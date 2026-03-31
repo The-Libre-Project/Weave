@@ -1,6 +1,6 @@
 use clap::Parser;
 use std::path::PathBuf;
-use weave_core::{exec, iat, loader, stubs, teb};
+use weave_core::{exec, iat, loader, sandbox, stubs, teb};
 
 /// Weave — run Windows executables on Linux.
 #[derive(Parser)]
@@ -8,6 +8,10 @@ use weave_core::{exec, iat, loader, stubs, teb};
 struct Args {
     /// Path to the Windows .exe file to run
     exe: PathBuf,
+
+    /// Disable the filesystem sandbox (for debugging only)
+    #[arg(long)]
+    no_sandbox: bool,
 }
 
 fn main() {
@@ -61,7 +65,10 @@ fn main() {
 
     eprintln!("weave: imports resolved");
 
-    // ── 3. Initialise TEB / PEB / TLS ────────────────────────────────────
+    // ── 3. Apply filesystem sandbox ───────────────────────────────────────
+    sandbox::apply(!args.no_sandbox);
+
+    // ── 4. Initialise TEB / PEB / TLS ────────────────────────────────────
     // Keep _teb alive — it holds the TEB, PEB, ProcessParameters, and TLS
     // memory that the PE code will read via GS throughout its execution.
     let _teb = teb::setup(&image).unwrap_or_else(|e| {
@@ -71,7 +78,7 @@ fn main() {
 
     eprintln!("weave: TEB ready — jumping in");
 
-    // ── 4. Jump to the entry point ────────────────────────────────────────
+    // ── 5. Jump to the entry point ────────────────────────────────────────
     // Safety: image.entry_point is a valid executable address set up by loader::load().
     unsafe { exec::run(image.entry_point) }
 }
