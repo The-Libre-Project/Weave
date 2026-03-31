@@ -1,0 +1,334 @@
+//! Stubs for the api-ms-win-crt-* DLL family (27 functions).
+//!
+//! These are the Universal CRT (UCRT) API-set forwarding DLLs used by every
+//! MinGW-compiled binary. On real Windows they forward to ucrtbase.dll.
+//! Weave implements the minimum surface needed for CRT initialisation to
+//! complete and for hello.exe to print output and exit.
+//!
+//! Strategy:
+//!   - Heap functions delegate to libc malloc/calloc/free.
+//!   - _initterm / _initterm_e actually call the function-pointer table —
+//!     these run global constructors and must not be stubbed as no-ops.
+//!   - Everything else is a harmless no-op or returns a safe sentinel.
+
+// Windows API names use double/triple underscores; Rust snake_case rules don't apply.
+#![allow(non_snake_case)]
+
+// ── Static CRT state ──────────────────────────────────────────────────────────
+
+use std::sync::atomic::{AtomicI32, AtomicPtr, Ordering};
+
+static COMMODE: AtomicI32 = AtomicI32::new(0);
+static FMODE: AtomicI32 = AtomicI32::new(0);
+static ARGC: AtomicI32 = AtomicI32::new(1);
+// Argv: "weave\0" followed by a null terminator for the array.
+static mut ARGV_BUF: [u8; 7] = *b"weave\0\0";
+static ARGV_PTR: AtomicPtr<u8> = AtomicPtr::new(std::ptr::null_mut());
+static ENVIRON_PTR: AtomicPtr<u8> = AtomicPtr::new(std::ptr::null_mut());
+
+/// Fake FILE — enough storage that the CRT doesn't stray out of bounds.
+/// The CRT only calls setvbuf / fflush on these; both are no-ops.
+#[repr(C)]
+pub(super) struct FakeFile {
+    fd: i32,
+    _pad: [u8; 60],
+}
+
+static FAKE_STDIN: FakeFile = FakeFile {
+    fd: 0,
+    _pad: [0; 60],
+};
+static FAKE_STDOUT: FakeFile = FakeFile {
+    fd: 1,
+    _pad: [0; 60],
+};
+static FAKE_STDERR: FakeFile = FakeFile {
+    fd: 2,
+    _pad: [0; 60],
+};
+
+// ── api-ms-win-crt-heap ───────────────────────────────────────────────────────
+
+/// malloc: allocate heap memory.
+///
+/// # Safety
+/// Delegates to libc malloc.
+pub unsafe extern "win64" fn crt_malloc(size: usize) -> *mut u8 {
+    unsafe { libc::malloc(size) as *mut u8 }
+}
+
+/// calloc: allocate zeroed heap memory.
+///
+/// # Safety
+/// Delegates to libc calloc.
+pub unsafe extern "win64" fn crt_calloc(count: usize, size: usize) -> *mut u8 {
+    unsafe { libc::calloc(count, size) as *mut u8 }
+}
+
+/// free: release heap memory.
+///
+/// # Safety
+/// `ptr` must have been returned by malloc/calloc/realloc, or be null.
+pub unsafe extern "win64" fn crt_free(ptr: *mut u8) {
+    unsafe { libc::free(ptr as *mut libc::c_void) }
+}
+
+/// _set_new_mode: set the C++ new-handler behaviour mode. No-op.
+pub extern "win64" fn set_new_mode(_mode: i32) -> i32 {
+    0
+}
+
+// ── api-ms-win-crt-private ────────────────────────────────────────────────────
+
+/// memcpy: copy bytes between non-overlapping regions.
+///
+/// # Safety
+/// `dst` and `src` must be valid for `n` bytes and must not overlap.
+pub unsafe extern "win64" fn crt_memcpy(dst: *mut u8, src: *const u8, n: usize) -> *mut u8 {
+    unsafe { libc::memcpy(dst as *mut libc::c_void, src as *const libc::c_void, n) as *mut u8 }
+}
+
+// ── api-ms-win-crt-runtime ────────────────────────────────────────────────────
+
+/// _initterm: call each non-null function pointer in [pfbegin, pfend).
+///
+/// Used by the CRT to run pre-initialisation hooks. Must actually call the
+/// functions — a no-op here would prevent CRT init from completing.
+///
+/// # Safety
+/// Each non-null pointer in the table must be a valid `extern "win64" fn()`.
+pub unsafe extern "win64" fn initterm(pfbegin: *mut usize, pfend: *mut usize) {
+    let mut ptr = pfbegin;
+    while ptr < pfend {
+        let addr = unsafe { *ptr };
+        if addr != 0 {
+            let f: unsafe extern "win64" fn() = unsafe { std::mem::transmute(addr) };
+            unsafe { f() };
+        }
+        ptr = unsafe { ptr.add(1) };
+    }
+}
+
+/// _initterm_e: like _initterm but each function returns an int error code.
+///
+/// Returns the first non-zero error code, or 0 if all functions succeed.
+///
+/// # Safety
+/// Each non-null pointer in the table must be a valid `extern "win64" fn() -> i32`.
+pub unsafe extern "win64" fn initterm_e(pfbegin: *mut usize, pfend: *mut usize) -> i32 {
+    let mut ptr = pfbegin;
+    while ptr < pfend {
+        let addr = unsafe { *ptr };
+        if addr != 0 {
+            let f: unsafe extern "win64" fn() -> i32 = unsafe { std::mem::transmute(addr) };
+            let ret = unsafe { f() };
+            if ret != 0 {
+                return ret;
+            }
+        }
+        ptr = unsafe { ptr.add(1) };
+    }
+    0
+}
+
+/// __p___argc: return a pointer to the process argc.
+pub extern "win64" fn p___argc() -> *mut i32 {
+    ARGC.as_ptr()
+}
+
+/// __p___argv: return a pointer to the argv array pointer.
+pub extern "win64" fn p___argv() -> *mut *mut u8 {
+    // Initialise ARGV_PTR on first call to point at the "weave\0" buffer.
+    let _ = ARGV_PTR.compare_exchange(
+        std::ptr::null_mut(),
+        std::ptr::addr_of_mut!(ARGV_BUF).cast::<u8>(),
+        Ordering::Relaxed,
+        Ordering::Relaxed,
+    );
+    ARGV_PTR.as_ptr()
+}
+
+/// _configure_narrow_argv: configure argv mode. Returns 0 (success).
+pub extern "win64" fn configure_narrow_argv(_mode: i32) -> i32 {
+    0
+}
+
+/// _initialize_narrow_environment: init the process environment. Returns 0.
+pub extern "win64" fn initialize_narrow_environment() -> i32 {
+    0
+}
+
+/// _set_app_type: record whether this is a console or GUI app. No-op.
+pub extern "win64" fn set_app_type(_at: i32) {}
+
+/// _set_invalid_parameter_handler: install a handler. Returns null.
+pub extern "win64" fn set_invalid_parameter_handler(_handler: usize) -> usize {
+    0
+}
+
+/// _crt_atexit: register an atexit callback. Returns 0 (not called).
+pub extern "win64" fn crt_atexit(_fn_ptr: usize) -> i32 {
+    0
+}
+
+/// _cexit: clean exit without process termination. No-op.
+pub extern "win64" fn cexit() {}
+
+/// _exit: exit without atexit handlers.
+pub extern "win64" fn crt_exit_no_cleanup(status: i32) -> ! {
+    unsafe { libc::exit(status) }
+}
+
+/// exit: normal process exit.
+pub extern "win64" fn crt_exit(status: i32) -> ! {
+    unsafe { libc::exit(status) }
+}
+
+/// abort: abnormal process termination.
+pub extern "win64" fn crt_abort() -> ! {
+    unsafe { libc::abort() }
+}
+
+/// signal: register a signal handler. Returns SIG_DFL (0 = previous handler).
+pub extern "win64" fn crt_signal(_sig: i32, _handler: usize) -> usize {
+    0
+}
+
+// ── api-ms-win-crt-locale ─────────────────────────────────────────────────────
+
+/// _configthreadlocale: configure per-thread locale. Returns -1 (not set).
+pub extern "win64" fn configthreadlocale(_per_thread: i32) -> i32 {
+    -1
+}
+
+// ── api-ms-win-crt-math ───────────────────────────────────────────────────────
+
+/// __setusermatherr: install a math-error handler. Returns null.
+pub extern "win64" fn setusermatherr(_pfn_new: usize) -> usize {
+    0
+}
+
+// ── api-ms-win-crt-environment ────────────────────────────────────────────────
+
+/// __p__environ: return a pointer to the environ array pointer (empty env).
+pub extern "win64" fn p__environ() -> *mut *mut u8 {
+    ENVIRON_PTR.as_ptr()
+}
+
+// ── api-ms-win-crt-stdio ──────────────────────────────────────────────────────
+
+/// __acrt_iob_func: return a pointer to a stdio FILE for index 0/1/2.
+pub extern "win64" fn acrt_iob_func(index: u32) -> *const u8 {
+    let file: *const FakeFile = match index {
+        0 => &FAKE_STDIN,
+        1 => &FAKE_STDOUT,
+        2 => &FAKE_STDERR,
+        _ => return std::ptr::null(),
+    };
+    file.cast()
+}
+
+/// __p__commode: return a pointer to the _commode global.
+pub extern "win64" fn p__commode() -> *mut i32 {
+    COMMODE.as_ptr()
+}
+
+/// __p__fmode: return a pointer to the _fmode global.
+pub extern "win64" fn p__fmode() -> *mut i32 {
+    FMODE.as_ptr()
+}
+
+/// __stdio_common_vfprintf: core vfprintf. Phase 1 stub — returns -1.
+pub extern "win64" fn stdio_common_vfprintf(
+    _options: u64,
+    _stream: usize,
+    _format: *const u8,
+    _locale: usize,
+    _arglist: usize,
+) -> i32 {
+    -1
+}
+
+/// fflush: flush a stdio stream. No-op — Weave writes directly via libc.
+pub extern "win64" fn crt_fflush(_stream: usize) -> i32 {
+    0
+}
+
+/// setvbuf: set buffering mode for a stdio stream. No-op.
+pub extern "win64" fn crt_setvbuf(_stream: usize, _buf: *mut u8, _mode: i32, _size: usize) -> i32 {
+    0
+}
+
+// ── api-ms-win-crt-string ─────────────────────────────────────────────────────
+
+/// strlen: return the length of a null-terminated string.
+///
+/// # Safety
+/// `s` must point to a valid null-terminated string.
+pub unsafe extern "win64" fn crt_strlen(s: *const u8) -> usize {
+    unsafe { libc::strlen(s as *const libc::c_char) }
+}
+
+/// strncmp: compare up to n bytes of two strings.
+///
+/// # Safety
+/// Both `s1` and `s2` must be valid for at least `n` bytes.
+pub unsafe extern "win64" fn crt_strncmp(s1: *const u8, s2: *const u8, n: usize) -> i32 {
+    unsafe { libc::strncmp(s1 as *const libc::c_char, s2 as *const libc::c_char, n) }
+}
+
+// ── Resolver ──────────────────────────────────────────────────────────────────
+
+pub fn resolve(func: &str) -> Option<usize> {
+    match func {
+        // heap
+        "malloc" => Some(crt_malloc as unsafe extern "win64" fn(_) -> _ as *const () as usize),
+        "calloc" => Some(crt_calloc as unsafe extern "win64" fn(_, _) -> _ as *const () as usize),
+        "free" => Some(crt_free as unsafe extern "win64" fn(_) as *const () as usize),
+        "_set_new_mode" => Some(set_new_mode as *const () as usize),
+        // private
+        "memcpy" => {
+            Some(crt_memcpy as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize)
+        }
+        // runtime
+        "_initterm" => Some(initterm as unsafe extern "win64" fn(_, _) as *const () as usize),
+        "_initterm_e" => {
+            Some(initterm_e as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "__p___argc" => Some(p___argc as *const () as usize),
+        "__p___argv" => Some(p___argv as *const () as usize),
+        "_configure_narrow_argv" => Some(configure_narrow_argv as *const () as usize),
+        "_initialize_narrow_environment" => {
+            Some(initialize_narrow_environment as *const () as usize)
+        }
+        "_set_app_type" => Some(set_app_type as *const () as usize),
+        "_set_invalid_parameter_handler" => {
+            Some(set_invalid_parameter_handler as *const () as usize)
+        }
+        "_crt_atexit" => Some(crt_atexit as *const () as usize),
+        "_cexit" => Some(cexit as *const () as usize),
+        "_exit" => Some(crt_exit_no_cleanup as *const () as usize),
+        "exit" => Some(crt_exit as *const () as usize),
+        "abort" => Some(crt_abort as *const () as usize),
+        "signal" => Some(crt_signal as *const () as usize),
+        // locale
+        "_configthreadlocale" => Some(configthreadlocale as *const () as usize),
+        // math
+        "__setusermatherr" => Some(setusermatherr as *const () as usize),
+        // environment
+        "__p__environ" => Some(p__environ as *const () as usize),
+        // stdio
+        "__acrt_iob_func" => Some(acrt_iob_func as *const () as usize),
+        "__p__commode" => Some(p__commode as *const () as usize),
+        "__p__fmode" => Some(p__fmode as *const () as usize),
+        "__stdio_common_vfprintf" => Some(stdio_common_vfprintf as *const () as usize),
+        "fflush" => Some(crt_fflush as *const () as usize),
+        "setvbuf" => Some(crt_setvbuf as *const () as usize),
+        // string
+        "strlen" => Some(crt_strlen as unsafe extern "win64" fn(_) -> _ as *const () as usize),
+        "strncmp" => {
+            Some(crt_strncmp as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize)
+        }
+        _ => None,
+    }
+}

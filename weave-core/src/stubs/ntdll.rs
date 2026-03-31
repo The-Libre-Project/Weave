@@ -1,9 +1,11 @@
-//! Phase 0 NT API stubs — the three functions hello_minimal.exe needs.
+//! Stubs for ntdll.dll — the three functions hello_minimal.exe needs.
 //!
 //! All functions use `extern "win64"` — the Windows x86-64 calling convention.
 //! This differs from the Linux System V ABI: the first four integer arguments
 //! come in RCX, RDX, R8, R9 (not RDI, RSI, RDX, RCX). Getting this wrong
 //! silently corrupts arguments, so every stub here must carry this attribute.
+
+use super::{STATUS_SUCCESS, STATUS_UNSUCCESSFUL};
 
 /// Windows UNICODE_STRING — a UTF-16 string with explicit length fields.
 /// Layout must match the Windows ABI exactly.
@@ -24,9 +26,6 @@ pub struct IoStatusBlock {
 }
 
 /// RtlInitUnicodeString: initialise a UNICODE_STRING from a UTF-16 literal.
-///
-/// Counts the length of `src`, fills in `dest.length`, `dest.maximum_length`,
-/// and `dest.buffer`. A null `src` zeroes out the struct.
 ///
 /// # Safety
 /// `dest` must be a valid, non-null pointer to a `UnicodeString`. `src`, if
@@ -51,21 +50,21 @@ pub unsafe extern "win64" fn rtl_init_unicode_string(dest: *mut UnicodeString, s
 
 /// NtWriteFile: write bytes to a file handle.
 ///
-/// Weave maps handle values directly to Linux file descriptors for Phase 0:
+/// Weave maps handle values directly to Linux file descriptors:
 /// handle 1 = stdout, handle 2 = stderr.
 ///
 /// # Safety
 /// `buffer` must be valid for `length` bytes. `io_status_block`, if non-null,
 /// must point to a valid `IoStatusBlock`.
 pub unsafe extern "win64" fn nt_write_file(
-    file_handle: usize, // HANDLE — used as Linux fd
+    file_handle: usize,
     _event: usize,
     _apc_routine: usize,
     _apc_context: usize,
     io_status_block: *mut IoStatusBlock,
     buffer: *const u8,
     length: u32,
-    _byte_offset: usize, // PLARGE_INTEGER — ignored (sequential write)
+    _byte_offset: usize,
     _key: usize,
 ) -> i32 {
     let fd = file_handle as i32;
@@ -93,28 +92,20 @@ pub unsafe extern "win64" fn nt_write_file(
 /// NtTerminateProcess: exit the current process.
 ///
 /// `process_handle` of 0 (NULL) means the calling process.
-/// `exit_status` is passed straight to Linux exit().
 pub extern "win64" fn nt_terminate_process(_process_handle: usize, exit_status: i32) -> i32 {
     unsafe { libc::exit(exit_status) }
 }
 
-/// Look up a stub address by DLL + function name.
-///
-/// Returns `None` for anything not yet implemented — the caller decides
-/// whether to abort or install an unimplemented-trap stub.
-pub fn resolve(dll: &str, func: &str) -> Option<usize> {
-    match (dll.to_ascii_lowercase().as_str(), func) {
-        ("ntdll.dll", "RtlInitUnicodeString") => {
+pub fn resolve(func: &str) -> Option<usize> {
+    match func {
+        "RtlInitUnicodeString" => {
             Some(rtl_init_unicode_string as unsafe extern "win64" fn(_, _) as *const () as usize)
         }
-        ("ntdll.dll", "NtWriteFile") => Some(
+        "NtWriteFile" => Some(
             nt_write_file as unsafe extern "win64" fn(_, _, _, _, _, _, _, _, _) -> _ as *const ()
                 as usize,
         ),
-        ("ntdll.dll", "NtTerminateProcess") => Some(nt_terminate_process as *const () as usize),
+        "NtTerminateProcess" => Some(nt_terminate_process as *const () as usize),
         _ => None,
     }
 }
-
-const STATUS_SUCCESS: i32 = 0;
-const STATUS_UNSUCCESSFUL: i32 = 0xC0000001_u32 as i32;
