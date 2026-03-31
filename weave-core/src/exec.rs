@@ -9,9 +9,14 @@
 
 /// Transfer control to the loaded PE's entry point.
 ///
+/// # Safety
+/// `entry_point` must be a valid, executable address pointing to a correctly
+/// loaded PE entry point. The caller is responsible for ensuring the image is
+/// fully mapped and all imports are resolved before calling this function.
+///
 /// This function does not return under normal circumstances: the entry point
 /// calls `NtTerminateProcess` (our stub), which calls `libc::exit()`.
-pub fn run(entry_point: *const u8) -> ! {
+pub unsafe fn run(entry_point: *const u8) -> ! {
     // Safety: entry_point is a valid executable address set up by the loader.
     // The Windows x86-64 ABI is declared here so the compiler generates the
     // correct prologue/epilogue (shadow space allocation, callee-saved regs).

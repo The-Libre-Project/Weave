@@ -27,6 +27,10 @@ pub struct IoStatusBlock {
 ///
 /// Counts the length of `src`, fills in `dest.length`, `dest.maximum_length`,
 /// and `dest.buffer`. A null `src` zeroes out the struct.
+///
+/// # Safety
+/// `dest` must be a valid, non-null pointer to a `UnicodeString`. `src`, if
+/// non-null, must point to a null-terminated UTF-16 string.
 pub unsafe extern "win64" fn rtl_init_unicode_string(dest: *mut UnicodeString, src: *const u16) {
     unsafe {
         if src.is_null() {
@@ -49,6 +53,10 @@ pub unsafe extern "win64" fn rtl_init_unicode_string(dest: *mut UnicodeString, s
 ///
 /// Weave maps handle values directly to Linux file descriptors for Phase 0:
 /// handle 1 = stdout, handle 2 = stderr.
+///
+/// # Safety
+/// `buffer` must be valid for `length` bytes. `io_status_block`, if non-null,
+/// must point to a valid `IoStatusBlock`.
 pub unsafe extern "win64" fn nt_write_file(
     file_handle: usize, // HANDLE — used as Linux fd
     _event: usize,

@@ -51,5 +51,6 @@ fn main() {
     eprintln!("weave: TEB ready — jumping in");
 
     // ── 4. Jump to the entry point ────────────────────────────────────────
-    exec::run(image.entry_point)
+    // Safety: image.entry_point is a valid executable address set up by loader::load().
+    unsafe { exec::run(image.entry_point) }
 }
