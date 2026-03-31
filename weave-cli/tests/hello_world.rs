@@ -31,8 +31,7 @@ fn hello_minimal_prints_hello_world() {
     );
 
     assert_eq!(
-        stdout,
-        "Hello, World!\n",
+        stdout, "Hello, World!\n",
         "unexpected stdout.\nstderr: {stderr}"
     );
 }

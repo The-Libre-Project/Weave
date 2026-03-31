@@ -9,10 +9,10 @@
 /// Layout must match the Windows ABI exactly.
 #[repr(C)]
 pub struct UnicodeString {
-    length: u16,          // byte length, NOT including null terminator
-    maximum_length: u16,  // byte length of the buffer
+    length: u16,         // byte length, NOT including null terminator
+    maximum_length: u16, // byte length of the buffer
     _pad: u32,
-    buffer: *const u16,   // UTF-16 data
+    buffer: *const u16, // UTF-16 data
 }
 
 /// Windows IO_STATUS_BLOCK — NtWriteFile writes its result here.
@@ -83,7 +83,11 @@ pub unsafe extern "win64" fn nt_write_file(
         }
     }
 
-    if n < 0 { STATUS_UNSUCCESSFUL } else { STATUS_SUCCESS }
+    if n < 0 {
+        STATUS_UNSUCCESSFUL
+    } else {
+        STATUS_SUCCESS
+    }
 }
 
 /// NtTerminateProcess: exit the current process.
@@ -103,12 +107,11 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         ("ntdll.dll", "RtlInitUnicodeString") => {
             Some(rtl_init_unicode_string as unsafe extern "win64" fn(_, _) as *const () as usize)
         }
-        ("ntdll.dll", "NtWriteFile") => {
-            Some(nt_write_file as unsafe extern "win64" fn(_, _, _, _, _, _, _, _, _) -> _ as *const () as usize)
-        }
-        ("ntdll.dll", "NtTerminateProcess") => {
-            Some(nt_terminate_process as *const () as usize)
-        }
+        ("ntdll.dll", "NtWriteFile") => Some(
+            nt_write_file as unsafe extern "win64" fn(_, _, _, _, _, _, _, _, _) -> _ as *const ()
+                as usize,
+        ),
+        ("ntdll.dll", "NtTerminateProcess") => Some(nt_terminate_process as *const () as usize),
         _ => None,
     }
 }

@@ -97,9 +97,8 @@ pub unsafe fn patch(
                 unsafe { read_cstr(base.add(name_rva + 2)) }
             };
 
-            let addr = resolve(&dll_name, &func_name).ok_or_else(|| {
-                format!("unresolved import: {dll_name}!{func_name}")
-            })?;
+            let addr = resolve(&dll_name, &func_name)
+                .ok_or_else(|| format!("unresolved import: {dll_name}!{func_name}"))?;
 
             unsafe {
                 *(base.add(iat_rva + i * 8) as *mut u64) = addr as u64;
@@ -110,11 +109,7 @@ pub unsafe fn patch(
 
         // Restore IAT to read-only.
         unsafe {
-            libc::mprotect(
-                page_start as *mut libc::c_void,
-                PAGE * 2,
-                libc::PROT_READ,
-            );
+            libc::mprotect(page_start as *mut libc::c_void, PAGE * 2, libc::PROT_READ);
         }
 
         desc_offset += std::mem::size_of::<ImportDescriptor>();

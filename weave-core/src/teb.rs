@@ -60,9 +60,7 @@ pub fn setup() -> Result<TebState, String> {
     {
         // arch_prctl(ARCH_SET_GS, teb_ptr)
         // ARCH_SET_GS = 0x1001, SYS_arch_prctl = 158
-        let ret = unsafe {
-            libc::syscall(libc::SYS_arch_prctl, 0x1001i64, teb_ptr as i64)
-        };
+        let ret = unsafe { libc::syscall(libc::SYS_arch_prctl, 0x1001i64, teb_ptr as i64) };
         if ret != 0 {
             return Err(format!(
                 "arch_prctl(ARCH_SET_GS) failed: {}",

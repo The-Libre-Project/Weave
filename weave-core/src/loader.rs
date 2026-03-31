@@ -120,7 +120,10 @@ pub fn load(bytes: &[u8]) -> Result<LoadedImage, String> {
 /// On Linux we try `MAP_FIXED_NOREPLACE` first (requires kernel 4.17+); if
 /// the address is already occupied we fall back to a kernel-chosen address.
 /// On other platforms (macOS dev builds) we go straight to kernel-chosen.
-fn reserve_memory(#[cfg_attr(not(target_os = "linux"), allow(unused_variables))] preferred_base: usize, size: usize) -> Result<usize, String> {
+fn reserve_memory(
+    #[cfg_attr(not(target_os = "linux"), allow(unused_variables))] preferred_base: usize,
+    size: usize,
+) -> Result<usize, String> {
     unsafe {
         #[cfg(target_os = "linux")]
         {
@@ -161,15 +164,13 @@ fn reserve_memory(#[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
 /// since PE64 binaries should only contain these two types.
 fn apply_relocations(base: *mut u8, pe: &PE, delta: i64) -> Result<(), String> {
     let opt = pe.header.optional_header.unwrap();
-    let (reloc_rva, reloc_size) =
-        match opt.data_directories.get_base_relocation_table() {
-            Some(d) if d.size > 0 => (d.virtual_address as usize, d.size as usize),
-            _ => return Ok(()), // no reloc section — position-independent or stripped
-        };
+    let (reloc_rva, reloc_size) = match opt.data_directories.get_base_relocation_table() {
+        Some(d) if d.size > 0 => (d.virtual_address as usize, d.size as usize),
+        _ => return Ok(()), // no reloc section — position-independent or stripped
+    };
 
     // Read from the already-mapped image (populated in step 2).
-    let reloc_bytes =
-        unsafe { std::slice::from_raw_parts(base.add(reloc_rva), reloc_size) };
+    let reloc_bytes = unsafe { std::slice::from_raw_parts(base.add(reloc_rva), reloc_size) };
 
     let mut cursor = 0usize;
     while cursor + 8 <= reloc_bytes.len() {
@@ -188,16 +189,15 @@ fn apply_relocations(base: *mut u8, pe: &PE, delta: i64) -> Result<(), String> {
             if e_off + 2 > reloc_bytes.len() {
                 break;
             }
-            let entry =
-                u16::from_le_bytes(reloc_bytes[e_off..e_off + 2].try_into().unwrap());
+            let entry = u16::from_le_bytes(reloc_bytes[e_off..e_off + 2].try_into().unwrap());
             let reloc_type = entry >> 12;
             let reloc_offset = (entry & 0x0FFF) as usize;
 
             match reloc_type {
-                0 => {}   // IMAGE_REL_BASED_ABSOLUTE — padding, skip
-                10 => {   // IMAGE_REL_BASED_DIR64 — patch a 64-bit VA
-                    let target =
-                        unsafe { base.add(page_rva + reloc_offset) as *mut i64 };
+                0 => {} // IMAGE_REL_BASED_ABSOLUTE — padding, skip
+                10 => {
+                    // IMAGE_REL_BASED_DIR64 — patch a 64-bit VA
+                    let target = unsafe { base.add(page_rva + reloc_offset) as *mut i64 };
                     unsafe { *target = (*target).wrapping_add(delta) };
                 }
                 t => {

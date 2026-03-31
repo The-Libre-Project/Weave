@@ -110,7 +110,12 @@ mod tests {
         assert!(!text.can_write);
 
         // Must have exactly 3 imports, all from ntdll.dll
-        assert_eq!(info.imports.len(), 3, "expected 3 imports, got: {:#?}", info.imports);
+        assert_eq!(
+            info.imports.len(),
+            3,
+            "expected 3 imports, got: {:#?}",
+            info.imports
+        );
         for imp in &info.imports {
             assert_eq!(
                 imp.dll.to_ascii_lowercase(),
@@ -123,8 +128,14 @@ mod tests {
 
         let names: Vec<&str> = info.imports.iter().map(|i| i.function.as_str()).collect();
         assert!(names.contains(&"NtWriteFile"), "missing NtWriteFile");
-        assert!(names.contains(&"NtTerminateProcess"), "missing NtTerminateProcess");
-        assert!(names.contains(&"RtlInitUnicodeString"), "missing RtlInitUnicodeString");
+        assert!(
+            names.contains(&"NtTerminateProcess"),
+            "missing NtTerminateProcess"
+        );
+        assert!(
+            names.contains(&"RtlInitUnicodeString"),
+            "missing RtlInitUnicodeString"
+        );
     }
 
     #[test]
