@@ -40,10 +40,10 @@ fn main() {
 
     eprintln!("weave: imports resolved");
 
-    // ── 3. Initialise TEB / PEB ───────────────────────────────────────────
-    // Keep _teb alive — it holds the TEB, PEB, and ProcessParameters memory
-    // that the PE code will read via GS throughout its execution.
-    let _teb = teb::setup().unwrap_or_else(|e| {
+    // ── 3. Initialise TEB / PEB / TLS ────────────────────────────────────
+    // Keep _teb alive — it holds the TEB, PEB, ProcessParameters, and TLS
+    // memory that the PE code will read via GS throughout its execution.
+    let _teb = teb::setup(&image).unwrap_or_else(|e| {
         eprintln!("weave: TEB setup failed: {e}");
         std::process::exit(1);
     });

@@ -11,6 +11,10 @@ pub struct LoadedImage {
     pub size: usize,
     /// Actual virtual address of the entry point (base + entry RVA).
     pub entry_point: *const u8,
+    /// Pointer to the start of the TLS raw data in the loaded image, and its
+    /// byte length.  Both are zero/null if the PE has no TLS directory.
+    pub tls_data: *const u8,
+    pub tls_data_size: usize,
 }
 
 // Safety: the mapped region is owned exclusively by this struct.
@@ -91,7 +95,10 @@ pub fn load(bytes: &[u8]) -> Result<LoadedImage, String> {
         apply_relocations(base, &pe, delta)?;
     }
 
-    // ── 4. Set final section permissions ──────────────────────────────────
+    // ── 4. Initialise TLS ─────────────────────────────────────────────────
+    let (tls_data, tls_data_size) = init_tls(base, bytes, &pe);
+
+    // ── 5. Set final section permissions ──────────────────────────────────
     for section in &pe.sections {
         let vaddr = section.virtual_address as usize;
         let vsize = page_align_up(if section.virtual_size == 0 {
@@ -112,6 +119,8 @@ pub fn load(bytes: &[u8]) -> Result<LoadedImage, String> {
         base,
         size: image_size,
         entry_point: unsafe { base.add(entry_rva) },
+        tls_data,
+        tls_data_size,
     })
 }
 
@@ -154,6 +163,49 @@ fn reserve_memory(
         }
         Ok(p as usize)
     }
+}
+
+/// Initialise TLS for the loaded PE.
+///
+/// Reads the TLS data directory from the parsed PE (from the raw file bytes, as
+/// goblin parses it from the file). For PE64 binaries the directory contains
+/// absolute VAs — after our loader has applied base relocations those VAs are
+/// valid in our process address space.
+///
+/// Steps:
+///   1. Find the TLS data directory; return early if absent.
+///   2. Write 0 to *AddressOfIndex — set the TLS slot index to 0 for the main
+///      thread (we only ever have one thread in Phase 1).
+///   3. Return a pointer to the raw TLS data block and its size so the TEB
+///      setup code can copy it into the per-thread TLS slot.
+fn init_tls(base: *mut u8, bytes: &[u8], pe: &PE) -> (*const u8, usize) {
+    let tls = match &pe.tls_data {
+        Some(t) => t,
+        None => return (std::ptr::null(), 0),
+    };
+
+    let dir = &tls.image_tls_directory;
+    let raw_start = dir.start_address_of_raw_data as usize;
+    let raw_end = dir.end_address_of_raw_data as usize;
+    let addr_of_index = dir.address_of_index as usize;
+
+    // addr_of_index is an absolute VA in the loaded image.  After apply_relocations
+    // it is correct in our address space.  Write TLS slot 0.
+    if addr_of_index != 0 {
+        unsafe { *(addr_of_index as *mut u32) = 0 };
+    }
+
+    // Compute the raw data size; both are absolute VAs pointing into the loaded
+    // image.
+    let raw_size = raw_end.saturating_sub(raw_start);
+    if raw_size == 0 || raw_start == 0 {
+        return (std::ptr::null(), 0);
+    }
+
+    // raw_start is an absolute VA in our process — it already points into the
+    // mapped image after relocations.
+    let _ = (base, bytes); // kept in signature for symmetry; not needed here
+    (raw_start as *const u8, raw_size)
 }
 
 /// Walk the `.reloc` section and add `delta` to every 64-bit absolute address.
