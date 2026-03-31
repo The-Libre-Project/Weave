@@ -14,9 +14,8 @@ mod ntdll;
 
 use std::cell::Cell;
 
-// Shared NT status codes used by ntdll stubs.
-const STATUS_SUCCESS: i32 = 0;
-const STATUS_UNSUCCESSFUL: i32 = 0xC0000001_u32 as i32;
+// Re-export from weave-common so sub-modules can use `super::STATUS_*`.
+pub(super) use weave_common::{STATUS_SUCCESS, STATUS_UNSUCCESSFUL};
 
 // Shared thread-local last-error used by kernel32 stubs.
 thread_local! {

@@ -273,12 +273,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "weave-common"
+version = "0.0.1"
+
+[[package]]
 name = "weave-core"
 version = "0.0.1"
 dependencies = [
  "goblin",
  "landlock",
  "libc",
+ "weave-common",
 ]
 
 [[package]]

@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "weave-common",
     "weave-core",
     "weave-cli",
 ]

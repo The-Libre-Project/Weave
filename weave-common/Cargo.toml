@@ -1,0 +1,7 @@
+[package]
+name = "weave-common"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Shared Windows type aliases, error types, and utilities for Weave"
