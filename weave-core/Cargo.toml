@@ -7,3 +7,4 @@ description = "PE loader and NT API stubs for Weave"
 
 [dependencies]
 goblin = { version = "0.9", default-features = false, features = ["pe32", "pe64"] }
+libc = "0.2"
