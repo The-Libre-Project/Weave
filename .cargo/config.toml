@@ -1,0 +1,8 @@
+[build]
+# Target Linux x86-64 explicitly — Weave is Linux-only.
+# Remove this line if cross-compiling for testing purposes.
+# target = "x86_64-unknown-linux-gnu"
+
+[alias]
+# Convenience: `cargo nt` to run the CLI
+nt = "run -p weave-cli --"

@@ -1,0 +1,12 @@
+[workspace]
+members = [
+    "weave-core",
+    "weave-cli",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/eldo9000/Weave"

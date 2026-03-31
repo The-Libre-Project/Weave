@@ -10,6 +10,7 @@ output/
 .build-work/
 *.iso
 *.log
+/target/
 
 # IDE
 .vscode/
