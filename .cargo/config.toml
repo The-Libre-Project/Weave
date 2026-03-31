@@ -1,8 +1,10 @@
 [build]
-# Target Linux x86-64 explicitly — Weave is Linux-only.
-# Remove this line if cross-compiling for testing purposes.
-# target = "x86_64-unknown-linux-gnu"
+# Weave is Linux x86-64 only. Cross-compile from macOS using cargo-zigbuild.
+# Build: cargo zigbuild --target x86_64-unknown-linux-gnu
+# Tests run on Linux (VM, CI, or ssh target).
+target = "x86_64-unknown-linux-gnu"
 
 [alias]
-# Convenience: `cargo nt` to run the CLI
-nt = "run -p weave-cli --"
+# Build for the Linux target (use instead of cargo build on macOS)
+zbuild = "zigbuild --target x86_64-unknown-linux-gnu"
+ztest  = "zigbuild --tests --target x86_64-unknown-linux-gnu"

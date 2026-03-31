@@ -1,6 +1,6 @@
 use clap::Parser;
 use std::path::PathBuf;
-use weave_core::pe;
+use weave_core::{exec, iat, loader, stubs, teb};
 
 /// Weave — run Windows executables on Linux.
 #[derive(Parser)]
@@ -14,50 +14,41 @@ fn main() {
     let args = Args::parse();
 
     let bytes = std::fs::read(&args.exe).unwrap_or_else(|e| {
-        eprintln!("error: could not read {}: {e}", args.exe.display());
+        eprintln!("weave: error reading {}: {e}", args.exe.display());
         std::process::exit(1);
     });
 
-    let info = pe::parse(&bytes).unwrap_or_else(|e| {
-        eprintln!("error: {e}");
+    // ── 1. Load sections into memory ─────────────────────────────────────
+    let image = loader::load(&bytes).unwrap_or_else(|e| {
+        eprintln!("weave: load failed: {e}");
         std::process::exit(1);
     });
 
-    println!("binary:      {}", args.exe.display());
-    println!("image base:  {:#018x}", info.image_base);
-    println!("entry point: {:#010x} (rva)", info.entry_point_rva);
-    println!();
+    eprintln!(
+        "weave: loaded {} at {:#x} (entry {:#x})",
+        args.exe.display(),
+        image.base as usize,
+        image.entry_point as usize,
+    );
 
-    println!("sections ({}):", info.sections.len());
-    for s in &info.sections {
-        let perms = format!(
-            "{}{}",
-            if s.can_execute { "x" } else { "-" },
-            if s.can_write { "w" } else { "-" },
-        );
-        println!("  {:12}  rva={:#010x}  size={:#08x}  [{}]", s.name, s.virtual_address, s.virtual_size, perms);
-    }
-    println!();
+    // ── 2. Patch the Import Address Table ────────────────────────────────
+    iat::patch(&bytes, image.base, stubs::resolve).unwrap_or_else(|e| {
+        eprintln!("weave: import error: {e}");
+        std::process::exit(1);
+    });
 
-    // Group imports by DLL for readability
-    let mut dlls: Vec<&str> = info.imports.iter().map(|i| i.dll.as_str()).collect();
-    dlls.dedup();
-    let dll_count = {
-        let mut seen = std::collections::HashSet::new();
-        info.imports.iter().filter(|i| seen.insert(&i.dll)).count()
-    };
+    eprintln!("weave: imports resolved");
 
-    println!("imports ({} functions from {} DLL{}):", info.imports.len(), dll_count, if dll_count == 1 { "" } else { "s" });
-    let mut current_dll = "";
-    for imp in &info.imports {
-        if imp.dll != current_dll {
-            println!("  {}:", imp.dll);
-            current_dll = &imp.dll;
-        }
-        println!("    {}", imp.function);
-    }
+    // ── 3. Initialise TEB / PEB ───────────────────────────────────────────
+    // Keep _teb alive — it holds the TEB, PEB, and ProcessParameters memory
+    // that the PE code will read via GS throughout its execution.
+    let _teb = teb::setup().unwrap_or_else(|e| {
+        eprintln!("weave: TEB setup failed: {e}");
+        std::process::exit(1);
+    });
 
-    // TODO: load and execute (Step 3+)
-    println!();
-    println!("(execution not yet implemented)");
+    eprintln!("weave: TEB ready — jumping in");
+
+    // ── 4. Jump to the entry point ────────────────────────────────────────
+    exec::run(image.entry_point)
 }
