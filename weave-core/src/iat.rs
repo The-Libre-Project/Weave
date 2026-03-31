@@ -1,13 +1,13 @@
-/// IAT (Import Address Table) patching.
-///
-/// After loading a PE binary into memory, every imported function's slot in the
-/// IAT still contains a hint/name pointer from the original file. This module
-/// walks the import descriptors, looks up each function in our stub table, and
-/// overwrites the IAT entries with Rust function pointers.
-///
-/// The IAT lives in the (normally read-only) `.idata` section. We briefly
-/// mprotect each IAT page to read+write, write the stub address, then restore
-/// it to read-only.
+//! IAT (Import Address Table) patching.
+//!
+//! After loading a PE binary into memory, every imported function's slot in the
+//! IAT still contains a hint/name pointer from the original file. This module
+//! walks the import descriptors, looks up each function in our stub table, and
+//! overwrites the IAT entries with Rust function pointers.
+//!
+//! The IAT lives in the (normally read-only) `.idata` section. We briefly
+//! mprotect each IAT page to read+write, write the stub address, then restore
+//! it to read-only.
 
 use goblin::pe::PE;
 
@@ -26,7 +26,9 @@ struct ImportDescriptor {
 /// `bytes` is the raw PE file (used to locate the import directory RVA via
 /// goblin). `base` is the start of the loaded image in our process memory.
 /// `resolve` maps `(dll_name, function_name)` to a function pointer address.
-pub fn patch(
+/// # Safety
+/// `base` must point to a fully loaded PE image with valid import descriptors.
+pub unsafe fn patch(
     bytes: &[u8],
     base: *mut u8,
     resolve: impl Fn(&str, &str) -> Option<usize>,

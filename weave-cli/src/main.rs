@@ -32,7 +32,8 @@ fn main() {
     );
 
     // ── 2. Patch the Import Address Table ────────────────────────────────
-    iat::patch(&bytes, image.base, stubs::resolve).unwrap_or_else(|e| {
+    // Safety: image.base points to a fully mapped PE loaded by loader::load().
+    unsafe { iat::patch(&bytes, image.base, stubs::resolve) }.unwrap_or_else(|e| {
         eprintln!("weave: import error: {e}");
         std::process::exit(1);
     });

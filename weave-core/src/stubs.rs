@@ -1,9 +1,9 @@
-/// Phase 0 NT API stubs — the three functions hello_minimal.exe needs.
-///
-/// All functions use `extern "win64"` — the Windows x86-64 calling convention.
-/// This differs from the Linux System V ABI: the first four integer arguments
-/// come in RCX, RDX, R8, R9 (not RDI, RSI, RDX, RCX). Getting this wrong
-/// silently corrupts arguments, so every stub here must carry this attribute.
+//! Phase 0 NT API stubs — the three functions hello_minimal.exe needs.
+//!
+//! All functions use `extern "win64"` — the Windows x86-64 calling convention.
+//! This differs from the Linux System V ABI: the first four integer arguments
+//! come in RCX, RDX, R8, R9 (not RDI, RSI, RDX, RCX). Getting this wrong
+//! silently corrupts arguments, so every stub here must carry this attribute.
 
 /// Windows UNICODE_STRING — a UTF-16 string with explicit length fields.
 /// Layout must match the Windows ABI exactly.
@@ -27,7 +27,7 @@ pub struct IoStatusBlock {
 ///
 /// Counts the length of `src`, fills in `dest.length`, `dest.maximum_length`,
 /// and `dest.buffer`. A null `src` zeroes out the struct.
-pub extern "win64" fn rtl_init_unicode_string(dest: *mut UnicodeString, src: *const u16) {
+pub unsafe extern "win64" fn rtl_init_unicode_string(dest: *mut UnicodeString, src: *const u16) {
     unsafe {
         if src.is_null() {
             (*dest).length = 0;
@@ -49,7 +49,7 @@ pub extern "win64" fn rtl_init_unicode_string(dest: *mut UnicodeString, src: *co
 ///
 /// Weave maps handle values directly to Linux file descriptors for Phase 0:
 /// handle 1 = stdout, handle 2 = stderr.
-pub extern "win64" fn nt_write_file(
+pub unsafe extern "win64" fn nt_write_file(
     file_handle: usize, // HANDLE — used as Linux fd
     _event: usize,
     _apc_routine: usize,
@@ -92,9 +92,15 @@ pub extern "win64" fn nt_terminate_process(_process_handle: usize, exit_status: 
 /// whether to abort or install an unimplemented-trap stub.
 pub fn resolve(dll: &str, func: &str) -> Option<usize> {
     match (dll.to_ascii_lowercase().as_str(), func) {
-        ("ntdll.dll", "RtlInitUnicodeString") => Some(rtl_init_unicode_string as *const () as usize),
-        ("ntdll.dll", "NtWriteFile") => Some(nt_write_file as *const () as usize),
-        ("ntdll.dll", "NtTerminateProcess") => Some(nt_terminate_process as *const () as usize),
+        ("ntdll.dll", "RtlInitUnicodeString") => {
+            Some(rtl_init_unicode_string as unsafe extern "win64" fn(_, _) as *const () as usize)
+        }
+        ("ntdll.dll", "NtWriteFile") => {
+            Some(nt_write_file as unsafe extern "win64" fn(_, _, _, _, _, _, _, _, _) -> _ as *const () as usize)
+        }
+        ("ntdll.dll", "NtTerminateProcess") => {
+            Some(nt_terminate_process as *const () as usize)
+        }
         _ => None,
     }
 }

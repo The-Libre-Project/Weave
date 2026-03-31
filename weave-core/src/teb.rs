@@ -1,22 +1,22 @@
-/// Thread Environment Block (TEB) and Process Environment Block (PEB) setup.
-///
-/// Every Windows x86-64 binary expects the GS segment register to point to a
-/// valid TEB. The TEB contains a pointer to the PEB, which contains a pointer
-/// to the process parameters (which include stdin/stdout/stderr handles).
-///
-/// On Linux x86-64, GS is not used by the kernel or Rust runtime (Rust uses
-/// FS for thread-local storage). We set GS via arch_prctl(ARCH_SET_GS) to
-/// point to our fake TEB before jumping to the PE entry point.
-///
-/// Minimum layout we must populate for hello_minimal.exe:
-///
-///   TEB + 0x030 → Self pointer (points back to TEB base)
-///   TEB + 0x060 → pointer to PEB
-///   PEB + 0x020 → pointer to RTL_USER_PROCESS_PARAMETERS
-///   ProcessParameters + 0x028 → StandardOutput handle
-///
-/// The StandardOutput handle is set to 1 — the Linux stdout file descriptor.
-/// Our NtWriteFile stub passes this value directly to Linux write(2).
+//! Thread Environment Block (TEB) and Process Environment Block (PEB) setup.
+//!
+//! Every Windows x86-64 binary expects the GS segment register to point to a
+//! valid TEB. The TEB contains a pointer to the PEB, which contains a pointer
+//! to the process parameters (which include stdin/stdout/stderr handles).
+//!
+//! On Linux x86-64, GS is not used by the kernel or Rust runtime (Rust uses
+//! FS for thread-local storage). We set GS via arch_prctl(ARCH_SET_GS) to
+//! point to our fake TEB before jumping to the PE entry point.
+//!
+//! Minimum layout we must populate for hello_minimal.exe:
+//!
+//!   TEB + 0x030 → Self pointer (points back to TEB base)
+//!   TEB + 0x060 → pointer to PEB
+//!   PEB + 0x020 → pointer to RTL_USER_PROCESS_PARAMETERS
+//!   ProcessParameters + 0x028 → StandardOutput handle
+//!
+//! The StandardOutput handle is set to 1 — the Linux stdout file descriptor.
+//! Our NtWriteFile stub passes this value directly to Linux write(2).
 
 /// Holds the allocated TEB, PEB, and ProcessParameters buffers.
 /// Must stay alive for the lifetime of the process (use `Box::leak` or keep
