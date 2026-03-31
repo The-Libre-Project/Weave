@@ -1,0 +1,21 @@
+# macOS
+.DS_Store
+**/.DS_Store
+*.swp
+*.swo
+*~
+
+# Build artifacts
+output/
+.build-work/
+*.iso
+*.log
+
+# IDE
+.vscode/
+.idea/
+
+# Temporary
+*.tmp
+*.temp
+/tmp/
