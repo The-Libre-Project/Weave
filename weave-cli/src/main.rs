@@ -1,6 +1,6 @@
 use clap::Parser;
 use std::path::PathBuf;
-use weave_core::{exec, iat, loader, sandbox, seh, stubs, teb};
+use weave_core::{exec, iat, loader, seh, teb};
 
 /// Weave — run Windows executables on Linux.
 #[derive(Parser)]
@@ -12,6 +12,14 @@ struct Args {
     /// Disable the filesystem sandbox (for debugging only)
     #[arg(long)]
     no_sandbox: bool,
+}
+
+/// Resolve a Windows import to a Weave stub address.
+///
+/// Tries each stub crate in turn; returns `None` for unknown imports so the
+/// IAT patcher can abort with a clear "unresolved import" message.
+fn resolve(dll: &str, func: &str) -> Option<usize> {
+    weave_ntdll::resolve(dll, func).or_else(|| weave_kernel32::resolve(dll, func))
 }
 
 fn main() {
@@ -37,7 +45,7 @@ fn main() {
 
     // ── 2. Patch the Import Address Table ────────────────────────────────
     // Safety: image.base points to a fully mapped PE loaded by loader::load().
-    unsafe { iat::patch(&bytes, image.base, stubs::resolve) }.unwrap_or_else(|e| {
+    unsafe { iat::patch(&bytes, image.base, resolve) }.unwrap_or_else(|e| {
         eprintln!("weave: import error: {e}");
         std::process::exit(1);
     });
@@ -45,7 +53,7 @@ fn main() {
     eprintln!("weave: imports resolved");
 
     // ── 3. Apply filesystem sandbox ───────────────────────────────────────
-    sandbox::apply(!args.no_sandbox);
+    weave_sandbox::apply(!args.no_sandbox);
 
     // ── 4. Initialise TEB / PEB / TLS ────────────────────────────────────
     // Keep _teb alive — it holds the TEB, PEB, ProcessParameters, and TLS
@@ -56,9 +64,6 @@ fn main() {
     });
 
     // ── 5. Install exception handlers ─────────────────────────────────────
-    // Must come after TEB setup (so GS is valid) and before exec::run.
-    // Replaces the Linux default crash handler with one that produces
-    // Windows-style crash reports and exits with the correct exception code.
     seh::install(&image);
 
     eprintln!("weave: TEB ready — jumping in");

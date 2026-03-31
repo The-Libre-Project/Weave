@@ -1,0 +1,11 @@
+[package]
+name = "weave-ntdll"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "ntdll.dll and UCRT API-set stubs for Weave"
+
+[dependencies]
+weave-common = { path = "../weave-common" }
+libc = "0.2"

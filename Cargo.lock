@@ -270,6 +270,9 @@ dependencies = [
  "clap",
  "libc",
  "weave-core",
+ "weave-kernel32",
+ "weave-ntdll",
+ "weave-sandbox",
 ]
 
 [[package]]
@@ -281,9 +284,30 @@ name = "weave-core"
 version = "0.0.1"
 dependencies = [
  "goblin",
- "landlock",
+ "libc",
+]
+
+[[package]]
+name = "weave-kernel32"
+version = "0.0.1"
+dependencies = [
  "libc",
  "weave-common",
+]
+
+[[package]]
+name = "weave-ntdll"
+version = "0.0.1"
+dependencies = [
+ "libc",
+ "weave-common",
+]
+
+[[package]]
+name = "weave-sandbox"
+version = "0.0.1"
+dependencies = [
+ "landlock",
 ]
 
 [[package]]

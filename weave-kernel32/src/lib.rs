@@ -1,18 +1,20 @@
-//! Stubs for KERNEL32.dll — the 14 functions hello.exe needs.
+//! kernel32.dll stubs for Weave — the 15 functions hello.exe needs.
 //!
 //! Critical section stubs are no-ops (Phase 1 is single-threaded).
 //! VirtualProtect/VirtualQuery delegate to mprotect/mincore.
 //! WriteConsoleW converts UTF-16 to UTF-8 and writes to the Linux fd.
 
-use super::LAST_ERROR;
+#![allow(non_snake_case)]
 
-// ── Handle constants ─────────────────────────────────────────────────────────
+use std::cell::Cell;
+use weave_common::{STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE};
 
-const STD_INPUT_HANDLE: u32 = 0xFFFFFFF6_u32; // -10
-const STD_OUTPUT_HANDLE: u32 = 0xFFFFFFF5_u32; // -11
-const STD_ERROR_HANDLE: u32 = 0xFFFFFFF4_u32; // -12
+// Per-thread last error, shared across GetLastError / SetLastError.
+thread_local! {
+    static LAST_ERROR: Cell<u32> = const { Cell::new(0) };
+}
 
-// ── Windows page-protection flags ────────────────────────────────────────────
+// ── Windows page-protection flags ─────────────────────────────────────────────
 
 fn win_prot_to_linux(protect: u32) -> i32 {
     match protect & 0xFF {
@@ -187,7 +189,13 @@ pub extern "win64" fn c_specific_handler(
     1 // ExceptionContinueSearch
 }
 
-pub fn resolve(func: &str) -> Option<usize> {
+// ── Resolver ──────────────────────────────────────────────────────────────────
+
+/// Resolve a kernel32.dll import to a stub address.
+pub fn resolve(dll: &str, func: &str) -> Option<usize> {
+    if !dll.eq_ignore_ascii_case("kernel32.dll") {
+        return None;
+    }
     match func {
         "GetStdHandle" => Some(get_std_handle as *const () as usize),
         "WriteConsoleW" => Some(

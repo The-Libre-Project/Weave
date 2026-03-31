@@ -5,7 +5,7 @@
 //! come in RCX, RDX, R8, R9 (not RDI, RSI, RDX, RCX). Getting this wrong
 //! silently corrupts arguments, so every stub here must carry this attribute.
 
-use super::{STATUS_SUCCESS, STATUS_UNSUCCESSFUL};
+use weave_common::{STATUS_SUCCESS, STATUS_UNSUCCESSFUL};
 
 /// Windows UNICODE_STRING — a UTF-16 string with explicit length fields.
 /// Layout must match the Windows ABI exactly.
