@@ -21,10 +21,22 @@ use std::sync::atomic::{AtomicI32, AtomicPtr, Ordering};
 static COMMODE: AtomicI32 = AtomicI32::new(0);
 static FMODE: AtomicI32 = AtomicI32::new(0);
 static ARGC: AtomicI32 = AtomicI32::new(1);
-// Argv: "weave\0" followed by a null terminator for the array.
-static mut ARGV_BUF: [u8; 7] = *b"weave\0\0";
-static ARGV_PTR: AtomicPtr<u8> = AtomicPtr::new(std::ptr::null_mut());
 static ENVIRON_PTR: AtomicPtr<u8> = AtomicPtr::new(std::ptr::null_mut());
+
+// argv layout (what the CRT expects):
+//   __p___argv()  →  &ARGV_VAR        (char ***)
+//   ARGV_VAR      →  &ARGV_ARRAY[0]   (char **)
+//   ARGV_ARRAY[0] →  ARGV0_STR        (char *)
+//   ARGV0_STR     =  "weave\0"
+//   ARGV_ARRAY[1] =  null
+//
+// Using usize so the array is always pointer-sized (avoids *const u8: !Sync).
+static ARGV0_STR: &[u8] = b"weave\0";
+// [ptr_to_argv0_string, null] as usize — filled once at first call.
+static mut ARGV_ARRAY: [usize; 2] = [0; 2];
+// char** = pointer to ARGV_ARRAY[0]; stored here so we can return &ARGV_VAR.
+static mut ARGV_VAR: usize = 0;
+static ARGV_INIT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Fake FILE — enough storage that the CRT doesn't stray out of bounds.
 /// The CRT only calls setvbuf / fflush on these; both are no-ops.
@@ -136,16 +148,20 @@ pub extern "win64" fn p___argc() -> *mut i32 {
     ARGC.as_ptr()
 }
 
-/// __p___argv: return a pointer to the argv array pointer.
-pub extern "win64" fn p___argv() -> *mut *mut u8 {
-    // Initialise ARGV_PTR on first call to point at the "weave\0" buffer.
-    let _ = ARGV_PTR.compare_exchange(
-        std::ptr::null_mut(),
-        std::ptr::addr_of_mut!(ARGV_BUF).cast::<u8>(),
-        Ordering::Relaxed,
-        Ordering::Relaxed,
-    );
-    ARGV_PTR.as_ptr()
+/// __p___argv: return a pointer to the argv array pointer (`char ***`).
+///
+/// # Safety
+/// Initialises static argv state on first call (single-threaded, safe in Phase 1).
+pub unsafe extern "win64" fn p___argv() -> *mut *mut u8 {
+    if !ARGV_INIT.swap(true, Ordering::Relaxed) {
+        unsafe {
+            ARGV_ARRAY[0] = ARGV0_STR.as_ptr() as usize;
+            ARGV_ARRAY[1] = 0;
+            ARGV_VAR = std::ptr::addr_of!(ARGV_ARRAY) as usize;
+        }
+    }
+    // Return &ARGV_VAR (char ***), which the CRT dereferences to get char**.
+    std::ptr::addr_of_mut!(ARGV_VAR).cast::<*mut u8>()
 }
 
 /// _configure_narrow_argv: configure argv mode. Returns 0 (success).
@@ -296,7 +312,7 @@ pub fn resolve(func: &str) -> Option<usize> {
             Some(initterm_e as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
         }
         "__p___argc" => Some(p___argc as *const () as usize),
-        "__p___argv" => Some(p___argv as *const () as usize),
+        "__p___argv" => Some(p___argv as unsafe extern "win64" fn() -> _ as *const () as usize),
         "_configure_narrow_argv" => Some(configure_narrow_argv as *const () as usize),
         "_initialize_narrow_environment" => {
             Some(initialize_narrow_environment as *const () as usize)
