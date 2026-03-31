@@ -15,6 +15,10 @@ pub struct LoadedImage {
     /// byte length.  Both are zero/null if the PE has no TLS directory.
     pub tls_data: *const u8,
     pub tls_data_size: usize,
+    /// RVA and byte size of the .pdata exception table (0/0 if absent).
+    /// Used by the SEH signal handler to identify which function faulted.
+    pub pdata_rva: usize,
+    pub pdata_size: usize,
 }
 
 // Safety: the mapped region is owned exclusively by this struct.
@@ -98,6 +102,14 @@ pub fn load(bytes: &[u8]) -> Result<LoadedImage, String> {
     // ── 4. Initialise TLS ─────────────────────────────────────────────────
     let (tls_data, tls_data_size) = init_tls(base, bytes, &pe);
 
+    // ── 4b. Locate .pdata for SEH crash reporting ──────────────────────────
+    let (pdata_rva, pdata_size) = pe
+        .sections
+        .iter()
+        .find(|s| s.name().ok() == Some(".pdata"))
+        .map(|s| (s.virtual_address as usize, s.virtual_size as usize))
+        .unwrap_or((0, 0));
+
     // ── 5. Set final section permissions ──────────────────────────────────
     for section in &pe.sections {
         let vaddr = section.virtual_address as usize;
@@ -121,6 +133,8 @@ pub fn load(bytes: &[u8]) -> Result<LoadedImage, String> {
         entry_point: unsafe { base.add(entry_rva) },
         tls_data,
         tls_data_size,
+        pdata_rva,
+        pdata_size,
     })
 }
 

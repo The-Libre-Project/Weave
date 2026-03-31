@@ -1,6 +1,6 @@
 use clap::Parser;
 use std::path::PathBuf;
-use weave_core::{exec, iat, loader, sandbox, stubs, teb};
+use weave_core::{exec, iat, loader, sandbox, seh, stubs, teb};
 
 /// Weave — run Windows executables on Linux.
 #[derive(Parser)]
@@ -15,27 +15,6 @@ struct Args {
 }
 
 fn main() {
-    // Install a SIGSEGV handler that prints the faulting address before dying.
-    // This helps diagnose crashes in PE code during development.
-    #[cfg(target_os = "linux")]
-    unsafe {
-        extern "C" fn on_sigsegv(
-            _sig: libc::c_int,
-            info: *mut libc::siginfo_t,
-            _ctx: *mut libc::c_void,
-        ) {
-            let addr = unsafe { (*info).si_addr() };
-            // Use write(2) directly — malloc/eprintln may be broken at this point.
-            let msg = format!("weave: SIGSEGV at {addr:p}\n");
-            unsafe { libc::write(2, msg.as_ptr() as *const libc::c_void, msg.len()) };
-            unsafe { libc::exit(139) };
-        }
-        let mut sa: libc::sigaction = std::mem::zeroed();
-        sa.sa_flags = libc::SA_SIGINFO;
-        sa.sa_sigaction = on_sigsegv as extern "C" fn(_, _, _) as usize;
-        libc::sigaction(libc::SIGSEGV, &sa, std::ptr::null_mut());
-    }
-
     let args = Args::parse();
 
     let bytes = std::fs::read(&args.exe).unwrap_or_else(|e| {
@@ -76,9 +55,15 @@ fn main() {
         std::process::exit(1);
     });
 
+    // ── 5. Install exception handlers ─────────────────────────────────────
+    // Must come after TEB setup (so GS is valid) and before exec::run.
+    // Replaces the Linux default crash handler with one that produces
+    // Windows-style crash reports and exits with the correct exception code.
+    seh::install(&image);
+
     eprintln!("weave: TEB ready — jumping in");
 
-    // ── 5. Jump to the entry point ────────────────────────────────────────
+    // ── 6. Jump to the entry point ────────────────────────────────────────
     // Safety: image.entry_point is a valid executable address set up by loader::load().
     unsafe { exec::run(image.entry_point) }
 }
