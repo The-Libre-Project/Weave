@@ -108,6 +108,7 @@ unsafe extern "C" fn on_fatal_signal(
 /// Windows x64 RUNTIME_FUNCTION — one 12-byte entry per function in .pdata.
 /// The table is sorted by BeginAddress, enabling binary search.
 #[repr(C)]
+#[cfg(target_os = "linux")]
 struct RuntimeFunction {
     begin_address: u32,       // RVA of first instruction
     end_address: u32,         // RVA one past the last instruction
@@ -201,6 +202,7 @@ fn print_crash_report(
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
+#[cfg(target_os = "linux")]
 fn signal_to_exception_code(sig: libc::c_int) -> u32 {
     match sig {
         libc::SIGSEGV => 0xC000_0005, // STATUS_ACCESS_VIOLATION
@@ -211,6 +213,7 @@ fn signal_to_exception_code(sig: libc::c_int) -> u32 {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn exception_name(code: u32) -> &'static str {
     match code {
         0xC000_0005 => "STATUS_ACCESS_VIOLATION",

@@ -11,6 +11,7 @@ output/
 *.iso
 *.log
 /target/
+/docker-target/
 
 # IDE
 .vscode/

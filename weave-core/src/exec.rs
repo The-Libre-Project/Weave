@@ -16,6 +16,7 @@
 ///
 /// This function does not return under normal circumstances: the entry point
 /// calls `NtTerminateProcess` (our stub), which calls `libc::exit()`.
+#[cfg(target_os = "linux")]
 pub unsafe fn run(entry_point: *const u8) -> ! {
     // Safety: entry_point is a valid executable address set up by the loader.
     // The Windows x86-64 ABI is declared here so the compiler generates the
@@ -26,4 +27,10 @@ pub unsafe fn run(entry_point: *const u8) -> ! {
     // Reached only if the entry point returned without calling ExitProcess /
     // NtTerminateProcess. Treat it as a clean exit.
     std::process::exit(0)
+}
+
+/// Stub for non-Linux platforms (macOS dev builds).
+#[cfg(not(target_os = "linux"))]
+pub unsafe fn run(_entry_point: *const u8) -> ! {
+    panic!("PE execution requires Linux — this is a cross-compilation target only")
 }
