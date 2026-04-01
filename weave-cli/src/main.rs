@@ -30,6 +30,7 @@ fn resolve(dll: &str, func: &str) -> Option<usize> {
         .or_else(|| weave_gdi32::resolve(dll, func))
         .or_else(|| weave_shell32::resolve(dll, func))
         .or_else(|| weave_ole32::resolve(dll, func))
+        .or_else(|| weave_ucrt::resolve(dll, func))
         .or_else(|| weave_vulkan::resolve(dll, func))
         .or_else(|| dll_registry::lookup(dll, func))
 }

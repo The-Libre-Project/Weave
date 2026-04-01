@@ -90,7 +90,7 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         // System metrics
         "GetSystemMetrics" => Some(get_system_metrics as *const () as usize),
         // Cursor / icon
-        "LoadCursorW" => {
+        "LoadCursorA" | "LoadCursorW" => {
             Some(load_cursor_w as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
         }
         "LoadIconW" => {

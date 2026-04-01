@@ -375,6 +375,7 @@ dependencies = [
  "weave-ole32",
  "weave-sandbox",
  "weave-shell32",
+ "weave-ucrt",
  "weave-user32",
  "weave-vulkan",
 ]
@@ -440,6 +441,13 @@ dependencies = [
  "libc",
  "weave-common",
  "weave-core",
+]
+
+[[package]]
+name = "weave-ucrt"
+version = "0.0.1"
+dependencies = [
+ "libc",
 ]
 
 [[package]]

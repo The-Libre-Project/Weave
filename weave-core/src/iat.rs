@@ -36,12 +36,24 @@ pub unsafe fn patch(
     patch_inner(bytes, base, resolve, false, |_, _| {})
 }
 
+/// Safe no-op stub written into IAT slots that we cannot resolve.
+///
+/// Returns 0 (NULL/FALSE/0) for any call signature.  This prevents a hard
+/// crash when pre-loaded DLLs (e.g. DXVK) call an import that Weave has no
+/// stub for — they will get a failure result instead of jumping into garbage.
+#[cfg(target_arch = "x86_64")]
+#[allow(unused)]
+pub extern "win64" fn unresolved_import_stub() -> u64 {
+    0
+}
+
 /// Like `patch`, but skips unresolved imports rather than failing.
 ///
 /// `on_miss` is called for each import that could not be resolved, allowing
-/// the caller to log or track missing symbols. Unresolved IAT slots are left
-/// at their original values (linker hint/RVA), which will crash immediately
-/// if the code attempts to call them.
+/// the caller to log or track missing symbols. Unresolved IAT slots are
+/// patched with the address of `unresolved_import_stub` (returns 0) so that
+/// calling an unresolved function is safe — callers see a failure return
+/// rather than jumping into garbage and crashing.
 ///
 /// Use this when loading pre-built DLLs where some imports may not be needed
 /// at runtime.
@@ -134,6 +146,18 @@ unsafe fn patch_inner(
                 },
                 None if lenient => {
                     on_miss(&dll_name, &func_name);
+                    // Write a safe no-op stub so the DLL won't crash if it
+                    // calls this import.  The stub returns 0 (NULL/FALSE/error)
+                    // which the caller should treat as a failure.
+                    #[cfg(target_arch = "x86_64")]
+                    unsafe {
+                        *(base.add(iat_rva + i * 8) as *mut u64) =
+                            unresolved_import_stub as *const () as u64;
+                    }
+                    #[cfg(not(target_arch = "x86_64"))]
+                    unsafe {
+                        *(base.add(iat_rva + i * 8) as *mut u64) = 0;
+                    }
                 }
                 None => {
                     return Err(format!("unresolved import: {dll_name}!{func_name}"));

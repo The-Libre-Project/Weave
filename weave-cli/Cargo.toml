@@ -18,6 +18,7 @@ weave-user32 = { path = "../weave-user32" }
 weave-gdi32 = { path = "../weave-gdi32" }
 weave-shell32 = { path = "../weave-shell32" }
 weave-ole32 = { path = "../weave-ole32" }
+weave-ucrt = { path = "../weave-ucrt" }
 weave-vulkan = { path = "../weave-vulkan" }
 weave-sandbox = { path = "../weave-sandbox" }
 clap = { version = "4", features = ["derive"] }

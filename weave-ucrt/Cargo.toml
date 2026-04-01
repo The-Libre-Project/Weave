@@ -1,0 +1,10 @@
+[package]
+name = "weave-ucrt"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "UCRT / api-ms-win-crt-* stubs for Weave"
+
+[dependencies]
+libc = "0.2"
