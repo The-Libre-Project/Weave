@@ -1,16 +1,34 @@
 # Weave
 
-A modern, Rust-native Windows compatibility layer for Linux. Run Windows applications on Linux with memory safety, default sandboxing, and cross-architecture support — no Windows license required.
+**A Rust-native Windows compatibility layer for Linux — built from scratch, not from Wine.**
 
-Weave is not a fork of Wine. It's a clean-room reimplementation of the Windows API surface built from the ground up with modern tools, modern security, and modern architecture.
+Run Windows applications on Linux with memory safety, default sandboxing, and cross-architecture support. No Windows license required.
 
 ---
 
-## Why Weave exists
+## The idea
 
-Wine has been the gold standard for running Windows apps on Linux for over 30 years. It works. But it carries 30 years of accumulated C code, no memory safety, no sandboxing, inconsistent API coverage, and an architecture that predates containers, Vulkan, io_uring, and ARM64 desktops.
+Wine spent 30 years reverse-engineering the Windows API — figuring out what every function does, including the undocumented behaviors and edge cases that real applications depend on. That work is extraordinary, and it's irreplaceable.
 
-Weave starts fresh with a simple question: what would a Windows compatibility layer look like if you designed it today?
+But Wine is also 30 years old. It's 10 million lines of C with no memory safety, no sandboxing, an architecture that predates containers and Vulkan, and the kind of accumulated complexity that comes from maintaining any large C project across three decades.
+
+Weave is not a Wine replacement. It's a fresh answer to the same question Wine answered in 1993: *how do you run Windows applications on Linux?*
+
+Wine did the hard work of figuring out what Windows actually does. Weave uses that knowledge as a reference — not code — to build the same thing from scratch in Rust, with 2020s infrastructure, 2020s security defaults, and 2020s architecture.
+
+The relationship is something like Firefox to Netscape: same problem, same era of users, no code in common. Built fresh because the old way accumulated too much debt to fix from the inside.
+
+---
+
+## Why this matters technically
+
+A few things that fall out of starting over:
+
+**The graphics stack is simpler than it looks.** DXVK — the battle-tested DirectX-to-Vulkan translation layer that ships inside Steam's Proton — has a fully maintained native Linux build mode (`dxvk-native`) that has *zero* Wine dependencies. It loads `libvulkan.so` directly. It doesn't call `__wine_get_vulkan_driver`. It doesn't need winevulkan. It doesn't import anything from Wine's ntdll. The Wine-specific code paths are simply absent in the native build. This means Weave can host DXVK directly — the hardest part of a Windows compatibility layer for gaming turned out to be largely solved by a library that doesn't require Wine at all.
+
+**Sandboxing is a default, not a feature.** Wine runs with full user permissions — every Windows application gets access to everything your Linux user account can touch. In Weave, isolation is the starting state. Each application runs in its own namespace with Landlock filesystem restrictions and seccomp syscall filtering. Relaxing permissions requires explicit action. This matters for running untrusted software, which is exactly what a Windows compatibility layer does.
+
+**Modularity is structural.** Every Windows DLL is a separate Rust crate. Adding a function to `kernel32` doesn't require understanding `user32`. Contributors can own individual shims, publish independent patches, and test in isolation. The Windows API surface is enormous — the only way to cover it is to make contribution easy.
 
 ---
 
