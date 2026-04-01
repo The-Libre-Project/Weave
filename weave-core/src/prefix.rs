@@ -1,0 +1,40 @@
+//! Global Weave prefix path.
+//!
+//! The "prefix" is the directory that acts as the virtual Windows filesystem
+//! root for a running application. Drive `C:` maps to `{prefix}/drive_c/`,
+//! drive `D:` to `{prefix}/drive_d/`, and so on — the same convention Wine uses.
+//!
+//! `set()` is called once by `weave-cli` before launching the PE. After that,
+//! `translator()` returns a `WinPathTranslator` ready to use from any stub.
+
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+use weave_common::path::WinPathTranslator;
+
+static PREFIX: OnceLock<PathBuf> = OnceLock::new();
+
+/// Set the Weave prefix directory. Must be called before any file I/O stubs
+/// run. Subsequent calls are silently ignored — the prefix is immutable once
+/// set.
+pub fn set(path: PathBuf) {
+    let _ = PREFIX.set(path);
+}
+
+/// Return the active prefix path.
+///
+/// If `set()` has never been called, a sensible default is used:
+/// `$HOME/.weave/default` (or `/tmp/.weave/default` if `$HOME` is unset).
+pub fn get() -> &'static Path {
+    PREFIX.get_or_init(|| {
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+        PathBuf::from(home).join(".weave").join("default")
+    })
+}
+
+/// Create a `WinPathTranslator` for the current prefix.
+///
+/// This is cheap — it just clones the prefix `PathBuf` into the translator.
+/// Call it per-operation; no need to cache.
+pub fn translator() -> WinPathTranslator {
+    WinPathTranslator::new(get().to_path_buf())
+}

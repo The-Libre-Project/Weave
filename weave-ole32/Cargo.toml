@@ -1,12 +1,10 @@
 [package]
-name = "weave-kernel32"
+name = "weave-ole32"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-repository.workspace = true
-description = "kernel32.dll stubs for Weave"
+description = "ole32.dll / combase.dll stubs for Weave — COM initialisation and object creation"
 
 [dependencies]
 weave-common = { path = "../weave-common" }
-weave-core = { path = "../weave-core" }
 libc = "0.2"

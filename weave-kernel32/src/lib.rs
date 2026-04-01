@@ -1,13 +1,15 @@
-//! kernel32.dll stubs for Weave — the 15 functions hello.exe needs.
+//! kernel32.dll stubs for Weave.
 //!
-//! Critical section stubs are no-ops (Phase 1 is single-threaded).
+//! Critical section stubs are no-ops (Phase 1/2 is single-threaded).
 //! VirtualProtect/VirtualQuery delegate to mprotect/mincore.
 //! WriteConsoleW converts UTF-16 to UTF-8 and writes to the Linux fd.
+//! CreateFileW/ReadFile/WriteFile/CloseHandle delegate to weave-core file_io.
 
 #![allow(non_snake_case)]
 
 use std::cell::Cell;
 use weave_common::{STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE};
+use weave_core::{file_io, handles};
 
 // Per-thread last error, shared across GetLastError / SetLastError.
 thread_local! {
@@ -31,17 +33,23 @@ fn win_prot_to_linux(protect: u32) -> i32 {
 
 // ── Stubs ─────────────────────────────────────────────────────────────────────
 
-/// GetStdHandle: return the Linux fd for stdin/stdout/stderr.
+/// GetStdHandle: return the Weave HANDLE for stdin/stdout/stderr.
+///
+/// Returns handle constants from the global handle table (4/5/6 for
+/// stdin/stdout/stderr). These map to Linux fds 0/1/2 in the table.
 pub extern "win64" fn get_std_handle(n_std_handle: u32) -> usize {
     match n_std_handle {
-        STD_INPUT_HANDLE => 0,
-        STD_OUTPUT_HANDLE => 1,
-        STD_ERROR_HANDLE => 2,
+        STD_INPUT_HANDLE => handles::STDIN_HANDLE,
+        STD_OUTPUT_HANDLE => handles::STDOUT_HANDLE,
+        STD_ERROR_HANDLE => handles::STDERR_HANDLE,
         _ => usize::MAX, // INVALID_HANDLE_VALUE
     }
 }
 
-/// WriteConsoleW: write a UTF-16 buffer to the console handle (Linux fd).
+/// WriteConsoleW: write a UTF-16 buffer to a console handle.
+///
+/// Looks up the Linux fd via the global HANDLE table, converts UTF-16 to
+/// UTF-8, then writes to the fd.
 ///
 /// # Safety
 /// `lp_buffer` must be valid for `n_chars` UTF-16 code units.
@@ -52,7 +60,10 @@ pub unsafe extern "win64" fn write_console_w(
     lp_chars_written: *mut u32,
     _lp_reserved: usize,
 ) -> i32 {
-    let fd = h_console_output as i32;
+    let fd = match handles::get_fd(h_console_output) {
+        Some(fd) => fd,
+        None => return 0, // FALSE
+    };
     let slice = unsafe { std::slice::from_raw_parts(lp_buffer, n_chars as usize) };
     let s = String::from_utf16_lossy(slice);
     let bytes = s.as_bytes();
@@ -189,6 +200,218 @@ pub extern "win64" fn c_specific_handler(
     1 // ExceptionContinueSearch
 }
 
+// ── Heap / global memory ──────────────────────────────────────────────────────
+
+/// GlobalAlloc: allocate a block of memory from the heap.
+///
+/// Phase 2: `GMEM_FIXED` and `GMEM_MOVEABLE` are both handled by returning
+/// a real heap pointer (handle == pointer). Zeroing (`GMEM_ZEROINIT`) is
+/// honoured.
+pub extern "win64" fn global_alloc(u_flags: u32, dw_bytes: usize) -> usize {
+    if dw_bytes == 0 {
+        return 0;
+    }
+    let zeroinit = (u_flags & 0x40) != 0; // GMEM_ZEROINIT
+    let ptr = if zeroinit {
+        unsafe { libc::calloc(1, dw_bytes) }
+    } else {
+        unsafe { libc::malloc(dw_bytes) }
+    };
+    ptr as usize
+}
+
+/// GlobalFree: free memory allocated by `GlobalAlloc`.
+///
+/// Returns NULL on success, the original handle on failure.
+pub extern "win64" fn global_free(h_mem: usize) -> usize {
+    if h_mem == 0 {
+        return 0;
+    }
+    unsafe { libc::free(h_mem as *mut libc::c_void) };
+    0 // success
+}
+
+/// GlobalLock: lock a global memory object and return a pointer.
+///
+/// Phase 2: `HGLOBAL == pointer`, so just return `h_mem` directly.
+pub extern "win64" fn global_lock(h_mem: usize) -> usize {
+    h_mem // pointer == handle in Phase 2
+}
+
+/// GlobalUnlock: decrement the lock count of a global memory object.
+///
+/// Phase 2: no-op; returns TRUE.
+pub extern "win64" fn global_unlock(_h_mem: usize) -> i32 {
+    1 // TRUE
+}
+
+/// GlobalSize: return the size of a global memory block.
+///
+/// Phase 2: we don't track sizes; returns 0 (stub).
+pub extern "win64" fn global_size(_h_mem: usize) -> usize {
+    0
+}
+
+/// LocalAlloc: allocate a block of local memory (alias for GlobalAlloc).
+pub extern "win64" fn local_alloc(u_flags: u32, u_bytes: usize) -> usize {
+    global_alloc(u_flags, u_bytes)
+}
+
+/// LocalFree: free memory allocated by `LocalAlloc`.
+pub extern "win64" fn local_free(h_mem: usize) -> usize {
+    global_free(h_mem)
+}
+
+/// LocalLock: lock a local memory object (alias for GlobalLock).
+pub extern "win64" fn local_lock(h_mem: usize) -> usize {
+    global_lock(h_mem)
+}
+
+/// LocalUnlock: unlock a local memory object (alias for GlobalUnlock).
+pub extern "win64" fn local_unlock(h_mem: usize) -> i32 {
+    global_unlock(h_mem)
+}
+
+// ── File I/O ──────────────────────────────────────────────────────────────────
+
+/// CreateFileW: open or create a file and return a HANDLE.
+///
+/// Translates Win32 parameters to NT equivalents and delegates to the
+/// shared `file_io::open_file` engine in weave-core.
+///
+/// # Safety
+/// `lp_file_name` must be a valid, null-terminated UTF-16 string.
+pub unsafe extern "win64" fn create_file_w(
+    lp_file_name: *const u16,
+    dw_desired_access: u32,
+    _dw_share_mode: u32,       // ignored — no file locking in Phase 2
+    _lp_security_attrs: usize, // ignored
+    dw_creation_disposition: u32,
+    _dw_flags_and_attrs: u32, // ignored
+    _h_template_file: usize,  // ignored
+) -> usize {
+    if lp_file_name.is_null() {
+        LAST_ERROR.with(|e| e.set(file_io::ERROR_INVALID_HANDLE));
+        return usize::MAX; // INVALID_HANDLE_VALUE
+    }
+
+    // Decode the null-terminated UTF-16 filename.
+    let win_path = unsafe {
+        let mut len = 0usize;
+        while *lp_file_name.add(len) != 0 {
+            len += 1;
+        }
+        let slice = std::slice::from_raw_parts(lp_file_name, len);
+        String::from_utf16_lossy(slice).to_owned()
+    };
+
+    let nt_disposition = file_io::win32_disposition_to_nt(dw_creation_disposition);
+
+    match file_io::open_file(&win_path, dw_desired_access, nt_disposition) {
+        Ok(handle) => {
+            LAST_ERROR.with(|e| e.set(0));
+            handle
+        }
+        Err(_status) => {
+            // Map NT status back to a Win32 error code. For now, return a
+            // generic error; Phase 3 can refine the mapping.
+            LAST_ERROR.with(|e| e.set(file_io::ERROR_FILE_NOT_FOUND));
+            usize::MAX // INVALID_HANDLE_VALUE
+        }
+    }
+}
+
+/// ReadFile: read bytes from a file handle into a buffer.
+///
+/// # Safety
+/// `lp_buffer` must be valid for `n_bytes_to_read` bytes.
+pub unsafe extern "win64" fn read_file(
+    h_file: usize,
+    lp_buffer: *mut u8,
+    n_bytes_to_read: u32,
+    lp_bytes_read: *mut u32,
+    _lp_overlapped: usize, // ignored — synchronous I/O only
+) -> i32 {
+    let fd = match handles::get_fd(h_file) {
+        Some(fd) => fd,
+        None => {
+            LAST_ERROR.with(|e| e.set(file_io::ERROR_INVALID_HANDLE));
+            return 0; // FALSE
+        }
+    };
+
+    let n = unsafe { libc::read(fd, lp_buffer as *mut libc::c_void, n_bytes_to_read as usize) };
+
+    if !lp_bytes_read.is_null() {
+        unsafe { *lp_bytes_read = if n >= 0 { n as u32 } else { 0 } };
+    }
+
+    if n < 0 {
+        LAST_ERROR.with(|e| e.set(file_io::ERROR_ACCESS_DENIED));
+        0 // FALSE
+    } else {
+        LAST_ERROR.with(|e| e.set(0));
+        1 // TRUE
+    }
+}
+
+/// WriteFile: write bytes from a buffer to a file handle.
+///
+/// # Safety
+/// `lp_buffer` must be valid for `n_bytes_to_write` bytes.
+pub unsafe extern "win64" fn write_file(
+    h_file: usize,
+    lp_buffer: *const u8,
+    n_bytes_to_write: u32,
+    lp_bytes_written: *mut u32,
+    _lp_overlapped: usize, // ignored — synchronous I/O only
+) -> i32 {
+    let fd = match handles::get_fd(h_file) {
+        Some(fd) => fd,
+        None => {
+            LAST_ERROR.with(|e| e.set(file_io::ERROR_INVALID_HANDLE));
+            return 0; // FALSE
+        }
+    };
+
+    let n = unsafe {
+        libc::write(
+            fd,
+            lp_buffer as *const libc::c_void,
+            n_bytes_to_write as usize,
+        )
+    };
+
+    if !lp_bytes_written.is_null() {
+        unsafe { *lp_bytes_written = if n >= 0 { n as u32 } else { 0 } };
+    }
+
+    if n < 0 {
+        LAST_ERROR.with(|e| e.set(file_io::ERROR_ACCESS_DENIED));
+        0 // FALSE
+    } else {
+        LAST_ERROR.with(|e| e.set(0));
+        1 // TRUE
+    }
+}
+
+/// CloseHandle: close an open object handle.
+///
+/// Returns TRUE on success, FALSE if the handle was invalid.
+/// Closing stdin/stdout/stderr returns FALSE (those are protected).
+pub extern "win64" fn close_handle(h_object: usize) -> i32 {
+    match file_io::close_handle(h_object) {
+        Ok(()) => {
+            LAST_ERROR.with(|e| e.set(0));
+            1 // TRUE
+        }
+        Err(_) => {
+            LAST_ERROR.with(|e| e.set(file_io::ERROR_INVALID_HANDLE));
+            0 // FALSE
+        }
+    }
+}
+
 // ── Resolver ──────────────────────────────────────────────────────────────────
 
 /// Resolve a kernel32.dll import to a stub address.
@@ -220,6 +443,27 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "DeleteCriticalSection" => Some(delete_critical_section as *const () as usize),
         "SetUnhandledExceptionFilter" => Some(set_unhandled_exception_filter as *const () as usize),
         "__C_specific_handler" => Some(c_specific_handler as *const () as usize),
+        "CreateFileW" => Some(
+            create_file_w as unsafe extern "win64" fn(_, _, _, _, _, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "ReadFile" => {
+            Some(read_file as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const () as usize)
+        }
+        "WriteFile" => {
+            Some(write_file as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const () as usize)
+        }
+        "CloseHandle" => Some(close_handle as *const () as usize),
+        // Heap / global memory
+        "GlobalAlloc" => Some(global_alloc as *const () as usize),
+        "GlobalFree" => Some(global_free as *const () as usize),
+        "GlobalLock" => Some(global_lock as *const () as usize),
+        "GlobalUnlock" => Some(global_unlock as *const () as usize),
+        "GlobalSize" => Some(global_size as *const () as usize),
+        "LocalAlloc" => Some(local_alloc as *const () as usize),
+        "LocalFree" => Some(local_free as *const () as usize),
+        "LocalLock" => Some(local_lock as *const () as usize),
+        "LocalUnlock" => Some(local_unlock as *const () as usize),
         _ => None,
     }
 }

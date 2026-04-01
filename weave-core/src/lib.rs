@@ -1,6 +1,10 @@
 pub mod exec;
+pub mod file_io;
+pub mod handles;
 pub mod iat;
 pub mod loader;
 pub mod pe;
+pub mod prefix;
+pub mod registry;
 pub mod seh;
 pub mod teb;

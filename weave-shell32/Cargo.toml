@@ -1,10 +1,9 @@
 [package]
-name = "weave-kernel32"
+name = "weave-shell32"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-repository.workspace = true
-description = "kernel32.dll stubs for Weave"
+description = "shell32.dll and comdlg32.dll stubs for Weave"
 
 [dependencies]
 weave-common = { path = "../weave-common" }

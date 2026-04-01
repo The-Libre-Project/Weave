@@ -1,12 +1,11 @@
 [package]
-name = "weave-kernel32"
+name = "weave-advapi32"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "kernel32.dll stubs for Weave"
+description = "advapi32.dll stubs for Weave — registry, security, and services"
 
 [dependencies]
 weave-common = { path = "../weave-common" }
 weave-core = { path = "../weave-core" }
-libc = "0.2"

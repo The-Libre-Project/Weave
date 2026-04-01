@@ -1,6 +1,6 @@
 use clap::Parser;
 use std::path::PathBuf;
-use weave_core::{exec, iat, loader, seh, teb};
+use weave_core::{exec, iat, loader, prefix, registry, seh, teb};
 
 /// Weave — run Windows executables on Linux.
 #[derive(Parser)]
@@ -8,6 +8,10 @@ use weave_core::{exec, iat, loader, seh, teb};
 struct Args {
     /// Path to the Windows .exe file to run
     exe: PathBuf,
+
+    /// Weave prefix directory (virtual Windows root). Defaults to ~/.weave/default
+    #[arg(long)]
+    prefix: Option<PathBuf>,
 
     /// Disable the filesystem sandbox (for debugging only)
     #[arg(long)]
@@ -19,18 +23,31 @@ struct Args {
 /// Tries each stub crate in turn; returns `None` for unknown imports so the
 /// IAT patcher can abort with a clear "unresolved import" message.
 fn resolve(dll: &str, func: &str) -> Option<usize> {
-    weave_ntdll::resolve(dll, func).or_else(|| weave_kernel32::resolve(dll, func))
+    weave_ntdll::resolve(dll, func)
+        .or_else(|| weave_kernel32::resolve(dll, func))
+        .or_else(|| weave_advapi32::resolve(dll, func))
+        .or_else(|| weave_user32::resolve(dll, func))
+        .or_else(|| weave_gdi32::resolve(dll, func))
+        .or_else(|| weave_shell32::resolve(dll, func))
+        .or_else(|| weave_ole32::resolve(dll, func))
 }
 
 fn main() {
     let args = Args::parse();
+
+    // ── 0. Initialise the prefix ──────────────────────────────────────────
+    if let Some(p) = args.prefix {
+        prefix::set(p);
+    }
+    // Ensure the registry is populated with defaults before the PE runs.
+    registry::populate();
 
     let bytes = std::fs::read(&args.exe).unwrap_or_else(|e| {
         eprintln!("weave: error reading {}: {e}", args.exe.display());
         std::process::exit(1);
     });
 
-    // ── 1. Load sections into memory ─────────────────────────────────────
+    // ── 1. Load sections into memory ──────────────────────────────────────
     let image = loader::load(&bytes).unwrap_or_else(|e| {
         eprintln!("weave: load failed: {e}");
         std::process::exit(1);

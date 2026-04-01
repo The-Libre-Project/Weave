@@ -8,4 +8,5 @@ description = "ntdll.dll and UCRT API-set stubs for Weave"
 
 [dependencies]
 weave-common = { path = "../weave-common" }
+weave-core = { path = "../weave-core" }
 libc = "0.2"

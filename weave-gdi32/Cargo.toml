@@ -1,0 +1,10 @@
+[package]
+name = "weave-gdi32"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "gdi32.dll stubs for Weave"
+
+[dependencies]
+weave-user32 = { path = "../weave-user32" }
+weave-common = { path = "../weave-common" }

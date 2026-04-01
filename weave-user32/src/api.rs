@@ -1,0 +1,823 @@
+//! Win32 user32 API function implementations.
+//!
+//! All functions use `extern "win64"` (Windows x86-64 calling convention).
+//! Functions that need X11 delegate to `backend::*`; when X11 is unavailable
+//! (no display, or non-Linux) they return safe error values.
+
+#![allow(non_snake_case)]
+
+use crate::backend;
+use crate::class::{self, ClassEntry};
+use crate::defs::*;
+use crate::queue::{self, MsgEntry};
+use crate::window::{self, WindowEntry};
+
+// ── RegisterClassW / RegisterClassExW ─────────────────────────────────────────
+
+/// RegisterClassW: register a window class.
+///
+/// Returns a non-zero ATOM identifying the class, or 0 on failure.
+///
+/// # Safety
+/// `lp_wnd_class` must point to a valid `WNDCLASSW` struct.
+pub unsafe extern "win64" fn register_class_w(lp_wnd_class: *const WndClassW) -> u16 {
+    if lp_wnd_class.is_null() {
+        return 0;
+    }
+    let wc = unsafe { &*lp_wnd_class };
+    let name = unsafe { decode_wide(wc.lpsz_class_name) };
+    if name.is_empty() {
+        return 0;
+    }
+    class::register(
+        &name,
+        ClassEntry {
+            wnd_proc: wc.lpfn_wnd_proc,
+            style: wc.style,
+            h_cursor: wc.h_cursor,
+            hbr_background: wc.hbr_background,
+        },
+    );
+    // Return a non-zero ATOM — use a hash of the name for uniqueness.
+    name_to_atom(&name)
+}
+
+/// RegisterClassExW: extended version with cbSize + hIconSm fields.
+///
+/// # Safety
+/// `lp_wnd_class_ex` must point to a valid `WNDCLASSEXW` struct.
+pub unsafe extern "win64" fn register_class_ex_w(lp_wnd_class_ex: *const WndClassExW) -> u16 {
+    if lp_wnd_class_ex.is_null() {
+        return 0;
+    }
+    let wc = unsafe { &*lp_wnd_class_ex };
+    let name = unsafe { decode_wide(wc.lpsz_class_name) };
+    if name.is_empty() {
+        return 0;
+    }
+    class::register(
+        &name,
+        ClassEntry {
+            wnd_proc: wc.lpfn_wnd_proc,
+            style: wc.style,
+            h_cursor: wc.h_cursor,
+            hbr_background: wc.hbr_background,
+        },
+    );
+    name_to_atom(&name)
+}
+
+/// Convert a class name to a stable 16-bit ATOM. Uses a simple djb2 hash.
+fn name_to_atom(name: &str) -> u16 {
+    let mut hash: u32 = 5381;
+    for b in name.bytes() {
+        hash = hash.wrapping_mul(33).wrapping_add(b as u32);
+    }
+    let atom = (hash & 0xFFFF) as u16;
+    if atom == 0 {
+        1
+    } else {
+        atom
+    }
+}
+
+// ── CreateWindowExW ───────────────────────────────────────────────────────────
+
+/// CreateWindowExW: create a new window.
+///
+/// # Safety
+/// `lp_class_name` and `lp_window_name` (if non-null) must be valid
+/// null-terminated UTF-16 strings.
+pub unsafe extern "win64" fn create_window_ex_w(
+    dw_ex_style: u32,
+    lp_class_name: *const u16,
+    lp_window_name: *const u16,
+    dw_style: u32,
+    x: i32,
+    y: i32,
+    n_width: i32,
+    n_height: i32,
+    h_wnd_parent: usize,
+    _h_menu: usize,
+    h_instance: usize,
+    lp_param: *mut u8,
+) -> usize {
+    let class_name = unsafe { decode_wide(lp_class_name) };
+    let title = unsafe { decode_wide(lp_window_name) };
+
+    // Look up the class.
+    let cls = match class::find(&class_name) {
+        Some(c) => c,
+        None => {
+            eprintln!("weave/user32: CreateWindowExW: unknown class '{class_name}'");
+            return 0;
+        }
+    };
+
+    // Default size if CW_USEDEFAULT (0x80000000 as i32).
+    let width = if n_width == i32::MIN {
+        640
+    } else {
+        n_width.max(1)
+    } as u32;
+    let height = if n_height == i32::MIN {
+        480
+    } else {
+        n_height.max(1)
+    } as u32;
+    let pos_x = if x == i32::MIN { 100 } else { x };
+    let pos_y = if y == i32::MIN { 100 } else { y };
+
+    let visible = (dw_style & WS_VISIBLE) != 0;
+
+    // Create the X11 window (no-op on non-Linux).
+    let xcb_id = backend::create_window(&title, pos_x, pos_y, width, height, visible);
+
+    let hwnd = window::create(WindowEntry {
+        class_name: class_name.clone(),
+        wnd_proc: cls.wnd_proc,
+        title: title.clone(),
+        style: dw_style,
+        x: pos_x,
+        y: pos_y,
+        width,
+        height,
+        visible,
+        xcb_id,
+    });
+
+    // Build CREATESTRUCTW on the stack and call WNDPROC with WM_NCCREATE then WM_CREATE.
+    // Title and class name as wide strings for the struct — we need them alive during the call.
+    let title_wide: Vec<u16> = title.encode_utf16().chain(std::iter::once(0)).collect();
+    let class_wide: Vec<u16> = class_name
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+
+    let cs = CreateStructW {
+        lp_create_params: lp_param,
+        h_instance,
+        h_menu: 0,
+        hwnd_parent: h_wnd_parent,
+        cy: height as i32,
+        cx: width as i32,
+        y: pos_y,
+        x: pos_x,
+        style: dw_style as i32,
+        _pad: 0,
+        lp_sz_name: title_wide.as_ptr(),
+        lp_sz_class: class_wide.as_ptr(),
+        dw_ex_style,
+        _pad2: 0,
+    };
+
+    call_wnd_proc(cls.wnd_proc, hwnd, WM_NCCREATE, 0, &cs as *const _ as isize);
+    call_wnd_proc(cls.wnd_proc, hwnd, WM_CREATE, 0, &cs as *const _ as isize);
+
+    hwnd
+}
+
+// ── ShowWindow ────────────────────────────────────────────────────────────────
+
+/// ShowWindow: show, hide, or change the state of a window.
+///
+/// Returns the previous visibility state as a BOOL.
+pub extern "win64" fn show_window(hwnd: usize, n_cmd_show: i32) -> i32 {
+    let was_visible = window::with(hwnd, |e| e.visible).unwrap_or(false);
+
+    let show = !matches!(n_cmd_show, SW_HIDE);
+
+    let xcb = window::xcb_id(hwnd);
+    window::with_mut(hwnd, |e| e.visible = show);
+    backend::show_window(xcb, show);
+
+    was_visible as i32
+}
+
+/// UpdateWindow: send WM_PAINT directly if the update region is non-empty.
+/// Phase 2: always posts WM_PAINT to the message queue.
+pub extern "win64" fn update_window(hwnd: usize) -> i32 {
+    if window::with(hwnd, |_| ()).is_some() {
+        queue::post(MsgEntry {
+            hwnd,
+            message: WM_PAINT,
+            w_param: 0,
+            l_param: 0,
+            time: 0,
+            pt_x: 0,
+            pt_y: 0,
+        });
+        1 // TRUE
+    } else {
+        0 // FALSE — invalid HWND
+    }
+}
+
+// ── DestroyWindow ─────────────────────────────────────────────────────────────
+
+/// DestroyWindow: destroy a window and post WM_DESTROY.
+pub extern "win64" fn destroy_window(hwnd: usize) -> i32 {
+    let xcb = window::xcb_id(hwnd);
+
+    // Call WM_DESTROY via the window's WNDPROC before removing it.
+    if let Some(proc_addr) = window::with(hwnd, |e| e.wnd_proc) {
+        call_wnd_proc(proc_addr, hwnd, WM_NCDESTROY, 0, 0);
+        call_wnd_proc(proc_addr, hwnd, WM_DESTROY, 0, 0);
+    }
+
+    backend::destroy_window(xcb);
+    window::remove(hwnd);
+    1 // TRUE
+}
+
+// ── Message loop ──────────────────────────────────────────────────────────────
+
+/// GetMessageW: retrieve a message from the queue, blocking until one arrives.
+///
+/// Returns:
+/// - `> 0` — a message was retrieved (not WM_QUIT)
+/// - `0`   — WM_QUIT was retrieved
+/// - `-1`  — error (invalid hwnd filter, or connection lost)
+///
+/// # Safety
+/// `lp_msg` must be a valid writable pointer to a `MSG`-sized buffer (48 bytes).
+pub unsafe extern "win64" fn get_message_w(
+    lp_msg: *mut Msg,
+    _h_wnd: usize,        // window filter — 0 = all windows (ignored in Phase 2)
+    _msg_filter_min: u32, // message range filter (ignored)
+    _msg_filter_max: u32,
+) -> i32 {
+    if lp_msg.is_null() {
+        return -1;
+    }
+
+    // Wait for a message: keep pumping X11 events until the queue has one.
+    loop {
+        if let Some(entry) = queue::pop() {
+            fill_msg(lp_msg, &entry);
+            return if entry.message == WM_QUIT { 0 } else { 1 };
+        }
+        // Block on the X11 connection for the next event.
+        if !backend::wait_event() {
+            // Connection lost or no display — return WM_QUIT.
+            let quit = MsgEntry {
+                hwnd: 0,
+                message: WM_QUIT,
+                w_param: 0,
+                l_param: 0,
+                time: 0,
+                pt_x: 0,
+                pt_y: 0,
+            };
+            fill_msg(lp_msg, &quit);
+            return 0;
+        }
+    }
+}
+
+/// PeekMessageW: check for messages without blocking.
+///
+/// # Safety
+/// `lp_msg` must be a valid writable pointer to a `MSG`-sized buffer.
+pub unsafe extern "win64" fn peek_message_w(
+    lp_msg: *mut Msg,
+    _h_wnd: usize,
+    _msg_filter_min: u32,
+    _msg_filter_max: u32,
+    w_remove_msg: u32, // PM_NOREMOVE (0) or PM_REMOVE (1)
+) -> i32 {
+    if lp_msg.is_null() {
+        return 0;
+    }
+    // Drain any pending X11 events first.
+    while backend::poll_event() {}
+
+    let entry = if w_remove_msg == 0 {
+        queue::peek()
+    } else {
+        queue::pop()
+    };
+
+    match entry {
+        Some(ref e) => {
+            fill_msg(lp_msg, e);
+            1 // TRUE — message available
+        }
+        None => 0, // FALSE — no message
+    }
+}
+
+/// TranslateMessage: translate virtual-key messages to WM_CHAR.
+///
+/// Phase 2 stub: returns TRUE if the message is a key message (WM_KEYDOWN /
+/// WM_KEYUP). WM_CHAR generation deferred to Phase 3 keyboard input work.
+///
+/// # Safety
+/// `lp_msg` must point to a valid `MSG`.
+pub unsafe extern "win64" fn translate_message(lp_msg: *const Msg) -> i32 {
+    if lp_msg.is_null() {
+        return 0;
+    }
+    let msg = unsafe { (*lp_msg).message };
+    (msg == WM_KEYDOWN || msg == WM_KEYUP) as i32
+}
+
+/// DispatchMessageW: call the window procedure for the message in `lp_msg`.
+///
+/// Returns the value returned by the window procedure.
+///
+/// # Safety
+/// `lp_msg` must point to a valid `MSG`.
+pub unsafe extern "win64" fn dispatch_message_w(lp_msg: *const Msg) -> isize {
+    if lp_msg.is_null() {
+        return 0;
+    }
+    let m = unsafe { &*lp_msg };
+
+    // WM_QUIT is never dispatched to a WNDPROC.
+    if m.message == WM_QUIT {
+        return 0;
+    }
+
+    let proc_addr = match window::with(m.hwnd, |e| e.wnd_proc) {
+        Some(p) => p,
+        None => return 0,
+    };
+
+    call_wnd_proc(proc_addr, m.hwnd, m.message, m.w_param, m.l_param)
+}
+
+// ── PostQuitMessage ───────────────────────────────────────────────────────────
+
+/// PostQuitMessage: post a WM_QUIT message to the calling thread's message queue.
+///
+/// `n_exit_code` becomes the wParam of the WM_QUIT message.
+pub extern "win64" fn post_quit_message(n_exit_code: i32) {
+    queue::post(MsgEntry {
+        hwnd: 0,
+        message: WM_QUIT,
+        w_param: n_exit_code as usize,
+        l_param: 0,
+        time: 0,
+        pt_x: 0,
+        pt_y: 0,
+    });
+}
+
+/// PostMessageW: post a message to a window's message queue without blocking.
+///
+/// Returns TRUE on success.
+pub extern "win64" fn post_message_w(hwnd: usize, msg: u32, w_param: usize, l_param: isize) -> i32 {
+    queue::post(MsgEntry {
+        hwnd,
+        message: msg,
+        w_param,
+        l_param,
+        time: 0,
+        pt_x: 0,
+        pt_y: 0,
+    });
+    1
+}
+
+/// SendMessageW: send a message directly to the WNDPROC, bypassing the queue.
+///
+/// Blocks until the WNDPROC returns.
+pub extern "win64" fn send_message_w(
+    hwnd: usize,
+    msg: u32,
+    w_param: usize,
+    l_param: isize,
+) -> isize {
+    let proc_addr = match window::with(hwnd, |e| e.wnd_proc) {
+        Some(p) => p,
+        None => return 0,
+    };
+    call_wnd_proc(proc_addr, hwnd, msg, w_param, l_param)
+}
+
+// ── DefWindowProcW ────────────────────────────────────────────────────────────
+
+/// DefWindowProcW: default message handling for messages the application
+/// does not process.
+///
+/// Key behaviours:
+///   WM_CLOSE   → calls DestroyWindow
+///   WM_DESTROY → calls PostQuitMessage(0)
+///   WM_PAINT   → validates the window (returns 0 without drawing)
+///   All others → return 0
+pub extern "win64" fn def_window_proc_w(
+    hwnd: usize,
+    msg: u32,
+    w_param: usize,
+    l_param: isize,
+) -> isize {
+    match msg {
+        WM_CLOSE => {
+            destroy_window(hwnd);
+            0
+        }
+        WM_DESTROY => {
+            post_quit_message(0);
+            0
+        }
+        WM_PAINT => {
+            // Validate the update region without drawing.
+            // In Phase 2, no GDI; apps that handle WM_PAINT call BeginPaint/EndPaint.
+            0
+        }
+        WM_NCCREATE => 1,  // non-zero = proceed with window creation
+        WM_NCHITTEST => 1, // HTCLIENT (1) — all hits are in client area
+        _ => {
+            let _ = (hwnd, w_param, l_param); // suppress unused warnings
+            0
+        }
+    }
+}
+
+// ── Geometry ──────────────────────────────────────────────────────────────────
+
+/// GetClientRect: return the client area of a window (x=0, y=0, w, h).
+///
+/// # Safety
+/// `lp_rect` must be a valid writable pointer to a `RECT`.
+pub unsafe extern "win64" fn get_client_rect(hwnd: usize, lp_rect: *mut Rect) -> i32 {
+    if lp_rect.is_null() {
+        return 0;
+    }
+    let (w, h) = window::with(hwnd, |e| (e.width, e.height)).unwrap_or((0, 0));
+    unsafe {
+        (*lp_rect).left = 0;
+        (*lp_rect).top = 0;
+        (*lp_rect).right = w as i32;
+        (*lp_rect).bottom = h as i32;
+    }
+    1
+}
+
+/// GetWindowRect: return the window position and size in screen coordinates.
+///
+/// # Safety
+/// `lp_rect` must be a valid writable pointer to a `RECT`.
+pub unsafe extern "win64" fn get_window_rect(hwnd: usize, lp_rect: *mut Rect) -> i32 {
+    if lp_rect.is_null() {
+        return 0;
+    }
+    let (x, y, w, h) =
+        window::with(hwnd, |e| (e.x, e.y, e.width, e.height)).unwrap_or((0, 0, 0, 0));
+    unsafe {
+        (*lp_rect).left = x;
+        (*lp_rect).top = y;
+        (*lp_rect).right = x + w as i32;
+        (*lp_rect).bottom = y + h as i32;
+    }
+    1
+}
+
+/// InvalidateRect: mark a region of a window as needing repaint.
+///
+/// Phase 2: posts WM_PAINT to the message queue.
+///
+/// # Safety
+/// `lp_rect` may be null (means invalidate entire client area).
+pub unsafe extern "win64" fn invalidate_rect(
+    hwnd: usize,
+    _lp_rect: *const Rect,
+    _b_erase: i32,
+) -> i32 {
+    if window::with(hwnd, |_| ()).is_some() {
+        queue::post(MsgEntry {
+            hwnd,
+            message: WM_PAINT,
+            w_param: 0,
+            l_param: 0,
+            time: 0,
+            pt_x: 0,
+            pt_y: 0,
+        });
+        1
+    } else {
+        0
+    }
+}
+
+// ── Window title ──────────────────────────────────────────────────────────────
+
+/// SetWindowTextW: update the title bar text of a window.
+///
+/// # Safety
+/// `lp_string` must be a valid null-terminated UTF-16 string.
+pub unsafe extern "win64" fn set_window_text_w(hwnd: usize, lp_string: *const u16) -> i32 {
+    let title = unsafe { decode_wide(lp_string) };
+    let xcb = window::xcb_id(hwnd);
+    window::with_mut(hwnd, |e| e.title = title.clone());
+    backend::set_title(xcb, &title);
+    1
+}
+
+/// GetWindowTextW: retrieve the title bar text.
+///
+/// Returns the number of characters copied (excluding the null terminator).
+///
+/// # Safety
+/// `lp_string` must be valid for `n_max_count` UTF-16 code units.
+pub unsafe extern "win64" fn get_window_text_w(
+    hwnd: usize,
+    lp_string: *mut u16,
+    n_max_count: i32,
+) -> i32 {
+    if lp_string.is_null() || n_max_count <= 0 {
+        return 0;
+    }
+    let title = window::with(hwnd, |e| e.title.clone()).unwrap_or_default();
+    let wide: Vec<u16> = title.encode_utf16().collect();
+    let copy_len = wide.len().min((n_max_count - 1) as usize);
+    for (i, &c) in wide[..copy_len].iter().enumerate() {
+        unsafe { *lp_string.add(i) = c };
+    }
+    unsafe { *lp_string.add(copy_len) = 0 };
+    copy_len as i32
+}
+
+// ── Paint ─────────────────────────────────────────────────────────────────────
+
+/// BeginPaint: prepare a window for painting; fill the PAINTSTRUCT.
+///
+/// Phase 2: returns a fake HDC (the HWND value itself). Real GDI integration
+/// comes in Step 4 (weave-gdi32).
+///
+/// # Safety
+/// `lp_paint` must point to a valid `PAINTSTRUCT`.
+pub unsafe extern "win64" fn begin_paint(hwnd: usize, lp_paint: *mut PaintStruct) -> usize {
+    if !lp_paint.is_null() {
+        unsafe {
+            let ps = &mut *lp_paint;
+            ps.hdc = hwnd; // fake HDC for now
+            ps.f_erase = 1;
+            ps._pad = 0;
+            let (w, h) = window::with(hwnd, |e| (e.width, e.height)).unwrap_or((640, 480));
+            ps.rc_paint = Rect {
+                left: 0,
+                top: 0,
+                right: w as i32,
+                bottom: h as i32,
+            };
+            ps.f_restore = 0;
+            ps.f_inc_update = 0;
+            ps.rgb_reserved = [0u8; 32];
+        }
+    }
+    hwnd // fake HDC
+}
+
+/// EndPaint: mark the end of painting for a window.
+///
+/// Phase 2: validates the update region (clears the WM_PAINT pending flag).
+/// Returns TRUE always.
+///
+/// # Safety
+/// `lp_paint` must point to the `PAINTSTRUCT` filled by `BeginPaint`.
+pub unsafe extern "win64" fn end_paint(_hwnd: usize, _lp_paint: *const PaintStruct) -> i32 {
+    1 // TRUE
+}
+
+// ── System metrics ────────────────────────────────────────────────────────────
+
+/// GetSystemMetrics: return various system dimension/capability values.
+///
+/// Returns reasonable values for a typical Linux desktop.
+pub extern "win64" fn get_system_metrics(n_index: i32) -> i32 {
+    let (sw, sh) = backend::screen_size();
+    match n_index {
+        SM_CXSCREEN => sw as i32,
+        SM_CYSCREEN => sh as i32,
+        SM_CXFULLSCREEN => sw as i32,
+        SM_CYFULLSCREEN => sh as i32 - 40, // subtract taskbar
+        SM_CXICON => 32,
+        SM_CYICON => 32,
+        SM_CXCURSOR => 32,
+        SM_CYCURSOR => 32,
+        SM_CYCAPTION => 23,
+        SM_CXFRAME => 4,
+        SM_CYFRAME => 4,
+        _ => 0,
+    }
+}
+
+// ── Cursor / Icon stubs ───────────────────────────────────────────────────────
+
+/// LoadCursorW: load a cursor resource.
+///
+/// Returns a non-zero fake HCURSOR. Real cursor loading requires Phase 3.
+///
+/// # Safety
+/// `lp_cursor_name` (if non-null) must be a valid UTF-16 string or an integer
+/// resource identifier (IDC_* constant passed via MAKEINTRESOURCEW).
+pub unsafe extern "win64" fn load_cursor_w(_h_instance: usize, _lp_cursor_name: usize) -> usize {
+    1 // non-zero fake HCURSOR
+}
+
+/// LoadIconW: load an icon resource.
+///
+/// Returns a non-zero fake HICON.
+///
+/// # Safety
+/// `lp_icon_name` (if non-null) must be a valid UTF-16 string or integer resource.
+pub unsafe extern "win64" fn load_icon_w(_h_instance: usize, _lp_icon_name: usize) -> usize {
+    1 // non-zero fake HICON
+}
+
+/// LoadImageW: load an image (icon, cursor, or bitmap) from a resource.
+///
+/// Phase 2 stub: returns a fake non-zero handle for all image types.
+///
+/// # Safety
+/// `_name` may be a pointer or an integer resource ID; callers must ensure it
+/// is valid for the given `_ty`. This stub ignores it entirely.
+pub unsafe extern "win64" fn load_image_w(
+    _h_inst: usize,
+    _name: usize,
+    _ty: u32,
+    _cx: i32,
+    _cy: i32,
+    _fu_load: u32,
+) -> usize {
+    1
+}
+
+// ── MessageBoxW ───────────────────────────────────────────────────────────────
+
+/// MessageBoxW: display a modal message box.
+///
+/// Phase 2: prints the message to stderr and returns IDOK (1). Real dialog
+/// support requires weave-comdlg32 in Phase 5.
+///
+/// # Safety
+/// `lp_text` and `lp_caption` (if non-null) must be valid UTF-16 strings.
+pub unsafe extern "win64" fn message_box_w(
+    _hwnd: usize,
+    lp_text: *const u16,
+    lp_caption: *const u16,
+    _u_type: u32,
+) -> i32 {
+    let text = unsafe { decode_wide(lp_text) };
+    let caption = unsafe { decode_wide(lp_caption) };
+    eprintln!("weave/MessageBoxW: [{caption}] {text}");
+    IDOK
+}
+
+// ── GetDC / ReleaseDC (user32-resident, not gdi32) ────────────────────────────
+
+/// GetDC: return a device context for a window.
+///
+/// Phase 2: returns a fake HDC (the HWND value itself).
+/// Real GDI integration comes in Step 4.
+pub extern "win64" fn get_dc(hwnd: usize) -> usize {
+    hwnd // fake HDC
+}
+
+/// ReleaseDC: release a device context.
+///
+/// Phase 2: no-op. Returns 1 (success).
+pub extern "win64" fn release_dc(_hwnd: usize, _hdc: usize) -> i32 {
+    1
+}
+
+// ── SetWindowPos / MoveWindow ─────────────────────────────────────────────────
+
+/// MoveWindow: change the position and size of a window.
+pub extern "win64" fn move_window(
+    hwnd: usize,
+    x: i32,
+    y: i32,
+    n_width: i32,
+    n_height: i32,
+    b_repaint: i32,
+) -> i32 {
+    window::with_mut(hwnd, |e| {
+        e.x = x;
+        e.y = y;
+        e.width = n_width.max(0) as u32;
+        e.height = n_height.max(0) as u32;
+    });
+    if b_repaint != 0 {
+        queue::post(MsgEntry {
+            hwnd,
+            message: WM_PAINT,
+            w_param: 0,
+            l_param: 0,
+            time: 0,
+            pt_x: 0,
+            pt_y: 0,
+        });
+    }
+    1
+}
+
+// ── GetForegroundWindow / SetForegroundWindow ─────────────────────────────────
+
+/// GetForegroundWindow: return the foreground window's HWND.
+///
+/// Phase 2: returns the first registered HWND, or 0 if none.
+pub extern "win64" fn get_foreground_window() -> usize {
+    window::all_hwnds().into_iter().next().unwrap_or(0)
+}
+
+/// SetForegroundWindow: attempt to bring a window to the foreground.
+///
+/// Phase 2: no-op (always succeeds).
+pub extern "win64" fn set_foreground_window(_hwnd: usize) -> i32 {
+    1
+}
+
+/// GetDesktopWindow: return the handle to the desktop window.
+///
+/// Phase 2: returns 0 (no desktop window object).
+pub extern "win64" fn get_desktop_window() -> usize {
+    0
+}
+
+// ── AdjustWindowRect ──────────────────────────────────────────────────────────
+
+/// AdjustWindowRect: compute window size from desired client area size.
+///
+/// Phase 2: returns the rect unchanged (no frame adjustments without a real WM).
+///
+/// # Safety
+/// `lp_rect` must point to a valid `RECT`.
+pub unsafe extern "win64" fn adjust_window_rect(
+    lp_rect: *mut Rect,
+    _dw_style: u32,
+    _b_menu: i32,
+) -> i32 {
+    if lp_rect.is_null() {
+        0
+    } else {
+        1
+    }
+}
+
+/// AdjustWindowRectEx: extended version with ex style parameter.
+///
+/// # Safety
+/// `lp_rect` must point to a valid `RECT`.
+pub unsafe extern "win64" fn adjust_window_rect_ex(
+    lp_rect: *mut Rect,
+    _dw_style: u32,
+    _b_menu: i32,
+    _dw_ex_style: u32,
+) -> i32 {
+    if lp_rect.is_null() {
+        0
+    } else {
+        1
+    }
+}
+
+/// SetCursor: set the cursor shape.
+///
+/// Phase 2: no-op; returns the previous cursor (fake handle = 1).
+pub extern "win64" fn set_cursor(_h_cursor: usize) -> usize {
+    1
+}
+
+/// ShowCursor: show or hide the cursor (ref-counted).
+///
+/// Phase 2: returns 0 (display counter unchanged).
+pub extern "win64" fn show_cursor(_b_show: i32) -> i32 {
+    0
+}
+
+// ── Internal helpers ──────────────────────────────────────────────────────────
+
+/// Call a window procedure (stored as `usize`) with `extern "win64"` ABI.
+fn call_wnd_proc(proc_addr: usize, hwnd: usize, msg: u32, w_param: usize, l_param: isize) -> isize {
+    if proc_addr == 0 {
+        return 0;
+    }
+    // Safety: proc_addr was registered by the PE as a valid WNDPROC with the
+    // Windows x64 calling convention. Transmuting a usize to a fn pointer is
+    // how Weave calls all guest callbacks.
+    let f: unsafe extern "win64" fn(usize, u32, usize, isize) -> isize =
+        unsafe { std::mem::transmute(proc_addr) };
+    unsafe { f(hwnd, msg, w_param, l_param) }
+}
+
+/// Write a `MsgEntry` into the caller-provided `MSG` buffer.
+///
+/// # Safety
+/// `lp_msg` must be a valid writable pointer.
+unsafe fn fill_msg(lp_msg: *mut Msg, entry: &MsgEntry) {
+    unsafe {
+        let m = &mut *lp_msg;
+        m.hwnd = entry.hwnd;
+        m.message = entry.message;
+        m._pad0 = 0;
+        m.w_param = entry.w_param;
+        m.l_param = entry.l_param;
+        m.time = entry.time;
+        m.pt_x = entry.pt_x;
+        m.pt_y = entry.pt_y;
+        m._pad1 = 0;
+    }
+}

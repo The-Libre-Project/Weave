@@ -53,6 +53,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "bitflags"
+version = "2.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "843867be96c8daad0d758b57df9392b6d8d271134fce549de6ce169ff98a92af"
+
+[[package]]
 name = "clap"
 version = "4.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -119,6 +125,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "errno"
+version = "0.3.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
+dependencies = [
+ "libc",
+ "windows-sys",
+]
+
+[[package]]
+name = "gethostname"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1bd49230192a3797a9a4d6abe9b3eed6f7fa4c8a8a4947977c6f80025f92cbd8"
+dependencies = [
+ "rustix",
+ "windows-link",
+]
+
+[[package]]
 name = "goblin"
 version = "0.9.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -159,6 +185,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b5b646652bf6661599e1da8901b3b9522896f01e736bad5f723fe7a3a27f899d"
 
 [[package]]
+name = "linux-raw-sys"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
+
+[[package]]
 name = "log"
 version = "0.4.29"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -192,6 +224,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "41f2619966050689382d2b44f664f4bc593e129785a36d6ee376ddf37259b924"
 dependencies = [
  "proc-macro2",
+]
+
+[[package]]
+name = "rustix"
+version = "1.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b6fe4565b9518b83ef4f91bb47ce29620ca828bd32cb7e408f0062e9930ba190"
+dependencies = [
+ "bitflags",
+ "errno",
+ "libc",
+ "linux-raw-sys",
+ "windows-sys",
 ]
 
 [[package]]
@@ -264,15 +309,28 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821"
 
 [[package]]
+name = "weave-advapi32"
+version = "0.0.1"
+dependencies = [
+ "weave-common",
+ "weave-core",
+]
+
+[[package]]
 name = "weave-cli"
 version = "0.0.1"
 dependencies = [
  "clap",
  "libc",
+ "weave-advapi32",
  "weave-core",
+ "weave-gdi32",
  "weave-kernel32",
  "weave-ntdll",
+ "weave-ole32",
  "weave-sandbox",
+ "weave-shell32",
+ "weave-user32",
 ]
 
 [[package]]
@@ -285,6 +343,15 @@ version = "0.0.1"
 dependencies = [
  "goblin",
  "libc",
+ "weave-common",
+]
+
+[[package]]
+name = "weave-gdi32"
+version = "0.0.1"
+dependencies = [
+ "weave-common",
+ "weave-user32",
 ]
 
 [[package]]
@@ -293,10 +360,20 @@ version = "0.0.1"
 dependencies = [
  "libc",
  "weave-common",
+ "weave-core",
 ]
 
 [[package]]
 name = "weave-ntdll"
+version = "0.0.1"
+dependencies = [
+ "libc",
+ "weave-common",
+ "weave-core",
+]
+
+[[package]]
+name = "weave-ole32"
 version = "0.0.1"
 dependencies = [
  "libc",
@@ -308,6 +385,24 @@ name = "weave-sandbox"
 version = "0.0.1"
 dependencies = [
  "landlock",
+]
+
+[[package]]
+name = "weave-shell32"
+version = "0.0.1"
+dependencies = [
+ "libc",
+ "weave-common",
+ "weave-core",
+]
+
+[[package]]
+name = "weave-user32"
+version = "0.0.1"
+dependencies = [
+ "weave-common",
+ "weave-core",
+ "x11rb",
 ]
 
 [[package]]
@@ -324,3 +419,20 @@ checksum = "ae137229bcbd6cdf0f7b80a31df61766145077ddf49416a728b02cb3921ff3fc"
 dependencies = [
  "windows-link",
 ]
+
+[[package]]
+name = "x11rb"
+version = "0.13.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9993aa5be5a26815fe2c3eacfc1fde061fc1a1f094bf1ad2a18bf9c495dd7414"
+dependencies = [
+ "gethostname",
+ "rustix",
+ "x11rb-protocol",
+]
+
+[[package]]
+name = "x11rb-protocol"
+version = "0.13.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ea6fc2961e4ef194dcbfe56bb845534d0dc8098940c7e5c012a258bfec6701bd"
