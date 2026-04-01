@@ -95,9 +95,17 @@ pub fn open_file(win_path: &str, desired_access: u32, nt_disposition: u32) -> Re
     let oflags = build_oflags(desired_access, nt_disposition);
 
     // ── 4. Open the file ──────────────────────────────────────────────────
-    let fd = unsafe { libc::open(path_cstr.as_ptr(), oflags, 0o666_i32) };
+    let mut fd = unsafe { libc::open(path_cstr.as_ptr(), oflags, 0o666_i32) };
     if fd < 0 {
-        return Err(errno_to_ntstatus());
+        // Windows is case-insensitive; try a case-folded filename lookup on ENOENT.
+        if std::io::Error::last_os_error().raw_os_error() == Some(libc::ENOENT) {
+            if let Some(folded) = case_fold_lookup(std::path::Path::new(&linux_path)) {
+                fd = unsafe { libc::open(folded.as_ptr(), oflags, 0o666_i32) };
+            }
+        }
+        if fd < 0 {
+            return Err(errno_to_ntstatus());
+        }
     }
 
     // ── 5. Register in the HANDLE table ──────────────────────────────────
@@ -186,4 +194,25 @@ fn errno_to_ntstatus() -> i32 {
 fn path_to_cstring(path: &std::path::Path) -> Option<std::ffi::CString> {
     use std::os::unix::ffi::OsStrExt;
     std::ffi::CString::new(path.as_os_str().as_bytes()).ok()
+}
+
+/// Case-insensitive path lookup: scan the parent directory for an entry whose
+/// name matches `path`'s filename component case-insensitively.
+///
+/// Windows is case-insensitive; Linux is not. When a direct `open()` fails with
+/// ENOENT, this function lets us recover by finding the actual on-disk name.
+/// Only the final component is folded — callers needing full-depth folding must
+/// call this recursively on each component (deferred to Phase 3).
+fn case_fold_lookup(path: &std::path::Path) -> Option<std::ffi::CString> {
+    let parent = path.parent()?;
+    let filename = path.file_name()?;
+    let filename_lower = filename.to_string_lossy().to_lowercase();
+
+    for entry in std::fs::read_dir(parent).ok()?.flatten() {
+        let name = entry.file_name();
+        if name.to_string_lossy().to_lowercase() == filename_lower {
+            return path_to_cstring(&parent.join(name));
+        }
+    }
+    None
 }
