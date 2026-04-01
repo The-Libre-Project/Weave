@@ -213,6 +213,46 @@ pub fn brush_color(handle: usize) -> u32 {
     .unwrap_or(0x00FF_FFFF)
 }
 
+/// Return the default RGB color for a Windows system color index (COLOR_*).
+///
+/// Used by `FillRect` to resolve pseudo-brush handles passed as `(COLOR_xxx + 1)`.
+/// Values are the classic Windows 2000/XP default palette.
+pub fn sys_color_rgb(index: usize) -> u32 {
+    match index {
+        0 => 0x00D4D0C8,  // COLOR_SCROLLBAR
+        1 => 0x00003A6A,  // COLOR_BACKGROUND
+        2 => 0x00000080,  // COLOR_ACTIVECAPTION
+        3 => 0x00808080,  // COLOR_INACTIVECAPTION
+        4 => 0x00D4D0C8,  // COLOR_MENU
+        5 => 0x00FFFFFF,  // COLOR_WINDOW
+        6 => 0x00000000,  // COLOR_WINDOWFRAME
+        7 => 0x00000000,  // COLOR_MENUTEXT
+        8 => 0x00000000,  // COLOR_WINDOWTEXT
+        9 => 0x00FFFFFF,  // COLOR_CAPTIONTEXT
+        10 => 0x00D4D0C8, // COLOR_ACTIVEBORDER
+        11 => 0x00D4D0C8, // COLOR_INACTIVEBORDER
+        12 => 0x00808080, // COLOR_APPWORKSPACE
+        13 => 0x00000080, // COLOR_HIGHLIGHT
+        14 => 0x00FFFFFF, // COLOR_HIGHLIGHTTEXT
+        15 => 0x00D4D0C8, // COLOR_BTNFACE
+        16 => 0x00808080, // COLOR_BTNSHADOW
+        17 => 0x00808080, // COLOR_GRAYTEXT
+        18 => 0x00000000, // COLOR_BTNTEXT
+        19 => 0x00D4D0C8, // COLOR_INACTIVECAPTIONTEXT
+        20 => 0x00FFFFFF, // COLOR_BTNHIGHLIGHT
+        21 => 0x00404040, // COLOR_3DDKSHADOW
+        22 => 0x00D4D0C8, // COLOR_3DLIGHT
+        23 => 0x00000000, // COLOR_INFOTEXT
+        24 => 0x00FFFFE1, // COLOR_INFOBK
+        26 => 0x000000C8, // COLOR_HOTLIGHT
+        27 => 0x00A6CAF0, // COLOR_GRADIENTACTIVECAPTION
+        28 => 0x00C0C0C0, // COLOR_GRADIENTINACTIVECAPTION
+        29 => 0x00000080, // COLOR_MENUHILIGHT
+        30 => 0x00D4D0C8, // COLOR_MENUBAR
+        _ => 0x00FFFFFF,  // unknown → white
+    }
+}
+
 /// Extract the pen color from any pen handle (allocated or stock).
 pub fn pen_color(handle: usize) -> u32 {
     if is_stock(handle) {

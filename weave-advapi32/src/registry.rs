@@ -20,7 +20,8 @@
 
 use weave_core::handles::{self, HandleKind};
 use weave_core::registry::{
-    find_value_file, predefined_hive_path, read_value_file, resolve_subkey, REG_NONE,
+    find_value_file, predefined_hive_path, read_value_file, resolve_subkey, REG_NONE, REG_SZ,
+    REG_EXPAND_SZ,
 };
 
 // ── Win32 error codes for registry operations ─────────────────────────────────
@@ -29,6 +30,7 @@ const ERROR_SUCCESS: i32 = 0;
 const ERROR_FILE_NOT_FOUND: i32 = 2;
 const ERROR_MORE_DATA: i32 = 234;
 const ERROR_INVALID_HANDLE: i32 = 6;
+const ERROR_INVALID_PARAMETER: i32 = 87;
 
 // ── REGSAM (registry access rights) — accepted but ignored for now ────────────
 
@@ -181,11 +183,19 @@ pub unsafe extern "win64" fn reg_create_key_ex_w(
 pub unsafe extern "win64" fn reg_query_value_ex_w(
     h_key: usize,
     lp_value_name: *const u16,
-    _lp_reserved: *mut u32, // must be null per MSDN
+    lp_reserved: *mut u32, // must be null per MSDN
     lp_type: *mut u32,
     lp_data: *mut u8,
     lpcb_data: *mut u32,
 ) -> i32 {
+    // reserved must be null; non-null data without a size pointer is invalid.
+    if !lp_reserved.is_null() {
+        return ERROR_INVALID_PARAMETER;
+    }
+    if !lp_data.is_null() && lpcb_data.is_null() {
+        return ERROR_INVALID_PARAMETER;
+    }
+
     let key_path = match key_to_path(h_key) {
         Some(p) => p,
         None => return ERROR_INVALID_HANDLE,
@@ -235,6 +245,21 @@ pub unsafe extern "win64" fn reg_query_value_ex_w(
 
     // Copy data into caller's buffer.
     unsafe { std::ptr::copy_nonoverlapping(data.as_ptr(), lp_data, data.len()) };
+
+    // Wine behaviour: for string types, guarantee a UTF-16 null terminator at
+    // the end of the buffer if the data doesn't already end with one and there
+    // is room for two more bytes.
+    if reg_type == REG_SZ || reg_type == REG_EXPAND_SZ {
+        let len = data.len();
+        let already_null = len >= 2 && data[len - 2] == 0 && data[len - 1] == 0;
+        if !already_null && buf_size as usize >= len + 2 {
+            unsafe {
+                *lp_data.add(len) = 0;
+                *lp_data.add(len + 1) = 0;
+            }
+        }
+    }
+
     ERROR_SUCCESS
 }
 

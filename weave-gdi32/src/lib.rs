@@ -244,12 +244,18 @@ pub unsafe extern "win64" fn fill_rect(hdc: usize, lp_rc: *const Rect, h_brush: 
     if w == 0 || h == 0 {
         return 1;
     }
-    let brush = if h_brush == 0 {
-        dc::with(hdc, |dc| dc.h_brush)
+    // Windows allows passing (COLOR_xxx + 1) as a pseudo-brush handle.
+    // Handle values 1..=31 are system color sentinels; 0 means use DC brush.
+    let color = if (1..=31).contains(&h_brush) {
+        objects::sys_color_rgb(h_brush - 1)
     } else {
-        h_brush
+        let brush = if h_brush == 0 {
+            dc::with(hdc, |dc| dc.h_brush)
+        } else {
+            h_brush
+        };
+        objects::brush_color(brush)
     };
-    let color = objects::brush_color(brush);
     let pixel = to_pixel(color);
     let xcb = xcb_for(hdc);
     weave_user32::backend::draw_filled_rect(xcb, rc.left as i16, rc.top as i16, w, h, pixel);
