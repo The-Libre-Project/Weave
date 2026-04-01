@@ -317,7 +317,7 @@ mod inner {
         let _ = g.conn.flush();
     }
 
-    /// Draw text using an X11 core bitmap font. y is the top of the text (not baseline).
+    /// Draw text using an X11 core bitmap font (Phase 2 legacy path).
     ///
     /// `text` must be ASCII/Latin-1 bytes (up to 255 per call). `fg_pixel` and
     /// `bg_pixel` are X11 TrueColor pixel values (0x00RRGGBB).
@@ -350,6 +350,65 @@ mod inner {
         let _ = g.conn.image_text8(xcb_id, gc_id, x, baseline_y, clamped);
         let _ = g.conn.free_gc(gc_id);
         let _ = g.conn.flush();
+    }
+
+    /// Draw UTF-16 text using fontdue rasterization + X11 PutImage.
+    ///
+    /// This is the Phase 3 text rendering path: proper Unicode support with
+    /// anti-aliased TrueType rendering. Falls back to the legacy `draw_text`
+    /// path if no system font is available.
+    ///
+    /// `fg_pixel` and `bg_pixel` are X11 TrueColor values (0x00RRGGBB).
+    pub fn draw_text_utf16(
+        xcb_id: u32,
+        x: i16,
+        y: i16,
+        text: &[u16],
+        px_size: f32,
+        fg_pixel: u32,
+        bg_pixel: u32,
+    ) {
+        use crate::font;
+        use x11rb::protocol::xproto::ImageFormat;
+
+        if text.is_empty() {
+            return;
+        }
+
+        // Try fontdue rendering first.
+        if let Some((pixels, w, h)) = font::rasterize_text(text, px_size, fg_pixel, bg_pixel) {
+            let x11 = match x11() {
+                Some(m) => m,
+                None => return,
+            };
+            let g = x11.lock().unwrap();
+            let gc_id: Gcontext = match g.conn.generate_id() {
+                Ok(id) => id,
+                Err(_) => return,
+            };
+            let _ = g.conn.create_gc(gc_id, xcb_id, &CreateGCAux::new());
+            let _ = g.conn.put_image(
+                ImageFormat::Z_PIXMAP,
+                xcb_id,
+                gc_id,
+                w as u16,
+                h as u16,
+                x,
+                y,
+                0,  // left_pad
+                24, // depth (TrueColor)
+                &pixels,
+            );
+            let _ = g.conn.free_gc(gc_id);
+            let _ = g.conn.flush();
+        } else {
+            // Fallback: convert to Latin-1 and use the legacy X11 bitmap path.
+            let bytes: Vec<u8> = text
+                .iter()
+                .map(|&u| if u <= 0xFF { u as u8 } else { b'?' })
+                .collect();
+            draw_text(xcb_id, x, y, &bytes, fg_pixel, bg_pixel);
+        }
     }
 
     /// Poll for one X11 event and translate it into Win32 messages.
@@ -557,7 +616,8 @@ mod inner {
 #[cfg(target_os = "linux")]
 pub use inner::{
     colorref_to_pixel, create_window, destroy_window, draw_filled_rect, draw_rect_outline,
-    draw_text, is_available, poll_event, screen_size, set_title, show_window, wait_event,
+    draw_text, draw_text_utf16, is_available, poll_event, screen_size, set_title, show_window,
+    wait_event,
 };
 
 // ── No-op stubs for non-Linux platforms (macOS dev builds) ───────────────────
@@ -616,3 +676,15 @@ pub fn draw_rect_outline(_xcb_id: u32, _x: i16, _y: i16, _w: u16, _h: u16, _pixe
 
 #[cfg(not(target_os = "linux"))]
 pub fn draw_text(_xcb_id: u32, _x: i16, _y: i16, _text: &[u8], _fg: u32, _bg: u32) {}
+
+#[cfg(not(target_os = "linux"))]
+pub fn draw_text_utf16(
+    _xcb_id: u32,
+    _x: i16,
+    _y: i16,
+    _text: &[u16],
+    _px_size: f32,
+    _fg: u32,
+    _bg: u32,
+) {
+}

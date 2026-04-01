@@ -1,16 +1,20 @@
 //! gdi32.dll stubs for Weave.
 //!
-//! Phase 2 scope: GDI object management, DC attributes, basic 2D drawing.
+//! GDI object management, DC attributes, basic 2D drawing, and text rendering.
 //! Actual rendering delegates to `weave_user32::backend` which holds the X11
 //! connection. All stubs are safe to call even when no display is available —
 //! drawing functions become no-ops on headless systems.
 //!
-//! # Phase 2 simplifications
+//! # Text rendering (Phase 3)
+//!
+//! Text is rendered via fontdue (pure-Rust TrueType rasterizer). UTF-16 strings
+//! are passed through without lossy conversion. System fonts are loaded from
+//! standard Linux paths; if unavailable, falls back to X11 bitmap fonts.
+//!
+//! # Current simplifications
 //!
 //! - HDC == HWND (every DC is tied to its window; no memory DCs backed by
 //!   real pixel buffers).
-//! - Text rendering uses X11 core bitmap fonts (Latin-1 only). Full Unicode
-//!   rendering via Xft/Pango is deferred to Phase 3.
 //! - Bitmaps, DIBs, and blitting are stubbed (return success codes, no pixels
 //!   are transferred).
 
@@ -288,6 +292,28 @@ pub extern "win64" fn ellipse(hdc: usize, left: i32, top: i32, right: i32, botto
     rectangle(hdc, left, top, right, bottom)
 }
 
+/// Default font pixel size when no specific height is selected.
+const DEFAULT_FONT_PX: f32 = 13.0;
+
+/// Resolve the pixel size for the font currently selected into this DC.
+fn font_px_size(hdc: usize) -> f32 {
+    let h_font = dc::with(hdc, |dc| dc.h_font);
+    if h_font == 0 {
+        return DEFAULT_FONT_PX;
+    }
+    let mut height: i32 = 0;
+    objects::get(h_font, |kind| {
+        if let GdiKind::Font { height: h, .. } = kind {
+            height = *h;
+        }
+    });
+    if height == 0 {
+        DEFAULT_FONT_PX
+    } else {
+        height.unsigned_abs().max(8) as f32
+    }
+}
+
 /// TextOutW: draw a UTF-16 string at (x, y) using the current DC colours.
 ///
 /// # Safety
@@ -305,22 +331,18 @@ pub unsafe extern "win64" fn text_out_w(
     let (fg, bg) = dc::with(hdc, |dc| (dc.text_color, dc.bk_color));
     let fg_pixel = to_pixel(fg);
     let bg_pixel = to_pixel(bg);
-    // Convert UTF-16 to Latin-1 bytes (Phase 2: BMP chars > 255 become b'?').
     let units: &[u16] = unsafe { std::slice::from_raw_parts(lp_string, c as usize) };
-    let bytes: Vec<u8> = units
-        .iter()
-        .map(|&u| if u <= 0xFF { u as u8 } else { b'?' })
-        .collect();
     let xcb = xcb_for(hdc);
-    weave_user32::backend::draw_text(xcb, x as i16, y as i16, &bytes, fg_pixel, bg_pixel);
+    let px_size = font_px_size(hdc);
+    weave_user32::backend::draw_text_utf16(
+        xcb, x as i16, y as i16, units, px_size, fg_pixel, bg_pixel,
+    );
     1
 }
 
 /// DrawTextW: draw formatted text within a rectangle.
 ///
-/// Phase 2: renders the first line of text at the top-left of the rectangle,
-/// ignoring most format flags. DT_CALCRECT fills the rect with an estimate and
-/// returns the text height without drawing.
+/// Supports DT_CALCRECT, DT_CENTER, DT_RIGHT, DT_VCENTER, DT_SINGLELINE.
 ///
 /// # Safety
 /// `lp_string` must point to `n_count` UTF-16 units (or null-terminated if
@@ -332,6 +354,10 @@ pub unsafe extern "win64" fn draw_text_w(
     lp_rect: *mut Rect,
     u_format: u32,
 ) -> i32 {
+    const DT_CENTER: u32 = 0x0001;
+    const DT_RIGHT: u32 = 0x0002;
+    const DT_VCENTER: u32 = 0x0004;
+    const DT_SINGLELINE: u32 = 0x0020;
     const DT_CALCRECT: u32 = 0x0400;
 
     if lp_string.is_null() || lp_rect.is_null() {
@@ -349,33 +375,49 @@ pub unsafe extern "win64" fn draw_text_w(
         n_count as usize
     };
 
-    // Convert to Latin-1 bytes.
     let units: &[u16] = unsafe { std::slice::from_raw_parts(lp_string, len) };
-    let bytes: Vec<u8> = units
-        .iter()
-        .map(|&u| if u <= 0xFF { u as u8 } else { b'?' })
-        .collect();
+    let px_size = font_px_size(hdc);
+    let (text_w, text_h) = weave_user32::font::measure_text(units, px_size);
 
     if u_format & DT_CALCRECT != 0 {
-        // Estimate size: 8px per character width, 16px height.
         let rc = unsafe { &mut *lp_rect };
-        rc.right = rc.left + bytes.len() as i32 * 8;
-        rc.bottom = rc.top + 16;
-        return 16; // height
+        rc.right = rc.left + text_w;
+        rc.bottom = rc.top + text_h;
+        return text_h;
     }
 
     let rc = unsafe { *lp_rect };
+    let rect_w = rc.right - rc.left;
+    let rect_h = rc.bottom - rc.top;
+
+    // Horizontal alignment.
+    let x = if u_format & DT_CENTER != 0 {
+        rc.left + (rect_w - text_w) / 2
+    } else if u_format & DT_RIGHT != 0 {
+        rc.right - text_w
+    } else {
+        rc.left
+    };
+
+    // Vertical alignment (DT_VCENTER only applies with DT_SINGLELINE).
+    let y = if u_format & DT_VCENTER != 0 && u_format & DT_SINGLELINE != 0 {
+        rc.top + (rect_h - text_h) / 2
+    } else {
+        rc.top
+    };
+
     let (fg, bg) = dc::with(hdc, |dc| (dc.text_color, dc.bk_color));
     let xcb = xcb_for(hdc);
-    weave_user32::backend::draw_text(
+    weave_user32::backend::draw_text_utf16(
         xcb,
-        rc.left as i16,
-        rc.top as i16,
-        &bytes,
+        x as i16,
+        y as i16,
+        units,
+        px_size,
         to_pixel(fg),
         to_pixel(bg),
     );
-    16 // approximate height
+    text_h
 }
 
 /// DrawTextA: ANSI variant — decode the byte string and delegate to draw_text_w.
@@ -576,30 +618,29 @@ pub extern "win64" fn set_dib_bits_to_device(
 
 /// GetTextMetricsW: return metrics for the selected font.
 ///
-/// Phase 2: returns approximate metrics for the X11 "fixed" bitmap font.
-///
 /// # Safety
 /// `lptm` must be a valid writable pointer to a `TEXTMETRICW`.
 pub unsafe extern "win64" fn get_text_metrics_w(hdc: usize, lptm: *mut TextMetricW) -> i32 {
     if lptm.is_null() {
         return 0;
     }
-    let _ = hdc;
+    let px_size = font_px_size(hdc);
+    let fm = weave_user32::font::metrics(px_size);
     unsafe {
         let tm = &mut *lptm;
-        tm.tm_height = 13;
-        tm.tm_ascent = 11;
-        tm.tm_descent = 2;
+        tm.tm_height = fm.height;
+        tm.tm_ascent = fm.ascent;
+        tm.tm_descent = fm.descent;
         tm.tm_internal_leading = 0;
         tm.tm_external_leading = 2;
-        tm.tm_ave_char_width = 7;
-        tm.tm_max_char_width = 8;
+        tm.tm_ave_char_width = fm.ave_char_width;
+        tm.tm_max_char_width = fm.ave_char_width + 2;
         tm.tm_weight = 400; // FW_NORMAL
         tm.tm_overhang = 0;
-        tm.tm_digitized_aspect_x = 75;
-        tm.tm_digitized_aspect_y = 75;
+        tm.tm_digitized_aspect_x = 96;
+        tm.tm_digitized_aspect_y = 96;
         tm.tm_first_char = 0x20;
-        tm.tm_last_char = 0xFF;
+        tm.tm_last_char = 0xFFFF;
         tm.tm_default_char = b'?' as u16;
         tm.tm_break_char = b' ' as u16;
         tm.tm_italic = 0;
@@ -612,9 +653,7 @@ pub unsafe extern "win64" fn get_text_metrics_w(hdc: usize, lptm: *mut TextMetri
     1
 }
 
-/// GetTextExtentPoint32W: estimate the bounding box of a text string.
-///
-/// Phase 2: uses fixed per-character width (7px) and height (13px).
+/// GetTextExtentPoint32W: compute the bounding box of a text string.
 ///
 /// # Safety
 /// `lpsz` must be a valid pointer to `c` UTF-16 code units.
@@ -628,11 +667,19 @@ pub unsafe extern "win64" fn get_text_extent_point32_w(
     if lp_size.is_null() {
         return 0;
     }
-    let _ = hdc;
-    let _ = lpsz;
+    let px_size = font_px_size(hdc);
+    if lpsz.is_null() || c <= 0 {
+        unsafe {
+            (*lp_size).cx = 0;
+            (*lp_size).cy = weave_user32::font::metrics(px_size).height;
+        }
+        return 1;
+    }
+    let units: &[u16] = unsafe { std::slice::from_raw_parts(lpsz, c as usize) };
+    let (w, h) = weave_user32::font::measure_text(units, px_size);
     unsafe {
-        (*lp_size).cx = c * 7;
-        (*lp_size).cy = 13;
+        (*lp_size).cx = w;
+        (*lp_size).cy = h;
     }
     1
 }

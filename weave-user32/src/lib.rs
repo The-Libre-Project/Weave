@@ -17,6 +17,7 @@ pub mod backend;
 pub mod class;
 pub mod clipboard;
 pub mod defs;
+pub mod font;
 pub mod menu;
 pub mod queue;
 pub mod window;

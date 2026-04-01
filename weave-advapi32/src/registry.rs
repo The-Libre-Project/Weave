@@ -20,8 +20,8 @@
 
 use weave_core::handles::{self, HandleKind};
 use weave_core::registry::{
-    find_value_file, predefined_hive_path, read_value_file, resolve_subkey, REG_NONE, REG_SZ,
-    REG_EXPAND_SZ,
+    find_value_file, predefined_hive_path, read_value_file, resolve_subkey, REG_EXPAND_SZ,
+    REG_NONE, REG_SZ,
 };
 
 // ── Win32 error codes for registry operations ─────────────────────────────────

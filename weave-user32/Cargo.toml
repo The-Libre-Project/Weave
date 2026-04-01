@@ -11,6 +11,8 @@ weave-common = { path = "../weave-common" }
 weave-core = { path = "../weave-core" }
 
 # x11rb is a pure-Rust X11 protocol client — no C FFI, no libxcb required.
-# Gated to Linux-only so macOS test-unit builds don't pull it in.
+# fontdue is a pure-Rust font parser + rasterizer for TrueType/OpenType.
+# Both gated to Linux-only so macOS test-unit builds don't pull them in.
 [target.'cfg(target_os = "linux")'.dependencies]
 x11rb = "0.13"
+fontdue = "0.9"

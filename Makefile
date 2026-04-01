@@ -44,7 +44,7 @@ test:
 		-v weave-target-cache:/weave/docker-target \
 		-e CARGO_TARGET_DIR=/weave/docker-target \
 		rust:latest \
-		cargo test
+		sh -c "apt-get update -qq && apt-get install -y -qq fonts-dejavu-core >/dev/null 2>&1; cargo test"
 
 # ── Full CI mirror ─────────────────────────────────────────────────────────────
 
