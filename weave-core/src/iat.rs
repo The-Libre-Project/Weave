@@ -33,6 +33,37 @@ pub unsafe fn patch(
     base: *mut u8,
     resolve: impl Fn(&str, &str) -> Option<usize>,
 ) -> Result<(), String> {
+    patch_inner(bytes, base, resolve, false, |_, _| {})
+}
+
+/// Like `patch`, but skips unresolved imports rather than failing.
+///
+/// `on_miss` is called for each import that could not be resolved, allowing
+/// the caller to log or track missing symbols. Unresolved IAT slots are left
+/// at their original values (linker hint/RVA), which will crash immediately
+/// if the code attempts to call them.
+///
+/// Use this when loading pre-built DLLs where some imports may not be needed
+/// at runtime.
+///
+/// # Safety
+/// `base` must point to a fully loaded PE image with valid import descriptors.
+pub unsafe fn patch_best_effort(
+    bytes: &[u8],
+    base: *mut u8,
+    resolve: impl Fn(&str, &str) -> Option<usize>,
+    on_miss: impl Fn(&str, &str),
+) {
+    let _ = patch_inner(bytes, base, resolve, true, on_miss);
+}
+
+unsafe fn patch_inner(
+    bytes: &[u8],
+    base: *mut u8,
+    resolve: impl Fn(&str, &str) -> Option<usize>,
+    lenient: bool,
+    on_miss: impl Fn(&str, &str),
+) -> Result<(), String> {
     let pe = PE::parse(bytes).map_err(|e| format!("IAT patch: parse error: {e}"))?;
 
     let opt = pe
@@ -97,11 +128,16 @@ pub unsafe fn patch(
                 unsafe { read_cstr(base.add(name_rva + 2)) }
             };
 
-            let addr = resolve(&dll_name, &func_name)
-                .ok_or_else(|| format!("unresolved import: {dll_name}!{func_name}"))?;
-
-            unsafe {
-                *(base.add(iat_rva + i * 8) as *mut u64) = addr as u64;
+            match resolve(&dll_name, &func_name) {
+                Some(addr) => unsafe {
+                    *(base.add(iat_rva + i * 8) as *mut u64) = addr as u64;
+                },
+                None if lenient => {
+                    on_miss(&dll_name, &func_name);
+                }
+                None => {
+                    return Err(format!("unresolved import: {dll_name}!{func_name}"));
+                }
             }
 
             i += 1;

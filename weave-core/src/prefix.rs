@@ -39,6 +39,14 @@ pub fn translator() -> WinPathTranslator {
     WinPathTranslator::new(get().to_path_buf())
 }
 
+/// Return the path to the virtual `C:\Windows\System32` directory.
+///
+/// This is where DLLs shipped with the prefix (e.g. DXVK's `d3d11.dll`)
+/// should be placed.
+pub fn system32() -> PathBuf {
+    get().join("drive_c").join("Windows").join("System32")
+}
+
 /// Ensure the basic prefix directory skeleton exists.
 ///
 /// Creates `drive_c/` (and `drive_c/Windows/Temp`) so that apps can
@@ -49,6 +57,7 @@ pub fn translator() -> WinPathTranslator {
 pub fn ensure_dirs() {
     let prefix = get();
     let _ = std::fs::create_dir_all(prefix.join("drive_c"));
+    let _ = std::fs::create_dir_all(prefix.join("drive_c/Windows/System32"));
     let _ = std::fs::create_dir_all(prefix.join("drive_c/Windows/Temp"));
     let _ = std::fs::create_dir_all(prefix.join("drive_c/users/weave/AppData/Local/Temp"));
 }
