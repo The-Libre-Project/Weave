@@ -23,6 +23,22 @@ static FMODE: AtomicI32 = AtomicI32::new(0);
 static ARGC: AtomicI32 = AtomicI32::new(1);
 static ENVIRON_PTR: AtomicPtr<u8> = AtomicPtr::new(std::ptr::null_mut());
 
+// Command-line strings for __p__acmdln / __p__wcmdln.
+// A minimal "weave\0" ANSI command line and the equivalent UTF-16.
+static ACMDLN: &[u8] = b"weave\0";
+// UTF-16LE encoding of "weave\0\0" (null terminator is two bytes).
+static WCMDLN: &[u16] = &[
+    b'w' as u16,
+    b'e' as u16,
+    b'a' as u16,
+    b'v' as u16,
+    b'e' as u16,
+    0u16,
+];
+// Pointers that __p__acmdln/__p__wcmdln return (pointer to the string pointer).
+static ACMDLN_PTR: AtomicPtr<u8> = AtomicPtr::new(std::ptr::null_mut());
+static WCMDLN_PTR: AtomicPtr<u16> = AtomicPtr::new(std::ptr::null_mut());
+
 // argv layout (what the CRT expects):
 //   __p___argv()  →  &ARGV_VAR        (char ***)
 //   ARGV_VAR      →  &ARGV_ARRAY[0]   (char **)
@@ -231,6 +247,29 @@ pub extern "win64" fn p__environ() -> *mut *mut u8 {
     ENVIRON_PTR.as_ptr()
 }
 
+/// __p__acmdln: return a pointer to the ANSI command-line string pointer (`char **`).
+pub extern "win64" fn p__acmdln() -> *mut *mut u8 {
+    // Initialise once — store the address of the ACMDLN slice.
+    let _ = ACMDLN_PTR.compare_exchange(
+        std::ptr::null_mut(),
+        ACMDLN.as_ptr() as *mut u8,
+        Ordering::SeqCst,
+        Ordering::SeqCst,
+    );
+    ACMDLN_PTR.as_ptr()
+}
+
+/// __p__wcmdln: return a pointer to the wide command-line string pointer (`wchar_t **`).
+pub extern "win64" fn p__wcmdln() -> *mut *mut u16 {
+    let _ = WCMDLN_PTR.compare_exchange(
+        std::ptr::null_mut(),
+        WCMDLN.as_ptr() as *mut u16,
+        Ordering::SeqCst,
+        Ordering::SeqCst,
+    );
+    WCMDLN_PTR.as_ptr()
+}
+
 // ── api-ms-win-crt-stdio ──────────────────────────────────────────────────────
 
 /// __acrt_iob_func: return a pointer to a stdio FILE for index 0/1/2.
@@ -293,6 +332,86 @@ pub unsafe extern "win64" fn crt_strncmp(s1: *const u8, s2: *const u8, n: usize)
     unsafe { libc::strncmp(s1 as *const libc::c_char, s2 as *const libc::c_char, n) }
 }
 
+/// wcslen: return the length of a null-terminated UTF-16 string.
+///
+/// # Safety
+/// `s` must point to a valid null-terminated array of u16.
+pub unsafe extern "win64" fn crt_wcslen(s: *const u16) -> usize {
+    if s.is_null() {
+        return 0;
+    }
+    let mut len = 0usize;
+    while unsafe { *s.add(len) } != 0 {
+        len += 1;
+    }
+    len
+}
+
+/// wcscpy: copy a null-terminated UTF-16 string.
+///
+/// # Safety
+/// `dst` must be writable for at least `wcslen(src)+1` u16 words.
+/// `src` must be a valid null-terminated UTF-16 string.
+pub unsafe extern "win64" fn crt_wcscpy(dst: *mut u16, src: *const u16) -> *mut u16 {
+    if dst.is_null() || src.is_null() {
+        return dst;
+    }
+    let mut i = 0usize;
+    loop {
+        let c = unsafe { *src.add(i) };
+        unsafe { *dst.add(i) = c };
+        if c == 0 {
+            break;
+        }
+        i += 1;
+    }
+    dst
+}
+
+/// wcsncpy: copy up to n UTF-16 characters.
+///
+/// # Safety
+/// `dst` must be writable for `n` u16 words. `src` must be valid.
+pub unsafe extern "win64" fn crt_wcsncpy(dst: *mut u16, src: *const u16, n: usize) -> *mut u16 {
+    if dst.is_null() || src.is_null() || n == 0 {
+        return dst;
+    }
+    for i in 0..n {
+        let c = unsafe { *src.add(i) };
+        unsafe { *dst.add(i) = c };
+        if c == 0 {
+            // Pad remainder with zeros
+            for j in (i + 1)..n {
+                unsafe { *dst.add(j) = 0 };
+            }
+            return dst;
+        }
+    }
+    dst
+}
+
+/// wcscmp: compare two null-terminated UTF-16 strings.
+///
+/// # Safety
+/// Both `s1` and `s2` must be valid null-terminated UTF-16 strings.
+pub unsafe extern "win64" fn crt_wcscmp(s1: *const u16, s2: *const u16) -> i32 {
+    if s1.is_null() || s2.is_null() {
+        return 0;
+    }
+    let mut i = 0usize;
+    loop {
+        let a = unsafe { *s1.add(i) };
+        let b = unsafe { *s2.add(i) };
+        if a != b {
+            return (a as i32) - (b as i32);
+        }
+        if a == 0 {
+            return 0;
+        }
+        i += 1;
+    }
+}
+
 // ── Resolver ──────────────────────────────────────────────────────────────────
 
 pub fn resolve(func: &str) -> Option<usize> {
@@ -331,8 +450,10 @@ pub fn resolve(func: &str) -> Option<usize> {
         "_configthreadlocale" => Some(configthreadlocale as *const () as usize),
         // math
         "__setusermatherr" => Some(setusermatherr as *const () as usize),
-        // environment
+        // environment / command line
         "__p__environ" => Some(p__environ as *const () as usize),
+        "__p__acmdln" => Some(p__acmdln as *const () as usize),
+        "__p__wcmdln" => Some(p__wcmdln as *const () as usize),
         // stdio
         "__acrt_iob_func" => Some(acrt_iob_func as *const () as usize),
         "__p__commode" => Some(p__commode as *const () as usize),
@@ -345,6 +466,13 @@ pub fn resolve(func: &str) -> Option<usize> {
         "strncmp" => {
             Some(crt_strncmp as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize)
         }
+        // wide string functions
+        "wcslen" => Some(crt_wcslen as unsafe extern "win64" fn(_) -> _ as *const () as usize),
+        "wcscpy" => Some(crt_wcscpy as unsafe extern "win64" fn(_, _) -> _ as *const () as usize),
+        "wcsncpy" => {
+            Some(crt_wcsncpy as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize)
+        }
+        "wcscmp" => Some(crt_wcscmp as unsafe extern "win64" fn(_, _) -> _ as *const () as usize),
         _ => None,
     }
 }

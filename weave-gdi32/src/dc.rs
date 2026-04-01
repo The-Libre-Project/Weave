@@ -79,3 +79,84 @@ where
 pub fn remove(hdc: usize) {
     table().lock().unwrap().remove(&hdc);
 }
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Each test uses a distinct HWND value to avoid cross-test state leakage.
+    /// We pick values far above the real HWND range used in production.
+    const TEST_HDC_BASE: usize = 0xDEAD_0000;
+
+    #[test]
+    fn default_text_color_is_black() {
+        let hdc = TEST_HDC_BASE + 1;
+        let color = with(hdc, |dc| dc.text_color);
+        assert_eq!(color, 0x0000_0000);
+    }
+
+    #[test]
+    fn default_bk_color_is_white() {
+        let hdc = TEST_HDC_BASE + 2;
+        let color = with(hdc, |dc| dc.bk_color);
+        assert_eq!(color, 0x00FF_FFFF);
+    }
+
+    #[test]
+    fn default_bk_mode_is_opaque() {
+        let hdc = TEST_HDC_BASE + 3;
+        let mode = with(hdc, |dc| dc.bk_mode);
+        assert_eq!(mode, OPAQUE);
+    }
+
+    #[test]
+    fn with_mut_sets_text_color() {
+        let hdc = TEST_HDC_BASE + 4;
+        with_mut(hdc, |dc| dc.text_color = 0x00FF_0000);
+        let color = with(hdc, |dc| dc.text_color);
+        assert_eq!(color, 0x00FF_0000);
+        remove(hdc);
+    }
+
+    #[test]
+    fn with_mut_sets_bk_color() {
+        let hdc = TEST_HDC_BASE + 5;
+        with_mut(hdc, |dc| dc.bk_color = 0x0000_00FF);
+        let color = with(hdc, |dc| dc.bk_color);
+        assert_eq!(color, 0x0000_00FF);
+        remove(hdc);
+    }
+
+    #[test]
+    fn with_mut_sets_bk_mode_to_transparent() {
+        let hdc = TEST_HDC_BASE + 6;
+        with_mut(hdc, |dc| dc.bk_mode = TRANSPARENT);
+        let mode = with(hdc, |dc| dc.bk_mode);
+        assert_eq!(mode, TRANSPARENT);
+        remove(hdc);
+    }
+
+    #[test]
+    fn remove_resets_to_default() {
+        let hdc = TEST_HDC_BASE + 7;
+        with_mut(hdc, |dc| dc.text_color = 0x00AA_BB_CC);
+        remove(hdc);
+        // After removal, with() creates a fresh default
+        let color = with(hdc, |dc| dc.text_color);
+        assert_eq!(color, 0x0000_0000);
+    }
+
+    #[test]
+    fn independent_hdcs_have_independent_state() {
+        let hdc_a = TEST_HDC_BASE + 8;
+        let hdc_b = TEST_HDC_BASE + 9;
+        with_mut(hdc_a, |dc| dc.text_color = 0x0000_00FF);
+        with_mut(hdc_b, |dc| dc.text_color = 0x00FF_0000);
+        assert_eq!(with(hdc_a, |dc| dc.text_color), 0x0000_00FF);
+        assert_eq!(with(hdc_b, |dc| dc.text_color), 0x00FF_0000);
+        remove(hdc_a);
+        remove(hdc_b);
+    }
+}

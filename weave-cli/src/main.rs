@@ -39,7 +39,8 @@ fn main() {
     if let Some(p) = args.prefix {
         prefix::set(p);
     }
-    // Ensure the registry is populated with defaults before the PE runs.
+    // Ensure the prefix directory skeleton and registry defaults exist.
+    prefix::ensure_dirs();
     registry::populate();
 
     let bytes = std::fs::read(&args.exe).unwrap_or_else(|e| {

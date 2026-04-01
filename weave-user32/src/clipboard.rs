@@ -122,15 +122,30 @@ pub fn get_clipboard_owner() -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    // Serialize all clipboard tests — they share global state.
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    fn reset_clipboard() {
+        let mut s = super::state().lock().unwrap();
+        s.open = false;
+        s.owner_hwnd = 0;
+        s.data.clear();
+    }
 
     #[test]
     fn open_close_cycle() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        reset_clipboard();
         assert_eq!(open_clipboard(1), 1);
         assert_eq!(close_clipboard(), 1);
     }
 
     #[test]
     fn set_and_get_format() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        reset_clipboard();
         open_clipboard(0);
         let fake_ptr = 0xDEAD_BEEFusize;
         assert_eq!(set_clipboard_data(CF_UNICODETEXT, fake_ptr), fake_ptr);
@@ -144,12 +159,8 @@ mod tests {
 
     #[test]
     fn get_without_open_returns_zero() {
-        // Ensure clipboard is closed.
-        {
-            let mut s = super::state().lock().unwrap();
-            s.open = false;
-            s.data.clear();
-        }
+        let _guard = TEST_LOCK.lock().unwrap();
+        reset_clipboard();
         assert_eq!(get_clipboard_data(CF_TEXT), 0);
     }
 }

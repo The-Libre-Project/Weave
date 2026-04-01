@@ -21,6 +21,7 @@
 //! has no TLS). This is the minimum needed to keep CRT startup code from
 //! crashing when it reads its per-thread state via GS:[0x58].
 
+use crate::handles;
 use crate::loader::LoadedImage;
 
 // Number of TLS pointer slots to allocate.  The Windows CRT only uses slot 0
@@ -91,8 +92,8 @@ pub fn setup(image: &LoadedImage) -> Result<TebState, String> {
         // PEB[0x020] = &ProcessParameters
         write_u64(peb_ptr, 0x020, params_ptr as u64);
 
-        // ProcessParameters[0x028] = stdout handle (Linux fd 1)
-        write_u64(params_ptr, 0x028, 1u64);
+        // ProcessParameters[0x028] = stdout handle (Weave HANDLE table value)
+        write_u64(params_ptr, 0x028, handles::STDOUT_HANDLE as u64);
     }
 
     #[cfg(target_os = "linux")]

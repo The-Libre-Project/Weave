@@ -372,6 +372,35 @@ pub unsafe extern "win64" fn draw_text_w(
     16 // approximate height
 }
 
+/// DrawTextA: ANSI variant — decode the byte string and delegate to draw_text_w.
+///
+/// # Safety
+/// `lp_string` must point to `n_count` bytes (or a null-terminated string if n_count == -1).
+pub unsafe extern "win64" fn draw_text_a(
+    hdc: usize,
+    lp_string: *const u8,
+    n_count: i32,
+    lp_rect: *mut Rect,
+    u_format: u32,
+) -> i32 {
+    if lp_string.is_null() || lp_rect.is_null() {
+        return 0;
+    }
+    let len = if n_count < 0 {
+        let mut i = 0usize;
+        while unsafe { *lp_string.add(i) } != 0 {
+            i += 1;
+        }
+        i
+    } else {
+        n_count as usize
+    };
+    let bytes = unsafe { std::slice::from_raw_parts(lp_string, len) };
+    // Encode as UTF-16 for draw_text_w.
+    let wide: Vec<u16> = bytes.iter().map(|&b| b as u16).collect();
+    unsafe { draw_text_w(hdc, wide.as_ptr(), wide.len() as i32, lp_rect, u_format) }
+}
+
 /// ExtTextOutW: extended text drawing (Phase 2: delegates to text_out_w).
 ///
 /// # Safety
@@ -670,8 +699,15 @@ pub extern "win64" fn restore_dc(_hdc: usize, _n_saved_dc: i32) -> i32 {
 // ── Resolve ───────────────────────────────────────────────────────────────────
 
 /// Resolve a `gdi32.dll` import to a stub address.
+///
+/// Also handles a small set of GDI functions that Windows re-exports from
+/// `user32.dll` (FillRect, DrawTextW, DrawTextA). Binaries compiled with
+/// MinGW may import these from either DLL name.
 pub fn resolve(dll: &str, func: &str) -> Option<usize> {
-    if !dll.eq_ignore_ascii_case("gdi32.dll") {
+    let is_gdi32 = dll.eq_ignore_ascii_case("gdi32.dll");
+    let is_user32_gdi = dll.eq_ignore_ascii_case("user32.dll")
+        && matches!(func, "FillRect" | "DrawTextW" | "DrawTextA");
+    if !is_gdi32 && !is_user32_gdi {
         return None;
     }
     match func {
@@ -708,6 +744,9 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         }
         "DrawTextW" => {
             Some(draw_text_w as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const () as usize)
+        }
+        "DrawTextA" => {
+            Some(draw_text_a as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const () as usize)
         }
         "ExtTextOutW" => Some(
             ext_text_out_w as unsafe extern "win64" fn(_, _, _, _, _, _, _, _) -> _ as *const ()

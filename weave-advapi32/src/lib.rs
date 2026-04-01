@@ -12,3 +12,26 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
     }
     registry::resolve(func)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_correct_dll_name_routes_to_registry() {
+        assert!(resolve("advapi32.dll", "RegCloseKey").is_some());
+        assert!(resolve("ADVAPI32.DLL", "RegCloseKey").is_some());
+        assert!(resolve("Advapi32.dll", "RegCloseKey").is_some());
+    }
+
+    #[test]
+    fn resolve_wrong_dll_returns_none() {
+        assert!(resolve("kernel32.dll", "RegCloseKey").is_none());
+        assert!(resolve("user32.dll", "RegCloseKey").is_none());
+    }
+
+    #[test]
+    fn resolve_unknown_func_returns_none() {
+        assert!(resolve("advapi32.dll", "__weave_nonexistent__").is_none());
+    }
+}

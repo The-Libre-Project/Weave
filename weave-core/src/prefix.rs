@@ -38,3 +38,17 @@ pub fn get() -> &'static Path {
 pub fn translator() -> WinPathTranslator {
     WinPathTranslator::new(get().to_path_buf())
 }
+
+/// Ensure the basic prefix directory skeleton exists.
+///
+/// Creates `drive_c/` (and `drive_c/Windows/Temp`) so that apps can
+/// create files with relative paths (which map to `drive_c/`) without
+/// failing because the parent directory doesn't exist.
+///
+/// Called once at startup by weave-cli before the PE runs.
+pub fn ensure_dirs() {
+    let prefix = get();
+    let _ = std::fs::create_dir_all(prefix.join("drive_c"));
+    let _ = std::fs::create_dir_all(prefix.join("drive_c/Windows/Temp"));
+    let _ = std::fs::create_dir_all(prefix.join("drive_c/users/weave/AppData/Local/Temp"));
+}

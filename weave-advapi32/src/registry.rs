@@ -535,3 +535,72 @@ pub fn resolve(func: &str) -> Option<usize> {
         _ => None,
     }
 }
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── Resolver table ────────────────────────────────────────────────────────
+
+    #[test]
+    fn resolve_all_registry_functions() {
+        let expected = [
+            "RegOpenKeyExW",
+            "RegCreateKeyExW",
+            "RegQueryValueExW",
+            "RegSetValueExW",
+            "RegDeleteValueW",
+            "RegCloseKey",
+            "RegQueryInfoKeyW",
+            "RegEnumValueW",
+        ];
+        for name in &expected {
+            assert!(resolve(name).is_some(), "missing resolver entry for {name}");
+        }
+    }
+
+    #[test]
+    fn resolve_unknown_function_returns_none() {
+        assert!(resolve("__weave_nonexistent__").is_none());
+        assert!(resolve("RegOpenKeyA").is_none()); // ASCII variant not implemented
+    }
+
+    // ── predefined_hive_path smoke test ───────────────────────────────────────
+
+    #[test]
+    fn predefined_hive_path_returns_some_for_known_roots() {
+        // 64-bit sign-extended values as passed by MinGW-compiled binaries.
+        // These constants are defined in weave-core.
+        const HKEY_CLASSES_ROOT: usize = 0xFFFFFFFF80000000;
+        const HKEY_CURRENT_USER: usize = 0xFFFFFFFF80000001;
+        const HKEY_LOCAL_MACHINE: usize = 0xFFFFFFFF80000002;
+        const HKEY_USERS: usize = 0xFFFFFFFF80000003;
+
+        assert!(
+            predefined_hive_path(HKEY_LOCAL_MACHINE).is_some(),
+            "HKLM not recognised"
+        );
+        assert!(
+            predefined_hive_path(HKEY_CURRENT_USER).is_some(),
+            "HKCU not recognised"
+        );
+        assert!(
+            predefined_hive_path(HKEY_CLASSES_ROOT).is_some(),
+            "HKCR not recognised"
+        );
+        assert!(
+            predefined_hive_path(HKEY_USERS).is_some(),
+            "HKU not recognised"
+        );
+    }
+
+    #[test]
+    fn predefined_hive_path_returns_none_for_non_root() {
+        // A plain handle value (not a predefined root) should return None
+        assert!(predefined_hive_path(0).is_none());
+        assert!(predefined_hive_path(4).is_none()); // looks like a real handle
+        assert!(predefined_hive_path(0x7FFF_FFFF).is_none());
+    }
+}

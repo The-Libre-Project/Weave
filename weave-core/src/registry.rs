@@ -41,11 +41,13 @@ pub const REG_QWORD: u32 = 11;
 
 // ── Predefined hive handles (Windows constants) ───────────────────────────────
 
-pub const HKEY_CLASSES_ROOT: usize = 0x80000000;
-pub const HKEY_CURRENT_USER: usize = 0x80000001;
-pub const HKEY_LOCAL_MACHINE: usize = 0x80000002;
-pub const HKEY_USERS: usize = 0x80000003;
-pub const HKEY_CURRENT_CONFIG: usize = 0x80000005;
+// On 64-bit Windows these are sign-extended from (LONG): 0x8000000x → 0xFFFFFFFF8000000x.
+// MinGW-compiled binaries pass the 64-bit sign-extended form.
+pub const HKEY_CLASSES_ROOT: usize = 0xFFFFFFFF80000000;
+pub const HKEY_CURRENT_USER: usize = 0xFFFFFFFF80000001;
+pub const HKEY_LOCAL_MACHINE: usize = 0xFFFFFFFF80000002;
+pub const HKEY_USERS: usize = 0xFFFFFFFF80000003;
+pub const HKEY_CURRENT_CONFIG: usize = 0xFFFFFFFF80000005;
 
 // ── Special filename for the default (unnamed) value ─────────────────────────
 
