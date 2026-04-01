@@ -98,7 +98,7 @@ pub unsafe extern "win64" fn create_window_ex_w(
     n_width: i32,
     n_height: i32,
     h_wnd_parent: usize,
-    _h_menu: usize,
+    h_menu_param: usize,
     h_instance: usize,
     lp_param: *mut u8,
 ) -> usize {
@@ -144,6 +144,7 @@ pub unsafe extern "win64" fn create_window_ex_w(
         height,
         visible,
         xcb_id,
+        h_menu: h_menu_param,
     });
 
     // Build CREATESTRUCTW on the stack and call WNDPROC with WM_NCCREATE then WM_CREATE.
@@ -157,7 +158,7 @@ pub unsafe extern "win64" fn create_window_ex_w(
     let cs = CreateStructW {
         lp_create_params: lp_param,
         h_instance,
-        h_menu: 0,
+        h_menu: h_menu_param,
         hwnd_parent: h_wnd_parent,
         cy: height as i32,
         cx: width as i32,
@@ -307,10 +308,80 @@ pub unsafe extern "win64" fn peek_message_w(
     }
 }
 
-/// TranslateMessage: translate virtual-key messages to WM_CHAR.
+/// Map an X11 keycode to a Unicode code point (unshifted, standard PC layout).
 ///
-/// Phase 2 stub: returns TRUE if the message is a key message (WM_KEYDOWN /
-/// WM_KEYUP). WM_CHAR generation deferred to Phase 3 keyboard input work.
+/// X11 keycodes are hardware-specific but follow a well-known layout on
+/// standard PC keyboards. This table covers the ASCII printable range.
+/// Returns `None` for keycodes with no printable character (function keys,
+/// modifiers, cursor keys, etc.).
+fn keycode_to_char(keycode: usize, _shift: bool) -> Option<char> {
+    // Standard PC keyboard keycode mapping (unshifted).
+    // Keycodes 8–255; printable ASCII starts around 10.
+    // Source: X11 keyboard specification for evdev/standard PC layout.
+    let ch: u8 = match keycode {
+        // Row 0 — number row
+        10 => b'1',
+        11 => b'2',
+        12 => b'3',
+        13 => b'4',
+        14 => b'5',
+        15 => b'6',
+        16 => b'7',
+        17 => b'8',
+        18 => b'9',
+        19 => b'0',
+        20 => b'-',
+        21 => b'=',
+        // Row 1 — QWERTY
+        24 => b'q',
+        25 => b'w',
+        26 => b'e',
+        27 => b'r',
+        28 => b't',
+        29 => b'y',
+        30 => b'u',
+        31 => b'i',
+        32 => b'o',
+        33 => b'p',
+        34 => b'[',
+        35 => b']',
+        // Row 2 — ASDF
+        38 => b'a',
+        39 => b's',
+        40 => b'd',
+        41 => b'f',
+        42 => b'g',
+        43 => b'h',
+        44 => b'j',
+        45 => b'k',
+        46 => b'l',
+        47 => b';',
+        48 => b'\'',
+        // Row 3 — ZXCV
+        52 => b'z',
+        53 => b'x',
+        54 => b'c',
+        55 => b'v',
+        56 => b'b',
+        57 => b'n',
+        58 => b'm',
+        59 => b',',
+        60 => b'.',
+        61 => b'/',
+        // Special
+        65 => b' ',  // Space
+        36 => b'\r', // Return / Enter
+        22 => 8,     // Backspace
+        23 => b'\t', // Tab
+        _ => return None,
+    };
+    Some(ch as char)
+}
+
+/// TranslateMessage: translate WM_KEYDOWN messages to WM_CHAR.
+///
+/// For each WM_KEYDOWN with a printable character, posts a corresponding
+/// WM_CHAR to the message queue. Returns TRUE if the message was translated.
 ///
 /// # Safety
 /// `lp_msg` must point to a valid `MSG`.
@@ -318,8 +389,24 @@ pub unsafe extern "win64" fn translate_message(lp_msg: *const Msg) -> i32 {
     if lp_msg.is_null() {
         return 0;
     }
-    let msg = unsafe { (*lp_msg).message };
-    (msg == WM_KEYDOWN || msg == WM_KEYUP) as i32
+    let msg = unsafe { &*lp_msg };
+    if msg.message != WM_KEYDOWN {
+        return (msg.message == WM_KEYUP || msg.message == WM_CHAR) as i32;
+    }
+    // msg.w_param holds the X11 keycode (set by backend::translate_event).
+    if let Some(ch) = keycode_to_char(msg.w_param, false) {
+        queue::post(MsgEntry {
+            hwnd: msg.hwnd,
+            message: WM_CHAR,
+            w_param: ch as usize,
+            l_param: msg.l_param,
+            time: msg.time,
+            pt_x: 0,
+            pt_y: 0,
+        });
+        return 1;
+    }
+    1 // WM_KEYDOWN always returns TRUE even if no WM_CHAR was generated
 }
 
 /// DispatchMessageW: call the window procedure for the message in `lp_msg`.

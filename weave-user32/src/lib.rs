@@ -17,6 +17,7 @@ pub mod backend;
 pub mod class;
 pub mod clipboard;
 pub mod defs;
+pub mod menu;
 pub mod queue;
 pub mod window;
 
@@ -126,6 +127,23 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         }
         "CountClipboardFormats" => Some(clipboard::count_clipboard_formats as *const () as usize),
         "GetClipboardOwner" => Some(clipboard::get_clipboard_owner as *const () as usize),
+        // Menus
+        "CreateMenu" => Some(menu::create_menu as *const () as usize),
+        "CreatePopupMenu" => Some(menu::create_popup_menu as *const () as usize),
+        "AppendMenuW" => {
+            Some(menu::append_menu_w as unsafe fn(_, _, _, _) -> _ as *const () as usize)
+        }
+        "InsertMenuItemW" => {
+            Some(menu::insert_menu_item_w as unsafe fn(_, _, _, _) -> _ as *const () as usize)
+        }
+        "SetMenu" => Some(menu::set_menu as *const () as usize),
+        "GetMenu" => Some(menu::get_menu as *const () as usize),
+        "DestroyMenu" => Some(menu::destroy_menu as *const () as usize),
+        "TrackPopupMenu" => Some(menu::track_popup_menu as *const () as usize),
+        "TrackPopupMenuEx" => Some(menu::track_popup_menu_ex as *const () as usize),
+        "GetMenuItemCount" => Some(menu::get_menu_item_count as *const () as usize),
+        "CheckMenuItem" => Some(menu::check_menu_item as *const () as usize),
+        "EnableMenuItem" => Some(menu::enable_menu_item as *const () as usize),
         _ => None,
     }
 }

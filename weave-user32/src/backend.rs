@@ -529,6 +529,24 @@ mod inner {
                 }
             }
 
+            Event::MotionNotify(ev) => {
+                let hwnd = window::hwnd_for_xcb(ev.event);
+                if hwnd != 0 {
+                    // wParam: MK_* modifier flags (Phase 2: always 0)
+                    // lParam: LOWORD = x, HIWORD = y (client coordinates)
+                    let l_param = (ev.event_x as isize) | ((ev.event_y as isize) << 16);
+                    queue::post(MsgEntry {
+                        hwnd,
+                        message: WM_MOUSEMOVE,
+                        w_param: 0,
+                        l_param,
+                        time: ev.time,
+                        pt_x: ev.event_x as i32,
+                        pt_y: ev.event_y as i32,
+                    });
+                }
+            }
+
             _ => {} // Ignore all other events for now.
         }
     }

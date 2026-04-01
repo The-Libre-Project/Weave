@@ -24,6 +24,8 @@ pub struct WindowEntry {
     pub visible: bool,
     /// X11 window ID — only meaningful on Linux.
     pub xcb_id: u32,
+    /// Attached menu bar (0 = none).
+    pub h_menu: usize,
 }
 
 // ── Global table ──────────────────────────────────────────────────────────────
