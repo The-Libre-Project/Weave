@@ -376,6 +376,7 @@ dependencies = [
  "weave-sandbox",
  "weave-shell32",
  "weave-user32",
+ "weave-vulkan",
 ]
 
 [[package]]
@@ -449,6 +450,14 @@ dependencies = [
  "weave-common",
  "weave-core",
  "x11rb",
+]
+
+[[package]]
+name = "weave-vulkan"
+version = "0.0.1"
+dependencies = [
+ "libc",
+ "weave-user32",
 ]
 
 [[package]]

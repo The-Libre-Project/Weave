@@ -1,0 +1,11 @@
+[package]
+name = "weave-vulkan"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "vulkan-1.dll shim for Weave — forwards Vulkan calls to the Linux loader with Win32 surface mapping"
+
+[dependencies]
+weave-user32 = { path = "../weave-user32" }
+libc = "0.2"

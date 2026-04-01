@@ -10,6 +10,7 @@ members = [
     "weave-ole32",
     "weave-sandbox",
     "weave-core",
+    "weave-vulkan",
     "weave-cli",
 ]
 resolver = "2"
