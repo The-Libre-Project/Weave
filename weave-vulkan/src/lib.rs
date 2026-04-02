@@ -39,7 +39,47 @@ type PFN_vkVoidFunction = *const c_void;
 
 type VkResult = i32;
 type VkInstance = *mut c_void;
+type VkPhysicalDevice = *mut c_void;
+type VkDevice = *mut c_void;
+type VkQueue = *mut c_void;
+type VkCommandBuffer = *mut c_void;
 type VkSurfaceKHR = u64;
+type VkSwapchainKHR = u64;
+type VkCommandPool = u64;
+type VkRenderPass = u64;
+type VkFramebuffer = u64;
+type VkPipeline = u64;
+type VkPipelineLayout = u64;
+type VkPipelineCache = u64;
+type VkShaderModule = u64;
+type VkDescriptorSetLayout = u64;
+type VkDescriptorPool = u64;
+type VkDescriptorSet = u64;
+type VkDescriptorUpdateTemplate = u64;
+type VkBuffer = u64;
+type VkImage = u64;
+type VkImageView = u64;
+type VkBufferView = u64;
+type VkDeviceMemory = u64;
+type VkSampler = u64;
+type VkFence = u64;
+type VkSemaphore = u64;
+type VkEvent = u64;
+type VkQueryPool = u64;
+type VkDeviceSize = u64;
+type VkDeviceAddress = u64;
+type VkMemoryMapFlags = u32;
+type VkQueryResultFlags = u32;
+type VkPipelineBindPoint = u32;
+type VkSubpassContents = u32;
+type VkPipelineStageFlags = u32;
+type VkIndexType = u32;
+type VkStencilFaceFlags = u32;
+type VkCommandBufferResetFlags = u32;
+type VkCommandPoolResetFlags = u32;
+type VkDescriptorPoolResetFlags = u32;
+type VkShaderStageFlags = u32;
+type VkFormat = u32;
 
 const VK_SUCCESS: VkResult = 0;
 const VK_ERROR_FEATURE_NOT_PRESENT: VkResult = -8;
@@ -100,6 +140,8 @@ struct VulkanLoader {
     enumerate_instance_layer_properties:
         unsafe extern "C" fn(p_property_count: *mut u32, p_properties: *mut c_void) -> VkResult,
     enumerate_instance_version: Option<unsafe extern "C" fn(p_api_version: *mut u32) -> VkResult>,
+    get_device_proc_addr:
+        unsafe extern "C" fn(device: VkDevice, name: *const c_char) -> PFN_vkVoidFunction,
 }
 
 static VULKAN: OnceLock<Option<VulkanLoader>> = OnceLock::new();
@@ -149,6 +191,7 @@ fn load_vulkan() -> Option<VulkanLoader> {
         enumerate_instance_extension_properties: sym!("vkEnumerateInstanceExtensionProperties"),
         enumerate_instance_layer_properties: sym!("vkEnumerateInstanceLayerProperties"),
         enumerate_instance_version: sym!(opt "vkEnumerateInstanceVersion"),
+        get_device_proc_addr: sym!("vkGetDeviceProcAddr"),
     })
 }
 
@@ -193,6 +236,19 @@ fn xcb_connection() -> Option<*mut c_void> {
     .map(|s| s.connection)
 }
 
+// ── Stored VkInstance for physical-device and device-level queries ────────────
+//
+// Physical-device queries need a VkInstance to call vkGetInstanceProcAddr.
+// We store it when vkCreateInstance succeeds (single-instance assumption,
+// which covers all games).
+
+use std::sync::atomic::{AtomicUsize, Ordering};
+static INSTANCE: AtomicUsize = AtomicUsize::new(0);
+
+fn stored_instance() -> VkInstance {
+    INSTANCE.load(Ordering::Acquire) as VkInstance
+}
+
 // ── Helper: look up a function from the real Vulkan loader ───────────────────
 
 fn real_fn(instance: VkInstance, name: &str) -> PFN_vkVoidFunction {
@@ -206,6 +262,283 @@ fn real_fn(instance: VkInstance, name: &str) -> PFN_vkVoidFunction {
     };
     unsafe { (vk.get_instance_proc_addr)(instance, cname.as_ptr()) }
 }
+
+fn real_device_fn(device: VkDevice, name: &str) -> PFN_vkVoidFunction {
+    let vk = match vulkan() {
+        Some(v) => v,
+        None => return std::ptr::null(),
+    };
+    let cname = match CString::new(name) {
+        Ok(s) => s,
+        Err(_) => return std::ptr::null(),
+    };
+    unsafe { (vk.get_device_proc_addr)(device, cname.as_ptr()) }
+}
+
+// ── Win64→SysV thunks for device/physical-device functions ───────────────────
+//
+// vkGetInstanceProcAddr returns SysV ABI pointers from the real loader.
+// Windows PE guest code invokes them with Windows x64 ABI — ABI mismatch →
+// crash.  For every function we expect DXVK to call we must provide a
+// win64-declared wrapper that delegates to the real SysV function.
+//
+// Macro: thunk!(Name, RetTy, (arg: ArgTy, ...)) generates:
+//   pub unsafe extern "win64" fn vk_##name(...) { real(instance/device, "vk##Name")(...) }
+
+// Physical-device thunks (use stored instance)
+macro_rules! inst_thunk {
+    ($name:ident, $real:literal, $ret:ty, ($($arg:ident : $ty:ty),*)) => {
+        pub unsafe extern "win64" fn $name($($arg: $ty),*) -> $ret {
+            let f = real_fn(stored_instance(), $real);
+            if f.is_null() { return std::mem::zeroed(); }
+            let f: unsafe extern "C" fn($($ty),*) -> $ret = unsafe { std::mem::transmute(f) };
+            unsafe { f($($arg),*) }
+        }
+    };
+    (void $name:ident, $real:literal, ($($arg:ident : $ty:ty),*)) => {
+        pub unsafe extern "win64" fn $name($($arg: $ty),*) {
+            let f = real_fn(stored_instance(), $real);
+            if f.is_null() { return; }
+            let f: unsafe extern "C" fn($($ty),*) = unsafe { std::mem::transmute(f) };
+            unsafe { f($($arg),*) }
+        }
+    };
+}
+
+// Device thunks (first arg is VkDevice)
+macro_rules! dev_thunk {
+    ($name:ident, $real:literal, $ret:ty, ($dev:ident, $($arg:ident : $ty:ty),*)) => {
+        pub unsafe extern "win64" fn $name($dev: VkDevice, $($arg: $ty),*) -> $ret {
+            let f = real_device_fn($dev, $real);
+            if f.is_null() { return std::mem::zeroed(); }
+            let f: unsafe extern "C" fn(VkDevice, $($ty),*) -> $ret = unsafe { std::mem::transmute(f) };
+            unsafe { f($dev, $($arg),*) }
+        }
+    };
+    (void $name:ident, $real:literal, ($dev:ident, $($arg:ident : $ty:ty),*)) => {
+        pub unsafe extern "win64" fn $name($dev: VkDevice, $($arg: $ty),*) {
+            let f = real_device_fn($dev, $real);
+            if f.is_null() { return; }
+            let f: unsafe extern "C" fn(VkDevice, $($ty),*) = unsafe { std::mem::transmute(f) };
+            unsafe { f($dev, $($arg),*) }
+        }
+    };
+}
+
+// Command-buffer thunks (first arg is VkCommandBuffer)
+macro_rules! cmd_thunk {
+    (void $name:ident, $real:literal, ($cb:ident, $($arg:ident : $ty:ty),*)) => {
+        pub unsafe extern "win64" fn $name($cb: VkCommandBuffer, $($arg: $ty),*) {
+            let f = real_fn(stored_instance(), $real);
+            if f.is_null() { return; }
+            let f: unsafe extern "C" fn(VkCommandBuffer, $($ty),*) = unsafe { std::mem::transmute(f) };
+            unsafe { f($cb, $($arg),*) }
+        }
+    };
+    ($name:ident, $real:literal, $ret:ty, ($cb:ident, $($arg:ident : $ty:ty),*)) => {
+        pub unsafe extern "win64" fn $name($cb: VkCommandBuffer, $($arg: $ty),*) -> $ret {
+            let f = real_fn(stored_instance(), $real);
+            if f.is_null() { return std::mem::zeroed(); }
+            let f: unsafe extern "C" fn(VkCommandBuffer, $($ty),*) -> $ret = unsafe { std::mem::transmute(f) };
+            unsafe { f($cb, $($arg),*) }
+        }
+    };
+}
+
+// Physical-device functions
+inst_thunk!(vk_enumerate_physical_devices, "vkEnumeratePhysicalDevices", VkResult, (instance: VkInstance, p_count: *mut u32, p_devices: *mut VkPhysicalDevice));
+inst_thunk!(void vk_get_physical_device_properties, "vkGetPhysicalDeviceProperties", (physical_device: VkPhysicalDevice, p_properties: *mut c_void));
+inst_thunk!(void vk_get_physical_device_features, "vkGetPhysicalDeviceFeatures", (physical_device: VkPhysicalDevice, p_features: *mut c_void));
+inst_thunk!(void vk_get_physical_device_features2, "vkGetPhysicalDeviceFeatures2", (physical_device: VkPhysicalDevice, p_features: *mut c_void));
+inst_thunk!(void vk_get_physical_device_properties2, "vkGetPhysicalDeviceProperties2", (physical_device: VkPhysicalDevice, p_properties: *mut c_void));
+inst_thunk!(void vk_get_physical_device_memory_properties, "vkGetPhysicalDeviceMemoryProperties", (physical_device: VkPhysicalDevice, p_properties: *mut c_void));
+inst_thunk!(void vk_get_physical_device_memory_properties2, "vkGetPhysicalDeviceMemoryProperties2", (physical_device: VkPhysicalDevice, p_properties: *mut c_void));
+inst_thunk!(void vk_get_physical_device_queue_family_properties, "vkGetPhysicalDeviceQueueFamilyProperties", (physical_device: VkPhysicalDevice, p_count: *mut u32, p_properties: *mut c_void));
+inst_thunk!(void vk_get_physical_device_queue_family_properties2, "vkGetPhysicalDeviceQueueFamilyProperties2", (physical_device: VkPhysicalDevice, p_count: *mut u32, p_properties: *mut c_void));
+inst_thunk!(void vk_get_physical_device_format_properties, "vkGetPhysicalDeviceFormatProperties", (physical_device: VkPhysicalDevice, format: VkFormat, p_properties: *mut c_void));
+inst_thunk!(void vk_get_physical_device_format_properties2, "vkGetPhysicalDeviceFormatProperties2", (physical_device: VkPhysicalDevice, format: VkFormat, p_properties: *mut c_void));
+inst_thunk!(vk_get_physical_device_image_format_properties, "vkGetPhysicalDeviceImageFormatProperties", VkResult, (physical_device: VkPhysicalDevice, format: u32, ty: u32, tiling: u32, usage: u32, flags: u32, p_properties: *mut c_void));
+inst_thunk!(vk_get_physical_device_image_format_properties2, "vkGetPhysicalDeviceImageFormatProperties2", VkResult, (physical_device: VkPhysicalDevice, p_info: *const c_void, p_properties: *mut c_void));
+inst_thunk!(vk_enumerate_device_extension_properties, "vkEnumerateDeviceExtensionProperties", VkResult, (physical_device: VkPhysicalDevice, p_layer: *const c_char, p_count: *mut u32, p_properties: *mut c_void));
+inst_thunk!(vk_enumerate_device_layer_properties, "vkEnumerateDeviceLayerProperties", VkResult, (physical_device: VkPhysicalDevice, p_count: *mut u32, p_properties: *mut c_void));
+inst_thunk!(vk_create_device, "vkCreateDevice", VkResult, (physical_device: VkPhysicalDevice, p_create_info: *const c_void, p_allocator: *const c_void, p_device: *mut VkDevice));
+inst_thunk!(void vk_destroy_instance, "vkDestroyInstance", (instance: VkInstance, p_allocator: *const c_void));
+inst_thunk!(vk_get_physical_device_surface_support_khr, "vkGetPhysicalDeviceSurfaceSupportKHR", VkResult, (physical_device: VkPhysicalDevice, queue_family_index: u32, surface: VkSurfaceKHR, p_supported: *mut u32));
+inst_thunk!(vk_get_physical_device_surface_capabilities_khr, "vkGetPhysicalDeviceSurfaceCapabilitiesKHR", VkResult, (physical_device: VkPhysicalDevice, surface: VkSurfaceKHR, p_capabilities: *mut c_void));
+inst_thunk!(vk_get_physical_device_surface_formats_khr, "vkGetPhysicalDeviceSurfaceFormatsKHR", VkResult, (physical_device: VkPhysicalDevice, surface: VkSurfaceKHR, p_count: *mut u32, p_formats: *mut c_void));
+inst_thunk!(vk_get_physical_device_surface_present_modes_khr, "vkGetPhysicalDeviceSurfacePresentModesKHR", VkResult, (physical_device: VkPhysicalDevice, surface: VkSurfaceKHR, p_count: *mut u32, p_modes: *mut u32));
+inst_thunk!(vk_get_physical_device_surface_capabilities2_khr, "vkGetPhysicalDeviceSurfaceCapabilities2KHR", VkResult, (physical_device: VkPhysicalDevice, p_surface_info: *const c_void, p_capabilities: *mut c_void));
+inst_thunk!(vk_get_physical_device_calibrateable_time_domains_ext, "vkGetPhysicalDeviceCalibrateableTimeDomainsEXT", VkResult, (physical_device: VkPhysicalDevice, p_count: *mut u32, p_domains: *mut u32));
+inst_thunk!(vk_get_physical_device_sparse_image_format_properties, "vkGetPhysicalDeviceSparseImageFormatProperties", VkResult, (physical_device: VkPhysicalDevice, format: u32, ty: u32, samples: u32, usage: u32, tiling: u32, p_count: *mut u32, p_properties: *mut c_void));
+
+// Device functions
+dev_thunk!(void vk_destroy_device, "vkDestroyDevice", (device, p_allocator: *const c_void));
+dev_thunk!(void vk_get_device_queue, "vkGetDeviceQueue", (device, queue_family_index: u32, queue_index: u32, p_queue: *mut VkQueue));
+dev_thunk!(void vk_get_device_queue2, "vkGetDeviceQueue2", (device, p_info: *const c_void, p_queue: *mut VkQueue));
+dev_thunk!(vk_device_wait_idle, "vkDeviceWaitIdle", VkResult, (device,));
+dev_thunk!(vk_queue_submit, "vkQueueSubmit", VkResult, (device, queue: VkQueue, submit_count: u32, p_submits: *const c_void, fence: VkFence));
+dev_thunk!(vk_queue_submit2, "vkQueueSubmit2", VkResult, (device, queue: VkQueue, submit_count: u32, p_submits: *const c_void, fence: VkFence));
+dev_thunk!(vk_queue_wait_idle, "vkQueueWaitIdle", VkResult, (device, queue: VkQueue));
+dev_thunk!(vk_queue_present_khr, "vkQueuePresentKHR", VkResult, (device, queue: VkQueue, p_present_info: *const c_void));
+dev_thunk!(vk_allocate_memory, "vkAllocateMemory", VkResult, (device, p_info: *const c_void, p_allocator: *const c_void, p_memory: *mut VkDeviceMemory));
+dev_thunk!(void vk_free_memory, "vkFreeMemory", (device, memory: VkDeviceMemory, p_allocator: *const c_void));
+dev_thunk!(vk_map_memory, "vkMapMemory", VkResult, (device, memory: VkDeviceMemory, offset: VkDeviceSize, size: VkDeviceSize, flags: VkMemoryMapFlags, pp_data: *mut *mut c_void));
+dev_thunk!(void vk_unmap_memory, "vkUnmapMemory", (device, memory: VkDeviceMemory));
+dev_thunk!(vk_flush_mapped_memory_ranges, "vkFlushMappedMemoryRanges", VkResult, (device, memory_range_count: u32, p_memory_ranges: *const c_void));
+dev_thunk!(vk_invalidate_mapped_memory_ranges, "vkInvalidateMappedMemoryRanges", VkResult, (device, memory_range_count: u32, p_memory_ranges: *const c_void));
+dev_thunk!(vk_bind_buffer_memory, "vkBindBufferMemory", VkResult, (device, buffer: VkBuffer, memory: VkDeviceMemory, memory_offset: VkDeviceSize));
+dev_thunk!(vk_bind_buffer_memory2, "vkBindBufferMemory2", VkResult, (device, bind_info_count: u32, p_bind_infos: *const c_void));
+dev_thunk!(vk_bind_image_memory, "vkBindImageMemory", VkResult, (device, image: VkImage, memory: VkDeviceMemory, memory_offset: VkDeviceSize));
+dev_thunk!(vk_bind_image_memory2, "vkBindImageMemory2", VkResult, (device, bind_info_count: u32, p_bind_infos: *const c_void));
+dev_thunk!(void vk_get_buffer_memory_requirements, "vkGetBufferMemoryRequirements", (device, buffer: VkBuffer, p_requirements: *mut c_void));
+dev_thunk!(void vk_get_buffer_memory_requirements2, "vkGetBufferMemoryRequirements2", (device, p_info: *const c_void, p_requirements: *mut c_void));
+dev_thunk!(void vk_get_image_memory_requirements, "vkGetImageMemoryRequirements", (device, image: VkImage, p_requirements: *mut c_void));
+dev_thunk!(void vk_get_image_memory_requirements2, "vkGetImageMemoryRequirements2", (device, p_info: *const c_void, p_requirements: *mut c_void));
+dev_thunk!(vk_create_buffer, "vkCreateBuffer", VkResult, (device, p_info: *const c_void, p_allocator: *const c_void, p_buffer: *mut VkBuffer));
+dev_thunk!(void vk_destroy_buffer, "vkDestroyBuffer", (device, buffer: VkBuffer, p_allocator: *const c_void));
+dev_thunk!(vk_create_image, "vkCreateImage", VkResult, (device, p_info: *const c_void, p_allocator: *const c_void, p_image: *mut VkImage));
+dev_thunk!(void vk_destroy_image, "vkDestroyImage", (device, image: VkImage, p_allocator: *const c_void));
+dev_thunk!(void vk_get_image_subresource_layout, "vkGetImageSubresourceLayout", (device, image: VkImage, p_subresource: *const c_void, p_layout: *mut c_void));
+dev_thunk!(vk_create_image_view, "vkCreateImageView", VkResult, (device, p_info: *const c_void, p_allocator: *const c_void, p_view: *mut VkImageView));
+dev_thunk!(void vk_destroy_image_view, "vkDestroyImageView", (device, image_view: VkImageView, p_allocator: *const c_void));
+dev_thunk!(vk_create_buffer_view, "vkCreateBufferView", VkResult, (device, p_info: *const c_void, p_allocator: *const c_void, p_view: *mut VkBufferView));
+dev_thunk!(void vk_destroy_buffer_view, "vkDestroyBufferView", (device, buffer_view: VkBufferView, p_allocator: *const c_void));
+dev_thunk!(vk_create_shader_module, "vkCreateShaderModule", VkResult, (device, p_info: *const c_void, p_allocator: *const c_void, p_module: *mut VkShaderModule));
+dev_thunk!(void vk_destroy_shader_module, "vkDestroyShaderModule", (device, module: VkShaderModule, p_allocator: *const c_void));
+dev_thunk!(vk_create_pipeline_cache, "vkCreatePipelineCache", VkResult, (device, p_info: *const c_void, p_allocator: *const c_void, p_cache: *mut VkPipelineCache));
+dev_thunk!(void vk_destroy_pipeline_cache, "vkDestroyPipelineCache", (device, cache: VkPipelineCache, p_allocator: *const c_void));
+dev_thunk!(vk_create_graphics_pipelines, "vkCreateGraphicsPipelines", VkResult, (device, cache: VkPipelineCache, count: u32, p_infos: *const c_void, p_allocator: *const c_void, p_pipelines: *mut VkPipeline));
+dev_thunk!(vk_create_compute_pipelines, "vkCreateComputePipelines", VkResult, (device, cache: VkPipelineCache, count: u32, p_infos: *const c_void, p_allocator: *const c_void, p_pipelines: *mut VkPipeline));
+dev_thunk!(void vk_destroy_pipeline, "vkDestroyPipeline", (device, pipeline: VkPipeline, p_allocator: *const c_void));
+dev_thunk!(vk_create_pipeline_layout, "vkCreatePipelineLayout", VkResult, (device, p_info: *const c_void, p_allocator: *const c_void, p_layout: *mut VkPipelineLayout));
+dev_thunk!(void vk_destroy_pipeline_layout, "vkDestroyPipelineLayout", (device, layout: VkPipelineLayout, p_allocator: *const c_void));
+dev_thunk!(vk_create_sampler, "vkCreateSampler", VkResult, (device, p_info: *const c_void, p_allocator: *const c_void, p_sampler: *mut VkSampler));
+dev_thunk!(void vk_destroy_sampler, "vkDestroySampler", (device, sampler: VkSampler, p_allocator: *const c_void));
+dev_thunk!(vk_create_descriptor_set_layout, "vkCreateDescriptorSetLayout", VkResult, (device, p_info: *const c_void, p_allocator: *const c_void, p_set_layout: *mut VkDescriptorSetLayout));
+dev_thunk!(void vk_destroy_descriptor_set_layout, "vkDestroyDescriptorSetLayout", (device, descriptor_set_layout: VkDescriptorSetLayout, p_allocator: *const c_void));
+dev_thunk!(vk_create_descriptor_pool, "vkCreateDescriptorPool", VkResult, (device, p_info: *const c_void, p_allocator: *const c_void, p_descriptor_pool: *mut VkDescriptorPool));
+dev_thunk!(void vk_destroy_descriptor_pool, "vkDestroyDescriptorPool", (device, descriptor_pool: VkDescriptorPool, p_allocator: *const c_void));
+dev_thunk!(vk_reset_descriptor_pool, "vkResetDescriptorPool", VkResult, (device, descriptor_pool: VkDescriptorPool, flags: VkDescriptorPoolResetFlags));
+dev_thunk!(vk_allocate_descriptor_sets, "vkAllocateDescriptorSets", VkResult, (device, p_info: *const c_void, p_descriptor_sets: *mut VkDescriptorSet));
+dev_thunk!(vk_free_descriptor_sets, "vkFreeDescriptorSets", VkResult, (device, descriptor_pool: VkDescriptorPool, descriptor_set_count: u32, p_descriptor_sets: *const VkDescriptorSet));
+dev_thunk!(void vk_update_descriptor_sets, "vkUpdateDescriptorSets", (device, write_count: u32, p_writes: *const c_void, copy_count: u32, p_copies: *const c_void));
+dev_thunk!(vk_create_descriptor_update_template, "vkCreateDescriptorUpdateTemplate", VkResult, (device, p_info: *const c_void, p_allocator: *const c_void, p_descriptor_update_template: *mut VkDescriptorUpdateTemplate));
+dev_thunk!(void vk_destroy_descriptor_update_template, "vkDestroyDescriptorUpdateTemplate", (device, descriptor_update_template: VkDescriptorUpdateTemplate, p_allocator: *const c_void));
+dev_thunk!(void vk_update_descriptor_set_with_template, "vkUpdateDescriptorSetWithTemplate", (device, descriptor_set: VkDescriptorSet, descriptor_update_template: VkDescriptorUpdateTemplate, p_data: *const c_void));
+dev_thunk!(vk_create_render_pass, "vkCreateRenderPass", VkResult, (device, p_info: *const c_void, p_allocator: *const c_void, p_render_pass: *mut VkRenderPass));
+dev_thunk!(vk_create_render_pass2, "vkCreateRenderPass2", VkResult, (device, p_info: *const c_void, p_allocator: *const c_void, p_render_pass: *mut VkRenderPass));
+dev_thunk!(void vk_destroy_render_pass, "vkDestroyRenderPass", (device, render_pass: VkRenderPass, p_allocator: *const c_void));
+dev_thunk!(vk_create_framebuffer, "vkCreateFramebuffer", VkResult, (device, p_info: *const c_void, p_allocator: *const c_void, p_framebuffer: *mut VkFramebuffer));
+dev_thunk!(void vk_destroy_framebuffer, "vkDestroyFramebuffer", (device, framebuffer: VkFramebuffer, p_allocator: *const c_void));
+dev_thunk!(vk_create_command_pool, "vkCreateCommandPool", VkResult, (device, p_info: *const c_void, p_allocator: *const c_void, p_command_pool: *mut VkCommandPool));
+dev_thunk!(void vk_destroy_command_pool, "vkDestroyCommandPool", (device, command_pool: VkCommandPool, p_allocator: *const c_void));
+dev_thunk!(vk_reset_command_pool, "vkResetCommandPool", VkResult, (device, command_pool: VkCommandPool, flags: VkCommandPoolResetFlags));
+dev_thunk!(vk_allocate_command_buffers, "vkAllocateCommandBuffers", VkResult, (device, p_info: *const c_void, p_command_buffers: *mut VkCommandBuffer));
+dev_thunk!(void vk_free_command_buffers, "vkFreeCommandBuffers", (device, command_pool: VkCommandPool, command_buffer_count: u32, p_command_buffers: *const VkCommandBuffer));
+dev_thunk!(vk_create_fence, "vkCreateFence", VkResult, (device, p_info: *const c_void, p_allocator: *const c_void, p_fence: *mut VkFence));
+dev_thunk!(void vk_destroy_fence, "vkDestroyFence", (device, fence: VkFence, p_allocator: *const c_void));
+dev_thunk!(vk_reset_fences, "vkResetFences", VkResult, (device, fence_count: u32, p_fences: *const VkFence));
+dev_thunk!(vk_get_fence_status, "vkGetFenceStatus", VkResult, (device, fence: VkFence));
+dev_thunk!(vk_wait_for_fences, "vkWaitForFences", VkResult, (device, fence_count: u32, p_fences: *const VkFence, wait_all: u32, timeout: u64));
+dev_thunk!(vk_create_semaphore, "vkCreateSemaphore", VkResult, (device, p_info: *const c_void, p_allocator: *const c_void, p_semaphore: *mut VkSemaphore));
+dev_thunk!(void vk_destroy_semaphore, "vkDestroySemaphore", (device, semaphore: VkSemaphore, p_allocator: *const c_void));
+dev_thunk!(vk_get_semaphore_counter_value, "vkGetSemaphoreCounterValue", VkResult, (device, semaphore: VkSemaphore, p_value: *mut u64));
+dev_thunk!(vk_wait_semaphores, "vkWaitSemaphores", VkResult, (device, p_wait_info: *const c_void, timeout: u64));
+dev_thunk!(vk_signal_semaphore, "vkSignalSemaphore", VkResult, (device, p_signal_info: *const c_void));
+dev_thunk!(vk_create_event, "vkCreateEvent", VkResult, (device, p_info: *const c_void, p_allocator: *const c_void, p_event: *mut VkEvent));
+dev_thunk!(void vk_destroy_event, "vkDestroyEvent", (device, event: VkEvent, p_allocator: *const c_void));
+dev_thunk!(vk_get_event_status, "vkGetEventStatus", VkResult, (device, event: VkEvent));
+dev_thunk!(vk_set_event, "vkSetEvent", VkResult, (device, event: VkEvent));
+dev_thunk!(vk_reset_event, "vkResetEvent", VkResult, (device, event: VkEvent));
+dev_thunk!(vk_create_query_pool, "vkCreateQueryPool", VkResult, (device, p_info: *const c_void, p_allocator: *const c_void, p_query_pool: *mut VkQueryPool));
+dev_thunk!(void vk_destroy_query_pool, "vkDestroyQueryPool", (device, query_pool: VkQueryPool, p_allocator: *const c_void));
+dev_thunk!(vk_get_query_pool_results, "vkGetQueryPoolResults", VkResult, (device, query_pool: VkQueryPool, first_query: u32, query_count: u32, data_size: usize, p_data: *mut c_void, stride: VkDeviceSize, flags: VkQueryResultFlags));
+dev_thunk!(void vk_reset_query_pool, "vkResetQueryPool", (device, query_pool: VkQueryPool, first_query: u32, query_count: u32));
+dev_thunk!(vk_create_swapchain_khr, "vkCreateSwapchainKHR", VkResult, (device, p_info: *const c_void, p_allocator: *const c_void, p_swapchain: *mut VkSwapchainKHR));
+dev_thunk!(void vk_destroy_swapchain_khr, "vkDestroySwapchainKHR", (device, swapchain: VkSwapchainKHR, p_allocator: *const c_void));
+dev_thunk!(vk_get_swapchain_images_khr, "vkGetSwapchainImagesKHR", VkResult, (device, swapchain: VkSwapchainKHR, p_count: *mut u32, p_images: *mut VkImage));
+dev_thunk!(vk_acquire_next_image_khr, "vkAcquireNextImageKHR", VkResult, (device, swapchain: VkSwapchainKHR, timeout: u64, semaphore: VkSemaphore, fence: VkFence, p_image_index: *mut u32));
+dev_thunk!(vk_acquire_next_image2_khr, "vkAcquireNextImage2KHR", VkResult, (device, p_info: *const c_void, p_image_index: *mut u32));
+dev_thunk!(vk_get_device_group_present_capabilities_khr, "vkGetDeviceGroupPresentCapabilitiesKHR", VkResult, (device, p_device_group_present_capabilities: *mut c_void));
+dev_thunk!(vk_get_device_group_surface_present_modes_khr, "vkGetDeviceGroupSurfacePresentModesKHR", VkResult, (device, surface: VkSurfaceKHR, p_modes: *mut u32));
+dev_thunk!(void vk_get_device_memory_commitment, "vkGetDeviceMemoryCommitment", (device, memory: VkDeviceMemory, p_committed: *mut VkDeviceSize));
+dev_thunk!(vk_get_device_memory_opaque_capture_address, "vkGetDeviceMemoryOpaqueCaptureAddress", VkDeviceAddress, (device, p_info: *const c_void));
+dev_thunk!(vk_get_buffer_device_address, "vkGetBufferDeviceAddress", VkDeviceAddress, (device, p_info: *const c_void));
+dev_thunk!(vk_get_buffer_opaque_capture_address, "vkGetBufferOpaqueCaptureAddress", u64, (device, p_info: *const c_void));
+dev_thunk!(void vk_get_render_area_granularity, "vkGetRenderAreaGranularity", (device, render_pass: VkRenderPass, p_granularity: *mut c_void));
+dev_thunk!(vk_get_calibrated_timestamps_ext, "vkGetCalibratedTimestampsEXT", VkResult, (device, timestamp_count: u32, p_timestamp_infos: *const c_void, p_timestamps: *mut u64, p_max_deviation: *mut u64));
+dev_thunk!(vk_create_private_data_slot, "vkCreatePrivateDataSlot", VkResult, (device, p_info: *const c_void, p_allocator: *const c_void, p_private_data_slot: *mut u64));
+dev_thunk!(void vk_destroy_private_data_slot, "vkDestroyPrivateDataSlot", (device, private_data_slot: u64, p_allocator: *const c_void));
+dev_thunk!(vk_set_private_data, "vkSetPrivateData", VkResult, (device, object_type: u32, object_handle: u64, private_data_slot: u64, data: u64));
+dev_thunk!(void vk_get_private_data, "vkGetPrivateData", (device, object_type: u32, object_handle: u64, private_data_slot: u64, p_data: *mut u64));
+dev_thunk!(void vk_set_hdr_metadata_ext, "vkSetHdrMetadataEXT", (device, swapchain_count: u32, p_swapchains: *const VkSwapchainKHR, p_metadata: *const c_void));
+
+// Command buffer functions (use stored instance for dispatch)
+cmd_thunk!(void vk_begin_command_buffer, "vkBeginCommandBuffer", (command_buffer, p_begin_info: *const c_void));
+cmd_thunk!(
+    vk_end_command_buffer,
+    "vkEndCommandBuffer",
+    VkResult,
+    (command_buffer,)
+);
+cmd_thunk!(vk_reset_command_buffer, "vkResetCommandBuffer", VkResult, (command_buffer, flags: VkCommandBufferResetFlags));
+cmd_thunk!(void vk_cmd_bind_pipeline, "vkCmdBindPipeline", (command_buffer, pipeline_bind_point: VkPipelineBindPoint, pipeline: VkPipeline));
+cmd_thunk!(void vk_cmd_set_viewport, "vkCmdSetViewport", (command_buffer, first_viewport: u32, viewport_count: u32, p_viewports: *const c_void));
+cmd_thunk!(void vk_cmd_set_scissor, "vkCmdSetScissor", (command_buffer, first_scissor: u32, scissor_count: u32, p_scissors: *const c_void));
+cmd_thunk!(void vk_cmd_set_line_width, "vkCmdSetLineWidth", (command_buffer, line_width: f32));
+cmd_thunk!(void vk_cmd_set_depth_bias, "vkCmdSetDepthBias", (command_buffer, depth_bias_constant_factor: f32, depth_bias_clamp: f32, depth_bias_slope_factor: f32));
+cmd_thunk!(void vk_cmd_set_blend_constants, "vkCmdSetBlendConstants", (command_buffer, blend_constants: *const f32));
+cmd_thunk!(void vk_cmd_set_depth_bounds, "vkCmdSetDepthBounds", (command_buffer, min_depth_bounds: f32, max_depth_bounds: f32));
+cmd_thunk!(void vk_cmd_set_stencil_compare_mask, "vkCmdSetStencilCompareMask", (command_buffer, face_mask: VkStencilFaceFlags, compare_mask: u32));
+cmd_thunk!(void vk_cmd_set_stencil_write_mask, "vkCmdSetStencilWriteMask", (command_buffer, face_mask: VkStencilFaceFlags, write_mask: u32));
+cmd_thunk!(void vk_cmd_set_stencil_reference, "vkCmdSetStencilReference", (command_buffer, face_mask: VkStencilFaceFlags, reference: u32));
+cmd_thunk!(void vk_cmd_bind_descriptor_sets, "vkCmdBindDescriptorSets", (command_buffer, pipeline_bind_point: VkPipelineBindPoint, layout: VkPipelineLayout, first_set: u32, descriptor_set_count: u32, p_descriptor_sets: *const VkDescriptorSet, dynamic_offset_count: u32, p_dynamic_offsets: *const u32));
+cmd_thunk!(void vk_cmd_bind_index_buffer, "vkCmdBindIndexBuffer", (command_buffer, buffer: VkBuffer, offset: VkDeviceSize, index_type: VkIndexType));
+cmd_thunk!(void vk_cmd_bind_vertex_buffers, "vkCmdBindVertexBuffers", (command_buffer, first_binding: u32, binding_count: u32, p_buffers: *const VkBuffer, p_offsets: *const VkDeviceSize));
+cmd_thunk!(void vk_cmd_bind_vertex_buffers2, "vkCmdBindVertexBuffers2", (command_buffer, first_binding: u32, binding_count: u32, p_buffers: *const VkBuffer, p_offsets: *const VkDeviceSize, p_sizes: *const VkDeviceSize, p_strides: *const VkDeviceSize));
+cmd_thunk!(void vk_cmd_draw, "vkCmdDraw", (command_buffer, vertex_count: u32, instance_count: u32, first_vertex: u32, first_instance: u32));
+cmd_thunk!(void vk_cmd_draw_indexed, "vkCmdDrawIndexed", (command_buffer, index_count: u32, instance_count: u32, first_index: u32, vertex_offset: i32, first_instance: u32));
+cmd_thunk!(void vk_cmd_draw_indirect, "vkCmdDrawIndirect", (command_buffer, buffer: VkBuffer, offset: VkDeviceSize, draw_count: u32, stride: u32));
+cmd_thunk!(void vk_cmd_draw_indexed_indirect, "vkCmdDrawIndexedIndirect", (command_buffer, buffer: VkBuffer, offset: VkDeviceSize, draw_count: u32, stride: u32));
+cmd_thunk!(void vk_cmd_dispatch, "vkCmdDispatch", (command_buffer, group_count_x: u32, group_count_y: u32, group_count_z: u32));
+cmd_thunk!(void vk_cmd_dispatch_indirect, "vkCmdDispatchIndirect", (command_buffer, buffer: VkBuffer, offset: VkDeviceSize));
+cmd_thunk!(void vk_cmd_copy_buffer, "vkCmdCopyBuffer", (command_buffer, src_buffer: VkBuffer, dst_buffer: VkBuffer, region_count: u32, p_regions: *const c_void));
+cmd_thunk!(void vk_cmd_copy_image, "vkCmdCopyImage", (command_buffer, src_image: VkImage, src_layout: u32, dst_image: VkImage, dst_layout: u32, region_count: u32, p_regions: *const c_void));
+cmd_thunk!(void vk_cmd_blit_image, "vkCmdBlitImage", (command_buffer, src_image: VkImage, src_layout: u32, dst_image: VkImage, dst_layout: u32, region_count: u32, p_regions: *const c_void, filter: u32));
+cmd_thunk!(void vk_cmd_copy_buffer_to_image, "vkCmdCopyBufferToImage", (command_buffer, src_buffer: VkBuffer, dst_image: VkImage, dst_layout: u32, region_count: u32, p_regions: *const c_void));
+cmd_thunk!(void vk_cmd_copy_image_to_buffer, "vkCmdCopyImageToBuffer", (command_buffer, src_image: VkImage, src_layout: u32, dst_buffer: VkBuffer, region_count: u32, p_regions: *const c_void));
+cmd_thunk!(void vk_cmd_update_buffer, "vkCmdUpdateBuffer", (command_buffer, dst_buffer: VkBuffer, dst_offset: VkDeviceSize, data_size: VkDeviceSize, p_data: *const c_void));
+cmd_thunk!(void vk_cmd_fill_buffer, "vkCmdFillBuffer", (command_buffer, dst_buffer: VkBuffer, dst_offset: VkDeviceSize, size: VkDeviceSize, data: u32));
+cmd_thunk!(void vk_cmd_clear_color_image, "vkCmdClearColorImage", (command_buffer, image: VkImage, image_layout: u32, p_color: *const c_void, range_count: u32, p_ranges: *const c_void));
+cmd_thunk!(void vk_cmd_clear_depth_stencil_image, "vkCmdClearDepthStencilImage", (command_buffer, image: VkImage, image_layout: u32, p_depth_stencil: *const c_void, range_count: u32, p_ranges: *const c_void));
+cmd_thunk!(void vk_cmd_clear_attachments, "vkCmdClearAttachments", (command_buffer, attachment_count: u32, p_attachments: *const c_void, rect_count: u32, p_rects: *const c_void));
+cmd_thunk!(void vk_cmd_resolve_image, "vkCmdResolveImage", (command_buffer, src_image: VkImage, src_layout: u32, dst_image: VkImage, dst_layout: u32, region_count: u32, p_regions: *const c_void));
+cmd_thunk!(void vk_cmd_set_event, "vkCmdSetEvent", (command_buffer, event: VkEvent, stage_mask: VkPipelineStageFlags));
+cmd_thunk!(void vk_cmd_reset_event, "vkCmdResetEvent", (command_buffer, event: VkEvent, stage_mask: VkPipelineStageFlags));
+cmd_thunk!(void vk_cmd_wait_events, "vkCmdWaitEvents", (command_buffer, event_count: u32, p_events: *const VkEvent, src_stage_mask: VkPipelineStageFlags, dst_stage_mask: VkPipelineStageFlags, memory_barrier_count: u32, p_memory_barriers: *const c_void, buffer_barrier_count: u32, p_buffer_barriers: *const c_void, image_barrier_count: u32, p_image_barriers: *const c_void));
+cmd_thunk!(void vk_cmd_pipeline_barrier, "vkCmdPipelineBarrier", (command_buffer, src_stage_mask: VkPipelineStageFlags, dst_stage_mask: VkPipelineStageFlags, dependency_flags: u32, memory_barrier_count: u32, p_memory_barriers: *const c_void, buffer_memory_barrier_count: u32, p_buffer_memory_barriers: *const c_void, image_memory_barrier_count: u32, p_image_memory_barriers: *const c_void));
+cmd_thunk!(void vk_cmd_pipeline_barrier2, "vkCmdPipelineBarrier2", (command_buffer, p_dependency_info: *const c_void));
+cmd_thunk!(void vk_cmd_begin_query, "vkCmdBeginQuery", (command_buffer, query_pool: VkQueryPool, query: u32, flags: u32));
+cmd_thunk!(void vk_cmd_end_query, "vkCmdEndQuery", (command_buffer, query_pool: VkQueryPool, query: u32));
+cmd_thunk!(void vk_cmd_reset_query_pool, "vkCmdResetQueryPool", (command_buffer, query_pool: VkQueryPool, first_query: u32, query_count: u32));
+cmd_thunk!(void vk_cmd_write_timestamp, "vkCmdWriteTimestamp", (command_buffer, pipeline_stage: VkPipelineStageFlags, query_pool: VkQueryPool, query: u32));
+cmd_thunk!(void vk_cmd_write_timestamp2, "vkCmdWriteTimestamp2", (command_buffer, stage: u64, query_pool: VkQueryPool, query: u32));
+cmd_thunk!(void vk_cmd_copy_query_pool_results, "vkCmdCopyQueryPoolResults", (command_buffer, query_pool: VkQueryPool, first_query: u32, query_count: u32, dst_buffer: VkBuffer, dst_offset: VkDeviceSize, stride: VkDeviceSize, flags: VkQueryResultFlags));
+cmd_thunk!(void vk_cmd_push_constants, "vkCmdPushConstants", (command_buffer, layout: VkPipelineLayout, stage_flags: VkShaderStageFlags, offset: u32, size: u32, p_values: *const c_void));
+cmd_thunk!(void vk_cmd_begin_render_pass, "vkCmdBeginRenderPass", (command_buffer, p_render_pass_begin: *const c_void, contents: VkSubpassContents));
+cmd_thunk!(void vk_cmd_begin_render_pass2, "vkCmdBeginRenderPass2", (command_buffer, p_render_pass_begin: *const c_void, p_subpass_begin_info: *const c_void));
+cmd_thunk!(void vk_cmd_next_subpass, "vkCmdNextSubpass", (command_buffer, contents: VkSubpassContents));
+cmd_thunk!(void vk_cmd_next_subpass2, "vkCmdNextSubpass2", (command_buffer, p_subpass_begin_info: *const c_void, p_subpass_end_info: *const c_void));
+cmd_thunk!(void vk_cmd_end_render_pass, "vkCmdEndRenderPass", (command_buffer,));
+cmd_thunk!(void vk_cmd_end_render_pass2, "vkCmdEndRenderPass2", (command_buffer, p_subpass_end_info: *const c_void));
+cmd_thunk!(void vk_cmd_execute_commands, "vkCmdExecuteCommands", (command_buffer, command_buffer_count: u32, p_command_buffers: *const VkCommandBuffer));
+cmd_thunk!(void vk_cmd_bind_descriptor_sets2, "vkCmdBindDescriptorSets2", (command_buffer, p_bind_descriptor_sets_info: *const c_void));
+cmd_thunk!(void vk_cmd_push_constants2, "vkCmdPushConstants2", (command_buffer, p_push_constants_info: *const c_void));
+cmd_thunk!(void vk_cmd_push_descriptor_set_khr, "vkCmdPushDescriptorSetKHR", (command_buffer, pipeline_bind_point: VkPipelineBindPoint, layout: VkPipelineLayout, set: u32, descriptor_write_count: u32, p_descriptor_writes: *const c_void));
+cmd_thunk!(void vk_cmd_push_descriptor_set_with_template_khr, "vkCmdPushDescriptorSetWithTemplateKHR", (command_buffer, descriptor_update_template: VkDescriptorUpdateTemplate, layout: VkPipelineLayout, set: u32, p_data: *const c_void));
+cmd_thunk!(void vk_cmd_debug_marker_begin_ext, "vkCmdDebugMarkerBeginEXT", (command_buffer, p_marker_info: *const c_void));
+cmd_thunk!(void vk_cmd_debug_marker_end_ext, "vkCmdDebugMarkerEndEXT", (command_buffer,));
+cmd_thunk!(void vk_cmd_debug_marker_insert_ext, "vkCmdDebugMarkerInsertEXT", (command_buffer, p_marker_info: *const c_void));
 
 // ── Exported Vulkan stubs (extern "win64") ────────────────────────────────────
 
@@ -237,10 +570,284 @@ pub unsafe extern "win64" fn vk_get_instance_proc_addr(
         "vkEnumerateInstanceVersion" => vk_enumerate_instance_version as PFN_vkVoidFunction,
         "vkCreateWin32SurfaceKHR" => vk_create_win32_surface_khr as PFN_vkVoidFunction,
         "vkDestroySurfaceKHR" => vk_destroy_surface_khr as PFN_vkVoidFunction,
-        // For all other functions: return the real Linux function pointer.
-        // NOTE: The returned pointer uses SysV ABI. A Windows PE caller will invoke
-        // it with Windows x64 ABI — this is a known Phase 3 limitation. A full
-        // per-function thunk table is needed for complete compatibility.
+        "vkGetDeviceProcAddr" => vk_get_device_proc_addr as PFN_vkVoidFunction,
+        // Physical-device thunks
+        "vkDestroyInstance" => vk_destroy_instance as PFN_vkVoidFunction,
+        "vkEnumeratePhysicalDevices" => vk_enumerate_physical_devices as PFN_vkVoidFunction,
+        "vkGetPhysicalDeviceProperties" => vk_get_physical_device_properties as PFN_vkVoidFunction,
+        "vkGetPhysicalDeviceFeatures" => vk_get_physical_device_features as PFN_vkVoidFunction,
+        "vkGetPhysicalDeviceFeatures2" | "vkGetPhysicalDeviceFeatures2KHR" => {
+            vk_get_physical_device_features2 as PFN_vkVoidFunction
+        }
+        "vkGetPhysicalDeviceProperties2" | "vkGetPhysicalDeviceProperties2KHR" => {
+            vk_get_physical_device_properties2 as PFN_vkVoidFunction
+        }
+        "vkGetPhysicalDeviceMemoryProperties" => {
+            vk_get_physical_device_memory_properties as PFN_vkVoidFunction
+        }
+        "vkGetPhysicalDeviceMemoryProperties2" | "vkGetPhysicalDeviceMemoryProperties2KHR" => {
+            vk_get_physical_device_memory_properties2 as PFN_vkVoidFunction
+        }
+        "vkGetPhysicalDeviceQueueFamilyProperties" => {
+            vk_get_physical_device_queue_family_properties as PFN_vkVoidFunction
+        }
+        "vkGetPhysicalDeviceQueueFamilyProperties2"
+        | "vkGetPhysicalDeviceQueueFamilyProperties2KHR" => {
+            vk_get_physical_device_queue_family_properties2 as PFN_vkVoidFunction
+        }
+        "vkGetPhysicalDeviceFormatProperties" => {
+            vk_get_physical_device_format_properties as PFN_vkVoidFunction
+        }
+        "vkGetPhysicalDeviceFormatProperties2" | "vkGetPhysicalDeviceFormatProperties2KHR" => {
+            vk_get_physical_device_format_properties2 as PFN_vkVoidFunction
+        }
+        "vkGetPhysicalDeviceImageFormatProperties" => {
+            vk_get_physical_device_image_format_properties as PFN_vkVoidFunction
+        }
+        "vkGetPhysicalDeviceImageFormatProperties2"
+        | "vkGetPhysicalDeviceImageFormatProperties2KHR" => {
+            vk_get_physical_device_image_format_properties2 as PFN_vkVoidFunction
+        }
+        "vkEnumerateDeviceExtensionProperties" => {
+            vk_enumerate_device_extension_properties as PFN_vkVoidFunction
+        }
+        "vkEnumerateDeviceLayerProperties" => {
+            vk_enumerate_device_layer_properties as PFN_vkVoidFunction
+        }
+        "vkCreateDevice" => vk_create_device as PFN_vkVoidFunction,
+        "vkGetPhysicalDeviceSurfaceSupportKHR" => {
+            vk_get_physical_device_surface_support_khr as PFN_vkVoidFunction
+        }
+        "vkGetPhysicalDeviceSurfaceCapabilitiesKHR" => {
+            vk_get_physical_device_surface_capabilities_khr as PFN_vkVoidFunction
+        }
+        "vkGetPhysicalDeviceSurfaceFormatsKHR" => {
+            vk_get_physical_device_surface_formats_khr as PFN_vkVoidFunction
+        }
+        "vkGetPhysicalDeviceSurfacePresentModesKHR" => {
+            vk_get_physical_device_surface_present_modes_khr as PFN_vkVoidFunction
+        }
+        "vkGetPhysicalDeviceSurfaceCapabilities2KHR" => {
+            vk_get_physical_device_surface_capabilities2_khr as PFN_vkVoidFunction
+        }
+        "vkGetPhysicalDeviceCalibrateableTimeDomainsEXT" => {
+            vk_get_physical_device_calibrateable_time_domains_ext as PFN_vkVoidFunction
+        }
+        "vkGetPhysicalDeviceSparseImageFormatProperties" => {
+            vk_get_physical_device_sparse_image_format_properties as PFN_vkVoidFunction
+        }
+        // Device thunks
+        "vkDestroyDevice" => vk_destroy_device as PFN_vkVoidFunction,
+        "vkGetDeviceQueue" => vk_get_device_queue as PFN_vkVoidFunction,
+        "vkGetDeviceQueue2" => vk_get_device_queue2 as PFN_vkVoidFunction,
+        "vkDeviceWaitIdle" => vk_device_wait_idle as PFN_vkVoidFunction,
+        "vkQueueSubmit" => vk_queue_submit as PFN_vkVoidFunction,
+        "vkQueueSubmit2" | "vkQueueSubmit2KHR" => vk_queue_submit2 as PFN_vkVoidFunction,
+        "vkQueueWaitIdle" => vk_queue_wait_idle as PFN_vkVoidFunction,
+        "vkQueuePresentKHR" => vk_queue_present_khr as PFN_vkVoidFunction,
+        "vkAllocateMemory" => vk_allocate_memory as PFN_vkVoidFunction,
+        "vkFreeMemory" => vk_free_memory as PFN_vkVoidFunction,
+        "vkMapMemory" => vk_map_memory as PFN_vkVoidFunction,
+        "vkUnmapMemory" => vk_unmap_memory as PFN_vkVoidFunction,
+        "vkFlushMappedMemoryRanges" => vk_flush_mapped_memory_ranges as PFN_vkVoidFunction,
+        "vkInvalidateMappedMemoryRanges" => {
+            vk_invalidate_mapped_memory_ranges as PFN_vkVoidFunction
+        }
+        "vkBindBufferMemory" => vk_bind_buffer_memory as PFN_vkVoidFunction,
+        "vkBindBufferMemory2" | "vkBindBufferMemory2KHR" => {
+            vk_bind_buffer_memory2 as PFN_vkVoidFunction
+        }
+        "vkBindImageMemory" => vk_bind_image_memory as PFN_vkVoidFunction,
+        "vkBindImageMemory2" | "vkBindImageMemory2KHR" => {
+            vk_bind_image_memory2 as PFN_vkVoidFunction
+        }
+        "vkGetBufferMemoryRequirements" => vk_get_buffer_memory_requirements as PFN_vkVoidFunction,
+        "vkGetBufferMemoryRequirements2" | "vkGetBufferMemoryRequirements2KHR" => {
+            vk_get_buffer_memory_requirements2 as PFN_vkVoidFunction
+        }
+        "vkGetImageMemoryRequirements" => vk_get_image_memory_requirements as PFN_vkVoidFunction,
+        "vkGetImageMemoryRequirements2" | "vkGetImageMemoryRequirements2KHR" => {
+            vk_get_image_memory_requirements2 as PFN_vkVoidFunction
+        }
+        "vkCreateBuffer" => vk_create_buffer as PFN_vkVoidFunction,
+        "vkDestroyBuffer" => vk_destroy_buffer as PFN_vkVoidFunction,
+        "vkCreateImage" => vk_create_image as PFN_vkVoidFunction,
+        "vkDestroyImage" => vk_destroy_image as PFN_vkVoidFunction,
+        "vkGetImageSubresourceLayout" => vk_get_image_subresource_layout as PFN_vkVoidFunction,
+        "vkCreateImageView" => vk_create_image_view as PFN_vkVoidFunction,
+        "vkDestroyImageView" => vk_destroy_image_view as PFN_vkVoidFunction,
+        "vkCreateBufferView" => vk_create_buffer_view as PFN_vkVoidFunction,
+        "vkDestroyBufferView" => vk_destroy_buffer_view as PFN_vkVoidFunction,
+        "vkCreateShaderModule" => vk_create_shader_module as PFN_vkVoidFunction,
+        "vkDestroyShaderModule" => vk_destroy_shader_module as PFN_vkVoidFunction,
+        "vkCreatePipelineCache" => vk_create_pipeline_cache as PFN_vkVoidFunction,
+        "vkDestroyPipelineCache" => vk_destroy_pipeline_cache as PFN_vkVoidFunction,
+        "vkCreateGraphicsPipelines" => vk_create_graphics_pipelines as PFN_vkVoidFunction,
+        "vkCreateComputePipelines" => vk_create_compute_pipelines as PFN_vkVoidFunction,
+        "vkDestroyPipeline" => vk_destroy_pipeline as PFN_vkVoidFunction,
+        "vkCreatePipelineLayout" => vk_create_pipeline_layout as PFN_vkVoidFunction,
+        "vkDestroyPipelineLayout" => vk_destroy_pipeline_layout as PFN_vkVoidFunction,
+        "vkCreateSampler" => vk_create_sampler as PFN_vkVoidFunction,
+        "vkDestroySampler" => vk_destroy_sampler as PFN_vkVoidFunction,
+        "vkCreateDescriptorSetLayout" => vk_create_descriptor_set_layout as PFN_vkVoidFunction,
+        "vkDestroyDescriptorSetLayout" => vk_destroy_descriptor_set_layout as PFN_vkVoidFunction,
+        "vkCreateDescriptorPool" => vk_create_descriptor_pool as PFN_vkVoidFunction,
+        "vkDestroyDescriptorPool" => vk_destroy_descriptor_pool as PFN_vkVoidFunction,
+        "vkResetDescriptorPool" => vk_reset_descriptor_pool as PFN_vkVoidFunction,
+        "vkAllocateDescriptorSets" => vk_allocate_descriptor_sets as PFN_vkVoidFunction,
+        "vkFreeDescriptorSets" => vk_free_descriptor_sets as PFN_vkVoidFunction,
+        "vkUpdateDescriptorSets" => vk_update_descriptor_sets as PFN_vkVoidFunction,
+        "vkCreateDescriptorUpdateTemplate" | "vkCreateDescriptorUpdateTemplateKHR" => {
+            vk_create_descriptor_update_template as PFN_vkVoidFunction
+        }
+        "vkDestroyDescriptorUpdateTemplate" | "vkDestroyDescriptorUpdateTemplateKHR" => {
+            vk_destroy_descriptor_update_template as PFN_vkVoidFunction
+        }
+        "vkUpdateDescriptorSetWithTemplate" | "vkUpdateDescriptorSetWithTemplateKHR" => {
+            vk_update_descriptor_set_with_template as PFN_vkVoidFunction
+        }
+        "vkCreateRenderPass" => vk_create_render_pass as PFN_vkVoidFunction,
+        "vkCreateRenderPass2" | "vkCreateRenderPass2KHR" => {
+            vk_create_render_pass2 as PFN_vkVoidFunction
+        }
+        "vkDestroyRenderPass" => vk_destroy_render_pass as PFN_vkVoidFunction,
+        "vkCreateFramebuffer" => vk_create_framebuffer as PFN_vkVoidFunction,
+        "vkDestroyFramebuffer" => vk_destroy_framebuffer as PFN_vkVoidFunction,
+        "vkCreateCommandPool" => vk_create_command_pool as PFN_vkVoidFunction,
+        "vkDestroyCommandPool" => vk_destroy_command_pool as PFN_vkVoidFunction,
+        "vkResetCommandPool" => vk_reset_command_pool as PFN_vkVoidFunction,
+        "vkAllocateCommandBuffers" => vk_allocate_command_buffers as PFN_vkVoidFunction,
+        "vkFreeCommandBuffers" => vk_free_command_buffers as PFN_vkVoidFunction,
+        "vkCreateFence" => vk_create_fence as PFN_vkVoidFunction,
+        "vkDestroyFence" => vk_destroy_fence as PFN_vkVoidFunction,
+        "vkResetFences" => vk_reset_fences as PFN_vkVoidFunction,
+        "vkGetFenceStatus" => vk_get_fence_status as PFN_vkVoidFunction,
+        "vkWaitForFences" => vk_wait_for_fences as PFN_vkVoidFunction,
+        "vkCreateSemaphore" => vk_create_semaphore as PFN_vkVoidFunction,
+        "vkDestroySemaphore" => vk_destroy_semaphore as PFN_vkVoidFunction,
+        "vkGetSemaphoreCounterValue" | "vkGetSemaphoreCounterValueKHR" => {
+            vk_get_semaphore_counter_value as PFN_vkVoidFunction
+        }
+        "vkWaitSemaphores" | "vkWaitSemaphoresKHR" => vk_wait_semaphores as PFN_vkVoidFunction,
+        "vkSignalSemaphore" | "vkSignalSemaphoreKHR" => vk_signal_semaphore as PFN_vkVoidFunction,
+        "vkCreateEvent" => vk_create_event as PFN_vkVoidFunction,
+        "vkDestroyEvent" => vk_destroy_event as PFN_vkVoidFunction,
+        "vkGetEventStatus" => vk_get_event_status as PFN_vkVoidFunction,
+        "vkSetEvent" => vk_set_event as PFN_vkVoidFunction,
+        "vkResetEvent" => vk_reset_event as PFN_vkVoidFunction,
+        "vkCreateQueryPool" => vk_create_query_pool as PFN_vkVoidFunction,
+        "vkDestroyQueryPool" => vk_destroy_query_pool as PFN_vkVoidFunction,
+        "vkGetQueryPoolResults" => vk_get_query_pool_results as PFN_vkVoidFunction,
+        "vkResetQueryPool" | "vkResetQueryPoolEXT" => vk_reset_query_pool as PFN_vkVoidFunction,
+        "vkCreateSwapchainKHR" => vk_create_swapchain_khr as PFN_vkVoidFunction,
+        "vkDestroySwapchainKHR" => vk_destroy_swapchain_khr as PFN_vkVoidFunction,
+        "vkGetSwapchainImagesKHR" => vk_get_swapchain_images_khr as PFN_vkVoidFunction,
+        "vkAcquireNextImageKHR" => vk_acquire_next_image_khr as PFN_vkVoidFunction,
+        "vkAcquireNextImage2KHR" => vk_acquire_next_image2_khr as PFN_vkVoidFunction,
+        "vkGetDeviceGroupPresentCapabilitiesKHR" => {
+            vk_get_device_group_present_capabilities_khr as PFN_vkVoidFunction
+        }
+        "vkGetDeviceGroupSurfacePresentModesKHR" => {
+            vk_get_device_group_surface_present_modes_khr as PFN_vkVoidFunction
+        }
+        "vkGetDeviceMemoryCommitment" => vk_get_device_memory_commitment as PFN_vkVoidFunction,
+        "vkGetDeviceMemoryOpaqueCaptureAddress" | "vkGetDeviceMemoryOpaqueCaptureAddressKHR" => {
+            vk_get_device_memory_opaque_capture_address as PFN_vkVoidFunction
+        }
+        "vkGetBufferDeviceAddress"
+        | "vkGetBufferDeviceAddressKHR"
+        | "vkGetBufferDeviceAddressEXT" => vk_get_buffer_device_address as PFN_vkVoidFunction,
+        "vkGetBufferOpaqueCaptureAddress" | "vkGetBufferOpaqueCaptureAddressKHR" => {
+            vk_get_buffer_opaque_capture_address as PFN_vkVoidFunction
+        }
+        "vkGetRenderAreaGranularity" => vk_get_render_area_granularity as PFN_vkVoidFunction,
+        "vkGetCalibratedTimestampsEXT" => vk_get_calibrated_timestamps_ext as PFN_vkVoidFunction,
+        "vkCreatePrivateDataSlot" | "vkCreatePrivateDataSlotEXT" => {
+            vk_create_private_data_slot as PFN_vkVoidFunction
+        }
+        "vkDestroyPrivateDataSlot" | "vkDestroyPrivateDataSlotEXT" => {
+            vk_destroy_private_data_slot as PFN_vkVoidFunction
+        }
+        "vkSetPrivateData" | "vkSetPrivateDataEXT" => vk_set_private_data as PFN_vkVoidFunction,
+        "vkGetPrivateData" | "vkGetPrivateDataEXT" => vk_get_private_data as PFN_vkVoidFunction,
+        "vkSetHdrMetadataEXT" => vk_set_hdr_metadata_ext as PFN_vkVoidFunction,
+        // Command buffer thunks
+        "vkBeginCommandBuffer" => vk_begin_command_buffer as PFN_vkVoidFunction,
+        "vkEndCommandBuffer" => vk_end_command_buffer as PFN_vkVoidFunction,
+        "vkResetCommandBuffer" => vk_reset_command_buffer as PFN_vkVoidFunction,
+        "vkCmdBindPipeline" => vk_cmd_bind_pipeline as PFN_vkVoidFunction,
+        "vkCmdSetViewport" => vk_cmd_set_viewport as PFN_vkVoidFunction,
+        "vkCmdSetScissor" => vk_cmd_set_scissor as PFN_vkVoidFunction,
+        "vkCmdSetLineWidth" => vk_cmd_set_line_width as PFN_vkVoidFunction,
+        "vkCmdSetDepthBias" => vk_cmd_set_depth_bias as PFN_vkVoidFunction,
+        "vkCmdSetBlendConstants" => vk_cmd_set_blend_constants as PFN_vkVoidFunction,
+        "vkCmdSetDepthBounds" => vk_cmd_set_depth_bounds as PFN_vkVoidFunction,
+        "vkCmdSetStencilCompareMask" => vk_cmd_set_stencil_compare_mask as PFN_vkVoidFunction,
+        "vkCmdSetStencilWriteMask" => vk_cmd_set_stencil_write_mask as PFN_vkVoidFunction,
+        "vkCmdSetStencilReference" => vk_cmd_set_stencil_reference as PFN_vkVoidFunction,
+        "vkCmdBindDescriptorSets" => vk_cmd_bind_descriptor_sets as PFN_vkVoidFunction,
+        "vkCmdBindIndexBuffer" => vk_cmd_bind_index_buffer as PFN_vkVoidFunction,
+        "vkCmdBindVertexBuffers" => vk_cmd_bind_vertex_buffers as PFN_vkVoidFunction,
+        "vkCmdBindVertexBuffers2" | "vkCmdBindVertexBuffers2EXT" => {
+            vk_cmd_bind_vertex_buffers2 as PFN_vkVoidFunction
+        }
+        "vkCmdDraw" => vk_cmd_draw as PFN_vkVoidFunction,
+        "vkCmdDrawIndexed" => vk_cmd_draw_indexed as PFN_vkVoidFunction,
+        "vkCmdDrawIndirect" => vk_cmd_draw_indirect as PFN_vkVoidFunction,
+        "vkCmdDrawIndexedIndirect" => vk_cmd_draw_indexed_indirect as PFN_vkVoidFunction,
+        "vkCmdDispatch" => vk_cmd_dispatch as PFN_vkVoidFunction,
+        "vkCmdDispatchIndirect" => vk_cmd_dispatch_indirect as PFN_vkVoidFunction,
+        "vkCmdCopyBuffer" => vk_cmd_copy_buffer as PFN_vkVoidFunction,
+        "vkCmdCopyImage" => vk_cmd_copy_image as PFN_vkVoidFunction,
+        "vkCmdBlitImage" => vk_cmd_blit_image as PFN_vkVoidFunction,
+        "vkCmdCopyBufferToImage" => vk_cmd_copy_buffer_to_image as PFN_vkVoidFunction,
+        "vkCmdCopyImageToBuffer" => vk_cmd_copy_image_to_buffer as PFN_vkVoidFunction,
+        "vkCmdUpdateBuffer" => vk_cmd_update_buffer as PFN_vkVoidFunction,
+        "vkCmdFillBuffer" => vk_cmd_fill_buffer as PFN_vkVoidFunction,
+        "vkCmdClearColorImage" => vk_cmd_clear_color_image as PFN_vkVoidFunction,
+        "vkCmdClearDepthStencilImage" => vk_cmd_clear_depth_stencil_image as PFN_vkVoidFunction,
+        "vkCmdClearAttachments" => vk_cmd_clear_attachments as PFN_vkVoidFunction,
+        "vkCmdResolveImage" => vk_cmd_resolve_image as PFN_vkVoidFunction,
+        "vkCmdSetEvent" => vk_cmd_set_event as PFN_vkVoidFunction,
+        "vkCmdResetEvent" => vk_cmd_reset_event as PFN_vkVoidFunction,
+        "vkCmdWaitEvents" => vk_cmd_wait_events as PFN_vkVoidFunction,
+        "vkCmdPipelineBarrier" => vk_cmd_pipeline_barrier as PFN_vkVoidFunction,
+        "vkCmdPipelineBarrier2" | "vkCmdPipelineBarrier2KHR" => {
+            vk_cmd_pipeline_barrier2 as PFN_vkVoidFunction
+        }
+        "vkCmdBeginQuery" => vk_cmd_begin_query as PFN_vkVoidFunction,
+        "vkCmdEndQuery" => vk_cmd_end_query as PFN_vkVoidFunction,
+        "vkCmdResetQueryPool" => vk_cmd_reset_query_pool as PFN_vkVoidFunction,
+        "vkCmdWriteTimestamp" => vk_cmd_write_timestamp as PFN_vkVoidFunction,
+        "vkCmdWriteTimestamp2" | "vkCmdWriteTimestamp2KHR" => {
+            vk_cmd_write_timestamp2 as PFN_vkVoidFunction
+        }
+        "vkCmdCopyQueryPoolResults" => vk_cmd_copy_query_pool_results as PFN_vkVoidFunction,
+        "vkCmdPushConstants" => vk_cmd_push_constants as PFN_vkVoidFunction,
+        "vkCmdBeginRenderPass" => vk_cmd_begin_render_pass as PFN_vkVoidFunction,
+        "vkCmdBeginRenderPass2" | "vkCmdBeginRenderPass2KHR" => {
+            vk_cmd_begin_render_pass2 as PFN_vkVoidFunction
+        }
+        "vkCmdNextSubpass" => vk_cmd_next_subpass as PFN_vkVoidFunction,
+        "vkCmdNextSubpass2" | "vkCmdNextSubpass2KHR" => vk_cmd_next_subpass2 as PFN_vkVoidFunction,
+        "vkCmdEndRenderPass" => vk_cmd_end_render_pass as PFN_vkVoidFunction,
+        "vkCmdEndRenderPass2" | "vkCmdEndRenderPass2KHR" => {
+            vk_cmd_end_render_pass2 as PFN_vkVoidFunction
+        }
+        "vkCmdExecuteCommands" => vk_cmd_execute_commands as PFN_vkVoidFunction,
+        "vkCmdBindDescriptorSets2" | "vkCmdBindDescriptorSets2KHR" => {
+            vk_cmd_bind_descriptor_sets2 as PFN_vkVoidFunction
+        }
+        "vkCmdPushConstants2" | "vkCmdPushConstants2KHR" => {
+            vk_cmd_push_constants2 as PFN_vkVoidFunction
+        }
+        "vkCmdPushDescriptorSetKHR" => vk_cmd_push_descriptor_set_khr as PFN_vkVoidFunction,
+        "vkCmdPushDescriptorSetWithTemplateKHR" => {
+            vk_cmd_push_descriptor_set_with_template_khr as PFN_vkVoidFunction
+        }
+        "vkCmdDebugMarkerBeginEXT" => vk_cmd_debug_marker_begin_ext as PFN_vkVoidFunction,
+        "vkCmdDebugMarkerEndEXT" => vk_cmd_debug_marker_end_ext as PFN_vkVoidFunction,
+        "vkCmdDebugMarkerInsertEXT" => vk_cmd_debug_marker_insert_ext as PFN_vkVoidFunction,
         _ => real_fn(instance, name),
     }
 }
@@ -303,7 +910,20 @@ pub unsafe extern "win64" fn vk_create_instance(
         pp_enabled_extension_names: new_exts.as_ptr(),
     };
 
-    unsafe { (vk.create_instance)(&patched, p_allocator, p_instance) }
+    let result = unsafe { (vk.create_instance)(&patched, p_allocator, p_instance) };
+    if result == VK_SUCCESS && !p_instance.is_null() {
+        INSTANCE.store(unsafe { *p_instance } as usize, Ordering::Release);
+    }
+    result
+}
+
+/// vkGetDeviceProcAddr — returns our win64 thunk for the named function.
+pub unsafe extern "win64" fn vk_get_device_proc_addr(
+    device: VkDevice,
+    p_name: *const c_char,
+) -> PFN_vkVoidFunction {
+    // Re-use the instance proc addr dispatch — our thunks work for both.
+    vk_get_instance_proc_addr(device as VkInstance, p_name)
 }
 
 /// vkEnumerateInstanceExtensionProperties — passthrough.
