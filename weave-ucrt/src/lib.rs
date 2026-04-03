@@ -299,17 +299,20 @@ pub unsafe extern "win64" fn ucrt_p_fmode() -> *mut i32 {
 // ── stdio ─────────────────────────────────────────────────────────────────────
 
 pub extern "win64" fn ucrt_acrt_iob_func(fd: u32) -> *mut c_void {
-    // Return non-NULL sentinel pointers for stdin/stdout/stderr so the MinGW
-    // CRT doesn't NULL-check and call error paths. Our own fprintf/fwrite
-    // stubs ignore the stream argument so the actual value doesn't matter.
-    static DUMMY_STDIN: u8 = 0;
-    static DUMMY_STDOUT: u8 = 1;
-    static DUMMY_STDERR: u8 = 2;
-    match fd {
-        0 => &raw const DUMMY_STDIN as *mut c_void,
-        1 => &raw const DUMMY_STDOUT as *mut c_void,
-        2 => &raw const DUMMY_STDERR as *mut c_void,
-        _ => std::ptr::null_mut(),
+    // Return writable buffers for stdin/stdout/stderr.  The MinGW CRT writes
+    // into the returned FILE* to initialise internal fields (e.g. file mode
+    // flags); if we return a read-only .rodata address the first such write
+    // causes SIGSEGV.  256 bytes is large enough to cover a Windows FILE struct.
+    static mut DUMMY_STDIN:  [u8; 256] = [0; 256];
+    static mut DUMMY_STDOUT: [u8; 256] = [0; 256];
+    static mut DUMMY_STDERR: [u8; 256] = [0; 256];
+    unsafe {
+        match fd {
+            0 => DUMMY_STDIN.as_mut_ptr() as *mut c_void,
+            1 => DUMMY_STDOUT.as_mut_ptr() as *mut c_void,
+            2 => DUMMY_STDERR.as_mut_ptr() as *mut c_void,
+            _ => std::ptr::null_mut(),
+        }
     }
 }
 

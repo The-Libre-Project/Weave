@@ -177,12 +177,67 @@ fn print_crash_report(
     };
     let insn_hex = insn_bytes.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ");
 
+    // Read 16 bytes at the fault address via /proc/self/mem (safe — doesn't
+    // re-raise SIGSEGV even if the page is unmapped or read-only).
+    let fault_bytes_hex = {
+        let path = b"/proc/self/mem\0";
+        let fd = unsafe { libc::open(path.as_ptr() as *const libc::c_char, libc::O_RDONLY) };
+        let mut hex = String::from("(unreadable)");
+        if fd >= 0 {
+            let mut buf = [0u8; 16];
+            let n = unsafe {
+                libc::pread(fd, buf.as_mut_ptr() as *mut libc::c_void, 16, fault_addr as i64)
+            };
+            unsafe { libc::close(fd) };
+            if n > 0 {
+                hex = buf[..n as usize].iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ");
+            }
+        }
+        hex
+    };
+
+    // Check /proc/self/maps to find the memory region containing fault_addr.
+    let fault_region = {
+        let path = b"/proc/self/maps\0";
+        let fd = unsafe { libc::open(path.as_ptr() as *const libc::c_char, libc::O_RDONLY) };
+        let mut region = String::from("(unknown)");
+        if fd >= 0 {
+            let mut buf = [0u8; 8192];
+            let n = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, 8192) };
+            unsafe { libc::close(fd) };
+            if n > 0 {
+                if let Ok(maps) = std::str::from_utf8(&buf[..n as usize]) {
+                    for line in maps.lines() {
+                        // Each line: "start-end perms offset dev inode pathname"
+                        let parts: Vec<&str> = line.splitn(6, ' ').collect();
+                        if parts.len() >= 2 {
+                            let range: Vec<&str> = parts[0].splitn(2, '-').collect();
+                            if range.len() == 2 {
+                                if let (Ok(start), Ok(end)) = (
+                                    usize::from_str_radix(range[0], 16),
+                                    usize::from_str_radix(range[1], 16),
+                                ) {
+                                    if fault_addr >= start && fault_addr < end {
+                                        region = format!("{} [{}]", parts[1], line);
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        region
+    };
+
     let msg = format!(
         "\nweave: CRASH — {sig_name} in PE code\n\
          weave:   exception = {win_code:#010x}  ({})\n\
          weave:   RIP       = {rip:#018x}  (PE rva {rva:#010x})\n\
          weave:   insn      = [{insn_hex}]\n\
-         weave:   fault     = {fault_addr:#018x}\n\
+         weave:   fault     = {fault_addr:#018x}  [{fault_bytes_hex}]\n\
+         weave:   region    = {fault_region}\n\
          weave:   function  = {func_line}\n\
          weave:   rax={:#018x}  rbx={:#018x}  rcx={:#018x}\n\
          weave:   rdx={:#018x}  rsi={:#018x}  rdi={:#018x}\n\
