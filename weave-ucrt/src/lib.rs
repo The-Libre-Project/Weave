@@ -456,6 +456,64 @@ pub extern "win64" fn ucrt_rand_s(_rand_val: *mut u32) -> i32 {
     0
 }
 
+// ── Legacy MSVCRT entry-point helpers ────────────────────────────────────────
+
+/// __getmainargs — legacy MSVCRT function that fills in argc/argv/envp for main().
+///
+/// Old MinGW-compiled executables call this to retrieve the parsed command line
+/// before calling main(). We return a minimal (empty) argument vector so the
+/// program sees argv=[""] with no extra args.
+///
+/// Signature: int __getmainargs(int *argc, char ***argv, char ***envp, int expand_wildcards, int *new_mode)
+///
+/// # Safety
+/// All pointer arguments must be valid or NULL.
+pub unsafe extern "win64" fn ucrt_getmainargs(
+    p_argc: *mut i32,
+    p_argv: *mut *mut *mut u8,
+    p_envp: *mut *mut *mut u8,
+    _expand_wildcards: i32,
+    _p_new_mode: *mut i32,
+) -> i32 {
+    // Provide a minimal argv = [""] with no env vars.
+    // These buffers live for the program lifetime — leaked intentionally.
+    static EMPTY_ARG: u8 = 0;
+    // argv[0] = ptr to empty string, argv[1] = NULL
+    let argv = Box::into_raw(Box::new([
+        &EMPTY_ARG as *const u8 as *mut u8,
+        std::ptr::null_mut::<u8>(),
+    ])) as *mut *mut u8;
+    // envp[0] = NULL
+    let envp = Box::into_raw(Box::new([std::ptr::null_mut::<u8>()])) as *mut *mut u8;
+    if !p_argc.is_null() { *p_argc = 1; }
+    if !p_argv.is_null() { *p_argv = argv; }
+    if !p_envp.is_null() { *p_envp = envp; }
+    0
+}
+
+/// __wgetmainargs — wide-char variant of __getmainargs.
+///
+/// # Safety
+/// All pointer arguments must be valid or NULL.
+pub unsafe extern "win64" fn ucrt_wgetmainargs(
+    p_argc: *mut i32,
+    p_argv: *mut *mut *mut u16,
+    p_envp: *mut *mut *mut u16,
+    _expand_wildcards: i32,
+    _p_new_mode: *mut i32,
+) -> i32 {
+    static EMPTY_WARG: u16 = 0;
+    let argv = Box::into_raw(Box::new([
+        &EMPTY_WARG as *const u16 as *mut u16,
+        std::ptr::null_mut::<u16>(),
+    ])) as *mut *mut u16;
+    let envp = Box::into_raw(Box::new([std::ptr::null_mut::<u16>()])) as *mut *mut u16;
+    if !p_argc.is_null() { *p_argc = 1; }
+    if !p_argv.is_null() { *p_argv = argv; }
+    if !p_envp.is_null() { *p_envp = envp; }
+    0
+}
+
 // ── Resolver ──────────────────────────────────────────────────────────────────
 
 /// Returns true for any DLL name this crate handles.
@@ -596,6 +654,9 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         // misc
         "rand_s" => stub!(ucrt_rand_s as extern "win64" fn(_) -> _),
         "strftime" | "wcsftime" => stub!(ucrt_cexit as extern "win64" fn()),
+        // legacy MSVCRT entry-point helpers
+        "__getmainargs" => stub!(ucrt_getmainargs as unsafe extern "win64" fn(_, _, _, _, _) -> _),
+        "__wgetmainargs" => stub!(ucrt_wgetmainargs as unsafe extern "win64" fn(_, _, _, _, _) -> _),
         _ => None,
     }
 }
