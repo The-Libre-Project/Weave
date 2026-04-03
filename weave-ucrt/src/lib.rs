@@ -594,7 +594,7 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "_exit" => stub!(ucrt__exit as extern "win64" fn(_) -> !),
         "abort" => stub!(ucrt_abort as extern "win64" fn() -> !),
         "_cexit" => stub!(ucrt_cexit as extern "win64" fn()),
-        "_set_app_type" => stub!(ucrt_set_app_type as extern "win64" fn(_)),
+        "_set_app_type" | "__set_app_type" => stub!(ucrt_set_app_type as extern "win64" fn(_)),
         "_configure_narrow_argv" => {
             stub!(ucrt_configure_narrow_argv as extern "win64" fn(_) -> _)
         }
@@ -685,6 +685,59 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "_stricmp" | "_strcmpi" => stub!(ucrt_strcmp as unsafe extern "win64" fn(_, _) -> _),
         "_wcsdup" => stub!(ucrt_strdup as unsafe extern "win64" fn(_) -> _),
         "_flushall" | "_filbuf" | "_flsbuf" => stub!(ucrt_cexit as extern "win64" fn()),
+        // Additional MSVCRT startup symbols seen in MinGW-compiled binaries.
+        // All are no-ops or aliases — the CRT startup just needs them to resolve.
+        "__getmainargs_to_utf8"
+        | "__wgetmainargs_to_utf8"
+        | "_get_pgmptr"
+        | "_get_wpgmptr"
+        | "__set_errno"
+        | "_Getdays"
+        | "_Getmonths"
+        | "_Gettnames"
+        | "_Strftime"
+        | "_Wcsftime"
+        | "_wassert"
+        | "__fpclassify"
+        | "__fpclassifyf"
+        | "_clearfp"
+        | "_controlfp"
+        | "_controlfp_s"
+        | "_statusfp"
+        | "_fpreset"
+        | "_chkstk"
+        | "__chkstk"
+        | "_alloca_probe"
+        | "__alloca_probe"
+        | "_isatty"
+        | "_get_errno"
+        | "_set_errno"
+        | "_doserrno"
+        | "__doserrno"
+        | "_get_doserrno"
+        | "_set_doserrno"
+        | "__stdio_common_vfscanf"
+        | "__stdio_common_vsscanf"
+        | "__stdio_common_vfwscanf"
+        | "__stdio_common_vswscanf"
+        | "_sopen_s"
+        | "_close"
+        | "_dup"
+        | "_dup2"
+        | "_pipe"
+        | "_cwait"
+        | "_spawnl"
+        | "_spawnle"
+        | "_spawnlp"
+        | "_spawnlpe"
+        | "_spawnv"
+        | "_spawnve"
+        | "_spawnvp"
+        | "_spawnvpe"
+        | "__crt_locale_data_public"
+        | "__crt_locale_pointers"
+        | "_Mbrtowc"
+        | "_Wctomb" => Some(ucrt_cexit as extern "win64" fn() as *const () as usize),
         _ => None,
     }
 }
