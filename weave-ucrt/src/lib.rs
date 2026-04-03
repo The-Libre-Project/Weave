@@ -298,8 +298,62 @@ pub unsafe extern "win64" fn ucrt_p_fmode() -> *mut i32 {
 
 // ── stdio ─────────────────────────────────────────────────────────────────────
 
-pub extern "win64" fn ucrt_acrt_iob_func(_fd: u32) -> *mut c_void {
-    std::ptr::null_mut()
+pub extern "win64" fn ucrt_acrt_iob_func(fd: u32) -> *mut c_void {
+    // Return non-NULL sentinel pointers for stdin/stdout/stderr so the MinGW
+    // CRT doesn't NULL-check and call error paths. Our own fprintf/fwrite
+    // stubs ignore the stream argument so the actual value doesn't matter.
+    static DUMMY_STDIN: u8 = 0;
+    static DUMMY_STDOUT: u8 = 1;
+    static DUMMY_STDERR: u8 = 2;
+    match fd {
+        0 => &raw const DUMMY_STDIN as *mut c_void,
+        1 => &raw const DUMMY_STDOUT as *mut c_void,
+        2 => &raw const DUMMY_STDERR as *mut c_void,
+        _ => std::ptr::null_mut(),
+    }
+}
+
+/// _amsg_exit — abnormal CRT termination (e.g. failed _onexit registration).
+/// Never returns — exits immediately.
+pub extern "win64" fn ucrt_amsg_exit(_msg_num: i32) -> ! {
+    unsafe { libc::exit(255) }
+}
+
+/// _onexit — register a function to be called at process exit.
+///
+/// On success returns the passed function pointer; NULL on failure.
+/// We don't maintain a real atexit list — just return the pointer so
+/// MinGW CRT startup sees "success" and doesn't call _amsg_exit.
+pub extern "win64" fn ucrt_onexit(fn_ptr: usize) -> usize {
+    fn_ptr
+}
+
+/// fprintf — formatted print to a FILE* (legacy msvcrt.dll variant).
+///
+/// We can't safely bridge the variadic Windows ABI to Linux, so this is a
+/// no-op stub. hello.exe never calls fprintf directly — the CRT startup only
+/// uses it on error paths that we bypass by making _onexit succeed.
+pub extern "win64" fn ucrt_fprintf(_stream: *mut c_void, _fmt: *const u8) -> i32 {
+    -1
+}
+
+/// vfprintf — variadic-list variant of fprintf.
+pub extern "win64" fn ucrt_vfprintf(
+    _stream: *mut c_void,
+    _fmt: *const u8,
+    _args: *mut c_void,
+) -> i32 {
+    -1
+}
+
+/// fwrite — write binary data to a FILE* (legacy msvcrt.dll variant).
+pub extern "win64" fn ucrt_fwrite(
+    _ptr: *const c_void,
+    _size: usize,
+    _count: usize,
+    _stream: *mut c_void,
+) -> usize {
+    0
 }
 
 pub extern "win64" fn ucrt_stdio_common_vfprintf(
@@ -632,6 +686,12 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "__p__fmode" => stub!(ucrt_p_fmode as unsafe extern "win64" fn() -> _),
         // stdio
         "__acrt_iob_func" | "__iob_func" => stub!(ucrt_acrt_iob_func as extern "win64" fn(_) -> _),
+        // Legacy msvcrt.dll CRT startup functions
+        "_amsg_exit" => stub!(ucrt_amsg_exit as extern "win64" fn(_) -> !),
+        "_onexit" => stub!(ucrt_onexit as extern "win64" fn(_) -> _),
+        "fprintf" => stub!(ucrt_fprintf as extern "win64" fn(_, _) -> _),
+        "vfprintf" => stub!(ucrt_vfprintf as extern "win64" fn(_, _, _) -> _),
+        "fwrite" => stub!(ucrt_fwrite as extern "win64" fn(_, _, _, _) -> _),
         "__stdio_common_vfprintf" | "__stdio_common_vfwprintf" => {
             stub!(ucrt_stdio_common_vfprintf as extern "win64" fn(_, _, _, _, _) -> _)
         }
