@@ -293,10 +293,6 @@ pub extern "win64" fn ucrt_signal(_signum: i32, _handler: *const c_void) -> *con
 
 use std::sync::OnceLock;
 
-static HEAP_ARGC:    OnceLock<usize> = OnceLock::new();
-static HEAP_ARGV:    OnceLock<usize> = OnceLock::new();
-static HEAP_ACMDLN:  OnceLock<usize> = OnceLock::new();
-static HEAP_ENVIRON: OnceLock<usize> = OnceLock::new();
 static HEAP_COMMODE: OnceLock<usize> = OnceLock::new();
 static HEAP_FMODE:   OnceLock<usize> = OnceLock::new();
 static HEAP_STDIO:   OnceLock<[usize; 3]> = OnceLock::new();
@@ -316,33 +312,76 @@ pub fn commode_data_addr() -> usize {
 }
 
 static HEAP_MB_CUR_MAX: OnceLock<usize> = OnceLock::new();
+static HEAP_INITENV:    OnceLock<usize> = OnceLock::new();
+static HEAP_WINITENV:   OnceLock<usize> = OnceLock::new();
+static HEAP_ENVIRON:    OnceLock<usize> = OnceLock::new();
+static HEAP_WENVIRON:   OnceLock<usize> = OnceLock::new();
+static HEAP_IARGC:      OnceLock<usize> = OnceLock::new();
+static HEAP_IARGV:      OnceLock<usize> = OnceLock::new();
+static HEAP_ACMDLN:     OnceLock<usize> = OnceLock::new();
+static HEAP_WCMDLN:     OnceLock<usize> = OnceLock::new();
+static HEAP_PGMPTR:     OnceLock<usize> = OnceLock::new();
+static HEAP_WPGMPTR:    OnceLock<usize> = OnceLock::new();
+static HEAP_DOSERRNO:   OnceLock<usize> = OnceLock::new();
 
 /// Return the address of writable __mb_cur_max storage for DATA imports.
 pub fn mb_cur_max_data_addr() -> usize {
     *HEAP_MB_CUR_MAX.get_or_init(|| Box::into_raw(Box::new(1i32)) as usize)
 }
 
+// DATA import address helpers — these return a heap address to put in the IAT slot.
+// MinGW CRT startup code dereferences the IAT slot to get a data pointer, then
+// writes through it. Putting a function pointer there causes a SIGSEGV because
+// code pages are not writable.
+pub fn initenv_data_addr() -> usize {
+    *HEAP_INITENV.get_or_init(|| Box::into_raw(Box::new(0usize)) as usize)
+}
+pub fn winitenv_data_addr() -> usize {
+    *HEAP_WINITENV.get_or_init(|| Box::into_raw(Box::new(0usize)) as usize)
+}
+pub fn environ_data_addr() -> usize {
+    *HEAP_ENVIRON.get_or_init(|| Box::into_raw(Box::new(0usize)) as usize)
+}
+pub fn wenviron_data_addr() -> usize {
+    *HEAP_WENVIRON.get_or_init(|| Box::into_raw(Box::new(0usize)) as usize)
+}
+pub fn argc_data_addr() -> usize {
+    *HEAP_IARGC.get_or_init(|| Box::into_raw(Box::new(0i32)) as usize)
+}
+pub fn argv_data_addr() -> usize {
+    *HEAP_IARGV.get_or_init(|| Box::into_raw(Box::new(0usize)) as usize)
+}
+pub fn acmdln_data_addr() -> usize {
+    *HEAP_ACMDLN.get_or_init(|| Box::into_raw(Box::new(0usize)) as usize)
+}
+pub fn wcmdln_data_addr() -> usize {
+    *HEAP_WCMDLN.get_or_init(|| Box::into_raw(Box::new(0usize)) as usize)
+}
+pub fn pgmptr_data_addr() -> usize {
+    *HEAP_PGMPTR.get_or_init(|| Box::into_raw(Box::new(0usize)) as usize)
+}
+pub fn wpgmptr_data_addr() -> usize {
+    *HEAP_WPGMPTR.get_or_init(|| Box::into_raw(Box::new(0usize)) as usize)
+}
+pub fn doserrno_data_addr() -> usize {
+    *HEAP_DOSERRNO.get_or_init(|| Box::into_raw(Box::new(0u32)) as usize)
+}
+
 pub unsafe extern "win64" fn ucrt_p_argc() -> *mut i32 {
     libc::write(2, b"weave: stub __p__argc\n".as_ptr() as *const libc::c_void, 22);
-    *HEAP_ARGC.get_or_init(|| Box::into_raw(Box::new(0i32)) as usize) as *mut i32
+    argc_data_addr() as *mut i32
 }
 pub unsafe extern "win64" fn ucrt_p_argv() -> *mut *mut *mut u8 {
     libc::write(2, b"weave: stub __p__argv\n".as_ptr() as *const libc::c_void, 22);
-    *HEAP_ARGV.get_or_init(|| {
-        Box::into_raw(Box::new(std::ptr::null_mut::<*mut u8>())) as usize
-    }) as *mut *mut *mut u8
+    argv_data_addr() as *mut *mut *mut u8
 }
 pub unsafe extern "win64" fn ucrt_p_acmdln() -> *mut *mut u8 {
     libc::write(2, b"weave: stub __p__acmdln\n".as_ptr() as *const libc::c_void, 24);
-    *HEAP_ACMDLN.get_or_init(|| {
-        Box::into_raw(Box::new(std::ptr::null_mut::<u8>())) as usize
-    }) as *mut *mut u8
+    acmdln_data_addr() as *mut *mut u8
 }
 pub unsafe extern "win64" fn ucrt_p_environ() -> *mut *mut *mut u8 {
     libc::write(2, b"weave: stub __p__environ\n".as_ptr() as *const libc::c_void, 25);
-    *HEAP_ENVIRON.get_or_init(|| {
-        Box::into_raw(Box::new(std::ptr::null_mut::<*mut u8>())) as usize
-    }) as *mut *mut *mut u8
+    environ_data_addr() as *mut *mut *mut u8
 }
 pub unsafe extern "win64" fn ucrt_p_commode() -> *mut i32 {
     libc::write(2, b"weave: stub __p__commode\n".as_ptr() as *const libc::c_void, 25);
@@ -798,8 +837,17 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         // legacy MSVCRT entry-point helpers
         "__getmainargs" => stub!(ucrt_getmainargs as unsafe extern "win64" fn(_, _, _, _, _) -> _),
         "__wgetmainargs" => stub!(ucrt_wgetmainargs as unsafe extern "win64" fn(_, _, _, _, _) -> _),
-        "__initenv" => stub!(ucrt_initenv as unsafe extern "win64" fn() -> _),
-        "__winitenv" => stub!(ucrt_winitenv as unsafe extern "win64" fn() -> _),
+        "__initenv" => Some(initenv_data_addr()),
+        "__winitenv" => Some(winitenv_data_addr()),
+        "_environ" => Some(environ_data_addr()),
+        "_wenviron" => Some(wenviron_data_addr()),
+        "__argc" => Some(argc_data_addr()),
+        "__argv" => Some(argv_data_addr()),
+        "_acmdln" => Some(acmdln_data_addr()),
+        "_wcmdln" => Some(wcmdln_data_addr()),
+        "_pgmptr" => Some(pgmptr_data_addr()),
+        "_wpgmptr" => Some(wpgmptr_data_addr()),
+        "_doserrno" | "__doserrno" => Some(doserrno_data_addr()),
         // Legacy MSVCRT aliases — older MinGW CRT startup code uses these names
         "_fmode" => Some(fmode_data_addr()),
         "_commode" => Some(commode_data_addr()),
@@ -834,8 +882,6 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         | "_isatty"
         | "_get_errno"
         | "_set_errno"
-        | "_doserrno"
-        | "__doserrno"
         | "_get_doserrno"
         | "_set_doserrno"
         | "__stdio_common_vfscanf"
