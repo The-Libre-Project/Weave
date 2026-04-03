@@ -301,6 +301,27 @@ static HEAP_COMMODE: OnceLock<usize> = OnceLock::new();
 static HEAP_FMODE:   OnceLock<usize> = OnceLock::new();
 static HEAP_STDIO:   OnceLock<[usize; 3]> = OnceLock::new();
 
+/// Return the address of writable _fmode storage for DATA imports.
+///
+/// When MinGW imports `_fmode` from msvcrt.dll, the IAT slot should contain the
+/// ADDRESS of an `int` variable (not a function pointer).  MinGW's internal
+/// `__p__fmode()` wrapper simply returns this IAT value.
+pub fn fmode_data_addr() -> usize {
+    *HEAP_FMODE.get_or_init(|| Box::into_raw(Box::new(0i32)) as usize)
+}
+
+/// Return the address of writable _commode storage for DATA imports.
+pub fn commode_data_addr() -> usize {
+    *HEAP_COMMODE.get_or_init(|| Box::into_raw(Box::new(0i32)) as usize)
+}
+
+static HEAP_MB_CUR_MAX: OnceLock<usize> = OnceLock::new();
+
+/// Return the address of writable __mb_cur_max storage for DATA imports.
+pub fn mb_cur_max_data_addr() -> usize {
+    *HEAP_MB_CUR_MAX.get_or_init(|| Box::into_raw(Box::new(1i32)) as usize)
+}
+
 pub unsafe extern "win64" fn ucrt_p_argc() -> *mut i32 {
     libc::write(2, b"weave: stub __p__argc\n".as_ptr() as *const libc::c_void, 22);
     *HEAP_ARGC.get_or_init(|| Box::into_raw(Box::new(0i32)) as usize) as *mut i32
@@ -780,9 +801,9 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "__initenv" => stub!(ucrt_initenv as unsafe extern "win64" fn() -> _),
         "__winitenv" => stub!(ucrt_winitenv as unsafe extern "win64" fn() -> _),
         // Legacy MSVCRT aliases — older MinGW CRT startup code uses these names
-        "_fmode" => stub!(ucrt_p_fmode as unsafe extern "win64" fn() -> _),
-        "_commode" => stub!(ucrt_p_commode as unsafe extern "win64" fn() -> _),
-        "__mb_cur_max" => stub!(ucrt_mb_cur_max_func as extern "win64" fn() -> _),
+        "_fmode" => Some(fmode_data_addr()),
+        "_commode" => Some(commode_data_addr()),
+        "__mb_cur_max" => Some(mb_cur_max_data_addr()),
         "_stricmp" | "_strcmpi" => stub!(ucrt_strcmp as unsafe extern "win64" fn(_, _) -> _),
         "_wcsdup" => stub!(ucrt_strdup as unsafe extern "win64" fn(_) -> _),
         "_flushall" | "_filbuf" | "_flsbuf" => stub!(ucrt_cexit as extern "win64" fn()),
