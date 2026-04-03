@@ -166,10 +166,22 @@ fn print_crash_report(
         None => "not found in .pdata".to_string(),
     };
 
+    // Dump 16 instruction bytes at RIP so we can identify the crashing
+    // instruction without a debugger or disassembler on CI.
+    let insn_bytes = {
+        let mut buf = [0u8; 16];
+        for (i, b) in buf.iter_mut().enumerate() {
+            *b = unsafe { *(rip as *const u8).add(i) };
+        }
+        buf
+    };
+    let insn_hex = insn_bytes.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ");
+
     let msg = format!(
         "\nweave: CRASH — {sig_name} in PE code\n\
          weave:   exception = {win_code:#010x}  ({})\n\
          weave:   RIP       = {rip:#018x}  (PE rva {rva:#010x})\n\
+         weave:   insn      = [{insn_hex}]\n\
          weave:   fault     = {fault_addr:#018x}\n\
          weave:   function  = {func_line}\n\
          weave:   rax={:#018x}  rbx={:#018x}  rcx={:#018x}\n\
