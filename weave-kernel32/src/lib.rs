@@ -315,6 +315,57 @@ pub extern "win64" fn local_unlock(h_mem: usize) -> i32 {
 
 // ── File I/O ──────────────────────────────────────────────────────────────────
 
+/// CreateFileA: open or create a file and return a HANDLE.
+///
+/// Translates Win32 parameters to NT equivalents and delegates to the
+/// shared `file_io::open_file` engine in weave-core.
+///
+/// # Safety
+/// `lp_file_name` must be a valid, null-terminated UTF-8 string.
+pub unsafe extern "win64" fn create_file_a(
+    lp_file_name: *const u8,
+    dw_desired_access: u32,
+    _dw_share_mode: u32,       // ignored — no file locking in Phase 2
+    _lp_security_attrs: usize, // ignored
+    dw_creation_disposition: u32,
+    _dw_flags_and_attrs: u32, // ignored
+    _h_template_file: usize,  // ignored
+) -> usize {
+    if lp_file_name.is_null() {
+        LAST_ERROR.with(|e| e.set(file_io::ERROR_INVALID_HANDLE));
+        return usize::MAX; // INVALID_HANDLE_VALUE
+    }
+
+    // Decode the null-terminated UTF-8 filename.
+    let win_path = unsafe {
+        let mut len = 0usize;
+        while len < MAX_UTF8_LEN && *lp_file_name.add(len) != 0 {
+            len += 1;
+        }
+        if len == MAX_UTF8_LEN {
+            LAST_ERROR.with(|e| e.set(87)); // ERROR_INVALID_PARAMETER
+            return usize::MAX;
+        }
+        let slice = std::slice::from_raw_parts(lp_file_name, len);
+        String::from_utf8_lossy(slice).to_owned()
+    };
+
+    let nt_disposition = file_io::win32_disposition_to_nt(dw_creation_disposition);
+
+    match file_io::open_file(&win_path, dw_desired_access, nt_disposition) {
+        Ok(handle) => {
+            LAST_ERROR.with(|e| e.set(0));
+            handle
+        }
+        Err(_status) => {
+            // Map NT status back to a Win32 error code. For now, return a
+            // generic error; Phase 3 can refine the mapping.
+            LAST_ERROR.with(|e| e.set(file_io::ERROR_FILE_NOT_FOUND));
+            usize::MAX // INVALID_HANDLE_VALUE
+        }
+    }
+}
+
 /// CreateFileW: open or create a file and return a HANDLE.
 ///
 /// Translates Win32 parameters to NT equivalents and delegates to the
@@ -1353,6 +1404,31 @@ pub unsafe extern "win64" fn wait_for_single_object(
 ) -> u32 {
     0xFFFFFFFF // WAIT_FAILED
 }
+
+/// WaitForSingleObjectEx — not supported; returns WAIT_FAILED.
+///
+/// # Safety
+/// No pointer arguments are dereferenced.
+pub unsafe extern "win64" fn wait_for_single_object_ex(
+    _h_handle: usize,
+    _dw_milliseconds: u32,
+    _b_alertable: i32,
+) -> u32 {
+    0xFFFFFFFF // WAIT_FAILED
+}
+
+/// TryEnterCriticalSection — no-op stub; always succeeds (single-threaded).
+///
+/// # Safety
+/// `_lp_critical_section` must be a valid pointer.
+pub unsafe extern "win64" fn try_enter_critical_section(_lp_critical_section: *mut usize) -> i32 {
+    1 // TRUE — always succeeds in single-threaded context
+}
+
+/// SwitchToThread — no-op stub; yields are not meaningful in single-threaded mode.
+pub extern "win64" fn switch_to_thread() -> i32 {
+    0 // FALSE — no other thread to switch to
+}
 /// WaitForMultipleObjects — not supported; returns WAIT_FAILED.
 ///
 /// # Safety
@@ -1433,6 +1509,10 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "DeleteCriticalSection" => Some(delete_critical_section as *const () as usize),
         "SetUnhandledExceptionFilter" => Some(set_unhandled_exception_filter as *const () as usize),
         "__C_specific_handler" => Some(c_specific_handler as *const () as usize),
+        "CreateFileA" => Some(
+            create_file_a as unsafe extern "win64" fn(_, _, _, _, _, _, _) -> _ as *const ()
+                as usize,
+        ),
         "CreateFileW" => Some(
             create_file_w as unsafe extern "win64" fn(_, _, _, _, _, _, _) -> _ as *const ()
                 as usize,
@@ -1663,6 +1743,14 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "WaitForSingleObject" => Some(
             wait_for_single_object as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
         ),
+        "WaitForSingleObjectEx" => Some(
+            wait_for_single_object_ex as unsafe extern "win64" fn(_, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "TryEnterCriticalSection" => Some(
+            try_enter_critical_section as unsafe extern "win64" fn(_) -> _ as *const () as usize,
+        ),
+        "SwitchToThread" => Some(switch_to_thread as extern "win64" fn() -> _ as *const () as usize),
         "WaitForMultipleObjects" => Some(
             wait_for_multiple_objects as unsafe extern "win64" fn(_, _, _, _) -> _ as *const ()
                 as usize,
@@ -1765,6 +1853,7 @@ mod tests {
             "EnterCriticalSection",
             "LeaveCriticalSection",
             "DeleteCriticalSection",
+            "CreateFileA",
             "CreateFileW",
             "ReadFile",
             "WriteFile",

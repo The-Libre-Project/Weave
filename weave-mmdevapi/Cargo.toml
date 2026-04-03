@@ -6,6 +6,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-# pipewire will be added here when Step 4 (audio) is implemented.
-# It requires pkg-config cross-compilation setup and is not declared
-# until real code exists to use it.
+weave-common = { path = "../weave-common" }
+
+# TODO(Step 4): Re-add pipewire = "0.8" here under [target.'cfg(target_os = "linux")'.dependencies]
+# once zig/zigbuild is available for cross-compilation verification.
