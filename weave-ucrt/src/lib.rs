@@ -269,54 +269,65 @@ pub extern "win64" fn ucrt_signal(_signum: i32, _handler: *const c_void) -> *con
 }
 
 // ── CRT global variable accessors ─────────────────────────────────────────────
+//
+// These accessors return pointers to CRT-global variables (__p___argc, etc.).
+// The MinGW CRT startup writes through these pointers, so the storage MUST be
+// writable.  Rust `static mut` can end up in a linker section that becomes
+// read-only after RELRO is applied, causing SIGSEGV.  We heap-allocate the
+// storage via Box::into_raw (leaked intentionally — process-lifetime) which
+// guarantees the memory is always in a R+W page.
 
-static mut CRT_ARGC: i32 = 0;
-static mut CRT_ARGV_PTR: *mut *mut u8 = std::ptr::null_mut();
-static mut CRT_ACMDLN: *mut u8 = std::ptr::null_mut();
-static mut CRT_ENVIRON: *mut *mut u8 = std::ptr::null_mut();
-static mut CRT_COMMODE: i32 = 0;
-static mut CRT_FMODE: i32 = 0;
+use std::sync::OnceLock;
+
+static HEAP_ARGC:    OnceLock<usize> = OnceLock::new();
+static HEAP_ARGV:    OnceLock<usize> = OnceLock::new();
+static HEAP_ACMDLN:  OnceLock<usize> = OnceLock::new();
+static HEAP_ENVIRON: OnceLock<usize> = OnceLock::new();
+static HEAP_COMMODE: OnceLock<usize> = OnceLock::new();
+static HEAP_FMODE:   OnceLock<usize> = OnceLock::new();
+static HEAP_STDIO:   OnceLock<[usize; 3]> = OnceLock::new();
 
 pub unsafe extern "win64" fn ucrt_p_argc() -> *mut i32 {
-    std::ptr::addr_of_mut!(CRT_ARGC)
+    *HEAP_ARGC.get_or_init(|| Box::into_raw(Box::new(0i32)) as usize) as *mut i32
 }
 pub unsafe extern "win64" fn ucrt_p_argv() -> *mut *mut *mut u8 {
-    std::ptr::addr_of_mut!(CRT_ARGV_PTR)
+    *HEAP_ARGV.get_or_init(|| {
+        Box::into_raw(Box::new(std::ptr::null_mut::<*mut u8>())) as usize
+    }) as *mut *mut *mut u8
 }
 pub unsafe extern "win64" fn ucrt_p_acmdln() -> *mut *mut u8 {
-    std::ptr::addr_of_mut!(CRT_ACMDLN)
+    *HEAP_ACMDLN.get_or_init(|| {
+        Box::into_raw(Box::new(std::ptr::null_mut::<u8>())) as usize
+    }) as *mut *mut u8
 }
 pub unsafe extern "win64" fn ucrt_p_environ() -> *mut *mut *mut u8 {
-    std::ptr::addr_of_mut!(CRT_ENVIRON)
+    *HEAP_ENVIRON.get_or_init(|| {
+        Box::into_raw(Box::new(std::ptr::null_mut::<*mut u8>())) as usize
+    }) as *mut *mut *mut u8
 }
 pub unsafe extern "win64" fn ucrt_p_commode() -> *mut i32 {
-    std::ptr::addr_of_mut!(CRT_COMMODE)
+    *HEAP_COMMODE.get_or_init(|| Box::into_raw(Box::new(0i32)) as usize) as *mut i32
 }
 pub unsafe extern "win64" fn ucrt_p_fmode() -> *mut i32 {
-    std::ptr::addr_of_mut!(CRT_FMODE)
+    *HEAP_FMODE.get_or_init(|| Box::into_raw(Box::new(0i32)) as usize) as *mut i32
 }
 
 // ── stdio ─────────────────────────────────────────────────────────────────────
 
-// Module-level (not function-local) mutable statics so the linker places them
-// in .bss (zero-initialised, read-write segment).  Function-local static muts
-// can end up in .data.rel.ro which becomes read-only after RELRO is applied,
-// causing SIGSEGV the first time MinGW's CRT startup writes into the FILE*.
-// 256 bytes is large enough to cover a Windows FILE struct.
-static mut STDIO_STDIN:  [u8; 256] = [0; 256];
-static mut STDIO_STDOUT: [u8; 256] = [0; 256];
-static mut STDIO_STDERR: [u8; 256] = [0; 256];
-
 pub extern "win64" fn ucrt_acrt_iob_func(fd: u32) -> *mut c_void {
-    // addr_of_mut! avoids creating a &mut reference (which would trigger
-    // the static_mut_refs lint) while still returning a writable raw pointer.
-    unsafe {
-        match fd {
-            0 => std::ptr::addr_of_mut!(STDIO_STDIN)  as *mut c_void,
-            1 => std::ptr::addr_of_mut!(STDIO_STDOUT) as *mut c_void,
-            2 => std::ptr::addr_of_mut!(STDIO_STDERR) as *mut c_void,
-            _ => std::ptr::null_mut(),
-        }
+    // Heap-allocated 256-byte buffers for fake FILE structs.  MinGW CRT writes
+    // into these immediately after calling __acrt_iob_func; heap memory is
+    // always R+W so this avoids the RELRO SIGSEGV issue with static mut.
+    let ptrs = HEAP_STDIO.get_or_init(|| [
+        Box::into_raw(Box::new([0u8; 256])) as usize,
+        Box::into_raw(Box::new([0u8; 256])) as usize,
+        Box::into_raw(Box::new([0u8; 256])) as usize,
+    ]);
+    match fd {
+        0 => ptrs[0] as *mut c_void,
+        1 => ptrs[1] as *mut c_void,
+        2 => ptrs[2] as *mut c_void,
+        _ => std::ptr::null_mut(),
     }
 }
 
