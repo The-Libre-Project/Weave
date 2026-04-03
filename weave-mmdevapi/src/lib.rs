@@ -1081,6 +1081,10 @@ static IAUDIO_RENDER_CLIENT_VTABLE: IAudioRenderClientVtable = IAudioRenderClien
 // ── DLL Exports ──────────────────────────────────────────────────────────────
 
 /// CoCreateInstance for CLSID_MMDeviceEnumerator -- main WASAPI entry point.
+///
+/// # Safety
+/// `rclsid` must point to a valid 16-byte CLSID. `ppv` must be a valid
+/// non-null pointer to a location that can receive a COM interface pointer.
 pub unsafe extern "win64" fn co_create_instance(
     rclsid: *const u8,
     _p_unk_outer: usize,
