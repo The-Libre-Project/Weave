@@ -691,6 +691,40 @@ pub unsafe extern "win64" fn nt_set_information_thread(
     0xC0000002 // STATUS_NOT_IMPLEMENTED
 }
 
+/// LdrLoadDll: load a DLL into the process address space.
+///
+/// Phase 2: dynamic loading is not supported; always returns STATUS_DLL_NOT_FOUND.
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn ldr_load_dll(
+    _path_to_file: *const u16,
+    _flags: u32,
+    _module_file_name: *const UnicodeString,
+    _module_handle: *mut usize,
+) -> u32 {
+    // Dynamic loading not supported in Phase 2
+    const STATUS_DLL_NOT_FOUND: u32 = 0xC0000135;
+    STATUS_DLL_NOT_FOUND
+}
+
+/// LdrGetProcedureAddress: get the address of a procedure in a loaded DLL.
+///
+/// Phase 2: dynamic loading is not supported; always returns STATUS_PROCEDURE_NOT_FOUND.
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn ldr_get_procedure_address(
+    _module_handle: usize,
+    _function_name: *const AnsiString,
+    _ordinal: u16,
+    _function_address: *mut usize,
+) -> u32 {
+    // Dynamic loading not supported in Phase 2
+    const STATUS_PROCEDURE_NOT_FOUND: u32 = 0xC000007A;
+    STATUS_PROCEDURE_NOT_FOUND
+}
+
 // ── Resolver ──────────────────────────────────────────────────────────────────
 
 pub fn resolve(func: &str) -> Option<usize> {
@@ -772,6 +806,13 @@ pub fn resolve(func: &str) -> Option<usize> {
         "NtYieldExecution" => Some(nt_yield_execution as *const () as usize),
         "NtSetInformationThread" => Some(
             nt_set_information_thread as unsafe extern "win64" fn(_, _, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "LdrLoadDll" => {
+            Some(ldr_load_dll as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize)
+        }
+        "LdrGetProcedureAddress" => Some(
+            ldr_get_procedure_address as unsafe extern "win64" fn(_, _, _, _) -> _ as *const ()
                 as usize,
         ),
         _ => None,

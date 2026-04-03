@@ -24,7 +24,7 @@ thread_local! {
 /// Windows OSVERSIONINFOEXW — extended version information.
 /// This is the superset; OSVERSIONINFOW is the first 276 bytes.
 #[repr(C)]
-struct OsVersionInfoExW {
+pub struct OsVersionInfoExW {
     dw_os_version_info_size: u32,
     dw_major_version: u32,
     dw_minor_version: u32,
@@ -960,6 +960,776 @@ pub extern "win64" fn flush_file_buffers(h_file: usize) -> i32 {
         LAST_ERROR.with(|e| e.set(file_io::ERROR_INVALID_HANDLE));
         0
     }
+}
+
+/// CreateFileMappingW: create a file mapping object for memory-mapped files.
+///
+/// For anonymous mappings (hFile == INVALID_HANDLE_VALUE), allocates RAM-backed
+/// memory using mmap. The returned address serves as both the mapping handle
+/// and the mapped memory address.
+///
+/// # Safety
+/// `lp_file_mapping_attributes` and `lp_name` are ignored (accepted but not dereferenced).
+pub unsafe extern "win64" fn create_file_mapping_w(
+    h_file: usize,
+    _lp_file_mapping_attributes: usize,
+    _fl_protect: u32,
+    dw_maximum_size_high: u32,
+    dw_maximum_size_low: u32,
+    _lp_name: *const u16,
+) -> usize {
+    const INVALID_HANDLE_VALUE: usize = usize::MAX;
+    if h_file != INVALID_HANDLE_VALUE {
+        // File-backed mappings not supported yet
+        return 0;
+    }
+    let size = (dw_maximum_size_high as usize) << 32 | dw_maximum_size_low as usize;
+    if size == 0 {
+        return 0; // Caller must provide a size for anonymous mappings
+    }
+    let addr = unsafe {
+        libc::mmap(
+            std::ptr::null_mut(),
+            size,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_ANONYMOUS | libc::MAP_SHARED,
+            -1,
+            0,
+        )
+    };
+    if addr == libc::MAP_FAILED {
+        0
+    } else {
+        addr as usize
+    }
+}
+
+/// MapViewOfFile: map a view of a file mapping into the address space.
+///
+/// For our anonymous mappings, the handle IS the mapped address, so we return it directly.
+/// Offset and access parameters are ignored for the anonymous mapping case.
+///
+/// # Safety
+/// No pointer dereference — just returns the handle value.
+pub extern "win64" fn map_view_of_file(
+    h_file_mapping_object: usize,
+    _dw_desired_access: u32,
+    _dw_file_offset_high: u32,
+    _dw_file_offset_low: u32,
+    _dw_number_of_bytes_to_map: usize,
+) -> usize {
+    h_file_mapping_object // Handle IS the mapped address
+}
+
+/// UnmapViewOfFile: unmap a mapped view of a file.
+///
+/// We don't track mapping sizes, so this is a no-op that always succeeds.
+/// The memory will be reclaimed when the process exits.
+///
+/// # Safety
+/// `lp_base_address` is accepted but not dereferenced.
+pub unsafe extern "win64" fn unmap_view_of_file(_lp_base_address: *const u8) -> i32 {
+    1 // TRUE — no-op
+}
+
+/// CopyFileW: copy a file (wide string version).
+///
+/// # Safety
+/// `lp_existing_file_name` and `lp_new_file_name` must be valid null-terminated UTF-16 strings.
+pub unsafe extern "win64" fn copy_file_w(
+    lp_existing_file_name: *const u16,
+    lp_new_file_name: *const u16,
+    b_fail_if_exists: i32,
+) -> i32 {
+    if lp_existing_file_name.is_null() || lp_new_file_name.is_null() {
+        return 0; // FALSE
+    }
+
+    // Read source filename
+    let mut len1 = 0usize;
+    while len1 < MAX_UTF16_LEN && unsafe { *lp_existing_file_name.add(len1) } != 0 {
+        len1 += 1;
+    }
+    if len1 == MAX_UTF16_LEN {
+        return 0;
+    }
+    let src_win_path = unsafe {
+        String::from_utf16_lossy(std::slice::from_raw_parts(lp_existing_file_name, len1))
+    };
+
+    // Read destination filename
+    let mut len2 = 0usize;
+    while len2 < MAX_UTF16_LEN && unsafe { *lp_new_file_name.add(len2) } != 0 {
+        len2 += 1;
+    }
+    if len2 == MAX_UTF16_LEN {
+        return 0;
+    }
+    let dst_win_path =
+        unsafe { String::from_utf16_lossy(std::slice::from_raw_parts(lp_new_file_name, len2)) };
+
+    // Translate paths
+    let src_linux_path = match weave_core::prefix::translator().to_linux_str(&src_win_path) {
+        Ok(p) => p,
+        Err(_) => return 0,
+    };
+    let dst_linux_path = match weave_core::prefix::translator().to_linux_str(&dst_win_path) {
+        Ok(p) => p,
+        Err(_) => return 0,
+    };
+
+    // Convert to C strings
+    let src_c_path = match std::ffi::CString::new(src_linux_path.as_os_str().as_encoded_bytes()) {
+        Ok(s) => s,
+        Err(_) => return 0,
+    };
+    let dst_c_path = match std::ffi::CString::new(dst_linux_path.as_os_str().as_encoded_bytes()) {
+        Ok(s) => s,
+        Err(_) => return 0,
+    };
+
+    // Check if destination exists and b_fail_if_exists is set
+    if b_fail_if_exists != 0 && unsafe { libc::access(dst_c_path.as_ptr(), libc::F_OK) } == 0 {
+        return 0; // FALSE — destination exists
+    }
+
+    // Open source file
+    let src_fd = unsafe { libc::open(src_c_path.as_ptr(), libc::O_RDONLY, 0) };
+    if src_fd < 0 {
+        return 0; // FALSE
+    }
+
+    // Open/create destination file
+    let dst_fd = unsafe {
+        libc::open(
+            dst_c_path.as_ptr(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC,
+            0o644,
+        )
+    };
+    if dst_fd < 0 {
+        unsafe { libc::close(src_fd) };
+        return 0; // FALSE
+    }
+
+    // Copy in 64KB chunks
+    let mut buf = [0u8; 65536];
+    loop {
+        let n = unsafe { libc::read(src_fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
+        if n <= 0 {
+            break;
+        }
+        let written =
+            unsafe { libc::write(dst_fd, buf.as_ptr() as *const libc::c_void, n as usize) };
+        if written != n {
+            unsafe { libc::close(src_fd) };
+            unsafe { libc::close(dst_fd) };
+            return 0; // FALSE
+        }
+    }
+
+    unsafe { libc::close(src_fd) };
+    unsafe { libc::close(dst_fd) };
+    1 // TRUE
+}
+
+/// Windows WIN32_FIND_DATAW structure (wide version).
+#[repr(C)]
+pub struct Win32FindDataW {
+    dw_file_attributes: u32,
+    ft_creation_time: u64,
+    ft_last_access_time: u64,
+    ft_last_write_time: u64,
+    n_file_size_high: u32,
+    n_file_size_low: u32,
+    dw_reserved0: u32,
+    dw_reserved1: u32,
+    c_file_name: [u16; 260],
+    c_alternate_file_name: [u16; 14],
+}
+
+/// Windows WIN32_FIND_DATAA structure (ANSI version).
+#[repr(C)]
+pub struct Win32FindDataA {
+    dw_file_attributes: u32,
+    ft_creation_time: u64,
+    ft_last_access_time: u64,
+    ft_last_write_time: u64,
+    n_file_size_high: u32,
+    n_file_size_low: u32,
+    dw_reserved0: u32,
+    dw_reserved1: u32,
+    c_file_name: [u8; 260],
+    c_alternate_file_name: [u8; 14],
+}
+
+/// FindFirstFileW: start directory enumeration (wide string version).
+///
+/// # Safety
+/// `lp_file_name` must be a valid null-terminated UTF-16 string.
+/// `lp_find_file_data` must be a valid writable pointer to a WIN32_FIND_DATAW.
+pub unsafe extern "win64" fn find_first_file_w(
+    lp_file_name: *const u16,
+    lp_find_file_data: *mut Win32FindDataW,
+) -> usize {
+    if lp_file_name.is_null() || lp_find_file_data.is_null() {
+        return usize::MAX; // INVALID_HANDLE_VALUE
+    }
+
+    // Read the null-terminated UTF-16 filename
+    let mut len = 0usize;
+    while len < MAX_UTF16_LEN && unsafe { *lp_file_name.add(len) } != 0 {
+        len += 1;
+    }
+    if len == MAX_UTF16_LEN {
+        return usize::MAX;
+    }
+    let win_path =
+        unsafe { String::from_utf16_lossy(std::slice::from_raw_parts(lp_file_name, len)) };
+
+    // Translate to Linux path
+    let linux_path = match weave_core::prefix::translator().to_linux_str(&win_path) {
+        Ok(p) => p,
+        Err(_) => return usize::MAX,
+    };
+
+    // Open directory
+    let c_path = match std::ffi::CString::new(linux_path.as_os_str().as_encoded_bytes()) {
+        Ok(s) => s,
+        Err(_) => return usize::MAX,
+    };
+
+    let dir = unsafe { libc::opendir(c_path.as_ptr()) };
+    if dir.is_null() {
+        return usize::MAX;
+    }
+
+    // Read first entry
+    let entry = unsafe { libc::readdir(dir) };
+    if entry.is_null() {
+        unsafe { libc::closedir(dir) };
+        return usize::MAX;
+    }
+
+    // Convert entry name to UTF-16
+    let entry_name = unsafe {
+        let name_ptr = (*entry).d_name.as_ptr();
+        let name_len = libc::strlen(name_ptr);
+        std::slice::from_raw_parts(name_ptr as *const u8, name_len)
+    };
+    let entry_name_str = String::from_utf8_lossy(entry_name);
+    let wide_name: Vec<u16> = entry_name_str.encode_utf16().collect();
+
+    // Fill WIN32_FIND_DATAW
+    unsafe {
+        (*lp_find_file_data).dw_file_attributes = 0x80; // FILE_ATTRIBUTE_NORMAL
+        (*lp_find_file_data).ft_creation_time = 0;
+        (*lp_find_file_data).ft_last_access_time = 0;
+        (*lp_find_file_data).ft_last_write_time = 0;
+        (*lp_find_file_data).n_file_size_high = 0;
+        (*lp_find_file_data).n_file_size_low = 0;
+        (*lp_find_file_data).dw_reserved0 = 0;
+        (*lp_find_file_data).dw_reserved1 = 0;
+
+        // Copy filename (truncate if too long)
+        let copy_len = wide_name.len().min(259); // leave room for null
+        std::ptr::copy_nonoverlapping(
+            wide_name.as_ptr(),
+            (*lp_find_file_data).c_file_name.as_mut_ptr(),
+            copy_len,
+        );
+        (*lp_find_file_data).c_file_name[copy_len] = 0;
+
+        // No alternate filename
+        (*lp_find_file_data).c_alternate_file_name[0] = 0;
+    }
+
+    dir as usize // Return directory handle
+}
+
+/// FindFirstFileA: start directory enumeration (ANSI version).
+///
+/// # Safety
+/// `lp_file_name` must be a valid null-terminated UTF-8 string.
+/// `lp_find_file_data` must be a valid writable pointer to a WIN32_FIND_DATAA.
+pub unsafe extern "win64" fn find_first_file_a(
+    lp_file_name: *const u8,
+    lp_find_file_data: *mut Win32FindDataA,
+) -> usize {
+    if lp_file_name.is_null() || lp_find_file_data.is_null() {
+        return usize::MAX; // INVALID_HANDLE_VALUE
+    }
+
+    // Read the null-terminated UTF-8 filename
+    let mut len = 0usize;
+    while len < MAX_UTF8_LEN && unsafe { *lp_file_name.add(len) } != 0 {
+        len += 1;
+    }
+    if len == MAX_UTF8_LEN {
+        return usize::MAX;
+    }
+    let win_path =
+        unsafe { String::from_utf8_lossy(std::slice::from_raw_parts(lp_file_name, len)) };
+
+    // Translate to Linux path
+    let linux_path = match weave_core::prefix::translator().to_linux_str(&win_path) {
+        Ok(p) => p,
+        Err(_) => return usize::MAX,
+    };
+
+    // Open directory
+    let c_path = match std::ffi::CString::new(linux_path.as_os_str().as_encoded_bytes()) {
+        Ok(s) => s,
+        Err(_) => return usize::MAX,
+    };
+
+    let dir = unsafe { libc::opendir(c_path.as_ptr()) };
+    if dir.is_null() {
+        return usize::MAX;
+    }
+
+    // Read first entry
+    let entry = unsafe { libc::readdir(dir) };
+    if entry.is_null() {
+        unsafe { libc::closedir(dir) };
+        return usize::MAX;
+    }
+
+    // Get entry name
+    let entry_name = unsafe {
+        let name_ptr = (*entry).d_name.as_ptr();
+        let name_len = libc::strlen(name_ptr);
+        std::slice::from_raw_parts(name_ptr as *const u8, name_len)
+    };
+    let entry_name_str = String::from_utf8_lossy(entry_name);
+
+    // Fill WIN32_FIND_DATAA
+    unsafe {
+        (*lp_find_file_data).dw_file_attributes = 0x80; // FILE_ATTRIBUTE_NORMAL
+        (*lp_find_file_data).ft_creation_time = 0;
+        (*lp_find_file_data).ft_last_access_time = 0;
+        (*lp_find_file_data).ft_last_write_time = 0;
+        (*lp_find_file_data).n_file_size_high = 0;
+        (*lp_find_file_data).n_file_size_low = 0;
+        (*lp_find_file_data).dw_reserved0 = 0;
+        (*lp_find_file_data).dw_reserved1 = 0;
+
+        // Copy filename (truncate if too long)
+        let bytes = entry_name_str.as_bytes();
+        let copy_len = bytes.len().min(259); // leave room for null
+        std::ptr::copy_nonoverlapping(
+            bytes.as_ptr(),
+            (*lp_find_file_data).c_file_name.as_mut_ptr(),
+            copy_len,
+        );
+        (*lp_find_file_data).c_file_name[copy_len] = 0;
+
+        // No alternate filename
+        (*lp_find_file_data).c_alternate_file_name[0] = 0;
+    }
+
+    dir as usize // Return directory handle
+}
+
+/// FindNextFileW: continue directory enumeration (wide string version).
+///
+/// # Safety
+/// `h_find_file` must be a valid directory handle from FindFirstFileW.
+/// `lp_find_file_data` must be a valid writable pointer to a WIN32_FIND_DATAW.
+pub unsafe extern "win64" fn find_next_file_w(
+    h_find_file: usize,
+    lp_find_file_data: *mut Win32FindDataW,
+) -> i32 {
+    if h_find_file == 0 || h_find_file == usize::MAX || lp_find_file_data.is_null() {
+        return 0; // FALSE
+    }
+
+    let dir = h_find_file as *mut libc::DIR;
+
+    // Read next entry
+    let entry = unsafe { libc::readdir(dir) };
+    if entry.is_null() {
+        return 0; // FALSE - no more entries
+    }
+
+    // Convert entry name to UTF-16
+    let entry_name = unsafe {
+        let name_ptr = (*entry).d_name.as_ptr();
+        let name_len = libc::strlen(name_ptr);
+        std::slice::from_raw_parts(name_ptr as *const u8, name_len)
+    };
+    let entry_name_str = String::from_utf8_lossy(entry_name);
+    let wide_name: Vec<u16> = entry_name_str.encode_utf16().collect();
+
+    // Fill WIN32_FIND_DATAW
+    unsafe {
+        (*lp_find_file_data).dw_file_attributes = 0x80; // FILE_ATTRIBUTE_NORMAL
+        (*lp_find_file_data).ft_creation_time = 0;
+        (*lp_find_file_data).ft_last_access_time = 0;
+        (*lp_find_file_data).ft_last_write_time = 0;
+        (*lp_find_file_data).n_file_size_high = 0;
+        (*lp_find_file_data).n_file_size_low = 0;
+        (*lp_find_file_data).dw_reserved0 = 0;
+        (*lp_find_file_data).dw_reserved1 = 0;
+
+        // Copy filename (truncate if too long)
+        let copy_len = wide_name.len().min(259); // leave room for null
+        std::ptr::copy_nonoverlapping(
+            wide_name.as_ptr(),
+            (*lp_find_file_data).c_file_name.as_mut_ptr(),
+            copy_len,
+        );
+        (*lp_find_file_data).c_file_name[copy_len] = 0;
+
+        // No alternate filename
+        (*lp_find_file_data).c_alternate_file_name[0] = 0;
+    }
+
+    1 // TRUE
+}
+
+/// FindNextFileA: continue directory enumeration (ANSI version).
+///
+/// # Safety
+/// `h_find_file` must be a valid directory handle from FindFirstFileA.
+/// `lp_find_file_data` must be a valid writable pointer to a WIN32_FIND_DATAA.
+pub unsafe extern "win64" fn find_next_file_a(
+    h_find_file: usize,
+    lp_find_file_data: *mut Win32FindDataA,
+) -> i32 {
+    if h_find_file == 0 || h_find_file == usize::MAX || lp_find_file_data.is_null() {
+        return 0; // FALSE
+    }
+
+    let dir = h_find_file as *mut libc::DIR;
+
+    // Read next entry
+    let entry = unsafe { libc::readdir(dir) };
+    if entry.is_null() {
+        return 0; // FALSE - no more entries
+    }
+
+    // Get entry name
+    let entry_name = unsafe {
+        let name_ptr = (*entry).d_name.as_ptr();
+        let name_len = libc::strlen(name_ptr);
+        std::slice::from_raw_parts(name_ptr as *const u8, name_len)
+    };
+    let entry_name_str = String::from_utf8_lossy(entry_name);
+
+    // Fill WIN32_FIND_DATAA
+    unsafe {
+        (*lp_find_file_data).dw_file_attributes = 0x80; // FILE_ATTRIBUTE_NORMAL
+        (*lp_find_file_data).ft_creation_time = 0;
+        (*lp_find_file_data).ft_last_access_time = 0;
+        (*lp_find_file_data).ft_last_write_time = 0;
+        (*lp_find_file_data).n_file_size_high = 0;
+        (*lp_find_file_data).n_file_size_low = 0;
+        (*lp_find_file_data).dw_reserved0 = 0;
+        (*lp_find_file_data).dw_reserved1 = 0;
+
+        // Copy filename (truncate if too long)
+        let bytes = entry_name_str.as_bytes();
+        let copy_len = bytes.len().min(259); // leave room for null
+        std::ptr::copy_nonoverlapping(
+            bytes.as_ptr(),
+            (*lp_find_file_data).c_file_name.as_mut_ptr(),
+            copy_len,
+        );
+        (*lp_find_file_data).c_file_name[copy_len] = 0;
+
+        // No alternate filename
+        (*lp_find_file_data).c_alternate_file_name[0] = 0;
+    }
+
+    1 // TRUE
+}
+
+/// FindClose: close directory enumeration handle.
+pub extern "win64" fn find_close(h_find_file: usize) -> i32 {
+    if h_find_file == 0 || h_find_file == usize::MAX {
+        return 0; // FALSE
+    }
+
+    let dir = h_find_file as *mut libc::DIR;
+    let ret = unsafe { libc::closedir(dir) };
+    (ret == 0) as i32
+}
+
+/// VerSetConditionMask: pack a condition into the corresponding 3-bit slot of the mask.
+pub extern "win64" fn ver_set_condition_mask(
+    mut condition_mask: u64,
+    type_mask: u32,
+    condition: u8,
+) -> u64 {
+    let mut bit = 1u32;
+    let mut shift = 0u32;
+    loop {
+        if bit > type_mask {
+            break;
+        }
+        if (type_mask & bit) != 0 {
+            condition_mask &= !(0x07u64 << shift);
+            condition_mask |= (condition as u64 & 0x07) << shift;
+        }
+        shift += 3;
+        bit <<= 1;
+    }
+    condition_mask
+}
+
+/// VerifyVersionInfoW: verify version information against conditions.
+///
+/// Phase 2: always returns TRUE (version check passes).
+///
+/// # Safety
+/// `lp_version_info` must be a valid pointer to an OSVERSIONINFOEXW.
+pub unsafe extern "win64" fn verify_version_info_w(
+    _lp_version_info: *const OsVersionInfoExW,
+    _type_mask: u32,
+    _condition_mask: u64,
+) -> i32 {
+    // Always return TRUE for version checks
+    1
+}
+
+/// Windows WIN32_FILE_ATTRIBUTE_DATA structure.
+#[repr(C)]
+pub struct Win32FileAttributeData {
+    dw_file_attributes: u32,
+    ft_creation_time: u64,
+    ft_last_access_time: u64,
+    ft_last_write_time: u64,
+    n_file_size_high: u32,
+    n_file_size_low: u32,
+}
+
+/// GetFileAttributesExW: get extended file attributes (wide string version).
+///
+/// # Safety
+/// `lp_file_name` must be a valid null-terminated UTF-16 string.
+/// `lp_file_information` must be a valid writable pointer to a WIN32_FILE_ATTRIBUTE_DATA.
+pub unsafe extern "win64" fn get_file_attributes_ex_w(
+    lp_file_name: *const u16,
+    _f_info_level_id: u32,
+    lp_file_information: *mut Win32FileAttributeData,
+) -> i32 {
+    const FILE_ATTRIBUTE_NORMAL: u32 = 0x80;
+    const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
+
+    if lp_file_name.is_null() || lp_file_information.is_null() {
+        return 0; // FALSE
+    }
+
+    // Read the null-terminated UTF-16 filename
+    let mut len = 0usize;
+    while len < MAX_UTF16_LEN && unsafe { *lp_file_name.add(len) } != 0 {
+        len += 1;
+    }
+    if len == MAX_UTF16_LEN {
+        return 0;
+    }
+    let win_path =
+        unsafe { String::from_utf16_lossy(std::slice::from_raw_parts(lp_file_name, len)) };
+
+    // Translate to Linux path
+    let linux_path = match weave_core::prefix::translator().to_linux_str(&win_path) {
+        Ok(p) => p,
+        Err(_) => return 0,
+    };
+
+    // Check if path exists and get type
+    let c_path = match std::ffi::CString::new(linux_path.as_os_str().as_encoded_bytes()) {
+        Ok(s) => s,
+        Err(_) => return 0,
+    };
+
+    let mut stat = unsafe { std::mem::zeroed::<libc::stat>() };
+    let ret = unsafe { libc::stat(c_path.as_ptr(), &mut stat) };
+    if ret != 0 {
+        return 0; // FALSE
+    }
+
+    // Fill WIN32_FILE_ATTRIBUTE_DATA
+    unsafe {
+        (*lp_file_information).dw_file_attributes =
+            if (stat.st_mode & libc::S_IFMT) == libc::S_IFDIR {
+                FILE_ATTRIBUTE_DIRECTORY
+            } else {
+                FILE_ATTRIBUTE_NORMAL
+            };
+        (*lp_file_information).ft_creation_time = 0;
+        (*lp_file_information).ft_last_access_time = 0;
+        (*lp_file_information).ft_last_write_time = 0;
+        (*lp_file_information).n_file_size_high = (stat.st_size >> 32) as u32;
+        (*lp_file_information).n_file_size_low = (stat.st_size & 0xFFFFFFFF) as u32;
+    }
+
+    1 // TRUE
+}
+
+/// GetFileAttributesExA: get extended file attributes (ANSI version).
+///
+/// # Safety
+/// `lp_file_name` must be a valid null-terminated UTF-8 string.
+/// `lp_file_information` must be a valid writable pointer to a WIN32_FILE_ATTRIBUTE_DATA.
+pub unsafe extern "win64" fn get_file_attributes_ex_a(
+    lp_file_name: *const u8,
+    _f_info_level_id: u32,
+    lp_file_information: *mut Win32FileAttributeData,
+) -> i32 {
+    const FILE_ATTRIBUTE_NORMAL: u32 = 0x80;
+    const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
+
+    if lp_file_name.is_null() || lp_file_information.is_null() {
+        return 0; // FALSE
+    }
+
+    // Read the null-terminated UTF-8 filename
+    let mut len = 0usize;
+    while len < MAX_UTF8_LEN && unsafe { *lp_file_name.add(len) } != 0 {
+        len += 1;
+    }
+    if len == MAX_UTF8_LEN {
+        return 0;
+    }
+    let win_path =
+        unsafe { String::from_utf8_lossy(std::slice::from_raw_parts(lp_file_name, len)) };
+
+    // Translate to Linux path
+    let linux_path = match weave_core::prefix::translator().to_linux_str(&win_path) {
+        Ok(p) => p,
+        Err(_) => return 0,
+    };
+
+    // Check if path exists and get type
+    let c_path = match std::ffi::CString::new(linux_path.as_os_str().as_encoded_bytes()) {
+        Ok(s) => s,
+        Err(_) => return 0,
+    };
+
+    let mut stat = unsafe { std::mem::zeroed::<libc::stat>() };
+    let ret = unsafe { libc::stat(c_path.as_ptr(), &mut stat) };
+    if ret != 0 {
+        return 0; // FALSE
+    }
+
+    // Fill WIN32_FILE_ATTRIBUTE_DATA
+    unsafe {
+        (*lp_file_information).dw_file_attributes =
+            if (stat.st_mode & libc::S_IFMT) == libc::S_IFDIR {
+                FILE_ATTRIBUTE_DIRECTORY
+            } else {
+                FILE_ATTRIBUTE_NORMAL
+            };
+        (*lp_file_information).ft_creation_time = 0;
+        (*lp_file_information).ft_last_access_time = 0;
+        (*lp_file_information).ft_last_write_time = 0;
+        (*lp_file_information).n_file_size_high = (stat.st_size >> 32) as u32;
+        (*lp_file_information).n_file_size_low = (stat.st_size & 0xFFFFFFFF) as u32;
+    }
+
+    1 // TRUE
+}
+
+/// CopyFileA: copy a file (ANSI version).
+///
+/// # Safety
+/// `lp_existing_file_name` and `lp_new_file_name` must be valid null-terminated UTF-8 strings.
+pub unsafe extern "win64" fn copy_file_a(
+    lp_existing_file_name: *const u8,
+    lp_new_file_name: *const u8,
+    b_fail_if_exists: i32,
+) -> i32 {
+    if lp_existing_file_name.is_null() || lp_new_file_name.is_null() {
+        return 0; // FALSE
+    }
+
+    // Read source filename
+    let mut len1 = 0usize;
+    while len1 < MAX_UTF8_LEN && unsafe { *lp_existing_file_name.add(len1) } != 0 {
+        len1 += 1;
+    }
+    if len1 == MAX_UTF8_LEN {
+        return 0;
+    }
+    let src_win_path =
+        unsafe { String::from_utf8_lossy(std::slice::from_raw_parts(lp_existing_file_name, len1)) };
+
+    // Read destination filename
+    let mut len2 = 0usize;
+    while len2 < MAX_UTF8_LEN && unsafe { *lp_new_file_name.add(len2) } != 0 {
+        len2 += 1;
+    }
+    if len2 == MAX_UTF8_LEN {
+        return 0;
+    }
+    let dst_win_path =
+        unsafe { String::from_utf8_lossy(std::slice::from_raw_parts(lp_new_file_name, len2)) };
+
+    // Translate paths
+    let src_linux_path = match weave_core::prefix::translator().to_linux_str(&src_win_path) {
+        Ok(p) => p,
+        Err(_) => return 0,
+    };
+    let dst_linux_path = match weave_core::prefix::translator().to_linux_str(&dst_win_path) {
+        Ok(p) => p,
+        Err(_) => return 0,
+    };
+
+    // Convert to C strings
+    let src_c_path = match std::ffi::CString::new(src_linux_path.as_os_str().as_encoded_bytes()) {
+        Ok(s) => s,
+        Err(_) => return 0,
+    };
+    let dst_c_path = match std::ffi::CString::new(dst_linux_path.as_os_str().as_encoded_bytes()) {
+        Ok(s) => s,
+        Err(_) => return 0,
+    };
+
+    // Check if destination exists and b_fail_if_exists is set
+    if b_fail_if_exists != 0 && unsafe { libc::access(dst_c_path.as_ptr(), libc::F_OK) } == 0 {
+        return 0; // FALSE — destination exists
+    }
+
+    // Open source file
+    let src_fd = unsafe { libc::open(src_c_path.as_ptr(), libc::O_RDONLY, 0) };
+    if src_fd < 0 {
+        return 0; // FALSE
+    }
+
+    // Open/create destination file
+    let dst_fd = unsafe {
+        libc::open(
+            dst_c_path.as_ptr(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC,
+            0o644,
+        )
+    };
+    if dst_fd < 0 {
+        unsafe { libc::close(src_fd) };
+        return 0; // FALSE
+    }
+
+    // Copy in 64KB chunks
+    let mut buf = [0u8; 65536];
+    loop {
+        let n = unsafe { libc::read(src_fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
+        if n <= 0 {
+            break;
+        }
+        let written =
+            unsafe { libc::write(dst_fd, buf.as_ptr() as *const libc::c_void, n as usize) };
+        if written != n {
+            unsafe { libc::close(src_fd) };
+            unsafe { libc::close(dst_fd) };
+            return 0; // FALSE
+        }
+    }
+
+    unsafe { libc::close(src_fd) };
+    unsafe { libc::close(dst_fd) };
+    1 // TRUE
 }
 
 // ── Module / library loading stubs ────────────────────────────────────────────
@@ -3894,6 +4664,47 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
             Some(get_file_size as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
         }
         "FlushFileBuffers" => Some(flush_file_buffers as *const () as usize),
+        "CreateFileMappingW" => Some(
+            create_file_mapping_w as unsafe extern "win64" fn(_, _, _, _, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "MapViewOfFile" => Some(
+            map_view_of_file as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const () as usize,
+        ),
+        "UnmapViewOfFile" => {
+            Some(unmap_view_of_file as unsafe extern "win64" fn(_) -> _ as *const () as usize)
+        }
+        "CopyFileW" => {
+            Some(copy_file_w as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize)
+        }
+        "CopyFileA" => {
+            Some(copy_file_a as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize)
+        }
+        "FindFirstFileW" => {
+            Some(find_first_file_w as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "FindFirstFileA" => {
+            Some(find_first_file_a as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "FindNextFileW" => {
+            Some(find_next_file_w as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "FindNextFileA" => {
+            Some(find_next_file_a as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "FindClose" => Some(find_close as *const () as usize),
+        "VerSetConditionMask" => Some(ver_set_condition_mask as *const () as usize),
+        "VerifyVersionInfoW" => Some(
+            verify_version_info_w as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
+        ),
+        "GetFileAttributesExW" => Some(
+            get_file_attributes_ex_w as unsafe extern "win64" fn(_, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "GetFileAttributesExA" => Some(
+            get_file_attributes_ex_a as unsafe extern "win64" fn(_, _, _) -> _ as *const ()
+                as usize,
+        ),
         "WideCharToMultiByte" => Some(
             wide_char_to_multi_byte as unsafe extern "win64" fn(_, _, _, _, _, _, _, _) -> _
                 as *const () as usize,
