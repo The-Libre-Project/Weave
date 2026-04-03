@@ -117,6 +117,7 @@ impl RingBuf {
 #[derive(Debug, Clone)]
 struct AudioDevice {
     id: String,
+    #[allow(dead_code)]
     name: String,
     is_default: bool,
 }
@@ -298,6 +299,7 @@ impl MMDeviceEnumerator {
 /// PipeWire process callback).  Audio written by the app through
 /// GetBuffer/ReleaseBuffer lands here; the PW callback drains it.
 struct AudioClient {
+    #[allow(dead_code)]
     device_id: String,
     format: Option<WaveFormatEx>,
     /// Frame count reported to the app via GetBufferSize (100 ms).
@@ -626,7 +628,7 @@ unsafe extern "win64" fn iaudio_client_initialize(
     let format = *p_format;
 
     let channels = format.n_channels as usize;
-    let bytes_per_sample = (format.w_bits_per_sample as usize + 7) / 8;
+    let bytes_per_sample = (format.w_bits_per_sample as usize).div_ceil(8);
     let frame_size = channels * bytes_per_sample;
 
     // 100 ms buffer as seen by the app
@@ -1079,7 +1081,7 @@ static IAUDIO_RENDER_CLIENT_VTABLE: IAudioRenderClientVtable = IAudioRenderClien
 // ── DLL Exports ──────────────────────────────────────────────────────────────
 
 /// CoCreateInstance for CLSID_MMDeviceEnumerator -- main WASAPI entry point.
-pub extern "win64" fn co_create_instance(
+pub unsafe extern "win64" fn co_create_instance(
     rclsid: *const u8,
     _p_unk_outer: usize,
     _dw_cls_context: u32,

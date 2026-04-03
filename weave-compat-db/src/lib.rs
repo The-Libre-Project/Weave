@@ -225,7 +225,7 @@ pub struct CompatStats {
 // ── Import Table Analysis ──────────────────────────────────────────────
 
 /// Analyze a PE file's import table
-pub fn analyze_imports(pe_data: &[u8]) -> Result<HashSet<ImportEntry>> {
+pub fn analyze_imports(_pe_data: &[u8]) -> Result<HashSet<ImportEntry>> {
     // This would parse the PE import table
     // For now, return empty set - would be implemented with goblin or similar
     Ok(HashSet::new())
@@ -269,8 +269,6 @@ pub fn report_app_launch(db: &mut CompatDatabase, exe_path: &std::path::Path, ex
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::SystemTime;
-
     #[test]
     fn test_app_identity() {
         let identity = AppIdentity {
