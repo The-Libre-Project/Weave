@@ -51,23 +51,23 @@ pub struct XInputCapabilities {
 }
 
 // Button bitmask constants (match Windows XInput header)
-pub const XINPUT_GAMEPAD_DPAD_UP: u16        = 0x0001;
-pub const XINPUT_GAMEPAD_DPAD_DOWN: u16      = 0x0002;
-pub const XINPUT_GAMEPAD_DPAD_LEFT: u16      = 0x0004;
-pub const XINPUT_GAMEPAD_DPAD_RIGHT: u16     = 0x0008;
-pub const XINPUT_GAMEPAD_START: u16          = 0x0010;
-pub const XINPUT_GAMEPAD_BACK: u16           = 0x0020;
-pub const XINPUT_GAMEPAD_LEFT_THUMB: u16     = 0x0040;
-pub const XINPUT_GAMEPAD_RIGHT_THUMB: u16    = 0x0080;
-pub const XINPUT_GAMEPAD_LEFT_SHOULDER: u16  = 0x0100;
+pub const XINPUT_GAMEPAD_DPAD_UP: u16 = 0x0001;
+pub const XINPUT_GAMEPAD_DPAD_DOWN: u16 = 0x0002;
+pub const XINPUT_GAMEPAD_DPAD_LEFT: u16 = 0x0004;
+pub const XINPUT_GAMEPAD_DPAD_RIGHT: u16 = 0x0008;
+pub const XINPUT_GAMEPAD_START: u16 = 0x0010;
+pub const XINPUT_GAMEPAD_BACK: u16 = 0x0020;
+pub const XINPUT_GAMEPAD_LEFT_THUMB: u16 = 0x0040;
+pub const XINPUT_GAMEPAD_RIGHT_THUMB: u16 = 0x0080;
+pub const XINPUT_GAMEPAD_LEFT_SHOULDER: u16 = 0x0100;
 pub const XINPUT_GAMEPAD_RIGHT_SHOULDER: u16 = 0x0200;
-pub const XINPUT_GAMEPAD_A: u16              = 0x1000;
-pub const XINPUT_GAMEPAD_B: u16              = 0x2000;
-pub const XINPUT_GAMEPAD_X: u16              = 0x4000;
-pub const XINPUT_GAMEPAD_Y: u16              = 0x8000;
+pub const XINPUT_GAMEPAD_A: u16 = 0x1000;
+pub const XINPUT_GAMEPAD_B: u16 = 0x2000;
+pub const XINPUT_GAMEPAD_X: u16 = 0x4000;
+pub const XINPUT_GAMEPAD_Y: u16 = 0x8000;
 
 // Error codes (match Windows WinError.h)
-pub const ERROR_SUCCESS: u32              = 0;
+pub const ERROR_SUCCESS: u32 = 0;
 pub const ERROR_DEVICE_NOT_CONNECTED: u32 = 1167;
 
 // ── Internal State ────────────────────────────────────────────────────────
@@ -90,32 +90,39 @@ mod linux_backend {
     // Linux joystick event structure (from <linux/joystick.h>)
     #[repr(C)]
     pub struct JsEvent {
-        pub time: u32,   // event timestamp in milliseconds
-        pub value: i16,  // axis value or button state
-        pub type_: u8,   // event type
-        pub number: u8,  // axis / button number
+        pub time: u32,  // event timestamp in milliseconds
+        pub value: i16, // axis value or button state
+        pub type_: u8,  // event type
+        pub number: u8, // axis / button number
     }
 
     pub const JS_EVENT_BUTTON: u8 = 0x01;
-    pub const JS_EVENT_AXIS: u8   = 0x02;
-    pub const JS_EVENT_INIT: u8   = 0x80; // synthetic init event flag
+    pub const JS_EVENT_AXIS: u8 = 0x02;
+    pub const JS_EVENT_INIT: u8 = 0x80; // synthetic init event flag
 
     /// Open /dev/input/jsN in non-blocking mode; returns the fd or -1.
     pub fn open_joystick(slot: u32) -> Option<RawFd> {
         let path = format!("/dev/input/js{slot}");
         let c_path = CString::new(path).ok()?;
         let fd = unsafe { libc::open(c_path.as_ptr(), O_RDONLY | O_NONBLOCK) };
-        if fd < 0 { None } else { Some(fd) }
+        if fd < 0 {
+            None
+        } else {
+            Some(fd)
+        }
     }
 
     /// Drain all pending js_events from fd and fold them into `gamepad`.
     pub fn read_joystick_state(fd: RawFd, gamepad: &mut XInputGamepad) {
         let event_size = std::mem::size_of::<JsEvent>();
         loop {
-            let mut ev = JsEvent { time: 0, value: 0, type_: 0, number: 0 };
-            let ret = unsafe {
-                libc::read(fd, &mut ev as *mut JsEvent as *mut c_void, event_size)
+            let mut ev = JsEvent {
+                time: 0,
+                value: 0,
+                type_: 0,
+                number: 0,
             };
+            let ret = unsafe { libc::read(fd, &mut ev as *mut JsEvent as *mut c_void, event_size) };
             if ret as usize != event_size {
                 // No more events (EAGAIN) or error — stop draining.
                 break;
@@ -143,7 +150,7 @@ mod linux_backend {
             1 => gp.s_thumb_ly = value.saturating_neg(),
             2 => gp.s_thumb_rx = value,
             3 => gp.s_thumb_ry = value.saturating_neg(),
-            4 => gp.b_left_trigger  = axis_to_trigger(value),
+            4 => gp.b_left_trigger = axis_to_trigger(value),
             5 => gp.b_right_trigger = axis_to_trigger(value),
             _ => {}
         }
@@ -177,21 +184,21 @@ mod linux_backend {
     ///  13  D-Pad Right
     fn apply_button(gp: &mut XInputGamepad, button: u8, value: i16) {
         let bit: Option<u16> = match button {
-            0  => Some(super::XINPUT_GAMEPAD_A),
-            1  => Some(super::XINPUT_GAMEPAD_B),
-            2  => Some(super::XINPUT_GAMEPAD_X),
-            3  => Some(super::XINPUT_GAMEPAD_Y),
-            4  => Some(super::XINPUT_GAMEPAD_LEFT_SHOULDER),
-            5  => Some(super::XINPUT_GAMEPAD_RIGHT_SHOULDER),
-            6  => Some(super::XINPUT_GAMEPAD_BACK),
-            7  => Some(super::XINPUT_GAMEPAD_START),
-            8  => Some(super::XINPUT_GAMEPAD_LEFT_THUMB),
-            9  => Some(super::XINPUT_GAMEPAD_RIGHT_THUMB),
+            0 => Some(super::XINPUT_GAMEPAD_A),
+            1 => Some(super::XINPUT_GAMEPAD_B),
+            2 => Some(super::XINPUT_GAMEPAD_X),
+            3 => Some(super::XINPUT_GAMEPAD_Y),
+            4 => Some(super::XINPUT_GAMEPAD_LEFT_SHOULDER),
+            5 => Some(super::XINPUT_GAMEPAD_RIGHT_SHOULDER),
+            6 => Some(super::XINPUT_GAMEPAD_BACK),
+            7 => Some(super::XINPUT_GAMEPAD_START),
+            8 => Some(super::XINPUT_GAMEPAD_LEFT_THUMB),
+            9 => Some(super::XINPUT_GAMEPAD_RIGHT_THUMB),
             10 => Some(super::XINPUT_GAMEPAD_DPAD_UP),
             11 => Some(super::XINPUT_GAMEPAD_DPAD_DOWN),
             12 => Some(super::XINPUT_GAMEPAD_DPAD_LEFT),
             13 => Some(super::XINPUT_GAMEPAD_DPAD_RIGHT),
-            _  => None,
+            _ => None,
         };
         if let Some(mask) = bit {
             if value != 0 {
@@ -238,8 +245,12 @@ mod linux_backend {
     use super::XInputGamepad;
 
     pub fn init_joystick_fds() {}
-    pub fn get_joystick_fd(_slot: u32) -> Option<i32> { None }
-    pub fn slot_connected(_slot: u32) -> bool { false }
+    pub fn get_joystick_fd(_slot: u32) -> Option<i32> {
+        None
+    }
+    pub fn slot_connected(_slot: u32) -> bool {
+        false
+    }
     pub fn read_joystick_state(_fd: i32, _gamepad: &mut XInputGamepad) {}
 }
 
@@ -253,18 +264,21 @@ fn init_gamepad_states() {
     if states_opt.is_none() {
         let mut states = HashMap::new();
         for slot in 0..4u32 {
-            states.insert(slot, XInputState {
-                dw_packet_number: 0,
-                gamepad: XInputGamepad {
-                    w_buttons: 0,
-                    b_left_trigger: 0,
-                    b_right_trigger: 0,
-                    s_thumb_lx: 0,
-                    s_thumb_ly: 0,
-                    s_thumb_rx: 0,
-                    s_thumb_ry: 0,
+            states.insert(
+                slot,
+                XInputState {
+                    dw_packet_number: 0,
+                    gamepad: XInputGamepad {
+                        w_buttons: 0,
+                        b_left_trigger: 0,
+                        b_right_trigger: 0,
+                        s_thumb_lx: 0,
+                        s_thumb_ly: 0,
+                        s_thumb_rx: 0,
+                        s_thumb_ry: 0,
+                    },
                 },
-            });
+            );
         }
         *states_opt = Some(states);
     }
@@ -420,11 +434,11 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
     }
 
     match func {
-        "XInputGetState"        => Some(x_input_get_state as *const () as usize),
-        "XInputSetState"        => Some(x_input_set_state as *const () as usize),
+        "XInputGetState" => Some(x_input_get_state as *const () as usize),
+        "XInputSetState" => Some(x_input_set_state as *const () as usize),
         "XInputGetCapabilities" => Some(x_input_get_capabilities as *const () as usize),
-        "XInputEnable"          => Some(x_input_enable as *const () as usize),
-        _                       => None,
+        "XInputEnable" => Some(x_input_enable as *const () as usize),
+        _ => None,
     }
 }
 
@@ -437,9 +451,18 @@ mod tests {
     #[test]
     fn resolve_known_functions_returns_some() {
         for dll in &["xinput1_3.dll", "xinput1_4.dll", "xinput9_1_0.dll"] {
-            assert!(resolve(dll, "XInputGetState").is_some(),        "missing XInputGetState in {dll}");
-            assert!(resolve(dll, "XInputSetState").is_some(),        "missing XInputSetState in {dll}");
-            assert!(resolve(dll, "XInputGetCapabilities").is_some(), "missing XInputGetCapabilities in {dll}");
+            assert!(
+                resolve(dll, "XInputGetState").is_some(),
+                "missing XInputGetState in {dll}"
+            );
+            assert!(
+                resolve(dll, "XInputSetState").is_some(),
+                "missing XInputSetState in {dll}"
+            );
+            assert!(
+                resolve(dll, "XInputGetCapabilities").is_some(),
+                "missing XInputGetCapabilities in {dll}"
+            );
         }
     }
 
@@ -489,7 +512,10 @@ mod tests {
         };
         for slot in 0..4u32 {
             let result = unsafe { x_input_get_state(slot, &mut state) };
-            assert_eq!(result, ERROR_DEVICE_NOT_CONNECTED, "slot {slot} should be disconnected on non-Linux");
+            assert_eq!(
+                result, ERROR_DEVICE_NOT_CONNECTED,
+                "slot {slot} should be disconnected on non-Linux"
+            );
         }
     }
 }

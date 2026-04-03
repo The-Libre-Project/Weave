@@ -6,10 +6,10 @@
 // Type alias for Result
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
-use serde::{Deserialize, Serialize};
 
 // ── Data Models ─────────────────────────────────────────────────────────
 
@@ -24,10 +24,10 @@ pub struct AppIdentity {
 // Compatibility status
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum CompatibilityStatus {
-    Working,      // Fully functional
-    Partial,      // Works with limitations
-    Broken,       // Doesn't work
-    Untested,     // Not tested yet
+    Working,  // Fully functional
+    Partial,  // Works with limitations
+    Broken,   // Doesn't work
+    Untested, // Not tested yet
 }
 
 // Import table entry
@@ -138,7 +138,11 @@ impl CompatDatabase {
     }
 
     /// Report application import table (called on first launch)
-    pub fn report_imports(&mut self, identity: AppIdentity, imports: HashSet<ImportEntry>) -> Result<()> {
+    pub fn report_imports(
+        &mut self,
+        identity: AppIdentity,
+        imports: HashSet<ImportEntry>,
+    ) -> Result<()> {
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?
             .as_secs();
@@ -162,7 +166,11 @@ impl CompatDatabase {
     }
 
     /// Update application status based on reports
-    pub fn update_status(&mut self, identity: &AppIdentity, status: CompatibilityStatus) -> Result<()> {
+    pub fn update_status(
+        &mut self,
+        identity: &AppIdentity,
+        status: CompatibilityStatus,
+    ) -> Result<()> {
         if let Some(record) = self.records.get_mut(identity) {
             record.status = status;
             record.last_updated = std::time::SystemTime::now()
@@ -181,7 +189,8 @@ impl CompatDatabase {
             function: function.to_string(),
         };
 
-        self.records.values()
+        self.records
+            .values()
             .filter(|record| record.import_table.contains(&target_import))
             .collect()
     }
@@ -234,7 +243,7 @@ pub fn analyze_imports(_pe_data: &[u8]) -> Result<HashSet<ImportEntry>> {
 /// Generate application identity from PE file
 pub fn identify_app(pe_data: &[u8], name_hint: Option<&str>) -> Result<AppIdentity> {
     // Calculate PE hash
-    use sha2::{Sha256, Digest};
+    use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(pe_data);
     let hash = format!("{:x}", hasher.finalize());
@@ -249,8 +258,13 @@ pub fn identify_app(pe_data: &[u8], name_hint: Option<&str>) -> Result<AppIdenti
 // ── Integration with Weave CLI ────────────────────────────────────────
 
 /// Report application launch to compatibility database
-pub fn report_app_launch(db: &mut CompatDatabase, exe_path: &std::path::Path, exe_data: &[u8]) -> Result<()> {
-    let app_name = exe_path.file_name()
+pub fn report_app_launch(
+    db: &mut CompatDatabase,
+    exe_path: &std::path::Path,
+    exe_data: &[u8],
+) -> Result<()> {
+    let app_name = exe_path
+        .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("Unknown");
 
@@ -349,8 +363,10 @@ mod tests {
             version: None,
             pe_hash: None,
         };
-        db.report_imports(identity1.clone(), HashSet::new()).unwrap();
-        db.update_status(&identity1, CompatibilityStatus::Working).unwrap();
+        db.report_imports(identity1.clone(), HashSet::new())
+            .unwrap();
+        db.update_status(&identity1, CompatibilityStatus::Working)
+            .unwrap();
 
         // Add a broken app
         let identity2 = AppIdentity {
@@ -358,8 +374,10 @@ mod tests {
             version: None,
             pe_hash: None,
         };
-        db.report_imports(identity2.clone(), HashSet::new()).unwrap();
-        db.update_status(&identity2, CompatibilityStatus::Broken).unwrap();
+        db.report_imports(identity2.clone(), HashSet::new())
+            .unwrap();
+        db.update_status(&identity2, CompatibilityStatus::Broken)
+            .unwrap();
 
         let stats = db.get_stats();
         assert_eq!(stats.total_apps, 2);
