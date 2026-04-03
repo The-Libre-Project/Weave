@@ -6,4 +6,6 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-pipewire = "0.9.2"
+# pipewire will be added here when Step 4 (audio) is implemented.
+# It requires pkg-config cross-compilation setup and is not declared
+# until real code exists to use it.

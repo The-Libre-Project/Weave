@@ -2,10 +2,26 @@
 //!
 //! These match the Windows DirectX 12 API types.
 
-use winapi::shared::guiddef::GUID;
-use winapi::shared::minwindef::UINT;
-use winapi::um::unknwnbase::IUnknown;
 use std::ffi::c_void;
+
+/// Windows 128-bit COM/GUID identifier.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GUID {
+    pub data1: u32,
+    pub data2: u16,
+    pub data3: u16,
+    pub data4: [u8; 8],
+}
+
+/// Windows UINT (unsigned 32-bit integer).
+pub type UINT = u32;
+
+/// COM IUnknown base interface (opaque; only used as a raw pointer).
+#[repr(C)]
+pub struct IUnknown {
+    _private: [u8; 0],
+}
 
 /// DirectX 12 feature levels.
 #[repr(u32)]
@@ -364,7 +380,6 @@ pub struct GpuDescriptorHandle {
 
 /// Resource barriers.
 #[repr(C)]
-#[derive(Debug, Clone)]
 pub struct ResourceBarrier {
     pub ty: ResourceBarrierType,
     pub flags: ResourceBarrierFlags,
@@ -382,11 +397,10 @@ pub enum ResourceBarrierType {
 pub type ResourceBarrierFlags = u32;
 
 #[repr(C)]
-#[derive(Clone)]
 pub union ResourceBarrierUnion {
-    pub transition: ResourceTransitionBarrier,
-    pub aliasing: ResourceAliasingBarrier,
-    pub uav: ResourceUavBarrier,
+    pub transition: std::mem::ManuallyDrop<ResourceTransitionBarrier>,
+    pub aliasing: std::mem::ManuallyDrop<ResourceAliasingBarrier>,
+    pub uav: std::mem::ManuallyDrop<ResourceUavBarrier>,
 }
 
 #[repr(C)]
@@ -771,10 +785,9 @@ pub struct HeapDesc {
 
 /// Clear value.
 #[repr(C)]
-#[derive(Clone)]
 pub union ClearValue {
     pub color: [f32; 4],
-    pub depth_stencil: ClearValueDepthStencil,
+    pub depth_stencil: std::mem::ManuallyDrop<ClearValueDepthStencil>,
 }
 
 /// Clear value for depth/stencil.
@@ -798,11 +811,10 @@ pub struct RootSignatureDesc {
 
 /// Root parameters.
 #[repr(C)]
-#[derive(Clone)]
 pub union RootParameter {
-    pub descriptor_table: RootDescriptorTable,
-    pub constants: RootConstants,
-    pub descriptor: RootDescriptor,
+    pub descriptor_table: std::mem::ManuallyDrop<RootDescriptorTable>,
+    pub constants: std::mem::ManuallyDrop<RootConstants>,
+    pub descriptor: std::mem::ManuallyDrop<RootDescriptor>,
 }
 
 /// Root descriptor tables.
