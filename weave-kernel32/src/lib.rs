@@ -70,6 +70,24 @@ pub struct ConsoleScreenBufferInfo {
     pub max_y: i16,
 }
 
+/// Mirrors Windows BY_HANDLE_FILE_INFORMATION layout.
+#[repr(C)]
+pub struct ByHandleFileInformation {
+    pub dw_file_attributes: u32,
+    pub ft_creation_time_low: u32,
+    pub ft_creation_time_high: u32,
+    pub ft_last_access_time_low: u32,
+    pub ft_last_access_time_high: u32,
+    pub ft_last_write_time_low: u32,
+    pub ft_last_write_time_high: u32,
+    pub dw_volume_serial_number: u32,
+    pub n_file_size_high: u32,
+    pub n_file_size_low: u32,
+    pub n_number_of_links: u32,
+    pub n_file_index_high: u32,
+    pub n_file_index_low: u32,
+}
+
 // ── Windows page-protection flags ─────────────────────────────────────────────
 
 fn win_prot_to_linux(protect: u32) -> i32 {
@@ -915,6 +933,483 @@ pub unsafe extern "win64" fn get_file_size(h_file: usize, lp_file_size_high: *mu
     }
     LAST_ERROR.with(|e| e.set(0));
     (size & 0xFFFF_FFFF) as u32
+}
+
+// ── File information functions ───────────────────────────────────────────────
+
+/// # Safety
+/// `lp_file_information` must be a valid writable pointer to a ByHandleFileInformation.
+pub unsafe extern "win64" fn get_file_information_by_handle(
+    h_file: usize,
+    lp_file_information: *mut ByHandleFileInformation,
+) -> i32 {
+    let fd = match handles::get_fd(h_file) {
+        Some(fd) => fd,
+        None => return 0, // FALSE
+    };
+
+    let mut stat = unsafe { std::mem::zeroed::<libc::stat>() };
+    let ret = unsafe { libc::fstat(fd, &mut stat) };
+    if ret != 0 {
+        return 0; // FALSE
+    }
+
+    unsafe {
+        (*lp_file_information).dw_file_attributes =
+            if (stat.st_mode & libc::S_IFMT) == libc::S_IFDIR {
+                0x10 // FILE_ATTRIBUTE_DIRECTORY
+            } else {
+                0x80 // FILE_ATTRIBUTE_NORMAL
+            };
+        (*lp_file_information).ft_creation_time_low = 0;
+        (*lp_file_information).ft_creation_time_high = 0;
+        (*lp_file_information).ft_last_access_time_low = 0;
+        (*lp_file_information).ft_last_access_time_high = 0;
+        (*lp_file_information).ft_last_write_time_low = 0;
+        (*lp_file_information).ft_last_write_time_high = 0;
+        (*lp_file_information).dw_volume_serial_number = 0xDEADBEEF;
+        (*lp_file_information).n_file_size_high = (stat.st_size >> 32) as u32;
+        (*lp_file_information).n_file_size_low = (stat.st_size & 0xFFFFFFFF) as u32;
+        (*lp_file_information).n_number_of_links = stat.st_nlink as u32;
+        (*lp_file_information).n_file_index_high = (stat.st_ino >> 32) as u32;
+        (*lp_file_information).n_file_index_low = (stat.st_ino & 0xFFFFFFFF) as u32;
+    }
+
+    1 // TRUE
+}
+
+/// # Safety
+/// No pointer arguments are dereferenced.
+pub unsafe extern "win64" fn set_end_of_file(h_file: usize) -> i32 {
+    let fd = match handles::get_fd(h_file) {
+        Some(fd) => fd,
+        None => return 0, // FALSE
+    };
+
+    let pos = unsafe { libc::lseek(fd, 0, libc::SEEK_CUR) };
+    if pos < 0 {
+        return 0; // FALSE
+    }
+
+    let ret = unsafe { libc::ftruncate(fd, pos) };
+    (ret == 0) as i32
+}
+
+/// # Safety
+/// `lp_buffer` must be valid for `n_buffer_length` u16 words.
+pub unsafe extern "win64" fn get_logical_drive_strings_w(
+    n_buffer_length: u32,
+    lp_buffer: *mut u16,
+) -> u32 {
+    const DRIVES: &[u16] = &[b'C' as u16, b':' as u16, b'\\' as u16, 0, 0];
+    let required = DRIVES.len() as u32;
+
+    if n_buffer_length == 0 || lp_buffer.is_null() {
+        return required;
+    }
+
+    if n_buffer_length < required {
+        return required;
+    }
+
+    unsafe {
+        std::ptr::copy_nonoverlapping(DRIVES.as_ptr(), lp_buffer, DRIVES.len());
+    }
+
+    4 // length excluding final null
+}
+
+/// # Safety
+/// `lp_buffer` must be valid for `n_buffer_length` bytes.
+pub unsafe extern "win64" fn get_logical_drive_strings_a(
+    n_buffer_length: u32,
+    lp_buffer: *mut u8,
+) -> u32 {
+    const DRIVES: &[u8] = b"C:\\\0\0";
+    let required = DRIVES.len() as u32;
+
+    if n_buffer_length == 0 || lp_buffer.is_null() {
+        return required;
+    }
+
+    if n_buffer_length < required {
+        return required;
+    }
+
+    unsafe {
+        std::ptr::copy_nonoverlapping(DRIVES.as_ptr(), lp_buffer, DRIVES.len());
+    }
+
+    4 // length excluding final null
+}
+
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn get_volume_information_w(
+    _lp_root_path_name: *const u16,
+    lp_volume_name_buffer: *mut u16,
+    n_volume_name_size: u32,
+    lp_volume_serial_number: *mut u32,
+    lp_maximum_component_length: *mut u32,
+    lp_file_system_flags: *mut u32,
+    lp_file_system_name_buffer: *mut u16,
+    n_file_system_name_size: u32,
+) -> i32 {
+    if !lp_volume_serial_number.is_null() {
+        unsafe { *lp_volume_serial_number = 0xDEAD_BEEFu32 };
+    }
+    if !lp_maximum_component_length.is_null() {
+        unsafe { *lp_maximum_component_length = 255u32 };
+    }
+    if !lp_file_system_flags.is_null() {
+        unsafe { *lp_file_system_flags = 0x0002u32 }; // FILE_CASE_PRESERVED_NAMES
+    }
+
+    if !lp_volume_name_buffer.is_null() && n_volume_name_size >= 6 {
+        const VOLUME_NAME: &[u16] = &[
+            b'W' as u16,
+            b'e' as u16,
+            b'a' as u16,
+            b'v' as u16,
+            b'e' as u16,
+            0u16,
+        ];
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                VOLUME_NAME.as_ptr(),
+                lp_volume_name_buffer,
+                VOLUME_NAME.len(),
+            );
+        }
+    }
+
+    if !lp_file_system_name_buffer.is_null() && n_file_system_name_size >= 5 {
+        const FS_NAME: &[u16] = &[b'N' as u16, b'T' as u16, b'F' as u16, b'S' as u16, 0u16];
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                FS_NAME.as_ptr(),
+                lp_file_system_name_buffer,
+                FS_NAME.len(),
+            );
+        }
+    }
+
+    1 // TRUE
+}
+
+// ── Process/thread stubs ─────────────────────────────────────────────────────
+
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn create_process_w(
+    _lp_application_name: *const u16,
+    _lp_command_line: *mut u16,
+    _lp_process_attributes: usize,
+    _lp_thread_attributes: usize,
+    _b_inherit_handles: i32,
+    _dw_creation_flags: u32,
+    _lp_environment: usize,
+    _lp_current_directory: *const u16,
+    _lp_startup_info: usize,
+    _lp_process_information: usize,
+) -> i32 {
+    0 // FALSE
+}
+
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn create_process_a(
+    _lp_application_name: *const u8,
+    _lp_command_line: *mut u8,
+    _lp_process_attributes: usize,
+    _lp_thread_attributes: usize,
+    _b_inherit_handles: i32,
+    _dw_creation_flags: u32,
+    _lp_environment: usize,
+    _lp_current_directory: *const u8,
+    _lp_startup_info: usize,
+    _lp_process_information: usize,
+) -> i32 {
+    0 // FALSE
+}
+
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn wait_for_input_idle(_h_process: usize, _dw_milliseconds: u32) -> u32 {
+    258 // WAIT_TIMEOUT
+}
+
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn get_process_id(_process: usize) -> u32 {
+    1000 // fake PID
+}
+
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn open_thread(
+    _dw_desired_access: u32,
+    _b_inherit_handle: i32,
+    _dw_thread_id: u32,
+) -> usize {
+    0x100 // fake non-null handle
+}
+
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn get_thread_id(_thread: usize) -> u32 {
+    42 // fake thread ID
+}
+
+// ── File time operations ─────────────────────────────────────────────────────
+
+/// # Safety
+/// `lp_file_time1` and `lp_file_time2` must be valid pointers to u64 values.
+pub unsafe extern "win64" fn compare_file_time(
+    lp_file_time1: *const u64,
+    lp_file_time2: *const u64,
+) -> i32 {
+    if lp_file_time1.is_null() || lp_file_time2.is_null() {
+        return 0;
+    }
+    let ft1 = unsafe { *lp_file_time1 };
+    let ft2 = unsafe { *lp_file_time2 };
+    match ft1.cmp(&ft2) {
+        std::cmp::Ordering::Less => -1,
+        std::cmp::Ordering::Equal => 0,
+        std::cmp::Ordering::Greater => 1,
+    }
+}
+
+/// # Safety
+/// `lp_file_time` and `lp_local_file_time` must be valid pointers to u64 values.
+pub unsafe extern "win64" fn file_time_to_local_file_time(
+    lp_file_time: *const u64,
+    lp_local_file_time: *mut u64,
+) -> i32 {
+    if lp_file_time.is_null() || lp_local_file_time.is_null() {
+        return 0;
+    }
+    unsafe { *lp_local_file_time = *lp_file_time };
+    1 // TRUE
+}
+
+/// # Safety
+/// `lp_local_file_time` and `lp_file_time` must be valid pointers to u64 values.
+pub unsafe extern "win64" fn local_file_time_to_file_time(
+    lp_local_file_time: *const u64,
+    lp_file_time: *mut u64,
+) -> i32 {
+    if lp_local_file_time.is_null() || lp_file_time.is_null() {
+        return 0;
+    }
+    unsafe { *lp_file_time = *lp_local_file_time };
+    1 // TRUE
+}
+
+/// # Safety
+/// `lp_file_time` must be a valid pointer to a u64 value.
+pub unsafe extern "win64" fn system_time_to_file_time(
+    _lp_system_time: *const SystemTime,
+    lp_file_time: *mut u64,
+) -> i32 {
+    if lp_file_time.is_null() {
+        return 0;
+    }
+    let unix_now = unsafe { libc::time(std::ptr::null_mut()) } as u64;
+    let ft = unix_now * 10_000_000u64 + 116_444_736_000_000_000u64;
+    unsafe { *lp_file_time = ft };
+    1 // TRUE
+}
+
+/// # Safety
+/// `lp_system_time` must be a valid pointer to a SystemTime struct.
+pub unsafe extern "win64" fn file_time_to_system_time(
+    _lp_file_time: *const u64,
+    lp_system_time: *mut SystemTime,
+) -> i32 {
+    if lp_system_time.is_null() {
+        return 0;
+    }
+    let unix_now = unsafe { libc::time(std::ptr::null_mut()) };
+    let tm = unsafe { *libc::gmtime(&unix_now) };
+    unsafe {
+        (*lp_system_time).w_year = (tm.tm_year + 1900) as u16;
+        (*lp_system_time).w_month = (tm.tm_mon + 1) as u16;
+        (*lp_system_time).w_day_of_week = tm.tm_wday as u16;
+        (*lp_system_time).w_day = tm.tm_mday as u16;
+        (*lp_system_time).w_hour = tm.tm_hour as u16;
+        (*lp_system_time).w_minute = tm.tm_min as u16;
+        (*lp_system_time).w_second = tm.tm_sec as u16;
+        (*lp_system_time).w_milliseconds = 0u16;
+    }
+    1 // TRUE
+}
+
+// ── Console misc + MoveFileEx ────────────────────────────────────────────────
+
+/// AllocConsole: allocate a console for the process.
+///
+/// No-op. Return TRUE.
+pub extern "win64" fn alloc_console() -> i32 {
+    1 // TRUE
+}
+
+/// FreeConsole: detach the process from its console.
+///
+/// No-op. Return TRUE.
+pub extern "win64" fn free_console() -> i32 {
+    1 // TRUE
+}
+
+/// AttachConsole: attach the calling process to the console of another process.
+///
+/// No-op. Return TRUE.
+///
+/// # Safety
+/// Pointer argument is accepted but not dereferenced.
+pub unsafe extern "win64" fn attach_console(_dw_process_id: u32) -> i32 {
+    1 // TRUE
+}
+
+/// GetConsoleWindow: retrieve the window handle for the console.
+///
+/// Return NULL (no window).
+pub extern "win64" fn get_console_window() -> usize {
+    0 // NULL
+}
+
+/// # Safety
+/// `lp_existing_file_name` and `lp_new_file_name` must be valid null-terminated UTF-16 strings.
+pub unsafe extern "win64" fn move_file_ex_w(
+    lp_existing_file_name: *const u16,
+    lp_new_file_name: *const u16,
+    dw_flags: u32,
+) -> i32 {
+    if lp_existing_file_name.is_null() || lp_new_file_name.is_null() {
+        return 0; // FALSE
+    }
+
+    // Read existing filename
+    let mut len1 = 0usize;
+    while len1 < MAX_UTF16_LEN && unsafe { *lp_existing_file_name.add(len1) } != 0 {
+        len1 += 1;
+    }
+    if len1 == MAX_UTF16_LEN {
+        return 0;
+    }
+    let old_path = unsafe {
+        String::from_utf16_lossy(std::slice::from_raw_parts(lp_existing_file_name, len1))
+    };
+
+    // Read new filename
+    let mut len2 = 0usize;
+    while len2 < MAX_UTF16_LEN && unsafe { *lp_new_file_name.add(len2) } != 0 {
+        len2 += 1;
+    }
+    if len2 == MAX_UTF16_LEN {
+        return 0;
+    }
+    let new_path =
+        unsafe { String::from_utf16_lossy(std::slice::from_raw_parts(lp_new_file_name, len2)) };
+
+    // Translate both paths
+    let linux_old = match weave_core::prefix::translator().to_linux_str(&old_path) {
+        Ok(p) => p,
+        Err(_) => return 0,
+    };
+    let linux_new = match weave_core::prefix::translator().to_linux_str(&new_path) {
+        Ok(p) => p,
+        Err(_) => return 0,
+    };
+
+    // Convert to C strings
+    let src_c_path = match std::ffi::CString::new(linux_old.as_os_str().as_encoded_bytes()) {
+        Ok(s) => s,
+        Err(_) => return 0,
+    };
+    let dst_c_path = match std::ffi::CString::new(linux_new.as_os_str().as_encoded_bytes()) {
+        Ok(s) => s,
+        Err(_) => return 0,
+    };
+
+    const MOVEFILE_REPLACE_EXISTING: u32 = 0x01;
+    if (dw_flags & MOVEFILE_REPLACE_EXISTING) == 0 {
+        // Check if destination exists
+        if unsafe { libc::access(dst_c_path.as_ptr(), libc::F_OK) } == 0 {
+            return 0; // FALSE — destination exists
+        }
+    }
+
+    // Call rename
+    let ret = unsafe { libc::rename(src_c_path.as_ptr(), dst_c_path.as_ptr()) };
+    (ret == 0) as i32
+}
+
+/// # Safety
+/// `lp_existing_file_name` and `lp_new_file_name` must be valid null-terminated UTF-8 strings.
+pub unsafe extern "win64" fn move_file_ex_a(
+    lp_existing_file_name: *const u8,
+    lp_new_file_name: *const u8,
+    dw_flags: u32,
+) -> i32 {
+    if lp_existing_file_name.is_null() || lp_new_file_name.is_null() {
+        return 0; // FALSE
+    }
+
+    // Read existing filename
+    let mut len1 = 0usize;
+    while len1 < MAX_UTF8_LEN && unsafe { *lp_existing_file_name.add(len1) } != 0 {
+        len1 += 1;
+    }
+    if len1 == MAX_UTF8_LEN {
+        return 0;
+    }
+    let old_path =
+        unsafe { String::from_utf8_lossy(std::slice::from_raw_parts(lp_existing_file_name, len1)) };
+
+    // Read new filename
+    let mut len2 = 0usize;
+    while len2 < MAX_UTF8_LEN && unsafe { *lp_new_file_name.add(len2) } != 0 {
+        len2 += 1;
+    }
+    if len2 == MAX_UTF8_LEN {
+        return 0;
+    }
+    let new_path =
+        unsafe { String::from_utf8_lossy(std::slice::from_raw_parts(lp_new_file_name, len2)) };
+
+    // Translate both paths
+    let linux_old = match weave_core::prefix::translator().to_linux_str(&old_path) {
+        Ok(p) => p,
+        Err(_) => return 0,
+    };
+    let linux_new = match weave_core::prefix::translator().to_linux_str(&new_path) {
+        Ok(p) => p,
+        Err(_) => return 0,
+    };
+
+    // Convert to C strings
+    let src_c_path = match std::ffi::CString::new(linux_old.as_os_str().as_encoded_bytes()) {
+        Ok(s) => s,
+        Err(_) => return 0,
+    };
+    let dst_c_path = match std::ffi::CString::new(linux_new.as_os_str().as_encoded_bytes()) {
+        Ok(s) => s,
+        Err(_) => return 0,
+    };
+
+    const MOVEFILE_REPLACE_EXISTING: u32 = 0x01;
+    if (dw_flags & MOVEFILE_REPLACE_EXISTING) == 0 {
+        // Check if destination exists
+        if unsafe { libc::access(dst_c_path.as_ptr(), libc::F_OK) } == 0 {
+            return 0; // FALSE — destination exists
+        }
+    }
+
+    // Call rename
+    let ret = unsafe { libc::rename(src_c_path.as_ptr(), dst_c_path.as_ptr()) };
+    (ret == 0) as i32
 }
 
 /// WideCharToMultiByte: convert a UTF-16 string to a multibyte (UTF-8) string.
@@ -3900,7 +4395,7 @@ pub unsafe extern "win64" fn set_file_attributes_a(
 
 /// Windows SYSTEMTIME structure — represents a date and time.
 #[repr(C)]
-struct SystemTime {
+pub struct SystemTime {
     w_year: u16,
     w_month: u16,
     w_day_of_week: u16,
@@ -5489,6 +5984,78 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "SetConsoleCtrlHandler" => Some(
             set_console_ctrl_handler as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
         ),
+        // Task 2: File information functions
+        "GetFileInformationByHandle" => Some(
+            get_file_information_by_handle as unsafe extern "win64" fn(_, _) -> _ as *const ()
+                as usize,
+        ),
+        "SetEndOfFile" => {
+            Some(set_end_of_file as unsafe extern "win64" fn(_) -> _ as *const () as usize)
+        }
+        "GetLogicalDriveStringsW" => Some(
+            get_logical_drive_strings_w as unsafe extern "win64" fn(_, _) -> _ as *const ()
+                as usize,
+        ),
+        "GetLogicalDriveStringsA" => Some(
+            get_logical_drive_strings_a as unsafe extern "win64" fn(_, _) -> _ as *const ()
+                as usize,
+        ),
+        "GetVolumeInformationW" => Some(
+            get_volume_information_w as unsafe extern "win64" fn(_, _, _, _, _, _, _, _) -> _
+                as *const () as usize,
+        ),
+        // Task 3: Process/thread stubs
+        "CreateProcessW" => Some(
+            create_process_w as unsafe extern "win64" fn(_, _, _, _, _, _, _, _, _, _) -> _
+                as *const () as usize,
+        ),
+        "CreateProcessA" => Some(
+            create_process_a as unsafe extern "win64" fn(_, _, _, _, _, _, _, _, _, _) -> _
+                as *const () as usize,
+        ),
+        "WaitForInputIdle" => {
+            Some(wait_for_input_idle as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "GetProcessId" => {
+            Some(get_process_id as unsafe extern "win64" fn(_) -> _ as *const () as usize)
+        }
+        "OpenThread" => {
+            Some(open_thread as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize)
+        }
+        "GetThreadId" => {
+            Some(get_thread_id as unsafe extern "win64" fn(_) -> _ as *const () as usize)
+        }
+        // Task 4: File time operations
+        "CompareFileTime" => {
+            Some(compare_file_time as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "FileTimeToLocalFileTime" => Some(
+            file_time_to_local_file_time as unsafe extern "win64" fn(_, _) -> _ as *const ()
+                as usize,
+        ),
+        "LocalFileTimeToFileTime" => Some(
+            local_file_time_to_file_time as unsafe extern "win64" fn(_, _) -> _ as *const ()
+                as usize,
+        ),
+        "SystemTimeToFileTime" => Some(
+            system_time_to_file_time as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
+        ),
+        "FileTimeToSystemTime" => Some(
+            file_time_to_system_time as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
+        ),
+        // Task 5: Console misc + MoveFileEx
+        "AllocConsole" => Some(alloc_console as *const () as usize),
+        "FreeConsole" => Some(free_console as *const () as usize),
+        "AttachConsole" => {
+            Some(attach_console as unsafe extern "win64" fn(_) -> _ as *const () as usize)
+        }
+        "GetConsoleWindow" => Some(get_console_window as *const () as usize),
+        "MoveFileExW" => {
+            Some(move_file_ex_w as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize)
+        }
+        "MoveFileExA" => {
+            Some(move_file_ex_a as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize)
+        }
         _ => None,
     }
 }

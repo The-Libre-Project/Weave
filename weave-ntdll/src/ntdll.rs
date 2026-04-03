@@ -588,6 +588,78 @@ pub unsafe extern "win64" fn rtl_free_unicode_string(unicode_string: *mut Unicod
     }
 }
 
+// ── RTL memory helpers ───────────────────────────────────────────────────────
+
+/// # Safety
+/// `destination` and `source` must be valid for `length` bytes.
+pub unsafe extern "win64" fn rtl_move_memory(
+    destination: *mut u8,
+    source: *const u8,
+    length: usize,
+) {
+    unsafe {
+        libc::memmove(
+            destination as *mut libc::c_void,
+            source as *const libc::c_void,
+            length,
+        );
+    }
+}
+
+/// # Safety
+/// `destination` and `source` must be valid for `length` bytes.
+pub unsafe extern "win64" fn rtl_copy_memory(
+    destination: *mut u8,
+    source: *const u8,
+    length: usize,
+) {
+    unsafe {
+        libc::memcpy(
+            destination as *mut libc::c_void,
+            source as *const libc::c_void,
+            length,
+        );
+    }
+}
+
+/// # Safety
+/// `destination` must be valid for `length` bytes.
+pub unsafe extern "win64" fn rtl_fill_memory(destination: *mut u8, length: usize, fill: u8) {
+    unsafe {
+        libc::memset(destination as *mut libc::c_void, fill as i32, length);
+    }
+}
+
+/// # Safety
+/// `destination` must be valid for `length` bytes.
+pub unsafe extern "win64" fn rtl_zero_memory(destination: *mut u8, length: usize) {
+    unsafe {
+        libc::memset(destination as *mut libc::c_void, 0, length);
+    }
+}
+
+/// # Safety
+/// `source1` and `source2` must be valid for `length` bytes.
+pub unsafe extern "win64" fn rtl_compare_memory(
+    source1: *const u8,
+    source2: *const u8,
+    length: usize,
+) -> usize {
+    let s1 = unsafe { std::slice::from_raw_parts(source1, length) };
+    let s2 = unsafe { std::slice::from_raw_parts(source2, length) };
+    s1.iter().zip(s2.iter()).take_while(|(a, b)| a == b).count()
+}
+
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn rtl_validate_heap(
+    _heap_handle: usize,
+    _flags: u32,
+    _base_address: usize,
+) -> i32 {
+    1 // TRUE
+}
+
 // ── System information functions ─────────────────────────────────────────────
 
 /// NtQuerySystemInformation: stub that returns STATUS_NOT_IMPLEMENTED.
@@ -915,6 +987,25 @@ pub fn resolve(func: &str) -> Option<usize> {
         ),
         "RtlFreeUnicodeString" => {
             Some(rtl_free_unicode_string as unsafe extern "win64" fn(_) as *const () as usize)
+        }
+        // RTL memory helpers
+        "RtlMoveMemory" => {
+            Some(rtl_move_memory as unsafe extern "win64" fn(_, _, _) as *const () as usize)
+        }
+        "RtlCopyMemory" => {
+            Some(rtl_copy_memory as unsafe extern "win64" fn(_, _, _) as *const () as usize)
+        }
+        "RtlFillMemory" => {
+            Some(rtl_fill_memory as unsafe extern "win64" fn(_, _, _) as *const () as usize)
+        }
+        "RtlZeroMemory" => {
+            Some(rtl_zero_memory as unsafe extern "win64" fn(_, _) as *const () as usize)
+        }
+        "RtlCompareMemory" => {
+            Some(rtl_compare_memory as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize)
+        }
+        "RtlValidateHeap" => {
+            Some(rtl_validate_heap as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize)
         }
         // System information functions
         "NtQuerySystemInformation" => Some(
