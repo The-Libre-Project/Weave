@@ -347,7 +347,7 @@ pub unsafe extern "win64" fn create_file_a(
             return usize::MAX;
         }
         let slice = std::slice::from_raw_parts(lp_file_name, len);
-        String::from_utf8_lossy(slice).to_owned()
+        String::from_utf8_lossy(slice).into_owned()
     };
 
     let nt_disposition = file_io::win32_disposition_to_nt(dw_creation_disposition);
