@@ -313,6 +313,122 @@ pub extern "win64" fn local_unlock(h_mem: usize) -> i32 {
     global_unlock(h_mem)
 }
 
+/// LocalReAlloc: reallocate a local memory block.
+///
+/// Wraps `realloc` with optional zero-initialization when `LMEM_ZEROINIT` (0x0040) is set.
+/// For simplicity, if the ZEROINIT flag is set, memset the entire block to 0 after realloc
+/// (conservative but correct). Ignores `LMEM_MOVEABLE` — we always move.
+///
+/// # Safety
+/// `h_mem` must be a valid pointer returned from LocalAlloc or NULL.
+pub unsafe extern "win64" fn local_re_alloc(
+    h_mem: *mut std::ffi::c_void,
+    u_bytes: usize,
+    u_flags: u32,
+) -> *mut std::ffi::c_void {
+    const LMEM_ZEROINIT: u32 = 0x0040;
+    let new_ptr = unsafe { libc::realloc(h_mem, u_bytes) };
+    if !new_ptr.is_null() && (u_flags & LMEM_ZEROINIT) != 0 {
+        unsafe { std::ptr::write_bytes(new_ptr, 0, u_bytes) };
+    }
+    new_ptr
+}
+
+/// HeapCreate: create a heap and return a fake handle.
+///
+/// Weave uses a single process heap (libc allocator). Return a fake but
+/// consistent handle value so callers can pass it back. Use `1usize` as the
+/// "process heap" sentinel. Ignore all parameters.
+pub extern "win64" fn heap_create(
+    _fl_options: u32,
+    _dw_initial_size: usize,
+    _dw_maximum_size: usize,
+) -> usize {
+    1usize // fake process heap handle
+}
+
+/// HeapDestroy: destroy a heap (no-op).
+///
+/// Returns TRUE. Never actually destroy memory — the "heap" is just the libc allocator.
+pub extern "win64" fn heap_destroy(_h_heap: usize) -> i32 {
+    1 // TRUE
+}
+
+/// HeapAlloc: allocate memory from the heap.
+///
+/// Wraps `malloc` with optional zero-initialization when HEAP_ZERO_MEMORY (0x08) is set.
+/// Ignores the hHeap parameter (we use a single global allocator).
+///
+/// # Safety
+/// The returned pointer must be freed with HeapFree or it will leak.
+pub extern "win64" fn heap_alloc(
+    _h_heap: usize,
+    dw_flags: u32,
+    dw_bytes: usize,
+) -> *mut std::ffi::c_void {
+    if dw_bytes == 0 {
+        return std::ptr::null_mut();
+    }
+    let zero_memory = (dw_flags & 0x08) != 0; // HEAP_ZERO_MEMORY
+    if zero_memory {
+        unsafe { libc::calloc(1, dw_bytes) }
+    } else {
+        unsafe { libc::malloc(dw_bytes) }
+    }
+}
+
+/// HeapReAlloc: reallocate memory in the heap.
+///
+/// Wraps `realloc`. Ignores hHeap and dwFlags parameters.
+///
+/// # Safety
+/// `lp_mem` must be a valid pointer returned from HeapAlloc or NULL.
+/// The returned pointer must be freed with HeapFree or it will leak.
+pub unsafe extern "win64" fn heap_re_alloc(
+    _h_heap: usize,
+    _dw_flags: u32,
+    lp_mem: *mut std::ffi::c_void,
+    dw_bytes: usize,
+) -> *mut std::ffi::c_void {
+    unsafe { libc::realloc(lp_mem, dw_bytes) }
+}
+
+/// HeapFree: free memory allocated from the heap.
+///
+/// Wraps `free`. Ignores hHeap and dwFlags parameters.
+///
+/// # Safety
+/// `lp_mem` must be a valid pointer returned from HeapAlloc/HeapReAlloc or NULL.
+pub unsafe extern "win64" fn heap_free(
+    _h_heap: usize,
+    _dw_flags: u32,
+    lp_mem: *mut std::ffi::c_void,
+) -> i32 {
+    if lp_mem.is_null() {
+        return 1; // TRUE
+    }
+    unsafe { libc::free(lp_mem) };
+    1 // TRUE
+}
+
+/// HeapSize: return the size of a heap block.
+///
+/// We don't track allocation sizes; returns 0 (acceptable for defensive callers).
+pub extern "win64" fn heap_size(
+    _h_heap: usize,
+    _dw_flags: u32,
+    _lp_mem: *const std::ffi::c_void,
+) -> usize {
+    0
+}
+
+/// GetProcessHeap: return the process heap handle.
+///
+/// Returns the same fake handle as HeapCreate (1usize).
+pub extern "win64" fn get_process_heap() -> usize {
+    1usize
+}
+
 // ── File I/O ──────────────────────────────────────────────────────────────────
 
 /// CreateFileA: open or create a file and return a HANDLE.
@@ -1008,6 +1124,17 @@ pub unsafe extern "win64" fn get_system_info(lp_system_info: *mut SystemInfo) {
     }
 }
 
+/// GetNativeSystemInfo — identical to GetSystemInfo.
+///
+/// Many apps call this on 64-bit Windows instead of GetSystemInfo.
+/// Just calls the existing get_system_info function internally.
+///
+/// # Safety
+/// `lp_system_info` must be a valid writable pointer or NULL.
+pub unsafe extern "win64" fn get_native_system_info(lp_system_info: *mut SystemInfo) {
+    unsafe { get_system_info(lp_system_info) };
+}
+
 // ── Debugger / diagnostics ────────────────────────────────────────────────────
 
 /// IsDebuggerPresent — always returns FALSE.
@@ -1033,7 +1160,7 @@ pub unsafe extern "win64" fn output_debug_string_w(_lp_output_string: *const u16
 
 // ── Events / synchronisation ──────────────────────────────────────────────────
 
-/// CreateEventA — returns a fake non-null handle (1).
+/// CreateEventA — returns a fake non-null handle (2).
 ///
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
@@ -1043,7 +1170,51 @@ pub unsafe extern "win64" fn create_event_a(
     _b_initial_state: i32,
     _lp_name: *const u8,
 ) -> usize {
-    1 // fake non-null handle
+    2 // fake non-null handle (distinct from mutex handle 1)
+}
+
+/// CreateEventW — returns a fake non-null handle (2).
+///
+/// Same as CreateEventA but accepts wide string name parameter.
+/// Ignores name, manual reset flag, initial state, and security attributes.
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn create_event_w(
+    _lp_event_attributes: *const u8,
+    _b_manual_reset: i32,
+    _b_initial_state: i32,
+    _lp_name: *const u16,
+) -> usize {
+    2 // fake non-null handle (distinct from mutex handle 1)
+}
+
+/// OpenEventA — returns a fake non-null handle (2).
+///
+/// Ignores access flags, inherit handle flag, and event name.
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn open_event_a(
+    _dw_desired_access: u32,
+    _b_inherit_handle: i32,
+    _lp_name: *const u8,
+) -> usize {
+    2 // fake non-null handle
+}
+
+/// OpenEventW — returns a fake non-null handle (2).
+///
+/// Ignores access flags, inherit handle flag, and event name.
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn open_event_w(
+    _dw_desired_access: u32,
+    _b_inherit_handle: i32,
+    _lp_name: *const u16,
+) -> usize {
+    2 // fake non-null handle
 }
 
 /// SetEvent — no-op stub, returns TRUE.
@@ -1295,20 +1466,122 @@ pub unsafe extern "win64" fn get_environment_variable_w(
 
 // ── Misc ──────────────────────────────────────────────────────────────────────
 
-/// FormatMessageA — not implemented; returns 0.
+/// FormatMessageA — formats an error message into an ANSI buffer.
+///
+/// Minimal implementation that handles FORMAT_MESSAGE_FROM_SYSTEM with error codes.
+/// Maps common Windows error codes to short ASCII strings and copies to caller's buffer.
 ///
 /// # Safety
-/// Pointer arguments are accepted but not dereferenced.
+/// `lp_buffer` must be valid for `n_size` bytes when non-null.
 pub unsafe extern "win64" fn format_message_a(
-    _dw_flags: u32,
-    _lp_source: *const u8,
-    _dw_message_id: u32,
+    dw_flags: u32,
+    _lp_source: usize,
+    dw_message_id: u32,
     _dw_language_id: u32,
-    _lp_buffer: *mut u8,
-    _n_size: u32,
-    _arguments: *mut u8,
+    lp_buffer: *mut u8,
+    n_size: u32,
+    _arguments: usize,
 ) -> u32 {
-    0
+    const FORMAT_MESSAGE_FROM_SYSTEM: u32 = 0x00001000;
+    const FORMAT_MESSAGE_IGNORE_INSERTS: u32 = 0x00000200;
+
+    // Only handle the most common case
+    if (dw_flags & FORMAT_MESSAGE_FROM_SYSTEM) == 0
+        || (dw_flags & FORMAT_MESSAGE_IGNORE_INSERTS) == 0
+    {
+        return 0;
+    }
+    if lp_buffer.is_null() {
+        return 0;
+    }
+
+    let message = match dw_message_id {
+        0 => b"The operation completed successfully.\0".as_slice(),
+        2 => b"The system cannot find the file specified.\0".as_slice(),
+        3 => b"The system cannot find the path specified.\0".as_slice(),
+        5 => b"Access is denied.\0".as_slice(),
+        6 => b"The handle is invalid.\0".as_slice(),
+        8 => b"Not enough memory resources are available.\0".as_slice(),
+        87 => b"The parameter is incorrect.\0".as_slice(),
+        122 => b"The data area passed to a system call is too small.\0".as_slice(),
+        123 => b"The filename, directory name, or volume label syntax is incorrect.\0".as_slice(),
+        183 => b"Cannot create a file when that file already exists.\0".as_slice(),
+        _ => b"Unknown error.\0".as_slice(),
+    };
+
+    let len = message.len() - 1; // exclude null terminator
+    if len >= n_size as usize {
+        // Buffer too small - copy what fits
+        unsafe {
+            std::ptr::copy_nonoverlapping(message.as_ptr(), lp_buffer, n_size as usize);
+        }
+        return 0; // error: buffer too small
+    }
+
+    unsafe {
+        std::ptr::copy_nonoverlapping(message.as_ptr(), lp_buffer, message.len());
+    }
+    len as u32
+}
+
+/// FormatMessageW — formats an error message into a wide-character buffer.
+///
+/// Minimal implementation that handles FORMAT_MESSAGE_FROM_SYSTEM with error codes.
+/// Maps common Windows error codes to short wide strings and copies to caller's buffer.
+///
+/// # Safety
+/// `lp_buffer` must be valid for `n_size` u16 words when non-null.
+pub unsafe extern "win64" fn format_message_w(
+    dw_flags: u32,
+    _lp_source: usize,
+    dw_message_id: u32,
+    _dw_language_id: u32,
+    lp_buffer: *mut u16,
+    n_size: u32,
+    _arguments: usize,
+) -> u32 {
+    const FORMAT_MESSAGE_FROM_SYSTEM: u32 = 0x00001000;
+    const FORMAT_MESSAGE_IGNORE_INSERTS: u32 = 0x00000200;
+
+    // Only handle the most common case
+    if (dw_flags & FORMAT_MESSAGE_FROM_SYSTEM) == 0
+        || (dw_flags & FORMAT_MESSAGE_IGNORE_INSERTS) == 0
+    {
+        return 0;
+    }
+    if lp_buffer.is_null() {
+        return 0;
+    }
+
+    let message = match dw_message_id {
+        0 => "The operation completed successfully.\0",
+        2 => "The system cannot find the file specified.\0",
+        3 => "The system cannot find the path specified.\0",
+        5 => "Access is denied.\0",
+        6 => "The handle is invalid.\0",
+        8 => "Not enough memory resources are available.\0",
+        87 => "The parameter is incorrect.\0",
+        122 => "The data area passed to a system call is too small.\0",
+        123 => "The filename, directory name, or volume label syntax is incorrect.\0",
+        183 => "Cannot create a file when that file already exists.\0",
+        _ => "Unknown error.\0",
+    };
+
+    let wide_chars: Vec<u16> = message.encode_utf16().collect();
+    let len = wide_chars.len() - 1; // exclude null terminator
+
+    if len >= n_size as usize {
+        // Buffer too small - copy what fits
+        unsafe {
+            std::ptr::copy_nonoverlapping(wide_chars.as_ptr(), lp_buffer, n_size as usize);
+        }
+        return 0; // error: buffer too small
+    }
+
+    unsafe {
+        std::ptr::copy_nonoverlapping(wide_chars.as_ptr(), lp_buffer, wide_chars.len());
+    }
+    len as u32
 }
 
 /// CreateDirectoryW — not implemented; returns FALSE.
@@ -1394,27 +1667,62 @@ pub extern "win64" fn tls_free(_dw_tls_index: u32) -> i32 {
     1
 }
 
-/// WaitForSingleObject — not supported; returns WAIT_FAILED.
+/// WaitForSingleObject — returns WAIT_OBJECT_0 for fake handles.
+///
+/// For our fake handles (1 for mutexes, 2 for events), returns WAIT_OBJECT_0 (0).
+/// For invalid handles (0 or INVALID_HANDLE_VALUE), returns WAIT_FAILED.
+/// Ignores dw_milliseconds timeout (we don't support real waiting).
 ///
 /// # Safety
 /// No pointer arguments are dereferenced.
-pub unsafe extern "win64" fn wait_for_single_object(
-    _h_handle: usize,
-    _dw_milliseconds: u32,
-) -> u32 {
-    0xFFFFFFFF // WAIT_FAILED
+pub unsafe extern "win64" fn wait_for_single_object(h_handle: usize, _dw_milliseconds: u32) -> u32 {
+    const INVALID_HANDLE_VALUE: usize = usize::MAX;
+    const WAIT_OBJECT_0: u32 = 0;
+    const WAIT_FAILED: u32 = 0xFFFFFFFF;
+
+    // Check for invalid handles
+    if h_handle == 0 || h_handle == INVALID_HANDLE_VALUE {
+        return WAIT_FAILED;
+    }
+
+    // For our fake handles (1 = mutex, 2 = event), return success
+    if h_handle == 1 || h_handle == 2 {
+        return WAIT_OBJECT_0;
+    }
+
+    // For any other handle, fail
+    WAIT_FAILED
 }
 
-/// WaitForSingleObjectEx — not supported; returns WAIT_FAILED.
+/// WaitForSingleObjectEx — returns WAIT_OBJECT_0 for fake handles.
+///
+/// Same as WaitForSingleObject but ignores b_alertable parameter.
+/// For our fake handles (1 for mutexes, 2 for events), returns WAIT_OBJECT_0 (0).
+/// For invalid handles (0 or INVALID_HANDLE_VALUE), returns WAIT_FAILED.
 ///
 /// # Safety
 /// No pointer arguments are dereferenced.
 pub unsafe extern "win64" fn wait_for_single_object_ex(
-    _h_handle: usize,
+    h_handle: usize,
     _dw_milliseconds: u32,
     _b_alertable: i32,
 ) -> u32 {
-    0xFFFFFFFF // WAIT_FAILED
+    const INVALID_HANDLE_VALUE: usize = usize::MAX;
+    const WAIT_OBJECT_0: u32 = 0;
+    const WAIT_FAILED: u32 = 0xFFFFFFFF;
+
+    // Check for invalid handles
+    if h_handle == 0 || h_handle == INVALID_HANDLE_VALUE {
+        return WAIT_FAILED;
+    }
+
+    // For our fake handles (1 = mutex, 2 = event), return success
+    if h_handle == 1 || h_handle == 2 {
+        return WAIT_OBJECT_0;
+    }
+
+    // For any other handle, fail
+    WAIT_FAILED
 }
 
 /// TryEnterCriticalSection — no-op stub; always succeeds (single-threaded).
@@ -1429,17 +1737,36 @@ pub unsafe extern "win64" fn try_enter_critical_section(_lp_critical_section: *m
 pub extern "win64" fn switch_to_thread() -> i32 {
     0 // FALSE — no other thread to switch to
 }
-/// WaitForMultipleObjects — not supported; returns WAIT_FAILED.
+/// WaitForMultipleObjects — returns WAIT_OBJECT_0 if any handle is fake.
+///
+/// Returns WAIT_OBJECT_0 if any handle in the array is one of our fake handles
+/// (1 for mutexes, 2 for events). Otherwise returns WAIT_FAILED.
+/// Ignores b_wait_all and dw_milliseconds timeout parameters.
 ///
 /// # Safety
-/// `_lp_handles` must be a valid pointer to `_n_count` handles or NULL.
+/// `lp_handles` must be a valid pointer to `n_count` handles or NULL.
 pub unsafe extern "win64" fn wait_for_multiple_objects(
-    _n_count: u32,
-    _lp_handles: *const usize,
+    n_count: u32,
+    lp_handles: *const usize,
     _b_wait_all: i32,
     _dw_milliseconds: u32,
 ) -> u32 {
-    0xFFFFFFFF // WAIT_FAILED
+    const WAIT_OBJECT_0: u32 = 0;
+    const WAIT_FAILED: u32 = 0xFFFFFFFF;
+
+    if lp_handles.is_null() || n_count == 0 {
+        return WAIT_FAILED;
+    }
+
+    // Check if any handle is one of our fake handles
+    for i in 0..n_count {
+        let handle = unsafe { *lp_handles.add(i as usize) };
+        if handle == 1 || handle == 2 {
+            return WAIT_OBJECT_0;
+        }
+    }
+
+    WAIT_FAILED
 }
 
 /// CreateMutexA — returns a fake handle (1).
@@ -1450,6 +1777,53 @@ pub unsafe extern "win64" fn create_mutex_a(
     _lp_mutex_attributes: *const u8,
     _b_initial_owner: i32,
     _lp_name: *const u8,
+) -> usize {
+    1 // fake handle
+}
+
+/// CreateMutexW — returns a fake handle (1).
+///
+/// Same as CreateMutexA but accepts wide string name parameter.
+/// Ignores name, initial owner flag, and security attributes.
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn create_mutex_w(
+    _lp_mutex_attributes: *const u8,
+    _b_initial_owner: i32,
+    _lp_name: *const u16,
+) -> usize {
+    1 // fake handle
+}
+
+/// CreateMutexExA — returns a fake handle (1).
+///
+/// Extended version with dwDesiredAccess parameter (ignored).
+/// Same behavior as CreateMutexA.
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn create_mutex_ex_a(
+    _lp_mutex_attributes: *const u8,
+    _lp_name: *const u8,
+    _dw_flags: u32,
+    _dw_desired_access: u32,
+) -> usize {
+    1 // fake handle
+}
+
+/// CreateMutexExW — returns a fake handle (1).
+///
+/// Extended version with dwDesiredAccess parameter (ignored).
+/// Same behavior as CreateMutexW but accepts wide string name.
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn create_mutex_ex_w(
+    _lp_mutex_attributes: *const u8,
+    _lp_name: *const u16,
+    _dw_flags: u32,
+    _dw_desired_access: u32,
 ) -> usize {
     1 // fake handle
 }
@@ -1558,6 +1932,22 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "LocalFree" => Some(local_free as *const () as usize),
         "LocalLock" => Some(local_lock as *const () as usize),
         "LocalUnlock" => Some(local_unlock as *const () as usize),
+        "LocalReAlloc" => {
+            Some(local_re_alloc as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize)
+        }
+        "HeapCreate" => Some(heap_create as *const () as usize),
+        "HeapDestroy" => Some(heap_destroy as *const () as usize),
+        "HeapAlloc" => {
+            Some(heap_alloc as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize)
+        }
+        "HeapReAlloc" => {
+            Some(heap_re_alloc as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize)
+        }
+        "HeapFree" => {
+            Some(heap_free as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize)
+        }
+        "HeapSize" => Some(heap_size as *const () as usize),
+        "GetProcessHeap" => Some(get_process_heap as *const () as usize),
         // Code page / DBCS
         "IsDBCSLeadByte" => Some(is_dbcs_lead_byte as *const () as usize),
         "IsDBCSLeadByteEx" => Some(is_dbcs_lead_byte_ex as *const () as usize),
@@ -1616,7 +2006,10 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         }
         // System info
         "GetSystemInfo" => {
-            Some(get_system_info as unsafe extern "win64" fn(_) as *const () as usize)
+            Some(get_system_info as unsafe extern "win64" fn(_) -> _ as *const () as usize)
+        }
+        "GetNativeSystemInfo" => {
+            Some(get_native_system_info as unsafe extern "win64" fn(_) -> _ as *const () as usize)
         }
         // Debugger
         "IsDebuggerPresent" => Some(is_debugger_present as *const () as usize),
@@ -1629,6 +2022,15 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         // Events / semaphores
         "CreateEventA" => {
             Some(create_event_a as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize)
+        }
+        "CreateEventW" => {
+            Some(create_event_w as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize)
+        }
+        "OpenEventA" => {
+            Some(open_event_a as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize)
+        }
+        "OpenEventW" => {
+            Some(open_event_w as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize)
         }
         "SetEvent" => Some(set_event as *const () as usize),
         "ResetEvent" => Some(reset_event as *const () as usize),
@@ -1711,6 +2113,10 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
             format_message_a as unsafe extern "win64" fn(_, _, _, _, _, _, _) -> _ as *const ()
                 as usize,
         ),
+        "FormatMessageW" => Some(
+            format_message_w as unsafe extern "win64" fn(_, _, _, _, _, _, _) -> _ as *const ()
+                as usize,
+        ),
         "CreateDirectoryW" => {
             Some(create_directory_w as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
         }
@@ -1760,6 +2166,15 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "CreateMutexA" => {
             Some(create_mutex_a as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize)
         }
+        "CreateMutexW" => {
+            Some(create_mutex_w as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize)
+        }
+        "CreateMutexExA" => Some(
+            create_mutex_ex_a as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
+        ),
+        "CreateMutexExW" => Some(
+            create_mutex_ex_w as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
+        ),
         "ReleaseMutex" => Some(release_mutex as *const () as usize),
         "UnhandledExceptionFilter" => Some(
             unhandled_exception_filter as unsafe extern "win64" fn(_) -> _ as *const () as usize,
