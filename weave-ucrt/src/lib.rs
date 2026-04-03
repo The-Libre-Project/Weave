@@ -117,6 +117,15 @@ pub unsafe extern "win64" fn ucrt_strnlen(s: *const u8, maxlen: usize) -> usize 
     }
 }
 
+pub unsafe extern "win64" fn ucrt_wcslen(s: *const u16) -> usize {
+    if s.is_null() { return 0; }
+    unsafe {
+        let mut i = 0;
+        while *s.add(i) != 0 { i += 1; }
+        i
+    }
+}
+
 pub unsafe extern "win64" fn ucrt_wcsnlen(s: *const u16, maxlen: usize) -> usize {
     unsafe {
         let mut i = 0;
@@ -728,6 +737,7 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "memchr" => stub!(ucrt_memchr as unsafe extern "win64" fn(_, _, _) -> _),
         // strings
         "strlen" => stub!(ucrt_strlen as unsafe extern "win64" fn(_) -> _),
+        "wcslen" => stub!(ucrt_wcslen as unsafe extern "win64" fn(_) -> _),
         "strncmp" => stub!(ucrt_strncmp as unsafe extern "win64" fn(_, _, _) -> _),
         "strcmp" | "strcoll" | "strxfrm" => {
             stub!(ucrt_strcmp as unsafe extern "win64" fn(_, _) -> _)
