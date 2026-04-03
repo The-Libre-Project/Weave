@@ -417,10 +417,7 @@ unsafe extern "win64" fn imm_device_open_property_store(
     -2147467263
 }
 
-unsafe extern "win64" fn imm_device_get_id(
-    this: *mut usize,
-    ppstr_id: *mut *mut u16,
-) -> i32 {
+unsafe extern "win64" fn imm_device_get_id(this: *mut usize, ppstr_id: *mut *mut u16) -> i32 {
     let device = &*(this as *mut MMDevice);
     let wide: Vec<u16> = device
         .device
@@ -434,10 +431,7 @@ unsafe extern "win64" fn imm_device_get_id(
     0
 }
 
-unsafe extern "win64" fn imm_device_get_state(
-    _this: *mut usize,
-    _pdw_state: *mut u32,
-) -> i32 {
+unsafe extern "win64" fn imm_device_get_state(_this: *mut usize, _pdw_state: *mut u32) -> i32 {
     -2147467263
 }
 
@@ -684,9 +678,7 @@ unsafe extern "win64" fn iaudio_client_is_format_supported(
     let f = &*p_format;
     if f.w_format_tag == 1
         && (f.n_samples_per_sec == 44100 || f.n_samples_per_sec == 48000)
-        && (f.w_bits_per_sample == 16
-            || f.w_bits_per_sample == 24
-            || f.w_bits_per_sample == 32)
+        && (f.w_bits_per_sample == 16 || f.w_bits_per_sample == 24 || f.w_bits_per_sample == 32)
         && f.n_channels <= 2
     {
         0

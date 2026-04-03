@@ -581,7 +581,7 @@ pub struct GraphicsPipelineStateDesc {
     pub ib_strip_cut_value: IndexBufferStripCutValue,
     pub primitive_topology_type: PrimitiveTopologyType,
     pub rtv_formats: [u32; 8], // DXGI_FORMAT
-    pub dsv_format: u32, // DXGI_FORMAT
+    pub dsv_format: u32,       // DXGI_FORMAT
     pub sample_desc: SampleDesc,
     pub node_mask: UINT,
     pub cached_pso: CachedPipelineState,
@@ -676,7 +676,7 @@ pub struct ConstantBufferViewDesc {
 #[repr(C)]
 #[derive(Debug, Clone)]
 pub struct ShaderResourceViewDesc {
-    pub format: u32, // DXGI_FORMAT
+    pub format: u32,         // DXGI_FORMAT
     pub view_dimension: u32, // D3D12_SRV_DIMENSION
     pub shader_4_component_mapping: UINT,
     pub texture_2d: ShaderResourceViewDescTexture2D,
@@ -696,7 +696,7 @@ pub struct ShaderResourceViewDescTexture2D {
 #[repr(C)]
 #[derive(Debug, Clone)]
 pub struct UnorderedAccessViewDesc {
-    pub format: u32, // DXGI_FORMAT
+    pub format: u32,         // DXGI_FORMAT
     pub view_dimension: u32, // D3D12_UAV_DIMENSION
     pub buffer: UnorderedAccessViewDescBuffer,
 }
@@ -716,7 +716,7 @@ pub struct UnorderedAccessViewDescBuffer {
 #[repr(C)]
 #[derive(Debug, Clone)]
 pub struct RenderTargetViewDesc {
-    pub format: u32, // DXGI_FORMAT
+    pub format: u32,         // DXGI_FORMAT
     pub view_dimension: u32, // D3D12_RTV_DIMENSION
     pub texture_2d: RenderTargetViewDescTexture2D,
 }
@@ -733,9 +733,9 @@ pub struct RenderTargetViewDescTexture2D {
 #[repr(C)]
 #[derive(Debug, Clone)]
 pub struct DepthStencilViewDesc {
-    pub format: u32, // DXGI_FORMAT
+    pub format: u32,         // DXGI_FORMAT
     pub view_dimension: u32, // D3D12_DSV_DIMENSION
-    pub flags: u32, // D3D12_DSV_FLAGS
+    pub flags: u32,          // D3D12_DSV_FLAGS
     pub texture_2d: DepthStencilViewDescTexture2D,
 }
 

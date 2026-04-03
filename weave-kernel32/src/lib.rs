@@ -1750,7 +1750,9 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "TryEnterCriticalSection" => Some(
             try_enter_critical_section as unsafe extern "win64" fn(_) -> _ as *const () as usize,
         ),
-        "SwitchToThread" => Some(switch_to_thread as extern "win64" fn() -> _ as *const () as usize),
+        "SwitchToThread" => {
+            Some(switch_to_thread as extern "win64" fn() -> _ as *const () as usize)
+        }
         "WaitForMultipleObjects" => Some(
             wait_for_multiple_objects as unsafe extern "win64" fn(_, _, _, _) -> _ as *const ()
                 as usize,

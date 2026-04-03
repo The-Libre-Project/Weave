@@ -176,7 +176,11 @@ fn print_crash_report(
         }
         buf
     };
-    let pre_hex = pre_bytes.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ");
+    let pre_hex = pre_bytes
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<Vec<_>>()
+        .join(" ");
     let insn_bytes = {
         let mut buf = [0u8; 16];
         for (i, b) in buf.iter_mut().enumerate() {
@@ -184,7 +188,11 @@ fn print_crash_report(
         }
         buf
     };
-    let insn_hex = insn_bytes.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ");
+    let insn_hex = insn_bytes
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<Vec<_>>()
+        .join(" ");
 
     // Read 16 bytes at the fault address via /proc/self/mem (safe — doesn't
     // re-raise SIGSEGV even if the page is unmapped or read-only).
@@ -195,11 +203,20 @@ fn print_crash_report(
         if fd >= 0 {
             let mut buf = [0u8; 16];
             let n = unsafe {
-                libc::pread(fd, buf.as_mut_ptr() as *mut libc::c_void, 16, fault_addr as i64)
+                libc::pread(
+                    fd,
+                    buf.as_mut_ptr() as *mut libc::c_void,
+                    16,
+                    fault_addr as i64,
+                )
             };
             unsafe { libc::close(fd) };
             if n > 0 {
-                hex = buf[..n as usize].iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ");
+                hex = buf[..n as usize]
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<Vec<_>>()
+                    .join(" ");
             }
         }
         hex

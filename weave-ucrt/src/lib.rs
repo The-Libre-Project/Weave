@@ -38,7 +38,11 @@ pub unsafe extern "win64" fn ucrt_aligned_malloc(size: usize, alignment: usize) 
             alignment.max(std::mem::size_of::<*mut c_void>()),
             size,
         );
-        if ret != 0 { std::ptr::null_mut() } else { ptr }
+        if ret != 0 {
+            std::ptr::null_mut()
+        } else {
+            ptr
+        }
     }
 }
 
@@ -47,7 +51,13 @@ pub unsafe extern "win64" fn ucrt_aligned_free(ptr: *mut c_void) {
 }
 
 pub extern "win64" fn ucrt_set_new_mode(_mode: i32) -> i32 {
-    unsafe { libc::write(2, b"weave: stub _set_new_mode\n".as_ptr() as *const libc::c_void, 26) };
+    unsafe {
+        libc::write(
+            2,
+            b"weave: stub _set_new_mode\n".as_ptr() as *const libc::c_void,
+            26,
+        )
+    };
     0
 }
 
@@ -118,10 +128,14 @@ pub unsafe extern "win64" fn ucrt_strnlen(s: *const u8, maxlen: usize) -> usize 
 }
 
 pub unsafe extern "win64" fn ucrt_wcslen(s: *const u16) -> usize {
-    if s.is_null() { return 0; }
+    if s.is_null() {
+        return 0;
+    }
     unsafe {
         let mut i = 0;
-        while *s.add(i) != 0 { i += 1; }
+        while *s.add(i) != 0 {
+            i += 1;
+        }
         i
     }
 }
@@ -199,30 +213,72 @@ pub extern "win64" fn ucrt_abort() -> ! {
 }
 
 pub extern "win64" fn ucrt_cexit() {
-    unsafe { libc::write(2, b"weave: stub _cexit\n".as_ptr() as *const libc::c_void, 19) };
+    unsafe {
+        libc::write(
+            2,
+            b"weave: stub _cexit\n".as_ptr() as *const libc::c_void,
+            19,
+        )
+    };
 }
 
 pub extern "win64" fn ucrt_set_app_type(_type: u32) {
-    unsafe { libc::write(2, b"weave: stub __set_app_type\n".as_ptr() as *const libc::c_void, 27) };
+    unsafe {
+        libc::write(
+            2,
+            b"weave: stub __set_app_type\n".as_ptr() as *const libc::c_void,
+            27,
+        )
+    };
 }
 pub extern "win64" fn ucrt_configure_narrow_argv(_mode: i32) -> i32 {
-    unsafe { libc::write(2, b"weave: stub _configure_narrow_argv\n".as_ptr() as *const libc::c_void, 35) };
+    unsafe {
+        libc::write(
+            2,
+            b"weave: stub _configure_narrow_argv\n".as_ptr() as *const libc::c_void,
+            35,
+        )
+    };
     0
 }
 pub extern "win64" fn ucrt_initialize_narrow_environment() -> i32 {
-    unsafe { libc::write(2, b"weave: stub _initialize_narrow_environment\n".as_ptr() as *const libc::c_void, 43) };
+    unsafe {
+        libc::write(
+            2,
+            b"weave: stub _initialize_narrow_environment\n".as_ptr() as *const libc::c_void,
+            43,
+        )
+    };
     0
 }
 pub extern "win64" fn ucrt_set_invalid_parameter_handler(_fn: *const c_void) -> *const c_void {
-    unsafe { libc::write(2, b"weave: stub _set_invalid_parameter_handler\n".as_ptr() as *const libc::c_void, 43) };
+    unsafe {
+        libc::write(
+            2,
+            b"weave: stub _set_invalid_parameter_handler\n".as_ptr() as *const libc::c_void,
+            43,
+        )
+    };
     std::ptr::null()
 }
 pub extern "win64" fn ucrt_configthreadlocale(_mode: i32) -> i32 {
-    unsafe { libc::write(2, b"weave: stub _configthreadlocale\n".as_ptr() as *const libc::c_void, 32) };
+    unsafe {
+        libc::write(
+            2,
+            b"weave: stub _configthreadlocale\n".as_ptr() as *const libc::c_void,
+            32,
+        )
+    };
     0
 }
 pub extern "win64" fn ucrt_setusermatherr(_fn: *const c_void) {
-    unsafe { libc::write(2, b"weave: stub __setusermatherr\n".as_ptr() as *const libc::c_void, 29) };
+    unsafe {
+        libc::write(
+            2,
+            b"weave: stub __setusermatherr\n".as_ptr() as *const libc::c_void,
+            29,
+        )
+    };
 }
 
 // ── _initterm / _initterm_e — runs C++ static constructors ───────────────────
@@ -232,7 +288,11 @@ pub extern "win64" fn ucrt_setusermatherr(_fn: *const c_void) {
 
 pub unsafe extern "win64" fn ucrt_initterm(start: *const *const c_void, end: *const *const c_void) {
     unsafe {
-        libc::write(2, b"weave: stub _initterm\n".as_ptr() as *const libc::c_void, 22);
+        libc::write(
+            2,
+            b"weave: stub _initterm\n".as_ptr() as *const libc::c_void,
+            22,
+        );
         let mut p = start;
         while p < end {
             let fn_ptr = *p;
@@ -250,7 +310,11 @@ pub unsafe extern "win64" fn ucrt_initterm_e(
     end: *const *const c_void,
 ) -> i32 {
     unsafe {
-        libc::write(2, b"weave: stub _initterm_e\n".as_ptr() as *const libc::c_void, 24);
+        libc::write(
+            2,
+            b"weave: stub _initterm_e\n".as_ptr() as *const libc::c_void,
+            24,
+        );
         let mut p = start;
         while p < end {
             let fn_ptr = *p;
@@ -268,7 +332,13 @@ pub unsafe extern "win64" fn ucrt_initterm_e(
 }
 
 pub extern "win64" fn ucrt_crt_atexit(_fn: *const c_void) -> i32 {
-    unsafe { libc::write(2, b"weave: stub _crt_atexit\n".as_ptr() as *const libc::c_void, 24) };
+    unsafe {
+        libc::write(
+            2,
+            b"weave: stub _crt_atexit\n".as_ptr() as *const libc::c_void,
+            24,
+        )
+    };
     0
 }
 
@@ -303,8 +373,8 @@ pub extern "win64" fn ucrt_signal(_signum: i32, _handler: *const c_void) -> *con
 use std::sync::OnceLock;
 
 static HEAP_COMMODE: OnceLock<usize> = OnceLock::new();
-static HEAP_FMODE:   OnceLock<usize> = OnceLock::new();
-static HEAP_STDIO:   OnceLock<[usize; 3]> = OnceLock::new();
+static HEAP_FMODE: OnceLock<usize> = OnceLock::new();
+static HEAP_STDIO: OnceLock<[usize; 3]> = OnceLock::new();
 
 /// Return the address of writable _fmode storage for DATA imports.
 ///
@@ -321,17 +391,17 @@ pub fn commode_data_addr() -> usize {
 }
 
 static HEAP_MB_CUR_MAX: OnceLock<usize> = OnceLock::new();
-static HEAP_INITENV:    OnceLock<usize> = OnceLock::new();
-static HEAP_WINITENV:   OnceLock<usize> = OnceLock::new();
-static HEAP_ENVIRON:    OnceLock<usize> = OnceLock::new();
-static HEAP_WENVIRON:   OnceLock<usize> = OnceLock::new();
-static HEAP_IARGC:      OnceLock<usize> = OnceLock::new();
-static HEAP_IARGV:      OnceLock<usize> = OnceLock::new();
-static HEAP_ACMDLN:     OnceLock<usize> = OnceLock::new();
-static HEAP_WCMDLN:     OnceLock<usize> = OnceLock::new();
-static HEAP_PGMPTR:     OnceLock<usize> = OnceLock::new();
-static HEAP_WPGMPTR:    OnceLock<usize> = OnceLock::new();
-static HEAP_DOSERRNO:   OnceLock<usize> = OnceLock::new();
+static HEAP_INITENV: OnceLock<usize> = OnceLock::new();
+static HEAP_WINITENV: OnceLock<usize> = OnceLock::new();
+static HEAP_ENVIRON: OnceLock<usize> = OnceLock::new();
+static HEAP_WENVIRON: OnceLock<usize> = OnceLock::new();
+static HEAP_IARGC: OnceLock<usize> = OnceLock::new();
+static HEAP_IARGV: OnceLock<usize> = OnceLock::new();
+static HEAP_ACMDLN: OnceLock<usize> = OnceLock::new();
+static HEAP_WCMDLN: OnceLock<usize> = OnceLock::new();
+static HEAP_PGMPTR: OnceLock<usize> = OnceLock::new();
+static HEAP_WPGMPTR: OnceLock<usize> = OnceLock::new();
+static HEAP_DOSERRNO: OnceLock<usize> = OnceLock::new();
 
 /// Return the address of writable __mb_cur_max storage for DATA imports.
 pub fn mb_cur_max_data_addr() -> usize {
@@ -377,27 +447,51 @@ pub fn doserrno_data_addr() -> usize {
 }
 
 pub unsafe extern "win64" fn ucrt_p_argc() -> *mut i32 {
-    libc::write(2, b"weave: stub __p__argc\n".as_ptr() as *const libc::c_void, 22);
+    libc::write(
+        2,
+        b"weave: stub __p__argc\n".as_ptr() as *const libc::c_void,
+        22,
+    );
     argc_data_addr() as *mut i32
 }
 pub unsafe extern "win64" fn ucrt_p_argv() -> *mut *mut *mut u8 {
-    libc::write(2, b"weave: stub __p__argv\n".as_ptr() as *const libc::c_void, 22);
+    libc::write(
+        2,
+        b"weave: stub __p__argv\n".as_ptr() as *const libc::c_void,
+        22,
+    );
     argv_data_addr() as *mut *mut *mut u8
 }
 pub unsafe extern "win64" fn ucrt_p_acmdln() -> *mut *mut u8 {
-    libc::write(2, b"weave: stub __p__acmdln\n".as_ptr() as *const libc::c_void, 24);
+    libc::write(
+        2,
+        b"weave: stub __p__acmdln\n".as_ptr() as *const libc::c_void,
+        24,
+    );
     acmdln_data_addr() as *mut *mut u8
 }
 pub unsafe extern "win64" fn ucrt_p_environ() -> *mut *mut *mut u8 {
-    libc::write(2, b"weave: stub __p__environ\n".as_ptr() as *const libc::c_void, 25);
+    libc::write(
+        2,
+        b"weave: stub __p__environ\n".as_ptr() as *const libc::c_void,
+        25,
+    );
     environ_data_addr() as *mut *mut *mut u8
 }
 pub unsafe extern "win64" fn ucrt_p_commode() -> *mut i32 {
-    libc::write(2, b"weave: stub __p__commode\n".as_ptr() as *const libc::c_void, 25);
+    libc::write(
+        2,
+        b"weave: stub __p__commode\n".as_ptr() as *const libc::c_void,
+        25,
+    );
     *HEAP_COMMODE.get_or_init(|| Box::into_raw(Box::new(0i32)) as usize) as *mut i32
 }
 pub unsafe extern "win64" fn ucrt_p_fmode() -> *mut i32 {
-    libc::write(2, b"weave: stub __p__fmode\n".as_ptr() as *const libc::c_void, 23);
+    libc::write(
+        2,
+        b"weave: stub __p__fmode\n".as_ptr() as *const libc::c_void,
+        23,
+    );
     *HEAP_FMODE.get_or_init(|| Box::into_raw(Box::new(0i32)) as usize) as *mut i32
 }
 
@@ -407,12 +501,20 @@ pub extern "win64" fn ucrt_acrt_iob_func(fd: u32) -> *mut c_void {
     // Heap-allocated 256-byte buffers for fake FILE structs.  MinGW CRT writes
     // into these immediately after calling __acrt_iob_func; heap memory is
     // always R+W so this avoids the RELRO SIGSEGV issue with static mut.
-    let ptrs = HEAP_STDIO.get_or_init(|| [
-        Box::into_raw(Box::new([0u8; 256])) as usize,
-        Box::into_raw(Box::new([0u8; 256])) as usize,
-        Box::into_raw(Box::new([0u8; 256])) as usize,
-    ]);
-    unsafe { libc::write(2, b"weave: stub __acrt_iob_func\n".as_ptr() as *const libc::c_void, 28) };
+    let ptrs = HEAP_STDIO.get_or_init(|| {
+        [
+            Box::into_raw(Box::new([0u8; 256])) as usize,
+            Box::into_raw(Box::new([0u8; 256])) as usize,
+            Box::into_raw(Box::new([0u8; 256])) as usize,
+        ]
+    });
+    unsafe {
+        libc::write(
+            2,
+            b"weave: stub __acrt_iob_func\n".as_ptr() as *const libc::c_void,
+            28,
+        )
+    };
     match fd {
         0 => ptrs[0] as *mut c_void,
         1 => ptrs[1] as *mut c_void,
@@ -498,7 +600,13 @@ pub extern "win64" fn ucrt_setvbuf(
     _mode: i32,
     _size: usize,
 ) -> i32 {
-    unsafe { libc::write(2, b"weave: stub setvbuf\n".as_ptr() as *const libc::c_void, 20) };
+    unsafe {
+        libc::write(
+            2,
+            b"weave: stub setvbuf\n".as_ptr() as *const libc::c_void,
+            20,
+        )
+    };
     0
 }
 
@@ -638,7 +746,11 @@ pub unsafe extern "win64" fn ucrt_getmainargs(
     _expand_wildcards: i32,
     _p_new_mode: *mut i32,
 ) -> i32 {
-    libc::write(2, b"weave: stub __getmainargs\n".as_ptr() as *const libc::c_void, 26);
+    libc::write(
+        2,
+        b"weave: stub __getmainargs\n".as_ptr() as *const libc::c_void,
+        26,
+    );
     // Provide a minimal argv = [""] with no env vars.
     // These buffers live for the program lifetime — leaked intentionally.
     static EMPTY_ARG: u8 = 0;
@@ -649,9 +761,15 @@ pub unsafe extern "win64" fn ucrt_getmainargs(
     ])) as *mut *mut u8;
     // envp[0] = NULL
     let envp = Box::into_raw(Box::new([std::ptr::null_mut::<u8>()])) as *mut *mut u8;
-    if !p_argc.is_null() { *p_argc = 1; }
-    if !p_argv.is_null() { *p_argv = argv; }
-    if !p_envp.is_null() { *p_envp = envp; }
+    if !p_argc.is_null() {
+        *p_argc = 1;
+    }
+    if !p_argv.is_null() {
+        *p_argv = argv;
+    }
+    if !p_envp.is_null() {
+        *p_envp = envp;
+    }
     0
 }
 
@@ -672,9 +790,15 @@ pub unsafe extern "win64" fn ucrt_wgetmainargs(
         std::ptr::null_mut::<u16>(),
     ])) as *mut *mut u16;
     let envp = Box::into_raw(Box::new([std::ptr::null_mut::<u16>()])) as *mut *mut u16;
-    if !p_argc.is_null() { *p_argc = 1; }
-    if !p_argv.is_null() { *p_argv = argv; }
-    if !p_envp.is_null() { *p_envp = envp; }
+    if !p_argc.is_null() {
+        *p_argc = 1;
+    }
+    if !p_argv.is_null() {
+        *p_argv = argv;
+    }
+    if !p_envp.is_null() {
+        *p_envp = envp;
+    }
     0
 }
 
@@ -846,7 +970,9 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "strftime" | "wcsftime" => stub!(ucrt_cexit as extern "win64" fn()),
         // legacy MSVCRT entry-point helpers
         "__getmainargs" => stub!(ucrt_getmainargs as unsafe extern "win64" fn(_, _, _, _, _) -> _),
-        "__wgetmainargs" => stub!(ucrt_wgetmainargs as unsafe extern "win64" fn(_, _, _, _, _) -> _),
+        "__wgetmainargs" => {
+            stub!(ucrt_wgetmainargs as unsafe extern "win64" fn(_, _, _, _, _) -> _)
+        }
         "__initenv" => Some(initenv_data_addr()),
         "__winitenv" => Some(winitenv_data_addr()),
         "_environ" => Some(environ_data_addr()),
