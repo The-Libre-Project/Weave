@@ -306,10 +306,16 @@ pub unsafe extern "win64" fn ucrt_p_environ() -> *mut *mut *mut u8 {
     }) as *mut *mut *mut u8
 }
 pub unsafe extern "win64" fn ucrt_p_commode() -> *mut i32 {
-    *HEAP_COMMODE.get_or_init(|| Box::into_raw(Box::new(0i32)) as usize) as *mut i32
+    let ptr = *HEAP_COMMODE.get_or_init(|| Box::into_raw(Box::new(0i32)) as usize) as *mut i32;
+    let msg = format!("weave: __p__commode() -> {ptr:p}\n");
+    libc::write(2, msg.as_ptr() as *const libc::c_void, msg.len());
+    ptr
 }
 pub unsafe extern "win64" fn ucrt_p_fmode() -> *mut i32 {
-    *HEAP_FMODE.get_or_init(|| Box::into_raw(Box::new(0i32)) as usize) as *mut i32
+    let ptr = *HEAP_FMODE.get_or_init(|| Box::into_raw(Box::new(0i32)) as usize) as *mut i32;
+    let msg = format!("weave: __p__fmode() -> {ptr:p}\n");
+    libc::write(2, msg.as_ptr() as *const libc::c_void, msg.len());
+    ptr
 }
 
 // ── stdio ─────────────────────────────────────────────────────────────────────
@@ -323,12 +329,15 @@ pub extern "win64" fn ucrt_acrt_iob_func(fd: u32) -> *mut c_void {
         Box::into_raw(Box::new([0u8; 256])) as usize,
         Box::into_raw(Box::new([0u8; 256])) as usize,
     ]);
-    match fd {
+    let ptr = match fd {
         0 => ptrs[0] as *mut c_void,
         1 => ptrs[1] as *mut c_void,
         2 => ptrs[2] as *mut c_void,
         _ => std::ptr::null_mut(),
-    }
+    };
+    let msg = format!("weave: __acrt_iob_func({fd}) -> {ptr:p}\n");
+    unsafe { libc::write(2, msg.as_ptr() as *const libc::c_void, msg.len()) };
+    ptr
 }
 
 /// _amsg_exit — abnormal CRT termination (e.g. failed _onexit registration).
