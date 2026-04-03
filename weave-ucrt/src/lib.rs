@@ -298,19 +298,23 @@ pub unsafe extern "win64" fn ucrt_p_fmode() -> *mut i32 {
 
 // ── stdio ─────────────────────────────────────────────────────────────────────
 
+// Module-level (not function-local) mutable statics so the linker places them
+// in .bss (zero-initialised, read-write segment).  Function-local static muts
+// can end up in .data.rel.ro which becomes read-only after RELRO is applied,
+// causing SIGSEGV the first time MinGW's CRT startup writes into the FILE*.
+// 256 bytes is large enough to cover a Windows FILE struct.
+static mut STDIO_STDIN:  [u8; 256] = [0; 256];
+static mut STDIO_STDOUT: [u8; 256] = [0; 256];
+static mut STDIO_STDERR: [u8; 256] = [0; 256];
+
 pub extern "win64" fn ucrt_acrt_iob_func(fd: u32) -> *mut c_void {
-    // Return writable buffers for stdin/stdout/stderr.  The MinGW CRT writes
-    // into the returned FILE* to initialise internal fields (e.g. file mode
-    // flags); if we return a read-only .rodata address the first such write
-    // causes SIGSEGV.  256 bytes is large enough to cover a Windows FILE struct.
-    static mut DUMMY_STDIN:  [u8; 256] = [0; 256];
-    static mut DUMMY_STDOUT: [u8; 256] = [0; 256];
-    static mut DUMMY_STDERR: [u8; 256] = [0; 256];
+    // addr_of_mut! avoids creating a &mut reference (which would trigger
+    // the static_mut_refs lint) while still returning a writable raw pointer.
     unsafe {
         match fd {
-            0 => DUMMY_STDIN.as_mut_ptr() as *mut c_void,
-            1 => DUMMY_STDOUT.as_mut_ptr() as *mut c_void,
-            2 => DUMMY_STDERR.as_mut_ptr() as *mut c_void,
+            0 => std::ptr::addr_of_mut!(STDIO_STDIN)  as *mut c_void,
+            1 => std::ptr::addr_of_mut!(STDIO_STDOUT) as *mut c_void,
+            2 => std::ptr::addr_of_mut!(STDIO_STDERR) as *mut c_void,
             _ => std::ptr::null_mut(),
         }
     }

@@ -166,8 +166,17 @@ fn print_crash_report(
         None => "not found in .pdata".to_string(),
     };
 
-    // Dump 16 instruction bytes at RIP so we can identify the crashing
-    // instruction without a debugger or disassembler on CI.
+    // Dump 16 bytes before RIP and 16 bytes at RIP so we can identify both the
+    // crashing instruction and the call/instruction that loaded the bad address.
+    let pre_bytes = {
+        let mut buf = [0u8; 16];
+        let pre_rip = rip.saturating_sub(16);
+        for (i, b) in buf.iter_mut().enumerate() {
+            *b = unsafe { *(pre_rip as *const u8).add(i) };
+        }
+        buf
+    };
+    let pre_hex = pre_bytes.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ");
     let insn_bytes = {
         let mut buf = [0u8; 16];
         for (i, b) in buf.iter_mut().enumerate() {
@@ -235,6 +244,7 @@ fn print_crash_report(
         "\nweave: CRASH — {sig_name} in PE code\n\
          weave:   exception = {win_code:#010x}  ({})\n\
          weave:   RIP       = {rip:#018x}  (PE rva {rva:#010x})\n\
+         weave:   pre-insn  = [{pre_hex}]\n\
          weave:   insn      = [{insn_hex}]\n\
          weave:   fault     = {fault_addr:#018x}  [{fault_bytes_hex}]\n\
          weave:   region    = {fault_region}\n\
