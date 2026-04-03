@@ -69,6 +69,33 @@ fn win_prot_to_linux(protect: u32) -> i32 {
     }
 }
 
+// ── Locale information ───────────────────────────────────────────────────────
+
+fn locale_info_lookup(lc_type: u32) -> Option<&'static str> {
+    match lc_type {
+        0x0001 => Some("en-US"),   // LOCALE_SLANGUAGE / LOCALE_SLOCALIZEDDISPLAYNAME
+        0x0002 => Some("English"), // LOCALE_SABBREVLANGNAME / LOCALE_SENGLISHDISPLAYNAME
+        0x0003 => Some("ENU"),     // LOCALE_SNATIVELANGNAME (abbreviated)
+        0x0004 => Some("US"),      // LOCALE_SCOUNTRY
+        0x0007 => Some("English (United States)"), // LOCALE_SENGCOUNTRY
+        0x000B => Some("437"),     // LOCALE_IDEFAULTCODEPAGE (OEM code page)
+        0x000C => Some(";"),       // LOCALE_SLIST
+        0x000D => Some("1"),       // LOCALE_IMEASURE (1 = imperial)
+        0x000E => Some("."),       // LOCALE_SDECIMAL
+        0x000F => Some(","),       // LOCALE_STHOUSAND
+        0x0012 => Some("1"),       // LOCALE_ILZERO (leading zeros)
+        0x0013 => Some("0123456789"), // LOCALE_SNATIVEDIGITS
+        0x0014 => Some("$"),       // LOCALE_SCURRENCY
+        0x0019 => Some("2"),       // LOCALE_ICURRDIGITS
+        0x0050 => Some(""),        // LOCALE_SPOSITIVESIGN
+        0x0051 => Some("-"),       // LOCALE_SNEGATIVESIGN
+        0x0059 => Some("en"),      // LOCALE_SISO639LANGNAME
+        0x005A => Some("US"),      // LOCALE_SISO3166CTRYNAME
+        0x1004 => Some("1252"),    // LOCALE_IDEFAULTANSICODEPAGE
+        _ => None,
+    }
+}
+
 // ── Stubs ─────────────────────────────────────────────────────────────────────
 
 /// GetStdHandle: return the Weave HANDLE for stdin/stdout/stderr.
@@ -2852,8 +2879,397 @@ pub unsafe extern "win64" fn free_environment_strings_a(_penv: *mut u8) -> i32 {
 
 // ── Locale functions ────────────────────────────────────────────────────────
 
+/// GetLocaleInfoW: retrieve locale information as UTF-16 string.
+///
+/// # Safety
+/// `lp_lc_data` must be a valid writable pointer for `cch_data` u16 words.
+pub unsafe extern "win64" fn get_locale_info_w(
+    _locale: u32,
+    lc_type: u32,
+    lp_lc_data: *mut u16,
+    cch_data: i32,
+) -> i32 {
+    let lc_type_clean = lc_type & 0x000FFFFF; // strip LOCALE_RETURN_NUMBER flag
+    if let Some(value) = locale_info_lookup(lc_type_clean) {
+        let wide_chars: Vec<u16> = format!("{}\0", value).encode_utf16().collect();
+        let required_size = wide_chars.len() as i32;
+        if cch_data == 0 {
+            return required_size;
+        }
+        if cch_data >= required_size {
+            unsafe {
+                std::ptr::copy_nonoverlapping(wide_chars.as_ptr(), lp_lc_data, wide_chars.len());
+            }
+            return required_size - 1; // exclude null terminator
+        }
+    }
+    0 // failure
+}
+
+/// GetLocaleInfoA: retrieve locale information as ANSI string.
+///
+/// # Safety
+/// `lp_lc_data` must be a valid writable pointer for `cch_data` bytes.
+pub unsafe extern "win64" fn get_locale_info_a(
+    _locale: u32,
+    lc_type: u32,
+    lp_lc_data: *mut u8,
+    cch_data: i32,
+) -> i32 {
+    let lc_type_clean = lc_type & 0x000FFFFF; // strip LOCALE_RETURN_NUMBER flag
+    if let Some(value) = locale_info_lookup(lc_type_clean) {
+        let formatted = format!("{}\0", value);
+        let bytes = formatted.as_bytes();
+        let required_size = bytes.len() as i32;
+        if cch_data == 0 {
+            return required_size;
+        }
+        if cch_data >= required_size {
+            unsafe {
+                std::ptr::copy_nonoverlapping(bytes.as_ptr(), lp_lc_data, bytes.len());
+            }
+            return required_size - 1; // exclude null terminator
+        }
+    }
+    0 // failure
+}
+
 /// Locale constant for English (United States).
 const LOCALE_EN_US: u32 = 0x0409;
+
+// ── String comparison ───────────────────────────────────────────────────────
+
+/// CompareStringW result constants.
+const CSTR_LESS_THAN: i32 = 1;
+const CSTR_EQUAL: i32 = 2;
+const CSTR_GREATER_THAN: i32 = 3;
+
+/// CompareStringW flag constants.
+const NORM_IGNORECASE: u32 = 0x00000001;
+const LINGUISTIC_IGNORECASE: u32 = 0x00000010;
+
+/// CompareStringW: compare two UTF-16 strings with optional case folding.
+///
+/// # Safety
+/// `lp_string1` and `lp_string2` must be valid pointers to null-terminated UTF-16 strings.
+pub unsafe extern "win64" fn compare_string_w(
+    _locale: u32,
+    dw_cmp_flags: u32,
+    lp_string1: *const u16,
+    cch_count1: i32,
+    lp_string2: *const u16,
+    cch_count2: i32,
+) -> i32 {
+    let len1 = if cch_count1 == -1 {
+        let mut len = 0usize;
+        while *lp_string1.add(len) != 0 {
+            len += 1;
+        }
+        len
+    } else {
+        cch_count1 as usize
+    };
+
+    let len2 = if cch_count2 == -1 {
+        let mut len = 0usize;
+        while *lp_string2.add(len) != 0 {
+            len += 1;
+        }
+        len
+    } else {
+        cch_count2 as usize
+    };
+
+    let case_insensitive =
+        (dw_cmp_flags & NORM_IGNORECASE) != 0 || (dw_cmp_flags & LINGUISTIC_IGNORECASE) != 0;
+
+    let min_len = len1.min(len2);
+    for i in 0..min_len {
+        let mut c1 = *lp_string1.add(i);
+        let mut c2 = *lp_string2.add(i);
+
+        if case_insensitive && (c1 as u8).is_ascii_uppercase() {
+            c1 += 32;
+        }
+        if case_insensitive && (c2 as u8).is_ascii_uppercase() {
+            c2 += 32;
+        }
+
+        if c1 < c2 {
+            return CSTR_LESS_THAN;
+        } else if c1 > c2 {
+            return CSTR_GREATER_THAN;
+        }
+    }
+
+    match len1.cmp(&len2) {
+        std::cmp::Ordering::Less => CSTR_LESS_THAN,
+        std::cmp::Ordering::Equal => CSTR_EQUAL,
+        std::cmp::Ordering::Greater => CSTR_GREATER_THAN,
+    }
+}
+
+/// CompareStringOrdinal: compare two UTF-16 strings with optional case folding.
+///
+/// # Safety
+/// `lp_string1` and `lp_string2` must be valid pointers to null-terminated UTF-16 strings.
+pub unsafe extern "win64" fn compare_string_ordinal(
+    lp_string1: *const u16,
+    cch_count1: i32,
+    lp_string2: *const u16,
+    cch_count2: i32,
+    b_ignore_case: i32,
+) -> i32 {
+    let len1 = if cch_count1 == -1 {
+        let mut len = 0usize;
+        while *lp_string1.add(len) != 0 {
+            len += 1;
+        }
+        len
+    } else {
+        cch_count1 as usize
+    };
+
+    let len2 = if cch_count2 == -1 {
+        let mut len = 0usize;
+        while *lp_string2.add(len) != 0 {
+            len += 1;
+        }
+        len
+    } else {
+        cch_count2 as usize
+    };
+
+    let case_insensitive = b_ignore_case != 0;
+
+    let min_len = len1.min(len2);
+    for i in 0..min_len {
+        let mut c1 = *lp_string1.add(i);
+        let mut c2 = *lp_string2.add(i);
+
+        if case_insensitive && (c1 as u8).is_ascii_uppercase() {
+            c1 += 32;
+        }
+        if case_insensitive && (c2 as u8).is_ascii_uppercase() {
+            c2 += 32;
+        }
+
+        if c1 < c2 {
+            return CSTR_LESS_THAN;
+        } else if c1 > c2 {
+            return CSTR_GREATER_THAN;
+        }
+    }
+
+    match len1.cmp(&len2) {
+        std::cmp::Ordering::Less => CSTR_LESS_THAN,
+        std::cmp::Ordering::Equal => CSTR_EQUAL,
+        std::cmp::Ordering::Greater => CSTR_GREATER_THAN,
+    }
+}
+
+// ── String mapping ──────────────────────────────────────────────────────────
+
+const LCMAP_LOWERCASE: u32 = 0x00000100;
+const LCMAP_UPPERCASE: u32 = 0x00000200;
+
+/// LCMapStringW: map a UTF-16 string (uppercase/lowercase conversion).
+///
+/// # Safety
+/// `lp_src_str` must be valid for `cch_src` u16 elements.
+/// `lp_dest_str` must be writable for `cch_dest` u16 elements.
+pub unsafe extern "win64" fn lc_map_string_w(
+    _locale: u32,
+    dw_map_flags: u32,
+    lp_src_str: *const u16,
+    cch_src: i32,
+    lp_dest_str: *mut u16,
+    cch_dest: i32,
+) -> i32 {
+    let src_len = if cch_src == -1 {
+        let mut len = 0usize;
+        unsafe {
+            while *lp_src_str.add(len) != 0 {
+                len += 1;
+            }
+        }
+        len + 1 // include null
+    } else {
+        cch_src as usize
+    };
+
+    if cch_dest == 0 {
+        return src_len as i32;
+    }
+
+    let copy_len = src_len.min(cch_dest as usize);
+    for i in 0..copy_len {
+        let mut c = unsafe { *lp_src_str.add(i) };
+        if c <= 127 {
+            if (dw_map_flags & LCMAP_UPPERCASE) != 0 && (c as u8).is_ascii_lowercase() {
+                c -= 32;
+            } else if (dw_map_flags & LCMAP_LOWERCASE) != 0 && (c as u8).is_ascii_uppercase() {
+                c += 32;
+            }
+        }
+        unsafe { *lp_dest_str.add(i) = c };
+    }
+    copy_len as i32
+}
+
+// ── Character classification ────────────────────────────────────────────────
+
+const CT_CTYPE1: u32 = 0x00000001;
+const C1_UPPER: u16 = 0x0001;
+const C1_LOWER: u16 = 0x0002;
+const C1_DIGIT: u16 = 0x0004;
+const C1_SPACE: u16 = 0x0008;
+const C1_PUNCT: u16 = 0x0010;
+const C1_CNTRL: u16 = 0x0020;
+const C1_BLANK: u16 = 0x0040;
+const C1_ALPHA: u16 = 0x0100;
+
+fn classify_char(c: u16) -> u16 {
+    if c > 127 {
+        return C1_ALPHA;
+    }
+    let b = c as u8;
+    let mut flags: u16 = 0;
+    if b.is_ascii_uppercase() {
+        flags |= C1_UPPER | C1_ALPHA;
+    }
+    if b.is_ascii_lowercase() {
+        flags |= C1_LOWER | C1_ALPHA;
+    }
+    if b.is_ascii_digit() {
+        flags |= C1_DIGIT;
+    }
+    if b.is_ascii_whitespace() {
+        flags |= C1_SPACE;
+    }
+    if b == b' ' || b == b'\t' {
+        flags |= C1_BLANK;
+    }
+    if b.is_ascii_punctuation() {
+        flags |= C1_PUNCT;
+    }
+    if b < 0x20 || b == 0x7F {
+        flags |= C1_CNTRL;
+    }
+    flags
+}
+
+/// GetStringTypeW: classify characters in a UTF-16 string.
+///
+/// # Safety
+/// `lp_src_str` must be valid for `cch_src` u16 elements.
+/// `lp_char_type` must be writable for `cch_src` u16 elements.
+pub unsafe extern "win64" fn get_string_type_w(
+    dw_info_type: u32,
+    lp_src_str: *const u16,
+    cch_src: i32,
+    lp_char_type: *mut u16,
+) -> i32 {
+    if dw_info_type != CT_CTYPE1 {
+        return 0; // FALSE — only CT_CTYPE1 supported
+    }
+
+    let len = if cch_src == -1 {
+        let mut l = 0usize;
+        unsafe {
+            while *lp_src_str.add(l) != 0 {
+                l += 1;
+            }
+        }
+        l
+    } else {
+        cch_src as usize
+    };
+
+    for i in 0..len {
+        unsafe {
+            *lp_char_type.add(i) = classify_char(*lp_src_str.add(i));
+        }
+    }
+    1 // TRUE
+}
+
+// ── File time and positioning ───────────────────────────────────────────────
+
+/// SetFilePointerEx: set file pointer position using 64-bit offset.
+///
+/// # Safety
+/// If `lp_new_file_pointer` is non-null, it must be writable.
+pub unsafe extern "win64" fn set_file_pointer_ex(
+    h_file: usize,
+    li_distance_to_move: i64,
+    lp_new_file_pointer: *mut i64,
+    dw_move_method: u32,
+) -> i32 {
+    let whence = match dw_move_method {
+        0 => libc::SEEK_SET,
+        1 => libc::SEEK_CUR,
+        2 => libc::SEEK_END,
+        _ => return 0, // FALSE
+    };
+    let result = unsafe { libc::lseek(h_file as i32, li_distance_to_move, whence) };
+    if result >= 0 {
+        if !lp_new_file_pointer.is_null() {
+            unsafe { *lp_new_file_pointer = result };
+        }
+        1 // TRUE
+    } else {
+        0 // FALSE
+    }
+}
+
+/// GetFileTime: stub that returns TRUE without filling timestamps.
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn get_file_time(
+    _h_file: usize,
+    _lp_creation_time: *mut u64,
+    _lp_last_access_time: *mut u64,
+    _lp_last_write_time: *mut u64,
+) -> i32 {
+    1 // TRUE
+}
+
+/// SetFileTime: no-op stub that returns TRUE.
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn set_file_time(
+    _h_file: usize,
+    _lp_creation_time: *const u64,
+    _lp_last_access_time: *const u64,
+    _lp_last_write_time: *const u64,
+) -> i32 {
+    1 // TRUE
+}
+
+// ── Vectored exception handlers ─────────────────────────────────────────────
+
+/// AddVectoredExceptionHandler: no-op stub returning the handler as a fake handle.
+pub extern "win64" fn add_vectored_exception_handler(_first: u32, handler: usize) -> usize {
+    handler
+}
+
+/// RemoveVectoredExceptionHandler: no-op stub returning success.
+pub extern "win64" fn remove_vectored_exception_handler(_handle: usize) -> u32 {
+    1
+}
+
+/// AddVectoredContinueHandler: no-op stub returning the handler as a fake handle.
+pub extern "win64" fn add_vectored_continue_handler(_first: u32, handler: usize) -> usize {
+    handler
+}
+
+/// RemoveVectoredContinueHandler: no-op stub returning success.
+pub extern "win64" fn remove_vectored_continue_handler(_handle: usize) -> u32 {
+    1
+}
 
 /// File type constant for unknown files.
 const FILE_TYPE_UNKNOWN: u32 = 0x0000;
@@ -3082,6 +3498,12 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "GetSystemTimeAsFileTime" => {
             Some(get_system_time_as_file_time as unsafe extern "win64" fn(_) as *const () as usize)
         }
+        "GetLocaleInfoW" => Some(
+            get_locale_info_w as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
+        ),
+        "GetLocaleInfoA" => Some(
+            get_locale_info_a as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
+        ),
         // System info
         "GetSystemInfo" => {
             Some(get_system_info as unsafe extern "win64" fn(_) -> _ as *const () as usize)
@@ -3416,6 +3838,43 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "GetTimeZoneInformation" => Some(
             get_time_zone_information as unsafe extern "win64" fn(_) -> _ as *const () as usize,
         ),
+        // String comparison
+        "CompareStringW" => Some(
+            compare_string_w as unsafe extern "win64" fn(_, _, _, _, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "CompareStringOrdinal" => Some(
+            compare_string_ordinal as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const ()
+                as usize,
+        ),
+        // String mapping
+        "LCMapStringW" => Some(
+            lc_map_string_w as unsafe extern "win64" fn(_, _, _, _, _, _) -> _ as *const ()
+                as usize,
+        ),
+        // Character classification
+        "GetStringTypeW" => Some(
+            get_string_type_w as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
+        ),
+        // File time and positioning
+        "SetFilePointerEx" => Some(
+            set_file_pointer_ex as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
+        ),
+        "GetFileTime" => {
+            Some(get_file_time as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize)
+        }
+        "SetFileTime" => {
+            Some(set_file_time as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize)
+        }
+        // Vectored exception handlers
+        "AddVectoredExceptionHandler" => Some(add_vectored_exception_handler as *const () as usize),
+        "RemoveVectoredExceptionHandler" => {
+            Some(remove_vectored_exception_handler as *const () as usize)
+        }
+        "AddVectoredContinueHandler" => Some(add_vectored_continue_handler as *const () as usize),
+        "RemoveVectoredContinueHandler" => {
+            Some(remove_vectored_continue_handler as *const () as usize)
+        }
         _ => None,
     }
 }

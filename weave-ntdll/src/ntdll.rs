@@ -586,6 +586,50 @@ pub unsafe extern "win64" fn nt_query_system_information(
     STATUS_NOT_IMPLEMENTED
 }
 
+// ── Process and thread information ───────────────────────────────────────────
+
+/// NtQueryInformationProcess: query process information.
+///
+/// # Safety
+/// If `process_information_class == 0` and length >= 48, writes to `process_information`.
+/// If `return_length` is non-null, writes the return length.
+pub unsafe extern "win64" fn nt_query_information_process(
+    _handle: usize,
+    process_information_class: u32,
+    process_information: *mut std::ffi::c_void,
+    process_information_length: u32,
+    return_length: *mut u32,
+) -> u32 {
+    // ProcessBasicInformation = 0, struct size = 48 bytes
+    if process_information_class == 0 && process_information_length >= 48 {
+        let buf = process_information as *mut u8;
+        unsafe {
+            std::ptr::write_bytes(buf, 0, 48);
+            // Write fake PID at offset 16 (UniqueProcessId field)
+            *(buf.add(16) as *mut usize) = 1000;
+            if !return_length.is_null() {
+                *return_length = 48;
+            }
+        }
+        return 0; // STATUS_SUCCESS
+    }
+    0xC0000002 // STATUS_NOT_IMPLEMENTED
+}
+
+/// NtQueryInformationThread: stub returning STATUS_NOT_IMPLEMENTED.
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn nt_query_information_thread(
+    _handle: usize,
+    _thread_information_class: u32,
+    _thread_information: *mut std::ffi::c_void,
+    _thread_information_length: u32,
+    _return_length: *mut u32,
+) -> u32 {
+    0xC0000002 // STATUS_NOT_IMPLEMENTED
+}
+
 // ── Resolver ──────────────────────────────────────────────────────────────────
 
 pub fn resolve(func: &str) -> Option<usize> {
@@ -649,6 +693,15 @@ pub fn resolve(func: &str) -> Option<usize> {
         // System information functions
         "NtQuerySystemInformation" => Some(
             nt_query_system_information as unsafe extern "win64" fn(_, _, _, _) -> _ as *const ()
+                as usize,
+        ),
+        // Process and thread information
+        "NtQueryInformationProcess" => Some(
+            nt_query_information_process as unsafe extern "win64" fn(_, _, _, _, _) -> _
+                as *const () as usize,
+        ),
+        "NtQueryInformationThread" => Some(
+            nt_query_information_thread as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const ()
                 as usize,
         ),
         _ => None,
