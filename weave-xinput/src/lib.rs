@@ -155,8 +155,7 @@ mod linux_backend {
     fn axis_to_trigger(value: i16) -> u8 {
         // Map -32767..32767 → 0..255
         let shifted = (value as i32) + 32767; // 0..65534
-        let scaled = (shifted * 255 / 65534) as u8;
-        scaled
+        (shifted * 255 / 65534) as u8
     }
 
     /// Map Linux joystick button numbers to XInput bitmask constants.
