@@ -30,6 +30,8 @@ fn resolve(dll: &str, func: &str) -> Option<usize> {
         .or_else(|| weave_gdi32::resolve(dll, func))
         .or_else(|| weave_shell32::resolve(dll, func))
         .or_else(|| weave_ole32::resolve(dll, func))
+        .or_else(|| weave_mmdevapi::resolve(dll, func))
+        .or_else(|| weave_xinput::resolve(dll, func))
         .or_else(|| weave_ucrt::resolve(dll, func))
         .or_else(|| weave_vulkan::resolve(dll, func))
         .or_else(|| dll_registry::lookup(dll, func))
@@ -98,11 +100,26 @@ fn main() {
     );
 
     // ── 3. Patch the Import Address Table ────────────────────────────────
+    // Use best-effort patching: unresolved imports are filled with a stub
+    // that returns 0 and logs the miss.  This lets the binary start even when
+    // some stub crates are incomplete, and surfaces all missing imports at
+    // once rather than one per run.
+    //
     // Safety: image.base points to a fully mapped PE loaded by loader::load().
-    unsafe { iat::patch(&bytes, image.base, resolve) }.unwrap_or_else(|e| {
-        eprintln!("weave: import error: {e}");
-        std::process::exit(1);
-    });
+    let mut missing: Vec<String> = Vec::new();
+    unsafe {
+        iat::patch_best_effort(&bytes, image.base, resolve, |dll, func| {
+            let sym = format!("{dll}!{func}");
+            eprintln!("weave: unresolved import: {sym} (stubbed to null)");
+            missing.push(sym);
+        });
+    }
+    if !missing.is_empty() {
+        eprintln!(
+            "weave: warning: {} import(s) unresolved — binary may crash if they are called",
+            missing.len()
+        );
+    }
 
     eprintln!("weave: imports resolved");
 
