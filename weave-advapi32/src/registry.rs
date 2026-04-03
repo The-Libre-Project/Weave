@@ -66,6 +66,23 @@ unsafe fn decode_wide_ptr(ptr: *const u16) -> String {
     String::from_utf16_lossy(slice)
 }
 
+/// Decode a null-terminated UTF-8 string pointer to a `String`.
+/// Returns an empty string if the pointer is null.
+///
+/// # Safety
+/// `ptr`, if non-null, must point to a valid null-terminated UTF-8 sequence.
+unsafe fn decode_narrow_ptr(ptr: *const u8) -> String {
+    if ptr.is_null() {
+        return String::new();
+    }
+    let mut len = 0usize;
+    while unsafe { *ptr.add(len) } != 0 {
+        len += 1;
+    }
+    let slice = unsafe { std::slice::from_raw_parts(ptr, len) };
+    String::from_utf8_lossy(slice).into_owned()
+}
+
 // ── RegOpenKeyExW ─────────────────────────────────────────────────────────────
 
 /// RegOpenKeyExW: open a registry key and return a handle.
@@ -525,6 +542,540 @@ pub unsafe extern "win64" fn reg_enum_value_w(
     ERROR_SUCCESS
 }
 
+// ── RegDeleteKeyW ─────────────────────────────────────────────────────────────
+
+/// RegDeleteKeyW: delete a registry key and all its subkeys/values.
+///
+/// # Safety
+/// `lp_sub_key` must be a valid null-terminated UTF-16 string.
+pub unsafe extern "win64" fn reg_delete_key_w(h_key: usize, lp_sub_key: *const u16) -> i32 {
+    let base_path = match key_to_path(h_key) {
+        Some(p) => p,
+        None => return ERROR_INVALID_HANDLE,
+    };
+
+    let subkey = unsafe { decode_wide_ptr(lp_sub_key) };
+    let key_path = match resolve_subkey(&base_path, &subkey) {
+        Some(p) => p,
+        None => return ERROR_FILE_NOT_FOUND,
+    };
+
+    // Check if it's a directory (key)
+    if !key_path.is_dir() {
+        return ERROR_FILE_NOT_FOUND;
+    }
+
+    match std::fs::remove_dir_all(&key_path) {
+        Ok(_) => ERROR_SUCCESS,
+        Err(_) => ERROR_FILE_NOT_FOUND,
+    }
+}
+
+// ── RegEnumKeyExW ─────────────────────────────────────────────────────────────
+
+/// RegEnumKeyExW: enumerate the subkeys of an open registry key.
+///
+/// # Safety
+/// `lp_name` must be valid for `*lpcch_name` UTF-16 code units.
+/// Unused parameters are ignored.
+pub unsafe extern "win64" fn reg_enum_key_ex_w(
+    h_key: usize,
+    dw_index: u32,
+    lp_name: *mut u16,
+    lpcch_name: *mut u32,
+    _lp_reserved: *mut u32,
+    _lp_class: *mut u16,
+    _lpcch_class: *mut u32,
+    _lp_ft_last_write_time: *mut u64,
+) -> i32 {
+    const ERROR_NO_MORE_ITEMS: i32 = 259;
+
+    let key_path = match key_to_path(h_key) {
+        Some(p) => p,
+        None => return ERROR_INVALID_HANDLE,
+    };
+
+    // Collect subdirectories (subkeys), sorted for deterministic ordering
+    let mut subkeys: Vec<std::path::PathBuf> = std::fs::read_dir(&key_path)
+        .ok()
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.metadata().map(|m| m.is_dir()).unwrap_or(false))
+        .map(|e| e.path())
+        .collect();
+    subkeys.sort();
+
+    let entry = match subkeys.get(dw_index as usize) {
+        Some(p) => p,
+        None => return ERROR_NO_MORE_ITEMS,
+    };
+
+    // Get the directory name
+    let name = entry
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
+
+    // Encode as UTF-16
+    let wide: Vec<u16> = name.encode_utf16().collect();
+    let required_chars = wide.len() as u32 + 1; // +1 for null terminator
+
+    if lpcch_name.is_null() {
+        return ERROR_INVALID_HANDLE;
+    }
+
+    let buf_capacity = unsafe { *lpcch_name };
+    unsafe { *lpcch_name = required_chars };
+
+    if buf_capacity < required_chars {
+        return ERROR_MORE_DATA;
+    }
+
+    // Copy wide chars into caller's buffer
+    for (i, &c) in wide.iter().enumerate() {
+        unsafe { *lp_name.add(i) = c };
+    }
+    unsafe { *lp_name.add(wide.len()) = 0 }; // null terminator
+
+    ERROR_SUCCESS
+}
+
+// ── RegDeleteKeyA ─────────────────────────────────────────────────────────────
+
+/// RegDeleteKeyA: delete a registry key and all its subkeys/values (ANSI version).
+///
+/// Converts the ANSI subkey name to UTF-16 and calls RegDeleteKeyW.
+///
+/// # Safety
+/// `lp_sub_key` must be a valid null-terminated UTF-8 string.
+pub unsafe extern "win64" fn reg_delete_key_a(h_key: usize, lp_sub_key: *const u8) -> i32 {
+    // Convert ANSI subkey to UTF-16
+    let subkey_utf8 = unsafe { decode_narrow_ptr(lp_sub_key) };
+    let subkey_utf16: Vec<u16> = subkey_utf8
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+
+    unsafe { reg_delete_key_w(h_key, subkey_utf16.as_ptr()) }
+}
+
+// ── RegEnumKeyExA ─────────────────────────────────────────────────────────────
+
+/// RegEnumKeyExA: enumerate the subkeys of an open registry key (ANSI version).
+///
+/// Same logic as RegEnumKeyExW but output is ANSI.
+///
+/// # Safety
+/// `lp_name` must be valid for `*lpcch_name` UTF-8 bytes.
+/// Unused parameters are ignored.
+pub unsafe extern "win64" fn reg_enum_key_ex_a(
+    h_key: usize,
+    dw_index: u32,
+    lp_name: *mut u8,
+    lpcch_name: *mut u32,
+    _lp_reserved: *mut u32,
+    _lp_class: *mut u8,
+    _lpcch_class: *mut u32,
+    _lp_ft_last_write_time: *mut u64,
+) -> i32 {
+    const ERROR_NO_MORE_ITEMS: i32 = 259;
+
+    let key_path = match key_to_path(h_key) {
+        Some(p) => p,
+        None => return ERROR_INVALID_HANDLE,
+    };
+
+    // Collect subdirectories (subkeys), sorted for deterministic ordering
+    let mut subkeys: Vec<std::path::PathBuf> = std::fs::read_dir(&key_path)
+        .ok()
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.metadata().map(|m| m.is_dir()).unwrap_or(false))
+        .map(|e| e.path())
+        .collect();
+    subkeys.sort();
+
+    let entry = match subkeys.get(dw_index as usize) {
+        Some(p) => p,
+        None => return ERROR_NO_MORE_ITEMS,
+    };
+
+    // Get the directory name
+    let name = entry
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
+
+    // Convert to UTF-8 bytes
+    let narrow: Vec<u8> = name.into_bytes();
+    let required_chars = narrow.len() as u32 + 1; // +1 for null terminator
+
+    if lpcch_name.is_null() {
+        return ERROR_INVALID_HANDLE;
+    }
+
+    let buf_capacity = unsafe { *lpcch_name };
+    unsafe { *lpcch_name = required_chars };
+
+    if buf_capacity < required_chars {
+        return ERROR_MORE_DATA;
+    }
+
+    // Copy bytes into caller's buffer
+    for (i, &c) in narrow.iter().enumerate() {
+        unsafe { *lp_name.add(i) = c };
+    }
+    unsafe { *lp_name.add(narrow.len()) = 0 }; // null terminator
+
+    ERROR_SUCCESS
+}
+
+// ── OpenProcessToken ──────────────────────────────────────────────────────────
+
+/// OpenProcessToken: open the access token associated with a process.
+///
+/// Returns FALSE (0). No real process tokens are supported.
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn open_process_token(
+    _process_handle: usize,
+    _desired_access: u32,
+    _token_handle: *mut usize,
+) -> i32 {
+    0 // FALSE
+}
+
+// ── LookupPrivilegeValueW ─────────────────────────────────────────────────────
+
+/// LookupPrivilegeValueW: retrieve the locally unique identifier (LUID) for a privilege.
+///
+/// Returns FALSE (0). Privilege lookup is not supported.
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn lookup_privilege_value_w(
+    _lp_system_name: *const u16,
+    _lp_name: *const u16,
+    _lp_luid: *mut u64,
+) -> i32 {
+    0 // FALSE
+}
+
+// ── AdjustTokenPrivileges ─────────────────────────────────────────────────────
+
+/// AdjustTokenPrivileges: enable or disable privileges in the specified access token.
+///
+/// Returns TRUE (1). No-op implementation.
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn adjust_token_privileges(
+    _token_handle: usize,
+    _disable_all_privileges: i32,
+    _new_state: usize,
+    _buffer_length: u32,
+    _previous_state: usize,
+    _return_length: *mut u32,
+) -> i32 {
+    1 // TRUE
+}
+
+// ── ANSI registry variants ────────────────────────────────────────────────────
+
+/// RegOpenKeyExA: open a registry key and return a handle (ANSI version).
+///
+/// Converts the ANSI subkey name to UTF-16 and calls RegOpenKeyExW.
+///
+/// # Safety
+/// `lp_sub_key`, if non-null, must be a valid null-terminated UTF-8 string.
+/// `phk_result` must be a valid writable pointer.
+pub unsafe extern "win64" fn reg_open_key_ex_a(
+    h_key: usize,
+    lp_sub_key: *const u8,
+    ul_options: u32,
+    sam_desired: u32,
+    phk_result: *mut usize,
+) -> i32 {
+    // Convert ANSI subkey to UTF-16
+    let subkey_utf8 = unsafe { decode_narrow_ptr(lp_sub_key) };
+    let subkey_utf16: Vec<u16> = subkey_utf8
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+
+    unsafe {
+        reg_open_key_ex_w(
+            h_key,
+            subkey_utf16.as_ptr(),
+            ul_options,
+            sam_desired,
+            phk_result,
+        )
+    }
+}
+
+/// RegCreateKeyExA: open an existing key or create it if it doesn't exist (ANSI version).
+///
+/// Converts the ANSI subkey name to UTF-16 and calls RegCreateKeyExW.
+///
+/// # Safety
+/// `lp_sub_key` and `lp_class` (if non-null) must be valid UTF-8 strings.
+/// `phk_result` must be a valid writable pointer.
+pub unsafe extern "win64" fn reg_create_key_ex_a(
+    h_key: usize,
+    lp_sub_key: *const u8,
+    reserved: u32,
+    lp_class: *const u8,
+    dw_options: u32,
+    sam_desired: u32,
+    lp_security_attrs: usize,
+    phk_result: *mut usize,
+    lpdw_disposition: *mut u32,
+) -> i32 {
+    // Convert ANSI subkey to UTF-16
+    let subkey_utf8 = unsafe { decode_narrow_ptr(lp_sub_key) };
+    let subkey_utf16: Vec<u16> = subkey_utf8
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+
+    // Convert ANSI class to UTF-16 (if provided)
+    let class_utf16 = if lp_class.is_null() {
+        vec![]
+    } else {
+        let class_utf8 = unsafe { decode_narrow_ptr(lp_class) };
+        class_utf8
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect()
+    };
+
+    unsafe {
+        reg_create_key_ex_w(
+            h_key,
+            subkey_utf16.as_ptr(),
+            reserved,
+            if class_utf16.is_empty() {
+                std::ptr::null()
+            } else {
+                class_utf16.as_ptr()
+            },
+            dw_options,
+            sam_desired,
+            lp_security_attrs,
+            phk_result,
+            lpdw_disposition,
+        )
+    }
+}
+
+/// RegQueryValueExA: read a registry value (ANSI version).
+///
+/// Converts the ANSI value name to UTF-16 and calls RegQueryValueExW.
+/// For string data, converts the result back from UTF-16 to UTF-8.
+///
+/// # Safety
+/// All pointer arguments must be valid per their Windows API contracts.
+pub unsafe extern "win64" fn reg_query_value_ex_a(
+    h_key: usize,
+    lp_value_name: *const u8,
+    lp_reserved: *mut u32,
+    lp_type: *mut u32,
+    lp_data: *mut u8,
+    lpcb_data: *mut u32,
+) -> i32 {
+    // Convert ANSI value name to UTF-16
+    let value_name_utf8 = unsafe { decode_narrow_ptr(lp_value_name) };
+    let value_name_utf16: Vec<u16> = value_name_utf8
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+
+    // First call to get the data size and type
+    let mut data_type = 0u32;
+    let mut data_size = 0u32;
+    let result = unsafe {
+        reg_query_value_ex_w(
+            h_key,
+            value_name_utf16.as_ptr(),
+            lp_reserved,
+            &mut data_type,
+            std::ptr::null_mut(),
+            &mut data_size,
+        )
+    };
+
+    if result != ERROR_SUCCESS {
+        return result;
+    }
+
+    // Write type back to caller
+    if !lp_type.is_null() {
+        unsafe { *lp_type = data_type };
+    }
+
+    // Size query
+    if lp_data.is_null() {
+        if !lpcb_data.is_null() {
+            // For string types, convert UTF-16 size to UTF-8 size
+            if data_type == REG_SZ || data_type == REG_EXPAND_SZ {
+                // Estimate UTF-8 size (UTF-16 bytes / 2 * ~1.5 for worst case)
+                let utf16_chars = data_size / 2;
+                unsafe { *lpcb_data = utf16_chars * 3 }; // conservative estimate
+            } else {
+                unsafe { *lpcb_data = data_size };
+            }
+        }
+        return ERROR_SUCCESS;
+    }
+
+    // Allocate buffer for UTF-16 data
+    let mut utf16_buffer = vec![0u8; data_size as usize];
+    let result = unsafe {
+        reg_query_value_ex_w(
+            h_key,
+            value_name_utf16.as_ptr(),
+            lp_reserved,
+            std::ptr::null_mut(),
+            utf16_buffer.as_mut_ptr(),
+            &mut data_size,
+        )
+    };
+
+    if result != ERROR_SUCCESS {
+        return result;
+    }
+
+    // Convert UTF-16 data to UTF-8 if it's a string type
+    if data_type == REG_SZ || data_type == REG_EXPAND_SZ {
+        // Convert UTF-16 buffer to string
+        let utf16_slice = unsafe {
+            std::slice::from_raw_parts(utf16_buffer.as_ptr() as *const u16, data_size as usize / 2)
+        };
+        let utf8_string = String::from_utf16_lossy(utf16_slice);
+        let utf8_bytes = utf8_string.as_bytes();
+
+        // Check if caller's buffer is large enough
+        let required_size = utf8_bytes.len() as u32 + 1; // +1 for null terminator
+        if !lpcb_data.is_null() {
+            unsafe { *lpcb_data = required_size };
+        }
+
+        let buffer_size = if lpcb_data.is_null() {
+            0u32
+        } else {
+            unsafe { *lpcb_data }
+        };
+
+        if buffer_size < required_size {
+            return ERROR_MORE_DATA;
+        }
+
+        // Copy UTF-8 data to caller's buffer
+        unsafe {
+            std::ptr::copy_nonoverlapping(utf8_bytes.as_ptr(), lp_data, utf8_bytes.len());
+            *lp_data.add(utf8_bytes.len()) = 0; // null terminator
+        }
+    } else {
+        // Non-string data - copy as-is
+        if !lpcb_data.is_null() {
+            unsafe { *lpcb_data = data_size };
+        }
+
+        let buffer_size = if lpcb_data.is_null() {
+            0u32
+        } else {
+            unsafe { *lpcb_data }
+        };
+
+        if buffer_size < data_size {
+            return ERROR_MORE_DATA;
+        }
+
+        unsafe {
+            std::ptr::copy_nonoverlapping(utf16_buffer.as_ptr(), lp_data, data_size as usize);
+        }
+    }
+
+    ERROR_SUCCESS
+}
+
+/// RegSetValueExA: write a registry value (ANSI version).
+///
+/// Converts the ANSI value name to UTF-16 and calls RegSetValueExW.
+/// For string data, converts the ANSI data to UTF-16.
+///
+/// # Safety
+/// `lp_value_name` must be a valid null-terminated UTF-8 string (or null for
+/// the default value). `lp_data` must be valid for `cb_data` bytes.
+pub unsafe extern "win64" fn reg_set_value_ex_a(
+    h_key: usize,
+    lp_value_name: *const u8,
+    reserved: u32,
+    dw_type: u32,
+    lp_data: *const u8,
+    cb_data: u32,
+) -> i32 {
+    // Convert ANSI value name to UTF-16
+    let value_name_utf8 = unsafe { decode_narrow_ptr(lp_value_name) };
+    let value_name_utf16: Vec<u16> = value_name_utf8
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+
+    // Convert data if it's a string type
+    let (converted_data, converted_size) =
+        if (dw_type == REG_SZ || dw_type == REG_EXPAND_SZ) && !lp_data.is_null() {
+            // Convert ANSI string to UTF-16
+            let data_slice = unsafe { std::slice::from_raw_parts(lp_data, cb_data as usize) };
+            let data_string = String::from_utf8_lossy(data_slice);
+            let utf16_data: Vec<u16> = data_string
+                .encode_utf16()
+                .chain(std::iter::once(0))
+                .collect();
+            let utf16_bytes = unsafe {
+                std::slice::from_raw_parts(utf16_data.as_ptr() as *const u8, utf16_data.len() * 2)
+            };
+            (utf16_bytes.as_ptr(), (utf16_data.len() * 2) as u32)
+        } else {
+            // Non-string data - pass through
+            (lp_data, cb_data)
+        };
+
+    unsafe {
+        reg_set_value_ex_w(
+            h_key,
+            value_name_utf16.as_ptr(),
+            reserved,
+            dw_type,
+            converted_data,
+            converted_size,
+        )
+    }
+}
+
+/// RegDeleteValueA: delete a named value from an open key (ANSI version).
+///
+/// Converts the ANSI value name to UTF-16 and calls RegDeleteValueW.
+///
+/// # Safety
+/// `lp_value_name` must be a valid null-terminated UTF-8 string or null.
+pub unsafe extern "win64" fn reg_delete_value_a(h_key: usize, lp_value_name: *const u8) -> i32 {
+    // Convert ANSI value name to UTF-16
+    let value_name_utf8 = unsafe { decode_narrow_ptr(lp_value_name) };
+    let value_name_utf16: Vec<u16> = value_name_utf8
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+
+    unsafe { reg_delete_value_w(h_key, value_name_utf16.as_ptr()) }
+}
+
 // ── Resolver ──────────────────────────────────────────────────────────────────
 
 pub fn resolve(func: &str) -> Option<usize> {
@@ -557,6 +1108,51 @@ pub fn resolve(func: &str) -> Option<usize> {
             reg_enum_value_w as unsafe extern "win64" fn(_, _, _, _, _, _, _, _) -> _ as *const ()
                 as usize,
         ),
+        // Additional registry and token functions
+        "RegDeleteKeyW" => {
+            Some(reg_delete_key_w as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "RegDeleteKeyA" => {
+            Some(reg_delete_key_a as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "RegEnumKeyExW" => Some(
+            reg_enum_key_ex_w as unsafe extern "win64" fn(_, _, _, _, _, _, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "RegEnumKeyExA" => Some(
+            reg_enum_key_ex_a as unsafe extern "win64" fn(_, _, _, _, _, _, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "OpenProcessToken" => {
+            Some(open_process_token as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize)
+        }
+        "LookupPrivilegeValueW" => Some(
+            lookup_privilege_value_w as unsafe extern "win64" fn(_, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "AdjustTokenPrivileges" => Some(
+            adjust_token_privileges as unsafe extern "win64" fn(_, _, _, _, _, _) -> _ as *const ()
+                as usize,
+        ),
+        // ANSI registry variants
+        "RegOpenKeyExA" => Some(
+            reg_open_key_ex_a as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const () as usize,
+        ),
+        "RegCreateKeyExA" => Some(
+            reg_create_key_ex_a as unsafe extern "win64" fn(_, _, _, _, _, _, _, _, _) -> _
+                as *const () as usize,
+        ),
+        "RegQueryValueExA" => Some(
+            reg_query_value_ex_a as unsafe extern "win64" fn(_, _, _, _, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "RegSetValueExA" => Some(
+            reg_set_value_ex_a as unsafe extern "win64" fn(_, _, _, _, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "RegDeleteValueA" => {
+            Some(reg_delete_value_a as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
         _ => None,
     }
 }

@@ -66,6 +66,24 @@ pub struct ObjectAttributes {
     _security_qos: usize,              // offset 40
 } // total: 48 bytes
 
+// ── NT virtual memory helpers ─────────────────────────────────────────────────
+
+/// Convert NT PAGE_* protection flags to Linux PROT_* values.
+fn nt_prot_to_linux(protect: u32) -> i32 {
+    match protect {
+        1 => 0,                                                       // PAGE_NOACCESS → PROT_NONE
+        2 => libc::PROT_READ,                                         // PAGE_READONLY
+        4 => libc::PROT_READ | libc::PROT_WRITE,                      // PAGE_READWRITE
+        0x10 => libc::PROT_EXEC,                                      // PAGE_EXECUTE
+        0x20 => libc::PROT_READ | libc::PROT_EXEC,                    // PAGE_EXECUTE_READ
+        0x40 => libc::PROT_READ | libc::PROT_WRITE | libc::PROT_EXEC, // PAGE_EXECUTE_READWRITE
+        _ => libc::PROT_READ | libc::PROT_WRITE,
+    }
+}
+
+const STATUS_NO_MEMORY: u32 = 0xC0000017;
+const STATUS_NOT_IMPLEMENTED: u32 = 0xC0000002;
+
 // ── RtlInitUnicodeString ──────────────────────────────────────────────────────
 
 /// RtlInitUnicodeString: initialise a UNICODE_STRING from a UTF-16 literal.
@@ -725,6 +743,119 @@ pub unsafe extern "win64" fn ldr_get_procedure_address(
     STATUS_PROCEDURE_NOT_FOUND
 }
 
+/// NtAllocateVirtualMemory: allocate virtual memory.
+///
+/// # Safety
+/// `base_address` must be a valid pointer to a pointer. `region_size` must be a valid pointer.
+pub unsafe extern "win64" fn nt_allocate_virtual_memory(
+    _process_handle: usize,
+    base_address: *mut *mut u8,
+    _zero_bits: usize,
+    region_size: *mut usize,
+    _allocation_type: u32,
+    protect: u32,
+) -> u32 {
+    unsafe {
+        if base_address.is_null() || region_size.is_null() {
+            return 0u32; // STATUS_SUCCESS
+        }
+
+        let prot = nt_prot_to_linux(protect);
+        const MAP_FIXED_NOREPLACE: i32 = 0x10_0000;
+
+        let result = if (*base_address).is_null() {
+            libc::mmap(
+                std::ptr::null_mut(),
+                *region_size,
+                prot,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                -1,
+                0,
+            )
+        } else {
+            libc::mmap(
+                *base_address as *mut libc::c_void,
+                *region_size,
+                prot,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | MAP_FIXED_NOREPLACE,
+                -1,
+                0,
+            )
+        };
+
+        if result == libc::MAP_FAILED {
+            STATUS_NO_MEMORY
+        } else {
+            *base_address = result as *mut u8;
+            0u32 // STATUS_SUCCESS
+        }
+    }
+}
+
+/// NtFreeVirtualMemory: free virtual memory.
+///
+/// # Safety
+/// `base_address` and `region_size` must be valid pointers.
+pub unsafe extern "win64" fn nt_free_virtual_memory(
+    _process_handle: usize,
+    base_address: *mut *mut u8,
+    region_size: *mut usize,
+    _free_type: u32,
+) -> u32 {
+    unsafe {
+        if base_address.is_null() || region_size.is_null() {
+            return 0u32; // STATUS_SUCCESS
+        }
+        libc::munmap(*base_address as *mut libc::c_void, *region_size);
+        0u32 // STATUS_SUCCESS
+    }
+}
+
+/// NtProtectVirtualMemory: change memory protection.
+///
+/// # Safety
+/// `base_address`, `number_of_bytes_to_protect`, and `old_access_protection` must be valid pointers.
+pub unsafe extern "win64" fn nt_protect_virtual_memory(
+    _process_handle: usize,
+    base_address: *mut *mut u8,
+    number_of_bytes_to_protect: *mut usize,
+    new_access_protection: u32,
+    old_access_protection: *mut u32,
+) -> u32 {
+    unsafe {
+        if !old_access_protection.is_null() {
+            *old_access_protection = 0x40; // PAGE_EXECUTE_READWRITE
+        }
+
+        if base_address.is_null() || number_of_bytes_to_protect.is_null() {
+            return 0u32; // STATUS_SUCCESS
+        }
+
+        let prot = nt_prot_to_linux(new_access_protection);
+        libc::mprotect(
+            *base_address as *mut libc::c_void,
+            *number_of_bytes_to_protect,
+            prot,
+        );
+        0u32 // STATUS_SUCCESS
+    }
+}
+
+/// NtQueryVirtualMemory: query virtual memory information (stub).
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn nt_query_virtual_memory(
+    _process_handle: usize,
+    _base_address: *const u8,
+    _memory_information_class: u32,
+    _memory_information: *mut u8,
+    _memory_information_length: usize,
+    _return_length: *mut usize,
+) -> u32 {
+    STATUS_NOT_IMPLEMENTED
+}
+
 // ── Resolver ──────────────────────────────────────────────────────────────────
 
 pub fn resolve(func: &str) -> Option<usize> {
@@ -813,6 +944,23 @@ pub fn resolve(func: &str) -> Option<usize> {
         }
         "LdrGetProcedureAddress" => Some(
             ldr_get_procedure_address as unsafe extern "win64" fn(_, _, _, _) -> _ as *const ()
+                as usize,
+        ),
+        // NT virtual memory functions
+        "NtAllocateVirtualMemory" => Some(
+            nt_allocate_virtual_memory as unsafe extern "win64" fn(_, _, _, _, _, _) -> _
+                as *const () as usize,
+        ),
+        "NtFreeVirtualMemory" => Some(
+            nt_free_virtual_memory as unsafe extern "win64" fn(_, _, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "NtProtectVirtualMemory" => Some(
+            nt_protect_virtual_memory as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "NtQueryVirtualMemory" => Some(
+            nt_query_virtual_memory as unsafe extern "win64" fn(_, _, _, _, _, _) -> _ as *const ()
                 as usize,
         ),
         _ => None,

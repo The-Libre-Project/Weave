@@ -54,6 +54,22 @@ struct OsVersionInfoExA {
     w_reserved: u8,
 }
 
+/// Mirrors Windows CONSOLE_SCREEN_BUFFER_INFO layout.
+#[repr(C)]
+pub struct ConsoleScreenBufferInfo {
+    pub size_x: i16,
+    pub size_y: i16,
+    pub cursor_x: i16,
+    pub cursor_y: i16,
+    pub attributes: u16,
+    pub window_left: i16,
+    pub window_top: i16,
+    pub window_right: i16,
+    pub window_bottom: i16,
+    pub max_x: i16,
+    pub max_y: i16,
+}
+
 // ── Windows page-protection flags ─────────────────────────────────────────────
 
 fn win_prot_to_linux(protect: u32) -> i32 {
@@ -203,6 +219,92 @@ pub unsafe extern "win64" fn virtual_query(
         *(lp_buffer.add(40) as *mut u32) = 0x20000; // Type = MEM_PRIVATE
     }
     MBI_SIZE
+}
+
+/// VirtualAlloc: allocate virtual memory.
+///
+/// # Safety
+/// `lp_address` must be null or a valid address for allocation.
+pub unsafe extern "win64" fn virtual_alloc(
+    lp_address: *mut u8,
+    dw_size: usize,
+    _fl_allocation_type: u32,
+    fl_protect: u32,
+) -> *mut u8 {
+    let prot = win_prot_to_linux(fl_protect);
+    const MAP_FIXED_NOREPLACE: i32 = 0x10_0000;
+    let result = if lp_address.is_null() {
+        unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                dw_size,
+                prot,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                -1,
+                0,
+            )
+        }
+    } else {
+        unsafe {
+            libc::mmap(
+                lp_address as *mut libc::c_void,
+                dw_size,
+                prot,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | MAP_FIXED_NOREPLACE,
+                -1,
+                0,
+            )
+        }
+    };
+    if result == libc::MAP_FAILED {
+        std::ptr::null_mut()
+    } else {
+        result as *mut u8
+    }
+}
+
+/// VirtualAllocEx: allocate virtual memory in another process.
+///
+/// # Safety
+/// `lp_address` must be null or a valid address for allocation.
+pub unsafe extern "win64" fn virtual_alloc_ex(
+    _h_process: usize,
+    lp_address: *mut u8,
+    dw_size: usize,
+    fl_allocation_type: u32,
+    fl_protect: u32,
+) -> *mut u8 {
+    unsafe { virtual_alloc(lp_address, dw_size, fl_allocation_type, fl_protect) }
+}
+
+/// VirtualFree: free virtual memory.
+///
+/// # Safety
+/// `lp_address` must be a valid allocated address.
+pub unsafe extern "win64" fn virtual_free(
+    lp_address: *mut u8,
+    dw_size: usize,
+    _dw_free_type: u32,
+) -> i32 {
+    if lp_address.is_null() || dw_size == 0 {
+        1 // TRUE
+    } else {
+        let ret = unsafe { libc::munmap(lp_address as *mut libc::c_void, dw_size) };
+        (ret == 0) as i32
+    }
+}
+
+/// VirtualFreeEx: free virtual memory in another process.
+///
+/// # Safety
+/// `lp_address` must be a valid allocated address.
+pub unsafe extern "win64" fn virtual_free_ex(
+    _h_process: usize,
+    lp_address: *mut u8,
+    dw_size: usize,
+    dw_free_type: u32,
+) -> i32 {
+    unsafe { virtual_free(lp_address, dw_size, dw_free_type) }
 }
 
 /// Sleep: suspend the calling thread for the given number of milliseconds.
@@ -4608,6 +4710,133 @@ pub unsafe extern "win64" fn set_console_mode(_h_console_handle: usize, _dw_mode
     1 // TRUE
 }
 
+// ── Console functions ─────────────────────────────────────────────────────────
+
+/// WriteConsoleA: write ANSI buffer to console handle.
+///
+/// Converts ANSI to UTF-8 and writes to the Linux fd.
+///
+/// # Safety
+/// `lp_buffer` must be valid for `n_chars` bytes.
+pub unsafe extern "win64" fn write_console_a(
+    h_console_output: usize,
+    lp_buffer: *const u8,
+    n_chars: u32,
+    lp_chars_written: *mut u32,
+    _lp_reserved: usize,
+) -> i32 {
+    let fd = match handles::get_fd(h_console_output) {
+        Some(fd) => fd,
+        None => return 0, // FALSE
+    };
+    let slice = unsafe { std::slice::from_raw_parts(lp_buffer, n_chars as usize) };
+    let s = String::from_utf8_lossy(slice);
+    let bytes = s.as_bytes();
+    let n = unsafe { libc::write(fd, bytes.as_ptr() as *const libc::c_void, bytes.len()) };
+    if !lp_chars_written.is_null() {
+        unsafe { *lp_chars_written = if n >= 0 { n_chars } else { 0 } };
+    }
+    (n >= 0) as i32
+}
+
+/// SetConsoleTitleW: set console title (wide version).
+///
+/// No-op. Return TRUE.
+///
+/// # Safety
+/// Pointer argument is accepted but not dereferenced.
+pub unsafe extern "win64" fn set_console_title_w(_lp_console_title: *const u16) -> i32 {
+    1 // TRUE
+}
+
+/// SetConsoleTitleA: set console title (ANSI version).
+///
+/// No-op. Return TRUE.
+///
+/// # Safety
+/// Pointer argument is accepted but not dereferenced.
+pub unsafe extern "win64" fn set_console_title_a(_lp_console_title: *const u8) -> i32 {
+    1 // TRUE
+}
+
+/// GetConsoleTitleW: get console title (wide version).
+///
+/// Write 0 to buffer, return 0.
+///
+/// # Safety
+/// `lp_console_title` must be valid for `n_size` u16 words.
+pub unsafe extern "win64" fn get_console_title_w(lp_console_title: *mut u16, n_size: u32) -> u32 {
+    if !lp_console_title.is_null() && n_size > 0 {
+        unsafe { *lp_console_title = 0 };
+    }
+    0
+}
+
+/// GetConsoleTitleA: get console title (ANSI version).
+///
+/// Write 0 to buffer, return 0.
+///
+/// # Safety
+/// `lp_console_title` must be valid for `n_size` bytes.
+pub unsafe extern "win64" fn get_console_title_a(lp_console_title: *mut u8, n_size: u32) -> u32 {
+    if !lp_console_title.is_null() && n_size > 0 {
+        unsafe { *lp_console_title = 0 };
+    }
+    0
+}
+
+/// GetConsoleScreenBufferInfo: get console screen buffer info.
+///
+/// Fill struct with fake 80×25 console info, return TRUE.
+///
+/// # Safety
+/// `lp_console_screen_buffer_info` must be a valid writable pointer to a ConsoleScreenBufferInfo.
+pub unsafe extern "win64" fn get_console_screen_buffer_info(
+    _h_console_output: usize,
+    lp_console_screen_buffer_info: *mut ConsoleScreenBufferInfo,
+) -> i32 {
+    if lp_console_screen_buffer_info.is_null() {
+        return 0; // FALSE
+    }
+    unsafe {
+        (*lp_console_screen_buffer_info).size_x = 80;
+        (*lp_console_screen_buffer_info).size_y = 25;
+        (*lp_console_screen_buffer_info).cursor_x = 0;
+        (*lp_console_screen_buffer_info).cursor_y = 0;
+        (*lp_console_screen_buffer_info).attributes = 7; // gray on black
+        (*lp_console_screen_buffer_info).window_left = 0;
+        (*lp_console_screen_buffer_info).window_top = 0;
+        (*lp_console_screen_buffer_info).window_right = 79;
+        (*lp_console_screen_buffer_info).window_bottom = 24;
+        (*lp_console_screen_buffer_info).max_x = 80;
+        (*lp_console_screen_buffer_info).max_y = 25;
+    }
+    1 // TRUE
+}
+
+/// SetConsoleTextAttribute: set console text attributes.
+///
+/// No-op. Return TRUE.
+///
+/// # Safety
+/// No pointer arguments are dereferenced.
+pub unsafe extern "win64" fn set_console_text_attribute(
+    _h_console_output: usize,
+    _w_attributes: u16,
+) -> i32 {
+    1 // TRUE
+}
+
+/// SetConsoleCtrlHandler: set console control handler.
+///
+/// No-op. Return TRUE.
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn set_console_ctrl_handler(_handler_routine: usize, _add: i32) -> i32 {
+    1 // TRUE
+}
+
 // ── Resolver ──────────────────────────────────────────────────────────────────
 
 /// Resolve a kernel32.dll import to a stub address.
@@ -4628,6 +4857,18 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         }
         "VirtualQuery" => {
             Some(virtual_query as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize)
+        }
+        "VirtualAlloc" => {
+            Some(virtual_alloc as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize)
+        }
+        "VirtualAllocEx" => Some(
+            virtual_alloc_ex as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const () as usize,
+        ),
+        "VirtualFree" => {
+            Some(virtual_free as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize)
+        }
+        "VirtualFreeEx" => {
+            Some(virtual_free_ex as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize)
         }
         "Sleep" => Some(sleep as *const () as usize),
         "TlsGetValue" => Some(tls_get_value as *const () as usize),
@@ -5222,6 +5463,32 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "RemoveVectoredContinueHandler" => {
             Some(remove_vectored_continue_handler as *const () as usize)
         }
+        // Console functions
+        "WriteConsoleA" => Some(
+            write_console_a as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const () as usize,
+        ),
+        "SetConsoleTitleW" => {
+            Some(set_console_title_w as unsafe extern "win64" fn(_) -> _ as *const () as usize)
+        }
+        "SetConsoleTitleA" => {
+            Some(set_console_title_a as unsafe extern "win64" fn(_) -> _ as *const () as usize)
+        }
+        "GetConsoleTitleW" => {
+            Some(get_console_title_w as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "GetConsoleTitleA" => {
+            Some(get_console_title_a as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "GetConsoleScreenBufferInfo" => Some(
+            get_console_screen_buffer_info as unsafe extern "win64" fn(_, _) -> _ as *const ()
+                as usize,
+        ),
+        "SetConsoleTextAttribute" => Some(
+            set_console_text_attribute as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
+        ),
+        "SetConsoleCtrlHandler" => Some(
+            set_console_ctrl_handler as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
+        ),
         _ => None,
     }
 }
