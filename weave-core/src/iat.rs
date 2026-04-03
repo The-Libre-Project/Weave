@@ -64,7 +64,7 @@ pub unsafe fn patch_best_effort(
     bytes: &[u8],
     base: *mut u8,
     resolve: impl Fn(&str, &str) -> Option<usize>,
-    on_miss: impl Fn(&str, &str),
+    on_miss: impl FnMut(&str, &str),
 ) {
     let _ = patch_inner(bytes, base, resolve, true, on_miss);
 }
@@ -74,7 +74,7 @@ unsafe fn patch_inner(
     base: *mut u8,
     resolve: impl Fn(&str, &str) -> Option<usize>,
     lenient: bool,
-    on_miss: impl Fn(&str, &str),
+    mut on_miss: impl FnMut(&str, &str),
 ) -> Result<(), String> {
     let pe = PE::parse(bytes).map_err(|e| format!("IAT patch: parse error: {e}"))?;
 

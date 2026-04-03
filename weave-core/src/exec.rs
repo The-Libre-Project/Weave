@@ -30,6 +30,9 @@ pub unsafe fn run(entry_point: *const u8) -> ! {
 }
 
 /// Stub for non-Linux platforms (macOS dev builds).
+///
+/// # Safety
+/// `_entry_point` is not used on this platform — the function always panics.
 #[cfg(not(target_os = "linux"))]
 pub unsafe fn run(_entry_point: *const u8) -> ! {
     panic!("PE execution requires Linux — this is a cross-compilation target only")
