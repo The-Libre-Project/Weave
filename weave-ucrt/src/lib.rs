@@ -631,7 +631,7 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "__p__commode" => stub!(ucrt_p_commode as unsafe extern "win64" fn() -> _),
         "__p__fmode" => stub!(ucrt_p_fmode as unsafe extern "win64" fn() -> _),
         // stdio
-        "__acrt_iob_func" => stub!(ucrt_acrt_iob_func as extern "win64" fn(_) -> _),
+        "__acrt_iob_func" | "__iob_func" => stub!(ucrt_acrt_iob_func as extern "win64" fn(_) -> _),
         "__stdio_common_vfprintf" | "__stdio_common_vfwprintf" => {
             stub!(ucrt_stdio_common_vfprintf as extern "win64" fn(_, _, _, _, _) -> _)
         }
@@ -678,6 +678,13 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "__wgetmainargs" => stub!(ucrt_wgetmainargs as unsafe extern "win64" fn(_, _, _, _, _) -> _),
         "__initenv" => stub!(ucrt_initenv as unsafe extern "win64" fn() -> _),
         "__winitenv" => stub!(ucrt_winitenv as unsafe extern "win64" fn() -> _),
+        // Legacy MSVCRT aliases — older MinGW CRT startup code uses these names
+        "_fmode" => stub!(ucrt_p_fmode as unsafe extern "win64" fn() -> _),
+        "_commode" => stub!(ucrt_p_commode as unsafe extern "win64" fn() -> _),
+        "__mb_cur_max" => stub!(ucrt_mb_cur_max_func as extern "win64" fn() -> _),
+        "_stricmp" | "_strcmpi" => stub!(ucrt_strcmp as unsafe extern "win64" fn(_, _) -> _),
+        "_wcsdup" => stub!(ucrt_strdup as unsafe extern "win64" fn(_) -> _),
+        "_flushall" | "_filbuf" | "_flsbuf" => stub!(ucrt_cexit as extern "win64" fn()),
         _ => None,
     }
 }
