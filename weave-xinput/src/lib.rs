@@ -277,6 +277,9 @@ fn init_gamepad_states() {
 ///
 /// On Linux, drains all pending joystick events from /dev/input/jsN into the
 /// cached state before returning it.  Non-blocking — never stalls.
+///
+/// # Safety
+/// `p_state` must be a valid non-null pointer to a writable `XInputState`.
 pub unsafe extern "win64" fn x_input_get_state(
     dw_user_index: u32,
     p_state: *mut XInputState,
@@ -331,6 +334,9 @@ pub unsafe extern "win64" fn x_input_get_state(
 /// FF_RUMBLE interface (EVIOCSFF / EV_FF).  Requires opening the evdev node
 /// (not the js node) for the same physical device.  For now this is a no-op
 /// that acknowledges the call correctly.
+///
+/// # Safety
+/// `p_vibration` must be a valid non-null pointer to a readable `XInputVibration`.
 pub unsafe extern "win64" fn x_input_set_state(
     dw_user_index: u32,
     p_vibration: *const XInputVibration,
@@ -359,6 +365,9 @@ pub unsafe extern "win64" fn x_input_set_state(
 }
 
 /// XInputGetCapabilities — retrieves capabilities of the specified controller.
+///
+/// # Safety
+/// `p_capabilities` must be a valid non-null pointer to a writable `XInputCapabilities`.
 pub unsafe extern "win64" fn x_input_get_capabilities(
     dw_user_index: u32,
     _dw_flags: u32,
