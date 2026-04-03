@@ -8,5 +8,5 @@ repository.workspace = true
 [dependencies]
 weave-common = { path = "../weave-common" }
 
-# TODO(Step 4): Re-add pipewire = "0.8" here under [target.'cfg(target_os = "linux")'.dependencies]
-# once zig/zigbuild is available for cross-compilation verification.
+[target.'cfg(target_os = "linux")'.dependencies]
+pipewire = "0.8"
