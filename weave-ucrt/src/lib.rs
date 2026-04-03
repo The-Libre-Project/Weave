@@ -33,12 +33,12 @@ pub unsafe extern "win64" fn ucrt_realloc(ptr: *mut c_void, size: usize) -> *mut
 pub unsafe extern "win64" fn ucrt_aligned_malloc(size: usize, alignment: usize) -> *mut c_void {
     unsafe {
         let mut ptr: *mut c_void = std::ptr::null_mut();
-        libc::posix_memalign(
+        let ret = libc::posix_memalign(
             &mut ptr,
             alignment.max(std::mem::size_of::<*mut c_void>()),
             size,
         );
-        ptr
+        if ret != 0 { std::ptr::null_mut() } else { ptr }
     }
 }
 
@@ -136,8 +136,8 @@ pub unsafe extern "win64" fn ucrt_wcsicmp(s1: *const u16, s2: *const u16) -> i32
     unsafe {
         let mut i = 0usize;
         loop {
-            let a = to_ascii_lower(*s1.add(i) as u32);
-            let b = to_ascii_lower(*s2.add(i) as u32);
+            let a = to_ascii_lower(*s1.add(i));
+            let b = to_ascii_lower(*s2.add(i));
             if a != b {
                 return a as i32 - b as i32;
             }
@@ -149,19 +149,19 @@ pub unsafe extern "win64" fn ucrt_wcsicmp(s1: *const u16, s2: *const u16) -> i32
     }
 }
 
-fn to_ascii_lower(c: u32) -> u16 {
-    if (b'A' as u32..=b'Z' as u32).contains(&c) {
-        (c + 32) as u16
+fn to_ascii_lower(c: u16) -> u16 {
+    if (b'A' as u16..=b'Z' as u16).contains(&c) {
+        c + 32
     } else {
-        c as u16
+        c
     }
 }
 
 pub unsafe extern "win64" fn ucrt_wcsnicmp(s1: *const u16, s2: *const u16, n: usize) -> i32 {
     unsafe {
         for i in 0..n {
-            let a = to_ascii_lower(*s1.add(i) as u32);
-            let b = to_ascii_lower(*s2.add(i) as u32);
+            let a = to_ascii_lower(*s1.add(i));
+            let b = to_ascii_lower(*s2.add(i));
             if a != b {
                 return a as i32 - b as i32;
             }
@@ -323,8 +323,10 @@ pub extern "win64" fn ucrt_stdio_common_vsprintf(
     0
 }
 
-pub extern "win64" fn ucrt_fflush(_stream: *mut c_void) -> i32 {
-    unsafe { libc::fflush(std::ptr::null_mut()) };
+pub unsafe extern "win64" fn ucrt_fflush(stream: *mut c_void) -> i32 {
+    // Pass the stream through. NULL flushes all (per C standard); non-NULL flushes that stream.
+    // This is correct when stream is a FILE* obtained from our libc-backed stubs.
+    unsafe { libc::fflush(stream as *mut libc::FILE) };
     0
 }
 
@@ -559,7 +561,7 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "__stdio_common_vsprintf" | "__stdio_common_vswprintf" => {
             stub!(ucrt_stdio_common_vsprintf as extern "win64" fn(_, _, _, _, _, _) -> _)
         }
-        "fflush" => stub!(ucrt_fflush as extern "win64" fn(_) -> _),
+        "fflush" => stub!(ucrt_fflush as unsafe extern "win64" fn(_) -> _),
         "setvbuf" => stub!(ucrt_setvbuf as extern "win64" fn(_, _, _, _) -> _),
         "_errno" => stub!(ucrt_errno as extern "win64" fn() -> _),
         "strerror" => stub!(ucrt_strerror as extern "win64" fn(_) -> _),

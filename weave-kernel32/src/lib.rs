@@ -11,6 +11,11 @@ use std::cell::Cell;
 use weave_common::{STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE};
 use weave_core::{file_io, handles};
 
+// Windows limits null-terminated strings to 32,767 UTF-16 code units (MAX_PATH extended).
+// Scanning beyond this is almost certainly a caller bug; cap the loop to avoid runaway reads.
+const MAX_UTF16_LEN: usize = 32_768;
+const MAX_UTF8_LEN: usize = 65_536;
+
 // Per-thread last error, shared across GetLastError / SetLastError.
 thread_local! {
     static LAST_ERROR: Cell<u32> = const { Cell::new(0) };
@@ -334,8 +339,12 @@ pub unsafe extern "win64" fn create_file_w(
     // Decode the null-terminated UTF-16 filename.
     let win_path = unsafe {
         let mut len = 0usize;
-        while *lp_file_name.add(len) != 0 {
+        while len < MAX_UTF16_LEN && *lp_file_name.add(len) != 0 {
             len += 1;
+        }
+        if len == MAX_UTF16_LEN {
+            LAST_ERROR.with(|e| e.set(87)); // ERROR_INVALID_PARAMETER
+            return usize::MAX;
         }
         let slice = std::slice::from_raw_parts(lp_file_name, len);
         String::from_utf16_lossy(slice).to_owned()
@@ -461,8 +470,12 @@ pub unsafe extern "win64" fn delete_file_w(lp_file_name: *const u16) -> i32 {
     }
     let win_path = unsafe {
         let mut len = 0usize;
-        while *lp_file_name.add(len) != 0 {
+        while len < MAX_UTF16_LEN && *lp_file_name.add(len) != 0 {
             len += 1;
+        }
+        if len == MAX_UTF16_LEN {
+            LAST_ERROR.with(|e| e.set(87)); // ERROR_INVALID_PARAMETER
+            return 0; // FALSE
         }
         String::from_utf16_lossy(std::slice::from_raw_parts(lp_file_name, len)).to_owned()
     };
@@ -600,8 +613,12 @@ pub unsafe extern "win64" fn wide_char_to_multi_byte(
     let null_terminated = cch_wide_char < 0;
     let wide: &[u16] = if null_terminated {
         let mut len = 0usize;
-        while unsafe { *lp_wide_char_str.add(len) } != 0 {
+        while len < MAX_UTF16_LEN && unsafe { *lp_wide_char_str.add(len) } != 0 {
             len += 1;
+        }
+        if len == MAX_UTF16_LEN {
+            LAST_ERROR.with(|e| e.set(87)); // ERROR_INVALID_PARAMETER
+            return 0;
         }
         unsafe { std::slice::from_raw_parts(lp_wide_char_str, len) }
     } else {
@@ -644,8 +661,12 @@ pub unsafe extern "win64" fn multi_byte_to_wide_char(
     let null_terminated = cb_multi_byte < 0;
     let bytes: &[u8] = if null_terminated {
         let mut len = 0usize;
-        while unsafe { *lp_multi_byte_str.add(len) } != 0 {
+        while len < MAX_UTF8_LEN && unsafe { *lp_multi_byte_str.add(len) } != 0 {
             len += 1;
+        }
+        if len == MAX_UTF8_LEN {
+            LAST_ERROR.with(|e| e.set(87)); // ERROR_INVALID_PARAMETER
+            return 0;
         }
         unsafe { std::slice::from_raw_parts(lp_multi_byte_str, len) }
     } else {
