@@ -514,6 +514,25 @@ pub unsafe extern "win64" fn ucrt_wgetmainargs(
     0
 }
 
+// ── Legacy MSVCRT global data exports ────────────────────────────────────────
+
+/// __initenv — MSVCRT global: pointer to the initial environment block (char**).
+///
+/// Some MinGW CRT startup sequences import this as a data symbol to initialise
+/// their own `environ` variable. We expose a pointer to a null-terminated
+/// empty environment (same as __p__environ).
+pub unsafe extern "win64" fn ucrt_initenv() -> *mut *mut u8 {
+    // A static null pointer (usize is Sync, raw pointers are not).
+    static NULL_ENV: usize = 0;
+    &NULL_ENV as *const usize as *mut *mut u8
+}
+
+/// __winitenv — wide-char variant (wchar_t**).
+pub unsafe extern "win64" fn ucrt_winitenv() -> *mut *mut u16 {
+    static NULL_WENV: usize = 0;
+    &NULL_WENV as *const usize as *mut *mut u16
+}
+
 // ── Resolver ──────────────────────────────────────────────────────────────────
 
 /// Returns true for any DLL name this crate handles.
@@ -657,6 +676,8 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         // legacy MSVCRT entry-point helpers
         "__getmainargs" => stub!(ucrt_getmainargs as unsafe extern "win64" fn(_, _, _, _, _) -> _),
         "__wgetmainargs" => stub!(ucrt_wgetmainargs as unsafe extern "win64" fn(_, _, _, _, _) -> _),
+        "__initenv" => stub!(ucrt_initenv as unsafe extern "win64" fn() -> _),
+        "__winitenv" => stub!(ucrt_winitenv as unsafe extern "win64" fn() -> _),
         _ => None,
     }
 }
