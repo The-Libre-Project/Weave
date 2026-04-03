@@ -258,6 +258,111 @@ pub extern "win64" fn nt_terminate_process(_process_handle: usize, exit_status: 
     unsafe { libc::exit(exit_status) }
 }
 
+// ── RTL heap functions ────────────────────────────────────────────────────────
+
+/// RtlAllocateHeap: allocate memory from the heap.
+///
+/// Wraps `malloc` with optional zero-initialization when HEAP_ZERO_MEMORY (0x08) is set.
+/// Ignores HeapHandle parameter (we use a single global allocator).
+///
+/// # Safety
+/// The returned pointer must be freed with RtlFreeHeap or it will leak.
+pub extern "win64" fn rtl_allocate_heap(
+    _heap_handle: usize,
+    flags: u32,
+    size: usize,
+) -> *mut std::ffi::c_void {
+    if size == 0 {
+        return std::ptr::null_mut();
+    }
+    let zero_memory = (flags & 0x08) != 0; // HEAP_ZERO_MEMORY
+    if zero_memory {
+        unsafe { libc::calloc(1, size) }
+    } else {
+        unsafe { libc::malloc(size) }
+    }
+}
+
+/// RtlFreeHeap: free memory allocated from the heap.
+///
+/// Wraps `free`. Ignores HeapHandle and Flags parameters.
+///
+/// # Safety
+/// `base_address` must be a valid pointer returned from RtlAllocateHeap/RtlReAllocateHeap or NULL.
+pub extern "win64" fn rtl_free_heap(
+    _heap_handle: usize,
+    _flags: u32,
+    base_address: *mut std::ffi::c_void,
+) -> u8 {
+    if base_address.is_null() {
+        return 1; // TRUE
+    }
+    unsafe { libc::free(base_address) };
+    1 // TRUE
+}
+
+/// RtlReAllocateHeap: reallocate memory in the heap.
+///
+/// Wraps `realloc`. Ignores HeapHandle and Flags parameters.
+///
+/// # Safety
+/// `base_address` must be a valid pointer returned from RtlAllocateHeap or NULL.
+/// The returned pointer must be freed with RtlFreeHeap or it will leak.
+pub extern "win64" fn rtl_re_allocate_heap(
+    _heap_handle: usize,
+    _flags: u32,
+    base_address: *mut std::ffi::c_void,
+    size: usize,
+) -> *mut std::ffi::c_void {
+    unsafe { libc::realloc(base_address, size) }
+}
+
+// ── RTL version and error functions ───────────────────────────────────────────
+
+/// Windows RTL_OSVERSIONINFOW structure.
+#[repr(C)]
+pub struct RtlOsVersionInfoW {
+    dw_os_version_info_size: u32,
+    dw_major_version: u32,
+    dw_minor_version: u32,
+    dw_build_number: u32,
+    dw_platform_id: u32,
+    sz_csd_version: [u16; 128],
+}
+
+/// RtlGetVersion: fills an RTL_OSVERSIONINFOW struct with Windows 10 info.
+///
+/// # Safety
+/// `lp_version_information` must be a valid writable pointer to an RtlOsVersionInfoW.
+pub unsafe extern "win64" fn rtl_get_version(
+    lp_version_information: *mut RtlOsVersionInfoW,
+) -> i32 {
+    unsafe {
+        (*lp_version_information).dw_os_version_info_size =
+            std::mem::size_of::<RtlOsVersionInfoW>() as u32;
+        (*lp_version_information).dw_major_version = 10;
+        (*lp_version_information).dw_minor_version = 0;
+        (*lp_version_information).dw_build_number = 19041;
+        (*lp_version_information).dw_platform_id = 2; // VER_PLATFORM_WIN32_NT
+                                                      // sz_csd_version is already zero-initialized
+    }
+    STATUS_SUCCESS
+}
+
+/// RtlNtStatusToDosError: maps NT status codes to Win32 error codes.
+pub extern "win64" fn rtl_nt_status_to_dos_error(status: u32) -> u32 {
+    match status {
+        0x00000000 => 0,  // STATUS_SUCCESS -> ERROR_SUCCESS
+        0xC0000005 => 5,  // STATUS_ACCESS_VIOLATION -> ERROR_ACCESS_DENIED
+        0xC0000034 => 2,  // STATUS_OBJECT_NAME_NOT_FOUND -> ERROR_FILE_NOT_FOUND
+        0xC000003A => 3,  // STATUS_OBJECT_PATH_NOT_FOUND -> ERROR_PATH_NOT_FOUND
+        0xC0000008 => 6,  // STATUS_INVALID_HANDLE -> ERROR_INVALID_HANDLE
+        0xC0000017 => 8,  // STATUS_NO_MEMORY -> ERROR_NOT_ENOUGH_MEMORY
+        0xC000000D => 87, // STATUS_INVALID_PARAMETER -> ERROR_INVALID_PARAMETER
+        _ => 317,         // STATUS_MR_MID_NOT_FOUND -> ERROR_MR_MID_NOT_FOUND
+    }
+}
+
 // ── Resolver ──────────────────────────────────────────────────────────────────
 
 pub fn resolve(func: &str) -> Option<usize> {
@@ -279,6 +384,23 @@ pub fn resolve(func: &str) -> Option<usize> {
         ),
         "NtClose" => Some(nt_close as *const () as usize),
         "NtTerminateProcess" => Some(nt_terminate_process as *const () as usize),
+        // RTL heap functions
+        "RtlAllocateHeap" => {
+            Some(rtl_allocate_heap as extern "win64" fn(_, _, _) -> _ as *const () as usize)
+        }
+        "RtlFreeHeap" => {
+            Some(rtl_free_heap as extern "win64" fn(_, _, _) -> _ as *const () as usize)
+        }
+        "RtlReAllocateHeap" => {
+            Some(rtl_re_allocate_heap as extern "win64" fn(_, _, _, _) -> _ as *const () as usize)
+        }
+        // RTL version and error functions
+        "RtlGetVersion" => {
+            Some(rtl_get_version as unsafe extern "win64" fn(_) -> _ as *const () as usize)
+        }
+        "RtlNtStatusToDosError" => {
+            Some(rtl_nt_status_to_dos_error as extern "win64" fn(_) -> _ as *const () as usize)
+        }
         _ => None,
     }
 }

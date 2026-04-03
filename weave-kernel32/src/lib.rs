@@ -991,6 +991,22 @@ pub unsafe extern "win64" fn get_module_file_name_w(
     0
 }
 
+/// GetModuleFileNameA — return 0 (error).
+///
+/// Same as GetModuleFileNameW — stub that returns 0.
+/// The A variant just needs to exist in the resolver so apps that call
+/// the narrow version don't get an unresolved import.
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn get_module_file_name_a(
+    _h_module: usize,
+    _lp_filename: *mut u8,
+    _n_size: u32,
+) -> u32 {
+    0
+}
+
 // ── Process / thread identity ─────────────────────────────────────────────────
 
 /// GetCurrentProcess — return a pseudo-handle (-1 = 0xFFFFFFFFFFFFFFFF).
@@ -1852,6 +1868,607 @@ pub unsafe extern "win64" fn unhandled_exception_filter(_exception_pointers: *mu
     1 // EXCEPTION_EXECUTE_HANDLER
 }
 
+// ── lstr* string functions ───────────────────────────────────────────────────
+
+/// lstrcmpA — compare two ANSI strings.
+///
+/// # Safety
+/// `lp_string1` and `lp_string2` must be valid null-terminated UTF-8 strings.
+pub unsafe extern "win64" fn lstrcmp_a(lp_string1: *const u8, lp_string2: *const u8) -> i32 {
+    unsafe { libc::strcmp(lp_string1 as *const i8, lp_string2 as *const i8) }
+}
+
+/// lstrcmpW — compare two wide strings.
+///
+/// # Safety
+/// `lp_string1` and `lp_string2` must be valid null-terminated UTF-16 strings.
+pub unsafe extern "win64" fn lstrcmp_w(lp_string1: *const u16, lp_string2: *const u16) -> i32 {
+    unsafe {
+        let mut p1 = lp_string1;
+        let mut p2 = lp_string2;
+        loop {
+            let c1 = *p1;
+            let c2 = *p2;
+            if c1 != c2 {
+                return if c1 < c2 { -1 } else { 1 };
+            }
+            if c1 == 0 {
+                return 0;
+            }
+            p1 = p1.add(1);
+            p2 = p2.add(1);
+        }
+    }
+}
+
+/// lstrcmpiA — compare two ANSI strings (case-insensitive).
+///
+/// # Safety
+/// `lp_string1` and `lp_string2` must be valid null-terminated UTF-8 strings.
+pub unsafe extern "win64" fn lstrcmpi_a(lp_string1: *const u8, lp_string2: *const u8) -> i32 {
+    unsafe { libc::strcasecmp(lp_string1 as *const i8, lp_string2 as *const i8) }
+}
+
+/// lstrcmpiW — compare two wide strings (case-insensitive).
+///
+/// # Safety
+/// `lp_string1` and `lp_string2` must be valid null-terminated UTF-16 strings.
+pub unsafe extern "win64" fn lstrcmpi_w(lp_string1: *const u16, lp_string2: *const u16) -> i32 {
+    unsafe {
+        let mut p1 = lp_string1;
+        let mut p2 = lp_string2;
+        loop {
+            let c1 = *p1;
+            let c2 = *p2;
+            let lc1 = if (c1 as u8).is_ascii_uppercase() {
+                c1 + 32
+            } else {
+                c1
+            };
+            let lc2 = if (c2 as u8).is_ascii_uppercase() {
+                c2 + 32
+            } else {
+                c2
+            };
+            if lc1 != lc2 {
+                return if lc1 < lc2 { -1 } else { 1 };
+            }
+            if c1 == 0 {
+                return 0;
+            }
+            p1 = p1.add(1);
+            p2 = p2.add(1);
+        }
+    }
+}
+
+/// lstrlenA — get length of ANSI string.
+///
+/// # Safety
+/// `lp_string` must be a valid null-terminated UTF-8 string.
+pub unsafe extern "win64" fn lstrlen_a(lp_string: *const u8) -> i32 {
+    unsafe { libc::strlen(lp_string as *const i8) as i32 }
+}
+
+/// lstrlenW — get length of wide string.
+///
+/// # Safety
+/// `lp_string` must be a valid null-terminated UTF-16 string.
+pub unsafe extern "win64" fn lstrlen_w(lp_string: *const u16) -> i32 {
+    unsafe {
+        let mut len = 0i32;
+        let mut p = lp_string;
+        while *p != 0 {
+            len += 1;
+            p = p.add(1);
+        }
+        len
+    }
+}
+
+/// lstrcpyA — copy ANSI string.
+///
+/// # Safety
+/// `lp_string1` must be writable for the length of `lp_string2` plus null terminator.
+/// `lp_string2` must be a valid null-terminated UTF-8 string.
+pub unsafe extern "win64" fn lstrcpy_a(lp_string1: *mut u8, lp_string2: *const u8) -> *mut u8 {
+    unsafe { libc::strcpy(lp_string1 as *mut i8, lp_string2 as *const i8) as *mut u8 };
+    lp_string1
+}
+
+/// lstrcpyW — copy wide string.
+///
+/// # Safety
+/// `lp_string1` must be writable for the length of `lp_string2` plus null terminator.
+/// `lp_string2` must be a valid null-terminated UTF-16 string.
+pub unsafe extern "win64" fn lstrcpy_w(lp_string1: *mut u16, lp_string2: *const u16) -> *mut u16 {
+    unsafe {
+        let mut dst = lp_string1;
+        let mut src = lp_string2;
+        loop {
+            let c = *src;
+            *dst = c;
+            if c == 0 {
+                break;
+            }
+            dst = dst.add(1);
+            src = src.add(1);
+        }
+    }
+    lp_string1
+}
+
+/// lstrcpynA — bounded copy of ANSI string.
+///
+/// # Safety
+/// `lp_string1` must be writable for at least `i_max_length` bytes.
+/// `lp_string2` must be a valid null-terminated UTF-8 string.
+pub unsafe extern "win64" fn lstrcpyn_a(
+    lp_string1: *mut u8,
+    lp_string2: *const u8,
+    i_max_length: i32,
+) -> *mut u8 {
+    unsafe {
+        libc::strncpy(
+            lp_string1 as *mut i8,
+            lp_string2 as *const i8,
+            i_max_length as usize,
+        ) as *mut u8
+    };
+    lp_string1
+}
+
+/// lstrcpynW — bounded copy of wide string.
+///
+/// # Safety
+/// `lp_string1` must be writable for at least `i_max_length` u16 words.
+/// `lp_string2` must be a valid null-terminated UTF-16 string.
+pub unsafe extern "win64" fn lstrcpyn_w(
+    lp_string1: *mut u16,
+    lp_string2: *const u16,
+    i_max_length: i32,
+) -> *mut u16 {
+    unsafe {
+        let mut dst = lp_string1;
+        let mut src = lp_string2;
+        let max_len = i_max_length as usize;
+        for _i in 0..max_len {
+            let c = *src;
+            *dst = c;
+            if c == 0 {
+                break;
+            }
+            dst = dst.add(1);
+            src = src.add(1);
+        }
+        // Ensure null termination
+        if max_len > 0 {
+            *lp_string1.add(max_len - 1) = 0;
+        }
+    }
+    lp_string1
+}
+
+// ── Directory path functions ──────────────────────────────────────────────────
+
+/// GetWindowsDirectoryW — write "C:\Windows" into buffer.
+///
+/// # Safety
+/// `lp_buffer` must be writable for `u_size` u16 words.
+pub unsafe extern "win64" fn get_windows_directory_w(lp_buffer: *mut u16, u_size: u32) -> u32 {
+    const PATH: &str = "C:\\Windows\0";
+    let wide_chars: Vec<u16> = PATH.encode_utf16().collect();
+    let len = wide_chars.len() - 1; // exclude null terminator
+
+    if u_size as usize <= len {
+        return len as u32; // required size
+    }
+
+    unsafe {
+        std::ptr::copy_nonoverlapping(wide_chars.as_ptr(), lp_buffer, wide_chars.len());
+    }
+    len as u32
+}
+
+/// GetWindowsDirectoryA — write "C:\Windows" into buffer.
+///
+/// # Safety
+/// `lp_buffer` must be writable for `u_size` bytes.
+pub unsafe extern "win64" fn get_windows_directory_a(lp_buffer: *mut u8, u_size: u32) -> u32 {
+    const PATH: &str = "C:\\Windows\0";
+    let bytes = PATH.as_bytes();
+    let len = bytes.len() - 1; // exclude null terminator
+
+    if u_size as usize <= len {
+        return len as u32; // required size
+    }
+
+    unsafe {
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), lp_buffer, bytes.len());
+    }
+    len as u32
+}
+
+/// GetSystemDirectoryW — write "C:\Windows\System32" into buffer.
+///
+/// # Safety
+/// `lp_buffer` must be writable for `u_size` u16 words.
+pub unsafe extern "win64" fn get_system_directory_w(lp_buffer: *mut u16, u_size: u32) -> u32 {
+    const PATH: &str = "C:\\Windows\\System32\0";
+    let wide_chars: Vec<u16> = PATH.encode_utf16().collect();
+    let len = wide_chars.len() - 1; // exclude null terminator
+
+    if u_size as usize <= len {
+        return len as u32; // required size
+    }
+
+    unsafe {
+        std::ptr::copy_nonoverlapping(wide_chars.as_ptr(), lp_buffer, wide_chars.len());
+    }
+    len as u32
+}
+
+/// GetSystemDirectoryA — write "C:\Windows\System32" into buffer.
+///
+/// # Safety
+/// `lp_buffer` must be writable for `u_size` bytes.
+pub unsafe extern "win64" fn get_system_directory_a(lp_buffer: *mut u8, u_size: u32) -> u32 {
+    const PATH: &str = "C:\\Windows\\System32\0";
+    let bytes = PATH.as_bytes();
+    let len = bytes.len() - 1; // exclude null terminator
+
+    if u_size as usize <= len {
+        return len as u32; // required size
+    }
+
+    unsafe {
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), lp_buffer, bytes.len());
+    }
+    len as u32
+}
+
+/// GetTempPathW — write "C:\Temp\" into buffer.
+///
+/// # Safety
+/// `lp_buffer` must be writable for `n_buffer_length` u16 words.
+pub unsafe extern "win64" fn get_temp_path_w(n_buffer_length: u32, lp_buffer: *mut u16) -> u32 {
+    const PATH: &str = "C:\\Temp\\\0";
+    let wide_chars: Vec<u16> = PATH.encode_utf16().collect();
+    let len = wide_chars.len() - 1; // exclude null terminator
+
+    if n_buffer_length as usize <= len {
+        return len as u32 + 1; // required size including null
+    }
+
+    unsafe {
+        std::ptr::copy_nonoverlapping(wide_chars.as_ptr(), lp_buffer, wide_chars.len());
+    }
+    len as u32
+}
+
+/// GetTempPathA — write "C:\Temp\" into buffer.
+///
+/// # Safety
+/// `lp_buffer` must be writable for `n_buffer_length` bytes.
+pub unsafe extern "win64" fn get_temp_path_a(n_buffer_length: u32, lp_buffer: *mut u8) -> u32 {
+    const PATH: &str = "C:\\Temp\\\0";
+    let bytes = PATH.as_bytes();
+    let len = bytes.len() - 1; // exclude null terminator
+
+    if n_buffer_length as usize <= len {
+        return len as u32 + 1; // required size including null
+    }
+
+    unsafe {
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), lp_buffer, bytes.len());
+    }
+    len as u32
+}
+
+/// GetCurrentDirectoryW — write "C:\" into buffer.
+///
+/// # Safety
+/// `lp_buffer` must be writable for `n_buffer_length` u16 words.
+pub unsafe extern "win64" fn get_current_directory_w(
+    n_buffer_length: u32,
+    lp_buffer: *mut u16,
+) -> u32 {
+    const PATH: &str = "C:\\\0";
+    let wide_chars: Vec<u16> = PATH.encode_utf16().collect();
+    let len = wide_chars.len() - 1; // exclude null terminator
+
+    if n_buffer_length as usize <= len {
+        return len as u32 + 1; // required size including null
+    }
+
+    unsafe {
+        std::ptr::copy_nonoverlapping(wide_chars.as_ptr(), lp_buffer, wide_chars.len());
+    }
+    len as u32
+}
+
+/// GetCurrentDirectoryA — write "C:\" into buffer.
+///
+/// # Safety
+/// `lp_buffer` must be writable for `n_buffer_length` bytes.
+pub unsafe extern "win64" fn get_current_directory_a(
+    n_buffer_length: u32,
+    lp_buffer: *mut u8,
+) -> u32 {
+    const PATH: &str = "C:\\\0";
+    let bytes = PATH.as_bytes();
+    let len = bytes.len() - 1; // exclude null terminator
+
+    if n_buffer_length as usize <= len {
+        return len as u32 + 1; // required size including null
+    }
+
+    unsafe {
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), lp_buffer, bytes.len());
+    }
+    len as u32
+}
+
+/// SetCurrentDirectoryW — no-op, returns TRUE.
+///
+/// # Safety
+/// Pointer argument is accepted but not dereferenced.
+pub unsafe extern "win64" fn set_current_directory_w(_lp_path_name: *const u16) -> i32 {
+    1 // TRUE
+}
+
+/// SetCurrentDirectoryA — no-op, returns TRUE.
+///
+/// # Safety
+/// Pointer argument is accepted but not dereferenced.
+pub unsafe extern "win64" fn set_current_directory_a(_lp_path_name: *const u8) -> i32 {
+    1 // TRUE
+}
+
+// ── Computer name and username ────────────────────────────────────────────────
+
+/// GetComputerNameW — write "WEAVE" into buffer.
+///
+/// # Safety
+/// `lp_buffer` must be writable for `lpn_size` u16 words.
+/// `lpn_size` must be a valid pointer to a u32.
+pub unsafe extern "win64" fn get_computer_name_w(lp_buffer: *mut u16, lpn_size: *mut u32) -> i32 {
+    const NAME: &str = "WEAVE\0";
+    let wide_chars: Vec<u16> = NAME.encode_utf16().collect();
+    let len = wide_chars.len() - 1; // exclude null terminator
+
+    if lp_buffer.is_null() || lpn_size.is_null() {
+        return 0; // FALSE
+    }
+
+    let buffer_size = unsafe { *lpn_size } as usize;
+    if buffer_size <= len {
+        unsafe { *lpn_size = len as u32 };
+        return 0; // FALSE - buffer too small
+    }
+
+    unsafe {
+        std::ptr::copy_nonoverlapping(wide_chars.as_ptr(), lp_buffer, wide_chars.len());
+        *lpn_size = len as u32;
+    }
+    1 // TRUE
+}
+
+/// GetComputerNameA — write "WEAVE" into buffer.
+///
+/// # Safety
+/// `lp_buffer` must be writable for `lpn_size` bytes.
+/// `lpn_size` must be a valid pointer to a u32.
+pub unsafe extern "win64" fn get_computer_name_a(lp_buffer: *mut u8, lpn_size: *mut u32) -> i32 {
+    const NAME: &str = "WEAVE\0";
+    let bytes = NAME.as_bytes();
+    let len = bytes.len() - 1; // exclude null terminator
+
+    if lp_buffer.is_null() || lpn_size.is_null() {
+        return 0; // FALSE
+    }
+
+    let buffer_size = unsafe { *lpn_size } as usize;
+    if buffer_size <= len {
+        unsafe { *lpn_size = len as u32 };
+        return 0; // FALSE - buffer too small
+    }
+
+    unsafe {
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), lp_buffer, bytes.len());
+        *lpn_size = len as u32;
+    }
+    1 // TRUE
+}
+
+/// GetUserNameW — write "WeavUser" into buffer.
+///
+/// # Safety
+/// `lp_buffer` must be writable for `pcb_buffer` u16 words.
+/// `pcb_buffer` must be a valid pointer to a u32.
+pub unsafe extern "win64" fn get_user_name_w(lp_buffer: *mut u16, pcb_buffer: *mut u32) -> i32 {
+    const NAME: &str = "WeavUser\0";
+    let wide_chars: Vec<u16> = NAME.encode_utf16().collect();
+    let len = wide_chars.len() - 1; // exclude null terminator
+
+    if lp_buffer.is_null() || pcb_buffer.is_null() {
+        return 0; // FALSE
+    }
+
+    let buffer_size = unsafe { *pcb_buffer } as usize;
+    if buffer_size <= len {
+        unsafe { *pcb_buffer = len as u32 };
+        return 0; // FALSE - buffer too small
+    }
+
+    unsafe {
+        std::ptr::copy_nonoverlapping(wide_chars.as_ptr(), lp_buffer, wide_chars.len());
+        *pcb_buffer = len as u32;
+    }
+    1 // TRUE
+}
+
+/// GetUserNameA — write "WeavUser" into buffer.
+///
+/// # Safety
+/// `lp_buffer` must be writable for `pcb_buffer` bytes.
+/// `pcb_buffer` must be a valid pointer to a u32.
+pub unsafe extern "win64" fn get_user_name_a(lp_buffer: *mut u8, pcb_buffer: *mut u32) -> i32 {
+    const NAME: &str = "WeavUser\0";
+    let bytes = NAME.as_bytes();
+    let len = bytes.len() - 1; // exclude null terminator
+
+    if lp_buffer.is_null() || pcb_buffer.is_null() {
+        return 0; // FALSE
+    }
+
+    let buffer_size = unsafe { *pcb_buffer } as usize;
+    if buffer_size <= len {
+        unsafe { *pcb_buffer = len as u32 };
+        return 0; // FALSE - buffer too small
+    }
+
+    unsafe {
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), lp_buffer, bytes.len());
+        *pcb_buffer = len as u32;
+    }
+    1 // TRUE
+}
+
+// ── File attribute functions ──────────────────────────────────────────────────
+
+/// GetFileAttributesW — check if file/directory exists and return attributes.
+///
+/// Translates Win32 path to Linux path and uses libc::stat to check existence.
+/// Returns FILE_ATTRIBUTE_NORMAL for files, FILE_ATTRIBUTE_DIRECTORY for directories,
+/// or INVALID_FILE_ATTRIBUTES if not found or stat fails.
+///
+/// # Safety
+/// `lp_file_name` must be a valid null-terminated UTF-16 string.
+pub unsafe extern "win64" fn get_file_attributes_w(lp_file_name: *const u16) -> u32 {
+    const INVALID_FILE_ATTRIBUTES: u32 = 0xFFFFFFFF;
+    const FILE_ATTRIBUTE_NORMAL: u32 = 0x80;
+    const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
+
+    if lp_file_name.is_null() {
+        return INVALID_FILE_ATTRIBUTES;
+    }
+
+    // Decode UTF-16 filename
+    let mut len = 0usize;
+    while len < MAX_UTF16_LEN && unsafe { *lp_file_name.add(len) } != 0 {
+        len += 1;
+    }
+    if len == MAX_UTF16_LEN {
+        return INVALID_FILE_ATTRIBUTES;
+    }
+    let win_path =
+        unsafe { String::from_utf16_lossy(std::slice::from_raw_parts(lp_file_name, len)) };
+
+    // Translate to Linux path
+    let linux_path = match weave_core::prefix::translator().to_linux_str(&win_path) {
+        Ok(p) => p,
+        Err(_) => return INVALID_FILE_ATTRIBUTES,
+    };
+
+    // Check if path exists and get type
+    let c_path = match std::ffi::CString::new(linux_path.as_os_str().as_encoded_bytes()) {
+        Ok(s) => s,
+        Err(_) => return INVALID_FILE_ATTRIBUTES,
+    };
+
+    let mut stat = unsafe { std::mem::zeroed::<libc::stat>() };
+    let ret = unsafe { libc::stat(c_path.as_ptr(), &mut stat) };
+    if ret != 0 {
+        return INVALID_FILE_ATTRIBUTES;
+    }
+
+    // Check if it's a directory
+    if (stat.st_mode & libc::S_IFMT) == libc::S_IFDIR {
+        FILE_ATTRIBUTE_DIRECTORY
+    } else {
+        FILE_ATTRIBUTE_NORMAL
+    }
+}
+
+/// GetFileAttributesA — check if file/directory exists and return attributes.
+///
+/// Same as GetFileAttributesW but accepts ANSI string.
+///
+/// # Safety
+/// `lp_file_name` must be a valid null-terminated UTF-8 string.
+pub unsafe extern "win64" fn get_file_attributes_a(lp_file_name: *const u8) -> u32 {
+    const INVALID_FILE_ATTRIBUTES: u32 = 0xFFFFFFFF;
+    const FILE_ATTRIBUTE_NORMAL: u32 = 0x80;
+    const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
+
+    if lp_file_name.is_null() {
+        return INVALID_FILE_ATTRIBUTES;
+    }
+
+    // Decode UTF-8 filename
+    let mut len = 0usize;
+    while len < MAX_UTF8_LEN && unsafe { *lp_file_name.add(len) } != 0 {
+        len += 1;
+    }
+    if len == MAX_UTF8_LEN {
+        return INVALID_FILE_ATTRIBUTES;
+    }
+    let win_path =
+        unsafe { String::from_utf8_lossy(std::slice::from_raw_parts(lp_file_name, len)) };
+
+    // Translate to Linux path
+    let linux_path = match weave_core::prefix::translator().to_linux_str(&win_path) {
+        Ok(p) => p,
+        Err(_) => return INVALID_FILE_ATTRIBUTES,
+    };
+
+    // Check if path exists and get type
+    let c_path = match std::ffi::CString::new(linux_path.as_os_str().as_encoded_bytes()) {
+        Ok(s) => s,
+        Err(_) => return INVALID_FILE_ATTRIBUTES,
+    };
+
+    let mut stat = unsafe { std::mem::zeroed::<libc::stat>() };
+    let ret = unsafe { libc::stat(c_path.as_ptr(), &mut stat) };
+    if ret != 0 {
+        return INVALID_FILE_ATTRIBUTES;
+    }
+
+    // Check if it's a directory
+    if (stat.st_mode & libc::S_IFMT) == libc::S_IFDIR {
+        FILE_ATTRIBUTE_DIRECTORY
+    } else {
+        FILE_ATTRIBUTE_NORMAL
+    }
+}
+
+/// SetFileAttributesW — no-op, returns TRUE.
+///
+/// We don't track Win32 file attributes separately from Linux permissions.
+///
+/// # Safety
+/// Pointer argument is accepted but not dereferenced.
+pub unsafe extern "win64" fn set_file_attributes_w(
+    _lp_file_name: *const u16,
+    _dw_file_attributes: u32,
+) -> i32 {
+    1 // TRUE
+}
+
+/// SetFileAttributesA — no-op, returns TRUE.
+///
+/// We don't track Win32 file attributes separately from Linux permissions.
+///
+/// # Safety
+/// Pointer argument is accepted but not dereferenced.
+pub unsafe extern "win64" fn set_file_attributes_a(
+    _lp_file_name: *const u8,
+    _dw_file_attributes: u32,
+) -> i32 {
+    1 // TRUE
+}
+
 // ── Resolver ──────────────────────────────────────────────────────────────────
 
 /// Resolve a kernel32.dll import to a stub address.
@@ -1986,6 +2603,9 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         ),
         "GetModuleFileNameW" => Some(
             get_module_file_name_w as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
+        ),
+        "GetModuleFileNameA" => Some(
+            get_module_file_name_a as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
         ),
         // Process / thread identity
         "GetCurrentProcess" => Some(get_current_process as *const () as usize),
@@ -2179,6 +2799,88 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "UnhandledExceptionFilter" => Some(
             unhandled_exception_filter as unsafe extern "win64" fn(_) -> _ as *const () as usize,
         ),
+        // lstr* string functions
+        "lstrcmpA" | "lstrcmp" => {
+            Some(lstrcmp_a as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "lstrcmpW" => Some(lstrcmp_w as unsafe extern "win64" fn(_, _) -> _ as *const () as usize),
+        "lstrcmpiA" | "lstrcmpi" => {
+            Some(lstrcmpi_a as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "lstrcmpiW" => {
+            Some(lstrcmpi_w as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "lstrlenA" | "lstrlen" => {
+            Some(lstrlen_a as unsafe extern "win64" fn(_) -> _ as *const () as usize)
+        }
+        "lstrlenW" => Some(lstrlen_w as unsafe extern "win64" fn(_) -> _ as *const () as usize),
+        "lstrcpyA" | "lstrcpy" => {
+            Some(lstrcpy_a as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "lstrcpyW" => Some(lstrcpy_w as unsafe extern "win64" fn(_, _) -> _ as *const () as usize),
+        "lstrcpynA" | "lstrcpyn" => {
+            Some(lstrcpyn_a as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize)
+        }
+        "lstrcpynW" => {
+            Some(lstrcpyn_w as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize)
+        }
+        // Directory path functions
+        "GetWindowsDirectoryW" => Some(
+            get_windows_directory_w as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
+        ),
+        "GetWindowsDirectoryA" => Some(
+            get_windows_directory_a as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
+        ),
+        "GetSystemDirectoryW" => Some(
+            get_system_directory_w as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
+        ),
+        "GetSystemDirectoryA" => Some(
+            get_system_directory_a as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
+        ),
+        "GetTempPathW" => {
+            Some(get_temp_path_w as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "GetTempPathA" => {
+            Some(get_temp_path_a as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "GetCurrentDirectoryW" => Some(
+            get_current_directory_w as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
+        ),
+        "GetCurrentDirectoryA" => Some(
+            get_current_directory_a as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
+        ),
+        "SetCurrentDirectoryW" => {
+            Some(set_current_directory_w as unsafe extern "win64" fn(_) -> _ as *const () as usize)
+        }
+        "SetCurrentDirectoryA" => {
+            Some(set_current_directory_a as unsafe extern "win64" fn(_) -> _ as *const () as usize)
+        }
+        // Computer name and username
+        "GetComputerNameW" => {
+            Some(get_computer_name_w as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "GetComputerNameA" => {
+            Some(get_computer_name_a as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "GetUserNameW" => {
+            Some(get_user_name_w as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "GetUserNameA" => {
+            Some(get_user_name_a as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        // File attribute functions
+        "GetFileAttributesW" => {
+            Some(get_file_attributes_w as unsafe extern "win64" fn(_) -> _ as *const () as usize)
+        }
+        "GetFileAttributesA" => {
+            Some(get_file_attributes_a as unsafe extern "win64" fn(_) -> _ as *const () as usize)
+        }
+        "SetFileAttributesW" => {
+            Some(set_file_attributes_w as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "SetFileAttributesA" => {
+            Some(set_file_attributes_a as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
         _ => None,
     }
 }
