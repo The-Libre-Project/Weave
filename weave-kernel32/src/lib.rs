@@ -2503,6 +2503,501 @@ pub unsafe extern "win64" fn get_file_attributes_a(lp_file_name: *const u8) -> u
     }
 }
 
+/// GetFullPathNameW: resolve relative paths to absolute paths.
+///
+/// # Safety
+/// `lp_file_name` must be a valid null-terminated UTF-16 string.
+/// `lp_buffer` must be writable for `n_buffer_length` u16 words.
+/// `lp_file_part` must be a valid writable pointer or NULL.
+pub unsafe extern "win64" fn get_full_path_name_w(
+    lp_file_name: *const u16,
+    n_buffer_length: u32,
+    lp_buffer: *mut u16,
+    lp_file_part: *mut *mut u16,
+) -> u32 {
+    if lp_file_name.is_null() {
+        return 0;
+    }
+
+    // Read the null-terminated UTF-16 filename
+    let mut len = 0usize;
+    while len < MAX_UTF16_LEN && unsafe { *lp_file_name.add(len) } != 0 {
+        len += 1;
+    }
+    if len == MAX_UTF16_LEN {
+        return 0;
+    }
+    let slice = unsafe { std::slice::from_raw_parts(lp_file_name, len) };
+    let win_path = String::from_utf16_lossy(slice);
+
+    // Check if path already starts with drive letter (X: where X is ASCII alpha)
+    let resolved_path =
+        if len >= 2 && (slice[0] as u8).is_ascii_alphabetic() && slice[1] == b':' as u16 {
+            win_path
+        } else {
+            format!("C:\\{}", win_path)
+        };
+
+    // Convert back to UTF-16 with null terminator
+    let wide_path: Vec<u16> = resolved_path
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    let required_chars = wide_path.len();
+
+    // Size query
+    if n_buffer_length == 0 {
+        return (required_chars - 1) as u32; // exclude null terminator
+    }
+
+    // Copy to buffer if it fits
+    if n_buffer_length as usize >= required_chars {
+        unsafe {
+            std::ptr::copy_nonoverlapping(wide_path.as_ptr(), lp_buffer, required_chars);
+        }
+
+        // Set lp_file_part to point at the last path component (after last \)
+        if !lp_file_part.is_null() {
+            let path_str = &resolved_path;
+            if let Some(last_backslash) = path_str.rfind('\\') {
+                let file_part_offset = last_backslash + 1;
+                unsafe {
+                    *lp_file_part = lp_buffer.add(file_part_offset);
+                }
+            } else {
+                unsafe {
+                    *lp_file_part = lp_buffer;
+                }
+            }
+        }
+
+        (required_chars - 1) as u32 // return chars written (excluding null)
+    } else {
+        0 // error: buffer too small
+    }
+}
+
+/// GetFullPathNameA: resolve relative paths to absolute paths (ANSI version).
+///
+/// # Safety
+/// `lp_file_name` must be a valid null-terminated UTF-8 string.
+/// `lp_buffer` must be writable for `n_buffer_length` bytes.
+/// `lp_file_part` must be a valid writable pointer or NULL.
+pub unsafe extern "win64" fn get_full_path_name_a(
+    lp_file_name: *const u8,
+    n_buffer_length: u32,
+    lp_buffer: *mut u8,
+    lp_file_part: *mut *mut u8,
+) -> u32 {
+    if lp_file_name.is_null() {
+        return 0;
+    }
+
+    // Read the null-terminated UTF-8 filename
+    let win_path = unsafe {
+        let mut len = 0usize;
+        while len < MAX_UTF8_LEN && *lp_file_name.add(len) != 0 {
+            len += 1;
+        }
+        if len == MAX_UTF8_LEN {
+            return 0;
+        }
+        let slice = std::slice::from_raw_parts(lp_file_name, len);
+        String::from_utf8_lossy(slice).into_owned()
+    };
+
+    // Check if path already starts with drive letter (X: where X is ASCII alpha)
+    let resolved_path = if win_path.len() >= 2
+        && win_path.as_bytes()[0].is_ascii_alphabetic()
+        && win_path.as_bytes()[1] == b':'
+    {
+        win_path
+    } else {
+        format!("C:\\{}", win_path)
+    };
+
+    // Convert to bytes with null terminator
+    let bytes = resolved_path.as_bytes();
+    let required_bytes = bytes.len() + 1;
+
+    // Size query
+    if n_buffer_length == 0 {
+        return (required_bytes - 1) as u32; // exclude null terminator
+    }
+
+    // Copy to buffer if it fits
+    if n_buffer_length as usize >= required_bytes {
+        unsafe {
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), lp_buffer, bytes.len());
+            *lp_buffer.add(bytes.len()) = 0; // null terminator
+        }
+
+        // Set lp_file_part to point at the last path component (after last \)
+        if !lp_file_part.is_null() {
+            let path_str = &resolved_path;
+            if let Some(last_backslash) = path_str.rfind('\\') {
+                let file_part_offset = last_backslash + 1;
+                unsafe {
+                    *lp_file_part = lp_buffer.add(file_part_offset);
+                }
+            } else {
+                unsafe {
+                    *lp_file_part = lp_buffer;
+                }
+            }
+        }
+
+        (required_bytes - 1) as u32 // return bytes written (excluding null)
+    } else {
+        0 // error: buffer too small
+    }
+}
+
+/// MoveFileW: move/rename a file (wide string version).
+///
+/// # Safety
+/// `lp_existing_file_name` and `lp_new_file_name` must be valid null-terminated UTF-16 strings.
+pub unsafe extern "win64" fn move_file_w(
+    lp_existing_file_name: *const u16,
+    lp_new_file_name: *const u16,
+) -> i32 {
+    if lp_existing_file_name.is_null() || lp_new_file_name.is_null() {
+        return 0; // FALSE
+    }
+
+    // Read existing filename
+    let mut len1 = 0usize;
+    while len1 < MAX_UTF16_LEN && unsafe { *lp_existing_file_name.add(len1) } != 0 {
+        len1 += 1;
+    }
+    if len1 == MAX_UTF16_LEN {
+        return 0;
+    }
+    let old_path = unsafe {
+        String::from_utf16_lossy(std::slice::from_raw_parts(lp_existing_file_name, len1))
+    };
+
+    // Read new filename
+    let mut len2 = 0usize;
+    while len2 < MAX_UTF16_LEN && unsafe { *lp_new_file_name.add(len2) } != 0 {
+        len2 += 1;
+    }
+    if len2 == MAX_UTF16_LEN {
+        return 0;
+    }
+    let new_path =
+        unsafe { String::from_utf16_lossy(std::slice::from_raw_parts(lp_new_file_name, len2)) };
+
+    // Translate both paths
+    let linux_old = match weave_core::prefix::translator().to_linux_str(&old_path) {
+        Ok(p) => p,
+        Err(_) => return 0,
+    };
+    let linux_new = match weave_core::prefix::translator().to_linux_str(&new_path) {
+        Ok(p) => p,
+        Err(_) => return 0,
+    };
+
+    // Convert to C strings
+    let c_old = match std::ffi::CString::new(linux_old.as_os_str().as_encoded_bytes()) {
+        Ok(s) => s,
+        Err(_) => return 0,
+    };
+    let c_new = match std::ffi::CString::new(linux_new.as_os_str().as_encoded_bytes()) {
+        Ok(s) => s,
+        Err(_) => return 0,
+    };
+
+    // Call rename
+    let ret = unsafe { libc::rename(c_old.as_ptr(), c_new.as_ptr()) };
+    (ret == 0) as i32
+}
+
+/// MoveFileA: move/rename a file (ANSI version).
+///
+/// # Safety
+/// `lp_existing_file_name` and `lp_new_file_name` must be valid null-terminated UTF-8 strings.
+pub unsafe extern "win64" fn move_file_a(
+    lp_existing_file_name: *const u8,
+    lp_new_file_name: *const u8,
+) -> i32 {
+    if lp_existing_file_name.is_null() || lp_new_file_name.is_null() {
+        return 0; // FALSE
+    }
+
+    // Read existing filename
+    let mut len1 = 0usize;
+    while len1 < MAX_UTF8_LEN && unsafe { *lp_existing_file_name.add(len1) } != 0 {
+        len1 += 1;
+    }
+    if len1 == MAX_UTF8_LEN {
+        return 0;
+    }
+    let old_path =
+        unsafe { String::from_utf8_lossy(std::slice::from_raw_parts(lp_existing_file_name, len1)) };
+
+    // Read new filename
+    let mut len2 = 0usize;
+    while len2 < MAX_UTF8_LEN && unsafe { *lp_new_file_name.add(len2) } != 0 {
+        len2 += 1;
+    }
+    if len2 == MAX_UTF8_LEN {
+        return 0;
+    }
+    let new_path =
+        unsafe { String::from_utf8_lossy(std::slice::from_raw_parts(lp_new_file_name, len2)) };
+
+    // Translate both paths
+    let linux_old = match weave_core::prefix::translator().to_linux_str(&old_path) {
+        Ok(p) => p,
+        Err(_) => return 0,
+    };
+    let linux_new = match weave_core::prefix::translator().to_linux_str(&new_path) {
+        Ok(p) => p,
+        Err(_) => return 0,
+    };
+
+    // Convert to C strings
+    let c_old = match std::ffi::CString::new(linux_old.as_os_str().as_encoded_bytes()) {
+        Ok(s) => s,
+        Err(_) => return 0,
+    };
+    let c_new = match std::ffi::CString::new(linux_new.as_os_str().as_encoded_bytes()) {
+        Ok(s) => s,
+        Err(_) => return 0,
+    };
+
+    // Call rename
+    let ret = unsafe { libc::rename(c_old.as_ptr(), c_new.as_ptr()) };
+    (ret == 0) as i32
+}
+
+/// RemoveDirectoryW: remove a directory (wide string version).
+///
+/// # Safety
+/// `lp_path_name` must be a valid null-terminated UTF-16 string.
+pub unsafe extern "win64" fn remove_directory_w(lp_path_name: *const u16) -> i32 {
+    if lp_path_name.is_null() {
+        return 0; // FALSE
+    }
+
+    // Read path
+    let mut len = 0usize;
+    while len < MAX_UTF16_LEN && unsafe { *lp_path_name.add(len) } != 0 {
+        len += 1;
+    }
+    if len == MAX_UTF16_LEN {
+        return 0;
+    }
+    let win_path =
+        unsafe { String::from_utf16_lossy(std::slice::from_raw_parts(lp_path_name, len)) };
+
+    // Translate path
+    let linux_path = match weave_core::prefix::translator().to_linux_str(&win_path) {
+        Ok(p) => p,
+        Err(_) => return 0,
+    };
+
+    // Convert to C string
+    let c_path = match std::ffi::CString::new(linux_path.as_os_str().as_encoded_bytes()) {
+        Ok(s) => s,
+        Err(_) => return 0,
+    };
+
+    // Call rmdir
+    let ret = unsafe { libc::rmdir(c_path.as_ptr()) };
+    (ret == 0) as i32
+}
+
+/// RemoveDirectoryA: remove a directory (ANSI version).
+///
+/// # Safety
+/// `lp_path_name` must be a valid null-terminated UTF-8 string.
+pub unsafe extern "win64" fn remove_directory_a(lp_path_name: *const u8) -> i32 {
+    if lp_path_name.is_null() {
+        return 0; // FALSE
+    }
+
+    // Read path
+    let mut len = 0usize;
+    while len < MAX_UTF8_LEN && unsafe { *lp_path_name.add(len) } != 0 {
+        len += 1;
+    }
+    if len == MAX_UTF8_LEN {
+        return 0;
+    }
+    let win_path =
+        unsafe { String::from_utf8_lossy(std::slice::from_raw_parts(lp_path_name, len)) };
+
+    // Translate path
+    let linux_path = match weave_core::prefix::translator().to_linux_str(&win_path) {
+        Ok(p) => p,
+        Err(_) => return 0,
+    };
+
+    // Convert to C string
+    let c_path = match std::ffi::CString::new(linux_path.as_os_str().as_encoded_bytes()) {
+        Ok(s) => s,
+        Err(_) => return 0,
+    };
+
+    // Call rmdir
+    let ret = unsafe { libc::rmdir(c_path.as_ptr()) };
+    (ret == 0) as i32
+}
+
+/// CreateDirectoryA: create a directory (ANSI version).
+///
+/// # Safety
+/// `lp_path_name` must be a valid null-terminated UTF-8 string.
+/// `lp_security_attributes` is ignored.
+pub unsafe extern "win64" fn create_directory_a(
+    lp_path_name: *const u8,
+    _lp_security_attributes: usize,
+) -> i32 {
+    if lp_path_name.is_null() {
+        return 0; // FALSE
+    }
+
+    // Read path
+    let mut len = 0usize;
+    while len < MAX_UTF8_LEN && unsafe { *lp_path_name.add(len) } != 0 {
+        len += 1;
+    }
+    if len == MAX_UTF8_LEN {
+        return 0;
+    }
+    let win_path =
+        unsafe { String::from_utf8_lossy(std::slice::from_raw_parts(lp_path_name, len)) };
+
+    // Translate path
+    let linux_path = match weave_core::prefix::translator().to_linux_str(&win_path) {
+        Ok(p) => p,
+        Err(_) => return 0,
+    };
+
+    // Convert to C string
+    let c_path = match std::ffi::CString::new(linux_path.as_os_str().as_encoded_bytes()) {
+        Ok(s) => s,
+        Err(_) => return 0,
+    };
+
+    // Call mkdir with 0o755 permissions
+    let ret = unsafe { libc::mkdir(c_path.as_ptr(), 0o755) };
+    (ret == 0) as i32
+}
+
+/// GetLogicalDrives: return bitmask of available drives.
+///
+/// Returns 0x00000004 (bit 2 set) indicating drive C: exists.
+pub extern "win64" fn get_logical_drives() -> u32 {
+    0x00000004 // bit 2 = drive C:
+}
+
+/// GetDriveTypeW: determine the type of drive (wide string version).
+///
+/// # Safety
+/// `lp_root_path_name` must be a valid null-terminated UTF-16 string.
+pub unsafe extern "win64" fn get_drive_type_w(lp_root_path_name: *const u16) -> u32 {
+    const DRIVE_UNKNOWN: u32 = 0;
+    const DRIVE_FIXED: u32 = 3;
+
+    if lp_root_path_name.is_null() {
+        return DRIVE_UNKNOWN;
+    }
+
+    // Read the path and check if it starts with 'C' (u16 value 67)
+    let first_char = unsafe { *lp_root_path_name };
+    if first_char == 67 {
+        // 'C' as u16
+        DRIVE_FIXED
+    } else {
+        DRIVE_UNKNOWN
+    }
+}
+
+/// GetDriveTypeA: determine the type of drive (ANSI version).
+///
+/// # Safety
+/// `lp_root_path_name` must be a valid null-terminated UTF-8 string.
+pub unsafe extern "win64" fn get_drive_type_a(lp_root_path_name: *const u8) -> u32 {
+    const DRIVE_UNKNOWN: u32 = 0;
+    const DRIVE_FIXED: u32 = 3;
+
+    if lp_root_path_name.is_null() {
+        return DRIVE_UNKNOWN;
+    }
+
+    // Check if first byte is 'C'
+    let first_byte = unsafe { *lp_root_path_name };
+    if first_byte == b'C' {
+        DRIVE_FIXED
+    } else {
+        DRIVE_UNKNOWN
+    }
+}
+
+/// GetDiskFreeSpaceExW: get disk space information for drive C:.
+///
+/// # Safety
+/// `lp_directory_name` is ignored.
+/// `lp_free_bytes_available_to_caller`, `lp_total_number_of_bytes`,
+/// `lp_total_number_of_free_bytes` must be valid pointers or NULL.
+pub unsafe extern "win64" fn get_disk_free_space_ex_w(
+    _lp_directory_name: *const u16,
+    lp_free_bytes_available_to_caller: *mut u64,
+    lp_total_number_of_bytes: *mut u64,
+    lp_total_number_of_free_bytes: *mut u64,
+) -> i32 {
+    // Write fake values: 100GB free/available, 500GB total
+    if !lp_free_bytes_available_to_caller.is_null() {
+        unsafe { *lp_free_bytes_available_to_caller = 100 * 1024 * 1024 * 1024u64 };
+    }
+    if !lp_total_number_of_bytes.is_null() {
+        unsafe { *lp_total_number_of_bytes = 500 * 1024 * 1024 * 1024u64 };
+    }
+    if !lp_total_number_of_free_bytes.is_null() {
+        unsafe { *lp_total_number_of_free_bytes = 100 * 1024 * 1024 * 1024u64 };
+    }
+    1 // TRUE
+}
+
+/// GetExitCodeProcess: get the exit code of a process.
+///
+/// # Safety
+/// `lp_exit_code` must be a valid writable pointer or NULL.
+pub unsafe extern "win64" fn get_exit_code_process(
+    _h_process: usize,
+    lp_exit_code: *mut u32,
+) -> i32 {
+    // Write STILL_ACTIVE (259) to indicate process is still running
+    if !lp_exit_code.is_null() {
+        unsafe { *lp_exit_code = 259 };
+    }
+    1 // TRUE
+}
+
+/// GetExitCodeThread: get the exit code of a thread.
+///
+/// # Safety
+/// `lp_exit_code` must be a valid writable pointer or NULL.
+pub unsafe extern "win64" fn get_exit_code_thread(_h_thread: usize, lp_exit_code: *mut u32) -> i32 {
+    // Write STILL_ACTIVE (259) to indicate thread is still running
+    if !lp_exit_code.is_null() {
+        unsafe { *lp_exit_code = 259 };
+    }
+    1 // TRUE
+}
+
+/// TerminateThread: terminate a thread (no-op stub).
+///
+/// # Safety
+/// `h_thread` is accepted but not dereferenced.
+pub unsafe extern "win64" fn terminate_thread(_h_thread: usize, _dw_exit_code: u32) -> i32 {
+    // No-op: thread termination not supported in Phase 1
+    1 // TRUE
+}
+
 /// SetFileAttributesW — no-op, returns TRUE.
 ///
 /// We don't track Win32 file attributes separately from Linux permissions.
@@ -3787,6 +4282,47 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "FreeEnvironmentStringsA" => Some(
             free_environment_strings_a as unsafe extern "win64" fn(_) -> _ as *const () as usize,
         ),
+        "GetFullPathNameW" => Some(
+            get_full_path_name_w as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
+        ),
+        "GetFullPathNameA" => Some(
+            get_full_path_name_a as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
+        ),
+        "MoveFileW" => {
+            Some(move_file_w as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "MoveFileA" => {
+            Some(move_file_a as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "RemoveDirectoryW" => {
+            Some(remove_directory_w as unsafe extern "win64" fn(_) -> _ as *const () as usize)
+        }
+        "RemoveDirectoryA" => {
+            Some(remove_directory_a as unsafe extern "win64" fn(_) -> _ as *const () as usize)
+        }
+        "CreateDirectoryA" => {
+            Some(create_directory_a as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "GetLogicalDrives" => Some(get_logical_drives as *const () as usize),
+        "GetDriveTypeW" => {
+            Some(get_drive_type_w as unsafe extern "win64" fn(_) -> _ as *const () as usize)
+        }
+        "GetDriveTypeA" => {
+            Some(get_drive_type_a as unsafe extern "win64" fn(_) -> _ as *const () as usize)
+        }
+        "GetDiskFreeSpaceExW" => Some(
+            get_disk_free_space_ex_w as unsafe extern "win64" fn(_, _, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "GetExitCodeProcess" => {
+            Some(get_exit_code_process as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "GetExitCodeThread" => {
+            Some(get_exit_code_thread as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "TerminateThread" => {
+            Some(terminate_thread as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
         // Locale functions
         "GetUserDefaultLCID" => Some(get_user_default_lcid as *const () as usize),
         "GetSystemDefaultLCID" => Some(get_system_default_lcid as *const () as usize),

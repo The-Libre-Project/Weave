@@ -630,6 +630,67 @@ pub unsafe extern "win64" fn nt_query_information_thread(
     0xC0000002 // STATUS_NOT_IMPLEMENTED
 }
 
+/// RtlCompareUnicodeString: compare two Unicode strings.
+///
+/// # Safety
+/// `string1` and `string2` must be valid pointers to UnicodeString structs.
+/// Their buffer pointers must be valid for their respective lengths.
+pub unsafe extern "win64" fn rtl_compare_unicode_string(
+    string1: *const UnicodeString,
+    string2: *const UnicodeString,
+    case_insensitive: u8,
+) -> i32 {
+    unsafe {
+        let s1 = &*string1;
+        let s2 = &*string2;
+
+        let len1 = (s1.length / 2) as usize;
+        let len2 = (s2.length / 2) as usize;
+        let min_len = len1.min(len2);
+
+        // Compare char-by-char for min length
+        for i in 0..min_len {
+            let mut c1 = *s1.buffer.add(i);
+            let mut c2 = *s2.buffer.add(i);
+
+            if case_insensitive != 0 {
+                if (c1 as u8).is_ascii_uppercase() {
+                    c1 += 32; // convert to lowercase
+                }
+                if (c2 as u8).is_ascii_uppercase() {
+                    c2 += 32; // convert to lowercase
+                }
+            }
+
+            if c1 != c2 {
+                return (c1 as i32) - (c2 as i32);
+            }
+        }
+
+        // If all compared chars are equal, return length difference
+        (s1.length as i32) - (s2.length as i32)
+    }
+}
+
+/// NtYieldExecution: yield the processor to another thread.
+pub extern "win64" fn nt_yield_execution() -> u32 {
+    unsafe { libc::sched_yield() };
+    0 // STATUS_SUCCESS
+}
+
+/// NtSetInformationThread: set thread information (stub).
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn nt_set_information_thread(
+    _thread_handle: usize,
+    _thread_information_class: u32,
+    _thread_information: *mut std::ffi::c_void,
+    _thread_information_length: u32,
+) -> u32 {
+    0xC0000002 // STATUS_NOT_IMPLEMENTED
+}
+
 // ── Resolver ──────────────────────────────────────────────────────────────────
 
 pub fn resolve(func: &str) -> Option<usize> {
@@ -702,6 +763,15 @@ pub fn resolve(func: &str) -> Option<usize> {
         ),
         "NtQueryInformationThread" => Some(
             nt_query_information_thread as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "RtlCompareUnicodeString" => Some(
+            rtl_compare_unicode_string as unsafe extern "win64" fn(_, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "NtYieldExecution" => Some(nt_yield_execution as *const () as usize),
+        "NtSetInformationThread" => Some(
+            nt_set_information_thread as unsafe extern "win64" fn(_, _, _, _) -> _ as *const ()
                 as usize,
         ),
         _ => None,
