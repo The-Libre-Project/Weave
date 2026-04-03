@@ -7,10 +7,10 @@ use std::fmt;
 pub enum D3d12Error {
     Ok = 0,
     False = 1,
-    InvalidArg = 0x80070057,
-    OutOfMemory = 0x8007000E,
-    NotSupported = 0x80004002,
-    Fail = 0x80004005,
+    InvalidArg = 0x80070057u32 as isize,
+    OutOfMemory = 0x8007000Eu32 as isize,
+    NotSupported = 0x80004002u32 as isize,
+    Fail = 0x80004005u32 as isize,
 }
 
 impl fmt::Display for D3d12Error {
