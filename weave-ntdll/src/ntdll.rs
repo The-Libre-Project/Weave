@@ -20,6 +20,15 @@ pub struct UnicodeString {
     buffer: *const u16, // UTF-16 data
 }
 
+/// Windows ANSI_STRING — a narrow string with explicit length fields.
+#[repr(C)]
+pub struct AnsiString {
+    length: u16,         // byte length, NOT including null terminator
+    maximum_length: u16, // byte capacity of the buffer
+    _pad: u32,
+    buffer: *mut u8,
+}
+
 impl UnicodeString {
     /// Decode the buffer to a Rust `String`. Returns `None` if the pointer is null.
     ///
@@ -363,6 +372,116 @@ pub extern "win64" fn rtl_nt_status_to_dos_error(status: u32) -> u32 {
     }
 }
 
+// ── RTL string functions ─────────────────────────────────────────────────────
+
+/// RtlInitAnsiString: initialize an ANSI_STRING from a null-terminated C string.
+///
+/// # Safety
+/// `destination_string` must be a valid writable pointer to an AnsiString.
+/// `source_string` must be a valid null-terminated UTF-8 string or NULL.
+pub unsafe extern "win64" fn rtl_init_ansi_string(
+    destination_string: *mut AnsiString,
+    source_string: *const u8,
+) {
+    unsafe {
+        if source_string.is_null() {
+            (*destination_string).length = 0;
+            (*destination_string).maximum_length = 0;
+            (*destination_string).buffer = std::ptr::null_mut();
+            return;
+        }
+        let len = libc::strlen(source_string as *const i8) as u16;
+        (*destination_string).length = len;
+        (*destination_string).maximum_length = len + 1;
+        (*destination_string).buffer = source_string as *mut u8;
+    }
+}
+
+/// RtlCopyUnicodeString: copy a Unicode string with length limits.
+///
+/// # Safety
+/// `destination_string` and `source_string` must be valid pointers.
+/// `destination_string.buffer` must have capacity for the copy operation.
+pub unsafe extern "win64" fn rtl_copy_unicode_string(
+    destination_string: *mut UnicodeString,
+    source_string: *const UnicodeString,
+) {
+    unsafe {
+        if source_string.is_null() {
+            (*destination_string).length = 0;
+            return;
+        }
+        let src = &*source_string;
+        let dst = &mut *destination_string;
+        let copy_len = (src.length as usize).min(dst.maximum_length as usize);
+        if copy_len > 0 {
+            libc::memcpy(
+                dst.buffer as *mut libc::c_void,
+                src.buffer as *const libc::c_void,
+                copy_len,
+            );
+        }
+        dst.length = copy_len as u16;
+    }
+}
+
+/// RtlEqualUnicodeString: compare two Unicode strings.
+///
+/// # Safety
+/// `string1` and `string2` must be valid pointers to UnicodeString structs.
+/// Their buffer pointers must be valid for their respective lengths.
+pub unsafe extern "win64" fn rtl_equal_unicode_string(
+    string1: *const UnicodeString,
+    string2: *const UnicodeString,
+    case_insensitive: u8,
+) -> u8 {
+    unsafe {
+        let s1 = &*string1;
+        let s2 = &*string2;
+
+        if s1.length != s2.length {
+            return 0; // FALSE
+        }
+
+        let len = (s1.length / 2) as usize;
+        for i in 0..len {
+            let mut c1 = *s1.buffer.add(i);
+            let mut c2 = *s2.buffer.add(i);
+
+            if case_insensitive != 0 {
+                if (c1 as u8).is_ascii_uppercase() {
+                    c1 += 32;
+                }
+                if (c2 as u8).is_ascii_uppercase() {
+                    c2 += 32;
+                }
+            }
+
+            if c1 != c2 {
+                return 0; // FALSE
+            }
+        }
+
+        1 // TRUE
+    }
+}
+
+// ── System information functions ─────────────────────────────────────────────
+
+/// NtQuerySystemInformation: stub that returns STATUS_NOT_IMPLEMENTED.
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn nt_query_system_information(
+    _system_information_class: u32,
+    _system_information: *mut std::ffi::c_void,
+    _system_information_length: u32,
+    _return_length: *mut u32,
+) -> u32 {
+    const STATUS_NOT_IMPLEMENTED: u32 = 0xC0000002;
+    STATUS_NOT_IMPLEMENTED
+}
+
 // ── Resolver ──────────────────────────────────────────────────────────────────
 
 pub fn resolve(func: &str) -> Option<usize> {
@@ -401,6 +520,22 @@ pub fn resolve(func: &str) -> Option<usize> {
         "RtlNtStatusToDosError" => {
             Some(rtl_nt_status_to_dos_error as extern "win64" fn(_) -> _ as *const () as usize)
         }
+        // RTL string functions
+        "RtlInitAnsiString" => {
+            Some(rtl_init_ansi_string as unsafe extern "win64" fn(_, _) as *const () as usize)
+        }
+        "RtlCopyUnicodeString" => {
+            Some(rtl_copy_unicode_string as unsafe extern "win64" fn(_, _) as *const () as usize)
+        }
+        "RtlEqualUnicodeString" => Some(
+            rtl_equal_unicode_string as unsafe extern "win64" fn(_, _, _) -> _ as *const ()
+                as usize,
+        ),
+        // System information functions
+        "NtQuerySystemInformation" => Some(
+            nt_query_system_information as unsafe extern "win64" fn(_, _, _, _) -> _ as *const ()
+                as usize,
+        ),
         _ => None,
     }
 }

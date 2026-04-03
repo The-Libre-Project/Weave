@@ -2469,6 +2469,210 @@ pub unsafe extern "win64" fn set_file_attributes_a(
     1 // TRUE
 }
 
+// ── Time functions ───────────────────────────────────────────────────────────
+
+/// Windows SYSTEMTIME structure — represents a date and time.
+#[repr(C)]
+struct SystemTime {
+    w_year: u16,
+    w_month: u16,
+    w_day_of_week: u16,
+    w_day: u16,
+    w_hour: u16,
+    w_minute: u16,
+    w_second: u16,
+    w_milliseconds: u16,
+}
+
+/// GetSystemTime: fill a SYSTEMTIME struct with current UTC time.
+///
+/// # Safety
+/// `lp_system_time` must be a valid writable pointer to a SystemTime struct.
+pub unsafe extern "win64" fn get_system_time(lp_system_time: *mut u8) {
+    let mut t: libc::time_t = 0;
+    unsafe { libc::time(&mut t) };
+    let mut tm: libc::tm = std::mem::zeroed();
+    unsafe { libc::gmtime_r(&t, &mut tm) };
+    let st = lp_system_time as *mut SystemTime;
+    unsafe {
+        (*st).w_year = (tm.tm_year + 1900) as u16;
+        (*st).w_month = (tm.tm_mon + 1) as u16;
+        (*st).w_day_of_week = tm.tm_wday as u16;
+        (*st).w_day = tm.tm_mday as u16;
+        (*st).w_hour = tm.tm_hour as u16;
+        (*st).w_minute = tm.tm_min as u16;
+        (*st).w_second = tm.tm_sec as u16;
+        (*st).w_milliseconds = 0;
+    }
+}
+
+/// GetLocalTime: fill a SYSTEMTIME struct with current local time.
+///
+/// # Safety
+/// `lp_system_time` must be a valid writable pointer to a SystemTime struct.
+pub unsafe extern "win64" fn get_local_time(lp_system_time: *mut u8) {
+    let mut t: libc::time_t = 0;
+    unsafe { libc::time(&mut t) };
+    let mut tm: libc::tm = std::mem::zeroed();
+    unsafe { libc::localtime_r(&t, &mut tm) };
+    let st = lp_system_time as *mut SystemTime;
+    unsafe {
+        (*st).w_year = (tm.tm_year + 1900) as u16;
+        (*st).w_month = (tm.tm_mon + 1) as u16;
+        (*st).w_day_of_week = tm.tm_wday as u16;
+        (*st).w_day = tm.tm_mday as u16;
+        (*st).w_hour = tm.tm_hour as u16;
+        (*st).w_minute = tm.tm_min as u16;
+        (*st).w_second = tm.tm_sec as u16;
+        (*st).w_milliseconds = 0;
+    }
+}
+
+// ── Environment functions ────────────────────────────────────────────────────
+
+/// Static empty wide environment block (double-null-terminated).
+static EMPTY_ENV_W: [u16; 2] = [0u16, 0u16];
+
+/// Static empty narrow environment block (double-null-terminated).
+static EMPTY_ENV_A: [u8; 2] = [0u8, 0u8];
+
+/// GetEnvironmentVariableA: return 0 (variable not found).
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn get_environment_variable_a(
+    _lp_name: *const u8,
+    _lp_buffer: *mut u8,
+    _n_size: u32,
+) -> u32 {
+    0 // not found
+}
+
+/// SetEnvironmentVariableW: no-op, returns TRUE.
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn set_environment_variable_w(
+    _lp_name: *const u16,
+    _lp_value: *const u16,
+) -> i32 {
+    1 // TRUE
+}
+
+/// SetEnvironmentVariableA: no-op, returns TRUE.
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn set_environment_variable_a(
+    _lp_name: *const u8,
+    _lp_value: *const u8,
+) -> i32 {
+    1 // TRUE
+}
+
+/// GetEnvironmentStringsW: return pointer to static empty wide environment block.
+pub extern "win64" fn get_environment_strings_w() -> usize {
+    EMPTY_ENV_W.as_ptr() as usize
+}
+
+/// GetEnvironmentStringsA: return pointer to static empty narrow environment block.
+pub extern "win64" fn get_environment_strings_a() -> usize {
+    EMPTY_ENV_A.as_ptr() as usize
+}
+
+/// FreeEnvironmentStringsW: no-op, returns TRUE.
+///
+/// # Safety
+/// `penv` is accepted but not dereferenced.
+pub unsafe extern "win64" fn free_environment_strings_w(_penv: *mut u16) -> i32 {
+    1 // TRUE
+}
+
+/// FreeEnvironmentStringsA: no-op, returns TRUE.
+///
+/// # Safety
+/// `penv` is accepted but not dereferenced.
+pub unsafe extern "win64" fn free_environment_strings_a(_penv: *mut u8) -> i32 {
+    1 // TRUE
+}
+
+// ── Locale functions ────────────────────────────────────────────────────────
+
+/// Locale constant for English (United States).
+const LOCALE_EN_US: u32 = 0x0409;
+
+/// File type constant for unknown files.
+const FILE_TYPE_UNKNOWN: u32 = 0x0000;
+
+/// GetUserDefaultLCID: return English (United States) locale ID.
+pub extern "win64" fn get_user_default_lcid() -> u32 {
+    LOCALE_EN_US
+}
+
+/// GetSystemDefaultLCID: return English (United States) locale ID.
+pub extern "win64" fn get_system_default_lcid() -> u32 {
+    LOCALE_EN_US
+}
+
+/// GetUserDefaultUILanguage: return English (United States) language ID.
+pub extern "win64" fn get_user_default_ui_language() -> u16 {
+    LOCALE_EN_US as u16
+}
+
+/// GetSystemDefaultLangID: return English (United States) language ID.
+pub extern "win64" fn get_system_default_lang_id() -> u16 {
+    LOCALE_EN_US as u16
+}
+
+/// IsValidCodePage: validate code page identifiers.
+pub extern "win64" fn is_valid_code_page(code_page: u32) -> i32 {
+    match code_page {
+        0 | 65001 | 1252 | 437 => 1, // TRUE for UTF-8, CP_ACP, CP_OEM
+        _ => 0,                      // FALSE for others
+    }
+}
+
+/// GetFileType: return FILE_TYPE_UNKNOWN.
+pub extern "win64" fn get_file_type(_h_file: usize) -> u32 {
+    FILE_TYPE_UNKNOWN
+}
+
+// ── File and console functions ──────────────────────────────────────────────
+
+/// GetFileSizeEx: write 0 to file size, return FALSE.
+///
+/// # Safety
+/// `lp_file_size` must be a valid writable pointer to an i64.
+pub unsafe extern "win64" fn get_file_size_ex(_h_file: usize, lp_file_size: *mut i64) -> i32 {
+    unsafe {
+        if !lp_file_size.is_null() {
+            *lp_file_size = 0;
+        }
+    }
+    0 // FALSE
+}
+
+/// GetConsoleMode: write 0 to mode, return TRUE.
+///
+/// # Safety
+/// `lp_mode` must be a valid writable pointer to a u32.
+pub unsafe extern "win64" fn get_console_mode(_h_console_handle: usize, lp_mode: *mut u32) -> i32 {
+    unsafe {
+        if !lp_mode.is_null() {
+            *lp_mode = 0;
+        }
+    }
+    1 // TRUE
+}
+
+/// SetConsoleMode: no-op, return TRUE.
+///
+/// # Safety
+/// No pointer arguments are dereferenced.
+pub unsafe extern "win64" fn set_console_mode(_h_console_handle: usize, _dw_mode: u32) -> i32 {
+    1 // TRUE
+}
+
 // ── Resolver ──────────────────────────────────────────────────────────────────
 
 /// Resolve a kernel32.dll import to a stub address.
@@ -2880,6 +3084,49 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         }
         "SetFileAttributesA" => {
             Some(set_file_attributes_a as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        // Time functions
+        "GetSystemTime" => {
+            Some(get_system_time as unsafe extern "win64" fn(_) as *const () as usize)
+        }
+        "GetLocalTime" => Some(get_local_time as unsafe extern "win64" fn(_) as *const () as usize),
+        // Environment functions
+        "GetEnvironmentVariableA" => Some(
+            get_environment_variable_a as unsafe extern "win64" fn(_, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "SetEnvironmentVariableW" => Some(
+            set_environment_variable_w as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
+        ),
+        "SetEnvironmentVariableA" => Some(
+            set_environment_variable_a as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
+        ),
+        "GetEnvironmentStringsW" => Some(get_environment_strings_w as *const () as usize),
+        "GetEnvironmentStringsA" | "GetEnvironmentStrings" => {
+            Some(get_environment_strings_a as *const () as usize)
+        }
+        "FreeEnvironmentStringsW" => Some(
+            free_environment_strings_w as unsafe extern "win64" fn(_) -> _ as *const () as usize,
+        ),
+        "FreeEnvironmentStringsA" => Some(
+            free_environment_strings_a as unsafe extern "win64" fn(_) -> _ as *const () as usize,
+        ),
+        // Locale functions
+        "GetUserDefaultLCID" => Some(get_user_default_lcid as *const () as usize),
+        "GetSystemDefaultLCID" => Some(get_system_default_lcid as *const () as usize),
+        "GetUserDefaultUILanguage" => Some(get_user_default_ui_language as *const () as usize),
+        "GetSystemDefaultLangID" => Some(get_system_default_lang_id as *const () as usize),
+        "IsValidCodePage" => Some(is_valid_code_page as *const () as usize),
+        "GetFileType" => Some(get_file_type as *const () as usize),
+        // File and console functions
+        "GetFileSizeEx" => {
+            Some(get_file_size_ex as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "GetConsoleMode" => {
+            Some(get_console_mode as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "SetConsoleMode" => {
+            Some(set_console_mode as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
         }
         _ => None,
     }
