@@ -4,13 +4,14 @@ use std::fmt;
 
 /// DirectX 12 error codes (HRESULT values).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(i32)]
 pub enum D3d12Error {
     Ok = 0,
     False = 1,
-    InvalidArg = 0x80070057u32 as isize,
-    OutOfMemory = 0x8007000Eu32 as isize,
-    NotSupported = 0x80004002u32 as isize,
-    Fail = 0x80004005u32 as isize,
+    InvalidArg = 0x80070057u32 as i32,
+    OutOfMemory = 0x8007000Eu32 as i32,
+    NotSupported = 0x80004002u32 as i32,
+    Fail = 0x80004005u32 as i32,
 }
 
 impl fmt::Display for D3d12Error {
