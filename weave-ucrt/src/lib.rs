@@ -47,6 +47,7 @@ pub unsafe extern "win64" fn ucrt_aligned_free(ptr: *mut c_void) {
 }
 
 pub extern "win64" fn ucrt_set_new_mode(_mode: i32) -> i32 {
+    unsafe { libc::write(2, b"weave: stub _set_new_mode\n".as_ptr() as *const libc::c_void, 26) };
     0
 }
 
@@ -188,22 +189,32 @@ pub extern "win64" fn ucrt_abort() -> ! {
     unsafe { libc::abort() }
 }
 
-pub extern "win64" fn ucrt_cexit() {}
+pub extern "win64" fn ucrt_cexit() {
+    unsafe { libc::write(2, b"weave: stub _cexit\n".as_ptr() as *const libc::c_void, 19) };
+}
 
-pub extern "win64" fn ucrt_set_app_type(_type: u32) {}
+pub extern "win64" fn ucrt_set_app_type(_type: u32) {
+    unsafe { libc::write(2, b"weave: stub __set_app_type\n".as_ptr() as *const libc::c_void, 27) };
+}
 pub extern "win64" fn ucrt_configure_narrow_argv(_mode: i32) -> i32 {
+    unsafe { libc::write(2, b"weave: stub _configure_narrow_argv\n".as_ptr() as *const libc::c_void, 35) };
     0
 }
 pub extern "win64" fn ucrt_initialize_narrow_environment() -> i32 {
+    unsafe { libc::write(2, b"weave: stub _initialize_narrow_environment\n".as_ptr() as *const libc::c_void, 43) };
     0
 }
 pub extern "win64" fn ucrt_set_invalid_parameter_handler(_fn: *const c_void) -> *const c_void {
+    unsafe { libc::write(2, b"weave: stub _set_invalid_parameter_handler\n".as_ptr() as *const libc::c_void, 43) };
     std::ptr::null()
 }
 pub extern "win64" fn ucrt_configthreadlocale(_mode: i32) -> i32 {
+    unsafe { libc::write(2, b"weave: stub _configthreadlocale\n".as_ptr() as *const libc::c_void, 32) };
     0
 }
-pub extern "win64" fn ucrt_setusermatherr(_fn: *const c_void) {}
+pub extern "win64" fn ucrt_setusermatherr(_fn: *const c_void) {
+    unsafe { libc::write(2, b"weave: stub __setusermatherr\n".as_ptr() as *const libc::c_void, 29) };
+}
 
 // ── _initterm / _initterm_e — runs C++ static constructors ───────────────────
 //
@@ -212,6 +223,7 @@ pub extern "win64" fn ucrt_setusermatherr(_fn: *const c_void) {}
 
 pub unsafe extern "win64" fn ucrt_initterm(start: *const *const c_void, end: *const *const c_void) {
     unsafe {
+        libc::write(2, b"weave: stub _initterm\n".as_ptr() as *const libc::c_void, 22);
         let mut p = start;
         while p < end {
             let fn_ptr = *p;
@@ -229,6 +241,7 @@ pub unsafe extern "win64" fn ucrt_initterm_e(
     end: *const *const c_void,
 ) -> i32 {
     unsafe {
+        libc::write(2, b"weave: stub _initterm_e\n".as_ptr() as *const libc::c_void, 24);
         let mut p = start;
         while p < end {
             let fn_ptr = *p;
@@ -246,6 +259,7 @@ pub unsafe extern "win64" fn ucrt_initterm_e(
 }
 
 pub extern "win64" fn ucrt_crt_atexit(_fn: *const c_void) -> i32 {
+    unsafe { libc::write(2, b"weave: stub _crt_atexit\n".as_ptr() as *const libc::c_void, 24) };
     0
 }
 
@@ -288,34 +302,34 @@ static HEAP_FMODE:   OnceLock<usize> = OnceLock::new();
 static HEAP_STDIO:   OnceLock<[usize; 3]> = OnceLock::new();
 
 pub unsafe extern "win64" fn ucrt_p_argc() -> *mut i32 {
+    libc::write(2, b"weave: stub __p__argc\n".as_ptr() as *const libc::c_void, 22);
     *HEAP_ARGC.get_or_init(|| Box::into_raw(Box::new(0i32)) as usize) as *mut i32
 }
 pub unsafe extern "win64" fn ucrt_p_argv() -> *mut *mut *mut u8 {
+    libc::write(2, b"weave: stub __p__argv\n".as_ptr() as *const libc::c_void, 22);
     *HEAP_ARGV.get_or_init(|| {
         Box::into_raw(Box::new(std::ptr::null_mut::<*mut u8>())) as usize
     }) as *mut *mut *mut u8
 }
 pub unsafe extern "win64" fn ucrt_p_acmdln() -> *mut *mut u8 {
+    libc::write(2, b"weave: stub __p__acmdln\n".as_ptr() as *const libc::c_void, 24);
     *HEAP_ACMDLN.get_or_init(|| {
         Box::into_raw(Box::new(std::ptr::null_mut::<u8>())) as usize
     }) as *mut *mut u8
 }
 pub unsafe extern "win64" fn ucrt_p_environ() -> *mut *mut *mut u8 {
+    libc::write(2, b"weave: stub __p__environ\n".as_ptr() as *const libc::c_void, 25);
     *HEAP_ENVIRON.get_or_init(|| {
         Box::into_raw(Box::new(std::ptr::null_mut::<*mut u8>())) as usize
     }) as *mut *mut *mut u8
 }
 pub unsafe extern "win64" fn ucrt_p_commode() -> *mut i32 {
-    let ptr = *HEAP_COMMODE.get_or_init(|| Box::into_raw(Box::new(0i32)) as usize) as *mut i32;
-    let msg = format!("weave: __p__commode() -> {ptr:p}\n");
-    libc::write(2, msg.as_ptr() as *const libc::c_void, msg.len());
-    ptr
+    libc::write(2, b"weave: stub __p__commode\n".as_ptr() as *const libc::c_void, 25);
+    *HEAP_COMMODE.get_or_init(|| Box::into_raw(Box::new(0i32)) as usize) as *mut i32
 }
 pub unsafe extern "win64" fn ucrt_p_fmode() -> *mut i32 {
-    let ptr = *HEAP_FMODE.get_or_init(|| Box::into_raw(Box::new(0i32)) as usize) as *mut i32;
-    let msg = format!("weave: __p__fmode() -> {ptr:p}\n");
-    libc::write(2, msg.as_ptr() as *const libc::c_void, msg.len());
-    ptr
+    libc::write(2, b"weave: stub __p__fmode\n".as_ptr() as *const libc::c_void, 23);
+    *HEAP_FMODE.get_or_init(|| Box::into_raw(Box::new(0i32)) as usize) as *mut i32
 }
 
 // ── stdio ─────────────────────────────────────────────────────────────────────
@@ -329,15 +343,13 @@ pub extern "win64" fn ucrt_acrt_iob_func(fd: u32) -> *mut c_void {
         Box::into_raw(Box::new([0u8; 256])) as usize,
         Box::into_raw(Box::new([0u8; 256])) as usize,
     ]);
-    let ptr = match fd {
+    unsafe { libc::write(2, b"weave: stub __acrt_iob_func\n".as_ptr() as *const libc::c_void, 28) };
+    match fd {
         0 => ptrs[0] as *mut c_void,
         1 => ptrs[1] as *mut c_void,
         2 => ptrs[2] as *mut c_void,
         _ => std::ptr::null_mut(),
-    };
-    let msg = format!("weave: __acrt_iob_func({fd}) -> {ptr:p}\n");
-    unsafe { libc::write(2, msg.as_ptr() as *const libc::c_void, msg.len()) };
-    ptr
+    }
 }
 
 /// _amsg_exit — abnormal CRT termination (e.g. failed _onexit registration).
@@ -417,6 +429,7 @@ pub extern "win64" fn ucrt_setvbuf(
     _mode: i32,
     _size: usize,
 ) -> i32 {
+    unsafe { libc::write(2, b"weave: stub setvbuf\n".as_ptr() as *const libc::c_void, 20) };
     0
 }
 
@@ -556,6 +569,7 @@ pub unsafe extern "win64" fn ucrt_getmainargs(
     _expand_wildcards: i32,
     _p_new_mode: *mut i32,
 ) -> i32 {
+    libc::write(2, b"weave: stub __getmainargs\n".as_ptr() as *const libc::c_void, 26);
     // Provide a minimal argv = [""] with no env vars.
     // These buffers live for the program lifetime — leaked intentionally.
     static EMPTY_ARG: u8 = 0;
