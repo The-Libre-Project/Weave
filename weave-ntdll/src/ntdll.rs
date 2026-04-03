@@ -466,6 +466,110 @@ pub unsafe extern "win64" fn rtl_equal_unicode_string(
     }
 }
 
+/// RtlAnsiStringToUnicodeString: convert ANSI string to Unicode string.
+///
+/// # Safety
+/// `destination_string` and `source_string` must be valid pointers.
+/// If `allocate_destination_string` is non-zero, memory will be allocated.
+pub unsafe extern "win64" fn rtl_ansi_string_to_unicode_string(
+    destination_string: *mut UnicodeString,
+    source_string: *const AnsiString,
+    allocate_destination_string: u8,
+) -> u32 {
+    unsafe {
+        let src = &*source_string;
+        let dst = &mut *destination_string;
+
+        let src_len = src.length as usize;
+        let wide_len = src_len * 2;
+
+        if allocate_destination_string != 0 {
+            let alloc_size = wide_len + 2; // +2 for null terminator
+            let buffer = libc::malloc(alloc_size) as *mut u16;
+            if buffer.is_null() {
+                return 0xC0000017; // STATUS_NO_MEMORY
+            }
+            dst.buffer = buffer;
+            dst.maximum_length = alloc_size as u16;
+        } else {
+            if dst.maximum_length < (wide_len + 2) as u16 {
+                return 0xC0000023; // STATUS_BUFFER_TOO_SMALL
+            }
+        }
+
+        // Convert each byte to u16
+        let dst_buf = dst.buffer as *mut u16;
+        let src_buf = src.buffer;
+        for i in 0..src_len {
+            *dst_buf.add(i) = *src_buf.add(i) as u16;
+        }
+        *dst_buf.add(src_len) = 0; // null terminator
+
+        dst.length = wide_len as u16;
+        0 // STATUS_SUCCESS
+    }
+}
+
+/// RtlUnicodeStringToAnsiString: convert Unicode string to ANSI string.
+///
+/// # Safety
+/// `destination_string` and `source_string` must be valid pointers.
+/// If `allocate_destination_string` is non-zero, memory will be allocated.
+pub unsafe extern "win64" fn rtl_unicode_string_to_ansi_string(
+    destination_string: *mut AnsiString,
+    source_string: *const UnicodeString,
+    allocate_destination_string: u8,
+) -> u32 {
+    unsafe {
+        let src = &*source_string;
+        let dst = &mut *destination_string;
+
+        let src_len = (src.length / 2) as usize;
+        let narrow_len = src_len;
+
+        if allocate_destination_string != 0 {
+            let alloc_size = narrow_len + 1; // +1 for null terminator
+            let buffer = libc::malloc(alloc_size);
+            if buffer.is_null() {
+                return 0xC0000017; // STATUS_NO_MEMORY
+            }
+            dst.buffer = buffer as *mut u8;
+            dst.maximum_length = alloc_size as u16;
+        } else {
+            if dst.maximum_length < (narrow_len + 1) as u16 {
+                return 0xC0000023; // STATUS_BUFFER_TOO_SMALL
+            }
+        }
+
+        // Convert each u16 to u8 (keep low byte)
+        let dst_buf = dst.buffer;
+        let src_buf = src.buffer;
+        for i in 0..narrow_len {
+            *dst_buf.add(i) = *src_buf.add(i) as u8;
+        }
+        *dst_buf.add(narrow_len) = 0; // null terminator
+
+        dst.length = narrow_len as u16;
+        0 // STATUS_SUCCESS
+    }
+}
+
+/// RtlFreeUnicodeString: free a Unicode string buffer.
+///
+/// # Safety
+/// `unicode_string` must be a valid pointer. If buffer was allocated, it will be freed.
+pub unsafe extern "win64" fn rtl_free_unicode_string(unicode_string: *mut UnicodeString) {
+    unsafe {
+        let us = &mut *unicode_string;
+        if !us.buffer.is_null() {
+            libc::free(us.buffer as *mut libc::c_void);
+        }
+        us.length = 0;
+        us.maximum_length = 0;
+        us.buffer = std::ptr::null();
+    }
+}
+
 // ── System information functions ─────────────────────────────────────────────
 
 /// NtQuerySystemInformation: stub that returns STATUS_NOT_IMPLEMENTED.
@@ -531,6 +635,17 @@ pub fn resolve(func: &str) -> Option<usize> {
             rtl_equal_unicode_string as unsafe extern "win64" fn(_, _, _) -> _ as *const ()
                 as usize,
         ),
+        "RtlAnsiStringToUnicodeString" => Some(
+            rtl_ansi_string_to_unicode_string as unsafe extern "win64" fn(_, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "RtlUnicodeStringToAnsiString" => Some(
+            rtl_unicode_string_to_ansi_string as unsafe extern "win64" fn(_, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "RtlFreeUnicodeString" => {
+            Some(rtl_free_unicode_string as unsafe extern "win64" fn(_) as *const () as usize)
+        }
         // System information functions
         "NtQuerySystemInformation" => Some(
             nt_query_system_information as unsafe extern "win64" fn(_, _, _, _) -> _ as *const ()

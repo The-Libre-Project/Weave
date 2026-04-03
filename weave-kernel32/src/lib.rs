@@ -21,6 +21,39 @@ thread_local! {
     static LAST_ERROR: Cell<u32> = const { Cell::new(0) };
 }
 
+/// Windows OSVERSIONINFOEXW — extended version information.
+/// This is the superset; OSVERSIONINFOW is the first 276 bytes.
+#[repr(C)]
+struct OsVersionInfoExW {
+    dw_os_version_info_size: u32,
+    dw_major_version: u32,
+    dw_minor_version: u32,
+    dw_build_number: u32,
+    dw_platform_id: u32,
+    sz_csd_version: [u16; 128],
+    w_service_pack_major: u16,
+    w_service_pack_minor: u16,
+    w_suite_mask: u16,
+    w_product_type: u8,
+    w_reserved: u8,
+}
+
+/// Windows OSVERSIONINFOEXA — extended version information (ANSI).
+#[repr(C)]
+struct OsVersionInfoExA {
+    dw_os_version_info_size: u32,
+    dw_major_version: u32,
+    dw_minor_version: u32,
+    dw_build_number: u32,
+    dw_platform_id: u32,
+    sz_csd_version: [u8; 128],
+    w_service_pack_major: u16,
+    w_service_pack_minor: u16,
+    w_suite_mask: u16,
+    w_product_type: u8,
+    w_reserved: u8,
+}
+
 // ── Windows page-protection flags ─────────────────────────────────────────────
 
 fn win_prot_to_linux(protect: u32) -> i32 {
@@ -2484,6 +2517,227 @@ struct SystemTime {
     w_milliseconds: u16,
 }
 
+/// GetVersionExW: fill an OSVERSIONINFOEXW struct with Windows 10 info.
+///
+/// # Safety
+/// `lp_version_information` must be a valid writable pointer to an OsVersionInfoExW.
+pub unsafe extern "win64" fn get_version_ex_w(lp_version_information: *mut u8) -> i32 {
+    let info = lp_version_information as *mut OsVersionInfoExW;
+    unsafe {
+        (*info).dw_major_version = 10;
+        (*info).dw_minor_version = 0;
+        (*info).dw_build_number = 18362;
+        (*info).dw_platform_id = 2; // VER_PLATFORM_WIN32_NT
+                                    // sz_csd_version is already zero-initialized
+
+        let size = (*info).dw_os_version_info_size;
+        if size >= 284 {
+            // OSVERSIONINFOEXW
+            (*info).w_service_pack_major = 0;
+            (*info).w_service_pack_minor = 0;
+            (*info).w_suite_mask = 0x0100; // VER_SUITE_SINGLEUSERTS
+            (*info).w_product_type = 1; // VER_NT_WORKSTATION
+            (*info).w_reserved = 0;
+        }
+    }
+    1 // TRUE
+}
+
+/// GetVersionExA: fill an OSVERSIONINFOEXA struct with Windows 10 info.
+///
+/// # Safety
+/// `lp_version_information` must be a valid writable pointer to an OsVersionInfoExA.
+pub unsafe extern "win64" fn get_version_ex_a(lp_version_information: *mut u8) -> i32 {
+    let info = lp_version_information as *mut OsVersionInfoExA;
+    unsafe {
+        (*info).dw_major_version = 10;
+        (*info).dw_minor_version = 0;
+        (*info).dw_build_number = 18362;
+        (*info).dw_platform_id = 2; // VER_PLATFORM_WIN32_NT
+                                    // sz_csd_version is already zero-initialized
+
+        let size = (*info).dw_os_version_info_size;
+        if size >= 156 {
+            // OSVERSIONINFOEXA
+            (*info).w_service_pack_major = 0;
+            (*info).w_service_pack_minor = 0;
+            (*info).w_suite_mask = 0x0100; // VER_SUITE_SINGLEUSERTS
+            (*info).w_product_type = 1; // VER_NT_WORKSTATION
+            (*info).w_reserved = 0;
+        }
+    }
+    1 // TRUE
+}
+
+/// Fake command line for GetCommandLineA.
+static CMD_LINE_A: &[u8] = b"app.exe\0";
+
+/// Fake command line for GetCommandLineW.
+static CMD_LINE_W: &[u16] = &[
+    b'a' as u16,
+    b'p' as u16,
+    b'p' as u16,
+    b'.' as u16,
+    b'e' as u16,
+    b'x' as u16,
+    b'e' as u16,
+    0u16,
+];
+
+/// GetCommandLineA: return a static fake command line.
+///
+/// Returns a pointer to a static "app.exe" string.
+pub extern "win64" fn get_command_line_a() -> usize {
+    CMD_LINE_A.as_ptr() as usize
+}
+
+/// GetCommandLineW: return a static fake command line.
+///
+/// Returns a pointer to a static wide "app.exe" string.
+pub extern "win64" fn get_command_line_w() -> usize {
+    CMD_LINE_W.as_ptr() as usize
+}
+
+/// EncodePointer: identity — return the pointer unchanged.
+pub extern "win64" fn encode_pointer(ptr: usize) -> usize {
+    ptr
+}
+
+/// DecodePointer: identity — return the pointer unchanged.
+pub extern "win64" fn decode_pointer(ptr: usize) -> usize {
+    ptr
+}
+
+const FLS_MAX_SLOTS: usize = 128;
+const FLS_OUT_OF_INDEXES: u32 = 0xFFFFFFFF;
+
+/// Fiber Local Storage data and usage tracking.
+static mut FLS_DATA: [usize; FLS_MAX_SLOTS] = [0; FLS_MAX_SLOTS];
+static mut FLS_USED: [bool; FLS_MAX_SLOTS] = [false; FLS_MAX_SLOTS];
+
+/// FlsAlloc: allocate a fiber local storage slot.
+///
+/// # Safety
+/// Pointer argument is accepted but not dereferenced.
+pub unsafe extern "win64" fn fls_alloc(_lp_callback: usize) -> u32 {
+    unsafe {
+        for i in 0..FLS_MAX_SLOTS {
+            if !FLS_USED[i] {
+                FLS_USED[i] = true;
+                FLS_DATA[i] = 0;
+                return i as u32;
+            }
+        }
+        FLS_OUT_OF_INDEXES
+    }
+}
+
+/// FlsGetValue: retrieve value from fiber local storage slot.
+pub extern "win64" fn fls_get_value(dw_fls_index: u32) -> usize {
+    if dw_fls_index >= FLS_MAX_SLOTS as u32 {
+        return 0;
+    }
+    unsafe { FLS_DATA[dw_fls_index as usize] }
+}
+
+/// FlsSetValue: store value in fiber local storage slot.
+pub extern "win64" fn fls_set_value(dw_fls_index: u32, lp_fls_data: usize) -> i32 {
+    if dw_fls_index >= FLS_MAX_SLOTS as u32 {
+        return 0; // FALSE
+    }
+    unsafe {
+        FLS_DATA[dw_fls_index as usize] = lp_fls_data;
+    }
+    1 // TRUE
+}
+
+/// FlsFree: free a fiber local storage slot.
+pub extern "win64" fn fls_free(dw_fls_index: u32) -> i32 {
+    if dw_fls_index >= FLS_MAX_SLOTS as u32 {
+        return 0; // FALSE
+    }
+    unsafe {
+        FLS_USED[dw_fls_index as usize] = false;
+        FLS_DATA[dw_fls_index as usize] = 0;
+    }
+    1 // TRUE
+}
+
+/// InitializeCriticalSectionAndSpinCount: initialize critical section with spin count.
+///
+/// # Safety
+/// `lp_critical_section` must point to at least 40 bytes of writable memory.
+pub unsafe extern "win64" fn initialize_critical_section_and_spin_count(
+    lp_critical_section: *mut u8,
+    _dw_spin_count: u32,
+) -> i32 {
+    unsafe { std::ptr::write_bytes(lp_critical_section, 0, 40) };
+    // LockCount at offset 8 should be -1 (unlocked)
+    unsafe { *(lp_critical_section.add(8) as *mut i32) = -1 };
+    1 // TRUE
+}
+
+/// InitializeCriticalSectionEx: initialize critical section with extended options.
+///
+/// # Safety
+/// `lp_critical_section` must point to at least 40 bytes of writable memory.
+pub unsafe extern "win64" fn initialize_critical_section_ex(
+    lp_critical_section: *mut u8,
+    _dw_spin_count: u32,
+    _flags: u32,
+) -> i32 {
+    unsafe { std::ptr::write_bytes(lp_critical_section, 0, 40) };
+    // LockCount at offset 8 should be -1 (unlocked)
+    unsafe { *(lp_critical_section.add(8) as *mut i32) = -1 };
+    1 // TRUE
+}
+
+/// HeapSetInformation: set heap information (no-op).
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn heap_set_information(
+    _heap_handle: usize,
+    _heap_information_class: u32,
+    _heap_information: *mut u8,
+    _heap_information_length: usize,
+) -> i32 {
+    1 // TRUE
+}
+
+/// SetHandleCount: legacy stub that returns the input value.
+pub extern "win64" fn set_handle_count(u_number: u32) -> u32 {
+    u_number
+}
+
+/// GetThreadLocale: return English (United States) locale ID.
+pub extern "win64" fn get_thread_locale() -> u32 {
+    0x0409 // LOCALE_EN_US
+}
+
+/// SetThreadLocale: no-op, returns TRUE.
+pub extern "win64" fn set_thread_locale(_locale: u32) -> i32 {
+    1 // TRUE
+}
+
+/// SetThreadStackGuarantee: no-op, returns TRUE.
+///
+/// # Safety
+/// Pointer argument is accepted but not dereferenced.
+pub unsafe extern "win64" fn set_thread_stack_guarantee(_stack_size_in_bytes: *mut u32) -> i32 {
+    1 // TRUE
+}
+
+/// GetTimeZoneInformation: fill TIME_ZONE_INFORMATION struct with UTC info.
+///
+/// # Safety
+/// `lp_time_zone_information` must be a valid writable pointer to a TIME_ZONE_INFORMATION.
+pub unsafe extern "win64" fn get_time_zone_information(lp_time_zone_information: *mut u8) -> u32 {
+    unsafe { std::ptr::write_bytes(lp_time_zone_information, 0, 172) }; // Zero entire struct
+                                                                        // bias = 0 (UTC)
+    0 // TIME_ZONE_ID_UNKNOWN
+}
+
 /// GetSystemTime: fill a SYSTEMTIME struct with current UTC time.
 ///
 /// # Safety
@@ -3128,6 +3382,40 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "SetConsoleMode" => {
             Some(set_console_mode as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
         }
+        "GetVersionExW" => {
+            Some(get_version_ex_w as unsafe extern "win64" fn(_) -> _ as *const () as usize)
+        }
+        "GetVersionExA" => {
+            Some(get_version_ex_a as unsafe extern "win64" fn(_) -> _ as *const () as usize)
+        }
+        "GetCommandLineW" => Some(get_command_line_w as *const () as usize),
+        "GetCommandLineA" => Some(get_command_line_a as *const () as usize),
+        "EncodePointer" => Some(encode_pointer as *const () as usize),
+        "DecodePointer" => Some(decode_pointer as *const () as usize),
+        "FlsAlloc" => Some(fls_alloc as *const () as usize),
+        "FlsGetValue" => Some(fls_get_value as *const () as usize),
+        "FlsSetValue" => Some(fls_set_value as *const () as usize),
+        "FlsFree" => Some(fls_free as *const () as usize),
+        "InitializeCriticalSectionAndSpinCount" => Some(
+            initialize_critical_section_and_spin_count as unsafe extern "win64" fn(_, _) -> _
+                as *const () as usize,
+        ),
+        "InitializeCriticalSectionEx" => Some(
+            initialize_critical_section_ex as unsafe extern "win64" fn(_, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "HeapSetInformation" => Some(
+            heap_set_information as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
+        ),
+        "SetHandleCount" => Some(set_handle_count as *const () as usize),
+        "GetThreadLocale" => Some(get_thread_locale as *const () as usize),
+        "SetThreadLocale" => Some(set_thread_locale as *const () as usize),
+        "SetThreadStackGuarantee" => Some(
+            set_thread_stack_guarantee as unsafe extern "win64" fn(_) -> _ as *const () as usize,
+        ),
+        "GetTimeZoneInformation" => Some(
+            get_time_zone_information as unsafe extern "win64" fn(_) -> _ as *const () as usize,
+        ),
         _ => None,
     }
 }
