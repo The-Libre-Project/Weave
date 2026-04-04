@@ -1266,6 +1266,7 @@ dependencies = [
  "weave-ucrt",
  "weave-user32",
  "weave-vulkan",
+ "weave-winmm",
  "weave-xinput",
 ]
 
@@ -1371,6 +1372,7 @@ name = "weave-user32"
 version = "0.0.1"
 dependencies = [
  "fontdue",
+ "libc",
  "weave-common",
  "weave-core",
  "x11rb",
@@ -1394,6 +1396,13 @@ version = "0.0.1"
 dependencies = [
  "libc",
  "weave-user32",
+]
+
+[[package]]
+name = "weave-winmm"
+version = "0.0.1"
+dependencies = [
+ "libc",
 ]
 
 [[package]]

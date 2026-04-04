@@ -1165,6 +1165,114 @@ pub extern "win64" fn window_from_point(_pt_x: i32, _pt_y: i32) -> usize {
     0
 }
 
+// ── DPI awareness stubs ───────────────────────────────────────────────────────
+
+/// SetProcessDPIAware: mark the process as DPI-aware.
+pub extern "win64" fn set_process_dpi_aware() -> i32 {
+    1
+}
+
+/// GetDpiForWindow: return the DPI for a window.
+pub extern "win64" fn get_dpi_for_window(_hwnd: usize) -> u32 {
+    96
+}
+
+/// GetDpiForSystem: return the system DPI.
+pub extern "win64" fn get_dpi_for_system() -> u32 {
+    96
+}
+
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn adjust_window_rect_ex_for_dpi(
+    _lp_rect: usize,
+    _dw_style: u32,
+    _b_menu: i32,
+    _dw_ex_style: u32,
+    _dpi: u32,
+) -> i32 {
+    1
+}
+
+/// SetProcessDpiAwarenessContext: set the DPI awareness context.
+pub extern "win64" fn set_process_dpi_awareness_context(_value: isize) -> i32 {
+    1
+}
+
+/// GetDpiAwarenessContextForProcess: get the DPI awareness context for a process.
+pub extern "win64" fn get_dpi_awareness_context_for_process(_h_process: usize) -> isize {
+    -4isize
+}
+
+/// AreDpiAwarenessContextsEqual: compare two DPI awareness contexts.
+pub extern "win64" fn are_dpi_awareness_contexts_equal(
+    dpi_context_a: isize,
+    dpi_context_b: isize,
+) -> i32 {
+    (dpi_context_a == dpi_context_b) as i32
+}
+
+// ── Input state stubs ─────────────────────────────────────────────────────────
+
+/// GetKeyState: return the state of a virtual key.
+pub extern "win64" fn get_key_state(_n_virt_key: i32) -> i16 {
+    0
+}
+
+/// GetAsyncKeyState: return the state of a virtual key (async).
+pub extern "win64" fn get_async_key_state(_v_key: i32) -> i16 {
+    0
+}
+
+/// MapVirtualKeyW: map a virtual key code to a scan code or character.
+pub extern "win64" fn map_virtual_key_w(_u_code: u32, _u_map_type: u32) -> u32 {
+    0
+}
+
+/// MapVirtualKeyExW: map a virtual key code to a scan code or character (extended).
+pub extern "win64" fn map_virtual_key_ex_w(_u_code: u32, _u_map_type: u32, _dwhkl: usize) -> u32 {
+    0
+}
+
+/// GetKeyboardLayout: return the keyboard layout for the current thread.
+pub extern "win64" fn get_keyboard_layout(_id_thread: u32) -> usize {
+    0
+}
+
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn get_keyboard_layout_list(_n_buff: i32, _lp_list: usize) -> i32 {
+    0
+}
+
+/// VkKeyScanW: translate a character to a virtual key code.
+pub extern "win64" fn vk_key_scan_w(_ch: u16) -> i16 {
+    -1i16
+}
+
+/// # Safety
+/// `lp_key_state` must be a valid pointer to 256 bytes if non-null.
+pub unsafe extern "win64" fn get_keyboard_state(lp_key_state: *mut u8) -> i32 {
+    if !lp_key_state.is_null() {
+        unsafe { std::ptr::write_bytes(lp_key_state, 0, 256) };
+    }
+    1
+}
+
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn to_unicode_ex(
+    _w_virt_key: u32,
+    _w_scan_code: u32,
+    _lp_key_state: usize,
+    _pwsz_buff: usize,
+    _cch_buff: i32,
+    _w_flags: u32,
+    _dwhkl: usize,
+) -> i32 {
+    0
+}
+
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
 /// Call a window procedure (stored as `usize`) with `extern "win64"` ABI.
