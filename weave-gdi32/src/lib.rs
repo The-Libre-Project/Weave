@@ -881,12 +881,25 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "SaveDC" => Some(save_dc as *const () as usize),
         "RestoreDC" => Some(restore_dc as *const () as usize),
         // D3DKMT adapter stubs
-        "D3DKMTOpenAdapterFromHdc" => Some(d3dkmt_open_adapter_from_hdc as unsafe extern "win64" fn(_) -> _ as *const () as usize),
-        "D3DKMTCloseAdapter" => Some(d3dkmt_close_adapter as unsafe extern "win64" fn(_) -> _ as *const () as usize),
-        "D3DKMTCreateDevice" => Some(d3dkmt_create_device as unsafe extern "win64" fn(_) -> _ as *const () as usize),
-        "D3DKMTDestroyDevice" => Some(d3dkmt_destroy_device as unsafe extern "win64" fn(_) -> _ as *const () as usize),
-        "D3DKMTQueryAdapterInfo" => Some(d3dkmt_query_adapter_info as unsafe extern "win64" fn(_) -> _ as *const () as usize),
-        "D3DKMTSetVidPnSourceOwner" => Some(d3dkmt_set_vid_pn_source_owner as unsafe extern "win64" fn(_) -> _ as *const () as usize),
+        "D3DKMTOpenAdapterFromHdc" => Some(
+            d3dkmt_open_adapter_from_hdc as unsafe extern "win64" fn(_) -> _ as *const () as usize,
+        ),
+        "D3DKMTCloseAdapter" => {
+            Some(d3dkmt_close_adapter as unsafe extern "win64" fn(_) -> _ as *const () as usize)
+        }
+        "D3DKMTCreateDevice" => {
+            Some(d3dkmt_create_device as unsafe extern "win64" fn(_) -> _ as *const () as usize)
+        }
+        "D3DKMTDestroyDevice" => {
+            Some(d3dkmt_destroy_device as unsafe extern "win64" fn(_) -> _ as *const () as usize)
+        }
+        "D3DKMTQueryAdapterInfo" => Some(
+            d3dkmt_query_adapter_info as unsafe extern "win64" fn(_) -> _ as *const () as usize,
+        ),
+        "D3DKMTSetVidPnSourceOwner" => Some(
+            d3dkmt_set_vid_pn_source_owner as unsafe extern "win64" fn(_) -> _ as *const ()
+                as usize,
+        ),
         _ => None,
     }
 }

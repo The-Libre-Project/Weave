@@ -221,9 +221,15 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
             adjust_window_rect_ex_for_dpi as unsafe extern "win64" fn(_, _, _, _, _) -> _
                 as *const () as usize,
         ),
-        "SetProcessDpiAwarenessContext" => Some(set_process_dpi_awareness_context as *const () as usize),
-        "GetDpiAwarenessContextForProcess" => Some(get_dpi_awareness_context_for_process as *const () as usize),
-        "AreDpiAwarenessContextsEqual" => Some(are_dpi_awareness_contexts_equal as *const () as usize),
+        "SetProcessDpiAwarenessContext" => {
+            Some(set_process_dpi_awareness_context as *const () as usize)
+        }
+        "GetDpiAwarenessContextForProcess" => {
+            Some(get_dpi_awareness_context_for_process as *const () as usize)
+        }
+        "AreDpiAwarenessContextsEqual" => {
+            Some(are_dpi_awareness_contexts_equal as *const () as usize)
+        }
         // Input state stubs
         "GetKeyState" => Some(get_key_state as *const () as usize),
         "GetAsyncKeyState" => Some(get_async_key_state as *const () as usize),
@@ -234,9 +240,9 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
             get_keyboard_layout_list as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
         ),
         "VkKeyScanW" => Some(vk_key_scan_w as *const () as usize),
-        "GetKeyboardState" => Some(
-            get_keyboard_state as unsafe extern "win64" fn(_) -> _ as *const () as usize,
-        ),
+        "GetKeyboardState" => {
+            Some(get_keyboard_state as unsafe extern "win64" fn(_) -> _ as *const () as usize)
+        }
         "ToUnicodeEx" => Some(
             to_unicode_ex as unsafe extern "win64" fn(_, _, _, _, _, _, _) -> _ as *const ()
                 as usize,

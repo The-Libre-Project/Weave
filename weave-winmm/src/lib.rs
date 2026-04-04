@@ -33,7 +33,7 @@ pub extern "win64" fn time_end_period(_u_period: u32) -> u32 {
 pub unsafe extern "win64" fn time_get_dev_caps(ptc: *mut u32, cbtc: u32) -> u32 {
     if !ptc.is_null() && cbtc >= 8 {
         unsafe {
-            *ptc = 1;           // wPeriodMin
+            *ptc = 1; // wPeriodMin
             *ptc.add(1) = 1_000_000; // wPeriodMax
         }
     }
@@ -65,13 +65,21 @@ pub extern "win64" fn wave_out_set_volume(_hwo: usize, _dw_volume: u32) -> u32 {
 
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
-pub unsafe extern "win64" fn play_sound_w(_psz_sound: *const u16, _hmod: usize, _fdw_sound: u32) -> i32 {
+pub unsafe extern "win64" fn play_sound_w(
+    _psz_sound: *const u16,
+    _hmod: usize,
+    _fdw_sound: u32,
+) -> i32 {
     0 // FALSE
 }
 
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
-pub unsafe extern "win64" fn play_sound_a(_psz_sound: *const u8, _hmod: usize, _fdw_sound: u32) -> i32 {
+pub unsafe extern "win64" fn play_sound_a(
+    _psz_sound: *const u8,
+    _hmod: usize,
+    _fdw_sound: u32,
+) -> i32 {
     0 // FALSE
 }
 
@@ -107,18 +115,46 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         return None;
     }
     match func {
-        "timeGetTime"    => Some(time_get_time as extern "win64" fn() -> u32 as *const () as usize),
-        "timeBeginPeriod" => Some(time_begin_period as extern "win64" fn(u32) -> u32 as *const () as usize),
-        "timeEndPeriod"   => Some(time_end_period as extern "win64" fn(u32) -> u32 as *const () as usize),
-        "timeGetDevCaps"  => Some(time_get_dev_caps as unsafe extern "win64" fn(*mut u32, u32) -> u32 as *const () as usize),
-        "waveOutGetNumDevs" => Some(wave_out_get_num_devs as extern "win64" fn() -> u32 as *const () as usize),
-        "waveInGetNumDevs"  => Some(wave_in_get_num_devs  as extern "win64" fn() -> u32 as *const () as usize),
-        "waveOutGetVolume"  => Some(wave_out_get_volume as unsafe extern "win64" fn(usize, usize) -> u32 as *const () as usize),
-        "waveOutSetVolume"  => Some(wave_out_set_volume as extern "win64" fn(usize, u32) -> u32 as *const () as usize),
-        "PlaySoundW"        => Some(play_sound_w as unsafe extern "win64" fn(*const u16, usize, u32) -> i32 as *const () as usize),
-        "PlaySoundA"        => Some(play_sound_a as unsafe extern "win64" fn(*const u8, usize, u32) -> i32 as *const () as usize),
-        "mciSendStringW"    => Some(mci_send_string_w as unsafe extern "win64" fn(*const u16, usize, u32, usize) -> u32 as *const () as usize),
-        "mciSendCommandW"   => Some(mci_send_command_w as extern "win64" fn(u32, u32, usize, usize) -> u32 as *const () as usize),
+        "timeGetTime" => Some(time_get_time as extern "win64" fn() -> u32 as *const () as usize),
+        "timeBeginPeriod" => {
+            Some(time_begin_period as extern "win64" fn(u32) -> u32 as *const () as usize)
+        }
+        "timeEndPeriod" => {
+            Some(time_end_period as extern "win64" fn(u32) -> u32 as *const () as usize)
+        }
+        "timeGetDevCaps" => Some(
+            time_get_dev_caps as unsafe extern "win64" fn(*mut u32, u32) -> u32 as *const ()
+                as usize,
+        ),
+        "waveOutGetNumDevs" => {
+            Some(wave_out_get_num_devs as extern "win64" fn() -> u32 as *const () as usize)
+        }
+        "waveInGetNumDevs" => {
+            Some(wave_in_get_num_devs as extern "win64" fn() -> u32 as *const () as usize)
+        }
+        "waveOutGetVolume" => Some(
+            wave_out_get_volume as unsafe extern "win64" fn(usize, usize) -> u32 as *const ()
+                as usize,
+        ),
+        "waveOutSetVolume" => {
+            Some(wave_out_set_volume as extern "win64" fn(usize, u32) -> u32 as *const () as usize)
+        }
+        "PlaySoundW" => Some(
+            play_sound_w as unsafe extern "win64" fn(*const u16, usize, u32) -> i32 as *const ()
+                as usize,
+        ),
+        "PlaySoundA" => Some(
+            play_sound_a as unsafe extern "win64" fn(*const u8, usize, u32) -> i32 as *const ()
+                as usize,
+        ),
+        "mciSendStringW" => Some(
+            mci_send_string_w as unsafe extern "win64" fn(*const u16, usize, u32, usize) -> u32
+                as *const () as usize,
+        ),
+        "mciSendCommandW" => Some(
+            mci_send_command_w as extern "win64" fn(u32, u32, usize, usize) -> u32 as *const ()
+                as usize,
+        ),
         _ => None,
     }
 }

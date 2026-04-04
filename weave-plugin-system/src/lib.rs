@@ -65,12 +65,10 @@ unsafe extern "C" fn register_override(
     func_len: usize,
     addr: usize,
 ) {
-    let dll_str = unsafe {
-        std::str::from_utf8_unchecked(std::slice::from_raw_parts(dll, dll_len))
-    };
-    let func_str = unsafe {
-        std::str::from_utf8_unchecked(std::slice::from_raw_parts(func, func_len))
-    };
+    let dll_str =
+        unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(dll, dll_len)) };
+    let func_str =
+        unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(func, func_len)) };
     overrides()
         .lock()
         .unwrap()
@@ -111,10 +109,7 @@ pub fn load_plugins(plugins_dir: &Path) {
         let lib = match unsafe { libloading::Library::new(&path) } {
             Ok(l) => l,
             Err(e) => {
-                eprintln!(
-                    "weave: plugin: could not open {}: {e}",
-                    path.display()
-                );
+                eprintln!("weave: plugin: could not open {}: {e}", path.display());
                 continue;
             }
         };
