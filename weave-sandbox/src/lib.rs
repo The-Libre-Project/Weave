@@ -111,3 +111,33 @@ fn apply_landlock() -> SandboxStatus {
         },
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_apply_disabled_returns_disabled() {
+        // apply(false) must always return Disabled, on any platform.
+        // This is safe to call in tests — it is a pure no-op.
+        assert_eq!(apply(false), SandboxStatus::Disabled);
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn test_apply_enabled_non_linux_returns_unavailable() {
+        // On macOS (the dev machine), Landlock is not available.
+        // apply(true) must return Unavailable without panicking.
+        assert_eq!(apply(true), SandboxStatus::Unavailable);
+    }
+
+    #[test]
+    fn test_sandbox_status_eq() {
+        // SandboxStatus derives PartialEq — verify the basic variant equality.
+        assert_eq!(SandboxStatus::Active, SandboxStatus::Active);
+        assert_eq!(SandboxStatus::Partial, SandboxStatus::Partial);
+        assert_eq!(SandboxStatus::Unavailable, SandboxStatus::Unavailable);
+        assert_eq!(SandboxStatus::Disabled, SandboxStatus::Disabled);
+        assert_ne!(SandboxStatus::Active, SandboxStatus::Disabled);
+    }
+}

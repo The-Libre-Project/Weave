@@ -157,3 +157,51 @@ pub fn lookup(dll: &str, func: &str) -> Option<usize> {
         .get(&(dll.to_lowercase(), func.to_string()))
         .copied()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_lookup_empty_returns_none() {
+        // Before any plugins are loaded, lookup returns None for any dll!func.
+        assert!(lookup("kernel32.dll", "CreateFileW").is_none());
+        assert!(lookup("user32.dll", "MessageBoxW").is_none());
+    }
+
+    #[test]
+    fn test_lookup_case_insensitive_dll() {
+        // Case variants of an unregistered dll all return None.
+        assert!(lookup("Kernel32.DLL", "CreateFileW").is_none());
+        assert!(lookup("KERNEL32.DLL", "CreateFileW").is_none());
+    }
+
+    #[test]
+    fn test_load_plugins_missing_dir() {
+        // load_plugins with a path that does not exist must return without panicking.
+        let path = std::path::Path::new("/tmp/weave-plugin-test-nonexistent-xyzzy");
+        load_plugins(path); // must not panic
+    }
+
+    #[test]
+    fn test_load_plugins_empty_dir() {
+        // load_plugins with an empty directory must return without panicking
+        // and must not register any overrides.
+        let dir = std::env::temp_dir().join("weave-plugin-test-empty");
+        std::fs::create_dir_all(&dir).ok();
+        load_plugins(&dir);
+        assert!(lookup("any.dll", "AnyFunc").is_none());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_load_plugins_ignores_non_so_files() {
+        // Files without a .so extension must be silently skipped.
+        let dir = std::env::temp_dir().join("weave-plugin-test-non-so");
+        std::fs::create_dir_all(&dir).ok();
+        std::fs::write(dir.join("not_a_plugin.txt"), b"hello").ok();
+        std::fs::write(dir.join("not_a_plugin.dll"), b"hello").ok();
+        load_plugins(&dir); // must not panic, must not attempt to dlopen text files
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}
