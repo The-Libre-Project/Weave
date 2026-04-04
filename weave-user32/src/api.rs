@@ -1396,8 +1396,16 @@ pub unsafe extern "win64" fn create_window_ex_a(
         }
     };
 
-    let width = if n_width == i32::MIN { 640 } else { n_width.max(1) } as u32;
-    let height = if n_height == i32::MIN { 480 } else { n_height.max(1) } as u32;
+    let width = if n_width == i32::MIN {
+        640
+    } else {
+        n_width.max(1)
+    } as u32;
+    let height = if n_height == i32::MIN {
+        480
+    } else {
+        n_height.max(1)
+    } as u32;
     let pos_x = if x == i32::MIN { 100 } else { x };
     let pos_y = if y == i32::MIN { 100 } else { y };
     let visible = (dw_style & WS_VISIBLE) != 0;
@@ -1419,7 +1427,10 @@ pub unsafe extern "win64" fn create_window_ex_a(
     });
 
     let title_wide: Vec<u16> = title.encode_utf16().chain(std::iter::once(0)).collect();
-    let class_wide: Vec<u16> = class_name.encode_utf16().chain(std::iter::once(0)).collect();
+    let class_wide: Vec<u16> = class_name
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
     let cs = CreateStructW {
         lp_create_params: lp_param,
         h_instance,
@@ -1467,7 +1478,15 @@ pub unsafe extern "win64" fn peek_message_a(
     w_msg_filter_max: u32,
     w_remove_msg: u32,
 ) -> i32 {
-    unsafe { peek_message_w(lp_msg, h_wnd, w_msg_filter_min, w_msg_filter_max, w_remove_msg) }
+    unsafe {
+        peek_message_w(
+            lp_msg,
+            h_wnd,
+            w_msg_filter_min,
+            w_msg_filter_max,
+            w_remove_msg,
+        )
+    }
 }
 
 /// DispatchMessageA: ANSI variant — identical to W.
@@ -1543,7 +1562,11 @@ pub extern "win64" fn get_window_long_ptr_a(hwnd: usize, n_index: i32) -> isize 
 }
 
 /// SetWindowLongPtrA: ANSI variant — identical to W.
-pub extern "win64" fn set_window_long_ptr_a(hwnd: usize, n_index: i32, dw_new_long: isize) -> isize {
+pub extern "win64" fn set_window_long_ptr_a(
+    hwnd: usize,
+    n_index: i32,
+    dw_new_long: isize,
+) -> isize {
     set_window_long_ptr_w(hwnd, n_index, dw_new_long)
 }
 
@@ -1664,14 +1687,8 @@ pub extern "win64" fn get_system_menu(h_wnd: usize, b_revert: i32) -> usize {
         // Revert to default — we don't track the original, just return current.
         return window::with(h_wnd, |w| w.h_menu).unwrap_or(0);
     }
-    window::with(h_wnd, |w| {
-        if w.h_menu != 0 {
-            w.h_menu
-        } else {
-            0
-        }
-    })
-    .unwrap_or_else(menu::create_menu)
+    window::with(h_wnd, |w| if w.h_menu != 0 { w.h_menu } else { 0 })
+        .unwrap_or_else(menu::create_menu)
 }
 
 /// DeleteMenu: remove an item from a menu.
@@ -1949,8 +1966,7 @@ pub unsafe extern "win64" fn msg_wait_for_multiple_objects(
 ) -> u32 {
     // Delegate to WaitForMultipleObjects for the handles portion.
     if n_count > 0 && !lp_handles.is_null() {
-        let handles =
-            unsafe { std::slice::from_raw_parts(lp_handles, n_count as usize) };
+        let handles = unsafe { std::slice::from_raw_parts(lp_handles, n_count as usize) };
         for &h in handles {
             let _ = h;
         }
@@ -2183,4 +2199,42 @@ pub unsafe extern "win64" fn to_ascii_ex(
     _dwhkl: usize,
 ) -> i32 {
     0
+}
+
+/// SetFocus: set keyboard focus to a window. Returns the previous focus window.
+///
+/// Stub: returns the supplied HWND (pretend it already had focus).
+///
+/// # Safety
+/// No pointer dereferences.
+pub unsafe extern "win64" fn set_focus(hwnd: usize) -> usize {
+    hwnd
+}
+
+/// SetKeyboardState: set the keyboard state for the calling thread. Returns TRUE.
+///
+/// # Safety
+/// `lp_key_state` is accepted but not dereferenced.
+pub unsafe extern "win64" fn set_keyboard_state(_lp_key_state: *const u8) -> i32 {
+    1 // TRUE
+}
+
+/// SetWindowTextA: update the title bar text of a window (ANSI).
+///
+/// Decodes the ANSI string and delegates to `set_window_text_w`.
+///
+/// # Safety
+/// `lp_string` must be a valid null-terminated ANSI string or null.
+pub unsafe extern "win64" fn set_window_text_a(hwnd: usize, lp_string: *const u8) -> i32 {
+    if lp_string.is_null() {
+        return 0;
+    }
+    let mut len = 0usize;
+    while unsafe { *lp_string.add(len) } != 0 {
+        len += 1;
+    }
+    let bytes = unsafe { std::slice::from_raw_parts(lp_string, len) };
+    let s = String::from_utf8_lossy(bytes);
+    let wide: Vec<u16> = s.encode_utf16().chain(std::iter::once(0)).collect();
+    unsafe { set_window_text_w(hwnd, wide.as_ptr()) }
 }

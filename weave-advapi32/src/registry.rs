@@ -734,6 +734,35 @@ pub unsafe extern "win64" fn reg_enum_key_ex_a(
     ERROR_SUCCESS
 }
 
+// ── RegEnumKeyA ───────────────────────────────────────────────────────────────
+
+/// RegEnumKeyA: legacy 3-parameter subkey enumeration (ANSI).
+///
+/// Wrapper around `RegEnumKeyExA` with no class or timestamp parameters.
+///
+/// # Safety
+/// `lp_name` must be a writable buffer of at least `cch_name` bytes.
+pub unsafe extern "win64" fn reg_enum_key_a(
+    h_key: usize,
+    dw_index: u32,
+    lp_name: *mut u8,
+    cch_name: u32,
+) -> i32 {
+    let mut cch = cch_name;
+    unsafe {
+        reg_enum_key_ex_a(
+            h_key,
+            dw_index,
+            lp_name,
+            &mut cch,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    }
+}
+
 // ── OpenProcessToken ──────────────────────────────────────────────────────────
 
 /// OpenProcessToken: open the access token associated with a process.
@@ -1123,6 +1152,9 @@ pub fn resolve(func: &str) -> Option<usize> {
             reg_enum_key_ex_a as unsafe extern "win64" fn(_, _, _, _, _, _, _, _) -> _ as *const ()
                 as usize,
         ),
+        "RegEnumKeyA" => {
+            Some(reg_enum_key_a as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize)
+        }
         "OpenProcessToken" => {
             Some(open_process_token as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize)
         }
@@ -1154,36 +1186,29 @@ pub fn resolve(func: &str) -> Option<usize> {
             Some(reg_delete_value_a as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
         }
         // ── Security / SID stubs (PuTTY gap-fill) ────────────────────────
-        "GetUserNameA" => Some(
-            get_user_name_a as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
-        ),
+        "GetUserNameA" => {
+            Some(get_user_name_a as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
         "AllocateAndInitializeSid" => Some(
             allocate_and_initialize_sid
                 as unsafe extern "win64" fn(_, _, _, _, _, _, _, _, _, _, _) -> _
                 as *const () as usize,
         ),
-        "CopySid" => Some(
-            copy_sid as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
-        ),
-        "EqualSid" => Some(
-            equal_sid as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
-        ),
+        "CopySid" => Some(copy_sid as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize),
+        "EqualSid" => Some(equal_sid as unsafe extern "win64" fn(_, _) -> _ as *const () as usize),
         "GetLengthSid" => Some(get_length_sid as *const () as usize),
         "FreeSid" => Some(free_sid as *const () as usize),
         "InitializeSecurityDescriptor" => Some(
-            initialize_security_descriptor
-                as unsafe extern "win64" fn(_, _) -> _
-                as *const () as usize,
+            initialize_security_descriptor as unsafe extern "win64" fn(_, _) -> _ as *const ()
+                as usize,
         ),
         "SetSecurityDescriptorDacl" => Some(
-            set_security_descriptor_dacl
-                as unsafe extern "win64" fn(_, _, _, _) -> _
-                as *const () as usize,
+            set_security_descriptor_dacl as unsafe extern "win64" fn(_, _, _, _) -> _ as *const ()
+                as usize,
         ),
         "SetSecurityDescriptorOwner" => Some(
-            set_security_descriptor_owner
-                as unsafe extern "win64" fn(_, _, _) -> _
-                as *const () as usize,
+            set_security_descriptor_owner as unsafe extern "win64" fn(_, _, _) -> _ as *const ()
+                as usize,
         ),
         _ => None,
     }
@@ -1195,10 +1220,7 @@ pub fn resolve(func: &str) -> Option<usize> {
 ///
 /// # Safety
 /// `lp_buffer` must be writable for `*lpcb_buffer` bytes; `lpcb_buffer` writable.
-pub unsafe extern "win64" fn get_user_name_a(
-    lp_buffer: *mut u8,
-    lpcb_buffer: *mut u32,
-) -> i32 {
+pub unsafe extern "win64" fn get_user_name_a(lp_buffer: *mut u8, lpcb_buffer: *mut u32) -> i32 {
     let user = b"weave\0";
     let needed = user.len() as u32;
     if lpcb_buffer.is_null() {
@@ -1253,8 +1275,14 @@ pub unsafe extern "win64" fn allocate_and_initialize_sid(
             [0u8; 6]
         },
         sub_authority: [
-            n_sub_authority0, n_sub_authority1, n_sub_authority2, n_sub_authority3,
-            n_sub_authority4, n_sub_authority5, n_sub_authority6, n_sub_authority7,
+            n_sub_authority0,
+            n_sub_authority1,
+            n_sub_authority2,
+            n_sub_authority3,
+            n_sub_authority4,
+            n_sub_authority5,
+            n_sub_authority6,
+            n_sub_authority7,
         ],
     });
     unsafe { *new_sid = Box::into_raw(sid) };

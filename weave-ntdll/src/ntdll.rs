@@ -1063,9 +1063,7 @@ pub unsafe extern "win64" fn ldr_get_procedure_address(
             0 // STATUS_SUCCESS
         }
         None => {
-            eprintln!(
-                "weave/ntdll: LdrGetProcedureAddress({dll_name}!{func}) → NOT_FOUND"
-            );
+            eprintln!("weave/ntdll: LdrGetProcedureAddress({dll_name}!{func}) → NOT_FOUND");
             0xC000007A // STATUS_PROCEDURE_NOT_FOUND
         }
     }

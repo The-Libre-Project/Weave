@@ -71,10 +71,7 @@ pub fn lookup(handle: usize) -> Option<String> {
 /// `r"C:\Windows\System32\SHELL32.DLL"` → `"shell32.dll"`
 /// `"shell32.dll"` → `"shell32.dll"`
 fn dll_basename(name: &str) -> String {
-    let base = name
-        .rsplit(['\\', '/'])
-        .next()
-        .unwrap_or(name);
+    let base = name.rsplit(['\\', '/']).next().unwrap_or(name);
     base.to_ascii_lowercase()
 }
 
@@ -120,9 +117,6 @@ mod tests {
 
     #[test]
     fn dll_basename_with_path() {
-        assert_eq!(
-            dll_basename(r"C:\Windows\System32\ntdll.dll"),
-            "ntdll.dll"
-        );
+        assert_eq!(dll_basename(r"C:\Windows\System32\ntdll.dll"), "ntdll.dll");
     }
 }

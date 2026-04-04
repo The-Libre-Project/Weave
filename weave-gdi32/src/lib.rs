@@ -902,46 +902,40 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         ),
         // ── PuTTY gap-fill: ANSI variants + missing GDI ──────────────────
         "CreateFontA" => Some(
-            create_font_a
-                as unsafe extern "win64" fn(_, _, _, _, _, _, _, _, _, _, _, _, _, _) -> _
+            create_font_a as unsafe extern "win64" fn(_, _, _, _, _, _, _, _, _, _, _, _, _, _) -> _
                 as *const () as usize,
         ),
-        "CreateFontIndirectA" => Some(
-            create_font_indirect_a as unsafe extern "win64" fn(_) -> _ as *const () as usize,
-        ),
-        "TextOutA" => Some(
-            text_out_a as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const () as usize,
-        ),
+        "CreateFontIndirectA" => {
+            Some(create_font_indirect_a as unsafe extern "win64" fn(_) -> _ as *const () as usize)
+        }
+        "TextOutA" => {
+            Some(text_out_a as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const () as usize)
+        }
         "ExtTextOutA" => Some(
-            ext_text_out_a
-                as unsafe extern "win64" fn(_, _, _, _, _, _, _, _) -> _
-                as *const () as usize,
+            ext_text_out_a as unsafe extern "win64" fn(_, _, _, _, _, _, _, _) -> _ as *const ()
+                as usize,
         ),
         "GetTextExtentPoint32A" => Some(
-            get_text_extent_point32_a
-                as unsafe extern "win64" fn(_, _, _, _) -> _
-                as *const () as usize,
+            get_text_extent_point32_a as unsafe extern "win64" fn(_, _, _, _) -> _ as *const ()
+                as usize,
         ),
-        "GetTextMetricsA" => Some(
-            get_text_metrics_a as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
-        ),
-        "GetObjectA" => Some(
-            get_object_a as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
-        ),
+        "GetTextMetricsA" => {
+            Some(get_text_metrics_a as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "GetObjectA" => {
+            Some(get_object_a as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize)
+        }
         "GetTextExtentExPointA" => Some(
-            get_text_extent_ex_point_a
-                as unsafe extern "win64" fn(_, _, _, _, _, _, _) -> _
+            get_text_extent_ex_point_a as unsafe extern "win64" fn(_, _, _, _, _, _, _) -> _
                 as *const () as usize,
         ),
         "GetOutlineTextMetricsA" => Some(
-            get_outline_text_metrics_a
-                as unsafe extern "win64" fn(_, _, _) -> _
-                as *const () as usize,
+            get_outline_text_metrics_a as unsafe extern "win64" fn(_, _, _) -> _ as *const ()
+                as usize,
         ),
         "GetCharABCWidthsFloatA" => Some(
-            get_char_abc_widths_float_a
-                as unsafe extern "win64" fn(_, _, _, _) -> _
-                as *const () as usize,
+            get_char_abc_widths_float_a as unsafe extern "win64" fn(_, _, _, _) -> _ as *const ()
+                as usize,
         ),
         "GetCharWidth32A" => Some(
             get_char_width32_a as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
@@ -956,33 +950,29 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
             get_char_width_w as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
         ),
         "GetCharacterPlacementW" => Some(
-            get_character_placement_w
-                as unsafe extern "win64" fn(_, _, _, _, _, _) -> _
+            get_character_placement_w as unsafe extern "win64" fn(_, _, _, _, _, _) -> _
                 as *const () as usize,
         ),
         "SetTextAlign" => Some(set_text_align as *const () as usize),
         "GetCurrentObject" => Some(get_current_object as *const () as usize),
         "SetMapMode" => Some(set_map_mode as *const () as usize),
-        "Polyline" => Some(
-            polyline as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
-        ),
+        "Polyline" => {
+            Some(polyline as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize)
+        }
         "CreateBitmap" => Some(create_bitmap as *const () as usize),
         "GetDIBits" => Some(
-            get_dib_bits
-                as unsafe extern "win64" fn(_, _, _, _, _, _, _) -> _
-                as *const () as usize,
+            get_dib_bits as unsafe extern "win64" fn(_, _, _, _, _, _, _) -> _ as *const ()
+                as usize,
         ),
         "ExcludeClipRect" => Some(exclude_clip_rect as *const () as usize),
         "IntersectClipRect" => Some(intersect_clip_rect as *const () as usize),
         "TranslateCharsetInfo" => Some(
-            translate_charset_info
-                as unsafe extern "win64" fn(_, _, _) -> _
-                as *const () as usize,
+            translate_charset_info as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
         ),
         // Palette functions
-        "CreatePalette" => Some(
-            create_palette as unsafe extern "win64" fn(_) -> _ as *const () as usize,
-        ),
+        "CreatePalette" => {
+            Some(create_palette as unsafe extern "win64" fn(_) -> _ as *const () as usize)
+        }
         "SelectPalette" => Some(select_palette as *const () as usize),
         "RealizePalette" => Some(realize_palette as *const () as usize),
         "SetPaletteEntries" => Some(
@@ -1033,9 +1023,19 @@ pub unsafe extern "win64" fn create_font_a(
     let wide: Vec<u16> = face.encode_utf16().chain(std::iter::once(0)).collect();
     unsafe {
         create_font_w(
-            c_height, c_width, c_escapement, c_orientation, c_weight,
-            b_italic, b_underline, b_strike_out, i_char_set,
-            i_out_precision, i_clip_precision, i_quality, i_pitch_and_family,
+            c_height,
+            c_width,
+            c_escapement,
+            c_orientation,
+            c_weight,
+            b_italic,
+            b_underline,
+            b_strike_out,
+            i_char_set,
+            i_out_precision,
+            i_clip_precision,
+            i_quality,
+            i_pitch_and_family,
             wide.as_ptr(),
         )
     }
@@ -1073,11 +1073,19 @@ pub unsafe extern "win64" fn create_font_indirect_a(lplf: *const LogFontA) -> us
     let face = String::from_utf8_lossy(&lf.lf_face_name[..face_end]).into_owned();
     unsafe {
         create_font_a(
-            lf.lf_height, lf.lf_width, lf.lf_escapement, lf.lf_orientation,
-            lf.lf_weight, lf.lf_italic as u32, lf.lf_underline as u32,
-            lf.lf_strike_out as u32, lf.lf_char_set as u32,
-            lf.lf_out_precision as u32, lf.lf_clip_precision as u32,
-            lf.lf_quality as u32, lf.lf_pitch_and_family as u32,
+            lf.lf_height,
+            lf.lf_width,
+            lf.lf_escapement,
+            lf.lf_orientation,
+            lf.lf_weight,
+            lf.lf_italic as u32,
+            lf.lf_underline as u32,
+            lf.lf_strike_out as u32,
+            lf.lf_char_set as u32,
+            lf.lf_out_precision as u32,
+            lf.lf_clip_precision as u32,
+            lf.lf_quality as u32,
+            lf.lf_pitch_and_family as u32,
             face.as_ptr(),
         )
     }
@@ -1125,8 +1133,14 @@ pub unsafe extern "win64" fn ext_text_out_a(
     };
     unsafe {
         ext_text_out_w(
-            hdc, x, y, options, lp_rc as *const _,
-            wide.as_ptr(), wide.len() as u32, lp_dx as *const _,
+            hdc,
+            x,
+            y,
+            options,
+            lp_rc as *const _,
+            wide.as_ptr(),
+            wide.len() as u32,
+            lp_dx as *const _,
         )
     }
 }
@@ -1220,26 +1234,46 @@ pub unsafe extern "win64" fn get_char_abc_widths_float_a(
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
 pub unsafe extern "win64" fn get_char_width32_a(
-    _hdc: usize, _i_first: u32, _i_last: u32, _lp_buffer: usize,
-) -> i32 { 0 }
+    _hdc: usize,
+    _i_first: u32,
+    _i_last: u32,
+    _lp_buffer: usize,
+) -> i32 {
+    0
+}
 
 /// # Safety
 /// `lp_buffer` must point to writable storage for `(i_last - i_first + 1)` INT values.
 pub unsafe extern "win64" fn get_char_width32_w(
-    _hdc: usize, _i_first: u32, _i_last: u32, _lp_buffer: usize,
-) -> i32 { 0 }
+    _hdc: usize,
+    _i_first: u32,
+    _i_last: u32,
+    _lp_buffer: usize,
+) -> i32 {
+    0
+}
 
 /// # Safety
 /// `lp_buffer` must point to writable storage for the requested char range.
 pub unsafe extern "win64" fn get_char_width_a(
-    _hdc: usize, _i_first: u32, _i_last: u32, _lp_buffer: usize,
-) -> i32 { 0 }
+    _hdc: usize,
+    _i_first: u32,
+    _i_last: u32,
+    _lp_buffer: usize,
+) -> i32 {
+    0
+}
 
 /// # Safety
 /// `lp_buffer` must point to writable storage for the requested char range.
 pub unsafe extern "win64" fn get_char_width_w(
-    _hdc: usize, _i_first: u32, _i_last: u32, _lp_buffer: usize,
-) -> i32 { 0 }
+    _hdc: usize,
+    _i_first: u32,
+    _i_last: u32,
+    _lp_buffer: usize,
+) -> i32 {
+    0
+}
 
 /// GetCharacterPlacementW: return 0 (not implemented).
 ///
@@ -1252,7 +1286,9 @@ pub unsafe extern "win64" fn get_character_placement_w(
     _n_max_extent: i32,
     _lpgcp_results: usize,
     _dw_flags: u32,
-) -> u32 { 0 }
+) -> u32 {
+    0
+}
 
 /// SetTextAlign: set DC text alignment. Returns TA_LEFT (previous value).
 pub extern "win64" fn set_text_align(_hdc: usize, _fmode: u32) -> u32 {
@@ -1302,15 +1338,29 @@ pub unsafe extern "win64" fn get_dib_bits(
     _lp_vbits: usize,
     _lpbmi: usize,
     _usage: u32,
-) -> i32 { 0 }
+) -> i32 {
+    0
+}
 
 /// ExcludeClipRect: exclude a rectangle from the clipping region. Returns SIMPLEREGION (2).
-pub extern "win64" fn exclude_clip_rect(_hdc: usize, _left: i32, _top: i32, _right: i32, _bottom: i32) -> i32 {
+pub extern "win64" fn exclude_clip_rect(
+    _hdc: usize,
+    _left: i32,
+    _top: i32,
+    _right: i32,
+    _bottom: i32,
+) -> i32 {
     2 // SIMPLEREGION
 }
 
 /// IntersectClipRect: intersect the clipping region with a rectangle. Returns SIMPLEREGION (2).
-pub extern "win64" fn intersect_clip_rect(_hdc: usize, _left: i32, _top: i32, _right: i32, _bottom: i32) -> i32 {
+pub extern "win64" fn intersect_clip_rect(
+    _hdc: usize,
+    _left: i32,
+    _top: i32,
+    _right: i32,
+    _bottom: i32,
+) -> i32 {
     2 // SIMPLEREGION
 }
 
@@ -1322,7 +1372,9 @@ pub unsafe extern "win64" fn translate_charset_info(
     _lp_src: usize,
     _lp_cs: usize,
     _dw_flags: u32,
-) -> i32 { 0 }
+) -> i32 {
+    0
+}
 
 // ── Palette stubs ─────────────────────────────────────────────────────────────
 
@@ -1336,7 +1388,11 @@ pub unsafe extern "win64" fn create_palette(_lplgpl: *const u8) -> usize {
 }
 
 /// SelectPalette: select a palette into a DC. Returns the previous (fake) palette.
-pub extern "win64" fn select_palette(_hdc: usize, _h_pal: usize, _b_force_background: i32) -> usize {
+pub extern "win64" fn select_palette(
+    _hdc: usize,
+    _h_pal: usize,
+    _b_force_background: i32,
+) -> usize {
     0x0000_FACE_usize
 }
 
@@ -1354,10 +1410,16 @@ pub unsafe extern "win64" fn set_palette_entries(
     _i_start: u32,
     _c_entries: u32,
     _lppe: usize,
-) -> u32 { 0 }
+) -> u32 {
+    0
+}
 
 /// UnrealizeObject: reset a brush origin or restore a palette. Returns TRUE.
-pub extern "win64" fn unrealize_object(_h: usize) -> i32 { 1 }
+pub extern "win64" fn unrealize_object(_h: usize) -> i32 {
+    1
+}
 
 /// UpdateColors: update client area colors. Returns TRUE.
-pub extern "win64" fn update_colors(_hdc: usize) -> i32 { 1 }
+pub extern "win64" fn update_colors(_hdc: usize) -> i32 {
+    1
+}

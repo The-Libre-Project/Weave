@@ -58,6 +58,13 @@ pub fn install(image: &LoadedImage) {
     }
 }
 
+/// Return the base address at which the guest PE is mapped.
+///
+/// Returns 0 if called before [`install`].
+pub fn pe_base() -> usize {
+    PE_BASE.load(Ordering::Relaxed)
+}
+
 // ── Signal handler installation ───────────────────────────────────────────────
 
 #[cfg(target_os = "linux")]
@@ -272,12 +279,7 @@ fn print_weave_crash(
     // Async-signal-safe: only open/read/close syscalls + stack buffers.
     {
         let maps_path = b"/proc/self/maps\0";
-        let fd = unsafe {
-            libc::open(
-                maps_path.as_ptr() as *const libc::c_char,
-                libc::O_RDONLY,
-            )
-        };
+        let fd = unsafe { libc::open(maps_path.as_ptr() as *const libc::c_char, libc::O_RDONLY) };
         if fd >= 0 {
             let mut buf = [0u8; 512];
             let mut line = [0u8; 256];
@@ -285,9 +287,7 @@ fn print_weave_crash(
             let mut found_line = [0u8; 256];
             let mut found = false;
             'outer: loop {
-                let n = unsafe {
-                    libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len())
-                };
+                let n = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
                 if n <= 0 {
                     break;
                 }

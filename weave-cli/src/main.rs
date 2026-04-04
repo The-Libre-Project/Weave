@@ -184,7 +184,9 @@ fn main() {
         let bytes_at_ep: Vec<u8> = (0..16).map(|i| unsafe { *ep.add(i) }).collect();
         eprintln!("weave: entry bytes: {:02x?}", bytes_at_ep);
         let mut gs_base: u64 = 0;
-        unsafe { libc::syscall(libc::SYS_arch_prctl, 0x1004i64, &mut gs_base as *mut u64); }
+        unsafe {
+            libc::syscall(libc::SYS_arch_prctl, 0x1004i64, &mut gs_base as *mut u64);
+        }
         eprintln!("weave: GS base = {gs_base:#x}");
     }
 

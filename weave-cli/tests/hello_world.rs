@@ -38,8 +38,9 @@ fn hello_minimal_prints_hello_world() {
 }
 
 /// `weave putty.exe` — PuTTY GUI; we check that HeapAlloc is called during CRT init.
-/// This is a diagnostic test — PuTTY will crash later without a display, but we
-/// want stderr to show HeapAlloc was reached before any crash.
+///
+/// PuTTY will hang after CRT init (no display in Docker), so we enforce a 5s
+/// timeout, kill the process, then inspect what was written to stderr.
 #[test]
 fn putty_heapalloc_is_reached() {
     if !cfg!(target_os = "linux") {
@@ -52,14 +53,39 @@ fn putty_heapalloc_is_reached() {
         "{}/../tests/fixtures/bin/putty.exe",
         env!("CARGO_MANIFEST_DIR")
     );
-    // Run with a short timeout — PuTTY will likely crash or hang without a display.
-    // We just care about stderr output from our stubs.
-    let output = std::process::Command::new(weave_bin)
-        .arg(&fixture)
-        .output()
-        .unwrap_or_else(|e| panic!("failed to run weave on putty.exe: {e}"));
 
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    // Capture stderr via a pipe, spawn, wait up to 5 s, then kill.
+    let mut child = std::process::Command::new(weave_bin)
+        .arg(&fixture)
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|e| panic!("failed to spawn weave on putty.exe: {e}"));
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break, // exited on its own
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err(e) => panic!("wait failed: {e}"),
+        }
+    }
+
+    // Read whatever stderr was produced.
+    let stderr_bytes = {
+        use std::io::Read;
+        let mut buf = Vec::new();
+        if let Some(mut pipe) = child.stderr.take() {
+            let _ = pipe.read_to_end(&mut buf);
+        }
+        buf
+    };
+    let stderr = String::from_utf8_lossy(&stderr_bytes);
     eprintln!("putty stderr:\n{stderr}");
 
     // Must have called HeapAlloc at least once (CRT init allocates memory).

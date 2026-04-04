@@ -522,9 +522,7 @@ fn patch_cfg_section_slots(pe_bytes: &[u8], base: *mut u8, stub_addr: usize) {
         let sec_map_base = base_usize + sec_va;
         let page_size = 4096usize;
 
-        eprintln!(
-            "weave: CFG: scanning .00cfg section at {sec_map_base:#x} ({slot_count} slots)"
-        );
+        eprintln!("weave: CFG: scanning .00cfg section at {sec_map_base:#x} ({slot_count} slots)");
 
         for j in 0..slot_count {
             let slot_va = sec_map_base + j * 8;

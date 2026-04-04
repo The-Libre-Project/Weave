@@ -84,8 +84,16 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "SetWindowTextW" => {
             Some(set_window_text_w as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
         }
+        "SetWindowTextA" => {
+            Some(set_window_text_a as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
         "GetWindowTextW" => {
             Some(get_window_text_w as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize)
+        }
+        // Focus
+        "SetFocus" => Some(set_focus as unsafe extern "win64" fn(_) -> _ as *const () as usize),
+        "SetKeyboardState" => {
+            Some(set_keyboard_state as unsafe extern "win64" fn(_) -> _ as *const () as usize)
         }
         // System metrics
         "GetSystemMetrics" => Some(get_system_metrics as *const () as usize),
@@ -256,27 +264,26 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         }
         // ── ANSI window creation ──────────────────────────────────────────
         "CreateWindowExA" => Some(
-            create_window_ex_a
-                as unsafe extern "win64" fn(_, _, _, _, _, _, _, _, _, _, _, _) -> _
+            create_window_ex_a as unsafe extern "win64" fn(_, _, _, _, _, _, _, _, _, _, _, _) -> _
                 as *const () as usize,
         ),
         // ── ANSI message loop ─────────────────────────────────────────────
-        "GetMessageA" => Some(
-            get_message_a as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
-        ),
+        "GetMessageA" => {
+            Some(get_message_a as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize)
+        }
         "PeekMessageA" => Some(
             peek_message_a as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const () as usize,
         ),
-        "DispatchMessageA" => Some(
-            dispatch_message_a as unsafe extern "win64" fn(_) -> _ as *const () as usize,
-        ),
+        "DispatchMessageA" => {
+            Some(dispatch_message_a as unsafe extern "win64" fn(_) -> _ as *const () as usize)
+        }
         "PostMessageA" => Some(post_message_a as *const () as usize),
         "SendMessageA" => Some(send_message_a as *const () as usize),
         "DefWindowProcA" => Some(def_window_proc_a as *const () as usize),
         // ── ANSI window text / class ──────────────────────────────────────
-        "GetWindowTextA" => Some(
-            get_window_text_a as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
-        ),
+        "GetWindowTextA" => {
+            Some(get_window_text_a as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize)
+        }
         "GetWindowTextLengthA" => Some(get_window_text_length_a as *const () as usize),
         "GetWindowLongPtrA" => Some(get_window_long_ptr_a as *const () as usize),
         "SetWindowLongPtrA" => Some(set_window_long_ptr_a as *const () as usize),
@@ -292,16 +299,16 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         ),
         "DestroyIcon" => Some(destroy_icon as *const () as usize),
         // ── ANSI message box ──────────────────────────────────────────────
-        "MessageBoxA" => Some(
-            message_box_a as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
-        ),
-        "MessageBoxIndirectW" => Some(
-            message_box_indirect_w as unsafe extern "win64" fn(_) -> _ as *const () as usize,
-        ),
+        "MessageBoxA" => {
+            Some(message_box_a as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize)
+        }
+        "MessageBoxIndirectW" => {
+            Some(message_box_indirect_w as unsafe extern "win64" fn(_) -> _ as *const () as usize)
+        }
         // ── ANSI menu helpers ─────────────────────────────────────────────
-        "AppendMenuA" => Some(
-            append_menu_a as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
-        ),
+        "AppendMenuA" => {
+            Some(append_menu_a as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize)
+        }
         "InsertMenuA" => Some(
             insert_menu_a as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const () as usize,
         ),
@@ -335,33 +342,32 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "CheckDlgButton" => Some(check_dlg_button as *const () as usize),
         "IsDlgButtonChecked" => Some(is_dlg_button_checked as *const () as usize),
         "CheckRadioButton" => Some(check_radio_button as *const () as usize),
-        "IsDialogMessageA" => Some(
-            is_dialog_message_a as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
-        ),
-        "MapDialogRect" => Some(
-            map_dialog_rect as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
-        ),
+        "IsDialogMessageA" => {
+            Some(is_dialog_message_a as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "MapDialogRect" => {
+            Some(map_dialog_rect as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
         // ── Window state ──────────────────────────────────────────────────
         "IsIconic" => Some(is_iconic as *const () as usize),
         "IsZoomed" => Some(is_zoomed as *const () as usize),
         "FlashWindow" => Some(flash_window as *const () as usize),
-        "GetWindowPlacement" => Some(
-            get_window_placement as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
-        ),
-        "SetWindowPlacement" => Some(
-            set_window_placement as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
-        ),
+        "GetWindowPlacement" => {
+            Some(get_window_placement as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "SetWindowPlacement" => {
+            Some(set_window_placement as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
         // ── Timers ────────────────────────────────────────────────────────
-        "SetTimer" => Some(
-            set_timer as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
-        ),
+        "SetTimer" => {
+            Some(set_timer as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize)
+        }
         "KillTimer" => Some(kill_timer as *const () as usize),
         // ── Message helpers ───────────────────────────────────────────────
         "GetMessageTime" => Some(get_message_time as *const () as usize),
         "GetQueueStatus" => Some(get_queue_status as *const () as usize),
         "MsgWaitForMultipleObjects" => Some(
-            msg_wait_for_multiple_objects
-                as unsafe extern "win64" fn(_, _, _, _, _) -> _
+            msg_wait_for_multiple_objects as unsafe extern "win64" fn(_, _, _, _, _) -> _
                 as *const () as usize,
         ),
         // ── Mouse capture ─────────────────────────────────────────────────
@@ -373,12 +379,12 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "GetSysColor" => Some(get_sys_color as *const () as usize),
         "GetSysColorBrush" => Some(get_sys_color_brush as *const () as usize),
         // ── Scrollbar ───────────────────────────────���────────────────────
-        "GetScrollInfo" => Some(
-            get_scroll_info as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
-        ),
-        "SetScrollInfo" => Some(
-            set_scroll_info as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
-        ),
+        "GetScrollInfo" => {
+            Some(get_scroll_info as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize)
+        }
+        "SetScrollInfo" => {
+            Some(set_scroll_info as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize)
+        }
         // ── Caret ────────────────────────────────────────────────────────
         "CreateCaret" => Some(create_caret as *const () as usize),
         "DestroyCaret" => Some(destroy_caret as *const () as usize),
@@ -389,16 +395,15 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         // ── Misc ──────────────────────────────────────────────────────────
         "MessageBeep" => Some(message_beep as *const () as usize),
         "GetDoubleClickTime" => Some(get_double_click_time as *const () as usize),
-        "OffsetRect" => Some(
-            offset_rect as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
-        ),
-        "DrawEdge" => Some(
-            draw_edge as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
-        ),
+        "OffsetRect" => {
+            Some(offset_rect as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize)
+        }
+        "DrawEdge" => {
+            Some(draw_edge as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize)
+        }
         "DrawIconEx" => Some(
-            draw_icon_ex
-                as unsafe extern "win64" fn(_, _, _, _, _, _, _, _, _) -> _
-                as *const () as usize,
+            draw_icon_ex as unsafe extern "win64" fn(_, _, _, _, _, _, _, _, _) -> _ as *const ()
+                as usize,
         ),
         "RegisterClipboardFormatA" => Some(
             register_clipboard_format_a as unsafe extern "win64" fn(_) -> _ as *const () as usize,
@@ -407,14 +412,11 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
             register_window_message_a as unsafe extern "win64" fn(_) -> _ as *const () as usize,
         ),
         "SystemParametersInfoA" => Some(
-            system_parameters_info_a
-                as unsafe extern "win64" fn(_, _, _, _) -> _
-                as *const () as usize,
+            system_parameters_info_a as unsafe extern "win64" fn(_, _, _, _) -> _ as *const ()
+                as usize,
         ),
         "ToAsciiEx" => Some(
-            to_ascii_ex
-                as unsafe extern "win64" fn(_, _, _, _, _, _) -> _
-                as *const () as usize,
+            to_ascii_ex as unsafe extern "win64" fn(_, _, _, _, _, _) -> _ as *const () as usize,
         ),
         _ => None,
     }

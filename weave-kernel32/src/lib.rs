@@ -3096,15 +3096,11 @@ pub unsafe extern "win64" fn get_proc_address(h_module: usize, lp_proc_name: *co
 
     match weave_core::resolve::resolve(&dll_name, &func_name) {
         Some(addr) => {
-            eprintln!(
-                "weave/kernel32: GetProcAddress({dll_name}!{func_name}) → {addr:#x}"
-            );
+            eprintln!("weave/kernel32: GetProcAddress({dll_name}!{func_name}) → {addr:#x}");
             addr
         }
         None => {
-            eprintln!(
-                "weave/kernel32: GetProcAddress({dll_name}!{func_name}) → NULL (not found)"
-            );
+            eprintln!("weave/kernel32: GetProcAddress({dll_name}!{func_name}) → NULL (not found)");
             0
         }
     }
@@ -3112,14 +3108,14 @@ pub unsafe extern "win64" fn get_proc_address(h_module: usize, lp_proc_name: *co
 
 /// GetModuleHandleA — get a handle to an already-loaded module (ANSI).
 ///
-/// NULL `lp_module_name` means "the main executable" — we return a fixed
-/// sentinel (0x00400000, the default PE image base) for that case.
+/// NULL `lp_module_name` means "the main executable" — return the actual
+/// PE load address recorded by the SEH module.
 ///
 /// # Safety
 /// `lp_module_name` must be null or a valid null-terminated ANSI string.
 pub unsafe extern "win64" fn get_module_handle_a(lp_module_name: *const u8) -> usize {
     if lp_module_name.is_null() {
-        return 0x00400000; // conventional EXE image base
+        return weave_core::seh::pe_base();
     }
     let name = unsafe { read_cstr_a(lp_module_name) };
     weave_core::module_handles::register(&name)
@@ -3131,7 +3127,7 @@ pub unsafe extern "win64" fn get_module_handle_a(lp_module_name: *const u8) -> u
 /// `lp_module_name` must be null or a valid null-terminated UTF-16 string.
 pub unsafe extern "win64" fn get_module_handle_w(lp_module_name: *const u16) -> usize {
     if lp_module_name.is_null() {
-        return 0x00400000; // conventional EXE image base
+        return weave_core::seh::pe_base();
     }
     let name = unsafe { read_cstr_w(lp_module_name) };
     weave_core::module_handles::register(&name)
@@ -3185,7 +3181,7 @@ pub unsafe extern "win64" fn get_module_file_name_w(
     if lp_filename.is_null() || n_size == 0 {
         return 0;
     }
-    let path = if h_module == 0 || h_module == 0x00400000 {
+    let path = if h_module == 0 || h_module == weave_core::seh::pe_base() {
         r"C:\Program Files\app.exe".to_string()
     } else {
         match weave_core::module_handles::lookup(h_module) {
@@ -3214,7 +3210,7 @@ pub unsafe extern "win64" fn get_module_file_name_a(
     if lp_filename.is_null() || n_size == 0 {
         return 0;
     }
-    let path = if h_module == 0 || h_module == 0x00400000 {
+    let path = if h_module == 0 || h_module == weave_core::seh::pe_base() {
         r"C:\Program Files\app.exe".to_string()
     } else {
         match weave_core::module_handles::lookup(h_module) {
@@ -6123,7 +6119,11 @@ pub unsafe extern "win64" fn set_console_ctrl_handler(_handler_routine: usize, _
 
 /// Resolve a kernel32.dll import to a stub address.
 pub fn resolve(dll: &str, func: &str) -> Option<usize> {
-    if !dll.eq_ignore_ascii_case("kernel32.dll") {
+    // api-ms-win-* API sets forward to kernel32. Accept any such name so that
+    // GetProcAddress on a LoadLibrary'd api-ms-win-* handle finds our stubs.
+    let is_kernel32 = dll.eq_ignore_ascii_case("kernel32.dll");
+    let is_apiset = dll.to_ascii_lowercase().starts_with("api-ms-win-");
+    if !is_kernel32 && !is_apiset {
         return None;
     }
     match func {
@@ -6132,9 +6132,9 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
             write_console_w as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const () as usize,
         ),
         "ExitProcess" => Some(exit_process as *const () as usize),
-        "TerminateProcess" => Some(
-            terminate_process as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
-        ),
+        "TerminateProcess" => {
+            Some(terminate_process as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
         "GetLastError" => Some(get_last_error as *const () as usize),
         "SetLastError" => Some(set_last_error as *const () as usize),
         "VirtualProtect" => {
@@ -6942,96 +6942,84 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "Beep" => Some(beep as *const () as usize),
         "MulDiv" => Some(mul_div as *const () as usize),
         "SetStdHandle" => Some(set_std_handle as *const () as usize),
-        "DeleteFileA" => Some(
-            delete_file_a as unsafe extern "win64" fn(_) -> _ as *const () as usize,
-        ),
+        "DeleteFileA" => {
+            Some(delete_file_a as unsafe extern "win64" fn(_) -> _ as *const () as usize)
+        }
         "FindFirstFileExW" => Some(
-            find_first_file_ex_w
-                as unsafe extern "win64" fn(_, _, _, _, _, _) -> _
-                as *const () as usize,
+            find_first_file_ex_w as unsafe extern "win64" fn(_, _, _, _, _, _) -> _ as *const ()
+                as usize,
         ),
-        "GetCPInfo" => Some(
-            get_cp_info as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
-        ),
+        "GetCPInfo" => {
+            Some(get_cp_info as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
         "GetDateFormatW" => Some(
-            get_date_format_w
-                as unsafe extern "win64" fn(_, _, _, _, _, _) -> _
-                as *const () as usize,
+            get_date_format_w as unsafe extern "win64" fn(_, _, _, _, _, _) -> _ as *const ()
+                as usize,
         ),
         "GetTimeFormatW" => Some(
-            get_time_format_w
-                as unsafe extern "win64" fn(_, _, _, _, _, _) -> _
-                as *const () as usize,
+            get_time_format_w as unsafe extern "win64" fn(_, _, _, _, _, _) -> _ as *const ()
+                as usize,
         ),
-        "GlobalMemoryStatus" => Some(
-            global_memory_status as unsafe extern "win64" fn(_) -> _ as *const () as usize,
-        ),
-        "InitializeSListHead" => Some(
-            initialize_slist_head as unsafe extern "win64" fn(_) as *const () as usize,
-        ),
+        "GlobalMemoryStatus" => {
+            Some(global_memory_status as unsafe extern "win64" fn(_) -> _ as *const () as usize)
+        }
+        "InitializeSListHead" => {
+            Some(initialize_slist_head as unsafe extern "win64" fn(_) as *const () as usize)
+        }
         "IsValidLocale" => Some(is_valid_locale as *const () as usize),
-        "EnumSystemLocalesW" => Some(
-            enum_system_locales_w as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
-        ),
-        "FindResourceA" => Some(
-            find_resource_a as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
-        ),
+        "EnumSystemLocalesW" => {
+            Some(enum_system_locales_w as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "FindResourceA" => {
+            Some(find_resource_a as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize)
+        }
         "LoadResource" => Some(load_resource as *const () as usize),
         "LockResource" => Some(lock_resource as *const () as usize),
         "SizeofResource" => Some(sizeof_resource as *const () as usize),
         "GetProcessTimes" => Some(
-            get_process_times
-                as unsafe extern "win64" fn(_, _, _, _, _) -> _
-                as *const () as usize,
+            get_process_times as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const () as usize,
         ),
         "GetThreadTimes" => Some(
-            get_thread_times
-                as unsafe extern "win64" fn(_, _, _, _, _) -> _
-                as *const () as usize,
+            get_thread_times as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const () as usize,
         ),
         "GetOverlappedResult" => Some(
-            get_overlapped_result
-                as unsafe extern "win64" fn(_, _, _, _) -> _
-                as *const () as usize,
+            get_overlapped_result as unsafe extern "win64" fn(_, _, _, _) -> _ as *const ()
+                as usize,
         ),
-        "RtlPcToFileHeader" => Some(
-            rtl_pc_to_file_header as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
-        ),
+        "RtlPcToFileHeader" => {
+            Some(rtl_pc_to_file_header as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
         "CreateFileMappingA" => Some(
-            create_file_mapping_a
-                as unsafe extern "win64" fn(_, _, _, _, _, _) -> _
-                as *const () as usize,
+            create_file_mapping_a as unsafe extern "win64" fn(_, _, _, _, _, _) -> _ as *const ()
+                as usize,
         ),
-        "CreatePipe" => Some(
-            create_pipe as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
-        ),
+        "CreatePipe" => {
+            Some(create_pipe as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize)
+        }
         "ReadConsoleW" => Some(
-            read_console_w
-                as unsafe extern "win64" fn(_, _, _, _, _) -> _
-                as *const () as usize,
+            read_console_w as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const () as usize,
         ),
-        "ConnectNamedPipe" => Some(
-            connect_named_pipe as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
-        ),
+        "ConnectNamedPipe" => {
+            Some(connect_named_pipe as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
         "CreateNamedPipeA" => Some(
-            create_named_pipe_a
-                as unsafe extern "win64" fn(_, _, _, _, _, _, _, _) -> _
+            create_named_pipe_a as unsafe extern "win64" fn(_, _, _, _, _, _, _, _) -> _
                 as *const () as usize,
         ),
-        "WaitNamedPipeA" => Some(
-            wait_named_pipe_a as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
-        ),
+        "WaitNamedPipeA" => {
+            Some(wait_named_pipe_a as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
         "ClearCommBreak" => Some(clear_comm_break as *const () as usize),
         "SetCommBreak" => Some(set_comm_break as *const () as usize),
-        "GetCommState" => Some(
-            get_comm_state as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
-        ),
-        "SetCommState" => Some(
-            set_comm_state as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
-        ),
-        "SetCommTimeouts" => Some(
-            set_comm_timeouts as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
-        ),
+        "GetCommState" => {
+            Some(get_comm_state as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "SetCommState" => {
+            Some(set_comm_state as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "SetCommTimeouts" => {
+            Some(set_comm_timeouts as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
         _ => None,
     }
 }
@@ -7129,7 +7117,10 @@ pub unsafe extern "win64" fn get_date_format_w(
     lp_date_str: *mut u16,
     cch_date: i32,
 ) -> i32 {
-    let s: Vec<u16> = "2026-01-01".encode_utf16().chain(std::iter::once(0)).collect();
+    let s: Vec<u16> = "2026-01-01"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
     let copy = (s.len()).min(cch_date as usize);
     if !lp_date_str.is_null() && cch_date > 0 {
         unsafe { std::ptr::copy_nonoverlapping(s.as_ptr(), lp_date_str, copy) };
@@ -7149,7 +7140,10 @@ pub unsafe extern "win64" fn get_time_format_w(
     lp_time_str: *mut u16,
     cch_time: i32,
 ) -> i32 {
-    let s: Vec<u16> = "00:00:00".encode_utf16().chain(std::iter::once(0)).collect();
+    let s: Vec<u16> = "00:00:00"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
     let copy = (s.len()).min(cch_time as usize);
     if !lp_time_str.is_null() && cch_time > 0 {
         unsafe { std::ptr::copy_nonoverlapping(s.as_ptr(), lp_time_str, copy) };
@@ -7291,7 +7285,15 @@ pub unsafe extern "win64" fn get_thread_times(
     lp_kernel_time: *mut FileTime,
     lp_user_time: *mut FileTime,
 ) -> i32 {
-    unsafe { get_process_times(0, lp_creation_time, lp_exit_time, lp_kernel_time, lp_user_time) }
+    unsafe {
+        get_process_times(
+            0,
+            lp_creation_time,
+            lp_exit_time,
+            lp_kernel_time,
+            lp_user_time,
+        )
+    }
 }
 
 /// GetOverlappedResult: query the result of an async I/O operation.
@@ -7378,7 +7380,10 @@ pub unsafe extern "win64" fn read_console_w(
 ///
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
-pub unsafe extern "win64" fn connect_named_pipe(_h_named_pipe: usize, _lp_overlapped: usize) -> i32 {
+pub unsafe extern "win64" fn connect_named_pipe(
+    _h_named_pipe: usize,
+    _lp_overlapped: usize,
+) -> i32 {
     0
 }
 
@@ -7404,7 +7409,10 @@ pub unsafe extern "win64" fn create_named_pipe_a(
 ///
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
-pub unsafe extern "win64" fn wait_named_pipe_a(_lp_named_pipe_name: *const u8, _n_timeout_ms: u32) -> i32 {
+pub unsafe extern "win64" fn wait_named_pipe_a(
+    _lp_named_pipe_name: *const u8,
+    _n_timeout_ms: u32,
+) -> i32 {
     0
 }
 
