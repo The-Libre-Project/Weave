@@ -5,8 +5,214 @@
 //! come in RCX, RDX, R8, R9 (not RDI, RSI, RDX, RCX). Getting this wrong
 //! silently corrupts arguments, so every stub here must carry this attribute.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use weave_common::{STATUS_SUCCESS, STATUS_UNSUCCESSFUL};
 use weave_core::{file_io, handles};
+
+// ── Task 3 — NT timing + shutdown flag ───────────────────────────────────────
+
+/// RtlDllShutdownInProgress: check if DLL shutdown is in progress.
+///
+/// Return 0 (process is not shutting down). No parameters. Not `unsafe`.
+pub extern "win64" fn rtl_dll_shutdown_in_progress() -> u8 {
+    0
+}
+
+/// NtQueryPerformanceCounter: get performance counter and frequency.
+///
+/// Fill `*performance_counter` with a monotonic 100-ns tick count using `clock_gettime(CLOCK_MONOTONIC)`.
+/// If `performance_frequency` is non-null, write `10_000_000i64` to it.
+/// Return `0u32` (STATUS_SUCCESS). Mark `unsafe`.
+///
+/// # Safety
+/// `performance_counter` and `performance_frequency` must be valid pointers or NULL.
+pub unsafe extern "win64" fn nt_query_performance_counter(
+    performance_counter: *mut i64,
+    performance_frequency: *mut i64,
+) -> u32 {
+    if !performance_counter.is_null() {
+        let mut ts = unsafe { std::mem::zeroed::<libc::timespec>() };
+        unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) };
+        let counter = ts.tv_sec * 10_000_000 + ts.tv_nsec / 100;
+        unsafe { *performance_counter = counter };
+    }
+
+    if !performance_frequency.is_null() {
+        unsafe { *performance_frequency = 10_000_000i64 };
+    }
+
+    0u32 // STATUS_SUCCESS
+}
+
+/// NtQuerySystemTime: get current system time.
+///
+/// Fill `*system_time` with current UTC as 100-ns intervals since 1601-01-01, using
+/// `clock_gettime(CLOCK_REALTIME)`. Return `0u32`. Mark `unsafe`.
+///
+/// # Safety
+/// `system_time` must be a valid writable pointer.
+pub unsafe extern "win64" fn nt_query_system_time(system_time: *mut i64) -> u32 {
+    if system_time.is_null() {
+        return 0u32;
+    }
+    let mut ts = unsafe { std::mem::zeroed::<libc::timespec>() };
+    unsafe { libc::clock_gettime(libc::CLOCK_REALTIME, &mut ts) };
+    let value = ts.tv_sec * 10_000_000 + ts.tv_nsec / 100 + 116_444_736_000_000_000;
+    unsafe { *system_time = value };
+    0u32 // STATUS_SUCCESS
+}
+
+/// NtDelayExecution: delay execution for a specified interval.
+///
+/// Yield the CPU once with `libc::sched_yield()`. Do not inspect or dereference
+/// `delay_interval` — just yield and return `0u32`. Mark `unsafe`.
+///
+/// # Safety
+/// `delay_interval` is accepted but not dereferenced.
+pub unsafe extern "win64" fn nt_delay_execution(
+    _alertable: u8,
+    _delay_interval: *const i64,
+) -> u32 {
+    unsafe { libc::sched_yield() };
+    0u32 // STATUS_SUCCESS
+}
+
+// ── Task 4 — NT event stubs ──────────────────────────────────────────────────
+
+/// Global handle counter for NT event objects.
+static NT_HANDLE_COUNTER: AtomicUsize = AtomicUsize::new(0x9000_0000);
+
+fn next_nt_handle() -> usize {
+    NT_HANDLE_COUNTER.fetch_add(4, Ordering::Relaxed)
+}
+
+/// NtCreateEvent: create an event object.
+///
+/// Returns a fake handle (incrementing counter). Ignores all parameters.
+///
+/// # Safety
+/// `event_handle` must be a valid writable pointer.
+/// Other pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn nt_create_event(
+    event_handle: *mut usize,
+    _desired_access: u32,
+    _object_attributes: usize,
+    _event_type: u32,
+    _initial_state: u8,
+) -> u32 {
+    if !event_handle.is_null() {
+        unsafe { *event_handle = next_nt_handle() };
+    }
+    0u32 // STATUS_SUCCESS
+}
+
+/// NtOpenEvent: open an existing event object by name.
+///
+/// Returns a fake handle. Ignores the object name.
+///
+/// # Safety
+/// `event_handle` must be a valid writable pointer or NULL.
+pub unsafe extern "win64" fn nt_open_event(
+    event_handle: *mut usize,
+    _desired_access: u32,
+    _object_attributes: usize,
+) -> u32 {
+    if !event_handle.is_null() {
+        unsafe { *event_handle = next_nt_handle() };
+    }
+    0u32 // STATUS_SUCCESS
+}
+
+/// NtClearEvent: clear an event object to the non-signaled state.
+///
+/// No-op. Returns STATUS_SUCCESS.
+///
+/// # Safety
+/// `_event_handle` is a handle value, not dereferenced.
+pub unsafe extern "win64" fn nt_clear_event(_event_handle: usize) -> u32 {
+    0u32 // STATUS_SUCCESS
+}
+
+/// NtPulseEvent: pulse an event object (set then immediately reset).
+///
+/// No-op. Returns STATUS_SUCCESS.
+///
+/// # Safety
+/// `_event_handle` is a handle value. `previous_state` written if non-null.
+pub unsafe extern "win64" fn nt_pulse_event(_event_handle: usize, previous_state: *mut i32) -> u32 {
+    if !previous_state.is_null() {
+        unsafe { *previous_state = 0 };
+    }
+    0u32 // STATUS_SUCCESS
+}
+
+/// NtSetEvent: set an event object to the signaled state.
+///
+/// No-op. Returns STATUS_SUCCESS.
+///
+/// # Safety
+/// `_event_handle` is accepted but not dereferenced.
+pub unsafe extern "win64" fn nt_set_event(_event_handle: usize, _previous_state: *mut u32) -> u32 {
+    0u32 // STATUS_SUCCESS
+}
+
+/// NtResetEvent: reset an event object to the non-signaled state.
+///
+/// No-op. Returns STATUS_SUCCESS.
+///
+/// # Safety
+/// `_event_handle` is accepted but not dereferenced.
+pub unsafe extern "win64" fn nt_reset_event(
+    _event_handle: usize,
+    _previous_state: *mut u32,
+) -> u32 {
+    0u32 // STATUS_SUCCESS
+}
+
+/// NtWaitForSingleObject: wait for an object to become signaled.
+///
+/// No-op. Returns STATUS_SUCCESS (object is always signaled).
+///
+/// # Safety
+/// `_object` is accepted but not dereferenced.
+/// `_timeout` is accepted but not dereferenced.
+pub unsafe extern "win64" fn nt_wait_for_single_object(
+    _object: usize,
+    _alertable: u8,
+    _timeout: usize,
+) -> u32 {
+    0u32 // STATUS_SUCCESS
+}
+
+// ── Task 5 — RtlWaitOnAddress family ──────────────────────────────────────────
+
+/// RtlWaitOnAddress: wait for a value at an address to change.
+///
+/// Stub: immediately return STATUS_SUCCESS (no actual waiting).
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn rtl_wait_on_address(
+    _address: *const u8,
+    _compare_address: *const u8,
+    _address_size: usize,
+    _timeout: usize,
+) -> u32 {
+    0u32 // STATUS_SUCCESS
+}
+
+/// RtlWakeByAddressSingle: wake one thread waiting on an address.
+///
+/// No-op.
+/// # Safety
+/// `_address` is accepted but never dereferenced.
+pub unsafe extern "win64" fn rtl_wake_by_address_single(_address: usize) {}
+
+/// RtlWakeByAddressAll: wake all threads waiting on an address.
+///
+/// No-op.
+/// # Safety
+/// `_address` is accepted but never dereferenced.
+pub unsafe extern "win64" fn rtl_wake_by_address_all(_address: usize) {}
 
 // ── Windows NT structures ─────────────────────────────────────────────────────
 
@@ -1054,6 +1260,51 @@ pub fn resolve(func: &str) -> Option<usize> {
             nt_query_virtual_memory as unsafe extern "win64" fn(_, _, _, _, _, _) -> _ as *const ()
                 as usize,
         ),
+        // Task 3: NT timing + shutdown flag
+        "RtlDllShutdownInProgress" => Some(rtl_dll_shutdown_in_progress as *const () as usize),
+        "NtQueryPerformanceCounter" => Some(
+            nt_query_performance_counter as unsafe extern "win64" fn(_, _) -> _ as *const ()
+                as usize,
+        ),
+        "NtQuerySystemTime" => {
+            Some(nt_query_system_time as unsafe extern "win64" fn(_) -> _ as *const () as usize)
+        }
+        "NtDelayExecution" => {
+            Some(nt_delay_execution as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        // Task 4: NT event stubs (requires adding handle counter)
+        "NtCreateEvent" => Some(
+            nt_create_event as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const () as usize,
+        ),
+        "NtOpenEvent" => {
+            Some(nt_open_event as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize)
+        }
+        "NtSetEvent" => {
+            Some(nt_set_event as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "NtResetEvent" => {
+            Some(nt_reset_event as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "NtClearEvent" => {
+            Some(nt_clear_event as unsafe extern "win64" fn(_) -> _ as *const () as usize)
+        }
+        "NtPulseEvent" => {
+            Some(nt_pulse_event as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "NtWaitForSingleObject" => Some(
+            nt_wait_for_single_object as unsafe extern "win64" fn(_, _, _) -> _ as *const ()
+                as usize,
+        ),
+        // Task 5: RtlWaitOnAddress family
+        "RtlWaitOnAddress" => Some(
+            rtl_wait_on_address as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
+        ),
+        "RtlWakeByAddressSingle" => {
+            Some(rtl_wake_by_address_single as unsafe extern "win64" fn(_) as *const () as usize)
+        }
+        "RtlWakeByAddressAll" => {
+            Some(rtl_wake_by_address_all as unsafe extern "win64" fn(_) as *const () as usize)
+        }
         _ => None,
     }
 }

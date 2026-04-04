@@ -394,6 +394,165 @@ pub extern "win64" fn get_acp() -> u32 {
     65001 // CP_UTF8
 }
 
+// ── Task 1 — SRW try-acquire + DuplicateHandle + WaitOnAddress family ───────
+
+/// TryAcquireSRWLockExclusive: try to acquire an SRW lock for exclusive access.
+///
+/// Single-threaded stub — always succeeds.
+/// # Safety
+/// `srw_lock` must be a valid pointer to an SRWLOCK-sized slot.
+pub unsafe extern "win64" fn try_acquire_srw_lock_exclusive(srw_lock: *mut usize) -> u8 {
+    let _ = srw_lock; // accepted but not dereferenced
+    1 // TRUE — always succeeds in single-threaded context
+}
+
+/// TryAcquireSRWLockShared: try to acquire an SRW lock for shared access.
+///
+/// Single-threaded stub — always succeeds.
+/// # Safety
+/// `srw_lock` must be a valid pointer to an SRWLOCK-sized slot.
+pub unsafe extern "win64" fn try_acquire_srw_lock_shared(srw_lock: *mut usize) -> u8 {
+    let _ = srw_lock; // accepted but not dereferenced
+    1 // TRUE — always succeeds in single-threaded context
+}
+
+/// DuplicateHandle: duplicate a handle to another process.
+///
+/// Stub: if `lp_target_handle` is non-null, write `h_source_handle` to it. Return TRUE.
+/// # Safety
+/// `lp_target_handle` must be a valid writable pointer or NULL.
+pub unsafe extern "win64" fn duplicate_handle(
+    _h_source_process_handle: usize,
+    h_source_handle: usize,
+    _h_target_process_handle: usize,
+    lp_target_handle: *mut usize,
+    _dw_desired_access: u32,
+    _b_inherit_handle: i32,
+    _dw_options: u32,
+) -> i32 {
+    if !lp_target_handle.is_null() {
+        unsafe { *lp_target_handle = h_source_handle };
+    }
+    1 // TRUE
+}
+
+/// ProcessIdToSessionId: get the session ID for a process.
+///
+/// Stub: write 0 to `*p_session_id` if non-null. Return TRUE.
+/// # Safety
+/// `p_session_id` must be a valid writable pointer or NULL.
+pub unsafe extern "win64" fn process_id_to_session_id(
+    _dw_process_id: u32,
+    p_session_id: *mut u32,
+) -> i32 {
+    if !p_session_id.is_null() {
+        unsafe { *p_session_id = 0 };
+    }
+    1 // TRUE
+}
+
+/// WaitOnAddress: wait for a value at an address to change.
+///
+/// Stub: immediately return TRUE (no actual waiting).
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn wait_on_address(
+    _address: *const u8,
+    _compare_address: *const u8,
+    _address_size: usize,
+    _dw_milliseconds: u32,
+) -> i32 {
+    1 // TRUE
+}
+
+/// WakeByAddressSingle: wake one thread waiting on an address.
+///
+/// No-op.
+/// # Safety
+/// `_address` is accepted but never dereferenced.
+pub extern "win64" fn wake_by_address_single(_address: usize) {}
+
+/// WakeByAddressAll: wake all threads waiting on an address.
+///
+/// No-op.
+/// # Safety
+/// `_address` is accepted but never dereferenced.
+pub extern "win64" fn wake_by_address_all(_address: usize) {}
+
+// ── Task 2 — Thread description + timer queue + affinity ────────────────────
+
+/// SetThreadDescription: set a description for a thread.
+///
+/// No-op. Returns S_OK.
+/// # Safety
+/// `_h_thread` and `_lp_thread_description` are accepted but not dereferenced.
+pub unsafe extern "win64" fn set_thread_description(
+    _h_thread: usize,
+    _lp_thread_description: *const u16,
+) -> i32 {
+    0 // S_OK
+}
+
+/// GetThreadDescription: get the description for a thread.
+///
+/// Write null to `*ppsz_thread_description` if non-null. Return S_OK.
+/// # Safety
+/// `ppsz_thread_description` must be a valid writable pointer or NULL.
+pub unsafe extern "win64" fn get_thread_description(
+    _h_thread: usize,
+    ppsz_thread_description: *mut *mut u16,
+) -> i32 {
+    if !ppsz_thread_description.is_null() {
+        unsafe { *ppsz_thread_description = std::ptr::null_mut() };
+    }
+    0 // S_OK
+}
+
+/// CreateTimerQueueTimer: create a timer queue timer.
+///
+/// Stub: if `ph_new_timer` is non-null, write 1 to it. Return TRUE.
+/// # Safety
+/// `ph_new_timer` must be a valid writable pointer or NULL.
+pub unsafe extern "win64" fn create_timer_queue_timer(
+    ph_new_timer: *mut usize,
+    _timer_queue: usize,
+    _callback: usize,
+    _parameter: usize,
+    _due_time: u32,
+    _period: u32,
+    _flags: u32,
+) -> i32 {
+    if !ph_new_timer.is_null() {
+        unsafe { *ph_new_timer = 1 };
+    }
+    1 // TRUE
+}
+
+/// DeleteTimerQueueTimer: delete a timer queue timer.
+///
+/// No-op. Return TRUE.
+/// # Safety
+/// Arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn delete_timer_queue_timer(
+    _timer_queue: usize,
+    _timer: usize,
+    _completion_event: usize,
+) -> i32 {
+    1 // TRUE
+}
+
+/// SetThreadAffinityMask: set the processor affinity mask for a thread.
+///
+/// Stub: return 1 (previous mask).
+/// # Safety
+/// `_h_thread` and `_dw_thread_affinity_mask` are accepted but not dereferenced.
+pub unsafe extern "win64" fn set_thread_affinity_mask(
+    _h_thread: usize,
+    _dw_thread_affinity_mask: usize,
+) -> usize {
+    1 // previous mask
+}
+
 // ── Task 1 — System query stubs ──────────────────────────────────────────────
 
 /// IsWow64Process: check if a process is running under WOW64.
@@ -3261,22 +3420,6 @@ pub unsafe extern "win64" fn open_process(
     _b_inherit_handle: i32,
     _dw_process_id: u32,
 ) -> usize {
-    0
-}
-
-/// DuplicateHandle — returns FALSE (not supported).
-///
-/// # Safety
-/// Pointer arguments are accepted but not dereferenced.
-pub unsafe extern "win64" fn duplicate_handle(
-    _h_source_process: usize,
-    _h_source_handle: usize,
-    _h_target_process: usize,
-    _lp_target_handle: *mut usize,
-    _dw_desired_access: u32,
-    _b_inherit_handle: i32,
-    _dw_options: u32,
-) -> i32 {
     0
 }
 
@@ -6344,6 +6487,39 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "GetLargePageMinimum" => Some(get_large_page_minimum as *const () as usize),
         "SetHandleInformation" => Some(
             set_handle_information as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
+        ),
+        // SRW locks
+        "TryAcquireSRWLockExclusive" => Some(
+            try_acquire_srw_lock_exclusive as unsafe extern "win64" fn(_) -> _ as *const ()
+                as usize,
+        ),
+        "TryAcquireSRWLockShared" => Some(
+            try_acquire_srw_lock_shared as unsafe extern "win64" fn(_) -> _ as *const () as usize,
+        ),
+        "ProcessIdToSessionId" => Some(
+            process_id_to_session_id as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
+        ),
+        "WaitOnAddress" => {
+            Some(wait_on_address as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize)
+        }
+        "WakeByAddressSingle" => Some(wake_by_address_single as *const () as usize),
+        "WakeByAddressAll" => Some(wake_by_address_all as *const () as usize),
+        "SetThreadDescription" => Some(
+            set_thread_description as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
+        ),
+        "GetThreadDescription" => Some(
+            get_thread_description as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
+        ),
+        "CreateTimerQueueTimer" => Some(
+            create_timer_queue_timer as unsafe extern "win64" fn(_, _, _, _, _, _, _) -> _
+                as *const () as usize,
+        ),
+        "DeleteTimerQueueTimer" => Some(
+            delete_timer_queue_timer as unsafe extern "win64" fn(_, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "SetThreadAffinityMask" => Some(
+            set_thread_affinity_mask as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
         ),
         "InitOnceExecuteOnce" => Some(
             init_once_execute_once as unsafe extern "win64" fn(_, _, _, _) -> _ as *const ()
