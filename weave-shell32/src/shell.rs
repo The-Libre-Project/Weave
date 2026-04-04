@@ -6,6 +6,50 @@
 
 use weave_core::prefix;
 
+// ── Shell_NotifyIconW constants ───────────────────────────────────────────────
+
+const NIM_MODIFY: u32 = 0x00000001;
+const NIF_INFO: u32 = 0x00000010;
+
+// ── NOTIFYICONDATAW struct (Windows x64 layout) ───────────────────────────────
+//
+// Only the fields up to dwInfoFlags are needed. Offsets (verified against SDK):
+//   +0    cbSize               u32
+//   +4    _pad0                u32  (align hWnd to 8)
+//   +8    hWnd                 usize
+//   +16   uID                  u32
+//   +20   uFlags               u32
+//   +24   uCallbackMessage     u32
+//   +28   _pad1                u32  (align hIcon to 8)
+//   +32   hIcon                usize
+//   +40   szTip[128]           [u16; 128]   = 256 bytes → end at 296
+//   +296  dwState              u32
+//   +300  dwStateMask          u32
+//   +304  szInfo[256]          [u16; 256]   = 512 bytes → end at 816
+//   +816  uTimeoutOrVersion    u32
+//   +820  szInfoTitle[64]      [u16; 64]    = 128 bytes → end at 948
+//   +948  dwInfoFlags          u32
+//   total: 952 bytes
+
+#[repr(C)]
+pub(crate) struct NotifyIconDataW {
+    cb_size: u32,
+    _pad0: u32,
+    h_wnd: usize,
+    u_id: u32,
+    u_flags: u32,
+    u_callback_message: u32,
+    _pad1: u32,
+    h_icon: usize,
+    sz_tip: [u16; 128],
+    dw_state: u32,
+    dw_state_mask: u32,
+    sz_info: [u16; 256],
+    u_timeout_or_version: u32,
+    sz_info_title: [u16; 64],
+    dw_info_flags: u32,
+}
+
 // ── CSIDL constants ───────────────────────────────────────────────────────────
 
 const CSIDL_DESKTOP: i32 = 0x0000;
@@ -110,6 +154,42 @@ fn ensure_linux_dir(win_path: &str) {
     if let Ok(p) = translator.to_linux_str(win_path) {
         let _ = std::fs::create_dir_all(&p);
     }
+}
+
+// ── Shell_NotifyIconW ─────────────────────────────────────────────────────────
+
+/// Decode a null-terminated slice of UTF-16 code units to a `String`.
+fn decode_wide_slice(s: &[u16]) -> String {
+    let end = s.iter().position(|&c| c == 0).unwrap_or(s.len());
+    String::from_utf16_lossy(&s[..end])
+}
+
+/// Shell_NotifyIconW: add, modify, or delete a taskbar notification icon.
+///
+/// Weave maps balloon tips (NIM_MODIFY + NIF_INFO) to Linux desktop
+/// notifications via `notify-send`. All other operations (NIM_ADD, NIM_DELETE)
+/// silently succeed. The icon handle is ignored — only text is surfaced.
+///
+/// # Safety
+/// `lp_data` must be null or point to a valid `NOTIFYICONDATAW` struct.
+pub unsafe extern "win64" fn shell_notify_icon_w(
+    dw_message: u32,
+    lp_data: *const NotifyIconDataW,
+) -> i32 {
+    if lp_data.is_null() {
+        return 0; // FALSE
+    }
+    if dw_message == NIM_MODIFY {
+        let data = unsafe { &*lp_data };
+        if data.u_flags & NIF_INFO != 0 {
+            let title = decode_wide_slice(&data.sz_info_title);
+            let body = decode_wide_slice(&data.sz_info);
+            if !title.is_empty() || !body.is_empty() {
+                let _ = weave_notify::send(&title, &body);
+            }
+        }
+    }
+    1 // TRUE — NIM_ADD, NIM_DELETE, and unhandled cases always report success
 }
 
 // ── Win32 API functions ───────────────────────────────────────────────────────
@@ -370,5 +450,18 @@ mod tests {
     #[test]
     fn csidl_unknown_returns_none() {
         assert!(csidl_to_win_path(0x99).is_none());
+    }
+
+    #[test]
+    fn decode_wide_slice_basic() {
+        let wide: Vec<u16> = "Hello".encode_utf16().chain(std::iter::once(0)).collect();
+        assert_eq!(decode_wide_slice(&wide), "Hello");
+    }
+
+    #[test]
+    fn decode_wide_slice_no_null() {
+        // Slice with no null terminator — should decode all chars.
+        let wide: Vec<u16> = "Hi".encode_utf16().collect();
+        assert_eq!(decode_wide_slice(&wide), "Hi");
     }
 }

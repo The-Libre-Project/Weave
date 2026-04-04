@@ -65,6 +65,10 @@ fn resolve_shell32(func: &str) -> Option<usize> {
             shell::command_line_to_argv_w as unsafe extern "win64" fn(_, _) -> _ as *const ()
                 as usize,
         ),
+        "Shell_NotifyIconW" => Some(
+            shell::shell_notify_icon_w as unsafe extern "win64" fn(_, _) -> _ as *const ()
+                as usize,
+        ),
         _ => None,
     }
 }

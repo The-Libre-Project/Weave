@@ -3,6 +3,7 @@ members = [
     "weave-common",
     "weave-desktop",
     "weave-installer",
+    "weave-notify",
     "weave-ntdll",
     "weave-kernel32",
     "weave-advapi32",

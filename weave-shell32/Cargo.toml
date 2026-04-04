@@ -8,4 +8,5 @@ description = "shell32.dll and comdlg32.dll stubs for Weave"
 [dependencies]
 weave-common = { path = "../weave-common" }
 weave-core = { path = "../weave-core" }
+weave-notify = { path = "../weave-notify" }
 libc = "0.2"
