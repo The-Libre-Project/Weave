@@ -27,6 +27,7 @@ weave-ucrt = { path = "../weave-ucrt" }
 weave-vulkan = { path = "../weave-vulkan" }
 weave-ws2 = { path = "../weave-ws2" }
 weave-comctl32 = { path = "../weave-comctl32" }
+weave-imm32 = { path = "../weave-imm32" }
 weave-sandbox = { path = "../weave-sandbox" }
 clap = { version = "4", features = ["derive"] }
 libc = "0.2"

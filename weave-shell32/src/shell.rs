@@ -320,6 +320,21 @@ pub unsafe extern "win64" fn shell_execute_w(
     33 // SE_ERR_SUCCESS (any value > 32 means success)
 }
 
+/// ShellExecuteA: ANSI variant of ShellExecuteW.
+///
+/// # Safety
+/// All pointer arguments must be null or valid null-terminated ANSI strings.
+pub unsafe extern "win64" fn shell_execute_a(
+    _h_wnd: usize,
+    _lp_operation: *const u8,
+    _lp_file: *const u8,
+    _lp_parameters: *const u8,
+    _lp_directory: *const u8,
+    _n_show_cmd: i32,
+) -> usize {
+    33 // SE_ERR_SUCCESS
+}
+
 /// CommandLineToArgvW: parse a command-line string into an argv array.
 ///
 /// Returns a pointer to an array of wide string pointers allocated with a

@@ -38,6 +38,18 @@ fn resolve_comdlg32(func: &str) -> Option<usize> {
         "GetSaveFileNameW" => Some(
             dialogs::get_save_file_name_w as unsafe extern "win64" fn(_) -> _ as *const () as usize,
         ),
+        "GetOpenFileNameA" => Some(
+            dialogs::get_open_file_name_a as unsafe extern "win64" fn(_) -> _ as *const () as usize,
+        ),
+        "GetSaveFileNameA" => Some(
+            dialogs::get_save_file_name_a as unsafe extern "win64" fn(_) -> _ as *const () as usize,
+        ),
+        "ChooseFontA" => {
+            Some(dialogs::choose_font_a as unsafe extern "win64" fn(_) -> _ as *const () as usize)
+        }
+        "ChooseColorA" => {
+            Some(dialogs::choose_color_a as unsafe extern "win64" fn(_) -> _ as *const () as usize)
+        }
         _ => None,
     }
 }
@@ -66,7 +78,10 @@ fn resolve_shell32(func: &str) -> Option<usize> {
                 as usize,
         ),
         "Shell_NotifyIconW" => Some(
-            shell::shell_notify_icon_w as unsafe extern "win64" fn(_, _) -> _ as *const ()
+            shell::shell_notify_icon_w as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
+        ),
+        "ShellExecuteA" => Some(
+            shell::shell_execute_a as unsafe extern "win64" fn(_, _, _, _, _, _) -> _ as *const ()
                 as usize,
         ),
         _ => None,

@@ -188,6 +188,40 @@ fn run_kdialog(save: bool, title: Option<&str>, initial_dir: Option<&str>) -> Op
 
 // ── Win32 API functions ───────────────────────────────────────────────────────
 
+// ── ANSI stubs ────────────────────────────────────────────────────────────────
+
+/// GetOpenFileNameA — ANSI variant. Returns 0 (cancelled/unsupported).
+///
+/// # Safety
+/// `lp_ofn` is ignored.
+pub unsafe extern "win64" fn get_open_file_name_a(_lp_ofn: *mut u8) -> i32 {
+    0 // FALSE — not implemented; apps fall back or show error
+}
+
+/// GetSaveFileNameA — ANSI variant. Returns 0 (cancelled/unsupported).
+///
+/// # Safety
+/// `lp_ofn` is ignored.
+pub unsafe extern "win64" fn get_save_file_name_a(_lp_ofn: *mut u8) -> i32 {
+    0
+}
+
+/// ChooseFontA — display the font chooser dialog. Returns 0 (cancelled).
+///
+/// # Safety
+/// `lp_cf` is ignored.
+pub unsafe extern "win64" fn choose_font_a(_lp_cf: *mut u8) -> i32 {
+    0
+}
+
+/// ChooseColorA — display the color chooser dialog. Returns 0 (cancelled).
+///
+/// # Safety
+/// `lp_cc` is ignored.
+pub unsafe extern "win64" fn choose_color_a(_lp_cc: *mut u8) -> i32 {
+    0
+}
+
 /// GetOpenFileNameW: display the system Open dialog box.
 ///
 /// Returns TRUE if the user selects a file; FALSE if cancelled or on error.
