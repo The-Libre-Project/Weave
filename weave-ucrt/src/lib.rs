@@ -8,28 +8,36 @@
 //! Handled DLL namespaces (case-insensitive):
 //!   api-ms-win-crt-*   ucrtbase.dll   msvcrt.dll
 
-#![allow(clippy::missing_safety_doc)]
-
 use libc::c_void;
 
 // ── Heap ──────────────────────────────────────────────────────────────────────
 
+/// # Safety
+/// No pointer requirements; wraps libc malloc. Caller must free the returned pointer with `ucrt_free`.
 pub unsafe extern "win64" fn ucrt_malloc(size: usize) -> *mut c_void {
     unsafe { libc::malloc(size) }
 }
 
+/// # Safety
+/// `ptr` must have been allocated by `ucrt_malloc`, `ucrt_calloc`, or `ucrt_realloc`, or be null.
 pub unsafe extern "win64" fn ucrt_free(ptr: *mut c_void) {
     unsafe { libc::free(ptr) }
 }
 
+/// # Safety
+/// No pointer requirements; wraps libc calloc. Caller must free the returned pointer with `ucrt_free`.
 pub unsafe extern "win64" fn ucrt_calloc(count: usize, size: usize) -> *mut c_void {
     unsafe { libc::calloc(count, size) }
 }
 
+/// # Safety
+/// `ptr` must have been allocated by `ucrt_malloc`, `ucrt_calloc`, or be null. Returned pointer must be freed with `ucrt_free`.
 pub unsafe extern "win64" fn ucrt_realloc(ptr: *mut c_void, size: usize) -> *mut c_void {
     unsafe { libc::realloc(ptr, size) }
 }
 
+/// # Safety
+/// No pointer requirements; wraps posix_memalign. Caller must free the returned pointer with `ucrt_aligned_free`.
 pub unsafe extern "win64" fn ucrt_aligned_malloc(size: usize, alignment: usize) -> *mut c_void {
     unsafe {
         let mut ptr: *mut c_void = std::ptr::null_mut();
@@ -46,6 +54,8 @@ pub unsafe extern "win64" fn ucrt_aligned_malloc(size: usize, alignment: usize) 
     }
 }
 
+/// # Safety
+/// `ptr` must have been allocated by `ucrt_aligned_malloc`, or be null.
 pub unsafe extern "win64" fn ucrt_aligned_free(ptr: *mut c_void) {
     unsafe { libc::free(ptr) }
 }
@@ -63,6 +73,8 @@ pub extern "win64" fn ucrt_set_new_mode(_mode: i32) -> i32 {
 
 // ── Memory ────────────────────────────────────────────────────────────────────
 
+/// # Safety
+/// `dst` must be writable for `n` bytes and must not overlap with `src`. `src` must be valid for `n` bytes.
 pub unsafe extern "win64" fn ucrt_memcpy(
     dst: *mut c_void,
     src: *const c_void,
@@ -71,6 +83,8 @@ pub unsafe extern "win64" fn ucrt_memcpy(
     unsafe { libc::memcpy(dst, src, n) }
 }
 
+/// # Safety
+/// `dst` must be writable for `n` bytes. `src` must be valid for `n` bytes. Overlapping regions are permitted.
 pub unsafe extern "win64" fn ucrt_memmove(
     dst: *mut c_void,
     src: *const c_void,
@@ -79,44 +93,64 @@ pub unsafe extern "win64" fn ucrt_memmove(
     unsafe { libc::memmove(dst, src, n) }
 }
 
+/// # Safety
+/// `dst` must be writable for `n` bytes.
 pub unsafe extern "win64" fn ucrt_memset(dst: *mut c_void, c: i32, n: usize) -> *mut c_void {
     unsafe { libc::memset(dst, c, n) }
 }
 
+/// # Safety
+/// `s1` and `s2` must each be valid for `n` bytes.
 pub unsafe extern "win64" fn ucrt_memcmp(s1: *const c_void, s2: *const c_void, n: usize) -> i32 {
     unsafe { libc::memcmp(s1, s2, n) }
 }
 
+/// # Safety
+/// `s` must be valid for `n` bytes.
 pub unsafe extern "win64" fn ucrt_memchr(s: *const c_void, c: i32, n: usize) -> *mut c_void {
     unsafe { libc::memchr(s, c, n) }
 }
 
 // ── Strings ───────────────────────────────────────────────────────────────────
 
+/// # Safety
+/// `s` must be a valid null-terminated byte string.
 pub unsafe extern "win64" fn ucrt_strlen(s: *const u8) -> usize {
     unsafe { libc::strlen(s as _) }
 }
 
+/// # Safety
+/// `s1` and `s2` must each be valid for at least `n` bytes, or null-terminated before `n`.
 pub unsafe extern "win64" fn ucrt_strncmp(s1: *const u8, s2: *const u8, n: usize) -> i32 {
     unsafe { libc::strncmp(s1 as _, s2 as _, n) }
 }
 
+/// # Safety
+/// `s1` and `s2` must each be valid null-terminated byte strings.
 pub unsafe extern "win64" fn ucrt_strcmp(s1: *const u8, s2: *const u8) -> i32 {
     unsafe { libc::strcmp(s1 as _, s2 as _) }
 }
 
+/// # Safety
+/// `s` must be a valid null-terminated byte string.
 pub unsafe extern "win64" fn ucrt_strchr(s: *const u8, c: i32) -> *mut u8 {
     unsafe { libc::strchr(s as _, c) as *mut u8 }
 }
 
+/// # Safety
+/// `s` must be a valid null-terminated byte string. Caller must free the returned pointer with `ucrt_free`.
 pub unsafe extern "win64" fn ucrt_strdup(s: *const u8) -> *mut u8 {
     unsafe { libc::strdup(s as _) as *mut u8 }
 }
 
+/// # Safety
+/// `dst` must be writable for `n` bytes. `src` must be valid for `n` bytes or null-terminated before `n`.
 pub unsafe extern "win64" fn ucrt_strncpy(dst: *mut u8, src: *const u8, n: usize) -> *mut u8 {
     unsafe { libc::strncpy(dst as _, src as _, n) as *mut u8 }
 }
 
+/// # Safety
+/// `s` must be valid for at least `maxlen` bytes.
 pub unsafe extern "win64" fn ucrt_strnlen(s: *const u8, maxlen: usize) -> usize {
     unsafe {
         let mut i = 0;
@@ -127,6 +161,8 @@ pub unsafe extern "win64" fn ucrt_strnlen(s: *const u8, maxlen: usize) -> usize 
     }
 }
 
+/// # Safety
+/// `s` must be a valid null-terminated UTF-16 (u16) string, or null.
 pub unsafe extern "win64" fn ucrt_wcslen(s: *const u16) -> usize {
     if s.is_null() {
         return 0;
@@ -140,6 +176,8 @@ pub unsafe extern "win64" fn ucrt_wcslen(s: *const u16) -> usize {
     }
 }
 
+/// # Safety
+/// `s` must be valid for at least `maxlen` u16 units.
 pub unsafe extern "win64" fn ucrt_wcsnlen(s: *const u16, maxlen: usize) -> usize {
     unsafe {
         let mut i = 0;
@@ -150,12 +188,16 @@ pub unsafe extern "win64" fn ucrt_wcsnlen(s: *const u16, maxlen: usize) -> usize
     }
 }
 
+/// # Safety
+/// `s` must be a valid null-terminated byte string. `endptr` must be writable if non-null.
 pub unsafe extern "win64" fn ucrt_strtoul(s: *const u8, endptr: *mut *mut u8, base: i32) -> u64 {
     unsafe { libc::strtoul(s as _, endptr as _, base) as u64 }
 }
 
 // ── Wide strings ──────────────────────────────────────────────────────────────
 
+/// # Safety
+/// `s1` and `s2` must each be valid null-terminated UTF-16 (u16) strings.
 pub unsafe extern "win64" fn ucrt_wcsicmp(s1: *const u16, s2: *const u16) -> i32 {
     unsafe {
         let mut i = 0usize;
@@ -181,6 +223,8 @@ fn to_ascii_lower(c: u16) -> u16 {
     }
 }
 
+/// # Safety
+/// `s1` and `s2` must each be valid for at least `n` u16 units, or null-terminated before `n`.
 pub unsafe extern "win64" fn ucrt_wcsnicmp(s1: *const u16, s2: *const u16, n: usize) -> i32 {
     unsafe {
         for i in 0..n {
@@ -286,6 +330,8 @@ pub extern "win64" fn ucrt_setusermatherr(_fn: *const c_void) {
 // Each entry is a function pointer (or NULL/padding).  _initterm calls void()
 // functions; _initterm_e calls int() functions and aborts on non-zero return.
 
+/// # Safety
+/// `start` and `end` must be valid pointers into a table of function pointers (or null entries). Each non-null entry must be callable as `extern "win64" fn()`.
 pub unsafe extern "win64" fn ucrt_initterm(start: *const *const c_void, end: *const *const c_void) {
     unsafe {
         libc::write(
@@ -305,6 +351,8 @@ pub unsafe extern "win64" fn ucrt_initterm(start: *const *const c_void, end: *co
     }
 }
 
+/// # Safety
+/// `start` and `end` must be valid pointers into a table of function pointers (or null entries). Each non-null entry must be callable as `extern "win64" fn() -> i32`.
 pub unsafe extern "win64" fn ucrt_initterm_e(
     start: *const *const c_void,
     end: *const *const c_void,
@@ -446,6 +494,8 @@ pub fn doserrno_data_addr() -> usize {
     *HEAP_DOSERRNO.get_or_init(|| Box::into_raw(Box::new(0u32)) as usize)
 }
 
+/// # Safety
+/// No pointer requirements; returns a pointer to heap-allocated CRT storage.
 pub unsafe extern "win64" fn ucrt_p_argc() -> *mut i32 {
     libc::write(
         2,
@@ -454,6 +504,8 @@ pub unsafe extern "win64" fn ucrt_p_argc() -> *mut i32 {
     );
     argc_data_addr() as *mut i32
 }
+/// # Safety
+/// No pointer requirements; returns a pointer to heap-allocated CRT storage.
 pub unsafe extern "win64" fn ucrt_p_argv() -> *mut *mut *mut u8 {
     libc::write(
         2,
@@ -462,6 +514,8 @@ pub unsafe extern "win64" fn ucrt_p_argv() -> *mut *mut *mut u8 {
     );
     argv_data_addr() as *mut *mut *mut u8
 }
+/// # Safety
+/// No pointer requirements; returns a pointer to heap-allocated CRT storage.
 pub unsafe extern "win64" fn ucrt_p_acmdln() -> *mut *mut u8 {
     libc::write(
         2,
@@ -470,6 +524,8 @@ pub unsafe extern "win64" fn ucrt_p_acmdln() -> *mut *mut u8 {
     );
     acmdln_data_addr() as *mut *mut u8
 }
+/// # Safety
+/// No pointer requirements; returns a pointer to heap-allocated CRT storage.
 pub unsafe extern "win64" fn ucrt_p_environ() -> *mut *mut *mut u8 {
     libc::write(
         2,
@@ -478,6 +534,8 @@ pub unsafe extern "win64" fn ucrt_p_environ() -> *mut *mut *mut u8 {
     );
     environ_data_addr() as *mut *mut *mut u8
 }
+/// # Safety
+/// No pointer requirements; returns a pointer to heap-allocated CRT storage.
 pub unsafe extern "win64" fn ucrt_p_commode() -> *mut i32 {
     libc::write(
         2,
@@ -486,6 +544,8 @@ pub unsafe extern "win64" fn ucrt_p_commode() -> *mut i32 {
     );
     *HEAP_COMMODE.get_or_init(|| Box::into_raw(Box::new(0i32)) as usize) as *mut i32
 }
+/// # Safety
+/// No pointer requirements; returns a pointer to heap-allocated CRT storage.
 pub unsafe extern "win64" fn ucrt_p_fmode() -> *mut i32 {
     libc::write(
         2,
@@ -587,6 +647,8 @@ pub extern "win64" fn ucrt_stdio_common_vsprintf(
     0
 }
 
+/// # Safety
+/// `stream` must be a valid `FILE*` obtained from a libc-backed stdio function, or null to flush all streams.
 pub unsafe extern "win64" fn ucrt_fflush(stream: *mut c_void) -> i32 {
     // Pass the stream through. NULL flushes all (per C standard); non-NULL flushes that stream.
     // This is correct when stream is a FILE* obtained from our libc-backed stubs.
@@ -618,6 +680,8 @@ pub extern "win64" fn ucrt_strerror(_errnum: i32) -> *mut u8 {
     std::ptr::null_mut()
 }
 
+/// # Safety
+/// `_expr` and `_file` must be valid null-terminated byte strings if non-null (they are not read — this stub calls abort immediately).
 pub unsafe extern "win64" fn ucrt_assert(_expr: *const u8, _file: *const u8, _line: u32) {
     unsafe { libc::abort() }
 }
@@ -635,6 +699,8 @@ pub extern "win64" fn ucrt_beginthreadex(
 
 pub extern "win64" fn ucrt_endthreadex(_exit_code: u32) {}
 
+/// # Safety
+/// `_buf` must point to a sufficiently sized jmp_buf-compatible buffer if non-null. This stub is a no-op and always returns 0.
 pub unsafe extern "win64" fn ucrt_intrinsic_setjmpex(
     _buf: *mut c_void,
     _frame: *const c_void,
@@ -656,9 +722,13 @@ pub extern "win64" fn ucrt_localeconv() -> *const c_void {
 pub extern "win64" fn ucrt_setlocale(_cat: i32, _locale: *const u8) -> *mut u8 {
     std::ptr::null_mut()
 }
+/// # Safety
+/// No pointer requirements; `c` is passed by value.
 pub unsafe extern "win64" fn ucrt_btowc(c: i32) -> u32 {
     c as u32
 }
+/// # Safety
+/// No pointer requirements; `c` is passed by value.
 pub unsafe extern "win64" fn ucrt_wctob(c: u32) -> i32 {
     if c <= 0xFF {
         c as i32
@@ -666,6 +736,8 @@ pub unsafe extern "win64" fn ucrt_wctob(c: u32) -> i32 {
         -1
     }
 }
+/// # Safety
+/// `_pwc` must be writable if non-null. `_s` must be valid for `_n` bytes if non-null. `_ps` is accepted but not read.
 pub unsafe extern "win64" fn ucrt_mbrtowc(
     _pwc: *mut u16,
     _s: *const u8,
@@ -674,6 +746,8 @@ pub unsafe extern "win64" fn ucrt_mbrtowc(
 ) -> usize {
     0
 }
+/// # Safety
+/// `_dst` must be writable for `_n` u16 units if non-null. `_src` must point to a valid string pointer if non-null. `_ps` is accepted but not read.
 pub unsafe extern "win64" fn ucrt_mbsrtowcs(
     _dst: *mut u16,
     _src: *mut *const u8,
@@ -682,6 +756,8 @@ pub unsafe extern "win64" fn ucrt_mbsrtowcs(
 ) -> usize {
     0
 }
+/// # Safety
+/// `_s` must be writable for at least one byte if non-null. `_ps` is accepted but not read.
 pub unsafe extern "win64" fn ucrt_wcrtomb(_s: *mut u8, _wc: u16, _ps: *mut c_void) -> usize {
     0
 }
@@ -809,6 +885,9 @@ pub unsafe extern "win64" fn ucrt_wgetmainargs(
 /// Some MinGW CRT startup sequences import this as a data symbol to initialise
 /// their own `environ` variable. We expose a pointer to a null-terminated
 /// empty environment (same as __p__environ).
+///
+/// # Safety
+/// No pointer requirements; returns a pointer to static null-terminated environment storage.
 pub unsafe extern "win64" fn ucrt_initenv() -> *mut *mut u8 {
     // A static null pointer (usize is Sync, raw pointers are not).
     static NULL_ENV: usize = 0;
@@ -816,6 +895,9 @@ pub unsafe extern "win64" fn ucrt_initenv() -> *mut *mut u8 {
 }
 
 /// __winitenv — wide-char variant (wchar_t**).
+///
+/// # Safety
+/// No pointer requirements; returns a pointer to static null-terminated wide environment storage.
 pub unsafe extern "win64" fn ucrt_winitenv() -> *mut *mut u16 {
     static NULL_WENV: usize = 0;
     &NULL_WENV as *const usize as *mut *mut u16
