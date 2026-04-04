@@ -42,6 +42,8 @@ fn resolve(dll: &str, func: &str) -> Option<usize> {
         .or_else(|| weave_winmm::resolve(dll, func))
         .or_else(|| weave_ucrt::resolve(dll, func))
         .or_else(|| weave_vulkan::resolve(dll, func))
+        .or_else(|| weave_ws2::resolve(dll, func))
+        .or_else(|| weave_comctl32::resolve(dll, func))
         .or_else(|| dll_registry::lookup(dll, func))
 }
 

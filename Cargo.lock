@@ -1255,6 +1255,7 @@ dependencies = [
  "clap",
  "libc",
  "weave-advapi32",
+ "weave-comctl32",
  "weave-core",
  "weave-gdi32",
  "weave-kernel32",
@@ -1269,8 +1270,13 @@ dependencies = [
  "weave-vm-fallback",
  "weave-vulkan",
  "weave-winmm",
+ "weave-ws2",
  "weave-xinput",
 ]
+
+[[package]]
+name = "weave-comctl32"
+version = "0.0.1"
 
 [[package]]
 name = "weave-common"
@@ -1303,6 +1309,9 @@ version = "0.0.1"
 [[package]]
 name = "weave-desktop"
 version = "0.0.1"
+dependencies = [
+ "goblin",
+]
 
 [[package]]
 name = "weave-gdi32"
@@ -1332,6 +1341,10 @@ dependencies = [
  "pipewire",
  "weave-common",
 ]
+
+[[package]]
+name = "weave-notify"
+version = "0.0.1"
 
 [[package]]
 name = "weave-ntdll"
@@ -1372,6 +1385,7 @@ dependencies = [
  "libc",
  "weave-common",
  "weave-core",
+ "weave-notify",
 ]
 
 [[package]]
@@ -1414,6 +1428,13 @@ dependencies = [
 
 [[package]]
 name = "weave-winmm"
+version = "0.0.1"
+dependencies = [
+ "libc",
+]
+
+[[package]]
+name = "weave-ws2"
 version = "0.0.1"
 dependencies = [
  "libc",

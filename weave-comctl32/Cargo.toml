@@ -1,0 +1,7 @@
+[package]
+name = "weave-comctl32"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Common Controls (comctl32.dll) stubs for Weave — load-time import resolution for Phase 6 app compatibility."
