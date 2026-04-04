@@ -2,6 +2,8 @@ use clap::Parser;
 use std::path::PathBuf;
 use weave_core::{dll_registry, exec, iat, loader, prefix, registry, seh, teb};
 
+mod arch;
+
 /// Weave — run Windows executables on Linux.
 #[derive(Parser)]
 #[command(version, about)]
@@ -45,6 +47,11 @@ fn resolve(dll: &str, func: &str) -> Option<usize> {
 
 fn main() {
     let args = Args::parse();
+
+    // ── −1. Architecture compatibility ────────────────────────────────────
+    if let Err(code) = arch::check_arch_compatibility(&args.exe) {
+        std::process::exit(code);
+    }
 
     // ── 0. Initialise the prefix ──────────────────────────────────────────
     if let Some(p) = args.prefix {
