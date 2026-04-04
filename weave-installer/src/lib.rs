@@ -74,6 +74,30 @@ impl Prefix {
     pub fn exists(&self) -> bool {
         self.path.is_dir()
     }
+
+    /// Stores the path of the main executable for this prefix.
+    ///
+    /// Writes the path as a UTF-8 string to `<prefix>/exe.txt`.
+    /// Overwrites any previously stored path.
+    pub fn set_exe_path(&self, exe_path: &Path) -> Result<(), InstallerError> {
+        fs::write(
+            self.path.join("exe.txt"),
+            exe_path.to_string_lossy().as_bytes(),
+        )?;
+        Ok(())
+    }
+
+    /// Returns the stored executable path for this prefix, if one has been set.
+    ///
+    /// Returns `Ok(None)` if no exe has been configured yet.
+    pub fn get_exe_path(&self) -> Result<Option<PathBuf>, InstallerError> {
+        let path = self.path.join("exe.txt");
+        match fs::read_to_string(&path) {
+            Ok(s) => Ok(Some(PathBuf::from(s.trim()))),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(InstallerError::Io(e)),
+        }
+    }
 }
 
 /// Manages the lifecycle of Weave prefixes.
@@ -312,5 +336,35 @@ mod tests {
         assert!(!cfg.force_vm);
         assert!(cfg.env_vars.is_empty());
         assert!(cfg.exe_path.is_none());
+    }
+
+    #[test]
+    fn test_set_and_get_exe_path() {
+        let base = temp_base("exe-path");
+        let mgr = PrefixManager::with_base(&base);
+        let prefix = mgr.create("app").expect("create failed");
+
+        assert!(prefix.get_exe_path().expect("get failed").is_none());
+
+        let exe = std::path::Path::new("C:\\Program Files\\App\\app.exe");
+        prefix.set_exe_path(exe).expect("set failed");
+
+        let got = prefix.get_exe_path().expect("get after set failed");
+        assert_eq!(got, Some(PathBuf::from("C:\\Program Files\\App\\app.exe")));
+
+        fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn test_get_exe_path_missing_is_none() {
+        let base = temp_base("exe-missing");
+        let mgr = PrefixManager::with_base(&base);
+        let prefix = mgr.create("app").expect("create failed");
+
+        // No exe.txt written — must return None, not an error.
+        let result = prefix.get_exe_path().expect("get failed");
+        assert!(result.is_none());
+
+        fs::remove_dir_all(&base).ok();
     }
 }
