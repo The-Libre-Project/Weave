@@ -145,6 +145,74 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "GetMenuItemCount" => Some(menu::get_menu_item_count as *const () as usize),
         "CheckMenuItem" => Some(menu::check_menu_item as *const () as usize),
         "EnableMenuItem" => Some(menu::enable_menu_item as *const () as usize),
+        // Display and mode enumeration
+        "EnumDisplayDevicesW" => Some(
+            enum_display_devices_w as unsafe extern "win64" fn(_, _, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "EnumDisplaySettingsW" => Some(
+            enum_display_settings_w as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
+        ),
+        "EnumDisplaySettingsExW" => Some(
+            enum_display_settings_ex_w as unsafe extern "win64" fn(_, _, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "ChangeDisplaySettingsW" => Some(
+            change_display_settings_w as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
+        ),
+        "ChangeDisplaySettingsExW" => Some(
+            change_display_settings_ex_w as unsafe extern "win64" fn(_, _, _, _, _) -> _
+                as *const () as usize,
+        ),
+        // Monitor handle functions
+        "MonitorFromWindow" => Some(monitor_from_window as *const () as usize),
+        "MonitorFromPoint" => Some(monitor_from_point as *const () as usize),
+        "MonitorFromRect" => {
+            Some(monitor_from_rect as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "GetMonitorInfoW" => {
+            Some(get_monitor_info_w as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "EnumDisplayMonitors" => Some(
+            enum_display_monitors as unsafe extern "win64" fn(_, _, _, _) -> _ as *const ()
+                as usize,
+        ),
+        // Window long + SetWindowPos
+        "GetWindowLongW" => Some(get_window_long_w as *const () as usize),
+        "GetWindowLongPtrW" => Some(get_window_long_ptr_w as *const () as usize),
+        "SetWindowLongW" => Some(set_window_long_w as *const () as usize),
+        "SetWindowLongPtrW" => Some(set_window_long_ptr_w as *const () as usize),
+        "SetWindowPos" => Some(set_window_pos as *const () as usize),
+        // Window queries
+        "FindWindowW" => {
+            Some(find_window_w as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "FindWindowA" => {
+            Some(find_window_a as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "IsWindow" => Some(is_window as *const () as usize),
+        "IsWindowVisible" => Some(is_window_visible as *const () as usize),
+        "GetWindowThreadProcessId" => Some(
+            get_window_thread_process_id as unsafe extern "win64" fn(_, _) -> _ as *const ()
+                as usize,
+        ),
+        "ScreenToClient" => {
+            Some(screen_to_client as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "ClientToScreen" => {
+            Some(client_to_screen as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        // Cursor + misc window ops
+        "GetCursorPos" => {
+            Some(get_cursor_pos as unsafe extern "win64" fn(_) -> _ as *const () as usize)
+        }
+        "SetCursorPos" => Some(set_cursor_pos as *const () as usize),
+        "EnableWindow" => Some(enable_window as *const () as usize),
+        "IsWindowEnabled" => Some(is_window_enabled as *const () as usize),
+        "GetParent" => Some(get_parent as *const () as usize),
+        "SetParent" => Some(set_parent as *const () as usize),
+        "BringWindowToTop" => Some(bring_window_to_top as *const () as usize),
+        "WindowFromPoint" => Some(window_from_point as *const () as usize),
         _ => None,
     }
 }

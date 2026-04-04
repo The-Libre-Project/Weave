@@ -242,6 +242,33 @@ pub struct CreateStructW {
     pub _pad2: u32,                // +76
 } // total: 80 bytes
 
+/// MONITORINFO: information about a monitor.
+///
+/// Windows x64 layout (40 bytes):
+///   offset  0: cbSize    (u32)
+///   offset  4: _pad      (u32)
+///   offset  8: rcMonitor (RECT = 16 bytes)
+///   offset 24: rcWork    (RECT = 16 bytes)
+///   offset 40: dwFlags   (u32) — MONITORINFOF_PRIMARY = 1
+///   _pad to align: 4 bytes (total 48 bytes on some compilers; use cbSize to detect)
+///
+/// Use this simplified layout that matches the 40-byte Windows definition:
+#[repr(C)]
+pub struct MonitorInfo {
+    pub cb_size: u32,
+    pub _pad: u32,
+    pub rc_monitor: Rect,
+    pub rc_work: Rect,
+    pub dw_flags: u32,
+}
+
+/// POINT: a 2D coordinate pair.
+#[repr(C)]
+pub struct Point {
+    pub x: i32,
+    pub y: i32,
+}
+
 /// Decode a null-terminated UTF-16 pointer to a `String`.
 /// Returns an empty `String` if the pointer is null.
 ///

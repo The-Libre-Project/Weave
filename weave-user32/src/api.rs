@@ -11,6 +11,7 @@ use crate::class::{self, ClassEntry};
 use crate::defs::*;
 use crate::queue::{self, MsgEntry};
 use crate::window::{self, WindowEntry};
+use libc;
 
 // ── RegisterClassW / RegisterClassExW ─────────────────────────────────────────
 
@@ -872,6 +873,295 @@ pub extern "win64" fn set_cursor(_h_cursor: usize) -> usize {
 ///
 /// Phase 2: returns 0 (display counter unchanged).
 pub extern "win64" fn show_cursor(_b_show: i32) -> i32 {
+    0
+}
+
+// ── Display and mode enumeration stubs ────────────────────────────────────────
+
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn enum_display_devices_w(
+    _lp_device: *const u16,
+    _i_dev_num: u32,
+    _lp_display_device: usize,
+    _dw_flags: u32,
+) -> i32 {
+    0
+}
+
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn enum_display_settings_w(
+    _lp_sz_device_name: *const u16,
+    _i_mode_num: u32,
+    _lp_dev_mode: usize,
+) -> i32 {
+    0
+}
+
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn enum_display_settings_ex_w(
+    _lp_sz_device_name: *const u16,
+    _i_mode_num: u32,
+    _lp_dev_mode: usize,
+    _dw_flags: u32,
+) -> i32 {
+    0
+}
+
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn change_display_settings_w(_lp_dev_mode: usize, _dw_flags: u32) -> i32 {
+    0
+}
+
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn change_display_settings_ex_w(
+    _lp_sz_device_name: *const u16,
+    _lp_dev_mode: usize,
+    _hwnd: usize,
+    _dw_flags: u32,
+    _lp_param: usize,
+) -> i32 {
+    0
+}
+
+// ── Monitor handle functions ─────────────────────────────────────────────────
+
+pub extern "win64" fn monitor_from_window(_hwnd: usize, _dw_flags: u32) -> usize {
+    1usize
+}
+
+pub extern "win64" fn monitor_from_point(_pt_x: i32, _pt_y: i32, _dw_flags: u32) -> usize {
+    1usize
+}
+
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn monitor_from_rect(_lp_rc: *const Rect, _dw_flags: u32) -> usize {
+    1usize
+}
+
+/// # Safety
+/// `lp_mi` must point to a valid `MonitorInfo` struct.
+pub unsafe extern "win64" fn get_monitor_info_w(_h_monitor: usize, lp_mi: *mut MonitorInfo) -> i32 {
+    if lp_mi.is_null() {
+        return 0;
+    }
+    unsafe {
+        (*lp_mi).rc_monitor = Rect {
+            left: 0,
+            top: 0,
+            right: 1920,
+            bottom: 1080,
+        };
+        (*lp_mi).rc_work = Rect {
+            left: 0,
+            top: 0,
+            right: 1920,
+            bottom: 1080,
+        };
+        (*lp_mi).dw_flags = 1;
+    }
+    1
+}
+
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn enum_display_monitors(
+    _hdc: usize,
+    _lprc_clip: usize,
+    _lpfn_enum: usize,
+    _dw_data: isize,
+) -> i32 {
+    1
+}
+
+// ── Window long + SetWindowPos ───────────────────────────────────────────────
+
+const GWL_WNDPROC: i32 = -4;
+const GWL_STYLE: i32 = -16;
+#[allow(dead_code)]
+const GWL_EXSTYLE: i32 = -20;
+
+pub extern "win64" fn get_window_long_w(hwnd: usize, n_index: i32) -> i32 {
+    window::with(hwnd, |w| match n_index {
+        GWL_STYLE => w.style as i32,
+        GWL_WNDPROC => w.wnd_proc as i32,
+        _ => 0,
+    })
+    .unwrap_or(0)
+}
+
+pub extern "win64" fn get_window_long_ptr_w(hwnd: usize, n_index: i32) -> isize {
+    window::with(hwnd, |w| match n_index {
+        GWL_STYLE => w.style as isize,
+        GWL_WNDPROC => w.wnd_proc as isize,
+        _ => 0,
+    })
+    .unwrap_or(0)
+}
+
+pub extern "win64" fn set_window_long_w(hwnd: usize, n_index: i32, dw_new_long: i32) -> i32 {
+    match n_index {
+        GWL_STYLE => window::with_mut(hwnd, |w| {
+            let old = w.style as i32;
+            w.style = dw_new_long as u32;
+            old
+        })
+        .unwrap_or(0),
+        _ => 0,
+    }
+}
+
+pub extern "win64" fn set_window_long_ptr_w(
+    hwnd: usize,
+    n_index: i32,
+    dw_new_long: isize,
+) -> isize {
+    match n_index {
+        GWL_STYLE => window::with_mut(hwnd, |w| {
+            let old = w.style as isize;
+            w.style = dw_new_long as u32;
+            old
+        })
+        .unwrap_or(0),
+        GWL_WNDPROC => window::with_mut(hwnd, |w| {
+            let old = w.wnd_proc as isize;
+            w.wnd_proc = dw_new_long as usize;
+            old
+        })
+        .unwrap_or(0),
+        _ => 0,
+    }
+}
+
+const SWP_NOSIZE: u32 = 0x0001;
+const SWP_NOMOVE: u32 = 0x0002;
+
+/// SetWindowPos: change window size, position, and Z order.
+///
+/// Updates the window table entry. Returns TRUE.
+pub extern "win64" fn set_window_pos(
+    hwnd: usize,
+    _hwnd_insert_after: usize,
+    x: i32,
+    y: i32,
+    cx: i32,
+    cy: i32,
+    u_flags: u32,
+) -> i32 {
+    window::with_mut(hwnd, |w| {
+        if u_flags & SWP_NOMOVE == 0 {
+            w.x = x;
+            w.y = y;
+        }
+        if u_flags & SWP_NOSIZE == 0 {
+            w.width = cx as u32;
+            w.height = cy as u32;
+        }
+    });
+    1 // TRUE
+}
+
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn find_window_w(
+    _lp_class_name: *const u16,
+    _lp_window_name: *const u16,
+) -> usize {
+    0
+}
+
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn find_window_a(
+    _lp_class_name: *const u8,
+    _lp_window_name: *const u8,
+) -> usize {
+    0
+}
+
+pub extern "win64" fn is_window(hwnd: usize) -> i32 {
+    if window::with(hwnd, |_| ()).is_some() {
+        1
+    } else {
+        0
+    }
+}
+
+pub extern "win64" fn is_window_visible(hwnd: usize) -> i32 {
+    window::with(hwnd, |w| w.visible as i32).unwrap_or(0)
+}
+
+/// # Safety
+/// `lpdw_process_id` may be null.
+pub unsafe extern "win64" fn get_window_thread_process_id(
+    _hwnd: usize,
+    lpdw_process_id: *mut u32,
+) -> u32 {
+    unsafe {
+        if !lpdw_process_id.is_null() {
+            *lpdw_process_id = libc::getpid() as u32;
+        }
+    }
+    1 // fake thread ID
+}
+
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn screen_to_client(_hwnd: usize, _lp_point: usize) -> i32 {
+    1
+}
+
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn client_to_screen(_hwnd: usize, _lp_point: usize) -> i32 {
+    1
+}
+
+// ── Cursor + misc window ops ─────────────────────────────────────────────────
+
+/// # Safety
+/// `lp_point` must point to a valid `Point` struct.
+pub unsafe extern "win64" fn get_cursor_pos(lp_point: *mut Point) -> i32 {
+    if lp_point.is_null() {
+        return 0;
+    }
+    unsafe {
+        (*lp_point).x = 0;
+        (*lp_point).y = 0;
+    }
+    1
+}
+
+pub extern "win64" fn set_cursor_pos(_x: i32, _y: i32) -> i32 {
+    1
+}
+
+pub extern "win64" fn enable_window(_hwnd: usize, _b_enable: i32) -> i32 {
+    0
+}
+
+pub extern "win64" fn is_window_enabled(_hwnd: usize) -> i32 {
+    1
+}
+
+pub extern "win64" fn get_parent(_hwnd: usize) -> usize {
+    0
+}
+
+pub extern "win64" fn set_parent(_hwnd_child: usize, _hwnd_new_parent: usize) -> usize {
+    0
+}
+
+pub extern "win64" fn bring_window_to_top(_hwnd: usize) -> i32 {
+    1
+}
+
+pub extern "win64" fn window_from_point(_pt_x: i32, _pt_y: i32) -> usize {
     0
 }
 
