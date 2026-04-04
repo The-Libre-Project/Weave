@@ -184,6 +184,40 @@ pub fn track_popup_menu_ex(
     0
 }
 
+/// append_menu_raw: internal helper used by AppendMenuA.
+///
+/// Like AppendMenuW but takes an already-decoded Rust String.
+pub fn append_menu_raw(h_menu: usize, u_flags: u32, u_id_new_item: usize, text: String) -> i32 {
+    let mut m = menus().lock().unwrap();
+    let items = match m.menus.get_mut(&h_menu) {
+        Some(v) => v,
+        None => return 0,
+    };
+    items.push(MenuItem {
+        flags: u_flags,
+        text,
+        id_or_submenu: u_id_new_item,
+    });
+    1
+}
+
+/// delete_item: remove a menu item by position or command id.
+pub fn delete_item(h_menu: usize, u_position: u32, u_flags: u32) {
+    let mut m = menus().lock().unwrap();
+    let items = match m.menus.get_mut(&h_menu) {
+        Some(v) => v,
+        None => return,
+    };
+    let by_pos = u_flags & MF_BYPOSITION != 0;
+    if by_pos {
+        if (u_position as usize) < items.len() {
+            items.remove(u_position as usize);
+        }
+    } else {
+        items.retain(|item| item.id_or_submenu as u32 != u_position);
+    }
+}
+
 /// GetMenuItemCount: return the number of items in a menu.
 pub fn get_menu_item_count(h_menu: usize) -> i32 {
     let m = menus().lock().unwrap();

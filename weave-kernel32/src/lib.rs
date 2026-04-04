@@ -6938,8 +6938,508 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "MoveFileExA" => {
             Some(move_file_ex_a as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize)
         }
+        // ── PuTTY gap-fill ────────────────────────────────────────────────
+        "Beep" => Some(beep as *const () as usize),
+        "MulDiv" => Some(mul_div as *const () as usize),
+        "SetStdHandle" => Some(set_std_handle as *const () as usize),
+        "DeleteFileA" => Some(
+            delete_file_a as unsafe extern "win64" fn(_) -> _ as *const () as usize,
+        ),
+        "FindFirstFileExW" => Some(
+            find_first_file_ex_w
+                as unsafe extern "win64" fn(_, _, _, _, _, _) -> _
+                as *const () as usize,
+        ),
+        "GetCPInfo" => Some(
+            get_cp_info as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
+        ),
+        "GetDateFormatW" => Some(
+            get_date_format_w
+                as unsafe extern "win64" fn(_, _, _, _, _, _) -> _
+                as *const () as usize,
+        ),
+        "GetTimeFormatW" => Some(
+            get_time_format_w
+                as unsafe extern "win64" fn(_, _, _, _, _, _) -> _
+                as *const () as usize,
+        ),
+        "GlobalMemoryStatus" => Some(
+            global_memory_status as unsafe extern "win64" fn(_) -> _ as *const () as usize,
+        ),
+        "InitializeSListHead" => Some(
+            initialize_slist_head as unsafe extern "win64" fn(_) as *const () as usize,
+        ),
+        "IsValidLocale" => Some(is_valid_locale as *const () as usize),
+        "EnumSystemLocalesW" => Some(
+            enum_system_locales_w as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
+        ),
+        "FindResourceA" => Some(
+            find_resource_a as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
+        ),
+        "LoadResource" => Some(load_resource as *const () as usize),
+        "LockResource" => Some(lock_resource as *const () as usize),
+        "SizeofResource" => Some(sizeof_resource as *const () as usize),
+        "GetProcessTimes" => Some(
+            get_process_times
+                as unsafe extern "win64" fn(_, _, _, _, _) -> _
+                as *const () as usize,
+        ),
+        "GetThreadTimes" => Some(
+            get_thread_times
+                as unsafe extern "win64" fn(_, _, _, _, _) -> _
+                as *const () as usize,
+        ),
+        "GetOverlappedResult" => Some(
+            get_overlapped_result
+                as unsafe extern "win64" fn(_, _, _, _) -> _
+                as *const () as usize,
+        ),
+        "RtlPcToFileHeader" => Some(
+            rtl_pc_to_file_header as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
+        ),
+        "CreateFileMappingA" => Some(
+            create_file_mapping_a
+                as unsafe extern "win64" fn(_, _, _, _, _, _) -> _
+                as *const () as usize,
+        ),
+        "CreatePipe" => Some(
+            create_pipe as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
+        ),
+        "ReadConsoleW" => Some(
+            read_console_w
+                as unsafe extern "win64" fn(_, _, _, _, _) -> _
+                as *const () as usize,
+        ),
+        "ConnectNamedPipe" => Some(
+            connect_named_pipe as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
+        ),
+        "CreateNamedPipeA" => Some(
+            create_named_pipe_a
+                as unsafe extern "win64" fn(_, _, _, _, _, _, _, _) -> _
+                as *const () as usize,
+        ),
+        "WaitNamedPipeA" => Some(
+            wait_named_pipe_a as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
+        ),
+        "ClearCommBreak" => Some(clear_comm_break as *const () as usize),
+        "SetCommBreak" => Some(set_comm_break as *const () as usize),
+        "GetCommState" => Some(
+            get_comm_state as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
+        ),
+        "SetCommState" => Some(
+            set_comm_state as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
+        ),
+        "SetCommTimeouts" => Some(
+            set_comm_timeouts as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
+        ),
         _ => None,
     }
+}
+
+// ── PuTTY gap-fill: missing kernel32 stubs ────────────────────────────────────
+
+/// Beep: produce a sound. Returns TRUE (no audio output yet).
+pub extern "win64" fn beep(_dw_freq: u32, _dw_duration: u32) -> i32 {
+    1
+}
+
+/// MulDiv: multiply and divide with 64-bit intermediate, rounded. (a*b)/c
+pub extern "win64" fn mul_div(n_number: i32, n_numerator: i32, n_denominator: i32) -> i32 {
+    if n_denominator == 0 {
+        return -1;
+    }
+    let result = (n_number as i64).wrapping_mul(n_numerator as i64) / n_denominator as i64;
+    result as i32
+}
+
+/// SetStdHandle: set stdin/stdout/stderr handle. Returns TRUE.
+pub extern "win64" fn set_std_handle(_n_std_handle: u32, _h_handle: usize) -> i32 {
+    1
+}
+
+/// DeleteFileA: ANSI variant of DeleteFileW.
+///
+/// # Safety
+/// `lp_file_name` must be a valid null-terminated ANSI string.
+pub unsafe extern "win64" fn delete_file_a(lp_file_name: *const u8) -> i32 {
+    if lp_file_name.is_null() {
+        return 0;
+    }
+    let mut len = 0usize;
+    while unsafe { *lp_file_name.add(len) } != 0 {
+        len += 1;
+    }
+    let name = unsafe { std::slice::from_raw_parts(lp_file_name, len) };
+    let name = String::from_utf8_lossy(name);
+    let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+    delete_file_w(wide.as_ptr())
+}
+
+/// FindFirstFileExW: extended FindFirstFile. Delegates to FindFirstFileW.
+///
+/// # Safety
+/// Pointer arguments must be valid or null.
+pub unsafe extern "win64" fn find_first_file_ex_w(
+    lp_file_name: *const u16,
+    _fi_info_level: i32,
+    lp_find_file_data: usize,
+    _f_search_op: i32,
+    _lp_search_filter: usize,
+    _dw_additional_flags: u32,
+) -> usize {
+    unsafe { find_first_file_w(lp_file_name, lp_find_file_data as *mut _) }
+}
+
+/// CPINFO layout (minimal — only first_byte_table[2] matters for basic codepages).
+#[repr(C)]
+pub struct CpInfo {
+    max_char_size: u32,
+    default_char: [u8; 2],
+    lead_byte: [u8; 12],
+}
+
+/// GetCPInfo: return code page information. Returns TRUE for known pages.
+///
+/// # Safety
+/// `lp_cp_info` must point to a writable `CPINFO` struct.
+pub unsafe extern "win64" fn get_cp_info(code_page: u32, lp_cp_info: *mut CpInfo) -> i32 {
+    if lp_cp_info.is_null() {
+        return 0;
+    }
+    unsafe {
+        (*lp_cp_info).max_char_size = match code_page {
+            932 | 936 | 949 | 950 => 2, // DBCS code pages
+            _ => 1,
+        };
+        (*lp_cp_info).default_char = [b'?', 0];
+        (*lp_cp_info).lead_byte = [0u8; 12];
+    }
+    1
+}
+
+/// GetDateFormatW: format a date as a string. Returns stub "2026-01-01\0".
+///
+/// # Safety
+/// `lp_date_str` must be a writable buffer of at least `cch_date` wide chars.
+pub unsafe extern "win64" fn get_date_format_w(
+    _locale: u32,
+    _dw_flags: u32,
+    _lp_date: usize,
+    _lp_format: *const u16,
+    lp_date_str: *mut u16,
+    cch_date: i32,
+) -> i32 {
+    let s: Vec<u16> = "2026-01-01".encode_utf16().chain(std::iter::once(0)).collect();
+    let copy = (s.len()).min(cch_date as usize);
+    if !lp_date_str.is_null() && cch_date > 0 {
+        unsafe { std::ptr::copy_nonoverlapping(s.as_ptr(), lp_date_str, copy) };
+    }
+    copy as i32
+}
+
+/// GetTimeFormatW: format a time as a string. Returns stub "00:00:00\0".
+///
+/// # Safety
+/// `lp_time_str` must be a writable buffer of at least `cch_time` wide chars.
+pub unsafe extern "win64" fn get_time_format_w(
+    _locale: u32,
+    _dw_flags: u32,
+    _lp_time: usize,
+    _lp_format: *const u16,
+    lp_time_str: *mut u16,
+    cch_time: i32,
+) -> i32 {
+    let s: Vec<u16> = "00:00:00".encode_utf16().chain(std::iter::once(0)).collect();
+    let copy = (s.len()).min(cch_time as usize);
+    if !lp_time_str.is_null() && cch_time > 0 {
+        unsafe { std::ptr::copy_nonoverlapping(s.as_ptr(), lp_time_str, copy) };
+    }
+    copy as i32
+}
+
+/// MEMORYSTATUS layout (Windows 9x/NT).
+#[repr(C)]
+pub struct MemoryStatus {
+    dw_length: u32,
+    dw_memory_load: u32,
+    dw_total_phys: usize,
+    dw_avail_phys: usize,
+    dw_total_page_file: usize,
+    dw_avail_page_file: usize,
+    dw_total_virtual: usize,
+    dw_avail_virtual: usize,
+}
+
+/// GlobalMemoryStatus: fill a MEMORYSTATUS struct with fake values.
+///
+/// # Safety
+/// `lp_buffer` must point to a writable `MEMORYSTATUS` struct.
+pub unsafe extern "win64" fn global_memory_status(lp_buffer: *mut MemoryStatus) {
+    if lp_buffer.is_null() {
+        return;
+    }
+    unsafe {
+        (*lp_buffer).dw_length = std::mem::size_of::<MemoryStatus>() as u32;
+        (*lp_buffer).dw_memory_load = 30;
+        (*lp_buffer).dw_total_phys = 8 * 1024 * 1024 * 1024; // 8 GB
+        (*lp_buffer).dw_avail_phys = 4 * 1024 * 1024 * 1024;
+        (*lp_buffer).dw_total_page_file = 16 * 1024 * 1024 * 1024;
+        (*lp_buffer).dw_avail_page_file = 8 * 1024 * 1024 * 1024;
+        (*lp_buffer).dw_total_virtual = 0x0000_7FFF_FFFF_0000usize;
+        (*lp_buffer).dw_avail_virtual = 0x0000_7FFF_FFFF_0000usize;
+    }
+}
+
+/// InitializeSListHead: initialise an interlocked singly-linked list.
+///
+/// # Safety
+/// `list_head` must point to a 16-byte-aligned SLIST_HEADER (zeroed).
+pub unsafe extern "win64" fn initialize_slist_head(list_head: *mut u128) {
+    if !list_head.is_null() {
+        unsafe { *list_head = 0 };
+    }
+}
+
+/// IsValidLocale: return TRUE for any locale (we accept all).
+pub extern "win64" fn is_valid_locale(_locale: u32, _dw_flags: u32) -> i32 {
+    1
+}
+
+/// EnumSystemLocalesW: call the callback for one fake locale. Returns TRUE.
+///
+/// # Safety
+/// `lp_locale_enum_proc` is called as `extern "win64" fn(*const u16) -> i32`.
+pub unsafe extern "win64" fn enum_system_locales_w(
+    lp_locale_enum_proc: usize,
+    _dw_flags: u32,
+) -> i32 {
+    if lp_locale_enum_proc == 0 {
+        return 0;
+    }
+    // Call the callback with the English (US) locale string.
+    let locale: Vec<u16> = "0409\0".encode_utf16().collect();
+    let cb: extern "win64" fn(*const u16) -> i32 =
+        unsafe { std::mem::transmute(lp_locale_enum_proc) };
+    cb(locale.as_ptr());
+    1
+}
+
+/// FindResourceA: locate a resource in a module. Returns NULL (not implemented).
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn find_resource_a(
+    _h_module: usize,
+    _lp_name: *const u8,
+    _lp_type: *const u8,
+) -> usize {
+    0
+}
+
+/// LoadResource: load a resource into memory. Returns NULL (not implemented).
+pub extern "win64" fn load_resource(_h_module: usize, _h_res_info: usize) -> usize {
+    0
+}
+
+/// LockResource: return a pointer to locked resource data. Returns NULL.
+pub extern "win64" fn lock_resource(_h_res_data: usize) -> usize {
+    0
+}
+
+/// SizeofResource: return the size of a resource. Returns 0.
+pub extern "win64" fn sizeof_resource(_h_module: usize, _h_res_info: usize) -> u32 {
+    0
+}
+
+/// FILETIME layout (Windows).
+#[repr(C)]
+pub struct FileTime {
+    dw_low_date_time: u32,
+    dw_high_date_time: u32,
+}
+
+/// GetProcessTimes: return zero CPU times. Returns TRUE.
+///
+/// # Safety
+/// Output pointers must be valid `FILETIME` structs or null.
+pub unsafe extern "win64" fn get_process_times(
+    _h_process: usize,
+    lp_creation_time: *mut FileTime,
+    lp_exit_time: *mut FileTime,
+    lp_kernel_time: *mut FileTime,
+    lp_user_time: *mut FileTime,
+) -> i32 {
+    for p in [lp_creation_time, lp_exit_time, lp_kernel_time, lp_user_time] {
+        if !p.is_null() {
+            unsafe {
+                (*p).dw_low_date_time = 0;
+                (*p).dw_high_date_time = 0;
+            }
+        }
+    }
+    1
+}
+
+/// GetThreadTimes: return zero CPU times. Returns TRUE.
+///
+/// # Safety
+/// Output pointers must be valid `FILETIME` structs or null.
+pub unsafe extern "win64" fn get_thread_times(
+    _h_thread: usize,
+    lp_creation_time: *mut FileTime,
+    lp_exit_time: *mut FileTime,
+    lp_kernel_time: *mut FileTime,
+    lp_user_time: *mut FileTime,
+) -> i32 {
+    unsafe { get_process_times(0, lp_creation_time, lp_exit_time, lp_kernel_time, lp_user_time) }
+}
+
+/// GetOverlappedResult: query the result of an async I/O operation.
+/// Returns FALSE (no async I/O support yet).
+///
+/// # Safety
+/// `lp_number_of_bytes_transferred` must be writable if non-null.
+pub unsafe extern "win64" fn get_overlapped_result(
+    _h_file: usize,
+    _lp_overlapped: usize,
+    lp_number_of_bytes_transferred: *mut u32,
+    _b_wait: i32,
+) -> i32 {
+    if !lp_number_of_bytes_transferred.is_null() {
+        unsafe { *lp_number_of_bytes_transferred = 0 };
+    }
+    0 // FALSE
+}
+
+/// RtlPcToFileHeader: return the module base for a code address.
+/// Returns NULL (cannot map Linux addresses to Windows modules).
+///
+/// # Safety
+/// `p_pc_value` must be readable; `pp_base_of_image` must be writable.
+pub unsafe extern "win64" fn rtl_pc_to_file_header(
+    _p_pc_value: *const u8,
+    pp_base_of_image: *mut *const u8,
+) -> *const u8 {
+    if !pp_base_of_image.is_null() {
+        unsafe { *pp_base_of_image = std::ptr::null() };
+    }
+    std::ptr::null()
+}
+
+/// CreateFileMappingA: ANSI variant — returns NULL (file mapping not implemented).
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn create_file_mapping_a(
+    _h_file: usize,
+    _lp_attributes: usize,
+    _fl_protect: u32,
+    _dw_maximum_size_high: u32,
+    _dw_maximum_size_low: u32,
+    _lp_name: *const u8,
+) -> usize {
+    0
+}
+
+/// CreatePipe: create an anonymous pipe. Returns FALSE (not implemented yet).
+///
+/// # Safety
+/// `lp_read_pipe` and `lp_write_pipe` must be writable handle pointers.
+pub unsafe extern "win64" fn create_pipe(
+    lp_read_pipe: *mut usize,
+    lp_write_pipe: *mut usize,
+    _lp_pipe_attributes: usize,
+    _n_size: u32,
+) -> i32 {
+    if !lp_read_pipe.is_null() {
+        unsafe { *lp_read_pipe = usize::MAX }; // INVALID_HANDLE_VALUE
+    }
+    if !lp_write_pipe.is_null() {
+        unsafe { *lp_write_pipe = usize::MAX };
+    }
+    0 // FALSE
+}
+
+/// ReadConsoleW: read from the console. Returns FALSE (no console input).
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn read_console_w(
+    _h_console_input: usize,
+    _lp_buffer: *mut u16,
+    _n_number_of_chars_to_read: u32,
+    _lp_number_of_chars_read: *mut u32,
+    _p_input_control: usize,
+) -> i32 {
+    0 // FALSE
+}
+
+/// ConnectNamedPipe: wait for a client to connect to a named pipe. Returns FALSE.
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn connect_named_pipe(_h_named_pipe: usize, _lp_overlapped: usize) -> i32 {
+    0
+}
+
+/// CreateNamedPipeA: create a named pipe. Returns INVALID_HANDLE_VALUE.
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "win64" fn create_named_pipe_a(
+    _lp_name: *const u8,
+    _dw_open_mode: u32,
+    _dw_pipe_mode: u32,
+    _n_max_instances: u32,
+    _n_out_buffer_size: u32,
+    _n_in_buffer_size: u32,
+    _n_default_timeout: u32,
+    _lp_security_attributes: usize,
+) -> usize {
+    usize::MAX // INVALID_HANDLE_VALUE
+}
+
+/// WaitNamedPipeA: wait for a named pipe to become available. Returns FALSE.
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn wait_named_pipe_a(_lp_named_pipe_name: *const u8, _n_timeout_ms: u32) -> i32 {
+    0
+}
+
+/// ClearCommBreak: clear a serial communication break condition. Returns FALSE.
+pub extern "win64" fn clear_comm_break(_h_file: usize) -> i32 {
+    0
+}
+
+/// SetCommBreak: set a serial communication break condition. Returns FALSE.
+pub extern "win64" fn set_comm_break(_h_file: usize) -> i32 {
+    0
+}
+
+/// GetCommState: return serial port state. Returns FALSE (no serial support).
+///
+/// # Safety
+/// `lp_dcb` is accepted but not written.
+pub unsafe extern "win64" fn get_comm_state(_h_file: usize, _lp_dcb: usize) -> i32 {
+    0
+}
+
+/// SetCommState: set serial port state. Returns FALSE.
+///
+/// # Safety
+/// `lp_dcb` is accepted but not dereferenced.
+pub unsafe extern "win64" fn set_comm_state(_h_file: usize, _lp_dcb: usize) -> i32 {
+    0
+}
+
+/// SetCommTimeouts: set serial port timeouts. Returns FALSE.
+///
+/// # Safety
+/// `lp_comm_timeouts` is accepted but not dereferenced.
+pub unsafe extern "win64" fn set_comm_timeouts(_h_file: usize, _lp_comm_timeouts: usize) -> i32 {
+    0
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

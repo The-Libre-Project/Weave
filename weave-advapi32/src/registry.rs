@@ -1153,8 +1153,190 @@ pub fn resolve(func: &str) -> Option<usize> {
         "RegDeleteValueA" => {
             Some(reg_delete_value_a as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
         }
+        // ── Security / SID stubs (PuTTY gap-fill) ────────────────────────
+        "GetUserNameA" => Some(
+            get_user_name_a as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
+        ),
+        "AllocateAndInitializeSid" => Some(
+            allocate_and_initialize_sid
+                as unsafe extern "win64" fn(_, _, _, _, _, _, _, _, _, _, _) -> _
+                as *const () as usize,
+        ),
+        "CopySid" => Some(
+            copy_sid as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
+        ),
+        "EqualSid" => Some(
+            equal_sid as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
+        ),
+        "GetLengthSid" => Some(get_length_sid as *const () as usize),
+        "FreeSid" => Some(free_sid as *const () as usize),
+        "InitializeSecurityDescriptor" => Some(
+            initialize_security_descriptor
+                as unsafe extern "win64" fn(_, _) -> _
+                as *const () as usize,
+        ),
+        "SetSecurityDescriptorDacl" => Some(
+            set_security_descriptor_dacl
+                as unsafe extern "win64" fn(_, _, _, _) -> _
+                as *const () as usize,
+        ),
+        "SetSecurityDescriptorOwner" => Some(
+            set_security_descriptor_owner
+                as unsafe extern "win64" fn(_, _, _) -> _
+                as *const () as usize,
+        ),
         _ => None,
     }
+}
+
+// ── Security / SID stubs ──────────────────────────────────────────────────────
+
+/// GetUserNameA: return the login name of the current user.
+///
+/// # Safety
+/// `lp_buffer` must be writable for `*lpcb_buffer` bytes; `lpcb_buffer` writable.
+pub unsafe extern "win64" fn get_user_name_a(
+    lp_buffer: *mut u8,
+    lpcb_buffer: *mut u32,
+) -> i32 {
+    let user = b"weave\0";
+    let needed = user.len() as u32;
+    if lpcb_buffer.is_null() {
+        return 0;
+    }
+    let avail = unsafe { *lpcb_buffer };
+    unsafe { *lpcb_buffer = needed };
+    if avail < needed || lp_buffer.is_null() {
+        return 0;
+    }
+    unsafe { std::ptr::copy_nonoverlapping(user.as_ptr(), lp_buffer, user.len()) };
+    1
+}
+
+/// A minimal fake SID (Security Identifier) stored on the heap.
+#[repr(C)]
+pub struct FakeSid {
+    revision: u8,
+    sub_authority_count: u8,
+    identifier_authority: [u8; 6],
+    sub_authority: [u32; 8],
+}
+
+/// AllocateAndInitializeSid: create a SID with up to 8 sub-authorities.
+///
+/// # Safety
+/// `pidentifier_authority` must be a valid 6-byte authority value.
+/// `new_sid` must be a writable `*mut PSID`.
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "win64" fn allocate_and_initialize_sid(
+    pidentifier_authority: *const u8,
+    n_sub_authority_count: u8,
+    n_sub_authority0: u32,
+    n_sub_authority1: u32,
+    n_sub_authority2: u32,
+    n_sub_authority3: u32,
+    n_sub_authority4: u32,
+    n_sub_authority5: u32,
+    n_sub_authority6: u32,
+    n_sub_authority7: u32,
+    new_sid: *mut *mut FakeSid,
+) -> i32 {
+    if new_sid.is_null() {
+        return 0;
+    }
+    let sid = Box::new(FakeSid {
+        revision: 1,
+        sub_authority_count: n_sub_authority_count.min(8),
+        identifier_authority: if !pidentifier_authority.is_null() {
+            unsafe { *(pidentifier_authority as *const [u8; 6]) }
+        } else {
+            [0u8; 6]
+        },
+        sub_authority: [
+            n_sub_authority0, n_sub_authority1, n_sub_authority2, n_sub_authority3,
+            n_sub_authority4, n_sub_authority5, n_sub_authority6, n_sub_authority7,
+        ],
+    });
+    unsafe { *new_sid = Box::into_raw(sid) };
+    1
+}
+
+/// CopySid: copy a SID to a buffer. Returns TRUE.
+///
+/// # Safety
+/// Both pointers must be valid if non-null.
+pub unsafe extern "win64" fn copy_sid(
+    n_destination_sid_length: u32,
+    p_destination_sid: *mut u8,
+    p_source_sid: *const u8,
+) -> i32 {
+    if p_destination_sid.is_null() || p_source_sid.is_null() {
+        return 0;
+    }
+    let copy = n_destination_sid_length as usize;
+    unsafe { std::ptr::copy_nonoverlapping(p_source_sid, p_destination_sid, copy) };
+    1
+}
+
+/// EqualSid: compare two SIDs. Returns FALSE (conservative — we can't know).
+///
+/// # Safety
+/// Both pointers must be valid FakeSid pointers.
+pub unsafe extern "win64" fn equal_sid(_sid1: *const FakeSid, _sid2: *const FakeSid) -> i32 {
+    0
+}
+
+/// GetLengthSid: return the length of a SID in bytes. Returns size of FakeSid.
+pub extern "win64" fn get_length_sid(_p_sid: *const u8) -> u32 {
+    std::mem::size_of::<FakeSid>() as u32
+}
+
+/// FreeSid: free a SID allocated by AllocateAndInitializeSid. Returns NULL.
+pub extern "win64" fn free_sid(p_sid: *mut FakeSid) -> *mut FakeSid {
+    if !p_sid.is_null() {
+        unsafe { drop(Box::from_raw(p_sid)) };
+    }
+    std::ptr::null_mut()
+}
+
+/// InitializeSecurityDescriptor: zero-initialise a security descriptor. Returns TRUE.
+///
+/// # Safety
+/// `p_security_descriptor` must be writable for at least 20 bytes.
+pub unsafe extern "win64" fn initialize_security_descriptor(
+    p_security_descriptor: *mut u8,
+    _dw_revision: u32,
+) -> i32 {
+    if p_security_descriptor.is_null() {
+        return 0;
+    }
+    unsafe { std::ptr::write_bytes(p_security_descriptor, 0, 20) };
+    1
+}
+
+/// SetSecurityDescriptorDacl: set the DACL in a security descriptor. Returns TRUE.
+///
+/// # Safety
+/// Pointer arguments are accepted but not fully validated.
+pub unsafe extern "win64" fn set_security_descriptor_dacl(
+    _p_security_descriptor: *mut u8,
+    _b_dacl_present: i32,
+    _p_dacl: *const u8,
+    _b_dacl_defaulted: i32,
+) -> i32 {
+    1
+}
+
+/// SetSecurityDescriptorOwner: set the owner SID. Returns TRUE.
+///
+/// # Safety
+/// Pointer arguments are accepted but not fully validated.
+pub unsafe extern "win64" fn set_security_descriptor_owner(
+    _p_security_descriptor: *mut u8,
+    _p_owner: *const u8,
+    _b_owner_defaulted: i32,
+) -> i32 {
+    1
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

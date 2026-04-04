@@ -247,6 +247,175 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
             to_unicode_ex as unsafe extern "win64" fn(_, _, _, _, _, _, _) -> _ as *const ()
                 as usize,
         ),
+        // ── ANSI window class wrappers ───────────────────────────��────────
+        "RegisterClassA" => {
+            Some(register_class_a as unsafe extern "win64" fn(_) -> _ as *const () as usize)
+        }
+        "RegisterClassExA" => {
+            Some(register_class_ex_a as unsafe extern "win64" fn(_) -> _ as *const () as usize)
+        }
+        // ── ANSI window creation ──────────────────────────────────────────
+        "CreateWindowExA" => Some(
+            create_window_ex_a
+                as unsafe extern "win64" fn(_, _, _, _, _, _, _, _, _, _, _, _) -> _
+                as *const () as usize,
+        ),
+        // ── ANSI message loop ─────────────────────────────────────────────
+        "GetMessageA" => Some(
+            get_message_a as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
+        ),
+        "PeekMessageA" => Some(
+            peek_message_a as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const () as usize,
+        ),
+        "DispatchMessageA" => Some(
+            dispatch_message_a as unsafe extern "win64" fn(_) -> _ as *const () as usize,
+        ),
+        "PostMessageA" => Some(post_message_a as *const () as usize),
+        "SendMessageA" => Some(send_message_a as *const () as usize),
+        "DefWindowProcA" => Some(def_window_proc_a as *const () as usize),
+        // ── ANSI window text / class ──────────────────────────────────────
+        "GetWindowTextA" => Some(
+            get_window_text_a as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
+        ),
+        "GetWindowTextLengthA" => Some(get_window_text_length_a as *const () as usize),
+        "GetWindowLongPtrA" => Some(get_window_long_ptr_a as *const () as usize),
+        "SetWindowLongPtrA" => Some(set_window_long_ptr_a as *const () as usize),
+        "SetClassLongPtrA" => Some(
+            set_class_long_ptr_a as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
+        ),
+        // ── ANSI resource loading ─────────────────────────────────────────
+        "LoadIconA" => {
+            Some(load_icon_a as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "LoadImageA" => Some(
+            load_image_a as unsafe extern "win64" fn(_, _, _, _, _, _) -> _ as *const () as usize,
+        ),
+        "DestroyIcon" => Some(destroy_icon as *const () as usize),
+        // ── ANSI message box ──────────────────────────────────────────────
+        "MessageBoxA" => Some(
+            message_box_a as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
+        ),
+        "MessageBoxIndirectW" => Some(
+            message_box_indirect_w as unsafe extern "win64" fn(_) -> _ as *const () as usize,
+        ),
+        // ── ANSI menu helpers ─────────────────────────────────────────────
+        "AppendMenuA" => Some(
+            append_menu_a as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
+        ),
+        "InsertMenuA" => Some(
+            insert_menu_a as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const () as usize,
+        ),
+        "GetSystemMenu" => Some(get_system_menu as *const () as usize),
+        "DeleteMenu" => Some(delete_menu as *const () as usize),
+        // ── Dialog stubs ──────────────────────────────────────────────────
+        "DefDlgProcA" => Some(def_dlg_proc_a as *const () as usize),
+        "DialogBoxParamA" => Some(
+            dialog_box_param_a as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "CreateDialogParamA" => Some(
+            create_dialog_param_a as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "EndDialog" => Some(end_dialog as *const () as usize),
+        "GetDlgItem" => Some(get_dlg_item as *const () as usize),
+        "GetDlgItemTextA" => Some(
+            get_dlg_item_text_a as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
+        ),
+        "GetDlgItemTextW" => Some(
+            get_dlg_item_text_w as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
+        ),
+        "SetDlgItemTextA" => Some(
+            set_dlg_item_text_a as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
+        ),
+        "SetDlgItemTextW" => Some(
+            set_dlg_item_text_w as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
+        ),
+        "SendDlgItemMessageA" => Some(send_dlg_item_message_a as *const () as usize),
+        "CheckDlgButton" => Some(check_dlg_button as *const () as usize),
+        "IsDlgButtonChecked" => Some(is_dlg_button_checked as *const () as usize),
+        "CheckRadioButton" => Some(check_radio_button as *const () as usize),
+        "IsDialogMessageA" => Some(
+            is_dialog_message_a as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
+        ),
+        "MapDialogRect" => Some(
+            map_dialog_rect as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
+        ),
+        // ── Window state ──────────────────────────────────────────────────
+        "IsIconic" => Some(is_iconic as *const () as usize),
+        "IsZoomed" => Some(is_zoomed as *const () as usize),
+        "FlashWindow" => Some(flash_window as *const () as usize),
+        "GetWindowPlacement" => Some(
+            get_window_placement as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
+        ),
+        "SetWindowPlacement" => Some(
+            set_window_placement as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
+        ),
+        // ── Timers ────────────────────────────────────────────────────────
+        "SetTimer" => Some(
+            set_timer as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
+        ),
+        "KillTimer" => Some(kill_timer as *const () as usize),
+        // ── Message helpers ───────────────────────────────────────────────
+        "GetMessageTime" => Some(get_message_time as *const () as usize),
+        "GetQueueStatus" => Some(get_queue_status as *const () as usize),
+        "MsgWaitForMultipleObjects" => Some(
+            msg_wait_for_multiple_objects
+                as unsafe extern "win64" fn(_, _, _, _, _) -> _
+                as *const () as usize,
+        ),
+        // ── Mouse capture ─────────────────────────────────────────────────
+        "GetCapture" => Some(get_capture as *const () as usize),
+        "SetCapture" => Some(set_capture as *const () as usize),
+        "ReleaseCapture" => Some(release_capture as *const () as usize),
+        "SetActiveWindow" => Some(set_active_window as *const () as usize),
+        // ── System colors ─────────────────────────────────────────────────
+        "GetSysColor" => Some(get_sys_color as *const () as usize),
+        "GetSysColorBrush" => Some(get_sys_color_brush as *const () as usize),
+        // ── Scrollbar ───────────────────────────────���────────────────────
+        "GetScrollInfo" => Some(
+            get_scroll_info as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
+        ),
+        "SetScrollInfo" => Some(
+            set_scroll_info as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
+        ),
+        // ── Caret ────────────────────────────────────────────────────────
+        "CreateCaret" => Some(create_caret as *const () as usize),
+        "DestroyCaret" => Some(destroy_caret as *const () as usize),
+        "ShowCaret" => Some(show_caret as *const () as usize),
+        "HideCaret" => Some(hide_caret as *const () as usize),
+        "SetCaretPos" => Some(set_caret_pos as *const () as usize),
+        "GetCaretBlinkTime" => Some(get_caret_blink_time as *const () as usize),
+        // ── Misc ──────────────────────────────────────────────────────────
+        "MessageBeep" => Some(message_beep as *const () as usize),
+        "GetDoubleClickTime" => Some(get_double_click_time as *const () as usize),
+        "OffsetRect" => Some(
+            offset_rect as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
+        ),
+        "DrawEdge" => Some(
+            draw_edge as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
+        ),
+        "DrawIconEx" => Some(
+            draw_icon_ex
+                as unsafe extern "win64" fn(_, _, _, _, _, _, _, _, _) -> _
+                as *const () as usize,
+        ),
+        "RegisterClipboardFormatA" => Some(
+            register_clipboard_format_a as unsafe extern "win64" fn(_) -> _ as *const () as usize,
+        ),
+        "RegisterWindowMessageA" => Some(
+            register_window_message_a as unsafe extern "win64" fn(_) -> _ as *const () as usize,
+        ),
+        "SystemParametersInfoA" => Some(
+            system_parameters_info_a
+                as unsafe extern "win64" fn(_, _, _, _) -> _
+                as *const () as usize,
+        ),
+        "ToAsciiEx" => Some(
+            to_ascii_ex
+                as unsafe extern "win64" fn(_, _, _, _, _, _) -> _
+                as *const () as usize,
+        ),
         _ => None,
     }
 }

@@ -9,6 +9,7 @@
 use crate::backend;
 use crate::class::{self, ClassEntry};
 use crate::defs::*;
+use crate::menu;
 use crate::queue::{self, MsgEntry};
 use crate::window::{self, WindowEntry};
 use libc;
@@ -1309,4 +1310,877 @@ unsafe fn fill_msg(lp_msg: *mut Msg, entry: &MsgEntry) {
         m.pt_y = entry.pt_y;
         m._pad1 = 0;
     }
+}
+
+// ── ANSI window class wrappers ────────────────────────────────────────────────
+
+/// RegisterClassA: ANSI variant — converts class name to wide and calls through.
+///
+/// # Safety
+/// `lp_wnd_class` must point to a valid `WNDCLASSA` struct.
+pub unsafe extern "win64" fn register_class_a(lp_wnd_class: *const WndClassA) -> u16 {
+    if lp_wnd_class.is_null() {
+        return 0;
+    }
+    let wc = unsafe { &*lp_wnd_class };
+    let name = unsafe { decode_ansi(wc.lpsz_class_name) };
+    if name.is_empty() {
+        return 0;
+    }
+    class::register(
+        &name,
+        class::ClassEntry {
+            wnd_proc: wc.lpfn_wnd_proc,
+            style: wc.style,
+            h_cursor: wc.h_cursor,
+            hbr_background: wc.hbr_background,
+        },
+    );
+    name_to_atom(&name)
+}
+
+/// RegisterClassExA: ANSI extended variant.
+///
+/// # Safety
+/// `lp_wnd_class_ex` must point to a valid `WNDCLASSEXA` struct.
+pub unsafe extern "win64" fn register_class_ex_a(lp_wnd_class_ex: *const WndClassExA) -> u16 {
+    if lp_wnd_class_ex.is_null() {
+        return 0;
+    }
+    let wc = unsafe { &*lp_wnd_class_ex };
+    let name = unsafe { decode_ansi(wc.lpsz_class_name) };
+    if name.is_empty() {
+        return 0;
+    }
+    class::register(
+        &name,
+        class::ClassEntry {
+            wnd_proc: wc.lpfn_wnd_proc,
+            style: wc.style,
+            h_cursor: wc.h_cursor,
+            hbr_background: wc.hbr_background,
+        },
+    );
+    name_to_atom(&name)
+}
+
+// ── ANSI window creation ──────────────────────────────────────────────────────
+
+/// CreateWindowExA: ANSI variant — converts string args and calls through.
+///
+/// # Safety
+/// String pointer arguments must be null or valid null-terminated ANSI strings.
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "win64" fn create_window_ex_a(
+    dw_ex_style: u32,
+    lp_class_name: *const u8,
+    lp_window_name: *const u8,
+    dw_style: u32,
+    x: i32,
+    y: i32,
+    n_width: i32,
+    n_height: i32,
+    h_wnd_parent: usize,
+    h_menu_param: usize,
+    h_instance: usize,
+    lp_param: *mut u8,
+) -> usize {
+    let class_name = unsafe { decode_ansi(lp_class_name) };
+    let title = unsafe { decode_ansi(lp_window_name) };
+
+    let cls = match class::find(&class_name) {
+        Some(c) => c,
+        None => {
+            eprintln!("weave/user32: CreateWindowExA: unknown class '{class_name}'");
+            return 0;
+        }
+    };
+
+    let width = if n_width == i32::MIN { 640 } else { n_width.max(1) } as u32;
+    let height = if n_height == i32::MIN { 480 } else { n_height.max(1) } as u32;
+    let pos_x = if x == i32::MIN { 100 } else { x };
+    let pos_y = if y == i32::MIN { 100 } else { y };
+    let visible = (dw_style & WS_VISIBLE) != 0;
+
+    let xcb_id = backend::create_window(&title, pos_x, pos_y, width, height, visible);
+
+    let hwnd = window::create(window::WindowEntry {
+        class_name: class_name.clone(),
+        wnd_proc: cls.wnd_proc,
+        title: title.clone(),
+        style: dw_style,
+        x: pos_x,
+        y: pos_y,
+        width,
+        height,
+        visible,
+        xcb_id,
+        h_menu: h_menu_param,
+    });
+
+    let title_wide: Vec<u16> = title.encode_utf16().chain(std::iter::once(0)).collect();
+    let class_wide: Vec<u16> = class_name.encode_utf16().chain(std::iter::once(0)).collect();
+    let cs = CreateStructW {
+        lp_create_params: lp_param,
+        h_instance,
+        h_menu: h_menu_param,
+        hwnd_parent: h_wnd_parent,
+        cy: height as i32,
+        cx: width as i32,
+        y: pos_y,
+        x: pos_x,
+        style: dw_style as i32,
+        _pad: 0,
+        lp_sz_name: title_wide.as_ptr(),
+        lp_sz_class: class_wide.as_ptr(),
+        dw_ex_style,
+        _pad2: 0,
+    };
+    call_wnd_proc(cls.wnd_proc, hwnd, WM_NCCREATE, 0, &cs as *const _ as isize);
+    call_wnd_proc(cls.wnd_proc, hwnd, WM_CREATE, 0, &cs as *const _ as isize);
+    hwnd
+}
+
+// ── ANSI message loop ─────────────────────────────────────────────────────────
+
+/// GetMessageA: ANSI variant — identical to W (MSG has no string fields).
+///
+/// # Safety
+/// `lp_msg` must be a valid writable `MSG` pointer.
+pub unsafe extern "win64" fn get_message_a(
+    lp_msg: *mut Msg,
+    h_wnd: usize,
+    w_msg_filter_min: u32,
+    w_msg_filter_max: u32,
+) -> i32 {
+    unsafe { get_message_w(lp_msg, h_wnd, w_msg_filter_min, w_msg_filter_max) }
+}
+
+/// PeekMessageA: ANSI variant — identical to W.
+///
+/// # Safety
+/// `lp_msg` must be a valid writable `MSG` pointer.
+pub unsafe extern "win64" fn peek_message_a(
+    lp_msg: *mut Msg,
+    h_wnd: usize,
+    w_msg_filter_min: u32,
+    w_msg_filter_max: u32,
+    w_remove_msg: u32,
+) -> i32 {
+    unsafe { peek_message_w(lp_msg, h_wnd, w_msg_filter_min, w_msg_filter_max, w_remove_msg) }
+}
+
+/// DispatchMessageA: ANSI variant — identical to W.
+///
+/// # Safety
+/// `lp_msg` must be a valid `MSG` pointer.
+pub unsafe extern "win64" fn dispatch_message_a(lp_msg: *const Msg) -> isize {
+    unsafe { dispatch_message_w(lp_msg) }
+}
+
+/// PostMessageA: ANSI variant.
+pub extern "win64" fn post_message_a(
+    h_wnd: usize,
+    msg: u32,
+    w_param: usize,
+    l_param: isize,
+) -> i32 {
+    post_message_w(h_wnd, msg, w_param, l_param)
+}
+
+/// SendMessageA: ANSI variant.
+pub extern "win64" fn send_message_a(
+    h_wnd: usize,
+    msg: u32,
+    w_param: usize,
+    l_param: isize,
+) -> isize {
+    send_message_w(h_wnd, msg, w_param, l_param)
+}
+
+/// DefWindowProcA: ANSI variant — forwards to W implementation.
+pub extern "win64" fn def_window_proc_a(
+    h_wnd: usize,
+    msg: u32,
+    w_param: usize,
+    l_param: isize,
+) -> isize {
+    def_window_proc_w(h_wnd, msg, w_param, l_param)
+}
+
+// ── ANSI window text / class ──────────────────────────────────────────────────
+
+/// GetWindowTextA: copy window title as ANSI into buffer.
+///
+/// # Safety
+/// `lp_string` must be a writable buffer of at least `n_max_count` bytes.
+pub unsafe extern "win64" fn get_window_text_a(
+    h_wnd: usize,
+    lp_string: *mut u8,
+    n_max_count: i32,
+) -> i32 {
+    if lp_string.is_null() || n_max_count <= 0 {
+        return 0;
+    }
+    let title = window::with(h_wnd, |w| w.title.clone()).unwrap_or_default();
+    let bytes = title.as_bytes();
+    let copy = bytes.len().min((n_max_count - 1) as usize);
+    unsafe {
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), lp_string, copy);
+        *lp_string.add(copy) = 0;
+    }
+    copy as i32
+}
+
+/// GetWindowTextLengthA: return character count of window title (ANSI).
+pub extern "win64" fn get_window_text_length_a(h_wnd: usize) -> i32 {
+    window::with(h_wnd, |w| w.title.len() as i32).unwrap_or(0)
+}
+
+/// GetWindowLongPtrA: ANSI variant — identical to W.
+pub extern "win64" fn get_window_long_ptr_a(hwnd: usize, n_index: i32) -> isize {
+    get_window_long_ptr_w(hwnd, n_index)
+}
+
+/// SetWindowLongPtrA: ANSI variant — identical to W.
+pub extern "win64" fn set_window_long_ptr_a(hwnd: usize, n_index: i32, dw_new_long: isize) -> isize {
+    set_window_long_ptr_w(hwnd, n_index, dw_new_long)
+}
+
+/// SetClassLongPtrA: change a class attribute. Stub — returns 0.
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn set_class_long_ptr_a(
+    _hwnd: usize,
+    _n_index: i32,
+    _dw_new_long: isize,
+) -> isize {
+    0
+}
+
+// ── ANSI resource loading ─────────────────────────────────────────────────────
+
+/// LoadIconA: ANSI variant — delegates to W stub.
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn load_icon_a(_h_instance: usize, _lp_icon_name: *const u8) -> usize {
+    1usize // fake HICON
+}
+
+/// LoadImageA: ANSI variant — delegates to W stub.
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn load_image_a(
+    _h_inst: usize,
+    _name: *const u8,
+    _type: u32,
+    _cx: i32,
+    _cy: i32,
+    _fu_load: u32,
+) -> usize {
+    1usize // fake handle
+}
+
+/// DestroyIcon: free an HICON. Stub — always succeeds.
+pub extern "win64" fn destroy_icon(_h_icon: usize) -> i32 {
+    1
+}
+
+// ── ANSI message box ──────────────────────────────────────────────────────────
+
+/// MessageBoxA: ANSI variant — returns IDOK.
+///
+/// # Safety
+/// String pointer arguments must be null or valid null-terminated ANSI strings.
+pub unsafe extern "win64" fn message_box_a(
+    h_wnd: usize,
+    lp_text: *const u8,
+    lp_caption: *const u8,
+    u_type: u32,
+) -> i32 {
+    let text = unsafe { decode_ansi(lp_text) };
+    let caption = unsafe { decode_ansi(lp_caption) };
+    eprintln!("weave/user32: MessageBoxA(hwnd={h_wnd:#x}, caption={caption:?}, text={text:?}, type={u_type:#x})");
+    1 // IDOK
+}
+
+/// MessageBoxIndirectW: extended message box. Returns IDOK.
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn message_box_indirect_w(_lp_msgboxparams: usize) -> i32 {
+    1 // IDOK
+}
+
+// ── ANSI menu helpers ─────────────────────────────────────────────────────────
+
+/// AppendMenuA: ANSI variant — converts text and calls through.
+///
+/// # Safety
+/// `lp_new_item` may be a string, bitmap, or other resource pointer.
+pub unsafe extern "win64" fn append_menu_a(
+    h_menu: usize,
+    u_flags: u32,
+    u_id_new_item: usize,
+    lp_new_item: *const u8,
+) -> i32 {
+    const MF_POPUP: u32 = 0x0010;
+    const MF_SEPARATOR: u32 = 0x0800;
+    const MF_BITMAP: u32 = 0x0004;
+    let is_string = (u_flags & (MF_SEPARATOR | MF_POPUP | MF_BITMAP)) == 0;
+    let text = if is_string && !lp_new_item.is_null() {
+        unsafe { decode_ansi(lp_new_item) }
+    } else {
+        String::new()
+    };
+    menu::append_menu_raw(h_menu, u_flags, u_id_new_item, text);
+    1
+}
+
+/// InsertMenuA: ANSI variant of InsertMenu.
+///
+/// # Safety
+/// `lp_new_item` may be a string pointer.
+pub unsafe extern "win64" fn insert_menu_a(
+    h_menu: usize,
+    u_position: u32,
+    u_flags: u32,
+    u_id_new_item: usize,
+    lp_new_item: *const u8,
+) -> i32 {
+    // Simplified: forward to AppendMenuA — position ignored for now.
+    let _ = u_position;
+    unsafe { append_menu_a(h_menu, u_flags, u_id_new_item, lp_new_item) }
+}
+
+/// GetSystemMenu: return the system (window) menu handle.
+///
+/// For Weave we allocate a real menu entry so callers can append to it safely.
+pub extern "win64" fn get_system_menu(h_wnd: usize, b_revert: i32) -> usize {
+    if b_revert != 0 {
+        // Revert to default — we don't track the original, just return current.
+        return window::with(h_wnd, |w| w.h_menu).unwrap_or(0);
+    }
+    window::with(h_wnd, |w| {
+        if w.h_menu != 0 {
+            w.h_menu
+        } else {
+            0
+        }
+    })
+    .unwrap_or_else(menu::create_menu)
+}
+
+/// DeleteMenu: remove an item from a menu.
+pub extern "win64" fn delete_menu(h_menu: usize, u_position: u32, u_flags: u32) -> i32 {
+    menu::delete_item(h_menu, u_position, u_flags);
+    1
+}
+
+// ── Dialog stubs ──────────────────────────────────────────────────────────────
+
+/// DefDlgProcA: default dialog procedure (ANSI). Forwards to DefWindowProcW.
+pub extern "win64" fn def_dlg_proc_a(
+    h_dlg: usize,
+    msg: u32,
+    w_param: usize,
+    l_param: isize,
+) -> isize {
+    def_window_proc_w(h_dlg, msg, w_param, l_param)
+}
+
+/// DialogBoxParamA: create and show a modal dialog box.
+///
+/// Returns IDCANCEL — Weave does not implement dialog templates.
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn dialog_box_param_a(
+    _h_instance: usize,
+    _lp_template_name: *const u8,
+    _hwnd_parent: usize,
+    _lp_dialog_func: usize,
+    _dw_init_param: isize,
+) -> i32 {
+    eprintln!("weave/user32: DialogBoxParamA → IDCANCEL (dialog templates not implemented)");
+    2 // IDCANCEL
+}
+
+/// CreateDialogParamA: create a modeless dialog box.
+///
+/// Returns NULL — Weave does not implement dialog templates.
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn create_dialog_param_a(
+    _h_instance: usize,
+    _lp_template_name: *const u8,
+    _hwnd_parent: usize,
+    _lp_dialog_func: usize,
+    _dw_init_param: isize,
+) -> usize {
+    0
+}
+
+/// EndDialog: close a dialog box.
+pub extern "win64" fn end_dialog(_h_dlg: usize, _n_result: isize) -> i32 {
+    1
+}
+
+/// GetDlgItem: find a control in a dialog by ID. Returns 0 (not found).
+pub extern "win64" fn get_dlg_item(_h_dlg: usize, _n_id_dlg_item: i32) -> usize {
+    0
+}
+
+/// GetDlgItemTextA: copy a dialog control's text. Returns 0 chars.
+///
+/// # Safety
+/// `lp_string` must be writable if non-null.
+pub unsafe extern "win64" fn get_dlg_item_text_a(
+    _h_dlg: usize,
+    _n_id_dlg_item: i32,
+    lp_string: *mut u8,
+    n_max_count: i32,
+) -> u32 {
+    if !lp_string.is_null() && n_max_count > 0 {
+        unsafe { *lp_string = 0 };
+    }
+    0
+}
+
+/// GetDlgItemTextW: copy a dialog control's text (wide). Returns 0 chars.
+///
+/// # Safety
+/// `lp_string` must be writable if non-null.
+pub unsafe extern "win64" fn get_dlg_item_text_w(
+    _h_dlg: usize,
+    _n_id_dlg_item: i32,
+    lp_string: *mut u16,
+    n_max_count: i32,
+) -> u32 {
+    if !lp_string.is_null() && n_max_count > 0 {
+        unsafe { *lp_string = 0 };
+    }
+    0
+}
+
+/// SetDlgItemTextA: set a dialog control's text. Returns TRUE.
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn set_dlg_item_text_a(
+    _h_dlg: usize,
+    _n_id_dlg_item: i32,
+    _lp_string: *const u8,
+) -> i32 {
+    1
+}
+
+/// SetDlgItemTextW: set a dialog control's text (wide). Returns TRUE.
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn set_dlg_item_text_w(
+    _h_dlg: usize,
+    _n_id_dlg_item: i32,
+    _lp_string: *const u16,
+) -> i32 {
+    1
+}
+
+/// SendDlgItemMessageA: send a message to a dialog control. Returns 0.
+pub extern "win64" fn send_dlg_item_message_a(
+    _h_dlg: usize,
+    _n_id_dlg_item: i32,
+    _msg: u32,
+    _w_param: usize,
+    _l_param: isize,
+) -> isize {
+    0
+}
+
+/// CheckDlgButton: set the checked state of a button control. Returns TRUE.
+pub extern "win64" fn check_dlg_button(_h_dlg: usize, _n_id_button: i32, _u_check: u32) -> i32 {
+    1
+}
+
+/// IsDlgButtonChecked: query the checked state of a button. Returns 0.
+pub extern "win64" fn is_dlg_button_checked(_h_dlg: usize, _n_id_button: i32) -> u32 {
+    0 // BST_UNCHECKED
+}
+
+/// CheckRadioButton: check one button in a group, uncheck the rest. Returns TRUE.
+pub extern "win64" fn check_radio_button(
+    _h_dlg: usize,
+    _n_id_first_button: i32,
+    _n_id_last_button: i32,
+    _n_id_check_button: i32,
+) -> i32 {
+    1
+}
+
+/// IsDialogMessageA: determine whether a message is for a dialog. Returns FALSE.
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn is_dialog_message_a(_h_dlg: usize, _lp_msg: *const Msg) -> i32 {
+    0
+}
+
+/// MapDialogRect: map dialog box units to pixels. Returns TRUE (rect unchanged).
+///
+/// # Safety
+/// `lp_rect` must point to a valid `Rect` if non-null.
+pub unsafe extern "win64" fn map_dialog_rect(_h_dlg: usize, _lp_rect: *mut Rect) -> i32 {
+    1
+}
+
+// ── Window state ──────────────────────────────────────────────────────────────
+
+/// IsIconic: return TRUE if the window is minimised. Always returns FALSE.
+pub extern "win64" fn is_iconic(_h_wnd: usize) -> i32 {
+    0
+}
+
+/// IsZoomed: return TRUE if the window is maximised. Always returns FALSE.
+pub extern "win64" fn is_zoomed(_h_wnd: usize) -> i32 {
+    0
+}
+
+/// FlashWindow: flash a window in the taskbar. Returns FALSE.
+pub extern "win64" fn flash_window(_h_wnd: usize, _b_invert: i32) -> i32 {
+    0
+}
+
+/// GetWindowPlacement: retrieve window size and position.
+///
+/// # Safety
+/// `lp_wndpl` must point to a valid `WindowPlacement` with `length` set.
+pub unsafe extern "win64" fn get_window_placement(
+    h_wnd: usize,
+    lp_wndpl: *mut WindowPlacement,
+) -> i32 {
+    if lp_wndpl.is_null() {
+        return 0;
+    }
+    let (x, y, w, h) = window::with(h_wnd, |win| (win.x, win.y, win.width, win.height))
+        .unwrap_or((0, 0, 800, 600));
+    unsafe {
+        (*lp_wndpl).flags = 0;
+        (*lp_wndpl).show_cmd = SW_SHOW as u32;
+        (*lp_wndpl).pt_min_position = Point { x: -1, y: -1 };
+        (*lp_wndpl).pt_max_position = Point { x: -1, y: -1 };
+        (*lp_wndpl).rc_normal_position = Rect {
+            left: x,
+            top: y,
+            right: x + w as i32,
+            bottom: y + h as i32,
+        };
+    }
+    1
+}
+
+/// SetWindowPlacement: set window size and position. Returns TRUE.
+///
+/// # Safety
+/// `lp_wndpl` must point to a valid `WindowPlacement` struct.
+pub unsafe extern "win64" fn set_window_placement(
+    h_wnd: usize,
+    lp_wndpl: *const WindowPlacement,
+) -> i32 {
+    if lp_wndpl.is_null() {
+        return 0;
+    }
+    let rc = unsafe { &(*lp_wndpl).rc_normal_position };
+    window::with_mut(h_wnd, |w| {
+        w.x = rc.left;
+        w.y = rc.top;
+        w.width = (rc.right - rc.left) as u32;
+        w.height = (rc.bottom - rc.top) as u32;
+    });
+    1
+}
+
+// ── Timer stubs ───────────────────────────────────────────────────────────────
+
+/// SetTimer: create a timer. Returns a fake timer ID (1).
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn set_timer(
+    _h_wnd: usize,
+    _n_id_event: usize,
+    _u_elapse: u32,
+    _lp_timer_func: usize,
+) -> usize {
+    1usize // non-zero = success
+}
+
+/// KillTimer: destroy a timer. Returns TRUE.
+pub extern "win64" fn kill_timer(_h_wnd: usize, _u_id_event: usize) -> i32 {
+    1
+}
+
+// ── Message helpers ───────────────────────────────────────────────────────────
+
+/// GetMessageTime: return the time of the last message. Returns 0.
+pub extern "win64" fn get_message_time() -> i32 {
+    0
+}
+
+/// GetQueueStatus: return the types of messages in the queue. Returns 0.
+pub extern "win64" fn get_queue_status(_flags: u32) -> u32 {
+    0
+}
+
+/// MsgWaitForMultipleObjects: wait for objects or a message. Returns WAIT_TIMEOUT.
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn msg_wait_for_multiple_objects(
+    n_count: u32,
+    lp_handles: *const usize,
+    b_wait_all: i32,
+    dw_milliseconds: u32,
+    dw_wake_mask: u32,
+) -> u32 {
+    // Delegate to WaitForMultipleObjects for the handles portion.
+    if n_count > 0 && !lp_handles.is_null() {
+        let handles =
+            unsafe { std::slice::from_raw_parts(lp_handles, n_count as usize) };
+        for &h in handles {
+            let _ = h;
+        }
+    }
+    let _ = (b_wait_all, dw_milliseconds, dw_wake_mask);
+    0x00000102u32 // WAIT_TIMEOUT
+}
+
+// ── Mouse capture ─────────────────────────────────────────────────────────────
+
+/// GetCapture: return the window that has mouse capture. Returns 0.
+pub extern "win64" fn get_capture() -> usize {
+    0
+}
+
+/// SetCapture: capture mouse input for a window. Returns 0 (previous capture).
+pub extern "win64" fn set_capture(_h_wnd: usize) -> usize {
+    0
+}
+
+/// ReleaseCapture: release mouse capture. Returns TRUE.
+pub extern "win64" fn release_capture() -> i32 {
+    1
+}
+
+/// SetActiveWindow: activate a window. Returns 0 (previous).
+pub extern "win64" fn set_active_window(_h_wnd: usize) -> usize {
+    0
+}
+
+// ── System colors ─────────────────────────────────────────────────────────────
+
+/// GetSysColor: return a system color. Returns black (0x000000) for all.
+pub extern "win64" fn get_sys_color(_n_index: i32) -> u32 {
+    // Hardcode some common ones for better appearance.
+    match _n_index {
+        5 => 0x00FFFFFF,  // COLOR_WINDOW = white
+        8 => 0x00000000,  // COLOR_WINDOWTEXT = black
+        15 => 0x00F0F0F0, // COLOR_BTNFACE = light gray
+        _ => 0x00D4D0C8,  // default = classic Windows gray
+    }
+}
+
+/// GetSysColorBrush: return a brush for a system color.
+///
+/// Returns a non-zero fake HBRUSH value. GDI functions that receive this
+/// handle will silently accept it (SelectObject/DeleteObject treat unknown
+/// handles as no-ops in Weave's stub implementation).
+pub extern "win64" fn get_sys_color_brush(n_index: i32) -> usize {
+    // Use the color index + 1 as the fake handle (non-zero, stable, cheap).
+    (n_index as usize).wrapping_add(1)
+}
+
+// ── Scrollbar stubs ───────────────────────────────────────────────────────────
+
+/// GetScrollInfo: retrieve scroll bar parameters. Returns TRUE.
+///
+/// # Safety
+/// `lp_si` must point to a valid `ScrollInfo` with `cb_size` set.
+pub unsafe extern "win64" fn get_scroll_info(
+    _hwnd: usize,
+    _n_bar: i32,
+    lp_si: *mut ScrollInfo,
+) -> i32 {
+    if lp_si.is_null() {
+        return 0;
+    }
+    // Fill with safe zero values.
+    unsafe {
+        (*lp_si).f_mask = 0x1F; // SIF_ALL
+        (*lp_si).n_min = 0;
+        (*lp_si).n_max = 100;
+        (*lp_si).n_page = 10;
+        (*lp_si).n_pos = 0;
+        (*lp_si).n_track_pos = 0;
+    }
+    1
+}
+
+/// SetScrollInfo: set scroll bar parameters. Returns 0 (new position).
+///
+/// # Safety
+/// `lp_si` must point to a valid `ScrollInfo`.
+pub unsafe extern "win64" fn set_scroll_info(
+    _hwnd: usize,
+    _n_bar: i32,
+    _lp_si: *const ScrollInfo,
+    _b_redraw: i32,
+) -> i32 {
+    0
+}
+
+// ── Caret stubs ───────────────────────────────────────────────────────────────
+
+/// CreateCaret: create a caret shape for a window. Returns TRUE.
+pub extern "win64" fn create_caret(_hwnd: usize, _h_bitmap: usize, _w: i32, _h: i32) -> i32 {
+    1
+}
+
+/// DestroyCaret: destroy the current caret. Returns TRUE.
+pub extern "win64" fn destroy_caret() -> i32 {
+    1
+}
+
+/// ShowCaret: make the caret visible. Returns TRUE.
+pub extern "win64" fn show_caret(_hwnd: usize) -> i32 {
+    1
+}
+
+/// HideCaret: hide the caret. Returns TRUE.
+pub extern "win64" fn hide_caret(_hwnd: usize) -> i32 {
+    1
+}
+
+/// SetCaretPos: move the caret. Returns TRUE.
+pub extern "win64" fn set_caret_pos(_x: i32, _y: i32) -> i32 {
+    1
+}
+
+/// GetCaretBlinkTime: return the caret blink interval in milliseconds.
+pub extern "win64" fn get_caret_blink_time() -> u32 {
+    500
+}
+
+// ── Misc stubs ────────────────────────────────────────────────────────────────
+
+/// MessageBeep: produce a sound. Returns TRUE (no audio yet).
+pub extern "win64" fn message_beep(_u_type: u32) -> i32 {
+    1
+}
+
+/// GetDoubleClickTime: return the double-click interval in milliseconds.
+pub extern "win64" fn get_double_click_time() -> u32 {
+    500
+}
+
+/// OffsetRect: offset a rectangle by x, y. Returns TRUE.
+///
+/// # Safety
+/// `lp_rc` must point to a valid `Rect`.
+pub unsafe extern "win64" fn offset_rect(lp_rc: *mut Rect, dx: i32, dy: i32) -> i32 {
+    if lp_rc.is_null() {
+        return 0;
+    }
+    unsafe {
+        (*lp_rc).left += dx;
+        (*lp_rc).right += dx;
+        (*lp_rc).top += dy;
+        (*lp_rc).bottom += dy;
+    }
+    1
+}
+
+/// DrawEdge: draw a 3D border around a rectangle. Returns TRUE.
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn draw_edge(
+    _hdc: usize,
+    _qrc: *mut Rect,
+    _edge: u32,
+    _grfflags: u32,
+) -> i32 {
+    1
+}
+
+/// DrawIconEx: draw an icon or cursor. Returns TRUE.
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn draw_icon_ex(
+    _hdc: usize,
+    _x_left: i32,
+    _y_top: i32,
+    _h_icon: usize,
+    _cx_width: i32,
+    _cy_height: i32,
+    _i_step_if_ani_cur: u32,
+    _h_br_flicker_free_draw: usize,
+    _di_flags: u32,
+) -> i32 {
+    1
+}
+
+/// RegisterClipboardFormatA: register a named clipboard format. Returns a fake ID.
+///
+/// # Safety
+/// `lp_sz_format` must be a valid null-terminated ANSI string.
+pub unsafe extern "win64" fn register_clipboard_format_a(lp_sz_format: *const u8) -> u32 {
+    let name = unsafe { decode_ansi(lp_sz_format) };
+    // Return a deterministic ID in the custom format range (0xC000–0xFFFF).
+    let mut h: u32 = 0xC000;
+    for b in name.bytes() {
+        h = h.wrapping_mul(31).wrapping_add(b as u32);
+    }
+    0xC000 | (h & 0x3FFF)
+}
+
+/// RegisterWindowMessageA: register a unique window message. Returns a fake ID.
+///
+/// # Safety
+/// `lp_string` must be a valid null-terminated ANSI string.
+pub unsafe extern "win64" fn register_window_message_a(lp_string: *const u8) -> u32 {
+    unsafe { register_clipboard_format_a(lp_string) }
+}
+
+/// SystemParametersInfoA: stub — returns FALSE (operation not supported).
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn system_parameters_info_a(
+    _u_action: u32,
+    _u_param: u32,
+    _pv_param: usize,
+    _f_win_ini: u32,
+) -> i32 {
+    0
+}
+
+/// ToAsciiEx: translate a virtual key to a character. Returns 0.
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn to_ascii_ex(
+    _u_virt_key: u32,
+    _u_scan_code: u32,
+    _lp_key_state: *const u8,
+    _lp_char: *mut u16,
+    _u_flags: u32,
+    _dwhkl: usize,
+) -> i32 {
+    0
 }

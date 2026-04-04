@@ -270,6 +270,80 @@ pub struct Point {
     pub y: i32,
 }
 
+// ── WNDCLASSA / WNDCLASSEXA ───────────────────────────────────────────────────
+
+/// WNDCLASSA: window class descriptor (ANSI variant).
+///
+/// Identical layout to WNDCLASSW except class/menu name fields are *const u8.
+#[repr(C)]
+pub struct WndClassA {
+    pub style: u32,
+    pub _pad: u32,
+    pub lpfn_wnd_proc: usize,
+    pub cb_cls_extra: i32,
+    pub cb_wnd_extra: i32,
+    pub h_instance: HINSTANCE,
+    pub h_icon: HICON,
+    pub h_cursor: HCURSOR,
+    pub hbr_background: HBRUSH,
+    pub lpsz_menu_name: *const u8,
+    pub lpsz_class_name: *const u8,
+}
+
+/// WNDCLASSEXA: extended window class descriptor (ANSI variant).
+#[repr(C)]
+pub struct WndClassExA {
+    pub cb_size: u32,
+    pub style: u32,
+    pub lpfn_wnd_proc: usize,
+    pub cb_cls_extra: i32,
+    pub cb_wnd_extra: i32,
+    pub h_instance: HINSTANCE,
+    pub h_icon: HICON,
+    pub h_cursor: HCURSOR,
+    pub hbr_background: HBRUSH,
+    pub lpsz_menu_name: *const u8,
+    pub lpsz_class_name: *const u8,
+    pub h_icon_sm: HICON,
+}
+
+// ── WINDOWPLACEMENT ───────────────────────────────────────────────────────────
+
+/// WINDOWPLACEMENT: window size, position, and show state.
+///
+/// Windows x64 layout (44 bytes):
+///   +0  length          (UINT)
+///   +4  flags           (UINT)
+///   +8  showCmd         (UINT)
+///   +12 ptMinPosition   (POINT = 8 bytes)
+///   +20 ptMaxPosition   (POINT = 8 bytes)
+///   +28 rcNormalPosition(RECT  = 16 bytes)
+#[repr(C)]
+pub struct WindowPlacement {
+    pub length: u32,
+    pub flags: u32,
+    pub show_cmd: u32,
+    pub pt_min_position: Point,
+    pub pt_max_position: Point,
+    pub rc_normal_position: Rect,
+}
+
+// ── SCROLLINFO ────────────────────────────────────────────────────────────────
+
+/// SCROLLINFO: scroll bar parameters (28 bytes).
+#[repr(C)]
+pub struct ScrollInfo {
+    pub cb_size: u32,
+    pub f_mask: u32,
+    pub n_min: i32,
+    pub n_max: i32,
+    pub n_page: u32,
+    pub n_pos: i32,
+    pub n_track_pos: i32,
+}
+
+// ── String helpers ────────────────────────────────────────────────────────────
+
 /// Decode a null-terminated UTF-16 pointer to a `String`.
 /// Returns an empty `String` if the pointer is null.
 ///
@@ -285,6 +359,23 @@ pub unsafe fn decode_wide(ptr: *const u16) -> String {
     }
     let slice = unsafe { std::slice::from_raw_parts(ptr, len) };
     String::from_utf16_lossy(slice)
+}
+
+/// Decode a null-terminated ANSI (Latin-1/UTF-8) pointer to a `String`.
+/// Returns an empty `String` if the pointer is null.
+///
+/// # Safety
+/// `ptr`, if non-null, must point to a valid null-terminated byte string.
+pub unsafe fn decode_ansi(ptr: *const u8) -> String {
+    if ptr.is_null() {
+        return String::new();
+    }
+    let mut len = 0usize;
+    while unsafe { *ptr.add(len) } != 0 {
+        len += 1;
+    }
+    let slice = unsafe { std::slice::from_raw_parts(ptr, len) };
+    String::from_utf8_lossy(slice).into_owned()
 }
 
 #[cfg(test)]
