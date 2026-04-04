@@ -94,13 +94,148 @@ unsafe extern "C" fn on_fatal_signal(
         print_crash_report(sig, win_code, rip, rva, fault_addr, func_range, uctx);
         unsafe { libc::exit(win_code as i32) };
     } else {
-        // Fault in Weave's own Rust code — restore the default handler and
-        // re-raise so Rust's panic/abort handler takes over.
+        // Fault in Weave's own Rust code — print a diagnostic first so we know
+        // which stub crashed, then restore the default handler and re-raise.
+        let fault_addr = unsafe { (*info).si_addr() } as usize;
+        print_weave_crash(sig, rip, fault_addr, base, uctx);
         unsafe {
             libc::signal(sig, libc::SIG_DFL);
             libc::raise(sig);
         }
     }
+}
+
+// ── Non-PE crash diagnostic ───────────────────────────────────────────────────
+
+/// Print a minimal crash report when the fault is in Weave's own Rust code.
+///
+/// This fires when PuTTY calls a Weave stub that itself crashes — the RIP
+/// is inside Weave's binary, not the PE image. Print the RIP and a few key
+/// registers so we know which stub failed, then fall through to re-raise.
+#[cfg(target_os = "linux")]
+fn print_weave_crash(
+    sig: libc::c_int,
+    rip: usize,
+    fault_addr: usize,
+    pe_base: usize,
+    uctx: *const libc::ucontext_t,
+) {
+    let gregs = unsafe { (*uctx).uc_mcontext.gregs };
+    let rax = gregs[libc::REG_RAX as usize] as u64;
+    let rbx = gregs[libc::REG_RBX as usize] as u64;
+    let rcx = gregs[libc::REG_RCX as usize] as u64;
+    let rdx = gregs[libc::REG_RDX as usize] as u64;
+    let rsp = gregs[libc::REG_RSP as usize] as u64;
+    let r8  = gregs[libc::REG_R8  as usize] as u64;
+
+    // Read 8 bytes at fault address safely via /proc/self/mem.
+    let fault_preview = {
+        let path = b"/proc/self/mem\0";
+        let fd = unsafe { libc::open(path.as_ptr() as *const libc::c_char, libc::O_RDONLY) };
+        let mut hex = [b'?' as u8; 23]; // "?? ?? ?? ?? ?? ?? ?? ??"
+        if fd >= 0 {
+            let mut buf = [0u8; 8];
+            let n = unsafe {
+                libc::pread(fd, buf.as_mut_ptr() as *mut libc::c_void, 8, fault_addr as i64)
+            };
+            unsafe { libc::close(fd) };
+            if n > 0 {
+                // Format as hex without std::fmt (async-signal-safe enough for abort path)
+                let _ = n; // silence unused
+                hex = *b"?? ?? ?? ?? ?? ?? ?? ??";
+                let nibble = |v: u8| if v < 10 { b'0' + v } else { b'a' + v - 10 };
+                for (i, &byte) in buf[..n as usize].iter().enumerate() {
+                    if i * 3 + 1 < hex.len() {
+                        hex[i * 3]     = nibble(byte >> 4);
+                        hex[i * 3 + 1] = nibble(byte & 0xf);
+                    }
+                }
+            }
+        }
+        hex
+    };
+
+    let sig_name: &[u8] = match sig {
+        libc::SIGSEGV => b"SIGSEGV",
+        libc::SIGFPE  => b"SIGFPE",
+        libc::SIGILL  => b"SIGILL",
+        libc::SIGBUS  => b"SIGBUS",
+        _             => b"SIG???",
+    };
+
+    // Read [RSP] and [RSP-8] via /proc/self/mem to detect ret-to-garbage vs
+    // call-to-garbage. A `ret` pops the return address off the stack, so at
+    // crash time [RSP-8] holds what was popped; a `call rax` leaves RSP
+    // unchanged so [RSP] is the return address pushed by that call.
+    let read_u64_at = |addr: u64| -> u64 {
+        if addr == 0 { return 0; }
+        let path = b"/proc/self/mem\0";
+        let fd = unsafe { libc::open(path.as_ptr() as *const libc::c_char, libc::O_RDONLY) };
+        if fd < 0 { return 0; }
+        let mut val = 0u64;
+        let n = unsafe {
+            libc::pread(fd, &mut val as *mut u64 as *mut libc::c_void, 8, addr as i64)
+        };
+        unsafe { libc::close(fd) };
+        if n == 8 { val } else { 0 }
+    };
+    let stack_top  = read_u64_at(rsp);           // [RSP]   — ret addr if call crashed
+    let stack_prev = read_u64_at(rsp - 8);       // [RSP-8] — ret addr if ret crashed
+
+    // Build message using only stack buffers (no heap) for signal safety.
+    let mut msg = [0u8; 768];
+    let mut pos = 0usize;
+
+    macro_rules! push {
+        ($s:expr) => {
+            for &b in $s { if pos < msg.len() - 1 { msg[pos] = b; pos += 1; } }
+        };
+    }
+    macro_rules! push_hex {
+        ($v:expr, $w:expr) => {{
+            let v: u64 = $v as u64;
+            let nibble = |n: u64| if n < 10 { b'0' + n as u8 } else { b'a' + n as u8 - 10 };
+            push!(b"0x");
+            let digits = $w * 2;
+            for shift in (0..digits).rev() {
+                let n = (v >> (shift * 4)) & 0xf;
+                push!(&[nibble(n)]);
+            }
+        }};
+    }
+
+    push!(b"\nweave: CRASH in Weave stub (not in PE) -- ");
+    push!(sig_name);
+    push!(b"\nweave:   RIP       = ");
+    push_hex!(rip, 8);
+    push!(b"\nweave:   fault     = ");
+    push_hex!(fault_addr, 8);
+    push!(b"  [");
+    for &b in &fault_preview { if pos < msg.len() - 1 { msg[pos] = b; pos += 1; } }
+    push!(b"]");
+    push!(b"\nweave:   PE base   = ");
+    push_hex!(pe_base, 8);
+    push!(b"\nweave:   RSP       = ");
+    push_hex!(rsp, 8);
+    push!(b"\nweave:   RCX       = ");
+    push_hex!(rcx, 8);
+    push!(b"\nweave:   RDX       = ");
+    push_hex!(rdx, 8);
+    push!(b"\nweave:   R8        = ");
+    push_hex!(r8, 8);
+    push!(b"\nweave:   RAX       = ");
+    push_hex!(rax, 8);
+    push!(b"\nweave:   RBX       = ");
+    push_hex!(rbx, 8);
+    push!(b"\nweave:   [RSP]     = ");
+    push_hex!(stack_top, 8);
+    push!(b"  (ret addr if call faulted)");
+    push!(b"\nweave:   [RSP-8]   = ");
+    push_hex!(stack_prev, 8);
+    push!(b"  (ret addr if ret faulted)");
+    push!(b"\n");
+
+    unsafe { libc::write(2, msg.as_ptr() as *const libc::c_void, pos) };
 }
 
 // ── .pdata exception table lookup ─────────────────────────────────────────────

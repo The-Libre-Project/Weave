@@ -1137,6 +1137,7 @@ pub extern "win64" fn heap_create(
     _dw_initial_size: usize,
     _dw_maximum_size: usize,
 ) -> usize {
+    eprintln!("weave: stub: HeapCreate");
     1usize // fake process heap handle
 }
 
@@ -3061,11 +3062,13 @@ pub extern "win64" fn get_current_thread() -> usize {
 
 /// GetCurrentProcessId / GetCurrentThreadId — return plausible fake IDs.
 pub extern "win64" fn get_current_process_id() -> u32 {
+    eprintln!("weave: stub: GetCurrentProcessId");
     unsafe { libc::getpid() as u32 }
 }
 
 /// GetCurrentThreadId — single-threaded stub, returns 1.
 pub extern "win64" fn get_current_thread_id() -> u32 {
+    eprintln!("weave: stub: GetCurrentThreadId");
     1 // single-threaded stub
 }
 
@@ -3091,6 +3094,7 @@ pub extern "win64" fn get_tick_count_64() -> u64 {
 /// # Safety
 /// `lp_performance_count` must be a valid writable pointer or NULL.
 pub unsafe extern "win64" fn query_performance_counter(lp_performance_count: *mut u64) -> i32 {
+    eprintln!("weave: stub: QueryPerformanceCounter enter");
     let mut ts = libc::timespec {
         tv_sec: 0,
         tv_nsec: 0,
@@ -3101,6 +3105,7 @@ pub unsafe extern "win64" fn query_performance_counter(lp_performance_count: *mu
             *lp_performance_count = ts.tv_sec as u64 * 1_000_000_000 + ts.tv_nsec as u64;
         }
     }
+    eprintln!("weave: stub: QueryPerformanceCounter exit");
     1 // TRUE
 }
 
@@ -3122,6 +3127,7 @@ pub unsafe extern "win64" fn query_performance_frequency(lp_frequency: *mut u64)
 /// # Safety
 /// `lp_system_time_as_file_time` must be a valid writable pointer or NULL.
 pub unsafe extern "win64" fn get_system_time_as_file_time(lp_system_time_as_file_time: *mut u64) {
+    eprintln!("weave: stub: GetSystemTimeAsFileTime");
     // FILETIME is 100-nanosecond intervals since 1601-01-01
     // Offset between 1601 and Unix epoch (1970) = 11644473600 seconds
     let mut ts = libc::timespec {
@@ -5106,6 +5112,7 @@ static mut FLS_USED: [bool; FLS_MAX_SLOTS] = [false; FLS_MAX_SLOTS];
 /// # Safety
 /// Pointer argument is accepted but not dereferenced.
 pub unsafe extern "win64" fn fls_alloc(_lp_callback: usize) -> u32 {
+    eprintln!("weave: stub: FlsAlloc");
     unsafe {
         for i in 0..FLS_MAX_SLOTS {
             if !FLS_USED[i] {

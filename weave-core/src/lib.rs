@@ -1,3 +1,4 @@
+pub mod cfg;
 pub mod dll_registry;
 pub mod exec;
 pub mod file_io;

@@ -76,9 +76,37 @@ pub fn setup(image: &LoadedImage) -> Result<TebState, String> {
     let tls_slots_ptr = tls_slots.as_mut_ptr();
     let tls_data_ptr = tls_data.as_mut_ptr();
 
+    // Determine the current thread's stack bounds so we can populate
+    // NT_TIB.StackBase (high addr) and NT_TIB.StackLimit (low addr).
+    // Windows code (including the MSVC CRT security cookie initialisation)
+    // reads these fields during startup. Leaving them as 0 causes crashes.
+    #[cfg(target_os = "linux")]
+    let (stack_base, stack_limit) = {
+        let mut attr: libc::pthread_attr_t = unsafe { std::mem::zeroed() };
+        let mut stack_addr: *mut libc::c_void = std::ptr::null_mut();
+        let mut stack_size: libc::size_t = 0;
+        unsafe {
+            libc::pthread_getattr_np(libc::pthread_self(), &mut attr);
+            libc::pthread_attr_getstack(&attr, &mut stack_addr, &mut stack_size);
+            libc::pthread_attr_destroy(&mut attr);
+        }
+        let low = stack_addr as u64;
+        let high = low + stack_size as u64;
+        (high, low) // StackBase = high addr, StackLimit = low addr
+    };
+
+    #[cfg(not(target_os = "linux"))]
+    let (stack_base, stack_limit) = (0u64, 0u64);
+
     unsafe {
         // TLS slot 0 → per-thread data block
         (*tls_slots_ptr) = tls_data_ptr as u64;
+
+        // NT_TIB.StackBase  — TEB[0x008]: high end of the stack (grows down)
+        write_u64(teb_ptr, 0x008, stack_base);
+
+        // NT_TIB.StackLimit — TEB[0x010]: low end of the stack (guard page)
+        write_u64(teb_ptr, 0x010, stack_limit);
 
         // TEB[0x030] = &TEB  (NT_TIB.Self — the TEB points to itself)
         write_u64(teb_ptr, 0x030, teb_ptr as u64);

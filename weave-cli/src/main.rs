@@ -1,6 +1,6 @@
 use clap::Parser;
 use std::path::PathBuf;
-use weave_core::{dll_registry, exec, iat, loader, prefix, registry, seh, teb};
+use weave_core::{cfg, dll_registry, exec, iat, loader, prefix, registry, seh, teb};
 
 mod arch;
 
@@ -163,7 +163,25 @@ fn main() {
     // ── 6. Install exception handlers ─────────────────────────────────────
     seh::install(&image);
 
+    // ── 6.5. Patch CFG dispatch stubs ─────────────────────────────────────
+    // Windows PEs compiled with CFG encode indirect call targets using the
+    // security cookie. Weave provides a decode-and-call stub so the encoded
+    // pointer in RAX is decoded before jumping, instead of crashing on a
+    // non-canonical garbage address.
+    cfg::setup(&bytes, image.base);
+
     eprintln!("weave: TEB ready — jumping in");
+
+    // ── DEBUG: print first 16 bytes at entry point and GS base ───────────
+    #[cfg(target_os = "linux")]
+    {
+        let ep = image.entry_point as *const u8;
+        let bytes_at_ep: Vec<u8> = (0..16).map(|i| unsafe { *ep.add(i) }).collect();
+        eprintln!("weave: entry bytes: {:02x?}", bytes_at_ep);
+        let mut gs_base: u64 = 0;
+        unsafe { libc::syscall(libc::SYS_arch_prctl, 0x1004i64, &mut gs_base as *mut u64); }
+        eprintln!("weave: GS base = {gs_base:#x}");
+    }
 
     // ── 7. Jump to the entry point ────────────────────────────────────────
     // Safety: image.entry_point is a valid executable address set up by loader::load().
