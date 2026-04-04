@@ -1,0 +1,10 @@
+[package]
+name = "weave-winmm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "winmm.dll stubs for Weave — multimedia timers, wave audio"
+
+[dependencies]
+libc = "0.2"

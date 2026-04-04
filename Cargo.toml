@@ -12,7 +12,7 @@ members = [
     "weave-core",
     "weave-ucrt",
     "weave-vulkan",
-    "weave-cli", "weave-mmdevapi", "weave-d3d12", "weave-plugin-system", "weave-vm-fallback", "weave-xinput", "weave-compat-db",
+    "weave-cli", "weave-mmdevapi", "weave-d3d12", "weave-plugin-system", "weave-vm-fallback", "weave-xinput", "weave-compat-db", "weave-winmm",
 ]
 resolver = "2"
 
