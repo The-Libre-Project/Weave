@@ -394,6 +394,460 @@ pub extern "win64" fn get_acp() -> u32 {
     65001 // CP_UTF8
 }
 
+// ── Task 1 — System query stubs ──────────────────────────────────────────────
+
+/// IsWow64Process: check if a process is running under WOW64.
+///
+/// Every app is 64-bit under Weave — WoW64 is never active.
+/// Returns TRUE (1) and writes FALSE (0) to *wow64_process if non-null.
+///
+/// # Safety
+/// `wow64_process` must be a valid pointer to an i32 if non-null.
+pub unsafe extern "win64" fn is_wow64_process(_h_process: usize, wow64_process: *mut i32) -> i32 {
+    if !wow64_process.is_null() {
+        unsafe { *wow64_process = 0i32 }; // FALSE
+    }
+    1 // TRUE
+}
+
+/// IsProcessorFeaturePresent: check if a processor feature is present.
+///
+/// Returns FALSE (0) for all features — stub implementation.
+pub extern "win64" fn is_processor_feature_present(_processor_feature: u32) -> i32 {
+    0 // FALSE
+}
+
+/// FlushInstructionCache: flush the instruction cache.
+///
+/// No-op. On x86-64 Linux the icache is coherent with dcache by hardware.
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn flush_instruction_cache(
+    _h_process: usize,
+    _lp_base_address: usize,
+    _dw_size: usize,
+) -> i32 {
+    1 // TRUE
+}
+
+/// GetSystemTimePreciseAsFileTime: get the current system time as a file time.
+///
+/// Returns the current time in FILETIME format (100-nanosecond intervals since 1601-01-01).
+///
+/// # Safety
+/// `lp_system_time_as_file_time` must be a valid pointer to a u64.
+pub unsafe extern "win64" fn get_system_time_precise_as_file_time(
+    lp_system_time_as_file_time: *mut u64,
+) {
+    if lp_system_time_as_file_time.is_null() {
+        return;
+    }
+    let mut ts = unsafe { std::mem::zeroed::<libc::timespec>() };
+    unsafe { libc::clock_gettime(libc::CLOCK_REALTIME, &mut ts) };
+    let ft = (ts.tv_sec as u64) * 10_000_000u64
+        + (ts.tv_nsec as u64) / 100u64
+        + 116_444_736_000_000_000u64;
+    unsafe { *lp_system_time_as_file_time = ft };
+}
+
+/// GetLargePageMinimum: get the minimum size of a large page.
+///
+/// Returns 0 — large pages not supported.
+pub extern "win64" fn get_large_page_minimum() -> usize {
+    0
+}
+
+/// SetHandleInformation: set handle information flags.
+///
+/// No-op. Returns TRUE.
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn set_handle_information(
+    _h_object: usize,
+    _dw_mask: u32,
+    _dw_flags: u32,
+) -> i32 {
+    1 // TRUE
+}
+
+// ── Task 2 — One-time init + waitable timers ─────────────────────────────────
+
+/// InitOnceExecuteOnce: execute one-time initialization.
+///
+/// # Safety
+/// `init_once`, `parameter`, and `context` must be valid pointers.
+pub unsafe extern "win64" fn init_once_execute_once(
+    init_once: *mut usize,
+    init_fn: unsafe extern "win64" fn(*mut usize, *mut u8, *mut *mut u8) -> i32,
+    parameter: *mut u8,
+    context: *mut *mut u8,
+) -> i32 {
+    if init_once.is_null() {
+        return 1; // TRUE
+    }
+    if unsafe { *init_once == 2 } {
+        return 1; // TRUE - already done
+    }
+    unsafe { *init_once = 1 };
+    let result = unsafe { init_fn(init_once, parameter, context) };
+    unsafe { *init_once = 2 };
+    result
+}
+
+/// InitOnceBeginInitialize: begin one-time initialization.
+///
+/// # Safety
+/// `lp_init_once` and `f_pending` must be valid pointers.
+pub unsafe extern "win64" fn init_once_begin_initialize(
+    lp_init_once: *mut usize,
+    _dw_flags: u32,
+    f_pending: *mut i32,
+    _lp_context: *mut *mut u8,
+) -> i32 {
+    if !f_pending.is_null() {
+        let pending = if !lp_init_once.is_null() && unsafe { *lp_init_once == 2 } {
+            0i32 // FALSE - not pending
+        } else {
+            1i32 // TRUE - pending
+        };
+        unsafe { *f_pending = pending };
+    }
+    1 // TRUE
+}
+
+/// InitOnceComplete: complete one-time initialization.
+///
+/// # Safety
+/// `lp_init_once` must be a valid pointer.
+pub unsafe extern "win64" fn init_once_complete(
+    lp_init_once: *mut usize,
+    _dw_flags: u32,
+    _lp_context: *mut u8,
+) -> i32 {
+    if !lp_init_once.is_null() {
+        unsafe { *lp_init_once = 2 };
+    }
+    1 // TRUE
+}
+
+/// CreateWaitableTimerW: create a waitable timer (wide version).
+///
+/// Returns a fake handle (1usize).
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn create_waitable_timer_w(
+    _lp_timer_attributes: usize,
+    _b_manual_reset: i32,
+    _lp_timer_name: *const u16,
+) -> usize {
+    1 // fake handle
+}
+
+/// CreateWaitableTimerA: create a waitable timer (ANSI version).
+///
+/// Returns a fake handle (1usize).
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn create_waitable_timer_a(
+    _lp_timer_attributes: usize,
+    _b_manual_reset: i32,
+    _lp_timer_name: usize,
+) -> usize {
+    1 // fake handle
+}
+
+/// SetWaitableTimer: set a waitable timer.
+///
+/// No-op. Returns TRUE.
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn set_waitable_timer(
+    _h_timer: usize,
+    _lp_due_time: usize,
+    _l_period: i32,
+    _pfn_completion_routine: usize,
+    _lp_arg_to_completion_routine: usize,
+    _f_resume: i32,
+) -> i32 {
+    1 // TRUE
+}
+
+/// CancelWaitableTimer: cancel a waitable timer.
+///
+/// No-op. Returns TRUE.
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn cancel_waitable_timer(_h_timer: usize) -> i32 {
+    1 // TRUE
+}
+
+// ── Task 3 — ExpandEnvironmentStrings, SearchPath, GetTempFileName ──────────
+
+/// ExpandEnvironmentStringsW: expand environment variables in a wide string.
+///
+/// Phase 2: no actual expansion — returns the input string unchanged.
+/// Copies the input string to the output buffer, null-terminated.
+///
+/// # Safety
+/// `lp_src` must be a valid null-terminated UTF-16 string.
+/// `lp_dst` must be writable for `n_size` u16 words.
+pub unsafe extern "win64" fn expand_environment_strings_w(
+    lp_src: *const u16,
+    lp_dst: *mut u16,
+    n_size: u32,
+) -> u32 {
+    if lp_src.is_null() {
+        return 0;
+    }
+
+    // Read the null-terminated UTF-16 string
+    let mut len = 0usize;
+    while len < MAX_UTF16_LEN && unsafe { *lp_src.add(len) } != 0 {
+        len += 1;
+    }
+    if len == MAX_UTF16_LEN {
+        return 0;
+    }
+
+    let required = len + 1; // include null terminator
+    if n_size == 0 || lp_dst.is_null() {
+        return required as u32;
+    }
+
+    if n_size as usize <= len {
+        // Copy what fits, null-terminate
+        unsafe {
+            std::ptr::copy_nonoverlapping(lp_src, lp_dst, n_size as usize - 1);
+            *lp_dst.add(n_size as usize - 1) = 0;
+        }
+        return required as u32;
+    }
+
+    // Copy the full string
+    unsafe {
+        std::ptr::copy_nonoverlapping(lp_src, lp_dst, required);
+    }
+    required as u32
+}
+
+/// ExpandEnvironmentStringsA: expand environment variables in an ANSI string.
+///
+/// Phase 2: no actual expansion — returns the input string unchanged.
+/// Copies the input string to the output buffer, null-terminated.
+///
+/// # Safety
+/// `lp_src` must be a valid null-terminated UTF-8 string.
+/// `lp_dst` must be writable for `n_size` bytes.
+pub unsafe extern "win64" fn expand_environment_strings_a(
+    lp_src: *const u8,
+    lp_dst: *mut u8,
+    n_size: u32,
+) -> u32 {
+    if lp_src.is_null() {
+        return 0;
+    }
+
+    // Read the null-terminated UTF-8 string
+    let mut len = 0usize;
+    while len < MAX_UTF8_LEN && unsafe { *lp_src.add(len) } != 0 {
+        len += 1;
+    }
+    if len == MAX_UTF8_LEN {
+        return 0;
+    }
+
+    let required = len + 1; // include null terminator
+    if n_size == 0 || lp_dst.is_null() {
+        return required as u32;
+    }
+
+    if n_size as usize <= len {
+        // Copy what fits, null-terminate
+        unsafe {
+            std::ptr::copy_nonoverlapping(lp_src, lp_dst, n_size as usize - 1);
+            *lp_dst.add(n_size as usize - 1) = 0;
+        }
+        return required as u32;
+    }
+
+    // Copy the full string
+    unsafe {
+        std::ptr::copy_nonoverlapping(lp_src, lp_dst, required);
+    }
+    required as u32
+}
+
+/// SearchPathW: search for a file in the PATH.
+///
+/// Stub implementation — always returns 0 (not found).
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn search_path_w(
+    _lp_path: *const u16,
+    _lp_file_name: *const u16,
+    _lp_extension: *const u16,
+    _n_buffer_length: u32,
+    _lp_buffer: *mut u16,
+    _lp_file_part: *mut *mut u16,
+) -> u32 {
+    0 // not found
+}
+
+/// SearchPathA: search for a file in the PATH (ANSI version).
+///
+/// Stub implementation — always returns 0 (not found).
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn search_path_a(
+    _lp_path: *const u8,
+    _lp_file_name: *const u8,
+    _lp_extension: *const u8,
+    _n_buffer_length: u32,
+    _lp_buffer: *mut u8,
+    _lp_file_part: *mut *mut u8,
+) -> u32 {
+    0 // not found
+}
+
+/// GetTempFileNameW: create a temporary filename.
+///
+/// Generates a temporary filename using the specified path and prefix.
+/// Uses process ID and time for uniqueness.
+///
+/// # Safety
+/// `lp_path_name` must be a valid null-terminated UTF-16 string.
+/// `lp_prefix_string` may be null.
+/// `lp_temp_file_name` must be writable for at least 260 u16 words.
+pub unsafe extern "win64" fn get_temp_file_name_w(
+    lp_path_name: *const u16,
+    lp_prefix_string: *const u16,
+    u_unique: u32,
+    lp_temp_file_name: *mut u16,
+) -> u32 {
+    if lp_path_name.is_null() || lp_temp_file_name.is_null() {
+        return 0;
+    }
+
+    // Read path
+    let mut path_len = 0usize;
+    while path_len < MAX_UTF16_LEN && unsafe { *lp_path_name.add(path_len) } != 0 {
+        path_len += 1;
+    }
+    if path_len == MAX_UTF16_LEN {
+        return 0;
+    }
+    let path =
+        unsafe { String::from_utf16_lossy(std::slice::from_raw_parts(lp_path_name, path_len)) };
+
+    // Read prefix (up to 3 chars)
+    let prefix = if lp_prefix_string.is_null() {
+        "tmp".to_string()
+    } else {
+        let mut prefix_len = 0usize;
+        while prefix_len < 3 && unsafe { *lp_prefix_string.add(prefix_len) } != 0 {
+            prefix_len += 1;
+        }
+        unsafe {
+            String::from_utf16_lossy(std::slice::from_raw_parts(lp_prefix_string, prefix_len))
+        }
+    };
+
+    // Generate unique number
+    let unique = if u_unique != 0 {
+        u_unique
+    } else {
+        unsafe { (libc::getpid() as u32) ^ (libc::time(std::ptr::null_mut()) as u32) }
+    };
+
+    // Build filename
+    let filename = format!("{}\\{}", path, prefix);
+    let temp_name = format!("{}\\{:04X}.tmp", filename, unique & 0xFFFF);
+
+    // Convert to UTF-16 and write to buffer (up to 260 chars)
+    let wide_name: Vec<u16> = temp_name.encode_utf16().collect();
+    let copy_len = wide_name.len().min(259); // leave room for null
+    unsafe {
+        std::ptr::copy_nonoverlapping(wide_name.as_ptr(), lp_temp_file_name, copy_len);
+        *lp_temp_file_name.add(copy_len) = 0;
+    }
+
+    unique & 0xFFFF
+}
+
+/// GetTempFileNameA: create a temporary filename (ANSI version).
+///
+/// Generates a temporary filename using the specified path and prefix.
+/// Uses process ID and time for uniqueness.
+///
+/// # Safety
+/// `lp_path_name` must be a valid null-terminated UTF-8 string.
+/// `lp_prefix_string` may be null.
+/// `lp_temp_file_name` must be writable for at least 260 bytes.
+pub unsafe extern "win64" fn get_temp_file_name_a(
+    lp_path_name: *const u8,
+    lp_prefix_string: *const u8,
+    u_unique: u32,
+    lp_temp_file_name: *mut u8,
+) -> u32 {
+    if lp_path_name.is_null() || lp_temp_file_name.is_null() {
+        return 0;
+    }
+
+    // Read path
+    let mut path_len = 0usize;
+    while path_len < MAX_UTF8_LEN && unsafe { *lp_path_name.add(path_len) } != 0 {
+        path_len += 1;
+    }
+    if path_len == MAX_UTF8_LEN {
+        return 0;
+    }
+    let path =
+        unsafe { String::from_utf8_lossy(std::slice::from_raw_parts(lp_path_name, path_len)) };
+
+    // Read prefix (up to 3 chars)
+    let prefix = if lp_prefix_string.is_null() {
+        "tmp".to_string()
+    } else {
+        let mut prefix_len = 0usize;
+        while prefix_len < 3 && unsafe { *lp_prefix_string.add(prefix_len) } != 0 {
+            prefix_len += 1;
+        }
+        unsafe {
+            String::from_utf8_lossy(std::slice::from_raw_parts(lp_prefix_string, prefix_len))
+                .to_string()
+        }
+    };
+
+    // Generate unique number
+    let unique = if u_unique != 0 {
+        u_unique
+    } else {
+        unsafe { (libc::getpid() as u32) ^ (libc::time(std::ptr::null_mut()) as u32) }
+    };
+
+    // Build filename
+    let filename = format!("{}\\{}", path, prefix);
+    let temp_name = format!("{}\\{:04X}.tmp", filename, unique & 0xFFFF);
+
+    // Write to buffer (up to 260 chars)
+    let bytes = temp_name.as_bytes();
+    let copy_len = bytes.len().min(259); // leave room for null
+    unsafe {
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), lp_temp_file_name, copy_len);
+        *lp_temp_file_name.add(copy_len) = 0;
+    }
+
+    unique & 0xFFFF
+}
+
 /// GetOEMCP: return the current OEM code page identifier.
 pub extern "win64" fn get_oemcp() -> u32 {
     65001
@@ -5876,6 +6330,65 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "GetUserDefaultUILanguage" => Some(get_user_default_ui_language as *const () as usize),
         "GetSystemDefaultLangID" => Some(get_system_default_lang_id as *const () as usize),
         "IsValidCodePage" => Some(is_valid_code_page as *const () as usize),
+        "IsWow64Process" => {
+            Some(is_wow64_process as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "IsProcessorFeaturePresent" => Some(is_processor_feature_present as *const () as usize),
+        "FlushInstructionCache" => Some(
+            flush_instruction_cache as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
+        ),
+        "GetSystemTimePreciseAsFileTime" => Some(
+            get_system_time_precise_as_file_time as unsafe extern "win64" fn(_) as *const ()
+                as usize,
+        ),
+        "GetLargePageMinimum" => Some(get_large_page_minimum as *const () as usize),
+        "SetHandleInformation" => Some(
+            set_handle_information as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
+        ),
+        "InitOnceExecuteOnce" => Some(
+            init_once_execute_once as unsafe extern "win64" fn(_, _, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "InitOnceBeginInitialize" => Some(
+            init_once_begin_initialize as unsafe extern "win64" fn(_, _, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "InitOnceComplete" => {
+            Some(init_once_complete as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize)
+        }
+        "CreateWaitableTimerW" => Some(
+            create_waitable_timer_w as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
+        ),
+        "CreateWaitableTimerA" => Some(
+            create_waitable_timer_a as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
+        ),
+        "SetWaitableTimer" => Some(
+            set_waitable_timer as unsafe extern "win64" fn(_, _, _, _, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "CancelWaitableTimer" => {
+            Some(cancel_waitable_timer as unsafe extern "win64" fn(_) -> _ as *const () as usize)
+        }
+        "ExpandEnvironmentStringsW" => Some(
+            expand_environment_strings_w as unsafe extern "win64" fn(_, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "ExpandEnvironmentStringsA" => Some(
+            expand_environment_strings_a as unsafe extern "win64" fn(_, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "SearchPathW" => Some(
+            search_path_w as unsafe extern "win64" fn(_, _, _, _, _, _) -> _ as *const () as usize,
+        ),
+        "SearchPathA" => Some(
+            search_path_a as unsafe extern "win64" fn(_, _, _, _, _, _) -> _ as *const () as usize,
+        ),
+        "GetTempFileNameW" => Some(
+            get_temp_file_name_w as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
+        ),
+        "GetTempFileNameA" => Some(
+            get_temp_file_name_a as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
+        ),
         "GetFileType" => Some(get_file_type as *const () as usize),
         // File and console functions
         "GetFileSizeEx" => {

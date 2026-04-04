@@ -821,6 +821,299 @@ pub unsafe extern "win64" fn ucrt_winitenv() -> *mut *mut u16 {
     &NULL_WENV as *const usize as *mut *mut u16
 }
 
+// ── Task 4 — ucrt C string + numeric stubs ───────────────────────────────────
+
+/// strcpy: copy a null-terminated string.
+///
+/// # Safety
+/// `dst` must be writable for the length of `src` plus null terminator.
+pub unsafe extern "win64" fn ucrt_strcpy(dst: *mut u8, src: *const u8) -> *mut u8 {
+    unsafe { libc::strcpy(dst as _, src as _) as *mut u8 }
+}
+
+/// strcat: concatenate two null-terminated strings.
+///
+/// # Safety
+/// `dst` must be writable for the combined length of both strings plus null terminator.
+pub unsafe extern "win64" fn ucrt_strcat(dst: *mut u8, src: *const u8) -> *mut u8 {
+    unsafe { libc::strcat(dst as _, src as _) as *mut u8 }
+}
+
+/// strstr: find the first occurrence of needle in haystack.
+///
+/// # Safety
+/// `haystack` and `needle` must be valid null-terminated strings.
+pub unsafe extern "win64" fn ucrt_strstr(haystack: *const u8, needle: *const u8) -> *mut u8 {
+    unsafe { libc::strstr(haystack as _, needle as _) as *mut u8 }
+}
+
+/// strrchr: find the last occurrence of c in s.
+///
+/// # Safety
+/// `s` must be a valid null-terminated string.
+pub unsafe extern "win64" fn ucrt_strrchr(s: *const u8, c: i32) -> *mut u8 {
+    unsafe { libc::strrchr(s as _, c) as *mut u8 }
+}
+
+/// atoi: convert string to integer.
+///
+/// # Safety
+/// `s` must be a valid null-terminated string.
+pub unsafe extern "win64" fn ucrt_atoi(s: *const u8) -> i32 {
+    unsafe { libc::atoi(s as _) }
+}
+
+/// atof: convert string to double.
+///
+/// # Safety
+/// `s` must be a valid null-terminated string.
+pub unsafe extern "win64" fn ucrt_atof(s: *const u8) -> f64 {
+    unsafe { libc::atof(s as _) }
+}
+
+/// strtod: convert string to double with end pointer.
+///
+/// # Safety
+/// `s` must be a valid null-terminated string.
+/// `endptr` must be writable if non-null.
+pub unsafe extern "win64" fn ucrt_strtod(s: *const u8, endptr: *mut *mut u8) -> f64 {
+    unsafe { libc::strtod(s as _, endptr as _) }
+}
+
+/// strtol: convert string to long integer.
+///
+/// # Safety
+/// `s` must be a valid null-terminated string.
+/// `endptr` must be writable if non-null.
+pub unsafe extern "win64" fn ucrt_strtol(s: *const u8, endptr: *mut *mut u8, base: i32) -> i64 {
+    unsafe { libc::strtol(s as _, endptr as _, base) as i64 }
+}
+
+/// strtoll: convert string to long long integer.
+///
+/// # Safety
+/// `s` must be a valid null-terminated string.
+/// `endptr` must be writable if non-null.
+pub unsafe extern "win64" fn ucrt_strtoll(s: *const u8, endptr: *mut *mut u8, base: i32) -> i64 {
+    unsafe { libc::strtoll(s as _, endptr as _, base) }
+}
+
+/// rand: generate a pseudo-random number.
+pub extern "win64" fn ucrt_rand() -> i32 {
+    unsafe { libc::rand() }
+}
+
+/// srand: seed the pseudo-random number generator.
+pub extern "win64" fn ucrt_srand(seed: u32) {
+    unsafe { libc::srand(seed) }
+}
+
+/// abs: compute the absolute value of an integer.
+pub extern "win64" fn ucrt_abs(x: i64) -> i64 {
+    x.abs()
+}
+
+// ── Task 5 — ucrt wide string + char-class stubs ─────────────────────────────
+
+/// wcscpy: copy a null-terminated UTF-16 string.
+///
+/// # Safety
+/// `dst` must be writable for the length of `src` plus null terminator (u16 units).
+pub unsafe extern "win64" fn ucrt_wcscpy(dst: *mut u16, src: *const u16) -> *mut u16 {
+    let mut i = 0usize;
+    loop {
+        let c = unsafe { *src.add(i) };
+        unsafe { *dst.add(i) = c };
+        if c == 0 {
+            break;
+        }
+        i += 1;
+    }
+    dst
+}
+
+/// wcscat: concatenate two null-terminated UTF-16 strings.
+///
+/// # Safety
+/// `dst` must be writable for the combined length of both strings plus null terminator.
+pub unsafe extern "win64" fn ucrt_wcscat(dst: *mut u16, src: *const u16) -> *mut u16 {
+    // find end of dst
+    let mut end = 0usize;
+    while unsafe { *dst.add(end) } != 0 {
+        end += 1;
+    }
+    // copy src
+    let mut i = 0usize;
+    loop {
+        let c = unsafe { *src.add(i) };
+        unsafe { *dst.add(end + i) = c };
+        if c == 0 {
+            break;
+        }
+        i += 1;
+    }
+    dst
+}
+
+/// wcschr: find the first occurrence of a character in a UTF-16 string.
+///
+/// # Safety
+/// `s` must be a valid null-terminated UTF-16 string.
+pub unsafe extern "win64" fn ucrt_wcschr(s: *const u16, c: u16) -> *mut u16 {
+    let mut i = 0usize;
+    loop {
+        let ch = unsafe { *s.add(i) };
+        if ch == c {
+            return unsafe { s.add(i) as *mut u16 };
+        }
+        if ch == 0 {
+            return std::ptr::null_mut();
+        }
+        i += 1;
+    }
+}
+
+/// wcsrchr: find the last occurrence of a character in a UTF-16 string.
+///
+/// # Safety
+/// `s` must be a valid null-terminated UTF-16 string.
+pub unsafe extern "win64" fn ucrt_wcsrchr(s: *const u16, c: u16) -> *mut u16 {
+    let mut last: *mut u16 = std::ptr::null_mut();
+    let mut i = 0usize;
+    loop {
+        let ch = unsafe { *s.add(i) };
+        if ch == c {
+            last = unsafe { s.add(i) as *mut u16 };
+        }
+        if ch == 0 {
+            break;
+        }
+        i += 1;
+    }
+    last
+}
+
+/// wcsstr: find the first occurrence of needle in haystack (UTF-16).
+///
+/// # Safety
+/// `haystack` and `needle` must be valid null-terminated UTF-16 strings.
+pub unsafe extern "win64" fn ucrt_wcsstr(haystack: *const u16, needle: *const u16) -> *mut u16 {
+    // empty needle matches at start
+    if unsafe { *needle } == 0 {
+        return haystack as *mut u16;
+    }
+    let mut i = 0usize;
+    loop {
+        let ch = unsafe { *haystack.add(i) };
+        if ch == 0 {
+            return std::ptr::null_mut();
+        }
+        // try to match needle at position i
+        let mut j = 0usize;
+        loop {
+            let nc = unsafe { *needle.add(j) };
+            if nc == 0 {
+                return unsafe { haystack.add(i) as *mut u16 };
+            }
+            let hc = unsafe { *haystack.add(i + j) };
+            if hc != nc {
+                break;
+            }
+            j += 1;
+        }
+        i += 1;
+    }
+}
+
+/// _wtoi: convert a null-terminated UTF-16 string to an integer.
+///
+/// # Safety
+/// `s` must be a valid null-terminated UTF-16 string.
+pub unsafe extern "win64" fn ucrt_wtoi(s: *const u16) -> i32 {
+    if s.is_null() {
+        return 0;
+    }
+    // skip leading whitespace
+    let mut i = 0usize;
+    while matches!(unsafe { *s.add(i) }, 0x09 | 0x0A | 0x0D | 0x20) {
+        i += 1;
+    }
+    // optional sign
+    let negative = match unsafe { *s.add(i) } {
+        0x2D => {
+            i += 1;
+            true
+        }
+        0x2B => {
+            i += 1;
+            false
+        }
+        _ => false,
+    };
+    // digits
+    let mut result: i32 = 0;
+    loop {
+        let ch = unsafe { *s.add(i) };
+        if ch < b'0' as u16 || ch > b'9' as u16 {
+            break;
+        }
+        result = result
+            .wrapping_mul(10)
+            .wrapping_add((ch - b'0' as u16) as i32);
+        i += 1;
+    }
+    if negative {
+        result.wrapping_neg()
+    } else {
+        result
+    }
+}
+
+/// tolower: convert a character to lowercase.
+pub extern "win64" fn ucrt_tolower(c: i32) -> i32 {
+    unsafe { libc::tolower(c) }
+}
+
+/// toupper: convert a character to uppercase.
+pub extern "win64" fn ucrt_toupper(c: i32) -> i32 {
+    unsafe { libc::toupper(c) }
+}
+
+/// isalpha: test if character is alphabetic.
+pub extern "win64" fn ucrt_isalpha(c: i32) -> i32 {
+    unsafe { libc::isalpha(c) }
+}
+
+/// isdigit: test if character is a decimal digit.
+pub extern "win64" fn ucrt_isdigit(c: i32) -> i32 {
+    unsafe { libc::isdigit(c) }
+}
+
+/// isspace: test if character is whitespace.
+pub extern "win64" fn ucrt_isspace(c: i32) -> i32 {
+    unsafe { libc::isspace(c) }
+}
+
+/// isalnum: test if character is alphanumeric.
+pub extern "win64" fn ucrt_isalnum(c: i32) -> i32 {
+    unsafe { libc::isalnum(c) }
+}
+
+/// isupper: test if character is uppercase.
+pub extern "win64" fn ucrt_isupper(c: i32) -> i32 {
+    unsafe { libc::isupper(c) }
+}
+
+/// islower: test if character is lowercase.
+pub extern "win64" fn ucrt_islower(c: i32) -> i32 {
+    unsafe { libc::islower(c) }
+}
+
+/// isprint: test if character is printable.
+pub extern "win64" fn ucrt_isprint(c: i32) -> i32 {
+    unsafe { libc::isprint(c) }
+}
+
 // ── Resolver ──────────────────────────────────────────────────────────────────
 
 /// Returns true for any DLL name this crate handles.
@@ -967,6 +1260,33 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         }
         // misc
         "rand_s" => stub!(ucrt_rand_s as extern "win64" fn(_) -> _),
+        "strcpy" => stub!(ucrt_strcpy as unsafe extern "win64" fn(_, _) -> _),
+        "strcat" => stub!(ucrt_strcat as unsafe extern "win64" fn(_, _) -> _),
+        "strstr" => stub!(ucrt_strstr as unsafe extern "win64" fn(_, _) -> _),
+        "strrchr" => stub!(ucrt_strrchr as unsafe extern "win64" fn(_, _) -> _),
+        "atoi" => stub!(ucrt_atoi as unsafe extern "win64" fn(_) -> _),
+        "atof" => stub!(ucrt_atof as unsafe extern "win64" fn(_) -> _),
+        "strtod" => stub!(ucrt_strtod as unsafe extern "win64" fn(_, _) -> _),
+        "strtol" => stub!(ucrt_strtol as unsafe extern "win64" fn(_, _, _) -> _),
+        "strtoll" => stub!(ucrt_strtoll as unsafe extern "win64" fn(_, _, _) -> _),
+        "rand" => stub!(ucrt_rand as extern "win64" fn() -> _),
+        "srand" => stub!(ucrt_srand as extern "win64" fn(_)),
+        "abs" => stub!(ucrt_abs as extern "win64" fn(_) -> _),
+        "wcscpy" => stub!(ucrt_wcscpy as unsafe extern "win64" fn(_, _) -> _),
+        "wcscat" => stub!(ucrt_wcscat as unsafe extern "win64" fn(_, _) -> _),
+        "wcschr" => stub!(ucrt_wcschr as unsafe extern "win64" fn(_, _) -> _),
+        "wcsrchr" => stub!(ucrt_wcsrchr as unsafe extern "win64" fn(_, _) -> _),
+        "wcsstr" => stub!(ucrt_wcsstr as unsafe extern "win64" fn(_, _) -> _),
+        "_wtoi" => stub!(ucrt_wtoi as unsafe extern "win64" fn(_) -> _),
+        "tolower" => stub!(ucrt_tolower as extern "win64" fn(_) -> _),
+        "toupper" => stub!(ucrt_toupper as extern "win64" fn(_) -> _),
+        "isalpha" => stub!(ucrt_isalpha as extern "win64" fn(_) -> _),
+        "isdigit" => stub!(ucrt_isdigit as extern "win64" fn(_) -> _),
+        "isspace" => stub!(ucrt_isspace as extern "win64" fn(_) -> _),
+        "isalnum" => stub!(ucrt_isalnum as extern "win64" fn(_) -> _),
+        "isupper" => stub!(ucrt_isupper as extern "win64" fn(_) -> _),
+        "islower" => stub!(ucrt_islower as extern "win64" fn(_) -> _),
+        "isprint" => stub!(ucrt_isprint as extern "win64" fn(_) -> _),
         "strftime" | "wcsftime" => stub!(ucrt_cexit as extern "win64" fn()),
         // legacy MSVCRT entry-point helpers
         "__getmainargs" => stub!(ucrt_getmainargs as unsafe extern "win64" fn(_, _, _, _, _) -> _),
