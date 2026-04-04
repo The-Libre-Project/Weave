@@ -1,6 +1,8 @@
 [workspace]
 members = [
     "weave-common",
+    "weave-desktop",
+    "weave-installer",
     "weave-ntdll",
     "weave-kernel32",
     "weave-advapi32",

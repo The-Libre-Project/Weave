@@ -1301,12 +1301,20 @@ name = "weave-d3d12"
 version = "0.0.1"
 
 [[package]]
+name = "weave-desktop"
+version = "0.0.1"
+
+[[package]]
 name = "weave-gdi32"
 version = "0.0.1"
 dependencies = [
  "weave-common",
  "weave-user32",
 ]
+
+[[package]]
+name = "weave-installer"
+version = "0.0.1"
 
 [[package]]
 name = "weave-kernel32"
