@@ -55,6 +55,9 @@ mod inner {
         pub black_pixel: u32,
         pub screen_width: u16,
         pub screen_height: u16,
+        pub screen_width_mm: u16,
+        #[allow(dead_code)]
+        pub screen_height_mm: u16,
     }
 
     static X11: OnceLock<Option<Mutex<X11State>>> = OnceLock::new();
@@ -71,11 +74,71 @@ mod inner {
                 black_pixel: screen.black_pixel,
                 screen_width: screen.width_in_pixels,
                 screen_height: screen.height_in_pixels,
+                screen_width_mm: screen.width_in_millimeters,
+                screen_height_mm: screen.height_in_millimeters,
                 conn,
                 screen_num,
             }))
         })
         .as_ref()
+    }
+
+    /// Parse `Xft.dpi` from the X11 `RESOURCE_MANAGER` root window property.
+    ///
+    /// The `RESOURCE_MANAGER` property is a newline-separated list of X resource
+    /// strings. Desktop environments (GNOME, KDE, etc.) set `Xft.dpi` here to
+    /// communicate the intended DPI to all X clients, including under XWayland.
+    fn read_xft_dpi(conn: &RustConnection, root: Window) -> Option<u32> {
+        let reply = conn
+            .get_property(
+                false,
+                root,
+                AtomEnum::RESOURCE_MANAGER,
+                AtomEnum::STRING,
+                0,
+                u32::MAX / 4,
+            )
+            .ok()?
+            .reply()
+            .ok()?;
+        let data = std::str::from_utf8(&reply.value).ok()?;
+        for line in data.lines() {
+            if let Some(rest) = line.strip_prefix("Xft.dpi:") {
+                let dpi: u32 = rest.trim().parse().ok()?;
+                if (72..=576).contains(&dpi) {
+                    return Some(dpi);
+                }
+            }
+        }
+        None
+    }
+
+    /// Calculate DPI from physical screen dimensions.
+    ///
+    /// Returns `None` if `mm` is zero or the result is outside the plausible
+    /// range of 72–576 DPI.
+    fn dpi_from_physical(px: u16, mm: u16) -> Option<u32> {
+        if mm == 0 {
+            return None;
+        }
+        let dpi = (f64::from(px) / f64::from(mm) * 25.4).round() as u32;
+        if (72..=576).contains(&dpi) { Some(dpi) } else { None }
+    }
+
+    /// Detect the system DPI with the following priority:
+    ///
+    /// 1. `Xft.dpi` from the X11 `RESOURCE_MANAGER` root window property — this
+    ///    is the authoritative value set by the desktop environment and works
+    ///    correctly under both native X11 and XWayland.
+    /// 2. Calculated from the physical screen width in millimetres as reported
+    ///    by the X server (less reliable — monitors often report incorrect EDID).
+    /// 3. 96 — the Windows "standard" DPI fallback.
+    pub fn system_dpi() -> u32 {
+        let Some(x11) = x11() else { return 96 };
+        let g = x11.lock().unwrap();
+        read_xft_dpi(&g.conn, g.root)
+            .or_else(|| dpi_from_physical(g.screen_width, g.screen_width_mm))
+            .unwrap_or(96)
     }
 
     /// Return whether an X11 display is available.
@@ -617,7 +680,7 @@ mod inner {
 pub use inner::{
     colorref_to_pixel, create_window, destroy_window, draw_filled_rect, draw_rect_outline,
     draw_text, draw_text_utf16, is_available, poll_event, screen_size, set_title, show_window,
-    wait_event,
+    system_dpi, wait_event,
 };
 
 // ── No-op stubs for non-Linux platforms (macOS dev builds) ───────────────────
@@ -630,6 +693,11 @@ pub fn is_available() -> bool {
 #[cfg(not(target_os = "linux"))]
 pub fn screen_size() -> (u16, u16) {
     (1920, 1080)
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn system_dpi() -> u32 {
+    96
 }
 
 #[cfg(not(target_os = "linux"))]

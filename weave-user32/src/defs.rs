@@ -53,6 +53,7 @@ pub const WM_LBUTTONDOWN: u32 = 0x0201;
 pub const WM_LBUTTONUP: u32 = 0x0202;
 pub const WM_RBUTTONDOWN: u32 = 0x0204;
 pub const WM_RBUTTONUP: u32 = 0x0205;
+pub const WM_DPICHANGED: u32 = 0x02E0;
 
 // ── Window styles ─────────────────────────────────────────────────────────────
 

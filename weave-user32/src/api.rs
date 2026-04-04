@@ -945,25 +945,26 @@ pub unsafe extern "win64" fn monitor_from_rect(_lp_rc: *const Rect, _dw_flags: u
 }
 
 /// # Safety
-/// `lp_mi` must point to a valid `MonitorInfo` struct.
+/// `lp_mi` must point to a valid `MonitorInfo` struct with `cb_size` set.
 pub unsafe extern "win64" fn get_monitor_info_w(_h_monitor: usize, lp_mi: *mut MonitorInfo) -> i32 {
     if lp_mi.is_null() {
         return 0;
     }
+    let (w, h) = crate::backend::screen_size();
     unsafe {
         (*lp_mi).rc_monitor = Rect {
             left: 0,
             top: 0,
-            right: 1920,
-            bottom: 1080,
+            right: w as i32,
+            bottom: h as i32,
         };
         (*lp_mi).rc_work = Rect {
             left: 0,
             top: 0,
-            right: 1920,
-            bottom: 1080,
+            right: w as i32,
+            bottom: h as i32,
         };
-        (*lp_mi).dw_flags = 1;
+        (*lp_mi).dw_flags = 1; // MONITORINFOF_PRIMARY
     }
     1
 }
@@ -1173,13 +1174,16 @@ pub extern "win64" fn set_process_dpi_aware() -> i32 {
 }
 
 /// GetDpiForWindow: return the DPI for a window.
+///
+/// Returns the detected system DPI. Per-window DPI (multi-monitor setups) is
+/// not yet implemented — all windows report the primary monitor's DPI.
 pub extern "win64" fn get_dpi_for_window(_hwnd: usize) -> u32 {
-    96
+    crate::backend::system_dpi()
 }
 
 /// GetDpiForSystem: return the system DPI.
 pub extern "win64" fn get_dpi_for_system() -> u32 {
-    96
+    crate::backend::system_dpi()
 }
 
 /// # Safety
