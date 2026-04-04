@@ -1,6 +1,8 @@
 //! Desktop integration for Weave — `.desktop` file generation, xdg-mime handler
 //! registration, and application menu management.
 
+mod icon;
+
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -31,6 +33,39 @@ impl std::fmt::Display for DesktopError {
             DesktopError::HomeNotFound => write!(f, "could not determine home directory"),
         }
     }
+}
+
+/// Returns the directory where per-user icons are stored.
+///
+/// Uses `$XDG_DATA_HOME/icons` if set, otherwise `~/.local/share/icons`.
+pub fn icons_dir() -> Result<PathBuf, DesktopError> {
+    let base = std::env::var("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .or_else(|_| std::env::var("HOME").map(|h| PathBuf::from(h).join(".local/share")))
+        .map_err(|_| DesktopError::HomeNotFound)?;
+    Ok(base.join("icons"))
+}
+
+/// Extract the icon from a Windows `.exe` file and install it as
+/// `weave-{app_id}.ico` in the user's icons directory.
+///
+/// Returns `Ok(Some(path))` if an icon was extracted and written.
+/// Returns `Ok(None)` if the file has no icon resources (not an error —
+/// the caller should fall back to the default Weave icon).
+/// Returns `Err` only on I/O failure after extraction succeeded.
+pub fn extract_and_install_icon(
+    app_id: &str,
+    exe_path: &Path,
+) -> Result<Option<PathBuf>, DesktopError> {
+    let exe_bytes = fs::read(exe_path)?;
+    let Some(ico_bytes) = icon::extract_icon(&exe_bytes) else {
+        return Ok(None);
+    };
+    let dir = icons_dir()?;
+    fs::create_dir_all(&dir)?;
+    let path = dir.join(format!("weave-{app_id}.ico"));
+    fs::write(&path, &ico_bytes)?;
+    Ok(Some(path))
 }
 
 /// Returns the directory where `.desktop` files are installed for this user.

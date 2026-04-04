@@ -39,9 +39,16 @@ fn create_prefix(name: String, exe_path: String) -> Result<(), String> {
             .set_exe_path(Path::new(&exe_path))
             .map_err(|e| e.to_string())?;
 
+        // Best-effort icon extraction — silently ignore failures so that
+        // apps without embedded icons (or with unreadable .exe files) still
+        // get a working .desktop entry using the default Weave icon.
+        let icon_path = weave_desktop::extract_and_install_icon(&name, Path::new(&exe_path))
+            .ok()
+            .flatten();
+
         let exec_cmd = format!("weave run {exe_path}");
         let content =
-            weave_desktop::generate_desktop_file(&name, &exec_cmd, None, "Wine;");
+            weave_desktop::generate_desktop_file(&name, &exec_cmd, icon_path.as_deref(), "Wine;");
         weave_desktop::install_desktop_file(&name, &content)
             .map_err(|e| e.to_string())?;
         weave_desktop::update_desktop_database()

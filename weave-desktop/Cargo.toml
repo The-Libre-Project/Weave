@@ -1,8 +1,9 @@
 [package]
 name = "weave-desktop"
-version = "0.0.1"
-edition = "2021"
-license = "MIT"
-repository = "https://github.com/eldo9000/Weave"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Desktop integration for Weave — .desktop file generation, xdg-mime handler registration, and application menu management."
 
 [dependencies]
+goblin = { version = "0.9", default-features = false, features = ["pe32", "pe64"] }
