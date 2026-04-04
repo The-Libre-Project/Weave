@@ -1,8 +1,9 @@
 //! Tauri backend for weave-gui.
 //!
 //! Exposes IPC commands that the Svelte frontend calls via `invoke()`.
-//! All commands delegate to `weave-installer` for prefix management and
-//! to the `weave` CLI binary for launching applications.
+//! Orchestrates weave-installer (prefix lifecycle) and weave-desktop
+//! (app menu integration) so creating a prefix also installs a .desktop
+//! entry and deleting one removes it.
 
 use std::path::Path;
 use weave_installer::PrefixManager;
@@ -23,34 +24,48 @@ fn list_apps() -> Result<Vec<String>, String> {
     Ok(list.into_iter().map(|p| p.name).collect())
 }
 
-/// Creates a new application prefix.
+/// Creates a new application prefix and installs a `.desktop` menu entry.
 ///
-/// `exe_path` is the Windows-style path to the main executable within the
-/// prefix's drive_c (e.g. `C:\Program Files\App\app.exe`). May be empty
-/// if the exe location is not yet known.
+/// If `exe_path` is non-empty, also stores it on the prefix and generates
+/// a `.desktop` file so the app appears in the Linux application menu.
+/// The desktop database is updated automatically.
 #[tauri::command]
 fn create_prefix(name: String, exe_path: String) -> Result<(), String> {
     let mgr = PrefixManager::new().map_err(|e| e.to_string())?;
     let prefix = mgr.create(&name).map_err(|e| e.to_string())?;
+
     if !exe_path.is_empty() {
         prefix
             .set_exe_path(Path::new(&exe_path))
             .map_err(|e| e.to_string())?;
+
+        let exec_cmd = format!("weave run {exe_path}");
+        let content =
+            weave_desktop::generate_desktop_file(&name, &exec_cmd, None, "Wine;");
+        weave_desktop::install_desktop_file(&name, &content)
+            .map_err(|e| e.to_string())?;
+        weave_desktop::update_desktop_database()
+            .map_err(|e| e.to_string())?;
     }
+
     Ok(())
 }
 
-/// Deletes an application prefix and all its contents.
+/// Deletes an application prefix and removes its `.desktop` menu entry.
 #[tauri::command]
 fn delete_prefix(name: String) -> Result<(), String> {
     let mgr = PrefixManager::new().map_err(|e| e.to_string())?;
+    weave_desktop::uninstall_desktop_file(&name)
+        .map_err(|e| e.to_string())?;
+    weave_desktop::update_desktop_database()
+        .map_err(|e| e.to_string())?;
     mgr.delete(&name).map_err(|e| e.to_string())
 }
 
 /// Launches the application associated with the given prefix.
 ///
 /// Reads the exe path from `<prefix>/exe.txt`, then spawns
-/// `weave run <exe_path>` as a background process.
+/// `weave run <exe_path>` as a detached background process.
 #[tauri::command]
 fn launch_app(prefix_name: String) -> Result<(), String> {
     let mgr = PrefixManager::new().map_err(|e| e.to_string())?;
@@ -67,6 +82,16 @@ fn launch_app(prefix_name: String) -> Result<(), String> {
     Ok(())
 }
 
+/// Registers Weave as the default handler for `.exe` files via xdg-mime.
+///
+/// This is a one-time setup step. After calling this, double-clicking a
+/// `.exe` file in the Linux file manager will open it with Weave.
+/// Returns `Ok(())` silently if xdg-mime is not installed.
+#[tauri::command]
+fn register_exe_handler() -> Result<(), String> {
+    weave_desktop::register_exe_handler().map_err(|e| e.to_string())
+}
+
 /// Tauri application entry point — called from `main.rs`.
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -78,6 +103,7 @@ pub fn run() {
             create_prefix,
             delete_prefix,
             launch_app,
+            register_exe_handler,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

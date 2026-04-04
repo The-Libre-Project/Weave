@@ -11,6 +11,10 @@
   let newExePath = $state("");
   let creating = $state(false);
 
+  // Setup state
+  let registering = $state(false);
+  let setupMsg = $state("");
+
   async function loadApps() {
     try {
       apps = await invoke<string[]>("list_apps");
@@ -58,6 +62,19 @@
       error = String(e);
     } finally {
       launching = "";
+    }
+  }
+
+  async function registerExeHandler() {
+    registering = true;
+    setupMsg = "";
+    try {
+      await invoke("register_exe_handler");
+      setupMsg = "Done — .exe files will now open with Weave.";
+    } catch (e) {
+      setupMsg = String(e);
+    } finally {
+      registering = false;
     }
   }
 </script>
@@ -119,6 +136,20 @@
 
     {#if error}
       <p class="error">{error}</p>
+    {/if}
+  </section>
+
+  <section class="setup">
+    <h2>Setup</h2>
+    <p class="setup-desc">
+      Register Weave as the default handler for .exe files so they open
+      directly from your file manager.
+    </p>
+    <button onclick={registerExeHandler} disabled={registering}>
+      {registering ? "Registering…" : "Register .exe handler"}
+    </button>
+    {#if setupMsg}
+      <p class="setup-msg">{setupMsg}</p>
     {/if}
   </section>
 </main>
@@ -262,5 +293,24 @@
     color: #ff6b6b;
     margin-top: 0.75rem;
     font-size: 0.9rem;
+  }
+
+  .setup {
+    padding: 1.25rem;
+    background: #222;
+    border-radius: 6px;
+    border: 1px solid #333;
+  }
+
+  .setup-desc {
+    color: #888;
+    font-size: 0.9rem;
+    margin-bottom: 0.75rem;
+  }
+
+  .setup-msg {
+    margin-top: 0.6rem;
+    font-size: 0.85rem;
+    color: #aaa;
   }
 </style>
