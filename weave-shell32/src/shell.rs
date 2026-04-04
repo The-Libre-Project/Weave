@@ -290,6 +290,65 @@ pub unsafe extern "win64" fn sh_get_known_folder_path(
     }
 }
 
+/// SHBrowseForFolderW: display a folder browser dialog.
+///
+/// Returns NULL (no folder selected / not implemented). Callers must handle
+/// NULL gracefully — they check return value before calling SHGetPathFromIDListW.
+///
+/// # Safety
+/// `lp_bi` may be null or a pointer to a BROWSEINFOW struct. Ignored.
+pub unsafe extern "win64" fn sh_browse_for_folder_w(_lp_bi: *const u8) -> *mut u8 {
+    std::ptr::null_mut() // NULL PIDL — user "cancelled"
+}
+
+/// SHGetPathFromIDListW: convert an item ID list (PIDL) to a path.
+///
+/// Returns FALSE. Since `sh_browse_for_folder_w` always returns NULL,
+/// callers should never reach this with a valid PIDL. If they do, we
+/// have no PIDL implementation, so we return FALSE and zero the buffer.
+///
+/// # Safety
+/// `pidl` and `psz_path` may be null. If `psz_path` is non-null we zero it.
+pub unsafe extern "win64" fn sh_get_path_from_id_list_w(
+    _pidl: *const u8,
+    psz_path: *mut u16,
+) -> i32 {
+    // Zero the output buffer so the caller gets an empty string, not garbage.
+    if !psz_path.is_null() {
+        unsafe { *psz_path = 0 };
+    }
+    0 // FALSE
+}
+
+/// DragAcceptFiles: register (or unregister) a window as a drop target.
+///
+/// No-op — Weave has no drag-and-drop pipeline yet.
+pub extern "win64" fn drag_accept_files(_hwnd: usize, _f_accept: i32) {}
+
+/// DragQueryFileW: retrieve information about a dropped file.
+///
+/// Returns 0 (no files in drop). Since `DragAcceptFiles` is a no-op,
+/// callers should not receive WM_DROPFILES and should not reach this.
+///
+/// # Safety
+/// `lpsz_file` is not dereferenced unless iFile == 0xFFFFFFFF.
+pub unsafe extern "win64" fn drag_query_file_w(
+    _h_drop: usize,
+    _i_file: u32,
+    lpsz_file: *mut u16,
+    _cch: u32,
+) -> u32 {
+    if !lpsz_file.is_null() {
+        unsafe { *lpsz_file = 0 };
+    }
+    0 // 0 files
+}
+
+/// DragFinish: release resources for a dropped-files handle.
+///
+/// No-op.
+pub extern "win64" fn drag_finish(_h_drop: usize) {}
+
 /// CoTaskMemFree: free memory allocated by COM task allocator.
 ///
 /// In Weave, CoTaskMemAlloc == libc malloc, so we just call libc::free.

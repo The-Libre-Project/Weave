@@ -84,6 +84,19 @@ fn resolve_shell32(func: &str) -> Option<usize> {
             shell::shell_execute_a as unsafe extern "win64" fn(_, _, _, _, _, _) -> _ as *const ()
                 as usize,
         ),
+        "SHBrowseForFolderW" => Some(
+            shell::sh_browse_for_folder_w as unsafe extern "win64" fn(_) -> _ as *const () as usize,
+        ),
+        "SHGetPathFromIDListW" => Some(
+            shell::sh_get_path_from_id_list_w as unsafe extern "win64" fn(_, _) -> _ as *const ()
+                as usize,
+        ),
+        "DragAcceptFiles" => Some(shell::drag_accept_files as extern "win64" fn(_, _) as *const () as usize),
+        "DragQueryFileW" => Some(
+            shell::drag_query_file_w as unsafe extern "win64" fn(_, _, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "DragFinish" => Some(shell::drag_finish as extern "win64" fn(_) as *const () as usize),
         _ => None,
     }
 }
