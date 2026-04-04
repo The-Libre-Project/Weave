@@ -1,7 +1,6 @@
 use clap::Parser;
 use std::path::PathBuf;
 use weave_core::{dll_registry, exec, iat, loader, prefix, registry, seh, teb};
-use weave_plugin_system;
 
 /// Weave — run Windows executables on Linux.
 #[derive(Parser)]
