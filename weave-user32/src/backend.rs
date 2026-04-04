@@ -122,7 +122,11 @@ mod inner {
             return None;
         }
         let dpi = (f64::from(px) / f64::from(mm) * 25.4).round() as u32;
-        if (72..=576).contains(&dpi) { Some(dpi) } else { None }
+        if (72..=576).contains(&dpi) {
+            Some(dpi)
+        } else {
+            None
+        }
     }
 
     /// Detect the system DPI with the following priority:

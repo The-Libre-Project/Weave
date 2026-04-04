@@ -989,36 +989,86 @@ pub unsafe extern "win64" fn nt_set_information_thread(
 
 /// LdrLoadDll: load a DLL into the process address space.
 ///
-/// Phase 2: dynamic loading is not supported; always returns STATUS_DLL_NOT_FOUND.
+/// Returns a synthetic module handle via the global handle registry and
+/// resolves functions through the runtime resolver chain.
 ///
 /// # Safety
-/// Pointer arguments are accepted but not dereferenced.
+/// `module_file_name` must be null or a valid pointer to a `UnicodeString`.
+/// `module_handle` must be a valid writable pointer.
 pub unsafe extern "win64" fn ldr_load_dll(
     _path_to_file: *const u16,
     _flags: u32,
-    _module_file_name: *const UnicodeString,
-    _module_handle: *mut usize,
+    module_file_name: *const UnicodeString,
+    module_handle: *mut usize,
 ) -> u32 {
-    // Dynamic loading not supported in Phase 2
-    const STATUS_DLL_NOT_FOUND: u32 = 0xC0000135;
-    STATUS_DLL_NOT_FOUND
+    let name = if !module_file_name.is_null() {
+        unsafe { (*module_file_name).to_string() }.unwrap_or_default()
+    } else {
+        String::new()
+    };
+    if name.is_empty() {
+        return 0xC0000135; // STATUS_DLL_NOT_FOUND
+    }
+    let handle = weave_core::module_handles::register(&name);
+    if !module_handle.is_null() {
+        unsafe { *module_handle = handle };
+    }
+    eprintln!("weave/ntdll: LdrLoadDll({name:?}) → {handle:#x}");
+    0 // STATUS_SUCCESS
 }
 
 /// LdrGetProcedureAddress: get the address of a procedure in a loaded DLL.
 ///
-/// Phase 2: dynamic loading is not supported; always returns STATUS_PROCEDURE_NOT_FOUND.
+/// Maps the module handle back to a DLL name, then resolves via the global
+/// resolver chain.
 ///
 /// # Safety
-/// Pointer arguments are accepted but not dereferenced.
+/// `function_name` must be null or a valid pointer to an `AnsiString`.
+/// `function_address` must be a valid writable pointer.
 pub unsafe extern "win64" fn ldr_get_procedure_address(
-    _module_handle: usize,
-    _function_name: *const AnsiString,
+    module_handle: usize,
+    function_name: *const AnsiString,
     _ordinal: u16,
-    _function_address: *mut usize,
+    function_address: *mut usize,
 ) -> u32 {
-    // Dynamic loading not supported in Phase 2
-    const STATUS_PROCEDURE_NOT_FOUND: u32 = 0xC000007A;
-    STATUS_PROCEDURE_NOT_FOUND
+    let dll_name = match weave_core::module_handles::lookup(module_handle) {
+        Some(name) => name,
+        None => return 0xC000007A, // STATUS_PROCEDURE_NOT_FOUND
+    };
+
+    let func = if !function_name.is_null() {
+        let ansi = unsafe { &*function_name };
+        if ansi.buffer.is_null() || ansi.length == 0 {
+            String::new()
+        } else {
+            let slice = unsafe {
+                std::slice::from_raw_parts(ansi.buffer as *const u8, ansi.length as usize)
+            };
+            String::from_utf8_lossy(slice).into_owned()
+        }
+    } else {
+        String::new()
+    };
+
+    if func.is_empty() {
+        return 0xC000007A; // STATUS_PROCEDURE_NOT_FOUND
+    }
+
+    match weave_core::resolve::resolve(&dll_name, &func) {
+        Some(addr) => {
+            if !function_address.is_null() {
+                unsafe { *function_address = addr };
+            }
+            eprintln!("weave/ntdll: LdrGetProcedureAddress({dll_name}!{func}) → {addr:#x}");
+            0 // STATUS_SUCCESS
+        }
+        None => {
+            eprintln!(
+                "weave/ntdll: LdrGetProcedureAddress({dll_name}!{func}) → NOT_FOUND"
+            );
+            0xC000007A // STATUS_PROCEDURE_NOT_FOUND
+        }
+    }
 }
 
 /// NtAllocateVirtualMemory: allocate virtual memory.

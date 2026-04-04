@@ -178,6 +178,18 @@ pub extern "win64" fn exit_process(u_exit_code: u32) -> ! {
     unsafe { libc::exit(u_exit_code as i32) }
 }
 
+/// TerminateProcess: forcibly terminate a process.
+///
+/// For Weave's single-process model we treat any TerminateProcess call as
+/// "exit immediately".  hProcess is ignored — there is only one process.
+///
+/// # Safety
+/// `_h_process` is accepted but not dereferenced.
+pub unsafe extern "win64" fn terminate_process(_h_process: usize, u_exit_code: u32) -> i32 {
+    eprintln!("weave: TerminateProcess called with exit code {u_exit_code}");
+    unsafe { libc::exit(u_exit_code as i32) }
+}
+
 /// GetLastError: return the calling thread's last error code.
 pub extern "win64" fn get_last_error() -> u32 {
     LAST_ERROR.with(|e| e.get())
@@ -1161,14 +1173,17 @@ pub extern "win64" fn heap_alloc(
     dw_bytes: usize,
 ) -> *mut std::ffi::c_void {
     if dw_bytes == 0 {
+        eprintln!("weave: HeapAlloc(bytes=0) → NULL");
         return std::ptr::null_mut();
     }
     let zero_memory = (dw_flags & 0x08) != 0; // HEAP_ZERO_MEMORY
-    if zero_memory {
+    let ptr = if zero_memory {
         unsafe { libc::calloc(1, dw_bytes) }
     } else {
         unsafe { libc::malloc(dw_bytes) }
-    }
+    };
+    eprintln!("weave: HeapAlloc(flags={dw_flags:#x}, bytes={dw_bytes:#x}) → {ptr:p}");
+    ptr
 }
 
 /// HeapReAlloc: reallocate memory in the heap.
@@ -1201,6 +1216,12 @@ pub unsafe extern "win64" fn heap_free(
     if lp_mem.is_null() {
         return 1; // TRUE
     }
+    // Reject non-canonical addresses (e.g. XFG-decoded garbage from BSS-zero slots).
+    // Windows HeapFree returns FALSE for invalid pointers instead of crashing.
+    let addr = lp_mem as usize;
+    if addr >> 47 != 0 {
+        return 0; // FALSE — invalid pointer
+    }
     unsafe { libc::free(lp_mem) };
     1 // TRUE
 }
@@ -1220,6 +1241,7 @@ pub extern "win64" fn heap_size(
 ///
 /// Returns the same fake handle as HeapCreate (1usize).
 pub extern "win64" fn get_process_heap() -> usize {
+    eprintln!("weave: GetProcessHeap() → 1");
     1usize
 }
 
@@ -2943,109 +2965,270 @@ pub unsafe extern "win64" fn copy_file_a(
     1 // TRUE
 }
 
-// ── Module / library loading stubs ────────────────────────────────────────────
+// ── Module / library loading ──────────────────────────────────────────────────
+//
+// Runtime DLL resolution. LoadLibrary* returns a synthetic HMODULE that
+// GetProcAddress maps back to a DLL name, then resolves via the global
+// resolver chain registered by weave-cli at startup.
 
-/// LoadLibraryA/W/ExA/ExW — we don't load DLLs dynamically; return NULL.
+/// Read a null-terminated ANSI string from a raw pointer. Returns an empty
+/// string if the pointer is null.
+unsafe fn read_cstr_a(p: *const u8) -> String {
+    if p.is_null() {
+        return String::new();
+    }
+    let mut len = 0usize;
+    while unsafe { *p.add(len) } != 0 {
+        len += 1;
+    }
+    let slice = unsafe { std::slice::from_raw_parts(p, len) };
+    String::from_utf8_lossy(slice).into_owned()
+}
+
+/// Read a null-terminated UTF-16 string from a raw pointer. Returns an empty
+/// string if the pointer is null.
+unsafe fn read_cstr_w(p: *const u16) -> String {
+    if p.is_null() {
+        return String::new();
+    }
+    let mut len = 0usize;
+    while unsafe { *p.add(len) } != 0 {
+        len += 1;
+    }
+    let slice = unsafe { std::slice::from_raw_parts(p, len) };
+    String::from_utf16_lossy(slice)
+}
+
+/// LoadLibraryA — load a DLL by ANSI name.
 ///
 /// # Safety
-/// Pointer arguments are accepted but not dereferenced.
-pub unsafe extern "win64" fn load_library_a(_lp_file_name: *const u8) -> usize {
-    0
-}
-/// # Safety
-/// Pointer arguments are accepted but not dereferenced.
-pub unsafe extern "win64" fn load_library_w(_lp_file_name: *const u16) -> usize {
-    0
-}
-/// # Safety
-/// Pointer arguments are accepted but not dereferenced.
-pub unsafe extern "win64" fn load_library_ex_a(
-    _lp_file_name: *const u8,
-    _h_file: usize,
-    _dw_flags: u32,
-) -> usize {
-    0
-}
-/// # Safety
-/// Pointer arguments are accepted but not dereferenced.
-pub unsafe extern "win64" fn load_library_ex_w(
-    _lp_file_name: *const u16,
-    _h_file: usize,
-    _dw_flags: u32,
-) -> usize {
-    0
+/// `lp_file_name` must be null or a valid null-terminated ANSI string.
+pub unsafe extern "win64" fn load_library_a(lp_file_name: *const u8) -> usize {
+    let name = unsafe { read_cstr_a(lp_file_name) };
+    if name.is_empty() {
+        return 0;
+    }
+    let handle = weave_core::module_handles::register(&name);
+    eprintln!("weave/kernel32: LoadLibraryA({name:?}) → {handle:#x}");
+    handle
 }
 
-/// FreeLibrary — no-op (we never loaded it).
+/// LoadLibraryW — load a DLL by wide name.
+///
+/// # Safety
+/// `lp_file_name` must be null or a valid null-terminated UTF-16 string.
+pub unsafe extern "win64" fn load_library_w(lp_file_name: *const u16) -> usize {
+    let name = unsafe { read_cstr_w(lp_file_name) };
+    if name.is_empty() {
+        return 0;
+    }
+    let handle = weave_core::module_handles::register(&name);
+    eprintln!("weave/kernel32: LoadLibraryW({name:?}) → {handle:#x}");
+    handle
+}
+
+/// LoadLibraryExA — load a DLL by ANSI name (extended).
+///
+/// # Safety
+/// `lp_file_name` must be null or a valid null-terminated ANSI string.
+pub unsafe extern "win64" fn load_library_ex_a(
+    lp_file_name: *const u8,
+    _h_file: usize,
+    _dw_flags: u32,
+) -> usize {
+    let name = unsafe { read_cstr_a(lp_file_name) };
+    if name.is_empty() {
+        return 0;
+    }
+    let handle = weave_core::module_handles::register(&name);
+    eprintln!("weave/kernel32: LoadLibraryExA({name:?}) → {handle:#x}");
+    handle
+}
+
+/// LoadLibraryExW — load a DLL by wide name (extended).
+///
+/// # Safety
+/// `lp_file_name` must be null or a valid null-terminated UTF-16 string.
+pub unsafe extern "win64" fn load_library_ex_w(
+    lp_file_name: *const u16,
+    _h_file: usize,
+    _dw_flags: u32,
+) -> usize {
+    let name = unsafe { read_cstr_w(lp_file_name) };
+    if name.is_empty() {
+        return 0;
+    }
+    let handle = weave_core::module_handles::register(&name);
+    eprintln!("weave/kernel32: LoadLibraryExW({name:?}) → {handle:#x}");
+    handle
+}
+
+/// FreeLibrary — no-op; synthetic handles have no resources to free.
 pub extern "win64" fn free_library(_h_module: usize) -> i32 {
     1 // TRUE
 }
 
-/// GetProcAddress — always returns NULL (we don't have a real DLL loader).
+/// GetProcAddress — resolve a function by module handle + name.
+///
+/// Maps the synthetic HMODULE back to a DLL name, then queries the global
+/// resolver. Falls back to 0 (NULL) if the handle is unknown or the
+/// function is not found.
 ///
 /// # Safety
-/// Pointer arguments are accepted but not dereferenced.
-pub unsafe extern "win64" fn get_proc_address(_h_module: usize, _lp_proc_name: *const u8) -> usize {
-    0
+/// `lp_proc_name` must be a valid null-terminated ANSI string, or an ordinal
+/// encoded in the low 16 bits (high bits zero — `MAKEINTRESOURCE` style).
+pub unsafe extern "win64" fn get_proc_address(h_module: usize, lp_proc_name: *const u8) -> usize {
+    // Ordinal imports: high 48 bits are zero, low 16 bits are the ordinal.
+    // We can't resolve ordinals — return NULL.
+    if !lp_proc_name.is_null() && (lp_proc_name as usize) < 0x10000 {
+        return 0;
+    }
+
+    let func_name = unsafe { read_cstr_a(lp_proc_name) };
+    if func_name.is_empty() {
+        return 0;
+    }
+
+    let dll_name = match weave_core::module_handles::lookup(h_module) {
+        Some(name) => name,
+        None => return 0,
+    };
+
+    match weave_core::resolve::resolve(&dll_name, &func_name) {
+        Some(addr) => {
+            eprintln!(
+                "weave/kernel32: GetProcAddress({dll_name}!{func_name}) → {addr:#x}"
+            );
+            addr
+        }
+        None => {
+            eprintln!(
+                "weave/kernel32: GetProcAddress({dll_name}!{func_name}) → NULL (not found)"
+            );
+            0
+        }
+    }
 }
 
-/// GetModuleHandleA/W/ExA/ExW — return NULL (module not found).
+/// GetModuleHandleA — get a handle to an already-loaded module (ANSI).
+///
+/// NULL `lp_module_name` means "the main executable" — we return a fixed
+/// sentinel (0x00400000, the default PE image base) for that case.
 ///
 /// # Safety
-/// Pointer arguments are accepted but not dereferenced.
-pub unsafe extern "win64" fn get_module_handle_a(_lp_module_name: *const u8) -> usize {
-    0
+/// `lp_module_name` must be null or a valid null-terminated ANSI string.
+pub unsafe extern "win64" fn get_module_handle_a(lp_module_name: *const u8) -> usize {
+    if lp_module_name.is_null() {
+        return 0x00400000; // conventional EXE image base
+    }
+    let name = unsafe { read_cstr_a(lp_module_name) };
+    weave_core::module_handles::register(&name)
 }
+
+/// GetModuleHandleW — get a handle to an already-loaded module (wide).
+///
 /// # Safety
-/// Pointer arguments are accepted but not dereferenced.
-pub unsafe extern "win64" fn get_module_handle_w(_lp_module_name: *const u16) -> usize {
-    0
+/// `lp_module_name` must be null or a valid null-terminated UTF-16 string.
+pub unsafe extern "win64" fn get_module_handle_w(lp_module_name: *const u16) -> usize {
+    if lp_module_name.is_null() {
+        return 0x00400000; // conventional EXE image base
+    }
+    let name = unsafe { read_cstr_w(lp_module_name) };
+    weave_core::module_handles::register(&name)
 }
+
+/// GetModuleHandleExA — extended module handle lookup (ANSI).
+///
 /// # Safety
-/// Pointer arguments are accepted but not dereferenced.
+/// `lp_module_name` must be null or a valid null-terminated ANSI string.
+/// `ph_module` must be a valid writable pointer.
 pub unsafe extern "win64" fn get_module_handle_ex_a(
     _dw_flags: u32,
-    _lp_module_name: *const u8,
-    _ph_module: *mut usize,
+    lp_module_name: *const u8,
+    ph_module: *mut usize,
 ) -> i32 {
-    0 // FALSE
+    let handle = unsafe { get_module_handle_a(lp_module_name) };
+    if !ph_module.is_null() {
+        unsafe { *ph_module = handle };
+    }
+    1 // TRUE
 }
+
+/// GetModuleHandleExW — extended module handle lookup (wide).
+///
 /// # Safety
-/// Pointer arguments are accepted but not dereferenced.
+/// `lp_module_name` must be null or a valid null-terminated UTF-16 string.
+/// `ph_module` must be a valid writable pointer.
 pub unsafe extern "win64" fn get_module_handle_ex_w(
     _dw_flags: u32,
-    _lp_module_name: *const u16,
-    _ph_module: *mut usize,
+    lp_module_name: *const u16,
+    ph_module: *mut usize,
 ) -> i32 {
-    0 // FALSE
+    let handle = unsafe { get_module_handle_w(lp_module_name) };
+    if !ph_module.is_null() {
+        unsafe { *ph_module = handle };
+    }
+    1 // TRUE
 }
 
-/// GetModuleFileNameW — return 0 (error).
+/// GetModuleFileNameW — return the file path for a module handle (wide).
+///
+/// Returns a fake path for NULL (main exe) or registered DLLs.
 ///
 /// # Safety
-/// Pointer arguments are accepted but not dereferenced.
+/// `lp_filename` must be a writable buffer of at least `n_size` wide chars.
 pub unsafe extern "win64" fn get_module_file_name_w(
-    _h_module: usize,
-    _lp_filename: *mut u16,
-    _n_size: u32,
+    h_module: usize,
+    lp_filename: *mut u16,
+    n_size: u32,
 ) -> u32 {
-    0
+    if lp_filename.is_null() || n_size == 0 {
+        return 0;
+    }
+    let path = if h_module == 0 || h_module == 0x00400000 {
+        r"C:\Program Files\app.exe".to_string()
+    } else {
+        match weave_core::module_handles::lookup(h_module) {
+            Some(dll) => format!(r"C:\Windows\System32\{dll}"),
+            None => return 0,
+        }
+    };
+    let wide: Vec<u16> = path.encode_utf16().collect();
+    let copy_len = wide.len().min((n_size as usize) - 1);
+    unsafe {
+        std::ptr::copy_nonoverlapping(wide.as_ptr(), lp_filename, copy_len);
+        *lp_filename.add(copy_len) = 0; // null terminator
+    }
+    copy_len as u32
 }
 
-/// GetModuleFileNameA — return 0 (error).
-///
-/// Same as GetModuleFileNameW — stub that returns 0.
-/// The A variant just needs to exist in the resolver so apps that call
-/// the narrow version don't get an unresolved import.
+/// GetModuleFileNameA — return the file path for a module handle (ANSI).
 ///
 /// # Safety
-/// Pointer arguments are accepted but not dereferenced.
+/// `lp_filename` must be a writable buffer of at least `n_size` bytes.
 pub unsafe extern "win64" fn get_module_file_name_a(
-    _h_module: usize,
-    _lp_filename: *mut u8,
-    _n_size: u32,
+    h_module: usize,
+    lp_filename: *mut u8,
+    n_size: u32,
 ) -> u32 {
-    0
+    if lp_filename.is_null() || n_size == 0 {
+        return 0;
+    }
+    let path = if h_module == 0 || h_module == 0x00400000 {
+        r"C:\Program Files\app.exe".to_string()
+    } else {
+        match weave_core::module_handles::lookup(h_module) {
+            Some(dll) => format!(r"C:\Windows\System32\{dll}"),
+            None => return 0,
+        }
+    };
+    let bytes = path.as_bytes();
+    let copy_len = bytes.len().min((n_size as usize) - 1);
+    unsafe {
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), lp_filename, copy_len);
+        *lp_filename.add(copy_len) = 0; // null terminator
+    }
+    copy_len as u32
 }
 
 // ── Process / thread identity ─────────────────────────────────────────────────
@@ -5949,6 +6132,9 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
             write_console_w as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const () as usize,
         ),
         "ExitProcess" => Some(exit_process as *const () as usize),
+        "TerminateProcess" => Some(
+            terminate_process as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
+        ),
         "GetLastError" => Some(get_last_error as *const () as usize),
         "SetLastError" => Some(set_last_error as *const () as usize),
         "VirtualProtect" => {
@@ -6833,6 +7019,7 @@ mod tests {
             "GetStdHandle",
             "WriteConsoleW",
             "ExitProcess",
+            "TerminateProcess",
             "GetLastError",
             "SetLastError",
             "VirtualProtect",

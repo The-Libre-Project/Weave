@@ -170,6 +170,11 @@ fn main() {
     // non-canonical garbage address.
     cfg::setup(&bytes, image.base);
 
+    // ── 6.6. Register runtime resolver ─────────────────────────────────
+    // LoadLibraryExW / GetProcAddress stubs call back into this resolver
+    // at runtime. Must be set before the PE entry point runs.
+    weave_core::resolve::set(resolve);
+
     eprintln!("weave: TEB ready — jumping in");
 
     // ── DEBUG: print first 16 bytes at entry point and GS base ───────────

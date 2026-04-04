@@ -126,17 +126,22 @@ fn print_weave_crash(
     let rcx = gregs[libc::REG_RCX as usize] as u64;
     let rdx = gregs[libc::REG_RDX as usize] as u64;
     let rsp = gregs[libc::REG_RSP as usize] as u64;
-    let r8  = gregs[libc::REG_R8  as usize] as u64;
+    let r8 = gregs[libc::REG_R8 as usize] as u64;
 
     // Read 8 bytes at fault address safely via /proc/self/mem.
     let fault_preview = {
         let path = b"/proc/self/mem\0";
         let fd = unsafe { libc::open(path.as_ptr() as *const libc::c_char, libc::O_RDONLY) };
-        let mut hex = [b'?' as u8; 23]; // "?? ?? ?? ?? ?? ?? ?? ??"
+        let mut hex = [b'?'; 23]; // "?? ?? ?? ?? ?? ?? ?? ??"
         if fd >= 0 {
             let mut buf = [0u8; 8];
             let n = unsafe {
-                libc::pread(fd, buf.as_mut_ptr() as *mut libc::c_void, 8, fault_addr as i64)
+                libc::pread(
+                    fd,
+                    buf.as_mut_ptr() as *mut libc::c_void,
+                    8,
+                    fault_addr as i64,
+                )
             };
             unsafe { libc::close(fd) };
             if n > 0 {
@@ -146,7 +151,7 @@ fn print_weave_crash(
                 let nibble = |v: u8| if v < 10 { b'0' + v } else { b'a' + v - 10 };
                 for (i, &byte) in buf[..n as usize].iter().enumerate() {
                     if i * 3 + 1 < hex.len() {
-                        hex[i * 3]     = nibble(byte >> 4);
+                        hex[i * 3] = nibble(byte >> 4);
                         hex[i * 3 + 1] = nibble(byte & 0xf);
                     }
                 }
@@ -157,10 +162,10 @@ fn print_weave_crash(
 
     let sig_name: &[u8] = match sig {
         libc::SIGSEGV => b"SIGSEGV",
-        libc::SIGFPE  => b"SIGFPE",
-        libc::SIGILL  => b"SIGILL",
-        libc::SIGBUS  => b"SIGBUS",
-        _             => b"SIG???",
+        libc::SIGFPE => b"SIGFPE",
+        libc::SIGILL => b"SIGILL",
+        libc::SIGBUS => b"SIGBUS",
+        _ => b"SIG???",
     };
 
     // Read [RSP] and [RSP-8] via /proc/self/mem to detect ret-to-garbage vs
@@ -168,19 +173,32 @@ fn print_weave_crash(
     // crash time [RSP-8] holds what was popped; a `call rax` leaves RSP
     // unchanged so [RSP] is the return address pushed by that call.
     let read_u64_at = |addr: u64| -> u64 {
-        if addr == 0 { return 0; }
+        if addr == 0 {
+            return 0;
+        }
         let path = b"/proc/self/mem\0";
         let fd = unsafe { libc::open(path.as_ptr() as *const libc::c_char, libc::O_RDONLY) };
-        if fd < 0 { return 0; }
+        if fd < 0 {
+            return 0;
+        }
         let mut val = 0u64;
         let n = unsafe {
-            libc::pread(fd, &mut val as *mut u64 as *mut libc::c_void, 8, addr as i64)
+            libc::pread(
+                fd,
+                &mut val as *mut u64 as *mut libc::c_void,
+                8,
+                addr as i64,
+            )
         };
         unsafe { libc::close(fd) };
-        if n == 8 { val } else { 0 }
+        if n == 8 {
+            val
+        } else {
+            0
+        }
     };
-    let stack_top  = read_u64_at(rsp);           // [RSP]   — ret addr if call crashed
-    let stack_prev = read_u64_at(rsp - 8);       // [RSP-8] — ret addr if ret crashed
+    let stack_top = read_u64_at(rsp); // [RSP]   — ret addr if call crashed
+    let stack_prev = read_u64_at(rsp - 8); // [RSP-8] — ret addr if ret crashed
 
     // Build message using only stack buffers (no heap) for signal safety.
     let mut msg = [0u8; 768];
@@ -188,13 +206,24 @@ fn print_weave_crash(
 
     macro_rules! push {
         ($s:expr) => {
-            for &b in $s { if pos < msg.len() - 1 { msg[pos] = b; pos += 1; } }
+            for &b in $s {
+                if pos < msg.len() - 1 {
+                    msg[pos] = b;
+                    pos += 1;
+                }
+            }
         };
     }
     macro_rules! push_hex {
         ($v:expr, $w:expr) => {{
             let v: u64 = $v as u64;
-            let nibble = |n: u64| if n < 10 { b'0' + n as u8 } else { b'a' + n as u8 - 10 };
+            let nibble = |n: u64| {
+                if n < 10 {
+                    b'0' + n as u8
+                } else {
+                    b'a' + n as u8 - 10
+                }
+            };
             push!(b"0x");
             let digits = $w * 2;
             for shift in (0..digits).rev() {
@@ -211,7 +240,12 @@ fn print_weave_crash(
     push!(b"\nweave:   fault     = ");
     push_hex!(fault_addr, 8);
     push!(b"  [");
-    for &b in &fault_preview { if pos < msg.len() - 1 { msg[pos] = b; pos += 1; } }
+    for &b in &fault_preview {
+        if pos < msg.len() - 1 {
+            msg[pos] = b;
+            pos += 1;
+        }
+    }
     push!(b"]");
     push!(b"\nweave:   PE base   = ");
     push_hex!(pe_base, 8);
@@ -233,6 +267,90 @@ fn print_weave_crash(
     push!(b"\nweave:   [RSP-8]   = ");
     push_hex!(stack_prev, 8);
     push!(b"  (ret addr if ret faulted)");
+
+    // Look up /proc/self/maps to find which library RIP is in.
+    // Async-signal-safe: only open/read/close syscalls + stack buffers.
+    {
+        let maps_path = b"/proc/self/maps\0";
+        let fd = unsafe {
+            libc::open(
+                maps_path.as_ptr() as *const libc::c_char,
+                libc::O_RDONLY,
+            )
+        };
+        if fd >= 0 {
+            let mut buf = [0u8; 512];
+            let mut line = [0u8; 256];
+            let mut line_pos = 0usize;
+            let mut found_line = [0u8; 256];
+            let mut found = false;
+            'outer: loop {
+                let n = unsafe {
+                    libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len())
+                };
+                if n <= 0 {
+                    break;
+                }
+                for &ch in &buf[..n as usize] {
+                    if ch == b'\n' || line_pos >= line.len() - 1 {
+                        // Parse this line: "START-END perms offset dev inode [path]"
+                        // START and END are hex without 0x prefix.
+                        let line_slice = &line[..line_pos];
+                        let mut i = 0usize;
+                        // Parse start address
+                        let mut start_addr = 0usize;
+                        while i < line_slice.len() && line_slice[i] != b'-' {
+                            let d = line_slice[i];
+                            let v = if d.is_ascii_digit() {
+                                (d - b'0') as usize
+                            } else if (b'a'..=b'f').contains(&d) {
+                                (d - b'a' + 10) as usize
+                            } else {
+                                break;
+                            };
+                            start_addr = start_addr * 16 + v;
+                            i += 1;
+                        }
+                        i += 1; // skip '-'
+                        let mut end_addr = 0usize;
+                        while i < line_slice.len() && line_slice[i] != b' ' {
+                            let d = line_slice[i];
+                            let v = if d.is_ascii_digit() {
+                                (d - b'0') as usize
+                            } else if (b'a'..=b'f').contains(&d) {
+                                (d - b'a' + 10) as usize
+                            } else {
+                                break;
+                            };
+                            end_addr = end_addr * 16 + v;
+                            i += 1;
+                        }
+                        let rip_usize = rip;
+                        if start_addr <= rip_usize && rip_usize < end_addr {
+                            found_line[..line_pos].copy_from_slice(line_slice);
+                            found = true;
+                            break 'outer;
+                        }
+                        line_pos = 0;
+                    } else {
+                        line[line_pos] = ch;
+                        line_pos += 1;
+                    }
+                }
+            }
+            unsafe { libc::close(fd) };
+            if found {
+                push!(b"\nweave:   RIP maps  = ");
+                for &b in &found_line[..found_line.iter().position(|&x| x == 0).unwrap_or(256)] {
+                    if pos < msg.len() - 1 {
+                        msg[pos] = b;
+                        pos += 1;
+                    }
+                }
+            }
+        }
+    }
+
     push!(b"\n");
 
     unsafe { libc::write(2, msg.as_ptr() as *const libc::c_void, pos) };
@@ -392,6 +510,7 @@ fn print_crash_report(
         region
     };
 
+    let cfg_count = crate::cfg::cfg_dispatch_count();
     let msg = format!(
         "\nweave: CRASH — {sig_name} in PE code\n\
          weave:   exception = {win_code:#010x}  ({})\n\
@@ -401,6 +520,7 @@ fn print_crash_report(
          weave:   fault     = {fault_addr:#018x}  [{fault_bytes_hex}]\n\
          weave:   region    = {fault_region}\n\
          weave:   function  = {func_line}\n\
+         weave:   CFG dispatches so far = {cfg_count}\n\
          weave:   rax={:#018x}  rbx={:#018x}  rcx={:#018x}\n\
          weave:   rdx={:#018x}  rsi={:#018x}  rdi={:#018x}\n\
          weave:   rsp={:#018x}  rbp={:#018x}\n\
