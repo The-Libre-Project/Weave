@@ -92,11 +92,10 @@ fn main() {
     // Check before loading the PE — if we're going into the VM, we don't
     // need to map the binary into this process at all.
     if weave_vm_fallback::should_use_vm_fallback(&args.exe, args.force_vm) {
-        let exit_code = weave_vm_fallback::execute_in_vm(&args.exe, &[])
-            .unwrap_or_else(|e| {
-                eprintln!("weave: VM fallback failed: {e}");
-                std::process::exit(1);
-            });
+        let exit_code = weave_vm_fallback::execute_in_vm(&args.exe, &[]).unwrap_or_else(|e| {
+            eprintln!("weave: VM fallback failed: {e}");
+            std::process::exit(1);
+        });
         std::process::exit(exit_code);
     }
 
