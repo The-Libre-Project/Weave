@@ -21,6 +21,7 @@ weave-ole32 = { path = "../weave-ole32" }
 weave-mmdevapi = { path = "../weave-mmdevapi" }
 weave-xinput = { path = "../weave-xinput" }
 weave-winmm = { path = "../weave-winmm" }
+weave-plugin-system = { path = "../weave-plugin-system" }
 weave-ucrt = { path = "../weave-ucrt" }
 weave-vulkan = { path = "../weave-vulkan" }
 weave-sandbox = { path = "../weave-sandbox" }

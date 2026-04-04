@@ -1,6 +1,7 @@
 use clap::Parser;
 use std::path::PathBuf;
 use weave_core::{dll_registry, exec, iat, loader, prefix, registry, seh, teb};
+use weave_plugin_system;
 
 /// Weave — run Windows executables on Linux.
 #[derive(Parser)]
@@ -23,7 +24,8 @@ struct Args {
 /// Checks Weave's built-in stub crates first, then falls back to any
 /// PE DLLs pre-loaded from the prefix (e.g. DXVK).
 fn resolve(dll: &str, func: &str) -> Option<usize> {
-    weave_ntdll::resolve(dll, func)
+    weave_plugin_system::lookup(dll, func)
+        .or_else(|| weave_ntdll::resolve(dll, func))
         .or_else(|| weave_kernel32::resolve(dll, func))
         .or_else(|| weave_advapi32::resolve(dll, func))
         .or_else(|| weave_user32::resolve(dll, func))
@@ -46,6 +48,7 @@ fn main() {
         prefix::set(p);
     }
     prefix::ensure_dirs();
+    weave_plugin_system::load_plugins(&weave_core::prefix::plugins_dir());
     registry::populate();
 
     // ── 1. Pre-load DLLs from the prefix ──────────────────────────────────

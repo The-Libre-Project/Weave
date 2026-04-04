@@ -4,5 +4,8 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "Runtime plugin loader for Weave — override any stub via .so plugins"
 
 [dependencies]
+libloading = "0.8"
+libc = "0.2"

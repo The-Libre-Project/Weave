@@ -61,3 +61,11 @@ pub fn ensure_dirs() {
     let _ = std::fs::create_dir_all(prefix.join("drive_c/Windows/Temp"));
     let _ = std::fs::create_dir_all(prefix.join("drive_c/users/weave/AppData/Local/Temp"));
 }
+
+/// Return the path to the prefix's plugin directory.
+///
+/// Plugins are `.so` files placed in `{prefix}/plugins/`. Weave loads every
+/// `.so` it finds there at startup, before the PE runs.
+pub fn plugins_dir() -> PathBuf {
+    get().join("plugins")
+}

@@ -1261,6 +1261,7 @@ dependencies = [
  "weave-mmdevapi",
  "weave-ntdll",
  "weave-ole32",
+ "weave-plugin-system",
  "weave-sandbox",
  "weave-shell32",
  "weave-ucrt",
@@ -1343,6 +1344,10 @@ dependencies = [
 [[package]]
 name = "weave-plugin-system"
 version = "0.0.1"
+dependencies = [
+ "libc",
+ "libloading",
+]
 
 [[package]]
 name = "weave-sandbox"
