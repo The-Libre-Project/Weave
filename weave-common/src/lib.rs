@@ -2,6 +2,7 @@
 
 pub mod error;
 pub mod path;
+pub mod stub;
 pub mod types;
 
 pub use error::WeaveError;

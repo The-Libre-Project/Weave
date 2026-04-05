@@ -24,6 +24,7 @@ pub mod objects;
 
 use defs::*;
 use objects::GdiKind;
+use weave_common::stub::warn_once;
 
 // ── Pixel helpers ─────────────────────────────────────────────────────────────
 
@@ -573,6 +574,7 @@ pub extern "win64" fn bit_blt(
     _y1: i32,
     _rop: u32,
 ) -> i32 {
+    warn_once("BitBlt");
     1
 }
 
@@ -590,6 +592,7 @@ pub extern "win64" fn stretch_blt(
     _h_src: i32,
     _rop: u32,
 ) -> i32 {
+    warn_once("StretchBlt");
     1
 }
 
@@ -639,6 +642,7 @@ pub extern "win64" fn create_dib_section(
     _h_section: usize,
     _offset: u32,
 ) -> usize {
+    warn_once("CreateDIBSection");
     0
 }
 
@@ -657,6 +661,7 @@ pub extern "win64" fn set_dib_bits_to_device(
     _lpbmi: usize,
     _color_use: u32,
 ) -> i32 {
+    warn_once("SetDIBitsToDevice");
     0
 }
 
@@ -801,14 +806,24 @@ pub unsafe extern "win64" fn get_dc_org_ex(_hdc: usize, lp_point: *mut Point) ->
 
 // ── DC save/restore ───────────────────────────────────────────────────────────
 
-/// SaveDC: save the current DC state onto an internal stack (stub).
-pub extern "win64" fn save_dc(_hdc: usize) -> i32 {
-    1 // returns save-state ID; Phase 2: always 1
+/// SaveDC: push the current DC state onto the per-HDC save stack.
+///
+/// Wine ref: dlls/win32u/dc.c — NtGdiSaveDC clones the DC object and pushes
+/// it onto the DC's save-state list. Returns the save level (≥ 1) on success
+/// or 0 on failure. The save level can be passed to RestoreDC to pop back to
+/// a specific point.
+pub extern "win64" fn save_dc(hdc: usize) -> i32 {
+    dc::save(hdc)
 }
 
-/// RestoreDC: restore a previously saved DC state (stub).
-pub extern "win64" fn restore_dc(_hdc: usize, _n_saved_dc: i32) -> i32 {
-    1
+/// RestoreDC: restore a previously saved DC state and discard more-recent saves.
+///
+/// Wine ref: dlls/win32u/dc.c — NtGdiRestoreDC accepts a positive save level
+/// (absolute, 1-based) or negative (relative: -1 = most recent). All states
+/// more recent than the target are discarded. Returns TRUE (1) on success or
+/// FALSE (0) if the level is out of range.
+pub extern "win64" fn restore_dc(hdc: usize, n_saved_dc: i32) -> i32 {
+    dc::restore(hdc, n_saved_dc)
 }
 
 // ── D3DKMT adapter stubs ──────────────────────────────────────────────────────

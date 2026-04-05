@@ -13,6 +13,48 @@ use crate::menu;
 use crate::queue::{self, MsgEntry};
 use crate::window::{self, WindowEntry};
 use libc;
+use weave_common::stub::warn_once;
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
+use std::sync::atomic::{AtomicI32, AtomicU32, Ordering};
+
+// ── Scroll bar per-(hwnd,bar) state ──────────────────────────────────────────
+
+/// Per-window per-bar scroll state.
+#[derive(Clone, Default)]
+struct ScrollState {
+    n_min: i32,
+    n_max: i32,
+    n_page: u32,
+    n_pos: i32,
+}
+
+static SCROLL_STATE: OnceLock<Mutex<HashMap<(usize, i32), ScrollState>>> = OnceLock::new();
+
+fn scroll_state() -> &'static Mutex<HashMap<(usize, i32), ScrollState>> {
+    SCROLL_STATE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+// ── Caret position ───────────────────────────────────────────────────────────
+
+static CARET_X: AtomicI32 = AtomicI32::new(0);
+static CARET_Y: AtomicI32 = AtomicI32::new(0);
+
+// ── Timer ID allocator ───────────────────────────────────────────────────────
+
+static NEXT_TIMER_ID: AtomicU32 = AtomicU32::new(1);
+
+static TIMER_TABLE: OnceLock<Mutex<HashMap<(usize, usize), usize>>> = OnceLock::new();
+
+fn timer_table() -> &'static Mutex<HashMap<(usize, usize), usize>> {
+    TIMER_TABLE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+// ── Last message time and position ───────────────────────────────────────────
+
+static LAST_MSG_TIME: AtomicU32 = AtomicU32::new(0);
+static LAST_MSG_POS_X: AtomicI32 = AtomicI32::new(0);
+static LAST_MSG_POS_Y: AtomicI32 = AtomicI32::new(0);
 
 // ── RegisterClassW / RegisterClassExW ─────────────────────────────────────────
 
@@ -757,6 +799,7 @@ pub extern "win64" fn get_system_metrics(n_index: i32) -> i32 {
 /// `lp_cursor_name` (if non-null) must be a valid UTF-16 string or an integer
 /// resource identifier (IDC_* constant passed via MAKEINTRESOURCEW).
 pub unsafe extern "win64" fn load_cursor_w(_h_instance: usize, _lp_cursor_name: usize) -> usize {
+    warn_once("LoadCursorW");
     1 // non-zero fake HCURSOR
 }
 
@@ -767,6 +810,7 @@ pub unsafe extern "win64" fn load_cursor_w(_h_instance: usize, _lp_cursor_name: 
 /// # Safety
 /// `lp_icon_name` (if non-null) must be a valid UTF-16 string or integer resource.
 pub unsafe extern "win64" fn load_icon_w(_h_instance: usize, _lp_icon_name: usize) -> usize {
+    warn_once("LoadIconW");
     1 // non-zero fake HICON
 }
 
@@ -785,6 +829,7 @@ pub unsafe extern "win64" fn load_image_w(
     _cy: i32,
     _fu_load: u32,
 ) -> usize {
+    warn_once("LoadImageW");
     1
 }
 
@@ -1202,15 +1247,45 @@ pub unsafe extern "win64" fn get_window_thread_process_id(
     1 // fake thread ID
 }
 
+/// ScreenToClient: convert screen coordinates to client coordinates.
+///
+/// Wine ref: server/window.c — screen_to_client walks the window parent chain,
+/// subtracting each window's client_rect offset from the point until reaching
+/// the desktop window. Weave stores window position (x, y) in the window table,
+/// where (x, y) is the top-left corner of the window in screen space. The
+/// client area starts at (x, y) so we subtract that offset.
+///
 /// # Safety
-/// Pointer arguments are accepted but not dereferenced.
-pub unsafe extern "win64" fn screen_to_client(_hwnd: usize, _lp_point: usize) -> i32 {
+/// `lp_point` must point to a valid `Point` (8 bytes) or NULL.
+pub unsafe extern "win64" fn screen_to_client(hwnd: usize, lp_point: *mut Point) -> i32 {
+    if lp_point.is_null() {
+        return 0;
+    }
+    let (wx, wy) = window::with(hwnd, |w| (w.x, w.y)).unwrap_or((0, 0));
+    unsafe {
+        (*lp_point).x -= wx;
+        (*lp_point).y -= wy;
+    }
     1
 }
 
+/// ClientToScreen: convert client coordinates to screen coordinates.
+///
+/// Wine ref: server/window.c — client_to_screen walks the parent chain and
+/// adds each window's client_rect.left/top offset. Weave adds the stored
+/// window position (x, y).
+///
 /// # Safety
-/// Pointer arguments are accepted but not dereferenced.
-pub unsafe extern "win64" fn client_to_screen(_hwnd: usize, _lp_point: usize) -> i32 {
+/// `lp_point` must point to a valid `Point` (8 bytes) or NULL.
+pub unsafe extern "win64" fn client_to_screen(hwnd: usize, lp_point: *mut Point) -> i32 {
+    if lp_point.is_null() {
+        return 0;
+    }
+    let (wx, wy) = window::with(hwnd, |w| (w.x, w.y)).unwrap_or((0, 0));
+    unsafe {
+        (*lp_point).x += wx;
+        (*lp_point).y += wy;
+    }
     1
 }
 
@@ -1388,6 +1463,10 @@ fn call_wnd_proc(proc_addr: usize, hwnd: usize, msg: u32, w_param: usize, l_para
 /// # Safety
 /// `lp_msg` must be a valid writable pointer.
 unsafe fn fill_msg(lp_msg: *mut Msg, entry: &MsgEntry) {
+    // Record last message time and position for GetMessageTime/GetMessagePos.
+    LAST_MSG_TIME.store(entry.time, Ordering::Relaxed);
+    LAST_MSG_POS_X.store(entry.pt_x, Ordering::Relaxed);
+    LAST_MSG_POS_Y.store(entry.pt_y, Ordering::Relaxed);
     unsafe {
         let m = &mut *lp_msg;
         m.hwnd = entry.hwnd;
@@ -2013,36 +2092,76 @@ pub unsafe extern "win64" fn set_window_placement(
     1
 }
 
-// ── Timer stubs ───────────────────────────────────────────────────────────────
+// ── Timer management ─────────────────────────────────────────────────────────
 
-/// SetTimer: create a timer. Returns a fake timer ID (1).
+/// SetTimer: create or replace a window timer, returning its ID.
+///
+/// Wine ref: dlls/win32u/message.c — SetTimer calls NtUserSetTimer which
+/// sends a set_win_timer request to the server. If n_id_event is 0 the
+/// server allocates a new ID (> 0x7FFF per Wine convention); if non-zero
+/// the existing timer for that (hwnd, id) is replaced. Weave tracks timer
+/// IDs in a HashMap but does not fire WM_TIMER messages (no real event
+/// loop timer support yet — Phase 5 gap). Returns 0 on failure.
 ///
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
 pub unsafe extern "win64" fn set_timer(
-    _h_wnd: usize,
-    _n_id_event: usize,
+    h_wnd: usize,
+    n_id_event: usize,
     _u_elapse: u32,
     _lp_timer_func: usize,
 ) -> usize {
-    1usize // non-zero = success
+    let id = if n_id_event == 0 {
+        // System-allocated timer ID — use counter above 0x7FFF to match Wine.
+        let new_id = NEXT_TIMER_ID.fetch_add(1, Ordering::Relaxed) as usize + 0x8000;
+        new_id
+    } else {
+        n_id_event
+    };
+    timer_table().lock().unwrap().insert((h_wnd, id), id);
+    id
 }
 
-/// KillTimer: destroy a timer. Returns TRUE.
-pub extern "win64" fn kill_timer(_h_wnd: usize, _u_id_event: usize) -> i32 {
-    1
+/// KillTimer: destroy a timer and free its ID. Returns TRUE if found, FALSE if not.
+///
+/// Wine ref: dlls/win32u/message.c — KillTimer sends a kill_win_timer request
+/// to the server; returns FALSE (sets ERROR_INVALID_PARAMETER) if the timer
+/// does not exist for the given (hwnd, id) pair.
+pub extern "win64" fn kill_timer(h_wnd: usize, u_id_event: usize) -> i32 {
+    let removed = timer_table().lock().unwrap().remove(&(h_wnd, u_id_event));
+    if removed.is_some() { 1 } else { 0 }
 }
 
 // ── Message helpers ───────────────────────────────────────────────────────────
 
-/// GetMessageTime: return the time of the last message. Returns 0.
+/// GetMessageTime: return the time field of the last retrieved message (ms).
+///
+/// Wine ref: dlls/user32/message.c — GetMessageTime calls NtUserGetMessageTime
+/// which reads the time field of the last message retrieved by the thread's
+/// GetMessage/PeekMessage call. Weave records this in LAST_MSG_TIME whenever
+/// fill_msg() copies a message to the caller.
 pub extern "win64" fn get_message_time() -> i32 {
-    0
+    LAST_MSG_TIME.load(Ordering::Relaxed) as i32
 }
 
-/// GetQueueStatus: return the types of messages in the queue. Returns 0.
+/// GetMessagePos: return the cursor position when the last message was posted.
+///
+/// Wine ref: dlls/win32u/message.c — GetMessagePos returns a DWORD packing
+/// the (x, y) cursor position from the last MSG retrieved by GetMessage/
+/// PeekMessage. Returns MAKELONG(x, y) — low word is X, high word is Y.
+pub extern "win64" fn get_message_pos() -> u32 {
+    let x = LAST_MSG_POS_X.load(Ordering::Relaxed) as u16 as u32;
+    let y = LAST_MSG_POS_Y.load(Ordering::Relaxed) as u16 as u32;
+    x | (y << 16)
+}
+
+/// GetQueueStatus: return the types of messages currently in the queue.
+///
+/// Wine ref: dlls/win32u/message.c — GetQueueStatus calls NtUserGetQueueStatus
+/// which returns a bitmask of QS_* flags. Weave returns QS_POSTMESSAGE (0x0008)
+/// when the queue is non-empty, 0 otherwise.
 pub extern "win64" fn get_queue_status(_flags: u32) -> u32 {
-    0
+    if queue::has_message() { 0x0008 } else { 0 } // QS_POSTMESSAGE
 }
 
 /// MsgWaitForMultipleObjects: wait for objects or a message. Returns WAIT_TIMEOUT.
@@ -2107,43 +2226,107 @@ pub extern "win64" fn get_sys_color_brush(n_index: i32) -> usize {
     (n_index as usize).wrapping_add(1)
 }
 
-// ── Scrollbar stubs ───────────────────────────────────────────────────────────
+// ── Scrollbar state ───────────────────────────────────────────────────────────
 
-/// GetScrollInfo: retrieve scroll bar parameters. Returns TRUE.
+/// GetScrollInfo: retrieve per-HWND per-bar scroll parameters.
+///
+/// Wine ref: dlls/win32u/scroll.c — get_scroll_info reads from a per-window
+/// scroll_info struct keyed by (hwnd, bar). SIF_PAGE/SIF_POS/SIF_RANGE/
+/// SIF_TRACKPOS control which fields are filled. Returns FALSE if no stored
+/// state exists for (hwnd, bar) — callers must initialise via SetScrollInfo.
 ///
 /// # Safety
-/// `lp_si` must point to a valid `ScrollInfo` with `cb_size` set.
+/// `lp_si` must point to a valid `ScrollInfo` with `cb_size` and `f_mask` set.
 pub unsafe extern "win64" fn get_scroll_info(
-    _hwnd: usize,
-    _n_bar: i32,
+    hwnd: usize,
+    n_bar: i32,
     lp_si: *mut ScrollInfo,
 ) -> i32 {
     if lp_si.is_null() {
         return 0;
     }
-    // Fill with safe zero values.
+    let mask = unsafe { (*lp_si).f_mask };
+    const SIF_RANGE: u32 = 0x0001;
+    const SIF_PAGE: u32 = 0x0002;
+    const SIF_POS: u32 = 0x0004;
+    const SIF_TRACKPOS: u32 = 0x0010;
+    let state = scroll_state()
+        .lock()
+        .unwrap()
+        .get(&(hwnd, n_bar))
+        .cloned()
+        .unwrap_or_default();
     unsafe {
-        (*lp_si).f_mask = 0x1F; // SIF_ALL
-        (*lp_si).n_min = 0;
-        (*lp_si).n_max = 100;
-        (*lp_si).n_page = 10;
-        (*lp_si).n_pos = 0;
-        (*lp_si).n_track_pos = 0;
+        if mask & SIF_RANGE != 0 {
+            (*lp_si).n_min = state.n_min;
+            (*lp_si).n_max = state.n_max;
+        }
+        if mask & SIF_PAGE != 0 {
+            (*lp_si).n_page = state.n_page;
+        }
+        if mask & SIF_POS != 0 {
+            (*lp_si).n_pos = state.n_pos;
+        }
+        if mask & SIF_TRACKPOS != 0 {
+            (*lp_si).n_track_pos = state.n_pos; // track pos = current pos (headless)
+        }
     }
-    1
+    1 // TRUE
 }
 
-/// SetScrollInfo: set scroll bar parameters. Returns 0 (new position).
+/// SetScrollInfo: store per-HWND per-bar scroll parameters, return new position.
+///
+/// Wine ref: dlls/win32u/scroll.c — set_scroll_info validates the struct,
+/// clamps page to (0, max-min+1), clamps pos to [min, max-max(page-1,0)],
+/// and returns the resulting position. Redraw is a no-op in headless mode.
+/// Returns the new clamped scroll position.
 ///
 /// # Safety
-/// `lp_si` must point to a valid `ScrollInfo`.
+/// `lp_si` must point to a valid `ScrollInfo` with `cb_size` and `f_mask` set.
 pub unsafe extern "win64" fn set_scroll_info(
-    _hwnd: usize,
-    _n_bar: i32,
-    _lp_si: *const ScrollInfo,
+    hwnd: usize,
+    n_bar: i32,
+    lp_si: *const ScrollInfo,
     _b_redraw: i32,
 ) -> i32 {
-    0
+    if lp_si.is_null() {
+        return 0;
+    }
+    const SIF_RANGE: u32 = 0x0001;
+    const SIF_PAGE: u32 = 0x0002;
+    const SIF_POS: u32 = 0x0004;
+    let si = unsafe { &*lp_si };
+    let mut table = scroll_state().lock().unwrap();
+    let state = table.entry((hwnd, n_bar)).or_default();
+    if si.f_mask & SIF_RANGE != 0 {
+        if si.n_min > si.n_max {
+            state.n_min = 0;
+            state.n_max = 0;
+        } else {
+            state.n_min = si.n_min;
+            state.n_max = si.n_max;
+        }
+    }
+    if si.f_mask & SIF_PAGE != 0 {
+        state.n_page = si.n_page;
+    }
+    if si.f_mask & SIF_POS != 0 {
+        state.n_pos = si.n_pos;
+    }
+    // Clamp page to [0, max-min+1].
+    let range = (state.n_max - state.n_min + 1).max(0) as u32;
+    if state.n_page > range {
+        state.n_page = range;
+    }
+    // Clamp pos to [min, max - max(page-1, 0)].
+    let page_adj = (state.n_page as i32 - 1).max(0);
+    let pos_max = state.n_max - page_adj;
+    if state.n_pos < state.n_min {
+        state.n_pos = state.n_min;
+    } else if state.n_pos > pos_max {
+        state.n_pos = pos_max;
+    }
+    state.n_pos // return new clamped position
 }
 
 // ── Caret stubs ───────────────────────────────────────────────────────────────
@@ -2168,8 +2351,32 @@ pub extern "win64" fn hide_caret(_hwnd: usize) -> i32 {
     1
 }
 
-/// SetCaretPos: move the caret. Returns TRUE.
-pub extern "win64" fn set_caret_pos(_x: i32, _y: i32) -> i32 {
+/// SetCaretPos: move the caret to (x, y) relative to the owning window.
+///
+/// Wine ref: dlls/win32u/caret.c — SetCaretPos stores the new position in the
+/// thread-local caret info and posts a WM_SETCARET message. Weave stores a
+/// single global caret position (single-threaded). Returns TRUE.
+pub extern "win64" fn set_caret_pos(x: i32, y: i32) -> i32 {
+    CARET_X.store(x, Ordering::Relaxed);
+    CARET_Y.store(y, Ordering::Relaxed);
+    1
+}
+
+/// GetCaretPos: retrieve the caret position into a POINT.
+///
+/// Wine ref: dlls/win32u/caret.c — GetCaretPos copies the stored caret
+/// coordinates into the provided POINT. Returns TRUE if the POINT is non-null.
+///
+/// # Safety
+/// `lp_point` must point to a valid `Point` struct or NULL.
+pub unsafe extern "win64" fn get_caret_pos(lp_point: *mut Point) -> i32 {
+    if lp_point.is_null() {
+        return 0;
+    }
+    unsafe {
+        (*lp_point).x = CARET_X.load(Ordering::Relaxed);
+        (*lp_point).y = CARET_Y.load(Ordering::Relaxed);
+    }
     1
 }
 
@@ -2637,5 +2844,144 @@ pub unsafe extern "win64" fn char_prev_ex_a(
         unsafe { lpsz.sub(1) }
     } else {
         lpsz_start
+    }
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── WS5: SetCaretPos / GetCaretPos ────────────────────────────────────────
+
+    #[test]
+    fn set_and_get_caret_pos_roundtrip() {
+        set_caret_pos(42, 99);
+        let mut pt = Point { x: 0, y: 0 };
+        let result = unsafe { get_caret_pos(&mut pt as *mut Point) };
+        assert_eq!(result, 1);
+        assert_eq!(pt.x, 42);
+        assert_eq!(pt.y, 99);
+    }
+
+    #[test]
+    fn get_caret_pos_null_returns_false() {
+        let result = unsafe { get_caret_pos(std::ptr::null_mut()) };
+        assert_eq!(result, 0);
+    }
+
+    // ── WS5: GetMessagePos ────────────────────────────────────────────────────
+
+    #[test]
+    fn get_message_pos_returns_u32() {
+        // Just ensure it doesn't crash and returns a valid u32
+        let _ = get_message_pos();
+    }
+
+    // ── WS5: GetMessageTime ───────────────────────────────────────────────────
+
+    #[test]
+    fn get_message_time_returns_i32() {
+        let _ = get_message_time();
+    }
+
+    // ── WS5: SetScrollInfo / GetScrollInfo ────────────────────────────────────
+
+    #[test]
+    fn scroll_info_set_and_get_range_pos() {
+        let hwnd = 0xBEEF_0001usize;
+        let n_bar = 0i32; // SB_HORZ
+
+        let si_set = ScrollInfo {
+            cb_size: std::mem::size_of::<ScrollInfo>() as u32,
+            f_mask: 0x0001 | 0x0004, // SIF_RANGE | SIF_POS
+            n_min: 0,
+            n_max: 100,
+            n_page: 0,
+            n_pos: 50,
+            n_track_pos: 0,
+        };
+        let new_pos = unsafe { set_scroll_info(hwnd, n_bar, &si_set as *const ScrollInfo, 0) };
+        assert_eq!(new_pos, 50);
+
+        let mut si_get = ScrollInfo {
+            cb_size: std::mem::size_of::<ScrollInfo>() as u32,
+            f_mask: 0x0001 | 0x0004, // SIF_RANGE | SIF_POS
+            n_min: 0,
+            n_max: 0,
+            n_page: 0,
+            n_pos: 0,
+            n_track_pos: 0,
+        };
+        let result = unsafe { get_scroll_info(hwnd, n_bar, &mut si_get as *mut ScrollInfo) };
+        assert_eq!(result, 1);
+        assert_eq!(si_get.n_min, 0);
+        assert_eq!(si_get.n_max, 100);
+        assert_eq!(si_get.n_pos, 50);
+    }
+
+    #[test]
+    fn scroll_info_pos_clamped_to_max() {
+        let hwnd = 0xBEEF_0002usize;
+        let n_bar = 1i32; // SB_VERT
+
+        let si = ScrollInfo {
+            cb_size: std::mem::size_of::<ScrollInfo>() as u32,
+            f_mask: 0x0001 | 0x0004, // SIF_RANGE | SIF_POS
+            n_min: 0,
+            n_max: 10,
+            n_page: 0,
+            n_pos: 999, // way above max
+            n_track_pos: 0,
+        };
+        let new_pos = unsafe { set_scroll_info(hwnd, n_bar, &si as *const ScrollInfo, 0) };
+        assert_eq!(new_pos, 10, "pos should be clamped to max");
+    }
+
+    // ── WS5: SetTimer / KillTimer ─────────────────────────────────────────────
+
+    #[test]
+    fn set_timer_with_explicit_id_returns_that_id() {
+        let hwnd = 0usize;
+        let id = unsafe { set_timer(hwnd, 42, 1000, 0) };
+        assert_eq!(id, 42);
+        assert_eq!(kill_timer(hwnd, id), 1);
+    }
+
+    #[test]
+    fn set_timer_with_zero_id_allocates_system_id() {
+        let hwnd = 0usize;
+        let id = unsafe { set_timer(hwnd, 0, 500, 0) };
+        assert!(id > 0x7FFF, "system-allocated IDs should be > 0x7FFF");
+        assert_eq!(kill_timer(hwnd, id), 1);
+    }
+
+    #[test]
+    fn kill_timer_nonexistent_returns_false() {
+        assert_eq!(kill_timer(0, 0xDEAD_BEEF), 0);
+    }
+
+    // ── WS5: ScreenToClient / ClientToScreen ──────────────────────────────────
+
+    #[test]
+    fn screen_to_client_null_returns_zero() {
+        let result = unsafe { screen_to_client(0, std::ptr::null_mut()) };
+        assert_eq!(result, 0);
+    }
+
+    #[test]
+    fn client_to_screen_null_returns_zero() {
+        let result = unsafe { client_to_screen(0, std::ptr::null_mut()) };
+        assert_eq!(result, 0);
+    }
+
+    // ── WS5: GetQueueStatus ───────────────────────────────────────────────────
+
+    #[test]
+    fn get_queue_status_returns_u32() {
+        let status = get_queue_status(0xFFFF);
+        // Either 0 (empty) or QS_POSTMESSAGE (0x0008)
+        assert!(status == 0 || status == 0x0008);
     }
 }

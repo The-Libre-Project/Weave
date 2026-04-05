@@ -708,6 +708,7 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "KillTimer" => Some(kill_timer as *const () as usize),
         // ── Message helpers ───────────────────────────────────────────────
         "GetMessageTime" => Some(get_message_time as *const () as usize),
+        "GetMessagePos" => Some(get_message_pos as *const () as usize),
         "GetQueueStatus" => Some(get_queue_status as *const () as usize),
         "MsgWaitForMultipleObjects" => Some(
             msg_wait_for_multiple_objects as unsafe extern "win64" fn(_, _, _, _, _) -> _
@@ -734,6 +735,9 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "ShowCaret" => Some(show_caret as *const () as usize),
         "HideCaret" => Some(hide_caret as *const () as usize),
         "SetCaretPos" => Some(set_caret_pos as *const () as usize),
+        "GetCaretPos" => {
+            Some(get_caret_pos as unsafe extern "win64" fn(_) -> _ as *const () as usize)
+        }
         "GetCaretBlinkTime" => Some(get_caret_blink_time as *const () as usize),
         // ── Misc ──────────────────────────────────────────────────────────
         "MessageBeep" => Some(message_beep as *const () as usize),

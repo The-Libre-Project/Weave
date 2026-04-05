@@ -78,6 +78,63 @@ where
 /// Remove a DC entry (called from DeleteDC / ReleaseDC).
 pub fn remove(hdc: usize) {
     table().lock().unwrap().remove(&hdc);
+    dc_save_stacks().lock().unwrap().remove(&hdc);
+}
+
+// ── DC save/restore stack ─────────────────────────────────────────────────────
+
+/// Per-HDC stack of saved DC states (pushed by SaveDC, popped by RestoreDC).
+fn dc_save_stacks() -> &'static Mutex<HashMap<usize, Vec<DcState>>> {
+    static S: OnceLock<Mutex<HashMap<usize, Vec<DcState>>>> = OnceLock::new();
+    S.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// SaveDC: push the current state onto the per-HDC stack.
+///
+/// Wine ref: dlls/win32u/dc.c — NtGdiSaveDC clones the DC object and pushes
+/// it onto an internal save-state list; the save level is incremented and
+/// returned (1 = first save). Returns 0 on failure.
+pub fn save(hdc: usize) -> i32 {
+    // Capture current state (or default if none exists yet).
+    let current = {
+        let t = table().lock().unwrap();
+        t.get(&hdc).cloned().unwrap_or_else(|| DcState::default_for(hdc))
+    };
+    let mut stacks = dc_save_stacks().lock().unwrap();
+    let stack = stacks.entry(hdc).or_default();
+    stack.push(current);
+    stack.len() as i32 // save level is 1-based depth
+}
+
+/// RestoreDC: pop the stack to the given level and restore that state.
+///
+/// Wine ref: dlls/win32u/dc.c — NtGdiRestoreDC accepts a positive save level
+/// (absolute) or a negative value (relative: -1 = most recent). All states
+/// more recent than the target are discarded. Returns TRUE on success.
+pub fn restore(hdc: usize, level: i32) -> i32 {
+    let mut stacks = dc_save_stacks().lock().unwrap();
+    let stack = match stacks.get_mut(&hdc) {
+        Some(s) if !s.is_empty() => s,
+        _ => return 0,
+    };
+    let depth = stack.len() as i32;
+    let target = if level < 0 {
+        // -1 = most recent, -2 = one before that, etc.
+        depth + level
+    } else {
+        level - 1 // 1-based → 0-based index
+    };
+    if target < 0 || target >= depth {
+        return 0;
+    }
+    let target_idx = target as usize;
+    // Restore to that state and discard everything more recent.
+    let saved = stack[target_idx].clone();
+    stack.truncate(target_idx); // pop target and everything above it
+    drop(stacks);
+    // Write the restored state into the active DC table.
+    with_mut(hdc, |dc| *dc = saved);
+    1
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -158,5 +215,63 @@ mod tests {
         assert_eq!(with(hdc_b, |dc| dc.text_color), 0x00FF_0000);
         remove(hdc_a);
         remove(hdc_b);
+    }
+
+    // ── WS5: SaveDC / RestoreDC ───────────────────────────────────────────────
+
+    #[test]
+    fn save_returns_one_based_level() {
+        let hdc = TEST_HDC_BASE + 10;
+        assert_eq!(save(hdc), 1);
+        assert_eq!(save(hdc), 2);
+        assert_eq!(save(hdc), 3);
+        remove(hdc);
+    }
+
+    #[test]
+    fn restore_absolute_level_restores_state() {
+        let hdc = TEST_HDC_BASE + 11;
+        with_mut(hdc, |dc| dc.text_color = 0x0000_00FF);
+        save(hdc); // level 1 — saved color is blue
+        with_mut(hdc, |dc| dc.text_color = 0x00FF_0000); // change to red
+        save(hdc); // level 2 — saved color is red
+        with_mut(hdc, |dc| dc.text_color = 0x0000_FF00); // change to green
+
+        // Restore to absolute level 1 — should get blue back
+        let ok = restore(hdc, 1);
+        assert_eq!(ok, 1);
+        let color = with(hdc, |dc| dc.text_color);
+        assert_eq!(color, 0x0000_00FF, "expected blue after restoring to level 1");
+        remove(hdc);
+    }
+
+    #[test]
+    fn restore_relative_minus_one_restores_most_recent() {
+        let hdc = TEST_HDC_BASE + 12;
+        with_mut(hdc, |dc| dc.text_color = 0x0000_00FF);
+        save(hdc); // level 1
+        with_mut(hdc, |dc| dc.text_color = 0x00FF_0000); // change to red
+
+        let ok = restore(hdc, -1); // most recent = level 1
+        assert_eq!(ok, 1);
+        assert_eq!(with(hdc, |dc| dc.text_color), 0x0000_00FF);
+        remove(hdc);
+    }
+
+    #[test]
+    fn restore_empty_stack_returns_zero() {
+        let hdc = TEST_HDC_BASE + 13;
+        assert_eq!(restore(hdc, 1), 0);
+        assert_eq!(restore(hdc, -1), 0);
+        remove(hdc);
+    }
+
+    #[test]
+    fn restore_out_of_range_level_returns_zero() {
+        let hdc = TEST_HDC_BASE + 14;
+        save(hdc); // level 1
+        assert_eq!(restore(hdc, 5), 0, "level 5 > depth 1 should fail");
+        assert_eq!(restore(hdc, -5), 0, "level -5 beyond depth should fail");
+        remove(hdc);
     }
 }

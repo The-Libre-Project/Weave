@@ -20,6 +20,7 @@ use std::sync::Mutex;
 /// same address can be legally freed again after a re-allocation.
 static LAST_HEAP_FREE: AtomicUsize = AtomicUsize::new(0);
 
+use weave_common::stub::warn_once;
 use weave_common::{STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE};
 use weave_core::{file_io, handles};
 
@@ -1379,15 +1380,14 @@ pub unsafe extern "win64" fn local_re_alloc(
 
 /// HeapCreate: create a heap and return a fake handle.
 ///
-/// Weave uses a single process heap (libc allocator). Return a fake but
-/// consistent handle value so callers can pass it back. Use `1usize` as the
-/// "process heap" sentinel. Ignore all parameters.
+/// Wine ref: dlls/kernelbase/memory.c — HeapCreate calls RtlCreateHeap;
+/// Weave uses a single libc allocator so we return a fake but consistent
+/// handle (1 = process heap sentinel). Parameters are ignored.
 pub extern "win64" fn heap_create(
     _fl_options: u32,
     _dw_initial_size: usize,
     _dw_maximum_size: usize,
 ) -> usize {
-    eprintln!("weave: stub: HeapCreate");
     1usize // fake process heap handle
 }
 
@@ -3770,17 +3770,47 @@ pub unsafe extern "win64" fn copy_file_ex_w(
     unsafe { copy_file_w(lp_existing_file_name, lp_new_file_name, 0) }
 }
 
-/// GetCompressedFileSizeW — return the compressed size of a file.
+/// GetCompressedFileSizeW — return the on-disk size of a file.
 ///
-/// Returns INVALID_FILE_SIZE (0xFFFFFFFF) — stub, compression not supported.
+/// Wine ref: dlls/kernelbase/file.c — GetCompressedFileSizeW calls
+/// NtQueryInformationFile(FileCompressionInformation) to get the compressed
+/// size. Linux filesystems don't support NTFS compression, so we return the
+/// actual file size via stat(). The high 32 bits are written to
+/// lp_file_size_high if non-null. Returns INVALID_FILE_SIZE on error.
 ///
 /// # Safety
-/// `lp_file_name` must be a valid null-terminated UTF-16 string.
+/// `lp_file_name` must be a valid null-terminated UTF-16 string or NULL.
+/// `lp_file_size_high` must be a writable u32 pointer or NULL.
 pub unsafe extern "win64" fn get_compressed_file_size_w(
-    _lp_file_name: *const u16,
-    _lp_file_size_high: *mut u32,
+    lp_file_name: *const u16,
+    lp_file_size_high: *mut u32,
 ) -> u32 {
-    0xFFFF_FFFF // INVALID_FILE_SIZE
+    if lp_file_name.is_null() {
+        return 0xFFFF_FFFF;
+    }
+    let mut len = 0usize;
+    while len < MAX_UTF16_LEN && unsafe { *lp_file_name.add(len) } != 0 {
+        len += 1;
+    }
+    let wide = unsafe { std::slice::from_raw_parts(lp_file_name, len) };
+    let s = String::from_utf16_lossy(wide);
+    let linux_path = weave_core::prefix::translator()
+        .to_linux_str(&s)
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| s.clone());
+    let cstr = match std::ffi::CString::new(linux_path.as_bytes()) {
+        Ok(c) => c,
+        Err(_) => return 0xFFFF_FFFF,
+    };
+    let mut st: libc::stat64 = unsafe { std::mem::zeroed() };
+    if unsafe { libc::stat64(cstr.as_ptr(), &mut st) } != 0 {
+        return 0xFFFF_FFFF;
+    }
+    let size = st.st_size as u64;
+    if !lp_file_size_high.is_null() {
+        unsafe { *lp_file_size_high = (size >> 32) as u32 };
+    }
+    (size & 0xFFFF_FFFF) as u32
 }
 
 /// CreateHardLinkW — create a hard link (Wide). Returns FALSE.
@@ -3867,31 +3897,96 @@ pub unsafe extern "win64" fn file_time_to_dos_date_time(
 /// Reports 16 GB physical RAM, 8 GB free.
 ///
 /// # Safety
+/// GlobalMemoryStatusEx — fill MEMORYSTATUSEX from /proc/meminfo.
+///
+/// Wine ref: dlls/kernelbase/memory.c — GlobalMemoryStatusEx calls
+/// NtQuerySystemInformation(SystemBasicInformation + SystemPerformanceInformation)
+/// to read page counts and page size. On Linux we parse /proc/meminfo directly,
+/// reading MemTotal and MemAvailable (in kB). Page file is approximated from
+/// SwapTotal/SwapFree. Virtual address space is fixed at 128 TB (x86-64 user).
+///
+/// MEMORYSTATUSEX layout (all u64 fields after the u32 dwLength at +0):
+///   +0  u32 dwLength   (must be 64 — validated by caller before calling us)
+///   +4  u32 dwMemoryLoad
+///   +8  u64 ullTotalPhys
+///   +16 u64 ullAvailPhys
+///   +24 u64 ullTotalPageFile
+///   +32 u64 ullAvailPageFile
+///   +40 u64 ullTotalVirtual
+///   +48 u64 ullAvailVirtual
+///   +56 u64 ullAvailExtendedVirtual
+///
+/// # Safety
 /// `lp_buffer` must be a writable MEMORYSTATUSEX (64 bytes, first DWORD = dwLength).
 pub unsafe extern "win64" fn global_memory_status_ex(lp_buffer: *mut u8) -> i32 {
     if lp_buffer.is_null() {
         return 0;
     }
+    const KB: u64 = 1024;
     const GB: u64 = 1024 * 1024 * 1024;
+    // Defaults in case /proc/meminfo is unreadable.
+    let mut total_phys: u64 = 8 * GB;
+    let mut avail_phys: u64 = 4 * GB;
+    let mut total_swap: u64 = 0;
+    let mut avail_swap: u64 = 0;
+    // Parse /proc/meminfo for real values.
+    if let Ok(contents) = std::fs::read_to_string("/proc/meminfo") {
+        for line in contents.lines() {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() >= 2 {
+                let val: u64 = parts[1].parse().unwrap_or(0) * KB;
+                match parts[0] {
+                    "MemTotal:" => total_phys = val,
+                    "MemAvailable:" => avail_phys = val,
+                    "SwapTotal:" => total_swap = val,
+                    "SwapFree:" => avail_swap = val,
+                    _ => {}
+                }
+            }
+        }
+    }
+    let memory_load: u32 = if total_phys > 0 {
+        ((total_phys - avail_phys) / (total_phys / 100)) as u32
+    } else {
+        50
+    };
     unsafe {
-        *(lp_buffer.add(4) as *mut u32) = 50; // 50% memory load
-        *(lp_buffer.add(8) as *mut u64) = 16 * GB; // 16 GB total
-        *(lp_buffer.add(16) as *mut u64) = 8 * GB; // 8 GB free
-        *(lp_buffer.add(24) as *mut u64) = 32 * GB; // 32 GB page file
-        *(lp_buffer.add(32) as *mut u64) = 24 * GB; // 24 GB avail page file
-        *(lp_buffer.add(40) as *mut u64) = 0x0000_7FFF_0000_0000u64; // total virtual
-        *(lp_buffer.add(48) as *mut u64) = 0x0000_7FFE_0000_0000u64; // avail virtual
-        *(lp_buffer.add(56) as *mut u64) = 0; // extended virtual
+        *(lp_buffer.add(4) as *mut u32) = memory_load;
+        *(lp_buffer.add(8) as *mut u64) = total_phys;
+        *(lp_buffer.add(16) as *mut u64) = avail_phys;
+        *(lp_buffer.add(24) as *mut u64) = total_phys + total_swap;
+        *(lp_buffer.add(32) as *mut u64) = avail_phys + avail_swap;
+        *(lp_buffer.add(40) as *mut u64) = 0x0000_7FFF_0000_0000u64; // 128 TB user VA
+        *(lp_buffer.add(48) as *mut u64) = 0x0000_7FFE_0000_0000u64; // approx avail VA
+        *(lp_buffer.add(56) as *mut u64) = 0;
     }
     1 // TRUE
 }
 
-/// SetPriorityClass — set the priority class of a process. Returns TRUE.
+/// SetPriorityClass — map a Windows priority class to a Linux nice value.
+///
+/// Wine ref: dlls/kernelbase/process.c — SetPriorityClass maps the Windows
+/// priority class to an NT priority value via NtSetInformationProcess. On
+/// Linux we map to setpriority(PRIO_PROCESS). Windows classes: IDLE=0x40 →
+/// nice 15, BELOW_NORMAL=0x4000 → nice 10, NORMAL=0x20 → nice 0,
+/// ABOVE_NORMAL=0x8000 → nice -5, HIGH=0x80 → nice -10. REALTIME is
+/// silently clamped to HIGH (requires CAP_SYS_NICE we don't have).
 ///
 /// # Safety
-/// No pointer dereferences.
-pub unsafe extern "win64" fn set_priority_class(_h_process: usize, _dw_priority_class: u32) -> i32 {
-    1 // TRUE — pretend it succeeded
+/// No pointer dereferences. h_process is the current process sentinel.
+pub unsafe extern "win64" fn set_priority_class(_h_process: usize, dw_priority_class: u32) -> i32 {
+    let nice: libc::c_int = match dw_priority_class {
+        0x00000040 => 15, // IDLE_PRIORITY_CLASS
+        0x00004000 => 10, // BELOW_NORMAL_PRIORITY_CLASS
+        0x00000020 => 0,  // NORMAL_PRIORITY_CLASS
+        0x00008000 => -5, // ABOVE_NORMAL_PRIORITY_CLASS
+        0x00000080 => -10, // HIGH_PRIORITY_CLASS
+        0x00000100 => -10, // REALTIME_PRIORITY_CLASS → clamped to HIGH
+        _ => return 1,    // Unknown class — silently succeed
+    };
+    // Ignore errors (may lack permissions); always return TRUE.
+    unsafe { libc::setpriority(libc::PRIO_PROCESS, 0, nice) };
+    1 // TRUE
 }
 
 // ── Change notifications ──────────────────────────────────────────────────────
@@ -4101,16 +4196,25 @@ pub extern "win64" fn get_current_thread() -> usize {
     usize::MAX - 1
 }
 
-/// GetCurrentProcessId / GetCurrentThreadId — return plausible fake IDs.
+/// GetCurrentProcessId — returns the Linux PID (matches Windows behaviour).
+///
+/// Wine ref: include/winbase.h — GetCurrentProcessId reads from the TEB
+/// process ID field, which the kernel fills with the PID. On Linux we call
+/// getpid() directly; the value is identical to what Windows would return
+/// for single-process guests.
 pub extern "win64" fn get_current_process_id() -> u32 {
-    eprintln!("weave: stub: GetCurrentProcessId");
     unsafe { libc::getpid() as u32 }
 }
 
-/// GetCurrentThreadId — single-threaded stub, returns 1.
+/// GetCurrentThreadId — returns the Linux thread ID (TID).
+///
+/// Wine ref: include/winbase.h — GetCurrentThreadId reads handle slot [9]
+/// from NtCurrentTeb(), which stores the thread ID. On Linux we use
+/// gettid() (SYS_gettid syscall). For the main thread this equals the PID;
+/// for any spawned threads it is unique — matches the Windows semantics.
 pub extern "win64" fn get_current_thread_id() -> u32 {
-    eprintln!("weave: stub: GetCurrentThreadId");
-    1 // single-threaded stub
+    // SAFETY: SYS_gettid takes no arguments and never fails.
+    unsafe { libc::syscall(libc::SYS_gettid) as u32 }
 }
 
 // ── Timing ────────────────────────────────────────────────────────────────────
@@ -4132,10 +4236,14 @@ pub extern "win64" fn get_tick_count_64() -> u64 {
 
 /// QueryPerformanceCounter — returns nanoseconds from CLOCK_MONOTONIC.
 ///
+/// Wine ref: dlls/ntdll/time.c — RtlQueryPerformanceCounter calls
+/// NtQueryPerformanceCounter; Wine reports 100-ns resolution (10 MHz).
+/// Weave reports 1-ns resolution (1 GHz) via CLOCK_MONOTONIC, matching
+/// QueryPerformanceFrequency which returns 1_000_000_000.
+///
 /// # Safety
 /// `lp_performance_count` must be a valid writable pointer or NULL.
 pub unsafe extern "win64" fn query_performance_counter(lp_performance_count: *mut u64) -> i32 {
-    eprintln!("weave: stub: QueryPerformanceCounter enter");
     let mut ts = libc::timespec {
         tv_sec: 0,
         tv_nsec: 0,
@@ -4146,7 +4254,6 @@ pub unsafe extern "win64" fn query_performance_counter(lp_performance_count: *mu
             *lp_performance_count = ts.tv_sec as u64 * 1_000_000_000 + ts.tv_nsec as u64;
         }
     }
-    eprintln!("weave: stub: QueryPerformanceCounter exit");
     1 // TRUE
 }
 
@@ -4165,10 +4272,14 @@ pub unsafe extern "win64" fn query_performance_frequency(lp_frequency: *mut u64)
 
 /// GetSystemTimeAsFileTime — fills FILETIME from CLOCK_REALTIME.
 ///
+/// Wine ref: dlls/kernelbase/file.c — GetSystemTimeAsFileTime delegates to
+/// NtQuerySystemTime which reads CLOCK_REALTIME and converts to 100-ns
+/// intervals since 1601-01-01. The 116_444_736_000_000_000 offset covers
+/// the 11644473600-second gap between 1601 and 1970 epochs.
+///
 /// # Safety
 /// `lp_system_time_as_file_time` must be a valid writable pointer or NULL.
 pub unsafe extern "win64" fn get_system_time_as_file_time(lp_system_time_as_file_time: *mut u64) {
-    eprintln!("weave: stub: GetSystemTimeAsFileTime");
     // FILETIME is 100-nanosecond intervals since 1601-01-01
     // Offset between 1601 and Unix epoch (1970) = 11644473600 seconds
     let mut ts = libc::timespec {
@@ -4202,7 +4313,13 @@ pub struct SystemInfo {
     processor_revision: u16,
 }
 
-/// GetSystemInfo — fills a SYSTEM_INFO with AMD64 defaults.
+/// GetSystemInfo — fills a SYSTEM_INFO with real CPU count from nprocs.
+///
+/// Wine ref: dlls/kernelbase/process.c — GetSystemInfo calls
+/// NtQuerySystemInformation(SystemBasicInformation) which the kernel fills
+/// from the actual hardware. On Linux we read the CPU count via
+/// libc::get_nprocs() and build an active_processor_mask accordingly.
+/// page_size is read from sysconf(_SC_PAGESIZE); other fields are AMD64 constants.
 ///
 /// # Safety
 /// `lp_system_info` must be a valid writable pointer or NULL.
@@ -4211,15 +4328,23 @@ pub unsafe extern "win64" fn get_system_info(lp_system_info: *mut SystemInfo) {
         if lp_system_info.is_null() {
             return;
         }
+        let nprocs = libc::sysconf(libc::_SC_NPROCESSORS_ONLN) as u32;
+        let nprocs = nprocs.max(1).min(64); // clamp: mask is 64-bit
+        let page_size = libc::sysconf(libc::_SC_PAGESIZE) as u32;
+        let active_mask: usize = if nprocs >= 64 {
+            usize::MAX
+        } else {
+            (1usize << nprocs) - 1
+        };
         (*lp_system_info) = SystemInfo {
             processor_architecture: 9, // PROCESSOR_ARCHITECTURE_AMD64
             reserved: 0,
-            page_size: 4096,
+            page_size,
             minimum_application_address: 0x10000,
             maximum_application_address: 0x7FFF_FFFF_FFFF,
-            active_processor_mask: 1,
-            number_of_processors: 1,
-            processor_type: 8664, // Intel64
+            active_processor_mask: active_mask,
+            number_of_processors: nprocs,
+            processor_type: 8664, // Intel64 / AMD64
             allocation_granularity: 65536,
             processor_level: 6,
             processor_revision: 0,
@@ -4273,6 +4398,7 @@ pub unsafe extern "win64" fn create_event_a(
     _b_initial_state: i32,
     _lp_name: *const u8,
 ) -> usize {
+    warn_once("CreateEventA");
     2 // fake non-null handle (distinct from mutex handle 1)
 }
 
@@ -4289,6 +4415,7 @@ pub unsafe extern "win64" fn create_event_w(
     _b_initial_state: i32,
     _lp_name: *const u16,
 ) -> usize {
+    warn_once("CreateEventW");
     2 // fake non-null handle (distinct from mutex handle 1)
 }
 
@@ -4303,6 +4430,7 @@ pub unsafe extern "win64" fn open_event_a(
     _b_inherit_handle: i32,
     _lp_name: *const u8,
 ) -> usize {
+    warn_once("OpenEventA");
     2 // fake non-null handle
 }
 
@@ -4317,15 +4445,18 @@ pub unsafe extern "win64" fn open_event_w(
     _b_inherit_handle: i32,
     _lp_name: *const u16,
 ) -> usize {
+    warn_once("OpenEventW");
     2 // fake non-null handle
 }
 
 /// SetEvent — no-op stub, returns TRUE.
 pub extern "win64" fn set_event(_h_event: usize) -> i32 {
+    warn_once("SetEvent");
     1
 }
 /// ResetEvent — no-op stub, returns TRUE.
 pub extern "win64" fn reset_event(_h_event: usize) -> i32 {
+    warn_once("ResetEvent");
     1
 }
 
@@ -4339,6 +4470,7 @@ pub unsafe extern "win64" fn create_semaphore_a(
     _l_maximum_count: i32,
     _lp_name: *const u8,
 ) -> usize {
+    warn_once("CreateSemaphoreA");
     1 // fake handle
 }
 /// ReleaseSemaphore — no-op stub, returns TRUE.
@@ -4347,6 +4479,7 @@ pub extern "win64" fn release_semaphore(
     _l_release_count: i32,
     _lp_previous_count: *mut i32,
 ) -> i32 {
+    warn_once("ReleaseSemaphore");
     1
 }
 
@@ -4363,6 +4496,7 @@ pub unsafe extern "win64" fn create_semaphore_w(
     _l_maximum_count: i32,
     _lp_name: *const u16,
 ) -> usize {
+    warn_once("CreateSemaphoreW");
     1 // fake HANDLE
 }
 
@@ -4380,6 +4514,7 @@ pub unsafe extern "win64" fn open_file_mapping_w(
     _b_inherit_handle: i32,
     _lp_name: *const u16,
 ) -> usize {
+    warn_once("OpenFileMappingW");
     0 // NULL — not found
 }
 
@@ -4910,9 +5045,14 @@ pub unsafe extern "win64" fn try_enter_critical_section(_lp_critical_section: *m
     1 // TRUE — always succeeds in single-threaded context
 }
 
-/// SwitchToThread — no-op stub; yields are not meaningful in single-threaded mode.
+/// SwitchToThread — yield the processor to another runnable thread.
+///
+/// Wine ref: dlls/kernelbase/thread.c — SwitchToThread calls NtYieldExecution
+/// and returns TRUE if a context switch occurred. On Linux we call sched_yield()
+/// which returns 0 on success; we always return TRUE (yield succeeded).
 pub extern "win64" fn switch_to_thread() -> i32 {
-    0 // FALSE — no other thread to switch to
+    unsafe { libc::sched_yield() };
+    1 // TRUE — yield succeeded
 }
 /// WaitForMultipleObjects — returns WAIT_OBJECT_0 if any handle is fake.
 ///
@@ -5049,6 +5189,7 @@ pub unsafe extern "win64" fn create_mutex_ex_w(
 }
 /// ReleaseMutex — no-op stub, returns TRUE.
 pub extern "win64" fn release_mutex(_h_mutex: usize) -> i32 {
+    warn_once("ReleaseMutex");
     1
 }
 
@@ -5434,16 +5575,64 @@ pub unsafe extern "win64" fn get_current_directory_a(
 ///
 /// # Safety
 /// Pointer argument is accepted but not dereferenced.
-pub unsafe extern "win64" fn set_current_directory_w(_lp_path_name: *const u16) -> i32 {
-    1 // TRUE
-}
-
-/// SetCurrentDirectoryA — no-op, returns TRUE.
+/// SetCurrentDirectoryW — change the current working directory (Wide).
+///
+/// Wine ref: dlls/kernelbase/file.c — SetCurrentDirectoryW calls
+/// RtlSetCurrentDirectory_U which calls NtSetInformationProcess with the
+/// NT path. Weave translates the wide Windows path to a Linux path via
+/// weave_core::prefix and calls chdir(2). Returns FALSE on error.
 ///
 /// # Safety
-/// Pointer argument is accepted but not dereferenced.
-pub unsafe extern "win64" fn set_current_directory_a(_lp_path_name: *const u8) -> i32 {
-    1 // TRUE
+/// `lp_path_name` must be a valid null-terminated UTF-16 string or NULL.
+pub unsafe extern "win64" fn set_current_directory_w(lp_path_name: *const u16) -> i32 {
+    if lp_path_name.is_null() {
+        return 0; // FALSE
+    }
+    // Decode wide string, capped to avoid runaway reads.
+    let mut len = 0usize;
+    while len < MAX_UTF16_LEN && unsafe { *lp_path_name.add(len) } != 0 {
+        len += 1;
+    }
+    let wide = unsafe { std::slice::from_raw_parts(lp_path_name, len) };
+    let s = String::from_utf16_lossy(wide);
+    // Translate Windows path (may start with Z:\...) to Linux path.
+    let linux_path = weave_core::prefix::translator()
+        .to_linux_str(&s)
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| s.clone());
+    let cstr = match std::ffi::CString::new(linux_path.as_bytes()) {
+        Ok(c) => c,
+        Err(_) => return 0,
+    };
+    let rc = unsafe { libc::chdir(cstr.as_ptr()) };
+    if rc == 0 { 1 } else { 0 } // TRUE / FALSE
+}
+
+/// SetCurrentDirectoryA — change the current working directory (ANSI).
+///
+/// Wine ref: dlls/kernelbase/file.c — SetCurrentDirectoryA converts to wide
+/// then calls SetCurrentDirectoryW.  Weave does the same: convert ANSI to
+/// UTF-8 (which is valid for ASCII-only paths) and call chdir(2) directly.
+///
+/// # Safety
+/// `lp_path_name` must be a valid null-terminated ANSI string or NULL.
+pub unsafe extern "win64" fn set_current_directory_a(lp_path_name: *const u8) -> i32 {
+    if lp_path_name.is_null() {
+        return 0;
+    }
+    let s = unsafe { std::ffi::CStr::from_ptr(lp_path_name as *const libc::c_char) }
+        .to_string_lossy()
+        .into_owned();
+    let linux_path = weave_core::prefix::translator()
+        .to_linux_str(&s)
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or(s.clone());
+    let cstr = match std::ffi::CString::new(linux_path.as_bytes()) {
+        Ok(c) => c,
+        Err(_) => return 0,
+    };
+    let rc = unsafe { libc::chdir(cstr.as_ptr()) };
+    if rc == 0 { 1 } else { 0 }
 }
 
 // ── Computer name and username ────────────────────────────────────────────────
@@ -6319,10 +6508,14 @@ static mut FLS_USED: [bool; FLS_MAX_SLOTS] = [false; FLS_MAX_SLOTS];
 
 /// FlsAlloc: allocate a fiber local storage slot.
 ///
+/// Wine ref: dlls/kernelbase/thread.c — FlsAlloc scans a bitmap of
+/// FLS_MAXIMUM_AVAILABLE (128) slots, marks the first free one, stores the
+/// destructor callback, and returns the index. Weave uses a flat array of
+/// 128 booleans; the callback is accepted but not invoked (no fiber support).
+///
 /// # Safety
 /// Pointer argument is accepted but not dereferenced.
 pub unsafe extern "win64" fn fls_alloc(_lp_callback: usize) -> u32 {
-    eprintln!("weave: stub: FlsAlloc");
     unsafe {
         for i in 0..FLS_MAX_SLOTS {
             if !FLS_USED[i] {
@@ -6431,14 +6624,46 @@ pub unsafe extern "win64" fn set_thread_stack_guarantee(_stack_size_in_bytes: *m
     1 // TRUE
 }
 
-/// GetTimeZoneInformation: fill TIME_ZONE_INFORMATION struct with UTC info.
+/// GetTimeZoneInformation — fill TIME_ZONE_INFORMATION from the local timezone.
+///
+/// Wine ref: dlls/kernelbase/locale.c — GetTimeZoneInformation calls
+/// RtlQueryTimeZoneInformation which reads from the registry or the system
+/// timezone data. On Linux we use localtime_r() to get the UTC offset and
+/// DST flag, then populate the Windows struct:
+///   +0   i32  Bias (minutes west of UTC; sign is opposite to tm_gmtoff)
+///   +4   [32]u16 StandardName (wide string)
+///   +68  SYSTEMTIME StandardDate (zeroed = not changing)
+///   +84  i32  StandardBias (usually 0)
+///   +88  [32]u16 DaylightName
+///   +152 SYSTEMTIME DaylightDate (zeroed)
+///   +168 i32  DaylightBias (usually -60)
+///
+/// Returns TIME_ZONE_ID_STANDARD (1) or TIME_ZONE_ID_DAYLIGHT (2).
 ///
 /// # Safety
-/// `lp_time_zone_information` must be a valid writable pointer to a TIME_ZONE_INFORMATION.
+/// `lp_time_zone_information` must be a valid writable pointer to a 172-byte struct.
 pub unsafe extern "win64" fn get_time_zone_information(lp_time_zone_information: *mut u8) -> u32 {
-    unsafe { std::ptr::write_bytes(lp_time_zone_information, 0, 172) }; // Zero entire struct
-                                                                        // bias = 0 (UTC)
-    0 // TIME_ZONE_ID_UNKNOWN
+    if lp_time_zone_information.is_null() {
+        return 0xFFFF_FFFF; // error
+    }
+    unsafe { std::ptr::write_bytes(lp_time_zone_information, 0, 172) };
+    // Get the local UTC offset via localtime_r.
+    let mut t: libc::time_t = 0;
+    unsafe { libc::time(&mut t) };
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    unsafe { libc::localtime_r(&t, &mut tm) };
+    // tm_gmtoff is seconds EAST of UTC; Windows Bias is minutes WEST.
+    let bias_minutes: i32 = -(tm.tm_gmtoff as i32) / 60;
+    unsafe { *(lp_time_zone_information.add(0) as *mut i32) = bias_minutes };
+    // StandardBias at offset 84 = 0 (no additional standard offset).
+    unsafe { *(lp_time_zone_information.add(84) as *mut i32) = 0 };
+    // DaylightBias at offset 168 = -60 (1 hour ahead in DST).
+    unsafe { *(lp_time_zone_information.add(168) as *mut i32) = -60i32 };
+    if tm.tm_isdst > 0 {
+        2 // TIME_ZONE_ID_DAYLIGHT
+    } else {
+        1 // TIME_ZONE_ID_STANDARD
+    }
 }
 
 /// GetSystemTime: fill a SYSTEMTIME struct with current UTC time.
@@ -8782,6 +9007,7 @@ pub unsafe extern "win64" fn connect_named_pipe(
     _h_named_pipe: usize,
     _lp_overlapped: usize,
 ) -> i32 {
+    warn_once("ConnectNamedPipe");
     0
 }
 
@@ -8800,6 +9026,7 @@ pub unsafe extern "win64" fn create_named_pipe_a(
     _n_default_timeout: u32,
     _lp_security_attributes: usize,
 ) -> usize {
+    warn_once("CreateNamedPipeA");
     usize::MAX // INVALID_HANDLE_VALUE
 }
 
@@ -8811,6 +9038,7 @@ pub unsafe extern "win64" fn wait_named_pipe_a(
     _lp_named_pipe_name: *const u8,
     _n_timeout_ms: u32,
 ) -> i32 {
+    warn_once("WaitNamedPipeA");
     0
 }
 
@@ -9059,5 +9287,126 @@ mod tests {
         assert_ne!(ptr, 0);
         let result = local_free(ptr);
         assert_eq!(result, 0); // NULL = success
+    }
+
+    // ── WS5: GetCurrentProcessId ──────────────────────────────────────────────
+
+    #[test]
+    fn get_current_process_id_nonzero() {
+        let pid = get_current_process_id();
+        assert_ne!(pid, 0);
+    }
+
+    // ── WS5: GetCurrentThreadId ───────────────────────────────────────────────
+
+    #[test]
+    fn get_current_thread_id_nonzero() {
+        let tid = get_current_thread_id();
+        assert_ne!(tid, 0);
+    }
+
+    // ── WS5: HeapCreate ───────────────────────────────────────────────────────
+
+    #[test]
+    fn heap_create_returns_nonzero() {
+        let h = heap_create(0, 0, 0);
+        assert_ne!(h, 0);
+    }
+
+    // ── WS5: SwitchToThread ───────────────────────────────────────────────────
+
+    #[test]
+    fn switch_to_thread_returns_true() {
+        assert_eq!(switch_to_thread(), 1);
+    }
+
+    // ── WS5: QueryPerformanceCounter ──────────────────────────────────────────
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn query_performance_counter_advances() {
+        let mut a: u64 = 0;
+        let mut b: u64 = 0;
+        unsafe {
+            query_performance_counter(&mut a as *mut u64);
+            query_performance_counter(&mut b as *mut u64);
+        }
+        assert!(b >= a, "counter should be non-decreasing");
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn query_performance_counter_null_safe() {
+        // Should not crash when passed a null pointer
+        let result = unsafe { query_performance_counter(std::ptr::null_mut()) };
+        assert_eq!(result, 1);
+    }
+
+    // ── WS5: GetSystemTimeAsFileTime ──────────────────────────────────────────
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn get_system_time_as_file_time_nonzero() {
+        let mut ft: u64 = 0;
+        unsafe { get_system_time_as_file_time(&mut ft as *mut u64 as *mut u8) };
+        // FILETIME should be well past the Windows epoch (2020-01-01 in FILETIME units)
+        assert!(ft > 132_200_000_000_000_000_u64);
+    }
+
+    // ── WS5: GlobalMemoryStatusEx ─────────────────────────────────────────────
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn global_memory_status_ex_returns_nonzero_total() {
+        // MEMORYSTATUSEX layout: dwLength (u32), dwMemoryLoad (u32),
+        // ullTotalPhys (u64 at +8), ullAvailPhys (u64 at +16), ...
+        let mut buf = [0u8; 64];
+        // write dwLength = 64
+        buf[0..4].copy_from_slice(&64u32.to_ne_bytes());
+        let result = unsafe { global_memory_status_ex(buf.as_mut_ptr()) };
+        assert_eq!(result, 1);
+        let total_phys = u64::from_ne_bytes(buf[8..16].try_into().unwrap());
+        assert_ne!(total_phys, 0, "total physical memory should not be zero");
+    }
+
+    // ── WS5: GetSystemInfo ────────────────────────────────────────────────────
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn get_system_info_nprocs_at_least_one() {
+        let mut si: SystemInfo = unsafe { std::mem::zeroed() };
+        unsafe { get_system_info(&mut si as *mut SystemInfo) };
+        assert!(si.number_of_processors >= 1);
+        assert_ne!(si.page_size, 0);
+    }
+
+    // ── WS5: SetPriorityClass ─────────────────────────────────────────────────
+
+    #[test]
+    fn set_priority_class_normal_returns_true() {
+        const NORMAL_PRIORITY_CLASS: u32 = 0x0000_0020;
+        // Use current process pseudo-handle (usize::MAX = -1 cast)
+        let result = unsafe { set_priority_class(usize::MAX, NORMAL_PRIORITY_CLASS) };
+        assert_eq!(result, 1);
+    }
+
+    // ── WS5: SetCurrentDirectoryW ─────────────────────────────────────────────
+
+    #[test]
+    fn set_current_directory_w_null_returns_false() {
+        let result = unsafe { set_current_directory_w(std::ptr::null()) };
+        assert_eq!(result, 0);
+    }
+
+    // ── WS5: GetTimeZoneInformation ───────────────────────────────────────────
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn get_time_zone_information_returns_valid_code() {
+        let mut buf = [0u8; 172];
+        let result = unsafe { get_time_zone_information(buf.as_mut_ptr()) };
+        // Must return TIME_ZONE_ID_UNKNOWN (0), TIME_ZONE_ID_STANDARD (1),
+        // or TIME_ZONE_ID_DAYLIGHT (2)
+        assert!(result <= 2, "unexpected return code: {result}");
     }
 }
