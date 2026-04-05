@@ -1,0 +1,10 @@
+[package]
+name = "weave-oleaut32"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "OLEAUT32 stubs for Weave — Variant, BSTR, SafeArray support for 7-Zip and COM apps."
+
+[dependencies]
+libc = "0.2"

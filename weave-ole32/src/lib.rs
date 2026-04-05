@@ -420,6 +420,43 @@ pub unsafe extern "win64" fn clsid_from_prog_id(
     REGDB_E_CLASSNOTREG
 }
 
+// ── Drag-and-drop / storage stubs ────────────────────────────────────────────
+
+/// ReleaseStgMedium — release a STGMEDIUM storage medium. No-op stub.
+///
+/// # Safety
+/// `pmedium` is accepted but not dereferenced.
+pub unsafe extern "win64" fn release_stg_medium(_pmedium: *mut u8) {}
+
+/// RegisterDragDrop — register a window as a drag-drop target. Returns E_NOTIMPL.
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn register_drag_drop(_hwnd: usize, _p_drop_target: *mut u8) -> i32 {
+    0x8000_4001u32 as i32 // E_NOTIMPL
+}
+
+/// RevokeDragDrop — revoke a window's drag-drop registration. Returns S_OK.
+///
+/// # Safety
+/// No pointer dereferences.
+pub unsafe extern "win64" fn revoke_drag_drop(_hwnd: usize) -> i32 {
+    0 // S_OK
+}
+
+/// DoDragDrop — initiate a drag-and-drop operation. Returns DRAGDROP_S_CANCEL.
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn do_drag_drop(
+    _p_data_obj: *mut u8,
+    _p_drop_source: *mut u8,
+    _dw_ok_effects: u32,
+    _pdw_effect: *mut u32,
+) -> i32 {
+    0x0004_0101u32 as i32 // DRAGDROP_S_CANCEL
+}
+
 // ── Resolver ──────────────────────────────────────────────────────────────────
 
 /// Resolve a `ole32.dll` or `combase.dll` import to a stub address.
@@ -475,6 +512,18 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         }
         "CLSIDFromProgID" => {
             Some(clsid_from_prog_id as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "ReleaseStgMedium" => {
+            Some(release_stg_medium as unsafe extern "win64" fn(_) as *const () as usize)
+        }
+        "RegisterDragDrop" => {
+            Some(register_drag_drop as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "RevokeDragDrop" => {
+            Some(revoke_drag_drop as unsafe extern "win64" fn(_) -> _ as *const () as usize)
+        }
+        "DoDragDrop" => {
+            Some(do_drag_drop as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize)
         }
         _ => None,
     }

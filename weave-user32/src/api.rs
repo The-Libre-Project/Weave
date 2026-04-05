@@ -2238,3 +2238,294 @@ pub unsafe extern "win64" fn set_window_text_a(hwnd: usize, lp_string: *const u8
     let wide: Vec<u16> = s.encode_utf16().chain(std::iter::once(0)).collect();
     unsafe { set_window_text_w(hwnd, wide.as_ptr()) }
 }
+
+/// CharUpperW — convert a wide string or character to uppercase in-place.
+///
+/// If the high word of `lpsz` is 0, treats it as a character value and returns
+/// the uppercased character. Otherwise treats it as a pointer to a null-terminated
+/// UTF-16 string and uppercases in place, returning the same pointer.
+///
+/// # Safety
+/// If `lpsz` has a non-zero high word, it must be a valid null-terminated UTF-16
+/// string.
+pub unsafe extern "win64" fn char_upper_w(lpsz: *mut u16) -> *mut u16 {
+    if (lpsz as usize) < 0x10000 {
+        let c = lpsz as u16;
+        let up = char::from_u32(c as u32)
+            .map(|ch| ch.to_uppercase().next().unwrap_or(ch) as u16)
+            .unwrap_or(c);
+        return up as usize as *mut u16;
+    }
+    let mut p = lpsz;
+    while unsafe { *p } != 0 {
+        let c = unsafe { *p };
+        let up = char::from_u32(c as u32)
+            .map(|ch| ch.to_uppercase().next().unwrap_or(ch) as u16)
+            .unwrap_or(c);
+        unsafe { *p = up };
+        p = unsafe { p.add(1) };
+    }
+    lpsz
+}
+
+/// GetMenuItemInfoW — retrieve information about a menu item (Wide).
+///
+/// Returns FALSE — stub.
+///
+/// # Safety
+/// `lpmii` is accepted but not dereferenced.
+pub unsafe extern "win64" fn get_menu_item_info_w(
+    _h_menu: usize,
+    _u_item: u32,
+    _f_by_position: i32,
+    _lpmii: *mut u8,
+) -> i32 {
+    0 // FALSE
+}
+
+/// SetMenuItemInfoW — set information about a menu item (Wide).
+///
+/// Returns FALSE — stub.
+///
+/// # Safety
+/// `lpmii` is accepted but not dereferenced.
+pub unsafe extern "win64" fn set_menu_item_info_w(
+    _h_menu: usize,
+    _u_item: u32,
+    _f_by_position: i32,
+    _lpmii: *const u8,
+) -> i32 {
+    0 // FALSE
+}
+
+/// LoadStringW — load a string from the application's resource table (Wide).
+///
+/// Returns 0 (empty string) — stub, no resource loading.
+///
+/// # Safety
+/// If `lp_buffer` is non-null and `n_buffer_max` > 0, writes an empty
+/// null-terminated string.
+pub unsafe extern "win64" fn load_string_w(
+    _h_instance: usize,
+    _u_id: u32,
+    lp_buffer: *mut u16,
+    n_buffer_max: i32,
+) -> i32 {
+    if !lp_buffer.is_null() && n_buffer_max > 0 {
+        unsafe { *lp_buffer = 0 };
+    }
+    0
+}
+
+/// RegisterClipboardFormatW — register a new clipboard format (Wide).
+///
+/// Returns a fake non-zero format ID.
+///
+/// # Safety
+/// `lpsz` is accepted but not dereferenced.
+pub unsafe extern "win64" fn register_clipboard_format_w(_lpsz: *const u16) -> u32 {
+    0xC000 // fake private clipboard format base
+}
+
+/// GetWindowTextLengthW — return the length of a window's title bar text.
+///
+/// Returns 0 — stub.
+///
+/// # Safety
+/// No pointer dereferences.
+pub unsafe extern "win64" fn get_window_text_length_w(_hwnd: usize) -> i32 {
+    0
+}
+
+/// SystemParametersInfoW — query or set system-wide parameters (Wide).
+///
+/// Returns FALSE — stub.
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn system_parameters_info_w(
+    _u_action: u32,
+    _u_param: u32,
+    _pv_param: *mut u8,
+    _f_win_ini: u32,
+) -> i32 {
+    0 // FALSE
+}
+
+/// GetMonitorInfoA — fill a MONITORINFO or MONITORINFOEX structure (ANSI).
+///
+/// Returns FALSE — stub (no multi-monitor support).
+///
+/// # Safety
+/// `lpmi` is accepted but not dereferenced.
+pub unsafe extern "win64" fn get_monitor_info_a(_h_monitor: usize, _lpmi: *mut u8) -> i32 {
+    0 // FALSE
+}
+
+/// GetDialogBaseUnits — return dialog base units. Returns a fixed value.
+pub extern "win64" fn get_dialog_base_units() -> u32 {
+    // Low word = horizontal base units (typically 6), high word = vertical (13).
+    (13 << 16) | 6
+}
+
+/// ChildWindowFromPointEx — find child window containing a point.
+///
+/// Returns NULL — no child windows in stub.
+///
+/// # Safety
+/// No pointer dereferences.
+pub unsafe extern "win64" fn child_window_from_point_ex(
+    _hwnd_parent: usize,
+    _point_x: i32,
+    _point_y: i32,
+    _u_flags: u32,
+) -> usize {
+    0 // NULL
+}
+
+/// LoadMenuW — load a menu resource (Wide). Returns NULL.
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn load_menu_w(_h_instance: usize, _lp_menu_name: *const u16) -> usize {
+    0 // NULL
+}
+
+/// DrawMenuBar — redraw the menu bar. Returns TRUE.
+///
+/// # Safety
+/// No pointer dereferences.
+pub unsafe extern "win64" fn draw_menu_bar(_hwnd: usize) -> i32 {
+    1 // TRUE
+}
+
+/// CheckMenuRadioItem — set a radio-button check mark. Returns TRUE.
+///
+/// # Safety
+/// No pointer dereferences.
+pub unsafe extern "win64" fn check_menu_radio_item(
+    _h_menu: usize,
+    _id_first: u32,
+    _id_last: u32,
+    _id_check: u32,
+    _u_flags: u32,
+) -> i32 {
+    1 // TRUE
+}
+
+/// RemoveMenu — delete a menu item. Returns TRUE.
+///
+/// # Safety
+/// No pointer dereferences.
+pub unsafe extern "win64" fn remove_menu(_h_menu: usize, _u_position: u32, _u_flags: u32) -> i32 {
+    1 // TRUE
+}
+
+/// GetSubMenu — return the handle of a pop-up submenu. Returns NULL.
+///
+/// # Safety
+/// No pointer dereferences.
+pub unsafe extern "win64" fn get_sub_menu(_h_menu: usize, _n_pos: i32) -> usize {
+    0 // NULL
+}
+
+/// SendDlgItemMessageW — send a message to a dialog control (Wide).
+///
+/// Returns 0 — stub.
+///
+/// # Safety
+/// No pointer dereferences.
+pub unsafe extern "win64" fn send_dlg_item_message_w(
+    _h_dlg: usize,
+    _n_id_dlg_item: i32,
+    _msg: u32,
+    _w_param: usize,
+    _l_param: isize,
+) -> isize {
+    0
+}
+
+/// LoadAcceleratorsW — load an accelerator table resource (Wide). Returns NULL.
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn load_accelerators_w(
+    _h_inst: usize,
+    _lp_table_name: *const u16,
+) -> usize {
+    0 // NULL
+}
+
+/// TranslateAcceleratorW — translate accelerator keystrokes (Wide). Returns 0.
+///
+/// # Safety
+/// `lp_msg` is accepted but not dereferenced.
+pub unsafe extern "win64" fn translate_accelerator_w(
+    _h_wnd: usize,
+    _h_acc_table: usize,
+    _lp_msg: *const u8,
+) -> i32 {
+    0
+}
+
+/// GetFocus — return the HWND that currently has keyboard focus. Returns NULL.
+pub extern "win64" fn get_focus() -> usize {
+    0 // NULL
+}
+
+/// LoadBitmapW — load a bitmap resource (Wide). Returns NULL.
+///
+/// # Safety
+/// `lp_bitmap_name` is accepted but not dereferenced.
+pub unsafe extern "win64" fn load_bitmap_w(
+    _h_instance: usize,
+    _lp_bitmap_name: *const u16,
+) -> usize {
+    0 // NULL HBITMAP
+}
+
+/// GetClassInfoW — retrieve information about a registered window class (Wide).
+///
+/// Returns FALSE — stub.
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn get_class_info_w(
+    _h_instance: usize,
+    _lp_class_name: *const u16,
+    _lp_wnd_class: *mut u8,
+) -> i32 {
+    0 // FALSE
+}
+
+/// CallWindowProcW — pass a message to the specified window procedure (Wide).
+///
+/// Returns 0 — stub.
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn call_window_proc_w(
+    _lp_prev_wnd_func: usize,
+    _h_wnd: usize,
+    _msg: u32,
+    _w_param: usize,
+    _l_param: isize,
+) -> isize {
+    0
+}
+
+/// DialogBoxParamW — display a modal dialog box from a resource template (Wide).
+///
+/// Returns -1 (error) — stub.
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn dialog_box_param_w(
+    _h_instance: usize,
+    _lp_template_name: *const u16,
+    _hwnd_parent: usize,
+    _lp_dialog_func: usize,
+    _dw_init_param: isize,
+) -> isize {
+    -1
+}

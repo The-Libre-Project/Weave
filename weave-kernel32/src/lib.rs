@@ -3068,6 +3068,41 @@ pub extern "win64" fn free_library(_h_module: usize) -> i32 {
     1 // TRUE
 }
 
+/// SetDefaultDllDirectories — restrict DLL search paths (security hardening).
+///
+/// Stub: returns TRUE. 7-Zip calls this via GetProcAddress on startup; if it
+/// returns NULL the app may exit as a security precaution.
+pub extern "win64" fn set_default_dll_directories(_directory_flags: u32) -> i32 {
+    1 // TRUE
+}
+
+/// AddDllDirectory — add a directory to the DLL search path.
+///
+/// Returns a fake cookie (1). Stub — search path is not implemented.
+///
+/// # Safety
+/// `new_directory` is ignored.
+pub unsafe extern "win64" fn add_dll_directory(_new_directory: *const u16) -> usize {
+    1 // fake DLL_DIRECTORY_COOKIE
+}
+
+/// RemoveDllDirectory — remove a directory from the DLL search path.
+///
+/// Returns TRUE. Stub.
+pub extern "win64" fn remove_dll_directory(_cookie: usize) -> i32 {
+    1 // TRUE
+}
+
+/// SetDllDirectoryW — set a single DLL search directory (Wide).
+///
+/// Returns TRUE. Stub.
+///
+/// # Safety
+/// `lp_path_name` is ignored.
+pub unsafe extern "win64" fn set_dll_directory_w(_lp_path_name: *const u16) -> i32 {
+    1 // TRUE
+}
+
 /// GetProcAddress — resolve a function by module handle + name.
 ///
 /// Maps the synthetic HMODULE back to a DLL name, then queries the global
@@ -3104,6 +3139,269 @@ pub unsafe extern "win64" fn get_proc_address(h_module: usize, lp_proc_name: *co
             0
         }
     }
+}
+
+// ── GetVersion ────────────────────────────────────────────────────────────────
+
+/// GetVersion — legacy API returning Windows version as a packed DWORD.
+///
+/// Returns 0x0A0A0000: major=10, minor=10 (little-endian packed).
+pub extern "win64" fn get_version() -> u32 {
+    0x0000_0A0A // minor=10, major=10 (little-endian packed: 10 | (10 << 8))
+}
+
+// ── Process/toolhelp ─────────────────────────────────────────────────────────
+
+/// CreateToolhelp32Snapshot — create a snapshot of processes/threads/modules.
+///
+/// Returns INVALID_HANDLE_VALUE (stub — no real snapshot).
+///
+/// # Safety
+/// No pointer dereferences.
+pub unsafe extern "win64" fn create_toolhelp32_snapshot(
+    _dw_flags: u32,
+    _th32_process_id: u32,
+) -> usize {
+    usize::MAX // INVALID_HANDLE_VALUE
+}
+
+/// Process32FirstW — retrieve first process from a toolhelp snapshot.
+///
+/// Returns FALSE — no processes in stub snapshot.
+///
+/// # Safety
+/// `lppe` is accepted but not dereferenced.
+pub unsafe extern "win64" fn process32_first_w(_h_snapshot: usize, _lppe: *mut u8) -> i32 {
+    0 // FALSE
+}
+
+/// Process32NextW — retrieve next process from a toolhelp snapshot.
+///
+/// Returns FALSE — no more processes.
+///
+/// # Safety
+/// `lppe` is accepted but not dereferenced.
+pub unsafe extern "win64" fn process32_next_w(_h_snapshot: usize, _lppe: *mut u8) -> i32 {
+    0 // FALSE
+}
+
+// ── Locale / language ────────────────────────────────────────────────────────
+
+/// GetUserDefaultLangID — return the default language identifier.
+///
+/// Returns 0x0409 (English, United States).
+pub extern "win64" fn get_user_default_lang_id() -> u16 {
+    0x0409
+}
+
+// ── File operations ──────────────────────────────────────────────────────────
+
+/// CopyFileExW — copy a file with progress callback (Wide).
+///
+/// Delegates to CopyFileW (ignores callback).
+///
+/// # Safety
+/// `lp_existing_file_name` and `lp_new_file_name` must be valid null-terminated
+/// UTF-16 strings.
+pub unsafe extern "win64" fn copy_file_ex_w(
+    lp_existing_file_name: *const u16,
+    lp_new_file_name: *const u16,
+    _lp_progress_routine: usize,
+    _lp_data: *mut u8,
+    _pb_cancel: *mut i32,
+    _dw_copy_flags: u32,
+) -> i32 {
+    unsafe { copy_file_w(lp_existing_file_name, lp_new_file_name, 0) }
+}
+
+/// GetCompressedFileSizeW — return the compressed size of a file.
+///
+/// Returns INVALID_FILE_SIZE (0xFFFFFFFF) — stub, compression not supported.
+///
+/// # Safety
+/// `lp_file_name` must be a valid null-terminated UTF-16 string.
+pub unsafe extern "win64" fn get_compressed_file_size_w(
+    _lp_file_name: *const u16,
+    _lp_file_size_high: *mut u32,
+) -> u32 {
+    0xFFFF_FFFF // INVALID_FILE_SIZE
+}
+
+/// CreateHardLinkW — create a hard link (Wide). Returns FALSE.
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced beyond null check.
+pub unsafe extern "win64" fn create_hard_link_w(
+    _lp_file_name: *const u16,
+    _lp_existing_file_name: *const u16,
+    _lp_security_attributes: *mut u8,
+) -> i32 {
+    0 // FALSE — hard links not supported in stub
+}
+
+/// MoveFileWithProgressW — move a file with progress callback.
+///
+/// Delegates to MoveFileExW (ignores callback).
+///
+/// # Safety
+/// Pointer arguments must be valid null-terminated UTF-16 strings or null.
+pub unsafe extern "win64" fn move_file_with_progress_w(
+    lp_existing_file_name: *const u16,
+    lp_new_file_name: *const u16,
+    _lp_progress_routine: usize,
+    _lp_data: *mut u8,
+    dw_flags: u32,
+) -> i32 {
+    unsafe { move_file_ex_w(lp_existing_file_name, lp_new_file_name, dw_flags) }
+}
+
+/// GetDiskFreeSpaceW — return disk free/total space information.
+///
+/// Returns stub values: 10 GB free, 100 GB total.
+///
+/// # Safety
+/// Output pointer arguments must be writable or null.
+pub unsafe extern "win64" fn get_disk_free_space_w(
+    _lp_root_path_name: *const u16,
+    lp_sectors_per_cluster: *mut u32,
+    lp_bytes_per_sector: *mut u32,
+    lp_number_of_free_clusters: *mut u32,
+    lp_total_number_of_clusters: *mut u32,
+) -> i32 {
+    if !lp_sectors_per_cluster.is_null() {
+        unsafe { *lp_sectors_per_cluster = 8 };
+    }
+    if !lp_bytes_per_sector.is_null() {
+        unsafe { *lp_bytes_per_sector = 512 };
+    }
+    if !lp_number_of_free_clusters.is_null() {
+        unsafe { *lp_number_of_free_clusters = 2_621_440 };
+    }
+    if !lp_total_number_of_clusters.is_null() {
+        unsafe { *lp_total_number_of_clusters = 26_214_400 };
+    }
+    1 // TRUE
+}
+
+/// FileTimeToDosDateTime — convert FILETIME to MS-DOS date/time.
+///
+/// Returns a fixed date/time (2026-01-01 00:00:00).
+///
+/// # Safety
+/// Output pointers must be writable or null.
+pub unsafe extern "win64" fn file_time_to_dos_date_time(
+    _lp_file_time: *const u64,
+    lp_fat_date: *mut u16,
+    lp_fat_time: *mut u16,
+) -> i32 {
+    // MS-DOS date: year since 1980 in bits 9-15, month in 5-8, day in 0-4.
+    // 2026-01-01: year=46 (2026-1980), month=1, day=1 → 0x5C21
+    if !lp_fat_date.is_null() {
+        unsafe { *lp_fat_date = ((46 << 9) | (1 << 5) | 1) as u16 };
+    }
+    // MS-DOS time: hour in bits 11-15, minute in 5-10, 2-sec in 0-4.
+    if !lp_fat_time.is_null() {
+        unsafe { *lp_fat_time = 0 };
+    }
+    1 // TRUE
+}
+
+/// GlobalMemoryStatusEx — fill a MEMORYSTATUSEX structure.
+///
+/// Reports 16 GB physical RAM, 8 GB free.
+///
+/// # Safety
+/// `lp_buffer` must be a writable MEMORYSTATUSEX (64 bytes, first DWORD = dwLength).
+pub unsafe extern "win64" fn global_memory_status_ex(lp_buffer: *mut u8) -> i32 {
+    if lp_buffer.is_null() {
+        return 0;
+    }
+    const GB: u64 = 1024 * 1024 * 1024;
+    unsafe {
+        *(lp_buffer.add(4) as *mut u32) = 50; // 50% memory load
+        *(lp_buffer.add(8) as *mut u64) = 16 * GB; // 16 GB total
+        *(lp_buffer.add(16) as *mut u64) = 8 * GB; // 8 GB free
+        *(lp_buffer.add(24) as *mut u64) = 32 * GB; // 32 GB page file
+        *(lp_buffer.add(32) as *mut u64) = 24 * GB; // 24 GB avail page file
+        *(lp_buffer.add(40) as *mut u64) = 0x0000_7FFF_0000_0000u64; // total virtual
+        *(lp_buffer.add(48) as *mut u64) = 0x0000_7FFE_0000_0000u64; // avail virtual
+        *(lp_buffer.add(56) as *mut u64) = 0; // extended virtual
+    }
+    1 // TRUE
+}
+
+/// SetPriorityClass — set the priority class of a process. Returns TRUE.
+///
+/// # Safety
+/// No pointer dereferences.
+pub unsafe extern "win64" fn set_priority_class(_h_process: usize, _dw_priority_class: u32) -> i32 {
+    1 // TRUE — pretend it succeeded
+}
+
+// ── Change notifications ──────────────────────────────────────────────────────
+
+/// FindFirstChangeNotificationW — watch a directory for changes.
+///
+/// Returns INVALID_HANDLE_VALUE — stub, no filesystem watching.
+///
+/// # Safety
+/// `lp_path_name` is accepted but not dereferenced beyond null check.
+pub unsafe extern "win64" fn find_first_change_notification_w(
+    _lp_path_name: *const u16,
+    _b_watch_subtree: i32,
+    _dw_notify_filter: u32,
+) -> usize {
+    usize::MAX // INVALID_HANDLE_VALUE
+}
+
+/// FindNextChangeNotification — wait for the next change notification.
+///
+/// Returns FALSE — stub.
+///
+/// # Safety
+/// No pointer dereferences.
+pub unsafe extern "win64" fn find_next_change_notification(_h_change_handle: usize) -> i32 {
+    0 // FALSE
+}
+
+/// FindCloseChangeNotification — close a change notification handle.
+///
+/// Returns TRUE — stub (no real handle to close).
+///
+/// # Safety
+/// No pointer dereferences.
+pub unsafe extern "win64" fn find_close_change_notification(_h_change_handle: usize) -> i32 {
+    1 // TRUE
+}
+
+// ── NTFS streams ─────────────────────────────────────────────────────────────
+
+/// FindFirstStreamW — enumerate alternate data streams of a file.
+///
+/// Returns INVALID_HANDLE_VALUE — NTFS streams not supported.
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn find_first_stream_w(
+    _lp_file_name: *const u16,
+    _info_level: u32,
+    _lp_find_stream_data: *mut u8,
+    _dw_flags: u32,
+) -> usize {
+    usize::MAX // INVALID_HANDLE_VALUE
+}
+
+/// FindNextStreamW — enumerate alternate data streams (next entry).
+///
+/// Returns FALSE — no streams.
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn find_next_stream_w(
+    _h_find_stream: usize,
+    _lp_find_stream_data: *mut u8,
+) -> i32 {
+    0 // FALSE
 }
 
 /// GetModuleHandleA — get a handle to an already-loaded module (ANSI).
@@ -6292,6 +6590,18 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
             Some(load_library_ex_w as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize)
         }
         "FreeLibrary" => Some(free_library as *const () as usize),
+        "SetDefaultDllDirectories" => {
+            Some(set_default_dll_directories as extern "win64" fn(_) -> _ as *const () as usize)
+        }
+        "AddDllDirectory" => {
+            Some(add_dll_directory as unsafe extern "win64" fn(_) -> _ as *const () as usize)
+        }
+        "RemoveDllDirectory" => {
+            Some(remove_dll_directory as extern "win64" fn(_) -> _ as *const () as usize)
+        }
+        "SetDllDirectoryW" => {
+            Some(set_dll_directory_w as unsafe extern "win64" fn(_) -> _ as *const () as usize)
+        }
         "GetProcAddress" => {
             Some(get_proc_address as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
         }
@@ -6769,11 +7079,66 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "SetConsoleMode" => {
             Some(set_console_mode as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
         }
+        "GetVersion" => Some(get_version as *const () as usize),
         "GetVersionExW" => {
             Some(get_version_ex_w as unsafe extern "win64" fn(_) -> _ as *const () as usize)
         }
         "GetVersionExA" => {
             Some(get_version_ex_a as unsafe extern "win64" fn(_) -> _ as *const () as usize)
+        }
+        "CreateToolhelp32Snapshot" => Some(
+            create_toolhelp32_snapshot as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
+        ),
+        "Process32FirstW" => {
+            Some(process32_first_w as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "Process32NextW" => {
+            Some(process32_next_w as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "GetUserDefaultLangID" => Some(get_user_default_lang_id as *const () as usize),
+        "CopyFileExW" => Some(
+            copy_file_ex_w as unsafe extern "win64" fn(_, _, _, _, _, _) -> _ as *const () as usize,
+        ),
+        "GetCompressedFileSizeW" => Some(
+            get_compressed_file_size_w as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
+        ),
+        "CreateHardLinkW" => {
+            Some(create_hard_link_w as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize)
+        }
+        "MoveFileWithProgressW" => Some(
+            move_file_with_progress_w as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "GetDiskFreeSpaceW" => Some(
+            get_disk_free_space_w as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "FileTimeToDosDateTime" => Some(
+            file_time_to_dos_date_time as unsafe extern "win64" fn(_, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "GlobalMemoryStatusEx" => {
+            Some(global_memory_status_ex as unsafe extern "win64" fn(_) -> _ as *const () as usize)
+        }
+        "SetPriorityClass" => {
+            Some(set_priority_class as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "FindFirstChangeNotificationW" => Some(
+            find_first_change_notification_w as unsafe extern "win64" fn(_, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "FindNextChangeNotification" => Some(
+            find_next_change_notification as unsafe extern "win64" fn(_) -> _ as *const () as usize,
+        ),
+        "FindCloseChangeNotification" => Some(
+            find_close_change_notification as unsafe extern "win64" fn(_) -> _ as *const ()
+                as usize,
+        ),
+        "FindFirstStreamW" => Some(
+            find_first_stream_w as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
+        ),
+        "FindNextStreamW" => {
+            Some(find_next_stream_w as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
         }
         "GetCommandLineW" => Some(get_command_line_w as *const () as usize),
         "GetCommandLineA" => Some(get_command_line_a as *const () as usize),

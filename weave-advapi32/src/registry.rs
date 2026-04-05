@@ -1105,6 +1105,132 @@ pub unsafe extern "win64" fn reg_delete_value_a(h_key: usize, lp_value_name: *co
     unsafe { reg_delete_value_w(h_key, value_name_utf16.as_ptr()) }
 }
 
+// ── LSA stubs ────────────────────────────────────────────────────────────────
+
+/// LsaOpenPolicy — open a handle to the LSA Policy object. Returns an error.
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn lsa_open_policy(
+    _system_name: *const u8,
+    _object_attributes: *const u8,
+    _desired_access: u32,
+    policy_handle: *mut usize,
+) -> i32 {
+    if !policy_handle.is_null() {
+        unsafe { *policy_handle = 0 };
+    }
+    0xC000_0022u32 as i32 // STATUS_ACCESS_DENIED
+}
+
+/// LsaClose — close a LSA policy handle. Returns STATUS_SUCCESS.
+///
+/// # Safety
+/// No pointer dereferences.
+pub unsafe extern "win64" fn lsa_close(_object_handle: usize) -> i32 {
+    0 // STATUS_SUCCESS
+}
+
+/// LsaAddAccountRights — add privileges to an account. Returns STATUS_SUCCESS.
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn lsa_add_account_rights(
+    _policy_handle: usize,
+    _account_sid: *const u8,
+    _user_rights: *const u8,
+    _count_of_rights: u32,
+) -> i32 {
+    0 // STATUS_SUCCESS
+}
+
+/// LookupAccountNameW — look up an account name and return its SID.
+///
+/// Returns FALSE — stub.
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn lookup_account_name_w(
+    _lp_system_name: *const u16,
+    _lp_account_name: *const u16,
+    _sid: *mut u8,
+    _cb_sid: *mut u32,
+    _referenced_domain_name: *mut u16,
+    _cch_referenced_domain_name: *mut u32,
+    _pe_use: *mut u32,
+) -> i32 {
+    0 // FALSE
+}
+
+/// GetUserNameW — return the current user's name (Wide).
+///
+/// Writes "weave" into the caller's buffer.
+///
+/// # Safety
+/// `lp_buffer` must be writable for `*lpcb_buffer` characters.
+/// `lpcb_buffer` must be writable.
+pub unsafe extern "win64" fn get_user_name_w(lp_buffer: *mut u16, lpcb_buffer: *mut u32) -> i32 {
+    let user: Vec<u16> = "weave\0".encode_utf16().collect();
+    let needed = user.len() as u32;
+    if lpcb_buffer.is_null() {
+        return 0;
+    }
+    let available = unsafe { *lpcb_buffer };
+    unsafe { *lpcb_buffer = needed };
+    if available < needed {
+        return 0;
+    }
+    if !lp_buffer.is_null() {
+        unsafe { std::ptr::copy_nonoverlapping(user.as_ptr(), lp_buffer, user.len()) };
+    }
+    1 // TRUE
+}
+
+/// RegDeleteKeyExW — delete a registry key with a 32/64-bit flag (Wide).
+///
+/// Delegates to RegDeleteKeyW (ignores sam_desired).
+///
+/// # Safety
+/// `lp_sub_key` must be a valid null-terminated UTF-16 string.
+pub unsafe extern "win64" fn reg_delete_key_ex_w(
+    h_key: usize,
+    lp_sub_key: *const u16,
+    _sam_desired: u32,
+    _reserved: u32,
+) -> i32 {
+    unsafe { reg_delete_key_w(h_key, lp_sub_key) }
+}
+
+/// GetFileSecurityW — retrieve security information for a file (Wide).
+///
+/// Returns FALSE — stub.
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn get_file_security_w(
+    _lp_file_name: *const u16,
+    _requested_information: u32,
+    _p_security_descriptor: *mut u8,
+    _n_length: u32,
+    _lp_needed_length: *mut u32,
+) -> i32 {
+    0 // FALSE
+}
+
+/// SetFileSecurityW — set security information for a file (Wide).
+///
+/// Returns FALSE — stub.
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn set_file_security_w(
+    _lp_file_name: *const u16,
+    _security_information: u32,
+    _p_security_descriptor: *const u8,
+) -> i32 {
+    0 // FALSE
+}
+
 // ── Resolver ──────────────────────────────────────────────────────────────────
 
 pub fn resolve(func: &str) -> Option<usize> {
@@ -1209,6 +1335,31 @@ pub fn resolve(func: &str) -> Option<usize> {
         "SetSecurityDescriptorOwner" => Some(
             set_security_descriptor_owner as unsafe extern "win64" fn(_, _, _) -> _ as *const ()
                 as usize,
+        ),
+        "LsaOpenPolicy" => {
+            Some(lsa_open_policy as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize)
+        }
+        "LsaClose" => Some(lsa_close as unsafe extern "win64" fn(_) -> _ as *const () as usize),
+        "LsaAddAccountRights" => Some(
+            lsa_add_account_rights as unsafe extern "win64" fn(_, _, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "LookupAccountNameW" => Some(
+            lookup_account_name_w as unsafe extern "win64" fn(_, _, _, _, _, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "GetUserNameW" => {
+            Some(get_user_name_w as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "RegDeleteKeyExW" => Some(
+            reg_delete_key_ex_w as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
+        ),
+        "GetFileSecurityW" => Some(
+            get_file_security_w as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "SetFileSecurityW" => Some(
+            set_file_security_w as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
         ),
         _ => None,
     }

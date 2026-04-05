@@ -479,10 +479,29 @@ pub fn argv_data_addr() -> usize {
     *HEAP_IARGV.get_or_init(|| Box::into_raw(Box::new(0usize)) as usize)
 }
 pub fn acmdln_data_addr() -> usize {
-    *HEAP_ACMDLN.get_or_init(|| Box::into_raw(Box::new(0usize)) as usize)
+    *HEAP_ACMDLN.get_or_init(|| {
+        // _acmdln is msvcrt's ANSI command-line variable (a `char*`).
+        // 7-Zip reads it as **char: r11 = &_acmdln, r8 = *r11.
+        // We store a pointer to a static ANSI string so r8 is non-null.
+        static ANSI_CMDLN: &[u8] = b"weave\0";
+        let ptr = ANSI_CMDLN.as_ptr() as usize;
+        Box::into_raw(Box::new(ptr)) as usize
+    })
 }
 pub fn wcmdln_data_addr() -> usize {
-    *HEAP_WCMDLN.get_or_init(|| Box::into_raw(Box::new(0usize)) as usize)
+    *HEAP_WCMDLN.get_or_init(|| {
+        // _wcmdln is msvcrt's wide command-line variable (a `wchar_t*`).
+        static WIDE_CMDLN: [u16; 6] = [
+            b'w' as u16,
+            b'e' as u16,
+            b'a' as u16,
+            b'v' as u16,
+            b'e' as u16,
+            0,
+        ];
+        let ptr = WIDE_CMDLN.as_ptr() as usize;
+        Box::into_raw(Box::new(ptr)) as usize
+    })
 }
 pub fn pgmptr_data_addr() -> usize {
     *HEAP_PGMPTR.get_or_init(|| Box::into_raw(Box::new(0usize)) as usize)
@@ -1207,6 +1226,104 @@ fn is_ucrt_dll(dll: &str) -> bool {
         || lower == "vcruntime140.dll"
 }
 
+// ── msvcrt C++ runtime stubs ─────────────────────────────────────────────────
+
+/// wcscmp — compare two null-terminated wide strings.
+///
+/// Returns negative, 0, or positive.
+///
+/// # Safety
+/// `s1` and `s2` must each be valid null-terminated UTF-16 strings.
+pub unsafe extern "win64" fn ucrt_wcscmp(s1: *const u16, s2: *const u16) -> i32 {
+    if s1.is_null() || s2.is_null() {
+        return if s1.is_null() { -1 } else { 1 };
+    }
+    let mut i = 0usize;
+    loop {
+        let a = unsafe { *s1.add(i) };
+        let b = unsafe { *s2.add(i) };
+        if a != b {
+            return (a as i32) - (b as i32);
+        }
+        if a == 0 {
+            return 0;
+        }
+        i += 1;
+    }
+}
+
+/// _c_exit — perform C runtime cleanup without terminating. No-op stub.
+pub extern "win64" fn ucrt_c_exit() {}
+
+/// __dllonexit — register a callback to be called on DLL detach. Returns NULL.
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn ucrt_dllonexit(
+    _func: *const u8,
+    _pbegin: *mut *const u8,
+    _pend: *mut *const u8,
+) -> *const u8 {
+    std::ptr::null()
+}
+
+/// _purecall — called when a pure virtual function is invoked. Aborts.
+pub extern "win64" fn ucrt_purecall() -> ! {
+    unsafe { libc::abort() }
+}
+
+/// _XcptFilter — MSVC SEH exception filter. Returns EXCEPTION_CONTINUE_SEARCH (0).
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn ucrt_xcpt_filter(_xno: u32, _pxcptinfoptrs: *const u8) -> i32 {
+    0 // EXCEPTION_CONTINUE_SEARCH
+}
+
+/// _CxxThrowException — throw a C++ exception. Logs and aborts.
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn ucrt_cxx_throw_exception(
+    _p_exception_object: *mut u8,
+    _p_throw_info: *const u8,
+) -> ! {
+    unsafe {
+        libc::write(
+            2,
+            b"weave: _CxxThrowException called -- aborting\n".as_ptr() as *const libc::c_void,
+            46,
+        );
+        libc::abort()
+    }
+}
+
+/// __CxxFrameHandler — MSVC C++ frame handler for exception unwinding.
+///
+/// Returns 0 (EXCEPTION_CONTINUE_SEARCH). Stub — no real SEH.
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn ucrt_cxx_frame_handler(
+    _p_exc_rec: *const u8,
+    _p_est_frame: *mut u8,
+    _p_context: *const u8,
+    _p_dispatch: *mut u8,
+) -> i32 {
+    0
+}
+
+/// ?terminate@@YAXXZ — C++ std::terminate(). Aborts the process.
+pub extern "win64" fn ucrt_terminate() -> ! {
+    unsafe { libc::abort() }
+}
+
+/// ??1type_info@@UEAA@XZ — type_info destructor. No-op (no real RTTI objects).
+///
+/// # Safety
+/// `this` is accepted but not dereferenced.
+pub unsafe extern "win64" fn ucrt_type_info_dtor(_this: *mut u8) {}
+
 /// Resolve a UCRT import to a stub address.
 pub fn resolve(dll: &str, func: &str) -> Option<usize> {
     if !is_ucrt_dll(dll) {
@@ -1444,6 +1561,28 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         | "__crt_locale_pointers"
         | "_Mbrtowc"
         | "_Wctomb" => Some(ucrt_cexit as extern "win64" fn() as *const () as usize),
+        "wcscmp" => Some(ucrt_wcscmp as unsafe extern "win64" fn(_, _) -> _ as *const () as usize),
+        "_c_exit" => Some(ucrt_c_exit as extern "win64" fn() as *const () as usize),
+        "__dllonexit" => {
+            Some(ucrt_dllonexit as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize)
+        }
+        "_purecall" => Some(ucrt_purecall as extern "win64" fn() -> ! as *const () as usize),
+        "_XcptFilter" => {
+            Some(ucrt_xcpt_filter as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "_CxxThrowException" => Some(
+            ucrt_cxx_throw_exception as unsafe extern "win64" fn(_, _) -> ! as *const () as usize,
+        ),
+        "__CxxFrameHandler" | "__CxxFrameHandler3" | "__CxxFrameHandler4" => Some(
+            ucrt_cxx_frame_handler as unsafe extern "win64" fn(_, _, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "?terminate@@YAXXZ" => {
+            Some(ucrt_terminate as extern "win64" fn() -> ! as *const () as usize)
+        }
+        "??1type_info@@UEAA@XZ" => {
+            Some(ucrt_type_info_dtor as unsafe extern "win64" fn(_) as *const () as usize)
+        }
         _ => None,
     }
 }

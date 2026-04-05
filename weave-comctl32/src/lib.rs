@@ -334,6 +334,16 @@ pub unsafe extern "win64" fn uninitialize_flat_sb(_hwnd: usize) -> i32 {
     1 // S_OK (0 is also acceptable; apps rarely check this)
 }
 
+/// ImageList_GetIcon — create an icon from an image list entry.
+///
+/// Returns NULL HICON — stub.
+///
+/// # Safety
+/// No pointer dereferences.
+pub unsafe extern "win64" fn image_list_get_icon(_himl: usize, _i: i32, _flags: u32) -> usize {
+    0 // NULL HICON
+}
+
 // ── DLL Resolver ─────────────────────────────────────────────────────────────
 
 /// Resolve a comctl32.dll import to a function pointer.
@@ -368,6 +378,9 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "PropertySheetA" => Some(property_sheet_a as *const () as usize),
         "InitializeFlatSB" => Some(initialize_flat_sb as *const () as usize),
         "UninitializeFlatSB" => Some(uninitialize_flat_sb as *const () as usize),
+        "ImageList_GetIcon" | "#17" => Some(
+            image_list_get_icon as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
+        ),
         _ => None,
     }
 }
@@ -416,6 +429,7 @@ mod tests {
             "PropertySheetA",
             "InitializeFlatSB",
             "UninitializeFlatSB",
+            "ImageList_GetIcon",
         ];
         for f in &funcs {
             assert!(resolve("comctl32.dll", f).is_some(), "missing: {f}");

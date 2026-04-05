@@ -1263,6 +1263,7 @@ dependencies = [
  "weave-mmdevapi",
  "weave-ntdll",
  "weave-ole32",
+ "weave-oleaut32",
  "weave-plugin-system",
  "weave-sandbox",
  "weave-shell32",
@@ -1366,6 +1367,13 @@ version = "0.0.1"
 dependencies = [
  "libc",
  "weave-common",
+]
+
+[[package]]
+name = "weave-oleaut32"
+version = "0.0.1"
+dependencies = [
+ "libc",
 ]
 
 [[package]]

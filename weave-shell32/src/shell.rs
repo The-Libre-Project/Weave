@@ -495,6 +495,98 @@ fn tokenise_cmd_line(s: &str) -> Vec<String> {
     args
 }
 
+// ── Shell icon / info stubs ───────────────────────────────────────────────────
+
+/// ExtractIconExW — extract icon handles from a file (Wide).
+///
+/// Returns 0 (no icons extracted) — stub.
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn extract_icon_ex_w(
+    _lp_sz_file: *const u16,
+    _n_icon_index: i32,
+    _phicon_large: *mut usize,
+    _phicon_small: *mut usize,
+    _n_icons: u32,
+) -> u32 {
+    0
+}
+
+/// SHGetDesktopFolder — return the shell's desktop IShellFolder.
+///
+/// Returns E_NOTIMPL — stub.
+///
+/// # Safety
+/// `ppshf` is accepted but not dereferenced.
+pub unsafe extern "win64" fn sh_get_desktop_folder(_ppshf: *mut *mut u8) -> i32 {
+    0x8000_4001u32 as i32 // E_NOTIMPL
+}
+
+/// SHGetSpecialFolderLocation — return the PIDL for a special folder.
+///
+/// Returns E_NOTIMPL — stub.
+///
+/// # Safety
+/// `ppidl` is accepted but not dereferenced.
+pub unsafe extern "win64" fn sh_get_special_folder_location(
+    _hwnd_owner: usize,
+    _n_folder: i32,
+    _ppidl: *mut *mut u8,
+) -> i32 {
+    0x8000_4001u32 as i32 // E_NOTIMPL
+}
+
+/// SHGetFileInfoW — retrieve information about an object in the shell namespace (Wide).
+///
+/// Returns 0 — stub.
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn sh_get_file_info_w(
+    _psz_path: *const u16,
+    _dw_file_attributes: u32,
+    _psfi: *mut u8,
+    _cb_file_info: u32,
+    _u_flags: u32,
+) -> usize {
+    0
+}
+
+/// SHFileOperationW — perform a file operation (copy/move/delete/rename) (Wide).
+///
+/// Returns 1 (operation aborted) — stub.
+///
+/// # Safety
+/// `lpfo` is accepted but not dereferenced.
+pub unsafe extern "win64" fn sh_file_operation_w(_lpfo: *mut u8) -> i32 {
+    1 // DE_OPCANCELLED — operation aborted
+}
+
+/// SHChangeNotify — notify the shell of a change to the namespace.
+///
+/// No-op stub.
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn sh_change_notify(
+    _w_event_id: i32,
+    _u_flags: u32,
+    _dw_item1: *const u8,
+    _dw_item2: *const u8,
+) {
+}
+
+/// ShellExecuteExW — execute a shell operation (Wide).
+///
+/// Returns FALSE — stub.
+///
+/// # Safety
+/// `lp_exec_info` is accepted but not dereferenced.
+pub unsafe extern "win64" fn shell_execute_ex_w(_lp_exec_info: *mut u8) -> i32 {
+    0 // FALSE
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

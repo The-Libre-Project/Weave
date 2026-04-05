@@ -418,6 +418,81 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "ToAsciiEx" => Some(
             to_ascii_ex as unsafe extern "win64" fn(_, _, _, _, _, _) -> _ as *const () as usize,
         ),
+        "CharUpperW" => {
+            Some(api::char_upper_w as unsafe extern "win64" fn(_) -> _ as *const () as usize)
+        }
+        "GetMenuItemInfoW" => Some(
+            api::get_menu_item_info_w as unsafe extern "win64" fn(_, _, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "SetMenuItemInfoW" => Some(
+            api::set_menu_item_info_w as unsafe extern "win64" fn(_, _, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "LoadStringW" => Some(
+            api::load_string_w as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
+        ),
+        "RegisterClipboardFormatW" => Some(
+            api::register_clipboard_format_w as unsafe extern "win64" fn(_) -> _ as *const ()
+                as usize,
+        ),
+        "GetWindowTextLengthW" => Some(
+            api::get_window_text_length_w as unsafe extern "win64" fn(_) -> _ as *const () as usize,
+        ),
+        "SystemParametersInfoW" => Some(
+            api::system_parameters_info_w as unsafe extern "win64" fn(_, _, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "GetMonitorInfoA" => Some(
+            api::get_monitor_info_a as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
+        ),
+        "GetDialogBaseUnits" => Some(api::get_dialog_base_units as *const () as usize),
+        "ChildWindowFromPointEx" => Some(
+            api::child_window_from_point_ex as unsafe extern "win64" fn(_, _, _, _) -> _
+                as *const () as usize,
+        ),
+        "LoadMenuW" => {
+            Some(api::load_menu_w as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "DrawMenuBar" => {
+            Some(api::draw_menu_bar as unsafe extern "win64" fn(_) -> _ as *const () as usize)
+        }
+        "CheckMenuRadioItem" => Some(
+            api::check_menu_radio_item as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "RemoveMenu" => {
+            Some(api::remove_menu as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize)
+        }
+        "GetSubMenu" => {
+            Some(api::get_sub_menu as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "SendDlgItemMessageW" => Some(
+            api::send_dlg_item_message_w as unsafe extern "win64" fn(_, _, _, _, _) -> _
+                as *const () as usize,
+        ),
+        "LoadAcceleratorsW" => Some(
+            api::load_accelerators_w as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
+        ),
+        "TranslateAcceleratorW" => Some(
+            api::translate_accelerator_w as unsafe extern "win64" fn(_, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "GetFocus" => Some(api::get_focus as *const () as usize),
+        "LoadBitmapW" => {
+            Some(api::load_bitmap_w as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "GetClassInfoW" => Some(
+            api::get_class_info_w as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
+        ),
+        "CallWindowProcW" => Some(
+            api::call_window_proc_w as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "DialogBoxParamW" => Some(
+            api::dialog_box_param_w as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const ()
+                as usize,
+        ),
         _ => None,
     }
 }

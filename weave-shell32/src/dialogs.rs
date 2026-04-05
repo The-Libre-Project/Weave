@@ -260,6 +260,15 @@ pub unsafe extern "win64" fn get_open_file_name_w(lp_ofn: *mut u8) -> i32 {
     }
 }
 
+// ── CommDlgExtendedError ──────────────────────────────────────────────────────
+
+/// CommDlgExtendedError — return the last common dialog error code.
+///
+/// Returns 0 (no error) — stub.
+pub extern "win64" fn comm_dlg_extended_error() -> u32 {
+    0
+}
+
 /// GetSaveFileNameW: display the system Save dialog box.
 ///
 /// Returns TRUE if the user selects a filename; FALSE if cancelled or on error.

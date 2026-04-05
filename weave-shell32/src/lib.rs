@@ -50,6 +50,9 @@ fn resolve_comdlg32(func: &str) -> Option<usize> {
         "ChooseColorA" => {
             Some(dialogs::choose_color_a as unsafe extern "win64" fn(_) -> _ as *const () as usize)
         }
+        "CommDlgExtendedError" => {
+            Some(dialogs::comm_dlg_extended_error as extern "win64" fn() -> _ as *const () as usize)
+        }
         _ => None,
     }
 }
@@ -99,6 +102,30 @@ fn resolve_shell32(func: &str) -> Option<usize> {
                 as usize,
         ),
         "DragFinish" => Some(shell::drag_finish as extern "win64" fn(_) as *const () as usize),
+        "ExtractIconExW" => Some(
+            shell::extract_icon_ex_w as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "SHGetDesktopFolder" => Some(
+            shell::sh_get_desktop_folder as unsafe extern "win64" fn(_) -> _ as *const () as usize,
+        ),
+        "SHGetSpecialFolderLocation" => Some(
+            shell::sh_get_special_folder_location as unsafe extern "win64" fn(_, _, _) -> _
+                as *const () as usize,
+        ),
+        "SHGetFileInfoW" => Some(
+            shell::sh_get_file_info_w as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "SHFileOperationW" => Some(
+            shell::sh_file_operation_w as unsafe extern "win64" fn(_) -> _ as *const () as usize,
+        ),
+        "SHChangeNotify" => Some(
+            shell::sh_change_notify as unsafe extern "win64" fn(_, _, _, _) as *const () as usize,
+        ),
+        "ShellExecuteExW" => Some(
+            shell::shell_execute_ex_w as unsafe extern "win64" fn(_) -> _ as *const () as usize,
+        ),
         _ => None,
     }
 }
