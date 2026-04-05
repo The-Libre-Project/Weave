@@ -28,8 +28,8 @@ output/
 core
 core.*
 
-# Test fixtures — large Windows PE binaries downloaded separately
+# Test fixtures — Windows PE binaries too large for git
+# 7za.exe + 7za.dll (~1.7 MB total) ARE committed — needed for CI integration test
+# 7z.dll + 7zFM.exe are excluded (only used for optional GUI test)
 tests/fixtures/bin/7z.dll
 tests/fixtures/bin/7zFM.exe
-tests/fixtures/bin/7za.dll
-tests/fixtures/bin/7za.exe
