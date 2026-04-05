@@ -1268,6 +1268,7 @@ dependencies = [
  "weave-plugin-system",
  "weave-sandbox",
  "weave-shell32",
+ "weave-shlwapi",
  "weave-ucrt",
  "weave-user32",
  "weave-vm-fallback",
@@ -1400,6 +1401,13 @@ dependencies = [
  "weave-common",
  "weave-core",
  "weave-notify",
+]
+
+[[package]]
+name = "weave-shlwapi"
+version = "0.0.1"
+dependencies = [
+ "weave-core",
 ]
 
 [[package]]

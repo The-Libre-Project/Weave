@@ -20,6 +20,7 @@ members = [
     "weave-comctl32",
     "weave-oleaut32",
     "weave-imm32",
+    "weave-shlwapi",
 ]
 resolver = "2"
 

@@ -194,8 +194,15 @@ pub fn check_arch_compatibility(exe_path: &Path) -> Result<(), i32> {
             Err(1)
         }
 
-        // x86_64 host with an unrecognised PE arch, or anything else — let the
-        // loader handle it (it will give a clearer error about the machine type)
+        // x86 32-bit PE on any host — not supported (Weave is 64-bit only)
+        (_, PeArch::Other(0x014c)) => {
+            eprintln!("weave: 32-bit x86 Windows PE binaries are not supported");
+            eprintln!("  This binary requires a 32-bit execution environment.");
+            eprintln!("  Use the 64-bit build of the application if available.");
+            Err(1)
+        }
+
+        // Any other unrecognised PE arch — let the loader report the error
         _ => Ok(()),
     }
 }

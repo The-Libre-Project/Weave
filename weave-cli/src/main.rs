@@ -50,6 +50,7 @@ fn resolve(dll: &str, func: &str) -> Option<usize> {
         .or_else(|| weave_comctl32::resolve(dll, func))
         .or_else(|| weave_oleaut32::resolve(dll, func))
         .or_else(|| weave_imm32::resolve(dll, func))
+        .or_else(|| weave_shlwapi::resolve(dll, func))
         .or_else(|| dll_registry::lookup(dll, func))
 }
 
@@ -77,14 +78,8 @@ fn main() {
     // can return the real location, letting apps like Notepad++ find their
     // plugins folder relative to the executable.
     {
-        let abs = args
-            .exe
-            .canonicalize()
-            .unwrap_or_else(|_| args.exe.clone());
-        let win_path = format!(
-            "Z:{}",
-            abs.to_string_lossy().replace('/', "\\")
-        );
+        let abs = args.exe.canonicalize().unwrap_or_else(|_| args.exe.clone());
+        let win_path = format!("Z:{}", abs.to_string_lossy().replace('/', "\\"));
         weave_core::exe_path::set(&win_path);
     }
 

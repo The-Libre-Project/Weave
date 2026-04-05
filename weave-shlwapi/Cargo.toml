@@ -1,0 +1,10 @@
+[package]
+name = "weave-shlwapi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "shlwapi.dll path and color functions for Weave — Sprint 4 Notepad++ compatibility."
+
+[dependencies]
+weave-core = { path = "../weave-core" }

@@ -686,7 +686,10 @@ fn init_xfg_lazy_slots(pe_bytes: &[u8], base: *mut u8) {
             // Effective address = (RVA of next instruction) + disp + image base
             let next_rva = sec_va + offset + 7;
             let ea_rva = next_rva.wrapping_add_signed(disp as isize);
-            let ea_va = base_usize + ea_rva;
+            let ea_va = match base_usize.checked_add(ea_rva) {
+                Some(v) => v,
+                None => continue, // overflow — not a valid BSS slot
+            };
 
             // Check EA falls in a BSS range
             if !bss_ranges.iter().any(|&(lo, hi)| ea_va >= lo && ea_va < hi) {

@@ -905,14 +905,160 @@ pub extern "win64" fn ucrt_fstat64(_fd: i32, _stat: *mut c_void) -> i32 {
 pub extern "win64" fn ucrt_fdopen(_fd: i32, _mode: *const u8) -> *mut c_void {
     std::ptr::null_mut()
 }
-pub extern "win64" fn ucrt_fseeki64(_stream: *mut c_void, _offset: i64, _origin: i32) -> i32 {
-    -1
+
+/// _fseeki64 / fseek — seek to a position in a libc-backed FILE stream.
+///
+/// # Safety
+/// `stream` must be a valid `FILE*` obtained from `ucrt_fopen` or `ucrt_wfopen`.
+pub unsafe extern "win64" fn ucrt_fseeki64(stream: *mut c_void, offset: i64, origin: i32) -> i32 {
+    if stream.is_null() {
+        return -1;
+    }
+    unsafe { libc::fseeko(stream as *mut libc::FILE, offset as libc::off_t, origin) }
 }
-pub extern "win64" fn ucrt_ftelli64(_stream: *mut c_void) -> i64 {
-    -1
+
+/// _ftelli64 / ftell — return the current position in a libc-backed FILE stream.
+///
+/// # Safety
+/// `stream` must be a valid `FILE*` obtained from `ucrt_fopen` or `ucrt_wfopen`.
+pub unsafe extern "win64" fn ucrt_ftelli64(stream: *mut c_void) -> i64 {
+    if stream.is_null() {
+        return -1;
+    }
+    unsafe { libc::ftello(stream as *mut libc::FILE) as i64 }
 }
+
 pub extern "win64" fn ucrt_get_osfhandle(_fd: i32) -> isize {
     -1
+}
+
+// ── CRT stdio file I/O (fopen / fread / fclose / feof / ferror) ───────────────
+
+/// Helper: decode a null-terminated UTF-16 string (up to `max_len` chars).
+/// Returns None if the pointer is null or the string exceeds `max_len`.
+fn decode_wide(ptr: *const u16, max_len: usize) -> Option<String> {
+    if ptr.is_null() {
+        return None;
+    }
+    let mut len = 0usize;
+    unsafe {
+        while len < max_len && *ptr.add(len) != 0 {
+            len += 1;
+        }
+    }
+    if len >= max_len {
+        return None;
+    }
+    Some(String::from_utf16_lossy(unsafe {
+        std::slice::from_raw_parts(ptr, len)
+    }))
+}
+
+/// fopen — open a file by narrow (ANSI/UTF-8) path, translating the Windows
+/// path to its Linux equivalent.
+///
+/// # Safety
+/// `path` must be a valid null-terminated byte string. `mode` must be a valid
+/// null-terminated ASCII mode string (e.g. "r", "rb", "w").
+pub unsafe extern "win64" fn ucrt_fopen(path: *const u8, mode: *const u8) -> *mut c_void {
+    use std::os::unix::ffi::OsStrExt;
+    if path.is_null() || mode.is_null() {
+        return std::ptr::null_mut();
+    }
+    let win_path = unsafe {
+        let len = libc::strlen(path as *const libc::c_char);
+        String::from_utf8_lossy(std::slice::from_raw_parts(path, len)).into_owned()
+    };
+    let linux_path = match weave_core::file_io::translate_win_path(&win_path) {
+        Ok(p) => p,
+        Err(_) => return std::ptr::null_mut(),
+    };
+    let path_cstr = match std::ffi::CString::new(linux_path.as_os_str().as_bytes()) {
+        Ok(s) => s,
+        Err(_) => return std::ptr::null_mut(),
+    };
+    unsafe { libc::fopen(path_cstr.as_ptr(), mode as *const libc::c_char) as *mut c_void }
+}
+
+/// _wfopen — open a file by wide (UTF-16) path, translating the Windows path
+/// to its Linux equivalent.
+///
+/// # Safety
+/// `path` must be a valid null-terminated UTF-16 string. `mode` must be a
+/// valid null-terminated UTF-16 mode string (e.g. L"r", L"rb").
+pub unsafe extern "win64" fn ucrt_wfopen(path: *const u16, mode: *const u16) -> *mut c_void {
+    use std::os::unix::ffi::OsStrExt;
+    let win_path = match decode_wide(path, 32_768) {
+        Some(s) => s,
+        None => return std::ptr::null_mut(),
+    };
+    let mode_str = match decode_wide(mode, 64) {
+        Some(s) => s,
+        None => return std::ptr::null_mut(),
+    };
+    let linux_path = match weave_core::file_io::translate_win_path(&win_path) {
+        Ok(p) => p,
+        Err(_) => return std::ptr::null_mut(),
+    };
+    let path_cstr = match std::ffi::CString::new(linux_path.as_os_str().as_bytes()) {
+        Ok(s) => s,
+        Err(_) => return std::ptr::null_mut(),
+    };
+    let mode_cstr = match std::ffi::CString::new(mode_str.as_bytes()) {
+        Ok(s) => s,
+        Err(_) => return std::ptr::null_mut(),
+    };
+    unsafe { libc::fopen(path_cstr.as_ptr(), mode_cstr.as_ptr()) as *mut c_void }
+}
+
+/// fread — read `count` items of `size` bytes from a libc-backed FILE stream.
+///
+/// # Safety
+/// `buf` must be writable for `size * count` bytes. `stream` must be a valid
+/// `FILE*` obtained from `ucrt_fopen` or `ucrt_wfopen`.
+pub unsafe extern "win64" fn ucrt_fread(
+    buf: *mut c_void,
+    size: usize,
+    count: usize,
+    stream: *mut c_void,
+) -> usize {
+    if buf.is_null() || stream.is_null() || size == 0 {
+        return 0;
+    }
+    unsafe { libc::fread(buf, size, count, stream as *mut libc::FILE) }
+}
+
+/// fclose — close a libc-backed FILE stream.
+///
+/// # Safety
+/// `stream` must be a valid `FILE*` obtained from `ucrt_fopen` or `ucrt_wfopen`.
+pub unsafe extern "win64" fn ucrt_fclose(stream: *mut c_void) -> i32 {
+    if stream.is_null() {
+        return -1;
+    }
+    unsafe { libc::fclose(stream as *mut libc::FILE) }
+}
+
+/// feof — test end-of-file indicator on a libc-backed FILE stream.
+///
+/// # Safety
+/// `stream` must be a valid `FILE*`.
+pub unsafe extern "win64" fn ucrt_feof(stream: *mut c_void) -> i32 {
+    if stream.is_null() {
+        return 1;
+    }
+    unsafe { libc::feof(stream as *mut libc::FILE) }
+}
+
+/// ferror — test error indicator on a libc-backed FILE stream.
+///
+/// # Safety
+/// `stream` must be a valid `FILE*`.
+pub unsafe extern "win64" fn ucrt_ferror(stream: *mut c_void) -> i32 {
+    if stream.is_null() {
+        return 1;
+    }
+    unsafe { libc::ferror(stream as *mut libc::FILE) }
 }
 
 // __C_specific_handler — identical stub as in kernel32
@@ -1619,13 +1765,21 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "_errno" => stub!(ucrt_errno as extern "win64" fn() -> _),
         "strerror" => stub!(ucrt_strerror as extern "win64" fn(_) -> _),
         "_get_osfhandle" => stub!(ucrt_get_osfhandle as extern "win64" fn(_) -> _),
-        "_fseeki64" => stub!(ucrt_fseeki64 as extern "win64" fn(_, _, _) -> _),
-        "_ftelli64" => stub!(ucrt_ftelli64 as extern "win64" fn(_) -> _),
+        "_fseeki64" | "fseek" => {
+            stub!(ucrt_fseeki64 as unsafe extern "win64" fn(_, _, _) -> _)
+        }
+        "_ftelli64" | "ftell" => stub!(ucrt_ftelli64 as unsafe extern "win64" fn(_) -> _),
         "_fdopen" => stub!(ucrt_fdopen as extern "win64" fn(_, _) -> _),
         "_lock_file" => stub!(ucrt_lock_file as extern "win64" fn(_)),
         "_unlock_file" => stub!(ucrt_unlock_file as extern "win64" fn(_)),
         "remove" => stub!(ucrt_remove as extern "win64" fn(_) -> _),
         "_fstat64" => stub!(ucrt_fstat64 as extern "win64" fn(_, _) -> _),
+        "fopen" => stub!(ucrt_fopen as unsafe extern "win64" fn(_, _) -> _),
+        "_wfopen" => stub!(ucrt_wfopen as unsafe extern "win64" fn(_, _) -> _),
+        "fread" => stub!(ucrt_fread as unsafe extern "win64" fn(_, _, _, _) -> _),
+        "fclose" => stub!(ucrt_fclose as unsafe extern "win64" fn(_) -> _),
+        "feof" => stub!(ucrt_feof as unsafe extern "win64" fn(_) -> _),
+        "ferror" => stub!(ucrt_ferror as unsafe extern "win64" fn(_) -> _),
         // locale / mb
         "___mb_cur_max_func" => stub!(ucrt_mb_cur_max_func as extern "win64" fn() -> _),
         "localeconv" => stub!(ucrt_localeconv as extern "win64" fn() -> _),

@@ -123,9 +123,14 @@ unsafe fn patch_inner(
         }
 
         // Walk INT + IAT in lock-step.
+        // Use read_unaligned / write_unaligned throughout: the PE spec does not
+        // guarantee 8-byte alignment of thunk arrays (they live in .idata which
+        // may only be 4-byte aligned), and Rust debug builds trap misaligned
+        // pointer dereferences.
         let mut i = 0usize;
         loop {
-            let thunk = unsafe { *(base.add(int_rva + i * 8) as *const u64) };
+            let thunk =
+                unsafe { std::ptr::read_unaligned(base.add(int_rva + i * 8) as *const u64) };
             if thunk == 0 {
                 break; // end of this DLL's import list
             }
@@ -142,7 +147,7 @@ unsafe fn patch_inner(
 
             match resolve(&dll_name, &func_name) {
                 Some(addr) => unsafe {
-                    *(base.add(iat_rva + i * 8) as *mut u64) = addr as u64;
+                    std::ptr::write_unaligned(base.add(iat_rva + i * 8) as *mut u64, addr as u64);
                 },
                 None if lenient => {
                     on_miss(&dll_name, &func_name);
@@ -151,12 +156,14 @@ unsafe fn patch_inner(
                     // which the caller should treat as a failure.
                     #[cfg(target_arch = "x86_64")]
                     unsafe {
-                        *(base.add(iat_rva + i * 8) as *mut u64) =
-                            unresolved_import_stub as *const () as u64;
+                        std::ptr::write_unaligned(
+                            base.add(iat_rva + i * 8) as *mut u64,
+                            unresolved_import_stub as *const () as u64,
+                        );
                     }
                     #[cfg(not(target_arch = "x86_64"))]
                     unsafe {
-                        *(base.add(iat_rva + i * 8) as *mut u64) = 0;
+                        std::ptr::write_unaligned(base.add(iat_rva + i * 8) as *mut u64, 0);
                     }
                 }
                 None => {

@@ -2882,10 +2882,17 @@ pub unsafe extern "win64" fn get_file_attributes_ex_w(
         unsafe { String::from_utf16_lossy(std::slice::from_raw_parts(lp_file_name, len)) };
 
     // Translate to Linux path
-    let linux_path = match weave_core::prefix::translator().to_linux_str(&win_path) {
+    let linux_path = match weave_core::file_io::translate_win_path(&win_path) {
         Ok(p) => p,
-        Err(_) => return 0,
+        Err(_) => {
+            eprintln!("weave/GetFileAttributesExW: {win_path:?} → translate FAILED");
+            return 0;
+        }
     };
+    eprintln!(
+        "weave/GetFileAttributesExW: {win_path:?} → {linux_path:?} exists={}",
+        linux_path.exists()
+    );
 
     // Check if path exists and get type
     let c_path = match std::ffi::CString::new(linux_path.as_os_str().as_encoded_bytes()) {
@@ -3100,7 +3107,9 @@ pub unsafe extern "win64" fn copy_file_a(
 ///   2. Same directory as the running exe
 ///   3. Prefix System32 directory
 fn load_library_impl(name: &str) -> usize {
-    use weave_core::{dll_registry, exe_path, file_io, iat, loader, module_handles, prefix, resolve};
+    use weave_core::{
+        dll_registry, exe_path, file_io, iat, loader, module_handles, prefix, resolve,
+    };
 
     let key = {
         let base = name.rsplit(['\\', '/']).next().unwrap_or(name);
@@ -3140,9 +3149,7 @@ fn load_library_impl(name: &str) -> usize {
                 // Patch the loaded DLL's own IAT using the global resolver.
                 unsafe {
                     iat::patch_best_effort(&bytes, image.base, resolve::resolve, |d, f| {
-                        eprintln!(
-                            "weave/kernel32: LoadLibrary({key}): unresolved import {d}!{f}"
-                        );
+                        eprintln!("weave/kernel32: LoadLibrary({key}): unresolved import {d}!{f}");
                     });
                 }
                 dll_registry::register(key.clone(), image, exports);
@@ -3154,7 +3161,10 @@ fn load_library_impl(name: &str) -> usize {
                 return handle;
             }
             Err(e) => {
-                eprintln!("weave/kernel32: LoadLibrary({name:?}): parse error for {}: {e}", path.display());
+                eprintln!(
+                    "weave/kernel32: LoadLibrary({name:?}): parse error for {}: {e}",
+                    path.display()
+                );
                 // File exists but is malformed — don't try other paths.
                 break;
             }
@@ -3670,9 +3680,11 @@ pub unsafe extern "win64" fn get_module_file_name_w(
     let path = if h_module == 0 || h_module == weave_core::seh::pe_base() {
         // NULL or main-exe handle — return the real exe path so apps can locate
         // their own directory (plugins, config files, etc.)
-        weave_core::exe_path::get()
+        let p = weave_core::exe_path::get()
             .unwrap_or(r"Z:\app.exe")
-            .to_string()
+            .to_string();
+        eprintln!("weave/kernel32: GetModuleFileNameW(NULL) → {p:?}");
+        p
     } else {
         match weave_core::module_handles::lookup(h_module) {
             Some(dll) => format!(r"Z:\Windows\System32\{dll}"),
@@ -4103,19 +4115,44 @@ pub unsafe extern "win64" fn wake_all_condition_variable(_condition_variable: *m
 
 // ── Threads ───────────────────────────────────────────────────────────────────
 
-/// CreateThread — thread creation is not supported; returns NULL.
+/// Fake handle returned by `CreateThread` for a synchronously-completed thread.
+///
+/// Values 1 and 2 are used for mutexes/events; 3 is the completed-thread sentinel.
+const FAKE_COMPLETED_THREAD_HANDLE: usize = 3;
+
+/// CreateThread — executes the thread function synchronously, then returns a fake handle.
+///
+/// Full multi-threading (via pthreads) is a future concern.  For Phase 1–4 compatibility,
+/// we run the thread body inline so that callers that create a thread purely to do file I/O
+/// (e.g. Notepad++ portable-mode detection via GetFileAttributesExW) still work correctly.
 ///
 /// # Safety
-/// Pointer arguments are accepted but not dereferenced.
+/// `lp_start_address` must be a valid `extern "win64"` function pointer.
+/// `lp_parameter` is forwarded to that function and must be valid for the duration of the call.
 pub unsafe extern "win64" fn create_thread(
     _lp_thread_attributes: *const u8,
     _dw_stack_size: usize,
-    _lp_start_address: *const u8,
-    _lp_parameter: *mut u8,
+    lp_start_address: *const u8,
+    lp_parameter: *mut u8,
     _dw_creation_flags: u32,
-    _lp_thread_id: *mut u32,
+    lp_thread_id: *mut u32,
 ) -> usize {
-    0 // NULL — thread creation not supported
+    if lp_start_address.is_null() {
+        return 0;
+    }
+    eprintln!(
+        "weave/CreateThread: fn={lp_start_address:p} param={lp_parameter:p} (executing inline)"
+    );
+    // Execute the Windows thread function inline using the Win64 calling convention.
+    // The Win64 ABI passes the first integer argument in RCX, so transmuting to
+    // `extern "win64" fn(*mut u8) -> u32` is correct on x86-64 Linux.
+    let fn_ptr: unsafe extern "win64" fn(*mut u8) -> u32 = std::mem::transmute(lp_start_address);
+    let ret = fn_ptr(lp_parameter);
+    eprintln!("weave/CreateThread: fn={lp_start_address:p} returned {ret}");
+    if !lp_thread_id.is_null() {
+        *lp_thread_id = 1;
+    }
+    FAKE_COMPLETED_THREAD_HANDLE
 }
 
 /// GetThreadPriority — returns THREAD_PRIORITY_NORMAL (0).
@@ -4467,8 +4504,8 @@ pub unsafe extern "win64" fn wait_for_single_object(h_handle: usize, _dw_millise
         return WAIT_FAILED;
     }
 
-    // For our fake handles (1 = mutex, 2 = event), return success
-    if h_handle == 1 || h_handle == 2 {
+    // For our fake handles (1 = mutex, 2 = event, 3 = completed thread), return success
+    if h_handle == 1 || h_handle == 2 || h_handle == FAKE_COMPLETED_THREAD_HANDLE {
         return WAIT_OBJECT_0;
     }
 
@@ -4498,8 +4535,8 @@ pub unsafe extern "win64" fn wait_for_single_object_ex(
         return WAIT_FAILED;
     }
 
-    // For our fake handles (1 = mutex, 2 = event), return success
-    if h_handle == 1 || h_handle == 2 {
+    // For our fake handles (1 = mutex, 2 = event, 3 = completed thread), return success
+    if h_handle == 1 || h_handle == 2 || h_handle == FAKE_COMPLETED_THREAD_HANDLE {
         return WAIT_OBJECT_0;
     }
 
@@ -5154,6 +5191,7 @@ pub unsafe extern "win64" fn get_file_attributes_w(lp_file_name: *const u16) -> 
         Ok(p) => p,
         Err(_) => return INVALID_FILE_ATTRIBUTES,
     };
+
     // Check if path exists and get type
     let c_path = match std::ffi::CString::new(linux_path.as_os_str().as_encoded_bytes()) {
         Ok(s) => s,
