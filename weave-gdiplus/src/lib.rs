@@ -186,10 +186,7 @@ pub unsafe extern "win64" fn GdipGetImageDecoders(
 /// `filename` must be a valid null-terminated UTF-16 string or NULL.
 /// `image` must be a writable pointer-sized slot or NULL.
 #[no_mangle]
-pub unsafe extern "win64" fn GdipLoadImageFromFile(
-    filename: *const u16,
-    image: *mut usize,
-) -> i32 {
+pub unsafe extern "win64" fn GdipLoadImageFromFile(filename: *const u16, image: *mut usize) -> i32 {
     if filename.is_null() || image.is_null() {
         return GP_INVALID_PARAMETER;
     }
@@ -202,10 +199,7 @@ pub unsafe extern "win64" fn GdipLoadImageFromFile(
 /// # Safety
 /// `stream` is a COM IStream pointer. `image` must be a writable pointer slot.
 #[no_mangle]
-pub unsafe extern "win64" fn GdipLoadImageFromStream(
-    _stream: *mut u8,
-    image: *mut usize,
-) -> i32 {
+pub unsafe extern "win64" fn GdipLoadImageFromStream(_stream: *mut u8, image: *mut usize) -> i32 {
     if !image.is_null() {
         unsafe { *image = 0 };
     }
@@ -229,10 +223,7 @@ pub unsafe extern "win64" fn GdipLoadImageFromFileICM(
 /// # Safety
 /// Same as GdipLoadImageFromStream.
 #[no_mangle]
-pub unsafe extern "win64" fn GdipLoadImageFromStreamICM(
-    stream: *mut u8,
-    image: *mut usize,
-) -> i32 {
+pub unsafe extern "win64" fn GdipLoadImageFromStreamICM(stream: *mut u8, image: *mut usize) -> i32 {
     unsafe { GdipLoadImageFromStream(stream, image) }
 }
 
@@ -352,10 +343,7 @@ pub unsafe extern "win64" fn GdipCreateBitmapFromHBITMAP(
 /// # Safety
 /// `hicon` is a GDI icon handle. `bitmap` is a writable slot.
 #[no_mangle]
-pub unsafe extern "win64" fn GdipCreateBitmapFromHICON(
-    _hicon: usize,
-    bitmap: *mut usize,
-) -> i32 {
+pub unsafe extern "win64" fn GdipCreateBitmapFromHICON(_hicon: usize, bitmap: *mut usize) -> i32 {
     if !bitmap.is_null() {
         unsafe { *bitmap = 0 };
     }
@@ -620,10 +608,7 @@ pub unsafe extern "win64" fn GdipImageGetFrameDimensionsList(
 /// # Safety
 /// `num_of_property` must be a writable u32 pointer.
 #[no_mangle]
-pub unsafe extern "win64" fn GdipGetPropertyCount(
-    image: usize,
-    num_of_property: *mut u32,
-) -> i32 {
+pub unsafe extern "win64" fn GdipGetPropertyCount(image: usize, num_of_property: *mut u32) -> i32 {
     if image == 0 || num_of_property.is_null() {
         return GP_INVALID_PARAMETER;
     }
@@ -965,12 +950,7 @@ pub extern "win64" fn GdipDrawImage(_graphics: usize, _image: usize, _x: f32, _y
 
 /// GdipDrawImageI — draw an image at an integer (x, y).
 #[no_mangle]
-pub extern "win64" fn GdipDrawImageI(
-    _graphics: usize,
-    _image: usize,
-    _x: i32,
-    _y: i32,
-) -> i32 {
+pub extern "win64" fn GdipDrawImageI(_graphics: usize, _image: usize, _x: i32, _y: i32) -> i32 {
     GP_NOT_IMPLEMENTED
 }
 
@@ -1252,10 +1232,7 @@ pub unsafe extern "win64" fn GdipMeasureString(
 /// # Safety
 /// `brush` must be a writable pointer slot.
 #[no_mangle]
-pub unsafe extern "win64" fn GdipCreateSolidFill(
-    _color: u32,
-    brush: *mut usize,
-) -> i32 {
+pub unsafe extern "win64" fn GdipCreateSolidFill(_color: u32, brush: *mut usize) -> i32 {
     if !brush.is_null() {
         unsafe { *brush = 0 };
     }
@@ -1632,12 +1609,7 @@ pub unsafe extern "win64" fn GdipBitmapGetPixel(
 
 /// GdipBitmapSetPixel — write a single pixel to a bitmap.
 #[no_mangle]
-pub extern "win64" fn GdipBitmapSetPixel(
-    _bitmap: usize,
-    _x: i32,
-    _y: i32,
-    _color: u32,
-) -> i32 {
+pub extern "win64" fn GdipBitmapSetPixel(_bitmap: usize, _x: i32, _y: i32, _color: u32) -> i32 {
     GP_NOT_IMPLEMENTED
 }
 
@@ -1724,10 +1696,7 @@ pub extern "win64" fn GdipFillPath(_graphics: usize, _brush: usize, _path: usize
 /// # Safety
 /// `matrix` is a GpMatrix pointer (6 f32s = 24 bytes).
 #[no_mangle]
-pub unsafe extern "win64" fn GdipSetWorldTransform(
-    _graphics: usize,
-    _matrix: *const f32,
-) -> i32 {
+pub unsafe extern "win64" fn GdipSetWorldTransform(_graphics: usize, _matrix: *const f32) -> i32 {
     GP_NOT_IMPLEMENTED
 }
 
@@ -1761,11 +1730,7 @@ pub extern "win64" fn GdipScaleWorldTransform(
 
 /// GdipRotateWorldTransform — prepend/append a rotation.
 #[no_mangle]
-pub extern "win64" fn GdipRotateWorldTransform(
-    _graphics: usize,
-    _angle: f32,
-    _order: i32,
-) -> i32 {
+pub extern "win64" fn GdipRotateWorldTransform(_graphics: usize, _angle: f32, _order: i32) -> i32 {
     GP_NOT_IMPLEMENTED
 }
 
@@ -1829,13 +1794,17 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "GdipGetImagePixelFormat" => GdipGetImagePixelFormat as *const () as usize,
         "GdipGetImageDimension" => GdipGetImageDimension as *const () as usize,
         "GdipGetImageBounds" => GdipGetImageBounds as *const () as usize,
-        "GdipGetImageHorizontalResolution" => GdipGetImageHorizontalResolution as *const () as usize,
+        "GdipGetImageHorizontalResolution" => {
+            GdipGetImageHorizontalResolution as *const () as usize
+        }
         "GdipGetImageVerticalResolution" => GdipGetImageVerticalResolution as *const () as usize,
         "GdipGetImageFlags" => GdipGetImageFlags as *const () as usize,
         // Frame/animation
         "GdipImageGetFrameCount" => GdipImageGetFrameCount as *const () as usize,
         "GdipImageSelectActiveFrame" => GdipImageSelectActiveFrame as *const () as usize,
-        "GdipImageGetFrameDimensionsCount" => GdipImageGetFrameDimensionsCount as *const () as usize,
+        "GdipImageGetFrameDimensionsCount" => {
+            GdipImageGetFrameDimensionsCount as *const () as usize
+        }
         "GdipImageGetFrameDimensionsList" => GdipImageGetFrameDimensionsList as *const () as usize,
         // Property/metadata
         "GdipGetPropertyCount" => GdipGetPropertyCount as *const () as usize,
@@ -1912,8 +1881,12 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         // String format
         "GdipCreateStringFormat" => GdipCreateStringFormat as *const () as usize,
         "GdipDeleteStringFormat" => GdipDeleteStringFormat as *const () as usize,
-        "GdipStringFormatGetGenericDefault" => GdipStringFormatGetGenericDefault as *const () as usize,
-        "GdipStringFormatGetGenericTypographic" => GdipStringFormatGetGenericTypographic as *const () as usize,
+        "GdipStringFormatGetGenericDefault" => {
+            GdipStringFormatGetGenericDefault as *const () as usize
+        }
+        "GdipStringFormatGetGenericTypographic" => {
+            GdipStringFormatGetGenericTypographic as *const () as usize
+        }
         "GdipSetStringFormatAlign" => GdipSetStringFormatAlign as *const () as usize,
         "GdipSetStringFormatLineAlign" => GdipSetStringFormatLineAlign as *const () as usize,
         "GdipSetStringFormatTrimming" => GdipSetStringFormatTrimming as *const () as usize,
@@ -1922,7 +1895,9 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "GdipCreateImageAttributes" => GdipCreateImageAttributes as *const () as usize,
         "GdipDisposeImageAttributes" => GdipDisposeImageAttributes as *const () as usize,
         "GdipSetImageAttributesColorKey" => GdipSetImageAttributesColorKey as *const () as usize,
-        "GdipSetImageAttributesColorMatrix" => GdipSetImageAttributesColorMatrix as *const () as usize,
+        "GdipSetImageAttributesColorMatrix" => {
+            GdipSetImageAttributesColorMatrix as *const () as usize
+        }
         "GdipSetImageAttributesGamma" => GdipSetImageAttributesGamma as *const () as usize,
         "GdipSetImageAttributesWrapMode" => GdipSetImageAttributesWrapMode as *const () as usize,
         // Bitmap pixel access
@@ -1991,10 +1966,7 @@ mod tests {
             "GdipBitmapUnlockBits",
         ];
         for f in &funcs {
-            assert!(
-                resolve("gdiplus.dll", f).is_some(),
-                "missing: {f}"
-            );
+            assert!(resolve("gdiplus.dll", f).is_some(), "missing: {f}");
         }
     }
 
@@ -2015,9 +1987,16 @@ mod tests {
         // Build a minimal valid GdiplusStartupInput (version=1, rest zeroed).
         let input = [1u32, 0, 0, 0];
         let status = unsafe {
-            GdiplusStartup(std::ptr::null_mut(), input.as_ptr() as *const u8, std::ptr::null_mut())
+            GdiplusStartup(
+                std::ptr::null_mut(),
+                input.as_ptr() as *const u8,
+                std::ptr::null_mut(),
+            )
         };
-        assert_eq!(status, GP_INVALID_PARAMETER, "NULL token must return InvalidParameter");
+        assert_eq!(
+            status, GP_INVALID_PARAMETER,
+            "NULL token must return InvalidParameter"
+        );
     }
 
     #[test]
@@ -2025,7 +2004,10 @@ mod tests {
         // Wine ref: dlls/gdiplus/gdiplus.c:87 — input NULL → InvalidParameter
         let mut token: usize = 0;
         let status = unsafe { GdiplusStartup(&mut token, std::ptr::null(), std::ptr::null_mut()) };
-        assert_eq!(status, GP_INVALID_PARAMETER, "NULL input must return InvalidParameter");
+        assert_eq!(
+            status, GP_INVALID_PARAMETER,
+            "NULL input must return InvalidParameter"
+        );
     }
 
     #[test]
@@ -2034,10 +2016,17 @@ mod tests {
         let mut token: usize = 0;
         let input = [1u32, 0, 0, 0]; // GdiplusStartupInput { Version=1, ... }
         let status = unsafe {
-            GdiplusStartup(&mut token, input.as_ptr() as *const u8, std::ptr::null_mut())
+            GdiplusStartup(
+                &mut token,
+                input.as_ptr() as *const u8,
+                std::ptr::null_mut(),
+            )
         };
         assert_eq!(status, GP_OK, "valid GdiplusStartup must return Ok");
-        assert_eq!(token, 0xdeadbeef, "token must be set to 0xdeadbeef (Wine behaviour)");
+        assert_eq!(
+            token, 0xdeadbeef,
+            "token must be set to 0xdeadbeef (Wine behaviour)"
+        );
     }
 
     #[test]
@@ -2046,12 +2035,20 @@ mod tests {
         let mut token: usize = 0;
         let input_v0 = [0u32, 0, 0, 0];
         let s = unsafe {
-            GdiplusStartup(&mut token, input_v0.as_ptr() as *const u8, std::ptr::null_mut())
+            GdiplusStartup(
+                &mut token,
+                input_v0.as_ptr() as *const u8,
+                std::ptr::null_mut(),
+            )
         };
         assert_eq!(s, 18, "version=0 must return UnsupportedGdiplusVersion");
         let input_v3 = [3u32, 0, 0, 0];
         let s = unsafe {
-            GdiplusStartup(&mut token, input_v3.as_ptr() as *const u8, std::ptr::null_mut())
+            GdiplusStartup(
+                &mut token,
+                input_v3.as_ptr() as *const u8,
+                std::ptr::null_mut(),
+            )
         };
         assert_eq!(s, 18, "version=3 must return UnsupportedGdiplusVersion");
     }

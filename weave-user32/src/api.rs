@@ -66,7 +66,9 @@ pub unsafe extern "win64" fn register_class_ex_w(lp_wnd_class_ex: *const WndClas
             hbr_background: wc.hbr_background,
         },
     );
-    name_to_atom(&name)
+    let atom = name_to_atom(&name);
+    eprintln!("weave/user32: RegisterClassExW({name:?}) → atom 0x{atom:04x}");
+    atom
 }
 
 /// Convert a class name to a stable 16-bit ATOM. Uses a simple djb2 hash.
@@ -107,11 +109,13 @@ pub unsafe extern "win64" fn create_window_ex_w(
     let class_name = unsafe { decode_wide(lp_class_name) };
     let title = unsafe { decode_wide(lp_window_name) };
 
+    eprintln!("weave/user32: CreateWindowExW(class={class_name:?}, title={title:?})");
+
     // Look up the class.
     let cls = match class::find(&class_name) {
         Some(c) => c,
         None => {
-            eprintln!("weave/user32: CreateWindowExW: unknown class '{class_name}'");
+            eprintln!("weave/user32: CreateWindowExW: unknown class '{class_name}' → 0");
             return 0;
         }
     };
@@ -263,6 +267,7 @@ pub unsafe extern "win64" fn get_message_w(
         // Block on the X11 connection for the next event.
         if !backend::wait_event() {
             // Connection lost or no display — return WM_QUIT.
+            eprintln!("weave/user32: GetMessageW → WM_QUIT (no display)");
             let quit = MsgEntry {
                 hwnd: 0,
                 message: WM_QUIT,
@@ -442,6 +447,7 @@ pub unsafe extern "win64" fn dispatch_message_w(lp_msg: *const Msg) -> isize {
 ///
 /// `n_exit_code` becomes the wParam of the WM_QUIT message.
 pub extern "win64" fn post_quit_message(n_exit_code: i32) {
+    eprintln!("weave/user32: PostQuitMessage({n_exit_code})");
     queue::post(MsgEntry {
         hwnd: 0,
         message: WM_QUIT,

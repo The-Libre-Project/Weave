@@ -10,7 +10,16 @@
 use std::cell::Cell;
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
+
+/// Tracks the most recently freed heap address so consecutive double-frees
+/// of the same pointer are silently ignored.  Windows HeapFree returns FALSE
+/// (but does not crash) when called twice on the same block; glibc's free()
+/// aborts on "fasttop" detection.  heap_alloc resets this to 0 so that the
+/// same address can be legally freed again after a re-allocation.
+static LAST_HEAP_FREE: AtomicUsize = AtomicUsize::new(0);
+
 use weave_common::{STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE};
 use weave_core::{file_io, handles};
 
@@ -23,6 +32,7 @@ use weave_core::{file_io, handles};
 // Mapping handles start at FILE_MAPPING_OFFSET to be visually distinct from
 // file handles (4–N) and HWND values (0x10000+).
 const FILE_MAPPING_OFFSET: usize = 0x0005_0000;
+#[allow(clippy::type_complexity)]
 static FILE_MAPPINGS: std::sync::OnceLock<Mutex<Vec<Option<(usize, usize)>>>> =
     std::sync::OnceLock::new();
 
@@ -44,6 +54,7 @@ fn alloc_mapping(addr: usize, size: usize) -> usize {
 }
 
 /// Look up and remove a mapping slot by handle; returns (addr, size).
+#[allow(dead_code)]
 fn take_mapping(handle: usize) -> Option<(usize, usize)> {
     let index = handle.checked_sub(FILE_MAPPING_OFFSET)?;
     let mut table = file_mappings().lock().unwrap();
@@ -165,26 +176,125 @@ fn win_prot_to_linux(protect: u32) -> i32 {
 
 fn locale_info_lookup(lc_type: u32) -> Option<&'static str> {
     match lc_type {
-        0x0001 => Some("en-US"),   // LOCALE_SLANGUAGE / LOCALE_SLOCALIZEDDISPLAYNAME
-        0x0002 => Some("English"), // LOCALE_SABBREVLANGNAME / LOCALE_SENGLISHDISPLAYNAME
-        0x0003 => Some("ENU"),     // LOCALE_SNATIVELANGNAME (abbreviated)
-        0x0004 => Some("US"),      // LOCALE_SCOUNTRY
+        0x0001 => Some("en-US"),                   // LOCALE_SLANGUAGE
+        0x0002 => Some("ENU"),                     // LOCALE_SABBREVLANGNAME
+        0x0003 => Some("English"),                 // LOCALE_SNATIVELANGNAME
+        0x0004 => Some("United States"),           // LOCALE_SCOUNTRY
+        0x0005 => Some("ENU"),                     // LOCALE_SABBREVCTRYNAME
         0x0007 => Some("English (United States)"), // LOCALE_SENGCOUNTRY
-        0x000B => Some("437"),     // LOCALE_IDEFAULTCODEPAGE (OEM code page)
-        0x000C => Some(";"),       // LOCALE_SLIST
-        0x000D => Some("1"),       // LOCALE_IMEASURE (1 = imperial)
-        0x000E => Some("."),       // LOCALE_SDECIMAL
-        0x000F => Some(","),       // LOCALE_STHOUSAND
-        0x0012 => Some("1"),       // LOCALE_ILZERO (leading zeros)
-        0x0013 => Some("0123456789"), // LOCALE_SNATIVEDIGITS
-        0x0014 => Some("$"),       // LOCALE_SCURRENCY
-        0x0019 => Some("2"),       // LOCALE_ICURRDIGITS
-        0x0050 => Some(""),        // LOCALE_SPOSITIVESIGN
-        0x0051 => Some("-"),       // LOCALE_SNEGATIVESIGN
-        0x0059 => Some("en"),      // LOCALE_SISO639LANGNAME
-        0x005A => Some("US"),      // LOCALE_SISO3166CTRYNAME
-        0x1004 => Some("1252"),    // LOCALE_IDEFAULTANSICODEPAGE
+        0x000B => Some("437"),                     // LOCALE_IDEFAULTCODEPAGE (OEM)
+        0x000C => Some(","),                       // LOCALE_SLIST (list separator)
+        0x000D => Some("1"),                       // LOCALE_IMEASURE (1 = US customary)
+        0x000E => Some("."),                       // LOCALE_SDECIMAL
+        0x000F => Some(","),                       // LOCALE_STHOUSAND
+        0x0010 => Some("3;0"),                     // LOCALE_SGROUPING
+        0x0011 => Some("2"),                       // LOCALE_IDIGITS
+        0x0012 => Some("1"),                       // LOCALE_ILZERO
+        0x0013 => Some("0123456789"),              // LOCALE_SNATIVEDIGITS
+        0x0014 => Some("$"),                       // LOCALE_SCURRENCY
+        0x0015 => Some("USD"),                     // LOCALE_SINTLSYMBOL
+        0x0016 => Some("."),                       // LOCALE_SMONDECIMALSEP
+        0x0017 => Some(","),                       // LOCALE_SMONTHOUSANDSEP
+        0x0018 => Some("3;0"),                     // LOCALE_SMONGROUPING
+        0x0019 => Some("2"),                       // LOCALE_ICURRDIGITS
+        0x001A => Some("2"),                       // LOCALE_IINTLCURRDIGITS
+        0x001B => Some("0"),                       // LOCALE_ICURRENCY
+        0x001C => Some("0"),                       // LOCALE_INEGCURR
+        0x001D => Some("/"),                       // LOCALE_SDATE (obsolete)
+        0x001E => Some(":"),                       // LOCALE_STIME (obsolete)
+        0x001F => Some("dddd, MMMM dd, yyyy"),     // LOCALE_SLONGDATE
+        0x0020 => Some("M/d/yyyy"),                // LOCALE_SSHORTDATE
+        0x0021 => Some("1"),                       // LOCALE_ITIMEMARKPOSN
+        0x0022 => Some("0"),                       // LOCALE_ICALENDARTYPE
+        0x0023 => Some("0"),                       // LOCALE_IOPTIONALCALENDAR
+        0x0024 => Some("1"),                       // LOCALE_IFIRSTDAYOFWEEK
+        0x0025 => Some("0"),                       // LOCALE_IFIRSTWEEKOFYEAR
+        0x0026 => Some("January"),                 // LOCALE_SMONTHNAME1
+        0x0027 => Some("February"),
+        0x0028 => Some("March"),
+        0x0029 => Some("April"),
+        0x002A => Some("May"),
+        0x002B => Some("June"),
+        0x002C => Some("July"),
+        0x002D => Some("August"),
+        0x002E => Some("September"),
+        0x002F => Some("October"),
+        0x0030 => Some("November"),
+        0x0031 => Some("December"),
+        0x0032 => Some(""),       // LOCALE_SMONTHNAME13 (not used in Gregorian)
+        0x0038 => Some("Sunday"), // LOCALE_SDAYNAME1
+        0x0039 => Some("Monday"),
+        0x003A => Some("Tuesday"),
+        0x003B => Some("Wednesday"),
+        0x003C => Some("Thursday"),
+        0x003D => Some("Friday"),
+        0x003E => Some("Saturday"),
+        0x0044 => Some("AM"),  // LOCALE_S1159 (AM designator)
+        0x0045 => Some("PM"),  // LOCALE_S2359 (PM designator)
+        0x0049 => Some("Jan"), // LOCALE_SABBREVMONTHNAME1
+        0x004A => Some("Feb"),
+        0x004B => Some("Mar"),
+        0x004C => Some("Apr"),
+        0x004D => Some("May"),
+        0x004E => Some("Jun"),
+        0x004F => Some("Jul"),
+        0x0050 => Some("Aug"),
+        0x0051 => Some("Sep"),
+        0x0052 => Some("Oct"),
+        0x0053 => Some("Nov"),
+        0x0054 => Some("Dec"),
+        0x0055 => Some(""),                        // LOCALE_SABBREVMONTHNAME13
+        0x0056 => Some(""),                        // LOCALE_SPOSITIVESIGN
+        0x0057 => Some("-"),                       // LOCALE_SNEGATIVESIGN
+        0x0058 => Some("1"),                       // LOCALE_IPOSSIGNPOSN
+        0x0059 => Some("en"),                      // LOCALE_SISO639LANGNAME
+        0x005A => Some("US"),                      // LOCALE_SISO3166CTRYNAME
+        0x005B => Some("h:mm:ss tt"),              // LOCALE_STIMEFORMAT (12h)
+        0x005C => Some("en-US"),                   // LOCALE_SNAME
+        0x0061 => Some("English"),                 // LOCALE_SENGLISHLANGUAGENAME
+        0x0062 => Some("United States"),           // LOCALE_SENGLISHCOUNTRYNAME
+        0x0063 => Some("English"),                 // LOCALE_SNATIVELANGUAGENAME
+        0x0064 => Some("United States"),           // LOCALE_SNATIVECOUNTRYNAME
+        0x1004 => Some("1252"),                    // LOCALE_IDEFAULTANSICODEPAGE
+        0x1007 => Some("English (United States)"), // LOCALE_SNATIVEDISPLAYNAME
+        0x1009 => Some("English (United States)"), // LOCALE_SLOCALIZEDDISPLAYNAME
         _ => None,
+    }
+}
+
+/// Numeric locale values returned when LOCALE_RETURN_NUMBER is set.
+///
+/// Wine ref: dlls/kernelbase/locale.c — get_locale_info writes binary DWORD for
+/// LOCALE_RETURN_NUMBER; caller passes cch_data=2 (sizeof DWORD / sizeof WCHAR).
+fn locale_number_lookup(lc_type: u32) -> u32 {
+    match lc_type {
+        0x0001 => 0x0409, // LOCALE_ILANGUAGE — English US LCID
+        0x000B => 437,    // LOCALE_IDEFAULTCODEPAGE — OEM code page
+        0x000D => 0,      // LOCALE_IMEASURE — 0 = metric
+        0x000E => 0,      // LOCALE_IDIGITSUBSTITUTION
+        0x0011 => 2,      // LOCALE_IDIGITS
+        0x0012 => 1,      // LOCALE_ILZERO
+        0x0018 => 0,      // LOCALE_INEGNUMBER
+        0x0019 => 2,      // LOCALE_ICURRDIGITS
+        0x001A => 2,      // LOCALE_IINTLCURRDIGITS
+        0x001B => 0,      // LOCALE_ICURRENCY (0 = $n)
+        0x001C => 0,      // LOCALE_INEGCURR
+        0x001D => 1,      // LOCALE_IPOSSYMPRECEDES
+        0x001E => 0,      // LOCALE_IPOSSEPBYSPACE
+        0x001F => 1,      // LOCALE_INEGSYMPRECEDES
+        0x0020 => 0,      // LOCALE_INEGSEPBYSPACE
+        0x0021 => 1,      // LOCALE_ITIMEMARKPOSN
+        0x0022 => 1,      // LOCALE_ICALENDARTYPE — 1 = Gregorian
+        0x0023 => 0,      // LOCALE_IOPTIONALCALENDAR
+        0x0024 => 0,      // LOCALE_IFIRSTDAYOFWEEK — 0 = Monday
+        0x0025 => 0,      // LOCALE_IFIRSTWEEKOFYEAR
+        0x0050 => 3,      // LOCALE_IPOSSIGNPOSN
+        0x0051 => 0,      // LOCALE_INEGSIGNPOSN
+        0x0055 => 0,      // LOCALE_IREADINGLAYOUT — 0 = LTR
+        0x1004 => 1252,   // LOCALE_IDEFAULTANSICODEPAGE
+        0x1010 => 1,      // LOCALE_INEGNUMBER
+        0x1014 => 0,      // LOCALE_IDEFAULTMACCODEPAGE
+        _ => 0,           // unknown: return 0 (safe default, avoids goto-fail)
     }
 }
 
@@ -233,6 +343,7 @@ pub unsafe extern "win64" fn write_console_w(
 
 /// ExitProcess: terminate the process with the given exit code.
 pub extern "win64" fn exit_process(u_exit_code: u32) -> ! {
+    eprintln!("weave/kernel32: ExitProcess({u_exit_code})");
     unsafe { libc::exit(u_exit_code as i32) }
 }
 
@@ -1253,8 +1364,10 @@ pub extern "win64" fn heap_alloc(
     } else {
         unsafe { libc::malloc(alloc_size) }
     };
-    if result.is_null() {
-        eprintln!("weave: HeapAlloc({dw_bytes}) returned NULL!");
+    // A fresh allocation means any previously seen double-free at this address
+    // is now gone from the fastbin.  Reset the tracker so the address is freeable again.
+    if !result.is_null() {
+        LAST_HEAP_FREE.store(0, Ordering::Relaxed);
     }
     result
 }
@@ -1295,6 +1408,13 @@ pub unsafe extern "win64" fn heap_free(
     if addr >> 47 != 0 {
         return 0; // FALSE — invalid pointer
     }
+    // Detect consecutive double-frees: glibc aborts on "fasttop" when free() is
+    // called twice in a row on the same address.  Windows HeapFree returns FALSE
+    // silently for already-freed blocks (the UCRT relies on this for shared
+    // locale category pointers freed once per category in free_locinfo).
+    if LAST_HEAP_FREE.swap(addr, Ordering::Relaxed) == addr {
+        return 0; // FALSE — duplicate free, silently ignored per Windows semantics
+    }
     unsafe { libc::free(lp_mem) };
     1 // TRUE
 }
@@ -1314,7 +1434,6 @@ pub extern "win64" fn heap_size(
 ///
 /// Returns the same fake handle as HeapCreate (1usize).
 pub extern "win64" fn get_process_heap() -> usize {
-    eprintln!("weave: GetProcessHeap() → 1");
     1usize
 }
 
@@ -2316,8 +2435,7 @@ pub unsafe extern "win64" fn create_file_mapping_w(
             }
         };
         // Determine size: use caller-supplied size or fstat if zero.
-        let caller_size =
-            ((dw_maximum_size_high as usize) << 32) | dw_maximum_size_low as usize;
+        let caller_size = ((dw_maximum_size_high as usize) << 32) | dw_maximum_size_low as usize;
         let map_size = if caller_size != 0 {
             caller_size
         } else {
@@ -4698,8 +4816,22 @@ pub unsafe extern "win64" fn wait_for_multiple_objects(
 pub unsafe extern "win64" fn create_mutex_a(
     _lp_mutex_attributes: *const u8,
     _b_initial_owner: i32,
-    _lp_name: *const u8,
+    lp_name: *const u8,
 ) -> usize {
+    let name = if lp_name.is_null() {
+        "(anonymous)".to_string()
+    } else {
+        // Read ANSI name for logging only
+        let mut s = Vec::new();
+        let mut p = lp_name;
+        while unsafe { *p } != 0 {
+            s.push(unsafe { *p });
+            p = unsafe { p.add(1) };
+        }
+        String::from_utf8_lossy(&s).into_owned()
+    };
+    eprintln!("weave/kernel32: CreateMutexA({name:?}) → handle 1 (new)");
+    LAST_ERROR.with(|e| e.set(0)); // ERROR_SUCCESS — newly created, no duplicate
     1 // fake handle
 }
 
@@ -4707,14 +4839,30 @@ pub unsafe extern "win64" fn create_mutex_a(
 ///
 /// Same as CreateMutexA but accepts wide string name parameter.
 /// Ignores name, initial owner flag, and security attributes.
+/// Clears LastError to 0 (ERROR_SUCCESS) to signal a newly-created mutex —
+/// callers check GetLastError()==ERROR_ALREADY_EXISTS (183) for single-instance
+/// detection and must not see a stale error value here.
 ///
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
 pub unsafe extern "win64" fn create_mutex_w(
     _lp_mutex_attributes: *const u8,
     _b_initial_owner: i32,
-    _lp_name: *const u16,
+    lp_name: *const u16,
 ) -> usize {
+    let name = if lp_name.is_null() {
+        "(anonymous)".to_string()
+    } else {
+        let mut s = Vec::<u16>::new();
+        let mut p = lp_name;
+        while unsafe { *p } != 0 {
+            s.push(unsafe { *p });
+            p = unsafe { p.add(1) };
+        }
+        String::from_utf16_lossy(&s)
+    };
+    eprintln!("weave/kernel32: CreateMutexW({name:?}) → handle 1 (new)");
+    LAST_ERROR.with(|e| e.set(0)); // ERROR_SUCCESS — newly created, no duplicate
     1 // fake handle
 }
 
@@ -4743,10 +4891,23 @@ pub unsafe extern "win64" fn create_mutex_ex_a(
 /// Pointer arguments are accepted but not dereferenced.
 pub unsafe extern "win64" fn create_mutex_ex_w(
     _lp_mutex_attributes: *const u8,
-    _lp_name: *const u16,
+    lp_name: *const u16,
     _dw_flags: u32,
     _dw_desired_access: u32,
 ) -> usize {
+    let name = if lp_name.is_null() {
+        "(anonymous)".to_string()
+    } else {
+        let mut s = Vec::<u16>::new();
+        let mut p = lp_name;
+        while unsafe { *p } != 0 {
+            s.push(unsafe { *p });
+            p = unsafe { p.add(1) };
+        }
+        String::from_utf16_lossy(&s)
+    };
+    eprintln!("weave/kernel32: CreateMutexExW({name:?}) → handle 1 (new)");
+    LAST_ERROR.with(|e| e.set(0)); // ERROR_SUCCESS — newly created
     1 // fake handle
 }
 /// ReleaseMutex — no-op stub, returns TRUE.
@@ -6257,6 +6418,9 @@ pub unsafe extern "win64" fn free_environment_strings_a(_penv: *mut u8) -> i32 {
 
 // ── Locale functions ────────────────────────────────────────────────────────
 
+/// Flag: caller wants a binary DWORD in the buffer, not a string.
+const LOCALE_RETURN_NUMBER: u32 = 0x20000000;
+
 /// GetLocaleInfoW: retrieve locale information as UTF-16 string.
 ///
 /// # Safety
@@ -6267,7 +6431,25 @@ pub unsafe extern "win64" fn get_locale_info_w(
     lp_lc_data: *mut u16,
     cch_data: i32,
 ) -> i32 {
-    let lc_type_clean = lc_type & 0x000FFFFF; // strip LOCALE_RETURN_NUMBER flag
+    let want_number = (lc_type & LOCALE_RETURN_NUMBER) != 0;
+    // Strip all flag bits (RETURN_NUMBER=0x20000000, NOUSEROVERRIDE=0x80000000, etc.)
+    let lc_type_clean = lc_type & 0x000FFFFF;
+
+    if want_number {
+        // Wine ref: dlls/kernelbase/locale.c get_locale_info — when LOCALE_RETURN_NUMBER
+        // is set, write a binary DWORD into the buffer; cch_data must be 2 (DWORD/sizeof WCHAR).
+        // Always return 2 (success) even for unknown types — returning 0 triggers goto-fail
+        // in the UCRT's create_locinfo, which double-frees partially-initialised locale structs.
+        let num = locale_number_lookup(lc_type_clean);
+        if cch_data == 0 {
+            return 2; // required buffer size (1 DWORD = 2 WCHARs)
+        }
+        if cch_data >= 2 && !lp_lc_data.is_null() {
+            unsafe { std::ptr::write_unaligned(lp_lc_data as *mut u32, num) };
+        }
+        return 2;
+    }
+
     if let Some(value) = locale_info_lookup(lc_type_clean) {
         let wide_chars: Vec<u16> = format!("{}\0", value).encode_utf16().collect();
         let required_size = wide_chars.len() as i32;
@@ -6310,6 +6492,50 @@ pub unsafe extern "win64" fn get_locale_info_a(
         }
     }
     0 // failure
+}
+
+/// GetLocaleInfoEx: retrieve locale information by locale name (UTF-16 string).
+///
+/// Wine ref: dlls/kernelbase/locale.c — resolves locale name to LCID via
+/// get_locale_by_name, then delegates to get_locale_info with the same
+/// LCType/buffer/len params; returns 0 + ERROR_INVALID_PARAMETER for unknown names.
+/// We ignore the locale name and delegate to get_locale_info_w with the default locale.
+///
+/// # Safety
+/// `lp_locale_name` may be NULL (means system default). `lp_lc_data` must be valid for `cch_data` words.
+pub unsafe extern "win64" fn get_locale_info_ex(
+    _lp_locale_name: *const u16,
+    lc_type: u32,
+    lp_lc_data: *mut u16,
+    cch_data: i32,
+) -> i32 {
+    // Delegate to our existing GetLocaleInfoW using LOCALE_USER_DEFAULT (0x0400).
+    unsafe { get_locale_info_w(0x0400, lc_type, lp_lc_data, cch_data) }
+}
+
+/// GetUserDefaultLocaleName: return the user-default locale name as a UTF-16 string.
+///
+/// Wine ref: dlls/kernelbase/locale.c — calls get_locale_by_id(GetUserDefaultLCID()),
+/// copies locale->sname (e.g. "en-US") into buffer.
+///
+/// # Safety
+/// `lp_locale_name` must be a writable buffer of at least `cch_locale_name` u16 words.
+pub unsafe extern "win64" fn get_user_default_locale_name(
+    lp_locale_name: *mut u16,
+    cch_locale_name: i32,
+) -> i32 {
+    let name: Vec<u16> = "en-US\0".encode_utf16().collect(); // 6 chars including null
+    let required = name.len() as i32;
+    if cch_locale_name == 0 {
+        return required;
+    }
+    if cch_locale_name < required {
+        return 0;
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(name.as_ptr(), lp_locale_name, name.len());
+    }
+    required - 1 // exclude null terminator
 }
 
 /// Locale constant for English (United States).
@@ -7121,6 +7347,13 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         ),
         "GetLocaleInfoA" => Some(
             get_locale_info_a as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
+        ),
+        "GetLocaleInfoEx" => Some(
+            get_locale_info_ex as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
+        ),
+        "GetUserDefaultLocaleName" => Some(
+            get_user_default_locale_name as unsafe extern "win64" fn(_, _) -> _ as *const ()
+                as usize,
         ),
         // System info
         "GetSystemInfo" => {

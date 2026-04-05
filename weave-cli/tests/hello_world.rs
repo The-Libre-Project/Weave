@@ -298,15 +298,18 @@ fn notepad_plus_plus_portable_mode() {
 
 /// `weave i_view64.exe` — IrfanView 64-bit portable image viewer.
 ///
-/// Sprint 5 functional gate: IrfanView must reach GdiplusStartup (logged to
-/// stderr) without crashing on an unresolved gdiplus.dll import.
+/// Sprint 5 functional gate: IrfanView 4.73 (64-bit) must fully initialise its
+/// Win32 window, run its message loop, and exit cleanly when no display is
+/// available (headless Docker). IrfanView 4.73 x64 does NOT use gdiplus.dll;
+/// it imports KERNEL32, USER32, GDI32, ADVAPI32, SHELL32, COMCTL32 statically
+/// plus ole32/SHLWAPI/COMDLG32 via delay-load.
 ///
 /// The fixture is `tests/fixtures/irfanview/i_view64.exe`. It is not bundled
 /// in the repo — copy the IrfanView portable exe there before running in Docker.
 /// The test is skipped gracefully if the file is absent (CI still passes).
 ///
-/// In headless Docker, IrfanView detects no display and exits. We cap at 15 s,
-/// kill if it hangs, then inspect stderr.
+/// In headless Docker, IrfanView detects no display and exits with code 0.
+/// We cap at 15 s, kill if it hangs, then inspect stderr.
 #[test]
 fn irfanview_gdip_startup_reached() {
     if !cfg!(target_os = "linux") {
@@ -364,11 +367,13 @@ fn irfanview_gdip_startup_reached() {
         "import resolution did not complete — possible crash during IAT patch.\nstderr: {stderr}"
     );
 
-    // GdiplusStartup must be called — this is the primary Sprint 5 functional gate.
-    // If it does not appear, gdiplus.dll is not being resolved at all.
+    // Sprint 5 functional gate: IrfanView 4.73 64-bit must reach its Win32
+    // message loop and exit cleanly when no display is available (headless Docker).
+    // GetMessageW returning WM_QUIT proves: IAT patch succeeded, RegisterClassExW
+    // and CreateWindowExW ran, COM initialised, and the message pump started.
     assert!(
-        stderr.contains("weave/gdiplus: GdiplusStartup"),
-        "GdiplusStartup was never called — gdiplus.dll imports are not resolving.\nstderr: {stderr}"
+        stderr.contains("weave/user32: GetMessageW → WM_QUIT (no display)"),
+        "IrfanView message loop was never reached — startup crashed before GetMessageW.\nstderr: {stderr}"
     );
 }
 

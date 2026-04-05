@@ -299,11 +299,14 @@ pub unsafe extern "win64" fn iid_from_string(lpsz: *const u16, piid: *mut u8) ->
 
 /// OleInitialize: initialise OLE on the calling thread (STA).
 pub extern "win64" fn ole_initialize(pv_reserved: usize) -> u32 {
-    co_initialize(pv_reserved)
+    let result = co_initialize(pv_reserved);
+    eprintln!("weave/ole32: OleInitialize → {result:#010x}");
+    result
 }
 
 /// OleUninitialize: uninitialise OLE on the calling thread.
 pub extern "win64" fn ole_uninitialize() {
+    eprintln!("weave/ole32: OleUninitialize");
     co_uninitialize();
 }
 
@@ -432,15 +435,20 @@ pub unsafe extern "win64" fn release_stg_medium(_pmedium: *mut u8) {}
 ///
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
-pub unsafe extern "win64" fn register_drag_drop(_hwnd: usize, _p_drop_target: *mut u8) -> i32 {
-    0x8000_4001u32 as i32 // E_NOTIMPL
+pub unsafe extern "win64" fn register_drag_drop(hwnd: usize, _p_drop_target: *mut u8) -> i32 {
+    // Wine ref: dlls/ole32/ole2.c — returns CO_E_NOTINITIALIZED if no STA,
+    // DRAGDROP_E_ALREADYREGISTERED if already registered, S_OK on success.
+    // Weave stub: always succeeds — no real drop events are ever delivered.
+    eprintln!("weave/ole32: RegisterDragDrop(hwnd={hwnd:#x}) → S_OK");
+    0 // S_OK
 }
 
 /// RevokeDragDrop — revoke a window's drag-drop registration. Returns S_OK.
 ///
 /// # Safety
 /// No pointer dereferences.
-pub unsafe extern "win64" fn revoke_drag_drop(_hwnd: usize) -> i32 {
+pub unsafe extern "win64" fn revoke_drag_drop(hwnd: usize) -> i32 {
+    eprintln!("weave/ole32: RevokeDragDrop(hwnd={hwnd:#x}) → S_OK");
     0 // S_OK
 }
 
