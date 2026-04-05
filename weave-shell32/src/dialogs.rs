@@ -222,6 +222,11 @@ pub unsafe extern "win64" fn choose_color_a(_lp_cc: *mut u8) -> i32 {
     0
 }
 
+// Wine ref: dlls/comdlg32/filedlg.c:4167 — validates lStructSize first (CDERR_STRUCTSIZE if wrong);
+// OFN_FILEMUSTEXIST implies OFN_PATHMUSTEXIST; writes selected path(s) into ofn->lpstrFile
+// (null-separated for OFN_ALLOWMULTISELECT); sets CommDlgExtendedError on failure.
+// Known gap: Weave uses zenity/kdialog subprocess; no OFN_ALLOWMULTISELECT; no filter; no
+// lStructSize validation; CommDlgExtendedError always 0.
 /// GetOpenFileNameW: display the system Open dialog box.
 ///
 /// Returns TRUE if the user selects a file; FALSE if cancelled or on error.
@@ -269,6 +274,9 @@ pub extern "win64" fn comm_dlg_extended_error() -> u32 {
     0
 }
 
+// Wine ref: dlls/comdlg32/filedlg.c — same structure as GetOpenFileNameW; automatically
+// appends lpstrDefExt if typed filename has no extension and OFN_EXTENSIONDIFFERENT is set.
+// Weave handles lpstrDefExt extension appending — behaviorally correct for that case.
 /// GetSaveFileNameW: display the system Save dialog box.
 ///
 /// Returns TRUE if the user selects a filename; FALSE if cancelled or on error.

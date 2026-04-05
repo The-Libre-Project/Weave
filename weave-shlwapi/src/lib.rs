@@ -15,7 +15,9 @@ unsafe fn read_wide(p: *const u16) -> Vec<u16> {
         return Vec::new();
     }
     let mut len = 0usize;
-    while unsafe { *p.add(len) } != 0 {
+    // Pointer validation: cap to prevent OOB read from unterminated strings.
+    const MAX_LEN: usize = 65_536;
+    while len < MAX_LEN && unsafe { *p.add(len) } != 0 {
         len += 1;
     }
     unsafe { std::slice::from_raw_parts(p, len) }.to_vec()

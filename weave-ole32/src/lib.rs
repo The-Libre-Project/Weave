@@ -273,7 +273,9 @@ pub unsafe extern "win64" fn clsid_from_string(lpsz: *const u16, pclsid: *mut u8
         return E_INVALIDARG;
     }
     let mut len = 0usize;
-    while unsafe { *lpsz.add(len) } != 0 {
+    // Pointer validation: GUID strings are at most ~40 chars; cap at 256.
+    const MAX_LEN: usize = 256;
+    while len < MAX_LEN && unsafe { *lpsz.add(len) } != 0 {
         len += 1;
     }
     let slice = unsafe { std::slice::from_raw_parts(lpsz, len) };

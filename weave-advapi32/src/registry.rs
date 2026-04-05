@@ -85,6 +85,9 @@ unsafe fn decode_narrow_ptr(ptr: *const u8) -> String {
 
 // ── RegOpenKeyExW ─────────────────────────────────────────────────────────────
 
+// Wine ref: dlls/kernelbase/registry.c:644 — if retkey is null returns ERROR_INVALID_PARAMETER
+// (not ERROR_INVALID_HANDLE); if name is empty AND hkey is a predefined root, sets *retkey=hkey
+// and returns ERROR_SUCCESS directly (no syscall); strips leading backslash for HKCU_CLASSES_ROOT.
 /// RegOpenKeyExW: open a registry key and return a handle.
 ///
 /// Returns `ERROR_SUCCESS` on success. The new handle is written to `phk_result`.
@@ -101,7 +104,7 @@ pub unsafe extern "win64" fn reg_open_key_ex_w(
 ) -> i32 {
     let _ = ul_options;
     if phk_result.is_null() {
-        return ERROR_INVALID_HANDLE;
+        return ERROR_INVALID_PARAMETER; // Wine: ERROR_INVALID_PARAMETER (not ERROR_INVALID_HANDLE)
     }
 
     let base_path = match key_to_path(h_key) {
@@ -126,6 +129,9 @@ pub unsafe extern "win64" fn reg_open_key_ex_w(
 
 // ── RegCreateKeyExW ───────────────────────────────────────────────────────────
 
+// Wine ref: dlls/kernelbase/registry.c:566 — if retkey is null returns ERROR_BADKEY (1010);
+// if reserved != 0 returns ERROR_INVALID_PARAMETER; calls create_key() which calls
+// NtCreateKey; writes REG_CREATED_NEW_KEY (1) or REG_OPENED_EXISTING_KEY (2) to *dispos.
 /// RegCreateKeyExW: open an existing key or create it if it doesn't exist.
 ///
 /// `lp_class`, `dw_options`, `sam_desired`, `lp_security_attrs` are ignored.
@@ -147,7 +153,7 @@ pub unsafe extern "win64" fn reg_create_key_ex_w(
     lpdw_disposition: *mut u32,
 ) -> i32 {
     if phk_result.is_null() {
-        return ERROR_INVALID_HANDLE;
+        return 1010; // ERROR_BADKEY — Wine returns this, not ERROR_INVALID_HANDLE
     }
 
     let base_path = match key_to_path(h_key) {
@@ -183,6 +189,10 @@ pub unsafe extern "win64" fn reg_create_key_ex_w(
 
 // ── RegQueryValueExW ──────────────────────────────────────────────────────────
 
+// Wine ref: dlls/kernelbase/registry.c:1636 — (data && !count) || reserved → ERROR_INVALID_PARAMETER;
+// for REG_SZ/REG_EXPAND_SZ, appends a null WCHAR if the stored data doesn't end with one and
+// there's room in the buffer; fills *type and *count on success and on ERROR_MORE_DATA;
+// calls NtQueryValueKey via KEY_VALUE_PARTIAL_INFORMATION.
 /// RegQueryValueExW: read a registry value.
 ///
 /// If `lp_data` is null (or `lpcb_data` points to 0), fills `lp_type` and
@@ -282,6 +292,11 @@ pub unsafe extern "win64" fn reg_query_value_ex_w(
 
 // ── RegSetValueExW ────────────────────────────────────────────────────────────
 
+// Wine ref: dlls/kernelbase/registry.c:1209 — if (!data && count) returns ERROR_NOACCESS;
+// auto-appends null WCHAR terminator for string types if count doesn't include it;
+// calls NtSetValueKey. Weave returns ERROR_FILE_NOT_FOUND for null data+nonzero count;
+// should be ERROR_NOACCESS.
+// Known gap: Weave returns ERROR_FILE_NOT_FOUND for null data; Wine returns ERROR_NOACCESS.
 /// RegSetValueExW: write a registry value.
 ///
 /// # Safety
@@ -334,6 +349,8 @@ pub unsafe extern "win64" fn reg_set_value_ex_w(
 
 // ── RegDeleteValueW ───────────────────────────────────────────────────────────
 
+// Wine ref: dlls/kernelbase/registry.c — calls NtDeleteValueKey(hkey, &nameW);
+// null value name deletes the default value ("").
 /// RegDeleteValueW: delete a named value from an open key.
 ///
 /// # Safety
@@ -358,11 +375,18 @@ pub unsafe extern "win64" fn reg_delete_value_w(h_key: usize, lp_value_name: *co
 
 // ── RegCloseKey ───────────────────────────────────────────────────────────────
 
+// Wine ref: dlls/kernelbase/registry.c:1129 — if hkey == NULL returns ERROR_INVALID_HANDLE;
+// if hkey >= 0x80000000 (predefined root) returns ERROR_SUCCESS immediately without NtClose;
+// otherwise calls NtClose(hkey). Weave previously didn't check for NULL handle.
 /// RegCloseKey: close a registry key handle.
 ///
 /// Predefined handles (HKLM, HKCU, etc.) are always valid and closing them is
 /// a no-op that returns `ERROR_SUCCESS`.
 pub extern "win64" fn reg_close_key(h_key: usize) -> i32 {
+    // Wine: NULL handle → ERROR_INVALID_HANDLE
+    if h_key == 0 {
+        return ERROR_INVALID_HANDLE;
+    }
     // Predefined handles do not live in the table — silently succeed.
     if predefined_hive_path(h_key).is_some() {
         return ERROR_SUCCESS;
@@ -374,6 +398,11 @@ pub extern "win64" fn reg_close_key(h_key: usize) -> i32 {
 
 // ── RegQueryInfoKeyW ──────────────────────────────────────────────────────────
 
+// Wine ref: dlls/kernelbase/registry.c:957 — if class != null && !class_len on WinNT returns
+// ERROR_INVALID_PARAMETER; calls NtQueryKey(KeyFullInformation) which returns subkey count,
+// value count, class name, max key/value sizes, and last write time.
+// Known gap: Weave reads the filesystem (counts files/dirs) instead of a proper registry store;
+// lp_ft_last_write_time always left as caller's value (not written); max_subkey_len not filled.
 /// RegQueryInfoKeyW: return metadata about a key (subkey count, value count, …).
 ///
 /// Phase 2: only fills in the value count and the max value name/data sizes.
@@ -443,6 +472,10 @@ pub unsafe extern "win64" fn reg_query_info_key_w(
 
 // ── RegEnumValueW ─────────────────────────────────────────────────────────────
 
+// Wine ref: dlls/kernelbase/registry.c:2144 — returns ERROR_INVALID_PARAMETER when
+// (data && !count) || reserved || !value || !val_count; calls NtEnumerateValueKey with
+// KeyValueFullInformation; val_count is in WCHAR units (not bytes); fills *val_count with
+// the number of chars (excluding null) on success.
 /// RegEnumValueW: enumerate the values of an open registry key.
 ///
 /// `dw_index` is the zero-based index of the value to retrieve. Returns
@@ -462,6 +495,11 @@ pub unsafe extern "win64" fn reg_enum_value_w(
     lpcb_data: *mut u32,
 ) -> i32 {
     const ERROR_NO_MORE_ITEMS: i32 = 259;
+
+    // Wine: !value || !val_count → ERROR_INVALID_PARAMETER
+    if lp_value_name.is_null() || lpcb_value_name.is_null() {
+        return ERROR_INVALID_PARAMETER;
+    }
 
     let key_path = match key_to_path(h_key) {
         Some(p) => p,
@@ -500,9 +538,7 @@ pub unsafe extern "win64" fn reg_enum_value_w(
     let name_wide: Vec<u16> = display_name.encode_utf16().collect();
     let name_chars_needed = name_wide.len() as u32 + 1; // +1 for null
 
-    if lpcb_value_name.is_null() {
-        return ERROR_INVALID_HANDLE;
-    }
+    // lpcb_value_name null already checked above (ERROR_INVALID_PARAMETER)
     let buf_chars = unsafe { *lpcb_value_name };
     unsafe { *lpcb_value_name = name_chars_needed };
 
@@ -544,6 +580,9 @@ pub unsafe extern "win64" fn reg_enum_value_w(
 
 // ── RegDeleteKeyW ─────────────────────────────────────────────────────────────
 
+// Wine ref: dlls/kernelbase/registry.c — calls RegOpenKeyExW to get child handle,
+// then NtDeleteKey; if the key has subkeys, must delete them first (Wine does this
+// iteratively). Known gap: Weave uses remove_dir_all which handles recursion on the filesystem.
 /// RegDeleteKeyW: delete a registry key and all its subkeys/values.
 ///
 /// # Safety
@@ -573,6 +612,10 @@ pub unsafe extern "win64" fn reg_delete_key_w(h_key: usize, lp_sub_key: *const u
 
 // ── RegEnumKeyExW ─────────────────────────────────────────────────────────────
 
+// Wine ref: dlls/kernelbase/registry.c — calls NtEnumerateKey(KeyBasicInformation);
+// returns ERROR_NO_MORE_ITEMS (259) when index out of range; writes subkey name
+// (without path) into lp_name. lpcch_name is char count including null on input,
+// set to char count excluding null on output.
 /// RegEnumKeyExW: enumerate the subkeys of an open registry key.
 ///
 /// # Safety
@@ -765,6 +808,9 @@ pub unsafe extern "win64" fn reg_enum_key_a(
 
 // ── OpenProcessToken ──────────────────────────────────────────────────────────
 
+// Wine ref: dlls/kernelbase/security.c:828 — calls NtOpenProcessToken(process, access, handle);
+// returns TRUE on success, FALSE + SetLastError on failure. Weave always returns FALSE (no token
+// support); apps that need a token for privilege escalation will fail, which is acceptable.
 /// OpenProcessToken: open the access token associated with a process.
 ///
 /// Returns FALSE (0). No real process tokens are supported.
@@ -781,6 +827,10 @@ pub unsafe extern "win64" fn open_process_token(
 
 // ── LookupPrivilegeValueW ─────────────────────────────────────────────────────
 
+// Wine ref: dlls/kernelbase/security.c — reads privilege LUID from registry
+// HKLM\SYSTEM\CurrentControlSet\Control\Lsa\Data. Weave stubs this as FALSE;
+// apps that call it for privilege checks (e.g. SeDebugPrivilege) will get FALSE
+// and must handle that gracefully.
 /// LookupPrivilegeValueW: retrieve the locally unique identifier (LUID) for a privilege.
 ///
 /// Returns FALSE (0). Privilege lookup is not supported.
@@ -797,6 +847,9 @@ pub unsafe extern "win64" fn lookup_privilege_value_w(
 
 // ── AdjustTokenPrivileges ─────────────────────────────────────────────────────
 
+// Wine ref: dlls/kernelbase/security.c — calls NtAdjustPrivilegesToken; returns TRUE even if
+// not all privileges were assigned (caller must check GetLastError for ERROR_NOT_ALL_ASSIGNED).
+// Weave returns TRUE unconditionally (no-op) — acceptable since we have no real token.
 /// AdjustTokenPrivileges: enable or disable privileges in the specified access token.
 ///
 /// Returns TRUE (1). No-op implementation.

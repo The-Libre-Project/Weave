@@ -164,6 +164,9 @@ fn decode_wide_slice(s: &[u16]) -> String {
     String::from_utf16_lossy(&s[..end])
 }
 
+// Wine ref: dlls/shell32/systray.c — Shell_NotifyIconW routes to the tray window via
+// SendNotifyMessage; balloon tip text (NIM_MODIFY + NIF_INFO + szInfo) is displayed
+// using the system balloon tip mechanism. Weave uses notify-send as a Linux equivalent.
 /// Shell_NotifyIconW: add, modify, or delete a taskbar notification icon.
 ///
 /// Weave maps balloon tips (NIM_MODIFY + NIF_INFO) to Linux desktop
@@ -194,6 +197,11 @@ pub unsafe extern "win64" fn shell_notify_icon_w(
 
 // ── Win32 API functions ───────────────────────────────────────────────────────
 
+// Wine ref: dlls/shell32/shellpath.c:2862 — delegates to SHGetFolderPathAndSubDirW which
+// reads from registry (User Shell Folders / Shell Folders) with %USERPROFILE% expansion;
+// converts ERROR_PATH_NOT_FOUND → ERROR_FILE_NOT_FOUND in the result; creates directory
+// if CSIDL_FLAG_CREATE (0x8000) is set in nFolder. Weave uses hardcoded paths — acceptable
+// since we're a synthetic environment with a fixed prefix layout.
 /// SHGetFolderPathW: return the path of a special shell folder.
 ///
 /// Supports the most common CSIDL values. Returns `S_OK` (0) on success,
@@ -221,6 +229,9 @@ pub unsafe extern "win64" fn sh_get_folder_path_w(
     }
 }
 
+// Wine ref: dlls/shell32/shellpath.c — SHGetSpecialFolderPathW wraps SHGetFolderPathW
+// with SHGFP_TYPE_CURRENT; uses SHGetFolderPathA/W depending on Unicode flag.
+// Returns TRUE/FALSE (not HRESULT) — same as Weave's impl.
 /// SHGetSpecialFolderPathW: older variant of SHGetFolderPathW.
 ///
 /// # Safety
@@ -244,6 +255,11 @@ pub unsafe extern "win64" fn sh_get_special_folder_path_w(
     }
 }
 
+// Wine ref: dlls/shell32/shellpath.c:3552 — zeroes *ret_path before any work; converts GUID
+// to CSIDL via csidl_from_id(), validates flags (E_INVALIDARG for unknown flag bits); allocates
+// with CoTaskMemAlloc (caller must free with CoTaskMemFree). Returns E_POINTER if rfid/ret_path
+// null; HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND) for unknown GUIDs.
+// Weave allocates with libc::malloc — compatible since co_task_mem_free uses libc::free.
 /// SHGetKnownFolderPath: retrieve the full path of a known folder by GUID.
 ///
 /// Allocates the result with `CoTaskMemAlloc` (emulated as a malloc'd buffer).
@@ -290,6 +306,10 @@ pub unsafe extern "win64" fn sh_get_known_folder_path(
     }
 }
 
+// Wine ref: dlls/shell32/brsfolder.c — SHBrowseForFolderW creates a dialog via DialogBoxParamW;
+// returns a PIDL (Shell Item ID List) allocated by CoTaskMemAlloc, or NULL if user cancelled.
+// Callers always check return value before calling SHGetPathFromIDListW. Weave returns NULL
+// (cancel) which apps handle as "user cancelled" — functionally correct as a stub.
 /// SHBrowseForFolderW: display a folder browser dialog.
 ///
 /// Returns NULL (no folder selected / not implemented). Callers must handle
@@ -349,6 +369,9 @@ pub unsafe extern "win64" fn drag_query_file_w(
 /// No-op.
 pub extern "win64" fn drag_finish(_h_drop: usize) {}
 
+// Wine ref: dlls/ole32/ifs.c — CoTaskMemFree calls IMalloc::Free on the task allocator;
+// the task allocator wraps HeapFree(GetProcessHeap(), ...). NULL pointer is a no-op.
+// Weave uses libc::free since SHGetKnownFolderPath allocates with libc::malloc — correct.
 /// CoTaskMemFree: free memory allocated by COM task allocator.
 ///
 /// In Weave, CoTaskMemAlloc == libc malloc, so we just call libc::free.
@@ -358,6 +381,10 @@ pub extern "win64" fn co_task_mem_free(pv: *mut u8) {
     }
 }
 
+// Wine ref: dlls/shell32/shlexec.c:2064 — builds SHELLEXECUTEINFOW, calls SHELL_execute
+// then ShellExecuteExW; returns sei.hInstApp which is the module instance if launched or
+// an error code ≤ 32 on failure. Any return value > 32 means success.
+// Known gap: Weave always returns 33 (success) without actually launching anything.
 /// ShellExecuteW: perform an operation on a file (open, run, etc.).
 ///
 /// Phase 2 stub: logs the operation and returns a fake HINSTANCE > 32
@@ -394,6 +421,12 @@ pub unsafe extern "win64" fn shell_execute_a(
     33 // SE_ERR_SUCCESS
 }
 
+// Wine ref: dlls/shcore/main.c:292 — if !numargs sets ERROR_INVALID_PARAMETER; if cmdline
+// is empty, returns argv[0] = GetModuleFileName() (the executable path); handles backslash
+// escape sequences inside double-quoted args (\\→\, \"→"); first arg (exe path) follows
+// different quoting rules (only double-quote terminates, no backslash escape).
+// Known gap: Weave's tokeniser doesn't handle backslash escapes; empty cmdline returns NULL
+// instead of [executable_path].
 /// CommandLineToArgvW: parse a command-line string into an argv array.
 ///
 /// Returns a pointer to an array of wide string pointers allocated with a
@@ -463,7 +496,9 @@ unsafe fn decode_wide_opt(p: *const u16) -> Option<String> {
         return None;
     }
     let mut len = 0usize;
-    while unsafe { *p.add(len) } != 0 {
+    // Pointer validation: cap to prevent OOB read from unterminated input.
+    const MAX_LEN: usize = 65_536;
+    while len < MAX_LEN && unsafe { *p.add(len) } != 0 {
         len += 1;
     }
     let slice = unsafe { std::slice::from_raw_parts(p, len) };

@@ -34,7 +34,9 @@ pub unsafe extern "win64" fn sys_alloc_string(psz: *const u16) -> *mut u16 {
         return std::ptr::null_mut();
     }
     let mut len = 0usize;
-    while unsafe { *psz.add(len) } != 0 {
+    // Pointer validation: cap to prevent OOB read and huge allocations.
+    const MAX_BSTR_LEN: usize = 65_536;
+    while len < MAX_BSTR_LEN && unsafe { *psz.add(len) } != 0 {
         len += 1;
     }
     let byte_len = len * 2;

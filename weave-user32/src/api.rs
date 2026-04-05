@@ -89,6 +89,11 @@ fn name_to_atom(name: &str) -> u16 {
 
 /// CreateWindowExW: create a new window.
 ///
+/// Wine ref: dlls/user32/win.c::CreateWindowExW — fills a CREATESTRUCTW and delegates to
+/// wow_handlers.create_window; dwExStyle is stored in cs.dwExStyle and must be preserved
+/// in the window object for GetWindowLong(GWL_EXSTYLE) to return the correct value.
+/// Sends WM_NCCREATE then WM_CREATE with a pointer to CREATESTRUCTW as lParam.
+///
 /// # Safety
 /// `lp_class_name` and `lp_window_name` (if non-null) must be valid
 /// null-terminated UTF-16 strings.
@@ -144,6 +149,8 @@ pub unsafe extern "win64" fn create_window_ex_w(
         wnd_proc: cls.wnd_proc,
         title: title.clone(),
         style: dw_style,
+        ex_style: dw_ex_style,
+        user_data: 0,
         x: pos_x,
         y: pos_y,
         width,
@@ -189,6 +196,10 @@ pub unsafe extern "win64" fn create_window_ex_w(
 /// ShowWindow: show, hide, or change the state of a window.
 ///
 /// Returns the previous visibility state as a BOOL.
+// Wine ref: dlls/win32u/window.c::show_window — returns was_visible; sends WM_SHOWWINDOW
+// before changing visibility; handles SW_HIDE, SW_MINIMIZE, SW_MAXIMIZE, SW_RESTORE, etc.
+// TODO Wine ref gap: WM_SHOWWINDOW not sent before show/hide (Phase 4); SW_MINIMIZE/MAXIMIZE
+// not handled (treated as show).
 pub extern "win64" fn show_window(hwnd: usize, n_cmd_show: i32) -> i32 {
     let was_visible = window::with(hwnd, |e| e.visible).unwrap_or(false);
 
@@ -222,14 +233,16 @@ pub extern "win64" fn update_window(hwnd: usize) -> i32 {
 
 // ── DestroyWindow ─────────────────────────────────────────────────────────────
 
-/// DestroyWindow: destroy a window and post WM_DESTROY.
+// Wine ref: dlls/win32u/window.c::user_destroy_window — sends WM_DESTROY first via
+// send_destroy_message, then WM_NCDESTROY inside destroy_window. WM_NCDESTROY is always
+// the last message a window receives; WM_DESTROY precedes it.
 pub extern "win64" fn destroy_window(hwnd: usize) -> i32 {
     let xcb = window::xcb_id(hwnd);
 
-    // Call WM_DESTROY via the window's WNDPROC before removing it.
+    // WM_DESTROY first, then WM_NCDESTROY (Wine order: send_destroy_message → destroy_window).
     if let Some(proc_addr) = window::with(hwnd, |e| e.wnd_proc) {
-        call_wnd_proc(proc_addr, hwnd, WM_NCDESTROY, 0, 0);
         call_wnd_proc(proc_addr, hwnd, WM_DESTROY, 0, 0);
+        call_wnd_proc(proc_addr, hwnd, WM_NCDESTROY, 0, 0);
     }
 
     backend::destroy_window(xcb);
@@ -245,6 +258,10 @@ pub extern "win64" fn destroy_window(hwnd: usize) -> i32 {
 /// - `> 0` — a message was retrieved (not WM_QUIT)
 /// - `0`   — WM_QUIT was retrieved
 /// - `-1`  — error (invalid hwnd filter, or connection lost)
+///
+/// Wine ref: dlls/win32u/message.c — GetMessageW calls NtUserGetMessage which blocks on the
+/// server queue; WM_QUIT returns 0; null lp_msg → returns -1. hwnd/filter params narrow which
+/// messages are returned; Weave ignores filters (Phase 4 gap).
 ///
 /// # Safety
 /// `lp_msg` must be a valid writable pointer to a `MSG`-sized buffer (48 bytes).
@@ -284,6 +301,10 @@ pub unsafe extern "win64" fn get_message_w(
 }
 
 /// PeekMessageW: check for messages without blocking.
+///
+/// Wine ref: dlls/win32u/message.c — PeekMessageW calls NtUserPeekMessage; PM_NOREMOVE (0)
+/// peeks without removing; PM_REMOVE (1) pops; returns non-zero if a message is available.
+/// Returns 0 (no message) without blocking, unlike GetMessage.
 ///
 /// # Safety
 /// `lp_msg` must be a valid writable pointer to a `MSG`-sized buffer.
@@ -422,6 +443,8 @@ pub unsafe extern "win64" fn translate_message(lp_msg: *const Msg) -> i32 {
 ///
 /// # Safety
 /// `lp_msg` must point to a valid `MSG`.
+// Wine ref: dlls/user32/message.c::dispatch_message — calls NtUserMessageCall to get dispatch
+// params then dispatch_win_proc_params; WM_QUIT is never dispatched to a WNDPROC.
 pub unsafe extern "win64" fn dispatch_message_w(lp_msg: *const Msg) -> isize {
     if lp_msg.is_null() {
         return 0;
@@ -445,6 +468,9 @@ pub unsafe extern "win64" fn dispatch_message_w(lp_msg: *const Msg) -> isize {
 
 /// PostQuitMessage: post a WM_QUIT message to the calling thread's message queue.
 ///
+/// Wine ref: dlls/win32u/message.c:3986 — sends post_quit_message server request with
+/// exit_code as wParam; WM_QUIT is thread-local and not associated with any window (hwnd=0).
+///
 /// `n_exit_code` becomes the wParam of the WM_QUIT message.
 pub extern "win64" fn post_quit_message(n_exit_code: i32) {
     eprintln!("weave/user32: PostQuitMessage({n_exit_code})");
@@ -460,6 +486,9 @@ pub extern "win64" fn post_quit_message(n_exit_code: i32) {
 }
 
 /// PostMessageW: post a message to a window's message queue without blocking.
+///
+/// Wine ref: server/queue.c::post_message — appends message to queue; returns TRUE if the
+/// window exists. HWND_BROADCAST (0xFFFF) posts to all top-level windows (not implemented).
 ///
 /// Returns TRUE on success.
 pub extern "win64" fn post_message_w(hwnd: usize, msg: u32, w_param: usize, l_param: isize) -> i32 {
@@ -477,6 +506,10 @@ pub extern "win64" fn post_message_w(hwnd: usize, msg: u32, w_param: usize, l_pa
 
 /// SendMessageW: send a message directly to the WNDPROC, bypassing the queue.
 ///
+/// Wine ref: dlls/win32u/message.c::send_window_message — sets up send_message_info with
+/// MSG_UNICODE type and calls process_message; blocks until WNDPROC returns. For cross-thread
+/// sends, Wine uses a server round-trip; Weave calls the WNDPROC directly (single-threaded).
+///
 /// Blocks until the WNDPROC returns.
 pub extern "win64" fn send_message_w(
     hwnd: usize,
@@ -493,8 +526,13 @@ pub extern "win64" fn send_message_w(
 
 // ── DefWindowProcW ────────────────────────────────────────────────────────────
 
-/// DefWindowProcW: default message handling for messages the application
-/// does not process.
+/// DefWindowProcW: default message handling for messages the application does not process.
+///
+/// Wine ref: dlls/win32u/defwnd.c — WM_CLOSE calls NtUserDestroyWindow; WM_DESTROY does NOT
+/// post WM_QUIT unless this is the last top-level window (Weave simplifies: always posts quit).
+/// WM_NCCREATE returns TRUE to allow window creation to proceed. WM_NCHITTEST returns HTCLIENT.
+/// WM_PAINT: calls BeginPaint/EndPaint to validate the update region.
+/// TODO Wine ref gap: WM_DESTROY should only PostQuitMessage for last top-level window.
 ///
 /// Key behaviours:
 ///   WM_CLOSE   → calls DestroyWindow
@@ -643,6 +681,9 @@ pub unsafe extern "win64" fn get_window_text_w(
 ///
 /// # Safety
 /// `lp_paint` must point to a valid `PAINTSTRUCT`.
+// Wine ref: dlls/win32u/painting.c::NtUserBeginPaint — validates the update region by clearing
+// the WM_PAINT pending flag; returns an HDC clipped to the update region; sets fErase if the
+// background was erased. Weave returns hwnd as a fake HDC (Phase 2 gap: no real DC or region).
 pub unsafe extern "win64" fn begin_paint(hwnd: usize, lp_paint: *mut PaintStruct) -> usize {
     if !lp_paint.is_null() {
         unsafe {
@@ -680,7 +721,10 @@ pub unsafe extern "win64" fn end_paint(_hwnd: usize, _lp_paint: *const PaintStru
 
 /// GetSystemMetrics: return various system dimension/capability values.
 ///
-/// Returns reasonable values for a typical Linux desktop.
+/// Wine ref: dlls/win32u/sysparams.c::get_system_metrics — SM_CXSCREEN/SM_CYSCREEN from
+/// primary monitor rect; SM_CXBORDER/SM_CYBORDER always 1 ("regardless of BorderWidth in
+/// registry"); SM_CXEDGE/SM_CYEDGE = SM_CXBORDER+1 = 2; SM_CXFRAME/SM_CYFRAME =
+/// SM_CXDLGFRAME(3) + max(border,1) = 4; SM_CXICON/SM_CYICON = map_to_dpi(32,...).
 pub extern "win64" fn get_system_metrics(n_index: i32) -> i32 {
     let (sw, sh) = backend::screen_size();
     match n_index {
@@ -695,6 +739,10 @@ pub extern "win64" fn get_system_metrics(n_index: i32) -> i32 {
         SM_CYCAPTION => 23,
         SM_CXFRAME => 4,
         SM_CYFRAME => 4,
+        SM_CXBORDER => 1, // Wine: always 1 regardless of registry BorderWidth
+        SM_CYBORDER => 1,
+        SM_CXEDGE => 2, // Wine: SM_CXBORDER + 1
+        SM_CYEDGE => 2,
         _ => 0,
     }
 }
@@ -991,27 +1039,37 @@ pub unsafe extern "win64" fn enum_display_monitors(
 
 const GWL_WNDPROC: i32 = -4;
 const GWL_STYLE: i32 = -16;
-#[allow(dead_code)]
 const GWL_EXSTYLE: i32 = -20;
+const GWLP_USERDATA: i32 = -21;
 
+// Wine ref: dlls/win32u/window.c — get_window_long_size dispatches on offset; GWL_EXSTYLE
+// returns the extended style stored at creation; GWLP_USERDATA returns per-window app data.
 pub extern "win64" fn get_window_long_w(hwnd: usize, n_index: i32) -> i32 {
     window::with(hwnd, |w| match n_index {
         GWL_STYLE => w.style as i32,
+        GWL_EXSTYLE => w.ex_style as i32,
         GWL_WNDPROC => w.wnd_proc as i32,
+        GWLP_USERDATA => w.user_data as i32,
         _ => 0,
     })
     .unwrap_or(0)
 }
 
+// Wine ref: dlls/win32u/window.c — GetWindowLongPtrW is a 64-bit version of GetWindowLongW;
+// GWLP_USERDATA returns the full pointer-width value.
 pub extern "win64" fn get_window_long_ptr_w(hwnd: usize, n_index: i32) -> isize {
     window::with(hwnd, |w| match n_index {
         GWL_STYLE => w.style as isize,
+        GWL_EXSTYLE => w.ex_style as isize,
         GWL_WNDPROC => w.wnd_proc as isize,
+        GWLP_USERDATA => w.user_data,
         _ => 0,
     })
     .unwrap_or(0)
 }
 
+// Wine ref: dlls/win32u/window.c — SetWindowLongW returns the previous value; triggers
+// WM_STYLECHANGING/WM_STYLECHANGED for GWL_STYLE (not implemented here — Phase 4 gap).
 pub extern "win64" fn set_window_long_w(hwnd: usize, n_index: i32, dw_new_long: i32) -> i32 {
     match n_index {
         GWL_STYLE => window::with_mut(hwnd, |w| {
@@ -1020,10 +1078,24 @@ pub extern "win64" fn set_window_long_w(hwnd: usize, n_index: i32, dw_new_long: 
             old
         })
         .unwrap_or(0),
+        GWL_EXSTYLE => window::with_mut(hwnd, |w| {
+            let old = w.ex_style as i32;
+            w.ex_style = dw_new_long as u32;
+            old
+        })
+        .unwrap_or(0),
+        GWLP_USERDATA => window::with_mut(hwnd, |w| {
+            let old = w.user_data as i32;
+            w.user_data = dw_new_long as isize;
+            old
+        })
+        .unwrap_or(0),
         _ => 0,
     }
 }
 
+// Wine ref: dlls/win32u/window.c — SetWindowLongPtrW is the 64-bit version; GWLP_WNDPROC
+// changes the window procedure and returns the old one.
 pub extern "win64" fn set_window_long_ptr_w(
     hwnd: usize,
     n_index: i32,
@@ -1036,9 +1108,21 @@ pub extern "win64" fn set_window_long_ptr_w(
             old
         })
         .unwrap_or(0),
+        GWL_EXSTYLE => window::with_mut(hwnd, |w| {
+            let old = w.ex_style as isize;
+            w.ex_style = dw_new_long as u32;
+            old
+        })
+        .unwrap_or(0),
         GWL_WNDPROC => window::with_mut(hwnd, |w| {
             let old = w.wnd_proc as isize;
             w.wnd_proc = dw_new_long as usize;
+            old
+        })
+        .unwrap_or(0),
+        GWLP_USERDATA => window::with_mut(hwnd, |w| {
+            let old = w.user_data;
+            w.user_data = dw_new_long;
             old
         })
         .unwrap_or(0),
@@ -1423,6 +1507,8 @@ pub unsafe extern "win64" fn create_window_ex_a(
         wnd_proc: cls.wnd_proc,
         title: title.clone(),
         style: dw_style,
+        ex_style: dw_ex_style,
+        user_data: 0,
         x: pos_x,
         y: pos_y,
         width,
@@ -1964,20 +2050,15 @@ pub extern "win64" fn get_queue_status(_flags: u32) -> u32 {
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
 pub unsafe extern "win64" fn msg_wait_for_multiple_objects(
-    n_count: u32,
-    lp_handles: *const usize,
-    b_wait_all: i32,
-    dw_milliseconds: u32,
-    dw_wake_mask: u32,
+    _n_count: u32,
+    _lp_handles: *const usize,
+    _b_wait_all: i32,
+    _dw_milliseconds: u32,
+    _dw_wake_mask: u32,
 ) -> u32 {
-    // Delegate to WaitForMultipleObjects for the handles portion.
-    if n_count > 0 && !lp_handles.is_null() {
-        let handles = unsafe { std::slice::from_raw_parts(lp_handles, n_count as usize) };
-        for &h in handles {
-            let _ = h;
-        }
-    }
-    let _ = (b_wait_all, dw_milliseconds, dw_wake_mask);
+    // Stub: always return WAIT_TIMEOUT immediately.
+    // We do not dereference lp_handles — doing so with an untrusted n_count
+    // from the guest could walk into unmapped memory.
     0x00000102u32 // WAIT_TIMEOUT
 }
 
@@ -2236,7 +2317,8 @@ pub unsafe extern "win64" fn set_window_text_a(hwnd: usize, lp_string: *const u8
         return 0;
     }
     let mut len = 0usize;
-    while unsafe { *lp_string.add(len) } != 0 {
+    // Pointer validation: cap walk to prevent OOB read from unterminated string.
+    while len < crate::defs::MAX_GUEST_STR_LEN && unsafe { *lp_string.add(len) } != 0 {
         len += 1;
     }
     let bytes = unsafe { std::slice::from_raw_parts(lp_string, len) };
@@ -2263,13 +2345,16 @@ pub unsafe extern "win64" fn char_upper_w(lpsz: *mut u16) -> *mut u16 {
         return up as usize as *mut u16;
     }
     let mut p = lpsz;
-    while unsafe { *p } != 0 {
+    let mut walked = 0usize;
+    // Pointer validation: cap walk to prevent OOB on unterminated strings.
+    while walked < crate::defs::MAX_GUEST_STR_LEN && unsafe { *p } != 0 {
         let c = unsafe { *p };
         let up = char::from_u32(c as u32)
             .map(|ch| ch.to_uppercase().next().unwrap_or(ch) as u16)
             .unwrap_or(c);
         unsafe { *p = up };
         p = unsafe { p.add(1) };
+        walked += 1;
     }
     lpsz
 }

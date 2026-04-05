@@ -85,7 +85,8 @@ pub unsafe fn append_menu_w(
 ) -> i32 {
     let text = if u_flags & MF_SEPARATOR == 0 && !lp_new_item.is_null() {
         let mut len = 0usize;
-        while unsafe { *lp_new_item.add(len) } != 0 {
+        // Pointer validation: cap string walk to avoid OOB read on unterminated input.
+        while len < crate::defs::MAX_GUEST_STR_LEN && unsafe { *lp_new_item.add(len) } != 0 {
             len += 1;
         }
         let slice = unsafe { std::slice::from_raw_parts(lp_new_item, len) };

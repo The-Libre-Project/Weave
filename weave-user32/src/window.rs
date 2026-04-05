@@ -17,6 +17,8 @@ pub struct WindowEntry {
     pub wnd_proc: usize, // called as extern "win64" fn(HWND, u32, usize, isize) -> isize
     pub title: String,
     pub style: u32,
+    pub ex_style: u32,
+    pub user_data: isize,
     pub x: i32,
     pub y: i32,
     pub width: u32,

@@ -341,7 +341,10 @@ pub unsafe extern "win64" fn crt_wcslen(s: *const u16) -> usize {
         return 0;
     }
     let mut len = 0usize;
-    while unsafe { *s.add(len) } != 0 {
+    // Pointer validation: cap to prevent walking into unmapped memory if the
+    // guest passes a non-null-terminated string (e.g. from a crafted PE).
+    const MAX_WCSLEN: usize = 1_048_576; // 1M wide chars = 2MB max
+    while len < MAX_WCSLEN && unsafe { *s.add(len) } != 0 {
         len += 1;
     }
     len

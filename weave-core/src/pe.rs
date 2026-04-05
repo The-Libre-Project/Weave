@@ -32,8 +32,21 @@ pub struct PeInfo {
 /// Parse a PE binary from raw bytes.
 ///
 /// Returns a `PeInfo` on success, or an error string describing what went wrong.
+///
+/// # Panic safety
+/// goblin's TLS parser (and potentially other sub-parsers) can panic when given
+/// crafted PE input — e.g. a TLS directory whose raw_end field, interpreted as a
+/// virtual address, overflows when used as a slice index (goblin bug, confirmed by
+/// fuzzing with cargo-fuzz, crash reproduced 2026-04-05). We wrap the call in
+/// `catch_unwind` so that malformed binaries are rejected with Err rather than
+/// crashing the Weave process.
 pub fn parse(bytes: &[u8]) -> Result<PeInfo, String> {
-    let pe = PE::parse(bytes).map_err(|e| format!("goblin parse error: {e}"))?;
+    // Use catch_unwind to turn any goblin panic into a graceful Err.
+    // The AssertUnwindSafe wrapper is sound here: bytes is read-only and we
+    // discard the PE value on panic, so no invariants are violated.
+    let parse_result = std::panic::catch_unwind(|| PE::parse(bytes))
+        .unwrap_or_else(|_| Err(goblin::error::Error::Malformed("goblin panicked on TLS/reloc/import parsing".to_string())));
+    let pe = parse_result.map_err(|e| format!("goblin parse error: {e}"))?;
 
     let header = pe.header;
 

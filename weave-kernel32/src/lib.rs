@@ -327,6 +327,18 @@ pub unsafe extern "win64" fn write_console_w(
     lp_chars_written: *mut u32,
     _lp_reserved: usize,
 ) -> i32 {
+    // Pointer validation: null buffer or zero-length is a no-op.
+    if lp_buffer.is_null() {
+        if !lp_chars_written.is_null() {
+            unsafe { *lp_chars_written = 0 };
+        }
+        return 0; // FALSE — invalid parameter
+    }
+    // Sanity cap: Windows itself rejects more than ~32k chars in one call.
+    // More importantly, a crafted n_chars of 0xFFFFFFFF would try to read 8GB.
+    const MAX_CONSOLE_CHARS: u32 = 65_536;
+    let n_chars = n_chars.min(MAX_CONSOLE_CHARS);
+
     let fd = match handles::get_fd(h_console_output) {
         Some(fd) => fd,
         None => return 0, // FALSE
@@ -424,6 +436,14 @@ pub unsafe extern "win64" fn virtual_query(
 ///
 /// # Safety
 /// `lp_address` must be null or a valid address for allocation.
+/// VirtualAlloc: reserve or commit virtual memory pages.
+///
+/// Wine ref: dlls/kernelbase/memory.c — VirtualAlloc delegates to VirtualAllocEx which
+/// calls NtAllocateVirtualMemory. MEM_COMMIT | MEM_RESERVE is the normal pattern.
+/// Weave maps via mmap; MAP_FIXED_NOREPLACE prevents overwriting existing Weave mappings.
+///
+/// # Safety
+/// `lp_address` must be null or a page-aligned address.
 pub unsafe extern "win64" fn virtual_alloc(
     lp_address: *mut u8,
     dw_size: usize,
@@ -488,18 +508,42 @@ pub unsafe extern "win64" fn virtual_alloc_ex(
 
 /// VirtualFree: free virtual memory.
 ///
+/// Wine ref: dlls/kernelbase/memory.c — VirtualFreeEx: MEM_RELEASE with non-zero size →
+/// ERROR_INVALID_PARAMETER. MEM_RELEASE with size=0 is the correct release pattern.
+/// MEM_DECOMMIT with a size decommits only that range.
+///
+/// Known gap: Weave does not track VirtualAlloc sizes. MEM_RELEASE (size=0) should unmap
+/// the entire allocation; without size tracking we cannot call munmap. This is an accepted
+/// in-process model gap (Phase 4).
+///
 /// # Safety
-/// `lp_address` must be a valid allocated address.
+/// `lp_address` must be a valid mmap'd address.
 pub unsafe extern "win64" fn virtual_free(
     lp_address: *mut u8,
     dw_size: usize,
-    _dw_free_type: u32,
+    dw_free_type: u32,
 ) -> i32 {
-    if lp_address.is_null() || dw_size == 0 {
-        1 // TRUE
-    } else {
+    const MEM_RELEASE: u32 = 0x8000;
+    const MEM_DECOMMIT: u32 = 0x4000;
+
+    if lp_address.is_null() {
+        return 1; // TRUE — null address is a no-op
+    }
+    if dw_free_type == MEM_RELEASE {
+        if dw_size != 0 {
+            // Wine: MEM_RELEASE with non-zero size → ERROR_INVALID_PARAMETER
+            LAST_ERROR.with(|e| e.set(87));
+            return 0;
+        }
+        // MEM_RELEASE with size=0: release the entire allocation.
+        // We don't track allocation sizes, so we can't call munmap with the right size.
+        // This is a known Phase 4 gap; return TRUE to avoid breaking callers.
+        1
+    } else if dw_free_type == MEM_DECOMMIT && dw_size > 0 {
         let ret = unsafe { libc::munmap(lp_address as *mut libc::c_void, dw_size) };
         (ret == 0) as i32
+    } else {
+        1 // TRUE
     }
 }
 
@@ -541,6 +585,10 @@ pub extern "win64" fn tls_get_value(dw_tls_index: u32) -> *mut u8 {
 /// # Safety
 /// `lp_critical_section` must point to at least 40 bytes of writable memory.
 pub unsafe extern "win64" fn initialize_critical_section(lp_critical_section: *mut u8) {
+    // Pointer validation: null is an invalid parameter.
+    if lp_critical_section.is_null() {
+        return;
+    }
     unsafe { std::ptr::write_bytes(lp_critical_section, 0, 40) };
     // LockCount at offset 8 should be -1 (unlocked)
     unsafe { *(lp_critical_section.add(8) as *mut i32) = -1 };
@@ -1309,17 +1357,24 @@ pub extern "win64" fn local_unlock(h_mem: usize) -> i32 {
 ///
 /// # Safety
 /// `h_mem` must be a valid pointer returned from LocalAlloc or NULL.
+/// LocalReAlloc: reallocate a local memory block.
+///
+/// Wine ref: dlls/kernelbase/memory.c — passes HEAP_ZERO_MEMORY to HeapReAlloc when
+/// LMEM_ZEROINIT is set; HeapReAlloc only zeroes newly added bytes (not the whole block).
+/// Known gap: Weave uses realloc and zeroes the entire block, destroying existing data.
+/// Fixing this requires tracking old sizes; deferred to Phase 4.
+///
+/// # Safety
+/// `h_mem` must be a pointer returned from LocalAlloc/LocalReAlloc or NULL.
 pub unsafe extern "win64" fn local_re_alloc(
     h_mem: *mut std::ffi::c_void,
     u_bytes: usize,
-    u_flags: u32,
+    _u_flags: u32,
 ) -> *mut std::ffi::c_void {
-    const LMEM_ZEROINIT: u32 = 0x0040;
-    let new_ptr = unsafe { libc::realloc(h_mem, u_bytes) };
-    if !new_ptr.is_null() && (u_flags & LMEM_ZEROINIT) != 0 {
-        unsafe { std::ptr::write_bytes(new_ptr, 0, u_bytes) };
-    }
-    new_ptr
+    // Note: LMEM_ZEROINIT should only zero new bytes — see Wine ref above.
+    // We can't implement this correctly without old-size tracking; drop zeroing to
+    // at least preserve existing data.
+    unsafe { libc::realloc(h_mem, u_bytes) }
 }
 
 /// HeapCreate: create a heap and return a fake handle.
@@ -1345,8 +1400,9 @@ pub extern "win64" fn heap_destroy(_h_heap: usize) -> i32 {
 
 /// HeapAlloc: allocate memory from the heap.
 ///
-/// Wraps `malloc` with optional zero-initialization when HEAP_ZERO_MEMORY (0x08) is set.
-/// Ignores the hHeap parameter (we use a single global allocator).
+/// Wine ref: dlls/kernelbase/memory.c — HeapAlloc delegates to RtlAllocateHeap;
+/// HEAP_ZERO_MEMORY (0x08) zeroes the block; size=0 returns a valid non-NULL pointer.
+/// Weave uses malloc/calloc directly; ignores hHeap (single global allocator).
 ///
 /// # Safety
 /// The returned pointer must be freed with HeapFree or it will leak.
@@ -1492,8 +1548,11 @@ pub unsafe extern "win64" fn create_file_a(
 
 /// CreateFileW: open or create a file and return a HANDLE.
 ///
-/// Translates Win32 parameters to NT equivalents and delegates to the
-/// shared `file_io::open_file` engine in weave-core.
+/// Wine ref: dlls/kernelbase/file.c — empty filename → ERROR_PATH_NOT_FOUND; invalid
+/// creation disposition → ERROR_INVALID_PARAMETER; CREATE_ALWAYS/OPEN_ALWAYS with
+/// existing file → valid handle + ERROR_ALREADY_EXISTS as LastError; STATUS_OBJECT_NAME_COLLISION
+/// → ERROR_FILE_EXISTS (not ERROR_ALREADY_EXISTS). Weave does not set ERROR_ALREADY_EXISTS on
+/// CREATE_ALWAYS success; maps creation dispositions via file_io::win32_disposition_to_nt.
 ///
 /// # Safety
 /// `lp_file_name` must be a valid, null-terminated UTF-16 string.
@@ -1541,6 +1600,11 @@ pub unsafe extern "win64" fn create_file_w(
 
 /// ReadFile: read bytes from a file handle into a buffer.
 ///
+/// Wine ref: dlls/kernelbase/file.c — initialises *result to 0; EOF (STATUS_END_OF_FILE)
+/// returns TRUE for synchronous reads, FALSE for overlapped; overlapped reads use the
+/// file offset from OVERLAPPED struct. Weave is synchronous-only (overlapped ignored);
+/// does not distinguish EOF from error — both set bytes_read=0 and return FALSE.
+///
 /// # Safety
 /// `lp_buffer` must be valid for `n_bytes_to_read` bytes.
 pub unsafe extern "win64" fn read_file(
@@ -1550,6 +1614,15 @@ pub unsafe extern "win64" fn read_file(
     lp_bytes_read: *mut u32,
     _lp_overlapped: usize, // ignored — synchronous I/O only
 ) -> i32 {
+    // Pointer validation: null buffer with non-zero read size is an error.
+    if lp_buffer.is_null() && n_bytes_to_read > 0 {
+        LAST_ERROR.with(|e| e.set(87)); // ERROR_INVALID_PARAMETER
+        if !lp_bytes_read.is_null() {
+            unsafe { *lp_bytes_read = 0 };
+        }
+        return 0; // FALSE
+    }
+
     let fd = match handles::get_fd(h_file) {
         Some(fd) => fd,
         None => {
@@ -1575,6 +1648,10 @@ pub unsafe extern "win64" fn read_file(
 
 /// WriteFile: write bytes from a buffer to a file handle.
 ///
+/// Wine ref: dlls/kernelbase/file.c — initialises *result to 0; overlapped writes use the
+/// file offset from OVERLAPPED struct and may return ERROR_IO_PENDING; synchronous writes
+/// set *result = bytes written. Weave is synchronous-only (overlapped ignored).
+///
 /// # Safety
 /// `lp_buffer` must be valid for `n_bytes_to_write` bytes.
 pub unsafe extern "win64" fn write_file(
@@ -1584,6 +1661,15 @@ pub unsafe extern "win64" fn write_file(
     lp_bytes_written: *mut u32,
     _lp_overlapped: usize, // ignored — synchronous I/O only
 ) -> i32 {
+    // Pointer validation: null buffer with non-zero write size is an error.
+    if lp_buffer.is_null() && n_bytes_to_write > 0 {
+        LAST_ERROR.with(|e| e.set(87)); // ERROR_INVALID_PARAMETER
+        if !lp_bytes_written.is_null() {
+            unsafe { *lp_bytes_written = 0 };
+        }
+        return 0; // FALSE
+    }
+
     let fd = match handles::get_fd(h_file) {
         Some(fd) => fd,
         None => {
@@ -1769,6 +1855,9 @@ pub unsafe extern "win64" fn get_file_information_by_handle(
     h_file: usize,
     lp_file_information: *mut ByHandleFileInformation,
 ) -> i32 {
+    if lp_file_information.is_null() {
+        return 0; // FALSE — invalid parameter
+    }
     let fd = match handles::get_fd(h_file) {
         Some(fd) => fd,
         None => return 0, // FALSE
@@ -2246,6 +2335,14 @@ pub unsafe extern "win64" fn move_file_ex_a(
 /// `lp_wide_char_str` must be valid for `cch_wide_char` UTF-16 code units
 /// (or null-terminated when `cch_wide_char == -1`).
 /// `lp_multi_byte_str`, if non-null, must be writable for `cb_multi_byte` bytes.
+/// WideCharToMultiByte: convert UTF-16 to multibyte (UTF-8 for CP_UTF8/default).
+///
+/// Wine ref: dlls/kernelbase/locale.c — validates !src || !srclen || (!dst && dstlen) ||
+/// dstlen < 0 → ERROR_INVALID_PARAMETER; srclen < 0 → lstrlenW(src)+1 (includes null).
+/// Weave only handles UTF-8 output; CP_SYMBOL/CP_UTF7 not supported.
+///
+/// # Safety
+/// `lp_wide_char_str` must be valid for `cch_wide_char` u16 words (or null-terminated if < 0).
 pub unsafe extern "win64" fn wide_char_to_multi_byte(
     _code_page: u32,
     _dw_flags: u32,
@@ -2256,7 +2353,12 @@ pub unsafe extern "win64" fn wide_char_to_multi_byte(
     _lp_default_char: usize,
     _lp_used_default_char: usize,
 ) -> i32 {
-    if lp_wide_char_str.is_null() {
+    // Wine: !src || !srclen || (!dst && dstlen) || dstlen < 0 → ERROR_INVALID_PARAMETER
+    if lp_wide_char_str.is_null()
+        || cch_wide_char == 0
+        || (lp_multi_byte_str.is_null() && cb_multi_byte != 0)
+        || cb_multi_byte < 0
+    {
         LAST_ERROR.with(|e| e.set(87)); // ERROR_INVALID_PARAMETER
         return 0;
     }
@@ -2304,6 +2406,10 @@ pub unsafe extern "win64" fn wide_char_to_multi_byte(
 
 /// MultiByteToWideChar: convert a multibyte (UTF-8) string to UTF-16.
 ///
+/// Wine ref: dlls/kernelbase/locale.c — validates !src || !srclen || (!dst && dstlen) ||
+/// dstlen < 0 → ERROR_INVALID_PARAMETER; srclen < 0 → strlen(src)+1 (includes null).
+/// Weave only handles UTF-8 input; CP_SYMBOL/CP_UTF7 not supported.
+///
 /// # Safety
 /// `lp_multi_byte_str` must be valid for `cb_multi_byte` bytes (or
 /// null-terminated when `cb_multi_byte == -1`).
@@ -2316,8 +2422,13 @@ pub unsafe extern "win64" fn multi_byte_to_wide_char(
     lp_wide_char_str: *mut u16,
     cch_wide_char: i32,
 ) -> i32 {
-    if lp_multi_byte_str.is_null() {
-        LAST_ERROR.with(|e| e.set(87));
+    // Wine: !src || !srclen || (!dst && dstlen) || dstlen < 0 → ERROR_INVALID_PARAMETER
+    if lp_multi_byte_str.is_null()
+        || cb_multi_byte == 0
+        || (lp_wide_char_str.is_null() && cch_wide_char != 0)
+        || cch_wide_char < 0
+    {
+        LAST_ERROR.with(|e| e.set(87)); // ERROR_INVALID_PARAMETER
         return 0;
     }
     let null_terminated = cb_multi_byte < 0;
@@ -2671,6 +2782,15 @@ pub struct Win32FindDataA {
 /// # Safety
 /// `lp_file_name` must be a valid null-terminated UTF-16 string.
 /// `lp_find_file_data` must be a valid writable pointer to a WIN32_FIND_DATAW.
+/// FindFirstFileW: begin directory enumeration.
+///
+/// Wine ref: dlls/kernelbase/file.c — FindFirstFileW delegates to FindFirstFileExW, which
+/// uses NtQueryDirectoryFile and stores results in a FIND_FIRST_INFO struct validated with
+/// a magic number. Wine skips `.` and `..` in root drives. Weave uses opendir/readdir;
+/// does not skip `.`/`..`. Returns sentinel 1 for single-file lookups.
+///
+/// # Safety
+/// `lp_file_name` must be a valid null-terminated UTF-16 path. `lp_find_file_data` writable.
 pub unsafe extern "win64" fn find_first_file_w(
     lp_file_name: *const u16,
     lp_find_file_data: *mut Win32FindDataW,
@@ -2894,6 +3014,11 @@ pub unsafe extern "win64" fn find_first_file_a(
 }
 
 /// FindNextFileW: continue directory enumeration (wide string version).
+///
+/// Wine ref: dlls/kernelbase/file.c — validates handle magic (FIND_FIRST_MAGIC); uses
+/// NtQueryDirectoryFile in a loop; fills full file metadata including reparse tag in
+/// dwReserved0. Weave uses libc::readdir; no magic validation; metadata not filled.
+/// Known gap: does not skip `.` and `..` from wildcard results.
 ///
 /// # Safety
 /// `h_find_file` must be a valid directory handle from FindFirstFileW.
@@ -3531,9 +3656,16 @@ pub unsafe extern "win64" fn set_dll_directory_w(_lp_path_name: *const u16) -> i
 /// # Safety
 /// `lp_proc_name` must be a valid null-terminated ANSI string, or an ordinal
 /// encoded in the low 16 bits (high bits zero — `MAKEINTRESOURCE` style).
+/// GetProcAddress: resolve a function address from a loaded module.
+///
+/// Wine ref: dlls/kernelbase/loader.c — GetProcAddress delegates to get_proc_address which
+/// calls LdrGetProcedureAddress; ordinals: HIWORD(function)==0 (pointer value < 0x10000).
+/// Weave resolves against the Weave DLL stub table via weave-core's resolve module.
+///
+/// # Safety
+/// `lp_proc_name` must be a null-terminated ASCII string or an ordinal value (< 0x10000).
 pub unsafe extern "win64" fn get_proc_address(h_module: usize, lp_proc_name: *const u8) -> usize {
-    // Ordinal imports: high 48 bits are zero, low 16 bits are the ordinal.
-    // We can't resolve ordinals — return NULL.
+    // Ordinal imports: pointer value < 0x10000 encodes the ordinal number.
     if !lp_proc_name.is_null() && (lp_proc_name as usize) < 0x10000 {
         return 0;
     }
@@ -3564,9 +3696,14 @@ pub unsafe extern "win64" fn get_proc_address(h_module: usize, lp_proc_name: *co
 
 /// GetVersion — legacy API returning Windows version as a packed DWORD.
 ///
-/// Returns 0x0A0A0000: major=10, minor=10 (little-endian packed).
+/// Low byte = major version, next byte = minor version. Windows 10 is 10.0,
+/// so low word = 0x000A (major=10, minor=0). High word would hold build number
+/// but legacy apps ignore it; we return 0.
+///
+/// Wine ref: dlls/kernelbase/version.c — GetVersion returns NtCurrentTeb()->Peb->OSMajorVersion
+/// | (NtCurrentTeb()->Peb->OSMinorVersion << 8); Windows 10 has OSMinorVersion = 0.
 pub extern "win64" fn get_version() -> u32 {
-    0x0000_0A0A // minor=10, major=10 (little-endian packed: 10 | (10 << 8))
+    0x0000_000A // major=10 (0x0A), minor=0 — Windows 10.0
 }
 
 // ── Process/toolhelp ─────────────────────────────────────────────────────────
@@ -6554,6 +6691,10 @@ const LINGUISTIC_IGNORECASE: u32 = 0x00000010;
 
 /// CompareStringW: compare two UTF-16 strings with optional case folding.
 ///
+/// Wine ref: dlls/kernelbase/locale.c — delegates to CompareStringEx; unknown LCID →
+/// ERROR_INVALID_PARAMETER. Weave ignores locale (LCID) — ASCII case-fold only;
+/// full Unicode collation not implemented. Known gap.
+///
 /// # Safety
 /// `lp_string1` and `lp_string2` must be valid pointers to null-terminated UTF-16 strings.
 pub unsafe extern "win64" fn compare_string_w(
@@ -6615,6 +6756,9 @@ pub unsafe extern "win64" fn compare_string_w(
 
 /// CompareStringOrdinal: compare two UTF-16 strings with optional case folding.
 ///
+/// Wine ref: dlls/kernelbase/locale.c — null str1 or str2 → ERROR_INVALID_PARAMETER, return 0;
+/// len < 0 → use lstrlenW; delegates to RtlCompareUnicodeStrings for case folding.
+///
 /// # Safety
 /// `lp_string1` and `lp_string2` must be valid pointers to null-terminated UTF-16 strings.
 pub unsafe extern "win64" fn compare_string_ordinal(
@@ -6624,7 +6768,13 @@ pub unsafe extern "win64" fn compare_string_ordinal(
     cch_count2: i32,
     b_ignore_case: i32,
 ) -> i32 {
-    let len1 = if cch_count1 == -1 {
+    // Wine: null str1 or str2 → ERROR_INVALID_PARAMETER
+    if lp_string1.is_null() || lp_string2.is_null() {
+        LAST_ERROR.with(|e| e.set(87)); // ERROR_INVALID_PARAMETER
+        return 0;
+    }
+
+    let len1 = if cch_count1 < 0 {
         let mut len = 0usize;
         while *lp_string1.add(len) != 0 {
             len += 1;
@@ -6634,7 +6784,7 @@ pub unsafe extern "win64" fn compare_string_ordinal(
         cch_count1 as usize
     };
 
-    let len2 = if cch_count2 == -1 {
+    let len2 = if cch_count2 < 0 {
         let mut len = 0usize;
         while *lp_string2.add(len) != 0 {
             len += 1;

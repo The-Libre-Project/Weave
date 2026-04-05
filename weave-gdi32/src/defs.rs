@@ -41,6 +41,22 @@ pub const LOGPIXELSX: i32 = 88;
 pub const LOGPIXELSY: i32 = 90;
 pub const RASTERCAPS: i32 = 38;
 pub const RC_PALETTE: i32 = 0x0100;
+// Wine ref: dlls/win32u/driver.c::nulldrv_GetDeviceCaps — standard raster capabilities
+// for a display DC: RC_BITBLT | RC_BITMAP64 | RC_GDI20_OUTPUT | RC_DI_BITMAP |
+// RC_DIBTODEV | RC_BIGFONT | RC_STRETCHBLT | RC_FLOODFILL | RC_STRETCHDIB | RC_DEVBITS
+pub const RC_BITBLT: i32 = 0x0001;
+pub const RC_BITMAP64: i32 = 0x0002;
+pub const RC_GDI20_OUTPUT: i32 = 0x0010;
+pub const RC_DI_BITMAP: i32 = 0x0080;
+pub const RC_DIBTODEV: i32 = 0x0200;
+pub const RC_BIGFONT: i32 = 0x0400;
+pub const RC_STRETCHBLT: i32 = 0x0800;
+pub const RC_FLOODFILL: i32 = 0x1000;
+pub const RC_STRETCHDIB: i32 = 0x2000;
+pub const RC_DEVBITS: i32 = 0x8000;
+pub const RASTER_CAPS_DISPLAY: i32 = RC_BITBLT | RC_BITMAP64 | RC_GDI20_OUTPUT |
+    RC_DI_BITMAP | RC_DIBTODEV | RC_BIGFONT | RC_STRETCHBLT |
+    RC_FLOODFILL | RC_STRETCHDIB | RC_DEVBITS;
 
 // ── GDI handle offsets ────────────────────────────────────────────────────────
 /// Allocated GDI object handles start at this offset.

@@ -89,6 +89,10 @@ pub const SM_CYCURSOR: i32 = 14;
 pub const SM_CYCAPTION: i32 = 4;
 pub const SM_CXFRAME: i32 = 32;
 pub const SM_CYFRAME: i32 = 33;
+pub const SM_CXBORDER: i32 = 5;
+pub const SM_CYBORDER: i32 = 6;
+pub const SM_CXEDGE: i32 = 45;
+pub const SM_CYEDGE: i32 = 46;
 
 // ── MessageBox flags ──────────────────────────────────────────────────────────
 
@@ -349,12 +353,24 @@ pub struct ScrollInfo {
 ///
 /// # Safety
 /// `ptr`, if non-null, must point to a valid null-terminated UTF-16 sequence.
+/// Maximum string length to walk for guest-provided pointers.
+/// Prevents infinite loops or OOB reads from unterminated guest strings.
+pub const MAX_GUEST_STR_LEN: usize = 65_536;
+
+/// Decode a null-terminated UTF-16 pointer to a `String`.
+/// Returns an empty `String` if the pointer is null.
+///
+/// # Safety
+/// `ptr`, if non-null, must point to a valid null-terminated UTF-16 sequence.
+/// Walk is capped at `MAX_GUEST_STR_LEN` to prevent OOB reads from guest strings.
 pub unsafe fn decode_wide(ptr: *const u16) -> String {
     if ptr.is_null() {
         return String::new();
     }
     let mut len = 0usize;
-    while unsafe { *ptr.add(len) } != 0 {
+    // Pointer validation: cap at MAX_GUEST_STR_LEN to avoid walking into
+    // unmapped memory if the guest passes an unterminated wide string.
+    while len < MAX_GUEST_STR_LEN && unsafe { *ptr.add(len) } != 0 {
         len += 1;
     }
     let slice = unsafe { std::slice::from_raw_parts(ptr, len) };
@@ -371,7 +387,9 @@ pub unsafe fn decode_ansi(ptr: *const u8) -> String {
         return String::new();
     }
     let mut len = 0usize;
-    while unsafe { *ptr.add(len) } != 0 {
+    // Pointer validation: cap at MAX_GUEST_STR_LEN to avoid walking into
+    // unmapped memory if the guest passes an unterminated ANSI string.
+    while len < MAX_GUEST_STR_LEN && unsafe { *ptr.add(len) } != 0 {
         len += 1;
     }
     let slice = unsafe { std::slice::from_raw_parts(ptr, len) };

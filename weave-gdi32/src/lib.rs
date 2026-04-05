@@ -42,11 +42,17 @@ fn xcb_for(hdc: usize) -> u32 {
 // ── GDI object creation / deletion ───────────────────────────────────────────
 
 /// CreateSolidBrush: allocate a solid-colour brush.
+///
+/// Wine ref: dlls/win32u/pen.c — NtGdiCreateSolidBrush allocates a BRUSHOBJ with
+/// lbStyle=BS_SOLID and lbColor=color; returns NULL on failure.
 pub extern "win64" fn create_solid_brush(color: u32) -> usize {
     objects::alloc(GdiKind::Brush { color })
 }
 
 /// CreatePen: allocate a cosmetic pen.
+///
+/// Wine ref: dlls/win32u/pen.c — NtGdiExtCreatePen; fnPenStyle may be PS_SOLID/PS_DASH/etc.;
+/// nWidth=0 selects 1-pixel cosmetic width. Returns NULL on failure.
 pub extern "win64" fn create_pen(fn_pen_style: i32, n_width: i32, color: u32) -> usize {
     objects::alloc(GdiKind::Pen {
         color,
@@ -113,6 +119,9 @@ pub unsafe extern "win64" fn create_font_indirect_w(lplf: *const LogFontW) -> us
 }
 
 /// DeleteObject: free an allocated GDI object.
+///
+/// Wine ref: dlls/win32u/gdiobj.c — NtGdiDeleteObjectApp; returns FALSE if the object is
+/// a stock object (stock objects cannot be deleted). Weave: stock handles are not freed.
 pub extern "win64" fn delete_object(h_object: usize) -> i32 {
     if h_object == 0 {
         return 0;
@@ -121,6 +130,9 @@ pub extern "win64" fn delete_object(h_object: usize) -> i32 {
 }
 
 /// GetStockObject: return a stock GDI object handle.
+///
+/// Wine ref: dlls/gdi32/objects.c::GetStockObject — validates 0 ≤ obj ≤ STOCK_LAST+1 and
+/// obj ≠ 9; maps DPI-aware font aliases for SYSTEM_FONT etc. Returns 0 for out-of-range.
 pub extern "win64" fn get_stock_object(i_object: i32) -> usize {
     if (0..=19).contains(&i_object) {
         objects::stock_handle(i_object)
@@ -137,6 +149,10 @@ pub extern "win64" fn get_object(_h: usize, _c: i32, _pv: usize) -> i32 {
 // ── DC object selection ───────────────────────────────────────────────────────
 
 /// SelectObject: bind a GDI object to a DC; returns the previously selected object.
+///
+/// Wine ref: dlls/win32u/dc.c — NtGdiSelectObject dispatches by object type (pen/brush/font/
+/// bitmap/region); returns the previously selected object of that type. Selecting a bitmap
+/// only succeeds on memory DCs (Phase 2 gap: Weave has no real memory DCs).
 pub extern "win64" fn select_object(hdc: usize, h_gdi_obj: usize) -> usize {
     let mut old: usize = 0;
     dc::with_mut(hdc, |dc| {
@@ -188,6 +204,9 @@ pub extern "win64" fn select_object(hdc: usize, h_gdi_obj: usize) -> usize {
 // ── DC attribute setters / getters ────────────────────────────────────────────
 
 /// SetTextColor: set the foreground (text) colour. Returns the previous colour.
+///
+/// Wine ref: dlls/win32u/dc.c::set_text_color — stores color in dc->attr->text_color via
+/// physdev chain; returns CLR_INVALID (0xFFFFFFFF) for an invalid HDC. Weave returns 0.
 pub extern "win64" fn set_text_color(hdc: usize, color: u32) -> u32 {
     let mut prev = 0u32;
     dc::with_mut(hdc, |dc| {
@@ -235,6 +254,11 @@ pub extern "win64" fn get_bk_mode(hdc: usize) -> i32 {
 // ── Drawing primitives ────────────────────────────────────────────────────────
 
 /// FillRect: fill a rectangle with a brush.
+///
+/// Wine ref: dlls/win32u/defwnd.c::fill_rect — if hbrush ≤ COLOR_MENUBAR+1 (31), treats
+/// the value as a system colour index and maps to the real sys color brush; selects it
+/// into the DC, calls PatBlt with PATCOPY, then restores the old brush. Returns 1 on
+/// success, 0 if rect is NULL.
 ///
 /// # Safety
 /// `lp_rc` must be a valid pointer to a `RECT`.
@@ -316,6 +340,11 @@ fn font_px_size(hdc: usize) -> f32 {
 
 /// TextOutW: draw a UTF-16 string at (x, y) using the current DC colours.
 ///
+/// Wine ref: dlls/win32u/font.c::nulldrv_ExtTextOut — TextOutW maps to ExtTextOutW with
+/// no options/rect; renders glyphs using the selected font; honours current text and bk
+/// colors and bk mode (OPAQUE fills background, TRANSPARENT does not).
+/// Known gap: Weave always paints an opaque background regardless of bk mode.
+///
 /// # Safety
 /// `lp_string` must be a valid pointer to `c` UTF-16 code units.
 pub unsafe extern "win64" fn text_out_w(
@@ -328,6 +357,10 @@ pub unsafe extern "win64" fn text_out_w(
     if lp_string.is_null() || c <= 0 {
         return 0;
     }
+    // Pointer validation: cap c to prevent building a multi-GB slice from a
+    // crafted large c value. Real text is never this long.
+    const MAX_TEXT_CHARS: i32 = 65_536;
+    let c = c.min(MAX_TEXT_CHARS);
     let (fg, bg) = dc::with(hdc, |dc| (dc.text_color, dc.bk_color));
     let fg_pixel = to_pixel(fg);
     let bg_pixel = to_pixel(bg);
@@ -364,15 +397,17 @@ pub unsafe extern "win64" fn draw_text_w(
         return 0;
     }
 
-    // Determine length.
+    // Determine length. Pointer validation: cap at 65k to prevent OOB reads
+    // from unterminated strings (n_count == -1) or crafted large n_count values.
+    const MAX_TEXT_CHARS: usize = 65_536;
     let len = if n_count < 0 {
         let mut i = 0usize;
-        while unsafe { *lp_string.add(i) } != 0 {
+        while i < MAX_TEXT_CHARS && unsafe { *lp_string.add(i) } != 0 {
             i += 1;
         }
         i
     } else {
-        n_count as usize
+        (n_count as usize).min(MAX_TEXT_CHARS)
     };
 
     let units: &[u16] = unsafe { std::slice::from_raw_parts(lp_string, len) };
@@ -434,14 +469,16 @@ pub unsafe extern "win64" fn draw_text_a(
     if lp_string.is_null() || lp_rect.is_null() {
         return 0;
     }
+    // Pointer validation: cap at 65k to prevent OOB reads.
+    const MAX_TEXT_CHARS: usize = 65_536;
     let len = if n_count < 0 {
         let mut i = 0usize;
-        while unsafe { *lp_string.add(i) } != 0 {
+        while i < MAX_TEXT_CHARS && unsafe { *lp_string.add(i) } != 0 {
             i += 1;
         }
         i
     } else {
-        n_count as usize
+        (n_count as usize).min(MAX_TEXT_CHARS)
     };
     let bytes = unsafe { std::slice::from_raw_parts(lp_string, len) };
     // Encode as UTF-16 for draw_text_w.
@@ -520,7 +557,11 @@ pub extern "win64" fn pat_blt(hdc: usize, x: i32, y: i32, w: i32, h: i32, _rop: 
     1
 }
 
-/// BitBlt: bit-block transfer (stub — returns TRUE, no pixels transferred).
+/// BitBlt: bit-block transfer.
+///
+/// Wine ref: dlls/win32u/bitblt.c — NtGdiBitBlt applies rop3 raster operation combining
+/// src DC, dst DC, and current brush pattern. SRCCOPY (0xCC0020) copies src to dst.
+/// Phase 2 stub: returns TRUE without transferring pixels (no real memory DC backing).
 pub extern "win64" fn bit_blt(
     _hdc_dest: usize,
     _x: i32,
@@ -564,7 +605,12 @@ pub extern "win64" fn set_rop2(_hdc: usize, _rop2: i32) -> i32 {
 
 // ── Memory DC and bitmap stubs ────────────────────────────────────────────────
 
-/// CreateCompatibleDC: create an off-screen DC (stub — returns the source HDC).
+/// CreateCompatibleDC: create an off-screen memory DC compatible with the given DC.
+///
+/// Wine ref: dlls/win32u/dc.c — alloc_dc_ptr allocates a new DC_OBJ; copies bit depth
+/// and device info from source DC; initially has a 1×1 monochrome bitmap selected.
+/// Phase 2 stub: returns a fixed fake handle; no pixel buffer is allocated; all drawing
+/// into this DC is silently dropped.
 pub extern "win64" fn create_compatible_dc(hdc: usize) -> usize {
     // Phase 2: return a fake HDC. No pixel buffer is allocated.
     // The value 0x00FF_FF00 is chosen to be visually distinct from valid HWNDs.
@@ -618,6 +664,11 @@ pub extern "win64" fn set_dib_bits_to_device(
 
 /// GetTextMetricsW: return metrics for the selected font.
 ///
+/// Wine ref: dlls/win32u/font.c::font_GetTextMetrics — queries the font cache for the
+/// currently selected font's TEXTMETRICW; fills tmHeight, tmAscent, tmDescent,
+/// tmAveCharWidth, tmMaxCharWidth, tmWeight, tmPitchAndFamily, tmCharSet.
+/// Returns FALSE if lptm is NULL or no font is selected.
+///
 /// # Safety
 /// `lptm` must be a valid writable pointer to a `TEXTMETRICW`.
 pub unsafe extern "win64" fn get_text_metrics_w(hdc: usize, lptm: *mut TextMetricW) -> i32 {
@@ -655,6 +706,10 @@ pub unsafe extern "win64" fn get_text_metrics_w(hdc: usize, lptm: *mut TextMetri
 
 /// GetTextExtentPoint32W: compute the bounding box of a text string.
 ///
+/// Wine ref: dlls/win32u/font.c::font_GetTextExtentExPoint — measures advance widths for
+/// each glyph using the selected font and sums them; cy = tmHeight. Returns FALSE if
+/// lpSize is NULL. Negative c is treated as 0 in Wine; Weave returns early with cy only.
+///
 /// # Safety
 /// `lpsz` must be a valid pointer to `c` UTF-16 code units.
 /// `lp_size` must be a valid writable pointer to a `SIZE`.
@@ -675,6 +730,8 @@ pub unsafe extern "win64" fn get_text_extent_point32_w(
         }
         return 1;
     }
+    // Pointer validation: cap c to prevent building a multi-GB slice.
+    let c = c.min(65_536i32);
     let units: &[u16] = unsafe { std::slice::from_raw_parts(lpsz, c as usize) };
     let (w, h) = weave_user32::font::measure_text(units, px_size);
     unsafe {
@@ -689,6 +746,10 @@ pub unsafe extern "win64" fn get_text_extent_point32_w(
 /// GetDeviceCaps: return device capabilities for a DC.
 ///
 /// Returns sensible defaults for a 96-DPI TrueColor display.
+// Wine ref: dlls/win32u/driver.c::nulldrv_GetDeviceCaps — HORZRES/VERTRES from primary
+// monitor rect (fallback: SM_CXSCREEN); LOGPIXELSX/Y = system DPI; PLANES=1;
+// RASTERCAPS = RC_BITBLT|RC_BITMAP64|RC_GDI20_OUTPUT|...|RC_DEVBITS for display DCs.
+// Known gap: HORZRES/VERTRES hardcoded to 1920×1080 instead of querying screen size.
 pub extern "win64" fn get_device_caps(hdc: usize, n_index: i32) -> i32 {
     let _ = hdc;
     match n_index {
@@ -698,7 +759,8 @@ pub extern "win64" fn get_device_caps(hdc: usize, n_index: i32) -> i32 {
         PLANES => 1,
         LOGPIXELSX => 96,
         LOGPIXELSY => 96,
-        RASTERCAPS => 0, // no raster capabilities special bits
+        // Wine ref: dlls/win32u/driver.c::nulldrv_GetDeviceCaps — standard display raster caps
+        RASTERCAPS => RASTER_CAPS_DISPLAY,
         _ => 0,
     }
 }
@@ -1193,6 +1255,8 @@ pub unsafe extern "win64" fn text_out_a(
     if lp_string.is_null() || c_string <= 0 {
         return 0;
     }
+    // Pointer validation: cap to prevent building a multi-GB slice.
+    let c_string = c_string.min(65_536i32);
     let s = unsafe { std::slice::from_raw_parts(lp_string, c_string as usize) };
     let wide: Vec<u16> = String::from_utf8_lossy(s).encode_utf16().collect();
     unsafe { text_out_w(hdc, x, y, wide.as_ptr(), wide.len() as i32) }
@@ -1216,6 +1280,8 @@ pub unsafe extern "win64" fn ext_text_out_a(
     let wide: Vec<u16> = if lp_string.is_null() || cb_count == 0 {
         Vec::new()
     } else {
+        // Pointer validation: cap to prevent building a multi-GB slice.
+        let cb_count = cb_count.min(65_536u32);
         let s = unsafe { std::slice::from_raw_parts(lp_string, cb_count as usize) };
         String::from_utf8_lossy(s).encode_utf16().collect()
     };
@@ -1246,6 +1312,8 @@ pub unsafe extern "win64" fn get_text_extent_point32_a(
     let wide: Vec<u16> = if lp_string.is_null() || c <= 0 {
         Vec::new()
     } else {
+        // Pointer validation: cap to prevent building a multi-GB slice.
+        let c = c.min(65_536i32);
         let s = unsafe { std::slice::from_raw_parts(lp_string, c as usize) };
         String::from_utf8_lossy(s).encode_utf16().collect()
     };

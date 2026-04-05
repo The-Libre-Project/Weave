@@ -297,6 +297,8 @@ const STATUS_NOT_IMPLEMENTED: u32 = 0xC0000002;
 /// # Safety
 /// `dest` must be a valid, non-null pointer to a `UnicodeString`. `src`, if
 /// non-null, must point to a null-terminated UTF-16 string.
+// Wine ref: dlls/ntdll/rtlstr.c:173 — sets Buffer=src; if src non-null, Length=wcslen*2
+// capped at 0xfffc, MaximumLength=Length+2; if src null, all fields zero.
 pub unsafe extern "win64" fn rtl_init_unicode_string(dest: *mut UnicodeString, src: *const u16) {
     unsafe {
         if src.is_null() {
@@ -309,14 +311,23 @@ pub unsafe extern "win64" fn rtl_init_unicode_string(dest: *mut UnicodeString, s
         while *src.add(len) != 0 {
             len += 1;
         }
-        (*dest).length = (len * 2) as u16;
-        (*dest).maximum_length = ((len + 1) * 2) as u16;
+        // Wine caps byte length at 0xfffc to avoid overflow in the u16 Length field.
+        let byte_len = (len * 2).min(0xfffc);
+        (*dest).length = byte_len as u16;
+        (*dest).maximum_length = (byte_len + 2) as u16;
         (*dest).buffer = src;
     }
 }
 
 // ── NtCreateFile ─────────────────────────────────────────────────────────────
 
+// Wine ref: dlls/ntdll/unix/file.c — NtCreateFile translates OBJECT_ATTRIBUTES.ObjectName
+// (a UNICODE_STRING NT path like \??\C:\foo) to a Unix path, opens via open(2) with flags
+// derived from DesiredAccess + CreateDisposition, writes FILE_OPENED/FILE_CREATED/FILE_SUPERSEDED
+// (1/2/5) into io->Information on success. Returns STATUS_OBJECT_NAME_NOT_FOUND for missing
+// files when CreateDisposition==FILE_OPEN, STATUS_ACCESS_DENIED on permission failure.
+// Known gap: Weave path translation is simplified (strips \??\ prefix only); CreateDisposition
+// values FILE_SUPERSEDE/FILE_OVERWRITE_IF not handled distinctly.
 /// NtCreateFile: open or create a file.
 ///
 /// This is the NT-level file open function. `CreateFileW` in kernel32 is a
@@ -380,6 +391,11 @@ pub unsafe extern "win64" fn nt_create_file(
 
 // ── NtReadFile ────────────────────────────────────────────────────────────────
 
+// Wine ref: dlls/ntdll/unix/file.c:6021 — returns STATUS_ACCESS_VIOLATION (not STATUS_UNSUCCESSFUL)
+// when io == NULL; validates buffer with virtual_check_buffer_for_write; writes bytes transferred
+// into io->Information on success; returns STATUS_END_OF_FILE (not 0) when read returns 0.
+// Known gap: Weave returns STATUS_UNSUCCESSFUL for null io instead of STATUS_ACCESS_VIOLATION;
+// STATUS_END_OF_FILE not returned (returns STATUS_UNSUCCESSFUL on read=0).
 /// NtReadFile: read bytes from a file handle.
 ///
 /// # Safety
@@ -424,6 +440,9 @@ pub unsafe extern "win64" fn nt_read_file(
 
 // ── NtWriteFile ───────────────────────────────────────────────────────────────
 
+// Wine ref: dlls/ntdll/unix/file.c:6298 — same structure as NtReadFile; returns
+// STATUS_ACCESS_VIOLATION for null io; writes bytes written into io->Information.
+// Known gap: same as NtReadFile — null io returns STATUS_UNSUCCESSFUL, not STATUS_ACCESS_VIOLATION.
 /// NtWriteFile: write bytes to a file handle.
 ///
 /// The handle is looked up in the global HANDLE table. Handles 4/5/6 map to
@@ -471,6 +490,9 @@ pub unsafe extern "win64" fn nt_write_file(
 
 // ── NtClose ───────────────────────────────────────────────────────────────────
 
+// Wine ref: dlls/ntdll/unix/server.c — NtClose calls close_handle() on the wine server;
+// invalid handles return STATUS_INVALID_HANDLE. Weave maps this to file_io::close_handle
+// which returns STATUS_INVALID_HANDLE for unknown handles — behaviorally correct.
 /// NtClose: close an open handle and release its kernel object.
 ///
 /// Closing stdin/stdout/stderr (handles 4/5/6) returns STATUS_UNSUCCESSFUL —
@@ -493,6 +515,11 @@ pub extern "win64" fn nt_terminate_process(_process_handle: usize, exit_status: 
 
 // ── RTL heap functions ────────────────────────────────────────────────────────
 
+// Wine ref: dlls/ntdll/heap.c:2038 — uses heap_get_block_size which returns ~0U for size==0
+// on some configurations, falling through to STATUS_NO_MEMORY; on others returns minimum block.
+// HEAP_ZERO_MEMORY (0x08) zeroes the block via calloc equivalent. Returns NULL on alloc failure
+// (not a crash). Wine uses a real heap structure with LFH; Weave delegates to malloc/calloc.
+// Known gap: size==0 returns NULL in Weave; Wine may return a minimum-size pointer.
 /// RtlAllocateHeap: allocate memory from the heap.
 ///
 /// Wraps `malloc` with optional zero-initialization when HEAP_ZERO_MEMORY (0x08) is set.
@@ -516,6 +543,9 @@ pub extern "win64" fn rtl_allocate_heap(
     }
 }
 
+// Wine ref: dlls/ntdll/heap.c — RtlFreeHeap returns TRUE (1) for NULL pointers (no-op);
+// invalid heap handles call heap_set_status which may raise STATUS_ACCESS_VIOLATION with
+// HEAP_GENERATE_EXCEPTIONS. Weave returns TRUE for NULL (correct); no exception on bad handle.
 /// RtlFreeHeap: free memory allocated from the heap.
 ///
 /// Wraps `free`. Ignores HeapHandle and Flags parameters.
@@ -563,6 +593,10 @@ pub struct RtlOsVersionInfoW {
     sz_csd_version: [u16; 128],
 }
 
+// Wine ref: dlls/ntdll/version.c:578 — fills dwMajorVersion/dwMinorVersion/dwBuildNumber/
+// dwPlatformId and szCSDVersion from current_version global; if dwOSVersionInfoSize ==
+// sizeof(RTL_OSVERSIONINFOEXW) also fills wServicePackMajor/Minor, wSuiteMask, wProductType.
+// Always returns STATUS_SUCCESS (no error path).
 /// RtlGetVersion: fills an RTL_OSVERSIONINFOW struct with Windows 10 info.
 ///
 /// # Safety
@@ -582,6 +616,12 @@ pub unsafe extern "win64" fn rtl_get_version(
     STATUS_SUCCESS
 }
 
+// Wine ref: dlls/ntdll/error.c:77 — writes status to NtCurrentTeb()->LastStatusValue before
+// calling RtlNtStatusToDosErrorNoTeb. RtlNtStatusToDosErrorNoTeb strips 0xd→0xc prefix,
+// handles HIWORD(status)==0xc001/0x8007/0xc007 by returning LOWORD(status), then does a full
+// table lookup via map_status; unknown codes → ERROR_MR_MID_NOT_FOUND (317).
+// Known gap: Weave has no TEB LastStatusValue; 0xd-prefix stripping and HIWORD special cases
+// are missing; only 7 codes are in the map (real Wine covers ~600+).
 /// RtlNtStatusToDosError: maps NT status codes to Win32 error codes.
 pub extern "win64" fn rtl_nt_status_to_dos_error(status: u32) -> u32 {
     match status {
@@ -851,6 +891,13 @@ pub unsafe extern "win64" fn rtl_compare_memory(
     source2: *const u8,
     length: usize,
 ) -> usize {
+    // Pointer validation: null pointers or zero length → 0 matching bytes.
+    if source1.is_null() || source2.is_null() || length == 0 {
+        return 0;
+    }
+    // Sanity cap: 256MB is more than any legitimate single comparison.
+    const MAX_COMPARE: usize = 256 * 1024 * 1024;
+    let length = length.min(MAX_COMPARE);
     let s1 = unsafe { std::slice::from_raw_parts(source1, length) };
     let s2 = unsafe { std::slice::from_raw_parts(source2, length) };
     s1.iter().zip(s2.iter()).take_while(|(a, b)| a == b).count()
@@ -868,6 +915,12 @@ pub unsafe extern "win64" fn rtl_validate_heap(
 
 // ── System information functions ─────────────────────────────────────────────
 
+// Wine ref: dlls/ntdll/unix/system.c:3256 — large switch on SYSTEM_INFORMATION_CLASS;
+// returns STATUS_INFO_LENGTH_MISMATCH when size doesn't match, STATUS_ACCESS_VIOLATION when
+// info==NULL and size is correct. SystemBasicInformation (0) and SystemCpuInformation (1)
+// are always handled; many classes return STATUS_NOT_IMPLEMENTED.
+// Known gap: Weave returns STATUS_NOT_IMPLEMENTED for all classes; apps that query
+// SystemBasicInformation or SystemCpuInformation will fail to get real values.
 /// NtQuerySystemInformation: stub that returns STATUS_NOT_IMPLEMENTED.
 ///
 /// # Safety
@@ -926,6 +979,12 @@ pub unsafe extern "win64" fn nt_query_information_thread(
     0xC0000002 // STATUS_NOT_IMPLEMENTED
 }
 
+// Wine ref: dlls/ntdll/rtlstr.c:414 — delegates to RtlCompareUnicodeStrings(s1->Buffer,
+// s1->Length/sizeof(WCHAR), s2->Buffer, s2->Length/sizeof(WCHAR), CaseInsensitive).
+// RtlCompareUnicodeStrings uses locale-aware Unicode case folding (RtlUpcaseUnicodeChar)
+// not ASCII bit-twiddling. Returns negative/zero/positive like memcmp.
+// Known gap: Weave's case-insensitive path folds only ASCII A-Z (adds 32); non-ASCII
+// codepoints (accented chars, Cyrillic, etc.) will compare case-sensitively.
 /// RtlCompareUnicodeString: compare two Unicode strings.
 ///
 /// # Safety
@@ -987,6 +1046,12 @@ pub unsafe extern "win64" fn nt_set_information_thread(
     0xC0000002 // STATUS_NOT_IMPLEMENTED
 }
 
+// Wine ref: dlls/ntdll/loader.c:3442 — appends ".dll" if missing, resolves the DLL search
+// path via LdrGetDllPath, acquires loader_section critical section, calls load_dll then
+// process_attach (runs DllMain with DLL_PROCESS_ATTACH). On attach failure, calls LdrUnloadDll.
+// Writes wm->ldr.DllBase into *hModule on success.
+// Known gap: Weave registers a synthetic handle and returns STATUS_SUCCESS for any non-empty
+// name — no actual DllMain invocation, no search path resolution, no loader lock.
 /// LdrLoadDll: load a DLL into the process address space.
 ///
 /// Returns a synthetic module handle via the global handle registry and
@@ -1017,6 +1082,11 @@ pub unsafe extern "win64" fn ldr_load_dll(
     0 // STATUS_SUCCESS
 }
 
+// Wine ref: dlls/ntdll/loader.c — LdrGetProcedureAddress searches the module's export table
+// for the named procedure; ordinal lookup supported via the Ordinal parameter (non-zero ordinal
+// overrides name). Returns STATUS_PROCEDURE_NOT_FOUND if not found.
+// Known gap: Weave uses its runtime resolve chain rather than the module's actual export table;
+// ordinal lookup not implemented (Ordinal parameter ignored).
 /// LdrGetProcedureAddress: get the address of a procedure in a loaded DLL.
 ///
 /// Maps the module handle back to a DLL name, then resolves via the global
@@ -1069,6 +1139,9 @@ pub unsafe extern "win64" fn ldr_get_procedure_address(
     }
 }
 
+// Wine ref: dlls/ntdll/unix/virtual.c:5193 — NtAllocateVirtualMemory returns
+// STATUS_INVALID_PARAMETER for null base_address, null region_size, or *region_size == 0.
+// On success writes the actual allocation base into *base_address.
 /// NtAllocateVirtualMemory: allocate virtual memory.
 ///
 /// # Safety
@@ -1081,9 +1154,14 @@ pub unsafe extern "win64" fn nt_allocate_virtual_memory(
     _allocation_type: u32,
     protect: u32,
 ) -> u32 {
+    const STATUS_INVALID_PARAMETER: u32 = 0xC000000D;
     unsafe {
         if base_address.is_null() || region_size.is_null() {
-            return 0u32; // STATUS_SUCCESS
+            return STATUS_INVALID_PARAMETER;
+        }
+        // Wine: if (!*size_ptr) return STATUS_INVALID_PARAMETER
+        if *region_size == 0 {
+            return STATUS_INVALID_PARAMETER;
         }
 
         let prot = nt_prot_to_linux(protect);

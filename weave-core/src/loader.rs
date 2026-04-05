@@ -41,7 +41,11 @@ impl Drop for LoadedImage {
 ///   3. Apply base relocations if ASLR placed us at a different address than preferred.
 ///   4. Set final memory permissions on each section (code=rx, data=rw, rodata=r).
 pub fn load(bytes: &[u8]) -> Result<LoadedImage, String> {
-    let pe = PE::parse(bytes).map_err(|e| format!("parse error: {e}"))?;
+    // Wrap in catch_unwind: goblin's TLS/reloc parsers can panic on crafted input.
+    // (Confirmed by cargo-fuzz crash, 2026-04-05.)
+    let pe = std::panic::catch_unwind(|| PE::parse(bytes))
+        .unwrap_or_else(|_| Err(goblin::error::Error::Malformed("goblin panicked".to_string())))
+        .map_err(|e| format!("parse error: {e}"))?;
 
     let opt = pe
         .header
@@ -80,7 +84,10 @@ pub fn load(bytes: &[u8]) -> Result<LoadedImage, String> {
 /// DllMain is not called — the caller is responsible for any initialisation
 /// the DLL requires.
 pub fn load_dll(bytes: &[u8]) -> Result<(LoadedImage, HashMap<String, usize>), String> {
-    let pe = PE::parse(bytes).map_err(|e| format!("parse error: {e}"))?;
+    // Wrap in catch_unwind: goblin's TLS/reloc parsers can panic on crafted input.
+    let pe = std::panic::catch_unwind(|| PE::parse(bytes))
+        .unwrap_or_else(|_| Err(goblin::error::Error::Malformed("goblin panicked".to_string())))
+        .map_err(|e| format!("parse error: {e}"))?;
 
     let opt = pe
         .header
@@ -231,7 +238,15 @@ fn init_tls(base: *mut u8, bytes: &[u8], pe: &PE) -> (*const u8, usize) {
     let raw_end = dir.end_address_of_raw_data as usize;
     let addr_of_index = dir.address_of_index as usize;
 
-    if addr_of_index != 0 {
+    // Security: addr_of_index is a VA from the PE file. Only write through it
+    // if it falls within the mapped image — otherwise a crafted PE could use
+    // this to write 0 to an arbitrary kernel address.
+    let image_start = base as usize;
+    let image_end = image_start + (bytes.len()); // conservative bound
+    if addr_of_index != 0
+        && addr_of_index >= image_start
+        && addr_of_index.saturating_add(4) <= image_end
+    {
         unsafe { *(addr_of_index as *mut u32) = 0 };
     }
 
@@ -240,7 +255,7 @@ fn init_tls(base: *mut u8, bytes: &[u8], pe: &PE) -> (*const u8, usize) {
         return (std::ptr::null(), 0);
     }
 
-    let _ = (base, bytes);
+    let _ = bytes;
     (raw_start as *const u8, raw_size)
 }
 
