@@ -27,6 +27,12 @@ pub enum GdiKind {
         face: [u16; 32],
     },
     Bitmap,
+    /// Region — clipping/fill region.
+    ///
+    /// Wine ref: dlls/win32u/region.c — NtGdiCreateRectRgn allocates a WINEREGION
+    /// with a single rect; HRGN is an opaque handle. Weave stores it as an enum
+    /// variant; clipping is not actually applied (no real GDI surface).
+    Region,
 }
 
 // ── Global object table ───────────────────────────────────────────────────────

@@ -26,6 +26,48 @@ pub const DC_PEN: i32 = 19;
 pub const TRANSPARENT: i32 = 1;
 pub const OPAQUE: i32 = 2;
 
+// ── Text alignment flags (SetTextAlign / GetTextAlign) ────────────────────────
+// Wine ref: dlls/win32u/dc.c — NtGdiSetTextAlign stores these in dc->attr.text_align.
+// Horizontal: TA_LEFT=0 (default), TA_RIGHT=2, TA_CENTER=6.
+// Vertical: TA_TOP=0 (default), TA_BOTTOM=8, TA_BASELINE=24.
+// TA_UPDATECP=1: advance current position after each draw call.
+pub const TA_NOUPDATECP: u32 = 0x0000;
+pub const TA_UPDATECP: u32 = 0x0001;
+pub const TA_LEFT: u32 = 0x0000;
+pub const TA_RIGHT: u32 = 0x0002;
+pub const TA_CENTER: u32 = 0x0006;
+pub const TA_TOP: u32 = 0x0000;
+pub const TA_BOTTOM: u32 = 0x0008;
+pub const TA_BASELINE: u32 = 0x0018;
+pub const GDI_ERROR: u32 = 0xFFFF_FFFF;
+
+// ── ExtTextOut option flags ───────────────────────────────────────────────────
+// Wine ref: dlls/win32u/font.c::nulldrv_ExtTextOut — ETO_OPAQUE fills the
+// background rect with the current background colour before rendering glyphs;
+// ETO_CLIPPED clips output to the provided rect; ETO_GLYPH_INDEX means lpString
+// holds glyph indices rather than Unicode codepoints.
+pub const ETO_OPAQUE: u32 = 0x0002;
+pub const ETO_CLIPPED: u32 = 0x0004;
+pub const ETO_GLYPH_INDEX: u32 = 0x0010;
+
+// ── Region combine modes ──────────────────────────────────────────────────────
+pub const RGN_AND: i32 = 1;
+pub const RGN_OR: i32 = 2;
+pub const RGN_XOR: i32 = 3;
+pub const RGN_DIFF: i32 = 4;
+pub const RGN_COPY: i32 = 5;
+
+// ── Region return values ──────────────────────────────────────────────────────
+pub const NULLREGION: i32 = 1;
+pub const SIMPLEREGION: i32 = 2;
+pub const COMPLEXREGION: i32 = 3;
+
+// ── Font type flags for EnumFontFamiliesEx callback ──────────────────────────
+pub const TRUETYPE_FONTTYPE: u32 = 0x0004;
+
+// ── R2 mix mode (ROP2) ────────────────────────────────────────────────────────
+pub const R2_COPYPEN: i32 = 13;
+
 // ── Pen styles ────────────────────────────────────────────────────────────────
 pub const PS_SOLID: i32 = 0;
 pub const PS_DASH: i32 = 1;
@@ -133,6 +175,43 @@ pub struct TextMetricW {
     pub tm_pitch_and_family: u8,
     pub tm_char_set: u8,
     pub _pad: [u8; 3],
+}
+
+// ── ENUMLOGFONTEXW (348 bytes) ────────────────────────────────────────────────
+// Wine ref: dlls/win32u/font.c — EnumFontFamiliesExW callback receives this as
+// first arg; elf_log_font is the logical font, elf_full_name is the full face
+// name, elf_style is the style string ("Regular", "Bold Italic", etc.).
+#[repr(C)]
+pub struct EnumLogFontExW {
+    pub elf_log_font: LogFontW,    // 92 bytes — the basic LOGFONTW
+    pub elf_full_name: [u16; 64],  // 128 bytes — full face name
+    pub elf_style: [u16; 32],      // 64 bytes — style string
+    pub elf_script: [u16; 32],     // 64 bytes — script name
+}
+
+// ── NEWTEXTMETRICEXW (100 bytes) ─────────────────────────────────────────────
+// Extends TEXTMETRICW with ntmFlags, ntmSizeEM, ntmCellHeight, ntmAvgWidth,
+// and FONTSIGNATURE. Wine ref: dlls/win32u/font.c — callbacks receive this
+// as second arg. Most callers only inspect the TEXTMETRICW portion.
+#[repr(C)]
+pub struct NewTextMetricExW {
+    pub tm: TextMetricW,          // 60 bytes — base TEXTMETRICW
+    pub ntm_flags: u32,           // NTM_* font flags
+    pub ntm_size_em: u32,         // design em square size
+    pub ntm_cell_height: u32,     // cell height in design units
+    pub ntm_avg_width: u32,       // avg char width in design units
+    pub fs_usage_bitmap: [u32; 4], // FONTSIGNATURE.fsUsb — Unicode subranges
+    pub fs_cset_bitmap: [u32; 2], // FONTSIGNATURE.fsCsb — codepage ranges
+}
+
+// ── DOCINFOW (printing) ───────────────────────────────────────────────────────
+#[repr(C)]
+pub struct DocInfoW {
+    pub cb_size: i32,
+    pub lp_sz_doc_name: *const u16,
+    pub lp_sz_output: *const u16,
+    pub lp_sz_datatype: *const u16,
+    pub f_type: u32,
 }
 
 #[cfg(test)]

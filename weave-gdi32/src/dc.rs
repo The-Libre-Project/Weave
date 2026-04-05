@@ -21,6 +21,13 @@ pub struct DcState {
     pub bk_color: u32,
     /// Background mode: TRANSPARENT or OPAQUE. Default: OPAQUE.
     pub bk_mode: i32,
+    /// Text alignment flags (TA_*). Default: TA_LEFT|TA_TOP = 0.
+    ///
+    /// Wine ref: dlls/win32u/dc.c — NtGdiSetTextAlign stores flags in
+    /// dc->attr.text_align; TA_UPDATECP(1) advances current position on draw.
+    /// Key flags: TA_LEFT=0, TA_RIGHT=2, TA_CENTER=6, TA_TOP=0, TA_BOTTOM=8,
+    /// TA_BASELINE=24. Scintilla uses TA_TOP|TA_LEFT (0) for its editor area.
+    pub text_align: u32,
     /// Currently selected brush handle.
     pub h_brush: usize,
     /// Currently selected pen handle.
@@ -36,6 +43,7 @@ impl DcState {
             text_color: 0x0000_0000,
             bk_color: 0x00FF_FFFF,
             bk_mode: OPAQUE,
+            text_align: 0, // TA_LEFT | TA_TOP
             h_brush: objects::stock_handle(WHITE_BRUSH),
             h_pen: objects::stock_handle(BLACK_PEN),
             h_font: objects::stock_handle(SYSTEM_FONT),

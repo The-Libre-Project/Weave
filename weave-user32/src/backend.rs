@@ -58,6 +58,8 @@ mod inner {
         pub screen_width_mm: u16,
         #[allow(dead_code)]
         pub screen_height_mm: u16,
+        /// Depth of the root window (typically 24 or 32). Used as PutImage depth.
+        pub depth: u8,
     }
 
     static X11: OnceLock<Option<Mutex<X11State>>> = OnceLock::new();
@@ -76,6 +78,7 @@ mod inner {
                 screen_height: screen.height_in_pixels,
                 screen_width_mm: screen.width_in_millimeters,
                 screen_height_mm: screen.height_in_millimeters,
+                depth: screen.root_depth,
                 conn,
                 screen_num,
             }))
@@ -454,6 +457,10 @@ mod inner {
                 Err(_) => return,
             };
             let _ = g.conn.create_gc(gc_id, xcb_id, &CreateGCAux::new());
+            // Wine ref: not applicable — X11 PutImage depth must match the drawable.
+            // g.depth is stored from screen.root_depth at init; typically 24 on most
+            // X11 servers, 32 on compositing desktops (XWayland, GNOME). Using the
+            // wrong depth produces a BadMatch X11 error and silently drops the pixels.
             let _ = g.conn.put_image(
                 ImageFormat::Z_PIXMAP,
                 xcb_id,
@@ -462,8 +469,8 @@ mod inner {
                 h as u16,
                 x,
                 y,
-                0,  // left_pad
-                24, // depth (TrueColor)
+                0, // left_pad
+                g.depth,
                 &pixels,
             );
             let _ = g.conn.free_gc(gc_id);
@@ -475,6 +482,127 @@ mod inner {
                 .map(|&u| if u <= 0xFF { u as u8 } else { b'?' })
                 .collect();
             draw_text(xcb_id, x, y, &bytes, fg_pixel, bg_pixel);
+        }
+    }
+
+    /// Convert an X11 keycode (ev.detail, hardware scan code + 8) to a Win32 VK virtual key.
+    ///
+    /// Wine ref: dlls/winex11.drv/keyboard.c::EVENT_event_to_vkey — builds a per-process
+    /// keyc2vkey[] table at runtime using XGetKeyboardMapping + keysym→VK tables.
+    /// Weave: static table for the standard Linux evdev (pc105) US layout.
+    /// X11 keycodes = Linux evdev keycode + 8 (the evdev offset).
+    fn x11_keycode_to_vk(keycode: u8) -> u32 {
+        match keycode {
+            9   => 0x1B, // VK_ESCAPE
+            10  => 0x31, // VK_1
+            11  => 0x32, // VK_2
+            12  => 0x33, // VK_3
+            13  => 0x34, // VK_4
+            14  => 0x35, // VK_5
+            15  => 0x36, // VK_6
+            16  => 0x37, // VK_7
+            17  => 0x38, // VK_8
+            18  => 0x39, // VK_9
+            19  => 0x30, // VK_0
+            20  => 0xBD, // VK_OEM_MINUS  '-'
+            21  => 0xBB, // VK_OEM_PLUS   '='
+            22  => 0x08, // VK_BACK
+            23  => 0x09, // VK_TAB
+            // QWERTY row
+            24  => 0x51, // VK_Q
+            25  => 0x57, // VK_W
+            26  => 0x45, // VK_E
+            27  => 0x52, // VK_R
+            28  => 0x54, // VK_T
+            29  => 0x59, // VK_Y
+            30  => 0x55, // VK_U
+            31  => 0x49, // VK_I
+            32  => 0x4F, // VK_O
+            33  => 0x50, // VK_P
+            34  => 0xDB, // VK_OEM_4  '['
+            35  => 0xDD, // VK_OEM_6  ']'
+            36  => 0x0D, // VK_RETURN
+            37  => 0xA2, // VK_LCONTROL
+            // ASDF row
+            38  => 0x41, // VK_A
+            39  => 0x53, // VK_S
+            40  => 0x44, // VK_D
+            41  => 0x46, // VK_F
+            42  => 0x47, // VK_G
+            43  => 0x48, // VK_H
+            44  => 0x4A, // VK_J
+            45  => 0x4B, // VK_K
+            46  => 0x4C, // VK_L
+            47  => 0xBA, // VK_OEM_1  ';'
+            48  => 0xDE, // VK_OEM_7  '\''
+            49  => 0xC0, // VK_OEM_3  '`'
+            50  => 0xA0, // VK_LSHIFT
+            51  => 0xDC, // VK_OEM_5  '\'
+            // ZXCV row
+            52  => 0x5A, // VK_Z
+            53  => 0x58, // VK_X
+            54  => 0x43, // VK_C
+            55  => 0x56, // VK_V
+            56  => 0x42, // VK_B
+            57  => 0x4E, // VK_N
+            58  => 0x4D, // VK_M
+            59  => 0xBC, // VK_OEM_COMMA  ','
+            60  => 0xBE, // VK_OEM_PERIOD '.'
+            61  => 0xBF, // VK_OEM_2      '/'
+            62  => 0xA1, // VK_RSHIFT
+            63  => 0x6A, // VK_MULTIPLY (KP_*)
+            64  => 0xA4, // VK_LMENU  (Alt_L)
+            65  => 0x20, // VK_SPACE
+            66  => 0x14, // VK_CAPITAL (CapsLock)
+            // Function keys
+            67  => 0x70, // VK_F1
+            68  => 0x71, // VK_F2
+            69  => 0x72, // VK_F3
+            70  => 0x73, // VK_F4
+            71  => 0x74, // VK_F5
+            72  => 0x75, // VK_F6
+            73  => 0x76, // VK_F7
+            74  => 0x77, // VK_F8
+            75  => 0x78, // VK_F9
+            76  => 0x79, // VK_F10
+            77  => 0x90, // VK_NUMLOCK
+            78  => 0x91, // VK_SCROLL
+            // Numpad
+            79  => 0x67, // VK_NUMPAD7
+            80  => 0x68, // VK_NUMPAD8
+            81  => 0x69, // VK_NUMPAD9
+            82  => 0x6D, // VK_SUBTRACT
+            83  => 0x64, // VK_NUMPAD4
+            84  => 0x65, // VK_NUMPAD5
+            85  => 0x66, // VK_NUMPAD6
+            86  => 0x6B, // VK_ADD
+            87  => 0x61, // VK_NUMPAD1
+            88  => 0x62, // VK_NUMPAD2
+            89  => 0x63, // VK_NUMPAD3
+            90  => 0x60, // VK_NUMPAD0
+            91  => 0x6E, // VK_DECIMAL
+            95  => 0x7A, // VK_F11
+            96  => 0x7B, // VK_F12
+            // Extended / nav cluster
+            104 => 0x0D, // VK_RETURN  (KP_Enter)
+            105 => 0xA3, // VK_RCONTROL
+            106 => 0x6F, // VK_DIVIDE  (KP_/)
+            107 => 0x2C, // VK_SNAPSHOT
+            108 => 0xA5, // VK_RMENU   (Alt_R / AltGr)
+            110 => 0x24, // VK_HOME
+            111 => 0x26, // VK_UP
+            112 => 0x21, // VK_PRIOR   (PageUp)
+            113 => 0x25, // VK_LEFT
+            114 => 0x27, // VK_RIGHT
+            115 => 0x23, // VK_END
+            116 => 0x28, // VK_DOWN
+            117 => 0x22, // VK_NEXT    (PageDown)
+            118 => 0x2D, // VK_INSERT
+            119 => 0x2E, // VK_DELETE
+            133 => 0x5B, // VK_LWIN   (Super_L)
+            134 => 0x5C, // VK_RWIN   (Super_R)
+            135 => 0x5D, // VK_APPS   (Menu)
+            _   => 0,    // unknown — caller should fall back to raw keycode
         }
     }
 
@@ -586,11 +714,15 @@ mod inner {
             Event::KeyPress(ev) => {
                 let hwnd = window::hwnd_for_xcb(ev.event);
                 if hwnd != 0 {
+                    let vk = x11_keycode_to_vk(ev.detail);
+                    // Store X11 modifier state in l_param high word so TranslateMessage
+                    // can extract the shift flag for WM_CHAR generation.
+                    let l_param = ((u16::from(ev.state) as isize) << 16) | 1;
                     queue::post(MsgEntry {
                         hwnd,
                         message: WM_KEYDOWN,
-                        w_param: ev.detail as usize,
-                        l_param: 0,
+                        w_param: vk as usize,
+                        l_param,
                         time: ev.time,
                         pt_x: ev.event_x as i32,
                         pt_y: ev.event_y as i32,
@@ -601,11 +733,13 @@ mod inner {
             Event::KeyRelease(ev) => {
                 let hwnd = window::hwnd_for_xcb(ev.event);
                 if hwnd != 0 {
+                    let vk = x11_keycode_to_vk(ev.detail);
+                    let l_param = ((u16::from(ev.state) as isize) << 16) | (1 << 30) | (1 << 31);
                     queue::post(MsgEntry {
                         hwnd,
                         message: WM_KEYUP,
-                        w_param: ev.detail as usize,
-                        l_param: 0,
+                        w_param: vk as usize,
+                        l_param,
                         time: ev.time,
                         pt_x: ev.event_x as i32,
                         pt_y: ev.event_y as i32,

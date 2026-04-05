@@ -223,13 +223,19 @@ fn seven_zip_fm_crt_init_completes() {
     );
 }
 
-/// `weave notepad++.exe` — Notepad++ GUI; Sprint 4 portable-mode gate.
+/// `weave notepad++.exe test.py` — Notepad++ GUI; Phase 6b WS1 gate.
 ///
-/// We run it with a 10-second timeout.  The critical check: Notepad++ must
-/// NOT print "Load langs.xml failed!" — that error fires when portable mode
-/// detection fails and Notepad++ looks in the wrong directory for config files.
-/// A clean run (no error dialog) means `PathFileExistsW` / `GetFileAttributesExW`
-/// correctly located `doLocalConf.xml` next to the exe.
+/// Runs Notepad++ with a Python file argument. Checks:
+/// 1. IAT patch completes ("weave: imports resolved")
+/// 2. Portable-mode config lookup succeeds (no "Load langs.xml failed!")
+/// 3. No critical GDI32/USER32 functions remain unresolved for Scintilla's
+///    text-rendering path (GetTextExtentExPointW, EnumFontFamiliesExW, etc.)
+/// 4. The process enters the Win32 message loop and runs for ≥ 2 seconds,
+///    indicating Notepad++ successfully loaded the file and began processing.
+///
+/// Note: visual verification (syntax-highlighted text in an X11 window) requires
+/// an interactive session with a live display. This test covers the headless
+/// regression gate only.
 #[test]
 fn notepad_plus_plus_portable_mode() {
     if !cfg!(target_os = "linux") {
@@ -240,6 +246,7 @@ fn notepad_plus_plus_portable_mode() {
     let manifest = env!("CARGO_MANIFEST_DIR");
     let npp_dir = format!("{manifest}/../tests/fixtures/npp");
     let npp_exe = format!("{npp_dir}/notepad++.exe");
+    let test_py = format!("{npp_dir}/test.py");
 
     if !std::path::Path::new(&npp_exe).exists() {
         eprintln!("skipping: notepad++.exe not present in tests/fixtures/npp/");
@@ -248,15 +255,17 @@ fn notepad_plus_plus_portable_mode() {
 
     let weave_bin = env!("CARGO_BIN_EXE_weave");
     // Run with CWD = npp_dir so relative paths in Notepad++ resolve inside the
-    // portable directory.
+    // portable directory. Pass test.py as argv[1] to exercise the file-load path.
+    let start = std::time::Instant::now();
     let mut child = std::process::Command::new(weave_bin)
         .current_dir(&npp_dir)
         .arg(&npp_exe)
+        .arg(&test_py)
         .stderr(std::process::Stdio::piped())
         .spawn()
         .unwrap_or_else(|e| panic!("failed to spawn weave on notepad++.exe: {e}"));
 
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let deadline = start + std::time::Duration::from_secs(10);
     loop {
         match child.try_wait() {
             Ok(Some(_)) => break,
@@ -270,6 +279,7 @@ fn notepad_plus_plus_portable_mode() {
             Err(e) => panic!("wait failed: {e}"),
         }
     }
+    let elapsed = start.elapsed();
 
     let stderr_bytes = {
         use std::io::Read;
@@ -280,19 +290,41 @@ fn notepad_plus_plus_portable_mode() {
         buf
     };
     let stderr = String::from_utf8_lossy(&stderr_bytes);
-    eprintln!("notepad++ stderr:\n{stderr}");
+    eprintln!("notepad++ stderr ({elapsed:.1?}):\n{stderr}");
 
-    // Imports must resolve before the entry point runs.
+    // Gate 1: IAT patch must complete before the entry point runs.
     assert!(
         stderr.contains("weave: imports resolved"),
         "import resolution did not complete — possible crash during IAT patch.\nstderr: {stderr}"
     );
 
-    // Portable mode check: doLocalConf.xml must be found next to the exe.
-    // If not found, Notepad++ shows "Load langs.xml failed!" via MessageBoxW.
+    // Gate 2: Portable mode — doLocalConf.xml must be found next to the exe.
     assert!(
         !stderr.contains("Load langs.xml failed"),
         "Notepad++ could not find langs.xml — portable mode detection failed.\nstderr: {stderr}"
+    );
+
+    // Gate 3: Critical Scintilla GDI functions must not appear as unresolved.
+    // These were wired in Phase 6b WS1; if they appear here the resolve() table
+    // regressed.
+    for func in &[
+        "GetTextExtentExPointW",
+        "EnumFontFamiliesExW",
+        "SetTextAlign",
+        "CreateRectRgn",
+        "GetObjectW",
+    ] {
+        assert!(
+            !stderr.contains(&format!("weave: unresolved: gdi32.dll::{func}")),
+            "Scintilla GDI function {func} is still unresolved — Phase 6b WS1 regression.\nstderr: {stderr}"
+        );
+    }
+
+    // Gate 4: Process must run for at least 2 seconds, indicating it entered
+    // the Win32 message loop rather than crashing at startup.
+    assert!(
+        elapsed >= std::time::Duration::from_secs(2),
+        "Notepad++ ran for only {elapsed:.1?} — likely crashed before entering message loop.\nstderr: {stderr}"
     );
 }
 

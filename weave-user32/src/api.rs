@@ -381,71 +381,61 @@ pub unsafe extern "win64" fn peek_message_w(
 /// Map an X11 keycode to a Unicode code point (unshifted, standard PC layout).
 ///
 /// X11 keycodes are hardware-specific but follow a well-known layout on
-/// standard PC keyboards. This table covers the ASCII printable range.
-/// Returns `None` for keycodes with no printable character (function keys,
-/// modifiers, cursor keys, etc.).
-fn keycode_to_char(keycode: usize, _shift: bool) -> Option<char> {
-    // Standard PC keyboard keycode mapping (unshifted).
-    // Keycodes 8–255; printable ASCII starts around 10.
-    // Source: X11 keyboard specification for evdev/standard PC layout.
-    let ch: u8 = match keycode {
-        // Row 0 — number row
-        10 => b'1',
-        11 => b'2',
-        12 => b'3',
-        13 => b'4',
-        14 => b'5',
-        15 => b'6',
-        16 => b'7',
-        17 => b'8',
-        18 => b'9',
-        19 => b'0',
-        20 => b'-',
-        21 => b'=',
-        // Row 1 — QWERTY
-        24 => b'q',
-        25 => b'w',
-        26 => b'e',
-        27 => b'r',
-        28 => b't',
-        29 => b'y',
-        30 => b'u',
-        31 => b'i',
-        32 => b'o',
-        33 => b'p',
-        34 => b'[',
-        35 => b']',
-        // Row 2 — ASDF
-        38 => b'a',
-        39 => b's',
-        40 => b'd',
-        41 => b'f',
-        42 => b'g',
-        43 => b'h',
-        44 => b'j',
-        45 => b'k',
-        46 => b'l',
-        47 => b';',
-        48 => b'\'',
-        // Row 3 — ZXCV
-        52 => b'z',
-        53 => b'x',
-        54 => b'c',
-        55 => b'v',
-        56 => b'b',
-        57 => b'n',
-        58 => b'm',
-        59 => b',',
-        60 => b'.',
-        61 => b'/',
-        // Special
-        65 => b' ',  // Space
-        36 => b'\r', // Return / Enter
-        22 => 8,     // Backspace
-        23 => b'\t', // Tab
-        _ => return None,
+/// Convert a Win32 VK virtual key code to a Unicode character for WM_CHAR.
+///
+/// Wine ref: dlls/winex11.drv/keyboard.c::X11DRV_ToUnicodeEx — applies the active
+/// keyboard layout to translate a VK + scan code pair to a Unicode string; for
+/// simple layouts this reduces to a table lookup. Weave: static US-QWERTY mapping.
+///
+/// `shift` is extracted from the X11 modifier state stored in `msg.l_param >> 16`.
+/// ShiftMask = bit 0 of the X11 state word.
+fn vk_to_char(vk: usize, shift: bool) -> Option<char> {
+    // Letters: VK_A(0x41)..VK_Z(0x5A) → lowercase or uppercase
+    if (0x41..=0x5A).contains(&vk) {
+        let base = vk as u8; // uppercase ASCII
+        return Some(if shift { base as char } else { (base + 0x20) as char });
+    }
+    // Digits and OEM punctuation
+    let ch = match vk {
+        // Digits — shift gives US shift-symbol
+        0x30 => if shift { ')' } else { '0' },
+        0x31 => if shift { '!' } else { '1' },
+        0x32 => if shift { '@' } else { '2' },
+        0x33 => if shift { '#' } else { '3' },
+        0x34 => if shift { '$' } else { '4' },
+        0x35 => if shift { '%' } else { '5' },
+        0x36 => if shift { '^' } else { '6' },
+        0x37 => if shift { '&' } else { '7' },
+        0x38 => if shift { '*' } else { '8' },
+        0x39 => if shift { '(' } else { '9' },
+        // OEM keys (US layout)
+        0xBA => if shift { ':' } else { ';' },  // VK_OEM_1
+        0xBB => if shift { '+' } else { '=' },  // VK_OEM_PLUS
+        0xBC => if shift { '<' } else { ',' },  // VK_OEM_COMMA
+        0xBD => if shift { '_' } else { '-' },  // VK_OEM_MINUS
+        0xBE => if shift { '>' } else { '.' },  // VK_OEM_PERIOD
+        0xBF => if shift { '?' } else { '/' },  // VK_OEM_2
+        0xC0 => if shift { '~' } else { '`' },  // VK_OEM_3
+        0xDB => if shift { '{' } else { '[' },  // VK_OEM_4
+        0xDC => if shift { '|' } else { '\\' }, // VK_OEM_5
+        0xDD => if shift { '}' } else { ']' },  // VK_OEM_6
+        0xDE => if shift { '"' } else { '\'' }, // VK_OEM_7
+        // Control characters
+        0x08 => '\x08', // VK_BACK
+        0x09 => '\t',   // VK_TAB
+        0x0D => '\r',   // VK_RETURN
+        0x20 => ' ',    // VK_SPACE
+        // Numpad digits
+        0x60 => '0', 0x61 => '1', 0x62 => '2', 0x63 => '3', 0x64 => '4',
+        0x65 => '5', 0x66 => '6', 0x67 => '7', 0x68 => '8', 0x69 => '9',
+        0x6A => '*', // VK_MULTIPLY
+        0x6B => '+', // VK_ADD
+        0x6D => '-', // VK_SUBTRACT
+        0x6E => '.', // VK_DECIMAL
+        0x6F => '/', // VK_DIVIDE
+        _ => return None, // non-printable: function keys, modifiers, arrows, etc.
     };
-    Some(ch as char)
+    Some(ch)
 }
 
 /// TranslateMessage: translate WM_KEYDOWN messages to WM_CHAR.
@@ -463,8 +453,10 @@ pub unsafe extern "win64" fn translate_message(lp_msg: *const Msg) -> i32 {
     if msg.message != WM_KEYDOWN {
         return (msg.message == WM_KEYUP || msg.message == WM_CHAR) as i32;
     }
-    // msg.w_param holds the X11 keycode (set by backend::translate_event).
-    if let Some(ch) = keycode_to_char(msg.w_param, false) {
+    // msg.w_param holds the Win32 VK code (set by backend::x11_keycode_to_vk).
+    // X11 modifier state is stored in msg.l_param bits 16–31; ShiftMask = bit 16.
+    let shift = ((msg.l_param >> 16) & 0x0001) != 0;
+    if let Some(ch) = vk_to_char(msg.w_param, shift) {
         queue::post(MsgEntry {
             hwnd: msg.hwnd,
             message: WM_CHAR,
@@ -2113,8 +2105,7 @@ pub unsafe extern "win64" fn set_timer(
 ) -> usize {
     let id = if n_id_event == 0 {
         // System-allocated timer ID — use counter above 0x7FFF to match Wine.
-        let new_id = NEXT_TIMER_ID.fetch_add(1, Ordering::Relaxed) as usize + 0x8000;
-        new_id
+        NEXT_TIMER_ID.fetch_add(1, Ordering::Relaxed) as usize + 0x8000
     } else {
         n_id_event
     };
