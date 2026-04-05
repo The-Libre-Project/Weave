@@ -73,6 +73,21 @@ fn main() {
         cmdline::set(exe_name, &args.exe_args);
     }
 
+    // Store the exe path as a Windows path (Z:\...) so GetModuleFileNameW(NULL)
+    // can return the real location, letting apps like Notepad++ find their
+    // plugins folder relative to the executable.
+    {
+        let abs = args
+            .exe
+            .canonicalize()
+            .unwrap_or_else(|_| args.exe.clone());
+        let win_path = format!(
+            "Z:{}",
+            abs.to_string_lossy().replace('/', "\\")
+        );
+        weave_core::exe_path::set(&win_path);
+    }
+
     if let Some(p) = args.prefix {
         prefix::set(p);
     }

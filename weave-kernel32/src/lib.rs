@@ -3083,9 +3083,89 @@ pub unsafe extern "win64" fn copy_file_a(
 
 // ── Module / library loading ──────────────────────────────────────────────────
 //
-// Runtime DLL resolution. LoadLibrary* returns a synthetic HMODULE that
-// GetProcAddress maps back to a DLL name, then resolves via the global
-// resolver chain registered by weave-cli at startup.
+// Runtime DLL resolution.
+//
+// Strategy: try to load the DLL from disk first (translating the Windows path
+// to a Linux path, searching the exe directory and prefix System32).  If the
+// file exists, map it with loader::load_dll, patch its IAT, and register it in
+// dll_registry so GetProcAddress returns real addresses from the mapped image.
+// If the file is not found (most Windows system DLLs), fall back to a synthetic
+// HMODULE so GetProcAddress can still route through our stub resolver chain.
+
+/// Attempt to load a DLL from disk given its Windows-style name or path.
+/// Returns (handle, loaded_from_disk).
+///
+/// Search order:
+///   1. Absolute path as given (after Windows→Linux translation)
+///   2. Same directory as the running exe
+///   3. Prefix System32 directory
+fn load_library_impl(name: &str) -> usize {
+    use weave_core::{dll_registry, exe_path, file_io, iat, loader, module_handles, prefix, resolve};
+
+    let key = {
+        let base = name.rsplit(['\\', '/']).next().unwrap_or(name);
+        base.to_ascii_lowercase()
+    };
+
+    // Build candidate Linux paths to try, in priority order.
+    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+
+    // 1. If name contains a path separator, translate it as a Windows absolute path.
+    if name.contains('\\') || name.contains('/') {
+        if let Ok(p) = file_io::translate_win_path(name) {
+            candidates.push(p);
+        }
+    }
+
+    // 2. Exe directory / basename (highest priority for app-local DLLs like SciLexer.dll)
+    if let Some(exe_dir_win) = exe_path::exe_dir() {
+        let candidate_win = format!("{}\\{}", exe_dir_win, key);
+        if let Ok(p) = file_io::translate_win_path(&candidate_win) {
+            candidates.push(p);
+        }
+    }
+
+    // 3. Prefix System32 / basename
+    candidates.push(prefix::system32().join(&key));
+
+    // Try each candidate.
+    for path in &candidates {
+        let bytes = match std::fs::read(path) {
+            Ok(b) => b,
+            Err(_) => continue,
+        };
+
+        match loader::load_dll(&bytes) {
+            Ok((image, exports)) => {
+                // Patch the loaded DLL's own IAT using the global resolver.
+                unsafe {
+                    iat::patch_best_effort(&bytes, image.base, resolve::resolve, |d, f| {
+                        eprintln!(
+                            "weave/kernel32: LoadLibrary({key}): unresolved import {d}!{f}"
+                        );
+                    });
+                }
+                dll_registry::register(key.clone(), image, exports);
+                let handle = module_handles::register(name);
+                eprintln!(
+                    "weave/kernel32: LoadLibrary({name:?}) → loaded from {}",
+                    path.display()
+                );
+                return handle;
+            }
+            Err(e) => {
+                eprintln!("weave/kernel32: LoadLibrary({name:?}): parse error for {}: {e}", path.display());
+                // File exists but is malformed — don't try other paths.
+                break;
+            }
+        }
+    }
+
+    // Fall back to synthetic handle (stubs handle GetProcAddress).
+    let handle = module_handles::register(name);
+    eprintln!("weave/kernel32: LoadLibrary({name:?}) → synthetic {handle:#x}");
+    handle
+}
 
 /// Read a null-terminated ANSI string from a raw pointer. Returns an empty
 /// string if the pointer is null.
@@ -3124,9 +3204,7 @@ pub unsafe extern "win64" fn load_library_a(lp_file_name: *const u8) -> usize {
     if name.is_empty() {
         return 0;
     }
-    let handle = weave_core::module_handles::register(&name);
-    eprintln!("weave/kernel32: LoadLibraryA({name:?}) → {handle:#x}");
-    handle
+    load_library_impl(&name)
 }
 
 /// LoadLibraryW — load a DLL by wide name.
@@ -3138,9 +3216,7 @@ pub unsafe extern "win64" fn load_library_w(lp_file_name: *const u16) -> usize {
     if name.is_empty() {
         return 0;
     }
-    let handle = weave_core::module_handles::register(&name);
-    eprintln!("weave/kernel32: LoadLibraryW({name:?}) → {handle:#x}");
-    handle
+    load_library_impl(&name)
 }
 
 /// LoadLibraryExA — load a DLL by ANSI name (extended).
@@ -3156,9 +3232,7 @@ pub unsafe extern "win64" fn load_library_ex_a(
     if name.is_empty() {
         return 0;
     }
-    let handle = weave_core::module_handles::register(&name);
-    eprintln!("weave/kernel32: LoadLibraryExA({name:?}) → {handle:#x}");
-    handle
+    load_library_impl(&name)
 }
 
 /// LoadLibraryExW — load a DLL by wide name (extended).
@@ -3174,9 +3248,7 @@ pub unsafe extern "win64" fn load_library_ex_w(
     if name.is_empty() {
         return 0;
     }
-    let handle = weave_core::module_handles::register(&name);
-    eprintln!("weave/kernel32: LoadLibraryExW({name:?}) → {handle:#x}");
-    handle
+    load_library_impl(&name)
 }
 
 /// FreeLibrary — no-op; synthetic handles have no resources to free.
@@ -3596,10 +3668,14 @@ pub unsafe extern "win64" fn get_module_file_name_w(
         return 0;
     }
     let path = if h_module == 0 || h_module == weave_core::seh::pe_base() {
-        r"C:\Program Files\app.exe".to_string()
+        // NULL or main-exe handle — return the real exe path so apps can locate
+        // their own directory (plugins, config files, etc.)
+        weave_core::exe_path::get()
+            .unwrap_or(r"Z:\app.exe")
+            .to_string()
     } else {
         match weave_core::module_handles::lookup(h_module) {
-            Some(dll) => format!(r"C:\Windows\System32\{dll}"),
+            Some(dll) => format!(r"Z:\Windows\System32\{dll}"),
             None => return 0,
         }
     };
@@ -3625,10 +3701,12 @@ pub unsafe extern "win64" fn get_module_file_name_a(
         return 0;
     }
     let path = if h_module == 0 || h_module == weave_core::seh::pe_base() {
-        r"C:\Program Files\app.exe".to_string()
+        weave_core::exe_path::get()
+            .unwrap_or(r"Z:\app.exe")
+            .to_string()
     } else {
         match weave_core::module_handles::lookup(h_module) {
-            Some(dll) => format!(r"C:\Windows\System32\{dll}"),
+            Some(dll) => format!(r"Z:\Windows\System32\{dll}"),
             None => return 0,
         }
     };
