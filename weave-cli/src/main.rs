@@ -1,6 +1,6 @@
 use clap::Parser;
 use std::path::PathBuf;
-use weave_core::{cfg, dll_registry, exec, iat, loader, prefix, registry, seh, teb};
+use weave_core::{cfg, cmdline, dll_registry, exec, iat, loader, prefix, registry, seh, teb};
 
 mod arch;
 
@@ -22,6 +22,10 @@ struct Args {
     /// Force ReactOS VM fallback mode, bypassing native API translation
     #[arg(long)]
     force_vm: bool,
+
+    /// Arguments to pass to the Windows executable (e.g. `weave app.exe arg1 arg2`)
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    exe_args: Vec<String>,
 }
 
 /// Resolve a Windows import to a function address.
@@ -58,6 +62,17 @@ fn main() {
     }
 
     // ── 0. Initialise the prefix ──────────────────────────────────────────
+    // Set the Windows command line before IAT patching so that
+    // GetCommandLineA/W and _acmdln/_wcmdln return the real argv.
+    {
+        let exe_name = args
+            .exe
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("app.exe");
+        cmdline::set(exe_name, &args.exe_args);
+    }
+
     if let Some(p) = args.prefix {
         prefix::set(p);
     }
@@ -181,7 +196,7 @@ fn main() {
     // ── DEBUG: print first 16 bytes at entry point and GS base ───────────
     #[cfg(target_os = "linux")]
     {
-        let ep = image.entry_point as *const u8;
+        let ep = image.entry_point;
         let bytes_at_ep: Vec<u8> = (0..16).map(|i| unsafe { *ep.add(i) }).collect();
         eprintln!("weave: entry bytes: {:02x?}", bytes_at_ep);
         let mut gs_base: u64 = 0;

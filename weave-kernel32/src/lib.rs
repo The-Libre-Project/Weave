@@ -8,6 +8,8 @@
 #![allow(non_snake_case)]
 
 use std::cell::Cell;
+use std::cell::RefCell;
+use std::collections::HashMap;
 use weave_common::{STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE};
 use weave_core::{file_io, handles};
 
@@ -19,6 +21,11 @@ const MAX_UTF8_LEN: usize = 65_536;
 // Per-thread last error, shared across GetLastError / SetLastError.
 thread_local! {
     static LAST_ERROR: Cell<u32> = const { Cell::new(0) };
+}
+
+// Per-thread TLS slot storage for dynamically allocated TLS indices.
+thread_local! {
+    static TLS_SLOTS: RefCell<HashMap<u32, usize>> = RefCell::new(HashMap::new());
 }
 
 /// Windows OSVERSIONINFOEXW — extended version information.
@@ -263,6 +270,11 @@ pub unsafe extern "win64" fn virtual_alloc(
 ) -> *mut u8 {
     let prot = win_prot_to_linux(fl_protect);
     const MAP_FIXED_NOREPLACE: i32 = 0x10_0000;
+    // Guard against mmap(NULL, 0, ...) which returns MAP_FAILED on Linux.
+    if dw_size == 0 {
+        eprintln!("weave: VirtualAlloc(size=0) → NULL");
+        return std::ptr::null_mut();
+    }
     let result = if lp_address.is_null() {
         unsafe {
             libc::mmap(
@@ -287,6 +299,11 @@ pub unsafe extern "win64" fn virtual_alloc(
         }
     };
     if result == libc::MAP_FAILED {
+        let err = std::io::Error::last_os_error();
+        eprintln!(
+            "weave: VirtualAlloc FAILED addr={:#x} size={dw_size:#x} err={err}",
+            lp_address as usize
+        );
         std::ptr::null_mut()
     } else {
         result as *mut u8
@@ -348,8 +365,12 @@ pub extern "win64" fn sleep(dw_milliseconds: u32) {
 
 /// TlsGetValue: return the value stored in a TLS slot.
 ///
-/// Phase 1 stubs — TLS slots always return null (CRT handles this gracefully).
-pub extern "win64" fn tls_get_value(_dw_tls_index: u32) -> *mut u8 {
+/// Static indices (0-63) return NULL. Dynamic indices (64+) use per-thread storage.
+pub extern "win64" fn tls_get_value(dw_tls_index: u32) -> *mut u8 {
+    if dw_tls_index >= 64 {
+        return TLS_SLOTS
+            .with(|slots| slots.borrow().get(&dw_tls_index).copied().unwrap_or(0) as *mut u8);
+    }
     std::ptr::null_mut()
 }
 
@@ -1172,18 +1193,19 @@ pub extern "win64" fn heap_alloc(
     dw_flags: u32,
     dw_bytes: usize,
 ) -> *mut std::ffi::c_void {
-    if dw_bytes == 0 {
-        eprintln!("weave: HeapAlloc(bytes=0) → NULL");
-        return std::ptr::null_mut();
-    }
+    // Windows HeapAlloc(heap, 0, 0) returns a valid non-NULL pointer.
+    // Use at least 1 byte so malloc/calloc never return NULL for size 0.
+    let alloc_size = if dw_bytes == 0 { 1 } else { dw_bytes };
     let zero_memory = (dw_flags & 0x08) != 0; // HEAP_ZERO_MEMORY
-    let ptr = if zero_memory {
-        unsafe { libc::calloc(1, dw_bytes) }
+    let result = if zero_memory {
+        unsafe { libc::calloc(1, alloc_size) }
     } else {
-        unsafe { libc::malloc(dw_bytes) }
+        unsafe { libc::malloc(alloc_size) }
     };
-    eprintln!("weave: HeapAlloc(flags={dw_flags:#x}, bytes={dw_bytes:#x}) → {ptr:p}");
-    ptr
+    if result.is_null() {
+        eprintln!("weave: HeapAlloc({dw_bytes}) returned NULL!");
+    }
+    result
 }
 
 /// HeapReAlloc: reallocate memory in the heap.
@@ -2091,13 +2113,25 @@ pub unsafe extern "win64" fn wide_char_to_multi_byte(
         return (bytes.len() + if null_terminated { 1 } else { 0 }) as i32;
     }
     let cap = cb_multi_byte as usize;
-    let copy_len = bytes.len().min(cap.saturating_sub(1));
-    unsafe {
-        std::ptr::copy_nonoverlapping(bytes.as_ptr(), lp_multi_byte_str, copy_len);
-        *lp_multi_byte_str.add(copy_len) = 0;
+    if null_terminated {
+        // Null-terminated source: reserve one byte for the null terminator.
+        let copy_len = bytes.len().min(cap.saturating_sub(1));
+        unsafe {
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), lp_multi_byte_str, copy_len);
+            *lp_multi_byte_str.add(copy_len) = 0;
+        }
+        LAST_ERROR.with(|e| e.set(0));
+        (copy_len + 1) as i32
+    } else {
+        // Counted source: copy exactly min(bytes, cap) bytes. No null added.
+        // (Windows does not null-terminate when cch_wide_char > 0.)
+        let copy_len = bytes.len().min(cap);
+        unsafe {
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), lp_multi_byte_str, copy_len);
+        }
+        LAST_ERROR.with(|e| e.set(0));
+        copy_len as i32
     }
-    LAST_ERROR.with(|e| e.set(0));
-    (copy_len + 1) as i32
 }
 
 /// MultiByteToWideChar: convert a multibyte (UTF-8) string to UTF-16.
@@ -2137,13 +2171,24 @@ pub unsafe extern "win64" fn multi_byte_to_wide_char(
         return (wide.len() + if null_terminated { 1 } else { 0 }) as i32;
     }
     let cap = cch_wide_char as usize;
-    let copy_len = wide.len().min(cap.saturating_sub(1));
-    unsafe {
-        std::ptr::copy_nonoverlapping(wide.as_ptr(), lp_wide_char_str, copy_len);
-        *lp_wide_char_str.add(copy_len) = 0;
+    if null_terminated {
+        // Null-terminated source: reserve one slot for the null terminator.
+        let copy_len = wide.len().min(cap.saturating_sub(1));
+        unsafe {
+            std::ptr::copy_nonoverlapping(wide.as_ptr(), lp_wide_char_str, copy_len);
+            *lp_wide_char_str.add(copy_len) = 0;
+        }
+        LAST_ERROR.with(|e| e.set(0));
+        (copy_len + 1) as i32
+    } else {
+        // Counted source: copy exactly min(wide, cap) chars. No null added.
+        let copy_len = wide.len().min(cap);
+        unsafe {
+            std::ptr::copy_nonoverlapping(wide.as_ptr(), lp_wide_char_str, copy_len);
+        }
+        LAST_ERROR.with(|e| e.set(0));
+        copy_len as i32
     }
-    LAST_ERROR.with(|e| e.set(0));
-    (copy_len + 1) as i32
 }
 
 /// GetStartupInfoA: return process startup parameters (ANSI variant).
@@ -2367,12 +2412,16 @@ pub unsafe extern "win64" fn copy_file_w(
 }
 
 /// Windows WIN32_FIND_DATAW structure (wide version).
+///
+/// FILETIME is two DWORDs (low, high) with 4-byte alignment — NOT a u64.
+/// Using u64 would add 4 bytes of padding after dw_file_attributes, shifting
+/// c_file_name by 4 bytes and breaking all filename reads.
 #[repr(C)]
 pub struct Win32FindDataW {
     dw_file_attributes: u32,
-    ft_creation_time: u64,
-    ft_last_access_time: u64,
-    ft_last_write_time: u64,
+    ft_creation_time: [u32; 2], // FILETIME = [dwLowDateTime, dwHighDateTime]
+    ft_last_access_time: [u32; 2],
+    ft_last_write_time: [u32; 2],
     n_file_size_high: u32,
     n_file_size_low: u32,
     dw_reserved0: u32,
@@ -2385,9 +2434,9 @@ pub struct Win32FindDataW {
 #[repr(C)]
 pub struct Win32FindDataA {
     dw_file_attributes: u32,
-    ft_creation_time: u64,
-    ft_last_access_time: u64,
-    ft_last_write_time: u64,
+    ft_creation_time: [u32; 2],
+    ft_last_access_time: [u32; 2],
+    ft_last_write_time: [u32; 2],
     n_file_size_high: u32,
     n_file_size_low: u32,
     dw_reserved0: u32,
@@ -2421,13 +2470,72 @@ pub unsafe extern "win64" fn find_first_file_w(
         unsafe { String::from_utf16_lossy(std::slice::from_raw_parts(lp_file_name, len)) };
 
     // Translate to Linux path
-    let linux_path = match weave_core::prefix::translator().to_linux_str(&win_path) {
+    let linux_path = match weave_core::file_io::translate_win_path(&win_path) {
         Ok(p) => p,
         Err(_) => return usize::MAX,
     };
+    // Check if path contains wildcards (* or ?)
+    let path_str = linux_path.to_string_lossy();
+    let has_wildcards = path_str.contains('*') || path_str.contains('?');
+
+    if !has_wildcards {
+        // Single file/dir lookup — use stat to check existence and fill data.
+        // Windows apps (like 7za.exe) call FindFirstFileW with a concrete path
+        // to check whether a file exists and get its attributes.
+        let c_path = match std::ffi::CString::new(linux_path.as_os_str().as_encoded_bytes()) {
+            Ok(s) => s,
+            Err(_) => return usize::MAX,
+        };
+        let mut stat_buf = unsafe { std::mem::zeroed::<libc::stat>() };
+        let ret = unsafe { libc::stat(c_path.as_ptr(), &mut stat_buf) };
+        if ret != 0 {
+            return usize::MAX; // INVALID_HANDLE_VALUE — file not found
+        }
+
+        let is_dir = (stat_buf.st_mode & libc::S_IFMT) == libc::S_IFDIR;
+        let filename = linux_path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let wide_name: Vec<u16> = filename.encode_utf16().collect();
+
+        unsafe {
+            (*lp_find_file_data).dw_file_attributes = if is_dir {
+                0x10 // FILE_ATTRIBUTE_DIRECTORY
+            } else {
+                0x20 // FILE_ATTRIBUTE_ARCHIVE — matches what real FindFirstFileW returns
+            };
+            (*lp_find_file_data).ft_creation_time = [0, 0];
+            (*lp_find_file_data).ft_last_access_time = [0, 0];
+            (*lp_find_file_data).ft_last_write_time = [0, 0];
+            (*lp_find_file_data).n_file_size_high = ((stat_buf.st_size as u64) >> 32) as u32;
+            (*lp_find_file_data).n_file_size_low = (stat_buf.st_size as u64 & 0xFFFF_FFFF) as u32;
+            (*lp_find_file_data).dw_reserved0 = 0;
+            (*lp_find_file_data).dw_reserved1 = 0;
+
+            let copy_len = wide_name.len().min(259);
+            std::ptr::copy_nonoverlapping(
+                wide_name.as_ptr(),
+                (*lp_find_file_data).c_file_name.as_mut_ptr(),
+                copy_len,
+            );
+            (*lp_find_file_data).c_file_name[copy_len] = 0;
+            (*lp_find_file_data).c_alternate_file_name[0] = 0;
+        }
+
+        // Return sentinel 1: a single-file handle (FindNextFileW returns FALSE for it).
+        return 1;
+    }
+
+    // Wildcard path — open parent directory and enumerate entries.
+    // Strip the wildcard component to get the parent directory path.
+    let dir_path = match linux_path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+        _ => std::path::PathBuf::from("."),
+    };
 
     // Open directory
-    let c_path = match std::ffi::CString::new(linux_path.as_os_str().as_encoded_bytes()) {
+    let c_path = match std::ffi::CString::new(dir_path.as_os_str().as_encoded_bytes()) {
         Ok(s) => s,
         Err(_) => return usize::MAX,
     };
@@ -2456,9 +2564,9 @@ pub unsafe extern "win64" fn find_first_file_w(
     // Fill WIN32_FIND_DATAW
     unsafe {
         (*lp_find_file_data).dw_file_attributes = 0x80; // FILE_ATTRIBUTE_NORMAL
-        (*lp_find_file_data).ft_creation_time = 0;
-        (*lp_find_file_data).ft_last_access_time = 0;
-        (*lp_find_file_data).ft_last_write_time = 0;
+        (*lp_find_file_data).ft_creation_time = [0, 0];
+        (*lp_find_file_data).ft_last_access_time = [0, 0];
+        (*lp_find_file_data).ft_last_write_time = [0, 0];
         (*lp_find_file_data).n_file_size_high = 0;
         (*lp_find_file_data).n_file_size_low = 0;
         (*lp_find_file_data).dw_reserved0 = 0;
@@ -2539,9 +2647,9 @@ pub unsafe extern "win64" fn find_first_file_a(
     // Fill WIN32_FIND_DATAA
     unsafe {
         (*lp_find_file_data).dw_file_attributes = 0x80; // FILE_ATTRIBUTE_NORMAL
-        (*lp_find_file_data).ft_creation_time = 0;
-        (*lp_find_file_data).ft_last_access_time = 0;
-        (*lp_find_file_data).ft_last_write_time = 0;
+        (*lp_find_file_data).ft_creation_time = [0, 0];
+        (*lp_find_file_data).ft_last_access_time = [0, 0];
+        (*lp_find_file_data).ft_last_write_time = [0, 0];
         (*lp_find_file_data).n_file_size_high = 0;
         (*lp_find_file_data).n_file_size_low = 0;
         (*lp_find_file_data).dw_reserved0 = 0;
@@ -2576,6 +2684,10 @@ pub unsafe extern "win64" fn find_next_file_w(
     if h_find_file == 0 || h_find_file == usize::MAX || lp_find_file_data.is_null() {
         return 0; // FALSE
     }
+    // Sentinel 1 = single-file handle from FindFirstFileW (no more entries).
+    if h_find_file == 1 {
+        return 0; // FALSE — no more entries
+    }
 
     let dir = h_find_file as *mut libc::DIR;
 
@@ -2597,9 +2709,9 @@ pub unsafe extern "win64" fn find_next_file_w(
     // Fill WIN32_FIND_DATAW
     unsafe {
         (*lp_find_file_data).dw_file_attributes = 0x80; // FILE_ATTRIBUTE_NORMAL
-        (*lp_find_file_data).ft_creation_time = 0;
-        (*lp_find_file_data).ft_last_access_time = 0;
-        (*lp_find_file_data).ft_last_write_time = 0;
+        (*lp_find_file_data).ft_creation_time = [0, 0];
+        (*lp_find_file_data).ft_last_access_time = [0, 0];
+        (*lp_find_file_data).ft_last_write_time = [0, 0];
         (*lp_find_file_data).n_file_size_high = 0;
         (*lp_find_file_data).n_file_size_low = 0;
         (*lp_find_file_data).dw_reserved0 = 0;
@@ -2653,9 +2765,9 @@ pub unsafe extern "win64" fn find_next_file_a(
     // Fill WIN32_FIND_DATAA
     unsafe {
         (*lp_find_file_data).dw_file_attributes = 0x80; // FILE_ATTRIBUTE_NORMAL
-        (*lp_find_file_data).ft_creation_time = 0;
-        (*lp_find_file_data).ft_last_access_time = 0;
-        (*lp_find_file_data).ft_last_write_time = 0;
+        (*lp_find_file_data).ft_creation_time = [0, 0];
+        (*lp_find_file_data).ft_last_access_time = [0, 0];
+        (*lp_find_file_data).ft_last_write_time = [0, 0];
         (*lp_find_file_data).n_file_size_high = 0;
         (*lp_find_file_data).n_file_size_low = 0;
         (*lp_find_file_data).dw_reserved0 = 0;
@@ -2682,6 +2794,10 @@ pub unsafe extern "win64" fn find_next_file_a(
 pub extern "win64" fn find_close(h_find_file: usize) -> i32 {
     if h_find_file == 0 || h_find_file == usize::MAX {
         return 0; // FALSE
+    }
+    // Sentinel 1 = single-file handle (no DIR* to close).
+    if h_find_file == 1 {
+        return 1; // TRUE — success, nothing to close
     }
 
     let dir = h_find_file as *mut libc::DIR;
@@ -2730,9 +2846,9 @@ pub unsafe extern "win64" fn verify_version_info_w(
 #[repr(C)]
 pub struct Win32FileAttributeData {
     dw_file_attributes: u32,
-    ft_creation_time: u64,
-    ft_last_access_time: u64,
-    ft_last_write_time: u64,
+    ft_creation_time: [u32; 2],
+    ft_last_access_time: [u32; 2],
+    ft_last_write_time: [u32; 2],
     n_file_size_high: u32,
     n_file_size_low: u32,
 }
@@ -2791,9 +2907,9 @@ pub unsafe extern "win64" fn get_file_attributes_ex_w(
             } else {
                 FILE_ATTRIBUTE_NORMAL
             };
-        (*lp_file_information).ft_creation_time = 0;
-        (*lp_file_information).ft_last_access_time = 0;
-        (*lp_file_information).ft_last_write_time = 0;
+        (*lp_file_information).ft_creation_time = [0, 0];
+        (*lp_file_information).ft_last_access_time = [0, 0];
+        (*lp_file_information).ft_last_write_time = [0, 0];
         (*lp_file_information).n_file_size_high = (stat.st_size >> 32) as u32;
         (*lp_file_information).n_file_size_low = (stat.st_size & 0xFFFFFFFF) as u32;
     }
@@ -2855,9 +2971,9 @@ pub unsafe extern "win64" fn get_file_attributes_ex_a(
             } else {
                 FILE_ATTRIBUTE_NORMAL
             };
-        (*lp_file_information).ft_creation_time = 0;
-        (*lp_file_information).ft_last_access_time = 0;
-        (*lp_file_information).ft_last_write_time = 0;
+        (*lp_file_information).ft_creation_time = [0, 0];
+        (*lp_file_information).ft_last_access_time = [0, 0];
+        (*lp_file_information).ft_last_write_time = [0, 0];
         (*lp_file_information).n_file_size_high = (stat.st_size >> 32) as u32;
         (*lp_file_information).n_file_size_low = (stat.st_size & 0xFFFFFFFF) as u32;
     }
@@ -3786,6 +3902,69 @@ pub extern "win64" fn release_semaphore(
     1
 }
 
+/// CreateSemaphoreW — create or open a named semaphore (Wide).
+///
+/// Returns a fake non-zero handle. 7-Zip uses semaphores for parallel
+/// compression; with a stub the single-threaded fallback path runs.
+///
+/// # Safety
+/// Pointer arguments are ignored.
+pub unsafe extern "win64" fn create_semaphore_w(
+    _lp_semaphore_attributes: *const u8,
+    _l_initial_count: i32,
+    _l_maximum_count: i32,
+    _lp_name: *const u16,
+) -> usize {
+    1 // fake HANDLE
+}
+
+/// SetFileApisToOEM — switch file APIs to OEM character set. No-op.
+pub extern "win64" fn set_file_apis_to_oem() {}
+
+/// OpenFileMappingW — open a named file-mapping object (Wide).
+///
+/// Returns NULL — no shared-memory objects are emulated.
+///
+/// # Safety
+/// `lp_name` is ignored.
+pub unsafe extern "win64" fn open_file_mapping_w(
+    _dw_desired_access: u32,
+    _b_inherit_handle: i32,
+    _lp_name: *const u16,
+) -> usize {
+    0 // NULL — not found
+}
+
+/// DosDateTimeToFileTime — convert a DOS date/time to a FILETIME.
+///
+/// Returns TRUE. Fills `*lp_file_time` with an approximate FILETIME derived
+/// from the DOS date/time fields (good enough for archive timestamp display).
+///
+/// # Safety
+/// `lp_file_time` must be a writable 8-byte buffer or null.
+pub unsafe extern "win64" fn dos_date_time_to_file_time(
+    w_fat_date: u16,
+    w_fat_time: u16,
+    lp_file_time: *mut u64,
+) -> i32 {
+    if !lp_file_time.is_null() {
+        // Convert DOS date/time to FILETIME (100-ns intervals since 1601-01-01).
+        // DOS date: bits 15-9=year-1980, 8-5=month, 4-0=day
+        // DOS time: bits 15-11=hours, 10-5=minutes, 4-0=seconds/2
+        let year = ((w_fat_date >> 9) & 0x7f) as u64 + 1980;
+        let month = ((w_fat_date >> 5) & 0x0f) as u64;
+        let day = (w_fat_date & 0x1f) as u64;
+        let hour = ((w_fat_time >> 11) & 0x1f) as u64;
+        let min = ((w_fat_time >> 5) & 0x3f) as u64;
+        let sec = ((w_fat_time & 0x1f) as u64) * 2;
+        // Rough FILETIME approximation (ignore leap years for simplicity).
+        let days = (year - 1601) * 365 + month * 30 + day;
+        let secs = days * 86400 + hour * 3600 + min * 60 + sec;
+        unsafe { *lp_file_time = secs * 10_000_000 };
+    }
+    1 // TRUE
+}
+
 // SRW locks are pointer-sized on Windows; we use the pointer itself as storage.
 /// AcquireSRWLockExclusive — no-op (single-threaded).
 ///
@@ -3934,6 +4113,25 @@ pub unsafe extern "win64" fn set_process_affinity_mask(
     _h_process: usize,
     _dw_process_affinity_mask: usize,
 ) -> i32 {
+    1
+}
+
+/// GetActiveProcessorGroupCount — returns the number of processor groups.
+///
+/// On typical systems there is exactly one processor group.
+pub extern "win64" fn get_active_processor_group_count() -> u16 {
+    1
+}
+
+/// GetActiveProcessorCount — returns the number of active logical processors.
+///
+/// `group_number == 0xFFFF` (ALL_PROCESSOR_GROUPS) requests the total count.
+/// Report 1 CPU so that apps like 7-Zip use single-threaded mode; their
+/// thread pools fail gracefully rather than throwing when _beginthreadex
+/// returns 0.
+pub extern "win64" fn get_active_processor_count(group_number: u16) -> u32 {
+    let msg = format!("weave: GetActiveProcessorCount({group_number:#x}) -> 1\n");
+    unsafe { libc::write(2, msg.as_ptr() as *const libc::c_void, msg.len()) };
     1
 }
 
@@ -4118,75 +4316,58 @@ pub unsafe extern "win64" fn create_directory_w(
     0
 }
 
-/// RaiseException — calls libc::abort to terminate the process.
+/// RaiseException — raises a Windows exception and dispatches through SEH.
 ///
 /// # Safety
-/// `_lp_arguments` may be NULL; this function does not return.
+/// `lp_arguments` must point to `n_number_of_arguments` valid u64 values.
 pub unsafe extern "win64" fn raise_exception(
-    _dw_exception_code: u32,
-    _dw_exception_flags: u32,
-    _n_number_of_arguments: u32,
-    _lp_arguments: *const usize,
+    dw_exception_code: u32,
+    dw_exception_flags: u32,
+    n_number_of_arguments: u32,
+    lp_arguments: *const u64,
 ) {
-    unsafe { libc::abort() }
+    unsafe {
+        weave_core::unwind::raise_exception(
+            dw_exception_code,
+            dw_exception_flags,
+            n_number_of_arguments,
+            lp_arguments,
+        );
+    }
 }
 
-/// RtlCaptureContext — no-op stub (context capture not implemented).
-///
-/// # Safety
-/// `_context_record` must be a valid writable pointer.
-pub unsafe extern "win64" fn rtl_capture_context(_context_record: *mut u8) {}
-/// RtlLookupFunctionEntry — returns NULL (no unwind info).
-///
-/// # Safety
-/// Pointer arguments are accepted but not dereferenced.
-pub unsafe extern "win64" fn rtl_lookup_function_entry(
-    _control_pc: u64,
-    _image_base: *mut u64,
-    _history_table: *mut u8,
-) -> *mut u8 {
-    std::ptr::null_mut()
-}
-/// RtlVirtualUnwind — returns NULL (unwinding not implemented).
-///
-/// # Safety
-/// Pointer arguments are accepted but not dereferenced.
-pub unsafe extern "win64" fn rtl_virtual_unwind(
-    _handler_type: u32,
-    _image_base: u64,
-    _control_pc: u64,
-    _function_entry: *mut u8,
-    _context_record: *mut u8,
-    _handler_data: *mut *mut u8,
-    _establisher_frame: *mut u64,
-    _context_pointers: *mut u8,
-) -> *mut u8 {
-    std::ptr::null_mut()
-}
-/// RtlUnwindEx — no-op stub (unwinding not implemented).
-///
-/// # Safety
-/// Pointer arguments are accepted but not dereferenced.
-pub unsafe extern "win64" fn rtl_unwind_ex(
-    _target_frame: *mut u8,
-    _target_ip: *mut u8,
-    _exception_record: *mut u8,
-    _return_value: usize,
-    _context_record: *mut u8,
-    _history_table: *mut u8,
-) {
-}
+// RtlCaptureContext, RtlLookupFunctionEntry, RtlVirtualUnwind, RtlUnwindEx
+// are now implemented in weave_core::unwind and re-exported here via resolve().
 
-/// TlsAlloc — returns TLS_OUT_OF_INDEXES (TLS not implemented).
+/// TlsAlloc — allocate a TLS slot index.
+///
+/// Returns indices starting from 64 (above the static TLS range).
+/// Thread-safe via atomic counter.
 pub extern "win64" fn tls_alloc() -> u32 {
-    u32::MAX // TLS_OUT_OF_INDEXES
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static NEXT_TLS_INDEX: AtomicU32 = AtomicU32::new(64);
+    let idx = NEXT_TLS_INDEX.fetch_add(1, Ordering::Relaxed);
+    if idx >= 1088 {
+        return u32::MAX; // TLS_OUT_OF_INDEXES
+    }
+    idx
 }
-/// TlsSetValue — no-op stub, returns TRUE.
-pub extern "win64" fn tls_set_value(_dw_tls_index: u32, _lp_tls_value: *mut u8) -> i32 {
+/// TlsSetValue — store a value in a TLS slot.
+///
+/// Single-threaded: uses a global HashMap keyed by slot index.
+pub extern "win64" fn tls_set_value(dw_tls_index: u32, lp_tls_value: *mut u8) -> i32 {
+    TLS_SLOTS.with(|slots| {
+        slots
+            .borrow_mut()
+            .insert(dw_tls_index, lp_tls_value as usize);
+    });
     1
 }
-/// TlsFree — no-op stub, returns TRUE.
-pub extern "win64" fn tls_free(_dw_tls_index: u32) -> i32 {
+/// TlsFree — release a TLS slot. Returns TRUE.
+pub extern "win64" fn tls_free(dw_tls_index: u32) -> i32 {
+    TLS_SLOTS.with(|slots| {
+        slots.borrow_mut().remove(&dw_tls_index);
+    });
     1
 }
 
@@ -4680,12 +4861,23 @@ pub unsafe extern "win64" fn get_current_directory_w(
     n_buffer_length: u32,
     lp_buffer: *mut u16,
 ) -> u32 {
-    const PATH: &str = "C:\\\0";
-    let wide_chars: Vec<u16> = PATH.encode_utf16().collect();
-    let len = wide_chars.len() - 1; // exclude null terminator
+    // Return the actual Linux process CWD represented as a Windows path.
+    // Drive Z: is mapped to the Linux filesystem root '/', so any Linux
+    // absolute path can be expressed as Z:\<path>.
+    let cwd = std::env::current_dir()
+        .map(|p| {
+            // Convert /some/linux/path  →  Z:\some\linux\path
+            let s = p.to_string_lossy();
+            format!("Z:{}", s.replace('/', "\\"))
+        })
+        .unwrap_or_else(|_| "C:\\".to_string());
+
+    let mut wide_chars: Vec<u16> = cwd.encode_utf16().collect();
+    wide_chars.push(0); // null terminator
+    let len = wide_chars.len() - 1; // chars excluding null
 
     if n_buffer_length as usize <= len {
-        return len as u32 + 1; // required size including null
+        return len as u32 + 1; // required buffer size including null
     }
 
     unsafe {
@@ -4702,8 +4894,14 @@ pub unsafe extern "win64" fn get_current_directory_a(
     n_buffer_length: u32,
     lp_buffer: *mut u8,
 ) -> u32 {
-    const PATH: &str = "C:\\\0";
-    let bytes = PATH.as_bytes();
+    let cwd = std::env::current_dir()
+        .map(|p| {
+            let s = p.to_string_lossy();
+            format!("Z:{}\0", s.replace('/', "\\"))
+        })
+        .unwrap_or_else(|_| "C:\\\0".to_string());
+
+    let bytes = cwd.as_bytes();
     let len = bytes.len() - 1; // exclude null terminator
 
     if n_buffer_length as usize <= len {
@@ -4872,12 +5070,12 @@ pub unsafe extern "win64" fn get_file_attributes_w(lp_file_name: *const u16) -> 
     let win_path =
         unsafe { String::from_utf16_lossy(std::slice::from_raw_parts(lp_file_name, len)) };
 
-    // Translate to Linux path
-    let linux_path = match weave_core::prefix::translator().to_linux_str(&win_path) {
+    // Translate to Linux path (with fallback for Linux absolute paths passed
+    // as CLI arguments to a Windows app running under Weave).
+    let linux_path = match weave_core::file_io::translate_win_path(&win_path) {
         Ok(p) => p,
         Err(_) => return INVALID_FILE_ATTRIBUTES,
     };
-
     // Check if path exists and get type
     let c_path = match std::ffi::CString::new(linux_path.as_os_str().as_encoded_bytes()) {
         Ok(s) => s,
@@ -4924,8 +5122,9 @@ pub unsafe extern "win64" fn get_file_attributes_a(lp_file_name: *const u8) -> u
     let win_path =
         unsafe { String::from_utf8_lossy(std::slice::from_raw_parts(lp_file_name, len)) };
 
-    // Translate to Linux path
-    let linux_path = match weave_core::prefix::translator().to_linux_str(&win_path) {
+    // Translate to Linux path (with fallback for Linux absolute paths passed
+    // as CLI arguments to a Windows app running under Weave).
+    let linux_path = match weave_core::file_io::translate_win_path(&win_path) {
         Ok(p) => p,
         Err(_) => return INVALID_FILE_ATTRIBUTES,
     };
@@ -5538,33 +5737,20 @@ pub unsafe extern "win64" fn get_version_ex_a(lp_version_information: *mut u8) -
     1 // TRUE
 }
 
-/// Fake command line for GetCommandLineA.
-static CMD_LINE_A: &[u8] = b"app.exe\0";
-
-/// Fake command line for GetCommandLineW.
-static CMD_LINE_W: &[u16] = &[
-    b'a' as u16,
-    b'p' as u16,
-    b'p' as u16,
-    b'.' as u16,
-    b'e' as u16,
-    b'x' as u16,
-    b'e' as u16,
-    0u16,
-];
-
-/// GetCommandLineA: return a static fake command line.
+/// GetCommandLineA — return the ANSI command line set by the Weave CLI.
 ///
-/// Returns a pointer to a static "app.exe" string.
+/// Returns a pointer to the null-terminated ANSI string built from the
+/// executable name and any trailing arguments passed to `weave`.
 pub extern "win64" fn get_command_line_a() -> usize {
-    CMD_LINE_A.as_ptr() as usize
+    weave_core::cmdline::get_a() as usize
 }
 
-/// GetCommandLineW: return a static fake command line.
+/// GetCommandLineW — return the wide command line set by the Weave CLI.
 ///
-/// Returns a pointer to a static wide "app.exe" string.
+/// Returns a pointer to the null-terminated UTF-16 string built from the
+/// executable name and any trailing arguments passed to `weave`.
 pub extern "win64" fn get_command_line_w() -> usize {
-    CMD_LINE_W.as_ptr() as usize
+    weave_core::cmdline::get_w() as usize
 }
 
 /// EncodePointer: identity — return the pointer unchanged.
@@ -6149,19 +6335,31 @@ pub unsafe extern "win64" fn set_file_pointer_ex(
     lp_new_file_pointer: *mut i64,
     dw_move_method: u32,
 ) -> i32 {
+    let fd = match handles::get_fd(h_file) {
+        Some(fd) => fd,
+        None => {
+            LAST_ERROR.with(|e| e.set(file_io::ERROR_INVALID_HANDLE));
+            return 0; // FALSE
+        }
+    };
     let whence = match dw_move_method {
         0 => libc::SEEK_SET,
         1 => libc::SEEK_CUR,
         2 => libc::SEEK_END,
-        _ => return 0, // FALSE
+        _ => {
+            LAST_ERROR.with(|e| e.set(file_io::ERROR_INVALID_HANDLE));
+            return 0; // FALSE
+        }
     };
-    let result = unsafe { libc::lseek(h_file as i32, li_distance_to_move, whence) };
+    let result = unsafe { libc::lseek(fd, li_distance_to_move, whence) };
     if result >= 0 {
         if !lp_new_file_pointer.is_null() {
             unsafe { *lp_new_file_pointer = result };
         }
+        LAST_ERROR.with(|e| e.set(0));
         1 // TRUE
     } else {
+        LAST_ERROR.with(|e| e.set(file_io::ERROR_INVALID_HANDLE));
         0 // FALSE
     }
 }
@@ -6252,17 +6450,31 @@ pub extern "win64" fn get_file_type(_h_file: usize) -> u32 {
 
 // ── File and console functions ──────────────────────────────────────────────
 
-/// GetFileSizeEx: write 0 to file size, return FALSE.
+/// GetFileSizeEx: return the true file size as an i64.
 ///
 /// # Safety
 /// `lp_file_size` must be a valid writable pointer to an i64.
-pub unsafe extern "win64" fn get_file_size_ex(_h_file: usize, lp_file_size: *mut i64) -> i32 {
-    unsafe {
-        if !lp_file_size.is_null() {
-            *lp_file_size = 0;
+pub unsafe extern "win64" fn get_file_size_ex(h_file: usize, lp_file_size: *mut i64) -> i32 {
+    let fd = match handles::get_fd(h_file) {
+        Some(fd) => fd,
+        None => {
+            LAST_ERROR.with(|e| e.set(file_io::ERROR_INVALID_HANDLE));
+            return 0; // FALSE
         }
+    };
+
+    let mut stat = unsafe { std::mem::zeroed::<libc::stat>() };
+    let ret = unsafe { libc::fstat(fd, &mut stat) };
+    if ret != 0 {
+        LAST_ERROR.with(|e| e.set(file_io::ERROR_INVALID_HANDLE));
+        return 0; // FALSE
     }
-    0 // FALSE
+
+    if !lp_file_size.is_null() {
+        unsafe { *lp_file_size = stat.st_size };
+    }
+    LAST_ERROR.with(|e| e.set(0));
+    1 // TRUE
 }
 
 /// GetConsoleMode: write 0 to mode, return TRUE.
@@ -6679,9 +6891,22 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "CreateSemaphoreA" => Some(
             create_semaphore_a as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
         ),
+        "CreateSemaphoreW" => Some(
+            create_semaphore_w as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
+        ),
         "ReleaseSemaphore" => {
             Some(release_semaphore as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize)
         }
+        "SetFileApisToOEM" => {
+            Some(set_file_apis_to_oem as extern "win64" fn() as *const () as usize)
+        }
+        "OpenFileMappingW" => Some(
+            open_file_mapping_w as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
+        ),
+        "DosDateTimeToFileTime" => Some(
+            dos_date_time_to_file_time as unsafe extern "win64" fn(_, _, _) -> _ as *const ()
+                as usize,
+        ),
         // SRW locks
         "AcquireSRWLockExclusive" => {
             Some(acquire_srw_lock_exclusive as unsafe extern "win64" fn(_) as *const () as usize)
@@ -6738,6 +6963,12 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "SetProcessAffinityMask" => Some(
             set_process_affinity_mask as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
         ),
+        "GetActiveProcessorGroupCount" => {
+            Some(get_active_processor_group_count as extern "win64" fn() -> _ as *const () as usize)
+        }
+        "GetActiveProcessorCount" => {
+            Some(get_active_processor_count as extern "win64" fn(_) -> _ as *const () as usize)
+        }
         "GetHandleInformation" => Some(
             get_handle_information as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
         ),
@@ -6765,21 +6996,24 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "RaiseException" => {
             Some(raise_exception as unsafe extern "win64" fn(_, _, _, _) as *const () as usize)
         }
-        // RTL unwind
-        "RtlCaptureContext" => {
-            Some(rtl_capture_context as unsafe extern "win64" fn(_) as *const () as usize)
-        }
+        // RTL unwind — real implementations in weave_core::unwind
+        "RtlCaptureContext" => Some(
+            weave_core::unwind::rtl_capture_context_export as unsafe extern "win64" fn(_)
+                as *const () as usize,
+        ),
         "RtlLookupFunctionEntry" => Some(
-            rtl_lookup_function_entry as unsafe extern "win64" fn(_, _, _) -> _ as *const ()
-                as usize,
+            weave_core::unwind::rtl_lookup_function_entry_export
+                as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
         ),
         "RtlVirtualUnwind" => Some(
-            rtl_virtual_unwind as unsafe extern "win64" fn(_, _, _, _, _, _, _, _) -> _ as *const ()
+            weave_core::unwind::rtl_virtual_unwind_export
+                as unsafe extern "win64" fn(_, _, _, _, _, _, _, _) -> _ as *const ()
                 as usize,
         ),
-        "RtlUnwindEx" => {
-            Some(rtl_unwind_ex as unsafe extern "win64" fn(_, _, _, _, _, _) as *const () as usize)
-        }
+        "RtlUnwindEx" => Some(
+            weave_core::unwind::rtl_unwind_ex_export as unsafe extern "win64" fn(_, _, _, _, _, _)
+                as *const () as usize,
+        ),
         "RtlUnwind" => {
             Some(rtl_unwind as unsafe extern "win64" fn(_, _, _, _) as *const () as usize)
         }

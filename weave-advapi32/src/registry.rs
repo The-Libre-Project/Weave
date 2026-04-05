@@ -1361,8 +1361,34 @@ pub fn resolve(func: &str) -> Option<usize> {
         "SetFileSecurityW" => Some(
             set_file_security_w as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
         ),
+        "SystemFunction036" => {
+            Some(system_function_036 as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
         _ => None,
     }
+}
+
+// ── Crypto stubs ──────────────────────────────────────────────────────────────
+
+/// SystemFunction036 — RtlGenRandom; fills a buffer with pseudo-random bytes.
+///
+/// Used by 7-Zip and other apps for random seed generation. This stub fills
+/// the buffer with bytes from `rand()` — not cryptographically secure but
+/// sufficient for seeding hash tables and salt generation in a compatibility layer.
+///
+/// # Safety
+/// `random_buffer` must be a writable buffer of at least `random_buffer_length` bytes.
+pub unsafe extern "win64" fn system_function_036(
+    random_buffer: *mut u8,
+    random_buffer_length: u32,
+) -> u8 {
+    if random_buffer.is_null() || random_buffer_length == 0 {
+        return 0; // FALSE
+    }
+    for i in 0..random_buffer_length as usize {
+        unsafe { *random_buffer.add(i) = (libc::rand() & 0xFF) as u8 };
+    }
+    1 // TRUE
 }
 
 // ── Security / SID stubs ──────────────────────────────────────────────────────

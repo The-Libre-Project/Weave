@@ -8,3 +8,4 @@ description = "UCRT / api-ms-win-crt-* stubs for Weave"
 
 [dependencies]
 libc = "0.2"
+weave-core = { path = "../weave-core" }

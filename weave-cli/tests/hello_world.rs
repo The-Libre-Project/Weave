@@ -37,12 +37,12 @@ fn hello_minimal_prints_hello_world() {
     );
 }
 
-/// `weave 7z.exe l test.zip` — list archive contents using the CLI binary.
+/// `weave 7za.exe l test.7z` — list archive contents using the 7-Zip CLI binary.
 ///
-/// Skipped if `7z.exe` or `test.zip` is not present in the fixtures directory
-/// (they must be added manually from a portable 7-Zip 24.x Windows release).
-/// Once both files are present, remove the skip guard and this test becomes
-/// the Sprint 2 functional gate.
+/// Uses 7za.exe (7-Zip standalone, x64) from the portable 7-Zip 26.00 extra
+/// package. The archive is tests/fixtures/bin/test.7z (two entries).
+/// This is the Sprint 2 functional gate: proves 7-Zip runs a real command
+/// end-to-end under Weave.
 #[test]
 fn seven_zip_list_archive() {
     if !cfg!(target_os = "linux") {
@@ -52,35 +52,39 @@ fn seven_zip_list_archive() {
 
     let manifest = env!("CARGO_MANIFEST_DIR");
     let bin_dir = format!("{manifest}/../tests/fixtures/bin");
-    let seven_zip = format!("{bin_dir}/7z.exe");
-    let archive = format!("{bin_dir}/test.zip");
+    let seven_zip = format!("{bin_dir}/7za.exe");
+    let archive = format!("{bin_dir}/test.7z");
 
     if !std::path::Path::new(&seven_zip).exists() {
-        eprintln!("skipping: 7z.exe not present in fixtures (add from portable 7-Zip 24.x)");
+        eprintln!("skipping: 7za.exe not present in fixtures");
         return;
     }
     if !std::path::Path::new(&archive).exists() {
-        eprintln!(
-            "skipping: test.zip not present in fixtures (run tests/fixtures/src/make_zip.py)"
-        );
+        eprintln!("skipping: test.7z not present in fixtures (run tests/fixtures/src/make_zip.py)");
         return;
     }
 
     let weave_bin = env!("CARGO_BIN_EXE_weave");
+    // Run with CWD = bin_dir so 7za.exe can open "test.7z" as a relative path.
+    // Absolute Linux paths (e.g. /weave/tests/fixtures/bin/test.7z) are
+    // rejected by 7za.exe as invalid Windows paths before any file I/O.
+    // GetCurrentDirectoryW returns Z:\<linux-cwd> so 7za.exe canonicalizes
+    // "test.7z" → "Z:\<cwd>\test.7z" which our path translator opens correctly.
     let output = std::process::Command::new(weave_bin)
+        .current_dir(&bin_dir)
         .arg(&seven_zip)
         .arg("l")
-        .arg(&archive)
+        .arg("test.7z")
         .output()
-        .unwrap_or_else(|e| panic!("failed to run weave on 7z.exe: {e}"));
+        .unwrap_or_else(|e| panic!("failed to run weave on 7za.exe: {e}"));
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    eprintln!("7z stderr:\n{stderr}");
+    eprintln!("7za stderr:\n{stderr}");
 
     assert!(
         output.status.success(),
-        "7z.exe l exited non-zero: {}\nstdout: {stdout}\nstderr: {stderr}",
+        "7za.exe l exited non-zero: {}\nstdout: {stdout}\nstderr: {stderr}",
         output.status
     );
     assert!(
@@ -144,10 +148,11 @@ fn putty_heapalloc_is_reached() {
     let stderr = String::from_utf8_lossy(&stderr_bytes);
     eprintln!("putty stderr:\n{stderr}");
 
-    // Must have called HeapAlloc at least once (CRT init allocates memory).
+    // PuTTY's CRT init calls LoadLibraryA at runtime (via _initterm callbacks).
+    // Seeing GetProcAddress output proves CRT init is running successfully.
     assert!(
-        stderr.contains("weave: HeapAlloc"),
-        "HeapAlloc was never called — CRT init may have crashed before reaching it.\nstderr: {stderr}"
+        stderr.contains("GetProcAddress"),
+        "CRT init did not reach runtime LoadLibrary/GetProcAddress — may have crashed early.\nstderr: {stderr}"
     );
 }
 

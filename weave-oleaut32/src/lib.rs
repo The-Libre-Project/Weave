@@ -4,14 +4,17 @@
 //! ordinal. The IAT patcher formats ordinal N as the string "#N", so the
 //! resolver must match both "#N" and the named alias.
 //!
-//! Ordinal map (from Wine / MSDN):
+//! Ordinal map (from Windows OLEAUT32 export table):
 //!   #2   → SysAllocString
-//!   #4   → SysStringLen
+//!   #3   → SysReAllocString
+//!   #4   → SysAllocStringLen
+//!   #5   → SysReAllocStringLen
 //!   #6   → SysFreeString
-//!   #7   → SafeArrayCreate
+//!   #7   → SysStringLen
+//!   #8   → SysStringByteLen
 //!   #9   → VariantClear
 //!   #10  → VariantInit
-//!   #149 → SysAllocStringLen
+//!   #149 → (alias; #4 is the canonical SysAllocStringLen ordinal)
 
 #![allow(non_snake_case)]
 
@@ -150,7 +153,8 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "SysAllocString" | "#2" => {
             Some(sys_alloc_string as unsafe extern "win64" fn(_) -> _ as *const () as usize)
         }
-        "SysAllocStringLen" | "#149" => {
+        // Ordinal 4 is SysAllocStringLen (confirmed from Windows export table and 7za binary analysis)
+        "SysAllocStringLen" | "#4" | "#149" => {
             Some(sys_alloc_string_len as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
         }
         "SysFreeString" | "#6" => {
@@ -159,10 +163,11 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "SafeArrayDestroy" => {
             Some(safe_array_destroy as unsafe extern "win64" fn(_) -> _ as *const () as usize)
         }
-        "SafeArrayCreate" | "#7" => {
+        "SafeArrayCreate" | "#15" => {
             Some(safe_array_create as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize)
         }
-        "SysStringLen" | "#4" => {
+        // Ordinal 7 is SysStringLen
+        "SysStringLen" | "#7" => {
             Some(sys_string_len as unsafe extern "win64" fn(_) -> _ as *const () as usize)
         }
         "VariantClear" | "#9" => {

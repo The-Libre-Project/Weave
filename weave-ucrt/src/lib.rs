@@ -15,7 +15,11 @@ use libc::c_void;
 /// # Safety
 /// No pointer requirements; wraps libc malloc. Caller must free the returned pointer with `ucrt_free`.
 pub unsafe extern "win64" fn ucrt_malloc(size: usize) -> *mut c_void {
-    unsafe { libc::malloc(size) }
+    let result = unsafe { libc::malloc(size) };
+    if result.is_null() && size > 0 {
+        eprintln!("weave: malloc({size}) returned NULL!");
+    }
+    result
 }
 
 /// # Safety
@@ -423,6 +427,9 @@ use std::sync::OnceLock;
 static HEAP_COMMODE: OnceLock<usize> = OnceLock::new();
 static HEAP_FMODE: OnceLock<usize> = OnceLock::new();
 static HEAP_STDIO: OnceLock<[usize; 3]> = OnceLock::new();
+/// Contiguous fake FILE[3] array for the msvcrt `_iob` DATA import.
+/// 64 bytes per slot — generous enough for any MSVC FILE struct layout.
+static IOB_ARRAY: OnceLock<Box<[u8; 192]>> = OnceLock::new();
 
 /// Return the address of writable _fmode storage for DATA imports.
 ///
@@ -481,25 +488,16 @@ pub fn argv_data_addr() -> usize {
 pub fn acmdln_data_addr() -> usize {
     *HEAP_ACMDLN.get_or_init(|| {
         // _acmdln is msvcrt's ANSI command-line variable (a `char*`).
-        // 7-Zip reads it as **char: r11 = &_acmdln, r8 = *r11.
-        // We store a pointer to a static ANSI string so r8 is non-null.
-        static ANSI_CMDLN: &[u8] = b"weave\0";
-        let ptr = ANSI_CMDLN.as_ptr() as usize;
+        // Double-dereference pattern: r11 = &_acmdln (IAT slot), r8 = *r11 (the char*).
+        // Point at the shared cmdline from weave-core so it reflects real argv.
+        let ptr = weave_core::cmdline::get_a() as usize;
         Box::into_raw(Box::new(ptr)) as usize
     })
 }
 pub fn wcmdln_data_addr() -> usize {
     *HEAP_WCMDLN.get_or_init(|| {
         // _wcmdln is msvcrt's wide command-line variable (a `wchar_t*`).
-        static WIDE_CMDLN: [u16; 6] = [
-            b'w' as u16,
-            b'e' as u16,
-            b'a' as u16,
-            b'v' as u16,
-            b'e' as u16,
-            0,
-        ];
-        let ptr = WIDE_CMDLN.as_ptr() as usize;
+        let ptr = weave_core::cmdline::get_w() as usize;
         Box::into_raw(Box::new(ptr)) as usize
     })
 }
@@ -574,7 +572,85 @@ pub unsafe extern "win64" fn ucrt_p_fmode() -> *mut i32 {
     *HEAP_FMODE.get_or_init(|| Box::into_raw(Box::new(0i32)) as usize) as *mut i32
 }
 
+/// Return the address of the fake `_iob` array (DATA import for msvcrt.dll).
+///
+/// `_iob` in msvcrt.dll is a contiguous array of FILE structs. The IAT slot
+/// holds the array's base address directly (not address-of-pointer).
+/// 7-Zip and other msvcrt.dll users access stdin/stdout/stderr as `_iob + N*64`.
+pub fn iob_data_addr() -> usize {
+    IOB_ARRAY.get_or_init(|| Box::new([0u8; 192])).as_ptr() as usize
+}
+
+/// Map a FILE* to a Linux fd number.
+///
+/// Assumes 64-byte stride between _iob entries. Falls back to fd 1 (stdout)
+/// for any unrecognised pointer — sufficient for archive listing output.
+fn stream_to_fd(stream: *const c_void) -> i32 {
+    let base = iob_data_addr();
+    let s = stream as usize;
+    if s == base {
+        return 0; // stdin
+    }
+    if s == base + 64 {
+        return 1; // stdout
+    }
+    if s == base + 128 {
+        return 2; // stderr
+    }
+    1 // default: stdout
+}
+
 // ── stdio ─────────────────────────────────────────────────────────────────────
+
+/// fputc — write a character to a FILE stream.
+///
+/// Routes to the Linux fd corresponding to the FILE* from `_iob`.
+///
+/// # Safety
+/// `stream` must be a valid pointer (may be one of the fake `_iob` entries).
+pub unsafe extern "win64" fn ms_fputc(c: i32, stream: *mut c_void) -> i32 {
+    let fd = stream_to_fd(stream);
+    let byte = c as u8;
+    unsafe { libc::write(fd, &byte as *const u8 as *const libc::c_void, 1) };
+    c & 0xFF
+}
+
+/// fputs — write a null-terminated string to a FILE stream.
+///
+/// # Safety
+/// `s` must be a valid null-terminated ANSI string or null.
+pub unsafe extern "win64" fn ms_fputs(s: *const u8, stream: *mut c_void) -> i32 {
+    if s.is_null() {
+        return -1;
+    }
+    let fd = stream_to_fd(stream);
+    let mut len = 0usize;
+    unsafe {
+        while *s.add(len) != 0 {
+            len += 1;
+        }
+        if len > 0 {
+            libc::write(fd, s as *const libc::c_void, len);
+        }
+    }
+    0
+}
+
+/// fgetc — read a character from a FILE stream. Returns EOF (-1) as stub.
+///
+/// # Safety
+/// `stream` is accepted but stdin reads are not implemented.
+pub unsafe extern "win64" fn ms_fgetc(_stream: *mut c_void) -> i32 {
+    -1 // EOF
+}
+
+/// fflush — flush a FILE stream. Returns 0 (success). No-op stub.
+///
+/// # Safety
+/// `stream` is ignored.
+pub unsafe extern "win64" fn ms_fflush(_stream: *mut c_void) -> i32 {
+    0
+}
 
 pub extern "win64" fn ucrt_acrt_iob_func(fd: u32) -> *mut c_void {
     // Heap-allocated 256-byte buffers for fake FILE structs.  MinGW CRT writes
@@ -636,13 +712,26 @@ pub extern "win64" fn ucrt_vfprintf(
 }
 
 /// fwrite — write binary data to a FILE* (legacy msvcrt.dll variant).
-pub extern "win64" fn ucrt_fwrite(
-    _ptr: *const c_void,
-    _size: usize,
-    _count: usize,
-    _stream: *mut c_void,
+///
+/// # Safety
+/// `ptr` must be valid for `size * count` bytes.
+pub unsafe extern "win64" fn ucrt_fwrite(
+    ptr: *const c_void,
+    size: usize,
+    count: usize,
+    stream: *mut c_void,
 ) -> usize {
-    0
+    if ptr.is_null() || size == 0 || count == 0 {
+        return 0;
+    }
+    let fd = stream_to_fd(stream);
+    let total = size.saturating_mul(count);
+    let n = unsafe { libc::write(fd, ptr, total) };
+    if n > 0 {
+        n as usize / size
+    } else {
+        0
+    }
 }
 
 pub extern "win64" fn ucrt_stdio_common_vfprintf(
@@ -705,15 +794,33 @@ pub unsafe extern "win64" fn ucrt_assert(_expr: *const u8, _file: *const u8, _li
     unsafe { libc::abort() }
 }
 
-pub extern "win64" fn ucrt_beginthreadex(
+/// _beginthreadex — create a Windows thread.
+///
+/// Returns a fake non-zero handle (1) so callers treat thread creation as
+/// successful. The thread never actually runs; WaitForSingleObject(1) returns
+/// WAIT_OBJECT_0 immediately, which is correct for single-threaded listing
+/// mode where worker threads sit idle anyway.
+/// # Safety
+/// `thread_id` must be null or a valid pointer to a writable `u32`.
+pub unsafe extern "win64" fn ucrt_beginthreadex(
     _security: *const c_void,
     _stack_size: u32,
     _start: *const c_void,
     _arg: *const c_void,
     _flags: u32,
-    _thread_id: *mut u32,
+    thread_id: *mut u32,
 ) -> usize {
-    0
+    unsafe {
+        libc::write(
+            2,
+            b"weave: stub _beginthreadex -> 1\n".as_ptr() as *const libc::c_void,
+            31,
+        );
+    }
+    if !thread_id.is_null() {
+        unsafe { *thread_id = 1 };
+    }
+    1 // fake thread handle — WaitForSingleObject(1) returns WAIT_OBJECT_0
 }
 
 pub extern "win64" fn ucrt_endthreadex(_exit_code: u32) {}
@@ -1280,43 +1387,119 @@ pub unsafe extern "win64" fn ucrt_xcpt_filter(_xno: u32, _pxcptinfoptrs: *const 
     0 // EXCEPTION_CONTINUE_SEARCH
 }
 
-/// _CxxThrowException — throw a C++ exception. Logs and aborts.
+/// _CxxThrowException — throw a C++ exception via SEH dispatch.
+///
+/// Builds the MSVC C++ exception parameters and calls RaiseException with
+/// exception code 0xE06D7363 ("msc" in ASCII). The SEH dispatch chain in
+/// weave_core::unwind walks .pdata to find __CxxFrameHandler, which matches
+/// the thrown type to catch blocks and transfers control.
 ///
 /// # Safety
-/// Pointer arguments are accepted but not dereferenced.
+/// `p_exception_object` and `p_throw_info` must be valid PE pointers.
 pub unsafe extern "win64" fn ucrt_cxx_throw_exception(
-    _p_exception_object: *mut u8,
-    _p_throw_info: *const u8,
-) -> ! {
+    p_exception_object: *mut u8,
+    p_throw_info: *const u8,
+) {
+    let image_base = weave_core::seh::pe_base();
+
+    eprintln!(
+        "weave: _CxxThrowException obj={:#x} throw_info={:#x} image_base={image_base:#x}",
+        p_exception_object as usize, p_throw_info as usize
+    );
+
+    // Print exception message if the thrown type looks like a const char*.
+    // Guard against non-canonical / garbage pointers from non-string throws.
     unsafe {
-        libc::write(
-            2,
-            b"weave: _CxxThrowException called -- aborting\n".as_ptr() as *const libc::c_void,
-            46,
-        );
-        libc::abort()
+        if !p_exception_object.is_null() {
+            let str_ptr = *(p_exception_object as *const *const u8);
+            // Only dereference if it looks like a canonical user-space address.
+            const CANONICAL_LIMIT: usize = 0x0000_8000_0000_0000;
+            if !str_ptr.is_null() && (str_ptr as usize) < CANONICAL_LIMIT {
+                let str_len = (0..256usize)
+                    .position(|i| *str_ptr.add(i) == 0)
+                    .unwrap_or(0);
+                if str_len > 0 {
+                    let str_bytes = std::slice::from_raw_parts(str_ptr, str_len);
+                    if let Ok(s) = std::str::from_utf8(str_bytes) {
+                        eprintln!("weave: exception message = {s:?}");
+                    }
+                }
+            }
+        }
     }
+
+    // MSVC C++ exception: RaiseException(0xE06D7363, NONCONTINUABLE, 4, params)
+    // params[0] = MSVC magic (0x19930520 for x64)
+    // params[1] = pointer to exception object
+    // params[2] = pointer to ThrowInfo
+    // params[3] = image base (for RVA resolution)
+    let params: [u64; 4] = [
+        0x19930520,
+        p_exception_object as u64,
+        p_throw_info as u64,
+        image_base as u64,
+    ];
+
+    unsafe {
+        weave_core::unwind::raise_exception(
+            0xE06D7363, // EH_EXCEPTION_NUMBER ("msc")
+            1,          // EXCEPTION_NONCONTINUABLE
+            4,
+            params.as_ptr(),
+        );
+    }
+
+    // If dispatch didn't find a handler, terminate
+    eprintln!("weave: _CxxThrowException: no handler found — terminating");
+    unsafe { libc::exit(1) }
 }
 
 /// __CxxFrameHandler — MSVC C++ frame handler for exception unwinding.
 ///
-/// Returns 0 (EXCEPTION_CONTINUE_SEARCH). Stub — no real SEH.
+/// Delegates to the real implementation in weave-core.
 ///
 /// # Safety
-/// Pointer arguments are accepted but not dereferenced.
+/// Pointer arguments must be valid Windows x64 SEH structures.
 pub unsafe extern "win64" fn ucrt_cxx_frame_handler(
-    _p_exc_rec: *const u8,
-    _p_est_frame: *mut u8,
-    _p_context: *const u8,
-    _p_dispatch: *mut u8,
+    p_exc_rec: *mut weave_core::unwind::ExceptionRecord,
+    est_frame: u64,
+    p_context: *mut weave_core::unwind::Context,
+    p_dispatch: *mut weave_core::unwind::DispatcherContext,
 ) -> i32 {
-    0
+    unsafe { weave_core::unwind::cxx_frame_handler(p_exc_rec, est_frame, p_context, p_dispatch) }
 }
 
 /// ?terminate@@YAXXZ — C++ std::terminate(). Aborts the process.
 pub extern "win64" fn ucrt_terminate() -> ! {
     unsafe { libc::abort() }
 }
+
+// ── Named stubs for previously catch-all functions ────────────────────────────
+// Each function gets its own stub so the log line names it.  The log uses
+// libc::write so it is guaranteed to flush before any potential abort.
+
+macro_rules! named_stub {
+    ($name:ident, $label:expr) => {
+        pub extern "win64" fn $name() {
+            unsafe {
+                let msg = concat!("weave: stub ", $label, "\n");
+                libc::write(2, msg.as_ptr() as *const libc::c_void, msg.len());
+            }
+        }
+    };
+}
+
+named_stub!(ucrt_isatty_stub, "_isatty");
+named_stub!(ucrt_get_errno_stub, "_get_errno");
+named_stub!(ucrt_set_errno_stub, "_set_errno");
+named_stub!(ucrt_get_doserrno_stub, "_get_doserrno");
+named_stub!(ucrt_set_doserrno_stub, "_set_doserrno");
+named_stub!(ucrt_sopen_s_stub, "_sopen_s");
+named_stub!(ucrt_close_stub, "_close");
+named_stub!(ucrt_dup_stub, "_dup");
+named_stub!(ucrt_dup2_stub, "_dup2");
+named_stub!(ucrt_flushall_stub, "_flushall");
+named_stub!(ucrt_chkstk_stub, "_chkstk");
 
 /// ??1type_info@@UEAA@XZ — type_info destructor. No-op (no real RTTI objects).
 ///
@@ -1401,7 +1584,9 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "_initialize_onexit_table" => {
             stub!(ucrt_initialize_onexit_table as extern "win64" fn(_) -> _)
         }
-        "_beginthreadex" => stub!(ucrt_beginthreadex as extern "win64" fn(_, _, _, _, _, _) -> _),
+        "_beginthreadex" => {
+            stub!(ucrt_beginthreadex as unsafe extern "win64" fn(_, _, _, _, _, _) -> _)
+        }
         "_endthreadex" => stub!(ucrt_endthreadex as extern "win64" fn(_)),
         "_assert" => stub!(ucrt_assert as unsafe extern "win64" fn(_, _, _)),
         // CRT globals
@@ -1418,14 +1603,18 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "_onexit" => stub!(ucrt_onexit as extern "win64" fn(_) -> _),
         "fprintf" => stub!(ucrt_fprintf as extern "win64" fn(_, _) -> _),
         "vfprintf" => stub!(ucrt_vfprintf as extern "win64" fn(_, _, _) -> _),
-        "fwrite" => stub!(ucrt_fwrite as extern "win64" fn(_, _, _, _) -> _),
+        "fwrite" => stub!(ucrt_fwrite as unsafe extern "win64" fn(_, _, _, _) -> _),
         "__stdio_common_vfprintf" | "__stdio_common_vfwprintf" => {
             stub!(ucrt_stdio_common_vfprintf as extern "win64" fn(_, _, _, _, _) -> _)
         }
         "__stdio_common_vsprintf" | "__stdio_common_vswprintf" => {
             stub!(ucrt_stdio_common_vsprintf as extern "win64" fn(_, _, _, _, _, _) -> _)
         }
-        "fflush" => stub!(ucrt_fflush as unsafe extern "win64" fn(_) -> _),
+        "_iob" => Some(iob_data_addr()),
+        "fputc" => Some(ms_fputc as unsafe extern "win64" fn(_, _) -> _ as *const () as usize),
+        "fputs" => Some(ms_fputs as unsafe extern "win64" fn(_, _) -> _ as *const () as usize),
+        "fgetc" => Some(ms_fgetc as unsafe extern "win64" fn(_) -> _ as *const () as usize),
+        "fflush" => Some(ms_fflush as unsafe extern "win64" fn(_) -> _ as *const () as usize),
         "setvbuf" => stub!(ucrt_setvbuf as extern "win64" fn(_, _, _, _) -> _),
         "_errno" => stub!(ucrt_errno as extern "win64" fn() -> _),
         "strerror" => stub!(ucrt_strerror as extern "win64" fn(_) -> _),
@@ -1509,7 +1698,20 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "__mb_cur_max" => Some(mb_cur_max_data_addr()),
         "_stricmp" | "_strcmpi" => stub!(ucrt_strcmp as unsafe extern "win64" fn(_, _) -> _),
         "_wcsdup" => stub!(ucrt_strdup as unsafe extern "win64" fn(_) -> _),
-        "_flushall" | "_filbuf" | "_flsbuf" => stub!(ucrt_cexit as extern "win64" fn()),
+        "_flushall" => stub!(ucrt_flushall_stub as extern "win64" fn()),
+        "_filbuf" | "_flsbuf" => stub!(ucrt_cexit as extern "win64" fn()),
+        "_isatty" => stub!(ucrt_isatty_stub as extern "win64" fn()),
+        "_get_errno" => stub!(ucrt_get_errno_stub as extern "win64" fn()),
+        "_set_errno" => stub!(ucrt_set_errno_stub as extern "win64" fn()),
+        "_get_doserrno" => stub!(ucrt_get_doserrno_stub as extern "win64" fn()),
+        "_set_doserrno" => stub!(ucrt_set_doserrno_stub as extern "win64" fn()),
+        "_sopen_s" => stub!(ucrt_sopen_s_stub as extern "win64" fn()),
+        "_close" => stub!(ucrt_close_stub as extern "win64" fn()),
+        "_dup" => stub!(ucrt_dup_stub as extern "win64" fn()),
+        "_dup2" => stub!(ucrt_dup2_stub as extern "win64" fn()),
+        "_chkstk" | "__chkstk" | "_alloca_probe" | "__alloca_probe" => {
+            stub!(ucrt_chkstk_stub as extern "win64" fn())
+        }
         // Additional MSVCRT startup symbols seen in MinGW-compiled binaries.
         // All are no-ops or aliases — the CRT startup just needs them to resolve.
         "__getmainargs_to_utf8"
@@ -1530,23 +1732,10 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         | "_controlfp_s"
         | "_statusfp"
         | "_fpreset"
-        | "_chkstk"
-        | "__chkstk"
-        | "_alloca_probe"
-        | "__alloca_probe"
-        | "_isatty"
-        | "_get_errno"
-        | "_set_errno"
-        | "_get_doserrno"
-        | "_set_doserrno"
         | "__stdio_common_vfscanf"
         | "__stdio_common_vsscanf"
         | "__stdio_common_vfwscanf"
         | "__stdio_common_vswscanf"
-        | "_sopen_s"
-        | "_close"
-        | "_dup"
-        | "_dup2"
         | "_pipe"
         | "_cwait"
         | "_spawnl"
@@ -1570,9 +1759,9 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "_XcptFilter" => {
             Some(ucrt_xcpt_filter as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
         }
-        "_CxxThrowException" => Some(
-            ucrt_cxx_throw_exception as unsafe extern "win64" fn(_, _) -> ! as *const () as usize,
-        ),
+        "_CxxThrowException" => {
+            Some(ucrt_cxx_throw_exception as unsafe extern "win64" fn(_, _) as *const () as usize)
+        }
         "__CxxFrameHandler" | "__CxxFrameHandler3" | "__CxxFrameHandler4" => Some(
             ucrt_cxx_frame_handler as unsafe extern "win64" fn(_, _, _, _) -> _ as *const ()
                 as usize,

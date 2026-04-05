@@ -1353,6 +1353,24 @@ pub fn resolve(func: &str) -> Option<usize> {
         "RtlWakeByAddressAll" => {
             Some(rtl_wake_by_address_all as unsafe extern "win64" fn(_) as *const () as usize)
         }
+        // RTL exception/unwind — real implementations in weave_core::unwind
+        "RtlCaptureContext" => Some(
+            weave_core::unwind::rtl_capture_context_export as unsafe extern "win64" fn(_)
+                as *const () as usize,
+        ),
+        "RtlLookupFunctionEntry" => Some(
+            weave_core::unwind::rtl_lookup_function_entry_export
+                as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
+        ),
+        "RtlVirtualUnwind" => Some(
+            weave_core::unwind::rtl_virtual_unwind_export
+                as unsafe extern "win64" fn(_, _, _, _, _, _, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "RtlUnwindEx" => Some(
+            weave_core::unwind::rtl_unwind_ex_export as unsafe extern "win64" fn(_, _, _, _, _, _)
+                as *const () as usize,
+        ),
         _ => None,
     }
 }

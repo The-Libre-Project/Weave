@@ -111,9 +111,18 @@ impl WinPathTranslator {
 
     /// Given a normalised, prefix-stripped Windows path, resolve it to a
     /// Linux path under the prefix.
+    ///
+    /// Drive `Z:` is special: it maps directly to the Linux filesystem root `/`
+    /// instead of `{prefix}/drive_z`.  This lets Weave represent real Linux
+    /// paths as Windows paths using the `Z:\` prefix, which is used by
+    /// `GetCurrentDirectoryW` to expose the real process CWD to guest apps.
     fn resolve_normalised(&self, normalised: &NormalisedPath) -> Result<PathBuf, PathError> {
-        let drive_dir = format!("drive_{}", normalised.drive.to_ascii_lowercase());
-        let drive_root = self.prefix.join(&drive_dir);
+        let drive_root = if normalised.drive == 'Z' || normalised.drive == 'z' {
+            PathBuf::from("/")
+        } else {
+            let drive_dir = format!("drive_{}", normalised.drive.to_ascii_lowercase());
+            self.prefix.join(&drive_dir)
+        };
 
         let mut result = drive_root;
         let mut depth: usize = 0; // how deep we are below the drive root

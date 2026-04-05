@@ -5,8 +5,15 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+# Enable real PipeWire audio output. Only works when building natively on Linux
+# (not cross-compiling from macOS), because libspa-sys requires a pkg-config
+# sysroot for the target platform. Disabled by default so `make lint` and
+# `make build` work on macOS. Docker / CI can enable this explicitly.
+pipewire-audio = ["dep:pipewire"]
+
 [dependencies]
 weave-common = { path = "../weave-common" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-pipewire = "0.8"
+pipewire = { version = "0.8", optional = true }

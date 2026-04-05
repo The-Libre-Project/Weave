@@ -30,10 +30,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 // Signal handlers cannot safely access complex data structures (locks, heap,
 // etc.), so we cache only what we need as plain atomics.
 
-static PE_BASE: AtomicUsize = AtomicUsize::new(0);
-static PE_SIZE: AtomicUsize = AtomicUsize::new(0);
-static PDATA_RVA: AtomicUsize = AtomicUsize::new(0);
-static PDATA_SIZE: AtomicUsize = AtomicUsize::new(0);
+pub(crate) static PE_BASE: AtomicUsize = AtomicUsize::new(0);
+pub(crate) static PE_SIZE: AtomicUsize = AtomicUsize::new(0);
+pub(crate) static PDATA_RVA: AtomicUsize = AtomicUsize::new(0);
+pub(crate) static PDATA_SIZE: AtomicUsize = AtomicUsize::new(0);
 
 // ── Public API ────────────────────────────────────────────────────────────────
 

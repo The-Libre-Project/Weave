@@ -421,6 +421,9 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "CharUpperW" => {
             Some(api::char_upper_w as unsafe extern "win64" fn(_) -> _ as *const () as usize)
         }
+        "CharPrevExA" => Some(
+            api::char_prev_ex_a as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
+        ),
         "GetMenuItemInfoW" => Some(
             api::get_menu_item_info_w as unsafe extern "win64" fn(_, _, _, _) -> _ as *const ()
                 as usize,

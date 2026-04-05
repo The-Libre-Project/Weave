@@ -2529,3 +2529,22 @@ pub unsafe extern "win64" fn dialog_box_param_w(
 ) -> isize {
     -1
 }
+
+/// CharPrevExA — find the previous character in a string (ANSI, code page aware).
+///
+/// Returns `lpsz - 1` clamped to `lpszStart`. Stub ignores the code page.
+///
+/// # Safety
+/// `lpsz_start` and `lpsz` must be valid pointers into the same buffer.
+pub unsafe extern "win64" fn char_prev_ex_a(
+    _code_page: u16,
+    lpsz_start: *const u8,
+    lpsz: *const u8,
+    _b_flags: u32,
+) -> *const u8 {
+    if lpsz > lpsz_start {
+        unsafe { lpsz.sub(1) }
+    } else {
+        lpsz_start
+    }
+}

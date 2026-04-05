@@ -84,6 +84,7 @@ impl RingBuf {
     }
 
     /// Read up to `dst.len()` bytes into `dst`.  Returns bytes actually copied.
+    #[cfg(feature = "pipewire-audio")]
     fn read_into(&mut self, dst: &mut [u8]) -> usize {
         let max_bytes = dst.len();
         let to_copy = max_bytes.min(self.available);
@@ -146,7 +147,7 @@ fn ensure_devices_initialized() {
 /// The `listener` field holds the `StreamListener<()>` registration that
 /// keeps the process callback alive.  We box-erase it to `dyn Any` so we
 /// don't have to propagate the `D` generic parameter out of this struct.
-#[cfg(target_os = "linux")]
+#[cfg(feature = "pipewire-audio")]
 struct PwState {
     thread_loop: pipewire::thread_loop::ThreadLoop,
     /// Raw stream pointer so we can call pw_stream_destroy in Drop before
@@ -156,7 +157,7 @@ struct PwState {
     _listener: Option<Box<dyn std::any::Any>>,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(feature = "pipewire-audio")]
 impl Drop for PwState {
     fn drop(&mut self) {
         // Drop the listener first (it holds raw pointers into the stream).
@@ -172,7 +173,7 @@ impl Drop for PwState {
 // SAFETY: We access PwState only while holding the ThreadLoop lock (COM thread)
 // or from within the ThreadLoop's own process callback.  Drop is only called
 // from the COM thread after `Stop()` (which stops the PW thread first).
-#[cfg(target_os = "linux")]
+#[cfg(feature = "pipewire-audio")]
 unsafe impl Send for PwState {}
 
 // ── Windows Audio Structures ─────────────────────────────────────────────────
@@ -309,7 +310,7 @@ struct AudioClient {
     ref_count: RefCell<u32>,
     ring_buf: Arc<Mutex<RingBuf>>,
     /// PipeWire stream state — Linux only.
-    #[cfg(target_os = "linux")]
+    #[cfg(feature = "pipewire-audio")]
     pw_state: Option<Box<PwState>>,
 }
 
@@ -324,7 +325,7 @@ impl AudioClient {
             frame_size,
             ref_count: RefCell::new(1),
             ring_buf: Arc::new(Mutex::new(RingBuf::new(ring_capacity, frame_size))),
-            #[cfg(target_os = "linux")]
+            #[cfg(feature = "pipewire-audio")]
             pw_state: None,
         }
     }
@@ -724,7 +725,7 @@ unsafe extern "win64" fn iaudio_client_get_device_period(
 /// discarded (silent output).
 /// TODO: connect to a platform audio backend here when porting to other OSes.
 unsafe extern "win64" fn iaudio_client_start(_this: *mut usize) -> i32 {
-    #[cfg(target_os = "linux")]
+    #[cfg(feature = "pipewire-audio")]
     {
         let this = _this;
         use pipewire as pw;
@@ -890,7 +891,7 @@ unsafe extern "win64" fn iaudio_client_start(_this: *mut usize) -> i32 {
 
 /// IAudioClient::Stop -- tear down the PipeWire stream.
 unsafe extern "win64" fn iaudio_client_stop(_this: *mut usize) -> i32 {
-    #[cfg(target_os = "linux")]
+    #[cfg(feature = "pipewire-audio")]
     {
         let client = &mut *(_this as *mut AudioClient);
         // Dropping PwState stops the thread loop and destroys the stream.

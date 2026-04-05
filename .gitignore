@@ -8,12 +8,12 @@
 *~
 
 # Build artifacts
+/target/
+/docker-target/
 output/
 .build-work/
 *.iso
 *.log
-/target/
-/docker-target/
 
 # IDE
 .vscode/
@@ -23,3 +23,13 @@ output/
 *.tmp
 *.temp
 /tmp/
+
+# Core dumps
+core
+core.*
+
+# Test fixtures — large Windows PE binaries downloaded separately
+tests/fixtures/bin/7z.dll
+tests/fixtures/bin/7zFM.exe
+tests/fixtures/bin/7za.dll
+tests/fixtures/bin/7za.exe

@@ -1,4 +1,5 @@
 pub mod cfg;
+pub mod cmdline;
 pub mod dll_registry;
 pub mod exec;
 pub mod file_io;
@@ -12,3 +13,4 @@ pub mod registry;
 pub mod resolve;
 pub mod seh;
 pub mod teb;
+pub mod unwind;

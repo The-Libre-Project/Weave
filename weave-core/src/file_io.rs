@@ -68,6 +68,41 @@ pub fn win32_disposition_to_nt(win32: u32) -> u32 {
     }
 }
 
+/// Translate a Windows path to a Linux path, with a fallback for native Linux
+/// absolute paths that have been passed through a Windows application.
+///
+/// When a Linux host passes an absolute path (e.g. `/abs/path/test.7z`) as a
+/// CLI argument to a Windows PE, the app typically converts forward slashes to
+/// backslashes internally (`\abs\path\test.7z`).  Our Windows path translator
+/// then maps this to `{prefix}/drive_c/abs/path/test.7z`, which doesn't exist.
+///
+/// This function first tries the standard Windows path translation.  If the
+/// result doesn't exist on disk, it checks whether the path — with all
+/// backslashes replaced by forward slashes — is a valid Linux absolute path
+/// that does exist, and returns that instead.
+pub fn translate_win_path(win_path: &str) -> Result<std::path::PathBuf, i32> {
+    let translated = prefix::translator()
+        .to_linux_str(win_path)
+        .map_err(|_| STATUS_UNSUCCESSFUL)?;
+
+    // Fast path: the translated path exists — use it directly.
+    if translated.exists() {
+        return Ok(translated);
+    }
+
+    // Fallback: try the path as a native Linux absolute path.
+    let candidate = win_path.replace('\\', "/");
+    if candidate.starts_with('/') {
+        let p = std::path::PathBuf::from(&candidate);
+        if p.exists() {
+            return Ok(p);
+        }
+    }
+
+    // Return the (non-existent) translated path so callers get the right error.
+    Ok(translated)
+}
+
 /// Open or create a file and return a Windows HANDLE.
 ///
 /// `win_path`    — Windows path (already decoded from UTF-16 if needed)
@@ -82,9 +117,7 @@ pub fn open_file(win_path: &str, desired_access: u32, nt_disposition: u32) -> Re
     }
 
     // ── 2. Translate Windows path → Linux path ────────────────────────────
-    let linux_path = prefix::translator()
-        .to_linux_str(win_path)
-        .map_err(|_| STATUS_UNSUCCESSFUL)?;
+    let linux_path = translate_win_path(win_path)?;
 
     let path_cstr = match path_to_cstring(&linux_path) {
         Some(s) => s,

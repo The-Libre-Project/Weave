@@ -7,5 +7,6 @@ repository.workspace = true
 description = "advapi32.dll stubs for Weave — registry, security, and services"
 
 [dependencies]
+libc = "0.2"
 weave-common = { path = "../weave-common" }
 weave-core = { path = "../weave-core" }

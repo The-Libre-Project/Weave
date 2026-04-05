@@ -1244,6 +1244,7 @@ dependencies = [
 name = "weave-advapi32"
 version = "0.0.1"
 dependencies = [
+ "libc",
  "weave-common",
  "weave-core",
 ]
@@ -1406,6 +1407,7 @@ name = "weave-ucrt"
 version = "0.0.1"
 dependencies = [
  "libc",
+ "weave-core",
 ]
 
 [[package]]
