@@ -409,8 +409,31 @@ pub extern "win64" fn ucrt_initialize_onexit_table(_table: *mut c_void) -> i32 {
     0
 }
 
-pub extern "win64" fn ucrt_signal(_signum: i32, _handler: *const c_void) -> *const c_void {
-    std::ptr::null()
+/// signal — install a CRT signal handler; returns previous handler.
+///
+/// Wine ref: dlls/msvcrt/except.c:655 — validates sig is in the Windows-specific set
+/// {SIGABRT=22,SIGFPE=8,SIGILL=4,SIGSEGV=11,SIGINT=2,SIGTERM=15,SIGBREAK=21}; stores
+/// the new handler and returns the previous one. Unknown sig → SIG_ERR (-1 as ptr).
+/// func==SIG_ERR returns SIG_ERR immediately without storing.
+/// Weave returns SIG_DFL (null) as the "previous handler" on all valid signals (correct
+/// for program startup), and usize::MAX as *const c_void (SIG_ERR) for invalid signals.
+pub extern "win64" fn ucrt_signal(signum: i32, handler: *const c_void) -> *const c_void {
+    // SIG_ERR passed as new handler → return SIG_ERR immediately (Wine behaviour).
+    if handler as usize == usize::MAX {
+        return usize::MAX as *const c_void;
+    }
+    // Windows CRT signal numbers (NOT POSIX — e.g. SIGABRT=22 not 6).
+    match signum {
+        2  // SIGINT
+        | 4  // SIGILL
+        | 8  // SIGFPE
+        | 11 // SIGSEGV
+        | 15 // SIGTERM
+        | 21 // SIGBREAK (Windows Ctrl+Break — never generated on Linux, but valid to register)
+        | 22 // SIGABRT
+        => std::ptr::null(), // SIG_DFL — correct "previous handler" at program start
+        _ => usize::MAX as *const c_void, // SIG_ERR
+    }
 }
 
 // ── CRT global variable accessors ─────────────────────────────────────────────
@@ -784,8 +807,15 @@ pub extern "win64" fn ucrt_errno() -> *mut i32 {
     unsafe { libc::__errno_location() }
 }
 
-pub extern "win64" fn ucrt_strerror(_errnum: i32) -> *mut u8 {
-    std::ptr::null_mut()
+/// strerror — return a pointer to the error message string for errnum.
+///
+/// Wine ref: dlls/msvcrt/errno.c:272 — uses a thread-local 256-byte buffer; copies from
+/// _sys_errlist[]; clamps out-of-range errnum to _sys_nerr ("Unknown error").
+/// Weave delegates to libc strerror() which uses the same POSIX error table and manages
+/// its own thread-local buffer. Returns non-null for all valid errnum values.
+pub extern "win64" fn ucrt_strerror(errnum: i32) -> *mut u8 {
+    // libc strerror() returns a pointer to a static/thread-local C string — valid to return.
+    unsafe { libc::strerror(errnum) as *mut u8 }
 }
 
 /// # Safety
@@ -845,8 +875,16 @@ pub extern "win64" fn ucrt_mb_cur_max_func() -> usize {
 pub extern "win64" fn ucrt_localeconv() -> *const c_void {
     std::ptr::null()
 }
+/// setlocale — set or query the locale for the given category.
+///
+/// Wine ref: dlls/msvcrt/locale.c:2015 — LC_MIN/LC_MAX bounds check → NULL on bad category;
+/// NULL locale queries and returns the current locale name string; "C"/"POSIX" sets C locale.
+/// Weave always reports the "C" locale — full locale switching is not implemented.
+/// Apps that check `setlocale(LC_ALL, "") != NULL` will now get a valid non-null return.
 pub extern "win64" fn ucrt_setlocale(_cat: i32, _locale: *const u8) -> *mut u8 {
-    std::ptr::null_mut()
+    // Return pointer to static "C\0" string. Safe: static lifetime, read-only by callers.
+    static C_LOCALE: &[u8] = b"C\0";
+    C_LOCALE.as_ptr() as *mut u8
 }
 /// # Safety
 /// No pointer requirements; `c` is passed by value.
@@ -886,6 +924,41 @@ pub unsafe extern "win64" fn ucrt_mbsrtowcs(
 /// `_s` must be writable for at least one byte if non-null. `_ps` is accepted but not read.
 pub unsafe extern "win64" fn ucrt_wcrtomb(_s: *mut u8, _wc: u16, _ps: *mut c_void) -> usize {
     0
+}
+
+/// towlower — convert a wide character to lowercase.
+///
+/// Wine ref: dlls/ntdll/locale.c:846 — ch >= 0x100 returned unchanged; otherwise uses
+/// casemap(LowerCaseTable, ch). Weave implements the ASCII [A-Z] and Latin-1 uppercase
+/// blocks (À–Ö 0xC0–0xD6, Ø–Þ 0xD8–0xDE) which map to lowercase by +0x20.
+/// Codepoints >= 0x100 returned unchanged (matching Wine's early-exit).
+pub extern "win64" fn ucrt_towlower(c: u32) -> u32 {
+    let ch = c as u16;
+    if (b'A' as u16..=b'Z' as u16).contains(&ch) {
+        return (ch + 0x20) as u32;
+    }
+    // Latin-1 uppercase: À(0xC0)–Ö(0xD6) and Ø(0xD8)–Þ(0xDE) → lowercase +0x20
+    if (0xC0u16..=0xD6).contains(&ch) || (0xD8u16..=0xDE).contains(&ch) {
+        return (ch + 0x20) as u32;
+    }
+    c // includes ch >= 0x100: returned unchanged per Wine
+}
+
+/// towupper — convert a wide character to uppercase.
+///
+/// Wine ref: dlls/ntdll/locale.c:856 — uses casemap(UpperCaseTable, ch) if table loaded,
+/// else casemap_ascii (ASCII only). Weave implements ASCII [a-z] and Latin-1 lowercase
+/// blocks (à–ö 0xE0–0xF6, ø–þ 0xF8–0xFE) which map to uppercase by -0x20.
+pub extern "win64" fn ucrt_towupper(c: u32) -> u32 {
+    let ch = c as u16;
+    if (b'a' as u16..=b'z' as u16).contains(&ch) {
+        return (ch - 0x20) as u32;
+    }
+    // Latin-1 lowercase: à(0xE0)–ö(0xF6) and ø(0xF8)–þ(0xFE) → uppercase -0x20
+    if (0xE0u16..=0xF6).contains(&ch) || (0xF8u16..=0xFEu16).contains(&ch) {
+        return (ch - 0x20) as u32;
+    }
+    c
 }
 
 // math
@@ -1073,7 +1146,27 @@ pub extern "win64" fn ucrt_c_specific_handler(
     1 // ExceptionContinueSearch
 }
 
-pub extern "win64" fn ucrt_rand_s(_rand_val: *mut u32) -> i32 {
+/// rand_s — generate a cryptographically secure random 32-bit value.
+///
+/// Wine ref: dlls/msvcrt/misc.c — null pval → sets *_errno()=EINVAL, returns EINVAL.
+/// On success calls RtlGenRandom(pval, 4) and returns 0.
+/// Weave uses the getrandom(2) syscall (Linux 3.17+) as the equivalent of RtlGenRandom.
+///
+/// # Safety
+/// `rand_val` must be a valid writable pointer to u32, or null (returns EINVAL).
+pub unsafe extern "win64" fn ucrt_rand_s(rand_val: *mut u32) -> i32 {
+    if rand_val.is_null() {
+        unsafe { *libc::__errno_location() = libc::EINVAL };
+        return libc::EINVAL;
+    }
+    // getrandom(buf, 4, 0) — blocks until kernel entropy pool is ready, then fills buf.
+    let ret = unsafe {
+        libc::syscall(libc::SYS_getrandom, rand_val as *mut libc::c_void, 4usize, 0u32)
+    };
+    if ret != 4 {
+        unsafe { *libc::__errno_location() = libc::EINVAL };
+        return libc::EINVAL;
+    }
     0
 }
 
@@ -1638,10 +1731,31 @@ macro_rules! named_stub {
 }
 
 named_stub!(ucrt_isatty_stub, "_isatty");
-named_stub!(ucrt_get_errno_stub, "_get_errno");
-named_stub!(ucrt_set_errno_stub, "_set_errno");
 named_stub!(ucrt_get_doserrno_stub, "_get_doserrno");
 named_stub!(ucrt_set_doserrno_stub, "_set_doserrno");
+
+/// _get_errno — copy the thread-local CRT errno value into *pValue.
+///
+/// Wine ref: dlls/msvcrt/errno.c:230 — null pValue → return EINVAL (no errno set);
+/// otherwise *pValue = *_errno(); return 0.
+///
+/// # Safety
+/// `p_value` must be a valid writable pointer to i32, or null (returns EINVAL).
+pub unsafe extern "win64" fn ucrt_get_errno(p_value: *mut i32) -> i32 {
+    if p_value.is_null() {
+        return libc::EINVAL;
+    }
+    unsafe { *p_value = *libc::__errno_location() };
+    0
+}
+
+/// _set_errno — write value into the thread-local CRT errno.
+///
+/// Wine ref: dlls/msvcrt/errno.c:254 — *_errno() = value; return 0. No bounds check.
+pub extern "win64" fn ucrt_set_errno(value: i32) -> i32 {
+    unsafe { *libc::__errno_location() = value };
+    0
+}
 named_stub!(ucrt_sopen_s_stub, "_sopen_s");
 named_stub!(ucrt_close_stub, "_close");
 named_stub!(ucrt_dup_stub, "_dup");
@@ -1699,8 +1813,9 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "_wcsnicmp" => stub!(ucrt_wcsnicmp as unsafe extern "win64" fn(_, _, _) -> _),
         "wcsnlen" => stub!(ucrt_wcsnlen as unsafe extern "win64" fn(_, _) -> _),
         "wcscoll" | "wcsxfrm" => stub!(ucrt_wcsicmp as unsafe extern "win64" fn(_, _) -> _),
-        "towlower" | "iswctype" | "wctype" => stub!(ucrt_wctob as unsafe extern "win64" fn(_) -> _),
-        "towupper" => stub!(ucrt_btowc as unsafe extern "win64" fn(_) -> _),
+        "towlower" => stub!(ucrt_towlower as extern "win64" fn(_) -> _),
+        "towupper" => stub!(ucrt_towupper as extern "win64" fn(_) -> _),
+        "iswctype" | "wctype" => stub!(ucrt_wctob as unsafe extern "win64" fn(_) -> _),
         // process
         "exit" => stub!(ucrt_exit as extern "win64" fn(_) -> !),
         "_exit" => stub!(ucrt__exit as extern "win64" fn(_) -> !),
@@ -1803,7 +1918,7 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
             stub!(ucrt_c_specific_handler as extern "win64" fn(_, _, _, _) -> _)
         }
         // misc
-        "rand_s" => stub!(ucrt_rand_s as extern "win64" fn(_) -> _),
+        "rand_s" => stub!(ucrt_rand_s as unsafe extern "win64" fn(_) -> _),
         "strcpy" => stub!(ucrt_strcpy as unsafe extern "win64" fn(_, _) -> _),
         "strcat" => stub!(ucrt_strcat as unsafe extern "win64" fn(_, _) -> _),
         "strstr" => stub!(ucrt_strstr as unsafe extern "win64" fn(_, _) -> _),
@@ -1857,8 +1972,8 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "_flushall" => stub!(ucrt_flushall_stub as extern "win64" fn()),
         "_filbuf" | "_flsbuf" => stub!(ucrt_cexit as extern "win64" fn()),
         "_isatty" => stub!(ucrt_isatty_stub as extern "win64" fn()),
-        "_get_errno" => stub!(ucrt_get_errno_stub as extern "win64" fn()),
-        "_set_errno" => stub!(ucrt_set_errno_stub as extern "win64" fn()),
+        "_get_errno" => stub!(ucrt_get_errno as unsafe extern "win64" fn(_) -> _),
+        "_set_errno" => stub!(ucrt_set_errno as extern "win64" fn(_) -> _),
         "_get_doserrno" => stub!(ucrt_get_doserrno_stub as extern "win64" fn()),
         "_set_doserrno" => stub!(ucrt_set_doserrno_stub as extern "win64" fn()),
         "_sopen_s" => stub!(ucrt_sopen_s_stub as extern "win64" fn()),
