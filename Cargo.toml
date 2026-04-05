@@ -21,6 +21,7 @@ members = [
     "weave-oleaut32",
     "weave-imm32",
     "weave-shlwapi",
+    "weave-gdiplus",
 ]
 resolver = "2"
 

@@ -39,6 +39,8 @@ fn resolve(dll: &str, func: &str) -> Option<usize> {
         .or_else(|| weave_advapi32::resolve(dll, func))
         .or_else(|| weave_user32::resolve(dll, func))
         .or_else(|| weave_gdi32::resolve(dll, func))
+        // msimg32.dll — alpha-blending, transparent blit (Sprint 5 IrfanView)
+        .or_else(|| weave_gdi32::resolve_msimg32(dll, func))
         .or_else(|| weave_shell32::resolve(dll, func))
         .or_else(|| weave_ole32::resolve(dll, func))
         .or_else(|| weave_mmdevapi::resolve(dll, func))
@@ -51,6 +53,10 @@ fn resolve(dll: &str, func: &str) -> Option<usize> {
         .or_else(|| weave_oleaut32::resolve(dll, func))
         .or_else(|| weave_imm32::resolve(dll, func))
         .or_else(|| weave_shlwapi::resolve(dll, func))
+        // gdiplus.dll — GDI+ 2D graphics / image codecs (Sprint 5 IrfanView)
+        .or_else(|| weave_gdiplus::resolve(dll, func))
+        // version.dll — file version info (Sprint 5 IrfanView)
+        .or_else(|| weave_kernel32::resolve_version(dll, func))
         .or_else(|| dll_registry::lookup(dll, func))
 }
 

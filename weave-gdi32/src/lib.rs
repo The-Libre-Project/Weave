@@ -984,6 +984,94 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
     }
 }
 
+// ── msimg32.dll stubs ─────────────────────────────────────────────────────────
+//
+// msimg32.dll provides alpha-blending, transparent blit, and gradient fill.
+// IrfanView uses AlphaBlend for compositing images with transparency.
+// All three stubs return FALSE (0); callers that check the return value will
+// fall back to a non-alpha path or skip the draw.
+//
+// Wine ref: dlls/msimg32/msimg32.c — AlphaBlend calls NtGdiAlphaBlend;
+// TransparentBlt calls NtGdiTransparentBlt; GradientFill calls NtGdiGradientFill.
+
+/// AlphaBlend — alpha-composite a source DC onto a destination DC.
+///
+/// # Safety
+/// All HDC and BLENDFUNCTION arguments are ignored in this stub.
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "win64" fn alpha_blend(
+    _hdc_dest: usize,
+    _x_origin_dest: i32,
+    _y_origin_dest: i32,
+    _w_dest: i32,
+    _h_dest: i32,
+    _hdc_src: usize,
+    _x_origin_src: i32,
+    _y_origin_src: i32,
+    _w_src: i32,
+    _h_src: i32,
+    _blend_function: u64, // BLENDFUNCTION packs into a u64 on x64 ABI
+) -> i32 {
+    0 // FALSE — not supported in headless
+}
+
+/// TransparentBlt — blit with a transparent colour key.
+///
+/// # Safety
+/// All HDC arguments are ignored.
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "win64" fn transparent_blt(
+    _hdc_dest: usize,
+    _x_origin_dest: i32,
+    _y_origin_dest: i32,
+    _w_dest: i32,
+    _h_dest: i32,
+    _hdc_src: usize,
+    _x_origin_src: i32,
+    _y_origin_src: i32,
+    _w_src: i32,
+    _h_src: i32,
+    _cr_transparent: u32,
+) -> i32 {
+    0 // FALSE
+}
+
+/// GradientFill — fill a rectangle or triangle with a colour gradient.
+///
+/// # Safety
+/// `pVertex` and `pMesh` are caller-supplied structs; we ignore them.
+pub unsafe extern "win64" fn gradient_fill(
+    _hdc: usize,
+    _p_vertex: *const u8,
+    _n_vertex: u32,
+    _p_mesh: *const u8,
+    _n_mesh: u32,
+    _ul_mode: u32,
+) -> i32 {
+    0 // FALSE
+}
+
+/// Resolve a gdi32.dll or msimg32.dll import added in Sprint 5.
+pub fn resolve_msimg32(dll: &str, func: &str) -> Option<usize> {
+    if !dll.eq_ignore_ascii_case("msimg32.dll") {
+        return None;
+    }
+    match func {
+        "AlphaBlend" => Some(
+            alpha_blend as unsafe extern "win64" fn(_, _, _, _, _, _, _, _, _, _, _) -> _
+                as *const () as usize,
+        ),
+        "TransparentBlt" => Some(
+            transparent_blt as unsafe extern "win64" fn(_, _, _, _, _, _, _, _, _, _, _) -> _
+                as *const () as usize,
+        ),
+        "GradientFill" => Some(
+            gradient_fill as unsafe extern "win64" fn(_, _, _, _, _, _) -> _ as *const () as usize,
+        ),
+        _ => None,
+    }
+}
+
 // ── PuTTY gap-fill: GDI ANSI variants and missing stubs ──────────────────────
 
 /// Read a null-terminated ANSI string from a raw pointer into a `String`.

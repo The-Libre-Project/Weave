@@ -296,6 +296,82 @@ fn notepad_plus_plus_portable_mode() {
     );
 }
 
+/// `weave i_view64.exe` — IrfanView 64-bit portable image viewer.
+///
+/// Sprint 5 functional gate: IrfanView must reach GdiplusStartup (logged to
+/// stderr) without crashing on an unresolved gdiplus.dll import.
+///
+/// The fixture is `tests/fixtures/irfanview/i_view64.exe`. It is not bundled
+/// in the repo — copy the IrfanView portable exe there before running in Docker.
+/// The test is skipped gracefully if the file is absent (CI still passes).
+///
+/// In headless Docker, IrfanView detects no display and exits. We cap at 15 s,
+/// kill if it hangs, then inspect stderr.
+#[test]
+fn irfanview_gdip_startup_reached() {
+    if !cfg!(target_os = "linux") {
+        eprintln!("skipping execution test — requires Linux");
+        return;
+    }
+
+    let manifest = env!("CARGO_MANIFEST_DIR");
+    let irfan_dir = format!("{manifest}/../tests/fixtures/irfanview");
+    let irfan_exe = format!("{irfan_dir}/i_view64.exe");
+
+    if !std::path::Path::new(&irfan_exe).exists() {
+        eprintln!("skipping: i_view64.exe not present in tests/fixtures/irfanview/");
+        eprintln!("  → copy the IrfanView 64-bit portable exe there to enable this test");
+        return;
+    }
+
+    let weave_bin = env!("CARGO_BIN_EXE_weave");
+    let mut child = std::process::Command::new(weave_bin)
+        .current_dir(&irfan_dir)
+        .arg(&irfan_exe)
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|e| panic!("failed to spawn weave on i_view64.exe: {e}"));
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err(e) => panic!("wait failed: {e}"),
+        }
+    }
+
+    let stderr_bytes = {
+        use std::io::Read;
+        let mut buf = Vec::new();
+        if let Some(mut pipe) = child.stderr.take() {
+            let _ = pipe.read_to_end(&mut buf);
+        }
+        buf
+    };
+    let stderr = String::from_utf8_lossy(&stderr_bytes);
+    eprintln!("irfanview stderr:\n{stderr}");
+
+    // Import resolution must complete before the entry point fires.
+    assert!(
+        stderr.contains("weave: imports resolved"),
+        "import resolution did not complete — possible crash during IAT patch.\nstderr: {stderr}"
+    );
+
+    // GdiplusStartup must be called — this is the primary Sprint 5 functional gate.
+    // If it does not appear, gdiplus.dll is not being resolved at all.
+    assert!(
+        stderr.contains("weave/gdiplus: GdiplusStartup"),
+        "GdiplusStartup was never called — gdiplus.dll imports are not resolving.\nstderr: {stderr}"
+    );
+}
+
 /// `weave hello.exe` — CRT-linked MinGW binary, 41 imports across 8 DLLs.
 #[test]
 fn hello_crt_prints_hello_world() {

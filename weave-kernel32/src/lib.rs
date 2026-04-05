@@ -7883,8 +7883,150 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "SetCommTimeouts" => {
             Some(set_comm_timeouts as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
         }
-        _ => None,
+        _ => {
+            // version.dll functions are forwarded through kernel32 in some apps;
+            // also handle them when the DLL name is version.dll directly.
+            resolve_version(dll, func)
+        }
     }
+}
+
+// ── version.dll stubs ─────────────────────────────────────────────────────────
+//
+// version.dll provides file version information (FileVersionInfo API).
+// IrfanView and many other apps call GetFileVersionInfoSizeW to probe for a
+// version resource, then GetFileVersionInfoW to load it, then VerQueryValueW
+// to extract fields (ProductVersion, FileDescription, etc.).
+//
+// We stub all three as "no version info available". Apps that check the return
+// value will see FALSE/0 and skip the version display — correct headless behaviour.
+//
+// Wine ref: dlls/version/version.c — GetFileVersionInfoSizeW walks PE resources
+// for RT_VERSION; VerQueryValueW parses the VS_VERSIONINFO structure.
+
+/// GetFileVersionInfoSizeW — return the byte size of the version resource.
+///
+/// Returns 0 — no version resource available.
+///
+/// # Safety
+/// `lp_filename` is a null-terminated wide path; we ignore it.
+/// `lpdw_handle` is an optional output DWORD; we set it to 0 if non-null.
+pub unsafe extern "win64" fn get_file_version_info_size_w(
+    _lp_filename: *const u16,
+    lpdw_handle: *mut u32,
+) -> u32 {
+    if !lpdw_handle.is_null() {
+        unsafe { *lpdw_handle = 0 };
+    }
+    0 // no version resource
+}
+
+/// GetFileVersionInfoSizeA — ANSI variant.
+///
+/// # Safety
+/// Same as GetFileVersionInfoSizeW.
+pub unsafe extern "win64" fn get_file_version_info_size_a(
+    _lp_filename: *const u8,
+    lpdw_handle: *mut u32,
+) -> u32 {
+    if !lpdw_handle.is_null() {
+        unsafe { *lpdw_handle = 0 };
+    }
+    0
+}
+
+/// GetFileVersionInfoW — load the version resource into a caller buffer.
+///
+/// Returns FALSE — no resource to load.
+///
+/// # Safety
+/// `lp_filename` is a wide path; `lp_data` is a writable buffer of `dw_len`
+/// bytes; we do not write to it.
+pub unsafe extern "win64" fn get_file_version_info_w(
+    _lp_filename: *const u16,
+    _dw_handle: u32,
+    _dw_len: u32,
+    _lp_data: *mut u8,
+) -> i32 {
+    0 // FALSE
+}
+
+/// GetFileVersionInfoA — ANSI variant of GetFileVersionInfoW.
+///
+/// # Safety
+/// Same as GetFileVersionInfoW.
+pub unsafe extern "win64" fn get_file_version_info_a(
+    _lp_filename: *const u8,
+    _dw_handle: u32,
+    _dw_len: u32,
+    _lp_data: *mut u8,
+) -> i32 {
+    0 // FALSE
+}
+
+/// VerQueryValueW — extract a sub-block from a version resource buffer.
+///
+/// Returns FALSE — the buffer is empty (we never loaded version data).
+///
+/// # Safety
+/// All pointer arguments may be non-null; we write 0/NULL to lplp_buffer and
+/// pui_len to indicate "not found" rather than leaving them uninitialised.
+pub unsafe extern "win64" fn ver_query_value_w(
+    _p_block: *const u8,
+    _lp_sub_block: *const u16,
+    lplp_buffer: *mut *mut u8,
+    pui_len: *mut u32,
+) -> i32 {
+    if !lplp_buffer.is_null() {
+        unsafe { *lplp_buffer = std::ptr::null_mut() };
+    }
+    if !pui_len.is_null() {
+        unsafe { *pui_len = 0 };
+    }
+    0 // FALSE
+}
+
+/// VerQueryValueA — ANSI variant of VerQueryValueW.
+///
+/// # Safety
+/// Same as VerQueryValueW.
+pub unsafe extern "win64" fn ver_query_value_a(
+    _p_block: *const u8,
+    _lp_sub_block: *const u8,
+    lplp_buffer: *mut *mut u8,
+    pui_len: *mut u32,
+) -> i32 {
+    if !lplp_buffer.is_null() {
+        unsafe { *lplp_buffer = std::ptr::null_mut() };
+    }
+    if !pui_len.is_null() {
+        unsafe { *pui_len = 0 };
+    }
+    0 // FALSE
+}
+
+/// Resolve a version.dll import.
+///
+/// Some apps import version.dll directly; others route through kernel32
+/// apisets. We handle both paths.
+pub fn resolve_version(dll: &str, func: &str) -> Option<usize> {
+    let is_version = dll.eq_ignore_ascii_case("version.dll");
+    // api-ms-win-core-version-* apisets forward to version.dll.
+    let is_version_apiset = dll
+        .to_ascii_lowercase()
+        .starts_with("api-ms-win-core-version");
+    if !is_version && !is_version_apiset {
+        return None;
+    }
+    Some(match func {
+        "GetFileVersionInfoSizeW" => get_file_version_info_size_w as *const () as usize,
+        "GetFileVersionInfoSizeA" => get_file_version_info_size_a as *const () as usize,
+        "GetFileVersionInfoW" => get_file_version_info_w as *const () as usize,
+        "GetFileVersionInfoA" => get_file_version_info_a as *const () as usize,
+        "VerQueryValueW" => ver_query_value_w as *const () as usize,
+        "VerQueryValueA" => ver_query_value_a as *const () as usize,
+        _ => return None,
+    })
 }
 
 // ── PuTTY gap-fill: missing kernel32 stubs ────────────────────────────────────

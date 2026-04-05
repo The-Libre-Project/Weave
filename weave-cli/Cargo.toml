@@ -30,6 +30,7 @@ weave-comctl32 = { path = "../weave-comctl32" }
 weave-oleaut32 = { path = "../weave-oleaut32" }
 weave-imm32 = { path = "../weave-imm32" }
 weave-shlwapi = { path = "../weave-shlwapi" }
+weave-gdiplus = { path = "../weave-gdiplus" }
 weave-sandbox = { path = "../weave-sandbox" }
 clap = { version = "4", features = ["derive"] }
 libc = "0.2"

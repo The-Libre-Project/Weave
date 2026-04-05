@@ -1259,6 +1259,7 @@ dependencies = [
  "weave-comctl32",
  "weave-core",
  "weave-gdi32",
+ "weave-gdiplus",
  "weave-imm32",
  "weave-kernel32",
  "weave-mmdevapi",
@@ -1323,6 +1324,13 @@ version = "0.0.1"
 dependencies = [
  "weave-common",
  "weave-user32",
+]
+
+[[package]]
+name = "weave-gdiplus"
+version = "0.0.1"
+dependencies = [
+ "weave-core",
 ]
 
 [[package]]

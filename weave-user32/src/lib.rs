@@ -22,8 +22,351 @@ pub mod menu;
 pub mod queue;
 pub mod window;
 
+// ── uxtheme.dll stubs ─────────────────────────────────────────────────────────
+//
+// UxTheme provides visual style (themed) drawing. In headless Docker there is
+// no theme engine, so all functions return "no theme" or success-no-op.
+// IrfanView calls IsThemeActive, OpenThemeData, DrawThemeBackground, and a
+// handful of others to decide whether to use themed controls.
+//
+// Wine ref: dlls/uxtheme/uxtheme.c — IsThemeActive checks a global flag;
+// OpenThemeData returns NULL when themes are inactive.
+
+/// IsThemeActive — returns TRUE if visual styles are active system-wide.
+///
+/// Headless: always FALSE — no display, no theme engine.
+pub extern "win64" fn is_theme_active() -> i32 {
+    0 // FALSE
+}
+
+/// IsAppThemed — returns TRUE if the calling process has themes enabled.
+///
+/// Headless: always FALSE.
+pub extern "win64" fn is_app_themed() -> i32 {
+    0 // FALSE
+}
+
+/// OpenThemeData — open a theme handle for a window and class list.
+///
+/// Returns NULL — no theme available.
+///
+/// # Safety
+/// `hwnd` and `psz_class_list` are ignored.
+pub unsafe extern "win64" fn open_theme_data(_hwnd: usize, _psz_class_list: *const u16) -> usize {
+    0 // NULL
+}
+
+/// OpenThemeDataEx — extended OpenThemeData with flags.
+///
+/// # Safety
+/// Arguments are ignored; returns NULL.
+pub unsafe extern "win64" fn open_theme_data_ex(
+    _hwnd: usize,
+    _psz_class_list: *const u16,
+    _dw_flags: u32,
+) -> usize {
+    0 // NULL
+}
+
+/// CloseThemeData — release a theme handle.
+///
+/// Wine ref: dlls/uxtheme/uxtheme.c — frees the theme object. No-op here.
+pub extern "win64" fn close_theme_data(_h_theme: usize) -> i32 {
+    0 // S_OK
+}
+
+/// DrawThemeBackground — render a themed part/state background.
+///
+/// No-op stub; returns S_OK so apps do not abort the paint cycle.
+///
+/// # Safety
+/// `hdc`, `p_rect`, and `p_clip_rect` are ignored.
+pub unsafe extern "win64" fn draw_theme_background(
+    _h_theme: usize,
+    _hdc: usize,
+    _i_part_id: i32,
+    _i_state_id: i32,
+    _p_rect: *const i32,
+    _p_clip_rect: *const i32,
+) -> i32 {
+    0 // S_OK
+}
+
+/// DrawThemeBackgroundEx — extended DrawThemeBackground with options.
+///
+/// # Safety
+/// Arguments are ignored; returns S_OK.
+pub unsafe extern "win64" fn draw_theme_background_ex(
+    _h_theme: usize,
+    _hdc: usize,
+    _i_part_id: i32,
+    _i_state_id: i32,
+    _p_rect: *const i32,
+    _p_options: *const u8,
+) -> i32 {
+    0 // S_OK
+}
+
+/// DrawThemeText — render themed text.
+///
+/// No-op; returns S_OK.
+///
+/// # Safety
+/// `psz_text` and `p_rect` are ignored.
+pub unsafe extern "win64" fn draw_theme_text(
+    _h_theme: usize,
+    _hdc: usize,
+    _i_part_id: i32,
+    _i_state_id: i32,
+    _psz_text: *const u16,
+    _i_char_count: i32,
+    _dw_text_flags: u32,
+    _dw_text_flags2: u32,
+    _p_rect: *const i32,
+) -> i32 {
+    0 // S_OK
+}
+
+/// DrawThemeEdge — render a themed edge.
+///
+/// # Safety
+/// `p_dest_rect` and `p_content_rect` are optional rect pointers.
+pub unsafe extern "win64" fn draw_theme_edge(
+    _h_theme: usize,
+    _hdc: usize,
+    _i_part_id: i32,
+    _i_state_id: i32,
+    _p_dest_rect: *const i32,
+    _u_edge: u32,
+    _grf_flags: u32,
+    _p_content_rect: *mut i32,
+) -> i32 {
+    0 // S_OK
+}
+
+/// DrawThemeIcon — render an icon via the theme engine.
+///
+/// # Safety
+/// Arguments are ignored; returns S_OK.
+pub unsafe extern "win64" fn draw_theme_icon(
+    _h_theme: usize,
+    _hdc: usize,
+    _i_part_id: i32,
+    _i_state_id: i32,
+    _p_rect: *const i32,
+    _himl: usize,
+    _i_image_index: i32,
+) -> i32 {
+    0 // S_OK
+}
+
+/// GetThemePartSize — query the size of a themed part.
+///
+/// Returns E_NOTIMPL so the caller uses its own sizing logic.
+///
+/// # Safety
+/// `p_sz` is written only on success; we don't write it.
+pub unsafe extern "win64" fn get_theme_part_size(
+    _h_theme: usize,
+    _hdc: usize,
+    _i_part_id: i32,
+    _i_state_id: i32,
+    _p_rect: *const i32,
+    _e_size: i32,
+    _p_sz: *mut i32,
+) -> i32 {
+    0x80004001u32 as i32 // E_NOTIMPL
+}
+
+/// GetThemeMetric — query a themed integer metric (e.g. border width).
+///
+/// Returns E_NOTIMPL.
+///
+/// # Safety
+/// `pi_val` is not written.
+pub unsafe extern "win64" fn get_theme_metric(
+    _h_theme: usize,
+    _hdc: usize,
+    _i_part_id: i32,
+    _i_state_id: i32,
+    _i_prop_id: i32,
+    _pi_val: *mut i32,
+) -> i32 {
+    0x80004001u32 as i32 // E_NOTIMPL
+}
+
+/// GetThemeColor — query a themed colour value.
+///
+/// Returns E_NOTIMPL.
+///
+/// # Safety
+/// `p_color` is not written.
+pub unsafe extern "win64" fn get_theme_color(
+    _h_theme: usize,
+    _i_part_id: i32,
+    _i_state_id: i32,
+    _i_prop_id: i32,
+    _p_color: *mut u32,
+) -> i32 {
+    0x80004001u32 as i32 // E_NOTIMPL
+}
+
+/// GetThemeFont — query a themed LOGFONTW.
+///
+/// Returns E_NOTIMPL.
+///
+/// # Safety
+/// `p_font` is not written.
+pub unsafe extern "win64" fn get_theme_font(
+    _h_theme: usize,
+    _hdc: usize,
+    _i_part_id: i32,
+    _i_state_id: i32,
+    _i_prop_id: i32,
+    _p_font: *mut u8,
+) -> i32 {
+    0x80004001u32 as i32 // E_NOTIMPL
+}
+
+/// GetThemeSysColor — query a system colour via the theme engine.
+///
+/// Falls back to 0 (black) since no theme is active.
+pub extern "win64" fn get_theme_sys_color(_h_theme: usize, _i_color_id: i32) -> u32 {
+    0
+}
+
+/// GetThemeSysColorBrush — get a system-colour brush via the theme engine.
+///
+/// Returns NULL — caller must fall back to GetSysColorBrush.
+pub extern "win64" fn get_theme_sys_color_brush(_h_theme: usize, _i_color_id: i32) -> usize {
+    0 // NULL
+}
+
+/// GetThemeSysFont — query a system font via the theme engine.
+///
+/// Returns E_NOTIMPL.
+///
+/// # Safety
+/// `p_lf` is not written.
+pub unsafe extern "win64" fn get_theme_sys_font(
+    _h_theme: usize,
+    _i_font_id: i32,
+    _p_lf: *mut u8,
+) -> i32 {
+    0x80004001u32 as i32 // E_NOTIMPL
+}
+
+/// IsThemePartDefined — check whether a part/state is defined in the theme.
+///
+/// Returns FALSE — no theme, no parts.
+pub extern "win64" fn is_theme_part_defined(
+    _h_theme: usize,
+    _i_part_id: i32,
+    _i_state_id: i32,
+) -> i32 {
+    0 // FALSE
+}
+
+/// IsThemeBackgroundPartiallyTransparent — check if a part uses alpha.
+///
+/// Returns FALSE — safe default that avoids transparency compositing.
+pub extern "win64" fn is_theme_background_partially_transparent(
+    _h_theme: usize,
+    _i_part_id: i32,
+    _i_state_id: i32,
+) -> i32 {
+    0 // FALSE
+}
+
+/// SetWindowTheme — override the visual style class for a window.
+///
+/// No-op stub; returns S_OK.
+///
+/// # Safety
+/// `h_wnd`, `psz_sub_app_name`, `psz_sub_id_list` are ignored.
+pub unsafe extern "win64" fn set_window_theme(
+    _h_wnd: usize,
+    _psz_sub_app_name: *const u16,
+    _psz_sub_id_list: *const u16,
+) -> i32 {
+    0 // S_OK
+}
+
+/// EnableThemeDialogTexture — enable/disable themed dialog texture.
+///
+/// No-op; returns S_OK.
+pub extern "win64" fn enable_theme_dialog_texture(_h_wnd: usize, _dw_flags: u32) -> i32 {
+    0 // S_OK
+}
+
+/// GetThemeAppProperties — query global theme property flags.
+///
+/// Returns 0 — no theme flags.
+pub extern "win64" fn get_theme_app_properties() -> u32 {
+    0
+}
+
+/// SetThemeAppProperties — set global theme property flags.
+pub extern "win64" fn set_theme_app_properties(_dw_flags: u32) {}
+
+/// BufferedPaintInit — initialise the buffered-paint API.
+pub extern "win64" fn buffered_paint_init() -> i32 {
+    0 // S_OK
+}
+
+/// BufferedPaintUnInit — shut down the buffered-paint API.
+pub extern "win64" fn buffered_paint_un_init() -> i32 {
+    0 // S_OK
+}
+
+/// Resolve a uxtheme.dll import to a stub address.
+///
+/// Called by weave-cli's resolve chain.
+pub fn resolve_uxtheme(dll: &str, func: &str) -> Option<usize> {
+    if !dll.eq_ignore_ascii_case("uxtheme.dll") {
+        return None;
+    }
+    Some(match func {
+        "IsThemeActive" => is_theme_active as *const () as usize,
+        "IsAppThemed" => is_app_themed as *const () as usize,
+        "OpenThemeData" => open_theme_data as *const () as usize,
+        "OpenThemeDataEx" => open_theme_data_ex as *const () as usize,
+        "CloseThemeData" => close_theme_data as *const () as usize,
+        "DrawThemeBackground" => draw_theme_background as *const () as usize,
+        "DrawThemeBackgroundEx" => draw_theme_background_ex as *const () as usize,
+        "DrawThemeText" => draw_theme_text as *const () as usize,
+        "DrawThemeEdge" => draw_theme_edge as *const () as usize,
+        "DrawThemeIcon" => draw_theme_icon as *const () as usize,
+        "GetThemePartSize" => get_theme_part_size as *const () as usize,
+        "GetThemeMetric" => get_theme_metric as *const () as usize,
+        "GetThemeColor" => get_theme_color as *const () as usize,
+        "GetThemeFont" => get_theme_font as *const () as usize,
+        "GetThemeSysColor" => get_theme_sys_color as *const () as usize,
+        "GetThemeSysColorBrush" => get_theme_sys_color_brush as *const () as usize,
+        "GetThemeSysFont" => get_theme_sys_font as *const () as usize,
+        "IsThemePartDefined" => is_theme_part_defined as *const () as usize,
+        "IsThemeBackgroundPartiallyTransparent" => {
+            is_theme_background_partially_transparent as *const () as usize
+        }
+        "SetWindowTheme" => set_window_theme as *const () as usize,
+        "EnableThemeDialogTexture" => enable_theme_dialog_texture as *const () as usize,
+        "GetThemeAppProperties" => get_theme_app_properties as *const () as usize,
+        "SetThemeAppProperties" => set_theme_app_properties as *const () as usize,
+        "BufferedPaintInit" => buffered_paint_init as *const () as usize,
+        "BufferedPaintUnInit" => buffered_paint_un_init as *const () as usize,
+        _ => return None,
+    })
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 /// Resolve a user32.dll import to a stub address.
 pub fn resolve(dll: &str, func: &str) -> Option<usize> {
+    // Also handle uxtheme.dll — UI theming, closely related to user32.
+    if let Some(addr) = resolve_uxtheme(dll, func) {
+        return Some(addr);
+    }
+
     if !dll.eq_ignore_ascii_case("user32.dll") {
         return None;
     }
