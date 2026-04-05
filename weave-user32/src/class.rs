@@ -5,6 +5,11 @@
 
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
+use crate::defs::{
+    decode_wide, WM_NCCREATE, WM_SETTEXT, WM_GETTEXT, WM_GETTEXTLENGTH,
+    EM_GETSEL, EM_SETSEL, EM_REPLACESEL, EM_SETLIMITTEXT, EM_GETLIMITTEXT,
+};
+use crate::window;
 
 /// Data stored for each registered window class.
 #[derive(Clone)]
@@ -36,6 +41,203 @@ pub fn register(name: &str, entry: ClassEntry) -> bool {
     let replaced = guard.contains_key(&key);
     guard.insert(key, entry);
     !replaced
+}
+
+// ── Edit control state ────────────────────────────────────────────────────────
+
+/// Per-window selection state for built-in EDIT controls.
+struct EditState {
+    sel_start: u32,
+    sel_end: u32,
+    limit: u32,
+}
+
+static EDIT_STATE: OnceLock<Mutex<HashMap<usize, EditState>>> = OnceLock::new();
+
+fn edit_state() -> &'static Mutex<HashMap<usize, EditState>> {
+    EDIT_STATE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Window procedure for the built-in EDIT window class.
+///
+/// Wine ref: dlls/user32/edit.c —
+///   WM_SETTEXT: selects all (EM_SetSel 0..-1), replaces with new text via EM_ReplaceSel,
+///     resets EF_MODIFIED flag, resets x_offset to 0, sends EN_UPDATE/EN_CHANGE for SL.
+///     Weave: store text in window title field; reset selection to 0.
+///   WM_GETTEXT: EDIT_WM_GetText — if count==0 returns 0; lstrcpynW(dst, es->text, count);
+///     returns lstrlenW(dst). Weave: copies from title, returns UTF-16 code unit count.
+///   WM_GETTEXTLENGTH: returns lstrlenW(es->text). Weave: encode_utf16().count().
+///   EM_SETSEL: EDIT_EM_SetSel — preserves order (start can be > end). If start==-1,
+///     both go to current sel_end (collapse). Values clamped to text length.
+///   EM_GETSEL: EDIT_EM_GetSel — stores start/end into out-pointers if non-null;
+///     returns MAKELONG(start, end).
+///   EM_REPLACESEL: EDIT_EM_ReplaceSel — ORDER_UINT(s,e); replaces [s,e) with new text;
+///     cursor placed after inserted text; sends EN_CHANGE if send_update set.
+///   EM_SETLIMITTEXT: EDIT_EM_SetLimitText — if limit==0 use 0x7FFF (SL default).
+///   EM_GETLIMITTEXT: returns es->buffer_limit.
+///
+/// # Safety
+/// Called from guest code with win64 ABI. lParam pointer arguments must be valid.
+unsafe extern "win64" fn edit_wnd_proc(
+    hwnd: usize,
+    msg: u32,
+    w_param: usize,
+    l_param: isize,
+) -> isize {
+    match msg {
+        WM_NCCREATE => {
+            // Initialise per-window edit state on creation.
+            edit_state().lock().unwrap().insert(
+                hwnd,
+                EditState { sel_start: 0, sel_end: 0, limit: 0x7FFF_FFFF },
+            );
+            1 // TRUE — allow creation
+        }
+
+        WM_SETTEXT => {
+            // lParam: LPCWSTR (may be null → clear text).
+            // Wine ref: dlls/user32/edit.c::EDIT_WM_SetText — EM_SetSel(0,-1) then
+            // EM_ReplaceSel, resets x_offset and EF_MODIFIED, EN_UPDATE/EN_CHANGE for SL.
+            let text = unsafe { decode_wide(l_param as *const u16) };
+            window::with_mut(hwnd, |e| e.title = text);
+            if let Some(s) = edit_state().lock().unwrap().get_mut(&hwnd) {
+                s.sel_start = 0;
+                s.sel_end = 0;
+            }
+            1 // TRUE
+        }
+
+        WM_GETTEXT => {
+            // wParam: max char count (including null); lParam: LPWSTR buffer.
+            // Wine ref: dlls/user32/edit.c::EDIT_WM_GetText — returns 0 if count==0;
+            // lstrcpynW(dst, es->text, count); returns lstrlenW(dst).
+            let max_count = w_param;
+            if max_count == 0 || l_param == 0 {
+                return 0;
+            }
+            let text = window::with(hwnd, |e| e.title.clone()).unwrap_or_default();
+            let wide: Vec<u16> = text.encode_utf16().collect();
+            let dst = l_param as *mut u16;
+            let copy_len = wide.len().min(max_count.saturating_sub(1));
+            unsafe {
+                for (i, &cu) in wide[..copy_len].iter().enumerate() {
+                    *dst.add(i) = cu;
+                }
+                *dst.add(copy_len) = 0;
+            }
+            copy_len as isize
+        }
+
+        WM_GETTEXTLENGTH => {
+            // Wine ref: dlls/user32/edit.c — returns lstrlenW(es->text) (UTF-16 code units).
+            let len = window::with(hwnd, |e| e.title.encode_utf16().count()).unwrap_or(0);
+            len as isize
+        }
+
+        EM_GETSEL => {
+            // wParam: optional *u32 start; lParam: optional *u32 end.
+            // Wine ref: dlls/user32/edit.c::EDIT_EM_GetSel — writes to out-ptrs, returns
+            // MAKELONG(start, end).
+            let guard = edit_state().lock().unwrap();
+            let (start, end) = guard
+                .get(&hwnd)
+                .map(|s| (s.sel_start, s.sel_end))
+                .unwrap_or((0, 0));
+            drop(guard);
+            if w_param != 0 {
+                unsafe { *(w_param as *mut u32) = start; }
+            }
+            if l_param != 0 {
+                unsafe { *(l_param as *mut u32) = end; }
+            }
+            (((end as isize) & 0xFFFF) << 16) | ((start as isize) & 0xFFFF)
+        }
+
+        EM_SETSEL => {
+            // wParam: start (i32); lParam: end (i32). -1 for start collapses to sel_end;
+            // -1 for end means "end of text".
+            // Wine ref: dlls/user32/edit.c::EDIT_EM_SetSel — start==-1 means move both to
+            // selection_end; values clamped to text length; order preserved as-is.
+            let text_len = window::with(hwnd, |e| e.title.encode_utf16().count())
+                .unwrap_or(0) as u32;
+            let raw_start = w_param as i32;
+            let raw_end = l_param as i32;
+            let (sel_start, sel_end) = if raw_start == -1 {
+                let old_end = edit_state().lock().unwrap()
+                    .get(&hwnd).map(|s| s.sel_end).unwrap_or(0);
+                (old_end, old_end)
+            } else {
+                let s = (raw_start as u32).min(text_len);
+                let e = if raw_end == -1 { text_len } else { (raw_end as u32).min(text_len) };
+                (s, e)
+            };
+            if let Some(state) = edit_state().lock().unwrap().get_mut(&hwnd) {
+                state.sel_start = sel_start;
+                state.sel_end = sel_end;
+            }
+            0
+        }
+
+        EM_REPLACESEL => {
+            // wParam: can_undo BOOL; lParam: LPCWSTR replacement (null → empty).
+            // Wine ref: dlls/user32/edit.c::EDIT_EM_ReplaceSel — ORDER_UINT(s,e); replaces
+            // [s,e) with new text; cursor placed after inserted text (s+strl); sets
+            // EF_MODIFIED; sends EN_CHANGE if send_update.
+            let replacement = unsafe { decode_wide(l_param as *const u16) };
+            let repl_chars: Vec<char> = replacement.chars().collect();
+
+            // Read text and selection separately to avoid nested mutex locks.
+            let current_text = window::with(hwnd, |e| e.title.clone()).unwrap_or_default();
+            let (raw_start, raw_end) = {
+                let guard = edit_state().lock().unwrap();
+                guard.get(&hwnd).map(|s| (s.sel_start, s.sel_end)).unwrap_or((0, 0))
+            };
+
+            // ORDER_UINT: ensure start <= end.
+            let (sel_start, sel_end) = if raw_start <= raw_end {
+                (raw_start as usize, raw_end as usize)
+            } else {
+                (raw_end as usize, raw_start as usize)
+            };
+
+            // Work on char (Unicode scalar) level — close enough for ASCII/Latin text.
+            let chars: Vec<char> = current_text.chars().collect();
+            let s = sel_start.min(chars.len());
+            let e = sel_end.min(chars.len());
+            let mut new_chars: Vec<char> = Vec::with_capacity(chars.len() - (e - s) + repl_chars.len());
+            new_chars.extend_from_slice(&chars[..s]);
+            new_chars.extend_from_slice(&repl_chars);
+            new_chars.extend_from_slice(&chars[e..]);
+            let new_text: String = new_chars.iter().collect();
+            let new_cursor = (s + repl_chars.len()) as u32;
+
+            window::with_mut(hwnd, |e| e.title = new_text);
+            if let Some(state) = edit_state().lock().unwrap().get_mut(&hwnd) {
+                state.sel_start = new_cursor;
+                state.sel_end = new_cursor;
+            }
+            0
+        }
+
+        EM_SETLIMITTEXT => {
+            // wParam: new limit; 0 means use default (0x7FFF for single-line).
+            // Wine ref: dlls/user32/edit.c::EDIT_EM_SetLimitText — if limit==0, use 0x7FFFFFFE
+            // for multi-line or MAXSHORT for single-line. Weave uses 0x7FFF as the simple default.
+            let limit = if w_param == 0 { 0x7FFF } else { w_param.min(0x7FFF_FFFF) as u32 };
+            if let Some(state) = edit_state().lock().unwrap().get_mut(&hwnd) {
+                state.limit = limit;
+            }
+            0
+        }
+
+        EM_GETLIMITTEXT => {
+            // Wine ref: dlls/user32/edit.c — returns es->buffer_limit.
+            edit_state().lock().unwrap()
+                .get(&hwnd).map(|s| s.limit as isize).unwrap_or(0x7FFF)
+        }
+
+        _ => builtin_control_wnd_proc(hwnd, msg, w_param, l_param as usize) as isize,
+    }
 }
 
 /// Stub window proc for built-in and common-control classes.
@@ -105,8 +307,14 @@ pub fn find(name: &str) -> Option<ClassEntry> {
         return Some(e);
     }
     if is_builtin_class(&key) {
+        // EDIT controls get a real window proc that stores text and selection.
+        let wnd_proc = if key == "edit" {
+            edit_wnd_proc as *const () as usize
+        } else {
+            builtin_control_wnd_proc as *const () as usize
+        };
         return Some(ClassEntry {
-            wnd_proc: builtin_control_wnd_proc as *const () as usize,
+            wnd_proc,
             style: 0,
             h_cursor: 0,
             hbr_background: 0,

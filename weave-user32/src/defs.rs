@@ -40,6 +40,13 @@ pub const WM_ERASEBKGND: u32 = 0x0014;
 pub const WM_SHOWWINDOW: u32 = 0x0018;
 pub const WM_SETTEXT: u32 = 0x000C;
 pub const WM_GETTEXT: u32 = 0x000D;
+pub const WM_GETTEXTLENGTH: u32 = 0x000E;
+// Edit control messages
+pub const EM_GETSEL: u32 = 0x00B0;
+pub const EM_SETSEL: u32 = 0x00B1;
+pub const EM_REPLACESEL: u32 = 0x00C2;
+pub const EM_SETLIMITTEXT: u32 = 0x00C5; // also EM_LIMITTEXT
+pub const EM_GETLIMITTEXT: u32 = 0x00D5;
 pub const WM_NCCREATE: u32 = 0x0081;
 pub const WM_NCDESTROY: u32 = 0x0082;
 pub const WM_NCCALCSIZE: u32 = 0x0083;

@@ -566,13 +566,11 @@ pub extern "win64" fn send_message_w(
 /// post WM_QUIT unless this is the last top-level window (Weave simplifies: always posts quit).
 /// WM_NCCREATE returns TRUE to allow window creation to proceed. WM_NCHITTEST returns HTCLIENT.
 /// WM_PAINT: calls BeginPaint/EndPaint to validate the update region.
+/// WM_SETTEXT: stores text as window title (Wine: defwnd.c::DefWndSetText — calls
+///   NtUserDefSetText which updates the window text in the window object).
+/// WM_GETTEXT: copies window title into buffer (Wine: defwnd.c — NtUserInternalGetWindowText).
+/// WM_GETTEXTLENGTH: returns title length in UTF-16 code units.
 /// TODO Wine ref gap: WM_DESTROY should only PostQuitMessage for last top-level window.
-///
-/// Key behaviours:
-///   WM_CLOSE   → calls DestroyWindow
-///   WM_DESTROY → calls PostQuitMessage(0)
-///   WM_PAINT   → validates the window (returns 0 without drawing)
-///   All others → return 0
 pub extern "win64" fn def_window_proc_w(
     hwnd: usize,
     msg: u32,
@@ -590,11 +588,42 @@ pub extern "win64" fn def_window_proc_w(
         }
         WM_PAINT => {
             // Validate the update region without drawing.
-            // In Phase 2, no GDI; apps that handle WM_PAINT call BeginPaint/EndPaint.
             0
         }
         WM_NCCREATE => 1,  // non-zero = proceed with window creation
         WM_NCHITTEST => 1, // HTCLIENT (1) — all hits are in client area
+        WM_SETTEXT => {
+            // Wine ref: dlls/win32u/defwnd.c — DefWndSetText stores text in window object
+            // title field; SetWindowTextW internally sends this message.
+            let text = unsafe { decode_wide(l_param as *const u16) };
+            let xcb = window::xcb_id(hwnd);
+            window::with_mut(hwnd, |e| e.title = text.clone());
+            backend::set_title(xcb, &text);
+            1 // TRUE
+        }
+        WM_GETTEXT => {
+            // Wine ref: dlls/win32u/defwnd.c — NtUserInternalGetWindowText; wParam=max count,
+            // lParam=LPWSTR buffer. Returns number of chars copied (excl. null terminator).
+            let max_count = w_param;
+            if max_count == 0 || l_param == 0 {
+                return 0;
+            }
+            let title = window::with(hwnd, |e| e.title.clone()).unwrap_or_default();
+            let wide: Vec<u16> = title.encode_utf16().collect();
+            let dst = l_param as *mut u16;
+            let copy_len = wide.len().min(max_count.saturating_sub(1));
+            unsafe {
+                for (i, &cu) in wide[..copy_len].iter().enumerate() {
+                    *dst.add(i) = cu;
+                }
+                *dst.add(copy_len) = 0;
+            }
+            copy_len as isize
+        }
+        WM_GETTEXTLENGTH => {
+            // Wine ref: dlls/win32u/defwnd.c — returns lstrlenW of window title.
+            window::with(hwnd, |e| e.title.encode_utf16().count()).unwrap_or(0) as isize
+        }
         _ => {
             let _ = (hwnd, w_param, l_param); // suppress unused warnings
             0
