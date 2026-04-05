@@ -4329,7 +4329,7 @@ pub unsafe extern "win64" fn get_system_info(lp_system_info: *mut SystemInfo) {
             return;
         }
         let nprocs = libc::sysconf(libc::_SC_NPROCESSORS_ONLN) as u32;
-        let nprocs = nprocs.max(1).min(64); // clamp: mask is 64-bit
+        let nprocs = nprocs.clamp(1, 64); // clamp: mask is 64-bit
         let page_size = libc::sysconf(libc::_SC_PAGESIZE) as u32;
         let active_mask: usize = if nprocs >= 64 {
             usize::MAX

@@ -750,21 +750,39 @@ mod inner {
             Event::ButtonPress(ev) => {
                 let hwnd = window::hwnd_for_xcb(ev.event);
                 if hwnd != 0 {
-                    let message = match ev.detail {
-                        1 => WM_LBUTTONDOWN,
-                        3 => WM_RBUTTONDOWN,
-                        _ => return,
-                    };
                     let l_param = (ev.event_x as isize) | ((ev.event_y as isize) << 16);
-                    queue::post(MsgEntry {
-                        hwnd,
-                        message,
-                        w_param: 0,
-                        l_param,
-                        time: ev.time,
-                        pt_x: ev.event_x as i32,
-                        pt_y: ev.event_y as i32,
-                    });
+                    match ev.detail {
+                        1 | 3 => {
+                            let message = if ev.detail == 1 { WM_LBUTTONDOWN } else { WM_RBUTTONDOWN };
+                            queue::post(MsgEntry {
+                                hwnd,
+                                message,
+                                w_param: 0,
+                                l_param,
+                                time: ev.time,
+                                pt_x: ev.event_x as i32,
+                                pt_y: ev.event_y as i32,
+                            });
+                        }
+                        // X11 button 4 = scroll up, button 5 = scroll down.
+                        // Wine ref: dlls/winex11.drv/mouse.c — button_down_data[3]=WHEEL_DELTA(120),
+                        //   button_down_data[4]=-WHEEL_DELTA(-120). WM_MOUSEWHEEL wParam HIWORD =
+                        //   signed delta: +120 forward/up, -120 backward/down. LOWORD = modifier keys.
+                        4 | 5 => {
+                            let delta: i16 = if ev.detail == 4 { 120 } else { -120 };
+                            let w_param = (delta as u16 as usize) << 16;
+                            queue::post(MsgEntry {
+                                hwnd,
+                                message: WM_MOUSEWHEEL,
+                                w_param,
+                                l_param,
+                                time: ev.time,
+                                pt_x: ev.event_x as i32,
+                                pt_y: ev.event_y as i32,
+                            });
+                        }
+                        _ => {}
+                    }
                 }
             }
 

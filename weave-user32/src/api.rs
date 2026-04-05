@@ -566,6 +566,8 @@ pub extern "win64" fn send_message_w(
 /// post WM_QUIT unless this is the last top-level window (Weave simplifies: always posts quit).
 /// WM_NCCREATE returns TRUE to allow window creation to proceed. WM_NCHITTEST returns HTCLIENT.
 /// WM_PAINT: calls BeginPaint/EndPaint to validate the update region.
+/// WM_SIZE: Wine ref: dlls/win32u/defwnd.c — DefWindowProc does not handle WM_SIZE; it is sent
+///   by the window manager to the app WNDPROC after a resize. We return 0 (no-op).
 /// WM_SETTEXT: stores text as window title (Wine: defwnd.c::DefWndSetText — calls
 ///   NtUserDefSetText which updates the window text in the window object).
 /// WM_GETTEXT: copies window title into buffer (Wine: defwnd.c — NtUserInternalGetWindowText).
@@ -590,6 +592,9 @@ pub extern "win64" fn def_window_proc_w(
             // Validate the update region without drawing.
             0
         }
+        // Wine ref: dlls/win32u/defwnd.c — WM_SIZE is dispatched by the window manager to the
+        // app WNDPROC; DefWindowProc itself takes no action and returns 0.
+        WM_SIZE => 0,
         WM_NCCREATE => 1,  // non-zero = proceed with window creation
         WM_NCHITTEST => 1, // HTCLIENT (1) — all hits are in client area
         WM_SETTEXT => {
