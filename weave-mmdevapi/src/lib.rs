@@ -1136,6 +1136,7 @@ mod tests {
         assert!(resolve("mmdevapi.dll", "__weave_nonexistent__").is_none());
     }
 
+    #[cfg(feature = "pipewire-audio")]
     #[test]
     fn ring_buf_write_read_roundtrip() {
         let mut rb = RingBuf::new(4096, 4);
