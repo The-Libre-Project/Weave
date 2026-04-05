@@ -173,6 +173,11 @@ fn seven_zip_fm_crt_init_completes() {
         env!("CARGO_MANIFEST_DIR")
     );
 
+    if !std::path::Path::new(&fixture).exists() {
+        eprintln!("skipping: 7zFM.exe not present in fixtures (add from portable 7-Zip 26.x)");
+        return;
+    }
+
     // The GUI app exits on its own in headless Docker; cap at 10 s anyway.
     let mut child = std::process::Command::new(weave_bin)
         .arg(&fixture)
