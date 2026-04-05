@@ -5176,12 +5176,27 @@ pub unsafe extern "win64" fn get_full_path_name_w(
     let slice = unsafe { std::slice::from_raw_parts(lp_file_name, len) };
     let win_path = String::from_utf16_lossy(slice);
 
-    // Check if path already starts with drive letter (X: where X is ASCII alpha)
+    // Resolve relative paths against the real CWD (returned as Z:\... by
+    // GetCurrentDirectoryW).  Previously this hardcoded "C:\" which caused
+    // CreateFileW to look in the wrong drive for any relative-path argument.
     let resolved_path =
         if len >= 2 && (slice[0] as u8).is_ascii_alphabetic() && slice[1] == b':' as u16 {
+            // Already absolute with drive letter — use as-is.
             win_path
+        } else if win_path.starts_with('\\') {
+            // Root-relative (no drive): prepend drive letter from CWD.
+            let cwd = std::env::current_dir()
+                .map(|p| format!("Z:{}", p.to_string_lossy().replace('/', "\\")))
+                .unwrap_or_else(|_| "Z:\\".to_string());
+            let drive = cwd.split(':').next().unwrap_or("Z");
+            format!("{}:{}", drive, win_path)
         } else {
-            format!("C:\\{}", win_path)
+            // Relative path: prepend full CWD.
+            let cwd = std::env::current_dir()
+                .map(|p| format!("Z:{}", p.to_string_lossy().replace('/', "\\")))
+                .unwrap_or_else(|_| "Z:\\".to_string());
+            let cwd_trimmed = cwd.trim_end_matches('\\');
+            format!("{}\\{}", cwd_trimmed, win_path)
         };
 
     // Convert back to UTF-16 with null terminator
@@ -5252,14 +5267,29 @@ pub unsafe extern "win64" fn get_full_path_name_a(
         String::from_utf8_lossy(slice).into_owned()
     };
 
-    // Check if path already starts with drive letter (X: where X is ASCII alpha)
+    // Resolve relative paths against the real CWD (returned as Z:\... by
+    // GetCurrentDirectoryW).  Previously this hardcoded "C:\" which caused
+    // CreateFileW to look in the wrong drive for any relative-path argument.
     let resolved_path = if win_path.len() >= 2
         && win_path.as_bytes()[0].is_ascii_alphabetic()
         && win_path.as_bytes()[1] == b':'
     {
+        // Already absolute with drive letter — use as-is.
         win_path
+    } else if win_path.starts_with('\\') {
+        // Root-relative (no drive): prepend drive letter from CWD.
+        let cwd = std::env::current_dir()
+            .map(|p| format!("Z:{}", p.to_string_lossy().replace('/', "\\")))
+            .unwrap_or_else(|_| "Z:\\".to_string());
+        let drive = cwd.split(':').next().unwrap_or("Z");
+        format!("{}:{}", drive, win_path)
     } else {
-        format!("C:\\{}", win_path)
+        // Relative path: prepend full CWD.
+        let cwd = std::env::current_dir()
+            .map(|p| format!("Z:{}", p.to_string_lossy().replace('/', "\\")))
+            .unwrap_or_else(|_| "Z:\\".to_string());
+        let cwd_trimmed = cwd.trim_end_matches('\\');
+        format!("{}\\{}", cwd_trimmed, win_path)
     };
 
     // Convert to bytes with null terminator
