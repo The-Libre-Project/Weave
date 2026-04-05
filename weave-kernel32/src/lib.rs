@@ -10,8 +10,59 @@
 use std::cell::Cell;
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::sync::Mutex;
 use weave_common::{STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE};
 use weave_core::{file_io, handles};
+
+// ── File mapping table ────────────────────────────────────────────────────────
+//
+// Maps a "mapping handle" → (mmap base address, mmap size) for file-backed
+// CreateFileMappingW.  The view address returned by MapViewOfFile equals the
+// base address, so UnmapViewOfFile can look it up by value.
+//
+// Mapping handles start at FILE_MAPPING_OFFSET to be visually distinct from
+// file handles (4–N) and HWND values (0x10000+).
+const FILE_MAPPING_OFFSET: usize = 0x0005_0000;
+static FILE_MAPPINGS: std::sync::OnceLock<Mutex<Vec<Option<(usize, usize)>>>> =
+    std::sync::OnceLock::new();
+
+fn file_mappings() -> &'static Mutex<Vec<Option<(usize, usize)>>> {
+    FILE_MAPPINGS.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+/// Allocate a mapping slot and return its handle.
+fn alloc_mapping(addr: usize, size: usize) -> usize {
+    let mut table = file_mappings().lock().unwrap();
+    for (i, slot) in table.iter_mut().enumerate() {
+        if slot.is_none() {
+            *slot = Some((addr, size));
+            return i + FILE_MAPPING_OFFSET;
+        }
+    }
+    table.push(Some((addr, size)));
+    (table.len() - 1) + FILE_MAPPING_OFFSET
+}
+
+/// Look up and remove a mapping slot by handle; returns (addr, size).
+fn take_mapping(handle: usize) -> Option<(usize, usize)> {
+    let index = handle.checked_sub(FILE_MAPPING_OFFSET)?;
+    let mut table = file_mappings().lock().unwrap();
+    table.get_mut(index)?.take()
+}
+
+/// Look up (addr, size) by view address across all slots (for UnmapViewOfFile).
+fn find_mapping_by_addr(view_addr: usize) -> Option<(usize, usize)> {
+    let mut table = file_mappings().lock().unwrap();
+    for slot in table.iter_mut() {
+        if let Some((addr, size)) = *slot {
+            if addr == view_addr {
+                *slot = None;
+                return Some((addr, size));
+            }
+        }
+    }
+    None
+}
 
 // Windows limits null-terminated strings to 32,767 UTF-16 code units (MAX_PATH extended).
 // Scanning beyond this is almost certainly a caller bug; cap the loop to avoid runaway reads.
@@ -1363,8 +1414,6 @@ pub unsafe extern "win64" fn create_file_w(
             handle
         }
         Err(_status) => {
-            // Map NT status back to a Win32 error code. For now, return a
-            // generic error; Phase 3 can refine the mapping.
             LAST_ERROR.with(|e| e.set(file_io::ERROR_FILE_NOT_FOUND));
             usize::MAX // INVALID_HANDLE_VALUE
         }
@@ -2251,19 +2300,62 @@ pub extern "win64" fn flush_file_buffers(h_file: usize) -> i32 {
 pub unsafe extern "win64" fn create_file_mapping_w(
     h_file: usize,
     _lp_file_mapping_attributes: usize,
-    _fl_protect: u32,
+    fl_protect: u32,
     dw_maximum_size_high: u32,
     dw_maximum_size_low: u32,
     _lp_name: *const u16,
 ) -> usize {
     const INVALID_HANDLE_VALUE: usize = usize::MAX;
     if h_file != INVALID_HANDLE_VALUE {
-        // File-backed mappings not supported yet
-        return 0;
+        // File-backed mapping: mmap the underlying fd.
+        let fd = match handles::get_fd(h_file) {
+            Some(f) => f,
+            None => {
+                LAST_ERROR.with(|e| e.set(file_io::ERROR_INVALID_HANDLE));
+                return 0;
+            }
+        };
+        // Determine size: use caller-supplied size or fstat if zero.
+        let caller_size =
+            ((dw_maximum_size_high as usize) << 32) | dw_maximum_size_low as usize;
+        let map_size = if caller_size != 0 {
+            caller_size
+        } else {
+            let mut stat = unsafe { std::mem::zeroed::<libc::stat>() };
+            if unsafe { libc::fstat(fd, &mut stat) } != 0 || stat.st_size <= 0 {
+                LAST_ERROR.with(|e| e.set(file_io::ERROR_INVALID_HANDLE));
+                return 0;
+            }
+            stat.st_size as usize
+        };
+        // PAGE_READONLY (0x02) → PROT_READ; PAGE_READWRITE (0x04) → PROT_READ|WRITE.
+        let prot = if fl_protect & 0x04 != 0 {
+            libc::PROT_READ | libc::PROT_WRITE
+        } else {
+            libc::PROT_READ
+        };
+        let addr = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                map_size,
+                prot,
+                libc::MAP_PRIVATE,
+                fd,
+                0,
+            )
+        };
+        if addr == libc::MAP_FAILED {
+            LAST_ERROR.with(|e| e.set(file_io::ERROR_ACCESS_DENIED));
+            return 0;
+        }
+        let mapping_handle = alloc_mapping(addr as usize, map_size);
+        LAST_ERROR.with(|e| e.set(0));
+        return mapping_handle;
     }
-    let size = (dw_maximum_size_high as usize) << 32 | dw_maximum_size_low as usize;
+    // Anonymous mapping.
+    let size = ((dw_maximum_size_high as usize) << 32) | dw_maximum_size_low as usize;
     if size == 0 {
-        return 0; // Caller must provide a size for anonymous mappings
+        return 0;
     }
     let addr = unsafe {
         libc::mmap(
@@ -2278,17 +2370,17 @@ pub unsafe extern "win64" fn create_file_mapping_w(
     if addr == libc::MAP_FAILED {
         0
     } else {
-        addr as usize
+        alloc_mapping(addr as usize, size)
     }
 }
 
 /// MapViewOfFile: map a view of a file mapping into the address space.
 ///
-/// For our anonymous mappings, the handle IS the mapped address, so we return it directly.
-/// Offset and access parameters are ignored for the anonymous mapping case.
+/// Looks up the mapping handle in the global file-mapping table and returns
+/// the mmap base address.
 ///
 /// # Safety
-/// No pointer dereference — just returns the handle value.
+/// No pointer dereference — just returns the mapped address.
 pub extern "win64" fn map_view_of_file(
     h_file_mapping_object: usize,
     _dw_desired_access: u32,
@@ -2296,18 +2388,29 @@ pub extern "win64" fn map_view_of_file(
     _dw_file_offset_low: u32,
     _dw_number_of_bytes_to_map: usize,
 ) -> usize {
-    h_file_mapping_object // Handle IS the mapped address
+    // Peek at the mapping without consuming it (MapViewOfFile doesn't free the handle).
+    let table = file_mappings().lock().unwrap();
+    if let Some(index) = h_file_mapping_object.checked_sub(FILE_MAPPING_OFFSET) {
+        if let Some(Some((addr, _size))) = table.get(index) {
+            return *addr;
+        }
+    }
+    0
 }
 
 /// UnmapViewOfFile: unmap a mapped view of a file.
 ///
-/// We don't track mapping sizes, so this is a no-op that always succeeds.
-/// The memory will be reclaimed when the process exits.
+/// Looks up the view address in the global mapping table to recover the size,
+/// then calls munmap.
 ///
 /// # Safety
-/// `lp_base_address` is accepted but not dereferenced.
-pub unsafe extern "win64" fn unmap_view_of_file(_lp_base_address: *const u8) -> i32 {
-    1 // TRUE — no-op
+/// `lp_base_address` must be a valid mmap address previously returned by MapViewOfFile.
+pub unsafe extern "win64" fn unmap_view_of_file(lp_base_address: *const u8) -> i32 {
+    let view = lp_base_address as usize;
+    if let Some((addr, size)) = find_mapping_by_addr(view) {
+        unsafe { libc::munmap(addr as *mut libc::c_void, size) };
+    }
+    1 // TRUE
 }
 
 /// CopyFileW: copy a file (wide string version).
@@ -6589,9 +6692,24 @@ pub extern "win64" fn is_valid_code_page(code_page: u32) -> i32 {
     }
 }
 
-/// GetFileType: return FILE_TYPE_UNKNOWN.
-pub extern "win64" fn get_file_type(_h_file: usize) -> u32 {
-    FILE_TYPE_UNKNOWN
+/// GetFileType: return FILE_TYPE_CHAR for stdio, FILE_TYPE_DISK for open file
+/// handles, FILE_TYPE_UNKNOWN for unrecognised handles.
+///
+/// The UCRT's internal `_open_osfhandle` (called from `_wfopen`) rejects any
+/// handle where GetFileType returns FILE_TYPE_UNKNOWN — it sets errno=EBADF and
+/// returns -1, silently aborting the entire fopen chain.
+pub extern "win64" fn get_file_type(h_file: usize) -> u32 {
+    if h_file == handles::STDIN_HANDLE
+        || h_file == handles::STDOUT_HANDLE
+        || h_file == handles::STDERR_HANDLE
+    {
+        return 0x0002; // FILE_TYPE_CHAR
+    }
+    if handles::get_fd(h_file).is_some() {
+        0x0001 // FILE_TYPE_DISK
+    } else {
+        FILE_TYPE_UNKNOWN
+    }
 }
 
 // ── File and console functions ──────────────────────────────────────────────
@@ -8078,14 +8196,24 @@ pub unsafe extern "win64" fn rtl_pc_to_file_header(
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
 pub unsafe extern "win64" fn create_file_mapping_a(
-    _h_file: usize,
-    _lp_attributes: usize,
-    _fl_protect: u32,
-    _dw_maximum_size_high: u32,
-    _dw_maximum_size_low: u32,
+    h_file: usize,
+    lp_attributes: usize,
+    fl_protect: u32,
+    dw_maximum_size_high: u32,
+    dw_maximum_size_low: u32,
     _lp_name: *const u8,
 ) -> usize {
-    0
+    // Delegate to the W variant — file-backed path doesn't use the name.
+    unsafe {
+        create_file_mapping_w(
+            h_file,
+            lp_attributes,
+            fl_protect,
+            dw_maximum_size_high,
+            dw_maximum_size_low,
+            std::ptr::null(),
+        )
+    }
 }
 
 /// CreatePipe: create an anonymous pipe. Returns FALSE (not implemented yet).

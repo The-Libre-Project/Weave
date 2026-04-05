@@ -977,7 +977,8 @@ pub unsafe extern "win64" fn ucrt_fopen(path: *const u8, mode: *const u8) -> *mu
         Ok(s) => s,
         Err(_) => return std::ptr::null_mut(),
     };
-    unsafe { libc::fopen(path_cstr.as_ptr(), mode as *const libc::c_char) as *mut c_void }
+    let result = unsafe { libc::fopen(path_cstr.as_ptr(), mode as *const libc::c_char) };
+    result as *mut c_void
 }
 
 /// _wfopen — open a file by wide (UTF-16) path, translating the Windows path
@@ -1008,7 +1009,8 @@ pub unsafe extern "win64" fn ucrt_wfopen(path: *const u16, mode: *const u16) -> 
         Ok(s) => s,
         Err(_) => return std::ptr::null_mut(),
     };
-    unsafe { libc::fopen(path_cstr.as_ptr(), mode_cstr.as_ptr()) as *mut c_void }
+    let result = unsafe { libc::fopen(path_cstr.as_ptr(), mode_cstr.as_ptr()) };
+    result as *mut c_void
 }
 
 /// fread — read `count` items of `size` bytes from a libc-backed FILE stream.
