@@ -1260,6 +1260,56 @@ pub unsafe extern "win64" fn nt_query_virtual_memory(
     STATUS_NOT_IMPLEMENTED
 }
 
+// ── RtlRaiseException ─────────────────────────────────────────────────────────
+//
+// Wine ref: dlls/ntdll/signal_x86_64.c — RtlRaiseException calls NtRaiseException
+// after capturing the full context. The exception_address is set to the return
+// address (the throw site inside _CxxThrowException). We must capture RSP/RIP
+// before any prolog runs so virtual_unwind can correctly reconstruct the throw
+// frame.
+
+/// Naked trampoline: captures the throw site (return address = [RSP]) and throw RSP
+/// (RSP+8, i.e. RSP inside _CxxThrowException's body) before any prolog runs.
+/// Win64 ABI: RCX = EXCEPTION_RECORD*
+#[unsafe(naked)]
+pub unsafe extern "win64" fn rtl_raise_exception(
+    _p_exception_record: *mut weave_core::unwind::ExceptionRecord,
+) {
+    core::arch::naked_asm!(
+        // RCX = EXCEPTION_RECORD* (Win64 arg1)
+        // [RSP] = return address into _CxxThrowException (throw_rip)
+        // RSP+8 would be the RSP inside _CxxThrowException body after the CALL
+        "mov rsi, [rsp]",    // throw_rip → Linux arg2 (rsi)
+        "lea rdx, [rsp+8]",  // &throw_rsp → Linux arg3 (rdx); caller interprets as throw_rsp value
+        "mov rdi, rcx",      // EXCEPTION_RECORD* → Linux arg1 (rdi)
+        // rsi = throw_rip (Linux arg2)
+        // rdx = throw_rsp (Linux arg3) — points to _CxxThrowException's stack frame top
+        "jmp {impl_fn}",
+        impl_fn = sym rtl_raise_exception_impl,
+    );
+}
+
+unsafe extern "C" fn rtl_raise_exception_impl(
+    p_exc: *mut weave_core::unwind::ExceptionRecord,
+    throw_rip: u64,
+    throw_rsp: u64,
+) {
+    let exc = unsafe { &mut *p_exc };
+    exc.exception_address = throw_rip as *mut u8;
+    let args_ptr = exc.exception_information.as_ptr();
+    unsafe {
+        weave_core::unwind::raise_exception_at(
+            exc.exception_code,
+            exc.exception_flags,
+            exc.number_parameters,
+            args_ptr,
+            throw_rip,
+            throw_rsp,
+        );
+    }
+    unsafe { libc::abort() };
+}
+
 // ── Resolver ──────────────────────────────────────────────────────────────────
 
 pub fn resolve(func: &str) -> Option<usize> {
@@ -1448,6 +1498,9 @@ pub fn resolve(func: &str) -> Option<usize> {
         "RtlUnwindEx" => Some(
             weave_core::unwind::rtl_unwind_ex_export as unsafe extern "win64" fn(_, _, _, _, _, _)
                 as *const () as usize,
+        ),
+        "RtlRaiseException" => Some(
+            rtl_raise_exception as unsafe extern "win64" fn(_) as *const () as usize,
         ),
         _ => None,
     }

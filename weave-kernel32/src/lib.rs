@@ -528,23 +528,32 @@ pub unsafe extern "win64" fn virtual_free(
     const MEM_DECOMMIT: u32 = 0x4000;
 
     if lp_address.is_null() {
-        return 1; // TRUE — null address is a no-op
+        return 0; // FALSE — NULL address is invalid
     }
-    if dw_free_type == MEM_RELEASE {
-        if dw_size != 0 {
-            // Wine: MEM_RELEASE with non-zero size → ERROR_INVALID_PARAMETER
-            LAST_ERROR.with(|e| e.set(87));
-            return 0;
+    match dw_free_type {
+        MEM_RELEASE if dw_size != 0 => {
+            // Wine ref: MEM_RELEASE with non-zero dwSize → ERROR_INVALID_PARAMETER
+            set_last_error(0x57); // ERROR_INVALID_PARAMETER
+            0
         }
-        // MEM_RELEASE with size=0: release the entire allocation.
-        // We don't track allocation sizes, so we can't call munmap with the right size.
-        // This is a known Phase 4 gap; return TRUE to avoid breaking callers.
-        1
-    } else if dw_free_type == MEM_DECOMMIT && dw_size > 0 {
-        let ret = unsafe { libc::munmap(lp_address as *mut libc::c_void, dw_size) };
-        (ret == 0) as i32
-    } else {
-        1 // TRUE
+        MEM_RELEASE => {
+            // Known gap: we don't track VirtualAlloc sizes, so we can't munmap the region.
+            // Accept it as a no-op (leak) rather than crashing.
+            1 // TRUE
+        }
+        MEM_DECOMMIT => {
+            // Decommit a range: munmap the specific range.
+            if dw_size == 0 {
+                set_last_error(0x57);
+                return 0;
+            }
+            let ret = unsafe { libc::munmap(lp_address as *mut libc::c_void, dw_size) };
+            (ret == 0) as i32
+        }
+        _ => {
+            set_last_error(0x57);
+            0
+        }
     }
 }
 
@@ -1352,18 +1361,9 @@ pub extern "win64" fn local_unlock(h_mem: usize) -> i32 {
 
 /// LocalReAlloc: reallocate a local memory block.
 ///
-/// Wraps `realloc` with optional zero-initialization when `LMEM_ZEROINIT` (0x0040) is set.
-/// For simplicity, if the ZEROINIT flag is set, memset the entire block to 0 after realloc
-/// (conservative but correct). Ignores `LMEM_MOVEABLE` — we always move.
-///
-/// # Safety
-/// `h_mem` must be a valid pointer returned from LocalAlloc or NULL.
-/// LocalReAlloc: reallocate a local memory block.
-///
-/// Wine ref: dlls/kernelbase/memory.c — passes HEAP_ZERO_MEMORY to HeapReAlloc when
-/// LMEM_ZEROINIT is set; HeapReAlloc only zeroes newly added bytes (not the whole block).
-/// Known gap: Weave uses realloc and zeroes the entire block, destroying existing data.
-/// Fixing this requires tracking old sizes; deferred to Phase 4.
+/// Wine ref: dlls/kernelbase/memory.c — HeapReAlloc with HEAP_ZERO_MEMORY zeroes only
+/// newly added bytes. Zeroing only new bytes requires old-size tracking; deferred to Phase 4.
+/// For now, LMEM_ZEROINIT is ignored (new bytes may contain garbage).
 ///
 /// # Safety
 /// `h_mem` must be a pointer returned from LocalAlloc/LocalReAlloc or NULL.
@@ -1372,9 +1372,9 @@ pub unsafe extern "win64" fn local_re_alloc(
     u_bytes: usize,
     _u_flags: u32,
 ) -> *mut std::ffi::c_void {
-    // Note: LMEM_ZEROINIT should only zero new bytes — see Wine ref above.
-    // We can't implement this correctly without old-size tracking; drop zeroing to
-    // at least preserve existing data.
+    // Wine ref: dlls/kernelbase/memory.c — HeapReAlloc with HEAP_ZERO_MEMORY only zeroes
+    // newly added bytes, not the whole block. Zeroing only new bytes requires tracking the
+    // old size; deferred to Phase 4. For now just realloc (ignores LMEM_ZEROINIT).
     unsafe { libc::realloc(h_mem, u_bytes) }
 }
 
@@ -3703,7 +3703,7 @@ pub unsafe extern "win64" fn get_proc_address(h_module: usize, lp_proc_name: *co
 /// Wine ref: dlls/kernelbase/version.c — GetVersion returns NtCurrentTeb()->Peb->OSMajorVersion
 /// | (NtCurrentTeb()->Peb->OSMinorVersion << 8); Windows 10 has OSMinorVersion = 0.
 pub extern "win64" fn get_version() -> u32 {
-    0x0000_000A // major=10 (0x0A), minor=0 — Windows 10.0
+    0x0000_000A // major=10, minor=0 — Windows 10 (Wine-correct)
 }
 
 // ── Process/toolhelp ─────────────────────────────────────────────────────────
@@ -3976,13 +3976,13 @@ pub unsafe extern "win64" fn global_memory_status_ex(lp_buffer: *mut u8) -> i32 
 /// No pointer dereferences. h_process is the current process sentinel.
 pub unsafe extern "win64" fn set_priority_class(_h_process: usize, dw_priority_class: u32) -> i32 {
     let nice: libc::c_int = match dw_priority_class {
-        0x00000040 => 15, // IDLE_PRIORITY_CLASS
-        0x00004000 => 10, // BELOW_NORMAL_PRIORITY_CLASS
-        0x00000020 => 0,  // NORMAL_PRIORITY_CLASS
-        0x00008000 => -5, // ABOVE_NORMAL_PRIORITY_CLASS
+        0x00000040 => 15,  // IDLE_PRIORITY_CLASS
+        0x00004000 => 10,  // BELOW_NORMAL_PRIORITY_CLASS
+        0x00000020 => 0,   // NORMAL_PRIORITY_CLASS
+        0x00008000 => -5,  // ABOVE_NORMAL_PRIORITY_CLASS
         0x00000080 => -10, // HIGH_PRIORITY_CLASS
         0x00000100 => -10, // REALTIME_PRIORITY_CLASS → clamped to HIGH
-        _ => return 1,    // Unknown class — silently succeed
+        _ => return 1,     // Unknown class — silently succeed
     };
     // Ignore errors (may lack permissions); always return TRUE.
     unsafe { libc::setpriority(libc::PRIO_PROCESS, 0, nice) };
@@ -4926,20 +4926,65 @@ pub unsafe extern "win64" fn create_directory_w(
 
 /// RaiseException — raises a Windows exception and dispatches through SEH.
 ///
+/// Naked trampoline: captures [RSP] (return address into the PE caller) and
+/// RSP+8 (the PE caller's RSP before the CALL) before any prolog runs, then
+/// tail-calls raise_exception_impl with those values as extra Linux ABI args.
+///
+/// Win64 entry: RCX=code, RDX=flags, R8=n_args, R9=lp_arguments
+/// Linux args to impl: RDI=code, RSI=flags, RDX=n_args, RCX=lp_arguments,
+///                     R8=throw_rip, R9=throw_rsp
+///
 /// # Safety
-/// `lp_arguments` must point to `n_number_of_arguments` valid u64 values.
+/// Called only via Win64 IAT from PE code.
+#[unsafe(naked)]
 pub unsafe extern "win64" fn raise_exception(
+    _dw_exception_code: u32,
+    _dw_exception_flags: u32,
+    _n_number_of_arguments: u32,
+    _lp_arguments: *const u64,
+) {
+    core::arch::naked_asm!(
+        // Capture throw site before any prolog modifies the stack.
+        "mov r10, [rsp]",     // r10 = return address into PE caller
+        "lea r11, [rsp+8]",   // r11 = PE caller's RSP before the CALL
+        // Convert Win64 args → Linux ABI for tail call to raise_exception_impl:
+        //   RDI = dw_exception_code  (Win64 RCX → Linux arg1)
+        //   RSI = dw_exception_flags (Win64 RDX → Linux arg2)
+        //   RDX = n_number_of_arguments (Win64 R8 → Linux arg3)
+        //   RCX = lp_arguments       (Win64 R9 → Linux arg4)
+        //   R8  = throw_rip          (Linux arg5)
+        //   R9  = throw_rsp          (Linux arg6)
+        "mov rdi, rcx",
+        "mov rsi, rdx",
+        "mov rdx, r8",
+        "mov rcx, r9",
+        "mov r8,  r10",
+        "mov r9,  r11",
+        "jmp {impl_fn}",
+        impl_fn = sym raise_exception_impl,
+    );
+}
+
+/// Inner implementation called by the naked raise_exception trampoline.
+///
+/// # Safety
+/// `throw_rip`/`throw_rsp` are the exact values from the PE call site.
+unsafe extern "C" fn raise_exception_impl(
     dw_exception_code: u32,
     dw_exception_flags: u32,
     n_number_of_arguments: u32,
     lp_arguments: *const u64,
+    throw_rip: u64,
+    throw_rsp: u64,
 ) {
     unsafe {
-        weave_core::unwind::raise_exception(
+        weave_core::unwind::raise_exception_at(
             dw_exception_code,
             dw_exception_flags,
             n_number_of_arguments,
             lp_arguments,
+            throw_rip,
+            throw_rsp,
         );
     }
 }
@@ -5605,7 +5650,11 @@ pub unsafe extern "win64" fn set_current_directory_w(lp_path_name: *const u16) -
         Err(_) => return 0,
     };
     let rc = unsafe { libc::chdir(cstr.as_ptr()) };
-    if rc == 0 { 1 } else { 0 } // TRUE / FALSE
+    if rc == 0 {
+        1
+    } else {
+        0
+    } // TRUE / FALSE
 }
 
 /// SetCurrentDirectoryA — change the current working directory (ANSI).
@@ -5632,7 +5681,11 @@ pub unsafe extern "win64" fn set_current_directory_a(lp_path_name: *const u8) ->
         Err(_) => return 0,
     };
     let rc = unsafe { libc::chdir(cstr.as_ptr()) };
-    if rc == 0 { 1 } else { 0 }
+    if rc == 0 {
+        1
+    } else {
+        0
+    }
 }
 
 // ── Computer name and username ────────────────────────────────────────────────
@@ -8927,18 +8980,31 @@ pub unsafe extern "win64" fn get_overlapped_result(
 }
 
 /// RtlPcToFileHeader: return the module base for a code address.
-/// Returns NULL (cannot map Linux addresses to Windows modules).
+///
+/// Wine ref: dlls/ntdll/loader.c — walks loaded module list via
+/// LdrFindEntryForAddress and returns module->DllBase. Weave has a single
+/// guest PE, so we check if the PC falls within [PE_BASE, PE_BASE+PE_SIZE).
 ///
 /// # Safety
-/// `p_pc_value` must be readable; `pp_base_of_image` must be writable.
+/// `pp_base_of_image` must be writable if non-null.
 pub unsafe extern "win64" fn rtl_pc_to_file_header(
-    _p_pc_value: *const u8,
+    p_pc_value: *const u8,
     pp_base_of_image: *mut *const u8,
 ) -> *const u8 {
+    let pc = p_pc_value as usize;
+    let base = weave_core::seh::pe_base();
+    let size = weave_core::seh::pe_size();
+
+    let ret = if base != 0 && pc >= base && pc < base + size {
+        base as *const u8
+    } else {
+        std::ptr::null()
+    };
+
     if !pp_base_of_image.is_null() {
-        unsafe { *pp_base_of_image = std::ptr::null() };
+        unsafe { *pp_base_of_image = ret };
     }
-    std::ptr::null()
+    ret
 }
 
 /// CreateFileMappingA: ANSI variant — returns NULL (file mapping not implemented).

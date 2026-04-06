@@ -1161,7 +1161,12 @@ pub unsafe extern "win64" fn ucrt_rand_s(rand_val: *mut u32) -> i32 {
     }
     // getrandom(buf, 4, 0) — blocks until kernel entropy pool is ready, then fills buf.
     let ret = unsafe {
-        libc::syscall(libc::SYS_getrandom, rand_val as *mut libc::c_void, 4usize, 0u32)
+        libc::syscall(
+            libc::SYS_getrandom,
+            rand_val as *mut libc::c_void,
+            4usize,
+            0u32,
+        )
     };
     if ret != 4 {
         unsafe { *libc::__errno_location() = libc::EINVAL };
@@ -1630,29 +1635,65 @@ pub unsafe extern "win64" fn ucrt_xcpt_filter(_xno: u32, _pxcptinfoptrs: *const 
 
 /// _CxxThrowException — throw a C++ exception via SEH dispatch.
 ///
-/// Builds the MSVC C++ exception parameters and calls RaiseException with
-/// exception code 0xE06D7363 ("msc" in ASCII). The SEH dispatch chain in
-/// weave_core::unwind walks .pdata to find __CxxFrameHandler, which matches
-/// the thrown type to catch blocks and transfers control.
+/// This is a naked trampoline: before any prolog runs, it captures [RSP]
+/// (the return address into NPP code = throw_rip) and RSP+8 (NPP's RSP
+/// before the CALL = throw_rsp), then tail-calls the real implementation
+/// with those values as extra arguments.
+///
+/// This avoids the false-positive problem in stack scanning: by the time
+/// the real impl runs, we already have the exact throw site context.
 ///
 /// # Safety
-/// `p_exception_object` and `p_throw_info` must be valid PE pointers.
+/// Called only via Win64 IAT from PE code.
+#[unsafe(naked)]
 pub unsafe extern "win64" fn ucrt_cxx_throw_exception(
+    _p_exception_object: *mut u8,
+    _p_throw_info: *const u8,
+) {
+    // Win64 entry state:
+    //   RCX = p_exception_object  (Win64 arg1)
+    //   RDX = p_throw_info        (Win64 arg2)
+    //   [RSP] = return address into NPP  (= throw_rip)
+    //   RSP+8 = NPP's RSP before the CALL  (= throw_rsp)
+    //
+    // We convert to Linux ABI for the tail call to ucrt_cxx_throw_exception_impl:
+    //   RDI = p_exception_object  (Linux arg1)
+    //   RSI = p_throw_info        (Linux arg2)
+    //   RDX = throw_rip           (Linux arg3)
+    //   RCX = throw_rsp           (Linux arg4)
+    core::arch::naked_asm!(
+        "mov r8,  [rsp]",   // r8  = throw_rip
+        "lea r9,  [rsp+8]", // r9  = throw_rsp
+        "mov rdi, rcx",     // p_exception_object → Linux arg1
+        "mov rsi, rdx",     // p_throw_info       → Linux arg2
+        "mov rdx, r8",      // throw_rip          → Linux arg3
+        "mov rcx, r9",      // throw_rsp          → Linux arg4
+        "jmp {inner}",
+        inner = sym ucrt_cxx_throw_exception_impl,
+    );
+}
+
+/// Inner (Linux ABI) implementation called by the naked trampoline above.
+///
+/// Receives the exact throw-site RIP and RSP captured before any prolog ran,
+/// so no stack scanning is needed.
+///
+/// # Safety
+/// `throw_rip` and `throw_rsp` must be the NPP throw-site values from the
+/// naked trampoline.
+unsafe extern "C" fn ucrt_cxx_throw_exception_impl(
     p_exception_object: *mut u8,
     p_throw_info: *const u8,
+    throw_rip: u64,
+    throw_rsp: u64,
 ) {
     let image_base = weave_core::seh::pe_base();
 
     eprintln!(
-        "weave: _CxxThrowException obj={:#x} throw_info={:#x} image_base={image_base:#x}",
-        p_exception_object as usize, p_throw_info as usize
+        "weave: _CxxThrowException obj={:#x} throw_info={:#x} image_base={image_base:#x} rip={throw_rip:#x} rsp={throw_rsp:#x}",
+        p_exception_object as usize,
+        p_throw_info as usize,
     );
-
-    // Note: we intentionally do NOT try to dereference p_exception_object to
-    // print a message. The exception object is a typed C++ object — reading its
-    // first bytes as a char* is a heuristic that fails silently for HRESULT-based
-    // exceptions (e.g. 0x80070002 passes a naive canonical-address check but is
-    // an unmapped address → SIGSEGV). The pointer values logged above are sufficient.
 
     // MSVC C++ exception: RaiseException(0xE06D7363, NONCONTINUABLE, 4, params)
     // params[0] = MSVC magic (0x19930520 for x64)
@@ -1667,15 +1708,16 @@ pub unsafe extern "win64" fn ucrt_cxx_throw_exception(
     ];
 
     unsafe {
-        weave_core::unwind::raise_exception(
+        weave_core::unwind::raise_exception_at(
             0xE06D7363, // EH_EXCEPTION_NUMBER ("msc")
             1,          // EXCEPTION_NONCONTINUABLE
             4,
             params.as_ptr(),
+            throw_rip,
+            throw_rsp,
         );
     }
 
-    // If dispatch didn't find a handler, terminate
     eprintln!("weave: _CxxThrowException: no handler found — terminating");
     unsafe { libc::exit(1) }
 }
