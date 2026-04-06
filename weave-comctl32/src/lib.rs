@@ -344,6 +344,87 @@ pub unsafe extern "win64" fn image_list_get_icon(_himl: usize, _i: i32, _flags: 
     0 // NULL HICON
 }
 
+/// ImageList_BeginDrag — begin dragging an image. Returns TRUE (stub).
+///
+/// # Safety
+/// No pointer dereferences.
+pub unsafe extern "win64" fn image_list_begin_drag(
+    _himl_track: usize,
+    _i_track: i32,
+    _dx_hotspot: i32,
+    _dy_hotspot: i32,
+) -> i32 {
+    1 // TRUE
+}
+
+/// ImageList_EndDrag — end a drag operation (stub, no-op).
+///
+/// # Safety
+/// No pointer dereferences.
+pub unsafe extern "win64" fn image_list_end_drag() {}
+
+/// ImageList_DragEnter — lock window updates and display drag image (stub).
+///
+/// # Safety
+/// No pointer dereferences.
+pub unsafe extern "win64" fn image_list_drag_enter(_hwnd_lock: usize, _x: i32, _y: i32) -> i32 {
+    1 // TRUE
+}
+
+/// ImageList_DragLeave — unlocks window updates (stub, no-op).
+///
+/// # Safety
+/// No pointer dereferences.
+pub unsafe extern "win64" fn image_list_drag_leave(_hwnd_lock: usize) -> i32 {
+    1 // TRUE
+}
+
+/// ImageList_DragMove — moves the image being dragged (stub).
+///
+/// # Safety
+/// No pointer dereferences.
+pub unsafe extern "win64" fn image_list_drag_move(_x: i32, _y: i32) -> i32 {
+    1 // TRUE
+}
+
+/// ImageList_DragShowNolock — shows or hides drag image without locking window (stub).
+///
+/// # Safety
+/// No pointer dereferences.
+pub unsafe extern "win64" fn image_list_drag_show_nolock(_f_show: i32) -> i32 {
+    1 // TRUE
+}
+
+/// ImageList_Remove — removes an image from an image list. Returns TRUE (stub).
+///
+/// # Safety
+/// No pointer dereferences.
+pub unsafe extern "win64" fn image_list_remove(_himl: usize, _i: i32) -> i32 {
+    1 // TRUE
+}
+
+/// ImageList_SetIconSize — sets the icon dimensions for an image list. Returns TRUE (stub).
+///
+/// # Safety
+/// No pointer dereferences.
+pub unsafe extern "win64" fn image_list_set_icon_size(_himl: usize, _cx: i32, _cy: i32) -> i32 {
+    1 // TRUE
+}
+
+/// ImageList_GetIconSize — gets the icon dimensions for an image list (stub).
+///
+/// Returns FALSE — no real image list backing. Apps should tolerate this.
+///
+/// # Safety
+/// `pcx`/`pcy` are ignored; we do not write through them.
+pub unsafe extern "win64" fn image_list_get_icon_size(
+    _himl: usize,
+    _pcx: *mut i32,
+    _pcy: *mut i32,
+) -> i32 {
+    0 // FALSE — stub
+}
+
 // ── DLL Resolver ─────────────────────────────────────────────────────────────
 
 /// Resolve a comctl32.dll import to a function pointer.
@@ -381,6 +462,22 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "ImageList_GetIcon" | "#17" => Some(
             image_list_get_icon as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
         ),
+        "ImageList_BeginDrag" => Some(image_list_begin_drag as *const () as usize),
+        "ImageList_EndDrag" => Some(image_list_end_drag as *const () as usize),
+        "ImageList_DragEnter" => Some(image_list_drag_enter as *const () as usize),
+        "ImageList_DragLeave" => Some(image_list_drag_leave as *const () as usize),
+        "ImageList_DragMove" => Some(image_list_drag_move as *const () as usize),
+        "ImageList_DragShowNolock" => Some(image_list_drag_show_nolock as *const () as usize),
+        "ImageList_Remove" => Some(image_list_remove as *const () as usize),
+        "ImageList_SetIconSize" => Some(image_list_set_icon_size as *const () as usize),
+        "ImageList_GetIconSize" => Some(image_list_get_icon_size as *const () as usize),
+        // Ordinals seen in Notepad++ imports — map to their named equivalents.
+        // #381 = ImageList_BeginDrag, #410/#411/#412/#413 = drag show/move/enter/leave variants.
+        "#381" => Some(image_list_begin_drag as *const () as usize),
+        "#410" => Some(image_list_drag_enter as *const () as usize),
+        "#411" => Some(image_list_drag_leave as *const () as usize),
+        "#412" => Some(image_list_drag_move as *const () as usize),
+        "#413" => Some(image_list_drag_show_nolock as *const () as usize),
         _ => None,
     }
 }
@@ -430,6 +527,20 @@ mod tests {
             "InitializeFlatSB",
             "UninitializeFlatSB",
             "ImageList_GetIcon",
+            "ImageList_BeginDrag",
+            "ImageList_EndDrag",
+            "ImageList_DragEnter",
+            "ImageList_DragLeave",
+            "ImageList_DragMove",
+            "ImageList_DragShowNolock",
+            "ImageList_Remove",
+            "ImageList_SetIconSize",
+            "ImageList_GetIconSize",
+            "#381",
+            "#410",
+            "#411",
+            "#412",
+            "#413",
         ];
         for f in &funcs {
             assert!(resolve("comctl32.dll", f).is_some(), "missing: {f}");

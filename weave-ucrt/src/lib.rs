@@ -1648,26 +1648,11 @@ pub unsafe extern "win64" fn ucrt_cxx_throw_exception(
         p_exception_object as usize, p_throw_info as usize
     );
 
-    // Print exception message if the thrown type looks like a const char*.
-    // Guard against non-canonical / garbage pointers from non-string throws.
-    unsafe {
-        if !p_exception_object.is_null() {
-            let str_ptr = *(p_exception_object as *const *const u8);
-            // Only dereference if it looks like a canonical user-space address.
-            const CANONICAL_LIMIT: usize = 0x0000_8000_0000_0000;
-            if !str_ptr.is_null() && (str_ptr as usize) < CANONICAL_LIMIT {
-                let str_len = (0..256usize)
-                    .position(|i| *str_ptr.add(i) == 0)
-                    .unwrap_or(0);
-                if str_len > 0 {
-                    let str_bytes = std::slice::from_raw_parts(str_ptr, str_len);
-                    if let Ok(s) = std::str::from_utf8(str_bytes) {
-                        eprintln!("weave: exception message = {s:?}");
-                    }
-                }
-            }
-        }
-    }
+    // Note: we intentionally do NOT try to dereference p_exception_object to
+    // print a message. The exception object is a typed C++ object — reading its
+    // first bytes as a char* is a heuristic that fails silently for HRESULT-based
+    // exceptions (e.g. 0x80070002 passes a naive canonical-address check but is
+    // an unmapped address → SIGSEGV). The pointer values logged above are sufficient.
 
     // MSVC C++ exception: RaiseException(0xE06D7363, NONCONTINUABLE, 4, params)
     // params[0] = MSVC magic (0x19930520 for x64)
