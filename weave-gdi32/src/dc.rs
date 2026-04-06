@@ -106,7 +106,9 @@ pub fn save(hdc: usize) -> i32 {
     // Capture current state (or default if none exists yet).
     let current = {
         let t = table().lock().unwrap();
-        t.get(&hdc).cloned().unwrap_or_else(|| DcState::default_for(hdc))
+        t.get(&hdc)
+            .cloned()
+            .unwrap_or_else(|| DcState::default_for(hdc))
     };
     let mut stacks = dc_save_stacks().lock().unwrap();
     let stack = stacks.entry(hdc).or_default();
@@ -249,7 +251,10 @@ mod tests {
         let ok = restore(hdc, 1);
         assert_eq!(ok, 1);
         let color = with(hdc, |dc| dc.text_color);
-        assert_eq!(color, 0x0000_00FF, "expected blue after restoring to level 1");
+        assert_eq!(
+            color, 0x0000_00FF,
+            "expected blue after restoring to level 1"
+        );
         remove(hdc);
     }
 
