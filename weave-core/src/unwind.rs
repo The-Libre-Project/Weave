@@ -328,8 +328,7 @@ mod x64 {
             // Wine ref: if (info->frame_reg)
             //     frame = get_int_reg(context, info->frame_reg) - info->frame_offset * 16;
             if frame_register != 0 {
-                frame = ctx_get_reg(ctx, frame_register)
-                    .wrapping_sub((frame_offset as u64) * 16);
+                frame = ctx_get_reg(ctx, frame_register).wrapping_sub((frame_offset as u64) * 16);
             }
 
             // Apply unwind codes to reverse the prolog.
@@ -886,9 +885,7 @@ mod x64 {
                 p[1]
             );
         } else {
-            eprintln!(
-                "weave: RaiseException: code={exception_code:#x} at rip={caller_rip:#x}"
-            );
+            eprintln!("weave: RaiseException: code={exception_code:#x} at rip={caller_rip:#x}");
         }
 
         let handled = unsafe { dispatch_exception(&mut exc_record, &mut ctx) };
@@ -932,7 +929,11 @@ mod x64 {
             exc_record.exception_information[i] = unsafe { *arguments.add(i) };
         }
 
-        let mut ctx = Context { rip: throw_rip, rsp: throw_rsp, ..Context::default() };
+        let mut ctx = Context {
+            rip: throw_rip,
+            rsp: throw_rsp,
+            ..Context::default()
+        };
 
         // Capture Weave's current non-volatile registers as a best-effort
         // approximation. virtual_unwind reads saved registers from the stack

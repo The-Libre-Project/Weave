@@ -1410,11 +1410,9 @@ pub extern "win64" fn set_window_long_ptr_w(
             let mut map = window_extra().lock().unwrap();
             if let Some(e) = map.get_mut(&hwnd) {
                 if offset + 8 <= e.extra_bytes.len() {
-                    let old = isize::from_ne_bytes(
-                        e.extra_bytes[offset..offset + 8].try_into().unwrap(),
-                    );
-                    e.extra_bytes[offset..offset + 8]
-                        .copy_from_slice(&dw_new_long.to_ne_bytes());
+                    let old =
+                        isize::from_ne_bytes(e.extra_bytes[offset..offset + 8].try_into().unwrap());
+                    e.extra_bytes[offset..offset + 8].copy_from_slice(&dw_new_long.to_ne_bytes());
                     old
                 } else {
                     0

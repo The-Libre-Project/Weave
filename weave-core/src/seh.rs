@@ -109,9 +109,8 @@ unsafe extern "C" fn on_fatal_signal(
         #[cfg(target_arch = "x86_64")]
         {
             let uctx_mut = ctx as *mut libc::ucontext_t;
-            if unsafe {
-                crate::unwind::dispatch_hardware_exception(win_code, fault_addr, uctx_mut)
-            } {
+            if unsafe { crate::unwind::dispatch_hardware_exception(win_code, fault_addr, uctx_mut) }
+            {
                 return; // Handler found — resume at updated RIP
             }
         }

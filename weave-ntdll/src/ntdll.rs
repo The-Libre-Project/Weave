@@ -1499,9 +1499,9 @@ pub fn resolve(func: &str) -> Option<usize> {
             weave_core::unwind::rtl_unwind_ex_export as unsafe extern "win64" fn(_, _, _, _, _, _)
                 as *const () as usize,
         ),
-        "RtlRaiseException" => Some(
-            rtl_raise_exception as unsafe extern "win64" fn(_) as *const () as usize,
-        ),
+        "RtlRaiseException" => {
+            Some(rtl_raise_exception as unsafe extern "win64" fn(_) as *const () as usize)
+        }
         _ => None,
     }
 }
