@@ -35,7 +35,7 @@ fn scroll_state() -> &'static Mutex<HashMap<(usize, i32), ScrollState>> {
     SCROLL_STATE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-// ── Per-window extra data (GWL_EXSTYLE / GWLP_USERDATA) ─────────────────────
+// ── Per-window extra data (GWL_EXSTYLE / GWLP_USERDATA / cbWndExtra) ────────
 //
 // Stored outside WindowEntry so that adding these fields doesn't change the
 // struct's heap-allocation size (which affects glibc tcache bucketing and can
@@ -44,6 +44,8 @@ fn scroll_state() -> &'static Mutex<HashMap<(usize, i32), ScrollState>> {
 struct WindowExtra {
     ex_style: u32,
     user_data: isize,
+    /// cbWndExtra bytes allocated at window creation (accessed via GetWindowLongPtr index >= 0).
+    extra_bytes: Vec<u8>,
 }
 
 static WINDOW_EXTRA: OnceLock<Mutex<HashMap<usize, WindowExtra>>> = OnceLock::new();
@@ -66,6 +68,7 @@ fn set_extra<F: FnOnce(&mut WindowExtra)>(hwnd: usize, f: F) {
     let entry = map.entry(hwnd).or_insert(WindowExtra {
         ex_style: 0,
         user_data: 0,
+        extra_bytes: Vec::new(),
     });
     f(entry);
 }
@@ -243,9 +246,11 @@ pub unsafe extern "win64" fn create_window_ex_w(
         visible,
         xcb_id,
         h_menu: h_menu_param,
-        extra_bytes: vec![0u8; cls.cb_wnd_extra as usize],
     });
-    set_extra(hwnd, |e| e.ex_style = dw_ex_style);
+    set_extra(hwnd, |e| {
+        e.ex_style = dw_ex_style;
+        e.extra_bytes = vec![0u8; cls.cb_wnd_extra as usize];
+    });
 
     // Build CREATESTRUCTW on the stack and call WNDPROC with WM_NCCREATE then WM_CREATE.
     // Title and class name as wide strings for the struct — we need them alive during the call.
@@ -1322,16 +1327,19 @@ pub extern "win64" fn get_window_long_ptr_w(hwnd: usize, n_index: i32) -> isize 
         _ if n_index >= 0 => {
             // Extra bytes: n_index is a byte offset; reads a pointer-sized (8-byte) value.
             let offset = n_index as usize;
-            window::with(hwnd, |w| {
-                if offset + 8 <= w.extra_bytes.len() {
-                    let mut buf = [0u8; 8];
-                    buf.copy_from_slice(&w.extra_bytes[offset..offset + 8]);
-                    isize::from_ne_bytes(buf)
-                } else {
-                    0
-                }
-            })
-            .unwrap_or(0)
+            get_extra(
+                hwnd,
+                |e| {
+                    if offset + 8 <= e.extra_bytes.len() {
+                        let mut buf = [0u8; 8];
+                        buf.copy_from_slice(&e.extra_bytes[offset..offset + 8]);
+                        isize::from_ne_bytes(buf)
+                    } else {
+                        0
+                    }
+                },
+                0,
+            )
         }
         _ => window::with(hwnd, |w| match n_index {
             GWL_STYLE => w.style as isize,
@@ -1399,18 +1407,21 @@ pub extern "win64" fn set_window_long_ptr_w(
         _ if n_index >= 0 => {
             // Extra bytes: n_index is a byte offset; writes a pointer-sized (8-byte) value.
             let offset = n_index as usize;
-            window::with_mut(hwnd, |w| {
-                if offset + 8 <= w.extra_bytes.len() {
-                    let old_buf = &w.extra_bytes[offset..offset + 8];
-                    let old = isize::from_ne_bytes(old_buf.try_into().unwrap());
-                    let new_bytes = dw_new_long.to_ne_bytes();
-                    w.extra_bytes[offset..offset + 8].copy_from_slice(&new_bytes);
+            let mut map = window_extra().lock().unwrap();
+            if let Some(e) = map.get_mut(&hwnd) {
+                if offset + 8 <= e.extra_bytes.len() {
+                    let old = isize::from_ne_bytes(
+                        e.extra_bytes[offset..offset + 8].try_into().unwrap(),
+                    );
+                    e.extra_bytes[offset..offset + 8]
+                        .copy_from_slice(&dw_new_long.to_ne_bytes());
                     old
                 } else {
                     0
                 }
-            })
-            .unwrap_or(0)
+            } else {
+                0
+            }
         }
         _ => 0,
     }
@@ -1836,9 +1847,11 @@ pub unsafe extern "win64" fn create_window_ex_a(
         visible,
         xcb_id,
         h_menu: h_menu_param,
-        extra_bytes: vec![0u8; cls.cb_wnd_extra as usize],
     });
-    set_extra(hwnd, |e| e.ex_style = dw_ex_style);
+    set_extra(hwnd, |e| {
+        e.ex_style = dw_ex_style;
+        e.extra_bytes = vec![0u8; cls.cb_wnd_extra as usize];
+    });
 
     let title_wide: Vec<u16> = title.encode_utf16().chain(std::iter::once(0)).collect();
     let class_wide: Vec<u16> = class_name

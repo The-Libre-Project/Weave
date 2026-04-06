@@ -26,8 +26,6 @@ pub struct WindowEntry {
     pub xcb_id: u32,
     /// Attached menu bar (0 = none).
     pub h_menu: usize,
-    /// Per-window extra bytes allocated from cbWndExtra (accessed via GetWindowLongPtr index >= 0).
-    pub extra_bytes: Vec<u8>,
 }
 
 // ── Global table ──────────────────────────────────────────────────────────────
