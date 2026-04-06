@@ -65,6 +65,13 @@ pub fn pe_base() -> usize {
     PE_BASE.load(Ordering::Relaxed)
 }
 
+/// Return the size (in bytes) of the mapped guest PE image.
+///
+/// Returns 0 if called before [`install`].
+pub fn pe_size() -> usize {
+    PE_SIZE.load(Ordering::Relaxed)
+}
+
 // ── Signal handler installation ───────────────────────────────────────────────
 
 #[cfg(target_os = "linux")]
@@ -92,10 +99,25 @@ unsafe extern "C" fn on_fatal_signal(
     let size = PE_SIZE.load(Ordering::Relaxed);
 
     if base != 0 && rip >= base && rip < base + size {
-        // Fault in PE code — produce a crash report and exit.
-        let rva = (rip - base) as u32;
+        // Fault in PE code — try SEH dispatch first (Windows delivers hardware
+        // exceptions through KiUserExceptionDispatcher → RtlDispatchException).
         let fault_addr = unsafe { (*info).si_addr() } as usize;
         let win_code = signal_to_exception_code(sig);
+
+        // Try to dispatch through SEH. If a handler catches it, the ucontext
+        // is updated and we return from the signal handler to resume PE code.
+        #[cfg(target_arch = "x86_64")]
+        {
+            let uctx_mut = ctx as *mut libc::ucontext_t;
+            if unsafe {
+                crate::unwind::dispatch_hardware_exception(win_code, fault_addr, uctx_mut)
+            } {
+                return; // Handler found — resume at updated RIP
+            }
+        }
+
+        // No SEH handler found — fall through to crash report.
+        let rva = (rip - base) as u32;
         let func_range = find_runtime_function(base, rva);
 
         print_crash_report(sig, win_code, rip, rva, fault_addr, func_range, uctx);

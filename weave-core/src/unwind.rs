@@ -288,6 +288,16 @@ mod x64 {
     /// # Safety
     /// `image_base` must be the mapped PE base, `func` must point to a valid
     /// RUNTIME_FUNCTION entry, and `ctx` must contain the current frame's state.
+    /// Wine ref: dlls/ntdll/unwind.c — RtlVirtualUnwind2 (x86_64 version, line 2035)
+    ///
+    /// Key behavioral details from Wine:
+    /// - `frame` (EstablisherFrame) is initialized to `context->Rsp` BEFORE any unwind
+    ///   processing, and only updated by UWOP_SET_FPREG.
+    /// - If `info->frame_reg` is set, `frame` is recomputed as
+    ///   `get_int_reg(context, frame_reg) - frame_offset * 16` at the START of each
+    ///   unwind info block (before processing codes).
+    /// - UWOP_SAVE_NONVOL reads from `frame + offset`, NOT `context->Rsp + offset`.
+    /// - Return address is popped AFTER all unwind codes (including chains).
     pub unsafe fn virtual_unwind(
         image_base: usize,
         _control_pc: u64,
@@ -297,7 +307,10 @@ mod x64 {
         let rf = unsafe { &*func };
         let unwind_rva = rf.unwind_info_address;
 
-        // Handle chained unwind info — follow the chain.
+        // Wine ref: `frame = *frame_ret = context->Rsp;` — initialized once before
+        // any unwind processing. This is the EstablisherFrame.
+        let mut frame: u64 = ctx.rsp;
+
         let mut info_ptr = (image_base + unwind_rva as usize) as *const u8;
 
         loop {
@@ -308,12 +321,18 @@ mod x64 {
             let count_of_codes = unsafe { *info_ptr.add(2) } as usize;
             let frame_reg_and_offset = unsafe { *info_ptr.add(3) };
             let frame_register = frame_reg_and_offset & 0x0f;
-            let frame_offset = ((frame_reg_and_offset >> 4) & 0x0f) as u64 * 16;
+            let frame_offset = (frame_reg_and_offset >> 4) & 0x0f;
 
             let codes_base = info_ptr.add(4);
 
+            // Wine ref: if (info->frame_reg)
+            //     frame = get_int_reg(context, info->frame_reg) - info->frame_offset * 16;
+            if frame_register != 0 {
+                frame = ctx_get_reg(ctx, frame_register)
+                    .wrapping_sub((frame_offset as u64) * 16);
+            }
+
             // Apply unwind codes to reverse the prolog.
-            // We process all codes (assuming we're in the function body, not prolog).
             let mut i = 0usize;
             while i < count_of_codes {
                 let code_ptr = unsafe { codes_base.add(i * 2) };
@@ -324,7 +343,6 @@ mod x64 {
 
                 match unwind_op {
                     UWOP_PUSH_NONVOL => {
-                        // Pop register from stack
                         let val = unsafe { read_u64(ctx.rsp as *const u8) };
                         ctx_set_reg(ctx, op_info, val);
                         ctx.rsp += 8;
@@ -332,12 +350,10 @@ mod x64 {
                     }
                     UWOP_ALLOC_LARGE => {
                         if op_info == 0 {
-                            // Next slot is size / 8 as u16
                             let slots = unsafe { read_u16(codes_base.add((i + 1) * 2)) } as u64;
                             ctx.rsp += slots * 8;
                             i += 2;
                         } else {
-                            // Next two slots are raw size as u32
                             let size = unsafe { read_u32(codes_base.add((i + 1) * 2)) } as u64;
                             ctx.rsp += size;
                             i += 3;
@@ -348,53 +364,47 @@ mod x64 {
                         i += 1;
                     }
                     UWOP_SET_FPREG => {
-                        // RSP = frame_register - frame_offset
-                        ctx.rsp = ctx_get_reg(ctx, frame_register).wrapping_sub(frame_offset);
+                        // Wine ref: case UWOP_SET_FPREG:
+                        //   context->Rsp = *frame_ret = frame;
+                        // Restores RSP from the frame value and updates EstablisherFrame.
+                        ctx.rsp = frame;
                         i += 1;
                     }
                     UWOP_SAVE_NONVOL => {
+                        // Wine ref: off = frame + *(USHORT *)&info->opcodes[i+1] * 8;
+                        // Reads relative to `frame`, NOT ctx.rsp.
                         let offset = unsafe { read_u16(codes_base.add((i + 1) * 2)) } as u64 * 8;
-                        let val = unsafe { read_u64((ctx.rsp + offset) as *const u8) };
+                        let val = unsafe { read_u64((frame + offset) as *const u8) };
                         ctx_set_reg(ctx, op_info, val);
                         i += 2;
                     }
                     UWOP_SAVE_NONVOL_FAR => {
+                        // Wine ref: off = frame + *(DWORD *)&info->opcodes[i+1];
                         let offset = unsafe { read_u32(codes_base.add((i + 1) * 2)) } as u64;
-                        let val = unsafe { read_u64((ctx.rsp + offset) as *const u8) };
+                        let val = unsafe { read_u64((frame + offset) as *const u8) };
                         ctx_set_reg(ctx, op_info, val);
                         i += 3;
                     }
                     UWOP_SAVE_XMM128 => {
-                        // Skip — we don't track XMM state for exception dispatch
                         i += 2;
                     }
                     UWOP_SAVE_XMM128_FAR => {
                         i += 3;
                     }
                     UWOP_PUSH_MACHFRAME => {
-                        // Machine frame pushed by interrupt/exception.
-                        // op_info 0: [RIP, CS, EFLAGS, RSP, SS]
-                        // op_info 1: [ErrorCode, RIP, CS, EFLAGS, RSP, SS]
                         if op_info == 1 {
-                            ctx.rsp += 8; // skip error code
+                            ctx.rsp += 8;
                         }
                         ctx.rip = unsafe { read_u64(ctx.rsp as *const u8) };
-                        ctx.rsp += 24; // skip RIP, CS, EFLAGS
+                        ctx.rsp += 24;
                         ctx.rsp = unsafe { read_u64(ctx.rsp as *const u8) };
-                        // Don't pop RIP again below
-                        let establisher_frame = if frame_register != 0 {
-                            ctx_get_reg(ctx, frame_register)
-                        } else {
-                            ctx.rsp
-                        };
                         return UnwindResult {
                             handler: None,
                             handler_data: std::ptr::null(),
-                            establisher_frame,
+                            establisher_frame: frame,
                         };
                     }
                     _ => {
-                        // Unknown opcode — skip 1 slot
                         i += 1;
                     }
                 }
@@ -402,26 +412,17 @@ mod x64 {
 
             // After processing codes, check for chained info
             if flags & UNW_FLAG_CHAININFO != 0 {
-                // Chained RUNTIME_FUNCTION follows the codes (aligned to u32)
                 let after_codes = unsafe { codes_base.add(count_of_codes * 2) };
                 let aligned = ((after_codes as usize + 3) & !3) as *const u8;
                 let chained_rf = aligned as *const RuntimeFunction;
                 let chained = unsafe { &*chained_rf };
                 info_ptr = (image_base + chained.unwind_info_address as usize) as *const u8;
-                continue; // process chained unwind info
+                continue;
             }
 
-            // Pop return address into RIP
+            // Pop return address — Wine does this AFTER all codes and chains.
             ctx.rip = unsafe { read_u64(ctx.rsp as *const u8) };
             ctx.rsp += 8;
-
-            // Establisher frame = RSP after unwind (before popping return address),
-            // or frame register value if one was set.
-            let establisher_frame = if frame_register != 0 {
-                ctx_get_reg(ctx, frame_register)
-            } else {
-                ctx.rsp
-            };
 
             // Extract handler if present
             let handler;
@@ -433,7 +434,7 @@ mod x64 {
                 let handler_addr = image_base + handler_rva;
                 handler =
                     Some(unsafe { std::mem::transmute::<usize, ExceptionHandlerFn>(handler_addr) });
-                handler_data = unsafe { aligned.add(4) }; // language-specific data follows
+                handler_data = unsafe { aligned.add(4) };
             } else {
                 handler = None;
                 handler_data = std::ptr::null();
@@ -442,7 +443,7 @@ mod x64 {
             return UnwindResult {
                 handler,
                 handler_data,
-                establisher_frame,
+                establisher_frame: frame,
             };
         }
     }
@@ -474,7 +475,14 @@ mod x64 {
             );
         }
 
-        // Walk up to 256 frames to prevent infinite loops
+        // Walk up to 256 frames to prevent infinite loops.
+        //
+        // scan_fallback_rsp tracks the RSP just before each call to virtual_unwind.
+        // When virtual_unwind produces a non-PE RIP (e.g. UWOP_SET_FPREG uses
+        // ctx.rbp which holds Weave's frame pointer rather than the PE caller's),
+        // we recover by re-scanning upward from scan_fallback_rsp to find the next
+        // genuine PE return address, skipping Weave stub frames.
+        let mut scan_fallback_rsp: u64 = dispatch_ctx.rsp;
         for _frame_idx in 0..256 {
             let control_pc = dispatch_ctx.rip;
 
@@ -482,11 +490,35 @@ mod x64 {
             let pe_size = crate::seh::PE_SIZE.load(Ordering::Relaxed);
             let pc_usize = control_pc as usize;
             if pc_usize < image_base || pc_usize >= image_base + pe_size {
-                // Left PE code — no handler found
-                eprintln!(
-                    "weave: SEH dispatch: frame left PE at {control_pc:#x} (base={image_base:#x})"
-                );
-                return false;
+                // RIP left PE space.  Two causes:
+                //   (a) virtual_unwind computed a wrong RSP via UWOP_SET_FPREG using
+                //       Weave's own RBP instead of the PE caller's, then read a
+                //       non-PE value as the next return address.
+                //   (b) The legitimate call stack passes through a Weave stub frame.
+                //
+                // Recovery: scan upward from scan_fallback_rsp (RSP before the last
+                // virtual_unwind) to find the next PE return address on the stack.
+                let scan_limit = scan_fallback_rsp.saturating_add(64 * 1024);
+                let mut found = false;
+                let mut scan_ptr = scan_fallback_rsp;
+                while scan_ptr < scan_limit {
+                    let candidate = unsafe { read_u64(scan_ptr as *const u8) };
+                    if candidate > image_base as u64
+                        && candidate < (image_base + pe_size) as u64
+                        && lookup_function_entry(image_base, candidate).is_some()
+                    {
+                        dispatch_ctx.rip = candidate;
+                        dispatch_ctx.rsp = scan_ptr + 8;
+                        scan_fallback_rsp = scan_ptr + 8;
+                        found = true;
+                        break;
+                    }
+                    scan_ptr += 8;
+                }
+                if !found {
+                    return false;
+                }
+                continue;
             }
 
             let func = match lookup_function_entry(image_base, control_pc) {
@@ -495,6 +527,7 @@ mod x64 {
                     // Leaf function (no .pdata entry): RSP points to return address
                     dispatch_ctx.rip = unsafe { read_u64(dispatch_ctx.rsp as *const u8) };
                     dispatch_ctx.rsp += 8;
+                    scan_fallback_rsp = dispatch_ctx.rsp;
                     continue;
                 }
             };
@@ -509,6 +542,8 @@ mod x64 {
                 );
             }
 
+            // Save RSP before virtual_unwind; used for re-scan if unwind goes off-track.
+            scan_fallback_rsp = dispatch_ctx.rsp;
             let result = unsafe { virtual_unwind(image_base, control_pc, func, &mut dispatch_ctx) };
 
             if let Some(handler) = result.handler {
@@ -528,49 +563,9 @@ mod x64 {
                     non_volatile_registers: std::ptr::null(),
                 };
 
-                // Log exc_record parameters for diagnosis
-                eprintln!(
-                "weave: SEH search: calling handler at {:#x} for frame rva={rva:#x} (establisher={:#x})",
-                handler as usize, result.establisher_frame
-            );
-                eprintln!(
-                    "weave: SEH search:  exc_code={:#x} exc_flags={:#x} n_params={}",
-                    exc_record.exception_code,
-                    exc_record.exception_flags,
-                    exc_record.number_parameters
-                );
-                if exc_record.number_parameters >= 4 {
-                    eprintln!(
-                        "weave: SEH search:  params[0]={:#x} [1]={:#x} [2]={:#x} [3]={:#x}",
-                        exc_record.exception_information[0],
-                        exc_record.exception_information[1],
-                        exc_record.exception_information[2],
-                        exc_record.exception_information[3],
-                    );
-                }
-                eprintln!(
-                    "weave: SEH search:  handler_data={:#x} ctx.rip={:#x} ctx.rsp={:#x}",
-                    result.handler_data as usize,
-                    ctx.rip,
-                    ctx.rsp // ctx is throw-site context
-                );
-                // Read first 4 bytes at handler_data (should be FuncInfo RVA)
-                if !result.handler_data.is_null() {
-                    let funcinfo_rva = unsafe { read_u32(result.handler_data) };
-                    let funcinfo_abs = image_base + funcinfo_rva as usize;
-                    eprintln!(
-                    "weave: SEH search:  handler_data[0..4]={funcinfo_rva:#x} → funcinfo_abs={funcinfo_abs:#x}"
-                );
-                }
-
                 // Call the language-specific handler in search mode
                 let disposition =
                     unsafe { handler(exc_record, result.establisher_frame, ctx, &mut dc) };
-
-                eprintln!(
-                    "weave: SEH search: handler disposition={disposition} target_ip={:#x}",
-                    dc.target_ip
-                );
 
                 match disposition {
                     // ExceptionContinueSearch (1) — not handled, keep walking
@@ -581,14 +576,12 @@ mod x64 {
                     }
                     _ => {
                         // ExceptionNestedException (2), ExceptionCollidedUnwind (3), etc.
-                        eprintln!("weave: SEH search: unexpected disposition {disposition}");
                     }
                 }
             }
             // No handler or handler said continue search — keep walking
         }
 
-        eprintln!("weave: SEH dispatch: exhausted 256 frames without finding handler");
         false
     }
 
@@ -683,10 +676,6 @@ mod x64 {
                 final_ctx.rip = target_ip;
                 final_ctx.rax = return_value;
 
-                eprintln!(
-                "weave: SEH unwind: reached target frame={target_frame:#x} ip={target_ip:#x} rsp={pre_rsp:#x}"
-            );
-
                 // Transfer control to the catch block
                 jump_to_context(final_ctx);
             }
@@ -723,7 +712,7 @@ mod x64 {
         }
 
         // If we couldn't reach the target, fatal error
-        eprintln!("weave: SEH unwind: FAILED to reach target frame={target_frame:#x}");
+        eprintln!("weave: SEH unwind failed to reach target frame={target_frame:#x}");
         unsafe { libc::exit(1) }
     }
 
@@ -855,10 +844,11 @@ mod x64 {
             }
             let candidate = unsafe { *(addr as *const u64) };
             if pe_base > 0 && candidate > pe_base && candidate < pe_base + pe_size {
+                let has_pdata = lookup_function_entry(pe_base as usize, candidate).is_some();
                 // Only accept if this is within a function that has .pdata coverage.
                 // This rejects PE data values (image_base, ThrowInfo pointers, etc.)
                 // which happen to lie in the PE address range but aren't code addresses.
-                if lookup_function_entry(pe_base as usize, candidate).is_some() {
+                if has_pdata {
                     caller_rip = candidate;
                     caller_rsp = addr + 8;
                     break;
@@ -867,10 +857,7 @@ mod x64 {
         }
 
         if caller_rip == 0 {
-            // Fallback: no PE address found on stack — exception has no PE origin.
-            eprintln!(
-            "weave: RaiseException code={exception_code:#x} — no PE return address found on stack"
-        );
+            eprintln!("weave: RaiseException {exception_code:#x} — no PE return address on stack");
             unsafe { libc::abort() };
         }
 
@@ -888,14 +875,178 @@ mod x64 {
 
         exc_record.exception_address = caller_rip as *mut u8;
 
-        eprintln!(
-        "weave: RaiseException code={exception_code:#x} flags={exception_flags:#x} at rip={caller_rip:#x}"
-    );
+        let handled = unsafe { dispatch_exception(&mut exc_record, &mut ctx) };
+        if !handled {
+            eprintln!("weave: unhandled exception {exception_code:#x}");
+            unsafe { libc::abort() };
+        }
+    }
+
+    /// Raise a Windows exception with an EXACT throw-site context.
+    ///
+    /// Unlike `raise_exception` (which scans the stack to guess the throw site),
+    /// this function takes the RIP and RSP captured by the naked
+    /// `ucrt_cxx_throw_exception` trampoline before any prolog ran. This avoids
+    /// the false-positive problem that occurs when PE addresses stored in Weave's
+    /// own stack frames are mistaken for the actual return address.
+    ///
+    /// `throw_rip` — return address from the NPP `call _CxxThrowException` instruction.
+    /// `throw_rsp` — NPP's RSP at the point of the CALL (= RSP+8 at naked-fn entry).
+    ///
+    /// # Safety
+    /// `arguments` must point to `num_args` valid u64 values. `throw_rip` and
+    /// `throw_rsp` must be valid values captured by the naked trampoline.
+    pub unsafe fn raise_exception_at(
+        exception_code: u32,
+        exception_flags: u32,
+        num_args: u32,
+        arguments: *const u64,
+        throw_rip: u64,
+        throw_rsp: u64,
+    ) {
+        let mut exc_record = ExceptionRecord {
+            exception_code,
+            exception_flags,
+            exception_record: std::ptr::null_mut(),
+            exception_address: throw_rip as *mut u8,
+            number_parameters: num_args.min(EXCEPTION_MAXIMUM_PARAMETERS as u32),
+            ..Default::default()
+        };
+        for i in 0..exc_record.number_parameters as usize {
+            exc_record.exception_information[i] = unsafe { *arguments.add(i) };
+        }
+
+        let mut ctx = Context::default();
+        ctx.rip = throw_rip;
+        ctx.rsp = throw_rsp;
+
+        // Capture Weave's current non-volatile registers as a best-effort
+        // approximation. virtual_unwind reads saved registers from the stack
+        // (not from ctx), so these values only matter for UWOP_SET_FPREG
+        // (which we skip) and the establisher-frame computation.
+        let rbx_val: u64;
+        let rbp_val: u64;
+        let rdi_val: u64;
+        let rsi_val: u64;
+        let r12_val: u64;
+        let r13_val: u64;
+        let r14_val: u64;
+        let r15_val: u64;
+        unsafe {
+            std::arch::asm!("mov {}, rbx", out(reg) rbx_val, options(nomem, nostack));
+            std::arch::asm!("mov {}, rbp", out(reg) rbp_val, options(nomem, nostack));
+            std::arch::asm!("mov {}, rdi", out(reg) rdi_val, options(nomem, nostack));
+            std::arch::asm!("mov {}, rsi", out(reg) rsi_val, options(nomem, nostack));
+            std::arch::asm!("mov {}, r12", out(reg) r12_val, options(nomem, nostack));
+            std::arch::asm!("mov {}, r13", out(reg) r13_val, options(nomem, nostack));
+            std::arch::asm!("mov {}, r14", out(reg) r14_val, options(nomem, nostack));
+            std::arch::asm!("mov {}, r15", out(reg) r15_val, options(nomem, nostack));
+        }
+        ctx.rbx = rbx_val;
+        ctx.rbp = rbp_val;
+        ctx.rdi = rdi_val;
+        ctx.rsi = rsi_val;
+        ctx.r12 = r12_val;
+        ctx.r13 = r13_val;
+        ctx.r14 = r14_val;
+        ctx.r15 = r15_val;
+        ctx.context_flags = 0x10001f; // CONTEXT_ALL
 
         let handled = unsafe { dispatch_exception(&mut exc_record, &mut ctx) };
         if !handled {
-            eprintln!("weave: unhandled exception {exception_code:#x} — aborting");
+            eprintln!("weave: unhandled exception {exception_code:#x}");
             unsafe { libc::abort() };
+        }
+    }
+
+    // ── Hardware exception dispatch (SIGSEGV → SEH) ────────────────────────────
+
+    /// Dispatch a hardware exception (e.g. SIGSEGV → STATUS_ACCESS_VIOLATION)
+    /// through the SEH mechanism. Called from the signal handler.
+    ///
+    /// Returns `true` if a handler was found and the ucontext was updated
+    /// (the signal handler should return normally to resume at the new RIP).
+    /// Returns `false` if no handler was found (caller should fall through to
+    /// the crash report).
+    ///
+    /// Wine ref: dlls/ntdll/signal_x86_64.c — setup_exception / call_vectored_handlers
+    /// On Windows, the kernel delivers hardware exceptions through
+    /// KiUserExceptionDispatcher which calls RtlDispatchException. We do the
+    /// same from the Linux signal handler.
+    ///
+    /// # Safety
+    /// `uctx` must be a valid ucontext_t from a signal handler.
+    #[cfg(target_os = "linux")]
+    pub unsafe fn dispatch_hardware_exception(
+        exception_code: u32,
+        fault_addr: usize,
+        uctx: *mut libc::ucontext_t,
+    ) -> bool {
+        let gregs = unsafe { &mut (*uctx).uc_mcontext.gregs };
+
+        // Build EXCEPTION_RECORD
+        let mut exc_record = ExceptionRecord {
+            exception_code,
+            exception_flags: 0, // continuable
+            exception_record: std::ptr::null_mut(),
+            exception_address: gregs[libc::REG_RIP as usize] as *mut u8,
+            number_parameters: 2,
+            ..Default::default()
+        };
+        // STATUS_ACCESS_VIOLATION has 2 params: [0]=read(0)/write(1), [1]=fault address
+        exc_record.exception_information[0] = 0; // read (we don't distinguish read/write here)
+        exc_record.exception_information[1] = fault_addr as u64;
+
+        // Build Context from ucontext
+        let mut ctx = Context::default();
+        ctx.rax = gregs[libc::REG_RAX as usize] as u64;
+        ctx.rcx = gregs[libc::REG_RCX as usize] as u64;
+        ctx.rdx = gregs[libc::REG_RDX as usize] as u64;
+        ctx.rbx = gregs[libc::REG_RBX as usize] as u64;
+        ctx.rsp = gregs[libc::REG_RSP as usize] as u64;
+        ctx.rbp = gregs[libc::REG_RBP as usize] as u64;
+        ctx.rsi = gregs[libc::REG_RSI as usize] as u64;
+        ctx.rdi = gregs[libc::REG_RDI as usize] as u64;
+        ctx.r8 = gregs[libc::REG_R8 as usize] as u64;
+        ctx.r9 = gregs[libc::REG_R9 as usize] as u64;
+        ctx.r10 = gregs[libc::REG_R10 as usize] as u64;
+        ctx.r11 = gregs[libc::REG_R11 as usize] as u64;
+        ctx.r12 = gregs[libc::REG_R12 as usize] as u64;
+        ctx.r13 = gregs[libc::REG_R13 as usize] as u64;
+        ctx.r14 = gregs[libc::REG_R14 as usize] as u64;
+        ctx.r15 = gregs[libc::REG_R15 as usize] as u64;
+        ctx.rip = gregs[libc::REG_RIP as usize] as u64;
+        ctx.context_flags = 0x10001f; // CONTEXT_ALL
+
+        let handled = unsafe { dispatch_exception(&mut exc_record, &mut ctx) };
+        if handled {
+            // dispatch_exception + unwind_ex already transferred control
+            // (unwind_ex does a longjmp-like context switch). If we get here,
+            // it means the handler returned ExceptionContinueExecution (0),
+            // which means "resume at the modified context." Update ucontext.
+            //
+            // Note: in practice, for ACCESS_VIOLATION this path is rare —
+            // most handlers will unwind. But we handle it for completeness.
+            gregs[libc::REG_RAX as usize] = ctx.rax as i64;
+            gregs[libc::REG_RCX as usize] = ctx.rcx as i64;
+            gregs[libc::REG_RDX as usize] = ctx.rdx as i64;
+            gregs[libc::REG_RBX as usize] = ctx.rbx as i64;
+            gregs[libc::REG_RSP as usize] = ctx.rsp as i64;
+            gregs[libc::REG_RBP as usize] = ctx.rbp as i64;
+            gregs[libc::REG_RSI as usize] = ctx.rsi as i64;
+            gregs[libc::REG_RDI as usize] = ctx.rdi as i64;
+            gregs[libc::REG_R8 as usize] = ctx.r8 as i64;
+            gregs[libc::REG_R9 as usize] = ctx.r9 as i64;
+            gregs[libc::REG_R10 as usize] = ctx.r10 as i64;
+            gregs[libc::REG_R11 as usize] = ctx.r11 as i64;
+            gregs[libc::REG_R12 as usize] = ctx.r12 as i64;
+            gregs[libc::REG_R13 as usize] = ctx.r13 as i64;
+            gregs[libc::REG_R14 as usize] = ctx.r14 as i64;
+            gregs[libc::REG_R15 as usize] = ctx.r15 as i64;
+            gregs[libc::REG_RIP as usize] = ctx.rip as i64;
+            true
+        } else {
+            false
         }
     }
 
