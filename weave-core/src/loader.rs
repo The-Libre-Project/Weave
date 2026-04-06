@@ -44,7 +44,11 @@ pub fn load(bytes: &[u8]) -> Result<LoadedImage, String> {
     // Wrap in catch_unwind: goblin's TLS/reloc parsers can panic on crafted input.
     // (Confirmed by cargo-fuzz crash, 2026-04-05.)
     let pe = std::panic::catch_unwind(|| PE::parse(bytes))
-        .unwrap_or_else(|_| Err(goblin::error::Error::Malformed("goblin panicked".to_string())))
+        .unwrap_or_else(|_| {
+            Err(goblin::error::Error::Malformed(
+                "goblin panicked".to_string(),
+            ))
+        })
         .map_err(|e| format!("parse error: {e}"))?;
 
     let opt = pe
@@ -86,7 +90,11 @@ pub fn load(bytes: &[u8]) -> Result<LoadedImage, String> {
 pub fn load_dll(bytes: &[u8]) -> Result<(LoadedImage, HashMap<String, usize>), String> {
     // Wrap in catch_unwind: goblin's TLS/reloc parsers can panic on crafted input.
     let pe = std::panic::catch_unwind(|| PE::parse(bytes))
-        .unwrap_or_else(|_| Err(goblin::error::Error::Malformed("goblin panicked".to_string())))
+        .unwrap_or_else(|_| {
+            Err(goblin::error::Error::Malformed(
+                "goblin panicked".to_string(),
+            ))
+        })
         .map_err(|e| format!("parse error: {e}"))?;
 
     let opt = pe

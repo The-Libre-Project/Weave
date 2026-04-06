@@ -44,8 +44,11 @@ pub fn parse(bytes: &[u8]) -> Result<PeInfo, String> {
     // Use catch_unwind to turn any goblin panic into a graceful Err.
     // The AssertUnwindSafe wrapper is sound here: bytes is read-only and we
     // discard the PE value on panic, so no invariants are violated.
-    let parse_result = std::panic::catch_unwind(|| PE::parse(bytes))
-        .unwrap_or_else(|_| Err(goblin::error::Error::Malformed("goblin panicked on TLS/reloc/import parsing".to_string())));
+    let parse_result = std::panic::catch_unwind(|| PE::parse(bytes)).unwrap_or_else(|_| {
+        Err(goblin::error::Error::Malformed(
+            "goblin panicked on TLS/reloc/import parsing".to_string(),
+        ))
+    });
     let pe = parse_result.map_err(|e| format!("goblin parse error: {e}"))?;
 
     let header = pe.header;

@@ -493,96 +493,96 @@ mod inner {
     /// X11 keycodes = Linux evdev keycode + 8 (the evdev offset).
     fn x11_keycode_to_vk(keycode: u8) -> u32 {
         match keycode {
-            9   => 0x1B, // VK_ESCAPE
-            10  => 0x31, // VK_1
-            11  => 0x32, // VK_2
-            12  => 0x33, // VK_3
-            13  => 0x34, // VK_4
-            14  => 0x35, // VK_5
-            15  => 0x36, // VK_6
-            16  => 0x37, // VK_7
-            17  => 0x38, // VK_8
-            18  => 0x39, // VK_9
-            19  => 0x30, // VK_0
-            20  => 0xBD, // VK_OEM_MINUS  '-'
-            21  => 0xBB, // VK_OEM_PLUS   '='
-            22  => 0x08, // VK_BACK
-            23  => 0x09, // VK_TAB
+            9 => 0x1B,  // VK_ESCAPE
+            10 => 0x31, // VK_1
+            11 => 0x32, // VK_2
+            12 => 0x33, // VK_3
+            13 => 0x34, // VK_4
+            14 => 0x35, // VK_5
+            15 => 0x36, // VK_6
+            16 => 0x37, // VK_7
+            17 => 0x38, // VK_8
+            18 => 0x39, // VK_9
+            19 => 0x30, // VK_0
+            20 => 0xBD, // VK_OEM_MINUS  '-'
+            21 => 0xBB, // VK_OEM_PLUS   '='
+            22 => 0x08, // VK_BACK
+            23 => 0x09, // VK_TAB
             // QWERTY row
-            24  => 0x51, // VK_Q
-            25  => 0x57, // VK_W
-            26  => 0x45, // VK_E
-            27  => 0x52, // VK_R
-            28  => 0x54, // VK_T
-            29  => 0x59, // VK_Y
-            30  => 0x55, // VK_U
-            31  => 0x49, // VK_I
-            32  => 0x4F, // VK_O
-            33  => 0x50, // VK_P
-            34  => 0xDB, // VK_OEM_4  '['
-            35  => 0xDD, // VK_OEM_6  ']'
-            36  => 0x0D, // VK_RETURN
-            37  => 0xA2, // VK_LCONTROL
+            24 => 0x51, // VK_Q
+            25 => 0x57, // VK_W
+            26 => 0x45, // VK_E
+            27 => 0x52, // VK_R
+            28 => 0x54, // VK_T
+            29 => 0x59, // VK_Y
+            30 => 0x55, // VK_U
+            31 => 0x49, // VK_I
+            32 => 0x4F, // VK_O
+            33 => 0x50, // VK_P
+            34 => 0xDB, // VK_OEM_4  '['
+            35 => 0xDD, // VK_OEM_6  ']'
+            36 => 0x0D, // VK_RETURN
+            37 => 0xA2, // VK_LCONTROL
             // ASDF row
-            38  => 0x41, // VK_A
-            39  => 0x53, // VK_S
-            40  => 0x44, // VK_D
-            41  => 0x46, // VK_F
-            42  => 0x47, // VK_G
-            43  => 0x48, // VK_H
-            44  => 0x4A, // VK_J
-            45  => 0x4B, // VK_K
-            46  => 0x4C, // VK_L
-            47  => 0xBA, // VK_OEM_1  ';'
-            48  => 0xDE, // VK_OEM_7  '\''
-            49  => 0xC0, // VK_OEM_3  '`'
-            50  => 0xA0, // VK_LSHIFT
-            51  => 0xDC, // VK_OEM_5  '\'
+            38 => 0x41, // VK_A
+            39 => 0x53, // VK_S
+            40 => 0x44, // VK_D
+            41 => 0x46, // VK_F
+            42 => 0x47, // VK_G
+            43 => 0x48, // VK_H
+            44 => 0x4A, // VK_J
+            45 => 0x4B, // VK_K
+            46 => 0x4C, // VK_L
+            47 => 0xBA, // VK_OEM_1  ';'
+            48 => 0xDE, // VK_OEM_7  '\''
+            49 => 0xC0, // VK_OEM_3  '`'
+            50 => 0xA0, // VK_LSHIFT
+            51 => 0xDC, // VK_OEM_5  '\'
             // ZXCV row
-            52  => 0x5A, // VK_Z
-            53  => 0x58, // VK_X
-            54  => 0x43, // VK_C
-            55  => 0x56, // VK_V
-            56  => 0x42, // VK_B
-            57  => 0x4E, // VK_N
-            58  => 0x4D, // VK_M
-            59  => 0xBC, // VK_OEM_COMMA  ','
-            60  => 0xBE, // VK_OEM_PERIOD '.'
-            61  => 0xBF, // VK_OEM_2      '/'
-            62  => 0xA1, // VK_RSHIFT
-            63  => 0x6A, // VK_MULTIPLY (KP_*)
-            64  => 0xA4, // VK_LMENU  (Alt_L)
-            65  => 0x20, // VK_SPACE
-            66  => 0x14, // VK_CAPITAL (CapsLock)
+            52 => 0x5A, // VK_Z
+            53 => 0x58, // VK_X
+            54 => 0x43, // VK_C
+            55 => 0x56, // VK_V
+            56 => 0x42, // VK_B
+            57 => 0x4E, // VK_N
+            58 => 0x4D, // VK_M
+            59 => 0xBC, // VK_OEM_COMMA  ','
+            60 => 0xBE, // VK_OEM_PERIOD '.'
+            61 => 0xBF, // VK_OEM_2      '/'
+            62 => 0xA1, // VK_RSHIFT
+            63 => 0x6A, // VK_MULTIPLY (KP_*)
+            64 => 0xA4, // VK_LMENU  (Alt_L)
+            65 => 0x20, // VK_SPACE
+            66 => 0x14, // VK_CAPITAL (CapsLock)
             // Function keys
-            67  => 0x70, // VK_F1
-            68  => 0x71, // VK_F2
-            69  => 0x72, // VK_F3
-            70  => 0x73, // VK_F4
-            71  => 0x74, // VK_F5
-            72  => 0x75, // VK_F6
-            73  => 0x76, // VK_F7
-            74  => 0x77, // VK_F8
-            75  => 0x78, // VK_F9
-            76  => 0x79, // VK_F10
-            77  => 0x90, // VK_NUMLOCK
-            78  => 0x91, // VK_SCROLL
+            67 => 0x70, // VK_F1
+            68 => 0x71, // VK_F2
+            69 => 0x72, // VK_F3
+            70 => 0x73, // VK_F4
+            71 => 0x74, // VK_F5
+            72 => 0x75, // VK_F6
+            73 => 0x76, // VK_F7
+            74 => 0x77, // VK_F8
+            75 => 0x78, // VK_F9
+            76 => 0x79, // VK_F10
+            77 => 0x90, // VK_NUMLOCK
+            78 => 0x91, // VK_SCROLL
             // Numpad
-            79  => 0x67, // VK_NUMPAD7
-            80  => 0x68, // VK_NUMPAD8
-            81  => 0x69, // VK_NUMPAD9
-            82  => 0x6D, // VK_SUBTRACT
-            83  => 0x64, // VK_NUMPAD4
-            84  => 0x65, // VK_NUMPAD5
-            85  => 0x66, // VK_NUMPAD6
-            86  => 0x6B, // VK_ADD
-            87  => 0x61, // VK_NUMPAD1
-            88  => 0x62, // VK_NUMPAD2
-            89  => 0x63, // VK_NUMPAD3
-            90  => 0x60, // VK_NUMPAD0
-            91  => 0x6E, // VK_DECIMAL
-            95  => 0x7A, // VK_F11
-            96  => 0x7B, // VK_F12
+            79 => 0x67, // VK_NUMPAD7
+            80 => 0x68, // VK_NUMPAD8
+            81 => 0x69, // VK_NUMPAD9
+            82 => 0x6D, // VK_SUBTRACT
+            83 => 0x64, // VK_NUMPAD4
+            84 => 0x65, // VK_NUMPAD5
+            85 => 0x66, // VK_NUMPAD6
+            86 => 0x6B, // VK_ADD
+            87 => 0x61, // VK_NUMPAD1
+            88 => 0x62, // VK_NUMPAD2
+            89 => 0x63, // VK_NUMPAD3
+            90 => 0x60, // VK_NUMPAD0
+            91 => 0x6E, // VK_DECIMAL
+            95 => 0x7A, // VK_F11
+            96 => 0x7B, // VK_F12
             // Extended / nav cluster
             104 => 0x0D, // VK_RETURN  (KP_Enter)
             105 => 0xA3, // VK_RCONTROL
@@ -602,7 +602,7 @@ mod inner {
             133 => 0x5B, // VK_LWIN   (Super_L)
             134 => 0x5C, // VK_RWIN   (Super_R)
             135 => 0x5D, // VK_APPS   (Menu)
-            _   => 0,    // unknown — caller should fall back to raw keycode
+            _ => 0,      // unknown — caller should fall back to raw keycode
         }
     }
 
@@ -753,7 +753,11 @@ mod inner {
                     let l_param = (ev.event_x as isize) | ((ev.event_y as isize) << 16);
                     match ev.detail {
                         1 | 3 => {
-                            let message = if ev.detail == 1 { WM_LBUTTONDOWN } else { WM_RBUTTONDOWN };
+                            let message = if ev.detail == 1 {
+                                WM_LBUTTONDOWN
+                            } else {
+                                WM_RBUTTONDOWN
+                            };
                             queue::post(MsgEntry {
                                 hwnd,
                                 message,

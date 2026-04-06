@@ -96,9 +96,16 @@ pub const RC_STRETCHBLT: i32 = 0x0800;
 pub const RC_FLOODFILL: i32 = 0x1000;
 pub const RC_STRETCHDIB: i32 = 0x2000;
 pub const RC_DEVBITS: i32 = 0x8000;
-pub const RASTER_CAPS_DISPLAY: i32 = RC_BITBLT | RC_BITMAP64 | RC_GDI20_OUTPUT |
-    RC_DI_BITMAP | RC_DIBTODEV | RC_BIGFONT | RC_STRETCHBLT |
-    RC_FLOODFILL | RC_STRETCHDIB | RC_DEVBITS;
+pub const RASTER_CAPS_DISPLAY: i32 = RC_BITBLT
+    | RC_BITMAP64
+    | RC_GDI20_OUTPUT
+    | RC_DI_BITMAP
+    | RC_DIBTODEV
+    | RC_BIGFONT
+    | RC_STRETCHBLT
+    | RC_FLOODFILL
+    | RC_STRETCHDIB
+    | RC_DEVBITS;
 
 // ── GDI handle offsets ────────────────────────────────────────────────────────
 /// Allocated GDI object handles start at this offset.
@@ -183,10 +190,10 @@ pub struct TextMetricW {
 // name, elf_style is the style string ("Regular", "Bold Italic", etc.).
 #[repr(C)]
 pub struct EnumLogFontExW {
-    pub elf_log_font: LogFontW,    // 92 bytes — the basic LOGFONTW
-    pub elf_full_name: [u16; 64],  // 128 bytes — full face name
-    pub elf_style: [u16; 32],      // 64 bytes — style string
-    pub elf_script: [u16; 32],     // 64 bytes — script name
+    pub elf_log_font: LogFontW,   // 92 bytes — the basic LOGFONTW
+    pub elf_full_name: [u16; 64], // 128 bytes — full face name
+    pub elf_style: [u16; 32],     // 64 bytes — style string
+    pub elf_script: [u16; 32],    // 64 bytes — script name
 }
 
 // ── NEWTEXTMETRICEXW (100 bytes) ─────────────────────────────────────────────
@@ -195,13 +202,13 @@ pub struct EnumLogFontExW {
 // as second arg. Most callers only inspect the TEXTMETRICW portion.
 #[repr(C)]
 pub struct NewTextMetricExW {
-    pub tm: TextMetricW,          // 60 bytes — base TEXTMETRICW
-    pub ntm_flags: u32,           // NTM_* font flags
-    pub ntm_size_em: u32,         // design em square size
-    pub ntm_cell_height: u32,     // cell height in design units
-    pub ntm_avg_width: u32,       // avg char width in design units
+    pub tm: TextMetricW,           // 60 bytes — base TEXTMETRICW
+    pub ntm_flags: u32,            // NTM_* font flags
+    pub ntm_size_em: u32,          // design em square size
+    pub ntm_cell_height: u32,      // cell height in design units
+    pub ntm_avg_width: u32,        // avg char width in design units
     pub fs_usage_bitmap: [u32; 4], // FONTSIGNATURE.fsUsb — Unicode subranges
-    pub fs_cset_bitmap: [u32; 2], // FONTSIGNATURE.fsCsb — codepage ranges
+    pub fs_cset_bitmap: [u32; 2],  // FONTSIGNATURE.fsCsb — codepage ranges
 }
 
 // ── DOCINFOW (printing) ───────────────────────────────────────────────────────
