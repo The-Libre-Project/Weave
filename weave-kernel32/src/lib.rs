@@ -9348,7 +9348,7 @@ mod tests {
     #[test]
     fn get_system_time_as_file_time_nonzero() {
         let mut ft: u64 = 0;
-        unsafe { get_system_time_as_file_time(&mut ft as *mut u64 as *mut u8) };
+        unsafe { get_system_time_as_file_time(&mut ft as *mut u64) };
         // FILETIME should be well past the Windows epoch (2020-01-01 in FILETIME units)
         assert!(ft > 132_200_000_000_000_000_u64);
     }
