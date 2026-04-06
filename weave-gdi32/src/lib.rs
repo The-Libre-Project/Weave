@@ -402,7 +402,13 @@ pub unsafe extern "win64" fn text_out_w(
     };
 
     weave_user32::backend::draw_text_utf16(
-        xcb, draw_x as i16, draw_y as i16, units, px_size, fg_pixel, bg_pixel,
+        xcb,
+        draw_x as i16,
+        draw_y as i16,
+        units,
+        px_size,
+        fg_pixel,
+        bg_pixel,
     );
     1
 }
@@ -554,7 +560,14 @@ pub unsafe extern "win64" fn ext_text_out_w(
         let h = (rc.bottom - rc.top).max(0) as u16;
         if w > 0 && h > 0 {
             let bg_pixel = to_pixel(dc::with(hdc, |dc| dc.bk_color));
-            weave_user32::backend::draw_filled_rect(xcb, rc.left as i16, rc.top as i16, w, h, bg_pixel);
+            weave_user32::backend::draw_filled_rect(
+                xcb,
+                rc.left as i16,
+                rc.top as i16,
+                w,
+                h,
+                bg_pixel,
+            );
         }
     }
 
@@ -601,7 +614,13 @@ pub unsafe extern "win64" fn ext_text_out_w(
     };
 
     weave_user32::backend::draw_text_utf16(
-        xcb, draw_x as i16, draw_y as i16, units, px_size, fg_pixel, bg_pixel,
+        xcb,
+        draw_x as i16,
+        draw_y as i16,
+        units,
+        px_size,
+        fg_pixel,
+        bg_pixel,
     );
     1
 }
@@ -867,7 +886,11 @@ pub extern "win64" fn get_device_caps(hdc: usize, n_index: i32) -> i32 {
         LOGPIXELSX => 96,
         LOGPIXELSY => 96,
         // Wine ref: dlls/win32u/driver.c::nulldrv_GetDeviceCaps — standard display raster caps
-        RASTERCAPS => RASTER_CAPS_DISPLAY,
+        // TODO: return RASTER_CAPS_DISPLAY once CreateDIBSection/BitBlt are real implementations.
+        // IrfanView (and likely others) branch into DIB code paths when RC_DI_BITMAP/RC_DIBTODEV
+        // are set; our stubs return NULL without initialising ppvBits, causing heap corruption.
+        // Returning 0 keeps apps on the non-DIB path until Phase 3 GDI is real.
+        RASTERCAPS => 0,
         _ => 0,
     }
 }
@@ -1162,78 +1185,59 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         // ── Notepad++ / Scintilla gap-fill ────────────────────────────────
         "GetTextAlign" => Some(get_text_align as *const () as usize),
         "GetTextExtentExPointW" => Some(
-            get_text_extent_ex_point_w
-                as unsafe extern "win64" fn(_, _, _, _, _, _, _) -> _
+            get_text_extent_ex_point_w as unsafe extern "win64" fn(_, _, _, _, _, _, _) -> _
                 as *const () as usize,
         ),
         "GetTextExtentPointW" => Some(
-            get_text_extent_point_w
-                as unsafe extern "win64" fn(_, _, _, _) -> _
-                as *const () as usize,
+            get_text_extent_point_w as unsafe extern "win64" fn(_, _, _, _) -> _ as *const ()
+                as usize,
         ),
-        "GetObjectW" => Some(
-            get_object_w as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
-        ),
+        "GetObjectW" => {
+            Some(get_object_w as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize)
+        }
         "EnumFontFamiliesExW" => Some(
-            enum_font_families_ex_w
-                as unsafe extern "win64" fn(_, _, _, _, _) -> _
-                as *const () as usize,
+            enum_font_families_ex_w as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const ()
+                as usize,
         ),
         "CreateRectRgn" => Some(create_rect_rgn as *const () as usize),
-        "CreateRectRgnIndirect" => Some(
-            create_rect_rgn_indirect
-                as unsafe extern "win64" fn(_) -> _
-                as *const () as usize,
-        ),
+        "CreateRectRgnIndirect" => {
+            Some(create_rect_rgn_indirect as unsafe extern "win64" fn(_) -> _ as *const () as usize)
+        }
         "CombineRgn" => Some(combine_rgn as *const () as usize),
         "SelectClipRgn" => Some(select_clip_rgn as *const () as usize),
         "CreateHatchBrush" => Some(create_hatch_brush as *const () as usize),
         "CreatePatternBrush" => Some(create_pattern_brush as *const () as usize),
         "ExtCreatePen" => Some(
-            ext_create_pen
-                as unsafe extern "win64" fn(_, _, _, _, _) -> _
-                as *const () as usize,
+            ext_create_pen as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const () as usize,
         ),
         "GdiAlphaBlend" => Some(
-            gdi_alpha_blend
-                as unsafe extern "win64" fn(_, _, _, _, _, _, _, _, _, _, _) -> _
+            gdi_alpha_blend as unsafe extern "win64" fn(_, _, _, _, _, _, _, _, _, _, _) -> _
                 as *const () as usize,
         ),
         "GetClipRgn" => Some(get_clip_rgn as *const () as usize),
         "GetROP2" => Some(get_rop2 as *const () as usize),
-        "RectVisible" => Some(
-            rect_visible as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
-        ),
+        "RectVisible" => {
+            Some(rect_visible as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
         "RoundRect" => Some(round_rect as *const () as usize),
         "SetWindowOrgEx" => Some(
-            set_window_org_ex
-                as unsafe extern "win64" fn(_, _, _, _) -> _
-                as *const () as usize,
+            set_window_org_ex as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
         ),
         "OffsetWindowOrgEx" => Some(
-            offset_window_org_ex
-                as unsafe extern "win64" fn(_, _, _, _) -> _
-                as *const () as usize,
+            offset_window_org_ex as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
         ),
         "SetBrushOrgEx" => Some(
-            set_brush_org_ex
-                as unsafe extern "win64" fn(_, _, _, _) -> _
-                as *const () as usize,
+            set_brush_org_ex as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
         ),
         "SetDIBits" => Some(
-            set_dib_bits
-                as unsafe extern "win64" fn(_, _, _, _, _, _, _) -> _
-                as *const () as usize,
+            set_dib_bits as unsafe extern "win64" fn(_, _, _, _, _, _, _) -> _ as *const ()
+                as usize,
         ),
-        "DPtoLP" => Some(
-            dpto_lp as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
-        ),
-        "LPtoDP" => Some(
-            lpto_dp as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
-        ),
-        "StartDocW" => Some(
-            start_doc_w as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
-        ),
+        "DPtoLP" => Some(dpto_lp as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize),
+        "LPtoDP" => Some(lpto_dp as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize),
+        "StartDocW" => {
+            Some(start_doc_w as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
         "StartPage" => Some(start_page as *const () as usize),
         "EndDoc" => Some(end_doc as *const () as usize),
         "EndPage" => Some(end_page as *const () as usize),
@@ -1848,7 +1852,9 @@ pub unsafe extern "win64" fn get_text_extent_ex_point_w(
     for (i, _) in units.iter().enumerate() {
         cum += char_w;
         if !lp_dx.is_null() {
-            unsafe { *lp_dx.add(i) = cum; }
+            unsafe {
+                *lp_dx.add(i) = cum;
+            }
         }
         if check_max && cum > n_max_extent && fit_count == c as i32 {
             fit_count = i as i32;
@@ -1895,7 +1901,12 @@ pub unsafe extern "win64" fn get_object_w(h: usize, c: i32, pv: *mut u8) -> i32 
     }
     let mut written = 0i32;
     objects::get(h, |kind| match kind {
-        GdiKind::Font { height, weight, italic, face } => {
+        GdiKind::Font {
+            height,
+            weight,
+            italic,
+            face,
+        } => {
             if c >= 92 {
                 let lf = pv as *mut LogFontW;
                 unsafe {
@@ -1929,7 +1940,11 @@ pub unsafe extern "win64" fn get_object_w(h: usize, c: i32, pv: *mut u8) -> i32 
                 written = 12;
             }
         }
-        GdiKind::Pen { color, style, width } => {
+        GdiKind::Pen {
+            color,
+            style,
+            width,
+        } => {
             // LOGPEN: lopnStyle(4)+lopnWidth.x(4)+lopnWidth.y(4)+lopnColor(4) = 16 bytes
             if c >= 16 {
                 let p = pv as *mut u32;
@@ -1995,11 +2010,17 @@ pub unsafe extern "win64" fn enum_font_families_ex_w(
         elf_script: [0u16; 32],
     };
     for (i, ch) in "Courier New".encode_utf16().enumerate() {
-        if i < 31 { elf.elf_log_font.lf_face_name[i] = ch; }
-        if i < 63 { elf.elf_full_name[i] = ch; }
+        if i < 31 {
+            elf.elf_log_font.lf_face_name[i] = ch;
+        }
+        if i < 63 {
+            elf.elf_full_name[i] = ch;
+        }
     }
     for (i, ch) in "Regular".encode_utf16().enumerate() {
-        if i < 31 { elf.elf_style[i] = ch; }
+        if i < 31 {
+            elf.elf_style[i] = ch;
+        }
     }
 
     // Build NEWTEXTMETRICEXW.
@@ -2039,7 +2060,11 @@ pub unsafe extern "win64" fn enum_font_families_ex_w(
         unsafe extern "win64" fn(*const EnumLogFontExW, *const NewTextMetricExW, u32, isize) -> i32;
     let proc_fn: EnumFontProc = unsafe { std::mem::transmute(lp_proc) };
     let ret = unsafe { proc_fn(&elf, &ntm, TRUETYPE_FONTTYPE, lp_param) };
-    if ret == 0 { 0 } else { 1 }
+    if ret == 0 {
+        0
+    } else {
+        1
+    }
 }
 
 /// CreateRectRgn: create a rectangular region.
@@ -2142,8 +2167,16 @@ pub unsafe extern "win64" fn ext_create_pen(
 /// All pointer arguments are ignored in this stub.
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "win64" fn gdi_alpha_blend(
-    _hdc_dest: usize, _x_dest: i32, _y_dest: i32, _w_dest: i32, _h_dest: i32,
-    _hdc_src: usize,  _x_src: i32,  _y_src: i32,  _w_src: i32,  _h_src: i32,
+    _hdc_dest: usize,
+    _x_dest: i32,
+    _y_dest: i32,
+    _w_dest: i32,
+    _h_dest: i32,
+    _hdc_src: usize,
+    _x_src: i32,
+    _y_src: i32,
+    _w_src: i32,
+    _h_src: i32,
     _blend: u64,
 ) -> i32 {
     0
@@ -2185,8 +2218,13 @@ pub unsafe extern "win64" fn rect_visible(_hdc: usize, lp_rect: *const Rect) -> 
 /// rectangle using the current brush and pen; corner ellipse dimensions are (w×h).
 /// Weave: delegates to rectangle (corner rounding is a Phase 3 TODO).
 pub extern "win64" fn round_rect(
-    hdc: usize, left: i32, top: i32, right: i32, bottom: i32,
-    _w: i32, _h: i32,
+    hdc: usize,
+    left: i32,
+    top: i32,
+    right: i32,
+    bottom: i32,
+    _w: i32,
+    _h: i32,
 ) -> i32 {
     rectangle(hdc, left, top, right, bottom)
 }
@@ -2200,10 +2238,15 @@ pub extern "win64" fn round_rect(
 /// # Safety
 /// `lp_point` (if non-null) must be a valid writable POINT.
 pub unsafe extern "win64" fn set_window_org_ex(
-    _hdc: usize, _x: i32, _y: i32, lp_point: *mut Point,
+    _hdc: usize,
+    _x: i32,
+    _y: i32,
+    lp_point: *mut Point,
 ) -> i32 {
     if !lp_point.is_null() {
-        unsafe { *lp_point = Point { x: 0, y: 0 }; }
+        unsafe {
+            *lp_point = Point { x: 0, y: 0 };
+        }
     }
     1
 }
@@ -2216,10 +2259,15 @@ pub unsafe extern "win64" fn set_window_org_ex(
 /// # Safety
 /// `lp_point` (if non-null) must be a valid writable POINT.
 pub unsafe extern "win64" fn offset_window_org_ex(
-    _hdc: usize, _x: i32, _y: i32, lp_point: *mut Point,
+    _hdc: usize,
+    _x: i32,
+    _y: i32,
+    lp_point: *mut Point,
 ) -> i32 {
     if !lp_point.is_null() {
-        unsafe { *lp_point = Point { x: 0, y: 0 }; }
+        unsafe {
+            *lp_point = Point { x: 0, y: 0 };
+        }
     }
     1
 }
@@ -2232,10 +2280,15 @@ pub unsafe extern "win64" fn offset_window_org_ex(
 /// # Safety
 /// `lp_pt` (if non-null) must be a valid writable POINT.
 pub unsafe extern "win64" fn set_brush_org_ex(
-    _hdc: usize, _x: i32, _y: i32, lp_pt: *mut Point,
+    _hdc: usize,
+    _x: i32,
+    _y: i32,
+    lp_pt: *mut Point,
 ) -> i32 {
     if !lp_pt.is_null() {
-        unsafe { *lp_pt = Point { x: 0, y: 0 }; }
+        unsafe {
+            *lp_pt = Point { x: 0, y: 0 };
+        }
     }
     1
 }
@@ -2248,8 +2301,13 @@ pub unsafe extern "win64" fn set_brush_org_ex(
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
 pub unsafe extern "win64" fn set_dib_bits(
-    _hdc: usize, _hbm: usize, _start: u32, _c_lines: u32,
-    _lp_bits: *const u8, _lp_bmi: usize, _color_use: u32,
+    _hdc: usize,
+    _hbm: usize,
+    _start: u32,
+    _c_lines: u32,
+    _lp_bits: *const u8,
+    _lp_bmi: usize,
+    _color_use: u32,
 ) -> i32 {
     0
 }

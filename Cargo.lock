@@ -1247,6 +1247,7 @@ dependencies = [
  "libc",
  "weave-common",
  "weave-core",
+ "weave-kernel32",
 ]
 
 [[package]]

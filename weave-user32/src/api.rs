@@ -13,10 +13,10 @@ use crate::menu;
 use crate::queue::{self, MsgEntry};
 use crate::window::{self, WindowEntry};
 use libc;
-use weave_common::stub::warn_once;
 use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
 use std::sync::atomic::{AtomicI32, AtomicU32, Ordering};
+use std::sync::{Mutex, OnceLock};
+use weave_common::stub::warn_once;
 
 // ── Scroll bar per-(hwnd,bar) state ──────────────────────────────────────────
 
@@ -33,6 +33,41 @@ static SCROLL_STATE: OnceLock<Mutex<HashMap<(usize, i32), ScrollState>>> = OnceL
 
 fn scroll_state() -> &'static Mutex<HashMap<(usize, i32), ScrollState>> {
     SCROLL_STATE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+// ── Per-window extra data (GWL_EXSTYLE / GWLP_USERDATA) ─────────────────────
+//
+// Stored outside WindowEntry so that adding these fields doesn't change the
+// struct's heap-allocation size (which affects glibc tcache bucketing and can
+// expose latent heap bugs in certain apps).
+
+struct WindowExtra {
+    ex_style: u32,
+    user_data: isize,
+}
+
+static WINDOW_EXTRA: OnceLock<Mutex<HashMap<usize, WindowExtra>>> = OnceLock::new();
+
+fn window_extra() -> &'static Mutex<HashMap<usize, WindowExtra>> {
+    WINDOW_EXTRA.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn get_extra<R, F: FnOnce(&WindowExtra) -> R>(hwnd: usize, f: F, default: R) -> R {
+    window_extra()
+        .lock()
+        .unwrap()
+        .get(&hwnd)
+        .map(f)
+        .unwrap_or(default)
+}
+
+fn set_extra<F: FnOnce(&mut WindowExtra)>(hwnd: usize, f: F) {
+    let mut map = window_extra().lock().unwrap();
+    let entry = map.entry(hwnd).or_insert(WindowExtra {
+        ex_style: 0,
+        user_data: 0,
+    });
+    f(entry);
 }
 
 // ── Caret position ───────────────────────────────────────────────────────────
@@ -201,8 +236,6 @@ pub unsafe extern "win64" fn create_window_ex_w(
         wnd_proc: cls.wnd_proc,
         title: title.clone(),
         style: dw_style,
-        ex_style: dw_ex_style,
-        user_data: 0,
         x: abs_x,
         y: abs_y,
         width,
@@ -211,6 +244,7 @@ pub unsafe extern "win64" fn create_window_ex_w(
         xcb_id,
         h_menu: h_menu_param,
     });
+    set_extra(hwnd, |e| e.ex_style = dw_ex_style);
 
     // Build CREATESTRUCTW on the stack and call WNDPROC with WM_NCCREATE then WM_CREATE.
     // Title and class name as wide strings for the struct — we need them alive during the call.
@@ -299,6 +333,7 @@ pub extern "win64" fn destroy_window(hwnd: usize) -> i32 {
 
     backend::destroy_window(xcb);
     window::remove(hwnd);
+    window_extra().lock().unwrap().remove(&hwnd);
     1 // TRUE
 }
 
@@ -403,46 +438,184 @@ fn vk_to_char(vk: usize, shift: bool) -> Option<char> {
     // Letters: VK_A(0x41)..VK_Z(0x5A) → lowercase or uppercase
     if (0x41..=0x5A).contains(&vk) {
         let base = vk as u8; // uppercase ASCII
-        return Some(if shift { base as char } else { (base + 0x20) as char });
+        return Some(if shift {
+            base as char
+        } else {
+            (base + 0x20) as char
+        });
     }
     // Digits and OEM punctuation
     let ch = match vk {
         // Digits — shift gives US shift-symbol
-        0x30 => if shift { ')' } else { '0' },
-        0x31 => if shift { '!' } else { '1' },
-        0x32 => if shift { '@' } else { '2' },
-        0x33 => if shift { '#' } else { '3' },
-        0x34 => if shift { '$' } else { '4' },
-        0x35 => if shift { '%' } else { '5' },
-        0x36 => if shift { '^' } else { '6' },
-        0x37 => if shift { '&' } else { '7' },
-        0x38 => if shift { '*' } else { '8' },
-        0x39 => if shift { '(' } else { '9' },
+        0x30 => {
+            if shift {
+                ')'
+            } else {
+                '0'
+            }
+        }
+        0x31 => {
+            if shift {
+                '!'
+            } else {
+                '1'
+            }
+        }
+        0x32 => {
+            if shift {
+                '@'
+            } else {
+                '2'
+            }
+        }
+        0x33 => {
+            if shift {
+                '#'
+            } else {
+                '3'
+            }
+        }
+        0x34 => {
+            if shift {
+                '$'
+            } else {
+                '4'
+            }
+        }
+        0x35 => {
+            if shift {
+                '%'
+            } else {
+                '5'
+            }
+        }
+        0x36 => {
+            if shift {
+                '^'
+            } else {
+                '6'
+            }
+        }
+        0x37 => {
+            if shift {
+                '&'
+            } else {
+                '7'
+            }
+        }
+        0x38 => {
+            if shift {
+                '*'
+            } else {
+                '8'
+            }
+        }
+        0x39 => {
+            if shift {
+                '('
+            } else {
+                '9'
+            }
+        }
         // OEM keys (US layout)
-        0xBA => if shift { ':' } else { ';' },  // VK_OEM_1
-        0xBB => if shift { '+' } else { '=' },  // VK_OEM_PLUS
-        0xBC => if shift { '<' } else { ',' },  // VK_OEM_COMMA
-        0xBD => if shift { '_' } else { '-' },  // VK_OEM_MINUS
-        0xBE => if shift { '>' } else { '.' },  // VK_OEM_PERIOD
-        0xBF => if shift { '?' } else { '/' },  // VK_OEM_2
-        0xC0 => if shift { '~' } else { '`' },  // VK_OEM_3
-        0xDB => if shift { '{' } else { '[' },  // VK_OEM_4
-        0xDC => if shift { '|' } else { '\\' }, // VK_OEM_5
-        0xDD => if shift { '}' } else { ']' },  // VK_OEM_6
-        0xDE => if shift { '"' } else { '\'' }, // VK_OEM_7
+        0xBA => {
+            if shift {
+                ':'
+            } else {
+                ';'
+            }
+        } // VK_OEM_1
+        0xBB => {
+            if shift {
+                '+'
+            } else {
+                '='
+            }
+        } // VK_OEM_PLUS
+        0xBC => {
+            if shift {
+                '<'
+            } else {
+                ','
+            }
+        } // VK_OEM_COMMA
+        0xBD => {
+            if shift {
+                '_'
+            } else {
+                '-'
+            }
+        } // VK_OEM_MINUS
+        0xBE => {
+            if shift {
+                '>'
+            } else {
+                '.'
+            }
+        } // VK_OEM_PERIOD
+        0xBF => {
+            if shift {
+                '?'
+            } else {
+                '/'
+            }
+        } // VK_OEM_2
+        0xC0 => {
+            if shift {
+                '~'
+            } else {
+                '`'
+            }
+        } // VK_OEM_3
+        0xDB => {
+            if shift {
+                '{'
+            } else {
+                '['
+            }
+        } // VK_OEM_4
+        0xDC => {
+            if shift {
+                '|'
+            } else {
+                '\\'
+            }
+        } // VK_OEM_5
+        0xDD => {
+            if shift {
+                '}'
+            } else {
+                ']'
+            }
+        } // VK_OEM_6
+        0xDE => {
+            if shift {
+                '"'
+            } else {
+                '\''
+            }
+        } // VK_OEM_7
         // Control characters
         0x08 => '\x08', // VK_BACK
         0x09 => '\t',   // VK_TAB
         0x0D => '\r',   // VK_RETURN
         0x20 => ' ',    // VK_SPACE
         // Numpad digits
-        0x60 => '0', 0x61 => '1', 0x62 => '2', 0x63 => '3', 0x64 => '4',
-        0x65 => '5', 0x66 => '6', 0x67 => '7', 0x68 => '8', 0x69 => '9',
-        0x6A => '*', // VK_MULTIPLY
-        0x6B => '+', // VK_ADD
-        0x6D => '-', // VK_SUBTRACT
-        0x6E => '.', // VK_DECIMAL
-        0x6F => '/', // VK_DIVIDE
+        0x60 => '0',
+        0x61 => '1',
+        0x62 => '2',
+        0x63 => '3',
+        0x64 => '4',
+        0x65 => '5',
+        0x66 => '6',
+        0x67 => '7',
+        0x68 => '8',
+        0x69 => '9',
+        0x6A => '*',      // VK_MULTIPLY
+        0x6B => '+',      // VK_ADD
+        0x6D => '-',      // VK_SUBTRACT
+        0x6E => '.',      // VK_DECIMAL
+        0x6F => '/',      // VK_DIVIDE
         _ => return None, // non-printable: function keys, modifiers, arrows, etc.
     };
     Some(ch)
@@ -1126,48 +1299,50 @@ const GWLP_USERDATA: i32 = -21;
 // Wine ref: dlls/win32u/window.c — get_window_long_size dispatches on offset; GWL_EXSTYLE
 // returns the extended style stored at creation; GWLP_USERDATA returns per-window app data.
 pub extern "win64" fn get_window_long_w(hwnd: usize, n_index: i32) -> i32 {
-    window::with(hwnd, |w| match n_index {
-        GWL_STYLE => w.style as i32,
-        GWL_EXSTYLE => w.ex_style as i32,
-        GWL_WNDPROC => w.wnd_proc as i32,
-        GWLP_USERDATA => w.user_data as i32,
-        _ => 0,
-    })
-    .unwrap_or(0)
+    match n_index {
+        GWL_EXSTYLE => get_extra(hwnd, |e| e.ex_style as i32, 0),
+        GWLP_USERDATA => get_extra(hwnd, |e| e.user_data as i32, 0),
+        _ => window::with(hwnd, |w| match n_index {
+            GWL_STYLE => w.style as i32,
+            GWL_WNDPROC => w.wnd_proc as i32,
+            _ => 0,
+        })
+        .unwrap_or(0),
+    }
 }
 
 // Wine ref: dlls/win32u/window.c — GetWindowLongPtrW is a 64-bit version of GetWindowLongW;
 // GWLP_USERDATA returns the full pointer-width value.
 pub extern "win64" fn get_window_long_ptr_w(hwnd: usize, n_index: i32) -> isize {
-    window::with(hwnd, |w| match n_index {
-        GWL_STYLE => w.style as isize,
-        GWL_EXSTYLE => w.ex_style as isize,
-        GWL_WNDPROC => w.wnd_proc as isize,
-        GWLP_USERDATA => w.user_data,
-        _ => 0,
-    })
-    .unwrap_or(0)
+    match n_index {
+        GWL_EXSTYLE => get_extra(hwnd, |e| e.ex_style as isize, 0),
+        GWLP_USERDATA => get_extra(hwnd, |e| e.user_data, 0),
+        _ => window::with(hwnd, |w| match n_index {
+            GWL_STYLE => w.style as isize,
+            GWL_WNDPROC => w.wnd_proc as isize,
+            _ => 0,
+        })
+        .unwrap_or(0),
+    }
 }
 
 // Wine ref: dlls/win32u/window.c — SetWindowLongW returns the previous value; triggers
 // WM_STYLECHANGING/WM_STYLECHANGED for GWL_STYLE (not implemented here — Phase 4 gap).
 pub extern "win64" fn set_window_long_w(hwnd: usize, n_index: i32, dw_new_long: i32) -> i32 {
     match n_index {
+        GWL_EXSTYLE => {
+            let old = get_extra(hwnd, |e| e.ex_style as i32, 0);
+            set_extra(hwnd, |e| e.ex_style = dw_new_long as u32);
+            old
+        }
+        GWLP_USERDATA => {
+            let old = get_extra(hwnd, |e| e.user_data as i32, 0);
+            set_extra(hwnd, |e| e.user_data = dw_new_long as isize);
+            old
+        }
         GWL_STYLE => window::with_mut(hwnd, |w| {
             let old = w.style as i32;
             w.style = dw_new_long as u32;
-            old
-        })
-        .unwrap_or(0),
-        GWL_EXSTYLE => window::with_mut(hwnd, |w| {
-            let old = w.ex_style as i32;
-            w.ex_style = dw_new_long as u32;
-            old
-        })
-        .unwrap_or(0),
-        GWLP_USERDATA => window::with_mut(hwnd, |w| {
-            let old = w.user_data as i32;
-            w.user_data = dw_new_long as isize;
             old
         })
         .unwrap_or(0),
@@ -1183,27 +1358,25 @@ pub extern "win64" fn set_window_long_ptr_w(
     dw_new_long: isize,
 ) -> isize {
     match n_index {
+        GWL_EXSTYLE => {
+            let old = get_extra(hwnd, |e| e.ex_style as isize, 0);
+            set_extra(hwnd, |e| e.ex_style = dw_new_long as u32);
+            old
+        }
+        GWLP_USERDATA => {
+            let old = get_extra(hwnd, |e| e.user_data, 0);
+            set_extra(hwnd, |e| e.user_data = dw_new_long);
+            old
+        }
         GWL_STYLE => window::with_mut(hwnd, |w| {
             let old = w.style as isize;
             w.style = dw_new_long as u32;
             old
         })
         .unwrap_or(0),
-        GWL_EXSTYLE => window::with_mut(hwnd, |w| {
-            let old = w.ex_style as isize;
-            w.ex_style = dw_new_long as u32;
-            old
-        })
-        .unwrap_or(0),
         GWL_WNDPROC => window::with_mut(hwnd, |w| {
             let old = w.wnd_proc as isize;
             w.wnd_proc = dw_new_long as usize;
-            old
-        })
-        .unwrap_or(0),
-        GWLP_USERDATA => window::with_mut(hwnd, |w| {
-            let old = w.user_data;
-            w.user_data = dw_new_long;
             old
         })
         .unwrap_or(0),
@@ -1622,8 +1795,6 @@ pub unsafe extern "win64" fn create_window_ex_a(
         wnd_proc: cls.wnd_proc,
         title: title.clone(),
         style: dw_style,
-        ex_style: dw_ex_style,
-        user_data: 0,
         x: pos_x,
         y: pos_y,
         width,
@@ -1632,6 +1803,7 @@ pub unsafe extern "win64" fn create_window_ex_a(
         xcb_id,
         h_menu: h_menu_param,
     });
+    set_extra(hwnd, |e| e.ex_style = dw_ex_style);
 
     let title_wide: Vec<u16> = title.encode_utf16().chain(std::iter::once(0)).collect();
     let class_wide: Vec<u16> = class_name
@@ -2164,7 +2336,11 @@ pub unsafe extern "win64" fn set_timer(
 /// does not exist for the given (hwnd, id) pair.
 pub extern "win64" fn kill_timer(h_wnd: usize, u_id_event: usize) -> i32 {
     let removed = timer_table().lock().unwrap().remove(&(h_wnd, u_id_event));
-    if removed.is_some() { 1 } else { 0 }
+    if removed.is_some() {
+        1
+    } else {
+        0
+    }
 }
 
 // ── Message helpers ───────────────────────────────────────────────────────────
@@ -2196,7 +2372,11 @@ pub extern "win64" fn get_message_pos() -> u32 {
 /// which returns a bitmask of QS_* flags. Weave returns QS_POSTMESSAGE (0x0008)
 /// when the queue is non-empty, 0 otherwise.
 pub extern "win64" fn get_queue_status(_flags: u32) -> u32 {
-    if queue::has_message() { 0x0008 } else { 0 } // QS_POSTMESSAGE
+    if queue::has_message() {
+        0x0008
+    } else {
+        0
+    } // QS_POSTMESSAGE
 }
 
 /// MsgWaitForMultipleObjects: wait for objects or a message. Returns WAIT_TIMEOUT.

@@ -3,13 +3,13 @@
 //! Maps class names (case-insensitive) to registered WNDCLASSW data.
 //! `RegisterClassW` stores here; `CreateWindowExW` looks up here.
 
-use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
 use crate::defs::{
-    decode_wide, WM_NCCREATE, WM_SETTEXT, WM_GETTEXT, WM_GETTEXTLENGTH,
-    EM_GETSEL, EM_SETSEL, EM_REPLACESEL, EM_SETLIMITTEXT, EM_GETLIMITTEXT,
+    decode_wide, EM_GETLIMITTEXT, EM_GETSEL, EM_REPLACESEL, EM_SETLIMITTEXT, EM_SETSEL, WM_GETTEXT,
+    WM_GETTEXTLENGTH, WM_NCCREATE, WM_SETTEXT,
 };
 use crate::window;
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
 
 /// Data stored for each registered window class.
 #[derive(Clone)]
@@ -89,7 +89,11 @@ unsafe extern "win64" fn edit_wnd_proc(
             // Initialise per-window edit state on creation.
             edit_state().lock().unwrap().insert(
                 hwnd,
-                EditState { sel_start: 0, sel_end: 0, limit: 0x7FFF_FFFF },
+                EditState {
+                    sel_start: 0,
+                    sel_end: 0,
+                    limit: 0x7FFF_FFFF,
+                },
             );
             1 // TRUE — allow creation
         }
@@ -145,10 +149,14 @@ unsafe extern "win64" fn edit_wnd_proc(
                 .unwrap_or((0, 0));
             drop(guard);
             if w_param != 0 {
-                unsafe { *(w_param as *mut u32) = start; }
+                unsafe {
+                    *(w_param as *mut u32) = start;
+                }
             }
             if l_param != 0 {
-                unsafe { *(l_param as *mut u32) = end; }
+                unsafe {
+                    *(l_param as *mut u32) = end;
+                }
             }
             (((end as isize) & 0xFFFF) << 16) | ((start as isize) & 0xFFFF)
         }
@@ -158,17 +166,25 @@ unsafe extern "win64" fn edit_wnd_proc(
             // -1 for end means "end of text".
             // Wine ref: dlls/user32/edit.c::EDIT_EM_SetSel — start==-1 means move both to
             // selection_end; values clamped to text length; order preserved as-is.
-            let text_len = window::with(hwnd, |e| e.title.encode_utf16().count())
-                .unwrap_or(0) as u32;
+            let text_len =
+                window::with(hwnd, |e| e.title.encode_utf16().count()).unwrap_or(0) as u32;
             let raw_start = w_param as i32;
             let raw_end = l_param as i32;
             let (sel_start, sel_end) = if raw_start == -1 {
-                let old_end = edit_state().lock().unwrap()
-                    .get(&hwnd).map(|s| s.sel_end).unwrap_or(0);
+                let old_end = edit_state()
+                    .lock()
+                    .unwrap()
+                    .get(&hwnd)
+                    .map(|s| s.sel_end)
+                    .unwrap_or(0);
                 (old_end, old_end)
             } else {
                 let s = (raw_start as u32).min(text_len);
-                let e = if raw_end == -1 { text_len } else { (raw_end as u32).min(text_len) };
+                let e = if raw_end == -1 {
+                    text_len
+                } else {
+                    (raw_end as u32).min(text_len)
+                };
                 (s, e)
             };
             if let Some(state) = edit_state().lock().unwrap().get_mut(&hwnd) {
@@ -190,7 +206,10 @@ unsafe extern "win64" fn edit_wnd_proc(
             let current_text = window::with(hwnd, |e| e.title.clone()).unwrap_or_default();
             let (raw_start, raw_end) = {
                 let guard = edit_state().lock().unwrap();
-                guard.get(&hwnd).map(|s| (s.sel_start, s.sel_end)).unwrap_or((0, 0))
+                guard
+                    .get(&hwnd)
+                    .map(|s| (s.sel_start, s.sel_end))
+                    .unwrap_or((0, 0))
             };
 
             // ORDER_UINT: ensure start <= end.
@@ -204,7 +223,8 @@ unsafe extern "win64" fn edit_wnd_proc(
             let chars: Vec<char> = current_text.chars().collect();
             let s = sel_start.min(chars.len());
             let e = sel_end.min(chars.len());
-            let mut new_chars: Vec<char> = Vec::with_capacity(chars.len() - (e - s) + repl_chars.len());
+            let mut new_chars: Vec<char> =
+                Vec::with_capacity(chars.len() - (e - s) + repl_chars.len());
             new_chars.extend_from_slice(&chars[..s]);
             new_chars.extend_from_slice(&repl_chars);
             new_chars.extend_from_slice(&chars[e..]);
@@ -223,7 +243,11 @@ unsafe extern "win64" fn edit_wnd_proc(
             // wParam: new limit; 0 means use default (0x7FFF for single-line).
             // Wine ref: dlls/user32/edit.c::EDIT_EM_SetLimitText — if limit==0, use 0x7FFFFFFE
             // for multi-line or MAXSHORT for single-line. Weave uses 0x7FFF as the simple default.
-            let limit = if w_param == 0 { 0x7FFF } else { w_param.min(0x7FFF_FFFF) as u32 };
+            let limit = if w_param == 0 {
+                0x7FFF
+            } else {
+                w_param.min(0x7FFF_FFFF) as u32
+            };
             if let Some(state) = edit_state().lock().unwrap().get_mut(&hwnd) {
                 state.limit = limit;
             }
@@ -232,8 +256,12 @@ unsafe extern "win64" fn edit_wnd_proc(
 
         EM_GETLIMITTEXT => {
             // Wine ref: dlls/user32/edit.c — returns es->buffer_limit.
-            edit_state().lock().unwrap()
-                .get(&hwnd).map(|s| s.limit as isize).unwrap_or(0x7FFF)
+            edit_state()
+                .lock()
+                .unwrap()
+                .get(&hwnd)
+                .map(|s| s.limit as isize)
+                .unwrap_or(0x7FFF)
         }
 
         _ => builtin_control_wnd_proc(hwnd, msg, w_param, l_param as usize) as isize,
