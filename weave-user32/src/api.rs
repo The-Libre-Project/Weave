@@ -181,10 +181,20 @@ pub unsafe extern "win64" fn create_window_ex_w(
     let pos_x = if x == i32::MIN { 100 } else { x };
     let pos_y = if y == i32::MIN { 100 } else { y };
 
+    // Wine ref: dlls/win32u/window.c — child window positions are parent-relative;
+    // top-level window positions are screen coordinates. Translate to screen coords
+    // so the X11 window appears at the correct absolute position.
+    let (abs_x, abs_y) = if (dw_style & WS_CHILD) != 0 && h_wnd_parent != 0 {
+        let parent_pos = window::with(h_wnd_parent, |e| (e.x, e.y)).unwrap_or((0, 0));
+        (pos_x + parent_pos.0, pos_y + parent_pos.1)
+    } else {
+        (pos_x, pos_y)
+    };
+
     let visible = (dw_style & WS_VISIBLE) != 0;
 
     // Create the X11 window (no-op on non-Linux).
-    let xcb_id = backend::create_window(&title, pos_x, pos_y, width, height, visible);
+    let xcb_id = backend::create_window(&title, abs_x, abs_y, width, height, visible);
 
     let hwnd = window::create(WindowEntry {
         class_name: class_name.clone(),
@@ -193,8 +203,8 @@ pub unsafe extern "win64" fn create_window_ex_w(
         style: dw_style,
         ex_style: dw_ex_style,
         user_data: 0,
-        x: pos_x,
-        y: pos_y,
+        x: abs_x,
+        y: abs_y,
         width,
         height,
         visible,
