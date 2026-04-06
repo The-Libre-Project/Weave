@@ -60,7 +60,7 @@ pub const MF_BYPOSITION: u32 = 0x0400;
 // ── Public API ────────────────────────────────────────────────────────────────
 
 /// CreateMenu: create an empty menu bar.
-pub fn create_menu() -> usize {
+pub extern "win64" fn create_menu() -> usize {
     alloc_menu()
 }
 
@@ -68,7 +68,7 @@ pub fn create_menu() -> usize {
 ///
 /// In the Win32 model, popup menus and menu bars have identical storage;
 /// the difference is only how they're displayed. We treat them the same.
-pub fn create_popup_menu() -> usize {
+pub extern "win64" fn create_popup_menu() -> usize {
     alloc_menu()
 }
 
@@ -77,7 +77,7 @@ pub fn create_popup_menu() -> usize {
 /// # Safety
 /// `lp_new_item`, when flags include MF_STRING, must be a valid
 /// null-terminated UTF-16 string pointer.
-pub unsafe fn append_menu_w(
+pub unsafe extern "win64" fn append_menu_w(
     h_menu: usize,
     u_flags: u32,
     u_id_new_item: usize,
@@ -114,7 +114,7 @@ pub unsafe fn append_menu_w(
 ///
 /// # Safety
 /// Same as append_menu_w.
-pub unsafe fn insert_menu_item_w(
+pub unsafe extern "win64" fn insert_menu_item_w(
     h_menu: usize,
     _u_item: u32,
     _f_by_position: i32,
@@ -140,7 +140,7 @@ pub unsafe fn insert_menu_item_w(
 /// SetMenu: attach a menu bar to a window.
 ///
 /// Phase 2: stored in window table; not rendered. Returns TRUE.
-pub fn set_menu(hwnd: usize, h_menu: usize) -> i32 {
+pub extern "win64" fn set_menu(hwnd: usize, h_menu: usize) -> i32 {
     crate::window::with_mut(hwnd, |w| {
         w.h_menu = h_menu;
     });
@@ -148,12 +148,12 @@ pub fn set_menu(hwnd: usize, h_menu: usize) -> i32 {
 }
 
 /// GetMenu: return the menu handle attached to a window.
-pub fn get_menu(hwnd: usize) -> usize {
+pub extern "win64" fn get_menu(hwnd: usize) -> usize {
     crate::window::with(hwnd, |w| w.h_menu).unwrap_or(0)
 }
 
 /// DestroyMenu: free a menu and all its items.
-pub fn destroy_menu(h_menu: usize) -> i32 {
+pub extern "win64" fn destroy_menu(h_menu: usize) -> i32 {
     let mut m = menus().lock().unwrap();
     m.menus.remove(&h_menu).map(|_| 1).unwrap_or(0)
 }
@@ -161,7 +161,7 @@ pub fn destroy_menu(h_menu: usize) -> i32 {
 /// TrackPopupMenu: display a popup menu at a screen position.
 ///
 /// Phase 2 stub: does nothing visually, returns 0 (no item selected).
-pub fn track_popup_menu(
+pub extern "win64" fn track_popup_menu(
     _h_menu: usize,
     _u_flags: u32,
     _x: i32,
@@ -174,7 +174,7 @@ pub fn track_popup_menu(
 }
 
 /// TrackPopupMenuEx: extended popup tracking (Phase 2 stub).
-pub fn track_popup_menu_ex(
+pub extern "win64" fn track_popup_menu_ex(
     _h_menu: usize,
     _u_flags: u32,
     _x: i32,
@@ -220,7 +220,7 @@ pub fn delete_item(h_menu: usize, u_position: u32, u_flags: u32) {
 }
 
 /// GetMenuItemCount: return the number of items in a menu.
-pub fn get_menu_item_count(h_menu: usize) -> i32 {
+pub extern "win64" fn get_menu_item_count(h_menu: usize) -> i32 {
     let m = menus().lock().unwrap();
     m.menus.get(&h_menu).map(|v| v.len() as i32).unwrap_or(-1)
 }
@@ -228,7 +228,7 @@ pub fn get_menu_item_count(h_menu: usize) -> i32 {
 /// CheckMenuItem: set or clear the checked state on a menu item.
 ///
 /// Phase 2: mutates stored flags, returns previous check state.
-pub fn check_menu_item(h_menu: usize, u_id_check_item: u32, u_check: u32) -> u32 {
+pub extern "win64" fn check_menu_item(h_menu: usize, u_id_check_item: u32, u_check: u32) -> u32 {
     let mut m = menus().lock().unwrap();
     let items = match m.menus.get_mut(&h_menu) {
         Some(v) => v,
@@ -255,7 +255,7 @@ pub fn check_menu_item(h_menu: usize, u_id_check_item: u32, u_check: u32) -> u32
 }
 
 /// EnableMenuItem: enable or grey a menu item.
-pub fn enable_menu_item(h_menu: usize, u_id_enable_item: u32, u_enable: u32) -> i32 {
+pub extern "win64" fn enable_menu_item(h_menu: usize, u_id_enable_item: u32, u_enable: u32) -> i32 {
     let mut m = menus().lock().unwrap();
     let items = match m.menus.get_mut(&h_menu) {
         Some(v) => v,

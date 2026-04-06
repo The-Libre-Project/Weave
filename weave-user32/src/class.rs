@@ -20,6 +20,8 @@ pub struct ClassEntry {
     pub style: u32,
     pub h_cursor: usize,
     pub hbr_background: usize,
+    /// Number of extra bytes to allocate per window (cbWndExtra).
+    pub cb_wnd_extra: u32,
 }
 
 // ── Global class table ────────────────────────────────────────────────────────
@@ -346,6 +348,7 @@ pub fn find(name: &str) -> Option<ClassEntry> {
             style: 0,
             h_cursor: 0,
             hbr_background: 0,
+            cb_wnd_extra: 0,
         });
     }
     None
@@ -361,6 +364,7 @@ mod tests {
             style: 0,
             h_cursor: 0,
             hbr_background: 0,
+            cb_wnd_extra: 0,
         }
     }
 

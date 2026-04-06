@@ -55,7 +55,7 @@ pub const CF_HDROP: u32 = 15;
 /// OpenClipboard: open the clipboard for examination or modification.
 ///
 /// Returns TRUE on success. Phase 2: always succeeds (no contention).
-pub fn open_clipboard(h_wnd_new_owner: usize) -> i32 {
+pub extern "win64" fn open_clipboard(h_wnd_new_owner: usize) -> i32 {
     let mut s = state().lock().unwrap();
     s.open = true;
     s.owner_hwnd = h_wnd_new_owner;
@@ -63,7 +63,7 @@ pub fn open_clipboard(h_wnd_new_owner: usize) -> i32 {
 }
 
 /// CloseClipboard: close the clipboard.
-pub fn close_clipboard() -> i32 {
+pub extern "win64" fn close_clipboard() -> i32 {
     let mut s = state().lock().unwrap();
     s.open = false;
     1 // TRUE
@@ -73,7 +73,7 @@ pub fn close_clipboard() -> i32 {
 ///
 /// Phase 2: leaks any previously stored HGLOBAL handles (caller should
 /// have already freed them before calling EmptyClipboard).
-pub fn empty_clipboard() -> i32 {
+pub extern "win64" fn empty_clipboard() -> i32 {
     let mut s = state().lock().unwrap();
     s.data.clear();
     1 // TRUE
@@ -83,7 +83,7 @@ pub fn empty_clipboard() -> i32 {
 ///
 /// Takes ownership of `h_mem` (the caller must not use it afterwards).
 /// Returns `h_mem` on success, 0 on failure.
-pub fn set_clipboard_data(u_format: u32, h_mem: usize) -> usize {
+pub extern "win64" fn set_clipboard_data(u_format: u32, h_mem: usize) -> usize {
     let mut s = state().lock().unwrap();
     if !s.open {
         return 0;
@@ -95,7 +95,7 @@ pub fn set_clipboard_data(u_format: u32, h_mem: usize) -> usize {
 /// GetClipboardData: retrieve a handle to the data in the specified format.
 ///
 /// Returns the stored HGLOBAL (pointer), or 0 if the format is unavailable.
-pub fn get_clipboard_data(u_format: u32) -> usize {
+pub extern "win64" fn get_clipboard_data(u_format: u32) -> usize {
     let s = state().lock().unwrap();
     if !s.open {
         return 0;
@@ -104,18 +104,18 @@ pub fn get_clipboard_data(u_format: u32) -> usize {
 }
 
 /// IsClipboardFormatAvailable: check whether a clipboard format is available.
-pub fn is_clipboard_format_available(u_format: u32) -> i32 {
+pub extern "win64" fn is_clipboard_format_available(u_format: u32) -> i32 {
     let s = state().lock().unwrap();
     s.data.contains_key(&u_format) as i32
 }
 
 /// CountClipboardFormats: return the number of formats currently on the clipboard.
-pub fn count_clipboard_formats() -> i32 {
+pub extern "win64" fn count_clipboard_formats() -> i32 {
     state().lock().unwrap().data.len() as i32
 }
 
 /// GetClipboardOwner: return the HWND of the current clipboard owner.
-pub fn get_clipboard_owner() -> usize {
+pub extern "win64" fn get_clipboard_owner() -> usize {
     state().lock().unwrap().owner_hwnd
 }
 

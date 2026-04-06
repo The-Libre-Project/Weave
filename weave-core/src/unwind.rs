@@ -532,7 +532,7 @@ mod x64 {
                 }
             };
 
-            let rva = (control_pc as usize - image_base) as u32;
+            let _rva = (control_pc as usize - image_base) as u32;
             let mut frame_ctx = Default::default();
             unsafe {
                 std::ptr::copy_nonoverlapping(
@@ -875,6 +875,22 @@ mod x64 {
 
         exc_record.exception_address = caller_rip as *mut u8;
 
+        // For MSVC C++ exceptions (0xe06d7363): params are [magic, obj_ptr, throwinfo_rva, imgbase]
+        // params[2] is the ThrowInfo RVA relative to params[3] (the image base).
+        // Logging the RVA helps identify the exception type in the PE.
+        if exception_code == 0xe06d7363 && exc_record.number_parameters >= 4 {
+            let p = &exc_record.exception_information;
+            let throwinfo_rva = p[2].wrapping_sub(p[3]);
+            eprintln!(
+                "weave: C++ throw at rip={caller_rip:#x}: obj={:#x} throwinfo_rva={throwinfo_rva:#x}",
+                p[1]
+            );
+        } else {
+            eprintln!(
+                "weave: RaiseException: code={exception_code:#x} at rip={caller_rip:#x}"
+            );
+        }
+
         let handled = unsafe { dispatch_exception(&mut exc_record, &mut ctx) };
         if !handled {
             eprintln!("weave: unhandled exception {exception_code:#x}");
@@ -916,9 +932,7 @@ mod x64 {
             exc_record.exception_information[i] = unsafe { *arguments.add(i) };
         }
 
-        let mut ctx = Context::default();
-        ctx.rip = throw_rip;
-        ctx.rsp = throw_rsp;
+        let mut ctx = Context { rip: throw_rip, rsp: throw_rsp, ..Context::default() };
 
         // Capture Weave's current non-volatile registers as a best-effort
         // approximation. virtual_unwind reads saved registers from the stack
@@ -998,25 +1012,27 @@ mod x64 {
         exc_record.exception_information[1] = fault_addr as u64;
 
         // Build Context from ucontext
-        let mut ctx = Context::default();
-        ctx.rax = gregs[libc::REG_RAX as usize] as u64;
-        ctx.rcx = gregs[libc::REG_RCX as usize] as u64;
-        ctx.rdx = gregs[libc::REG_RDX as usize] as u64;
-        ctx.rbx = gregs[libc::REG_RBX as usize] as u64;
-        ctx.rsp = gregs[libc::REG_RSP as usize] as u64;
-        ctx.rbp = gregs[libc::REG_RBP as usize] as u64;
-        ctx.rsi = gregs[libc::REG_RSI as usize] as u64;
-        ctx.rdi = gregs[libc::REG_RDI as usize] as u64;
-        ctx.r8 = gregs[libc::REG_R8 as usize] as u64;
-        ctx.r9 = gregs[libc::REG_R9 as usize] as u64;
-        ctx.r10 = gregs[libc::REG_R10 as usize] as u64;
-        ctx.r11 = gregs[libc::REG_R11 as usize] as u64;
-        ctx.r12 = gregs[libc::REG_R12 as usize] as u64;
-        ctx.r13 = gregs[libc::REG_R13 as usize] as u64;
-        ctx.r14 = gregs[libc::REG_R14 as usize] as u64;
-        ctx.r15 = gregs[libc::REG_R15 as usize] as u64;
-        ctx.rip = gregs[libc::REG_RIP as usize] as u64;
-        ctx.context_flags = 0x10001f; // CONTEXT_ALL
+        let mut ctx = Context {
+            rax: gregs[libc::REG_RAX as usize] as u64,
+            rcx: gregs[libc::REG_RCX as usize] as u64,
+            rdx: gregs[libc::REG_RDX as usize] as u64,
+            rbx: gregs[libc::REG_RBX as usize] as u64,
+            rsp: gregs[libc::REG_RSP as usize] as u64,
+            rbp: gregs[libc::REG_RBP as usize] as u64,
+            rsi: gregs[libc::REG_RSI as usize] as u64,
+            rdi: gregs[libc::REG_RDI as usize] as u64,
+            r8: gregs[libc::REG_R8 as usize] as u64,
+            r9: gregs[libc::REG_R9 as usize] as u64,
+            r10: gregs[libc::REG_R10 as usize] as u64,
+            r11: gregs[libc::REG_R11 as usize] as u64,
+            r12: gregs[libc::REG_R12 as usize] as u64,
+            r13: gregs[libc::REG_R13 as usize] as u64,
+            r14: gregs[libc::REG_R14 as usize] as u64,
+            r15: gregs[libc::REG_R15 as usize] as u64,
+            rip: gregs[libc::REG_RIP as usize] as u64,
+            context_flags: 0x10001f, // CONTEXT_ALL
+            ..Context::default()
+        };
 
         let handled = unsafe { dispatch_exception(&mut exc_record, &mut ctx) };
         if handled {
@@ -1064,10 +1080,16 @@ mod x64 {
         context_record: *mut Context,
         _history_table: u64,
     ) {
+        let (exc_code, exc_addr) = if exception_record.is_null() {
+            (0u32, 0usize)
+        } else {
+            let r = unsafe { &*exception_record };
+            (r.exception_code, r.exception_address as usize)
+        };
         eprintln!(
-        "weave: RtlUnwindEx called: target_frame={:#x} target_ip={:#x} return_value={return_value:#x}",
-        target_frame as usize, target_ip as usize
-    );
+            "weave: RtlUnwindEx: target_frame={:#x} target_ip={:#x} exc_code={exc_code:#x} exc_addr={exc_addr:#x}",
+            target_frame as usize, target_ip as usize
+        );
 
         unsafe {
             unwind_ex(

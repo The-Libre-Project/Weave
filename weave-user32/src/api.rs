@@ -115,6 +115,7 @@ pub unsafe extern "win64" fn register_class_w(lp_wnd_class: *const WndClassW) ->
             style: wc.style,
             h_cursor: wc.h_cursor,
             hbr_background: wc.hbr_background,
+            cb_wnd_extra: wc.cb_wnd_extra.max(0) as u32,
         },
     );
     // Return a non-zero ATOM — use a hash of the name for uniqueness.
@@ -141,6 +142,7 @@ pub unsafe extern "win64" fn register_class_ex_w(lp_wnd_class_ex: *const WndClas
             style: wc.style,
             h_cursor: wc.h_cursor,
             hbr_background: wc.hbr_background,
+            cb_wnd_extra: wc.cb_wnd_extra.max(0) as u32,
         },
     );
     let atom = name_to_atom(&name);
@@ -190,8 +192,6 @@ pub unsafe extern "win64" fn create_window_ex_w(
 ) -> usize {
     let class_name = unsafe { decode_wide(lp_class_name) };
     let title = unsafe { decode_wide(lp_window_name) };
-
-    eprintln!("weave/user32: CreateWindowExW(class={class_name:?}, title={title:?})");
 
     // Look up the class.
     let cls = match class::find(&class_name) {
@@ -243,6 +243,7 @@ pub unsafe extern "win64" fn create_window_ex_w(
         visible,
         xcb_id,
         h_menu: h_menu_param,
+        extra_bytes: vec![0u8; cls.cb_wnd_extra as usize],
     });
     set_extra(hwnd, |e| e.ex_style = dw_ex_style);
 
@@ -1312,11 +1313,26 @@ pub extern "win64" fn get_window_long_w(hwnd: usize, n_index: i32) -> i32 {
 }
 
 // Wine ref: dlls/win32u/window.c — GetWindowLongPtrW is a 64-bit version of GetWindowLongW;
-// GWLP_USERDATA returns the full pointer-width value.
+// GWLP_USERDATA returns the full pointer-width value; non-negative indices are byte offsets
+// into the per-window extra bytes (cbWndExtra) allocated at window creation.
 pub extern "win64" fn get_window_long_ptr_w(hwnd: usize, n_index: i32) -> isize {
     match n_index {
         GWL_EXSTYLE => get_extra(hwnd, |e| e.ex_style as isize, 0),
         GWLP_USERDATA => get_extra(hwnd, |e| e.user_data, 0),
+        _ if n_index >= 0 => {
+            // Extra bytes: n_index is a byte offset; reads a pointer-sized (8-byte) value.
+            let offset = n_index as usize;
+            window::with(hwnd, |w| {
+                if offset + 8 <= w.extra_bytes.len() {
+                    let mut buf = [0u8; 8];
+                    buf.copy_from_slice(&w.extra_bytes[offset..offset + 8]);
+                    isize::from_ne_bytes(buf)
+                } else {
+                    0
+                }
+            })
+            .unwrap_or(0)
+        }
         _ => window::with(hwnd, |w| match n_index {
             GWL_STYLE => w.style as isize,
             GWL_WNDPROC => w.wnd_proc as isize,
@@ -1380,6 +1396,22 @@ pub extern "win64" fn set_window_long_ptr_w(
             old
         })
         .unwrap_or(0),
+        _ if n_index >= 0 => {
+            // Extra bytes: n_index is a byte offset; writes a pointer-sized (8-byte) value.
+            let offset = n_index as usize;
+            window::with_mut(hwnd, |w| {
+                if offset + 8 <= w.extra_bytes.len() {
+                    let old_buf = &w.extra_bytes[offset..offset + 8];
+                    let old = isize::from_ne_bytes(old_buf.try_into().unwrap());
+                    let new_bytes = dw_new_long.to_ne_bytes();
+                    w.extra_bytes[offset..offset + 8].copy_from_slice(&new_bytes);
+                    old
+                } else {
+                    0
+                }
+            })
+            .unwrap_or(0)
+        }
         _ => 0,
     }
 }
@@ -1712,6 +1744,7 @@ pub unsafe extern "win64" fn register_class_a(lp_wnd_class: *const WndClassA) ->
             style: wc.style,
             h_cursor: wc.h_cursor,
             hbr_background: wc.hbr_background,
+            cb_wnd_extra: wc.cb_wnd_extra.max(0) as u32,
         },
     );
     name_to_atom(&name)
@@ -1737,6 +1770,7 @@ pub unsafe extern "win64" fn register_class_ex_a(lp_wnd_class_ex: *const WndClas
             style: wc.style,
             h_cursor: wc.h_cursor,
             hbr_background: wc.hbr_background,
+            cb_wnd_extra: wc.cb_wnd_extra.max(0) as u32,
         },
     );
     name_to_atom(&name)
@@ -1802,6 +1836,7 @@ pub unsafe extern "win64" fn create_window_ex_a(
         visible,
         xcb_id,
         h_menu: h_menu_param,
+        extra_bytes: vec![0u8; cls.cb_wnd_extra as usize],
     });
     set_extra(hwnd, |e| e.ex_style = dw_ex_style);
 
@@ -2067,7 +2102,7 @@ pub extern "win64" fn get_system_menu(h_wnd: usize, b_revert: i32) -> usize {
         return window::with(h_wnd, |w| w.h_menu).unwrap_or(0);
     }
     window::with(h_wnd, |w| if w.h_menu != 0 { w.h_menu } else { 0 })
-        .unwrap_or_else(menu::create_menu)
+        .unwrap_or_else(|| menu::create_menu())
 }
 
 /// DeleteMenu: remove an item from a menu.
