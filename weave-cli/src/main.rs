@@ -77,7 +77,29 @@ fn main() {
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("app.exe");
-        cmdline::set(exe_name, &args.exe_args);
+        // Convert absolute Linux paths in exe_args to Windows Z:\ paths so
+        // that Windows apps receive paths they can round-trip through
+        // GetFullPathNameW / CreateFileW.  Without this, a Linux path like
+        // /weave/foo/bar.txt is treated as relative by GetFullPathNameW (it
+        // doesn't start with a drive letter or backslash) and gets the CWD
+        // prepended, doubling the path prefix.
+        let windows_args: Vec<String> = args
+            .exe_args
+            .iter()
+            .map(|arg| {
+                if arg.starts_with('/') {
+                    // Canonicalize to resolve any .. components, then map to Z:\
+                    let canonical = std::path::Path::new(arg)
+                        .canonicalize()
+                        .map(|p| p.to_string_lossy().into_owned())
+                        .unwrap_or_else(|_| arg.clone());
+                    format!("Z:{}", canonical.replace('/', "\\"))
+                } else {
+                    arg.clone()
+                }
+            })
+            .collect();
+        cmdline::set(exe_name, &windows_args);
     }
 
     // Store the exe path as a Windows path (Z:\...) so GetModuleFileNameW(NULL)

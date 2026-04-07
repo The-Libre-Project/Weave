@@ -348,7 +348,10 @@ fn nop_security_cookie_stores(pe_bytes: &[u8], base: *mut u8, security_cookie_va
 
             // Effective address = VA of next instruction + signed disp.
             // Next instruction is at base + sec_va + offset + 7.
-            let next_va = base_usize + sec_va + offset + 7;
+            let next_va = base_usize
+                .wrapping_add(sec_va)
+                .wrapping_add(offset)
+                .wrapping_add(7);
             let ea = next_va.wrapping_add_signed(disp as isize);
 
             if ea != security_cookie_va {
@@ -359,8 +362,8 @@ fn nop_security_cookie_stores(pe_bytes: &[u8], base: *mut u8, security_cookie_va
             // Rather than NOP-ing just this instruction (which might miss other
             // write forms like LEA+MOV-indirect), disable the entire enclosing
             // function by writing RET at its start address from .pdata.
-            let instr_va = base_usize + sec_va + offset;
-            let instr_rva = (instr_va - base_usize) as u32;
+            let instr_va = base_usize.wrapping_add(sec_va).wrapping_add(offset);
+            let instr_rva = instr_va.wrapping_sub(base_usize) as u32;
             eprintln!(
                 "weave: CFG: found __security_cookie store at {instr_va:#x} (rva {instr_rva:#x})"
             );
@@ -608,8 +611,8 @@ fn init_xfg_lazy_slots(pe_bytes: &[u8], base: *mut u8) {
         };
         if vsize > raw {
             // BSS: [va + raw, va + vsize) mapped as zeroes
-            let bss_lo = base_usize + va + raw;
-            let bss_hi = base_usize + va + vsize;
+            let bss_lo = base_usize.wrapping_add(va).wrapping_add(raw);
+            let bss_hi = base_usize.wrapping_add(va).wrapping_add(vsize);
             bss_ranges.push((bss_lo, bss_hi));
         }
     }
@@ -684,7 +687,7 @@ fn init_xfg_lazy_slots(pe_bytes: &[u8], base: *mut u8) {
             }
 
             // Effective address = (RVA of next instruction) + disp + image base
-            let next_rva = sec_va + offset + 7;
+            let next_rva = sec_va.wrapping_add(offset).wrapping_add(7);
             let ea_rva = next_rva.wrapping_add_signed(disp as isize);
             let ea_va = match base_usize.checked_add(ea_rva) {
                 Some(v) => v,
@@ -718,7 +721,11 @@ fn init_xfg_lazy_slots(pe_bytes: &[u8], base: *mut u8) {
                     sec_bytes[prev + 5],
                     sec_bytes[prev + 6],
                 ]);
-                let ea2 = (sec_va + prev + 7).wrapping_add_signed(d2 as isize) & 0xFFFF_FFFF;
+                let ea2 = sec_va
+                    .wrapping_add(prev)
+                    .wrapping_add(7)
+                    .wrapping_add_signed(d2 as isize)
+                    & 0xFFFF_FFFF;
                 ea2 == ea_rva
             });
             if has_preceding_write {

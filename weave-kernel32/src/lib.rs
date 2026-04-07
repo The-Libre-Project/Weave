@@ -2087,8 +2087,9 @@ pub unsafe extern "win64" fn compare_file_time(
     if lp_file_time1.is_null() || lp_file_time2.is_null() {
         return 0;
     }
-    let ft1 = unsafe { *lp_file_time1 };
-    let ft2 = unsafe { *lp_file_time2 };
+    // FILETIME is two DWORDs — only 4-byte aligned. Use read_unaligned.
+    let ft1 = unsafe { std::ptr::read_unaligned(lp_file_time1) };
+    let ft2 = unsafe { std::ptr::read_unaligned(lp_file_time2) };
     match ft1.cmp(&ft2) {
         std::cmp::Ordering::Less => -1,
         std::cmp::Ordering::Equal => 0,
@@ -2105,7 +2106,9 @@ pub unsafe extern "win64" fn file_time_to_local_file_time(
     if lp_file_time.is_null() || lp_local_file_time.is_null() {
         return 0;
     }
-    unsafe { *lp_local_file_time = *lp_file_time };
+    // FILETIME is only 4-byte aligned — use unaligned reads/writes.
+    let val = unsafe { std::ptr::read_unaligned(lp_file_time) };
+    unsafe { std::ptr::write_unaligned(lp_local_file_time, val) };
     1 // TRUE
 }
 
@@ -2118,7 +2121,8 @@ pub unsafe extern "win64" fn local_file_time_to_file_time(
     if lp_local_file_time.is_null() || lp_file_time.is_null() {
         return 0;
     }
-    unsafe { *lp_file_time = *lp_local_file_time };
+    let val = unsafe { std::ptr::read_unaligned(lp_local_file_time) };
+    unsafe { std::ptr::write_unaligned(lp_file_time, val) };
     1 // TRUE
 }
 
@@ -2133,7 +2137,8 @@ pub unsafe extern "win64" fn system_time_to_file_time(
     }
     let unix_now = unsafe { libc::time(std::ptr::null_mut()) } as u64;
     let ft = unix_now * 10_000_000u64 + 116_444_736_000_000_000u64;
-    unsafe { *lp_file_time = ft };
+    // FILETIME is only 4-byte aligned.
+    unsafe { std::ptr::write_unaligned(lp_file_time, ft) };
     1 // TRUE
 }
 
@@ -2495,9 +2500,30 @@ pub unsafe extern "win64" fn get_startup_info_w(lp_startup_info: *mut u8) {
     if lp_startup_info.is_null() {
         return;
     }
+    // Wine ref: dlls/kernelbase/process.c GetStartupInfoW — copies from RTL_USER_PROCESS_PARAMETERS.
+    // STARTUPINFOW (64-bit) layout:
+    //   offset  0: DWORD cb (4)
+    //   offset  8: LPWSTR lpReserved (8, pointer-aligned)
+    //   offset 16: LPWSTR lpDesktop (8)
+    //   offset 24: LPWSTR lpTitle (8)
+    //   offset 32: DWORD dwX (4)
+    //   offset 36: DWORD dwY (4)
+    //   offset 40: DWORD dwXSize (4)
+    //   offset 44: DWORD dwYSize (4)
+    //   offset 48: DWORD dwXCountChars (4)
+    //   offset 52: DWORD dwYCountChars (4)
+    //   offset 56: DWORD dwFillAttribute (4)
+    //   offset 60: DWORD dwFlags (4)
+    //   offset 64: WORD wShowWindow (2)
+    // Set STARTF_USESHOWWINDOW so the CRT honours wShowWindow and passes
+    // SW_SHOWNORMAL to WinMain, causing the app to show its main window.
     unsafe {
         std::ptr::write_bytes(lp_startup_info, 0, 104);
         *(lp_startup_info as *mut u32) = 104; // cb = sizeof(STARTUPINFOW)
+        const STARTF_USESHOWWINDOW: u32 = 0x0001;
+        const SW_SHOWNORMAL: u16 = 1;
+        *(lp_startup_info.add(60) as *mut u32) = STARTF_USESHOWWINDOW; // dwFlags
+        *(lp_startup_info.add(64) as *mut u16) = SW_SHOWNORMAL; // wShowWindow
     }
 }
 
@@ -4543,7 +4569,7 @@ pub unsafe extern "win64" fn dos_date_time_to_file_time(
         // Rough FILETIME approximation (ignore leap years for simplicity).
         let days = (year - 1601) * 365 + month * 30 + day;
         let secs = days * 86400 + hour * 3600 + min * 60 + sec;
-        unsafe { *lp_file_time = secs * 10_000_000 };
+        unsafe { std::ptr::write_unaligned(lp_file_time, secs * 10_000_000) };
     }
     1 // TRUE
 }
@@ -4613,11 +4639,18 @@ pub unsafe extern "win64" fn wake_all_condition_variable(_condition_variable: *m
 /// Values 1 and 2 are used for mutexes/events; 3 is the completed-thread sentinel.
 const FAKE_COMPLETED_THREAD_HANDLE: usize = 3;
 
-/// CreateThread — executes the thread function synchronously, then returns a fake handle.
+/// CreateThread — run the thread function, then returns a fake handle.
 ///
-/// Full multi-threading (via pthreads) is a future concern.  For Phase 1–4 compatibility,
-/// we run the thread body inline so that callers that create a thread purely to do file I/O
-/// (e.g. Notepad++ portable-mode detection via GetFileAttributesExW) still work correctly.
+/// Wine ref: dlls/kernel32/thread.c — CreateThread wraps NtCreateThread; the thread
+/// function is called with lpParameter as its sole argument.
+///
+/// Dispatch strategy:
+/// - `lpParameter == NULL` → background/event-loop thread (e.g. NPP's toolbar-update
+///   timer that calls Sleep + SendMessage indefinitely). These must run on a real
+///   OS thread so they don't block the main Win32 message loop. We spawn a Rust thread.
+/// - `lpParameter != NULL` → short-lived result-returning thread (e.g. NPP's
+///   GetFileAttributesExW wrappers that write into a caller-owned buffer). These
+///   run inline so the result is available before the caller continues.
 ///
 /// # Safety
 /// `lp_start_address` must be a valid `extern "win64"` function pointer.
@@ -4633,15 +4666,34 @@ pub unsafe extern "win64" fn create_thread(
     if lp_start_address.is_null() {
         return 0;
     }
-    eprintln!(
-        "weave/CreateThread: fn={lp_start_address:p} param={lp_parameter:p} (executing inline)"
-    );
-    // Execute the Windows thread function inline using the Win64 calling convention.
-    // The Win64 ABI passes the first integer argument in RCX, so transmuting to
-    // `extern "win64" fn(*mut u8) -> u32` is correct on x86-64 Linux.
-    let fn_ptr: unsafe extern "win64" fn(*mut u8) -> u32 = std::mem::transmute(lp_start_address);
-    let ret = fn_ptr(lp_parameter);
-    eprintln!("weave/CreateThread: fn={lp_start_address:p} returned {ret}");
+
+    if lp_parameter.is_null() {
+        // Background thread: no result buffer to write, safe to run on a real OS thread.
+        let fn_addr = lp_start_address as usize;
+        eprintln!(
+            "weave/CreateThread: fn={lp_start_address:p} param=null (spawning background thread)"
+        );
+        std::thread::spawn(move || {
+            // SAFETY: fn_addr is a valid Win64 function pointer for the lifetime of the process.
+            let fn_ptr: unsafe extern "win64" fn(*mut u8) -> u32 =
+                unsafe { std::mem::transmute(fn_addr as *const u8) };
+            let ret = unsafe { fn_ptr(std::ptr::null_mut()) };
+            eprintln!("weave/CreateThread: fn={fn_addr:#x} background thread returned {ret}");
+        });
+    } else {
+        // Inline thread: caller expects results written to lp_parameter before proceeding.
+        eprintln!(
+            "weave/CreateThread: fn={lp_start_address:p} param={lp_parameter:p} (executing inline)"
+        );
+        // Execute the Windows thread function inline using the Win64 calling convention.
+        // The Win64 ABI passes the first integer argument in RCX, so transmuting to
+        // `extern "win64" fn(*mut u8) -> u32` is correct on x86-64 Linux.
+        let fn_ptr: unsafe extern "win64" fn(*mut u8) -> u32 =
+            std::mem::transmute(lp_start_address);
+        let ret = fn_ptr(lp_parameter);
+        eprintln!("weave/CreateThread: fn={lp_start_address:p} returned {ret}");
+    }
+
     if !lp_thread_id.is_null() {
         *lp_thread_id = 1;
     }

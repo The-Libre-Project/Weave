@@ -102,3 +102,19 @@ pub fn hwnd_for_xcb(xcb_window_id: u32) -> usize {
         .map(|(&h, _)| h)
         .unwrap_or(0)
 }
+
+/// Return the first HWND that has a valid (non-zero) XCB window ID.
+///
+/// Used as a last-resort fallback when `CreateCompatibleDC(NULL)` is called
+/// before any `BeginPaint` — e.g. Scintilla creates its off-screen DCs during
+/// class initialisation, before the first WM_PAINT cycle. Without this fallback
+/// all GDI drawing on those DCs would be silently dropped.
+pub fn first_hwnd_with_xcb() -> usize {
+    let guard = table().lock().unwrap();
+    guard
+        .entries
+        .iter()
+        .find(|(_, e)| e.xcb_id != 0)
+        .map(|(&h, _)| h)
+        .unwrap_or(0)
+}

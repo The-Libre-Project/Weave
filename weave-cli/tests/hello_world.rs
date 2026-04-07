@@ -360,9 +360,13 @@ fn irfanview_gdip_startup_reached() {
     }
 
     let weave_bin = env!("CARGO_BIN_EXE_weave");
+    // IrfanView's test is designed for headless operation: it detects no display
+    // and exits cleanly via WM_QUIT. Unset DISPLAY so the test stays headless even
+    // when Xvfb is running for the NPP test.
     let mut child = std::process::Command::new(weave_bin)
         .current_dir(&irfan_dir)
         .arg(&irfan_exe)
+        .env_remove("DISPLAY")
         .stderr(std::process::Stdio::piped())
         .spawn()
         .unwrap_or_else(|e| panic!("failed to spawn weave on i_view64.exe: {e}"));

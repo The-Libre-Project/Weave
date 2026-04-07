@@ -14,7 +14,7 @@ use crate::queue::{self, MsgEntry};
 use crate::window::{self, WindowEntry};
 use libc;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicI32, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 use weave_common::stub::warn_once;
 
@@ -93,6 +93,16 @@ fn timer_table() -> &'static Mutex<HashMap<(usize, usize), usize>> {
 static LAST_MSG_TIME: AtomicU32 = AtomicU32::new(0);
 static LAST_MSG_POS_X: AtomicI32 = AtomicI32::new(0);
 static LAST_MSG_POS_Y: AtomicI32 = AtomicI32::new(0);
+
+/// The HWND most recently passed to BeginPaint. Used by gdi32's CreateCompatibleDC(NULL)
+/// as a fallback when no explicit DC is provided.
+static CURRENT_PAINT_HWND: AtomicUsize = AtomicUsize::new(0);
+
+/// Return the HWND that was most recently passed to BeginPaint.
+/// Used by weave-gdi32 to resolve CreateCompatibleDC(NULL).
+pub fn current_paint_hwnd() -> usize {
+    CURRENT_PAINT_HWND.load(Ordering::Relaxed)
+}
 
 // ── RegisterClassW / RegisterClassExW ─────────────────────────────────────────
 
@@ -221,7 +231,7 @@ pub unsafe extern "win64" fn create_window_ex_w(
 
     // Wine ref: dlls/win32u/window.c — child window positions are parent-relative;
     // top-level window positions are screen coordinates. Translate to screen coords
-    // so the X11 window appears at the correct absolute position.
+    // so the Win32 window table stores correct absolute positions for future lookups.
     let (abs_x, abs_y) = if (dw_style & WS_CHILD) != 0 && h_wnd_parent != 0 {
         let parent_pos = window::with(h_wnd_parent, |e| (e.x, e.y)).unwrap_or((0, 0));
         (pos_x + parent_pos.0, pos_y + parent_pos.1)
@@ -231,8 +241,26 @@ pub unsafe extern "win64" fn create_window_ex_w(
 
     let visible = (dw_style & WS_VISIBLE) != 0;
 
+    // For child windows, create the X11 window as a child of the Win32 parent's X11
+    // window. X11 child windows use parent-relative coordinates and are z-ordered on
+    // top of (and clipped by) their X11 parent — which is the correct Win32 behavior.
+    // Top-level windows are created as children of the root window (screen coords).
+    let (x11_x, x11_y, parent_xcb_id) = if (dw_style & WS_CHILD) != 0 && h_wnd_parent != 0 {
+        let px = window::xcb_id(h_wnd_parent);
+        if px != 0 {
+            (pos_x, pos_y, px) // relative coords, proper X11 parent
+        } else {
+            (abs_x, abs_y, 0u32) // no X11 parent yet; fall back to root
+        }
+    } else {
+        (pos_x, pos_y, 0u32) // top-level: screen coords, root parent
+    };
+
     // Create the X11 window (no-op on non-Linux).
-    let xcb_id = backend::create_window(&title, abs_x, abs_y, width, height, visible);
+    let xcb_id =
+        backend::create_window(&title, x11_x, x11_y, width, height, visible, parent_xcb_id);
+
+    eprintln!("weave/user32: CreateWindow class={class_name:?} title={title:?} pos=({abs_x},{abs_y}) size={width}x{height} visible={visible} style={dw_style:#010x} xcb={xcb_id:#x} parent_xcb={parent_xcb_id:#x}");
 
     let hwnd = window::create(WindowEntry {
         class_name: class_name.clone(),
@@ -298,6 +326,7 @@ pub extern "win64" fn show_window(hwnd: usize, n_cmd_show: i32) -> i32 {
     let show = !matches!(n_cmd_show, SW_HIDE);
 
     let xcb = window::xcb_id(hwnd);
+    eprintln!("weave/user32: ShowWindow hwnd={hwnd:#x} cmd={n_cmd_show} show={show} xcb={xcb:#x}");
     window::with_mut(hwnd, |e| e.visible = show);
     backend::show_window(xcb, show);
 
@@ -864,6 +893,39 @@ pub unsafe extern "win64" fn get_window_rect(hwnd: usize, lp_rect: *mut Rect) ->
     1
 }
 
+/// GetUpdateRect: return the bounding rect of the current update region.
+///
+/// Wine ref: dlls/win32u/painting.c::NtUserGetUpdateRect — returns the smallest
+/// bounding rect of the window's update region; fills *lprect and returns TRUE if
+/// the region is non-empty, FALSE if it is empty.
+///
+/// Weave has no per-pixel update region tracking (Phase 2 gap). We always report
+/// the full client rect as dirty so Scintilla/other WM_PAINT handlers paint the
+/// full window rather than skipping on an empty region.
+///
+/// # Safety
+/// `lp_rect` must point to a `RECT`-sized buffer or be null.
+pub unsafe extern "win64" fn get_update_rect(
+    hwnd: usize,
+    lp_rect: *mut Rect,
+    _b_erase: i32,
+) -> i32 {
+    let (w, h) = window::with(hwnd, |e| (e.width, e.height)).unwrap_or((0, 0));
+    if !lp_rect.is_null() {
+        unsafe {
+            (*lp_rect).left = 0;
+            (*lp_rect).top = 0;
+            (*lp_rect).right = w as i32;
+            (*lp_rect).bottom = h as i32;
+        }
+    }
+    if w == 0 || h == 0 {
+        0
+    } else {
+        1
+    }
+}
+
 /// InvalidateRect: mark a region of a window as needing repaint.
 ///
 /// Phase 2: posts WM_PAINT to the message queue.
@@ -942,6 +1004,7 @@ pub unsafe extern "win64" fn get_window_text_w(
 // the WM_PAINT pending flag; returns an HDC clipped to the update region; sets fErase if the
 // background was erased. Weave returns hwnd as a fake HDC (Phase 2 gap: no real DC or region).
 pub unsafe extern "win64" fn begin_paint(hwnd: usize, lp_paint: *mut PaintStruct) -> usize {
+    CURRENT_PAINT_HWND.store(hwnd, Ordering::Relaxed);
     if !lp_paint.is_null() {
         unsafe {
             let ps = &mut *lp_paint;
@@ -1071,12 +1134,30 @@ pub unsafe extern "win64" fn message_box_w(
 
 // ── GetDC / ReleaseDC (user32-resident, not gdi32) ────────────────────────────
 
+/// Sentinel HDC returned by GetDC(NULL) — represents the screen/desktop DC.
+///
+/// Wine ref: dlls/win32u/dc.c — NtUserGetDC(NULL) returns a whole-screen DC tied
+/// to the root window; it is always non-NULL. Returning hwnd directly (0) for
+/// GetDC(NULL) causes callers that check hdc != NULL to spin-loop retrying forever,
+/// because they interpret NULL as "no display available." Using this sentinel keeps
+/// the HDC non-zero so validity checks pass; GetDeviceCaps / GetTextMetrics work on
+/// any non-NULL HDC in Weave (they ignore the drawable and return fixed values).
+/// Actual drawing on the screen DC resolves xcb_id → 0 → silent no-op, which is
+/// correct because nothing should be drawing directly to the root window.
+pub const SCREEN_HDC: usize = 0x0000_00DC;
+
 /// GetDC: return a device context for a window.
 ///
-/// Phase 2: returns a fake HDC (the HWND value itself).
-/// Real GDI integration comes in Step 4.
+/// Wine ref: dlls/win32u/dc.c — NtUserGetDC(hwnd=NULL) returns a whole-screen DC
+/// (never NULL); NtUserGetDC(hwnd) returns a DC clipped to that window's client area.
+/// Weave: returns SCREEN_HDC for hwnd=0 so callers don't spin-loop on a NULL check,
+/// and hwnd itself for non-null windows (matches the BeginPaint fake-HDC contract).
 pub extern "win64" fn get_dc(hwnd: usize) -> usize {
-    hwnd // fake HDC
+    if hwnd == 0 {
+        SCREEN_HDC
+    } else {
+        hwnd
+    }
 }
 
 /// ReleaseDC: release a device context.
@@ -1097,11 +1178,34 @@ pub extern "win64" fn move_window(
     n_height: i32,
     b_repaint: i32,
 ) -> i32 {
-    window::with_mut(hwnd, |e| {
+    let w = n_width.max(0) as u32;
+    let h = n_height.max(0) as u32;
+    eprintln!("weave/user32: MoveWindow hwnd={hwnd:#x} ({x},{y}) {w}x{h}");
+    let xcb_id = window::with_mut(hwnd, |e| {
         e.x = x;
         e.y = y;
-        e.width = n_width.max(0) as u32;
-        e.height = n_height.max(0) as u32;
+        e.width = w;
+        e.height = h;
+        e.xcb_id
+    })
+    .unwrap_or(0);
+    if xcb_id != 0 {
+        backend::configure_window(xcb_id, x, y, w, h);
+    }
+    // Wine ref: dlls/win32u/winpos.c — NtUserSetWindowPos sends WM_SIZE synchronously
+    // (via SendMessageTimeout) before the resize completes so that the application's
+    // window proc has updated internal state by the time WM_PAINT fires.
+    // We post WM_SIZE before WM_PAINT so Scintilla/NPP update their layout state
+    // (line count, content area width) before painting the invalidated region.
+    let l_param = (w as isize) | ((h as isize) << 16);
+    queue::post(MsgEntry {
+        hwnd,
+        message: WM_SIZE,
+        w_param: 0, // SIZE_RESTORED
+        l_param,
+        time: 0,
+        pt_x: 0,
+        pt_y: 0,
     });
     if b_repaint != 0 {
         queue::post(MsgEntry {
@@ -1430,7 +1534,10 @@ const SWP_NOMOVE: u32 = 0x0002;
 
 /// SetWindowPos: change window size, position, and Z order.
 ///
-/// Updates the window table entry. Returns TRUE.
+/// Wine ref: dlls/winex11.drv/window.c — X11DRV_SetWindowPos drives the geometry
+/// update; SWP_NOMOVE/SWP_NOSIZE gates which fields change; SWP_SHOWWINDOW /
+/// SWP_HIDEWINDOW map to map_window / unmap_window. Z-order (HWND_TOP, etc.) not
+/// yet implemented — Weave has no compositor.
 pub extern "win64" fn set_window_pos(
     hwnd: usize,
     _hwnd_insert_after: usize,
@@ -1440,7 +1547,13 @@ pub extern "win64" fn set_window_pos(
     cy: i32,
     u_flags: u32,
 ) -> i32 {
-    window::with_mut(hwnd, |w| {
+    const SWP_SHOWWINDOW: u32 = 0x0040;
+    const SWP_HIDEWINDOW: u32 = 0x0080;
+
+    eprintln!(
+        "weave/user32: SetWindowPos hwnd={hwnd:#x} ({x},{y}) {cx}x{cy} flags={u_flags:#010x}"
+    );
+    let result = window::with_mut(hwnd, |w| {
         if u_flags & SWP_NOMOVE == 0 {
             w.x = x;
             w.y = y;
@@ -1449,7 +1562,88 @@ pub extern "win64" fn set_window_pos(
             w.width = cx as u32;
             w.height = cy as u32;
         }
+        if u_flags & SWP_SHOWWINDOW != 0 {
+            w.visible = true;
+        }
+        if u_flags & SWP_HIDEWINDOW != 0 {
+            w.visible = false;
+        }
+        (w.xcb_id, w.x, w.y, w.width, w.height, w.visible)
     });
+
+    if let Some((xcb_id, wx, wy, ww, wh, vis)) = result {
+        if xcb_id != 0 {
+            backend::configure_window(xcb_id, wx, wy, ww, wh);
+            if u_flags & SWP_SHOWWINDOW != 0 {
+                backend::show_window(xcb_id, true);
+            } else if u_flags & SWP_HIDEWINDOW != 0 {
+                backend::show_window(xcb_id, false);
+            } else if vis {
+                // Ensure the window is mapped if it was already visible.
+                backend::show_window(xcb_id, true);
+            }
+        }
+        // Post WM_SIZE so app can update layout state before WM_PAINT.
+        // Only post when size actually changes (SWP_NOSIZE not set).
+        if u_flags & SWP_NOSIZE == 0 {
+            let l_param = (ww as isize) | ((wh as isize) << 16);
+            queue::post(MsgEntry {
+                hwnd,
+                message: WM_SIZE,
+                w_param: 0, // SIZE_RESTORED
+                l_param,
+                time: 0,
+                pt_x: 0,
+                pt_y: 0,
+            });
+        }
+    }
+    1 // TRUE
+}
+
+/// BeginDeferWindowPos: begin a batch window-position update.
+///
+/// Wine ref: dlls/win32u/winpos.c — BeginDeferWindowPos allocates a HDWP
+/// (pointer to SMWP struct) with pre-allocated space for n_num_windows entries.
+/// Returns NULL on failure.
+///
+/// Weave implementation: returns a non-null sentinel handle (0x1). We execute
+/// each DeferWindowPos call immediately rather than batching (deferred
+/// atomicity is a correctness nicety, not required for correctness of layout).
+pub extern "win64" fn begin_defer_window_pos(_n_num_windows: i32) -> usize {
+    0x1 // non-null sentinel HDWP
+}
+
+/// DeferWindowPos: queue a SetWindowPos call for EndDeferWindowPos.
+///
+/// Wine ref: dlls/win32u/winpos.c — DeferWindowPos appends to the SMWP list;
+/// may reallocate. On failure returns NULL (caller should abort).
+///
+/// Weave: executes immediately via set_window_pos; returns the same HDWP.
+pub extern "win64" fn defer_window_pos(
+    h_win_pos_info: usize,
+    hwnd: usize,
+    hwnd_insert_after: usize,
+    x: i32,
+    y: i32,
+    cx: i32,
+    cy: i32,
+    u_flags: u32,
+) -> usize {
+    if h_win_pos_info == 0 {
+        return 0; // invalid HDWP
+    }
+    set_window_pos(hwnd, hwnd_insert_after, x, y, cx, cy, u_flags);
+    h_win_pos_info
+}
+
+/// EndDeferWindowPos: execute all deferred SetWindowPos calls.
+///
+/// Wine ref: dlls/win32u/winpos.c — EndDeferWindowPos iterates the SMWP list,
+/// calls NtUserSetWindowPos for each entry, then frees the HDWP. Returns TRUE.
+///
+/// Weave: all calls were already executed in DeferWindowPos; just return TRUE.
+pub extern "win64" fn end_defer_window_pos(_h_win_pos_info: usize) -> i32 {
     1 // TRUE
 }
 
@@ -1831,15 +2025,34 @@ pub unsafe extern "win64" fn create_window_ex_a(
     let pos_y = if y == i32::MIN { 100 } else { y };
     let visible = (dw_style & WS_VISIBLE) != 0;
 
-    let xcb_id = backend::create_window(&title, pos_x, pos_y, width, height, visible);
+    let (abs_x, abs_y) = if (dw_style & WS_CHILD) != 0 && h_wnd_parent != 0 {
+        let parent_pos = window::with(h_wnd_parent, |e| (e.x, e.y)).unwrap_or((0, 0));
+        (pos_x + parent_pos.0, pos_y + parent_pos.1)
+    } else {
+        (pos_x, pos_y)
+    };
+
+    let (x11_x, x11_y, parent_xcb_id) = if (dw_style & WS_CHILD) != 0 && h_wnd_parent != 0 {
+        let px = window::xcb_id(h_wnd_parent);
+        if px != 0 {
+            (pos_x, pos_y, px)
+        } else {
+            (abs_x, abs_y, 0u32)
+        }
+    } else {
+        (pos_x, pos_y, 0u32)
+    };
+
+    let xcb_id =
+        backend::create_window(&title, x11_x, x11_y, width, height, visible, parent_xcb_id);
 
     let hwnd = window::create(window::WindowEntry {
         class_name: class_name.clone(),
         wnd_proc: cls.wnd_proc,
         title: title.clone(),
         style: dw_style,
-        x: pos_x,
-        y: pos_y,
+        x: abs_x,
+        y: abs_y,
         width,
         height,
         visible,
@@ -2337,12 +2550,19 @@ pub unsafe extern "win64" fn set_window_placement(
         return 0;
     }
     let rc = unsafe { &(*lp_wndpl).rc_normal_position };
-    window::with_mut(h_wnd, |w| {
-        w.x = rc.left;
-        w.y = rc.top;
-        w.width = (rc.right - rc.left) as u32;
-        w.height = (rc.bottom - rc.top) as u32;
-    });
+    let w = (rc.right - rc.left) as u32;
+    let h = (rc.bottom - rc.top) as u32;
+    let xcb_id = window::with_mut(h_wnd, |win| {
+        win.x = rc.left;
+        win.y = rc.top;
+        win.width = w;
+        win.height = h;
+        win.xcb_id
+    })
+    .unwrap_or(0);
+    if xcb_id != 0 {
+        backend::configure_window(xcb_id, rc.left, rc.top, w, h);
+    }
     1
 }
 

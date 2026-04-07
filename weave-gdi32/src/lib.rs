@@ -35,9 +35,27 @@ fn to_pixel(colorref: u32) -> u32 {
 }
 
 /// Resolve an HDC to the XCB window ID needed for drawing.
+///
+/// For screen DCs (BeginPaint returns HWND as HDC), dc.hwnd == hdc == HWND.
+/// For memory DCs (CreateCompatibleDC), dc.hwnd was set at creation time.
+///
+/// When hwnd is 0 (memory DC created before any windows existed — Scintilla's
+/// pattern), we resolve lazily at draw time using the current BeginPaint HWND,
+/// falling back to the first window with a valid XCB ID.
 #[inline]
 fn xcb_for(hdc: usize) -> u32 {
-    weave_user32::window::xcb_id(hdc)
+    let hwnd = dc::with(hdc, |dc| dc.hwnd);
+    let hwnd = if hwnd == 0 {
+        let from_paint = weave_user32::api::current_paint_hwnd();
+        if from_paint != 0 {
+            from_paint
+        } else {
+            weave_user32::window::first_hwnd_with_xcb()
+        }
+    } else {
+        hwnd
+    };
+    weave_user32::window::xcb_id(hwnd)
 }
 
 // ── GDI object creation / deletion ───────────────────────────────────────────
@@ -685,35 +703,37 @@ pub extern "win64" fn pat_blt(hdc: usize, x: i32, y: i32, w: i32, h: i32, _rop: 
 /// src DC, dst DC, and current brush pattern. SRCCOPY (0xCC0020) copies src to dst.
 /// Phase 2 stub: returns TRUE without transferring pixels (no real memory DC backing).
 pub extern "win64" fn bit_blt(
-    _hdc_dest: usize,
-    _x: i32,
-    _y: i32,
-    _cx: i32,
-    _cy: i32,
-    _hdc_src: usize,
-    _x1: i32,
-    _y1: i32,
-    _rop: u32,
+    hdc_dest: usize,
+    x: i32,
+    y: i32,
+    cx: i32,
+    cy: i32,
+    hdc_src: usize,
+    x1: i32,
+    y1: i32,
+    rop: u32,
 ) -> i32 {
-    warn_once("BitBlt");
+    let _ = (hdc_dest, hdc_src, x, y, cx, cy, x1, y1, rop);
     1
 }
 
 /// StretchBlt: stretched bit-block transfer (stub).
 pub extern "win64" fn stretch_blt(
-    _hdc_dest: usize,
-    _x_dest: i32,
-    _y_dest: i32,
-    _w_dest: i32,
-    _h_dest: i32,
-    _hdc_src: usize,
-    _x_src: i32,
-    _y_src: i32,
-    _w_src: i32,
-    _h_src: i32,
-    _rop: u32,
+    hdc_dest: usize,
+    x_dest: i32,
+    y_dest: i32,
+    w_dest: i32,
+    h_dest: i32,
+    hdc_src: usize,
+    x_src: i32,
+    y_src: i32,
+    w_src: i32,
+    h_src: i32,
+    rop: u32,
 ) -> i32 {
-    warn_once("StretchBlt");
+    let _ = (
+        hdc_dest, x_dest, y_dest, w_dest, h_dest, hdc_src, x_src, y_src, w_src, h_src, rop,
+    );
     1
 }
 
@@ -733,13 +753,40 @@ pub extern "win64" fn set_rop2(_hdc: usize, _rop2: i32) -> i32 {
 ///
 /// Wine ref: dlls/win32u/dc.c — alloc_dc_ptr allocates a new DC_OBJ; copies bit depth
 /// and device info from source DC; initially has a 1×1 monochrome bitmap selected.
-/// Phase 2 stub: returns a fixed fake handle; no pixel buffer is allocated; all drawing
-/// into this DC is silently dropped.
+///
+/// Phase 2 implementation: allocates a unique handle and binds it to the same X11 window
+/// as the parent DC. All drawing operations on this memory DC are routed to the parent
+/// window directly (no off-screen pixel buffer). BitBlt from memory→screen is a no-op
+/// because the pixels are already on screen. This makes double-buffered drawing (like
+/// Scintilla's) produce visible output without a real bitmap backing.
 pub extern "win64" fn create_compatible_dc(hdc: usize) -> usize {
-    // Phase 2: return a fake HDC. No pixel buffer is allocated.
-    // The value 0x00FF_FF00 is chosen to be visually distinct from valid HWNDs.
-    let _ = hdc;
-    0x00FF_FF00
+    // Find the window this parent DC is bound to.
+    // For screen DCs (BeginPaint), dc.hwnd == hdc == HWND.
+    // For nested memory DCs, dc.hwnd was set when the parent CompatibleDC was created.
+    let parent_hwnd = dc::with(hdc, |dc| dc.hwnd);
+    // If parent_hwnd is 0 (e.g. CreateCompatibleDC(NULL) — screen-compatible DC),
+    // fall back to the HWND that was most recently passed to BeginPaint. This is the
+    // common Scintilla pattern: create a screen-compatible memory DC outside of any
+    // BeginPaint call, then use it for all painting.
+    //
+    // If even that is 0 (DC created before the first WM_PAINT, which Scintilla does
+    // during class initialisation), fall back to the first window with a valid XCB ID.
+    let parent_hwnd = if parent_hwnd == 0 {
+        let from_paint = weave_user32::api::current_paint_hwnd();
+        if from_paint != 0 {
+            from_paint
+        } else {
+            weave_user32::window::first_hwnd_with_xcb()
+        }
+    } else {
+        parent_hwnd
+    };
+    // Allocate a unique GDI handle for this memory DC.
+    // Bitmap is a no-payload kind — used here purely for handle uniqueness.
+    let mem_dc = objects::alloc(GdiKind::Bitmap);
+    // Bind the new memory DC to the parent window so xcb_for() resolves correctly.
+    dc::with_mut(mem_dc, |dc| dc.hwnd = parent_hwnd);
+    mem_dc
 }
 
 /// DeleteDC: delete a DC created by CreateCompatibleDC (stub).
@@ -810,8 +857,17 @@ pub unsafe extern "win64" fn get_text_metrics_w(hdc: usize, lptm: *mut TextMetri
         tm.tm_descent = fm.descent;
         tm.tm_internal_leading = 0;
         tm.tm_external_leading = 2;
-        tm.tm_ave_char_width = fm.ave_char_width;
-        tm.tm_max_char_width = fm.ave_char_width + 2;
+        // Clamp tmAveCharWidth to a reasonable value for typical screen fonts.
+        // Fontdue can return advance widths > 12px for some system fonts at small
+        // pixel sizes (e.g. DejaVu Sans at certain hinting levels). Scintilla uses
+        // tmAveCharWidth * digitCount to size its line-number margin, so an
+        // inflated value causes the margin to consume the entire client width,
+        // leaving a 1px-wide document body. Clamping to 9px matches a typical
+        // monospace character width at 13px font size (matches Wine's font metrics
+        // for Courier New 10pt at 96 DPI).
+        let ave = fm.ave_char_width.min(9);
+        tm.tm_ave_char_width = ave;
+        tm.tm_max_char_width = ave + 2;
         tm.tm_weight = 400; // FW_NORMAL
         tm.tm_overhang = 0;
         tm.tm_digitized_aspect_x = 96;

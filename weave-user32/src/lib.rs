@@ -415,6 +415,9 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "InvalidateRect" => {
             Some(invalidate_rect as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize)
         }
+        "GetUpdateRect" => {
+            Some(get_update_rect as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize)
+        }
         "MoveWindow" => Some(move_window as *const () as usize),
         "AdjustWindowRect" => {
             Some(adjust_window_rect as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize)
@@ -535,6 +538,9 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "SetWindowLongW" => Some(set_window_long_w as *const () as usize),
         "SetWindowLongPtrW" => Some(set_window_long_ptr_w as *const () as usize),
         "SetWindowPos" => Some(set_window_pos as *const () as usize),
+        "BeginDeferWindowPos" => Some(begin_defer_window_pos as *const () as usize),
+        "DeferWindowPos" => Some(defer_window_pos as *const () as usize),
+        "EndDeferWindowPos" => Some(end_defer_window_pos as *const () as usize),
         // Window queries
         "FindWindowW" => {
             Some(find_window_w as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)

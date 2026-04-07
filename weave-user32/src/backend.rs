@@ -18,6 +18,7 @@
 
 #[cfg(target_os = "linux")]
 mod inner {
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Mutex, OnceLock};
 
     use crate::defs::*;
@@ -27,8 +28,8 @@ mod inner {
     use x11rb::atom_manager;
     use x11rb::connection::Connection;
     use x11rb::protocol::xproto::{
-        AtomEnum, ConfigureNotifyEvent, ConnectionExt, CreateGCAux, CreateWindowAux, EventMask,
-        Gcontext, PropMode, Window, WindowClass,
+        AtomEnum, ConfigureNotifyEvent, ConfigureWindowAux, ConnectionExt, CreateGCAux,
+        CreateWindowAux, EventMask, Gcontext, PropMode, Window, WindowClass,
     };
     use x11rb::protocol::Event;
     use x11rb::rust_connection::RustConnection;
@@ -165,6 +166,12 @@ mod inner {
 
     /// Create an X11 window and return its XCB window ID.
     /// Returns 0 on failure (no display, or XCB error).
+    /// Create an X11 window.
+    ///
+    /// `parent_xcb` — XCB window ID of the Win32 parent window, or 0 for top-level.
+    /// Child windows are parented to their Win32 parent's X11 window (not root) so
+    /// that they render on top of (and within) the parent. For top-level windows
+    /// `parent_xcb` should be 0, which causes the root window to be used.
     pub fn create_window(
         title: &str,
         x: i32,
@@ -172,6 +179,7 @@ mod inner {
         width: u32,
         height: u32,
         visible: bool,
+        parent_xcb: u32,
     ) -> u32 {
         let x11 = match x11() {
             Some(m) => m,
@@ -196,11 +204,14 @@ mod inner {
             .background_pixel(g.white_pixel)
             .event_mask(event_mask);
 
+        // Use the parent's X11 window if provided; fall back to root for top-level windows.
+        let x11_parent = if parent_xcb != 0 { parent_xcb } else { g.root };
+
         if g.conn
             .create_window(
                 x11rb::COPY_DEPTH_FROM_PARENT,
                 wid,
-                g.root,
+                x11_parent,
                 x as i16,
                 y as i16,
                 width.max(1) as u16,
@@ -258,9 +269,34 @@ mod inner {
         let g = x11.lock().unwrap();
         if show {
             let _ = g.conn.map_window(xcb_id);
+            // Win32 ShowWindow shows all visible children too.
+            // map_subwindows recursively maps every unmapped descendant so that
+            // child windows (Scintilla, toolbar, etc.) receive Expose events and
+            // can repaint with correct content.
+            let _ = g.conn.map_subwindows(xcb_id);
         } else {
             let _ = g.conn.unmap_window(xcb_id);
         }
+        let _ = g.conn.flush();
+    }
+
+    /// Move and/or resize an X11 window via ConfigureWindow.
+    ///
+    /// Wine ref: dlls/winex11.drv/window.c — X11DRV_SetWindowPos calls
+    /// XConfigureWindow with CWX/CWY for moves and CWWidth/CWHeight for resizes.
+    /// Zero-size windows are clamped to 1×1 to avoid X11 BadValue errors.
+    pub fn configure_window(xcb_id: u32, x: i32, y: i32, width: u32, height: u32) {
+        let x11 = match x11() {
+            Some(m) => m,
+            None => return,
+        };
+        let g = x11.lock().unwrap();
+        let aux = ConfigureWindowAux::new()
+            .x(x)
+            .y(y)
+            .width(width.max(1))
+            .height(height.max(1));
+        let _ = g.conn.configure_window(xcb_id, &aux);
         let _ = g.conn.flush();
     }
 
@@ -681,6 +717,47 @@ mod inner {
                             pt_y: 0,
                         });
                     }
+
+                    // WS1 fix: On the first Expose (X server is now showing
+                    // mapped windows), post WM_PAINT to ALL registered hwnds.
+                    //
+                    // Scintilla and other child windows paint during init
+                    // (triggered by UpdateWindow/WM_PAINT from the queue) while
+                    // their X11 windows are still unmapped — the X server
+                    // silently discards those draws. After ShowWindow maps the
+                    // top-level X11 window, most children receive Expose and
+                    // repaint correctly, but windows that were already mapped
+                    // via SetWindowPos before the parent was shown may not get
+                    // Expose at all. This one-shot mass WM_PAINT guarantees
+                    // they all repaint on their now-visible X11 surfaces.
+                    static FIRST_EXPOSE_SEEN: AtomicBool = AtomicBool::new(false);
+                    if !FIRST_EXPOSE_SEEN.swap(true, Ordering::SeqCst) {
+                        // Force redraw of top-level window too
+                        let top_hwnd = window::all_hwnds().first().copied().unwrap_or(0);
+                        if top_hwnd != 0 {
+                            queue::post(MsgEntry {
+                                hwnd: top_hwnd,
+                                message: WM_PAINT,
+                                w_param: 0,
+                                l_param: 0,
+                                time: 0,
+                                pt_x: 0,
+                                pt_y: 0,
+                            });
+                        }
+                        eprintln!("weave/x11: first Expose — posting WM_PAINT to all hwnds");
+                        for h in window::all_hwnds() {
+                            queue::post(MsgEntry {
+                                hwnd: h,
+                                message: WM_PAINT,
+                                w_param: 0,
+                                l_param: 0,
+                                time: 0,
+                                pt_x: 0,
+                                pt_y: 0,
+                            });
+                        }
+                    }
                 }
             }
 
@@ -838,9 +915,9 @@ mod inner {
 
 #[cfg(target_os = "linux")]
 pub use inner::{
-    colorref_to_pixel, create_window, destroy_window, draw_filled_rect, draw_rect_outline,
-    draw_text, draw_text_utf16, is_available, poll_event, screen_size, set_title, show_window,
-    system_dpi, wait_event,
+    colorref_to_pixel, configure_window, create_window, destroy_window, draw_filled_rect,
+    draw_rect_outline, draw_text, draw_text_utf16, is_available, poll_event, screen_size,
+    set_title, show_window, system_dpi, wait_event,
 };
 
 // ── No-op stubs for non-Linux platforms (macOS dev builds) ───────────────────
@@ -868,12 +945,16 @@ pub fn create_window(
     _width: u32,
     _height: u32,
     _visible: bool,
+    _parent_xcb: u32,
 ) -> u32 {
     0
 }
 
 #[cfg(not(target_os = "linux"))]
 pub fn show_window(_xcb_id: u32, _show: bool) {}
+
+#[cfg(not(target_os = "linux"))]
+pub fn configure_window(_xcb_id: u32, _x: i32, _y: i32, _width: u32, _height: u32) {}
 
 #[cfg(not(target_os = "linux"))]
 pub fn destroy_window(_xcb_id: u32) {}
