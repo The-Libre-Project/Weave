@@ -29,7 +29,7 @@ mod inner {
     use x11rb::connection::Connection;
     use x11rb::protocol::xproto::{
         AtomEnum, ConfigureNotifyEvent, ConfigureWindowAux, ConnectionExt, CreateGCAux,
-        CreateWindowAux, EventMask, Gcontext, PropMode, Window, WindowClass,
+        CreateWindowAux, EventMask, Gcontext, PropMode, Segment, Window, WindowClass,
     };
     use x11rb::protocol::Event;
     use x11rb::rust_connection::RustConnection;
@@ -329,6 +329,32 @@ mod inner {
         pid
     }
 
+    /// Draw a single-pixel line between two points using XDrawLine (poly_segment).
+    ///
+    /// Wine ref: dlls/winex11.drv/graphics.c — X11DRV_LineTo calls XDrawLine.
+    pub fn draw_line(xcb_id: u32, x1: i16, y1: i16, x2: i16, y2: i16, pixel: u32) {
+        if x1 == x2 && y1 == y2 {
+            return;
+        }
+        let x11 = match x11() {
+            Some(m) => m,
+            None => return,
+        };
+        let g = x11.lock().unwrap();
+        let gc_id = match g.conn.generate_id() {
+            Ok(id) => id,
+            Err(_) => return,
+        };
+        let _ = g
+            .conn
+            .create_gc(gc_id, xcb_id, &CreateGCAux::new().foreground(pixel));
+        let _ = g
+            .conn
+            .poly_segment(xcb_id, gc_id, &[Segment { x1, y1, x2, y2 }]);
+        let _ = g.conn.free_gc(gc_id);
+        let _ = g.conn.flush();
+    }
+
     /// Copy a rectangle of pixels from one X11 drawable to another (XCopyArea).
     ///
     /// Wine ref: dlls/winex11.drv/bitblt.c — X11DRV_BitBlt issues XCopyArea for
@@ -365,6 +391,19 @@ mod inner {
     }
 
     /// Destroy an X11 window.
+    /// Free an X11 Pixmap.
+    ///
+    /// Wine ref: dlls/winex11.drv/bitblt.c — X11DRV_DeleteObject frees pixmaps allocated by CreateBitmap.
+    pub fn free_pixmap(pid: u32) {
+        let x11 = match x11() {
+            Some(m) => m,
+            None => return,
+        };
+        let g = x11.lock().unwrap();
+        let _ = g.conn.free_pixmap(pid);
+        let _ = g.conn.flush();
+    }
+
     pub fn destroy_window(xcb_id: u32) {
         let x11 = match x11() {
             Some(m) => m,
@@ -980,8 +1019,8 @@ mod inner {
 #[cfg(target_os = "linux")]
 pub use inner::{
     colorref_to_pixel, configure_window, copy_area, create_pixmap, create_window, destroy_window,
-    draw_filled_rect, draw_rect_outline, draw_text, draw_text_utf16, is_available, poll_event,
-    screen_size, set_title, show_window, system_dpi, wait_event,
+    draw_filled_rect, draw_line, draw_rect_outline, draw_text, draw_text_utf16, free_pixmap,
+    is_available, poll_event, screen_size, set_title, show_window, system_dpi, wait_event,
 };
 
 // ── No-op stubs for non-Linux platforms (macOS dev builds) ───────────────────
@@ -1059,6 +1098,12 @@ pub fn copy_area(
     _height: u16,
 ) {
 }
+
+#[cfg(not(target_os = "linux"))]
+pub fn draw_line(_xcb_id: u32, _x1: i16, _y1: i16, _x2: i16, _y2: i16, _pixel: u32) {}
+
+#[cfg(not(target_os = "linux"))]
+pub fn free_pixmap(_pid: u32) {}
 
 #[cfg(not(target_os = "linux"))]
 pub fn draw_filled_rect(_xcb_id: u32, _x: i16, _y: i16, _w: u16, _h: u16, _pixel: u32) {}

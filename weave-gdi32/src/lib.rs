@@ -276,6 +276,7 @@ pub unsafe extern "win64" fn fill_rect(hdc: usize, lp_rc: *const Rect, h_brush: 
         return 0;
     }
     let rc = unsafe { *lp_rc };
+    let (dx, dy) = dc::with(hdc, |dc| dc.lp_to_device(rc.left, rc.top));
     let w = (rc.right - rc.left).max(0) as u16;
     let h = (rc.bottom - rc.top).max(0) as u16;
     if w == 0 || h == 0 {
@@ -295,12 +296,16 @@ pub unsafe extern "win64" fn fill_rect(hdc: usize, lp_rc: *const Rect, h_brush: 
     };
     let pixel = to_pixel(color);
     let xcb = dc::with(hdc, |dc| dc.drawable());
-    weave_user32::backend::draw_filled_rect(xcb, rc.left as i16, rc.top as i16, w, h, pixel);
+    let (dw, dh) = dc::with(hdc, |dc| dc.lp_to_device(rc.right, rc.bottom));
+    let ww = (dw - dx) as u16;
+    let hh = (dh - dy) as u16;
+    weave_user32::backend::draw_filled_rect(xcb, dx, dy, ww, hh, pixel);
     1
 }
 
 /// Rectangle: draw a filled rectangle with the current brush, outlined with the current pen.
 pub extern "win64" fn rectangle(hdc: usize, left: i32, top: i32, right: i32, bottom: i32) -> i32 {
+    let (dx, dy) = dc::with(hdc, |dc| dc.lp_to_device(left, top));
     let w = (right - left).max(0) as u16;
     let h = (bottom - top).max(0) as u16;
     if w == 0 || h == 0 {
@@ -311,11 +316,11 @@ pub extern "win64" fn rectangle(hdc: usize, left: i32, top: i32, right: i32, bot
 
     // Fill interior with brush.
     let fill_pixel = to_pixel(objects::brush_color(brush_h));
-    weave_user32::backend::draw_filled_rect(xcb, left as i16, top as i16, w, h, fill_pixel);
+    weave_user32::backend::draw_filled_rect(xcb, dx, dy, w, h, fill_pixel);
 
     // Draw outline with pen.
     let outline_pixel = to_pixel(objects::pen_color(pen_h));
-    weave_user32::backend::draw_rect_outline(xcb, left as i16, top as i16, w, h, outline_pixel);
+    weave_user32::backend::draw_rect_outline(xcb, dx, dy, w, h, outline_pixel);
     1
 }
 
@@ -483,15 +488,8 @@ pub unsafe extern "win64" fn draw_text_w(
 
     let (fg, bg) = dc::with(hdc, |dc| (dc.text_color, dc.bk_color));
     let xcb = dc::with(hdc, |dc| dc.drawable());
-    weave_user32::backend::draw_text_utf16(
-        xcb,
-        x as i16,
-        y as i16,
-        units,
-        px_size,
-        to_pixel(fg),
-        to_pixel(bg),
-    );
+    let (dx, dy) = dc::with(hdc, |dc| dc.lp_to_device(x, y));
+    weave_user32::backend::draw_text_utf16(xcb, dx, dy, units, px_size, to_pixel(fg), to_pixel(bg));
     text_h
 }
 
@@ -560,14 +558,8 @@ pub unsafe extern "win64" fn ext_text_out_w(
         let h = (rc.bottom - rc.top).max(0) as u16;
         if w > 0 && h > 0 {
             let bg_pixel = to_pixel(dc::with(hdc, |dc| dc.bk_color));
-            weave_user32::backend::draw_filled_rect(
-                xcb,
-                rc.left as i16,
-                rc.top as i16,
-                w,
-                h,
-                bg_pixel,
-            );
+            let (dx, dy) = dc::with(hdc, |dc| dc.lp_to_device(rc.left, rc.top));
+            weave_user32::backend::draw_filled_rect(xcb, dx, dy, w, h, bg_pixel);
         }
     }
 
@@ -629,7 +621,8 @@ pub unsafe extern "win64" fn ext_text_out_w(
 pub extern "win64" fn set_pixel(hdc: usize, x: i32, y: i32, color: u32) -> u32 {
     let pixel = to_pixel(color);
     let xcb = dc::with(hdc, |dc| dc.drawable());
-    weave_user32::backend::draw_filled_rect(xcb, x as i16, y as i16, 1, 1, pixel);
+    let (dx, dy) = dc::with(hdc, |dc| dc.lp_to_device(x, y));
+    weave_user32::backend::draw_filled_rect(xcb, dx, dy, 1, 1, pixel);
     color
 }
 
@@ -643,17 +636,31 @@ pub extern "win64" fn get_pixel(_hdc: usize, _x: i32, _y: i32) -> u32 {
 /// # Safety
 /// `lp_point` (if non-null) must be a valid writable pointer to a `POINT`.
 pub unsafe extern "win64" fn move_to_ex(hdc: usize, x: i32, y: i32, lp_point: *mut Point) -> i32 {
-    // Phase 2: no pen position in DC state — stub.
-    if !lp_point.is_null() {
-        unsafe { *lp_point = Point { x, y } };
-    }
-    let _ = hdc;
+    dc::with_mut(hdc, |dc| {
+        if !lp_point.is_null() {
+            unsafe {
+                *lp_point = dc.pen_pos;
+            }
+        }
+        dc.pen_pos = Point { x, y };
+    });
     1
 }
 
 /// LineTo: draw a line from the current position to (x, y) (stub).
-pub extern "win64" fn line_to(_hdc: usize, _x: i32, _y: i32) -> i32 {
-    // TODO Phase 3: real line drawing.
+pub extern "win64" fn line_to(hdc: usize, x: i32, y: i32) -> i32 {
+    // Wine ref: dlls/win32u/line.c — NtGdiLineTo draws from current pos to (x,y),
+    // then updates current pos to (x,y).
+    let (drawable, x1, y1, pixel) = dc::with(hdc, |dc| {
+        let (x1, y1) = dc.lp_to_device(dc.pen_pos.x, dc.pen_pos.y);
+        let pixel = weave_user32::backend::colorref_to_pixel(objects::pen_color(dc.h_pen));
+        (dc.drawable(), x1, y1, pixel)
+    });
+    let (x2, y2) = dc::with(hdc, |dc| dc.lp_to_device(x, y));
+    if drawable != 0 {
+        weave_user32::backend::draw_line(drawable, x1, y1, x2, y2, pixel);
+    }
+    dc::with_mut(hdc, |dc| dc.pen_pos = Point { x, y });
     1
 }
 
@@ -792,6 +799,11 @@ pub extern "win64" fn create_compatible_dc(hdc: usize) -> usize {
 
 /// DeleteDC: delete a DC created by CreateCompatibleDC (stub).
 pub extern "win64" fn delete_dc(hdc: usize) -> i32 {
+    if let Some(pixmap) = dc::with(hdc, |dc| dc.pixmap) {
+        if pixmap != 0 {
+            weave_user32::backend::free_pixmap(pixmap);
+        }
+    }
     dc::remove(hdc);
     1
 }
@@ -1280,6 +1292,16 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "RoundRect" => Some(round_rect as *const () as usize),
         "SetWindowOrgEx" => Some(
             set_window_org_ex as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
+        ),
+        "SetViewportOrgEx" => Some(
+            set_viewport_org_ex as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
+        ),
+        "GetViewportOrgEx" => {
+            Some(get_viewport_org_ex as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "OffsetViewportOrgEx" => Some(
+            offset_viewport_org_ex as unsafe extern "win64" fn(_, _, _, _) -> _ as *const ()
+                as usize,
         ),
         "OffsetWindowOrgEx" => Some(
             offset_window_org_ex as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
@@ -2298,16 +2320,23 @@ pub extern "win64" fn round_rect(
 /// # Safety
 /// `lp_point` (if non-null) must be a valid writable POINT.
 pub unsafe extern "win64" fn set_window_org_ex(
-    _hdc: usize,
-    _x: i32,
-    _y: i32,
+    hdc: usize,
+    x: i32,
+    y: i32,
     lp_point: *mut Point,
 ) -> i32 {
-    if !lp_point.is_null() {
-        unsafe {
-            *lp_point = Point { x: 0, y: 0 };
+    // Wine ref: dlls/win32u/mapping.c — NtGdiSetWindowOrgEx stores (x,y) in
+    // dc->attr.wnd_org, returns previous origin in lp_point if non-null.
+    let mut prev = Point { x: 0, y: 0 };
+    dc::with_mut(hdc, |dc| {
+        if !lp_point.is_null() {
+            unsafe {
+                *lp_point = dc.window_org;
+            }
         }
-    }
+        prev = dc.window_org;
+        dc.window_org = Point { x, y };
+    });
     1
 }
 
@@ -2319,16 +2348,83 @@ pub unsafe extern "win64" fn set_window_org_ex(
 /// # Safety
 /// `lp_point` (if non-null) must be a valid writable POINT.
 pub unsafe extern "win64" fn offset_window_org_ex(
-    _hdc: usize,
-    _x: i32,
-    _y: i32,
+    hdc: usize,
+    x: i32,
+    y: i32,
     lp_point: *mut Point,
 ) -> i32 {
-    if !lp_point.is_null() {
-        unsafe {
-            *lp_point = Point { x: 0, y: 0 };
+    dc::with_mut(hdc, |dc| {
+        if !lp_point.is_null() {
+            unsafe {
+                *lp_point = dc.window_org;
+            }
         }
+        dc.window_org.x += x;
+        dc.window_org.y += y;
+    });
+    1
+}
+
+/// SetViewportOrgEx: set the viewport origin of the DC.
+///
+/// Wine ref: dlls/win32u/mapping.c — NtGdiSetViewportOrgEx stores (x,y) in
+/// dc->attr.vport_org, returns previous origin in lp_point.
+///
+/// # Safety
+/// `lp_point` (if non-null) must be a valid writable POINT.
+pub unsafe extern "win64" fn set_viewport_org_ex(
+    hdc: usize,
+    x: i32,
+    y: i32,
+    lp_point: *mut Point,
+) -> i32 {
+    dc::with_mut(hdc, |dc| {
+        if !lp_point.is_null() {
+            unsafe {
+                *lp_point = dc.viewport_org;
+            }
+        }
+        dc.viewport_org = Point { x, y };
+    });
+    1
+}
+
+/// GetViewportOrgEx: return the viewport origin of the DC.
+///
+/// # Safety
+/// `lp_point` (if non-null) must be a valid writable POINT.
+pub unsafe extern "win64" fn get_viewport_org_ex(hdc: usize, lp_point: *mut Point) -> i32 {
+    if !lp_point.is_null() {
+        dc::with(hdc, |dc| unsafe { *lp_point = dc.viewport_org });
     }
+    1
+}
+
+/// OffsetViewportOrgEx: add (x, y) to the viewport origin.
+///
+/// Wine ref: dlls/win32u/mapping.c — NtGdiOffsetViewportOrg adds (x,y) to
+/// dc->attr.vport_org and returns the previous value in lp_point.
+///
+/// # Safety
+/// `lp_point` (if non-null) must be a valid writable POINT.
+pub unsafe extern "win64" fn offset_viewport_org_ex(
+    hdc: usize,
+    x: i32,
+    y: i32,
+    lp_point: *mut Point,
+) -> i32 {
+    // Wine ref: dlls/win32u/dc.c — offset_viewport_org adds (x,y) to dc->attr.vport_org
+    let mut prev = Point { x: 0, y: 0 };
+    dc::with_mut(hdc, |dc| {
+        if !lp_point.is_null() {
+            unsafe {
+                *lp_point = dc.viewport_org;
+            }
+        }
+        prev = dc.viewport_org;
+        dc.viewport_org.x += x;
+        dc.viewport_org.y += y;
+    });
     1
 }
 

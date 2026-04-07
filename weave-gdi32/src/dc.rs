@@ -37,6 +37,9 @@ pub struct DcState {
     pub h_font: usize,
     pub selected_bitmap: usize,
     pub pixmap: Option<u32>,
+    pub pen_pos: Point,      // current pen position (MoveToEx/LineTo)
+    pub viewport_org: Point, // viewport origin (SetViewportOrgEx)
+    pub window_org: Point,   // window origin (SetWindowOrgEx)
 }
 
 impl DcState {
@@ -52,6 +55,9 @@ impl DcState {
             h_font: objects::stock_handle(SYSTEM_FONT),
             selected_bitmap: 0,
             pixmap: None,
+            pen_pos: Point { x: 0, y: 0 },
+            viewport_org: Point { x: 0, y: 0 },
+            window_org: Point { x: 0, y: 0 },
         }
     }
 }
@@ -176,6 +182,13 @@ impl DcState {
             self.hwnd
         };
         weave_user32::window::xcb_id(hwnd)
+    }
+
+    pub fn lp_to_device(&self, x: i32, y: i32) -> (i16, i16) {
+        // MM_TEXT mapping: device = logical - window_org + viewport_org
+        let dx = x - self.window_org.x + self.viewport_org.x;
+        let dy = y - self.window_org.y + self.viewport_org.y;
+        (dx as i16, dy as i16)
     }
 }
 
