@@ -26,7 +26,7 @@ pub enum GdiKind {
         italic: bool,
         face: [u16; 32],
     },
-    Bitmap,
+    Bitmap { width: u32, height: u32 },
     /// Region — clipping/fill region.
     ///
     /// Wine ref: dlls/win32u/region.c — NtGdiCreateRectRgn allocates a WINEREGION
