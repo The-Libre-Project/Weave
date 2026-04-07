@@ -300,6 +300,70 @@ mod inner {
         let _ = g.conn.flush();
     }
 
+    /// Create an X11 Pixmap of the given dimensions.
+    ///
+    /// Wine ref: dlls/winex11.drv/bitblt.c — X11DRV_CreateBitmap allocates an
+    /// X11 Pixmap via XCreatePixmap with the screen depth. Returns 0 on failure.
+    pub fn create_pixmap(parent_drawable: u32, width: u16, height: u16) -> u32 {
+        let x11 = match x11() {
+            Some(m) => m,
+            None => return 0,
+        };
+        let g = x11.lock().unwrap();
+        let pid = match g.conn.generate_id() {
+            Ok(id) => id,
+            Err(_) => return 0,
+        };
+        let drawable = if parent_drawable != 0 {
+            parent_drawable
+        } else {
+            g.root
+        };
+        if g.conn
+            .create_pixmap(g.depth, pid, drawable, width.max(1), height.max(1))
+            .is_err()
+        {
+            return 0;
+        }
+        let _ = g.conn.flush();
+        pid
+    }
+
+    /// Copy a rectangle of pixels from one X11 drawable to another (XCopyArea).
+    ///
+    /// Wine ref: dlls/winex11.drv/bitblt.c — X11DRV_BitBlt issues XCopyArea for
+    /// SRCCOPY. src and dst may be windows or pixmaps interchangeably.
+    #[allow(clippy::too_many_arguments)]
+    pub fn copy_area(
+        src: u32,
+        dst: u32,
+        src_x: i16,
+        src_y: i16,
+        dst_x: i16,
+        dst_y: i16,
+        width: u16,
+        height: u16,
+    ) {
+        if width == 0 || height == 0 {
+            return;
+        }
+        let x11 = match x11() {
+            Some(m) => m,
+            None => return,
+        };
+        let g = x11.lock().unwrap();
+        let gc_id = match g.conn.generate_id() {
+            Ok(id) => id,
+            Err(_) => return,
+        };
+        let _ = g.conn.create_gc(gc_id, dst, &CreateGCAux::new());
+        let _ = g
+            .conn
+            .copy_area(src, dst, gc_id, src_x, src_y, dst_x, dst_y, width, height);
+        let _ = g.conn.free_gc(gc_id);
+        let _ = g.conn.flush();
+    }
+
     /// Destroy an X11 window.
     pub fn destroy_window(xcb_id: u32) {
         let x11 = match x11() {
@@ -915,9 +979,9 @@ mod inner {
 
 #[cfg(target_os = "linux")]
 pub use inner::{
-    colorref_to_pixel, configure_window, create_window, destroy_window, draw_filled_rect,
-    draw_rect_outline, draw_text, draw_text_utf16, is_available, poll_event, screen_size,
-    set_title, show_window, system_dpi, wait_event,
+    colorref_to_pixel, configure_window, copy_area, create_pixmap, create_window, destroy_window,
+    draw_filled_rect, draw_rect_outline, draw_text, draw_text_utf16, is_available, poll_event,
+    screen_size, set_title, show_window, system_dpi, wait_event,
 };
 
 // ── No-op stubs for non-Linux platforms (macOS dev builds) ───────────────────
@@ -975,6 +1039,25 @@ pub fn wait_event() -> bool {
 #[cfg(not(target_os = "linux"))]
 pub fn colorref_to_pixel(colorref: u32) -> u32 {
     colorref
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn create_pixmap(_parent_drawable: u32, _width: u16, _height: u16) -> u32 {
+    0
+}
+
+#[cfg(not(target_os = "linux"))]
+#[allow(clippy::too_many_arguments)]
+pub fn copy_area(
+    _src: u32,
+    _dst: u32,
+    _src_x: i16,
+    _src_y: i16,
+    _dst_x: i16,
+    _dst_y: i16,
+    _width: u16,
+    _height: u16,
+) {
 }
 
 #[cfg(not(target_os = "linux"))]

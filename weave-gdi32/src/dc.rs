@@ -1,8 +1,9 @@
 //! DC (Device Context) state table.
 //!
-//! In Phase 2, the HDC is identical to the HWND (the window handle) — a
-//! simplification that avoids a full GDI surface abstraction. Drawing functions
-//! resolve the XCB window id via `weave_user32::window::xcb_id(hdc)`.
+//! Each DC carries an optional X11 Pixmap for memory DCs. When a bitmap is
+//! selected into a DC via SelectObject, a Pixmap of the same dimensions is
+//! allocated. Drawing functions resolve the drawable via `DcState::drawable()`,
+//! which returns the Pixmap if present, or the X11 window ID otherwise.
 
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
@@ -34,6 +35,8 @@ pub struct DcState {
     pub h_pen: usize,
     /// Currently selected font handle.
     pub h_font: usize,
+    pub selected_bitmap: usize,
+    pub pixmap: Option<u32>,
 }
 
 impl DcState {
@@ -47,6 +50,8 @@ impl DcState {
             h_brush: objects::stock_handle(WHITE_BRUSH),
             h_pen: objects::stock_handle(BLACK_PEN),
             h_font: objects::stock_handle(SYSTEM_FONT),
+            selected_bitmap: 0,
+            pixmap: None,
         }
     }
 }
@@ -145,6 +150,33 @@ pub fn restore(hdc: usize, level: i32) -> i32 {
     // Write the restored state into the active DC table.
     with_mut(hdc, |dc| *dc = saved);
     1
+}
+
+impl DcState {
+    /// Return the X11 drawable for this DC.
+    ///
+    /// Priority:
+    /// 1. The Pixmap allocated for a memory DC (SelectObject + compatible bitmap).
+    /// 2. The X11 window ID of the associated HWND.
+    /// 3. If hwnd is 0 (memory DC created before any windows — Scintilla's
+    ///    pattern), fall back to the current BeginPaint HWND, then the first
+    ///    window with a valid XCB ID.
+    pub fn drawable(&self) -> u32 {
+        if let Some(pixmap) = self.pixmap {
+            return pixmap;
+        }
+        let hwnd = if self.hwnd == 0 {
+            let from_paint = weave_user32::api::current_paint_hwnd();
+            if from_paint != 0 {
+                from_paint
+            } else {
+                weave_user32::window::first_hwnd_with_xcb()
+            }
+        } else {
+            self.hwnd
+        };
+        weave_user32::window::xcb_id(hwnd)
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

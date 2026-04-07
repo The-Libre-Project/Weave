@@ -96,6 +96,7 @@ pub const RC_STRETCHBLT: i32 = 0x0800;
 pub const RC_FLOODFILL: i32 = 0x1000;
 pub const RC_STRETCHDIB: i32 = 0x2000;
 pub const RC_DEVBITS: i32 = 0x8000;
+pub const SRCCOPY: u32 = 0xCC0020;
 pub const RASTER_CAPS_DISPLAY: i32 = RC_BITBLT
     | RC_BITMAP64
     | RC_GDI20_OUTPUT

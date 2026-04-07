@@ -13,10 +13,9 @@
 //!
 //! # Current simplifications
 //!
-//! - HDC == HWND (every DC is tied to its window; no memory DCs backed by
-//!   real pixel buffers).
-//! - Bitmaps, DIBs, and blitting are stubbed (return success codes, no pixels
-//!   are transferred).
+//! - Memory DCs are backed by X11 Pixmaps (created on SelectObject of a bitmap).
+//! - BitBlt / SRCCOPY copies from the src Pixmap to the dst drawable via XCopyArea.
+//! - Other ROP codes beyond SRCCOPY are not yet implemented.
 
 pub mod dc;
 pub mod defs;
@@ -32,30 +31,6 @@ use weave_common::stub::warn_once;
 #[inline]
 fn to_pixel(colorref: u32) -> u32 {
     weave_user32::backend::colorref_to_pixel(colorref)
-}
-
-/// Resolve an HDC to the XCB window ID needed for drawing.
-///
-/// For screen DCs (BeginPaint returns HWND as HDC), dc.hwnd == hdc == HWND.
-/// For memory DCs (CreateCompatibleDC), dc.hwnd was set at creation time.
-///
-/// When hwnd is 0 (memory DC created before any windows existed — Scintilla's
-/// pattern), we resolve lazily at draw time using the current BeginPaint HWND,
-/// falling back to the first window with a valid XCB ID.
-#[inline]
-fn xcb_for(hdc: usize) -> u32 {
-    let hwnd = dc::with(hdc, |dc| dc.hwnd);
-    let hwnd = if hwnd == 0 {
-        let from_paint = weave_user32::api::current_paint_hwnd();
-        if from_paint != 0 {
-            from_paint
-        } else {
-            weave_user32::window::first_hwnd_with_xcb()
-        }
-    } else {
-        hwnd
-    };
-    weave_user32::window::xcb_id(hwnd)
 }
 
 // ── GDI object creation / deletion ───────────────────────────────────────────
@@ -211,10 +186,17 @@ pub extern "win64" fn select_object(hdc: usize, h_gdi_obj: usize) -> usize {
                     old = dc.h_font;
                     dc.h_font = h_gdi_obj;
                 }
-                GdiKind::Bitmap => {
-                    // In a real GDI, selecting a bitmap into a compatible DC
-                    // changes the DC's drawing surface. Phase 2: stub.
-                    old = 0;
+                GdiKind::Bitmap { width, height } => {
+                    old = dc.selected_bitmap;
+                    dc.selected_bitmap = h_gdi_obj;
+                    if dc.pixmap.is_none() {
+                        let parent_draw = dc.drawable();
+                        dc.pixmap = Some(weave_user32::backend::create_pixmap(
+                            parent_draw,
+                            *width as u16,
+                            *height as u16,
+                        ));
+                    }
                 }
                 GdiKind::Region => {
                     // SelectObject with a region selects it as the clip region.
@@ -312,7 +294,7 @@ pub unsafe extern "win64" fn fill_rect(hdc: usize, lp_rc: *const Rect, h_brush: 
         objects::brush_color(brush)
     };
     let pixel = to_pixel(color);
-    let xcb = xcb_for(hdc);
+    let xcb = dc::with(hdc, |dc| dc.drawable());
     weave_user32::backend::draw_filled_rect(xcb, rc.left as i16, rc.top as i16, w, h, pixel);
     1
 }
@@ -324,7 +306,7 @@ pub extern "win64" fn rectangle(hdc: usize, left: i32, top: i32, right: i32, bot
     if w == 0 || h == 0 {
         return 1;
     }
-    let xcb = xcb_for(hdc);
+    let xcb = dc::with(hdc, |dc| dc.drawable());
     let (brush_h, pen_h) = dc::with(hdc, |dc| (dc.h_brush, dc.h_pen));
 
     // Fill interior with brush.
@@ -392,7 +374,7 @@ pub unsafe extern "win64" fn text_out_w(
     let fg_pixel = to_pixel(fg);
     let bg_pixel = to_pixel(bg);
     let units: &[u16] = unsafe { std::slice::from_raw_parts(lp_string, c as usize) };
-    let xcb = xcb_for(hdc);
+    let xcb = dc::with(hdc, |dc| dc.drawable());
     let px_size = font_px_size(hdc);
     let text_align = dc::with(hdc, |dc| dc.text_align);
 
@@ -500,7 +482,7 @@ pub unsafe extern "win64" fn draw_text_w(
     };
 
     let (fg, bg) = dc::with(hdc, |dc| (dc.text_color, dc.bk_color));
-    let xcb = xcb_for(hdc);
+    let xcb = dc::with(hdc, |dc| dc.drawable());
     weave_user32::backend::draw_text_utf16(
         xcb,
         x as i16,
@@ -566,7 +548,7 @@ pub unsafe extern "win64" fn ext_text_out_w(
     c: u32,
     lp_dx: *const i32,
 ) -> i32 {
-    let xcb = xcb_for(hdc);
+    let xcb = dc::with(hdc, |dc| dc.drawable());
     if xcb == 0 {
         return 1; // no window — safe no-op
     }
@@ -646,7 +628,7 @@ pub unsafe extern "win64" fn ext_text_out_w(
 /// SetPixel: draw a single pixel.
 pub extern "win64" fn set_pixel(hdc: usize, x: i32, y: i32, color: u32) -> u32 {
     let pixel = to_pixel(color);
-    let xcb = xcb_for(hdc);
+    let xcb = dc::with(hdc, |dc| dc.drawable());
     weave_user32::backend::draw_filled_rect(xcb, x as i16, y as i16, 1, 1, pixel);
     color
 }
@@ -685,7 +667,7 @@ pub extern "win64" fn pat_blt(hdc: usize, x: i32, y: i32, w: i32, h: i32, _rop: 
     // Use the selected brush to fill the rectangle.
     let brush_h = dc::with(hdc, |dc| dc.h_brush);
     let color = objects::brush_color(brush_h);
-    let xcb = xcb_for(hdc);
+    let xcb = dc::with(hdc, |dc| dc.drawable());
     weave_user32::backend::draw_filled_rect(
         xcb,
         x as i16,
@@ -702,6 +684,7 @@ pub extern "win64" fn pat_blt(hdc: usize, x: i32, y: i32, w: i32, h: i32, _rop: 
 /// Wine ref: dlls/win32u/bitblt.c — NtGdiBitBlt applies rop3 raster operation combining
 /// src DC, dst DC, and current brush pattern. SRCCOPY (0xCC0020) copies src to dst.
 /// Phase 2 stub: returns TRUE without transferring pixels (no real memory DC backing).
+// Wine ref: dlls/gdi32/dc.c BitBlt → NtGdiBitBlt; dlls/gdi32/tests/bitmap.c ROP3 tests; dlls/winex11.drv/bitblt.c X11DRV_BitBlt → XCopyArea(GXcopy) SRCCOPY
 pub extern "win64" fn bit_blt(
     hdc_dest: usize,
     x: i32,
@@ -713,7 +696,22 @@ pub extern "win64" fn bit_blt(
     y1: i32,
     rop: u32,
 ) -> i32 {
-    let _ = (hdc_dest, hdc_src, x, y, cx, cy, x1, y1, rop);
+    // Wine ref: dlls/win32u/bitblt.c NtGdiBitBlt → X11DRV_BitBlt (winex11.drv/bitblt.c)
+    // SRCCOPY (0xCC0020): XCopyArea from src drawable to dst drawable.
+    if cx <= 0 || cy <= 0 {
+        return 1;
+    }
+    let dst_draw = dc::with(hdc_dest, |dc| dc.drawable());
+    let src_draw = dc::with(hdc_src, |dc| dc.drawable());
+    if dst_draw == 0 || src_draw == 0 {
+        return 0;
+    }
+    if rop != defs::SRCCOPY {
+        return 1; // TODO: other ROP codes
+    }
+    weave_user32::backend::copy_area(
+        src_draw, dst_draw, x1 as i16, y1 as i16, x as i16, y as i16, cx as u16, cy as u16,
+    );
     1
 }
 
@@ -783,7 +781,10 @@ pub extern "win64" fn create_compatible_dc(hdc: usize) -> usize {
     };
     // Allocate a unique GDI handle for this memory DC.
     // Bitmap is a no-payload kind — used here purely for handle uniqueness.
-    let mem_dc = objects::alloc(GdiKind::Bitmap);
+    let mem_dc = objects::alloc(GdiKind::Bitmap {
+        width: 1,
+        height: 1,
+    });
     // Bind the new memory DC to the parent window so xcb_for() resolves correctly.
     dc::with_mut(mem_dc, |dc| dc.hwnd = parent_hwnd);
     mem_dc
@@ -796,9 +797,10 @@ pub extern "win64" fn delete_dc(hdc: usize) -> i32 {
 }
 
 /// CreateCompatibleBitmap: create a bitmap compatible with a DC (stub).
-pub extern "win64" fn create_compatible_bitmap(hdc: usize, cx: i32, cy: i32) -> usize {
-    let _ = (hdc, cx, cy);
-    objects::alloc(GdiKind::Bitmap)
+pub extern "win64" fn create_compatible_bitmap(_hdc: usize, cx: i32, cy: i32) -> usize {
+    let width = cx.unsigned_abs().max(1);
+    let height = cy.unsigned_abs().max(1);
+    objects::alloc(GdiKind::Bitmap { width, height })
 }
 
 /// CreateDIBSection: create a DIB section (stub — returns 0).
@@ -1747,13 +1749,15 @@ pub unsafe extern "win64" fn polyline(_hdc: usize, _lpt: *const i32, _c_pt: i32)
 ///
 /// Returns a GDI object handle. Phase 2 stub — no pixel data stored.
 pub extern "win64" fn create_bitmap(
-    _n_width: i32,
-    _n_height: i32,
+    n_width: i32,
+    n_height: i32,
     _n_planes: u32,
     _n_bit_count: u32,
     _lp_bits: usize,
 ) -> usize {
-    objects::alloc(GdiKind::Bitmap)
+    let width = n_width.unsigned_abs().max(1);
+    let height = n_height.unsigned_abs().max(1);
+    objects::alloc(GdiKind::Bitmap { width, height })
 }
 
 /// GetDIBits: copy pixel data from a bitmap into a DIB. Returns 0 (stub).
@@ -2013,7 +2017,7 @@ pub unsafe extern "win64" fn get_object_w(h: usize, c: i32, pv: *mut u8) -> i32 
                 written = 16;
             }
         }
-        GdiKind::Bitmap | GdiKind::Region => {}
+        GdiKind::Bitmap { .. } | GdiKind::Region => {}
     });
     written
 }
