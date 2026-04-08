@@ -33,3 +33,4 @@ core.*
 # 7z.dll + 7zFM.exe are excluded (only used for optional GUI test)
 tests/fixtures/bin/7z.dll
 tests/fixtures/bin/7zFM.exe
+/.docker-cargo/

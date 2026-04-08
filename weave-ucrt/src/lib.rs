@@ -855,17 +855,61 @@ pub unsafe extern "win64" fn ucrt_beginthreadex(
 
 pub extern "win64" fn ucrt_endthreadex(_exit_code: u32) {}
 
-/// # Safety
-/// `_buf` must point to a sufficiently sized jmp_buf-compatible buffer if non-null. This stub is a no-op and always returns 0.
+/// `__intrinsic_setjmpex` — save the SEH frame pointer to jmp_buf->Frame.
+///
+/// Wine ref: dlls/ntdll/signal_x86_64.c — __wine_setjmpex saves frame (RDX in Win64)
+/// to jmp_buf->Frame at offset 0x00.  The integer registers are already saved inline
+/// by the compiler before this function is called.
+///
+/// Weave: we write 0 to buf->Frame so that longjmp always takes the direct
+/// register-restore path instead of the RtlUnwind path.  This is safe because
+/// our longjmp implementation does a full register restore and does not need the
+/// SEH unwind machinery.
 pub unsafe extern "win64" fn ucrt_intrinsic_setjmpex(
-    _buf: *mut c_void,
+    buf: *mut c_void,
     _frame: *const c_void,
 ) -> i32 {
+    // Zero buf->Frame so longjmp skips RtlUnwind and restores registers directly.
+    unsafe { *(buf as *mut u64) = 0 };
     0
 }
 
-pub extern "win64" fn ucrt_longjmp(_buf: *mut c_void, _val: i32) -> ! {
-    unsafe { libc::abort() }
+/// `longjmp` — restore CPU state saved by `setjmp` and return `val` to the caller.
+///
+/// Wine ref: dlls/ntdll/signal_x86_64.c — longjmp_regs (direct-restore path, Frame==0):
+///   restore Rbx/Rbp/Rsi/Rdi/R12-R15 from jmp_buf offsets 0x08/0x18/0x20/0x28/0x30-0x48,
+///   restore Rsp from 0x10, jump to Rip at 0x50.
+///
+/// MSVC _JUMP_BUFFER x64 layout (include/msvcrt/setjmp.h):
+///   +0x00 Frame  +0x08 Rbx  +0x10 Rsp  +0x18 Rbp
+///   +0x20 Rsi   +0x28 Rdi  +0x30 R12  +0x38 R13
+///   +0x40 R14   +0x48 R15  +0x50 Rip  +0x58 MxCsr  +0x5c FpCsr
+///
+/// Win64 entry: RCX = jmp_buf ptr, EDX = retval
+#[unsafe(naked)]
+pub unsafe extern "win64" fn ucrt_longjmp(_buf: *mut c_void, _val: i32) -> ! {
+    core::arch::naked_asm!(
+        // C standard: if retval == 0, force to 1
+        "test  edx, edx",
+        "jnz   1f",
+        "mov   edx, 1",
+        "1:",
+        "mov   rax, rdx",                        // rax = return value
+        "mov   rbx, qword ptr [rcx + 0x08]",     // restore Rbx
+        "mov   rbp, qword ptr [rcx + 0x18]",     // restore Rbp
+        "mov   rsi, qword ptr [rcx + 0x20]",     // restore Rsi
+        "mov   rdi, qword ptr [rcx + 0x28]",     // restore Rdi
+        "mov   r12, qword ptr [rcx + 0x30]",     // restore R12
+        "mov   r13, qword ptr [rcx + 0x38]",     // restore R13
+        "mov   r14, qword ptr [rcx + 0x40]",     // restore R14
+        "mov   r15, qword ptr [rcx + 0x48]",     // restore R15
+        "mov   r11, qword ptr [rcx + 0x50]",     // r11 = saved Rip (jump target)
+        "ldmxcsr dword ptr [rcx + 0x58]",        // restore MxCsr
+        "fnclex",                                // clear FPU exceptions
+        "fldcw  word ptr [rcx + 0x5c]",          // restore FpCsr
+        "mov   rsp, qword ptr [rcx + 0x10]",     // restore Rsp LAST (rcx now invalid)
+        "jmp   r11",                              // jump to saved Rip
+    )
 }
 
 // locale / multibyte stubs
@@ -1939,7 +1983,7 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "__intrinsic_setjmpex" => {
             stub!(ucrt_intrinsic_setjmpex as unsafe extern "win64" fn(_, _) -> _)
         }
-        "longjmp" => stub!(ucrt_longjmp as extern "win64" fn(_, _) -> !),
+        "longjmp" => stub!(ucrt_longjmp as unsafe extern "win64" fn(_, _) -> !),
         // exception handler
         "__C_specific_handler" => {
             stub!(ucrt_c_specific_handler as extern "win64" fn(_, _, _, _) -> _)

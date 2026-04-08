@@ -213,26 +213,30 @@ pub struct Rect {
 
 // ── PAINTSTRUCT struct ────────────────────────────────────────────────────────
 //
-// Windows layout (72 bytes):
-//   offset  0: hdc         (HDC = usize)
-//   offset  8: fErase      (BOOL = i32)
-//   offset 12: _pad        (4 bytes)
-//   offset 16: rcPaint     (RECT = 16 bytes)
-//   offset 32: fRestore    (BOOL = i32)
-//   offset 36: fIncUpdate  (BOOL = i32)
-//   offset 40: rgbReserved ([u8; 32])
+// Windows 64-bit layout (72 bytes):
+//   offset  0: hdc         (HDC = usize, 8 bytes)
+//   offset  8: fErase      (BOOL = i32, 4 bytes)
+//   offset 12: rcPaint     (RECT = 16 bytes) — RECT is 4-byte aligned, no padding needed
+//   offset 28: fRestore    (BOOL = i32, 4 bytes)
+//   offset 32: fIncUpdate  (BOOL = i32, 4 bytes)
+//   offset 36: rgbReserved ([u8; 32])
+//   offset 68: 4-byte tail padding (struct must be 8-byte aligned for hdc)
 //   total: 72 bytes
+//
+// Previous mistake: had a spurious _pad: u32 at offset 12, shifting rcPaint to
+// offset 16. That caused Scintilla to read zeros for rcPaint.right, making
+// IsRectEmpty() return true and skipping all painting.
 
 #[repr(C)]
 pub struct PaintStruct {
     pub hdc: usize,
     pub f_erase: i32,
-    pub _pad: u32,
     pub rc_paint: Rect,
     pub f_restore: i32,
     pub f_inc_update: i32,
     pub rgb_reserved: [u8; 32],
 }
+const _: () = assert!(std::mem::size_of::<PaintStruct>() == 72);
 
 // ── CREATESTRUCTW — passed to WNDPROC with WM_CREATE / WM_NCCREATE ───────────
 //

@@ -1586,7 +1586,7 @@ pub unsafe extern "win64" fn create_file_w(
 
     let nt_disposition = file_io::win32_disposition_to_nt(dw_creation_disposition);
 
-    match file_io::open_file(&win_path, dw_desired_access, nt_disposition) {
+    let result = match file_io::open_file(&win_path, dw_desired_access, nt_disposition) {
         Ok(handle) => {
             LAST_ERROR.with(|e| e.set(0));
             handle
@@ -1595,7 +1595,18 @@ pub unsafe extern "win64" fn create_file_w(
             LAST_ERROR.with(|e| e.set(file_io::ERROR_FILE_NOT_FOUND));
             usize::MAX // INVALID_HANDLE_VALUE
         }
+    };
+    {
+        static CFW: std::sync::atomic::AtomicU32 =
+            std::sync::atomic::AtomicU32::new(0);
+        let n = CFW.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let ok = result != usize::MAX;
+        let path_lc = win_path.to_ascii_lowercase();
+        if n < 50 || path_lc.contains(".py") || path_lc.contains("test") {
+            eprintln!("weave/kernel32: CreateFileW#{n} {win_path:?} ok={ok}");
+        }
     }
+    result
 }
 
 /// ReadFile: read bytes from a file handle into a buffer.
@@ -1641,6 +1652,14 @@ pub unsafe extern "win64" fn read_file(
         LAST_ERROR.with(|e| e.set(file_io::ERROR_ACCESS_DENIED));
         0 // FALSE
     } else {
+        {
+            static RF: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+            let rn = RF.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            // Log first 20 reads, or any small read (<=512 bytes, likely a text file like test.py).
+            if n > 0 && (rn < 20 || (n > 0 && n <= 512)) {
+                eprintln!("weave/kernel32: ReadFile#{rn} fd={fd} n_req={n_bytes_to_read} n_read={n}");
+            }
+        }
         LAST_ERROR.with(|e| e.set(0));
         1 // TRUE
     }
@@ -7278,6 +7297,189 @@ pub unsafe extern "win64" fn get_string_type_w(
     1 // TRUE
 }
 
+/// GetStringTypeExW: classify UTF-16 characters (locale-aware wrapper).
+///
+/// Wine ref: dlls/kernelbase/locale.c — locale param is explicitly ignored for Unicode;
+/// directly tail-calls GetStringTypeW(type, src, count, chartype).
+///
+/// # Safety
+/// `lp_src_str` must be valid for `cch_src` u16 elements.
+/// `lp_char_type` must be writable for `cch_src` u16 elements.
+pub unsafe extern "win64" fn get_string_type_ex_w(
+    _locale: u32,
+    dw_info_type: u32,
+    lp_src_str: *const u16,
+    cch_src: i32,
+    lp_char_type: *mut u16,
+) -> i32 {
+    unsafe { get_string_type_w(dw_info_type, lp_src_str, cch_src, lp_char_type) }
+}
+
+/// GetStringTypeExA: classify ANSI characters (locale-aware wrapper).
+///
+/// Wine ref: dlls/kernelbase/locale.c — locale ignored; converts each ANSI byte to
+/// its Unicode codepoint (identity for ASCII) then classifies via CT_CTYPE1 table.
+///
+/// # Safety
+/// `lp_src_str` must be valid for `cch_src` bytes.
+/// `lp_char_type` must be writable for `cch_src` u16 elements.
+pub unsafe extern "win64" fn get_string_type_ex_a(
+    _locale: u32,
+    dw_info_type: u32,
+    lp_src_str: *const u8,
+    cch_src: i32,
+    lp_char_type: *mut u16,
+) -> i32 {
+    if dw_info_type != CT_CTYPE1 {
+        return 0; // FALSE — only CT_CTYPE1 supported
+    }
+    if lp_src_str.is_null() || lp_char_type.is_null() {
+        LAST_ERROR.with(|e| e.set(87)); // ERROR_INVALID_PARAMETER
+        return 0;
+    }
+    let len = if cch_src == -1 {
+        let mut l = 0usize;
+        unsafe {
+            while *lp_src_str.add(l) != 0 {
+                l += 1;
+            }
+        }
+        l
+    } else {
+        cch_src as usize
+    };
+    for i in 0..len {
+        unsafe {
+            *lp_char_type.add(i) = classify_char(u16::from(*lp_src_str.add(i)));
+        }
+    }
+    1 // TRUE
+}
+
+/// AreFileApisANSI: return whether file I/O APIs use the ANSI codepage.
+///
+/// Wine ref: dlls/kernelbase/file.c — returns `!oem_file_apis`; default is FALSE
+/// (ANSI mode enabled), so returns TRUE. Weave always uses ANSI mode.
+pub extern "win64" fn are_file_apis_ansi() -> i32 {
+    1 // TRUE
+}
+
+/// CompareStringEx: compare two UTF-16 strings using a locale name.
+///
+/// Wine ref: dlls/kernelbase/locale.c — validates flags and null args, resolves locale
+/// name to sortguid, then delegates to compare_string(). NULL str1 or str2 →
+/// ERROR_INVALID_PARAMETER. Weave ignores locale name (ASCII case-fold only).
+///
+/// # Safety
+/// `lp_string1` and `lp_string2` must be valid UTF-16 string pointers.
+pub unsafe extern "win64" fn compare_string_ex(
+    _lp_locale_name: *const u16,
+    dw_cmp_flags: u32,
+    lp_string1: *const u16,
+    cch_count1: i32,
+    lp_string2: *const u16,
+    cch_count2: i32,
+    _lp_version_info: *const (),
+    _lp_reserved: *const (),
+    _l_param: isize,
+) -> i32 {
+    if lp_string1.is_null() || lp_string2.is_null() {
+        LAST_ERROR.with(|e| e.set(87)); // ERROR_INVALID_PARAMETER
+        return 0;
+    }
+    unsafe {
+        compare_string_w(0, dw_cmp_flags, lp_string1, cch_count1, lp_string2, cch_count2)
+    }
+}
+
+/// LCMapStringEx: map a UTF-16 string using a locale name.
+///
+/// Wine ref: dlls/kernelbase/locale.c — null src, srclen==0, or dstlen<0 →
+/// ERROR_INVALID_PARAMETER. LCMAP_SORTKEY writes binary sort key bytes.
+/// Weave delegates to LCMapStringW (locale name ignored, ASCII case-fold only).
+///
+/// # Safety
+/// `lp_src_str` must be valid for `cch_src` u16 elements.
+/// `lp_dest_str` must be writable for `cch_dest` u16 elements (when non-null).
+pub unsafe extern "win64" fn lc_map_string_ex(
+    _lp_locale_name: *const u16,
+    dw_map_flags: u32,
+    lp_src_str: *const u16,
+    cch_src: i32,
+    lp_dest_str: *mut u16,
+    cch_dest: i32,
+    _lp_version_info: *const (),
+    _lp_reserved: *const (),
+    _sort_handle: isize,
+) -> i32 {
+    if lp_src_str.is_null() || cch_src == 0 || cch_dest < 0 {
+        LAST_ERROR.with(|e| e.set(87)); // ERROR_INVALID_PARAMETER
+        return 0;
+    }
+    unsafe { lc_map_string_w(0, dw_map_flags, lp_src_str, cch_src, lp_dest_str, cch_dest) }
+}
+
+/// LCMapStringA: map an ANSI string using a locale (ANSI wrapper for LCMapStringW).
+///
+/// Wine ref: dlls/kernelbase/locale.c — converts ANSI→UTF-16, maps, converts back.
+/// Weave treats each ANSI byte as its Unicode codepoint (identity for ASCII) and
+/// delegates uppercase/lowercase to LCMapStringW.
+///
+/// # Safety
+/// `lp_src_str` must be valid for `cch_src` bytes.
+/// `lp_dest_str` must be writable for `cch_dest` bytes (when non-null).
+pub unsafe extern "win64" fn lc_map_string_a(
+    locale: u32,
+    dw_map_flags: u32,
+    lp_src_str: *const u8,
+    cch_src: i32,
+    lp_dest_str: *mut u8,
+    cch_dest: i32,
+) -> i32 {
+    if lp_src_str.is_null() || cch_src == 0 {
+        LAST_ERROR.with(|e| e.set(87)); // ERROR_INVALID_PARAMETER
+        return 0;
+    }
+    let src_len = if cch_src < 0 {
+        let mut l = 0usize;
+        unsafe {
+            while *lp_src_str.add(l) != 0 {
+                l += 1;
+            }
+        }
+        l + 1
+    } else {
+        cch_src as usize
+    };
+    // Expand ANSI bytes to UTF-16, map, then truncate back to bytes.
+    let wide: Vec<u16> = (0..src_len)
+        .map(|i| u16::from(unsafe { *lp_src_str.add(i) }))
+        .collect();
+    let mut wide_out = vec![0u16; src_len];
+    let mapped = unsafe {
+        lc_map_string_w(
+            locale,
+            dw_map_flags,
+            wide.as_ptr(),
+            src_len as i32,
+            wide_out.as_mut_ptr(),
+            src_len as i32,
+        )
+    };
+    if mapped == 0 {
+        return 0;
+    }
+    let out_len = mapped as usize;
+    if cch_dest == 0 {
+        return out_len as i32;
+    }
+    let copy_len = out_len.min(cch_dest as usize);
+    for i in 0..copy_len {
+        unsafe { *lp_dest_str.add(i) = (wide_out[i] & 0xFF) as u8 };
+    }
+    copy_len as i32
+}
+
 // ── File time and positioning ───────────────────────────────────────────────
 
 /// SetFilePointerEx: set file pointer position using 64-bit offset.
@@ -7601,7 +7803,8 @@ pub unsafe extern "win64" fn set_console_ctrl_handler(_handler_routine: usize, _
 pub fn resolve(dll: &str, func: &str) -> Option<usize> {
     // api-ms-win-* API sets forward to kernel32. Accept any such name so that
     // GetProcAddress on a LoadLibrary'd api-ms-win-* handle finds our stubs.
-    let is_kernel32 = dll.eq_ignore_ascii_case("kernel32.dll");
+    let is_kernel32 = dll.eq_ignore_ascii_case("kernel32.dll")
+        || dll.eq_ignore_ascii_case("kernel32");
     let is_apiset = dll.to_ascii_lowercase().starts_with("api-ms-win-");
     if !is_kernel32 && !is_apiset {
         return None;
@@ -8396,6 +8599,27 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         // Character classification
         "GetStringTypeW" => Some(
             get_string_type_w as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
+        ),
+        "GetStringTypeExW" => Some(
+            get_string_type_ex_w as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "GetStringTypeExA" => Some(
+            get_string_type_ex_a as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "AreFileApisANSI" => Some(are_file_apis_ansi as extern "win64" fn() -> _ as *const () as usize),
+        "CompareStringEx" => Some(
+            compare_string_ex
+                as unsafe extern "win64" fn(_, _, _, _, _, _, _, _, _) -> _ as *const () as usize,
+        ),
+        "LCMapStringEx" => Some(
+            lc_map_string_ex
+                as unsafe extern "win64" fn(_, _, _, _, _, _, _, _, _) -> _ as *const () as usize,
+        ),
+        "LCMapStringA" => Some(
+            lc_map_string_a as unsafe extern "win64" fn(_, _, _, _, _, _) -> _ as *const ()
+                as usize,
         ),
         // File time and positioning
         "SetFilePointerEx" => Some(

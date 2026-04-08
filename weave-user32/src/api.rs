@@ -744,6 +744,11 @@ pub extern "win64" fn post_quit_message(n_exit_code: i32) {
 ///
 /// Returns TRUE on success.
 pub extern "win64" fn post_message_w(hwnd: usize, msg: u32, w_param: usize, l_param: isize) -> i32 {
+    // Log WM_USER+ messages (>= 0x0400 = 1024) — these are app-defined messages, often
+    // used by NPP to schedule operations like file loading.
+    if msg >= 0x0400 {
+        eprintln!("weave/user32: PostMessageW hwnd={hwnd:#x} msg={msg} wp={w_param:#x} lp={l_param:#x}");
+    }
     queue::post(MsgEntry {
         hwnd,
         message: msg,
@@ -773,7 +778,14 @@ pub extern "win64" fn send_message_w(
         Some(p) => p,
         None => return 0,
     };
-    call_wnd_proc(proc_addr, hwnd, msg, w_param, l_param)
+    let ret = call_wnd_proc(proc_addr, hwnd, msg, w_param, l_param);
+    // Log SCI range, WM_USER+ app messages, and WM_NOTIFY (Scintilla modification signal).
+    const WM_NOTIFY: u32 = 0x004E;
+    if (2000..=2200).contains(&msg) || (msg >= 0x0400 && msg < 2000) || msg == WM_NOTIFY {
+        let xcb = window::xcb_id(hwnd);
+        eprintln!("weave/user32: SendMessageW hwnd={hwnd:#x} xcb={xcb:#x} msg={msg} → {ret:#x}");
+    }
+    ret
 }
 
 // ── DefWindowProcW ────────────────────────────────────────────────────────────
@@ -1005,12 +1017,23 @@ pub unsafe extern "win64" fn get_window_text_w(
 // background was erased. Weave returns hwnd as a fake HDC (Phase 2 gap: no real DC or region).
 pub unsafe extern "win64" fn begin_paint(hwnd: usize, lp_paint: *mut PaintStruct) -> usize {
     CURRENT_PAINT_HWND.store(hwnd, Ordering::Relaxed);
+    // Query SCI_GETLENGTH (2006) for Scintilla windows to check when document gets content.
+    {
+        static BP_SCI: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let n = BP_SCI.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let is_sci = window::with(hwnd, |e| e.class_name == "Scintilla").unwrap_or(false);
+        if is_sci && (n < 20 || n % 5 == 0) {
+            let doc_len = send_message_w(hwnd, 2006, 0, 0); // SCI_GETLENGTH
+            let status = send_message_w(hwnd, 2173, 0, 0); // SCI_GETSTATUS (0=ok, non-zero=error)
+            let xcb = window::xcb_id(hwnd);
+            eprintln!("weave/user32: BeginPaint Scintilla hwnd={hwnd:#x} xcb={xcb:#x} paint#{n} SCI_GETLENGTH={doc_len} SCI_GETSTATUS={status}");
+        }
+    }
     if !lp_paint.is_null() {
         unsafe {
             let ps = &mut *lp_paint;
             ps.hdc = hwnd; // fake HDC for now
             ps.f_erase = 1;
-            ps._pad = 0;
             let (w, h) = window::with(hwnd, |e| (e.width, e.height)).unwrap_or((640, 480));
             ps.rc_paint = Rect {
                 left: 0,
@@ -1431,7 +1454,7 @@ pub extern "win64" fn get_window_long_ptr_w(hwnd: usize, n_index: i32) -> isize 
         _ if n_index >= 0 => {
             // Extra bytes: n_index is a byte offset; reads a pointer-sized (8-byte) value.
             let offset = n_index as usize;
-            get_extra(
+            let val = get_extra(
                 hwnd,
                 |e| {
                     if offset + 8 <= e.extra_bytes.len() {
@@ -1443,7 +1466,21 @@ pub extern "win64" fn get_window_long_ptr_w(hwnd: usize, n_index: i32) -> isize 
                     }
                 },
                 0,
-            )
+            );
+            {
+                static GWLP: std::sync::atomic::AtomicU32 =
+                    std::sync::atomic::AtomicU32::new(0);
+                let is_sci = window::with(hwnd, |e| e.class_name == "Scintilla")
+                    .unwrap_or(false);
+                if is_sci && offset == 0
+                    && GWLP.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 8
+                {
+                    eprintln!(
+                        "weave/user32: GetWindowLongPtr hwnd={hwnd:#x} offset=0 → {val:#x}"
+                    );
+                }
+            }
+            val
         }
         _ => window::with(hwnd, |w| match n_index {
             GWL_STYLE => w.style as isize,
@@ -1519,9 +1556,11 @@ pub extern "win64" fn set_window_long_ptr_w(
                     e.extra_bytes[offset..offset + 8].copy_from_slice(&dw_new_long.to_ne_bytes());
                     old
                 } else {
+                    eprintln!("weave/user32: SetWindowLongPtr FAIL hwnd={hwnd:#x} offset={offset} extra_bytes.len()={} — too small to store ptr", e.extra_bytes.len());
                     0
                 }
             } else {
+                eprintln!("weave/user32: SetWindowLongPtr FAIL hwnd={hwnd:#x} offset={offset} — hwnd not in extra map");
                 0
             }
         }
@@ -2592,6 +2631,7 @@ pub unsafe extern "win64" fn set_timer(
         n_id_event
     };
     timer_table().lock().unwrap().insert((h_wnd, id), id);
+    eprintln!("weave/user32: SetTimer hwnd={h_wnd:#x} id={id:#x} elapse={_u_elapse}ms → WM_TIMER NOT FIRED (Phase 5 gap)");
     id
 }
 

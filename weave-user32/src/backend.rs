@@ -183,13 +183,19 @@ mod inner {
     ) -> u32 {
         let x11 = match x11() {
             Some(m) => m,
-            None => return 0,
+            None => {
+                eprintln!("weave/backend: create_window — x11() is None (no DISPLAY?)");
+                return 0;
+            }
         };
         let g = x11.lock().unwrap();
 
         let wid = match g.conn.generate_id() {
             Ok(id) => id,
-            Err(_) => return 0,
+            Err(e) => {
+                eprintln!("weave/backend: create_window — generate_id failed: {e}");
+                return 0;
+            }
         };
 
         let event_mask = EventMask::EXPOSURE
@@ -207,22 +213,20 @@ mod inner {
         // Use the parent's X11 window if provided; fall back to root for top-level windows.
         let x11_parent = if parent_xcb != 0 { parent_xcb } else { g.root };
 
-        if g.conn
-            .create_window(
-                x11rb::COPY_DEPTH_FROM_PARENT,
-                wid,
-                x11_parent,
-                x as i16,
-                y as i16,
-                width.max(1) as u16,
-                height.max(1) as u16,
-                0,
-                WindowClass::INPUT_OUTPUT,
-                0,
-                &aux,
-            )
-            .is_err()
-        {
+        if let Err(e) = g.conn.create_window(
+            x11rb::COPY_DEPTH_FROM_PARENT,
+            wid,
+            x11_parent,
+            x as i16,
+            y as i16,
+            width.max(1) as u16,
+            height.max(1) as u16,
+            0,
+            WindowClass::INPUT_OUTPUT,
+            0,
+            &aux,
+        ) {
+            eprintln!("weave/backend: create_window — xcb create_window failed: {e}");
             return 0;
         }
 

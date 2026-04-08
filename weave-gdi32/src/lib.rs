@@ -276,6 +276,13 @@ pub unsafe extern "win64" fn fill_rect(hdc: usize, lp_rc: *const Rect, h_brush: 
         return 0;
     }
     let rc = unsafe { *lp_rc };
+    {
+        static FR: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        if FR.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 3 {
+            let xcb = dc::with(hdc, |dc| dc.drawable());
+            eprintln!("weave/gdi32: FillRect hdc={hdc:#x} xcb={xcb:#x} ({},{}) {}x{}", rc.left, rc.top, rc.right-rc.left, rc.bottom-rc.top);
+        }
+    }
     let (dx, dy) = dc::with(hdc, |dc| dc.lp_to_device(rc.left, rc.top));
     let w = (rc.right - rc.left).max(0) as u16;
     let h = (rc.bottom - rc.top).max(0) as u16;
@@ -368,6 +375,12 @@ pub unsafe extern "win64" fn text_out_w(
     lp_string: *const u16,
     c: i32,
 ) -> i32 {
+    {
+        static TOW: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        if TOW.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 3 {
+            eprintln!("weave/gdi32: TextOutW hdc={hdc:#x} ({x},{y}) c={c}");
+        }
+    }
     if lp_string.is_null() || c <= 0 {
         return 0;
     }
@@ -547,6 +560,14 @@ pub unsafe extern "win64" fn ext_text_out_w(
     lp_dx: *const i32,
 ) -> i32 {
     let xcb = dc::with(hdc, |dc| dc.drawable());
+    {
+        static ETO_ALL: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let n = ETO_ALL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // Always log if: first 20 calls, OR c>0 (actual text), OR xcb matches known Scintilla pixmaps
+        if n < 20 || c > 0 || xcb >= 0x2006a0 {
+            eprintln!("weave/gdi32: ExtTextOutW#{n} hdc={hdc:#x} xcb={xcb:#x} c={c} options={options:#x}");
+        }
+    }
     if xcb == 0 {
         return 1; // no window — safe no-op
     }
@@ -568,6 +589,13 @@ pub unsafe extern "win64" fn ext_text_out_w(
     }
     const MAX_TEXT_CHARS: u32 = 65_536;
     let c = c.min(MAX_TEXT_CHARS);
+    {
+        static ETO: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        if ETO.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 3 {
+            let (fg, bg) = dc::with(hdc, |dc| (dc.text_color, dc.bk_color));
+            eprintln!("weave/gdi32: ExtTextOutW hdc={hdc:#x} xcb={xcb:#x} ({x},{y}) c={c} fg={fg:#08x} bg={bg:#08x}");
+        }
+    }
     let units: &[u16] = unsafe { std::slice::from_raw_parts(lp_string, c as usize) };
 
     let (fg, bg) = dc::with(hdc, |dc| (dc.text_color, dc.bk_color));
@@ -710,6 +738,10 @@ pub extern "win64" fn bit_blt(
     }
     let dst_draw = dc::with(hdc_dest, |dc| dc.drawable());
     let src_draw = dc::with(hdc_src, |dc| dc.drawable());
+    static BB: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    if BB.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 30 {
+        eprintln!("weave/gdi32: BitBlt dst={dst_draw:#x} src={src_draw:#x} ({x},{y}) {cx}x{cy}");
+    }
     if dst_draw == 0 || src_draw == 0 {
         return 0;
     }
@@ -930,6 +962,12 @@ pub unsafe extern "win64" fn get_text_extent_point32_w(
     let c = c.min(65_536i32);
     let units: &[u16] = unsafe { std::slice::from_raw_parts(lpsz, c as usize) };
     let (w, h) = weave_user32::font::measure_text(units, px_size);
+    {
+        static GTE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        if GTE.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 3 {
+            eprintln!("weave/gdi32: GetTextExtentPoint32W hdc={hdc:#x} c={c} → {w}x{h}");
+        }
+    }
     unsafe {
         (*lp_size).cx = w;
         (*lp_size).cy = h;
