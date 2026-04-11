@@ -22,6 +22,7 @@ static LAST_HEAP_FREE: AtomicUsize = AtomicUsize::new(0);
 
 use weave_common::stub::warn_once;
 use weave_common::{STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE};
+use std::sync::Arc;
 use weave_core::{file_io, handles};
 
 // ── File mapping table ────────────────────────────────────────────────────────
@@ -1790,7 +1791,17 @@ pub unsafe extern "win64" fn write_file(
 ///
 /// Returns TRUE on success, FALSE if the handle was invalid.
 /// Closing stdin/stdout/stderr returns FALSE (those are protected).
+///
+/// Wine ref: dlls/kernel32/sync.c — CloseHandle calls NtClose; thread handles
+/// are detached (not joined) on close, consistent with Win32 semantics where
+/// CloseHandle on a thread does not wait for it to terminate.
 pub extern "win64" fn close_handle(h_object: usize) -> i32 {
+    // Thread handles are not file descriptors; handle them before delegating
+    // to file_io::close_handle which would fail on non-fd handles.
+    if handles::free_if_thread(h_object) {
+        LAST_ERROR.with(|e| e.set(0));
+        return 1; // TRUE
+    }
     match file_io::close_handle(h_object) {
         Ok(()) => {
             LAST_ERROR.with(|e| e.set(0));
@@ -5059,27 +5070,19 @@ pub unsafe extern "win64" fn wake_all_condition_variable(_condition_variable: *m
 
 // ── Threads ───────────────────────────────────────────────────────────────────
 
-/// Fake handle returned by `CreateThread` for a synchronously-completed thread.
-///
-/// Values 1 and 2 are used for mutexes/events; 3 is the completed-thread sentinel.
-const FAKE_COMPLETED_THREAD_HANDLE: usize = 3;
-
-/// CreateThread — run the thread function, then returns a fake handle.
+/// CreateThread — spawn the thread function on a real OS thread, return a real handle.
 ///
 /// Wine ref: dlls/kernel32/thread.c — CreateThread wraps NtCreateThread; the thread
-/// function is called with lpParameter as its sole argument.
+/// function is called with lpParameter as its sole argument and returns a DWORD exit code.
 ///
-/// Dispatch strategy:
-/// - `lpParameter == NULL` → background/event-loop thread (e.g. NPP's toolbar-update
-///   timer that calls Sleep + SendMessage indefinitely). These must run on a real
-///   OS thread so they don't block the main Win32 message loop. We spawn a Rust thread.
-/// - `lpParameter != NULL` → short-lived result-returning thread (e.g. NPP's
-///   GetFileAttributesExW wrappers that write into a caller-owned buffer). These
-///   run inline so the result is available before the caller continues.
+/// Every thread — whether background (lpParameter == NULL) or short-lived with a result
+/// buffer — now runs on a genuine OS thread.  A `ThreadCompletion` arc is shared between
+/// the spawned thread and the handle table so that WaitForSingleObject can block on a
+/// condvar instead of a sentinel value.  CloseHandle drops the JoinHandle (detaches).
 ///
 /// # Safety
 /// `lp_start_address` must be a valid `extern "win64"` function pointer.
-/// `lp_parameter` is forwarded to that function and must be valid for the duration of the call.
+/// `lp_parameter` is forwarded to that function and must be valid for the thread's lifetime.
 pub unsafe extern "win64" fn create_thread(
     _lp_thread_attributes: *const u8,
     _dw_stack_size: usize,
@@ -5092,47 +5095,39 @@ pub unsafe extern "win64" fn create_thread(
         return 0;
     }
 
-    if lp_parameter.is_null() {
-        // Background thread: no result buffer to write, safe to run on a real OS thread.
-        let fn_addr = lp_start_address as usize;
-        eprintln!(
-            "weave/CreateThread: fn={lp_start_address:p} param=null (spawning background thread)"
-        );
-        std::thread::spawn(move || {
-            // SAFETY: `fn_addr` is the numeric address of a Win64-ABI function entry
-            // point in the guest PE image, captured before the spawn so there is no
-            // race with the caller.  Transmuting the raw address (as *const u8) to
-            // `unsafe extern "win64" fn(*mut u8) -> u32` is sound for the same reasons
-            // as the inline path above: pointer-sized on x86-64, Win64 ABI passes the
-            // first arg in RCX, and the spawned closure carries 'static lifetime so the
-            // PE image remains mapped for the lifetime of the thread.
-            let fn_ptr: unsafe extern "win64" fn(*mut u8) -> u32 =
-                unsafe { std::mem::transmute(fn_addr as *const u8) };
-            let ret = unsafe { fn_ptr(std::ptr::null_mut()) };
-            eprintln!("weave/CreateThread: fn={fn_addr:#x} background thread returned {ret}");
-        });
-    } else {
-        // Inline thread: caller expects results written to lp_parameter before proceeding.
-        eprintln!(
-            "weave/CreateThread: fn={lp_start_address:p} param={lp_parameter:p} (executing inline)"
-        );
-        // SAFETY: `lp_start_address` is a raw `*const u8` pointing to a Win64-ABI
-        // function entry point in the guest PE image (validated non-null above).
-        // Transmuting to `unsafe extern "win64" fn(*mut u8) -> u32` is sound because:
-        //   1. Function pointers and data pointers are both pointer-sized on x86-64.
-        //   2. The Win64 calling convention passes the first integer argument in RCX,
-        //      so `fn(*mut u8)` matches the `LPTHREAD_START_ROUTINE` signature exactly.
-        //   3. The caller's `# Safety` contract guarantees the function pointer is valid.
+    let fn_addr = lp_start_address as usize;
+    let param_addr = lp_parameter as usize;
+
+    eprintln!(
+        "weave/CreateThread: fn={lp_start_address:p} param={lp_parameter:p} (spawning thread)"
+    );
+
+    let completion = Arc::new(handles::ThreadCompletion {
+        result: std::sync::Mutex::new(None),
+        condvar: std::sync::Condvar::new(),
+    });
+    let completion_clone = Arc::clone(&completion);
+
+    // SAFETY: `fn_addr` is a Win64-ABI function pointer in the mapped PE image.
+    // The PE image stays mapped for the process lifetime, so the pointer is valid
+    // for the duration of the spawned thread.  `param_addr` is forwarded as the
+    // sole RCX argument, matching LPTHREAD_START_ROUTINE exactly on x86-64.
+    let join_handle = std::thread::spawn(move || {
         let fn_ptr: unsafe extern "win64" fn(*mut u8) -> u32 =
-            std::mem::transmute(lp_start_address);
-        let ret = fn_ptr(lp_parameter);
-        eprintln!("weave/CreateThread: fn={lp_start_address:p} returned {ret}");
-    }
+            unsafe { std::mem::transmute(fn_addr as *const u8) };
+        let ret = unsafe { fn_ptr(param_addr as *mut u8) };
+        eprintln!("weave/CreateThread: fn={fn_addr:#x} thread returned {ret}");
+        let mut guard = completion_clone.result.lock().unwrap();
+        *guard = Some(ret);
+        completion_clone.condvar.notify_all();
+    });
+
+    let handle = handles::alloc_thread(completion, join_handle);
 
     if !lp_thread_id.is_null() {
         *lp_thread_id = 1;
     }
-    FAKE_COMPLETED_THREAD_HANDLE
+    handle
 }
 
 /// GetThreadPriority — returns THREAD_PRIORITY_NORMAL (0).
@@ -5511,62 +5506,66 @@ pub extern "win64" fn tls_free(dw_tls_index: u32) -> i32 {
     1
 }
 
-/// WaitForSingleObject — returns WAIT_OBJECT_0 for fake handles.
+/// WaitForSingleObject — block until the object is signalled or the timeout expires.
 ///
-/// For our fake handles (1 for mutexes, 2 for events), returns WAIT_OBJECT_0 (0).
-/// For invalid handles (0 or INVALID_HANDLE_VALUE), returns WAIT_FAILED.
-/// Ignores dw_milliseconds timeout (we don't support real waiting).
+/// Wine ref: dlls/kernel32/sync.c — WaitForSingleObject wraps NtWaitForSingleObject;
+/// INFINITE (0xFFFFFFFF) means no timeout; returns WAIT_OBJECT_0 on success,
+/// WAIT_TIMEOUT on expiry, WAIT_FAILED for invalid handles.
 ///
 /// # Safety
 /// No pointer arguments are dereferenced.
-pub unsafe extern "win64" fn wait_for_single_object(h_handle: usize, _dw_milliseconds: u32) -> u32 {
+pub unsafe extern "win64" fn wait_for_single_object(h_handle: usize, dw_milliseconds: u32) -> u32 {
     const INVALID_HANDLE_VALUE: usize = usize::MAX;
     const WAIT_OBJECT_0: u32 = 0;
+    const WAIT_TIMEOUT: u32 = 0x00000102;
     const WAIT_FAILED: u32 = 0xFFFFFFFF;
+    const INFINITE: u32 = 0xFFFF_FFFF;
 
-    // Check for invalid handles
     if h_handle == 0 || h_handle == INVALID_HANDLE_VALUE {
         return WAIT_FAILED;
     }
 
-    // For our fake handles (1 = mutex, 2 = event, 3 = completed thread), return success
-    if h_handle == 1 || h_handle == 2 || h_handle == FAKE_COMPLETED_THREAD_HANDLE {
+    // Real thread handle — block on the condvar until completion or timeout.
+    if let Some(completion) = handles::get_thread_completion(h_handle) {
+        let guard = completion.result.lock().unwrap();
+        if guard.is_some() {
+            return WAIT_OBJECT_0;
+        }
+        if dw_milliseconds == INFINITE {
+            let _g = completion.condvar.wait_while(guard, |r| r.is_none()).unwrap();
+            return WAIT_OBJECT_0;
+        } else {
+            let timeout = std::time::Duration::from_millis(dw_milliseconds as u64);
+            let (_g, timed_out) = completion
+                .condvar
+                .wait_timeout_while(guard, timeout, |r| r.is_none())
+                .unwrap();
+            return if timed_out.timed_out() { WAIT_TIMEOUT } else { WAIT_OBJECT_0 };
+        }
+    }
+
+    // Legacy stub handles (1 = mutex, 2 = event) — return success immediately.
+    if h_handle == 1 || h_handle == 2 {
         return WAIT_OBJECT_0;
     }
 
-    // For any other handle, fail
     WAIT_FAILED
 }
 
-/// WaitForSingleObjectEx — returns WAIT_OBJECT_0 for fake handles.
+/// WaitForSingleObjectEx — WaitForSingleObject with alertable flag (ignored).
 ///
-/// Same as WaitForSingleObject but ignores b_alertable parameter.
-/// For our fake handles (1 for mutexes, 2 for events), returns WAIT_OBJECT_0 (0).
-/// For invalid handles (0 or INVALID_HANDLE_VALUE), returns WAIT_FAILED.
+/// Wine ref: dlls/kernel32/sync.c — thin wrapper; b_alertable controls APC
+/// delivery which Weave does not implement.  Delegates to the same logic.
 ///
 /// # Safety
 /// No pointer arguments are dereferenced.
 pub unsafe extern "win64" fn wait_for_single_object_ex(
     h_handle: usize,
-    _dw_milliseconds: u32,
+    dw_milliseconds: u32,
     _b_alertable: i32,
 ) -> u32 {
-    const INVALID_HANDLE_VALUE: usize = usize::MAX;
-    const WAIT_OBJECT_0: u32 = 0;
-    const WAIT_FAILED: u32 = 0xFFFFFFFF;
-
-    // Check for invalid handles
-    if h_handle == 0 || h_handle == INVALID_HANDLE_VALUE {
-        return WAIT_FAILED;
-    }
-
-    // For our fake handles (1 = mutex, 2 = event, 3 = completed thread), return success
-    if h_handle == 1 || h_handle == 2 || h_handle == FAKE_COMPLETED_THREAD_HANDLE {
-        return WAIT_OBJECT_0;
-    }
-
-    // For any other handle, fail
-    WAIT_FAILED
+    // Delegate to WaitForSingleObject (alertable flag is a no-op in Weave).
+    wait_for_single_object(h_handle, dw_milliseconds)
 }
 
 /// TryEnterCriticalSection — no-op stub; always succeeds (single-threaded).

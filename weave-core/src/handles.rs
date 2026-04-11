@@ -14,11 +14,25 @@
 //! Callers must use `STDIN_HANDLE`, `STDOUT_HANDLE`, `STDERR_HANDLE` (or call
 //! `get_fd(handle)`) — never assume a handle value equals a Linux fd number.
 
-use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
 
 /// Offset added to a slot index to produce the public handle value.
 /// Ensures 0 (NULL) is never returned as a valid open handle.
 const HANDLE_OFFSET: usize = 4;
+
+/// Completion state shared between a spawned thread and any WFSO waiters.
+pub struct ThreadCompletion {
+    /// `None` while running; `Some(exit_code)` after the thread function returns.
+    pub result: Mutex<Option<u32>>,
+    pub condvar: Condvar,
+}
+
+impl std::fmt::Debug for ThreadCompletion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let r = self.result.lock().ok().and_then(|g| *g);
+        f.debug_struct("ThreadCompletion").field("result", &r).finish()
+    }
+}
 
 /// The resource bound to a handle slot.
 #[derive(Debug)]
@@ -27,6 +41,12 @@ pub enum HandleKind {
     File(i32),
     /// An open registry key. Stores the on-disk path to the key's directory.
     RegistryKey(std::path::PathBuf),
+    /// A spawned OS thread.  The join handle is stored so that dropping it
+    /// (on CloseHandle) detaches the thread gracefully.
+    Thread {
+        completion: Arc<ThreadCompletion>,
+        join_handle: Mutex<Option<std::thread::JoinHandle<()>>>,
+    },
 }
 
 impl HandleKind {
@@ -147,6 +167,50 @@ pub fn get_registry_path(handle: usize) -> Option<std::path::PathBuf> {
         .get(index)?
         .as_ref()
         .and_then(|k| k.as_registry_path().map(|p| p.to_path_buf()))
+}
+
+/// Allocate a new thread handle.  The caller provides the completion Arc and
+/// the JoinHandle so they are owned by the handle table.
+pub fn alloc_thread(
+    completion: Arc<ThreadCompletion>,
+    join_handle: std::thread::JoinHandle<()>,
+) -> usize {
+    alloc(HandleKind::Thread {
+        completion,
+        join_handle: Mutex::new(Some(join_handle)),
+    })
+}
+
+/// Return a clone of the `ThreadCompletion` Arc for a thread handle.
+/// Returns `None` if the handle is not a Thread handle.
+pub fn get_thread_completion(handle: usize) -> Option<Arc<ThreadCompletion>> {
+    let guard = lock_table(table())?;
+    let index = handle.checked_sub(HANDLE_OFFSET)?;
+    match guard.slots.get(index)?.as_ref()? {
+        HandleKind::Thread { completion, .. } => Some(Arc::clone(completion)),
+        _ => None,
+    }
+}
+
+/// Free the handle if it is a Thread handle.  Returns `true` on success.
+/// Returns `false` if the handle is not a Thread handle (caller should try
+/// other handle types).
+pub fn free_if_thread(handle: usize) -> bool {
+    let mut guard = match lock_table(table()) {
+        Some(g) => g,
+        None => return false,
+    };
+    let index = match handle.checked_sub(HANDLE_OFFSET) {
+        Some(i) => i,
+        None => return false,
+    };
+    match guard.slots.get(index) {
+        Some(Some(HandleKind::Thread { .. })) => {
+            guard.slots[index] = None;
+            true
+        }
+        _ => false,
+    }
 }
 
 /// Free a handle. Returns `true` if the handle was valid and freed.

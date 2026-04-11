@@ -818,25 +818,65 @@ mod inner {
         true
     }
 
-    /// Block until one X11 event arrives, translate it, and return.
-    /// Returns `false` only on a connection error.
+    /// Block until one X11 event arrives or the message queue wake pipe fires.
+    ///
+    /// Uses `poll(2)` over two fds so the X11 mutex is NOT held during the
+    /// wait — background threads can make X11 calls freely while the main
+    /// loop is idle.  Returns `false` only on an unrecoverable connection
+    /// error (no display); returns `true` for any of:
+    ///   - X11 event processed and translated to a Win32 queue message
+    ///   - wake pipe signalled (a message was posted by another code path)
+    ///   - 50 ms poll timeout (lets GetMessageW re-check the queue)
     pub fn wait_event() -> bool {
-        let x11 = match x11() {
-            Some(m) => m,
-            None => return false,
-        };
-        let event = {
-            let g = match lock_x11(x11) {
-                Some(g) => g,
-                None => return false,
-            };
-            match g.conn.wait_for_event() {
-                Ok(ev) => ev,
-                Err(_) => return false,
+        use std::os::unix::io::AsRawFd;
+
+        // Ensure the wake pipe exists before we poll on it.
+        crate::queue::init_wake_pipe();
+        let wake_fd = crate::queue::wake_fd_read();
+
+        // Extract the X11 fd without holding the mutex during the poll.
+        // A negative fd value is ignored by poll(2), so -1 is the safe
+        // "no display" sentinel.
+        let x11_fd: i32 = x11()
+            .and_then(|x11| lock_x11(x11).map(|g| g.conn.stream().as_raw_fd()))
+            .unwrap_or(-1);
+
+        loop {
+            let mut fds = [
+                libc::pollfd { fd: x11_fd,  events: libc::POLLIN, revents: 0 },
+                libc::pollfd { fd: wake_fd, events: libc::POLLIN, revents: 0 },
+            ];
+            let ret = unsafe { libc::poll(fds.as_mut_ptr(), 2, 50) }; // 50 ms timeout
+
+            if ret < 0 {
+                // EINTR is normal (signal interrupted) — retry.
+                continue;
             }
-        };
-        translate_event(event, x11);
-        true
+
+            // Wake pipe fired: drain it and return — caller re-checks the queue.
+            if fds[1].revents & libc::POLLIN != 0 {
+                let mut buf = [0u8; 64];
+                unsafe { libc::read(wake_fd, buf.as_mut_ptr() as *mut _, 64) };
+                return true;
+            }
+
+            // X11 event ready: lock briefly, poll (non-blocking), translate.
+            if fds[0].revents & libc::POLLIN != 0 {
+                if let Some(x11) = x11() {
+                    let maybe_event = lock_x11(x11)
+                        .and_then(|g| g.conn.poll_for_event().ok().flatten());
+                    if let Some(event) = maybe_event {
+                        translate_event(event, x11);
+                        return true;
+                    }
+                }
+                // Spurious POLLIN (e.g. connection closed) — loop once more.
+                continue;
+            }
+
+            // Poll timeout with no events — return so GetMessageW re-checks the queue.
+            return true;
+        }
     }
 
     /// Translate one X11 event into one or more Win32 queue messages.

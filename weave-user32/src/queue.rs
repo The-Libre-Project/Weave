@@ -7,6 +7,40 @@
 use std::collections::VecDeque;
 use std::sync::{Mutex, OnceLock};
 
+// ── Wake pipe (Linux only) ────────────────────────────────────────────────────
+//
+// A self-pipe used to unblock GetMessageW's poll() when a message is posted
+// from a background thread.  The write end is written by `post()`; the read
+// end is polled by `backend::wait_event()` alongside the X11 fd.
+
+#[cfg(target_os = "linux")]
+mod wake {
+    use std::os::unix::io::RawFd;
+    use std::sync::OnceLock;
+
+    static WAKE_PIPE: OnceLock<(RawFd, RawFd)> = OnceLock::new(); // (read_fd, write_fd)
+
+    pub fn init() {
+        WAKE_PIPE.get_or_init(|| {
+            let mut fds = [0i32; 2];
+            unsafe { libc::pipe(fds.as_mut_ptr()) };
+            // Non-blocking write end so post() never blocks on a full pipe buffer.
+            unsafe { libc::fcntl(fds[1], libc::F_SETFL, libc::O_NONBLOCK) };
+            (fds[0], fds[1])
+        });
+    }
+
+    pub fn read_fd() -> RawFd {
+        WAKE_PIPE.get().expect("wake pipe not initialized").0
+    }
+
+    pub fn signal() {
+        if let Some(&(_, write_fd)) = WAKE_PIPE.get() {
+            unsafe { libc::write(write_fd, b"\x01".as_ptr() as *const _, 1) };
+        }
+    }
+}
+
 /// An internal message entry (the fields of Win32 MSG, minus the padding).
 #[derive(Clone, Debug)]
 pub struct MsgEntry {
@@ -33,11 +67,27 @@ fn lock_queue(
         .ok()
 }
 
+/// Initialise the wake pipe.  Must be called before the first `wait_event`.
+/// Idempotent — safe to call multiple times.
+#[cfg(target_os = "linux")]
+pub fn init_wake_pipe() {
+    wake::init();
+}
+
+/// Return the read end of the wake pipe for use in poll().
+#[cfg(target_os = "linux")]
+pub fn wake_fd_read() -> std::os::unix::io::RawFd {
+    wake::read_fd()
+}
+
 /// Push a message onto the back of the queue.
 pub fn post(msg: MsgEntry) {
     if let Some(mut g) = lock_queue(queue()) {
         g.push_back(msg);
     }
+    // Signal the wake pipe so that a blocked poll() in wait_event() wakes up.
+    #[cfg(target_os = "linux")]
+    wake::signal();
 }
 
 /// Pop the front message, returning `None` if the queue is empty.
