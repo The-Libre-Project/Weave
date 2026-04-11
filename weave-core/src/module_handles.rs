@@ -24,11 +24,17 @@ struct HandleTable {
 
 static TABLE: Mutex<Option<HandleTable>> = Mutex::new(None);
 
-fn with_table<F, R>(f: F) -> R
+fn with_table<F, R>(fallback: R, f: F) -> R
 where
     F: FnOnce(&mut HandleTable) -> R,
 {
-    let mut guard = TABLE.lock().unwrap();
+    let mut guard = match TABLE
+        .lock()
+        .map_err(|e| eprintln!("weave: weave-core: module handle table mutex poisoned: {e}"))
+    {
+        Ok(g) => g,
+        Err(_) => return fallback,
+    };
     let table = guard.get_or_insert_with(|| HandleTable {
         name_to_handle: HashMap::new(),
         handle_to_name: HashMap::new(),
@@ -43,7 +49,7 @@ where
 /// `dll_name` may include a path — only the final component (basename) is used.
 pub fn register(dll_name: &str) -> usize {
     let key = dll_basename(dll_name);
-    with_table(|t| {
+    with_table(0, |t| {
         if let Some(&existing) = t.name_to_handle.get(&key) {
             return existing;
         }
@@ -63,7 +69,7 @@ pub fn lookup(handle: usize) -> Option<String> {
     if handle < HANDLE_BASE {
         return None;
     }
-    with_table(|t| t.handle_to_name.get(&handle).cloned())
+    with_table(None, |t| t.handle_to_name.get(&handle).cloned())
 }
 
 /// Extract the lowercase DLL basename from a path or bare name.

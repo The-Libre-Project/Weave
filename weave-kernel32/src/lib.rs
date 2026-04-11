@@ -41,9 +41,20 @@ fn file_mappings() -> &'static Mutex<Vec<Option<(usize, usize)>>> {
     FILE_MAPPINGS.get_or_init(|| Mutex::new(Vec::new()))
 }
 
+fn lock_file_mappings<'a>(
+    m: &'a Mutex<Vec<Option<(usize, usize)>>>,
+) -> Option<std::sync::MutexGuard<'a, Vec<Option<(usize, usize)>>>> {
+    m.lock()
+        .map_err(|e| eprintln!("weave: weave-kernel32: file mappings mutex poisoned: {e}"))
+        .ok()
+}
+
 /// Allocate a mapping slot and return its handle.
 fn alloc_mapping(addr: usize, size: usize) -> usize {
-    let mut table = file_mappings().lock().unwrap();
+    let mut table = match lock_file_mappings(file_mappings()) {
+        Some(g) => g,
+        None => return 0,
+    };
     for (i, slot) in table.iter_mut().enumerate() {
         if slot.is_none() {
             *slot = Some((addr, size));
@@ -58,13 +69,13 @@ fn alloc_mapping(addr: usize, size: usize) -> usize {
 #[allow(dead_code)]
 fn take_mapping(handle: usize) -> Option<(usize, usize)> {
     let index = handle.checked_sub(FILE_MAPPING_OFFSET)?;
-    let mut table = file_mappings().lock().unwrap();
+    let mut table = lock_file_mappings(file_mappings())?;
     table.get_mut(index)?.take()
 }
 
 /// Look up (addr, size) by view address across all slots (for UnmapViewOfFile).
 fn find_mapping_by_addr(view_addr: usize) -> Option<(usize, usize)> {
-    let mut table = file_mappings().lock().unwrap();
+    let mut table = lock_file_mappings(file_mappings())?;
     for slot in table.iter_mut() {
         if let Some((addr, size)) = *slot {
             if addr == view_addr {
@@ -2664,7 +2675,10 @@ pub extern "win64" fn map_view_of_file(
     _dw_number_of_bytes_to_map: usize,
 ) -> usize {
     // Peek at the mapping without consuming it (MapViewOfFile doesn't free the handle).
-    let table = file_mappings().lock().unwrap();
+    let table = match lock_file_mappings(file_mappings()) {
+        Some(g) => g,
+        None => return 0,
+    };
     if let Some(index) = h_file_mapping_object.checked_sub(FILE_MAPPING_OFFSET) {
         if let Some(Some((addr, _size))) = table.get(index) {
             return *addr;
@@ -6631,6 +6645,14 @@ const FLS_OUT_OF_INDEXES: u32 = 0xFFFFFFFF;
 static FLS_SLOTS: std::sync::Mutex<[bool; FLS_MAX_SLOTS]> =
     std::sync::Mutex::new([false; FLS_MAX_SLOTS]);
 
+fn lock_fls_slots<'a>(
+    m: &'a std::sync::Mutex<[bool; FLS_MAX_SLOTS]>,
+) -> Option<std::sync::MutexGuard<'a, [bool; FLS_MAX_SLOTS]>> {
+    m.lock()
+        .map_err(|e| eprintln!("weave: weave-kernel32: FLS slots mutex poisoned: {e}"))
+        .ok()
+}
+
 // Per-thread fiber local storage values; each thread gets its own array.
 thread_local! {
     static FLS_DATA: std::cell::RefCell<[usize; FLS_MAX_SLOTS]> =
@@ -6647,7 +6669,10 @@ thread_local! {
 /// Slot allocation is process-global (protected by a Mutex); slot values are
 /// per-thread (thread_local). This matches Windows FLS semantics.
 pub extern "win64" fn fls_alloc(_lp_callback: usize) -> u32 {
-    let mut slots = FLS_SLOTS.lock().unwrap();
+    let mut slots = match lock_fls_slots(&FLS_SLOTS) {
+        Some(g) => g,
+        None => return FLS_OUT_OF_INDEXES,
+    };
     for i in 0..FLS_MAX_SLOTS {
         if !slots[i] {
             slots[i] = true;
@@ -6687,7 +6712,9 @@ pub extern "win64" fn fls_free(dw_fls_index: u32) -> i32 {
     if dw_fls_index >= FLS_MAX_SLOTS as u32 {
         return 0; // FALSE
     }
-    FLS_SLOTS.lock().unwrap()[dw_fls_index as usize] = false;
+    if let Some(mut slots) = lock_fls_slots(&FLS_SLOTS) {
+        slots[dw_fls_index as usize] = false;
+    }
     1 // TRUE
 }
 
