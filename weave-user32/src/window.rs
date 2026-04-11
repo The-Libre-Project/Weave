@@ -57,29 +57,41 @@ fn table() -> &'static Mutex<WindowTable> {
     WINDOWS.get_or_init(|| Mutex::new(WindowTable::new()))
 }
 
+fn lock_table(m: &Mutex<WindowTable>) -> Option<std::sync::MutexGuard<'_, WindowTable>> {
+    m.lock()
+        .map_err(|e| eprintln!("weave: user32: window table mutex poisoned: {e}"))
+        .ok()
+}
+
 // ── Public API ────────────────────────────────────────────────────────────────
 
 /// Create a new window entry and return its HWND.
 pub fn create(entry: WindowEntry) -> usize {
-    table().lock().unwrap().insert(entry)
+    match lock_table(table()) {
+        Some(mut g) => g.insert(entry),
+        None => 0,
+    }
 }
 
 /// Look up a window by HWND. Calls `f` with a reference to the entry.
 /// Returns `None` if the HWND is unknown.
 pub fn with<R, F: FnOnce(&WindowEntry) -> R>(hwnd: usize, f: F) -> Option<R> {
-    let guard = table().lock().unwrap();
+    let guard = lock_table(table())?;
     guard.entries.get(&hwnd).map(f)
 }
 
 /// Look up a window by HWND for mutation.
 pub fn with_mut<R, F: FnOnce(&mut WindowEntry) -> R>(hwnd: usize, f: F) -> Option<R> {
-    let mut guard = table().lock().unwrap();
+    let mut guard = lock_table(table())?;
     guard.entries.get_mut(&hwnd).map(f)
 }
 
 /// Remove a window entry. Returns `true` if the HWND was known.
 pub fn remove(hwnd: usize) -> bool {
-    table().lock().unwrap().entries.remove(&hwnd).is_some()
+    match lock_table(table()) {
+        Some(mut g) => g.entries.remove(&hwnd).is_some(),
+        None => false,
+    }
 }
 
 /// Return the XCB window ID for an HWND (0 if not found or not on Linux).
@@ -89,12 +101,18 @@ pub fn xcb_id(hwnd: usize) -> u32 {
 
 /// Collect all HWNDs currently registered (for event dispatch to all windows).
 pub fn all_hwnds() -> Vec<usize> {
-    table().lock().unwrap().entries.keys().copied().collect()
+    match lock_table(table()) {
+        Some(g) => g.entries.keys().copied().collect(),
+        None => Vec::new(),
+    }
 }
 
 /// Look up a HWND by XCB window ID. Returns 0 if not found.
 pub fn hwnd_for_xcb(xcb_window_id: u32) -> usize {
-    let guard = table().lock().unwrap();
+    let guard = match lock_table(table()) {
+        Some(g) => g,
+        None => return 0,
+    };
     guard
         .entries
         .iter()
@@ -110,7 +128,10 @@ pub fn hwnd_for_xcb(xcb_window_id: u32) -> usize {
 /// class initialisation, before the first WM_PAINT cycle. Without this fallback
 /// all GDI drawing on those DCs would be silently dropped.
 pub fn first_hwnd_with_xcb() -> usize {
-    let guard = table().lock().unwrap();
+    let guard = match lock_table(table()) {
+        Some(g) => g,
+        None => return 0,
+    };
     guard
         .entries
         .iter()

@@ -32,6 +32,22 @@ fn table() -> &'static Mutex<HashMap<String, ClassEntry>> {
     CLASSES.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+fn lock_table(
+    m: &Mutex<HashMap<String, ClassEntry>>,
+) -> Option<std::sync::MutexGuard<'_, HashMap<String, ClassEntry>>> {
+    m.lock()
+        .map_err(|e| eprintln!("weave: user32: class table mutex poisoned: {e}"))
+        .ok()
+}
+
+fn lock_edit_state(
+    m: &Mutex<HashMap<usize, EditState>>,
+) -> Option<std::sync::MutexGuard<'_, HashMap<usize, EditState>>> {
+    m.lock()
+        .map_err(|e| eprintln!("weave: user32: edit state mutex poisoned: {e}"))
+        .ok()
+}
+
 /// Register a window class. Uses the lowercase class name as the key so
 /// lookups are case-insensitive (matching Windows registry-like behaviour).
 ///
@@ -39,7 +55,10 @@ fn table() -> &'static Mutex<HashMap<String, ClassEntry>> {
 /// an existing registration with the same name.
 pub fn register(name: &str, entry: ClassEntry) -> bool {
     let key = name.to_ascii_lowercase();
-    let mut guard = table().lock().unwrap();
+    let mut guard = match lock_table(table()) {
+        Some(g) => g,
+        None => return false,
+    };
     let replaced = guard.contains_key(&key);
     guard.insert(key, entry);
     !replaced
@@ -89,14 +108,16 @@ unsafe extern "win64" fn edit_wnd_proc(
     match msg {
         WM_NCCREATE => {
             // Initialise per-window edit state on creation.
-            edit_state().lock().unwrap().insert(
-                hwnd,
-                EditState {
-                    sel_start: 0,
-                    sel_end: 0,
-                    limit: 0x7FFF_FFFF,
-                },
-            );
+            if let Some(mut g) = lock_edit_state(edit_state()) {
+                g.insert(
+                    hwnd,
+                    EditState {
+                        sel_start: 0,
+                        sel_end: 0,
+                        limit: 0x7FFF_FFFF,
+                    },
+                );
+            }
             1 // TRUE — allow creation
         }
 
@@ -106,9 +127,11 @@ unsafe extern "win64" fn edit_wnd_proc(
             // EM_ReplaceSel, resets x_offset and EF_MODIFIED, EN_UPDATE/EN_CHANGE for SL.
             let text = unsafe { decode_wide(l_param as *const u16) };
             window::with_mut(hwnd, |e| e.title = text);
-            if let Some(s) = edit_state().lock().unwrap().get_mut(&hwnd) {
-                s.sel_start = 0;
-                s.sel_end = 0;
+            if let Some(mut g) = lock_edit_state(edit_state()) {
+                if let Some(s) = g.get_mut(&hwnd) {
+                    s.sel_start = 0;
+                    s.sel_end = 0;
+                }
             }
             1 // TRUE
         }
@@ -144,12 +167,10 @@ unsafe extern "win64" fn edit_wnd_proc(
             // wParam: optional *u32 start; lParam: optional *u32 end.
             // Wine ref: dlls/user32/edit.c::EDIT_EM_GetSel — writes to out-ptrs, returns
             // MAKELONG(start, end).
-            let guard = edit_state().lock().unwrap();
-            let (start, end) = guard
-                .get(&hwnd)
-                .map(|s| (s.sel_start, s.sel_end))
-                .unwrap_or((0, 0));
-            drop(guard);
+            let (start, end) = match lock_edit_state(edit_state()) {
+                Some(g) => g.get(&hwnd).map(|s| (s.sel_start, s.sel_end)).unwrap_or((0, 0)),
+                None => (0, 0),
+            };
             if w_param != 0 {
                 unsafe {
                     *(w_param as *mut u32) = start;
@@ -173,11 +194,8 @@ unsafe extern "win64" fn edit_wnd_proc(
             let raw_start = w_param as i32;
             let raw_end = l_param as i32;
             let (sel_start, sel_end) = if raw_start == -1 {
-                let old_end = edit_state()
-                    .lock()
-                    .unwrap()
-                    .get(&hwnd)
-                    .map(|s| s.sel_end)
+                let old_end = lock_edit_state(edit_state())
+                    .and_then(|g| g.get(&hwnd).map(|s| s.sel_end))
                     .unwrap_or(0);
                 (old_end, old_end)
             } else {
@@ -189,9 +207,11 @@ unsafe extern "win64" fn edit_wnd_proc(
                 };
                 (s, e)
             };
-            if let Some(state) = edit_state().lock().unwrap().get_mut(&hwnd) {
-                state.sel_start = sel_start;
-                state.sel_end = sel_end;
+            if let Some(mut g) = lock_edit_state(edit_state()) {
+                if let Some(state) = g.get_mut(&hwnd) {
+                    state.sel_start = sel_start;
+                    state.sel_end = sel_end;
+                }
             }
             0
         }
@@ -206,12 +226,9 @@ unsafe extern "win64" fn edit_wnd_proc(
 
             // Read text and selection separately to avoid nested mutex locks.
             let current_text = window::with(hwnd, |e| e.title.clone()).unwrap_or_default();
-            let (raw_start, raw_end) = {
-                let guard = edit_state().lock().unwrap();
-                guard
-                    .get(&hwnd)
-                    .map(|s| (s.sel_start, s.sel_end))
-                    .unwrap_or((0, 0))
+            let (raw_start, raw_end) = match lock_edit_state(edit_state()) {
+                Some(g) => g.get(&hwnd).map(|s| (s.sel_start, s.sel_end)).unwrap_or((0, 0)),
+                None => (0, 0),
             };
 
             // ORDER_UINT: ensure start <= end.
@@ -234,9 +251,11 @@ unsafe extern "win64" fn edit_wnd_proc(
             let new_cursor = (s + repl_chars.len()) as u32;
 
             window::with_mut(hwnd, |e| e.title = new_text);
-            if let Some(state) = edit_state().lock().unwrap().get_mut(&hwnd) {
-                state.sel_start = new_cursor;
-                state.sel_end = new_cursor;
+            if let Some(mut g) = lock_edit_state(edit_state()) {
+                if let Some(state) = g.get_mut(&hwnd) {
+                    state.sel_start = new_cursor;
+                    state.sel_end = new_cursor;
+                }
             }
             0
         }
@@ -250,20 +269,20 @@ unsafe extern "win64" fn edit_wnd_proc(
             } else {
                 w_param.min(0x7FFF_FFFF) as u32
             };
-            if let Some(state) = edit_state().lock().unwrap().get_mut(&hwnd) {
-                state.limit = limit;
+            if let Some(mut g) = lock_edit_state(edit_state()) {
+                if let Some(state) = g.get_mut(&hwnd) {
+                    state.limit = limit;
+                }
             }
             0
         }
 
         EM_GETLIMITTEXT => {
             // Wine ref: dlls/user32/edit.c — returns es->buffer_limit.
-            edit_state()
-                .lock()
-                .unwrap()
-                .get(&hwnd)
-                .map(|s| s.limit as isize)
-                .unwrap_or(0x7FFF)
+            match lock_edit_state(edit_state()) {
+                Some(g) => g.get(&hwnd).map(|s| s.limit as isize).unwrap_or(0x7FFF),
+                None => 0x7FFF,
+            }
         }
 
         _ => builtin_control_wnd_proc(hwnd, msg, w_param, l_param as usize) as isize,
@@ -333,11 +352,21 @@ fn is_builtin_class(name: &str) -> bool {
 /// get a valid (no-op) window proc rather than immediate failure.
 pub fn find(name: &str) -> Option<ClassEntry> {
     let key = name.to_ascii_lowercase();
-    if let Some(e) = table().lock().unwrap().get(&key).cloned() {
+    if let Some(e) = lock_table(table())?.get(&key).cloned() {
         return Some(e);
     }
     if is_builtin_class(&key) {
         // EDIT controls get a real window proc that stores text and selection.
+        //
+        // SAFETY: These are concrete Rust functions with `extern "win64"` ABI,
+        // coerced to a raw pointer and then widened to `usize` for opaque storage
+        // in `ClassEntry::wnd_proc`. The only consumer is `call_wnd_proc` in
+        // api.rs, which transmutes the stored `usize` back to
+        // `unsafe extern "win64" fn(usize, u32, usize, isize) -> isize` — exactly
+        // the signature of both `edit_wnd_proc` and `builtin_control_wnd_proc`.
+        // The round-trip is valid because: (a) the ABI is identical on both sides,
+        // (b) the pointer was never modified between storage and retrieval, and
+        // (c) these are static functions whose lifetime is `'static`.
         let wnd_proc = if key == "edit" {
             edit_wnd_proc as *const () as usize
         } else {
