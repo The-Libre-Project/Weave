@@ -226,7 +226,7 @@ pub unsafe extern "win64" fn crypt_msg_get_param(
     const CMSG_SIGNER_INFO_PARAM: u32 = 6;
 
     if h_crypt_msg != FAKE_MSG_HANDLE {
-        weave_kernel32::set_last_error(0x8009_1004_u32); // CRYPT_E_INVALID_MSG_TYPE
+        weave_common::set_last_error(0x8009_1004_u32); // CRYPT_E_INVALID_MSG_TYPE
         return 0; // FALSE
     }
 
@@ -257,7 +257,7 @@ pub unsafe extern "win64" fn crypt_msg_get_param(
         return 1; // TRUE
     }
 
-    weave_kernel32::set_last_error(0x8009_1004_u32); // CRYPT_E_INVALID_MSG_TYPE
+    weave_common::set_last_error(0x8009_1004_u32); // CRYPT_E_INVALID_MSG_TYPE
     0 // FALSE
 }
 
@@ -413,7 +413,7 @@ pub unsafe extern "win64" fn cert_get_certificate_context_property(
                 unsafe { *pcb_data }
             };
             if available < hash_size {
-                weave_kernel32::set_last_error(234_u32); // ERROR_MORE_DATA
+                weave_common::set_last_error(234_u32); // ERROR_MORE_DATA
                 if !pcb_data.is_null() {
                     unsafe { *pcb_data = hash_size };
                 }
@@ -439,7 +439,7 @@ pub unsafe extern "win64" fn cert_get_certificate_context_property(
                 unsafe { *pcb_data }
             };
             if available < hash_size {
-                weave_kernel32::set_last_error(234_u32); // ERROR_MORE_DATA
+                weave_common::set_last_error(234_u32); // ERROR_MORE_DATA
                 if !pcb_data.is_null() {
                     unsafe { *pcb_data = hash_size };
                 }
@@ -460,7 +460,7 @@ pub unsafe extern "win64" fn cert_get_certificate_context_property(
         }
         _ => {
             // CRYPT_E_NOT_FOUND = 0x80092004
-            weave_kernel32::set_last_error(0x8009_2004_u32);
+            weave_common::set_last_error(0x8009_2004_u32);
             0
         }
     }

@@ -7,7 +7,6 @@
 
 #![allow(non_snake_case)]
 
-use std::cell::Cell;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -95,10 +94,9 @@ fn find_mapping_by_addr(view_addr: usize) -> Option<(usize, usize)> {
 const MAX_UTF16_LEN: usize = 32_768;
 const MAX_UTF8_LEN: usize = 65_536;
 
-// Per-thread last error, shared across GetLastError / SetLastError.
-thread_local! {
-    static LAST_ERROR: Cell<u32> = const { Cell::new(0) };
-}
+// Per-thread last error — backed by weave_common::last_error (shared TLS).
+// The LAST_ERROR TLS definition lives in weave-common so other DLL crates
+// (advapi32, user32, etc.) can set/get it without depending on weave-kernel32.
 
 // Per-thread TLS slot storage for dynamically allocated TLS indices.
 thread_local! {
@@ -392,12 +390,12 @@ pub unsafe extern "win64" fn terminate_process(_h_process: usize, u_exit_code: u
 
 /// GetLastError: return the calling thread's last error code.
 pub extern "win64" fn get_last_error() -> u32 {
-    LAST_ERROR.with(|e| e.get())
+    weave_common::get_last_error()
 }
 
 /// SetLastError: set the calling thread's last error code.
 pub extern "win64" fn set_last_error(dw_err_code: u32) {
-    LAST_ERROR.with(|e| e.set(dw_err_code));
+    weave_common::set_last_error(dw_err_code);
 }
 
 /// VirtualProtect: change memory protection on a region.
@@ -1574,7 +1572,7 @@ pub unsafe extern "win64" fn create_file_a(
     _h_template_file: usize,  // ignored
 ) -> usize {
     if lp_file_name.is_null() {
-        LAST_ERROR.with(|e| e.set(file_io::ERROR_INVALID_HANDLE));
+        set_last_error(file_io::ERROR_INVALID_HANDLE);
         return usize::MAX; // INVALID_HANDLE_VALUE
     }
 
@@ -1585,7 +1583,7 @@ pub unsafe extern "win64" fn create_file_a(
             len += 1;
         }
         if len == MAX_UTF8_LEN {
-            LAST_ERROR.with(|e| e.set(87)); // ERROR_INVALID_PARAMETER
+            set_last_error(87); // ERROR_INVALID_PARAMETER
             return usize::MAX;
         }
         let slice = std::slice::from_raw_parts(lp_file_name, len);
@@ -1596,13 +1594,13 @@ pub unsafe extern "win64" fn create_file_a(
 
     match file_io::open_file(&win_path, dw_desired_access, nt_disposition) {
         Ok(handle) => {
-            LAST_ERROR.with(|e| e.set(0));
+            set_last_error(0);
             handle
         }
         Err(_status) => {
             // Map NT status back to a Win32 error code. For now, return a
             // generic error; Phase 3 can refine the mapping.
-            LAST_ERROR.with(|e| e.set(file_io::ERROR_FILE_NOT_FOUND));
+            set_last_error(file_io::ERROR_FILE_NOT_FOUND);
             usize::MAX // INVALID_HANDLE_VALUE
         }
     }
@@ -1628,7 +1626,7 @@ pub unsafe extern "win64" fn create_file_w(
     _h_template_file: usize,  // ignored
 ) -> usize {
     if lp_file_name.is_null() {
-        LAST_ERROR.with(|e| e.set(file_io::ERROR_INVALID_HANDLE));
+        set_last_error(file_io::ERROR_INVALID_HANDLE);
         return usize::MAX; // INVALID_HANDLE_VALUE
     }
 
@@ -1639,7 +1637,7 @@ pub unsafe extern "win64" fn create_file_w(
             len += 1;
         }
         if len == MAX_UTF16_LEN {
-            LAST_ERROR.with(|e| e.set(87)); // ERROR_INVALID_PARAMETER
+            set_last_error(87); // ERROR_INVALID_PARAMETER
             return usize::MAX;
         }
         let slice = std::slice::from_raw_parts(lp_file_name, len);
@@ -1650,11 +1648,11 @@ pub unsafe extern "win64" fn create_file_w(
 
     let result = match file_io::open_file(&win_path, dw_desired_access, nt_disposition) {
         Ok(handle) => {
-            LAST_ERROR.with(|e| e.set(0));
+            set_last_error(0);
             handle
         }
         Err(_status) => {
-            LAST_ERROR.with(|e| e.set(file_io::ERROR_FILE_NOT_FOUND));
+            set_last_error(file_io::ERROR_FILE_NOT_FOUND);
             usize::MAX // INVALID_HANDLE_VALUE
         }
     };
@@ -1688,7 +1686,7 @@ pub unsafe extern "win64" fn read_file(
 ) -> i32 {
     // Pointer validation: null buffer with non-zero read size is an error.
     if lp_buffer.is_null() && n_bytes_to_read > 0 {
-        LAST_ERROR.with(|e| e.set(87)); // ERROR_INVALID_PARAMETER
+        set_last_error(87); // ERROR_INVALID_PARAMETER
         if !lp_bytes_read.is_null() {
             unsafe { *lp_bytes_read = 0 };
         }
@@ -1698,7 +1696,7 @@ pub unsafe extern "win64" fn read_file(
     let fd = match handles::get_fd(h_file) {
         Some(fd) => fd,
         None => {
-            LAST_ERROR.with(|e| e.set(file_io::ERROR_INVALID_HANDLE));
+            set_last_error(file_io::ERROR_INVALID_HANDLE);
             return 0; // FALSE
         }
     };
@@ -1714,7 +1712,7 @@ pub unsafe extern "win64" fn read_file(
     }
 
     if n < 0 {
-        LAST_ERROR.with(|e| e.set(file_io::ERROR_ACCESS_DENIED));
+        set_last_error(file_io::ERROR_ACCESS_DENIED);
         0 // FALSE
     } else {
         {
@@ -1727,7 +1725,7 @@ pub unsafe extern "win64" fn read_file(
                 );
             }
         }
-        LAST_ERROR.with(|e| e.set(0));
+        set_last_error(0);
         1 // TRUE
     }
 }
@@ -1749,7 +1747,7 @@ pub unsafe extern "win64" fn write_file(
 ) -> i32 {
     // Pointer validation: null buffer with non-zero write size is an error.
     if lp_buffer.is_null() && n_bytes_to_write > 0 {
-        LAST_ERROR.with(|e| e.set(87)); // ERROR_INVALID_PARAMETER
+        set_last_error(87); // ERROR_INVALID_PARAMETER
         if !lp_bytes_written.is_null() {
             unsafe { *lp_bytes_written = 0 };
         }
@@ -1759,7 +1757,7 @@ pub unsafe extern "win64" fn write_file(
     let fd = match handles::get_fd(h_file) {
         Some(fd) => fd,
         None => {
-            LAST_ERROR.with(|e| e.set(file_io::ERROR_INVALID_HANDLE));
+            set_last_error(file_io::ERROR_INVALID_HANDLE);
             return 0; // FALSE
         }
     };
@@ -1781,10 +1779,10 @@ pub unsafe extern "win64" fn write_file(
     }
 
     if n < 0 {
-        LAST_ERROR.with(|e| e.set(file_io::ERROR_ACCESS_DENIED));
+        set_last_error(file_io::ERROR_ACCESS_DENIED);
         0 // FALSE
     } else {
-        LAST_ERROR.with(|e| e.set(0));
+        set_last_error(0);
         1 // TRUE
     }
 }
@@ -1801,16 +1799,16 @@ pub extern "win64" fn close_handle(h_object: usize) -> i32 {
     // Thread handles are not file descriptors; handle them before delegating
     // to file_io::close_handle which would fail on non-fd handles.
     if handles::free_if_thread(h_object) {
-        LAST_ERROR.with(|e| e.set(0));
+        set_last_error(0);
         return 1; // TRUE
     }
     match file_io::close_handle(h_object) {
         Ok(()) => {
-            LAST_ERROR.with(|e| e.set(0));
+            set_last_error(0);
             1 // TRUE
         }
         Err(_) => {
-            LAST_ERROR.with(|e| e.set(file_io::ERROR_INVALID_HANDLE));
+            set_last_error(file_io::ERROR_INVALID_HANDLE);
             0 // FALSE
         }
     }
@@ -1824,7 +1822,7 @@ pub extern "win64" fn close_handle(h_object: usize) -> i32 {
 /// `lp_file_name` must be a valid, null-terminated UTF-16 string.
 pub unsafe extern "win64" fn delete_file_w(lp_file_name: *const u16) -> i32 {
     if lp_file_name.is_null() {
-        LAST_ERROR.with(|e| e.set(file_io::ERROR_INVALID_HANDLE));
+        set_last_error(file_io::ERROR_INVALID_HANDLE);
         return 0; // FALSE
     }
     let win_path = unsafe {
@@ -1833,7 +1831,7 @@ pub unsafe extern "win64" fn delete_file_w(lp_file_name: *const u16) -> i32 {
             len += 1;
         }
         if len == MAX_UTF16_LEN {
-            LAST_ERROR.with(|e| e.set(87)); // ERROR_INVALID_PARAMETER
+            set_last_error(87); // ERROR_INVALID_PARAMETER
             return 0; // FALSE
         }
         String::from_utf16_lossy(std::slice::from_raw_parts(lp_file_name, len)).to_owned()
@@ -1841,23 +1839,23 @@ pub unsafe extern "win64" fn delete_file_w(lp_file_name: *const u16) -> i32 {
     let linux_path = match weave_core::prefix::translator().to_linux_str(&win_path) {
         Ok(p) => p,
         Err(_) => {
-            LAST_ERROR.with(|e| e.set(file_io::ERROR_FILE_NOT_FOUND));
+            set_last_error(file_io::ERROR_FILE_NOT_FOUND);
             return 0;
         }
     };
     let c_path = match std::ffi::CString::new(linux_path.as_os_str().as_encoded_bytes()) {
         Ok(s) => s,
         Err(_) => {
-            LAST_ERROR.with(|e| e.set(file_io::ERROR_FILE_NOT_FOUND));
+            set_last_error(file_io::ERROR_FILE_NOT_FOUND);
             return 0;
         }
     };
     let ret = unsafe { libc::unlink(c_path.as_ptr()) };
     if ret == 0 {
-        LAST_ERROR.with(|e| e.set(0));
+        set_last_error(0);
         1 // TRUE
     } else {
-        LAST_ERROR.with(|e| e.set(file_io::ERROR_FILE_NOT_FOUND));
+        set_last_error(file_io::ERROR_FILE_NOT_FOUND);
         0 // FALSE
     }
 }
@@ -1878,7 +1876,7 @@ pub unsafe extern "win64" fn set_file_pointer(
     let fd = match handles::get_fd(h_file) {
         Some(fd) => fd,
         None => {
-            LAST_ERROR.with(|e| e.set(file_io::ERROR_INVALID_HANDLE));
+            set_last_error(file_io::ERROR_INVALID_HANDLE);
             return 0xFFFF_FFFF; // INVALID_SET_FILE_POINTER
         }
     };
@@ -1896,14 +1894,14 @@ pub unsafe extern "win64" fn set_file_pointer(
         1 => libc::SEEK_CUR,
         2 => libc::SEEK_END,
         _ => {
-            LAST_ERROR.with(|e| e.set(file_io::ERROR_INVALID_HANDLE));
+            set_last_error(file_io::ERROR_INVALID_HANDLE);
             return 0xFFFF_FFFF;
         }
     };
 
     let new_pos = unsafe { libc::lseek(fd, offset, whence) };
     if new_pos < 0 {
-        LAST_ERROR.with(|e| e.set(file_io::ERROR_INVALID_HANDLE));
+        set_last_error(file_io::ERROR_INVALID_HANDLE);
         return 0xFFFF_FFFF;
     }
 
@@ -1912,7 +1910,7 @@ pub unsafe extern "win64" fn set_file_pointer(
         unsafe { *lp_distance_to_move_high = (new_pos >> 32) as i32 };
     }
 
-    LAST_ERROR.with(|e| e.set(0));
+    set_last_error(0);
     (new_pos & 0xFFFF_FFFF) as u32
 }
 
@@ -1927,7 +1925,7 @@ pub unsafe extern "win64" fn get_file_size(h_file: usize, lp_file_size_high: *mu
     let fd = match handles::get_fd(h_file) {
         Some(fd) => fd,
         None => {
-            LAST_ERROR.with(|e| e.set(file_io::ERROR_INVALID_HANDLE));
+            set_last_error(file_io::ERROR_INVALID_HANDLE);
             return 0xFFFF_FFFF;
         }
     };
@@ -1935,7 +1933,7 @@ pub unsafe extern "win64" fn get_file_size(h_file: usize, lp_file_size_high: *mu
     let mut stat = unsafe { std::mem::zeroed::<libc::stat>() };
     let ret = unsafe { libc::fstat(fd, &mut stat) };
     if ret != 0 {
-        LAST_ERROR.with(|e| e.set(file_io::ERROR_INVALID_HANDLE));
+        set_last_error(file_io::ERROR_INVALID_HANDLE);
         return 0xFFFF_FFFF;
     }
 
@@ -1943,7 +1941,7 @@ pub unsafe extern "win64" fn get_file_size(h_file: usize, lp_file_size_high: *mu
     if !lp_file_size_high.is_null() {
         unsafe { *lp_file_size_high = (size >> 32) as u32 };
     }
-    LAST_ERROR.with(|e| e.set(0));
+    set_last_error(0);
     (size & 0xFFFF_FFFF) as u32
 }
 
@@ -2752,7 +2750,7 @@ pub unsafe extern "win64" fn wide_char_to_multi_byte(
         || (lp_multi_byte_str.is_null() && cb_multi_byte != 0)
         || cb_multi_byte < 0
     {
-        LAST_ERROR.with(|e| e.set(87)); // ERROR_INVALID_PARAMETER
+        set_last_error(87); // ERROR_INVALID_PARAMETER
         return 0;
     }
     let null_terminated = cch_wide_char < 0;
@@ -2762,7 +2760,7 @@ pub unsafe extern "win64" fn wide_char_to_multi_byte(
             len += 1;
         }
         if len == MAX_UTF16_LEN {
-            LAST_ERROR.with(|e| e.set(87)); // ERROR_INVALID_PARAMETER
+            set_last_error(87); // ERROR_INVALID_PARAMETER
             return 0;
         }
         unsafe { std::slice::from_raw_parts(lp_wide_char_str, len) }
@@ -2783,7 +2781,7 @@ pub unsafe extern "win64" fn wide_char_to_multi_byte(
             std::ptr::copy_nonoverlapping(bytes.as_ptr(), lp_multi_byte_str, copy_len);
             *lp_multi_byte_str.add(copy_len) = 0;
         }
-        LAST_ERROR.with(|e| e.set(0));
+        set_last_error(0);
         (copy_len + 1) as i32
     } else {
         // Counted source: copy exactly min(bytes, cap) bytes. No null added.
@@ -2792,7 +2790,7 @@ pub unsafe extern "win64" fn wide_char_to_multi_byte(
         unsafe {
             std::ptr::copy_nonoverlapping(bytes.as_ptr(), lp_multi_byte_str, copy_len);
         }
-        LAST_ERROR.with(|e| e.set(0));
+        set_last_error(0);
         copy_len as i32
     }
 }
@@ -2821,7 +2819,7 @@ pub unsafe extern "win64" fn multi_byte_to_wide_char(
         || (lp_wide_char_str.is_null() && cch_wide_char != 0)
         || cch_wide_char < 0
     {
-        LAST_ERROR.with(|e| e.set(87)); // ERROR_INVALID_PARAMETER
+        set_last_error(87); // ERROR_INVALID_PARAMETER
         return 0;
     }
     let null_terminated = cb_multi_byte < 0;
@@ -2831,7 +2829,7 @@ pub unsafe extern "win64" fn multi_byte_to_wide_char(
             len += 1;
         }
         if len == MAX_UTF8_LEN {
-            LAST_ERROR.with(|e| e.set(87)); // ERROR_INVALID_PARAMETER
+            set_last_error(87); // ERROR_INVALID_PARAMETER
             return 0;
         }
         unsafe { std::slice::from_raw_parts(lp_multi_byte_str, len) }
@@ -2850,7 +2848,7 @@ pub unsafe extern "win64" fn multi_byte_to_wide_char(
             std::ptr::copy_nonoverlapping(wide.as_ptr(), lp_wide_char_str, copy_len);
             *lp_wide_char_str.add(copy_len) = 0;
         }
-        LAST_ERROR.with(|e| e.set(0));
+        set_last_error(0);
         (copy_len + 1) as i32
     } else {
         // Counted source: copy exactly min(wide, cap) chars. No null added.
@@ -2858,7 +2856,7 @@ pub unsafe extern "win64" fn multi_byte_to_wide_char(
         unsafe {
             std::ptr::copy_nonoverlapping(wide.as_ptr(), lp_wide_char_str, copy_len);
         }
-        LAST_ERROR.with(|e| e.set(0));
+        set_last_error(0);
         copy_len as i32
     }
 }
@@ -2930,7 +2928,7 @@ pub extern "win64" fn flush_file_buffers(h_file: usize) -> i32 {
     let fd = match handles::get_fd(h_file) {
         Some(fd) => fd,
         None => {
-            LAST_ERROR.with(|e| e.set(file_io::ERROR_INVALID_HANDLE));
+            set_last_error(file_io::ERROR_INVALID_HANDLE);
             return 0;
         }
     };
@@ -2938,7 +2936,7 @@ pub extern "win64" fn flush_file_buffers(h_file: usize) -> i32 {
     if ret == 0 {
         1
     } else {
-        LAST_ERROR.with(|e| e.set(file_io::ERROR_INVALID_HANDLE));
+        set_last_error(file_io::ERROR_INVALID_HANDLE);
         0
     }
 }
@@ -2965,7 +2963,7 @@ pub unsafe extern "win64" fn create_file_mapping_w(
         let fd = match handles::get_fd(h_file) {
             Some(f) => f,
             None => {
-                LAST_ERROR.with(|e| e.set(file_io::ERROR_INVALID_HANDLE));
+                set_last_error(file_io::ERROR_INVALID_HANDLE);
                 return 0;
             }
         };
@@ -2976,7 +2974,7 @@ pub unsafe extern "win64" fn create_file_mapping_w(
         } else {
             let mut stat = unsafe { std::mem::zeroed::<libc::stat>() };
             if unsafe { libc::fstat(fd, &mut stat) } != 0 || stat.st_size <= 0 {
-                LAST_ERROR.with(|e| e.set(file_io::ERROR_INVALID_HANDLE));
+                set_last_error(file_io::ERROR_INVALID_HANDLE);
                 return 0;
             }
             stat.st_size as usize
@@ -2998,11 +2996,11 @@ pub unsafe extern "win64" fn create_file_mapping_w(
             )
         };
         if addr == libc::MAP_FAILED {
-            LAST_ERROR.with(|e| e.set(file_io::ERROR_ACCESS_DENIED));
+            set_last_error(file_io::ERROR_ACCESS_DENIED);
             return 0;
         }
         let mapping_handle = alloc_mapping(addr as usize, map_size);
-        LAST_ERROR.with(|e| e.set(0));
+        set_last_error(0);
         return mapping_handle;
     }
     // Anonymous mapping.
@@ -5670,7 +5668,7 @@ pub unsafe extern "win64" fn create_mutex_a(
         String::from_utf8_lossy(&s).into_owned()
     };
     eprintln!("weave/kernel32: CreateMutexA({name:?}) → handle 1 (new)");
-    LAST_ERROR.with(|e| e.set(0)); // ERROR_SUCCESS — newly created, no duplicate
+    set_last_error(0); // ERROR_SUCCESS — newly created, no duplicate
     1 // fake handle
 }
 
@@ -5701,7 +5699,7 @@ pub unsafe extern "win64" fn create_mutex_w(
         String::from_utf16_lossy(&s)
     };
     eprintln!("weave/kernel32: CreateMutexW({name:?}) → handle 1 (new)");
-    LAST_ERROR.with(|e| e.set(0)); // ERROR_SUCCESS — newly created, no duplicate
+    set_last_error(0); // ERROR_SUCCESS — newly created, no duplicate
     1 // fake handle
 }
 
@@ -5746,7 +5744,7 @@ pub unsafe extern "win64" fn create_mutex_ex_w(
         String::from_utf16_lossy(&s)
     };
     eprintln!("weave/kernel32: CreateMutexExW({name:?}) → handle 1 (new)");
-    LAST_ERROR.with(|e| e.set(0)); // ERROR_SUCCESS — newly created
+    set_last_error(0); // ERROR_SUCCESS — newly created
     1 // fake handle
 }
 /// ReleaseMutex — no-op stub, returns TRUE.
@@ -7619,7 +7617,7 @@ pub unsafe extern "win64" fn compare_string_ordinal(
 ) -> i32 {
     // Wine: null str1 or str2 → ERROR_INVALID_PARAMETER
     if lp_string1.is_null() || lp_string2.is_null() {
-        LAST_ERROR.with(|e| e.set(87)); // ERROR_INVALID_PARAMETER
+        set_last_error(87); // ERROR_INVALID_PARAMETER
         return 0;
     }
 
@@ -7834,7 +7832,7 @@ pub unsafe extern "win64" fn get_string_type_ex_a(
         return 0; // FALSE — only CT_CTYPE1 supported
     }
     if lp_src_str.is_null() || lp_char_type.is_null() {
-        LAST_ERROR.with(|e| e.set(87)); // ERROR_INVALID_PARAMETER
+        set_last_error(87); // ERROR_INVALID_PARAMETER
         return 0;
     }
     let len = if cch_src == -1 {
@@ -7884,7 +7882,7 @@ pub unsafe extern "win64" fn compare_string_ex(
     _l_param: isize,
 ) -> i32 {
     if lp_string1.is_null() || lp_string2.is_null() {
-        LAST_ERROR.with(|e| e.set(87)); // ERROR_INVALID_PARAMETER
+        set_last_error(87); // ERROR_INVALID_PARAMETER
         return 0;
     }
     unsafe {
@@ -7920,7 +7918,7 @@ pub unsafe extern "win64" fn lc_map_string_ex(
     _sort_handle: isize,
 ) -> i32 {
     if lp_src_str.is_null() || cch_src == 0 || cch_dest < 0 {
-        LAST_ERROR.with(|e| e.set(87)); // ERROR_INVALID_PARAMETER
+        set_last_error(87); // ERROR_INVALID_PARAMETER
         return 0;
     }
     unsafe { lc_map_string_w(0, dw_map_flags, lp_src_str, cch_src, lp_dest_str, cch_dest) }
@@ -7944,7 +7942,7 @@ pub unsafe extern "win64" fn lc_map_string_a(
     cch_dest: i32,
 ) -> i32 {
     if lp_src_str.is_null() || cch_src == 0 {
-        LAST_ERROR.with(|e| e.set(87)); // ERROR_INVALID_PARAMETER
+        set_last_error(87); // ERROR_INVALID_PARAMETER
         return 0;
     }
     let src_len = if cch_src < 0 {
@@ -8002,7 +8000,7 @@ pub unsafe extern "win64" fn set_file_pointer_ex(
     let fd = match handles::get_fd(h_file) {
         Some(fd) => fd,
         None => {
-            LAST_ERROR.with(|e| e.set(file_io::ERROR_INVALID_HANDLE));
+            set_last_error(file_io::ERROR_INVALID_HANDLE);
             return 0; // FALSE
         }
     };
@@ -8011,7 +8009,7 @@ pub unsafe extern "win64" fn set_file_pointer_ex(
         1 => libc::SEEK_CUR,
         2 => libc::SEEK_END,
         _ => {
-            LAST_ERROR.with(|e| e.set(file_io::ERROR_INVALID_HANDLE));
+            set_last_error(file_io::ERROR_INVALID_HANDLE);
             return 0; // FALSE
         }
     };
@@ -8020,10 +8018,10 @@ pub unsafe extern "win64" fn set_file_pointer_ex(
         if !lp_new_file_pointer.is_null() {
             unsafe { *lp_new_file_pointer = result };
         }
-        LAST_ERROR.with(|e| e.set(0));
+        set_last_error(0);
         1 // TRUE
     } else {
-        LAST_ERROR.with(|e| e.set(file_io::ERROR_INVALID_HANDLE));
+        set_last_error(file_io::ERROR_INVALID_HANDLE);
         0 // FALSE
     }
 }
@@ -8137,7 +8135,7 @@ pub unsafe extern "win64" fn get_file_size_ex(h_file: usize, lp_file_size: *mut 
     let fd = match handles::get_fd(h_file) {
         Some(fd) => fd,
         None => {
-            LAST_ERROR.with(|e| e.set(file_io::ERROR_INVALID_HANDLE));
+            set_last_error(file_io::ERROR_INVALID_HANDLE);
             return 0; // FALSE
         }
     };
@@ -8145,14 +8143,14 @@ pub unsafe extern "win64" fn get_file_size_ex(h_file: usize, lp_file_size: *mut 
     let mut stat = unsafe { std::mem::zeroed::<libc::stat>() };
     let ret = unsafe { libc::fstat(fd, &mut stat) };
     if ret != 0 {
-        LAST_ERROR.with(|e| e.set(file_io::ERROR_INVALID_HANDLE));
+        set_last_error(file_io::ERROR_INVALID_HANDLE);
         return 0; // FALSE
     }
 
     if !lp_file_size.is_null() {
         unsafe { *lp_file_size = stat.st_size };
     }
-    LAST_ERROR.with(|e| e.set(0));
+    set_last_error(0);
     1 // TRUE
 }
 
