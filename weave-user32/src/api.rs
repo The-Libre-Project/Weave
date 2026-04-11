@@ -398,8 +398,13 @@ pub unsafe extern "win64" fn get_message_w(
     }
 
     // Wait for a message: keep pumping X11 events until the queue has one.
+    static GM_COUNT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
     loop {
         if let Some(entry) = queue::pop() {
+            let n = GM_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if n < 30 {
+                eprintln!("weave/GetMessageW#{n}: hwnd={:#x} msg={}", entry.hwnd, entry.message);
+            }
             fill_msg(lp_msg, &entry);
             return if entry.message == WM_QUIT { 0 } else { 1 };
         }

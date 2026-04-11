@@ -846,6 +846,20 @@ mod inner {
             None => return,
         };
 
+        // Diagnostic: log every X11 event type so we can see if events arrive.
+        let event_tag = match &event {
+            Event::Expose(ev) => format!("Expose(window={:#x}, count={})", ev.window, ev.count),
+            Event::ClientMessage(_) => "ClientMessage".to_string(),
+            Event::ConfigureNotify(_) => "ConfigureNotify".to_string(),
+            Event::KeyPress(_) => "KeyPress".to_string(),
+            Event::KeyRelease(_) => "KeyRelease".to_string(),
+            Event::ButtonPress(_) => "ButtonPress".to_string(),
+            Event::ButtonRelease(_) => "ButtonRelease".to_string(),
+            Event::MotionNotify(_) => "MotionNotify".to_string(),
+            _ => "Other".to_string(),
+        };
+        eprintln!("weave/x11: event {event_tag}");
+
         match event {
             Event::ClientMessage(ev) => {
                 // User clicked the window manager's close button.
