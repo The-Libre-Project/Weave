@@ -59,9 +59,14 @@ unsafe fn decode_wide_ptr(ptr: *const u16) -> String {
         return String::new();
     }
     let mut len = 0usize;
+    // SAFETY: caller guarantees `ptr` points to a null-terminated UTF-16 sequence;
+    // we advance through it one u16 at a time until the null terminator is found.
     while unsafe { *ptr.add(len) } != 0 {
         len += 1;
     }
+    // SAFETY: `ptr` is non-null (checked above) and valid for `len` u16 elements
+    // (we just walked the entire string to find the null).  The slice does not
+    // outlive this function — it is consumed by `from_utf16_lossy` immediately.
     let slice = unsafe { std::slice::from_raw_parts(ptr, len) };
     String::from_utf16_lossy(slice)
 }
@@ -76,9 +81,14 @@ unsafe fn decode_narrow_ptr(ptr: *const u8) -> String {
         return String::new();
     }
     let mut len = 0usize;
+    // SAFETY: caller guarantees `ptr` points to a null-terminated byte sequence;
+    // we scan byte-by-byte until the null terminator is found.
     while unsafe { *ptr.add(len) } != 0 {
         len += 1;
     }
+    // SAFETY: `ptr` is non-null (checked above) and valid for `len` bytes
+    // (we just walked the entire string).  The slice is consumed immediately by
+    // `from_utf8_lossy` and does not escape this function.
     let slice = unsafe { std::slice::from_raw_parts(ptr, len) };
     String::from_utf8_lossy(slice).into_owned()
 }
@@ -112,6 +122,9 @@ pub unsafe extern "win64" fn reg_open_key_ex_w(
         None => return ERROR_INVALID_HANDLE,
     };
 
+    // SAFETY: RegOpenKeyExW: lp_sub_key is documented as optional (may be null for the root
+    // key itself); decode_wide_ptr handles the null case.  When non-null, the Win32 API
+    // contract requires callers to supply a valid null-terminated UTF-16 path.
     let subkey = unsafe { decode_wide_ptr(lp_sub_key) };
     let key_path = match resolve_subkey(&base_path, &subkey) {
         Some(p) => p,
@@ -123,6 +136,8 @@ pub unsafe extern "win64" fn reg_open_key_ex_w(
     }
 
     let handle = handles::alloc(HandleKind::RegistryKey(key_path));
+    // SAFETY: phk_result non-null checked at function entry (returns ERROR_INVALID_PARAMETER
+    // if null).  The Win32 API contract requires callers to provide a valid, writable HKEY*.
     unsafe { *phk_result = handle };
     ERROR_SUCCESS
 }
@@ -161,6 +176,9 @@ pub unsafe extern "win64" fn reg_create_key_ex_w(
         None => return ERROR_INVALID_HANDLE,
     };
 
+    // SAFETY: RegCreateKeyExW: lp_sub_key is documented as optional (null means the key
+    // itself); decode_wide_ptr handles null.  When non-null, callers must supply a valid
+    // null-terminated UTF-16 path per the Win32 API contract.
     let subkey = unsafe { decode_wide_ptr(lp_sub_key) };
     let key_path = match resolve_subkey(&base_path, &subkey) {
         Some(p) => p,
@@ -173,6 +191,10 @@ pub unsafe extern "win64" fn reg_create_key_ex_w(
     }
 
     if !lpdw_disposition.is_null() {
+        // SAFETY: lpdw_disposition is optional per MSDN; we only write through it
+        // after confirming it is non-null.  The Win32 API contract requires that when
+        // non-null, it points to a valid, writable DWORD (u32) aligned on a 4-byte
+        // boundary.
         unsafe {
             *lpdw_disposition = if existed {
                 2 // REG_OPENED_EXISTING_KEY
@@ -183,6 +205,8 @@ pub unsafe extern "win64" fn reg_create_key_ex_w(
     }
 
     let handle = handles::alloc(HandleKind::RegistryKey(key_path));
+    // SAFETY: phk_result non-null checked at function entry (returns ERROR_BADKEY if null).
+    // The Win32 API contract requires callers to provide a valid, writable HKEY*.
     unsafe { *phk_result = handle };
     ERROR_SUCCESS
 }
@@ -228,6 +252,9 @@ pub unsafe extern "win64" fn reg_query_value_ex_w(
         None => return ERROR_INVALID_HANDLE,
     };
 
+    // SAFETY: RegQueryValueExW: lp_value_name is documented as optional (null means the
+    // default value ""); decode_wide_ptr handles the null case.  When non-null, callers
+    // must supply a valid null-terminated UTF-16 string.
     let value_name = unsafe { decode_wide_ptr(lp_value_name) };
 
     let value_file = match find_value_file(&key_path, &value_name) {
@@ -242,6 +269,8 @@ pub unsafe extern "win64" fn reg_query_value_ex_w(
 
     // Write the type.
     if !lp_type.is_null() {
+        // SAFETY: lp_type is optional per MSDN; written only after confirming non-null.
+        // The Win32 API contract requires callers to provide a valid, writable DWORD*.
         unsafe { *lp_type = reg_type };
     }
 
@@ -250,6 +279,9 @@ pub unsafe extern "win64" fn reg_query_value_ex_w(
     if lp_data.is_null() {
         // Size-probe call: just report the required size.
         if !lpcb_data.is_null() {
+            // SAFETY: lpcb_data is optional per MSDN (may be null for a pure type query);
+            // written only after confirming non-null.  The Win32 API contract requires that
+            // when non-null it points to a valid, writable DWORD*.
             unsafe { *lpcb_data = data_len };
         }
         return ERROR_SUCCESS;
@@ -259,10 +291,13 @@ pub unsafe extern "win64" fn reg_query_value_ex_w(
     let buf_size = if lpcb_data.is_null() {
         0u32
     } else {
+        // SAFETY: lpcb_data is non-null here; the Win32 API contract requires callers to
+        // provide a valid DWORD* when lp_data is also non-null (validated at function entry).
         unsafe { *lpcb_data }
     };
 
     if !lpcb_data.is_null() {
+        // SAFETY: same as above — lpcb_data is non-null and points to a valid DWORD.
         unsafe { *lpcb_data = data_len };
     }
 
@@ -271,6 +306,10 @@ pub unsafe extern "win64" fn reg_query_value_ex_w(
     }
 
     // Copy data into caller's buffer.
+    // SAFETY: lp_data is non-null (checked above) and the Win32 API contract requires
+    // callers to supply a buffer of at least *lpcb_data bytes.  We confirmed buf_size >=
+    // data_len before reaching this point, so the write cannot overflow the buffer.
+    // data.as_ptr() is a valid Rust slice — no aliasing with lp_data (caller-owned memory).
     unsafe { std::ptr::copy_nonoverlapping(data.as_ptr(), lp_data, data.len()) };
 
     // Wine behaviour: for string types, guarantee a UTF-16 null terminator at
@@ -280,6 +319,9 @@ pub unsafe extern "win64" fn reg_query_value_ex_w(
         let len = data.len();
         let already_null = len >= 2 && data[len - 2] == 0 && data[len - 1] == 0;
         if !already_null && buf_size as usize >= len + 2 {
+            // SAFETY: We checked buf_size >= len + 2, so writing two bytes past the end
+            // of the data (but still within the caller's declared buffer) is safe.
+            // lp_data is non-null and points into the caller-provided buffer.
             unsafe {
                 *lp_data.add(len) = 0;
                 *lp_data.add(len + 1) = 0;
@@ -319,6 +361,9 @@ pub unsafe extern "win64" fn reg_set_value_ex_w(
         return ERROR_FILE_NOT_FOUND;
     }
 
+    // SAFETY: RegSetValueExW: lp_value_name is documented as optional (null means the
+    // default value); decode_wide_ptr handles null.  When non-null, callers must supply a
+    // valid null-terminated UTF-16 string per the Win32 API contract.
     let value_name = unsafe { decode_wide_ptr(lp_value_name) };
     let filename = if value_name.is_empty() {
         "@".to_string()
@@ -335,6 +380,9 @@ pub unsafe extern "win64" fn reg_set_value_ex_w(
     let data_slice = if cb_data == 0 || lp_data.is_null() {
         &[]
     } else {
+        // SAFETY: RegSetValueExW: lp_data is non-null and cb_data > 0 (both checked above).
+        // The Win32 API contract requires callers to supply a valid buffer of at least
+        // cb_data bytes containing the value data to write.
         unsafe { std::slice::from_raw_parts(lp_data, cb_data as usize) }
     };
 
@@ -361,6 +409,9 @@ pub unsafe extern "win64" fn reg_delete_value_w(h_key: usize, lp_value_name: *co
         None => return ERROR_INVALID_HANDLE,
     };
 
+    // SAFETY: RegDeleteValueW: lp_value_name is documented as optional (null deletes the
+    // default value); decode_wide_ptr handles null.  When non-null, callers must supply a
+    // valid null-terminated UTF-16 string per the Win32 API contract.
     let value_name = unsafe { decode_wide_ptr(lp_value_name) };
     let value_file = match find_value_file(&key_path, &value_name) {
         Some(f) => f,
@@ -454,6 +505,10 @@ pub unsafe extern "win64" fn reg_query_info_key_w(
         }
     }
 
+    // SAFETY (all four output writes below): RegQueryInfoKeyW documents every output
+    // parameter as optional — callers pass null for fields they don't need (MSDN).
+    // We only write through each pointer after confirming it is non-null.  The Win32 API
+    // contract requires that when non-null, each pointer addresses a valid, writable DWORD.
     if !lpc_sub_keys.is_null() {
         unsafe { *lpc_sub_keys = subkey_count };
     }
@@ -539,6 +594,10 @@ pub unsafe extern "win64" fn reg_enum_value_w(
     let name_chars_needed = name_wide.len() as u32 + 1; // +1 for null
 
     // lpcb_value_name null already checked above (ERROR_INVALID_PARAMETER)
+    // SAFETY: lpcb_value_name non-null is enforced at function entry.  The Win32 API
+    // contract requires callers to supply a valid DWORD* containing the buffer capacity
+    // in characters; we read it once to get the available space and then overwrite it
+    // with the required size (Wine behaviour: always updates even on ERROR_MORE_DATA).
     let buf_chars = unsafe { *lpcb_value_name };
     unsafe { *lpcb_value_name = name_chars_needed };
 
@@ -549,8 +608,13 @@ pub unsafe extern "win64" fn reg_enum_value_w(
     // Copy name into caller buffer.
     if !lp_value_name.is_null() {
         for (i, &c) in name_wide.iter().enumerate() {
+            // SAFETY: buf_chars >= name_chars_needed (checked above), so lp_value_name is
+            // valid for at least name_wide.len() + 1 u16 elements.  The Win32 API contract
+            // requires callers to supply a writable buffer large enough for *lpcb_value_name
+            // characters (including the null terminator).
             unsafe { *lp_value_name.add(i) = c };
         }
+        // SAFETY: same as above — the null terminator fits within the declared buffer.
         unsafe { *lp_value_name.add(name_wide.len()) = 0 }; // null terminator
     }
 
@@ -561,14 +625,22 @@ pub unsafe extern "win64" fn reg_enum_value_w(
     };
 
     if !lp_type.is_null() {
+        // SAFETY: lp_type is optional per MSDN; written only after confirming non-null.
+        // The Win32 API contract requires that when non-null it points to a valid DWORD*.
         unsafe { *lp_type = reg_type };
     }
 
     let data_len = data.len() as u32;
     if !lpcb_data.is_null() {
+        // SAFETY: lpcb_data is optional per MSDN; we only read/write through it after
+        // confirming non-null.  The Win32 API contract requires callers to supply a valid
+        // DWORD* holding the data buffer capacity in bytes when lp_data is also provided.
         let buf = unsafe { *lpcb_data };
         unsafe { *lpcb_data = data_len };
         if !lp_data.is_null() && buf >= data_len {
+            // SAFETY: lp_data is non-null and buf >= data_len, so the destination buffer
+            // is large enough.  The Win32 API contract requires callers to supply a buffer
+            // of at least *lpcb_data bytes.  data is a Rust-owned Vec — no aliasing.
             unsafe { std::ptr::copy_nonoverlapping(data.as_ptr(), lp_data, data.len()) };
         } else if buf < data_len {
             return ERROR_MORE_DATA;
@@ -593,6 +665,9 @@ pub unsafe extern "win64" fn reg_delete_key_w(h_key: usize, lp_sub_key: *const u
         None => return ERROR_INVALID_HANDLE,
     };
 
+    // SAFETY: RegDeleteKeyW: lp_sub_key is documented as required; decode_wide_ptr handles
+    // null defensively.  When non-null, callers must supply a valid null-terminated UTF-16
+    // string per the Win32 API contract.
     let subkey = unsafe { decode_wide_ptr(lp_sub_key) };
     let key_path = match resolve_subkey(&base_path, &subkey) {
         Some(p) => p,
@@ -669,6 +744,10 @@ pub unsafe extern "win64" fn reg_enum_key_ex_w(
         return ERROR_INVALID_HANDLE;
     }
 
+    // SAFETY: lpcch_name non-null is enforced at the check above (returns ERROR_INVALID_HANDLE
+    // if null).  The Win32 API contract requires callers to supply a valid DWORD* containing
+    // the buffer capacity in characters; we read it to check available space and then update
+    // it with the required size (Wine behaviour: always updates *lpcch_name even on overflow).
     let buf_capacity = unsafe { *lpcch_name };
     unsafe { *lpcch_name = required_chars };
 
@@ -678,8 +757,12 @@ pub unsafe extern "win64" fn reg_enum_key_ex_w(
 
     // Copy wide chars into caller's buffer
     for (i, &c) in wide.iter().enumerate() {
+        // SAFETY: buf_capacity >= required_chars (checked above), so lp_name is valid for
+        // at least wide.len() + 1 u16 elements.  The Win32 API contract requires callers to
+        // supply a writable buffer of at least *lpcch_name UTF-16 code units.
         unsafe { *lp_name.add(i) = c };
     }
+    // SAFETY: same as above — the null terminator fits within the declared buffer.
     unsafe { *lp_name.add(wide.len()) = 0 }; // null terminator
 
     ERROR_SUCCESS
@@ -695,12 +778,17 @@ pub unsafe extern "win64" fn reg_enum_key_ex_w(
 /// `lp_sub_key` must be a valid null-terminated UTF-8 string.
 pub unsafe extern "win64" fn reg_delete_key_a(h_key: usize, lp_sub_key: *const u8) -> i32 {
     // Convert ANSI subkey to UTF-16
+    // SAFETY: RegDeleteKeyA: lp_sub_key is documented as required; decode_narrow_ptr handles
+    // null defensively.  When non-null, callers must supply a valid null-terminated ANSI
+    // (UTF-8 compatible) string per the Win32 API contract.
     let subkey_utf8 = unsafe { decode_narrow_ptr(lp_sub_key) };
     let subkey_utf16: Vec<u16> = subkey_utf8
         .encode_utf16()
         .chain(std::iter::once(0))
         .collect();
 
+    // SAFETY: subkey_utf16 is a locally-owned Vec with a null terminator appended above;
+    // it outlives the call to reg_delete_key_w which does not store the pointer.
     unsafe { reg_delete_key_w(h_key, subkey_utf16.as_ptr()) }
 }
 
@@ -761,6 +849,10 @@ pub unsafe extern "win64" fn reg_enum_key_ex_a(
         return ERROR_INVALID_HANDLE;
     }
 
+    // SAFETY: lpcch_name non-null is enforced at the check above (returns ERROR_INVALID_HANDLE
+    // if null).  The Win32 API contract requires callers to supply a valid DWORD* containing
+    // the buffer capacity in bytes; we read it to check available space and then update it
+    // with the required size (consistent with Wine's update-even-on-overflow behaviour).
     let buf_capacity = unsafe { *lpcch_name };
     unsafe { *lpcch_name = required_chars };
 
@@ -770,8 +862,12 @@ pub unsafe extern "win64" fn reg_enum_key_ex_a(
 
     // Copy bytes into caller's buffer
     for (i, &c) in narrow.iter().enumerate() {
+        // SAFETY: buf_capacity >= required_chars (checked above), so lp_name is valid for
+        // at least narrow.len() + 1 bytes.  The Win32 API contract requires callers to
+        // supply a writable buffer of at least *lpcch_name bytes.
         unsafe { *lp_name.add(i) = c };
     }
+    // SAFETY: same as above — the null terminator fits within the declared buffer.
     unsafe { *lp_name.add(narrow.len()) = 0 }; // null terminator
 
     ERROR_SUCCESS
@@ -792,6 +888,10 @@ pub unsafe extern "win64" fn reg_enum_key_a(
     cch_name: u32,
 ) -> i32 {
     let mut cch = cch_name;
+    // SAFETY: lp_name is the caller's buffer passed through directly.  The Win32 API
+    // contract for RegEnumKeyA requires lp_name to be writable for cch_name bytes.
+    // &mut cch is a stack variable — always valid.  Null is passed for all optional
+    // output parameters (class, class_len, last_write_time) that this legacy API omits.
     unsafe {
         reg_enum_key_ex_a(
             h_key,
@@ -884,12 +984,17 @@ pub unsafe extern "win64" fn reg_open_key_ex_a(
     phk_result: *mut usize,
 ) -> i32 {
     // Convert ANSI subkey to UTF-16
+    // SAFETY: RegOpenKeyExA: lp_sub_key is optional (may be null for the root key);
+    // decode_narrow_ptr handles null.  When non-null, callers must supply a valid
+    // null-terminated ANSI string per the Win32 API contract.
     let subkey_utf8 = unsafe { decode_narrow_ptr(lp_sub_key) };
     let subkey_utf16: Vec<u16> = subkey_utf8
         .encode_utf16()
         .chain(std::iter::once(0))
         .collect();
 
+    // SAFETY: subkey_utf16 is a locally-owned Vec with a null terminator; it outlives
+    // this call.  phk_result validity is enforced by reg_open_key_ex_w itself.
     unsafe {
         reg_open_key_ex_w(
             h_key,
@@ -920,6 +1025,9 @@ pub unsafe extern "win64" fn reg_create_key_ex_a(
     lpdw_disposition: *mut u32,
 ) -> i32 {
     // Convert ANSI subkey to UTF-16
+    // SAFETY: RegCreateKeyExA: lp_sub_key is optional (null means the key itself);
+    // decode_narrow_ptr handles null.  When non-null, callers must supply a valid
+    // null-terminated ANSI string per the Win32 API contract.
     let subkey_utf8 = unsafe { decode_narrow_ptr(lp_sub_key) };
     let subkey_utf16: Vec<u16> = subkey_utf8
         .encode_utf16()
@@ -930,6 +1038,8 @@ pub unsafe extern "win64" fn reg_create_key_ex_a(
     let class_utf16 = if lp_class.is_null() {
         vec![]
     } else {
+        // SAFETY: lp_class is optional per MSDN; here it is non-null.  Callers must supply
+        // a valid null-terminated ANSI string when providing a class name.
         let class_utf8 = unsafe { decode_narrow_ptr(lp_class) };
         class_utf8
             .encode_utf16()
@@ -972,6 +1082,9 @@ pub unsafe extern "win64" fn reg_query_value_ex_a(
     lpcb_data: *mut u32,
 ) -> i32 {
     // Convert ANSI value name to UTF-16
+    // SAFETY: RegQueryValueExA: lp_value_name is optional (null means the default value);
+    // decode_narrow_ptr handles null.  When non-null, callers must supply a valid
+    // null-terminated ANSI string per the Win32 API contract.
     let value_name_utf8 = unsafe { decode_narrow_ptr(lp_value_name) };
     let value_name_utf16: Vec<u16> = value_name_utf8
         .encode_utf16()
@@ -981,6 +1094,10 @@ pub unsafe extern "win64" fn reg_query_value_ex_a(
     // First call to get the data size and type
     let mut data_type = 0u32;
     let mut data_size = 0u32;
+    // SAFETY: value_name_utf16 is a locally-owned Vec with a null terminator appended
+    // above; it outlives this call.  lp_reserved is passed through unchanged (its validity
+    // is checked inside reg_query_value_ex_w).  &mut data_type and &mut data_size are
+    // stack-allocated — always valid.
     let result = unsafe {
         reg_query_value_ex_w(
             h_key,
@@ -998,6 +1115,8 @@ pub unsafe extern "win64" fn reg_query_value_ex_a(
 
     // Write type back to caller
     if !lp_type.is_null() {
+        // SAFETY: lp_type is optional per MSDN; written only after confirming non-null.
+        // The Win32 API contract requires that when non-null it points to a valid DWORD*.
         unsafe { *lp_type = data_type };
     }
 
@@ -1008,8 +1127,12 @@ pub unsafe extern "win64" fn reg_query_value_ex_a(
             if data_type == REG_SZ || data_type == REG_EXPAND_SZ {
                 // Estimate UTF-8 size (UTF-16 bytes / 2 * ~1.5 for worst case)
                 let utf16_chars = data_size / 2;
+                // SAFETY: lpcb_data is optional per MSDN; written only after confirming
+                // non-null.  The Win32 API contract requires that when non-null it points
+                // to a valid DWORD*.
                 unsafe { *lpcb_data = utf16_chars * 3 }; // conservative estimate
             } else {
+                // SAFETY: same as above.
                 unsafe { *lpcb_data = data_size };
             }
         }
@@ -1036,6 +1159,12 @@ pub unsafe extern "win64" fn reg_query_value_ex_a(
     // Convert UTF-16 data to UTF-8 if it's a string type
     if data_type == REG_SZ || data_type == REG_EXPAND_SZ {
         // Convert UTF-16 buffer to string
+        // SAFETY: utf16_buffer is a Rust Vec<u8> of length data_size bytes, allocated
+        // and filled by the reg_query_value_ex_w call above.  Reinterpreting it as u16
+        // values is valid: data_size is always an even number of bytes for string types
+        // (UTF-16 is 2 bytes per code unit), and the pointer is 1-byte aligned which is
+        // sufficient for a *const u16 read via from_raw_parts.  The slice does not outlive
+        // utf16_buffer.
         let utf16_slice = unsafe {
             std::slice::from_raw_parts(utf16_buffer.as_ptr() as *const u16, data_size as usize / 2)
         };
@@ -1059,6 +1188,12 @@ pub unsafe extern "win64" fn reg_query_value_ex_a(
         }
 
         // Copy UTF-8 data to caller's buffer
+        // SAFETY: lp_data is non-null (checked before this code path) and buffer_size >=
+        // required_size (checked just above).  The Win32 API contract requires callers to
+        // supply a buffer of at least *lpcb_data bytes.  utf8_bytes is a Rust-owned slice —
+        // no aliasing with lp_data (caller-owned memory).
+        // The null terminator byte at lp_data.add(utf8_bytes.len()) is within the declared
+        // buffer because buffer_size >= required_size = utf8_bytes.len() + 1.
         unsafe {
             std::ptr::copy_nonoverlapping(utf8_bytes.as_ptr(), lp_data, utf8_bytes.len());
             *lp_data.add(utf8_bytes.len()) = 0; // null terminator
@@ -1066,12 +1201,14 @@ pub unsafe extern "win64" fn reg_query_value_ex_a(
     } else {
         // Non-string data - copy as-is
         if !lpcb_data.is_null() {
+            // SAFETY: lpcb_data is optional per MSDN; written only after confirming non-null.
             unsafe { *lpcb_data = data_size };
         }
 
         let buffer_size = if lpcb_data.is_null() {
             0u32
         } else {
+            // SAFETY: lpcb_data is non-null here; just updated above.
             unsafe { *lpcb_data }
         };
 
@@ -1079,6 +1216,8 @@ pub unsafe extern "win64" fn reg_query_value_ex_a(
             return ERROR_MORE_DATA;
         }
 
+        // SAFETY: lp_data is non-null (checked before this code path) and buffer_size >=
+        // data_size (checked just above).  utf16_buffer is a Rust-owned Vec — no aliasing.
         unsafe {
             std::ptr::copy_nonoverlapping(utf16_buffer.as_ptr(), lp_data, data_size as usize);
         }
@@ -1104,6 +1243,9 @@ pub unsafe extern "win64" fn reg_set_value_ex_a(
     cb_data: u32,
 ) -> i32 {
     // Convert ANSI value name to UTF-16
+    // SAFETY: RegSetValueExA: lp_value_name is optional (null means the default value);
+    // decode_narrow_ptr handles null.  When non-null, callers must supply a valid
+    // null-terminated ANSI string per the Win32 API contract.
     let value_name_utf8 = unsafe { decode_narrow_ptr(lp_value_name) };
     let value_name_utf16: Vec<u16> = value_name_utf8
         .encode_utf16()
@@ -1114,12 +1256,19 @@ pub unsafe extern "win64" fn reg_set_value_ex_a(
     let (converted_data, converted_size) =
         if (dw_type == REG_SZ || dw_type == REG_EXPAND_SZ) && !lp_data.is_null() {
             // Convert ANSI string to UTF-16
+            // SAFETY: lp_data is non-null (checked by the if-guard) and cb_data is the
+            // caller-declared byte length.  The Win32 API contract requires callers to supply
+            // a valid buffer of at least cb_data bytes.
             let data_slice = unsafe { std::slice::from_raw_parts(lp_data, cb_data as usize) };
             let data_string = String::from_utf8_lossy(data_slice);
             let utf16_data: Vec<u16> = data_string
                 .encode_utf16()
                 .chain(std::iter::once(0))
                 .collect();
+            // SAFETY: utf16_data is a Rust-owned Vec<u16>; reinterpreting its bytes as u8
+            // for the size calculation is valid because u16 is always 2 bytes and the Vec
+            // is suitably aligned.  The resulting slice does not outlive utf16_data, which
+            // is kept alive for the duration of this block.
             let utf16_bytes = unsafe {
                 std::slice::from_raw_parts(utf16_data.as_ptr() as *const u8, utf16_data.len() * 2)
             };
@@ -1129,6 +1278,10 @@ pub unsafe extern "win64" fn reg_set_value_ex_a(
             (lp_data, cb_data)
         };
 
+    // SAFETY: value_name_utf16 is a locally-owned Vec with a null terminator; it outlives
+    // this call.  converted_data either points into the local utf16_bytes slice (kept alive
+    // by the enclosing block) or is the original caller-provided lp_data pointer — both are
+    // valid for converted_size bytes per the analysis above.
     unsafe {
         reg_set_value_ex_w(
             h_key,
@@ -1149,12 +1302,17 @@ pub unsafe extern "win64" fn reg_set_value_ex_a(
 /// `lp_value_name` must be a valid null-terminated UTF-8 string or null.
 pub unsafe extern "win64" fn reg_delete_value_a(h_key: usize, lp_value_name: *const u8) -> i32 {
     // Convert ANSI value name to UTF-16
+    // SAFETY: RegDeleteValueA: lp_value_name is optional (null deletes the default value);
+    // decode_narrow_ptr handles null.  When non-null, callers must supply a valid
+    // null-terminated ANSI string per the Win32 API contract.
     let value_name_utf8 = unsafe { decode_narrow_ptr(lp_value_name) };
     let value_name_utf16: Vec<u16> = value_name_utf8
         .encode_utf16()
         .chain(std::iter::once(0))
         .collect();
 
+    // SAFETY: value_name_utf16 is a locally-owned Vec with a null terminator appended
+    // above; it outlives the call to reg_delete_value_w which does not store the pointer.
     unsafe { reg_delete_value_w(h_key, value_name_utf16.as_ptr()) }
 }
 
@@ -1171,6 +1329,9 @@ pub unsafe extern "win64" fn lsa_open_policy(
     policy_handle: *mut usize,
 ) -> i32 {
     if !policy_handle.is_null() {
+        // SAFETY: policy_handle is optional; written only after confirming non-null.
+        // The Win32 API contract requires callers to provide a valid, writable LSA_HANDLE*
+        // (a pointer-sized output parameter) when they need the handle value.
         unsafe { *policy_handle = 0 };
     }
     0xC000_0022u32 as i32 // STATUS_ACCESS_DENIED
@@ -1228,12 +1389,18 @@ pub unsafe extern "win64" fn get_user_name_w(lp_buffer: *mut u16, lpcb_buffer: *
     if lpcb_buffer.is_null() {
         return 0;
     }
+    // SAFETY: lpcb_buffer is non-null (checked above).  GetUserNameW requires callers to
+    // provide a valid DWORD* containing the buffer size in characters (UTF-16 code units);
+    // we read it then update it with the required size (including the null terminator).
     let available = unsafe { *lpcb_buffer };
     unsafe { *lpcb_buffer = needed };
     if available < needed {
         return 0;
     }
     if !lp_buffer.is_null() {
+        // SAFETY: lp_buffer is non-null and available >= needed u16 elements, so the buffer
+        // is large enough for the entire "weave\0" string.  user is a locally-allocated Vec
+        // — no aliasing with lp_buffer (caller-owned memory).
         unsafe { std::ptr::copy_nonoverlapping(user.as_ptr(), lp_buffer, user.len()) };
     }
     1 // TRUE
@@ -1251,6 +1418,9 @@ pub unsafe extern "win64" fn reg_delete_key_ex_w(
     _sam_desired: u32,
     _reserved: u32,
 ) -> i32 {
+    // SAFETY: lp_sub_key validity is the same as RegDeleteKeyW (null-terminated UTF-16
+    // string, or null handled defensively by decode_wide_ptr inside reg_delete_key_w).
+    // The sam_desired and reserved parameters are ignored — they are not dereferenced.
     unsafe { reg_delete_key_w(h_key, lp_sub_key) }
 }
 
@@ -1439,6 +1609,10 @@ pub unsafe extern "win64" fn system_function_036(
         return 0; // FALSE
     }
     for i in 0..random_buffer_length as usize {
+        // SAFETY: random_buffer is non-null (checked above) and the Win32 API contract
+        // for RtlGenRandom requires callers to supply a writable buffer of at least
+        // random_buffer_length bytes.  The index `i` stays within [0, random_buffer_length)
+        // so every write is within the declared buffer bounds.
         unsafe { *random_buffer.add(i) = (libc::rand() & 0xFF) as u8 };
     }
     1 // TRUE
@@ -1456,11 +1630,17 @@ pub unsafe extern "win64" fn get_user_name_a(lp_buffer: *mut u8, lpcb_buffer: *m
     if lpcb_buffer.is_null() {
         return 0;
     }
+    // SAFETY: lpcb_buffer is non-null (checked above).  GetUserNameA requires callers to
+    // provide a valid DWORD* containing the buffer size in bytes; we read it then update it
+    // with the required size (including the null terminator).
     let avail = unsafe { *lpcb_buffer };
     unsafe { *lpcb_buffer = needed };
     if avail < needed || lp_buffer.is_null() {
         return 0;
     }
+    // SAFETY: lp_buffer is non-null (checked above) and avail >= needed bytes, so the
+    // buffer is large enough for the entire "weave\0" string (6 bytes).  user is a
+    // static byte slice — no aliasing with lp_buffer (caller-owned memory).
     unsafe { std::ptr::copy_nonoverlapping(user.as_ptr(), lp_buffer, user.len()) };
     1
 }
@@ -1500,6 +1680,10 @@ pub unsafe extern "win64" fn allocate_and_initialize_sid(
         revision: 1,
         sub_authority_count: n_sub_authority_count.min(8),
         identifier_authority: if !pidentifier_authority.is_null() {
+            // SAFETY: AllocateAndInitializeSid: pidentifier_authority is documented as a
+            // required pointer to a SID_IDENTIFIER_AUTHORITY structure which is exactly 6
+            // bytes.  The Win32 API contract requires callers to provide a valid, readable
+            // 6-byte value when non-null; we copy it by value via an array cast.
             unsafe { *(pidentifier_authority as *const [u8; 6]) }
         } else {
             [0u8; 6]
@@ -1515,6 +1699,10 @@ pub unsafe extern "win64" fn allocate_and_initialize_sid(
             n_sub_authority7,
         ],
     });
+    // SAFETY: new_sid is non-null (checked at function entry).  The Win32 API contract
+    // requires callers to provide a valid PSID* (pointer to a pointer) that receives the
+    // allocated SID.  Box::into_raw transfers ownership to the caller; they are responsible
+    // for releasing it via FreeSid (which calls Box::from_raw).
     unsafe { *new_sid = Box::into_raw(sid) };
     1
 }
@@ -1532,6 +1720,11 @@ pub unsafe extern "win64" fn copy_sid(
         return 0;
     }
     let copy = n_destination_sid_length as usize;
+    // SAFETY: Both pointers are non-null (checked above).  The Win32 API contract for
+    // CopySid requires callers to supply a destination buffer of at least
+    // n_destination_sid_length bytes (documented to be >= GetLengthSid(p_source_sid)).
+    // p_source_sid is a FakeSid allocated by AllocateAndInitializeSid — valid for at
+    // least sizeof(FakeSid) bytes which equals n_destination_sid_length per MSDN contract.
     unsafe { std::ptr::copy_nonoverlapping(p_source_sid, p_destination_sid, copy) };
     1
 }
@@ -1552,6 +1745,10 @@ pub extern "win64" fn get_length_sid(_p_sid: *const u8) -> u32 {
 /// FreeSid: free a SID allocated by AllocateAndInitializeSid. Returns NULL.
 pub extern "win64" fn free_sid(p_sid: *mut FakeSid) -> *mut FakeSid {
     if !p_sid.is_null() {
+        // SAFETY: p_sid is non-null and was originally allocated by AllocateAndInitializeSid
+        // via Box::into_raw.  FreeSid is the documented counterpart that transfers ownership
+        // back to Rust; Box::from_raw is the correct way to reclaim and drop it.  The caller
+        // must not use p_sid after calling FreeSid (per Win32 API contract).
         unsafe { drop(Box::from_raw(p_sid)) };
     }
     std::ptr::null_mut()
@@ -1568,6 +1765,10 @@ pub unsafe extern "win64" fn initialize_security_descriptor(
     if p_security_descriptor.is_null() {
         return 0;
     }
+    // SAFETY: p_security_descriptor is non-null (checked above).  The Win32 API contract
+    // for InitializeSecurityDescriptor requires callers to supply a buffer of at least
+    // SECURITY_DESCRIPTOR_MIN_LENGTH bytes (20 on both 32-bit and 64-bit Windows).
+    // We zero exactly those 20 bytes; writing u8 values imposes no alignment requirements.
     unsafe { std::ptr::write_bytes(p_security_descriptor, 0, 20) };
     1
 }
