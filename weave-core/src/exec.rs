@@ -18,9 +18,14 @@
 /// calls `NtTerminateProcess` (our stub), which calls `libc::exit()`.
 #[cfg(target_os = "linux")]
 pub unsafe fn run(entry_point: *const u8) -> ! {
-    // Safety: entry_point is a valid executable address set up by the loader.
-    // The Windows x86-64 ABI is declared here so the compiler generates the
-    // correct prologue/epilogue (shadow space allocation, callee-saved regs).
+    // SAFETY: `entry_point` is a raw byte pointer to the PE optional-header entry-point
+    // VA, resolved and bounds-checked by the loader before this function is called.
+    // Casting from `*const u8` to `extern "win64" fn()` is sound because (a) the
+    // address points into an mmap'd executable mapping of the .text section, (b)
+    // x86-64 Windows EXEs always use the Win64 calling convention for their entry
+    // point, and (c) the caller (`run`) is declared `unsafe` and documents this
+    // precondition.  The cast does not create a Rust reference, so alignment and
+    // provenance rules for references do not apply.
     let f: extern "win64" fn() = unsafe { std::mem::transmute(entry_point) };
     f();
 

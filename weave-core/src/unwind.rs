@@ -431,6 +431,15 @@ mod x64 {
                 let aligned = ((after_codes as usize + 3) & !3) as *const u8;
                 let handler_rva = unsafe { read_u32(aligned) } as usize;
                 let handler_addr = image_base + handler_rva;
+                // SAFETY: `handler_addr` is computed as `image_base + handler_rva`, where
+                // `handler_rva` is the 32-bit RVA stored in the UNWIND_INFO exception-handler
+                // slot (4 bytes immediately after the unwind codes, as specified by the
+                // Microsoft x64 ABI).  The PE loader has already mapped the image into an
+                // executable region, so `handler_addr` is a valid instruction address for a
+                // function whose signature is `ExceptionHandlerFn` (four Win64-ABI arguments:
+                // ExceptionRecord*, EstablisherFrame u64, ContextRecord*, DispatcherContext*,
+                // returning i32).  Converting a `usize` VA to this fn-pointer type is the
+                // standard pattern for invoking PE-resident exception handlers.
                 handler =
                     Some(unsafe { std::mem::transmute::<usize, ExceptionHandlerFn>(handler_addr) });
                 handler_data = unsafe { aligned.add(4) };
@@ -1470,6 +1479,14 @@ mod x64 {
                 // rcx = exception object (or address of caught obj slot),
                 // rdx = establisher_frame (the catching function's frame pointer).
                 // Returns: rax = continuation address (where to resume in the outer function).
+                // SAFETY: `handler_va` is the virtual address of a C++ catch funclet embedded
+                // in the PE image, extracted from the FuncInfo4 HandlerType table at the index
+                // selected by the type-match loop above.  The Microsoft C++ ABI specifies that
+                // catch funclets take (rcx=exception_object_ptr, rdx=establisher_frame) and
+                // return the continuation RIP in rax — matching the `fn(u64, u64) -> u64`
+                // signature declared here with `extern "win64"`.  The address has been verified
+                // to be non-zero by the surrounding `if handler_va != 0` guard, and it lies
+                // within the loaded image because it was decoded from a PE-relative offset.
                 let handler_fn: unsafe extern "win64" fn(u64, u64) -> u64 =
                     unsafe { std::mem::transmute(handler_va) };
                 let continuation = unsafe { handler_fn(exc_obj, establisher_frame) };

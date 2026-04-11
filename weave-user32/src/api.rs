@@ -1932,9 +1932,15 @@ fn call_wnd_proc(proc_addr: usize, hwnd: usize, msg: u32, w_param: usize, l_para
     if proc_addr == 0 {
         return 0;
     }
-    // Safety: proc_addr was registered by the PE as a valid WNDPROC with the
-    // Windows x64 calling convention. Transmuting a usize to a fn pointer is
-    // how Weave calls all guest callbacks.
+    // SAFETY: `proc_addr` is a window-procedure address registered by the PE guest
+    // via `RegisterClassExW` or `CreateWindowExW`, both of which store the raw
+    // `WNDPROC` value the guest supplied.  The Win32 API contract requires a WNDPROC
+    // to have the signature `LRESULT CALLBACK(HWND, UINT, WPARAM, LPARAM)`, which
+    // maps to `extern "win64" fn(usize, u32, usize, isize) -> isize` on x86-64
+    // Windows.  The non-zero guard at the top of this function ensures `proc_addr`
+    // is not null.  Transmuting a non-null `usize` VA to a Win64 fn pointer is the
+    // standard Weave pattern for invoking all guest callbacks stored in the IAT or
+    // class/window registries.
     let f: unsafe extern "win64" fn(usize, u32, usize, isize) -> isize =
         unsafe { std::mem::transmute(proc_addr) };
     unsafe { f(hwnd, msg, w_param, l_param) }

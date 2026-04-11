@@ -130,6 +130,13 @@ pub unsafe extern "win64" fn initterm(pfbegin: *mut usize, pfend: *mut usize) {
     while ptr < pfend {
         let addr = unsafe { *ptr };
         if addr != 0 {
+            // SAFETY: `addr` is a non-zero entry from the CRT initialiser table
+            // (the `__xi_a` / `__xi_z` or `__xc_a` / `__xc_z` sections).  The
+            // MSVC/MinGW CRT ABI guarantees every non-null slot in this table
+            // holds the address of a `void ()(void)` function compiled with the
+            // Win64 calling convention.  The `unsafe` fn signature matches that
+            // contract.  The caller's `# Safety` doc requires the table bounds to
+            // be valid, so this transmute is sound under that precondition.
             let f: unsafe extern "win64" fn() = unsafe { std::mem::transmute(addr) };
             unsafe { f() };
         }
@@ -148,6 +155,14 @@ pub unsafe extern "win64" fn initterm_e(pfbegin: *mut usize, pfend: *mut usize) 
     while ptr < pfend {
         let addr = unsafe { *ptr };
         if addr != 0 {
+            // SAFETY: `addr` is a non-zero entry from the CRT error-checked
+            // initialiser table (the `__xi_a` / `__xi_z` sections used by
+            // `_initterm_e`).  The MSVC/MinGW CRT ABI guarantees every non-null
+            // slot holds the address of an `int ()(void)` function compiled with
+            // the Win64 calling convention — matching the `fn() -> i32` signature
+            // declared here.  The caller's `# Safety` doc requires the table
+            // bounds to be valid, making this transmute sound under that
+            // precondition.
             let f: unsafe extern "win64" fn() -> i32 = unsafe { std::mem::transmute(addr) };
             let ret = unsafe { f() };
             if ret != 0 {

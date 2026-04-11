@@ -2186,6 +2186,15 @@ pub unsafe extern "win64" fn enum_font_families_ex_w(
 
     type EnumFontProc =
         unsafe extern "win64" fn(*const EnumLogFontExW, *const NewTextMetricExW, u32, isize) -> i32;
+    // SAFETY: `lp_proc` is the `FONTENUMPROC` callback supplied by the caller of
+    // `EnumFontFamiliesExW`.  The Windows API contract (documented in MSDN and
+    // confirmed by Wine's dlls/win32u/font.c) requires this argument to be a pointer
+    // to a function with the signature `FONTENUMPROC` — identical to `EnumFontProc`
+    // above: four Win64-ABI arguments (ENUMLOGFONTEXW*, NEWTEXTMETRICEXW*, DWORD,
+    // LPARAM) returning int.  The caller has already been guarded by the
+    // `if lp_proc == 0 { return 1; }` check above, so `lp_proc` is non-zero.
+    // Transmuting a `usize` to a Win64 fn pointer is the correct mechanism for
+    // invoking guest callbacks stored as raw addresses in Weave's IAT.
     let proc_fn: EnumFontProc = unsafe { std::mem::transmute(lp_proc) };
     let ret = unsafe { proc_fn(&elf, &ntm, TRUETYPE_FONTTYPE, lp_param) };
     if ret == 0 {
