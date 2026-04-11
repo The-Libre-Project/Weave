@@ -5521,7 +5521,10 @@ pub unsafe extern "win64" fn wait_for_single_object(h_handle: usize, dw_millisec
     const WAIT_FAILED: u32 = 0xFFFFFFFF;
     const INFINITE: u32 = 0xFFFF_FFFF;
 
+    eprintln!("weave/WFSO: handle={h_handle:#x} timeout={dw_milliseconds}ms");
+
     if h_handle == 0 || h_handle == INVALID_HANDLE_VALUE {
+        eprintln!("weave/WFSO: handle={h_handle:#x} → WAIT_FAILED (invalid)");
         return WAIT_FAILED;
     }
 
@@ -5529,10 +5532,12 @@ pub unsafe extern "win64" fn wait_for_single_object(h_handle: usize, dw_millisec
     if let Some(completion) = handles::get_thread_completion(h_handle) {
         let guard = completion.result.lock().unwrap();
         if guard.is_some() {
+            eprintln!("weave/WFSO: handle={h_handle:#x} → WAIT_OBJECT_0 (already done)");
             return WAIT_OBJECT_0;
         }
         if dw_milliseconds == INFINITE {
             let _g = completion.condvar.wait_while(guard, |r| r.is_none()).unwrap();
+            eprintln!("weave/WFSO: handle={h_handle:#x} → WAIT_OBJECT_0 (condvar)");
             return WAIT_OBJECT_0;
         } else {
             let timeout = std::time::Duration::from_millis(dw_milliseconds as u64);
@@ -5540,15 +5545,23 @@ pub unsafe extern "win64" fn wait_for_single_object(h_handle: usize, dw_millisec
                 .condvar
                 .wait_timeout_while(guard, timeout, |r| r.is_none())
                 .unwrap();
-            return if timed_out.timed_out() { WAIT_TIMEOUT } else { WAIT_OBJECT_0 };
+            let result = if timed_out.timed_out() { WAIT_TIMEOUT } else { WAIT_OBJECT_0 };
+            eprintln!(
+                "weave/WFSO: handle={h_handle:#x} → {} (timed_out={})",
+                if result == WAIT_TIMEOUT { "WAIT_TIMEOUT" } else { "WAIT_OBJECT_0" },
+                timed_out.timed_out()
+            );
+            return result;
         }
     }
 
     // Legacy stub handles (1 = mutex, 2 = event) — return success immediately.
     if h_handle == 1 || h_handle == 2 {
+        eprintln!("weave/WFSO: handle={h_handle:#x} → WAIT_OBJECT_0 (legacy stub)");
         return WAIT_OBJECT_0;
     }
 
+    eprintln!("weave/WFSO: handle={h_handle:#x} → WAIT_FAILED (unknown handle)");
     WAIT_FAILED
 }
 
@@ -5597,23 +5610,35 @@ pub unsafe extern "win64" fn wait_for_multiple_objects(
     n_count: u32,
     lp_handles: *const usize,
     _b_wait_all: i32,
-    _dw_milliseconds: u32,
+    dw_milliseconds: u32,
 ) -> u32 {
     const WAIT_OBJECT_0: u32 = 0;
     const WAIT_FAILED: u32 = 0xFFFFFFFF;
 
+    eprintln!("weave/WFMO: n={n_count} timeout={dw_milliseconds}ms");
+
     if lp_handles.is_null() || n_count == 0 {
+        eprintln!("weave/WFMO: → WAIT_FAILED (null/empty)");
         return WAIT_FAILED;
     }
 
-    // Check if any handle is one of our fake handles
     for i in 0..n_count {
         let handle = unsafe { *lp_handles.add(i as usize) };
+        eprintln!("weave/WFMO: handle[{i}]={handle:#x}");
+        // Real thread handle — delegate to WFSO logic.
+        if handles::get_thread_completion(handle).is_some() {
+            let result = wait_for_single_object(handle, dw_milliseconds);
+            eprintln!("weave/WFMO: handle[{i}]={handle:#x} → {result:#x} (thread)");
+            return result;
+        }
+        // Legacy stub handles (1 = mutex, 2 = event).
         if handle == 1 || handle == 2 {
+            eprintln!("weave/WFMO: handle[{i}]={handle:#x} → WAIT_OBJECT_0 (stub)");
             return WAIT_OBJECT_0;
         }
     }
 
+    eprintln!("weave/WFMO: → WAIT_FAILED (no recognized handles)");
     WAIT_FAILED
 }
 
