@@ -173,6 +173,12 @@ fn load_vulkan() -> Option<VulkanLoader> {
             if ptr.is_null() {
                 return None;
             }
+            // SAFETY: `ptr` was returned by `dlsym` for the symbol named by `$name`
+            // in `libvulkan.so.1` (the system Vulkan loader).  The target type of this
+            // transmute is always a typed `unsafe extern "C" fn(...)` whose signature
+            // matches the Vulkan specification for `$name`.  `dlsym` guarantees the
+            // pointer is non-null (checked above) and correctly aligned for code.
+            // Vulkan loader symbols always use the System V AMD64 ABI (`extern "C"`).
             unsafe { std::mem::transmute(ptr) }
         }};
         (opt $name:literal) => {{
@@ -180,6 +186,11 @@ fn load_vulkan() -> Option<VulkanLoader> {
             if ptr.is_null() {
                 None
             } else {
+                // SAFETY: Same as the required variant above — `ptr` is a non-null
+                // `dlsym` result for `$name` in `libvulkan.so.1`, cast to the typed
+                // `extern "C"` fn pointer whose signature matches the Vulkan spec.
+                // The `Option` wrapper is used for symbols that may be absent in
+                // older Vulkan loader versions (e.g. `vkEnumerateInstanceVersion`).
                 Some(unsafe { std::mem::transmute(ptr) })
             }
         }};
@@ -223,6 +234,15 @@ fn xcb_connection() -> Option<*mut c_void> {
         if lib.is_null() {
             return None;
         }
+        // SAFETY: `libc::dlsym` is called with the literal symbol name `xcb_connect`
+        // from `libxcb.so.1` (or `libxcb.so`), which was successfully opened above.
+        // The XCB API specifies `xcb_connect(const char *displayname, int *screenp)`
+        // returning `xcb_connection_t *`, matching the `extern "C" fn(*const c_char,
+        // *mut i32) -> *mut c_void` signature here.  The result of `dlsym` is cast to
+        // a fn pointer; if `dlsym` returns null the subsequent call would be UB, but
+        // `xcb_connect` is a mandatory export of libxcb so its absence means the
+        // library is corrupt — the connection check `if conn.is_null()` acts as a
+        // runtime guard for the success of the call itself.
         let connect: unsafe extern "C" fn(*const c_char, *mut i32) -> *mut c_void =
             unsafe { std::mem::transmute(libc::dlsym(lib, b"xcb_connect\0".as_ptr() as _)) };
         let conn = unsafe { connect(std::ptr::null(), std::ptr::null_mut()) };
@@ -291,6 +311,11 @@ macro_rules! inst_thunk {
         pub unsafe extern "win64" fn $name($($arg: $ty),*) -> $ret {
             let f = real_fn(stored_instance(), $real);
             if f.is_null() { return std::mem::zeroed(); }
+            // SAFETY: `f` is the `PFN_vkVoidFunction` returned by
+            // `vkGetInstanceProcAddr` for the symbol `$real`.  The Vulkan
+            // specification defines the signature for `$real` to match the
+            // `extern "C" fn($($ty),*) -> $ret` type declared here.  The
+            // null-pointer guard above ensures `f` is a valid code address.
             let f: unsafe extern "C" fn($($ty),*) -> $ret = unsafe { std::mem::transmute(f) };
             unsafe { f($($arg),*) }
         }
@@ -299,6 +324,11 @@ macro_rules! inst_thunk {
         pub unsafe extern "win64" fn $name($($arg: $ty),*) {
             let f = real_fn(stored_instance(), $real);
             if f.is_null() { return; }
+            // SAFETY: `f` is the `PFN_vkVoidFunction` returned by
+            // `vkGetInstanceProcAddr` for the symbol `$real`.  The Vulkan
+            // specification defines the (void-returning) signature for `$real`
+            // to match the `extern "C" fn($($ty),*)` type declared here.
+            // The null-pointer guard above ensures `f` is a valid code address.
             let f: unsafe extern "C" fn($($ty),*) = unsafe { std::mem::transmute(f) };
             unsafe { f($($arg),*) }
         }
@@ -311,6 +341,11 @@ macro_rules! dev_thunk {
         pub unsafe extern "win64" fn $name($dev: VkDevice, $($arg: $ty),*) -> $ret {
             let f = real_device_fn($dev, $real);
             if f.is_null() { return std::mem::zeroed(); }
+            // SAFETY: `f` is the `PFN_vkVoidFunction` returned by
+            // `vkGetDeviceProcAddr` for the symbol `$real` on device `$dev`.
+            // The Vulkan specification defines the signature for `$real` to
+            // match `extern "C" fn(VkDevice, $($ty),*) -> $ret`.  The
+            // null-pointer guard above ensures `f` is a valid code address.
             let f: unsafe extern "C" fn(VkDevice, $($ty),*) -> $ret = unsafe { std::mem::transmute(f) };
             unsafe { f($dev, $($arg),*) }
         }
@@ -319,6 +354,11 @@ macro_rules! dev_thunk {
         pub unsafe extern "win64" fn $name($dev: VkDevice, $($arg: $ty),*) {
             let f = real_device_fn($dev, $real);
             if f.is_null() { return; }
+            // SAFETY: `f` is the `PFN_vkVoidFunction` returned by
+            // `vkGetDeviceProcAddr` for the symbol `$real` on device `$dev`.
+            // The Vulkan specification defines the (void-returning) signature
+            // for `$real` to match `extern "C" fn(VkDevice, $($ty),*)`.
+            // The null-pointer guard above ensures `f` is a valid code address.
             let f: unsafe extern "C" fn(VkDevice, $($ty),*) = unsafe { std::mem::transmute(f) };
             unsafe { f($dev, $($arg),*) }
         }
@@ -331,6 +371,11 @@ macro_rules! cmd_thunk {
         pub unsafe extern "win64" fn $name($cb: VkCommandBuffer, $($arg: $ty),*) {
             let f = real_fn(stored_instance(), $real);
             if f.is_null() { return; }
+            // SAFETY: `f` is the `PFN_vkVoidFunction` for the command-buffer
+            // function `$real`, obtained via `vkGetInstanceProcAddr`.  The
+            // Vulkan specification defines the (void-returning) signature for
+            // `$real` to match `extern "C" fn(VkCommandBuffer, $($ty),*)`.
+            // The null-pointer guard above ensures `f` is a valid code address.
             let f: unsafe extern "C" fn(VkCommandBuffer, $($ty),*) = unsafe { std::mem::transmute(f) };
             unsafe { f($cb, $($arg),*) }
         }
@@ -339,6 +384,11 @@ macro_rules! cmd_thunk {
         pub unsafe extern "win64" fn $name($cb: VkCommandBuffer, $($arg: $ty),*) -> $ret {
             let f = real_fn(stored_instance(), $real);
             if f.is_null() { return std::mem::zeroed(); }
+            // SAFETY: `f` is the `PFN_vkVoidFunction` for the command-buffer
+            // function `$real`, obtained via `vkGetInstanceProcAddr`.  The
+            // Vulkan specification defines the signature for `$real` to match
+            // `extern "C" fn(VkCommandBuffer, $($ty),*) -> $ret`.  The
+            // null-pointer guard above ensures `f` is a valid code address.
             let f: unsafe extern "C" fn(VkCommandBuffer, $($ty),*) -> $ret = unsafe { std::mem::transmute(f) };
             unsafe { f($cb, $($arg),*) }
         }
@@ -996,6 +1046,13 @@ pub unsafe extern "win64" fn vk_create_win32_surface_khr(
     if fn_ptr.is_null() {
         return VK_ERROR_EXTENSION_NOT_PRESENT;
     }
+    // SAFETY: `fn_ptr` is the `PFN_vkVoidFunction` returned by
+    // `vkGetInstanceProcAddr(instance, "vkCreateXcbSurfaceKHR")`.  The Vulkan
+    // specification (VK_KHR_xcb_surface) defines `vkCreateXcbSurfaceKHR` to have
+    // exactly the signature `VkResult(VkInstance, const VkXcbSurfaceCreateInfoKHR*,
+    // const VkAllocationCallbacks*, VkSurfaceKHR*)`, matching the `extern "C"` fn
+    // pointer declared here.  The null-pointer guard above ensures `fn_ptr` is a
+    // valid code address before the cast.
     let create_xcb: unsafe extern "C" fn(
         VkInstance,
         *const VkXcbSurfaceCreateInfoKHR,
@@ -1024,6 +1081,13 @@ pub unsafe extern "win64" fn vk_destroy_surface_khr(
     if fn_ptr.is_null() {
         return;
     }
+    // SAFETY: `fn_ptr` is the `PFN_vkVoidFunction` returned by
+    // `vkGetInstanceProcAddr(instance, "vkDestroySurfaceKHR")`.  The Vulkan
+    // specification (VK_KHR_surface) defines `vkDestroySurfaceKHR` to have the
+    // signature `void(VkInstance, VkSurfaceKHR, const VkAllocationCallbacks*)`,
+    // matching the `extern "C" fn(VkInstance, VkSurfaceKHR, *const c_void)` type
+    // declared here.  The null-pointer guard above ensures `fn_ptr` is a valid
+    // code address before the cast.
     let destroy: unsafe extern "C" fn(VkInstance, VkSurfaceKHR, *const c_void) =
         unsafe { std::mem::transmute(fn_ptr) };
     unsafe { destroy(instance, surface, p_allocator) };
