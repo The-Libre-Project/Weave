@@ -69,6 +69,22 @@ fn table() -> &'static Mutex<HashMap<usize, DcState>> {
     T.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+fn lock_dc_table(
+    m: &Mutex<HashMap<usize, DcState>>,
+) -> Option<std::sync::MutexGuard<'_, HashMap<usize, DcState>>> {
+    m.lock()
+        .map_err(|e| eprintln!("weave: gdi32: dc table mutex poisoned: {e}"))
+        .ok()
+}
+
+fn lock_dc_stacks(
+    m: &Mutex<HashMap<usize, Vec<DcState>>>,
+) -> Option<std::sync::MutexGuard<'_, HashMap<usize, Vec<DcState>>>> {
+    m.lock()
+        .map_err(|e| eprintln!("weave: gdi32: dc save-stack mutex poisoned: {e}"))
+        .ok()
+}
+
 // ── Public API ────────────────────────────────────────────────────────────────
 
 /// Read a DC state, or a fresh default if no DC was explicitly created.
@@ -76,12 +92,16 @@ pub fn with<F, R>(hdc: usize, f: F) -> R
 where
     F: FnOnce(&DcState) -> R,
 {
-    let t = table().lock().unwrap();
-    if let Some(dc) = t.get(&hdc) {
-        return f(dc);
+    match lock_dc_table(table()) {
+        Some(t) => {
+            if let Some(dc) = t.get(&hdc) {
+                return f(dc);
+            }
+            drop(t);
+            f(&DcState::default_for(hdc))
+        }
+        None => f(&DcState::default_for(hdc)),
     }
-    drop(t);
-    f(&DcState::default_for(hdc))
 }
 
 /// Modify a DC state; creates a default entry if one does not exist.
@@ -89,15 +109,22 @@ pub fn with_mut<F>(hdc: usize, f: F)
 where
     F: FnOnce(&mut DcState),
 {
-    let mut t = table().lock().unwrap();
+    let mut t = match lock_dc_table(table()) {
+        Some(g) => g,
+        None => return,
+    };
     let dc = t.entry(hdc).or_insert_with(|| DcState::default_for(hdc));
     f(dc);
 }
 
 /// Remove a DC entry (called from DeleteDC / ReleaseDC).
 pub fn remove(hdc: usize) {
-    table().lock().unwrap().remove(&hdc);
-    dc_save_stacks().lock().unwrap().remove(&hdc);
+    if let Some(mut t) = lock_dc_table(table()) {
+        t.remove(&hdc);
+    }
+    if let Some(mut s) = lock_dc_stacks(dc_save_stacks()) {
+        s.remove(&hdc);
+    }
 }
 
 // ── DC save/restore stack ─────────────────────────────────────────────────────
@@ -116,12 +143,15 @@ fn dc_save_stacks() -> &'static Mutex<HashMap<usize, Vec<DcState>>> {
 pub fn save(hdc: usize) -> i32 {
     // Capture current state (or default if none exists yet).
     let current = {
-        let t = table().lock().unwrap();
-        t.get(&hdc)
-            .cloned()
-            .unwrap_or_else(|| DcState::default_for(hdc))
+        match lock_dc_table(table()) {
+            Some(t) => t.get(&hdc).cloned().unwrap_or_else(|| DcState::default_for(hdc)),
+            None => return 0,
+        }
     };
-    let mut stacks = dc_save_stacks().lock().unwrap();
+    let mut stacks = match lock_dc_stacks(dc_save_stacks()) {
+        Some(g) => g,
+        None => return 0,
+    };
     let stack = stacks.entry(hdc).or_default();
     stack.push(current);
     stack.len() as i32 // save level is 1-based depth
@@ -133,7 +163,10 @@ pub fn save(hdc: usize) -> i32 {
 /// (absolute) or a negative value (relative: -1 = most recent). All states
 /// more recent than the target are discarded. Returns TRUE on success.
 pub fn restore(hdc: usize, level: i32) -> i32 {
-    let mut stacks = dc_save_stacks().lock().unwrap();
+    let mut stacks = match lock_dc_stacks(dc_save_stacks()) {
+        Some(g) => g,
+        None => return 0,
+    };
     let stack = match stacks.get_mut(&hdc) {
         Some(s) if !s.is_empty() => s,
         _ => return 0,

@@ -55,11 +55,20 @@ fn table() -> &'static Mutex<ObjTable> {
     })
 }
 
+fn lock_obj_table(m: &Mutex<ObjTable>) -> Option<std::sync::MutexGuard<'_, ObjTable>> {
+    m.lock()
+        .map_err(|e| eprintln!("weave: gdi32: object table mutex poisoned: {e}"))
+        .ok()
+}
+
 // ── Public API ────────────────────────────────────────────────────────────────
 
 /// Allocate a new GDI object and return its handle.
 pub fn alloc(kind: GdiKind) -> usize {
-    let mut t = table().lock().unwrap();
+    let mut t = match lock_obj_table(table()) {
+        Some(g) => g,
+        None => return 0,
+    };
     let id = t.next_id;
     t.next_id += 1;
     t.entries.insert(id, kind);
@@ -71,7 +80,7 @@ pub fn get<F, R>(handle: usize, f: F) -> Option<R>
 where
     F: FnOnce(&GdiKind) -> R,
 {
-    let t = table().lock().unwrap();
+    let t = lock_obj_table(table())?;
     t.entries.get(&handle).map(f)
 }
 
@@ -80,7 +89,10 @@ pub fn free(handle: usize) -> bool {
     if is_stock(handle) {
         return false;
     }
-    table().lock().unwrap().entries.remove(&handle).is_some()
+    match lock_obj_table(table()) {
+        Some(mut t) => t.entries.remove(&handle).is_some(),
+        None => false,
+    }
 }
 
 /// True for stock object handles.
