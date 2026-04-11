@@ -347,6 +347,9 @@ pub unsafe extern "win64" fn ucrt_initterm(start: *const *const c_void, end: *co
         while p < end {
             let fn_ptr = *p;
             if !fn_ptr.is_null() {
+                // SAFETY: fn_ptr is obtained by reading a slot in the PE .CRT$XI initializer
+                // table; the Windows ABI guarantees each non-null entry is a `void()` function
+                // compiled with the win64 calling convention — no arguments, no return value.
                 let f: extern "win64" fn() = std::mem::transmute(fn_ptr);
                 f();
             }
@@ -371,6 +374,10 @@ pub unsafe extern "win64" fn ucrt_initterm_e(
         while p < end {
             let fn_ptr = *p;
             if !fn_ptr.is_null() {
+                // SAFETY: fn_ptr is obtained by reading a slot in the PE .CRT$XII initializer
+                // table; the Windows ABI guarantees each non-null entry is an `int()` function
+                // compiled with the win64 calling convention — no arguments, i32 return value
+                // (non-zero signals initializer failure per MSVC CRT convention).
                 let f: extern "win64" fn() -> i32 = std::mem::transmute(fn_ptr);
                 let ret = f();
                 if ret != 0 {
@@ -686,6 +693,9 @@ pub extern "win64" fn ucrt_acrt_iob_func(fd: u32) -> *mut c_void {
             Box::into_raw(Box::new([0u8; 256])) as usize,
         ]
     });
+    // SAFETY: The byte slice literal has static lifetime; casting its pointer to *const c_void
+    // and passing length 28 (exact byte count) to libc::write on fd 2 (stderr) is safe —
+    // write(2) is async-signal-safe and never modifies the buffer.
     unsafe {
         libc::write(
             2,
@@ -814,7 +824,11 @@ pub extern "win64" fn ucrt_errno() -> *mut i32 {
 /// Weave delegates to libc strerror() which uses the same POSIX error table and manages
 /// its own thread-local buffer. Returns non-null for all valid errnum values.
 pub extern "win64" fn ucrt_strerror(errnum: i32) -> *mut u8 {
-    // libc strerror() returns a pointer to a static/thread-local C string — valid to return.
+    // SAFETY: libc::strerror takes an i32 error number with no pointer arguments.
+    // It returns a pointer to a static or thread-local C string that is valid for the
+    // lifetime of the current thread and is never NULL for any input (glibc guarantees
+    // a fallback "Unknown error" string). The cast to *mut u8 matches the Windows
+    // strerror return type (char*); callers must not write through this pointer.
     unsafe { libc::strerror(errnum) as *mut u8 }
 }
 
@@ -848,6 +862,8 @@ pub unsafe extern "win64" fn ucrt_beginthreadex(
         );
     }
     if !thread_id.is_null() {
+        // SAFETY: thread_id is non-null (checked above) and the caller guarantees it is a
+        // valid writable *mut u32 (per the _beginthreadex signature contract).
         unsafe { *thread_id = 1 };
     }
     1 // fake thread handle — WaitForSingleObject(1) returns WAIT_OBJECT_0
@@ -873,6 +889,10 @@ pub unsafe extern "win64" fn ucrt_intrinsic_setjmpex(
     _frame: *const c_void,
 ) -> i32 {
     // Zero buf->Frame so longjmp skips RtlUnwind and restores registers directly.
+    // SAFETY: buf is guaranteed valid and writable by the caller contract (at least 8 bytes,
+    // as documented in the function's Safety section). The cast to *mut u64 is safe because
+    // JUMP_BUFFER is 8-byte aligned and the Frame field is the first 8 bytes at offset 0x00
+    // per the MSVC _JUMP_BUFFER layout for x64.
     unsafe { *(buf as *mut u64) = 0 };
     0
 }
@@ -1065,6 +1085,9 @@ fn decode_wide(ptr: *const u16, max_len: usize) -> Option<String> {
         return None;
     }
     let mut len = 0usize;
+    // SAFETY: ptr is non-null (checked above). We read at most max_len u16 units, stopping
+    // at the null terminator. The caller is responsible for ensuring ptr points to at least
+    // max_len valid u16 units; the max_len bound prevents runaway reads on unterminated input.
     unsafe {
         while len < max_len && *ptr.add(len) != 0 {
             len += 1;
@@ -1073,6 +1096,8 @@ fn decode_wide(ptr: *const u16, max_len: usize) -> Option<String> {
     if len >= max_len {
         return None;
     }
+    // SAFETY: ptr is non-null and we have confirmed the string is null-terminated within
+    // max_len units, so [ptr, ptr+len) is a valid, initialized slice of u16 values.
     Some(String::from_utf16_lossy(unsafe {
         std::slice::from_raw_parts(ptr, len)
     }))
@@ -1089,6 +1114,10 @@ pub unsafe extern "win64" fn ucrt_fopen(path: *const u8, mode: *const u8) -> *mu
     if path.is_null() || mode.is_null() {
         return std::ptr::null_mut();
     }
+    // SAFETY: path is non-null (checked above) and the caller guarantees it is a valid
+    // null-terminated byte string. libc::strlen walks until the null terminator; the
+    // resulting [path, path+len) range is then valid for from_raw_parts because strlen
+    // only counts bytes that were actually readable.
     let win_path = unsafe {
         let len = libc::strlen(path as *const libc::c_char);
         String::from_utf8_lossy(std::slice::from_raw_parts(path, len)).into_owned()
@@ -1101,6 +1130,10 @@ pub unsafe extern "win64" fn ucrt_fopen(path: *const u8, mode: *const u8) -> *mu
         Ok(s) => s,
         Err(_) => return std::ptr::null_mut(),
     };
+    // SAFETY: path_cstr is a valid CString (just created above with no interior nuls).
+    // mode is non-null (checked at function entry) and the caller guarantees it is a
+    // valid null-terminated ASCII mode string; casting *const u8 → *const c_char is
+    // safe because c_char is i8/u8 and the pointed-to bytes are the same representation.
     let result = unsafe { libc::fopen(path_cstr.as_ptr(), mode as *const libc::c_char) };
     result as *mut c_void
 }
@@ -1133,6 +1166,9 @@ pub unsafe extern "win64" fn ucrt_wfopen(path: *const u16, mode: *const u16) -> 
         Ok(s) => s,
         Err(_) => return std::ptr::null_mut(),
     };
+    // SAFETY: path_cstr and mode_cstr are valid CStrings constructed above from decoded
+    // UTF-16 inputs; CString::new guarantees no interior nuls. libc::fopen takes ownership
+    // of neither pointer — it only reads them during the call, which is safe.
     let result = unsafe { libc::fopen(path_cstr.as_ptr(), mode_cstr.as_ptr()) };
     result as *mut c_void
 }
@@ -1207,10 +1243,15 @@ pub extern "win64" fn ucrt_c_specific_handler(
 /// `rand_val` must be a valid writable pointer to u32, or null (returns EINVAL).
 pub unsafe extern "win64" fn ucrt_rand_s(rand_val: *mut u32) -> i32 {
     if rand_val.is_null() {
+        // SAFETY: __errno_location() always returns a valid per-thread pointer; writing
+        // EINVAL here matches the Wine msvcrt/misc.c null-pval behavior.
         unsafe { *libc::__errno_location() = libc::EINVAL };
         return libc::EINVAL;
     }
     // getrandom(buf, 4, 0) — blocks until kernel entropy pool is ready, then fills buf.
+    // SAFETY: rand_val is non-null (checked above) and the caller guarantees it is a
+    // writable *mut u32. Passing it as *mut c_void to getrandom is safe because getrandom
+    // only writes exactly the requested byte count (4) into the buffer.
     let ret = unsafe {
         libc::syscall(
             libc::SYS_getrandom,
@@ -1220,6 +1261,8 @@ pub unsafe extern "win64" fn ucrt_rand_s(rand_val: *mut u32) -> i32 {
         )
     };
     if ret != 4 {
+        // SAFETY: __errno_location() always returns a valid per-thread pointer to the CRT
+        // errno variable; writing EINVAL here is the correct MSVC rand_s error path.
         unsafe { *libc::__errno_location() = libc::EINVAL };
         return libc::EINVAL;
     }
@@ -1260,6 +1303,9 @@ pub unsafe extern "win64" fn ucrt_getmainargs(
     ])) as *mut *mut u8;
     // envp[0] = NULL
     let envp = Box::into_raw(Box::new([std::ptr::null_mut::<u8>()])) as *mut *mut u8;
+    // SAFETY: each pointer is null-checked before write. The caller is the MinGW CRT startup
+    // code which passes valid writable pointers for each out-parameter it cares about.
+    // Box::into_raw leaks intentionally — the lifetime matches the process.
     if !p_argc.is_null() {
         *p_argc = 1;
     }
@@ -1289,6 +1335,9 @@ pub unsafe extern "win64" fn ucrt_wgetmainargs(
         std::ptr::null_mut::<u16>(),
     ])) as *mut *mut u16;
     let envp = Box::into_raw(Box::new([std::ptr::null_mut::<u16>()])) as *mut *mut u16;
+    // SAFETY: each pointer is null-checked before write. Box::into_raw leaks intentionally —
+    // EMPTY_WARG is a static, so its address is valid for the process lifetime.
+    // Callers (MinGW CRT startup) pass valid writable pointers for each out-parameter.
     if !p_argc.is_null() {
         *p_argc = 1;
     }
@@ -1314,6 +1363,10 @@ pub unsafe extern "win64" fn ucrt_wgetmainargs(
 pub unsafe extern "win64" fn ucrt_initenv() -> *mut *mut u8 {
     // A static null pointer (usize is Sync, raw pointers are not).
     static NULL_ENV: usize = 0;
+    // SAFETY: NULL_ENV is a static with 'static lifetime, so its address is always valid.
+    // The cast chain (*const usize → *mut *mut u8) is sound because the caller only reads
+    // the resulting pointer to get the env array base address; it sees a null char** (empty
+    // environment), which matches the MinGW CRT expectation for a freshly started process.
     &NULL_ENV as *const usize as *mut *mut u8
 }
 
@@ -1323,6 +1376,9 @@ pub unsafe extern "win64" fn ucrt_initenv() -> *mut *mut u8 {
 /// No pointer requirements; returns a pointer to static null-terminated wide environment storage.
 pub unsafe extern "win64" fn ucrt_winitenv() -> *mut *mut u16 {
     static NULL_WENV: usize = 0;
+    // SAFETY: NULL_WENV is a static with 'static lifetime; the address is always valid.
+    // Cast to *mut *mut u16 gives the caller a null wchar_t** (empty wide environment),
+    // which is the correct value for __winitenv at process start per MSVC CRT convention.
     &NULL_WENV as *const usize as *mut *mut u16
 }
 
@@ -1427,7 +1483,12 @@ pub extern "win64" fn ucrt_abs(x: i64) -> i64 {
 pub unsafe extern "win64" fn ucrt_wcscpy(dst: *mut u16, src: *const u16) -> *mut u16 {
     let mut i = 0usize;
     loop {
+        // SAFETY: src is a valid null-terminated UTF-16 string (caller contract).
+        // We advance i only after confirming the previous character is non-null, so
+        // we never read past the null terminator.
         let c = unsafe { *src.add(i) };
+        // SAFETY: dst is writable for at least len(src)+1 u16 units (caller contract).
+        // i is bounded by the same null-terminator scan used for src.
         unsafe { *dst.add(i) = c };
         if c == 0 {
             break;
@@ -1444,13 +1505,18 @@ pub unsafe extern "win64" fn ucrt_wcscpy(dst: *mut u16, src: *const u16) -> *mut
 pub unsafe extern "win64" fn ucrt_wcscat(dst: *mut u16, src: *const u16) -> *mut u16 {
     // find end of dst
     let mut end = 0usize;
+    // SAFETY: dst is a valid null-terminated UTF-16 string (caller contract — we scan to
+    // find its length before appending, so we never advance past its null terminator).
     while unsafe { *dst.add(end) } != 0 {
         end += 1;
     }
     // copy src
     let mut i = 0usize;
     loop {
+        // SAFETY: src is a valid null-terminated UTF-16 string (caller contract).
         let c = unsafe { *src.add(i) };
+        // SAFETY: dst is writable for len(dst)+len(src)+1 u16 units (caller contract).
+        // end+i is bounded by the lengths confirmed above.
         unsafe { *dst.add(end + i) = c };
         if c == 0 {
             break;
@@ -1467,8 +1533,13 @@ pub unsafe extern "win64" fn ucrt_wcscat(dst: *mut u16, src: *const u16) -> *mut
 pub unsafe extern "win64" fn ucrt_wcschr(s: *const u16, c: u16) -> *mut u16 {
     let mut i = 0usize;
     loop {
+        // SAFETY: s is a valid null-terminated UTF-16 string (caller contract). We stop
+        // on the null terminator, so we never read past the end of the string.
         let ch = unsafe { *s.add(i) };
         if ch == c {
+            // SAFETY: s.add(i) points within the same valid allocation we've been scanning.
+            // The cast to *mut u16 is sound because the Windows CRT wcschr signature returns
+            // a mutable pointer into the original string (caller is responsible for aliasing).
             return unsafe { s.add(i) as *mut u16 };
         }
         if ch == 0 {
@@ -1486,6 +1557,10 @@ pub unsafe extern "win64" fn ucrt_wcsrchr(s: *const u16, c: u16) -> *mut u16 {
     let mut last: *mut u16 = std::ptr::null_mut();
     let mut i = 0usize;
     loop {
+        // SAFETY: s is a valid null-terminated UTF-16 string (caller contract). We stop
+        // on the null terminator so we never read past the end. The cast to *mut u16 for
+        // `last` is sound for the same reason as wcschr — Windows CRT returns a mutable
+        // pointer into the original string.
         let ch = unsafe { *s.add(i) };
         if ch == c {
             last = unsafe { s.add(i) as *mut u16 };
@@ -1504,11 +1579,15 @@ pub unsafe extern "win64" fn ucrt_wcsrchr(s: *const u16, c: u16) -> *mut u16 {
 /// `haystack` and `needle` must be valid null-terminated UTF-16 strings.
 pub unsafe extern "win64" fn ucrt_wcsstr(haystack: *const u16, needle: *const u16) -> *mut u16 {
     // empty needle matches at start
+    // SAFETY: needle is a valid null-terminated UTF-16 string (caller contract); reading the
+    // first u16 to check for an empty needle is always safe under that contract.
     if unsafe { *needle } == 0 {
         return haystack as *mut u16;
     }
     let mut i = 0usize;
     loop {
+        // SAFETY: haystack is a valid null-terminated UTF-16 string (caller contract); we
+        // advance i only while haystack[i] is non-null, so we never read past the end.
         let ch = unsafe { *haystack.add(i) };
         if ch == 0 {
             return std::ptr::null_mut();
@@ -1516,10 +1595,15 @@ pub unsafe extern "win64" fn ucrt_wcsstr(haystack: *const u16, needle: *const u1
         // try to match needle at position i
         let mut j = 0usize;
         loop {
+            // SAFETY: needle is null-terminated (caller contract); j advances only when the
+            // previous needle character matched, so we scan at most len(needle) characters.
             let nc = unsafe { *needle.add(j) };
             if nc == 0 {
+                // SAFETY: haystack.add(i) is within the same valid allocation we scanned above.
                 return unsafe { haystack.add(i) as *mut u16 };
             }
+            // SAFETY: i+j <= len(haystack) because the outer loop stopped before haystack's
+            // null terminator, and the inner loop stops as soon as needle is exhausted.
             let hc = unsafe { *haystack.add(i + j) };
             if hc != nc {
                 break;
@@ -1540,10 +1624,14 @@ pub unsafe extern "win64" fn ucrt_wtoi(s: *const u16) -> i32 {
     }
     // skip leading whitespace
     let mut i = 0usize;
+    // SAFETY: s is a valid null-terminated UTF-16 string (caller contract, null-checked above).
+    // Each *s.add(i) read is bounded by the null terminator — whitespace characters are all
+    // non-zero, so once we hit a non-whitespace or null character the loop stops safely.
     while matches!(unsafe { *s.add(i) }, 0x09 | 0x0A | 0x0D | 0x20) {
         i += 1;
     }
     // optional sign
+    // SAFETY: same string bounds as the whitespace loop above.
     let negative = match unsafe { *s.add(i) } {
         0x2D => {
             i += 1;
@@ -1558,6 +1646,8 @@ pub unsafe extern "win64" fn ucrt_wtoi(s: *const u16) -> i32 {
     // digits
     let mut result: i32 = 0;
     loop {
+        // SAFETY: s is null-terminated; the digit loop stops when ch is outside ['0','9'],
+        // which includes the null terminator (0x00 < 0x30), so we never over-read.
         let ch = unsafe { *s.add(i) };
         if ch < b'0' as u16 || ch > b'9' as u16 {
             break;
@@ -1758,6 +1848,12 @@ unsafe extern "C" fn ucrt_cxx_throw_exception_impl(
         image_base as u64,
     ];
 
+    // SAFETY: params is a stack-allocated [u64; 4] valid for the duration of this call.
+    // raise_exception_at requires: a valid exception code, flag (1 = NONCONTINUABLE),
+    // the correct parameter count (4), a valid params pointer, and the exact throw-site
+    // RIP and RSP captured by the naked trampoline before any prolog ran. All of these
+    // are satisfied: throw_rip and throw_rsp come directly from the trampoline's [RSP]
+    // and RSP+8 reads, which are the true call-site values per the Win64 ABI.
     unsafe {
         weave_core::unwind::raise_exception_at(
             0xE06D7363, // EH_EXCEPTION_NUMBER ("msc")
@@ -1770,6 +1866,8 @@ unsafe extern "C" fn ucrt_cxx_throw_exception_impl(
     }
 
     eprintln!("weave: _CxxThrowException: no handler found — terminating");
+    // SAFETY: No return expected after a noncontinuable exception with no handler.
+    // libc::exit is always safe to call and terminates the process immediately.
     unsafe { libc::exit(1) }
 }
 
@@ -1785,6 +1883,10 @@ pub unsafe extern "win64" fn ucrt_cxx_frame_handler(
     p_context: *mut weave_core::unwind::Context,
     p_dispatch: *mut weave_core::unwind::DispatcherContext,
 ) -> i32 {
+    // SAFETY: This function is only ever called by the OS SEH dispatch machinery, which
+    // guarantees that all four pointer arguments point to valid, correctly typed Windows
+    // x64 SEH structures. est_frame is the establisher frame value from the unwind tables,
+    // passed through unmodified. The weave_core implementation documents the same contract.
     unsafe { weave_core::unwind::cxx_frame_handler(p_exc_rec, est_frame, p_context, p_dispatch) }
 }
 
@@ -1823,6 +1925,9 @@ pub unsafe extern "win64" fn ucrt_get_errno(p_value: *mut i32) -> i32 {
     if p_value.is_null() {
         return libc::EINVAL;
     }
+    // SAFETY: p_value is non-null (checked above) and the caller guarantees it is a valid
+    // writable *mut i32. __errno_location() always returns a valid per-thread pointer;
+    // dereferencing it to read the current errno value is always safe on Linux.
     unsafe { *p_value = *libc::__errno_location() };
     0
 }
@@ -1831,6 +1936,9 @@ pub unsafe extern "win64" fn ucrt_get_errno(p_value: *mut i32) -> i32 {
 ///
 /// Wine ref: dlls/msvcrt/errno.c:254 — *_errno() = value; return 0. No bounds check.
 pub extern "win64" fn ucrt_set_errno(value: i32) -> i32 {
+    // SAFETY: __errno_location() always returns a valid per-thread pointer to the CRT
+    // errno variable. Writing to it is safe and is exactly what the Windows _set_errno
+    // contract requires (Wine msvcrt/errno.c:254).
     unsafe { *libc::__errno_location() = value };
     0
 }
