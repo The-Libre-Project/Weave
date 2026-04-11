@@ -41,9 +41,25 @@ pub unsafe fn patch(
 /// Returns 0 (NULL/FALSE/0) for any call signature.  This prevents a hard
 /// crash when pre-loaded DLLs (e.g. DXVK) call an import that Weave has no
 /// stub for — they will get a failure result instead of jumping into garbage.
+///
+/// Logs the caller's return address so the call site can be identified in a
+/// disassembly — this is the only way to know which unresolved function was
+/// invoked, since all unresolved slots share this single stub.
 #[cfg(target_arch = "x86_64")]
 #[allow(unused)]
 pub extern "win64" fn unresolved_import_stub() -> u64 {
+    let ret_addr: usize;
+    // SAFETY: reads [RSP] — the return address pushed by the CALL instruction
+    // that jumped here. `nostack` is set because we do not move RSP; `readonly`
+    // because we only read the stack, never write.
+    unsafe {
+        std::arch::asm!(
+            "mov {}, [rsp]",
+            out(reg) ret_addr,
+            options(nostack, readonly)
+        );
+    }
+    eprintln!("weave: unresolved_import_stub called (ret={ret_addr:#x})");
     0
 }
 

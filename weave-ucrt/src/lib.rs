@@ -901,6 +901,13 @@ pub unsafe extern "win64" fn ucrt_intrinsic_setjmpex(
 ///   +0x00 Frame  +0x08 Rbx  +0x10 Rsp  +0x18 Rbp
 ///   +0x20 Rsi   +0x28 Rdi  +0x30 R12  +0x38 R13
 ///   +0x40 R14   +0x48 R15  +0x50 Rip  +0x58 MxCsr  +0x5c FpCsr
+///   +0x60 Xmm6  +0x70 Xmm7  +0x80 Xmm8  +0x90 Xmm9
+///   +0xa0 Xmm10 +0xb0 Xmm11 +0xc0 Xmm12 +0xd0 Xmm13
+///   +0xe0 Xmm14 +0xf0 Xmm15
+///
+/// XMM6–XMM15 are non-volatile (callee-save) in Win64. MSVC's setjmp inline-saves
+/// them so longjmp must restore them — otherwise those registers are corrupted
+/// on return, which is fatal if NPP's longjmp recovery path uses them.
 ///
 /// Win64 entry: RCX = jmp_buf ptr, EDX = retval
 ///
@@ -915,7 +922,7 @@ pub unsafe extern "win64" fn ucrt_longjmp(_buf: *mut c_void, _val: i32) -> ! {
         "jnz   1f",
         "mov   edx, 1",
         "1:",
-        "mov   rax, rdx",                    // rax = return value
+        "mov   rax, rdx", // rax = return value (preserved through all restores)
         "mov   rbx, qword ptr [rcx + 0x08]", // restore Rbx
         "mov   rbp, qword ptr [rcx + 0x18]", // restore Rbp
         "mov   rsi, qword ptr [rcx + 0x20]", // restore Rsi
@@ -925,9 +932,20 @@ pub unsafe extern "win64" fn ucrt_longjmp(_buf: *mut c_void, _val: i32) -> ! {
         "mov   r14, qword ptr [rcx + 0x40]", // restore R14
         "mov   r15, qword ptr [rcx + 0x48]", // restore R15
         "mov   r11, qword ptr [rcx + 0x50]", // r11 = saved Rip (jump target)
-        "ldmxcsr dword ptr [rcx + 0x58]",    // restore MxCsr
-        "fnclex",                            // clear FPU exceptions
-        "fldcw  word ptr [rcx + 0x5c]",      // restore FpCsr
+        "ldmxcsr dword ptr [rcx + 0x58]", // restore MxCsr
+        "fnclex",         // clear FPU exceptions
+        "fldcw  word ptr [rcx + 0x5c]", // restore FpCsr
+        // Restore non-volatile XMM registers (XMM6–XMM15, 16 bytes each at +0x60)
+        "movdqu xmm6,  xmmword ptr [rcx + 0x60]",
+        "movdqu xmm7,  xmmword ptr [rcx + 0x70]",
+        "movdqu xmm8,  xmmword ptr [rcx + 0x80]",
+        "movdqu xmm9,  xmmword ptr [rcx + 0x90]",
+        "movdqu xmm10, xmmword ptr [rcx + 0xa0]",
+        "movdqu xmm11, xmmword ptr [rcx + 0xb0]",
+        "movdqu xmm12, xmmword ptr [rcx + 0xc0]",
+        "movdqu xmm13, xmmword ptr [rcx + 0xd0]",
+        "movdqu xmm14, xmmword ptr [rcx + 0xe0]",
+        "movdqu xmm15, xmmword ptr [rcx + 0xf0]",
         "mov   rsp, qword ptr [rcx + 0x10]", // restore Rsp LAST (rcx now invalid)
         "jmp   r11",                         // jump to saved Rip
     )

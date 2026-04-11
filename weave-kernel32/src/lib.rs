@@ -1953,8 +1953,13 @@ pub unsafe extern "win64" fn get_file_information_by_handle(
     let mut stat = unsafe { std::mem::zeroed::<libc::stat>() };
     let ret = unsafe { libc::fstat(fd, &mut stat) };
     if ret != 0 {
+        eprintln!("weave/GetFileInformationByHandle: h={h_file:#x} fd={fd} fstat failed");
         return 0; // FALSE
     }
+
+    let ino = stat.st_ino;
+    let size = stat.st_size;
+    eprintln!("weave/GetFileInformationByHandle: h={h_file:#x} fd={fd} ino={ino:#x} size={size}");
 
     unsafe {
         (*lp_file_information).dw_file_attributes =
