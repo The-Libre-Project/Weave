@@ -537,3 +537,64 @@ pub fn resolve_sensapi(func: &str) -> Option<usize> {
         _ => return None,
     })
 }
+
+// ── wininet.dll ───────────────────────────────────────────────────────────────
+
+/// InternetCrackUrlW — parse a URL into its component parts.
+///
+/// Wine ref: dlls/wininet/internet.c — InternetCrackUrlW calls
+/// INTERNET_ParseUrlW which walks the URL string and fills URL_COMPONENTSW.
+/// Weave: stub returning FALSE. NPP uses this for update-check URL parsing;
+/// returning FALSE skips the update check gracefully.
+///
+/// # Safety
+/// All pointer arguments are ignored.
+pub unsafe extern "win64" fn internet_crack_url_w(
+    _lpsz_url: *const u16,
+    _dw_url_length: u32,
+    _dw_flags: u32,
+    _lp_url_components: *mut u8,
+) -> i32 {
+    0 // FALSE — URL parsing not supported in headless mode
+}
+
+pub fn resolve_wininet(func: &str) -> Option<usize> {
+    Some(match func {
+        "InternetCrackUrlW" => internet_crack_url_w as *const () as usize,
+        _ => return None,
+    })
+}
+
+// ── dbghelp.dll ───────────────────────────────────────────────────────────────
+
+/// ImageNtHeader — return a pointer to the PE NT headers for a loaded image.
+///
+/// Wine ref: dlls/dbghelp/dbghelp.c — ImageNtHeader reads the DOS header at
+/// the base address, follows e_lfanew, and returns the IMAGE_NT_HEADERS pointer.
+/// This is safe to implement: the caller provides a valid module base address
+/// (from GetModuleHandleW or the PEB ImageBase), and we just add e_lfanew.
+///
+/// Returns NULL if the DOS signature ("MZ") is absent.
+///
+/// # Safety
+/// `base` must be a valid mapped PE image in the calling process's address space.
+pub unsafe extern "win64" fn image_nt_header(base: *const u8) -> *const u8 {
+    if base.is_null() {
+        return std::ptr::null();
+    }
+    // Verify DOS signature "MZ" (0x4D5A).
+    let dos_sig = unsafe { std::ptr::read_unaligned(base as *const u16) };
+    if dos_sig != 0x5A4D {
+        return std::ptr::null();
+    }
+    // e_lfanew is at offset 0x3C in the DOS header.
+    let e_lfanew = unsafe { std::ptr::read_unaligned(base.add(0x3C) as *const u32) };
+    unsafe { base.add(e_lfanew as usize) }
+}
+
+pub fn resolve_dbghelp(func: &str) -> Option<usize> {
+    Some(match func {
+        "ImageNtHeader" => image_nt_header as *const () as usize,
+        _ => return None,
+    })
+}

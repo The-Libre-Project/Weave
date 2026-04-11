@@ -3373,6 +3373,92 @@ pub unsafe extern "win64" fn char_prev_ex_a(
     }
 }
 
+// ── Accessibility / event hooks ───────────────────────────────────────────────
+
+/// NotifyWinEvent — fire a WinEvent hook (accessibility notification).
+///
+/// Wine ref: dlls/user32/event.c — NtUserNotifyWinEvent dispatches to
+/// installed WinEvent hooks via the hook thread. Weave: no-op. We have no
+/// accessibility infrastructure; callers (Scintilla, NPP) ignore the return.
+pub extern "win64" fn notify_win_event(
+    _event: u32,
+    _hwnd: usize,
+    _id_object: i32,
+    _id_child: i32,
+) {
+    // no-op
+}
+
+/// FlashWindowEx — flash the taskbar button and/or caption.
+///
+/// Wine ref: dlls/user32/message.c — updates the window caption highlight
+/// state. Weave: no-op, returns FALSE (was not previously active).
+pub unsafe extern "win64" fn flash_window_ex(_pfwi: *const u8) -> i32 {
+    0 // FALSE — window was not previously in an active state
+}
+
+/// LockWindowUpdate — prevent drawing in the specified window.
+///
+/// Wine ref: dlls/user32/painting.c — LockWindowUpdate sets a global lock
+/// on drawing for one window at a time; NULL unlocks. Weave: no-op stub
+/// returning TRUE (always succeeds).
+pub extern "win64" fn lock_window_update(_hwnd_lock: usize) -> i32 {
+    1 // TRUE
+}
+
+/// GetMenuBarInfo — retrieve menu bar information.
+///
+/// Wine ref: dlls/user32/menu.c — fills MENUBARINFO with the menu rect and
+/// HMENU. Weave: fills with zeros and returns FALSE (no menu bar info).
+///
+/// # Safety
+/// `pmbi` must be a valid MENUBARINFO pointer.
+pub unsafe extern "win64" fn get_menu_bar_info(
+    _hwnd: usize,
+    _id_object: i32,
+    _id_item: i32,
+    pmbi: *mut u8,
+) -> i32 {
+    // MENUBARINFO starts with cbSize (DWORD). If the pointer is valid and
+    // cbSize matches, fill with zeros and return TRUE; otherwise FALSE.
+    if pmbi.is_null() {
+        return 0;
+    }
+    0 // FALSE — simplest safe stub
+}
+
+/// GetIconInfo — retrieve information about an icon or cursor.
+///
+/// Wine ref: dlls/user32/cursoricon.c — GetIconInfo fills an ICONINFO struct
+/// with mask/color bitmaps. Weave: returns FALSE (no real icon infrastructure).
+///
+/// # Safety
+/// `piconinfo` is ignored.
+pub unsafe extern "win64" fn get_icon_info(_hicon: usize, _piconinfo: *mut u8) -> i32 {
+    0 // FALSE
+}
+
+/// CreateIconIndirect — create an icon from an ICONINFO structure.
+///
+/// Wine ref: dlls/user32/cursoricon.c — allocates a new CURSORICONCACHE entry.
+/// Weave: returns a non-NULL handle so callers don't treat NULL as an error.
+/// We reuse the ICONINFO pointer value as a fake handle.
+///
+/// # Safety
+/// `piconinfo` is ignored.
+pub unsafe extern "win64" fn create_icon_indirect(piconinfo: *const u8) -> usize {
+    piconinfo as usize | 1 // non-NULL fake handle
+}
+
+/// IsChild — test if a window is a descendant of another.
+///
+/// Wine ref: dlls/user32/win.c — IsChild walks the parent chain looking for
+/// hWndParent. Weave: stub returning FALSE — parent relationships are not
+/// tracked in the window table (Phase 2 gap). No callers crash on FALSE.
+pub extern "win64" fn is_child(_hwnd_parent: usize, _hwnd: usize) -> i32 {
+    0 // FALSE
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]

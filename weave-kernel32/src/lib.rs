@@ -1985,6 +1985,277 @@ pub unsafe extern "win64" fn get_file_information_by_handle(
     1 // TRUE
 }
 
+/// GetFileInformationByHandleEx — query extended file information by class.
+///
+/// Wine ref: dlls/kernelbase/file.c::GetFileInformationByHandleEx — dispatches on
+/// FILE_INFO_BY_HANDLE_CLASS; calls NtQueryInformationFile for most classes.
+/// Weave: implements FileBasicInfo (0) and FileStandardInfo (1) via Linux fstat;
+/// returns FALSE/ERROR_INVALID_PARAMETER for unsupported classes.
+///
+/// # Safety
+/// `h_file` must be a valid Weave handle. `lp_file_information` must point to a
+/// buffer of at least `dw_buffer_size` bytes matching the requested class layout.
+#[allow(non_upper_case_globals)]
+pub unsafe extern "win64" fn get_file_information_by_handle_ex(
+    h_file: usize,
+    file_information_class: u32,
+    lp_file_information: *mut u8,
+    dw_buffer_size: u32,
+) -> i32 {
+    // FILE_INFO_BY_HANDLE_CLASS constants
+    const FileBasicInfo: u32 = 0;
+    const FileStandardInfo: u32 = 1;
+    const FileNameInfo: u32 = 2;
+    const FileIdInfo: u32 = 18;
+
+    if lp_file_information.is_null() {
+        set_last_error(87); // ERROR_INVALID_PARAMETER
+        return 0;
+    }
+
+    let fd = match handles::get_fd(h_file) {
+        Some(fd) => fd,
+        None => {
+            set_last_error(6); // ERROR_INVALID_HANDLE
+            return 0;
+        }
+    };
+
+    let mut stat = unsafe { std::mem::zeroed::<libc::stat>() };
+    if unsafe { libc::fstat(fd, &mut stat) } != 0 {
+        set_last_error(6); // ERROR_INVALID_HANDLE
+        return 0;
+    }
+
+    // Convert Unix epoch seconds to Windows FILETIME (100-ns since 1601-01-01).
+    // Offset = 11644473600 seconds between 1601-01-01 and 1970-01-01.
+    let to_ft = |secs: i64| -> u64 { ((secs + 11_644_473_600) as u64) * 10_000_000 };
+
+    match file_information_class {
+        FileBasicInfo => {
+            // FILE_BASIC_INFO: CreationTime, LastAccessTime, LastWriteTime,
+            // ChangeTime (each 8 bytes), FileAttributes (4 bytes) = 36 bytes minimum.
+            if dw_buffer_size < 36 {
+                set_last_error(122); // ERROR_INSUFFICIENT_BUFFER
+                return 0;
+            }
+            let mtime_ft = to_ft(stat.st_mtime);
+            let atime_ft = to_ft(stat.st_atime);
+            unsafe {
+                let p = lp_file_information as *mut u64;
+                p.add(0).write_unaligned(mtime_ft); // CreationTime (approximate)
+                p.add(1).write_unaligned(atime_ft); // LastAccessTime
+                p.add(2).write_unaligned(mtime_ft); // LastWriteTime
+                p.add(3).write_unaligned(mtime_ft); // ChangeTime
+                let attr_p = p.add(4) as *mut u32;
+                let attr = if (stat.st_mode & libc::S_IFMT) == libc::S_IFDIR {
+                    0x10u32 // FILE_ATTRIBUTE_DIRECTORY
+                } else {
+                    0x20u32 // FILE_ATTRIBUTE_ARCHIVE
+                };
+                attr_p.write_unaligned(attr);
+            }
+            eprintln!(
+                "weave/GetFileInformationByHandleEx: h={h_file:#x} fd={fd} FileBasicInfo mtime={mtime_ft:#x}"
+            );
+            1 // TRUE
+        }
+        FileStandardInfo => {
+            // FILE_STANDARD_INFO: AllocationSize, EndOfFile (8 bytes each),
+            // NumberOfLinks, DeletePending, Directory (4 bytes each) = 24 bytes.
+            if dw_buffer_size < 24 {
+                set_last_error(122); // ERROR_INSUFFICIENT_BUFFER
+                return 0;
+            }
+            let size = stat.st_size as u64;
+            let alloc = ((size + 4095) & !4095) as u64; // round up to 4 KiB blocks
+            let is_dir = (stat.st_mode & libc::S_IFMT) == libc::S_IFDIR;
+            unsafe {
+                let p = lp_file_information as *mut u64;
+                p.add(0).write_unaligned(alloc); // AllocationSize
+                p.add(1).write_unaligned(size);  // EndOfFile
+                let p32 = p.add(2) as *mut u32;
+                p32.add(0).write_unaligned(stat.st_nlink as u32); // NumberOfLinks
+                p32.add(1).write_unaligned(0u32); // DeletePending = FALSE
+                p32.add(2).write_unaligned(is_dir as u32); // Directory
+            }
+            eprintln!(
+                "weave/GetFileInformationByHandleEx: h={h_file:#x} fd={fd} FileStandardInfo size={size}"
+            );
+            1 // TRUE
+        }
+        FileNameInfo => {
+            // FILE_NAME_INFO: FileNameLength (DWORD) + FileName (WCHAR[]).
+            // Stub: return an empty name (length=0). Callers checking the name
+            // will see an empty string — acceptable for headless operation.
+            if dw_buffer_size < 4 {
+                set_last_error(122); // ERROR_INSUFFICIENT_BUFFER
+                return 0;
+            }
+            unsafe { (lp_file_information as *mut u32).write_unaligned(0) }; // FileNameLength=0
+            1 // TRUE
+        }
+        FileIdInfo => {
+            // FILE_ID_INFO: VolumeSerialNumber (8 bytes) + FileId (16 bytes) = 24 bytes.
+            if dw_buffer_size < 24 {
+                set_last_error(122); // ERROR_INSUFFICIENT_BUFFER
+                return 0;
+            }
+            unsafe {
+                let p = lp_file_information as *mut u64;
+                p.add(0).write_unaligned(0xDEAD_BEEF_u64); // VolumeSerialNumber
+                p.add(1).write_unaligned(stat.st_ino);      // FileId low 64 bits
+                p.add(2).write_unaligned(0u64);             // FileId high 64 bits
+            }
+            1 // TRUE
+        }
+        _ => {
+            eprintln!(
+                "weave/GetFileInformationByHandleEx: h={h_file:#x} class={file_information_class} → ERROR_INVALID_PARAMETER"
+            );
+            set_last_error(87); // ERROR_INVALID_PARAMETER
+            0 // FALSE
+        }
+    }
+}
+
+/// GetFinalPathNameByHandleW — get the full path of an open file handle.
+///
+/// Wine ref: dlls/kernelbase/file.c::GetFinalPathNameByHandleW — queries
+/// ObjectNameInformation via NtQueryObject then strips the NT prefix.
+/// Weave: reads /proc/self/fd/N symlink for the Linux path, prepends Z:\.
+/// VOLUME_NAME_DOS (0) returns \\?\Z:\path; callers expecting a plain path
+/// should strip the \\?\ prefix themselves.
+///
+/// Returns the number of characters (excluding NUL) required or written.
+/// If `path` is NULL or `count` is 0, returns the required length.
+///
+/// # Safety
+/// `h_file` must be a valid handle. `path` (if non-null) must point to a
+/// writable buffer of `count` wide characters.
+pub unsafe extern "win64" fn get_final_path_name_by_handle_w(
+    h_file: usize,
+    path: *mut u16,
+    count: u32,
+    _flags: u32,
+) -> u32 {
+    let fd = match handles::get_fd(h_file) {
+        Some(fd) => fd,
+        None => {
+            set_last_error(6); // ERROR_INVALID_HANDLE
+            return 0;
+        }
+    };
+
+    // Read the symlink /proc/self/fd/<fd> to get the real Linux path.
+    let proc_link = format!("/proc/self/fd/{fd}");
+    let linux_path = match std::fs::read_link(&proc_link) {
+        Ok(p) => p.to_string_lossy().into_owned(),
+        Err(_) => {
+            set_last_error(6); // ERROR_INVALID_HANDLE
+            return 0;
+        }
+    };
+
+    // Convert Linux path to Windows Z:\ path (same convention as CreateFileW).
+    let win_path = format!("\\\\?\\Z:{}", linux_path.replace('/', "\\"));
+    let wide: Vec<u16> = win_path.encode_utf16().collect();
+    let needed = wide.len() as u32; // excludes NUL
+
+    if !path.is_null() && count > needed {
+        unsafe {
+            for (i, &ch) in wide.iter().enumerate() {
+                path.add(i).write(ch);
+            }
+            path.add(wide.len()).write(0); // NUL terminator
+        }
+        needed
+    } else {
+        // Buffer too small or NULL — return required length (without NUL, per MSDN).
+        needed + 1
+    }
+}
+
+/// GetProductInfo — return the product type for the OS version.
+///
+/// Wine ref: dlls/kernelbase/version.c::GetProductInfo — calls RtlGetProductInfo
+/// which returns PRODUCT_UNDEFINED (0) for Wine. Weave returns
+/// PRODUCT_PROFESSIONAL (0x30) to satisfy apps that check for a workstation SKU.
+///
+/// # Safety
+/// `pdw_returned_product_type` must be a valid writable pointer if non-null.
+pub unsafe extern "win64" fn get_product_info(
+    _dw_os_major_version: u32,
+    _dw_os_minor_version: u32,
+    _dw_sp_major_version: u32,
+    _dw_sp_minor_version: u32,
+    pdw_returned_product_type: *mut u32,
+) -> i32 {
+    if !pdw_returned_product_type.is_null() {
+        unsafe { *pdw_returned_product_type = 0x30 }; // PRODUCT_PROFESSIONAL
+    }
+    1 // TRUE
+}
+
+/// RegisterApplicationRestart — register restart command for crash recovery.
+///
+/// Wine ref: dlls/kernel32/process.c — stub returning S_OK. Applications like
+/// NPP register restart parameters via this API; Weave ignores them.
+///
+/// # Safety
+/// `pwz_commandline` is an optional wide string (may be NULL).
+pub unsafe extern "win64" fn register_application_restart(
+    _pwz_commandline: *const u16,
+    _dw_flags: u32,
+) -> i32 {
+    0 // S_OK
+}
+
+/// UnregisterApplicationRestart — remove a previously registered restart command.
+///
+/// Wine ref: dlls/kernel32/process.c — stub returning S_OK.
+pub extern "win64" fn unregister_application_restart() -> i32 {
+    0 // S_OK
+}
+
+/// GetApplicationRestartSettings — query restart command registered by the app.
+///
+/// Wine ref: dlls/kernel32/process.c — stub returning E_FAIL. NPP calls this
+/// during startup; returning E_FAIL is correct when no restart is registered.
+///
+/// # Safety
+/// Output pointers may be NULL; we do not dereference them.
+pub unsafe extern "win64" fn get_application_restart_settings(
+    _h_process: usize,
+    _pwz_commandline: *mut u16,
+    _pcch_size: *mut u32,
+    _pdw_flags: *mut u32,
+) -> i32 {
+    0x8007_00E8_u32 as i32 // HRESULT_FROM_WIN32(ERROR_NOT_FOUND) — no restart registered
+}
+
+/// ReadDirectoryChangesW — watch a directory for changes.
+///
+/// Wine ref: dlls/kernel32/change.c — issues NtNotifyChangeDirectoryFile.
+/// Weave stub: returns FALSE (not supported). NPP uses this for live file
+/// change detection; failing here disables that feature gracefully.
+///
+/// # Safety
+/// All pointer args are ignored.
+pub unsafe extern "win64" fn read_directory_changes_w(
+    _h_directory: usize,
+    _lp_buffer: *mut u8,
+    _n_buffer_length: u32,
+    _b_watch_subtree: i32,
+    _dw_notify_filter: u32,
+    _lp_bytes_returned: *mut u32,
+    _lp_overlapped: *mut u8,
+    _lp_completion_routine: usize,
+) -> i32 {
+    set_last_error(120); // ERROR_CALL_NOT_IMPLEMENTED
+    0 // FALSE
+}
+
 /// # Safety
 /// No pointer arguments are dereferenced.
 pub unsafe extern "win64" fn set_end_of_file(h_file: usize) -> i32 {
@@ -3658,8 +3929,8 @@ fn load_library_impl(name: &str) -> usize {
                 // PROT_READ|PROT_WRITE.  `resolve::resolve` is a plain function pointer
                 // with no thread-safety requirements (single-threaded Phase 1/2).
                 unsafe {
-                    iat::patch_best_effort(&bytes, image.base, resolve::resolve, |d, f| {
-                        eprintln!("weave/kernel32: LoadLibrary({key}): unresolved import {d}!{f}");
+                    iat::patch_best_effort(&bytes, image.base, resolve::resolve, |d, f, va| {
+                        eprintln!("weave/kernel32: LoadLibrary({key}): unresolved import {d}!{f} at iat={va:#x}");
                     });
                 }
                 dll_registry::register(key.clone(), image, exports);
@@ -8878,6 +9149,32 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "GetFileInformationByHandle" => Some(
             get_file_information_by_handle as unsafe extern "win64" fn(_, _) -> _ as *const ()
                 as usize,
+        ),
+        "GetFileInformationByHandleEx" => Some(
+            get_file_information_by_handle_ex
+                as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
+        ),
+        "GetFinalPathNameByHandleW" => Some(
+            get_final_path_name_by_handle_w
+                as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
+        ),
+        "GetProductInfo" => Some(
+            get_product_info as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const () as usize,
+        ),
+        "RegisterApplicationRestart" => Some(
+            register_application_restart
+                as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
+        ),
+        "UnregisterApplicationRestart" => {
+            Some(unregister_application_restart as extern "win64" fn() -> _ as *const () as usize)
+        }
+        "GetApplicationRestartSettings" => Some(
+            get_application_restart_settings
+                as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
+        ),
+        "ReadDirectoryChangesW" => Some(
+            read_directory_changes_w
+                as unsafe extern "win64" fn(_, _, _, _, _, _, _, _) -> _ as *const () as usize,
         ),
         "SetEndOfFile" => {
             Some(set_end_of_file as unsafe extern "win64" fn(_) -> _ as *const () as usize)

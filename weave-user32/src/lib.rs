@@ -319,6 +319,113 @@ pub extern "win64" fn buffered_paint_un_init() -> i32 {
     0 // S_OK
 }
 
+/// EndBufferedAnimation — end a buffered animation (commit final frame).
+///
+/// Wine ref: dlls/uxtheme/animation.c — EndBufferedAnimation calls EndPaint on
+/// the window; Weave no-ops since we have no animation infrastructure.
+pub extern "win64" fn end_buffered_animation(_h_bp_animation: usize, _f_update_target: i32) -> i32 {
+    0 // S_OK
+}
+
+/// GetThemeTransitionDuration — query animation duration for a theme transition.
+///
+/// Wine ref: dlls/uxtheme/uxtheme.c — returns E_FAIL (theme not active).
+/// Weave: returns 0 duration (no transition).
+pub unsafe extern "win64" fn get_theme_transition_duration(
+    _h_theme: usize,
+    _i_part_id: i32,
+    _i_state_id_from: i32,
+    _i_state_id_to: i32,
+    _prop_id: i32,
+    pdw_duration: *mut u32,
+) -> i32 {
+    if !pdw_duration.is_null() {
+        unsafe { *pdw_duration = 0 };
+    }
+    0 // S_OK
+}
+
+/// DrawThemeParentBackground — redraw the parent window background.
+///
+/// Wine ref: dlls/uxtheme/uxtheme.c — SendMessage(parent, WM_ERASEBKGND/WM_PRINTCLIENT).
+/// Weave: no-op (S_OK); background is handled by BeginPaint/EndPaint in our backend.
+pub extern "win64" fn draw_theme_parent_background(
+    _hwnd: usize,
+    _hdc: usize,
+    _prc: usize,
+) -> i32 {
+    0 // S_OK
+}
+
+/// GetThemeBackgroundContentRect — compute inner content rect of a themed part.
+///
+/// Wine ref: dlls/uxtheme/uxtheme.c — subtracts margins from the bounding rect.
+/// Weave: returns the bounding rect unchanged (no margins).
+pub unsafe extern "win64" fn get_theme_background_content_rect(
+    _h_theme: usize,
+    _hdc: usize,
+    _i_part_id: i32,
+    _i_state_id: i32,
+    p_bounding_rect: *const [i32; 4],
+    p_content_rect: *mut [i32; 4],
+) -> i32 {
+    if !p_bounding_rect.is_null() && !p_content_rect.is_null() {
+        unsafe { *p_content_rect = *p_bounding_rect };
+    }
+    0 // S_OK
+}
+
+/// DrawThemeTextEx — draw themed text with additional options.
+///
+/// Wine ref: dlls/uxtheme/uxtheme.c — draws text using GDI with theme font/color.
+/// Weave: no-op (S_OK); text is drawn directly by GDI functions we implement.
+pub extern "win64" fn draw_theme_text_ex(
+    _h_theme: usize,
+    _hdc: usize,
+    _i_part_id: i32,
+    _i_state_id: i32,
+    _psz_text: usize,
+    _cch_text: i32,
+    _dw_text_flags: u32,
+    _p_rect: usize,
+    _p_options: usize,
+) -> i32 {
+    0 // S_OK
+}
+
+/// BufferedPaintStopAllAnimations — stop buffered animations for a window.
+///
+/// Wine ref: dlls/uxtheme/animation.c — iterates the animation list.
+/// Weave: no-op (S_OK), no animation list exists.
+pub extern "win64" fn buffered_paint_stop_all_animations(_hwnd: usize) -> i32 {
+    0 // S_OK
+}
+
+/// BeginBufferedAnimation — start a buffered animation.
+///
+/// Wine ref: dlls/uxtheme/animation.c — allocates an animation context.
+/// Weave: returns NULL (no animation support); callers must handle NULL gracefully.
+pub extern "win64" fn begin_buffered_animation(
+    _hwnd: usize,
+    _hdc_target: usize,
+    _prc_target: usize,
+    _dw_format: u32,
+    _p_paint_params: usize,
+    _p_animation_params: usize,
+    _phdc_from: usize,
+    _phdc_to: usize,
+) -> usize {
+    0 // NULL — no animation handle
+}
+
+/// BufferedPaintRenderAnimation — render the current frame of a buffered animation.
+///
+/// Wine ref: dlls/uxtheme/animation.c — blends from/to frames.
+/// Weave: returns FALSE (no animation running).
+pub extern "win64" fn buffered_paint_render_animation(_hwnd: usize, _hdc_target: usize) -> i32 {
+    0 // FALSE — no animation to render
+}
+
 /// Resolve a uxtheme.dll import to a stub address.
 ///
 /// Called by weave-cli's resolve chain.
@@ -354,6 +461,70 @@ pub fn resolve_uxtheme(dll: &str, func: &str) -> Option<usize> {
         "SetThemeAppProperties" => set_theme_app_properties as *const () as usize,
         "BufferedPaintInit" => buffered_paint_init as *const () as usize,
         "BufferedPaintUnInit" => buffered_paint_un_init as *const () as usize,
+        "EndBufferedAnimation" => end_buffered_animation as *const () as usize,
+        "GetThemeTransitionDuration" => get_theme_transition_duration as *const () as usize,
+        "DrawThemeParentBackground" => draw_theme_parent_background as *const () as usize,
+        "GetThemeBackgroundContentRect" => get_theme_background_content_rect as *const () as usize,
+        "DrawThemeTextEx" => draw_theme_text_ex as *const () as usize,
+        "BufferedPaintStopAllAnimations" => buffered_paint_stop_all_animations as *const () as usize,
+        "BeginBufferedAnimation" => begin_buffered_animation as *const () as usize,
+        "BufferedPaintRenderAnimation" => buffered_paint_render_animation as *const () as usize,
+        _ => return None,
+    })
+}
+
+// ── dwmapi.dll stubs ──────────────────────────────────────────────────────────
+//
+// Desktop Window Manager API. NPP uses DwmSetWindowAttribute to enable rounded
+// corners / Mica blur on Windows 11, and DwmGetColorizationColor for the accent
+// colour. Both are cosmetic; returning safe defaults is correct for headless use.
+//
+// Wine ref: dlls/dwmapi/dwmapi_main.c — both functions are FIXME stubs returning
+// S_OK / a hardcoded colour. Weave does the same.
+
+/// DwmSetWindowAttribute — set a DWM attribute on a window.
+///
+/// Wine ref: dlls/dwmapi/dwmapi_main.c — FIXME stub, returns S_OK.
+///
+/// # Safety
+/// `pv_attribute` is ignored.
+pub unsafe extern "win64" fn dwm_set_window_attribute(
+    _hwnd: usize,
+    _dw_attribute: u32,
+    _pv_attribute: *const u8,
+    _cb_attribute: u32,
+) -> i32 {
+    0 // S_OK
+}
+
+/// DwmGetColorizationColor — query the current DWM accent colour.
+///
+/// Wine ref: dlls/dwmapi/dwmapi_main.c — FIXME stub returning a hardcoded
+/// blue/purple colour with opaque blend disabled.
+///
+/// # Safety
+/// Output pointers may be NULL.
+pub unsafe extern "win64" fn dwm_get_colorization_color(
+    pcr_colorization: *mut u32,
+    pf_opaque_blend: *mut i32,
+) -> i32 {
+    if !pcr_colorization.is_null() {
+        unsafe { *pcr_colorization = 0x640050EF }; // ABGR blue-purple accent
+    }
+    if !pf_opaque_blend.is_null() {
+        unsafe { *pf_opaque_blend = 0 }; // FALSE — not opaque
+    }
+    0 // S_OK
+}
+
+/// Resolve a dwmapi.dll import to a stub address.
+pub fn resolve_dwmapi(dll: &str, func: &str) -> Option<usize> {
+    if !dll.eq_ignore_ascii_case("dwmapi.dll") {
+        return None;
+    }
+    Some(match func {
+        "DwmSetWindowAttribute" => dwm_set_window_attribute as *const () as usize,
+        "DwmGetColorizationColor" => dwm_get_colorization_color as *const () as usize,
         _ => return None,
     })
 }
@@ -364,6 +535,10 @@ pub fn resolve_uxtheme(dll: &str, func: &str) -> Option<usize> {
 pub fn resolve(dll: &str, func: &str) -> Option<usize> {
     // Also handle uxtheme.dll — UI theming, closely related to user32.
     if let Some(addr) = resolve_uxtheme(dll, func) {
+        return Some(addr);
+    }
+    // dwmapi.dll — Desktop Window Manager, closely related to user32 windowing.
+    if let Some(addr) = resolve_dwmapi(dll, func) {
         return Some(addr);
     }
 
@@ -500,6 +675,18 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "GetMenuItemCount" => Some(menu::get_menu_item_count as *const () as usize),
         "CheckMenuItem" => Some(menu::check_menu_item as *const () as usize),
         "EnableMenuItem" => Some(menu::enable_menu_item as *const () as usize),
+        "GetMenuStringW" => Some(
+            menu::get_menu_string_w as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "SetMenuItemBitmaps" => Some(menu::set_menu_item_bitmaps as *const () as usize),
+        "GetMenuState" => Some(menu::get_menu_state as *const () as usize),
+        "ModifyMenuW" => Some(
+            menu::modify_menu_w as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "GetMenuItemID" => Some(menu::get_menu_item_id as *const () as usize),
+        "GetSubMenu" => Some(menu::get_sub_menu as *const () as usize),
         // Display and mode enumeration
         "EnumDisplayDevicesW" => Some(
             enum_display_devices_w as unsafe extern "win64" fn(_, _, _, _) -> _ as *const ()
@@ -821,9 +1008,6 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "RemoveMenu" => {
             Some(api::remove_menu as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize)
         }
-        "GetSubMenu" => {
-            Some(api::get_sub_menu as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
-        }
         "SendDlgItemMessageW" => Some(
             api::send_dlg_item_message_w as unsafe extern "win64" fn(_, _, _, _, _) -> _
                 as *const () as usize,
@@ -850,6 +1034,23 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
             api::dialog_box_param_w as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const ()
                 as usize,
         ),
+        // Accessibility / event hooks
+        "NotifyWinEvent" => Some(api::notify_win_event as *const () as usize),
+        "FlashWindowEx" => Some(
+            api::flash_window_ex as unsafe extern "win64" fn(_) -> _ as *const () as usize,
+        ),
+        "LockWindowUpdate" => Some(api::lock_window_update as *const () as usize),
+        "GetMenuBarInfo" => Some(
+            api::get_menu_bar_info as unsafe extern "win64" fn(_, _, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "GetIconInfo" => Some(
+            api::get_icon_info as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
+        ),
+        "CreateIconIndirect" => Some(
+            api::create_icon_indirect as unsafe extern "win64" fn(_) -> _ as *const () as usize,
+        ),
+        "IsChild" => Some(api::is_child as *const () as usize),
         _ => None,
     }
 }

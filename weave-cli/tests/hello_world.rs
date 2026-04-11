@@ -326,6 +326,28 @@ fn notepad_plus_plus_portable_mode() {
         elapsed >= std::time::Duration::from_secs(2),
         "Notepad++ ran for only {elapsed:.1?} — likely crashed before entering message loop.\nstderr: {stderr}"
     );
+
+    // Gate 5: Scintilla document must have content after opening test.py.
+    // BeginPaint logs "SCI_GETLENGTH=N" every time it paints a Scintilla window.
+    // If N is always 0, NPP ran but the file content was never inserted into
+    // the document — the regression introduced after the XMM longjmp fix.
+    let max_sci_len: isize = stderr
+        .lines()
+        .filter(|l| l.contains("SCI_GETLENGTH="))
+        .filter_map(|l| {
+            l.split("SCI_GETLENGTH=")
+                .nth(1)
+                .and_then(|s| s.split_whitespace().next())
+                .and_then(|s| s.parse::<isize>().ok())
+        })
+        .max()
+        .unwrap_or(0);
+    assert!(
+        max_sci_len > 0,
+        "Scintilla document is empty (max SCI_GETLENGTH={max_sci_len}) — \
+         test.py was loaded but content was not inserted into Scintilla.\n\
+         stderr: {stderr}"
+    );
 }
 
 /// `weave i_view64.exe` — IrfanView 64-bit portable image viewer.

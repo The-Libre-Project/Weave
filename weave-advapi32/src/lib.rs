@@ -3,8 +3,9 @@
 //! Phase 2 scope: registry read/write operations. Security and service
 //! management APIs are stubbed as no-ops for now.
 //!
-//! Also hosts wintrust.dll, crypt32.dll, and sensapi.dll stubs — they share
-//! the security/PKI domain and have no separate crate of their own.
+//! Also hosts wintrust.dll, crypt32.dll, sensapi.dll, wininet.dll, and
+//! dbghelp.dll stubs — they share the security/utility domain and have no
+//! separate crate of their own.
 
 mod registry;
 mod wintrust;
@@ -16,6 +17,8 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "wintrust.dll" => wintrust::resolve_wintrust(func),
         "crypt32.dll" => wintrust::resolve_crypt32(func),
         "sensapi.dll" => wintrust::resolve_sensapi(func),
+        "wininet.dll" => wintrust::resolve_wininet(func),
+        "dbghelp.dll" => wintrust::resolve_dbghelp(func),
         _ => None,
     }
 }

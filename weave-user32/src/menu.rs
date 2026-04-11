@@ -219,6 +219,198 @@ pub fn delete_item(h_menu: usize, u_position: u32, u_flags: u32) {
     }
 }
 
+/// GetMenuStringW: copy the text of the specified menu item into a buffer.
+///
+/// Wine ref: dlls/user32/menu.c — GetMenuStringW calls MENU_GetItem (by command or
+/// position), then does a wcsncpy of item->text into the caller's buffer, returning
+/// the character count (excluding null). Returns 0 if the menu/item is not found or
+/// if lpString is NULL / nMaxCount == 0 with no valid item.
+///
+/// # Safety
+/// `lp_string`, when `n_max_count > 0`, must point to a buffer of at least
+/// `n_max_count` wide characters.
+pub unsafe extern "win64" fn get_menu_string_w(
+    h_menu: usize,
+    u_id_item: u32,
+    lp_string: *mut u16,
+    n_max_count: i32,
+    u_flags: u32,
+) -> i32 {
+    let m = menus().lock().unwrap();
+    let items = match m.menus.get(&h_menu) {
+        Some(v) => v,
+        None => {
+            // Menu not found: write empty string and return 0.
+            if !lp_string.is_null() && n_max_count > 0 {
+                unsafe { *lp_string = 0 };
+            }
+            return 0;
+        }
+    };
+    let by_pos = u_flags & MF_BYPOSITION != 0;
+    let item = if by_pos {
+        items.get(u_id_item as usize)
+    } else {
+        items.iter().find(|it| it.id_or_submenu as u32 == u_id_item)
+    };
+    let text = match item {
+        Some(it) => &it.text,
+        None => {
+            if !lp_string.is_null() && n_max_count > 0 {
+                unsafe { *lp_string = 0 };
+            }
+            return 0;
+        }
+    };
+    // Encode as UTF-16. The return value is the number of characters
+    // copied, NOT including the null terminator.
+    let wide: Vec<u16> = text.encode_utf16().collect();
+    if lp_string.is_null() || n_max_count <= 0 {
+        // Caller just wants the length.
+        return wide.len() as i32;
+    }
+    let copy_len = wide.len().min((n_max_count as usize).saturating_sub(1));
+    unsafe {
+        std::ptr::copy_nonoverlapping(wide.as_ptr(), lp_string, copy_len);
+        *lp_string.add(copy_len) = 0; // null-terminate
+    }
+    copy_len as i32
+}
+
+/// SetMenuItemBitmaps: associate bitmaps with the check-mark and unchecked state
+/// of a menu item.
+///
+/// Wine ref: dlls/user32/menu.c — SetMenuItemBitmaps stores hBitmapChecked /
+/// hBitmapUnchecked in the menu item; used by MF_BITMAP items. Weave does not
+/// render menus visually, so we just validate the handle and return TRUE.
+pub extern "win64" fn set_menu_item_bitmaps(
+    _h_menu: usize,
+    _u_item: u32,
+    _u_flags: u32,
+    _h_bmp_unchecked: usize,
+    _h_bmp_checked: usize,
+) -> i32 {
+    1 // TRUE — success
+}
+
+/// GetMenuState: return the flags and (for popup submenus) the item count for a
+/// menu item identified by command ID or position.
+///
+/// Wine ref: dlls/user32/menu.c — GetMenuState calls MENU_GetItem; for a popup
+/// item returns (submenu_count << 8) | (item_flags | MF_POPUP); for a command
+/// returns item_flags. Returns (UINT)-1 = 0xFFFFFFFF if not found.
+pub extern "win64" fn get_menu_state(h_menu: usize, u_id: u32, u_flags: u32) -> u32 {
+    let m = menus().lock().unwrap();
+    let items = match m.menus.get(&h_menu) {
+        Some(v) => v,
+        None => return u32::MAX,
+    };
+    let by_pos = u_flags & MF_BYPOSITION != 0;
+    for (i, item) in items.iter().enumerate() {
+        let matches = if by_pos {
+            i as u32 == u_id
+        } else {
+            item.id_or_submenu as u32 == u_id
+        };
+        if matches {
+            if item.flags & MF_POPUP != 0 {
+                // Return submenu item count in high byte | (flags | MF_POPUP) in low byte
+                let submenu_h = item.id_or_submenu;
+                let count = m
+                    .menus
+                    .get(&submenu_h)
+                    .map(|v| v.len() as u32)
+                    .unwrap_or(0);
+                return (count << 8) | (item.flags | MF_POPUP);
+            }
+            return item.flags;
+        }
+    }
+    u32::MAX // not found
+}
+
+/// ModifyMenuW: change an existing menu item's flags, text, and ID.
+///
+/// Wine ref: dlls/user32/menu.c — ModifyMenuW calls MENU_GetItem then updates
+/// item->fType, item->wID, and item->text in place. Returns TRUE on success.
+///
+/// # Safety
+/// `lp_new_item`, when `u_flags` includes MF_STRING, must be a valid
+/// null-terminated UTF-16 string pointer or NULL.
+pub unsafe extern "win64" fn modify_menu_w(
+    h_menu: usize,
+    u_position: u32,
+    u_flags: u32,
+    u_id_new_item: usize,
+    lp_new_item: *const u16,
+) -> i32 {
+    let mut m = menus().lock().unwrap();
+    let items = match m.menus.get_mut(&h_menu) {
+        Some(v) => v,
+        None => return 0,
+    };
+    let by_pos = u_flags & MF_BYPOSITION != 0;
+    let item = if by_pos {
+        items.get_mut(u_position as usize)
+    } else {
+        items.iter_mut().find(|it| it.id_or_submenu as u32 == u_position)
+    };
+    let item = match item {
+        Some(it) => it,
+        None => return 0,
+    };
+    // Update flags (preserve internal bits, apply new public bits).
+    item.flags = u_flags & !(MF_BYPOSITION);
+    item.id_or_submenu = u_id_new_item;
+    if u_flags & MF_SEPARATOR == 0 && !lp_new_item.is_null() {
+        let mut len = 0usize;
+        while len < crate::defs::MAX_GUEST_STR_LEN && unsafe { *lp_new_item.add(len) } != 0 {
+            len += 1;
+        }
+        let slice = unsafe { std::slice::from_raw_parts(lp_new_item, len) };
+        item.text = String::from_utf16_lossy(slice).into();
+    }
+    1 // TRUE
+}
+
+/// GetMenuItemID: return the command ID of a menu item at a given position.
+///
+/// Wine ref: dlls/user32/menu.c — GetMenuItemID returns item->wID for command
+/// items; returns (UINT)-1 for popup submenus (per Win32 spec).
+pub extern "win64" fn get_menu_item_id(h_menu: usize, n_pos: i32) -> u32 {
+    if n_pos < 0 {
+        return u32::MAX;
+    }
+    let m = menus().lock().unwrap();
+    let items = match m.menus.get(&h_menu) {
+        Some(v) => v,
+        None => return u32::MAX,
+    };
+    match items.get(n_pos as usize) {
+        Some(item) if item.flags & MF_POPUP == 0 => item.id_or_submenu as u32,
+        _ => u32::MAX, // not found or is a popup
+    }
+}
+
+/// GetSubMenu: return the HMENU of a popup submenu at a given position.
+///
+/// Wine ref: dlls/user32/menu.c — GetSubMenu returns item->hSubMenu when
+/// item->fType & MF_POPUP; NULL otherwise.
+pub extern "win64" fn get_sub_menu(h_menu: usize, n_pos: i32) -> usize {
+    if n_pos < 0 {
+        return 0;
+    }
+    let m = menus().lock().unwrap();
+    let items = match m.menus.get(&h_menu) {
+        Some(v) => v,
+        None => return 0,
+    };
+    match items.get(n_pos as usize) {
+        Some(item) if item.flags & MF_POPUP != 0 => item.id_or_submenu,
+        _ => 0,
+    }
+}
+
 /// GetMenuItemCount: return the number of items in a menu.
 pub extern "win64" fn get_menu_item_count(h_menu: usize) -> i32 {
     let m = menus().lock().unwrap();
