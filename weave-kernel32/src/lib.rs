@@ -741,15 +741,16 @@ pub unsafe extern "win64" fn duplicate_handle(
 
 /// ProcessIdToSessionId: get the session ID for a process.
 ///
-/// Stub: write 0 to `*p_session_id` if non-null. Return TRUE.
 /// # Safety
 /// `p_session_id` must be a valid writable pointer or NULL.
+// Wine ref: dlls/kernel32/process.c — session 0 is reserved for the system/service session;
+// interactive user sessions begin at session 1. Returns TRUE on success.
 pub unsafe extern "win64" fn process_id_to_session_id(
     _dw_process_id: u32,
     p_session_id: *mut u32,
 ) -> i32 {
     if !p_session_id.is_null() {
-        unsafe { *p_session_id = 0 };
+        unsafe { *p_session_id = 1 };
     }
     1 // TRUE
 }
@@ -5131,6 +5132,8 @@ pub unsafe extern "win64" fn create_thread(
 }
 
 /// GetThreadPriority — returns THREAD_PRIORITY_NORMAL (0).
+// Wine ref: dlls/kernel32/thread.c — valid priority range is [-15, 15]; THREAD_PRIORITY_NORMAL
+// is 0, returned as the default for threads not explicitly assigned a priority.
 pub extern "win64" fn get_thread_priority(_h_thread: usize) -> i32 {
     0 // THREAD_PRIORITY_NORMAL
 }
@@ -5179,6 +5182,8 @@ pub unsafe extern "win64" fn open_process(
 ///
 /// # Safety
 /// Output pointers must be valid and writable or NULL.
+// Wine ref: dlls/kernel32/process.c — process affinity mask must be a subset of the system
+// affinity mask; both reported as 1 for single-CPU environments. Returns TRUE on success.
 pub unsafe extern "win64" fn get_process_affinity_mask(
     _h_process: usize,
     lp_process_affinity_mask: *mut usize,
