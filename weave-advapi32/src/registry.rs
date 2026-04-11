@@ -679,10 +679,40 @@ pub unsafe extern "win64" fn reg_delete_key_w(h_key: usize, lp_sub_key: *const u
         return ERROR_FILE_NOT_FOUND;
     }
 
-    match std::fs::remove_dir_all(&key_path) {
+    match remove_dir_no_follow(&key_path) {
         Ok(_) => ERROR_SUCCESS,
         Err(_) => ERROR_FILE_NOT_FOUND,
     }
+}
+
+/// Recursively delete a directory tree without following symlinks.
+///
+/// `std::fs::remove_dir_all` follows symlinks on some platforms, which
+/// could allow a symlink planted inside the registry directory tree to
+/// escape the prefix and delete host paths.  This implementation uses
+/// `symlink_metadata` (no follow) to detect and skip symlinks rather
+/// than descending into them.
+fn remove_dir_no_follow(path: &std::path::Path) -> std::io::Result<()> {
+    let meta = path.symlink_metadata()?;
+    if meta.is_symlink() {
+        // Refuse to delete through a symlink — this should never appear in
+        // Weave's registry tree, so treat it as a permissions error.
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "refusing to remove symlink in registry tree",
+        ));
+    }
+    for entry in std::fs::read_dir(path)? {
+        let entry = entry?;
+        let child_meta = entry.path().symlink_metadata()?;
+        if child_meta.is_dir() && !child_meta.is_symlink() {
+            remove_dir_no_follow(&entry.path())?;
+        } else {
+            // File or symlink — remove without following.
+            std::fs::remove_file(entry.path())?;
+        }
+    }
+    std::fs::remove_dir(path)
 }
 
 // ── RegEnumKeyExW ─────────────────────────────────────────────────────────────
@@ -1593,11 +1623,14 @@ pub fn resolve(func: &str) -> Option<usize> {
 
 // ── Crypto stubs ──────────────────────────────────────────────────────────────
 
-/// SystemFunction036 — RtlGenRandom; fills a buffer with pseudo-random bytes.
+/// SystemFunction036 — RtlGenRandom; fills a buffer with cryptographically
+/// random bytes via the Linux `getrandom(2)` syscall (flags=0, GRND_DEFAULT:
+/// blocks until the urandom pool is seeded, then returns non-blocking).
 ///
-/// Used by 7-Zip and other apps for random seed generation. This stub fills
-/// the buffer with bytes from `rand()` — not cryptographically secure but
-/// sufficient for seeding hash tables and salt generation in a compatibility layer.
+/// Wine ref: dlls/advapi32/crypt.c — RtlGenRandom delegates directly to
+/// NtQuerySystemInformation(SystemInterruptInformation) on NT; on Linux Wine
+/// uses /dev/urandom; we use getrandom(2) which is the modern equivalent
+/// and avoids fd management inside the sandbox.
 ///
 /// # Safety
 /// `random_buffer` must be a writable buffer of at least `random_buffer_length` bytes.
@@ -1608,12 +1641,16 @@ pub unsafe extern "win64" fn system_function_036(
     if random_buffer.is_null() || random_buffer_length == 0 {
         return 0; // FALSE
     }
-    for i in 0..random_buffer_length as usize {
-        // SAFETY: random_buffer is non-null (checked above) and the Win32 API contract
-        // for RtlGenRandom requires callers to supply a writable buffer of at least
-        // random_buffer_length bytes.  The index `i` stays within [0, random_buffer_length)
-        // so every write is within the declared buffer bounds.
-        unsafe { *random_buffer.add(i) = (libc::rand() & 0xFF) as u8 };
+    let len = random_buffer_length as usize;
+    // SAFETY: random_buffer is non-null (checked above) and the Win32 API contract
+    // for RtlGenRandom requires callers to supply a writable buffer of at least
+    // random_buffer_length bytes.  getrandom(2) writes exactly `len` bytes on
+    // success (for len ≤ 256 it is atomic and never short-reads).
+    let ret = unsafe {
+        libc::getrandom(random_buffer as *mut libc::c_void, len, 0)
+    };
+    if ret < 0 || ret as usize != len {
+        return 0; // FALSE — getrandom failed (should not happen in practice)
     }
     1 // TRUE
 }

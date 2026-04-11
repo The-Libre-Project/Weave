@@ -499,6 +499,7 @@ pub unsafe extern "win64" fn virtual_alloc(
     // non-null, MAP_FIXED_NOREPLACE ensures mmap returns MAP_FAILED instead of
     // silently remapping an existing allocation — the caller must handle the failure.
     // dw_size > 0 is enforced by the early-return above.
+    // Sandbox: fd=-1 + MAP_ANONYMOUS only — no fd-backed mapping; no Landlock escape path.
     let result = if lp_address.is_null() {
         unsafe {
             libc::mmap(
