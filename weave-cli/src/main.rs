@@ -206,7 +206,14 @@ fn main() {
     eprintln!("weave: imports resolved");
 
     // ── 4. Apply filesystem sandbox ───────────────────────────────────────
-    weave_sandbox::apply(!args.no_sandbox);
+    // Allowlist the exe's own directory for read-only access so apps can open
+    // config files, data files, and DLLs that live beside the executable.
+    // All other filesystem paths remain denied by default.
+    let exe_abs = args.exe.canonicalize().unwrap_or_else(|_| args.exe.clone());
+    let exe_dir = exe_abs
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."));
+    weave_sandbox::apply(!args.no_sandbox, &[exe_dir]);
 
     // ── 5. Initialise TEB / PEB / TLS ────────────────────────────────────
     let _teb = teb::setup(&image).unwrap_or_else(|e| {
