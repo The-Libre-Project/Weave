@@ -215,14 +215,19 @@ pub unsafe extern "win64" fn create_window_ex_w(
         }
     };
 
-    // Default size if CW_USEDEFAULT (0x80000000 as i32).
-    let width = if n_width == i32::MIN {
-        640
+    // Default size for CW_USEDEFAULT (0x80000000 as i32) and for top-level windows
+    // created with zero size (e.g. NPP reads window size from config; when config is
+    // absent it passes 0×0, intending the OS to supply a default).
+    // Wine ref: dlls/win32u/window.c::NtUserCreateWindowEx — CW_USEDEFAULT is only
+    // valid for top-level windows; for child windows a 0-size is left at 0.
+    let is_toplevel = (dw_style & WS_CHILD) == 0;
+    let width = if n_width == i32::MIN || (is_toplevel && n_width <= 0) {
+        800
     } else {
         n_width.max(1)
     } as u32;
-    let height = if n_height == i32::MIN {
-        480
+    let height = if n_height == i32::MIN || (is_toplevel && n_height <= 0) {
+        600
     } else {
         n_height.max(1)
     } as u32;
@@ -2435,9 +2440,54 @@ pub unsafe extern "win64" fn dialog_box_param_a(
     2 // IDCANCEL
 }
 
+/// CreateDialogParamW: create a modeless dialog box.
+///
+/// Wine ref: dlls/user32/dialog.c::CreateDialogParamW — loads dialog template from PE
+/// resources, creates dialog window, calls WM_INITDIALOG with dw_init_param as lParam.
+/// Weave cannot parse PE dialog templates, so we create a minimal invisible window with
+/// the given DLGPROC and call WM_INITDIALOG, satisfying the non-NULL return requirement.
+///
+/// # Safety
+/// `lp_dialog_func` must be a valid `DLGPROC` if non-zero.
+pub unsafe extern "win64" fn create_dialog_param_w(
+    _h_instance: usize,
+    _lp_template_name: *const u16,
+    hwnd_parent: usize,
+    lp_dialog_func: usize,
+    dw_init_param: isize,
+) -> usize {
+    if lp_dialog_func == 0 {
+        return 0;
+    }
+    // Create a minimal invisible window in the window table with the DLGPROC as wnd_proc.
+    // No X11 window is created (xcb_id=0) — dialog is purely logical.
+    let hwnd = window::create(window::WindowEntry {
+        class_name: "#32770".to_string(),
+        wnd_proc: lp_dialog_func,
+        title: String::new(),
+        style: 0x4000_0000, // WS_CLIPSIBLINGS
+        x: 0,
+        y: 0,
+        width: 1,
+        height: 1,
+        visible: false,
+        xcb_id: 0,
+        h_menu: 0,
+    });
+    // Call WM_INITDIALOG (0x0110) with hwnd_parent as wParam, dw_init_param as lParam.
+    // Wine ref: dlls/user32/dialog.c — WM_INITDIALOG return value is ignored for
+    // CreateDialogParam (only used by DialogBox modal variant).
+    let fn_ptr: unsafe extern "win64" fn(usize, u32, usize, isize) -> i32 =
+        unsafe { std::mem::transmute(lp_dialog_func) };
+    let _ = unsafe { fn_ptr(hwnd, 0x0110, hwnd_parent, dw_init_param) };
+    eprintln!("weave/user32: CreateDialogParamW → hwnd={hwnd:#x}");
+    hwnd
+}
+
 /// CreateDialogParamA: create a modeless dialog box.
 ///
-/// Returns NULL — Weave does not implement dialog templates.
+/// Wine ref: dlls/user32/dialog.c::CreateDialogParamA — converts template name to wide
+/// and delegates to CreateDialogParamW. Weave: same minimal stub as the W variant.
 ///
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.

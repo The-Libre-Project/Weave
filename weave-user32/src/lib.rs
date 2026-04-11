@@ -861,6 +861,10 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
             create_dialog_param_a as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const ()
                 as usize,
         ),
+        "CreateDialogParamW" => Some(
+            create_dialog_param_w as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const ()
+                as usize,
+        ),
         "EndDialog" => Some(end_dialog as *const () as usize),
         "GetDlgItem" => Some(get_dlg_item as *const () as usize),
         "GetDlgItemTextA" => Some(
