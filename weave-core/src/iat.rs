@@ -33,7 +33,7 @@ pub unsafe fn patch(
     base: *mut u8,
     resolve: impl Fn(&str, &str) -> Option<usize>,
 ) -> Result<(), String> {
-    patch_inner(bytes, base, resolve, false, |_, _| {})
+    patch_inner(bytes, base, resolve, false, |_, _, _| {})
 }
 
 /// Safe no-op stub written into IAT slots that we cannot resolve.
@@ -42,25 +42,53 @@ pub unsafe fn patch(
 /// crash when pre-loaded DLLs (e.g. DXVK) call an import that Weave has no
 /// stub for — they will get a failure result instead of jumping into garbage.
 ///
-/// Logs the caller's return address so the call site can be identified in a
-/// disassembly — this is the only way to know which unresolved function was
-/// invoked, since all unresolved slots share this single stub.
+/// Logs the caller's return address AND the value of rax at call time.  For
+/// indirect virtual calls of the form `call [rax+N]`, rax holds the vtable
+/// pointer and rax+N is the IAT slot — logging rax lets us identify which
+/// specific IAT slot was dispatched through.
+///
+/// Must be a naked function: a normal function prologue adjusts RSP before
+/// any inline asm runs, so `[rsp]` would read a saved register or shadow
+/// space rather than the actual return address pushed by the caller's CALL.
 #[cfg(target_arch = "x86_64")]
 #[allow(unused)]
-pub extern "win64" fn unresolved_import_stub() -> u64 {
-    let ret_addr: usize;
-    // SAFETY: reads [RSP] — the return address pushed by the CALL instruction
-    // that jumped here. `nostack` is set because we do not move RSP; `readonly`
-    // because we only read the stack, never write.
-    unsafe {
-        std::arch::asm!(
-            "mov {}, [rsp]",
-            out(reg) ret_addr,
-            options(nostack, readonly)
-        );
-    }
-    eprintln!("weave: unresolved_import_stub called (ret={ret_addr:#x})");
-    0
+#[unsafe(naked)]
+pub unsafe extern "win64" fn unresolved_import_stub() -> u64 {
+    // On entry (naked — no prologue):
+    //   [rsp] = return address of caller
+    //   rax   = whatever the caller had in rax (for `call [rax+N]` patterns,
+    //           this is the vtable/function-table pointer; rax+N is the IAT slot)
+    //   rcx, rdx, r8, r9 = caller's first four arguments (preserved for ABI)
+    core::arch::naked_asm!(
+        // Save rax (vtable pointer) before we clobber it reading [rsp].
+        "mov  r10, rax",
+        // Read return address from top of stack.
+        "mov  rax, [rsp]",
+        // Allocate shadow space + 16-byte align.
+        "sub  rsp, 0x28",
+        // arg1 (rcx) = return address
+        "mov  rcx, rax",
+        // arg2 (rdx) = original rax (vtable / base pointer)
+        "mov  rdx, r10",
+        "call {log}",
+        // Return 0 for all unresolved imports.
+        "xor  eax, eax",
+        "add  rsp, 0x28",
+        "ret",
+        log = sym unresolved_import_stub_log,
+    )
+}
+
+/// Logging half of `unresolved_import_stub` — called from the naked trampoline.
+///
+/// `ret_addr` is the instruction after the call into this stub (inside the
+/// calling code).  `rax_at_call` is the value of rax at stub entry — for a
+/// virtual-dispatch pattern `call [rax+N]`, this is the vtable pointer and
+/// `rax_at_call + N` is the IAT slot that was patched.
+extern "win64" fn unresolved_import_stub_log(ret_addr: usize, rax_at_call: usize) {
+    eprintln!(
+        "weave: unresolved_import_stub called (ret={ret_addr:#x}, rax={rax_at_call:#x})"
+    );
 }
 
 /// Like `patch`, but skips unresolved imports rather than failing.
@@ -76,11 +104,18 @@ pub extern "win64" fn unresolved_import_stub() -> u64 {
 ///
 /// # Safety
 /// `base` must point to a fully loaded PE image with valid import descriptors.
+/// The `on_miss` callback receives `(dll_name, func_name, iat_slot_va)` where
+/// `iat_slot_va` is the absolute virtual address of the unresolved IAT slot
+/// (image_base + RVA).  This can be used to correlate unresolved imports with
+/// observed `unresolved_import_stub` calls: if a stub call logs
+/// `rax=V`, the calling instruction was `call [rax+N]`, so the IAT slot is
+/// `V+N`.  Comparing `V+N` against the reported `iat_slot_va` values
+/// identifies which specific import was dispatched.
 pub unsafe fn patch_best_effort(
     bytes: &[u8],
     base: *mut u8,
     resolve: impl Fn(&str, &str) -> Option<usize>,
-    on_miss: impl FnMut(&str, &str),
+    on_miss: impl FnMut(&str, &str, usize),
 ) {
     let _ = patch_inner(bytes, base, resolve, true, on_miss);
 }
@@ -90,7 +125,7 @@ unsafe fn patch_inner(
     base: *mut u8,
     resolve: impl Fn(&str, &str) -> Option<usize>,
     lenient: bool,
-    mut on_miss: impl FnMut(&str, &str),
+    mut on_miss: impl FnMut(&str, &str, usize),
 ) -> Result<(), String> {
     let pe = PE::parse(bytes).map_err(|e| format!("IAT patch: parse error: {e}"))?;
 
@@ -166,7 +201,8 @@ unsafe fn patch_inner(
                     std::ptr::write_unaligned(base.add(iat_rva + i * 8) as *mut u64, addr as u64);
                 },
                 None if lenient => {
-                    on_miss(&dll_name, &func_name);
+                    let iat_slot_va = base as usize + iat_rva + i * 8;
+                    on_miss(&dll_name, &func_name, iat_slot_va);
                     // Write a safe no-op stub so the DLL won't crash if it
                     // calls this import.  The stub returns 0 (NULL/FALSE/error)
                     // which the caller should treat as a failure.
