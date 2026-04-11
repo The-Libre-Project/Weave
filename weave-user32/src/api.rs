@@ -330,6 +330,23 @@ pub extern "win64" fn show_window(hwnd: usize, n_cmd_show: i32) -> i32 {
     window::with_mut(hwnd, |e| e.visible = show);
     backend::show_window(xcb, show);
 
+    // Win32 invalid-region model: when a window first becomes visible the OS marks
+    // its entire client area dirty, causing WM_PAINT to be synthesised by the next
+    // GetMessage call.  We replicate this by posting WM_PAINT immediately so that
+    // the message loop doesn't have to wait for an X11 Expose event.
+    if show && !was_visible && hwnd != 0 {
+        eprintln!("weave/user32: ShowWindow → posting WM_PAINT to hwnd={hwnd:#x}");
+        queue::post(MsgEntry {
+            hwnd,
+            message: WM_PAINT,
+            w_param: 0,
+            l_param: 0,
+            time: 0,
+            pt_x: 0,
+            pt_y: 0,
+        });
+    }
+
     was_visible as i32
 }
 
@@ -399,6 +416,11 @@ pub unsafe extern "win64" fn get_message_w(
 
     // Wait for a message: keep pumping X11 events until the queue has one.
     static GM_COUNT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    static GM_ENTRY: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let entry_n = GM_ENTRY.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    if entry_n < 5 {
+        eprintln!("weave/GetMessageW: entry #{entry_n}");
+    }
     loop {
         if let Some(entry) = queue::pop() {
             let n = GM_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
