@@ -1597,8 +1597,7 @@ pub unsafe extern "win64" fn create_file_w(
         }
     };
     {
-        static CFW: std::sync::atomic::AtomicU32 =
-            std::sync::atomic::AtomicU32::new(0);
+        static CFW: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
         let n = CFW.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let ok = result != usize::MAX;
         let path_lc = win_path.to_ascii_lowercase();
@@ -1656,8 +1655,10 @@ pub unsafe extern "win64" fn read_file(
             static RF: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
             let rn = RF.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             // Log first 20 reads, or any small read (<=512 bytes, likely a text file like test.py).
-            if n > 0 && (rn < 20 || (n > 0 && n <= 512)) {
-                eprintln!("weave/kernel32: ReadFile#{rn} fd={fd} n_req={n_bytes_to_read} n_read={n}");
+            if (n <= 512 || rn < 20) && n > 0 {
+                eprintln!(
+                    "weave/kernel32: ReadFile#{rn} fd={fd} n_req={n_bytes_to_read} n_read={n}"
+                );
             }
         }
         LAST_ERROR.with(|e| e.set(0));
@@ -6626,9 +6627,15 @@ pub extern "win64" fn decode_pointer(ptr: usize) -> usize {
 const FLS_MAX_SLOTS: usize = 128;
 const FLS_OUT_OF_INDEXES: u32 = 0xFFFFFFFF;
 
-/// Fiber Local Storage data and usage tracking.
-static mut FLS_DATA: [usize; FLS_MAX_SLOTS] = [0; FLS_MAX_SLOTS];
-static mut FLS_USED: [bool; FLS_MAX_SLOTS] = [false; FLS_MAX_SLOTS];
+/// Process-global slot allocation table; guards FlsAlloc / FlsFree only.
+static FLS_SLOTS: std::sync::Mutex<[bool; FLS_MAX_SLOTS]> =
+    std::sync::Mutex::new([false; FLS_MAX_SLOTS]);
+
+// Per-thread fiber local storage values; each thread gets its own array.
+thread_local! {
+    static FLS_DATA: std::cell::RefCell<[usize; FLS_MAX_SLOTS]> =
+        const { std::cell::RefCell::new([0; FLS_MAX_SLOTS]) };
+}
 
 /// FlsAlloc: allocate a fiber local storage slot.
 ///
@@ -6637,49 +6644,50 @@ static mut FLS_USED: [bool; FLS_MAX_SLOTS] = [false; FLS_MAX_SLOTS];
 /// destructor callback, and returns the index. Weave uses a flat array of
 /// 128 booleans; the callback is accepted but not invoked (no fiber support).
 ///
-/// # Safety
-/// Pointer argument is accepted but not dereferenced.
-pub unsafe extern "win64" fn fls_alloc(_lp_callback: usize) -> u32 {
-    unsafe {
-        for i in 0..FLS_MAX_SLOTS {
-            if !FLS_USED[i] {
-                FLS_USED[i] = true;
-                FLS_DATA[i] = 0;
-                return i as u32;
-            }
+/// Slot allocation is process-global (protected by a Mutex); slot values are
+/// per-thread (thread_local). This matches Windows FLS semantics.
+pub extern "win64" fn fls_alloc(_lp_callback: usize) -> u32 {
+    let mut slots = FLS_SLOTS.lock().unwrap();
+    for i in 0..FLS_MAX_SLOTS {
+        if !slots[i] {
+            slots[i] = true;
+            return i as u32;
         }
-        FLS_OUT_OF_INDEXES
     }
+    FLS_OUT_OF_INDEXES
 }
 
 /// FlsGetValue: retrieve value from fiber local storage slot.
+///
+/// Values are per-thread — each thread sees its own copy at each slot index.
 pub extern "win64" fn fls_get_value(dw_fls_index: u32) -> usize {
     if dw_fls_index >= FLS_MAX_SLOTS as u32 {
         return 0;
     }
-    unsafe { FLS_DATA[dw_fls_index as usize] }
+    FLS_DATA.with(|d| d.borrow()[dw_fls_index as usize])
 }
 
 /// FlsSetValue: store value in fiber local storage slot.
+///
+/// Values are per-thread — writing from one thread does not affect others.
 pub extern "win64" fn fls_set_value(dw_fls_index: u32, lp_fls_data: usize) -> i32 {
     if dw_fls_index >= FLS_MAX_SLOTS as u32 {
         return 0; // FALSE
     }
-    unsafe {
-        FLS_DATA[dw_fls_index as usize] = lp_fls_data;
-    }
+    FLS_DATA.with(|d| d.borrow_mut()[dw_fls_index as usize] = lp_fls_data);
     1 // TRUE
 }
 
 /// FlsFree: free a fiber local storage slot.
+///
+/// Marks the slot as available in the process-global table. Does not clear
+/// per-thread values (threads using the old index after free get stale data,
+/// matching Windows behavior).
 pub extern "win64" fn fls_free(dw_fls_index: u32) -> i32 {
     if dw_fls_index >= FLS_MAX_SLOTS as u32 {
         return 0; // FALSE
     }
-    unsafe {
-        FLS_USED[dw_fls_index as usize] = false;
-        FLS_DATA[dw_fls_index as usize] = 0;
-    }
+    FLS_SLOTS.lock().unwrap()[dw_fls_index as usize] = false;
     1 // TRUE
 }
 
@@ -7388,7 +7396,14 @@ pub unsafe extern "win64" fn compare_string_ex(
         return 0;
     }
     unsafe {
-        compare_string_w(0, dw_cmp_flags, lp_string1, cch_count1, lp_string2, cch_count2)
+        compare_string_w(
+            0,
+            dw_cmp_flags,
+            lp_string1,
+            cch_count1,
+            lp_string2,
+            cch_count2,
+        )
     }
 }
 
@@ -7474,8 +7489,8 @@ pub unsafe extern "win64" fn lc_map_string_a(
         return out_len as i32;
     }
     let copy_len = out_len.min(cch_dest as usize);
-    for i in 0..copy_len {
-        unsafe { *lp_dest_str.add(i) = (wide_out[i] & 0xFF) as u8 };
+    for (i, &w) in wide_out.iter().enumerate().take(copy_len) {
+        unsafe { *lp_dest_str.add(i) = (w & 0xFF) as u8 };
     }
     copy_len as i32
 }
@@ -7803,8 +7818,8 @@ pub unsafe extern "win64" fn set_console_ctrl_handler(_handler_routine: usize, _
 pub fn resolve(dll: &str, func: &str) -> Option<usize> {
     // api-ms-win-* API sets forward to kernel32. Accept any such name so that
     // GetProcAddress on a LoadLibrary'd api-ms-win-* handle finds our stubs.
-    let is_kernel32 = dll.eq_ignore_ascii_case("kernel32.dll")
-        || dll.eq_ignore_ascii_case("kernel32");
+    let is_kernel32 =
+        dll.eq_ignore_ascii_case("kernel32.dll") || dll.eq_ignore_ascii_case("kernel32");
     let is_apiset = dll.to_ascii_lowercase().starts_with("api-ms-win-");
     if !is_kernel32 && !is_apiset {
         return None;
@@ -8608,14 +8623,16 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
             get_string_type_ex_a as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const ()
                 as usize,
         ),
-        "AreFileApisANSI" => Some(are_file_apis_ansi as extern "win64" fn() -> _ as *const () as usize),
+        "AreFileApisANSI" => {
+            Some(are_file_apis_ansi as extern "win64" fn() -> _ as *const () as usize)
+        }
         "CompareStringEx" => Some(
-            compare_string_ex
-                as unsafe extern "win64" fn(_, _, _, _, _, _, _, _, _) -> _ as *const () as usize,
+            compare_string_ex as unsafe extern "win64" fn(_, _, _, _, _, _, _, _, _) -> _
+                as *const () as usize,
         ),
         "LCMapStringEx" => Some(
-            lc_map_string_ex
-                as unsafe extern "win64" fn(_, _, _, _, _, _, _, _, _) -> _ as *const () as usize,
+            lc_map_string_ex as unsafe extern "win64" fn(_, _, _, _, _, _, _, _, _) -> _
+                as *const () as usize,
         ),
         "LCMapStringA" => Some(
             lc_map_string_a as unsafe extern "win64" fn(_, _, _, _, _, _) -> _ as *const ()

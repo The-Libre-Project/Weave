@@ -747,7 +747,9 @@ pub extern "win64" fn post_message_w(hwnd: usize, msg: u32, w_param: usize, l_pa
     // Log WM_USER+ messages (>= 0x0400 = 1024) — these are app-defined messages, often
     // used by NPP to schedule operations like file loading.
     if msg >= 0x0400 {
-        eprintln!("weave/user32: PostMessageW hwnd={hwnd:#x} msg={msg} wp={w_param:#x} lp={l_param:#x}");
+        eprintln!(
+            "weave/user32: PostMessageW hwnd={hwnd:#x} msg={msg} wp={w_param:#x} lp={l_param:#x}"
+        );
     }
     queue::post(MsgEntry {
         hwnd,
@@ -781,7 +783,7 @@ pub extern "win64" fn send_message_w(
     let ret = call_wnd_proc(proc_addr, hwnd, msg, w_param, l_param);
     // Log SCI range, WM_USER+ app messages, and WM_NOTIFY (Scintilla modification signal).
     const WM_NOTIFY: u32 = 0x004E;
-    if (2000..=2200).contains(&msg) || (msg >= 0x0400 && msg < 2000) || msg == WM_NOTIFY {
+    if (2000..=2200).contains(&msg) || (0x0400..2000).contains(&msg) || msg == WM_NOTIFY {
         let xcb = window::xcb_id(hwnd);
         eprintln!("weave/user32: SendMessageW hwnd={hwnd:#x} xcb={xcb:#x} msg={msg} → {ret:#x}");
     }
@@ -1022,7 +1024,7 @@ pub unsafe extern "win64" fn begin_paint(hwnd: usize, lp_paint: *mut PaintStruct
         static BP_SCI: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
         let n = BP_SCI.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let is_sci = window::with(hwnd, |e| e.class_name == "Scintilla").unwrap_or(false);
-        if is_sci && (n < 20 || n % 5 == 0) {
+        if is_sci && (n < 20 || n.is_multiple_of(5)) {
             let doc_len = send_message_w(hwnd, 2006, 0, 0); // SCI_GETLENGTH
             let status = send_message_w(hwnd, 2173, 0, 0); // SCI_GETSTATUS (0=ok, non-zero=error)
             let xcb = window::xcb_id(hwnd);
@@ -1468,16 +1470,13 @@ pub extern "win64" fn get_window_long_ptr_w(hwnd: usize, n_index: i32) -> isize 
                 0,
             );
             {
-                static GWLP: std::sync::atomic::AtomicU32 =
-                    std::sync::atomic::AtomicU32::new(0);
-                let is_sci = window::with(hwnd, |e| e.class_name == "Scintilla")
-                    .unwrap_or(false);
-                if is_sci && offset == 0
+                static GWLP: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+                let is_sci = window::with(hwnd, |e| e.class_name == "Scintilla").unwrap_or(false);
+                if is_sci
+                    && offset == 0
                     && GWLP.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 8
                 {
-                    eprintln!(
-                        "weave/user32: GetWindowLongPtr hwnd={hwnd:#x} offset=0 → {val:#x}"
-                    );
+                    eprintln!("weave/user32: GetWindowLongPtr hwnd={hwnd:#x} offset=0 → {val:#x}");
                 }
             }
             val

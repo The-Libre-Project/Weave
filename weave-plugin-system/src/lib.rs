@@ -65,10 +65,15 @@ unsafe extern "C" fn register_override(
     func_len: usize,
     addr: usize,
 ) {
-    let dll_str =
-        unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(dll, dll_len)) };
-    let func_str =
-        unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(func, func_len)) };
+    let dll_str = match std::str::from_utf8(unsafe { std::slice::from_raw_parts(dll, dll_len) }) {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    let func_str = match std::str::from_utf8(unsafe { std::slice::from_raw_parts(func, func_len) })
+    {
+        Ok(s) => s,
+        Err(_) => return,
+    };
     overrides()
         .lock()
         .unwrap()

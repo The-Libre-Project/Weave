@@ -52,7 +52,7 @@ static ARGV0_STR: &[u8] = b"weave\0";
 static mut ARGV_ARRAY: [usize; 2] = [0; 2];
 // char** = pointer to ARGV_ARRAY[0]; stored here so we can return &ARGV_VAR.
 static mut ARGV_VAR: usize = 0;
-static ARGV_INIT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static ARGV_ONCE: std::sync::Once = std::sync::Once::new();
 
 /// Fake FILE — enough storage that the CRT doesn't stray out of bounds.
 /// The CRT only calls setvbuf / fflush on these; both are no-ops.
@@ -169,13 +169,11 @@ pub extern "win64" fn p___argc() -> *mut i32 {
 /// # Safety
 /// Initialises static argv state on first call (single-threaded, safe in Phase 1).
 pub unsafe extern "win64" fn p___argv() -> *mut *mut u8 {
-    if !ARGV_INIT.swap(true, Ordering::Relaxed) {
-        unsafe {
-            ARGV_ARRAY[0] = ARGV0_STR.as_ptr() as usize;
-            ARGV_ARRAY[1] = 0;
-            ARGV_VAR = std::ptr::addr_of!(ARGV_ARRAY) as usize;
-        }
-    }
+    ARGV_ONCE.call_once(|| unsafe {
+        ARGV_ARRAY[0] = ARGV0_STR.as_ptr() as usize;
+        ARGV_ARRAY[1] = 0;
+        ARGV_VAR = std::ptr::addr_of!(ARGV_ARRAY) as usize;
+    });
     // Return &ARGV_VAR (char ***), which the CRT dereferences to get char**.
     std::ptr::addr_of_mut!(ARGV_VAR).cast::<*mut u8>()
 }

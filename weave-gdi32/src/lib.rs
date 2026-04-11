@@ -280,7 +280,13 @@ pub unsafe extern "win64" fn fill_rect(hdc: usize, lp_rc: *const Rect, h_brush: 
         static FR: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
         if FR.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 3 {
             let xcb = dc::with(hdc, |dc| dc.drawable());
-            eprintln!("weave/gdi32: FillRect hdc={hdc:#x} xcb={xcb:#x} ({},{}) {}x{}", rc.left, rc.top, rc.right-rc.left, rc.bottom-rc.top);
+            eprintln!(
+                "weave/gdi32: FillRect hdc={hdc:#x} xcb={xcb:#x} ({},{}) {}x{}",
+                rc.left,
+                rc.top,
+                rc.right - rc.left,
+                rc.bottom - rc.top
+            );
         }
     }
     let (dx, dy) = dc::with(hdc, |dc| dc.lp_to_device(rc.left, rc.top));
@@ -565,7 +571,9 @@ pub unsafe extern "win64" fn ext_text_out_w(
         let n = ETO_ALL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         // Always log if: first 20 calls, OR c>0 (actual text), OR xcb matches known Scintilla pixmaps
         if n < 20 || c > 0 || xcb >= 0x2006a0 {
-            eprintln!("weave/gdi32: ExtTextOutW#{n} hdc={hdc:#x} xcb={xcb:#x} c={c} options={options:#x}");
+            eprintln!(
+                "weave/gdi32: ExtTextOutW#{n} hdc={hdc:#x} xcb={xcb:#x} c={c} options={options:#x}"
+            );
         }
     }
     if xcb == 0 {

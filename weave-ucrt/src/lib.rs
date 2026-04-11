@@ -865,6 +865,9 @@ pub extern "win64" fn ucrt_endthreadex(_exit_code: u32) {}
 /// register-restore path instead of the RtlUnwind path.  This is safe because
 /// our longjmp implementation does a full register restore and does not need the
 /// SEH unwind machinery.
+///
+/// # Safety
+/// `buf` must be a valid, writable pointer to a `JUMP_BUFFER` (at least 8 bytes).
 pub unsafe extern "win64" fn ucrt_intrinsic_setjmpex(
     buf: *mut c_void,
     _frame: *const c_void,
@@ -886,6 +889,10 @@ pub unsafe extern "win64" fn ucrt_intrinsic_setjmpex(
 ///   +0x40 R14   +0x48 R15  +0x50 Rip  +0x58 MxCsr  +0x5c FpCsr
 ///
 /// Win64 entry: RCX = jmp_buf ptr, EDX = retval
+///
+/// # Safety
+/// `buf` must point to a `JUMP_BUFFER` previously initialised by `setjmp`/`__intrinsic_setjmpex`.
+/// This function never returns — it restores CPU state and jumps to the saved `Rip`.
 #[unsafe(naked)]
 pub unsafe extern "win64" fn ucrt_longjmp(_buf: *mut c_void, _val: i32) -> ! {
     core::arch::naked_asm!(
@@ -894,21 +901,21 @@ pub unsafe extern "win64" fn ucrt_longjmp(_buf: *mut c_void, _val: i32) -> ! {
         "jnz   1f",
         "mov   edx, 1",
         "1:",
-        "mov   rax, rdx",                        // rax = return value
-        "mov   rbx, qword ptr [rcx + 0x08]",     // restore Rbx
-        "mov   rbp, qword ptr [rcx + 0x18]",     // restore Rbp
-        "mov   rsi, qword ptr [rcx + 0x20]",     // restore Rsi
-        "mov   rdi, qword ptr [rcx + 0x28]",     // restore Rdi
-        "mov   r12, qword ptr [rcx + 0x30]",     // restore R12
-        "mov   r13, qword ptr [rcx + 0x38]",     // restore R13
-        "mov   r14, qword ptr [rcx + 0x40]",     // restore R14
-        "mov   r15, qword ptr [rcx + 0x48]",     // restore R15
-        "mov   r11, qword ptr [rcx + 0x50]",     // r11 = saved Rip (jump target)
-        "ldmxcsr dword ptr [rcx + 0x58]",        // restore MxCsr
-        "fnclex",                                // clear FPU exceptions
-        "fldcw  word ptr [rcx + 0x5c]",          // restore FpCsr
-        "mov   rsp, qword ptr [rcx + 0x10]",     // restore Rsp LAST (rcx now invalid)
-        "jmp   r11",                              // jump to saved Rip
+        "mov   rax, rdx",                    // rax = return value
+        "mov   rbx, qword ptr [rcx + 0x08]", // restore Rbx
+        "mov   rbp, qword ptr [rcx + 0x18]", // restore Rbp
+        "mov   rsi, qword ptr [rcx + 0x20]", // restore Rsi
+        "mov   rdi, qword ptr [rcx + 0x28]", // restore Rdi
+        "mov   r12, qword ptr [rcx + 0x30]", // restore R12
+        "mov   r13, qword ptr [rcx + 0x38]", // restore R13
+        "mov   r14, qword ptr [rcx + 0x40]", // restore R14
+        "mov   r15, qword ptr [rcx + 0x48]", // restore R15
+        "mov   r11, qword ptr [rcx + 0x50]", // r11 = saved Rip (jump target)
+        "ldmxcsr dword ptr [rcx + 0x58]",    // restore MxCsr
+        "fnclex",                            // clear FPU exceptions
+        "fldcw  word ptr [rcx + 0x5c]",      // restore FpCsr
+        "mov   rsp, qword ptr [rcx + 0x10]", // restore Rsp LAST (rcx now invalid)
+        "jmp   r11",                         // jump to saved Rip
     )
 }
 
