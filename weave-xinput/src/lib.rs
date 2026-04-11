@@ -78,6 +78,22 @@ static GAMEPAD_STATES: Mutex<Option<HashMap<u32, XInputState>>> = Mutex::new(Non
 /// Monotonic packet counter — incremented on every state change.
 static PACKET_COUNTER: Mutex<u32> = Mutex::new(0);
 
+fn lock_gamepad_states<'a>(
+    m: &'a Mutex<Option<HashMap<u32, XInputState>>>,
+) -> Option<std::sync::MutexGuard<'a, Option<HashMap<u32, XInputState>>>> {
+    m.lock()
+        .map_err(|e| eprintln!("weave: weave-xinput: gamepad states mutex poisoned: {e}"))
+        .ok()
+}
+
+fn lock_packet_counter<'a>(
+    m: &'a Mutex<u32>,
+) -> Option<std::sync::MutexGuard<'a, u32>> {
+    m.lock()
+        .map_err(|e| eprintln!("weave: weave-xinput: packet counter mutex poisoned: {e}"))
+        .ok()
+}
+
 // ── Linux joystick backend ────────────────────────────────────────────────
 
 #[cfg(target_os = "linux")]
@@ -212,9 +228,20 @@ mod linux_backend {
     /// Open file descriptors for each joystick slot, keyed by slot index.
     static JOYSTICK_FDS: Mutex<Option<HashMap<u32, RawFd>>> = Mutex::new(None);
 
+    fn lock_joystick_fds<'a>(
+        m: &'a Mutex<Option<HashMap<u32, RawFd>>>,
+    ) -> Option<std::sync::MutexGuard<'a, Option<HashMap<u32, RawFd>>>> {
+        m.lock()
+            .map_err(|e| eprintln!("weave: weave-xinput: joystick fds mutex poisoned: {e}"))
+            .ok()
+    }
+
     /// Scan /dev/input/js0..js3, open each that exists, store the fds.
     pub fn init_joystick_fds() {
-        let mut fds_opt = JOYSTICK_FDS.lock().unwrap();
+        let mut fds_opt = match lock_joystick_fds(&JOYSTICK_FDS) {
+            Some(g) => g,
+            None => return,
+        };
         if fds_opt.is_none() {
             let mut map: HashMap<u32, RawFd> = HashMap::new();
             for slot in 0..4u32 {
@@ -228,7 +255,7 @@ mod linux_backend {
 
     /// Return the fd for `slot`, or None if no device is connected there.
     pub fn get_joystick_fd(slot: u32) -> Option<RawFd> {
-        let fds_opt = JOYSTICK_FDS.lock().unwrap();
+        let fds_opt = lock_joystick_fds(&JOYSTICK_FDS)?;
         fds_opt.as_ref().and_then(|m| m.get(&slot).copied())
     }
 
@@ -260,7 +287,10 @@ fn init_gamepad_states() {
     // Ensure joystick fds are opened first (Linux: scans /dev/input/js*).
     linux_backend::init_joystick_fds();
 
-    let mut states_opt = GAMEPAD_STATES.lock().unwrap();
+    let mut states_opt = match lock_gamepad_states(&GAMEPAD_STATES) {
+        Some(g) => g,
+        None => return,
+    };
     if states_opt.is_none() {
         let mut states = HashMap::new();
         for slot in 0..4u32 {
@@ -310,20 +340,22 @@ pub unsafe extern "win64" fn x_input_get_state(
 
     // Drain any new hardware events into the cached state.
     {
-        let mut states_opt = GAMEPAD_STATES.lock().unwrap();
-        if let Some(states) = states_opt.as_mut() {
-            if let Some(state) = states.get_mut(&dw_user_index) {
-                if let Some(fd) = linux_backend::get_joystick_fd(dw_user_index) {
-                    let prev_buttons = state.gamepad.w_buttons;
-                    let prev_lx = state.gamepad.s_thumb_lx;
-                    linux_backend::read_joystick_state(fd, &mut state.gamepad);
-                    // Bump packet number if anything changed.
-                    if state.gamepad.w_buttons != prev_buttons
-                        || state.gamepad.s_thumb_lx != prev_lx
-                    {
-                        let mut counter = PACKET_COUNTER.lock().unwrap();
-                        *counter += 1;
-                        state.dw_packet_number = *counter;
+        if let Some(mut states_opt) = lock_gamepad_states(&GAMEPAD_STATES) {
+            if let Some(states) = states_opt.as_mut() {
+                if let Some(state) = states.get_mut(&dw_user_index) {
+                    if let Some(fd) = linux_backend::get_joystick_fd(dw_user_index) {
+                        let prev_buttons = state.gamepad.w_buttons;
+                        let prev_lx = state.gamepad.s_thumb_lx;
+                        linux_backend::read_joystick_state(fd, &mut state.gamepad);
+                        // Bump packet number if anything changed.
+                        if state.gamepad.w_buttons != prev_buttons
+                            || state.gamepad.s_thumb_lx != prev_lx
+                        {
+                            if let Some(mut counter) = lock_packet_counter(&PACKET_COUNTER) {
+                                *counter += 1;
+                                state.dw_packet_number = *counter;
+                            }
+                        }
                     }
                 }
             }
@@ -331,7 +363,10 @@ pub unsafe extern "win64" fn x_input_get_state(
     }
 
     // Copy state to caller.
-    let states_opt = GAMEPAD_STATES.lock().unwrap();
+    let states_opt = match lock_gamepad_states(&GAMEPAD_STATES) {
+        Some(g) => g,
+        None => return ERROR_DEVICE_NOT_CONNECTED,
+    };
     if let Some(states) = states_opt.as_ref() {
         if let Some(state) = states.get(&dw_user_index) {
             *p_state = *state;
@@ -365,12 +400,16 @@ pub unsafe extern "win64" fn x_input_set_state(
     }
 
     // Acknowledge the call and bump the packet counter.
-    let mut states_opt = GAMEPAD_STATES.lock().unwrap();
+    let mut states_opt = match lock_gamepad_states(&GAMEPAD_STATES) {
+        Some(g) => g,
+        None => return ERROR_DEVICE_NOT_CONNECTED,
+    };
     if let Some(states) = states_opt.as_mut() {
         if let Some(state) = states.get_mut(&dw_user_index) {
-            let mut counter = PACKET_COUNTER.lock().unwrap();
-            *counter += 1;
-            state.dw_packet_number = *counter;
+            if let Some(mut counter) = lock_packet_counter(&PACKET_COUNTER) {
+                *counter += 1;
+                state.dw_packet_number = *counter;
+            }
             return ERROR_SUCCESS;
         }
     }

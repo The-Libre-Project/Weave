@@ -125,8 +125,27 @@ struct AudioDevice {
 
 static AUDIO_DEVICES: Mutex<Vec<AudioDevice>> = Mutex::new(Vec::new());
 
+fn lock_audio_devices<'a>(
+    m: &'a Mutex<Vec<AudioDevice>>,
+) -> Option<std::sync::MutexGuard<'a, Vec<AudioDevice>>> {
+    m.lock()
+        .map_err(|e| eprintln!("weave: weave-mmdevapi: audio devices mutex poisoned: {e}"))
+        .ok()
+}
+
+fn lock_ring_buf<'a>(
+    m: &'a Mutex<RingBuf>,
+) -> Option<std::sync::MutexGuard<'a, RingBuf>> {
+    m.lock()
+        .map_err(|e| eprintln!("weave: weave-mmdevapi: ring buf mutex poisoned: {e}"))
+        .ok()
+}
+
 fn ensure_devices_initialized() {
-    let mut devices = AUDIO_DEVICES.lock().unwrap();
+    let mut devices = match lock_audio_devices(&AUDIO_DEVICES) {
+        Some(g) => g,
+        None => return,
+    };
     if devices.is_empty() {
         devices.push(AudioDevice {
             id: "default".to_string(),
@@ -493,7 +512,10 @@ unsafe extern "win64" fn imm_device_enumerator_get_default_audio_endpoint(
     pp_endpoint: *mut *mut usize,
 ) -> i32 {
     ensure_devices_initialized();
-    let devices = AUDIO_DEVICES.lock().unwrap();
+    let devices = match lock_audio_devices(&AUDIO_DEVICES) {
+        Some(g) => g,
+        None => return -2147023728,
+    };
     if let Some(dev) = devices.iter().find(|d| d.is_default) {
         let device = Box::new(MMDevice::new(dev.clone()));
         let ptr = Box::into_raw(device) as *mut usize;
@@ -511,7 +533,10 @@ unsafe extern "win64" fn imm_device_enumerator_get_device(
     pp_device: *mut *mut usize,
 ) -> i32 {
     ensure_devices_initialized();
-    let devices = AUDIO_DEVICES.lock().unwrap();
+    let devices = match lock_audio_devices(&AUDIO_DEVICES) {
+        Some(g) => g,
+        None => return -2147023728,
+    };
     if let Some(dev) = devices.iter().find(|d| d.is_default) {
         let device = Box::new(MMDevice::new(dev.clone()));
         let ptr = Box::into_raw(device) as *mut usize;
@@ -665,7 +690,13 @@ unsafe extern "win64" fn iaudio_client_get_current_padding(
         *p_num_padding_frames = 0;
         return 0;
     }
-    let available = c.ring_buf.lock().unwrap().available;
+    let available = match lock_ring_buf(&c.ring_buf) {
+        Some(g) => g.available,
+        None => {
+            *p_num_padding_frames = 0;
+            return 0;
+        }
+    };
     *p_num_padding_frames = (available / c.frame_size) as u32;
     0
 }
@@ -813,7 +844,10 @@ unsafe extern "win64" fn iaudio_client_start(_this: *mut usize) -> i32 {
                 let raw_ptr = d.as_raw().data as *mut u8;
                 if !raw_ptr.is_null() {
                     let dst = unsafe { std::slice::from_raw_parts_mut(raw_ptr, total) };
-                    let mut ring = ring_buf.lock().unwrap();
+                    let mut ring = match lock_ring_buf(&ring_buf) {
+                        Some(g) => g,
+                        None => return,
+                    };
                     let copied = ring.read_into(dst);
                     // Silence any un-filled portion (underrun).
                     dst[copied..].fill(0);
@@ -905,7 +939,9 @@ unsafe extern "win64" fn iaudio_client_stop(_this: *mut usize) -> i32 {
 /// WASAPI requires the stream to be stopped before calling Reset.
 unsafe extern "win64" fn iaudio_client_reset(this: *mut usize) -> i32 {
     let client = &mut *(this as *mut AudioClient);
-    client.ring_buf.lock().unwrap().reset();
+    if let Some(mut ring) = lock_ring_buf(&client.ring_buf) {
+        ring.reset();
+    }
     0
 }
 
@@ -1018,7 +1054,10 @@ unsafe extern "win64" fn iaudio_render_client_release_buffer(
     const AUDCLNT_BUFFERFLAGS_SILENT: u32 = 0x0000_0002;
     let bytes = num_frames_written as usize * client.frame_size;
 
-    let mut ring = client.ring_buf.lock().unwrap();
+    let mut ring = match lock_ring_buf(&client.ring_buf) {
+        Some(g) => g,
+        None => return 0,
+    };
     let dst_ptr = match ring.write_ptr_mut(num_frames_written as usize) {
         Some(p) => p,
         None => return 0,

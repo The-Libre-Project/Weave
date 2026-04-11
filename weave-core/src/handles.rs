@@ -14,7 +14,7 @@
 //! Callers must use `STDIN_HANDLE`, `STDOUT_HANDLE`, `STDERR_HANDLE` (or call
 //! `get_fd(handle)`) — never assume a handle value equals a Linux fd number.
 
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 
 /// Offset added to a slot index to produce the public handle value.
 /// Ensures 0 (NULL) is never returned as a valid open handle.
@@ -110,6 +110,12 @@ fn table() -> &'static Mutex<HandleTable> {
     HANDLES.get_or_init(|| Mutex::new(HandleTable::new()))
 }
 
+fn lock_table<'a>(m: &'a Mutex<HandleTable>) -> Option<MutexGuard<'a, HandleTable>> {
+    m.lock()
+        .map_err(|e| eprintln!("weave: weave-core: handle table mutex poisoned: {e}"))
+        .ok()
+}
+
 // ── Public API ────────────────────────────────────────────────────────────────
 
 /// The handle value for standard input (always valid; cannot be closed).
@@ -122,19 +128,21 @@ pub const STDERR_HANDLE: usize = 2 + HANDLE_OFFSET;
 /// Allocate a new handle for the given resource. The table is initialised on
 /// first call.
 pub fn alloc(kind: HandleKind) -> usize {
-    table().lock().unwrap().alloc(kind)
+    lock_table(table())
+        .map(|mut g| g.alloc(kind))
+        .unwrap_or(0)
 }
 
 /// Return the Linux file descriptor for a handle. Returns `None` if the handle
 /// is invalid or not a file handle.
 pub fn get_fd(handle: usize) -> Option<i32> {
-    table().lock().unwrap().get_fd(handle)
+    lock_table(table())?.get_fd(handle)
 }
 
 /// Return the registry key path for a handle. Returns `None` if the handle is
 /// invalid or not a registry key handle.
 pub fn get_registry_path(handle: usize) -> Option<std::path::PathBuf> {
-    let guard = table().lock().unwrap();
+    let guard = lock_table(table())?;
     let index = handle.checked_sub(HANDLE_OFFSET)?;
     guard
         .slots
@@ -146,7 +154,9 @@ pub fn get_registry_path(handle: usize) -> Option<std::path::PathBuf> {
 /// Free a handle. Returns `true` if the handle was valid and freed.
 /// stdin/stdout/stderr handles are never freed (returns `false`).
 pub fn free(handle: usize) -> bool {
-    table().lock().unwrap().free(handle)
+    lock_table(table())
+        .map(|mut g| g.free(handle))
+        .unwrap_or(false)
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

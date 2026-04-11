@@ -11,7 +11,7 @@
 use crate::loader::LoadedImage;
 use std::collections::HashMap;
 use std::mem::ManuallyDrop;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 
 struct DllEntry {
     /// Keeps the mapped memory alive. ManuallyDrop prevents munmap on drop —
@@ -32,6 +32,14 @@ fn registry() -> &'static Mutex<HashMap<String, DllEntry>> {
     REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+fn lock_registry<'a>(
+    m: &'a Mutex<HashMap<String, DllEntry>>,
+) -> Option<MutexGuard<'a, HashMap<String, DllEntry>>> {
+    m.lock()
+        .map_err(|e| eprintln!("weave: weave-core: dll registry mutex poisoned: {e}"))
+        .ok()
+}
+
 /// Register a loaded DLL and its export table.
 ///
 /// `name` is the lowercase DLL filename (e.g. `"d3d11.dll"`).
@@ -42,7 +50,9 @@ pub fn register(name: String, image: LoadedImage, exports: HashMap<String, usize
         _image: ManuallyDrop::new(image),
         exports,
     };
-    registry().lock().unwrap().insert(name, entry);
+    if let Some(mut reg) = lock_registry(registry()) {
+        reg.insert(name, entry);
+    }
 }
 
 /// Look up a function exported by a registered DLL.
@@ -51,6 +61,6 @@ pub fn register(name: String, image: LoadedImage, exports: HashMap<String, usize
 /// Returns the absolute address of the function in the loaded image, or `None`
 /// if the DLL is not registered or the function is not found.
 pub fn lookup(dll: &str, func: &str) -> Option<usize> {
-    let reg = registry().lock().unwrap();
+    let reg = lock_registry(registry())?;
     reg.get(&dll.to_lowercase())?.exports.get(func).copied()
 }

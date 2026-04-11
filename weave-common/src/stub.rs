@@ -16,11 +16,19 @@
 //! ```
 
 use std::collections::HashSet;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 
 fn seen() -> &'static Mutex<HashSet<&'static str>> {
     static S: OnceLock<Mutex<HashSet<&'static str>>> = OnceLock::new();
     S.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+fn lock_seen<'a>(
+    m: &'a Mutex<HashSet<&'static str>>,
+) -> Option<MutexGuard<'a, HashSet<&'static str>>> {
+    m.lock()
+        .map_err(|e| eprintln!("weave: weave-common: stub-seen mutex poisoned: {e}"))
+        .ok()
 }
 
 /// Emit a one-time stderr warning for an unimplemented stub.
@@ -28,8 +36,9 @@ fn seen() -> &'static Mutex<HashSet<&'static str>> {
 /// The warning is printed at most once per `name` value per process lifetime.
 /// Subsequent calls with the same `name` are silent.
 pub fn warn_once(name: &'static str) {
-    let mut s = seen().lock().unwrap();
-    if s.insert(name) {
-        eprintln!("weave: stub not yet implemented: {name}");
+    if let Some(mut s) = lock_seen(seen()) {
+        if s.insert(name) {
+            eprintln!("weave: stub not yet implemented: {name}");
+        }
     }
 }
