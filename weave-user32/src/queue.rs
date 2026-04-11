@@ -25,24 +25,37 @@ fn queue() -> &'static Mutex<VecDeque<MsgEntry>> {
     QUEUE.get_or_init(|| Mutex::new(VecDeque::new()))
 }
 
+fn lock_queue(
+    m: &Mutex<VecDeque<MsgEntry>>,
+) -> Option<std::sync::MutexGuard<'_, VecDeque<MsgEntry>>> {
+    m.lock()
+        .map_err(|e| eprintln!("weave: user32: message queue mutex poisoned: {e}"))
+        .ok()
+}
+
 /// Push a message onto the back of the queue.
 pub fn post(msg: MsgEntry) {
-    queue().lock().unwrap().push_back(msg);
+    if let Some(mut g) = lock_queue(queue()) {
+        g.push_back(msg);
+    }
 }
 
 /// Pop the front message, returning `None` if the queue is empty.
 pub fn pop() -> Option<MsgEntry> {
-    queue().lock().unwrap().pop_front()
+    lock_queue(queue())?.pop_front()
 }
 
 /// Peek at the front message without removing it.
 pub fn peek() -> Option<MsgEntry> {
-    queue().lock().unwrap().front().cloned()
+    lock_queue(queue())?.front().cloned()
 }
 
 /// Returns `true` if the queue currently has at least one message.
 pub fn has_message() -> bool {
-    !queue().lock().unwrap().is_empty()
+    match lock_queue(queue()) {
+        Some(g) => !g.is_empty(),
+        None => false,
+    }
 }
 
 #[cfg(test)]

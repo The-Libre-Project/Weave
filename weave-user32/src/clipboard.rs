@@ -43,6 +43,12 @@ fn state() -> &'static Mutex<ClipState> {
     })
 }
 
+fn lock_state(m: &Mutex<ClipState>) -> Option<std::sync::MutexGuard<'_, ClipState>> {
+    m.lock()
+        .map_err(|e| eprintln!("weave: user32: clipboard mutex poisoned: {e}"))
+        .ok()
+}
+
 // ── Win32 clipboard format constants ──────────────────────────────────────────
 
 pub const CF_TEXT: u32 = 1;
@@ -56,7 +62,10 @@ pub const CF_HDROP: u32 = 15;
 ///
 /// Returns TRUE on success. Phase 2: always succeeds (no contention).
 pub extern "win64" fn open_clipboard(h_wnd_new_owner: usize) -> i32 {
-    let mut s = state().lock().unwrap();
+    let mut s = match lock_state(state()) {
+        Some(g) => g,
+        None => return 0,
+    };
     s.open = true;
     s.owner_hwnd = h_wnd_new_owner;
     1 // TRUE
@@ -64,7 +73,10 @@ pub extern "win64" fn open_clipboard(h_wnd_new_owner: usize) -> i32 {
 
 /// CloseClipboard: close the clipboard.
 pub extern "win64" fn close_clipboard() -> i32 {
-    let mut s = state().lock().unwrap();
+    let mut s = match lock_state(state()) {
+        Some(g) => g,
+        None => return 0,
+    };
     s.open = false;
     1 // TRUE
 }
@@ -74,7 +86,10 @@ pub extern "win64" fn close_clipboard() -> i32 {
 /// Phase 2: leaks any previously stored HGLOBAL handles (caller should
 /// have already freed them before calling EmptyClipboard).
 pub extern "win64" fn empty_clipboard() -> i32 {
-    let mut s = state().lock().unwrap();
+    let mut s = match lock_state(state()) {
+        Some(g) => g,
+        None => return 0,
+    };
     s.data.clear();
     1 // TRUE
 }
@@ -84,7 +99,10 @@ pub extern "win64" fn empty_clipboard() -> i32 {
 /// Takes ownership of `h_mem` (the caller must not use it afterwards).
 /// Returns `h_mem` on success, 0 on failure.
 pub extern "win64" fn set_clipboard_data(u_format: u32, h_mem: usize) -> usize {
-    let mut s = state().lock().unwrap();
+    let mut s = match lock_state(state()) {
+        Some(g) => g,
+        None => return 0,
+    };
     if !s.open {
         return 0;
     }
@@ -96,7 +114,10 @@ pub extern "win64" fn set_clipboard_data(u_format: u32, h_mem: usize) -> usize {
 ///
 /// Returns the stored HGLOBAL (pointer), or 0 if the format is unavailable.
 pub extern "win64" fn get_clipboard_data(u_format: u32) -> usize {
-    let s = state().lock().unwrap();
+    let s = match lock_state(state()) {
+        Some(g) => g,
+        None => return 0,
+    };
     if !s.open {
         return 0;
     }
@@ -105,18 +126,26 @@ pub extern "win64" fn get_clipboard_data(u_format: u32) -> usize {
 
 /// IsClipboardFormatAvailable: check whether a clipboard format is available.
 pub extern "win64" fn is_clipboard_format_available(u_format: u32) -> i32 {
-    let s = state().lock().unwrap();
-    s.data.contains_key(&u_format) as i32
+    match lock_state(state()) {
+        Some(s) => s.data.contains_key(&u_format) as i32,
+        None => 0,
+    }
 }
 
 /// CountClipboardFormats: return the number of formats currently on the clipboard.
 pub extern "win64" fn count_clipboard_formats() -> i32 {
-    state().lock().unwrap().data.len() as i32
+    match lock_state(state()) {
+        Some(s) => s.data.len() as i32,
+        None => 0,
+    }
 }
 
 /// GetClipboardOwner: return the HWND of the current clipboard owner.
 pub extern "win64" fn get_clipboard_owner() -> usize {
-    state().lock().unwrap().owner_hwnd
+    match lock_state(state()) {
+        Some(s) => s.owner_hwnd,
+        None => 0,
+    }
 }
 
 #[cfg(test)]
