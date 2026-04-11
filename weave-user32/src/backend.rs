@@ -19,7 +19,7 @@
 #[cfg(target_os = "linux")]
 mod inner {
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::{Mutex, OnceLock};
+    use std::sync::{Mutex, MutexGuard, OnceLock};
 
     use crate::defs::*;
     use crate::queue::{self, MsgEntry};
@@ -87,6 +87,12 @@ mod inner {
         .as_ref()
     }
 
+    fn lock_x11(m: &Mutex<X11State>) -> Option<MutexGuard<'_, X11State>> {
+        m.lock()
+            .map_err(|e| eprintln!("weave: user32: X11 mutex poisoned: {e}"))
+            .ok()
+    }
+
     /// Parse `Xft.dpi` from the X11 `RESOURCE_MANAGER` root window property.
     ///
     /// The `RESOURCE_MANAGER` property is a newline-separated list of X resource
@@ -143,7 +149,10 @@ mod inner {
     /// 3. 96 — the Windows "standard" DPI fallback.
     pub fn system_dpi() -> u32 {
         let Some(x11) = x11() else { return 96 };
-        let g = x11.lock().unwrap();
+        let g = match lock_x11(x11) {
+            Some(g) => g,
+            None => return 96,
+        };
         read_xft_dpi(&g.conn, g.root)
             .or_else(|| dpi_from_physical(g.screen_width, g.screen_width_mm))
             .unwrap_or(96)
@@ -157,9 +166,9 @@ mod inner {
     /// Screen dimensions in pixels, or a sensible fallback.
     pub fn screen_size() -> (u16, u16) {
         x11()
-            .map(|m| {
-                let g = m.lock().unwrap();
-                (g.screen_width, g.screen_height)
+            .and_then(|m| {
+                let g = lock_x11(m)?;
+                Some((g.screen_width, g.screen_height))
             })
             .unwrap_or((1920, 1080))
     }
@@ -188,7 +197,10 @@ mod inner {
                 return 0;
             }
         };
-        let g = x11.lock().unwrap();
+        let g = match lock_x11(x11) {
+            Some(g) => g,
+            None => return 0,
+        };
 
         let wid = match g.conn.generate_id() {
             Ok(id) => id,
@@ -270,7 +282,10 @@ mod inner {
             Some(m) => m,
             None => return,
         };
-        let g = x11.lock().unwrap();
+        let g = match lock_x11(x11) {
+            Some(g) => g,
+            None => return,
+        };
         if show {
             let _ = g.conn.map_window(xcb_id);
             // Win32 ShowWindow shows all visible children too.
@@ -294,7 +309,10 @@ mod inner {
             Some(m) => m,
             None => return,
         };
-        let g = x11.lock().unwrap();
+        let g = match lock_x11(x11) {
+            Some(g) => g,
+            None => return,
+        };
         let aux = ConfigureWindowAux::new()
             .x(x)
             .y(y)
@@ -313,7 +331,10 @@ mod inner {
             Some(m) => m,
             None => return 0,
         };
-        let g = x11.lock().unwrap();
+        let g = match lock_x11(x11) {
+            Some(g) => g,
+            None => return 0,
+        };
         let pid = match g.conn.generate_id() {
             Ok(id) => id,
             Err(_) => return 0,
@@ -344,7 +365,10 @@ mod inner {
             Some(m) => m,
             None => return,
         };
-        let g = x11.lock().unwrap();
+        let g = match lock_x11(x11) {
+            Some(g) => g,
+            None => return,
+        };
         let gc_id = match g.conn.generate_id() {
             Ok(id) => id,
             Err(_) => return,
@@ -381,7 +405,10 @@ mod inner {
             Some(m) => m,
             None => return,
         };
-        let g = x11.lock().unwrap();
+        let g = match lock_x11(x11) {
+            Some(g) => g,
+            None => return,
+        };
         let gc_id = match g.conn.generate_id() {
             Ok(id) => id,
             Err(_) => return,
@@ -403,7 +430,10 @@ mod inner {
             Some(m) => m,
             None => return,
         };
-        let g = x11.lock().unwrap();
+        let g = match lock_x11(x11) {
+            Some(g) => g,
+            None => return,
+        };
         let _ = g.conn.free_pixmap(pid);
         let _ = g.conn.flush();
     }
@@ -413,7 +443,10 @@ mod inner {
             Some(m) => m,
             None => return,
         };
-        let g = x11.lock().unwrap();
+        let g = match lock_x11(x11) {
+            Some(g) => g,
+            None => return,
+        };
         let _ = g.conn.destroy_window(xcb_id);
         let _ = g.conn.flush();
     }
@@ -424,7 +457,10 @@ mod inner {
             Some(m) => m,
             None => return,
         };
-        let g = x11.lock().unwrap();
+        let g = match lock_x11(x11) {
+            Some(g) => g,
+            None => return,
+        };
         let _ = g.conn.change_property8(
             PropMode::REPLACE,
             xcb_id,
@@ -447,7 +483,7 @@ mod inner {
     fn get_or_open_font() -> Option<u32> {
         *FONT_ID.get_or_init(|| {
             let x11 = x11()?;
-            let g = x11.lock().unwrap();
+            let g = lock_x11(x11)?;
             let fid = g.conn.generate_id().ok()?;
             // Try common X11 bitmap font names in order.
             for name in [b"fixed" as &[u8], b"9x15", b"6x13"] {
@@ -477,7 +513,10 @@ mod inner {
             Some(m) => m,
             None => return,
         };
-        let g = x11.lock().unwrap();
+        let g = match lock_x11(x11) {
+            Some(g) => g,
+            None => return,
+        };
         let gc_id: Gcontext = match g.conn.generate_id() {
             Ok(id) => id,
             Err(_) => return,
@@ -508,7 +547,10 @@ mod inner {
             Some(m) => m,
             None => return,
         };
-        let g = x11.lock().unwrap();
+        let g = match lock_x11(x11) {
+            Some(g) => g,
+            None => return,
+        };
         let gc_id: Gcontext = match g.conn.generate_id() {
             Ok(id) => id,
             Err(_) => return,
@@ -546,7 +588,10 @@ mod inner {
             Some(m) => m,
             None => return,
         };
-        let g = x11.lock().unwrap();
+        let g = match lock_x11(x11) {
+            Some(g) => g,
+            None => return,
+        };
         let gc_id: Gcontext = match g.conn.generate_id() {
             Ok(id) => id,
             Err(_) => return,
@@ -594,7 +639,10 @@ mod inner {
                 Some(m) => m,
                 None => return,
             };
-            let g = x11.lock().unwrap();
+            let g = match lock_x11(x11) {
+                Some(g) => g,
+                None => return,
+            };
             let gc_id: Gcontext = match g.conn.generate_id() {
                 Ok(id) => id,
                 Err(_) => return,
@@ -757,7 +805,10 @@ mod inner {
             None => return false,
         };
         let event = {
-            let g = x11.lock().unwrap();
+            let g = match lock_x11(x11) {
+                Some(g) => g,
+                None => return false,
+            };
             match g.conn.poll_for_event() {
                 Ok(Some(ev)) => ev,
                 _ => return false,
@@ -775,7 +826,10 @@ mod inner {
             None => return false,
         };
         let event = {
-            let g = x11.lock().unwrap();
+            let g = match lock_x11(x11) {
+                Some(g) => g,
+                None => return false,
+            };
             match g.conn.wait_for_event() {
                 Ok(ev) => ev,
                 Err(_) => return false,
@@ -787,7 +841,10 @@ mod inner {
 
     /// Translate one X11 event into one or more Win32 queue messages.
     fn translate_event(event: Event, x11: &Mutex<X11State>) {
-        let wm_delete_window = x11.lock().unwrap().atoms.WM_DELETE_WINDOW;
+        let wm_delete_window = match lock_x11(x11) {
+            Some(g) => g.atoms.WM_DELETE_WINDOW,
+            None => return,
+        };
 
         match event {
             Event::ClientMessage(ev) => {

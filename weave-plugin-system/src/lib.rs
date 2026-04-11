@@ -192,21 +192,19 @@ mod tests {
     fn test_load_plugins_empty_dir() {
         // load_plugins with an empty directory must return without panicking
         // and must not register any overrides.
-        let dir = std::env::temp_dir().join("weave-plugin-test-empty");
-        std::fs::create_dir_all(&dir).ok();
-        load_plugins(&dir);
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path();
+        load_plugins(dir);
         assert!(lookup("any.dll", "AnyFunc").is_none());
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
     fn test_load_plugins_ignores_non_so_files() {
         // Files without a .so extension must be silently skipped.
-        let dir = std::env::temp_dir().join("weave-plugin-test-non-so");
-        std::fs::create_dir_all(&dir).ok();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path();
         std::fs::write(dir.join("not_a_plugin.txt"), b"hello").ok();
         std::fs::write(dir.join("not_a_plugin.dll"), b"hello").ok();
-        load_plugins(&dir); // must not panic, must not attempt to dlopen text files
-        std::fs::remove_dir_all(&dir).ok();
+        load_plugins(dir); // must not panic, must not attempt to dlopen text files
     }
 }

@@ -269,7 +269,10 @@ fn init_tls(base: *mut u8, bytes: &[u8], pe: &PE) -> (*const u8, usize) {
 
 /// Walk the `.reloc` section and add `delta` to every 64-bit absolute address.
 fn apply_relocations(base: *mut u8, pe: &PE, delta: i64) -> Result<(), String> {
-    let opt = pe.header.optional_header.unwrap();
+    let opt = pe
+        .header
+        .optional_header
+        .ok_or_else(|| "apply_relocations: PE has no optional header".to_string())?;
     let (reloc_rva, reloc_size) = match opt.data_directories.get_base_relocation_table() {
         Some(d) if d.size > 0 => (d.virtual_address as usize, d.size as usize),
         _ => return Ok(()),

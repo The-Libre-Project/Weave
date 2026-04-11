@@ -6,3 +6,6 @@ license = "MIT"
 repository = "https://github.com/eldo9000/Weave"
 
 [dependencies]
+
+[dev-dependencies]
+tempfile = "3"

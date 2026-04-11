@@ -9,3 +9,6 @@ description = "PE loader and NT API stubs for Weave"
 goblin = { version = "0.9", default-features = false, features = ["pe32", "pe64"] }
 libc = "0.2"
 weave-common = { path = "../weave-common" }
+
+[dev-dependencies]
+tempfile = "3"

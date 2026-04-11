@@ -9,3 +9,6 @@ description = "Runtime plugin loader for Weave — override any stub via .so plu
 [dependencies]
 libloading = "0.8"
 libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"

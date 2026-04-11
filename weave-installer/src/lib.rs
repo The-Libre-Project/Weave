@@ -240,16 +240,11 @@ impl AppConfig {
 mod tests {
     use super::*;
 
-    fn temp_base(label: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("weave-installer-test-{label}"));
-        let _ = fs::remove_dir_all(&dir);
-        dir
-    }
-
     #[test]
     fn test_create_builds_directory_structure() {
-        let base = temp_base("create");
-        let mgr = PrefixManager::with_base(&base);
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let base = tmp.path();
+        let mgr = PrefixManager::with_base(base);
 
         let prefix = mgr.create("test-app").expect("create failed");
 
@@ -258,40 +253,37 @@ mod tests {
         assert!(prefix.drive_c().is_dir());
         assert!(prefix.registry_dir().is_dir());
         assert!(prefix.config_path().is_file());
-
-        fs::remove_dir_all(&base).ok();
     }
 
     #[test]
     fn test_list_returns_created_prefixes() {
-        let base = temp_base("list");
-        let mgr = PrefixManager::with_base(&base);
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let base = tmp.path();
+        let mgr = PrefixManager::with_base(base);
 
         mgr.create("alpha").expect("create alpha failed");
         mgr.create("beta").expect("create beta failed");
 
         let list = mgr.list().expect("list failed");
         assert_eq!(list.len(), 2);
-
-        fs::remove_dir_all(&base).ok();
     }
 
     #[test]
     fn test_create_duplicate_returns_already_exists() {
-        let base = temp_base("dup");
-        let mgr = PrefixManager::with_base(&base);
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let base = tmp.path();
+        let mgr = PrefixManager::with_base(base);
 
         mgr.create("app").expect("first create failed");
         let result = mgr.create("app");
         assert!(matches!(result, Err(InstallerError::AlreadyExists(_))));
-
-        fs::remove_dir_all(&base).ok();
     }
 
     #[test]
     fn test_list_empty_base_dir_returns_empty() {
-        let base = temp_base("empty-list");
-        let mgr = PrefixManager::with_base(&base);
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let base = tmp.path().join("nonexistent-subdir");
+        let mgr = PrefixManager::with_base(base);
 
         let list = mgr.list().expect("list on non-existent base failed");
         assert!(list.is_empty());
@@ -299,8 +291,9 @@ mod tests {
 
     #[test]
     fn test_get_nonexistent_returns_not_found() {
-        let base = temp_base("get");
-        let mgr = PrefixManager::with_base(&base);
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let base = tmp.path();
+        let mgr = PrefixManager::with_base(base);
 
         let result = mgr.get("no-such-app-xyz");
         assert!(matches!(result, Err(InstallerError::NotFound(_))));
@@ -308,24 +301,24 @@ mod tests {
 
     #[test]
     fn test_delete_nonexistent_is_ok() {
-        let base = temp_base("delete");
-        let mgr = PrefixManager::with_base(&base);
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let base = tmp.path();
+        let mgr = PrefixManager::with_base(base);
 
         assert!(mgr.delete("ghost").is_ok());
     }
 
     #[test]
     fn test_delete_removes_prefix() {
-        let base = temp_base("delete-real");
-        let mgr = PrefixManager::with_base(&base);
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let base = tmp.path();
+        let mgr = PrefixManager::with_base(base);
 
         mgr.create("app").expect("create failed");
         assert!(mgr.get("app").is_ok());
 
         mgr.delete("app").expect("delete failed");
         assert!(matches!(mgr.get("app"), Err(InstallerError::NotFound(_))));
-
-        fs::remove_dir_all(&base).ok();
     }
 
     #[test]
@@ -340,8 +333,9 @@ mod tests {
 
     #[test]
     fn test_set_and_get_exe_path() {
-        let base = temp_base("exe-path");
-        let mgr = PrefixManager::with_base(&base);
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let base = tmp.path();
+        let mgr = PrefixManager::with_base(base);
         let prefix = mgr.create("app").expect("create failed");
 
         assert!(prefix.get_exe_path().expect("get failed").is_none());
@@ -351,20 +345,17 @@ mod tests {
 
         let got = prefix.get_exe_path().expect("get after set failed");
         assert_eq!(got, Some(PathBuf::from("C:\\Program Files\\App\\app.exe")));
-
-        fs::remove_dir_all(&base).ok();
     }
 
     #[test]
     fn test_get_exe_path_missing_is_none() {
-        let base = temp_base("exe-missing");
-        let mgr = PrefixManager::with_base(&base);
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let base = tmp.path();
+        let mgr = PrefixManager::with_base(base);
         let prefix = mgr.create("app").expect("create failed");
 
         // No exe.txt written — must return None, not an error.
         let result = prefix.get_exe_path().expect("get failed");
         assert!(result.is_none());
-
-        fs::remove_dir_all(&base).ok();
     }
 }

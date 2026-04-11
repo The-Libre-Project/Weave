@@ -348,7 +348,7 @@ mod tests {
 
     #[test]
     fn read_value_file_roundtrip() {
-        let dir = tempdir();
+        let dir = tempfile::tempdir().expect("tempdir");
         let val_path = dir.path().join("TestValue");
         let data = encode_sz("hello");
         let mut content = REG_SZ.to_le_bytes().to_vec();
@@ -358,34 +358,5 @@ mod tests {
         let (reg_type, bytes) = read_value_file(&val_path).unwrap();
         assert_eq!(reg_type, REG_SZ);
         assert_eq!(bytes, data);
-    }
-
-    /// Minimal temp-dir helper — no external crate needed.
-    fn tempdir() -> TempDir {
-        let path = std::env::temp_dir().join(format!(
-            "weave_registry_test_{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .subsec_nanos()
-        ));
-        std::fs::create_dir_all(&path).unwrap();
-        TempDir { path }
-    }
-
-    struct TempDir {
-        path: PathBuf,
-    }
-
-    impl TempDir {
-        fn path(&self) -> &Path {
-            &self.path
-        }
-    }
-
-    impl Drop for TempDir {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.path);
-        }
     }
 }
