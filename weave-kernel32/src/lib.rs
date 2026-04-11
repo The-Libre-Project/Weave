@@ -344,9 +344,13 @@ pub unsafe extern "win64" fn write_console_w(
         Some(fd) => fd,
         None => return 0, // FALSE
     };
+    // SAFETY: lp_buffer was checked non-null above; n_chars was capped to
+    // MAX_CONSOLE_CHARS (65_536) so the slice length is bounded and valid.
     let slice = unsafe { std::slice::from_raw_parts(lp_buffer, n_chars as usize) };
     let s = String::from_utf16_lossy(slice);
     let bytes = s.as_bytes();
+    // SAFETY: fd is a valid Linux file descriptor from the handle table;
+    // bytes is a valid UTF-8 slice with a stable pointer.
     let n = unsafe { libc::write(fd, bytes.as_ptr() as *const libc::c_void, bytes.len()) };
     if !lp_chars_written.is_null() {
         unsafe { *lp_chars_written = if n >= 0 { n_chars } else { 0 } };
@@ -396,8 +400,15 @@ pub unsafe extern "win64" fn virtual_protect(
         unsafe { *lpfl_old_protect = 0x40 }; // report old prot as PAGE_EXECUTE_READWRITE
     }
     let prot = win_prot_to_linux(fl_new_protect);
+    // Round address down to page boundary and size up to a full page multiple.
     let page_addr = (lp_address as usize) & !(4096 - 1);
     let page_size = (dw_size + 4095) & !4095;
+    // SAFETY: page_addr is a page-aligned address within a mapped region (the caller's
+    // # Safety contract); page_size is a non-zero multiple of the system page size.
+    // mprotect requires both conditions, plus that the range stays within a single
+    // VMA.  We don't enforce the VMA constraint here — Windows semantics allow
+    // multi-region calls, and mprotect will return ENOMEM for invalid ranges which
+    // we map to failure via the return value.
     let ret = unsafe { libc::mprotect(page_addr as *mut libc::c_void, page_size, prot) };
     (ret == 0) as i32
 }
@@ -420,6 +431,17 @@ pub unsafe extern "win64" fn virtual_query(
         return 0;
     }
     let page_addr = (lp_address as usize) & !(4096 - 1);
+    // SAFETY: lp_buffer is non-null (checked above) and dw_length >= MBI_SIZE (48).
+    // We write exactly MBI_SIZE bytes at byte-level offsets matching the
+    // MEMORY_BASIC_INFORMATION layout documented in the Windows SDK (x64):
+    //   +0  PVOID  BaseAddress
+    //   +8  PVOID  AllocationBase
+    //   +16 DWORD  AllocationProtect
+    //   +24 SIZE_T RegionSize
+    //   +32 DWORD  State
+    //   +36 DWORD  Protect
+    //   +40 DWORD  Type
+    // All writes stay within the 48-byte span and are at correctly aligned offsets.
     unsafe {
         std::ptr::write_bytes(lp_buffer, 0, MBI_SIZE);
         *(lp_buffer as *mut usize) = page_addr; // BaseAddress
@@ -458,6 +480,11 @@ pub unsafe extern "win64" fn virtual_alloc(
         eprintln!("weave: VirtualAlloc(size=0) → NULL");
         return std::ptr::null_mut();
     }
+    // SAFETY: mmap with MAP_ANONYMOUS and fd=-1 does not dereference any pointer;
+    // passing null (or lp_address) as the hint is always valid.  When lp_address is
+    // non-null, MAP_FIXED_NOREPLACE ensures mmap returns MAP_FAILED instead of
+    // silently remapping an existing allocation — the caller must handle the failure.
+    // dw_size > 0 is enforced by the early-return above.
     let result = if lp_address.is_null() {
         unsafe {
             libc::mmap(
@@ -547,6 +574,11 @@ pub unsafe extern "win64" fn virtual_free(
                 set_last_error(0x57);
                 return 0;
             }
+            // SAFETY: lp_address is non-null (checked above) and was obtained from
+            // VirtualAlloc (mmap); dw_size > 0 (checked above).  munmap requires
+            // that the address is page-aligned — Windows semantics say lp_address
+            // for MEM_DECOMMIT must be within an allocated region, so the caller is
+            // responsible for alignment per the API contract.
             let ret = unsafe { libc::munmap(lp_address as *mut libc::c_void, dw_size) };
             (ret == 0) as i32
         }
@@ -600,7 +632,11 @@ pub unsafe extern "win64" fn initialize_critical_section(lp_critical_section: *m
         return;
     }
     unsafe { std::ptr::write_bytes(lp_critical_section, 0, 40) };
-    // LockCount at offset 8 should be -1 (unlocked)
+    // SAFETY: lp_critical_section is non-null (checked above) and points to at
+    // least 40 bytes (documented in the function's # Safety contract).  Offset 8
+    // is the LockCount field of the Windows CRITICAL_SECTION struct (RTL_CRITICAL_SECTION
+    // layout: DebugInfo(8) + LockCount(4) = offset 8).  We wrote the preceding 40 bytes
+    // to zero, so the pointer arithmetic stays within the allocation.
     unsafe { *(lp_critical_section.add(8) as *mut i32) = -1 };
 }
 
@@ -899,10 +935,16 @@ pub unsafe extern "win64" fn init_once_execute_once(
     if init_once.is_null() {
         return 1; // TRUE
     }
+    // SAFETY: init_once is non-null (checked above). It points to a usize-aligned
+    // slot used as a Windows INIT_ONCE opaque structure (a single pointer-sized word).
+    // We read and write atomically at this address — no races because Phase 1/2 is
+    // single-threaded.  Values: 0=unstarted, 1=in-progress, 2=done.
     if unsafe { *init_once == 2 } {
         return 1; // TRUE - already done
     }
     unsafe { *init_once = 1 };
+    // SAFETY: init_fn is a valid Win64 callback supplied by the caller; parameter
+    // and context are forwarded unchanged per the InitOnceExecuteOnce contract.
     let result = unsafe { init_fn(init_once, parameter, context) };
     unsafe { *init_once = 2 };
     result
@@ -1471,6 +1513,10 @@ pub unsafe extern "win64" fn heap_free(
     if LAST_HEAP_FREE.swap(addr, Ordering::Relaxed) == addr {
         return 0; // FALSE — duplicate free, silently ignored per Windows semantics
     }
+    // SAFETY: lp_mem is non-null (early return above), has a canonical x86-64 address
+    // (addr >> 47 == 0 check above), and was not freed in the immediately preceding
+    // call (swap check above).  It was originally returned by libc::malloc/realloc
+    // (via HeapAlloc/HeapReAlloc), so libc::free is the correct deallocator.
     unsafe { libc::free(lp_mem) };
     1 // TRUE
 }
@@ -1641,9 +1687,13 @@ pub unsafe extern "win64" fn read_file(
         }
     };
 
+    // SAFETY: fd is a valid Linux file descriptor from the handle table (checked above).
+    // lp_buffer is non-null when n_bytes_to_read > 0 (checked above) and points to a
+    // writable region of at least n_bytes_to_read bytes per the caller's # Safety contract.
     let n = unsafe { libc::read(fd, lp_buffer as *mut libc::c_void, n_bytes_to_read as usize) };
 
     if !lp_bytes_read.is_null() {
+        // SAFETY: lp_bytes_read is non-null (checked) and writable per the caller's contract.
         unsafe { *lp_bytes_read = if n >= 0 { n as u32 } else { 0 } };
     }
 
@@ -1698,6 +1748,9 @@ pub unsafe extern "win64" fn write_file(
         }
     };
 
+    // SAFETY: fd is a valid Linux file descriptor from the handle table.  lp_buffer
+    // is non-null when n_bytes_to_write > 0 (checked above) and points to at least
+    // n_bytes_to_write readable bytes per the caller's # Safety contract.
     let n = unsafe {
         libc::write(
             fd,
@@ -1707,6 +1760,7 @@ pub unsafe extern "win64" fn write_file(
     };
 
     if !lp_bytes_written.is_null() {
+        // SAFETY: lp_bytes_written is non-null (checked) and writable per the caller's contract.
         unsafe { *lp_bytes_written = if n >= 0 { n as u32 } else { 0 } };
     }
 
@@ -2107,7 +2161,11 @@ pub unsafe extern "win64" fn compare_file_time(
     if lp_file_time1.is_null() || lp_file_time2.is_null() {
         return 0;
     }
-    // FILETIME is two DWORDs — only 4-byte aligned. Use read_unaligned.
+    // SAFETY: FILETIME (two u32 fields) is only 4-byte aligned per the Windows ABI,
+    // so read_unaligned is required — using a plain dereference would be UB on
+    // architectures that require 8-byte alignment for u64.  The pointers are non-null
+    // (checked above) and were passed by the Windows caller, which guarantees at least
+    // 4-byte alignment and a valid 8-byte object at each address.
     let ft1 = unsafe { std::ptr::read_unaligned(lp_file_time1) };
     let ft2 = unsafe { std::ptr::read_unaligned(lp_file_time2) };
     match ft1.cmp(&ft2) {
@@ -2126,7 +2184,9 @@ pub unsafe extern "win64" fn file_time_to_local_file_time(
     if lp_file_time.is_null() || lp_local_file_time.is_null() {
         return 0;
     }
-    // FILETIME is only 4-byte aligned — use unaligned reads/writes.
+    // SAFETY: FILETIME is only 4-byte aligned (two u32 fields); unaligned ops are
+    // required to avoid potential misaligned-access UB.  Both pointers are non-null
+    // (checked above) and valid per the caller's # Safety contract.
     let val = unsafe { std::ptr::read_unaligned(lp_file_time) };
     unsafe { std::ptr::write_unaligned(lp_local_file_time, val) };
     1 // TRUE
@@ -2172,7 +2232,13 @@ pub unsafe extern "win64" fn file_time_to_system_time(
         return 0;
     }
     let unix_now = unsafe { libc::time(std::ptr::null_mut()) };
+    // SAFETY: libc::gmtime returns a pointer to a static thread-local tm struct;
+    // it is always valid and non-null for any valid time_t.  We copy by value
+    // immediately so there is no lifetime concern.
     let tm = unsafe { *libc::gmtime(&unix_now) };
+    // SAFETY: lp_system_time is non-null (checked above) and points to a writable
+    // SystemTime (16 bytes).  Each field is written at its correct struct offset via
+    // the typed pointer.
     unsafe {
         (*lp_system_time).w_year = (tm.tm_year + 1900) as u16;
         (*lp_system_time).w_month = (tm.tm_mon + 1) as u16;
@@ -2506,6 +2572,9 @@ pub unsafe extern "win64" fn get_startup_info_a(lp_startup_info: *mut u8) {
     if lp_startup_info.is_null() {
         return;
     }
+    // SAFETY: lp_startup_info is non-null (checked above) and the caller guarantees
+    // at least 68 bytes (sizeof STARTUPINFOA).  We zero the entire struct then write
+    // cb at offset 0 — the first field in both STARTUPINFOA and STARTUPINFOW.
     unsafe {
         std::ptr::write_bytes(lp_startup_info, 0, 68);
         *(lp_startup_info as *mut u32) = 68; // cb = sizeof(STARTUPINFOA)
@@ -2537,6 +2606,13 @@ pub unsafe extern "win64" fn get_startup_info_w(lp_startup_info: *mut u8) {
     //   offset 64: WORD wShowWindow (2)
     // Set STARTF_USESHOWWINDOW so the CRT honours wShowWindow and passes
     // SW_SHOWNORMAL to WinMain, causing the app to show its main window.
+    // SAFETY: lp_startup_info is non-null (checked above) and the caller guarantees
+    // at least 104 bytes (sizeof STARTUPINFOW on x64).  The byte offsets used below
+    // match the STARTUPINFOW layout for x64 (all pointer fields are 8-byte aligned;
+    // DWORD fields follow):
+    //   +0  DWORD cb          +60 DWORD dwFlags
+    //   +64 WORD  wShowWindow
+    // All writes are within the 104-byte span after the zeroing at the start.
     unsafe {
         std::ptr::write_bytes(lp_startup_info, 0, 104);
         *(lp_startup_info as *mut u32) = 104; // cb = sizeof(STARTUPINFOW)
@@ -2972,6 +3048,9 @@ pub unsafe extern "win64" fn find_first_file_w(
         (*lp_find_file_data).c_alternate_file_name[0] = 0;
     }
 
+    // Store the DIR* as a usize handle.  find_next_file_w and find_close will cast
+    // it back to *mut libc::DIR.  This is safe because usize is pointer-sized on
+    // all supported targets (x86-64) and the DIR allocation outlives the handle.
     dir as usize // Return directory handle
 }
 
@@ -3081,6 +3160,11 @@ pub unsafe extern "win64" fn find_next_file_w(
         return 0; // FALSE — no more entries
     }
 
+    // SAFETY: h_find_file is the `dir as usize` value stored by find_first_file_w;
+    // it is a valid *mut libc::DIR returned by libc::opendir and has not been
+    // closed (find_close is the only closer).  Casting back to *mut libc::DIR is
+    // the inverse of the store — the type/alignment are preserved because DIR is
+    // an opaque C struct allocated by libc, always at a valid pointer address.
     let dir = h_find_file as *mut libc::DIR;
 
     // Read next entry
@@ -3138,6 +3222,8 @@ pub unsafe extern "win64" fn find_next_file_a(
         return 0; // FALSE
     }
 
+    // SAFETY: same invariant as find_next_file_w — h_find_file is the `dir as usize`
+    // value stored by find_first_file_a, which is a valid *mut libc::DIR from opendir.
     let dir = h_find_file as *mut libc::DIR;
 
     // Read next entry
@@ -3192,6 +3278,10 @@ pub extern "win64" fn find_close(h_find_file: usize) -> i32 {
         return 1; // TRUE — success, nothing to close
     }
 
+    // SAFETY: h_find_file is the `dir as usize` value stored by find_first_file_w/a;
+    // it is a valid *mut libc::DIR returned by libc::opendir.  Casting back is the
+    // inverse of the store.  We call closedir exactly once (guarded by the sentinel
+    // checks above), so there is no double-free risk.
     let dir = h_find_file as *mut libc::DIR;
     let ret = unsafe { libc::closedir(dir) };
     (ret == 0) as i32
@@ -3539,6 +3629,13 @@ fn load_library_impl(name: &str) -> usize {
         match loader::load_dll(&bytes) {
             Ok((image, exports)) => {
                 // Patch the loaded DLL's own IAT using the global resolver.
+                // SAFETY: `bytes` is the raw PE image just parsed by `load_dll`;
+                // `image.base` is the virtual address at which it was mapped into this
+                // process.  `iat::patch_best_effort` walks the Import Directory and
+                // overwrites each IAT slot — pointer-sized writes into the mapped PE
+                // region.  The region is writable because `load_dll` maps it with
+                // PROT_READ|PROT_WRITE.  `resolve::resolve` is a plain function pointer
+                // with no thread-safety requirements (single-threaded Phase 1/2).
                 unsafe {
                     iat::patch_best_effort(&bytes, image.base, resolve::resolve, |d, f| {
                         eprintln!("weave/kernel32: LoadLibrary({key}): unresolved import {d}!{f}");
@@ -3996,6 +4093,18 @@ pub unsafe extern "win64" fn global_memory_status_ex(lp_buffer: *mut u8) -> i32 
     } else {
         50
     };
+    // SAFETY: lp_buffer is non-null (checked above) and the caller guarantees
+    // at least 64 bytes (sizeof MEMORYSTATUSEX).  The MEMORYSTATUSEX x64 layout is:
+    //   +0  DWORD  dwLength        (caller must pre-fill; we don't clobber it)
+    //   +4  DWORD  dwMemoryLoad
+    //   +8  DWORDLONG  ullTotalPhys
+    //   +16 DWORDLONG  ullAvailPhys
+    //   +24 DWORDLONG  ullTotalPageFile
+    //   +32 DWORDLONG  ullAvailPageFile
+    //   +40 DWORDLONG  ullTotalVirtual
+    //   +48 DWORDLONG  ullAvailVirtual
+    //   +56 DWORDLONG  ullAvailExtendedVirtual
+    // All u64 fields are at 8-byte-aligned offsets so direct pointer casts are sound.
     unsafe {
         *(lp_buffer.add(4) as *mut u32) = memory_load;
         *(lp_buffer.add(8) as *mut u64) = total_phys;
@@ -4589,6 +4698,10 @@ pub unsafe extern "win64" fn dos_date_time_to_file_time(
         // Rough FILETIME approximation (ignore leap years for simplicity).
         let days = (year - 1601) * 365 + month * 30 + day;
         let secs = days * 86400 + hour * 3600 + min * 60 + sec;
+        // SAFETY: lp_file_time is non-null (checked above).  FILETIME is only
+        // 4-byte aligned (two u32 fields), so write_unaligned is required to avoid
+        // UB on any platform requiring 8-byte alignment for u64.  The caller's
+        // # Safety contract guarantees the pointer is valid for an 8-byte write.
         unsafe { std::ptr::write_unaligned(lp_file_time, secs * 10_000_000) };
     }
     1 // TRUE
@@ -4694,7 +4807,13 @@ pub unsafe extern "win64" fn create_thread(
             "weave/CreateThread: fn={lp_start_address:p} param=null (spawning background thread)"
         );
         std::thread::spawn(move || {
-            // SAFETY: fn_addr is a valid Win64 function pointer for the lifetime of the process.
+            // SAFETY: `fn_addr` is the numeric address of a Win64-ABI function entry
+            // point in the guest PE image, captured before the spawn so there is no
+            // race with the caller.  Transmuting the raw address (as *const u8) to
+            // `unsafe extern "win64" fn(*mut u8) -> u32` is sound for the same reasons
+            // as the inline path above: pointer-sized on x86-64, Win64 ABI passes the
+            // first arg in RCX, and the spawned closure carries 'static lifetime so the
+            // PE image remains mapped for the lifetime of the thread.
             let fn_ptr: unsafe extern "win64" fn(*mut u8) -> u32 =
                 unsafe { std::mem::transmute(fn_addr as *const u8) };
             let ret = unsafe { fn_ptr(std::ptr::null_mut()) };
@@ -4705,9 +4824,13 @@ pub unsafe extern "win64" fn create_thread(
         eprintln!(
             "weave/CreateThread: fn={lp_start_address:p} param={lp_parameter:p} (executing inline)"
         );
-        // Execute the Windows thread function inline using the Win64 calling convention.
-        // The Win64 ABI passes the first integer argument in RCX, so transmuting to
-        // `extern "win64" fn(*mut u8) -> u32` is correct on x86-64 Linux.
+        // SAFETY: `lp_start_address` is a raw `*const u8` pointing to a Win64-ABI
+        // function entry point in the guest PE image (validated non-null above).
+        // Transmuting to `unsafe extern "win64" fn(*mut u8) -> u32` is sound because:
+        //   1. Function pointers and data pointers are both pointer-sized on x86-64.
+        //   2. The Win64 calling convention passes the first integer argument in RCX,
+        //      so `fn(*mut u8)` matches the `LPTHREAD_START_ROUTINE` signature exactly.
+        //   3. The caller's `# Safety` contract guarantees the function pointer is valid.
         let fn_ptr: unsafe extern "win64" fn(*mut u8) -> u32 =
             std::mem::transmute(lp_start_address);
         let ret = fn_ptr(lp_parameter);
@@ -6551,6 +6674,12 @@ pub struct SystemTime {
 /// # Safety
 /// `lp_version_information` must be a valid writable pointer to an OsVersionInfoExW.
 pub unsafe extern "win64" fn get_version_ex_w(lp_version_information: *mut u8) -> i32 {
+    // SAFETY: lp_version_information is non-null per the Windows caller contract and
+    // points to an OSVERSIONINFOEXW (or OSVERSIONINFOW) — the caller sets
+    // dw_os_version_info_size before calling, so we can read that field.  Casting
+    // *mut u8 to *mut OsVersionInfoExW is sound because OsVersionInfoExW is
+    // #[repr(C)] and 4-byte aligned; a *mut u8 at any Windows-allocated address
+    // satisfies that requirement.
     let info = lp_version_information as *mut OsVersionInfoExW;
     unsafe {
         (*info).dw_major_version = 10;
@@ -6577,6 +6706,9 @@ pub unsafe extern "win64" fn get_version_ex_w(lp_version_information: *mut u8) -
 /// # Safety
 /// `lp_version_information` must be a valid writable pointer to an OsVersionInfoExA.
 pub unsafe extern "win64" fn get_version_ex_a(lp_version_information: *mut u8) -> i32 {
+    // SAFETY: same as get_version_ex_w — lp_version_information is a valid
+    // Windows-allocated pointer to an OSVERSIONINFOEXA/OSVERSIONINFOA struct.
+    // OsVersionInfoExA is #[repr(C)] and 4-byte aligned; the cast is sound.
     let info = lp_version_information as *mut OsVersionInfoExA;
     unsafe {
         (*info).dw_major_version = 10;
@@ -6699,8 +6831,11 @@ pub unsafe extern "win64" fn initialize_critical_section_and_spin_count(
     lp_critical_section: *mut u8,
     _dw_spin_count: u32,
 ) -> i32 {
+    // SAFETY: lp_critical_section is non-null (checked by the caller contract above)
+    // and points to at least 40 bytes.  Offset 8 is LockCount in the Windows
+    // RTL_CRITICAL_SECTION layout (DebugInfo ptr = 8 bytes, then LockCount i32).
+    // We zero all 40 bytes first, then set LockCount = -1 (unlocked per Windows ABI).
     unsafe { std::ptr::write_bytes(lp_critical_section, 0, 40) };
-    // LockCount at offset 8 should be -1 (unlocked)
     unsafe { *(lp_critical_section.add(8) as *mut i32) = -1 };
     1 // TRUE
 }
@@ -6714,8 +6849,10 @@ pub unsafe extern "win64" fn initialize_critical_section_ex(
     _dw_spin_count: u32,
     _flags: u32,
 ) -> i32 {
+    // SAFETY: same invariant as initialize_critical_section and
+    // initialize_critical_section_and_spin_count — offset 8 is LockCount in
+    // RTL_CRITICAL_SECTION; -1 means unlocked.
     unsafe { std::ptr::write_bytes(lp_critical_section, 0, 40) };
-    // LockCount at offset 8 should be -1 (unlocked)
     unsafe { *(lp_critical_section.add(8) as *mut i32) = -1 };
     1 // TRUE
 }
@@ -6778,6 +6915,12 @@ pub unsafe extern "win64" fn get_time_zone_information(lp_time_zone_information:
     if lp_time_zone_information.is_null() {
         return 0xFFFF_FFFF; // error
     }
+    // SAFETY: lp_time_zone_information is non-null (checked above) and the caller
+    // guarantees at least 172 bytes (sizeof TIME_ZONE_INFORMATION).  We zero all
+    // 172 bytes first, then write exactly three i32 fields at their documented
+    // byte offsets (see layout in the function doc comment):
+    //   +0   Bias, +84 StandardBias, +168 DaylightBias
+    // All three writes are 4-byte-aligned within the 172-byte span.
     unsafe { std::ptr::write_bytes(lp_time_zone_information, 0, 172) };
     // Get the local UTC offset via localtime_r.
     let mut t: libc::time_t = 0;
@@ -6807,6 +6950,10 @@ pub unsafe extern "win64" fn get_system_time(lp_system_time: *mut u8) {
     unsafe { libc::time(&mut t) };
     let mut tm: libc::tm = std::mem::zeroed();
     unsafe { libc::gmtime_r(&t, &mut tm) };
+    // SAFETY: lp_system_time is non-null per the Windows caller contract (GetSystemTime
+    // accepts a guaranteed-non-null LPSYSTEMTIME).  Casting *mut u8 to *mut SystemTime
+    // is sound because SystemTime is #[repr(C)] and 2-byte aligned (all u16 fields);
+    // a *mut u8 satisfies that alignment requirement on any platform.
     let st = lp_system_time as *mut SystemTime;
     unsafe {
         (*st).w_year = (tm.tm_year + 1900) as u16;
@@ -6829,6 +6976,10 @@ pub unsafe extern "win64" fn get_local_time(lp_system_time: *mut u8) {
     unsafe { libc::time(&mut t) };
     let mut tm: libc::tm = std::mem::zeroed();
     unsafe { libc::localtime_r(&t, &mut tm) };
+    // SAFETY: same invariant as get_system_time — lp_system_time is a valid non-null
+    // pointer to a writable SystemTime struct per the Windows caller contract.
+    // Casting *mut u8 to *mut SystemTime is sound: SystemTime is #[repr(C)], 2-byte
+    // aligned, so a *mut u8 meets the alignment requirement.
     let st = lp_system_time as *mut SystemTime;
     unsafe {
         (*st).w_year = (tm.tm_year + 1900) as u16;
@@ -6939,6 +7090,12 @@ pub unsafe extern "win64" fn get_locale_info_w(
             return 2; // required buffer size (1 DWORD = 2 WCHARs)
         }
         if cch_data >= 2 && !lp_lc_data.is_null() {
+            // SAFETY: lp_lc_data is non-null (checked) and cch_data >= 2 ensures
+            // at least 4 bytes (2 × WCHAR) are available.  We cast *mut u16 to
+            // *mut u32 to write a DWORD — this is the documented behaviour when
+            // LOCALE_RETURN_NUMBER is set (Wine ref: dlls/kernelbase/locale.c).
+            // write_unaligned is used because the buffer may be only 2-byte aligned
+            // (WCHAR alignment), while u32 normally requires 4-byte alignment.
             unsafe { std::ptr::write_unaligned(lp_lc_data as *mut u32, num) };
         }
         return 2;
@@ -9171,6 +9328,13 @@ pub unsafe extern "win64" fn enum_system_locales_w(
     }
     // Call the callback with the English (US) locale string.
     let locale: Vec<u16> = "0409\0".encode_utf16().collect();
+    // SAFETY: `lp_locale_enum_proc` is a usize holding the numeric address of a
+    // Win64-ABI callback supplied by the caller, validated non-zero above.
+    // Transmuting to `extern "win64" fn(*const u16) -> i32` is sound because:
+    //   1. `usize` and function pointers are both pointer-sized on x86-64.
+    //   2. The LOCALE_ENUMPROCW signature is `fn(LPWSTR) -> BOOL`, which maps
+    //      exactly to `fn(*const u16) -> i32` under the Win64 calling convention.
+    //   3. The caller's `# Safety` contract guarantees the callback is valid.
     let cb: extern "win64" fn(*const u16) -> i32 =
         unsafe { std::mem::transmute(lp_locale_enum_proc) };
     cb(locale.as_ptr());
@@ -9295,6 +9459,9 @@ pub unsafe extern "win64" fn rtl_pc_to_file_header(
     };
 
     if !pp_base_of_image.is_null() {
+        // SAFETY: pp_base_of_image is non-null (checked) and the caller's # Safety
+        // contract guarantees it is a writable `*mut *const u8`.  We write a single
+        // pointer — either the PE image base or null — so the size is always correct.
         unsafe { *pp_base_of_image = ret };
     }
     ret
