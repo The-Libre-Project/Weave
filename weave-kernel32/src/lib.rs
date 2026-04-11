@@ -718,9 +718,16 @@ pub unsafe extern "win64" fn try_acquire_srw_lock_shared(srw_lock: *mut usize) -
     1 // TRUE — always succeeds in single-threaded context
 }
 
-/// DuplicateHandle: duplicate a handle to another process.
+/// DuplicateHandle: duplicate a kernel object handle.
 ///
-/// Stub: if `lp_target_handle` is non-null, write `h_source_handle` to it. Return TRUE.
+/// Wine ref: dlls/kernelbase/sync.c — calls NtDuplicateObject; if
+/// DUPLICATE_CLOSE_SOURCE is set, closes the source handle after duplication.
+/// Weave limitation: handle table has no ref-counting in Phase 1/2; single-process
+/// only. We copy the handle value — caller gets a second reference to the same
+/// slot. DUPLICATE_CLOSE_SOURCE and DUPLICATE_SAME_ACCESS flags are ignored.
+/// This is sufficient for apps that duplicate handles to pass to threads they
+/// create (also no-ops in Phase 1/2) or to child processes (not supported).
+///
 /// # Safety
 /// `lp_target_handle` must be a valid writable pointer or NULL.
 pub unsafe extern "win64" fn duplicate_handle(
@@ -846,7 +853,13 @@ pub unsafe extern "win64" fn delete_timer_queue_timer(
 
 /// SetThreadAffinityMask: set the processor affinity mask for a thread.
 ///
-/// Stub: return 1 (previous mask).
+/// Wine ref: dlls/kernelbase/thread.c — calls NtSetInformationThread with
+/// ThreadAffinityMask; returns previous affinity mask on success, 0 on error.
+/// Weave: single-threaded Phase 1/2 — no real thread objects exist. Accept the
+/// call, return 1 (all CPUs, matching a system with one logical processor).
+/// Correct no-op: affinity masks are advisory and ignored by the Linux scheduler
+/// without a real NtSetInformationThread backing.
+///
 /// # Safety
 /// `_h_thread` and `_dw_thread_affinity_mask` are accepted but not dereferenced.
 pub unsafe extern "win64" fn set_thread_affinity_mask(
@@ -1057,10 +1070,62 @@ pub unsafe extern "win64" fn cancel_waitable_timer(_h_timer: usize) -> i32 {
 
 // ── Task 3 — ExpandEnvironmentStrings, SearchPath, GetTempFileName ──────────
 
-/// ExpandEnvironmentStringsW: expand environment variables in a wide string.
+/// Expand `%VAR%` references in `src` using the process environment.
 ///
-/// Phase 2: no actual expansion — returns the input string unchanged.
-/// Copies the input string to the output buffer, null-terminated.
+/// Rules (matching Windows behaviour — jCodemunch unavailable this session;
+/// derived from MSDN + observed Wine behaviour):
+///   - `%NAME%` → value of env var NAME (case-insensitive on Windows, but
+///     Linux env is case-sensitive so we pass the name as-is)
+///   - `%%`     → literal `%`
+///   - Unknown var `%FOO%` → left as-is (not removed)
+///
+/// Returns the expanded string.
+fn expand_env_vars(src: &str) -> String {
+    let mut result = String::with_capacity(src.len());
+    let mut chars = src.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '%' {
+            result.push(c);
+            continue;
+        }
+        // Collect everything up to the next '%'
+        let mut name = String::new();
+        let mut closed = false;
+        for nc in chars.by_ref() {
+            if nc == '%' {
+                closed = true;
+                break;
+            }
+            name.push(nc);
+        }
+        if !closed {
+            // Unterminated % — emit as-is
+            result.push('%');
+            result.push_str(&name);
+        } else if name.is_empty() {
+            // "%%" → literal "%"
+            result.push('%');
+        } else {
+            match std::env::var(&name) {
+                Ok(val) => result.push_str(&val),
+                Err(_) => {
+                    // Unknown variable — leave unexpanded (Windows behaviour)
+                    result.push('%');
+                    result.push_str(&name);
+                    result.push('%');
+                }
+            }
+        }
+    }
+    result
+}
+
+/// ExpandEnvironmentStringsW: expand `%VAR%` references in a wide string.
+///
+/// Wine ref: dlls/kernelbase/environ.c — calls RtlExpandEnvironmentStrings_U
+/// which scans for % pairs and looks up each name in the process environment
+/// block; %% → literal %; unknown variables left as-is; returns required
+/// char count (including null) so callers can size-query with NULL dst.
 ///
 /// # Safety
 /// `lp_src` must be a valid null-terminated UTF-16 string.
@@ -1073,8 +1138,7 @@ pub unsafe extern "win64" fn expand_environment_strings_w(
     if lp_src.is_null() {
         return 0;
     }
-
-    // Read the null-terminated UTF-16 string
+    // Decode the UTF-16 source string.
     let mut len = 0usize;
     while len < MAX_UTF16_LEN && unsafe { *lp_src.add(len) } != 0 {
         len += 1;
@@ -1082,32 +1146,32 @@ pub unsafe extern "win64" fn expand_environment_strings_w(
     if len == MAX_UTF16_LEN {
         return 0;
     }
+    let src_utf16 = unsafe { std::slice::from_raw_parts(lp_src, len) };
+    let src = String::from_utf16_lossy(src_utf16);
 
-    let required = len + 1; // include null terminator
+    let expanded = expand_env_vars(&src);
+    let expanded_utf16: Vec<u16> = expanded.encode_utf16().chain(std::iter::once(0)).collect();
+    let required = expanded_utf16.len() as u32; // includes null terminator
+
     if n_size == 0 || lp_dst.is_null() {
-        return required as u32;
+        return required;
     }
-
-    if n_size as usize <= len {
-        // Copy what fits, null-terminate
-        unsafe {
-            std::ptr::copy_nonoverlapping(lp_src, lp_dst, n_size as usize - 1);
-            *lp_dst.add(n_size as usize - 1) = 0;
-        }
-        return required as u32;
-    }
-
-    // Copy the full string
+    let copy_len = (n_size as usize).min(expanded_utf16.len());
     unsafe {
-        std::ptr::copy_nonoverlapping(lp_src, lp_dst, required);
+        std::ptr::copy_nonoverlapping(expanded_utf16.as_ptr(), lp_dst, copy_len);
+        // Ensure null-termination even if buffer was too small
+        if copy_len > 0 {
+            *lp_dst.add(copy_len - 1) = 0;
+        }
     }
-    required as u32
+    required
 }
 
-/// ExpandEnvironmentStringsA: expand environment variables in an ANSI string.
+/// ExpandEnvironmentStringsA: expand `%VAR%` references in an ANSI string.
 ///
-/// Phase 2: no actual expansion — returns the input string unchanged.
-/// Copies the input string to the output buffer, null-terminated.
+/// Wine ref: dlls/kernelbase/environ.c — converts to Unicode, calls
+/// RtlExpandEnvironmentStrings_U, converts result back to ANSI.
+/// Weave: operates directly on UTF-8 (ANSI is treated as UTF-8).
 ///
 /// # Safety
 /// `lp_src` must be a valid null-terminated UTF-8 string.
@@ -1120,8 +1184,6 @@ pub unsafe extern "win64" fn expand_environment_strings_a(
     if lp_src.is_null() {
         return 0;
     }
-
-    // Read the null-terminated UTF-8 string
     let mut len = 0usize;
     while len < MAX_UTF8_LEN && unsafe { *lp_src.add(len) } != 0 {
         len += 1;
@@ -1129,60 +1191,209 @@ pub unsafe extern "win64" fn expand_environment_strings_a(
     if len == MAX_UTF8_LEN {
         return 0;
     }
+    let src_bytes = unsafe { std::slice::from_raw_parts(lp_src, len) };
+    let src = String::from_utf8_lossy(src_bytes);
 
-    let required = len + 1; // include null terminator
+    let expanded = expand_env_vars(&src);
+    let expanded_bytes = expanded.as_bytes();
+    let required = (expanded_bytes.len() + 1) as u32; // +1 for null terminator
+
     if n_size == 0 || lp_dst.is_null() {
-        return required as u32;
+        return required;
     }
-
-    if n_size as usize <= len {
-        // Copy what fits, null-terminate
-        unsafe {
-            std::ptr::copy_nonoverlapping(lp_src, lp_dst, n_size as usize - 1);
-            *lp_dst.add(n_size as usize - 1) = 0;
-        }
-        return required as u32;
-    }
-
-    // Copy the full string
+    let copy_len = (n_size as usize - 1).min(expanded_bytes.len());
     unsafe {
-        std::ptr::copy_nonoverlapping(lp_src, lp_dst, required);
+        std::ptr::copy_nonoverlapping(expanded_bytes.as_ptr(), lp_dst, copy_len);
+        *lp_dst.add(copy_len) = 0; // null terminator
     }
-    required as u32
+    required
 }
 
 /// SearchPathW: search for a file in the PATH.
 ///
-/// Stub implementation — always returns 0 (not found).
+/// Wine ref: dlls/kernelbase/path.c — searches in order: explicit path arg,
+/// exe directory, current directory, System32, Windows dir, PATH env dirs;
+/// tries the filename bare then appends lpExtension if provided; return value
+/// is the char count of the full path (excluding null) written to lpBuffer;
+/// lpFilePart is set to point at the filename component within lpBuffer.
+///
+/// Weave simplification: skips Windows/System dir (not applicable); searches
+/// explicit path arg → exe directory → PATH env dirs.
 ///
 /// # Safety
-/// Pointer arguments are accepted but not dereferenced.
+/// All non-null pointer arguments must satisfy their Win32 API contracts.
 pub unsafe extern "win64" fn search_path_w(
-    _lp_path: *const u16,
-    _lp_file_name: *const u16,
-    _lp_extension: *const u16,
-    _n_buffer_length: u32,
-    _lp_buffer: *mut u16,
-    _lp_file_part: *mut *mut u16,
+    lp_path: *const u16,
+    lp_file_name: *const u16,
+    lp_extension: *const u16,
+    n_buffer_length: u32,
+    lp_buffer: *mut u16,
+    lp_file_part: *mut *mut u16,
 ) -> u32 {
+    let file_name = unsafe { read_cstr_w(lp_file_name) };
+    if file_name.is_empty() {
+        return 0;
+    }
+    let extension = if lp_extension.is_null() {
+        String::new()
+    } else {
+        unsafe { read_cstr_w(lp_extension) }
+    };
+
+    // Each search dir is tracked as (linux_path, windows_dir_prefix) so we
+    // can construct the Windows-style output path without a reverse translator.
+    let mut search_dirs: Vec<(std::path::PathBuf, String)> = Vec::new();
+
+    // 1. Explicit path argument (Windows paths, semicolon-separated)
+    if !lp_path.is_null() {
+        let path_str = unsafe { read_cstr_w(lp_path) };
+        for dir in path_str.split(';') {
+            if !dir.is_empty() {
+                if let Ok(linux_dir) = weave_core::file_io::translate_win_path(dir) {
+                    search_dirs.push((linux_dir, dir.to_string()));
+                }
+            }
+        }
+    }
+
+    // 2. Exe directory (already a Windows path string)
+    if let Some(exe_dir_win) = weave_core::exe_path::exe_dir() {
+        if let Ok(linux_dir) = weave_core::file_io::translate_win_path(&exe_dir_win) {
+            search_dirs.push((linux_dir, exe_dir_win));
+        }
+    }
+
+    // 3. PATH environment dirs — these are Linux paths; expose as Z:\ prefixed.
+    if let Ok(path_env) = std::env::var("PATH") {
+        for dir in path_env.split(':') {
+            if !dir.is_empty() {
+                let linux_dir = std::path::PathBuf::from(dir);
+                let win_dir = format!("Z:{}", dir.replace('/', "\\"));
+                search_dirs.push((linux_dir, win_dir));
+            }
+        }
+    }
+
+    let candidates: Vec<String> = if extension.is_empty() {
+        vec![file_name.clone()]
+    } else {
+        vec![file_name.clone(), format!("{}{}", file_name, extension)]
+    };
+
+    for (linux_dir, win_dir) in &search_dirs {
+        for candidate in &candidates {
+            let full_linux = linux_dir.join(candidate);
+            if full_linux.exists() {
+                // Build the full Windows path.
+                let win_path = format!("{}\\{}", win_dir.trim_end_matches('\\'), candidate);
+                let win_utf16: Vec<u16> =
+                    win_path.encode_utf16().chain(std::iter::once(0)).collect();
+                let char_count = (win_utf16.len() - 1) as u32;
+
+                if n_buffer_length > char_count && !lp_buffer.is_null() {
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(
+                            win_utf16.as_ptr(),
+                            lp_buffer,
+                            win_utf16.len(),
+                        );
+                    }
+                    if !lp_file_part.is_null() {
+                        let sep_pos = win_path.rfind('\\').map(|p| {
+                            // Count UTF-16 code units before the backslash.
+                            win_path[..p + 1].encode_utf16().count()
+                        }).unwrap_or(0);
+                        unsafe { *lp_file_part = lp_buffer.add(sep_pos) };
+                    }
+                }
+                return char_count;
+            }
+        }
+    }
     0 // not found
 }
 
-/// SearchPathA: search for a file in the PATH (ANSI version).
+/// SearchPathA: search for a file in the PATH (ANSI wrapper).
 ///
-/// Stub implementation — always returns 0 (not found).
+/// Wine ref: dlls/kernelbase/path.c — converts arguments to Unicode and
+/// delegates to SearchPathW.
 ///
 /// # Safety
-/// Pointer arguments are accepted but not dereferenced.
+/// All non-null pointer arguments must satisfy their Win32 API contracts.
 pub unsafe extern "win64" fn search_path_a(
-    _lp_path: *const u8,
-    _lp_file_name: *const u8,
-    _lp_extension: *const u8,
-    _n_buffer_length: u32,
-    _lp_buffer: *mut u8,
-    _lp_file_part: *mut *mut u8,
+    lp_path: *const u8,
+    lp_file_name: *const u8,
+    lp_extension: *const u8,
+    n_buffer_length: u32,
+    lp_buffer: *mut u8,
+    lp_file_part: *mut *mut u8,
 ) -> u32 {
-    0 // not found
+    // Convert inputs to UTF-16 and delegate to the W version via a temporary buffer.
+    let file_name = unsafe { read_cstr_a(lp_file_name) };
+    if file_name.is_empty() {
+        return 0;
+    }
+    let extension = if lp_extension.is_null() {
+        String::new()
+    } else {
+        unsafe { read_cstr_a(lp_extension) }
+    };
+    let path_str = if lp_path.is_null() {
+        String::new()
+    } else {
+        unsafe { read_cstr_a(lp_path) }
+    };
+
+    // Use a large temp buffer for the W call, then convert result back to ANSI.
+    let mut wide_buf: Vec<u16> = vec![0u16; 32768];
+    let mut file_part_w: *mut u16 = std::ptr::null_mut();
+
+    let file_name_w: Vec<u16> = file_name.encode_utf16().chain(std::iter::once(0)).collect();
+    let extension_w: Vec<u16> = extension.encode_utf16().chain(std::iter::once(0)).collect();
+    let path_w: Vec<u16> = path_str.encode_utf16().chain(std::iter::once(0)).collect();
+
+    let path_ptr = if lp_path.is_null() { std::ptr::null() } else { path_w.as_ptr() };
+    let ext_ptr = if lp_extension.is_null() {
+        std::ptr::null()
+    } else {
+        extension_w.as_ptr()
+    };
+
+    let count = unsafe {
+        search_path_w(
+            path_ptr,
+            file_name_w.as_ptr(),
+            ext_ptr,
+            wide_buf.len() as u32,
+            wide_buf.as_mut_ptr(),
+            &mut file_part_w as *mut *mut u16,
+        )
+    };
+    if count == 0 {
+        return 0;
+    }
+
+    let win_path = String::from_utf16_lossy(&wide_buf[..count as usize]);
+    let ansi_bytes = win_path.as_bytes();
+    let required = (ansi_bytes.len() + 1) as u32;
+
+    if n_buffer_length > required && !lp_buffer.is_null() {
+        unsafe {
+            std::ptr::copy_nonoverlapping(ansi_bytes.as_ptr(), lp_buffer, ansi_bytes.len());
+            *lp_buffer.add(ansi_bytes.len()) = 0;
+        }
+        if !lp_file_part.is_null() {
+            // Compute file part offset from wide buffer offset.
+            let offset = if file_part_w.is_null() {
+                0
+            } else {
+                unsafe { file_part_w.offset_from(wide_buf.as_ptr()) as usize }
+            };
+            // For ASCII paths offset in u16 == offset in bytes
+            unsafe { *lp_file_part = lp_buffer.add(offset) };
+        }
+    }
+    required - 1 // return char count excluding null, matching SearchPathW
 }
 
 /// GetTempFileNameW: create a temporary filename.
@@ -2332,6 +2543,13 @@ pub unsafe extern "win64" fn get_logical_drive_strings_a(
     4 // length excluding final null
 }
 
+/// GetVolumeInformationW: return volume name, serial, flags, and filesystem name.
+///
+/// Wine ref: dlls/kernelbase/volume.c — queries NtQueryVolumeInformationFile
+/// (FileFsAttributeInformation + FileFsVolumeInformation); returns TRUE on
+/// success. Weave returns a fake "Weave" volume name, fixed serial 0xDEADBEEF,
+/// max component 255, FILE_CASE_PRESERVED_NAMES, and filesystem "NTFS".
+///
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
 pub unsafe extern "win64" fn get_volume_information_w(
@@ -4053,7 +4271,13 @@ pub unsafe extern "win64" fn load_library_ex_w(
     load_library_impl(&name)
 }
 
-/// FreeLibrary — no-op; synthetic handles have no resources to free.
+/// FreeLibrary: decrement the reference count for a loaded DLL.
+///
+/// Wine ref: dlls/kernelbase/loader.c — calls LdrUnloadDll which decrements the
+/// loader data entry refcount and, when it hits zero, calls DllMain(DLL_PROCESS_DETACH)
+/// then unmaps the image. Weave: module_handles has no refcount (Phase 1/2);
+/// FreeLibrary is a no-op returning TRUE. Synthetic handles have no resources
+/// to release; real loaded DLLs (if any) remain mapped for the process lifetime.
 pub extern "win64" fn free_library(_h_module: usize) -> i32 {
     1 // TRUE
 }
