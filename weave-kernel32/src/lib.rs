@@ -41,9 +41,11 @@ fn file_mappings() -> &'static Mutex<Vec<Option<(usize, usize)>>> {
     FILE_MAPPINGS.get_or_init(|| Mutex::new(Vec::new()))
 }
 
+type FileMappingsGuard<'a> = std::sync::MutexGuard<'a, Vec<Option<(usize, usize)>>>;
+
 fn lock_file_mappings<'a>(
     m: &'a Mutex<Vec<Option<(usize, usize)>>>,
-) -> Option<std::sync::MutexGuard<'a, Vec<Option<(usize, usize)>>>> {
+) -> Option<FileMappingsGuard<'a>> {
     m.lock()
         .map_err(|e| eprintln!("weave: weave-kernel32: file mappings mutex poisoned: {e}"))
         .ok()

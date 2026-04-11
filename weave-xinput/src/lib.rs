@@ -86,9 +86,7 @@ fn lock_gamepad_states<'a>(
         .ok()
 }
 
-fn lock_packet_counter<'a>(
-    m: &'a Mutex<u32>,
-) -> Option<std::sync::MutexGuard<'a, u32>> {
+fn lock_packet_counter<'a>(m: &'a Mutex<u32>) -> Option<std::sync::MutexGuard<'a, u32>> {
     m.lock()
         .map_err(|e| eprintln!("weave: weave-xinput: packet counter mutex poisoned: {e}"))
         .ok()

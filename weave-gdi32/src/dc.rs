@@ -144,7 +144,10 @@ pub fn save(hdc: usize) -> i32 {
     // Capture current state (or default if none exists yet).
     let current = {
         match lock_dc_table(table()) {
-            Some(t) => t.get(&hdc).cloned().unwrap_or_else(|| DcState::default_for(hdc)),
+            Some(t) => t
+                .get(&hdc)
+                .cloned()
+                .unwrap_or_else(|| DcState::default_for(hdc)),
             None => return 0,
         }
     };

@@ -168,7 +168,10 @@ unsafe extern "win64" fn edit_wnd_proc(
             // Wine ref: dlls/user32/edit.c::EDIT_EM_GetSel — writes to out-ptrs, returns
             // MAKELONG(start, end).
             let (start, end) = match lock_edit_state(edit_state()) {
-                Some(g) => g.get(&hwnd).map(|s| (s.sel_start, s.sel_end)).unwrap_or((0, 0)),
+                Some(g) => g
+                    .get(&hwnd)
+                    .map(|s| (s.sel_start, s.sel_end))
+                    .unwrap_or((0, 0)),
                 None => (0, 0),
             };
             if w_param != 0 {
@@ -227,7 +230,10 @@ unsafe extern "win64" fn edit_wnd_proc(
             // Read text and selection separately to avoid nested mutex locks.
             let current_text = window::with(hwnd, |e| e.title.clone()).unwrap_or_default();
             let (raw_start, raw_end) = match lock_edit_state(edit_state()) {
-                Some(g) => g.get(&hwnd).map(|s| (s.sel_start, s.sel_end)).unwrap_or((0, 0)),
+                Some(g) => g
+                    .get(&hwnd)
+                    .map(|s| (s.sel_start, s.sel_end))
+                    .unwrap_or((0, 0)),
                 None => (0, 0),
             };
 

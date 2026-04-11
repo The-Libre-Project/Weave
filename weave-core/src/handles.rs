@@ -128,9 +128,7 @@ pub const STDERR_HANDLE: usize = 2 + HANDLE_OFFSET;
 /// Allocate a new handle for the given resource. The table is initialised on
 /// first call.
 pub fn alloc(kind: HandleKind) -> usize {
-    lock_table(table())
-        .map(|mut g| g.alloc(kind))
-        .unwrap_or(0)
+    lock_table(table()).map(|mut g| g.alloc(kind)).unwrap_or(0)
 }
 
 /// Return the Linux file descriptor for a handle. Returns `None` if the handle

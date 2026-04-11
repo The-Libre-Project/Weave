@@ -133,9 +133,7 @@ fn lock_audio_devices<'a>(
         .ok()
 }
 
-fn lock_ring_buf<'a>(
-    m: &'a Mutex<RingBuf>,
-) -> Option<std::sync::MutexGuard<'a, RingBuf>> {
+fn lock_ring_buf<'a>(m: &'a Mutex<RingBuf>) -> Option<std::sync::MutexGuard<'a, RingBuf>> {
     m.lock()
         .map_err(|e| eprintln!("weave: weave-mmdevapi: ring buf mutex poisoned: {e}"))
         .ok()
