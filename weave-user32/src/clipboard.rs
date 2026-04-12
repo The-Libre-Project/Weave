@@ -61,6 +61,9 @@ pub const CF_HDROP: u32 = 15;
 /// OpenClipboard: open the clipboard for examination or modification.
 ///
 /// Returns TRUE on success. Phase 2: always succeeds (no contention).
+// Wine ref: server/clipboard.c:360 — server validates window handle; sets
+// STATUS_INVALID_LOCK_SEQUENCE if already open by a different window (not thread).
+// Records open_seqno=seqno on first open; resets rendering=0 on re-open by new thread.
 pub extern "win64" fn open_clipboard(h_wnd_new_owner: usize) -> i32 {
     let mut s = match lock_state(state()) {
         Some(g) => g,
@@ -72,6 +75,8 @@ pub extern "win64" fn open_clipboard(h_wnd_new_owner: usize) -> i32 {
 }
 
 /// CloseClipboard: close the clipboard.
+// Wine ref: dlls/win32u/clipboard.c:208 — server call; on success reply carries viewer
+// and owner handles; client sends WM_DRAWCLIPBOARD to the viewer chain after close.
 pub extern "win64" fn close_clipboard() -> i32 {
     let mut s = match lock_state(state()) {
         Some(g) => g,
@@ -85,6 +90,9 @@ pub extern "win64" fn close_clipboard() -> i32 {
 ///
 /// Phase 2: leaks any previously stored HGLOBAL handles (caller should
 /// have already freed them before calling EmptyClipboard).
+// Wine ref: server/clipboard.c — empty_clipboard server handler increments seqno,
+// clears all format data, and sets clipboard->owner to the opening thread's process.
+// Clipboard must be open or the call fails with STATUS_ACCESS_DENIED.
 pub extern "win64" fn empty_clipboard() -> i32 {
     let mut s = match lock_state(state()) {
         Some(g) => g,
@@ -98,6 +106,9 @@ pub extern "win64" fn empty_clipboard() -> i32 {
 ///
 /// Takes ownership of `h_mem` (the caller must not use it afterwards).
 /// Returns `h_mem` on success, 0 on failure.
+// Wine ref: dlls/win32u/clipboard.c:596 — server_set_clipboard_data passes raw bytes
+// via wine_server_add_data; stores reply->seqno in the local cache entry for delayed
+// rendering detection. Caller must have called EmptyClipboard first or be the owner.
 pub extern "win64" fn set_clipboard_data(u_format: u32, h_mem: usize) -> usize {
     let mut s = match lock_state(state()) {
         Some(g) => g,
@@ -113,6 +124,9 @@ pub extern "win64" fn set_clipboard_data(u_format: u32, h_mem: usize) -> usize {
 /// GetClipboardData: retrieve a handle to the data in the specified format.
 ///
 /// Returns the stored HGLOBAL (pointer), or 0 if the format is unavailable.
+// Wine ref: dlls/win32u/clipboard.c:641 — checks local cache first (by seqno match);
+// on cache miss sends get_clipboard_data server request with render=TRUE to trigger
+// WM_RENDERFORMAT to the owner if data hasn't been rendered yet.
 pub extern "win64" fn get_clipboard_data(u_format: u32) -> usize {
     let s = match lock_state(state()) {
         Some(g) => g,
@@ -125,6 +139,9 @@ pub extern "win64" fn get_clipboard_data(u_format: u32) -> usize {
 }
 
 /// IsClipboardFormatAvailable: check whether a clipboard format is available.
+// Wine ref: dlls/win32u/clipboard.c — get_clipboard_formats server request; does NOT
+// require the clipboard to be open (unlike GetClipboardData). Returns TRUE if the
+// format is in the server's format list (including synthesized CF_TEXT↔CF_UNICODETEXT).
 pub extern "win64" fn is_clipboard_format_available(u_format: u32) -> i32 {
     match lock_state(state()) {
         Some(s) => s.data.contains_key(&u_format) as i32,
@@ -133,6 +150,9 @@ pub extern "win64" fn is_clipboard_format_available(u_format: u32) -> i32 {
 }
 
 /// CountClipboardFormats: return the number of formats currently on the clipboard.
+// Wine ref: dlls/win32u/main.c:1301 — NtUserCountClipboardFormats; server-side count
+// includes synthesized formats (CF_TEXT auto-synthesized from CF_UNICODETEXT and vice
+// versa), so count may exceed explicitly set formats.
 pub extern "win64" fn count_clipboard_formats() -> i32 {
     match lock_state(state()) {
         Some(s) => s.data.len() as i32,
@@ -141,6 +161,9 @@ pub extern "win64" fn count_clipboard_formats() -> i32 {
 }
 
 /// GetClipboardOwner: return the HWND of the current clipboard owner.
+// Wine ref: server/clipboard.c — owner is the process that last called EmptyClipboard;
+// does NOT require clipboard to be open. Returns NULL if clipboard has never been
+// emptied or if the owning process has exited.
 pub extern "win64" fn get_clipboard_owner() -> usize {
     match lock_state(state()) {
         Some(s) => s.owner_hwnd,

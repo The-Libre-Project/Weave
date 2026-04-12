@@ -112,6 +112,8 @@ pub fn current_paint_hwnd() -> usize {
 ///
 /// # Safety
 /// `lp_wnd_class` must point to a valid `WNDCLASSW` struct.
+// Wine ref: dlls/user32/class.c — RegisterClassW calls NtUserRegisterClassExWOW; ATOM is
+// allocated by the server; duplicate registration returns the existing atom, not an error.
 pub unsafe extern "win64" fn register_class_w(lp_wnd_class: *const WndClassW) -> u16 {
     if lp_wnd_class.is_null() {
         return 0;
@@ -139,6 +141,8 @@ pub unsafe extern "win64" fn register_class_w(lp_wnd_class: *const WndClassW) ->
 ///
 /// # Safety
 /// `lp_wnd_class_ex` must point to a valid `WNDCLASSEXW` struct.
+// Wine ref: dlls/user32/class.c — RegisterClassExW validates cbSize == sizeof(WNDCLASSEXW)
+// before passing to NtUserRegisterClassExWOW; hIconSm stored separately from hIcon.
 pub unsafe extern "win64" fn register_class_ex_w(lp_wnd_class_ex: *const WndClassExW) -> u16 {
     if lp_wnd_class_ex.is_null() {
         return 0;
@@ -189,6 +193,8 @@ fn name_to_atom(name: &str) -> u16 {
 /// # Safety
 /// `lp_class_name` and `lp_window_name` (if non-null) must be valid
 /// null-terminated UTF-16 strings.
+// Wine ref: dlls/user32/win.c::CreateWindowExW — fills CREATESTRUCTW, sends WM_NCCREATE
+// then WM_CREATE; dwExStyle stored in window object for GWL_EXSTYLE; returns NULL on WM_CREATE failure.
 pub unsafe extern "win64" fn create_window_ex_w(
     dw_ex_style: u32,
     lp_class_name: *const u16,
@@ -357,6 +363,8 @@ pub extern "win64" fn show_window(hwnd: usize, n_cmd_show: i32) -> i32 {
 
 /// UpdateWindow: send WM_PAINT directly if the update region is non-empty.
 /// Phase 2: always posts WM_PAINT to the message queue.
+// Wine ref: dlls/win32u/painting.c — NtUserRedrawWindow with RDW_UPDATENOW; sends WM_PAINT
+// only if the window has a non-empty update region; returns TRUE even if nothing was painted.
 pub extern "win64" fn update_window(hwnd: usize) -> i32 {
     if window::with(hwnd, |_| ()).is_some() {
         queue::post(MsgEntry {
@@ -409,6 +417,8 @@ pub extern "win64" fn destroy_window(hwnd: usize) -> i32 {
 ///
 /// # Safety
 /// `lp_msg` must be a valid writable pointer to a `MSG`-sized buffer (48 bytes).
+// Wine ref: dlls/win32u/message.c — NtUserGetMessage blocks on server queue; WM_QUIT → 0;
+// hwnd/filter narrow which messages dequeue; dispatches SendMessage calls while waiting.
 pub unsafe extern "win64" fn get_message_w(
     lp_msg: *mut Msg,
     _h_wnd: usize,        // window filter — 0 = all windows (ignored in Phase 2)
@@ -430,7 +440,10 @@ pub unsafe extern "win64" fn get_message_w(
         if let Some(entry) = queue::pop() {
             let n = GM_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             if n < 30 {
-                eprintln!("weave/GetMessageW#{n}: hwnd={:#x} msg={}", entry.hwnd, entry.message);
+                eprintln!(
+                    "weave/GetMessageW#{n}: hwnd={:#x} msg={}",
+                    entry.hwnd, entry.message
+                );
             }
             fill_msg(lp_msg, &entry);
             return if entry.message == WM_QUIT { 0 } else { 1 };
@@ -462,6 +475,8 @@ pub unsafe extern "win64" fn get_message_w(
 ///
 /// # Safety
 /// `lp_msg` must be a valid writable pointer to a `MSG`-sized buffer.
+// Wine ref: dlls/win32u/message.c — NtUserPeekMessage; PM_NOREMOVE leaves msg in queue;
+// PM_REMOVE pops; PM_NOYIELD suppresses fiber yield; returns 0 immediately if no msg.
 pub unsafe extern "win64" fn peek_message_w(
     lp_msg: *mut Msg,
     _h_wnd: usize,
@@ -695,6 +710,9 @@ fn vk_to_char(vk: usize, shift: bool) -> Option<char> {
 ///
 /// # Safety
 /// `lp_msg` must point to a valid `MSG`.
+// Wine ref: dlls/user32/message.c::TranslateMessage — calls NtUserTranslateMessage which
+// uses the thread keyboard layout to convert WM_KEYDOWN to WM_CHAR/WM_DEADCHAR; returns
+// TRUE for WM_KEYDOWN/WM_KEYUP/WM_SYSKEYDOWN/WM_SYSKEYUP regardless of translation result.
 pub unsafe extern "win64" fn translate_message(lp_msg: *const Msg) -> i32 {
     if lp_msg.is_null() {
         return 0;
@@ -837,6 +855,8 @@ pub extern "win64" fn send_message_w(
 /// WM_GETTEXT: copies window title into buffer (Wine: defwnd.c — NtUserInternalGetWindowText).
 /// WM_GETTEXTLENGTH: returns title length in UTF-16 code units.
 /// TODO Wine ref gap: WM_DESTROY should only PostQuitMessage for last top-level window.
+// Wine ref: dlls/win32u/defwnd.c::DefWindowProcW — dispatches ~30 default message handlers;
+// WM_NCCREATE sets WS_EX_CLIENTEDGE; WM_SETTEXT calls NtUserDefSetText; WM_CLOSE calls DestroyWindow.
 pub extern "win64" fn def_window_proc_w(
     hwnd: usize,
     msg: u32,
@@ -906,6 +926,8 @@ pub extern "win64" fn def_window_proc_w(
 ///
 /// # Safety
 /// `lp_rect` must be a valid writable pointer to a `RECT`.
+// Wine ref: dlls/win32u/window.c::get_client_rect — calls get_client_rect_rel with
+// COORDS_CLIENT; origin is always (0,0) in client coords; right/bottom = client size.
 pub unsafe extern "win64" fn get_client_rect(hwnd: usize, lp_rect: *mut Rect) -> i32 {
     if lp_rect.is_null() {
         return 0;
@@ -924,6 +946,8 @@ pub unsafe extern "win64" fn get_client_rect(hwnd: usize, lp_rect: *mut Rect) ->
 ///
 /// # Safety
 /// `lp_rect` must be a valid writable pointer to a `RECT`.
+// Wine ref: dlls/win32u/window.c::get_window_rect — calls get_window_rect_rel with
+// COORDS_SCREEN; includes non-client area (frame + caption); returns screen coordinates.
 pub unsafe extern "win64" fn get_window_rect(hwnd: usize, lp_rect: *mut Rect) -> i32 {
     if lp_rect.is_null() {
         return 0;
@@ -951,6 +975,8 @@ pub unsafe extern "win64" fn get_window_rect(hwnd: usize, lp_rect: *mut Rect) ->
 ///
 /// # Safety
 /// `lp_rect` must point to a `RECT`-sized buffer or be null.
+// Wine ref: dlls/win32u/painting.c::NtUserGetUpdateRect — returns bounding rect of update
+// region; TRUE if region non-empty; bErase TRUE triggers WM_ERASEBKGND before returning.
 pub unsafe extern "win64" fn get_update_rect(
     hwnd: usize,
     lp_rect: *mut Rect,
@@ -978,6 +1004,8 @@ pub unsafe extern "win64" fn get_update_rect(
 ///
 /// # Safety
 /// `lp_rect` may be null (means invalidate entire client area).
+// Wine ref: dlls/win32u/painting.c::NtUserInvalidateRect — adds rect (or entire client area
+// if NULL) to the window's update region; posts WM_PAINT if region transitions from empty.
 pub unsafe extern "win64" fn invalidate_rect(
     hwnd: usize,
     _lp_rect: *const Rect,
@@ -1005,6 +1033,8 @@ pub unsafe extern "win64" fn invalidate_rect(
 ///
 /// # Safety
 /// `lp_string` must be a valid null-terminated UTF-16 string.
+// Wine ref: server/window.c::set_window_text handler — stores text in server-side window
+// object; also calls X11DRV_SetWindowText (dlls/winex11.drv/window.c:2562) to update title.
 pub unsafe extern "win64" fn set_window_text_w(hwnd: usize, lp_string: *const u16) -> i32 {
     let title = unsafe { decode_wide(lp_string) };
     let xcb = window::xcb_id(hwnd);
@@ -1019,6 +1049,8 @@ pub unsafe extern "win64" fn set_window_text_w(hwnd: usize, lp_string: *const u1
 ///
 /// # Safety
 /// `lp_string` must be valid for `n_max_count` UTF-16 code units.
+// Wine ref: server/window.c::get_window_text handler — reads text stored in server window
+// object; NtUserInternalGetWindowText returns char count excluding null terminator.
 pub unsafe extern "win64" fn get_window_text_w(
     hwnd: usize,
     lp_string: *mut u16,
@@ -1090,6 +1122,8 @@ pub unsafe extern "win64" fn begin_paint(hwnd: usize, lp_paint: *mut PaintStruct
 ///
 /// # Safety
 /// `lp_paint` must point to the `PAINTSTRUCT` filled by `BeginPaint`.
+// Wine ref: dlls/win32u/painting.c::NtUserEndPaint — releases the HDC obtained in BeginPaint,
+// calls validate_window to clear the update region; always returns TRUE.
 pub unsafe extern "win64" fn end_paint(_hwnd: usize, _lp_paint: *const PaintStruct) -> i32 {
     1 // TRUE
 }
@@ -1133,6 +1167,8 @@ pub extern "win64" fn get_system_metrics(n_index: i32) -> i32 {
 /// # Safety
 /// `lp_cursor_name` (if non-null) must be a valid UTF-16 string or an integer
 /// resource identifier (IDC_* constant passed via MAKEINTRESOURCEW).
+// Wine ref: dlls/user32/cursoricon.c::CURSORICON_Load — LoadCursorW calls LoadImageW with
+// IMAGE_CURSOR; h_instance=NULL loads OEM system cursors from winex11.drv; returns HCURSOR.
 pub unsafe extern "win64" fn load_cursor_w(_h_instance: usize, _lp_cursor_name: usize) -> usize {
     warn_once("LoadCursorW");
     1 // non-zero fake HCURSOR
@@ -1144,6 +1180,8 @@ pub unsafe extern "win64" fn load_cursor_w(_h_instance: usize, _lp_cursor_name: 
 ///
 /// # Safety
 /// `lp_icon_name` (if non-null) must be a valid UTF-16 string or integer resource.
+// Wine ref: dlls/user32/cursoricon.c::CURSORICON_Load — LoadIconW calls LoadImageW with
+// IMAGE_ICON and LR_DEFAULTSIZE; h_instance=NULL loads OEM icons (IDI_APPLICATION etc).
 pub unsafe extern "win64" fn load_icon_w(_h_instance: usize, _lp_icon_name: usize) -> usize {
     warn_once("LoadIconW");
     1 // non-zero fake HICON
@@ -1156,6 +1194,8 @@ pub unsafe extern "win64" fn load_icon_w(_h_instance: usize, _lp_icon_name: usiz
 /// # Safety
 /// `_name` may be a pointer or an integer resource ID; callers must ensure it
 /// is valid for the given `_ty`. This stub ignores it entirely.
+// Wine ref: include/ntuser.h::load_image_params — NtUserLoadImage dispatches on type:
+// IMAGE_BITMAP → CreateBitmap path, IMAGE_ICON/IMAGE_CURSOR → CURSORICON_Load path.
 pub unsafe extern "win64" fn load_image_w(
     _h_inst: usize,
     _name: usize,
@@ -1177,6 +1217,8 @@ pub unsafe extern "win64" fn load_image_w(
 ///
 /// # Safety
 /// `lp_text` and `lp_caption` (if non-null) must be valid UTF-16 strings.
+// Wine ref: dlls/user32/dialog.c::DIALOG_DoDialogBox — MessageBoxW creates a dialog via
+// DialogBoxIndirectParamAW; runs its own modal message loop; returns button ID (IDOK=1 etc).
 pub unsafe extern "win64" fn message_box_w(
     _hwnd: usize,
     lp_text: *const u16,
@@ -1220,6 +1262,8 @@ pub extern "win64" fn get_dc(hwnd: usize) -> usize {
 /// ReleaseDC: release a device context.
 ///
 /// Phase 2: no-op. Returns 1 (success).
+// Wine ref: dlls/win32u/dce.c::release_dc — decrements DC ref count; for class/window DCs
+// clears busy flag; for private DCs (GetDC) actually frees the DCE; returns 1 if released.
 pub extern "win64" fn release_dc(_hwnd: usize, _hdc: usize) -> i32 {
     1
 }
@@ -1227,6 +1271,8 @@ pub extern "win64" fn release_dc(_hwnd: usize, _hdc: usize) -> i32 {
 // ── SetWindowPos / MoveWindow ─────────────────────────────────────────────────
 
 /// MoveWindow: change the position and size of a window.
+// Wine ref: dlls/win32u/window.c::set_window_pos — MoveWindow calls NtUserSetWindowPos with
+// SWP_NOZORDER|SWP_NOACTIVATE; sends WM_SIZE synchronously before WM_PAINT fires.
 pub extern "win64" fn move_window(
     hwnd: usize,
     x: i32,
@@ -1283,6 +1329,8 @@ pub extern "win64" fn move_window(
 /// GetForegroundWindow: return the foreground window's HWND.
 ///
 /// Phase 2: returns the first registered HWND, or 0 if none.
+// Wine ref: dlls/win32u/main.c — NtUserGetForegroundWindow returns thread's active window
+// from the server; can return NULL if no window has focus (e.g. another process is active).
 pub extern "win64" fn get_foreground_window() -> usize {
     window::all_hwnds().into_iter().next().unwrap_or(0)
 }
@@ -1290,6 +1338,8 @@ pub extern "win64" fn get_foreground_window() -> usize {
 /// SetForegroundWindow: attempt to bring a window to the foreground.
 ///
 /// Phase 2: no-op (always succeeds).
+// Wine ref: dlls/win32u/input.c::set_foreground_window — sends set_foreground_window server
+// request; allowed_fg_apps list controls whether caller is permitted to steal focus.
 pub extern "win64" fn set_foreground_window(_hwnd: usize) -> i32 {
     1
 }
@@ -1297,6 +1347,8 @@ pub extern "win64" fn set_foreground_window(_hwnd: usize) -> i32 {
 /// GetDesktopWindow: return the handle to the desktop window.
 ///
 /// Phase 2: returns 0 (no desktop window object).
+// Wine ref: dlls/win32u/winstation.c::get_desktop_window — queries server for the desktop
+// HWND; creates the desktop window on first call; handle is process-global.
 pub extern "win64" fn get_desktop_window() -> usize {
     0
 }
@@ -1309,6 +1361,8 @@ pub extern "win64" fn get_desktop_window() -> usize {
 ///
 /// # Safety
 /// `lp_rect` must point to a valid `RECT`.
+// Wine ref: dlls/win32u/defwnd.c::adjust_window_rect — inflates rect based on style flags;
+// WS_THICKFRAME adds ncm.iBorderWidth+iPaddedBorderWidth; WS_CAPTION subtracts caption height.
 pub unsafe extern "win64" fn adjust_window_rect(
     lp_rect: *mut Rect,
     _dw_style: u32,
@@ -1325,6 +1379,8 @@ pub unsafe extern "win64" fn adjust_window_rect(
 ///
 /// # Safety
 /// `lp_rect` must point to a valid `RECT`.
+// Wine ref: dlls/win32u/defwnd.c::adjust_window_rect — same as AdjustWindowRect but also
+// handles WS_EX_CLIENTEDGE (inflates by SM_CXEDGE/SM_CYEDGE) and WS_EX_STATICEDGE.
 pub unsafe extern "win64" fn adjust_window_rect_ex(
     lp_rect: *mut Rect,
     _dw_style: u32,
@@ -1341,6 +1397,8 @@ pub unsafe extern "win64" fn adjust_window_rect_ex(
 /// SetCursor: set the cursor shape.
 ///
 /// Phase 2: no-op; returns the previous cursor (fake handle = 1).
+// Wine ref: dlls/win32u/input.c — NtUserSetCursor updates thread cursor and sends
+// WM_SETCURSOR to the window under the cursor; returns previous HCURSOR.
 pub extern "win64" fn set_cursor(_h_cursor: usize) -> usize {
     1
 }
@@ -1348,6 +1406,8 @@ pub extern "win64" fn set_cursor(_h_cursor: usize) -> usize {
 /// ShowCursor: show or hide the cursor (ref-counted).
 ///
 /// Phase 2: returns 0 (display counter unchanged).
+// Wine ref: dlls/win32u/input.c — NtUserShowCursor increments/decrements a per-thread
+// display counter; cursor visible when counter >= 0; returns new counter value.
 pub extern "win64" fn show_cursor(_b_show: i32) -> i32 {
     0
 }
@@ -1356,6 +1416,8 @@ pub extern "win64" fn show_cursor(_b_show: i32) -> i32 {
 
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
+// Wine ref: dlls/win32u/sysparams.c — EnumDisplayDevicesW iterates source list; returns
+// FALSE when iDevNum >= adapter count; fills DISPLAY_DEVICEW with DeviceName/DeviceString.
 pub unsafe extern "win64" fn enum_display_devices_w(
     _lp_device: *const u16,
     _i_dev_num: u32,
@@ -1367,6 +1429,8 @@ pub unsafe extern "win64" fn enum_display_devices_w(
 
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
+// Wine ref: dlls/win32u/sysparams.c::source_enum_display_settings — iModeNum=ENUM_CURRENT_SETTINGS
+// (-1) returns current mode; ENUM_REGISTRY_SETTINGS (-2) returns saved mode; else enumerates.
 pub unsafe extern "win64" fn enum_display_settings_w(
     _lp_sz_device_name: *const u16,
     _i_mode_num: u32,
@@ -1377,6 +1441,8 @@ pub unsafe extern "win64" fn enum_display_settings_w(
 
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
+// Wine ref: dlls/win32u/sysparams.c — EnumDisplaySettingsExW adds EDS_RAWMODE/EDS_ROTATEDMODE
+// flags; otherwise identical to EnumDisplaySettingsW.
 pub unsafe extern "win64" fn enum_display_settings_ex_w(
     _lp_sz_device_name: *const u16,
     _i_mode_num: u32,
@@ -1388,12 +1454,16 @@ pub unsafe extern "win64" fn enum_display_settings_ex_w(
 
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
+// Wine ref: dlls/win32u/driver.c::nulldrv_ChangeDisplaySettings — returns DISP_CHANGE_FAILED
+// when no driver; the real path calls into the GPU driver via NtUserChangeDisplaySettings.
 pub unsafe extern "win64" fn change_display_settings_w(_lp_dev_mode: usize, _dw_flags: u32) -> i32 {
     0
 }
 
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
+// Wine ref: dlls/win32u/driver.c::loaderdrv_ChangeDisplaySettings — ChangeDisplaySettingsExW
+// adds target device name and HWND parameters; same DISP_CHANGE_* return codes.
 pub unsafe extern "win64" fn change_display_settings_ex_w(
     _lp_sz_device_name: *const u16,
     _lp_dev_mode: usize,
@@ -1406,22 +1476,30 @@ pub unsafe extern "win64" fn change_display_settings_ex_w(
 
 // ── Monitor handle functions ─────────────────────────────────────────────────
 
+// Wine ref: dlls/win32u/sysparams.c::monitor_from_window — uses window rect (or placement
+// rcNormalPosition if iconic) to find intersecting monitor; falls back to primary if no match.
 pub extern "win64" fn monitor_from_window(_hwnd: usize, _dw_flags: u32) -> usize {
     1usize
 }
 
+// Wine ref: dlls/win32u/sysparams.c — MonitorFromPoint wraps monitor_from_rect with a
+// 1×1 rect at the point; returns primary monitor handle on MONITOR_DEFAULTTOPRIMARY.
 pub extern "win64" fn monitor_from_point(_pt_x: i32, _pt_y: i32, _dw_flags: u32) -> usize {
     1usize
 }
 
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
+// Wine ref: dlls/win32u/sysparams.c::monitor_info_from_rect — finds monitor with largest
+// intersection area; if no intersection uses MONITOR_DEFAULTTO* flag to pick fallback.
 pub unsafe extern "win64" fn monitor_from_rect(_lp_rc: *const Rect, _dw_flags: u32) -> usize {
     1usize
 }
 
 /// # Safety
 /// `lp_mi` must point to a valid `MonitorInfo` struct with `cb_size` set.
+// Wine ref: dlls/win32u/sysparams.c::monitor_info_from_window — fills rcMonitor (full screen
+// rect) and rcWork (work area minus taskbar); dwFlags=MONITORINFOF_PRIMARY for primary.
 pub unsafe extern "win64" fn get_monitor_info_w(_h_monitor: usize, lp_mi: *mut MonitorInfo) -> i32 {
     if lp_mi.is_null() {
         return 0;
@@ -1447,6 +1525,8 @@ pub unsafe extern "win64" fn get_monitor_info_w(_h_monitor: usize, lp_mi: *mut M
 
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
+// Wine ref: dlls/win32u/sysparams.c — EnumDisplayMonitors iterates monitor list; calls
+// lpfnEnum for each monitor whose rect intersects hdc clip rect (or all if hdc=NULL).
 pub unsafe extern "win64" fn enum_display_monitors(
     _hdc: usize,
     _lprc_clip: usize,
@@ -1680,6 +1760,8 @@ pub extern "win64" fn set_window_pos(
 /// Weave implementation: returns a non-null sentinel handle (0x1). We execute
 /// each DeferWindowPos call immediately rather than batching (deferred
 /// atomicity is a correctness nicety, not required for correctness of layout).
+// Wine ref: dlls/win32u/winpos.c — BeginDeferWindowPos allocates SMWP struct with
+// n_num_windows pre-allocated entries; returns NULL on allocation failure.
 pub extern "win64" fn begin_defer_window_pos(_n_num_windows: i32) -> usize {
     0x1 // non-null sentinel HDWP
 }
@@ -1719,6 +1801,8 @@ pub extern "win64" fn end_defer_window_pos(_h_win_pos_info: usize) -> i32 {
 
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
+// Wine ref: dlls/win32u/window.c — FindWindowW calls NtUserFindWindowEx with hwndParent=0,
+// hwndChildAfter=0; searches top-level windows matching class and/or title.
 pub unsafe extern "win64" fn find_window_w(
     _lp_class_name: *const u16,
     _lp_window_name: *const u16,
@@ -1728,6 +1812,8 @@ pub unsafe extern "win64" fn find_window_w(
 
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
+// Wine ref: dlls/user32/win.c — FindWindowA converts ANSI class/title to wide and calls
+// FindWindowExW; same search semantics as FindWindowW.
 pub unsafe extern "win64" fn find_window_a(
     _lp_class_name: *const u8,
     _lp_window_name: *const u8,
@@ -1735,6 +1821,8 @@ pub unsafe extern "win64" fn find_window_a(
     0
 }
 
+// Wine ref: include/ntuser.h::NtUserIsWindow — calls NtUserGetWindowLongW(hwnd, GWL_STYLE);
+// returns FALSE for destroyed or invalid handles (server validates via get_user_entry).
 pub extern "win64" fn is_window(hwnd: usize) -> i32 {
     if window::with(hwnd, |_| ()).is_some() {
         1
@@ -1743,12 +1831,16 @@ pub extern "win64" fn is_window(hwnd: usize) -> i32 {
     }
 }
 
+// Wine ref: dlls/win32u/window.c::is_window_visible — walks parent chain checking WS_VISIBLE
+// on each ancestor; returns FALSE if any ancestor is hidden; top message window always hidden.
 pub extern "win64" fn is_window_visible(hwnd: usize) -> i32 {
     window::with(hwnd, |w| w.visible as i32).unwrap_or(0)
 }
 
 /// # Safety
 /// `lpdw_process_id` may be null.
+// Wine ref: dlls/win32u/window.c::get_window_thread — returns entry.tid and optionally
+// entry.pid; sets ERROR_INVALID_WINDOW_HANDLE and returns 0 for invalid HWND.
 pub unsafe extern "win64" fn get_window_thread_process_id(
     _hwnd: usize,
     lpdw_process_id: *mut u32,
@@ -1771,6 +1863,8 @@ pub unsafe extern "win64" fn get_window_thread_process_id(
 ///
 /// # Safety
 /// `lp_point` must point to a valid `Point` (8 bytes) or NULL.
+// Wine ref: server/window.c — walks parent chain subtracting client_rect offsets;
+// result is point in client coords of hwnd; returns FALSE if hwnd is invalid.
 pub unsafe extern "win64" fn screen_to_client(hwnd: usize, lp_point: *mut Point) -> i32 {
     if lp_point.is_null() {
         return 0;
@@ -1791,6 +1885,8 @@ pub unsafe extern "win64" fn screen_to_client(hwnd: usize, lp_point: *mut Point)
 ///
 /// # Safety
 /// `lp_point` must point to a valid `Point` (8 bytes) or NULL.
+// Wine ref: server/window.c — client_to_screen adds each window's client_rect offset up
+// the parent chain; inverse of ScreenToClient; returns FALSE if hwnd is invalid.
 pub unsafe extern "win64" fn client_to_screen(hwnd: usize, lp_point: *mut Point) -> i32 {
     if lp_point.is_null() {
         return 0;
@@ -1807,6 +1903,8 @@ pub unsafe extern "win64" fn client_to_screen(hwnd: usize, lp_point: *mut Point)
 
 /// # Safety
 /// `lp_point` must point to a valid `Point` struct.
+// Wine ref: dlls/win32u/driver.c::nulldrv_GetCursorPos — driver entry point; winex11.drv
+// queries XQueryPointer; returns screen-space cursor position in POINT.
 pub unsafe extern "win64" fn get_cursor_pos(lp_point: *mut Point) -> i32 {
     if lp_point.is_null() {
         return 0;
@@ -1818,30 +1916,44 @@ pub unsafe extern "win64" fn get_cursor_pos(lp_point: *mut Point) -> i32 {
     1
 }
 
+// Wine ref: dlls/win32u/driver.c::loaderdrv_SetCursorPos — delegates to GPU driver;
+// winex11.drv calls XWarpPointer to move cursor; returns TRUE on success.
 pub extern "win64" fn set_cursor_pos(_x: i32, _y: i32) -> i32 {
     1
 }
 
+// Wine ref: dlls/win32u/window.c — NtUserEnableWindow sets/clears WS_DISABLED style;
+// sends WM_ENABLE(FALSE/TRUE) before changing state; returns previous disabled state.
 pub extern "win64" fn enable_window(_hwnd: usize, _b_enable: i32) -> i32 {
     0
 }
 
+// Wine ref: dlls/win32u/window.c — IsWindowEnabled checks !(style & WS_DISABLED);
+// also returns FALSE if any ancestor in the chain has WS_DISABLED set.
 pub extern "win64" fn is_window_enabled(_hwnd: usize) -> i32 {
     1
 }
 
+// Wine ref: dlls/win32u/window.c — NtUserGetParent returns owner for top-level windows
+// with WS_POPUP, or parent for child windows (WS_CHILD); NULL for top-level non-popup.
 pub extern "win64" fn get_parent(_hwnd: usize) -> usize {
     0
 }
 
+// Wine ref: dlls/win32u/window.c — NtUserSetParent re-parents a window; sends
+// WM_STYLECHANGING/WM_STYLECHANGED to add/remove WS_CHILD; returns old parent.
 pub extern "win64" fn set_parent(_hwnd_child: usize, _hwnd_new_parent: usize) -> usize {
     0
 }
 
+// Wine ref: dlls/win32u/window.c — BringWindowToTop calls NtUserSetWindowPos with
+// HWND_TOP and SWP_NOMOVE|SWP_NOSIZE; brings window to top of Z order.
 pub extern "win64" fn bring_window_to_top(_hwnd: usize) -> i32 {
     1
 }
 
+// Wine ref: dlls/win32u/window.c — WindowFromPoint calls NtUserWindowFromPoint which
+// hit-tests all windows at the point; returns child before parent (WS_CHILD first).
 pub extern "win64" fn window_from_point(_pt_x: i32, _pt_y: i32) -> usize {
     0
 }
@@ -1849,6 +1961,8 @@ pub extern "win64" fn window_from_point(_pt_x: i32, _pt_y: i32) -> usize {
 // ── DPI awareness stubs ───────────────────────────────────────────────────────
 
 /// SetProcessDPIAware: mark the process as DPI-aware.
+// Wine ref: dlls/win32u/sysparams.c — sets thread DPI awareness context to
+// DPI_AWARENESS_CONTEXT_SYSTEM_AWARE; older API, superseded by SetProcessDpiAwarenessContext.
 pub extern "win64" fn set_process_dpi_aware() -> i32 {
     1
 }
@@ -1857,17 +1971,23 @@ pub extern "win64" fn set_process_dpi_aware() -> i32 {
 ///
 /// Returns the detected system DPI. Per-window DPI (multi-monitor setups) is
 /// not yet implemented — all windows report the primary monitor's DPI.
+// Wine ref: dlls/win32u/window.c::get_dpi_for_window — if window is monitor-aware returns
+// monitor DPI via get_win_monitor_dpi; otherwise returns context DPI from awareness context.
 pub extern "win64" fn get_dpi_for_window(_hwnd: usize) -> u32 {
     crate::backend::system_dpi()
 }
 
 /// GetDpiForSystem: return the system DPI.
+// Wine ref: dlls/win32u/sysparams.c::get_system_dpi — returns USER_DEFAULT_SCREEN_DPI (96)
+// for DPI_AWARENESS_UNAWARE threads; returns actual system_dpi for aware threads.
 pub extern "win64" fn get_dpi_for_system() -> u32 {
     crate::backend::system_dpi()
 }
 
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
+// Wine ref: dlls/win32u/defwnd.c::adjust_window_rect — AdjustWindowRectExForDpi is the
+// DPI-aware version; uses dpi parameter instead of thread DPI for ncm metric lookups.
 pub unsafe extern "win64" fn adjust_window_rect_ex_for_dpi(
     _lp_rect: usize,
     _dw_style: u32,
@@ -1879,16 +1999,22 @@ pub unsafe extern "win64" fn adjust_window_rect_ex_for_dpi(
 }
 
 /// SetProcessDpiAwarenessContext: set the DPI awareness context.
+// Wine ref: dlls/win32u/sysparams.c — stores value in thread-local DPI awareness context;
+// valid values: DPI_AWARENESS_CONTEXT_UNAWARE (-1) through PER_MONITOR_AWARE_V2 (-4).
 pub extern "win64" fn set_process_dpi_awareness_context(_value: isize) -> i32 {
     1
 }
 
 /// GetDpiAwarenessContextForProcess: get the DPI awareness context for a process.
+// Wine ref: dlls/win32u/sysparams.c — returns process-level DPI awareness context as
+// a DPI_AWARENESS_CONTEXT handle (encoded isize); -4 = PER_MONITOR_AWARE_V2.
 pub extern "win64" fn get_dpi_awareness_context_for_process(_h_process: usize) -> isize {
     -4isize
 }
 
 /// AreDpiAwarenessContextsEqual: compare two DPI awareness contexts.
+// Wine ref: dlls/win32u/sysparams.c — extracts DPI_AWARENESS from both context handles
+// via NTUSER_DPI_CONTEXT_GET_AWARENESS macro and compares them.
 pub extern "win64" fn are_dpi_awareness_contexts_equal(
     dpi_context_a: isize,
     dpi_context_b: isize,
@@ -1899,43 +2025,59 @@ pub extern "win64" fn are_dpi_awareness_contexts_equal(
 // ── Input state stubs ─────────────────────────────────────────────────────────
 
 /// GetKeyState: return the state of a virtual key.
+// Wine ref: dlls/win32u/input.c::get_key_state — reads from the per-thread async key state
+// table; high bit set = key down, low bit = toggled (for lock keys); snapshot at last message.
 pub extern "win64" fn get_key_state(_n_virt_key: i32) -> i16 {
     0
 }
 
 /// GetAsyncKeyState: return the state of a virtual key (async).
+// Wine ref: dlls/win32u/input.c::get_async_keyboard_state — queries the live hardware key
+// state from the server (not the message-time snapshot); high bit = currently pressed.
 pub extern "win64" fn get_async_key_state(_v_key: i32) -> i16 {
     0
 }
 
 /// MapVirtualKeyW: map a virtual key code to a scan code or character.
+// Wine ref: dlls/win32u/driver.c::nulldrv_MapVirtualKeyEx — dispatches to keyboard driver;
+// MAPVK_VK_TO_VSC, MAPVK_VSC_TO_VK, MAPVK_VK_TO_CHAR, MAPVK_VSC_TO_VK_EX are the 4 modes.
 pub extern "win64" fn map_virtual_key_w(_u_code: u32, _u_map_type: u32) -> u32 {
     0
 }
 
 /// MapVirtualKeyExW: map a virtual key code to a scan code or character (extended).
+// Wine ref: dlls/win32u/driver.c::loaderdrv_MapVirtualKeyEx — layout-aware version of
+// MapVirtualKeyW; uses the HKL to pick the keyboard driver for the given layout.
 pub extern "win64" fn map_virtual_key_ex_w(_u_code: u32, _u_map_type: u32, _dwhkl: usize) -> u32 {
     0
 }
 
 /// GetKeyboardLayout: return the keyboard layout for the current thread.
+// Wine ref: dlls/win32u/input.c — NtUserGetKeyboardLayout returns HKL for the given thread
+// (or calling thread if idThread=0); HKL encodes locale and device in a single handle.
 pub extern "win64" fn get_keyboard_layout(_id_thread: u32) -> usize {
     0
 }
 
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
+// Wine ref: dlls/win32u/input.c — GetKeyboardLayoutList fills lpList with HKL handles for
+// all loaded layouts; returns count; if nBuff=0 returns count without filling buffer.
 pub unsafe extern "win64" fn get_keyboard_layout_list(_n_buff: i32, _lp_list: usize) -> i32 {
     0
 }
 
 /// VkKeyScanW: translate a character to a virtual key code.
+// Wine ref: dlls/win32u/driver.c::nulldrv_VkKeyScanEx — VkKeyScanW calls VkKeyScanExW with
+// current HKL; high byte = shift state (0=none,1=shift,2=ctrl); returns -1 if no mapping.
 pub extern "win64" fn vk_key_scan_w(_ch: u16) -> i16 {
     -1i16
 }
 
 /// # Safety
 /// `lp_key_state` must be a valid pointer to 256 bytes if non-null.
+// Wine ref: dlls/win32u/input.c — NtUserGetKeyboardState copies the 256-byte per-thread
+// key state table (snapshot at last GetMessage call) into caller's buffer; returns TRUE.
 pub unsafe extern "win64" fn get_keyboard_state(lp_key_state: *mut u8) -> i32 {
     if !lp_key_state.is_null() {
         unsafe { std::ptr::write_bytes(lp_key_state, 0, 256) };
@@ -1945,6 +2087,8 @@ pub unsafe extern "win64" fn get_keyboard_state(lp_key_state: *mut u8) -> i32 {
 
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
+// Wine ref: dlls/win32u/input.c — ToUnicodeEx translates VK+scan+keystate to Unicode via
+// keyboard driver; returns char count (1+), 0 (no translation), or -1 (dead key).
 pub unsafe extern "win64" fn to_unicode_ex(
     _w_virt_key: u32,
     _w_scan_code: u32,
@@ -2007,6 +2151,8 @@ unsafe fn fill_msg(lp_msg: *mut Msg, entry: &MsgEntry) {
 ///
 /// # Safety
 /// `lp_wnd_class` must point to a valid `WNDCLASSA` struct.
+// Wine ref: dlls/user32/class.c — RegisterClassA converts lpszClassName/lpszMenuName to
+// UNICODE_STRING then calls NtUserRegisterClassExWOW with IS_ANSI flag set.
 pub unsafe extern "win64" fn register_class_a(lp_wnd_class: *const WndClassA) -> u16 {
     if lp_wnd_class.is_null() {
         return 0;
@@ -2033,6 +2179,8 @@ pub unsafe extern "win64" fn register_class_a(lp_wnd_class: *const WndClassA) ->
 ///
 /// # Safety
 /// `lp_wnd_class_ex` must point to a valid `WNDCLASSEXA` struct.
+// Wine ref: dlls/user32/class.c — RegisterClassExA uses init_class_name_ansi to convert
+// lpszClassName; validates cbSize == sizeof(WNDCLASSEXA); delegates to NtUserRegisterClassExWOW.
 pub unsafe extern "win64" fn register_class_ex_a(lp_wnd_class_ex: *const WndClassExA) -> u16 {
     if lp_wnd_class_ex.is_null() {
         return 0;
@@ -2061,6 +2209,8 @@ pub unsafe extern "win64" fn register_class_ex_a(lp_wnd_class_ex: *const WndClas
 ///
 /// # Safety
 /// String pointer arguments must be null or valid null-terminated ANSI strings.
+// Wine ref: dlls/user32/win.c::CreateWindowExA — converts class/title to wide via
+// RtlCreateUnicodeStringFromAsciiz then delegates to WIN_CreateWindowEx with unicode=FALSE.
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "win64" fn create_window_ex_a(
     dw_ex_style: u32,
@@ -2172,6 +2322,8 @@ pub unsafe extern "win64" fn create_window_ex_a(
 ///
 /// # Safety
 /// `lp_msg` must be a valid writable `MSG` pointer.
+// Wine ref: dlls/user32/message.c::GetMessageA — calls NtUserGetMessage; MSG struct is
+// identical for A/W (no embedded strings); ANSI/W difference only matters for WM_CHAR.
 pub unsafe extern "win64" fn get_message_a(
     lp_msg: *mut Msg,
     h_wnd: usize,
@@ -2185,6 +2337,8 @@ pub unsafe extern "win64" fn get_message_a(
 ///
 /// # Safety
 /// `lp_msg` must be a valid writable `MSG` pointer.
+// Wine ref: dlls/user32/message.c::PeekMessageA — calls NtUserPeekMessage; translates
+// WM_CHAR wParam from Unicode to ANSI via WM_CHAR_MAPPING table if needed.
 pub unsafe extern "win64" fn peek_message_a(
     lp_msg: *mut Msg,
     h_wnd: usize,
@@ -2207,11 +2361,15 @@ pub unsafe extern "win64" fn peek_message_a(
 ///
 /// # Safety
 /// `lp_msg` must be a valid `MSG` pointer.
+// Wine ref: dlls/user32/message.c::dispatch_message — calls WINPROC_CallProcAtoW for ANSI
+// window procs; WM_CHAR wParam is converted from ANSI to Unicode before dispatch.
 pub unsafe extern "win64" fn dispatch_message_a(lp_msg: *const Msg) -> isize {
     unsafe { dispatch_message_w(lp_msg) }
 }
 
 /// PostMessageA: ANSI variant.
+// Wine ref: dlls/win32u/message.c — PostMessageA calls NtUserPostMessage; for string
+// messages (WM_SETTEXT etc.) duplicates the string buffer for async delivery.
 pub extern "win64" fn post_message_a(
     h_wnd: usize,
     msg: u32,
@@ -2222,6 +2380,8 @@ pub extern "win64" fn post_message_a(
 }
 
 /// SendMessageA: ANSI variant.
+// Wine ref: dlls/win32u/message.c — SendMessageA sets up send_message_info with MSG_ANSI
+// type; WINPROC thunk converts string params A→W before calling Unicode WNDPROC.
 pub extern "win64" fn send_message_a(
     h_wnd: usize,
     msg: u32,
@@ -2232,6 +2392,8 @@ pub extern "win64" fn send_message_a(
 }
 
 /// DefWindowProcA: ANSI variant — forwards to W implementation.
+// Wine ref: dlls/win32u/defwnd.c — DefWindowProcA is identical to DefWindowProcW; all
+// internal processing is Unicode; ANSI callers go through the same DefWndProc handler.
 pub extern "win64" fn def_window_proc_a(
     h_wnd: usize,
     msg: u32,
@@ -2247,6 +2409,8 @@ pub extern "win64" fn def_window_proc_a(
 ///
 /// # Safety
 /// `lp_string` must be a writable buffer of at least `n_max_count` bytes.
+// Wine ref: server/window.c::get_window_text — GetWindowTextA retrieves Unicode text then
+// converts to ANSI via WideCharToMultiByte; result may be shorter than Unicode length.
 pub unsafe extern "win64" fn get_window_text_a(
     h_wnd: usize,
     lp_string: *mut u8,
@@ -2266,16 +2430,22 @@ pub unsafe extern "win64" fn get_window_text_a(
 }
 
 /// GetWindowTextLengthA: return character count of window title (ANSI).
+// Wine ref: dlls/win32u/window.c — GetWindowTextLengthA calls NtUserGetWindowTextLength
+// which returns UTF-16 length; ANSI length may differ for non-ASCII window titles.
 pub extern "win64" fn get_window_text_length_a(h_wnd: usize) -> i32 {
     window::with(h_wnd, |w| w.title.len() as i32).unwrap_or(0)
 }
 
 /// GetWindowLongPtrA: ANSI variant — identical to W.
+// Wine ref: dlls/win32u/window.c — GetWindowLongPtrA dispatches to get_window_long_size;
+// for GWLP_WNDPROC returns ANSI thunk address (not the raw WNDPROC) for ANSI windows.
 pub extern "win64" fn get_window_long_ptr_a(hwnd: usize, n_index: i32) -> isize {
     get_window_long_ptr_w(hwnd, n_index)
 }
 
 /// SetWindowLongPtrA: ANSI variant — identical to W.
+// Wine ref: dlls/win32u/window.c — SetWindowLongPtrA for GWLP_WNDPROC stores ANSI thunk;
+// returns old value; triggers WM_STYLECHANGING/WM_STYLECHANGED for GWL_STYLE.
 pub extern "win64" fn set_window_long_ptr_a(
     hwnd: usize,
     n_index: i32,
@@ -2288,6 +2458,8 @@ pub extern "win64" fn set_window_long_ptr_a(
 ///
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
+// Wine ref: dlls/win32u/class.c — NtUserSetClassLongPtr modifies shared class data; returns
+// old value; nIndex=GCLP_WNDPROC replaces the class WNDPROC for all future windows.
 pub unsafe extern "win64" fn set_class_long_ptr_a(
     _hwnd: usize,
     _n_index: i32,
@@ -2302,6 +2474,8 @@ pub unsafe extern "win64" fn set_class_long_ptr_a(
 ///
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
+// Wine ref: dlls/user32/cursoricon.c — LoadIconA converts lpIconName to wide and calls
+// LoadIconW; uses CURSORICON_Load with IMAGE_ICON and LR_DEFAULTSIZE.
 pub unsafe extern "win64" fn load_icon_a(_h_instance: usize, _lp_icon_name: *const u8) -> usize {
     1usize // fake HICON
 }
@@ -2310,6 +2484,8 @@ pub unsafe extern "win64" fn load_icon_a(_h_instance: usize, _lp_icon_name: *con
 ///
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
+// Wine ref: dlls/user32/cursoricon.c — LoadImageA converts name to wide then calls
+// NtUserLoadImage; LR_LOADFROMFILE flag triggers file-system path lookup.
 pub unsafe extern "win64" fn load_image_a(
     _h_inst: usize,
     _name: *const u8,
@@ -2322,6 +2498,8 @@ pub unsafe extern "win64" fn load_image_a(
 }
 
 /// DestroyIcon: free an HICON. Stub — always succeeds.
+// Wine ref: dlls/win32u/cursoricon.c — NtUserDestroyCursor decrements refcount on the
+// CURSORICONCACHE entry; frees backing bitmaps when count reaches zero.
 pub extern "win64" fn destroy_icon(_h_icon: usize) -> i32 {
     1
 }
@@ -2332,6 +2510,8 @@ pub extern "win64" fn destroy_icon(_h_icon: usize) -> i32 {
 ///
 /// # Safety
 /// String pointer arguments must be null or valid null-terminated ANSI strings.
+// Wine ref: dlls/user32/dialog.c — MessageBoxA converts text/caption to wide via
+// MultiByteToWideChar then calls MessageBoxW; same IDOK/IDCANCEL/etc return values.
 pub unsafe extern "win64" fn message_box_a(
     h_wnd: usize,
     lp_text: *const u8,
@@ -2348,6 +2528,8 @@ pub unsafe extern "win64" fn message_box_a(
 ///
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
+// Wine ref: dlls/user32/dialog.c — MessageBoxIndirectW reads MSGBOXPARAMSW to get hook
+// proc, icon, and help context; runs dialog via DIALOG_DoDialogBox.
 pub unsafe extern "win64" fn message_box_indirect_w(_lp_msgboxparams: usize) -> i32 {
     1 // IDOK
 }
@@ -2358,6 +2540,8 @@ pub unsafe extern "win64" fn message_box_indirect_w(_lp_msgboxparams: usize) -> 
 ///
 /// # Safety
 /// `lp_new_item` may be a string, bitmap, or other resource pointer.
+// Wine ref: dlls/win32u/menu.c — AppendMenuA converts string via RtlCreateUnicodeStringFromAsciiz
+// then calls NtUserThunkedMenuItemInfo; MF_SEPARATOR/MF_POPUP/MF_BITMAP change lpNewItem type.
 pub unsafe extern "win64" fn append_menu_a(
     h_menu: usize,
     u_flags: u32,
@@ -2381,6 +2565,8 @@ pub unsafe extern "win64" fn append_menu_a(
 ///
 /// # Safety
 /// `lp_new_item` may be a string pointer.
+// Wine ref: dlls/win32u/menu.c — InsertMenuA calls NtUserThunkedMenuItemInfo with
+// uPosition as insertion point; MF_BYCOMMAND or MF_BYPOSITION controls lookup mode.
 pub unsafe extern "win64" fn insert_menu_a(
     h_menu: usize,
     u_position: u32,
@@ -2396,6 +2582,8 @@ pub unsafe extern "win64" fn insert_menu_a(
 /// GetSystemMenu: return the system (window) menu handle.
 ///
 /// For Weave we allocate a real menu entry so callers can append to it safely.
+// Wine ref: dlls/win32u/menu.c::get_win_sys_menu — returns window's system menu HMENU;
+// bRevert=TRUE resets to default; system menu is separate from the window menu bar.
 pub extern "win64" fn get_system_menu(h_wnd: usize, b_revert: i32) -> usize {
     if b_revert != 0 {
         // Revert to default — we don't track the original, just return current.
@@ -2406,6 +2594,8 @@ pub extern "win64" fn get_system_menu(h_wnd: usize, b_revert: i32) -> usize {
 }
 
 /// DeleteMenu: remove an item from a menu.
+// Wine ref: dlls/win32u/menu.c — NtUserDeleteMenu removes item by position or command ID;
+// MF_POPUP submenus are NOT destroyed (caller must DestroyMenu them separately).
 pub extern "win64" fn delete_menu(h_menu: usize, u_position: u32, u_flags: u32) -> i32 {
     menu::delete_item(h_menu, u_position, u_flags);
     1
@@ -2414,6 +2604,8 @@ pub extern "win64" fn delete_menu(h_menu: usize, u_position: u32, u_flags: u32) 
 // ── Dialog stubs ──────────────────────────────────────────────────────────────
 
 /// DefDlgProcA: default dialog procedure (ANSI). Forwards to DefWindowProcW.
+// Wine ref: dlls/user32/dialog.c — DefDlgProcA/W handles WM_INITDIALOG, WM_NEXTDLGCTL,
+// WM_GETFONT, WM_SETFONT; tab key navigation between dialog controls via IsDialogMessage.
 pub extern "win64" fn def_dlg_proc_a(
     h_dlg: usize,
     msg: u32,
@@ -2429,6 +2621,8 @@ pub extern "win64" fn def_dlg_proc_a(
 ///
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
+// Wine ref: dlls/user32/dialog.c — DialogBoxParamA loads template from resources, creates
+// window, calls WM_INITDIALOG with dwInitParam, runs modal loop until EndDialog.
 pub unsafe extern "win64" fn dialog_box_param_a(
     _h_instance: usize,
     _lp_template_name: *const u8,
@@ -2449,6 +2643,8 @@ pub unsafe extern "win64" fn dialog_box_param_a(
 ///
 /// # Safety
 /// `lp_dialog_func` must be a valid `DLGPROC` if non-zero.
+// Wine ref: dlls/user32/dialog.c::CreateDialogParamW — loads DLGTEMPLATE from PE resources,
+// creates modeless dialog window, sends WM_INITDIALOG with lParam; returns HWND (not modal).
 pub unsafe extern "win64" fn create_dialog_param_w(
     _h_instance: usize,
     _lp_template_name: *const u16,
@@ -2502,11 +2698,15 @@ pub unsafe extern "win64" fn create_dialog_param_a(
 }
 
 /// EndDialog: close a dialog box.
+// Wine ref: dlls/user32/dialog.c — EndDialog sets dialog's nResult field and posts
+// WM_NULL to unblock the modal message loop in DialogBox; DestroyWindow called after loop.
 pub extern "win64" fn end_dialog(_h_dlg: usize, _n_result: isize) -> i32 {
     1
 }
 
 /// GetDlgItem: find a control in a dialog by ID. Returns 0 (not found).
+// Wine ref: dlls/win32u/dialog.c — NtUserGetDlgItem searches child windows for matching
+// nIDDlgItem (from GWLP_ID); returns first match or NULL if not found.
 pub extern "win64" fn get_dlg_item(_h_dlg: usize, _n_id_dlg_item: i32) -> usize {
     0
 }
@@ -2515,6 +2715,8 @@ pub extern "win64" fn get_dlg_item(_h_dlg: usize, _n_id_dlg_item: i32) -> usize 
 ///
 /// # Safety
 /// `lp_string` must be writable if non-null.
+// Wine ref: dlls/user32/dialog.c — GetDlgItemTextA calls GetDlgItem then GetWindowTextA;
+// returns 0 and null-terminates buffer if control not found.
 pub unsafe extern "win64" fn get_dlg_item_text_a(
     _h_dlg: usize,
     _n_id_dlg_item: i32,
@@ -2531,6 +2733,8 @@ pub unsafe extern "win64" fn get_dlg_item_text_a(
 ///
 /// # Safety
 /// `lp_string` must be writable if non-null.
+// Wine ref: dlls/user32/dialog.c — GetDlgItemTextW calls GetDlgItem then GetWindowTextW;
+// identical to A variant except buffer is UTF-16.
 pub unsafe extern "win64" fn get_dlg_item_text_w(
     _h_dlg: usize,
     _n_id_dlg_item: i32,
@@ -2547,6 +2751,8 @@ pub unsafe extern "win64" fn get_dlg_item_text_w(
 ///
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
+// Wine ref: dlls/user32/dialog.c — SetDlgItemTextA calls GetDlgItem then SetWindowTextA;
+// returns TRUE if control found, FALSE otherwise.
 pub unsafe extern "win64" fn set_dlg_item_text_a(
     _h_dlg: usize,
     _n_id_dlg_item: i32,
@@ -2559,6 +2765,8 @@ pub unsafe extern "win64" fn set_dlg_item_text_a(
 ///
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
+// Wine ref: dlls/user32/dialog.c — SetDlgItemTextW calls GetDlgItem then SetWindowTextW;
+// sends WM_SETTEXT directly to control HWND.
 pub unsafe extern "win64" fn set_dlg_item_text_w(
     _h_dlg: usize,
     _n_id_dlg_item: i32,
@@ -2568,6 +2776,8 @@ pub unsafe extern "win64" fn set_dlg_item_text_w(
 }
 
 /// SendDlgItemMessageA: send a message to a dialog control. Returns 0.
+// Wine ref: dlls/user32/dialog.c — SendDlgItemMessageA calls GetDlgItem then SendMessageA;
+// returns 0 if control not found; otherwise returns WNDPROC return value.
 pub extern "win64" fn send_dlg_item_message_a(
     _h_dlg: usize,
     _n_id_dlg_item: i32,
@@ -2579,16 +2789,22 @@ pub extern "win64" fn send_dlg_item_message_a(
 }
 
 /// CheckDlgButton: set the checked state of a button control. Returns TRUE.
+// Wine ref: dlls/user32/dialog.c — CheckDlgButton calls GetDlgItem then sends BM_SETCHECK;
+// uCheck: BST_UNCHECKED(0), BST_CHECKED(1), BST_INDETERMINATE(2).
 pub extern "win64" fn check_dlg_button(_h_dlg: usize, _n_id_button: i32, _u_check: u32) -> i32 {
     1
 }
 
 /// IsDlgButtonChecked: query the checked state of a button. Returns 0.
+// Wine ref: dlls/user32/dialog.c — IsDlgButtonChecked calls GetDlgItem then sends
+// BM_GETCHECK; returns BST_UNCHECKED(0), BST_CHECKED(1), or BST_INDETERMINATE(2).
 pub extern "win64" fn is_dlg_button_checked(_h_dlg: usize, _n_id_button: i32) -> u32 {
     0 // BST_UNCHECKED
 }
 
 /// CheckRadioButton: check one button in a group, uncheck the rest. Returns TRUE.
+// Wine ref: dlls/user32/dialog.c — iterates controls from nIDFirstButton to nIDLastButton,
+// sends BM_SETCHECK(BST_CHECKED) to nIDCheckButton, BM_SETCHECK(0) to all others.
 pub extern "win64" fn check_radio_button(
     _h_dlg: usize,
     _n_id_first_button: i32,
@@ -2602,6 +2818,8 @@ pub extern "win64" fn check_radio_button(
 ///
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
+// Wine ref: dlls/user32/dialog.c — IsDialogMessage handles WM_KEYDOWN Tab/Escape/Return
+// for dialog navigation; translates and dispatches if consumed; returns TRUE if eaten.
 pub unsafe extern "win64" fn is_dialog_message_a(_h_dlg: usize, _lp_msg: *const Msg) -> i32 {
     0
 }
@@ -2610,6 +2828,8 @@ pub unsafe extern "win64" fn is_dialog_message_a(_h_dlg: usize, _lp_msg: *const 
 ///
 /// # Safety
 /// `lp_rect` must point to a valid `Rect` if non-null.
+// Wine ref: dlls/user32/dialog.c — MapDialogRect uses dialog base units (GetDialogBaseUnits)
+// to scale: x = (dlgx * baseX) / 4, y = (dlgy * baseY) / 8.
 pub unsafe extern "win64" fn map_dialog_rect(_h_dlg: usize, _lp_rect: *mut Rect) -> i32 {
     1
 }
@@ -2617,16 +2837,22 @@ pub unsafe extern "win64" fn map_dialog_rect(_h_dlg: usize, _lp_rect: *mut Rect)
 // ── Window state ──────────────────────────────────────────────────────────────
 
 /// IsIconic: return TRUE if the window is minimised. Always returns FALSE.
+// Wine ref: dlls/win32u/window.c — IsIconic checks WS_MINIMIZE style via
+// get_window_long(hwnd, GWL_STYLE); does NOT check WS_ICONIC (same bit, legacy alias).
 pub extern "win64" fn is_iconic(_h_wnd: usize) -> i32 {
     0
 }
 
 /// IsZoomed: return TRUE if the window is maximised. Always returns FALSE.
+// Wine ref: dlls/win32u/window.c — IsZoomed checks WS_MAXIMIZE style bit; maximised
+// windows have WS_MAXIMIZE set by ShowWindow(SW_MAXIMIZE) or WM_SIZE/SIZE_MAXIMIZED.
 pub extern "win64" fn is_zoomed(_h_wnd: usize) -> i32 {
     0
 }
 
 /// FlashWindow: flash a window in the taskbar. Returns FALSE.
+// Wine ref: dlls/user32/message.c — FlashWindow calls FlashWindowEx with FLASHW_CAPTION|
+// FLASHW_TRAY for bInvert=TRUE; returns previous active state of caption.
 pub extern "win64" fn flash_window(_h_wnd: usize, _b_invert: i32) -> i32 {
     0
 }
@@ -2635,6 +2861,8 @@ pub extern "win64" fn flash_window(_h_wnd: usize, _b_invert: i32) -> i32 {
 ///
 /// # Safety
 /// `lp_wndpl` must point to a valid `WindowPlacement` with `length` set.
+// Wine ref: dlls/win32u/window.c::set_window_placement — GetWindowPlacement fills
+// WINDOWPLACEMENT: showCmd=SW_SHOW for normal, ptMinPosition/ptMaxPosition from window state.
 pub unsafe extern "win64" fn get_window_placement(
     h_wnd: usize,
     lp_wndpl: *mut WindowPlacement,
@@ -2663,6 +2891,8 @@ pub unsafe extern "win64" fn get_window_placement(
 ///
 /// # Safety
 /// `lp_wndpl` must point to a valid `WindowPlacement` struct.
+// Wine ref: dlls/win32u/window.c::set_window_placement — applies rcNormalPosition via
+// NtUserSetWindowPos; handles SW_SHOWMINIMIZED/SW_SHOWMAXIMIZED in showCmd field.
 pub unsafe extern "win64" fn set_window_placement(
     h_wnd: usize,
     lp_wndpl: *const WindowPlacement,
@@ -2700,6 +2930,8 @@ pub unsafe extern "win64" fn set_window_placement(
 ///
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
+// Wine ref: dlls/win32u/message.c — NtUserSetTimer sends set_win_timer to wineserver;
+// id=0 allocates new ID > 0x7FFF; uElapse clamped to [USER_TIMER_MINIMUM, USER_TIMER_MAXIMUM].
 pub unsafe extern "win64" fn set_timer(
     h_wnd: usize,
     n_id_event: usize,
@@ -2771,6 +3003,8 @@ pub extern "win64" fn get_queue_status(_flags: u32) -> u32 {
 ///
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
+// Wine ref: dlls/user32/message.c — calls NtUserMsgWaitForMultipleObjectsEx; dwWakeMask
+// is QS_* flags; returns WAIT_OBJECT_0+nCount if a message matches wakeMask.
 pub unsafe extern "win64" fn msg_wait_for_multiple_objects(
     _n_count: u32,
     _lp_handles: *const usize,
@@ -2787,21 +3021,29 @@ pub unsafe extern "win64" fn msg_wait_for_multiple_objects(
 // ── Mouse capture ─────────────────────────────────────────────────────────────
 
 /// GetCapture: return the window that has mouse capture. Returns 0.
+// Wine ref: dlls/win32u/input.c — NtUserGetCapture returns the per-thread capture window;
+// capture is thread-local; returns NULL if no window has capture in this thread.
 pub extern "win64" fn get_capture() -> usize {
     0
 }
 
 /// SetCapture: capture mouse input for a window. Returns 0 (previous capture).
+// Wine ref: dlls/win32u/input.c — NtUserSetCapture sets per-thread capture window;
+// sends WM_CAPTURECHANGED to the old capture window; returns previous capture HWND.
 pub extern "win64" fn set_capture(_h_wnd: usize) -> usize {
     0
 }
 
 /// ReleaseCapture: release mouse capture. Returns TRUE.
+// Wine ref: dlls/win32u/main.c — NtUserReleaseCapture clears per-thread capture;
+// sends WM_CAPTURECHANGED(NULL) to the previously capturing window.
 pub extern "win64" fn release_capture() -> i32 {
     1
 }
 
 /// SetActiveWindow: activate a window. Returns 0 (previous).
+// Wine ref: dlls/win32u/input.c::set_focus_window — SetActiveWindow calls set_focus_window
+// via server request; sends WM_ACTIVATE(WA_ACTIVE) and WM_SETFOCUS to new window.
 pub extern "win64" fn set_active_window(_h_wnd: usize) -> usize {
     0
 }
@@ -2809,6 +3051,8 @@ pub extern "win64" fn set_active_window(_h_wnd: usize) -> usize {
 // ── System colors ─────────────────────────────────────────────────────────────
 
 /// GetSysColor: return a system color. Returns black (0x000000) for all.
+// Wine ref: dlls/win32u/sysparams.c::get_sys_color — returns COLORREF from syscolor array
+// indexed by nIndex; array populated from registry (Control Panel colors) at startup.
 pub extern "win64" fn get_sys_color(_n_index: i32) -> u32 {
     // Hardcode some common ones for better appearance.
     match _n_index {
@@ -2824,6 +3068,8 @@ pub extern "win64" fn get_sys_color(_n_index: i32) -> u32 {
 /// Returns a non-zero fake HBRUSH value. GDI functions that receive this
 /// handle will silently accept it (SelectObject/DeleteObject treat unknown
 /// handles as no-ops in Weave's stub implementation).
+// Wine ref: dlls/win32u/sysparams.c::get_sys_color_brush — returns a cached HBRUSH from
+// the syscolbrush array; brushes are created once and reused (do not delete them).
 pub extern "win64" fn get_sys_color_brush(n_index: i32) -> usize {
     // Use the color index + 1 as the fake handle (non-zero, stable, cheap).
     (n_index as usize).wrapping_add(1)
@@ -2840,6 +3086,8 @@ pub extern "win64" fn get_sys_color_brush(n_index: i32) -> usize {
 ///
 /// # Safety
 /// `lp_si` must point to a valid `ScrollInfo` with `cb_size` and `f_mask` set.
+// Wine ref: dlls/win32u/scroll.c — reads per-window scroll_info keyed by (hwnd, bar);
+// SIF_PAGE/POS/RANGE/TRACKPOS select which fields are filled; FALSE if no state stored.
 pub unsafe extern "win64" fn get_scroll_info(
     hwnd: usize,
     n_bar: i32,
@@ -2886,6 +3134,8 @@ pub unsafe extern "win64" fn get_scroll_info(
 ///
 /// # Safety
 /// `lp_si` must point to a valid `ScrollInfo` with `cb_size` and `f_mask` set.
+// Wine ref: dlls/win32u/scroll.c — clamps page to (0, max-min+1), pos to [min, max-max(page-1,0)];
+// sends WM_HSCROLL/WM_VSCROLL if redraw; returns new clamped nPos.
 pub unsafe extern "win64" fn set_scroll_info(
     hwnd: usize,
     n_bar: i32,
@@ -2935,21 +3185,29 @@ pub unsafe extern "win64" fn set_scroll_info(
 // ── Caret stubs ───────────────────────────────────────────────────────────────
 
 /// CreateCaret: create a caret shape for a window. Returns TRUE.
+// Wine ref: dlls/win32u/input.c — NtUserCreateCaret stores caret dimensions in per-thread
+// caret info; hBitmap=NULL=solid, hBitmap=1=gray; destroys previous caret first.
 pub extern "win64" fn create_caret(_hwnd: usize, _h_bitmap: usize, _w: i32, _h: i32) -> i32 {
     1
 }
 
 /// DestroyCaret: destroy the current caret. Returns TRUE.
+// Wine ref: dlls/win32u/main.c — NtUserDestroyCaret clears per-thread caret state;
+// hides the caret if visible; only the thread that owns the caret can destroy it.
 pub extern "win64" fn destroy_caret() -> i32 {
     1
 }
 
 /// ShowCaret: make the caret visible. Returns TRUE.
+// Wine ref: dlls/win32u/input.c — NtUserShowCaret decrements the per-thread caret
+// hide count; caret becomes visible when hide count reaches 0.
 pub extern "win64" fn show_caret(_hwnd: usize) -> i32 {
     1
 }
 
 /// HideCaret: hide the caret. Returns TRUE.
+// Wine ref: dlls/win32u/input.c — NtUserHideCaret increments the per-thread caret
+// hide count; caret is hidden when count > 0; paired with ShowCaret.
 pub extern "win64" fn hide_caret(_hwnd: usize) -> i32 {
     1
 }
@@ -2984,6 +3242,8 @@ pub unsafe extern "win64" fn get_caret_pos(lp_point: *mut Point) -> i32 {
 }
 
 /// GetCaretBlinkTime: return the caret blink interval in milliseconds.
+// Wine ref: dlls/win32u/main.c — NtUserGetCaretBlinkTime reads from per-thread caret info;
+// default 500ms; can be changed by SystemParametersInfo(SPI_SETCARETWIDTH) or registry.
 pub extern "win64" fn get_caret_blink_time() -> u32 {
     500
 }
@@ -2991,11 +3251,15 @@ pub extern "win64" fn get_caret_blink_time() -> u32 {
 // ── Misc stubs ────────────────────────────────────────────────────────────────
 
 /// MessageBeep: produce a sound. Returns TRUE (no audio yet).
+// Wine ref: dlls/user32/message.c — MessageBeep plays a system sound via PlaySound;
+// uType maps MB_OK/MB_ICONERROR etc. to SND_ALIAS entries; returns TRUE always.
 pub extern "win64" fn message_beep(_u_type: u32) -> i32 {
     1
 }
 
 /// GetDoubleClickTime: return the double-click interval in milliseconds.
+// Wine ref: dlls/win32u/sysparams.c — NtUserGetDoubleClickTime reads SPI_GETDOUBLECLICKTIME
+// from system parameters; default 500ms; configurable via SystemParametersInfo.
 pub extern "win64" fn get_double_click_time() -> u32 {
     500
 }
@@ -3004,6 +3268,8 @@ pub extern "win64" fn get_double_click_time() -> u32 {
 ///
 /// # Safety
 /// `lp_rc` must point to a valid `Rect`.
+// Wine ref: dlls/win32u/defwnd.c — OffsetRect adds dx to left/right and dy to top/bottom;
+// returns FALSE if lprc is NULL; works on empty rects without validation.
 pub unsafe extern "win64" fn offset_rect(lp_rc: *mut Rect, dx: i32, dy: i32) -> i32 {
     if lp_rc.is_null() {
         return 0;
@@ -3021,6 +3287,8 @@ pub unsafe extern "win64" fn offset_rect(lp_rc: *mut Rect, dx: i32, dy: i32) -> 
 ///
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
+// Wine ref: dlls/win32u/defwnd.c — DrawEdge renders BDR_RAISED/BDR_SUNKEN/EDGE_BUMP etc.
+// using system colors; BF_ADJUST shrinks qrc by border width after drawing.
 pub unsafe extern "win64" fn draw_edge(
     _hdc: usize,
     _qrc: *mut Rect,
@@ -3034,6 +3302,8 @@ pub unsafe extern "win64" fn draw_edge(
 ///
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
+// Wine ref: dlls/win32u/cursoricon.c — DrawIconEx renders icon mask + color bitmaps onto
+// hdc; DI_IMAGE|DI_MASK|DI_NORMAL control which planes are drawn; animates if iStepIfAniCur>0.
 pub unsafe extern "win64" fn draw_icon_ex(
     _hdc: usize,
     _x_left: i32,
@@ -3052,6 +3322,8 @@ pub unsafe extern "win64" fn draw_icon_ex(
 ///
 /// # Safety
 /// `lp_sz_format` must be a valid null-terminated ANSI string.
+// Wine ref: dlls/win32u/clipboard.c — NtUserRegisterClipboardFormat allocates IDs in
+// 0xC000–0xFFFF range; same name → same ID (idempotent); case-insensitive comparison.
 pub unsafe extern "win64" fn register_clipboard_format_a(lp_sz_format: *const u8) -> u32 {
     let name = unsafe { decode_ansi(lp_sz_format) };
     // Return a deterministic ID in the custom format range (0xC000–0xFFFF).
@@ -3066,6 +3338,8 @@ pub unsafe extern "win64" fn register_clipboard_format_a(lp_sz_format: *const u8
 ///
 /// # Safety
 /// `lp_string` must be a valid null-terminated ANSI string.
+// Wine ref: dlls/win32u/message.c — RegisterWindowMessageA converts to wide then calls
+// NtUserRegisterClipboardFormat; WM IDs share the same 0xC000–0xFFFF range as clipboard formats.
 pub unsafe extern "win64" fn register_window_message_a(lp_string: *const u8) -> u32 {
     unsafe { register_clipboard_format_a(lp_string) }
 }
@@ -3074,6 +3348,8 @@ pub unsafe extern "win64" fn register_window_message_a(lp_string: *const u8) -> 
 ///
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
+// Wine ref: dlls/win32u/sysparams.c — SystemParametersInfoA converts string params to
+// wide then calls SystemParametersInfoW; handles ~120 SPI_* actions; updates registry if fWinIni set.
 pub unsafe extern "win64" fn system_parameters_info_a(
     _u_action: u32,
     _u_param: u32,
@@ -3087,6 +3363,8 @@ pub unsafe extern "win64" fn system_parameters_info_a(
 ///
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
+// Wine ref: dlls/win32u/input.c — ToAsciiEx calls ToUnicodeEx then WideCharToMultiByte;
+// returns -1 for dead key, 0 for no char, 1-2 for chars produced.
 pub unsafe extern "win64" fn to_ascii_ex(
     _u_virt_key: u32,
     _u_scan_code: u32,
@@ -3104,6 +3382,8 @@ pub unsafe extern "win64" fn to_ascii_ex(
 ///
 /// # Safety
 /// No pointer dereferences.
+// Wine ref: dlls/win32u/input.c::set_focus_window — sends WM_KILLFOCUS to old focus window,
+// then WM_SETFOCUS to new one; returns old focus HWND (NULL if none had focus).
 pub unsafe extern "win64" fn set_focus(hwnd: usize) -> usize {
     hwnd
 }
@@ -3112,6 +3392,8 @@ pub unsafe extern "win64" fn set_focus(hwnd: usize) -> usize {
 ///
 /// # Safety
 /// `lp_key_state` is accepted but not dereferenced.
+// Wine ref: dlls/win32u/input.c — NtUserSetKeyboardState copies 256-byte array into the
+// per-thread key state table; used by IME and accessibility tools to inject key state.
 pub unsafe extern "win64" fn set_keyboard_state(_lp_key_state: *const u8) -> i32 {
     1 // TRUE
 }
@@ -3122,6 +3404,8 @@ pub unsafe extern "win64" fn set_keyboard_state(_lp_key_state: *const u8) -> i32
 ///
 /// # Safety
 /// `lp_string` must be a valid null-terminated ANSI string or null.
+// Wine ref: dlls/user32/win.c — SetWindowTextA converts to wide via MultiByteToWideChar
+// then calls NtUserDefSetText; sends WM_SETTEXT to the window; returns FALSE if hwnd invalid.
 pub unsafe extern "win64" fn set_window_text_a(hwnd: usize, lp_string: *const u8) -> i32 {
     if lp_string.is_null() {
         return 0;
@@ -3146,6 +3430,8 @@ pub unsafe extern "win64" fn set_window_text_a(hwnd: usize, lp_string: *const u8
 /// # Safety
 /// If `lpsz` has a non-zero high word, it must be a valid null-terminated UTF-16
 /// string.
+// Wine ref: dlls/win32u/defwnd.c — CharUpperW checks HIWORD(lpsz)==0 for single-char mode;
+// string mode calls RtlUpcaseUnicodeChar per code unit; locale-insensitive.
 pub unsafe extern "win64" fn char_upper_w(lpsz: *mut u16) -> *mut u16 {
     if (lpsz as usize) < 0x10000 {
         let c = lpsz as u16;
@@ -3175,6 +3461,9 @@ pub unsafe extern "win64" fn char_upper_w(lpsz: *mut u16) -> *mut u16 {
 ///
 /// # Safety
 /// `lpmii` is accepted but not dereferenced.
+// Wine ref: dlls/win32u/menu.c::get_menu_item_info — validates cbSize via
+// MENU_NormalizeMenuItemInfoStruct; copies string via get_menu_item_text if MIIM_STRING set;
+// MIIM_TYPE is legacy alias — normalized to MIIM_FTYPE+MIIM_STRING before dispatch.
 pub unsafe extern "win64" fn get_menu_item_info_w(
     _h_menu: usize,
     _u_item: u32,
@@ -3190,6 +3479,9 @@ pub unsafe extern "win64" fn get_menu_item_info_w(
 ///
 /// # Safety
 /// `lpmii` is accepted but not dereferenced.
+// Wine ref: dlls/win32u/menu.c::set_menu_item_info — normalizes struct via
+// MENU_NormalizeMenuItemInfoStruct; MIIM_BITMAP/MIIM_FTYPE/MIIM_STRING handled separately;
+// string ownership: copies dwTypeData if MIIM_STRING, frees previous string.
 pub unsafe extern "win64" fn set_menu_item_info_w(
     _h_menu: usize,
     _u_item: u32,
@@ -3206,6 +3498,9 @@ pub unsafe extern "win64" fn set_menu_item_info_w(
 /// # Safety
 /// If `lp_buffer` is non-null and `n_buffer_max` > 0, writes an empty
 /// null-terminated string.
+// Wine ref: dlls/user32/resource.c::LoadStringW — locates RT_STRING block via
+// FindResourceW((id>>4)+1); walks 16-string blocks (each entry: length u16 + chars);
+// buflen==0 special case: returns pointer to resource data in *buffer directly.
 pub unsafe extern "win64" fn load_string_w(
     _h_instance: usize,
     _u_id: u32,
@@ -3224,6 +3519,8 @@ pub unsafe extern "win64" fn load_string_w(
 ///
 /// # Safety
 /// `lpsz` is accepted but not dereferenced.
+// Wine ref: dlls/win32u/clipboard.c — NtUserRegisterClipboardFormat allocates IDs in
+// 0xC000–0xFFFF range; same name → same ID (idempotent); name comparison is case-insensitive.
 pub unsafe extern "win64" fn register_clipboard_format_w(_lpsz: *const u16) -> u32 {
     0xC000 // fake private clipboard format base
 }
@@ -3234,6 +3531,9 @@ pub unsafe extern "win64" fn register_clipboard_format_w(_lpsz: *const u16) -> u
 ///
 /// # Safety
 /// No pointer dereferences.
+// Wine ref: include/ntuser.h::NtUserGetWindowTextLength — calls NtUserGetWindowText with
+// NULL buffer; WM_GETTEXTLENGTH is sent to the window; result may differ from actual
+// text length due to ANSI/Unicode conversion expansion.
 pub unsafe extern "win64" fn get_window_text_length_w(_hwnd: usize) -> i32 {
     0
 }
@@ -3244,6 +3544,9 @@ pub unsafe extern "win64" fn get_window_text_length_w(_hwnd: usize) -> i32 {
 ///
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
+// Wine ref: dlls/win32u/sysparams.c — handles ~120 SPI_* actions; reads/writes system
+// metrics, font smoothing, mouse settings; updates registry if SPIF_UPDATEINIFILE set;
+// sends WM_SETTINGCHANGE broadcast if SPIF_SENDCHANGE set.
 pub unsafe extern "win64" fn system_parameters_info_w(
     _u_action: u32,
     _u_param: u32,
@@ -3259,11 +3562,17 @@ pub unsafe extern "win64" fn system_parameters_info_w(
 ///
 /// # Safety
 /// `lpmi` is accepted but not dereferenced.
+// Wine ref: dlls/win32u/sysparams.c::get_monitor_info — fills rcMonitor/rcWork/dwFlags;
+// MONITORINFOEX adds szDevice name; cbSize must be sizeof(MONITORINFO) or MONITORINFOEX
+// else returns FALSE; primary monitor has MONITORINFOF_PRIMARY flag set.
 pub unsafe extern "win64" fn get_monitor_info_a(_h_monitor: usize, _lpmi: *mut u8) -> i32 {
     0 // FALSE
 }
 
 /// GetDialogBaseUnits — return dialog base units. Returns a fixed value.
+// Wine ref: dlls/win32u/sysparams.c::get_dialog_base_units — measures average char width/height
+// of system font via get_char_dimensions on screen DC; scales by DPI; low word = horizontal
+// base units (avg char width), high word = vertical base units (avg char height).
 pub extern "win64" fn get_dialog_base_units() -> u32 {
     // Low word = horizontal base units (typically 6), high word = vertical (13).
     (13 << 16) | 6
@@ -3275,6 +3584,9 @@ pub extern "win64" fn get_dialog_base_units() -> u32 {
 ///
 /// # Safety
 /// No pointer dereferences.
+// Wine ref: dlls/win32u/win32u_private.h::window_from_point — walks child list in Z-order;
+// uFlags (CWP_SKIPINVISIBLE/SKIPDISABLED/SKIPTRANSPARENT) control which children are skipped;
+// returns parent if no child contains the point.
 pub unsafe extern "win64" fn child_window_from_point_ex(
     _hwnd_parent: usize,
     _point_x: i32,
@@ -3288,6 +3600,9 @@ pub unsafe extern "win64" fn child_window_from_point_ex(
 ///
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
+// Wine ref: dlls/user32/menu.c::MENU_ParseResource — loads RT_MENU resource, creates
+// HMENU via CreateMenu, then walks MENU/MENUEX resource bytes; MENUEX format uses
+// MENUEX_TEMPLATE_ITEM with dwType/dwState/menuId/bResInfo fields.
 pub unsafe extern "win64" fn load_menu_w(_h_instance: usize, _lp_menu_name: *const u16) -> usize {
     0 // NULL
 }
@@ -3296,6 +3611,8 @@ pub unsafe extern "win64" fn load_menu_w(_h_instance: usize, _lp_menu_name: *con
 ///
 /// # Safety
 /// No pointer dereferences.
+// Wine ref: dlls/win32u/menu.c — sets the menu-bar-dirty flag and posts WM_NCPAINT;
+// only effective for top-level windows with WS_CAPTION|WS_SYSMENU; child windows ignored.
 pub unsafe extern "win64" fn draw_menu_bar(_hwnd: usize) -> i32 {
     1 // TRUE
 }
@@ -3304,6 +3621,9 @@ pub unsafe extern "win64" fn draw_menu_bar(_hwnd: usize) -> i32 {
 ///
 /// # Safety
 /// No pointer dereferences.
+// Wine ref: dlls/win32u/menu.c::check_menu_radio_item — iterates first..last range;
+// sets MFT_RADIOCHECK|MFS_CHECKED on idCheck item; clears MFS_CHECKED on others;
+// Windows does NOT remove MFT_RADIOCHECK flag from unchecked items (by design).
 pub unsafe extern "win64" fn check_menu_radio_item(
     _h_menu: usize,
     _id_first: u32,
@@ -3318,6 +3638,9 @@ pub unsafe extern "win64" fn check_menu_radio_item(
 ///
 /// # Safety
 /// No pointer dereferences.
+// Wine ref: dlls/win32u/menu.c — finds item by MF_BYPOSITION or MF_BYCOMMAND; removes
+// item from list but does NOT destroy a popup submenu handle (use DestroyMenu for that);
+// contrast with DeleteMenu which does destroy the submenu.
 pub unsafe extern "win64" fn remove_menu(_h_menu: usize, _u_position: u32, _u_flags: u32) -> i32 {
     1 // TRUE
 }
@@ -3326,6 +3649,8 @@ pub unsafe extern "win64" fn remove_menu(_h_menu: usize, _u_position: u32, _u_fl
 ///
 /// # Safety
 /// No pointer dereferences.
+// Wine ref: dlls/win32u/menu.c::get_sub_menu — finds item by MF_BYPOSITION; returns
+// item->hSubMenu only if fType has MF_POPUP set; returns NULL if item is not a popup.
 pub unsafe extern "win64" fn get_sub_menu(_h_menu: usize, _n_pos: i32) -> usize {
     0 // NULL
 }
@@ -3336,6 +3661,8 @@ pub unsafe extern "win64" fn get_sub_menu(_h_menu: usize, _n_pos: i32) -> usize 
 ///
 /// # Safety
 /// No pointer dereferences.
+// Wine ref: dlls/user32/dialog.c — calls GetDlgItem(hDlg, nIDDlgItem) then SendMessageW;
+// returns 0 if control not found (GetDlgItem returns NULL); no special message routing.
 pub unsafe extern "win64" fn send_dlg_item_message_w(
     _h_dlg: usize,
     _n_id_dlg_item: i32,
@@ -3350,6 +3677,9 @@ pub unsafe extern "win64" fn send_dlg_item_message_w(
 ///
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
+// Wine ref: dlls/user32/resource.c — loads RT_ACCELERATOR resource via FindResourceW/
+// LoadResource; each entry is ACCEL struct (fVirt, key, cmd); table handle is not freed
+// by the application — lifetime tied to the module.
 pub unsafe extern "win64" fn load_accelerators_w(
     _h_inst: usize,
     _lp_table_name: *const u16,
@@ -3361,6 +3691,9 @@ pub unsafe extern "win64" fn load_accelerators_w(
 ///
 /// # Safety
 /// `lp_msg` is accepted but not dereferenced.
+// Wine ref: dlls/win32u/menu.c::translate_accelerator — matches WM_KEYDOWN/WM_CHAR against
+// ACCEL table; checks FVIRTKEY/FSHIFT/FCONTROL/FALT modifiers; on match sends WM_COMMAND
+// or WM_SYSCOMMAND; skips disabled/grayed menu items.
 pub unsafe extern "win64" fn translate_accelerator_w(
     _h_wnd: usize,
     _h_acc_table: usize,
@@ -3370,6 +3703,8 @@ pub unsafe extern "win64" fn translate_accelerator_w(
 }
 
 /// GetFocus — return the HWND that currently has keyboard focus. Returns NULL.
+// Wine ref: dlls/win32u/input.c::get_focus — queries GUITHREADINFO for calling thread;
+// returns info.hwndFocus; returns NULL if thread has no focus window or no message queue.
 pub extern "win64" fn get_focus() -> usize {
     0 // NULL
 }
@@ -3378,6 +3713,9 @@ pub extern "win64" fn get_focus() -> usize {
 ///
 /// # Safety
 /// `lp_bitmap_name` is accepted but not dereferenced.
+// Wine ref: dlls/user32/cursoricon.c::BITMAP_Load — calls LoadImageW(LR_LOADFROMFILE or
+// RT_BITMAP resource); OBM_* predefined IDs (< 32768) load from OEMRESOURCE;
+// returns DDB HBITMAP; caller must DeleteObject.
 pub unsafe extern "win64" fn load_bitmap_w(
     _h_instance: usize,
     _lp_bitmap_name: *const u16,
@@ -3391,6 +3729,9 @@ pub unsafe extern "win64" fn load_bitmap_w(
 ///
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
+// Wine ref: dlls/user32/class.c — calls NtUserGetClassInfoEx; searches per-instance then
+// global class list; fills WNDCLASSEXW; lpszMenuName returned as atom or pointer;
+// returns FALSE + ERROR_CLASS_DOES_NOT_EXIST if not found.
 pub unsafe extern "win64" fn get_class_info_w(
     _h_instance: usize,
     _lp_class_name: *const u16,
@@ -3405,6 +3746,9 @@ pub unsafe extern "win64" fn get_class_info_w(
 ///
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
+// Wine ref: dlls/win32u/message.c::call_window_proc — checks if lpPrevWndFunc is an
+// interprocess thunk (for ANSI↔Unicode conversion); dispatches directly if same-thread;
+// used by subclassing chains to call the previous wndproc.
 pub unsafe extern "win64" fn call_window_proc_w(
     _lp_prev_wnd_func: usize,
     _h_wnd: usize,
@@ -3421,6 +3765,9 @@ pub unsafe extern "win64" fn call_window_proc_w(
 ///
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
+// Wine ref: dlls/user32/dialog.c::DIALOG_CreateIndirect + DIALOG_DoDialogBox —
+// creates a window from DLGTEMPLATE resource, runs modal message loop (blocks caller),
+// returns EndDialog value; -1 means error (resource not found or create failed).
 pub unsafe extern "win64" fn dialog_box_param_w(
     _h_instance: usize,
     _lp_template_name: *const u16,
@@ -3437,6 +3784,9 @@ pub unsafe extern "win64" fn dialog_box_param_w(
 ///
 /// # Safety
 /// `lpsz_start` and `lpsz` must be valid pointers into the same buffer.
+// Wine ref: dlls/user32/charwidth.c — walks backward from lpsz checking IsDBCSLeadByteEx
+// to skip the high byte of a 2-byte DBCS sequence; returns lpszStart if already at start;
+// code page affects which lead bytes are valid DBCS high bytes.
 pub unsafe extern "win64" fn char_prev_ex_a(
     _code_page: u16,
     lpsz_start: *const u8,
@@ -3457,12 +3807,7 @@ pub unsafe extern "win64" fn char_prev_ex_a(
 /// Wine ref: dlls/user32/event.c — NtUserNotifyWinEvent dispatches to
 /// installed WinEvent hooks via the hook thread. Weave: no-op. We have no
 /// accessibility infrastructure; callers (Scintilla, NPP) ignore the return.
-pub extern "win64" fn notify_win_event(
-    _event: u32,
-    _hwnd: usize,
-    _id_object: i32,
-    _id_child: i32,
-) {
+pub extern "win64" fn notify_win_event(_event: u32, _hwnd: usize, _id_object: i32, _id_child: i32) {
     // no-op
 }
 
@@ -3470,6 +3815,9 @@ pub extern "win64" fn notify_win_event(
 ///
 /// Wine ref: dlls/user32/message.c — updates the window caption highlight
 /// state. Weave: no-op, returns FALSE (was not previously active).
+///
+/// # Safety
+/// Pointer arguments must be valid for the duration of the call; null where noted is permitted.
 pub unsafe extern "win64" fn flash_window_ex(_pfwi: *const u8) -> i32 {
     0 // FALSE — window was not previously in an active state
 }
@@ -3523,6 +3871,8 @@ pub unsafe extern "win64" fn get_icon_info(_hicon: usize, _piconinfo: *mut u8) -
 ///
 /// # Safety
 /// `piconinfo` is ignored.
+// Wine ref: dlls/user32/cursoricon.c — CreateIconIndirect allocates CURSORICONCACHE entry;
+// copies mask+color bitmaps from ICONINFO; hbmColor=NULL means single-plane monochrome cursor.
 pub unsafe extern "win64" fn create_icon_indirect(piconinfo: *const u8) -> usize {
     piconinfo as usize | 1 // non-NULL fake handle
 }

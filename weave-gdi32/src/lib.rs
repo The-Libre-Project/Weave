@@ -59,6 +59,9 @@ pub extern "win64" fn create_pen(fn_pen_style: i32, n_width: i32, color: u32) ->
 ///
 /// # Safety
 /// `lp_sz_face` (if non-null) must be a null-terminated UTF-16 string.
+// Wine ref: dlls/win32u/font.c — NtGdiHfontCreate fills LOGFONTW; lfFaceName is
+// truncated to LF_FACESIZE-1 (31) chars; lfHeight<0 means cell height, >0 means
+// character height; weight 400=normal, 700=bold.
 pub unsafe extern "win64" fn create_font_w(
     c_height: i32,
     _c_width: i32,
@@ -99,6 +102,8 @@ pub unsafe extern "win64" fn create_font_w(
 ///
 /// # Safety
 /// `lplf` must be a valid pointer to a `LOGFONTW`.
+// Wine ref: dlls/win32u/font.c — NtGdiHfontCreate copies the full LOGFONTW; if lplf
+// is NULL returns NULL; lfFaceName is treated as UTF-16 and clamped to 31 chars.
 pub unsafe extern "win64" fn create_font_indirect_w(lplf: *const LogFontW) -> usize {
     if lplf.is_null() {
         return 0;
@@ -138,6 +143,9 @@ pub extern "win64" fn get_stock_object(i_object: i32) -> usize {
 /// GetObject: fill a buffer with GDI object information.
 ///
 /// Delegates to `get_object_w` — same binary representation on x64 (pointer == usize).
+// Wine ref: dlls/gdi32/objects.c — GetObject calls NtGdiExtGetObjectW; for HBITMAP
+// returns BITMAP or DIBSECTION; for HPEN returns LOGPEN (or EXTLOGPEN if ExtCreatePen);
+// returns 0 if h is NULL or unrecognized type.
 pub extern "win64" fn get_object(h: usize, c: i32, pv: usize) -> i32 {
     unsafe { get_object_w(h, c, pv as *mut u8) }
 }
@@ -226,11 +234,15 @@ pub extern "win64" fn set_text_color(hdc: usize, color: u32) -> u32 {
 }
 
 /// GetTextColor: return the current text colour.
+// Wine ref: dlls/win32u/dc.c — reads dc->attr->text_color directly; returns
+// CLR_INVALID (0xFFFFFFFF) if hdc is invalid (Weave returns 0 for invalid hdc).
 pub extern "win64" fn get_text_color(hdc: usize) -> u32 {
     dc::with(hdc, |dc| dc.text_color)
 }
 
 /// SetBkColor: set the background colour used by text and hatched brushes.
+// Wine ref: dlls/win32u/dc.c::set_bk_color — stores color in dc->attr->background_color
+// via physdev chain (pSetBkColor); returns previous color; CLR_INVALID returned on bad hdc.
 pub extern "win64" fn set_bk_color(hdc: usize, color: u32) -> u32 {
     let mut prev = 0u32;
     dc::with_mut(hdc, |dc| {
@@ -241,11 +253,16 @@ pub extern "win64" fn set_bk_color(hdc: usize, color: u32) -> u32 {
 }
 
 /// GetBkColor: return the current background colour.
+// Wine ref: dlls/win32u/dc.c — reads dc->attr->background_color directly;
+// returns CLR_INVALID on invalid hdc.
 pub extern "win64" fn get_bk_color(hdc: usize) -> u32 {
     dc::with(hdc, |dc| dc.bk_color)
 }
 
 /// SetBkMode: TRANSPARENT (1) or OPAQUE (2).
+// Wine ref: dlls/win32u/dc.c — stores mode in dc->attr->background_mode; returns
+// previous mode; only TRANSPARENT(1) and OPAQUE(2) are valid; invalid values are
+// stored as-is (no validation in Wine).
 pub extern "win64" fn set_bk_mode(hdc: usize, i_bk_mode: i32) -> i32 {
     let mut prev = 0i32;
     dc::with_mut(hdc, |dc| {
@@ -256,6 +273,8 @@ pub extern "win64" fn set_bk_mode(hdc: usize, i_bk_mode: i32) -> i32 {
 }
 
 /// GetBkMode: return the current background mode.
+// Wine ref: dlls/win32u/dc.c — reads dc->attr->background_mode directly; returns 0
+// on invalid hdc (not CLR_INVALID since mode is INT not COLORREF).
 pub extern "win64" fn get_bk_mode(hdc: usize) -> i32 {
     dc::with(hdc, |dc| dc.bk_mode)
 }
@@ -271,6 +290,7 @@ pub extern "win64" fn get_bk_mode(hdc: usize) -> i32 {
 ///
 /// # Safety
 /// `lp_rc` must be a valid pointer to a `RECT`.
+// Wine ref: dlls/win32u/defwnd.c::fill_rect — hbrush ≤ 31 treated as system color index.
 pub unsafe extern "win64" fn fill_rect(hdc: usize, lp_rc: *const Rect, h_brush: usize) -> i32 {
     if lp_rc.is_null() {
         return 0;
@@ -317,6 +337,9 @@ pub unsafe extern "win64" fn fill_rect(hdc: usize, lp_rc: *const Rect, h_brush: 
 }
 
 /// Rectangle: draw a filled rectangle with the current brush, outlined with the current pen.
+// Wine ref: dlls/win32u/driver.c::nulldrv_Rectangle — forwards to physdev chain;
+// the pen outline excludes right/bottom edges (interior is left+1..right-1); empty
+// or inverted rectangles (left>=right or top>=bottom) are silently no-ops.
 pub extern "win64" fn rectangle(hdc: usize, left: i32, top: i32, right: i32, bottom: i32) -> i32 {
     let (dx, dy) = dc::with(hdc, |dc| dc.lp_to_device(left, top));
     let w = (right - left).max(0) as u16;
@@ -338,6 +361,9 @@ pub extern "win64" fn rectangle(hdc: usize, left: i32, top: i32, right: i32, bot
 }
 
 /// Ellipse: draw an ellipse (stub in Phase 2 — renders as a rectangle).
+// Wine ref: dlls/win32u/driver.c::nulldrv_Ellipse — forwards to physdev chain;
+// bounding box semantics same as Rectangle (exclusive right/bottom); fills with
+// current brush, outlines with current pen.
 pub extern "win64" fn ellipse(hdc: usize, left: i32, top: i32, right: i32, bottom: i32) -> i32 {
     // TODO Phase 3: real ellipse rasterisation.
     rectangle(hdc, left, top, right, bottom)
@@ -374,6 +400,7 @@ fn font_px_size(hdc: usize) -> f32 {
 ///
 /// # Safety
 /// `lp_string` must be a valid pointer to `c` UTF-16 code units.
+// Wine ref: dlls/win32u/font.c::nulldrv_ExtTextOut — TextOutW calls ExtTextOutW(0,NULL).
 pub unsafe extern "win64" fn text_out_w(
     hdc: usize,
     x: i32,
@@ -444,6 +471,9 @@ pub unsafe extern "win64" fn text_out_w(
 /// # Safety
 /// `lp_string` must point to `n_count` UTF-16 units (or null-terminated if
 /// `n_count == -1`). `lp_rect` must be a valid pointer to a `RECT`.
+// Wine ref: dlls/user32/text.c::DrawTextExW — DT_CALCRECT updates lp_rect without
+// drawing; DT_NOCLIP is implied if lp_rect is NULL; n_count==-1 means null-terminated;
+// returns height of drawn text (0 on error), not number of chars.
 pub unsafe extern "win64" fn draw_text_w(
     hdc: usize,
     lp_string: *const u16,
@@ -516,6 +546,8 @@ pub unsafe extern "win64" fn draw_text_w(
 ///
 /// # Safety
 /// `lp_string` must point to `n_count` bytes (or a null-terminated string if n_count == -1).
+// Wine ref: dlls/user32/text.c::DrawTextExA — converts lpchText from ACP to UTF-16 via
+// MultiByteToWideChar then calls DrawTextExW; nCount==-1 triggers strlen on input.
 pub unsafe extern "win64" fn draw_text_a(
     hdc: usize,
     lp_string: *const u8,
@@ -555,6 +587,7 @@ pub unsafe extern "win64" fn draw_text_a(
 ///
 /// # Safety
 /// `lp_string` must point to `c` valid UTF-16 code units (or glyph indices).
+// Wine ref: dlls/win32u/font.c::nulldrv_ExtTextOut — ETO_OPAQUE fills background rect first.
 pub unsafe extern "win64" fn ext_text_out_w(
     hdc: usize,
     x: i32,
@@ -654,6 +687,9 @@ pub unsafe extern "win64" fn ext_text_out_w(
 }
 
 /// SetPixel: draw a single pixel.
+// Wine ref: dlls/win32u/driver.c::nulldrv_SetPixel — returns color unchanged (no
+// real drawing in null driver); actual X11 impl in winex11.drv calls XDrawPoint and
+// returns the nearest palette color for the pixel drawn.
 pub extern "win64" fn set_pixel(hdc: usize, x: i32, y: i32, color: u32) -> u32 {
     let pixel = to_pixel(color);
     let xcb = dc::with(hdc, |dc| dc.drawable());
@@ -663,6 +699,9 @@ pub extern "win64" fn set_pixel(hdc: usize, x: i32, y: i32, color: u32) -> u32 {
 }
 
 /// GetPixel: return the colour of a pixel (stub — always returns black).
+// Wine ref: dlls/win32u/bitblt.c — NtGdiGetPixel clips x,y to DC clip region; returns
+// CLR_INVALID (0xFFFFFFFF) if point is outside; otherwise reads back the pixel color
+// from the device surface via GetImage.
 pub extern "win64" fn get_pixel(_hdc: usize, _x: i32, _y: i32) -> u32 {
     0 // CLR_INVALID would be 0xFFFFFFFF; return black for now
 }
@@ -671,6 +710,8 @@ pub extern "win64" fn get_pixel(_hdc: usize, _x: i32, _y: i32) -> u32 {
 ///
 /// # Safety
 /// `lp_point` (if non-null) must be a valid writable pointer to a `POINT`.
+// Wine ref: dlls/win32u/driver.c::nulldrv_MoveTo — stores new position in dc->cur_pos;
+// lpPoint receives *previous* position before the move; returns FALSE on invalid hdc.
 pub unsafe extern "win64" fn move_to_ex(hdc: usize, x: i32, y: i32, lp_point: *mut Point) -> i32 {
     dc::with_mut(hdc, |dc| {
         if !lp_point.is_null() {
@@ -684,9 +725,9 @@ pub unsafe extern "win64" fn move_to_ex(hdc: usize, x: i32, y: i32, lp_point: *m
 }
 
 /// LineTo: draw a line from the current position to (x, y) (stub).
+// Wine ref: dlls/win32u/painting.c — NtGdiLineTo draws from current pos to (x,y)
+// using the current pen; updates dc->cur_pos to (x,y) after drawing.
 pub extern "win64" fn line_to(hdc: usize, x: i32, y: i32) -> i32 {
-    // Wine ref: dlls/win32u/line.c — NtGdiLineTo draws from current pos to (x,y),
-    // then updates current pos to (x,y).
     let (drawable, x1, y1, pixel) = dc::with(hdc, |dc| {
         let (x1, y1) = dc.lp_to_device(dc.pen_pos.x, dc.pen_pos.y);
         let pixel = weave_user32::backend::colorref_to_pixel(objects::pen_color(dc.h_pen));
@@ -701,11 +742,17 @@ pub extern "win64" fn line_to(hdc: usize, x: i32, y: i32) -> i32 {
 }
 
 /// Polygon: draw a filled polygon (stub).
+// Wine ref: dlls/win32u/painting.c — NtGdiPolyPolyDraw with type POLYPOLYGON; fills
+// with current brush using fill mode (ALTERNATE or WINDING); outlines with current pen;
+// requires at least 2 points, returns FALSE if cpt < 2.
 pub extern "win64" fn polygon(_hdc: usize, _apt: *const Point, _cpt: i32) -> i32 {
     1
 }
 
 /// PatBlt: fill with a pattern brush using a raster operation (stub).
+// Wine ref: dlls/winex11.drv/bitblt.c::X11DRV_PatBlt — checks usePat=(rop uses pattern
+// bits); BLACKNESS/WHITENESS handled specially to set XForeground directly; DSTINVERT
+// uses GXxor with white^black pixel; falls through to XFillRectangle for all cases.
 pub extern "win64" fn pat_blt(hdc: usize, x: i32, y: i32, w: i32, h: i32, _rop: u32) -> i32 {
     // Use the selected brush to fill the rectangle.
     let brush_h = dc::with(hdc, |dc| dc.h_brush);
@@ -763,6 +810,9 @@ pub extern "win64" fn bit_blt(
 }
 
 /// StretchBlt: stretched bit-block transfer (stub).
+// Wine ref: dlls/win32u/bitblt.c — NtGdiStretchBlt uses stretch_blt_mode
+// (COLORONCOLOR=3 deletes rows/cols; HALFTONE=4 uses averaging); negative w/h
+// mirror the image; returns FALSE if src and dst DCs have incompatible formats.
 pub extern "win64" fn stretch_blt(
     hdc_dest: usize,
     x_dest: i32,
@@ -783,11 +833,16 @@ pub extern "win64" fn stretch_blt(
 }
 
 /// SetStretchBltMode: set the bitmap-stretching mode (stub).
+// Wine ref: dlls/win32u/dc.c::set_stretch_blt_mode — stores mode in
+// dc->attr->stretch_blt_mode; returns previous mode; HALFTONE(4) requires
+// SetBrushOrgEx to align the halftone brush, which is skipped here.
 pub extern "win64" fn set_stretch_blt_mode(_hdc: usize, _mode: i32) -> i32 {
     1
 }
 
 /// SetROP2: set the foreground mix mode (stub).
+// Wine ref: dlls/win32u/dc.c — stores rop2 in dc->attr->rop_mode; valid range 1..16
+// (R2_BLACK..R2_WHITE); returns previous mode; out-of-range values stored as-is.
 pub extern "win64" fn set_rop2(_hdc: usize, _rop2: i32) -> i32 {
     1
 }
@@ -804,6 +859,8 @@ pub extern "win64" fn set_rop2(_hdc: usize, _rop2: i32) -> i32 {
 /// window directly (no off-screen pixel buffer). BitBlt from memory→screen is a no-op
 /// because the pixels are already on screen. This makes double-buffered drawing (like
 /// Scintilla's) produce visible output without a real bitmap backing.
+// Wine ref: dlls/win32u/dc.c — alloc_dc_ptr; new compat DC starts with 1×1 monochrome
+// bitmap selected; CreateCompatibleDC(NULL) creates a screen-compatible memory DC.
 pub extern "win64" fn create_compatible_dc(hdc: usize) -> usize {
     // Find the window this parent DC is bound to.
     // For screen DCs (BeginPaint), dc.hwnd == hdc == HWND.
@@ -838,6 +895,9 @@ pub extern "win64" fn create_compatible_dc(hdc: usize) -> usize {
 }
 
 /// DeleteDC: delete a DC created by CreateCompatibleDC (stub).
+// Wine ref: dlls/win32u/dc.c::free_dc_ptr — walks physDev chain calling pDeleteDC on
+// each; decrements refcounts on hPen/hBrush/hFont/hBitmap; frees GDI handle; returns
+// FALSE if hdc is a display DC (those are not freed via DeleteDC).
 pub extern "win64" fn delete_dc(hdc: usize) -> i32 {
     if let Some(pixmap) = dc::with(hdc, |dc| dc.pixmap) {
         if pixmap != 0 {
@@ -849,6 +909,9 @@ pub extern "win64" fn delete_dc(hdc: usize) -> i32 {
 }
 
 /// CreateCompatibleBitmap: create a bitmap compatible with a DC (stub).
+// Wine ref: dlls/win32u/bitmap.c — NtGdiCreateCompatibleBitmap uses the DC's bit depth;
+// cx/cy of 0 creates a 1×1 bitmap (not NULL); returns NULL only on alloc failure.
+// A DC-compatible bitmap inherits depth from hdc (screen DC → display depth, mem DC → 1bpp).
 pub extern "win64" fn create_compatible_bitmap(_hdc: usize, cx: i32, cy: i32) -> usize {
     let width = cx.unsigned_abs().max(1);
     let height = cy.unsigned_abs().max(1);
@@ -856,6 +919,9 @@ pub extern "win64" fn create_compatible_bitmap(_hdc: usize, cx: i32, cy: i32) ->
 }
 
 /// CreateDIBSection: create a DIB section (stub — returns 0).
+// Wine ref: dlls/gdi32/objects.c::CreateDIBSection → NtGdiCreateDIBSection; creates a
+// shared-memory bitmap (section!=NULL uses MapViewOfSection); ppvBits receives a pointer
+// to the raw pixel buffer; DIB_PAL_COLORS usage maps color table entries to palette indices.
 pub extern "win64" fn create_dib_section(
     _hdc: usize,
     _pbmi: usize,
@@ -869,6 +935,9 @@ pub extern "win64" fn create_dib_section(
 }
 
 /// SetDIBitsToDevice: copy DIB pixels to a device (stub).
+// Wine ref: dlls/win32u/dib.c — NtGdiSetDIBitsToDevice validates BITMAPINFO header
+// (biHeight<0 = top-down DIB); StartScan/cLines select a horizontal band; clips to
+// DC clip region; DIB_PAL_COLORS in ColorUse maps table entries through current palette.
 pub extern "win64" fn set_dib_bits_to_device(
     _hdc: usize,
     _x_dest: i32,
@@ -898,6 +967,7 @@ pub extern "win64" fn set_dib_bits_to_device(
 ///
 /// # Safety
 /// `lptm` must be a valid writable pointer to a `TEXTMETRICW`.
+// Wine ref: dlls/win32u/font.c::font_GetTextMetrics — fills otmTextMetrics from font cache.
 pub unsafe extern "win64" fn get_text_metrics_w(hdc: usize, lptm: *mut TextMetricW) -> i32 {
     if lptm.is_null() {
         return 0;
@@ -949,6 +1019,7 @@ pub unsafe extern "win64" fn get_text_metrics_w(hdc: usize, lptm: *mut TextMetri
 /// # Safety
 /// `lpsz` must be a valid pointer to `c` UTF-16 code units.
 /// `lp_size` must be a valid writable pointer to a `SIZE`.
+// Wine ref: dlls/win32u/font.c::font_GetTextExtentExPoint — sums abc advances per glyph.
 pub unsafe extern "win64" fn get_text_extent_point32_w(
     hdc: usize,
     lpsz: *const u16,
@@ -1017,6 +1088,9 @@ pub extern "win64" fn get_device_caps(hdc: usize, n_index: i32) -> i32 {
 ///
 /// # Safety
 /// `lp_rect` must be a valid writable pointer to a `RECT`.
+// Wine ref: dlls/win32u/clipping.c — NtGdiGetAppClipBox intersects the vis region
+// with the meta/app clip regions; return values: ERROR(0), NULLREGION(1), SIMPLEREGION(2),
+// COMPLEXREGION(3); lp_rect receives the bounding box of the combined region.
 pub unsafe extern "win64" fn get_clip_box(hdc: usize, lp_rect: *mut Rect) -> i32 {
     if lp_rect.is_null() {
         return 0; // ERROR
@@ -1038,6 +1112,9 @@ pub unsafe extern "win64" fn get_clip_box(hdc: usize, lp_rect: *mut Rect) -> i32
 ///
 /// # Safety
 /// `lp_point` must be a valid writable pointer to a `POINT`.
+// Wine ref: dlls/win32u/dc.c — NtGdiGetDCPoint(hdc, DCPT_DCORG) returns the DC origin
+// offset (window client area top-left in screen coords for window DCs; (0,0) for
+// compatible/printer DCs). Weave always returns (0,0).
 pub unsafe extern "win64" fn get_dc_org_ex(_hdc: usize, lp_point: *mut Point) -> i32 {
     if !lp_point.is_null() {
         unsafe { *lp_point = Point { x: 0, y: 0 } };
@@ -1071,36 +1148,50 @@ pub extern "win64" fn restore_dc(hdc: usize, n_saved_dc: i32) -> i32 {
 
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
+// Wine ref: dlls/win32u/dc.c — NtGdiDdDDIOpenAdapterFromHdc maps HDC to adapter LUID;
+// returns STATUS_INVALID_PARAMETER if hdc is not a display DC; not in Wine gdi32.
 pub unsafe extern "win64" fn d3dkmt_open_adapter_from_hdc(_p_data: usize) -> u32 {
     0
 }
 
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
+// Wine ref: include/ntuser.h::NtUserD3DKMTCloseAdapter — thin wrapper; returns
+// STATUS_SUCCESS(0) on success, STATUS_INVALID_HANDLE on bad adapter handle.
 pub unsafe extern "win64" fn d3dkmt_close_adapter(_p_data: usize) -> u32 {
     0
 }
 
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
+// Wine ref: include/ntuser.h::NtUserD3DKMTCreateDevice — allocates a kernel-mode
+// device context on the adapter; returns STATUS_NO_MEMORY if allocation fails.
 pub unsafe extern "win64" fn d3dkmt_create_device(_p_data: usize) -> u32 {
     0
 }
 
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
+// Wine ref: include/ntuser.h::NtUserD3DKMTDestroyDevice — frees kernel device context;
+// returns STATUS_INVALID_HANDLE if hDevice is invalid.
 pub unsafe extern "win64" fn d3dkmt_destroy_device(_p_data: usize) -> u32 {
     0
 }
 
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
+// Wine ref: include/ntuser.h::NtUserD3DKMTQueryAdapterInfo — dispatches on QueryType;
+// returns STATUS_INVALID_PARAMETER(0xC000000D) for unknown types; Weave returns
+// STATUS_NOT_IMPLEMENTED(0xC0000001) to signal unimplemented adapter queries.
 pub unsafe extern "win64" fn d3dkmt_query_adapter_info(_p_data: usize) -> u32 {
     0xC000_0001u32
 }
 
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
+// Wine ref: include/ntuser.h::NtUserD3DKMTSetVidPnSourceOwner — claims exclusive
+// ownership of a VidPN source for fullscreen presentation; returns
+// STATUS_GRAPHICS_VIDPN_SOURCE_IN_USE if already owned.
 pub unsafe extern "win64" fn d3dkmt_set_vid_pn_source_owner(_p_data: usize) -> u32 {
     0
 }
@@ -1112,6 +1203,7 @@ pub unsafe extern "win64" fn d3dkmt_set_vid_pn_source_owner(_p_data: usize) -> u
 /// Also handles a small set of GDI functions that Windows re-exports from
 /// `user32.dll` (FillRect, DrawTextW, DrawTextA). Binaries compiled with
 /// MinGW may import these from either DLL name.
+// Wine ref: not applicable — Weave-internal IAT dispatch function with no Wine equivalent.
 pub fn resolve(dll: &str, func: &str) -> Option<usize> {
     let is_gdi32 = dll.eq_ignore_ascii_case("gdi32.dll");
     let is_user32_gdi = dll.eq_ignore_ascii_case("user32.dll")
@@ -1386,6 +1478,9 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
 ///
 /// # Safety
 /// All HDC and BLENDFUNCTION arguments are ignored in this stub.
+// Wine ref: dlls/msimg32/msimg32.c — AlphaBlend calls NtGdiAlphaBlend; BLENDFUNCTION
+// SourceAlpha=AC_SRC_ALPHA(1) + AlphaFormat=AC_SRC_OVER(0) is the standard per-pixel
+// alpha path; returns FALSE if source and destination DCs are incompatible.
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "win64" fn alpha_blend(
     _hdc_dest: usize,
@@ -1407,6 +1502,9 @@ pub unsafe extern "win64" fn alpha_blend(
 ///
 /// # Safety
 /// All HDC arguments are ignored.
+// Wine ref: dlls/msimg32/msimg32.c — TransparentBlt calls NtGdiTransparentBlt;
+// crTransparent color is matched exactly (no tolerance); src pixels matching the key
+// are skipped; the blit is stretched if src and dst dimensions differ.
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "win64" fn transparent_blt(
     _hdc_dest: usize,
@@ -1428,6 +1526,9 @@ pub unsafe extern "win64" fn transparent_blt(
 ///
 /// # Safety
 /// `pVertex` and `pMesh` are caller-supplied structs; we ignore them.
+// Wine ref: dlls/msimg32/msimg32.c — GradientFill calls NtGdiGradientFill; ulMode is
+// GRADIENT_FILL_RECT_H(0), GRADIENT_FILL_RECT_V(1), or GRADIENT_FILL_TRIANGLE(2);
+// pVertex is TRIVERTEX array; nVertex must match pMesh references or return FALSE.
 pub unsafe extern "win64" fn gradient_fill(
     _hdc: usize,
     _p_vertex: *const u8,
@@ -1440,6 +1541,8 @@ pub unsafe extern "win64" fn gradient_fill(
 }
 
 /// Resolve a gdi32.dll or msimg32.dll import added in Sprint 5.
+// Wine ref: dlls/msimg32/msimg32.c — msimg32 exports AlphaBlend, TransparentBlt,
+// GradientFill, and DllMain only; all three drawing functions delegate to ntgdi syscalls.
 pub fn resolve_msimg32(dll: &str, func: &str) -> Option<usize> {
     if !dll.eq_ignore_ascii_case("msimg32.dll") {
         return None;
@@ -1478,6 +1581,8 @@ unsafe fn read_gdi_ansi(p: *const u8) -> String {
 ///
 /// # Safety
 /// `lp_sz_face` must be null or a valid null-terminated ANSI string.
+// Wine ref: dlls/gdi32/font.c — CreateFontA converts face name via MultiByteToWideChar
+// then calls CreateFontW; all other params pass through unchanged.
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "win64" fn create_font_a(
     c_height: i32,
@@ -1540,6 +1645,8 @@ pub struct LogFontA {
 ///
 /// # Safety
 /// `lplf` must point to a valid `LOGFONTA`.
+// Wine ref: dlls/gdi32/font.c — CreateFontIndirectA converts LOGFONTA.lfFaceName via
+// MultiByteToWideChar into LOGFONTW.lfFaceName, then calls CreateFontIndirectW.
 pub unsafe extern "win64" fn create_font_indirect_a(lplf: *const LogFontA) -> usize {
     if lplf.is_null() {
         return 0;
@@ -1571,6 +1678,8 @@ pub unsafe extern "win64" fn create_font_indirect_a(lplf: *const LogFontA) -> us
 ///
 /// # Safety
 /// `lp_string` must point to `c_string` valid ANSI bytes.
+// Wine ref: dlls/gdi32/font.c — TextOutA converts lpString via MultiByteToWideChar
+// (using DC's charset from LOGFONT) then calls TextOutW; c is byte count, not char count.
 pub unsafe extern "win64" fn text_out_a(
     hdc: usize,
     x: i32,
@@ -1592,6 +1701,8 @@ pub unsafe extern "win64" fn text_out_a(
 ///
 /// # Safety
 /// `lp_string` must point to `cb_count` valid ANSI bytes.
+// Wine ref: dlls/gdi32/font.c — ExtTextOutA converts lpString via MultiByteToWideChar;
+// cbCount is byte count; lpDx spacing array is per-character (byte), not per-wchar.
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "win64" fn ext_text_out_a(
     hdc: usize,
@@ -1629,6 +1740,8 @@ pub unsafe extern "win64" fn ext_text_out_a(
 ///
 /// # Safety
 /// `lp_string` must point to `c` valid ANSI bytes; `lp_size` writable.
+// Wine ref: dlls/gdi32/font.c — GetTextExtentPoint32A converts via MultiByteToWideChar
+// then delegates to GetTextExtentPoint32W; c is byte count (MBCS chars may span 2 bytes).
 pub unsafe extern "win64" fn get_text_extent_point32_a(
     hdc: usize,
     lp_string: *const u8,
@@ -1650,6 +1763,8 @@ pub unsafe extern "win64" fn get_text_extent_point32_a(
 ///
 /// # Safety
 /// `lptm` must be a writable pointer to a TEXTMETRICA (same layout as W).
+// Wine ref: dlls/gdi32/font.c — GetTextMetricsA calls GetTextMetricsW; then converts
+// tmFirstChar/tmLastChar/tmDefaultChar/tmBreakChar from wide to the DC charset encoding.
 pub unsafe extern "win64" fn get_text_metrics_a(hdc: usize, lptm: usize) -> i32 {
     unsafe { get_text_metrics_w(hdc, lptm as *mut _) }
 }
@@ -1658,6 +1773,8 @@ pub unsafe extern "win64" fn get_text_metrics_a(hdc: usize, lptm: usize) -> i32 
 ///
 /// # Safety
 /// Pointer arguments must be valid.
+// Wine ref: dlls/gdi32/objects.c — GetObjectA calls NtGdiExtGetObjectW for most types;
+// for HFONT it calls GetObjectW then converts lfFaceName from wide to ANSI via WideCharToMultiByte.
 pub unsafe extern "win64" fn get_object_a(h: usize, c: i32, pv: *mut u8) -> i32 {
     get_object(h, c, pv as usize)
 }
@@ -1666,6 +1783,8 @@ pub unsafe extern "win64" fn get_object_a(h: usize, c: i32, pv: *mut u8) -> i32 
 ///
 /// # Safety
 /// Pointer arguments are accepted but not fully used.
+// Wine ref: dlls/gdi32/font.c — GetTextExtentExPointA converts string via
+// MultiByteToWideChar then calls GetTextExtentExPointW; lpnFit counts MBCS chars, not bytes.
 pub unsafe extern "win64" fn get_text_extent_ex_point_a(
     _hdc: usize,
     _lp_sz: *const u8,
@@ -1690,6 +1809,9 @@ pub unsafe extern "win64" fn get_text_extent_ex_point_a(
 ///
 /// # Safety
 /// Pointer arguments are accepted but not fully used.
+// Wine ref: dlls/win32u/font.c::font_GetOutlineTextMetrics — returns total size of
+// OUTLINETEXTMETRICA struct (including variable strings) when lpOTM is NULL; only
+// works for TrueType fonts (returns 0 for raster/device fonts).
 pub unsafe extern "win64" fn get_outline_text_metrics_a(
     _hdc: usize,
     _cb_data: u32,
@@ -1702,6 +1824,8 @@ pub unsafe extern "win64" fn get_outline_text_metrics_a(
 ///
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
+// Wine ref: dlls/win32u/font.c — GetCharABCWidthsFloatA converts char range to wide,
+// calls GetCharABCWidthsFloatW; only valid for TrueType fonts (returns FALSE for raster).
 pub unsafe extern "win64" fn get_char_abc_widths_float_a(
     _hdc: usize,
     _i_first_char: u32,
@@ -1715,6 +1839,8 @@ pub unsafe extern "win64" fn get_char_abc_widths_float_a(
 ///
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
+// Wine ref: dlls/win32u/font.c — GetCharWidth32A/W queries advance widths for a char
+// range; fills lpBuffer with INT advance widths; GetCharWidthA/W are identical (old alias).
 pub unsafe extern "win64" fn get_char_width32_a(
     _hdc: usize,
     _i_first: u32,
@@ -1726,6 +1852,8 @@ pub unsafe extern "win64" fn get_char_width32_a(
 
 /// # Safety
 /// `lp_buffer` must point to writable storage for `(i_last - i_first + 1)` INT values.
+// Wine ref: dlls/win32u/font.c — GetCharWidth32W queries ABC widths via get_glyph_outline
+// and returns abcA+abcB+abcC as a single INT per character.
 pub unsafe extern "win64" fn get_char_width32_w(
     _hdc: usize,
     _i_first: u32,
@@ -1737,6 +1865,8 @@ pub unsafe extern "win64" fn get_char_width32_w(
 
 /// # Safety
 /// `lp_buffer` must point to writable storage for the requested char range.
+// Wine ref: dlls/gdi32/font.c — GetCharWidthA is an alias for GetCharWidth32A; both
+// call NtGdiGetCharWidthW with the same semantics.
 pub unsafe extern "win64" fn get_char_width_a(
     _hdc: usize,
     _i_first: u32,
@@ -1748,6 +1878,8 @@ pub unsafe extern "win64" fn get_char_width_a(
 
 /// # Safety
 /// `lp_buffer` must point to writable storage for the requested char range.
+// Wine ref: dlls/gdi32/font.c — GetCharWidthW is an alias for GetCharWidth32W; same
+// INT advance width semantics; both superseded by GetCharABCWidthsW for TrueType detail.
 pub unsafe extern "win64" fn get_char_width_w(
     _hdc: usize,
     _i_first: u32,
@@ -1761,6 +1893,9 @@ pub unsafe extern "win64" fn get_char_width_w(
 ///
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
+// Wine ref: dlls/win32u/font.c — GetCharacterPlacementW fills GCP_RESULTS with glyph
+// indices, dx advances, caret positions, and reordering info; GCP_REORDER flag triggers
+// BiDi analysis; return value packs nGlyphs in low word and nMaxFit in high word.
 pub unsafe extern "win64" fn get_character_placement_w(
     _hdc: usize,
     _lpsz: *const u16,
@@ -1796,11 +1931,16 @@ pub extern "win64" fn get_text_align(hdc: usize) -> u32 {
 }
 
 /// GetCurrentObject: return a selected GDI object from a DC. Returns 0.
+// Wine ref: dlls/win32u/gdiobj.c — NtGdiGetDCObject maps uObjectType (OBJ_PEN=1,
+// OBJ_BRUSH=2, OBJ_FONT=6, OBJ_BITMAP=7) to the corresponding handle in the DC struct.
 pub extern "win64" fn get_current_object(_hdc: usize, _u_object_type: u32) -> usize {
     0
 }
 
 /// SetMapMode: set the DC mapping mode. Returns MM_TEXT (1) as the previous mode.
+// Wine ref: dlls/win32u/dc.c — NtGdiSetMapMode stores iMode in dc->attr->map_mode;
+// valid modes: MM_TEXT(1)..MM_ANISOTROPIC(8); changes viewport/window extents for
+// non-MM_TEXT modes; returns 0 on invalid hdc (Weave always returns 1).
 pub extern "win64" fn set_map_mode(_hdc: usize, _i_mode: i32) -> i32 {
     1 // MM_TEXT
 }
@@ -1809,6 +1949,9 @@ pub extern "win64" fn set_map_mode(_hdc: usize, _i_mode: i32) -> i32 {
 ///
 /// # Safety
 /// `lpt` must point to `c_pt` valid POINT structs.
+// Wine ref: dlls/win32u/painting.c — NtGdiPolyPolyDraw with type POLYLINE; draws line
+// segments between consecutive points using current pen; does NOT close the figure;
+// cPt must be >= 2 or returns FALSE.
 pub unsafe extern "win64" fn polyline(_hdc: usize, _lpt: *const i32, _c_pt: i32) -> i32 {
     1
 }
@@ -1816,6 +1959,9 @@ pub unsafe extern "win64" fn polyline(_hdc: usize, _lpt: *const i32, _c_pt: i32)
 /// CreateBitmap: create a device-dependent bitmap.
 ///
 /// Returns a GDI object handle. Phase 2 stub — no pixel data stored.
+// Wine ref: dlls/win32u/bitmap.c — NtGdiCreateBitmap clamps nWidth/nHeight to MAX_BITMAP
+// (0x7fff); nPlanes×nBitCount must not exceed 32; lpBits initialises the bitmap data if
+// non-NULL; a 0×0 bitmap creates a 1×1 placeholder.
 pub extern "win64" fn create_bitmap(
     n_width: i32,
     n_height: i32,
@@ -1832,6 +1978,9 @@ pub extern "win64" fn create_bitmap(
 ///
 /// # Safety
 /// Pointer arguments are accepted but not fully used.
+// Wine ref: dlls/win32u/dib.c — NtGdiGetDIBitsInternal copies scan lines from hbm into
+// lpvBits; negative biHeight in lpbmi means top-down output; uStartScan+cLines must not
+// exceed bitmap height or it clips; DIB_PAL_COLORS usage maps colors through palette.
 pub unsafe extern "win64" fn get_dib_bits(
     _hdc: usize,
     _h_bm: usize,
@@ -1845,6 +1994,9 @@ pub unsafe extern "win64" fn get_dib_bits(
 }
 
 /// ExcludeClipRect: exclude a rectangle from the clipping region. Returns SIMPLEREGION (2).
+// Wine ref: dlls/win32u/clipping.c — NtGdiExcludeClipRect intersects the clip region
+// with the complement of the rectangle; returns NULLREGION(1) if result is empty,
+// SIMPLEREGION(2) if rectangular, COMPLEXREGION(3) otherwise.
 pub extern "win64" fn exclude_clip_rect(
     _hdc: usize,
     _left: i32,
@@ -1856,6 +2008,8 @@ pub extern "win64" fn exclude_clip_rect(
 }
 
 /// IntersectClipRect: intersect the clipping region with a rectangle. Returns SIMPLEREGION (2).
+// Wine ref: dlls/win32u/clipping.c — NtGdiIntersectClipRect intersects the current clip
+// region with the specified rectangle; returns NULLREGION(1) if intersection is empty.
 pub extern "win64" fn intersect_clip_rect(
     _hdc: usize,
     _left: i32,
@@ -1870,6 +2024,9 @@ pub extern "win64" fn intersect_clip_rect(
 ///
 /// # Safety
 /// Pointer arguments are accepted but not fully used.
+// Wine ref: dlls/win32u/font.c — TranslateCharsetInfo maps between charset id, codepage,
+// and font signature; TCI_SRCCHARSET(1), TCI_SRCCODEPAGE(2), TCI_SRCFONTSIG(3) are the
+// three valid dwFlags values; returns FALSE for unknown charset/codepage combos.
 pub unsafe extern "win64" fn translate_charset_info(
     _lp_src: usize,
     _lp_cs: usize,
@@ -1884,12 +2041,17 @@ pub unsafe extern "win64" fn translate_charset_info(
 ///
 /// # Safety
 /// `lplgpl` must point to a valid LOGPALETTE struct.
+// Wine ref: dlls/win32u/palette.c — NtGdiCreatePaletteInternal allocates a PALETTEOBJ;
+// palNumEntries must be in range 1..0x400 (1024); palVersion must be 0x300.
 pub unsafe extern "win64" fn create_palette(_lplgpl: *const u8) -> usize {
     // Return a non-zero fake handle; palette operations are no-ops.
     0x0000_FACE_usize
 }
 
 /// SelectPalette: select a palette into a DC. Returns the previous (fake) palette.
+// Wine ref: dlls/win32u/palette.c — NtUserSelectPalette stores hpal in dc->hPalette;
+// bForceBackground=FALSE means foreground (top-level window) palette mapping is used;
+// returns old palette handle; NULL hdc returns NULL.
 pub extern "win64" fn select_palette(
     _hdc: usize,
     _h_pal: usize,
@@ -1899,6 +2061,9 @@ pub extern "win64" fn select_palette(
 }
 
 /// RealizePalette: map palette entries to the system palette. Returns 0.
+// Wine ref: dlls/win32u/palette.c — NtUserRealizePalette maps the foreground palette
+// to system palette entries; returns the number of entries changed; WM_PALETTECHANGED
+// is broadcast to all top-level windows after mapping.
 pub extern "win64" fn realize_palette(_hdc: usize) -> u32 {
     0
 }
@@ -1907,6 +2072,8 @@ pub extern "win64" fn realize_palette(_hdc: usize) -> u32 {
 ///
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
+// Wine ref: dlls/win32u/palette.c — NtGdiSetPaletteEntries modifies cEntries palette
+// slots starting at iStart; returns 0 if hpal is invalid or iStart+cEntries > palNumEntries.
 pub unsafe extern "win64" fn set_palette_entries(
     _h_pal: usize,
     _i_start: u32,
@@ -1917,11 +2084,17 @@ pub unsafe extern "win64" fn set_palette_entries(
 }
 
 /// UnrealizeObject: reset a brush origin or restore a palette. Returns TRUE.
+// Wine ref: dlls/win32u/palette.c — NtGdiUnrealizeObject; for HPALETTE marks it
+// unrealized so next RealizePalette remaps all entries; for HBRUSH clears the brush
+// origin so next SelectObject recalculates it.
 pub extern "win64" fn unrealize_object(_h: usize) -> i32 {
     1
 }
 
 /// UpdateColors: update client area colors. Returns TRUE.
+// Wine ref: dlls/win32u/palette.c — NtGdiUpdateColors remaps pixels in the DC's client
+// area to the new realized palette; intended for WM_PALETTECHANGED handlers; slow on
+// large windows (redraws all pixels); modern apps use InvalidateRect instead.
 pub extern "win64" fn update_colors(_hdc: usize) -> i32 {
     1
 }
@@ -1940,6 +2113,7 @@ pub extern "win64" fn update_colors(_hdc: usize) -> i32 {
 /// # Safety
 /// `lp_string` must point to `cch_string` valid UTF-16 code units.
 /// `lp_nfit`, `lp_dx`, `lp_size` must be valid writable pointers when non-null.
+// Wine ref: dlls/win32u/font.c::font_GetTextExtentExPoint — accumulates pos+=abcA+abcB+abcC; dxs[i]=pos.
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "win64" fn get_text_extent_ex_point_w(
     hdc: usize,
@@ -2023,6 +2197,7 @@ pub unsafe extern "win64" fn get_text_extent_point_w(
 ///
 /// # Safety
 /// `pv` must be writable for at least `c` bytes when non-null.
+// Wine ref: dlls/win32u/gdiobj.c::NtGdiExtGetObjectW — dispatches by type; HFONT→92 bytes LOGFONTW.
 pub unsafe extern "win64" fn get_object_w(h: usize, c: i32, pv: *mut u8) -> i32 {
     if h == 0 || c <= 0 || pv.is_null() {
         return 0;
@@ -2103,6 +2278,8 @@ pub unsafe extern "win64" fn get_object_w(h: usize, c: i32, pv: *mut u8) -> i32 
 /// # Safety
 /// `lp_log_font` may be null (enumerate all families) or a valid LOGFONTW pointer.
 /// `lp_proc` must be a valid FONTENUMPROCW function pointer.
+// Wine ref: dlls/win32u/font.c — iterates gdi_font_family list; calls enum_face_charsets
+// per family; stops early if callback returns 0.
 pub unsafe extern "win64" fn enum_font_families_ex_w(
     hdc: usize,
     lp_log_font: *const LogFontW,
@@ -2218,6 +2395,7 @@ pub extern "win64" fn create_rect_rgn(left: i32, top: i32, right: i32, bottom: i
 ///
 /// # Safety
 /// `lp_rc` must be a valid pointer to a RECT.
+// Wine ref: dlls/win32u/region.c — NtGdiCreateRectRgn; NULL lp_rc returns NULL (ERROR).
 pub unsafe extern "win64" fn create_rect_rgn_indirect(lp_rc: *const Rect) -> usize {
     if lp_rc.is_null() {
         return 0;
@@ -2275,6 +2453,8 @@ pub extern "win64" fn create_pattern_brush(_hbm: usize) -> usize {
 ///
 /// # Safety
 /// `lp_lb` (if non-null) must point to a valid LOGBRUSH (12 bytes: style+color+hatch).
+// Wine ref: dlls/win32u/pen.c::NtGdiExtCreatePen — PS_GEOMETRIC pens use LOGBRUSH color;
+// PS_COSMETIC pens ignore brush; dw_pen_style low byte is PS_SOLID/PS_DASH/PS_DOT/etc.
 pub unsafe extern "win64" fn ext_create_pen(
     dw_pen_style: u32,
     dw_width: u32,
@@ -2302,6 +2482,8 @@ pub unsafe extern "win64" fn ext_create_pen(
 ///
 /// # Safety
 /// All pointer arguments are ignored in this stub.
+// Wine ref: dlls/gdi32/gdi32.spec — GdiAlphaBlend is a forward to msimg32.AlphaBlend;
+// both map to NtGdiAlphaBlend in win32u.
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "win64" fn gdi_alpha_blend(
     _hdc_dest: usize,
@@ -2344,6 +2526,8 @@ pub extern "win64" fn get_rop2(_hdc: usize) -> i32 {
 ///
 /// # Safety
 /// `lp_rect` must be a valid pointer to a RECT.
+// Wine ref: dlls/win32u/clipping.c — NtGdiRectVisible checks rect against DC vis region;
+// returns TRUE if any part is unclipped, FALSE if entirely outside the clip region.
 pub unsafe extern "win64" fn rect_visible(_hdc: usize, lp_rect: *const Rect) -> i32 {
     let _ = lp_rect;
     1
@@ -2374,6 +2558,7 @@ pub extern "win64" fn round_rect(
 ///
 /// # Safety
 /// `lp_point` (if non-null) must be a valid writable POINT.
+// Wine ref: dlls/win32u/mapping.c::NtGdiSetWindowOrgEx — stores (x,y) in dc->attr.wnd_org.
 pub unsafe extern "win64" fn set_window_org_ex(
     hdc: usize,
     x: i32,
@@ -2448,6 +2633,7 @@ pub unsafe extern "win64" fn set_viewport_org_ex(
 ///
 /// # Safety
 /// `lp_point` (if non-null) must be a valid writable POINT.
+// Wine ref: dlls/win32u/dc.c — NtGdiGetDCPoint(DCPT_VPORT_ORG) reads dc->attr.vport_org.
 pub unsafe extern "win64" fn get_viewport_org_ex(hdc: usize, lp_point: *mut Point) -> i32 {
     if !lp_point.is_null() {
         dc::with(hdc, |dc| unsafe { *lp_point = dc.viewport_org });
@@ -2531,6 +2717,8 @@ pub unsafe extern "win64" fn set_dib_bits(
 ///
 /// # Safety
 /// `lp_points` must point to `c` writable POINT structs.
+// Wine ref: dlls/win32u/mapping.c::NtGdiTransformPoints — applies inverse world-to-device
+// matrix; in MM_TEXT (scale=1, no offset) this is identity and points pass through unchanged.
 pub unsafe extern "win64" fn dpto_lp(_hdc: usize, _lp_points: *mut Point, _c: i32) -> i32 {
     1
 }
@@ -2539,6 +2727,8 @@ pub unsafe extern "win64" fn dpto_lp(_hdc: usize, _lp_points: *mut Point, _c: i3
 ///
 /// # Safety
 /// `lp_points` must point to `c` writable POINT structs.
+// Wine ref: dlls/win32u/mapping.c::NtGdiTransformPoints — applies world-to-device
+// matrix; in MM_TEXT (scale=1) logical coords equal device coords.
 pub unsafe extern "win64" fn lpto_dp(_hdc: usize, _lp_points: *mut Point, _c: i32) -> i32 {
     1
 }
@@ -2553,6 +2743,8 @@ pub unsafe extern "win64" fn lpto_dp(_hdc: usize, _lp_points: *mut Point, _c: i3
 ///
 /// # Safety
 /// `lp_di` (if non-null) must point to a valid DOCINFOW.
+// Wine ref: dlls/win32u/printdrv.c::NtGdiStartDoc — opens spool job; returns positive job
+// ID on success; SP_ERROR(-1) if printer DC is invalid or spooler is unavailable.
 pub unsafe extern "win64" fn start_doc_w(_hdc: usize, _lp_di: *const DocInfoW) -> i32 {
     1
 }
@@ -2580,6 +2772,8 @@ pub extern "win64" fn end_page(_hdc: usize) -> i32 {
 }
 
 /// AbortDoc: abort a print job. Returns TRUE. Weave: stub.
+// Wine ref: dlls/win32u/printdrv.c::NtGdiAbortDoc — cancels the current print job;
+// discards any buffered output; returns FALSE if no job is active.
 pub extern "win64" fn abort_doc(_hdc: usize) -> i32 {
     1
 }

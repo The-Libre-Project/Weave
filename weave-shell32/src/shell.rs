@@ -167,6 +167,8 @@ fn decode_wide_slice(s: &[u16]) -> String {
 // Wine ref: dlls/shell32/systray.c — Shell_NotifyIconW routes to the tray window via
 // SendNotifyMessage; balloon tip text (NIM_MODIFY + NIF_INFO + szInfo) is displayed
 // using the system balloon tip mechanism. Weave uses notify-send as a Linux equivalent.
+// Wine ref: dlls/shell32/systray.c — routes NIM_ADD/MODIFY/DELETE to tray window via SendNotifyMessage;
+// balloon (NIM_MODIFY+NIF_INFO+szInfo) displayed via system tooltip; see full ref above.
 /// Shell_NotifyIconW: add, modify, or delete a taskbar notification icon.
 ///
 /// Weave maps balloon tips (NIM_MODIFY + NIF_INFO) to Linux desktop
@@ -175,6 +177,7 @@ fn decode_wide_slice(s: &[u16]) -> String {
 ///
 /// # Safety
 /// `lp_data` must be null or point to a valid `NOTIFYICONDATAW` struct.
+// Wine ref: dlls/shell32/systray.c — NIM_ADD/MODIFY/DELETE via SendNotifyMessage to tray window.
 pub unsafe extern "win64" fn shell_notify_icon_w(
     dw_message: u32,
     lp_data: *const NotifyIconDataW,
@@ -202,6 +205,8 @@ pub unsafe extern "win64" fn shell_notify_icon_w(
 // converts ERROR_PATH_NOT_FOUND → ERROR_FILE_NOT_FOUND in the result; creates directory
 // if CSIDL_FLAG_CREATE (0x8000) is set in nFolder. Weave uses hardcoded paths — acceptable
 // since we're a synthetic environment with a fixed prefix layout.
+// Wine ref: dlls/shell32/shellpath.c:2862 — reads registry User Shell Folders/%USERPROFILE%;
+// creates dir if CSIDL_FLAG_CREATE set; see full behavioral ref in block comment above.
 /// SHGetFolderPathW: return the path of a special shell folder.
 ///
 /// Supports the most common CSIDL values. Returns `S_OK` (0) on success,
@@ -209,6 +214,7 @@ pub unsafe extern "win64" fn shell_notify_icon_w(
 ///
 /// # Safety
 /// `psz_path` must be a writable buffer of at least `MAX_PATH` (260) wide chars.
+// Wine ref: dlls/shell32/shellpath.c:2862 — registry User Shell Folders; creates dir if CSIDL_FLAG_CREATE.
 pub unsafe extern "win64" fn sh_get_folder_path_w(
     _h_wnd: usize,
     n_folder: i32,
@@ -232,10 +238,13 @@ pub unsafe extern "win64" fn sh_get_folder_path_w(
 // Wine ref: dlls/shell32/shellpath.c — SHGetSpecialFolderPathW wraps SHGetFolderPathW
 // with SHGFP_TYPE_CURRENT; uses SHGetFolderPathA/W depending on Unicode flag.
 // Returns TRUE/FALSE (not HRESULT) — same as Weave's impl.
+// Wine ref: dlls/shell32/shellpath.c — wraps SHGetFolderPathW(SHGFP_TYPE_CURRENT);
+// returns TRUE/FALSE (not HRESULT); see full ref in block comment above.
 /// SHGetSpecialFolderPathW: older variant of SHGetFolderPathW.
 ///
 /// # Safety
 /// `psz_path` must be writable for at least 260 wide chars.
+// Wine ref: dlls/shell32/shellpath.c — wraps SHGetFolderPathW(SHGFP_TYPE_CURRENT); returns TRUE/FALSE.
 pub unsafe extern "win64" fn sh_get_special_folder_path_w(
     _h_wnd: usize,
     psz_path: *mut u16,
@@ -260,6 +269,8 @@ pub unsafe extern "win64" fn sh_get_special_folder_path_w(
 // with CoTaskMemAlloc (caller must free with CoTaskMemFree). Returns E_POINTER if rfid/ret_path
 // null; HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND) for unknown GUIDs.
 // Weave allocates with libc::malloc — compatible since co_task_mem_free uses libc::free.
+// Wine ref: dlls/shell32/shellpath.c:3552 — zeroes *ret_path before work; converts GUID to CSIDL;
+// allocates with CoTaskMemAlloc (caller frees); E_POINTER if rfid/ret_path null; see full ref above.
 /// SHGetKnownFolderPath: retrieve the full path of a known folder by GUID.
 ///
 /// Allocates the result with `CoTaskMemAlloc` (emulated as a malloc'd buffer).
@@ -270,6 +281,7 @@ pub unsafe extern "win64" fn sh_get_special_folder_path_w(
 /// # Safety
 /// `rfid` must be a pointer to a 16-byte KNOWNFOLDERID GUID.
 /// `ppsz_path` must be a valid pointer to a `*mut u16` output slot.
+// Wine ref: dlls/shell32/shellpath.c:3552 — CoTaskMemAlloc result; E_POINTER if rfid/ppsz_path null.
 pub unsafe extern "win64" fn sh_get_known_folder_path(
     rfid: *const [u8; 16],
     _dw_flags: u32,
@@ -310,6 +322,8 @@ pub unsafe extern "win64" fn sh_get_known_folder_path(
 // returns a PIDL (Shell Item ID List) allocated by CoTaskMemAlloc, or NULL if user cancelled.
 // Callers always check return value before calling SHGetPathFromIDListW. Weave returns NULL
 // (cancel) which apps handle as "user cancelled" — functionally correct as a stub.
+// Wine ref: dlls/shell32/brsfolder.c — creates dialog via DialogBoxParamW; returns CoTaskMemAlloc'd
+// PIDL or NULL if cancelled; caller must ILFree() the PIDL; see full ref above.
 /// SHBrowseForFolderW: display a folder browser dialog.
 ///
 /// Returns NULL (no folder selected / not implemented). Callers must handle
@@ -317,10 +331,13 @@ pub unsafe extern "win64" fn sh_get_known_folder_path(
 ///
 /// # Safety
 /// `lp_bi` may be null or a pointer to a BROWSEINFOW struct. Ignored.
+// Wine ref: dlls/shell32/brsfolder.c — DialogBoxParamW; returns CoTaskMemAlloc'd PIDL or NULL on cancel.
 pub unsafe extern "win64" fn sh_browse_for_folder_w(_lp_bi: *const u8) -> *mut u8 {
     std::ptr::null_mut() // NULL PIDL — user "cancelled"
 }
 
+// Wine ref: dlls/shell32/pidl.c — calls SHGetDesktopFolder then BindToObject to walk PIDL;
+// returns FALSE if PIDL is NULL or not a filesystem item; zeros output buffer on failure.
 /// SHGetPathFromIDListW: convert an item ID list (PIDL) to a path.
 ///
 /// Returns FALSE. Since `sh_browse_for_folder_w` always returns NULL,
@@ -329,6 +346,7 @@ pub unsafe extern "win64" fn sh_browse_for_folder_w(_lp_bi: *const u8) -> *mut u
 ///
 /// # Safety
 /// `pidl` and `psz_path` may be null. If `psz_path` is non-null we zero it.
+// Wine ref: dlls/shell32/pidl.c — SHGetDesktopFolder + BindToObject; FALSE if PIDL null or non-filesystem.
 pub unsafe extern "win64" fn sh_get_path_from_id_list_w(
     _pidl: *const u8,
     psz_path: *mut u16,
@@ -340,11 +358,15 @@ pub unsafe extern "win64" fn sh_get_path_from_id_list_w(
     0 // FALSE
 }
 
+// Wine ref: dlls/shell32/shellreg.c / user32 — sets/clears WS_EX_ACCEPTFILES style on hwnd;
+// WM_DROPFILES is posted to the window when files are dropped onto it.
 /// DragAcceptFiles: register (or unregister) a window as a drop target.
 ///
 /// No-op — Weave has no drag-and-drop pipeline yet.
 pub extern "win64" fn drag_accept_files(_hwnd: usize, _f_accept: i32) {}
 
+// Wine ref: dlls/shell32/shelllink.c — reads HDROP (GlobalLock'd DROPFILES struct); iFile==0xFFFFFFFF
+// returns total count; otherwise copies filename[iFile] to lpsz; returns char count copied.
 /// DragQueryFileW: retrieve information about a dropped file.
 ///
 /// Returns 0 (no files in drop). Since `DragAcceptFiles` is a no-op,
@@ -352,6 +374,7 @@ pub extern "win64" fn drag_accept_files(_hwnd: usize, _f_accept: i32) {}
 ///
 /// # Safety
 /// `lpsz_file` is not dereferenced unless iFile == 0xFFFFFFFF.
+// Wine ref: dlls/shell32/shelllink.c — GlobalLock'd DROPFILES; 0xFFFFFFFF returns count; else copy path[i].
 pub unsafe extern "win64" fn drag_query_file_w(
     _h_drop: usize,
     _i_file: u32,
@@ -364,6 +387,8 @@ pub unsafe extern "win64" fn drag_query_file_w(
     0 // 0 files
 }
 
+// Wine ref: dlls/shell32/shelllink.c — calls GlobalFree on the HDROP handle; must be called
+// after WM_DROPFILES processing to release the shell-allocated DROPFILES buffer.
 /// DragFinish: release resources for a dropped-files handle.
 ///
 /// No-op.
@@ -372,6 +397,8 @@ pub extern "win64" fn drag_finish(_h_drop: usize) {}
 // Wine ref: dlls/ole32/ifs.c — CoTaskMemFree calls IMalloc::Free on the task allocator;
 // the task allocator wraps HeapFree(GetProcessHeap(), ...). NULL pointer is a no-op.
 // Weave uses libc::free since SHGetKnownFolderPath allocates with libc::malloc — correct.
+// Wine ref: dlls/ole32/ifs.c — calls IMalloc::Free on the task allocator (HeapFree(GetProcessHeap()));
+// NULL is a no-op; see block comment above for context.
 /// CoTaskMemFree: free memory allocated by COM task allocator.
 ///
 /// In Weave, CoTaskMemAlloc == libc malloc, so we just call libc::free.
@@ -385,6 +412,8 @@ pub extern "win64" fn co_task_mem_free(pv: *mut u8) {
 // then ShellExecuteExW; returns sei.hInstApp which is the module instance if launched or
 // an error code ≤ 32 on failure. Any return value > 32 means success.
 // Known gap: Weave always returns 33 (success) without actually launching anything.
+// Wine ref: dlls/shell32/shlexec.c:2064 — builds SHELLEXECUTEINFOW, calls ShellExecuteExW;
+// return > 32 means success; see block comment above for hInstApp encoding detail.
 /// ShellExecuteW: perform an operation on a file (open, run, etc.).
 ///
 /// Phase 2 stub: logs the operation and returns a fake HINSTANCE > 32
@@ -392,6 +421,7 @@ pub extern "win64" fn co_task_mem_free(pv: *mut u8) {
 ///
 /// # Safety
 /// All pointer arguments must be null or valid null-terminated UTF-16 strings.
+// Wine ref: dlls/shell32/shlexec.c:2064 — builds SHELLEXECUTEINFOW + calls ShellExecuteExW; >32 = success.
 pub unsafe extern "win64" fn shell_execute_w(
     _h_wnd: usize,
     lp_operation: *const u16,
@@ -406,10 +436,13 @@ pub unsafe extern "win64" fn shell_execute_w(
     33 // SE_ERR_SUCCESS (any value > 32 means success)
 }
 
+// Wine ref: dlls/shell32/shlexec.c — converts ANSI args to Unicode via MultiByteToWideChar then
+// calls ShellExecuteExW; returns hInstApp encoded as uintptr_t (> 32 = success, ≤ 32 = error code).
 /// ShellExecuteA: ANSI variant of ShellExecuteW.
 ///
 /// # Safety
 /// All pointer arguments must be null or valid null-terminated ANSI strings.
+// Wine ref: dlls/shell32/shlexec.c — MultiByteToWideChar then ShellExecuteExW; >32 = success.
 pub unsafe extern "win64" fn shell_execute_a(
     _h_wnd: usize,
     _lp_operation: *const u8,
@@ -427,6 +460,8 @@ pub unsafe extern "win64" fn shell_execute_a(
 // different quoting rules (only double-quote terminates, no backslash escape).
 // Known gap: Weave's tokeniser doesn't handle backslash escapes; empty cmdline returns NULL
 // instead of [executable_path].
+// Wine ref: dlls/shcore/main.c:292 — if numargs null sets ERROR_INVALID_PARAMETER; empty cmdline
+// returns [GetModuleFileName()]; handles backslash escapes inside quotes; see full ref above.
 /// CommandLineToArgvW: parse a command-line string into an argv array.
 ///
 /// Returns a pointer to an array of wide string pointers allocated with a
@@ -436,6 +471,7 @@ pub unsafe extern "win64" fn shell_execute_a(
 /// # Safety
 /// `lp_cmd_line` must be a null-terminated UTF-16 string.
 /// `p_num_args` must be a valid writable pointer to an `i32`.
+// Wine ref: dlls/shcore/main.c:292 — empty cmdline → [GetModuleFileName()]; backslash escapes in quotes.
 pub unsafe extern "win64" fn command_line_to_argv_w(
     lp_cmd_line: *const u16,
     p_num_args: *mut i32,
@@ -532,12 +568,15 @@ fn tokenise_cmd_line(s: &str) -> Vec<String> {
 
 // ── Shell icon / info stubs ───────────────────────────────────────────────────
 
+// Wine ref: dlls/user32/exticon.c:249 — ICO_ExtractIconExW loads icon from PE resource; nIconIndex
+// < 0 means icon ID; 0xFFFFFFFF returns total count without extracting; fills phicon_large/small.
 /// ExtractIconExW — extract icon handles from a file (Wide).
 ///
 /// Returns 0 (no icons extracted) — stub.
 ///
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
+// Wine ref: dlls/user32/exticon.c:249 — ICO_ExtractIconExW; nIconIndex<0 means icon ID; 0xFFFFFFFF→count.
 pub unsafe extern "win64" fn extract_icon_ex_w(
     _lp_sz_file: *const u16,
     _n_icon_index: i32,
@@ -548,22 +587,28 @@ pub unsafe extern "win64" fn extract_icon_ex_w(
     0
 }
 
+// Wine ref: dlls/shell32/shfldr_desktop.c — returns singleton IShellFolder for the desktop
+// namespace; creates on first call; AddRef'd before returning; E_POINTER if ppshf is NULL.
 /// SHGetDesktopFolder — return the shell's desktop IShellFolder.
 ///
 /// Returns E_NOTIMPL — stub.
 ///
 /// # Safety
 /// `ppshf` is accepted but not dereferenced.
+// Wine ref: dlls/shell32/shfldr_desktop.c — singleton IShellFolder; created on first call; AddRef'd.
 pub unsafe extern "win64" fn sh_get_desktop_folder(_ppshf: *mut *mut u8) -> i32 {
     0x8000_4001u32 as i32 // E_NOTIMPL
 }
 
+// Wine ref: dlls/shell32/shellpath.c — wraps SHGetFolderLocation(nFolder, 0); allocates PIDL
+// with CoTaskMemAlloc; caller must ILFree(); E_INVALIDARG if ppidl is NULL.
 /// SHGetSpecialFolderLocation — return the PIDL for a special folder.
 ///
 /// Returns E_NOTIMPL — stub.
 ///
 /// # Safety
 /// `ppidl` is accepted but not dereferenced.
+// Wine ref: dlls/shell32/shellpath.c — SHGetFolderLocation(nFolder, 0); CoTaskMemAlloc PIDL; caller ILFree.
 pub unsafe extern "win64" fn sh_get_special_folder_location(
     _hwnd_owner: usize,
     _n_folder: i32,
@@ -572,12 +617,15 @@ pub unsafe extern "win64" fn sh_get_special_folder_location(
     0x8000_4001u32 as i32 // E_NOTIMPL
 }
 
+// Wine ref: dlls/shell32/shell32_main.c — queries icon index, display name, type name per uFlags;
+// SHGFI_USEFILEATTRIBUTES skips disk access; returns HIMAGELIST handle or 0 on failure.
 /// SHGetFileInfoW — retrieve information about an object in the shell namespace (Wide).
 ///
 /// Returns 0 — stub.
 ///
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
+// Wine ref: dlls/shell32/shell32_main.c — icon index/display name/type by uFlags; SHGFI_USEFILEATTRIBUTES skips disk.
 pub unsafe extern "win64" fn sh_get_file_info_w(
     _psz_path: *const u16,
     _dw_file_attributes: u32,
@@ -588,22 +636,28 @@ pub unsafe extern "win64" fn sh_get_file_info_w(
     0
 }
 
+// Wine ref: dlls/shell32/shlfileop.c — parses SHFILEOPSTRUCTW; dispatches to copy/delete/rename/move
+// helpers; FOF_* flags control confirmation dialogs; returns 0 on success, non-zero on cancel/error.
 /// SHFileOperationW — perform a file operation (copy/move/delete/rename) (Wide).
 ///
 /// Returns 1 (operation aborted) — stub.
 ///
 /// # Safety
 /// `lpfo` is accepted but not dereferenced.
+// Wine ref: dlls/shell32/shlfileop.c — parses SHFILEOPSTRUCTW; copy/delete/rename/move; 0=success.
 pub unsafe extern "win64" fn sh_file_operation_w(_lpfo: *mut u8) -> i32 {
     1 // DE_OPCANCELLED — operation aborted
 }
 
+// Wine ref: dlls/shell32/changenotify.c — broadcasts SHCNE_* event to SHChangeNotifyRegister
+// listeners; SHCNF_FLUSH waits for all recipients to process before returning.
 /// SHChangeNotify — notify the shell of a change to the namespace.
 ///
 /// No-op stub.
 ///
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
+// Wine ref: dlls/shell32/changenotify.c — SHCNE_* event to registered listeners; SHCNF_FLUSH waits.
 pub unsafe extern "win64" fn sh_change_notify(
     _w_event_id: i32,
     _u_flags: u32,
@@ -612,12 +666,15 @@ pub unsafe extern "win64" fn sh_change_notify(
 ) {
 }
 
+// Wine ref: dlls/shell32/shlexec.c:2053 — calls SHELL_execute(sei, SHELL_ExecuteW); stores result
+// in sei->hInstApp; returns TRUE if hInstApp > 32 (success), FALSE otherwise.
 /// ShellExecuteExW — execute a shell operation (Wide).
 ///
 /// Returns FALSE — stub.
 ///
 /// # Safety
 /// `lp_exec_info` is accepted but not dereferenced.
+// Wine ref: dlls/shell32/shlexec.c:2053 — SHELL_execute(sei, SHELL_ExecuteW); TRUE if hInstApp > 32.
 pub unsafe extern "win64" fn shell_execute_ex_w(_lp_exec_info: *mut u8) -> i32 {
     0 // FALSE
 }

@@ -81,6 +81,8 @@ static FAKE_STDERR: FakeFile = FakeFile {
 ///
 /// # Safety
 /// Delegates to libc malloc.
+// Wine ref: dlls/msvcrt/heap.c:430 — retries via _callnewh(size) if MSVCRT_new_mode set; uses
+// msvcrt_heap_alloc(0, size) backed by NT private heap, not libc malloc.
 pub unsafe extern "win64" fn crt_malloc(size: usize) -> *mut u8 {
     unsafe { libc::malloc(size) as *mut u8 }
 }
@@ -89,6 +91,8 @@ pub unsafe extern "win64" fn crt_malloc(size: usize) -> *mut u8 {
 ///
 /// # Safety
 /// Delegates to libc calloc.
+// Wine ref: dlls/msvcrt/heap.c:386 — checks count*size overflow before alloc; sets errno=ENOMEM
+// on overflow; calls msvcrt_heap_alloc(HEAP_ZERO_MEMORY, bytes).
 pub unsafe extern "win64" fn crt_calloc(count: usize, size: usize) -> *mut u8 {
     unsafe { libc::calloc(count, size) as *mut u8 }
 }
@@ -97,11 +101,14 @@ pub unsafe extern "win64" fn crt_calloc(count: usize, size: usize) -> *mut u8 {
 ///
 /// # Safety
 /// `ptr` must have been returned by malloc/calloc/realloc, or be null.
+// Wine ref: dlls/msvcrt/heap.c:412 — delegates to msvcrt_heap_free(ptr); null-safe.
 pub unsafe extern "win64" fn crt_free(ptr: *mut u8) {
     unsafe { libc::free(ptr as *mut libc::c_void) }
 }
 
 /// _set_new_mode: set the C++ new-handler behaviour mode. No-op.
+// Wine ref: dlls/msvcrt/heap.c:227 — validates mode 0 or 1 (CHECK_PMT returns -1 on invalid);
+// uses InterlockedExchange on MSVCRT_new_mode; returns previous value.
 pub extern "win64" fn set_new_mode(_mode: i32) -> i32 {
     0
 }
@@ -112,6 +119,8 @@ pub extern "win64" fn set_new_mode(_mode: i32) -> i32 {
 ///
 /// # Safety
 /// `dst` and `src` must be valid for `n` bytes and must not overlap.
+// Wine ref: dlls/msvcrt/string.c — memcpy is a compiler intrinsic in Wine's msvcrt; no distinct
+// Wine impl; delegates to platform memcpy. Weave delegates to libc memcpy identically.
 pub unsafe extern "win64" fn crt_memcpy(dst: *mut u8, src: *const u8, n: usize) -> *mut u8 {
     unsafe { libc::memcpy(dst as *mut libc::c_void, src as *const libc::c_void, n) as *mut u8 }
 }
@@ -125,6 +134,8 @@ pub unsafe extern "win64" fn crt_memcpy(dst: *mut u8, src: *const u8, n: usize) 
 ///
 /// # Safety
 /// Each non-null pointer in the table must be a valid `extern "win64" fn()`.
+// Wine ref: libs/winecrt0/crt_dllmain.c:36 — iterates table[pfbegin..pfend); calls each non-null
+// slot; silently skips null entries; no return value.
 pub unsafe extern "win64" fn initterm(pfbegin: *mut usize, pfend: *mut usize) {
     let mut ptr = pfbegin;
     while ptr < pfend {
@@ -150,6 +161,8 @@ pub unsafe extern "win64" fn initterm(pfbegin: *mut usize, pfend: *mut usize) {
 ///
 /// # Safety
 /// Each non-null pointer in the table must be a valid `extern "win64" fn() -> i32`.
+// Wine ref: libs/winecrt0/crt_dllmain.c:42 — same as _initterm but stops on first non-zero return;
+// returns that error code; null slots skipped.
 pub unsafe extern "win64" fn initterm_e(pfbegin: *mut usize, pfend: *mut usize) -> i32 {
     let mut ptr = pfbegin;
     while ptr < pfend {
@@ -175,6 +188,7 @@ pub unsafe extern "win64" fn initterm_e(pfbegin: *mut usize, pfend: *mut usize) 
 }
 
 /// __p___argc: return a pointer to the process argc.
+// Wine ref: dlls/msvcrt/data.c:154 — returns &MSVCRT___argc (pointer to the global argc int).
 pub extern "win64" fn p___argc() -> *mut i32 {
     ARGC.as_ptr()
 }
@@ -183,6 +197,7 @@ pub extern "win64" fn p___argc() -> *mut i32 {
 ///
 /// # Safety
 /// Initialises static argv state on first call (single-threaded, safe in Phase 1).
+// Wine ref: dlls/msvcrt/data.c:256 — returns &MSVCRT___argv; a char*** pointing to the argv array.
 pub unsafe extern "win64" fn p___argv() -> *mut *mut u8 {
     ARGV_ONCE.call_once(|| unsafe {
         ARGV_ARRAY[0] = ARGV0_STR.as_ptr() as usize;
@@ -194,47 +209,66 @@ pub unsafe extern "win64" fn p___argv() -> *mut *mut u8 {
 }
 
 /// _configure_narrow_argv: configure argv mode. Returns 0 (success).
+// Wine ref: not in Wine msvcrt — UCRT-only (ucrtbase). On Windows, selects whether argv is
+// inherited or reparsed from the command line. Weave stubs as 0 (use-inherited default).
 pub extern "win64" fn configure_narrow_argv(_mode: i32) -> i32 {
     0
 }
 
 /// _initialize_narrow_environment: init the process environment. Returns 0.
+// Wine ref: not in Wine msvcrt — UCRT-only (ucrtbase). On Windows, builds environ[] from the
+// process environment block. Weave stubs as 0; host env not exposed to guest.
 pub extern "win64" fn initialize_narrow_environment() -> i32 {
     0
 }
 
 /// _set_app_type: record whether this is a console or GUI app. No-op.
+// Wine ref: dlls/msvcrt/data.c:587 — stores app_type in MSVCRT_app_type; 2=GUI, else console;
+// controls whether abort/signal raise a dialog box.
 pub extern "win64" fn set_app_type(_at: i32) {}
 
 /// _set_invalid_parameter_handler: install a handler. Returns null.
+// Wine ref: dlls/msvcrt/errno.c:514 — stores handler in invalid_parameter_handler global; returns
+// the PREVIOUS handler value (not null — our stub returns 0 which is only safe if no prior handler).
 pub extern "win64" fn set_invalid_parameter_handler(_handler: usize) -> usize {
     0
 }
 
 /// _crt_atexit: register an atexit callback. Returns 0 (not called).
+// Wine ref: dlls/msvcrt/exit.c:425 — delegates to _onexit((onexit_t)func); returns 0 on success,
+// -1 on failure (onexit table full).
 pub extern "win64" fn crt_atexit(_fn_ptr: usize) -> i32 {
     0
 }
 
 /// _cexit: clean exit without process termination. No-op.
+// Wine ref: dlls/msvcrt/exit.c:341 — calls call_atexit() under LOCK_EXIT; runs atexit chain but
+// does NOT call ExitProcess; returns to caller.
 pub extern "win64" fn cexit() {}
 
 /// _exit: exit without atexit handlers.
+// Wine ref: dlls/msvcrt/exit.c:187 — calls ExitProcess(exitcode) directly; skips all atexit/cleanup.
 pub extern "win64" fn crt_exit_no_cleanup(status: i32) -> ! {
     unsafe { libc::exit(status) }
 }
 
 /// exit: normal process exit.
+// Wine ref: dlls/msvcrt/exit.c:369 — checks for CorExitProcess in mscoree.dll (for .NET apps);
+// then runs atexit chain via _cexit before calling ExitProcess.
 pub extern "win64" fn crt_exit(status: i32) -> ! {
     unsafe { libc::exit(status) }
 }
 
 /// abort: abnormal process termination.
+// Wine ref: dlls/msvcrt/exit.c:252 — conditionally shows abort dialog (if _WRITE_ABORT_MSG set in
+// abort_behavior); raises SIGABRT; terminates via _aexit_rtn(3).
 pub extern "win64" fn crt_abort() -> ! {
     unsafe { libc::abort() }
 }
 
 /// signal: register a signal handler. Returns SIG_DFL (0 = previous handler).
+// Wine ref: dlls/msvcrt/except.c:655 — validates signal number; returns SIG_ERR on invalid sig;
+// stores handler in per-signal table; returns previous handler.
 pub extern "win64" fn crt_signal(_sig: i32, _handler: usize) -> usize {
     0
 }
@@ -242,6 +276,8 @@ pub extern "win64" fn crt_signal(_sig: i32, _handler: usize) -> usize {
 // ── api-ms-win-crt-locale ─────────────────────────────────────────────────────
 
 /// _configthreadlocale: configure per-thread locale. Returns -1 (not set).
+// Wine ref: dlls/msvcrt/locale.c:2112 — reads/sets per-thread locale flag in TLS
+// (thread_data_t.locale_flags); returns _ENABLE_PER_THREAD_LOCALE or _DISABLE_PER_THREAD_LOCALE.
 pub extern "win64" fn configthreadlocale(_per_thread: i32) -> i32 {
     -1
 }
@@ -249,6 +285,8 @@ pub extern "win64" fn configthreadlocale(_per_thread: i32) -> i32 {
 // ── api-ms-win-crt-math ───────────────────────────────────────────────────────
 
 /// __setusermatherr: install a math-error handler. Returns null.
+// Wine ref: dlls/msvcrt/math.c:156 — stores func in MSVCRT_default_matherr_func global; void
+// return; handler is called on math domain/overflow errors.
 pub extern "win64" fn setusermatherr(_pfn_new: usize) -> usize {
     0
 }
@@ -256,11 +294,14 @@ pub extern "win64" fn setusermatherr(_pfn_new: usize) -> usize {
 // ── api-ms-win-crt-environment ────────────────────────────────────────────────
 
 /// __p__environ: return a pointer to the environ array pointer (empty env).
+// Wine ref: dlls/msvcrt/data.c:266 — returns &MSVCRT__environ; triple-pointer: caller deref to
+// get char** pointing to null-terminated "KEY=VALUE\0" array.
 pub extern "win64" fn p__environ() -> *mut *mut u8 {
     ENVIRON_PTR.as_ptr()
 }
 
 /// __p__acmdln: return a pointer to the ANSI command-line string pointer (`char **`).
+// Wine ref: dlls/msvcrt/data.c:246 — returns &MSVCRT__acmdln; char** pointing to ANSI cmd line.
 pub extern "win64" fn p__acmdln() -> *mut *mut u8 {
     // Initialise once — store the address of the ACMDLN slice.
     let _ = ACMDLN_PTR.compare_exchange(
@@ -273,6 +314,7 @@ pub extern "win64" fn p__acmdln() -> *mut *mut u8 {
 }
 
 /// __p__wcmdln: return a pointer to the wide command-line string pointer (`wchar_t **`).
+// Wine ref: dlls/msvcrt/data.c:248 — returns &MSVCRT__wcmdln; wchar_t** pointing to wide cmd line.
 pub extern "win64" fn p__wcmdln() -> *mut *mut u16 {
     let _ = WCMDLN_PTR.compare_exchange(
         std::ptr::null_mut(),
@@ -286,6 +328,8 @@ pub extern "win64" fn p__wcmdln() -> *mut *mut u16 {
 // ── api-ms-win-crt-stdio ──────────────────────────────────────────────────────
 
 /// __acrt_iob_func: return a pointer to a stdio FILE for index 0/1/2.
+// Wine ref: dlls/msvcrt/file.c:981 — returns iob_get_file(idx); provides FILE* for
+// stdin(0)/stdout(1)/stderr(2); UCRT-only (_MSVCR_VER>=140).
 pub extern "win64" fn acrt_iob_func(index: u32) -> *const u8 {
     let file: *const FakeFile = match index {
         0 => &FAKE_STDIN,
@@ -297,16 +341,22 @@ pub extern "win64" fn acrt_iob_func(index: u32) -> *const u8 {
 }
 
 /// __p__commode: return a pointer to the _commode global.
+// Wine ref: dlls/msvcrt/data.c:159 — returns &MSVCRT__commode; controls commit-on-write for
+// file I/O (non-zero = flush to disk on every write).
 pub extern "win64" fn p__commode() -> *mut i32 {
     COMMODE.as_ptr()
 }
 
 /// __p__fmode: return a pointer to the _fmode global.
+// Wine ref: dlls/msvcrt/data.c:196 — returns &MSVCRT__fmode; default file-open mode flag
+// (0=text, _O_BINARY=binary); applied when fopen doesn't specify mode explicitly.
 pub extern "win64" fn p__fmode() -> *mut i32 {
     FMODE.as_ptr()
 }
 
 /// __stdio_common_vfprintf: core vfprintf. Phase 1 stub — returns -1.
+// Wine ref: dlls/msvcrt/file.c:5377 — options is a bitmask (UCRTBASE_PRINTF_MASK); unsupported
+// bits logged as FIXME; delegates to vfprintf_helper with masked options.
 pub extern "win64" fn stdio_common_vfprintf(
     _options: u64,
     _stream: usize,
@@ -318,11 +368,15 @@ pub extern "win64" fn stdio_common_vfprintf(
 }
 
 /// fflush: flush a stdio stream. No-op — Weave writes directly via libc.
+// Wine ref: dlls/msvcrt/file.c:1182 — NULL arg flushes all write buffers; returns 0 on success,
+// EOF on error; acquires per-stream file lock.
 pub extern "win64" fn crt_fflush(_stream: usize) -> i32 {
     0
 }
 
 /// setvbuf: set buffering mode for a stdio stream. No-op.
+// Wine ref: dlls/msvcrt/file.c:5002 — validates mode (IONBF/IOFBF/IOLBF) and size (>=2 <=INT_MAX
+// unless IONBF); acquires file lock; CHECK_PMT returns -1 on invalid args.
 pub extern "win64" fn crt_setvbuf(_stream: usize, _buf: *mut u8, _mode: i32, _size: usize) -> i32 {
     0
 }
@@ -333,6 +387,7 @@ pub extern "win64" fn crt_setvbuf(_stream: usize, _buf: *mut u8, _mode: i32, _si
 ///
 /// # Safety
 /// `s` must point to a valid null-terminated string.
+// Wine ref: dlls/msvcrt/string.c:1565 — pointer walk to null byte; returns s-str; no length cap.
 pub unsafe extern "win64" fn crt_strlen(s: *const u8) -> usize {
     unsafe { libc::strlen(s as *const libc::c_char) }
 }
@@ -341,6 +396,8 @@ pub unsafe extern "win64" fn crt_strlen(s: *const u8) -> usize {
 ///
 /// # Safety
 /// Both `s1` and `s2` must be valid for at least `n` bytes.
+// Wine ref: dlls/msvcrt/string.c:3294 — returns 0 for len=0; on x86-64/UCRT normalizes result to
+// +1/0/-1 (not raw byte difference, unlike older 32-bit msvcrt).
 pub unsafe extern "win64" fn crt_strncmp(s1: *const u8, s2: *const u8, n: usize) -> i32 {
     unsafe { libc::strncmp(s1 as *const libc::c_char, s2 as *const libc::c_char, n) }
 }
@@ -349,6 +406,8 @@ pub unsafe extern "win64" fn crt_strncmp(s1: *const u8, s2: *const u8, n: usize)
 ///
 /// # Safety
 /// `s` must point to a valid null-terminated array of u16.
+// Wine ref: dlls/msvcrt/wcs.c:2968 — pointer walk to null wchar_t; no length cap in Wine (Weave
+// adds 1M cap as a defensive measure against unterminated guest strings).
 pub unsafe extern "win64" fn crt_wcslen(s: *const u16) -> usize {
     if s.is_null() {
         return 0;
@@ -368,6 +427,8 @@ pub unsafe extern "win64" fn crt_wcslen(s: *const u16) -> usize {
 /// # Safety
 /// `dst` must be writable for at least `wcslen(src)+1` u16 words.
 /// `src` must be a valid null-terminated UTF-16 string.
+// Wine ref: dlls/msvcrt/wcs.c:2453 — loop `while ((*p++ = *src++))` including null; returns dst;
+// no null-pointer check in Wine (Weave adds one defensively).
 pub unsafe extern "win64" fn crt_wcscpy(dst: *mut u16, src: *const u16) -> *mut u16 {
     if dst.is_null() || src.is_null() {
         return dst;
@@ -388,6 +449,8 @@ pub unsafe extern "win64" fn crt_wcscpy(dst: *mut u16, src: *const u16) -> *mut 
 ///
 /// # Safety
 /// `dst` must be writable for `n` u16 words. `src` must be valid.
+// Wine ref: dlls/msvcrt/wcs.c:2463 — copies up to n wchar_t; pads remaining dst slots with zeros
+// if src ends early; returns dst; no null-pointer guard in Wine.
 pub unsafe extern "win64" fn crt_wcsncpy(dst: *mut u16, src: *const u16, n: usize) -> *mut u16 {
     if dst.is_null() || src.is_null() || n == 0 {
         return dst;
@@ -410,6 +473,8 @@ pub unsafe extern "win64" fn crt_wcsncpy(dst: *mut u16, src: *const u16, n: usiz
 ///
 /// # Safety
 /// Both `s1` and `s2` must be valid null-terminated UTF-16 strings.
+// Wine ref: dlls/msvcrt/wcs.c:1966 — advances while chars equal and non-null; returns first
+// differing wchar_t difference; no null-pointer guard in Wine.
 pub unsafe extern "win64" fn crt_wcscmp(s1: *const u16, s2: *const u16) -> i32 {
     if s1.is_null() || s2.is_null() {
         return 0;

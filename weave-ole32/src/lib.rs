@@ -51,11 +51,15 @@ thread_local! {
 
 // ── CoInitializeEx / CoInitialize / CoUninitialize ───────────────────────────
 
+// Wine ref: dlls/combase/apartment.c — creates STA (COINIT_APARTMENTTHREADED) or joins MTA
+// (COINIT_MULTITHREADED); returns RPC_E_CHANGED_MODE (0x80010106) if apartment model conflicts
+// with existing apartment on this thread; S_OK first call, S_FALSE if already initialized.
 /// CoInitializeEx: initialise the COM library on the calling thread.
 ///
 /// Returns `S_OK` on first call, `S_FALSE` if COM was already initialised on
 /// this thread, or `RPC_E_CHANGED_MODE` (0x80010106) if the apartment model
 /// conflicts with a previous call.
+// Wine ref: dlls/combase/apartment.c — STA/MTA per-thread apartment; RPC_E_CHANGED_MODE on model conflict.
 pub extern "win64" fn co_initialize_ex(_pv_reserved: usize, dw_co_init: u32) -> u32 {
     COM_INIT_COUNT.with(|c| {
         let count = c.get();
@@ -79,15 +83,19 @@ pub extern "win64" fn co_initialize_ex(_pv_reserved: usize, dw_co_init: u32) -> 
     })
 }
 
+// Wine ref: dlls/combase/combase.c — thin wrapper: calls CoInitializeEx(NULL, COINIT_APARTMENTTHREADED).
 /// CoInitialize: legacy variant (always STA).
 pub extern "win64" fn co_initialize(pv_reserved: usize) -> u32 {
     co_initialize_ex(pv_reserved, COINIT_APARTMENTTHREADED)
 }
 
+// Wine ref: dlls/combase/combase.c — decrements per-thread apartment refcount; at zero
+// uninitializes apartment and frees thread-local COM state (TLS slot released).
 /// CoUninitialize: decrement the COM initialisation count for this thread.
 ///
 /// When the count reaches zero the thread's apartment is torn down (no-op in
 /// Phase 2).
+// Wine ref: dlls/combase/combase.c — per-thread refcount; at zero: uninit apartment + free TLS.
 pub extern "win64" fn co_uninitialize() {
     COM_INIT_COUNT.with(|c| {
         let count = c.get();
@@ -109,6 +117,8 @@ unsafe fn read_guid(p: *const u8) -> Option<[u8; 16]> {
     Some(buf)
 }
 
+// Wine ref: dlls/combase/combase.c:1725 — wraps CoCreateInstanceEx with single MULTI_QI entry;
+// returns E_POINTER if obj is NULL before any registry lookup; sets *obj = multi_qi.pItf.
 /// CoCreateInstance: create a single uninitialized object of a given class.
 ///
 /// Phase 2: returns `REGDB_E_CLASSNOTREG` for all CLSIDs. The primary purpose
@@ -118,6 +128,7 @@ unsafe fn read_guid(p: *const u8) -> Option<[u8; 16]> {
 /// # Safety
 /// `rclsid` and `riid` must be valid pointers to 16-byte GUID structs.
 /// `ppv` must be a valid writable pointer to a `*mut c_void` output slot.
+// Wine ref: dlls/combase/combase.c:1725 — wraps CoCreateInstanceEx; E_POINTER if obj null.
 pub unsafe extern "win64" fn co_create_instance(
     rclsid: *const u8,
     _p_unk_outer: usize,
@@ -143,10 +154,13 @@ pub unsafe extern "win64" fn co_create_instance(
     REGDB_E_CLASSNOTREG
 }
 
+// Wine ref: dlls/combase/combase.c:1922 — calls CoGetClassObject then IClassFactory::CreateInstance
+// then QI for each MULTI_QI entry; sets hr per entry; aggregate hr = first failure.
 /// CoCreateInstanceEx: extended version of CoCreateInstance (stub).
 ///
 /// # Safety
 /// `rclsid` must be a valid pointer to a 16-byte GUID.
+// Wine ref: dlls/combase/combase.c:1922 — CoGetClassObject + IClassFactory::CreateInstance + QI per MULTI_QI.
 pub unsafe extern "win64" fn co_create_instance_ex(
     rclsid: *const u8,
     _p_unk_outer: usize,
@@ -168,6 +182,8 @@ pub unsafe extern "win64" fn co_create_instance_ex(
 
 // ── CoTaskMemAlloc / CoTaskMemFree / CoTaskMemRealloc ─────────────────────────
 
+// Wine ref: dlls/ole32/ifs.c — calls IMalloc::Alloc on process task allocator (wraps
+// HeapAlloc(GetProcessHeap())); returns NULL on failure; cb==0 behavior is implementation-defined.
 /// CoTaskMemAlloc: allocate a block of task memory.
 ///
 /// Equivalent to `malloc`; returns NULL on failure.
@@ -178,6 +194,7 @@ pub extern "win64" fn co_task_mem_alloc(cb: usize) -> usize {
     unsafe { libc::malloc(cb) as usize }
 }
 
+// Wine ref: dlls/ole32/ifs.c — calls IMalloc::Free (wraps HeapFree(GetProcessHeap())); NULL is no-op.
 /// CoTaskMemFree: free task memory allocated by CoTaskMemAlloc.
 pub extern "win64" fn co_task_mem_free(pv: usize) {
     if pv != 0 {
@@ -185,6 +202,8 @@ pub extern "win64" fn co_task_mem_free(pv: usize) {
     }
 }
 
+// Wine ref: dlls/ole32/ifs.c — calls IMalloc::Realloc; if cb==0 frees and returns NULL;
+// if pv==NULL equivalent to CoTaskMemAlloc(cb); returns NULL on allocation failure.
 /// CoTaskMemRealloc: resize a task memory block.
 pub extern "win64" fn co_task_mem_realloc(pv: usize, cb: usize) -> usize {
     if cb == 0 {
@@ -196,6 +215,8 @@ pub extern "win64" fn co_task_mem_realloc(pv: usize, cb: usize) -> usize {
 
 // ── GUID utilities ────────────────────────────────────────────────────────────
 
+// Wine ref: dlls/ole32/compobj.c — writes {XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX}\0 uppercase;
+// returns 0 if cch_max < 39 or pointers null; 39 (characters including NUL) on success.
 /// StringFromGUID2: convert a GUID to its string representation.
 ///
 /// Writes `{XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX}\0` (39 chars including NUL)
@@ -205,6 +226,7 @@ pub extern "win64" fn co_task_mem_realloc(pv: usize, cb: usize) -> usize {
 /// # Safety
 /// `rclsid` must be a valid pointer to a 16-byte GUID.
 /// `lpsz` must be a writable buffer of at least `cch_max` UTF-16 code units.
+// Wine ref: dlls/ole32/compobj.c — uppercase hex; returns 0 if cch_max < 39 or null ptr.
 pub unsafe extern "win64" fn string_from_guid2(
     rclsid: *const u8,
     lpsz: *mut u16,
@@ -263,11 +285,14 @@ fn parse_guid_str(s: &str) -> Option<[u8; 16]> {
     Some(buf)
 }
 
+// Wine ref: dlls/combase/combase.c — calls guid_from_string() helper; accepts with or without
+// braces; returns CO_E_CLASSSTRING (0x80040205) on malformed input, not E_INVALIDARG.
 /// CLSIDFromString: convert a CLSID string to a CLSID.
 ///
 /// # Safety
 /// `lpsz` must be a null-terminated UTF-16 string.
 /// `pclsid` must be a writable 16-byte buffer.
+// Wine ref: dlls/combase/combase.c — guid_from_string(); CO_E_CLASSSTRING on bad format.
 pub unsafe extern "win64" fn clsid_from_string(lpsz: *const u16, pclsid: *mut u8) -> u32 {
     if lpsz.is_null() || pclsid.is_null() {
         return E_INVALIDARG;
@@ -289,16 +314,21 @@ pub unsafe extern "win64" fn clsid_from_string(lpsz: *const u16, pclsid: *mut u8
     }
 }
 
+// Wine ref: dlls/combase/combase.c — identical implementation to CLSIDFromString; IID and CLSID
+// share the GUID wire format; both call guid_from_string() internally.
 /// IIDFromString: same as CLSIDFromString (IID and CLSID are both GUIDs).
 ///
 /// # Safety
 /// Same as `CLSIDFromString`.
+// Wine ref: dlls/combase/combase.c — identical to CLSIDFromString; IID == GUID wire format.
 pub unsafe extern "win64" fn iid_from_string(lpsz: *const u16, piid: *mut u8) -> u32 {
     unsafe { clsid_from_string(lpsz, piid) }
 }
 
 // ── OLE initialisation ────────────────────────────────────────────────────────
 
+// Wine ref: dlls/ole32/ole2.c:162 — calls CoInitializeEx(COINIT_APARTMENTTHREADED); on first
+// process init calls OLEDD_Initialize() (D&D tracker) and OLEMenu_Initialize(); S_FALSE if re-init.
 /// OleInitialize: initialise OLE on the calling thread (STA).
 pub extern "win64" fn ole_initialize(pv_reserved: usize) -> u32 {
     let result = co_initialize(pv_reserved);
@@ -306,6 +336,8 @@ pub extern "win64" fn ole_initialize(pv_reserved: usize) -> u32 {
     result
 }
 
+// Wine ref: dlls/ole32/ole2.c — decrements OLE init count; at zero shuts down D&D tracker and
+// OLE menus (if last process reference); then calls CoUninitialize to release the apartment.
 /// OleUninitialize: uninitialise OLE on the calling thread.
 pub extern "win64" fn ole_uninitialize() {
     eprintln!("weave/ole32: OleUninitialize");
@@ -314,6 +346,8 @@ pub extern "win64" fn ole_uninitialize() {
 
 // ── Security / proxy stubs ────────────────────────────────────────────────────
 
+// Wine ref: dlls/combase/marshal.c — QIs proxy for IClientSecurity; calls SetBlanket with
+// authn/authz/auth-level/imp-level; returns E_NOINTERFACE if pProxy is not a real proxy.
 /// CoSetProxyBlanket: set authentication information for a proxy (stub).
 ///
 /// Returns `S_OK` — security blankets are ignored in Phase 2.
@@ -330,6 +364,8 @@ pub extern "win64" fn co_set_proxy_blanket(
     S_OK
 }
 
+// Wine ref: dlls/combase/combase.c — sets process-wide security blanket; valid only before first
+// apartment is created; returns RPC_E_TOO_LATE if any apartment already exists.
 /// CoInitializeSecurity: set security for the process (stub).
 ///
 /// Returns `S_OK` — security is not enforced in Phase 2.
@@ -347,12 +383,15 @@ pub extern "win64" fn co_initialize_security(
     S_OK
 }
 
+// Wine ref: dlls/combase/combase.c:1965 — delegates to com_get_class_object(); searches activation
+// context first, then HKCR\CLSID\{...}\InprocServer32; returns REGDB_E_CLASSNOTREG if not found.
 /// CoGetClassObject: retrieve the class factory for a given CLSID (stub).
 ///
 /// Returns `REGDB_E_CLASSNOTREG` — no class factories in Phase 2.
 ///
 /// # Safety
 /// Pointer arguments must be null or valid.
+// Wine ref: dlls/combase/combase.c:1965 — com_get_class_object(); REGDB_E_CLASSNOTREG if not found.
 pub unsafe extern "win64" fn co_get_class_object(
     rclsid: *const u8,
     _dw_cls_context: u32,
@@ -374,6 +413,8 @@ pub unsafe extern "win64" fn co_get_class_object(
     REGDB_E_CLASSNOTREG
 }
 
+// Wine ref: dlls/combase/marshal.c — CoMarshalInterface QIs object for IMarshal; writes OBJREF
+// to stream; increments stub refcount; CO_E_NOTINITIALIZED if no apartment on thread.
 /// CoMarshalInterface / CoUnmarshalInterface: no-op stubs.
 pub extern "win64" fn co_marshal_interface(
     _p_stm: usize,
@@ -386,20 +427,27 @@ pub extern "win64" fn co_marshal_interface(
     CO_E_NOTINITIALIZED
 }
 
+// Wine ref: dlls/combase/marshal.c — reads OBJREF header from stream; calls get_unmarshaler_from_stream()
+// to create proxy; requires initialized apartment; CO_E_NOTINITIALIZED if no apartment on thread.
 pub extern "win64" fn co_unmarshal_interface(_p_stm: usize, _riid: usize, _ppv: usize) -> u32 {
     CO_E_NOTINITIALIZED
 }
 
+// Wine ref: dlls/combase/stubmanager.c — finds stub manager for punk in current apartment;
+// disconnects all remote references without destroying the object itself; S_OK always.
 /// CoDisconnectObject: disconnect a running object from its external connections (stub).
 pub extern "win64" fn co_disconnect_object(_punk: usize, _dw_reserved: u32) -> u32 {
     S_OK
 }
 
+// Wine ref: dlls/combase/combase.c:1302 — checks activation context section first; falls back to
+// HKCR\CLSID\{...}\ProgID registry value; allocates result with CoTaskMemAlloc (caller must free).
 /// ProgIDFromCLSID: return the ProgID for a given CLSID (stub).
 ///
 /// # Safety
 /// `_rclsid` must be null or a valid pointer to a 16-byte CLSID.
 /// `lp_sz_prog_id` must be a valid writable pointer to a `*mut u16` output slot.
+// Wine ref: dlls/combase/combase.c:1302 — activation context then HKCR\CLSID\{}\ProgID; CoTaskMemAlloc result.
 pub unsafe extern "win64" fn prog_id_from_clsid(
     _rclsid: *const u8,
     lp_sz_prog_id: *mut *mut u16,
@@ -410,11 +458,14 @@ pub unsafe extern "win64" fn prog_id_from_clsid(
     REGDB_E_CLASSNOTREG
 }
 
+// Wine ref: dlls/combase/combase.c:1477 — checks activation context first; falls back to
+// HKCR\<progid>\CLSID\(default) registry value; returns REGDB_E_CLASSNOTREG if not found.
 /// CLSIDFromProgID: return the CLSID for a given ProgID (stub).
 ///
 /// # Safety
 /// `_lpsz_prog_id` must be null or a valid null-terminated UTF-16 string.
 /// `lpclsid` must be a valid writable 16-byte buffer.
+// Wine ref: dlls/combase/combase.c:1477 — activation context then HKCR\<progid>\CLSID\(default).
 pub unsafe extern "win64" fn clsid_from_prog_id(
     _lpsz_prog_id: *const u16,
     lpclsid: *mut u8,
@@ -427,16 +478,22 @@ pub unsafe extern "win64" fn clsid_from_prog_id(
 
 // ── Drag-and-drop / storage stubs ────────────────────────────────────────────
 
+// Wine ref: dlls/ole32/ole2.c — frees medium based on tymed: HGLOBAL→GlobalFree, HFILE→CloseHandle,
+// IStream/IStorage→Release, HGDIOBJ→DeleteObject; if pUnkForRelease non-null, calls its Release.
 /// ReleaseStgMedium — release a STGMEDIUM storage medium. No-op stub.
 ///
 /// # Safety
 /// `pmedium` is accepted but not dereferenced.
+// Wine ref: dlls/ole32/ole2.c — frees by tymed: HGLOBAL/HFILE/IStream/IStorage/HGDIOBJ; pUnkForRelease->Release.
 pub unsafe extern "win64" fn release_stg_medium(_pmedium: *mut u8) {}
 
+// Wine ref: dlls/ole32/ole2.c — registers IDropTarget for hwnd in internal hashtable; requires STA;
+// returns DRAGDROP_E_ALREADYREGISTERED (0x80040101) if hwnd already registered; CO_E_NOTINITIALIZED if no STA.
 /// RegisterDragDrop — register a window as a drag-drop target. Returns E_NOTIMPL.
 ///
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
+// Wine ref: dlls/ole32/ole2.c — registers IDropTarget in hashtable; STA required; DRAGDROP_E_ALREADYREGISTERED if dup.
 pub unsafe extern "win64" fn register_drag_drop(hwnd: usize, _p_drop_target: *mut u8) -> i32 {
     // Wine ref: dlls/ole32/ole2.c — returns CO_E_NOTINITIALIZED if no STA,
     // DRAGDROP_E_ALREADYREGISTERED if already registered, S_OK on success.
@@ -445,19 +502,25 @@ pub unsafe extern "win64" fn register_drag_drop(hwnd: usize, _p_drop_target: *mu
     0 // S_OK
 }
 
+// Wine ref: dlls/ole32/ole2.c — removes IDropTarget for hwnd from hashtable; returns
+// DRAGDROP_E_NOTREGISTERED (0x80040100) if hwnd was not registered; S_OK on success.
 /// RevokeDragDrop — revoke a window's drag-drop registration. Returns S_OK.
 ///
 /// # Safety
 /// No pointer dereferences.
+// Wine ref: dlls/ole32/ole2.c — removes IDropTarget from hashtable; DRAGDROP_E_NOTREGISTERED if not found.
 pub unsafe extern "win64" fn revoke_drag_drop(hwnd: usize) -> i32 {
     eprintln!("weave/ole32: RevokeDragDrop(hwnd={hwnd:#x}) → S_OK");
     0 // S_OK
 }
 
+// Wine ref: dlls/ole32/ole2.c — creates tracker window; runs message loop tracking mouse;
+// calls IDropTarget::{DragEnter,DragOver,Drop,DragLeave}; returns DRAGDROP_S_DROP or DRAGDROP_S_CANCEL.
 /// DoDragDrop — initiate a drag-and-drop operation. Returns DRAGDROP_S_CANCEL.
 ///
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
+// Wine ref: dlls/ole32/ole2.c — tracker window + message loop; IDropTarget::{DragEnter,DragOver,Drop,DragLeave}.
 pub unsafe extern "win64" fn do_drag_drop(
     _p_data_obj: *mut u8,
     _p_drop_source: *mut u8,

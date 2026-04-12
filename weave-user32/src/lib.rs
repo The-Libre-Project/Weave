@@ -35,6 +35,8 @@ pub mod window;
 /// IsThemeActive — returns TRUE if visual styles are active system-wide.
 ///
 /// Headless: always FALSE — no display, no theme engine.
+// Wine ref: dlls/uxtheme/system.c:539 — reads module-global `bThemeActive` and
+// unconditionally calls SetLastError(ERROR_SUCCESS) before returning, even on TRUE.
 pub extern "win64" fn is_theme_active() -> i32 {
     0 // FALSE
 }
@@ -42,6 +44,8 @@ pub extern "win64" fn is_theme_active() -> i32 {
 /// IsAppThemed — returns TRUE if the calling process has themes enabled.
 ///
 /// Headless: always FALSE.
+// Wine ref: dlls/uxtheme/system.c:531 — pure alias for IsThemeActive(); no
+// separate per-process theming state exists in Wine's implementation.
 pub extern "win64" fn is_app_themed() -> i32 {
     0 // FALSE
 }
@@ -52,6 +56,7 @@ pub extern "win64" fn is_app_themed() -> i32 {
 ///
 /// # Safety
 /// `hwnd` and `psz_class_list` are ignored.
+// Wine ref: dlls/uxtheme/system.c:678 — one-liner alias: `return OpenThemeDataEx(hwnd, classlist, 0)`.
 pub unsafe extern "win64" fn open_theme_data(_hwnd: usize, _psz_class_list: *const u16) -> usize {
     0 // NULL
 }
@@ -60,6 +65,9 @@ pub unsafe extern "win64" fn open_theme_data(_hwnd: usize, _psz_class_list: *con
 ///
 /// # Safety
 /// Arguments are ignored; returns NULL.
+// Wine ref: dlls/uxtheme/system.c:656 — on failure sets SetLastError(E_PROP_ID_UNSUPPORTED)
+// (an HRESULT, not a standard Win32 error) and calls SetPropW(hwnd, atWindowTheme, NULL)
+// even when returning NULL, clearing any previously cached theme handle.
 pub unsafe extern "win64" fn open_theme_data_ex(
     _hwnd: usize,
     _psz_class_list: *const u16,
@@ -81,6 +89,8 @@ pub extern "win64" fn close_theme_data(_h_theme: usize) -> i32 {
 ///
 /// # Safety
 /// `hdc`, `p_rect`, and `p_clip_rect` are ignored.
+// Wine ref: dlls/uxtheme/draw.c:148 — thin wrapper that synthesizes DTBGOPTS with
+// DTBG_CLIPRECT when pClipRect != NULL, then calls DrawThemeBackgroundEx. No drawing itself.
 pub unsafe extern "win64" fn draw_theme_background(
     _h_theme: usize,
     _hdc: usize,
@@ -96,6 +106,9 @@ pub unsafe extern "win64" fn draw_theme_background(
 ///
 /// # Safety
 /// Arguments are ignored; returns S_OK.
+// Wine ref: dlls/uxtheme/draw.c:1084 — reads TMT_BGTYPE first; if BT_NONE returns S_OK
+// immediately without touching the DC. For BT_IMAGEFILE/BT_BORDERFILL calls UXTHEME_DrawGlyph
+// as a second pass after the background fill.
 pub unsafe extern "win64" fn draw_theme_background_ex(
     _h_theme: usize,
     _hdc: usize,
@@ -113,6 +126,9 @@ pub unsafe extern "win64" fn draw_theme_background_ex(
 ///
 /// # Safety
 /// `psz_text` and `p_rect` are ignored.
+// Wine ref: dlls/uxtheme/draw.c:1753 — checks flags2 only for DTT_GRAYED; if set, forces
+// DTT_TEXTCOLOR with GetSysColor(COLOR_GRAYTEXT), ignores all other flags2 bits, then
+// delegates entirely to DrawThemeTextEx.
 pub unsafe extern "win64" fn draw_theme_text(
     _h_theme: usize,
     _hdc: usize,
@@ -131,6 +147,8 @@ pub unsafe extern "win64" fn draw_theme_text(
 ///
 /// # Safety
 /// `p_dest_rect` and `p_content_rect` are optional rect pointers.
+// Wine ref: dlls/uxtheme/draw.c:1672 — dispatches to draw_diag_edge() vs draw_rect_edge()
+// based on BF_DIAGONAL in uFlags; diagonal path is ~50% larger (distinct algorithm).
 pub unsafe extern "win64" fn draw_theme_edge(
     _h_theme: usize,
     _hdc: usize,
@@ -148,6 +166,9 @@ pub unsafe extern "win64" fn draw_theme_edge(
 ///
 /// # Safety
 /// Arguments are ignored; returns S_OK.
+// Wine ref: dlls/uxtheme/draw.c:1694 — reads TMT_ICONEFFECT to select ILS_* draw state;
+// for ICE_PULSE reads TMT_SATURATION into params.Frame (not alpha); default alpha=128
+// is only used for ICE_ALPHA path.
 pub unsafe extern "win64" fn draw_theme_icon(
     _h_theme: usize,
     _hdc: usize,
@@ -166,6 +187,8 @@ pub unsafe extern "win64" fn draw_theme_icon(
 ///
 /// # Safety
 /// `p_sz` is written only on success; we don't write it.
+// Wine ref: dlls/uxtheme/draw.c:2126 — if TMT_BGTYPE resolves to BT_NONE, returns S_OK
+// with psz={1,1} (1×1 sentinel, not zero). Callers must handle this case.
 pub unsafe extern "win64" fn get_theme_part_size(
     _h_theme: usize,
     _hdc: usize,
@@ -184,6 +207,9 @@ pub unsafe extern "win64" fn get_theme_part_size(
 ///
 /// # Safety
 /// `pi_val` is not written.
+// Wine ref: dlls/uxtheme/property.c:238 — TMT_POSITION returns only X coord,
+// TMT_MARGINS returns only cxLeftWidth, TMT_INTLIST returns only first element —
+// all silently truncated to a single int.
 pub unsafe extern "win64" fn get_theme_metric(
     _h_theme: usize,
     _hdc: usize,
@@ -201,6 +227,9 @@ pub unsafe extern "win64" fn get_theme_metric(
 ///
 /// # Safety
 /// `p_color` is not written.
+// Wine ref: dlls/uxtheme/property.c:57 — on any lookup failure returns E_PROP_ID_UNSUPPORTED
+// (not E_INVALIDARG). Passing a non-color iPropId always fails with E_PROP_ID_UNSUPPORTED
+// regardless of whether the property exists under a different type.
 pub unsafe extern "win64" fn get_theme_color(
     _h_theme: usize,
     _i_part_id: i32,
@@ -217,6 +246,9 @@ pub unsafe extern "win64" fn get_theme_color(
 ///
 /// # Safety
 /// `p_font` is not written.
+// Wine ref: dlls/uxtheme/property.c:117 — hdc is passed to MSSTYLES_GetPropertyFont
+// but only used for device-unit size conversion; not validated. Lookup uses TMT_FONT
+// primitive type filter via MSSTYLES_FindProperty.
 pub unsafe extern "win64" fn get_theme_font(
     _h_theme: usize,
     _hdc: usize,
@@ -231,6 +263,9 @@ pub unsafe extern "win64" fn get_theme_font(
 /// GetThemeSysColor — query a system colour via the theme engine.
 ///
 /// Falls back to 0 (black) since no theme is active.
+// Wine ref: dlls/uxtheme/metric.c:71 — if hTheme is NULL or metric not found, falls
+// through to GetSysColor(iColorID) passing the ID directly as a COLOR_* index.
+// Also calls SetLastError(0) on entry (explicit zero, same as ERROR_SUCCESS).
 pub extern "win64" fn get_theme_sys_color(_h_theme: usize, _i_color_id: i32) -> u32 {
     0
 }
@@ -238,6 +273,8 @@ pub extern "win64" fn get_theme_sys_color(_h_theme: usize, _i_color_id: i32) -> 
 /// GetThemeSysColorBrush — get a system-colour brush via the theme engine.
 ///
 /// Returns NULL — caller must fall back to GetSysColorBrush.
+// Wine ref: dlls/uxtheme/metric.c:94 — always calls CreateSolidBrush(GetThemeSysColor(...));
+// allocates a new GDI brush on every call, never cached. Caller must DeleteObject.
 pub extern "win64" fn get_theme_sys_color_brush(_h_theme: usize, _i_color_id: i32) -> usize {
     0 // NULL
 }
@@ -248,6 +285,10 @@ pub extern "win64" fn get_theme_sys_color_brush(_h_theme: usize, _i_color_id: i3
 ///
 /// # Safety
 /// `p_lf` is not written.
+// Wine ref: dlls/uxtheme/metric.c:103 — falls back to SPI_GETICONTITLELOGFONT only for
+// TMT_ICONTITLEFONT; all others use SPI_GETNONCLIENTMETRICS with a switch on ID for
+// lfCaptionFont/lfSmCaptionFont/lfMenuFont/lfStatusFont/lfMessageFont. Unknown IDs hit
+// FIXME and return without writing *plf.
 pub unsafe extern "win64" fn get_theme_sys_font(
     _h_theme: usize,
     _i_font_id: i32,
@@ -259,6 +300,9 @@ pub unsafe extern "win64" fn get_theme_sys_font(
 /// IsThemePartDefined — check whether a part/state is defined in the theme.
 ///
 /// Returns FALSE — no theme, no parts.
+// Wine ref: dlls/uxtheme/system.c:800 — checks !iStateId first; if iStateId != 0,
+// returns FALSE without calling MSSTYLES_FindPart at all. Only part-level (state 0) queries
+// are supported.
 pub extern "win64" fn is_theme_part_defined(
     _h_theme: usize,
     _i_part_id: i32,
@@ -270,6 +314,9 @@ pub extern "win64" fn is_theme_part_defined(
 /// IsThemeBackgroundPartiallyTransparent — check if a part uses alpha.
 ///
 /// Returns FALSE — safe default that avoids transparency compositing.
+// Wine ref: dlls/uxtheme/draw.c:2232 — returns FALSE immediately if TMT_BGTYPE != BT_IMAGEFILE;
+// border-fill backgrounds are never partially transparent. Returns FALSE (not error) if
+// hTheme == NULL.
 pub extern "win64" fn is_theme_background_partially_transparent(
     _h_theme: usize,
     _i_part_id: i32,
@@ -284,6 +331,9 @@ pub extern "win64" fn is_theme_background_partially_transparent(
 ///
 /// # Safety
 /// `h_wnd`, `psz_sub_app_name`, `psz_sub_id_list` are ignored.
+// Wine ref: dlls/uxtheme/system.c:712 — stores pszSubAppName/pszSubIdList as window
+// properties via SetPropW, then sends WM_THEMECHANGED to force immediate re-open of any
+// cached theme handle (not lazily deferred).
 pub unsafe extern "win64" fn set_window_theme(
     _h_wnd: usize,
     _psz_sub_app_name: *const u16,
@@ -295,6 +345,9 @@ pub unsafe extern "win64" fn set_window_theme(
 /// EnableThemeDialogTexture — enable/disable themed dialog texture.
 ///
 /// No-op; returns S_OK.
+// Wine ref: dlls/uxtheme/draw.c:55 — masks new_flag with ETDT_VALIDBITS; if ETDT_DISABLE
+// is set, clears all other bits and sets old_flag=0. Returns S_OK without touching the
+// window property if the masked new_flag == 0.
 pub extern "win64" fn enable_theme_dialog_texture(_h_wnd: usize, _dw_flags: u32) -> i32 {
     0 // S_OK
 }
@@ -302,19 +355,26 @@ pub extern "win64" fn enable_theme_dialog_texture(_h_wnd: usize, _dw_flags: u32)
 /// GetThemeAppProperties — query global theme property flags.
 ///
 /// Returns 0 — no theme flags.
+// Wine ref: dlls/uxtheme/system.c:758 — direct read of module-global dwThemeAppProperties
+// DWORD; no handle, no validation, no error path.
 pub extern "win64" fn get_theme_app_properties() -> u32 {
     0
 }
 
 /// SetThemeAppProperties — set global theme property flags.
+// Wine ref: dlls/uxtheme/system.c:766 — writes directly to dwThemeAppProperties with no
+// flag validation, no notification to other windows, no return value.
 pub extern "win64" fn set_theme_app_properties(_dw_flags: u32) {}
 
 /// BufferedPaintInit — initialise the buffered-paint API.
+// Wine ref: dlls/uxtheme/buffer.c:60 — complete stub (FIXME + return S_OK); BeginBufferedPaint
+// works regardless of whether Init was called, so the no-op is behaviorally correct.
 pub extern "win64" fn buffered_paint_init() -> i32 {
     0 // S_OK
 }
 
 /// BufferedPaintUnInit — shut down the buffered-paint API.
+// Wine ref: dlls/uxtheme/buffer.c:68 — identical stub to BufferedPaintInit; no cleanup performed.
 pub extern "win64" fn buffered_paint_un_init() -> i32 {
     0 // S_OK
 }
@@ -331,6 +391,9 @@ pub extern "win64" fn end_buffered_animation(_h_bp_animation: usize, _f_update_t
 ///
 /// Wine ref: dlls/uxtheme/uxtheme.c — returns E_FAIL (theme not active).
 /// Weave: returns 0 duration (no transition).
+///
+/// # Safety
+/// Pointer arguments must be valid for the duration of the call; null where noted is permitted.
 pub unsafe extern "win64" fn get_theme_transition_duration(
     _h_theme: usize,
     _i_part_id: i32,
@@ -349,11 +412,7 @@ pub unsafe extern "win64" fn get_theme_transition_duration(
 ///
 /// Wine ref: dlls/uxtheme/uxtheme.c — SendMessage(parent, WM_ERASEBKGND/WM_PRINTCLIENT).
 /// Weave: no-op (S_OK); background is handled by BeginPaint/EndPaint in our backend.
-pub extern "win64" fn draw_theme_parent_background(
-    _hwnd: usize,
-    _hdc: usize,
-    _prc: usize,
-) -> i32 {
+pub extern "win64" fn draw_theme_parent_background(_hwnd: usize, _hdc: usize, _prc: usize) -> i32 {
     0 // S_OK
 }
 
@@ -361,6 +420,9 @@ pub extern "win64" fn draw_theme_parent_background(
 ///
 /// Wine ref: dlls/uxtheme/uxtheme.c — subtracts margins from the bounding rect.
 /// Weave: returns the bounding rect unchanged (no margins).
+///
+/// # Safety
+/// Pointer arguments must be valid for the duration of the call; null where noted is permitted.
 pub unsafe extern "win64" fn get_theme_background_content_rect(
     _h_theme: usize,
     _hdc: usize,
@@ -466,7 +528,9 @@ pub fn resolve_uxtheme(dll: &str, func: &str) -> Option<usize> {
         "DrawThemeParentBackground" => draw_theme_parent_background as *const () as usize,
         "GetThemeBackgroundContentRect" => get_theme_background_content_rect as *const () as usize,
         "DrawThemeTextEx" => draw_theme_text_ex as *const () as usize,
-        "BufferedPaintStopAllAnimations" => buffered_paint_stop_all_animations as *const () as usize,
+        "BufferedPaintStopAllAnimations" => {
+            buffered_paint_stop_all_animations as *const () as usize
+        }
         "BeginBufferedAnimation" => begin_buffered_animation as *const () as usize,
         "BufferedPaintRenderAnimation" => buffered_paint_render_animation as *const () as usize,
         _ => return None,
@@ -1040,17 +1104,17 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         ),
         // Accessibility / event hooks
         "NotifyWinEvent" => Some(api::notify_win_event as *const () as usize),
-        "FlashWindowEx" => Some(
-            api::flash_window_ex as unsafe extern "win64" fn(_) -> _ as *const () as usize,
-        ),
+        "FlashWindowEx" => {
+            Some(api::flash_window_ex as unsafe extern "win64" fn(_) -> _ as *const () as usize)
+        }
         "LockWindowUpdate" => Some(api::lock_window_update as *const () as usize),
         "GetMenuBarInfo" => Some(
             api::get_menu_bar_info as unsafe extern "win64" fn(_, _, _, _) -> _ as *const ()
                 as usize,
         ),
-        "GetIconInfo" => Some(
-            api::get_icon_info as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
-        ),
+        "GetIconInfo" => {
+            Some(api::get_icon_info as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
         "CreateIconIndirect" => Some(
             api::create_icon_indirect as unsafe extern "win64" fn(_) -> _ as *const () as usize,
         ),

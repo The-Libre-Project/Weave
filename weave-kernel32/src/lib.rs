@@ -19,9 +19,9 @@ use std::sync::Mutex;
 /// same address can be legally freed again after a re-allocation.
 static LAST_HEAP_FREE: AtomicUsize = AtomicUsize::new(0);
 
+use std::sync::Arc;
 use weave_common::stub::warn_once;
 use weave_common::{STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE};
-use std::sync::Arc;
 use weave_core::{file_io, handles};
 
 // ── File mapping table ────────────────────────────────────────────────────────
@@ -317,6 +317,9 @@ fn locale_number_lookup(lc_type: u32) -> u32 {
 ///
 /// Returns handle constants from the global handle table (4/5/6 for
 /// stdin/stdout/stderr). These map to Linux fds 0/1/2 in the table.
+// Wine ref: dlls/kernelbase/process.c:1385 — reads hStdInput/hStdOutput/hStdError
+// directly from PEB->ProcessParameters; returns INVALID_HANDLE_VALUE + sets
+// ERROR_INVALID_HANDLE for unknown std_handle values.
 pub extern "win64" fn get_std_handle(n_std_handle: u32) -> usize {
     match n_std_handle {
         STD_INPUT_HANDLE => handles::STDIN_HANDLE,
@@ -333,6 +336,9 @@ pub extern "win64" fn get_std_handle(n_std_handle: u32) -> usize {
 ///
 /// # Safety
 /// `lp_buffer` must be valid for `n_chars` UTF-16 code units.
+// Wine ref: dlls/kernelbase/console.c:2163 — calls console_ioctl with
+// IOCTL_CONDRV_WRITE_CONSOLE; sets *written = length on success, 0 on failure.
+// reserved parameter is accepted but not used.
 pub unsafe extern "win64" fn write_console_w(
     h_console_output: usize,
     lp_buffer: *const u16,
@@ -371,6 +377,9 @@ pub unsafe extern "win64" fn write_console_w(
 }
 
 /// ExitProcess: terminate the process with the given exit code.
+// Wine ref: dlls/kernelbase/process.c — ExitProcess calls RtlExitUserProcess
+// which sends the exit code to the Wineserver and unwinds TLS callbacks
+// (DLL_PROCESS_DETACH) before calling NtTerminateProcess.
 pub extern "win64" fn exit_process(u_exit_code: u32) -> ! {
     eprintln!("weave/kernel32: ExitProcess({u_exit_code})");
     unsafe { libc::exit(u_exit_code as i32) }
@@ -383,17 +392,24 @@ pub extern "win64" fn exit_process(u_exit_code: u32) -> ! {
 ///
 /// # Safety
 /// `_h_process` is accepted but not dereferenced.
+// Wine ref: server/process.c:1512 (terminate_process handler) — sends
+// SIGKILL via server to the target process; the server sets exit_code
+// then calls process_killed(). Ignores self-termination vs. remote.
 pub unsafe extern "win64" fn terminate_process(_h_process: usize, u_exit_code: u32) -> i32 {
     eprintln!("weave: TerminateProcess called with exit code {u_exit_code}");
     unsafe { libc::exit(u_exit_code as i32) }
 }
 
 /// GetLastError: return the calling thread's last error code.
+// Wine ref: include/winbase.h:2679 — inline that reads TEB->LastErrorValue;
+// kernelbase implements via NtCurrentTeb()->LastErrorValue directly.
 pub extern "win64" fn get_last_error() -> u32 {
     weave_common::get_last_error()
 }
 
 /// SetLastError: set the calling thread's last error code.
+// Wine ref: include/winbase.h — inline that writes TEB->LastErrorValue;
+// SetLastError(0) is a common pattern to clear error before a call.
 pub extern "win64" fn set_last_error(dw_err_code: u32) {
     weave_common::set_last_error(dw_err_code);
 }
@@ -402,6 +418,9 @@ pub extern "win64" fn set_last_error(dw_err_code: u32) {
 ///
 /// # Safety
 /// `lp_address` must point into a valid mapped region.
+// Wine ref: dlls/kernelbase/memory.c:553 — delegates to VirtualProtectEx which
+// calls NtProtectVirtualMemory; Win9x allows NULL old_prot but NT does not —
+// old_prot must be a valid pointer on NT/Vista+.
 pub unsafe extern "win64" fn virtual_protect(
     lp_address: *mut u8,
     dw_size: usize,
@@ -433,6 +452,10 @@ pub unsafe extern "win64" fn virtual_protect(
 ///
 /// # Safety
 /// `lp_buffer` must be writable for at least `dw_length` bytes (minimum 48).
+// Wine ref: dlls/kernelbase/memory.c::VirtualQueryEx — calls
+// NtQueryVirtualMemory(MemoryBasicInformation); returns sizeof(MBI) on success,
+// 0 on failure. MBI layout: BaseAddress(8)+AllocationBase(8)+AllocationProtect(4)
+// +__alignment(4)+RegionSize(8)+State(4)+Protect(4)+Type(4) = 48 bytes on x64.
 pub unsafe extern "win64" fn virtual_query(
     lp_address: *const u8,
     lp_buffer: *mut u8,
@@ -479,6 +502,10 @@ pub unsafe extern "win64" fn virtual_query(
 ///
 /// # Safety
 /// `lp_address` must be null or a page-aligned address.
+// Wine ref: dlls/kernelbase/memory.c — VirtualAlloc delegates to VirtualAllocEx →
+// NtAllocateVirtualMemory. MEM_COMMIT|MEM_RESERVE is the normal pattern; MEM_RESERVE
+// alone allocates without backing pages. Weave maps via mmap; MAP_FIXED_NOREPLACE used
+// when addr is non-null to avoid silently replacing existing mappings.
 pub unsafe extern "win64" fn virtual_alloc(
     lp_address: *mut u8,
     dw_size: usize,
@@ -537,6 +564,8 @@ pub unsafe extern "win64" fn virtual_alloc(
 ///
 /// # Safety
 /// `lp_address` must be null or a valid address for allocation.
+// Wine ref: dlls/kernelbase/memory.c — VirtualAllocEx calls
+// NtAllocateVirtualMemory; hProcess is ignored in Weave (single-process model).
 pub unsafe extern "win64" fn virtual_alloc_ex(
     _h_process: usize,
     lp_address: *mut u8,
@@ -559,6 +588,9 @@ pub unsafe extern "win64" fn virtual_alloc_ex(
 ///
 /// # Safety
 /// `lp_address` must be a valid mmap'd address.
+// Wine ref: dlls/kernelbase/memory.c — VirtualFree delegates to VirtualFreeEx →
+// NtFreeVirtualMemory. MEM_RELEASE requires dwSize=0; non-zero → ERROR_INVALID_PARAMETER.
+// MEM_DECOMMIT with size decommits only that range (pages become reserved, not freed).
 pub unsafe extern "win64" fn virtual_free(
     lp_address: *mut u8,
     dw_size: usize,
@@ -606,6 +638,8 @@ pub unsafe extern "win64" fn virtual_free(
 ///
 /// # Safety
 /// `lp_address` must be a valid allocated address.
+// Wine ref: dlls/kernelbase/memory.c — VirtualFreeEx calls
+// NtFreeVirtualMemory; hProcess is ignored in Weave (single-process model).
 pub unsafe extern "win64" fn virtual_free_ex(
     _h_process: usize,
     lp_address: *mut u8,
@@ -616,6 +650,9 @@ pub unsafe extern "win64" fn virtual_free_ex(
 }
 
 /// Sleep: suspend the calling thread for the given number of milliseconds.
+// Wine ref: dlls/kernelbase/sync.c:361 — calls NtDelayExecution(FALSE, &timeout)
+// where timeout is a negative 100ns LARGE_INTEGER. INFINITE (0xFFFFFFFF) passes
+// NULL timeout to NtDelayExecution, sleeping indefinitely.
 pub extern "win64" fn sleep(dw_milliseconds: u32) {
     let ts = libc::timespec {
         tv_sec: (dw_milliseconds / 1000) as i64,
@@ -627,6 +664,9 @@ pub extern "win64" fn sleep(dw_milliseconds: u32) {
 /// TlsGetValue: return the value stored in a TLS slot.
 ///
 /// Static indices (0-63) return NULL. Dynamic indices (64+) use per-thread storage.
+// Wine ref: dlls/kernelbase/thread.c:785 — indices < TLS_MINIMUM_AVAILABLE (64)
+// read TEB->TlsSlots[index]; higher indices use TEB->TlsExpansionSlots[index-64].
+// Always clears LastError to ERROR_SUCCESS before returning.
 pub extern "win64" fn tls_get_value(dw_tls_index: u32) -> *mut u8 {
     if dw_tls_index >= 64 {
         return TLS_SLOTS
@@ -639,6 +679,9 @@ pub extern "win64" fn tls_get_value(dw_tls_index: u32) -> *mut u8 {
 ///
 /// # Safety
 /// `lp_critical_section` must point to at least 40 bytes of writable memory.
+// Wine ref: dlls/kernelbase/sync.c::InitializeCriticalSectionEx — calls
+// RtlInitializeCriticalSectionEx; sets LockCount=-1, RecursionCount=0,
+// OwningThread=0, LockSemaphore=0; raises STATUS_NO_MEMORY on failure.
 pub unsafe extern "win64" fn initialize_critical_section(lp_critical_section: *mut u8) {
     // Pointer validation: null is an invalid parameter.
     if lp_critical_section.is_null() {
@@ -656,21 +699,29 @@ pub unsafe extern "win64" fn initialize_critical_section(lp_critical_section: *m
 /// EnterCriticalSection: acquire the critical section.
 ///
 /// Phase 1: single-threaded no-op.
+// Wine ref: dlls/ntdll/sync.c — RtlEnterCriticalSection: spins on LockCount,
+// then waits on NtWaitForKeyedEvent if contended; sets OwningThread to current TID.
 pub extern "win64" fn enter_critical_section(_lp_critical_section: *mut u8) {}
 
 /// LeaveCriticalSection: release the critical section.
 ///
 /// Phase 1: single-threaded no-op.
+// Wine ref: dlls/ntdll/sync.c — RtlLeaveCriticalSection: decrements RecursionCount;
+// when it hits 0 clears OwningThread and releases via NtReleaseKeyedEvent.
 pub extern "win64" fn leave_critical_section(_lp_critical_section: *mut u8) {}
 
 /// DeleteCriticalSection: free resources associated with a critical section.
 ///
 /// Phase 1: no-op.
+// Wine ref: dlls/ntdll/sync.c — RtlDeleteCriticalSection: closes LockSemaphore
+// via NtClose if non-null; frees DebugInfo allocation from the heap.
 pub extern "win64" fn delete_critical_section(_lp_critical_section: *mut u8) {}
 
 /// SetUnhandledExceptionFilter: install a top-level exception filter.
 ///
 /// Phase 1: accepted and ignored — returns null (no previous filter).
+// Wine ref: dlls/kernelbase/debug.c:453 — stores filter via
+// InterlockedExchangePointer into top_filter; returns the previous filter.
 pub extern "win64" fn set_unhandled_exception_filter(_lp_top_level_handler: usize) -> usize {
     0
 }
@@ -678,6 +729,8 @@ pub extern "win64" fn set_unhandled_exception_filter(_lp_top_level_handler: usiz
 /// IsDBCSLeadByte: test whether a byte is a lead byte in the current DBCS.
 ///
 /// Linux always uses UTF-8; DBCS is never active. Always returns FALSE.
+// Wine ref: dlls/kernelbase/locale.c — checks if ACP is a DBCS code page
+// and if so, looks up test_char in the lead-byte table; FALSE for UTF-8 (65001).
 pub extern "win64" fn is_dbcs_lead_byte(_test_char: u8) -> i32 {
     0 // FALSE
 }
@@ -685,6 +738,8 @@ pub extern "win64" fn is_dbcs_lead_byte(_test_char: u8) -> i32 {
 /// IsDBCSLeadByteEx: test whether a byte is a lead byte for a specific code page.
 ///
 /// Only UTF-8 (65001) is used; DBCS is not active. Always returns FALSE.
+// Wine ref: dlls/kernelbase/locale.c — same as IsDBCSLeadByte but takes explicit
+// code page; still FALSE for UTF-8 and all single-byte code pages.
 pub extern "win64" fn is_dbcs_lead_byte_ex(_code_page: u32, _test_char: u8) -> i32 {
     0 // FALSE
 }
@@ -692,6 +747,8 @@ pub extern "win64" fn is_dbcs_lead_byte_ex(_code_page: u32, _test_char: u8) -> i
 /// GetACP: return the current ANSI code page identifier.
 ///
 /// Returns 65001 (UTF-8) — the only code page Weave supports.
+// Wine ref: dlls/kernelbase/locale.c — reads ansi_cp.CodePage from the
+// NLS locale data; returns the system ANSI code page set at boot.
 pub extern "win64" fn get_acp() -> u32 {
     65001 // CP_UTF8
 }
@@ -703,6 +760,8 @@ pub extern "win64" fn get_acp() -> u32 {
 /// Single-threaded stub — always succeeds.
 /// # Safety
 /// `srw_lock` must be a valid pointer to an SRWLOCK-sized slot.
+// Wine ref: dlls/kernelbase/sync.c — calls RtlTryAcquireSRWLockExclusive;
+// returns TRUE (non-zero byte) if acquired, FALSE (0) if already held.
 pub unsafe extern "win64" fn try_acquire_srw_lock_exclusive(srw_lock: *mut usize) -> u8 {
     let _ = srw_lock; // accepted but not dereferenced
     1 // TRUE — always succeeds in single-threaded context
@@ -713,6 +772,8 @@ pub unsafe extern "win64" fn try_acquire_srw_lock_exclusive(srw_lock: *mut usize
 /// Single-threaded stub — always succeeds.
 /// # Safety
 /// `srw_lock` must be a valid pointer to an SRWLOCK-sized slot.
+// Wine ref: dlls/kernelbase/sync.c — calls RtlTryAcquireSRWLockShared;
+// returns TRUE if acquired, FALSE if exclusive lock is held.
 pub unsafe extern "win64" fn try_acquire_srw_lock_shared(srw_lock: *mut usize) -> u8 {
     let _ = srw_lock; // accepted but not dereferenced
     1 // TRUE — always succeeds in single-threaded context
@@ -730,6 +791,9 @@ pub unsafe extern "win64" fn try_acquire_srw_lock_shared(srw_lock: *mut usize) -
 ///
 /// # Safety
 /// `lp_target_handle` must be a valid writable pointer or NULL.
+// Wine ref: dlls/kernelbase/process.c:744 — calls NtDuplicateObject(source_process, source,
+// dest_process, dest, access, inherit ? OBJ_INHERIT : 0, options); full cross-process handle
+// duplication backed by the server handle table. DUPLICATE_CLOSE_SOURCE handled server-side.
 pub unsafe extern "win64" fn duplicate_handle(
     _h_source_process_handle: usize,
     h_source_handle: usize,
@@ -766,6 +830,9 @@ pub unsafe extern "win64" fn process_id_to_session_id(
 /// Stub: immediately return TRUE (no actual waiting).
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
+// Wine ref: dlls/kernelbase/sync.c:531 — calls RtlWaitOnAddress with
+// negative 100ns timeout; compares address value to cmp_value before sleeping
+// to avoid missed wakes. Returns FALSE + ERROR_TIMEOUT on timeout.
 pub unsafe extern "win64" fn wait_on_address(
     _address: *const u8,
     _compare_address: *const u8,
@@ -780,6 +847,8 @@ pub unsafe extern "win64" fn wait_on_address(
 /// No-op.
 /// # Safety
 /// `_address` is accepted but never dereferenced.
+// Wine ref: dlls/kernelbase/sync.c — calls RtlWakeAddressSingle;
+// wakes at most one thread blocked in RtlWaitOnAddress on the same address.
 pub extern "win64" fn wake_by_address_single(_address: usize) {}
 
 /// WakeByAddressAll: wake all threads waiting on an address.
@@ -787,6 +856,8 @@ pub extern "win64" fn wake_by_address_single(_address: usize) {}
 /// No-op.
 /// # Safety
 /// `_address` is accepted but never dereferenced.
+// Wine ref: dlls/kernelbase/sync.c — calls RtlWakeAddressAll;
+// wakes all threads blocked in RtlWaitOnAddress on the same address.
 pub extern "win64" fn wake_by_address_all(_address: usize) {}
 
 // ── Task 2 — Thread description + timer queue + affinity ────────────────────
@@ -796,6 +867,8 @@ pub extern "win64" fn wake_by_address_all(_address: usize) {}
 /// No-op. Returns S_OK.
 /// # Safety
 /// `_h_thread` and `_lp_thread_description` are accepted but not dereferenced.
+// Wine ref: dlls/kernelbase/thread.c:476 — calls NtSetInformationThread with
+// ThreadNameInformation; stores description as UNICODE_STRING in server thread object.
 pub unsafe extern "win64" fn set_thread_description(
     _h_thread: usize,
     _lp_thread_description: *const u16,
@@ -808,6 +881,9 @@ pub unsafe extern "win64" fn set_thread_description(
 /// Write null to `*ppsz_thread_description` if non-null. Return S_OK.
 /// # Safety
 /// `ppsz_thread_description` must be a valid writable pointer or NULL.
+// Wine ref: dlls/kernelbase/thread.c:497 — calls NtQueryInformationThread with
+// ThreadNameInformation; allocates a LocalAlloc'd WCHAR buffer for the caller
+// (caller must LocalFree it). Returns empty string if no description is set.
 pub unsafe extern "win64" fn get_thread_description(
     _h_thread: usize,
     ppsz_thread_description: *mut *mut u16,
@@ -823,6 +899,8 @@ pub unsafe extern "win64" fn get_thread_description(
 /// Stub: if `ph_new_timer` is non-null, write 1 to it. Return TRUE.
 /// # Safety
 /// `ph_new_timer` must be a valid writable pointer or NULL.
+// Wine ref: dlls/kernelbase/sync.c — calls RtlCreateTimer; period=0 is one-shot,
+// period>0 is repeating. Callback runs in a thread pool thread, not the caller.
 pub unsafe extern "win64" fn create_timer_queue_timer(
     ph_new_timer: *mut usize,
     _timer_queue: usize,
@@ -843,6 +921,8 @@ pub unsafe extern "win64" fn create_timer_queue_timer(
 /// No-op. Return TRUE.
 /// # Safety
 /// Arguments are accepted but not dereferenced.
+// Wine ref: dlls/kernelbase/sync.c:994 — calls RtlDeleteTimer; if completion_event
+// is INVALID_HANDLE_VALUE, waits for running callbacks to finish before returning.
 pub unsafe extern "win64" fn delete_timer_queue_timer(
     _timer_queue: usize,
     _timer: usize,
@@ -862,6 +942,9 @@ pub unsafe extern "win64" fn delete_timer_queue_timer(
 ///
 /// # Safety
 /// `_h_thread` and `_dw_thread_affinity_mask` are accepted but not dereferenced.
+// Wine ref: dlls/kernelbase/thread.c — no standalone SetThreadAffinityMask symbol in Wine;
+// affinity routed through NtSetInformationThread(ThreadAffinityMask, &mask, sizeof(mask));
+// returns previous mask from server/thread.c:get_thread_affinity (line 810), 0 on error.
 pub unsafe extern "win64" fn set_thread_affinity_mask(
     _h_thread: usize,
     _dw_thread_affinity_mask: usize,
@@ -878,6 +961,8 @@ pub unsafe extern "win64" fn set_thread_affinity_mask(
 ///
 /// # Safety
 /// `wow64_process` must be a valid pointer to an i32 if non-null.
+// Wine ref: dlls/kernelbase/process.c:1031 — calls NtQueryInformationProcess with
+// ProcessWow64Information; writes pointer-size value (non-null = WoW64 active).
 pub unsafe extern "win64" fn is_wow64_process(_h_process: usize, wow64_process: *mut i32) -> i32 {
     if !wow64_process.is_null() {
         unsafe { *wow64_process = 0i32 }; // FALSE
@@ -888,6 +973,9 @@ pub unsafe extern "win64" fn is_wow64_process(_h_process: usize, wow64_process: 
 /// IsProcessorFeaturePresent: check if a processor feature is present.
 ///
 /// Returns FALSE (0) for all features — stub implementation.
+// Wine ref: dlls/kernelbase/process.c:1013 — reads
+// SharedUserData->ProcessorFeatures[feature]; feature index must be < 64
+// (PROCESSOR_FEATURE_MAX), returns FALSE for out-of-range.
 pub extern "win64" fn is_processor_feature_present(_processor_feature: u32) -> i32 {
     0 // FALSE
 }
@@ -898,6 +986,8 @@ pub extern "win64" fn is_processor_feature_present(_processor_feature: u32) -> i
 ///
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
+// Wine ref: dlls/kernelbase/memory.c:135 — calls NtFlushInstructionCache;
+// on x86/x64 this is a no-op since the hardware maintains I/D cache coherency.
 pub unsafe extern "win64" fn flush_instruction_cache(
     _h_process: usize,
     _lp_base_address: usize,
@@ -912,6 +1002,9 @@ pub unsafe extern "win64" fn flush_instruction_cache(
 ///
 /// # Safety
 /// `lp_system_time_as_file_time` must be a valid pointer to a u64.
+// Wine ref: dlls/kernelbase/file.c:4206 — calls NtQuerySystemTime which reads
+// SharedUserData->SystemTime; "Precise" variant forces a syscall instead of the
+// VDSO path to guarantee sub-millisecond accuracy.
 pub unsafe extern "win64" fn get_system_time_precise_as_file_time(
     lp_system_time_as_file_time: *mut u64,
 ) {
@@ -929,6 +1022,8 @@ pub unsafe extern "win64" fn get_system_time_precise_as_file_time(
 /// GetLargePageMinimum: get the minimum size of a large page.
 ///
 /// Returns 0 — large pages not supported.
+// Wine ref: dlls/kernelbase/memory.c — returns GetSystemInfo large page size;
+// returns 0 if large page privilege (SeLockMemoryPrivilege) is not held.
 pub extern "win64" fn get_large_page_minimum() -> usize {
     0
 }
@@ -939,6 +1034,9 @@ pub extern "win64" fn get_large_page_minimum() -> usize {
 ///
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
+// Wine ref: dlls/kernelbase/sync.c — calls NtSetInformationObject with
+// ObjectHandleFlagInformation; sets HANDLE_FLAG_INHERIT and/or
+// HANDLE_FLAG_PROTECT_FROM_CLOSE bits in the server handle table.
 pub unsafe extern "win64" fn set_handle_information(
     _h_object: usize,
     _dw_mask: u32,
@@ -953,6 +1051,9 @@ pub unsafe extern "win64" fn set_handle_information(
 ///
 /// # Safety
 /// `init_once`, `parameter`, and `context` must be valid pointers.
+// Wine ref: dlls/kernelbase/sync.c:1780 — calls RtlRunOnceExecuteOnce which
+// uses an interlocked state machine (0=unstarted, 1=in-progress, 2=done);
+// callback receives InitOnce pointer, param, and context output pointer.
 pub unsafe extern "win64" fn init_once_execute_once(
     init_once: *mut usize,
     init_fn: unsafe extern "win64" fn(*mut usize, *mut u8, *mut *mut u8) -> i32,
@@ -981,6 +1082,8 @@ pub unsafe extern "win64" fn init_once_execute_once(
 ///
 /// # Safety
 /// `lp_init_once` and `f_pending` must be valid pointers.
+// Wine ref: dlls/kernelbase/sync.c — calls RtlRunOnceBeginInitialize;
+// sets *fPending=TRUE if caller must do init, FALSE if already complete.
 pub unsafe extern "win64" fn init_once_begin_initialize(
     lp_init_once: *mut usize,
     _dw_flags: u32,
@@ -1002,6 +1105,8 @@ pub unsafe extern "win64" fn init_once_begin_initialize(
 ///
 /// # Safety
 /// `lp_init_once` must be a valid pointer.
+// Wine ref: dlls/kernelbase/sync.c — calls RtlRunOnceComplete; marks the
+// INIT_ONCE as done and wakes any threads waiting in BeginInitialize.
 pub unsafe extern "win64" fn init_once_complete(
     lp_init_once: *mut usize,
     _dw_flags: u32,
@@ -1019,6 +1124,8 @@ pub unsafe extern "win64" fn init_once_complete(
 ///
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
+// Wine ref: dlls/kernelbase/sync.c — calls NtCreateTimer; manual-reset=TRUE
+// keeps timer signaled until reset, FALSE auto-resets after one wait release.
 pub unsafe extern "win64" fn create_waitable_timer_w(
     _lp_timer_attributes: usize,
     _b_manual_reset: i32,
@@ -1033,6 +1140,8 @@ pub unsafe extern "win64" fn create_waitable_timer_w(
 ///
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
+// Wine ref: dlls/kernelbase/sync.c — ANSI wrapper that converts name via
+// RtlCreateUnicodeStringFromAsciiz then calls CreateWaitableTimerW.
 pub unsafe extern "win64" fn create_waitable_timer_a(
     _lp_timer_attributes: usize,
     _b_manual_reset: i32,
@@ -1047,6 +1156,8 @@ pub unsafe extern "win64" fn create_waitable_timer_a(
 ///
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
+// Wine ref: dlls/kernelbase/sync.c — calls NtSetTimer; negative due_time is
+// relative (100ns units), positive is absolute. lPeriod=0 is one-shot.
 pub unsafe extern "win64" fn set_waitable_timer(
     _h_timer: usize,
     _lp_due_time: usize,
@@ -1064,6 +1175,8 @@ pub unsafe extern "win64" fn set_waitable_timer(
 ///
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
+// Wine ref: dlls/kernelbase/sync.c:938 — calls NtCancelTimer; sets
+// *pfPreviousState to timer's signaled state before cancellation.
 pub unsafe extern "win64" fn cancel_waitable_timer(_h_timer: usize) -> i32 {
     1 // TRUE
 }
@@ -1130,6 +1243,10 @@ fn expand_env_vars(src: &str) -> String {
 /// # Safety
 /// `lp_src` must be a valid null-terminated UTF-16 string.
 /// `lp_dst` must be writable for `n_size` u16 words.
+// Wine ref: dlls/kernelbase/process.c — ExpandEnvironmentStringsW calls
+// RtlExpandEnvironmentStrings_U; caps len at UNICODE_STRING_MAX_CHARS; returns
+// required char count (incl. null) even when dst=NULL (size-query pattern).
+// STATUS_BUFFER_TOO_SMALL is not treated as error — count still returned.
 pub unsafe extern "win64" fn expand_environment_strings_w(
     lp_src: *const u16,
     lp_dst: *mut u16,
@@ -1176,6 +1293,9 @@ pub unsafe extern "win64" fn expand_environment_strings_w(
 /// # Safety
 /// `lp_src` must be a valid null-terminated UTF-8 string.
 /// `lp_dst` must be writable for `n_size` bytes.
+// Wine ref: dlls/kernelbase/process.c — ExpandEnvironmentStringsA converts to Unicode,
+// calls ExpandEnvironmentStringsW, converts result back via WideCharToMultiByte(CP_ACP).
+// When buffer too small: sets *dst=0 and over-reports by 1 byte (count_neededA + 1).
 pub unsafe extern "win64" fn expand_environment_strings_a(
     lp_src: *const u8,
     lp_dst: *mut u8,
@@ -1222,6 +1342,10 @@ pub unsafe extern "win64" fn expand_environment_strings_a(
 ///
 /// # Safety
 /// All non-null pointer arguments must satisfy their Win32 API contracts.
+// Wine ref: dlls/kernelbase/file.c — SearchPathW: if name contains path separator,
+// skips search and calls GetFullPathNameW directly (with/without ext). If path arg
+// given, uses RtlDosSearchPath_U. Otherwise tries activation context, then
+// RtlGetSearchPath. Empty/whitespace-only name → ERROR_INVALID_PARAMETER.
 pub unsafe extern "win64" fn search_path_w(
     lp_path: *const u16,
     lp_file_name: *const u16,
@@ -1299,10 +1423,13 @@ pub unsafe extern "win64" fn search_path_w(
                         );
                     }
                     if !lp_file_part.is_null() {
-                        let sep_pos = win_path.rfind('\\').map(|p| {
-                            // Count UTF-16 code units before the backslash.
-                            win_path[..p + 1].encode_utf16().count()
-                        }).unwrap_or(0);
+                        let sep_pos = win_path
+                            .rfind('\\')
+                            .map(|p| {
+                                // Count UTF-16 code units before the backslash.
+                                win_path[..p + 1].encode_utf16().count()
+                            })
+                            .unwrap_or(0);
                         unsafe { *lp_file_part = lp_buffer.add(sep_pos) };
                     }
                 }
@@ -1352,7 +1479,11 @@ pub unsafe extern "win64" fn search_path_a(
     let extension_w: Vec<u16> = extension.encode_utf16().chain(std::iter::once(0)).collect();
     let path_w: Vec<u16> = path_str.encode_utf16().chain(std::iter::once(0)).collect();
 
-    let path_ptr = if lp_path.is_null() { std::ptr::null() } else { path_w.as_ptr() };
+    let path_ptr = if lp_path.is_null() {
+        std::ptr::null()
+    } else {
+        path_w.as_ptr()
+    };
     let ext_ptr = if lp_extension.is_null() {
         std::ptr::null()
     } else {
@@ -1405,6 +1536,10 @@ pub unsafe extern "win64" fn search_path_a(
 /// `lp_path_name` must be a valid null-terminated UTF-16 string.
 /// `lp_prefix_string` may be null.
 /// `lp_temp_file_name` must be writable for at least 260 u16 words.
+// Wine ref: dlls/kernelbase/file.c:2438 — verifies path is an existing directory
+// (GetFileAttributesW); uses only the first 3 chars of prefix; if unique=0,
+// iterates via NtGetTickCount to find an unused filename, creating each candidate
+// with CreateFileW(CREATE_NEW); returns the unique number used (low 16 bits).
 pub unsafe extern "win64" fn get_temp_file_name_w(
     lp_path_name: *const u16,
     lp_prefix_string: *const u16,
@@ -1470,6 +1605,8 @@ pub unsafe extern "win64" fn get_temp_file_name_w(
 /// `lp_path_name` must be a valid null-terminated UTF-8 string.
 /// `lp_prefix_string` may be null.
 /// `lp_temp_file_name` must be writable for at least 260 bytes.
+// Wine ref: dlls/kernelbase/file.c:2418 — converts ANSI args to Unicode via
+// RtlMultiByteToUnicodeN, delegates to GetTempFileNameW, converts result back.
 pub unsafe extern "win64" fn get_temp_file_name_a(
     lp_path_name: *const u8,
     lp_prefix_string: *const u8,
@@ -1528,16 +1665,22 @@ pub unsafe extern "win64" fn get_temp_file_name_a(
 }
 
 /// GetOEMCP: return the current OEM code page identifier.
+// Wine ref: dlls/kernelbase/locale.c — reads oem_cp.CodePage from NLS data;
+// typically 437 (US) or 850 (Multilingual Latin 1) on Western Windows installs.
 pub extern "win64" fn get_oemcp() -> u32 {
     65001
 }
 
 /// GetConsoleCP: return the console input code page.
+// Wine ref: dlls/kernelbase/console.c:833 — queries IOCTL_CONDRV_GET_INPUT_INFO
+// and returns info.input_cp; returns 0 if the console handle is invalid.
 pub extern "win64" fn get_console_cp() -> u32 {
     65001
 }
 
 /// GetConsoleOutputCP: return the console output code page.
+// Wine ref: dlls/kernelbase/console.c:969 — queries IOCTL_CONDRV_GET_INPUT_INFO
+// and returns info.output_cp; returns 0 if the console handle is invalid.
 pub extern "win64" fn get_console_output_cp() -> u32 {
     65001
 }
@@ -1545,6 +1688,9 @@ pub extern "win64" fn get_console_output_cp() -> u32 {
 /// __C_specific_handler: SEH C-specific exception filter.
 ///
 /// Returns ExceptionContinueSearch (1) — Weave does not implement SEH in Phase 1.
+// Wine ref: dlls/msvcrt/except_x86_64.c — __C_specific_handler is the MSVC
+// SEH handler for C code; walks the scope table to find __except/__finally handlers;
+// returns ExceptionContinueSearch if no matching filter found.
 pub extern "win64" fn c_specific_handler(
     _exception_record: usize,
     _establisher_frame: usize,
@@ -1561,6 +1707,9 @@ pub extern "win64" fn c_specific_handler(
 /// Phase 2: `GMEM_FIXED` and `GMEM_MOVEABLE` are both handled by returning
 /// a real heap pointer (handle == pointer). Zeroing (`GMEM_ZEROINIT`) is
 /// honoured.
+// Wine ref: dlls/kernelbase/memory.c:1017 — delegates to LocalAlloc; forces
+// size=1 for GMEM_FIXED with size=0 (unlike LocalAlloc which allows 0-size fixed);
+// sets MEM_FLAG_DDESHARE if GMEM_DDESHARE flag is set.
 pub extern "win64" fn global_alloc(u_flags: u32, dw_bytes: usize) -> usize {
     if dw_bytes == 0 {
         return 0;
@@ -1577,6 +1726,8 @@ pub extern "win64" fn global_alloc(u_flags: u32, dw_bytes: usize) -> usize {
 /// GlobalFree: free memory allocated by `GlobalAlloc`.
 ///
 /// Returns NULL on success, the original handle on failure.
+// Wine ref: dlls/kernelbase/memory.c — delegates to LocalFree; returns
+// NULL on success, handle on failure; NULL input returns NULL (no error).
 pub extern "win64" fn global_free(h_mem: usize) -> usize {
     if h_mem == 0 {
         return 0;
@@ -1588,6 +1739,9 @@ pub extern "win64" fn global_free(h_mem: usize) -> usize {
 /// GlobalLock: lock a global memory object and return a pointer.
 ///
 /// Phase 2: `HGLOBAL == pointer`, so just return `h_mem` directly.
+// Wine ref: dlls/kernelbase/memory.c — delegates to LocalLock; for GMEM_FIXED
+// (ptr==handle) returns the pointer directly; for GMEM_MOVEABLE increments
+// mem_entry lock count and returns mem_entry->ptr.
 pub extern "win64" fn global_lock(h_mem: usize) -> usize {
     h_mem // pointer == handle in Phase 2
 }
@@ -1595,6 +1749,8 @@ pub extern "win64" fn global_lock(h_mem: usize) -> usize {
 /// GlobalUnlock: decrement the lock count of a global memory object.
 ///
 /// Phase 2: no-op; returns TRUE.
+// Wine ref: dlls/kernelbase/memory.c — delegates to LocalUnlock; decrements
+// mem_entry lock count; returns FALSE + ERROR_NOT_LOCKED when count reaches 0.
 pub extern "win64" fn global_unlock(_h_mem: usize) -> i32 {
     1 // TRUE
 }
@@ -1602,26 +1758,38 @@ pub extern "win64" fn global_unlock(_h_mem: usize) -> i32 {
 /// GlobalSize: return the size of a global memory block.
 ///
 /// Phase 2: we don't track sizes; returns 0 (stub).
+// Wine ref: dlls/kernelbase/memory.c — delegates to LocalSize; calls
+// HeapSize on the underlying allocation; returns 0 for NULL or invalid handles.
 pub extern "win64" fn global_size(_h_mem: usize) -> usize {
     0
 }
 
 /// LocalAlloc: allocate a block of local memory (alias for GlobalAlloc).
+// Wine ref: dlls/kernelbase/memory.c:1046 — LMEM_FIXED returns raw heap pointer;
+// LMEM_MOVEABLE allocates a mem_entry handle with a separate heap block (ptr);
+// LMEM_DISCARDABLE flag allowed only with MOVEABLE; size=0 → discarded state.
 pub extern "win64" fn local_alloc(u_flags: u32, u_bytes: usize) -> usize {
     global_alloc(u_flags, u_bytes)
 }
 
 /// LocalFree: free memory allocated by `LocalAlloc`.
+// Wine ref: dlls/kernelbase/memory.c:1106 — for LMEM_FIXED, calls HeapFree directly;
+// for LMEM_MOVEABLE, frees mem_entry->ptr then recycles the mem_entry slot;
+// returns NULL on success, original handle on failure (sets ERROR_INVALID_HANDLE).
 pub extern "win64" fn local_free(h_mem: usize) -> usize {
     global_free(h_mem)
 }
 
 /// LocalLock: lock a local memory object (alias for GlobalLock).
+// Wine ref: dlls/kernelbase/memory.c — LMEM_FIXED handle is the pointer itself;
+// LMEM_MOVEABLE increments mem_entry.lock and returns mem_entry->ptr.
 pub extern "win64" fn local_lock(h_mem: usize) -> usize {
     global_lock(h_mem)
 }
 
 /// LocalUnlock: unlock a local memory object (alias for GlobalUnlock).
+// Wine ref: dlls/kernelbase/memory.c — decrements mem_entry.lock;
+// returns FALSE + ERROR_NOT_LOCKED when lock count already zero.
 pub extern "win64" fn local_unlock(h_mem: usize) -> i32 {
     global_unlock(h_mem)
 }
@@ -1634,6 +1802,9 @@ pub extern "win64" fn local_unlock(h_mem: usize) -> i32 {
 ///
 /// # Safety
 /// `h_mem` must be a pointer returned from LocalAlloc/LocalReAlloc or NULL.
+// Wine ref: dlls/kernelbase/memory.c — LocalReAlloc: LMEM_MODIFY just sets flags, no resize.
+// LMEM_MOVEABLE allows relocation; without it HEAP_REALLOC_IN_PLACE_ONLY is set.
+// LMEM_ZEROINIT → HEAP_ZERO_MEMORY (zeroes only newly added bytes, not whole block).
 pub unsafe extern "win64" fn local_re_alloc(
     h_mem: *mut std::ffi::c_void,
     u_bytes: usize,
@@ -1661,6 +1832,8 @@ pub extern "win64" fn heap_create(
 /// HeapDestroy: destroy a heap (no-op).
 ///
 /// Returns TRUE. Never actually destroy memory — the "heap" is just the libc allocator.
+// Wine ref: dlls/kernelbase/memory.c:750 — calls RtlDestroyHeap; returns TRUE
+// if NULL returned (success), FALSE + ERROR_INVALID_HANDLE if handle was invalid.
 pub extern "win64" fn heap_destroy(_h_heap: usize) -> i32 {
     1 // TRUE
 }
@@ -1673,6 +1846,9 @@ pub extern "win64" fn heap_destroy(_h_heap: usize) -> i32 {
 ///
 /// # Safety
 /// The returned pointer must be freed with HeapFree or it will leak.
+// Wine ref: dlls/ntdll/heap.c — RtlAllocateHeap: size=0 still returns non-NULL (minimum
+// block allocated). HEAP_ZERO_MEMORY zeroes allocation. Large blocks (≥HEAP_MIN_LARGE_BLOCK_SIZE)
+// take a separate path via heap_allocate_large. Weave uses malloc/calloc; hHeap ignored.
 pub extern "win64" fn heap_alloc(
     _h_heap: usize,
     dw_flags: u32,
@@ -1702,6 +1878,9 @@ pub extern "win64" fn heap_alloc(
 /// # Safety
 /// `lp_mem` must be a valid pointer returned from HeapAlloc or NULL.
 /// The returned pointer must be freed with HeapFree or it will leak.
+// Wine ref: dlls/kernelbase/memory.c — calls RtlReAllocateHeap; HEAP_ZERO_MEMORY
+// zeroes only newly added bytes; HEAP_REALLOC_IN_PLACE_ONLY fails rather than
+// moving the block; returns NULL on failure (does NOT free original block).
 pub unsafe extern "win64" fn heap_re_alloc(
     _h_heap: usize,
     _dw_flags: u32,
@@ -1717,6 +1896,9 @@ pub unsafe extern "win64" fn heap_re_alloc(
 ///
 /// # Safety
 /// `lp_mem` must be a valid pointer returned from HeapAlloc/HeapReAlloc or NULL.
+// Wine ref: dlls/ntdll/heap.c::RtlFreeHeap:2078 — NULL ptr returns TRUE without
+// freeing; invalid ptr sets ERROR_INVALID_PARAMETER and returns FALSE; double-free
+// of same ptr in same heap → silent FALSE on Windows (glibc aborts instead).
 pub unsafe extern "win64" fn heap_free(
     _h_heap: usize,
     _dw_flags: u32,
@@ -1749,6 +1931,8 @@ pub unsafe extern "win64" fn heap_free(
 /// HeapSize: return the size of a heap block.
 ///
 /// We don't track allocation sizes; returns 0 (acceptable for defensive callers).
+// Wine ref: dlls/ntdll/heap.c::heap_size — calls heap_size() internal helper;
+// returns (SIZE_T)-1 on error (invalid handle or ptr), actual usable size on success.
 pub extern "win64" fn heap_size(
     _h_heap: usize,
     _dw_flags: u32,
@@ -1760,6 +1944,8 @@ pub extern "win64" fn heap_size(
 /// GetProcessHeap: return the process heap handle.
 ///
 /// Returns the same fake handle as HeapCreate (1usize).
+// Wine ref: include/winbase.h:2684 — inline that reads
+// NtCurrentTeb()->Peb->ProcessHeap; always non-NULL after process init.
 pub extern "win64" fn get_process_heap() -> usize {
     1usize
 }
@@ -1773,6 +1959,9 @@ pub extern "win64" fn get_process_heap() -> usize {
 ///
 /// # Safety
 /// `lp_file_name` must be a valid, null-terminated UTF-8 string.
+// Wine ref: dlls/kernelbase/file.c:750 — converts name via RtlMultiByteToUnicodeN,
+// delegates to CreateFileW; "\\\\.\\" device paths routed to NtCreateFile with
+// FILE_NON_DIRECTORY_FILE; directory opens use FILE_DIRECTORY_FILE flag.
 pub unsafe extern "win64" fn create_file_a(
     lp_file_name: *const u8,
     dw_desired_access: u32,
@@ -1827,6 +2016,10 @@ pub unsafe extern "win64" fn create_file_a(
 ///
 /// # Safety
 /// `lp_file_name` must be a valid, null-terminated UTF-16 string.
+// Wine ref: dlls/kernelbase/file.c — CreateFileW: empty/null filename → ERROR_PATH_NOT_FOUND.
+// creation out of range [1,5] → ERROR_INVALID_PARAMETER. STATUS_OBJECT_NAME_COLLISION →
+// ERROR_FILE_EXISTS. CREATE_ALWAYS/OPEN_ALWAYS with existing file → ERROR_ALREADY_EXISTS set
+// as LastError even on success (io.Information == FILE_OVERWRITTEN/FILE_OPENED).
 pub unsafe extern "win64" fn create_file_w(
     lp_file_name: *const u16,
     dw_desired_access: u32,
@@ -1888,6 +2081,9 @@ pub unsafe extern "win64" fn create_file_w(
 ///
 /// # Safety
 /// `lp_buffer` must be valid for `n_bytes_to_read` bytes.
+// Wine ref: dlls/kernelbase/file.c — ReadFile: always sets *result=0 first. Synchronous EOF
+// (STATUS_END_OF_FILE) → TRUE with *result=0. Overlapped EOF → FALSE + ERROR_HANDLE_EOF.
+// Pipe reads: STATUS_PIPE_BROKEN → FALSE + ERROR_BROKEN_PIPE. Weave: sync only, no pipe handling.
 pub unsafe extern "win64" fn read_file(
     h_file: usize,
     lp_buffer: *mut u8,
@@ -1949,6 +2145,9 @@ pub unsafe extern "win64" fn read_file(
 ///
 /// # Safety
 /// `lp_buffer` must be valid for `n_bytes_to_write` bytes.
+// Wine ref: dlls/kernelbase/file.c — WriteFile: sets *result=0 first; overlapped writes use
+// OVERLAPPED.Offset/OffsetHigh for file position and may return ERROR_IO_PENDING. Console
+// handle writes go through WriteConsoleA. Weave: sync only, no overlapped, no console path.
 pub unsafe extern "win64" fn write_file(
     h_file: usize,
     lp_buffer: *const u8,
@@ -2031,6 +2230,9 @@ pub extern "win64" fn close_handle(h_object: usize) -> i32 {
 ///
 /// # Safety
 /// `lp_file_name` must be a valid, null-terminated UTF-16 string.
+// Wine ref: dlls/kernelbase/file.c:1104 — converts path via RtlDosPathNameToNtPathName_U,
+// opens with FILE_DELETE_ON_CLOSE | FILE_OPEN_REPARSE_POINT, then NtClose triggers delete;
+// returns ERROR_PATH_NOT_FOUND for non-existent paths (not ERROR_FILE_NOT_FOUND).
 pub unsafe extern "win64" fn delete_file_w(lp_file_name: *const u16) -> i32 {
     if lp_file_name.is_null() {
         set_last_error(file_io::ERROR_INVALID_HANDLE);
@@ -2078,6 +2280,9 @@ pub unsafe extern "win64" fn delete_file_w(lp_file_name: *const u16) -> i32 {
 /// (0xFFFFFFFF) on failure.
 /// # Safety
 /// `lp_distance_to_move_high`, if non-null, must be a valid pointer to an i32.
+// Wine ref: dlls/kernelbase/file.c:3848 — builds LARGE_INTEGER from low+highword,
+// calls SetFilePointerEx; if low result == INVALID_SET_FILE_POINTER (0xFFFFFFFF)
+// and no error, clears LastError to 0 to distinguish EOF from failure.
 pub unsafe extern "win64" fn set_file_pointer(
     h_file: usize,
     l_distance_to_move: i32,
@@ -2132,6 +2337,9 @@ pub unsafe extern "win64" fn set_file_pointer(
 /// on error.
 /// # Safety
 /// `lp_file_size_high`, if non-null, must be a valid pointer to a u32.
+// Wine ref: dlls/kernelbase/file.c:3228 — calls GetFileSizeEx; if LowPart==
+// INVALID_FILE_SIZE (0xFFFFFFFF) and no error, clears LastError to 0
+// to distinguish valid 4GB-1 size from failure (same trick as SetFilePointer).
 pub unsafe extern "win64" fn get_file_size(h_file: usize, lp_file_size_high: *mut u32) -> u32 {
     let fd = match handles::get_fd(h_file) {
         Some(fd) => fd,
@@ -2158,8 +2366,14 @@ pub unsafe extern "win64" fn get_file_size(h_file: usize, lp_file_size_high: *mu
 
 // ── File information functions ───────────────────────────────────────────────
 
+/// GetFileInformationByHandle: return BY_HANDLE_FILE_INFORMATION for an open file.
+///
 /// # Safety
 /// `lp_file_information` must be a valid writable pointer to a ByHandleFileInformation.
+// Wine ref: dlls/kernelbase/file.c:3106 — calls NtQueryInformationFile with
+// FileStatInformation; separately queries NtQueryVolumeInformationFile for
+// VolumeSerialNumber (STATUS_BUFFER_OVERFLOW is tolerated). FileId maps to
+// nFileIndexHigh/Low; dwVolumeSerialNumber defaults to 0 if volume query fails.
 pub unsafe extern "win64" fn get_file_information_by_handle(
     h_file: usize,
     lp_file_information: *mut ByHandleFileInformation,
@@ -2217,6 +2431,10 @@ pub unsafe extern "win64" fn get_file_information_by_handle(
 /// # Safety
 /// `h_file` must be a valid Weave handle. `lp_file_information` must point to a
 /// buffer of at least `dw_buffer_size` bytes matching the requested class layout.
+// Wine ref: dlls/kernelbase/file.c:3141 — switch on FILE_INFO_BY_HANDLE_CLASS; calls
+// NtQueryInformationFile for FileBasicInfo/FileStandardInfo/FileNameInfo/FileIdInfo/etc.;
+// ERROR_CALL_NOT_IMPLEMENTED for FileRemoteProtocolInfo/FileNormalizedNameInfo;
+// ERROR_INVALID_PARAMETER for FileRenameInfo/FileDispositionInfo/FileEndOfFileInfo.
 #[allow(non_upper_case_globals)]
 pub unsafe extern "win64" fn get_file_information_by_handle_ex(
     h_file: usize,
@@ -2290,12 +2508,12 @@ pub unsafe extern "win64" fn get_file_information_by_handle_ex(
                 return 0;
             }
             let size = stat.st_size as u64;
-            let alloc = ((size + 4095) & !4095) as u64; // round up to 4 KiB blocks
+            let alloc = (size + 4095) & !4095; // round up to 4 KiB blocks
             let is_dir = (stat.st_mode & libc::S_IFMT) == libc::S_IFDIR;
             unsafe {
                 let p = lp_file_information as *mut u64;
                 p.add(0).write_unaligned(alloc); // AllocationSize
-                p.add(1).write_unaligned(size);  // EndOfFile
+                p.add(1).write_unaligned(size); // EndOfFile
                 let p32 = p.add(2) as *mut u32;
                 p32.add(0).write_unaligned(stat.st_nlink as u32); // NumberOfLinks
                 p32.add(1).write_unaligned(0u32); // DeletePending = FALSE
@@ -2326,8 +2544,8 @@ pub unsafe extern "win64" fn get_file_information_by_handle_ex(
             unsafe {
                 let p = lp_file_information as *mut u64;
                 p.add(0).write_unaligned(0xDEAD_BEEF_u64); // VolumeSerialNumber
-                p.add(1).write_unaligned(stat.st_ino);      // FileId low 64 bits
-                p.add(2).write_unaligned(0u64);             // FileId high 64 bits
+                p.add(1).write_unaligned(stat.st_ino); // FileId low 64 bits
+                p.add(2).write_unaligned(0u64); // FileId high 64 bits
             }
             1 // TRUE
         }
@@ -2355,6 +2573,10 @@ pub unsafe extern "win64" fn get_file_information_by_handle_ex(
 /// # Safety
 /// `h_file` must be a valid handle. `path` (if non-null) must point to a
 /// writable buffer of `count` wide characters.
+// Wine ref: dlls/kernelbase/file.c — GetFinalPathNameByHandleW: unknown flags →
+// ERROR_INVALID_PARAMETER. Queries ObjectNameInformation via NtQueryObject, strips
+// \\??\ prefix. Buffer too small → returns result+1 (not result). VOLUME_NAME_DOS
+// prepends \\?\ to the NT-style path. FILE_NAME_OPENED is not yet supported in Wine.
 pub unsafe extern "win64" fn get_final_path_name_by_handle_w(
     h_file: usize,
     path: *mut u16,
@@ -2406,6 +2628,9 @@ pub unsafe extern "win64" fn get_final_path_name_by_handle_w(
 ///
 /// # Safety
 /// `pdw_returned_product_type` must be a valid writable pointer if non-null.
+// Wine ref: dlls/kernelbase/version.c — GetProductInfo is a thin wrapper around
+// RtlGetProductInfo; Wine's RtlGetProductInfo returns PRODUCT_UNDEFINED (0).
+// Weave returns PRODUCT_PROFESSIONAL (0x30) to satisfy SKU checks.
 pub unsafe extern "win64" fn get_product_info(
     _dw_os_major_version: u32,
     _dw_os_minor_version: u32,
@@ -2464,6 +2689,9 @@ pub unsafe extern "win64" fn get_application_restart_settings(
 ///
 /// # Safety
 /// All pointer args are ignored.
+// Wine ref: dlls/kernelbase/file.c — ReadDirectoryChangesW: issues NtNotifyChangeDirectoryFile.
+// No overlapped → creates a temporary event, waits synchronously, then CloseHandle(event).
+// overlapped → STATUS_PENDING returns TRUE immediately (async path).
 pub unsafe extern "win64" fn read_directory_changes_w(
     _h_directory: usize,
     _lp_buffer: *mut u8,
@@ -2478,8 +2706,13 @@ pub unsafe extern "win64" fn read_directory_changes_w(
     0 // FALSE
 }
 
+/// SetEndOfFile: truncate or extend file at current position.
+///
 /// # Safety
 /// No pointer arguments are dereferenced.
+// Wine ref: dlls/kernelbase/file.c:3749 — calls NtQueryInformationFile to get
+// current position, then NtSetInformationFile(FileEndOfFileInformation);
+// returns ERROR_INVALID_HANDLE if the handle is invalid.
 pub unsafe extern "win64" fn set_end_of_file(h_file: usize) -> i32 {
     let fd = match handles::get_fd(h_file) {
         Some(fd) => fd,
@@ -2495,8 +2728,13 @@ pub unsafe extern "win64" fn set_end_of_file(h_file: usize) -> i32 {
     (ret == 0) as i32
 }
 
+/// GetLogicalDriveStringsW: enumerate available drive letters.
+///
 /// # Safety
 /// `lp_buffer` must be valid for `n_buffer_length` u16 words.
+// Wine ref: dlls/kernelbase/volume.c:526 — iterates drive letters A–Z, checks
+// each with GetDriveTypeW; returns double-null-terminated list; if buffer is NULL
+// or too small, returns required length without writing.
 pub unsafe extern "win64" fn get_logical_drive_strings_w(
     n_buffer_length: u32,
     lp_buffer: *mut u16,
@@ -2519,8 +2757,12 @@ pub unsafe extern "win64" fn get_logical_drive_strings_w(
     4 // length excluding final null
 }
 
+/// GetLogicalDriveStringsA: enumerate available drive letters (ANSI).
+///
 /// # Safety
 /// `lp_buffer` must be valid for `n_buffer_length` bytes.
+// Wine ref: dlls/kernelbase/volume.c — ANSI wrapper; converts result from
+// GetLogicalDriveStringsW via RtlUnicodeToMultiByteN.
 pub unsafe extern "win64" fn get_logical_drive_strings_a(
     n_buffer_length: u32,
     lp_buffer: *mut u8,
@@ -2545,13 +2787,14 @@ pub unsafe extern "win64" fn get_logical_drive_strings_a(
 
 /// GetVolumeInformationW: return volume name, serial, flags, and filesystem name.
 ///
-/// Wine ref: dlls/kernelbase/volume.c — queries NtQueryVolumeInformationFile
-/// (FileFsAttributeInformation + FileFsVolumeInformation); returns TRUE on
-/// success. Weave returns a fake "Weave" volume name, fixed serial 0xDEADBEEF,
+/// Weave returns a fake "Weave" volume name, fixed serial 0xDEADBEEF,
 /// max component 255, FILE_CASE_PRESERVED_NAMES, and filesystem "NTFS".
 ///
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
+// Wine ref: dlls/kernelbase/volume.c — queries NtQueryVolumeInformationFile with
+// FileFsVolumeInformation (serial + name) and FileFsAttributeInformation (fs name + flags);
+// returns TRUE via set_ntstatus; NULL root path uses current directory's volume.
 pub unsafe extern "win64" fn get_volume_information_w(
     _lp_root_path_name: *const u16,
     lp_volume_name_buffer: *mut u16,
@@ -2606,8 +2849,13 @@ pub unsafe extern "win64" fn get_volume_information_w(
 
 // ── Process/thread stubs ─────────────────────────────────────────────────────
 
+/// CreateProcessW: create a new process and its primary thread.
+///
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
+// Wine ref: dlls/kernelbase/process.c — calls NtCreateUserProcess; fills
+// PROCESS_INFORMATION with hProcess/hThread/ProcessId/ThreadId; CREATE_SUSPENDED
+// leaves thread suspended until ResumeThread. Weave stub: returns FALSE (not supported).
 pub unsafe extern "win64" fn create_process_w(
     _lp_application_name: *const u16,
     _lp_command_line: *mut u16,
@@ -2623,8 +2871,12 @@ pub unsafe extern "win64" fn create_process_w(
     0 // FALSE
 }
 
+/// CreateProcessA: create a new process (ANSI wrapper).
+///
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
+// Wine ref: dlls/kernelbase/process.c — converts name/cmdline via
+// RtlMultiByteToUnicodeN then delegates to CreateProcessW.
 pub unsafe extern "win64" fn create_process_a(
     _lp_application_name: *const u8,
     _lp_command_line: *mut u8,
@@ -2640,20 +2892,29 @@ pub unsafe extern "win64" fn create_process_a(
     0 // FALSE
 }
 
+/// WaitForInputIdle: wait until a process is idle or timeout expires.
+///
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
+// Wine ref: dlls/user32/misc.c — sends WM_NULL to the process's thread to check
+// if it's processing messages; returns WAIT_OBJECT_0 when idle,
+// WAIT_TIMEOUT (258) if timeout expires, WAIT_FAILED on error.
 pub unsafe extern "win64" fn wait_for_input_idle(_h_process: usize, _dw_milliseconds: u32) -> u32 {
     258 // WAIT_TIMEOUT
 }
 
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
+// Wine ref: dlls/kernelbase/process.c:886 — calls NtQueryInformationProcess(ProcessBasicInformation);
+// returns pbi.UniqueProcessId; returns 0 on NT error (sets LastError via set_ntstatus).
 pub unsafe extern "win64" fn get_process_id(_process: usize) -> u32 {
     1000 // fake PID
 }
 
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
+// Wine ref: dlls/kernelbase/thread.c:400 — NtOpenThread with CLIENT_ID{UniqueProcess=0,
+// UniqueThread=id}; sets OBJ_INHERIT when inherit!=0; returns 0 (not INVALID_HANDLE_VALUE) on failure.
 pub unsafe extern "win64" fn open_thread(
     _dw_desired_access: u32,
     _b_inherit_handle: i32,
@@ -2664,6 +2925,8 @@ pub unsafe extern "win64" fn open_thread(
 
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
+// Wine ref: dlls/kernelbase/thread.c:296 — NtQueryInformationThread(ThreadBasicInformation);
+// returns tbi.ClientId.UniqueThread cast to DWORD; returns 0 on error.
 pub unsafe extern "win64" fn get_thread_id(_thread: usize) -> u32 {
     42 // fake thread ID
 }
@@ -2672,6 +2935,8 @@ pub unsafe extern "win64" fn get_thread_id(_thread: usize) -> u32 {
 
 /// # Safety
 /// `lp_file_time1` and `lp_file_time2` must be valid pointers to u64 values.
+// Wine ref: dlls/kernelbase/file.c:4106 — compares high DWORD first, then low DWORD;
+// returns -1 if either pointer is NULL (not 0/ERROR_INVALID_PARAMETER).
 pub unsafe extern "win64" fn compare_file_time(
     lp_file_time1: *const u64,
     lp_file_time2: *const u64,
@@ -2695,6 +2960,8 @@ pub unsafe extern "win64" fn compare_file_time(
 
 /// # Safety
 /// `lp_file_time` and `lp_local_file_time` must be valid pointers to u64 values.
+// Wine ref: dlls/kernelbase/file.c:4120 — delegates to RtlSystemTimeToLocalTime which
+// applies the bias from SharedUserData->TimeZoneBias; does not simply copy the value.
 pub unsafe extern "win64" fn file_time_to_local_file_time(
     lp_file_time: *const u64,
     lp_local_file_time: *mut u64,
@@ -2712,6 +2979,8 @@ pub unsafe extern "win64" fn file_time_to_local_file_time(
 
 /// # Safety
 /// `lp_local_file_time` and `lp_file_time` must be valid pointers to u64 values.
+// Wine ref: dlls/kernelbase/file.c:4219 — delegates to RtlLocalTimeToSystemTime;
+// inverse of FileTimeToLocalFileTime; applies bias in the opposite direction.
 pub unsafe extern "win64" fn local_file_time_to_file_time(
     lp_local_file_time: *const u64,
     lp_file_time: *mut u64,
@@ -2726,6 +2995,8 @@ pub unsafe extern "win64" fn local_file_time_to_file_time(
 
 /// # Safety
 /// `lp_file_time` must be a valid pointer to a u64 value.
+// Wine ref: dlls/kernelbase/file.c:4267 — calls RtlTimeFieldsToTime; sets
+// ERROR_INVALID_PARAMETER and returns FALSE if RtlTimeFieldsToTime fails (e.g. invalid month/day).
 pub unsafe extern "win64" fn system_time_to_file_time(
     _lp_system_time: *const SystemTime,
     lp_file_time: *mut u64,
@@ -2742,6 +3013,8 @@ pub unsafe extern "win64" fn system_time_to_file_time(
 
 /// # Safety
 /// `lp_system_time` must be a valid pointer to a SystemTime struct.
+// Wine ref: dlls/kernelbase/file.c:4129 — rejects negative FILETIME (li->QuadPart < 0)
+// with ERROR_INVALID_PARAMETER; calls RtlTimeToTimeFields which fills wDayOfWeek correctly.
 pub unsafe extern "win64" fn file_time_to_system_time(
     _lp_file_time: *const u64,
     lp_system_time: *mut SystemTime,
@@ -2775,6 +3048,9 @@ pub unsafe extern "win64" fn file_time_to_system_time(
 /// AllocConsole: allocate a console for the process.
 ///
 /// No-op. Return TRUE.
+// Wine ref: dlls/kernelbase/console.c:404 (alloc_console) — checks PEB->ProcessParameters->ConsoleHandle;
+// returns ERROR_ACCESS_DENIED if console already attached; spawns conhost.exe as DETACHED_PROCESS with
+// a server handle passed via PROC_THREAD_ATTRIBUTE_HANDLE_LIST; sets ConsoleHandle in PEB on success.
 pub extern "win64" fn alloc_console() -> i32 {
     1 // TRUE
 }
@@ -2782,6 +3058,9 @@ pub extern "win64" fn alloc_console() -> i32 {
 /// FreeConsole: detach the process from its console.
 ///
 /// No-op. Return TRUE.
+// Wine ref: dlls/kernelbase/console.c:675 — closes console_connection and ConsoleHandle via NtClose;
+// also closes std handles if console_flags has CONSOLE_INPUT/OUTPUT/ERROR_HANDLE bits set;
+// sets ConsoleHandle=NULL in PEB; always returns TRUE.
 pub extern "win64" fn free_console() -> i32 {
     1 // TRUE
 }
@@ -2792,6 +3071,9 @@ pub extern "win64" fn free_console() -> i32 {
 ///
 /// # Safety
 /// Pointer argument is accepted but not dereferenced.
+// Wine ref: dlls/kernelbase/console.c:368 — checks ConsoleHandle first; ERROR_ACCESS_DENIED if
+// already attached; calls create_console_connection + IOCTL_CONDRV_BIND_PID with the target pid;
+// calls FreeConsole() on any error to clean up partial state.
 pub unsafe extern "win64" fn attach_console(_dw_process_id: u32) -> i32 {
     1 // TRUE
 }
@@ -2799,12 +3081,17 @@ pub unsafe extern "win64" fn attach_console(_dw_process_id: u32) -> i32 {
 /// GetConsoleWindow: retrieve the window handle for the console.
 ///
 /// Return NULL (no window).
+// Wine ref: dlls/kernelbase/console.c — queries the console server via IOCTL_CONDRV_GET_WINDOW
+// to obtain the HWND; returns NULL if no console is attached or the server returns no window.
 pub extern "win64" fn get_console_window() -> usize {
     0 // NULL
 }
 
 /// # Safety
 /// `lp_existing_file_name` and `lp_new_file_name` must be valid null-terminated UTF-16 strings.
+// Wine ref: dlls/kernelbase/file.c:2623 (MoveFileWithProgressW) — MoveFileExW delegates here;
+// MOVEFILE_DELAY_UNTIL_REBOOT stores entry via add_boot_rename_entry; NULL dest means DeleteFileW;
+// cross-device move with MOVEFILE_COPY_ALLOWED falls back to CopyFileExW+DeleteFileW.
 pub unsafe extern "win64" fn move_file_ex_w(
     lp_existing_file_name: *const u16,
     lp_new_file_name: *const u16,
@@ -2872,6 +3159,8 @@ pub unsafe extern "win64" fn move_file_ex_w(
 
 /// # Safety
 /// `lp_existing_file_name` and `lp_new_file_name` must be valid null-terminated UTF-8 strings.
+// Wine ref: dlls/kernelbase/file.c — MoveFileExA converts paths via RtlMultiByteToUnicodeN
+// then delegates to MoveFileExW/MoveFileWithProgressW.
 pub unsafe extern "win64" fn move_file_ex_a(
     lp_existing_file_name: *const u8,
     lp_new_file_name: *const u8,
@@ -2952,6 +3241,9 @@ pub unsafe extern "win64" fn move_file_ex_a(
 ///
 /// # Safety
 /// `lp_wide_char_str` must be valid for `cch_wide_char` u16 words (or null-terminated if < 0).
+// Wine ref: dlls/kernelbase/locale.c — WideCharToMultiByte: srclen<0 → lstrlenW(src)+1.
+// Invalid flags for the codepage → ERROR_INVALID_FLAGS. CP_SYMBOL and CP_UTF7 have
+// separate paths. CP_UNIXCP falls through to default. Weave handles UTF-8 only.
 pub unsafe extern "win64" fn wide_char_to_multi_byte(
     _code_page: u32,
     _dw_flags: u32,
@@ -3023,6 +3315,9 @@ pub unsafe extern "win64" fn wide_char_to_multi_byte(
 /// `lp_multi_byte_str` must be valid for `cb_multi_byte` bytes (or
 /// null-terminated when `cb_multi_byte == -1`).
 /// `lp_wide_char_str`, if non-null, must be writable for `cch_wide_char` u16 words.
+// Wine ref: dlls/kernelbase/locale.c — MultiByteToWideChar: srclen<0 → strlen(src)+1.
+// Invalid flags for the codepage → ERROR_INVALID_FLAGS. CP_SYMBOL/CP_UTF7 separate paths.
+// CP_UNIXCP falls through to default codepage. Weave handles UTF-8 input only.
 pub unsafe extern "win64" fn multi_byte_to_wide_char(
     _code_page: u32,
     _dw_flags: u32,
@@ -3086,6 +3381,9 @@ pub unsafe extern "win64" fn multi_byte_to_wide_char(
 ///
 /// # Safety
 /// `lp_startup_info` must point to at least 68 bytes of writable memory.
+// Wine ref: dlls/kernelbase/process.c:1349 (GetStartupInfoW) — copies fields directly from
+// RtlGetCurrentPeb()->ProcessParameters under RtlAcquirePebLock; hStdInput/Output/Error
+// are only filled when STARTF_USESTDHANDLES is set in dwFlags.
 pub unsafe extern "win64" fn get_startup_info_a(lp_startup_info: *mut u8) {
     if lp_startup_info.is_null() {
         return;
@@ -3103,6 +3401,9 @@ pub unsafe extern "win64" fn get_startup_info_a(lp_startup_info: *mut u8) {
 ///
 /// # Safety
 /// `lp_startup_info` must point to at least 104 bytes of writable memory.
+// Wine ref: dlls/kernelbase/process.c — GetStartupInfoW reads RTL_USER_PROCESS_PARAMETERS
+// under RtlAcquirePebLock. hStdInput/Output/Error only filled when STARTF_USESTDHANDLES
+// is set in dwFlags. lpReserved is always NULL. Weave zeroes struct and sets cb only.
 pub unsafe extern "win64" fn get_startup_info_w(lp_startup_info: *mut u8) {
     if lp_startup_info.is_null() {
         return;
@@ -3142,6 +3443,8 @@ pub unsafe extern "win64" fn get_startup_info_w(lp_startup_info: *mut u8) {
 }
 
 /// FlushFileBuffers: flush OS write buffers for an open file handle.
+// Wine ref: dlls/kernelbase/file.c:3095 — calls NtFlushBuffersFile with an IO_STATUS_BLOCK;
+// does not special-case console handles (those fail NtFlushBuffersFile gracefully).
 pub extern "win64" fn flush_file_buffers(h_file: usize) -> i32 {
     let fd = match handles::get_fd(h_file) {
         Some(fd) => fd,
@@ -3167,6 +3470,10 @@ pub extern "win64" fn flush_file_buffers(h_file: usize) -> i32 {
 ///
 /// # Safety
 /// `lp_file_mapping_attributes` and `lp_name` are ignored (accepted but not dereferenced).
+// Wine ref: dlls/kernelbase/sync.c:1032 — INVALID_HANDLE_VALUE maps to file=0 for NtCreateSection;
+// size must be non-zero for anonymous mappings (ERROR_INVALID_PARAMETER otherwise);
+// SEC_COMMIT is implied when no SEC_* flags are set in the protect bits;
+// STATUS_OBJECT_NAME_EXISTS sets ERROR_ALREADY_EXISTS (not ERROR_ACCESS_DENIED).
 pub unsafe extern "win64" fn create_file_mapping_w(
     h_file: usize,
     _lp_file_mapping_attributes: usize,
@@ -3250,6 +3557,9 @@ pub unsafe extern "win64" fn create_file_mapping_w(
 ///
 /// # Safety
 /// No pointer dereference — just returns the mapped address.
+// Wine ref: dlls/kernelbase/memory.c:278 — thin wrapper over MapViewOfFileEx(addr=NULL);
+// MapViewOfFileEx calls NtMapViewOfSection with ViewShare and translates FILE_MAP_COPY
+// to PAGE_WRITECOPY, FILE_MAP_WRITE to PAGE_READWRITE, FILE_MAP_EXECUTE to PAGE_EXECUTE_*.
 pub extern "win64" fn map_view_of_file(
     h_file_mapping_object: usize,
     _dw_desired_access: u32,
@@ -3277,6 +3587,9 @@ pub extern "win64" fn map_view_of_file(
 ///
 /// # Safety
 /// `lp_base_address` must be a valid mmap address previously returned by MapViewOfFile.
+// Wine ref: dlls/kernelbase/memory.c:384 — on Win9x also validates AllocationBase == addr
+// via VirtualQuery; on NT calls NtUnmapViewOfSection(GetCurrentProcess(), addr); Weave
+// uses munmap since our mapping is backed by mmap rather than NtMapViewOfSection.
 pub unsafe extern "win64" fn unmap_view_of_file(lp_base_address: *const u8) -> i32 {
     let view = lp_base_address as usize;
     if let Some((addr, size)) = find_mapping_by_addr(view) {
@@ -3289,6 +3602,9 @@ pub unsafe extern "win64" fn unmap_view_of_file(lp_base_address: *const u8) -> i
 ///
 /// # Safety
 /// `lp_existing_file_name` and `lp_new_file_name` must be valid null-terminated UTF-16 strings.
+// Wine ref: dlls/kernelbase/file.c — CopyFileW delegates to CopyFileExW(progress=NULL, cancel=NULL,
+// flags = bFailIfExists ? COPY_FILE_FAIL_IF_EXISTS : 0); CopyFileExW opens source with
+// GENERIC_READ|FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE and copies file attributes.
 pub unsafe extern "win64" fn copy_file_w(
     lp_existing_file_name: *const u16,
     lp_new_file_name: *const u16,
@@ -3434,6 +3750,9 @@ pub struct Win32FindDataA {
 ///
 /// # Safety
 /// `lp_file_name` must be a valid null-terminated UTF-16 path. `lp_find_file_data` writable.
+// Wine ref: dlls/kernelbase/file.c — FindFirstFileW delegates to FindFirstFileExW with
+// FindExInfoStandard + FindExSearchNameMatch. FindFirstFileExW allocates a FIND_FIRST_INFO
+// struct with a magic number, uses NtQueryDirectoryFile. Skips ./..\u{a0}only in root drives.
 pub unsafe extern "win64" fn find_first_file_w(
     lp_file_name: *const u16,
     lp_find_file_data: *mut Win32FindDataW,
@@ -3580,6 +3899,8 @@ pub unsafe extern "win64" fn find_first_file_w(
 /// # Safety
 /// `lp_file_name` must be a valid null-terminated UTF-8 string.
 /// `lp_find_file_data` must be a valid writable pointer to a WIN32_FIND_DATAA.
+// Wine ref: dlls/kernelbase/file.c:1448 — FindFirstFileA delegates to FindFirstFileExA
+// which converts the filename via RtlMultiByteToUnicodeN then calls FindFirstFileExW.
 pub unsafe extern "win64" fn find_first_file_a(
     lp_file_name: *const u8,
     lp_find_file_data: *mut Win32FindDataA,
@@ -3669,6 +3990,10 @@ pub unsafe extern "win64" fn find_first_file_a(
 /// # Safety
 /// `h_find_file` must be a valid directory handle from FindFirstFileW.
 /// `lp_find_file_data` must be a valid writable pointer to a WIN32_FIND_DATAW.
+// Wine ref: dlls/kernelbase/file.c — FindNextFileW: validates info->magic == FIND_FIRST_MAGIC
+// before use (invalid handle → ERROR_INVALID_HANDLE). Loops NtQueryDirectoryFile for more
+// data when buffer exhausted. Sets dwReserved0 to reparse tag when FILE_ATTRIBUTE_REPARSE_POINT.
+// FindExInfoBasic suppresses cAlternateFileName. Weave: no magic, no reparse tag.
 pub unsafe extern "win64" fn find_next_file_w(
     h_find_file: usize,
     lp_find_file_data: *mut Win32FindDataW,
@@ -3735,6 +4060,8 @@ pub unsafe extern "win64" fn find_next_file_w(
 /// # Safety
 /// `h_find_file` must be a valid directory handle from FindFirstFileA.
 /// `lp_find_file_data` must be a valid writable pointer to a WIN32_FIND_DATAA.
+// Wine ref: dlls/kernelbase/file.c:1486 — converts the result of FindNextFileW to ANSI
+// via file_name_WtoA; both cFileName and cAlternateFileName are converted.
 pub unsafe extern "win64" fn find_next_file_a(
     h_find_file: usize,
     lp_find_file_data: *mut Win32FindDataA,
@@ -3790,6 +4117,9 @@ pub unsafe extern "win64" fn find_next_file_a(
 }
 
 /// FindClose: close directory enumeration handle.
+// Wine ref: dlls/kernelbase/file.c — validates FIND_FIRST_MAGIC; calls NtClose on the
+// directory handle stored in FIND_FIRST_INFO; frees the FIND_FIRST_INFO heap allocation.
+// Weave uses a raw DIR* instead of the NT directory-handle approach.
 pub extern "win64" fn find_close(h_find_file: usize) -> i32 {
     if h_find_file == 0 || h_find_file == usize::MAX {
         return 0; // FALSE
@@ -3809,6 +4139,9 @@ pub extern "win64" fn find_close(h_find_file: usize) -> i32 {
 }
 
 /// VerSetConditionMask: pack a condition into the corresponding 3-bit slot of the mask.
+// Wine ref: dlls/kernel32/version.c:40 (version_update_condition) — each type flag gets a
+// 3-bit slot in the 64-bit mask; VER_EQUAL (1) through VER_LESS_EQUAL (6) are the valid
+// conditions; invalid transitions leave the prior condition unchanged.
 pub extern "win64" fn ver_set_condition_mask(
     mut condition_mask: u64,
     type_mask: u32,
@@ -3836,6 +4169,9 @@ pub extern "win64" fn ver_set_condition_mask(
 ///
 /// # Safety
 /// `lp_version_info` must be a valid pointer to an OSVERSIONINFOEXW.
+// Wine ref: dlls/kernel32/version.c — delegates to RtlVerifyVersionInfo in ntdll;
+// compares fields (MajorVersion, MinorVersion, BuildNumber, ServicePackMajor, etc.) using
+// the 3-bit condition slots from the condition_mask; sets ERROR_OLD_WIN_VERSION on failure.
 pub unsafe extern "win64" fn verify_version_info_w(
     _lp_version_info: *const OsVersionInfoExW,
     _type_mask: u32,
@@ -3861,6 +4197,9 @@ pub struct Win32FileAttributeData {
 /// # Safety
 /// `lp_file_name` must be a valid null-terminated UTF-16 string.
 /// `lp_file_information` must be a valid writable pointer to a WIN32_FILE_ATTRIBUTE_DATA.
+// Wine ref: dlls/kernelbase/file.c:1799 — only GetFileExInfoStandard is valid (level != 0
+// → ERROR_INVALID_PARAMETER); calls NtQueryFullAttributesFile to fill WIN32_FILE_ATTRIBUTE_DATA
+// including all four timestamps and both file size halves; ERROR_PATH_NOT_FOUND if path fails.
 pub unsafe extern "win64" fn get_file_attributes_ex_w(
     lp_file_name: *const u16,
     _f_info_level_id: u32,
@@ -3932,6 +4271,8 @@ pub unsafe extern "win64" fn get_file_attributes_ex_w(
 /// # Safety
 /// `lp_file_name` must be a valid null-terminated UTF-8 string.
 /// `lp_file_information` must be a valid writable pointer to a WIN32_FILE_ATTRIBUTE_DATA.
+// Wine ref: dlls/kernelbase/file.c:1787 — converts name via file_name_AtoW (stack allocation)
+// then delegates entirely to GetFileAttributesExW.
 pub unsafe extern "win64" fn get_file_attributes_ex_a(
     lp_file_name: *const u8,
     _f_info_level_id: u32,
@@ -3995,6 +4336,8 @@ pub unsafe extern "win64" fn get_file_attributes_ex_a(
 ///
 /// # Safety
 /// `lp_existing_file_name` and `lp_new_file_name` must be valid null-terminated UTF-8 strings.
+// Wine ref: dlls/kernelbase/file.c — CopyFileA converts via MultiByteToWideChar then calls
+// CopyFileExW(progress=NULL, cancel=NULL, flags=bFailIfExists ? COPY_FILE_FAIL_IF_EXISTS : 0).
 pub unsafe extern "win64" fn copy_file_a(
     lp_existing_file_name: *const u8,
     lp_new_file_name: *const u8,
@@ -4219,6 +4562,8 @@ unsafe fn read_cstr_w(p: *const u16) -> String {
 ///
 /// # Safety
 /// `lp_file_name` must be null or a valid null-terminated ANSI string.
+// Wine ref: dlls/kernelbase/loader.c:518 — thin wrapper: LoadLibraryA delegates to
+// LoadLibraryExA(name, 0, 0); no flags processing here.
 pub unsafe extern "win64" fn load_library_a(lp_file_name: *const u8) -> usize {
     let name = unsafe { read_cstr_a(lp_file_name) };
     if name.is_empty() {
@@ -4231,6 +4576,7 @@ pub unsafe extern "win64" fn load_library_a(lp_file_name: *const u8) -> usize {
 ///
 /// # Safety
 /// `lp_file_name` must be null or a valid null-terminated UTF-16 string.
+// Wine ref: dlls/kernelbase/loader.c:527 — delegates to LoadLibraryExW(name, 0, 0).
 pub unsafe extern "win64" fn load_library_w(lp_file_name: *const u16) -> usize {
     let name = unsafe { read_cstr_w(lp_file_name) };
     if name.is_empty() {
@@ -4243,6 +4589,8 @@ pub unsafe extern "win64" fn load_library_w(lp_file_name: *const u16) -> usize {
 ///
 /// # Safety
 /// `lp_file_name` must be null or a valid null-terminated ANSI string.
+// Wine ref: dlls/kernelbase/loader.c:536 — converts name via RtlCreateUnicodeStringFromAsciiz,
+// then delegates to load_library(); frees the UNICODE_STRING before returning.
 pub unsafe extern "win64" fn load_library_ex_a(
     lp_file_name: *const u8,
     _h_file: usize,
@@ -4259,6 +4607,8 @@ pub unsafe extern "win64" fn load_library_ex_a(
 ///
 /// # Safety
 /// `lp_file_name` must be null or a valid null-terminated UTF-16 string.
+// Wine ref: dlls/kernelbase/loader.c:555 — strips trailing spaces from name before calling
+// load_library(); returns ERROR_INVALID_PARAMETER for NULL name; uses LdrLoadDll underneath.
 pub unsafe extern "win64" fn load_library_ex_w(
     lp_file_name: *const u16,
     _h_file: usize,
@@ -4286,6 +4636,9 @@ pub extern "win64" fn free_library(_h_module: usize) -> i32 {
 ///
 /// Stub: returns TRUE. 7-Zip calls this via GetProcAddress on startup; if it
 /// returns NULL the app may exit as a security precaution.
+// Wine ref: dlls/kernelbase/loader.c — SetDefaultDllDirectories delegates to
+// LdrSetDefaultDllDirectories; sets the safe-DLL-search-mode flags for the process.
+// Invalid flags combination → error from LdrSetDefaultDllDirectories. Weave: no-op.
 pub extern "win64" fn set_default_dll_directories(_directory_flags: u32) -> i32 {
     1 // TRUE
 }
@@ -4296,6 +4649,8 @@ pub extern "win64" fn set_default_dll_directories(_directory_flags: u32) -> i32 
 ///
 /// # Safety
 /// `new_directory` is ignored.
+// Wine ref: dlls/kernelbase/loader.c:191 — calls LdrAddDllDirectory which allocates a
+// UNICODE_STRING node in the NT loader's DLL directory list; returns the node pointer as cookie.
 pub unsafe extern "win64" fn add_dll_directory(_new_directory: *const u16) -> usize {
     1 // fake DLL_DIRECTORY_COOKIE
 }
@@ -4303,6 +4658,8 @@ pub unsafe extern "win64" fn add_dll_directory(_new_directory: *const u16) -> us
 /// RemoveDllDirectory — remove a directory from the DLL search path.
 ///
 /// Returns TRUE. Stub.
+// Wine ref: dlls/kernelbase/loader.c:603 — calls LdrRemoveDllDirectory(cookie);
+// the cookie is the UNICODE_STRING node pointer allocated by AddDllDirectory.
 pub extern "win64" fn remove_dll_directory(_cookie: usize) -> i32 {
     1 // TRUE
 }
@@ -4313,6 +4670,8 @@ pub extern "win64" fn remove_dll_directory(_cookie: usize) -> i32 {
 ///
 /// # Safety
 /// `lp_path_name` is ignored.
+// Wine ref: dlls/kernelbase/loader.c — SetDllDirectoryW calls LdrSetDefaultDllDirectories
+// internally to override the safe-DLL-search-mode directory; NULL restores default behavior.
 pub unsafe extern "win64" fn set_dll_directory_w(_lp_path_name: *const u16) -> i32 {
     1 // TRUE
 }
@@ -4334,6 +4693,9 @@ pub unsafe extern "win64" fn set_dll_directory_w(_lp_path_name: *const u16) -> i
 ///
 /// # Safety
 /// `lp_proc_name` must be a null-terminated ASCII string or an ordinal value (< 0x10000).
+// Wine ref: dlls/kernelbase/loader.c — GetProcAddress delegates to get_proc_address which
+// calls LdrGetProcedureAddress. Ordinal: HIWORD(function)==0 (pointer value < 0x10000).
+// Returns NULL + ERROR_PROC_NOT_FOUND when not found. Weave: resolves via weave-core stub table.
 pub unsafe extern "win64" fn get_proc_address(h_module: usize, lp_proc_name: *const u8) -> usize {
     // Ordinal imports: pointer value < 0x10000 encodes the ordinal number.
     if !lp_proc_name.is_null() && (lp_proc_name as usize) < 0x10000 {
@@ -4384,6 +4746,9 @@ pub extern "win64" fn get_version() -> u32 {
 ///
 /// # Safety
 /// No pointer dereferences.
+// Wine ref: dlls/kernel32/toolhelp.c — calls NtQuerySystemInformation(SystemProcessInformation)
+// to populate the snapshot; stores PROCESSENTRY32W/THREADENTRY32/MODULEENTRY32W structs
+// in a heap-allocated block; returns a handle to the snapshot object.
 pub unsafe extern "win64" fn create_toolhelp32_snapshot(
     _dw_flags: u32,
     _th32_process_id: u32,
@@ -4397,6 +4762,9 @@ pub unsafe extern "win64" fn create_toolhelp32_snapshot(
 ///
 /// # Safety
 /// `lppe` is accepted but not dereferenced.
+// Wine ref: dlls/kernel32/toolhelp.c — checks that hSnapshot is a valid snapshot handle
+// and that TH32CS_SNAPPROCESS flag was set; returns ERROR_INVALID_PARAMETER otherwise;
+// fills PROCESSENTRY32W from the snapshot buffer.
 pub unsafe extern "win64" fn process32_first_w(_h_snapshot: usize, _lppe: *mut u8) -> i32 {
     0 // FALSE
 }
@@ -4407,6 +4775,8 @@ pub unsafe extern "win64" fn process32_first_w(_h_snapshot: usize, _lppe: *mut u
 ///
 /// # Safety
 /// `lppe` is accepted but not dereferenced.
+// Wine ref: dlls/kernel32/toolhelp.c — advances the internal offset into the snapshot
+// buffer; returns ERROR_NO_MORE_FILES when exhausted (NOT ERROR_NO_MORE_ITEMS).
 pub unsafe extern "win64" fn process32_next_w(_h_snapshot: usize, _lppe: *mut u8) -> i32 {
     0 // FALSE
 }
@@ -4416,6 +4786,8 @@ pub unsafe extern "win64" fn process32_next_w(_h_snapshot: usize, _lppe: *mut u8
 /// GetUserDefaultLangID — return the default language identifier.
 ///
 /// Returns 0x0409 (English, United States).
+// Wine ref: dlls/kernelbase/locale.c:6392 — LANGIDFROMLCID(GetUserDefaultLCID()); reads
+// the user LCID from the NLS locale data; on Wine this comes from the registry or env vars.
 pub extern "win64" fn get_user_default_lang_id() -> u16 {
     0x0409
 }
@@ -4429,6 +4801,9 @@ pub extern "win64" fn get_user_default_lang_id() -> u16 {
 /// # Safety
 /// `lp_existing_file_name` and `lp_new_file_name` must be valid null-terminated
 /// UTF-16 strings.
+// Wine ref: dlls/kernelbase/file.c — CopyFileExW opens source with FILE_SHARE_READ|WRITE|DELETE,
+// calls progress routine after each 64KB chunk; COPY_FILE_FAIL_IF_EXISTS prevents overwrite;
+// copies extended attributes and security descriptor when possible.
 pub unsafe extern "win64" fn copy_file_ex_w(
     lp_existing_file_name: *const u16,
     lp_new_file_name: *const u16,
@@ -4451,6 +4826,9 @@ pub unsafe extern "win64" fn copy_file_ex_w(
 /// # Safety
 /// `lp_file_name` must be a valid null-terminated UTF-16 string or NULL.
 /// `lp_file_size_high` must be a writable u32 pointer or NULL.
+// Wine ref: dlls/kernelbase/file.c — GetCompressedFileSizeW: opens file with NtOpenFile,
+// calls GetFileSize (not compression info) since Wine doesn't support compressed files either.
+// Returns INVALID_FILE_SIZE (0xFFFFFFFF) on error. Weave uses stat64 directly.
 pub unsafe extern "win64" fn get_compressed_file_size_w(
     lp_file_name: *const u16,
     lp_file_size_high: *mut u32,
@@ -4487,6 +4865,9 @@ pub unsafe extern "win64" fn get_compressed_file_size_w(
 ///
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced beyond null check.
+// Wine ref: dlls/kernelbase/file.c — opens source with FILE_WRITE_ATTRIBUTES via NtOpenFile,
+// then calls NtSetInformationFile(FileLinkInformation) with the destination NT path;
+// requires the same volume (STATUS_NOT_SAME_DEVICE → ERROR_NOT_SAME_DEVICE).
 pub unsafe extern "win64" fn create_hard_link_w(
     _lp_file_name: *const u16,
     _lp_existing_file_name: *const u16,
@@ -4501,6 +4882,9 @@ pub unsafe extern "win64" fn create_hard_link_w(
 ///
 /// # Safety
 /// Pointer arguments must be valid null-terminated UTF-16 strings or null.
+// Wine ref: dlls/kernelbase/file.c:2623 — this is the real MoveFileExW implementation;
+// MoveFileExW delegates here with progress=NULL; handles MOVEFILE_DELAY_UNTIL_REBOOT
+// and cross-device moves (MOVEFILE_COPY_ALLOWED falls back to CopyFileExW+DeleteFileW).
 pub unsafe extern "win64" fn move_file_with_progress_w(
     lp_existing_file_name: *const u16,
     lp_new_file_name: *const u16,
@@ -4517,6 +4901,9 @@ pub unsafe extern "win64" fn move_file_with_progress_w(
 ///
 /// # Safety
 /// Output pointer arguments must be writable or null.
+// Wine ref: dlls/kernelbase/volume.c:656 — opens root path via NtOpenFile then calls
+// NtQueryVolumeInformationFile(FileFsSizeInformation); on Win9x clusters are capped to
+// 65535 and total size to 2GB; NULL root defaults to current directory.
 pub unsafe extern "win64" fn get_disk_free_space_w(
     _lp_root_path_name: *const u16,
     lp_sectors_per_cluster: *mut u32,
@@ -4545,6 +4932,9 @@ pub unsafe extern "win64" fn get_disk_free_space_w(
 ///
 /// # Safety
 /// Output pointers must be writable or null.
+// Wine ref: dlls/kernelbase/file.c — converts FILETIME via FileTimeToLocalFileTime then
+// FileTimeToSystemTime; encodes year-1980 in bits 9-15, month in 5-8, day in 0-4 of date
+// and hour in 11-15, min in 5-10, 2-second count in 0-4 of time.
 pub unsafe extern "win64" fn file_time_to_dos_date_time(
     _lp_file_time: *const u64,
     lp_fat_date: *mut u16,
@@ -4588,6 +4978,9 @@ pub unsafe extern "win64" fn file_time_to_dos_date_time(
 ///
 /// # Safety
 /// `lp_buffer` must be a writable MEMORYSTATUSEX (64 bytes, first DWORD = dwLength).
+// Wine ref: dlls/kernelbase/memory.c — GlobalMemoryStatusEx: dwLength != 64 →
+// ERROR_INVALID_PARAMETER. Caches result for 1 second (GetTickCount64 diff < 1000).
+// ullAvailVirtual ≈ ullTotalVirtual - WorkingSetSize (approximate). Weave: reads /proc/meminfo.
 pub unsafe extern "win64" fn global_memory_status_ex(lp_buffer: *mut u8) -> i32 {
     if lp_buffer.is_null() {
         return 0;
@@ -4656,6 +5049,9 @@ pub unsafe extern "win64" fn global_memory_status_ex(lp_buffer: *mut u8) -> i32 
 ///
 /// # Safety
 /// No pointer dereferences. h_process is the current process sentinel.
+// Wine ref: dlls/kernelbase/process.c — SetPriorityClass: unmapped class value →
+// ERROR_INVALID_PARAMETER. Maps to PROCESS_PRIOCLASS_* and calls NtSetInformationProcess.
+// Weave: maps to Linux nice values via setpriority; REALTIME clamped to HIGH.
 pub unsafe extern "win64" fn set_priority_class(_h_process: usize, dw_priority_class: u32) -> i32 {
     let nice: libc::c_int = match dw_priority_class {
         0x00000040 => 15,  // IDLE_PRIORITY_CLASS
@@ -4679,6 +5075,9 @@ pub unsafe extern "win64" fn set_priority_class(_h_process: usize, dw_priority_c
 ///
 /// # Safety
 /// `lp_path_name` is accepted but not dereferenced beyond null check.
+// Wine ref: dlls/kernelbase/file.c:1162 — opens directory with FILE_LIST_DIRECTORY|SYNCHRONIZE
+// via NtOpenFile, then calls NtNotifyChangeDirectoryFile; returns the directory handle as the
+// change notification handle; ERROR_PATH_NOT_FOUND if path doesn't exist.
 pub unsafe extern "win64" fn find_first_change_notification_w(
     _lp_path_name: *const u16,
     _b_watch_subtree: i32,
@@ -4693,6 +5092,8 @@ pub unsafe extern "win64" fn find_first_change_notification_w(
 ///
 /// # Safety
 /// No pointer dereferences.
+// Wine ref: dlls/kernelbase/file.c:1199 — calls NtNotifyChangeDirectoryFile again on the
+// same directory handle returned by FindFirstChangeNotificationW; returns STATUS_PENDING.
 pub unsafe extern "win64" fn find_next_change_notification(_h_change_handle: usize) -> i32 {
     0 // FALSE
 }
@@ -4703,6 +5104,8 @@ pub unsafe extern "win64" fn find_next_change_notification(_h_change_handle: usi
 ///
 /// # Safety
 /// No pointer dereferences.
+// Wine ref: dlls/kernelbase/file.c:1134 — calls NtClose on the directory handle that was
+// returned by FindFirstChangeNotificationW; handle is the same dir fd used for watching.
 pub unsafe extern "win64" fn find_close_change_notification(_h_change_handle: usize) -> i32 {
     1 // TRUE
 }
@@ -4715,6 +5118,9 @@ pub unsafe extern "win64" fn find_close_change_notification(_h_change_handle: us
 ///
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
+// Wine ref: dlls/kernelbase/file.c — calls NtQueryInformationFile(FileStreamInformation)
+// to enumerate named NTFS alternate data streams; allocates a FIND_STREAM_DATA struct;
+// info_level must be FindStreamInfoStandard (0) or ERROR_INVALID_PARAMETER is returned.
 pub unsafe extern "win64" fn find_first_stream_w(
     _lp_file_name: *const u16,
     _info_level: u32,
@@ -4730,6 +5136,8 @@ pub unsafe extern "win64" fn find_first_stream_w(
 ///
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
+// Wine ref: dlls/kernelbase/file.c — advances internal pointer in the FIND_STREAM_DATA
+// buffer; returns ERROR_HANDLE_EOF (equivalent to no-more-files) when streams exhausted.
 pub unsafe extern "win64" fn find_next_stream_w(
     _h_find_stream: usize,
     _lp_find_stream_data: *mut u8,
@@ -4744,6 +5152,9 @@ pub unsafe extern "win64" fn find_next_stream_w(
 ///
 /// # Safety
 /// `lp_module_name` must be null or a valid null-terminated ANSI string.
+// Wine ref: dlls/kernelbase/loader.c — GetModuleHandleA converts via RtlCreateUnicodeStringFromAsciiz
+// then delegates to GetModuleHandleExW(UNCHANGED_REFCOUNT, name, &module); NULL returns
+// NtCurrentTeb()->Peb->ImageBaseAddress (the main exe base).
 pub unsafe extern "win64" fn get_module_handle_a(lp_module_name: *const u8) -> usize {
     if lp_module_name.is_null() {
         return weave_core::seh::pe_base();
@@ -4756,6 +5167,7 @@ pub unsafe extern "win64" fn get_module_handle_a(lp_module_name: *const u8) -> u
 ///
 /// # Safety
 /// `lp_module_name` must be null or a valid null-terminated UTF-16 string.
+// Wine ref: dlls/kernelbase/loader.c — delegates to GetModuleHandleExW(UNCHANGED_REFCOUNT).
 pub unsafe extern "win64" fn get_module_handle_w(lp_module_name: *const u16) -> usize {
     if lp_module_name.is_null() {
         return weave_core::seh::pe_base();
@@ -4769,6 +5181,9 @@ pub unsafe extern "win64" fn get_module_handle_w(lp_module_name: *const u16) -> 
 /// # Safety
 /// `lp_module_name` must be null or a valid null-terminated ANSI string.
 /// `ph_module` must be a valid writable pointer.
+// Wine ref: dlls/kernelbase/loader.c:353 — converts name via RtlCreateUnicodeStringFromAsciiz
+// then calls GetModuleHandleExW; frees the temp UNICODE_STRING; returns FALSE+sets module=NULL
+// on NULL module output pointer.
 pub unsafe extern "win64" fn get_module_handle_ex_a(
     _dw_flags: u32,
     lp_module_name: *const u8,
@@ -4786,6 +5201,10 @@ pub unsafe extern "win64" fn get_module_handle_ex_a(
 /// # Safety
 /// `lp_module_name` must be null or a valid null-terminated UTF-16 string.
 /// `ph_module` must be a valid writable pointer.
+// Wine ref: dlls/kernelbase/loader.c:379 — GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS uses
+// RtlPcToFileHeader to find the module base for a code address; PIN and UNCHANGED_REFCOUNT
+// flags are mutually exclusive (ERROR_INVALID_PARAMETER if both set); NULL module output
+// pointer also returns ERROR_INVALID_PARAMETER.
 pub unsafe extern "win64" fn get_module_handle_ex_w(
     _dw_flags: u32,
     lp_module_name: *const u16,
@@ -4804,6 +5223,9 @@ pub unsafe extern "win64" fn get_module_handle_ex_w(
 ///
 /// # Safety
 /// `lp_filename` must be a writable buffer of at least `n_size` wide chars.
+// Wine ref: dlls/kernelbase/loader.c:300 — calls LdrGetDllFullName; NULL module returns
+// ImageBaseAddress path; STATUS_BUFFER_TOO_SMALL still returns the truncated length and
+// sets ERROR_INSUFFICIENT_BUFFER (unlike most APIs that return 0 on overflow).
 pub unsafe extern "win64" fn get_module_file_name_w(
     h_module: usize,
     lp_filename: *mut u16,
@@ -4839,6 +5261,9 @@ pub unsafe extern "win64" fn get_module_file_name_w(
 ///
 /// # Safety
 /// `lp_filename` must be a writable buffer of at least `n_size` bytes.
+// Wine ref: dlls/kernelbase/loader.c:274 — heap-allocates a WCHAR buffer of `size` chars,
+// calls GetModuleFileNameW, converts result via file_name_WtoA; sets ERROR_INSUFFICIENT_BUFFER
+// if converted length equals size (no room for null terminator).
 pub unsafe extern "win64" fn get_module_file_name_a(
     h_module: usize,
     lp_filename: *mut u8,
@@ -4869,11 +5294,15 @@ pub unsafe extern "win64" fn get_module_file_name_a(
 // ── Process / thread identity ─────────────────────────────────────────────────
 
 /// GetCurrentProcess — return a pseudo-handle (-1 = 0xFFFFFFFFFFFFFFFF).
+// Wine ref: include/winbase.h — inline that returns (HANDLE)(LONG_PTR)-1;
+// pseudo-handles are never closed and are valid for the current process only.
 pub extern "win64" fn get_current_process() -> usize {
     usize::MAX // pseudo-handle
 }
 
 /// GetCurrentThread — return a pseudo-handle (-2 = 0xFFFFFFFFFFFFFFFE).
+// Wine ref: include/winbase.h — inline that returns (HANDLE)(LONG_PTR)-2;
+// must not be passed to functions that close handles (CloseHandle would fail).
 pub extern "win64" fn get_current_thread() -> usize {
     usize::MAX - 1
 }
@@ -4902,11 +5331,15 @@ pub extern "win64" fn get_current_thread_id() -> u32 {
 // ── Timing ────────────────────────────────────────────────────────────────────
 
 /// GetTickCount — milliseconds since process start (stub: use clock_gettime).
+// Wine ref: dlls/kernelbase/time.c — reads SharedUserData->TickCount (updated by the kernel);
+// wraps at ~49.7 days (u32 overflow); callers must handle wrap-around.
 pub extern "win64" fn get_tick_count() -> u32 {
     get_tick_count_64() as u32
 }
 
 /// GetTickCount64 — milliseconds since process start.
+// Wine ref: dlls/kernelbase/time.c — reads SharedUserData->TickCount64 (64-bit monotonic);
+// never wraps; introduced Vista+; Weave uses CLOCK_MONOTONIC directly.
 pub extern "win64" fn get_tick_count_64() -> u64 {
     let mut ts = libc::timespec {
         tv_sec: 0,
@@ -4925,6 +5358,9 @@ pub extern "win64" fn get_tick_count_64() -> u64 {
 ///
 /// # Safety
 /// `lp_performance_count` must be a valid writable pointer or NULL.
+// Wine ref: dlls/ntdll/time.c — RtlQueryPerformanceCounter calls NtQueryPerformanceCounter.
+// Wine's QpcFrequency is 10_000_000 (10 MHz, 100-ns ticks) from SharedUserData.
+// Weave uses CLOCK_MONOTONIC at 1 GHz (nanosecond ticks) for higher resolution.
 pub unsafe extern "win64" fn query_performance_counter(lp_performance_count: *mut u64) -> i32 {
     let mut ts = libc::timespec {
         tv_sec: 0,
@@ -4943,6 +5379,9 @@ pub unsafe extern "win64" fn query_performance_counter(lp_performance_count: *mu
 ///
 /// # Safety
 /// `lp_frequency` must be a valid writable pointer or NULL.
+// Wine ref: dlls/ntdll/time.c — RtlQueryPerformanceFrequency returns
+// SharedUserData->QpcFrequency which Wine sets to 10_000_000 (10 MHz, 100-ns ticks);
+// Weave uses 1_000_000_000 (1 GHz) to match CLOCK_MONOTONIC nanosecond resolution.
 pub unsafe extern "win64" fn query_performance_frequency(lp_frequency: *mut u64) -> i32 {
     unsafe {
         if !lp_frequency.is_null() {
@@ -4961,6 +5400,9 @@ pub unsafe extern "win64" fn query_performance_frequency(lp_frequency: *mut u64)
 ///
 /// # Safety
 /// `lp_system_time_as_file_time` must be a valid writable pointer or NULL.
+// Wine ref: dlls/kernelbase/file.c — GetSystemTimeAsFileTime calls NtQuerySystemTime
+// which reads CLOCK_REALTIME and returns 100-ns intervals since 1601-01-01.
+// Weave converts CLOCK_REALTIME directly using the 116_444_736_000_000_000 epoch offset.
 pub unsafe extern "win64" fn get_system_time_as_file_time(lp_system_time_as_file_time: *mut u64) {
     // FILETIME is 100-nanosecond intervals since 1601-01-01
     // Offset between 1601 and Unix epoch (1970) = 11644473600 seconds
@@ -5005,6 +5447,9 @@ pub struct SystemInfo {
 ///
 /// # Safety
 /// `lp_system_info` must be a valid writable pointer or NULL.
+// Wine ref: dlls/kernelbase/memory.c — GetSystemInfo: calls NtQuerySystemInformation with
+// SystemBasicInformation + SystemCpuInformation then fill_system_info. ProcessorArchitecture
+// comes from cpu_info.ProcessorArchitecture; AllocationGranularity from basic_info.AllocationGranularity.
 pub unsafe extern "win64" fn get_system_info(lp_system_info: *mut SystemInfo) {
     unsafe {
         if lp_system_info.is_null() {
@@ -5041,6 +5486,8 @@ pub unsafe extern "win64" fn get_system_info(lp_system_info: *mut SystemInfo) {
 ///
 /// # Safety
 /// `lp_system_info` must be a valid writable pointer or NULL.
+// Wine ref: dlls/kernelbase/memory.c:207 — calls RtlGetNativeSystemInformation for WoW64 processes;
+// uses RtlWow64GetProcessMachines to detect native vs WoW64; falls back to GetSystemInfo for non-WoW64
 pub unsafe extern "win64" fn get_native_system_info(lp_system_info: *mut SystemInfo) {
     unsafe { get_system_info(lp_system_info) };
 }
@@ -5048,6 +5495,7 @@ pub unsafe extern "win64" fn get_native_system_info(lp_system_info: *mut SystemI
 // ── Debugger / diagnostics ────────────────────────────────────────────────────
 
 /// IsDebuggerPresent — always returns FALSE.
+// Wine ref: dlls/kernelbase/debug.c — reads NtCurrentTeb()->Peb->BeingDebugged; returns 1 if set, 0 otherwise
 pub extern "win64" fn is_debugger_present() -> i32 {
     0 // FALSE
 }
@@ -5056,6 +5504,8 @@ pub extern "win64" fn is_debugger_present() -> i32 {
 ///
 /// # Safety
 /// Pointer argument is accepted but not dereferenced.
+// Wine ref: dlls/kernelbase/debug.c — raises DBG_PRINTEXCEPTION_C (0x40010006) via NtRaiseException;
+// if no debugger is attached the exception is caught internally; also sends to console via NtDeviceIoControlFile
 pub unsafe extern "win64" fn output_debug_string_a(_lp_output_string: *const u8) {
     // silently discard
 }
@@ -5064,6 +5514,7 @@ pub unsafe extern "win64" fn output_debug_string_a(_lp_output_string: *const u8)
 ///
 /// # Safety
 /// Pointer argument is accepted but not dereferenced.
+// Wine ref: dlls/kernelbase/debug.c — converts to UTF-8 via WideCharToMultiByte then calls OutputDebugStringA
 pub unsafe extern "win64" fn output_debug_string_w(_lp_output_string: *const u16) {
     // silently discard
 }
@@ -5074,6 +5525,7 @@ pub unsafe extern "win64" fn output_debug_string_w(_lp_output_string: *const u16
 ///
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
+// Wine ref: dlls/kernelbase/sync.c:553 — converts name via RtlCreateUnicodeStringFromAsciiz then delegates to CreateEventExW
 pub unsafe extern "win64" fn create_event_a(
     _lp_event_attributes: *const u8,
     _b_manual_reset: i32,
@@ -5091,6 +5543,8 @@ pub unsafe extern "win64" fn create_event_a(
 ///
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
+// Wine ref: dlls/kernelbase/sync.c:566 — delegates to CreateEventExW with CREATE_EVENT_MANUAL_RESET
+// and CREATE_EVENT_INITIAL_SET flags translated from bManualReset/bInitialState booleans
 pub unsafe extern "win64" fn create_event_w(
     _lp_event_attributes: *const u8,
     _b_manual_reset: i32,
@@ -5107,6 +5561,9 @@ pub unsafe extern "win64" fn create_event_w(
 ///
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
+// Wine ref: dlls/kernelbase/sync.c — OpenEventA: converts name via MultiByteToWideChar(CP_ACP);
+// name longer than MAX_PATH → ERROR_FILENAME_EXCED_RANGE. Delegates to OpenEventW →
+// NtOpenEvent with OBJECT_ATTRIBUTES built from name. NULL handle → last-error set.
 pub unsafe extern "win64" fn open_event_a(
     _dw_desired_access: u32,
     _b_inherit_handle: i32,
@@ -5120,6 +5577,8 @@ pub unsafe extern "win64" fn open_event_a(
 ///
 /// Ignores access flags, inherit handle flag, and event name.
 ///
+// Wine ref: dlls/kernelbase/sync.c:653 — calls NtOpenEvent with OBJECT_ATTRIBUTES built from name;
+// returns NULL on failure with last-error set via RtlNtStatusToDosError
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
 pub unsafe extern "win64" fn open_event_w(
@@ -5132,11 +5591,13 @@ pub unsafe extern "win64" fn open_event_w(
 }
 
 /// SetEvent — no-op stub, returns TRUE.
+// Wine ref: dlls/kernelbase/sync.c:700 — calls NtSetEvent(handle, NULL); NULL for previous_state is valid
 pub extern "win64" fn set_event(_h_event: usize) -> i32 {
     warn_once("SetEvent");
     1
 }
 /// ResetEvent — no-op stub, returns TRUE.
+// Wine ref: dlls/kernelbase/sync.c:688 — calls NtResetEvent(handle, NULL)
 pub extern "win64" fn reset_event(_h_event: usize) -> i32 {
     warn_once("ResetEvent");
     1
@@ -5146,6 +5607,9 @@ pub extern "win64" fn reset_event(_h_event: usize) -> i32 {
 ///
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
+// Wine ref: dlls/kernelbase/sync.c — CreateSemaphoreA converts name via
+// RtlCreateUnicodeStringFromAsciiz then delegates to CreateSemaphoreW →
+// CreateSemaphoreExW → NtCreateSemaphore. STATUS_OBJECT_NAME_EXISTS → ERROR_ALREADY_EXISTS.
 pub unsafe extern "win64" fn create_semaphore_a(
     _lp_semaphore_attributes: *const u8,
     _l_initial_count: i32,
@@ -5156,6 +5620,7 @@ pub unsafe extern "win64" fn create_semaphore_a(
     1 // fake handle
 }
 /// ReleaseSemaphore — no-op stub, returns TRUE.
+// Wine ref: dlls/kernelbase/sync.c:846 — calls NtReleaseSemaphore(handle, count, (PULONG)previous)
 pub extern "win64" fn release_semaphore(
     _h_semaphore: usize,
     _l_release_count: i32,
@@ -5172,6 +5637,9 @@ pub extern "win64" fn release_semaphore(
 ///
 /// # Safety
 /// Pointer arguments are ignored.
+// Wine ref: dlls/kernelbase/sync.c — CreateSemaphoreW delegates to
+// CreateSemaphoreExW(sa, initial, max, name, 0, SEMAPHORE_ALL_ACCESS) →
+// NtCreateSemaphore. STATUS_OBJECT_NAME_EXISTS → ERROR_ALREADY_EXISTS.
 pub unsafe extern "win64" fn create_semaphore_w(
     _lp_semaphore_attributes: *const u8,
     _l_initial_count: i32,
@@ -5183,6 +5651,7 @@ pub unsafe extern "win64" fn create_semaphore_w(
 }
 
 /// SetFileApisToOEM — switch file APIs to OEM character set. No-op.
+// Wine ref: dlls/kernelbase/file.c:2970 — sets global oem_file_apis = TRUE; checked by file name conversion helpers
 pub extern "win64" fn set_file_apis_to_oem() {}
 
 /// OpenFileMappingW — open a named file-mapping object (Wide).
@@ -5191,6 +5660,8 @@ pub extern "win64" fn set_file_apis_to_oem() {}
 ///
 /// # Safety
 /// `lp_name` is ignored.
+// Wine ref: dlls/kernelbase/sync.c:1137 — FILE_MAP_COPY is remapped to SECTION_MAP_READ;
+// calls NtOpenSection; on Win9x tries access|READ|WRITE first to skip access checks
 pub unsafe extern "win64" fn open_file_mapping_w(
     _dw_desired_access: u32,
     _b_inherit_handle: i32,
@@ -5207,6 +5678,9 @@ pub unsafe extern "win64" fn open_file_mapping_w(
 ///
 /// # Safety
 /// `lp_file_time` must be a writable 8-byte buffer or null.
+// Wine ref: dlls/ntdll (RtlDosDateTimeToFileTime) — DOS date: bits 15-9=year-1980,
+// 8-5=month, 4-0=day. DOS time: bits 15-11=hours, 10-5=minutes, 4-0=seconds/2.
+// Special case (0,0) → FILETIME (0,0) per wininet internal wrapper.
 pub unsafe extern "win64" fn dos_date_time_to_file_time(
     w_fat_date: u16,
     w_fat_time: u16,
@@ -5235,10 +5709,14 @@ pub unsafe extern "win64" fn dos_date_time_to_file_time(
 }
 
 // SRW locks are pointer-sized on Windows; we use the pointer itself as storage.
+// Wine ref: include/winnt.h:6354 — RTL_SRWLOCK is a single PVOID Ptr; Rtl acquire/release
+// are implemented in ntdll as futex-based slim reader-writer primitives. Single-threaded: no-op.
 /// AcquireSRWLockExclusive — no-op (single-threaded).
 ///
 /// # Safety
 /// `srw_lock` must be a valid pointer to an SRWLOCK-sized slot.
+// Wine ref: include/winnt.h — RTL_SRWLOCK is a single PVOID Ptr; RtlAcquireSRWLockExclusive
+// sets the exclusive bit in Ptr via interlocked CAS loop; waits on futex if contended.
 pub unsafe extern "win64" fn acquire_srw_lock_exclusive(srw_lock: *mut usize) {
     let _ = srw_lock; // single-threaded: no-op
 }
@@ -5246,6 +5724,8 @@ pub unsafe extern "win64" fn acquire_srw_lock_exclusive(srw_lock: *mut usize) {
 ///
 /// # Safety
 /// `srw_lock` must be a valid pointer to an SRWLOCK-sized slot.
+// Wine ref: include/winnt.h — RtlReleaseSRWLockExclusive clears the exclusive bit in
+// RTL_SRWLOCK.Ptr via interlocked ops and wakes waiting threads via futex.
 pub unsafe extern "win64" fn release_srw_lock_exclusive(srw_lock: *mut usize) {
     let _ = srw_lock;
 }
@@ -5253,11 +5733,15 @@ pub unsafe extern "win64" fn release_srw_lock_exclusive(srw_lock: *mut usize) {
 ///
 /// # Safety
 /// `srw_lock` must be a valid pointer to an SRWLOCK-sized slot.
+// Wine ref: include/winnt.h — RtlAcquireSRWLockShared increments the shared-reader
+// count in RTL_SRWLOCK.Ptr; blocks if exclusive bit is set; uses futex for waiting.
 pub unsafe extern "win64" fn acquire_srw_lock_shared(srw_lock: *mut usize) {
     let _ = srw_lock;
 }
 /// ReleaseSRWLockShared — no-op (single-threaded).
 ///
+// Wine ref: include/winnt.h:6354 — RTL_SRWLOCK is a single PVOID; RtlReleaseSRWLockShared
+// clears shared-lock count in the Ptr field via interlocked ops; single-threaded: no-op
 /// # Safety
 /// `srw_lock` must be a valid pointer to an SRWLOCK-sized slot.
 pub unsafe extern "win64" fn release_srw_lock_shared(srw_lock: *mut usize) {
@@ -5266,6 +5750,8 @@ pub unsafe extern "win64" fn release_srw_lock_shared(srw_lock: *mut usize) {
 
 /// InitializeConditionVariable — no-op stub.
 ///
+// Wine ref: dlls/kernelbase/sync.c:1196 — RTL_CONDITION_VARIABLE is a single PVOID; initialize
+// sets it to zero (RTL_CONDITION_VARIABLE_INIT = {0})
 /// # Safety
 /// `_condition_variable` must be a valid writable pointer.
 pub unsafe extern "win64" fn initialize_condition_variable(_condition_variable: *mut usize) {}
@@ -5273,6 +5759,8 @@ pub unsafe extern "win64" fn initialize_condition_variable(_condition_variable: 
 ///
 /// # Safety
 /// Pointer arguments must be valid or the caller must not care about the result.
+// Wine ref: dlls/kernelbase/sync.c:1196 — delegates to RtlSleepConditionVariableSRW with NT timeout;
+// flags=CONDITION_VARIABLE_LOCKMODE_SHARED unlocks as shared rather than exclusive
 pub unsafe extern "win64" fn sleep_condition_variable_srw(
     _condition_variable: *mut usize,
     _srw_lock: *mut usize,
@@ -5283,11 +5771,15 @@ pub unsafe extern "win64" fn sleep_condition_variable_srw(
 }
 /// WakeConditionVariable — no-op stub.
 ///
+// Wine ref: dlls/kernelbase/sync.c — WakeConditionVariable calls RtlWakeConditionVariable
+// which uses futex FUTEX_WAKE to unblock one waiter; single-threaded: no-op
 /// # Safety
 /// `_condition_variable` must be a valid pointer.
 pub unsafe extern "win64" fn wake_condition_variable(_condition_variable: *mut usize) {}
 /// WakeAllConditionVariable — no-op stub.
 ///
+// Wine ref: dlls/kernelbase/sync.c — WakeAllConditionVariable calls RtlWakeAllConditionVariable
+// which uses FUTEX_WAKE with INT_MAX to unblock all waiters; single-threaded: no-op
 /// # Safety
 /// `_condition_variable` must be a valid pointer.
 pub unsafe extern "win64" fn wake_all_condition_variable(_condition_variable: *mut usize) {}
@@ -5307,6 +5799,9 @@ pub unsafe extern "win64" fn wake_all_condition_variable(_condition_variable: *m
 /// # Safety
 /// `lp_start_address` must be a valid `extern "win64"` function pointer.
 /// `lp_parameter` is forwarded to that function and must be valid for the thread's lifetime.
+// Wine ref: dlls/kernelbase/thread.c — CreateThread wraps CreateRemoteThread(GetCurrentProcess(),
+// ...) → NtCreateThread. Thread function called with lpParameter; returns DWORD exit code.
+// CREATE_SUSPENDED flag (0x4) defers start until ResumeThread; Weave ignores it.
 pub unsafe extern "win64" fn create_thread(
     _lp_thread_attributes: *const u8,
     _dw_stack_size: usize,
@@ -5361,6 +5856,8 @@ pub extern "win64" fn get_thread_priority(_h_thread: usize) -> i32 {
     0 // THREAD_PRIORITY_NORMAL
 }
 /// SetThreadPriority — no-op stub, returns TRUE.
+// Wine ref: dlls/kernelbase/thread.c::SetThreadPriority:617 — calls
+// NtSetInformationThread(ThreadBasePriority, &priority); valid range is [-15,15].
 pub extern "win64" fn set_thread_priority(_h_thread: usize, _n_priority: i32) -> i32 {
     1
 }
@@ -5368,6 +5865,8 @@ pub extern "win64" fn set_thread_priority(_h_thread: usize, _n_priority: i32) ->
 ///
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
+// Wine ref: dlls/kernelbase/thread.c::GetThreadContext:253 — delegates to
+// NtGetContextThread; CONTEXT flags select which register groups to capture.
 pub unsafe extern "win64" fn get_thread_context(_h_thread: usize, _lp_context: *mut u8) -> i32 {
     0 // FALSE
 }
@@ -5375,14 +5874,20 @@ pub unsafe extern "win64" fn get_thread_context(_h_thread: usize, _lp_context: *
 ///
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
+// Wine ref: dlls/kernelbase/thread.c::SetThreadContext:467 — delegates to
+// NtSetContextThread; requires thread to be suspended first.
 pub unsafe extern "win64" fn set_thread_context(_h_thread: usize, _lp_context: *const u8) -> i32 {
     0
 }
 /// SuspendThread — not supported, returns DWORD(-1) (failure).
+// Wine ref: dlls/kernelbase/thread.c:689 — calls NtSuspendThread; Win9x mode returns 0 for
+// current thread; returns ~0U on failure (NtSuspendThread fails)
 pub extern "win64" fn suspend_thread(_h_thread: usize) -> u32 {
     u32::MAX // failure
 }
 /// ResumeThread — not supported, returns DWORD(-1) (failure).
+// Wine ref: dlls/kernelbase/thread.c — calls NtResumeThread; returns previous suspend count
+// or ~0U on failure
 pub extern "win64" fn resume_thread(_h_thread: usize) -> u32 {
     u32::MAX // failure
 }
@@ -5391,6 +5896,8 @@ pub extern "win64" fn resume_thread(_h_thread: usize) -> u32 {
 
 /// OpenProcess — returns NULL (not supported).
 ///
+// Wine ref: server/process.c:1500 — DECL_HANDLER(open_process): looks up process by pid,
+// checks access rights, returns handle; Weave has no process table so returns NULL
 /// # Safety
 /// No pointer arguments are dereferenced.
 pub unsafe extern "win64" fn open_process(
@@ -5425,6 +5932,8 @@ pub unsafe extern "win64" fn get_process_affinity_mask(
 
 /// SetProcessAffinityMask — no-op stub, returns TRUE.
 ///
+// Wine ref: dlls/kernelbase/process.c::SetProcessGroupAffinity:1232 — calls
+// NtSetInformationProcess(ProcessGroupInformation); Weave ignores affinity (single-process)
 /// # Safety
 /// No pointer arguments are dereferenced.
 pub unsafe extern "win64" fn set_process_affinity_mask(
@@ -5436,6 +5945,8 @@ pub unsafe extern "win64" fn set_process_affinity_mask(
 
 /// GetActiveProcessorGroupCount — returns the number of processor groups.
 ///
+// Wine ref: include/winnt.h:6819 — PROCESSOR_GROUP_INFO.ActiveProcessorCount tracks active CPUs
+// per group; GetActiveProcessorGroupCount queries SystemLogicalProcessorInformationEx
 /// On typical systems there is exactly one processor group.
 pub extern "win64" fn get_active_processor_group_count() -> u16 {
     1
@@ -5447,6 +5958,8 @@ pub extern "win64" fn get_active_processor_group_count() -> u16 {
 /// Report 1 CPU so that apps like 7-Zip use single-threaded mode; their
 /// thread pools fail gracefully rather than throwing when _beginthreadex
 /// returns 0.
+// Wine ref: include/winnt.h:6819 — PROCESSOR_GROUP_INFO.ActiveProcessorCount; group 0xFFFF
+// (ALL_PROCESSOR_GROUPS) sums all groups; Wine queries NtQuerySystemInformation.
 pub extern "win64" fn get_active_processor_count(group_number: u16) -> u32 {
     let msg = format!("weave: GetActiveProcessorCount({group_number:#x}) -> 1\n");
     unsafe { libc::write(2, msg.as_ptr() as *const libc::c_void, msg.len()) };
@@ -5455,6 +5968,8 @@ pub extern "win64" fn get_active_processor_count(group_number: u16) -> u32 {
 
 /// GetHandleInformation — writes 0 flags and returns TRUE.
 ///
+// Wine ref: dlls/kernelbase/process.c:812 — calls NtQueryObject(ObjectHandleFlagInformation);
+// maps info.Inherit → HANDLE_FLAG_INHERIT and info.ProtectFromClose → HANDLE_FLAG_PROTECT_FROM_CLOSE
 /// # Safety
 /// `lp_flags` must be a valid writable pointer or NULL.
 pub unsafe extern "win64" fn get_handle_information(_h_object: usize, lp_flags: *mut u32) -> i32 {
@@ -5468,6 +5983,8 @@ pub unsafe extern "win64" fn get_handle_information(_h_object: usize, lp_flags: 
 
 /// DeviceIoControl — not supported; writes 0 bytes returned and returns FALSE.
 ///
+// Wine ref: dlls/kernelbase/file.c:4349 — FILE_DEVICE_FILE_SYSTEM codes → NtFsControlFile;
+// others → NtDeviceIoControlFile; overlapped->Internal set to STATUS_PENDING before call
 /// # Safety
 /// `lp_bytes_returned` must be a valid writable pointer or NULL; other
 /// pointer arguments are accepted but not dereferenced.
@@ -5493,6 +6010,8 @@ pub unsafe extern "win64" fn device_io_control(
 
 /// GetEnvironmentVariableW — returns 0 (variable not found).
 ///
+// Wine ref: dlls/kernelbase/process.c:1660 — calls RtlQueryEnvironmentVariable_U(NULL, ...);
+// STATUS_BUFFER_TOO_SMALL → returns len+1 (required size); on success writes null terminator
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
 pub unsafe extern "win64" fn get_environment_variable_w(
@@ -5512,6 +6031,9 @@ pub unsafe extern "win64" fn get_environment_variable_w(
 ///
 /// # Safety
 /// `lp_buffer` must be valid for `n_size` bytes when non-null.
+// Wine ref: dlls/kernelbase/locale.c:5382 — FORMAT_MESSAGE_ALLOCATE_BUFFER allocates on heap
+// and stores pointer at *buffer; FORMAT_MESSAGE_MAX_WIDTH_MASK 0xff means unlimited width;
+// delegates to RtlFormatMessage via get_message(); retsize==sizeof(WCHAR) sets ERROR_NO_WORK_DONE
 pub unsafe extern "win64" fn format_message_a(
     dw_flags: u32,
     _lp_source: usize,
@@ -5570,6 +6092,8 @@ pub unsafe extern "win64" fn format_message_a(
 ///
 /// # Safety
 /// `lp_buffer` must be valid for `n_size` u16 words when non-null.
+// Wine ref: dlls/kernelbase/locale.c:5465 — delegates to RtlFormatMessage; returns retsize/sizeof(WCHAR)-1
+// (char count excl NUL); STATUS_BUFFER_OVERFLOW → ERROR_INSUFFICIENT_BUFFER, still NUL-terminates at buffer[size-1]
 pub unsafe extern "win64" fn format_message_w(
     dw_flags: u32,
     _lp_source: usize,
@@ -5627,6 +6151,9 @@ pub unsafe extern "win64" fn format_message_w(
 ///
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
+// Wine ref: dlls/kernelbase/file.c:668 — converts path via RtlDosPathNameToNtPathName_U;
+// calls NtCreateFile with FILE_DIRECTORY_FILE|FILE_OPEN_REPARSE_POINT|FILE_CREATE disposition;
+// closes handle immediately on success; ERROR_PATH_NOT_FOUND if NT path conversion fails
 pub unsafe extern "win64" fn create_directory_w(
     _lp_path_name: *const u16,
     _lp_security_attributes: *const u8,
@@ -5646,6 +6173,8 @@ pub unsafe extern "win64" fn create_directory_w(
 ///
 /// # Safety
 /// Called only via Win64 IAT from PE code.
+// Wine ref: dlls/kernelbase/debug.c:389 — masks flags to EXCEPTION_NONCONTINUABLE; caps
+// NumberParameters to EXCEPTION_MAXIMUM_PARAMETERS (15); calls RtlRaiseException with record.
 #[unsafe(naked)]
 pub unsafe extern "win64" fn raise_exception(
     _dw_exception_code: u32,
@@ -5706,6 +6235,8 @@ unsafe extern "C" fn raise_exception_impl(
 ///
 /// Returns indices starting from 64 (above the static TLS range).
 /// Thread-safe via atomic counter.
+// Wine ref: dlls/kernelbase/thread.c:723 — uses RtlFindClearBitsAndSet on peb->TlsBitmap (slots 0-63);
+// overflow goes to TlsExpansionBitmap (up to 1024 extra slots); clears slot value on alloc; returns ~0U on exhaustion
 pub extern "win64" fn tls_alloc() -> u32 {
     use std::sync::atomic::{AtomicU32, Ordering};
     static NEXT_TLS_INDEX: AtomicU32 = AtomicU32::new(64);
@@ -5718,6 +6249,8 @@ pub extern "win64" fn tls_alloc() -> u32 {
 /// TlsSetValue — store a value in a TLS slot.
 ///
 /// Single-threaded: uses a global HashMap keyed by slot index.
+// Wine ref: dlls/kernelbase/thread.c::TlsSetValue:804 — index < TLS_MINIMUM_AVAILABLE goes into
+// TEB.TlsSlots[]; higher indices use TlsExpansionSlots (heap-alloc on first use); out-of-range → ERROR_INVALID_PARAMETER.
 pub extern "win64" fn tls_set_value(dw_tls_index: u32, lp_tls_value: *mut u8) -> i32 {
     TLS_SLOTS.with(|slots| {
         slots
@@ -5727,6 +6260,8 @@ pub extern "win64" fn tls_set_value(dw_tls_index: u32, lp_tls_value: *mut u8) ->
     1
 }
 /// TlsFree — release a TLS slot. Returns TRUE.
+// Wine ref: dlls/kernelbase/thread.c:760 — clears PEB TlsBitmap or TlsExpansionBitmap bit;
+// calls NtSetInformationThread(ThreadZeroTlsCell) to zero the slot across all threads
 pub extern "win64" fn tls_free(dw_tls_index: u32) -> i32 {
     TLS_SLOTS.with(|slots| {
         slots.borrow_mut().remove(&dw_tls_index);
@@ -5736,12 +6271,13 @@ pub extern "win64" fn tls_free(dw_tls_index: u32) -> i32 {
 
 /// WaitForSingleObject — block until the object is signalled or the timeout expires.
 ///
-/// Wine ref: dlls/kernel32/sync.c — WaitForSingleObject wraps NtWaitForSingleObject;
 /// INFINITE (0xFFFFFFFF) means no timeout; returns WAIT_OBJECT_0 on success,
 /// WAIT_TIMEOUT on expiry, WAIT_FAILED for invalid handles.
 ///
 /// # Safety
 /// No pointer arguments are dereferenced.
+// Wine ref: dlls/kernel32/sync.c — WaitForSingleObject wraps NtWaitForSingleObject;
+// WAIT_OBJECT_0=0, WAIT_TIMEOUT=0x102, WAIT_FAILED=0xFFFFFFFF; invalid handle → WAIT_FAILED.
 pub unsafe extern "win64" fn wait_for_single_object(h_handle: usize, dw_milliseconds: u32) -> u32 {
     const INVALID_HANDLE_VALUE: usize = usize::MAX;
     const WAIT_OBJECT_0: u32 = 0;
@@ -5764,7 +6300,10 @@ pub unsafe extern "win64" fn wait_for_single_object(h_handle: usize, dw_millisec
             return WAIT_OBJECT_0;
         }
         if dw_milliseconds == INFINITE {
-            let _g = completion.condvar.wait_while(guard, |r| r.is_none()).unwrap();
+            let _g = completion
+                .condvar
+                .wait_while(guard, |r| r.is_none())
+                .unwrap();
             eprintln!("weave/WFSO: handle={h_handle:#x} → WAIT_OBJECT_0 (condvar)");
             return WAIT_OBJECT_0;
         } else {
@@ -5773,10 +6312,18 @@ pub unsafe extern "win64" fn wait_for_single_object(h_handle: usize, dw_millisec
                 .condvar
                 .wait_timeout_while(guard, timeout, |r| r.is_none())
                 .unwrap();
-            let result = if timed_out.timed_out() { WAIT_TIMEOUT } else { WAIT_OBJECT_0 };
+            let result = if timed_out.timed_out() {
+                WAIT_TIMEOUT
+            } else {
+                WAIT_OBJECT_0
+            };
             eprintln!(
                 "weave/WFSO: handle={h_handle:#x} → {} (timed_out={})",
-                if result == WAIT_TIMEOUT { "WAIT_TIMEOUT" } else { "WAIT_OBJECT_0" },
+                if result == WAIT_TIMEOUT {
+                    "WAIT_TIMEOUT"
+                } else {
+                    "WAIT_OBJECT_0"
+                },
                 timed_out.timed_out()
             );
             return result;
@@ -5813,6 +6360,8 @@ pub unsafe extern "win64" fn wait_for_single_object_ex(
 ///
 /// # Safety
 /// `_lp_critical_section` must be a valid pointer.
+// Wine ref: dlls/ntdll/sync.c — RTL_CRITICAL_SECTION.LockCount starts at -1 (unlocked);
+// TryEnterCriticalSection uses InterlockedCompareExchange on LockCount; returns FALSE if owned.
 pub unsafe extern "win64" fn try_enter_critical_section(_lp_critical_section: *mut usize) -> i32 {
     1 // TRUE — always succeeds in single-threaded context
 }
@@ -5834,6 +6383,8 @@ pub extern "win64" fn switch_to_thread() -> i32 {
 ///
 /// # Safety
 /// `lp_handles` must be a valid pointer to `n_count` handles or NULL.
+// Wine ref: dlls/kernelbase/sync.c:424 — thin wrapper; delegates to WaitForMultipleObjectsEx(alertable=FALSE);
+// return value is WAIT_OBJECT_0+index of signalled handle when wait_all=FALSE
 pub unsafe extern "win64" fn wait_for_multiple_objects(
     n_count: u32,
     lp_handles: *const usize,
@@ -5874,6 +6425,8 @@ pub unsafe extern "win64" fn wait_for_multiple_objects(
 ///
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
+// Wine ref: dlls/kernelbase/sync.c:702 — converts name via RtlCreateUnicodeStringFromAsciiz then
+// delegates to CreateMutexExA; STATUS_OBJECT_NAME_EXISTS sets ERROR_ALREADY_EXISTS (183)
 pub unsafe extern "win64" fn create_mutex_a(
     _lp_mutex_attributes: *const u8,
     _b_initial_owner: i32,
@@ -5906,6 +6459,8 @@ pub unsafe extern "win64" fn create_mutex_a(
 ///
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
+// Wine ref: dlls/kernelbase/sync.c:711 — delegates to CreateMutexExW(owner ? CREATE_MUTEX_INITIAL_OWNER : 0, MUTEX_ALL_ACCESS);
+// CreateMutexExW calls NtCreateMutant; STATUS_OBJECT_NAME_EXISTS → ERROR_ALREADY_EXISTS
 pub unsafe extern "win64" fn create_mutex_w(
     _lp_mutex_attributes: *const u8,
     _b_initial_owner: i32,
@@ -5932,6 +6487,8 @@ pub unsafe extern "win64" fn create_mutex_w(
 /// Extended version with dwDesiredAccess parameter (ignored).
 /// Same behavior as CreateMutexA.
 ///
+// Wine ref: dlls/kernelbase/sync.c:720 — converts name via RtlAnsiStringToUnicodeString into
+// StaticUnicodeString then delegates to CreateMutexExW; name > MAX_PATH → ERROR_FILENAME_EXCED_RANGE
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
 pub unsafe extern "win64" fn create_mutex_ex_a(
@@ -5950,6 +6507,8 @@ pub unsafe extern "win64" fn create_mutex_ex_a(
 ///
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
+// Wine ref: dlls/kernelbase/sync.c:742 — calls NtCreateMutant; STATUS_OBJECT_NAME_EXISTS →
+// ERROR_ALREADY_EXISTS; otherwise sets LastError from RtlNtStatusToDosError
 pub unsafe extern "win64" fn create_mutex_ex_w(
     _lp_mutex_attributes: *const u8,
     lp_name: *const u16,
@@ -5972,6 +6531,7 @@ pub unsafe extern "win64" fn create_mutex_ex_w(
     1 // fake handle
 }
 /// ReleaseMutex — no-op stub, returns TRUE.
+// Wine ref: dlls/kernelbase/sync.c:782 — calls NtReleaseMutant(handle, NULL); NULL previous_count is valid
 pub extern "win64" fn release_mutex(_h_mutex: usize) -> i32 {
     warn_once("ReleaseMutex");
     1
@@ -5981,6 +6541,8 @@ pub extern "win64" fn release_mutex(_h_mutex: usize) -> i32 {
 ///
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
+// Wine ref: libs/winecrt0/exception.c::__wine_rtl_unwind:72 — calls RtlUnwind(frame, target,
+// record, 0) then loops calling target; sets EXCEPTION_UNWINDING flag on record.ExceptionFlags.
 pub unsafe extern "win64" fn rtl_unwind(
     _target_frame: *mut u8,
     _target_ip: *mut u8,
@@ -5993,6 +6555,8 @@ pub unsafe extern "win64" fn rtl_unwind(
 ///
 /// # Safety
 /// `_exception_pointers` is accepted but not dereferenced.
+// Wine ref: dlls/kernelbase/thread.c:1043 — called as SEH filter; on unhandled exception calls
+// TerminateThread(GetCurrentThread(), GetExceptionCode()); user filter set via SetUnhandledExceptionFilter is called first
 pub unsafe extern "win64" fn unhandled_exception_filter(_exception_pointers: *mut u8) -> i32 {
     1 // EXCEPTION_EXECUTE_HANDLER
 }
@@ -6003,6 +6567,8 @@ pub unsafe extern "win64" fn unhandled_exception_filter(_exception_pointers: *mu
 ///
 /// # Safety
 /// `lp_string1` and `lp_string2` must be valid null-terminated UTF-8 strings.
+// Wine ref: dlls/user32/lstr.c — lstrcmpA wraps CompareStringA(LOCALE_USER_DEFAULT,...) in
+// later Wine; returns negative/0/positive. NULL pointer → exception (not graceful return).
 pub unsafe extern "win64" fn lstrcmp_a(lp_string1: *const u8, lp_string2: *const u8) -> i32 {
     unsafe { libc::strcmp(lp_string1 as *const i8, lp_string2 as *const i8) }
 }
@@ -6011,6 +6577,8 @@ pub unsafe extern "win64" fn lstrcmp_a(lp_string1: *const u8, lp_string2: *const
 ///
 /// # Safety
 /// `lp_string1` and `lp_string2` must be valid null-terminated UTF-16 strings.
+// Wine ref: dlls/user32/lstr.c — lstrcmpW wraps CompareStringW(LOCALE_USER_DEFAULT,...);
+// char-by-char Unicode comparison; NULL pointer → exception on real Windows.
 pub unsafe extern "win64" fn lstrcmp_w(lp_string1: *const u16, lp_string2: *const u16) -> i32 {
     unsafe {
         let mut p1 = lp_string1;
@@ -6032,6 +6600,8 @@ pub unsafe extern "win64" fn lstrcmp_w(lp_string1: *const u16, lp_string2: *cons
 
 /// lstrcmpiA — compare two ANSI strings (case-insensitive).
 ///
+// Wine ref: dlls/kernelbase/locale.c::CompareStringA — lstrcmpiA delegates to CompareStringA
+// with LOCALE_USER_DEFAULT + NORM_IGNORECASE; returns 0 if strings are equal (CSTR_EQUAL - 2)
 /// # Safety
 /// `lp_string1` and `lp_string2` must be valid null-terminated UTF-8 strings.
 pub unsafe extern "win64" fn lstrcmpi_a(lp_string1: *const u8, lp_string2: *const u8) -> i32 {
@@ -6040,6 +6610,8 @@ pub unsafe extern "win64" fn lstrcmpi_a(lp_string1: *const u8, lp_string2: *cons
 
 /// lstrcmpiW — compare two wide strings (case-insensitive).
 ///
+// Wine ref: dlls/kernelbase/locale.c::CompareStringW — lstrcmpiW delegates to CompareStringW
+// with LOCALE_USER_DEFAULT + NORM_IGNORECASE; ASCII fast-path for pure-ASCII strings
 /// # Safety
 /// `lp_string1` and `lp_string2` must be valid null-terminated UTF-16 strings.
 pub unsafe extern "win64" fn lstrcmpi_w(lp_string1: *const u16, lp_string2: *const u16) -> i32 {
@@ -6073,6 +6645,8 @@ pub unsafe extern "win64" fn lstrcmpi_w(lp_string1: *const u16, lp_string2: *con
 
 /// lstrlenA — get length of ANSI string.
 ///
+// Wine ref: dlls/kernel32 — lstrlenA/lstrlenW are thin wrappers around strlen/wcslen;
+// NULL input is undefined behavior per Windows docs (may AV); no special-casing in Wine
 /// # Safety
 /// `lp_string` must be a valid null-terminated UTF-8 string.
 pub unsafe extern "win64" fn lstrlen_a(lp_string: *const u8) -> i32 {
@@ -6081,6 +6655,8 @@ pub unsafe extern "win64" fn lstrlen_a(lp_string: *const u8) -> i32 {
 
 /// lstrlenW — get length of wide string.
 ///
+// Wine ref: dlls/kernel32 — lstrlenW counts UTF-16 code units up to null terminator;
+// equivalent to wcslen; no locale awareness; NULL input is undefined per Windows docs
 /// # Safety
 /// `lp_string` must be a valid null-terminated UTF-16 string.
 pub unsafe extern "win64" fn lstrlen_w(lp_string: *const u16) -> i32 {
@@ -6097,6 +6673,8 @@ pub unsafe extern "win64" fn lstrlen_w(lp_string: *const u16) -> i32 {
 
 /// lstrcpyA — copy ANSI string.
 ///
+// Wine ref: dlls/kernel32 — lstrcpyA/W are strcpy/wcscpy wrappers; buffer overrun is
+// caller's responsibility; NULL src → undefined; returns dst pointer like strcpy
 /// # Safety
 /// `lp_string1` must be writable for the length of `lp_string2` plus null terminator.
 /// `lp_string2` must be a valid null-terminated UTF-8 string.
@@ -6107,6 +6685,8 @@ pub unsafe extern "win64" fn lstrcpy_a(lp_string1: *mut u8, lp_string2: *const u
 
 /// lstrcpyW — copy wide string.
 ///
+// Wine ref: dlls/kernel32 — lstrcpyW is wcscpy; copies until null UTF-16 code unit;
+// no bounds checking; returns dst pointer
 /// # Safety
 /// `lp_string1` must be writable for the length of `lp_string2` plus null terminator.
 /// `lp_string2` must be a valid null-terminated UTF-16 string.
@@ -6129,6 +6709,8 @@ pub unsafe extern "win64" fn lstrcpy_w(lp_string1: *mut u16, lp_string2: *const 
 
 /// lstrcpynA — bounded copy of ANSI string.
 ///
+// Wine ref: dlls/kernel32 — lstrcpynA is strncpy; copies at most iMaxLength-1 chars then
+// always null-terminates dst[iMaxLength-1] (unlike POSIX strncpy which may not null-terminate)
 /// # Safety
 /// `lp_string1` must be writable for at least `i_max_length` bytes.
 /// `lp_string2` must be a valid null-terminated UTF-8 string.
@@ -6149,6 +6731,8 @@ pub unsafe extern "win64" fn lstrcpyn_a(
 
 /// lstrcpynW — bounded copy of wide string.
 ///
+// Wine ref: dlls/kernel32 — lstrcpynW copies at most iMaxLength-1 wide chars then forces
+// null terminator at dst[iMaxLength-1], unlike wcsncpy which may leave dst unterminated
 /// # Safety
 /// `lp_string1` must be writable for at least `i_max_length` u16 words.
 /// `lp_string2` must be a valid null-terminated UTF-16 string.
@@ -6184,6 +6768,8 @@ pub unsafe extern "win64" fn lstrcpyn_w(
 ///
 /// # Safety
 /// `lp_buffer` must be writable for `u_size` u16 words.
+// Wine ref: dlls/kernelbase/file.c:2605 — delegates to copy_filename(windows_dir, path, count);
+// windows_dir is initialized from SharedUserData->NtSystemRoot (e.g. "C:\Windows")
 pub unsafe extern "win64" fn get_windows_directory_w(lp_buffer: *mut u16, u_size: u32) -> u32 {
     const PATH: &str = "C:\\Windows\0";
     let wide_chars: Vec<u16> = PATH.encode_utf16().collect();
@@ -6203,6 +6789,7 @@ pub unsafe extern "win64" fn get_windows_directory_w(lp_buffer: *mut u16, u_size
 ///
 /// # Safety
 /// `lp_buffer` must be writable for `u_size` bytes.
+// Wine ref: dlls/kernelbase/file.c:2596 — converts windows_dir from UNICODE_STRING via WideCharToMultiByte then copies
 pub unsafe extern "win64" fn get_windows_directory_a(lp_buffer: *mut u8, u_size: u32) -> u32 {
     const PATH: &str = "C:\\Windows\0";
     let bytes = PATH.as_bytes();
@@ -6222,6 +6809,8 @@ pub unsafe extern "win64" fn get_windows_directory_a(lp_buffer: *mut u8, u_size:
 ///
 /// # Safety
 /// `lp_buffer` must be writable for `u_size` u16 words.
+// Wine ref: dlls/kernelbase/file.c:2341 — delegates to copy_filename(system_dir, path, count);
+// system_dir is initialized from windows_dir + "\system32"
 pub unsafe extern "win64" fn get_system_directory_w(lp_buffer: *mut u16, u_size: u32) -> u32 {
     const PATH: &str = "C:\\Windows\\System32\0";
     let wide_chars: Vec<u16> = PATH.encode_utf16().collect();
@@ -6241,6 +6830,7 @@ pub unsafe extern "win64" fn get_system_directory_w(lp_buffer: *mut u16, u_size:
 ///
 /// # Safety
 /// `lp_buffer` must be writable for `u_size` bytes.
+// Wine ref: dlls/kernelbase/file.c:2332 — converts system_dir from wide to ANSI then copies
 pub unsafe extern "win64" fn get_system_directory_a(lp_buffer: *mut u8, u_size: u32) -> u32 {
     const PATH: &str = "C:\\Windows\\System32\0";
     let bytes = PATH.as_bytes();
@@ -6260,6 +6850,8 @@ pub unsafe extern "win64" fn get_system_directory_a(lp_buffer: *mut u8, u_size: 
 ///
 /// # Safety
 /// `lp_buffer` must be writable for `n_buffer_length` u16 words.
+// Wine ref: dlls/kernelbase/file.c:2521 — checks TMP, TEMP, USERPROFILE env vars in order, then
+// falls back to GetWindowsDirectoryW; appends trailing backslash; zeroes remainder of buffer up to 32767 chars
 pub unsafe extern "win64" fn get_temp_path_w(n_buffer_length: u32, lp_buffer: *mut u16) -> u32 {
     const PATH: &str = "C:\\Temp\\\0";
     let wide_chars: Vec<u16> = PATH.encode_utf16().collect();
@@ -6279,6 +6871,8 @@ pub unsafe extern "win64" fn get_temp_path_w(n_buffer_length: u32, lp_buffer: *m
 ///
 /// # Safety
 /// `lp_buffer` must be writable for `n_buffer_length` bytes.
+// Wine ref: dlls/kernelbase/file.c:2503 — heap-allocates a wide buffer, calls GetTempPathW, then
+// converts via WideCharToMultiByte; returns required byte count (not char count) when buffer too small
 pub unsafe extern "win64" fn get_temp_path_a(n_buffer_length: u32, lp_buffer: *mut u8) -> u32 {
     const PATH: &str = "C:\\Temp\\\0";
     let bytes = PATH.as_bytes();
@@ -6298,6 +6892,8 @@ pub unsafe extern "win64" fn get_temp_path_a(n_buffer_length: u32, lp_buffer: *m
 ///
 /// # Safety
 /// `lp_buffer` must be writable for `n_buffer_length` u16 words.
+// Wine ref: dlls/kernelbase/file.c:1734 — delegates to RtlGetCurrentDirectory_U(buflen*sizeof(WCHAR), buf);
+// divides byte count result by sizeof(WCHAR) to return char count; the NT current dir is in PEB->ProcessParameters
 pub unsafe extern "win64" fn get_current_directory_w(
     n_buffer_length: u32,
     lp_buffer: *mut u16,
@@ -6331,6 +6927,8 @@ pub unsafe extern "win64" fn get_current_directory_w(
 ///
 /// # Safety
 /// `lp_buffer` must be writable for `n_buffer_length` bytes.
+// Wine ref: dlls/kernelbase/file.c:1704 — heap-allocates a wide buffer, calls GetCurrentDirectoryW,
+// converts via WideCharToMultiByte; returns required byte count on buffer-too-small
 pub unsafe extern "win64" fn get_current_directory_a(
     n_buffer_length: u32,
     lp_buffer: *mut u8,
@@ -6355,19 +6953,15 @@ pub unsafe extern "win64" fn get_current_directory_a(
     len as u32
 }
 
-/// SetCurrentDirectoryW — no-op, returns TRUE.
-///
-/// # Safety
-/// Pointer argument is accepted but not dereferenced.
 /// SetCurrentDirectoryW — change the current working directory (Wide).
 ///
-/// Wine ref: dlls/kernelbase/file.c — SetCurrentDirectoryW calls
-/// RtlSetCurrentDirectory_U which calls NtSetInformationProcess with the
-/// NT path. Weave translates the wide Windows path to a Linux path via
+/// Weave translates the wide Windows path to a Linux path via
 /// weave_core::prefix and calls chdir(2). Returns FALSE on error.
 ///
 /// # Safety
 /// `lp_path_name` must be a valid null-terminated UTF-16 string or NULL.
+// Wine ref: dlls/kernelbase/file.c:2949 — calls RtlInitUnicodeString then RtlSetCurrentDirectory_U;
+// RtlSetCurrentDirectory_U updates PEB->ProcessParameters->CurrentDirectory under RtlAcquirePebLock
 pub unsafe extern "win64" fn set_current_directory_w(lp_path_name: *const u16) -> i32 {
     if lp_path_name.is_null() {
         return 0; // FALSE
@@ -6398,12 +6992,11 @@ pub unsafe extern "win64" fn set_current_directory_w(lp_path_name: *const u16) -
 
 /// SetCurrentDirectoryA — change the current working directory (ANSI).
 ///
-/// Wine ref: dlls/kernelbase/file.c — SetCurrentDirectoryA converts to wide
-/// then calls SetCurrentDirectoryW.  Weave does the same: convert ANSI to
-/// UTF-8 (which is valid for ASCII-only paths) and call chdir(2) directly.
+/// Weave converts ANSI to UTF-8 and calls chdir(2) directly.
 ///
 /// # Safety
 /// `lp_path_name` must be a valid null-terminated ANSI string or NULL.
+// Wine ref: dlls/kernelbase/file.c:2935 — converts via file_name_AtoW then delegates to SetCurrentDirectoryW
 pub unsafe extern "win64" fn set_current_directory_a(lp_path_name: *const u8) -> i32 {
     if lp_path_name.is_null() {
         return 0;
@@ -6434,6 +7027,8 @@ pub unsafe extern "win64" fn set_current_directory_a(lp_path_name: *const u8) ->
 /// # Safety
 /// `lp_buffer` must be writable for `lpn_size` u16 words.
 /// `lpn_size` must be a valid pointer to a u32.
+// Wine ref: dlls/kernelbase/registry.c — delegates to GetComputerNameExW(ComputerNameNetBIOS);
+// ComputerNameNetBIOS reads HKLM\SYSTEM\CurrentControlSet\Control\ComputerName\ComputerName
 pub unsafe extern "win64" fn get_computer_name_w(lp_buffer: *mut u16, lpn_size: *mut u32) -> i32 {
     const NAME: &str = "WEAVE\0";
     let wide_chars: Vec<u16> = NAME.encode_utf16().collect();
@@ -6461,6 +7056,8 @@ pub unsafe extern "win64" fn get_computer_name_w(lp_buffer: *mut u16, lpn_size: 
 /// # Safety
 /// `lp_buffer` must be writable for `lpn_size` bytes.
 /// `lpn_size` must be a valid pointer to a u32.
+// Wine ref: dlls/kernelbase/registry.c — delegates to GetComputerNameExA(ComputerNameNetBIOS);
+// converts wide result via WideCharToMultiByte; sets ERROR_BUFFER_OVERFLOW if buffer too small
 pub unsafe extern "win64" fn get_computer_name_a(lp_buffer: *mut u8, lpn_size: *mut u32) -> i32 {
     const NAME: &str = "WEAVE\0";
     let bytes = NAME.as_bytes();
@@ -6488,6 +7085,8 @@ pub unsafe extern "win64" fn get_computer_name_a(lp_buffer: *mut u8, lpn_size: *
 /// # Safety
 /// `lp_buffer` must be writable for `pcb_buffer` u16 words.
 /// `pcb_buffer` must be a valid pointer to a u32.
+// Wine ref: dlls/secur32/userenv.c — queries token via GetTokenInformation(TokenUser) then
+// LookupAccountSidW to get user name; pcb_buffer is in chars including NUL; ERROR_INSUFFICIENT_BUFFER if too small
 pub unsafe extern "win64" fn get_user_name_w(lp_buffer: *mut u16, pcb_buffer: *mut u32) -> i32 {
     const NAME: &str = "WeavUser\0";
     let wide_chars: Vec<u16> = NAME.encode_utf16().collect();
@@ -6515,6 +7114,8 @@ pub unsafe extern "win64" fn get_user_name_w(lp_buffer: *mut u16, pcb_buffer: *m
 /// # Safety
 /// `lp_buffer` must be writable for `pcb_buffer` bytes.
 /// `pcb_buffer` must be a valid pointer to a u32.
+// Wine ref: dlls/secur32/userenv.c — calls GetUserNameW then converts via WideCharToMultiByte;
+// pcb_buffer counts bytes including NUL terminator
 pub unsafe extern "win64" fn get_user_name_a(lp_buffer: *mut u8, pcb_buffer: *mut u32) -> i32 {
     const NAME: &str = "WeavUser\0";
     let bytes = NAME.as_bytes();
@@ -6547,6 +7148,8 @@ pub unsafe extern "win64" fn get_user_name_a(lp_buffer: *mut u8, pcb_buffer: *mu
 ///
 /// # Safety
 /// `lp_file_name` must be a valid null-terminated UTF-16 string.
+// Wine ref: dlls/kernelbase/file.c:1755 — uses NtQueryAttributesFile(FILE_BASIC_INFORMATION);
+// falls back to FILE_ATTRIBUTE_ARCHIVE for DOS device names (e.g. "NUL") which NtQueryAttributesFile rejects
 pub unsafe extern "win64" fn get_file_attributes_w(lp_file_name: *const u16) -> u32 {
     const INVALID_FILE_ATTRIBUTES: u32 = 0xFFFFFFFF;
     const FILE_ATTRIBUTE_NORMAL: u32 = 0x80;
@@ -6600,6 +7203,7 @@ pub unsafe extern "win64" fn get_file_attributes_w(lp_file_name: *const u16) -> 
 ///
 /// # Safety
 /// `lp_file_name` must be a valid null-terminated UTF-8 string.
+// Wine ref: dlls/kernelbase/file.c:1743 — converts via file_name_AtoW then delegates to GetFileAttributesW
 pub unsafe extern "win64" fn get_file_attributes_a(lp_file_name: *const u8) -> u32 {
     const INVALID_FILE_ATTRIBUTES: u32 = 0xFFFFFFFF;
     const FILE_ATTRIBUTE_NORMAL: u32 = 0x80;
@@ -6653,6 +7257,8 @@ pub unsafe extern "win64" fn get_file_attributes_a(lp_file_name: *const u8) -> u
 /// `lp_file_name` must be a valid null-terminated UTF-16 string.
 /// `lp_buffer` must be writable for `n_buffer_length` u16 words.
 /// `lp_file_part` must be a valid writable pointer or NULL.
+// Wine ref: dlls/kernelbase/file.c:2063 — delegates to RtlGetFullPathName_U(name, len*sizeof(WCHAR), buf, lastpart);
+// divides byte result by sizeof(WCHAR); lastpart is set to the pointer of the filename component in buffer
 pub unsafe extern "win64" fn get_full_path_name_w(
     lp_file_name: *const u16,
     n_buffer_length: u32,
@@ -6742,6 +7348,8 @@ pub unsafe extern "win64" fn get_full_path_name_w(
 /// `lp_file_name` must be a valid null-terminated UTF-8 string.
 /// `lp_buffer` must be writable for `n_buffer_length` bytes.
 /// `lp_file_part` must be a valid writable pointer or NULL.
+// Wine ref: dlls/kernelbase/file.c:2032 — converts via file_name_AtoW, calls RtlGetFullPathName_U,
+// converts result back via WideCharToMultiByte; returns required byte count when buffer too small
 pub unsafe extern "win64" fn get_full_path_name_a(
     lp_file_name: *const u8,
     n_buffer_length: u32,
@@ -6831,6 +7439,8 @@ pub unsafe extern "win64" fn get_full_path_name_a(
 ///
 /// # Safety
 /// `lp_existing_file_name` and `lp_new_file_name` must be valid null-terminated UTF-16 strings.
+// Wine ref: dlls/kernelbase/file.c — MoveFileW delegates to MoveFileExW(MOVEFILE_COPY_ALLOWED);
+// MoveFileExW delegates to MoveFileWithProgressW which handles cross-device copies via CopyFileExW+DeleteFileW
 pub unsafe extern "win64" fn move_file_w(
     lp_existing_file_name: *const u16,
     lp_new_file_name: *const u16,
@@ -6891,6 +7501,7 @@ pub unsafe extern "win64" fn move_file_w(
 ///
 /// # Safety
 /// `lp_existing_file_name` and `lp_new_file_name` must be valid null-terminated UTF-8 strings.
+// Wine ref: dlls/kernelbase/file.c — MoveFileA converts via RtlMultiByteToUnicodeN then delegates to MoveFileW
 pub unsafe extern "win64" fn move_file_a(
     lp_existing_file_name: *const u8,
     lp_new_file_name: *const u8,
@@ -6950,6 +7561,8 @@ pub unsafe extern "win64" fn move_file_a(
 ///
 /// # Safety
 /// `lp_path_name` must be a valid null-terminated UTF-16 string.
+// Wine ref: dlls/kernelbase/file.c:3717 — opens with DELETE|SYNCHRONIZE, FILE_DIRECTORY_FILE|FILE_OPEN_REPARSE_POINT;
+// sets FileDispositionInformation{TRUE} on the handle to mark for deletion; actual delete on NtClose
 pub unsafe extern "win64" fn remove_directory_w(lp_path_name: *const u16) -> i32 {
     if lp_path_name.is_null() {
         return 0; // FALSE
@@ -6987,6 +7600,7 @@ pub unsafe extern "win64" fn remove_directory_w(lp_path_name: *const u16) -> i32
 ///
 /// # Safety
 /// `lp_path_name` must be a valid null-terminated UTF-8 string.
+// Wine ref: dlls/kernelbase/file.c:3705 — converts via file_name_AtoW then delegates to RemoveDirectoryW
 pub unsafe extern "win64" fn remove_directory_a(lp_path_name: *const u8) -> i32 {
     if lp_path_name.is_null() {
         return 0; // FALSE
@@ -7025,6 +7639,7 @@ pub unsafe extern "win64" fn remove_directory_a(lp_path_name: *const u8) -> i32 
 /// # Safety
 /// `lp_path_name` must be a valid null-terminated UTF-8 string.
 /// `lp_security_attributes` is ignored.
+// Wine ref: dlls/kernelbase/file.c:656 — converts via file_name_AtoW then delegates to CreateDirectoryW
 pub unsafe extern "win64" fn create_directory_a(
     lp_path_name: *const u8,
     _lp_security_attributes: usize,
@@ -7064,6 +7679,8 @@ pub unsafe extern "win64" fn create_directory_a(
 /// GetLogicalDrives: return bitmask of available drives.
 ///
 /// Returns 0x00000004 (bit 2 set) indicating drive C: exists.
+// Wine ref: dlls/kernelbase/volume.c:495 — enumerates \\DosDevices\\ NT directory via NtQueryDirectoryObject;
+// sets bit N for each two-char name where name[1]==':' (e.g. 'C:' sets bit 2)
 pub extern "win64" fn get_logical_drives() -> u32 {
     0x00000004 // bit 2 = drive C:
 }
@@ -7072,6 +7689,8 @@ pub extern "win64" fn get_logical_drives() -> u32 {
 ///
 /// # Safety
 /// `lp_root_path_name` must be a valid null-terminated UTF-16 string.
+// Wine ref: dlls/kernelbase/volume.c:552 — opens device root, calls NtQueryVolumeInformationFile(FileFsDeviceInformation);
+// distinguishes CD-ROM, removable, remote, RAM disk by DeviceType and Characteristics; falls back to mountmgr for DRIVE_FIXED
 pub unsafe extern "win64" fn get_drive_type_w(lp_root_path_name: *const u16) -> u32 {
     const DRIVE_UNKNOWN: u32 = 0;
     const DRIVE_FIXED: u32 = 3;
@@ -7092,6 +7711,8 @@ pub unsafe extern "win64" fn get_drive_type_w(lp_root_path_name: *const u16) -> 
 
 /// GetDriveTypeA: determine the type of drive (ANSI version).
 ///
+// Wine ref: dlls/kernelbase/volume.c:602 — converts root via file_name_AtoW then delegates
+// to GetDriveTypeW; NULL root → DRIVE_NO_ROOT_DIR if AtoW fails
 /// # Safety
 /// `lp_root_path_name` must be a valid null-terminated UTF-8 string.
 pub unsafe extern "win64" fn get_drive_type_a(lp_root_path_name: *const u8) -> u32 {
@@ -7117,6 +7738,8 @@ pub unsafe extern "win64" fn get_drive_type_a(lp_root_path_name: *const u8) -> u
 /// `lp_directory_name` is ignored.
 /// `lp_free_bytes_available_to_caller`, `lp_total_number_of_bytes`,
 /// `lp_total_number_of_free_bytes` must be valid pointers or NULL.
+// Wine ref: dlls/kernelbase/volume.c:614 — opens device root, calls NtQueryVolumeInformationFile(FileFsSizeInformation);
+// avail quota FIXME: does not account for per-user disk quotas; computes bytes as AllocationUnits*SectorsPerUnit*BytesPerSector
 pub unsafe extern "win64" fn get_disk_free_space_ex_w(
     _lp_directory_name: *const u16,
     lp_free_bytes_available_to_caller: *mut u64,
@@ -7140,6 +7763,8 @@ pub unsafe extern "win64" fn get_disk_free_space_ex_w(
 ///
 /// # Safety
 /// `lp_exit_code` must be a valid writable pointer or NULL.
+// Wine ref: dlls/kernelbase/process.c:798 — calls NtQueryInformationProcess(ProcessBasicInformation);
+// reads pbi.ExitStatus; STILL_ACTIVE (259 = STATUS_PENDING) means still running
 pub unsafe extern "win64" fn get_exit_code_process(
     _h_process: usize,
     lp_exit_code: *mut u32,
@@ -7155,6 +7780,8 @@ pub unsafe extern "win64" fn get_exit_code_process(
 ///
 /// # Safety
 /// `lp_exit_code` must be a valid writable pointer or NULL.
+// Wine ref: dlls/kernelbase/thread.c:218 — calls NtQueryInformationThread(ThreadBasicInformation);
+// reads info.ExitStatus; STILL_ACTIVE (259) means thread is still running
 pub unsafe extern "win64" fn get_exit_code_thread(_h_thread: usize, lp_exit_code: *mut u32) -> i32 {
     // Write STILL_ACTIVE (259) to indicate thread is still running
     if !lp_exit_code.is_null() {
@@ -7167,6 +7794,8 @@ pub unsafe extern "win64" fn get_exit_code_thread(_h_thread: usize, lp_exit_code
 ///
 /// # Safety
 /// `h_thread` is accepted but not dereferenced.
+// Wine ref: dlls/kernelbase/thread.c:714 — calls NtTerminateThread(handle, exit_code);
+// handle == GetCurrentThread() causes the calling thread to exit immediately
 pub unsafe extern "win64" fn terminate_thread(_h_thread: usize, _dw_exit_code: u32) -> i32 {
     // No-op: thread termination not supported in Phase 1
     1 // TRUE
@@ -7178,6 +7807,8 @@ pub unsafe extern "win64" fn terminate_thread(_h_thread: usize, _dw_exit_code: u
 ///
 /// # Safety
 /// Pointer argument is accepted but not dereferenced.
+// Wine ref: dlls/kernelbase/file.c:2991 — opens with SYNCHRONIZE|FILE_OPEN_REPARSE_POINT;
+// calls NtSetInformationFile(FileBasicInformation) with attributes|FILE_ATTRIBUTE_NORMAL to prevent zero attrs
 pub unsafe extern "win64" fn set_file_attributes_w(
     _lp_file_name: *const u16,
     _dw_file_attributes: u32,
@@ -7191,6 +7822,7 @@ pub unsafe extern "win64" fn set_file_attributes_w(
 ///
 /// # Safety
 /// Pointer argument is accepted but not dereferenced.
+// Wine ref: dlls/kernelbase/file.c:2979 — converts via file_name_AtoW then delegates to SetFileAttributesW
 pub unsafe extern "win64" fn set_file_attributes_a(
     _lp_file_name: *const u8,
     _dw_file_attributes: u32,
@@ -7217,6 +7849,8 @@ pub struct SystemTime {
 ///
 /// # Safety
 /// `lp_version_information` must be a valid writable pointer to an OsVersionInfoExW.
+// Wine ref: dlls/kernelbase/locale.c — reads version fields from peb->OSMajorVersion etc.; also fills
+// wSuiteMask from the registry HKLM\System\CurrentControlSet\Control\ProductOptions\ProductSuite
 pub unsafe extern "win64" fn get_version_ex_w(lp_version_information: *mut u8) -> i32 {
     // SAFETY: lp_version_information is non-null per the Windows caller contract and
     // points to an OSVERSIONINFOEXW (or OSVERSIONINFOW) — the caller sets
@@ -7249,6 +7883,8 @@ pub unsafe extern "win64" fn get_version_ex_w(lp_version_information: *mut u8) -
 ///
 /// # Safety
 /// `lp_version_information` must be a valid writable pointer to an OsVersionInfoExA.
+// Wine ref: dlls/kernelbase/locale.c — converts szCSDVersion from wide to ANSI via WideCharToMultiByte then
+// calls GetVersionExW internally; struct layout matches OSVERSIONINFOEXA
 pub unsafe extern "win64" fn get_version_ex_a(lp_version_information: *mut u8) -> i32 {
     // SAFETY: same as get_version_ex_w — lp_version_information is a valid
     // Windows-allocated pointer to an OSVERSIONINFOEXA/OSVERSIONINFOA struct.
@@ -7275,6 +7911,7 @@ pub unsafe extern "win64" fn get_version_ex_a(lp_version_information: *mut u8) -
 }
 
 /// GetCommandLineA — return the ANSI command line set by the Weave CLI.
+// Wine ref: dlls/kernelbase/process.c — returns NtCurrentTeb()->Peb->ProcessParameters->CommandLine converted via WideCharToMultiByte; pointer is valid for process lifetime
 ///
 /// Returns a pointer to the null-terminated ANSI string built from the
 /// executable name and any trailing arguments passed to `weave`.
@@ -7283,6 +7920,7 @@ pub extern "win64" fn get_command_line_a() -> usize {
 }
 
 /// GetCommandLineW — return the wide command line set by the Weave CLI.
+// Wine ref: dlls/kernelbase/process.c — returns NtCurrentTeb()->Peb->ProcessParameters->CommandLine.Buffer directly; never NULL, never freed
 ///
 /// Returns a pointer to the null-terminated UTF-16 string built from the
 /// executable name and any trailing arguments passed to `weave`.
@@ -7291,11 +7929,14 @@ pub extern "win64" fn get_command_line_w() -> usize {
 }
 
 /// EncodePointer: identity — return the pointer unchanged.
+// Wine ref: dlls/kernelbase/process.c — calls RtlEncodePointer which XORs with a per-process cookie;
+// cookie is stored in the PEB; encoded pointers crash intentionally if misused cross-process
 pub extern "win64" fn encode_pointer(ptr: usize) -> usize {
     ptr
 }
 
 /// DecodePointer: identity — return the pointer unchanged.
+// Wine ref: dlls/kernelbase/process.c — calls RtlDecodePointer which XORs with the same per-process cookie as EncodePointer; inverse of EncodePointer
 pub extern "win64" fn decode_pointer(ptr: usize) -> usize {
     ptr
 }
@@ -7323,13 +7964,10 @@ thread_local! {
 
 /// FlsAlloc: allocate a fiber local storage slot.
 ///
-/// Wine ref: dlls/kernelbase/thread.c — FlsAlloc scans a bitmap of
-/// FLS_MAXIMUM_AVAILABLE (128) slots, marks the first free one, stores the
-/// destructor callback, and returns the index. Weave uses a flat array of
-/// 128 booleans; the callback is accepted but not invoked (no fiber support).
-///
 /// Slot allocation is process-global (protected by a Mutex); slot values are
 /// per-thread (thread_local). This matches Windows FLS semantics.
+// Wine ref: dlls/kernelbase/thread.c:1264 — delegates to RtlFlsAlloc(callback, &index);
+// FLS_OUT_OF_INDEXES (0xFFFFFFFF) returned when RtlFlsAlloc fails; callback invoked on fiber/thread exit
 pub extern "win64" fn fls_alloc(_lp_callback: usize) -> u32 {
     let mut slots = match lock_fls_slots(&FLS_SLOTS) {
         Some(g) => g,
@@ -7347,6 +7985,8 @@ pub extern "win64" fn fls_alloc(_lp_callback: usize) -> u32 {
 /// FlsGetValue: retrieve value from fiber local storage slot.
 ///
 /// Values are per-thread — each thread sees its own copy at each slot index.
+// Wine ref: dlls/kernelbase/thread.c:1285 — delegates to RtlFlsGetValue; sets ERROR_SUCCESS on success;
+// returns NULL and sets last error on invalid index
 pub extern "win64" fn fls_get_value(dw_fls_index: u32) -> usize {
     if dw_fls_index >= FLS_MAX_SLOTS as u32 {
         return 0;
@@ -7357,6 +7997,7 @@ pub extern "win64" fn fls_get_value(dw_fls_index: u32) -> usize {
 /// FlsSetValue: store value in fiber local storage slot.
 ///
 /// Values are per-thread — writing from one thread does not affect others.
+// Wine ref: dlls/kernelbase/thread.c:1298 — delegates to RtlFlsSetValue(index, data)
 pub extern "win64" fn fls_set_value(dw_fls_index: u32, lp_fls_data: usize) -> i32 {
     if dw_fls_index >= FLS_MAX_SLOTS as u32 {
         return 0; // FALSE
@@ -7370,6 +8011,8 @@ pub extern "win64" fn fls_set_value(dw_fls_index: u32, lp_fls_data: usize) -> i3
 /// Marks the slot as available in the process-global table. Does not clear
 /// per-thread values (threads using the old index after free get stale data,
 /// matching Windows behavior).
+// Wine ref: dlls/kernelbase/thread.c:1276 — delegates to RtlFlsFree(index);
+// RtlFlsFree invokes the registered callback for each thread's value before freeing the slot
 pub extern "win64" fn fls_free(dw_fls_index: u32) -> i32 {
     if dw_fls_index >= FLS_MAX_SLOTS as u32 {
         return 0; // FALSE
@@ -7384,6 +8027,8 @@ pub extern "win64" fn fls_free(dw_fls_index: u32) -> i32 {
 ///
 /// # Safety
 /// `lp_critical_section` must point to at least 40 bytes of writable memory.
+// Wine ref: dlls/kernelbase/sync.c:1008 — delegates to RtlInitializeCriticalSectionAndSpinCount;
+// returns TRUE (inverts the NTSTATUS success code); spin count is stored in RTL_CRITICAL_SECTION.SpinCount
 pub unsafe extern "win64" fn initialize_critical_section_and_spin_count(
     lp_critical_section: *mut u8,
     _dw_spin_count: u32,
@@ -7401,6 +8046,8 @@ pub unsafe extern "win64" fn initialize_critical_section_and_spin_count(
 ///
 /// # Safety
 /// `lp_critical_section` must point to at least 40 bytes of writable memory.
+// Wine ref: dlls/kernelbase/sync.c:1016 — delegates to RtlInitializeCriticalSectionEx;
+// flags include CRITICAL_SECTION_NO_DEBUG_INFO which skips RTL_CRITICAL_SECTION_DEBUG allocation
 pub unsafe extern "win64" fn initialize_critical_section_ex(
     lp_critical_section: *mut u8,
     _dw_spin_count: u32,
@@ -7416,6 +8063,8 @@ pub unsafe extern "win64" fn initialize_critical_section_ex(
 
 /// HeapSetInformation: set heap information (no-op).
 ///
+// Wine ref: dlls/kernelbase/memory.c — HeapSetInformation delegates to RtlSetHeapInformation;
+// HeapCompatibilityInformation class 2 enables low-fragmentation heap; ignored in Wine/Weave
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
 pub unsafe extern "win64" fn heap_set_information(
@@ -7428,22 +8077,29 @@ pub unsafe extern "win64" fn heap_set_information(
 }
 
 /// SetHandleCount: legacy stub that returns the input value.
+// Wine ref: dlls/kernelbase/process.c:1165 — returns count unchanged; Win3.1 legacy, no-op on NT
 pub extern "win64" fn set_handle_count(u_number: u32) -> u32 {
     u_number
 }
 
 /// GetThreadLocale: return English (United States) locale ID.
+// Wine ref: dlls/kernelbase/thread.c — returns NtCurrentTeb()->CurrentLocale; set by
+// SetThreadLocale; default is system locale from PEB->Ldr->... at process start
 pub extern "win64" fn get_thread_locale() -> u32 {
     0x0409 // LOCALE_EN_US
 }
 
 /// SetThreadLocale: no-op, returns TRUE.
+// Wine ref: dlls/kernelbase/thread.c:598 — calls ConvertDefaultLocale then IsValidLocale;
+// stores into NtCurrentTeb()->CurrentLocale; invalid locale → ERROR_INVALID_PARAMETER
 pub extern "win64" fn set_thread_locale(_locale: u32) -> i32 {
     1 // TRUE
 }
 
 /// SetThreadStackGuarantee: no-op, returns TRUE.
 ///
+// Wine ref: dlls/kernelbase/thread.c:636 — rounds size up to 4096; 64-bit enforces min 8192;
+// stores in NtCurrentTeb()->GuaranteedStackBytes; *size receives previous value
 /// # Safety
 /// Pointer argument is accepted but not dereferenced.
 pub unsafe extern "win64" fn set_thread_stack_guarantee(_stack_size_in_bytes: *mut u32) -> i32 {
@@ -7452,10 +8108,8 @@ pub unsafe extern "win64" fn set_thread_stack_guarantee(_stack_size_in_bytes: *m
 
 /// GetTimeZoneInformation — fill TIME_ZONE_INFORMATION from the local timezone.
 ///
-/// Wine ref: dlls/kernelbase/locale.c — GetTimeZoneInformation calls
-/// RtlQueryTimeZoneInformation which reads from the registry or the system
-/// timezone data. On Linux we use localtime_r() to get the UTC offset and
-/// DST flag, then populate the Windows struct:
+/// On Linux we use localtime_r() to get the UTC offset and DST flag,
+/// then populate the Windows struct:
 ///   +0   i32  Bias (minutes west of UTC; sign is opposite to tm_gmtoff)
 ///   +4   [32]u16 StandardName (wide string)
 ///   +68  SYSTEMTIME StandardDate (zeroed = not changing)
@@ -7468,6 +8122,9 @@ pub unsafe extern "win64" fn set_thread_stack_guarantee(_stack_size_in_bytes: *m
 ///
 /// # Safety
 /// `lp_time_zone_information` must be a valid writable pointer to a 172-byte struct.
+// Wine ref: dlls/kernelbase/locale.c:6294 — delegates to GetDynamicTimeZoneInformationInformation
+// then memcpy's first sizeof(TIME_ZONE_INFORMATION) bytes; GetDynamicTimeZoneInformation reads
+// from HKLM\System\CurrentControlSet\Control\TimeZoneInformation or calls RtlQueryTimeZoneInformation
 pub unsafe extern "win64" fn get_time_zone_information(lp_time_zone_information: *mut u8) -> u32 {
     if lp_time_zone_information.is_null() {
         return 0xFFFF_FFFF; // error
@@ -7502,6 +8159,8 @@ pub unsafe extern "win64" fn get_time_zone_information(lp_time_zone_information:
 ///
 /// # Safety
 /// `lp_system_time` must be a valid writable pointer to a SystemTime struct.
+// Wine ref: dlls/kernelbase/time.c — calls NtQuerySystemTime then RtlTimeToTimeFields;
+// wDayOfWeek is computed by RtlTimeToTimeFields from the absolute filetime
 pub unsafe extern "win64" fn get_system_time(lp_system_time: *mut u8) {
     let mut t: libc::time_t = 0;
     unsafe { libc::time(&mut t) };
@@ -7528,6 +8187,8 @@ pub unsafe extern "win64" fn get_system_time(lp_system_time: *mut u8) {
 ///
 /// # Safety
 /// `lp_system_time` must be a valid writable pointer to a SystemTime struct.
+// Wine ref: dlls/kernelbase/time.c — calls GetSystemTime then SystemTimeToTzSpecificLocalTime
+// (applies bias from GetTimeZoneInformation to convert UTC → local)
 pub unsafe extern "win64" fn get_local_time(lp_system_time: *mut u8) {
     let mut t: libc::time_t = 0;
     unsafe { libc::time(&mut t) };
@@ -7562,6 +8223,8 @@ static EMPTY_ENV_A: [u8; 2] = [0u8, 0u8];
 ///
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
+// Wine ref: dlls/kernelbase/process.c — calls RtlQueryEnvironmentVariable_U on PEB->ProcessParameters->Environment;
+// returns required chars (excl NUL) on success, 0+ERROR_ENVVAR_NOT_FOUND if missing, required size+ERROR_INSUFFICIENT_BUFFER if too small
 pub unsafe extern "win64" fn get_environment_variable_a(
     _lp_name: *const u8,
     _lp_buffer: *mut u8,
@@ -7574,6 +8237,8 @@ pub unsafe extern "win64" fn get_environment_variable_a(
 ///
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
+// Wine ref: dlls/kernelbase/process.c:1723 — calls RtlSetEnvironmentVariable(NULL, &nameW, &valueW);
+// NULL value deletes the variable; NULL env param means current process environment
 pub unsafe extern "win64" fn set_environment_variable_w(
     _lp_name: *const u16,
     _lp_value: *const u16,
@@ -7585,6 +8250,7 @@ pub unsafe extern "win64" fn set_environment_variable_w(
 ///
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
+// Wine ref: dlls/kernelbase/process.c:1696 — converts name and value via RtlCreateUnicodeStringFromAsciiz then delegates to SetEnvironmentVariableW
 pub unsafe extern "win64" fn set_environment_variable_a(
     _lp_name: *const u8,
     _lp_value: *const u8,
@@ -7593,11 +8259,14 @@ pub unsafe extern "win64" fn set_environment_variable_a(
 }
 
 /// GetEnvironmentStringsW: return pointer to static empty wide environment block.
+// Wine ref: dlls/kernelbase/process.c — returns NtCurrentTeb()->Peb->ProcessParameters->Environment directly;
+// block is double-null-terminated; caller must free with FreeEnvironmentStringsW
 pub extern "win64" fn get_environment_strings_w() -> usize {
     EMPTY_ENV_W.as_ptr() as usize
 }
 
 /// GetEnvironmentStringsA: return pointer to static empty narrow environment block.
+// Wine ref: dlls/kernelbase/process.c — converts wide environment block via WideCharToMultiByte; caller frees with FreeEnvironmentStringsA
 pub extern "win64" fn get_environment_strings_a() -> usize {
     EMPTY_ENV_A.as_ptr() as usize
 }
@@ -7606,6 +8275,7 @@ pub extern "win64" fn get_environment_strings_a() -> usize {
 ///
 /// # Safety
 /// `penv` is accepted but not dereferenced.
+// Wine ref: dlls/kernelbase/process.c — frees the heap allocation returned by GetEnvironmentStringsW; NULL is accepted
 pub unsafe extern "win64" fn free_environment_strings_w(_penv: *mut u16) -> i32 {
     1 // TRUE
 }
@@ -7614,6 +8284,7 @@ pub unsafe extern "win64" fn free_environment_strings_w(_penv: *mut u16) -> i32 
 ///
 /// # Safety
 /// `penv` is accepted but not dereferenced.
+// Wine ref: dlls/kernelbase/process.c — frees the heap allocation returned by GetEnvironmentStringsA; NULL is accepted
 pub unsafe extern "win64" fn free_environment_strings_a(_penv: *mut u8) -> i32 {
     1 // TRUE
 }
@@ -7627,6 +8298,8 @@ const LOCALE_RETURN_NUMBER: u32 = 0x20000000;
 ///
 /// # Safety
 /// `lp_lc_data` must be a valid writable pointer for `cch_data` u16 words.
+// Wine ref: dlls/kernelbase/locale.c — when LOCALE_RETURN_NUMBER set, writes binary DWORD into buffer (cch_data must be 2);
+// cch_data==0 is a size query; unknown types return 0+ERROR_INVALID_FLAGS
 pub unsafe extern "win64" fn get_locale_info_w(
     _locale: u32,
     lc_type: u32,
@@ -7678,6 +8351,7 @@ pub unsafe extern "win64" fn get_locale_info_w(
 ///
 /// # Safety
 /// `lp_lc_data` must be a valid writable pointer for `cch_data` bytes.
+// Wine ref: dlls/kernelbase/locale.c — converts name via WideCharToMultiByte then copies; returns byte count excluding NUL
 pub unsafe extern "win64" fn get_locale_info_a(
     _locale: u32,
     lc_type: u32,
@@ -7704,13 +8378,10 @@ pub unsafe extern "win64" fn get_locale_info_a(
 
 /// GetLocaleInfoEx: retrieve locale information by locale name (UTF-16 string).
 ///
-/// Wine ref: dlls/kernelbase/locale.c — resolves locale name to LCID via
-/// get_locale_by_name, then delegates to get_locale_info with the same
-/// LCType/buffer/len params; returns 0 + ERROR_INVALID_PARAMETER for unknown names.
-/// We ignore the locale name and delegate to get_locale_info_w with the default locale.
-///
 /// # Safety
 /// `lp_locale_name` may be NULL (means system default). `lp_lc_data` must be valid for `cch_data` words.
+// Wine ref: dlls/kernelbase/locale.c — resolves locale name to LCID via get_locale_by_name;
+// delegates to get_locale_info; returns 0+ERROR_INVALID_PARAMETER for unknown locale names
 pub unsafe extern "win64" fn get_locale_info_ex(
     _lp_locale_name: *const u16,
     lc_type: u32,
@@ -7723,11 +8394,10 @@ pub unsafe extern "win64" fn get_locale_info_ex(
 
 /// GetUserDefaultLocaleName: return the user-default locale name as a UTF-16 string.
 ///
-/// Wine ref: dlls/kernelbase/locale.c — calls get_locale_by_id(GetUserDefaultLCID()),
-/// copies locale->sname (e.g. "en-US") into buffer.
-///
 /// # Safety
 /// `lp_locale_name` must be a writable buffer of at least `cch_locale_name` u16 words.
+// Wine ref: dlls/kernelbase/locale.c — calls get_locale_by_id(GetUserDefaultLCID());
+// copies locale->sname (e.g. "en-US") into buffer; returns char count including NUL on success
 pub unsafe extern "win64" fn get_user_default_locale_name(
     lp_locale_name: *mut u16,
     cch_locale_name: i32,
@@ -7762,12 +8432,10 @@ const LINGUISTIC_IGNORECASE: u32 = 0x00000010;
 
 /// CompareStringW: compare two UTF-16 strings with optional case folding.
 ///
-/// Wine ref: dlls/kernelbase/locale.c — delegates to CompareStringEx; unknown LCID →
-/// ERROR_INVALID_PARAMETER. Weave ignores locale (LCID) — ASCII case-fold only;
-/// full Unicode collation not implemented. Known gap.
-///
 /// # Safety
 /// `lp_string1` and `lp_string2` must be valid pointers to null-terminated UTF-16 strings.
+// Wine ref: dlls/kernelbase/locale.c — delegates to CompareStringEx; unknown LCID → ERROR_INVALID_PARAMETER;
+// returns CSTR_LESS_THAN(1)/CSTR_EQUAL(2)/CSTR_GREATER_THAN(3) (not -1/0/1)
 pub unsafe extern "win64" fn compare_string_w(
     _locale: u32,
     dw_cmp_flags: u32,
@@ -7827,11 +8495,10 @@ pub unsafe extern "win64" fn compare_string_w(
 
 /// CompareStringOrdinal: compare two UTF-16 strings with optional case folding.
 ///
-/// Wine ref: dlls/kernelbase/locale.c — null str1 or str2 → ERROR_INVALID_PARAMETER, return 0;
-/// len < 0 → use lstrlenW; delegates to RtlCompareUnicodeStrings for case folding.
-///
 /// # Safety
 /// `lp_string1` and `lp_string2` must be valid pointers to null-terminated UTF-16 strings.
+// Wine ref: dlls/kernelbase/locale.c — null str1 or str2 → ERROR_INVALID_PARAMETER, return 0;
+// len < 0 → use lstrlenW length; delegates to RtlCompareUnicodeStrings for case folding
 pub unsafe extern "win64" fn compare_string_ordinal(
     lp_string1: *const u16,
     cch_count1: i32,
@@ -7903,6 +8570,8 @@ const LCMAP_UPPERCASE: u32 = 0x00000200;
 /// # Safety
 /// `lp_src_str` must be valid for `cch_src` u16 elements.
 /// `lp_dest_str` must be writable for `cch_dest` u16 elements.
+// Wine ref: dlls/kernelbase/locale.c — delegates to LCMapStringEx; LCMAP_SORTKEY converts to sort key bytes;
+// LCMAP_UPPERCASE/LOWERCASE fold case; cch_dest==0 is size query
 pub unsafe extern "win64" fn lc_map_string_w(
     _locale: u32,
     dw_map_flags: u32,
@@ -7989,6 +8658,8 @@ fn classify_char(c: u16) -> u16 {
 /// # Safety
 /// `lp_src_str` must be valid for `cch_src` u16 elements.
 /// `lp_char_type` must be writable for `cch_src` u16 elements.
+// Wine ref: dlls/kernelbase/locale.c — CT_CTYPE1 uses C1_* bitmask table; CT_CTYPE2 returns BiDi class;
+// CT_CTYPE3 returns character type (half-width, full-width, etc.); unknown type → ERROR_INVALID_PARAMETER
 pub unsafe extern "win64" fn get_string_type_w(
     dw_info_type: u32,
     lp_src_str: *const u16,
@@ -8021,12 +8692,10 @@ pub unsafe extern "win64" fn get_string_type_w(
 
 /// GetStringTypeExW: classify UTF-16 characters (locale-aware wrapper).
 ///
-/// Wine ref: dlls/kernelbase/locale.c — locale param is explicitly ignored for Unicode;
-/// directly tail-calls GetStringTypeW(type, src, count, chartype).
-///
 /// # Safety
 /// `lp_src_str` must be valid for `cch_src` u16 elements.
 /// `lp_char_type` must be writable for `cch_src` u16 elements.
+// Wine ref: dlls/kernelbase/locale.c — locale param ignored for Unicode; tail-calls GetStringTypeW(type, src, count, chartype)
 pub unsafe extern "win64" fn get_string_type_ex_w(
     _locale: u32,
     dw_info_type: u32,
@@ -8039,12 +8708,11 @@ pub unsafe extern "win64" fn get_string_type_ex_w(
 
 /// GetStringTypeExA: classify ANSI characters (locale-aware wrapper).
 ///
-/// Wine ref: dlls/kernelbase/locale.c — locale ignored; converts each ANSI byte to
-/// its Unicode codepoint (identity for ASCII) then classifies via CT_CTYPE1 table.
-///
 /// # Safety
 /// `lp_src_str` must be valid for `cch_src` bytes.
 /// `lp_char_type` must be writable for `cch_src` u16 elements.
+// Wine ref: dlls/kernelbase/locale.c — locale ignored; converts each ANSI byte to its Unicode
+// codepoint (identity for ASCII) then classifies via CT_CTYPE1 table
 pub unsafe extern "win64" fn get_string_type_ex_a(
     _locale: u32,
     dw_info_type: u32,
@@ -8079,21 +8747,19 @@ pub unsafe extern "win64" fn get_string_type_ex_a(
 }
 
 /// AreFileApisANSI: return whether file I/O APIs use the ANSI codepage.
-///
-/// Wine ref: dlls/kernelbase/file.c — returns `!oem_file_apis`; default is FALSE
-/// (ANSI mode enabled), so returns TRUE. Weave always uses ANSI mode.
+// Wine ref: dlls/kernelbase/file.c:498 — returns `!oem_file_apis`; oem_file_apis is a
+// module-level bool toggled by SetFileApisToOEM/SetFileApisToANSI; default FALSE → returns TRUE
 pub extern "win64" fn are_file_apis_ansi() -> i32 {
     1 // TRUE
 }
 
 /// CompareStringEx: compare two UTF-16 strings using a locale name.
 ///
-/// Wine ref: dlls/kernelbase/locale.c — validates flags and null args, resolves locale
-/// name to sortguid, then delegates to compare_string(). NULL str1 or str2 →
-/// ERROR_INVALID_PARAMETER. Weave ignores locale name (ASCII case-fold only).
-///
 /// # Safety
 /// `lp_string1` and `lp_string2` must be valid UTF-16 string pointers.
+// Wine ref: dlls/kernelbase/locale.c — validates flags and null args, resolves locale name to
+// sortguid via locale_name_to_sortguid(), delegates to compare_string(); NULL str1/str2 →
+// ERROR_INVALID_PARAMETER; Weave ignores locale name (ASCII case-fold only)
 pub unsafe extern "win64" fn compare_string_ex(
     _lp_locale_name: *const u16,
     dw_cmp_flags: u32,
@@ -8123,13 +8789,11 @@ pub unsafe extern "win64" fn compare_string_ex(
 
 /// LCMapStringEx: map a UTF-16 string using a locale name.
 ///
-/// Wine ref: dlls/kernelbase/locale.c — null src, srclen==0, or dstlen<0 →
-/// ERROR_INVALID_PARAMETER. LCMAP_SORTKEY writes binary sort key bytes.
-/// Weave delegates to LCMapStringW (locale name ignored, ASCII case-fold only).
-///
 /// # Safety
 /// `lp_src_str` must be valid for `cch_src` u16 elements.
 /// `lp_dest_str` must be writable for `cch_dest` u16 elements (when non-null).
+// Wine ref: dlls/kernelbase/locale.c — null src, srclen==0, or dstlen<0 → ERROR_INVALID_PARAMETER;
+// LCMAP_SORTKEY writes binary sort key bytes; locale name resolved via locale_name_to_sortguid()
 pub unsafe extern "win64" fn lc_map_string_ex(
     _lp_locale_name: *const u16,
     dw_map_flags: u32,
@@ -8150,13 +8814,11 @@ pub unsafe extern "win64" fn lc_map_string_ex(
 
 /// LCMapStringA: map an ANSI string using a locale (ANSI wrapper for LCMapStringW).
 ///
-/// Wine ref: dlls/kernelbase/locale.c — converts ANSI→UTF-16, maps, converts back.
-/// Weave treats each ANSI byte as its Unicode codepoint (identity for ASCII) and
-/// delegates uppercase/lowercase to LCMapStringW.
-///
 /// # Safety
 /// `lp_src_str` must be valid for `cch_src` bytes.
 /// `lp_dest_str` must be writable for `cch_dest` bytes (when non-null).
+// Wine ref: dlls/kernelbase/locale.c — converts ANSI→UTF-16 via MultiByteToWideChar(CP_ACP),
+// calls LCMapStringW, converts back; Weave treats each ANSI byte as its Unicode codepoint
 pub unsafe extern "win64" fn lc_map_string_a(
     locale: u32,
     dw_map_flags: u32,
@@ -8215,6 +8877,9 @@ pub unsafe extern "win64" fn lc_map_string_a(
 ///
 /// # Safety
 /// If `lp_new_file_pointer` is non-null, it must be writable.
+// Wine ref: dlls/kernelbase/file.c:3870 — FILE_CURRENT uses NtQueryInformationFile(FilePositionInformation)
+// to read current offset; FILE_END uses FileStandardInformation.EndOfFile; negative final pos →
+// ERROR_NEGATIVE_SEEK; writes newpos via NtSetInformationFile(FilePositionInformation)
 pub unsafe extern "win64" fn set_file_pointer_ex(
     h_file: usize,
     li_distance_to_move: i64,
@@ -8254,6 +8919,8 @@ pub unsafe extern "win64" fn set_file_pointer_ex(
 ///
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
+// Wine ref: dlls/kernelbase/file.c:3258 — calls NtQueryInformationFile(FileBasicInformation);
+// unpacks LARGE_INTEGER fields into creation/access/write FILETIME structs; NULL pointers skipped
 pub unsafe extern "win64" fn get_file_time(
     _h_file: usize,
     _lp_creation_time: *mut u64,
@@ -8267,6 +8934,8 @@ pub unsafe extern "win64" fn get_file_time(
 ///
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
+// Wine ref: dlls/kernelbase/file.c:3919 — zeroes FILE_BASIC_INFORMATION then packs only the
+// non-null FILETIME args into it; zero-filled fields are ignored by NtSetInformationFile
 pub unsafe extern "win64" fn set_file_time(
     _h_file: usize,
     _lp_creation_time: *const u64,
@@ -8279,21 +8948,29 @@ pub unsafe extern "win64" fn set_file_time(
 // ── Vectored exception handlers ─────────────────────────────────────────────
 
 /// AddVectoredExceptionHandler: no-op stub returning the handler as a fake handle.
+// Wine ref: dlls/ntdll/exception.c:371 — delegates to add_vectored_handler(&vectored_exception_handlers, first, func);
+// inserts at head (first!=0) or tail; returns allocated VECTORED_HANDLER* as opaque handle
 pub extern "win64" fn add_vectored_exception_handler(_first: u32, handler: usize) -> usize {
     handler
 }
 
 /// RemoveVectoredExceptionHandler: no-op stub returning success.
+// Wine ref: dlls/ntdll/exception.c — delegates to remove_vectored_handler(&vectored_exception_handlers, handler);
+// walks the list, removes and frees the entry; returns count of remaining handlers
 pub extern "win64" fn remove_vectored_exception_handler(_handle: usize) -> u32 {
     1
 }
 
 /// AddVectoredContinueHandler: no-op stub returning the handler as a fake handle.
+// Wine ref: dlls/ntdll/exception.c — delegates to add_vectored_handler(&vectored_continue_handlers, first, func);
+// same linked-list mechanism as AddVectoredExceptionHandler but separate list
 pub extern "win64" fn add_vectored_continue_handler(_first: u32, handler: usize) -> usize {
     handler
 }
 
 /// RemoveVectoredContinueHandler: no-op stub returning success.
+// Wine ref: dlls/ntdll/exception.c — delegates to remove_vectored_handler(&vectored_continue_handlers, handler);
+// same mechanism as RemoveVectoredExceptionHandler but uses the continue handler list
 pub extern "win64" fn remove_vectored_continue_handler(_handle: usize) -> u32 {
     1
 }
@@ -8302,26 +8979,36 @@ pub extern "win64" fn remove_vectored_continue_handler(_handle: usize) -> u32 {
 const FILE_TYPE_UNKNOWN: u32 = 0x0000;
 
 /// GetUserDefaultLCID: return English (United States) locale ID.
+// Wine ref: dlls/kernelbase/locale.c:6383 — returns global `user_lcid` set at init from
+// NtQueryDefaultLocale(TRUE, &user_lcid); Weave hardcodes EN_US
 pub extern "win64" fn get_user_default_lcid() -> u32 {
     LOCALE_EN_US
 }
 
 /// GetSystemDefaultLCID: return English (United States) locale ID.
+// Wine ref: dlls/kernelbase/locale.c:6236 — returns global `system_lcid` set at init from
+// NtQueryDefaultLocale(FALSE, &system_lcid); Weave hardcodes EN_US
 pub extern "win64" fn get_system_default_lcid() -> u32 {
     LOCALE_EN_US
 }
 
 /// GetUserDefaultUILanguage: return English (United States) language ID.
+// Wine ref: dlls/kernelbase/locale.c:6410 — returns LANGIDFROMLCID(GetUserDefaultLCID());
+// extracts primary+sublang ID from the lower 16 bits of the LCID
 pub extern "win64" fn get_user_default_ui_language() -> u16 {
     LOCALE_EN_US as u16
 }
 
 /// GetSystemDefaultLangID: return English (United States) language ID.
+// Wine ref: dlls/kernelbase/locale.c:6245 — returns LANGIDFROMLCID(GetSystemDefaultLCID());
+// extracts primary+sublang ID from the lower 16 bits of the system LCID
 pub extern "win64" fn get_system_default_lang_id() -> u16 {
     LOCALE_EN_US as u16
 }
 
 /// IsValidCodePage: validate code page identifiers.
+// Wine ref: dlls/kernelbase/locale.c:6678 — CP_ACP/CP_OEMCP/CP_MACCP/CP_THREAD_ACP return FALSE
+// unconditionally; all others call get_codepage_table(codepage) and return TRUE if non-NULL
 pub extern "win64" fn is_valid_code_page(code_page: u32) -> i32 {
     match code_page {
         0 | 65001 | 1252 | 437 => 1, // TRUE for UTF-8, CP_ACP, CP_OEM
@@ -8335,6 +9022,9 @@ pub extern "win64" fn is_valid_code_page(code_page: u32) -> i32 {
 /// The UCRT's internal `_open_osfhandle` (called from `_wfopen`) rejects any
 /// handle where GetFileType returns FILE_TYPE_UNKNOWN — it sets errno=EBADF and
 /// returns -1, silently aborting the entire fopen chain.
+// Wine ref: dlls/kernelbase/file.c:3289 — resolves STD_*_HANDLE pseudo-handles via GetStdHandle;
+// calls NtQueryVolumeInformationFile(FileFsDeviceInformation); maps device types:
+// FILE_DEVICE_CONSOLE/SERIAL/PARALLEL/TAPE/NULL/UNKNOWN → FILE_TYPE_CHAR; NAMED_PIPE → FILE_TYPE_PIPE; else FILE_TYPE_DISK
 pub extern "win64" fn get_file_type(h_file: usize) -> u32 {
     if h_file == handles::STDIN_HANDLE
         || h_file == handles::STDOUT_HANDLE
@@ -8355,6 +9045,8 @@ pub extern "win64" fn get_file_type(h_file: usize) -> u32 {
 ///
 /// # Safety
 /// `lp_file_size` must be a valid writable pointer to an i64.
+// Wine ref: dlls/kernelbase/file.c:3242 — calls NtQueryInformationFile(FileStandardInformation);
+// writes info.EndOfFile (LARGE_INTEGER) directly to *size; returns FALSE on NT error
 pub unsafe extern "win64" fn get_file_size_ex(h_file: usize, lp_file_size: *mut i64) -> i32 {
     let fd = match handles::get_fd(h_file) {
         Some(fd) => fd,
@@ -8382,6 +9074,8 @@ pub unsafe extern "win64" fn get_file_size_ex(h_file: usize, lp_file_size: *mut 
 ///
 /// # Safety
 /// `lp_mode` must be a valid writable pointer to a u32.
+// Wine ref: dlls/kernelbase/console.c:932 — calls console_ioctl(IOCTL_CONDRV_GET_MODE) into the
+// console driver; returns the mode flags word directly; Weave stubs it as 0
 pub unsafe extern "win64" fn get_console_mode(_h_console_handle: usize, lp_mode: *mut u32) -> i32 {
     unsafe {
         if !lp_mode.is_null() {
@@ -8395,6 +9089,8 @@ pub unsafe extern "win64" fn get_console_mode(_h_console_handle: usize, lp_mode:
 ///
 /// # Safety
 /// No pointer arguments are dereferenced.
+// Wine ref: dlls/kernelbase/console.c:1633 — calls console_ioctl(IOCTL_CONDRV_SET_MODE) passing
+// &mode as input buffer; Weave stubs to no-op
 pub unsafe extern "win64" fn set_console_mode(_h_console_handle: usize, _dw_mode: u32) -> i32 {
     1 // TRUE
 }
@@ -8407,6 +9103,8 @@ pub unsafe extern "win64" fn set_console_mode(_h_console_handle: usize, _dw_mode
 ///
 /// # Safety
 /// `lp_buffer` must be valid for `n_chars` bytes.
+// Wine ref: dlls/kernelbase/console.c:2147 — calls console_ioctl(IOCTL_CONDRV_WRITE_FILE) with
+// the raw buffer; on success sets *written=length; Wine goes through condrv not a Unix fd write
 pub unsafe extern "win64" fn write_console_a(
     h_console_output: usize,
     lp_buffer: *const u8,
@@ -8434,6 +9132,8 @@ pub unsafe extern "win64" fn write_console_a(
 ///
 /// # Safety
 /// Pointer argument is accepted but not dereferenced.
+// Wine ref: dlls/kernelbase/console.c:1736 — calls console_ioctl(IOCTL_CONDRV_SET_TITLE)
+// with title bytes = lstrlenW(title)*sizeof(WCHAR); no null terminator sent in ioctl.
 pub unsafe extern "win64" fn set_console_title_w(_lp_console_title: *const u16) -> i32 {
     1 // TRUE
 }
@@ -8444,6 +9144,8 @@ pub unsafe extern "win64" fn set_console_title_w(_lp_console_title: *const u16) 
 ///
 /// # Safety
 /// Pointer argument is accepted but not dereferenced.
+// Wine ref: dlls/kernelbase/console.c — SetConsoleTitleA converts via MultiByteToWideChar
+// then delegates to SetConsoleTitleW; codepage is CP_ACP.
 pub unsafe extern "win64" fn set_console_title_a(_lp_console_title: *const u8) -> i32 {
     1 // TRUE
 }
@@ -8454,6 +9156,8 @@ pub unsafe extern "win64" fn set_console_title_a(_lp_console_title: *const u8) -
 ///
 /// # Safety
 /// `lp_console_title` must be valid for `n_size` u16 words.
+// Wine ref: dlls/kernelbase/console.c:1105 — delegates to get_console_title(title, size, TRUE);
+// TRUE = current title (vs FALSE = original title for GetConsoleOriginalTitleW).
 pub unsafe extern "win64" fn get_console_title_w(lp_console_title: *mut u16, n_size: u32) -> u32 {
     if !lp_console_title.is_null() && n_size > 0 {
         unsafe { *lp_console_title = 0 };
@@ -8467,6 +9171,8 @@ pub unsafe extern "win64" fn get_console_title_w(lp_console_title: *mut u16, n_s
 ///
 /// # Safety
 /// `lp_console_title` must be valid for `n_size` bytes.
+// Wine ref: dlls/kernelbase/console.c::GetConsoleTitleA:1086 — calls get_console_title into
+// a wide buffer, then WideCharToMultiByte(CP_ACP) to fill ANSI output.
 pub unsafe extern "win64" fn get_console_title_a(lp_console_title: *mut u8, n_size: u32) -> u32 {
     if !lp_console_title.is_null() && n_size > 0 {
         unsafe { *lp_console_title = 0 };
@@ -8480,6 +9186,8 @@ pub unsafe extern "win64" fn get_console_title_a(lp_console_title: *mut u8, n_si
 ///
 /// # Safety
 /// `lp_console_screen_buffer_info` must be a valid writable pointer to a ConsoleScreenBufferInfo.
+// Wine ref: dlls/kernelbase/console.c:1019 — calls console_ioctl(IOCTL_CONDRV_GET_OUTPUT_INFO)
+// into condrv_output_info; maps width/height/cursor_x/cursor_y/attr/win_left/right/top/bottom/max_width/max_height
 pub unsafe extern "win64" fn get_console_screen_buffer_info(
     _h_console_output: usize,
     lp_console_screen_buffer_info: *mut ConsoleScreenBufferInfo,
@@ -8509,6 +9217,8 @@ pub unsafe extern "win64" fn get_console_screen_buffer_info(
 ///
 /// # Safety
 /// No pointer arguments are dereferenced.
+// Wine ref: dlls/kernelbase/console.c:1706 — sends IOCTL_CONDRV_SET_OUTPUT_INFO with
+// SET_CONSOLE_OUTPUT_INFO_ATTR flag; condrv_output_info_params.info.attr = attr.
 pub unsafe extern "win64" fn set_console_text_attribute(
     _h_console_output: usize,
     _w_attributes: u16,
@@ -8522,6 +9232,9 @@ pub unsafe extern "win64" fn set_console_text_attribute(
 ///
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
+// Wine ref: dlls/kernelbase/console.c:1502 — NULL func toggles ConsoleFlags bit 1 in PEB->ProcessParameters;
+// non-NULL func: add allocates ctrl_handler linked-list node; remove walks list and frees it;
+// removing default_handler → ERROR_INVALID_PARAMETER
 pub unsafe extern "win64" fn set_console_ctrl_handler(_handler_routine: usize, _add: i32) -> i32 {
     1 // TRUE
 }
@@ -9403,30 +10116,30 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
                 as usize,
         ),
         "GetFileInformationByHandleEx" => Some(
-            get_file_information_by_handle_ex
-                as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
+            get_file_information_by_handle_ex as unsafe extern "win64" fn(_, _, _, _) -> _
+                as *const () as usize,
         ),
         "GetFinalPathNameByHandleW" => Some(
-            get_final_path_name_by_handle_w
-                as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
+            get_final_path_name_by_handle_w as unsafe extern "win64" fn(_, _, _, _) -> _
+                as *const () as usize,
         ),
         "GetProductInfo" => Some(
             get_product_info as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const () as usize,
         ),
         "RegisterApplicationRestart" => Some(
-            register_application_restart
-                as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
+            register_application_restart as unsafe extern "win64" fn(_, _) -> _ as *const ()
+                as usize,
         ),
         "UnregisterApplicationRestart" => {
             Some(unregister_application_restart as extern "win64" fn() -> _ as *const () as usize)
         }
         "GetApplicationRestartSettings" => Some(
-            get_application_restart_settings
-                as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
+            get_application_restart_settings as unsafe extern "win64" fn(_, _, _, _) -> _
+                as *const () as usize,
         ),
         "ReadDirectoryChangesW" => Some(
-            read_directory_changes_w
-                as unsafe extern "win64" fn(_, _, _, _, _, _, _, _) -> _ as *const () as usize,
+            read_directory_changes_w as unsafe extern "win64" fn(_, _, _, _, _, _, _, _) -> _
+                as *const () as usize,
         ),
         "SetEndOfFile" => {
             Some(set_end_of_file as unsafe extern "win64" fn(_) -> _ as *const () as usize)
@@ -9605,6 +10318,9 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
 /// # Safety
 /// `lp_filename` is a null-terminated wide path; we ignore it.
 /// `lpdw_handle` is an optional output DWORD; we set it to 0 if non-null.
+// Wine ref: dlls/kernelbase/version.c — opens PE with LdrGetDllHandle, calls
+// LdrFindResource_U/LdrAccessResource to locate RT_VERSION; sets *lpdwHandle=0 always;
+// returns total byte size of the VS_VERSIONINFO block, or 0 if not found
 pub unsafe extern "win64" fn get_file_version_info_size_w(
     _lp_filename: *const u16,
     lpdw_handle: *mut u32,
@@ -9619,6 +10335,8 @@ pub unsafe extern "win64" fn get_file_version_info_size_w(
 ///
 /// # Safety
 /// Same as GetFileVersionInfoSizeW.
+// Wine ref: dlls/kernelbase/version.c — converts ANSI filename via MultiByteToWideChar(CP_ACP),
+// then delegates to GetFileVersionInfoSizeExW(FILE_VER_GET_LOCALISED, wide, lpdwHandle)
 pub unsafe extern "win64" fn get_file_version_info_size_a(
     _lp_filename: *const u8,
     lpdw_handle: *mut u32,
@@ -9636,6 +10354,8 @@ pub unsafe extern "win64" fn get_file_version_info_size_a(
 /// # Safety
 /// `lp_filename` is a wide path; `lp_data` is a writable buffer of `dw_len`
 /// bytes; we do not write to it.
+// Wine ref: dlls/kernelbase/version.c — opens module, locates RT_VERSION resource via
+// LdrFindResource_U, copies the raw VS_VERSIONINFO bytes into lp_data; zero-pads to dw_len
 pub unsafe extern "win64" fn get_file_version_info_w(
     _lp_filename: *const u16,
     _dw_handle: u32,
@@ -9649,6 +10369,8 @@ pub unsafe extern "win64" fn get_file_version_info_w(
 ///
 /// # Safety
 /// Same as GetFileVersionInfoW.
+// Wine ref: dlls/kernelbase/version.c — converts ANSI path via MultiByteToWideChar(CP_ACP),
+// then delegates to GetFileVersionInfoExW(FILE_VER_GET_LOCALISED, wide, handle, len, data)
 pub unsafe extern "win64" fn get_file_version_info_a(
     _lp_filename: *const u8,
     _dw_handle: u32,
@@ -9665,6 +10387,9 @@ pub unsafe extern "win64" fn get_file_version_info_a(
 /// # Safety
 /// All pointer arguments may be non-null; we write 0/NULL to lplp_buffer and
 /// pui_len to indicate "not found" rather than leaving them uninitialised.
+// Wine ref: dlls/kernelbase/version.c — "\" returns VS_FIXEDFILEINFO; "\VarFileInfo\Translation"
+// returns LANGID+CODEPAGE pairs; "\StringFileInfo\LLLLCCCC\Key" walks sub-blocks by WCHAR key;
+// VersionInfo32_QueryValue handles the 32-bit DWORD-aligned struct walking
 pub unsafe extern "win64" fn ver_query_value_w(
     _p_block: *const u8,
     _lp_sub_block: *const u16,
@@ -9684,6 +10409,9 @@ pub unsafe extern "win64" fn ver_query_value_w(
 ///
 /// # Safety
 /// Same as VerQueryValueW.
+// Wine ref: dlls/kernelbase/version.c — detects VS_VERSION_INFO_STRUCT16 vs STRUCT32 by
+// wType field; 16-bit uses ANSI string matching; 32-bit uses WCHAR; ANSI key is matched
+// case-insensitively via lstrcmpiA
 pub unsafe extern "win64" fn ver_query_value_a(
     _p_block: *const u8,
     _lp_sub_block: *const u8,
@@ -9726,11 +10454,15 @@ pub fn resolve_version(dll: &str, func: &str) -> Option<usize> {
 // ── PuTTY gap-fill: missing kernel32 stubs ────────────────────────────────────
 
 /// Beep: produce a sound. Returns TRUE (no audio output yet).
+// Wine ref: dlls/win32u/driver.c — dispatches to the display driver's pBeep callback (e.g.
+// X11DRV_Beep calls XBell); nulldrv_Beep is a no-op; Weave has no audio output
 pub extern "win64" fn beep(_dw_freq: u32, _dw_duration: u32) -> i32 {
     1
 }
 
 /// MulDiv: multiply and divide with 64-bit intermediate, rounded. (a*b)/c
+// Wine ref: dlls/kernelbase/utils.c — computes (nNumber*(int64)nNumerator)/nDenominator with
+// 64-bit intermediate; rounds half-away-from-zero; denominator==0 or overflow returns -1
 pub extern "win64" fn mul_div(n_number: i32, n_numerator: i32, n_denominator: i32) -> i32 {
     if n_denominator == 0 {
         return -1;
@@ -9740,6 +10472,8 @@ pub extern "win64" fn mul_div(n_number: i32, n_numerator: i32, n_denominator: i3
 }
 
 /// SetStdHandle: set stdin/stdout/stderr handle. Returns TRUE.
+// Wine ref: dlls/kernelbase/process.c — stores handle in PEB->ProcessParameters->hStdInput/Output/Error
+// indexed by (nStdHandle - STD_INPUT_HANDLE); invalid nStdHandle → ERROR_INVALID_PARAMETER
 pub extern "win64" fn set_std_handle(_n_std_handle: u32, _h_handle: usize) -> i32 {
     1
 }
@@ -9748,6 +10482,8 @@ pub extern "win64" fn set_std_handle(_n_std_handle: u32, _h_handle: usize) -> i3
 ///
 /// # Safety
 /// `lp_file_name` must be a valid null-terminated ANSI string.
+// Wine ref: dlls/kernelbase/file.c — converts via MultiByteToWideChar(CP_ACP), delegates to
+// DeleteFileW; Weave similarly converts ANSI→UTF-16 then calls delete_file_w
 pub unsafe extern "win64" fn delete_file_a(lp_file_name: *const u8) -> i32 {
     if lp_file_name.is_null() {
         return 0;
@@ -9766,6 +10502,8 @@ pub unsafe extern "win64" fn delete_file_a(lp_file_name: *const u8) -> i32 {
 ///
 /// # Safety
 /// Pointer arguments must be valid or null.
+// Wine ref: dlls/kernelbase/file.c — fInfoLevelStandard uses WIN32_FIND_DATAW; fSearchOp can
+// filter by attributes via dwAdditionalFlags=FIND_FIRST_EX_LARGE_FETCH; delegates to NtQueryDirectoryFile
 pub unsafe extern "win64" fn find_first_file_ex_w(
     lp_file_name: *const u16,
     _fi_info_level: i32,
@@ -9789,6 +10527,9 @@ pub struct CpInfo {
 ///
 /// # Safety
 /// `lp_cp_info` must point to a writable `CPINFO` struct.
+// Wine ref: dlls/kernelbase/locale.c:5554 — calls get_codepage_table(codepage); NULL table →
+// ERROR_INVALID_PARAMETER; fills MaxCharSize from table->MaximumCharacterSize;
+// DefaultChar from table->DefaultChar; LeadByte from table->LeadByte (multi-byte only)
 pub unsafe extern "win64" fn get_cp_info(code_page: u32, lp_cp_info: *mut CpInfo) -> i32 {
     if lp_cp_info.is_null() {
         return 0;
@@ -9808,6 +10549,9 @@ pub unsafe extern "win64" fn get_cp_info(code_page: u32, lp_cp_info: *mut CpInfo
 ///
 /// # Safety
 /// `lp_date_str` must be a writable buffer of at least `cch_date` wide chars.
+// Wine ref: dlls/kernelbase/locale.c — cchDate==0 returns required size; uses SYSTEMTIME if
+// lpDate==NULL (current local time via GetLocalTime); expands format tokens d/dd/M/MM/y/yy/yyyy;
+// locale-aware month/day names from NLS data tables
 pub unsafe extern "win64" fn get_date_format_w(
     _locale: u32,
     _dw_flags: u32,
@@ -9831,6 +10575,9 @@ pub unsafe extern "win64" fn get_date_format_w(
 ///
 /// # Safety
 /// `lp_time_str` must be a writable buffer of at least `cch_time` wide chars.
+// Wine ref: dlls/kernelbase/locale.c — cchTime==0 returns required size; TIME_NOSECONDS strips
+// seconds; TIME_NOTIMEMARKER strips AM/PM; h/hh/H/HH/m/mm/s/ss/tt tokens expanded from SYSTEMTIME;
+// locale NLS table supplies AM/PM strings
 pub unsafe extern "win64" fn get_time_format_w(
     _locale: u32,
     _dw_flags: u32,
@@ -9867,6 +10614,9 @@ pub struct MemoryStatus {
 ///
 /// # Safety
 /// `lp_buffer` must point to a writable `MEMORYSTATUS` struct.
+// Wine ref: dlls/kernelbase/memory.c — GlobalMemoryStatus delegates to GlobalMemoryStatusEx;
+// copies first sizeof(MEMORYSTATUS) bytes from MEMORYSTATUSEX; GlobalMemoryStatusEx caches result
+// for 1 second via GetTickCount64() to avoid repeated NtQuerySystemInformation calls
 pub unsafe extern "win64" fn global_memory_status(lp_buffer: *mut MemoryStatus) {
     if lp_buffer.is_null() {
         return;
@@ -9887,6 +10637,8 @@ pub unsafe extern "win64" fn global_memory_status(lp_buffer: *mut MemoryStatus) 
 ///
 /// # Safety
 /// `list_head` must point to a 16-byte-aligned SLIST_HEADER (zeroed).
+// Wine ref: dlls/ntdll/rtl.c — delegates to RtlInitializeSListHead which zeroes
+// the SLIST_HEADER; on x86-64 the header is a 128-bit structure containing Next ptr + Depth + Sequence
 pub unsafe extern "win64" fn initialize_slist_head(list_head: *mut u128) {
     if !list_head.is_null() {
         unsafe { *list_head = 0 };
@@ -9894,6 +10646,8 @@ pub unsafe extern "win64" fn initialize_slist_head(list_head: *mut u128) {
 }
 
 /// IsValidLocale: return TRUE for any locale (we accept all).
+// Wine ref: dlls/kernelbase/locale.c:6717 — LOCALE_NEUTRAL/USER_DEFAULT/SYSTEM_DEFAULT return FALSE;
+// others call NlsValidateLocale(&lcid, LOCALE_ALLOW_NEUTRAL_NAMES); returns !!result
 pub extern "win64" fn is_valid_locale(_locale: u32, _dw_flags: u32) -> i32 {
     1
 }
@@ -9902,6 +10656,9 @@ pub extern "win64" fn is_valid_locale(_locale: u32, _dw_flags: u32) -> i32 {
 ///
 /// # Safety
 /// `lp_locale_enum_proc` is called as `extern "win64" fn(*const u16) -> i32`.
+// Wine ref: dlls/kernelbase/locale.c — iterates through all locales in locale_table[]; each
+// LCID is formatted as hex string via swprintf; callback returning FALSE stops enumeration;
+// dwFlags can be LCID_INSTALLED or LCID_SUPPORTED
 pub unsafe extern "win64" fn enum_system_locales_w(
     lp_locale_enum_proc: usize,
     _dw_flags: u32,
@@ -9928,6 +10685,9 @@ pub unsafe extern "win64" fn enum_system_locales_w(
 ///
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
+// Wine ref: dlls/kernelbase/loader.c — converts ANSI name/type to Unicode if not IS_INTRESOURCE;
+// delegates to FindResourceExW(hModule, typeW, nameW, MAKELANGID(LANG_NEUTRAL, SUBLANG_NEUTRAL));
+// LdrFindResource_U returns an HRSRC (pointer into the PE image)
 pub unsafe extern "win64" fn find_resource_a(
     _h_module: usize,
     _lp_name: *const u8,
@@ -9937,16 +10697,22 @@ pub unsafe extern "win64" fn find_resource_a(
 }
 
 /// LoadResource: load a resource into memory. Returns NULL (not implemented).
+// Wine ref: dlls/kernelbase/loader.c — calls LdrAccessResource(hModule, hRsrcInfo, &ptr, NULL);
+// returns a HGLOBAL which is actually a direct pointer into the PE image (no actual allocation)
 pub extern "win64" fn load_resource(_h_module: usize, _h_res_info: usize) -> usize {
     0
 }
 
 /// LockResource: return a pointer to locked resource data. Returns NULL.
+// Wine ref: dlls/kernelbase/loader.c — simply returns hResData cast to LPVOID; Win32 resources
+// are never actually locked (16-bit legacy API; on Win32 LoadResource already returns the pointer)
 pub extern "win64" fn lock_resource(_h_res_data: usize) -> usize {
     0
 }
 
 /// SizeofResource: return the size of a resource. Returns 0.
+// Wine ref: dlls/kernelbase/loader.c — calls LdrFindResource_U to get the resource entry;
+// returns entry->DataSize field from IMAGE_RESOURCE_DATA_ENTRY; 0 on failure
 pub extern "win64" fn sizeof_resource(_h_module: usize, _h_res_info: usize) -> u32 {
     0
 }
@@ -9962,6 +10728,9 @@ pub struct FileTime {
 ///
 /// # Safety
 /// Output pointers must be valid `FILETIME` structs or null.
+// Wine ref: dlls/kernelbase/process.c:931 — calls NtQueryInformationProcess(ProcessTimes,
+// KERNEL_USER_TIMES); unpacks CreateTime/ExitTime/KernelTime/UserTime into four FILETIME structs;
+// null pointers for any output are valid (Wine does not check for null — callers must pass valid ptrs)
 pub unsafe extern "win64" fn get_process_times(
     _h_process: usize,
     lp_creation_time: *mut FileTime,
@@ -9984,6 +10753,8 @@ pub unsafe extern "win64" fn get_process_times(
 ///
 /// # Safety
 /// Output pointers must be valid `FILETIME` structs or null.
+// Wine ref: dlls/kernelbase/thread.c — calls NtQueryInformationThread(ThreadTimes, KERNEL_USER_TIMES);
+// same struct layout as ProcessTimes; delegates identical FILETIME unpacking logic
 pub unsafe extern "win64" fn get_thread_times(
     _h_thread: usize,
     lp_creation_time: *mut FileTime,
@@ -10007,6 +10778,9 @@ pub unsafe extern "win64" fn get_thread_times(
 ///
 /// # Safety
 /// `lp_number_of_bytes_transferred` must be writable if non-null.
+// Wine ref: dlls/kernelbase/file.c:3323 — reads overlapped->Internal (STATUS) via ReadAcquire for
+// acquire semantics; STATUS_PENDING + bWait → WaitForSingleObject(event/file, INFINITE);
+// *result = overlapped->InternalHigh (byte count set by async completion)
 pub unsafe extern "win64" fn get_overlapped_result(
     _h_file: usize,
     _lp_overlapped: usize,
@@ -10021,12 +10795,13 @@ pub unsafe extern "win64" fn get_overlapped_result(
 
 /// RtlPcToFileHeader: return the module base for a code address.
 ///
-/// Wine ref: dlls/ntdll/loader.c — walks loaded module list via
-/// LdrFindEntryForAddress and returns module->DllBase. Weave has a single
-/// guest PE, so we check if the PC falls within [PE_BASE, PE_BASE+PE_SIZE).
+/// Weave has a single guest PE, so we check if the PC falls within
+/// [PE_BASE, PE_BASE+PE_SIZE).
 ///
 /// # Safety
 /// `pp_base_of_image` must be writable if non-null.
+// Wine ref: dlls/ntdll/loader.c — walks loaded module list via LdrFindEntryForAddress;
+// returns module->DllBase on match, NULL if no module contains the address.
 pub unsafe extern "win64" fn rtl_pc_to_file_header(
     p_pc_value: *const u8,
     pp_base_of_image: *mut *const u8,
@@ -10054,6 +10829,8 @@ pub unsafe extern "win64" fn rtl_pc_to_file_header(
 ///
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
+// Wine ref: dlls/kernelbase/memory.c — converts ANSI name to Unicode via MultiByteToWideChar(CP_ACP),
+// delegates to CreateFileMappingW; NULL name is valid (anonymous mapping)
 pub unsafe extern "win64" fn create_file_mapping_a(
     h_file: usize,
     lp_attributes: usize,
@@ -10079,6 +10856,9 @@ pub unsafe extern "win64" fn create_file_mapping_a(
 ///
 /// # Safety
 /// `lp_read_pipe` and `lp_write_pipe` must be writable handle pointers.
+// Wine ref: dlls/kernelbase/sync.c — calls NtCreateNamedPipeFile twice with a generated unique name
+// under \Device\NamedPipe; read end opens with FILE_PIPE_INBOUND, write end with FILE_PIPE_OUTBOUND;
+// nSize==0 defaults to 4096 byte buffer
 pub unsafe extern "win64" fn create_pipe(
     lp_read_pipe: *mut usize,
     lp_write_pipe: *mut usize,
@@ -10098,6 +10878,8 @@ pub unsafe extern "win64" fn create_pipe(
 ///
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
+// Wine ref: dlls/kernelbase/console.c — calls console_ioctl(IOCTL_CONDRV_READ_INPUT) into condrv;
+// pInputControl can specify a stopping character; nNumberOfCharsRead is set on success
 pub unsafe extern "win64" fn read_console_w(
     _h_console_input: usize,
     _lp_buffer: *mut u16,
@@ -10112,6 +10894,9 @@ pub unsafe extern "win64" fn read_console_w(
 ///
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
+// Wine ref: dlls/kernelbase/sync.c:1350 — calls NtFsControlFile(FSCTL_PIPE_LISTEN); if overlapped
+// is NULL and status is STATUS_PENDING, calls WaitForSingleObject(pipe, INFINITE) to block;
+// overlapped->Internal set to STATUS_PENDING on async path
 pub unsafe extern "win64" fn connect_named_pipe(
     _h_named_pipe: usize,
     _lp_overlapped: usize,
@@ -10124,6 +10909,8 @@ pub unsafe extern "win64" fn connect_named_pipe(
 ///
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
+// Wine ref: dlls/kernelbase/sync.c — converts ANSI name to Unicode via MultiByteToWideChar(CP_ACP);
+// delegates to CreateNamedPipeW; pipe name must begin with \\.\pipe\
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "win64" fn create_named_pipe_a(
     _lp_name: *const u8,
@@ -10143,6 +10930,8 @@ pub unsafe extern "win64" fn create_named_pipe_a(
 ///
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
+// Wine ref: dlls/kernelbase/sync.c — converts ANSI name to Unicode, delegates to WaitNamedPipeW;
+// WaitNamedPipeW calls NtFsControlFile(FSCTL_PIPE_WAIT) with timeout in 100ns units; NMPWAIT_USE_DEFAULT_WAIT → 0 timeout
 pub unsafe extern "win64" fn wait_named_pipe_a(
     _lp_named_pipe_name: *const u8,
     _n_timeout_ms: u32,
@@ -10152,11 +10941,15 @@ pub unsafe extern "win64" fn wait_named_pipe_a(
 }
 
 /// ClearCommBreak: clear a serial communication break condition. Returns FALSE.
+// Wine ref: dlls/kernelbase/comm.c — calls DeviceIoControl(IOCTL_SERIAL_SET_BREAK_OFF, NULL, 0, NULL, 0);
+// maps to the serial port driver ioctl; Weave has no serial port support
 pub extern "win64" fn clear_comm_break(_h_file: usize) -> i32 {
     0
 }
 
 /// SetCommBreak: set a serial communication break condition. Returns FALSE.
+// Wine ref: dlls/kernelbase/comm.c — calls DeviceIoControl(IOCTL_SERIAL_SET_BREAK_ON, NULL, 0, NULL, 0);
+// sets the TX line to a break state (continuous 0); must be cleared with ClearCommBreak
 pub extern "win64" fn set_comm_break(_h_file: usize) -> i32 {
     0
 }
@@ -10165,6 +10958,8 @@ pub extern "win64" fn set_comm_break(_h_file: usize) -> i32 {
 ///
 /// # Safety
 /// `lp_dcb` is accepted but not written.
+// Wine ref: dlls/kernelbase/comm.c — calls DeviceIoControl(IOCTL_SERIAL_GET_BAUD_RATE + others)
+// to populate DCB fields; translates serial driver bitmasks to Win32 DCB structure fields
 pub unsafe extern "win64" fn get_comm_state(_h_file: usize, _lp_dcb: usize) -> i32 {
     0
 }
@@ -10173,6 +10968,8 @@ pub unsafe extern "win64" fn get_comm_state(_h_file: usize, _lp_dcb: usize) -> i
 ///
 /// # Safety
 /// `lp_dcb` is accepted but not dereferenced.
+// Wine ref: dlls/kernelbase/comm.c — validates DCB.DCBlength == sizeof(DCB); translates Win32 DCB
+// fields to IOCTL_SERIAL_SET_BAUD_RATE/LINE_CONTROL/HANDFLOW/CHARS ioctls; ERROR_INVALID_PARAMETER if invalid
 pub unsafe extern "win64" fn set_comm_state(_h_file: usize, _lp_dcb: usize) -> i32 {
     0
 }
@@ -10181,6 +10978,8 @@ pub unsafe extern "win64" fn set_comm_state(_h_file: usize, _lp_dcb: usize) -> i
 ///
 /// # Safety
 /// `lp_comm_timeouts` is accepted but not dereferenced.
+// Wine ref: dlls/kernelbase/comm.c — calls DeviceIoControl(IOCTL_SERIAL_SET_TIMEOUTS) with the
+// COMMTIMEOUTS struct; ReadIntervalTimeout/ReadTotalTimeoutMultiplier/Constant/Write fields mapped directly
 pub unsafe extern "win64" fn set_comm_timeouts(_h_file: usize, _lp_comm_timeouts: usize) -> i32 {
     0
 }

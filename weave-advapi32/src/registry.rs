@@ -105,6 +105,7 @@ unsafe fn decode_narrow_ptr(ptr: *const u8) -> String {
 /// # Safety
 /// `lp_sub_key`, if non-null, must be a valid null-terminated UTF-16 string.
 /// `phk_result` must be a valid writable pointer.
+// Wine ref: dlls/kernelbase/registry.c:644 — NULL retkey → ERROR_INVALID_PARAMETER; empty name + predefined root sets *retkey=hkey directly; strips leading backslash for HKCR
 pub unsafe extern "win64" fn reg_open_key_ex_w(
     h_key: usize,
     lp_sub_key: *const u16,
@@ -156,6 +157,7 @@ pub unsafe extern "win64" fn reg_open_key_ex_w(
 /// # Safety
 /// `lp_sub_key` and `lp_class` (if non-null) must be valid UTF-16 strings.
 /// `phk_result` must be a valid writable pointer.
+// Wine ref: dlls/kernelbase/registry.c:566 — NULL retkey → ERROR_BADKEY; reserved!=0 → ERROR_INVALID_PARAMETER; writes REG_CREATED_NEW_KEY(1) or REG_OPENED_EXISTING_KEY(2) to *dispos
 pub unsafe extern "win64" fn reg_create_key_ex_w(
     h_key: usize,
     lp_sub_key: *const u16,
@@ -231,6 +233,7 @@ pub unsafe extern "win64" fn reg_create_key_ex_w(
 ///
 /// # Safety
 /// All pointer arguments must be valid per their Windows API contracts.
+// Wine ref: dlls/kernelbase/registry.c:1636 — appends NUL for REG_SZ if space allows; data+!count → ERROR_INVALID_PARAMETER; perf keys handled separately via query_perf_data
 pub unsafe extern "win64" fn reg_query_value_ex_w(
     h_key: usize,
     lp_value_name: *const u16,
@@ -344,6 +347,7 @@ pub unsafe extern "win64" fn reg_query_value_ex_w(
 /// # Safety
 /// `lp_value_name` must be a valid null-terminated UTF-16 string (or null for
 /// the default value). `lp_data` must be valid for `cb_data` bytes.
+// Wine ref: dlls/kernelbase/registry.c:1209 — auto-extends count by sizeof(WCHAR) if string not NUL-terminated but space allows; data ptr >>16==0 → ERROR_NOACCESS
 pub unsafe extern "win64" fn reg_set_value_ex_w(
     h_key: usize,
     lp_value_name: *const u16,
@@ -403,6 +407,7 @@ pub unsafe extern "win64" fn reg_set_value_ex_w(
 ///
 /// # Safety
 /// `lp_value_name` must be a valid null-terminated UTF-16 string or null.
+// Wine ref: dlls/kernelbase/registry.c — NtDeleteValueKey(hkey, &nameW); null value name deletes the default value ("")
 pub unsafe extern "win64" fn reg_delete_value_w(h_key: usize, lp_value_name: *const u16) -> i32 {
     let key_path = match key_to_path(h_key) {
         Some(p) => p,
@@ -433,6 +438,7 @@ pub unsafe extern "win64" fn reg_delete_value_w(h_key: usize, lp_value_name: *co
 ///
 /// Predefined handles (HKLM, HKCU, etc.) are always valid and closing them is
 /// a no-op that returns `ERROR_SUCCESS`.
+// Wine ref: dlls/kernelbase/registry.c:1129 — hkey>=0x80000000 returns ERROR_SUCCESS without NtClose; NULL → ERROR_INVALID_HANDLE
 pub extern "win64" fn reg_close_key(h_key: usize) -> i32 {
     // Wine: NULL handle → ERROR_INVALID_HANDLE
     if h_key == 0 {
@@ -463,6 +469,7 @@ pub extern "win64" fn reg_close_key(h_key: usize) -> i32 {
 /// # Safety
 /// All output pointer arguments may be null (callers pass null for fields they
 /// don't need, per MSDN).
+// Wine ref: dlls/kernelbase/registry.c — NtQueryKey(KeyFullInformation); fills all output fields; null output pointers are silently skipped
 pub unsafe extern "win64" fn reg_query_info_key_w(
     h_key: usize,
     _lp_class: *mut u16,
@@ -539,6 +546,7 @@ pub unsafe extern "win64" fn reg_query_info_key_w(
 /// # Safety
 /// `lp_value_name` must be valid for `*lpcb_value_name` UTF-16 code units.
 /// `lp_data` (if non-null) must be valid for `*lpcb_data` bytes.
+// Wine ref: dlls/kernelbase/registry.c:2144 — val_count in WCHAR units; !value||!val_count → ERROR_INVALID_PARAMETER; KeyValueFullInformation; sets *val_count to chars excluding null on success
 pub unsafe extern "win64" fn reg_enum_value_w(
     h_key: usize,
     dw_index: u32,
@@ -659,6 +667,7 @@ pub unsafe extern "win64" fn reg_enum_value_w(
 ///
 /// # Safety
 /// `lp_sub_key` must be a valid null-terminated UTF-16 string.
+// Wine ref: dlls/kernelbase/registry.c — RegOpenKeyExW to get child handle then NtDeleteKey; subkeys must be deleted first (NT has no recursive delete)
 pub unsafe extern "win64" fn reg_delete_key_w(h_key: usize, lp_sub_key: *const u16) -> i32 {
     let base_path = match key_to_path(h_key) {
         Some(p) => p,
@@ -726,6 +735,7 @@ fn remove_dir_no_follow(path: &std::path::Path) -> std::io::Result<()> {
 /// # Safety
 /// `lp_name` must be valid for `*lpcch_name` UTF-16 code units.
 /// Unused parameters are ignored.
+// Wine ref: dlls/kernelbase/registry.c — NtEnumerateKey(KeyBasicInformation); lpcch_name is chars including null on input, chars excluding null on output; ERROR_NO_MORE_ITEMS(259) when out of range
 pub unsafe extern "win64" fn reg_enum_key_ex_w(
     h_key: usize,
     dw_index: u32,
@@ -800,12 +810,16 @@ pub unsafe extern "win64" fn reg_enum_key_ex_w(
 
 // ── RegDeleteKeyA ─────────────────────────────────────────────────────────────
 
+// Wine ref: dlls/kernelbase/registry.c — RegDeleteKeyA converts ANSI name via
+// RtlAnsiStringToUnicodeString then calls RegDeleteKeyW. No behavioral difference
+// from RegDeleteKeyW except ANSI→UTF-16 conversion.
 /// RegDeleteKeyA: delete a registry key and all its subkeys/values (ANSI version).
 ///
 /// Converts the ANSI subkey name to UTF-16 and calls RegDeleteKeyW.
 ///
 /// # Safety
 /// `lp_sub_key` must be a valid null-terminated UTF-8 string.
+// Wine ref: dlls/kernelbase/registry.c — RegDeleteKeyA converts ANSI via RtlAnsiStringToUnicodeString then calls RegDeleteKeyW; no behavioral difference from W variant
 pub unsafe extern "win64" fn reg_delete_key_a(h_key: usize, lp_sub_key: *const u8) -> i32 {
     // Convert ANSI subkey to UTF-16
     // SAFETY: RegDeleteKeyA: lp_sub_key is documented as required; decode_narrow_ptr handles
@@ -824,6 +838,10 @@ pub unsafe extern "win64" fn reg_delete_key_a(h_key: usize, lp_sub_key: *const u
 
 // ── RegEnumKeyExA ─────────────────────────────────────────────────────────────
 
+// Wine ref: dlls/kernelbase/registry.c — RegEnumKeyExA converts output key name
+// from Unicode to ANSI via RtlUnicodeStringToAnsiString; lpcchName is in chars
+// (bytes for ANSI), same semantics as W variant. Wine updates *lpcchName to
+// chars-excluding-null on success.
 /// RegEnumKeyExA: enumerate the subkeys of an open registry key (ANSI version).
 ///
 /// Same logic as RegEnumKeyExW but output is ANSI.
@@ -831,6 +849,7 @@ pub unsafe extern "win64" fn reg_delete_key_a(h_key: usize, lp_sub_key: *const u
 /// # Safety
 /// `lp_name` must be valid for `*lpcch_name` UTF-8 bytes.
 /// Unused parameters are ignored.
+// Wine ref: dlls/kernelbase/registry.c — converts output name from Unicode via RtlUnicodeStringToAnsiString; lpcchName in bytes (chars for ANSI); same index semantics as W variant
 pub unsafe extern "win64" fn reg_enum_key_ex_a(
     h_key: usize,
     dw_index: u32,
@@ -905,12 +924,16 @@ pub unsafe extern "win64" fn reg_enum_key_ex_a(
 
 // ── RegEnumKeyA ───────────────────────────────────────────────────────────────
 
+// Wine ref: dlls/kernelbase/registry.c — RegEnumKeyA is a thin wrapper around
+// RegEnumKeyExA with class and timestamp params set to NULL. Deprecated Win3.1
+// API; Wine maps it directly.
 /// RegEnumKeyA: legacy 3-parameter subkey enumeration (ANSI).
 ///
 /// Wrapper around `RegEnumKeyExA` with no class or timestamp parameters.
 ///
 /// # Safety
 /// `lp_name` must be a writable buffer of at least `cch_name` bytes.
+// Wine ref: dlls/kernelbase/registry.c — RegEnumKeyA thin wrapper around RegEnumKeyExA with class+timestamp NULL; deprecated Win3.1 API
 pub unsafe extern "win64" fn reg_enum_key_a(
     h_key: usize,
     dw_index: u32,
@@ -947,6 +970,7 @@ pub unsafe extern "win64" fn reg_enum_key_a(
 ///
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
+// Wine ref: dlls/kernelbase/security.c:828 — NtOpenProcessToken(process, access, handle); TRUE on success; Weave has no token support
 pub unsafe extern "win64" fn open_process_token(
     _process_handle: usize,
     _desired_access: u32,
@@ -967,6 +991,7 @@ pub unsafe extern "win64" fn open_process_token(
 ///
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
+// Wine ref: dlls/kernelbase/security.c — reads privilege LUID from HKLM\SYSTEM\CurrentControlSet\Control\Lsa\Data; Weave has no LSA registry data
 pub unsafe extern "win64" fn lookup_privilege_value_w(
     _lp_system_name: *const u16,
     _lp_name: *const u16,
@@ -986,6 +1011,7 @@ pub unsafe extern "win64" fn lookup_privilege_value_w(
 ///
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
+// Wine ref: dlls/kernelbase/security.c — NtAdjustPrivilegesToken; returns TRUE even if not all privileges assigned (caller checks ERROR_NOT_ALL_ASSIGNED via GetLastError)
 pub unsafe extern "win64" fn adjust_token_privileges(
     _token_handle: usize,
     _disable_all_privileges: i32,
@@ -999,6 +1025,9 @@ pub unsafe extern "win64" fn adjust_token_privileges(
 
 // ── ANSI registry variants ────────────────────────────────────────────────────
 
+// Wine ref: dlls/kernelbase/registry.c:688 — RegOpenKeyExA converts ANSI name via
+// RtlAnsiStringToUnicodeString into TEB->StaticUnicodeString then calls open_key;
+// for a predefined root with empty name, sets *retkey=hkey and returns immediately.
 /// RegOpenKeyExA: open a registry key and return a handle (ANSI version).
 ///
 /// Converts the ANSI subkey name to UTF-16 and calls RegOpenKeyExW.
@@ -1006,6 +1035,7 @@ pub unsafe extern "win64" fn adjust_token_privileges(
 /// # Safety
 /// `lp_sub_key`, if non-null, must be a valid null-terminated UTF-8 string.
 /// `phk_result` must be a valid writable pointer.
+// Wine ref: dlls/kernelbase/registry.c:688 — RtlAnsiStringToUnicodeString into TEB->StaticUnicodeString then open_key; predefined root + empty name → *retkey=hkey immediately
 pub unsafe extern "win64" fn reg_open_key_ex_a(
     h_key: usize,
     lp_sub_key: *const u8,
@@ -1036,6 +1066,9 @@ pub unsafe extern "win64" fn reg_open_key_ex_a(
     }
 }
 
+// Wine ref: dlls/kernelbase/registry.c:606 — RegCreateKeyExA converts ANSI name
+// and class via RtlAnsiStringToUnicodeString then calls RegCreateKeyExW. Returns
+// ERROR_BADKEY (not ERROR_INVALID_HANDLE) when retkey is null, same as W variant.
 /// RegCreateKeyExA: open an existing key or create it if it doesn't exist (ANSI version).
 ///
 /// Converts the ANSI subkey name to UTF-16 and calls RegCreateKeyExW.
@@ -1043,6 +1076,7 @@ pub unsafe extern "win64" fn reg_open_key_ex_a(
 /// # Safety
 /// `lp_sub_key` and `lp_class` (if non-null) must be valid UTF-8 strings.
 /// `phk_result` must be a valid writable pointer.
+// Wine ref: dlls/kernelbase/registry.c:606 — RtlAnsiStringToUnicodeString for name+class then create_key; ERROR_BADKEY for NULL retkey (same as W variant)
 pub unsafe extern "win64" fn reg_create_key_ex_a(
     h_key: usize,
     lp_sub_key: *const u8,
@@ -1096,6 +1130,9 @@ pub unsafe extern "win64" fn reg_create_key_ex_a(
     }
 }
 
+// Wine ref: dlls/kernelbase/registry.c — RegQueryValueExA converts ANSI name to
+// Unicode, calls NtQueryValueKey, then converts REG_SZ/REG_EXPAND_SZ data back to
+// ANSI via RtlUnicodeToMultiByteN; *lpcbData reflects ANSI byte count on return.
 /// RegQueryValueExA: read a registry value (ANSI version).
 ///
 /// Converts the ANSI value name to UTF-16 and calls RegQueryValueExW.
@@ -1103,6 +1140,7 @@ pub unsafe extern "win64" fn reg_create_key_ex_a(
 ///
 /// # Safety
 /// All pointer arguments must be valid per their Windows API contracts.
+// Wine ref: dlls/kernelbase/registry.c:1730 — fetches string data even when not requested to compute ANSI length; Win9x sets *type=REG_NONE; *lpcbData reflects ANSI byte count on return
 pub unsafe extern "win64" fn reg_query_value_ex_a(
     h_key: usize,
     lp_value_name: *const u8,
@@ -1256,6 +1294,9 @@ pub unsafe extern "win64" fn reg_query_value_ex_a(
     ERROR_SUCCESS
 }
 
+// Wine ref: dlls/kernelbase/registry.c — RegSetValueExA converts ANSI name via
+// RtlAnsiStringToUnicodeString; for REG_SZ/REG_EXPAND_SZ converts ANSI data to
+// UTF-16 via RtlAnsiStringToUnicodeString, appending null terminator if absent.
 /// RegSetValueExA: write a registry value (ANSI version).
 ///
 /// Converts the ANSI value name to UTF-16 and calls RegSetValueExW.
@@ -1264,6 +1305,7 @@ pub unsafe extern "win64" fn reg_query_value_ex_a(
 /// # Safety
 /// `lp_value_name` must be a valid null-terminated UTF-8 string (or null for
 /// the default value). `lp_data` must be valid for `cb_data` bytes.
+// Wine ref: dlls/kernelbase/registry.c:1241 — REG_SZ/REG_EXPAND_SZ data converted from ANSI to UTF-16 via RtlMultiByteToUnicodeN; appends null if absent (NT behavior)
 pub unsafe extern "win64" fn reg_set_value_ex_a(
     h_key: usize,
     lp_value_name: *const u8,
@@ -1324,12 +1366,16 @@ pub unsafe extern "win64" fn reg_set_value_ex_a(
     }
 }
 
+// Wine ref: dlls/kernelbase/registry.c — RegDeleteValueA converts ANSI name via
+// RtlAnsiStringToUnicodeString then calls NtDeleteValueKey. Null name deletes
+// the default value, same as the W variant.
 /// RegDeleteValueA: delete a named value from an open key (ANSI version).
 ///
 /// Converts the ANSI value name to UTF-16 and calls RegDeleteValueW.
 ///
 /// # Safety
 /// `lp_value_name` must be a valid null-terminated UTF-8 string or null.
+// Wine ref: dlls/kernelbase/registry.c — RegDeleteValueA converts ANSI via RtlAnsiStringToUnicodeString then NtDeleteValueKey; null name deletes default value
 pub unsafe extern "win64" fn reg_delete_value_a(h_key: usize, lp_value_name: *const u8) -> i32 {
     // Convert ANSI value name to UTF-16
     // SAFETY: RegDeleteValueA: lp_value_name is optional (null deletes the default value);
@@ -1348,10 +1394,15 @@ pub unsafe extern "win64" fn reg_delete_value_a(h_key: usize, lp_value_name: *co
 
 // ── LSA stubs ────────────────────────────────────────────────────────────────
 
+// Wine ref: dlls/advapi32/lsa.c — LsaOpenPolicy calls advapi32!LsaOpenPolicy which
+// forwards to sechost; Wine talks to the wine server via an RPC handle. Returns
+// STATUS_ACCESS_DENIED when the server rejects the access request. Weave has no
+// security server, so we return STATUS_ACCESS_DENIED unconditionally.
 /// LsaOpenPolicy — open a handle to the LSA Policy object. Returns an error.
 ///
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
+// Wine ref: dlls/advapi32/lsa.c — forwards to sechost via RPC; Wine talks to wine server; STATUS_ACCESS_DENIED when server rejects access request
 pub unsafe extern "win64" fn lsa_open_policy(
     _system_name: *const u8,
     _object_attributes: *const u8,
@@ -1367,18 +1418,27 @@ pub unsafe extern "win64" fn lsa_open_policy(
     0xC000_0022u32 as i32 // STATUS_ACCESS_DENIED
 }
 
+// Wine ref: dlls/advapi32/lsa.c — LsaClose calls NtClose on the LSA policy handle.
+// Returns STATUS_SUCCESS (0) even for invalid handles in some Wine paths; our
+// stub has no real handle to close so we return STATUS_SUCCESS unconditionally.
 /// LsaClose — close a LSA policy handle. Returns STATUS_SUCCESS.
 ///
 /// # Safety
 /// No pointer dereferences.
+// Wine ref: dlls/advapi32/lsa.c — NtClose on LSA policy handle; STATUS_SUCCESS even for invalid handles in some Wine code paths
 pub unsafe extern "win64" fn lsa_close(_object_handle: usize) -> i32 {
     0 // STATUS_SUCCESS
 }
 
+// Wine ref: dlls/advapi32/lsa.c — LsaAddAccountRights calls LsaOpenAccount to get
+// an account handle then LsaAddPrivilegesToAccount for each right string. Requires
+// a valid policy handle. Our stub returns STATUS_SUCCESS (no-op) since we have no
+// real account database.
 /// LsaAddAccountRights — add privileges to an account. Returns STATUS_SUCCESS.
 ///
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
+// Wine ref: dlls/advapi32/lsa.c — LsaOpenAccount then LsaAddPrivilegesToAccount for each right string; requires valid policy handle
 pub unsafe extern "win64" fn lsa_add_account_rights(
     _policy_handle: usize,
     _account_sid: *const u8,
@@ -1388,12 +1448,18 @@ pub unsafe extern "win64" fn lsa_add_account_rights(
     0 // STATUS_SUCCESS
 }
 
+// Wine ref: dlls/advapi32/security.c:1104 — LookupAccountNameW calls
+// lookup_user_account_name then lookup_computer_account_name then
+// lookup_local_wellknown_name; falls back to LsaLookupNames2 for domain
+// accounts. Each helper fills Sid + cbSid + domain + SID_NAME_USE.
+// Weave returns FALSE (no account database).
 /// LookupAccountNameW — look up an account name and return its SID.
 ///
 /// Returns FALSE — stub.
 ///
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
+// Wine ref: dlls/advapi32/security.c:1104 — lookup_user_account_name then lookup_computer_account_name then lookup_local_wellknown_name; LsaLookupNames2 fallback for domain accounts
 pub unsafe extern "win64" fn lookup_account_name_w(
     _lp_system_name: *const u16,
     _lp_account_name: *const u16,
@@ -1406,6 +1472,10 @@ pub unsafe extern "win64" fn lookup_account_name_w(
     0 // FALSE
 }
 
+// Wine ref: dlls/sechost/security.c — GetUserNameW calls GetUserNameExW with
+// NameSamCompatible, falls back to GetEnvironmentVariableW("USERNAME"); on
+// failure sets ERROR_NOT_LOGGED_ON and returns FALSE. Returns char count
+// including null terminator in *lpcbBuffer on success.
 /// GetUserNameW — return the current user's name (Wide).
 ///
 /// Writes "weave" into the caller's buffer.
@@ -1413,6 +1483,7 @@ pub unsafe extern "win64" fn lookup_account_name_w(
 /// # Safety
 /// `lp_buffer` must be writable for `*lpcb_buffer` characters.
 /// `lpcb_buffer` must be writable.
+// Wine ref: dlls/sechost/security.c — GetUserNameExW(NameSamCompatible) then GetEnvironmentVariableW("USERNAME") fallback; sets ERROR_NOT_LOGGED_ON on failure
 pub unsafe extern "win64" fn get_user_name_w(lp_buffer: *mut u16, lpcb_buffer: *mut u32) -> i32 {
     let user: Vec<u16> = "weave\0".encode_utf16().collect();
     let needed = user.len() as u32;
@@ -1436,12 +1507,17 @@ pub unsafe extern "win64" fn get_user_name_w(lp_buffer: *mut u16, lpcb_buffer: *
     1 // TRUE
 }
 
+// Wine ref: dlls/kernelbase/registry.c — RegDeleteKeyExW is a wrapper around
+// RegDeleteKeyW that accepts a samDesired view flag (KEY_WOW64_32KEY or
+// KEY_WOW64_64KEY) for registry reflection; Wine passes it to NtDeleteKey.
+// We ignore samDesired and delegate to our RegDeleteKeyW.
 /// RegDeleteKeyExW — delete a registry key with a 32/64-bit flag (Wide).
 ///
 /// Delegates to RegDeleteKeyW (ignores sam_desired).
 ///
 /// # Safety
 /// `lp_sub_key` must be a valid null-terminated UTF-16 string.
+// Wine ref: dlls/kernelbase/registry.c — wrapper around RegDeleteKeyW; samDesired KEY_WOW64_32KEY/KEY_WOW64_64KEY selects registry view for reflection; passed to NtDeleteKey
 pub unsafe extern "win64" fn reg_delete_key_ex_w(
     h_key: usize,
     lp_sub_key: *const u16,
@@ -1454,12 +1530,17 @@ pub unsafe extern "win64" fn reg_delete_key_ex_w(
     unsafe { reg_delete_key_w(h_key, lp_sub_key) }
 }
 
+// Wine ref: dlls/advapi32/security.c:166 — GetFileSecurityW calls get_security_file
+// to open the file with READ_CONTROL access, then GetKernelObjectSecurity to fill
+// the security descriptor. Requires a real file handle and kernel SD support.
+// Weave returns FALSE — no file security descriptor support.
 /// GetFileSecurityW — retrieve security information for a file (Wide).
 ///
 /// Returns FALSE — stub.
 ///
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
+// Wine ref: dlls/advapi32/security.c:166 — get_security_file with READ_CONTROL then GetKernelObjectSecurity fills SD; requires real file handle + kernel SD support
 pub unsafe extern "win64" fn get_file_security_w(
     _lp_file_name: *const u16,
     _requested_information: u32,
@@ -1470,12 +1551,16 @@ pub unsafe extern "win64" fn get_file_security_w(
     0 // FALSE
 }
 
+// Wine ref: dlls/advapi32/security.c — SetFileSecurityW calls get_security_file
+// with WRITE_DAC|WRITE_OWNER access then SetKernelObjectSecurity. Requires a real
+// kernel object. Weave returns FALSE — no file security support.
 /// SetFileSecurityW — set security information for a file (Wide).
 ///
 /// Returns FALSE — stub.
 ///
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
+// Wine ref: dlls/advapi32/security.c — get_security_file with WRITE_DAC|WRITE_OWNER then SetKernelObjectSecurity; Weave returns FALSE (no kernel security object support)
 pub unsafe extern "win64" fn set_file_security_w(
     _lp_file_name: *const u16,
     _security_information: u32,
@@ -1634,6 +1719,7 @@ pub fn resolve(func: &str) -> Option<usize> {
 ///
 /// # Safety
 /// `random_buffer` must be a writable buffer of at least `random_buffer_length` bytes.
+// Wine ref: dlls/advapi32/crypt.c — RtlGenRandom; Wine uses /dev/urandom; Weave uses getrandom(2) (modern equivalent, atomic for ≤256 bytes, sandbox-friendly)
 pub unsafe extern "win64" fn system_function_036(
     random_buffer: *mut u8,
     random_buffer_length: u32,
@@ -1646,9 +1732,7 @@ pub unsafe extern "win64" fn system_function_036(
     // for RtlGenRandom requires callers to supply a writable buffer of at least
     // random_buffer_length bytes.  getrandom(2) writes exactly `len` bytes on
     // success (for len ≤ 256 it is atomic and never short-reads).
-    let ret = unsafe {
-        libc::getrandom(random_buffer as *mut libc::c_void, len, 0)
-    };
+    let ret = unsafe { libc::getrandom(random_buffer as *mut libc::c_void, len, 0) };
     if ret < 0 || ret as usize != len {
         return 0; // FALSE — getrandom failed (should not happen in practice)
     }
@@ -1657,10 +1741,14 @@ pub unsafe extern "win64" fn system_function_036(
 
 // ── Security / SID stubs ──────────────────────────────────────────────────────
 
+// Wine ref: dlls/sechost/security.c — GetUserNameA calls GetUserNameW then converts
+// result via WideCharToMultiByte. Sets *lpcbBuffer to byte count including null on
+// success; sets ERROR_INSUFFICIENT_BUFFER and returns FALSE if buffer too small.
 /// GetUserNameA: return the login name of the current user.
 ///
 /// # Safety
 /// `lp_buffer` must be writable for `*lpcb_buffer` bytes; `lpcb_buffer` writable.
+// Wine ref: dlls/sechost/security.c — GetUserNameA calls GetUserNameW then WideCharToMultiByte; sets *lpcbBuffer to byte count including null on success
 pub unsafe extern "win64" fn get_user_name_a(lp_buffer: *mut u8, lpcb_buffer: *mut u32) -> i32 {
     let user = b"weave\0";
     let needed = user.len() as u32;
@@ -1691,12 +1779,17 @@ pub struct FakeSid {
     sub_authority: [u32; 8],
 }
 
+// Wine ref: dlls/ntdll/sec.c — RtlAllocateAndInitializeSid allocates
+// sizeof(SID) + (nSubAuthorityCount-1)*4 bytes via RtlAllocateHeap, sets
+// Revision=1, SubAuthorityCount=n, IdentifierAuthority from pIdentifierAuthority,
+// and fills SubAuthority[0..n-1]. Returns FALSE if nSubAuthorityCount > 8.
 /// AllocateAndInitializeSid: create a SID with up to 8 sub-authorities.
 ///
 /// # Safety
 /// `pidentifier_authority` must be a valid 6-byte authority value.
 /// `new_sid` must be a writable `*mut PSID`.
 #[allow(clippy::too_many_arguments)]
+// Wine ref: dlls/ntdll/sec.c — RtlAllocateAndInitializeSid allocates sizeof(SID)+(n-1)*4 bytes; sets Revision=1, SubAuthorityCount=n, copies IdentifierAuthority; FALSE if n>8
 pub unsafe extern "win64" fn allocate_and_initialize_sid(
     pidentifier_authority: *const u8,
     n_sub_authority_count: u8,
@@ -1744,10 +1837,14 @@ pub unsafe extern "win64" fn allocate_and_initialize_sid(
     1
 }
 
+// Wine ref: dlls/ntdll/sec.c — RtlCopySid checks nDestinationSidLength >=
+// RtlLengthSid(pSourceSid), then memcpy. Returns STATUS_INVALID_SID (mapped to
+// FALSE) if destination too small. Weave copies nDestinationSidLength bytes.
 /// CopySid: copy a SID to a buffer. Returns TRUE.
 ///
 /// # Safety
 /// Both pointers must be valid if non-null.
+// Wine ref: dlls/ntdll/sec.c — RtlCopySid checks nDestinationSidLength >= RtlLengthSid(pSourceSid) then memcpy; STATUS_INVALID_SID if destination too small
 pub unsafe extern "win64" fn copy_sid(
     n_destination_sid_length: u32,
     p_destination_sid: *mut u8,
@@ -1766,19 +1863,28 @@ pub unsafe extern "win64" fn copy_sid(
     1
 }
 
+// Wine ref: dlls/ntdll/sec.c — RtlEqualSid compares SubAuthorityCount and
+// IdentifierAuthority, then SubAuthority[0..n-1] via memcmp. Returns FALSE if
+// counts differ. Weave returns FALSE conservatively (we have no real SID store).
 /// EqualSid: compare two SIDs. Returns FALSE (conservative — we can't know).
 ///
 /// # Safety
 /// Both pointers must be valid FakeSid pointers.
+// Wine ref: dlls/ntdll/sec.c — RtlEqualSid compares SubAuthorityCount + IdentifierAuthority + SubAuthority[0..n-1] via memcmp; FALSE if counts differ
 pub unsafe extern "win64" fn equal_sid(_sid1: *const FakeSid, _sid2: *const FakeSid) -> i32 {
     0
 }
 
+// Wine ref: dlls/ntdll/sec.c — RtlLengthSid returns
+// sizeof(SID) + (SubAuthorityCount - 1) * sizeof(DWORD) by reading the
+// SubAuthorityCount field from the SID header. Weave returns sizeof(FakeSid).
 /// GetLengthSid: return the length of a SID in bytes. Returns size of FakeSid.
 pub extern "win64" fn get_length_sid(_p_sid: *const u8) -> u32 {
     std::mem::size_of::<FakeSid>() as u32
 }
 
+// Wine ref: dlls/ntdll/sec.c — RtlFreeSid calls RtlFreeHeap on the SID pointer
+// and returns NULL. No-op for NULL input. Weave mirrors this via Box::from_raw.
 /// FreeSid: free a SID allocated by AllocateAndInitializeSid. Returns NULL.
 pub extern "win64" fn free_sid(p_sid: *mut FakeSid) -> *mut FakeSid {
     if !p_sid.is_null() {
@@ -1791,10 +1897,15 @@ pub extern "win64" fn free_sid(p_sid: *mut FakeSid) -> *mut FakeSid {
     std::ptr::null_mut()
 }
 
+// Wine ref: dlls/ntdll/sec.c — RtlCreateSecurityDescriptor zeros
+// SECURITY_DESCRIPTOR_MIN_LENGTH (20) bytes then sets Revision=SECURITY_DESCRIPTOR_REVISION (1).
+// Returns STATUS_UNKNOWN_REVISION if dwRevision != 1. Weave zeros 20 bytes (revision
+// field is at offset 0 and will be 0, which callers don't check strictly).
 /// InitializeSecurityDescriptor: zero-initialise a security descriptor. Returns TRUE.
 ///
 /// # Safety
 /// `p_security_descriptor` must be writable for at least 20 bytes.
+// Wine ref: dlls/ntdll/sec.c — RtlCreateSecurityDescriptor zeros SECURITY_DESCRIPTOR_MIN_LENGTH(20) bytes then sets Revision=1; STATUS_UNKNOWN_REVISION if dwRevision!=1
 pub unsafe extern "win64" fn initialize_security_descriptor(
     p_security_descriptor: *mut u8,
     _dw_revision: u32,
@@ -1810,10 +1921,15 @@ pub unsafe extern "win64" fn initialize_security_descriptor(
     1
 }
 
+// Wine ref: dlls/ntdll/sec.c — RtlSetDaclSecurityDescriptor checks
+// pSecurityDescriptor->Revision == SECURITY_DESCRIPTOR_REVISION (1); sets
+// SE_DACL_PRESENT in Control if bDaclPresent; stores pDacl and sets SE_DACL_DEFAULTED
+// from bDaclDefaulted. Weave no-ops (TRUE) — callers only check the return value.
 /// SetSecurityDescriptorDacl: set the DACL in a security descriptor. Returns TRUE.
 ///
 /// # Safety
 /// Pointer arguments are accepted but not fully validated.
+// Wine ref: dlls/ntdll/sec.c — RtlSetDaclSecurityDescriptor checks Revision==1; sets SE_DACL_PRESENT in Control if bDaclPresent; stores pDacl pointer; SE_DACL_DEFAULTED from bDaclDefaulted
 pub unsafe extern "win64" fn set_security_descriptor_dacl(
     _p_security_descriptor: *mut u8,
     _b_dacl_present: i32,
@@ -1823,10 +1939,15 @@ pub unsafe extern "win64" fn set_security_descriptor_dacl(
     1
 }
 
+// Wine ref: dlls/ntdll/sec.c — RtlSetOwnerSecurityDescriptor stores pOwner in the
+// SECURITY_DESCRIPTOR and sets/clears SE_OWNER_DEFAULTED in Control based on
+// bOwnerDefaulted. Returns STATUS_SUCCESS unconditionally if Revision is valid.
+// Weave no-ops (TRUE) — callers only check the return value.
 /// SetSecurityDescriptorOwner: set the owner SID. Returns TRUE.
 ///
 /// # Safety
 /// Pointer arguments are accepted but not fully validated.
+// Wine ref: dlls/ntdll/sec.c — RtlSetOwnerSecurityDescriptor stores pOwner; sets/clears SE_OWNER_DEFAULTED in Control; STATUS_SUCCESS if Revision valid
 pub unsafe extern "win64" fn set_security_descriptor_owner(
     _p_security_descriptor: *mut u8,
     _p_owner: *const u8,

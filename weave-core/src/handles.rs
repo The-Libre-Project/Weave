@@ -30,7 +30,9 @@ pub struct ThreadCompletion {
 impl std::fmt::Debug for ThreadCompletion {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let r = self.result.lock().ok().and_then(|g| *g);
-        f.debug_struct("ThreadCompletion").field("result", &r).finish()
+        f.debug_struct("ThreadCompletion")
+            .field("result", &r)
+            .finish()
     }
 }
 

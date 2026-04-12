@@ -843,8 +843,16 @@ mod inner {
 
         loop {
             let mut fds = [
-                libc::pollfd { fd: x11_fd,  events: libc::POLLIN, revents: 0 },
-                libc::pollfd { fd: wake_fd, events: libc::POLLIN, revents: 0 },
+                libc::pollfd {
+                    fd: x11_fd,
+                    events: libc::POLLIN,
+                    revents: 0,
+                },
+                libc::pollfd {
+                    fd: wake_fd,
+                    events: libc::POLLIN,
+                    revents: 0,
+                },
             ];
             let ret = unsafe { libc::poll(fds.as_mut_ptr(), 2, 50) }; // 50 ms timeout
 
@@ -863,8 +871,8 @@ mod inner {
             // X11 event ready: lock briefly, poll (non-blocking), translate.
             if fds[0].revents & libc::POLLIN != 0 {
                 if let Some(x11) = x11() {
-                    let maybe_event = lock_x11(x11)
-                        .and_then(|g| g.conn.poll_for_event().ok().flatten());
+                    let maybe_event =
+                        lock_x11(x11).and_then(|g| g.conn.poll_for_event().ok().flatten());
                     if let Some(event) = maybe_event {
                         translate_event(event, x11);
                         return true;

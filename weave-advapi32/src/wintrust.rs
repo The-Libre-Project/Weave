@@ -146,6 +146,7 @@ pub fn resolve_wintrust(func: &str) -> Option<usize> {
 ///
 /// We return TRUE with sentinel fake handles. The file need not exist —
 /// our stub does not open it.
+// Wine ref: dlls/crypt32/object.c — CRYPT_QueryEmbeddedMessageObject reads WIN_CERTIFICATE section, decodes PKCS7 blob, populates *phMsg and *phCertStore on success
 #[unsafe(no_mangle)]
 pub unsafe extern "win64" fn crypt_query_object(
     dw_object_type: u32,
@@ -215,6 +216,7 @@ pub unsafe extern "win64" fn crypt_msg_close(_h_crypt_msg: usize) -> i32 {
 /// dwVersion=1, all blob fields zeroed (cbData=0, pbData=NULL). NPP copies
 /// Issuer and SerialNumber into a stack CERT_INFO and passes it to
 /// CertFindCertificateInStore, which we also stub to ignore pvPara.
+// Wine ref: dlls/crypt32/msg.c — CDecodeMsg_GetParam dispatches by dwParamType; CMSG_SIGNER_INFO_PARAM(6) copies SignerInfo from decode table into caller's buffer
 #[unsafe(no_mangle)]
 pub unsafe extern "win64" fn crypt_msg_get_param(
     h_crypt_msg: usize,
@@ -294,6 +296,7 @@ pub unsafe extern "win64" fn cert_find_certificate_in_store(
 /// null-stubbed return of 0 from the unresolved IAT entry signals failure and
 /// causes NPP to throw a C++ exception. We return L"Notepad++" so NPP sees a
 /// non-empty name and proceeds without throwing.
+// Wine ref: dlls/crypt32/str.c:336 — cert_name_to_str_with_indent encodes CERT_NAME_BLOB as DN string; returns 1 (null term only) for empty blob; 0 only on outright failure
 #[unsafe(no_mangle)]
 pub unsafe extern "win64" fn cert_name_to_str_w(
     _dw_cert_encoding_type: u32,
@@ -333,6 +336,7 @@ pub unsafe extern "win64" fn cert_name_to_str_w(
 /// verifySignedLibrary() checks against gup.exe's embedded signature.
 /// The return value is the character count including the null terminator,
 /// matching Wine's behavior (dlls/crypt32/str.c CertGetNameStringW).
+// Wine ref: dlls/crypt32/str.c — CertGetNameStringW CERT_NAME_SIMPLE_DISPLAY_TYPE(4) walks Subject RDN for CN then O then OU; falls back to SAN/email; returns cch including null
 #[unsafe(no_mangle)]
 pub unsafe extern "win64" fn cert_get_name_string_w(
     _p_cert_context: *const u8,
@@ -374,6 +378,7 @@ pub unsafe extern "win64" fn cert_get_name_string_w(
 ///
 /// We return 20 zero bytes for propIds 3 and 20 (the two NPP most commonly
 /// queries), and CRYPT_E_NOT_FOUND (0x80092004) for anything else.
+// Wine ref: dlls/crypt32/cert.c:526 — CertContext_GetProperty dispatches by dwPropId; SHA1_HASH(3) hashes pbCertEncoded; KEY_IDENTIFIER(20) decodes SubjectKeyIdentifier extension
 #[unsafe(no_mangle)]
 pub unsafe extern "win64" fn cert_get_certificate_context_property(
     _p_cert_context: *const u8,
@@ -549,6 +554,7 @@ pub fn resolve_sensapi(func: &str) -> Option<usize> {
 ///
 /// # Safety
 /// All pointer arguments are ignored.
+// Wine ref: dlls/wininet/internet.c — InternetCrackUrlW calls INTERNET_ParseUrlW; fills URL_COMPONENTSW scheme/host/path/port fields; returns FALSE on parse failure
 pub unsafe extern "win64" fn internet_crack_url_w(
     _lpsz_url: *const u16,
     _dw_url_length: u32,
@@ -578,6 +584,7 @@ pub fn resolve_wininet(func: &str) -> Option<usize> {
 ///
 /// # Safety
 /// `base` must be a valid mapped PE image in the calling process's address space.
+// Wine ref: dlls/dbghelp/dbghelp.c — ImageNtHeader reads e_lfanew at DOS header offset 0x3C, returns IMAGE_NT_HEADERS pointer; NULL if MZ signature absent at base
 pub unsafe extern "win64" fn image_nt_header(base: *const u8) -> *const u8 {
     if base.is_null() {
         return std::ptr::null();

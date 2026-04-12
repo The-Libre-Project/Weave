@@ -60,6 +60,8 @@ pub const MF_BYPOSITION: u32 = 0x0400;
 // ── Public API ────────────────────────────────────────────────────────────────
 
 /// CreateMenu: create an empty menu bar.
+// Wine ref: dlls/win32u/menu.c:598 — same internal create_menu(is_popup=FALSE);
+// sets FocusedItem=NO_SELECTED_ITEM, refcount=1, allocates handle via alloc_user_handle.
 pub extern "win64" fn create_menu() -> usize {
     alloc_menu()
 }
@@ -68,6 +70,8 @@ pub extern "win64" fn create_menu() -> usize {
 ///
 /// In the Win32 model, popup menus and menu bars have identical storage;
 /// the difference is only how they're displayed. We treat them the same.
+// Wine ref: dlls/win32u/menu.c:598 — calls create_menu(is_popup=TRUE) which sets
+// MF_POPUP on wFlags, distinguishing popup from menu bar at the kernel level.
 pub extern "win64" fn create_popup_menu() -> usize {
     alloc_menu()
 }
@@ -77,6 +81,9 @@ pub extern "win64" fn create_popup_menu() -> usize {
 /// # Safety
 /// `lp_new_item`, when flags include MF_STRING, must be a valid
 /// null-terminated UTF-16 string pointer.
+// Wine ref: dlls/win32u/menu.c:427 — insert_menu_item appends at nItems; keeps MDI
+// system-button bitmaps (HBMMENU_SYSTEM..HBMMENU_MBAR_CLOSE_D, handles 1-6) at right
+// by decrementing pos. Sets menu->Height=0 to force size recalculate.
 pub unsafe extern "win64" fn append_menu_w(
     h_menu: usize,
     u_flags: u32,
@@ -114,6 +121,9 @@ pub unsafe extern "win64" fn append_menu_w(
 ///
 /// # Safety
 /// Same as append_menu_w.
+// Wine ref: dlls/win32u/menu.c:427 — insert_menu_item resolves item position via
+// find_menu_item; on failure falls back to appending at nItems. Passes lpmii fields
+// through set_menu_item_info which validates cbSize and applies MIIM_* mask bits.
 pub unsafe extern "win64" fn insert_menu_item_w(
     h_menu: usize,
     _u_item: u32,
@@ -140,6 +150,9 @@ pub unsafe extern "win64" fn insert_menu_item_w(
 /// SetMenu: attach a menu bar to a window.
 ///
 /// Phase 2: stored in window table; not rendered. Returns TRUE.
+// Wine ref: dlls/win32u/menu.c:673 — set_window_menu; validates handle via is_menu();
+// if hwnd is capture window, releases capture (GUI_INMENUMODE); stores hwnd in
+// menu->hWnd, resets menu->Height=0, then calls NtUserSetWindowLong(GWLP_ID, handle).
 pub extern "win64" fn set_menu(hwnd: usize, h_menu: usize) -> i32 {
     crate::window::with_mut(hwnd, |w| {
         w.h_menu = h_menu;
@@ -148,11 +161,15 @@ pub extern "win64" fn set_menu(hwnd: usize, h_menu: usize) -> i32 {
 }
 
 /// GetMenu: return the menu handle attached to a window.
+// Wine ref: dlls/win32u/menu.c — GetMenu reads the handle stored via GWLP_ID by
+// set_window_menu; returns NULL for child windows (is_win_menu_disallowed).
 pub extern "win64" fn get_menu(hwnd: usize) -> usize {
     crate::window::with(hwnd, |w| w.h_menu).unwrap_or(0)
 }
 
 /// DestroyMenu: free a menu and all its items.
+// Wine ref: dlls/win32u/menu.c — NtUserDestroyMenu; recursively frees all popup
+// submenus before freeing the parent; frees string item text via free().
 pub extern "win64" fn destroy_menu(h_menu: usize) -> i32 {
     let mut m = menus().lock().unwrap();
     m.menus.remove(&h_menu).map(|_| 1).unwrap_or(0)
@@ -161,6 +178,9 @@ pub extern "win64" fn destroy_menu(h_menu: usize) -> i32 {
 /// TrackPopupMenu: display a popup menu at a screen position.
 ///
 /// Phase 2 stub: does nothing visually, returns 0 (no item selected).
+// Wine ref: dlls/win32u/menu.c — TrackPopupMenu calls TrackPopupMenuEx with
+// TPMPARAMS=NULL; the real impl creates a popup window and runs a modal message loop.
+// Returns the selected command id, or 0 if cancelled/no selection.
 pub extern "win64" fn track_popup_menu(
     _h_menu: usize,
     _u_flags: u32,
@@ -174,6 +194,8 @@ pub extern "win64" fn track_popup_menu(
 }
 
 /// TrackPopupMenuEx: extended popup tracking (Phase 2 stub).
+// Wine ref: dlls/win32u/menu.c — creates a popup_menu_window_proc window, calc_popup_menu_size,
+// then enters exec_menu modal loop; posts WM_MENURBUTTONUP/WM_MENUCOMMAND to owner on selection.
 pub extern "win64" fn track_popup_menu_ex(
     _h_menu: usize,
     _u_flags: u32,
@@ -229,6 +251,7 @@ pub fn delete_item(h_menu: usize, u_position: u32, u_flags: u32) {
 /// # Safety
 /// `lp_string`, when `n_max_count > 0`, must point to a buffer of at least
 /// `n_max_count` wide characters.
+// Wine ref: dlls/user32/menu.c — see doc comment above; returns char count excl. null.
 pub unsafe extern "win64" fn get_menu_string_w(
     h_menu: usize,
     u_id_item: u32,
@@ -316,11 +339,7 @@ pub extern "win64" fn get_menu_state(h_menu: usize, u_id: u32, u_flags: u32) -> 
             if item.flags & MF_POPUP != 0 {
                 // Return submenu item count in high byte | (flags | MF_POPUP) in low byte
                 let submenu_h = item.id_or_submenu;
-                let count = m
-                    .menus
-                    .get(&submenu_h)
-                    .map(|v| v.len() as u32)
-                    .unwrap_or(0);
+                let count = m.menus.get(&submenu_h).map(|v| v.len() as u32).unwrap_or(0);
                 return (count << 8) | (item.flags | MF_POPUP);
             }
             return item.flags;
@@ -337,6 +356,7 @@ pub extern "win64" fn get_menu_state(h_menu: usize, u_id: u32, u_flags: u32) -> 
 /// # Safety
 /// `lp_new_item`, when `u_flags` includes MF_STRING, must be a valid
 /// null-terminated UTF-16 string pointer or NULL.
+// Wine ref: dlls/user32/menu.c — see doc comment above; updates fType, wID, text in place.
 pub unsafe extern "win64" fn modify_menu_w(
     h_menu: usize,
     u_position: u32,
@@ -353,7 +373,9 @@ pub unsafe extern "win64" fn modify_menu_w(
     let item = if by_pos {
         items.get_mut(u_position as usize)
     } else {
-        items.iter_mut().find(|it| it.id_or_submenu as u32 == u_position)
+        items
+            .iter_mut()
+            .find(|it| it.id_or_submenu as u32 == u_position)
     };
     let item = match item {
         Some(it) => it,
@@ -368,7 +390,7 @@ pub unsafe extern "win64" fn modify_menu_w(
             len += 1;
         }
         let slice = unsafe { std::slice::from_raw_parts(lp_new_item, len) };
-        item.text = String::from_utf16_lossy(slice).into();
+        item.text = String::from_utf16_lossy(slice);
     }
     1 // TRUE
 }
@@ -412,6 +434,8 @@ pub extern "win64" fn get_sub_menu(h_menu: usize, n_pos: i32) -> usize {
 }
 
 /// GetMenuItemCount: return the number of items in a menu.
+// Wine ref: dlls/win32u/menu.c:1359 — grab_menu_ptr fails on invalid handle → returns -1
+// (not 0); valid handle returns menu->nItems directly.
 pub extern "win64" fn get_menu_item_count(h_menu: usize) -> i32 {
     let m = menus().lock().unwrap();
     m.menus.get(&h_menu).map(|v| v.len() as i32).unwrap_or(-1)
@@ -420,6 +444,8 @@ pub extern "win64" fn get_menu_item_count(h_menu: usize) -> i32 {
 /// CheckMenuItem: set or clear the checked state on a menu item.
 ///
 /// Phase 2: mutates stored flags, returns previous check state.
+// Wine ref: dlls/win32u/menu.c — NtUserCheckMenuItem; uses find_menu_item, returns
+// previous (fState & MFS_CHECKED) cast to DWORD; returns -1 (0xFFFFFFFF) if not found.
 pub extern "win64" fn check_menu_item(h_menu: usize, u_id_check_item: u32, u_check: u32) -> u32 {
     let mut m = menus().lock().unwrap();
     let items = match m.menus.get_mut(&h_menu) {
@@ -447,6 +473,9 @@ pub extern "win64" fn check_menu_item(h_menu: usize, u_id_check_item: u32, u_che
 }
 
 /// EnableMenuItem: enable or grey a menu item.
+// Wine ref: dlls/win32u/menu.c — NtUserEnableMenuItem; uses find_menu_item, stores
+// new flags in item->fState masked to (MFS_GRAYED|MFS_DISABLED); returns previous
+// enable state or -1 if item not found.
 pub extern "win64" fn enable_menu_item(h_menu: usize, u_id_enable_item: u32, u_enable: u32) -> i32 {
     let mut m = menus().lock().unwrap();
     let items = match m.menus.get_mut(&h_menu) {

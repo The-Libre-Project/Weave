@@ -14,6 +14,8 @@ use weave_core::{file_io, handles};
 /// RtlDllShutdownInProgress: check if DLL shutdown is in progress.
 ///
 /// Return 0 (process is not shutting down). No parameters. Not `unsafe`.
+// Wine ref: dlls/ntdll/loader.c:3815 — reads a static `process_detaching` bool set during
+// DLL unload phase; returns TRUE only after process shutdown has been initiated.
 pub extern "win64" fn rtl_dll_shutdown_in_progress() -> u8 {
     0
 }
@@ -26,6 +28,9 @@ pub extern "win64" fn rtl_dll_shutdown_in_progress() -> u8 {
 ///
 /// # Safety
 /// `performance_counter` and `performance_frequency` must be valid pointers or NULL.
+// Wine ref: ReactOS ntoskrnl/ex/profile.c:278 — calls KeQueryPerformanceCounter internally;
+// probes both output pointers in SEH before writing; raises the exception code (not
+// STATUS_INVALID_PARAMETER) if the pointer access faults.
 pub unsafe extern "win64" fn nt_query_performance_counter(
     performance_counter: *mut i64,
     performance_frequency: *mut i64,
@@ -51,6 +56,9 @@ pub unsafe extern "win64" fn nt_query_performance_counter(
 ///
 /// # Safety
 /// `system_time` must be a valid writable pointer.
+// Wine ref: Wine syscall (ntsyscalls.h) — on real Windows reads from KUSER_SHARED_DATA
+// at fixed user-space address 0x7ffe0014 (SystemTime field), avoiding a kernel transition.
+// Weave uses clock_gettime(CLOCK_REALTIME) + Windows epoch offset instead.
 pub unsafe extern "win64" fn nt_query_system_time(system_time: *mut i64) -> u32 {
     if system_time.is_null() {
         return 0u32;
@@ -69,6 +77,9 @@ pub unsafe extern "win64" fn nt_query_system_time(system_time: *mut i64) -> u32 
 ///
 /// # Safety
 /// `delay_interval` is accepted but not dereferenced.
+// Wine ref: ReactOS ntoskrnl/ke/wait.c:876 — probes and captures DelayInterval via SEH in
+// user mode; delegates to KeDelayExecutionThread(PreviousMode, Alertable, DelayInterval).
+// Weave stub yields once then returns immediately — does not honour the interval.
 pub unsafe extern "win64" fn nt_delay_execution(
     _alertable: u8,
     _delay_interval: *const i64,
@@ -93,6 +104,9 @@ fn next_nt_handle() -> usize {
 /// # Safety
 /// `event_handle` must be a valid writable pointer.
 /// Other pointer arguments are accepted but not dereferenced.
+// Wine ref: ReactOS ntoskrnl/ex/event.c:96 — validates EventType: only NotificationEvent(0)
+// or SynchronizationEvent(1) accepted; returns STATUS_INVALID_PARAMETER for other values.
+// Creates KEVENT via ObCreateObject + KeInitializeEvent; Weave returns fake handle, no validation.
 pub unsafe extern "win64" fn nt_create_event(
     event_handle: *mut usize,
     _desired_access: u32,
@@ -112,6 +126,9 @@ pub unsafe extern "win64" fn nt_create_event(
 ///
 /// # Safety
 /// `event_handle` must be a valid writable pointer or NULL.
+// Wine ref: ReactOS ntoskrnl/ex/event.c:185 — opens by name via ObOpenObjectByName;
+// returns STATUS_OBJECT_NAME_NOT_FOUND for unknown names. Weave returns fake handle
+// with no name lookup or object-manager validation.
 pub unsafe extern "win64" fn nt_open_event(
     event_handle: *mut usize,
     _desired_access: u32,
@@ -129,6 +146,8 @@ pub unsafe extern "win64" fn nt_open_event(
 ///
 /// # Safety
 /// `_event_handle` is a handle value, not dereferenced.
+// Wine ref: ReactOS ntoskrnl/ex/event.c — equivalent to NtResetEvent; looks up handle via
+// ObReferenceObjectByHandle with EVENT_MODIFY_STATE; calls KeResetEvent; no previous-state output.
 pub unsafe extern "win64" fn nt_clear_event(_event_handle: usize) -> u32 {
     0u32 // STATUS_SUCCESS
 }
@@ -139,6 +158,8 @@ pub unsafe extern "win64" fn nt_clear_event(_event_handle: usize) -> u32 {
 ///
 /// # Safety
 /// `_event_handle` is a handle value. `previous_state` written if non-null.
+// Wine ref: ReactOS ntoskrnl/ex/event.c:247 — calls KePulseEvent with EVENT_INCREMENT boost;
+// writes previous state to PreviousState if non-null; invalid handle → STATUS_INVALID_HANDLE.
 pub unsafe extern "win64" fn nt_pulse_event(_event_handle: usize, previous_state: *mut i32) -> u32 {
     if !previous_state.is_null() {
         unsafe { *previous_state = 0 };
@@ -152,6 +173,9 @@ pub unsafe extern "win64" fn nt_pulse_event(_event_handle: usize, previous_state
 ///
 /// # Safety
 /// `_event_handle` is accepted but not dereferenced.
+// Wine ref: ReactOS ntoskrnl/ex/event.c:450 — calls KeSetEvent with EVENT_INCREMENT priority
+// boost; writes previous signaled state to PreviousState if non-null; invalid handle →
+// STATUS_INVALID_HANDLE.
 pub unsafe extern "win64" fn nt_set_event(_event_handle: usize, _previous_state: *mut u32) -> u32 {
     0u32 // STATUS_SUCCESS
 }
@@ -162,6 +186,8 @@ pub unsafe extern "win64" fn nt_set_event(_event_handle: usize, _previous_state:
 ///
 /// # Safety
 /// `_event_handle` is accepted but not dereferenced.
+// Wine ref: ReactOS ntoskrnl/ex/event.c:392 — calls KeResetEvent; writes previous signaled
+// state to PreviousState if non-null; invalid handle → STATUS_INVALID_HANDLE.
 pub unsafe extern "win64" fn nt_reset_event(
     _event_handle: usize,
     _previous_state: *mut u32,
@@ -176,6 +202,9 @@ pub unsafe extern "win64" fn nt_reset_event(
 /// # Safety
 /// `_object` is accepted but not dereferenced.
 /// `_timeout` is accepted but not dereferenced.
+// Wine ref: Wine syscall (ntsyscalls.h) — delegates to KeWaitForSingleObject; returns
+// WAIT_OBJECT_0 (0) on signal, WAIT_TIMEOUT (0x102) on timeout, STATUS_ALERTED if alertable
+// and APC queued. Weave always returns STATUS_SUCCESS — no real wait.
 pub unsafe extern "win64" fn nt_wait_for_single_object(
     _object: usize,
     _alertable: u8,
@@ -191,6 +220,9 @@ pub unsafe extern "win64" fn nt_wait_for_single_object(
 /// Stub: immediately return STATUS_SUCCESS (no actual waiting).
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
+// Wine ref: dlls/ntdll/sync.c:878 — size must be 1/2/4/8 else STATUS_INVALID_PARAMETER;
+// comparison done inside spinlock to reduce spurious wakeups; delegates to
+// NtWaitForAlertByThreadId; maps STATUS_ALERTED → STATUS_SUCCESS on return.
 pub unsafe extern "win64" fn rtl_wait_on_address(
     _address: *const u8,
     _compare_address: *const u8,
@@ -205,6 +237,8 @@ pub unsafe extern "win64" fn rtl_wait_on_address(
 /// No-op.
 /// # Safety
 /// `_address` is accepted but never dereferenced.
+// Wine ref: dlls/ntdll/sync.c:967 — no-op if addr==NULL; wakes first matching entry in futex
+// queue via NtAlertThreadByThreadId called outside the spinlock to avoid syscall under lock.
 pub unsafe extern "win64" fn rtl_wake_by_address_single(_address: usize) {}
 
 /// RtlWakeByAddressAll: wake all threads waiting on an address.
@@ -212,6 +246,8 @@ pub unsafe extern "win64" fn rtl_wake_by_address_single(_address: usize) {}
 /// No-op.
 /// # Safety
 /// `_address` is accepted but never dereferenced.
+// Wine ref: dlls/ntdll/sync.c:930 — no-op if addr==NULL; collects up to 256 TIDs under
+// spinlock then calls NtAlertMultipleThreadByThreadId after releasing lock.
 pub unsafe extern "win64" fn rtl_wake_by_address_all(_address: usize) {}
 
 // ── Windows NT structures ─────────────────────────────────────────────────────
@@ -336,6 +372,9 @@ pub unsafe extern "win64" fn rtl_init_unicode_string(dest: *mut UnicodeString, s
 /// # Safety
 /// `file_handle` must be a valid, writable pointer. `object_attrs` must be a
 /// valid `ObjectAttributes` with a non-null `object_name` pointer.
+// Wine ref: dlls/ntdll/unix/file.c — translates ObjectAttributes.ObjectName (NT path \??\C:\foo)
+// to Unix path; writes FILE_OPENED(1)/FILE_CREATED(2)/FILE_SUPERSEDED(5) into io->Information;
+// returns STATUS_OBJECT_NAME_NOT_FOUND for missing files when CreateDisposition==FILE_OPEN.
 pub unsafe extern "win64" fn nt_create_file(
     file_handle: *mut usize, // out: receives the new handle
     desired_access: u32,     // ACCESS_MASK: GENERIC_READ / GENERIC_WRITE / …
@@ -401,6 +440,9 @@ pub unsafe extern "win64" fn nt_create_file(
 /// # Safety
 /// `buffer` must be valid for `length` bytes. `io_status_block`, if non-null,
 /// must point to a valid `IoStatusBlock`.
+// Wine ref: dlls/ntdll/unix/file.c:6021 — returns STATUS_ACCESS_VIOLATION (not STATUS_UNSUCCESSFUL)
+// when io==NULL; validates buffer with virtual_check_buffer_for_write; returns STATUS_END_OF_FILE
+// (not 0) when read() returns 0 bytes.
 pub unsafe extern "win64" fn nt_read_file(
     file_handle: usize,
     _event: usize,
@@ -451,6 +493,8 @@ pub unsafe extern "win64" fn nt_read_file(
 /// # Safety
 /// `buffer` must be valid for `length` bytes. `io_status_block`, if non-null,
 /// must point to a valid `IoStatusBlock`.
+// Wine ref: dlls/ntdll/unix/file.c:6298 — same structure as NtReadFile; returns
+// STATUS_ACCESS_VIOLATION for null io; writes bytes written into io->Information.
 pub unsafe extern "win64" fn nt_write_file(
     file_handle: usize,
     _event: usize,
@@ -497,6 +541,8 @@ pub unsafe extern "win64" fn nt_write_file(
 ///
 /// Closing stdin/stdout/stderr (handles 4/5/6) returns STATUS_UNSUCCESSFUL —
 /// those handles are protected.
+// Wine ref: dlls/ntdll/unix/server.c — NtClose calls close_handle() on the wine server;
+// invalid handles return STATUS_INVALID_HANDLE (0xC0000008).
 pub extern "win64" fn nt_close(handle: usize) -> i32 {
     match file_io::close_handle(handle) {
         Ok(()) => STATUS_SUCCESS,
@@ -509,6 +555,8 @@ pub extern "win64" fn nt_close(handle: usize) -> i32 {
 /// NtTerminateProcess: exit the current process.
 ///
 /// `process_handle` of 0 (NULL) means the calling process.
+// Wine ref: Wine syscall (ntsyscalls.h) — ProcessHandle==NULL terminates calling process;
+// exit_status propagated to parent via NtQueryInformationProcess(ProcessExitStatus).
 pub extern "win64" fn nt_terminate_process(_process_handle: usize, exit_status: i32) -> i32 {
     unsafe { libc::exit(exit_status) }
 }
@@ -527,6 +575,8 @@ pub extern "win64" fn nt_terminate_process(_process_handle: usize, exit_status: 
 ///
 /// # Safety
 /// The returned pointer must be freed with RtlFreeHeap or it will leak.
+// Wine ref: dlls/ntdll/heap.c:2038 — HEAP_ZERO_MEMORY (0x08) zeroes via calloc;
+// size==0 may return a minimum-size pointer in Wine (not NULL as Weave does).
 pub extern "win64" fn rtl_allocate_heap(
     _heap_handle: usize,
     flags: u32,
@@ -552,6 +602,8 @@ pub extern "win64" fn rtl_allocate_heap(
 ///
 /// # Safety
 /// `base_address` must be a valid pointer returned from RtlAllocateHeap/RtlReAllocateHeap or NULL.
+// Wine ref: dlls/ntdll/heap.c — returns TRUE for NULL pointer (no-op, correct);
+// HEAP_GENERATE_EXCEPTIONS flag may raise STATUS_ACCESS_VIOLATION on bad handle.
 pub extern "win64" fn rtl_free_heap(
     _heap_handle: usize,
     _flags: u32,
@@ -571,6 +623,9 @@ pub extern "win64" fn rtl_free_heap(
 /// # Safety
 /// `base_address` must be a valid pointer returned from RtlAllocateHeap or NULL.
 /// The returned pointer must be freed with RtlFreeHeap or it will leak.
+// Wine ref: dlls/ntdll/heap.c:2229 — returns NULL if ptr==NULL (not a fresh alloc);
+// HEAP_REALLOC_IN_PLACE_ONLY → STATUS_NO_MEMORY if in-place resize fails; copies old data
+// via memcpy then frees old block when relocating.
 pub extern "win64" fn rtl_re_allocate_heap(
     _heap_handle: usize,
     _flags: u32,
@@ -601,6 +656,9 @@ pub struct RtlOsVersionInfoW {
 ///
 /// # Safety
 /// `lp_version_information` must be a valid writable pointer to an RtlOsVersionInfoW.
+// Wine ref: dlls/ntdll/version.c:578 — fills from current_version global; if size==
+// sizeof(RTL_OSVERSIONINFOEXW) also fills wServicePackMajor/Minor, wSuiteMask, wProductType;
+// always returns STATUS_SUCCESS (no error path).
 pub unsafe extern "win64" fn rtl_get_version(
     lp_version_information: *mut RtlOsVersionInfoW,
 ) -> i32 {
@@ -623,6 +681,8 @@ pub unsafe extern "win64" fn rtl_get_version(
 // Known gap: Weave has no TEB LastStatusValue; 0xd-prefix stripping and HIWORD special cases
 // are missing; only 7 codes are in the map (real Wine covers ~600+).
 /// RtlNtStatusToDosError: maps NT status codes to Win32 error codes.
+// Wine ref: dlls/ntdll/error.c:77 — writes status to TEB LastStatusValue first;
+// HIWORD 0xc001/0x8007/0xc007 returns LOWORD directly; unknown codes → ERROR_MR_MID_NOT_FOUND (317).
 pub extern "win64" fn rtl_nt_status_to_dos_error(status: u32) -> u32 {
     match status {
         0x00000000 => 0,  // STATUS_SUCCESS -> ERROR_SUCCESS
@@ -643,6 +703,9 @@ pub extern "win64" fn rtl_nt_status_to_dos_error(status: u32) -> u32 {
 /// # Safety
 /// `destination_string` must be a valid writable pointer to an AnsiString.
 /// `source_string` must be a valid null-terminated UTF-8 string or NULL.
+// Wine ref: dlls/ntdll/rtlstr.c:56 — sets Buffer=source, Length=strlen(source),
+// MaximumLength=Length+1; no length cap (unlike RtlInitAnsiStringEx which caps at 0xffff
+// and returns STATUS_NAME_TOO_LONG).
 pub unsafe extern "win64" fn rtl_init_ansi_string(
     destination_string: *mut AnsiString,
     source_string: *const u8,
@@ -666,6 +729,9 @@ pub unsafe extern "win64" fn rtl_init_ansi_string(
 /// # Safety
 /// `destination_string` and `source_string` must be valid pointers.
 /// `destination_string.buffer` must have capacity for the copy operation.
+// Wine ref: dlls/ntdll/rtlstr.c:290 — copies min(src->Length, dst->MaximumLength) bytes;
+// if space remains appends null terminator at dst->Buffer[len/sizeof(WCHAR)];
+// src==NULL sets dst->Length=0 only (buffer untouched).
 pub unsafe extern "win64" fn rtl_copy_unicode_string(
     destination_string: *mut UnicodeString,
     source_string: *const UnicodeString,
@@ -694,6 +760,8 @@ pub unsafe extern "win64" fn rtl_copy_unicode_string(
 /// # Safety
 /// `string1` and `string2` must be valid pointers to UnicodeString structs.
 /// Their buffer pointers must be valid for their respective lengths.
+// Wine ref: dlls/ntdll/rtlstr.c:447 — returns FALSE immediately if lengths differ;
+// delegates to RtlCompareUnicodeString (full locale-aware compare) rather than inline comparison.
 pub unsafe extern "win64" fn rtl_equal_unicode_string(
     string1: *const UnicodeString,
     string2: *const UnicodeString,
@@ -735,6 +803,9 @@ pub unsafe extern "win64" fn rtl_equal_unicode_string(
 /// # Safety
 /// `destination_string` and `source_string` must be valid pointers.
 /// If `allocate_destination_string` is non-zero, memory will be allocated.
+// Wine ref: dlls/ntdll/rtlstr.c:563 — returns STATUS_INVALID_PARAMETER_2 (not
+// STATUS_INVALID_PARAMETER) if result >0xffff; uses RtlMultiByteToUnicodeN (not simple byte
+// widening); always writes null terminator after converted data.
 pub unsafe extern "win64" fn rtl_ansi_string_to_unicode_string(
     destination_string: *mut UnicodeString,
     source_string: *const AnsiString,
@@ -779,6 +850,9 @@ pub unsafe extern "win64" fn rtl_ansi_string_to_unicode_string(
 /// # Safety
 /// `destination_string` and `source_string` must be valid pointers.
 /// If `allocate_destination_string` is non-zero, memory will be allocated.
+// Wine ref: dlls/ntdll/rtlstr.c:637 — if buffer too small and doalloc==FALSE, sets
+// ansi->Length = MaximumLength-1 and returns STATUS_BUFFER_OVERFLOW (not STATUS_BUFFER_TOO_SMALL);
+// uses RtlUnicodeToMultiByteN for conversion.
 pub unsafe extern "win64" fn rtl_unicode_string_to_ansi_string(
     destination_string: *mut AnsiString,
     source_string: *const UnicodeString,
@@ -822,6 +896,8 @@ pub unsafe extern "win64" fn rtl_unicode_string_to_ansi_string(
 ///
 /// # Safety
 /// `unicode_string` must be a valid pointer. If buffer was allocated, it will be freed.
+// Wine ref: dlls/ntdll/rtlstr.c:272 — calls RtlFreeHeap on Buffer if non-null; then
+// zeroes the entire UNICODE_STRING struct via RtlZeroMemory (not just the Buffer field).
 pub unsafe extern "win64" fn rtl_free_unicode_string(unicode_string: *mut UnicodeString) {
     unsafe {
         let us = &mut *unicode_string;
@@ -838,6 +914,8 @@ pub unsafe extern "win64" fn rtl_free_unicode_string(unicode_string: *mut Unicod
 
 /// # Safety
 /// `destination` and `source` must be valid for `length` bytes.
+// Wine ref: dlls/ntdll/string.c:265 — direct memmove wrapper; no null/length checks;
+// handles overlapping regions correctly via memmove semantics.
 pub unsafe extern "win64" fn rtl_move_memory(
     destination: *mut u8,
     source: *const u8,
@@ -854,6 +932,8 @@ pub unsafe extern "win64" fn rtl_move_memory(
 
 /// # Safety
 /// `destination` and `source` must be valid for `length` bytes.
+// Wine ref: dlls/ntdll/string.c — direct memcpy wrapper; macro #undef'd before definition;
+// no overlap handling — use RtlMoveMemory for overlapping regions.
 pub unsafe extern "win64" fn rtl_copy_memory(
     destination: *mut u8,
     source: *const u8,
@@ -870,6 +950,8 @@ pub unsafe extern "win64" fn rtl_copy_memory(
 
 /// # Safety
 /// `destination` must be valid for `length` bytes.
+// Wine ref: dlls/ntdll/string.c:274 — direct memset wrapper; macro #undef'd before definition
+// to expose as real function rather than inline.
 pub unsafe extern "win64" fn rtl_fill_memory(destination: *mut u8, length: usize, fill: u8) {
     unsafe {
         libc::memset(destination as *mut libc::c_void, fill as i32, length);
@@ -878,6 +960,8 @@ pub unsafe extern "win64" fn rtl_fill_memory(destination: *mut u8, length: usize
 
 /// # Safety
 /// `destination` must be valid for `length` bytes.
+// Wine ref: dlls/ntdll/string.c:281 — memset(dest, 0) wrapper; macro #undef'd before
+// definition; identical to RtlFillMemory(dest, len, 0).
 pub unsafe extern "win64" fn rtl_zero_memory(destination: *mut u8, length: usize) {
     unsafe {
         libc::memset(destination as *mut libc::c_void, 0, length);
@@ -886,6 +970,8 @@ pub unsafe extern "win64" fn rtl_zero_memory(destination: *mut u8, length: usize
 
 /// # Safety
 /// `source1` and `source2` must be valid for `length` bytes.
+// Wine ref: dlls/ntdll/string.c:289 — returns count of matching bytes from start (NOT a signed
+// comparator like memcmp); stops at first mismatch; no null pointer checks.
 pub unsafe extern "win64" fn rtl_compare_memory(
     source1: *const u8,
     source2: *const u8,
@@ -905,6 +991,9 @@ pub unsafe extern "win64" fn rtl_compare_memory(
 
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
+// Wine ref: dlls/ntdll/heap.c:2377 — returns FALSE for invalid handle; acquires heap lock;
+// validates specific ptr if non-null, else validates entire heap structure; returns BOOLEAN
+// TRUE/FALSE, not a STATUS code.
 pub unsafe extern "win64" fn rtl_validate_heap(
     _heap_handle: usize,
     _flags: u32,
@@ -925,6 +1014,9 @@ pub unsafe extern "win64" fn rtl_validate_heap(
 ///
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
+// Wine ref: dlls/ntdll/unix/system.c:3256 — large switch on SYSTEM_INFORMATION_CLASS;
+// returns STATUS_INFO_LENGTH_MISMATCH when size doesn't match; STATUS_ACCESS_VIOLATION
+// when info==NULL and size is correct; SystemBasicInformation(0)/SystemCpuInformation(1) always handled.
 pub unsafe extern "win64" fn nt_query_system_information(
     _system_information_class: u32,
     _system_information: *mut std::ffi::c_void,
@@ -942,6 +1034,9 @@ pub unsafe extern "win64" fn nt_query_system_information(
 /// # Safety
 /// If `process_information_class == 0` and length >= 48, writes to `process_information`.
 /// If `return_length` is non-null, writes the return length.
+// Wine ref: Wine syscall — ProcessBasicInformation (class 0) returns PEB address, UniqueProcessId
+// at offset 16, InheritedFromUniqueProcessId, AffinityMask, BasePriority; wrong size →
+// STATUS_INFO_LENGTH_MISMATCH.
 pub unsafe extern "win64" fn nt_query_information_process(
     _handle: usize,
     process_information_class: u32,
@@ -969,6 +1064,9 @@ pub unsafe extern "win64" fn nt_query_information_process(
 ///
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
+// Wine ref: ReactOS ntoskrnl/ps/query.c:2985 — ThreadBasicInformation writes ExitStatus,
+// TebBaseAddress (Tcb.Teb), ClientId, AffinityMask, Priority, BasePriority;
+// STATUS_INFO_LENGTH_MISMATCH if buffer size wrong.
 pub unsafe extern "win64" fn nt_query_information_thread(
     _handle: usize,
     _thread_information_class: u32,
@@ -990,6 +1088,8 @@ pub unsafe extern "win64" fn nt_query_information_thread(
 /// # Safety
 /// `string1` and `string2` must be valid pointers to UnicodeString structs.
 /// Their buffer pointers must be valid for their respective lengths.
+// Wine ref: dlls/ntdll/rtlstr.c:414 — delegates to RtlCompareUnicodeStrings; uses
+// locale-aware RtlUpcaseUnicodeChar for case folding, not ASCII bit-twiddling (Weave gap).
 pub unsafe extern "win64" fn rtl_compare_unicode_string(
     string1: *const UnicodeString,
     string2: *const UnicodeString,
@@ -1028,6 +1128,9 @@ pub unsafe extern "win64" fn rtl_compare_unicode_string(
 }
 
 /// NtYieldExecution: yield the processor to another thread.
+// Wine ref: ReactOS ntoskrnl/ke/thrdschd.c:887 — returns STATUS_NO_YIELD_PERFORMED if
+// ReadySummary==0 (no ready threads at any priority); raises IRQL to SynchLevel before
+// selecting next thread. Weave's sched_yield() is a reasonable approximation.
 pub extern "win64" fn nt_yield_execution() -> u32 {
     unsafe { libc::sched_yield() };
     0 // STATUS_SUCCESS
@@ -1037,6 +1140,9 @@ pub extern "win64" fn nt_yield_execution() -> u32 {
 ///
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
+// Wine ref: ReactOS ntoskrnl/ps/query.c:2269 — large switch on THREADINFOCLASS; ThreadPriority
+// requires SeIncreaseBasePriorityPrivilege for realtime values (>=LOW_REALTIME_PRIORITY);
+// validates class/size via PsThreadInfoClass table; STATUS_INFO_LENGTH_MISMATCH for wrong size.
 pub unsafe extern "win64" fn nt_set_information_thread(
     _thread_handle: usize,
     _thread_information_class: u32,
@@ -1060,6 +1166,9 @@ pub unsafe extern "win64" fn nt_set_information_thread(
 /// # Safety
 /// `module_file_name` must be null or a valid pointer to a `UnicodeString`.
 /// `module_handle` must be a valid writable pointer.
+// Wine ref: dlls/ntdll/loader.c:3442 — appends ".dll" if missing; acquires loader_section
+// critical section; calls load_dll then runs DllMain DLL_PROCESS_ATTACH; on attach failure
+// calls LdrUnloadDll; writes wm->ldr.DllBase into *hModule on success.
 pub unsafe extern "win64" fn ldr_load_dll(
     _path_to_file: *const u16,
     _flags: u32,
@@ -1095,6 +1204,8 @@ pub unsafe extern "win64" fn ldr_load_dll(
 /// # Safety
 /// `function_name` must be null or a valid pointer to an `AnsiString`.
 /// `function_address` must be a valid writable pointer.
+// Wine ref: dlls/ntdll/loader.c — ordinal lookup (non-zero Ordinal) takes priority over name;
+// returns STATUS_PROCEDURE_NOT_FOUND if not found in the module's export table.
 pub unsafe extern "win64" fn ldr_get_procedure_address(
     module_handle: usize,
     function_name: *const AnsiString,
@@ -1146,6 +1257,9 @@ pub unsafe extern "win64" fn ldr_get_procedure_address(
 ///
 /// # Safety
 /// `base_address` must be a valid pointer to a pointer. `region_size` must be a valid pointer.
+// Wine ref: dlls/ntdll/unix/virtual.c:5193 — returns STATUS_INVALID_PARAMETER for null
+// base_address, null region_size, or *region_size==0; writes actual allocation base into
+// *base_address on success.
 pub unsafe extern "win64" fn nt_allocate_virtual_memory(
     _process_handle: usize,
     base_address: *mut *mut u8,
@@ -1200,6 +1314,9 @@ pub unsafe extern "win64" fn nt_allocate_virtual_memory(
 ///
 /// # Safety
 /// `base_address` and `region_size` must be valid pointers.
+// Wine ref: Wine syscall (ntsyscalls.h) — MEM_RELEASE (0x8000) frees entire allocation,
+// size should be 0; MEM_DECOMMIT (0x4000) decommits only. Weave always calls munmap
+// regardless of free_type — does not distinguish decommit vs release.
 pub unsafe extern "win64" fn nt_free_virtual_memory(
     _process_handle: usize,
     base_address: *mut *mut u8,
@@ -1219,6 +1336,9 @@ pub unsafe extern "win64" fn nt_free_virtual_memory(
 ///
 /// # Safety
 /// `base_address`, `number_of_bytes_to_protect`, and `old_access_protection` must be valid pointers.
+// Wine ref: Wine syscall (ntsyscalls.h) — rounds base/size down/up to page boundaries before
+// calling mprotect; writes previous page protection flags into old_access_protection before
+// applying new protection.
 pub unsafe extern "win64" fn nt_protect_virtual_memory(
     _process_handle: usize,
     base_address: *mut *mut u8,
@@ -1249,6 +1369,9 @@ pub unsafe extern "win64" fn nt_protect_virtual_memory(
 ///
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
+// Wine ref: Wine syscall (ntsyscalls.h) — MemoryBasicInformation (class 0) fills
+// MEMORY_BASIC_INFORMATION with base, size, protection, type; MemoryMappedFilenameInformation
+// (class 2) returns mapped file path; STATUS_INVALID_INFO_CLASS for unknown class.
 pub unsafe extern "win64" fn nt_query_virtual_memory(
     _process_handle: usize,
     _base_address: *const u8,
@@ -1271,6 +1394,9 @@ pub unsafe extern "win64" fn nt_query_virtual_memory(
 /// Naked trampoline: captures the throw site (return address = [RSP]) and throw RSP
 /// (RSP+8, i.e. RSP inside _CxxThrowException's body) before any prolog runs.
 /// Win64 ABI: RCX = EXCEPTION_RECORD*
+// Wine ref: dlls/ntdll/signal_x86_64.c — sets exception_address to the return address
+// (throw site inside _CxxThrowException); RSP/RIP captured before any prolog runs so
+// virtual_unwind can correctly reconstruct the throw frame.
 #[unsafe(naked)]
 pub unsafe extern "win64" fn rtl_raise_exception(
     _p_exception_record: *mut weave_core::unwind::ExceptionRecord,

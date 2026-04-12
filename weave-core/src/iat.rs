@@ -50,6 +50,13 @@ pub unsafe fn patch(
 /// Must be a naked function: a normal function prologue adjusts RSP before
 /// any inline asm runs, so `[rsp]` would read a saved register or shadow
 /// space rather than the actual return address pushed by the caller's CALL.
+///
+/// # Safety
+///
+/// Must be called via an IAT entry patched by Weave's loader. Assumes:
+/// - Stack is 8-byte aligned before entry (ABI requirement for win64 calls)
+/// - Caller passed a valid return address on the stack
+/// - RAX holds the IAT slot address or vtable pointer (preserved by loader)
 #[cfg(target_arch = "x86_64")]
 #[allow(unused)]
 #[unsafe(naked)]
@@ -86,9 +93,7 @@ pub unsafe extern "win64" fn unresolved_import_stub() -> u64 {
 /// virtual-dispatch pattern `call [rax+N]`, this is the vtable pointer and
 /// `rax_at_call + N` is the IAT slot that was patched.
 extern "win64" fn unresolved_import_stub_log(ret_addr: usize, rax_at_call: usize) {
-    eprintln!(
-        "weave: unresolved_import_stub called (ret={ret_addr:#x}, rax={rax_at_call:#x})"
-    );
+    eprintln!("weave: unresolved_import_stub called (ret={ret_addr:#x}, rax={rax_at_call:#x})");
 }
 
 /// Like `patch`, but skips unresolved imports rather than failing.

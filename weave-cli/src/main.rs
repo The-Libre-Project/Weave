@@ -142,7 +142,9 @@ fn main() {
                 // includes any DLLs registered in earlier iterations).
                 unsafe {
                     iat::patch_best_effort(&dll_bytes, image.base, resolve, |d, f, va| {
-                        eprintln!("weave: {dll_name}: unresolved import {d}!{f} at iat={va:#x} (skipped)");
+                        eprintln!(
+                            "weave: {dll_name}: unresolved import {d}!{f} at iat={va:#x} (skipped)"
+                        );
                     });
                 }
                 dll_registry::register(dll_name.to_lowercase(), image, exports);
