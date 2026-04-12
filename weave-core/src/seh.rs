@@ -113,6 +113,7 @@ unsafe extern "C" fn on_fatal_signal(
     unsafe { libc::write(2, b"weave: signal handler entered\n".as_ptr() as *const _, 30); }
     let uctx = ctx as *const libc::ucontext_t;
     let rip = unsafe { (*uctx).uc_mcontext.gregs[libc::REG_RIP as usize] as usize };
+    unsafe { libc::write(2, b"weave: sh got rip\n".as_ptr() as *const _, 18); }
 
     let base = PE_BASE.load(Ordering::Relaxed);
     let size = PE_SIZE.load(Ordering::Relaxed);
@@ -121,6 +122,7 @@ unsafe extern "C" fn on_fatal_signal(
         // Fault in PE code — try SEH dispatch first (Windows delivers hardware
         // exceptions through KiUserExceptionDispatcher → RtlDispatchException).
         let fault_addr = unsafe { (*info).si_addr() } as usize;
+        unsafe { libc::write(2, b"weave: sh got fault_addr\n".as_ptr() as *const _, 25); }
         let win_code = signal_to_exception_code(sig);
 
         // Try to dispatch through SEH. If a handler catches it, the ucontext
@@ -128,7 +130,9 @@ unsafe extern "C" fn on_fatal_signal(
         #[cfg(target_arch = "x86_64")]
         {
             let uctx_mut = ctx as *mut libc::ucontext_t;
-            if unsafe { crate::unwind::dispatch_hardware_exception(win_code, fault_addr, uctx_mut) }
+            let seh_handled = unsafe { crate::unwind::dispatch_hardware_exception(win_code, fault_addr, uctx_mut) };
+            unsafe { libc::write(2, b"weave: sh dispatch returned\n".as_ptr() as *const _, 28); }
+            if seh_handled
             {
                 // Diagnostic: SEH handler caught the exception — log before resuming.
                 // Use only stack buffers + write() — no heap, no format!, async-signal-safe.
