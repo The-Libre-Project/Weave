@@ -75,11 +75,28 @@ pub fn pe_size() -> usize {
 
 // ── Signal handler installation ───────────────────────────────────────────────
 
+// Alternate signal stack — written once at startup, before any threads.
+#[cfg(target_os = "linux")]
+static mut ALT_STACK_BUF: [u8; 65536] = [0u8; 65536];
+
 #[cfg(target_os = "linux")]
 fn install_one(sig: libc::c_int) {
     unsafe {
+        // Set up an alternate signal stack so delivery works even when RSP is
+        // in a PE stack segment (or otherwise invalid at fault time).
+        static ALTSTACK_INSTALLED: std::sync::atomic::AtomicBool =
+            std::sync::atomic::AtomicBool::new(false);
+        if !ALTSTACK_INSTALLED.swap(true, Ordering::Relaxed) {
+            let ss = libc::stack_t {
+                ss_sp: std::ptr::addr_of_mut!(ALT_STACK_BUF) as *mut _,
+                ss_flags: 0,
+                ss_size: 65536,
+            };
+            libc::sigaltstack(&ss as *const _, std::ptr::null_mut());
+        }
+
         let mut sa: libc::sigaction = std::mem::zeroed();
-        sa.sa_flags = libc::SA_SIGINFO;
+        sa.sa_flags = libc::SA_SIGINFO | libc::SA_ONSTACK;
         sa.sa_sigaction = on_fatal_signal as unsafe extern "C" fn(_, _, _) as usize;
         libc::sigaction(sig, &sa, std::ptr::null_mut());
     }
@@ -93,6 +110,7 @@ unsafe extern "C" fn on_fatal_signal(
     info: *mut libc::siginfo_t,
     ctx: *mut libc::c_void,
 ) {
+    unsafe { libc::write(2, b"weave: signal handler entered\n".as_ptr() as *const _, 30); }
     let uctx = ctx as *const libc::ucontext_t;
     let rip = unsafe { (*uctx).uc_mcontext.gregs[libc::REG_RIP as usize] as usize };
 
