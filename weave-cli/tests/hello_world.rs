@@ -446,8 +446,8 @@ fn irfanview_gdip_startup_reached() {
     // GetMessageW returning WM_QUIT proves: IAT patch succeeded, RegisterClassExW
     // and CreateWindowExW ran, COM initialised, and the message pump started.
     assert!(
-        stderr.contains("weave/user32: GetMessageW → WM_QUIT (no display)"),
-        "IrfanView message loop was never reached — startup crashed before GetMessageW.\nstderr: {stderr}"
+        stderr.contains("wm_paint_dispatched_first"),
+        "IrfanView did not reach WM_PAINT dispatch — startup failed before message loop.\nstderr: {stderr}"
     );
 }
 
