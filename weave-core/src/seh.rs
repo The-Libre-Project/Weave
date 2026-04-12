@@ -112,6 +112,27 @@ unsafe extern "C" fn on_fatal_signal(
             let uctx_mut = ctx as *mut libc::ucontext_t;
             if unsafe { crate::unwind::dispatch_hardware_exception(win_code, fault_addr, uctx_mut) }
             {
+                // Diagnostic: SEH handler caught the exception — log before resuming.
+                // Use only stack buffers + write() — no heap, no format!, async-signal-safe.
+                let rva = (rip - base) as u32;
+                let mut buf = [0u8; 80];
+                let mut pos = 0usize;
+                let nibble = |n: u64| if n < 10 { b'0' + n as u8 } else { b'a' + n as u8 - 10 };
+                macro_rules! push_bytes {
+                    ($s:expr) => { for &b in $s { if pos < buf.len() { buf[pos] = b; pos += 1; } } };
+                }
+                macro_rules! push_hex16 {
+                    ($v:expr) => { push_bytes!(b"0x"); for sh in (0..16u32).rev() { let n = ($v as u64 >> (sh*4)) & 0xf; if pos < buf.len() { buf[pos] = nibble(n); pos += 1; } } };
+                }
+                macro_rules! push_hex8 {
+                    ($v:expr) => { push_bytes!(b"0x"); for sh in (0..8u32).rev() { let n = ($v as u64 >> (sh*4)) & 0xf; if pos < buf.len() { buf[pos] = nibble(n); pos += 1; } } };
+                }
+                push_bytes!(b"weave: SEH dispatched rip=");
+                push_hex16!(rip);
+                push_bytes!(b" rva=");
+                push_hex8!(rva);
+                push_bytes!(b"\n");
+                unsafe { libc::write(2, buf.as_ptr() as *const libc::c_void, pos) };
                 return; // Handler found — resume at updated RIP
             }
         }
@@ -532,6 +553,24 @@ fn print_crash_report(
         }
         region
     };
+
+    // Write a minimal crash line BEFORE format! in case a secondary fault kills
+    // the heap allocation inside format!. Uses only stack + write() — async-signal-safe.
+    {
+        let mut buf = [0u8; 64];
+        let mut pos = 0usize;
+        let nibble = |n: u64| if n < 10 { b'0' + n as u8 } else { b'a' + n as u8 - 10 };
+        macro_rules! push_b {
+            ($s:expr) => { for &b in $s { if pos < buf.len() { buf[pos] = b; pos += 1; } } };
+        }
+        macro_rules! push_hex16 {
+            ($v:expr) => { push_b!(b"0x"); for sh in (0..16u32).rev() { let n = ($v as u64 >> (sh*4)) & 0xf; if pos < buf.len() { buf[pos] = nibble(n); pos += 1; } } };
+        }
+        push_b!(b"weave: CRASH in PE rip=");
+        push_hex16!(rip);
+        push_b!(b"\n");
+        unsafe { libc::write(2, buf.as_ptr() as *const libc::c_void, pos) };
+    }
 
     let cfg_count = crate::cfg::cfg_dispatch_count();
     let msg = format!(
