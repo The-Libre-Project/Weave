@@ -2065,6 +2065,15 @@ pub unsafe extern "win64" fn create_file_w(
         }
     }
 
+    // Log file-open progress every 100 calls — lets CI log show when bulk
+    // .properties loading ends even when individual opens are not visible.
+    static FILE_OPEN_TOTAL: std::sync::atomic::AtomicU32 =
+        std::sync::atomic::AtomicU32::new(0);
+    let fot = FILE_OPEN_TOTAL.fetch_add(1, Ordering::Relaxed) + 1;
+    if fot % 100 == 0 {
+        eprintln!("DIAG: file_opens_n={fot} path={win_path:?}");
+    }
+
     eprintln!("weave/CreateFileW: path={win_path:?}");
 
     let nt_disposition = file_io::win32_disposition_to_nt(dw_creation_disposition);

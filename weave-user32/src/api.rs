@@ -502,6 +502,15 @@ pub unsafe extern "win64" fn peek_message_w(
     _msg_filter_max: u32,
     w_remove_msg: u32, // PM_NOREMOVE (0) or PM_REMOVE (1)
 ) -> i32 {
+    // Shared phase flag with GetMessageW — fires once on whichever is called first.
+    if !PHASE_GET_MESSAGE.swap(true, Ordering::Relaxed) {
+        mark_phase("get_message_first");
+    }
+    static PEEK_ENTRY: AtomicU32 = AtomicU32::new(0);
+    let pn = PEEK_ENTRY.fetch_add(1, Ordering::Relaxed);
+    if pn < 5 {
+        eprintln!("weave/PeekMessageW: entry #{pn}");
+    }
     if lp_msg.is_null() {
         return 0;
     }
@@ -874,6 +883,32 @@ pub extern "win64" fn send_message_w(
         eprintln!("weave/user32: SendMessageW hwnd={hwnd:#x} xcb={xcb:#x} msg={msg} → {ret:#x}");
     }
     ret
+}
+
+/// SendMessageTimeoutW: send a message to a window with a timeout.
+///
+// Wine ref: dlls/user32/message.c::SendMessageTimeoutW — calls NtUserMessageCall with
+// NtUserSendMessageTimeout; stores message result in *res_ptr; returns params.result
+// (non-zero = success, 0 = timeout or error). For single-process in-process WndProc
+// calls the timeout never fires — dispatch is synchronous. Weave calls send_message_w
+// directly and always succeeds.
+///
+/// # Safety
+/// `lpdw_result` may be null; if non-null must be a valid writable `usize`-sized location.
+pub unsafe extern "win64" fn send_message_timeout_w(
+    h_wnd: usize,
+    msg: u32,
+    w_param: usize,
+    l_param: isize,
+    _fu_flags: u32,
+    _u_timeout: u32,
+    lpdw_result: *mut usize,
+) -> isize {
+    let result = send_message_w(h_wnd, msg, w_param, l_param);
+    if !lpdw_result.is_null() {
+        *lpdw_result = result as usize;
+    }
+    1 // non-zero = success (no timeout)
 }
 
 // ── DefWindowProcW ────────────────────────────────────────────────────────────
