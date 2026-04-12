@@ -1,0 +1,2 @@
+Hello from SciTE gate test
+Line two of the test file
