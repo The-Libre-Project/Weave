@@ -891,19 +891,11 @@ pub extern "win64" fn send_message_w(
             return 0;
         }
     };
-    const WM_NOTIFY: u32 = 0x004E;
-    let log_scintilla = (2000..=3000).contains(&msg);
-    if log_scintilla {
-        let xcb = window::xcb_id(hwnd);
-        eprintln!(
-            "weave/user32: SendMessageW Scintilla entry hwnd={hwnd:#x} xcb={xcb:#x} msg={msg} wparam={w_param:#x} lparam={l_param:#x}"
-        );
-    }
     let ret = call_wnd_proc(proc_addr, hwnd, msg, w_param, l_param);
-    if log_scintilla || (0x0400..2000).contains(&msg) || msg == WM_NOTIFY {
-        let xcb = window::xcb_id(hwnd);
-        eprintln!("weave/user32: SendMessageW hwnd={hwnd:#x} xcb={xcb:#x} msg={msg} → {ret:#x}");
-    }
+    // Log all SendMessageW calls to expose gaps in call sequence (e.g. toolbar/status-bar init).
+    eprintln!(
+        "weave/user32: SendMessageW hwnd={hwnd:#x} msg={msg:#06x} wparam={w_param:#x} → {ret:#x}"
+    );
     ret
 }
 
