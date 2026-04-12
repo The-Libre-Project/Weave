@@ -2057,13 +2057,26 @@ pub unsafe extern "win64" fn create_file_w(
 
     let nt_disposition = file_io::win32_disposition_to_nt(dw_creation_disposition);
 
+    // Wine ref: dlls/kernelbase/file.c:795 — CreateFileW maps NtCreateFile status
+    // to LastError via RtlNtStatusToDosError with two special cases:
+    // STATUS_OBJECT_NAME_COLLISION → ERROR_FILE_EXISTS (not ERROR_ALREADY_EXISTS),
+    // trailing-slash + STATUS_FILE_IS_A_DIRECTORY → ERROR_PATH_NOT_FOUND.
+    // On success, CREATE_ALWAYS+FILE_OVERWRITTEN or OPEN_ALWAYS+FILE_OPENED sets
+    // ERROR_ALREADY_EXISTS; Weave does not track io.Information yet, so it just
+    // clears LastError on success.
     let result = match file_io::open_file(&win_path, dw_desired_access, nt_disposition) {
         Ok(handle) => {
             set_last_error(0);
             handle
         }
-        Err(_status) => {
-            set_last_error(file_io::ERROR_FILE_NOT_FOUND);
+        Err(status) => {
+            let win_err = match status {
+                s if s == file_io::STATUS_OBJECT_NAME_NOT_FOUND => file_io::ERROR_FILE_NOT_FOUND,
+                s if s == file_io::STATUS_OBJECT_NAME_COLLISION => file_io::ERROR_FILE_EXISTS,
+                s if s == file_io::STATUS_ACCESS_DENIED => file_io::ERROR_ACCESS_DENIED,
+                _ => file_io::ERROR_FILE_NOT_FOUND,
+            };
+            set_last_error(win_err);
             usize::MAX // INVALID_HANDLE_VALUE
         }
     };
@@ -9791,8 +9804,8 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         }
         "GetLocalTime" => Some(get_local_time as unsafe extern "win64" fn(_) as *const () as usize),
         "SystemTimeToTzSpecificLocalTime" => Some(
-            system_time_to_tz_specific_local_time
-                as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
+            system_time_to_tz_specific_local_time as unsafe extern "win64" fn(_, _, _) -> _
+                as *const () as usize,
         ),
         // Environment functions
         "GetEnvironmentVariableA" => Some(

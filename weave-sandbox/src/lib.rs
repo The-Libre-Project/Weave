@@ -89,13 +89,28 @@ fn apply_landlock(allowed_read_paths: &[&std::path::Path]) -> SandboxStatus {
         }
     };
 
-    // Add read-only allow rules for each permitted path (files + subdirs).
+    // Add read+write allow rules for each permitted path (files + subdirs).
     // try_fold so a single-path failure aborts rather than leaving a silent gap.
+    //
+    // Windows apps routinely write config next to the exe (Notepad++ langs.xml,
+    // stylers.xml, config.xml, session.xml). Read-only denies those CreateFileW
+    // calls with ACCESS_DENIED and breaks first-run initialisation. We grant the
+    // full set of file + dir mutation rights on the PE's parent directory only —
+    // nothing else in the filesystem is reachable.
+    // ABI V1 access set — Truncate is V3+ and would be filtered out here.
+    // Under V1, O_TRUNC is authorised by WriteFile alone.
+    let rw_access = AccessFs::ReadFile
+        | AccessFs::ReadDir
+        | AccessFs::WriteFile
+        | AccessFs::MakeReg
+        | AccessFs::MakeDir
+        | AccessFs::RemoveFile
+        | AccessFs::RemoveDir;
     let ruleset = allowed_read_paths.iter().try_fold(
         ruleset,
         |r, path| -> Result<_, Box<dyn std::error::Error>> {
             let fd = PathFd::new(path)?;
-            Ok(r.add_rule(PathBeneath::new(fd, AccessFs::ReadFile | AccessFs::ReadDir))?)
+            Ok(r.add_rule(PathBeneath::new(fd, rw_access))?)
         },
     );
 

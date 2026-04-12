@@ -830,9 +830,7 @@ pub extern "win64" fn send_message_w(
         Some(p) => p,
         None => {
             if (2000..=3000).contains(&msg) {
-                eprintln!(
-                    "weave/user32: SendMessageW hwnd={hwnd:#x} msg={msg} → 0 (no wndproc)"
-                );
+                eprintln!("weave/user32: SendMessageW hwnd={hwnd:#x} msg={msg} → 0 (no wndproc)");
             }
             return 0;
         }

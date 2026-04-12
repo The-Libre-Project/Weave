@@ -57,10 +57,19 @@ pub const STATUS_ACCESS_DENIED: i32 = 0xC0000022_u32 as i32;
 pub const STATUS_UNSUCCESSFUL: i32 = 0xC0000001_u32 as i32;
 
 /// Convert a Win32 `dwCreationDisposition` value to its NT equivalent.
+///
+/// Wine ref: dlls/kernelbase/file.c:795 — CreateFileW uses the table
+/// { CREATE_NEW→FILE_CREATE, CREATE_ALWAYS→FILE_OVERWRITE_IF,
+///   OPEN_EXISTING→FILE_OPEN, OPEN_ALWAYS→FILE_OPEN_IF,
+///   TRUNCATE_EXISTING→FILE_OVERWRITE }. CREATE_ALWAYS is FILE_OVERWRITE_IF
+/// (not FILE_SUPERSEDE) — the practical oflag mapping is identical
+/// (O_CREAT|O_TRUNC) but the NT disposition must match for io.Information
+/// to return FILE_OVERWRITTEN, which is what Wine uses to set
+/// ERROR_ALREADY_EXISTS on CREATE_ALWAYS success.
 pub fn win32_disposition_to_nt(win32: u32) -> u32 {
     match win32 {
         CREATE_NEW => FILE_CREATE,
-        CREATE_ALWAYS => FILE_SUPERSEDE,
+        CREATE_ALWAYS => FILE_OVERWRITE_IF,
         OPEN_EXISTING => FILE_OPEN,
         OPEN_ALWAYS => FILE_OPEN_IF,
         TRUNCATE_EXISTING => FILE_OVERWRITE,
