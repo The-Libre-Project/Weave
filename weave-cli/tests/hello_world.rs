@@ -510,12 +510,15 @@ fn scite_portable_mode() {
         .unwrap_or_else(|e| panic!("failed to spawn weave on SciTE.exe: {e}"));
 
     let deadline = start + std::time::Duration::from_secs(15);
+    let mut exit_status: Option<std::process::ExitStatus> = None;
+    let mut killed_by_deadline = false;
     loop {
         match child.try_wait() {
-            Ok(Some(_)) => break,
+            Ok(Some(status)) => { exit_status = Some(status); break; }
             Ok(None) => {
                 if std::time::Instant::now() >= deadline {
                     let _ = child.kill();
+                    killed_by_deadline = true;
                     break;
                 }
                 std::thread::sleep(std::time::Duration::from_millis(100));
@@ -524,6 +527,36 @@ fn scite_portable_mode() {
         }
     }
     let elapsed = start.elapsed();
+
+    #[cfg(unix)]
+    let exit_summary = {
+        use std::os::unix::process::ExitStatusExt;
+        if killed_by_deadline {
+            "killed by test deadline".to_string()
+        } else if let Some(ref s) = exit_status {
+            if let Some(sig) = s.signal() {
+                format!("killed by signal {sig}")
+            } else if let Some(code) = s.code() {
+                format!("exited with code {code}")
+            } else {
+                "unknown exit status".to_string()
+            }
+        } else {
+            "no exit status captured".to_string()
+        }
+    };
+    #[cfg(not(unix))]
+    let exit_summary = if killed_by_deadline {
+        "killed by test deadline".to_string()
+    } else if let Some(ref s) = exit_status {
+        if let Some(code) = s.code() {
+            format!("exited with code {code}")
+        } else {
+            "unknown exit status".to_string()
+        }
+    } else {
+        "no exit status captured".to_string()
+    };
 
     let stderr_bytes = {
         use std::io::Read;
@@ -540,7 +573,7 @@ fn scite_portable_mode() {
     assert!(
         stderr.contains("weave: imports resolved"),
         "import resolution did not complete — possible crash during IAT patch \
-         (check Lua re-export EXE edge case).\nstderr: {stderr}"
+         (check Lua re-export EXE edge case).\nexit: {exit_summary}\nstderr: {stderr}"
     );
 
     // Gate 2: Process ran ≥ 8 seconds OR SCI_GETLENGTH was dispatched —
@@ -549,7 +582,7 @@ fn scite_portable_mode() {
         elapsed >= std::time::Duration::from_secs(8)
             || stderr.contains("PHASE: sci_getlength_probed"),
         "SciTE ran for only {elapsed:.1?} without dispatching SCI_GETLENGTH — \
-         likely crashed before reaching the editor loop.\nstderr: {stderr}"
+         likely crashed before reaching the editor loop.\nexit: {exit_summary}\nstderr: {stderr}"
     );
 
     // Gate 5 semantic: SCI_GETLENGTH (msg=2006) must have been dispatched via
@@ -558,7 +591,7 @@ fn scite_portable_mode() {
         stderr.contains("PHASE: sci_getlength_probed"),
         "PHASE: sci_getlength_probed was never emitted — SCI_GETLENGTH was not \
          dispatched, meaning Scintilla did not process the document.\n\
-         stderr: {stderr}"
+         exit: {exit_summary}\nstderr: {stderr}"
     );
 }
 
