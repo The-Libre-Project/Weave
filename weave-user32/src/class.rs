@@ -307,6 +307,9 @@ extern "win64" fn builtin_control_wnd_proc(
 ) -> usize {
     match msg {
         0x0081 => 1, // WM_NCCREATE → TRUE
+        // TB_ADDBUTTONSW (WM_USER+68) — Wine ref: dlls/comctl32/toolbar.c::TOOLBAR_InternalInsertButtonsT
+        // returns TRUE on success; SciTE checks this and bails if FALSE.
+        0x0444 => 1,
         _ => 0,
     }
 }
