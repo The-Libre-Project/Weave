@@ -686,6 +686,7 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         }
         // System metrics
         "GetSystemMetrics" => Some(get_system_metrics as *const () as usize),
+        "GetSystemMetricsForDpi" => Some(get_system_metrics_for_dpi as extern "win64" fn(_, _) -> _ as *const () as usize),
         // Cursor / icon
         "LoadCursorA" | "LoadCursorW" => {
             Some(load_cursor_w as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)

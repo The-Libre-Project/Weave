@@ -185,32 +185,60 @@ pub unsafe extern "win64" fn image_list_load_image_a(
 
 /// CreateStatusWindowW — create a status bar window (Wide).
 ///
-/// Returns NULL HWND. Apps degrade gracefully when no status bar is present.
+/// Wine ref: comctl32/status.c — CreateStatusWindowW is a thin wrapper around
+/// CreateWindowExW(0, STATUSCLASSNAME, lpszText, style, ...) where STATUSCLASSNAME
+/// is "msctls_statusbar32". SciTE checks `if (!statusBar_) return false` after
+/// this call, so returning NULL causes an immediate clean exit before GetMessageW.
 ///
 /// # Safety
-/// Arguments are ignored.
+/// lp_sz_text, if non-null, must be a valid null-terminated UTF-16 string.
+/// hwnd_parent must be a valid HWND or 0.
 pub unsafe extern "win64" fn create_status_window_w(
-    _style: i32,
-    _lp_sz_text: *const u16,
-    _hwnd_parent: usize,
-    _wid: u32,
+    style: i32,
+    lp_sz_text: *const u16,
+    hwnd_parent: usize,
+    wid: u32,
 ) -> usize {
-    0 // NULL HWND
+    // "msctls_statusbar32\0" as a wide string literal for the class name.
+    let class_name: Vec<u16> = "msctls_statusbar32\0".encode_utf16().collect();
+    let empty_title = [0u16; 1];
+    let title_ptr = if lp_sz_text.is_null() {
+        empty_title.as_ptr()
+    } else {
+        lp_sz_text
+    };
+    // WS_CHILD (0x4000_0000) must be set so user32 treats it as a child window.
+    let adjusted_style = (style as u32) | 0x4000_0000u32;
+    weave_user32::api::create_window_ex_w(
+        0,                   // dwExStyle
+        class_name.as_ptr(), // "msctls_statusbar32"
+        title_ptr,           // lpWindowName
+        adjusted_style,      // dwStyle | WS_CHILD
+        0,                   // x
+        0,                   // y
+        0,                   // nWidth (sized by parent on WM_SIZE)
+        20,                  // nHeight (typical status bar height)
+        hwnd_parent,         // hWndParent
+        wid as usize,        // hMenu (child window ID)
+        0,                   // hInstance
+        std::ptr::null_mut(), // lpParam
+    )
 }
 
 /// CreateStatusWindowA — create a status bar window (ANSI).
 ///
-/// Returns NULL HWND.
+/// Forwards to the wide variant; the initial text is not significant for
+/// Gate 5 (SciTE sets parts/text via SB_* messages after creation).
 ///
 /// # Safety
-/// Arguments are ignored.
+/// hwnd_parent must be a valid HWND or 0.
 pub unsafe extern "win64" fn create_status_window_a(
-    _style: i32,
+    style: i32,
     _lp_sz_text: *const u8,
-    _hwnd_parent: usize,
-    _wid: u32,
+    hwnd_parent: usize,
+    wid: u32,
 ) -> usize {
-    0 // NULL HWND
+    create_status_window_w(style, std::ptr::null(), hwnd_parent, wid)
 }
 
 /// DrawStatusTextW — draw status bar text into a DC (Wide). No-op.

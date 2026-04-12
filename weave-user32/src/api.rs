@@ -1251,6 +1251,15 @@ pub extern "win64" fn get_system_metrics(n_index: i32) -> i32 {
     }
 }
 
+/// GetSystemMetricsForDpi: DPI-aware variant of GetSystemMetrics.
+///
+/// Wine ref: dlls/win32u/sysparams.c — same as GetSystemMetrics but scales
+/// SM_CX*/SM_CY* values by (dpi / 96). Weave doesn't implement per-monitor
+/// DPI scaling, so we ignore dpi and delegate to GetSystemMetrics.
+pub extern "win64" fn get_system_metrics_for_dpi(n_index: i32, _dpi: u32) -> i32 {
+    get_system_metrics(n_index)
+}
+
 // ── Cursor / Icon stubs ───────────────────────────────────────────────────────
 
 /// LoadCursorW: load a cursor resource.
