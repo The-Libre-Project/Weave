@@ -4616,10 +4616,58 @@ fn load_library_impl(name: &str) -> usize {
         }
     }
 
-    // Fall back to synthetic handle (stubs handle GetProcAddress).
+    // Only return a synthetic handle for DLLs Weave actually emulates.
+    // For everything else (e.g. Scintilla.DLL statically embedded in SciTE),
+    // return NULL so callers can detect failure and fall back to their own
+    // implementations — a non-NULL handle with all-NULL GetProcAddress results
+    // causes null-pointer crashes during the caller's static init.
+    if !is_emulated_dll(&key) {
+        eprintln!("weave/kernel32: LoadLibrary({name:?}) → NULL (not emulated)");
+        return 0;
+    }
     let handle = module_handles::register(name);
     eprintln!("weave/kernel32: LoadLibrary({name:?}) → synthetic {handle:#x}");
     handle
+}
+
+/// Return true if `key` (lowercase DLL basename, e.g. `"kernel32.dll"`) is a
+/// DLL that Weave actually emulates via its stub resolver chain.  Only these
+/// DLLs should receive a synthetic HMODULE when they are not found on disk;
+/// all other DLLs must get NULL so callers can fall back gracefully.
+fn is_emulated_dll(key: &str) -> bool {
+    // API-set virtual DLLs — forwarded to kernel32/ucrt/version stubs.
+    if key.starts_with("api-ms-win-") {
+        return true;
+    }
+    matches!(
+        key,
+        "ntdll.dll"
+            | "kernel32.dll"
+            | "advapi32.dll"
+            | "user32.dll"
+            | "uxtheme.dll"
+            | "dwmapi.dll"
+            | "gdi32.dll"
+            | "msimg32.dll"
+            | "shell32.dll"
+            | "ole32.dll"
+            | "mmdevapi.dll"
+            | "xinput1_3.dll"
+            | "xinput1_4.dll"
+            | "xinput9_1_0.dll"
+            | "winmm.dll"
+            | "vulkan-1.dll"
+            | "ws2_32.dll"
+            | "wsock32.dll"
+            | "comctl32.dll"
+            | "oleaut32.dll"
+            | "imm32.dll"
+            | "shlwapi.dll"
+            | "gdiplus.dll"
+            | "version.dll"
+            | "ucrtbase.dll"
+            | "msvcrt.dll"
+    )
 }
 
 /// Read a null-terminated ANSI string from a raw pointer. Returns an empty
