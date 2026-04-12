@@ -137,6 +137,15 @@ pub fn setup(pe_bytes: &[u8], base: *mut u8) {
     // the process.  All XFG call sites then see consistent null semantics.
     nop_security_cookie_stores(pe_bytes, base, security_cookie_va);
 
+    // Also disable __security_check_cookie — the per-function epilog GS check
+    // that compares the on-stack cookie against __security_cookie and calls
+    // __report_gsfailure (→ __fastfail → int 29h → SIGSEGV on Linux).
+    //
+    // The Linux/Windows ABI mismatch at RSP-check time means the on-stack
+    // cookie slot does not reliably match __security_cookie, so every epilog
+    // check mispredicts as failure. Patch the function to a single RET.
+    disable_security_check_cookie(pe_bytes, base);
+
     // Patch _guard_check_icall_fptr and _guard_dispatch_icall_fptr to our stub.
     // Both slots are writable .data-like pages (in the .00cfg section which is r+w on Linux
     // after mprotect). We temporarily make them writable if needed.
@@ -475,6 +484,207 @@ fn disable_function_containing(pe_bytes: &[u8], base: *mut u8, target_rva: u32) 
          __security_init_cookie not fully disabled"
     );
     false
+}
+
+/// Return the .pdata BeginAddress (function-start RVA) of the runtime function
+/// that contains `target_rva`, or `None` if the RVA is not covered by any entry.
+fn function_start_rva(pe_bytes: &[u8], base: *mut u8, target_rva: u32) -> Option<u32> {
+    let base_usize = base as usize;
+    let pe_off = read_u32(pe_bytes, 0x3c)? as usize;
+    let opt_off = pe_off + 24;
+    let dd_off = opt_off + 112;
+    let pdata_rva = read_u32(pe_bytes, dd_off + 3 * 8)? as usize;
+    let pdata_sz = read_u32(pe_bytes, dd_off + 3 * 8 + 4)? as usize;
+    if pdata_rva == 0 || pdata_sz < 12 {
+        return None;
+    }
+    let count = pdata_sz / 12;
+    let pdata_base = base_usize + pdata_rva;
+    for i in 0..count {
+        let entry = pdata_base + i * 12;
+        let begin = unsafe { *(entry as *const u32) };
+        let end = unsafe { *((entry + 4) as *const u32) };
+        if target_rva >= begin && target_rva < end {
+            return Some(begin);
+        }
+    }
+    None
+}
+
+/// Locate `__security_check_cookie` (the per-function epilog GS check) and
+/// patch its first byte with `RET` (0xC3).
+///
+/// Strategy:
+///   1. Find `__report_gsfailure` by scanning executable sections for its
+///      canonical tail `B9 02 00 00 00 CD 29` — `mov ecx, 2; int 29h`
+///      (FAST_FAIL_STACK_COOKIE_CHECK_FAILURE → __fastfail). The containing
+///      runtime function is `__report_gsfailure`.
+///   2. Scan executable sections for a 5-byte near CALL (opcode 0xE8) whose
+///      target VA equals `__report_gsfailure`'s start. The runtime function
+///      containing that CALL is `__security_check_cookie`.
+///   3. Write `RET` at its start via a temporary mprotect to RW+X.
+fn disable_security_check_cookie(pe_bytes: &[u8], base: *mut u8) {
+    let base_usize = base as usize;
+
+    let pe_off = match read_u32(pe_bytes, 0x3c) {
+        Some(x) => x as usize,
+        None => return,
+    };
+    let num_sections = match read_u16(pe_bytes, pe_off + 6) {
+        Some(x) => x as usize,
+        None => return,
+    };
+    let sec_table_off = pe_off + 24 + 240;
+
+    // Step 1: locate __report_gsfailure via its __fastfail(2) tail sequence.
+    let mut report_gs_va: Option<usize> = None;
+    'outer: for i in 0..num_sections {
+        let s = sec_table_off + i * 40;
+        let characteristics = match read_u32(pe_bytes, s + 36) {
+            Some(x) => x,
+            None => continue,
+        };
+        if characteristics & 0x2000_0000 == 0 {
+            continue;
+        }
+        let sec_va = match read_u32(pe_bytes, s + 12) {
+            Some(x) => x as usize,
+            None => continue,
+        };
+        let sec_fsz = match read_u32(pe_bytes, s + 16) {
+            Some(x) => x as usize,
+            None => continue,
+        };
+        let sec_foff = match read_u32(pe_bytes, s + 20) {
+            Some(x) => x as usize,
+            None => continue,
+        };
+        if sec_foff >= pe_bytes.len() || sec_fsz == 0 {
+            continue;
+        }
+        let avail = pe_bytes.len() - sec_foff;
+        if avail < 7 {
+            continue;
+        }
+        let scan_len = sec_fsz.min(avail) - 7;
+        let sec_bytes = &pe_bytes[sec_foff..sec_foff + scan_len + 7];
+
+        for offset in 0..=scan_len {
+            if sec_bytes[offset] == 0xB9
+                && sec_bytes[offset + 1] == 0x02
+                && sec_bytes[offset + 2] == 0x00
+                && sec_bytes[offset + 3] == 0x00
+                && sec_bytes[offset + 4] == 0x00
+                && sec_bytes[offset + 5] == 0xCD
+                && sec_bytes[offset + 6] == 0x29
+            {
+                let instr_rva = (sec_va + offset) as u32;
+                if let Some(begin) = function_start_rva(pe_bytes, base, instr_rva) {
+                    report_gs_va = Some(base_usize + begin as usize);
+                    eprintln!(
+                        "weave: CFG: __report_gsfailure located at {:#x} (rva {:#x})",
+                        base_usize + begin as usize,
+                        begin
+                    );
+                    break 'outer;
+                }
+            }
+        }
+    }
+
+    let report_gs_va = match report_gs_va {
+        Some(v) => v,
+        None => {
+            eprintln!(
+                "weave: CFG: warning: __report_gsfailure not found — \
+                 __security_check_cookie will not be patched"
+            );
+            return;
+        }
+    };
+
+    // Step 2: scan for CALL rel32 (0xE8) whose target == __report_gsfailure.
+    // The containing runtime function is __security_check_cookie.
+    for i in 0..num_sections {
+        let s = sec_table_off + i * 40;
+        let characteristics = match read_u32(pe_bytes, s + 36) {
+            Some(x) => x,
+            None => continue,
+        };
+        if characteristics & 0x2000_0000 == 0 {
+            continue;
+        }
+        let sec_va = match read_u32(pe_bytes, s + 12) {
+            Some(x) => x as usize,
+            None => continue,
+        };
+        let sec_fsz = match read_u32(pe_bytes, s + 16) {
+            Some(x) => x as usize,
+            None => continue,
+        };
+        let sec_foff = match read_u32(pe_bytes, s + 20) {
+            Some(x) => x as usize,
+            None => continue,
+        };
+        if sec_foff >= pe_bytes.len() || sec_fsz == 0 {
+            continue;
+        }
+        let avail = pe_bytes.len() - sec_foff;
+        if avail < 5 {
+            continue;
+        }
+        let scan_len = sec_fsz.min(avail) - 5;
+        let sec_bytes = &pe_bytes[sec_foff..sec_foff + scan_len + 5];
+
+        for offset in 0..=scan_len {
+            if sec_bytes[offset] != 0xE8 {
+                continue;
+            }
+            let rel = i32::from_le_bytes([
+                sec_bytes[offset + 1],
+                sec_bytes[offset + 2],
+                sec_bytes[offset + 3],
+                sec_bytes[offset + 4],
+            ]);
+            let next_va = base_usize
+                .wrapping_add(sec_va)
+                .wrapping_add(offset)
+                .wrapping_add(5);
+            let target_va = next_va.wrapping_add_signed(rel as isize);
+            if target_va != report_gs_va {
+                continue;
+            }
+
+            let caller_rva = (sec_va + offset) as u32;
+            let begin = match function_start_rva(pe_bytes, base, caller_rva) {
+                Some(b) => b,
+                None => continue,
+            };
+
+            let func_va = base_usize + begin as usize;
+            let page_size = 4096usize;
+            let page_base = (func_va & !(page_size - 1)) as *mut libc::c_void;
+            unsafe {
+                libc::mprotect(
+                    page_base,
+                    page_size,
+                    libc::PROT_READ | libc::PROT_WRITE | libc::PROT_EXEC,
+                );
+                (func_va as *mut u8).write(0xC3); // RET
+                libc::mprotect(page_base, page_size, libc::PROT_READ | libc::PROT_EXEC);
+            }
+            eprintln!(
+                "weave: CFG: disabled __security_check_cookie at {func_va:#x} \
+                 (rva {begin:#x}) with RET"
+            );
+            return;
+        }
+    }
+
+    eprintln!(
+        "weave: CFG: warning: no CALL __report_gsfailure found — \
+         __security_check_cookie not patched"
+    );
 }
 
 /// Scan the .00cfg section of the loaded PE image and patch every non-zero
