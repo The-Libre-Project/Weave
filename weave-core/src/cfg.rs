@@ -197,7 +197,7 @@ pub fn setup(pe_bytes: &[u8], base: *mut u8) {
     //
     // Fix: scan executable sections for the `CMP [BSS_addr], r64; JZ/JNZ`
     // pattern and write DEFAULT_COOKIE into each matching BSS location.
-    init_xfg_lazy_slots(pe_bytes, base);
+    init_xfg_lazy_slots(pe_bytes, base, security_cookie_va);
 }
 
 // ── Load Config parser ─────────────────────────────────────────────────────────
@@ -757,7 +757,7 @@ fn patch_cfg_section_slots(pe_bytes: &[u8], base: *mut u8, stub_addr: usize) {
 /// This function detects the pattern and writes `DEFAULT_COOKIE` into every
 /// matching BSS slot, restoring the invariant the Windows loader normally
 /// provides.
-fn init_xfg_lazy_slots(pe_bytes: &[u8], base: *mut u8) {
+fn init_xfg_lazy_slots(pe_bytes: &[u8], base: *mut u8, security_cookie_va: usize) {
     let base_usize = base as usize;
 
     let pe_off = match read_u32(pe_bytes, 0x3c) {
@@ -859,7 +859,8 @@ fn init_xfg_lazy_slots(pe_bytes: &[u8], base: *mut u8) {
                 continue;
             }
             // Byte 2: ModRM — mod=00, rm=101 means [RIP+disp32]
-            if sec_bytes[offset + 2] & 0xC7 != 0x05 {
+            let modrm = sec_bytes[offset + 2];
+            if modrm & 0xC7 != 0x05 {
                 continue;
             }
             // Bytes 3–6: 32-bit signed displacement
@@ -888,20 +889,35 @@ fn init_xfg_lazy_slots(pe_bytes: &[u8], base: *mut u8) {
                 continue;
             }
 
-            // False-positive filter: if there is a `MOV [same_EA], r64` within the
-            // 64 bytes immediately before this CMP, the pattern is not XFG lazy-init
-            // but rather an ordinary "write then check" sequence (e.g. storing an
-            // allocation result and then comparing it).  In genuine XFG lazy-init
-            // the CMP always precedes the write.
-            let check_start = offset.saturating_sub(64);
-            let has_preceding_write = (check_start..offset).any(|prev| {
+            // Require the source register of this CMP to have been loaded from
+            // __security_cookie within the last 32 bytes.  The canonical XFG
+            // lazy-init pattern is:
+            //     MOV  reg, [rip+__security_cookie]     (48+R 8B /reg [rip+d32])
+            //     CMP  [rip+xfg_slot], reg              (48+R 39 /reg [rip+d32])
+            //     JZ/JNZ …
+            // without that preceding cookie load, the CMP is almost always a
+            // null check of a CRT BSS global (e.g. _wenviron) that compares
+            // against a just-zeroed register — priming such a slot with the
+            // cookie value breaks the subsequent CRT init path.
+            //
+            // Extract the source register index from the CMP's ModRM.reg field
+            // (bits 3-5) combined with REX.R (bit 2 of REX prefix).
+            let cmp_reg = ((modrm >> 3) & 0x07) | (((b0 >> 2) & 0x01) << 3);
+
+            let check_start = offset.saturating_sub(32);
+            let has_cookie_load = (check_start..offset).any(|prev| {
+                if prev + 7 > sec_bytes.len() {
+                    return false;
+                }
                 let pb0 = sec_bytes[prev];
                 let pb1 = sec_bytes[prev + 1];
                 let pb2 = sec_bytes[prev + 2];
-                if !(0x48..=0x4F).contains(&pb0) || pb1 != 0x89 || pb2 & 0xC7 != 0x05 {
+                // MOV r64, [rip+disp32]:  REX.W (0x48–0x4F) + 0x8B + ModRM
+                if !(0x48..=0x4F).contains(&pb0) || pb1 != 0x8B || pb2 & 0xC7 != 0x05 {
                     return false;
                 }
-                if prev + 7 > sec_bytes.len() {
+                let load_reg = ((pb2 >> 3) & 0x07) | (((pb0 >> 2) & 0x01) << 3);
+                if load_reg != cmp_reg {
                     return false;
                 }
                 let d2 = i32::from_le_bytes([
@@ -910,14 +926,14 @@ fn init_xfg_lazy_slots(pe_bytes: &[u8], base: *mut u8) {
                     sec_bytes[prev + 5],
                     sec_bytes[prev + 6],
                 ]);
-                let ea2 = sec_va
+                let next_va = base_usize
+                    .wrapping_add(sec_va)
                     .wrapping_add(prev)
-                    .wrapping_add(7)
-                    .wrapping_add_signed(d2 as isize)
-                    & 0xFFFF_FFFF;
-                ea2 == ea_rva
+                    .wrapping_add(7);
+                let ea2 = next_va.wrapping_add_signed(d2 as isize);
+                ea2 == security_cookie_va
             });
-            if has_preceding_write {
+            if !has_cookie_load {
                 continue;
             }
 
