@@ -1374,6 +1374,7 @@ mod x64 {
         establisher_frame: *mut u64,
         _context_pointers: *mut u8,
     ) -> usize {
+        eprintln!("weave/unwind: RtlVirtualUnwind ip=0x{control_pc:x} base=0x{image_base:x} type={handler_type}");
         let _ = handler_type;
         // SAFETY: `context_record` is non-null per caller's safety contract (exported as
         // RtlVirtualUnwind; callers are PE-compiled CRT or user code). The Context must

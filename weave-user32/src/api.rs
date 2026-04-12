@@ -3402,7 +3402,9 @@ pub unsafe extern "win64" fn register_window_message_w(lp_string: *const u16) ->
         h = h.wrapping_mul(31).wrapping_add(ch as u32);
         p = unsafe { p.add(1) };
     }
-    0xC000 | (h & 0x3FFF)
+    let result = 0xC000 | (h & 0x3FFF);
+    eprintln!("weave/user32: RegisterWindowMessageW → 0x{result:x}");
+    result
 }
 
 /// SystemParametersInfoA: stub — returns FALSE (operation not supported).

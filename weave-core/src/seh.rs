@@ -54,6 +54,7 @@ pub fn install(image: &LoadedImage) {
         install_one(libc::SIGFPE);
         install_one(libc::SIGILL);
         install_one(libc::SIGBUS);
+        install_one(libc::SIGABRT);
         eprintln!("weave: exception handlers installed");
     }
 }
@@ -193,6 +194,7 @@ fn print_weave_crash(
         libc::SIGFPE => b"SIGFPE",
         libc::SIGILL => b"SIGILL",
         libc::SIGBUS => b"SIGBUS",
+        libc::SIGABRT => b"SIGABRT",
         _ => b"SIG???",
     };
 
