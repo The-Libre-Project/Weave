@@ -3042,6 +3042,33 @@ pub unsafe extern "win64" fn file_time_to_system_time(
     1 // TRUE
 }
 
+/// SystemTimeToTzSpecificLocalTime: convert a UTC SYSTEMTIME to local-time using
+/// the supplied TIME_ZONE_INFORMATION (or the system default when `info` is NULL).
+///
+/// Minimal impl: copy `system` into `local` unchanged (bias=0 equivalent) and return
+/// TRUE. NPP calls this only during config-file timestamp comparison in `langs.xml`
+/// loading; exact accuracy isn't required, but a non-zero return is.
+///
+/// # Safety
+/// `lp_system` and `lp_local` must be valid pointers to SYSTEMTIME structs
+/// (16 bytes). `lp_info` may be null.
+// Wine ref: dlls/kernelbase/locale.c:7281 — calls SystemTimeToFileTime, applies
+// info->Bias (+ StandardBias/DaylightBias depending on get_timezone_id) as a
+// LONGLONG offset of 600_000_000 (minutes → 100ns units), then FileTimeToSystemTime.
+// Returns FALSE on invalid SYSTEMTIME. Falls back to RtlQueryTimeZoneInformation
+// when info is NULL.
+pub unsafe extern "win64" fn system_time_to_tz_specific_local_time(
+    _lp_info: *const u8,
+    lp_system: *const SystemTime,
+    lp_local: *mut SystemTime,
+) -> i32 {
+    if lp_system.is_null() || lp_local.is_null() {
+        return 0;
+    }
+    unsafe { std::ptr::write(lp_local, std::ptr::read(lp_system)) };
+    1 // TRUE
+}
+
 // ── Console misc + MoveFileEx ────────────────────────────────────────────────
 
 /// AllocConsole: allocate a console for the process.
@@ -9763,6 +9790,10 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
             Some(get_system_time as unsafe extern "win64" fn(_) as *const () as usize)
         }
         "GetLocalTime" => Some(get_local_time as unsafe extern "win64" fn(_) as *const () as usize),
+        "SystemTimeToTzSpecificLocalTime" => Some(
+            system_time_to_tz_specific_local_time
+                as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
+        ),
         // Environment functions
         "GetEnvironmentVariableA" => Some(
             get_environment_variable_a as unsafe extern "win64" fn(_, _, _) -> _ as *const ()
