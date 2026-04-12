@@ -451,6 +451,117 @@ fn irfanview_gdip_startup_reached() {
     );
 }
 
+/// `weave SciTE.exe test.txt` — SciTE 5.6.1 source code editor; Gate 5 semantic gate.
+///
+/// SciTE (SCIntilla based Text Editor) is a Win32 GUI editor that embeds
+/// Scintilla statically — Scintilla.dll does not appear in the import table.
+/// SCI_GETLENGTH (message 2006) is dispatched via SendMessageW to the Scintilla
+/// control when the editor loads a document; intercepting it proves the editor
+/// loop is running and a document was inserted into the Scintilla buffer.
+///
+/// Surface audit: 2026-04-12, SciTE 5.6.1 (x64 PE).
+/// - All 8 phase-ladder events are reachable from a cold start with a file arg.
+/// - PHASE: sci_getlength_probed appears in Weave stderr when SCI_GETLENGTH fires.
+///
+/// Known risk: SciTE.exe re-exports 146 lua_*/luaL_* symbols from its own EXE
+/// section — EXE-as-pseudo-DLL edge case that may trigger Weave loader issues
+/// on export table resolution. If the loader crashes early, imports resolved
+/// will be absent and the test will fail on Gate 1 with a clear message.
+///
+/// Gate 5 semantic: sci_getlength_probed in stderr proves SCI_GETLENGTH was
+/// dispatched, i.e. the Scintilla editor loaded the document and the editor
+/// loop is processing Win32 messages.
+///
+/// Fixture: tests/fixtures/scite/SciTE.exe + tests/fixtures/scite/test.txt
+/// The test is skipped gracefully if either file is absent (CI still passes).
+/// Timeout: 15 s cap (kill); asserts alive for ≥ 8 s OR sci_getlength_probed.
+#[test]
+fn scite_portable_mode() {
+    if !cfg!(target_os = "linux") {
+        eprintln!("skipping execution test — requires Linux");
+        return;
+    }
+
+    let manifest = env!("CARGO_MANIFEST_DIR");
+    let scite_dir = format!("{manifest}/../tests/fixtures/scite");
+    let scite_exe = format!("{scite_dir}/SciTE.exe");
+    let test_txt = format!("{scite_dir}/test.txt");
+
+    if !std::path::Path::new(&scite_exe).exists() {
+        eprintln!("skipping: SciTE.exe not present in tests/fixtures/scite/");
+        eprintln!("  → copy SciTE 5.6.1 portable exe there to enable this test");
+        return;
+    }
+
+    if !std::path::Path::new(&test_txt).exists() {
+        eprintln!("skipping: test.txt not present in tests/fixtures/scite/");
+        eprintln!("  → create tests/fixtures/scite/test.txt with content to enable this test");
+        return;
+    }
+
+    let weave_bin = env!("CARGO_BIN_EXE_weave");
+    let start = std::time::Instant::now();
+    let mut child = std::process::Command::new(weave_bin)
+        .current_dir(&scite_dir)
+        .arg(&scite_exe)
+        .arg(&test_txt)
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|e| panic!("failed to spawn weave on SciTE.exe: {e}"));
+
+    let deadline = start + std::time::Duration::from_secs(15);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err(e) => panic!("wait failed: {e}"),
+        }
+    }
+    let elapsed = start.elapsed();
+
+    let stderr_bytes = {
+        use std::io::Read;
+        let mut buf = Vec::new();
+        if let Some(mut pipe) = child.stderr.take() {
+            let _ = pipe.read_to_end(&mut buf);
+        }
+        buf
+    };
+    let stderr = String::from_utf8_lossy(&stderr_bytes);
+    eprintln!("scite stderr ({elapsed:.1?}):\n{stderr}");
+
+    // Gate 1: IAT patch must complete before the entry point runs.
+    assert!(
+        stderr.contains("weave: imports resolved"),
+        "import resolution did not complete — possible crash during IAT patch \
+         (check Lua re-export EXE edge case).\nstderr: {stderr}"
+    );
+
+    // Gate 2: Process ran ≥ 8 seconds OR SCI_GETLENGTH was dispatched —
+    // either condition proves SciTE reached the editor message loop.
+    assert!(
+        elapsed >= std::time::Duration::from_secs(8)
+            || stderr.contains("PHASE: sci_getlength_probed"),
+        "SciTE ran for only {elapsed:.1?} without dispatching SCI_GETLENGTH — \
+         likely crashed before reaching the editor loop.\nstderr: {stderr}"
+    );
+
+    // Gate 5 semantic: SCI_GETLENGTH (msg=2006) must have been dispatched via
+    // SendMessageW, proving the Scintilla buffer was loaded with document content.
+    assert!(
+        stderr.contains("PHASE: sci_getlength_probed"),
+        "PHASE: sci_getlength_probed was never emitted — SCI_GETLENGTH was not \
+         dispatched, meaning Scintilla did not process the document.\n\
+         stderr: {stderr}"
+    );
+}
+
 /// `weave hello.exe` — CRT-linked MinGW binary, 41 imports across 8 DLLs.
 #[test]
 fn hello_crt_prints_hello_world() {
