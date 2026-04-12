@@ -9,7 +9,7 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Mutex;
 
 /// Tracks the most recently freed heap address so consecutive double-frees
@@ -22,6 +22,7 @@ static LAST_HEAP_FREE: AtomicUsize = AtomicUsize::new(0);
 use std::sync::Arc;
 use weave_common::stub::warn_once;
 use weave_common::{STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE};
+use weave_core::progress::mark_phase;
 use weave_core::{file_io, handles};
 
 // ── File mapping table ────────────────────────────────────────────────────────
@@ -2052,6 +2053,17 @@ pub unsafe extern "win64" fn create_file_w(
         let slice = std::slice::from_raw_parts(lp_file_name, len);
         String::from_utf16_lossy(slice).to_owned()
     };
+
+    // Phase 7 — fire once on the first user-supplied path (not a device/extended path).
+    static PHASE_CREATE_FILE: AtomicBool = AtomicBool::new(false);
+    if !PHASE_CREATE_FILE.swap(true, Ordering::Relaxed) {
+        if !win_path.starts_with("\\\\.\\") && !win_path.starts_with("\\\\?\\") {
+            mark_phase("create_file_user_arg");
+        } else {
+            // Not a user path yet — reset so the guard fires again next call.
+            PHASE_CREATE_FILE.store(false, Ordering::Relaxed);
+        }
+    }
 
     eprintln!("weave/CreateFileW: path={win_path:?}");
 
