@@ -61,6 +61,25 @@ fn resolve(dll: &str, func: &str) -> Option<usize> {
 }
 
 fn main() {
+    // ── −2. Panic hook — must be first, before any PE is loaded ──────────
+    // Catches Rust panics inside Weave stubs (e.g. todo!(), unimplemented!()).
+    // These call OS exit directly — no SIGSEGV, no SEH — so without this hook
+    // they are invisible. Output goes to stderr before the process dies.
+    std::panic::set_hook(Box::new(|info| {
+        let location = info
+            .location()
+            .map(|l| format!("{}:{}", l.file(), l.line()))
+            .unwrap_or_else(|| "<unknown>".to_string());
+        let message = if let Some(s) = info.payload().downcast_ref::<&str>() {
+            *s
+        } else if let Some(s) = info.payload().downcast_ref::<String>() {
+            s.as_str()
+        } else {
+            "<non-string payload>"
+        };
+        eprintln!("weave: RUST PANIC — {location}: {message}");
+    }));
+
     let args = Args::parse();
 
     // ── −1. Architecture compatibility ────────────────────────────────────
