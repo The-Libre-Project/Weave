@@ -109,13 +109,34 @@ pub fn load_dll(bytes: &[u8]) -> Result<(LoadedImage, HashMap<String, usize>), S
         .optional_header
         .ok_or("no optional header — not a valid DLL")?;
 
-    let (base, actual_base) = map_sections(bytes, &pe, &opt)?;
+    let (base, _actual_base) = map_sections(bytes, &pe, &opt)?;
+    // Derive loaded base from the mapped pointer — this is the single source of
+    // truth for where the image lives.  Using a separate `actual_base` usize
+    // from map_sections is redundant and has historically caused base-address
+    // confusion when the preferred base coincided with another loaded image.
+    let dll_loaded_base = base as usize;
+    let preferred_base = opt.windows_fields.image_base as usize;
 
     let mut exports: HashMap<String, usize> = HashMap::new();
     for exp in &pe.exports {
         if let Some(name) = exp.name {
-            // exp.rva is relative to image base; actual_base is where we loaded.
-            exports.insert(name.to_string(), actual_base + exp.rva);
+            // exp.rva is the raw RVA from the Export Address Table — a 32-bit
+            // byte offset from image base 0, regardless of where the image
+            // actually loaded.  Absolute address = dll_loaded_base + rva.
+            //
+            // Defensive: some DLLs (particularly debug builds or unusual
+            // linkers) store preferred-base VAs rather than RVAs in the EAT.
+            // If exp.rva >= preferred_base it cannot be a true RVA (no PE
+            // image is that large), so strip the preferred base first.
+            // Wine ref: dlls/ntdll/loader.c — export RVAs are always relative
+            // to the module base; IMAGE_EXPORT_DIRECTORY.AddressOfFunctions
+            // entries are u32 RVAs, never absolute VAs in conforming PEs.
+            let rva = if exp.rva >= preferred_base {
+                exp.rva - preferred_base
+            } else {
+                exp.rva
+            };
+            exports.insert(name.to_string(), dll_loaded_base + rva);
         }
     }
 

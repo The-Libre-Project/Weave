@@ -4677,7 +4677,17 @@ fn load_library_impl(name: &str) -> usize {
     // return NULL so callers can detect failure and fall back to their own
     // implementations — a non-NULL handle with all-NULL GetProcAddress results
     // causes null-pointer crashes during the caller's static init.
-    if !is_emulated_dll(&key) {
+    //
+    // Normalize: bare names like "kernel32" (no extension) must also match.
+    // Windows allows LoadLibrary("kernel32") without ".dll" — the loader
+    // appends the default extension.  Our key is already lowercase, so just
+    // ensure it ends with ".dll" before the emulated-set check.
+    let emulated_key: std::borrow::Cow<str> = if key.contains('.') {
+        std::borrow::Cow::Borrowed(&key)
+    } else {
+        std::borrow::Cow::Owned(format!("{key}.dll"))
+    };
+    if !is_emulated_dll(&emulated_key) {
         eprintln!("weave/kernel32: LoadLibrary({name:?}) → NULL (not emulated)");
         return 0;
     }
