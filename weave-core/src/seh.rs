@@ -446,6 +446,26 @@ fn print_crash_report(
     func_range: Option<(u32, u32)>,
     uctx: *const libc::ucontext_t,
 ) {
+    // Emit a minimal crash line FIRST — before any unsafe reads or heap
+    // allocations — so we always get at least one line of output even if
+    // a secondary fault kills the process mid-way through this function.
+    // Uses only stack + write(2) — fully async-signal-safe.
+    {
+        let mut buf = [0u8; 64];
+        let mut pos = 0usize;
+        let nibble = |n: u64| if n < 10 { b'0' + n as u8 } else { b'a' + n as u8 - 10 };
+        macro_rules! push_b {
+            ($s:expr) => { for &b in $s { if pos < buf.len() { buf[pos] = b; pos += 1; } } };
+        }
+        macro_rules! push_hex16 {
+            ($v:expr) => { push_b!(b"0x"); for sh in (0..16u32).rev() { let n = ($v as u64 >> (sh*4)) & 0xf; if pos < buf.len() { buf[pos] = nibble(n); pos += 1; } } };
+        }
+        push_b!(b"weave: CRASH in PE rip=");
+        push_hex16!(rip);
+        push_b!(b"\n");
+        unsafe { libc::write(2, buf.as_ptr() as *const libc::c_void, pos) };
+    }
+
     // format! + libc::write is intentional: we are about to exit(), so heap
     // allocation inside the signal handler is safe in practice.
     let gregs = unsafe { (*uctx).uc_mcontext.gregs };
@@ -463,51 +483,24 @@ fn print_crash_report(
         None => "not found in .pdata".to_string(),
     };
 
-    // Dump 16 bytes before RIP and 16 bytes at RIP so we can identify both the
-    // crashing instruction and the call/instruction that loaded the bad address.
-    let pre_bytes = {
-        let mut buf = [0u8; 16];
-        let pre_rip = rip.saturating_sub(16);
-        for (i, b) in buf.iter_mut().enumerate() {
-            *b = unsafe { *(pre_rip as *const u8).add(i) };
-        }
-        buf
-    };
-    let pre_hex = pre_bytes
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect::<Vec<_>>()
-        .join(" ");
-    let insn_bytes = {
-        let mut buf = [0u8; 16];
-        for (i, b) in buf.iter_mut().enumerate() {
-            *b = unsafe { *(rip as *const u8).add(i) };
-        }
-        buf
-    };
-    let insn_hex = insn_bytes
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect::<Vec<_>>()
-        .join(" ");
+    // Dump 16 bytes before RIP and 16 bytes at RIP via /proc/self/mem so we
+    // never trigger a secondary SIGSEGV on unmapped pages.
+    let mem_path = b"/proc/self/mem\0";
+    let mem_fd = unsafe { libc::open(mem_path.as_ptr() as *const libc::c_char, libc::O_RDONLY) };
 
-    // Read 16 bytes at the fault address via /proc/self/mem (safe — doesn't
-    // re-raise SIGSEGV even if the page is unmapped or read-only).
-    let fault_bytes_hex = {
-        let path = b"/proc/self/mem\0";
-        let fd = unsafe { libc::open(path.as_ptr() as *const libc::c_char, libc::O_RDONLY) };
+    let pre_hex = {
+        let pre_rip = rip.saturating_sub(16);
         let mut hex = String::from("(unreadable)");
-        if fd >= 0 {
+        if mem_fd >= 0 {
             let mut buf = [0u8; 16];
             let n = unsafe {
                 libc::pread(
-                    fd,
+                    mem_fd,
                     buf.as_mut_ptr() as *mut libc::c_void,
                     16,
-                    fault_addr as i64,
+                    pre_rip as i64,
                 )
             };
-            unsafe { libc::close(fd) };
             if n > 0 {
                 hex = buf[..n as usize]
                     .iter()
@@ -518,6 +511,56 @@ fn print_crash_report(
         }
         hex
     };
+    let insn_hex = {
+        let mut hex = String::from("(unreadable)");
+        if mem_fd >= 0 {
+            let mut buf = [0u8; 16];
+            let n = unsafe {
+                libc::pread(
+                    mem_fd,
+                    buf.as_mut_ptr() as *mut libc::c_void,
+                    16,
+                    rip as i64,
+                )
+            };
+            if n > 0 {
+                hex = buf[..n as usize]
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+            }
+        }
+        hex
+    };
+
+    // Read 16 bytes at the fault address via /proc/self/mem (safe — doesn't
+    // re-raise SIGSEGV even if the page is unmapped or read-only).
+    let fault_bytes_hex = {
+        let mut hex = String::from("(unreadable)");
+        if mem_fd >= 0 {
+            let mut buf = [0u8; 16];
+            let n = unsafe {
+                libc::pread(
+                    mem_fd,
+                    buf.as_mut_ptr() as *mut libc::c_void,
+                    16,
+                    fault_addr as i64,
+                )
+            };
+            if n > 0 {
+                hex = buf[..n as usize]
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+            }
+        }
+        hex
+    };
+    if mem_fd >= 0 {
+        unsafe { libc::close(mem_fd) };
+    }
 
     // Check /proc/self/maps to find the memory region containing fault_addr.
     let fault_region = {
@@ -553,24 +596,6 @@ fn print_crash_report(
         }
         region
     };
-
-    // Write a minimal crash line BEFORE format! in case a secondary fault kills
-    // the heap allocation inside format!. Uses only stack + write() — async-signal-safe.
-    {
-        let mut buf = [0u8; 64];
-        let mut pos = 0usize;
-        let nibble = |n: u64| if n < 10 { b'0' + n as u8 } else { b'a' + n as u8 - 10 };
-        macro_rules! push_b {
-            ($s:expr) => { for &b in $s { if pos < buf.len() { buf[pos] = b; pos += 1; } } };
-        }
-        macro_rules! push_hex16 {
-            ($v:expr) => { push_b!(b"0x"); for sh in (0..16u32).rev() { let n = ($v as u64 >> (sh*4)) & 0xf; if pos < buf.len() { buf[pos] = nibble(n); pos += 1; } } };
-        }
-        push_b!(b"weave: CRASH in PE rip=");
-        push_hex16!(rip);
-        push_b!(b"\n");
-        unsafe { libc::write(2, buf.as_ptr() as *const libc::c_void, pos) };
-    }
 
     let cfg_count = crate::cfg::cfg_dispatch_count();
     let msg = format!(
