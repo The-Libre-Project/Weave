@@ -568,15 +568,13 @@ fn disable_security_check_cookie(pe_bytes: &[u8], base: *mut u8, security_cookie
         let sec_bytes = &pe_bytes[sec_foff..sec_foff + scan_len + 7];
 
         for offset in 0..=scan_len {
-            // REX.W MOV r64, [rip+disp32]:
-            //   byte 0: 0x48  (REX.W, no R/X/B — register encoded in ModRM.reg)
-            //   byte 1: 0x8B  (MOV r64, r/m64)
-            //   byte 2: ModRM with mod=00, rm=101  →  (b2 & 0xC7) == 0x05
-            //   bytes 3..7: 32-bit signed disp
-            if sec_bytes[offset] != 0x48 || sec_bytes[offset + 1] != 0x8B {
-                continue;
-            }
-            if sec_bytes[offset + 2] & 0xC7 != 0x05 {
+            // MSVC __security_check_cookie starts with:
+            //   48 3B 0D <disp32>    cmp rcx, [rip+__security_cookie]
+            // (REX.W CMP r64, r/m64 with ModRM mod=00 reg=001 rm=101 → 0x0D)
+            if sec_bytes[offset] != 0x48
+                || sec_bytes[offset + 1] != 0x3B
+                || sec_bytes[offset + 2] != 0x0D
+            {
                 continue;
             }
             let disp = i32::from_le_bytes([
@@ -664,7 +662,7 @@ fn disable_security_check_cookie(pe_bytes: &[u8], base: *mut u8, security_cookie
 
     eprintln!(
         "weave: CFG: warning: __security_check_cookie not patched — \
-         no REX.W MOV r64, [rip+__security_cookie] load found"
+         no CMP rcx, [rip+__security_cookie] found"
     );
 }
 
