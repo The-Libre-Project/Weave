@@ -4537,6 +4537,34 @@ pub unsafe extern "win64" fn copy_file_a(
 // If the file is not found (most Windows system DLLs), fall back to a synthetic
 // HMODULE so GetProcAddress can still route through our stub resolver chain.
 
+/// Read a file, falling back to case-insensitive basename lookup on ENOENT.
+///
+/// The Windows-path translator lowercases DLL names before searching, but
+/// Linux filesystems are case-sensitive.  If the exact path doesn't exist,
+/// scan the parent directory for an entry whose name matches the basename
+/// case-insensitively (e.g. disk has `Scintilla.DLL`, request was `scintilla.dll`).
+fn read_file_case_insensitive(path: &std::path::Path) -> std::io::Result<Vec<u8>> {
+    match std::fs::read(path) {
+        Ok(b) => return Ok(b),
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e),
+        Err(_) => {}
+    }
+    let parent = path
+        .parent()
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no parent dir"))?;
+    let want = path
+        .file_name()
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no filename"))?
+        .to_string_lossy()
+        .to_ascii_lowercase();
+    for entry in std::fs::read_dir(parent)?.flatten() {
+        if entry.file_name().to_string_lossy().to_ascii_lowercase() == want {
+            return std::fs::read(entry.path());
+        }
+    }
+    Err(std::io::Error::from(std::io::ErrorKind::NotFound))
+}
+
 /// Attempt to load a DLL from disk given its Windows-style name or path.
 /// Returns (handle, loaded_from_disk).
 ///
@@ -4577,13 +4605,15 @@ fn load_library_impl(name: &str) -> usize {
 
     // Try each candidate.
     for path in &candidates {
-        let bytes = match std::fs::read(path) {
+        let bytes = match read_file_case_insensitive(path) {
             Ok(b) => b,
             Err(_) => continue,
         };
 
         match loader::load_dll(&bytes) {
             Ok((image, exports)) => {
+                let image_base = image.base as usize;
+                let dll_entry = image.entry_point;
                 // Patch the loaded DLL's own IAT using the global resolver.
                 // SAFETY: `bytes` is the raw PE image just parsed by `load_dll`;
                 // `image.base` is the virtual address at which it was mapped into this
@@ -4598,12 +4628,38 @@ fn load_library_impl(name: &str) -> usize {
                     });
                 }
                 dll_registry::register(key.clone(), image, exports);
-                let handle = module_handles::register(name);
+                // HMODULE == image base address (Windows convention).  Register
+                // this so GetProcAddress / GetModuleFileName can map handle→name.
+                module_handles::register_with_handle(name, image_base);
+
+                // Invoke DllMain(hinstDLL, DLL_PROCESS_ATTACH, NULL) if present.
+                // Must happen after IAT patching so the DLL's imports resolve
+                // correctly inside DllMain.  Wine ref: dlls/ntdll/loader.c —
+                // MODULE_InitDLL passes reserved=1 for static, NULL for dynamic.
+                if !dll_entry.is_null() {
+                    const DLL_PROCESS_ATTACH: u32 = 1;
+                    type DllMain =
+                        unsafe extern "win64" fn(hinst: usize, reason: u32, reserved: usize) -> i32;
+                    // SAFETY: dll_entry points into the mapped image; sections
+                    // have already been set to their final permissions by
+                    // map_sections, so the entry page is executable.
+                    let dll_main: DllMain = unsafe { std::mem::transmute(dll_entry) };
+                    let ok = unsafe { dll_main(image_base, DLL_PROCESS_ATTACH, 0) };
+                    eprintln!(
+                        "weave/kernel32: LoadLibrary({name:?}) DllMain({image_base:#x}, DLL_PROCESS_ATTACH) → {ok}"
+                    );
+                    if ok == 0 {
+                        eprintln!(
+                            "weave/kernel32: LoadLibrary({name:?}) DllMain returned FALSE — proceeding anyway"
+                        );
+                    }
+                }
+
                 eprintln!(
-                    "weave/kernel32: LoadLibrary({name:?}) → loaded from {}",
+                    "weave/kernel32: LoadLibrary({name:?}) → loaded from {} at {image_base:#x}",
                     path.display()
                 );
-                return handle;
+                return image_base;
             }
             Err(e) => {
                 eprintln!(

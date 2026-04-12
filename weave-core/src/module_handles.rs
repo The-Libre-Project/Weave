@@ -61,15 +61,27 @@ pub fn register(dll_name: &str) -> usize {
     })
 }
 
-/// Look up the DLL name for a synthetic HMODULE returned by `register()`.
-///
-/// Returns `None` if the handle is unknown (e.g. 0 or a real pointer outside
-/// the synthetic range).
+/// Look up the DLL name for an HMODULE returned by `register()` or
+/// `register_with_handle()`. Returns `None` if the handle is unknown.
 pub fn lookup(handle: usize) -> Option<String> {
-    if handle < HANDLE_BASE {
+    if handle == 0 {
         return None;
     }
     with_table(None, |t| t.handle_to_name.get(&handle).cloned())
+}
+
+/// Register `dll_name` with a caller-supplied handle value.
+///
+/// Used by the dynamic DLL loader to record the real base address of a
+/// PE image as its HMODULE (Windows convention: HMODULE == image base).
+/// If `dll_name` was already registered with a different handle, the new
+/// handle replaces the old mapping.
+pub fn register_with_handle(dll_name: &str, handle: usize) {
+    let key = dll_basename(dll_name);
+    with_table((), |t| {
+        t.name_to_handle.insert(key.clone(), handle);
+        t.handle_to_name.insert(handle, key);
+    });
 }
 
 /// Extract the lowercase DLL basename from a path or bare name.

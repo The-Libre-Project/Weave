@@ -119,10 +119,19 @@ pub fn load_dll(bytes: &[u8]) -> Result<(LoadedImage, HashMap<String, usize>), S
         }
     }
 
+    // DLLs have an optional entry point (DllMain). AddressOfEntryPoint == 0
+    // means the DLL has no DllMain — leave the pointer null.
+    let entry_rva = opt.standard_fields.address_of_entry_point as usize;
+    let entry_point = if entry_rva != 0 {
+        unsafe { base.add(entry_rva) as *const u8 }
+    } else {
+        std::ptr::null()
+    };
+
     let image = LoadedImage {
         base,
         size: opt.windows_fields.size_of_image as usize,
-        entry_point: std::ptr::null(),
+        entry_point,
         tls_data: std::ptr::null(),
         tls_data_size: 0,
         pdata_rva: 0,
