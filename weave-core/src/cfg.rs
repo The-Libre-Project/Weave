@@ -534,6 +534,8 @@ fn disable_security_check_cookie(pe_bytes: &[u8], base: *mut u8, security_cookie
     };
     let sec_table_off = pe_off + 24 + 240;
 
+    let mut candidates: Vec<(u32, u32)> = Vec::new();
+
     for i in 0..num_sections {
         let s = sec_table_off + i * 40;
         let characteristics = match read_u32(pe_bytes, s + 36) {
@@ -597,54 +599,67 @@ fn disable_security_check_cookie(pe_bytes: &[u8], base: *mut u8, security_cookie
                 Some(r) => r,
                 None => continue,
             };
-
-            // Filter A: MSVC __security_check_cookie is a tiny stub (12–20 bytes).
-            // Skip any function ≥ 32 bytes.
-            let func_len = end.saturating_sub(begin) as usize;
-            if func_len >= 32 {
-                continue;
+            if !candidates.iter().any(|&(b, _)| b == begin) {
+                candidates.push((begin, end));
             }
-
-            // Filter B: __security_check_cookie contains a conditional branch
-            // (JNE 0x75 rel8, or 0F 85 rel32) to __report_gsfailure. Reject
-            // any candidate whose body contains neither opcode.
-            let func_va = base_usize + begin as usize;
-            let func_bytes =
-                unsafe { std::slice::from_raw_parts(func_va as *const u8, func_len) };
-            let mut has_jne = false;
-            let mut k = 0usize;
-            while k < func_len {
-                let b = func_bytes[k];
-                if b == 0x75 {
-                    has_jne = true;
-                    break;
-                }
-                if b == 0x0F && k + 1 < func_len && func_bytes[k + 1] == 0x85 {
-                    has_jne = true;
-                    break;
-                }
-                k += 1;
-            }
-            if !has_jne {
-                continue;
-            }
-            let page_size = 4096usize;
-            let page_base = (func_va & !(page_size - 1)) as *mut libc::c_void;
-            unsafe {
-                libc::mprotect(
-                    page_base,
-                    page_size,
-                    libc::PROT_READ | libc::PROT_WRITE | libc::PROT_EXEC,
-                );
-                (func_va as *mut u8).write(0xC3); // RET
-                libc::mprotect(page_base, page_size, libc::PROT_READ | libc::PROT_EXEC);
-            }
-            eprintln!(
-                "weave: CFG: disabled __security_check_cookie at {func_va:#x} \
-                 (rva {begin:#x}) with RET"
-            );
-            return;
         }
+    }
+
+    eprintln!(
+        "weave: CFG: __security_check_cookie scan: {} cookie-load candidates found",
+        candidates.len()
+    );
+
+    for &(begin, end) in &candidates {
+        let func_len = end.saturating_sub(begin) as usize;
+        let func_va = base_usize + begin as usize;
+
+        // Filter B: scan body for JNE (0x75 rel8 or 0F 85 rel32).
+        let func_bytes =
+            unsafe { std::slice::from_raw_parts(func_va as *const u8, func_len) };
+        let mut has_jne = false;
+        let mut k = 0usize;
+        while k < func_len {
+            let b = func_bytes[k];
+            if b == 0x75 {
+                has_jne = true;
+                break;
+            }
+            if b == 0x0F && k + 1 < func_len && func_bytes[k + 1] == 0x85 {
+                has_jne = true;
+                break;
+            }
+            k += 1;
+        }
+
+        // Filter A: size < 32.
+        let filtered_a = func_len >= 32;
+        let filtered_b = !has_jne;
+
+        if filtered_a || filtered_b {
+            eprintln!(
+                "weave: CFG: candidate rva={:#x} size={} hasJNE={} — filtered A={} B={}",
+                begin, func_len, has_jne, filtered_a, filtered_b
+            );
+            continue;
+        }
+
+        let page_size = 4096usize;
+        let page_base = (func_va & !(page_size - 1)) as *mut libc::c_void;
+        unsafe {
+            libc::mprotect(
+                page_base,
+                page_size,
+                libc::PROT_READ | libc::PROT_WRITE | libc::PROT_EXEC,
+            );
+            (func_va as *mut u8).write(0xC3); // RET
+            libc::mprotect(page_base, page_size, libc::PROT_READ | libc::PROT_EXEC);
+        }
+        eprintln!(
+            "weave: CFG: disabled __security_check_cookie at {func_va:#x} \
+             (rva {begin:#x}) with RET"
+        );
+        return;
     }
 
     eprintln!(
