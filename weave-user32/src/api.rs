@@ -14,9 +14,18 @@ use crate::queue::{self, MsgEntry};
 use crate::window::{self, WindowEntry};
 use libc;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicI32, AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 use weave_common::stub::warn_once;
+use weave_core::progress::mark_phase;
+
+// ── Progress phase guards (fire exactly once) ────────────────────────────────
+
+static PHASE_REGISTER_CLASS: AtomicBool = AtomicBool::new(false);
+static PHASE_CREATE_WINDOW: AtomicBool = AtomicBool::new(false);
+static PHASE_GET_MESSAGE: AtomicBool = AtomicBool::new(false);
+static PHASE_WM_PAINT_DISPATCHED: AtomicBool = AtomicBool::new(false);
+static PHASE_SCI_GETLENGTH: AtomicBool = AtomicBool::new(false);
 
 // ── Scroll bar per-(hwnd,bar) state ──────────────────────────────────────────
 
@@ -115,6 +124,9 @@ pub fn current_paint_hwnd() -> usize {
 // Wine ref: dlls/user32/class.c — RegisterClassW calls NtUserRegisterClassExWOW; ATOM is
 // allocated by the server; duplicate registration returns the existing atom, not an error.
 pub unsafe extern "win64" fn register_class_w(lp_wnd_class: *const WndClassW) -> u16 {
+    if !PHASE_REGISTER_CLASS.swap(true, Ordering::Relaxed) {
+        mark_phase("register_class_first");
+    }
     if lp_wnd_class.is_null() {
         return 0;
     }
@@ -209,6 +221,9 @@ pub unsafe extern "win64" fn create_window_ex_w(
     h_instance: usize,
     lp_param: *mut u8,
 ) -> usize {
+    if !PHASE_CREATE_WINDOW.swap(true, Ordering::Relaxed) {
+        mark_phase("create_window_first");
+    }
     let class_name = unsafe { decode_wide(lp_class_name) };
     let title = unsafe { decode_wide(lp_window_name) };
 
@@ -425,6 +440,9 @@ pub unsafe extern "win64" fn get_message_w(
     _msg_filter_min: u32, // message range filter (ignored)
     _msg_filter_max: u32,
 ) -> i32 {
+    if !PHASE_GET_MESSAGE.swap(true, Ordering::Relaxed) {
+        mark_phase("get_message_first");
+    }
     if lp_msg.is_null() {
         return -1;
     }
@@ -763,6 +781,10 @@ pub unsafe extern "win64" fn dispatch_message_w(lp_msg: *const Msg) -> isize {
         None => return 0,
     };
 
+    if m.message == 0x000F && !PHASE_WM_PAINT_DISPATCHED.swap(true, Ordering::Relaxed) {
+        mark_phase("wm_paint_dispatched_first");
+    }
+
     call_wnd_proc(proc_addr, m.hwnd, m.message, m.w_param, m.l_param)
 }
 
@@ -826,6 +848,9 @@ pub extern "win64" fn send_message_w(
     w_param: usize,
     l_param: isize,
 ) -> isize {
+    if msg == 2006 && !PHASE_SCI_GETLENGTH.swap(true, Ordering::Relaxed) {
+        mark_phase("sci_getlength_probed");
+    }
     let proc_addr = match window::with(hwnd, |e| e.wnd_proc) {
         Some(p) => p,
         None => {
