@@ -382,6 +382,7 @@ pub extern "win64" fn show_window(hwnd: usize, n_cmd_show: i32) -> i32 {
 // Wine ref: dlls/win32u/painting.c — NtUserRedrawWindow with RDW_UPDATENOW; sends WM_PAINT
 // only if the window has a non-empty update region; returns TRUE even if nothing was painted.
 pub extern "win64" fn update_window(hwnd: usize) -> i32 {
+    eprintln!("weave/user32: UpdateWindow hwnd={hwnd:#x}");
     if window::with(hwnd, |_| ()).is_some() {
         queue::post(MsgEntry {
             hwnd,
@@ -1015,6 +1016,7 @@ pub extern "win64" fn def_window_proc_w(
 // Wine ref: dlls/win32u/window.c::get_client_rect — calls get_client_rect_rel with
 // COORDS_CLIENT; origin is always (0,0) in client coords; right/bottom = client size.
 pub unsafe extern "win64" fn get_client_rect(hwnd: usize, lp_rect: *mut Rect) -> i32 {
+    eprintln!("weave/user32: GetClientRect hwnd={hwnd:#x}");
     if lp_rect.is_null() {
         return 0;
     }
@@ -1035,6 +1037,7 @@ pub unsafe extern "win64" fn get_client_rect(hwnd: usize, lp_rect: *mut Rect) ->
 // Wine ref: dlls/win32u/window.c::get_window_rect — calls get_window_rect_rel with
 // COORDS_SCREEN; includes non-client area (frame + caption); returns screen coordinates.
 pub unsafe extern "win64" fn get_window_rect(hwnd: usize, lp_rect: *mut Rect) -> i32 {
+    eprintln!("weave/user32: GetWindowRect hwnd={hwnd:#x}");
     if lp_rect.is_null() {
         return 0;
     }
