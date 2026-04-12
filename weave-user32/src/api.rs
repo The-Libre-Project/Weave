@@ -525,6 +525,14 @@ pub unsafe extern "win64" fn peek_message_w(
 
     match entry {
         Some(ref e) => {
+            static PEEK_MSG_COUNT: AtomicU32 = AtomicU32::new(0);
+            let mn = PEEK_MSG_COUNT.fetch_add(1, Ordering::Relaxed);
+            if mn < 30 {
+                eprintln!(
+                    "weave/PeekMessageW#{mn}: hwnd={:#x} msg={}",
+                    e.hwnd, e.message
+                );
+            }
             fill_msg(lp_msg, e);
             1 // TRUE — message available
         }
@@ -785,14 +793,28 @@ pub unsafe extern "win64" fn dispatch_message_w(lp_msg: *const Msg) -> isize {
         return 0;
     }
 
-    let proc_addr = match window::with(m.hwnd, |e| e.wnd_proc) {
-        Some(p) => p,
-        None => return 0,
-    };
-
-    if m.message == 0x000F && !PHASE_WM_PAINT_DISPATCHED.swap(true, Ordering::Relaxed) {
+    // Fire phase marker before the HWND table lookup.  Previously the marker
+    // was placed after the lookup, so any WM_PAINT dispatched for an HWND that
+    // had already been removed from the table (e.g. a child window destroyed
+    // between queue-post and dispatch) caused an early return that silently
+    // swallowed the marker.  Moving it here ensures we record the first
+    // WM_PAINT that reaches DispatchMessageW regardless of HWND validity.
+    if m.message == WM_PAINT && !PHASE_WM_PAINT_DISPATCHED.swap(true, Ordering::Relaxed) {
         mark_phase("wm_paint_dispatched_first");
     }
+
+    let proc_addr = match window::with(m.hwnd, |e| e.wnd_proc) {
+        Some(p) => p,
+        None => {
+            if m.message == WM_PAINT {
+                eprintln!(
+                    "weave/DispatchMessageW: WM_PAINT hwnd={:#x} not in window table — skipped",
+                    m.hwnd
+                );
+            }
+            return 0;
+        }
+    };
 
     call_wnd_proc(proc_addr, m.hwnd, m.message, m.w_param, m.l_param)
 }
@@ -3982,6 +4004,121 @@ pub unsafe extern "win64" fn create_icon_indirect(piconinfo: *const u8) -> usize
 /// tracked in the window table (Phase 2 gap). No callers crash on FALSE.
 pub extern "win64" fn is_child(_hwnd_parent: usize, _hwnd: usize) -> i32 {
     0 // FALSE
+}
+
+/// GetWindow — retrieve a window with the specified relationship to the given window.
+///
+/// Returns NULL — Weave's window table does not track parent/child/sibling
+/// relationships (Phase 2 gap). Logs a warning once per unique `uCmd` value.
+///
+/// # Safety
+/// No pointer dereferences.
+// Wine ref: dlls/user32/win.c — GetWindow delegates to NtUserGetWindowRelative;
+// supports GW_HWNDFIRST(0), GW_HWNDLAST(1), GW_HWNDNEXT(2), GW_HWNDPREV(3),
+// GW_OWNER(4), GW_CHILD(5), GW_ENABLEDPOPUP(6); all walk the server-side window
+// tree. Weave has no hierarchy — stub returns NULL.
+pub extern "win64" fn get_window(_hwnd: usize, _u_cmd: u32) -> usize {
+    warn_once("weave/user32: GetWindow — window hierarchy not tracked, returning NULL");
+    0 // NULL
+}
+
+/// IsRectEmpty — test whether a rectangle has zero or negative area.
+///
+/// Returns TRUE if `lprc` is NULL, or if `left >= right` or `top >= bottom`.
+///
+/// # Safety
+/// `lprc` must be NULL or a valid pointer to a `RECT`-sized region.
+// Wine ref: dlls/user32/uitools.c — IsRectEmpty: NULL→TRUE (bug compat);
+// returns (rect->left >= rect->right) || (rect->top >= rect->bottom).
+pub unsafe extern "win64" fn is_rect_empty(lprc: *const Rect) -> i32 {
+    if lprc.is_null() {
+        return 1; // TRUE — bug-compat, matches Wine
+    }
+    let r = unsafe { &*lprc };
+    if r.left >= r.right || r.top >= r.bottom {
+        1 // TRUE
+    } else {
+        0 // FALSE
+    }
+}
+
+/// CopyRect — copy a RECT from `lprc_src` to `lprc_dst`.
+///
+/// Returns TRUE on success; FALSE if either pointer is NULL.
+///
+/// # Safety
+/// Both pointers must be NULL or valid, aligned `RECT` pointers.
+// Wine ref: dlls/user32/uitools.c — CopyRect: NULL dst or src → FALSE;
+// *dest = *src (struct copy); returns TRUE.
+pub unsafe extern "win64" fn copy_rect(lprc_dst: *mut Rect, lprc_src: *const Rect) -> i32 {
+    if lprc_dst.is_null() || lprc_src.is_null() {
+        return 0; // FALSE
+    }
+    unsafe { std::ptr::copy_nonoverlapping(lprc_src, lprc_dst, 1) };
+    1 // TRUE
+}
+
+/// InflateRect — expand or shrink a RECT by the specified amounts.
+///
+/// Subtracts `dx`/`dy` from left/top and adds to right/bottom.
+/// Returns FALSE if `lprc` is NULL.
+///
+/// # Safety
+/// `lprc` must be NULL or a valid, aligned mutable `RECT` pointer.
+// Wine ref: dlls/user32/uitools.c — InflateRect: NULL→FALSE;
+// rect->left -= x; rect->top -= y; rect->right += x; rect->bottom += y; TRUE.
+pub unsafe extern "win64" fn inflate_rect(lprc: *mut Rect, dx: i32, dy: i32) -> i32 {
+    if lprc.is_null() {
+        return 0; // FALSE
+    }
+    let r = unsafe { &mut *lprc };
+    r.left -= dx;
+    r.top -= dy;
+    r.right += dx;
+    r.bottom += dy;
+    1 // TRUE
+}
+
+/// CharNextW — advance a pointer past the next wide character.
+///
+/// For BMP characters, advances by one code unit. Returns the same pointer
+/// unchanged if already at the null terminator.
+///
+/// # Safety
+/// `lpsz` must be a valid pointer into a null-terminated UTF-16 string.
+// Wine ref: dlls/kernelbase/string.c — CharNextW: if (*x) x++; return (WCHAR *)x;
+// Wide strings are one code unit per BMP character; no DBCS handling needed.
+pub unsafe extern "win64" fn char_next_w(lpsz: *const u16) -> *const u16 {
+    if lpsz.is_null() {
+        return lpsz;
+    }
+    if unsafe { *lpsz } != 0 {
+        unsafe { lpsz.add(1) }
+    } else {
+        lpsz
+    }
+}
+
+/// CharLowerBuffW — convert `cch_length` wide characters in a buffer to lowercase in-place.
+///
+/// Returns `cch_length` on success, 0 if `lpsz` is NULL.
+///
+/// # Safety
+/// `lpsz` must be a valid pointer to at least `cch_length` writable UTF-16 code units.
+// Wine ref: dlls/kernelbase/string.c — CharLowerBuffW: NULL→0 (Wine source comment: "YES",
+// intentional bug-compat); calls LCMapStringW(LOCALE_USER_DEFAULT, LCMAP_LOWERCASE, str, len,
+// str, len). Weave: applies char::to_lowercase() per BMP code unit (no ICU/locale mapping).
+pub unsafe extern "win64" fn char_lower_buff_w(lpsz: *mut u16, cch_length: u32) -> u32 {
+    if lpsz.is_null() {
+        return 0;
+    }
+    let slice = unsafe { std::slice::from_raw_parts_mut(lpsz, cch_length as usize) };
+    for cu in slice.iter_mut() {
+        *cu = char::from_u32(*cu as u32)
+            .map(|ch| ch.to_lowercase().next().unwrap_or(ch) as u16)
+            .unwrap_or(*cu);
+    }
+    cch_length
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

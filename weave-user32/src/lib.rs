@@ -642,6 +642,10 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "PostQuitMessage" => Some(post_quit_message as *const () as usize),
         "PostMessageW" => Some(post_message_w as *const () as usize),
         "SendMessageW" => Some(send_message_w as *const () as usize),
+        "SendMessageTimeoutW" => Some(
+            send_message_timeout_w as unsafe extern "win64" fn(_, _, _, _, _, _, _) -> _
+                as *const () as usize,
+        ),
         // Default window procedure
         "DefWindowProcW" => Some(def_window_proc_w as *const () as usize),
         // Geometry
@@ -1122,6 +1126,23 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
             api::create_icon_indirect as unsafe extern "win64" fn(_) -> _ as *const () as usize,
         ),
         "IsChild" => Some(api::is_child as *const () as usize),
+        // ── Window hierarchy / rect utilities / char ops ──────────────────
+        "GetWindow" => Some(api::get_window as *const () as usize),
+        "IsRectEmpty" => {
+            Some(api::is_rect_empty as unsafe extern "win64" fn(_) -> _ as *const () as usize)
+        }
+        "CopyRect" => {
+            Some(api::copy_rect as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "InflateRect" => {
+            Some(api::inflate_rect as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize)
+        }
+        "CharNextW" => {
+            Some(api::char_next_w as unsafe extern "win64" fn(_) -> _ as *const () as usize)
+        }
+        "CharLowerBuffW" => {
+            Some(api::char_lower_buff_w as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
         _ => None,
     }
 }
