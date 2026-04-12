@@ -3380,6 +3380,31 @@ pub unsafe extern "win64" fn register_window_message_a(lp_string: *const u8) -> 
     unsafe { register_clipboard_format_a(lp_string) }
 }
 
+/// RegisterWindowMessageW: register a unique window message. Returns a deterministic ID.
+///
+/// # Safety
+/// `lp_string` must be a valid null-terminated UTF-16 string.
+// Wine ref: dlls/user32/message.c — RegisterWindowMessageW calls NtUserRegisterClipboardFormat;
+// WM IDs share the 0xC000–0xFFFF atom range with clipboard formats; same name → same ID.
+pub unsafe extern "win64" fn register_window_message_w(lp_string: *const u16) -> u32 {
+    if lp_string.is_null() {
+        return 0;
+    }
+    // Hash the UTF-16 code units into the 0xC000–0xFFFF range (same logic as the A variant
+    // but operating on u16 units so the same wide string always produces the same ID).
+    let mut h: u32 = 0xC000;
+    let mut p = lp_string;
+    loop {
+        let ch = unsafe { *p };
+        if ch == 0 {
+            break;
+        }
+        h = h.wrapping_mul(31).wrapping_add(ch as u32);
+        p = unsafe { p.add(1) };
+    }
+    0xC000 | (h & 0x3FFF)
+}
+
 /// SystemParametersInfoA: stub — returns FALSE (operation not supported).
 ///
 /// # Safety

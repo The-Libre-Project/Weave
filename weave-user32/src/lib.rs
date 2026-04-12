@@ -1020,6 +1020,9 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "RegisterWindowMessageA" => Some(
             register_window_message_a as unsafe extern "win64" fn(_) -> _ as *const () as usize,
         ),
+        "RegisterWindowMessageW" => Some(
+            register_window_message_w as unsafe extern "win64" fn(_) -> _ as *const () as usize,
+        ),
         "SystemParametersInfoA" => Some(
             system_parameters_info_a as unsafe extern "win64" fn(_, _, _, _) -> _ as *const ()
                 as usize,

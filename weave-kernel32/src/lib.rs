@@ -10475,6 +10475,10 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "FindResourceA" => {
             Some(find_resource_a as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize)
         }
+        "FindResourceW" => {
+            Some(find_resource_w as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize)
+        }
+        "FreeResource" => Some(free_resource as *const () as usize),
         "LoadResource" => Some(load_resource as *const () as usize),
         "LockResource" => Some(lock_resource as *const () as usize),
         "SizeofResource" => Some(sizeof_resource as *const () as usize),
@@ -10926,6 +10930,30 @@ pub unsafe extern "win64" fn find_resource_a(
     _lp_type: *const u8,
 ) -> usize {
     0
+}
+
+/// FindResourceW: locate a named resource in a module. Returns NULL.
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+// Wine ref: dlls/kernelbase/loader.c FindResourceW — delegates to
+// FindResourceExW(module, type, name, MAKELANGID(LANG_NEUTRAL, SUBLANG_NEUTRAL));
+// FindResourceExW calls LdrFindResource_U which walks the PE resource directory;
+// no real PE resource directory in Weave guest — return NULL + ERROR_RESOURCE_NAME_NOT_FOUND.
+pub unsafe extern "win64" fn find_resource_w(
+    _h_module: usize,
+    _lp_name: *const u16,
+    _lp_type: *const u16,
+) -> usize {
+    set_last_error(1814); // ERROR_RESOURCE_NAME_NOT_FOUND
+    0
+}
+
+/// FreeResource: legacy 16-bit resource free. Always returns FALSE.
+// Wine ref: dlls/kernelbase/loader.c FreeResource — stub: always returns FALSE;
+// Win32 resources are part of the PE image and are never actually freed via this API.
+pub extern "win64" fn free_resource(_h_res_data: usize) -> i32 {
+    0 // FALSE
 }
 
 /// LoadResource: load a resource into memory. Returns NULL (not implemented).
