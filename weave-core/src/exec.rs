@@ -7,6 +7,10 @@
 //!
 //! If the entry point does return (it shouldn't), we exit with code 0.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
+static PHASE_WINMAIN_ENTERED: AtomicBool = AtomicBool::new(false);
+
 /// Transfer control to the loaded PE's entry point.
 ///
 /// # Safety
@@ -27,6 +31,9 @@ pub unsafe fn run(entry_point: *const u8) -> ! {
     // precondition.  The cast does not create a Rust reference, so alignment and
     // provenance rules for references do not apply.
     let f: extern "win64" fn() = unsafe { std::mem::transmute(entry_point) };
+    if !PHASE_WINMAIN_ENTERED.swap(true, Ordering::Relaxed) {
+        crate::progress::mark_phase("wWinMain_entered");
+    }
     f();
 
     // Reached only if the entry point returned without calling ExitProcess /

@@ -1,6 +1,9 @@
 use goblin::pe::PE;
 use std::collections::HashMap;
 use std::ptr;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+static PHASE_LOADED_PE: AtomicBool = AtomicBool::new(false);
 
 /// A PE binary successfully loaded into memory.
 ///
@@ -68,6 +71,10 @@ pub fn load(bytes: &[u8]) -> Result<LoadedImage, String> {
         .find(|s| s.name().ok() == Some(".pdata"))
         .map(|s| (s.virtual_address as usize, s.virtual_size as usize))
         .unwrap_or((0, 0));
+
+    if !PHASE_LOADED_PE.swap(true, Ordering::Relaxed) {
+        crate::progress::mark_phase("loaded_pe");
+    }
 
     Ok(LoadedImage {
         base,
