@@ -2030,9 +2030,6 @@ pub unsafe extern "win64" fn create_file_w(
     _dw_flags_and_attrs: u32, // ignored
     _h_template_file: usize,  // ignored
 ) -> usize {
-    eprintln!(
-        "weave/CreateFileW: entry access={dw_desired_access:#x} disp={dw_creation_disposition}"
-    );
     if lp_file_name.is_null() {
         set_last_error(file_io::ERROR_INVALID_HANDLE);
         eprintln!("weave/CreateFileW: exit null_name → INVALID_HANDLE_VALUE");
@@ -2074,7 +2071,12 @@ pub unsafe extern "win64" fn create_file_w(
         eprintln!("DIAG: file_opens_n={fot} path={win_path:?}");
     }
 
-    eprintln!("weave/CreateFileW: path={win_path:?}");
+    // Log path only for write-mode opens — read-only opens (e.g. .properties loading)
+    // are too frequent and overflow CI log caps.
+    const GENERIC_WRITE: u32 = 0x40000000;
+    if dw_desired_access & GENERIC_WRITE != 0 {
+        eprintln!("weave/CreateFileW: write-open path={win_path:?} access={dw_desired_access:#x}");
+    }
 
     let nt_disposition = file_io::win32_disposition_to_nt(dw_creation_disposition);
 
@@ -2101,10 +2103,6 @@ pub unsafe extern "win64" fn create_file_w(
             usize::MAX // INVALID_HANDLE_VALUE
         }
     };
-    eprintln!(
-        "weave/CreateFileW: exit {win_path:?} → handle={result:#x} ok={}",
-        result != usize::MAX
-    );
     result
 }
 
@@ -2127,7 +2125,6 @@ pub unsafe extern "win64" fn read_file(
     lp_bytes_read: *mut u32,
     _lp_overlapped: usize, // ignored — synchronous I/O only
 ) -> i32 {
-    eprintln!("weave/ReadFile: entry handle={h_file:#x} n_req={n_bytes_to_read}");
     // Pointer validation: null buffer with non-zero read size is an error.
     if lp_buffer.is_null() && n_bytes_to_read > 0 {
         set_last_error(87); // ERROR_INVALID_PARAMETER
@@ -2162,9 +2159,6 @@ pub unsafe extern "win64" fn read_file(
         eprintln!("weave/ReadFile: exit handle={h_file:#x} fd={fd} → FALSE (read err)");
         0 // FALSE
     } else {
-        eprintln!(
-            "weave/ReadFile: exit handle={h_file:#x} fd={fd} n_req={n_bytes_to_read} n_read={n} → TRUE"
-        );
         set_last_error(0);
         1 // TRUE
     }
@@ -2188,7 +2182,6 @@ pub unsafe extern "win64" fn write_file(
     lp_bytes_written: *mut u32,
     _lp_overlapped: usize, // ignored — synchronous I/O only
 ) -> i32 {
-    eprintln!("weave/WriteFile: entry handle={h_file:#x} n_req={n_bytes_to_write}");
     // Pointer validation: null buffer with non-zero write size is an error.
     if lp_buffer.is_null() && n_bytes_to_write > 0 {
         set_last_error(87); // ERROR_INVALID_PARAMETER
@@ -2226,13 +2219,10 @@ pub unsafe extern "win64" fn write_file(
 
     if n < 0 {
         set_last_error(file_io::ERROR_ACCESS_DENIED);
-        eprintln!("weave/WriteFile: exit handle={h_file:#x} fd={fd} → FALSE (write err)");
+        eprintln!("weave/WriteFile: error handle={h_file:#x} fd={fd} → write failed");
         0 // FALSE
     } else {
         set_last_error(0);
-        eprintln!(
-            "weave/WriteFile: exit handle={h_file:#x} fd={fd} n_req={n_bytes_to_write} n_written={n} → TRUE"
-        );
         1 // TRUE
     }
 }
@@ -2246,23 +2236,20 @@ pub unsafe extern "win64" fn write_file(
 /// are detached (not joined) on close, consistent with Win32 semantics where
 /// CloseHandle on a thread does not wait for it to terminate.
 pub extern "win64" fn close_handle(h_object: usize) -> i32 {
-    eprintln!("weave/CloseHandle: entry handle={h_object:#x}");
     // Thread handles are not file descriptors; handle them before delegating
     // to file_io::close_handle which would fail on non-fd handles.
     if handles::free_if_thread(h_object) {
         set_last_error(0);
-        eprintln!("weave/CloseHandle: exit handle={h_object:#x} → TRUE (thread)");
         return 1; // TRUE
     }
     match file_io::close_handle(h_object) {
         Ok(()) => {
             set_last_error(0);
-            eprintln!("weave/CloseHandle: exit handle={h_object:#x} → TRUE (file)");
             1 // TRUE
         }
         Err(_) => {
             set_last_error(file_io::ERROR_INVALID_HANDLE);
-            eprintln!("weave/CloseHandle: exit handle={h_object:#x} → FALSE (invalid)");
+            eprintln!("weave/CloseHandle: invalid handle={h_object:#x}");
             0 // FALSE
         }
     }
