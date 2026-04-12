@@ -65,7 +65,7 @@ pub fn cfg_dispatch_count() -> usize {
 #[cfg(target_arch = "x86_64")]
 #[no_mangle]
 unsafe extern "win64" fn weave_cfg_do_debug(rax_val: usize, caller_rip: usize) {
-    const MAX_LOG: usize = 30;
+    const MAX_LOG: usize = 500;
     let n = CFG_DEBUG_COUNT.fetch_add(1, Ordering::Relaxed);
     if n >= MAX_LOG {
         if n == MAX_LOG {

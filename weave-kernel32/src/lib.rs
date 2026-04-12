@@ -2029,8 +2029,12 @@ pub unsafe extern "win64" fn create_file_w(
     _dw_flags_and_attrs: u32, // ignored
     _h_template_file: usize,  // ignored
 ) -> usize {
+    eprintln!(
+        "weave/CreateFileW: entry access={dw_desired_access:#x} disp={dw_creation_disposition}"
+    );
     if lp_file_name.is_null() {
         set_last_error(file_io::ERROR_INVALID_HANDLE);
+        eprintln!("weave/CreateFileW: exit null_name → INVALID_HANDLE_VALUE");
         return usize::MAX; // INVALID_HANDLE_VALUE
     }
 
@@ -2042,11 +2046,14 @@ pub unsafe extern "win64" fn create_file_w(
         }
         if len == MAX_UTF16_LEN {
             set_last_error(87); // ERROR_INVALID_PARAMETER
+            eprintln!("weave/CreateFileW: exit overlong_name → INVALID_HANDLE_VALUE");
             return usize::MAX;
         }
         let slice = std::slice::from_raw_parts(lp_file_name, len);
         String::from_utf16_lossy(slice).to_owned()
     };
+
+    eprintln!("weave/CreateFileW: path={win_path:?}");
 
     let nt_disposition = file_io::win32_disposition_to_nt(dw_creation_disposition);
 
@@ -2060,15 +2067,10 @@ pub unsafe extern "win64" fn create_file_w(
             usize::MAX // INVALID_HANDLE_VALUE
         }
     };
-    {
-        static CFW: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-        let n = CFW.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let ok = result != usize::MAX;
-        let path_lc = win_path.to_ascii_lowercase();
-        if n < 50 || path_lc.contains(".py") || path_lc.contains("test") {
-            eprintln!("weave/kernel32: CreateFileW#{n} {win_path:?} ok={ok}");
-        }
-    }
+    eprintln!(
+        "weave/CreateFileW: exit {win_path:?} → handle={result:#x} ok={}",
+        result != usize::MAX
+    );
     result
 }
 
@@ -2091,12 +2093,14 @@ pub unsafe extern "win64" fn read_file(
     lp_bytes_read: *mut u32,
     _lp_overlapped: usize, // ignored — synchronous I/O only
 ) -> i32 {
+    eprintln!("weave/ReadFile: entry handle={h_file:#x} n_req={n_bytes_to_read}");
     // Pointer validation: null buffer with non-zero read size is an error.
     if lp_buffer.is_null() && n_bytes_to_read > 0 {
         set_last_error(87); // ERROR_INVALID_PARAMETER
         if !lp_bytes_read.is_null() {
             unsafe { *lp_bytes_read = 0 };
         }
+        eprintln!("weave/ReadFile: exit handle={h_file:#x} → FALSE (null buffer)");
         return 0; // FALSE
     }
 
@@ -2104,6 +2108,7 @@ pub unsafe extern "win64" fn read_file(
         Some(fd) => fd,
         None => {
             set_last_error(file_io::ERROR_INVALID_HANDLE);
+            eprintln!("weave/ReadFile: exit handle={h_file:#x} → FALSE (invalid handle)");
             return 0; // FALSE
         }
     };
@@ -2120,18 +2125,12 @@ pub unsafe extern "win64" fn read_file(
 
     if n < 0 {
         set_last_error(file_io::ERROR_ACCESS_DENIED);
+        eprintln!("weave/ReadFile: exit handle={h_file:#x} fd={fd} → FALSE (read err)");
         0 // FALSE
     } else {
-        {
-            static RF: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-            let rn = RF.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            // Log first 20 reads, or any small read (<=512 bytes, likely a text file like test.py).
-            if (n <= 512 || rn < 20) && n > 0 {
-                eprintln!(
-                    "weave/kernel32: ReadFile#{rn} fd={fd} n_req={n_bytes_to_read} n_read={n}"
-                );
-            }
-        }
+        eprintln!(
+            "weave/ReadFile: exit handle={h_file:#x} fd={fd} n_req={n_bytes_to_read} n_read={n} → TRUE"
+        );
         set_last_error(0);
         1 // TRUE
     }

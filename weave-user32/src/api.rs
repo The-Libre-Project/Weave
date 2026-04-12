@@ -828,12 +828,25 @@ pub extern "win64" fn send_message_w(
 ) -> isize {
     let proc_addr = match window::with(hwnd, |e| e.wnd_proc) {
         Some(p) => p,
-        None => return 0,
+        None => {
+            if (2000..=3000).contains(&msg) {
+                eprintln!(
+                    "weave/user32: SendMessageW hwnd={hwnd:#x} msg={msg} → 0 (no wndproc)"
+                );
+            }
+            return 0;
+        }
     };
-    let ret = call_wnd_proc(proc_addr, hwnd, msg, w_param, l_param);
-    // Log SCI range, WM_USER+ app messages, and WM_NOTIFY (Scintilla modification signal).
     const WM_NOTIFY: u32 = 0x004E;
-    if (2000..=2200).contains(&msg) || (0x0400..2000).contains(&msg) || msg == WM_NOTIFY {
+    let log_scintilla = (2000..=3000).contains(&msg);
+    if log_scintilla {
+        let xcb = window::xcb_id(hwnd);
+        eprintln!(
+            "weave/user32: SendMessageW Scintilla entry hwnd={hwnd:#x} xcb={xcb:#x} msg={msg} wparam={w_param:#x} lparam={l_param:#x}"
+        );
+    }
+    let ret = call_wnd_proc(proc_addr, hwnd, msg, w_param, l_param);
+    if log_scintilla || (0x0400..2000).contains(&msg) || msg == WM_NOTIFY {
         let xcb = window::xcb_id(hwnd);
         eprintln!("weave/user32: SendMessageW hwnd={hwnd:#x} xcb={xcb:#x} msg={msg} → {ret:#x}");
     }
