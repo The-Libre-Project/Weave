@@ -486,9 +486,10 @@ fn disable_function_containing(pe_bytes: &[u8], base: *mut u8, target_rva: u32) 
     false
 }
 
-/// Return the .pdata BeginAddress (function-start RVA) of the runtime function
-/// that contains `target_rva`, or `None` if the RVA is not covered by any entry.
-fn function_start_rva(pe_bytes: &[u8], base: *mut u8, target_rva: u32) -> Option<u32> {
+/// Return the .pdata `(BeginAddress, EndAddress)` RVA range of the runtime
+/// function that contains `target_rva`, or `None` if the RVA is not covered
+/// by any entry.
+fn function_start_rva(pe_bytes: &[u8], base: *mut u8, target_rva: u32) -> Option<(u32, u32)> {
     let base_usize = base as usize;
     let pe_off = read_u32(pe_bytes, 0x3c)? as usize;
     let opt_off = pe_off + 24;
@@ -505,7 +506,7 @@ fn function_start_rva(pe_bytes: &[u8], base: *mut u8, target_rva: u32) -> Option
         let begin = unsafe { *(entry as *const u32) };
         let end = unsafe { *((entry + 4) as *const u32) };
         if target_rva >= begin && target_rva < end {
-            return Some(begin);
+            return Some((begin, end));
         }
     }
     None
@@ -592,12 +593,41 @@ fn disable_security_check_cookie(pe_bytes: &[u8], base: *mut u8, security_cookie
             }
 
             let instr_rva = (sec_va + offset) as u32;
-            let begin = match function_start_rva(pe_bytes, base, instr_rva) {
-                Some(b) => b,
+            let (begin, end) = match function_start_rva(pe_bytes, base, instr_rva) {
+                Some(r) => r,
                 None => continue,
             };
 
+            // Filter A: MSVC __security_check_cookie is a tiny stub (12–20 bytes).
+            // Skip any function ≥ 32 bytes.
+            let func_len = end.saturating_sub(begin) as usize;
+            if func_len >= 32 {
+                continue;
+            }
+
+            // Filter B: __security_check_cookie contains a conditional branch
+            // (JNE 0x75 rel8, or 0F 85 rel32) to __report_gsfailure. Reject
+            // any candidate whose body contains neither opcode.
             let func_va = base_usize + begin as usize;
+            let func_bytes =
+                unsafe { std::slice::from_raw_parts(func_va as *const u8, func_len) };
+            let mut has_jne = false;
+            let mut k = 0usize;
+            while k < func_len {
+                let b = func_bytes[k];
+                if b == 0x75 {
+                    has_jne = true;
+                    break;
+                }
+                if b == 0x0F && k + 1 < func_len && func_bytes[k + 1] == 0x85 {
+                    has_jne = true;
+                    break;
+                }
+                k += 1;
+            }
+            if !has_jne {
+                continue;
+            }
             let page_size = 4096usize;
             let page_base = (func_va & !(page_size - 1)) as *mut libc::c_void;
             unsafe {
