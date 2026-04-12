@@ -125,19 +125,41 @@ unsafe extern "C" fn on_fatal_signal(
         unsafe { libc::write(2, b"weave: sh got fault_addr\n".as_ptr() as *const _, 25); }
         let win_code = signal_to_exception_code(sig);
 
-        // DIAG: dispatch_hardware_exception() bypassed — it faults internally
-        // (walks PE UNWIND_INFO, hits unmapped memory → secondary SIGSEGV).
-        // Fall straight through to print_crash_report() to capture fault RIP.
-        // TODO: restore SEH dispatch once unwind table mapping is fixed.
-        //
-        // #[cfg(target_arch = "x86_64")]
-        // {
-        //     let uctx_mut = ctx as *mut libc::ucontext_t;
-        //     let seh_handled = unsafe { crate::unwind::dispatch_hardware_exception(win_code, fault_addr, uctx_mut) };
-        //     if seh_handled { ... return; }
-        // }
+        // Try to dispatch through SEH. If a handler catches it, the ucontext
+        // is updated and we return from the signal handler to resume PE code.
+        #[cfg(target_arch = "x86_64")]
+        {
+            let uctx_mut = ctx as *mut libc::ucontext_t;
+            let seh_handled = unsafe { crate::unwind::dispatch_hardware_exception(win_code, fault_addr, uctx_mut) };
+            unsafe { libc::write(2, b"weave: sh dispatch returned\n".as_ptr() as *const _, 28); }
+            if seh_handled
+            {
+                // Diagnostic: SEH handler caught the exception — log before resuming.
+                // Use only stack buffers + write() — no heap, no format!, async-signal-safe.
+                let rva = (rip - base) as u32;
+                let mut buf = [0u8; 80];
+                let mut pos = 0usize;
+                let nibble = |n: u64| if n < 10 { b'0' + n as u8 } else { b'a' + n as u8 - 10 };
+                macro_rules! push_bytes {
+                    ($s:expr) => { for &b in $s { if pos < buf.len() { buf[pos] = b; pos += 1; } } };
+                }
+                macro_rules! push_hex16 {
+                    ($v:expr) => { push_bytes!(b"0x"); for sh in (0..16u32).rev() { let n = ($v as u64 >> (sh*4)) & 0xf; if pos < buf.len() { buf[pos] = nibble(n); pos += 1; } } };
+                }
+                macro_rules! push_hex8 {
+                    ($v:expr) => { push_bytes!(b"0x"); for sh in (0..8u32).rev() { let n = ($v as u64 >> (sh*4)) & 0xf; if pos < buf.len() { buf[pos] = nibble(n); pos += 1; } } };
+                }
+                push_bytes!(b"weave: SEH dispatched rip=");
+                push_hex16!(rip);
+                push_bytes!(b" rva=");
+                push_hex8!(rva);
+                push_bytes!(b"\n");
+                unsafe { libc::write(2, buf.as_ptr() as *const libc::c_void, pos) };
+                return; // Handler found — resume at updated RIP
+            }
+        }
 
-        // Fall through to crash report.
+        // No SEH handler found — fall through to crash report.
         let rva = (rip - base) as u32;
         let func_range = find_runtime_function(base, rva);
 
