@@ -10,6 +10,7 @@ pub mod loader;
 pub mod module_handles;
 pub mod pe;
 pub mod prefix;
+pub mod progress;
 pub mod registry;
 pub mod resolve;
 pub mod seh;
