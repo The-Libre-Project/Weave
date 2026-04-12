@@ -4627,6 +4627,9 @@ fn load_library_impl(name: &str) -> usize {
                         eprintln!("weave/kernel32: LoadLibrary({key}): unresolved import {d}!{f} at iat={va:#x}");
                     });
                 }
+                for (fname, &addr) in &exports {
+                    eprintln!("weave: dll export registered: {key}!{fname} → {addr:#x}");
+                }
                 dll_registry::register(key.clone(), image, exports);
                 // HMODULE == image base address (Windows convention).  Register
                 // this so GetProcAddress / GetModuleFileName can map handle→name.
@@ -4915,8 +4918,18 @@ pub unsafe extern "win64" fn get_proc_address(h_module: usize, lp_proc_name: *co
 
     let dll_name = match weave_core::module_handles::lookup(h_module) {
         Some(name) => name,
-        None => return 0,
+        None => {
+            eprintln!("weave/kernel32: GetProcAddress(h={h_module:#x}!{func_name}) → NULL (handle unknown)");
+            return 0;
+        }
     };
+
+    // Check dll_registry first: covers real DLLs loaded from disk via LoadLibrary
+    // (e.g. Scintilla.DLL).  resolve::resolve only knows Weave's synthetic stubs.
+    if let Some(addr) = weave_core::dll_registry::lookup(&dll_name, &func_name) {
+        eprintln!("weave/kernel32: GetProcAddress({dll_name}!{func_name}) → {addr:#x} [dynamic]");
+        return addr;
+    }
 
     match weave_core::resolve::resolve(&dll_name, &func_name) {
         Some(addr) => {

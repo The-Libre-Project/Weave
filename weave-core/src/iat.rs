@@ -93,7 +93,14 @@ pub unsafe extern "win64" fn unresolved_import_stub() -> u64 {
 /// virtual-dispatch pattern `call [rax+N]`, this is the vtable pointer and
 /// `rax_at_call + N` is the IAT slot that was patched.
 extern "win64" fn unresolved_import_stub_log(ret_addr: usize, rax_at_call: usize) {
-    eprintln!("weave: unresolved_import_stub called (ret={ret_addr:#x}, rax={rax_at_call:#x})");
+    // ret_addr: instruction after the call (inside SciTE/caller) — cross-ref
+    //   against startup "unresolved import ... at iat=0x..." listing to identify
+    //   which of the 30 stubs fired.
+    // rax_at_call: for `call [rax+N]` dispatch, rax is the table base; the IAT
+    //   slot is rax+N (N recoverable from the call-site disassembly).
+    eprintln!(
+        "weave: unresolved import stub fired (ret={ret_addr:#x} rax={rax_at_call:#x})"
+    );
 }
 
 /// Like `patch`, but skips unresolved imports rather than failing.
