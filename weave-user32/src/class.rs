@@ -307,6 +307,12 @@ extern "win64" fn builtin_control_wnd_proc(
 ) -> usize {
     match msg {
         0x0081 => 1, // WM_NCCREATE → TRUE
+        // TB_SETBITMAPSIZE (WM_USER+32) — Wine ref: dlls/comctl32/toolbar.c::TOOLBAR_SetBitmapSize
+        // returns TRUE on success; FALSE only if size is invalid (0 args mean "use default").
+        0x0420 => 1,
+        // TB_SETBUTTONSIZEW (WM_USER+50) — Wine ref: dlls/comctl32/toolbar.c::TOOLBAR_SetButtonSize
+        // returns TRUE on success.
+        0x0432 => 1,
         // TB_ADDBUTTONSW (WM_USER+68) — Wine ref: dlls/comctl32/toolbar.c::TOOLBAR_InternalInsertButtonsT
         // returns TRUE on success; SciTE checks this and bails if FALSE.
         0x0444 => 1,

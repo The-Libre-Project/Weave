@@ -896,7 +896,7 @@ pub extern "win64" fn send_message_w(
     let ret = call_wnd_proc(proc_addr, hwnd, msg, w_param, l_param);
     // Log all SendMessageW calls to expose gaps in call sequence (e.g. toolbar/status-bar init).
     eprintln!(
-        "weave/user32: SendMessageW hwnd={hwnd:#x} msg={msg:#06x} wparam={w_param:#x} → {ret:#x}"
+        "weave/user32: SendMessageW hwnd={hwnd:#x} msg={msg:#06x} wparam={w_param:#x} lparam={l_param:#x} → {ret:#x}"
     );
     ret
 }
