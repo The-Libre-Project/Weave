@@ -383,6 +383,8 @@ pub unsafe extern "win64" fn write_console_w(
 // (DLL_PROCESS_DETACH) before calling NtTerminateProcess.
 pub extern "win64" fn exit_process(u_exit_code: u32) -> ! {
     eprintln!("weave/kernel32: ExitProcess({u_exit_code})");
+    let bt = std::backtrace::Backtrace::force_capture();
+    eprintln!("weave/kernel32: ExitProcess backtrace:\n{bt}");
     unsafe { libc::exit(u_exit_code as i32) }
 }
 
