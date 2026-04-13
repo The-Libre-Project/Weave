@@ -1074,12 +1074,6 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "LoadMenuW" => {
             Some(api::load_menu_w as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
         }
-        "SetMenu" => {
-            Some(api::set_menu as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
-        }
-        "GetMenu" => {
-            Some(api::get_menu as unsafe extern "win64" fn(_) -> _ as *const () as usize)
-        }
         "DrawMenuBar" => {
             Some(api::draw_menu_bar as unsafe extern "win64" fn(_) -> _ as *const () as usize)
         }

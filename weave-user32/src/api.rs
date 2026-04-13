@@ -3837,6 +3837,7 @@ pub unsafe extern "win64" fn load_accelerators_w(
     _h_inst: usize,
     _lp_table_name: *const u16,
 ) -> usize {
+    eprintln!("weave/user32: LoadAcceleratorsW → NULL (diag)");
     0 // NULL
 }
 
