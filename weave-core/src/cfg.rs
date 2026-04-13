@@ -682,7 +682,10 @@ fn disable_security_check_cookie(pe_bytes: &[u8], base: *mut u8, security_cookie
 /// Detection: scan executable sections for `MOV edx, STATUS_STACK_BUFFER_OVERRUN`
 /// (BA 09 04 00 C0), which is unique to `__report_gsfailure`. Use pdata to find
 /// the function start, then patch with RET.
-fn disable_report_gsfailure(pe_bytes: &[u8], base: *mut u8) {
+///
+/// Exported so the DLL loader can call it for every loaded DLL — each DLL
+/// compiled with MSVC GS has its own copy of `__report_gsfailure`.
+pub fn disable_report_gsfailure(pe_bytes: &[u8], base: *mut u8) {
     // Signature: MOV edx, STATUS_STACK_BUFFER_OVERRUN (0xC0000409)
     // This appears in two forms:
     //   1. __report_gsfailure — a small dedicated function (<= 128 bytes).

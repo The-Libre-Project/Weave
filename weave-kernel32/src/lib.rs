@@ -4661,6 +4661,11 @@ fn load_library_impl(name: &str) -> usize {
                         eprintln!("weave/kernel32: LoadLibrary({key}): unresolved import {d}!{f} at iat={va:#x}");
                     });
                 }
+                // Patch __report_gsfailure in the loaded DLL to RET so that
+                // MSVC GS epilogue misfires (caused by Linux/Windows ABI cookie
+                // mismatch) do not call TerminateProcess(STATUS_STACK_BUFFER_OVERRUN).
+                // Each MSVC-compiled DLL has its own copy of __report_gsfailure.
+                weave_core::cfg::disable_report_gsfailure(&bytes, image.base);
                 for (fname, &addr) in &exports {
                     eprintln!("weave: dll export registered: {key}!{fname} → {addr:#x}");
                 }

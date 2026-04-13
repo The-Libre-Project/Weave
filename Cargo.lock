@@ -1282,6 +1282,9 @@ dependencies = [
 [[package]]
 name = "weave-comctl32"
 version = "0.0.1"
+dependencies = [
+ "weave-user32",
+]
 
 [[package]]
 name = "weave-common"
