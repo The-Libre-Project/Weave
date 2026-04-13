@@ -415,7 +415,17 @@ pub extern "win64" fn exit_process(u_exit_code: u32) -> ! {
 // SIGKILL via server to the target process; the server sets exit_code
 // then calls process_killed(). Ignores self-termination vs. remote.
 pub unsafe extern "win64" fn terminate_process(_h_process: usize, u_exit_code: u32) -> i32 {
-    eprintln!("weave: TerminateProcess called with exit code {u_exit_code}");
+    let ret_addr: usize;
+    unsafe {
+        core::arch::asm!(
+            "mov {}, [rsp]",
+            out(reg) ret_addr,
+            options(nostack, preserves_flags),
+        );
+    }
+    let base = weave_core::seh::pe_base() as usize;
+    let caller_rva = ret_addr.wrapping_sub(base);
+    eprintln!("weave: TerminateProcess exit_code={u_exit_code:#x} caller_rva={caller_rva:#x}");
     unsafe { libc::exit(u_exit_code as i32) }
 }
 
