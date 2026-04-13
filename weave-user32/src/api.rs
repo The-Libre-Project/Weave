@@ -3721,15 +3721,43 @@ pub unsafe extern "win64" fn child_window_from_point_ex(
     0 // NULL
 }
 
-/// LoadMenuW — load a menu resource (Wide). Returns NULL.
+/// LoadMenuW — load a menu resource (Wide). Returns a fake non-null HMENU handle.
 ///
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
 // Wine ref: dlls/user32/menu.c::MENU_ParseResource — loads RT_MENU resource, creates
 // HMENU via CreateMenu, then walks MENU/MENUEX resource bytes; MENUEX format uses
 // MENUEX_TEMPLATE_ITEM with dwType/dwState/menuId/bResInfo fields.
+// Hypothesis (2026-04-13): returning NULL causes SciTE to call exit(0) immediately
+// after ShowWindow(toolbar) in WM_CREATE — zero Win32 calls, pure C++ null-check path.
 pub unsafe extern "win64" fn load_menu_w(_h_instance: usize, _lp_menu_name: *const u16) -> usize {
-    0 // NULL
+    eprintln!("weave/user32: LoadMenuW → fake 0x1");
+    1 // fake HMENU — non-null so callers don't bail
+}
+
+/// SetMenu — attach or remove a menu from a top-level window.
+///
+/// Returns TRUE. Weave does not render Win32 menus natively; this is a no-op stub.
+///
+/// # Safety
+/// No pointer dereferences.
+// Wine ref: dlls/win32u/menu.c::NtUserSetMenu — stores hMenu in window data,
+// posts WM_NCPAINT for menu-bar repaint; top-level only.
+pub unsafe extern "win64" fn set_menu(hwnd: usize, h_menu: usize) -> i32 {
+    eprintln!("weave/user32: SetMenu hwnd={hwnd:#x} hmenu={h_menu:#x} → TRUE");
+    1 // TRUE
+}
+
+/// GetMenu — retrieve the menu handle for a window.
+///
+/// Returns 0 (NULL). Weave doesn't track menus per-window.
+///
+/// # Safety
+/// No pointer dereferences.
+// Wine ref: dlls/win32u/menu.c::NtUserGetMenu — reads menu field from WND struct.
+pub unsafe extern "win64" fn get_menu(hwnd: usize) -> usize {
+    eprintln!("weave/user32: GetMenu hwnd={hwnd:#x} → NULL");
+    0
 }
 
 /// DrawMenuBar — redraw the menu bar. Returns TRUE.
