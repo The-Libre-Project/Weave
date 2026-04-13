@@ -3667,19 +3667,56 @@ pub unsafe extern "win64" fn get_window_text_length_w(_hwnd: usize) -> i32 {
 
 /// SystemParametersInfoW — query or set system-wide parameters (Wide).
 ///
-/// Returns FALSE — stub.
-///
 /// # Safety
-/// Pointer arguments are accepted but not dereferenced.
-// Wine ref: dlls/win32u/sysparams.c — handles ~120 SPI_* actions; reads/writes system
-// metrics, font smoothing, mouse settings; updates registry if SPIF_UPDATEINIFILE set;
-// sends WM_SETTINGCHANGE broadcast if SPIF_SENDCHANGE set.
+/// pv_param is written for GET actions; caller must provide a valid buffer.
+// Wine ref: dlls/win32u/sysparams.c::NtUserSystemParametersInfo —
+// SPI_GETICONTITLELOGFONT: calls get_font_entry(&entry_ICONTITLELOGFONT,...) which
+// falls back to DEFAULT_GUI_FONT with lfCharSet=DEFAULT_CHARSET, lfHeight mapped from
+// system DPI (typically -11 at 96dpi), lfWeight from entry default (FW_NORMAL=400),
+// copies full LOGFONTW into ptr_param, returns TRUE. SciTE calls this with
+// uiParam=sizeof(LOGFONTW)=92 and exits immediately on FALSE return (RVA 0x777ab).
 pub unsafe extern "win64" fn system_parameters_info_w(
-    _u_action: u32,
+    u_action: u32,
     _u_param: u32,
-    _pv_param: *mut u8,
+    pv_param: *mut u8,
     _f_win_ini: u32,
 ) -> i32 {
+    // SPI_GETICONTITLELOGFONT = 0x1f (31)
+    // Fill a LOGFONTW with the system icon-title font. SciTE exits(0) if this
+    // returns FALSE. LOGFONTW layout (92 bytes, all little-endian):
+    //   +0x00 i32 lfHeight        (4)
+    //   +0x04 i32 lfWidth         (4)
+    //   +0x08 i32 lfEscapement    (4)
+    //   +0x0c i32 lfOrientation   (4)
+    //   +0x10 i32 lfWeight        (4)
+    //   +0x14 u8  lfItalic        (1)
+    //   +0x15 u8  lfUnderline     (1)
+    //   +0x16 u8  lfStrikeOut     (1)
+    //   +0x17 u8  lfCharSet       (1)
+    //   +0x18 u8  lfOutPrecision  (1)
+    //   +0x19 u8  lfClipPrecision (1)
+    //   +0x1a u8  lfQuality       (1)
+    //   +0x1b u8  lfPitchAndFamily(1)
+    //   +0x1c u16 lfFaceName[32]  (64)  total = 92 = 0x5c
+    if u_action == 0x1f {
+        if pv_param.is_null() {
+            return 0;
+        }
+        std::ptr::write_bytes(pv_param, 0, 92);
+        let p32 = pv_param as *mut i32;
+        *p32.add(0) = -11; // lfHeight: 11pt at 96dpi (Wine default)
+        *p32.add(1) = 0;   // lfWidth
+        *p32.add(2) = 0;   // lfEscapement
+        *p32.add(3) = 0;   // lfOrientation
+        *p32.add(4) = 400; // lfWeight: FW_NORMAL
+        *pv_param.add(0x17) = 1; // lfCharSet: DEFAULT_CHARSET
+        // lfFaceName = L"Segoe UI" at offset 0x1c
+        let face: &[u16] = &[0x53, 0x65, 0x67, 0x6f, 0x65, 0x20, 0x55, 0x49, 0]; // "Segoe UI\0"
+        std::ptr::copy_nonoverlapping(face.as_ptr(), pv_param.add(0x1c) as *mut u16, face.len());
+        eprintln!("weave/user32: SystemParametersInfoW(SPI_GETICONTITLELOGFONT) → TRUE");
+        return 1; // TRUE
+    }
+    eprintln!("weave/user32: SystemParametersInfoW(u_action={u_action:#x}) → FALSE (stub)");
     0 // FALSE
 }
 
