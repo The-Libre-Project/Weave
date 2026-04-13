@@ -1227,7 +1227,7 @@ pub unsafe extern "win64" fn end_paint(_hwnd: usize, _lp_paint: *const PaintStru
 /// SM_CXDLGFRAME(3) + max(border,1) = 4; SM_CXICON/SM_CYICON = map_to_dpi(32,...).
 pub extern "win64" fn get_system_metrics(n_index: i32) -> i32 {
     let (sw, sh) = backend::screen_size();
-    match n_index {
+    let result = match n_index {
         SM_CXSCREEN => sw as i32,
         SM_CYSCREEN => sh as i32,
         SM_CXFULLSCREEN => sw as i32,
@@ -1244,7 +1244,9 @@ pub extern "win64" fn get_system_metrics(n_index: i32) -> i32 {
         SM_CXEDGE => 2, // Wine: SM_CXBORDER + 1
         SM_CYEDGE => 2,
         _ => 0,
-    }
+    };
+    eprintln!("weave/user32: GetSystemMetrics({n_index}) → {result}");
+    result
 }
 
 /// GetSystemMetricsForDpi: DPI-aware variant of GetSystemMetrics.
