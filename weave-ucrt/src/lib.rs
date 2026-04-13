@@ -248,6 +248,7 @@ pub unsafe extern "win64" fn ucrt_wcsnicmp(s1: *const u16, s2: *const u16, n: us
 // ── Process / runtime ─────────────────────────────────────────────────────────
 
 pub extern "win64" fn ucrt_exit(code: i32) -> ! {
+    eprintln!("weave/ucrt: exit({code}) called");
     unsafe { libc::exit(code) }
 }
 
