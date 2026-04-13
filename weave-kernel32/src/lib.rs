@@ -415,18 +415,28 @@ pub extern "win64" fn exit_process(u_exit_code: u32) -> ! {
 // SIGKILL via server to the target process; the server sets exit_code
 // then calls process_killed(). Ignores self-termination vs. remote.
 pub unsafe extern "win64" fn terminate_process(_h_process: usize, u_exit_code: u32) -> i32 {
-    let ret_addr: usize;
+    // [rsp] is unreliable here — Rust's function prologue adjusts RSP before
+    // any user code runs, so [rsp] no longer points to the return address.
+    // Use the same stack scan as exit_process: walk RSP+0..8192 and print all
+    // values that fall inside SciTE.exe .text to identify every call frame.
+    const SCITE_BASE: usize = 0x140000000;
+    const SCITE_TEXT_LO: usize = 0x140001000;
+    const SCITE_TEXT_HI: usize = 0x14011e5d0;
     unsafe {
-        core::arch::asm!(
-            "mov {}, [rsp]",
-            out(reg) ret_addr,
-            options(nostack, preserves_flags),
+        let rsp: usize;
+        std::arch::asm!("mov {}, rsp", out(reg) rsp);
+        eprintln!(
+            "weave: TerminateProcess exit_code={u_exit_code:#x} — stack scan (rsp={rsp:#018x}):"
         );
+        for offset in (0..8192usize).step_by(8) {
+            let ptr = (rsp + offset) as *const usize;
+            let val = *ptr;
+            if val >= SCITE_TEXT_LO && val < SCITE_TEXT_HI {
+                eprintln!("  rsp+{offset:#06x}: {val:#018x}  rva={:#010x}", val - SCITE_BASE);
+            }
+        }
+        libc::exit(u_exit_code as i32)
     }
-    let base = weave_core::seh::pe_base() as usize;
-    let caller_rva = ret_addr.wrapping_sub(base);
-    eprintln!("weave: TerminateProcess exit_code={u_exit_code:#x} caller_rva={caller_rva:#x}");
-    unsafe { libc::exit(u_exit_code as i32) }
 }
 
 /// GetLastError: return the calling thread's last error code.
