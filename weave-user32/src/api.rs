@@ -3922,19 +3922,70 @@ pub unsafe extern "win64" fn load_bitmap_w(
 
 /// GetClassInfoW — retrieve information about a registered window class (Wide).
 ///
-/// Returns FALSE — stub.
+/// Looks up the class in Weave's class registry. Returns TRUE if found and fills
+/// `lp_wnd_class`; returns FALSE if the class does not exist.
 ///
 /// # Safety
-/// Pointer arguments are accepted but not dereferenced.
+/// `lp_class_name` must be a valid null-terminated UTF-16 string or an ATOM cast to pointer.
+/// `lp_wnd_class` must point to a writable `WNDCLASSW` struct (72 bytes) or be null.
 // Wine ref: dlls/user32/class.c — calls NtUserGetClassInfoEx; searches per-instance then
 // global class list; fills WNDCLASSEXW; lpszMenuName returned as atom or pointer;
 // returns FALSE + ERROR_CLASS_DOES_NOT_EXIST if not found.
 pub unsafe extern "win64" fn get_class_info_w(
     _h_instance: usize,
-    _lp_class_name: *const u16,
-    _lp_wnd_class: *mut u8,
+    lp_class_name: *const u16,
+    lp_wnd_class: *mut u8,
 ) -> i32 {
-    0 // FALSE
+    // ATOM inputs (LOWORD < 0xC000, HIWORD == 0) are not yet supported — treat as not found.
+    let name = if lp_class_name.is_null()
+        || (lp_class_name as usize) < 0xC000
+    {
+        eprintln!("weave/user32: GetClassInfoW(atom/null) → FALSE");
+        return 0;
+    } else {
+        unsafe { decode_wide(lp_class_name) }
+    };
+
+    let entry = class::find(&name);
+    eprintln!(
+        "weave/user32: GetClassInfoW({:?}) → {}",
+        name,
+        if entry.is_some() { "TRUE" } else { "FALSE" }
+    );
+    let entry = match entry {
+        Some(e) => e,
+        None => return 0,
+    };
+
+    if !lp_wnd_class.is_null() {
+        // Fill WNDCLASSW (72 bytes, Win64 layout — see defs.rs WndClassW):
+        //   offset  0: style (u32)
+        //   offset  4: _pad  (u32) — zero
+        //   offset  8: lpfnWndProc (usize)
+        //   offset 16: cbClsExtra (i32) — zero
+        //   offset 20: cbWndExtra (i32)
+        //   offset 24: hInstance (usize) — zero
+        //   offset 32: hIcon (usize) — zero
+        //   offset 40: hCursor (usize)
+        //   offset 48: hbrBackground (usize)
+        //   offset 56: lpszMenuName (*const u16) — null
+        //   offset 64: lpszClassName (*const u16) — null (caller already knows)
+        let p = lp_wnd_class;
+        unsafe {
+            *(p.add(0) as *mut u32) = entry.style;
+            *(p.add(4) as *mut u32) = 0;
+            *(p.add(8) as *mut usize) = entry.wnd_proc;
+            *(p.add(16) as *mut i32) = 0;
+            *(p.add(20) as *mut i32) = entry.cb_wnd_extra as i32;
+            *(p.add(24) as *mut usize) = 0;
+            *(p.add(32) as *mut usize) = 0;
+            *(p.add(40) as *mut usize) = entry.h_cursor;
+            *(p.add(48) as *mut usize) = entry.hbr_background;
+            *(p.add(56) as *mut usize) = 0;
+            *(p.add(64) as *mut usize) = 0;
+        }
+    }
+    1 // TRUE
 }
 
 /// CallWindowProcW — pass a message to the specified window procedure (Wide).
