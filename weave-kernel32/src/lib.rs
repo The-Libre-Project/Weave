@@ -383,12 +383,22 @@ pub unsafe extern "win64" fn write_console_w(
 // (DLL_PROCESS_DETACH) before calling NtTerminateProcess.
 pub extern "win64" fn exit_process(u_exit_code: u32) -> ! {
     eprintln!("weave/kernel32: ExitProcess({u_exit_code})");
+    // Raw stack scan: libc::backtrace can't unwind PE frames (no frame pointers).
+    // Scan RSP+0..RSP+8192 for values in SciTE.exe .text [VAddr 0x1000, size 0x11d5d0].
+    // SciTE preferred base = 0x140000000; .text = [0x140001000, 0x14011e5d0].
+    const SCITE_BASE: usize = 0x140000000;
+    const SCITE_TEXT_LO: usize = 0x140001000;
+    const SCITE_TEXT_HI: usize = 0x14011e5d0;
     unsafe {
-        let mut frames = [std::ptr::null_mut::<libc::c_void>(); 64];
-        let count = libc::backtrace(frames.as_mut_ptr(), 64);
-        eprintln!("weave/kernel32: ExitProcess stack ({count} frames):");
-        for i in 0..count as usize {
-            eprintln!("  [{i:2}] {:#018x}", frames[i] as usize);
+        let rsp: usize;
+        std::arch::asm!("mov {}, rsp", out(reg) rsp);
+        eprintln!("weave/kernel32: ExitProcess stack scan (rsp={rsp:#018x}):");
+        for offset in (0..8192usize).step_by(8) {
+            let ptr = (rsp + offset) as *const usize;
+            let val = *ptr;
+            if val >= SCITE_TEXT_LO && val < SCITE_TEXT_HI {
+                eprintln!("  rsp+{offset:#06x}: {val:#018x}  rva={:#010x}", val - SCITE_BASE);
+            }
         }
         libc::exit(u_exit_code as i32)
     }
