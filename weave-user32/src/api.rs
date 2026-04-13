@@ -3684,6 +3684,10 @@ pub unsafe extern "win64" fn system_parameters_info_w(
     // SPI_GETICONTITLELOGFONT = 0x1f (31)
     // Fill a LOGFONTW with the system icon-title font. SciTE exits(0) if this
     // returns FALSE. LOGFONTW layout (92 bytes, all little-endian):
+    eprintln!(
+        "weave/user32: SystemParametersInfoW ENTRY u_action={u_action:#x} pv_param={:?}",
+        pv_param
+    );
     //   +0x00 i32 lfHeight        (4)
     //   +0x04 i32 lfWidth         (4)
     //   +0x08 i32 lfEscapement    (4)
