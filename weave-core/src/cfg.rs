@@ -683,9 +683,18 @@ fn disable_security_check_cookie(pe_bytes: &[u8], base: *mut u8, security_cookie
 /// (BA 09 04 00 C0), which is unique to `__report_gsfailure`. Use pdata to find
 /// the function start, then patch with RET.
 fn disable_report_gsfailure(pe_bytes: &[u8], base: *mut u8) {
-    // STATUS_STACK_BUFFER_OVERRUN = 0xC0000409
+    // Signature: MOV edx, STATUS_STACK_BUFFER_OVERRUN (0xC0000409)
+    // This appears in two forms:
+    //   1. __report_gsfailure — a small dedicated function (<= 128 bytes).
+    //      Patch: write RET at the function entry so it returns immediately.
+    //   2. Inline GS epilogue inside a large function (> 128 bytes).
+    //      The compiler inlines `MOV edx,0xC0000409; ...; CALL [TerminateProcess]`
+    //      directly.  Patch: NOP out the CALL instruction (FF 15 or E8).
+    // Both patterns must be suppressed — leaving either active causes a
+    // STATUS_STACK_BUFFER_OVERRUN termination on ABI-induced cookie mismatches.
     let sig: [u8; 5] = [0xBA, 0x09, 0x04, 0x00, 0xC0];
     let base_usize = base as usize;
+    let page_size = 4096usize;
 
     let pe_off = match read_u32(pe_bytes, 0x3c) {
         Some(x) => x as usize,
@@ -696,6 +705,7 @@ fn disable_report_gsfailure(pe_bytes: &[u8], base: *mut u8) {
         None => return,
     };
     let sec_table_off = pe_off + 24 + 240;
+    let mut patched = 0u32;
 
     for i in 0..num_sections {
         let s = sec_table_off + i * 40;
@@ -735,34 +745,109 @@ fn disable_report_gsfailure(pe_bytes: &[u8], base: *mut u8) {
                 None => continue,
             };
             let func_len = end.saturating_sub(begin) as usize;
-            // __report_gsfailure is small (< 128 bytes) and calls TerminateProcess
-            if func_len > 128 {
-                continue;
-            }
-            let func_va = base_usize + begin as usize;
-            let page_size = 4096usize;
-            let page_base = (func_va & !(page_size - 1)) as *mut libc::c_void;
-            unsafe {
-                libc::mprotect(
-                    page_base,
-                    page_size,
-                    libc::PROT_READ | libc::PROT_WRITE | libc::PROT_EXEC,
+
+            if func_len <= 128 {
+                // Dedicated __report_gsfailure — patch entry to RET.
+                let func_va = base_usize + begin as usize;
+                let page_base = (func_va & !(page_size - 1)) as *mut libc::c_void;
+                unsafe {
+                    libc::mprotect(
+                        page_base,
+                        page_size,
+                        libc::PROT_READ | libc::PROT_WRITE | libc::PROT_EXEC,
+                    );
+                    (func_va as *mut u8).write(0xC3); // RET
+                    libc::mprotect(page_base, page_size, libc::PROT_READ | libc::PROT_EXEC);
+                }
+                eprintln!(
+                    "weave: CFG: disabled __report_gsfailure at {func_va:#x} \
+                     (rva {begin:#x}) with RET"
                 );
-                (func_va as *mut u8).write(0xC3); // RET
-                libc::mprotect(page_base, page_size, libc::PROT_READ | libc::PROT_EXEC);
+                patched += 1;
+            } else {
+                // Inline GS epilogue inside a large function — NOP the CALL.
+                // Scan up to 24 bytes after the MOV edx signature for a
+                // CALL [rip+offset] (FF 15 xx xx xx xx, 6 bytes) or a direct
+                // CALL rel32 (E8 xx xx xx xx, 5 bytes).
+                let sig_va = base_usize + sec_va + offset;
+                let lookahead_len = 24usize;
+                let lookahead_end = (offset + sig.len() + lookahead_len).min(sec_bytes.len());
+                let lookahead = &sec_bytes[offset + sig.len()..lookahead_end];
+
+                let mut found = false;
+                for k in 0..lookahead.len() {
+                    let call_va = sig_va + sig.len() + k;
+                    let call_rva = call_va - base_usize;
+                    if lookahead.len() > k + 5 && lookahead[k] == 0xFF && lookahead[k + 1] == 0x15
+                    {
+                        // CALL [rip+offset] — 6 bytes
+                        let page_base = (call_va & !(page_size - 1)) as *mut libc::c_void;
+                        unsafe {
+                            libc::mprotect(
+                                page_base,
+                                page_size * 2,
+                                libc::PROT_READ | libc::PROT_WRITE | libc::PROT_EXEC,
+                            );
+                            for j in 0..6usize {
+                                ((call_va + j) as *mut u8).write(0x90); // NOP
+                            }
+                            libc::mprotect(
+                                page_base,
+                                page_size * 2,
+                                libc::PROT_READ | libc::PROT_EXEC,
+                            );
+                        }
+                        eprintln!(
+                            "weave: CFG: NOPed inline GS epilogue CALL [mem] at \
+                             {call_va:#x} (rva {call_rva:#x})"
+                        );
+                        patched += 1;
+                        found = true;
+                        break;
+                    } else if lookahead.len() > k + 4 && lookahead[k] == 0xE8 {
+                        // CALL rel32 — 5 bytes
+                        let page_base = (call_va & !(page_size - 1)) as *mut libc::c_void;
+                        unsafe {
+                            libc::mprotect(
+                                page_base,
+                                page_size * 2,
+                                libc::PROT_READ | libc::PROT_WRITE | libc::PROT_EXEC,
+                            );
+                            for j in 0..5usize {
+                                ((call_va + j) as *mut u8).write(0x90); // NOP
+                            }
+                            libc::mprotect(
+                                page_base,
+                                page_size * 2,
+                                libc::PROT_READ | libc::PROT_EXEC,
+                            );
+                        }
+                        eprintln!(
+                            "weave: CFG: NOPed inline GS epilogue CALL rel32 at \
+                             {call_va:#x} (rva {call_rva:#x})"
+                        );
+                        patched += 1;
+                        found = true;
+                        break;
+                    }
+                }
+                if !found {
+                    eprintln!(
+                        "weave: CFG: warning: MOV edx,0xC0000409 at rva {:#x} in large \
+                         function (len={func_len}) — no CALL within 24 bytes",
+                        sec_va + offset
+                    );
+                }
             }
-            eprintln!(
-                "weave: CFG: disabled __report_gsfailure at {func_va:#x} \
-                 (rva {begin:#x}) with RET"
-            );
-            return;
         }
     }
 
-    eprintln!(
-        "weave: CFG: warning: __report_gsfailure not patched — \
-         no MOV edx,STATUS_STACK_BUFFER_OVERRUN found"
-    );
+    if patched == 0 {
+        eprintln!(
+            "weave: CFG: warning: __report_gsfailure not patched — \
+             no MOV edx,STATUS_STACK_BUFFER_OVERRUN found"
+        );
+    }
 }
 
 /// Scan the .00cfg section of the loaded PE image and patch every non-zero
