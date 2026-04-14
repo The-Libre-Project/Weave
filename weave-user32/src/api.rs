@@ -894,12 +894,28 @@ pub extern "win64" fn send_message_w(
         }
     };
     let ret = call_wnd_proc(proc_addr, hwnd, msg, w_param, l_param);
+    // Store Scintilla direct-call interface so BeginPaint can probe via direct fn (not WndProc).
+    // SCI_GETDIRECTFUNCTION=2184(0x888) returns fn ptr; SCI_GETDIRECTPOINTER=2185(0x889) returns sci*.
+    // TODO: remove once NPP Gate 6 is green.
+    if msg == 2184 && ret != 0 {
+        SCI_DIRECT_FN.store(ret as usize, std::sync::atomic::Ordering::Relaxed);
+    }
+    if msg == 2185 && ret != 0 {
+        SCI_DIRECT_PTR.store(ret as usize, std::sync::atomic::Ordering::Relaxed);
+    }
     // Log all SendMessageW calls to expose gaps in call sequence (e.g. toolbar/status-bar init).
     eprintln!(
         "weave/user32: SendMessageW hwnd={hwnd:#x} msg={msg:#06x} wparam={w_param:#x} lparam={l_param:#x} → {ret:#x}"
     );
     ret
 }
+
+/// Stored Scintilla direct function pointer (SCI_GETDIRECTFUNCTION result).
+/// Used in BeginPaint to probe document state bypassing WndProc path.
+/// TODO: remove once NPP Gate 6 is green.
+static SCI_DIRECT_FN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// Stored Scintilla direct pointer / sci* (SCI_GETDIRECTPOINTER result).
+static SCI_DIRECT_PTR: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 /// SendMessageTimeoutW: send a message to a window with a timeout.
 ///
@@ -1178,10 +1194,21 @@ pub unsafe extern "win64" fn begin_paint(hwnd: usize, lp_paint: *mut PaintStruct
         let n = BP_SCI.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let is_sci = window::with(hwnd, |e| e.class_name == "Scintilla").unwrap_or(false);
         if is_sci && (n < 20 || n.is_multiple_of(5)) {
-            let doc_len = send_message_w(hwnd, 2006, 0, 0); // SCI_GETLENGTH
+            let doc_len = send_message_w(hwnd, 2006, 0, 0); // SCI_GETLENGTH via WndProc
             let status = send_message_w(hwnd, 2173, 0, 0); // SCI_GETSTATUS (0=ok, non-zero=error)
             let xcb = window::xcb_id(hwnd);
-            eprintln!("weave/user32: BeginPaint Scintilla hwnd={hwnd:#x} xcb={xcb:#x} paint#{n} SCI_GETLENGTH={doc_len} SCI_GETSTATUS={status}");
+            // Also call via direct function interface to distinguish WndProc bug from empty doc.
+            let direct_fn = SCI_DIRECT_FN.load(std::sync::atomic::Ordering::Relaxed);
+            let direct_ptr = SCI_DIRECT_PTR.load(std::sync::atomic::Ordering::Relaxed);
+            let direct_len = if direct_fn != 0 && direct_ptr != 0 {
+                // directFn(sci*, SCI_GETLENGTH=2006, 0, 0) — same signature as WndProc.
+                type DirectFn = unsafe extern "win64" fn(usize, u32, usize, isize) -> isize;
+                let f: DirectFn = unsafe { std::mem::transmute(direct_fn) };
+                unsafe { f(direct_ptr, 2006, 0, 0) }
+            } else {
+                -1
+            };
+            eprintln!("weave/user32: BeginPaint Scintilla hwnd={hwnd:#x} xcb={xcb:#x} paint#{n} SCI_GETLENGTH={doc_len} direct_len={direct_len} SCI_GETSTATUS={status}");
         }
     }
     if !lp_paint.is_null() {
