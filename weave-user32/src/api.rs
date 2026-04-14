@@ -1016,16 +1016,23 @@ pub unsafe extern "win64" fn sci_direct_fn_proxy(
     let ret = unsafe { f(sci, msg, wparam, lparam, p_status) };
 
     if !msg_name.is_empty() || (2000..=3000).contains(&msg) {
-        // For key text-storage messages, also log p_status to detect failure.
-        // SCI_APPENDTEXT (2282) returns 1 on success, 0 on failure.
-        // SCI_CLEARALL (2004), SCI_GETLENGTH (2006), SCI_SETREADONLY (2046) also logged.
-        if matches!(msg, 2282 | 2004 | 2006 | 2046) && !p_status.is_null() {
+        // SCI_SETREADONLY (2046): log ret and wParam only — do NOT dereference p_status.
+        // p_status is not a valid output pointer for SCI_SETREADONLY; dereferencing it
+        // caused a SIGSEGV on the VM when p_status was non-null but unmapped.
+        if msg == 2046 {
+            eprintln!(
+                "weave/sci_proxy:   → ret={ret:#x} readonly_set={} (SCI_SETREADONLY)",
+                wparam != 0,
+            );
+        // For SCI_CLEARALL (2004), SCI_GETLENGTH (2006), SCI_APPENDTEXT (2282):
+        // log p_status only when non-null (those messages do use the status slot).
+        } else if matches!(msg, 2282 | 2004 | 2006) && !p_status.is_null() {
             let status_val = unsafe { *p_status };
             eprintln!(
                 "weave/sci_proxy:   → ret={ret:#x} status={status_val:#x} (msg={msg}({}))",
                 if msg_name.is_empty() { "?" } else { msg_name }
             );
-        } else if matches!(msg, 2282 | 2004 | 2006 | 2046) {
+        } else if matches!(msg, 2282 | 2004 | 2006) {
             eprintln!(
                 "weave/sci_proxy:   → ret={ret:#x} status=null (msg={msg}({}))",
                 if msg_name.is_empty() { "?" } else { msg_name }
