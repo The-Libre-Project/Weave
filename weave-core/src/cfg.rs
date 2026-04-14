@@ -151,6 +151,12 @@ pub fn setup(pe_bytes: &[u8], base: *mut u8) {
     // Inline checks JMP directly to __report_gsfailure on cookie mismatch.
     disable_report_gsfailure(pe_bytes, base);
 
+    // Also disable __fastfail(FAST_FAIL_STACK_COOKIE_CHECK_FAILURE) — the newer
+    // MSVC GS epilogue pattern that emits `int $0x29` instead of calling
+    // __report_gsfailure.  On Linux, int $0x29 fires SIGSEGV with fault=0x0.
+    // Same ABI-induced false-positive as above; patch the int to nop nop.
+    disable_fastfail_gs(pe_bytes, base);
+
     // Patch _guard_check_icall_fptr and _guard_dispatch_icall_fptr to our stub.
     // Both slots are writable .data-like pages (in the .00cfg section which is r+w on Linux
     // after mprotect). We temporarily make them writable if needed.
@@ -848,6 +854,92 @@ pub fn disable_report_gsfailure(pe_bytes: &[u8], base: *mut u8) {
             "weave: CFG: warning: __report_gsfailure not patched — \
              no MOV edx,STATUS_STACK_BUFFER_OVERRUN found"
         );
+    }
+}
+
+/// Scan executable sections for MSVC's newer GS fast-fail pattern and NOP it.
+///
+/// Newer MSVC compilers emit `MOV ecx, 0xd; INT 0x29` (7 bytes: B9 0D 00 00 00
+/// CD 29) for `__fastfail(FAST_FAIL_STACK_COOKIE_CHECK_FAILURE)` instead of
+/// calling `__report_gsfailure`.  On Linux, `INT 0x29` fires SIGSEGV with
+/// fault=0x0 — same ABI-induced false-positive as the __report_gsfailure path.
+///
+/// Patch: replace the two-byte `CD 29` (int $0x29) with `90 90` (nop nop).
+///
+/// Exported so the DLL loader can call it for every loaded DLL.
+pub fn disable_fastfail_gs(pe_bytes: &[u8], base: *mut u8) {
+    // Pattern: MOV ecx, 0xd (B9 0D 00 00 00) followed by INT 0x29 (CD 29)
+    let sig: [u8; 7] = [0xB9, 0x0D, 0x00, 0x00, 0x00, 0xCD, 0x29];
+    let base_usize = base as usize;
+    let page_size = 4096usize;
+
+    let pe_off = match read_u32(pe_bytes, 0x3c) {
+        Some(x) => x as usize,
+        None => return,
+    };
+    let num_sections = match read_u16(pe_bytes, pe_off + 6) {
+        Some(x) => x as usize,
+        None => return,
+    };
+    let sec_table_off = pe_off + 24 + 240;
+    let mut patched = 0u32;
+
+    for i in 0..num_sections {
+        let s = sec_table_off + i * 40;
+        let characteristics = match read_u32(pe_bytes, s + 36) {
+            Some(x) => x,
+            None => continue,
+        };
+        if characteristics & 0x2000_0000 == 0 {
+            continue; // not executable
+        }
+        let sec_va = match read_u32(pe_bytes, s + 12) {
+            Some(x) => x as usize,
+            None => continue,
+        };
+        let sec_fsz = match read_u32(pe_bytes, s + 16) {
+            Some(x) => x as usize,
+            None => continue,
+        };
+        let sec_foff = match read_u32(pe_bytes, s + 20) {
+            Some(x) => x as usize,
+            None => continue,
+        };
+        if sec_foff >= pe_bytes.len() || sec_fsz < sig.len() {
+            continue;
+        }
+        let avail = pe_bytes.len() - sec_foff;
+        let scan_len = sec_fsz.min(avail) - sig.len();
+        let sec_bytes = &pe_bytes[sec_foff..sec_foff + scan_len + sig.len()];
+
+        for offset in 0..=scan_len {
+            if sec_bytes[offset..offset + sig.len()] != sig {
+                continue;
+            }
+            // Found the pattern.  NOP out the CD 29 (bytes at offset+5 and offset+6).
+            let int29_va = base_usize + sec_va + offset + 5;
+            let int29_rva = sec_va + offset + 5;
+            let page_base = (int29_va & !(page_size - 1)) as *mut libc::c_void;
+            unsafe {
+                libc::mprotect(
+                    page_base,
+                    page_size,
+                    libc::PROT_READ | libc::PROT_WRITE | libc::PROT_EXEC,
+                );
+                (int29_va as *mut u8).write(0x90); // NOP
+                ((int29_va + 1) as *mut u8).write(0x90); // NOP
+                libc::mprotect(page_base, page_size, libc::PROT_READ | libc::PROT_EXEC);
+            }
+            eprintln!(
+                "weave: CFG: NOPed __fastfail(GS) int $0x29 at {int29_va:#x} \
+                 (rva {int29_rva:#x})"
+            );
+            patched += 1;
+        }
+    }
+
+    if patched == 0 {
+        eprintln!("weave: CFG: no __fastfail(GS) int $0x29 patterns found (not an error)");
     }
 }
 

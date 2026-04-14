@@ -4670,6 +4670,8 @@ fn load_library_impl(name: &str) -> usize {
                 // mismatch) do not call TerminateProcess(STATUS_STACK_BUFFER_OVERRUN).
                 // Each MSVC-compiled DLL has its own copy of __report_gsfailure.
                 weave_core::cfg::disable_report_gsfailure(&bytes, image.base);
+                // Also patch the newer MSVC GS fast-fail pattern (int $0x29).
+                weave_core::cfg::disable_fastfail_gs(&bytes, image.base);
                 for (fname, &addr) in &exports {
                     eprintln!("weave: dll export registered: {key}!{fname} → {addr:#x}");
                 }
