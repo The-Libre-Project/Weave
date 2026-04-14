@@ -199,11 +199,20 @@ pub extern "win64" fn select_object(hdc: usize, h_gdi_obj: usize) -> usize {
                     dc.selected_bitmap = h_gdi_obj;
                     if dc.pixmap.is_none() {
                         let parent_draw = dc.drawable();
-                        dc.pixmap = Some(weave_user32::backend::create_pixmap(
+                        let pid = weave_user32::backend::create_pixmap(
                             parent_draw,
                             *width as u16,
                             *height as u16,
-                        ));
+                        );
+                        // Only store a non-zero pixmap ID.  If create_pixmap fails
+                        // (returns 0) leave dc.pixmap as None so drawable() falls
+                        // back to xcb_id(hwnd) rather than returning 0, which would
+                        // silently discard all draw calls to this DC.
+                        // Wine ref: dlls/winex11.drv/bitmap.c — X11DRV_CreateBitmap
+                        // fails gracefully; callers fall back to display DC drawing.
+                        if pid != 0 {
+                            dc.pixmap = Some(pid);
+                        }
                     }
                 }
                 GdiKind::Region => {
@@ -602,8 +611,10 @@ pub unsafe extern "win64" fn ext_text_out_w(
     {
         static ETO_ALL: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
         let n = ETO_ALL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        // Always log if: first 20 calls, OR c>0 (actual text), OR xcb matches known Scintilla pixmaps
-        if n < 20 || c > 0 || xcb >= 0x2006a0 {
+        // Always log first 20 calls and ALL calls with c>0 (actual text glyphs).
+        // Previously also filtered on xcb>=0x2006a0 but that threshold is
+        // run-specific and causes silent loss of c>0 log entries when xcb==0.
+        if n < 20 || c > 0 {
             eprintln!(
                 "weave/gdi32: ExtTextOutW#{n} hdc={hdc:#x} xcb={xcb:#x} c={c} options={options:#x}"
             );
@@ -2163,11 +2174,22 @@ pub unsafe extern "win64" fn get_text_extent_ex_point_w(
         }
     }
 
+    let nfit_out = if check_max { fit_count } else { c as i32 };
+    {
+        static GTEX: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let m = GTEX.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // Log first 5 calls and any call where nFit < cch (chars were clipped).
+        if m < 5 || (check_max && nfit_out < c as i32) {
+            eprintln!(
+                "weave/gdi32: GetTextExtentExPointW#{m} hdc={hdc:#x} cch={c} max={n_max_extent} char_w={char_w} → fit={nfit_out} cx={cum}"
+            );
+        }
+    }
     unsafe {
         (*lp_size).cx = cum;
         (*lp_size).cy = fm.height;
         if !lp_nfit.is_null() {
-            *lp_nfit = if check_max { fit_count } else { c as i32 };
+            *lp_nfit = nfit_out;
         }
     }
     1
