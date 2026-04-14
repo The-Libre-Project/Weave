@@ -1131,27 +1131,43 @@ pub unsafe extern "win64" fn sci_direct_fn_proxy(
                 );
             }
 
-            // sci+0x18 — offset 3 words
-            let cand_0x18 = unsafe { *sci_ptr.add(3) };
-            if cand_0x18 > 0x0005_0000_0000_0000_usize && cand_0x18 < 0x0008_0000_0000_0000_usize {
-                let len = unsafe {
-                    real_fn(
-                        cand_0x18,
-                        2006, /*SCI_GETLENGTH*/
-                        0,
-                        0,
-                        std::ptr::null_mut(),
-                    )
-                };
+            // sci+0x18 — offset 3 words (no filter: test unconditionally as sci pointer)
+            let ptr_at_0x18 = unsafe { *sci_ptr.add(3) };
+            if ptr_at_0x18 != 0 {
+                let len_at_0x18 = unsafe { real_fn(ptr_at_0x18, 2006, 0, 0, std::ptr::null_mut()) };
+                let doc_at_0x18 = unsafe { real_fn(ptr_at_0x18, 2268, 0, 0, std::ptr::null_mut()) };
                 eprintln!(
-                    "weave/sci_proxy: sci+0x18 deref call → SCI_GETLENGTH={len} \
-                     (cand={cand_0x18:#x})"
+                    "weave/sci_proxy: sci+0x18 deref = {ptr_at_0x18:#x} → len={len_at_0x18} \
+                     doc={doc_at_0x18:#x}"
                 );
             } else {
+                eprintln!("weave/sci_proxy: sci+0x18 deref = 0 (null, skipped)");
+            }
+
+            // sci+0x58 — offset 11 words (had heap-looking address 0x555555d45cb0)
+            let ptr_at_0x58 = unsafe { *sci_ptr.add(11) };
+            if ptr_at_0x58 != 0 {
+                let len_at_0x58 = unsafe { real_fn(ptr_at_0x58, 2006, 0, 0, std::ptr::null_mut()) };
+                let doc_at_0x58 = unsafe { real_fn(ptr_at_0x58, 2268, 0, 0, std::ptr::null_mut()) };
                 eprintln!(
-                    "weave/sci_proxy: sci+0x18 deref call skipped — not heap addr \
-                     ({cand_0x18:#x})"
+                    "weave/sci_proxy: sci+0x58 deref = {ptr_at_0x58:#x} → len={len_at_0x58} \
+                     doc={doc_at_0x58:#x}"
                 );
+            } else {
+                eprintln!("weave/sci_proxy: sci+0x58 deref = 0 (null, skipped)");
+            }
+
+            // sci+0x60 — offset 12 words (had heap-looking address 0x555555d45cd0)
+            let ptr_at_0x60 = unsafe { *sci_ptr.add(12) };
+            if ptr_at_0x60 != 0 {
+                let len_at_0x60 = unsafe { real_fn(ptr_at_0x60, 2006, 0, 0, std::ptr::null_mut()) };
+                let doc_at_0x60 = unsafe { real_fn(ptr_at_0x60, 2268, 0, 0, std::ptr::null_mut()) };
+                eprintln!(
+                    "weave/sci_proxy: sci+0x60 deref = {ptr_at_0x60:#x} → len={len_at_0x60} \
+                     doc={doc_at_0x60:#x}"
+                );
+            } else {
+                eprintln!("weave/sci_proxy: sci+0x60 deref = 0 (null, skipped)");
             }
         }
     }
