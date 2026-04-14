@@ -1074,11 +1074,22 @@ pub unsafe extern "win64" fn sci_direct_fn_proxy(
     // TODO: remove once NPP Gate 6 is green.
     {
         let append_sci = LAST_APPEND_SCI.load(std::sync::atomic::Ordering::Relaxed);
-        if append_sci != 0 && sci == append_sci && msg != 2006 {
+        if append_sci != 0 && sci == append_sci && msg != 2006 && msg != 2268 {
             let len_after = unsafe {
                 f(sci, 2006 /*SCI_GETLENGTH*/, 0, 0, std::ptr::null_mut())
             };
-            eprintln!("weave/sci_proxy: post-call probe sci={sci:#x} msg={msg} → len={len_after}");
+            let doc_ptr = unsafe {
+                f(
+                    sci,
+                    2268, /*SCI_GETDOCPOINTER*/
+                    0,
+                    0,
+                    std::ptr::null_mut(),
+                )
+            };
+            eprintln!(
+                "weave/sci_proxy: post-call probe sci={sci:#x} msg={msg} → len={len_after} doc_ptr={doc_ptr:#x}"
+            );
         }
     }
 
@@ -1430,24 +1441,27 @@ pub unsafe extern "win64" fn begin_paint(hwnd: usize, lp_paint: *mut PaintStruct
                 // If extra[0] is non-zero but SCI_GETDIRECTPOINTER returns 0, the WndProc was
                 // subclassed and the new proc doesn't forward SCI queries to Scintilla.
                 // In that case, use extra[0] directly as the sci* for the direct_len probe.
-                let direct_len_via_extra = if direct_fn != 0 && extra0 > 0 {
+                let (direct_len_via_extra, doc_ptr_via_extra) = if direct_fn != 0 && extra0 > 0 {
                     type DirectFn =
                         unsafe extern "win64" fn(usize, u32, usize, isize, *mut u8) -> isize;
                     let f: DirectFn = unsafe { std::mem::transmute(direct_fn) };
                     let len = unsafe { f(extra0 as usize, 2006, 0, 0, std::ptr::null_mut()) };
+                    let doc_ptr = unsafe { f(extra0 as usize, 2268, 0, 0, std::ptr::null_mut()) };
                     eprintln!(
                         "weave/user32: BeginPaint direct_len_via_extra query \
-                         sci={extra0:#x} SCI_GETLENGTH → ret={len:#x} ({len})"
+                         sci={extra0:#x} SCI_GETLENGTH → ret={len:#x} ({len}) \
+                         SCI_GETDOCPOINTER → doc_ptr={doc_ptr:#x}"
                     );
-                    len
+                    (len, doc_ptr)
                 } else {
-                    -1
+                    (-1, -1)
                 };
                 eprintln!(
                     "weave/user32: BeginPaint Scintilla hwnd={hwnd:#x} xcb={xcb:#x} sci_paint#{n} \
                      wnd_proc={wnd_proc:#x} extra0={extra0:#x} \
                      SCI_GETLENGTH={doc_len} direct_len={direct_len} \
-                     direct_len_via_extra={direct_len_via_extra}"
+                     direct_len_via_extra={direct_len_via_extra} \
+                     doc_ptr={doc_ptr_via_extra:#x}"
                 );
             }
         }
