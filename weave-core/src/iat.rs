@@ -10,6 +10,70 @@
 //! it to read-only.
 
 use goblin::pe::PE;
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
+
+/// Global map: unresolved IAT slot VA → "dll::func".
+/// Populated at `patch_best_effort` time; queried by `unresolved_import_stub_log`
+/// at call time to identify which function fired.
+static UNRESOLVED_SLOT_MAP: OnceLock<Mutex<HashMap<usize, String>>> = OnceLock::new();
+
+fn slot_map() -> &'static Mutex<HashMap<usize, String>> {
+    UNRESOLVED_SLOT_MAP.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Look up the function name for an unresolved IAT slot by its absolute VA.
+pub fn lookup_unresolved_slot(slot_va: usize) -> Option<String> {
+    slot_map().lock().ok()?.get(&slot_va).cloned()
+}
+
+/// Decode a `call [rax+N]` instruction immediately before `ret_addr` to recover
+/// the IAT slot VA (`rax + N`).  Handles the three common encodings:
+/// - `FF 90 dd dd dd dd` (6 bytes, disp32)
+/// - `FF 50 dd`          (3 bytes, disp8)
+/// - `FF 10`             (2 bytes, no displacement)
+///
+/// Returns `None` if the bytes don't match any known pattern or the address
+/// range is inaccessible.
+///
+/// # Safety
+/// `ret_addr` must be a valid mapped address with at least 6 readable bytes
+/// preceding it.  This is always true when called from `unresolved_import_stub`
+/// because `ret_addr` came from `[rsp]` inside a real CALL instruction.
+#[cfg(target_arch = "x86_64")]
+unsafe fn decode_call_iat_slot(ret_addr: usize, rax: usize) -> Option<usize> {
+    if ret_addr < 6 {
+        return None;
+    }
+    // Read the 6 bytes immediately before ret_addr.
+    //   bytes[0] = *(ret_addr - 6)
+    //   bytes[5] = *(ret_addr - 1)
+    let bytes = unsafe { std::slice::from_raw_parts((ret_addr - 6) as *const u8, 6) };
+
+    // FF 90 dd dd dd dd → call [rax+disp32]  (6 bytes, starts at ret_addr-6)
+    if bytes[0] == 0xFF && bytes[1] == 0x90 {
+        let disp = i32::from_le_bytes([bytes[2], bytes[3], bytes[4], bytes[5]]);
+        return Some((rax as i64 + disp as i64) as usize);
+    }
+
+    // FF 50 dd → call [rax+disp8]  (3 bytes, starts at ret_addr-3)
+    if bytes[3] == 0xFF && bytes[4] == 0x50 {
+        let disp = bytes[5] as i8;
+        return Some((rax as i64 + disp as i64) as usize);
+    }
+
+    // FF 10 → call [rax]  (2 bytes, starts at ret_addr-2)
+    if bytes[4] == 0xFF && bytes[5] == 0x10 {
+        return Some(rax);
+    }
+
+    None
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+unsafe fn decode_call_iat_slot(_ret_addr: usize, _rax: usize) -> Option<usize> {
+    None
+}
 
 /// IMAGE_IMPORT_DESCRIPTOR — one entry per imported DLL (20 bytes, C layout).
 #[repr(C)]
@@ -90,15 +154,21 @@ pub unsafe extern "win64" fn unresolved_import_stub() -> u64 {
 ///
 /// `ret_addr` is the instruction after the call into this stub (inside the
 /// calling code).  `rax_at_call` is the value of rax at stub entry — for a
-/// virtual-dispatch pattern `call [rax+N]`, this is the vtable pointer and
-/// `rax_at_call + N` is the IAT slot that was patched.
+/// `call [rax+N]` pattern, this is the table base and `rax_at_call + N` is
+/// the IAT slot.  We decode the CALL bytes before `ret_addr` to recover N,
+/// then look up the slot in the global map to log the function name directly.
 extern "win64" fn unresolved_import_stub_log(ret_addr: usize, rax_at_call: usize) {
-    // ret_addr: instruction after the call (inside SciTE/caller) — cross-ref
-    //   against startup "unresolved import ... at iat=0x..." listing to identify
-    //   which of the 30 stubs fired.
-    // rax_at_call: for `call [rax+N]` dispatch, rax is the table base; the IAT
-    //   slot is rax+N (N recoverable from the call-site disassembly).
-    eprintln!("weave: unresolved import stub fired (ret={ret_addr:#x} rax={rax_at_call:#x})");
+    let slot_va = unsafe { decode_call_iat_slot(ret_addr, rax_at_call) };
+    let name = slot_va.and_then(lookup_unresolved_slot);
+    match name {
+        Some(n) => eprintln!(
+            "weave: unresolved: {n} (ret={ret_addr:#x} rax={rax_at_call:#x})"
+        ),
+        None => eprintln!(
+            "weave: unresolved import stub fired (ret={ret_addr:#x} rax={rax_at_call:#x} slot={:#x})",
+            slot_va.unwrap_or(0)
+        ),
+    }
 }
 
 /// Like `patch`, but skips unresolved imports rather than failing.
@@ -213,6 +283,11 @@ unsafe fn patch_inner(
                 None if lenient => {
                     let iat_slot_va = base as usize + iat_rva + i * 8;
                     on_miss(&dll_name, &func_name, iat_slot_va);
+                    // Record in global map so unresolved_import_stub_log can
+                    // identify the function name at call time.
+                    if let Ok(mut map) = slot_map().lock() {
+                        map.insert(iat_slot_va, format!("{dll_name}::{func_name}"));
+                    }
                     // Write a safe no-op stub so the DLL won't crash if it
                     // calls this import.  The stub returns 0 (NULL/FALSE/error)
                     // which the caller should treat as a failure.
