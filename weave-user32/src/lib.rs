@@ -937,6 +937,7 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
                 as usize,
         ),
         "EndDialog" => Some(end_dialog as *const () as usize),
+        "GetDlgCtrlID" => Some(get_dlg_ctrl_id as *const () as usize),
         "GetDlgItem" => Some(get_dlg_item as *const () as usize),
         "GetDlgItemTextA" => Some(
             get_dlg_item_text_a as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize,

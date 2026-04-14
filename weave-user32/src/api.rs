@@ -2903,6 +2903,26 @@ pub extern "win64" fn get_dlg_item(_h_dlg: usize, _n_id_dlg_item: i32) -> usize 
     0
 }
 
+/// GetDlgCtrlID: return the child-window identifier for `hwnd`.
+///
+/// For child windows (WS_CHILD set), the ID is the integer passed as the
+/// `hMenu` parameter when the window was created.  Returns 0 if the window
+/// has no identifier or is not found.
+///
+/// Wine ref: dlls/win32u/window.c::NtUserGetDlgCtrlID — reads WND.wIDmenu;
+/// same field used for both menu handle and child ID.
+pub extern "win64" fn get_dlg_ctrl_id(hwnd: usize) -> i32 {
+    const WS_CHILD: u32 = 0x4000_0000;
+    window::with(hwnd, |e| {
+        if e.style & WS_CHILD != 0 {
+            e.h_menu as i32
+        } else {
+            0
+        }
+    })
+    .unwrap_or(0)
+}
+
 /// GetDlgItemTextA: copy a dialog control's text. Returns 0 chars.
 ///
 /// # Safety
