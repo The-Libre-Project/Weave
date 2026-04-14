@@ -335,6 +335,16 @@ pub unsafe extern "win64" fn create_window_ex_w(
     let wm_create_ret = call_wnd_proc(cls.wnd_proc, hwnd, WM_CREATE, 0, &cs as *const _ as isize);
     eprintln!("weave/user32: WM_CREATE class={class_name:?} hwnd={hwnd:#x} → {wm_create_ret}");
 
+    // Probe Scintilla document state immediately after WM_CREATE, before NPP has a
+    // chance to call SCI_SETDOCPOINTER.  This tells us whether pdoc is NULL from the
+    // start (constructor/init failure) or whether something clears it later.
+    // SCI_GETDOCPOINTER = 2268, SCI_GETDIRECTPOINTER = 2185.
+    if class_name.eq_ignore_ascii_case("Scintilla") {
+        let sci_ptr = send_message_w(hwnd, 2185, 0, 0); // SCI_GETDIRECTPOINTER → this*
+        let doc_ptr = send_message_w(hwnd, 2268, 0, 0); // SCI_GETDOCPOINTER → pdoc
+        eprintln!("weave/user32: Scintilla post-WM_CREATE hwnd={hwnd:#x} sci*={sci_ptr:#x} pdoc={doc_ptr:#x}");
+    }
+
     hwnd
 }
 
@@ -954,24 +964,6 @@ pub extern "win64" fn sci_direct_fn_proxy(
     let real_fn = SCI_REAL_DIRECT_FN.load(std::sync::atomic::Ordering::Relaxed);
     let f: unsafe extern "win64" fn(usize, u32, usize, isize) -> isize =
         unsafe { std::mem::transmute(real_fn) };
-
-    // SCI_SETDOCPOINTER(NULL) is supposed to reset to a fresh empty document.
-    // Scintilla's SetDocPointer has a guard: `if (document == pdoc) return`.
-    // If pdoc is NULL (Scintilla initialized without a document), passing NULL
-    // triggers the guard and returns early — no document is ever created.
-    // Fix: when setting doc=NULL and pdoc is already NULL, create a document
-    // explicitly via SCI_CREATEDOCUMENT first, then set it.
-    if msg == 2037 && lparam == 0 {
-        let cur_doc = unsafe { f(sci, 2268, 0, 0) }; // SCI_GETDOCPOINTER
-        if cur_doc == 0 {
-            let new_doc = unsafe { f(sci, 2276, 0, 0) }; // SCI_CREATEDOCUMENT
-            eprintln!("weave/sci_proxy: SCI_SETDOCPOINTER(NULL) with null pdoc — created doc {new_doc:#x}, setting it");
-            let ret = unsafe { f(sci, 2037, 0, new_doc) };
-            eprintln!("weave/sci_proxy:   → {ret:#x}");
-            return ret;
-        }
-    }
-
     let ret = unsafe { f(sci, msg, wparam, lparam) };
     match msg {
         2001 | 2004 | 2276 | 2037 | 2268 => {
