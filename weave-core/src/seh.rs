@@ -110,10 +110,18 @@ unsafe extern "C" fn on_fatal_signal(
     info: *mut libc::siginfo_t,
     ctx: *mut libc::c_void,
 ) {
-    unsafe { libc::write(2, b"weave: signal handler entered\n".as_ptr() as *const _, 30); }
+    unsafe {
+        libc::write(
+            2,
+            b"weave: signal handler entered\n".as_ptr() as *const _,
+            30,
+        );
+    }
     let uctx = ctx as *const libc::ucontext_t;
     let rip = unsafe { (*uctx).uc_mcontext.gregs[libc::REG_RIP as usize] as usize };
-    unsafe { libc::write(2, b"weave: sh got rip\n".as_ptr() as *const _, 18); }
+    unsafe {
+        libc::write(2, b"weave: sh got rip\n".as_ptr() as *const _, 18);
+    }
 
     let base = PE_BASE.load(Ordering::Relaxed);
     let size = PE_SIZE.load(Ordering::Relaxed);
@@ -122,7 +130,9 @@ unsafe extern "C" fn on_fatal_signal(
         // Fault in PE code — try SEH dispatch first (Windows delivers hardware
         // exceptions through KiUserExceptionDispatcher → RtlDispatchException).
         let fault_addr = unsafe { (*info).si_addr() } as usize;
-        unsafe { libc::write(2, b"weave: sh got fault_addr\n".as_ptr() as *const _, 25); }
+        unsafe {
+            libc::write(2, b"weave: sh got fault_addr\n".as_ptr() as *const _, 25);
+        }
         let win_code = signal_to_exception_code(sig);
 
         // Try to dispatch through SEH. If a handler catches it, the ucontext
@@ -130,24 +140,58 @@ unsafe extern "C" fn on_fatal_signal(
         #[cfg(target_arch = "x86_64")]
         {
             let uctx_mut = ctx as *mut libc::ucontext_t;
-            let seh_handled = unsafe { crate::unwind::dispatch_hardware_exception(win_code, fault_addr, uctx_mut) };
-            unsafe { libc::write(2, b"weave: sh dispatch returned\n".as_ptr() as *const _, 28); }
-            if seh_handled
-            {
+            let seh_handled = unsafe {
+                crate::unwind::dispatch_hardware_exception(win_code, fault_addr, uctx_mut)
+            };
+            unsafe {
+                libc::write(2, b"weave: sh dispatch returned\n".as_ptr() as *const _, 28);
+            }
+            if seh_handled {
                 // Diagnostic: SEH handler caught the exception — log before resuming.
                 // Use only stack buffers + write() — no heap, no format!, async-signal-safe.
                 let rva = (rip - base) as u32;
                 let mut buf = [0u8; 80];
                 let mut pos = 0usize;
-                let nibble = |n: u64| if n < 10 { b'0' + n as u8 } else { b'a' + n as u8 - 10 };
+                let nibble = |n: u64| {
+                    if n < 10 {
+                        b'0' + n as u8
+                    } else {
+                        b'a' + n as u8 - 10
+                    }
+                };
                 macro_rules! push_bytes {
-                    ($s:expr) => { for &b in $s { if pos < buf.len() { buf[pos] = b; pos += 1; } } };
+                    ($s:expr) => {
+                        for &b in $s {
+                            if pos < buf.len() {
+                                buf[pos] = b;
+                                pos += 1;
+                            }
+                        }
+                    };
                 }
                 macro_rules! push_hex16 {
-                    ($v:expr) => { push_bytes!(b"0x"); for sh in (0..16u32).rev() { let n = ($v as u64 >> (sh*4)) & 0xf; if pos < buf.len() { buf[pos] = nibble(n); pos += 1; } } };
+                    ($v:expr) => {
+                        push_bytes!(b"0x");
+                        for sh in (0..16u32).rev() {
+                            let n = ($v as u64 >> (sh * 4)) & 0xf;
+                            if pos < buf.len() {
+                                buf[pos] = nibble(n);
+                                pos += 1;
+                            }
+                        }
+                    };
                 }
                 macro_rules! push_hex8 {
-                    ($v:expr) => { push_bytes!(b"0x"); for sh in (0..8u32).rev() { let n = ($v as u64 >> (sh*4)) & 0xf; if pos < buf.len() { buf[pos] = nibble(n); pos += 1; } } };
+                    ($v:expr) => {
+                        push_bytes!(b"0x");
+                        for sh in (0..8u32).rev() {
+                            let n = ($v as u64 >> (sh * 4)) & 0xf;
+                            if pos < buf.len() {
+                                buf[pos] = nibble(n);
+                                pos += 1;
+                            }
+                        }
+                    };
                 }
                 push_bytes!(b"weave: SEH dispatched rip=");
                 push_hex16!(rip);
@@ -475,12 +519,34 @@ fn print_crash_report(
     {
         let mut buf = [0u8; 64];
         let mut pos = 0usize;
-        let nibble = |n: u64| if n < 10 { b'0' + n as u8 } else { b'a' + n as u8 - 10 };
+        let nibble = |n: u64| {
+            if n < 10 {
+                b'0' + n as u8
+            } else {
+                b'a' + n as u8 - 10
+            }
+        };
         macro_rules! push_b {
-            ($s:expr) => { for &b in $s { if pos < buf.len() { buf[pos] = b; pos += 1; } } };
+            ($s:expr) => {
+                for &b in $s {
+                    if pos < buf.len() {
+                        buf[pos] = b;
+                        pos += 1;
+                    }
+                }
+            };
         }
         macro_rules! push_hex16 {
-            ($v:expr) => { push_b!(b"0x"); for sh in (0..16u32).rev() { let n = ($v as u64 >> (sh*4)) & 0xf; if pos < buf.len() { buf[pos] = nibble(n); pos += 1; } } };
+            ($v:expr) => {
+                push_b!(b"0x");
+                for sh in (0..16u32).rev() {
+                    let n = ($v as u64 >> (sh * 4)) & 0xf;
+                    if pos < buf.len() {
+                        buf[pos] = nibble(n);
+                        pos += 1;
+                    }
+                }
+            };
         }
         push_b!(b"weave: CRASH in PE rip=");
         push_hex16!(rip);

@@ -529,7 +529,10 @@ fn scite_portable_mode() {
     let mut killed_by_deadline = false;
     loop {
         match child.try_wait() {
-            Ok(Some(status)) => { exit_status = Some(status); break; }
+            Ok(Some(status)) => {
+                exit_status = Some(status);
+                break;
+            }
             Ok(None) => {
                 if std::time::Instant::now() >= deadline {
                     let _ = child.kill();

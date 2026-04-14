@@ -98,9 +98,7 @@ extern "win64" fn unresolved_import_stub_log(ret_addr: usize, rax_at_call: usize
     //   which of the 30 stubs fired.
     // rax_at_call: for `call [rax+N]` dispatch, rax is the table base; the IAT
     //   slot is rax+N (N recoverable from the call-site disassembly).
-    eprintln!(
-        "weave: unresolved import stub fired (ret={ret_addr:#x} rax={rax_at_call:#x})"
-    );
+    eprintln!("weave: unresolved import stub fired (ret={ret_addr:#x} rax={rax_at_call:#x})");
 }
 
 /// Like `patch`, but skips unresolved imports rather than failing.

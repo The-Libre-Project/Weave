@@ -210,17 +210,17 @@ pub unsafe extern "win64" fn create_status_window_w(
     // WS_CHILD (0x4000_0000) must be set so user32 treats it as a child window.
     let adjusted_style = (style as u32) | 0x4000_0000u32;
     weave_user32::api::create_window_ex_w(
-        0,                   // dwExStyle
-        class_name.as_ptr(), // "msctls_statusbar32"
-        title_ptr,           // lpWindowName
-        adjusted_style,      // dwStyle | WS_CHILD
-        0,                   // x
-        0,                   // y
-        0,                   // nWidth (sized by parent on WM_SIZE)
-        20,                  // nHeight (typical status bar height)
-        hwnd_parent,         // hWndParent
-        wid as usize,        // hMenu (child window ID)
-        0,                   // hInstance
+        0,                    // dwExStyle
+        class_name.as_ptr(),  // "msctls_statusbar32"
+        title_ptr,            // lpWindowName
+        adjusted_style,       // dwStyle | WS_CHILD
+        0,                    // x
+        0,                    // y
+        0,                    // nWidth (sized by parent on WM_SIZE)
+        20,                   // nHeight (typical status bar height)
+        hwnd_parent,          // hWndParent
+        wid as usize,         // hMenu (child window ID)
+        0,                    // hInstance
         std::ptr::null_mut(), // lpParam
     )
 }

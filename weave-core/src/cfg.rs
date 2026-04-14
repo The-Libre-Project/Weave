@@ -618,8 +618,7 @@ fn disable_security_check_cookie(pe_bytes: &[u8], base: *mut u8, security_cookie
         let func_va = base_usize + begin as usize;
 
         // Filter B: scan body for JNE (0x75 rel8 or 0F 85 rel32).
-        let func_bytes =
-            unsafe { std::slice::from_raw_parts(func_va as *const u8, func_len) };
+        let func_bytes = unsafe { std::slice::from_raw_parts(func_va as *const u8, func_len) };
         let mut has_jne = false;
         let mut k = 0usize;
         while k < func_len {
@@ -781,8 +780,7 @@ pub fn disable_report_gsfailure(pe_bytes: &[u8], base: *mut u8) {
                 for k in 0..lookahead.len() {
                     let call_va = sig_va + sig.len() + k;
                     let call_rva = call_va - base_usize;
-                    if lookahead.len() > k + 5 && lookahead[k] == 0xFF && lookahead[k + 1] == 0x15
-                    {
+                    if lookahead.len() > k + 5 && lookahead[k] == 0xFF && lookahead[k + 1] == 0x15 {
                         // CALL [rip+offset] — 6 bytes
                         let page_base = (call_va & !(page_size - 1)) as *mut libc::c_void;
                         unsafe {
