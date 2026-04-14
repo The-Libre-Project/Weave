@@ -1290,10 +1290,28 @@ pub unsafe extern "win64" fn begin_paint(hwnd: usize, lp_paint: *mut PaintStruct
             if n < 40 || n.is_multiple_of(10) {
                 let doc_len = send_message_w(hwnd, 2006, 0, 0); // SCI_GETLENGTH via WndProc
                 let xcb = window::xcb_id(hwnd);
-                // Call SCI_GETDIRECTPOINTER on THIS window to get the per-window sci* pointer,
-                // then call SCI_GETLENGTH directly to cross-check the WndProc result.
-                // This avoids the stale SCI_DIRECT_PTR bug where the global ptr pointed to
-                // the secondary (always-empty) Scintilla.
+                // Capture wnd_proc to detect NPP subclassing — if NPP replaced Scintilla's
+                // WndProc the stored proc won't handle SCI_GETDIRECTPOINTER, and both
+                // doc_len and direct_len will be 0 via the SendMessage path.
+                let wnd_proc = window::with(hwnd, |e| e.wnd_proc).unwrap_or(0);
+                // Also read extra[0] directly (bypassing the WndProc) to show the real sci*.
+                let extra0 = get_extra(
+                    hwnd,
+                    |e| {
+                        if e.extra_bytes.len() >= 8 {
+                            let mut buf = [0u8; 8];
+                            buf.copy_from_slice(&e.extra_bytes[0..8]);
+                            isize::from_ne_bytes(buf)
+                        } else {
+                            -3 // extra_bytes too small
+                        }
+                    },
+                    -4,
+                ); // hwnd not in extra map
+                   // Call SCI_GETDIRECTPOINTER on THIS window to get the per-window sci* pointer,
+                   // then call SCI_GETLENGTH directly to cross-check the WndProc result.
+                   // This avoids the stale SCI_DIRECT_PTR bug where the global ptr pointed to
+                   // the secondary (always-empty) Scintilla.
                 let direct_fn = SCI_REAL_DIRECT_FN.load(std::sync::atomic::Ordering::Relaxed);
                 let direct_len = if direct_fn != 0 {
                     let this_sci_ptr = send_message_w(hwnd, 2185, 0, 0); // SCI_GETDIRECTPOINTER
@@ -1307,9 +1325,21 @@ pub unsafe extern "win64" fn begin_paint(hwnd: usize, lp_paint: *mut PaintStruct
                 } else {
                     -1 // no real direct fn captured yet
                 };
+                // If extra[0] is non-zero but SCI_GETDIRECTPOINTER returns 0, the WndProc was
+                // subclassed and the new proc doesn't forward SCI queries to Scintilla.
+                // In that case, use extra[0] directly as the sci* for the direct_len probe.
+                let direct_len_via_extra = if direct_fn != 0 && extra0 > 0 {
+                    type DirectFn = unsafe extern "win64" fn(usize, u32, usize, isize) -> isize;
+                    let f: DirectFn = unsafe { std::mem::transmute(direct_fn) };
+                    unsafe { f(extra0 as usize, 2006, 0, 0) }
+                } else {
+                    -1
+                };
                 eprintln!(
                     "weave/user32: BeginPaint Scintilla hwnd={hwnd:#x} xcb={xcb:#x} sci_paint#{n} \
-                     SCI_GETLENGTH={doc_len} direct_len={direct_len}"
+                     wnd_proc={wnd_proc:#x} extra0={extra0:#x} \
+                     SCI_GETLENGTH={doc_len} direct_len={direct_len} \
+                     direct_len_via_extra={direct_len_via_extra}"
                 );
             }
         }
@@ -1880,12 +1910,25 @@ pub extern "win64" fn set_window_long_ptr_w(
             old
         })
         .unwrap_or(0),
-        GWL_WNDPROC => window::with_mut(hwnd, |w| {
-            let old = w.wnd_proc as isize;
-            w.wnd_proc = dw_new_long as usize;
-            old
-        })
-        .unwrap_or(0),
+        GWL_WNDPROC => {
+            let result = window::with_mut(hwnd, |w| {
+                let old = w.wnd_proc as isize;
+                w.wnd_proc = dw_new_long as usize;
+                old
+            })
+            .unwrap_or(0);
+            // Log wndproc changes for Scintilla hwnds — NPP subclasses them; we need to
+            // know when the WndProc changes and what it changes to, so that BeginPaint
+            // SCI probes know which proc is actually handling SCI_GETDIRECTPOINTER.
+            let is_sci = window::with(hwnd, |e| e.class_name == "Scintilla").unwrap_or(false);
+            if is_sci {
+                eprintln!(
+                    "weave/user32: SetWindowLongPtr GWL_WNDPROC hwnd={hwnd:#x} \
+                     old={result:#x} new={dw_new_long:#x}"
+                );
+            }
+            result
+        }
         _ if n_index >= 0 => {
             // Extra bytes: n_index is a byte offset; writes a pointer-sized (8-byte) value.
             let offset = n_index as usize;
@@ -1895,6 +1938,16 @@ pub extern "win64" fn set_window_long_ptr_w(
                     let old =
                         isize::from_ne_bytes(e.extra_bytes[offset..offset + 8].try_into().unwrap());
                     e.extra_bytes[offset..offset + 8].copy_from_slice(&dw_new_long.to_ne_bytes());
+                    // Log this* storage for Scintilla hwnds at offset 0 (the sci* slot).
+                    // This confirms whether Scintilla_WM_NCCREATE ran and stored a valid ptr.
+                    let is_sci =
+                        window::with(hwnd, |e| e.class_name == "Scintilla").unwrap_or(false);
+                    if is_sci && offset == 0 {
+                        eprintln!(
+                            "weave/user32: SetWindowLongPtr extra[0] hwnd={hwnd:#x} \
+                             old={old:#x} new={dw_new_long:#x}"
+                        );
+                    }
                     old
                 } else {
                     eprintln!("weave/user32: SetWindowLongPtr FAIL hwnd={hwnd:#x} offset={offset} extra_bytes.len()={} — too small to store ptr", e.extra_bytes.len());
