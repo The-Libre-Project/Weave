@@ -946,6 +946,9 @@ static SCI_DIRECT_FN: std::sync::atomic::AtomicUsize = std::sync::atomic::Atomic
 static SCI_REAL_DIRECT_FN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 /// Stored Scintilla direct pointer / sci* (SCI_GETDIRECTPOINTER result).
 static SCI_DIRECT_PTR: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// sci pointer that received the most recent SCI_APPENDTEXT — used to track per-call length drift.
+/// TODO: remove once NPP Gate 6 is green.
+static LAST_APPEND_SCI: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 /// Proxy for SciFnDirectStatus — logs all SCI messages to expose what NPP sends.
 /// NPP calls this instead of SciFnDirectStatus after we intercept SCI_GETDIRECTSTATUSFUNCTION.
@@ -1015,6 +1018,9 @@ pub unsafe extern "win64" fn sci_direct_fn_proxy(
             "weave/sci_proxy: SCI_APPENDTEXT p_status={:#x}",
             p_status as usize
         );
+        // Record which sci pointer received SCI_APPENDTEXT so post-call probes can track it.
+        // TODO: remove once NPP Gate 6 is green.
+        LAST_APPEND_SCI.store(sci, std::sync::atomic::Ordering::Relaxed);
     }
 
     // Also log SCI_SETREADONLY (2046) return value to detect if the document is marked read-only.
@@ -1060,6 +1066,20 @@ pub unsafe extern "win64" fn sci_direct_fn_proxy(
             "weave/sci_proxy: immediate SCI_GETLENGTH after SCI_APPENDTEXT = {post_len} (expected {})",
             wparam
         );
+    }
+
+    // Per-call post-probe: for every call on the sci that received SCI_APPENDTEXT,
+    // query SCI_GETLENGTH immediately after so we can pinpoint which call drops length to 0.
+    // Skip SCI_GETLENGTH itself (avoid infinite recursion) and skip calls on other sci ptrs.
+    // TODO: remove once NPP Gate 6 is green.
+    {
+        let append_sci = LAST_APPEND_SCI.load(std::sync::atomic::Ordering::Relaxed);
+        if append_sci != 0 && sci == append_sci && msg != 2006 {
+            let len_after = unsafe {
+                f(sci, 2006 /*SCI_GETLENGTH*/, 0, 0, std::ptr::null_mut())
+            };
+            eprintln!("weave/sci_proxy: post-call probe sci={sci:#x} msg={msg} → len={len_after}");
+        }
     }
 
     ret
