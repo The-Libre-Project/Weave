@@ -954,6 +954,24 @@ pub extern "win64" fn sci_direct_fn_proxy(
     let real_fn = SCI_REAL_DIRECT_FN.load(std::sync::atomic::Ordering::Relaxed);
     let f: unsafe extern "win64" fn(usize, u32, usize, isize) -> isize =
         unsafe { std::mem::transmute(real_fn) };
+
+    // SCI_SETDOCPOINTER(NULL) is supposed to reset to a fresh empty document.
+    // Scintilla's SetDocPointer has a guard: `if (document == pdoc) return`.
+    // If pdoc is NULL (Scintilla initialized without a document), passing NULL
+    // triggers the guard and returns early — no document is ever created.
+    // Fix: when setting doc=NULL and pdoc is already NULL, create a document
+    // explicitly via SCI_CREATEDOCUMENT first, then set it.
+    if msg == 2037 && lparam == 0 {
+        let cur_doc = unsafe { f(sci, 2268, 0, 0) }; // SCI_GETDOCPOINTER
+        if cur_doc == 0 {
+            let new_doc = unsafe { f(sci, 2276, 0, 0) }; // SCI_CREATEDOCUMENT
+            eprintln!("weave/sci_proxy: SCI_SETDOCPOINTER(NULL) with null pdoc — created doc {new_doc:#x}, setting it");
+            let ret = unsafe { f(sci, 2037, 0, new_doc) };
+            eprintln!("weave/sci_proxy:   → {ret:#x}");
+            return ret;
+        }
+    }
+
     let ret = unsafe { f(sci, msg, wparam, lparam) };
     match msg {
         2001 | 2004 | 2276 | 2037 | 2268 => {
