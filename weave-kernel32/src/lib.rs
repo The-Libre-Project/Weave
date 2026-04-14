@@ -397,7 +397,10 @@ pub extern "win64" fn exit_process(u_exit_code: u32) -> ! {
             let ptr = (rsp + offset) as *const usize;
             let val = *ptr;
             if (SCITE_TEXT_LO..SCITE_TEXT_HI).contains(&val) {
-                eprintln!("  rsp+{offset:#06x}: {val:#018x}  rva={:#010x}", val - SCITE_BASE);
+                eprintln!(
+                    "  rsp+{offset:#06x}: {val:#018x}  rva={:#010x}",
+                    val - SCITE_BASE
+                );
             }
         }
         libc::exit(u_exit_code as i32)
@@ -432,7 +435,10 @@ pub unsafe extern "win64" fn terminate_process(_h_process: usize, u_exit_code: u
             let ptr = (rsp + offset) as *const usize;
             let val = *ptr;
             if (SCITE_TEXT_LO..SCITE_TEXT_HI).contains(&val) {
-                eprintln!("  rsp+{offset:#06x}: {val:#018x}  rva={:#010x}", val - SCITE_BASE);
+                eprintln!(
+                    "  rsp+{offset:#06x}: {val:#018x}  rva={:#010x}",
+                    val - SCITE_BASE
+                );
             }
         }
         libc::exit(u_exit_code as i32)
@@ -2102,8 +2108,7 @@ pub unsafe extern "win64" fn create_file_w(
 
     // Log file-open progress every 100 calls — lets CI log show when bulk
     // .properties loading ends even when individual opens are not visible.
-    static FILE_OPEN_TOTAL: std::sync::atomic::AtomicU32 =
-        std::sync::atomic::AtomicU32::new(0);
+    static FILE_OPEN_TOTAL: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
     let fot = FILE_OPEN_TOTAL.fetch_add(1, Ordering::Relaxed) + 1;
     if fot.is_multiple_of(100) {
         eprintln!("DIAG: file_opens_n={fot} path={win_path:?}");

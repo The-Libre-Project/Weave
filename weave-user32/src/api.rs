@@ -3709,12 +3709,12 @@ pub unsafe extern "win64" fn system_parameters_info_w(
         std::ptr::write_bytes(pv_param, 0, 92);
         let p32 = pv_param as *mut i32;
         *p32.add(0) = -11; // lfHeight: 11pt at 96dpi (Wine default)
-        *p32.add(1) = 0;   // lfWidth
-        *p32.add(2) = 0;   // lfEscapement
-        *p32.add(3) = 0;   // lfOrientation
+        *p32.add(1) = 0; // lfWidth
+        *p32.add(2) = 0; // lfEscapement
+        *p32.add(3) = 0; // lfOrientation
         *p32.add(4) = 400; // lfWeight: FW_NORMAL
         *pv_param.add(0x17) = 1; // lfCharSet: DEFAULT_CHARSET
-        // lfFaceName = L"Segoe UI" at offset 0x1c
+                                 // lfFaceName = L"Segoe UI" at offset 0x1c
         let face: &[u16] = &[0x53, 0x65, 0x67, 0x6f, 0x65, 0x20, 0x55, 0x49, 0]; // "Segoe UI\0"
         std::ptr::copy_nonoverlapping(face.as_ptr(), pv_param.add(0x1c) as *mut u16, face.len());
         eprintln!("weave/user32: SystemParametersInfoW(SPI_GETICONTITLELOGFONT) → TRUE");
@@ -3937,9 +3937,7 @@ pub unsafe extern "win64" fn get_class_info_w(
     lp_wnd_class: *mut u8,
 ) -> i32 {
     // ATOM inputs (LOWORD < 0xC000, HIWORD == 0) are not yet supported — treat as not found.
-    let name = if lp_class_name.is_null()
-        || (lp_class_name as usize) < 0xC000
-    {
+    let name = if lp_class_name.is_null() || (lp_class_name as usize) < 0xC000 {
         eprintln!("weave/user32: GetClassInfoW(atom/null) → FALSE");
         return 0;
     } else {
