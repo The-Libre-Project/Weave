@@ -1080,12 +1080,15 @@ pub unsafe extern "win64" fn sci_direct_fn_proxy(
         }
 
         // Probe sci object memory at word-aligned offsets to locate the pdoc pointer field.
+        // Filter: val > 0x500000000000 && val < 0x800000000000 — excludes 0xffffffffffffffff (-1 in isize).
         // TODO: remove once NPP Gate 6 is green.
         {
             let sci_ptr = sci as *const usize;
-            for offset_words in [2_usize, 3, 4, 5, 6, 7, 8] {
+            for offset_words in [2_usize, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16] {
                 let val = unsafe { *sci_ptr.add(offset_words) };
-                if val > 0x0005_0000_0000_0000_usize {
+                let is_heap =
+                    val > 0x0005_0000_0000_0000_usize && val < 0x0008_0000_0000_0000_usize;
+                if is_heap {
                     eprintln!(
                         "weave/sci_proxy: sci+{:#x} → {val:#x} (heap addr!)",
                         offset_words * 8
@@ -1093,6 +1096,62 @@ pub unsafe extern "win64" fn sci_direct_fn_proxy(
                 } else {
                     eprintln!("weave/sci_proxy: sci+{:#x} → {val:#x}", offset_words * 8);
                 }
+            }
+        }
+
+        // Try calling SCI_GETLENGTH via the pointer stored at sci+0x10 (offset 2) and sci+0x18 (offset 3).
+        // HYPOTHESIS: extra[0] is an NPP wrapper; the real ScintillaBase* is at wrapper+0x18.
+        // If sci+0x18 is the real ScintillaBase*, real_fn(*(sci+0x18), SCI_GETLENGTH, ...) == 289.
+        // TODO: remove once NPP Gate 6 is green.
+        {
+            type DirectFn = unsafe extern "win64" fn(usize, u32, usize, isize, *mut u8) -> isize;
+            let real_fn: DirectFn = unsafe { std::mem::transmute(f as usize) };
+            let sci_ptr = sci as *const usize;
+
+            // sci+0x10 — offset 2 words
+            let cand_0x10 = unsafe { *sci_ptr.add(2) };
+            if cand_0x10 > 0x0005_0000_0000_0000_usize && cand_0x10 < 0x0008_0000_0000_0000_usize {
+                let len = unsafe {
+                    real_fn(
+                        cand_0x10,
+                        2006, /*SCI_GETLENGTH*/
+                        0,
+                        0,
+                        std::ptr::null_mut(),
+                    )
+                };
+                eprintln!(
+                    "weave/sci_proxy: sci+0x10 deref call → SCI_GETLENGTH={len} \
+                     (cand={cand_0x10:#x})"
+                );
+            } else {
+                eprintln!(
+                    "weave/sci_proxy: sci+0x10 deref call skipped — not heap addr \
+                     ({cand_0x10:#x})"
+                );
+            }
+
+            // sci+0x18 — offset 3 words
+            let cand_0x18 = unsafe { *sci_ptr.add(3) };
+            if cand_0x18 > 0x0005_0000_0000_0000_usize && cand_0x18 < 0x0008_0000_0000_0000_usize {
+                let len = unsafe {
+                    real_fn(
+                        cand_0x18,
+                        2006, /*SCI_GETLENGTH*/
+                        0,
+                        0,
+                        std::ptr::null_mut(),
+                    )
+                };
+                eprintln!(
+                    "weave/sci_proxy: sci+0x18 deref call → SCI_GETLENGTH={len} \
+                     (cand={cand_0x18:#x})"
+                );
+            } else {
+                eprintln!(
+                    "weave/sci_proxy: sci+0x18 deref call skipped — not heap addr \
+                     ({cand_0x18:#x})"
+                );
             }
         }
     }
