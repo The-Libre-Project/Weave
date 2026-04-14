@@ -4280,13 +4280,20 @@ pub unsafe extern "win64" fn get_class_info_w(
 // interprocess thunk (for ANSI↔Unicode conversion); dispatches directly if same-thread;
 // used by subclassing chains to call the previous wndproc.
 pub unsafe extern "win64" fn call_window_proc_w(
-    _lp_prev_wnd_func: usize,
-    _h_wnd: usize,
-    _msg: u32,
-    _w_param: usize,
-    _l_param: isize,
+    lp_prev_wnd_func: usize,
+    h_wnd: usize,
+    msg: u32,
+    w_param: usize,
+    l_param: isize,
 ) -> isize {
-    0
+    // Previously a stub returning 0 — broke NPP subclassing of Scintilla.
+    // NPP calls CallWindowProcW(original_sci_proc, hwnd, SCI_GETDOCPOINTER, 0, 0) to
+    // forward unhandled SCI messages to Scintilla's real WndProc.  Stub meant
+    // SCI_GETDOCPOINTER always returned NULL, preventing document transfer.
+    //
+    // Implementation: call the previous WndProc directly using extern "win64"
+    // (Windows x64 calling convention), same as call_wnd_proc.
+    call_wnd_proc(lp_prev_wnd_func, h_wnd, msg, w_param, l_param)
 }
 
 /// DialogBoxParamW — display a modal dialog box from a resource template (Wide).
