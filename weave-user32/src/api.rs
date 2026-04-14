@@ -894,11 +894,19 @@ pub extern "win64" fn send_message_w(
         }
     };
     let ret = call_wnd_proc(proc_addr, hwnd, msg, w_param, l_param);
-    // Store Scintilla direct-call interface so BeginPaint can probe via direct fn (not WndProc).
-    // SCI_GETDIRECTFUNCTION=2184(0x888) returns fn ptr; SCI_GETDIRECTPOINTER=2185(0x889) returns sci*.
+    // Intercept SCI_GETDIRECTFUNCTION: return our proxy instead of the real fn ptr.
+    // This lets us log SCI_ADDTEXT/CLEARALL/CREATEDOCUMENT/SETDOCPOINTER calls that NPP
+    // makes via the direct interface (bypassing SendMessageW).
     // TODO: remove once NPP Gate 6 is green.
     if msg == 2184 && ret != 0 {
-        SCI_DIRECT_FN.store(ret as usize, std::sync::atomic::Ordering::Relaxed);
+        // Store the real Scintilla_DirectFunction address, return our proxy instead.
+        SCI_REAL_DIRECT_FN.store(ret as usize, std::sync::atomic::Ordering::Relaxed);
+        SCI_DIRECT_FN.store(sci_direct_fn_proxy as *const () as usize, std::sync::atomic::Ordering::Relaxed);
+        let proxy_addr = sci_direct_fn_proxy as *const () as usize as isize;
+        eprintln!(
+            "weave/user32: SendMessageW hwnd={hwnd:#x} msg={msg:#06x} wparam={w_param:#x} lparam={l_param:#x} → {ret:#x} (proxy={proxy_addr:#x})"
+        );
+        return proxy_addr;
     }
     if msg == 2185 && ret != 0 {
         SCI_DIRECT_PTR.store(ret as usize, std::sync::atomic::Ordering::Relaxed);
@@ -910,12 +918,51 @@ pub extern "win64" fn send_message_w(
     ret
 }
 
-/// Stored Scintilla direct function pointer (SCI_GETDIRECTFUNCTION result).
-/// Used in BeginPaint to probe document state bypassing WndProc path.
+/// Stored Scintilla direct function pointer (proxy address, not the real one).
+/// Used in BeginPaint to probe document state.
 /// TODO: remove once NPP Gate 6 is green.
 static SCI_DIRECT_FN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// Real Scintilla_DirectFunction address (from the PE binary).
+static SCI_REAL_DIRECT_FN: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
 /// Stored Scintilla direct pointer / sci* (SCI_GETDIRECTPOINTER result).
 static SCI_DIRECT_PTR: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Proxy for Scintilla_DirectFunction — logs key SCI messages (SCI_ADDTEXT, SCI_CLEARALL,
+/// SCI_CREATEDOCUMENT, SCI_SETDOCPOINTER) then delegates to the real function.
+/// NPP calls this instead of Scintilla_DirectFunction after we intercept
+/// SCI_GETDIRECTFUNCTION. TODO: remove once NPP Gate 6 is green.
+pub extern "win64" fn sci_direct_fn_proxy(
+    sci: usize,
+    msg: u32,
+    wparam: usize,
+    lparam: isize,
+) -> isize {
+    // Log the SCI operations we care about for diagnosing empty document.
+    match msg {
+        2001 => eprintln!(
+            "weave/sci_proxy: SCI_ADDTEXT sci={sci:#x} len={wparam} textptr={lparam:#x}"
+        ),
+        2004 => eprintln!("weave/sci_proxy: SCI_CLEARALL sci={sci:#x}"),
+        2276 => eprintln!("weave/sci_proxy: SCI_CREATEDOCUMENT sci={sci:#x}"),
+        2037 => eprintln!(
+            "weave/sci_proxy: SCI_SETDOCPOINTER sci={sci:#x} doc={lparam:#x}"
+        ),
+        2268 => eprintln!("weave/sci_proxy: SCI_GETDOCPOINTER sci={sci:#x}"),
+        _ => {}
+    }
+    let real_fn = SCI_REAL_DIRECT_FN.load(std::sync::atomic::Ordering::Relaxed);
+    let f: unsafe extern "win64" fn(usize, u32, usize, isize) -> isize =
+        unsafe { std::mem::transmute(real_fn) };
+    let ret = unsafe { f(sci, msg, wparam, lparam) };
+    match msg {
+        2001 | 2004 | 2276 | 2037 | 2268 => {
+            eprintln!("weave/sci_proxy:   → {ret:#x}")
+        }
+        _ => {}
+    }
+    ret
+}
 
 /// SendMessageTimeoutW: send a message to a window with a timeout.
 ///
