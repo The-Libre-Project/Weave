@@ -969,6 +969,7 @@ pub unsafe extern "win64" fn sci_direct_fn_proxy(
         2006 => "SCI_GETLENGTH",
         2009 => "SCI_SETTEXT",
         2037 => "SCI_SETDOCPOINTER",
+        2046 => "SCI_SETREADONLY",
         2182 => "SCI_GETDIRECTFUNCTION",
         2183 => "SCI_GETDIRECTPOINTER",
         2184 => "SCI_GETDIRECTSTATUSFUNCTION",
@@ -985,19 +986,46 @@ pub unsafe extern "win64" fn sci_direct_fn_proxy(
         );
     }
 
+    // Diagnostic: for SCI_APPENDTEXT (2282), dump first 16 bytes of the text buffer so we can
+    // confirm whether NPP's text pointer is valid before the call.
+    // TODO: remove once NPP Gate 6 is green.
+    if msg == 2282 {
+        let ptr = lparam as *const u8;
+        let len = wparam.min(16);
+        let bytes: Vec<u8> = if !ptr.is_null() && len > 0 {
+            unsafe { std::slice::from_raw_parts(ptr, len).to_vec() }
+        } else {
+            Vec::new()
+        };
+        let hex: Vec<String> = bytes.iter().map(|b| format!("{b:02x}")).collect();
+        eprintln!(
+            "weave/sci_proxy: SCI_APPENDTEXT text[0..{}] = [{}] (ptr={lparam:#x} len={})",
+            len,
+            hex.join(" "),
+            wparam
+        );
+        eprintln!(
+            "weave/sci_proxy: SCI_APPENDTEXT p_status={:#x}",
+            p_status as usize
+        );
+    }
+
+    // Also log SCI_SETREADONLY (2046) return value to detect if the document is marked read-only.
+    // TODO: remove once NPP Gate 6 is green.
+
     let ret = unsafe { f(sci, msg, wparam, lparam, p_status) };
 
     if !msg_name.is_empty() || (2000..=3000).contains(&msg) {
         // For key text-storage messages, also log p_status to detect failure.
         // SCI_APPENDTEXT (2282) returns 1 on success, 0 on failure.
-        // SCI_CLEARALL (2004) and SCI_GETLENGTH (2006) also logged for correlation.
-        if matches!(msg, 2282 | 2004 | 2006) && !p_status.is_null() {
+        // SCI_CLEARALL (2004), SCI_GETLENGTH (2006), SCI_SETREADONLY (2046) also logged.
+        if matches!(msg, 2282 | 2004 | 2006 | 2046) && !p_status.is_null() {
             let status_val = unsafe { *p_status };
             eprintln!(
                 "weave/sci_proxy:   → ret={ret:#x} status={status_val:#x} (msg={msg}({}))",
                 if msg_name.is_empty() { "?" } else { msg_name }
             );
-        } else if matches!(msg, 2282 | 2004 | 2006) {
+        } else if matches!(msg, 2282 | 2004 | 2006 | 2046) {
             eprintln!(
                 "weave/sci_proxy:   → ret={ret:#x} status=null (msg={msg}({}))",
                 if msg_name.is_empty() { "?" } else { msg_name }
@@ -1005,6 +1033,19 @@ pub unsafe extern "win64" fn sci_direct_fn_proxy(
         } else {
             eprintln!("weave/sci_proxy:   → {ret:#x}");
         }
+    }
+
+    // After SCI_APPENDTEXT: immediately call SCI_GETLENGTH (2006) to probe document length.
+    // If InsertString succeeded, length should equal wparam. If still 0, InsertString failed.
+    // TODO: remove once NPP Gate 6 is green.
+    if msg == 2282 {
+        let post_len = unsafe {
+            f(sci, 2006 /*SCI_GETLENGTH*/, 0, 0, std::ptr::null_mut())
+        };
+        eprintln!(
+            "weave/sci_proxy: immediate SCI_GETLENGTH after SCI_APPENDTEXT = {post_len} (expected {})",
+            wparam
+        );
     }
 
     ret
