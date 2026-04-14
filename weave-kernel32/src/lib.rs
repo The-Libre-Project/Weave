@@ -19,6 +19,11 @@ use std::sync::Mutex;
 /// same address can be legally freed again after a re-allocation.
 static LAST_HEAP_FREE: AtomicUsize = AtomicUsize::new(0);
 
+/// Diagnostic: Windows handle for the test.py file opened by NPP during the Gate 6
+/// integration test.  Stored by CreateFileW, checked by ReadFile and CreateFileMappingW
+/// to trace whether/how NPP reads the file.  TODO: remove once Gate 6 is green.
+static TEST_PY_HANDLE: AtomicUsize = AtomicUsize::new(0);
+
 use std::sync::Arc;
 use weave_common::stub::warn_once;
 use weave_common::{STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE};
@@ -2114,11 +2119,15 @@ pub unsafe extern "win64" fn create_file_w(
         eprintln!("DIAG: file_opens_n={fot} path={win_path:?}");
     }
 
-    // Log path only for write-mode opens — read-only opens (e.g. .properties loading)
-    // are too frequent and overflow CI log caps.
+    // Log write-opens always; log read-opens only when the path contains "test.py"
+    // (to diagnose why NPP's test.py content is not being inserted into Scintilla).
+    // TODO: remove test.py diagnostic once NPP Gate 6 is green.
     const GENERIC_WRITE: u32 = 0x40000000;
+    let is_test_py = win_path.contains("test.py");
     if dw_desired_access & GENERIC_WRITE != 0 {
         eprintln!("weave/CreateFileW: write-open path={win_path:?} access={dw_desired_access:#x}");
+    } else if is_test_py {
+        eprintln!("weave/CreateFileW: read-open path={win_path:?} access={dw_desired_access:#x} disp={dw_creation_disposition:#x}");
     }
 
     let nt_disposition = file_io::win32_disposition_to_nt(dw_creation_disposition);
@@ -2132,6 +2141,10 @@ pub unsafe extern "win64" fn create_file_w(
     // clears LastError on success.
     match file_io::open_file(&win_path, dw_desired_access, nt_disposition) {
         Ok(handle) => {
+            if is_test_py {
+                eprintln!("weave/CreateFileW: test.py opened → handle={handle:#x}");
+                TEST_PY_HANDLE.store(handle, Ordering::Relaxed);
+            }
             set_last_error(0);
             handle
         }
@@ -2142,6 +2155,9 @@ pub unsafe extern "win64" fn create_file_w(
                 s if s == file_io::STATUS_ACCESS_DENIED => file_io::ERROR_ACCESS_DENIED,
                 _ => file_io::ERROR_FILE_NOT_FOUND,
             };
+            if is_test_py {
+                eprintln!("weave/CreateFileW: test.py FAILED status={status:#x} win_err={win_err}");
+            }
             set_last_error(win_err);
             usize::MAX // INVALID_HANDLE_VALUE
         }
@@ -2189,6 +2205,10 @@ pub unsafe extern "win64" fn read_file(
     // SAFETY: fd is a valid Linux file descriptor from the handle table (checked above).
     // lp_buffer is non-null when n_bytes_to_read > 0 (checked above) and points to a
     // writable region of at least n_bytes_to_read bytes per the caller's # Safety contract.
+    let is_test_py_handle = h_file == TEST_PY_HANDLE.load(Ordering::Relaxed) && h_file != 0;
+    if is_test_py_handle {
+        eprintln!("weave/ReadFile: test.py handle={h_file:#x} fd={fd} n_to_read={n_bytes_to_read}");
+    }
     let n = unsafe { libc::read(fd, lp_buffer as *mut libc::c_void, n_bytes_to_read as usize) };
 
     if !lp_bytes_read.is_null() {
@@ -2201,6 +2221,9 @@ pub unsafe extern "win64" fn read_file(
         eprintln!("weave/ReadFile: exit handle={h_file:#x} fd={fd} → FALSE (read err)");
         0 // FALSE
     } else {
+        if is_test_py_handle {
+            eprintln!("weave/ReadFile: test.py read → {n} bytes");
+        }
         set_last_error(0);
         1 // TRUE
     }
@@ -3614,6 +3637,10 @@ pub unsafe extern "win64" fn create_file_mapping_w(
 ) -> usize {
     const INVALID_HANDLE_VALUE: usize = usize::MAX;
     if h_file != INVALID_HANDLE_VALUE {
+        let is_test_py_handle = h_file == TEST_PY_HANDLE.load(Ordering::Relaxed) && h_file != 0;
+        if is_test_py_handle {
+            eprintln!("weave/CreateFileMappingW: test.py handle={h_file:#x} protect={fl_protect:#x}");
+        }
         // File-backed mapping: mmap the underlying fd.
         let fd = match handles::get_fd(h_file) {
             Some(f) => f,
