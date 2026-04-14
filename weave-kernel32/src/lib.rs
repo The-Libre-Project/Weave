@@ -3639,7 +3639,9 @@ pub unsafe extern "win64" fn create_file_mapping_w(
     if h_file != INVALID_HANDLE_VALUE {
         let is_test_py_handle = h_file == TEST_PY_HANDLE.load(Ordering::Relaxed) && h_file != 0;
         if is_test_py_handle {
-            eprintln!("weave/CreateFileMappingW: test.py handle={h_file:#x} protect={fl_protect:#x}");
+            eprintln!(
+                "weave/CreateFileMappingW: test.py handle={h_file:#x} protect={fl_protect:#x}"
+            );
         }
         // File-backed mapping: mmap the underlying fd.
         let fd = match handles::get_fd(h_file) {

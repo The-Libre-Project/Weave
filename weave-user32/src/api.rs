@@ -911,7 +911,10 @@ pub extern "win64" fn send_message_w(
     if msg == 2184 && ret != 0 {
         // Store the real Scintilla_DirectFunction address, return our proxy instead.
         SCI_REAL_DIRECT_FN.store(ret as usize, std::sync::atomic::Ordering::Relaxed);
-        SCI_DIRECT_FN.store(sci_direct_fn_proxy as *const () as usize, std::sync::atomic::Ordering::Relaxed);
+        SCI_DIRECT_FN.store(
+            sci_direct_fn_proxy as *const () as usize,
+            std::sync::atomic::Ordering::Relaxed,
+        );
         let proxy_addr = sci_direct_fn_proxy as *const () as usize as isize;
         eprintln!(
             "weave/user32: SendMessageW hwnd={hwnd:#x} msg={msg:#06x} wparam={w_param:#x} lparam={l_param:#x} → {ret:#x} (proxy={proxy_addr:#x})"
@@ -933,8 +936,7 @@ pub extern "win64" fn send_message_w(
 /// TODO: remove once NPP Gate 6 is green.
 static SCI_DIRECT_FN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 /// Real Scintilla_DirectFunction address (from the PE binary).
-static SCI_REAL_DIRECT_FN: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
+static SCI_REAL_DIRECT_FN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 /// Stored Scintilla direct pointer / sci* (SCI_GETDIRECTPOINTER result).
 static SCI_DIRECT_PTR: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
@@ -969,8 +971,10 @@ pub extern "win64" fn sci_direct_fn_proxy(
         _ => "",
     };
     if !msg_name.is_empty() || (2000..=3000).contains(&msg) {
-        eprintln!("weave/sci_proxy: msg={msg}({}) sci={sci:#x} wp={wparam:#x} lp={lparam:#x}",
-            if msg_name.is_empty() { "?" } else { msg_name });
+        eprintln!(
+            "weave/sci_proxy: msg={msg}({}) sci={sci:#x} wp={wparam:#x} lp={lparam:#x}",
+            if msg_name.is_empty() { "?" } else { msg_name }
+        );
     }
 
     let ret = unsafe { f(sci, msg, wparam, lparam) };

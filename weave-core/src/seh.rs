@@ -136,14 +136,54 @@ unsafe extern "C" fn on_fatal_signal(
         unsafe {
             let mut buf = [0u8; 96];
             let mut pos = 0usize;
-            let nibble = |n: u64| if n < 10 { b'0' + n as u8 } else { b'a' + n as u8 - 10 };
-            for &b in b"weave: sh fault rip=0x" { if pos < buf.len() { buf[pos] = b; pos += 1; } }
-            for sh in (0..16u32).rev() { let n = (rip as u64 >> (sh * 4)) & 0xf; if pos < buf.len() { buf[pos] = nibble(n); pos += 1; } }
-            for &b in b" rva=0x" { if pos < buf.len() { buf[pos] = b; pos += 1; } }
-            for sh in (0..8u32).rev() { let n = (rva as u64 >> (sh * 4)) & 0xf; if pos < buf.len() { buf[pos] = nibble(n); pos += 1; } }
-            for &b in b" fault=0x" { if pos < buf.len() { buf[pos] = b; pos += 1; } }
-            for sh in (0..16u32).rev() { let n = (fault_addr as u64 >> (sh * 4)) & 0xf; if pos < buf.len() { buf[pos] = nibble(n); pos += 1; } }
-            buf[pos] = b'\n'; pos += 1;
+            let nibble = |n: u64| {
+                if n < 10 {
+                    b'0' + n as u8
+                } else {
+                    b'a' + n as u8 - 10
+                }
+            };
+            for &b in b"weave: sh fault rip=0x" {
+                if pos < buf.len() {
+                    buf[pos] = b;
+                    pos += 1;
+                }
+            }
+            for sh in (0..16u32).rev() {
+                let n = (rip as u64 >> (sh * 4)) & 0xf;
+                if pos < buf.len() {
+                    buf[pos] = nibble(n);
+                    pos += 1;
+                }
+            }
+            for &b in b" rva=0x" {
+                if pos < buf.len() {
+                    buf[pos] = b;
+                    pos += 1;
+                }
+            }
+            for sh in (0..8u32).rev() {
+                let n = (rva as u64 >> (sh * 4)) & 0xf;
+                if pos < buf.len() {
+                    buf[pos] = nibble(n);
+                    pos += 1;
+                }
+            }
+            for &b in b" fault=0x" {
+                if pos < buf.len() {
+                    buf[pos] = b;
+                    pos += 1;
+                }
+            }
+            for sh in (0..16u32).rev() {
+                let n = (fault_addr as u64 >> (sh * 4)) & 0xf;
+                if pos < buf.len() {
+                    buf[pos] = nibble(n);
+                    pos += 1;
+                }
+            }
+            buf[pos] = b'\n';
+            pos += 1;
             libc::write(2, buf.as_ptr() as *const _, pos);
         }
         let win_code = signal_to_exception_code(sig);
