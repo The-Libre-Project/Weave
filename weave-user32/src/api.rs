@@ -903,6 +903,13 @@ pub extern "win64" fn send_message_w(
             return 0;
         }
     };
+    // Diagnostic: log proc_addr for SCI_GETDOCPOINTER (0x08DC=2268) so we can confirm
+    // the call reaches Scintilla's WndProc and the 0 return is from Scintilla itself.
+    if msg == 0x08DC {
+        eprintln!(
+            "weave/user32: SendMessageW SCI_GETDOCPOINTER hwnd={hwnd:#x} → wnd_proc={proc_addr:#x}"
+        );
+    }
     let ret = call_wnd_proc(proc_addr, hwnd, msg, w_param, l_param);
     // Intercept SCI_GETDIRECTSTATUSFUNCTION (2184): return our proxy instead of the real fn ptr.
     // SCI_GETDIRECTSTATUSFUNCTION returns a 5-param fn: (sci, msg, wp, lp, *status) -> iptr.
