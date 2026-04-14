@@ -509,6 +509,21 @@ fn scite_portable_mode() {
         .spawn()
         .unwrap_or_else(|e| panic!("failed to spawn weave on SciTE.exe: {e}"));
 
+    // Drain stderr in a background thread so the OS pipe (64 KB on Linux) never
+    // fills up and blocks SciTE's eprintln! calls.  Without this, SciTE's verbose
+    // Weave output (toolbar button setup alone emits ~71 KB) fills the pipe buffer
+    // and the SciTE process blocks on write() before it can call GetMessageW.
+    let stderr_pipe = child.stderr.take().expect("stderr was piped");
+    let stderr_shared = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let stderr_writer = std::sync::Arc::clone(&stderr_shared);
+    let drain_thread = std::thread::spawn(move || {
+        use std::io::Read;
+        let mut buf = Vec::new();
+        let mut pipe = stderr_pipe;
+        let _ = pipe.read_to_end(&mut buf);
+        *stderr_writer.lock().unwrap() = buf;
+    });
+
     let deadline = start + std::time::Duration::from_secs(15);
     let mut exit_status: Option<std::process::ExitStatus> = None;
     let mut killed_by_deadline = false;
@@ -558,14 +573,9 @@ fn scite_portable_mode() {
         "no exit status captured".to_string()
     };
 
-    let stderr_bytes = {
-        use std::io::Read;
-        let mut buf = Vec::new();
-        if let Some(mut pipe) = child.stderr.take() {
-            let _ = pipe.read_to_end(&mut buf);
-        }
-        buf
-    };
+    // Wait for the drain thread to finish reading all remaining output.
+    drain_thread.join().expect("stderr drain thread panicked");
+    let stderr_bytes = stderr_shared.lock().unwrap().clone();
     let stderr = String::from_utf8_lossy(&stderr_bytes);
     eprintln!("scite stderr ({elapsed:.1?}):\n{stderr}");
 
