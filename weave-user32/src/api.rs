@@ -1066,6 +1066,35 @@ pub unsafe extern "win64" fn sci_direct_fn_proxy(
             "weave/sci_proxy: immediate SCI_GETLENGTH after SCI_APPENDTEXT = {post_len} (expected {})",
             wparam
         );
+
+        // Probe adjacent message numbers to find the real SCI_GETDOCPOINTER in this build.
+        // 2268 returned 0 despite 2006 returning 289 — scan neighbours for a heap-pointer return.
+        // TODO: remove once NPP Gate 6 is green.
+        for msg_test in 2265_u32..=2275 {
+            let ret_probe = unsafe { f(sci, msg_test, 0, 0, std::ptr::null_mut()) };
+            if ret_probe > 0x0005_0000_0000_0000_isize {
+                eprintln!("weave/sci_proxy: msg-scan msg={msg_test} → {ret_probe:#x} (heap addr!)");
+            } else {
+                eprintln!("weave/sci_proxy: msg-scan msg={msg_test} → {ret_probe:#x}");
+            }
+        }
+
+        // Probe sci object memory at word-aligned offsets to locate the pdoc pointer field.
+        // TODO: remove once NPP Gate 6 is green.
+        {
+            let sci_ptr = sci as *const usize;
+            for offset_words in [2_usize, 3, 4, 5, 6, 7, 8] {
+                let val = unsafe { *sci_ptr.add(offset_words) };
+                if val > 0x0005_0000_0000_0000_usize {
+                    eprintln!(
+                        "weave/sci_proxy: sci+{:#x} → {val:#x} (heap addr!)",
+                        offset_words * 8
+                    );
+                } else {
+                    eprintln!("weave/sci_proxy: sci+{:#x} → {val:#x}", offset_words * 8);
+                }
+            }
+        }
     }
 
     // Per-call post-probe: for every call on the sci that received SCI_APPENDTEXT,
