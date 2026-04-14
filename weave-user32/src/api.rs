@@ -1186,17 +1186,36 @@ pub unsafe extern "win64" fn invalidate_rect(
     _b_erase: i32,
 ) -> i32 {
     if window::with(hwnd, |_| ()).is_some() {
-        queue::post(MsgEntry {
-            hwnd,
-            message: WM_PAINT,
-            w_param: 0,
-            l_param: 0,
-            time: 0,
-            pt_x: 0,
-            pt_y: 0,
-        });
+        // Coalesce: only post WM_PAINT if one is not already queued for this hwnd.
+        // In Windows, multiple InvalidateRect calls before the next GetMessage are
+        // merged into a single WM_PAINT. Posting duplicates floods the queue and
+        // can cause Scintilla to paint before document state is settled.
+        // Wine ref: dlls/win32u/painting.c::NtUserInvalidateRect — adds to update
+        // region; WM_PAINT is generated lazily on next GetMessage, not posted directly.
+        let already_queued = queue::has_paint_for(hwnd);
+        {
+            static INV: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+            let n = INV.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if n < 30 {
+                eprintln!(
+                    "weave/user32: InvalidateRect hwnd={hwnd:#x} already_queued={already_queued}"
+                );
+            }
+        }
+        if !already_queued {
+            queue::post(MsgEntry {
+                hwnd,
+                message: WM_PAINT,
+                w_param: 0,
+                l_param: 0,
+                time: 0,
+                pt_x: 0,
+                pt_y: 0,
+            });
+        }
         1
     } else {
+        eprintln!("weave/user32: InvalidateRect hwnd={hwnd:#x} — window not found");
         0
     }
 }
@@ -1257,27 +1276,42 @@ pub unsafe extern "win64" fn get_window_text_w(
 // background was erased. Weave returns hwnd as a fake HDC (Phase 2 gap: no real DC or region).
 pub unsafe extern "win64" fn begin_paint(hwnd: usize, lp_paint: *mut PaintStruct) -> usize {
     CURRENT_PAINT_HWND.store(hwnd, Ordering::Relaxed);
-    // Query SCI_GETLENGTH (2006) for Scintilla windows to check when document gets content.
+    // Query SCI_GETLENGTH (2006) for Scintilla windows to check document state at paint time.
+    // Use a Scintilla-only counter so non-Scintilla BeginPaint calls don't consume slots.
+    // Each Scintilla HWND gets its own probe via SCI_GETDIRECTPOINTER to avoid
+    // the stale SCI_DIRECT_PTR bug (which always pointed to the secondary Scintilla).
     {
-        static BP_SCI: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-        let n = BP_SCI.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let is_sci = window::with(hwnd, |e| e.class_name == "Scintilla").unwrap_or(false);
-        if is_sci && (n < 20 || n.is_multiple_of(5)) {
-            let doc_len = send_message_w(hwnd, 2006, 0, 0); // SCI_GETLENGTH via WndProc
-            let status = send_message_w(hwnd, 2173, 0, 0); // SCI_GETSTATUS (0=ok, non-zero=error)
-            let xcb = window::xcb_id(hwnd);
-            // Also call via direct function interface to distinguish WndProc bug from empty doc.
-            let direct_fn = SCI_DIRECT_FN.load(std::sync::atomic::Ordering::Relaxed);
-            let direct_ptr = SCI_DIRECT_PTR.load(std::sync::atomic::Ordering::Relaxed);
-            let direct_len = if direct_fn != 0 && direct_ptr != 0 {
-                // directFn(sci*, SCI_GETLENGTH=2006, 0, 0) — same signature as WndProc.
-                type DirectFn = unsafe extern "win64" fn(usize, u32, usize, isize) -> isize;
-                let f: DirectFn = unsafe { std::mem::transmute(direct_fn) };
-                unsafe { f(direct_ptr, 2006, 0, 0) }
-            } else {
-                -1
-            };
-            eprintln!("weave/user32: BeginPaint Scintilla hwnd={hwnd:#x} xcb={xcb:#x} paint#{n} SCI_GETLENGTH={doc_len} direct_len={direct_len} SCI_GETSTATUS={status}");
+        if is_sci {
+            static BP_SCI: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+            let n = BP_SCI.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            // Log every Scintilla paint for the first 40 (covers startup + first repaint after
+            // text load), then every 10th to avoid drowning the log during long sessions.
+            if n < 40 || n.is_multiple_of(10) {
+                let doc_len = send_message_w(hwnd, 2006, 0, 0); // SCI_GETLENGTH via WndProc
+                let xcb = window::xcb_id(hwnd);
+                // Call SCI_GETDIRECTPOINTER on THIS window to get the per-window sci* pointer,
+                // then call SCI_GETLENGTH directly to cross-check the WndProc result.
+                // This avoids the stale SCI_DIRECT_PTR bug where the global ptr pointed to
+                // the secondary (always-empty) Scintilla.
+                let direct_fn = SCI_REAL_DIRECT_FN.load(std::sync::atomic::Ordering::Relaxed);
+                let direct_len = if direct_fn != 0 {
+                    let this_sci_ptr = send_message_w(hwnd, 2185, 0, 0); // SCI_GETDIRECTPOINTER
+                    if this_sci_ptr != 0 {
+                        type DirectFn = unsafe extern "win64" fn(usize, u32, usize, isize) -> isize;
+                        let f: DirectFn = unsafe { std::mem::transmute(direct_fn) };
+                        unsafe { f(this_sci_ptr as usize, 2006, 0, 0) }
+                    } else {
+                        -2 // SCI_GETDIRECTPOINTER returned 0
+                    }
+                } else {
+                    -1 // no real direct fn captured yet
+                };
+                eprintln!(
+                    "weave/user32: BeginPaint Scintilla hwnd={hwnd:#x} xcb={xcb:#x} sci_paint#{n} \
+                     SCI_GETLENGTH={doc_len} direct_len={direct_len}"
+                );
+            }
         }
     }
     if !lp_paint.is_null() {

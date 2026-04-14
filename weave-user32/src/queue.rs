@@ -108,6 +108,16 @@ pub fn has_message() -> bool {
     }
 }
 
+/// Returns `true` if there is already a WM_PAINT message queued for `hwnd`.
+/// Used by InvalidateRect to coalesce multiple invalidations into one paint.
+pub fn has_paint_for(hwnd: usize) -> bool {
+    const WM_PAINT: u32 = 0x000F;
+    match lock_queue(queue()) {
+        Some(g) => g.iter().any(|m| m.hwnd == hwnd && m.message == WM_PAINT),
+        None => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
