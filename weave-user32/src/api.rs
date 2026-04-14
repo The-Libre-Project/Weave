@@ -988,7 +988,23 @@ pub unsafe extern "win64" fn sci_direct_fn_proxy(
     let ret = unsafe { f(sci, msg, wparam, lparam, p_status) };
 
     if !msg_name.is_empty() || (2000..=3000).contains(&msg) {
-        eprintln!("weave/sci_proxy:   → {ret:#x}");
+        // For key text-storage messages, also log p_status to detect failure.
+        // SCI_APPENDTEXT (2282) returns 1 on success, 0 on failure.
+        // SCI_CLEARALL (2004) and SCI_GETLENGTH (2006) also logged for correlation.
+        if matches!(msg, 2282 | 2004 | 2006) && !p_status.is_null() {
+            let status_val = unsafe { *p_status };
+            eprintln!(
+                "weave/sci_proxy:   → ret={ret:#x} status={status_val:#x} (msg={msg}({}))",
+                if msg_name.is_empty() { "?" } else { msg_name }
+            );
+        } else if matches!(msg, 2282 | 2004 | 2006) {
+            eprintln!(
+                "weave/sci_proxy:   → ret={ret:#x} status=null (msg={msg}({}))",
+                if msg_name.is_empty() { "?" } else { msg_name }
+            );
+        } else {
+            eprintln!("weave/sci_proxy:   → {ret:#x}");
+        }
     }
 
     ret
@@ -1343,7 +1359,12 @@ pub unsafe extern "win64" fn begin_paint(hwnd: usize, lp_paint: *mut PaintStruct
                     type DirectFn =
                         unsafe extern "win64" fn(usize, u32, usize, isize, *mut u8) -> isize;
                     let f: DirectFn = unsafe { std::mem::transmute(direct_fn) };
-                    unsafe { f(extra0 as usize, 2006, 0, 0, std::ptr::null_mut()) }
+                    let len = unsafe { f(extra0 as usize, 2006, 0, 0, std::ptr::null_mut()) };
+                    eprintln!(
+                        "weave/user32: BeginPaint direct_len_via_extra query \
+                         sci={extra0:#x} SCI_GETLENGTH → ret={len:#x} ({len})"
+                    );
+                    len
                 } else {
                     -1
                 };
