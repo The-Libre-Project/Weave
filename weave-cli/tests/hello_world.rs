@@ -409,6 +409,19 @@ fn irfanview_gdip_startup_reached() {
         .spawn()
         .unwrap_or_else(|e| panic!("failed to spawn weave on i_view64.exe: {e}"));
 
+    // Drain stderr concurrently — IrfanView's Weave output can exceed the 64 KB
+    // Linux pipe buffer, blocking write() before the message loop is reached.
+    let stderr_pipe = child.stderr.take().expect("stderr was piped");
+    let stderr_shared = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let stderr_writer = std::sync::Arc::clone(&stderr_shared);
+    let drain_thread = std::thread::spawn(move || {
+        use std::io::Read;
+        let mut buf = Vec::new();
+        let mut pipe = stderr_pipe;
+        let _ = pipe.read_to_end(&mut buf);
+        *stderr_writer.lock().unwrap() = buf;
+    });
+
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
     loop {
         match child.try_wait() {
@@ -424,14 +437,8 @@ fn irfanview_gdip_startup_reached() {
         }
     }
 
-    let stderr_bytes = {
-        use std::io::Read;
-        let mut buf = Vec::new();
-        if let Some(mut pipe) = child.stderr.take() {
-            let _ = pipe.read_to_end(&mut buf);
-        }
-        buf
-    };
+    drain_thread.join().expect("stderr drain thread panicked");
+    let stderr_bytes = stderr_shared.lock().unwrap().clone();
     let stderr = String::from_utf8_lossy(&stderr_bytes);
     eprintln!("irfanview stderr:\n{stderr}");
 
