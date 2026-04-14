@@ -396,7 +396,7 @@ pub extern "win64" fn exit_process(u_exit_code: u32) -> ! {
         for offset in (0..8192usize).step_by(8) {
             let ptr = (rsp + offset) as *const usize;
             let val = *ptr;
-            if val >= SCITE_TEXT_LO && val < SCITE_TEXT_HI {
+            if (SCITE_TEXT_LO..SCITE_TEXT_HI).contains(&val) {
                 eprintln!("  rsp+{offset:#06x}: {val:#018x}  rva={:#010x}", val - SCITE_BASE);
             }
         }
@@ -431,7 +431,7 @@ pub unsafe extern "win64" fn terminate_process(_h_process: usize, u_exit_code: u
         for offset in (0..8192usize).step_by(8) {
             let ptr = (rsp + offset) as *const usize;
             let val = *ptr;
-            if val >= SCITE_TEXT_LO && val < SCITE_TEXT_HI {
+            if (SCITE_TEXT_LO..SCITE_TEXT_HI).contains(&val) {
                 eprintln!("  rsp+{offset:#06x}: {val:#018x}  rva={:#010x}", val - SCITE_BASE);
             }
         }
@@ -2105,7 +2105,7 @@ pub unsafe extern "win64" fn create_file_w(
     static FILE_OPEN_TOTAL: std::sync::atomic::AtomicU32 =
         std::sync::atomic::AtomicU32::new(0);
     let fot = FILE_OPEN_TOTAL.fetch_add(1, Ordering::Relaxed) + 1;
-    if fot % 100 == 0 {
+    if fot.is_multiple_of(100) {
         eprintln!("DIAG: file_opens_n={fot} path={win_path:?}");
     }
 
@@ -2125,7 +2125,7 @@ pub unsafe extern "win64" fn create_file_w(
     // On success, CREATE_ALWAYS+FILE_OVERWRITTEN or OPEN_ALWAYS+FILE_OPENED sets
     // ERROR_ALREADY_EXISTS; Weave does not track io.Information yet, so it just
     // clears LastError on success.
-    let result = match file_io::open_file(&win_path, dw_desired_access, nt_disposition) {
+    match file_io::open_file(&win_path, dw_desired_access, nt_disposition) {
         Ok(handle) => {
             set_last_error(0);
             handle
@@ -2140,8 +2140,7 @@ pub unsafe extern "win64" fn create_file_w(
             set_last_error(win_err);
             usize::MAX // INVALID_HANDLE_VALUE
         }
-    };
-    result
+    }
 }
 
 /// ReadFile: read bytes from a file handle into a buffer.
