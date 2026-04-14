@@ -236,23 +236,7 @@ fn seven_zip_fm_crt_init_completes() {
 /// Note: visual verification (syntax-highlighted text in an X11 window) requires
 /// an interactive session with a live display. This test covers the headless
 /// regression gate only.
-///
-/// # Muted (signal gate)
-///
-/// This test is temporarily `#[ignore]`d per NPP-FIX-PLAN.md Step 1
-/// ("Stop the bleeding"). Gate 5 has been a persistent red wall blocking all
-/// other CI signal — the underlying NPP launch failures are tracked and being
-/// addressed via the phase ladder in that plan.
-///
-/// - Strategy context: GATE5-STRATEGY.md
-/// - Fix plan + phase ladder: NPP-FIX-PLAN.md
-/// - Unmute condition: NPP-FIX-PLAN.md Step 6 decision point — re-enable only
-///   when the phase-ladder harness confirms sustained green on the target gate.
-///
-/// This is signal-muting, not surrender. The test remains as a longitudinal
-/// observation target; do not delete it.
 #[test]
-#[ignore = "Gate 5 red wall: muted per NPP-FIX-PLAN step 1 — re-enable at step 6 decision point (see GATE5-STRATEGY.md)"]
 fn notepad_plus_plus_portable_mode() {
     if !cfg!(target_os = "linux") {
         eprintln!("skipping execution test — requires Linux");
