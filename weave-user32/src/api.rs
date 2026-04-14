@@ -904,12 +904,12 @@ pub extern "win64" fn send_message_w(
         }
     };
     let ret = call_wnd_proc(proc_addr, hwnd, msg, w_param, l_param);
-    // Intercept SCI_GETDIRECTFUNCTION: return our proxy instead of the real fn ptr.
-    // This lets us log SCI_ADDTEXT/CLEARALL/CREATEDOCUMENT/SETDOCPOINTER calls that NPP
-    // makes via the direct interface (bypassing SendMessageW).
+    // Intercept SCI_GETDIRECTSTATUSFUNCTION (2184): return our proxy instead of the real fn ptr.
+    // SCI_GETDIRECTSTATUSFUNCTION returns a 5-param fn: (sci, msg, wp, lp, *status) -> iptr.
+    // We intercept it so we can log all SCI calls NPP makes via the direct interface.
     // TODO: remove once NPP Gate 6 is green.
     if msg == 2184 && ret != 0 {
-        // Store the real Scintilla_DirectFunction address, return our proxy instead.
+        // Store the real SciFnDirectStatus address, return our 5-param proxy instead.
         SCI_REAL_DIRECT_FN.store(ret as usize, std::sync::atomic::Ordering::Relaxed);
         SCI_DIRECT_FN.store(
             sci_direct_fn_proxy as *const () as usize,
@@ -917,7 +917,7 @@ pub extern "win64" fn send_message_w(
         );
         let proxy_addr = sci_direct_fn_proxy as *const () as usize as isize;
         eprintln!(
-            "weave/user32: SendMessageW hwnd={hwnd:#x} msg={msg:#06x} wparam={w_param:#x} lparam={l_param:#x} → {ret:#x} (proxy={proxy_addr:#x})"
+            "weave/user32: SendMessageW hwnd={hwnd:#x} msg={msg:#06x}(SCI_GETDIRECTSTATUSFUNCTION) real_fn={ret:#x} proxy={proxy_addr:#x}"
         );
         return proxy_addr;
     }
@@ -940,17 +940,24 @@ static SCI_REAL_DIRECT_FN: std::sync::atomic::AtomicUsize = std::sync::atomic::A
 /// Stored Scintilla direct pointer / sci* (SCI_GETDIRECTPOINTER result).
 static SCI_DIRECT_PTR: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
-/// Proxy for Scintilla_DirectFunction — logs all SCI messages to expose what NPP sends.
-/// NPP calls this instead of Scintilla_DirectFunction after we intercept SCI_GETDIRECTFUNCTION.
+/// Proxy for SciFnDirectStatus — logs all SCI messages to expose what NPP sends.
+/// NPP calls this instead of SciFnDirectStatus after we intercept SCI_GETDIRECTSTATUSFUNCTION.
+/// Matches the 5-param SciFnDirectStatus signature: (sci, msg, wp, lp, *status) -> iptr.
+///
+/// # Safety
+/// `p_status` is passed through to the real Scintilla function; caller must ensure it
+/// is null or points to a valid bool-sized location (as guaranteed by NPP's Scintilla bindings).
 /// TODO: remove once NPP Gate 6 is green.
-pub extern "win64" fn sci_direct_fn_proxy(
+pub unsafe extern "win64" fn sci_direct_fn_proxy(
     sci: usize,
     msg: u32,
     wparam: usize,
     lparam: isize,
+    p_status: *mut u8,
 ) -> isize {
     let real_fn = SCI_REAL_DIRECT_FN.load(std::sync::atomic::Ordering::Relaxed);
-    let f: unsafe extern "win64" fn(usize, u32, usize, isize) -> isize =
+    // SciFnDirectStatus: (usize, u32, usize, isize, *mut u8) -> isize
+    let f: unsafe extern "win64" fn(usize, u32, usize, isize, *mut u8) -> isize =
         unsafe { std::mem::transmute(real_fn) };
 
     // Log ALL SCI messages to reveal what NPP sends (needed to diagnose why text is never added).
@@ -964,6 +971,7 @@ pub extern "win64" fn sci_direct_fn_proxy(
         2037 => "SCI_SETDOCPOINTER",
         2182 => "SCI_GETDIRECTFUNCTION",
         2183 => "SCI_GETDIRECTPOINTER",
+        2184 => "SCI_GETDIRECTSTATUSFUNCTION",
         2268 => "SCI_GETDOCPOINTER",
         2276 => "SCI_CREATEDOCUMENT",
         2282 => "SCI_APPENDTEXT",
@@ -972,12 +980,12 @@ pub extern "win64" fn sci_direct_fn_proxy(
     };
     if !msg_name.is_empty() || (2000..=3000).contains(&msg) {
         eprintln!(
-            "weave/sci_proxy: msg={msg}({}) sci={sci:#x} wp={wparam:#x} lp={lparam:#x}",
+            "weave/sci_proxy: msg={msg}({}) sci={sci:#x} wp={wparam:#x} lp={lparam:#x} real_fn={real_fn:#x}",
             if msg_name.is_empty() { "?" } else { msg_name }
         );
     }
 
-    let ret = unsafe { f(sci, msg, wparam, lparam) };
+    let ret = unsafe { f(sci, msg, wparam, lparam, p_status) };
 
     if !msg_name.is_empty() || (2000..=3000).contains(&msg) {
         eprintln!("weave/sci_proxy:   → {ret:#x}");
@@ -1313,12 +1321,15 @@ pub unsafe extern "win64" fn begin_paint(hwnd: usize, lp_paint: *mut PaintStruct
                    // This avoids the stale SCI_DIRECT_PTR bug where the global ptr pointed to
                    // the secondary (always-empty) Scintilla.
                 let direct_fn = SCI_REAL_DIRECT_FN.load(std::sync::atomic::Ordering::Relaxed);
+                // SCI_REAL_DIRECT_FN holds SciFnDirectStatus (5-param: sci,msg,wp,lp,*status).
+                // Pass a null status pointer — we only care about the return value here.
                 let direct_len = if direct_fn != 0 {
                     let this_sci_ptr = send_message_w(hwnd, 2185, 0, 0); // SCI_GETDIRECTPOINTER
                     if this_sci_ptr != 0 {
-                        type DirectFn = unsafe extern "win64" fn(usize, u32, usize, isize) -> isize;
+                        type DirectFn =
+                            unsafe extern "win64" fn(usize, u32, usize, isize, *mut u8) -> isize;
                         let f: DirectFn = unsafe { std::mem::transmute(direct_fn) };
-                        unsafe { f(this_sci_ptr as usize, 2006, 0, 0) }
+                        unsafe { f(this_sci_ptr as usize, 2006, 0, 0, std::ptr::null_mut()) }
                     } else {
                         -2 // SCI_GETDIRECTPOINTER returned 0
                     }
@@ -1329,9 +1340,10 @@ pub unsafe extern "win64" fn begin_paint(hwnd: usize, lp_paint: *mut PaintStruct
                 // subclassed and the new proc doesn't forward SCI queries to Scintilla.
                 // In that case, use extra[0] directly as the sci* for the direct_len probe.
                 let direct_len_via_extra = if direct_fn != 0 && extra0 > 0 {
-                    type DirectFn = unsafe extern "win64" fn(usize, u32, usize, isize) -> isize;
+                    type DirectFn =
+                        unsafe extern "win64" fn(usize, u32, usize, isize, *mut u8) -> isize;
                     let f: DirectFn = unsafe { std::mem::transmute(direct_fn) };
-                    unsafe { f(extra0 as usize, 2006, 0, 0) }
+                    unsafe { f(extra0 as usize, 2006, 0, 0, std::ptr::null_mut()) }
                 } else {
                     -1
                 };
