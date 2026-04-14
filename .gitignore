@@ -34,3 +34,4 @@ core.*
 tests/fixtures/bin/7z.dll
 tests/fixtures/bin/7zFM.exe
 /.docker-cargo/
+.claude/worktrees/
