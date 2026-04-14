@@ -246,7 +246,6 @@ fn notepad_plus_plus_portable_mode() {
     let manifest = env!("CARGO_MANIFEST_DIR");
     let npp_dir = format!("{manifest}/../tests/fixtures/npp");
     let npp_exe = format!("{npp_dir}/notepad++.exe");
-    let test_py = format!("{npp_dir}/test.py");
 
     if !std::path::Path::new(&npp_exe).exists() {
         eprintln!("skipping: notepad++.exe not present in tests/fixtures/npp/");
@@ -359,24 +358,26 @@ fn notepad_plus_plus_portable_mode() {
     );
 
     // Gate 5: Scintilla document must have content after opening test.py.
-    // BeginPaint logs "SCI_GETLENGTH=N" every time it paints a Scintilla window.
-    // If N is always 0, NPP ran but the file content was never inserted into
-    // the document — the regression introduced after the XMM longjmp fix.
-    let max_sci_len: isize = stderr
-        .lines()
-        .filter(|l| l.contains("SCI_GETLENGTH="))
-        .filter_map(|l| {
-            l.split("SCI_GETLENGTH=")
-                .nth(1)
-                .and_then(|s| s.split_whitespace().next())
-                .and_then(|s| s.parse::<isize>().ok())
-        })
-        .max()
-        .unwrap_or(0);
+    // NPP uses Scintilla_DirectFunction (not SendMessageW) for all SCI ops. The proxy
+    // intercepts this and logs SCI_APPENDTEXT when NPP loads file bytes into the document.
+    // Note: SCI_DIRECT_PTR only stores the last SCI_GETDIRECTPOINTER result (secondary
+    // Scintilla window) so BeginPaint's SCI_GETLENGTH probe reads the wrong instance.
+    // Checking SCI_APPENDTEXT(wp>0) in the proxy log is the correct signal.
+    let sci_content_loaded = stderr.lines().any(|l| {
+        if !l.contains("msg=2282(SCI_APPENDTEXT)") {
+            return false;
+        }
+        l.split("wp=")
+            .nth(1)
+            .and_then(|s| s.split_whitespace().next())
+            .and_then(|s| usize::from_str_radix(s.trim_start_matches("0x"), 16).ok())
+            .map(|wp| wp > 0)
+            .unwrap_or(false)
+    });
     assert!(
-        max_sci_len > 0,
-        "Scintilla document is empty (max SCI_GETLENGTH={max_sci_len}) — \
-         test.py was loaded but content was not inserted into Scintilla.\n\
+        sci_content_loaded,
+        "Scintilla never received SCI_APPENDTEXT with content — \
+         test.py was loaded but not inserted into Scintilla.\n\
          stderr: {stderr}"
     );
 }
