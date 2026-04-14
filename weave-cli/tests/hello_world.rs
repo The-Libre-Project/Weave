@@ -254,16 +254,53 @@ fn notepad_plus_plus_portable_mode() {
     }
 
     let weave_bin = env!("CARGO_BIN_EXE_weave");
-    // Run with CWD = npp_dir so relative paths in Notepad++ resolve inside the
-    // portable directory. Pass test.py as argv[1] to exercise the file-load path.
+
+    // Copy the fixture to a temp dir so NPP can write-open config files (langs.xml,
+    // stylers.xml, etc.) without hitting the sandbox deny on the read-only fixture dir.
+    let tmp_dir = std::env::temp_dir().join("weave_npp_test");
+    if tmp_dir.exists() {
+        std::fs::remove_dir_all(&tmp_dir).expect("failed to clean temp npp dir");
+    }
+    fn copy_dir_all(src: &std::path::Path, dst: &std::path::Path) {
+        std::fs::create_dir_all(dst).expect("create_dir_all failed");
+        for entry in std::fs::read_dir(src).expect("read_dir failed") {
+            let entry = entry.expect("entry failed");
+            let dst_path = dst.join(entry.file_name());
+            if entry.file_type().expect("file_type failed").is_dir() {
+                copy_dir_all(&entry.path(), &dst_path);
+            } else {
+                std::fs::copy(entry.path(), &dst_path).expect("copy failed");
+            }
+        }
+    }
+    copy_dir_all(std::path::Path::new(&npp_dir), &tmp_dir);
+
+    let tmp_exe = tmp_dir.join("notepad++.exe");
+    let tmp_py = tmp_dir.join("test.py");
+
+    // Run with CWD = tmp_dir so relative paths in Notepad++ resolve inside the
+    // writable copy. Pass test.py as argv[1] to exercise the file-load path.
     let start = std::time::Instant::now();
     let mut child = std::process::Command::new(weave_bin)
-        .current_dir(&npp_dir)
-        .arg(&npp_exe)
-        .arg(&test_py)
+        .current_dir(&tmp_dir)
+        .arg(&tmp_exe)
+        .arg(&tmp_py)
         .stderr(std::process::Stdio::piped())
         .spawn()
         .unwrap_or_else(|e| panic!("failed to spawn weave on notepad++.exe: {e}"));
+
+    // Drain stderr concurrently — NPP's Weave output can exceed the 64 KB
+    // Linux pipe buffer, blocking write() before the message loop is reached.
+    let stderr_pipe = child.stderr.take().expect("stderr was piped");
+    let stderr_shared = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let stderr_writer = std::sync::Arc::clone(&stderr_shared);
+    let drain_thread = std::thread::spawn(move || {
+        use std::io::Read;
+        let mut buf = Vec::new();
+        let mut pipe = stderr_pipe;
+        let _ = pipe.read_to_end(&mut buf);
+        *stderr_writer.lock().unwrap() = buf;
+    });
 
     let deadline = start + std::time::Duration::from_secs(10);
     loop {
@@ -281,14 +318,8 @@ fn notepad_plus_plus_portable_mode() {
     }
     let elapsed = start.elapsed();
 
-    let stderr_bytes = {
-        use std::io::Read;
-        let mut buf = Vec::new();
-        if let Some(mut pipe) = child.stderr.take() {
-            let _ = pipe.read_to_end(&mut buf);
-        }
-        buf
-    };
+    drain_thread.join().expect("stderr drain thread panicked");
+    let stderr_bytes = stderr_shared.lock().unwrap().clone();
     let stderr = String::from_utf8_lossy(&stderr_bytes);
     eprintln!("notepad++ stderr ({elapsed:.1?}):\n{stderr}");
 
