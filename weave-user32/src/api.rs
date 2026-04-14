@@ -938,39 +938,68 @@ static SCI_REAL_DIRECT_FN: std::sync::atomic::AtomicUsize =
 /// Stored Scintilla direct pointer / sci* (SCI_GETDIRECTPOINTER result).
 static SCI_DIRECT_PTR: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
-/// Proxy for Scintilla_DirectFunction — logs key SCI messages (SCI_ADDTEXT, SCI_CLEARALL,
-/// SCI_CREATEDOCUMENT, SCI_SETDOCPOINTER) then delegates to the real function.
-/// NPP calls this instead of Scintilla_DirectFunction after we intercept
-/// SCI_GETDIRECTFUNCTION. TODO: remove once NPP Gate 6 is green.
+/// Proxy for Scintilla_DirectFunction — fixes the null-pdoc initialization bug and delegates
+/// to the real function for all other messages.
+///
+/// NPP calls this instead of Scintilla_DirectFunction after we intercept SCI_GETDIRECTFUNCTION.
+///
+/// Root cause (confirmed by binary analysis of notepad++.exe):
+/// Scintilla's SetDocPointer has a guard `if (document == pdoc) return` which short-circuits
+/// when both are NULL — so the initial SCI_SETDOCPOINTER(NULL) call during WM_CREATE never
+/// creates a document, and pdoc stays NULL for the lifetime of the window.
+///
+/// Fix: intercept SCI_SETDOCPOINTER(NULL). When pdoc is NULL (offset 0x128 from the
+/// ScintillaWin object — confirmed by disassembly of SCI_ADDTEXT/SCI_GETLENGTH handlers),
+/// create a document via SCI_CREATEDOCUMENT and write it directly to the pdoc field.
+/// Skip the real SetDocPointer to avoid SCN_DOCUMENTCHANGE notifications firing into NPP
+/// code before it is ready (re-entrant crash confirmed at rva=0x2521b3).
+///
+/// Scintilla ref: Scintilla/src/Editor.cxx — SetDocPointer(nullptr) when pdoc==nullptr
+/// fires the `if(document==pdoc) return` guard before creating the document.
 pub extern "win64" fn sci_direct_fn_proxy(
     sci: usize,
     msg: u32,
     wparam: usize,
     lparam: isize,
 ) -> isize {
-    // Log the SCI operations we care about for diagnosing empty document.
-    match msg {
-        2001 => eprintln!(
-            "weave/sci_proxy: SCI_ADDTEXT sci={sci:#x} len={wparam} textptr={lparam:#x}"
-        ),
-        2004 => eprintln!("weave/sci_proxy: SCI_CLEARALL sci={sci:#x}"),
-        2276 => eprintln!("weave/sci_proxy: SCI_CREATEDOCUMENT sci={sci:#x}"),
-        2037 => eprintln!(
-            "weave/sci_proxy: SCI_SETDOCPOINTER sci={sci:#x} doc={lparam:#x}"
-        ),
-        2268 => eprintln!("weave/sci_proxy: SCI_GETDOCPOINTER sci={sci:#x}"),
-        _ => {}
-    }
     let real_fn = SCI_REAL_DIRECT_FN.load(std::sync::atomic::Ordering::Relaxed);
     let f: unsafe extern "win64" fn(usize, u32, usize, isize) -> isize =
         unsafe { std::mem::transmute(real_fn) };
-    let ret = unsafe { f(sci, msg, wparam, lparam) };
-    match msg {
-        2001 | 2004 | 2276 | 2037 | 2268 => {
-            eprintln!("weave/sci_proxy:   → {ret:#x}")
+
+    // SCI_SETDOCPOINTER(NULL) — intercept to work around null-pdoc initialization bug.
+    // pdoc is at byte offset 0x128 from the ScintillaWin 'this' pointer (verified by
+    // disassembly: both SCI_ADDTEXT and SCI_GETLENGTH handlers do `mov r?x, [r14+0x128]`
+    // to load pdoc, where r14 = 'this').
+    if msg == 2037 && lparam == 0 {
+        const PDOC_OFFSET: usize = 0x128;
+        let pdoc = unsafe { *((sci as *const u8).add(PDOC_OFFSET) as *const usize) };
+        eprintln!(
+            "weave/sci_proxy: SCI_SETDOCPOINTER(NULL) sci={sci:#x} pdoc@0x128={pdoc:#x}"
+        );
+        if pdoc == 0 {
+            // Create a fresh document (SCI_CREATEDOCUMENT=2276) and write it directly
+            // to the pdoc field, bypassing SetDocPointer and its notifications entirely.
+            let new_doc = unsafe { f(sci, 2276, 0, 0) } as usize; // SCI_CREATEDOCUMENT
+            eprintln!("weave/sci_proxy:   pdoc was null — created doc={new_doc:#x}, patched sci+0x128");
+            unsafe {
+                *((sci as *mut u8).add(PDOC_OFFSET) as *mut usize) = new_doc;
+            }
         }
+        // Skip the real SetDocPointer to avoid notification crash in all cases.
+        return 0;
+    }
+
+    let ret = unsafe { f(sci, msg, wparam, lparam) };
+
+    // Log key SCI operations for diagnosing document state.
+    match msg {
+        2001 => eprintln!(
+            "weave/sci_proxy: SCI_ADDTEXT sci={sci:#x} len={wparam} → {ret:#x}"
+        ),
+        2268 => eprintln!("weave/sci_proxy: SCI_GETDOCPOINTER sci={sci:#x} → {ret:#x}"),
         _ => {}
     }
+
     ret
 }
 
