@@ -459,6 +459,45 @@ pub unsafe extern "win64" fn get_message_w(
         return -1;
     }
 
+    // Apply any pending deferred doc transfer after NPP is fully initialized.
+    // The transfer crashes if applied too early (NPP not ready for SCN_DOCUMENTCHANGE at
+    // RVA 0x2521b3). Wait until PHASE_WM_PAINT has fired (first WM_PAINT = NPP fully up).
+    {
+        let pending_sci = PENDING_DOC_SCI.load(std::sync::atomic::Ordering::Relaxed);
+        let pending_doc = PENDING_DOC_PTR.load(std::sync::atomic::Ordering::Relaxed);
+        let text_buf = PENDING_TEXT_BUF.load(std::sync::atomic::Ordering::Relaxed);
+        if pending_sci != 0
+            && text_buf != 0
+            && PHASE_WM_PAINT_DISPATCHED.load(std::sync::atomic::Ordering::Relaxed)
+        {
+            // Clear all pending state before calling to prevent re-triggering.
+            PENDING_DOC_SCI.store(0, std::sync::atomic::Ordering::Relaxed);
+            PENDING_DOC_PTR.store(0, std::sync::atomic::Ordering::Relaxed);
+            PENDING_TEXT_BUF.store(0, std::sync::atomic::Ordering::Relaxed);
+            let real_fn = SCI_REAL_DIRECT_FN.load(std::sync::atomic::Ordering::Relaxed);
+            if real_fn != 0 {
+                type DirectFn =
+                    unsafe extern "win64" fn(usize, u32, usize, isize, *mut u8) -> isize;
+                let f: DirectFn = unsafe { std::mem::transmute(real_fn) };
+                // Use SCI_APPENDTEXT (2282) — confirmed working in this Scintilla build.
+                // SCI_SETTEXT (2009) returned len=0 (wrong msg# or notification resets it).
+                // SCI_APPENDTEXT fires SCN_MODIFIED (safe from message-loop context).
+                // First clear any content, then append the file bytes.
+                unsafe { f(pending_sci, 2004 /*SCI_CLEARALL*/, 0, 0, std::ptr::null_mut()) };
+                // text_buf is null-terminated; pass wparam=length (not including null).
+                let text_len = unsafe { std::ffi::CStr::from_ptr(text_buf as *const i8).to_bytes().len() };
+                unsafe { f(pending_sci, 2282 /*SCI_APPENDTEXT*/, text_len, text_buf as isize, std::ptr::null_mut()) };
+                // Free the buffer we allocated in sci_direct_fn_proxy.
+                let _ = unsafe { Box::from_raw(text_buf as *mut u8) };
+                let main_len = unsafe { f(pending_sci, 2006, 0, 0, std::ptr::null_mut()) };
+                eprintln!(
+                    "weave/GetMessageW: applied SCI_SETTEXT to main \
+                     sci={pending_sci:#x} main_SCI_GETLENGTH={main_len}"
+                );
+            }
+        }
+    }
+
     // Wait for a message: keep pumping X11 events until the queue has one.
     static GM_COUNT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
     static GM_ENTRY: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
@@ -964,6 +1003,14 @@ static SCI_DIRECT_PTR: std::sync::atomic::AtomicUsize = std::sync::atomic::Atomi
 /// Tracks the sci pointer that received SCI_SETDOCPOINTER(NULL) = the main editor sci.
 /// Required for the forced doc transfer in sci_direct_fn_proxy.
 static MAIN_EDITOR_SCI: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// Deferred SCI_SETTEXT: target sci and text buffer to apply from get_message_w after WM_PAINT.
+/// Calling any SCI message re-entrantly from inside the proxy causes NPP notification crashes.
+/// Instead, we copy scratch's text here and apply it from the message-loop context.
+static PENDING_DOC_SCI: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static PENDING_DOC_PTR: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// Heap-allocated copy of file content to apply via SCI_SETTEXT from get_message_w.
+/// Raw pointer to a null-terminated Vec<u8> owned by Weave. Set once, freed after use.
+static PENDING_TEXT_BUF: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 /// Proxy for SciFnDirectStatus — logs all SCI messages and intercepts SCI_GETDOCPOINTER.
 /// NPP calls this instead of SciFnDirectStatus after we intercept SCI_GETDIRECTSTATUSFUNCTION.
@@ -1034,27 +1081,33 @@ pub unsafe extern "win64" fn sci_direct_fn_proxy(
         if main_sci != 0 && sci != main_sci && sci >= 0x0000_1000_0000_0000 {
             // Read scratch's CURRENT pdoc (before this msg=2358 replaces it).
             let scratch_pdoc = unsafe { *(sci as *const usize).add(37) }; // sci+0x128
+            let scratch_len_dbg = if scratch_pdoc != 0 { unsafe { f(sci, 2006, 0, 0, std::ptr::null_mut()) } } else { -99 };
+            let main_len_dbg = unsafe { f(main_sci, 2006, 0, 0, std::ptr::null_mut()) };
+            eprintln!("weave/sci_proxy: msg=2358 debug: scratch_pdoc={scratch_pdoc:#x} scratch_len={scratch_len_dbg} main_len={main_len_dbg}");
             if scratch_pdoc != 0 {
                 // Check if scratch has content worth transferring.
-                let scratch_len = unsafe { f(sci, 2006, 0, 0, std::ptr::null_mut()) };
+                let scratch_len = scratch_len_dbg;
                 // Check if main is currently empty (avoid overwriting user edits).
-                let main_len = unsafe { f(main_sci, 2006, 0, 0, std::ptr::null_mut()) };
+                let main_len = main_len_dbg;
                 if scratch_len > 0 && main_len == 0 {
-                    // Transfer scratch's loaded doc to main by writing directly to sci+0x128.
-                    // We cannot call msg=2358 (SCI_SETDOCPOINTER) on main because it triggers
-                    // synchronous SCN_DOCUMENTCHANGE notifications that crash NPP when fired
-                    // re-entrantly from inside a proxy call (confirmed in investigation log,
-                    // commit a498b58 ruled out). Direct write bypasses the notification path.
-                    // Scintilla's paint handler reads pdoc from sci+0x128 for content.
-                    unsafe {
-                        *(main_sci as *mut usize).add(37) = scratch_pdoc;
-                    };
-                    let main_len_after = unsafe { f(main_sci, 2006, 0, 0, std::ptr::null_mut()) };
-                    eprintln!(
-                        "weave/sci_proxy: forced doc transfer to main (direct write): \
-                         scratch={sci:#x} doc={scratch_pdoc:#x} scratch_len={scratch_len} \
-                         → main={main_sci:#x} main_len_after={main_len_after}"
-                    );
+                    // Use the text pointer saved from SCI_APPENDTEXT (PENDING_DOC_PTR).
+                    // SCI_GETCHARACTERPOINTER returns 0 in this build (wrong msg number).
+                    let saved_text_ptr = PENDING_DOC_PTR.load(std::sync::atomic::Ordering::Relaxed);
+                    if saved_text_ptr != 0 {
+                        let text_slice = unsafe {
+                            std::slice::from_raw_parts(saved_text_ptr as *const u8, scratch_len as usize)
+                        };
+                        let mut buf = text_slice.to_vec();
+                        buf.push(0); // null-terminate for SCI_SETTEXT
+                        let buf_ptr = Box::into_raw(buf.into_boxed_slice()) as *mut u8 as usize;
+                        PENDING_TEXT_BUF.store(buf_ptr, std::sync::atomic::Ordering::Relaxed);
+                        PENDING_DOC_SCI.store(main_sci, std::sync::atomic::Ordering::Relaxed);
+                        PENDING_DOC_PTR.store(0, std::sync::atomic::Ordering::Relaxed);
+                        eprintln!(
+                            "weave/sci_proxy: text captured for deferred SCI_SETTEXT: \
+                             scratch={sci:#x} len={scratch_len} → main={main_sci:#x}"
+                        );
+                    }
                 }
             }
         }
@@ -1074,6 +1127,11 @@ pub unsafe extern "win64" fn sci_direct_fn_proxy(
         } else {
             eprintln!("weave/sci_proxy:   → {ret:#x}");
         }
+    }
+
+    // Save lparam from SCI_APPENDTEXT for the msg=2358 handler's text copy.
+    if msg == 2282 /*SCI_APPENDTEXT*/ && lparam != 0 && wparam > 0 {
+        PENDING_DOC_PTR.store(lparam as usize, std::sync::atomic::Ordering::Relaxed);
     }
 
     ret

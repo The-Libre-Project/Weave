@@ -218,12 +218,20 @@ mod inner {
             | EventMask::BUTTON_RELEASE
             | EventMask::POINTER_MOTION;
 
+        // backing_store = ALWAYS: the X11 server maintains the window's pixel content
+        // even when obscured, so XQuartz (macOS compositor) can composite it correctly.
+        // Without this, child window content is discarded on expose and XQuartz shows white.
         let aux = CreateWindowAux::new()
             .background_pixel(g.white_pixel)
+            .backing_store(x11rb::protocol::xproto::BackingStore::ALWAYS)
             .event_mask(event_mask);
 
-        // Use the parent's X11 window if provided; fall back to root for top-level windows.
-        let x11_parent = if parent_xcb != 0 { parent_xcb } else { g.root };
+        // Always create as children of root — XQuartz (macOS compositor) only renders
+        // top-level X11 windows correctly. Child-of-child windows are invisible because
+        // XQuartz doesn't composite them into the macOS display. Win32 parent-child
+        // relationships are managed at the HWND level; all X11 windows are siblings.
+        let x11_parent = g.root;
+        let _ = parent_xcb; // Win32 parent tracked separately, not in X11
 
         if let Err(e) = g.conn.create_window(
             x11rb::COPY_DEPTH_FROM_PARENT,
@@ -418,7 +426,7 @@ mod inner {
             .conn
             .copy_area(src, dst, gc_id, src_x, src_y, dst_x, dst_y, width, height);
         let _ = g.conn.free_gc(gc_id);
-        let _ = g.conn.flush();
+        let _ = g.conn.sync();
     }
 
     /// Destroy an X11 window.
@@ -501,7 +509,8 @@ mod inner {
         let r = colorref & 0xFF;
         let g = (colorref >> 8) & 0xFF;
         let b = (colorref >> 16) & 0xFF;
-        (r << 16) | (g << 8) | b
+        // Alpha must be 0xFF for compositing displays (XQuartz on macOS). Alpha=0 = transparent.
+        0xFF00_0000 | (r << 16) | (g << 8) | b
     }
 
     /// Fill a solid rectangle on an X11 window.
