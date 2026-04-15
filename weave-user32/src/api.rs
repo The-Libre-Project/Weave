@@ -903,6 +903,27 @@ pub extern "win64" fn send_message_w(
             return 0;
         }
     };
+    // SCI_GETDOCPOINTER (2268=0x08DC): Scintilla's WndProc in this NPP 8.9.3 build reads a
+    // different field. Binary analysis confirmed pdoc is at sci+0x128. Read it directly.
+    if msg == 2268 {
+        let sci = get_extra(hwnd, |e| {
+            if e.extra_bytes.len() >= 8 {
+                let mut buf = [0u8; 8];
+                buf.copy_from_slice(&e.extra_bytes[0..8]);
+                usize::from_ne_bytes(buf)
+            } else {
+                0
+            }
+        }, 0_usize);
+        if sci >= 0x0000_1000_0000_0000 {
+            let pdoc = unsafe { *(sci as *const usize).add(37) }; // sci+0x128
+            eprintln!(
+                "weave/user32: SendMessageW SCI_GETDOCPOINTER hwnd={hwnd:#x} sci={sci:#x} → pdoc={pdoc:#x}"
+            );
+            return pdoc as isize;
+        }
+    }
+
     let ret = call_wnd_proc(proc_addr, hwnd, msg, w_param, l_param);
     // Intercept SCI_GETDIRECTSTATUSFUNCTION (2184): return our proxy instead of the real fn ptr.
     // SCI_GETDIRECTSTATUSFUNCTION returns a 5-param fn: (sci, msg, wp, lp, *status) -> iptr.
@@ -936,6 +957,13 @@ static SCI_DIRECT_FN: std::sync::atomic::AtomicUsize = std::sync::atomic::Atomic
 static SCI_REAL_DIRECT_FN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 /// Stored Scintilla direct pointer / sci* (SCI_GETDIRECTPOINTER result).
 static SCI_DIRECT_PTR: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Tracks the sci pointer that received SCI_SETDOCPOINTER(NULL) = the main editor sci.
+static MAIN_EDITOR_SCI: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+/// Counts how many times msg=2358 has fired on the scratch sci (to identify the post-load reset).
+static MSG_2358_COUNT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
 
 /// Proxy for SciFnDirectStatus — logs all SCI messages and intercepts SCI_GETDOCPOINTER.
 /// NPP calls this instead of SciFnDirectStatus after we intercept SCI_GETDIRECTSTATUSFUNCTION.
@@ -980,6 +1008,12 @@ pub unsafe extern "win64" fn sci_direct_fn_proxy(
         );
     }
 
+    // Track main editor sci (first sci to receive SCI_SETDOCPOINTER=NULL, msg=2269, lp=0).
+    if msg == 2269 && lparam == 0 && MAIN_EDITOR_SCI.load(std::sync::atomic::Ordering::Relaxed) == 0 {
+        MAIN_EDITOR_SCI.store(sci, std::sync::atomic::Ordering::Relaxed);
+        eprintln!("weave/sci_proxy: main editor sci tracked = {sci:#x}");
+    }
+
     // SCI_GETDOCPOINTER (2268): Scintilla's WndProc in this NPP 8.9.3 build reads a different
     // field than pdoc. Binary analysis confirmed pdoc is at sci+0x128 (offset 37 * 8).
     // RVAs 0x2626bb and 0x2634f1 both dereference [sci+0x128] for the document pointer.
@@ -988,7 +1022,61 @@ pub unsafe extern "win64" fn sci_direct_fn_proxy(
         return pdoc as isize;
     }
 
+    // msg=2358 = SCI_SETDOCPOINTER in NPP 8.9.3's Scintilla (writes to sci+0x128).
+    // NPP calls this on scratch to set up document sharing, but never calls it on the main
+    // editor to transfer the loaded document. We intercept here: when scratch is about to be
+    // reset to a new empty doc (lparam = new_empty_doc) and scratch currently has content,
+    // first transfer scratch's current doc (with file bytes) to the main editor, then let
+    // scratch reset normally.
+    if msg == 2358 {
+        let main_sci = MAIN_EDITOR_SCI.load(std::sync::atomic::Ordering::Relaxed);
+        if main_sci != 0 && sci != main_sci && sci >= 0x0000_1000_0000_0000 {
+            // Read scratch's CURRENT pdoc (before this msg=2358 replaces it).
+            let scratch_pdoc = unsafe { *(sci as *const usize).add(37) }; // sci+0x128
+            if scratch_pdoc != 0 {
+                // Check if scratch has content worth transferring.
+                let scratch_len = unsafe { f(sci, 2006, 0, 0, std::ptr::null_mut()) };
+                // Check if main is currently empty (avoid overwriting user edits).
+                let main_len = unsafe { f(main_sci, 2006, 0, 0, std::ptr::null_mut()) };
+                if scratch_len > 0 && main_len == 0 {
+                    // Transfer scratch's loaded doc to main by writing directly to sci+0x128.
+                    // We cannot call msg=2358 (SCI_SETDOCPOINTER) on main because it triggers
+                    // synchronous SCN_DOCUMENTCHANGE notifications that crash NPP when fired
+                    // re-entrantly from inside a proxy call (confirmed in investigation log,
+                    // commit a498b58 ruled out). Direct write bypasses the notification path.
+                    // Scintilla's paint handler reads pdoc from sci+0x128 for content.
+                    unsafe { *(main_sci as *mut usize).add(37) = scratch_pdoc; };
+                    let main_len_after = unsafe { f(main_sci, 2006, 0, 0, std::ptr::null_mut()) };
+                    eprintln!(
+                        "weave/sci_proxy: forced doc transfer to main (direct write): \
+                         scratch={sci:#x} doc={scratch_pdoc:#x} scratch_len={scratch_len} \
+                         → main={main_sci:#x} main_len_after={main_len_after}"
+                    );
+                }
+            }
+        }
+    }
+
     let ret = unsafe { f(sci, msg, wparam, lparam, p_status) };
+
+    // After each msg=2358 (scratch doc replacement), probe main editor's doc and length.
+    if msg == 2358 {
+        let count = MSG_2358_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let main_sci = MAIN_EDITOR_SCI.load(std::sync::atomic::Ordering::Relaxed);
+        if main_sci != 0 {
+            let main_len = unsafe { f(main_sci, 2006, 0, 0, std::ptr::null_mut()) };
+            // Read main's pdoc directly from sci+0x128 (confirmed field from binary analysis).
+            let main_pdoc = if main_sci >= 0x0000_1000_0000_0000 {
+                unsafe { *(main_sci as *const usize).add(37) }
+            } else { 0 };
+            eprintln!(
+                "weave/sci_proxy: after msg=2358 #{count}: scratch={sci:#x} lp={lparam:#x} \
+                 main={main_sci:#x} main_pdoc@0x128={main_pdoc:#x} \
+                 lp_eq_main_pdoc={} main_SCI_GETLENGTH={main_len}",
+                lparam as usize == main_pdoc
+            );
+        }
+    }
 
     if !msg_name.is_empty() || (2000..=3000).contains(&msg) {
         // SCI_SETREADONLY (2046): log ret and wParam only — do NOT dereference p_status.
