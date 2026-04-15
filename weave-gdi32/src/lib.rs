@@ -5,6 +5,35 @@
 //! connection. All stubs are safe to call even when no display is available —
 //! drawing functions become no-ops on headless systems.
 //!
+//! # Coupling to weave-user32 — intentional, documented exception
+//!
+//! `weave-gdi32` directly imports `weave-user32`. This violates the general
+//! architecture rule that DLL crates should not import each other (shared types
+//! belong in `weave-common`). The exception is intentional and mirrors real
+//! Windows: gdi32 and user32 are deeply entangled at the implementation level.
+//!
+//! On Windows, gdi32 cannot function without user32 internals:
+//! - **Window DCs**: `GetDC` / `BeginPaint` return a DC bound to an HWND. gdi32
+//!   must reach into the window's drawable (here: an XCB drawable/pixmap) to
+//!   issue drawing commands. That state lives in `weave_user32::window`.
+//! - **Paint context**: `weave_user32::api::current_paint_hwnd()` tracks the
+//!   window currently inside `BeginPaint`/`EndPaint`. gdi32 needs this to
+//!   resolve which drawable the DC targets during a WM_PAINT handler.
+//! - **Rendering backend**: X11 drawing primitives (fill, line, blit, text) are
+//!   owned by `weave_user32::backend` because user32 bootstraps the XCB
+//!   connection. gdi32 borrows those primitives rather than re-owning the
+//!   connection.
+//! - **Font metrics**: `weave_user32::font` provides the fontdue rasterizer.
+//!   gdi32 calls `metrics()` and `measure_text()` for `GetTextMetrics`,
+//!   `GetTextExtentPoint32`, and `DrawText` layout.
+//!
+//! Extraction was evaluated (audit action 01, 2026-04-15). The surface is 13
+//! items across 4 modules (`backend`, `font`, `api`, `window`), several of
+//! which mutate or read user32-internal state. Moving them to `weave-common`
+//! would either hollow out `weave-user32` or create a circular dependency.
+//! The coupling is accepted as-is. Do not add further DLL→DLL imports without
+//! a similar written justification.
+//!
 //! # Text rendering (Phase 3)
 //!
 //! Text is rendered via fontdue (pure-Rust TrueType rasterizer). UTF-16 strings
