@@ -906,15 +906,19 @@ pub extern "win64" fn send_message_w(
     // SCI_GETDOCPOINTER (2268=0x08DC): Scintilla's WndProc in this NPP 8.9.3 build reads a
     // different field. Binary analysis confirmed pdoc is at sci+0x128. Read it directly.
     if msg == 2268 {
-        let sci = get_extra(hwnd, |e| {
-            if e.extra_bytes.len() >= 8 {
-                let mut buf = [0u8; 8];
-                buf.copy_from_slice(&e.extra_bytes[0..8]);
-                usize::from_ne_bytes(buf)
-            } else {
-                0
-            }
-        }, 0_usize);
+        let sci = get_extra(
+            hwnd,
+            |e| {
+                if e.extra_bytes.len() >= 8 {
+                    let mut buf = [0u8; 8];
+                    buf.copy_from_slice(&e.extra_bytes[0..8]);
+                    usize::from_ne_bytes(buf)
+                } else {
+                    0
+                }
+            },
+            0_usize,
+        );
         if sci >= 0x0000_1000_0000_0000 {
             let pdoc = unsafe { *(sci as *const usize).add(37) }; // sci+0x128
             eprintln!(
@@ -959,11 +963,9 @@ static SCI_REAL_DIRECT_FN: std::sync::atomic::AtomicUsize = std::sync::atomic::A
 static SCI_DIRECT_PTR: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 /// Tracks the sci pointer that received SCI_SETDOCPOINTER(NULL) = the main editor sci.
-static MAIN_EDITOR_SCI: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
+static MAIN_EDITOR_SCI: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 /// Counts how many times msg=2358 has fired on the scratch sci (to identify the post-load reset).
-static MSG_2358_COUNT: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
+static MSG_2358_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 /// Proxy for SciFnDirectStatus — logs all SCI messages and intercepts SCI_GETDOCPOINTER.
 /// NPP calls this instead of SciFnDirectStatus after we intercept SCI_GETDIRECTSTATUSFUNCTION.
@@ -1009,7 +1011,8 @@ pub unsafe extern "win64" fn sci_direct_fn_proxy(
     }
 
     // Track main editor sci (first sci to receive SCI_SETDOCPOINTER=NULL, msg=2269, lp=0).
-    if msg == 2269 && lparam == 0 && MAIN_EDITOR_SCI.load(std::sync::atomic::Ordering::Relaxed) == 0 {
+    if msg == 2269 && lparam == 0 && MAIN_EDITOR_SCI.load(std::sync::atomic::Ordering::Relaxed) == 0
+    {
         MAIN_EDITOR_SCI.store(sci, std::sync::atomic::Ordering::Relaxed);
         eprintln!("weave/sci_proxy: main editor sci tracked = {sci:#x}");
     }
@@ -1045,7 +1048,9 @@ pub unsafe extern "win64" fn sci_direct_fn_proxy(
                     // re-entrantly from inside a proxy call (confirmed in investigation log,
                     // commit a498b58 ruled out). Direct write bypasses the notification path.
                     // Scintilla's paint handler reads pdoc from sci+0x128 for content.
-                    unsafe { *(main_sci as *mut usize).add(37) = scratch_pdoc; };
+                    unsafe {
+                        *(main_sci as *mut usize).add(37) = scratch_pdoc;
+                    };
                     let main_len_after = unsafe { f(main_sci, 2006, 0, 0, std::ptr::null_mut()) };
                     eprintln!(
                         "weave/sci_proxy: forced doc transfer to main (direct write): \
@@ -1068,7 +1073,9 @@ pub unsafe extern "win64" fn sci_direct_fn_proxy(
             // Read main's pdoc directly from sci+0x128 (confirmed field from binary analysis).
             let main_pdoc = if main_sci >= 0x0000_1000_0000_0000 {
                 unsafe { *(main_sci as *const usize).add(37) }
-            } else { 0 };
+            } else {
+                0
+            };
             eprintln!(
                 "weave/sci_proxy: after msg=2358 #{count}: scratch={sci:#x} lp={lparam:#x} \
                  main={main_sci:#x} main_pdoc@0x128={main_pdoc:#x} \
