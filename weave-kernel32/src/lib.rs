@@ -9550,6 +9550,7 @@ pub unsafe extern "win64" fn set_console_ctrl_handler(_handler_routine: usize, _
 // ── Resolver ──────────────────────────────────────────────────────────────────
 
 /// Resolve a kernel32.dll import to a stub address.
+// Wine ref: not implemented in Wine — Weave-internal IAT resolver; maps DLL export names to stub fn pointers; no Windows API equivalent
 pub fn resolve(dll: &str, func: &str) -> Option<usize> {
     // api-ms-win-* API sets forward to kernel32. Accept any such name so that
     // GetProcAddress on a LoadLibrary'd api-ms-win-* handle finds our stubs.
@@ -10747,6 +10748,7 @@ pub unsafe extern "win64" fn ver_query_value_a(
 ///
 /// Some apps import version.dll directly; others route through kernel32
 /// apisets. We handle both paths.
+// Wine ref: not implemented in Wine — Weave-internal IAT resolver for version.dll; no Windows API equivalent
 pub fn resolve_version(dll: &str, func: &str) -> Option<usize> {
     let is_version = dll.eq_ignore_ascii_case("version.dll");
     // api-ms-win-core-version-* apisets forward to version.dll.
