@@ -6837,11 +6837,17 @@ pub extern "win64" fn release_mutex(_h_mutex: usize) -> i32 {
 // Wine ref: libs/winecrt0/exception.c::__wine_rtl_unwind:72 — calls RtlUnwind(frame, target,
 // record, 0) then loops calling target; sets EXCEPTION_UNWINDING flag on record.ExceptionFlags.
 pub unsafe extern "win64" fn rtl_unwind(
-    _target_frame: *mut u8,
-    _target_ip: *mut u8,
-    _exception_record: *mut u8,
+    target_frame: *mut u8,
+    target_ip: *mut u8,
+    exception_record: *mut u8,
     _return_value: usize,
 ) {
+    eprintln!(
+        "[weave] FATAL: RtlUnwind is not implemented — aborting to prevent silent corruption. \
+        target_frame={:p} target_ip={:p} exception_record={:p}",
+        target_frame, target_ip, exception_record
+    );
+    std::process::abort();
 }
 
 /// UnhandledExceptionFilter — returns EXCEPTION_EXECUTE_HANDLER (1).
