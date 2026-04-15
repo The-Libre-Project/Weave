@@ -903,18 +903,10 @@ pub extern "win64" fn send_message_w(
             return 0;
         }
     };
-    // Diagnostic: log proc_addr for SCI_GETDOCPOINTER (0x08DC=2268) so we can confirm
-    // the call reaches Scintilla's WndProc and the 0 return is from Scintilla itself.
-    if msg == 0x08DC {
-        eprintln!(
-            "weave/user32: SendMessageW SCI_GETDOCPOINTER hwnd={hwnd:#x} → wnd_proc={proc_addr:#x}"
-        );
-    }
     let ret = call_wnd_proc(proc_addr, hwnd, msg, w_param, l_param);
     // Intercept SCI_GETDIRECTSTATUSFUNCTION (2184): return our proxy instead of the real fn ptr.
     // SCI_GETDIRECTSTATUSFUNCTION returns a 5-param fn: (sci, msg, wp, lp, *status) -> iptr.
-    // We intercept it so we can log all SCI calls NPP makes via the direct interface.
-    // TODO: remove once NPP Gate 6 is green.
+    // The proxy logs all SCI calls and fixes SCI_GETDOCPOINTER to read pdoc from sci+0x128.
     if msg == 2184 && ret != 0 {
         // Store the real SciFnDirectStatus address, return our 5-param proxy instead.
         SCI_REAL_DIRECT_FN.store(ret as usize, std::sync::atomic::Ordering::Relaxed);
@@ -939,25 +931,19 @@ pub extern "win64" fn send_message_w(
 }
 
 /// Stored Scintilla direct function pointer (proxy address, not the real one).
-/// Used in BeginPaint to probe document state.
-/// TODO: remove once NPP Gate 6 is green.
 static SCI_DIRECT_FN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 /// Real Scintilla_DirectFunction address (from the PE binary).
 static SCI_REAL_DIRECT_FN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 /// Stored Scintilla direct pointer / sci* (SCI_GETDIRECTPOINTER result).
 static SCI_DIRECT_PTR: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-/// sci pointer that received the most recent SCI_APPENDTEXT — used to track per-call length drift.
-/// TODO: remove once NPP Gate 6 is green.
-static LAST_APPEND_SCI: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
-/// Proxy for SciFnDirectStatus — logs all SCI messages to expose what NPP sends.
+/// Proxy for SciFnDirectStatus — logs all SCI messages and intercepts SCI_GETDOCPOINTER.
 /// NPP calls this instead of SciFnDirectStatus after we intercept SCI_GETDIRECTSTATUSFUNCTION.
 /// Matches the 5-param SciFnDirectStatus signature: (sci, msg, wp, lp, *status) -> iptr.
 ///
 /// # Safety
 /// `p_status` is passed through to the real Scintilla function; caller must ensure it
 /// is null or points to a valid bool-sized location (as guaranteed by NPP's Scintilla bindings).
-/// TODO: remove once NPP Gate 6 is green.
 pub unsafe extern "win64" fn sci_direct_fn_proxy(
     sci: usize,
     msg: u32,
@@ -970,8 +956,6 @@ pub unsafe extern "win64" fn sci_direct_fn_proxy(
     let f: unsafe extern "win64" fn(usize, u32, usize, isize, *mut u8) -> isize =
         unsafe { std::mem::transmute(real_fn) };
 
-    // Log ALL SCI messages to reveal what NPP sends (needed to diagnose why text is never added).
-    // TODO: remove once NPP Gate 6 is green.
     let msg_name = match msg {
         2001 => "SCI_ADDTEXT",
         2003 => "SCI_INSERTTEXT",
@@ -996,35 +980,13 @@ pub unsafe extern "win64" fn sci_direct_fn_proxy(
         );
     }
 
-    // Diagnostic: for SCI_APPENDTEXT (2282), dump first 16 bytes of the text buffer so we can
-    // confirm whether NPP's text pointer is valid before the call.
-    // TODO: remove once NPP Gate 6 is green.
-    if msg == 2282 {
-        let ptr = lparam as *const u8;
-        let len = wparam.min(16);
-        let bytes: Vec<u8> = if !ptr.is_null() && len > 0 {
-            unsafe { std::slice::from_raw_parts(ptr, len).to_vec() }
-        } else {
-            Vec::new()
-        };
-        let hex: Vec<String> = bytes.iter().map(|b| format!("{b:02x}")).collect();
-        eprintln!(
-            "weave/sci_proxy: SCI_APPENDTEXT text[0..{}] = [{}] (ptr={lparam:#x} len={})",
-            len,
-            hex.join(" "),
-            wparam
-        );
-        eprintln!(
-            "weave/sci_proxy: SCI_APPENDTEXT p_status={:#x}",
-            p_status as usize
-        );
-        // Record which sci pointer received SCI_APPENDTEXT so post-call probes can track it.
-        // TODO: remove once NPP Gate 6 is green.
-        LAST_APPEND_SCI.store(sci, std::sync::atomic::Ordering::Relaxed);
+    // SCI_GETDOCPOINTER (2268): Scintilla's WndProc in this NPP 8.9.3 build reads a different
+    // field than pdoc. Binary analysis confirmed pdoc is at sci+0x128 (offset 37 * 8).
+    // RVAs 0x2626bb and 0x2634f1 both dereference [sci+0x128] for the document pointer.
+    if msg == 2268 && sci >= 0x0000_1000_0000_0000 {
+        let pdoc = unsafe { *(sci as *const usize).add(37) }; // sci+0x128
+        return pdoc as isize;
     }
-
-    // Also log SCI_SETREADONLY (2046) return value to detect if the document is marked read-only.
-    // TODO: remove once NPP Gate 6 is green.
 
     let ret = unsafe { f(sci, msg, wparam, lparam, p_status) };
 
@@ -1037,163 +999,8 @@ pub unsafe extern "win64" fn sci_direct_fn_proxy(
                 "weave/sci_proxy:   → ret={ret:#x} readonly_set={} (SCI_SETREADONLY)",
                 wparam != 0,
             );
-        // For SCI_CLEARALL (2004), SCI_GETLENGTH (2006), SCI_APPENDTEXT (2282):
-        // log p_status only when non-null (those messages do use the status slot).
-        } else if matches!(msg, 2282 | 2004 | 2006) && !p_status.is_null() {
-            let status_val = unsafe { *p_status };
-            eprintln!(
-                "weave/sci_proxy:   → ret={ret:#x} status={status_val:#x} (msg={msg}({}))",
-                if msg_name.is_empty() { "?" } else { msg_name }
-            );
-        } else if matches!(msg, 2282 | 2004 | 2006) {
-            eprintln!(
-                "weave/sci_proxy:   → ret={ret:#x} status=null (msg={msg}({}))",
-                if msg_name.is_empty() { "?" } else { msg_name }
-            );
         } else {
             eprintln!("weave/sci_proxy:   → {ret:#x}");
-        }
-    }
-
-    // After SCI_APPENDTEXT: immediately call SCI_GETLENGTH (2006) to probe document length.
-    // If InsertString succeeded, length should equal wparam. If still 0, InsertString failed.
-    // TODO: remove once NPP Gate 6 is green.
-    if msg == 2282 {
-        let post_len = unsafe {
-            f(sci, 2006 /*SCI_GETLENGTH*/, 0, 0, std::ptr::null_mut())
-        };
-        eprintln!(
-            "weave/sci_proxy: immediate SCI_GETLENGTH after SCI_APPENDTEXT = {post_len} (expected {})",
-            wparam
-        );
-
-        // Probe adjacent message numbers to find the real SCI_GETDOCPOINTER in this build.
-        // 2268 returned 0 despite 2006 returning 289 — scan neighbours for a heap-pointer return.
-        // TODO: remove once NPP Gate 6 is green.
-        for msg_test in 2265_u32..=2275 {
-            let ret_probe = unsafe { f(sci, msg_test, 0, 0, std::ptr::null_mut()) };
-            if ret_probe > 0x0005_0000_0000_0000_isize {
-                eprintln!("weave/sci_proxy: msg-scan msg={msg_test} → {ret_probe:#x} (heap addr!)");
-            } else {
-                eprintln!("weave/sci_proxy: msg-scan msg={msg_test} → {ret_probe:#x}");
-            }
-        }
-
-        // Probe sci object memory at word-aligned offsets to locate the pdoc pointer field.
-        // Filter: val > 0x500000000000 && val < 0x800000000000 — excludes 0xffffffffffffffff (-1 in isize).
-        // TODO: remove once NPP Gate 6 is green.
-        {
-            let sci_ptr = sci as *const usize;
-            for offset_words in [2_usize, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16] {
-                let val = unsafe { *sci_ptr.add(offset_words) };
-                let is_heap =
-                    val > 0x0005_0000_0000_0000_usize && val < 0x0008_0000_0000_0000_usize;
-                if is_heap {
-                    eprintln!(
-                        "weave/sci_proxy: sci+{:#x} → {val:#x} (heap addr!)",
-                        offset_words * 8
-                    );
-                } else {
-                    eprintln!("weave/sci_proxy: sci+{:#x} → {val:#x}", offset_words * 8);
-                }
-            }
-        }
-
-        // Try calling SCI_GETLENGTH via the pointer stored at sci+0x10 (offset 2) and sci+0x18 (offset 3).
-        // HYPOTHESIS: extra[0] is an NPP wrapper; the real ScintillaBase* is at wrapper+0x18.
-        // If sci+0x18 is the real ScintillaBase*, real_fn(*(sci+0x18), SCI_GETLENGTH, ...) == 289.
-        // TODO: remove once NPP Gate 6 is green.
-        {
-            type DirectFn = unsafe extern "win64" fn(usize, u32, usize, isize, *mut u8) -> isize;
-            let real_fn: DirectFn = unsafe { std::mem::transmute(f as usize) };
-            let sci_ptr = sci as *const usize;
-
-            // sci+0x10 — offset 2 words
-            let cand_0x10 = unsafe { *sci_ptr.add(2) };
-            if cand_0x10 > 0x0005_0000_0000_0000_usize && cand_0x10 < 0x0008_0000_0000_0000_usize {
-                let len = unsafe {
-                    real_fn(
-                        cand_0x10,
-                        2006, /*SCI_GETLENGTH*/
-                        0,
-                        0,
-                        std::ptr::null_mut(),
-                    )
-                };
-                eprintln!(
-                    "weave/sci_proxy: sci+0x10 deref call → SCI_GETLENGTH={len} \
-                     (cand={cand_0x10:#x})"
-                );
-            } else {
-                eprintln!(
-                    "weave/sci_proxy: sci+0x10 deref call skipped — not heap addr \
-                     ({cand_0x10:#x})"
-                );
-            }
-
-            // sci+0x18 — offset 3 words (no filter: test unconditionally as sci pointer)
-            let ptr_at_0x18 = unsafe { *sci_ptr.add(3) };
-            if ptr_at_0x18 != 0 {
-                let len_at_0x18 = unsafe { real_fn(ptr_at_0x18, 2006, 0, 0, std::ptr::null_mut()) };
-                let doc_at_0x18 = unsafe { real_fn(ptr_at_0x18, 2268, 0, 0, std::ptr::null_mut()) };
-                eprintln!(
-                    "weave/sci_proxy: sci+0x18 deref = {ptr_at_0x18:#x} → len={len_at_0x18} \
-                     doc={doc_at_0x18:#x}"
-                );
-            } else {
-                eprintln!("weave/sci_proxy: sci+0x18 deref = 0 (null, skipped)");
-            }
-
-            // sci+0x58 — offset 11 words (had heap-looking address 0x555555d45cb0)
-            let ptr_at_0x58 = unsafe { *sci_ptr.add(11) };
-            if ptr_at_0x58 != 0 {
-                let len_at_0x58 = unsafe { real_fn(ptr_at_0x58, 2006, 0, 0, std::ptr::null_mut()) };
-                let doc_at_0x58 = unsafe { real_fn(ptr_at_0x58, 2268, 0, 0, std::ptr::null_mut()) };
-                eprintln!(
-                    "weave/sci_proxy: sci+0x58 deref = {ptr_at_0x58:#x} → len={len_at_0x58} \
-                     doc={doc_at_0x58:#x}"
-                );
-            } else {
-                eprintln!("weave/sci_proxy: sci+0x58 deref = 0 (null, skipped)");
-            }
-
-            // sci+0x60 — offset 12 words (had heap-looking address 0x555555d45cd0)
-            let ptr_at_0x60 = unsafe { *sci_ptr.add(12) };
-            if ptr_at_0x60 != 0 {
-                let len_at_0x60 = unsafe { real_fn(ptr_at_0x60, 2006, 0, 0, std::ptr::null_mut()) };
-                let doc_at_0x60 = unsafe { real_fn(ptr_at_0x60, 2268, 0, 0, std::ptr::null_mut()) };
-                eprintln!(
-                    "weave/sci_proxy: sci+0x60 deref = {ptr_at_0x60:#x} → len={len_at_0x60} \
-                     doc={doc_at_0x60:#x}"
-                );
-            } else {
-                eprintln!("weave/sci_proxy: sci+0x60 deref = 0 (null, skipped)");
-            }
-        }
-    }
-
-    // Per-call post-probe: for every call on the sci that received SCI_APPENDTEXT,
-    // query SCI_GETLENGTH immediately after so we can pinpoint which call drops length to 0.
-    // Skip SCI_GETLENGTH itself (avoid infinite recursion) and skip calls on other sci ptrs.
-    // TODO: remove once NPP Gate 6 is green.
-    {
-        let append_sci = LAST_APPEND_SCI.load(std::sync::atomic::Ordering::Relaxed);
-        if append_sci != 0 && sci == append_sci && msg != 2006 && msg != 2268 {
-            let len_after = unsafe {
-                f(sci, 2006 /*SCI_GETLENGTH*/, 0, 0, std::ptr::null_mut())
-            };
-            let doc_ptr = unsafe {
-                f(
-                    sci,
-                    2268, /*SCI_GETDOCPOINTER*/
-                    0,
-                    0,
-                    std::ptr::null_mut(),
-                )
-            };
-            eprintln!(
-                "weave/sci_proxy: post-call probe sci={sci:#x} msg={msg} → len={len_after} doc_ptr={doc_ptr:#x}"
-            );
         }
     }
 
