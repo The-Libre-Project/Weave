@@ -788,8 +788,9 @@ pub extern "win64" fn is_dbcs_lead_byte(_test_char: u8) -> i32 {
 /// IsDBCSLeadByteEx: test whether a byte is a lead byte for a specific code page.
 ///
 /// Only UTF-8 (65001) is used; DBCS is not active. Always returns FALSE.
-// Wine ref: dlls/kernelbase/locale.c — same as IsDBCSLeadByte but takes explicit
-// code page; still FALSE for UTF-8 and all single-byte code pages.
+// Wine ref: dlls/kernelbase/locale.c:6657 — calls get_codepage_table(codepage); returns TRUE
+// only if table->DBCSCodePage != 0 AND table->DBCSOffsets[testchar] != 0; UTF-8 and all
+// single-byte code pages have DBCSCodePage==0 so always evaluate FALSE.
 pub extern "win64" fn is_dbcs_lead_byte_ex(_code_page: u32, _test_char: u8) -> i32 {
     0 // FALSE
 }
@@ -863,8 +864,9 @@ pub unsafe extern "win64" fn duplicate_handle(
 ///
 /// # Safety
 /// `p_session_id` must be a valid writable pointer or NULL.
-// Wine ref: dlls/kernel32/process.c — session 0 is reserved for the system/service session;
-// interactive user sessions begin at session 1. Returns TRUE on success.
+// Wine ref: dlls/kernelbase/process.c:1117 — fast-path for current PID reads
+// NtCurrentTeb()->Peb->SessionId directly; other PIDs: OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)
+// then NtQueryInformationProcess(ProcessSessionInformation, id, sizeof(DWORD)).
 pub unsafe extern "win64" fn process_id_to_session_id(
     _dw_process_id: u32,
     p_session_id: *mut u32,
@@ -897,8 +899,9 @@ pub unsafe extern "win64" fn wait_on_address(
 /// No-op.
 /// # Safety
 /// `_address` is accepted but never dereferenced.
-// Wine ref: dlls/kernelbase/sync.c — calls RtlWakeAddressSingle;
-// wakes at most one thread blocked in RtlWaitOnAddress on the same address.
+// Wine ref: dlls/ntdll/sync.c (RtlWakeAddressSingle) — hashes addr into one of 256 futex_queues
+// via (addr>>4)%256; sets entry->addr=NULL before calling NtAlertThreadByThreadId so two
+// concurrent calls are guaranteed to wake two distinct waiters rather than the same one twice.
 pub extern "win64" fn wake_by_address_single(_address: usize) {}
 
 /// WakeByAddressAll: wake all threads waiting on an address.
@@ -906,8 +909,9 @@ pub extern "win64" fn wake_by_address_single(_address: usize) {}
 /// No-op.
 /// # Safety
 /// `_address` is accepted but never dereferenced.
-// Wine ref: dlls/kernelbase/sync.c — calls RtlWakeAddressAll;
-// wakes all threads blocked in RtlWaitOnAddress on the same address.
+// Wine ref: dlls/ntdll/sync.c (RtlWakeAddressAll) — collects matching TIDs (up to 256) into a
+// local array under the spinlock, releases the lock, then calls NtAlertMultipleThreadByThreadId
+// in a single syscall to avoid making a syscall while holding a spinlock.
 pub extern "win64" fn wake_by_address_all(_address: usize) {}
 
 // ── Task 2 — Thread description + timer queue + affinity ────────────────────
@@ -2776,8 +2780,8 @@ pub extern "win64" fn unregister_application_restart() -> i32 {
 
 /// GetApplicationRestartSettings — query restart command registered by the app.
 ///
-/// Wine ref: dlls/kernel32/process.c — stub returning E_FAIL. NPP calls this
-/// during startup; returning E_FAIL is correct when no restart is registered.
+/// Wine ref: dlls/kernelbase/process.c — FIXME stub; Wine returns E_NOTIMPL unconditionally,
+/// not E_FAIL; no restart command storage exists in Wine at all.
 ///
 /// # Safety
 /// Output pointers may be NULL; we do not dereference them.
@@ -5807,7 +5811,9 @@ pub unsafe extern "win64" fn output_debug_string_a(_lp_output_string: *const u8)
 ///
 /// # Safety
 /// Pointer argument is accepted but not dereferenced.
-// Wine ref: dlls/kernelbase/debug.c — converts to UTF-8 via WideCharToMultiByte then calls OutputDebugStringA
+// Wine ref: dlls/kernelbase/debug.c:275 — converts via RtlUnicodeStringToAnsiString (not WideCharToMultiByte);
+// raises DBG_PRINTEXCEPTION_WIDE_C with 4-arg array [wcslen+1, wide_ptr, strlen+1, ansi_ptr];
+// only falls back to OutputDebugStringA if the exception is not caught by a debugger.
 pub unsafe extern "win64" fn output_debug_string_w(_lp_output_string: *const u16) {
     // silently discard
 }
@@ -6635,8 +6641,9 @@ pub unsafe extern "win64" fn wait_for_single_object(h_handle: usize, dw_millisec
 
 /// WaitForSingleObjectEx — WaitForSingleObject with alertable flag (ignored).
 ///
-/// Wine ref: dlls/kernel32/sync.c — thin wrapper; b_alertable controls APC
-/// delivery which Weave does not implement.  Delegates to the same logic.
+/// Wine ref: dlls/kernelbase/sync.c:404 — calls normalize_std_handle(handle) before
+/// NtWaitForSingleObject; on NT_ERROR maps status via RtlNtStatusToDosError and returns
+/// WAIT_FAILED; alertable flag forwarded unchanged to NtWaitForSingleObject.
 ///
 /// # Safety
 /// No pointer arguments are dereferenced.
