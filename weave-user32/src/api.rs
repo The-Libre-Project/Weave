@@ -1592,6 +1592,7 @@ pub extern "win64" fn get_system_metrics(n_index: i32) -> i32 {
         SM_CYBORDER => 1,
         SM_CXEDGE => 2, // Wine: SM_CXBORDER + 1
         SM_CYEDGE => 2,
+        80 => 1, // SM_CMONITORS — one virtual monitor
         _ => 0,
     };
     eprintln!("weave/user32: GetSystemMetrics({n_index}) → {result}");
@@ -1864,41 +1865,123 @@ pub extern "win64" fn show_cursor(_b_show: i32) -> i32 {
 // ── Display and mode enumeration stubs ────────────────────────────────────────
 
 /// # Safety
-/// Pointer arguments are accepted but not dereferenced.
+/// `lp_display_device` must point to a caller-allocated DISPLAY_DEVICEW (cb must be set).
 // Wine ref: dlls/win32u/sysparams.c — EnumDisplayDevicesW iterates source list; returns
 // FALSE when iDevNum >= adapter count; fills DISPLAY_DEVICEW with DeviceName/DeviceString.
 pub unsafe extern "win64" fn enum_display_devices_w(
     _lp_device: *const u16,
-    _i_dev_num: u32,
-    _lp_display_device: usize,
+    i_dev_num: u32,
+    lp_display_device: usize,
     _dw_flags: u32,
 ) -> i32 {
-    0
+    // Weave presents exactly one display adapter (and one monitor per adapter).
+    if i_dev_num > 0 || lp_display_device == 0 {
+        return 0; // FALSE — no more devices
+    }
+
+    // DISPLAY_DEVICEW layout:
+    //   offset   0: cb         (u32)         — 4 bytes
+    //   offset   4: DeviceName (u16 × 32)    — 64 bytes
+    //   offset  68: DeviceString (u16 × 128) — 256 bytes
+    //   offset 324: StateFlags  (u32)         — 4 bytes
+    //   offset 328: DeviceID    (u16 × 128)   — 256 bytes
+    //   offset 584: DeviceKey   (u16 × 128)   — 256 bytes
+    let base = lp_display_device as *mut u8;
+
+    // DeviceName: "\\.\DISPLAY1"
+    let name_chars: Vec<u16> = [
+        '\\', '\\', '.', '\\', 'D', 'I', 'S', 'P', 'L', 'A', 'Y', '1', '\0',
+    ]
+    .iter()
+    .map(|&c| c as u16)
+    .collect();
+    let name_ptr = base.add(4) as *mut u16;
+    for (i, &c) in name_chars.iter().enumerate().take(32) {
+        name_ptr.add(i).write(c);
+    }
+
+    // DeviceString: "Generic Display"
+    let ds_chars: Vec<u16> = "Generic Display\0".encode_utf16().collect();
+    let ds_ptr = base.add(68) as *mut u16;
+    for (i, &c) in ds_chars.iter().enumerate().take(128) {
+        ds_ptr.add(i).write(c);
+    }
+
+    // StateFlags: DISPLAY_DEVICE_ATTACHED_TO_DESKTOP | DISPLAY_DEVICE_PRIMARY_DEVICE
+    (base.add(324) as *mut u32).write(0x0000_0001 | 0x0000_0004);
+
+    1 // TRUE
 }
 
+/// Write the current display mode into a caller-supplied DEVMODEW.
+///
 /// # Safety
-/// Pointer arguments are accepted but not dereferenced.
+/// `lp_dev_mode` must point to a DEVMODEW large enough to hold the fields written.
 // Wine ref: dlls/win32u/sysparams.c::source_enum_display_settings — iModeNum=ENUM_CURRENT_SETTINGS
 // (-1) returns current mode; ENUM_REGISTRY_SETTINGS (-2) returns saved mode; else enumerates.
 pub unsafe extern "win64" fn enum_display_settings_w(
     _lp_sz_device_name: *const u16,
-    _i_mode_num: u32,
-    _lp_dev_mode: usize,
+    i_mode_num: u32,
+    lp_dev_mode: usize,
 ) -> i32 {
-    0
+    fill_devmode(i_mode_num, lp_dev_mode)
 }
 
 /// # Safety
-/// Pointer arguments are accepted but not dereferenced.
+/// `lp_dev_mode` must point to a DEVMODEW large enough to hold the fields written.
 // Wine ref: dlls/win32u/sysparams.c — EnumDisplaySettingsExW adds EDS_RAWMODE/EDS_ROTATEDMODE
 // flags; otherwise identical to EnumDisplaySettingsW.
 pub unsafe extern "win64" fn enum_display_settings_ex_w(
     _lp_sz_device_name: *const u16,
-    _i_mode_num: u32,
-    _lp_dev_mode: usize,
+    i_mode_num: u32,
+    lp_dev_mode: usize,
     _dw_flags: u32,
 ) -> i32 {
-    0
+    fill_devmode(i_mode_num, lp_dev_mode)
+}
+
+/// Populate a DEVMODEW with the Weave virtual display's current mode.
+///
+/// ENUM_CURRENT_SETTINGS (0xFFFF_FFFF) and ENUM_REGISTRY_SETTINGS (0xFFFF_FFFE) both
+/// return the single mode Weave advertises. iModeNum == 0 also returns that mode (the
+/// only enumerable index). All other indices return FALSE so SDL2 stops enumerating.
+///
+/// DEVMODEW key offsets (all little-endian, Windows x64 ABI):
+///   68: dmSize (u16) — sizeof(DEVMODEW) = 220
+///   72: dmFields (u32)
+///  168: dmBitsPerPel (u32)
+///  172: dmPelsWidth (u32)
+///  176: dmPelsHeight (u32)
+///  184: dmDisplayFrequency (u32)
+unsafe fn fill_devmode(i_mode_num: u32, lp_dev_mode: usize) -> i32 {
+    // Accept ENUM_CURRENT_SETTINGS, ENUM_REGISTRY_SETTINGS, and index 0.
+    // Reject any other index so callers stop enumerating.
+    const ENUM_CURRENT_SETTINGS: u32 = 0xFFFF_FFFF;
+    const ENUM_REGISTRY_SETTINGS: u32 = 0xFFFF_FFFE;
+    if i_mode_num > 0 && i_mode_num != ENUM_CURRENT_SETTINGS && i_mode_num != ENUM_REGISTRY_SETTINGS
+    {
+        return 0;
+    }
+    if lp_dev_mode == 0 {
+        return 0;
+    }
+
+    let (sw, sh) = backend::screen_size();
+    let base = lp_dev_mode as *mut u8;
+
+    // dmSize — caller must have set this; we overwrite to ensure correctness
+    (base.add(68) as *mut u16).write(220);
+
+    // dmFields: DM_BITSPERPEL | DM_PELSWIDTH | DM_PELSHEIGHT | DM_DISPLAYFREQUENCY
+    (base.add(72) as *mut u32).write(0x0040_0000 | 0x0008_0000 | 0x0010_0000 | 0x0004_0000);
+
+    // dmBitsPerPel, dmPelsWidth, dmPelsHeight, dmDisplayFrequency
+    (base.add(168) as *mut u32).write(32);
+    (base.add(172) as *mut u32).write(sw as u32);
+    (base.add(176) as *mut u32).write(sh as u32);
+    (base.add(184) as *mut u32).write(60);
+
+    1 // TRUE
 }
 
 /// # Safety
@@ -1946,42 +2029,81 @@ pub unsafe extern "win64" fn monitor_from_rect(_lp_rc: *const Rect, _dw_flags: u
 }
 
 /// # Safety
-/// `lp_mi` must point to a valid `MonitorInfo` struct with `cb_size` set.
+/// `lp_mi` must point to a MONITORINFO or MONITORINFOEXW with `cbSize` pre-filled.
 // Wine ref: dlls/win32u/sysparams.c::monitor_info_from_window — fills rcMonitor (full screen
 // rect) and rcWork (work area minus taskbar); dwFlags=MONITORINFOF_PRIMARY for primary.
 pub unsafe extern "win64" fn get_monitor_info_w(_h_monitor: usize, lp_mi: *mut MonitorInfo) -> i32 {
     if lp_mi.is_null() {
         return 0;
     }
-    let (w, h) = crate::backend::screen_size();
-    unsafe {
-        (*lp_mi).rc_monitor = Rect {
-            left: 0,
-            top: 0,
-            right: w as i32,
-            bottom: h as i32,
-        };
-        (*lp_mi).rc_work = Rect {
-            left: 0,
-            top: 0,
-            right: w as i32,
-            bottom: h as i32,
-        };
-        (*lp_mi).dw_flags = 1; // MONITORINFOF_PRIMARY
+    let (sw, sh) = crate::backend::screen_size();
+    // Write using real Windows MONITORINFO layout (NOT the Weave MonitorInfo struct,
+    // which has an erroneous _pad field that shifts offsets by 4 bytes):
+    //   offset  0: cbSize (u32)  — caller pre-fills; do not touch
+    //   offset  4: rcMonitor (RECT = 4×i32 = 16 bytes)
+    //   offset 20: rcWork    (RECT)
+    //   offset 36: dwFlags   (u32) — MONITORINFOF_PRIMARY = 1
+    //   offset 40: szDevice  (u16×32, only in MONITORINFOEXW, cbSize ≥ 104)
+    let base = lp_mi as *mut u8;
+    let cb_size = (base as *const u32).read_unaligned();
+
+    // rcMonitor
+    (base.add(4) as *mut i32).write(0);
+    (base.add(8) as *mut i32).write(0);
+    (base.add(12) as *mut i32).write(sw as i32);
+    (base.add(16) as *mut i32).write(sh as i32);
+    // rcWork (same — no taskbar in Weave)
+    (base.add(20) as *mut i32).write(0);
+    (base.add(24) as *mut i32).write(0);
+    (base.add(28) as *mut i32).write(sw as i32);
+    (base.add(32) as *mut i32).write(sh as i32);
+    // dwFlags: MONITORINFOF_PRIMARY
+    (base.add(36) as *mut u32).write(1);
+    // szDevice in MONITORINFOEXW — SDL2 passes cbSize=104; fill "\\.\DISPLAY1"
+    if cb_size >= 104 {
+        let name: [u16; 13] = [
+            '\\' as u16,
+            '\\' as u16,
+            '.' as u16,
+            '\\' as u16,
+            'D' as u16,
+            'I' as u16,
+            'S' as u16,
+            'P' as u16,
+            'L' as u16,
+            'A' as u16,
+            'Y' as u16,
+            '1' as u16,
+            0,
+        ];
+        let sz_ptr = base.add(40) as *mut u16;
+        for (i, &c) in name.iter().enumerate() {
+            sz_ptr.add(i).write(c);
+        }
     }
     1
 }
 
 /// # Safety
-/// Pointer arguments are accepted but not dereferenced.
+/// `lpfn_enum` must be a valid MONITORENUMPROC callback (or zero/null to skip).
 // Wine ref: dlls/win32u/sysparams.c — EnumDisplayMonitors iterates monitor list; calls
 // lpfnEnum for each monitor whose rect intersects hdc clip rect (or all if hdc=NULL).
 pub unsafe extern "win64" fn enum_display_monitors(
     _hdc: usize,
     _lprc_clip: usize,
-    _lpfn_enum: usize,
-    _dw_data: isize,
+    lpfn_enum: usize,
+    dw_data: isize,
 ) -> i32 {
+    if lpfn_enum == 0 {
+        return 1;
+    }
+    let (sw, sh) = backend::screen_size();
+    // RECT: left, top, right, bottom
+    let rect: [i32; 4] = [0, 0, sw as i32, sh as i32];
+    // MONITORENUMPROC: BOOL CALLBACK(HMONITOR, HDC, LPRECT, LPARAM)
+    let callback: unsafe extern "win64" fn(usize, usize, *const i32, isize) -> i32 =
+        std::mem::transmute(lpfn_enum);
+    callback(1, 0, rect.as_ptr(), dw_data);
     1
 }
 

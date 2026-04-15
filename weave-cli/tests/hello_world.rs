@@ -640,6 +640,168 @@ fn scite_portable_mode() {
     );
 }
 
+/// `weave testsprite2.exe` — SDL2 test binary; WS2 Gate 1 smoke test.
+///
+/// Runs testsprite2.exe (SDL2 test binary, PE32+ x86-64) under Weave with
+/// --no-sandbox and DISPLAY=:99 (Xvfb). SDL2.dll must be in the same directory
+/// as the exe (tests/fixtures/bin/SDL2.dll).
+///
+/// Gate 1 definition of done: window opens, sprites animate for 10 seconds
+/// without crash. This test is a first-run diagnostic: it always dumps full
+/// stderr and does not assert on the phase marker yet — that comes after gate 1
+/// is confirmed green. The one hard assertion is that IAT patch completes.
+///
+/// Skipped gracefully if testsprite2.exe is absent from fixtures.
+#[test]
+fn testsprite2_sdl2_gate1_smoke() {
+    if !cfg!(target_os = "linux") {
+        eprintln!("skipping execution test — requires Linux");
+        return;
+    }
+
+    let manifest = env!("CARGO_MANIFEST_DIR");
+    let bin_dir = format!("{manifest}/../tests/fixtures/bin");
+    let exe = format!("{bin_dir}/testsprite2.exe");
+
+    if !std::path::Path::new(&exe).exists() {
+        eprintln!("skipping: testsprite2.exe not present in tests/fixtures/bin/");
+        return;
+    }
+
+    let weave_bin = env!("CARGO_BIN_EXE_weave");
+
+    // Run with CWD = bin_dir so SDL2.dll is found by the PE loader next to the
+    // exe. Pass --no-sandbox to eliminate sandbox as a variable on first run.
+    // Set DISPLAY=:99 (Xvfb) so SDL2 can attempt to open an X11 window.
+    let start = std::time::Instant::now();
+    let mut child = std::process::Command::new(weave_bin)
+        .current_dir(&bin_dir)
+        .arg(&exe)
+        .arg("--no-sandbox")
+        .env("DISPLAY", ":99")
+        .stderr(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|e| panic!("failed to spawn weave on testsprite2.exe: {e}"));
+
+    // Drain stderr concurrently — SDL2's verbose output can fill the 64 KB
+    // Linux pipe buffer and block the child process before it gets anywhere.
+    let stderr_pipe = child.stderr.take().expect("stderr was piped");
+    let stderr_shared = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let stderr_writer = std::sync::Arc::clone(&stderr_shared);
+    let drain_thread = std::thread::spawn(move || {
+        use std::io::Read;
+        let mut buf = Vec::new();
+        let mut pipe = stderr_pipe;
+        let _ = pipe.read_to_end(&mut buf);
+        *stderr_writer.lock().unwrap() = buf;
+    });
+
+    // Let it run for up to 15 seconds (Gate 1 target is 10 s of animation),
+    // then kill it. SDL2 in headless mode may exit early on its own.
+    let deadline = start + std::time::Duration::from_secs(15);
+    let mut exit_status: Option<std::process::ExitStatus> = None;
+    let mut killed_by_deadline = false;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                exit_status = Some(status);
+                break;
+            }
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    killed_by_deadline = true;
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err(e) => panic!("wait failed: {e}"),
+        }
+    }
+    let elapsed = start.elapsed();
+
+    drain_thread.join().expect("stderr drain thread panicked");
+    let stderr_bytes = stderr_shared.lock().unwrap().clone();
+    let stderr = String::from_utf8_lossy(&stderr_bytes);
+
+    // --- Diagnostic dump ---------------------------------------------------
+    eprintln!("testsprite2 elapsed: {elapsed:.1?}");
+    eprintln!(
+        "testsprite2 exit: {}",
+        if killed_by_deadline {
+            "killed by deadline".to_string()
+        } else {
+            exit_status
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "unknown".to_string())
+        }
+    );
+    eprintln!("--- FULL STDERR BEGIN ---");
+    eprintln!("{stderr}");
+    eprintln!("--- FULL STDERR END ---");
+
+    // Grep summary lines for the report.
+    eprintln!("--- warn_once hits ---");
+    for line in stderr.lines().filter(|l| l.contains("warn_once")) {
+        eprintln!("{line}");
+    }
+    eprintln!("--- FATAL / fatal ---");
+    for line in stderr
+        .lines()
+        .filter(|l| l.contains("FATAL") || l.contains("fatal"))
+    {
+        eprintln!("{line}");
+    }
+    eprintln!("--- error / Error ---");
+    for line in stderr
+        .lines()
+        .filter(|l| l.contains("error") || l.contains("Error"))
+    {
+        eprintln!("{line}");
+    }
+    eprintln!("--- SDL lines ---");
+    for line in stderr.lines().filter(|l| l.contains("SDL")) {
+        eprintln!("{line}");
+    }
+    eprintln!("--- vulkan / Vulkan / vk lines ---");
+    for line in stderr
+        .lines()
+        .filter(|l| l.contains("vulkan") || l.contains("Vulkan") || l.contains(" vk"))
+    {
+        eprintln!("{line}");
+    }
+    eprintln!("--- unresolved imports ---");
+    for line in stderr.lines().filter(|l| l.contains("unresolved import")) {
+        eprintln!("{line}");
+    }
+
+    // Gate 1, assertion 1: IAT patch must complete before anything else matters.
+    assert!(
+        stderr.contains("weave: imports resolved"),
+        "WS2 Gate 1 FAIL: IAT patch did not complete — weave crashed before \
+         reaching the entry point.\nelapsed: {elapsed:.1?}\nstderr: {stderr}"
+    );
+
+    // Gate 1, assertion 2: SDL2 must reach video init (display discovered).
+    // EnumDisplayMonitors callback fires only if SDL2 got past WIN_InitModes.
+    // The RegisterClassExW("SDL_app") line appears immediately after display
+    // enumeration succeeds, so it's a reliable proxy for "video driver inited".
+    assert!(
+        stderr.contains("RegisterClassExW(\"SDL_app\")"),
+        "WS2 Gate 1 FAIL: SDL2 video init did not reach display enumeration — \
+         no display found.\nelapsed: {elapsed:.1?}\nstderr: {stderr}"
+    );
+
+    // Gate 1, assertion 3: process must survive at least 10 seconds.
+    // If it died in < 10s, either a hard crash or SDL_CreateWindow failed.
+    assert!(
+        killed_by_deadline || elapsed >= std::time::Duration::from_secs(10),
+        "WS2 Gate 1 FAIL: process exited after only {elapsed:.1?} — \
+         crashed or quit before 10-second gate.\nstderr: {stderr}"
+    );
+}
+
 /// `weave hello.exe` — CRT-linked MinGW binary, 41 imports across 8 DLLs.
 #[test]
 fn hello_crt_prints_hello_world() {

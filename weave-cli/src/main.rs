@@ -1,6 +1,6 @@
 use clap::Parser;
 use std::path::PathBuf;
-use weave_core::{cfg, cmdline, dll_registry, exec, iat, loader, prefix, registry, seh, teb};
+use weave_core::{cfg, cmdline, dll_registry, exec, iat, loader, pe, prefix, registry, seh, teb};
 
 mod arch;
 
@@ -201,6 +201,48 @@ fn main() {
         image.base as usize,
         image.entry_point as usize,
     );
+
+    // ── 2.5. Pre-load side-by-side DLLs from the exe's directory ─────────
+    // Windows DLL search order: exe dir is checked before system32. Any DLL
+    // that lives next to the exe and appears in its import table is loaded as
+    // a PE and registered so that IAT patching can resolve its exports.
+    // SDL2.dll, custom runtimes, and game-specific DLLs all land here.
+    {
+        let exe_dir_canon = args.exe.canonicalize().unwrap_or_else(|_| args.exe.clone());
+        let exe_dir = exe_dir_canon.parent().unwrap_or(std::path::Path::new("."));
+
+        // Collect unique DLL names from the import table.
+        let mut import_dlls = std::collections::HashSet::new();
+        if let Ok(info) = pe::parse(&bytes) {
+            for imp in &info.imports {
+                import_dlls.insert(imp.dll.to_lowercase());
+            }
+        }
+
+        for dll_name in &import_dlls {
+            let path = exe_dir.join(dll_name);
+            let dll_bytes = match std::fs::read(&path) {
+                Ok(b) => b,
+                Err(_) => continue, // not present beside the exe — skip
+            };
+            match loader::load_dll(&dll_bytes) {
+                Ok((image, exports)) => {
+                    unsafe {
+                        iat::patch_best_effort(&dll_bytes, image.base, resolve, |d, f, va| {
+                            eprintln!(
+                                "weave: {dll_name}: unresolved import {d}!{f} at iat={va:#x} (skipped)"
+                            );
+                        });
+                    }
+                    dll_registry::register(dll_name.clone(), image, exports);
+                    eprintln!("weave: pre-loaded {dll_name} from exe dir");
+                }
+                Err(e) => {
+                    eprintln!("weave: warning: could not load {dll_name} from exe dir: {e}");
+                }
+            }
+        }
+    }
 
     // ── 3. Patch the Import Address Table ────────────────────────────────
     // Use best-effort patching: unresolved imports are filled with a stub
