@@ -357,7 +357,16 @@ fn notepad_plus_plus_portable_mode() {
         "Notepad++ ran for only {elapsed:.1?} — likely crashed before entering message loop.\nstderr: {stderr}"
     );
 
-    // Gate 5: Scintilla document must have content after opening test.py.
+    // Gate 5: WM_PAINT must have been dispatched, proving the paint path is reached.
+    // ShowWindow posts WM_PAINT → GetMessageW returns it → DispatchMessageW fires the
+    // wm_paint_dispatched_first phase marker before invoking NPP's WndProc.
+    assert!(
+        stderr.contains("PHASE: wm_paint_dispatched_first"),
+        "PHASE: wm_paint_dispatched_first was never emitted — WM_PAINT was not dispatched, \
+         meaning Notepad++ did not reach the paint path.\nstderr: {stderr}"
+    );
+
+    // Gate 6: Scintilla document must have content after opening test.py.
     // NPP uses Scintilla_DirectFunction (not SendMessageW) for all SCI ops. The proxy
     // intercepts this and logs SCI_APPENDTEXT when NPP loads file bytes into the document.
     // Note: SCI_DIRECT_PTR only stores the last SCI_GETDIRECTPOINTER result (secondary
