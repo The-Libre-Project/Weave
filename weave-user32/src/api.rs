@@ -464,7 +464,6 @@ pub unsafe extern "win64" fn get_message_w(
     // RVA 0x2521b3). Wait until PHASE_WM_PAINT has fired (first WM_PAINT = NPP fully up).
     {
         let pending_sci = PENDING_DOC_SCI.load(std::sync::atomic::Ordering::Relaxed);
-        let pending_doc = PENDING_DOC_PTR.load(std::sync::atomic::Ordering::Relaxed);
         let text_buf = PENDING_TEXT_BUF.load(std::sync::atomic::Ordering::Relaxed);
         if pending_sci != 0
             && text_buf != 0
@@ -483,10 +482,30 @@ pub unsafe extern "win64" fn get_message_w(
                 // SCI_SETTEXT (2009) returned len=0 (wrong msg# or notification resets it).
                 // SCI_APPENDTEXT fires SCN_MODIFIED (safe from message-loop context).
                 // First clear any content, then append the file bytes.
-                unsafe { f(pending_sci, 2004 /*SCI_CLEARALL*/, 0, 0, std::ptr::null_mut()) };
+                unsafe {
+                    f(
+                        pending_sci,
+                        2004, /*SCI_CLEARALL*/
+                        0,
+                        0,
+                        std::ptr::null_mut(),
+                    )
+                };
                 // text_buf is null-terminated; pass wparam=length (not including null).
-                let text_len = unsafe { std::ffi::CStr::from_ptr(text_buf as *const i8).to_bytes().len() };
-                unsafe { f(pending_sci, 2282 /*SCI_APPENDTEXT*/, text_len, text_buf as isize, std::ptr::null_mut()) };
+                let text_len = unsafe {
+                    std::ffi::CStr::from_ptr(text_buf as *const i8)
+                        .to_bytes()
+                        .len()
+                };
+                unsafe {
+                    f(
+                        pending_sci,
+                        2282, /*SCI_APPENDTEXT*/
+                        text_len,
+                        text_buf as isize,
+                        std::ptr::null_mut(),
+                    )
+                };
                 // Free the buffer we allocated in sci_direct_fn_proxy.
                 let _ = unsafe { Box::from_raw(text_buf as *mut u8) };
                 let main_len = unsafe { f(pending_sci, 2006, 0, 0, std::ptr::null_mut()) };
@@ -1081,7 +1100,11 @@ pub unsafe extern "win64" fn sci_direct_fn_proxy(
         if main_sci != 0 && sci != main_sci && sci >= 0x0000_1000_0000_0000 {
             // Read scratch's CURRENT pdoc (before this msg=2358 replaces it).
             let scratch_pdoc = unsafe { *(sci as *const usize).add(37) }; // sci+0x128
-            let scratch_len_dbg = if scratch_pdoc != 0 { unsafe { f(sci, 2006, 0, 0, std::ptr::null_mut()) } } else { -99 };
+            let scratch_len_dbg = if scratch_pdoc != 0 {
+                unsafe { f(sci, 2006, 0, 0, std::ptr::null_mut()) }
+            } else {
+                -99
+            };
             let main_len_dbg = unsafe { f(main_sci, 2006, 0, 0, std::ptr::null_mut()) };
             eprintln!("weave/sci_proxy: msg=2358 debug: scratch_pdoc={scratch_pdoc:#x} scratch_len={scratch_len_dbg} main_len={main_len_dbg}");
             if scratch_pdoc != 0 {
@@ -1095,7 +1118,10 @@ pub unsafe extern "win64" fn sci_direct_fn_proxy(
                     let saved_text_ptr = PENDING_DOC_PTR.load(std::sync::atomic::Ordering::Relaxed);
                     if saved_text_ptr != 0 {
                         let text_slice = unsafe {
-                            std::slice::from_raw_parts(saved_text_ptr as *const u8, scratch_len as usize)
+                            std::slice::from_raw_parts(
+                                saved_text_ptr as *const u8,
+                                scratch_len as usize,
+                            )
                         };
                         let mut buf = text_slice.to_vec();
                         buf.push(0); // null-terminate for SCI_SETTEXT
