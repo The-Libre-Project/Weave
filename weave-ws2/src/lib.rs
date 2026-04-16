@@ -9,6 +9,18 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
+// ── POSIX functions not exposed by the libc crate on all host platforms ──────
+// inet_ntop is available on Linux (our target) but not always through libc crate
+// on macOS (build host). Declare it directly so cargo check passes on macOS.
+extern "C" {
+    fn inet_ntop(
+        af: libc::c_int,
+        src: *const libc::c_void,
+        dst: *mut libc::c_char,
+        size: libc::socklen_t,
+    ) -> *const libc::c_char;
+}
+
 // ── Constants ────────────────────────────────────────────────────────────────
 
 /// `INVALID_SOCKET` on Win64.
@@ -797,6 +809,476 @@ pub unsafe extern "win64" fn ws_inet_addr(cp: *const u8) -> u32 {
     u32::from_ne_bytes(parts)
 }
 
+// ── Winsock API: legacy name-resolution (hostent/servent) ────────────────────
+
+/// gethostname — retrieve the local machine's hostname.
+///
+/// Wine ref: dlls/ws2_32/unixlib.c:1042 — unix_gethostname calls gethostname(params->name,
+/// params->size); returns 0 on success or errno_from_unix(errno) on failure.
+///
+/// # Safety
+/// `name` must point to a writable buffer of at least `namelen` bytes.
+pub unsafe extern "win64" fn ws_gethostname(name: *mut u8, namelen: i32) -> i32 {
+    if name.is_null() || namelen <= 0 {
+        set_last_error(10014); // WSAEFAULT
+        return SOCKET_ERROR;
+    }
+    let ret = libc::gethostname(name as *mut libc::c_char, namelen as libc::size_t);
+    if ret < 0 {
+        save_errno();
+        SOCKET_ERROR
+    } else {
+        0
+    }
+}
+
+// Windows HOSTENT layout (64-bit):
+//   h_name      *c_char  (8 bytes)
+//   h_aliases   **c_char (8 bytes)
+//   h_addrtype  i16      (2 bytes) + h_length i16 (2 bytes) + pad (4 bytes)
+//   h_addr_list **c_char (8 bytes)
+// Total: 32 bytes, plus heap storage for strings and addr arrays.
+//
+// We use a thread-local static buffer so the pointer remains valid after return,
+// which is what the real Winsock does (not thread-safe across threads, same as
+// the real Windows gethostbyname).
+
+thread_local! {
+    static HOSTENT_BUF: std::cell::RefCell<Option<HostentStorage>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+struct HostentStorage {
+    // The flat Windows HOSTENT structure (32 bytes on 64-bit).
+    hostent: [u8; 32],
+    // Heap-allocated name (NUL-terminated).
+    name: Vec<u8>,
+    // Heap-allocated addr bytes (4 bytes for IPv4).
+    addr: Vec<u8>,
+    // Pointer array: [*addr, null].
+    addr_list: Vec<*mut u8>,
+    // Pointer array: [null] (no aliases).
+    aliases: Vec<*mut u8>,
+}
+
+unsafe impl Send for HostentStorage {}
+
+/// gethostbyname — resolve a hostname to a HOSTENT structure.
+///
+/// Wine ref: dlls/ws2_32/unixlib.c:981 — unix_gethostbyname uses gethostbyname_r,
+/// then hostent_from_unix to convert the Linux hostent to a Windows layout.
+/// Returns NULL and sets last error on failure.
+///
+/// # Safety
+/// `name` must be a valid null-terminated byte string, or null.
+pub unsafe extern "win64" fn ws_gethostbyname(name: *const u8) -> *mut u8 {
+    if name.is_null() {
+        set_last_error(10014); // WSAEFAULT
+        return std::ptr::null_mut();
+    }
+    let c_str = std::ffi::CStr::from_ptr(name as *const libc::c_char);
+
+    // Use getaddrinfo to resolve — works for both names and dotted-decimal.
+    let mut hints: libc::addrinfo = std::mem::zeroed();
+    hints.ai_family = libc::AF_INET;
+    hints.ai_socktype = libc::SOCK_STREAM;
+    let mut res: *mut libc::addrinfo = std::ptr::null_mut();
+    let rc = libc::getaddrinfo(c_str.as_ptr(), std::ptr::null(), &hints, &mut res);
+    if rc != 0 || res.is_null() {
+        set_last_error(11001); // WSAHOST_NOT_FOUND
+        return std::ptr::null_mut();
+    }
+
+    // Extract first IPv4 address.
+    let sin = &*((*res).ai_addr as *const libc::sockaddr_in);
+    let addr_bytes = sin.sin_addr.s_addr.to_ne_bytes();
+
+    // Build name string (use the input name as canonical).
+    let name_bytes: Vec<u8> = c_str.to_bytes_with_nul().to_vec();
+
+    HOSTENT_BUF.with(|cell| {
+        let mut storage = HostentStorage {
+            hostent: [0u8; 32],
+            name: name_bytes,
+            addr: addr_bytes.to_vec(),
+            addr_list: vec![std::ptr::null_mut(); 2], // [ptr, null]
+            aliases: vec![std::ptr::null_mut()],      // [null]
+        };
+        // Point addr_list[0] at addr bytes.
+        storage.addr_list[0] = storage.addr.as_mut_ptr();
+
+        // Build Windows HOSTENT (little-endian 64-bit layout):
+        //  offset 0:  h_name        *u8  (8)
+        //  offset 8:  h_aliases     **u8 (8)
+        //  offset 16: h_addrtype    i16  (2)
+        //  offset 18: h_length      i16  (2)
+        //  offset 20: pad           (4)
+        //  offset 24: h_addr_list   **u8 (8)
+        let h = &mut storage.hostent;
+        let name_ptr = storage.name.as_ptr() as usize;
+        let aliases_ptr = storage.aliases.as_ptr() as usize;
+        let addr_list_ptr = storage.addr_list.as_ptr() as usize;
+        h[0..8].copy_from_slice(&name_ptr.to_ne_bytes());
+        h[8..16].copy_from_slice(&aliases_ptr.to_ne_bytes());
+        h[16..18].copy_from_slice(&(2i16).to_ne_bytes()); // AF_INET = 2
+        h[18..20].copy_from_slice(&(4i16).to_ne_bytes()); // IPv4 addr len = 4
+        h[24..32].copy_from_slice(&addr_list_ptr.to_ne_bytes());
+
+        *cell.borrow_mut() = Some(storage);
+        libc::freeaddrinfo(res);
+    });
+
+    HOSTENT_BUF.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .map(|s| s.hostent.as_ptr() as *mut u8)
+            .unwrap_or(std::ptr::null_mut())
+    })
+}
+
+// Windows SERVENT layout (64-bit):
+//   s_name    *c_char  (8 bytes)
+//   s_aliases **c_char (8 bytes)
+//   s_port    i16      (2 bytes) + pad (6 bytes)
+//   s_proto   *c_char  (8 bytes)
+// Total: 32 bytes.
+
+thread_local! {
+    static SERVENT_BUF: std::cell::RefCell<Option<ServentStorage>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+struct ServentStorage {
+    servent: [u8; 32],
+    name: Vec<u8>,
+    proto: Vec<u8>,
+    aliases: Vec<*mut u8>,
+}
+
+unsafe impl Send for ServentStorage {}
+
+/// getservbyname — look up a service by name and protocol.
+///
+/// Wine ref: dlls/ws2_32/async.c:78 — async_query_getservbyname struct shows the
+/// fields: name, proto, port. The sync path calls the POSIX getservbyname and
+/// packages the result into a Windows SERVENT. Returns NULL on failure.
+///
+/// # Safety
+/// `name` and `proto` must be null-terminated byte strings (proto may be null).
+pub unsafe extern "win64" fn ws_getservbyname(name: *const u8, proto: *const u8) -> *mut u8 {
+    if name.is_null() {
+        set_last_error(10014); // WSAEFAULT
+        return std::ptr::null_mut();
+    }
+    let proto_ptr = if proto.is_null() {
+        std::ptr::null()
+    } else {
+        proto as *const libc::c_char
+    };
+    let se = libc::getservbyname(name as *const libc::c_char, proto_ptr);
+    if se.is_null() {
+        set_last_error(11001); // WSAHOST_NOT_FOUND (service not found)
+        return std::ptr::null_mut();
+    }
+
+    // Extract fields from libc servent.
+    let sname: Vec<u8> = std::ffi::CStr::from_ptr((*se).s_name)
+        .to_bytes_with_nul()
+        .to_vec();
+    let sproto: Vec<u8> = std::ffi::CStr::from_ptr((*se).s_proto)
+        .to_bytes_with_nul()
+        .to_vec();
+    // Port: Linux stores in network byte order, Windows also stores network byte order.
+    let port_ne = (*se).s_port as i16;
+
+    SERVENT_BUF.with(|cell| {
+        let mut storage = ServentStorage {
+            servent: [0u8; 32],
+            name: sname,
+            proto: sproto,
+            aliases: vec![std::ptr::null_mut()],
+        };
+
+        let name_ptr = storage.name.as_ptr() as usize;
+        let aliases_ptr = storage.aliases.as_ptr() as usize;
+        let proto_ptr2 = storage.proto.as_ptr() as usize;
+        let h = &mut storage.servent;
+        h[0..8].copy_from_slice(&name_ptr.to_ne_bytes());
+        h[8..16].copy_from_slice(&aliases_ptr.to_ne_bytes());
+        h[16..18].copy_from_slice(&port_ne.to_ne_bytes());
+        h[24..32].copy_from_slice(&proto_ptr2.to_ne_bytes());
+
+        *cell.borrow_mut() = Some(storage);
+    });
+
+    SERVENT_BUF.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .map(|s| s.servent.as_ptr() as *mut u8)
+            .unwrap_or(std::ptr::null_mut())
+    })
+}
+
+// ── Winsock API: address formatting ──────────────────────────────────────────
+
+/// inet_ntoa — convert an IPv4 in-addr structure to a dotted-decimal string.
+///
+/// Wine ref: dlls/ws2_32/socket.c — WS_inet_ntoa returns a pointer to a thread-local
+/// static buffer formatted as "a.b.c.d". The input is a struct in_addr (u32 in
+/// network byte order). Returns a pointer to the static string.
+///
+/// # Safety
+/// `in_addr` is passed by value as a u32 (Windows calling convention passes
+/// small structs in registers).
+pub extern "win64" fn ws_inet_ntoa(in_addr: u32) -> *const u8 {
+    thread_local! {
+        static INET_NTOA_BUF: std::cell::RefCell<[u8; 16]> =
+            const { std::cell::RefCell::new([0u8; 16]) };
+    }
+    let bytes = in_addr.to_ne_bytes(); // already network byte order
+    let s = std::format!("{}.{}.{}.{}\0", bytes[0], bytes[1], bytes[2], bytes[3]);
+    INET_NTOA_BUF.with(|cell| {
+        let mut buf = cell.borrow_mut();
+        let len = s.len().min(16);
+        buf[..len].copy_from_slice(&s.as_bytes()[..len]);
+        buf.as_ptr()
+    })
+}
+
+/// inet_ntop — convert a binary network address to a presentation string.
+///
+/// Wine ref: dlls/ws2_32/socket.c — WS_InetNtopW/A call the POSIX inet_ntop.
+/// Returns the buffer pointer on success, NULL on failure (sets WSAEINVAL or
+/// WSAEAFNOSUPPORT).
+///
+/// # Safety
+/// `src` must point to a valid network address (4 bytes for AF_INET, 16 for AF_INET6).
+/// `dst` must point to a writable buffer of at least `size` bytes.
+pub unsafe extern "win64" fn ws_inet_ntop(
+    af: i32,
+    src: *const u8,
+    dst: *mut u8,
+    size: u32,
+) -> *const u8 {
+    if src.is_null() || dst.is_null() {
+        set_last_error(10014); // WSAEFAULT
+        return std::ptr::null();
+    }
+    let linux_af = af_win_to_linux(af);
+    let ret = inet_ntop(
+        linux_af,
+        src as *const libc::c_void,
+        dst as *mut libc::c_char,
+        size as libc::socklen_t,
+    );
+    if ret.is_null() {
+        save_errno();
+        std::ptr::null()
+    } else {
+        dst as *const u8
+    }
+}
+
+/// getnameinfo — resolve a socket address to a host/service name.
+///
+/// Wine ref: dlls/ws2_32/unixlib.c:1052 — unix_getnameinfo converts sockaddr via
+/// sockaddr_to_unix then calls POSIX getnameinfo, translating flags via
+/// nameinfo_flags_to_unix. Returns 0 on success, error code on failure.
+///
+/// # Safety
+/// `sa` must point to a valid sockaddr of `salen` bytes.
+pub unsafe extern "win64" fn ws_getnameinfo(
+    sa: *const u8,
+    salen: i32,
+    host: *mut u8,
+    hostlen: u32,
+    serv: *mut u8,
+    servlen: u32,
+    flags: i32,
+) -> i32 {
+    if sa.is_null() {
+        set_last_error(10014); // WSAEFAULT
+        return 10014;
+    }
+    // Translate sockaddr from Windows to Linux format.
+    let addr = copy_sockaddr_win_to_linux(sa, salen as usize);
+    let ret = libc::getnameinfo(
+        addr.as_ptr() as *const libc::sockaddr,
+        salen as libc::socklen_t,
+        host as *mut libc::c_char,
+        hostlen,
+        serv as *mut libc::c_char,
+        servlen,
+        flags, // NI_* flags have the same values on Linux and Windows
+    );
+    if ret != 0 {
+        save_errno();
+        set_last_error(ret);
+    }
+    ret
+}
+
+/// WSAAddressToStringA — convert a sockaddr to a human-readable string.
+///
+/// Wine ref: dlls/ws2_32/socket.c — WSAAddressToStringA validates lpsaAddress and
+/// lpdwAddressStringLength, then formats as "a.b.c.d:port" for IPv4 or
+/// "[addr]:port" for IPv6. Returns 0 on success, SOCKET_ERROR on failure.
+///
+/// # Safety
+/// `lp_address` must point to a valid sockaddr of `dw_address_length` bytes.
+/// `lpsz_address_string` must point to a writable buffer.
+/// `lpdw_address_string_length` must be a valid pointer to the buffer size.
+pub unsafe extern "win64" fn ws_wsa_address_to_string_a(
+    lp_address: *const u8,
+    dw_address_length: u32,
+    _lp_protocol_info: *const u8, // ignored
+    lpsz_address_string: *mut u8,
+    lpdw_address_string_length: *mut u32,
+) -> i32 {
+    if lp_address.is_null() || lpdw_address_string_length.is_null() {
+        set_last_error(10014); // WSAEFAULT
+        return SOCKET_ERROR;
+    }
+    // Read Windows address family from sockaddr.
+    let family = if dw_address_length >= 2 {
+        u16::from_ne_bytes([*lp_address, *lp_address.add(1)]) as i32
+    } else {
+        set_last_error(10022); // WSAEINVAL
+        return SOCKET_ERROR;
+    };
+
+    let result_str = match family {
+        2 => {
+            // AF_INET: sockaddr_in = family(2) + port(2) + addr(4) + pad(8)
+            if dw_address_length < 8 {
+                set_last_error(10022); // WSAEINVAL
+                return SOCKET_ERROR;
+            }
+            let port = u16::from_be_bytes([*lp_address.add(2), *lp_address.add(3)]);
+            let a = *lp_address.add(4);
+            let b = *lp_address.add(5);
+            let c = *lp_address.add(6);
+            let d = *lp_address.add(7);
+            if port != 0 {
+                std::format!("{a}.{b}.{c}.{d}:{port}")
+            } else {
+                std::format!("{a}.{b}.{c}.{d}")
+            }
+        }
+        23 => {
+            // AF_INET6 (Windows = 23): use inet_ntop for the address.
+            if dw_address_length < 16 {
+                set_last_error(10022); // WSAEINVAL
+                return SOCKET_ERROR;
+            }
+            let mut buf = [0u8; 64];
+            let addr_ptr = lp_address.add(8); // skip family(2)+port(2)+flowinfo(4)
+            let ret = inet_ntop(
+                libc::AF_INET6,
+                addr_ptr as *const libc::c_void,
+                buf.as_mut_ptr() as *mut libc::c_char,
+                buf.len() as libc::socklen_t,
+            );
+            if ret.is_null() {
+                save_errno();
+                return SOCKET_ERROR;
+            }
+            let len = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+            std::format!("[{}]", std::str::from_utf8(&buf[..len]).unwrap_or(""))
+        }
+        _ => {
+            set_last_error(10047); // WSAEAFNOSUPPORT
+            return SOCKET_ERROR;
+        }
+    };
+
+    let needed = (result_str.len() + 1) as u32;
+    let provided = *lpdw_address_string_length;
+    *lpdw_address_string_length = needed;
+
+    if lpsz_address_string.is_null() || provided < needed {
+        set_last_error(10055); // WSAENOBUFS (buffer too small)
+        return SOCKET_ERROR;
+    }
+
+    let bytes = result_str.as_bytes();
+    std::ptr::copy_nonoverlapping(bytes.as_ptr(), lpsz_address_string, bytes.len());
+    *lpsz_address_string.add(bytes.len()) = 0;
+    0
+}
+
+/// WSAIoctl — control socket I/O mode (extended ioctlsocket).
+///
+/// Wine ref: dlls/ws2_32/socket.c:debugstr_wsaioctl shows known codes; the main
+/// WSAIoctl handler routes known codes (SIO_GET_EXTENSION_FUNCTION_POINTER,
+/// FIONBIO, etc.) and returns WSAEOPNOTSUPP for unrecognised ones.
+/// Stub: handle FIONBIO (same as ioctlsocket), return WSAEOPNOTSUPP for rest.
+///
+/// # Safety
+/// Pointer arguments are only dereferenced when non-null.
+pub unsafe extern "win64" fn ws_wsa_ioctl(
+    s: usize,
+    dw_ioctl_code: u32,
+    lp_vb_in_buffer: *const u8,
+    cb_in_buffer: u32,
+    _lp_vb_out_buffer: *mut u8,
+    _cb_out_buffer: u32,
+    lpcb_bytes_returned: *mut u32,
+    _lp_overlapped: *const u8,
+    _lp_completion_routine: *const u8,
+) -> i32 {
+    // FIONBIO (0x8004667E) — same semantics as ioctlsocket FIONBIO.
+    if dw_ioctl_code == FIONBIO_WIN {
+        if lp_vb_in_buffer.is_null() || cb_in_buffer < 4 {
+            set_last_error(10014); // WSAEFAULT
+            return SOCKET_ERROR;
+        }
+        let nonblock = *(lp_vb_in_buffer as *const u32) != 0;
+        let mut flags = libc::fcntl(s as i32, libc::F_GETFL);
+        if flags < 0 {
+            save_errno();
+            return SOCKET_ERROR;
+        }
+        if nonblock {
+            flags |= libc::O_NONBLOCK;
+        } else {
+            flags &= !libc::O_NONBLOCK;
+        }
+        if libc::fcntl(s as i32, libc::F_SETFL, flags) < 0 {
+            save_errno();
+            return SOCKET_ERROR;
+        }
+        if !lpcb_bytes_returned.is_null() {
+            *lpcb_bytes_returned = 0;
+        }
+        return 0;
+    }
+
+    eprintln!("weave: WSAIoctl: unsupported ioctl code {dw_ioctl_code:#010x}");
+    set_last_error(10045); // WSAEOPNOTSUPP
+    SOCKET_ERROR
+}
+
+/// WSAAsyncSelect — request event notification for a socket (message-based).
+///
+/// Wine ref: dlls/ws2_32/socket.c:3885 — WSAAsyncSelect uses IOCTL_AFD_EVENT_SELECT
+/// (an NT kernel I/O control) to register interest in events; the socket enters
+/// non-blocking mode. Weave has no Win32 message queue, so this is a no-op stub
+/// that returns 0 (success), allowing callers that use it only to set up async I/O
+/// to proceed normally.
+///
+/// # Safety
+/// Arguments are not dereferenced.
+pub unsafe extern "win64" fn ws_wsa_async_select(
+    s: usize,
+    h_wnd: usize,
+    w_msg: u32,
+    l_event: i32,
+) -> i32 {
+    let _ = (s, h_wnd, w_msg, l_event);
+    0 // success — no-op
+}
+
 // ── Winsock API: async-event stubs ───────────────────────────────────────────
 
 // WSA_INVALID_EVENT is the null/invalid WSAEVENT sentinel (0).
@@ -934,6 +1416,16 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "ntohs" => Some(ws_ntohs as *const () as usize),
         "ntohl" => Some(ws_ntohl as *const () as usize),
         "inet_addr" => Some(ws_inet_addr as *const () as usize),
+        // Legacy name-resolution (M3 — plink/PuTTY).
+        "gethostname" => Some(ws_gethostname as *const () as usize),
+        "gethostbyname" => Some(ws_gethostbyname as *const () as usize),
+        "getservbyname" => Some(ws_getservbyname as *const () as usize),
+        "inet_ntoa" => Some(ws_inet_ntoa as *const () as usize),
+        "inet_ntop" => Some(ws_inet_ntop as *const () as usize),
+        "getnameinfo" => Some(ws_getnameinfo as *const () as usize),
+        "WSAAddressToStringA" => Some(ws_wsa_address_to_string_a as *const () as usize),
+        "WSAIoctl" => Some(ws_wsa_ioctl as *const () as usize),
+        "WSAAsyncSelect" => Some(ws_wsa_async_select as *const () as usize),
         // Async-event stubs (M3 — PuTTY SSH engine).
         "WSACreateEvent" => Some(wsa_create_event as *const () as usize),
         "WSACloseEventObject" => Some(wsa_close_event_object as *const () as usize),
@@ -1024,6 +1516,15 @@ mod tests {
             "ntohs",
             "ntohl",
             "inet_addr",
+            "gethostname",
+            "gethostbyname",
+            "getservbyname",
+            "inet_ntoa",
+            "inet_ntop",
+            "getnameinfo",
+            "WSAAddressToStringA",
+            "WSAIoctl",
+            "WSAAsyncSelect",
         ];
         for f in &funcs {
             assert!(resolve("ws2_32.dll", f).is_some(), "missing {f}");

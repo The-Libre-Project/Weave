@@ -1571,6 +1571,121 @@ fn putty_m3_ssh_connect_gate() {
     }
 }
 
+/// `weave plink.exe` — headless SSH client gate (M3).
+///
+/// Runs `weave plink.exe -batch -pw weave-test-pw -P 2222 runner@localhost echo hello`
+/// against a local sshd on port 2222 (set up by CI). 15-second timeout with
+/// concurrent stderr drain. Gate 1 (hard): imports resolved. Reports all stderr
+/// for diagnosis. Skipped gracefully if plink.exe is absent.
+#[test]
+fn putty_m3_plink_gate() {
+    if !cfg!(target_os = "linux") {
+        eprintln!("skipping putty_m3_plink_gate — requires Linux");
+        return;
+    }
+
+    let manifest = env!("CARGO_MANIFEST_DIR");
+    let fixture = format!("{manifest}/../tests/fixtures/bin/plink.exe");
+
+    if !std::path::Path::new(&fixture).exists() {
+        eprintln!(
+            "skipping: plink.exe not present in tests/fixtures/bin/ — putty_m3_plink_gate skipped"
+        );
+        return;
+    }
+
+    let weave_bin = env!("CARGO_BIN_EXE_weave");
+
+    let start = std::time::Instant::now();
+    let mut child = std::process::Command::new(weave_bin)
+        .arg(&fixture)
+        .arg("-batch")
+        .arg("-pw")
+        .arg("weave-test-pw")
+        .arg("-P")
+        .arg("2222")
+        .arg("runner@localhost")
+        .arg("echo")
+        .arg("hello")
+        .stderr(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|e| panic!("failed to spawn weave on plink.exe: {e}"));
+
+    // Drain stderr concurrently to avoid 64 KB pipe blocking.
+    let stderr_pipe = child.stderr.take().expect("stderr was piped");
+    let stderr_shared = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let stderr_writer = std::sync::Arc::clone(&stderr_shared);
+    let drain_thread = std::thread::spawn(move || {
+        use std::io::Read;
+        let mut buf = Vec::new();
+        let _ = stderr_pipe.read_to_end(&mut buf);
+        *stderr_writer.lock().unwrap() = buf;
+    });
+
+    let deadline = start + std::time::Duration::from_secs(15);
+    let mut exit_status: Option<std::process::ExitStatus> = None;
+    let mut killed_by_deadline = false;
+
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                exit_status = Some(status);
+                break;
+            }
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    killed_by_deadline = true;
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err(e) => panic!("wait failed: {e}"),
+        }
+    }
+    let elapsed = start.elapsed();
+
+    drain_thread.join().expect("stderr drain thread panicked");
+    let stderr_bytes = stderr_shared.lock().unwrap().clone();
+    let stderr = String::from_utf8_lossy(&stderr_bytes);
+
+    eprintln!("putty_m3_plink elapsed: {elapsed:.1?}");
+    eprintln!(
+        "putty_m3_plink exit: {}",
+        if killed_by_deadline {
+            "killed by deadline".to_string()
+        } else {
+            exit_status
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "unknown".to_string())
+        }
+    );
+    eprintln!("--- putty_m3_plink FULL STDERR BEGIN ---");
+    eprintln!("{stderr}");
+    eprintln!("--- putty_m3_plink FULL STDERR END ---");
+
+    // Report unresolved imports for diagnosis.
+    eprintln!("--- putty_m3_plink unresolved imports ---");
+    for line in stderr.lines().filter(|l| l.contains("unresolved import")) {
+        eprintln!("{line}");
+    }
+
+    // Gate 1 (hard): IAT patch must complete before plink enters its SSH stack.
+    assert!(
+        stderr.contains("weave: imports resolved"),
+        "putty_m3_plink Gate 1 FAIL: IAT patch did not complete — weave crashed before \
+         entry point.\nelapsed: {elapsed:.1?}\nstderr:\n{stderr}"
+    );
+
+    // Diagnostic: report what SSH activity was observed.
+    let tcp_attempted = stderr.contains("ws_connect")
+        || stderr.contains("ws_getaddrinfo")
+        || stderr.contains("gethostbyname")
+        || stderr.contains("connect(");
+    eprintln!("putty_m3_plink diagnostic: TCP/name-resolution attempted = {tcp_attempted}");
+}
+
 /// `weave hello.exe` — CRT-linked MinGW binary, 41 imports across 8 DLLs.
 #[test]
 fn hello_crt_prints_hello_world() {
