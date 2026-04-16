@@ -1613,7 +1613,7 @@ fn putty_m3_plink_gate() {
         .unwrap_or_else(|e| panic!("failed to spawn weave on plink.exe: {e}"));
 
     // Drain stderr concurrently to avoid 64 KB pipe blocking.
-    let stderr_pipe = child.stderr.take().expect("stderr was piped");
+    let mut stderr_pipe = child.stderr.take().expect("stderr was piped");
     let stderr_shared = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
     let stderr_writer = std::sync::Arc::clone(&stderr_shared);
     let drain_thread = std::thread::spawn(move || {
