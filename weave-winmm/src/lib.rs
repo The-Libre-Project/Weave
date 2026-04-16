@@ -25,6 +25,7 @@ struct RingBuf {
     /// Read cursor (byte offset into `data`).
     read_pos: usize,
     /// Bytes per audio frame (channels x bytes_per_sample).
+    #[allow(dead_code)]
     frame_size: usize,
 }
 
@@ -127,6 +128,7 @@ unsafe impl Send for PwState {}
 #[cfg(feature = "pipewire-audio")]
 struct WaveOutSession {
     ring_buf: Arc<Mutex<RingBuf>>,
+    #[allow(dead_code)]
     pw_state: Option<PwState>,
     // callback info for WOM_DONE
     callback: usize,
@@ -485,7 +487,7 @@ pub unsafe extern "win64" fn wave_out_open(
         unsafe {
             maybe_notify(WAVE_OUT_HANDLE, WOM_OPEN, callback, instance, flags);
         }
-        return 0;
+        0
     }
 
     #[cfg(not(feature = "pipewire-audio"))]
@@ -512,7 +514,7 @@ pub extern "win64" fn wave_out_close(_hwo: usize) -> u32 {
                 guard.take(); // drops WaveOutSession → drops PwState → stops ThreadLoop
             }
         }
-        return 0;
+        0
     }
     #[cfg(not(feature = "pipewire-audio"))]
     {
@@ -592,7 +594,7 @@ pub unsafe extern "win64" fn wave_out_write(_hwo: usize, pwh: *mut WAVEHDR, _cbw
                 );
             }
         }
-        return 0;
+        0
     }
 
     #[cfg(not(feature = "pipewire-audio"))]
