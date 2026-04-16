@@ -918,32 +918,57 @@ mod inner {
         eprintln!("weave/x11: event {event_tag}");
 
         match event {
-            Event::ClientMessage(ev) => {
-                // User clicked the window manager's close button.
-                if ev.data.as_data32()[0] == wm_delete_window {
-                    let hwnd = window::hwnd_for_xcb(ev.window);
-                    if hwnd != 0 {
-                        queue::post(MsgEntry {
-                            hwnd,
-                            message: WM_CLOSE,
-                            w_param: 0,
-                            l_param: 0,
-                            time: 0,
-                            pt_x: 0,
-                            pt_y: 0,
-                        });
-                    }
+            // User clicked the window manager's close button.
+            Event::ClientMessage(ev) if ev.data.as_data32()[0] == wm_delete_window => {
+                let hwnd = window::hwnd_for_xcb(ev.window);
+                if hwnd != 0 {
+                    queue::post(MsgEntry {
+                        hwnd,
+                        message: WM_CLOSE,
+                        w_param: 0,
+                        l_param: 0,
+                        time: 0,
+                        pt_x: 0,
+                        pt_y: 0,
+                    });
                 }
             }
 
-            Event::Expose(ev) => {
-                // Only post WM_PAINT for the last Expose in a sequence
-                // (count == 0 means no more expose events follow).
-                if ev.count == 0 {
-                    let hwnd = window::hwnd_for_xcb(ev.window);
-                    if hwnd != 0 {
+            // Only post WM_PAINT for the last Expose in a sequence
+            // (count == 0 means no more expose events follow).
+            Event::Expose(ev) if ev.count == 0 => {
+                let hwnd = window::hwnd_for_xcb(ev.window);
+                if hwnd != 0 {
+                    queue::post(MsgEntry {
+                        hwnd,
+                        message: WM_PAINT,
+                        w_param: 0,
+                        l_param: 0,
+                        time: 0,
+                        pt_x: 0,
+                        pt_y: 0,
+                    });
+                }
+
+                // WS1 fix: On the first Expose (X server is now showing
+                // mapped windows), post WM_PAINT to ALL registered hwnds.
+                //
+                // Scintilla and other child windows paint during init
+                // (triggered by UpdateWindow/WM_PAINT from the queue) while
+                // their X11 windows are still unmapped — the X server
+                // silently discards those draws. After ShowWindow maps the
+                // top-level X11 window, most children receive Expose and
+                // repaint correctly, but windows that were already mapped
+                // via SetWindowPos before the parent was shown may not get
+                // Expose at all. This one-shot mass WM_PAINT guarantees
+                // they all repaint on their now-visible X11 surfaces.
+                static FIRST_EXPOSE_SEEN: AtomicBool = AtomicBool::new(false);
+                if !FIRST_EXPOSE_SEEN.swap(true, Ordering::SeqCst) {
+                    // Force redraw of top-level window too
+                    let top_hwnd = window::all_hwnds().first().copied().unwrap_or(0);
+                    if top_hwnd != 0 {
                         queue::post(MsgEntry {
-                            hwnd,
+                            hwnd: top_hwnd,
                             message: WM_PAINT,
                             w_param: 0,
                             l_param: 0,
@@ -952,46 +977,17 @@ mod inner {
                             pt_y: 0,
                         });
                     }
-
-                    // WS1 fix: On the first Expose (X server is now showing
-                    // mapped windows), post WM_PAINT to ALL registered hwnds.
-                    //
-                    // Scintilla and other child windows paint during init
-                    // (triggered by UpdateWindow/WM_PAINT from the queue) while
-                    // their X11 windows are still unmapped — the X server
-                    // silently discards those draws. After ShowWindow maps the
-                    // top-level X11 window, most children receive Expose and
-                    // repaint correctly, but windows that were already mapped
-                    // via SetWindowPos before the parent was shown may not get
-                    // Expose at all. This one-shot mass WM_PAINT guarantees
-                    // they all repaint on their now-visible X11 surfaces.
-                    static FIRST_EXPOSE_SEEN: AtomicBool = AtomicBool::new(false);
-                    if !FIRST_EXPOSE_SEEN.swap(true, Ordering::SeqCst) {
-                        // Force redraw of top-level window too
-                        let top_hwnd = window::all_hwnds().first().copied().unwrap_or(0);
-                        if top_hwnd != 0 {
-                            queue::post(MsgEntry {
-                                hwnd: top_hwnd,
-                                message: WM_PAINT,
-                                w_param: 0,
-                                l_param: 0,
-                                time: 0,
-                                pt_x: 0,
-                                pt_y: 0,
-                            });
-                        }
-                        eprintln!("weave/x11: first Expose — posting WM_PAINT to all hwnds");
-                        for h in window::all_hwnds() {
-                            queue::post(MsgEntry {
-                                hwnd: h,
-                                message: WM_PAINT,
-                                w_param: 0,
-                                l_param: 0,
-                                time: 0,
-                                pt_x: 0,
-                                pt_y: 0,
-                            });
-                        }
+                    eprintln!("weave/x11: first Expose — posting WM_PAINT to all hwnds");
+                    for h in window::all_hwnds() {
+                        queue::post(MsgEntry {
+                            hwnd: h,
+                            message: WM_PAINT,
+                            w_param: 0,
+                            l_param: 0,
+                            time: 0,
+                            pt_x: 0,
+                            pt_y: 0,
+                        });
                     }
                 }
             }
