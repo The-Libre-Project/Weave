@@ -823,14 +823,52 @@ pub unsafe extern "win64" fn ucrt_fwrite(
     }
 }
 
-pub extern "win64" fn ucrt_stdio_common_vfprintf(
+/// __stdio_common_vfprintf — core vfprintf dispatch used by UCRT and MinGW CRT.
+///
+/// Wine ref: dlls/ucrtbase/__stdio_common_vfprintf.c — options bit 0 enables
+/// legacy mode (no BOM stripping, no locale override). For our purposes, options
+/// and locale are both ignored; we delegate directly to vsnprintf + write.
+///
+/// # Safety
+/// `stream` must be a valid FILE* or one of the three standard streams.
+/// `format` must be a valid null-terminated C format string.
+/// `args` must be a valid Windows-x64 va_list for the given format.
+pub unsafe extern "win64" fn ucrt_stdio_common_vfprintf(
     _options: u64,
-    _stream: *mut c_void,
-    _format: *const u8,
+    stream: *mut c_void,
+    format: *const u8,
     _locale: *const c_void,
-    _args: *mut c_void,
+    args: *mut c_void,
 ) -> i32 {
-    0
+    if format.is_null() {
+        return -1;
+    }
+    // Count how many bytes the formatted output needs.
+    let mut va_tag = VaListTag {
+        gp_offset: 48,
+        fp_offset: 176,
+        overflow_arg_area: args,
+        reg_save_area: std::ptr::null_mut(),
+    };
+    let needed = unsafe { vsnprintf(std::ptr::null_mut(), 0, format, &mut va_tag) };
+    if needed <= 0 {
+        return needed;
+    }
+    let buf_len = needed as usize + 1;
+    let mut buf: Vec<u8> = vec![0u8; buf_len];
+    // Re-init va_tag — vsnprintf consumed it above.
+    let mut va_tag2 = VaListTag {
+        gp_offset: 48,
+        fp_offset: 176,
+        overflow_arg_area: args,
+        reg_save_area: std::ptr::null_mut(),
+    };
+    let written = unsafe { vsnprintf(buf.as_mut_ptr(), buf_len, format, &mut va_tag2) };
+    if written > 0 {
+        let fd = stream_to_fd(stream);
+        unsafe { libc::write(fd, buf.as_ptr() as *const libc::c_void, written as usize) };
+    }
+    written
 }
 
 /// __stdio_common_vsprintf — core sprintf dispatch used by UCRT and MinGW CRT.
@@ -869,6 +907,290 @@ pub unsafe extern "win64" fn ucrt_stdio_common_vsprintf(
     } else {
         unsafe { vsnprintf(buf, buf_count, format, &mut va_tag) }
     }
+}
+
+// ── snprintf / sprintf / printf / fprintf / puts / putchar ───────────────────
+
+/// snprintf — write at most `count` bytes of formatted output into `buf`.
+///
+/// Wine ref: dlls/msvcrt/printf.c — snprintf delegates to __stdio_common_vsprintf
+/// with options=0; buf/count/format/args passthrough. Null-terminates if count>0.
+///
+/// # Safety
+/// `buf` must be writable for `count` bytes. `format` must be a null-terminated C string.
+/// `args` must be a valid Windows-x64 va_list.
+pub unsafe extern "win64" fn ucrt_snprintf(
+    buf: *mut u8,
+    count: usize,
+    format: *const u8,
+    args: *mut c_void,
+) -> i32 {
+    if format.is_null() {
+        return -1;
+    }
+    let mut va_tag = VaListTag {
+        gp_offset: 48,
+        fp_offset: 176,
+        overflow_arg_area: args,
+        reg_save_area: std::ptr::null_mut(),
+    };
+    if buf.is_null() || count == 0 {
+        unsafe { vsnprintf(std::ptr::null_mut(), 0, format, &mut va_tag) }
+    } else {
+        unsafe { vsnprintf(buf, count, format, &mut va_tag) }
+    }
+}
+
+/// sprintf — write formatted output into `buf` (no size limit).
+///
+/// Wine ref: dlls/msvcrt/printf.c — sprintf calls vsnprintf with SIZE_MAX as the
+/// count; callers are responsible for ensuring buf is large enough.
+///
+/// # Safety
+/// `buf` must point to a buffer large enough for the formatted output.
+/// `format` must be a null-terminated C string. `args` must be a valid Windows-x64 va_list.
+pub unsafe extern "win64" fn ucrt_sprintf(
+    buf: *mut u8,
+    format: *const u8,
+    args: *mut c_void,
+) -> i32 {
+    if format.is_null() || buf.is_null() {
+        return -1;
+    }
+    let mut va_tag = VaListTag {
+        gp_offset: 48,
+        fp_offset: 176,
+        overflow_arg_area: args,
+        reg_save_area: std::ptr::null_mut(),
+    };
+    unsafe { vsnprintf(buf, usize::MAX, format, &mut va_tag) }
+}
+
+/// printf — write formatted output to stdout.
+///
+/// Wine ref: dlls/msvcrt/printf.c — printf calls vfprintf(stdout, fmt, args).
+/// Weave: formats to a heap buffer via vsnprintf, then writes to fd 1.
+///
+/// # Safety
+/// `format` must be a null-terminated C string. `args` must be a valid Windows-x64 va_list.
+pub unsafe extern "win64" fn ucrt_printf(format: *const u8, args: *mut c_void) -> i32 {
+    if format.is_null() {
+        return -1;
+    }
+    let mut va_tag = VaListTag {
+        gp_offset: 48,
+        fp_offset: 176,
+        overflow_arg_area: args,
+        reg_save_area: std::ptr::null_mut(),
+    };
+    let needed = unsafe { vsnprintf(std::ptr::null_mut(), 0, format, &mut va_tag) };
+    if needed <= 0 {
+        return needed;
+    }
+    let buf_len = needed as usize + 1;
+    let mut buf: Vec<u8> = vec![0u8; buf_len];
+    let mut va_tag2 = VaListTag {
+        gp_offset: 48,
+        fp_offset: 176,
+        overflow_arg_area: args,
+        reg_save_area: std::ptr::null_mut(),
+    };
+    let written = unsafe { vsnprintf(buf.as_mut_ptr(), buf_len, format, &mut va_tag2) };
+    if written > 0 {
+        unsafe { libc::write(1, buf.as_ptr() as *const libc::c_void, written as usize) };
+    }
+    written
+}
+
+/// fprintf — write formatted output to a FILE* stream.
+///
+/// Wine ref: dlls/msvcrt/printf.c — fprintf routes through __stdio_common_vfprintf.
+///
+/// # Safety
+/// `stream` must be a valid FILE*. `format` must be null-terminated. `args` must be a valid Windows-x64 va_list.
+pub unsafe extern "win64" fn ucrt_fprintf_va(
+    stream: *mut c_void,
+    format: *const u8,
+    args: *mut c_void,
+) -> i32 {
+    unsafe { ucrt_stdio_common_vfprintf(0, stream, format, std::ptr::null(), args) }
+}
+
+/// puts — write a string followed by a newline to stdout.
+///
+/// Wine ref: dlls/msvcrt/file.c — puts calls fwrite(s, 1, len, stdout) then
+/// fwrite("\n", 1, 1, stdout). Returns non-negative on success, EOF on error.
+///
+/// # Safety
+/// `s` must be a valid null-terminated C string.
+pub unsafe extern "win64" fn ucrt_puts(s: *const u8) -> i32 {
+    if s.is_null() {
+        return -1;
+    }
+    let len = unsafe { libc::strlen(s as *const libc::c_char) };
+    let r1 = unsafe { libc::write(1, s as *const libc::c_void, len) };
+    let newline = b"\n";
+    let r2 = unsafe { libc::write(1, newline.as_ptr() as *const libc::c_void, 1) };
+    if r1 < 0 || r2 < 0 {
+        -1
+    } else {
+        0
+    }
+}
+
+/// putchar — write a single character to stdout.
+///
+/// Wine ref: dlls/msvcrt/file.c — putchar calls fputc(c, stdout).
+pub extern "win64" fn ucrt_putchar(c: i32) -> i32 {
+    let byte = (c & 0xFF) as u8;
+    let r = unsafe { libc::write(1, &byte as *const u8 as *const libc::c_void, 1) };
+    if r < 0 {
+        -1
+    } else {
+        c
+    }
+}
+
+// ── getenv / _wgetenv ─────────────────────────────────────────────────────────
+
+/// getenv — look up an environment variable by narrow name.
+///
+/// Wine ref: dlls/msvcrt/environ.c — getenv calls libc getenv; returns null
+/// if the variable is not set.
+///
+/// # Safety
+/// `name` must be a valid null-terminated C string.
+pub unsafe extern "win64" fn ucrt_getenv(name: *const u8) -> *const u8 {
+    if name.is_null() {
+        return std::ptr::null();
+    }
+    unsafe { libc::getenv(name as *const libc::c_char) as *const u8 }
+}
+
+/// _wgetenv — look up an environment variable by wide (UTF-16LE) name.
+///
+/// Wine ref: dlls/msvcrt/environ.c — _wgetenv converts the wide name to ANSI,
+/// calls getenv, then converts the result back to a wide string in a static
+/// per-thread buffer. We convert to UTF-8 via a heap buffer, call getenv,
+/// then convert the result to a heap-allocated wide string. Returns null if
+/// not found. The returned pointer is valid until the next call to _wgetenv.
+///
+/// # Safety
+/// `name` must be a valid null-terminated UTF-16LE string.
+pub unsafe extern "win64" fn ucrt_wgetenv(name: *const u16) -> *const u16 {
+    if name.is_null() {
+        return std::ptr::null();
+    }
+    // Convert wide name to a narrow UTF-8 string.
+    let mut len = 0usize;
+    unsafe {
+        while *name.add(len) != 0 {
+            len += 1;
+        }
+    }
+    let wide_slice = unsafe { std::slice::from_raw_parts(name, len) };
+    let narrow: String = wide_slice
+        .iter()
+        .map(|&c| if c < 128 { c as u8 as char } else { '?' })
+        .collect();
+    let narrow_cstr = match std::ffi::CString::new(narrow) {
+        Ok(s) => s,
+        Err(_) => return std::ptr::null(),
+    };
+    let val = unsafe { libc::getenv(narrow_cstr.as_ptr()) };
+    if val.is_null() {
+        return std::ptr::null();
+    }
+    // Convert the narrow result to a heap-allocated wide (UTF-16LE) string.
+    let val_bytes = unsafe { std::ffi::CStr::from_ptr(val) }.to_bytes();
+    let mut wide: Vec<u16> = val_bytes.iter().map(|&b| b as u16).collect();
+    wide.push(0);
+    // Leak the allocation — the caller must not free it (Windows convention for getenv).
+    Box::into_raw(wide.into_boxed_slice()) as *const u16
+}
+
+// ── math functions ─────────────────────────────────────────────────────────────
+
+// Double-precision (f64) math delegates — each uses Rust's f64 methods.
+pub extern "win64" fn ucrt_sin(x: f64) -> f64 {
+    x.sin()
+}
+pub extern "win64" fn ucrt_cos(x: f64) -> f64 {
+    x.cos()
+}
+pub extern "win64" fn ucrt_tan(x: f64) -> f64 {
+    x.tan()
+}
+pub extern "win64" fn ucrt_sqrt(x: f64) -> f64 {
+    x.sqrt()
+}
+pub extern "win64" fn ucrt_floor(x: f64) -> f64 {
+    x.floor()
+}
+pub extern "win64" fn ucrt_ceil(x: f64) -> f64 {
+    x.ceil()
+}
+pub extern "win64" fn ucrt_log(x: f64) -> f64 {
+    x.ln()
+}
+pub extern "win64" fn ucrt_log2(x: f64) -> f64 {
+    x.log2()
+}
+pub extern "win64" fn ucrt_log10(x: f64) -> f64 {
+    x.log10()
+}
+pub extern "win64" fn ucrt_exp(x: f64) -> f64 {
+    x.exp()
+}
+pub extern "win64" fn ucrt_pow(base: f64, exp: f64) -> f64 {
+    base.powf(exp)
+}
+pub extern "win64" fn ucrt_fabs(x: f64) -> f64 {
+    x.abs()
+}
+pub extern "win64" fn ucrt_fmod(x: f64, y: f64) -> f64 {
+    x % y
+}
+pub extern "win64" fn ucrt_atan(x: f64) -> f64 {
+    x.atan()
+}
+pub extern "win64" fn ucrt_atan2(y: f64, x: f64) -> f64 {
+    y.atan2(x)
+}
+pub extern "win64" fn ucrt_asin(x: f64) -> f64 {
+    x.asin()
+}
+pub extern "win64" fn ucrt_acos(x: f64) -> f64 {
+    x.acos()
+}
+
+// Single-precision (f32) math delegates.
+pub extern "win64" fn ucrt_sinf(x: f32) -> f32 {
+    x.sin()
+}
+pub extern "win64" fn ucrt_cosf(x: f32) -> f32 {
+    x.cos()
+}
+pub extern "win64" fn ucrt_tanf(x: f32) -> f32 {
+    x.tan()
+}
+pub extern "win64" fn ucrt_sqrtf(x: f32) -> f32 {
+    x.sqrt()
+}
+pub extern "win64" fn ucrt_floorf(x: f32) -> f32 {
+    x.floor()
+}
+pub extern "win64" fn ucrt_ceilf(x: f32) -> f32 {
+    x.ceil()
+}
+pub extern "win64" fn ucrt_fabsf(x: f32) -> f32 {
+    x.abs()
+}
+pub extern "win64" fn ucrt_fmodf(x: f32, y: f32) -> f32 {
+    x % y
+}
+pub extern "win64" fn ucrt_atan2f(y: f32, x: f32) -> f32 {
+    y.atan2(x)
 }
 
 /// # Safety
@@ -2176,7 +2498,7 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "vfprintf" => stub!(ucrt_vfprintf as extern "win64" fn(_, _, _) -> _),
         "fwrite" => stub!(ucrt_fwrite as unsafe extern "win64" fn(_, _, _, _) -> _),
         "__stdio_common_vfprintf" | "__stdio_common_vfwprintf" => {
-            stub!(ucrt_stdio_common_vfprintf as extern "win64" fn(_, _, _, _, _) -> _)
+            stub!(ucrt_stdio_common_vfprintf as unsafe extern "win64" fn(_, _, _, _, _) -> _)
         }
         "__stdio_common_vsprintf" | "__stdio_common_vswprintf" => {
             stub!(ucrt_stdio_common_vsprintf as unsafe extern "win64" fn(_, _, _, _, _, _) -> _)
@@ -2205,6 +2527,16 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "fclose" => stub!(ucrt_fclose as unsafe extern "win64" fn(_) -> _),
         "feof" => stub!(ucrt_feof as unsafe extern "win64" fn(_) -> _),
         "ferror" => stub!(ucrt_ferror as unsafe extern "win64" fn(_) -> _),
+        "snprintf" | "_snprintf" => {
+            stub!(ucrt_snprintf as unsafe extern "win64" fn(_, _, _, _) -> _)
+        }
+        "sprintf" | "_sprintf" => stub!(ucrt_sprintf as unsafe extern "win64" fn(_, _, _) -> _),
+        "printf" | "_printf" => stub!(ucrt_printf as unsafe extern "win64" fn(_, _) -> _),
+        "fprintf_va" => stub!(ucrt_fprintf_va as unsafe extern "win64" fn(_, _, _) -> _),
+        "puts" => stub!(ucrt_puts as unsafe extern "win64" fn(_) -> _),
+        "putchar" | "_putchar" => stub!(ucrt_putchar as extern "win64" fn(_) -> _),
+        "getenv" => stub!(ucrt_getenv as unsafe extern "win64" fn(_) -> _),
+        "_wgetenv" => stub!(ucrt_wgetenv as unsafe extern "win64" fn(_) -> _),
         // locale / mb
         "___mb_cur_max_func" => stub!(ucrt_mb_cur_max_func as extern "win64" fn() -> _),
         "localeconv" => stub!(ucrt_localeconv as extern "win64" fn() -> _),
@@ -2214,7 +2546,34 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "mbrtowc" => stub!(ucrt_mbrtowc as unsafe extern "win64" fn(_, _, _, _) -> _),
         "mbsrtowcs" => stub!(ucrt_mbsrtowcs as unsafe extern "win64" fn(_, _, _, _) -> _),
         "wcrtomb" => stub!(ucrt_wcrtomb as unsafe extern "win64" fn(_, _, _) -> _),
-        // math
+        // math — double precision
+        "sin" => stub!(ucrt_sin as extern "win64" fn(_) -> _),
+        "cos" => stub!(ucrt_cos as extern "win64" fn(_) -> _),
+        "tan" => stub!(ucrt_tan as extern "win64" fn(_) -> _),
+        "sqrt" => stub!(ucrt_sqrt as extern "win64" fn(_) -> _),
+        "floor" => stub!(ucrt_floor as extern "win64" fn(_) -> _),
+        "ceil" => stub!(ucrt_ceil as extern "win64" fn(_) -> _),
+        "log" => stub!(ucrt_log as extern "win64" fn(_) -> _),
+        "log2" => stub!(ucrt_log2 as extern "win64" fn(_) -> _),
+        "log10" => stub!(ucrt_log10 as extern "win64" fn(_) -> _),
+        "exp" => stub!(ucrt_exp as extern "win64" fn(_) -> _),
+        "pow" => stub!(ucrt_pow as extern "win64" fn(_, _) -> _),
+        "fabs" => stub!(ucrt_fabs as extern "win64" fn(_) -> _),
+        "fmod" => stub!(ucrt_fmod as extern "win64" fn(_, _) -> _),
+        "atan" => stub!(ucrt_atan as extern "win64" fn(_) -> _),
+        "atan2" => stub!(ucrt_atan2 as extern "win64" fn(_, _) -> _),
+        "asin" => stub!(ucrt_asin as extern "win64" fn(_) -> _),
+        "acos" => stub!(ucrt_acos as extern "win64" fn(_) -> _),
+        // math — single precision
+        "sinf" => stub!(ucrt_sinf as extern "win64" fn(_) -> _),
+        "cosf" => stub!(ucrt_cosf as extern "win64" fn(_) -> _),
+        "tanf" => stub!(ucrt_tanf as extern "win64" fn(_) -> _),
+        "sqrtf" => stub!(ucrt_sqrtf as extern "win64" fn(_) -> _),
+        "floorf" => stub!(ucrt_floorf as extern "win64" fn(_) -> _),
+        "ceilf" => stub!(ucrt_ceilf as extern "win64" fn(_) -> _),
+        "fabsf" => stub!(ucrt_fabsf as extern "win64" fn(_) -> _),
+        "fmodf" => stub!(ucrt_fmodf as extern "win64" fn(_, _) -> _),
+        "atan2f" => stub!(ucrt_atan2f as extern "win64" fn(_, _) -> _),
         "powf" => stub!(ucrt_powf as extern "win64" fn(_, _) -> _),
         // setjmp/longjmp
         "__intrinsic_setjmpex" => {
