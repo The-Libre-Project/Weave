@@ -8,6 +8,141 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
+// ── PipeWire ring buffer (pipewire-audio feature) ────────────────────────────
+
+#[cfg(feature = "pipewire-audio")]
+use std::sync::{Arc, Mutex};
+
+/// Lock-free-ish ring buffer for PCM audio data.
+/// Copied verbatim from weave-mmdevapi — no external deps.
+#[cfg(feature = "pipewire-audio")]
+struct RingBuf {
+    data: Vec<u8>,
+    /// Number of bytes currently available to read.
+    available: usize,
+    /// Write cursor (byte offset into `data`).
+    write_pos: usize,
+    /// Read cursor (byte offset into `data`).
+    read_pos: usize,
+    /// Bytes per audio frame (channels x bytes_per_sample).
+    frame_size: usize,
+}
+
+#[cfg(feature = "pipewire-audio")]
+impl RingBuf {
+    fn new(capacity_bytes: usize, frame_size: usize) -> Self {
+        Self {
+            data: vec![0u8; capacity_bytes.max(4096)],
+            available: 0,
+            write_pos: 0,
+            read_pos: 0,
+            frame_size,
+        }
+    }
+
+    /// Read up to `dst.len()` bytes into `dst`.  Returns bytes actually copied.
+    fn read_into(&mut self, dst: &mut [u8]) -> usize {
+        let max_bytes = dst.len();
+        let to_copy = max_bytes.min(self.available);
+        if to_copy == 0 {
+            return 0;
+        }
+        let capacity = self.data.len();
+        let first_chunk = (capacity - self.read_pos).min(to_copy);
+        dst[..first_chunk].copy_from_slice(&self.data[self.read_pos..self.read_pos + first_chunk]);
+        if first_chunk < to_copy {
+            let second_chunk = to_copy - first_chunk;
+            dst[first_chunk..first_chunk + second_chunk]
+                .copy_from_slice(&self.data[..second_chunk]);
+        }
+        self.read_pos = (self.read_pos + to_copy) % capacity;
+        self.available -= to_copy;
+        to_copy
+    }
+
+    /// Write `src` into the ring buffer. Discards overflow if the buffer is full.
+    fn write_from(&mut self, src: &[u8]) {
+        if src.is_empty() {
+            return;
+        }
+        let capacity = self.data.len();
+        let free = capacity.saturating_sub(self.available);
+        let to_write = src.len().min(free);
+        if to_write == 0 {
+            // Buffer full — discard.
+            return;
+        }
+        let src = &src[..to_write];
+        let first_chunk = (capacity - self.write_pos).min(to_write);
+        self.data[self.write_pos..self.write_pos + first_chunk]
+            .copy_from_slice(&src[..first_chunk]);
+        if first_chunk < to_write {
+            let second_chunk = to_write - first_chunk;
+            self.data[..second_chunk]
+                .copy_from_slice(&src[first_chunk..first_chunk + second_chunk]);
+        }
+        self.write_pos = (self.write_pos + to_write) % capacity;
+        self.available += to_write;
+    }
+}
+
+// ── PipeWire stream state ────────────────────────────────────────────────────
+
+/// Live PipeWire objects for one waveOut session.
+///
+/// PipeWire objects use `Rc` internally and are therefore `!Send`.  We drive
+/// them from the ThreadLoop's internal thread; all other access is gated by
+/// the ThreadLoop lock.
+///
+/// `_listener` is box-erased to `dyn Any` so we don't propagate a generic
+/// parameter out of this struct.
+#[cfg(feature = "pipewire-audio")]
+struct PwState {
+    thread_loop: pipewire::thread_loop::ThreadLoop,
+    /// Raw stream pointer so we can call pw_stream_destroy in Drop before
+    /// stopping the thread loop.
+    stream: Option<*mut pipewire::sys::pw_stream>,
+    /// Type-erased StreamListener — must be dropped before the stream.
+    _listener: Option<Box<dyn std::any::Any>>,
+}
+
+#[cfg(feature = "pipewire-audio")]
+impl Drop for PwState {
+    fn drop(&mut self) {
+        self._listener = None;
+        if let Some(ptr) = self.stream.take() {
+            unsafe { pipewire::sys::pw_stream_destroy(ptr) };
+        }
+        self.thread_loop.stop();
+    }
+}
+
+// SAFETY: accessed only while holding the ThreadLoop lock or from within the
+// ThreadLoop's process callback.  Drop is only called after Stop().
+#[cfg(feature = "pipewire-audio")]
+unsafe impl Send for PwState {}
+
+// ── waveOut global session ───────────────────────────────────────────────────
+
+#[cfg(feature = "pipewire-audio")]
+struct WaveOutSession {
+    ring_buf: Arc<Mutex<RingBuf>>,
+    pw_state: Option<PwState>,
+    // callback info for WOM_DONE
+    callback: usize,
+    instance: usize,
+    flags: u32,
+}
+
+#[cfg(feature = "pipewire-audio")]
+static WAVE_OUT_SESSION: std::sync::OnceLock<Mutex<Option<WaveOutSession>>> =
+    std::sync::OnceLock::new();
+
+#[cfg(feature = "pipewire-audio")]
+fn wave_out_session_mutex() -> &'static Mutex<Option<WaveOutSession>> {
+    WAVE_OUT_SESSION.get_or_init(|| Mutex::new(None))
+}
+
 // ── waveOut structs ──────────────────────────────────────────────────────────
 // Wine ref: include/mmsystem.h — WAVEFORMATEX struct layout (line 500)
 #[repr(C)]
@@ -45,6 +180,8 @@ const CALLBACK_TYPEMASK: u32 = 0x00070000;
 
 // WOM messages — Wine ref: include/mmsystem.h
 const WOM_OPEN: u32 = 0x3BB;
+#[cfg(feature = "pipewire-audio")]
+const WOM_DONE: u32 = 0x3BD;
 
 // Wine ref: include/mmsystem.h — WAVEOUTCAPSA struct layout (line 347)
 // MAXPNAMELEN = 32
@@ -197,27 +334,190 @@ pub extern "win64" fn mci_send_command_w(
 pub unsafe extern "win64" fn wave_out_open(
     phwo: *mut usize,
     _dev_id: u32,
-    _pwfx: *const WAVEFORMATEX,
+    #[cfg_attr(not(feature = "pipewire-audio"), allow(unused_variables))] pwfx: *const WAVEFORMATEX,
     callback: usize,
     instance: usize,
     flags: u32,
 ) -> u32 {
-    if !phwo.is_null() {
-        unsafe {
-            *phwo = WAVE_OUT_HANDLE;
+    #[cfg(feature = "pipewire-audio")]
+    {
+        use pipewire as pw;
+        use pw::spa;
+
+        // Read format from caller; fall back to a safe 44100/16/stereo default.
+        let (channels, sample_rate, bits_per_sample, frame_size) = if !pwfx.is_null() {
+            let f = &*pwfx;
+            (
+                f.nChannels as u32,
+                f.nSamplesPerSec,
+                f.wBitsPerSample,
+                f.nBlockAlign as usize,
+            )
+        } else {
+            (2u32, 44100u32, 16u16, 4usize)
+        };
+
+        // 2-second ring buffer.
+        let ring_capacity = (sample_rate as usize) * (frame_size) * 2;
+        let ring_buf = Arc::new(Mutex::new(RingBuf::new(ring_capacity, frame_size)));
+
+        pw::init();
+
+        let pw_state: Option<PwState> = (|| -> Option<PwState> {
+            let thread_loop =
+                unsafe { pw::thread_loop::ThreadLoop::new(Some("weave-waveout"), None) }.ok()?;
+            let _lock = thread_loop.lock();
+            let context = pw::context::Context::new(&thread_loop).ok()?;
+            let core = context.connect(None).ok()?;
+
+            let stream = pw::stream::Stream::new(
+                &core,
+                "weave-waveout",
+                pw::properties::properties! {
+                    *pw::keys::MEDIA_TYPE     => "Audio",
+                    *pw::keys::MEDIA_ROLE     => "Music",
+                    *pw::keys::MEDIA_CATEGORY => "Playback",
+                },
+            )
+            .ok()?;
+
+            let rb_clone = Arc::clone(&ring_buf);
+            let listener = stream
+                .add_local_listener_with_user_data(())
+                .process(move |stream, _| {
+                    let mut buf = match stream.dequeue_buffer() {
+                        Some(b) => b,
+                        None => return,
+                    };
+                    let datas = buf.datas_mut();
+                    let d = &mut datas[0];
+                    let total = match d.data() {
+                        Some(slice) => slice.len(),
+                        None => return,
+                    };
+                    let raw_ptr = d.as_raw().data as *mut u8;
+                    if !raw_ptr.is_null() {
+                        let dst = unsafe { std::slice::from_raw_parts_mut(raw_ptr, total) };
+                        if let Ok(mut ring) = rb_clone.lock() {
+                            let copied = ring.read_into(dst);
+                            dst[copied..].fill(0);
+                        }
+                    }
+                    let chunk = d.chunk_mut();
+                    *chunk.offset_mut() = 0;
+                    *chunk.stride_mut() = frame_size as i32;
+                    *chunk.size_mut() = total as u32;
+                })
+                .register()
+                .ok()?;
+
+            let spa_fmt = match bits_per_sample {
+                16 => spa::param::audio::AudioFormat::S16LE,
+                24 => spa::param::audio::AudioFormat::S24LE,
+                32 => spa::param::audio::AudioFormat::S32LE,
+                _ => spa::param::audio::AudioFormat::S16LE,
+            };
+
+            let mut audio_info = spa::param::audio::AudioInfoRaw::new();
+            audio_info.set_format(spa_fmt);
+            audio_info.set_rate(sample_rate);
+            audio_info.set_channels(channels);
+
+            let values: Vec<u8> = pw::spa::pod::serialize::PodSerializer::serialize(
+                std::io::Cursor::new(Vec::new()),
+                &pw::spa::pod::Value::Object(pw::spa::pod::Object {
+                    type_: pw::spa::sys::SPA_TYPE_OBJECT_Format,
+                    id: pw::spa::sys::SPA_PARAM_EnumFormat,
+                    properties: audio_info.into(),
+                }),
+            )
+            .ok()?
+            .0
+            .into_inner();
+
+            let pod = spa::pod::Pod::from_bytes(&values)?;
+            let mut params = [pod];
+
+            stream
+                .connect(
+                    spa::utils::Direction::Output,
+                    None,
+                    pw::stream::StreamFlags::AUTOCONNECT
+                        | pw::stream::StreamFlags::MAP_BUFFERS
+                        | pw::stream::StreamFlags::RT_PROCESS,
+                    &mut params,
+                )
+                .ok()?;
+
+            let stream_raw = stream.into_raw();
+            let listener_any: Box<dyn std::any::Any> = Box::new(listener);
+
+            thread_loop.start();
+            drop(_lock);
+
+            Some(PwState {
+                thread_loop,
+                stream: Some(stream_raw),
+                _listener: Some(listener_any),
+            })
+        })();
+
+        if pw_state.is_some() {
+            eprintln!("weave/waveOut: PipeWire stream connected");
+        } else {
+            eprintln!("weave/waveOut: PipeWire unavailable — silent mode");
         }
+
+        let session = WaveOutSession {
+            ring_buf,
+            pw_state,
+            callback,
+            instance,
+            flags,
+        };
+        wave_out_session_mutex().lock().unwrap().replace(session);
+
+        if !phwo.is_null() {
+            unsafe {
+                *phwo = WAVE_OUT_HANDLE;
+            }
+        }
+        unsafe {
+            maybe_notify(WAVE_OUT_HANDLE, WOM_OPEN, callback, instance, flags);
+        }
+        return 0;
     }
-    unsafe {
-        maybe_notify(WAVE_OUT_HANDLE, WOM_OPEN, callback, instance, flags);
+
+    #[cfg(not(feature = "pipewire-audio"))]
+    {
+        if !phwo.is_null() {
+            unsafe {
+                *phwo = WAVE_OUT_HANDLE;
+            }
+        }
+        unsafe {
+            maybe_notify(WAVE_OUT_HANDLE, WOM_OPEN, callback, instance, flags);
+        }
+        0 // MMSYSERR_NOERROR
     }
-    0 // MMSYSERR_NOERROR
 }
 
 /// waveOutClose: close a wave output device.
 /// Wine ref: dlls/winmm/waveform.c WOD_Close — invokes WOM_CLOSE callback.
-/// Callback state is not preserved in this stub; close is a no-op.
 pub extern "win64" fn wave_out_close(_hwo: usize) -> u32 {
-    0 // MMSYSERR_NOERROR
+    #[cfg(feature = "pipewire-audio")]
+    {
+        if let Some(m) = WAVE_OUT_SESSION.get() {
+            if let Ok(mut guard) = m.lock() {
+                guard.take(); // drops WaveOutSession → drops PwState → stops ThreadLoop
+            }
+        }
+        return 0;
+    }
+    #[cfg(not(feature = "pipewire-audio"))]
+    {
+        0 // MMSYSERR_NOERROR
+    }
 }
 
 /// waveOutPrepareHeader: prepare a wave header for playback.
@@ -256,22 +556,56 @@ pub unsafe extern "win64" fn wave_out_unprepare_header(
     0 // MMSYSERR_NOERROR
 }
 
-/// waveOutWrite: submit a buffer for playback (silent stub).
+/// waveOutWrite: submit a buffer for playback.
 /// Wine ref: dlls/winmm/waveform.c — marks WHDR_INQUEUE while queued,
-///   marks WHDR_DONE when buffer completes. Stub marks done immediately
-///   (no audio produced; app does not deadlock waiting for completion).
+///   marks WHDR_DONE when buffer completes.
+/// With pipewire-audio: pushes PCM data into the ring buffer consumed by the
+/// PipeWire process callback. WOM_DONE is fired immediately after queuing
+/// (approximate — real WinMM fires after playback completes).
 ///
 /// # Safety
 /// `pwh` must be a valid pointer to a WAVEHDR if non-null.
 pub unsafe extern "win64" fn wave_out_write(_hwo: usize, pwh: *mut WAVEHDR, _cbwh: u32) -> u32 {
-    if !pwh.is_null() {
-        unsafe {
-            (*pwh).dwFlags |= WHDR_INQUEUE;
-            (*pwh).dwFlags |= WHDR_DONE;
-            (*pwh).dwFlags &= !WHDR_INQUEUE;
+    #[cfg(feature = "pipewire-audio")]
+    {
+        if let Ok(guard) = wave_out_session_mutex().lock() {
+            if let Some(ref session) = *guard {
+                if !pwh.is_null() {
+                    let hdr = &mut *pwh;
+                    hdr.dwFlags |= WHDR_INQUEUE | WHDR_DONE;
+                    if !hdr.lpData.is_null() && hdr.dwBufferLength > 0 {
+                        let slice = std::slice::from_raw_parts(
+                            hdr.lpData as *const u8,
+                            hdr.dwBufferLength as usize,
+                        );
+                        if let Ok(mut ring) = session.ring_buf.lock() {
+                            ring.write_from(slice);
+                        }
+                    }
+                }
+                maybe_notify(
+                    WAVE_OUT_HANDLE,
+                    WOM_DONE,
+                    session.callback,
+                    session.instance,
+                    session.flags,
+                );
+            }
         }
+        return 0;
     }
-    0 // MMSYSERR_NOERROR
+
+    #[cfg(not(feature = "pipewire-audio"))]
+    {
+        if !pwh.is_null() {
+            unsafe {
+                (*pwh).dwFlags |= WHDR_INQUEUE;
+                (*pwh).dwFlags |= WHDR_DONE;
+                (*pwh).dwFlags &= !WHDR_INQUEUE;
+            }
+        }
+        0 // MMSYSERR_NOERROR
+    }
 }
 
 /// waveOutReset: reset a wave output device.

@@ -6,5 +6,15 @@ license.workspace = true
 repository.workspace = true
 description = "winmm.dll stubs for Weave — multimedia timers, wave audio"
 
+[features]
+# Enable real PipeWire audio output. Only works when building natively on Linux
+# (not cross-compiling from macOS), because libspa-sys requires a pkg-config
+# sysroot for the target platform. Disabled by default so `make lint` and
+# `make build` work on macOS. Docker / CI can enable this explicitly.
+pipewire-audio = ["dep:pipewire"]
+
 [dependencies]
 libc = "0.2"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+pipewire = { version = "0.8", optional = true }
