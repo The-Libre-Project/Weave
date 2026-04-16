@@ -640,7 +640,70 @@ fn scite_portable_mode() {
     );
 }
 
-/// `weave testsprite2.exe` — SDL2 test binary; WS2 Gate 1 smoke test.
+/// Sample the X11 display `:99` for non-trivial (non-black) pixels.
+///
+/// Uses Python3 + ctypes + libX11.so.6 (available via libx11-dev in CI).
+/// Samples a 640×480 grid at 8-pixel intervals.  Returns:
+///   `Some(true)` — found a pixel brighter than #141414
+///   `Some(false)` — all sampled pixels are near-black
+///   `None` — Python3 or libX11 unavailable (skips the check)
+#[cfg(target_os = "linux")]
+fn sample_display_pixels_99() -> Option<bool> {
+    // Raw string — Python braces don't conflict with Rust format.
+    let script = r#"
+import ctypes, sys
+try:
+    x = ctypes.cdll.LoadLibrary("libX11.so.6")
+    x.XOpenDisplay.restype  = ctypes.c_void_p
+    x.XRootWindow.restype   = ctypes.c_ulong
+    x.XGetImage.restype     = ctypes.c_void_p
+    x.XGetPixel.restype     = ctypes.c_ulong
+    dpy = x.XOpenDisplay(b":99")
+    if not dpy: sys.exit(42)
+    scr  = x.XDefaultScreen(dpy)
+    root = x.XRootWindow(dpy, scr)
+    # 640x480 at top-left (SDL2 testsprite2 default window position)
+    img = x.XGetImage(dpy, root, 0, 0, 640, 480, 0xFFFFFF, 2)
+    if not img:
+        x.XCloseDisplay(dpy)
+        sys.exit(43)
+    threshold = 0x141414  # any channel > 20 counts as "not black"
+    found = any(x.XGetPixel(img, xi, yi) > threshold
+                for xi in range(0, 640, 8) for yi in range(0, 480, 8))
+    x.XDestroyImage(img)
+    x.XCloseDisplay(dpy)
+    print(1 if found else 0)
+except Exception:
+    import traceback; traceback.print_exc()
+    sys.exit(44)
+"#;
+    let out = std::process::Command::new("python3")
+        .arg("-c")
+        .arg(script)
+        .output()
+        .ok()?;
+    match out.status.code() {
+        Some(42) | Some(43) | Some(44) => {
+            eprintln!(
+                "gate2/pixel-sampler: python3 exit {:?} stderr={}",
+                out.status.code(),
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+            None
+        }
+        _ if !out.status.success() => None,
+        _ => match String::from_utf8_lossy(&out.stdout).trim() {
+            "1" => Some(true),
+            "0" => Some(false),
+            s => {
+                eprintln!("gate2/pixel-sampler: unexpected output: {s:?}");
+                None
+            }
+        },
+    }
+}
+
+/// `weave testsprite2.exe` — SDL2 test binary; WS2 Gate 1 + Gate 2 smoke test.
 ///
 /// Runs testsprite2.exe (SDL2 test binary, PE32+ x86-64) under Weave with
 /// --no-sandbox and DISPLAY=:99 (Xvfb). SDL2.dll must be in the same directory
@@ -650,6 +713,10 @@ fn scite_portable_mode() {
 /// without crash. This test is a first-run diagnostic: it always dumps full
 /// stderr and does not assert on the phase marker yet — that comes after gate 1
 /// is confirmed green. The one hard assertion is that IAT patch completes.
+///
+/// Gate 2 definition of done (M1): at the 5-second mark, the Xvfb screen
+/// contains at least one non-black pixel in the 640×480 window area, proving
+/// that SDL2's software renderer is actually blitting pixels via GDI→X11.
 ///
 /// Skipped gracefully if testsprite2.exe is absent from fixtures.
 #[test]
@@ -700,6 +767,10 @@ fn testsprite2_sdl2_gate1_smoke() {
     // Let it run for up to 15 seconds (Gate 1 target is 10 s of animation),
     // then kill it. SDL2 in headless mode may exit early on its own.
     let deadline = start + std::time::Duration::from_secs(15);
+    // Gate 2 pixel check: at 5 seconds testsprite2 has rendered ~300 frames.
+    // We sample the Xvfb display for non-black pixels to confirm GDI→X11 blit works.
+    let pixel_check_at = start + std::time::Duration::from_secs(5);
+    let mut gate2_pixels: Option<bool> = None;
     let mut exit_status: Option<std::process::ExitStatus> = None;
     let mut killed_by_deadline = false;
     loop {
@@ -709,7 +780,20 @@ fn testsprite2_sdl2_gate1_smoke() {
                 break;
             }
             Ok(None) => {
-                if std::time::Instant::now() >= deadline {
+                let now = std::time::Instant::now();
+                // Gate 2: sample pixels once at the 5-second mark.
+                if gate2_pixels.is_none() && now >= pixel_check_at {
+                    #[cfg(target_os = "linux")]
+                    {
+                        gate2_pixels = sample_display_pixels_99();
+                    }
+                    eprintln!(
+                        "gate2: pixel check at {:.1?} → {:?}",
+                        now - start,
+                        gate2_pixels
+                    );
+                }
+                if now >= deadline {
                     let _ = child.kill();
                     killed_by_deadline = true;
                     break;
@@ -800,6 +884,24 @@ fn testsprite2_sdl2_gate1_smoke() {
         "WS2 Gate 1 FAIL: process exited after only {elapsed:.1?} — \
          crashed or quit before 10-second gate.\nstderr: {stderr}"
     );
+
+    // Gate 2 (M1 — First Frame): Xvfb must show non-black pixels at 5 s.
+    //
+    // testsprite2 renders animated sprites onto a black background.  After
+    // 5 seconds of running the GDI→X11 BitBlt path must have written colored
+    // pixels to the Xvfb frame buffer.  If the screen is all-black, the
+    // DibSection→Pixmap sync (put_dib_to_pixmap) is broken.
+    //
+    // Skip gracefully when Python3/libX11 unavailable (returns None).
+    eprintln!("gate2: final pixel check result: {:?}", gate2_pixels);
+    if let Some(has_pixels) = gate2_pixels {
+        assert!(
+            has_pixels,
+            "WS2 Gate 2 / M1 FAIL: Xvfb screen all-black at 5 s — \
+             SDL2 is running but no pixels rendered. GDI→X11 BitBlt broken.\
+             \nelapsed: {elapsed:.1?}\nstderr:\n{stderr}"
+        );
+    }
 }
 
 /// `weave hello.exe` — CRT-linked MinGW binary, 41 imports across 8 DLLs.
