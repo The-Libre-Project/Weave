@@ -1418,6 +1418,159 @@ fn putty_m3_config_window_gate() {
     }
 }
 
+/// PuTTY M3 SSH connect gate — attempts a real TCP connection to a local sshd.
+///
+/// Prerequisites (set up by CI before running this test):
+///   - openssh-server installed, host keys generated, sshd running on port 2222
+///   - PasswordAuthentication=yes, UsePAM=no in sshd_config
+///
+/// PuTTY is invoked with:
+///   `weave putty.exe -ssh -P 2222 -l runner -pw "" -batch localhost`
+///
+/// `-batch` suppresses interactive prompts (host-key verification, password
+/// dialogs) so PuTTY drives straight into the SSH handshake without waiting
+/// for user input.
+///
+/// Gates:
+///   1. (hard) IAT resolution completes — "weave: imports resolved"
+///   2. (hard) TCP connect or name resolution was attempted — stderr contains
+///      "connect" or "getaddrinfo" or "WSAConnect" (proves SSH path entered)
+///   3. (diagnostic) WSA async-event stubs reached
+///
+/// 15-second timeout. Skipped gracefully if putty.exe is absent.
+#[test]
+fn putty_m3_ssh_connect_gate() {
+    if !cfg!(target_os = "linux") {
+        eprintln!("skipping putty_m3_ssh_connect_gate — requires Linux");
+        return;
+    }
+
+    let manifest = env!("CARGO_MANIFEST_DIR");
+    let fixture = format!("{manifest}/../tests/fixtures/bin/putty.exe");
+
+    if !std::path::Path::new(&fixture).exists() {
+        eprintln!("skipping: putty.exe not present in tests/fixtures/bin/ — putty_m3_ssh_connect_gate skipped");
+        return;
+    }
+
+    let weave_bin = env!("CARGO_BIN_EXE_weave");
+
+    let start = std::time::Instant::now();
+    let mut child = std::process::Command::new(weave_bin)
+        .arg(&fixture)
+        .arg("-ssh")
+        .arg("-P")
+        .arg("2222")
+        .arg("-l")
+        .arg("runner")
+        .arg("-pw")
+        .arg("")
+        .arg("-batch")
+        .arg("localhost")
+        .env("DISPLAY", ":99")
+        .stderr(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|e| panic!("failed to spawn weave on putty.exe (ssh connect gate): {e}"));
+
+    // Drain stderr concurrently to avoid 64 KB pipe blocking.
+    let stderr_pipe = child.stderr.take().expect("stderr was piped");
+    let stderr_shared = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let stderr_writer = std::sync::Arc::clone(&stderr_shared);
+    let drain_thread = std::thread::spawn(move || {
+        use std::io::Read;
+        let mut buf = Vec::new();
+        let mut pipe = stderr_pipe;
+        let _ = pipe.read_to_end(&mut buf);
+        *stderr_writer.lock().unwrap() = buf;
+    });
+
+    let deadline = start + std::time::Duration::from_secs(15);
+    let mut exit_status: Option<std::process::ExitStatus> = None;
+    let mut killed_by_deadline = false;
+
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                exit_status = Some(status);
+                break;
+            }
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    killed_by_deadline = true;
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err(e) => panic!("wait failed: {e}"),
+        }
+    }
+    let elapsed = start.elapsed();
+
+    drain_thread.join().expect("stderr drain thread panicked");
+    let stderr_bytes = stderr_shared.lock().unwrap().clone();
+    let stderr = String::from_utf8_lossy(&stderr_bytes);
+
+    eprintln!("putty_m3_ssh elapsed: {elapsed:.1?}");
+    eprintln!(
+        "putty_m3_ssh exit: {}",
+        if killed_by_deadline {
+            "killed by deadline".to_string()
+        } else {
+            exit_status
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "unknown".to_string())
+        }
+    );
+    eprintln!("--- putty_m3_ssh FULL STDERR BEGIN ---");
+    eprintln!("{stderr}");
+    eprintln!("--- putty_m3_ssh FULL STDERR END ---");
+
+    // Report unresolved imports for diagnosis.
+    eprintln!("--- putty_m3_ssh unresolved imports ---");
+    for line in stderr.lines().filter(|l| l.contains("unresolved import")) {
+        eprintln!("{line}");
+    }
+
+    // Gate 1 (hard): IAT patch must complete before the SSH stack is entered.
+    assert!(
+        stderr.contains("weave: imports resolved"),
+        "putty_m3_ssh Gate 1 FAIL: IAT patch did not complete — weave crashed before \
+         entry point.\nelapsed: {elapsed:.1?}\nstderr:\n{stderr}"
+    );
+
+    // Gate 2 (hard): TCP connect or name resolution must have been attempted.
+    // ws_connect and ws_getaddrinfo both log their function name to stderr.
+    // Seeing either proves PuTTY drove past the config dialog into the SSH path.
+    let tcp_attempted = stderr.contains("ws_connect")
+        || stderr.contains("ws_getaddrinfo")
+        || stderr.contains("WSAConnect")
+        || stderr.contains("getaddrinfo")
+        || stderr.contains("connect(");
+    assert!(
+        tcp_attempted,
+        "putty_m3_ssh Gate 2 FAIL: no TCP connect or name-resolution call observed. \
+         PuTTY did not reach the SSH connection path under Weave. \
+         First observable failure is in the FULL STDERR dump above.\n\
+         elapsed: {elapsed:.1?}\nstderr:\n{stderr}"
+    );
+
+    // Gate 3 (diagnostic): WSA async-event stubs reached — logged warn-only.
+    let wsa_async_hit = stderr.contains("WSACreateEvent")
+        || stderr.contains("WSAEventSelect")
+        || stderr.contains("WSAWaitForMultipleEvents")
+        || stderr.contains("WSAEnumNetworkEvents");
+    if wsa_async_hit {
+        eprintln!("putty_m3_ssh Gate 3: WSA async-event stubs reached — SSH socket path entered");
+    } else {
+        eprintln!(
+            "putty_m3_ssh Gate 3 WARN: no WSA async-event stub hit in stderr. \
+             TCP connect may be failing before the async event loop is set up."
+        );
+    }
+}
+
 /// `weave hello.exe` — CRT-linked MinGW binary, 41 imports across 8 DLLs.
 #[test]
 fn hello_crt_prints_hello_world() {
