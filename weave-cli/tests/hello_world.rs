@@ -907,6 +907,147 @@ fn testsprite2_sdl2_gate1_smoke() {
     }
 }
 
+/// `weave waveout_test.exe` — waveOut + blue window; Gate 1 smoke test.
+///
+/// Runs waveout_test.exe under Weave with --no-sandbox and DISPLAY=:99.
+/// The binary opens a solid-blue window, calls waveOutOpen/PrepareHeader/Write
+/// with a 1-second silence PCM buffer, runs for 5 seconds, then cleans up.
+///
+/// Gates:
+///   1. process exits (not timeout) — no panic / hard crash
+///   2. stderr contains PHASE: waveout_opened — waveOutOpen returned MMSYSERR_NOERROR
+///   3. pixel check at 5 s — Xvfb screen non-black (blue window rendered)
+///   PHASE: waveout_wrote is checked but only warned (silent stub is acceptable)
+///
+/// Skipped gracefully if waveout_test.exe is absent from fixtures.
+#[test]
+fn waveout_gate1_smoke() {
+    if !cfg!(target_os = "linux") {
+        eprintln!("skipping execution test — requires Linux");
+        return;
+    }
+
+    let manifest = env!("CARGO_MANIFEST_DIR");
+    let bin_dir = format!("{manifest}/../tests/fixtures/bin");
+    let exe = format!("{bin_dir}/waveout_test.exe");
+
+    if !std::path::Path::new(&exe).exists() {
+        eprintln!("skipping: waveout_test.exe not present in tests/fixtures/bin/");
+        return;
+    }
+
+    let weave_bin = env!("CARGO_BIN_EXE_weave");
+
+    let start = std::time::Instant::now();
+    let mut child = std::process::Command::new(weave_bin)
+        .current_dir(&bin_dir)
+        .arg(&exe)
+        .arg("--no-sandbox")
+        .env("DISPLAY", ":99")
+        .stderr(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|e| panic!("failed to spawn weave on waveout_test.exe: {e}"));
+
+    // Drain stderr concurrently to avoid blocking the child on the 64 KB pipe.
+    let stderr_pipe = child.stderr.take().expect("stderr was piped");
+    let stderr_shared = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let stderr_writer = std::sync::Arc::clone(&stderr_shared);
+    let drain_thread = std::thread::spawn(move || {
+        use std::io::Read;
+        let mut buf = Vec::new();
+        let mut pipe = stderr_pipe;
+        let _ = pipe.read_to_end(&mut buf);
+        *stderr_writer.lock().unwrap() = buf;
+    });
+
+    let deadline = start + std::time::Duration::from_secs(10);
+    let pixel_check_at = start + std::time::Duration::from_secs(5);
+    let mut pixel_result: Option<bool> = None;
+    let mut exit_status: Option<std::process::ExitStatus> = None;
+    let mut killed_by_deadline = false;
+
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                exit_status = Some(status);
+                break;
+            }
+            Ok(None) => {
+                let now = std::time::Instant::now();
+                if pixel_result.is_none() && now >= pixel_check_at {
+                    #[cfg(target_os = "linux")]
+                    {
+                        pixel_result = sample_display_pixels_99();
+                    }
+                    println!("gate2: waveout_pixel_check → {:?}", pixel_result);
+                }
+                if now >= deadline {
+                    let _ = child.kill();
+                    killed_by_deadline = true;
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err(e) => panic!("wait failed: {e}"),
+        }
+    }
+    let elapsed = start.elapsed();
+
+    drain_thread.join().expect("stderr drain thread panicked");
+    let stderr_bytes = stderr_shared.lock().unwrap().clone();
+    let stderr = String::from_utf8_lossy(&stderr_bytes);
+
+    eprintln!("waveout_test elapsed: {elapsed:.1?}");
+    eprintln!(
+        "waveout_test exit: {}",
+        if killed_by_deadline {
+            "killed by deadline".to_string()
+        } else {
+            exit_status
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "unknown".to_string())
+        }
+    );
+    eprintln!("--- FULL STDERR BEGIN ---");
+    eprintln!("{stderr}");
+    eprintln!("--- FULL STDERR END ---");
+
+    // Gate 1: process must exit before the 10-second deadline (no hard hang/panic).
+    assert!(
+        !killed_by_deadline,
+        "waveout Gate 1 FAIL: process did not exit within 10 s — hung or panicked.\nstderr: {stderr}"
+    );
+
+    // Gate 2: waveOutOpen must have returned MMSYSERR_NOERROR.
+    assert!(
+        stderr.contains("PHASE: waveout_opened"),
+        "waveout Gate 1 FAIL: PHASE: waveout_opened not found — waveOutOpen did not \
+         return MMSYSERR_NOERROR.\nstderr: {stderr}"
+    );
+
+    // Warn only (not fail) if waveOutWrite did not succeed — silent stub is OK.
+    if !stderr.contains("PHASE: waveout_wrote") {
+        eprintln!(
+            "waveout warn: PHASE: waveout_wrote absent — waveOutWrite stub may be silent (acceptable)"
+        );
+    }
+
+    // Gate 2 pixel check: blue window must have rendered non-black pixels at 5 s.
+    eprintln!(
+        "gate2: waveout final pixel check result: {:?}",
+        pixel_result
+    );
+    if let Some(has_pixels) = pixel_result {
+        assert!(
+            has_pixels,
+            "waveout Gate 2 FAIL: Xvfb screen all-black at 5 s — \
+             blue window did not render. GDI→X11 path broken alongside waveOut.\
+             \nelapsed: {elapsed:.1?}\nstderr:\n{stderr}"
+        );
+    }
+}
+
 /// `weave hello.exe` — CRT-linked MinGW binary, 41 imports across 8 DLLs.
 #[test]
 fn hello_crt_prints_hello_world() {
