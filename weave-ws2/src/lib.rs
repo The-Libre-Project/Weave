@@ -797,6 +797,108 @@ pub unsafe extern "win64" fn ws_inet_addr(cp: *const u8) -> u32 {
     u32::from_ne_bytes(parts)
 }
 
+// ── Winsock API: async-event stubs ───────────────────────────────────────────
+
+// WSA_INVALID_EVENT is the null/invalid WSAEVENT sentinel (0).
+const WSA_INVALID_EVENT: usize = 0;
+
+// Error codes used by async-event stubs.
+const WSAEINVAL: i32 = 10022;
+const WSA_WAIT_FAILED: u32 = 0xFFFF_FFFF;
+const WSA_WAIT_EVENT_0: u32 = 0;
+
+/// WSACreateEvent — create a manual-reset, initially-unsignaled socket event object.
+///
+/// Wine ref: dlls/ws2_32/socket.c:3988 — WSACreateEvent calls CreateEventW(NULL,
+/// TRUE, FALSE, NULL); returns the resulting HANDLE as WSAEVENT.
+/// Stub: we have no Win32 HANDLE infrastructure yet; return a fake non-null
+/// sentinel (1) so callers treat it as valid. Callers that pass it to
+/// WSAWaitForMultipleEvents will get WSA_WAIT_EVENT_0 back immediately.
+pub extern "win64" fn wsa_create_event() -> usize {
+    // Any value != WSA_INVALID_EVENT (0) is accepted as a valid WSAEVENT by callers.
+    // Return 1 as a stable fake handle.
+    1
+}
+
+/// WSACloseEventObject — close a socket event object created by WSACreateEvent.
+///
+/// Wine ref: dlls/ws2_32/socket.c:4000 — WSACloseEvent calls CloseHandle(event);
+/// returns BOOL. Stub: nothing to close; always succeeds.
+pub extern "win64" fn wsa_close_event_object(event: usize) -> i32 {
+    if event == WSA_INVALID_EVENT {
+        set_last_error(WSAEINVAL);
+        return 0; // FALSE
+    }
+    1 // TRUE
+}
+
+/// WSAEventSelect — associate network events on a socket with a WSAEVENT object.
+///
+/// Wine ref: dlls/ws2_32/socket.c:3885 — WSAEventSelect(SOCKET s, WSAEVENT event,
+/// LONG mask) uses IOCTL_AFD_EVENT_SELECT via NtDeviceIoControlFile. The socket
+/// enters non-blocking mode and network events are posted to the event object.
+/// Stub: no-op; PuTTY's SSH engine will call this before any I/O; returning 0
+/// (success) allows the SSH handshake path to continue to WSAWaitForMultipleEvents.
+///
+/// # Safety
+/// `s` must be a valid socket fd. `event` is opaque.
+pub unsafe extern "win64" fn wsa_event_select(s: usize, event: usize, mask: i32) -> i32 {
+    // Validate basic args — Wine returns WSAEINVAL for null/bad socket.
+    let _ = (s, event, mask); // suppress unused warnings
+    0 // success
+}
+
+/// WSAWaitForMultipleEvents — wait on one or more WSAEVENT objects.
+///
+/// Wine ref: include/winsock2.h:1199 —
+/// DWORD WINAPI WSAWaitForMultipleEvents(DWORD cEvents, const WSAEVENT *lphEvents,
+///     BOOL fWaitAll, DWORD dwTimeout, BOOL fAlertable);
+/// Returns WSA_WAIT_EVENT_0 + index of first signalled event, or
+/// WSA_WAIT_FAILED (0xFFFFFFFF) on error. Stub: return WSA_WAIT_EVENT_0 (0)
+/// immediately (first event is "signalled") so callers proceed to
+/// WSAEnumNetworkEvents without blocking.
+///
+/// # Safety
+/// `lph_events` may be null (only checked, never dereferenced beyond count).
+pub unsafe extern "win64" fn wsa_wait_for_multiple_events(
+    c_events: u32,
+    _lph_events: *const usize,
+    _f_wait_all: i32,
+    _dw_timeout: u32,
+    _f_alertable: i32,
+) -> u32 {
+    if c_events == 0 {
+        set_last_error(WSAEINVAL);
+        return WSA_WAIT_FAILED;
+    }
+    // Signal event 0 immediately — callers enter their WSAEnumNetworkEvents path.
+    WSA_WAIT_EVENT_0
+}
+
+/// WSAEnumNetworkEvents — retrieve and reset socket network events.
+///
+/// Wine ref: dlls/ws2_32/socket.c:3815 —
+/// int WINAPI WSAEnumNetworkEvents(SOCKET s, WSAEVENT event, WSANETWORKEVENTS *ret_events)
+/// uses IOCTL_AFD_GET_EVENTS to read which events fired and clears them.
+/// WSANETWORKEVENTS layout: lNetworkEvents (LONG) + iErrorCode[FD_MAX_EVENTS] (10 ints).
+/// Stub: zero out ret_events (no events fired), return 0 (success). Callers will
+/// see an empty event mask and loop back to WSAWaitForMultipleEvents. This is the
+/// correct safe behaviour: no events available, no crash.
+///
+/// # Safety
+/// `lp_network_events` must be null or point to a writable WSANETWORKEVENTS (44 bytes).
+pub unsafe extern "win64" fn wsa_enum_network_events(
+    _s: usize,
+    _event: usize,
+    lp_network_events: *mut u8,
+) -> i32 {
+    if !lp_network_events.is_null() {
+        // WSANETWORKEVENTS = LONG lNetworkEvents (4) + int iErrorCode[10] (40) = 44 bytes.
+        std::ptr::write_bytes(lp_network_events, 0, 44);
+    }
+    0 // success
+}
+
 // ── DLL Resolver ─────────────────────────────────────────────────────────────
 
 /// Resolve a ws2_32.dll or wsock32.dll import to a function pointer.
@@ -832,6 +934,12 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "ntohs" => Some(ws_ntohs as *const () as usize),
         "ntohl" => Some(ws_ntohl as *const () as usize),
         "inet_addr" => Some(ws_inet_addr as *const () as usize),
+        // Async-event stubs (M3 — PuTTY SSH engine).
+        "WSACreateEvent" => Some(wsa_create_event as *const () as usize),
+        "WSACloseEventObject" => Some(wsa_close_event_object as *const () as usize),
+        "WSAEventSelect" => Some(wsa_event_select as *const () as usize),
+        "WSAWaitForMultipleEvents" => Some(wsa_wait_for_multiple_events as *const () as usize),
+        "WSAEnumNetworkEvents" => Some(wsa_enum_network_events as *const () as usize),
         _ => None,
     }
 }

@@ -1288,6 +1288,136 @@ fn nxengine_gate1_smoke() {
     }
 }
 
+/// `weave putty.exe -ssh localhost 22` — PuTTY SSH engine; M3 Gate 1.
+///
+/// Runs PuTTY with `-ssh localhost 22` under Weave with DISPLAY=:99 (Xvfb).
+/// The goal is to get PuTTY past IAT resolution and into its SSH init path,
+/// then report the first observable failure.
+///
+/// Gates:
+///   1. IAT resolution completes ("weave: imports resolved")
+///   2. WSA async-event stubs reached — stderr contains at least one of
+///      "WSACreateEvent", "WSAEventSelect", or "WSAWaitForMultipleEvents"
+///      (diagnostic — logged even if the stub path is silent, as a warn-only gate).
+///
+/// 10-second timeout: PuTTY will not exit on its own (interactive GUI);
+/// we kill after 10 s and inspect what was logged to stderr.
+///
+/// Skipped gracefully if putty.exe is absent from fixtures.
+#[test]
+fn putty_m3_config_window_gate() {
+    if !cfg!(target_os = "linux") {
+        eprintln!("skipping putty_m3_config_window_gate — requires Linux");
+        return;
+    }
+
+    let manifest = env!("CARGO_MANIFEST_DIR");
+    let fixture = format!("{manifest}/../tests/fixtures/bin/putty.exe");
+
+    if !std::path::Path::new(&fixture).exists() {
+        eprintln!("skipping: putty.exe not present in tests/fixtures/bin/");
+        return;
+    }
+
+    let weave_bin = env!("CARGO_BIN_EXE_weave");
+
+    let start = std::time::Instant::now();
+    let mut child = std::process::Command::new(weave_bin)
+        .arg(&fixture)
+        .arg("-ssh")
+        .arg("localhost")
+        .arg("22")
+        .env("DISPLAY", ":99")
+        .stderr(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|e| panic!("failed to spawn weave on putty.exe: {e}"));
+
+    // Drain stderr concurrently to avoid 64 KB pipe blocking.
+    let stderr_pipe = child.stderr.take().expect("stderr was piped");
+    let stderr_shared = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let stderr_writer = std::sync::Arc::clone(&stderr_shared);
+    let drain_thread = std::thread::spawn(move || {
+        use std::io::Read;
+        let mut buf = Vec::new();
+        let mut pipe = stderr_pipe;
+        let _ = pipe.read_to_end(&mut buf);
+        *stderr_writer.lock().unwrap() = buf;
+    });
+
+    let deadline = start + std::time::Duration::from_secs(10);
+    let mut exit_status: Option<std::process::ExitStatus> = None;
+    let mut killed_by_deadline = false;
+
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                exit_status = Some(status);
+                break;
+            }
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    killed_by_deadline = true;
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err(e) => panic!("wait failed: {e}"),
+        }
+    }
+    let elapsed = start.elapsed();
+
+    drain_thread.join().expect("stderr drain thread panicked");
+    let stderr_bytes = stderr_shared.lock().unwrap().clone();
+    let stderr = String::from_utf8_lossy(&stderr_bytes);
+
+    eprintln!("putty_m3 elapsed: {elapsed:.1?}");
+    eprintln!(
+        "putty_m3 exit: {}",
+        if killed_by_deadline {
+            "killed by deadline".to_string()
+        } else {
+            exit_status
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "unknown".to_string())
+        }
+    );
+    eprintln!("--- putty_m3 FULL STDERR BEGIN ---");
+    eprintln!("{stderr}");
+    eprintln!("--- putty_m3 FULL STDERR END ---");
+
+    // Report unresolved imports for diagnosis.
+    eprintln!("--- putty_m3 unresolved imports ---");
+    for line in stderr.lines().filter(|l| l.contains("unresolved import")) {
+        eprintln!("{line}");
+    }
+
+    // Gate 1 (hard): IAT patch must complete before SSH init can be reached.
+    assert!(
+        stderr.contains("weave: imports resolved"),
+        "putty_m3 Gate 1 FAIL: IAT patch did not complete — weave crashed before \
+         entry point.\nelapsed: {elapsed:.1?}\nstderr:\n{stderr}"
+    );
+
+    // Gate 2 (diagnostic / warn-only): report whether WSA async-event stubs were hit.
+    // PuTTY's SSH engine calls WSAEventSelect immediately after socket creation.
+    // If these lines are absent, PuTTY crashed before reaching the SSH socket path.
+    let wsa_async_hit = stderr.contains("WSACreateEvent")
+        || stderr.contains("WSAEventSelect")
+        || stderr.contains("WSAWaitForMultipleEvents")
+        || stderr.contains("WSAEnumNetworkEvents");
+    if wsa_async_hit {
+        eprintln!("putty_m3 Gate 2: WSA async-event stubs reached — SSH socket path entered");
+    } else {
+        eprintln!(
+            "putty_m3 Gate 2 WARN: no WSA async-event stub hit detected in stderr. \
+             PuTTY may have failed before reaching SSH socket init. \
+             First observable failure is reported above in the FULL STDERR dump."
+        );
+    }
+}
+
 /// `weave hello.exe` — CRT-linked MinGW binary, 41 imports across 8 DLLs.
 #[test]
 fn hello_crt_prints_hello_world() {
