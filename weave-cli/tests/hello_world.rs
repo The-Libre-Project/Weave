@@ -1598,6 +1598,7 @@ fn putty_m3_plink_gate() {
 
     let start = std::time::Instant::now();
     let mut child = std::process::Command::new(weave_bin)
+        .arg("--no-sandbox")
         .arg(&fixture)
         .arg("-batch")
         .arg("-pw")
