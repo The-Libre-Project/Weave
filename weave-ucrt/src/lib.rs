@@ -956,8 +956,14 @@ pub unsafe extern "win64" fn ucrt_longjmp(_buf: *mut c_void, _val: i32) -> ! {
 pub extern "win64" fn ucrt_mb_cur_max_func() -> usize {
     1
 }
+/// localeconv: return pointer to locale formatting structure.
+///
+/// SDL2 (MinGW) calls localeconv() to get the decimal separator and
+/// numeric formatting. Returning NULL causes SDL2 to crash when it
+/// dereferences the lconv* pointer. Delegate to the host libc so callers
+/// get a valid, fully-populated struct lconv (decimal_point = "." etc.).
 pub extern "win64" fn ucrt_localeconv() -> *const c_void {
-    std::ptr::null()
+    unsafe { libc::localeconv() as *const c_void }
 }
 /// setlocale — set or query the locale for the given category.
 ///
