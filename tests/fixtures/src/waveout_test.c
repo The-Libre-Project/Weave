@@ -13,7 +13,13 @@
 
 #include <windows.h>
 #include <mmsystem.h>
-#include <stdio.h>
+
+/* Use WriteFile+GetStdHandle for logging — avoids MinGW static CRT (_lock stub crash) */
+#define LOG(msg) do { \
+    DWORD _written; \
+    WriteFile(GetStdHandle(STD_ERROR_HANDLE), msg "\n", \
+              (DWORD)(sizeof(msg)), &_written, NULL); \
+} while(0)
 
 /* 1 second of stereo 16-bit 44100 Hz silence */
 #define PCM_SAMPLES   44100
@@ -34,7 +40,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         HDC hdc = BeginPaint(hwnd, &ps);
 
         /* Fill background solid blue — pixel-check target for Gate 2 */
-        RECT rc = {0, 0, 640, 480};
+        RECT rc;
+        GetClientRect(hwnd, &rc);
         HBRUSH blue = CreateSolidBrush(RGB(0, 0, 255));
         FillRect(hdc, &rc, blue);
         DeleteObject(blue);
@@ -70,7 +77,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR lpCmd, int nShow)
     wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
 
     if (!RegisterClassW(&wc)) {
-        fprintf(stderr, "waveout_test: RegisterClassW failed\n");
+        LOG("waveout_test: RegisterClassW failed");
         ExitProcess(1);
     }
 
@@ -82,11 +89,12 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR lpCmd, int nShow)
     );
 
     if (!hwnd) {
-        fprintf(stderr, "waveout_test: CreateWindowExW failed\n");
+        LOG("waveout_test: CreateWindowExW failed");
         ExitProcess(1);
     }
 
     ShowWindow(hwnd, nShow ? nShow : SW_SHOWNORMAL);
+    InvalidateRect(hwnd, NULL, TRUE);
     UpdateWindow(hwnd);
 
     /* --- waveOut ---------------------------------------------------------- */
@@ -109,7 +117,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR lpCmd, int nShow)
     );
 
     if (rc == MMSYSERR_NOERROR) {
-        fprintf(stderr, "PHASE: waveout_opened\n");
+        LOG("PHASE: waveout_opened");
 
         /* Prepare a 1-second silence buffer */
         ZeroMemory(&g_waveHdr, sizeof(g_waveHdr));
@@ -120,15 +128,15 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR lpCmd, int nShow)
         if (rc == MMSYSERR_NOERROR) {
             rc = waveOutWrite(g_hWaveOut, &g_waveHdr, sizeof(WAVEHDR));
             if (rc == MMSYSERR_NOERROR) {
-                fprintf(stderr, "PHASE: waveout_wrote\n");
+                LOG("PHASE: waveout_wrote");
             } else {
-                fprintf(stderr, "waveout_test: waveOutWrite returned %u\n", rc);
+                LOG("waveout_test: waveOutWrite failed");
             }
         } else {
-            fprintf(stderr, "waveout_test: waveOutPrepareHeader returned %u\n", rc);
+            LOG("waveout_test: waveOutPrepareHeader failed");
         }
     } else {
-        fprintf(stderr, "waveout_test: waveOutOpen returned %u (not MMSYSERR_NOERROR)\n", rc);
+        LOG("waveout_test: waveOutOpen failed");
     }
 
     /* --- Message loop (5 seconds, PeekMessage-based to avoid WM_TIMER dependency) --- */
@@ -152,7 +160,7 @@ cleanup:
             waveOutUnprepareHeader(g_hWaveOut, &g_waveHdr, sizeof(WAVEHDR));
         }
         waveOutClose(g_hWaveOut);
-        fprintf(stderr, "PHASE: waveout_closed\n");
+        LOG("PHASE: waveout_closed");
     }
 
     ExitProcess(0);
