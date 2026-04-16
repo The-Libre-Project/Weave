@@ -29,7 +29,7 @@ mod inner {
     use x11rb::connection::Connection;
     use x11rb::protocol::xproto::{
         AtomEnum, ConfigureNotifyEvent, ConfigureWindowAux, ConnectionExt, CreateGCAux,
-        CreateWindowAux, EventMask, Gcontext, PropMode, Segment, Window, WindowClass,
+        CreateWindowAux, EventMask, Gcontext, ImageFormat, PropMode, Segment, Window, WindowClass,
     };
     use x11rb::protocol::Event;
     use x11rb::rust_connection::RustConnection;
@@ -427,6 +427,91 @@ mod inner {
             .copy_area(src, dst, gc_id, src_x, src_y, dst_x, dst_y, width, height);
         let _ = g.conn.free_gc(gc_id);
         let _ = g.conn.sync();
+    }
+
+    /// Upload DIB pixel data from a heap buffer to an X11 Pixmap.
+    ///
+    /// Called from BitBlt when the source DC has a DibSection selected.  SDL2's
+    /// software renderer writes sprites into the DibSection's CPU-side buffer;
+    /// this call syncs those pixels to the server-side Pixmap before XCopyArea.
+    ///
+    /// Wine ref: dlls/winex11.drv/bitmap.c — X11DRV_PutImage uploads DIB data to
+    /// the server Pixmap with XPutImage, then XCopyArea transfers to the window.
+    ///
+    /// Format: 32bpp DIB is BGRA; X11 depth-24 expects BGRX — the A byte is
+    /// ignored by the X server.  24bpp DIB is BGR; expanded to BGRX (4 bytes/px).
+    /// Stride = ceil(width × bpp / 32) × 4 bytes (standard Windows DIB padding).
+    ///
+    /// # Safety
+    /// `bits_ptr` must be a valid pointer to at least stride × height bytes.
+    pub unsafe fn put_dib_to_pixmap(
+        pixmap: u32,
+        width: u32,
+        height: u32,
+        bits_ptr: usize,
+        bpp: u16,
+    ) {
+        if pixmap == 0 || width == 0 || height == 0 || bits_ptr == 0 {
+            return;
+        }
+        let x11 = match x11() {
+            Some(m) => m,
+            None => return,
+        };
+        let g = match lock_x11(x11) {
+            Some(g) => g,
+            None => return,
+        };
+
+        // Recompute stride (Windows DIB rows are 4-byte aligned).
+        let stride = ((u64::from(width) * u64::from(bpp)).div_ceil(32) * 4) as usize;
+
+        let pixels: Vec<u8> = match bpp {
+            32 => {
+                // BGRA → BGRX: pass bytes through; X11 ignores the 4th byte at depth 24.
+                let size = stride * height as usize;
+                unsafe { std::slice::from_raw_parts(bits_ptr as *const u8, size) }.to_vec()
+            }
+            24 => {
+                // BGR → BGRX: expand from 3 to 4 bytes per pixel, skip stride padding.
+                let src = unsafe {
+                    std::slice::from_raw_parts(bits_ptr as *const u8, stride * height as usize)
+                };
+                let mut out = vec![0u8; (width * height * 4) as usize];
+                for row in 0..height as usize {
+                    let row_src = &src[row * stride..row * stride + width as usize * 3];
+                    for (col, chunk) in row_src.chunks_exact(3).enumerate() {
+                        let base = (row * width as usize + col) * 4;
+                        out[base] = chunk[0]; // B
+                        out[base + 1] = chunk[1]; // G
+                        out[base + 2] = chunk[2]; // R
+                        out[base + 3] = 0xFF; // X (padding)
+                    }
+                }
+                out
+            }
+            _ => return,
+        };
+
+        let gc_id: Gcontext = match g.conn.generate_id() {
+            Ok(id) => id,
+            Err(_) => return,
+        };
+        let _ = g.conn.create_gc(gc_id, pixmap, &CreateGCAux::new());
+        let _ = g.conn.put_image(
+            ImageFormat::Z_PIXMAP,
+            pixmap,
+            gc_id,
+            width as u16,
+            height as u16,
+            0, // dst_x
+            0, // dst_y
+            0, // left_pad
+            g.depth,
+            &pixels,
+        );
+        let _ = g.conn.free_gc(gc_id);
+        let _ = g.conn.flush();
     }
 
     /// Destroy an X11 window.
@@ -1148,7 +1233,8 @@ mod inner {
 pub use inner::{
     colorref_to_pixel, configure_window, copy_area, create_pixmap, create_window, destroy_window,
     draw_filled_rect, draw_line, draw_rect_outline, draw_text, draw_text_utf16, free_pixmap,
-    is_available, poll_event, screen_size, set_title, show_window, system_dpi, wait_event,
+    is_available, poll_event, put_dib_to_pixmap, screen_size, set_title, show_window, system_dpi,
+    wait_event,
 };
 
 // ── No-op stubs for non-Linux platforms (macOS dev builds) ───────────────────
@@ -1251,5 +1337,15 @@ pub fn draw_text_utf16(
     _px_size: f32,
     _fg: u32,
     _bg: u32,
+) {
+}
+
+#[cfg(not(target_os = "linux"))]
+pub unsafe fn put_dib_to_pixmap(
+    _pixmap: u32,
+    _width: u32,
+    _height: u32,
+    _bits_ptr: usize,
+    _bpp: u16,
 ) {
 }

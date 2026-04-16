@@ -843,6 +843,37 @@ pub extern "win64" fn bit_blt(
     if rop != defs::SRCCOPY {
         return 1; // TODO: other ROP codes
     }
+    // If the source DC has a DibSection selected, upload its CPU-side pixel
+    // buffer to the server-side Pixmap before XCopyArea.  SDL2's software
+    // renderer writes directly into the DibSection heap buffer; without this
+    // sync the Pixmap contains only the zeroed initial state.
+    //
+    // Wine ref: dlls/winex11.drv/bitmap.c — X11DRV_PutImage syncs DIB→Pixmap.
+    let dib_info: Option<(u32, u32, usize, u16)> = dc::with(hdc_src, |dc| {
+        let bmp = dc.selected_bitmap;
+        if bmp == 0 {
+            return None;
+        }
+        objects::get(bmp, |kind| {
+            if let objects::GdiKind::DibSection {
+                width,
+                height,
+                bits_ptr,
+                bpp,
+            } = kind
+            {
+                Some((*width, *height, *bits_ptr, *bpp))
+            } else {
+                None
+            }
+        })
+        .flatten()
+    });
+    if let Some((dib_w, dib_h, bits_ptr, bpp)) = dib_info {
+        unsafe {
+            weave_user32::backend::put_dib_to_pixmap(src_draw, dib_w, dib_h, bits_ptr, bpp);
+        }
+    }
     weave_user32::backend::copy_area(
         src_draw, dst_draw, x1 as i16, y1 as i16, x as i16, y as i16, cx as u16, cy as u16,
     );
