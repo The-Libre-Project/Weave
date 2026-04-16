@@ -1056,7 +1056,7 @@ fn waveout_gate1_smoke() {
 /// SDL2.dll must be in the same directory as the exe (tests/fixtures/bin/SDL2.dll).
 ///
 /// Gates:
-///   1. process exits within 12 s — no panic / hard crash
+///   1. process exits within 70 s — no panic / hard crash (M2: 60s stability)
 ///   2. stderr contains PHASE: sdl2_audio_init — SDL_Init succeeded
 ///   3. stderr contains PHASE: sdl2_audio_opened — SDL_OpenAudio returned 0 (waveOut stubs work)
 ///   4. pixel check at 5 s — Xvfb screen non-black (SDL2 software renderer working)
@@ -1106,7 +1106,7 @@ fn sdl2_audio_gate1_smoke() {
         *stderr_writer.lock().unwrap() = buf;
     });
 
-    let deadline = start + std::time::Duration::from_secs(12);
+    let deadline = start + std::time::Duration::from_secs(70);
     let pixel_check_at = start + std::time::Duration::from_secs(5);
     let mut pixel_result: Option<bool> = None;
     let mut exit_status: Option<std::process::ExitStatus> = None;

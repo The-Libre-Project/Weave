@@ -2,7 +2,7 @@
  * sdl2_audio_test.c — SDL2 video + audio integration test for Weave M2.
  *
  * Initialises SDL2 video and audio, opens a SDL_OpenAudio PCM device, renders
- * colored rectangles each frame for 5 seconds, then cleans up and exits.
+ * colored rectangles each frame for 60 seconds, then cleans up and exits.
  * PHASE markers written to stderr so they appear in cargo test --nocapture.
  *
  * Compile:
@@ -77,7 +77,7 @@ int main(int argc, char *argv[])
         LOG("sdl2_audio_test: SDL_OpenAudio failed (non-fatal)");
     }
 
-    /* --- Game loop (5 seconds) --------------------------------------------- */
+    /* --- Game loop (60 seconds — M2 stability gate) -------------------------- */
     Uint32 start      = SDL_GetTicks();
     int    loop_logged = 0;
 
@@ -105,8 +105,8 @@ int main(int argc, char *argv[])
             loop_logged = 1;
         }
 
-        /* 5-second run limit */
-        if (ticks - start >= 5000) break;
+        /* 60-second run limit — M2 stability criterion */
+        if (ticks - start >= 60000) break;
 
         SDL_Delay(16); /* ~60 fps */
     }
