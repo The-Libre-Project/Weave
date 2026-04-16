@@ -10,6 +10,31 @@
 
 use libc::c_void;
 
+// ── Linux x86-64 ABI helpers ──────────────────────────────────────────────────
+//
+// Linux x86-64 va_list layout (SysV ABI §3.5.7).  Used to reconstruct a Linux
+// va_list from a Windows-x64 va_list pointer so we can delegate to vsnprintf.
+//
+// Windows x64 va_list is a char* pointing to a contiguous 8-byte-aligned arg
+// spill area.  Setting gp_offset=48 and fp_offset=176 marks all registers
+// exhausted, so vsnprintf reads every argument from overflow_arg_area — which
+// is exactly the Windows arg layout.
+#[repr(C)]
+struct VaListTag {
+    gp_offset: u32,                 // 48 → all 6 GP regs exhausted
+    fp_offset: u32,                 // 176 → all 8 XMM regs exhausted (48 + 8×16)
+    overflow_arg_area: *mut c_void, // Windows va_list pointer goes here
+    reg_save_area: *mut c_void,     // null (no GP/FP reg save needed)
+}
+
+extern "C" {
+    // Linux x86-64: va_list is *__va_list_tag — passed as *mut VaListTag.
+    fn vsnprintf(s: *mut u8, n: usize, format: *const u8, ap: *mut VaListTag) -> i32;
+    // POSIX wchar classification (wctype_t is unsigned long = u64 on Linux).
+    fn iswctype(c: u32, type_: u64) -> i32;
+    fn wctype(name: *const libc::c_char) -> u64;
+}
+
 // ── Heap ──────────────────────────────────────────────────────────────────────
 
 /// # Safety
@@ -145,6 +170,32 @@ pub unsafe extern "win64" fn ucrt_strchr(s: *const u8, c: i32) -> *mut u8 {
 /// `s` must be a valid null-terminated byte string. Caller must free the returned pointer with `ucrt_free`.
 pub unsafe extern "win64" fn ucrt_strdup(s: *const u8) -> *mut u8 {
     unsafe { libc::strdup(s as _) as *mut u8 }
+}
+
+/// _wcsdup — duplicate a wide (UTF-16LE) string.
+///
+/// libc::wcsdup cannot be used here: on Linux wchar_t is 4 bytes but Windows
+/// WCHAR is 2 bytes, so wcsdup would mis-count.  We count u16 units manually,
+/// malloc (len+1)*2 bytes, and copy — identical to the MSVCRT behavior.
+///
+/// # Safety
+/// `s` must be a valid null-terminated UTF-16LE string, or null.
+/// Caller must free the returned pointer with `ucrt_free` / `free`.
+pub unsafe extern "win64" fn ucrt_wcsdup(s: *const u16) -> *mut u16 {
+    if s.is_null() {
+        return std::ptr::null_mut();
+    }
+    let mut len = 0usize;
+    while unsafe { *s.add(len) } != 0 {
+        len += 1;
+    }
+    let size = (len + 1) * std::mem::size_of::<u16>();
+    let buf = unsafe { libc::malloc(size) } as *mut u16;
+    if buf.is_null() {
+        return std::ptr::null_mut();
+    }
+    unsafe { std::ptr::copy_nonoverlapping(s, buf, len + 1) };
+    buf
 }
 
 /// # Safety
@@ -782,15 +833,42 @@ pub extern "win64" fn ucrt_stdio_common_vfprintf(
     0
 }
 
-pub extern "win64" fn ucrt_stdio_common_vsprintf(
+/// __stdio_common_vsprintf — core sprintf dispatch used by UCRT and MinGW CRT.
+///
+/// Implementation: Windows x64 va_list is a char* into a contiguous 8-byte
+/// argument spill area.  We construct a Linux x86-64 va_list with gp_offset=48
+/// and fp_offset=176 (all registers exhausted) so vsnprintf reads every arg
+/// from overflow_arg_area, which maps exactly onto the Windows arg layout.
+/// Integer, pointer, and double (promoted float) args are all 8 bytes in both
+/// ABIs when spilled to the overflow area.
+///
+/// # Safety
+/// `buf` must be writable for `buf_count` bytes if non-null.
+/// `format` must be a valid null-terminated C format string.
+/// `args` must be a valid Windows-x64 va_list for the given format.
+pub unsafe extern "win64" fn ucrt_stdio_common_vsprintf(
     _options: u64,
-    _buf: *mut u8,
-    _buf_count: usize,
-    _format: *const u8,
+    buf: *mut u8,
+    buf_count: usize,
+    format: *const u8,
     _locale: *const c_void,
-    _args: *mut c_void,
+    args: *mut c_void,
 ) -> i32 {
-    0
+    if format.is_null() {
+        return -1;
+    }
+    let mut va_tag = VaListTag {
+        gp_offset: 48,  // 6 GP regs × 8 bytes = 48 → all exhausted
+        fp_offset: 176, // 48 + 8 XMM regs × 16 bytes = 176 → all exhausted
+        overflow_arg_area: args,
+        reg_save_area: std::ptr::null_mut(),
+    };
+    if buf.is_null() || buf_count == 0 {
+        // Count-only mode: return number of chars that would be written.
+        unsafe { vsnprintf(std::ptr::null_mut(), 0, format, &mut va_tag) }
+    } else {
+        unsafe { vsnprintf(buf, buf_count, format, &mut va_tag) }
+    }
 }
 
 /// # Safety
@@ -1837,6 +1915,81 @@ pub extern "win64" fn ucrt_terminate() -> ! {
     unsafe { libc::abort() }
 }
 
+// ── Sprint A: confirmed bug fixes ─────────────────────────────────────────────
+
+/// _isatty — test whether a CRT fd refers to a terminal.
+///
+/// SDL2 and MinGW CRT startup call _isatty to decide buffering mode.
+/// On Linux under Weave the CRT fd table is not yet implemented, so we
+/// conservatively return 0 (not a terminal) for all fds.  This avoids
+/// the previous void-stub behaviour that returned garbage in RAX.
+pub extern "win64" fn ucrt_isatty(_fd: i32) -> i32 {
+    0
+}
+
+/// iswctype — test if a wide character belongs to a character class.
+///
+/// Delegates to Linux libc iswctype.  On Linux wctype_t is u64; Windows
+/// passes a u32-truncated value which we zero-extend — safe because glibc
+/// wctype() return values fit in 16 bits.
+pub extern "win64" fn ucrt_iswctype(c: u32, desc: u64) -> i32 {
+    unsafe { iswctype(c, desc) }
+}
+
+/// wctype — return character-class descriptor for a named class.
+///
+/// Delegates to Linux libc wctype.  The returned u64 will be truncated
+/// to u32 by the Windows caller, but glibc values are small and lossless.
+///
+/// # Safety
+/// `name` must be a valid null-terminated ASCII string.
+pub unsafe extern "win64" fn ucrt_wctype_fn(name: *const u8) -> u64 {
+    unsafe { wctype(name as *const libc::c_char) }
+}
+
+/// strftime — format a broken-down time into a string.
+///
+/// Delegates to libc strftime.  Windows struct tm and POSIX struct tm share
+/// the same 9 standard fields at the same offsets on x86-64, so the pointer
+/// can be passed directly.  Format codes using the glibc-only tm_gmtoff /
+/// tm_zone fields (%z, %Z) may produce empty output — acceptable for Sprint A.
+///
+/// # Safety
+/// `s` must be writable for `max` bytes. `format` must be null-terminated.
+/// `tm` must point to a valid Windows struct tm (at minimum 9 int fields).
+pub unsafe extern "win64" fn ucrt_strftime(
+    s: *mut u8,
+    max: usize,
+    format: *const u8,
+    tm: *const c_void,
+) -> usize {
+    if s.is_null() || max == 0 || format.is_null() || tm.is_null() {
+        return 0;
+    }
+    unsafe {
+        libc::strftime(
+            s as *mut libc::c_char,
+            max,
+            format as *const libc::c_char,
+            tm as *const libc::tm,
+        )
+    }
+}
+
+/// wcsftime — wide-character strftime.
+///
+/// Not delegated to libc: Linux wcsftime uses 4-byte wchar_t while Windows
+/// uses 2-byte WCHAR.  Returns 0 (empty output) which is safe and prevents
+/// the previous garbage-in-RAX from the ucrt_cexit alias.
+pub extern "win64" fn ucrt_wcsftime(
+    _s: *mut u16,
+    _max: usize,
+    _format: *const u16,
+    _tm: *const c_void,
+) -> usize {
+    0
+}
+
 // ── Named stubs for previously catch-all functions ────────────────────────────
 // Each function gets its own stub so the log line names it.  The log uses
 // libc::write so it is guaranteed to flush before any potential abort.
@@ -1937,7 +2090,8 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "wcscoll" | "wcsxfrm" => stub!(ucrt_wcsicmp as unsafe extern "win64" fn(_, _) -> _),
         "towlower" => stub!(ucrt_towlower as extern "win64" fn(_) -> _),
         "towupper" => stub!(ucrt_towupper as extern "win64" fn(_) -> _),
-        "iswctype" | "wctype" => stub!(ucrt_wctob as unsafe extern "win64" fn(_) -> _),
+        "iswctype" => stub!(ucrt_iswctype as extern "win64" fn(_, _) -> _),
+        "wctype" => stub!(ucrt_wctype_fn as unsafe extern "win64" fn(_) -> _),
         // process
         "exit" => stub!(ucrt_exit as extern "win64" fn(_) -> !),
         "_exit" => stub!(ucrt__exit as extern "win64" fn(_) -> !),
@@ -1993,7 +2147,7 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
             stub!(ucrt_stdio_common_vfprintf as extern "win64" fn(_, _, _, _, _) -> _)
         }
         "__stdio_common_vsprintf" | "__stdio_common_vswprintf" => {
-            stub!(ucrt_stdio_common_vsprintf as extern "win64" fn(_, _, _, _, _, _) -> _)
+            stub!(ucrt_stdio_common_vsprintf as unsafe extern "win64" fn(_, _, _, _, _, _) -> _)
         }
         "_iob" => Some(iob_data_addr()),
         "fputc" => Some(ms_fputc as unsafe extern "win64" fn(_, _) -> _ as *const () as usize),
@@ -2068,7 +2222,8 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "isupper" => stub!(ucrt_isupper as extern "win64" fn(_) -> _),
         "islower" => stub!(ucrt_islower as extern "win64" fn(_) -> _),
         "isprint" => stub!(ucrt_isprint as extern "win64" fn(_) -> _),
-        "strftime" | "wcsftime" => stub!(ucrt_cexit as extern "win64" fn()),
+        "strftime" => stub!(ucrt_strftime as unsafe extern "win64" fn(_, _, _, _) -> _),
+        "wcsftime" => stub!(ucrt_wcsftime as extern "win64" fn(_, _, _, _) -> _),
         // legacy MSVCRT entry-point helpers
         "__getmainargs" => stub!(ucrt_getmainargs as unsafe extern "win64" fn(_, _, _, _, _) -> _),
         "__wgetmainargs" => {
@@ -2090,10 +2245,10 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "_commode" => Some(commode_data_addr()),
         "__mb_cur_max" => Some(mb_cur_max_data_addr()),
         "_stricmp" | "_strcmpi" => stub!(ucrt_strcmp as unsafe extern "win64" fn(_, _) -> _),
-        "_wcsdup" => stub!(ucrt_strdup as unsafe extern "win64" fn(_) -> _),
+        "_wcsdup" => stub!(ucrt_wcsdup as unsafe extern "win64" fn(_) -> _),
         "_flushall" => stub!(ucrt_flushall_stub as extern "win64" fn()),
         "_filbuf" | "_flsbuf" => stub!(ucrt_cexit as extern "win64" fn()),
-        "_isatty" => stub!(ucrt_isatty_stub as extern "win64" fn()),
+        "_isatty" => stub!(ucrt_isatty as extern "win64" fn(_) -> _),
         "_get_errno" => stub!(ucrt_get_errno as unsafe extern "win64" fn(_) -> _),
         "_set_errno" => stub!(ucrt_set_errno as extern "win64" fn(_) -> _),
         "_get_doserrno" => stub!(ucrt_get_doserrno_stub as extern "win64" fn()),
