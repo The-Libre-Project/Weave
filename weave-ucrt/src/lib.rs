@@ -917,33 +917,65 @@ pub unsafe extern "win64" fn ucrt_assert(_expr: *const u8, _file: *const u8, _li
     unsafe { libc::abort() }
 }
 
-/// _beginthreadex — create a Windows thread.
+/// _beginthreadex — create a Windows thread backed by a real OS thread.
 ///
-/// Returns a fake non-zero handle (1) so callers treat thread creation as
-/// successful. The thread never actually runs; WaitForSingleObject(1) returns
-/// WAIT_OBJECT_0 immediately, which is correct for single-threaded listing
-/// mode where worker threads sit idle anyway.
+/// Wine ref: dlls/msvcrt/thread.c — _beginthreadex calls CreateThread with a
+/// trampoline; trampoline calls start_address_ex(arglist) then _endthreadex(retval).
+/// On x86-64 the start routine is `unsigned int (__stdcall *)(void *)` which is
+/// identical to `extern "win64" fn(*mut u8) -> u32`.  Returns 0 on failure,
+/// the thread handle (uintptr_t) on success.  _flags / initflag is forwarded to
+/// CreateThread (CREATE_SUSPENDED=0x4 defers start); Weave ignores it as
+/// kernel32::create_thread does.
+///
 /// # Safety
-/// `thread_id` must be null or a valid pointer to a writable `u32`.
+/// `start` must be a valid `extern "win64"` function pointer for the duration
+/// of the spawned thread.  `arg` is forwarded as the sole argument and must
+/// remain valid for the thread's lifetime.  `thread_id` must be null or a
+/// valid pointer to a writable `u32`.
 pub unsafe extern "win64" fn ucrt_beginthreadex(
     _security: *const c_void,
     _stack_size: u32,
-    _start: *const c_void,
-    _arg: *const c_void,
+    start: *const c_void,
+    arg: *const c_void,
     _flags: u32,
     thread_id: *mut u32,
 ) -> usize {
-    unsafe {
-        libc::write(
-            2,
-            b"weave: stub _beginthreadex -> 1\n".as_ptr() as *const libc::c_void,
-            31,
-        );
+    if start.is_null() {
+        return 0;
     }
+
+    let fn_addr = start as usize;
+    let param_addr = arg as usize;
+
+    eprintln!("weave/_beginthreadex: fn={start:p} arg={arg:p} (spawning thread)");
+
+    let completion = std::sync::Arc::new(weave_core::handles::ThreadCompletion {
+        result: std::sync::Mutex::new(None),
+        condvar: std::sync::Condvar::new(),
+    });
+    let completion_clone = std::sync::Arc::clone(&completion);
+
+    // SAFETY: `fn_addr` is a Win64-ABI function pointer in the mapped PE image.
+    // The PE image stays mapped for the process lifetime, so the pointer is valid
+    // for the duration of the spawned thread.  `param_addr` is forwarded as the
+    // sole RCX argument, matching the _beginthreadex start-routine signature
+    // `unsigned int (__stdcall *)(void *)` on x86-64.
+    let join_handle = std::thread::spawn(move || {
+        let fn_ptr: unsafe extern "win64" fn(*mut u8) -> u32 =
+            unsafe { std::mem::transmute(fn_addr as *const u8) };
+        let ret = unsafe { fn_ptr(param_addr as *mut u8) };
+        eprintln!("weave/_beginthreadex: fn={fn_addr:#x} thread returned {ret}");
+        let mut guard = completion_clone.result.lock().unwrap();
+        *guard = Some(ret);
+        completion_clone.condvar.notify_all();
+    });
+
+    let handle = weave_core::handles::alloc_thread(completion, join_handle);
+
     if !thread_id.is_null() {
         unsafe { *thread_id = 1 };
     }
-    1 // fake thread handle — WaitForSingleObject(1) returns WAIT_OBJECT_0
+    handle
 }
 
 pub extern "win64" fn ucrt_endthreadex(_exit_code: u32) {}
