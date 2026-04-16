@@ -131,15 +131,19 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR lpCmd, int nShow)
         fprintf(stderr, "waveout_test: waveOutOpen returned %u (not MMSYSERR_NOERROR)\n", rc);
     }
 
-    /* --- Message loop (5 seconds) ---------------------------------------- */
+    /* --- Message loop (5 seconds, PeekMessage-based to avoid WM_TIMER dependency) --- */
     g_startTick = GetTickCount();
-    SetTimer(hwnd, 1, 100, NULL); /* 100 ms polling timer */
-
+    DWORD deadline = GetTickCount() + 5000;
     MSG m;
-    while (GetMessageW(&m, NULL, 0, 0) > 0) {
-        TranslateMessage(&m);
-        DispatchMessageW(&m);
+    while (GetTickCount() < deadline) {
+        while (PeekMessageW(&m, NULL, 0, 0, PM_REMOVE)) {
+            if (m.message == WM_QUIT) goto cleanup;
+            TranslateMessage(&m);
+            DispatchMessageW(&m);
+        }
+        Sleep(10);  /* yield to avoid CPU spin */
     }
+cleanup:
 
     /* --- Cleanup ---------------------------------------------------------- */
     if (g_hWaveOut) {

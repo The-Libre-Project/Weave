@@ -2494,7 +2494,7 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         // Legacy msvcrt.dll CRT startup functions
         "_amsg_exit" => stub!(ucrt_amsg_exit as extern "win64" fn(_) -> !),
         "_onexit" => stub!(ucrt_onexit as extern "win64" fn(_) -> _),
-        "fprintf" => stub!(ucrt_fprintf as extern "win64" fn(_, _) -> _),
+        "fprintf" => stub!(ucrt_fprintf_va as unsafe extern "win64" fn(_, _, _) -> _),
         "vfprintf" => stub!(ucrt_vfprintf as extern "win64" fn(_, _, _) -> _),
         "fwrite" => stub!(ucrt_fwrite as unsafe extern "win64" fn(_, _, _, _) -> _),
         "__stdio_common_vfprintf" | "__stdio_common_vfwprintf" => {
