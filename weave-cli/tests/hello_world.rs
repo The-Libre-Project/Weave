@@ -1191,6 +1191,96 @@ fn sdl2_audio_gate1_smoke() {
     }
 }
 
+/// `weave nx.exe` — NXEngine-evo (Cave Story) x64 Windows build; M2 real-game gate.
+///
+/// Downloads handled in CI (Download NXEngine-evo step). Skipped gracefully
+/// when binary is absent (local dev / non-CI).
+///
+/// This is a diagnostic / exploratory gate — it logs everything and only asserts
+/// the absolute minimum: PE loads without IAT crash. All other results are logged
+/// for analysis. The pixel check is warn-only. This gate intentionally does NOT
+/// fail CI — it is the base for iterative M2 game work.
+///
+/// CWD is set to tests/fixtures/nxengine/ so nx.exe finds its data directory.
+#[test]
+fn nxengine_gate1_smoke() {
+    if !cfg!(target_os = "linux") {
+        eprintln!("skipping nxengine_gate1_smoke — requires Linux");
+        return;
+    }
+
+    let manifest = env!("CARGO_MANIFEST_DIR");
+    let game_dir = format!("{manifest}/../tests/fixtures/nxengine");
+    let exe = format!("{game_dir}/nx.exe");
+
+    if !std::path::Path::new(&exe).exists() {
+        eprintln!("skipping: nx.exe not present in tests/fixtures/nxengine/ — run CI or download NXEngine-evo manually");
+        return;
+    }
+
+    let weave_bin = env!("CARGO_BIN_EXE_weave");
+    let start = std::time::Instant::now();
+
+    // Spawn with CWD = game dir so nx.exe finds its data files next to itself.
+    let mut child = std::process::Command::new(weave_bin)
+        .current_dir(&game_dir)
+        .args(["--no-sandbox", &exe])
+        .env("DISPLAY", ":99")
+        .stderr(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|e| panic!("failed to spawn weave on nx.exe: {e}"));
+
+    let pixel_check_at = start + std::time::Duration::from_secs(5);
+    let deadline = start + std::time::Duration::from_secs(20);
+    let mut pixel_result: Option<bool> = None;
+    let mut exited = false;
+
+    loop {
+        let now = std::time::Instant::now();
+        match child.try_wait().expect("try_wait failed") {
+            Some(_) => { exited = true; break; }
+            None => {
+                if pixel_result.is_none() && now >= pixel_check_at {
+                    pixel_result = sample_display_pixels_99();
+                    println!("gate2: nxengine_pixel_check → {:?}", pixel_result);
+                }
+                if now >= deadline {
+                    let _ = child.kill();
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        }
+    }
+
+    let elapsed = start.elapsed();
+    let stderr = {
+        use std::io::Read;
+        let mut s = String::new();
+        if let Some(mut p) = child.stderr.take() { let _ = p.read_to_string(&mut s); }
+        s
+    };
+
+    eprintln!("nxengine elapsed: {elapsed:.1?}");
+    eprintln!("nxengine exited_before_deadline: {exited}");
+    eprintln!("--- nxengine STDERR BEGIN ---\n{stderr}\n--- nxengine STDERR END ---");
+
+    // Only hard gate: PE must load (Weave must not crash on IAT resolution).
+    assert!(
+        stderr.contains("PHASE: loaded_pe") || stderr.contains("weave: loaded"),
+        "nxengine Gate 1 FAIL: PE did not load — IAT resolution crashed before entry point.\nstderr:\n{stderr}"
+    );
+
+    // Soft diagnostics — warn only.
+    if let Some(false) | None = pixel_result {
+        eprintln!("nxengine pixel WARN — screen black at 5s; rendering or init incomplete");
+    }
+    if !stderr.contains("weave/user32: CreateWindow") && !stderr.contains("RegisterClassEx") {
+        eprintln!("nxengine window WARN — no CreateWindow seen; game may not have reached SDL2 init");
+    }
+}
+
 /// `weave hello.exe` — CRT-linked MinGW binary, 41 imports across 8 DLLs.
 #[test]
 fn hello_crt_prints_hello_world() {
