@@ -1050,6 +1050,147 @@ fn waveout_gate1_smoke() {
     }
 }
 
+/// `weave sdl2_audio_test.exe` — SDL2 video+audio fixture; M2 Gate 1 smoke test.
+///
+/// Runs sdl2_audio_test.exe under Weave with --no-sandbox and DISPLAY=:99 (Xvfb).
+/// SDL2.dll must be in the same directory as the exe (tests/fixtures/bin/SDL2.dll).
+///
+/// Gates:
+///   1. process exits within 12 s — no panic / hard crash
+///   2. stderr contains PHASE: sdl2_audio_init — SDL_Init succeeded
+///   3. stderr contains PHASE: sdl2_audio_opened — SDL_OpenAudio returned 0 (waveOut stubs work)
+///   4. pixel check at 5 s — Xvfb screen non-black (SDL2 software renderer working)
+///      Gate 4 is warn-only: Some(false) is logged but does NOT fail the test.
+///
+/// Skipped gracefully if sdl2_audio_test.exe is absent from fixtures.
+#[test]
+fn sdl2_audio_gate1_smoke() {
+    if !cfg!(target_os = "linux") {
+        eprintln!("skipping execution test — requires Linux");
+        return;
+    }
+
+    let manifest = env!("CARGO_MANIFEST_DIR");
+    let bin_dir = format!("{manifest}/../tests/fixtures/bin");
+    let exe = format!("{bin_dir}/sdl2_audio_test.exe");
+
+    if !std::path::Path::new(&exe).exists() {
+        eprintln!("skipping: sdl2_audio_test.exe not present in tests/fixtures/bin/");
+        return;
+    }
+
+    let weave_bin = env!("CARGO_BIN_EXE_weave");
+
+    // Run with CWD = bin_dir so SDL2.dll is found next to the exe.
+    // --no-sandbox eliminates sandbox as a variable. DISPLAY=:99 for Xvfb.
+    let start = std::time::Instant::now();
+    let mut child = std::process::Command::new(weave_bin)
+        .current_dir(&bin_dir)
+        .arg(&exe)
+        .arg("--no-sandbox")
+        .env("DISPLAY", ":99")
+        .stderr(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|e| panic!("failed to spawn weave on sdl2_audio_test.exe: {e}"));
+
+    // Drain stderr concurrently to avoid blocking the child on the 64 KB pipe.
+    let stderr_pipe = child.stderr.take().expect("stderr was piped");
+    let stderr_shared = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let stderr_writer = std::sync::Arc::clone(&stderr_shared);
+    let drain_thread = std::thread::spawn(move || {
+        use std::io::Read;
+        let mut buf = Vec::new();
+        let mut pipe = stderr_pipe;
+        let _ = pipe.read_to_end(&mut buf);
+        *stderr_writer.lock().unwrap() = buf;
+    });
+
+    let deadline = start + std::time::Duration::from_secs(12);
+    let pixel_check_at = start + std::time::Duration::from_secs(5);
+    let mut pixel_result: Option<bool> = None;
+    let mut exit_status: Option<std::process::ExitStatus> = None;
+    let mut killed_by_deadline = false;
+
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                exit_status = Some(status);
+                break;
+            }
+            Ok(None) => {
+                let now = std::time::Instant::now();
+                if pixel_result.is_none() && now >= pixel_check_at {
+                    #[cfg(target_os = "linux")]
+                    {
+                        pixel_result = sample_display_pixels_99();
+                    }
+                    println!("gate2: sdl2_audio_pixel_check → {:?}", pixel_result);
+                }
+                if now >= deadline {
+                    let _ = child.kill();
+                    killed_by_deadline = true;
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err(e) => panic!("wait failed: {e}"),
+        }
+    }
+    let elapsed = start.elapsed();
+
+    drain_thread.join().expect("stderr drain thread panicked");
+    let stderr_bytes = stderr_shared.lock().unwrap().clone();
+    let stderr = String::from_utf8_lossy(&stderr_bytes);
+
+    eprintln!("sdl2_audio_test elapsed: {elapsed:.1?}");
+    eprintln!(
+        "sdl2_audio_test exit: {}",
+        if killed_by_deadline {
+            "killed by deadline".to_string()
+        } else {
+            exit_status
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "unknown".to_string())
+        }
+    );
+    eprintln!("--- FULL STDERR BEGIN ---");
+    eprintln!("{stderr}");
+    eprintln!("--- FULL STDERR END ---");
+
+    // Gate 1: process must exit before the 12-second deadline (no hang/panic).
+    assert!(
+        !killed_by_deadline,
+        "sdl2_audio Gate 1 FAIL: process did not exit within 12 s — hung or panicked.\nstderr: {stderr}"
+    );
+
+    // Gate 2: SDL_Init must have succeeded.
+    assert!(
+        stderr.contains("PHASE: sdl2_audio_init"),
+        "sdl2_audio Gate 2 FAIL: PHASE: sdl2_audio_init not found — SDL_Init failed.\nstderr: {stderr}"
+    );
+
+    // Gate 3: SDL_OpenAudio must have returned 0 — proves waveOut stubs are functional.
+    assert!(
+        stderr.contains("PHASE: sdl2_audio_opened"),
+        "sdl2_audio Gate 3 FAIL: PHASE: sdl2_audio_opened not found — \
+         SDL_OpenAudio did not return 0. waveOut stubs may be broken.\nstderr: {stderr}"
+    );
+
+    // Gate 4 (warn only): SDL2 software renderer pixel check.
+    // Some(false) = screen black; not a hard failure — audio is the primary gate.
+    eprintln!(
+        "gate4: sdl2_audio final pixel check result: {:?} (warn only — not a hard gate)",
+        pixel_result
+    );
+    if let Some(false) | None = pixel_result {
+        eprintln!(
+            "gate4: sdl2_audio pixel check WARN — screen black or unavailable; \
+             SDL2 software renderer may not be flushing to X11 (separate from audio correctness)"
+        );
+    }
+}
+
 /// `weave hello.exe` — CRT-linked MinGW binary, 41 imports across 8 DLLs.
 #[test]
 fn hello_crt_prints_hello_world() {
