@@ -701,6 +701,16 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         ),
         "SetCursor" => Some(set_cursor as *const () as usize),
         "ShowCursor" => Some(show_cursor as *const () as usize),
+        // Window property store
+        "SetPropA" | "SetPropW" => {
+            Some(set_prop_w as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize)
+        }
+        "GetPropA" | "GetPropW" => {
+            Some(get_prop_w as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "RemovePropA" | "RemovePropW" => {
+            Some(remove_prop_w as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
         // Message box
         "MessageBoxW" => {
             Some(message_box_w as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize)

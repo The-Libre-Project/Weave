@@ -1218,7 +1218,11 @@ pub extern "win64" fn def_window_proc_w(
             0
         }
         WM_DESTROY => {
-            post_quit_message(0);
+            // Wine ref: dlls/win32u/defwnd.c — DefWindowProcW does NOT call
+            // PostQuitMessage for WM_DESTROY; that is the application's responsibility
+            // (typically done in WM_DESTROY of the main window). Posting WM_QUIT here
+            // breaks SDL2 which creates/destroys multiple test windows during renderer
+            // selection and expects WM_DESTROY to be silent in DefWindowProc.
             0
         }
         WM_PAINT => {
@@ -1592,7 +1596,10 @@ pub extern "win64" fn get_system_metrics(n_index: i32) -> i32 {
         SM_CYBORDER => 1,
         SM_CXEDGE => 2, // Wine: SM_CXBORDER + 1
         SM_CYEDGE => 2,
-        80 => 1, // SM_CMONITORS — one virtual monitor
+        // SM_CMONITORS: report 1 only when a real display is available.
+        // Without DISPLAY (headless tests), returning 1 causes apps like IrfanView
+        // to attempt display hardware initialization that corrupts the heap.
+        80 => i32::from(backend::is_available()),
         _ => 0,
     };
     eprintln!("weave/user32: GetSystemMetrics({n_index}) → {result}");
@@ -1862,6 +1869,90 @@ pub extern "win64" fn show_cursor(_b_show: i32) -> i32 {
     0
 }
 
+// ── Window property store (SetPropW / GetPropW / RemovePropW) ─────────────────
+
+/// Global window property table: (hwnd, prop_name) → handle value.
+///
+/// Wine ref: dlls/win32u/property.c — properties are stored per-window in a
+/// linked list of PROPERTY structs (name atom + handle value); Get/Set/Remove
+/// operate on that list. Weave uses a flat HashMap for simplicity.
+fn prop_table() -> &'static std::sync::Mutex<std::collections::HashMap<(usize, String), usize>> {
+    static T: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<(usize, String), usize>>,
+    > = std::sync::OnceLock::new();
+    T.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// SetPropW: add or replace a named property on a window.
+///
+/// Returns TRUE (1) on success, FALSE (0) on failure.
+///
+/// # Safety
+/// `lp_string` must be a valid null-terminated UTF-16 string or NULL.
+// Wine ref: dlls/win32u/property.c::NtUserSetProp — looks up/creates a PROPERTY
+// entry by atom (intern string via GlobalAddAtom); stores handle; returns TRUE on success.
+pub unsafe extern "win64" fn set_prop_w(hwnd: usize, lp_string: *const u16, h_data: usize) -> i32 {
+    if hwnd == 0 || lp_string.is_null() {
+        return 0;
+    }
+    // MAKEINTATOM guard: values ≤ 0xFFFF are atoms, not string pointers.
+    if lp_string as usize <= 0xFFFF {
+        let key = format!("#{}", lp_string as usize);
+        if let Ok(mut t) = prop_table().lock() {
+            t.insert((hwnd, key), h_data);
+            return 1;
+        }
+        return 0;
+    }
+    let name = unsafe { decode_wide(lp_string) };
+    if let Ok(mut t) = prop_table().lock() {
+        t.insert((hwnd, name), h_data);
+        1 // TRUE
+    } else {
+        0
+    }
+}
+
+/// GetPropW: retrieve a named property from a window.
+///
+/// Returns the stored handle, or NULL if not found.
+///
+/// # Safety
+/// `lp_string` must be a valid null-terminated UTF-16 string or NULL.
+// Wine ref: dlls/win32u/property.c::NtUserGetProp — looks up PROPERTY by atom;
+// returns handle or NULL if atom not found on window.
+pub unsafe extern "win64" fn get_prop_w(hwnd: usize, lp_string: *const u16) -> usize {
+    if hwnd == 0 || lp_string.is_null() {
+        return 0;
+    }
+    let name = unsafe { decode_wide(lp_string) };
+    prop_table()
+        .lock()
+        .ok()
+        .and_then(|t| t.get(&(hwnd, name)).copied())
+        .unwrap_or(0)
+}
+
+/// RemovePropW: remove a named property from a window.
+///
+/// Returns the previously stored handle, or NULL if not found.
+///
+/// # Safety
+/// `lp_string` must be a valid null-terminated UTF-16 string or NULL.
+// Wine ref: dlls/win32u/property.c::NtUserRemoveProp — removes PROPERTY entry
+// by atom; returns old handle so caller can free it if needed.
+pub unsafe extern "win64" fn remove_prop_w(hwnd: usize, lp_string: *const u16) -> usize {
+    if hwnd == 0 || lp_string.is_null() {
+        return 0;
+    }
+    let name = unsafe { decode_wide(lp_string) };
+    prop_table()
+        .lock()
+        .ok()
+        .and_then(|mut t| t.remove(&(hwnd, name)))
+        .unwrap_or(0)
+}
+
 // ── Display and mode enumeration stubs ────────────────────────────────────────
 
 /// # Safety
@@ -2010,13 +2101,20 @@ pub unsafe extern "win64" fn change_display_settings_ex_w(
 
 // Wine ref: dlls/win32u/sysparams.c::monitor_from_window — uses window rect (or placement
 // rcNormalPosition if iconic) to find intersecting monitor; falls back to primary if no match.
+// Return 0 (no monitor) when X11 is unavailable so headless apps see no display.
 pub extern "win64" fn monitor_from_window(_hwnd: usize, _dw_flags: u32) -> usize {
+    if !backend::is_available() {
+        return 0;
+    }
     1usize
 }
 
 // Wine ref: dlls/win32u/sysparams.c — MonitorFromPoint wraps monitor_from_rect with a
 // 1×1 rect at the point; returns primary monitor handle on MONITOR_DEFAULTTOPRIMARY.
 pub extern "win64" fn monitor_from_point(_pt_x: i32, _pt_y: i32, _dw_flags: u32) -> usize {
+    if !backend::is_available() {
+        return 0;
+    }
     1usize
 }
 
@@ -2025,6 +2123,9 @@ pub extern "win64" fn monitor_from_point(_pt_x: i32, _pt_y: i32, _dw_flags: u32)
 // Wine ref: dlls/win32u/sysparams.c::monitor_info_from_rect — finds monitor with largest
 // intersection area; if no intersection uses MONITOR_DEFAULTTO* flag to pick fallback.
 pub unsafe extern "win64" fn monitor_from_rect(_lp_rc: *const Rect, _dw_flags: u32) -> usize {
+    if !backend::is_available() {
+        return 0;
+    }
     1usize
 }
 
@@ -2095,6 +2196,14 @@ pub unsafe extern "win64" fn enum_display_monitors(
     dw_data: isize,
 ) -> i32 {
     if lpfn_enum == 0 {
+        return 1;
+    }
+    // Only enumerate monitors when a real display is available.  Without a
+    // display (e.g. headless IrfanView test, env_remove("DISPLAY")), there are
+    // no monitors to report and the callback must not be called — calling it
+    // with a fake HMONITOR causes apps that probe display hardware in their
+    // callback (IrfanView) to corrupt the heap when the hardware isn't there.
+    if !backend::is_available() {
         return 1;
     }
     let (sw, sh) = backend::screen_size();

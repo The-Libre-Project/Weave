@@ -2144,13 +2144,13 @@ pub unsafe extern "win64" fn create_file_w(
     }
 
     // Log write-opens always; log read-opens only when the path contains "test.py"
-    // (to diagnose why NPP's test.py content is not being inserted into Scintilla).
-    // TODO: remove test.py diagnostic once NPP Gate 6 is green.
+    // or a BMP file (WS2 gate-1 diagnostic — remove after gate passes).
     const GENERIC_WRITE: u32 = 0x40000000;
     let is_test_py = win_path.contains("test.py");
+    let is_bmp = win_path.to_ascii_lowercase().ends_with(".bmp");
     if dw_desired_access & GENERIC_WRITE != 0 {
         eprintln!("weave/CreateFileW: write-open path={win_path:?} access={dw_desired_access:#x}");
-    } else if is_test_py {
+    } else if is_test_py || is_bmp {
         eprintln!("weave/CreateFileW: read-open path={win_path:?} access={dw_desired_access:#x} disp={dw_creation_disposition:#x}");
     }
 
@@ -5862,9 +5862,16 @@ pub unsafe extern "win64" fn output_debug_string_a(_lp_output_string: *const u8)
 // Wine ref: dlls/kernelbase/debug.c:275 — converts via RtlUnicodeStringToAnsiString (not WideCharToMultiByte);
 // raises DBG_PRINTEXCEPTION_WIDE_C with 4-arg array [wcslen+1, wide_ptr, strlen+1, ansi_ptr];
 // only falls back to OutputDebugStringA if the exception is not caught by a debugger.
-pub unsafe extern "win64" fn output_debug_string_w(_lp_output_string: *const u16) {
-    warn_once("OutputDebugStringW");
-    // silently discard
+pub unsafe extern "win64" fn output_debug_string_w(lp_output_string: *const u16) {
+    if !lp_output_string.is_null() {
+        let mut len = 0usize;
+        while unsafe { *lp_output_string.add(len) } != 0 {
+            len += 1;
+        }
+        let wide = unsafe { std::slice::from_raw_parts(lp_output_string, len) };
+        let s = String::from_utf16_lossy(wide);
+        eprint!("OutputDebugStringW: {s}");
+    }
 }
 
 // ── Events / synchronisation ──────────────────────────────────────────────────

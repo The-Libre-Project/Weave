@@ -212,16 +212,22 @@ fn main() {
         let exe_dir = exe_dir_canon.parent().unwrap_or(std::path::Path::new("."));
 
         // Collect unique DLL names from the import table.
-        let mut import_dlls = std::collections::HashSet::new();
+        // Key = lowercase (for registry lookup); value = original case (for
+        // case-sensitive Linux filesystem — e.g. "SDL2.dll" ≠ "sdl2.dll").
+        let mut import_dlls: std::collections::HashMap<String, String> = Default::default();
         if let Ok(info) = pe::parse(&bytes) {
             for imp in &info.imports {
-                import_dlls.insert(imp.dll.to_lowercase());
+                import_dlls
+                    .entry(imp.dll.to_lowercase())
+                    .or_insert_with(|| imp.dll.clone());
             }
         }
 
-        for dll_name in &import_dlls {
-            let path = exe_dir.join(dll_name);
-            let dll_bytes = match std::fs::read(&path) {
+        for (dll_name, orig_name) in &import_dlls {
+            // Try original import-table case first, then lowercase fallback.
+            let dll_bytes = std::fs::read(exe_dir.join(orig_name))
+                .or_else(|_| std::fs::read(exe_dir.join(dll_name)));
+            let dll_bytes = match dll_bytes {
                 Ok(b) => b,
                 Err(_) => continue, // not present beside the exe — skip
             };

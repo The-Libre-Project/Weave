@@ -30,6 +30,18 @@ pub enum GdiKind {
         width: u32,
         height: u32,
     },
+    /// DIB section — CPU-accessible bitmap with a caller-visible bits pointer.
+    ///
+    /// Wine ref: dlls/gdi32/objects.c::CreateDIBSection → NtGdiCreateDIBSection;
+    /// allocates a shared-memory region and returns a pointer in ppvBits. Weave
+    /// allocates a plain heap buffer (no shared section) and leaks it for the
+    /// lifetime of the object. bits_ptr is the raw address of that buffer.
+    DibSection {
+        width: u32,
+        height: u32,
+        bits_ptr: usize,
+        bpp: u16,
+    },
     /// Region — clipping/fill region.
     ///
     /// Wine ref: dlls/win32u/region.c — NtGdiCreateRectRgn allocates a WINEREGION

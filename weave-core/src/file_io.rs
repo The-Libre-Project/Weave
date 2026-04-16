@@ -99,12 +99,26 @@ pub fn translate_win_path(win_path: &str) -> Result<std::path::PathBuf, i32> {
         return Ok(translated);
     }
 
-    // Fallback: try the path as a native Linux absolute path.
+    // Fallback 1: try the path as a native Linux absolute path.
     let candidate = win_path.replace('\\', "/");
     if candidate.starts_with('/') {
         let p = std::path::PathBuf::from(&candidate);
         if p.exists() {
             return Ok(p);
+        }
+    }
+
+    // Fallback 2: relative path (no drive letter, no leading backslash) →
+    // try resolving against the real Linux CWD.  This lets apps like testsprite2
+    // open "moose.bmp" / "icon.bmp" from the directory they were launched from
+    // without needing a full Windows path.
+    if !win_path.contains(':') && !win_path.starts_with('\\') && !win_path.starts_with('/') {
+        let rel = win_path.replace('\\', "/");
+        if let Ok(cwd) = std::env::current_dir() {
+            let cwd_candidate = cwd.join(&rel);
+            if cwd_candidate.exists() {
+                return Ok(cwd_candidate);
+            }
         }
     }
 

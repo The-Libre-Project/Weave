@@ -223,7 +223,7 @@ pub extern "win64" fn select_object(hdc: usize, h_gdi_obj: usize) -> usize {
                     old = dc.h_font;
                     dc.h_font = h_gdi_obj;
                 }
-                GdiKind::Bitmap { width, height } => {
+                GdiKind::Bitmap { width, height } | GdiKind::DibSection { width, height, .. } => {
                     old = dc.selected_bitmap;
                     dc.selected_bitmap = h_gdi_obj;
                     if dc.pixmap.is_none() {
@@ -934,6 +934,28 @@ pub extern "win64" fn create_compatible_dc(hdc: usize) -> usize {
     mem_dc
 }
 
+/// CreateDCW: create a device context for the named device.
+///
+/// SDL2 calls `CreateDCW(driver, NULL, NULL, NULL)` to get a display DC for
+/// gamma-ramp queries and pixel-format introspection. Weave returns a screen-
+/// compatible DC (same as CreateCompatibleDC(NULL)) so callers get a valid
+/// handle without crashing.
+///
+/// # Safety
+/// All pointer arguments may be NULL; non-NULL pointers must be valid.
+// Wine ref: dlls/win32u/dc.c::NtGdiOpenDCW — allocates a DC_OBJ and binds it to
+// the named device (display or printer); for "DISPLAY" creates a screen DC;
+// returns NULL only if the device doesn't exist or alloc fails.
+pub unsafe extern "win64" fn create_dc_w(
+    _lp_driver: *const u16,
+    _lp_device: *const u16,
+    _lp_port: *const u16,
+    _pdm: *const u8,
+) -> usize {
+    // Delegate to CreateCompatibleDC(NULL) — creates a screen-compatible DC.
+    create_compatible_dc(0)
+}
+
 /// DeleteDC: delete a DC created by CreateCompatibleDC (stub).
 // Wine ref: dlls/win32u/dc.c::free_dc_ptr — walks physDev chain calling pDeleteDC on
 // each; decrements refcounts on hPen/hBrush/hFont/hBitmap; frees GDI handle; returns
@@ -958,20 +980,56 @@ pub extern "win64" fn create_compatible_bitmap(_hdc: usize, cx: i32, cy: i32) ->
     objects::alloc(GdiKind::Bitmap { width, height })
 }
 
-/// CreateDIBSection: create a DIB section (stub — returns 0).
+/// CreateDIBSection: create a DIB section with a CPU-accessible pixel buffer.
+///
+/// # Safety
+/// `pbmi` must point to a valid `BITMAPINFO` struct. `ppv_bits` may be NULL;
+/// if non-NULL it must be a writable `*mut usize`.
 // Wine ref: dlls/gdi32/objects.c::CreateDIBSection → NtGdiCreateDIBSection; creates a
 // shared-memory bitmap (section!=NULL uses MapViewOfSection); ppvBits receives a pointer
 // to the raw pixel buffer; DIB_PAL_COLORS usage maps color table entries to palette indices.
-pub extern "win64" fn create_dib_section(
+// Weave: h_section always ignored (no section object support). Allocates a zeroed heap
+// buffer sized to the bitmap, leaks it for the handle's lifetime, writes address to ppvBits.
+pub unsafe extern "win64" fn create_dib_section(
     _hdc: usize,
-    _pbmi: usize,
+    pbmi: usize,
     _usage: u32,
-    _ppv_bits: *mut usize,
+    ppv_bits: *mut usize,
     _h_section: usize,
     _offset: u32,
 ) -> usize {
-    warn_once("CreateDIBSection");
-    0
+    if pbmi == 0 {
+        return 0;
+    }
+    // BITMAPINFOHEADER offsets (little-endian, packed):
+    //   +0  biSize(4), +4 biWidth(i32), +8 biHeight(i32),
+    //   +12 biPlanes(u16), +14 biBitCount(u16), +16 biCompression(u32), ...
+    let (width, height, bpp) = unsafe {
+        let bi_width = (pbmi + 4) as *const i32;
+        let bi_height = (pbmi + 8) as *const i32;
+        let bi_bit_count = (pbmi + 14) as *const u16;
+        (
+            (*bi_width).unsigned_abs(),
+            (*bi_height).unsigned_abs(),
+            (*bi_bit_count).max(1),
+        )
+    };
+    let stride = (u64::from(width) * u64::from(bpp)).div_ceil(32) * 4;
+    let size = (stride * u64::from(height)).max(1) as usize;
+    let buf: Vec<u8> = vec![0u8; size];
+    let ptr = buf.as_ptr() as usize;
+    let _ = Box::leak(buf.into_boxed_slice());
+    if !ppv_bits.is_null() {
+        unsafe {
+            *ppv_bits = ptr;
+        }
+    }
+    objects::alloc(GdiKind::DibSection {
+        width,
+        height,
+        bits_ptr: ptr,
+        bpp,
+    })
 }
 
 /// SetDIBitsToDevice: copy DIB pixels to a device (stub).
@@ -1307,9 +1365,15 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "SetROP2" => Some(set_rop2 as *const () as usize),
         // Memory DCs and bitmaps
         "CreateCompatibleDC" => Some(create_compatible_dc as *const () as usize),
+        "CreateDCW" | "CreateDCA" => {
+            Some(create_dc_w as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize)
+        }
         "DeleteDC" => Some(delete_dc as *const () as usize),
         "CreateCompatibleBitmap" => Some(create_compatible_bitmap as *const () as usize),
-        "CreateDIBSection" => Some(create_dib_section as *const () as usize),
+        "CreateDIBSection" => Some(
+            create_dib_section as unsafe extern "win64" fn(_, _, _, _, _, _) -> _ as *const ()
+                as usize,
+        ),
         "SetDIBitsToDevice" => Some(set_dib_bits_to_device as *const () as usize),
         // Text metrics
         "GetTextMetricsW" => {
@@ -2311,7 +2375,7 @@ pub unsafe extern "win64" fn get_object_w(h: usize, c: i32, pv: *mut u8) -> i32 
                 written = 16;
             }
         }
-        GdiKind::Bitmap { .. } | GdiKind::Region => {}
+        GdiKind::Bitmap { .. } | GdiKind::DibSection { .. } | GdiKind::Region => {}
     });
     written
 }
