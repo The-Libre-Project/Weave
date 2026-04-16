@@ -650,6 +650,9 @@ fn scite_portable_mode() {
 #[cfg(target_os = "linux")]
 fn sample_display_pixels_99() -> Option<bool> {
     // Raw string — Python braces don't conflict with Rust format.
+    // Sample the whole 1280x720 Xvfb screen at 16-pixel intervals (~3600 samples).
+    // SDL2 testsprite2 opens centered on a 1280x720 screen → ~(320,120).
+    // Sampling every 16 px covers the window area without being slow.
     let script = r#"
 import ctypes, sys
 try:
@@ -662,14 +665,14 @@ try:
     if not dpy: sys.exit(42)
     scr  = x.XDefaultScreen(dpy)
     root = x.XRootWindow(dpy, scr)
-    # 640x480 at top-left (SDL2 testsprite2 default window position)
-    img = x.XGetImage(dpy, root, 0, 0, 640, 480, 0xFFFFFF, 2)
+    # Full 1280x720 screen — SDL2 window is centered so top-left misses it
+    img = x.XGetImage(dpy, root, 0, 0, 1280, 720, 0xFFFFFF, 2)
     if not img:
         x.XCloseDisplay(dpy)
         sys.exit(43)
     threshold = 0x141414  # any channel > 20 counts as "not black"
     found = any(x.XGetPixel(img, xi, yi) > threshold
-                for xi in range(0, 640, 8) for yi in range(0, 480, 8))
+                for xi in range(0, 1280, 16) for yi in range(0, 720, 16))
     x.XDestroyImage(img)
     x.XCloseDisplay(dpy)
     print(1 if found else 0)
