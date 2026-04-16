@@ -1239,7 +1239,10 @@ fn nxengine_gate1_smoke() {
     loop {
         let now = std::time::Instant::now();
         match child.try_wait().expect("try_wait failed") {
-            Some(_) => { exited = true; break; }
+            Some(_) => {
+                exited = true;
+                break;
+            }
             None => {
                 if pixel_result.is_none() && now >= pixel_check_at {
                     pixel_result = sample_display_pixels_99();
@@ -1258,7 +1261,9 @@ fn nxengine_gate1_smoke() {
     let stderr = {
         use std::io::Read;
         let mut s = String::new();
-        if let Some(mut p) = child.stderr.take() { let _ = p.read_to_string(&mut s); }
+        if let Some(mut p) = child.stderr.take() {
+            let _ = p.read_to_string(&mut s);
+        }
         s
     };
 
@@ -1277,7 +1282,9 @@ fn nxengine_gate1_smoke() {
         eprintln!("nxengine pixel WARN — screen black at 5s; rendering or init incomplete");
     }
     if !stderr.contains("weave/user32: CreateWindow") && !stderr.contains("RegisterClassEx") {
-        eprintln!("nxengine window WARN — no CreateWindow seen; game may not have reached SDL2 init");
+        eprintln!(
+            "nxengine window WARN — no CreateWindow seen; game may not have reached SDL2 init"
+        );
     }
 }
 
