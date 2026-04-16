@@ -1,0 +1,10 @@
+[package]
+name = "weave-ddraw"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "ddraw.dll stubs for Weave — DirectDraw 5 COM stubs for Cave Story and DirectDraw games"
+
+[dependencies]
+libc = "0.2"
