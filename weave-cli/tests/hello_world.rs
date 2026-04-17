@@ -1575,8 +1575,8 @@ fn putty_m3_ssh_connect_gate() {
 ///
 /// Runs `weave plink.exe -batch -pw weave-test-pw -P 2222 runner@localhost echo hello`
 /// against a local sshd on port 2222 (set up by CI). 15-second timeout with
-/// concurrent stderr drain. Gate 1 (hard): imports resolved. Reports all stderr
-/// for diagnosis. Skipped gracefully if plink.exe is absent.
+/// concurrent stderr and stdout drains. Gate 1 (hard): imports resolved. Reports all
+/// stderr/stdout for diagnosis. Skipped gracefully if plink.exe or host key is absent.
 #[test]
 fn putty_m3_plink_gate() {
     if !cfg!(target_os = "linux") {
@@ -1594,6 +1594,52 @@ fn putty_m3_plink_gate() {
         return;
     }
 
+    // Extract sshd ed25519 host key fingerprint so plink -batch can verify the host key
+    // without an interactive prompt. Without -hostkey, plink -batch exits 1 immediately
+    // on an unknown host key (no registry entry / known_hosts file present).
+    let hostkey_output = std::process::Command::new("ssh-keygen")
+        .args([
+            "-l",
+            "-E",
+            "sha256",
+            "-f",
+            "/etc/ssh/ssh_host_ed25519_key.pub",
+        ])
+        .output();
+    let hostkey_fingerprint = match hostkey_output {
+        Err(e) => {
+            eprintln!(
+                "skipping: ssh-keygen failed ({e}) — cannot determine sshd host key; \
+                 putty_m3_plink_gate skipped"
+            );
+            return;
+        }
+        Ok(out) if !out.status.success() => {
+            eprintln!(
+                "skipping: ssh-keygen exited {:?} — /etc/ssh/ssh_host_ed25519_key.pub absent; \
+                 putty_m3_plink_gate skipped",
+                out.status
+            );
+            return;
+        }
+        Ok(out) => {
+            // Output format: "256 SHA256:xxxx /etc/ssh/... (ED25519)"
+            // Field [1] is the SHA256:base64 fingerprint.
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            match stdout.split_whitespace().nth(1) {
+                Some(fp) => fp.to_string(),
+                None => {
+                    eprintln!(
+                        "skipping: could not parse ssh-keygen output: {stdout:?}; \
+                         putty_m3_plink_gate skipped"
+                    );
+                    return;
+                }
+            }
+        }
+    };
+    eprintln!("putty_m3_plink: using hostkey fingerprint: {hostkey_fingerprint}");
+
     let weave_bin = env!("CARGO_BIN_EXE_weave");
 
     let start = std::time::Instant::now();
@@ -1603,6 +1649,8 @@ fn putty_m3_plink_gate() {
         .arg("-batch")
         .arg("-pw")
         .arg("weave-test-pw")
+        .arg("-hostkey")
+        .arg(&hostkey_fingerprint)
         .arg("-P")
         .arg("2222")
         .arg("runner@localhost")
@@ -1622,6 +1670,17 @@ fn putty_m3_plink_gate() {
         let mut buf = Vec::new();
         let _ = stderr_pipe.read_to_end(&mut buf);
         *stderr_writer.lock().unwrap() = buf;
+    });
+
+    // Drain stdout concurrently to avoid 64 KB pipe blocking (plink writes "hello" here).
+    let mut stdout_pipe = child.stdout.take().expect("stdout was piped");
+    let stdout_shared = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let stdout_writer = std::sync::Arc::clone(&stdout_shared);
+    let stdout_drain_thread = std::thread::spawn(move || {
+        use std::io::Read;
+        let mut buf = Vec::new();
+        let _ = stdout_pipe.read_to_end(&mut buf);
+        *stdout_writer.lock().unwrap() = buf;
     });
 
     let deadline = start + std::time::Duration::from_secs(15);
@@ -1648,8 +1707,13 @@ fn putty_m3_plink_gate() {
     let elapsed = start.elapsed();
 
     drain_thread.join().expect("stderr drain thread panicked");
+    stdout_drain_thread
+        .join()
+        .expect("stdout drain thread panicked");
     let stderr_bytes = stderr_shared.lock().unwrap().clone();
     let stderr = String::from_utf8_lossy(&stderr_bytes);
+    let stdout_bytes = stdout_shared.lock().unwrap().clone();
+    let stdout = String::from_utf8_lossy(&stdout_bytes);
 
     eprintln!("putty_m3_plink elapsed: {elapsed:.1?}");
     eprintln!(
@@ -1662,6 +1726,9 @@ fn putty_m3_plink_gate() {
                 .unwrap_or_else(|| "unknown".to_string())
         }
     );
+    eprintln!("--- putty_m3_plink FULL STDOUT BEGIN ---");
+    eprintln!("{stdout}");
+    eprintln!("--- putty_m3_plink FULL STDOUT END ---");
     eprintln!("--- putty_m3_plink FULL STDERR BEGIN ---");
     eprintln!("{stderr}");
     eprintln!("--- putty_m3_plink FULL STDERR END ---");
@@ -1685,6 +1752,21 @@ fn putty_m3_plink_gate() {
         || stderr.contains("gethostbyname")
         || stderr.contains("connect(");
     eprintln!("putty_m3_plink diagnostic: TCP/name-resolution attempted = {tcp_attempted}");
+
+    // Soft gate: warn if exit was non-zero or stdout does not contain "hello".
+    // This is diagnostic-only (not a hard assert) — further stubs may be needed.
+    let exit_ok = exit_status.map_or(false, |s| s.success());
+    let stdout_has_hello = stdout.contains("hello");
+    if exit_ok && stdout_has_hello {
+        eprintln!(
+            "putty_m3_plink diagnostic: SSH session succeeded — exit=0, stdout contains 'hello'"
+        );
+    } else {
+        eprintln!(
+            "putty_m3_plink diagnostic: SSH session incomplete — exit_ok={exit_ok}, \
+             stdout_has_hello={stdout_has_hello} (further stubs may be needed)"
+        );
+    }
 }
 
 /// `weave hello.exe` — CRT-linked MinGW binary, 41 imports across 8 DLLs.
