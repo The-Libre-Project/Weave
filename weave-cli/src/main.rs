@@ -74,7 +74,7 @@ fn handle_prefix_cmd(args: &[String]) -> ! {
         std::process::exit(1);
     });
 
-    match args.get(0).map(|s| s.as_str()) {
+    match args.first().map(|s| s.as_str()) {
         Some("create") => {
             let name = args.get(1).unwrap_or_else(|| {
                 eprintln!("weave prefix create: missing <name>");
