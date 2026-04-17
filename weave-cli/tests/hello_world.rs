@@ -2008,6 +2008,125 @@ fn sevenzip_m4_listing_gate() {
     }
 }
 
+/// M5 install-flow gate — exercises the full prefix+desktop pipeline:
+/// PrefixManager::create → set_exe_path → generate_desktop_file →
+/// install_desktop_file → (Linux only) weave run hello.exe.
+///
+/// Steps 1-4 are pure Rust and run on all platforms.
+/// Step 5 is Linux-only (guarded by cfg).
+#[test]
+fn m5_install_flow_gate() {
+    use weave_desktop::{generate_desktop_file, install_desktop_file};
+    use weave_installer::PrefixManager;
+
+    // ── Step 1: Create a prefix via PrefixManager (isolated tempdir). ────────
+    let tmp = tempfile::tempdir().expect("tempdir for m5_install_flow_gate");
+    // Override XDG_DATA_HOME so install_desktop_file writes inside tmp too.
+    let xdg_data = tmp.path().join("xdg");
+    std::fs::create_dir_all(&xdg_data).expect("create xdg_data dir");
+    std::env::set_var("XDG_DATA_HOME", &xdg_data);
+
+    let prefix_base = tmp.path().join("prefixes");
+    let mgr = PrefixManager::with_base(&prefix_base);
+    let prefix = mgr.create("hello-app").expect("PrefixManager::create failed");
+
+    assert!(prefix.exists(), "prefix directory must exist after create");
+    assert!(prefix.drive_c().is_dir(), "drive_c must be a directory");
+    assert!(prefix.config_path().is_file(), "prefix.toml must be a file");
+
+    // ── Step 2: Store the exe path. ──────────────────────────────────────────
+    let manifest = env!("CARGO_MANIFEST_DIR");
+    let hello_exe = std::path::PathBuf::from(format!(
+        "{manifest}/../tests/fixtures/bin/hello.exe"
+    ));
+    prefix
+        .set_exe_path(&hello_exe)
+        .expect("set_exe_path failed");
+
+    let got = prefix
+        .get_exe_path()
+        .expect("get_exe_path failed")
+        .expect("get_exe_path returned None after set");
+    assert_eq!(
+        got, hello_exe,
+        "get_exe_path must round-trip the stored path"
+    );
+
+    // ── Step 3: Generate the .desktop file content. ──────────────────────────
+    let exec_cmd = format!("weave run {}", hello_exe.display());
+    let content = generate_desktop_file("Hello App", &exec_cmd, None, "Utility;");
+
+    assert!(
+        content.contains("Name=Hello App"),
+        "desktop content must contain Name=Hello App\ncontent:\n{content}"
+    );
+    assert!(
+        content.contains("Exec=weave run"),
+        "desktop content must contain Exec=weave run\ncontent:\n{content}"
+    );
+    assert!(
+        content.contains("Type=Application"),
+        "desktop content must contain Type=Application\ncontent:\n{content}"
+    );
+    assert!(
+        content.contains("[Desktop Entry]"),
+        "desktop content must start with [Desktop Entry]\ncontent:\n{content}"
+    );
+
+    // ── Step 4: Install the .desktop file into tempdir. ──────────────────────
+    // XDG_DATA_HOME is already set to xdg_data above; install_desktop_file
+    // will write to <xdg_data>/applications/weave-hello-app.desktop.
+    let installed_path =
+        install_desktop_file("hello-app", &content).expect("install_desktop_file failed");
+
+    assert!(
+        installed_path.exists(),
+        "installed .desktop file must exist on disk at {installed_path:?}"
+    );
+
+    let on_disk = std::fs::read_to_string(&installed_path)
+        .expect("failed to read installed .desktop file");
+    assert_eq!(
+        on_disk, content,
+        "on-disk .desktop content must match generated content"
+    );
+
+    eprintln!("m5_install_flow_gate: steps 1-4 OK — prefix+desktop pipeline verified");
+
+    // ── Step 5 (Linux only): weave run hello.exe → exits 0 + "Hello, World!". -
+    if !cfg!(target_os = "linux") {
+        eprintln!("m5_install_flow_gate: skipping step 5 (weave run) — requires Linux");
+        return;
+    }
+
+    let weave_bin = env!("CARGO_BIN_EXE_weave");
+    let output = std::process::Command::new(weave_bin)
+        .arg(&hello_exe)
+        .output()
+        .unwrap_or_else(|e| panic!("failed to launch weave for step 5: {e}"));
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    eprintln!("m5_install_flow_gate step 5: exit {}", output.status);
+    eprintln!("--- weave stdout ---\n{stdout}");
+    eprintln!("--- weave stderr ---\n{stderr}");
+
+    assert!(
+        output.status.success(),
+        "m5_install_flow_gate step 5 FAIL: weave run exited non-zero: {}\n\
+         stdout: {stdout}\nstderr: {stderr}",
+        output.status
+    );
+    assert_eq!(
+        stdout.as_ref(),
+        "Hello, World!\n",
+        "m5_install_flow_gate step 5 FAIL: unexpected stdout.\nstderr: {stderr}"
+    );
+
+    eprintln!("m5_install_flow_gate: step 5 OK — weave run hello.exe exited 0");
+}
+
 /// `weave hello.exe` — CRT-linked MinGW binary, 41 imports across 8 DLLs.
 #[test]
 fn hello_crt_prints_hello_world() {

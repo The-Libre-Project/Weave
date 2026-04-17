@@ -35,3 +35,7 @@ weave-ddraw = { path = "../weave-ddraw" }
 weave-sandbox = { path = "../weave-sandbox" }
 clap = { version = "4", features = ["derive"] }
 libc = "0.2"
+
+[dev-dependencies]
+weave-installer = { path = "../weave-installer" }
+weave-desktop = { path = "../weave-desktop" }
