@@ -1925,6 +1925,91 @@ fn sevenzip_m4_extraction_gate() {
     }
 }
 
+/// M4 listing gate — `weave 7za.exe l test.7z` lists archive contents correctly.
+///
+/// Verifies file names and sizes match the known archive layout:
+///   hello.txt           32 bytes
+///   subdir/world.txt    32 bytes
+#[test]
+fn sevenzip_m4_listing_gate() {
+    if !cfg!(target_os = "linux") {
+        eprintln!("skipping sevenzip_m4_listing_gate — requires Linux");
+        return;
+    }
+
+    let manifest = env!("CARGO_MANIFEST_DIR");
+    let bin_dir = format!("{manifest}/../tests/fixtures/bin");
+    let seven_zip = format!("{bin_dir}/7za.exe");
+    let archive = format!("{bin_dir}/test.7z");
+
+    if !std::path::Path::new(&seven_zip).exists() {
+        eprintln!("skipping: 7za.exe not present in tests/fixtures/bin/");
+        return;
+    }
+    if !std::path::Path::new(&archive).exists() {
+        eprintln!(
+            "skipping: test.7z not present in tests/fixtures/bin/ \
+             (run tests/fixtures/src/make_zip.py)"
+        );
+        return;
+    }
+
+    let weave_bin = env!("CARGO_BIN_EXE_weave");
+
+    // Run: weave 7za.exe l test.7z
+    // CWD = bin_dir so 7za.exe finds test.7z as a relative path.
+    let output = std::process::Command::new(weave_bin)
+        .current_dir(&bin_dir)
+        .arg(&seven_zip)
+        .arg("l")
+        .arg("test.7z")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run weave on 7za.exe l: {e}"));
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    eprintln!("sevenzip_m4_listing: exit: {}", output.status);
+    eprintln!("--- 7za stdout ---\n{stdout}");
+    eprintln!("--- 7za stderr ---\n{stderr}");
+
+    // Gate 3a (hard): 7za.exe l must exit 0.
+    assert!(
+        output.status.success(),
+        "sevenzip_m4_listing Gate 3a FAIL: 7za.exe l exited non-zero: {}\n\
+         stdout: {stdout}\nstderr: {stderr}",
+        output.status
+    );
+
+    // Gate 3b (hard): stdout must contain both file names and correct sizes.
+    //   hello.txt           → 32 bytes ("Hello from inside the archive\!\n")
+    //   subdir/world.txt    → 32 bytes ("Another file in a subdirectory.\n")
+    let expected: &[(&str, &str)] = &[
+        ("hello.txt", "32"),
+        ("subdir/world.txt", "32"),
+    ];
+
+    for (name, size) in expected {
+        assert!(
+            stdout.contains(name),
+            "sevenzip_m4_listing Gate 3b FAIL: '{name}' not found in 7za l output.\n\
+             stdout: {stdout}\nstderr: {stderr}"
+        );
+        // The listing line format: "Size  Compressed  ..." — size appears on the
+        // same line as the file name. We just need the size digit sequence present
+        // somewhere before the file name on its line.
+        let found_size = stdout
+            .lines()
+            .any(|line| line.contains(name) && line.contains(size));
+        assert!(
+            found_size,
+            "sevenzip_m4_listing Gate 3b FAIL: '{name}' line does not contain size {size}.\n\
+             stdout: {stdout}\nstderr: {stderr}"
+        );
+        eprintln!("sevenzip_m4_listing: {name} ({size} bytes) OK");
+    }
+}
+
 /// `weave hello.exe` — CRT-linked MinGW binary, 41 imports across 8 DLLs.
 #[test]
 fn hello_crt_prints_hello_world() {
