@@ -8,4 +8,5 @@ description = "Winsock2 (ws2_32.dll) networking stubs for Weave — backed by Li
 
 [dependencies]
 libc = "0.2"
+weave-common = { path = "../weave-common" }
 weave-core = { path = "../weave-core" }

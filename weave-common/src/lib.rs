@@ -3,6 +3,7 @@
 pub mod error;
 pub mod last_error;
 pub mod path;
+pub mod socket_event;
 pub mod stub;
 pub mod types;
 

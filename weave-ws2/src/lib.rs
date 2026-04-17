@@ -1405,6 +1405,13 @@ pub unsafe extern "win64" fn wsa_event_select(s: usize, event: usize, mask: i32)
     if let Some(ref mut map) = *g {
         map.insert(s, (event, mask as u32));
     }
+    drop(g);
+    // Update the reverse map in weave-common so WFMO can poll the socket fd directly.
+    if mask != 0 {
+        weave_common::socket_event::register_socket_event(event as u64, s as i32);
+    } else {
+        weave_common::socket_event::deregister_socket_event(event as u64);
+    }
     0 // success
 }
 

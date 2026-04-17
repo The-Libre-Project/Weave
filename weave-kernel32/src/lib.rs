@@ -6884,14 +6884,25 @@ pub unsafe extern "win64" fn wait_for_multiple_objects(
             return result;
         }
 
-        // Event handle backed by eventfd.
+        // Event handle backed by eventfd — but if it was registered via
+        // WSAEventSelect the eventfd is never written; poll the socket fd instead.
         #[cfg(target_os = "linux")]
         if let Some(efd) = handles::get_event_fd(handle) {
-            pollfds.push(libc::pollfd {
-                fd: efd,
-                events: libc::POLLIN,
-                revents: 0,
-            });
+            // Check whether this event handle has an associated socket (reverse map).
+            if let Some(sock_fd) = weave_common::socket_event::get_socket_for_event(handle as u64) {
+                eprintln!("weave/WFMO: handle[{i}]={handle:#x} → socket-event fd={sock_fd} (will poll socket)");
+                pollfds.push(libc::pollfd {
+                    fd: sock_fd,
+                    events: libc::POLLIN | libc::POLLOUT | libc::POLLHUP | libc::POLLRDHUP,
+                    revents: 0,
+                });
+            } else {
+                pollfds.push(libc::pollfd {
+                    fd: efd,
+                    events: libc::POLLIN,
+                    revents: 0,
+                });
+            }
             pollfd_to_handle_idx.push(i);
             continue;
         }
@@ -6918,12 +6929,25 @@ pub unsafe extern "win64" fn wait_for_multiple_objects(
         );
         if ret > 0 {
             for (pi, pfd) in pollfds.iter().enumerate() {
-                if (pfd.revents & libc::POLLIN) != 0 {
+                let ready = (pfd.revents
+                    & (libc::POLLIN | libc::POLLOUT | libc::POLLHUP | libc::POLLRDHUP))
+                    != 0;
+                if ready {
                     let hi = pollfd_to_handle_idx[pi];
-                    // Drain the eventfd counter.
-                    let mut _val: u64 = 0;
-                    libc::read(pfd.fd, &mut _val as *mut u64 as *mut libc::c_void, 8);
-                    eprintln!("weave/WFMO: handle[{hi}] → WAIT_OBJECT_0+{hi} (eventfd)");
+                    let handle = *lp_handles.add(hi);
+                    // If this fd is a socket (WSAEventSelect reverse map), do NOT drain
+                    // the eventfd — WSAEnumNetworkEvents polls the socket fd directly.
+                    if weave_common::socket_event::get_socket_for_event(handle as u64).is_some() {
+                        eprintln!(
+                            "weave/WFMO: handle[{hi}]={handle:#x} → WAIT_OBJECT_0+{hi} (socket-event fd={})",
+                            pfd.fd
+                        );
+                    } else {
+                        // Drain the eventfd counter.
+                        let mut _val: u64 = 0;
+                        libc::read(pfd.fd, &mut _val as *mut u64 as *mut libc::c_void, 8);
+                        eprintln!("weave/WFMO: handle[{hi}] → WAIT_OBJECT_0+{hi} (eventfd)");
+                    }
                     return WAIT_OBJECT_0 + hi as u32;
                 }
             }
