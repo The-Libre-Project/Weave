@@ -9,7 +9,7 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
 use std::sync::Mutex;
 
 /// Tracks the most recently freed heap address so consecutive double-frees
@@ -403,9 +403,7 @@ pub extern "win64" fn exit_process(u_exit_code: u32) -> ! {
 // then calls process_killed(). Ignores self-termination vs. remote.
 pub unsafe extern "win64" fn terminate_process(_h_process: usize, u_exit_code: u32) -> i32 {
     eprintln!("weave: TerminateProcess exit_code={u_exit_code:#x}");
-    unsafe {
-        libc::exit(u_exit_code as i32)
-    }
+    unsafe { libc::exit(u_exit_code as i32) }
 }
 
 /// GetLastError: return the calling thread's last error code.
@@ -767,30 +765,134 @@ pub extern "win64" fn get_acp() -> u32 {
     65001 // CP_UTF8
 }
 
+// ── SRW lock helpers (Linux futex) ───────────────────────────────────────────
+//
+// Wine ref: dlls/ntdll/sync.c:471 — Wine stores the SRW lock state as a
+// packed 4-byte struct: `exclusive_waiters` (i16, bit 0 = exclusive-held flag,
+// bits 1+ = exclusive-waiter count) followed by `owners` (u16, shared reader
+// count). `RtlAcquireSRWLockExclusive` increments exclusive_waiters by 2 first,
+// then CAS-loops on owners==0 to set owners=1 and clear the held bit. Shared
+// waiters loop on exclusive_waiters==0 to increment owners.
+//
+// We follow this layout exactly. The SRWLOCK PVOID slot is 8 bytes on x64
+// but only the low 32 bits carry lock state; the upper 32 bits stay zero.
+//
+// futex_wait / futex_wake operate on *const u32 (the low 32 bits of the slot).
+
+/// Packed SRW lock state: [exclusive_waiters: i16][owners: u16] = 4 bytes.
+/// bit 0 of exclusive_waiters: exclusive-held flag ("owned exclusive")
+/// bits 1..15 of exclusive_waiters: number of threads waiting for exclusive access
+/// owners: number of shared (read) holders
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct SrwLock {
+    exclusive_waiters: i16,
+    owners: u16,
+}
+
+// CONDITION_VARIABLE_LOCKMODE_SHARED
+const CONDITION_VARIABLE_LOCKMODE_SHARED: u32 = 0x1;
+
+/// FUTEX_WAIT on the low 32-bit word at `addr`.
+/// Returns the raw i32 syscall return value (0 = woken, -EAGAIN/-EINTR/-ETIMEDOUT).
+/// # Safety
+/// `addr` must be valid for a 4-byte aligned read. `timeout` must be NULL or point
+/// to a valid `libc::timespec`.
+unsafe fn futex_wait(addr: *const u32, val: u32, timeout: *const libc::timespec) -> i32 {
+    libc::syscall(
+        libc::SYS_futex,
+        addr,
+        libc::FUTEX_WAIT | libc::FUTEX_PRIVATE_FLAG,
+        val,
+        timeout,
+        std::ptr::null::<u32>(),
+        0u32,
+    ) as i32
+}
+
+/// FUTEX_WAKE up to `count` waiters on `addr`.
+/// # Safety
+/// `addr` must be valid for a 4-byte read.
+unsafe fn futex_wake(addr: *const u32, count: i32) -> i32 {
+    libc::syscall(
+        libc::SYS_futex,
+        addr,
+        libc::FUTEX_WAKE | libc::FUTEX_PRIVATE_FLAG,
+        count,
+        std::ptr::null::<libc::timespec>(),
+        std::ptr::null::<u32>(),
+        0u32,
+    ) as i32
+}
+
+/// Get a pointer to the low 32-bit word of an SRWLOCK slot (the packed state).
+/// The SRWLOCK is stored in a `*mut usize` (8 bytes on x64); only the low 4 bytes
+/// are used for lock state so that futex can operate on them.
+/// # Safety
+/// `slot` must be a valid pointer to an 8-byte SRWLOCK-sized region.
+#[inline]
+unsafe fn srw_state_ptr(slot: *mut usize) -> *mut u32 {
+    // On little-endian Linux x86-64 the low 32 bits are at the same address.
+    slot as *mut u32
+}
+
 // ── Task 1 — SRW try-acquire + DuplicateHandle + WaitOnAddress family ───────
 
 /// TryAcquireSRWLockExclusive: try to acquire an SRW lock for exclusive access.
 ///
-/// Single-threaded stub — always succeeds.
+/// Single CAS attempt — returns TRUE (1) if acquired, FALSE (0) if already held.
 /// # Safety
 /// `srw_lock` must be a valid pointer to an SRWLOCK-sized slot.
-// Wine ref: dlls/kernelbase/sync.c — calls RtlTryAcquireSRWLockExclusive;
-// returns TRUE (non-zero byte) if acquired, FALSE (0) if already held.
+// Wine ref: dlls/ntdll/sync.c:645 — RtlTryAcquireSRWLockExclusive: CAS loop on
+// owners==0 to set owners=1 and exclusive_waiters|=1; returns BOOLEAN.
 pub unsafe extern "win64" fn try_acquire_srw_lock_exclusive(srw_lock: *mut usize) -> u8 {
-    let _ = srw_lock; // accepted but not dereferenced
-    1 // TRUE — always succeeds in single-threaded context
+    let p = unsafe { srw_state_ptr(srw_lock) };
+    let atomic = unsafe { &*(p as *const AtomicI32) };
+    loop {
+        let old_i32 = atomic.load(Ordering::Acquire);
+        let old: SrwLock = unsafe { std::mem::transmute(old_i32 as u32) };
+        if old.owners != 0 {
+            return 0; // FALSE — locked (exclusive or shared)
+        }
+        let mut new = old;
+        new.owners = 1;
+        new.exclusive_waiters |= 1; // set held-exclusive bit
+        let new_i32: i32 = unsafe { std::mem::transmute::<SrwLock, u32>(new) as i32 };
+        if atomic
+            .compare_exchange(old_i32, new_i32, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            return 1; // TRUE
+        }
+    }
 }
 
 /// TryAcquireSRWLockShared: try to acquire an SRW lock for shared access.
 ///
-/// Single-threaded stub — always succeeds.
+/// Returns TRUE (1) if acquired, FALSE (0) if an exclusive lock is held or waiters present.
 /// # Safety
 /// `srw_lock` must be a valid pointer to an SRWLOCK-sized slot.
-// Wine ref: dlls/kernelbase/sync.c — calls RtlTryAcquireSRWLockShared;
-// returns TRUE if acquired, FALSE if exclusive lock is held.
+// Wine ref: dlls/ntdll/sync.c:680 — RtlTryAcquireSRWLockShared: CAS loop; fails if
+// exclusive_waiters != 0 (exclusive held or waiters pending), else increments owners.
 pub unsafe extern "win64" fn try_acquire_srw_lock_shared(srw_lock: *mut usize) -> u8 {
-    let _ = srw_lock; // accepted but not dereferenced
-    1 // TRUE — always succeeds in single-threaded context
+    let p = unsafe { srw_state_ptr(srw_lock) };
+    let atomic = unsafe { &*(p as *const AtomicI32) };
+    loop {
+        let old_i32 = atomic.load(Ordering::Acquire);
+        let old: SrwLock = unsafe { std::mem::transmute(old_i32 as u32) };
+        if old.exclusive_waiters != 0 {
+            return 0; // FALSE — exclusive held or exclusive waiters present
+        }
+        let mut new = old;
+        new.owners += 1;
+        let new_i32: i32 = unsafe { std::mem::transmute::<SrwLock, u32>(new) as i32 };
+        if atomic
+            .compare_exchange(old_i32, new_i32, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            return 1; // TRUE
+        }
+    }
 }
 
 /// DuplicateHandle: duplicate a kernel object handle.
@@ -840,46 +942,99 @@ pub unsafe extern "win64" fn process_id_to_session_id(
     1 // TRUE
 }
 
-/// WaitOnAddress: wait for a value at an address to change.
+/// WaitOnAddress: wait for the value at `address` to differ from `*compare_address`.
 ///
-/// Stub: immediately return TRUE (no actual waiting).
+/// Compares `address_size` bytes (1, 2, 4, or 8). If they already differ, returns
+/// TRUE immediately. Otherwise blocks via futex until woken or timeout.
+/// Returns FALSE + sets ERROR_TIMEOUT (0x5B4) on timeout.
+///
 /// # Safety
-/// Pointer arguments are accepted but not dereferenced.
-// Wine ref: dlls/kernelbase/sync.c:531 — calls RtlWaitOnAddress with
-// negative 100ns timeout; compares address value to cmp_value before sleeping
-// to avoid missed wakes. Returns FALSE + ERROR_TIMEOUT on timeout.
+/// `address` must be valid for a read of `address_size` bytes.
+/// `compare_address` must be valid for a read of `address_size` bytes.
+// Wine ref: dlls/ntdll/sync.c:877 — RtlWaitOnAddress: compare_addr(addr, cmp, size)
+// inside a spinlock to prevent missed wakes; size must be 1/2/4/8 else STATUS_INVALID_PARAMETER.
+// Wine uses NtWaitForAlertByThreadId; on Linux we use FUTEX_WAIT on the low 32 bits.
+// EAGAIN means the value changed before we slept — return TRUE. ETIMEDOUT → FALSE + ERROR_TIMEOUT.
 pub unsafe extern "win64" fn wait_on_address(
-    _address: *const u8,
-    _compare_address: *const u8,
-    _address_size: usize,
-    _dw_milliseconds: u32,
+    address: *const u8,
+    compare_address: *const u8,
+    address_size: usize,
+    dw_milliseconds: u32,
 ) -> i32 {
-    warn_once("WaitOnAddress");
+    if address_size != 1 && address_size != 2 && address_size != 4 && address_size != 8 {
+        set_last_error(0x57); // ERROR_INVALID_PARAMETER
+        return 0;
+    }
+
+    // Compare current value to compare value.
+    let differs = unsafe {
+        match address_size {
+            1 => *address != *compare_address,
+            2 => *(address as *const u16) != *(compare_address as *const u16),
+            4 => *(address as *const u32) != *(compare_address as *const u32),
+            8 => *(address as *const u64) != *(compare_address as *const u64),
+            _ => unreachable!(),
+        }
+    };
+    if differs {
+        return 1; // TRUE — already different, no need to wait
+    }
+
+    // Snapshot the low 32 bits at the wait address to use as the futex compare value.
+    // For sizes < 4 we still read a u32 (safe: we only compare the low bytes we care about).
+    let futex_val = unsafe { std::ptr::read_unaligned(address as *const u32) };
+
+    // Build optional timeout.
+    let timeout_storage: libc::timespec;
+    let timeout_ptr: *const libc::timespec = if dw_milliseconds == 0xFFFF_FFFF {
+        std::ptr::null()
+    } else {
+        timeout_storage = libc::timespec {
+            tv_sec: (dw_milliseconds / 1000) as libc::time_t,
+            tv_nsec: ((dw_milliseconds % 1000) * 1_000_000) as libc::c_long,
+        };
+        &timeout_storage
+    };
+
+    // futex_wait on the low 32-bit word.
+    let ret = unsafe { futex_wait(address as *const u32, futex_val, timeout_ptr) };
+
+    let errno = unsafe { *libc::__errno_location() };
+    if ret == -1 && errno == libc::ETIMEDOUT {
+        set_last_error(0x5B4); // ERROR_TIMEOUT
+        return 0; // FALSE
+    }
+    // EAGAIN: value changed before sleep started — success.
+    // EINTR: signal — treat as woken, caller will re-check.
     1 // TRUE
 }
 
-/// WakeByAddressSingle: wake one thread waiting on an address.
+/// WakeByAddressSingle: wake one thread waiting on an address via WaitOnAddress.
 ///
-/// No-op.
+/// Issues FUTEX_WAKE(1) on the low 32-bit word at `address`.
 /// # Safety
-/// `_address` is accepted but never dereferenced.
-// Wine ref: dlls/ntdll/sync.c (RtlWakeAddressSingle) — hashes addr into one of 256 futex_queues
-// via (addr>>4)%256; sets entry->addr=NULL before calling NtAlertThreadByThreadId so two
-// concurrent calls are guaranteed to wake two distinct waiters rather than the same one twice.
-pub extern "win64" fn wake_by_address_single(_address: usize) {
-    warn_once("WakeByAddressSingle");
+/// `address` must be a valid pointer to a memory location that waiters are watching.
+// Wine ref: dlls/ntdll/sync.c:961 — RtlWakeAddressSingle walks the hash-bucket queue and
+// alerts one matching thread via NtAlertThreadByThreadId. On Linux we use FUTEX_WAKE(1).
+pub extern "win64" fn wake_by_address_single(address: usize) {
+    if address == 0 {
+        return;
+    }
+    unsafe { futex_wake(address as *const u32, 1) };
 }
 
-/// WakeByAddressAll: wake all threads waiting on an address.
+/// WakeByAddressAll: wake all threads waiting on an address via WaitOnAddress.
 ///
-/// No-op.
+/// Issues FUTEX_WAKE(INT_MAX) on the low 32-bit word at `address`.
 /// # Safety
-/// `_address` is accepted but never dereferenced.
-// Wine ref: dlls/ntdll/sync.c (RtlWakeAddressAll) — collects matching TIDs (up to 256) into a
-// local array under the spinlock, releases the lock, then calls NtAlertMultipleThreadByThreadId
-// in a single syscall to avoid making a syscall while holding a spinlock.
-pub extern "win64" fn wake_by_address_all(_address: usize) {
-    warn_once("WakeByAddressAll");
+/// `address` must be a valid pointer to a memory location that waiters are watching.
+// Wine ref: dlls/ntdll/sync.c:927 — RtlWakeAddressAll collects all matching TIDs then
+// calls NtAlertMultipleThreadByThreadId. On Linux FUTEX_WAKE(INT_MAX) wakes all waiters.
+pub extern "win64" fn wake_by_address_all(address: usize) {
+    if address == 0 {
+        return;
+    }
+    unsafe { futex_wake(address as *const u32, i32::MAX) };
 }
 
 // ── Task 2 — Thread description + timer queue + affinity ────────────────────
@@ -6084,91 +6239,262 @@ pub unsafe extern "win64" fn dos_date_time_to_file_time(
     1 // TRUE
 }
 
-// SRW locks are pointer-sized on Windows; we use the pointer itself as storage.
-// Wine ref: include/winnt.h:6354 — RTL_SRWLOCK is a single PVOID Ptr; Rtl acquire/release
-// are implemented in ntdll as futex-based slim reader-writer primitives. Single-threaded: no-op.
-/// AcquireSRWLockExclusive — no-op (single-threaded).
+// SRW locks use the packed srw_lock layout defined above (see SRW helpers section).
+// The SRWLOCK PVOID slot is 8 bytes; only the low 4 bytes carry state.
+
+/// AcquireSRWLockExclusive: acquire the SRW lock for exclusive (write) access.
+///
+/// Spins via CAS until `owners == 0`, then sets `owners = 1` and marks the
+/// exclusive-held bit. Blocks on futex if another thread holds the lock.
 ///
 /// # Safety
 /// `srw_lock` must be a valid pointer to an SRWLOCK-sized slot.
-// Wine ref: include/winnt.h — RTL_SRWLOCK is a single PVOID Ptr; RtlAcquireSRWLockExclusive
-// sets the exclusive bit in Ptr via interlocked CAS loop; waits on futex if contended.
+// Wine ref: dlls/ntdll/sync.c:514 — RtlAcquireSRWLockExclusive: increments
+// exclusive_waiters by 2 before the loop; CAS on owners==0 to set owners=1 and
+// clear the waiter count; futex-waits on &owners when contended.
 pub unsafe extern "win64" fn acquire_srw_lock_exclusive(srw_lock: *mut usize) {
-    warn_once("AcquireSRWLockExclusive");
-    let _ = srw_lock; // single-threaded: no-op
-}
-/// ReleaseSRWLockExclusive — no-op (single-threaded).
-///
-/// # Safety
-/// `srw_lock` must be a valid pointer to an SRWLOCK-sized slot.
-// Wine ref: include/winnt.h — RtlReleaseSRWLockExclusive clears the exclusive bit in
-// RTL_SRWLOCK.Ptr via interlocked ops and wakes waiting threads via futex.
-pub unsafe extern "win64" fn release_srw_lock_exclusive(srw_lock: *mut usize) {
-    warn_once("ReleaseSRWLockExclusive");
-    let _ = srw_lock;
-}
-/// AcquireSRWLockShared — no-op (single-threaded).
-///
-/// # Safety
-/// `srw_lock` must be a valid pointer to an SRWLOCK-sized slot.
-// Wine ref: include/winnt.h — RtlAcquireSRWLockShared increments the shared-reader
-// count in RTL_SRWLOCK.Ptr; blocks if exclusive bit is set; uses futex for waiting.
-pub unsafe extern "win64" fn acquire_srw_lock_shared(srw_lock: *mut usize) {
-    warn_once("AcquireSRWLockShared");
-    let _ = srw_lock;
-}
-/// ReleaseSRWLockShared — no-op (single-threaded).
-///
-// Wine ref: include/winnt.h:6354 — RTL_SRWLOCK is a single PVOID; RtlReleaseSRWLockShared
-// clears shared-lock count in the Ptr field via interlocked ops; single-threaded: no-op
-/// # Safety
-/// `srw_lock` must be a valid pointer to an SRWLOCK-sized slot.
-pub unsafe extern "win64" fn release_srw_lock_shared(srw_lock: *mut usize) {
-    warn_once("ReleaseSRWLockShared");
-    let _ = srw_lock;
+    let p = unsafe { srw_state_ptr(srw_lock) };
+    let atomic = unsafe { &*(p as *const AtomicI32) };
+
+    // Announce ourselves as an exclusive waiter (increment by 2 — bit 0 is the held flag).
+    atomic.fetch_add(2, Ordering::AcqRel);
+
+    loop {
+        let old_i32 = atomic.load(Ordering::Acquire);
+        let old: SrwLock = unsafe { std::mem::transmute(old_i32 as u32) };
+
+        if old.owners == 0 {
+            // Lock is free — try to grab it.
+            let mut new = old;
+            new.owners = 1;
+            new.exclusive_waiters = (new.exclusive_waiters - 2) | 1; // decrement waiter, set held bit
+            let new_i32: i32 = unsafe { std::mem::transmute::<SrwLock, u32>(new) as i32 };
+            if atomic
+                .compare_exchange(old_i32, new_i32, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                return;
+            }
+        } else {
+            // Lock is held — wait on the owners field (upper 2 bytes of the u32).
+            // We wait on the full 32-bit word; any change will wake us.
+            let owners_ptr = unsafe { (p as *const u8).add(2) as *const u32 };
+            let owners_val = old.owners as u32;
+            unsafe { futex_wait(owners_ptr, owners_val, std::ptr::null()) };
+        }
+    }
 }
 
-/// InitializeConditionVariable — no-op stub.
+/// ReleaseSRWLockExclusive: release an exclusively held SRW lock.
 ///
-// Wine ref: dlls/kernelbase/sync.c:1196 — RTL_CONDITION_VARIABLE is a single PVOID; initialize
-// sets it to zero (RTL_CONDITION_VARIABLE_INIT = {0})
+/// Clears `owners` and the exclusive-held bit. Wakes one exclusive waiter if
+/// any are present, otherwise wakes all shared waiters.
+///
 /// # Safety
-/// `_condition_variable` must be a valid writable pointer.
-pub unsafe extern "win64" fn initialize_condition_variable(_condition_variable: *mut usize) {
-    warn_once("InitializeConditionVariable");
+/// `srw_lock` must be a valid pointer to a currently exclusively held SRWLOCK slot.
+// Wine ref: dlls/ntdll/sync.c:589 — RtlReleaseSRWLockExclusive: CAS clears owners=0 and
+// exclusive_waiters &= ~1; if exclusive_waiters remain, wakes &owners (one exclusive);
+// otherwise wakes all (shared waiters watch the full 32-bit word).
+pub unsafe extern "win64" fn release_srw_lock_exclusive(srw_lock: *mut usize) {
+    let p = unsafe { srw_state_ptr(srw_lock) };
+    let atomic = unsafe { &*(p as *const AtomicI32) };
+
+    loop {
+        let old_i32 = atomic.load(Ordering::Acquire);
+        let old: SrwLock = unsafe { std::mem::transmute(old_i32 as u32) };
+        let mut new = old;
+        new.owners = 0;
+        new.exclusive_waiters &= !1; // clear held bit
+        let new_i32: i32 = unsafe { std::mem::transmute::<SrwLock, u32>(new) as i32 };
+        if atomic
+            .compare_exchange(old_i32, new_i32, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            // Wake appropriate waiters.
+            if new.exclusive_waiters != 0 {
+                // Exclusive waiters present — wake one on the owners field.
+                let owners_ptr = unsafe { (p as *const u8).add(2) as *const u32 };
+                unsafe { futex_wake(owners_ptr, 1) };
+            } else {
+                // No exclusive waiters — wake all (shared waiters watch the full word).
+                unsafe { futex_wake(p, i32::MAX) };
+            }
+            return;
+        }
+    }
 }
-/// SleepConditionVariableSRW — returns FALSE (timed out / not supported).
+
+/// AcquireSRWLockShared: acquire the SRW lock for shared (read) access.
+///
+/// Blocks if any exclusive waiter is present (to prevent starvation).
+/// Otherwise increments the shared-reader count.
 ///
 /// # Safety
-/// Pointer arguments must be valid or the caller must not care about the result.
-// Wine ref: dlls/kernelbase/sync.c:1196 — delegates to RtlSleepConditionVariableSRW with NT timeout;
-// flags=CONDITION_VARIABLE_LOCKMODE_SHARED unlocks as shared rather than exclusive
+/// `srw_lock` must be a valid pointer to an SRWLOCK-sized slot.
+// Wine ref: dlls/ntdll/sync.c:550 — RtlAcquireSRWLockShared: CAS on exclusive_waiters==0
+// to increment owners; if exclusive_waiters != 0, futex-waits on the full 32-bit word.
+pub unsafe extern "win64" fn acquire_srw_lock_shared(srw_lock: *mut usize) {
+    let p = unsafe { srw_state_ptr(srw_lock) };
+    let atomic = unsafe { &*(p as *const AtomicI32) };
+
+    loop {
+        let old_i32 = atomic.load(Ordering::Acquire);
+        let old: SrwLock = unsafe { std::mem::transmute(old_i32 as u32) };
+
+        if old.exclusive_waiters == 0 {
+            let mut new = old;
+            new.owners += 1;
+            let new_i32: i32 = unsafe { std::mem::transmute::<SrwLock, u32>(new) as i32 };
+            if atomic
+                .compare_exchange(old_i32, new_i32, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                return;
+            }
+        } else {
+            // Exclusive waiters present — wait on the full word.
+            unsafe { futex_wait(p, old_i32 as u32, std::ptr::null()) };
+        }
+    }
+}
+
+/// ReleaseSRWLockShared: release a shared (read) hold on the SRW lock.
+///
+/// Decrements the shared-reader count. If it reaches zero and there are
+/// exclusive waiters, wakes one on the owners futex word.
+///
+/// # Safety
+/// `srw_lock` must be a valid pointer to a currently shared-held SRWLOCK slot.
+// Wine ref: dlls/ntdll/sync.c:618 — RtlReleaseSRWLockShared: CAS decrements owners;
+// if owners reaches 0, calls RtlWakeAddressSingle(&owners) to unblock one exclusive waiter.
+pub unsafe extern "win64" fn release_srw_lock_shared(srw_lock: *mut usize) {
+    let p = unsafe { srw_state_ptr(srw_lock) };
+    let atomic = unsafe { &*(p as *const AtomicI32) };
+
+    loop {
+        let old_i32 = atomic.load(Ordering::Acquire);
+        let old: SrwLock = unsafe { std::mem::transmute(old_i32 as u32) };
+        let mut new = old;
+        if new.owners > 0 {
+            new.owners -= 1;
+        }
+        let new_i32: i32 = unsafe { std::mem::transmute::<SrwLock, u32>(new) as i32 };
+        if atomic
+            .compare_exchange(old_i32, new_i32, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            if new.owners == 0 {
+                // Last shared reader gone — wake one exclusive waiter if any.
+                let owners_ptr = unsafe { (p as *const u8).add(2) as *const u32 };
+                unsafe { futex_wake(owners_ptr, 1) };
+            }
+            return;
+        }
+    }
+}
+
+/// InitializeConditionVariable: zero-initialise a CONDITION_VARIABLE.
+///
+/// # Safety
+/// `condition_variable` must be a valid writable pointer to a PVOID-sized slot.
+// Wine ref: dlls/ntdll/sync.c:712 — RtlInitializeConditionVariable: sets variable->Ptr = NULL.
+pub unsafe extern "win64" fn initialize_condition_variable(condition_variable: *mut usize) {
+    if !condition_variable.is_null() {
+        unsafe { *condition_variable = 0 };
+    }
+}
+
+/// SleepConditionVariableSRW: atomically release the SRW lock and wait on the condvar.
+///
+/// Captures the current condvar value, releases the lock (shared or exclusive based on
+/// `flags`), futex-waits for the condvar to be incremented by a Wake call, then
+/// reacquires the lock. Returns TRUE on wake, FALSE on timeout.
+///
+/// # Safety
+/// `condition_variable` and `srw_lock` must be valid, non-null pointers.
+// Wine ref: dlls/ntdll/sync.c:799 — RtlSleepConditionVariableSRW: snapshots *(int*)&variable->Ptr,
+// releases lock (shared or exclusive per flags & RTL_CONDITION_VARIABLE_LOCKMODE_SHARED),
+// calls RtlWaitOnAddress(&variable->Ptr, &value, 4, timeout), reacquires lock.
 pub unsafe extern "win64" fn sleep_condition_variable_srw(
-    _condition_variable: *mut usize,
-    _srw_lock: *mut usize,
-    _dw_milliseconds: u32,
-    _flags: u32,
+    condition_variable: *mut usize,
+    srw_lock: *mut usize,
+    dw_milliseconds: u32,
+    flags: u32,
 ) -> i32 {
-    warn_once("SleepConditionVariableSRW");
-    0 // FALSE / timed out
+    if condition_variable.is_null() || srw_lock.is_null() {
+        return 0;
+    }
+
+    // Snapshot the current condvar value (low 32 bits).
+    let cv_ptr = condition_variable as *const u32;
+    let captured_val = unsafe { std::ptr::read_volatile(cv_ptr) };
+
+    // Release the SRW lock.
+    if flags & CONDITION_VARIABLE_LOCKMODE_SHARED != 0 {
+        unsafe { release_srw_lock_shared(srw_lock) };
+    } else {
+        unsafe { release_srw_lock_exclusive(srw_lock) };
+    }
+
+    // Build optional timeout.
+    let timeout_storage: libc::timespec;
+    let timeout_ptr: *const libc::timespec = if dw_milliseconds == 0xFFFF_FFFF {
+        std::ptr::null()
+    } else {
+        timeout_storage = libc::timespec {
+            tv_sec: (dw_milliseconds / 1000) as libc::time_t,
+            tv_nsec: ((dw_milliseconds % 1000) * 1_000_000) as libc::c_long,
+        };
+        &timeout_storage
+    };
+
+    let ret = unsafe { futex_wait(cv_ptr, captured_val, timeout_ptr) };
+
+    // Reacquire the lock regardless of wait result.
+    if flags & CONDITION_VARIABLE_LOCKMODE_SHARED != 0 {
+        unsafe { acquire_srw_lock_shared(srw_lock) };
+    } else {
+        unsafe { acquire_srw_lock_exclusive(srw_lock) };
+    }
+
+    let errno = unsafe { *libc::__errno_location() };
+    if ret == -1 && errno == libc::ETIMEDOUT {
+        set_last_error(0x5B4); // ERROR_TIMEOUT
+        return 0; // FALSE
+    }
+    1 // TRUE
 }
-/// WakeConditionVariable — no-op stub.
+
+/// WakeConditionVariable: wake one thread waiting on a condition variable.
 ///
-// Wine ref: dlls/kernelbase/sync.c — WakeConditionVariable calls RtlWakeConditionVariable
-// which uses futex FUTEX_WAKE to unblock one waiter; single-threaded: no-op
+/// Increments the condvar value and issues FUTEX_WAKE(1).
 /// # Safety
-/// `_condition_variable` must be a valid pointer.
-pub unsafe extern "win64" fn wake_condition_variable(_condition_variable: *mut usize) {
-    warn_once("WakeConditionVariable");
+/// `condition_variable` must be a valid pointer to a PVOID-sized condvar slot.
+// Wine ref: dlls/ntdll/sync.c:731 — RtlWakeConditionVariable: InterlockedIncrement on
+// variable->Ptr then RtlWakeAddressSingle(variable).
+pub unsafe extern "win64" fn wake_condition_variable(condition_variable: *mut usize) {
+    if condition_variable.is_null() {
+        return;
+    }
+    let cv_atomic = unsafe { &*(condition_variable as *const AtomicI32) };
+    cv_atomic.fetch_add(1, Ordering::Release);
+    unsafe { futex_wake(condition_variable as *const u32, 1) };
 }
-/// WakeAllConditionVariable — no-op stub.
+
+/// WakeAllConditionVariable: wake all threads waiting on a condition variable.
 ///
-// Wine ref: dlls/kernelbase/sync.c — WakeAllConditionVariable calls RtlWakeAllConditionVariable
-// which uses FUTEX_WAKE with INT_MAX to unblock all waiters; single-threaded: no-op
+/// Increments the condvar value and issues FUTEX_WAKE(INT_MAX).
 /// # Safety
-/// `_condition_variable` must be a valid pointer.
-pub unsafe extern "win64" fn wake_all_condition_variable(_condition_variable: *mut usize) {
-    warn_once("WakeAllConditionVariable");
+/// `condition_variable` must be a valid pointer to a PVOID-sized condvar slot.
+// Wine ref: dlls/ntdll/sync.c:745 — RtlWakeAllConditionVariable: InterlockedIncrement
+// on variable->Ptr then RtlWakeAddressAll(variable).
+pub unsafe extern "win64" fn wake_all_condition_variable(condition_variable: *mut usize) {
+    if condition_variable.is_null() {
+        return;
+    }
+    let cv_atomic = unsafe { &*(condition_variable as *const AtomicI32) };
+    cv_atomic.fetch_add(1, Ordering::Release);
+    unsafe { futex_wake(condition_variable as *const u32, i32::MAX) };
 }
 
 // ── Threads ───────────────────────────────────────────────────────────────────
