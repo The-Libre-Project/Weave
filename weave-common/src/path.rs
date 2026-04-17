@@ -213,8 +213,16 @@ fn extract_drive(s: &str) -> Result<(char, &str), PathError> {
             return Ok((letter, rest));
         }
     }
-    // No drive letter — treat as relative to C: for now.
-    // Windows apps occasionally use bare relative paths after CWD resolution.
+    // No drive letter — check for root-relative path (leading backslash).
+    // `\path\to\file` after prefix-stripping (e.g. after `\\?\` was removed and
+    // no drive letter remained) is a root-relative Windows path.  Map it to Z:
+    // so it resolves under the Linux filesystem root (`/`), consistent with how
+    // Weave uses Z: as the mirror of the real Linux root.
+    if bytes.first() == Some(&b'\\') {
+        return Ok(('Z', &s[1..]));
+    }
+    // Bare relative path (no drive letter, no leading backslash) — treat as
+    // relative to C: so Windows apps can use CWD-relative paths.
     Ok(('C', s))
 }
 
