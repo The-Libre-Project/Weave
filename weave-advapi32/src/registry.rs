@@ -1703,19 +1703,19 @@ pub fn resolve(func: &str) -> Option<usize> {
             Some(system_function_036 as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
         }
         "CryptAcquireContextA" => Some(
-            crypt_acquire_context_a as unsafe extern "win64" fn(_, _, _, _, _) -> _
-                as *const () as usize,
+            crypt_acquire_context_a as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const ()
+                as usize,
         ),
         "CryptAcquireContextW" => Some(
-            crypt_acquire_context_w as unsafe extern "win64" fn(_, _, _, _, _) -> _
-                as *const () as usize,
+            crypt_acquire_context_w as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const ()
+                as usize,
         ),
-        "CryptReleaseContext" => Some(
-            crypt_release_context as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
-        ),
-        "CryptGenRandom" => Some(
-            crypt_gen_random as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
-        ),
+        "CryptReleaseContext" => {
+            Some(crypt_release_context as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "CryptGenRandom" => {
+            Some(crypt_gen_random as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize)
+        }
         _ => None,
     }
 }
