@@ -39,3 +39,4 @@ libc = "0.2"
 [dev-dependencies]
 weave-installer = { path = "../weave-installer" }
 weave-desktop = { path = "../weave-desktop" }
+tempfile = "3"
