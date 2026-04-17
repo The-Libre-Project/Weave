@@ -10199,6 +10199,104 @@ pub unsafe extern "win64" fn set_console_ctrl_handler(_handler_routine: usize, _
     1 // TRUE
 }
 
+// ── Task-01 additions — curl stubs ────────────────────────────────────────────
+
+/// CancelIo — cancel pending I/O on a file handle. Stub returns TRUE.
+///
+/// Wine ref: dlls/kernelbase/sync.c — CancelIo calls NtCancelIoFile on the
+/// kernel handle. Weave: no async I/O model; return TRUE (no-op).
+///
+/// # Safety
+/// `h_file` is accepted but not used.
+// Wine ref: dlls/kernelbase/sync.c — CancelIo(hFile) calls NtCancelIoFile; cancels all pending I/O for hFile issued by the current thread
+pub unsafe extern "win64" fn cancel_io(_h_file: usize) -> i32 {
+    1 // TRUE — no pending I/O in Weave
+}
+
+/// SleepEx — sleep for a specified interval, optionally alertable. Returns 0.
+///
+/// Wine ref: dlls/kernel32/sync.c — SleepEx calls NtDelayExecution. When
+/// bAlertable is TRUE it can return WAIT_IO_COMPLETION (0xC0). Weave: delegate
+/// to libc::usleep.
+///
+/// # Safety
+/// No pointer arguments.
+// Wine ref: dlls/kernel32/sync.c — SleepEx calls NtDelayExecution(Alertable, &timeout); returns 0 normally, WAIT_IO_COMPLETION(0xC0) when an APC fires
+pub unsafe extern "win64" fn sleep_ex(dw_milliseconds: u32, _b_alertable: i32) -> u32 {
+    if dw_milliseconds > 0 {
+        libc::usleep((dw_milliseconds as u64 * 1000) as libc::c_uint);
+    }
+    0 // WAIT_OBJECT_0
+}
+
+// MODULEENTRY32W layout (Windows x64, tlhelp32.h):
+//   dwSize         u32   = 4
+//   th32ModuleID   u32
+//   th32ProcessID  u32
+//   GlblcntUsage   u32
+//   ProccntUsage   u32
+//   modBaseAddr    *u8   = 8 (at offset 20 due to padding)
+//   modBaseSize    u32   = 4
+//   hModule        usize = 8
+//   szModule[256 chars × 2 bytes = 512]
+//   szExePath[260 chars × 2 bytes = 520]
+// Total: ≥ 568 bytes.
+// We only support the null-stub path — no toolhelp snapshot in Weave.
+
+/// Module32First — retrieve the first module in a snapshot. Returns FALSE.
+///
+/// Wine ref: dlls/kernelbase/toolhelp.c — Module32First reads the first entry
+/// from the snapshot. Weave has no Toolhelp snapshots; return FALSE + ERROR_NO_MORE_FILES.
+///
+/// # Safety
+/// `h_snapshot` and `lp_me` are accepted but not used.
+// Wine ref: dlls/kernelbase/toolhelp.c — Module32First/Next walk the snapshot module list; return FALSE+ERROR_NO_MORE_FILES(18) when exhausted
+pub unsafe extern "win64" fn module32_first(_h_snapshot: usize, _lp_me: *mut u8) -> i32 {
+    weave_common::set_last_error(18); // ERROR_NO_MORE_FILES
+    0 // FALSE
+}
+
+/// Module32Next — retrieve the next module in a snapshot. Returns FALSE.
+///
+/// Wine ref: dlls/kernelbase/toolhelp.c — Module32Next advances the snapshot cursor.
+/// Weave: always returns FALSE + ERROR_NO_MORE_FILES.
+///
+/// # Safety
+/// `h_snapshot` and `lp_me` are accepted but not used.
+// Wine ref: dlls/kernelbase/toolhelp.c — Module32Next advances cursor; returns FALSE+ERROR_NO_MORE_FILES when no more entries
+pub unsafe extern "win64" fn module32_next(_h_snapshot: usize, _lp_me: *mut u8) -> i32 {
+    weave_common::set_last_error(18); // ERROR_NO_MORE_FILES
+    0 // FALSE
+}
+
+/// PeekNamedPipe — check for data in a named pipe without reading. Returns TRUE with zero bytes.
+///
+/// Wine ref: dlls/kernelbase/file.c — PeekNamedPipe uses NtQueryInformationFile
+/// on the pipe handle. Weave: return TRUE with 0 bytes available.
+///
+/// # Safety
+/// All pointer arguments may be null; we only write to non-null ones.
+// Wine ref: dlls/kernelbase/file.c — PeekNamedPipe calls NtQueryInformationFile(FilePipeLocalInfo); fills lpBytesRead/lpTotalBytesAvail/lpBytesLeftThisMessage
+pub unsafe extern "win64" fn peek_named_pipe(
+    _h_named_pipe: usize,
+    _lp_buffer: *mut u8,
+    _n_buffer_size: u32,
+    lp_bytes_read: *mut u32,
+    lp_total_bytes_avail: *mut u32,
+    lp_bytes_left_this_message: *mut u32,
+) -> i32 {
+    if !lp_bytes_read.is_null() {
+        *lp_bytes_read = 0;
+    }
+    if !lp_total_bytes_avail.is_null() {
+        *lp_total_bytes_avail = 0;
+    }
+    if !lp_bytes_left_this_message.is_null() {
+        *lp_bytes_left_this_message = 0;
+    }
+    1 // TRUE — no data available, not an error
+}
+
 // ── Resolver ──────────────────────────────────────────────────────────────────
 
 /// Resolve a kernel32.dll import to a stub address.
@@ -11258,6 +11356,18 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         }
         "SetCommTimeouts" => {
             Some(set_comm_timeouts as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        // Task-01 additions — curl
+        "CancelIo" => Some(cancel_io as unsafe extern "win64" fn(_) -> _ as *const () as usize),
+        "SleepEx" => Some(sleep_ex as unsafe extern "win64" fn(_, _) -> _ as *const () as usize),
+        "Module32First" => {
+            Some(module32_first as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "Module32Next" => {
+            Some(module32_next as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "PeekNamedPipe" => {
+            Some(peek_named_pipe as unsafe extern "win64" fn(_, _, _, _, _, _) -> _ as *const () as usize)
         }
         _ => {
             // version.dll functions are forwarded through kernel32 in some apps;

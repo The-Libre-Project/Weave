@@ -2260,3 +2260,145 @@ fn m5_prefix_cli_gate() {
     eprintln!("m5_prefix_cli_gate step 5 OK: hello-cli absent after delete");
     eprintln!("m5_prefix_cli_gate: all 5 steps passed");
 }
+
+/// `weave --no-sandbox curl.exe http://example.com` — ws2 second-app network validation gate.
+///
+/// Verifies that curl.exe (static MinGW Windows build, 64-bit) can make a real
+/// HTTP GET request to http://example.com under Weave and return the HTML
+/// response to stdout. This exercises the full ws2_32 networking path
+/// (WSAStartup → getaddrinfo → socket → connect → send → recv → closesocket)
+/// using a blocking/select-based HTTP client rather than the async WSAEventSelect
+/// model used by plink.
+///
+/// Exit criteria:
+///   1. weave exits 0
+///   2. stdout contains "Example Domain"
+///
+/// Network requires /etc/hosts access, so --no-sandbox is mandatory.
+/// Skipped gracefully on non-Linux targets.
+#[test]
+fn curl_ws2_gate() {
+    if !cfg!(target_os = "linux") {
+        eprintln!("skipping curl_ws2_gate — requires Linux");
+        return;
+    }
+
+    let manifest = env!("CARGO_MANIFEST_DIR");
+    let fixture = format!("{manifest}/../tests/fixtures/bin/curl.exe");
+
+    if !std::path::Path::new(&fixture).exists() {
+        eprintln!(
+            "skipping: curl.exe not present in tests/fixtures/bin/ — curl_ws2_gate skipped"
+        );
+        return;
+    }
+
+    let weave_bin = env!("CARGO_BIN_EXE_weave");
+
+    let start = std::time::Instant::now();
+    let mut child = std::process::Command::new(weave_bin)
+        .arg("--no-sandbox")
+        .arg(&fixture)
+        .arg("--no-progress-meter")
+        .arg("http://example.com")
+        .stderr(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|e| panic!("failed to spawn weave on curl.exe: {e}"));
+
+    // Drain stderr concurrently to avoid 64 KB pipe blocking.
+    let mut stderr_pipe = child.stderr.take().expect("stderr was piped");
+    let stderr_shared = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let stderr_writer = std::sync::Arc::clone(&stderr_shared);
+    let drain_thread = std::thread::spawn(move || {
+        use std::io::Read;
+        let mut buf = Vec::new();
+        let _ = stderr_pipe.read_to_end(&mut buf);
+        *stderr_writer.lock().unwrap() = buf;
+    });
+
+    // Drain stdout concurrently (curl writes HTML here).
+    let mut stdout_pipe = child.stdout.take().expect("stdout was piped");
+    let stdout_shared = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let stdout_writer = std::sync::Arc::clone(&stdout_shared);
+    let stdout_drain_thread = std::thread::spawn(move || {
+        use std::io::Read;
+        let mut buf = Vec::new();
+        let _ = stdout_pipe.read_to_end(&mut buf);
+        *stdout_writer.lock().unwrap() = buf;
+    });
+
+    // 30-second deadline — DNS + TCP + HTTP for example.com should complete well within this.
+    let deadline = start + std::time::Duration::from_secs(30);
+    let mut exit_status: Option<std::process::ExitStatus> = None;
+    let mut killed_by_deadline = false;
+
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                exit_status = Some(status);
+                break;
+            }
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    eprintln!("curl_ws2_gate: deadline exceeded — killing curl.exe");
+                    let _ = child.kill();
+                    killed_by_deadline = true;
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err(e) => {
+                eprintln!("curl_ws2_gate: try_wait error: {e}");
+                break;
+            }
+        }
+    }
+
+    let elapsed = start.elapsed();
+    drain_thread.join().ok();
+    stdout_drain_thread.join().ok();
+
+    let stderr = String::from_utf8_lossy(&stderr_shared.lock().unwrap()).into_owned();
+    let stdout = String::from_utf8_lossy(&stdout_shared.lock().unwrap()).into_owned();
+
+    eprintln!("curl_ws2_gate: elapsed={elapsed:.1?} killed={killed_by_deadline}");
+    eprintln!("--- curl_ws2_gate FULL STDOUT BEGIN ---");
+    eprintln!("{stdout}");
+    eprintln!("--- curl_ws2_gate FULL STDOUT END ---");
+    eprintln!("--- curl_ws2_gate FULL STDERR BEGIN ---");
+    eprintln!("{stderr}");
+    eprintln!("--- curl_ws2_gate FULL STDERR END ---");
+
+    // Report unresolved imports for diagnosis.
+    eprintln!("--- curl_ws2_gate unresolved imports ---");
+    for line in stderr.lines().filter(|l| l.contains("unresolved import")) {
+        eprintln!("{line}");
+    }
+
+    assert!(
+        !killed_by_deadline,
+        "curl_ws2_gate FAIL: curl.exe did not exit within 30s deadline\nstderr:\n{stderr}"
+    );
+
+    // Gate 1 (hard): IAT patch must complete.
+    assert!(
+        stderr.contains("weave: imports resolved"),
+        "curl_ws2_gate Gate 1 FAIL: IAT patch did not complete\nelapsed: {elapsed:.1?}\nstderr:\n{stderr}"
+    );
+
+    // Gate 2 (hard): exit 0.
+    assert!(
+        exit_status.map_or(false, |s| s.success()),
+        "curl_ws2_gate Gate 2 FAIL: curl.exe exited {:?} (expected 0)\nstdout:\n{stdout}\nstderr:\n{stderr}",
+        exit_status
+    );
+
+    // Gate 3 (hard): stdout contains the expected page content.
+    assert!(
+        stdout.contains("Example Domain"),
+        "curl_ws2_gate Gate 3 FAIL: stdout does not contain 'Example Domain'\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+
+    eprintln!("curl_ws2_gate: all gates passed — curl.exe HTTP GET to example.com succeeded");
+}

@@ -241,6 +241,12 @@ unsafe fn patch_inner(
         };
         let iat_rva = desc.first_thunk as usize;
 
+        // Diagnostic: log which DLL we are patching and how many imports it has.
+        // TODO: remove after curl_ws2_gate passes.
+        if dll_name.to_ascii_lowercase().contains("crt-runtime") || dll_name.to_ascii_lowercase().contains("kernel32") {
+            eprintln!("weave/iat: patching {dll_name} INT={int_rva:#x} IAT={iat_rva:#x} first_thunk_in_desc={:#x} orig={:#x}", desc.first_thunk, desc.original_first_thunk);
+        }
+
         // Temporarily make the IAT page(s) writable.
         let iat_va = unsafe { base.add(iat_rva) };
         let page_start = page_align_down(iat_va as usize);
@@ -279,6 +285,11 @@ unsafe fn patch_inner(
             match resolve(&dll_name, &func_name) {
                 Some(addr) => unsafe {
                     std::ptr::write_unaligned(base.add(iat_rva + i * 8) as *mut u64, addr as u64);
+                    // Diagnostic: log key UCRT function patches.
+                    // TODO: remove after curl_ws2_gate passes.
+                    if func_name == "__p___argc" || func_name == "_configure_narrow_argv" || func_name == "_initterm" {
+                        eprintln!("weave/iat: patched {dll_name}!{func_name} → {addr:#x} at IAT slot {:#x}", base as usize + iat_rva + i * 8);
+                    }
                 },
                 None if lenient => {
                     let iat_slot_va = base as usize + iat_rva + i * 8;

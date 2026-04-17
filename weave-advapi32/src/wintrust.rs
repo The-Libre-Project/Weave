@@ -491,6 +491,73 @@ pub unsafe extern "win64" fn cert_close_store(_h_cert_store: usize, _dw_flags: u
     1 // TRUE
 }
 
+/// CertOpenSystemStoreA — open a certificate store by name.
+///
+/// Wine ref: dlls/crypt32/store.c — CertOpenSystemStoreA opens a system store
+/// (e.g. "ROOT", "MY", "CA"). Returns a fake store handle so callers proceed.
+///
+/// # Safety
+/// `subsystem_protocol` is a null-terminated C string (store name); we ignore it.
+// Wine ref: dlls/crypt32/store.c — CertOpenSystemStoreA calls CertOpenStore(CERT_STORE_PROV_SYSTEM_A, ...); returns HCERTSTORE or NULL on failure
+pub unsafe extern "win64" fn cert_open_system_store_a(
+    _h_prov: usize,
+    _sz_subsystem_protocol: *const u8,
+) -> usize {
+    FAKE_STORE_HANDLE
+}
+
+/// CertEnumCertificatesInStore — enumerate certificates in a store.
+///
+/// Wine ref: dlls/crypt32/store.c — CertEnumCertificatesInStore walks the store
+/// chain. Returns NULL (no certificates) for our fake store.
+///
+/// # Safety
+/// `h_cert_store` and `pv_prev_context` are accepted but not dereferenced.
+// Wine ref: dlls/crypt32/store.c — CertEnumCertificatesInStore returns next CERT_CONTEXT in store or NULL if done; caller must free each context
+pub unsafe extern "win64" fn cert_enum_certificates_in_store(
+    _h_cert_store: usize,
+    _pv_prev_context: *const u8,
+) -> *const u8 {
+    std::ptr::null() // no certificates — fake store is empty
+}
+
+/// CertGetIntendedKeyUsage — retrieve intended key usage from a certificate.
+///
+/// Wine ref: dlls/crypt32/cert.c — CertGetIntendedKeyUsage reads the
+/// KEY_USAGE extension from pCertInfo. Returns FALSE (stub).
+///
+/// # Safety
+/// All pointer arguments accepted but not used.
+// Wine ref: dlls/crypt32/cert.c — CertGetIntendedKeyUsage decodes the 2.5.29.15 extension; writes up to cbKeyUsage bytes; returns FALSE if extension absent
+pub unsafe extern "win64" fn cert_get_intended_key_usage(
+    _dw_cert_encoding_type: u32,
+    _p_cert_info: *const u8,
+    _pb_key_usage: *mut u8,
+    _cb_key_usage: u32,
+) -> i32 {
+    0 // FALSE — no key usage extension in our fake cert
+}
+
+/// CertGetEnhancedKeyUsage — retrieve enhanced key usage OIDs from a certificate.
+///
+/// Wine ref: dlls/crypt32/cert.c — CertGetEnhancedKeyUsage reads the 2.5.29.37
+/// extension or the CERT_ENHKEY_USAGE_PROP_ID property.
+/// Returns FALSE (stub).
+///
+/// # Safety
+/// All pointer arguments accepted but not dereferenced.
+// Wine ref: dlls/crypt32/cert.c — CertGetEnhancedKeyUsage reads 2.5.29.37 extension; fills CERT_ENHKEY_USAGE struct; returns FALSE on error (CRYPT_E_NOT_FOUND)
+pub unsafe extern "win64" fn cert_get_enhanced_key_usage(
+    _p_cert_context: *const u8,
+    _dw_flags: u32,
+    _p_usage: *mut u8,
+    _pcb_usage: *mut u32,
+) -> i32 {
+    // CRYPT_E_NOT_FOUND = 0x80092004
+    weave_common::set_last_error(0x8009_2004_u32);
+    0 // FALSE
+}
+
 pub fn resolve_crypt32(func: &str) -> Option<usize> {
     Some(match func {
         "CryptQueryObject" => crypt_query_object as *const () as usize,
@@ -504,6 +571,11 @@ pub fn resolve_crypt32(func: &str) -> Option<usize> {
         }
         "CertFreeCertificateContext" => cert_free_certificate_context as *const () as usize,
         "CertCloseStore" => cert_close_store as *const () as usize,
+        // Task-01 additions — curl
+        "CertOpenSystemStoreA" => cert_open_system_store_a as *const () as usize,
+        "CertEnumCertificatesInStore" => cert_enum_certificates_in_store as *const () as usize,
+        "CertGetIntendedKeyUsage" => cert_get_intended_key_usage as *const () as usize,
+        "CertGetEnhancedKeyUsage" => cert_get_enhanced_key_usage as *const () as usize,
         _ => return None,
     })
 }
@@ -604,4 +676,279 @@ pub fn resolve_dbghelp(func: &str) -> Option<usize> {
         "ImageNtHeader" => image_nt_header as *const () as usize,
         _ => return None,
     })
+}
+
+// ── bcrypt.dll ────────────────────────────────────────────────────────────────
+
+/// BCryptGenRandom — fill a buffer with cryptographically random bytes.
+///
+/// Wine ref: dlls/bcrypt/bcrypt_main.c — BCryptGenRandom(hAlgorithm, pbBuffer,
+/// cbBuffer, dwFlags) calls RtlGenRandom for BCRYPT_USE_SYSTEM_PREFERRED_RNG;
+/// otherwise uses the algorithm's pseudo-RNG. We always use getrandom(2) which
+/// is the modern Linux equivalent (atomic for ≤256 bytes, blocks until seeded).
+///
+/// Returns STATUS_SUCCESS (0) on success, STATUS_INVALID_PARAMETER on failure.
+/// The BCRYPT_USE_SYSTEM_PREFERRED_RNG flag (0x00000002) allows hAlgorithm to
+/// be NULL; curl uses this flag unconditionally.
+///
+/// # Safety
+/// `pb_buffer` must be a writable buffer of at least `cb_buffer` bytes, or null
+/// with `BCRYPT_USE_SYSTEM_PREFERRED_RNG` flag (which we treat as an error for
+/// safety).
+// Wine ref: dlls/bcrypt/bcrypt_main.c — BCryptGenRandom: BCRYPT_USE_SYSTEM_PREFERRED_RNG calls RtlGenRandom(pbBuffer, cbBuffer) → getrandom(2); returns STATUS_SUCCESS(0) or STATUS_INVALID_PARAMETER(0xC000000D)
+pub unsafe extern "win64" fn bcrypt_gen_random(
+    _h_algorithm: usize,
+    pb_buffer: *mut u8,
+    cb_buffer: u32,
+    _dw_flags: u32,
+) -> i32 {
+    if pb_buffer.is_null() || cb_buffer == 0 {
+        return 0xC000_000Du32 as i32; // STATUS_INVALID_PARAMETER
+    }
+    // Use the same getrandom(2) helper as CryptGenRandom / RtlGenRandom.
+    // For large buffers (>256 bytes) getrandom may short-read; loop until done.
+    let mut remaining = cb_buffer as usize;
+    let mut ptr = pb_buffer;
+    while remaining > 0 {
+        let chunk = remaining.min(256);
+        let ret = unsafe { libc::getrandom(ptr as *mut libc::c_void, chunk, 0) };
+        if ret < 0 {
+            return 0xC000_000Du32 as i32; // STATUS_INVALID_PARAMETER
+        }
+        ptr = unsafe { ptr.add(ret as usize) };
+        remaining -= ret as usize;
+    }
+    0 // STATUS_SUCCESS
+}
+
+pub fn resolve_bcrypt(func: &str) -> Option<usize> {
+    Some(match func {
+        "BCryptGenRandom" => bcrypt_gen_random as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
+        _ => return None,
+    })
+}
+
+// ── secur32.dll — SSPI stub ───────────────────────────────────────────────────
+
+/// Stub returning SEC_E_UNSUPPORTED_FUNCTION for all SSPI calls.
+///
+/// This is installed in every slot of the fake SecurityFunctionTableA so that
+/// any caller that actually invokes an SSPI function gets a clean HRESULT error
+/// rather than a NULL-pointer crash.
+///
+/// Wine ref: dlls/secur32/secur32.c — real SecFn table entries dispatch to
+/// provider DLLs (Negotiate, Kerberos, NTLM, Schannel).
+///
+/// # Safety
+/// Ignores all arguments — no pointer dereferences.
+pub unsafe extern "win64" fn sspi_stub_fn() -> i32 {
+    // SEC_E_UNSUPPORTED_FUNCTION = 0x80090302u32 as i32
+    0x8009_0302u32 as i32
+}
+
+// Windows SecurityFunctionTableA layout (sspi.h, Windows SDK, 64-bit):
+//
+//   offset   0: dwVersion          (u32 + 4 pad = 8)
+//   offset   8: EnumerateSecurityPackagesA
+//   offset  16: QueryCredentialsAttributesA
+//   offset  24: AcquireCredentialsHandleA
+//   offset  32: FreeCredentialsHandle
+//   offset  40: Reserved2
+//   offset  48: InitializeSecurityContextA
+//   offset  56: AcceptSecurityContext
+//   offset  64: CompleteAuthToken
+//   offset  72: DeleteSecurityContext
+//   offset  80: ApplyControlToken
+//   offset  88: QueryContextAttributesA
+//   offset  96: ImpersonateSecurityContext
+//   offset 104: RevertSecurityContext
+//   offset 112: MakeSignature
+//   offset 120: VerifySignature
+//   offset 128: FreeContextBuffer
+//   offset 136: QuerySecurityPackageInfoA
+//   offset 144: Reserved3
+//   offset 152: Reserved4
+//   offset 160: ExportSecurityContext
+//   offset 168: ImportSecurityContextA
+//   offset 176: AddCredentialsA
+//   offset 184: Reserved8
+//   offset 192: QuerySecurityContextToken
+//   offset 200: EncryptMessage
+//   offset 208: DecryptMessage
+//   offset 216: SetContextAttributesA   (Windows XP+)
+//   offset 224: SetCredentialsAttributesA
+//   offset 232: ChangeAccountPasswordA
+//   offset 240: Reserved9
+//   offset 248: QueryContextAttributesExA
+//   offset 256: QueryCredentialsAttributesExA
+//   Total: 264 bytes (33 slots: 1 u32 version + 4-byte pad + 32 fn pointers × 8)
+
+// We use a flat [u8; 264] with the version field and all fn pointers set at
+// init time. Rust's const fn limitations prevent building this as a typed
+// struct with function pointer values in a static initializer, so we use a
+// raw byte table (8-byte slots).
+//
+// SAFETY: The table is write-once at program startup before any PE entry
+// point runs. After initialization it is read-only from the PE's perspective.
+
+static SSPI_TABLE_INIT: std::sync::Once = std::sync::Once::new();
+// SAFETY: written exactly once inside SSPI_TABLE_INIT.call_once before any PE
+// entry point runs; after that it is read-only from the PE's perspective.
+// UnsafeCell would be cleaner but we need *const u8 for the return type.
+static mut SSPI_TABLE: [u64; 33] = [0u64; 33];
+
+fn init_sspi_table() -> *const u8 {
+    SSPI_TABLE_INIT.call_once(|| {
+        let stub = sspi_stub_fn as *const () as usize as u64;
+        // SAFETY: call_once guarantees exclusive access.
+        unsafe {
+            SSPI_TABLE[0] = 1u64; // dwVersion = SECURITY_SUPPORT_PROVIDER_INTERFACE_VERSION (1)
+            for i in 1..33 {
+                SSPI_TABLE[i] = stub;
+            }
+        }
+    });
+    // SAFETY: After call_once, SSPI_TABLE is not mutated again. The returned
+    // pointer is valid for the lifetime of the process.
+    #[allow(static_mut_refs)]
+    unsafe { SSPI_TABLE.as_ptr() as *const u8 }
+}
+
+/// InitSecurityInterfaceA — return a pointer to the SSPI function table.
+///
+/// Wine ref: dlls/secur32/secur32.c — InitSecurityInterfaceA returns &SSPI_ftable,
+/// a SecurityFunctionTableA populated with provider-dispatching function pointers.
+/// Our table has dwVersion=1 and all function slots pointing to sspi_stub_fn,
+/// which returns SEC_E_UNSUPPORTED_FUNCTION. This satisfies the non-NULL check
+/// in curl's Schannel init (Curl_schannel_init: `if(!g_pSSPI) return CURLE_FAILED_INIT`)
+/// while safely failing any actual TLS handshake attempt.
+///
+/// # Safety
+/// No pointer arguments. Returns a pointer to a static table (safe to use
+/// for the lifetime of the process).
+// Wine ref: dlls/secur32/secur32.c — InitSecurityInterfaceA returns &SSPI_ftable; table has dwVersion=SECURITY_SUPPORT_PROVIDER_INTERFACE_VERSION(1), all fn ptrs filled
+pub unsafe extern "win64" fn init_security_interface_a() -> *const u8 {
+    eprintln!("weave/Secur32!InitSecurityInterfaceA → stub SSPI table");
+    init_sspi_table()
+}
+
+pub fn resolve_secur32(func: &str) -> Option<usize> {
+    Some(match func {
+        "InitSecurityInterfaceA" => init_security_interface_a as unsafe extern "win64" fn() -> _ as *const () as usize,
+        _ => return None,
+    })
+}
+
+// ── normaliz.dll ──────────────────────────────────────────────────────────────
+
+/// IdnToAscii — convert an Internationalized Domain Name to its ASCII form.
+///
+/// Wine ref: dlls/normaliz/normaliz.c — IdnToAscii converts a UTF-16 IDN label
+/// to ACE form (xn--...). We stub to return 0 (failure / not supported).
+/// curl only calls this for non-ASCII domain names (international URLs).
+///
+/// # Safety
+/// Pointer arguments are ignored.
+// Wine ref: dlls/normaliz/normaliz.c — IdnToAscii converts UTF-16 IDN to Punycode ACE; returns 0 on failure
+pub unsafe extern "win64" fn idn_to_ascii(
+    _dw_flags: u32,
+    _lp_unicode_char_str: *const u16,
+    _cch_unicode_char: i32,
+    _lp_ascii_char_str: *mut u16,
+    _cch_ascii_char: i32,
+) -> i32 {
+    0 // failure — not supported; caller falls back to raw Unicode host
+}
+
+/// IdnToUnicode — convert an ACE-form IDN back to Unicode.
+///
+/// Wine ref: dlls/normaliz/normaliz.c — IdnToUnicode converts Punycode ACE
+/// (xn--...) back to UTF-16. Stub — returns 0 (failure).
+///
+/// # Safety
+/// Pointer arguments are ignored.
+// Wine ref: dlls/normaliz/normaliz.c — IdnToUnicode converts Punycode ACE to UTF-16; returns 0 on failure
+pub unsafe extern "win64" fn idn_to_unicode(
+    _dw_flags: u32,
+    _lp_ascii_char_str: *const u16,
+    _cch_ascii_char: i32,
+    _lp_unicode_char_str: *mut u16,
+    _cch_unicode_char: i32,
+) -> i32 {
+    0 // failure — not supported
+}
+
+pub fn resolve_normaliz(func: &str) -> Option<usize> {
+    Some(match func {
+        "IdnToAscii" => idn_to_ascii as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const () as usize,
+        "IdnToUnicode" => idn_to_unicode as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const () as usize,
+        _ => return None,
+    })
+}
+
+// ── iphlpapi.dll ──────────────────────────────────────────────────────────────
+
+/// if_nametoindex — convert a network interface name to its index.
+///
+/// Wine ref: dlls/iphlpapi/iphlpapi_main.c — if_nametoindex calls the POSIX
+/// if_nametoindex() directly (same name, same semantics on Linux).
+///
+/// # Safety
+/// `if_name` must be a valid null-terminated C string, or null.
+// Wine ref: dlls/iphlpapi/iphlpapi_main.c — if_nametoindex delegates to POSIX if_nametoindex(3); returns 0 if name not found
+pub unsafe extern "win64" fn win_if_nametoindex(if_name: *const u8) -> u32 {
+    if if_name.is_null() {
+        return 0;
+    }
+    let ret = unsafe { libc::if_nametoindex(if_name as *const libc::c_char) };
+    ret
+}
+
+pub fn resolve_iphlpapi(func: &str) -> Option<usize> {
+    Some(match func {
+        "if_nametoindex" => win_if_nametoindex as unsafe extern "win64" fn(_) -> _ as *const () as usize,
+        _ => return None,
+    })
+}
+
+// ── wldap32.dll ───────────────────────────────────────────────────────────────
+//
+// curl imports WLDAP32 for LDAP URL support (ldap://, ldaps://) which is not
+// relevant for plain HTTP. All stubs return 0 / NULL so IAT patching succeeds
+// and any accidental call returns failure gracefully.
+
+/// Generic WLDAP32 stub — returns NULL for functions returning pointers,
+/// or 0 (LDAP_OTHER) for functions returning ULONG error codes.
+///
+/// # Safety
+/// All arguments are ignored.
+pub unsafe extern "win64" fn wldap_stub_null() -> usize {
+    0
+}
+
+pub fn resolve_wldap32(func: &str) -> Option<usize> {
+    // All WLDAP32 functions are stubs returning 0/NULL.
+    // Wine ref: dlls/wldap32/ — full LDAP implementation; we return failure for all.
+    let stub = wldap_stub_null as unsafe extern "win64" fn() -> usize as *const () as usize;
+    match func {
+        "ldap_init"
+        | "ldap_sslinit"
+        | "ldap_bind_s"
+        | "ldap_simple_bind_s"
+        | "ldap_unbind_s"
+        | "ldap_search_s"
+        | "ldap_first_entry"
+        | "ldap_next_entry"
+        | "ldap_first_attribute"
+        | "ldap_next_attribute"
+        | "ldap_get_dn"
+        | "ldap_get_values_len"
+        | "ldap_value_free_len"
+        | "ldap_msgfree"
+        | "ldap_memfree"
+        | "ldap_err2string"
+        | "ldap_set_option"
+        | "ber_free" => Some(stub),
+        _ => None,
+    }
 }

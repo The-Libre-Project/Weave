@@ -19,6 +19,16 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "sensapi.dll" => wintrust::resolve_sensapi(func),
         "wininet.dll" => wintrust::resolve_wininet(func),
         "dbghelp.dll" => wintrust::resolve_dbghelp(func),
+        // bcrypt.dll — BCryptGenRandom (backed by getrandom(2))
+        "bcrypt.dll" => wintrust::resolve_bcrypt(func),
+        // secur32.dll — SSPI stub table so curl's Schannel init doesn't abort
+        "secur32.dll" => wintrust::resolve_secur32(func),
+        // normaliz.dll — IdnToAscii/IdnToUnicode (no-op stubs for IDN)
+        "normaliz.dll" => wintrust::resolve_normaliz(func),
+        // iphlpapi.dll — if_nametoindex (delegates to POSIX)
+        "iphlpapi.dll" => wintrust::resolve_iphlpapi(func),
+        // wldap32.dll — LDAP stubs (curl LDAP backend, not used for HTTP)
+        "wldap32.dll" => wintrust::resolve_wldap32(func),
         _ => None,
     }
 }

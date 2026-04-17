@@ -22,6 +22,11 @@ extern "C" {
         dst: *mut libc::c_char,
         size: libc::socklen_t,
     ) -> *const libc::c_char;
+    fn inet_pton(
+        af: libc::c_int,
+        src: *const libc::c_char,
+        dst: *mut libc::c_void,
+    ) -> libc::c_int;
 }
 
 // ── Constants ────────────────────────────────────────────────────────────────
@@ -1660,6 +1665,203 @@ pub unsafe extern "win64" fn wsa_enum_network_events(
     0 // success
 }
 
+// ── Winsock API: additional socket I/O ───────────────────────────────────────
+
+/// sendto — send data to a specific destination (UDP / unconnected sockets).
+///
+/// Wine ref: dlls/ws2_32/socket.c — WS_sendto translates sockaddr Windows→Linux
+/// then calls POSIX sendto(). Flags are passed through unchanged.
+///
+/// # Safety
+/// `buf` must point to `len` readable bytes. `to` must point to a valid sockaddr
+/// of `tolen` bytes, or be null for connected sockets.
+pub unsafe extern "win64" fn ws_sendto(
+    s: usize,
+    buf: *const u8,
+    len: i32,
+    flags: i32,
+    to: *const u8,
+    tolen: i32,
+) -> i32 {
+    if to.is_null() || tolen == 0 {
+        // Connected socket — use send() path.
+        let ret = libc::send(s as i32, buf as *const libc::c_void, len as usize, flags);
+        if ret < 0 {
+            save_errno();
+            return SOCKET_ERROR;
+        }
+        return ret as i32;
+    }
+    let addr = copy_sockaddr_win_to_linux(to, tolen as usize);
+    let ret = libc::sendto(
+        s as i32,
+        buf as *const libc::c_void,
+        len as usize,
+        flags,
+        addr.as_ptr() as *const libc::sockaddr,
+        tolen as libc::socklen_t,
+    );
+    if ret < 0 {
+        save_errno();
+        SOCKET_ERROR
+    } else {
+        ret as i32
+    }
+}
+
+/// recvfrom — receive data and capture the sender's address.
+///
+/// Wine ref: dlls/ws2_32/socket.c — WS_recvfrom translates the returned
+/// sockaddr Linux→Windows and updates `fromlen`.
+///
+/// # Safety
+/// `buf` must point to `len` writable bytes. `from` and `fromlen` may be null
+/// for callers that don't need the sender's address.
+pub unsafe extern "win64" fn ws_recvfrom(
+    s: usize,
+    buf: *mut u8,
+    len: i32,
+    flags: i32,
+    from: *mut u8,
+    fromlen: *mut i32,
+) -> i32 {
+    let mut linux_len: libc::socklen_t = if !fromlen.is_null() {
+        *fromlen as libc::socklen_t
+    } else {
+        0
+    };
+    let ret = libc::recvfrom(
+        s as i32,
+        buf as *mut libc::c_void,
+        len as usize,
+        flags,
+        if from.is_null() {
+            std::ptr::null_mut()
+        } else {
+            from as *mut libc::sockaddr
+        },
+        if fromlen.is_null() {
+            std::ptr::null_mut()
+        } else {
+            &mut linux_len
+        },
+    );
+    if ret < 0 {
+        save_errno();
+        SOCKET_ERROR
+    } else {
+        if !from.is_null() {
+            patch_sockaddr_linux_to_win(from, linux_len as usize);
+        }
+        if !fromlen.is_null() {
+            *fromlen = linux_len as i32;
+        }
+        ret as i32
+    }
+}
+
+/// inet_pton — convert a presentation-form IP address to binary.
+///
+/// Wine ref: dlls/ws2_32/socket.c — WS_InetPtonW/A delegate to POSIX inet_pton()
+/// with AF family translation (AF_INET6: Win=23 → Linux=10).
+///
+/// # Safety
+/// `src` must be a null-terminated C string. `dst` must be a writable buffer
+/// of at least 4 bytes (AF_INET) or 16 bytes (AF_INET6).
+// Wine ref: dlls/ws2_32/socket.c — WS_InetPtonA/W translate af then call POSIX inet_pton; returns 1 on success, 0 on invalid input, -1 on AF error (sets WSAEINVAL)
+pub unsafe extern "win64" fn ws_inet_pton(af: i32, src: *const u8, dst: *mut u8) -> i32 {
+    if src.is_null() || dst.is_null() {
+        set_last_error(10014); // WSAEFAULT
+        return -1;
+    }
+    let linux_af = af_win_to_linux(af);
+    let ret = inet_pton(linux_af, src as *const libc::c_char, dst as *mut libc::c_void);
+    if ret < 0 {
+        set_last_error(10047); // WSAEAFNOSUPPORT
+    } else if ret == 0 {
+        // valid call, invalid address string — no WSA error set on Windows either
+    }
+    ret
+}
+
+/// WSACloseEvent — alias for CloseHandle on a WSAEVENT.
+///
+/// Wine ref: dlls/ws2_32/socket.c:4000 — WSACloseEvent calls CloseHandle(event).
+/// Returns BOOL. Weave: same implementation as WSACloseEventObject — free handle.
+///
+/// # Safety
+/// No pointer arguments.
+// Wine ref: dlls/ws2_32/socket.c:4000 — WSACloseEvent(event) calls CloseHandle(event); returns TRUE on success
+pub extern "win64" fn wsa_close_event(event: usize) -> i32 {
+    // Delegate to WSACloseEventObject (same implementation).
+    wsa_close_event_object(event)
+}
+
+/// WSAResetEvent — reset (clear) a manual-reset WSAEVENT object.
+///
+/// Wine ref: dlls/ws2_32/socket.c:4014 — WSAResetEvent calls ResetEvent(event).
+/// Weave: clears the eventfd counter by reading it (draining all notifications).
+/// Returns BOOL (1 = success, 0 = failure).
+///
+/// # Safety
+/// No pointer arguments.
+// Wine ref: dlls/ws2_32/socket.c:4014 — WSAResetEvent calls ResetEvent(hEvent); clears the eventfd counter
+pub unsafe extern "win64" fn wsa_reset_event(event: usize) -> i32 {
+    #[cfg(target_os = "linux")]
+    {
+        if let Some(efd) = weave_core::handles::get_event_fd(event) {
+            let mut buf = [0u8; 8];
+            // Non-blocking drain — ignore EAGAIN (already drained).
+            let _ = libc::read(efd, buf.as_mut_ptr() as *mut libc::c_void, 8);
+        }
+    }
+    1 // TRUE
+}
+
+/// WSAStringToAddressW — parse a wide string into a SOCKADDR.
+///
+/// Wine ref: dlls/ws2_32/socket.c — WSAStringToAddressW parses "a.b.c.d[:port]"
+/// for AF_INET or "[addr]:port" for AF_INET6 into a SOCKADDR. Stub: return
+/// SOCKET_ERROR + WSAEINVAL. curl uses this only when connecting via string
+/// address (rare path, not used for example.com lookup).
+///
+/// # Safety
+/// Pointer arguments are not dereferenced.
+// Wine ref: dlls/ws2_32/socket.c — WSAStringToAddressW parses dotted-decimal/colon-hex into sockaddr; returns SOCKET_ERROR+WSAEINVAL on parse failure
+pub unsafe extern "win64" fn ws_wsa_string_to_address_w(
+    _lp_addr_string: *const u16,
+    _dw_address_family: i32,
+    _lp_protocol_info: *const u8,
+    _lp_address: *mut u8,
+    _lp_address_length: *mut i32,
+) -> i32 {
+    set_last_error(10022); // WSAEINVAL
+    SOCKET_ERROR
+}
+
+/// __WSAFDIsSet — test whether a socket fd is in an fd_set.
+///
+/// Wine ref: dlls/ws2_32/socket.c — __WSAFDIsSet(SOCKET s, fd_set *set) walks
+/// the Windows fd_set counted array and returns non-zero if `s` is found.
+///
+/// # Safety
+/// `set` must be a valid Windows fd_set (counted SOCKET array).
+// Wine ref: dlls/ws2_32/socket.c — __WSAFDIsSet walks the Windows fd_set array (count + SOCKET[FD_SETSIZE]) and returns 1 if the socket is found
+pub unsafe extern "win64" fn ws_fd_is_set(s: usize, set: *const u8) -> i32 {
+    if set.is_null() {
+        return 0;
+    }
+    let count = *(set as *const u32) as usize;
+    let arr = set.add(8); // skip count(4) + padding(4)
+    for i in 0..count.min(WIN_FD_SETSIZE) {
+        let sock = *(arr.add(i * 8) as *const usize);
+        if sock == s {
+            return 1;
+        }
+    }
+    0
+}
+
 // ── DLL Resolver ─────────────────────────────────────────────────────────────
 
 /// Resolve a ws2_32.dll or wsock32.dll import to a function pointer.
@@ -1711,6 +1913,14 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "WSAEventSelect" => Some(wsa_event_select as *const () as usize),
         "WSAWaitForMultipleEvents" => Some(wsa_wait_for_multiple_events as *const () as usize),
         "WSAEnumNetworkEvents" => Some(wsa_enum_network_events as *const () as usize),
+        // Additional socket I/O (curl — Task 01).
+        "sendto" => Some(ws_sendto as *const () as usize),
+        "recvfrom" => Some(ws_recvfrom as *const () as usize),
+        "inet_pton" => Some(ws_inet_pton as *const () as usize),
+        "WSACloseEvent" => Some(wsa_close_event as *const () as usize),
+        "WSAResetEvent" => Some(wsa_reset_event as *const () as usize),
+        "WSAStringToAddressW" => Some(ws_wsa_string_to_address_w as *const () as usize),
+        "__WSAFDIsSet" => Some(ws_fd_is_set as *const () as usize),
         _ => None,
     }
 }

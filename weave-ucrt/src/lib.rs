@@ -332,23 +332,11 @@ pub extern "win64" fn ucrt_set_app_type(_type: u32) {
     };
 }
 pub extern "win64" fn ucrt_configure_narrow_argv(_mode: i32) -> i32 {
-    unsafe {
-        libc::write(
-            2,
-            b"weave: stub _configure_narrow_argv\n".as_ptr() as *const libc::c_void,
-            35,
-        )
-    };
+    eprintln!("weave: stub _configure_narrow_argv called");
     0
 }
 pub extern "win64" fn ucrt_initialize_narrow_environment() -> i32 {
-    unsafe {
-        libc::write(
-            2,
-            b"weave: stub _initialize_narrow_environment\n".as_ptr() as *const libc::c_void,
-            43,
-        )
-    };
+    eprintln!("weave: stub _initialize_narrow_environment called");
     0
 }
 pub extern "win64" fn ucrt_set_invalid_parameter_handler(_fn: *const c_void) -> *const c_void {
@@ -539,8 +527,7 @@ static HEAP_INITENV: OnceLock<usize> = OnceLock::new();
 static HEAP_WINITENV: OnceLock<usize> = OnceLock::new();
 static HEAP_ENVIRON: OnceLock<usize> = OnceLock::new();
 static HEAP_WENVIRON: OnceLock<usize> = OnceLock::new();
-static HEAP_IARGC: OnceLock<usize> = OnceLock::new();
-static HEAP_IARGV: OnceLock<usize> = OnceLock::new();
+// HEAP_IARGC and HEAP_IARGV removed — argc/argv now parsed from cmdline in parsed_argc_argv().
 static HEAP_ACMDLN: OnceLock<usize> = OnceLock::new();
 static HEAP_WCMDLN: OnceLock<usize> = OnceLock::new();
 static HEAP_PGMPTR: OnceLock<usize> = OnceLock::new();
@@ -568,11 +555,56 @@ pub fn environ_data_addr() -> usize {
 pub fn wenviron_data_addr() -> usize {
     *HEAP_WENVIRON.get_or_init(|| Box::into_raw(Box::new(0usize)) as usize)
 }
+/// Lazily-initialized argc/argv storage, pre-populated from the Weave command line.
+///
+/// The MinGW CRT startup reads `__argc` and `__argv` DATA imports directly.
+/// We parse the command line at first access (which happens after cmdline::set()
+/// has been called during IAT patching) so the guest sees real arguments.
+///
+/// Stored as `usize` pairs (raw-pointer-as-integer) to satisfy OnceLock's
+/// Sync requirement — raw pointers are not Sync.
+static HEAP_ARGV_PARSED: OnceLock<(usize, usize)> = OnceLock::new();
+
+fn parsed_argc_argv() -> (usize, usize) {
+    *HEAP_ARGV_PARSED.get_or_init(|| {
+        let cmdline_ptr = weave_core::cmdline::get_a();
+        // Safety: cmdline_ptr is valid null-terminated ANSI from weave_core::cmdline.
+        let len = unsafe { libc::strlen(cmdline_ptr as *const libc::c_char) };
+        let s = unsafe { std::slice::from_raw_parts(cmdline_ptr, len) };
+        let s = std::str::from_utf8(s).unwrap_or("");
+        let args = split_cmdline(s);
+        let argc = args.len() as i32;
+        // Build argv array: null-terminated list of null-terminated strings.
+        let mut ptrs: Vec<*mut u8> = args
+            .into_iter()
+            .map(|arg| {
+                let mut buf: Vec<u8> = arg.bytes().collect();
+                buf.push(0);
+                let boxed = buf.into_boxed_slice();
+                Box::into_raw(boxed) as *mut u8
+            })
+            .collect();
+        ptrs.push(std::ptr::null_mut()); // null terminator
+        let argv = ptrs.as_mut_ptr() as usize;
+        std::mem::forget(ptrs); // leak: process-lifetime
+        let argc_box = Box::into_raw(Box::new(argc)) as usize;
+        (argc_box, argv)
+    })
+}
+
 pub fn argc_data_addr() -> usize {
-    *HEAP_IARGC.get_or_init(|| Box::into_raw(Box::new(0i32)) as usize)
+    // Return pointer to the argc i32 (writable, heap).
+    parsed_argc_argv().0
 }
 pub fn argv_data_addr() -> usize {
-    *HEAP_IARGV.get_or_init(|| Box::into_raw(Box::new(0usize)) as usize)
+    // Return pointer to the argv pointer (writable, heap).
+    // The DATA import slot holds the address of a `char**` variable.
+    // We allocate a writable pointer cell pointing at the argv array.
+    static HEAP_ARGV_PTR: OnceLock<usize> = OnceLock::new();
+    *HEAP_ARGV_PTR.get_or_init(|| {
+        let argv = parsed_argc_argv().1 as *mut *mut u8;
+        Box::into_raw(Box::new(argv)) as usize
+    })
 }
 pub fn acmdln_data_addr() -> usize {
     *HEAP_ACMDLN.get_or_init(|| {
@@ -603,22 +635,17 @@ pub fn doserrno_data_addr() -> usize {
 /// # Safety
 /// No pointer requirements; returns a pointer to heap-allocated CRT storage.
 pub unsafe extern "win64" fn ucrt_p_argc() -> *mut i32 {
-    libc::write(
-        2,
-        b"weave: stub __p__argc\n".as_ptr() as *const libc::c_void,
-        22,
-    );
-    argc_data_addr() as *mut i32
+    let ptr = argc_data_addr() as *mut i32;
+    let val = unsafe { *ptr };
+    eprintln!("weave: stub __p___argc called → ptr={ptr:?} argc={val}");
+    ptr
 }
 /// # Safety
 /// No pointer requirements; returns a pointer to heap-allocated CRT storage.
 pub unsafe extern "win64" fn ucrt_p_argv() -> *mut *mut *mut u8 {
-    libc::write(
-        2,
-        b"weave: stub __p__argv\n".as_ptr() as *const libc::c_void,
-        22,
-    );
-    argv_data_addr() as *mut *mut *mut u8
+    let ptr = argv_data_addr() as *mut *mut *mut u8;
+    eprintln!("weave: stub __p___argv called → ptr={ptr:?}");
+    ptr
 }
 /// # Safety
 /// No pointer requirements; returns a pointer to heap-allocated CRT storage.
@@ -1704,11 +1731,97 @@ pub unsafe extern "win64" fn ucrt_rand_s(rand_val: *mut u32) -> i32 {
 
 // ── Legacy MSVCRT entry-point helpers ────────────────────────────────────────
 
+// ── Command-line argument parsing helpers ────────────────────────────────────
+//
+// Windows CRT __getmainargs / __wgetmainargs supply the parsed argc/argv to
+// the guest main(). We parse the full command line stored in weave_core::cmdline
+// so the guest sees real arguments, not a stub [""].
+//
+// Parsing rules (simplified Windows CmdLineToArgvW semantics):
+//   - Arguments separated by spaces/tabs.
+//   - Quoted strings: content between "" is a single argument.
+//   - No backslash-escaping (handles the common case; full MSVC rules not needed).
+
+/// Parse a null-terminated ANSI command line into a Vec of owned byte-strings.
+/// Each string is null-terminated and lives in its own Box<[u8]>.
+fn parse_cmdline_a(cmdline: *const u8) -> Vec<*mut u8> {
+    // Safety: cmdline is a valid null-terminated string from weave_core::cmdline::get_a()
+    let s = unsafe {
+        let len = libc::strlen(cmdline as *const libc::c_char);
+        std::slice::from_raw_parts(cmdline, len)
+    };
+    let s = std::str::from_utf8(s).unwrap_or("");
+    let args = split_cmdline(s);
+    let mut ptrs: Vec<*mut u8> = args
+        .into_iter()
+        .map(|arg| {
+            let mut buf: Vec<u8> = arg.bytes().collect();
+            buf.push(0);
+            let boxed = buf.into_boxed_slice();
+            Box::into_raw(boxed) as *mut u8
+        })
+        .collect();
+    ptrs.push(std::ptr::null_mut()); // null terminator for argv
+    ptrs
+}
+
+/// Parse a null-terminated wide command line into a Vec of owned u16-strings.
+fn parse_cmdline_w(cmdline: *const u16) -> Vec<*mut u16> {
+    // Safety: cmdline is a valid null-terminated wide string from weave_core::cmdline::get_w()
+    let len = unsafe {
+        let mut p = cmdline;
+        while *p != 0 { p = p.add(1); }
+        p.offset_from(cmdline) as usize
+    };
+    let s = unsafe { std::slice::from_raw_parts(cmdline, len) };
+    let s = String::from_utf16_lossy(s);
+    let args = split_cmdline(&s);
+    let mut ptrs: Vec<*mut u16> = args
+        .into_iter()
+        .map(|arg| {
+            let mut buf: Vec<u16> = arg.encode_utf16().collect();
+            buf.push(0);
+            let boxed = buf.into_boxed_slice();
+            Box::into_raw(boxed) as *mut u16
+        })
+        .collect();
+    ptrs.push(std::ptr::null_mut()); // null terminator for argv
+    ptrs
+}
+
+/// Split a Windows command-line string into individual argument strings.
+/// Handles quoted arguments and whitespace separators.
+fn split_cmdline(s: &str) -> Vec<String> {
+    let mut args: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut in_quotes = false;
+    let mut iter = s.chars().peekable();
+    while let Some(c) = iter.next() {
+        match c {
+            '"' => {
+                in_quotes = !in_quotes;
+            }
+            ' ' | '\t' if !in_quotes => {
+                if !current.is_empty() {
+                    args.push(current.clone());
+                    current.clear();
+                }
+            }
+            _ => {
+                current.push(c);
+            }
+        }
+    }
+    if !current.is_empty() {
+        args.push(current);
+    }
+    args
+}
+
 /// __getmainargs — legacy MSVCRT function that fills in argc/argv/envp for main().
 ///
 /// Old MinGW-compiled executables call this to retrieve the parsed command line
-/// before calling main(). We return a minimal (empty) argument vector so the
-/// program sees argv=[""] with no extra args.
+/// before calling main(). We parse the Weave command line from weave_core::cmdline.
 ///
 /// Signature: int __getmainargs(int *argc, char ***argv, char ***envp, int expand_wildcards, int *new_mode)
 ///
@@ -1721,29 +1834,23 @@ pub unsafe extern "win64" fn ucrt_getmainargs(
     _expand_wildcards: i32,
     _p_new_mode: *mut i32,
 ) -> i32 {
-    libc::write(
-        2,
-        b"weave: stub __getmainargs\n".as_ptr() as *const libc::c_void,
-        26,
-    );
-    // Provide a minimal argv = [""] with no env vars.
-    // These buffers live for the program lifetime — leaked intentionally.
-    static EMPTY_ARG: u8 = 0;
-    // argv[0] = ptr to empty string, argv[1] = NULL
-    let argv = Box::into_raw(Box::new([
-        &EMPTY_ARG as *const u8 as *mut u8,
-        std::ptr::null_mut::<u8>(),
-    ])) as *mut *mut u8;
+    // Parse actual command line so the guest sees real arguments.
+    let cmdline_ptr = weave_core::cmdline::get_a();
+    let mut arg_ptrs = parse_cmdline_a(cmdline_ptr);
+    let argc = (arg_ptrs.len() - 1) as i32; // exclude null terminator
+    let argv = arg_ptrs.as_mut_ptr();
+    // Leak: argv lives for program lifetime.
+    std::mem::forget(arg_ptrs);
     // envp[0] = NULL
     let envp = Box::into_raw(Box::new([std::ptr::null_mut::<u8>()])) as *mut *mut u8;
     if !p_argc.is_null() {
-        *p_argc = 1;
+        unsafe { *p_argc = argc; }
     }
     if !p_argv.is_null() {
-        *p_argv = argv;
+        unsafe { *p_argv = argv; }
     }
     if !p_envp.is_null() {
-        *p_envp = envp;
+        unsafe { *p_envp = envp; }
     }
     0
 }
@@ -1759,20 +1866,23 @@ pub unsafe extern "win64" fn ucrt_wgetmainargs(
     _expand_wildcards: i32,
     _p_new_mode: *mut i32,
 ) -> i32 {
-    static EMPTY_WARG: u16 = 0;
-    let argv = Box::into_raw(Box::new([
-        &EMPTY_WARG as *const u16 as *mut u16,
-        std::ptr::null_mut::<u16>(),
-    ])) as *mut *mut u16;
+    // Parse actual wide command line so the guest sees real arguments.
+    let cmdline_ptr = weave_core::cmdline::get_w();
+    let mut arg_ptrs = parse_cmdline_w(cmdline_ptr);
+    let argc = (arg_ptrs.len() - 1) as i32; // exclude null terminator
+    let argv = arg_ptrs.as_mut_ptr();
+    // Leak: argv lives for program lifetime.
+    std::mem::forget(arg_ptrs);
+    // envp[0] = NULL
     let envp = Box::into_raw(Box::new([std::ptr::null_mut::<u16>()])) as *mut *mut u16;
     if !p_argc.is_null() {
-        *p_argc = 1;
+        unsafe { *p_argc = argc; }
     }
     if !p_argv.is_null() {
-        *p_argv = argv;
+        unsafe { *p_argv = argv; }
     }
     if !p_envp.is_null() {
-        *p_envp = envp;
+        unsafe { *p_envp = envp; }
     }
     0
 }
@@ -2398,6 +2508,798 @@ named_stub!(ucrt_chkstk_stub, "_chkstk");
 /// `this` is accepted but not dereferenced.
 pub unsafe extern "win64" fn ucrt_type_info_dtor(_this: *mut u8) {}
 
+// ── Additional string functions (Task 01 — curl) ─────────────────────────────
+
+/// strncpy_s — bounded strcpy with null-termination guarantee. Returns 0 on success.
+///
+/// Wine ref: dlls/msvcrt/string.c — strncpy_s copies at most count chars, always
+/// null-terminates dst[0] on failure, returns EINVAL(22) or ERANGE(34).
+///
+/// # Safety
+/// `dst` must be a writable buffer of `size_dst` bytes. `src` must be readable.
+pub unsafe extern "win64" fn ucrt_strncpy_s(
+    dst: *mut u8,
+    size_dst: usize,
+    src: *const u8,
+    count: usize,
+) -> i32 {
+    if dst.is_null() || size_dst == 0 {
+        return 22; // EINVAL
+    }
+    if src.is_null() {
+        *dst = 0;
+        return 22; // EINVAL
+    }
+    let copy_max = count.min(size_dst - 1);
+    let mut i = 0usize;
+    while i < copy_max {
+        let c = *src.add(i);
+        *dst.add(i) = c;
+        if c == 0 {
+            return 0;
+        }
+        i += 1;
+    }
+    *dst.add(i) = 0;
+    // If count > copy_max and src still has chars, truncation occurred = ERANGE
+    if count > copy_max && !src.add(i).is_null() && *src.add(i) != 0 {
+        *dst = 0; // truncate-to-empty on overflow (strncpy_s MSVCRT behavior)
+        return 34; // ERANGE
+    }
+    0
+}
+
+/// _strnicmp — case-insensitive bounded string compare. Delegates to strncasecmp.
+///
+/// Wine ref: dlls/msvcrt/string.c — _strnicmp uses locale-aware case fold on
+/// Windows; on Linux we use strncasecmp which matches the C locale behavior.
+///
+/// # Safety
+/// `s1` and `s2` must be readable for at least `n` bytes.
+pub unsafe extern "win64" fn ucrt_strnicmp(s1: *const u8, s2: *const u8, n: usize) -> i32 {
+    if n == 0 {
+        return 0;
+    }
+    if s1.is_null() && s2.is_null() {
+        return 0;
+    }
+    if s1.is_null() {
+        return -1;
+    }
+    if s2.is_null() {
+        return 1;
+    }
+    libc::strncasecmp(s1 as *const libc::c_char, s2 as *const libc::c_char, n)
+}
+
+/// strcspn — return the length of the initial segment not containing any char in `reject`.
+///
+/// Wine ref: dlls/msvcrt/string.c — delegates directly to POSIX strcspn.
+///
+/// # Safety
+/// `s` and `reject` must be null-terminated byte strings.
+pub unsafe extern "win64" fn ucrt_strcspn(s: *const u8, reject: *const u8) -> usize {
+    libc::strcspn(s as *const libc::c_char, reject as *const libc::c_char)
+}
+
+/// strpbrk — find the first occurrence of any char from `accept` in `s`.
+///
+/// Wine ref: dlls/msvcrt/string.c — delegates to POSIX strpbrk.
+///
+/// # Safety
+/// `s` and `accept` must be null-terminated byte strings.
+pub unsafe extern "win64" fn ucrt_strpbrk(s: *const u8, accept: *const u8) -> *mut u8 {
+    libc::strpbrk(s as *const libc::c_char, accept as *const libc::c_char) as *mut u8
+}
+
+/// strspn — return the length of the initial segment containing only chars from `accept`.
+///
+/// Wine ref: dlls/msvcrt/string.c — delegates to POSIX strspn.
+///
+/// # Safety
+/// `s` and `accept` must be null-terminated byte strings.
+pub unsafe extern "win64" fn ucrt_strspn(s: *const u8, accept: *const u8) -> usize {
+    libc::strspn(s as *const libc::c_char, accept as *const libc::c_char)
+}
+
+/// mbrlen — determine the number of bytes in the next multibyte character.
+///
+/// Wine ref: dlls/msvcrt/mbcs.c — mbrlen calls mbrtowc with internal state.
+/// Stub: treats input as single-byte locale, returns 1 for non-null bytes.
+///
+/// # Safety
+/// `s` must point to at least `n` readable bytes, or be null.
+pub unsafe extern "win64" fn ucrt_mbrlen(
+    s: *const u8,
+    n: usize,
+    _ps: *mut u8,
+) -> usize {
+    if s.is_null() || n == 0 {
+        return 0;
+    }
+    if *s == 0 {
+        return 0; // null char
+    }
+    1 // single-byte locale stub
+}
+
+/// strerror_s — write the error string for `errnum` into `buf`.
+///
+/// Wine ref: dlls/msvcrt/errno.c — strerror_s copies strerror(errnum) into buf,
+/// truncating if necessary; always null-terminates. Returns 0 on success.
+///
+/// # Safety
+/// `buf` must be a writable buffer of at least `buf_size` bytes.
+pub unsafe extern "win64" fn ucrt_strerror_s(buf: *mut u8, buf_size: usize, errnum: i32) -> i32 {
+    if buf.is_null() || buf_size == 0 {
+        return 22; // EINVAL
+    }
+    let msg = libc::strerror(errnum);
+    if msg.is_null() {
+        *buf = 0;
+        return 0;
+    }
+    let len = libc::strlen(msg);
+    let copy = len.min(buf_size - 1);
+    std::ptr::copy_nonoverlapping(msg as *const u8, buf, copy);
+    *buf.add(copy) = 0;
+    0
+}
+
+// ── Additional wide string functions ─────────────────────────────────────────
+
+/// wcsncmp — compare at most n wide chars of two strings.
+///
+/// Wine ref: dlls/msvcrt/wcs.c — wcsncmp compares up to n wchar_t elements.
+///
+/// # Safety
+/// `s1` and `s2` must be readable for at least `n` wide chars.
+pub unsafe extern "win64" fn ucrt_wcsncmp(s1: *const u16, s2: *const u16, n: usize) -> i32 {
+    if n == 0 {
+        return 0;
+    }
+    for i in 0..n {
+        let a = *s1.add(i);
+        let b = *s2.add(i);
+        if a != b {
+            return (a as i32) - (b as i32);
+        }
+        if a == 0 {
+            return 0;
+        }
+    }
+    0
+}
+
+/// wcsncpy_s — bounded wcscpy with null-termination guarantee. Returns 0 on success.
+///
+/// Wine ref: dlls/msvcrt/wcs.c — wcsncpy_s mirrors strncpy_s for wide chars.
+///
+/// # Safety
+/// `dst` must be writable for `size_dst` wide chars. `src` must be readable.
+pub unsafe extern "win64" fn ucrt_wcsncpy_s(
+    dst: *mut u16,
+    size_dst: usize,
+    src: *const u16,
+    count: usize,
+) -> i32 {
+    if dst.is_null() || size_dst == 0 {
+        return 22; // EINVAL
+    }
+    if src.is_null() {
+        *dst = 0;
+        return 22; // EINVAL
+    }
+    let copy_max = count.min(size_dst - 1);
+    let mut i = 0usize;
+    while i < copy_max {
+        let c = *src.add(i);
+        *dst.add(i) = c;
+        if c == 0 {
+            return 0;
+        }
+        i += 1;
+    }
+    *dst.add(i) = 0;
+    0
+}
+
+/// wcscpy_s — bounded wcscpy with null-termination guarantee. Returns 0 on success.
+///
+/// Wine ref: dlls/msvcrt/wcs.c — wcscpy_s is wcsncpy_s with count = RSIZE_MAX.
+///
+/// # Safety
+/// `dst` must be writable for `size_dst` wide chars. `src` must be a valid wide string.
+pub unsafe extern "win64" fn ucrt_wcscpy_s(
+    dst: *mut u16,
+    size_dst: usize,
+    src: *const u16,
+) -> i32 {
+    ucrt_wcsncpy_s(dst, size_dst, src, usize::MAX)
+}
+
+// ── Additional char classification ───────────────────────────────────────────
+
+/// isxdigit — test if a character is a hex digit (0-9, a-f, A-F).
+///
+/// Wine ref: dlls/msvcrt/ctype.c — isxdigit delegates to the C locale table.
+pub extern "win64" fn ucrt_isxdigit(c: i32) -> i32 {
+    let c = c as u8;
+    if c.is_ascii_hexdigit() {
+        1
+    } else {
+        0
+    }
+}
+
+// ── Time functions ────────────────────────────────────────────────────────────
+
+/// _time64 — return the current time as a 64-bit Unix timestamp (seconds since epoch).
+///
+/// Wine ref: dlls/msvcrt/time.c — _time64 calls NtQuerySystemTime and converts
+/// to Unix time. Weave delegates to libc::time().
+///
+/// # Safety
+/// `timer` may be null or a pointer to a writable i64.
+pub unsafe extern "win64" fn ucrt_time64(timer: *mut i64) -> i64 {
+    let t = unsafe { libc::time(std::ptr::null_mut()) } as i64;
+    if !timer.is_null() {
+        *timer = t;
+    }
+    t
+}
+
+/// _difftime64 — compute the difference between two _time64_t values.
+///
+/// Wine ref: dlls/msvcrt/time.c — _difftime64(t1, t0) returns (double)(t1 - t0).
+pub extern "win64" fn ucrt_difftime64(t1: i64, t0: i64) -> f64 {
+    (t1 - t0) as f64
+}
+
+// Layout of MSVCRT tm struct on Windows x64 (same as Linux but 32-bit year):
+// int tm_sec, tm_min, tm_hour, tm_mday, tm_mon, tm_year, tm_wday, tm_yday, tm_isdst
+// = 9 × i32 = 36 bytes
+
+unsafe fn unix_tm_to_win(tm: *const libc::tm, out: *mut u8) {
+    if out.is_null() || tm.is_null() {
+        return;
+    }
+    let fields: [i32; 9] = [
+        (*tm).tm_sec,
+        (*tm).tm_min,
+        (*tm).tm_hour,
+        (*tm).tm_mday,
+        (*tm).tm_mon,
+        (*tm).tm_year,
+        (*tm).tm_wday,
+        (*tm).tm_yday,
+        (*tm).tm_isdst,
+    ];
+    std::ptr::copy_nonoverlapping(fields.as_ptr() as *const u8, out, 36);
+}
+
+/// _localtime64_s — convert _time64_t to local time, thread-safe.
+///
+/// Wine ref: dlls/msvcrt/time.c — _localtime64_s calls localtime_r and fills
+/// the tm struct. Returns 0 on success, EINVAL on null pointers.
+///
+/// # Safety
+/// `result` must be a writable buffer of at least 36 bytes (Win MSVCRT tm struct).
+/// `time` must be a valid pointer to a _time64_t value.
+pub unsafe extern "win64" fn ucrt_localtime64_s(result: *mut u8, time: *const i64) -> i32 {
+    if result.is_null() || time.is_null() {
+        return 22; // EINVAL
+    }
+    let t = *time as libc::time_t;
+    let mut linux_tm: libc::tm = std::mem::zeroed();
+    if libc::localtime_r(&t, &mut linux_tm).is_null() {
+        return 22; // EINVAL
+    }
+    unix_tm_to_win(&linux_tm, result);
+    0
+}
+
+/// _gmtime64_s — convert _time64_t to UTC time, thread-safe.
+///
+/// Wine ref: dlls/msvcrt/time.c — _gmtime64_s calls gmtime_r and fills tm struct.
+/// Returns 0 on success.
+///
+/// # Safety
+/// `result` must be a writable buffer of at least 36 bytes.
+/// `time` must be a valid pointer to a _time64_t value.
+pub unsafe extern "win64" fn ucrt_gmtime64_s(result: *mut u8, time: *const i64) -> i32 {
+    if result.is_null() || time.is_null() {
+        return 22; // EINVAL
+    }
+    let t = *time as libc::time_t;
+    let mut linux_tm: libc::tm = std::mem::zeroed();
+    if libc::gmtime_r(&t, &mut linux_tm).is_null() {
+        return 22; // EINVAL
+    }
+    unix_tm_to_win(&linux_tm, result);
+    0
+}
+
+// ── Utility functions ─────────────────────────────────────────────────────────
+
+/// _byteswap_uint64 — swap byte order of a 64-bit unsigned integer.
+///
+/// Wine ref: dlls/msvcrt/math.c — maps directly to __builtin_bswap64.
+pub extern "win64" fn ucrt_byteswap_uint64(val: u64) -> u64 {
+    val.swap_bytes()
+}
+
+/// bsearch — binary search in a sorted array.
+///
+/// Wine ref: dlls/msvcrt/misc.c — bsearch delegates to POSIX bsearch.
+///
+/// # Safety
+/// `key`, `base`, and the comparator must satisfy the bsearch preconditions.
+pub unsafe extern "win64" fn ucrt_bsearch(
+    key: *const u8,
+    base: *const u8,
+    num_elements: usize,
+    element_size: usize,
+    compare: unsafe extern "win64" fn(*const u8, *const u8) -> i32,
+) -> *mut u8 {
+    // Manual binary search to avoid calling libc bsearch with a win64-ABI comparator.
+    if num_elements == 0 || element_size == 0 {
+        return std::ptr::null_mut();
+    }
+    let mut lo = 0usize;
+    let mut hi = num_elements;
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        let elem = base.add(mid * element_size);
+        let cmp = compare(key, elem);
+        if cmp == 0 {
+            return elem as *mut u8;
+        } else if cmp < 0 {
+            hi = mid;
+        } else {
+            lo = mid + 1;
+        }
+    }
+    std::ptr::null_mut()
+}
+
+/// qsort — sort an array in place using a comparator.
+///
+/// Wine ref: dlls/msvcrt/misc.c — qsort delegates to POSIX qsort.
+/// We implement a simple insertion sort to avoid ABI issues with libc qsort.
+///
+/// # Safety
+/// `base` must be writable for `num × size` bytes. `compare` must be a valid win64 fn.
+pub unsafe extern "win64" fn ucrt_qsort(
+    base: *mut u8,
+    num_elements: usize,
+    element_size: usize,
+    compare: unsafe extern "win64" fn(*const u8, *const u8) -> i32,
+) {
+    if num_elements <= 1 || element_size == 0 {
+        return;
+    }
+    // Insertion sort — O(n²) but correct across ABI boundaries.
+    let mut tmp = vec![0u8; element_size];
+    for i in 1..num_elements {
+        std::ptr::copy_nonoverlapping(base.add(i * element_size), tmp.as_mut_ptr(), element_size);
+        let mut j = i;
+        while j > 0
+            && compare(base.add((j - 1) * element_size), tmp.as_ptr()) > 0
+        {
+            let src = base.add((j - 1) * element_size);
+            let dst = base.add(j * element_size);
+            std::ptr::copy_nonoverlapping(src, dst, element_size);
+            j -= 1;
+        }
+        std::ptr::copy_nonoverlapping(tmp.as_ptr(), base.add(j * element_size), element_size);
+    }
+}
+
+/// strtoull — convert a string to an unsigned long long.
+///
+/// Wine ref: dlls/msvcrt/string.c — strtoull calls strtoul/strtoull from libc.
+///
+/// # Safety
+/// `nptr` must be a null-terminated C string. `endptr` may be null.
+pub unsafe extern "win64" fn ucrt_strtoull(
+    nptr: *const u8,
+    endptr: *mut *mut u8,
+    base: i32,
+) -> u64 {
+    libc::strtoull(nptr as *const libc::c_char, endptr as *mut *mut libc::c_char, base)
+}
+
+/// mbstowcs_s — convert multibyte string to wide string, safe version.
+///
+/// Wine ref: dlls/msvcrt/mbcs.c — mbstowcs_s calls mbstowcs_r and fills *retval
+/// with the number of wide chars converted including the null terminator.
+/// Returns 0 on success.
+///
+/// # Safety
+/// `wcstr` must be writable for `size_in_words` wide chars. `mbstr` must be readable.
+pub unsafe extern "win64" fn ucrt_mbstowcs_s(
+    retval: *mut usize,
+    wcstr: *mut u16,
+    size_in_words: usize,
+    mbstr: *const u8,
+    count: usize,
+) -> i32 {
+    if mbstr.is_null() {
+        if !retval.is_null() {
+            *retval = 0;
+        }
+        return 22; // EINVAL
+    }
+    let mb_len = libc::strlen(mbstr as *const libc::c_char);
+    let copy_chars = mb_len.min(count).min(if size_in_words > 0 { size_in_words - 1 } else { 0 });
+    if wcstr.is_null() {
+        if !retval.is_null() {
+            *retval = mb_len + 1;
+        }
+        return 0;
+    }
+    // ASCII path (single-byte locale) — extend each byte to u16.
+    for i in 0..copy_chars {
+        *wcstr.add(i) = *mbstr.add(i) as u16;
+    }
+    if size_in_words > copy_chars {
+        *wcstr.add(copy_chars) = 0;
+    }
+    if !retval.is_null() {
+        *retval = copy_chars + 1;
+    }
+    0
+}
+
+/// wcstombs_s — convert wide string to multibyte string, safe version.
+///
+/// Wine ref: dlls/msvcrt/mbcs.c — wcstombs_s calls wcstombs_r.
+/// Returns 0 on success.
+///
+/// # Safety
+/// `mbstr` must be writable for `size_in_bytes` bytes. `wcstr` must be readable.
+pub unsafe extern "win64" fn ucrt_wcstombs_s(
+    retval: *mut usize,
+    mbstr: *mut u8,
+    size_in_bytes: usize,
+    wcstr: *const u16,
+    count: usize,
+) -> i32 {
+    if wcstr.is_null() {
+        if !retval.is_null() {
+            *retval = 0;
+        }
+        return 22; // EINVAL
+    }
+    // Measure source length.
+    let mut wlen = 0usize;
+    while *wcstr.add(wlen) != 0 {
+        wlen += 1;
+    }
+    let copy_bytes = wlen.min(count).min(if size_in_bytes > 0 { size_in_bytes - 1 } else { 0 });
+    if mbstr.is_null() {
+        if !retval.is_null() {
+            *retval = wlen + 1;
+        }
+        return 0;
+    }
+    // ASCII path (single-byte locale) — truncate each u16 to u8.
+    for i in 0..copy_bytes {
+        *mbstr.add(i) = (*wcstr.add(i) & 0xFF) as u8;
+    }
+    if size_in_bytes > copy_bytes {
+        *mbstr.add(copy_bytes) = 0;
+    }
+    if !retval.is_null() {
+        *retval = copy_bytes + 1;
+    }
+    0
+}
+
+// ── Console I/O ───────────────────────────────────────────────────────────────
+
+/// _getch — read a single character from the console without echo. Returns 0.
+///
+/// Wine ref: dlls/msvcrt/console.c — _getch calls NtDeviceIoControlFile on
+/// the console handle. Stub: return 0 (as if no key pressed / EOF).
+pub extern "win64" fn ucrt_getch() -> i32 {
+    0
+}
+
+// ── Additional stdio ──────────────────────────────────────────────────────────
+
+/// fgets — read a line from a FILE stream into a buffer.
+///
+/// Wine ref: dlls/msvcrt/file.c — fgets reads until newline, EOF, or buf_size-1.
+/// Returns buf on success, NULL on EOF or error.
+///
+/// # Safety
+/// `buf` must be a writable buffer of `buf_size` bytes. `stream` must be a valid FILE*.
+pub unsafe extern "win64" fn ucrt_fgets(
+    buf: *mut u8,
+    buf_size: i32,
+    stream: *mut c_void,
+) -> *mut u8 {
+    if buf.is_null() || buf_size <= 0 || stream.is_null() {
+        return std::ptr::null_mut();
+    }
+    let ret = libc::fgets(buf as *mut libc::c_char, buf_size, stream as *mut libc::FILE);
+    if ret.is_null() {
+        std::ptr::null_mut()
+    } else {
+        buf
+    }
+}
+
+/// freopen_s — reopen a file stream with a new path and mode, safe version.
+///
+/// Wine ref: dlls/msvcrt/file.c — freopen_s validates args, calls freopen.
+/// Returns 0 on success, EINVAL on null pointers.
+///
+/// # Safety
+/// `pfile` must be writable. `path` and `mode` must be null-terminated C strings.
+pub unsafe extern "win64" fn ucrt_freopen_s(
+    pfile: *mut *mut c_void,
+    path: *const u8,
+    mode: *const u8,
+    stream: *mut c_void,
+) -> i32 {
+    if pfile.is_null() || path.is_null() || mode.is_null() {
+        return 22; // EINVAL
+    }
+    let f = libc::freopen(
+        path as *const libc::c_char,
+        mode as *const libc::c_char,
+        stream as *mut libc::FILE,
+    );
+    *pfile = f as *mut c_void;
+    if f.is_null() {
+        *libc::__errno_location()
+    } else {
+        0
+    }
+}
+
+/// rewind — reset a FILE stream to its beginning. No return value.
+///
+/// Wine ref: dlls/msvcrt/file.c — rewind calls fseek(stream, 0, SEEK_SET) and clears error.
+///
+/// # Safety
+/// `stream` must be a valid FILE*.
+pub unsafe extern "win64" fn ucrt_rewind(stream: *mut c_void) {
+    if !stream.is_null() {
+        libc::rewind(stream as *mut libc::FILE);
+    }
+}
+
+/// ungetc — push a character back onto a FILE stream.
+///
+/// Wine ref: dlls/msvcrt/file.c — ungetc calls POSIX ungetc.
+///
+/// # Safety
+/// `stream` must be a valid FILE*.
+pub unsafe extern "win64" fn ucrt_ungetc(c: i32, stream: *mut c_void) -> i32 {
+    if stream.is_null() {
+        return -1; // EOF
+    }
+    libc::ungetc(c, stream as *mut libc::FILE)
+}
+
+/// getc — read a character from a FILE stream (macro alias for fgetc).
+///
+/// Wine ref: dlls/msvcrt/file.c — getc expands to fgetc in MSVCRT.
+///
+/// # Safety
+/// `stream` must be a valid FILE*.
+pub unsafe extern "win64" fn ucrt_getc(stream: *mut c_void) -> i32 {
+    if stream.is_null() {
+        return -1; // EOF
+    }
+    libc::fgetc(stream as *mut libc::FILE)
+}
+
+// ── Low-level file I/O ────────────────────────────────────────────────────────
+
+/// _fileno — return the file descriptor associated with a FILE*.
+///
+/// Wine ref: dlls/msvcrt/file.c — _fileno(stream) calls fileno(stream) on POSIX.
+///
+/// # Safety
+/// `stream` must be a valid FILE* or null.
+pub unsafe extern "win64" fn ucrt_fileno(stream: *mut c_void) -> i32 {
+    if stream.is_null() {
+        return -1;
+    }
+    libc::fileno(stream as *mut libc::FILE)
+}
+
+/// _read — low-level fd read. Returns bytes read or -1 on error.
+///
+/// Wine ref: dlls/msvcrt/file.c — _read translates fd to handle and calls ReadFile.
+/// Weave: delegates to POSIX read(2).
+///
+/// # Safety
+/// `buf` must be a writable buffer of `count` bytes.
+pub unsafe extern "win64" fn ucrt_read(fd: i32, buf: *mut c_void, count: u32) -> i32 {
+    let ret = libc::read(fd, buf, count as usize);
+    ret as i32
+}
+
+/// _write — low-level fd write. Returns bytes written or -1 on error.
+///
+/// Wine ref: dlls/msvcrt/file.c — _write translates fd to handle and calls WriteFile.
+/// Weave: delegates to POSIX write(2).
+///
+/// # Safety
+/// `buf` must be a readable buffer of `count` bytes.
+pub unsafe extern "win64" fn ucrt_write(fd: i32, buf: *const c_void, count: u32) -> i32 {
+    let ret = libc::write(fd, buf, count as usize);
+    ret as i32
+}
+
+/// _lseeki64 — seek on a file descriptor (64-bit offset). Returns new position.
+///
+/// Wine ref: dlls/msvcrt/file.c — _lseeki64 wraps lseek64.
+///
+/// # Safety
+/// `fd` must be a valid open file descriptor.
+pub unsafe extern "win64" fn ucrt_lseeki64(fd: i32, offset: i64, origin: i32) -> i64 {
+    let ret = libc::lseek(fd, offset as libc::off_t, origin);
+    ret as i64
+}
+
+/// _setmode — set the translation mode for a file descriptor. Returns old mode.
+///
+/// Wine ref: dlls/msvcrt/file.c — _setmode sets binary (O_BINARY=0x8000) or
+/// text (O_TEXT=0x4000) mode on Windows. On Linux, all fds are binary; return 0.
+///
+/// # Safety
+/// No pointer arguments.
+pub unsafe extern "win64" fn ucrt_setmode(_fd: i32, _mode: i32) -> i32 {
+    0 // previous mode = binary (always on Linux)
+}
+
+/// _chsize_s — set the length of a file, 64-bit safe version. Returns 0 on success.
+///
+/// Wine ref: dlls/msvcrt/file.c — _chsize_s calls ftruncate on Linux.
+///
+/// # Safety
+/// `fd` must be a valid open file descriptor.
+pub unsafe extern "win64" fn ucrt_chsize_s(fd: i32, size: i64) -> i32 {
+    let ret = libc::ftruncate(fd, size as libc::off_t);
+    if ret < 0 {
+        *libc::__errno_location()
+    } else {
+        0
+    }
+}
+
+/// _fsopen — open a shared file (returns FILE*). Simplified: delegates to fopen.
+///
+/// Wine ref: dlls/msvcrt/file.c — _fsopen(path, mode, shflag) is like fopen
+/// with optional sharing flags; sharing is ignored on Linux.
+///
+/// # Safety
+/// `path` and `mode` must be null-terminated C strings.
+pub unsafe extern "win64" fn ucrt_fsopen(
+    path: *const u8,
+    mode: *const u8,
+    _sh_flag: i32,
+) -> *mut c_void {
+    if path.is_null() || mode.is_null() {
+        return std::ptr::null_mut();
+    }
+    libc::fopen(path as *const libc::c_char, mode as *const libc::c_char) as *mut c_void
+}
+
+// ── Filesystem functions ──────────────────────────────────────────────────────
+
+// WIN32_FIND_DATA / _finddata64i32_t layout (Windows x64, MSVCRT):
+// DWORD dwFileAttributes (4)
+// FILETIME ftCreationTime (8), ftLastAccessTime (8), ftLastWriteTime (8)
+// DWORD nFileSizeHigh (4), nFileSizeLow (4)
+// DWORD dwReserved0, dwReserved1 (8)
+// WCHAR cFileName[260*2=520], cAlternateFileName[14*2=28]
+// Total ≥ 572 bytes. We use an opaque struct; callers only get back errors.
+
+/// _findfirst64i32 — start a file search. Returns a search handle or -1 on error.
+///
+/// Wine ref: dlls/msvcrt/dir.c — _findfirst64i32 calls FindFirstFileW and
+/// converts WIN32_FIND_DATAW to _finddata64i32_t. Stub: returns -1 (not found).
+///
+/// # Safety
+/// `file_spec` must be a null-terminated C string. `file_info` must be writable.
+pub unsafe extern "win64" fn ucrt_findfirst64i32(
+    _file_spec: *const u8,
+    _file_info: *mut u8,
+) -> i64 {
+    unsafe { *libc::__errno_location() = libc::ENOENT };
+    -1i64 // ENOENT — no match found
+}
+
+/// _findnext64i32 — find the next match. Returns 0 on success.
+///
+/// Wine ref: dlls/msvcrt/dir.c — _findnext64i32 calls FindNextFileW.
+/// Stub: always returns -1 (no more files).
+///
+/// # Safety
+/// `handle` is ignored. `file_info` must be writable.
+pub unsafe extern "win64" fn ucrt_findnext64i32(
+    _handle: i64,
+    _file_info: *mut u8,
+) -> i32 {
+    unsafe { *libc::__errno_location() = libc::ENOENT };
+    -1
+}
+
+/// _findclose — close a search handle. Returns 0 on success.
+///
+/// Wine ref: dlls/msvcrt/dir.c — _findclose calls FindClose(handle).
+///
+/// # Safety
+/// `handle` is accepted but ignored for stubs.
+pub unsafe extern "win64" fn ucrt_findclose(_handle: i64) -> i32 {
+    0 // success (no-op; stub handles were never real)
+}
+
+/// _fullpath — return the absolute path of a relative path. Returns NULL on failure.
+///
+/// Wine ref: dlls/msvcrt/dir.c — _fullpath calls GetFullPathNameA.
+/// Stub: returns NULL (not supported).
+///
+/// # Safety
+/// Pointer arguments are not dereferenced.
+pub unsafe extern "win64" fn ucrt_fullpath(
+    _abs_path: *mut u8,
+    _rel_path: *const u8,
+    _max_length: usize,
+) -> *mut u8 {
+    std::ptr::null_mut()
+}
+
+/// _mkdir — create a directory. Returns 0 on success, -1 on failure.
+///
+/// Wine ref: dlls/msvcrt/dir.c — _mkdir calls CreateDirectoryA.
+/// Weave: delegates to libc::mkdir with mode 0o755.
+///
+/// # Safety
+/// `path` must be a null-terminated C string.
+pub unsafe extern "win64" fn ucrt_mkdir(path: *const u8) -> i32 {
+    if path.is_null() {
+        return -1;
+    }
+    let ret = libc::mkdir(path as *const libc::c_char, 0o755);
+    if ret < 0 { -1 } else { 0 }
+}
+
+/// _stat64 — get file status (64-bit version). Returns 0 on success.
+///
+/// Wine ref: dlls/msvcrt/dir.c — _stat64 calls GetFileAttributesW and
+/// fills a _stat64 struct. Stub: returns -1 (ENOENT).
+///
+/// # Safety
+/// `path` must be a null-terminated C string. `buf` must be writable.
+pub unsafe extern "win64" fn ucrt_stat64(_path: *const u8, _buf: *mut u8) -> i32 {
+    unsafe { *libc::__errno_location() = libc::ENOENT };
+    -1
+}
+
+/// _unlink — delete a file. Returns 0 on success.
+///
+/// Wine ref: dlls/msvcrt/dir.c — _unlink calls DeleteFileA.
+/// Weave: delegates to libc::unlink.
+///
+/// # Safety
+/// `path` must be a null-terminated C string.
+pub unsafe extern "win64" fn ucrt_unlink(path: *const u8) -> i32 {
+    if path.is_null() {
+        return -1;
+    }
+    let ret = libc::unlink(path as *const libc::c_char);
+    if ret < 0 { -1 } else { 0 }
+}
+
 /// Resolve a UCRT import to a stub address.
 pub fn resolve(dll: &str, func: &str) -> Option<usize> {
     if !is_ucrt_dll(dll) {
@@ -2691,6 +3593,48 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         | "_Wctomb" => Some(ucrt_cexit as extern "win64" fn() as *const () as usize),
         "wcscmp" => Some(ucrt_wcscmp as unsafe extern "win64" fn(_, _) -> _ as *const () as usize),
         "_c_exit" => Some(ucrt_c_exit as extern "win64" fn() as *const () as usize),
+        // Task 01 additions — curl
+        "strncpy_s" => stub!(ucrt_strncpy_s as unsafe extern "win64" fn(_, _, _, _) -> _),
+        "_strnicmp" => stub!(ucrt_strnicmp as unsafe extern "win64" fn(_, _, _) -> _),
+        "strcspn" => stub!(ucrt_strcspn as unsafe extern "win64" fn(_, _) -> _),
+        "strpbrk" => stub!(ucrt_strpbrk as unsafe extern "win64" fn(_, _) -> _),
+        "strspn" => stub!(ucrt_strspn as unsafe extern "win64" fn(_, _) -> _),
+        "mbrlen" => stub!(ucrt_mbrlen as unsafe extern "win64" fn(_, _, _) -> _),
+        "strerror_s" => stub!(ucrt_strerror_s as unsafe extern "win64" fn(_, _, _) -> _),
+        "wcsncmp" => stub!(ucrt_wcsncmp as unsafe extern "win64" fn(_, _, _) -> _),
+        "wcsncpy_s" => stub!(ucrt_wcsncpy_s as unsafe extern "win64" fn(_, _, _, _) -> _),
+        "wcscpy_s" => stub!(ucrt_wcscpy_s as unsafe extern "win64" fn(_, _, _) -> _),
+        "isxdigit" => stub!(ucrt_isxdigit as extern "win64" fn(_) -> _),
+        "_time64" => stub!(ucrt_time64 as unsafe extern "win64" fn(_) -> _),
+        "_difftime64" => stub!(ucrt_difftime64 as extern "win64" fn(_, _) -> _),
+        "_localtime64_s" => stub!(ucrt_localtime64_s as unsafe extern "win64" fn(_, _) -> _),
+        "_gmtime64_s" => stub!(ucrt_gmtime64_s as unsafe extern "win64" fn(_, _) -> _),
+        "_byteswap_uint64" => stub!(ucrt_byteswap_uint64 as extern "win64" fn(_) -> _),
+        "bsearch" => stub!(ucrt_bsearch as unsafe extern "win64" fn(_, _, _, _, _) -> _),
+        "qsort" => stub!(ucrt_qsort as unsafe extern "win64" fn(_, _, _, _)),
+        "strtoull" => stub!(ucrt_strtoull as unsafe extern "win64" fn(_, _, _) -> _),
+        "mbstowcs_s" => stub!(ucrt_mbstowcs_s as unsafe extern "win64" fn(_, _, _, _, _) -> _),
+        "wcstombs_s" => stub!(ucrt_wcstombs_s as unsafe extern "win64" fn(_, _, _, _, _) -> _),
+        "_getch" => stub!(ucrt_getch as extern "win64" fn() -> _),
+        "fgets" => stub!(ucrt_fgets as unsafe extern "win64" fn(_, _, _) -> _),
+        "freopen_s" => stub!(ucrt_freopen_s as unsafe extern "win64" fn(_, _, _, _) -> _),
+        "rewind" => stub!(ucrt_rewind as unsafe extern "win64" fn(_)),
+        "ungetc" => stub!(ucrt_ungetc as unsafe extern "win64" fn(_, _) -> _),
+        "getc" => stub!(ucrt_getc as unsafe extern "win64" fn(_) -> _),
+        "_fileno" => stub!(ucrt_fileno as unsafe extern "win64" fn(_) -> _),
+        "_read" => stub!(ucrt_read as unsafe extern "win64" fn(_, _, _) -> _),
+        "_write" => stub!(ucrt_write as unsafe extern "win64" fn(_, _, _) -> _),
+        "_lseeki64" => stub!(ucrt_lseeki64 as unsafe extern "win64" fn(_, _, _) -> _),
+        "_setmode" => stub!(ucrt_setmode as unsafe extern "win64" fn(_, _) -> _),
+        "_chsize_s" => stub!(ucrt_chsize_s as unsafe extern "win64" fn(_, _) -> _),
+        "_fsopen" => stub!(ucrt_fsopen as unsafe extern "win64" fn(_, _, _) -> _),
+        "_findfirst64i32" => stub!(ucrt_findfirst64i32 as unsafe extern "win64" fn(_, _) -> _),
+        "_findnext64i32" => stub!(ucrt_findnext64i32 as unsafe extern "win64" fn(_, _) -> _),
+        "_findclose" => stub!(ucrt_findclose as unsafe extern "win64" fn(_) -> _),
+        "_fullpath" => stub!(ucrt_fullpath as unsafe extern "win64" fn(_, _, _) -> _),
+        "_mkdir" => stub!(ucrt_mkdir as unsafe extern "win64" fn(_) -> _),
+        "_stat64" => stub!(ucrt_stat64 as unsafe extern "win64" fn(_, _) -> _),
+        "_unlink" => stub!(ucrt_unlink as unsafe extern "win64" fn(_) -> _),
         "__dllonexit" => {
             Some(ucrt_dllonexit as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize)
         }
