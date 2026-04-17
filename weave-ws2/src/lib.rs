@@ -87,7 +87,40 @@ fn set_last_error(err: i32) {
 
 fn save_errno() {
     let e = unsafe { *libc::__errno_location() };
-    set_last_error(e);
+    set_last_error(errno_to_wsa(e));
+}
+
+fn errno_to_wsa(e: i32) -> i32 {
+    // Wine ref: dlls/ws2_32/socket.c — wsaErrno() mapping
+    // EINPROGRESS on non-blocking connect → WSAEWOULDBLOCK (10035), not WSAEINPROGRESS (10036).
+    // Windows returns WSAEWOULDBLOCK for non-blocking connect(); PuTTY/plink checks exactly 10035.
+    match e {
+        libc::EINPROGRESS  => 10035, // WSAEWOULDBLOCK (non-blocking connect in progress)
+        libc::EWOULDBLOCK  => 10035, // WSAEWOULDBLOCK
+        libc::ECONNREFUSED => 10061, // WSAECONNREFUSED
+        libc::ECONNRESET   => 10054, // WSAECONNRESET
+        libc::ECONNABORTED => 10053, // WSAECONNABORTED
+        libc::ETIMEDOUT    => 10060, // WSAETIMEDOUT
+        libc::EHOSTUNREACH => 10065, // WSAEHOSTUNREACH
+        libc::ENETUNREACH  => 10051, // WSAENETUNREACH
+        libc::EADDRINUSE   => 10048, // WSAEADDRINUSE
+        libc::ENOBUFS      => 10055, // WSAENOBUFS
+        libc::EAFNOSUPPORT => 10047, // WSAEAFNOSUPPORT
+        libc::ENOTCONN     => 10057, // WSAENOTCONN
+        libc::EMSGSIZE     => 10040, // WSAEMSGSIZE
+        libc::EOPNOTSUPP   => 10045, // WSAEOPNOTSUPP
+        libc::ENOTSOCK     => 10038, // WSAENOTSOCK
+        libc::EBADF        => 10009, // WSAEBADF
+        libc::EFAULT       => 10014, // WSAEFAULT
+        libc::EINVAL       => 10022, // WSAEINVAL
+        libc::EACCES       => 10013, // WSAEACCES
+        libc::ENOMEM       => 10055, // WSAENOBUFS (closest match)
+        libc::EPIPE        => 10054, // WSAECONNRESET (broken pipe = connection reset)
+        libc::EPROTO       => 10004, // WSAEPROTOTYPE
+        libc::EPROTOTYPE   => 10041, // WSAEPROTOTYPE
+        libc::ENOPROTOOPT  => 10042, // WSAENOPROTOOPT
+        _                  => e,     // pass through unknown errnos as-is
+    }
 }
 
 // ── Address family translation ───────────────────────────────────────────────
