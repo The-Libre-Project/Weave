@@ -1,0 +1,4 @@
+# weave-gui builds natively on the host — override the workspace
+# Linux cross-compile target from the parent .cargo/config.toml.
+[build]
+target = "aarch64-apple-darwin"

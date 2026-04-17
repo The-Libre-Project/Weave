@@ -28,3 +28,5 @@ panic = "abort"
 
 [profile.dev]
 incremental = true
+
+[workspace]
