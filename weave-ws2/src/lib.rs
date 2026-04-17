@@ -377,7 +377,16 @@ pub unsafe extern "win64" fn ws_connect(s: usize, name: *const u8, namelen: i32)
 pub unsafe extern "win64" fn ws_send(s: usize, buf: *const u8, len: i32, flags: i32) -> i32 {
     let ret = libc::send(s as i32, buf as *const libc::c_void, len as usize, flags);
     if ret < 0 {
-        save_errno();
+        let e = *libc::__errno_location();
+        // Re-arm FD_WRITE edge trigger when send buffer is full.
+        // Wine ref: dlls/ws2_32/socket.c — when send() returns EWOULDBLOCK,
+        // the socket's write-pending bit (hmask POLLEVENT_WRITE) is re-set so
+        // that FD_WRITE fires again once the kernel signals write-space available.
+        // This is the "re-arm after EWOULDBLOCK" step of the edge-triggered contract.
+        if e == libc::EWOULDBLOCK || e == libc::EAGAIN {
+            weave_common::socket_event::arm_socket_write(s as i32);
+        }
+        set_last_error(errno_to_wsa(e));
         SOCKET_ERROR
     } else {
         ret as i32
@@ -1421,6 +1430,13 @@ pub unsafe extern "win64" fn wsa_event_select(s: usize, event: usize, mask: i32)
     } else {
         weave_common::socket_event::deregister_socket_event(event as u64);
     }
+    // Arm FD_WRITE edge-trigger if the caller requested FD_WRITE (0x2) events.
+    // Wine ref: dlls/ws2_32/socket.c — WSAEventSelect arms the socket's write-pending
+    // state (hmask |= POLLEVENT_WRITE) so FD_WRITE fires once on the initial connect
+    // completion, then only again after a send() returns EWOULDBLOCK + buffer drains.
+    if (mask & 0x2) != 0 {
+        weave_common::socket_event::arm_socket_write(s as i32);
+    }
     0 // success
 }
 
@@ -1618,7 +1634,16 @@ pub unsafe extern "win64" fn wsa_enum_network_events(
         // plink will receive FD_WRITE on the next WSAEnumNetworkEvents call once
         // the socket is in the connected (not connecting) state.
         } else {
-            mask |= 2; // FD_WRITE
+            // Edge-triggered FD_WRITE: only report if armed.
+            // Wine ref: dlls/ws2_32/socket.c — sock_get_events: after FD_WRITE is
+            // delivered, the bit is cleared from hmask. It is re-set only after a
+            // send() returns EWOULDBLOCK and the kernel signals write-space available.
+            // Linux POLLOUT is level-triggered (always set when send buf has space);
+            // we enforce edge semantics via SOCKET_WRITE_ARMED.
+            if weave_common::socket_event::is_socket_write_armed(s as i32) {
+                mask |= 2; // FD_WRITE
+                weave_common::socket_event::disarm_socket_write(s as i32);
+            }
         }
     }
     if (pfd.revents & (libc::POLLHUP | libc::POLLRDHUP)) != 0 {

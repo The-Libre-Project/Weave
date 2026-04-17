@@ -6891,9 +6891,19 @@ pub unsafe extern "win64" fn wait_for_multiple_objects(
             // Check whether this event handle has an associated socket (reverse map).
             if let Some(sock_fd) = weave_common::socket_event::get_socket_for_event(handle as u64) {
                 eprintln!("weave/WFMO: handle[{i}]={handle:#x} → socket-event fd={sock_fd} (will poll socket)");
+                // Edge-triggered FD_WRITE: only poll POLLOUT if FD_WRITE is armed.
+                // Linux POLLOUT is level-triggered (always ready when send buf has space).
+                // Including POLLOUT unconditionally floods WFMO with ~2ms wakeups on
+                // an idle connected socket, preventing plink from blocking on FD_READ.
+                // Wine ref: dlls/ws2_32/socket.c — WFMO only wakes on socket events
+                // that are currently in the socket's pending hmask; armed bits only.
+                let mut sock_events = libc::POLLIN | libc::POLLHUP | libc::POLLRDHUP;
+                if weave_common::socket_event::is_socket_write_armed(sock_fd) {
+                    sock_events |= libc::POLLOUT;
+                }
                 pollfds.push(libc::pollfd {
                     fd: sock_fd,
-                    events: libc::POLLIN | libc::POLLOUT | libc::POLLHUP | libc::POLLRDHUP,
+                    events: sock_events,
                     revents: 0,
                 });
             } else {
