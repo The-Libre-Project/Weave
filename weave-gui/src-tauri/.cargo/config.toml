@@ -1,4 +1,4 @@
-# weave-gui builds natively on the host — override the workspace
-# Linux cross-compile target from the parent .cargo/config.toml.
-[build]
-target = "aarch64-apple-darwin"
+# weave-gui is an independent workspace (see [workspace] in Cargo.toml).
+# Build with an explicit --target flag per platform:
+#   macOS:  npm run tauri -- build --target aarch64-apple-darwin
+#   Linux:  npm run tauri -- build   (inherits x86_64-unknown-linux-gnu from parent)
