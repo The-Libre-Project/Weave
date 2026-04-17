@@ -1833,12 +1833,14 @@ fn sevenzip_m4_extraction_gate() {
             .to_string()
     }
 
-    // Create a fresh temp directory for extracted files.
-    let out_dir = std::env::temp_dir().join("weave_7z_extract_gate");
+    // Create a fresh extraction directory INSIDE bin_dir so that Landlock's
+    // exe-dir allow-rule covers it.  Using /tmp would be outside the sandbox's
+    // allowed path set and CreateFileW would receive EACCES.
+    let out_dir = std::path::PathBuf::from(&bin_dir).join("extract_out");
     if out_dir.exists() {
-        std::fs::remove_dir_all(&out_dir).expect("failed to clean temp extract dir");
+        std::fs::remove_dir_all(&out_dir).expect("failed to clean extract_out dir");
     }
-    std::fs::create_dir_all(&out_dir).expect("failed to create temp extract dir");
+    std::fs::create_dir_all(&out_dir).expect("failed to create extract_out dir");
 
     let weave_bin = env!("CARGO_BIN_EXE_weave");
 
