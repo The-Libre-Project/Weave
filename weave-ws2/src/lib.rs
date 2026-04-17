@@ -354,7 +354,16 @@ pub unsafe extern "win64" fn ws_connect(s: usize, name: *const u8, namelen: i32)
         namelen as libc::socklen_t,
     );
     if ret < 0 {
-        save_errno();
+        let e = *libc::__errno_location();
+        if e == libc::EINPROGRESS {
+            // Non-blocking connect in progress — mark socket as connecting so
+            // WSAEnumNetworkEvents can report FD_CONNECT (0x10) instead of
+            // FD_WRITE (0x2) when POLLOUT fires on connect completion.
+            // Wine ref: dlls/ws2_32/socket.c — SS_CONNECTING state transition;
+            // sock_get_events maps POLLOUT+SS_CONNECTING → POLLEVENT_CONNECT (FD_CONNECT).
+            weave_common::socket_event::mark_socket_connecting(s as i32);
+        }
+        set_last_error(errno_to_wsa(e));
         SOCKET_ERROR
     } else {
         0
@@ -1571,7 +1580,46 @@ pub unsafe extern "win64" fn wsa_enum_network_events(
         mask |= 1; // FD_READ
     }
     if (pfd.revents & libc::POLLOUT) != 0 {
-        mask |= 2; // FD_WRITE
+        // Wine ref: dlls/ws2_32/socket.c — sock_get_events / get_sock_fd_events:
+        // When socket is in SS_CONNECTING state and POLLOUT fires, Wine reports
+        // FD_CONNECT (POLLEVENT_CONNECT). After the connect completes the socket
+        // transitions to SS_CONNECTED; subsequent POLLOUT maps to FD_WRITE.
+        // We mirror this with SOCKET_CONNECTING in weave-common/socket_event.rs.
+        if weave_common::socket_event::is_socket_connecting(s as i32) {
+            // Confirm connect succeeded via SO_ERROR getsockopt.
+            let mut so_err: libc::c_int = 0;
+            let mut so_err_len: libc::socklen_t =
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+            let rc = libc::getsockopt(
+                s as i32,
+                libc::SOL_SOCKET,
+                libc::SO_ERROR,
+                &mut so_err as *mut libc::c_int as *mut libc::c_void,
+                &mut so_err_len,
+            );
+            let connect_err = if rc == 0 { so_err } else { libc::ECONNREFUSED };
+            // Transition out of connecting state regardless of outcome.
+            weave_common::socket_event::clear_socket_connecting(s as i32);
+            mask |= 0x10; // FD_CONNECT
+                          // iErrorCode[FD_CONNECT_BIT=4] at offset 4 + 4*4 = offset 20.
+                          // WSANETWORKEVENTS: long lNetworkEvents (4) + int iErrorCode[10] (40).
+                          // iErrorCode[4] starts at offset 4 + 4*4 = 20.
+            let wsa_err = if connect_err == 0 {
+                0i32
+            } else {
+                errno_to_wsa(connect_err)
+            };
+            std::ptr::copy_nonoverlapping(
+                wsa_err.to_le_bytes().as_ptr(),
+                lp_network_events.add(4 + 4 * 4), // iErrorCode[FD_CONNECT_BIT=4]
+                4,
+            );
+        // Do NOT set FD_WRITE on this call — connect completion != write-ready.
+        // plink will receive FD_WRITE on the next WSAEnumNetworkEvents call once
+        // the socket is in the connected (not connecting) state.
+        } else {
+            mask |= 2; // FD_WRITE
+        }
     }
     if (pfd.revents & (libc::POLLHUP | libc::POLLRDHUP)) != 0 {
         mask |= 32; // FD_CLOSE
