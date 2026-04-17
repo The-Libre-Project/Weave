@@ -806,6 +806,7 @@ pub unsafe extern "win64" fn query_security_package_info_a(
     _pz_package_name: *const u8,
     pp_package_info: *mut *const u8,
 ) -> i32 {
+    eprintln!("weave/Secur32!QuerySecurityPackageInfoA → SEC_E_OK (fake Schannel)");
     if !pp_package_info.is_null() {
         *pp_package_info = fake_pkg_info();
     }
