@@ -1722,35 +1722,42 @@ pub fn resolve(func: &str) -> Option<usize> {
 
 // ── Crypto stubs ──────────────────────────────────────────────────────────────
 
-/// SystemFunction036 — RtlGenRandom; fills a buffer with cryptographically
-/// random bytes via the Linux `getrandom(2)` syscall (flags=0, GRND_DEFAULT:
-/// blocks until the urandom pool is seeded, then returns non-blocking).
+/// Fill `buf` with `len` cryptographically random bytes via `getrandom(2)`.
 ///
-/// Wine ref: dlls/advapi32/crypt.c — RtlGenRandom delegates directly to
+/// Returns `true` on success. Uses `GRND_DEFAULT` (flags=0): blocks until
+/// the urandom pool is seeded, then returns non-blocking. Atomic for ≤256 bytes.
+///
+/// # Future seccomp note
+/// `getrandom(2)` (syscall 318) must appear in the seccomp allowlist when
+/// Phase 4 BPF filtering is implemented. Both RtlGenRandom and CryptGenRandom
+/// funnel through this helper — one allowlist entry covers both.
+///
+/// # Safety
+/// `buf` must be a writable buffer of at least `len` bytes.
+unsafe fn fill_random(buf: *mut u8, len: usize) -> bool {
+    if buf.is_null() || len == 0 {
+        return false;
+    }
+    // SAFETY: buf is non-null (checked above); caller guarantees writable buf of `len` bytes.
+    // getrandom(2) writes exactly `len` bytes on success for len ≤ 256 (atomic, no short-reads).
+    let ret = unsafe { libc::getrandom(buf as *mut libc::c_void, len, 0) };
+    ret >= 0 && ret as usize == len
+}
+
+/// SystemFunction036 — RtlGenRandom; fills a buffer with cryptographically random bytes.
+///
+/// Wine ref: dlls/advapi32/crypt.c — RtlGenRandom delegates to
 /// NtQuerySystemInformation(SystemInterruptInformation) on NT; on Linux Wine
-/// uses /dev/urandom; we use getrandom(2) which is the modern equivalent
-/// and avoids fd management inside the sandbox.
+/// uses /dev/urandom; Weave uses getrandom(2) (modern equivalent, atomic for
+/// ≤256 bytes, avoids fd management inside the sandbox).
 ///
 /// # Safety
 /// `random_buffer` must be a writable buffer of at least `random_buffer_length` bytes.
-// Wine ref: dlls/advapi32/crypt.c — RtlGenRandom; Wine uses /dev/urandom; Weave uses getrandom(2) (modern equivalent, atomic for ≤256 bytes, sandbox-friendly)
 pub unsafe extern "win64" fn system_function_036(
     random_buffer: *mut u8,
     random_buffer_length: u32,
 ) -> u8 {
-    if random_buffer.is_null() || random_buffer_length == 0 {
-        return 0; // FALSE
-    }
-    let len = random_buffer_length as usize;
-    // SAFETY: random_buffer is non-null (checked above) and the Win32 API contract
-    // for RtlGenRandom requires callers to supply a writable buffer of at least
-    // random_buffer_length bytes.  getrandom(2) writes exactly `len` bytes on
-    // success (for len ≤ 256 it is atomic and never short-reads).
-    let ret = unsafe { libc::getrandom(random_buffer as *mut libc::c_void, len, 0) };
-    if ret < 0 || ret as usize != len {
-        return 0; // FALSE — getrandom failed (should not happen in practice)
-    }
-    1 // TRUE
+    unsafe { fill_random(random_buffer, random_buffer_length as usize) as u8 }
 }
 
 /// CryptAcquireContextA — open a cryptographic service provider context (ANSI).
@@ -1808,28 +1815,18 @@ pub unsafe extern "win64" fn crypt_release_context(_h_prov: usize, _dw_flags: u3
 
 /// CryptGenRandom — fill a buffer with cryptographically random bytes.
 ///
+/// Wine ref: dlls/advapi32/crypt.c — CryptGenRandom delegates to RtlGenRandom on NT;
+/// Wine uses /dev/urandom; Weave uses getrandom(2) via fill_random (same helper as
+/// SystemFunction036 / RtlGenRandom).
+///
 /// # Safety
 /// `pb_buffer` must be a writable buffer of at least `dw_len` bytes.
-// Wine ref: dlls/advapi32/crypt.c — CryptGenRandom delegates to RtlGenRandom on NT;
-// Wine uses /dev/urandom; Weave uses getrandom(2) (same pattern as SystemFunction036,
-// atomic for ≤256 bytes, sandbox-friendly, no fd management).
 pub unsafe extern "win64" fn crypt_gen_random(
     _h_prov: usize,
     dw_len: u32,
     pb_buffer: *mut u8,
 ) -> i32 {
-    if pb_buffer.is_null() || dw_len == 0 {
-        return 0; // FALSE
-    }
-    let len = dw_len as usize;
-    // SAFETY: pb_buffer is non-null (checked above); Win32 ABI requires callers to supply a
-    // writable buffer of at least dw_len bytes. getrandom(2) writes exactly `len` bytes on
-    // success (for len ≤ 256 it is atomic and never short-reads).
-    let ret = unsafe { libc::getrandom(pb_buffer as *mut libc::c_void, len, 0) };
-    if ret < 0 || ret as usize != len {
-        return 0; // FALSE — getrandom failed (should not happen in practice)
-    }
-    1 // TRUE
+    unsafe { fill_random(pb_buffer, dw_len as usize) as i32 }
 }
 
 // ── Security / SID stubs ──────────────────────────────────────────────────────

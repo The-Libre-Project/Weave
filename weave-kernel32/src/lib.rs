@@ -388,28 +388,7 @@ pub unsafe extern "win64" fn write_console_w(
 // (DLL_PROCESS_DETACH) before calling NtTerminateProcess.
 pub extern "win64" fn exit_process(u_exit_code: u32) -> ! {
     eprintln!("weave/kernel32: ExitProcess({u_exit_code})");
-    // Raw stack scan: libc::backtrace can't unwind PE frames (no frame pointers).
-    // Scan RSP+0..RSP+8192 for values in SciTE.exe .text [VAddr 0x1000, size 0x11d5d0].
-    // SciTE preferred base = 0x140000000; .text = [0x140001000, 0x14011e5d0].
-    const SCITE_BASE: usize = 0x140000000;
-    const SCITE_TEXT_LO: usize = 0x140001000;
-    const SCITE_TEXT_HI: usize = 0x14011e5d0;
-    unsafe {
-        let rsp: usize;
-        std::arch::asm!("mov {}, rsp", out(reg) rsp);
-        eprintln!("weave/kernel32: ExitProcess stack scan (rsp={rsp:#018x}):");
-        for offset in (0..8192usize).step_by(8) {
-            let ptr = (rsp + offset) as *const usize;
-            let val = *ptr;
-            if (SCITE_TEXT_LO..SCITE_TEXT_HI).contains(&val) {
-                eprintln!(
-                    "  rsp+{offset:#06x}: {val:#018x}  rva={:#010x}",
-                    val - SCITE_BASE
-                );
-            }
-        }
-        libc::exit(u_exit_code as i32)
-    }
+    unsafe { libc::exit(u_exit_code as i32) }
 }
 
 /// TerminateProcess: forcibly terminate a process.
@@ -423,29 +402,8 @@ pub extern "win64" fn exit_process(u_exit_code: u32) -> ! {
 // SIGKILL via server to the target process; the server sets exit_code
 // then calls process_killed(). Ignores self-termination vs. remote.
 pub unsafe extern "win64" fn terminate_process(_h_process: usize, u_exit_code: u32) -> i32 {
-    // [rsp] is unreliable here — Rust's function prologue adjusts RSP before
-    // any user code runs, so [rsp] no longer points to the return address.
-    // Use the same stack scan as exit_process: walk RSP+0..8192 and print all
-    // values that fall inside SciTE.exe .text to identify every call frame.
-    const SCITE_BASE: usize = 0x140000000;
-    const SCITE_TEXT_LO: usize = 0x140001000;
-    const SCITE_TEXT_HI: usize = 0x14011e5d0;
+    eprintln!("weave: TerminateProcess exit_code={u_exit_code:#x}");
     unsafe {
-        let rsp: usize;
-        std::arch::asm!("mov {}, rsp", out(reg) rsp);
-        eprintln!(
-            "weave: TerminateProcess exit_code={u_exit_code:#x} — stack scan (rsp={rsp:#018x}):"
-        );
-        for offset in (0..8192usize).step_by(8) {
-            let ptr = (rsp + offset) as *const usize;
-            let val = *ptr;
-            if (SCITE_TEXT_LO..SCITE_TEXT_HI).contains(&val) {
-                eprintln!(
-                    "  rsp+{offset:#06x}: {val:#018x}  rva={:#010x}",
-                    val - SCITE_BASE
-                );
-            }
-        }
         libc::exit(u_exit_code as i32)
     }
 }
@@ -718,6 +676,10 @@ pub extern "win64" fn sleep(dw_milliseconds: u32) {
 // read TEB->TlsSlots[index]; higher indices use TEB->TlsExpansionSlots[index-64].
 // Always clears LastError to ERROR_SUCCESS before returning.
 pub extern "win64" fn tls_get_value(dw_tls_index: u32) -> *mut u8 {
+    // Wine ref: dlls/kernelbase/thread.c — TlsGetValue always clears LastError
+    // to ERROR_SUCCESS before returning, even on success. Callers use GetLastError
+    // after TlsGetValue(index) to distinguish "slot is NULL" from "slot not set".
+    set_last_error(0);
     if dw_tls_index >= 64 {
         return TLS_SLOTS
             .with(|slots| slots.borrow().get(&dw_tls_index).copied().unwrap_or(0) as *mut u8);

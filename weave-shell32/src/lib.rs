@@ -8,6 +8,12 @@
 //! - `shell32.dll`: `SHGetFolderPathW`, `SHGetSpecialFolderPathW`,
 //!   `SHGetKnownFolderPath`, `ShellExecuteW`, `CommandLineToArgvW`,
 //!   `CoTaskMemFree`.
+//!
+//! # Crate boundary note
+//! This crate depends on `weave-notify` (a thin `notify-send` subprocess bridge).
+//! `weave-notify` is an infrastructure utility crate, not a Windows DLL crate —
+//! it has no Win32 API surface. This is NOT a DLL-to-DLL import violation.
+//! See `weave-gdi32/src/lib.rs` for the convention on documenting crate exceptions.
 
 mod dialogs;
 mod shell;

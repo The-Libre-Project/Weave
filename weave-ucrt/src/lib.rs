@@ -392,8 +392,8 @@ pub unsafe extern "win64" fn ucrt_initterm(start: *const *const c_void, end: *co
     unsafe {
         libc::write(
             2,
-            b"weave: stub _initterm\n".as_ptr() as *const libc::c_void,
-            22,
+            b"weave: _initterm running\n".as_ptr() as *const libc::c_void,
+            25,
         );
         let mut p = start;
         while p < end {
@@ -423,8 +423,8 @@ pub unsafe extern "win64" fn ucrt_initterm_e(
     unsafe {
         libc::write(
             2,
-            b"weave: stub _initterm_e\n".as_ptr() as *const libc::c_void,
-            24,
+            b"weave: _initterm_e running\n".as_ptr() as *const libc::c_void,
+            27,
         );
         let mut p = start;
         while p < end {
