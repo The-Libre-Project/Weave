@@ -746,6 +746,85 @@ pub unsafe extern "win64" fn sspi_stub_fn() -> i32 {
     0x8009_0302u32 as i32
 }
 
+// Static strings for the fake Schannel SecPkgInfoA.
+static FAKE_SCHANNEL_NAME: &[u8] = b"Schannel\0";
+static FAKE_SCHANNEL_COMMENT: &[u8] = b"Microsoft Unified Security Protocol Provider\0";
+
+// Lazily-initialized SecPkgInfoA for Schannel.
+//
+// SecPkgInfoA layout (Windows x64, sspi.h):
+//   offset  0: fCapabilities  u32
+//   offset  4: wVersion       u16
+//   offset  6: wRPCID         u16
+//   offset  8: cbMaxToken     u32
+//   offset 12: (padding)      u32
+//   offset 16: Name           *const u8 (8 bytes)
+//   offset 24: Comment        *const u8 (8 bytes)
+//   Total: 32 bytes
+static FAKE_PKG_INFO: std::sync::OnceLock<[u8; 32]> = std::sync::OnceLock::new();
+
+fn fake_pkg_info() -> *const u8 {
+    FAKE_PKG_INFO
+        .get_or_init(|| {
+            let mut buf = [0u8; 32];
+            // fCapabilities — standard Schannel flags
+            buf[0..4].copy_from_slice(&0x0010_7B3Fu32.to_le_bytes());
+            // wVersion = 1
+            buf[4..6].copy_from_slice(&1u16.to_le_bytes());
+            // wRPCID = 0xE (Schannel package ID)
+            buf[6..8].copy_from_slice(&0x000Eu16.to_le_bytes());
+            // cbMaxToken = 0x4000 (standard Schannel max)
+            buf[8..12].copy_from_slice(&0x0000_4000u32.to_le_bytes());
+            // Name pointer
+            let name_ptr = FAKE_SCHANNEL_NAME.as_ptr() as usize;
+            buf[16..24].copy_from_slice(&name_ptr.to_le_bytes());
+            // Comment pointer
+            let comment_ptr = FAKE_SCHANNEL_COMMENT.as_ptr() as usize;
+            buf[24..32].copy_from_slice(&comment_ptr.to_le_bytes());
+            buf
+        })
+        .as_ptr()
+}
+
+/// QuerySecurityPackageInfoA — return fake Schannel package info.
+///
+/// curl calls this immediately after InitSecurityInterfaceA to get cbMaxToken
+/// for buffer allocation. A stub returning SEC_E_UNSUPPORTED_FUNCTION causes
+/// Curl_schannel_init → CURLE_FAILED_INIT even for plain HTTP requests, because
+/// curl_global_init unconditionally initialises the SSL backend.
+///
+/// We return SEC_E_OK (0) and a static SecPkgInfoA with Schannel's standard
+/// fields so curl's init completes. Actual TLS is not supported.
+///
+/// Wine ref: dlls/secur32/secur32.c — QuerySecurityPackageInfoA calls
+/// EnumerateSecurityPackages internally and returns the matching entry.
+///
+/// # Safety
+/// `pp_package_info` must be a valid writable pointer or null.
+// Wine ref: dlls/secur32/secur32.c — QuerySecurityPackageInfoA returns SEC_E_OK + SecPkgInfoA* via pp_package_info; caller must free via FreeContextBuffer
+pub unsafe extern "win64" fn query_security_package_info_a(
+    _pz_package_name: *const u8,
+    pp_package_info: *mut *const u8,
+) -> i32 {
+    if !pp_package_info.is_null() {
+        *pp_package_info = fake_pkg_info();
+    }
+    0 // SEC_E_OK
+}
+
+/// FreeContextBuffer — free a buffer returned by an SSPI function.
+///
+/// Our SecPkgInfoA is a static buffer, so this is a no-op.
+///
+/// Wine ref: dlls/secur32/secur32.c — FreeContextBuffer calls SECUR32_FREE.
+///
+/// # Safety
+/// `pv_context_buffer` is accepted but not dereferenced (static buffer, nothing to free).
+// Wine ref: dlls/secur32/secur32.c — FreeContextBuffer(pv) calls LocalFree(pv); safe to no-op for static buffers
+pub unsafe extern "win64" fn free_context_buffer(_pv_context_buffer: *mut u8) -> i32 {
+    0 // SEC_E_OK
+}
+
 // Windows SecurityFunctionTableA layout (sspi.h, Windows SDK, 64-bit):
 //
 //   offset   0: dwVersion          (u32 + 4 pad = 8)
@@ -806,6 +885,17 @@ fn init_sspi_table() -> *const u8 {
             for i in 1..33 {
                 SSPI_TABLE[i] = stub;
             }
+            // Override specific slots that callers actually invoke.
+            // Indices = (struct_offset / 8): slot 0 = dwVersion, slot 1 = first fn ptr at offset 8.
+            // offset 128 → index 16: FreeContextBuffer
+            SSPI_TABLE[16] =
+                free_context_buffer as unsafe extern "win64" fn(*mut u8) -> i32
+                    as *const () as u64;
+            // offset 136 → index 17: QuerySecurityPackageInfoA
+            SSPI_TABLE[17] =
+                query_security_package_info_a
+                    as unsafe extern "win64" fn(*const u8, *mut *const u8) -> i32
+                    as *const () as u64;
         }
     });
     // SAFETY: After call_once, SSPI_TABLE is not mutated again. The returned
