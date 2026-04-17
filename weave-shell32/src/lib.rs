@@ -59,6 +59,10 @@ fn resolve_comdlg32(func: &str) -> Option<usize> {
 
 fn resolve_shell32(func: &str) -> Option<usize> {
     match func {
+        "SHGetFolderPathA" => Some(
+            shell::sh_get_folder_path_a as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const ()
+                as usize,
+        ),
         "SHGetFolderPathW" => Some(
             shell::sh_get_folder_path_w as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const ()
                 as usize,

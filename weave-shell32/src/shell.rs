@@ -235,6 +235,44 @@ pub unsafe extern "win64" fn sh_get_folder_path_w(
     }
 }
 
+// Wine ref: dlls/shell32/shellpath.c:2838 — SHGetFolderPathA is a thin wrapper around
+// SHGetFolderPathW; it calls the W variant then converts the wide result to ANSI via
+// WideCharToMultiByte(CP_ACP). Our fake paths are pure ASCII so a direct byte copy
+// suffices — no multi-byte conversion needed.
+/// SHGetFolderPathA: ANSI variant of SHGetFolderPathW.
+///
+/// Returns `S_OK` (0) on success, `E_FAIL` (0x80004005) if the CSIDL is unknown.
+///
+/// # Safety
+/// `psz_path` must be a writable buffer of at least `MAX_PATH` (260) bytes.
+// Wine ref: dlls/shell32/shellpath.c:2838 — calls SHGetFolderPathW then WideCharToMultiByte(CP_ACP).
+pub unsafe extern "win64" fn sh_get_folder_path_a(
+    _h_wnd: usize,
+    n_folder: i32,
+    _h_token: usize,
+    _dw_flags: u32,
+    psz_path: *mut u8,
+) -> u32 {
+    match csidl_to_win_path(n_folder) {
+        Some(win_path) => {
+            ensure_linux_dir(&win_path);
+            if !psz_path.is_null() {
+                let bytes = win_path.as_bytes();
+                let len = bytes.len().min(259);
+                unsafe {
+                    core::ptr::copy_nonoverlapping(bytes.as_ptr(), psz_path, len);
+                    *psz_path.add(len) = 0;
+                }
+            }
+            0 // S_OK
+        }
+        None => {
+            eprintln!("weave/shell32: SHGetFolderPathA: unknown CSIDL {n_folder:#x}");
+            0x8000_4005 // E_FAIL
+        }
+    }
+}
+
 // Wine ref: dlls/shell32/shellpath.c — SHGetSpecialFolderPathW wraps SHGetFolderPathW
 // with SHGFP_TYPE_CURRENT; uses SHGetFolderPathA/W depending on Unicode flag.
 // Returns TRUE/FALSE (not HRESULT) — same as Weave's impl.
