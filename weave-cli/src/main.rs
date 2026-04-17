@@ -1,6 +1,7 @@
 use clap::Parser;
 use std::path::PathBuf;
 use weave_core::{cfg, cmdline, dll_registry, exec, iat, loader, pe, prefix, registry, seh, teb};
+use weave_installer::PrefixManager;
 
 mod arch;
 
@@ -62,7 +63,130 @@ fn resolve(dll: &str, func: &str) -> Option<usize> {
         .or_else(|| dll_registry::lookup(dll, func))
 }
 
+fn handle_prefix_cmd(args: &[String]) -> ! {
+    let usage = || {
+        eprintln!("usage: weave prefix <create|list|launch|delete> [args...]");
+        std::process::exit(1);
+    };
+
+    let mgr = PrefixManager::new().unwrap_or_else(|e| {
+        eprintln!("weave prefix: {e}");
+        std::process::exit(1);
+    });
+
+    match args.get(0).map(|s| s.as_str()) {
+        Some("create") => {
+            let name = args.get(1).unwrap_or_else(|| {
+                eprintln!("weave prefix create: missing <name>");
+                std::process::exit(1);
+            });
+            // Parse optional --exe <path>
+            let exe_path: Option<std::path::PathBuf> = {
+                let mut result = None;
+                let mut i = 2;
+                while i < args.len() {
+                    if args[i] == "--exe" {
+                        if let Some(p) = args.get(i + 1) {
+                            result = Some(std::path::PathBuf::from(p));
+                            i += 2;
+                        } else {
+                            eprintln!("weave prefix create: --exe requires a path");
+                            std::process::exit(1);
+                        }
+                    } else {
+                        i += 1;
+                    }
+                }
+                result
+            };
+            let prefix = mgr.create(name).unwrap_or_else(|e| {
+                eprintln!("weave prefix create: {e}");
+                std::process::exit(1);
+            });
+            if let Some(exe) = exe_path {
+                prefix.set_exe_path(&exe).unwrap_or_else(|e| {
+                    eprintln!("weave prefix create: set_exe_path: {e}");
+                    std::process::exit(1);
+                });
+            }
+            println!("created prefix '{name}'");
+            std::process::exit(0);
+        }
+        Some("list") => {
+            let prefixes = mgr.list().unwrap_or_else(|e| {
+                eprintln!("weave prefix list: {e}");
+                std::process::exit(1);
+            });
+            if prefixes.is_empty() {
+                println!("(no prefixes)");
+            } else {
+                for p in &prefixes {
+                    println!("{}", p.name);
+                }
+            }
+            std::process::exit(0);
+        }
+        Some("launch") => {
+            let name = args.get(1).unwrap_or_else(|| {
+                eprintln!("weave prefix launch: missing <name>");
+                std::process::exit(1);
+            });
+            let prefix = mgr.get(name).unwrap_or_else(|e| {
+                eprintln!("weave prefix launch: {e}");
+                std::process::exit(1);
+            });
+            let exe_path = prefix
+                .get_exe_path()
+                .unwrap_or_else(|e| {
+                    eprintln!("weave prefix launch: {e}");
+                    std::process::exit(1);
+                })
+                .unwrap_or_else(|| {
+                    eprintln!("weave prefix launch: no exe configured for prefix '{name}'");
+                    std::process::exit(1);
+                });
+            let current_exe = std::env::current_exe().unwrap_or_else(|e| {
+                eprintln!("weave prefix launch: could not find current exe: {e}");
+                std::process::exit(1);
+            });
+            let status = std::process::Command::new(&current_exe)
+                .arg(&exe_path)
+                .status()
+                .unwrap_or_else(|e| {
+                    eprintln!(
+                        "weave prefix launch: failed to exec {}: {e}",
+                        current_exe.display()
+                    );
+                    std::process::exit(1);
+                });
+            std::process::exit(status.code().unwrap_or(1));
+        }
+        Some("delete") => {
+            let name = args.get(1).unwrap_or_else(|| {
+                eprintln!("weave prefix delete: missing <name>");
+                std::process::exit(1);
+            });
+            mgr.delete(name).unwrap_or_else(|e| {
+                eprintln!("weave prefix delete: {e}");
+                std::process::exit(1);
+            });
+            println!("deleted prefix '{name}'");
+            std::process::exit(0);
+        }
+        _ => usage(),
+    }
+}
+
 fn main() {
+    // ── −3. Prefix subcommand dispatch — intercept before clap parsing ────
+    // `weave prefix <create|list|launch|delete> [args...]` is handled here so
+    // that Args::parse() (which requires an exe positional arg) is never called
+    // for prefix management commands.
+    let raw: Vec<String> = std::env::args().collect();
+    if raw.get(1).map(|s| s.as_str()) == Some("prefix") {
+        handle_prefix_cmd(&raw[2..]);
+    }
+
     // ── −2. Panic hook — must be first, before any PE is loaded ──────────
     // Catches Rust panics inside Weave stubs (e.g. todo!(), unimplemented!()).
     // These call OS exit directly — no SIGSEGV, no SEH — so without this hook

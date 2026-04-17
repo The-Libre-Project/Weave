@@ -2149,3 +2149,114 @@ fn hello_crt_prints_hello_world() {
         "unexpected stdout.\nstderr: {stderr}"
     );
 }
+
+/// M5 prefix CLI gate — exercises the `weave prefix` subcommands end-to-end:
+/// create / list / launch / delete, each as a subprocess call to the real binary.
+///
+/// Linux-only: `launch` runs the PE under Weave which requires Linux x86-64.
+#[test]
+fn m5_prefix_cli_gate() {
+    if !cfg!(target_os = "linux") {
+        eprintln!("m5_prefix_cli_gate: skipping — requires Linux");
+        return;
+    }
+
+    let weave_bin = env!("CARGO_BIN_EXE_weave");
+    let manifest = env!("CARGO_MANIFEST_DIR");
+    let hello_exe = format!("{manifest}/../tests/fixtures/bin/hello.exe");
+
+    let tmp = tempfile::tempdir().expect("tempdir for m5_prefix_cli_gate");
+    let xdg_data = tmp.path().join("xdg");
+    std::fs::create_dir_all(&xdg_data).expect("create xdg_data dir");
+
+    // ── Step 1: create the prefix ─────────────────────────────────────────
+    let output = std::process::Command::new(weave_bin)
+        .args(["prefix", "create", "hello-cli", "--exe", &hello_exe])
+        .env("XDG_DATA_HOME", &xdg_data)
+        .output()
+        .expect("failed to run `weave prefix create`");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "m5_prefix_cli_gate step 1 FAIL: `weave prefix create` exited {}\nstdout: {stdout}\nstderr: {stderr}",
+        output.status
+    );
+    eprintln!("m5_prefix_cli_gate step 1 OK: {}", stdout.trim());
+
+    // ── Step 2: list — must contain "hello-cli" ────────────────────────────
+    let output = std::process::Command::new(weave_bin)
+        .args(["prefix", "list"])
+        .env("XDG_DATA_HOME", &xdg_data)
+        .output()
+        .expect("failed to run `weave prefix list`");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "m5_prefix_cli_gate step 2 FAIL: `weave prefix list` exited {}\nstdout: {stdout}\nstderr: {stderr}",
+        output.status
+    );
+    assert!(
+        stdout.contains("hello-cli"),
+        "m5_prefix_cli_gate step 2 FAIL: 'hello-cli' not in list output\nstdout: {stdout}"
+    );
+    eprintln!("m5_prefix_cli_gate step 2 OK: list contains hello-cli");
+
+    // ── Step 3: launch — must exit 0 and print "Hello, World!" ────────────
+    let output = std::process::Command::new(weave_bin)
+        .args(["prefix", "launch", "hello-cli"])
+        .env("XDG_DATA_HOME", &xdg_data)
+        .output()
+        .expect("failed to run `weave prefix launch`");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    eprintln!("m5_prefix_cli_gate step 3: exit {}", output.status);
+    eprintln!("--- weave stdout ---\n{stdout}");
+    eprintln!("--- weave stderr ---\n{stderr}");
+    assert!(
+        output.status.success(),
+        "m5_prefix_cli_gate step 3 FAIL: `weave prefix launch` exited {}\nstdout: {stdout}\nstderr: {stderr}",
+        output.status
+    );
+    assert!(
+        stdout.contains("Hello, World!"),
+        "m5_prefix_cli_gate step 3 FAIL: stdout does not contain 'Hello, World!'\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    eprintln!("m5_prefix_cli_gate step 3 OK: launch exited 0 + Hello, World!");
+
+    // ── Step 4: delete ────────────────────────────────────────────────────
+    let output = std::process::Command::new(weave_bin)
+        .args(["prefix", "delete", "hello-cli"])
+        .env("XDG_DATA_HOME", &xdg_data)
+        .output()
+        .expect("failed to run `weave prefix delete`");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "m5_prefix_cli_gate step 4 FAIL: `weave prefix delete` exited {}\nstdout: {stdout}\nstderr: {stderr}",
+        output.status
+    );
+    eprintln!("m5_prefix_cli_gate step 4 OK: {}", stdout.trim());
+
+    // ── Step 5: list — must NOT contain "hello-cli" ────────────────────────
+    let output = std::process::Command::new(weave_bin)
+        .args(["prefix", "list"])
+        .env("XDG_DATA_HOME", &xdg_data)
+        .output()
+        .expect("failed to run `weave prefix list` after delete");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "m5_prefix_cli_gate step 5 FAIL: `weave prefix list` exited {}\nstdout: {stdout}\nstderr: {stderr}",
+        output.status
+    );
+    assert!(
+        !stdout.contains("hello-cli"),
+        "m5_prefix_cli_gate step 5 FAIL: 'hello-cli' still present after delete\nstdout: {stdout}"
+    );
+    eprintln!("m5_prefix_cli_gate step 5 OK: hello-cli absent after delete");
+    eprintln!("m5_prefix_cli_gate: all 5 steps passed");
+}
