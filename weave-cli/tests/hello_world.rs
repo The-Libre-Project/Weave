@@ -1984,9 +1984,10 @@ fn sevenzip_m4_listing_gate() {
     // Gate 3b (hard): stdout must contain both file names and correct sizes.
     //   hello.txt           → 32 bytes ("Hello from inside the archive\!\n")
     //   subdir/world.txt    → 32 bytes ("Another file in a subdirectory.\n")
+    // 7za l uses backslash separators in its output on Windows paths.
     let expected: &[(&str, &str)] = &[
         ("hello.txt", "32"),
-        ("subdir/world.txt", "32"),
+        ("subdir\\world.txt", "32"),
     ];
 
     for (name, size) in expected {
