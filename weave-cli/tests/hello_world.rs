@@ -1769,6 +1769,150 @@ fn putty_m3_plink_gate() {
     }
 }
 
+/// `weave 7za.exe x test.7z` — M4 extraction gate.
+///
+/// Verifies that 7-Zip can extract a known archive under Weave and that the
+/// extracted files have the expected SHA-256 digests. This exercises the CRT
+/// file-I/O path (fopen/fwrite/fclose) and Weave's path translation layer.
+///
+/// Expected archive contents (tests/fixtures/bin/test.7z):
+///   hello.txt — "hello world\n"  (SHA-256: a948904f2f0f479b8f...)
+///   world.txt — "hello world\n"  (SHA-256: a948904f2f0f479b8f...)
+///
+/// The test extracts to a fresh temp directory, then reads each file back and
+/// checks its SHA-256 against the known value. A mismatch or missing file is
+/// a hard failure and reports exactly which file is wrong.
+///
+/// Skipped gracefully if 7za.exe or test.7z is absent from fixtures.
+#[test]
+fn sevenzip_m4_extraction_gate() {
+    if !cfg!(target_os = "linux") {
+        eprintln!("skipping sevenzip_m4_extraction_gate — requires Linux");
+        return;
+    }
+
+    let manifest = env!("CARGO_MANIFEST_DIR");
+    let bin_dir = format!("{manifest}/../tests/fixtures/bin");
+    let seven_zip = format!("{bin_dir}/7za.exe");
+    let archive = format!("{bin_dir}/test.7z");
+
+    if !std::path::Path::new(&seven_zip).exists() {
+        eprintln!("skipping: 7za.exe not present in tests/fixtures/bin/");
+        return;
+    }
+    if !std::path::Path::new(&archive).exists() {
+        eprintln!(
+            "skipping: test.7z not present in tests/fixtures/bin/ \
+             (run tests/fixtures/src/make_zip.py)"
+        );
+        return;
+    }
+
+    // Compute SHA-256 of a byte slice using the sha2 crate is not available
+    // without adding a dep; use the standard library's approach via /proc or
+    // shell out to sha256sum (available in CI Docker image).
+    fn sha256_of_bytes(data: &[u8]) -> String {
+        use std::io::Write;
+        let mut child = std::process::Command::new("sha256sum")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("sha256sum not found — needed for extraction gate");
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(data)
+            .expect("write to sha256sum stdin");
+        let out = child.wait_with_output().expect("sha256sum wait");
+        // output: "<hex>  -\n"
+        String::from_utf8_lossy(&out.stdout)
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .to_string()
+    }
+
+    // Create a fresh temp directory for extracted files.
+    let out_dir = std::env::temp_dir().join("weave_7z_extract_gate");
+    if out_dir.exists() {
+        std::fs::remove_dir_all(&out_dir).expect("failed to clean temp extract dir");
+    }
+    std::fs::create_dir_all(&out_dir).expect("failed to create temp extract dir");
+
+    let weave_bin = env!("CARGO_BIN_EXE_weave");
+
+    // Run: weave 7za.exe x test.7z -o<out_dir> -y
+    // CWD = bin_dir so 7za.exe finds test.7z as a relative path.
+    // -y: assume yes to all prompts (non-interactive).
+    let output = std::process::Command::new(weave_bin)
+        .current_dir(&bin_dir)
+        .arg(&seven_zip)
+        .arg("x")
+        .arg("test.7z")
+        .arg(format!("-o{}", out_dir.display()))
+        .arg("-y")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run weave on 7za.exe x: {e}"));
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    eprintln!("sevenzip_m4_extraction: exit: {}", output.status);
+    eprintln!("--- 7za stdout ---\n{stdout}");
+    eprintln!("--- 7za stderr ---\n{stderr}");
+
+    // Gate 1 (hard): 7za.exe must exit 0.
+    assert!(
+        output.status.success(),
+        "sevenzip_m4_extraction Gate 1 FAIL: 7za.exe x exited non-zero: {}\n\
+         stdout: {stdout}\nstderr: {stderr}",
+        output.status
+    );
+
+    // Gate 2 (hard): extracted files must exist and have correct content.
+    // Expected: both hello.txt and world.txt contain "hello world\n".
+    // SHA-256("hello world\n") = a948904f2f0f479b8f9a3e7df7f5f5f5... (computed at build time below)
+    //
+    // We compute the expected hash dynamically from the known string so this
+    // test does not depend on a hard-coded hash that could drift.
+    let expected_content = b"hello world\n";
+    let expected_hash = sha256_of_bytes(expected_content);
+    eprintln!("sevenzip_m4_extraction: expected SHA-256 = {expected_hash}");
+
+    for filename in &["hello.txt", "world.txt"] {
+        let path = out_dir.join(filename);
+        assert!(
+            path.exists(),
+            "sevenzip_m4_extraction Gate 2 FAIL: extracted file {filename} is missing.\n\
+             out_dir contents: {:?}\nstdout: {stdout}\nstderr: {stderr}",
+            std::fs::read_dir(&out_dir)
+                .map(|r| r
+                    .filter_map(|e| e.ok())
+                    .map(|e| e.file_name())
+                    .collect::<Vec<_>>())
+                .unwrap_or_default()
+        );
+
+        let actual = std::fs::read(&path)
+            .unwrap_or_else(|e| panic!("failed to read extracted {filename}: {e}"));
+        let actual_hash = sha256_of_bytes(&actual);
+
+        assert_eq!(
+            actual_hash,
+            expected_hash,
+            "sevenzip_m4_extraction Gate 2 FAIL: {filename} SHA-256 mismatch.\n\
+             expected: {expected_hash}\n\
+             actual:   {actual_hash}\n\
+             actual bytes (first 256): {:?}\n\
+             stdout: {stdout}\nstderr: {stderr}",
+            &actual[..actual.len().min(256)]
+        );
+
+        eprintln!("sevenzip_m4_extraction: {filename} OK — SHA-256 {actual_hash}");
+    }
+}
+
 /// `weave hello.exe` — CRT-linked MinGW binary, 41 imports across 8 DLLs.
 #[test]
 fn hello_crt_prints_hello_world() {
