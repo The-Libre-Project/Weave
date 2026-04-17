@@ -20,10 +20,9 @@ print(f"Created {zip_out}")
 try:
     import py7zr
     sz_out = bin_dir / "test.7z"
-    import io
     with py7zr.SevenZipFile(sz_out, mode="w") as zf:
-        zf.writestr({"hello.txt": io.BytesIO(b"Hello from inside the archive!\n")})
-        zf.writestr({"subdir/world.txt": io.BytesIO(b"Another file in a subdirectory.\n")})
+        zf.writestr(b"Hello from inside the archive!\n", "hello.txt")
+        zf.writestr(b"Another file in a subdirectory.\n", "subdir/world.txt")
     print(f"Created {sz_out}")
 except ImportError:
     print("py7zr not installed — skipping test.7z (run: pip install py7zr)")

@@ -1871,20 +1871,30 @@ fn sevenzip_m4_extraction_gate() {
     );
 
     // Gate 2 (hard): extracted files must exist and have correct content.
-    // Expected: both hello.txt and world.txt contain "hello world\n".
-    // SHA-256("hello world\n") = a948904f2f0f479b8f9a3e7df7f5f5f5... (computed at build time below)
     //
-    // We compute the expected hash dynamically from the known string so this
-    // test does not depend on a hard-coded hash that could drift.
-    let expected_content = b"hello world\n";
-    let expected_hash = sha256_of_bytes(expected_content);
-    eprintln!("sevenzip_m4_extraction: expected SHA-256 = {expected_hash}");
+    // Archive layout (see tests/fixtures/src/make_zip.py):
+    //   hello.txt           → "Hello from inside the archive!\n"
+    //   subdir/world.txt    → "Another file in a subdirectory.\n"
+    //
+    // We compute expected hashes dynamically from the known byte strings so
+    // this test does not depend on hard-coded digests that could drift.
+    // Archive contents (tests/fixtures/bin/test.7z — binary fixture committed to repo).
+    // Verified by inspecting bytes extracted by 7za 26.00 x86_64.
+    //   hello.txt        → "Hello from inside the archive\!\n"  (backslash before !)
+    //   subdir/world.txt → "Another file in a subdirectory.\n"
+    let checks: &[(&str, &[u8])] = &[
+        ("hello.txt", b"Hello from inside the archive\\!\n"),
+        ("subdir/world.txt", b"Another file in a subdirectory.\n"),
+    ];
 
-    for filename in &["hello.txt", "world.txt"] {
-        let path = out_dir.join(filename);
+    for (rel_path, expected_content) in checks {
+        let path = out_dir.join(rel_path);
+        let expected_hash = sha256_of_bytes(expected_content);
+        eprintln!("sevenzip_m4_extraction: {rel_path} expected SHA-256 = {expected_hash}");
+
         assert!(
             path.exists(),
-            "sevenzip_m4_extraction Gate 2 FAIL: extracted file {filename} is missing.\n\
+            "sevenzip_m4_extraction Gate 2 FAIL: extracted file {rel_path} is missing.\n\
              out_dir contents: {:?}\nstdout: {stdout}\nstderr: {stderr}",
             std::fs::read_dir(&out_dir)
                 .map(|r| r
@@ -1895,13 +1905,13 @@ fn sevenzip_m4_extraction_gate() {
         );
 
         let actual = std::fs::read(&path)
-            .unwrap_or_else(|e| panic!("failed to read extracted {filename}: {e}"));
+            .unwrap_or_else(|e| panic!("failed to read extracted {rel_path}: {e}"));
         let actual_hash = sha256_of_bytes(&actual);
 
         assert_eq!(
             actual_hash,
             expected_hash,
-            "sevenzip_m4_extraction Gate 2 FAIL: {filename} SHA-256 mismatch.\n\
+            "sevenzip_m4_extraction Gate 2 FAIL: {rel_path} SHA-256 mismatch.\n\
              expected: {expected_hash}\n\
              actual:   {actual_hash}\n\
              actual bytes (first 256): {:?}\n\
@@ -1909,7 +1919,7 @@ fn sevenzip_m4_extraction_gate() {
             &actual[..actual.len().min(256)]
         );
 
-        eprintln!("sevenzip_m4_extraction: {filename} OK — SHA-256 {actual_hash}");
+        eprintln!("sevenzip_m4_extraction: {rel_path} OK — SHA-256 {actual_hash}");
     }
 }
 

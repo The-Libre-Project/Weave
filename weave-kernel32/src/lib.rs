@@ -6584,18 +6584,77 @@ pub unsafe extern "win64" fn format_message_w(
     len as u32
 }
 
-/// CreateDirectoryW — not implemented; returns FALSE.
+/// CreateDirectoryW — create a directory (wide string version).
+///
+/// Returns TRUE (1) on success, FALSE (0) with SetLastError on failure.
+/// ERROR_ALREADY_EXISTS (183) if the directory already exists.
+/// ERROR_PATH_NOT_FOUND (3) if the parent directory does not exist.
+/// ERROR_ACCESS_DENIED (5) if permission is denied.
 ///
 /// # Safety
-/// Pointer arguments are accepted but not dereferenced.
+/// `lp_path_name` must be a valid null-terminated UTF-16 string or null.
+/// `lp_security_attributes` is ignored.
 // Wine ref: dlls/kernelbase/file.c:668 — converts path via RtlDosPathNameToNtPathName_U;
 // calls NtCreateFile with FILE_DIRECTORY_FILE|FILE_OPEN_REPARSE_POINT|FILE_CREATE disposition;
-// closes handle immediately on success; ERROR_PATH_NOT_FOUND if NT path conversion fails
+// closes handle immediately on success; returns FALSE + SetLastError on any failure.
+// EEXIST → ERROR_ALREADY_EXISTS (183), ENOENT → ERROR_PATH_NOT_FOUND (3),
+// EACCES → ERROR_ACCESS_DENIED (5).
 pub unsafe extern "win64" fn create_directory_w(
-    _lp_path_name: *const u16,
+    lp_path_name: *const u16,
     _lp_security_attributes: *const u8,
 ) -> i32 {
-    warn_once("CreateDirectoryW");
+    if lp_path_name.is_null() {
+        set_last_error(3); // ERROR_PATH_NOT_FOUND
+        return 0;
+    }
+
+    // Decode null-terminated UTF-16 path.
+    let win_path = {
+        let mut len = 0usize;
+        while len < MAX_UTF16_LEN && unsafe { *lp_path_name.add(len) } != 0 {
+            len += 1;
+        }
+        if len == MAX_UTF16_LEN {
+            set_last_error(3); // ERROR_PATH_NOT_FOUND — overlong
+            return 0;
+        }
+        let slice = unsafe { std::slice::from_raw_parts(lp_path_name, len) };
+        String::from_utf16_lossy(slice).to_owned()
+    };
+
+    // Translate Windows path to Linux path.
+    let linux_path = match weave_core::prefix::translator().to_linux_str(&win_path) {
+        Ok(p) => p,
+        Err(_) => {
+            set_last_error(3); // ERROR_PATH_NOT_FOUND
+            return 0;
+        }
+    };
+
+    // Convert to C string.
+    let c_path = match std::ffi::CString::new(linux_path.as_os_str().as_encoded_bytes()) {
+        Ok(s) => s,
+        Err(_) => {
+            set_last_error(3); // ERROR_PATH_NOT_FOUND
+            return 0;
+        }
+    };
+
+    // Call mkdir(2) with rwxr-xr-x permissions.
+    let ret = unsafe { libc::mkdir(c_path.as_ptr(), 0o755) };
+    if ret == 0 {
+        return 1; // TRUE
+    }
+
+    // Map errno to Win32 error code.
+    let errno = unsafe { *libc::__errno_location() };
+    let win_err = match errno {
+        libc::EEXIST => 183, // ERROR_ALREADY_EXISTS
+        libc::ENOENT => 3,   // ERROR_PATH_NOT_FOUND
+        libc::EACCES => 5,   // ERROR_ACCESS_DENIED
+        _ => 183,            // default: already exists covers most other mkdir conflicts
+    };
+    set_last_error(win_err);
     0
 }
 
