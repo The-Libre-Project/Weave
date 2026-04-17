@@ -2028,7 +2028,9 @@ fn m5_install_flow_gate() {
 
     let prefix_base = tmp.path().join("prefixes");
     let mgr = PrefixManager::with_base(&prefix_base);
-    let prefix = mgr.create("hello-app").expect("PrefixManager::create failed");
+    let prefix = mgr
+        .create("hello-app")
+        .expect("PrefixManager::create failed");
 
     assert!(prefix.exists(), "prefix directory must exist after create");
     assert!(prefix.drive_c().is_dir(), "drive_c must be a directory");
@@ -2036,9 +2038,7 @@ fn m5_install_flow_gate() {
 
     // ── Step 2: Store the exe path. ──────────────────────────────────────────
     let manifest = env!("CARGO_MANIFEST_DIR");
-    let hello_exe = std::path::PathBuf::from(format!(
-        "{manifest}/../tests/fixtures/bin/hello.exe"
-    ));
+    let hello_exe = std::path::PathBuf::from(format!("{manifest}/../tests/fixtures/bin/hello.exe"));
     prefix
         .set_exe_path(&hello_exe)
         .expect("set_exe_path failed");
@@ -2084,8 +2084,8 @@ fn m5_install_flow_gate() {
         "installed .desktop file must exist on disk at {installed_path:?}"
     );
 
-    let on_disk = std::fs::read_to_string(&installed_path)
-        .expect("failed to read installed .desktop file");
+    let on_disk =
+        std::fs::read_to_string(&installed_path).expect("failed to read installed .desktop file");
     assert_eq!(
         on_disk, content,
         "on-disk .desktop content must match generated content"
