@@ -1702,6 +1702,20 @@ pub fn resolve(func: &str) -> Option<usize> {
         "SystemFunction036" => {
             Some(system_function_036 as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
         }
+        "CryptAcquireContextA" => Some(
+            crypt_acquire_context_a as unsafe extern "win64" fn(_, _, _, _, _) -> _
+                as *const () as usize,
+        ),
+        "CryptAcquireContextW" => Some(
+            crypt_acquire_context_w as unsafe extern "win64" fn(_, _, _, _, _) -> _
+                as *const () as usize,
+        ),
+        "CryptReleaseContext" => Some(
+            crypt_release_context as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
+        ),
+        "CryptGenRandom" => Some(
+            crypt_gen_random as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
+        ),
         _ => None,
     }
 }
@@ -1733,6 +1747,85 @@ pub unsafe extern "win64" fn system_function_036(
     // random_buffer_length bytes.  getrandom(2) writes exactly `len` bytes on
     // success (for len ≤ 256 it is atomic and never short-reads).
     let ret = unsafe { libc::getrandom(random_buffer as *mut libc::c_void, len, 0) };
+    if ret < 0 || ret as usize != len {
+        return 0; // FALSE — getrandom failed (should not happen in practice)
+    }
+    1 // TRUE
+}
+
+/// CryptAcquireContextA — open a cryptographic service provider context (ANSI).
+///
+/// # Safety
+/// `ph_prov` must be a writable pointer to a `ULONG_PTR`-sized slot.
+// Wine ref: dlls/advapi32/crypt.c — CryptAcquireContextA calls CryptAcquireContextW internally;
+// writes a non-zero HCRYPTPROV to *phProv and returns TRUE. Flags like CRYPT_VERIFYCONTEXT are
+// accepted without validation; error codes (e.g. NTE_BAD_PROV_TYPE) not needed for entropy path.
+pub unsafe extern "win64" fn crypt_acquire_context_a(
+    ph_prov: *mut usize,
+    _psz_container: *const u8,
+    _psz_provider: *const u8,
+    _dw_prov_type: u32,
+    _dw_flags: u32,
+) -> i32 {
+    if ph_prov.is_null() {
+        return 0; // FALSE
+    }
+    // SAFETY: ph_prov is non-null (checked above); caller provides a writable HCRYPTPROV slot.
+    unsafe { *ph_prov = 1 }; // non-zero fake provider handle
+    1 // TRUE
+}
+
+/// CryptAcquireContextW — open a cryptographic service provider context (Unicode).
+///
+/// # Safety
+/// `ph_prov` must be a writable pointer to a `ULONG_PTR`-sized slot.
+// Wine ref: dlls/advapi32/crypt.c — CryptAcquireContextW; same semantics as A variant;
+// returns TRUE with a fake non-zero HCRYPTPROV handle.
+pub unsafe extern "win64" fn crypt_acquire_context_w(
+    ph_prov: *mut usize,
+    _psz_container: *const u16,
+    _psz_provider: *const u16,
+    _dw_prov_type: u32,
+    _dw_flags: u32,
+) -> i32 {
+    if ph_prov.is_null() {
+        return 0; // FALSE
+    }
+    // SAFETY: ph_prov is non-null (checked above); caller provides a writable HCRYPTPROV slot.
+    unsafe { *ph_prov = 1 }; // non-zero fake provider handle
+    1 // TRUE
+}
+
+/// CryptReleaseContext — release a cryptographic service provider context.
+///
+/// # Safety
+/// No pointer dereferences needed; `h_prov` is treated as an opaque handle.
+// Wine ref: dlls/advapi32/crypt.c — CryptReleaseContext; frees provider state and returns TRUE.
+// Weave uses a fake handle so there is nothing to free.
+pub unsafe extern "win64" fn crypt_release_context(_h_prov: usize, _dw_flags: u32) -> i32 {
+    1 // TRUE
+}
+
+/// CryptGenRandom — fill a buffer with cryptographically random bytes.
+///
+/// # Safety
+/// `pb_buffer` must be a writable buffer of at least `dw_len` bytes.
+// Wine ref: dlls/advapi32/crypt.c — CryptGenRandom delegates to RtlGenRandom on NT;
+// Wine uses /dev/urandom; Weave uses getrandom(2) (same pattern as SystemFunction036,
+// atomic for ≤256 bytes, sandbox-friendly, no fd management).
+pub unsafe extern "win64" fn crypt_gen_random(
+    _h_prov: usize,
+    dw_len: u32,
+    pb_buffer: *mut u8,
+) -> i32 {
+    if pb_buffer.is_null() || dw_len == 0 {
+        return 0; // FALSE
+    }
+    let len = dw_len as usize;
+    // SAFETY: pb_buffer is non-null (checked above); Win32 ABI requires callers to supply a
+    // writable buffer of at least dw_len bytes. getrandom(2) writes exactly `len` bytes on
+    // success (for len ≤ 256 it is atomic and never short-reads).
+    let ret = unsafe { libc::getrandom(pb_buffer as *mut libc::c_void, len, 0) };
     if ret < 0 || ret as usize != len {
         return 0; // FALSE — getrandom failed (should not happen in practice)
     }
