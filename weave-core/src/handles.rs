@@ -49,6 +49,9 @@ pub enum HandleKind {
         completion: Arc<ThreadCompletion>,
         join_handle: Mutex<Option<std::thread::JoinHandle<()>>>,
     },
+    /// A Win32 event object backed by a Linux eventfd (on Linux target).
+    /// The i32 is the raw eventfd file descriptor.
+    Event(i32),
 }
 
 impl HandleKind {
@@ -64,6 +67,14 @@ impl HandleKind {
     pub fn as_registry_path(&self) -> Option<&std::path::Path> {
         match self {
             HandleKind::RegistryKey(p) => Some(p),
+            _ => None,
+        }
+    }
+
+    /// Return the eventfd file descriptor. `None` for non-event handles.
+    pub fn as_event_fd(&self) -> Option<i32> {
+        match self {
+            HandleKind::Event(fd) => Some(*fd),
             _ => None,
         }
     }
@@ -101,6 +112,15 @@ impl HandleTable {
     fn get_fd(&self, handle: usize) -> Option<i32> {
         let index = handle.checked_sub(HANDLE_OFFSET)?;
         self.slots.get(index)?.as_ref().and_then(|k| k.as_fd())
+    }
+
+    /// Return the eventfd for an Event handle, or `None` if not an Event.
+    fn get_event_fd(&self, handle: usize) -> Option<i32> {
+        let index = handle.checked_sub(HANDLE_OFFSET)?;
+        self.slots
+            .get(index)?
+            .as_ref()
+            .and_then(|k| k.as_event_fd())
     }
 
     /// Free a handle slot. Returns `false` if the handle was already free or
@@ -157,6 +177,17 @@ pub fn alloc(kind: HandleKind) -> usize {
 /// is invalid or not a file handle.
 pub fn get_fd(handle: usize) -> Option<i32> {
     lock_table(table())?.get_fd(handle)
+}
+
+/// Allocate a new Event handle backed by the given eventfd fd.
+pub fn alloc_event(fd: i32) -> usize {
+    alloc(HandleKind::Event(fd))
+}
+
+/// Return the eventfd file descriptor for an Event handle. Returns `None` if the
+/// handle is invalid or not an Event handle.
+pub fn get_event_fd(handle: usize) -> Option<i32> {
+    lock_table(table())?.get_event_fd(handle)
 }
 
 /// Return the registry key path for a handle. Returns `None` if the handle is

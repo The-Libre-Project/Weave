@@ -5876,25 +5876,62 @@ pub unsafe extern "win64" fn output_debug_string_w(lp_output_string: *const u16)
 
 // ── Events / synchronisation ──────────────────────────────────────────────────
 
-/// CreateEventA — returns a fake non-null handle (2).
+/// Internal helper: create an event handle backed by eventfd on Linux.
+/// Falls back to a legacy fake handle (2) on macOS (build host only).
+///
+/// # Safety
+/// Calls libc::eventfd on Linux. On macOS this is a compile-time no-op.
+unsafe fn create_event_impl(_b_manual_reset: i32, b_initial_state: i32) -> usize {
+    #[cfg(target_os = "linux")]
+    {
+        let efd = libc::eventfd(0, libc::EFD_NONBLOCK | libc::EFD_CLOEXEC);
+        if efd < 0 {
+            eprintln!(
+                "weave/CreateEvent: eventfd() failed errno={}",
+                *libc::__errno_location()
+            );
+            return 0; // NULL — caller must check
+        }
+        if b_initial_state != 0 {
+            let val: u64 = 1;
+            libc::write(efd, &val as *const u64 as *const libc::c_void, 8);
+        }
+        let handle = handles::alloc_event(efd);
+        eprintln!("weave/CreateEvent: eventfd={efd} handle={handle:#x}");
+        handle
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        // macOS build host: return legacy stub handle so cargo check passes.
+        let _ = b_initial_state;
+        2
+    }
+}
+
+/// CreateEventA — create a Win32 event object.
+///
+/// On Linux: backed by eventfd(2) so WaitForSingleObject/WaitForMultipleObjects
+/// can poll it with real I/O readiness. The handle is stored in the global
+/// handle table via HandleKind::Event.
 ///
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
-// Wine ref: dlls/kernelbase/sync.c:553 — converts name via RtlCreateUnicodeStringFromAsciiz then delegates to CreateEventExW
+// Wine ref: dlls/kernelbase/sync.c:553 — converts name via RtlCreateUnicodeStringFromAsciiz
+// then delegates to CreateEventExW(attr, name, flags, EVENT_ALL_ACCESS) where flags encode
+// manual_reset (CREATE_EVENT_MANUAL_RESET=1) and initial_state (CREATE_EVENT_INITIAL_SET=2).
 pub unsafe extern "win64" fn create_event_a(
     _lp_event_attributes: *const u8,
-    _b_manual_reset: i32,
-    _b_initial_state: i32,
+    b_manual_reset: i32,
+    b_initial_state: i32,
     _lp_name: *const u8,
 ) -> usize {
-    warn_once("CreateEventA");
-    2 // fake non-null handle (distinct from mutex handle 1)
+    create_event_impl(b_manual_reset, b_initial_state)
 }
 
-/// CreateEventW — returns a fake non-null handle (2).
+/// CreateEventW — create a Win32 event object (wide-string name variant).
 ///
 /// Same as CreateEventA but accepts wide string name parameter.
-/// Ignores name, manual reset flag, initial state, and security attributes.
+/// Name is ignored (unnamed event). Uses same eventfd backing as CreateEventA.
 ///
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
@@ -5902,12 +5939,11 @@ pub unsafe extern "win64" fn create_event_a(
 // and CREATE_EVENT_INITIAL_SET flags translated from bManualReset/bInitialState booleans
 pub unsafe extern "win64" fn create_event_w(
     _lp_event_attributes: *const u8,
-    _b_manual_reset: i32,
-    _b_initial_state: i32,
+    b_manual_reset: i32,
+    b_initial_state: i32,
     _lp_name: *const u16,
 ) -> usize {
-    warn_once("CreateEventW");
-    2 // fake non-null handle (distinct from mutex handle 1)
+    create_event_impl(b_manual_reset, b_initial_state)
 }
 
 /// OpenEventA — returns a fake non-null handle (2).
@@ -5945,16 +5981,37 @@ pub unsafe extern "win64" fn open_event_w(
     2 // fake non-null handle
 }
 
-/// SetEvent — no-op stub, returns TRUE.
+/// SetEvent — signal a Win32 event object.
+///
+/// On Linux: writes 1 to the backing eventfd, waking any thread blocked in
+/// poll/WaitForSingleObject/WaitForMultipleObjects.
 // Wine ref: dlls/kernelbase/sync.c:700 — calls NtSetEvent(handle, NULL); NULL for previous_state is valid
-pub extern "win64" fn set_event(_h_event: usize) -> i32 {
-    warn_once("SetEvent");
+pub extern "win64" fn set_event(h_event: usize) -> i32 {
+    #[cfg(target_os = "linux")]
+    if let Some(efd) = handles::get_event_fd(h_event) {
+        let val: u64 = 1;
+        unsafe {
+            libc::write(efd, &val as *const u64 as *const libc::c_void, 8);
+        }
+        return 1; // TRUE
+    }
+    // Legacy stub handle or unknown — succeed silently.
     1
 }
-/// ResetEvent — no-op stub, returns TRUE.
+
+/// ResetEvent — clear a Win32 event object.
+///
+/// On Linux: drains the backing eventfd (reads the counter, ignores EAGAIN).
 // Wine ref: dlls/kernelbase/sync.c:688 — calls NtResetEvent(handle, NULL)
-pub extern "win64" fn reset_event(_h_event: usize) -> i32 {
-    warn_once("ResetEvent");
+pub extern "win64" fn reset_event(h_event: usize) -> i32 {
+    #[cfg(target_os = "linux")]
+    if let Some(efd) = handles::get_event_fd(h_event) {
+        let mut val: u64 = 0;
+        unsafe {
+            libc::read(efd, &mut val as *mut u64 as *mut libc::c_void, 8);
+        }
+        return 1; // TRUE
+    }
     1
 }
 
@@ -6711,6 +6768,31 @@ pub unsafe extern "win64" fn wait_for_single_object(h_handle: usize, dw_millisec
         }
     }
 
+    // Real Event handle backed by eventfd — poll with timeout.
+    #[cfg(target_os = "linux")]
+    if let Some(efd) = handles::get_event_fd(h_handle) {
+        let timeout_ms: i32 = if dw_milliseconds == INFINITE {
+            -1
+        } else {
+            dw_milliseconds.min(i32::MAX as u32) as i32
+        };
+        let mut pfd = libc::pollfd {
+            fd: efd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let ret = libc::poll(&mut pfd, 1, timeout_ms);
+        if ret > 0 && (pfd.revents & libc::POLLIN) != 0 {
+            // Drain the counter (manual-reset callers can re-signal; draining is safe).
+            let mut _val: u64 = 0;
+            libc::read(efd, &mut _val as *mut u64 as *mut libc::c_void, 8);
+            eprintln!("weave/WFSO: handle={h_handle:#x} → WAIT_OBJECT_0 (eventfd)");
+            return WAIT_OBJECT_0;
+        }
+        eprintln!("weave/WFSO: handle={h_handle:#x} → WAIT_TIMEOUT (eventfd poll timed out)");
+        return WAIT_TIMEOUT;
+    }
+
     // Legacy stub handles (1 = mutex, 2 = event) — return success immediately.
     if h_handle == 1 || h_handle == 2 {
         eprintln!("weave/WFSO: handle={h_handle:#x} → WAIT_OBJECT_0 (legacy stub)");
@@ -6758,11 +6840,11 @@ pub extern "win64" fn switch_to_thread() -> i32 {
     unsafe { libc::sched_yield() };
     1 // TRUE — yield succeeded
 }
-/// WaitForMultipleObjects — returns WAIT_OBJECT_0 if any handle is fake.
+/// WaitForMultipleObjects — wait until one (or all) handles are signalled.
 ///
-/// Returns WAIT_OBJECT_0 if any handle in the array is one of our fake handles
-/// (1 for mutexes, 2 for events). Otherwise returns WAIT_FAILED.
-/// Ignores b_wait_all and dw_milliseconds timeout parameters.
+/// For event handles backed by eventfd: builds a pollfd array and calls poll(2)
+/// with the requested timeout. Returns WAIT_OBJECT_0+index of the first signalled
+/// handle, WAIT_TIMEOUT on expiry, or WAIT_FAILED on error.
 ///
 /// # Safety
 /// `lp_handles` must be a valid pointer to `n_count` handles or NULL.
@@ -6775,7 +6857,9 @@ pub unsafe extern "win64" fn wait_for_multiple_objects(
     dw_milliseconds: u32,
 ) -> u32 {
     const WAIT_OBJECT_0: u32 = 0;
+    const WAIT_TIMEOUT: u32 = 0x00000102;
     const WAIT_FAILED: u32 = 0xFFFFFFFF;
+    const INFINITE: u32 = 0xFFFF_FFFF;
 
     eprintln!("weave/WFMO: n={n_count} timeout={dw_milliseconds}ms");
 
@@ -6784,20 +6868,71 @@ pub unsafe extern "win64" fn wait_for_multiple_objects(
         return WAIT_FAILED;
     }
 
-    for i in 0..n_count {
-        let handle = unsafe { *lp_handles.add(i as usize) };
+    // Collect handles — classify each one.
+    let mut pollfds: Vec<libc::pollfd> = Vec::new();
+    // Map from pollfd index → original handle index
+    let mut pollfd_to_handle_idx: Vec<usize> = Vec::new();
+
+    for i in 0..n_count as usize {
+        let handle = *lp_handles.add(i);
         eprintln!("weave/WFMO: handle[{i}]={handle:#x}");
-        // Real thread handle — delegate to WFSO logic.
+
+        // Real thread handle — delegate to WFSO immediately (blocking wait).
         if handles::get_thread_completion(handle).is_some() {
             let result = wait_for_single_object(handle, dw_milliseconds);
             eprintln!("weave/WFMO: handle[{i}]={handle:#x} → {result:#x} (thread)");
             return result;
         }
-        // Legacy stub handles (1 = mutex, 2 = event).
-        if handle == 1 || handle == 2 {
-            eprintln!("weave/WFMO: handle[{i}]={handle:#x} → WAIT_OBJECT_0 (stub)");
-            return WAIT_OBJECT_0;
+
+        // Event handle backed by eventfd.
+        #[cfg(target_os = "linux")]
+        if let Some(efd) = handles::get_event_fd(handle) {
+            pollfds.push(libc::pollfd {
+                fd: efd,
+                events: libc::POLLIN,
+                revents: 0,
+            });
+            pollfd_to_handle_idx.push(i);
+            continue;
         }
+
+        // Legacy stub handles (1 = mutex, 2 = event) — signal immediately.
+        if handle == 1 || handle == 2 {
+            eprintln!("weave/WFMO: handle[{i}]={handle:#x} → WAIT_OBJECT_0+{i} (stub)");
+            return WAIT_OBJECT_0 + i as u32;
+        }
+    }
+
+    // Poll all eventfd-backed handles together.
+    #[cfg(target_os = "linux")]
+    if !pollfds.is_empty() {
+        let timeout_ms: i32 = if dw_milliseconds == INFINITE {
+            -1
+        } else {
+            dw_milliseconds.min(i32::MAX as u32) as i32
+        };
+        let ret = libc::poll(
+            pollfds.as_mut_ptr(),
+            pollfds.len() as libc::nfds_t,
+            timeout_ms,
+        );
+        if ret > 0 {
+            for (pi, pfd) in pollfds.iter().enumerate() {
+                if (pfd.revents & libc::POLLIN) != 0 {
+                    let hi = pollfd_to_handle_idx[pi];
+                    // Drain the eventfd counter.
+                    let mut _val: u64 = 0;
+                    libc::read(pfd.fd, &mut _val as *mut u64 as *mut libc::c_void, 8);
+                    eprintln!("weave/WFMO: handle[{hi}] → WAIT_OBJECT_0+{hi} (eventfd)");
+                    return WAIT_OBJECT_0 + hi as u32;
+                }
+            }
+        }
+        if ret == 0 {
+            eprintln!("weave/WFMO: → WAIT_TIMEOUT");
+            return WAIT_TIMEOUT;
+        }
+        // poll error — fall through to WAIT_FAILED
     }
 
     eprintln!("weave/WFMO: → WAIT_FAILED (no recognized handles)");

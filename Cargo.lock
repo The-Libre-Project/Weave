@@ -1258,6 +1258,7 @@ dependencies = [
  "weave-advapi32",
  "weave-comctl32",
  "weave-core",
+ "weave-ddraw",
  "weave-gdi32",
  "weave-gdiplus",
  "weave-imm32",
@@ -1314,6 +1315,13 @@ dependencies = [
 [[package]]
 name = "weave-d3d12"
 version = "0.0.1"
+
+[[package]]
+name = "weave-ddraw"
+version = "0.0.1"
+dependencies = [
+ "libc",
+]
 
 [[package]]
 name = "weave-desktop"
@@ -1470,6 +1478,7 @@ name = "weave-winmm"
 version = "0.0.1"
 dependencies = [
  "libc",
+ "pipewire",
 ]
 
 [[package]]
@@ -1477,6 +1486,7 @@ name = "weave-ws2"
 version = "0.0.1"
 dependencies = [
  "libc",
+ "weave-core",
 ]
 
 [[package]]

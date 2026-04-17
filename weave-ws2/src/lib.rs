@@ -7,7 +7,10 @@
 
 #![allow(non_snake_case)]
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
+use weave_core::handles;
 
 // ── POSIX functions not exposed by the libc crate on all host platforms ──────
 // inet_ntop is available on Linux (our target) but not always through libc crate
@@ -58,6 +61,19 @@ const WIN_FD_SETSIZE: usize = 64;
 
 /// Whether WSAStartup has been called.
 static WSA_INITIALIZED: AtomicBool = AtomicBool::new(false);
+
+/// Map from socket fd (as usize) → (event_handle, network_events_mask).
+/// Populated by WSAEventSelect. Queried by WSAWaitForMultipleEvents and
+/// WSAEnumNetworkEvents to poll the real socket fd.
+static SOCKET_EVENT_MAP: Mutex<Option<HashMap<usize, (usize, u32)>>> = Mutex::new(None);
+
+fn socket_event_map() -> std::sync::MutexGuard<'static, Option<HashMap<usize, (usize, u32)>>> {
+    let mut g = SOCKET_EVENT_MAP.lock().unwrap();
+    if g.is_none() {
+        *g = Some(HashMap::new());
+    }
+    g
+}
 
 // ── Thread-local Winsock error ───────────────────────────────────────────────
 
@@ -1279,12 +1295,12 @@ pub unsafe extern "win64" fn ws_wsa_async_select(
     0 // success — no-op
 }
 
-// ── Winsock API: async-event stubs ───────────────────────────────────────────
+// ── Winsock API: async-event model ───────────────────────────────────────────
 
 // WSA_INVALID_EVENT is the null/invalid WSAEVENT sentinel (0).
 const WSA_INVALID_EVENT: usize = 0;
 
-// Error codes used by async-event stubs.
+// Error codes used by async-event functions.
 const WSAEINVAL: i32 = 10022;
 const WSA_WAIT_FAILED: u32 = 0xFFFF_FFFF;
 const WSA_WAIT_EVENT_0: u32 = 0;
@@ -1293,24 +1309,43 @@ const WSA_WAIT_EVENT_0: u32 = 0;
 ///
 /// Wine ref: dlls/ws2_32/socket.c:3988 — WSACreateEvent calls CreateEventW(NULL,
 /// TRUE, FALSE, NULL); returns the resulting HANDLE as WSAEVENT.
-/// Stub: we have no Win32 HANDLE infrastructure yet; return a fake non-null
-/// sentinel (1) so callers treat it as valid. Callers that pass it to
-/// WSAWaitForMultipleEvents will get WSA_WAIT_EVENT_0 back immediately.
+/// Weave: backed by eventfd(EFD_NONBLOCK|EFD_CLOEXEC), stored in the global
+/// handle table as HandleKind::Event so WaitForMultipleObjects can poll it.
 pub extern "win64" fn wsa_create_event() -> usize {
-    // Any value != WSA_INVALID_EVENT (0) is accepted as a valid WSAEVENT by callers.
-    // Return 1 as a stable fake handle.
-    1
+    #[cfg(target_os = "linux")]
+    {
+        unsafe {
+            let efd = libc::eventfd(0, libc::EFD_NONBLOCK | libc::EFD_CLOEXEC);
+            if efd < 0 {
+                set_last_error(WSAEINVAL);
+                return WSA_INVALID_EVENT;
+            }
+            let handle = handles::alloc_event(efd);
+            eprintln!("weave/WSACreateEvent: eventfd={efd} handle={handle:#x}");
+            handle
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        // macOS build host — return stable fake handle for cargo check.
+        1
+    }
 }
 
 /// WSACloseEventObject — close a socket event object created by WSACreateEvent.
 ///
 /// Wine ref: dlls/ws2_32/socket.c:4000 — WSACloseEvent calls CloseHandle(event);
-/// returns BOOL. Stub: nothing to close; always succeeds.
+/// returns BOOL. Weave: frees the handle table entry (closes underlying eventfd).
 pub extern "win64" fn wsa_close_event_object(event: usize) -> i32 {
     if event == WSA_INVALID_EVENT {
         set_last_error(WSAEINVAL);
         return 0; // FALSE
     }
+    #[cfg(target_os = "linux")]
+    if let Some(efd) = handles::get_event_fd(event) {
+        unsafe { libc::close(efd) };
+    }
+    handles::free(event);
     1 // TRUE
 }
 
@@ -1319,14 +1354,24 @@ pub extern "win64" fn wsa_close_event_object(event: usize) -> i32 {
 /// Wine ref: dlls/ws2_32/socket.c:3885 — WSAEventSelect(SOCKET s, WSAEVENT event,
 /// LONG mask) uses IOCTL_AFD_EVENT_SELECT via NtDeviceIoControlFile. The socket
 /// enters non-blocking mode and network events are posted to the event object.
-/// Stub: no-op; PuTTY's SSH engine will call this before any I/O; returning 0
-/// (success) allows the SSH handshake path to continue to WSAWaitForMultipleEvents.
+/// Weave: stores socket→(event_handle, mask) in SOCKET_EVENT_MAP so that
+/// WSAWaitForMultipleEvents and WSAEnumNetworkEvents can poll the real socket fd.
+/// Also sets the socket to non-blocking mode (matches Wine behaviour).
 ///
 /// # Safety
-/// `s` must be a valid socket fd. `event` is opaque.
+/// `s` must be a valid socket fd. `event` is the WSAEVENT handle.
 pub unsafe extern "win64" fn wsa_event_select(s: usize, event: usize, mask: i32) -> i32 {
-    // Validate basic args — Wine returns WSAEINVAL for null/bad socket.
-    let _ = (s, event, mask); // suppress unused warnings
+    eprintln!("weave/WSAEventSelect: socket={s} event={event:#x} mask={mask:#010x}");
+    // Set socket non-blocking (Wine does this implicitly via AFD_EVENT_SELECT).
+    let flags = libc::fcntl(s as i32, libc::F_GETFL);
+    if flags >= 0 {
+        libc::fcntl(s as i32, libc::F_SETFL, flags | libc::O_NONBLOCK);
+    }
+    // Store the association.
+    let mut g = socket_event_map();
+    if let Some(ref mut map) = *g {
+        map.insert(s, (event, mask as u32));
+    }
     0 // success
 }
 
@@ -1336,25 +1381,108 @@ pub unsafe extern "win64" fn wsa_event_select(s: usize, event: usize, mask: i32)
 /// DWORD WINAPI WSAWaitForMultipleEvents(DWORD cEvents, const WSAEVENT *lphEvents,
 ///     BOOL fWaitAll, DWORD dwTimeout, BOOL fAlertable);
 /// Returns WSA_WAIT_EVENT_0 + index of first signalled event, or
-/// WSA_WAIT_FAILED (0xFFFFFFFF) on error. Stub: return WSA_WAIT_EVENT_0 (0)
-/// immediately (first event is "signalled") so callers proceed to
-/// WSAEnumNetworkEvents without blocking.
+/// WSA_WAIT_FAILED (0xFFFFFFFF) on error.
+///
+/// Weave: for each event handle, look up the associated socket fd in
+/// SOCKET_EVENT_MAP and poll for I/O readiness. The event that becomes ready
+/// first determines the return value.
 ///
 /// # Safety
-/// `lph_events` may be null (only checked, never dereferenced beyond count).
+/// `lph_events` must point to `c_events` WSAEVENT handles or be null.
 pub unsafe extern "win64" fn wsa_wait_for_multiple_events(
     c_events: u32,
-    _lph_events: *const usize,
+    lph_events: *const usize,
     _f_wait_all: i32,
-    _dw_timeout: u32,
+    dw_timeout: u32,
     _f_alertable: i32,
 ) -> u32 {
-    if c_events == 0 {
+    if c_events == 0 || lph_events.is_null() {
         set_last_error(WSAEINVAL);
         return WSA_WAIT_FAILED;
     }
-    // Signal event 0 immediately — callers enter their WSAEnumNetworkEvents path.
-    WSA_WAIT_EVENT_0
+
+    // Collect (event_index, socket_fd, mask) for all events we know about.
+    let mut pollfds: Vec<libc::pollfd> = Vec::new();
+    // Map from pollfd index → event index in lph_events
+    let mut pfd_to_event: Vec<u32> = Vec::new();
+
+    {
+        let g = socket_event_map();
+        let map_opt = g.as_ref();
+        for ei in 0..c_events {
+            let ev_handle = unsafe { *lph_events.add(ei as usize) };
+
+            // Try socket-backed event: find socket_fd where map[fd] = (ev_handle, _)
+            if let Some(map) = map_opt {
+                for (&sock_fd, &(ref_handle, _mask)) in map.iter() {
+                    if ref_handle == ev_handle {
+                        pollfds.push(libc::pollfd {
+                            fd: sock_fd as i32,
+                            events: libc::POLLIN | libc::POLLOUT | libc::POLLHUP,
+                            revents: 0,
+                        });
+                        pfd_to_event.push(ei);
+                        break;
+                    }
+                }
+            }
+
+            // Try eventfd-backed event (CreateEvent/WSACreateEvent handles).
+            #[cfg(target_os = "linux")]
+            if let Some(efd) = handles::get_event_fd(ev_handle) {
+                pollfds.push(libc::pollfd {
+                    fd: efd,
+                    events: libc::POLLIN,
+                    revents: 0,
+                });
+                pfd_to_event.push(ei);
+            }
+        }
+    }
+
+    if pollfds.is_empty() {
+        // No known events — return event 0 immediately (safe fallback).
+        eprintln!("weave/WSAWait: no pollable events, returning WSA_WAIT_EVENT_0");
+        return WSA_WAIT_EVENT_0;
+    }
+
+    let timeout_ms: i32 = if dw_timeout == 0xFFFF_FFFF {
+        -1 // INFINITE → block until ready
+    } else {
+        dw_timeout.min(i32::MAX as u32) as i32
+    };
+
+    eprintln!(
+        "weave/WSAWait: polling {} fds timeout={}ms",
+        pollfds.len(),
+        timeout_ms
+    );
+
+    let ret = libc::poll(
+        pollfds.as_mut_ptr(),
+        pollfds.len() as libc::nfds_t,
+        timeout_ms,
+    );
+
+    if ret > 0 {
+        for (pi, pfd) in pollfds.iter().enumerate() {
+            if pfd.revents != 0 {
+                let ei = pfd_to_event[pi];
+                eprintln!(
+                    "weave/WSAWait: event[{ei}] ready (revents={:#x})",
+                    pfd.revents
+                );
+                return WSA_WAIT_EVENT_0 + ei;
+            }
+        }
+    }
+    if ret == 0 {
+        set_last_error(258); // WSA_WAIT_TIMEOUT
+        return 258; // WSA_WAIT_TIMEOUT
+    }
+
+    set_last_error(WSAEINVAL);
+    WSA_WAIT_FAILED
 }
 
 /// WSAEnumNetworkEvents — retrieve and reset socket network events.
@@ -1362,22 +1490,60 @@ pub unsafe extern "win64" fn wsa_wait_for_multiple_events(
 /// Wine ref: dlls/ws2_32/socket.c:3815 —
 /// int WINAPI WSAEnumNetworkEvents(SOCKET s, WSAEVENT event, WSANETWORKEVENTS *ret_events)
 /// uses IOCTL_AFD_GET_EVENTS to read which events fired and clears them.
-/// WSANETWORKEVENTS layout: lNetworkEvents (LONG) + iErrorCode[FD_MAX_EVENTS] (10 ints).
-/// Stub: zero out ret_events (no events fired), return 0 (success). Callers will
-/// see an empty event mask and loop back to WSAWaitForMultipleEvents. This is the
-/// correct safe behaviour: no events available, no crash.
+/// WSANETWORKEVENTS layout (from winsock2.h):
+///   typedef struct _WSANETWORKEVENTS {
+///     long lNetworkEvents;   // offset 0, 4 bytes — bitmask of FD_* events
+///     int  iErrorCode[10];   // offset 4, 40 bytes — per-event error codes
+///   } WSANETWORKEVENTS;      // total 44 bytes
+/// FD_READ=1, FD_WRITE=2, FD_OOB=4, FD_ACCEPT=8, FD_CONNECT=16, FD_CLOSE=32.
+///
+/// Weave: performs a non-blocking poll(2) on the socket fd to determine what events
+/// are actually available, then writes the real bitmask into lNetworkEvents.
 ///
 /// # Safety
 /// `lp_network_events` must be null or point to a writable WSANETWORKEVENTS (44 bytes).
 pub unsafe extern "win64" fn wsa_enum_network_events(
-    _s: usize,
+    s: usize,
     _event: usize,
     lp_network_events: *mut u8,
 ) -> i32 {
-    if !lp_network_events.is_null() {
-        // WSANETWORKEVENTS = LONG lNetworkEvents (4) + int iErrorCode[10] (40) = 44 bytes.
-        std::ptr::write_bytes(lp_network_events, 0, 44);
+    if lp_network_events.is_null() {
+        return 0;
     }
+    // Zero the entire struct first.
+    std::ptr::write_bytes(lp_network_events, 0, 44);
+
+    // Non-blocking poll on the socket fd to get real readiness.
+    let mut pfd = libc::pollfd {
+        fd: s as i32,
+        events: libc::POLLIN | libc::POLLOUT | libc::POLLHUP | libc::POLLRDHUP,
+        revents: 0,
+    };
+    let ret = libc::poll(&mut pfd, 1, 0); // timeout=0 → non-blocking
+
+    if ret <= 0 {
+        // No events ready or error — return zero-filled struct (success).
+        return 0;
+    }
+
+    let mut mask: i32 = 0;
+    if (pfd.revents & libc::POLLIN) != 0 {
+        mask |= 1; // FD_READ
+    }
+    if (pfd.revents & libc::POLLOUT) != 0 {
+        mask |= 2; // FD_WRITE
+    }
+    if (pfd.revents & (libc::POLLHUP | libc::POLLRDHUP)) != 0 {
+        mask |= 32; // FD_CLOSE
+    }
+
+    eprintln!(
+        "weave/WSAEnumNetworkEvents: socket={s} revents={:#x} mask={mask:#x}",
+        pfd.revents
+    );
+
+    // Write lNetworkEvents at offset 0 (little-endian i32).
+    std::ptr::copy_nonoverlapping(mask.to_le_bytes().as_ptr(), lp_network_events, 4);
     0 // success
 }
 
