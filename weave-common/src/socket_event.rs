@@ -236,6 +236,17 @@ pub fn mark_socket_listening(fd: i32) {
     }
 }
 
+/// Remove `fd` from the listening set. Called by ws_closesocket so that a
+/// recycled fd does not inherit stale listening state (which would misroute
+/// POLLIN → FD_ACCEPT on the reused connected socket).
+#[cfg(target_os = "linux")]
+pub fn unmark_socket_listening(fd: i32) {
+    let mut g = listening_set();
+    if let Some(ref mut s) = *g {
+        s.remove(&fd);
+    }
+}
+
 /// Return true if `fd` is a listening socket.
 /// Called by wsa_enum_network_events to map POLLIN → FD_ACCEPT vs FD_READ.
 #[cfg(target_os = "linux")]
@@ -247,6 +258,8 @@ pub fn is_socket_listening(fd: i32) -> bool {
 // No-op stubs for non-Linux targets.
 #[cfg(not(target_os = "linux"))]
 pub fn mark_socket_listening(_fd: i32) {}
+#[cfg(not(target_os = "linux"))]
+pub fn unmark_socket_listening(_fd: i32) {}
 #[cfg(not(target_os = "linux"))]
 pub fn is_socket_listening(_fd: i32) -> bool {
     false
