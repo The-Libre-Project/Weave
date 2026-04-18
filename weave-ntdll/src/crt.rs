@@ -20,7 +20,9 @@ use std::sync::atomic::{AtomicI32, AtomicPtr, Ordering};
 
 static COMMODE: AtomicI32 = AtomicI32::new(0);
 static FMODE: AtomicI32 = AtomicI32::new(0);
-static ARGC: AtomicI32 = AtomicI32::new(1);
+// ARGC_VAL: lazily populated from weave_core::cmdline on first __p___argc call.
+// Stored as a static i32 so we can return a stable *mut i32.
+static ARGC_VAL: AtomicI32 = AtomicI32::new(-1);
 static ENVIRON_PTR: AtomicPtr<u8> = AtomicPtr::new(std::ptr::null_mut());
 
 // Command-line strings for __p__acmdln / __p__wcmdln.
@@ -39,19 +41,9 @@ static WCMDLN: &[u16] = &[
 static ACMDLN_PTR: AtomicPtr<u8> = AtomicPtr::new(std::ptr::null_mut());
 static WCMDLN_PTR: AtomicPtr<u16> = AtomicPtr::new(std::ptr::null_mut());
 
-// argv layout (what the CRT expects):
-//   __p___argv()  →  &ARGV_VAR        (char ***)
-//   ARGV_VAR      →  &ARGV_ARRAY[0]   (char **)
-//   ARGV_ARRAY[0] →  ARGV0_STR        (char *)
-//   ARGV0_STR     =  "weave\0"
-//   ARGV_ARRAY[1] =  null
-//
-// Using usize so the array is always pointer-sized (avoids *const u8: !Sync).
-static ARGV0_STR: &[u8] = b"weave\0";
-// [ptr_to_argv0_string, null] as usize — filled once at first call.
-static mut ARGV_ARRAY: [usize; 2] = [0; 2];
-// char** = pointer to ARGV_ARRAY[0]; stored here so we can return &ARGV_VAR.
-static mut ARGV_VAR: usize = 0;
+// argv_ptrs from cmdline: a stable *mut *mut u8 stored in an AtomicPtr so
+// __p___argv can return it without unsafe mutable statics.
+static ARGV_PTR_STORE: AtomicPtr<*mut u8> = AtomicPtr::new(std::ptr::null_mut());
 static ARGV_ONCE: std::sync::Once = std::sync::Once::new();
 
 /// Fake FILE — enough storage that the CRT doesn't stray out of bounds.
@@ -189,23 +181,32 @@ pub unsafe extern "win64" fn initterm_e(pfbegin: *mut usize, pfend: *mut usize) 
 
 /// __p___argc: return a pointer to the process argc.
 // Wine ref: dlls/msvcrt/data.c:154 — returns &MSVCRT___argc (pointer to the global argc int).
+// Reads the real arg count from weave_core::cmdline (set by main.rs before IAT patching).
 pub extern "win64" fn p___argc() -> *mut i32 {
-    ARGC.as_ptr()
+    // Initialise ARGC_VAL from cmdline on first call.
+    if ARGC_VAL.load(Ordering::Relaxed) == -1 {
+        ARGC_VAL.store(weave_core::cmdline::get_argc(), Ordering::Relaxed);
+    }
+    ARGC_VAL.as_ptr()
 }
 
 /// __p___argv: return a pointer to the argv array pointer (`char ***`).
 ///
 /// # Safety
-/// Initialises static argv state on first call (single-threaded, safe in Phase 1).
+/// Initialises static argv state on first call. The argv data lives in
+/// weave_core::cmdline (OnceLock, never freed) so the pointer is stable.
+///
 // Wine ref: dlls/msvcrt/data.c:256 — returns &MSVCRT___argv; a char*** pointing to the argv array.
+// Reads the real argv from weave_core::cmdline (set by main.rs before IAT patching).
 pub unsafe extern "win64" fn p___argv() -> *mut *mut u8 {
-    ARGV_ONCE.call_once(|| unsafe {
-        ARGV_ARRAY[0] = ARGV0_STR.as_ptr() as usize;
-        ARGV_ARRAY[1] = 0;
-        ARGV_VAR = std::ptr::addr_of!(ARGV_ARRAY) as usize;
+    ARGV_ONCE.call_once(|| {
+        let ptr = weave_core::cmdline::get_argv();
+        ARGV_PTR_STORE.store(ptr, Ordering::Relaxed);
     });
-    // Return &ARGV_VAR (char ***), which the CRT dereferences to get char**.
-    std::ptr::addr_of_mut!(ARGV_VAR).cast::<*mut u8>()
+    // Return a pointer to ARGV_PTR_STORE (char***), which the CRT dereferences
+    // to get the char** argv array. AtomicPtr<*mut u8>::as_ptr() gives us a
+    // stable *mut *mut u8 — the address of the stored pointer itself.
+    ARGV_PTR_STORE.as_ptr() as *mut *mut u8
 }
 
 /// _configure_narrow_argv: configure argv mode. Returns 0 (success).
