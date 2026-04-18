@@ -330,6 +330,48 @@ pub unsafe extern "win64" fn ws_socket(af: i32, type_: i32, protocol: i32) -> us
     }
 }
 
+/// WSASocketW — create a socket (wide / extended form).
+///
+/// Windows SDK `winsock2.h`:
+///   SOCKET WSAAPI WSASocketW(int af, int type, int protocol,
+///                            LPWSAPROTOCOL_INFOW lpProtocolInfo,
+///                            GROUP g, DWORD dwFlags);
+///
+/// When `lpProtocolInfo` is NULL (curl always passes NULL) the call is
+/// identical to `socket(af, type, protocol)`.  dwFlags (overlapped I/O
+/// flags) are ignored — overlapped I/O is not implemented.
+///
+/// # Safety
+/// `lpProtocolInfo` is unused (ignored when NULL); no other pointer args.
+pub unsafe extern "win64" fn ws_wsa_socket_w(
+    af: i32,
+    type_: i32,
+    protocol: i32,
+    _lp_protocol_info: usize, // LPWSAPROTOCOL_INFOW — ignored when NULL
+    _g: u32,                  // GROUP — reserved, always 0
+    _dw_flags: u32,           // WSA_FLAG_* — overlapped I/O not yet implemented
+) -> usize {
+    // Wine ref: dlls/ws2_32/socket.c WSASocketW — when lpProtocolInfo==NULL,
+    // delegates to a socket() call with the supplied af/type/protocol.
+    ws_socket(af, type_, protocol)
+}
+
+/// WSASocketA — ANSI alias for WSASocketW.  Identical ABI; af/type/protocol
+/// are integers so there is no string-conversion difference between A and W.
+///
+/// # Safety
+/// Same as `ws_wsa_socket_w`.
+pub unsafe extern "win64" fn ws_wsa_socket_a(
+    af: i32,
+    type_: i32,
+    protocol: i32,
+    _lp_protocol_info: usize,
+    _g: u32,
+    _dw_flags: u32,
+) -> usize {
+    ws_wsa_socket_w(af, type_, protocol, _lp_protocol_info, _g, _dw_flags)
+}
+
 /// closesocket — close a socket.
 ///
 /// # Safety
@@ -1925,6 +1967,9 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "WSAResetEvent" => Some(wsa_reset_event as *const () as usize),
         "WSAStringToAddressW" => Some(ws_wsa_string_to_address_w as *const () as usize),
         "__WSAFDIsSet" => Some(ws_fd_is_set as *const () as usize),
+        // WSASocket variants (curl — loopback socket-pair setup).
+        "WSASocketW" => Some(ws_wsa_socket_w as *const () as usize),
+        "WSASocketA" => Some(ws_wsa_socket_a as *const () as usize),
         _ => None,
     }
 }
@@ -2018,6 +2063,8 @@ mod tests {
             "WSAAddressToStringA",
             "WSAIoctl",
             "WSAAsyncSelect",
+            "WSASocketW",
+            "WSASocketA",
         ];
         for f in &funcs {
             assert!(resolve("ws2_32.dll", f).is_some(), "missing {f}");
