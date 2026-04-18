@@ -674,6 +674,25 @@ pub unsafe extern "win64" fn rtl_get_version(
     STATUS_SUCCESS
 }
 
+/// RtlVerifyVersionInfo — low-level Windows version check (bypasses compat shims).
+///
+/// curl and other callers use this (when available) in preference to VerifyVersionInfoW.
+/// When GetProcAddress returns NULL for this function, callers fall back to
+/// VerifyVersionInfoW. We implement it to always return STATUS_SUCCESS so that
+/// version checks (e.g., "Vista or later") always pass.
+///
+/// # Safety
+/// Arguments are accepted but ignored.
+// Wine ref: dlls/ntdll/version.c — RtlVerifyVersionInfo validates VersionInfo fields
+// against the current OS using ConditionMask; returns STATUS_SUCCESS or STATUS_REVISION_MISMATCH.
+pub unsafe extern "win64" fn rtl_verify_version_info(
+    _lp_version_info: *const u8,
+    _type_mask: u32,
+    _condition_mask: u64,
+) -> i32 {
+    STATUS_SUCCESS
+}
+
 // Wine ref: dlls/ntdll/error.c:77 — writes status to NtCurrentTeb()->LastStatusValue before
 // calling RtlNtStatusToDosErrorNoTeb. RtlNtStatusToDosErrorNoTeb strips 0xd→0xc prefix,
 // handles HIWORD(status)==0xc001/0x8007/0xc007 by returning LOWORD(status), then does a full
@@ -1471,6 +1490,10 @@ pub fn resolve(func: &str) -> Option<usize> {
         "RtlGetVersion" => {
             Some(rtl_get_version as unsafe extern "win64" fn(_) -> _ as *const () as usize)
         }
+        "RtlVerifyVersionInfo" => Some(
+            rtl_verify_version_info as unsafe extern "win64" fn(_, _, _) -> _
+                as *const () as usize,
+        ),
         "RtlNtStatusToDosError" => {
             Some(rtl_nt_status_to_dos_error as extern "win64" fn(_) -> _ as *const () as usize)
         }

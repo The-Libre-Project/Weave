@@ -902,7 +902,18 @@ fn init_sspi_table() -> *const u8 {
     // SAFETY: After call_once, SSPI_TABLE is not mutated again. The returned
     // pointer is valid for the lifetime of the process.
     #[allow(static_mut_refs)]
-    unsafe { SSPI_TABLE.as_ptr() as *const u8 }
+    let ptr = unsafe { SSPI_TABLE.as_ptr() };
+    // Diagnostic: confirm slot 17 holds the real QuerySecurityPackageInfoA address.
+    // TODO: remove after curl_ws2_gate passes.
+    let expected = query_security_package_info_a
+        as unsafe extern "win64" fn(*const u8, *mut *const u8) -> i32
+        as *const () as u64;
+    let actual = unsafe { *ptr.add(17) };
+    eprintln!(
+        "weave/SSPI: table={ptr:p} slot17={actual:#x} expected={expected:#x} match={}",
+        actual == expected
+    );
+    ptr as *const u8
 }
 
 /// InitSecurityInterfaceA — return a pointer to the SSPI function table.
