@@ -1795,8 +1795,7 @@ fn split_cmdline(s: &str) -> Vec<String> {
     let mut args: Vec<String> = Vec::new();
     let mut current = String::new();
     let mut in_quotes = false;
-    let mut iter = s.chars().peekable();
-    while let Some(c) = iter.next() {
+    for c in s.chars() {
         match c {
             '"' => {
                 in_quotes = !in_quotes;
