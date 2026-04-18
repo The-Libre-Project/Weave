@@ -20,6 +20,21 @@ const E_FAIL: u32 = 0x80004005u32;
 // S_FALSE — COM "already done, not an error"
 const S_FALSE: u32 = 1;
 
+// ── Blt constants ────────────────────────────────────────────────────────────
+//
+// Wine ref: include/ddraw.h:213 — `#define DDBLT_COLORFILL 0x00000400`.
+// Wine ref: include/ddraw.h:94  — `#define DDERR_INVALIDPARAMS E_INVALIDARG`.
+// Wine ref: winerror.h          — `E_INVALIDARG = 0x80070057`.
+// Wine ref: include/ddraw.h:96  — `DDERR_INVALIDRECT = MAKE_DDHRESULT(150)`
+//   where MAKE_DDHRESULT(c) = MAKE_HRESULT(1, 0x876, c) = 0x88760000 | 150.
+
+/// DDBLT_COLORFILL — Wine ref: include/ddraw.h:213
+const DDBLT_COLORFILL: u32 = 0x0000_0400;
+/// DDERR_INVALIDPARAMS — Wine ref: include/ddraw.h:94 (= E_INVALIDARG)
+const DDERR_INVALIDPARAMS: u32 = 0x8007_0057;
+/// DDERR_INVALIDRECT — Wine ref: include/ddraw.h:96 (= MAKE_DDHRESULT(150))
+const DDERR_INVALIDRECT: u32 = 0x8876_0000 | 150;
+
 // ── IDirectDrawSurface4 vtable ───────────────────────────────────────────────
 // Wine ref: include/ddraw.h lines 2358-2415 — IDirectDrawSurface4 method order:
 // [0]  QueryInterface
@@ -182,6 +197,85 @@ pub struct Ddsd2 {
     pub dw_texture_stage: u32,
 }
 
+// ── Rect + DDBLTFX on-wire layouts ───────────────────────────────────────────
+//
+// Wine ref: include/windef.h — RECT is { LONG left; LONG top; LONG right;
+// LONG bottom; } where LONG is 32-bit on both x86 and x86-64 Windows ABIs.
+// We match that with four i32 fields.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct Rect {
+    pub left: i32,
+    pub top: i32,
+    pub right: i32,
+    pub bottom: i32,
+}
+
+// Wine ref: include/ddraw.h:1142-1189 — DDBLTFX struct. We mirror the full
+// layout so `#[repr(C)]` computes the same offsets the guest's MSVC/MinGW x64
+// compile produced. The union members that contain `struct IDirectDrawSurface *`
+// (8-byte pointer on x86-64) force 8-byte alignment on every enclosing union;
+// rather than hand-count offsets, we declare the full struct and let rustc do
+// the arithmetic.
+//
+// For dispatch 3 we only read dwFillColor (Wine include/ddraw.h:1182 — inside
+// DUMMYUNIONNAME5, "color in RGB or Palettized"). Every other field is present
+// purely to force correct alignment/offset computation.
+#[repr(C)]
+pub union DdBltFxZDest {
+    pub dw_z_dest_const: u32,
+    pub lp_dds_z_buffer_dest: *mut u8,
+}
+#[repr(C)]
+pub union DdBltFxZSrc {
+    pub dw_z_src_const: u32,
+    pub lp_dds_z_buffer_src: *mut u8,
+}
+#[repr(C)]
+pub union DdBltFxAlphaDest {
+    pub dw_alpha_dest_const: u32,
+    pub lp_dds_alpha_dest: *mut u8,
+}
+#[repr(C)]
+pub union DdBltFxAlphaSrc {
+    pub dw_alpha_src_const: u32,
+    pub lp_dds_alpha_src: *mut u8,
+}
+#[repr(C)]
+pub union DdBltFxFill {
+    pub dw_fill_color: u32,
+    pub dw_fill_depth: u32,
+    pub dw_fill_pixel: u32,
+    pub lp_dds_pattern: *mut u8,
+}
+
+#[repr(C)]
+pub struct DdBltFx {
+    pub dw_size: u32,                       // 0x00
+    pub dw_ddfx: u32,                       // 0x04
+    pub dw_rop: u32,                        // 0x08
+    pub dw_ddrop: u32,                      // 0x0C
+    pub dw_rotation_angle: u32,             // 0x10
+    pub dw_z_buffer_op_code: u32,           // 0x14
+    pub dw_z_buffer_low: u32,               // 0x18
+    pub dw_z_buffer_high: u32,              // 0x1C
+    pub dw_z_buffer_base_dest: u32,         // 0x20
+    pub dw_z_dest_const_bit_depth: u32,     // 0x24
+    pub u1: DdBltFxZDest,                   // 0x28 (8-aligned due to pointer member)
+    pub dw_z_src_const_bit_depth: u32,      // 0x30
+    pub u2: DdBltFxZSrc,                    // 0x38
+    pub dw_alpha_edge_blend_bit_depth: u32, // 0x40
+    pub dw_alpha_edge_blend: u32,           // 0x44
+    pub dw_reserved: u32,                   // 0x48
+    pub dw_alpha_dest_const_bit_depth: u32, // 0x4C
+    pub u3: DdBltFxAlphaDest,               // 0x50
+    pub dw_alpha_src_const_bit_depth: u32,  // 0x58
+    pub u4: DdBltFxAlphaSrc,                // 0x60
+    pub u5: DdBltFxFill,                    // 0x68 — dwFillColor lives here
+    pub ddck_dest_color_key: [u32; 2], // DDCOLORKEY { dwColorSpaceLowValue; dwColorSpaceHighValue; }
+    pub ddck_src_color_key: [u32; 2],
+}
+
 #[repr(C)]
 pub struct FakeSurface4 {
     /// Vtable pointer MUST be the first field. Guest reads *this as the vtable ptr.
@@ -286,28 +380,262 @@ unsafe extern "win64" fn surf_Release(this: *mut u8) -> u32 {
 unsafe extern "win64" fn surf_stub0(_this: *mut u8, _a: *mut u8) -> u32 {
     DD_OK
 }
-unsafe extern "win64" fn surf_Blt(
-    _this: *mut u8,
-    _a: *mut u8,
-    _b: *mut u8,
-    _c: *mut u8,
-    _d: u32,
-    _e: *mut u8,
+/// Clip a rect to [0,width) × [0,height). Returns None if the clipped rect is empty.
+fn clip_rect(r: Rect, width: i32, height: i32) -> Option<Rect> {
+    let left = r.left.max(0);
+    let top = r.top.max(0);
+    let right = r.right.min(width);
+    let bottom = r.bottom.min(height);
+    if left >= right || top >= bottom {
+        return None;
+    }
+    Some(Rect {
+        left,
+        top,
+        right,
+        bottom,
+    })
+}
+
+/// Full-surface rect helper.
+fn full_rect(s: &FakeSurface4) -> Rect {
+    Rect {
+        left: 0,
+        top: 0,
+        right: s.width as i32,
+        bottom: s.height as i32,
+    }
+}
+
+/// Core Blt path: either fill (when `fill` is Some) or src→dst copy.
+///
+/// Wine ref: dlls/ddraw/surface.c::ddraw_surface1_Blt — accepts NULL rects
+/// (meaning full surface via SetRect), clips to surface bounds, dispatches to
+/// wined3d for the actual memory work. Our implementation is the memory-only
+/// analogue: no wined3d, no clipper, no color-key, no stretching.
+///
+/// Pixel format: 32bpp BGRA little-endian. The guest supplies `dwFillColor`
+/// as a DWORD already in the surface's pixel format (Wine passes it through
+/// to wined3d_device_context_clear, which writes the raw 32-bit value to each
+/// pixel). We write the u32 via `*p = color`, so the memory layout is
+/// (B, G, R, A) — matching the surface buffer's BGRA interpretation.
+///
+/// # Safety
+/// Caller guarantees `dst` and (if Some) `src` point to valid FakeSurface4
+/// instances with live backing buffers.
+unsafe fn do_blt(
+    dst: &FakeSurface4,
+    dst_rect_opt: Option<Rect>,
+    src: Option<&FakeSurface4>,
+    src_rect_opt: Option<Rect>,
+    fill: Option<u32>,
 ) -> u32 {
+    // Only 32bpp surfaces are supported in dispatch 3.
+    if dst.bpp != 32 {
+        return DDERR_INVALIDPARAMS;
+    }
+
+    let dst_bounds = full_rect(dst);
+    let dst_rect = dst_rect_opt.unwrap_or(dst_bounds);
+    let Some(dst_clipped) = clip_rect(dst_rect, dst_bounds.right, dst_bounds.bottom) else {
+        // Fully off-surface → nothing to do; Wine treats this as success.
+        return DD_OK;
+    };
+
+    // COLORFILL path
+    if let Some(color) = fill {
+        // How much of the original rect was clipped off each side — the src
+        // path needs this shift, but for fill it's irrelevant since fill has
+        // no source coordinates.
+        let dw = (dst_clipped.right - dst_clipped.left) as usize;
+        let dh = (dst_clipped.bottom - dst_clipped.top) as usize;
+        let pitch = dst.pitch as usize;
+        for row in 0..dh {
+            let y = dst_clipped.top as usize + row;
+            let row_start = y * pitch + dst_clipped.left as usize * 4;
+            let dst_row =
+                unsafe { core::slice::from_raw_parts_mut(dst.pixels.add(row_start), dw * 4) };
+            for px in 0..dw {
+                let off = px * 4;
+                dst_row[off..off + 4].copy_from_slice(&color.to_le_bytes());
+            }
+        }
+        return DD_OK;
+    }
+
+    // SRC→DST copy path
+    let Some(src) = src else {
+        return DDERR_INVALIDPARAMS;
+    };
+    if src.bpp != 32 {
+        return DDERR_INVALIDPARAMS;
+    }
+    let src_bounds = full_rect(src);
+    let src_rect = src_rect_opt.unwrap_or(src_bounds);
+    let Some(src_clipped) = clip_rect(src_rect, src_bounds.right, src_bounds.bottom) else {
+        return DD_OK;
+    };
+
+    // No stretching: require matching widths and heights. Wine supports
+    // stretching via wined3d; we don't (documented out-of-scope).
+    let src_w = src_clipped.right - src_clipped.left;
+    let src_h = src_clipped.bottom - src_clipped.top;
+    let dst_w = dst_clipped.right - dst_clipped.left;
+    let dst_h = dst_clipped.bottom - dst_clipped.top;
+    // After both clips the sizes may have diverged (the caller may have
+    // supplied rects where only one side overflowed). If sizes differ,
+    // we take the min of each dimension — so the effective copy is the
+    // intersection of both clipped boxes.
+    let w = src_w.min(dst_w) as usize;
+    let h = src_h.min(dst_h) as usize;
+    if w == 0 || h == 0 {
+        return DD_OK;
+    }
+
+    let src_pitch = src.pitch as usize;
+    let dst_pitch = dst.pitch as usize;
+    let bytes_per_row = w * 4;
+
+    // Byte-distance between the src and dst buffers for the first copied row.
+    // Used to detect overlap; when the buffers are distinct allocations, they
+    // never overlap.
+    let same_surface = core::ptr::eq(src.pixels, dst.pixels);
+
+    for row in 0..h {
+        let src_y = src_clipped.top as usize + row;
+        let dst_y = dst_clipped.top as usize + row;
+        let src_row_start = src_y * src_pitch + src_clipped.left as usize * 4;
+        let dst_row_start = dst_y * dst_pitch + dst_clipped.left as usize * 4;
+        let src_ptr = unsafe { src.pixels.add(src_row_start) };
+        let dst_ptr = unsafe { dst.pixels.add(dst_row_start) };
+        if same_surface {
+            // Potentially overlapping — use memmove semantics.
+            unsafe {
+                core::ptr::copy(src_ptr, dst_ptr, bytes_per_row);
+            }
+        } else {
+            unsafe {
+                core::ptr::copy_nonoverlapping(src_ptr, dst_ptr, bytes_per_row);
+            }
+        }
+    }
     DD_OK
+}
+
+unsafe extern "win64" fn surf_Blt(
+    this: *mut u8,
+    dst_rect: *mut u8,
+    src: *mut u8,
+    src_rect: *mut u8,
+    flags: u32,
+    fx: *mut u8,
+) -> u32 {
+    // Wine ref: dlls/ddraw/surface.c::ddraw_surface4_Blt (line 1924) → forwards
+    // to ddraw_surface1_Blt (line 1728). Signature:
+    //   HRESULT Blt(IDirectDrawSurface4*, RECT *dst_rect,
+    //       IDirectDrawSurface4 *src_surface, RECT *src_rect,
+    //       DWORD flags, DDBLTFX *fx);
+    // Null-rect means full surface (Wine's ddraw_surface1_Blt does `SetRect`
+    // over the full surface_desc geometry when dst_rect/src_rect are NULL).
+    if this.is_null() {
+        return DDERR_INVALIDPARAMS;
+    }
+    let dst = unsafe { &*(this as *const FakeSurface4) };
+
+    let dst_rect_opt = if dst_rect.is_null() {
+        None
+    } else {
+        Some(unsafe { *(dst_rect as *const Rect) })
+    };
+    let src_rect_opt = if src_rect.is_null() {
+        None
+    } else {
+        Some(unsafe { *(src_rect as *const Rect) })
+    };
+
+    if flags & DDBLT_COLORFILL != 0 {
+        // Wine ref: include/ddraw.h:1182 — `DWORD dwFillColor; /* color in RGB
+        // or Palettized */` inside DUMMYUNIONNAME5 of DDBLTFX. Offset is
+        // computed by #[repr(C)] on our DdBltFx to match the guest's x64
+        // compile.
+        if fx.is_null() {
+            return DDERR_INVALIDPARAMS;
+        }
+        let fx_ref = unsafe { &*(fx as *const DdBltFx) };
+        let color = unsafe { fx_ref.u5.dw_fill_color };
+        return unsafe { do_blt(dst, dst_rect_opt, None, None, Some(color)) };
+    }
+
+    // Plain src→dst copy. DDBLT_WAIT / DDBLT_ASYNC are synchronous anyway
+    // in our in-process model; we ignore them (see Wine's WINED3D_BLT_WAIT
+    // mapping in ddraw_surface7_BltFast).
+    let src_ref = if src.is_null() {
+        None
+    } else {
+        Some(unsafe { &*(src as *const FakeSurface4) })
+    };
+    unsafe { do_blt(dst, dst_rect_opt, src_ref, src_rect_opt, None) }
 }
 unsafe extern "win64" fn surf_BltBatch(_this: *mut u8, _a: *mut u8, _b: u32, _c: u32) -> u32 {
     DD_OK
 }
 unsafe extern "win64" fn surf_BltFast(
-    _this: *mut u8,
-    _x: u32,
-    _y: u32,
-    _src: *mut u8,
-    _rect: *mut u8,
+    this: *mut u8,
+    dst_x: u32,
+    dst_y: u32,
+    src: *mut u8,
+    src_rect: *mut u8,
     _flags: u32,
 ) -> u32 {
-    DD_OK
+    // Wine ref: dlls/ddraw/surface.c::ddraw_surface7_BltFast (line 4428):
+    //   if (!src_rect) SetRect(&s, 0, 0, src->dwWidth, src->dwHeight);
+    //   src_w = src_rect->right - src_rect->left;
+    //   src_h = src_rect->bottom - src_rect->top;
+    //   if (src_w > dst_w || dst_x > dst_w - src_w
+    //       || src_h > dst_h || dst_y > dst_h - src_h)
+    //       return DDERR_INVALIDRECT;
+    //   SetRect(&dst_rect, dst_x, dst_y, dst_x + src_w, dst_y + src_h);
+    // No stretching; purely a wrapper that builds a dst_rect of the same
+    // size as the src_rect at (dst_x, dst_y).
+    if this.is_null() || src.is_null() {
+        return DDERR_INVALIDPARAMS;
+    }
+    let dst = unsafe { &*(this as *const FakeSurface4) };
+    let src_obj = unsafe { &*(src as *const FakeSurface4) };
+
+    let src_rect_val = if src_rect.is_null() {
+        full_rect(src_obj)
+    } else {
+        unsafe { *(src_rect as *const Rect) }
+    };
+    let src_w = src_rect_val.right - src_rect_val.left;
+    let src_h = src_rect_val.bottom - src_rect_val.top;
+    if src_w <= 0 || src_h <= 0 {
+        return DDERR_INVALIDRECT;
+    }
+    let dst_w = dst.width as i32;
+    let dst_h = dst.height as i32;
+    let dst_x_i = dst_x as i32;
+    let dst_y_i = dst_y as i32;
+    // Wine's overflow-safe bounds check, reproduced.
+    if src_w > dst_w || dst_x_i > dst_w - src_w || src_h > dst_h || dst_y_i > dst_h - src_h {
+        return DDERR_INVALIDRECT;
+    }
+    let dst_rect_val = Rect {
+        left: dst_x_i,
+        top: dst_y_i,
+        right: dst_x_i + src_w,
+        bottom: dst_y_i + src_h,
+    };
+    unsafe {
+        do_blt(
+            dst,
+            Some(dst_rect_val),
+            Some(src_obj),
+            Some(src_rect_val),
+            None,
+        )
+    }
 }
 unsafe extern "win64" fn surf_DeleteAttachedSurface(_this: *mut u8, _f: u32, _a: *mut u8) -> u32 {
     DD_OK
@@ -1398,6 +1726,399 @@ mod tests {
         let dd_vtbl = unsafe { &*(*(dd as *const FakeDirectDraw4)).vtbl };
         assert_eq!(unsafe { (s_vtbl.Release)(surf) }, 0);
         assert_eq!(unsafe { (dd_vtbl.Release)(dd) }, 0);
+    }
+
+    // ── IDirectDrawSurface4::Blt dispatch 3 tests ────────────────────────────
+
+    /// Helper: read pixel as u32 at (x, y) from a FakeSurface4 pixel buffer.
+    unsafe fn read_pixel(surf: *mut u8, x: i32, y: i32) -> u32 {
+        let obj = unsafe { &*(surf as *const FakeSurface4) };
+        let offset = (y as usize) * obj.pitch as usize + (x as usize) * 4;
+        let p = unsafe { obj.pixels.add(offset) };
+        u32::from_le_bytes([
+            unsafe { *p.add(0) },
+            unsafe { *p.add(1) },
+            unsafe { *p.add(2) },
+            unsafe { *p.add(3) },
+        ])
+    }
+
+    /// Helper: write pixel as u32 at (x, y).
+    unsafe fn write_pixel(surf: *mut u8, x: i32, y: i32, color: u32) {
+        let obj = unsafe { &*(surf as *const FakeSurface4) };
+        let offset = (y as usize) * obj.pitch as usize + (x as usize) * 4;
+        let p = unsafe { obj.pixels.add(offset) };
+        let bytes = color.to_le_bytes();
+        unsafe {
+            *p.add(0) = bytes[0];
+            *p.add(1) = bytes[1];
+            *p.add(2) = bytes[2];
+            *p.add(3) = bytes[3];
+        }
+    }
+
+    /// Release helper — drops both surface and ddraw.
+    unsafe fn release_all(dd: *mut u8, surfs: &[*mut u8]) {
+        for &s in surfs {
+            let vtbl = unsafe { &*(*(s as *const FakeSurface4)).vtbl };
+            let _ = unsafe { (vtbl.Release)(s) };
+        }
+        let dd_vtbl = unsafe { &*(*(dd as *const FakeDirectDraw4)).vtbl };
+        let _ = unsafe { (dd_vtbl.Release)(dd) };
+    }
+
+    /// DDBLT_COLORFILL on a sub-rect: every pixel inside == fill color;
+    /// every pixel outside unchanged (starts at 0).
+    #[test]
+    fn blt_colorfill_writes_fill_color_in_rect() {
+        let (dd, surf) = unsafe { make_ddraw_and_surface() };
+        let s_vtbl = unsafe { &*(*(surf as *const FakeSurface4)).vtbl };
+
+        // Fill a 100x100 sub-rect with 0x00FF0000 (red in BGRA: bytes 00 00 FF 00).
+        // In memory: [B=0x00, G=0x00, R=0xFF, A=0x00] — little-endian DWORD 0x00FF0000.
+        const FILL: u32 = 0x00FF_0000;
+        let dst_rect = Rect {
+            left: 10,
+            top: 20,
+            right: 110,
+            bottom: 120,
+        };
+        let mut fx: DdBltFx = unsafe { core::mem::zeroed() };
+        fx.dw_size = core::mem::size_of::<DdBltFx>() as u32;
+        fx.u5 = DdBltFxFill {
+            dw_fill_color: FILL,
+        };
+        let hr = unsafe {
+            (s_vtbl.Blt)(
+                surf,
+                &dst_rect as *const Rect as *mut u8,
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+                DDBLT_COLORFILL,
+                &mut fx as *mut DdBltFx as *mut u8,
+            )
+        };
+        assert_eq!(hr, DD_OK);
+
+        // Inside rect: every pixel == FILL.
+        for y in 20..120 {
+            for x in 10..110 {
+                assert_eq!(
+                    unsafe { read_pixel(surf, x, y) },
+                    FILL,
+                    "pixel ({},{}) inside fill rect must == FILL",
+                    x,
+                    y
+                );
+            }
+        }
+        // Outside: top-left, top-right, bottom-left, bottom-right corners
+        // and four sample points just outside the rect — all must be 0.
+        assert_eq!(unsafe { read_pixel(surf, 0, 0) }, 0);
+        assert_eq!(unsafe { read_pixel(surf, 9, 20) }, 0);
+        assert_eq!(unsafe { read_pixel(surf, 10, 19) }, 0);
+        assert_eq!(unsafe { read_pixel(surf, 110, 20) }, 0);
+        assert_eq!(unsafe { read_pixel(surf, 10, 120) }, 0);
+        assert_eq!(unsafe { read_pixel(surf, 639, 479) }, 0);
+
+        unsafe { release_all(dd, &[surf]) };
+    }
+
+    /// Full-rect src→dst copy: write a pattern to src, Blt full surface,
+    /// assert dst contains the identical pattern.
+    #[test]
+    fn blt_src_to_dst_full_rect_copy() {
+        // Create two surfaces on one ddraw instance.
+        let mut dd: *mut u8 = core::ptr::null_mut();
+        unsafe {
+            DirectDrawCreate(
+                core::ptr::null(),
+                &mut dd as *mut *mut u8,
+                core::ptr::null_mut(),
+            );
+        }
+        let dd_vtbl = unsafe { &*(*(dd as *const FakeDirectDraw4)).vtbl };
+        let mut src: *mut u8 = core::ptr::null_mut();
+        let mut dst: *mut u8 = core::ptr::null_mut();
+        let _ = unsafe {
+            (dd_vtbl.CreateSurface)(
+                dd,
+                core::ptr::null_mut(),
+                &mut src as *mut *mut u8,
+                core::ptr::null_mut(),
+            )
+        };
+        let _ = unsafe {
+            (dd_vtbl.CreateSurface)(
+                dd,
+                core::ptr::null_mut(),
+                &mut dst as *mut *mut u8,
+                core::ptr::null_mut(),
+            )
+        };
+        assert_ne!(src, dst);
+
+        // Write a red-diagonal pattern to src.
+        for y in 0..480 {
+            for x in 0..640 {
+                let c = if x == y { 0x00FF_0000 } else { 0x0000_00FFu32 };
+                unsafe { write_pixel(src, x, y, c) };
+            }
+        }
+
+        // Blt full surface src → dst (all rects NULL = full surface).
+        let s_vtbl = unsafe { &*(*(dst as *const FakeSurface4)).vtbl };
+        let hr = unsafe {
+            (s_vtbl.Blt)(
+                dst,
+                core::ptr::null_mut(),
+                src,
+                core::ptr::null_mut(),
+                0,
+                core::ptr::null_mut(),
+            )
+        };
+        assert_eq!(hr, DD_OK);
+
+        // Verify pattern landed in dst.
+        for y in 0..480 {
+            for x in 0..640 {
+                let expected = if x == y { 0x00FF_0000 } else { 0x0000_00FFu32 };
+                assert_eq!(
+                    unsafe { read_pixel(dst, x, y) },
+                    expected,
+                    "full-rect copy missing pixel ({},{})",
+                    x,
+                    y
+                );
+            }
+        }
+
+        unsafe { release_all(dd, &[src, dst]) };
+    }
+
+    /// Partial-rect copy: only pixels inside the dst sub-rect are modified.
+    #[test]
+    fn blt_partial_rect_leaves_outside_untouched() {
+        let mut dd: *mut u8 = core::ptr::null_mut();
+        unsafe {
+            DirectDrawCreate(
+                core::ptr::null(),
+                &mut dd as *mut *mut u8,
+                core::ptr::null_mut(),
+            );
+        }
+        let dd_vtbl = unsafe { &*(*(dd as *const FakeDirectDraw4)).vtbl };
+        let mut src: *mut u8 = core::ptr::null_mut();
+        let mut dst: *mut u8 = core::ptr::null_mut();
+        unsafe {
+            (dd_vtbl.CreateSurface)(
+                dd,
+                core::ptr::null_mut(),
+                &mut src as *mut *mut u8,
+                core::ptr::null_mut(),
+            );
+            (dd_vtbl.CreateSurface)(
+                dd,
+                core::ptr::null_mut(),
+                &mut dst as *mut *mut u8,
+                core::ptr::null_mut(),
+            );
+        }
+
+        // Fill src with constant color 0x11223344.
+        const SRC_COLOR: u32 = 0x1122_3344;
+        for y in 0..480 {
+            for x in 0..640 {
+                unsafe { write_pixel(src, x, y, SRC_COLOR) };
+            }
+        }
+        // Prime dst with 0xDEAD_BEEF so we can tell modified from untouched.
+        const DST_COLOR: u32 = 0xDEAD_BEEF;
+        for y in 0..480 {
+            for x in 0..640 {
+                unsafe { write_pixel(dst, x, y, DST_COLOR) };
+            }
+        }
+
+        let rect = Rect {
+            left: 50,
+            top: 60,
+            right: 150,
+            bottom: 160,
+        };
+        let s_vtbl = unsafe { &*(*(dst as *const FakeSurface4)).vtbl };
+        let hr = unsafe {
+            (s_vtbl.Blt)(
+                dst,
+                &rect as *const Rect as *mut u8,
+                src,
+                &rect as *const Rect as *mut u8,
+                0,
+                core::ptr::null_mut(),
+            )
+        };
+        assert_eq!(hr, DD_OK);
+
+        // Inside rect → SRC_COLOR; outside → DST_COLOR.
+        for y in 0..480 {
+            for x in 0..640 {
+                let got = unsafe { read_pixel(dst, x, y) };
+                let inside = (50..150).contains(&x) && (60..160).contains(&y);
+                let expected = if inside { SRC_COLOR } else { DST_COLOR };
+                assert_eq!(got, expected, "pixel ({},{}) wrong after partial blt", x, y);
+            }
+        }
+
+        unsafe { release_all(dd, &[src, dst]) };
+    }
+
+    /// BltFast: same as full src→dst copy but through the BltFast entry point.
+    #[test]
+    fn blt_fast_copies_pattern() {
+        let mut dd: *mut u8 = core::ptr::null_mut();
+        unsafe {
+            DirectDrawCreate(
+                core::ptr::null(),
+                &mut dd as *mut *mut u8,
+                core::ptr::null_mut(),
+            );
+        }
+        let dd_vtbl = unsafe { &*(*(dd as *const FakeDirectDraw4)).vtbl };
+        let mut src: *mut u8 = core::ptr::null_mut();
+        let mut dst: *mut u8 = core::ptr::null_mut();
+        unsafe {
+            (dd_vtbl.CreateSurface)(
+                dd,
+                core::ptr::null_mut(),
+                &mut src as *mut *mut u8,
+                core::ptr::null_mut(),
+            );
+            (dd_vtbl.CreateSurface)(
+                dd,
+                core::ptr::null_mut(),
+                &mut dst as *mut *mut u8,
+                core::ptr::null_mut(),
+            );
+        }
+        // Pattern.
+        for y in 0..480 {
+            for x in 0..640 {
+                let c = ((x as u32) << 16) | (y as u32);
+                unsafe { write_pixel(src, x, y, c) };
+            }
+        }
+        // BltFast a 100×100 block from src(0,0)-(100,100) → dst(20,30).
+        let src_rect = Rect {
+            left: 0,
+            top: 0,
+            right: 100,
+            bottom: 100,
+        };
+        let s_vtbl = unsafe { &*(*(dst as *const FakeSurface4)).vtbl };
+        let hr =
+            unsafe { (s_vtbl.BltFast)(dst, 20, 30, src, &src_rect as *const Rect as *mut u8, 0) };
+        assert_eq!(hr, DD_OK);
+
+        // Spot-check the copied block.
+        for sy in 0..100i32 {
+            for sx in 0..100i32 {
+                let expected = ((sx as u32) << 16) | (sy as u32);
+                let got = unsafe { read_pixel(dst, 20 + sx, 30 + sy) };
+                assert_eq!(got, expected, "BltFast missed pixel ({},{})", sx, sy);
+            }
+        }
+        // Pixel just outside the block must still be 0 (dst was never written).
+        assert_eq!(unsafe { read_pixel(dst, 19, 30) }, 0);
+        assert_eq!(unsafe { read_pixel(dst, 20, 29) }, 0);
+        assert_eq!(unsafe { read_pixel(dst, 120, 30) }, 0);
+
+        unsafe { release_all(dd, &[src, dst]) };
+    }
+
+    /// Clipping: a dst_rect that extends beyond surface bounds must not cause
+    /// an out-of-bounds write. Only the in-bounds portion is modified.
+    #[test]
+    fn blt_colorfill_clips_to_surface_bounds() {
+        let (dd, surf) = unsafe { make_ddraw_and_surface() };
+        let s_vtbl = unsafe { &*(*(surf as *const FakeSurface4)).vtbl };
+
+        // Rect extending past the right/bottom edges of a 640×480 surface.
+        let rect = Rect {
+            left: 600,
+            top: 450,
+            right: 800,  // past right edge (640)
+            bottom: 600, // past bottom edge (480)
+        };
+        const FILL: u32 = 0xAABB_CCDD;
+        let mut fx: DdBltFx = unsafe { core::mem::zeroed() };
+        fx.dw_size = core::mem::size_of::<DdBltFx>() as u32;
+        fx.u5 = DdBltFxFill {
+            dw_fill_color: FILL,
+        };
+        let hr = unsafe {
+            (s_vtbl.Blt)(
+                surf,
+                &rect as *const Rect as *mut u8,
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+                DDBLT_COLORFILL,
+                &mut fx as *mut DdBltFx as *mut u8,
+            )
+        };
+        // No crash, returns DD_OK, and only the in-bounds region [600..640, 450..480)
+        // is modified.
+        assert_eq!(hr, DD_OK);
+        for y in 450..480 {
+            for x in 600..640 {
+                assert_eq!(
+                    unsafe { read_pixel(surf, x, y) },
+                    FILL,
+                    "clipped-in pixel ({},{}) must be filled",
+                    x,
+                    y
+                );
+            }
+        }
+        // Pixels outside the clipped rect — still zero. Sample a few.
+        assert_eq!(unsafe { read_pixel(surf, 599, 450) }, 0);
+        assert_eq!(unsafe { read_pixel(surf, 600, 449) }, 0);
+        assert_eq!(unsafe { read_pixel(surf, 0, 0) }, 0);
+
+        unsafe { release_all(dd, &[surf]) };
+    }
+
+    /// NULL rects on both sides = full surface on both sides.
+    #[test]
+    fn blt_null_rects_mean_full_surface() {
+        let (dd, surf) = unsafe { make_ddraw_and_surface() };
+        let s_vtbl = unsafe { &*(*(surf as *const FakeSurface4)).vtbl };
+
+        // Fill entire surface via NULL dst_rect + COLORFILL.
+        const FILL: u32 = 0x0000_FF00; // green in BGRA bytes [00, FF, 00, 00]
+        let mut fx: DdBltFx = unsafe { core::mem::zeroed() };
+        fx.dw_size = core::mem::size_of::<DdBltFx>() as u32;
+        fx.u5 = DdBltFxFill {
+            dw_fill_color: FILL,
+        };
+        let hr = unsafe {
+            (s_vtbl.Blt)(
+                surf,
+                core::ptr::null_mut(), // NULL dst_rect = full surface
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+                DDBLT_COLORFILL,
+                &mut fx as *mut DdBltFx as *mut u8,
+            )
+        };
+        assert_eq!(hr, DD_OK);
+
+        // Every pixel must be FILL. Sample corners + center.
+        for (x, y) in [(0, 0), (639, 0), (0, 479), (639, 479), (320, 240)] {
+            assert_eq!(unsafe { read_pixel(surf, x, y) }, FILL);
+        }
+
+        unsafe { release_all(dd, &[surf]) };
     }
 
     /// DDSURFACEDESC2 field offsets must match Wine's include/ddraw.h:1036
