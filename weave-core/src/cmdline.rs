@@ -85,15 +85,18 @@ pub fn set(exe_name: &str, args: &[String]) {
         // Build argv_ptrs: pointers into the strings above + null sentinel.
         // We take the pointers AFTER constructing all strings so no
         // reallocation can occur between pointer capture and use.
-        let mut argv_ptrs: Vec<*mut u8> = argv_strings
-            .iter_mut()
-            .map(|v| v.as_mut_ptr())
-            .collect();
+        let mut argv_ptrs: Vec<*mut u8> = argv_strings.iter_mut().map(|v| v.as_mut_ptr()).collect();
         argv_ptrs.push(std::ptr::null_mut()); // null terminator (argv[argc])
 
         let argc = (argv_ptrs.len() - 1) as i32; // exclude the null sentinel
 
-        CmdLine { ansi, wide, argc, argv_strings, argv_ptrs }
+        CmdLine {
+            ansi,
+            wide,
+            argc,
+            argv_strings,
+            argv_ptrs,
+        }
     });
 }
 

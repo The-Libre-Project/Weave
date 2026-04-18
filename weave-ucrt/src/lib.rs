@@ -1806,7 +1806,9 @@ fn parse_cmdline_w(cmdline: *const u16) -> Vec<*mut u16> {
     // Safety: cmdline is a valid null-terminated wide string from weave_core::cmdline::get_w()
     let len = unsafe {
         let mut p = cmdline;
-        while *p != 0 { p = p.add(1); }
+        while *p != 0 {
+            p = p.add(1);
+        }
         p.offset_from(cmdline) as usize
     };
     let s = unsafe { std::slice::from_raw_parts(cmdline, len) };
@@ -1879,13 +1881,19 @@ pub unsafe extern "win64" fn ucrt_getmainargs(
     // envp[0] = NULL
     let envp = Box::into_raw(Box::new([std::ptr::null_mut::<u8>()])) as *mut *mut u8;
     if !p_argc.is_null() {
-        unsafe { *p_argc = argc; }
+        unsafe {
+            *p_argc = argc;
+        }
     }
     if !p_argv.is_null() {
-        unsafe { *p_argv = argv; }
+        unsafe {
+            *p_argv = argv;
+        }
     }
     if !p_envp.is_null() {
-        unsafe { *p_envp = envp; }
+        unsafe {
+            *p_envp = envp;
+        }
     }
     0
 }
@@ -1911,13 +1919,19 @@ pub unsafe extern "win64" fn ucrt_wgetmainargs(
     // envp[0] = NULL
     let envp = Box::into_raw(Box::new([std::ptr::null_mut::<u16>()])) as *mut *mut u16;
     if !p_argc.is_null() {
-        unsafe { *p_argc = argc; }
+        unsafe {
+            *p_argc = argc;
+        }
     }
     if !p_argv.is_null() {
-        unsafe { *p_argv = argv; }
+        unsafe {
+            *p_argv = argv;
+        }
     }
     if !p_envp.is_null() {
-        unsafe { *p_envp = envp; }
+        unsafe {
+            *p_envp = envp;
+        }
     }
     0
 }
@@ -2644,11 +2658,7 @@ pub unsafe extern "win64" fn ucrt_strspn(s: *const u8, accept: *const u8) -> usi
 ///
 /// # Safety
 /// `s` must point to at least `n` readable bytes, or be null.
-pub unsafe extern "win64" fn ucrt_mbrlen(
-    s: *const u8,
-    n: usize,
-    _ps: *mut u8,
-) -> usize {
+pub unsafe extern "win64" fn ucrt_mbrlen(s: *const u8, n: usize, _ps: *mut u8) -> usize {
     if s.is_null() || n == 0 {
         return 0;
     }
@@ -2745,11 +2755,7 @@ pub unsafe extern "win64" fn ucrt_wcsncpy_s(
 ///
 /// # Safety
 /// `dst` must be writable for `size_dst` wide chars. `src` must be a valid wide string.
-pub unsafe extern "win64" fn ucrt_wcscpy_s(
-    dst: *mut u16,
-    size_dst: usize,
-    src: *const u16,
-) -> i32 {
+pub unsafe extern "win64" fn ucrt_wcscpy_s(dst: *mut u16, size_dst: usize, src: *const u16) -> i32 {
     ucrt_wcsncpy_s(dst, size_dst, src, usize::MAX)
 }
 
@@ -2919,9 +2925,7 @@ pub unsafe extern "win64" fn ucrt_qsort(
     for i in 1..num_elements {
         std::ptr::copy_nonoverlapping(base.add(i * element_size), tmp.as_mut_ptr(), element_size);
         let mut j = i;
-        while j > 0
-            && compare(base.add((j - 1) * element_size), tmp.as_ptr()) > 0
-        {
+        while j > 0 && compare(base.add((j - 1) * element_size), tmp.as_ptr()) > 0 {
             let src = base.add((j - 1) * element_size);
             let dst = base.add(j * element_size);
             std::ptr::copy_nonoverlapping(src, dst, element_size);
@@ -2942,7 +2946,11 @@ pub unsafe extern "win64" fn ucrt_strtoull(
     endptr: *mut *mut u8,
     base: i32,
 ) -> u64 {
-    libc::strtoull(nptr as *const libc::c_char, endptr as *mut *mut libc::c_char, base)
+    libc::strtoull(
+        nptr as *const libc::c_char,
+        endptr as *mut *mut libc::c_char,
+        base,
+    )
 }
 
 /// mbstowcs_s — convert multibyte string to wide string, safe version.
@@ -2967,7 +2975,11 @@ pub unsafe extern "win64" fn ucrt_mbstowcs_s(
         return 22; // EINVAL
     }
     let mb_len = libc::strlen(mbstr as *const libc::c_char);
-    let copy_chars = mb_len.min(count).min(if size_in_words > 0 { size_in_words - 1 } else { 0 });
+    let copy_chars = mb_len.min(count).min(if size_in_words > 0 {
+        size_in_words - 1
+    } else {
+        0
+    });
     if wcstr.is_null() {
         if !retval.is_null() {
             *retval = mb_len + 1;
@@ -3012,7 +3024,11 @@ pub unsafe extern "win64" fn ucrt_wcstombs_s(
     while *wcstr.add(wlen) != 0 {
         wlen += 1;
     }
-    let copy_bytes = wlen.min(count).min(if size_in_bytes > 0 { size_in_bytes - 1 } else { 0 });
+    let copy_bytes = wlen.min(count).min(if size_in_bytes > 0 {
+        size_in_bytes - 1
+    } else {
+        0
+    });
     if mbstr.is_null() {
         if !retval.is_null() {
             *retval = wlen + 1;
@@ -3059,7 +3075,11 @@ pub unsafe extern "win64" fn ucrt_fgets(
     if buf.is_null() || buf_size <= 0 || stream.is_null() {
         return std::ptr::null_mut();
     }
-    let ret = libc::fgets(buf as *mut libc::c_char, buf_size, stream as *mut libc::FILE);
+    let ret = libc::fgets(
+        buf as *mut libc::c_char,
+        buf_size,
+        stream as *mut libc::FILE,
+    );
     if ret.is_null() {
         std::ptr::null_mut()
     } else {
@@ -3260,10 +3280,7 @@ pub unsafe extern "win64" fn ucrt_findfirst64i32(
 ///
 /// # Safety
 /// `handle` is ignored. `file_info` must be writable.
-pub unsafe extern "win64" fn ucrt_findnext64i32(
-    _handle: i64,
-    _file_info: *mut u8,
-) -> i32 {
+pub unsafe extern "win64" fn ucrt_findnext64i32(_handle: i64, _file_info: *mut u8) -> i32 {
     unsafe { *libc::__errno_location() = libc::ENOENT };
     -1
 }
@@ -3305,7 +3322,11 @@ pub unsafe extern "win64" fn ucrt_mkdir(path: *const u8) -> i32 {
         return -1;
     }
     let ret = libc::mkdir(path as *const libc::c_char, 0o755);
-    if ret < 0 { -1 } else { 0 }
+    if ret < 0 {
+        -1
+    } else {
+        0
+    }
 }
 
 /// _stat64 — get file status (64-bit version). Returns 0 on success.
@@ -3332,7 +3353,11 @@ pub unsafe extern "win64" fn ucrt_unlink(path: *const u8) -> i32 {
         return -1;
     }
     let ret = libc::unlink(path as *const libc::c_char);
-    if ret < 0 { -1 } else { 0 }
+    if ret < 0 {
+        -1
+    } else {
+        0
+    }
 }
 
 /// Resolve a UCRT import to a stub address.

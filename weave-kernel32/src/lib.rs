@@ -6523,9 +6523,7 @@ pub unsafe extern "win64" fn create_thread(
     _dw_creation_flags: u32,
     lp_thread_id: *mut u32,
 ) -> usize {
-    eprintln!(
-        "weave/CreateThread: entry fn={lp_start_address:p} param={lp_parameter:p}"
-    );
+    eprintln!("weave/CreateThread: entry fn={lp_start_address:p} param={lp_parameter:p}");
     if lp_start_address.is_null() {
         eprintln!("weave/CreateThread: null fn ptr — returning 0 (ERROR_INVALID_PARAMETER)");
         return 0;
@@ -11412,9 +11410,10 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "Module32Next" => {
             Some(module32_next as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
         }
-        "PeekNamedPipe" => {
-            Some(peek_named_pipe as unsafe extern "win64" fn(_, _, _, _, _, _) -> _ as *const () as usize)
-        }
+        "PeekNamedPipe" => Some(
+            peek_named_pipe as unsafe extern "win64" fn(_, _, _, _, _, _) -> _ as *const ()
+                as usize,
+        ),
         _ => {
             // version.dll functions are forwarded through kernel32 in some apps;
             // also handle them when the DLL name is version.dll directly.

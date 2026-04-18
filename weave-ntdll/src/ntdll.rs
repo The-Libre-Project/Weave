@@ -1491,8 +1491,7 @@ pub fn resolve(func: &str) -> Option<usize> {
             Some(rtl_get_version as unsafe extern "win64" fn(_) -> _ as *const () as usize)
         }
         "RtlVerifyVersionInfo" => Some(
-            rtl_verify_version_info as unsafe extern "win64" fn(_, _, _) -> _
-                as *const () as usize,
+            rtl_verify_version_info as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
         ),
         "RtlNtStatusToDosError" => {
             Some(rtl_nt_status_to_dos_error as extern "win64" fn(_) -> _ as *const () as usize)

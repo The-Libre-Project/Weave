@@ -723,7 +723,9 @@ pub unsafe extern "win64" fn bcrypt_gen_random(
 
 pub fn resolve_bcrypt(func: &str) -> Option<usize> {
     Some(match func {
-        "BCryptGenRandom" => bcrypt_gen_random as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
+        "BCryptGenRandom" => {
+            bcrypt_gen_random as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize
+        }
         _ => return None,
     })
 }
@@ -891,13 +893,11 @@ fn init_sspi_table() -> *const u8 {
             // Indices = (struct_offset / 8): slot 0 = dwVersion, slot 1 = first fn ptr at offset 8.
             // offset 128 → index 16: FreeContextBuffer
             SSPI_TABLE[16] =
-                free_context_buffer as unsafe extern "win64" fn(*mut u8) -> i32
-                    as *const () as u64;
+                free_context_buffer as unsafe extern "win64" fn(*mut u8) -> i32 as *const () as u64;
             // offset 136 → index 17: QuerySecurityPackageInfoA
-            SSPI_TABLE[17] =
-                query_security_package_info_a
-                    as unsafe extern "win64" fn(*const u8, *mut *const u8) -> i32
-                    as *const () as u64;
+            SSPI_TABLE[17] = query_security_package_info_a
+                as unsafe extern "win64" fn(*const u8, *mut *const u8) -> i32
+                as *const () as u64;
         }
     });
     // SAFETY: After call_once, SSPI_TABLE is not mutated again. The returned
@@ -937,7 +937,9 @@ pub unsafe extern "win64" fn init_security_interface_a() -> *const u8 {
 
 pub fn resolve_secur32(func: &str) -> Option<usize> {
     Some(match func {
-        "InitSecurityInterfaceA" => init_security_interface_a as unsafe extern "win64" fn() -> _ as *const () as usize,
+        "InitSecurityInterfaceA" => {
+            init_security_interface_a as unsafe extern "win64" fn() -> _ as *const () as usize
+        }
         _ => return None,
     })
 }
@@ -983,8 +985,12 @@ pub unsafe extern "win64" fn idn_to_unicode(
 
 pub fn resolve_normaliz(func: &str) -> Option<usize> {
     Some(match func {
-        "IdnToAscii" => idn_to_ascii as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const () as usize,
-        "IdnToUnicode" => idn_to_unicode as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const () as usize,
+        "IdnToAscii" => {
+            idn_to_ascii as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const () as usize
+        }
+        "IdnToUnicode" => {
+            idn_to_unicode as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const () as usize
+        }
         _ => return None,
     })
 }
@@ -1008,7 +1014,9 @@ pub unsafe extern "win64" fn win_if_nametoindex(if_name: *const u8) -> u32 {
 
 pub fn resolve_iphlpapi(func: &str) -> Option<usize> {
     Some(match func {
-        "if_nametoindex" => win_if_nametoindex as unsafe extern "win64" fn(_) -> _ as *const () as usize,
+        "if_nametoindex" => {
+            win_if_nametoindex as unsafe extern "win64" fn(_) -> _ as *const () as usize
+        }
         _ => return None,
     })
 }

@@ -2299,9 +2299,7 @@ fn curl_ws2_gate() {
     let fixture = format!("{manifest}/../tests/fixtures/bin/curl.exe");
 
     if !std::path::Path::new(&fixture).exists() {
-        eprintln!(
-            "skipping: curl.exe not present in tests/fixtures/bin/ — curl_ws2_gate skipped"
-        );
+        eprintln!("skipping: curl.exe not present in tests/fixtures/bin/ — curl_ws2_gate skipped");
         return;
     }
 
@@ -2456,9 +2454,7 @@ fn wget_ws2_gate() {
     let fixture = format!("{manifest}/../tests/fixtures/bin/wget.exe");
 
     if !std::path::Path::new(&fixture).exists() {
-        eprintln!(
-            "skipping: wget.exe not present in tests/fixtures/bin/ — wget_ws2_gate skipped"
-        );
+        eprintln!("skipping: wget.exe not present in tests/fixtures/bin/ — wget_ws2_gate skipped");
         return;
     }
 
@@ -2701,5 +2697,7 @@ fn ws2_probe_ws2_gate() {
         "ws2_probe_ws2_gate Gate 3 FAIL: stdout does not contain 'Example Domain'\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
 
-    eprintln!("ws2_probe_ws2_gate: all gates passed — ws2_probe.exe HTTP GET to example.com succeeded");
+    eprintln!(
+        "ws2_probe_ws2_gate: all gates passed — ws2_probe.exe HTTP GET to example.com succeeded"
+    );
 }

@@ -243,7 +243,9 @@ unsafe fn patch_inner(
 
         // Diagnostic: log which DLL we are patching and how many imports it has.
         // TODO: remove after curl_ws2_gate passes.
-        if dll_name.to_ascii_lowercase().contains("crt-runtime") || dll_name.to_ascii_lowercase().contains("kernel32") {
+        if dll_name.to_ascii_lowercase().contains("crt-runtime")
+            || dll_name.to_ascii_lowercase().contains("kernel32")
+        {
             eprintln!("weave/iat: patching {dll_name} INT={int_rva:#x} IAT={iat_rva:#x} first_thunk_in_desc={:#x} orig={:#x}", desc.first_thunk, desc.original_first_thunk);
         }
 
@@ -287,7 +289,11 @@ unsafe fn patch_inner(
                     std::ptr::write_unaligned(base.add(iat_rva + i * 8) as *mut u64, addr as u64);
                     // Diagnostic: log ALL kernel32 and CRT patches to confirm CreateThread resolution.
                     // TODO: remove after curl_ws2_gate passes.
-                    if dll_name.to_ascii_lowercase().contains("kernel32") || func_name == "__p___argc" || func_name == "_configure_narrow_argv" || func_name == "_initterm" {
+                    if dll_name.to_ascii_lowercase().contains("kernel32")
+                        || func_name == "__p___argc"
+                        || func_name == "_configure_narrow_argv"
+                        || func_name == "_initterm"
+                    {
                         eprintln!("weave/iat: patched {dll_name}!{func_name} → {addr:#x} at IAT slot {:#x}", base as usize + iat_rva + i * 8);
                     }
                 },

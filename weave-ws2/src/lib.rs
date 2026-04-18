@@ -22,11 +22,7 @@ extern "C" {
         dst: *mut libc::c_char,
         size: libc::socklen_t,
     ) -> *const libc::c_char;
-    fn inet_pton(
-        af: libc::c_int,
-        src: *const libc::c_char,
-        dst: *mut libc::c_void,
-    ) -> libc::c_int;
+    fn inet_pton(af: libc::c_int, src: *const libc::c_char, dst: *mut libc::c_void) -> libc::c_int;
 }
 
 // ── Constants ────────────────────────────────────────────────────────────────
@@ -1858,7 +1854,11 @@ pub unsafe extern "win64" fn ws_inet_pton(af: i32, src: *const u8, dst: *mut u8)
         return -1;
     }
     let linux_af = af_win_to_linux(af);
-    let ret = inet_pton(linux_af, src as *const libc::c_char, dst as *mut libc::c_void);
+    let ret = inet_pton(
+        linux_af,
+        src as *const libc::c_char,
+        dst as *mut libc::c_void,
+    );
     if ret < 0 {
         set_last_error(10047); // WSAEAFNOSUPPORT
     } else if ret == 0 {
