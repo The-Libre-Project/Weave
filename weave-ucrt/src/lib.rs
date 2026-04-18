@@ -1260,6 +1260,33 @@ pub extern "win64" fn ucrt_strerror(errnum: i32) -> *mut u8 {
     unsafe { libc::strerror(errnum) as *mut u8 }
 }
 
+/// perror — write `s: <errno-message>\n` to stderr.
+///
+/// Wine ref: dlls/msvcrt/file.c — perror fetches the thread-local errno,
+/// formats "<prefix>: <strerror(errno)>\n", and writes it to stderr without
+/// buffering. When `s` is null, only the errno message is emitted.
+///
+/// # Safety
+/// `s`, if non-null, must be a valid null-terminated C string.
+pub unsafe extern "win64" fn ucrt_perror(s: *const u8) {
+    let errnum = unsafe { *libc::__errno_location() };
+    let msg = unsafe { libc::strerror(errnum) };
+    unsafe {
+        if !s.is_null() {
+            let plen = libc::strlen(s as *const libc::c_char);
+            if plen > 0 {
+                libc::write(2, s as *const libc::c_void, plen);
+            }
+            libc::write(2, b": ".as_ptr() as *const libc::c_void, 2);
+        }
+        if !msg.is_null() {
+            let mlen = libc::strlen(msg);
+            libc::write(2, msg as *const libc::c_void, mlen);
+        }
+        libc::write(2, b"\n".as_ptr() as *const libc::c_void, 1);
+    }
+}
+
 /// # Safety
 /// `_expr` and `_file` must be valid null-terminated byte strings if non-null (they are not read — this stub calls abort immediately).
 pub unsafe extern "win64" fn ucrt_assert(_expr: *const u8, _file: *const u8, _line: u32) {
@@ -3412,6 +3439,7 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "setvbuf" => stub!(ucrt_setvbuf as extern "win64" fn(_, _, _, _) -> _),
         "_errno" => stub!(ucrt_errno as extern "win64" fn() -> _),
         "strerror" => stub!(ucrt_strerror as extern "win64" fn(_) -> _),
+        "perror" => stub!(ucrt_perror as unsafe extern "win64" fn(_)),
         "_get_osfhandle" => stub!(ucrt_get_osfhandle as extern "win64" fn(_) -> _),
         "_fseeki64" | "fseek" => {
             stub!(ucrt_fseeki64 as unsafe extern "win64" fn(_, _, _) -> _)
