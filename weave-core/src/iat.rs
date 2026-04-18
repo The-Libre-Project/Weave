@@ -27,6 +27,235 @@ pub fn lookup_unresolved_slot(slot_va: usize) -> Option<String> {
     slot_map().lock().ok()?.get(&slot_va).cloned()
 }
 
+// ---------------------------------------------------------------------------
+// IAT-every-call tracer
+// ---------------------------------------------------------------------------
+//
+// Opt-in at process start via `WEAVE_IAT_TRACE=1`.  When enabled, each IAT
+// slot that Weave successfully resolves is redirected through
+// `trace_import_stub` instead of being written with the real function
+// pointer.  The stub logs `weave/iat-trace: <dll>::<func>` to stderr and
+// tail-jmps into the real function, preserving all win64 register/stack
+// arguments and the real function's return value.
+//
+// When the env var is unset the code paths here are never entered — the
+// existing `patch_best_effort` behavior is unchanged and zero-overhead.
+//
+// Missing evidence this unlocks: Task 01b's wget SIGABRT investigation needs
+// per-call IAT ordering, which the existing `unresolved_import_stub` log
+// only provides for *unresolved* calls.  The tracer provides the same for
+// *resolved* calls.
+
+/// Global map: resolved IAT slot VA → ("dll::func", real function pointer).
+/// Populated in `patch_inner` when the tracer is enabled; queried by
+/// `trace_import_stub_log` at call time to look up both the display name and
+/// the real function pointer to tail-jmp into.
+static RESOLVED_SLOT_MAP: OnceLock<Mutex<HashMap<usize, (String, usize)>>> = OnceLock::new();
+
+fn resolved_slot_map() -> &'static Mutex<HashMap<usize, (String, usize)>> {
+    RESOLVED_SLOT_MAP.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Cache the env-var read so we don't do a syscall-ish lookup on every call.
+static TRACER_ENABLED: OnceLock<bool> = OnceLock::new();
+
+/// Returns true iff `WEAVE_IAT_TRACE=1` was set when this process started.
+/// The result is cached after first call.
+pub fn tracer_enabled() -> bool {
+    *TRACER_ENABLED.get_or_init(|| {
+        std::env::var("WEAVE_IAT_TRACE")
+            .map(|v| v == "1")
+            .unwrap_or(false)
+    })
+}
+
+/// Test-only helper: record a resolved slot as if the tracer had patched it.
+/// Exposed for the unit tests in this module so they can drive
+/// `trace_import_stub_log` without needing a real PE.
+#[cfg(test)]
+fn tracer_record_for_test(slot_va: usize, name: String, real_fn: usize) {
+    if let Ok(mut map) = resolved_slot_map().lock() {
+        map.insert(slot_va, (name, real_fn));
+    }
+}
+
+/// Fallback target used when the tracer stub fires but the resolved-slot
+/// lookup fails (slot decode failed, map entry missing, etc.).  Returns 0
+/// for any signature, mirroring `unresolved_import_stub`'s safety model:
+/// the calling code sees a failure return instead of jumping into garbage.
+#[cfg(target_arch = "x86_64")]
+#[unsafe(naked)]
+unsafe extern "win64" fn trace_lookup_miss_stub() -> u64 {
+    core::arch::naked_asm!("xor eax, eax", "ret",)
+}
+
+/// Logging half of `trace_import_stub` — called from the naked trampoline.
+///
+/// `ret_addr` is the instruction after the CALL that reached this stub (i.e.
+/// inside the guest code); `rax_at_call` is the caller's rax at the moment
+/// of entry.  For the standard `call [rax+N]` IAT dispatch pattern used by
+/// most PE code, `rax_at_call + N` is the IAT slot VA.
+///
+/// Decodes the CALL bytes before `ret_addr`, looks up `(name, real_fn)` in
+/// `RESOLVED_SLOT_MAP`, emits one stderr line, and returns the real function
+/// pointer to tail-jmp into.
+///
+/// If decoding or lookup fails, falls back to `trace_lookup_miss_stub` so
+/// the caller sees a safe 0-return rather than a crash.
+///
+/// This function is NOT `#[cfg(target_arch = "x86_64")]`-gated so the unit
+/// tests in this file can exercise its decode+lookup logic on aarch64 macOS
+/// hosts.  The naked tail-jmp trampoline that calls it IS x86_64-gated.
+/// On non-x86_64 hosts the ABI falls back to `extern "C"`; the trampoline
+/// does not exist on those targets so the ABI choice is irrelevant outside
+/// unit-test code paths.
+#[cfg(target_arch = "x86_64")]
+extern "win64" fn trace_import_stub_log(ret_addr: usize, rax_at_call: usize) -> usize {
+    trace_import_stub_log_impl(ret_addr, rax_at_call)
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+extern "C" fn trace_import_stub_log(ret_addr: usize, rax_at_call: usize) -> usize {
+    trace_import_stub_log_impl(ret_addr, rax_at_call)
+}
+
+fn trace_import_stub_log_impl(ret_addr: usize, rax_at_call: usize) -> usize {
+    let slot_va = unsafe { decode_call_iat_slot(ret_addr, rax_at_call) };
+    let entry = slot_va.and_then(|va| {
+        resolved_slot_map()
+            .lock()
+            .ok()
+            .and_then(|m| m.get(&va).cloned())
+    });
+    match entry {
+        Some((name, real_fn)) => {
+            eprintln!("weave/iat-trace: {name}");
+            real_fn
+        }
+        None => {
+            eprintln!(
+                "weave/iat-trace: <lookup-miss> (ret={ret_addr:#x} rax={rax_at_call:#x} slot={:#x})",
+                slot_va.unwrap_or(0)
+            );
+            #[cfg(target_arch = "x86_64")]
+            {
+                trace_lookup_miss_stub as *const () as usize
+            }
+            #[cfg(not(target_arch = "x86_64"))]
+            {
+                0
+            }
+        }
+    }
+}
+
+/// Naked tracer trampoline written into IAT slots when
+/// `WEAVE_IAT_TRACE=1`.
+///
+/// On entry (just like `unresolved_import_stub` — see its comment for the
+/// authoritative template):
+///   [rsp] = return address of caller
+///   rax   = caller's rax (for `call [rax+N]` patterns this is the vtable /
+///           IAT-base pointer; rax+N is the IAT slot)
+///   rcx, rdx, r8, r9    = caller's first four integer args
+///   xmm0, xmm1, xmm2, xmm3 = caller's first four float args
+///   stack args above the return address = unchanged
+///
+/// win64 ABI notes this stub relies on:
+///   - rcx/rdx/r8/r9 AND xmm0..xmm3 are volatile — any C-ABI call out of
+///     this stub is permitted to clobber them.  We therefore save/restore
+///     all eight before/after the `trace_import_stub_log` call.
+///   - On entry rsp is 8-byte-misaligned modulo 16 (caller's CALL pushed
+///     the 8-byte return addr onto a 16-aligned stack).  Our `sub rsp, 0xA8`
+///     leaves rsp 16-byte aligned, satisfying the callee's alignment
+///     precondition.
+///   - xmm saves use `movdqu`: `movdqa` would require the dest to be
+///     16-aligned; `[rsp+0x40]` is 16-aligned after the 0xA8 adjustment
+///     but `movdqu` is used for defensiveness (identical correctness, near-
+///     identical perf on modern x86).
+///   - Before the tail-`jmp`, the 0xA8 scratch frame is fully unwound so
+///     [rsp] is once again the original return address.  This makes the
+///     real function's own `ret` return directly to the original caller,
+///     yielding a zero-frame tail-call.
+///
+/// # Safety
+/// Must only be written into an IAT slot by `patch_inner` when
+/// `tracer_enabled()` was true at patch time.  Requires that the slot VA
+/// is resolvable via `decode_call_iat_slot` from the caller's return
+/// address — true for all standard PE IAT dispatch patterns.
+#[cfg(target_arch = "x86_64")]
+#[unsafe(naked)]
+pub unsafe extern "win64" fn trace_import_stub() -> u64 {
+    core::arch::naked_asm!(
+        // ------------------------------------------------------------------
+        // Prologue: save return-addr-derived inputs to log, allocate scratch.
+        // ------------------------------------------------------------------
+        // Stash caller's rax (IAT base for `call [rax+N]`) in r10 before we
+        // clobber rax reading [rsp].  r10 is volatile and unused by callers.
+        "mov  r10, rax",
+        // Read return address from top of stack.
+        "mov  rax, [rsp]",
+        // Allocate 0xA8 of scratch.  rsp was 8-mod-16 on entry; 0xA8 is
+        // 8-mod-16, so rsp becomes 0-mod-16 — callee alignment OK.
+        "sub  rsp, 0xA8",
+        // ------------------------------------------------------------------
+        // Save volatile regs the log callout may clobber.
+        //   [rsp+0x00..0x1F] shadow space for callee (written by it, not us)
+        //   [rsp+0x20] rcx  [rsp+0x28] rdx  [rsp+0x30] r8  [rsp+0x38] r9
+        //   [rsp+0x40..0x4F] xmm0
+        //   [rsp+0x50..0x5F] xmm1
+        //   [rsp+0x60..0x6F] xmm2
+        //   [rsp+0x70..0x7F] xmm3
+        //   [rsp+0x80] real_fn slot (filled from log return)
+        // ------------------------------------------------------------------
+        "mov  [rsp+0x20], rcx",
+        "mov  [rsp+0x28], rdx",
+        "mov  [rsp+0x30], r8",
+        "mov  [rsp+0x38], r9",
+        "movdqu [rsp+0x40], xmm0",
+        "movdqu [rsp+0x50], xmm1",
+        "movdqu [rsp+0x60], xmm2",
+        "movdqu [rsp+0x70], xmm3",
+        // ------------------------------------------------------------------
+        // Call trace_import_stub_log(ret_addr, rax_at_call) -> real_fn.
+        // arg1 (rcx) = return address (still in rax from above)
+        // arg2 (rdx) = original rax (stashed in r10)
+        // ------------------------------------------------------------------
+        "mov  rcx, rax",
+        "mov  rdx, r10",
+        "call {log}",
+        // Return value (real_fn pointer) is in rax — stash it; we need rax
+        // free while restoring guest regs, and we cannot leave it clobbered
+        // (the guest's `call [rax+N]` convention means rax was a parameter
+        // to the dispatch, not an arg to the callee — the callee itself
+        // treats rax as volatile, so clobbering is fine, but we still need
+        // the value somewhere across the restore.)
+        "mov  [rsp+0x80], rax",
+        // ------------------------------------------------------------------
+        // Restore volatile regs exactly as the guest caller left them.
+        // ------------------------------------------------------------------
+        "mov  rcx, [rsp+0x20]",
+        "mov  rdx, [rsp+0x28]",
+        "mov  r8,  [rsp+0x30]",
+        "mov  r9,  [rsp+0x38]",
+        "movdqu xmm0, [rsp+0x40]",
+        "movdqu xmm1, [rsp+0x50]",
+        "movdqu xmm2, [rsp+0x60]",
+        "movdqu xmm3, [rsp+0x70]",
+        // Load real_fn into a scratch register (r10 is volatile, unused by
+        // callee convention for args).
+        "mov  r10, [rsp+0x80]",
+        // ------------------------------------------------------------------
+        // Epilogue: unwind scratch so [rsp] is the original ret addr again,
+        // then tail-jmp.  The real function's final `ret` will pop that
+        // ret addr and return directly to the guest caller.
+        // ------------------------------------------------------------------
+        "add  rsp, 0xA8",
+        "jmp  r10",
+        log = sym trace_import_stub_log,
+    )
+}
+
 /// Decode a `call [rax+N]` instruction immediately before `ret_addr` to recover
 /// the IAT slot VA (`rax + N`).  Handles the three common encodings:
 /// - `FF 90 dd dd dd dd` (6 bytes, disp32)
@@ -40,7 +269,13 @@ pub fn lookup_unresolved_slot(slot_va: usize) -> Option<String> {
 /// `ret_addr` must be a valid mapped address with at least 6 readable bytes
 /// preceding it.  This is always true when called from `unresolved_import_stub`
 /// because `ret_addr` came from `[rsp]` inside a real CALL instruction.
-#[cfg(target_arch = "x86_64")]
+///
+/// Not `#[cfg]`-gated: the decode logic is pure byte arithmetic and has no
+/// architecture-specific behavior, so it's compiled on all targets.  This
+/// allows the unit tests in this file to exercise it on aarch64 macOS host
+/// builds.  On non-x86_64 targets the only concern is that a caller must
+/// supply bytes that match one of the three patterns and a `ret_addr` that
+/// is a valid pointer — the function does not assume the host is x86.
 unsafe fn decode_call_iat_slot(ret_addr: usize, rax: usize) -> Option<usize> {
     if ret_addr < 6 {
         return None;
@@ -67,11 +302,6 @@ unsafe fn decode_call_iat_slot(ret_addr: usize, rax: usize) -> Option<usize> {
         return Some(rax);
     }
 
-    None
-}
-
-#[cfg(not(target_arch = "x86_64"))]
-unsafe fn decode_call_iat_slot(_ret_addr: usize, _rax: usize) -> Option<usize> {
     None
 }
 
@@ -287,7 +517,25 @@ unsafe fn patch_inner(
 
             match resolve(&dll_name, &func_name) {
                 Some(addr) => unsafe {
-                    std::ptr::write_unaligned(base.add(iat_rva + i * 8) as *mut u64, addr as u64);
+                    // IAT-every-call tracer: if WEAVE_IAT_TRACE=1 was set at
+                    // process start, record (slot_va, name, real_fn) and
+                    // write the tracer trampoline into the IAT slot instead
+                    // of `addr`.  The trampoline logs, then tail-jmps into
+                    // `addr`.  Default path is unchanged.
+                    #[cfg(target_arch = "x86_64")]
+                    let write_addr: u64 = if tracer_enabled() {
+                        let slot_va = base as usize + iat_rva + i * 8;
+                        if let Ok(mut map) = resolved_slot_map().lock() {
+                            map.insert(slot_va, (format!("{dll_name}::{func_name}"), addr));
+                        }
+                        trace_import_stub as *const () as u64
+                    } else {
+                        addr as u64
+                    };
+                    #[cfg(not(target_arch = "x86_64"))]
+                    let write_addr: u64 = addr as u64;
+
+                    std::ptr::write_unaligned(base.add(iat_rva + i * 8) as *mut u64, write_addr);
                     // Diagnostic: log ALL kernel32 and CRT patches to confirm CreateThread resolution.
                     // TODO: remove after curl_ws2_gate passes.
                     if dll_name.to_ascii_lowercase().contains("kernel32")
@@ -356,4 +604,109 @@ const PAGE: usize = 4096;
 
 fn page_align_down(addr: usize) -> usize {
     addr & !(PAGE - 1)
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build an in-memory byte buffer ending in a `call [rax+disp32]`
+    /// instruction whose effective slot VA is `slot_va` when rax == `rax_base`.
+    /// Returns (buffer, ret_addr) where ret_addr points just past the CALL.
+    fn build_call_iat_disp32(rax_base: usize, slot_va: usize) -> (Vec<u8>, usize) {
+        let disp = (slot_va as i64 - rax_base as i64) as i32;
+        let mut buf: Vec<u8> = Vec::with_capacity(32);
+        // 16 leading NOPs so (ret_addr - 6) is well within the buffer.
+        buf.extend(std::iter::repeat(0x90u8).take(16));
+        // FF 90 dd dd dd dd : call [rax + disp32]
+        buf.push(0xFF);
+        buf.push(0x90);
+        buf.extend_from_slice(&disp.to_le_bytes());
+        let ret_addr = buf.as_ptr() as usize + buf.len();
+        (buf, ret_addr)
+    }
+
+    #[test]
+    fn decode_call_iat_slot_disp32_roundtrip() {
+        let rax_base = 0x1000_0000usize;
+        let slot_va = 0x1000_0080usize;
+        let (_buf, ret_addr) = build_call_iat_disp32(rax_base, slot_va);
+        let decoded = unsafe { decode_call_iat_slot(ret_addr, rax_base) };
+        assert_eq!(decoded, Some(slot_va));
+    }
+
+    #[test]
+    fn trace_import_stub_log_returns_real_fn_on_hit() {
+        // Populate the resolved-slot map with a synthetic entry, then call
+        // trace_import_stub_log with a ret_addr whose preceding bytes decode
+        // to that slot VA.  Assert the returned pointer matches real_fn.
+        let rax_base = 0x2000_0000usize;
+        let slot_va = 0x2000_0040usize;
+        let (_buf, ret_addr) = build_call_iat_disp32(rax_base, slot_va);
+
+        let real_fn: usize = 0xDEAD_BEEF_CAFE_F00Dusize;
+        tracer_record_for_test(slot_va, "test_dll.dll::TestFunc".to_string(), real_fn);
+
+        let returned = trace_import_stub_log(ret_addr, rax_base);
+        assert_eq!(returned, real_fn);
+    }
+
+    #[test]
+    fn trace_import_stub_log_returns_miss_stub_on_decode_failure() {
+        // ret_addr=0 cannot possibly decode — the function should fall back
+        // to a non-crashing pointer.  We only check that it returns a
+        // non-zero address on x86_64 (the miss stub) or 0 elsewhere.
+        let returned = trace_import_stub_log(0, 0);
+        #[cfg(target_arch = "x86_64")]
+        {
+            assert_eq!(returned, trace_lookup_miss_stub as *const () as usize);
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            assert_eq!(returned, 0);
+        }
+    }
+
+    #[test]
+    fn trace_import_stub_log_returns_miss_stub_on_lookup_miss() {
+        // Decode succeeds, but there is no entry in the resolved map for
+        // this slot VA.  Expect the miss-stub fallback.
+        let rax_base = 0x3000_0000usize;
+        let slot_va = 0x3000_0100usize; // intentionally NOT inserted
+        let (_buf, ret_addr) = build_call_iat_disp32(rax_base, slot_va);
+
+        // Make sure the slot really isn't in the map from a prior test.
+        {
+            let mut m = resolved_slot_map().lock().unwrap();
+            m.remove(&slot_va);
+        }
+
+        let returned = trace_import_stub_log(ret_addr, rax_base);
+        #[cfg(target_arch = "x86_64")]
+        {
+            assert_eq!(returned, trace_lookup_miss_stub as *const () as usize);
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            assert_eq!(returned, 0);
+        }
+    }
+
+    #[test]
+    fn tracer_enabled_defaults_false_when_unset() {
+        // NOTE: tracer_enabled() uses OnceLock, so this test asserts the
+        // *cached* state.  In CI/local runs where WEAVE_IAT_TRACE is not set,
+        // the first invocation (whichever test gets there first) returns
+        // false and caches it.  We re-read std::env directly to corroborate
+        // the observed state matches the environment, rather than relying
+        // on test ordering.
+        let env_is_one = std::env::var("WEAVE_IAT_TRACE")
+            .map(|v| v == "1")
+            .unwrap_or(false);
+        assert_eq!(tracer_enabled(), env_is_one);
+    }
 }
