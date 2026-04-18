@@ -59,6 +59,11 @@ const SO_SNDBUF_WIN: i32 = 0x1001;
 const SO_SNDBUF_LINUX: i32 = 7;
 const SO_RCVBUF_WIN: i32 = 0x1002;
 const SO_RCVBUF_LINUX: i32 = 8;
+// SO_EXCLUSIVEADDRUSE: Windows-only option defined as ~SO_REUSEADDR = 0xFFFFFFFB = -5 (i32).
+// Wine ref: dlls/ws2_32/socket.c — SO_EXCLUSIVEADDRUSE is silently ignored on Wine/Linux
+// because Linux sockets are exclusive by default (no SO_REUSEADDR = exclusive ownership).
+// Returning 0 without calling setsockopt is the correct no-op translation.
+const SO_EXCLUSIVEADDRUSE_WIN: i32 = -5; // = ~SO_REUSEADDR_WIN = (int)(~0x0004)
 
 // Windows fd_set layout: count(u32) + padding(u32) + SOCKET[FD_SETSIZE].
 // FD_SETSIZE is 64 on Windows.
@@ -796,7 +801,6 @@ pub unsafe extern "win64" fn ws_ioctlsocket(s: usize, cmd: u32, argp: *mut u32) 
             }
         }
         _ => {
-            eprintln!("weave: ioctlsocket: unknown command {cmd:#x}");
             set_last_error(10045); // WSAEOPNOTSUPP
             SOCKET_ERROR
         }
@@ -816,6 +820,14 @@ pub unsafe extern "win64" fn ws_setsockopt(
     optval: *const u8,
     optlen: i32,
 ) -> i32 {
+    // SO_EXCLUSIVEADDRUSE is Windows-only (~SO_REUSEADDR = -5). Linux sockets are
+    // exclusive by default (absence of SO_REUSEADDR = exclusive ownership), so this
+    // option is a no-op on Linux.
+    // Wine ref: dlls/ws2_32/socket.c — SO_EXCLUSIVEADDRUSE silently ignored; Linux
+    // default socket behavior already provides exclusivity without needing a setsockopt call.
+    if level == SOL_SOCKET_WIN && optname == SO_EXCLUSIVEADDRUSE_WIN {
+        return 0;
+    }
     let linux_level = translate_sockopt_level(level);
     let linux_name = translate_sockopt_name(level, optname);
     let ret = libc::setsockopt(
