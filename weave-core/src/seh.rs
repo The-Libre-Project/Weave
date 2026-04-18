@@ -35,6 +35,33 @@ pub(crate) static PE_SIZE: AtomicUsize = AtomicUsize::new(0);
 pub(crate) static PDATA_RVA: AtomicUsize = AtomicUsize::new(0);
 pub(crate) static PDATA_SIZE: AtomicUsize = AtomicUsize::new(0);
 
+// ── SEH runaway cap ──────────────────────────────────────────────────────────
+//
+// When a guest fault is dispatched through the SEH chain and no handler
+// actually consumes it (or a handler returns EXCEPTION_CONTINUE_EXECUTION
+// without advancing RIP past the faulting instruction), the signal handler
+// returns to the same RIP, faults again, and spins forever.  Observed
+// instance: Task 01b Dispatch 2 — wget.exe NULL-deref at +0x12b5 produced
+// 89M log lines / 4.1 GB of stderr before being killed externally.
+//
+// Cap consecutive re-faults at the same RIP and terminate cleanly with a
+// diagnostic rather than letting the process spin.  The threshold is
+// conservative: a legitimate tight watchdog retry loop in guest code could
+// briefly trip this, but 16 identical-RIP faults in a row is well beyond
+// any known Windows pattern and firmly indicates unhandled-fault spin.
+//
+// Signal-handler safety: both counters are plain atomics (no locks, no
+// heap).  Writes use `libc::write` to a fixed stack buffer; termination
+// uses `libc::_exit` to skip atexit handlers that are not async-signal-safe.
+#[cfg(target_os = "linux")]
+const SEH_RUNAWAY_CAP: u32 = 16;
+
+#[cfg(target_os = "linux")]
+static LAST_FAULT_RIP: AtomicUsize = AtomicUsize::new(0);
+
+#[cfg(target_os = "linux")]
+static CONSECUTIVE_FAULTS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
 // ── Public API ────────────────────────────────────────────────────────────────
 
 /// Register the PE's address range and install signal handlers.
@@ -127,6 +154,58 @@ unsafe extern "C" fn on_fatal_signal(
     let size = PE_SIZE.load(Ordering::Relaxed);
 
     if base != 0 && rip >= base && rip < base + size {
+        // ── SEH runaway cap ────────────────────────────────────────────────
+        // If the same RIP faults repeatedly, no handler is actually resolving
+        // the exception.  Cap consecutive identical-RIP faults and terminate
+        // cleanly rather than spinning forever.  See `SEH_RUNAWAY_CAP`
+        // rationale at the top of this file.  All operations here are
+        // async-signal-safe: atomic load/store, fixed stack buffer, libc::write,
+        // libc::_exit (not exit — we skip atexit handlers inside a handler).
+        {
+            let prev = LAST_FAULT_RIP.load(Ordering::Relaxed);
+            let count = if prev == rip {
+                CONSECUTIVE_FAULTS.fetch_add(1, Ordering::Relaxed) + 1
+            } else {
+                LAST_FAULT_RIP.store(rip, Ordering::Relaxed);
+                CONSECUTIVE_FAULTS.store(1, Ordering::Relaxed);
+                1
+            };
+            if count > SEH_RUNAWAY_CAP {
+                unsafe {
+                    let mut buf = [0u8; 128];
+                    let mut pos = 0usize;
+                    let nibble = |n: u64| {
+                        if n < 10 {
+                            b'0' + n as u8
+                        } else {
+                            b'a' + n as u8 - 10
+                        }
+                    };
+                    for &b in b"weave: SEH runaway at rip=0x" {
+                        if pos < buf.len() {
+                            buf[pos] = b;
+                            pos += 1;
+                        }
+                    }
+                    for sh in (0..16u32).rev() {
+                        let n = (rip as u64 >> (sh * 4)) & 0xf;
+                        if pos < buf.len() {
+                            buf[pos] = nibble(n);
+                            pos += 1;
+                        }
+                    }
+                    for &b in b" -- unhandled guest fault looping; terminating\n" {
+                        if pos < buf.len() {
+                            buf[pos] = b;
+                            pos += 1;
+                        }
+                    }
+                    libc::write(2, buf.as_ptr() as *const libc::c_void, pos);
+                    libc::_exit(134);
+                }
+            }
+        }
+
         // Fault in PE code — try SEH dispatch first (Windows delivers hardware
         // exceptions through KiUserExceptionDispatcher → RtlDispatchException).
         let fault_addr = unsafe { (*info).si_addr() } as usize;

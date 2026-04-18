@@ -256,11 +256,13 @@ pub unsafe extern "win64" fn trace_import_stub() -> u64 {
     )
 }
 
-/// Decode a `call [rax+N]` instruction immediately before `ret_addr` to recover
-/// the IAT slot VA (`rax + N`).  Handles the three common encodings:
-/// - `FF 90 dd dd dd dd` (6 bytes, disp32)
-/// - `FF 50 dd`          (3 bytes, disp8)
-/// - `FF 10`             (2 bytes, no displacement)
+/// Decode a CALL instruction immediately before `ret_addr` to recover the IAT
+/// slot VA.  Handles four encodings:
+/// - `FF 90 dd dd dd dd` (6 bytes, `call [rax+disp32]`)
+/// - `FF 15 dd dd dd dd` (6 bytes, `call [rip+disp32]` — MinGW's dominant
+///   IAT dispatch form on x86_64; the slot is at `ret_addr + disp32`)
+/// - `FF 50 dd`          (3 bytes, `call [rax+disp8]`)
+/// - `FF 10`             (2 bytes, `call [rax]`)
 ///
 /// Returns `None` if the bytes don't match any known pattern or the address
 /// range is inaccessible.
@@ -274,7 +276,7 @@ pub unsafe extern "win64" fn trace_import_stub() -> u64 {
 /// architecture-specific behavior, so it's compiled on all targets.  This
 /// allows the unit tests in this file to exercise it on aarch64 macOS host
 /// builds.  On non-x86_64 targets the only concern is that a caller must
-/// supply bytes that match one of the three patterns and a `ret_addr` that
+/// supply bytes that match one of the four patterns and a `ret_addr` that
 /// is a valid pointer — the function does not assume the host is x86.
 unsafe fn decode_call_iat_slot(ret_addr: usize, rax: usize) -> Option<usize> {
     if ret_addr < 6 {
@@ -289,6 +291,15 @@ unsafe fn decode_call_iat_slot(ret_addr: usize, rax: usize) -> Option<usize> {
     if bytes[0] == 0xFF && bytes[1] == 0x90 {
         let disp = i32::from_le_bytes([bytes[2], bytes[3], bytes[4], bytes[5]]);
         return Some((rax as i64 + disp as i64) as usize);
+    }
+
+    // FF 15 dd dd dd dd → call [rip+disp32]  (6 bytes, starts at ret_addr-6)
+    // This is the dominant MinGW x86_64 IAT dispatch encoding.  RIP at decode
+    // time of the CALL is the address of the NEXT instruction = `ret_addr`.
+    // So `slot_va = ret_addr + disp32`.  `rax` is ignored for this form.
+    if bytes[0] == 0xFF && bytes[1] == 0x15 {
+        let disp = i32::from_le_bytes([bytes[2], bytes[3], bytes[4], bytes[5]]);
+        return Some(ret_addr.wrapping_add_signed(disp as isize));
     }
 
     // FF 50 dd → call [rax+disp8]  (3 bytes, starts at ret_addr-3)
@@ -637,6 +648,54 @@ mod tests {
         let (_buf, ret_addr) = build_call_iat_disp32(rax_base, slot_va);
         let decoded = unsafe { decode_call_iat_slot(ret_addr, rax_base) };
         assert_eq!(decoded, Some(slot_va));
+    }
+
+    /// Build a buffer ending in `FF 15 disp32` where disp32 is chosen after
+    /// the buffer is allocated so that `ret_addr + disp32 == target_slot_va`.
+    /// Takes a closure that computes the target from the known ret_addr.
+    fn build_call_iat_rip_relative(
+        compute_slot: impl Fn(usize) -> usize,
+    ) -> (Vec<u8>, usize, usize) {
+        let mut buf: Vec<u8> = Vec::with_capacity(32);
+        buf.extend(std::iter::repeat(0x90u8).take(16));
+        buf.push(0xFF);
+        buf.push(0x15);
+        buf.extend_from_slice(&0i32.to_le_bytes());
+        let ret_addr = buf.as_ptr() as usize + buf.len();
+        let slot_va = compute_slot(ret_addr);
+        let disp = (slot_va as isize - ret_addr as isize) as i32;
+        let len = buf.len();
+        buf[len - 4..len].copy_from_slice(&disp.to_le_bytes());
+        (buf, ret_addr, slot_va)
+    }
+
+    #[test]
+    fn decode_call_iat_slot_rip_disp32_positive() {
+        // Positive disp32: slot sits ahead of ret_addr.
+        let (_buf, ret_addr, slot_va) = build_call_iat_rip_relative(|ret_addr| ret_addr + 0x4000);
+        // rax is ignored for FF 15 — pass a bogus value to prove it.
+        let decoded = unsafe { decode_call_iat_slot(ret_addr, 0xDEAD_BEEFusize) };
+        assert_eq!(decoded, Some(slot_va));
+    }
+
+    #[test]
+    fn decode_call_iat_slot_rip_disp32_negative() {
+        // Negative disp32: slot sits behind ret_addr.
+        let (_buf, ret_addr, slot_va) =
+            build_call_iat_rip_relative(|ret_addr| ret_addr.wrapping_sub(0x1000));
+        let decoded = unsafe { decode_call_iat_slot(ret_addr, 0) };
+        assert_eq!(decoded, Some(slot_va));
+    }
+
+    #[test]
+    fn decode_call_iat_slot_unmatched_pattern_returns_none() {
+        // A buffer of bytes that matches none of the four known CALL encodings.
+        // Use sixteen 0x90 NOPs so (ret_addr-6..ret_addr) is all 0x90 —
+        // which is not a valid CALL opcode and should decode to None.
+        let buf: Vec<u8> = vec![0x90u8; 32];
+        let ret_addr = buf.as_ptr() as usize + buf.len();
+        let decoded = unsafe { decode_call_iat_slot(ret_addr, 0x1000_0000usize) };
+        assert_eq!(decoded, None);
     }
 
     #[test]
