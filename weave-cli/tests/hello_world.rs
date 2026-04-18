@@ -2701,3 +2701,142 @@ fn ws2_probe_ws2_gate() {
         "ws2_probe_ws2_gate: all gates passed — ws2_probe.exe HTTP GET to example.com succeeded"
     );
 }
+
+/// `weave ddraw_basic.exe` — Task 04 DirectDraw Lock/Blt/verify gate.
+///
+/// Runs ddraw_basic.exe under Weave (no sandbox, DISPLAY=:99). The fixture
+/// self-verifies: it calls DirectDrawCreate → SetCooperativeLevel →
+/// CreateSurface → Lock → write → Unlock → Blt(DDBLT_COLORFILL) → Lock →
+/// read-back a sentinel DWORD, and emits PHASE markers at each step. On
+/// success it emits `PHASE: blt_verified` and exits 0; on pixel mismatch
+/// it emits `PHASE: blt_mismatch[...]` and exits 2.
+///
+/// Gates:
+///   1. Process exits 0 within 10 s deadline
+///   2. stderr contains all six PHASE markers up to `PHASE: blt_verified`
+///   3. `PHASE: blt_mismatch` absent
+///
+/// Skipped gracefully when ddraw_basic.exe is absent (e.g. MinGW not available
+/// during local macOS runs).
+#[test]
+fn ddraw_basic_blt_gate() {
+    if !cfg!(target_os = "linux") {
+        eprintln!("skipping execution test — requires Linux");
+        return;
+    }
+
+    let manifest = env!("CARGO_MANIFEST_DIR");
+    let bin_dir = format!("{manifest}/../tests/fixtures/bin");
+    let exe = format!("{bin_dir}/ddraw_basic.exe");
+
+    if !std::path::Path::new(&exe).exists() {
+        eprintln!("skipping: ddraw_basic.exe not present in tests/fixtures/bin/");
+        return;
+    }
+
+    let weave_bin = env!("CARGO_BIN_EXE_weave");
+
+    let start = std::time::Instant::now();
+    let mut child = std::process::Command::new(weave_bin)
+        .current_dir(&bin_dir)
+        .arg(&exe)
+        .arg("--no-sandbox")
+        .env("DISPLAY", ":99")
+        .stderr(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|e| panic!("failed to spawn weave on ddraw_basic.exe: {e}"));
+
+    // Drain stderr concurrently so the child never blocks on the pipe buffer.
+    let stderr_pipe = child.stderr.take().expect("stderr was piped");
+    let stderr_shared = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let stderr_writer = std::sync::Arc::clone(&stderr_shared);
+    let drain_thread = std::thread::spawn(move || {
+        use std::io::Read;
+        let mut buf = Vec::new();
+        let mut pipe = stderr_pipe;
+        let _ = pipe.read_to_end(&mut buf);
+        *stderr_writer.lock().unwrap() = buf;
+    });
+
+    let deadline = start + std::time::Duration::from_secs(10);
+    let mut exit_status: Option<std::process::ExitStatus> = None;
+    let mut killed_by_deadline = false;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                exit_status = Some(status);
+                break;
+            }
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    killed_by_deadline = true;
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err(e) => panic!("wait failed: {e}"),
+        }
+    }
+    let elapsed = start.elapsed();
+
+    drain_thread.join().expect("stderr drain thread panicked");
+    let stderr_bytes = stderr_shared.lock().unwrap().clone();
+    let stderr = String::from_utf8_lossy(&stderr_bytes);
+
+    eprintln!("ddraw_basic elapsed: {elapsed:.1?}");
+    eprintln!(
+        "ddraw_basic exit: {}",
+        if killed_by_deadline {
+            "killed by deadline".to_string()
+        } else {
+            exit_status
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "unknown".to_string())
+        }
+    );
+    eprintln!("--- FULL STDERR BEGIN ---");
+    eprintln!("{stderr}");
+    eprintln!("--- FULL STDERR END ---");
+
+    // Gate 1a: process must exit before the 10-second deadline.
+    assert!(
+        !killed_by_deadline,
+        "ddraw_basic_blt_gate FAIL: process did not exit within 10 s — hung or panicked.\nstderr:\n{stderr}"
+    );
+
+    // A mismatch emits a specific marker; surface it with the hex values.
+    assert!(
+        !stderr.contains("PHASE: blt_mismatch"),
+        "ddraw_basic_blt_gate FAIL: Blt/readback mismatch — Blt COLORFILL did not write the sentinel fill color.\nstderr:\n{stderr}"
+    );
+
+    // Gate 1b: exit status must be 0 (the fixture exits non-zero on every
+    // individual API failure).
+    assert!(
+        exit_status.map_or(false, |s| s.success()),
+        "ddraw_basic_blt_gate FAIL: ddraw_basic.exe exited {:?} (expected 0).\nstderr:\n{stderr}",
+        exit_status
+    );
+
+    // Gate 2: every PHASE marker must be present in order.
+    for phase in [
+        "PHASE: ddraw_created",
+        "PHASE: coop_set",
+        "PHASE: surface_created",
+        "PHASE: locked",
+        "PHASE: pixels_written",
+        "PHASE: blt_colorfill",
+        "PHASE: blt_verified",
+    ] {
+        assert!(
+            stderr.contains(phase),
+            "ddraw_basic_blt_gate FAIL: expected marker `{phase}` missing from stderr.\nstderr:\n{stderr}"
+        );
+    }
+
+    eprintln!(
+        "ddraw_basic_blt_gate: all gates passed — DirectDraw Lock/Blt/verify path confirmed end-to-end"
+    );
+}
