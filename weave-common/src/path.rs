@@ -483,4 +483,134 @@ mod tests {
     fn identify_normal_path() {
         assert_eq!(identify_device(r"C:\foo\bar"), None);
     }
+
+    // ── Task 02 path-form inventory ───────────────────────────────────────────
+    //
+    // One test per distinct path form observed in M4 CreateFileW logs and the
+    // Task 02 inventory. Each form exercises a different branch of
+    // `normalise_win_path` / `extract_drive`.
+
+    /// Drive-absolute `Z:\...` must resolve under the real Linux root `/`,
+    /// not under `{prefix}/drive_z`. Z: is Weave's mirror of the Linux fs.
+    #[test]
+    fn drive_absolute_z_uppercase() {
+        let t = translator();
+        assert_eq!(
+            t.to_linux_str(r"Z:\tmp\test.txt").unwrap(),
+            PathBuf::from("/tmp/test.txt")
+        );
+    }
+
+    /// Lowercase `z:` must behave identically to uppercase — drive letter
+    /// comparison is case-insensitive.
+    #[test]
+    fn drive_absolute_z_lowercase() {
+        let t = translator();
+        assert_eq!(
+            t.to_linux_str(r"z:\tmp\test.txt").unwrap(),
+            PathBuf::from("/tmp/test.txt")
+        );
+    }
+
+    /// Root-relative paths (leading backslash, no drive letter) must map to
+    /// Z: so they resolve under the Linux filesystem root. This is the M4
+    /// regression fix landed in c903a32 — the fallback previously sent them
+    /// to C: which mapped `\tmp\...` to `{prefix}/drive_c/tmp/...`.
+    #[test]
+    fn root_relative_maps_to_z() {
+        let t = translator();
+        assert_eq!(
+            t.to_linux_str(r"\tmp\test.txt").unwrap(),
+            PathBuf::from("/tmp/test.txt")
+        );
+    }
+
+    /// Extended-length prefix (`\\?\`) combined with Z: drive — the M4
+    /// CreateFileW log showed 7-Zip emitting `\\?\Z:\tmp\...`. Prefix must
+    /// be stripped before drive-letter extraction.
+    #[test]
+    fn extended_length_with_z() {
+        let t = translator();
+        assert_eq!(
+            t.to_linux_str(r"\\?\Z:\tmp\test.txt").unwrap(),
+            PathBuf::from("/tmp/test.txt")
+        );
+    }
+
+    /// NT object namespace (`\??\`) combined with Z: drive. Same stripping
+    /// behavior as `\\?\`.
+    #[test]
+    fn nt_namespace_with_z() {
+        let t = translator();
+        assert_eq!(
+            t.to_linux_str(r"\??\Z:\tmp\test.txt").unwrap(),
+            PathBuf::from("/tmp/test.txt")
+        );
+    }
+
+    /// Bare relative paths (no drive letter, no leading backslash) fall back
+    /// to C: so CWD-relative usage resolves under the prefix. Documented
+    /// behavior of `extract_drive` — not a bug.
+    #[test]
+    fn bare_relative_falls_back_to_c() {
+        let t = translator();
+        assert_eq!(
+            t.to_linux_str(r"foo\bar.txt").unwrap(),
+            PathBuf::from("/prefix/drive_c/foo/bar.txt")
+        );
+    }
+
+    /// Trailing backslash — the empty component after the split must be
+    /// filtered out. `split('\\').filter(|s| !s.is_empty())` guarantees this.
+    #[test]
+    fn trailing_backslash_filtered() {
+        let t = translator();
+        assert_eq!(
+            t.to_linux_str(r"C:\Users\foo\").unwrap(),
+            PathBuf::from("/prefix/drive_c/Users/foo")
+        );
+    }
+
+    /// `C:` with no separator at all — drive extraction must not panic on
+    /// the 2-byte input and must return an empty component list.
+    #[test]
+    fn drive_only_no_separator() {
+        let t = translator();
+        assert_eq!(
+            t.to_linux_str("C:").unwrap(),
+            PathBuf::from("/prefix/drive_c")
+        );
+    }
+
+    /// Forward-slash Z: — MSVC CRT callers use `/` as separator. The first
+    /// step of `normalise_win_path` replaces `/` with `\`, so this must
+    /// behave identically to `Z:\tmp\test.txt`.
+    #[test]
+    fn forward_slash_z_drive() {
+        let t = translator();
+        assert_eq!(
+            t.to_linux_str("Z:/tmp/test.txt").unwrap(),
+            PathBuf::from("/tmp/test.txt")
+        );
+    }
+
+    /// Root-relative with forward slashes — after slash normalisation this
+    /// becomes `\tmp\test.txt` which the Z: fallback handles.
+    #[test]
+    fn root_relative_forward_slashes() {
+        let t = translator();
+        assert_eq!(
+            t.to_linux_str("/tmp/test.txt").unwrap(),
+            PathBuf::from("/tmp/test.txt")
+        );
+    }
+
+    /// Z: drive-root alone should resolve to `/` — verifies that
+    /// drive_root override for Z: does not produce an empty PathBuf when
+    /// no components follow.
+    #[test]
+    fn z_drive_root_only() {
+        let t = translator();
+        assert_eq!(t.to_linux_str(r"Z:\").unwrap(), PathBuf::from("/"));
+    }
 }
