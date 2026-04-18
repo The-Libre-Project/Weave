@@ -204,3 +204,50 @@ pub fn disarm_socket_write(_fd: i32) {}
 pub fn is_socket_write_armed(_fd: i32) -> bool {
     false
 }
+
+// ── Socket listening state ────────────────────────────────────────────────────
+//
+// Tracks socket fds that have called listen(2). Used by wsa_enum_network_events
+// to distinguish POLLIN on a listening socket (→ FD_ACCEPT) from POLLIN on a
+// connected socket (→ FD_READ).
+//
+// Wine ref: dlls/ws2_32/socket.c — sock_get_events: when a socket is in
+// listening state (SS_LISTENING), POLLIN maps to POLLEVENT_ACCEPT (FD_ACCEPT).
+// For connected sockets (SS_CONNECTED), POLLIN maps to POLLEVENT_READ (FD_READ).
+
+#[cfg(target_os = "linux")]
+static SOCKET_LISTENING: Mutex<Option<HashSet<i32>>> = Mutex::new(None);
+
+#[cfg(target_os = "linux")]
+fn listening_set() -> std::sync::MutexGuard<'static, Option<HashSet<i32>>> {
+    let mut g = SOCKET_LISTENING.lock().unwrap();
+    if g.is_none() {
+        *g = Some(HashSet::new());
+    }
+    g
+}
+
+/// Mark `fd` as a listening socket. Called by ws_listen on success.
+#[cfg(target_os = "linux")]
+pub fn mark_socket_listening(fd: i32) {
+    let mut g = listening_set();
+    if let Some(ref mut s) = *g {
+        s.insert(fd);
+    }
+}
+
+/// Return true if `fd` is a listening socket.
+/// Called by wsa_enum_network_events to map POLLIN → FD_ACCEPT vs FD_READ.
+#[cfg(target_os = "linux")]
+pub fn is_socket_listening(fd: i32) -> bool {
+    let g = listening_set();
+    g.as_ref().map(|s| s.contains(&fd)).unwrap_or(false)
+}
+
+// No-op stubs for non-Linux targets.
+#[cfg(not(target_os = "linux"))]
+pub fn mark_socket_listening(_fd: i32) {}
+#[cfg(not(target_os = "linux"))]
+pub fn is_socket_listening(_fd: i32) -> bool {
+    false
+}

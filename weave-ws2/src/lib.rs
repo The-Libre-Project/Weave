@@ -491,6 +491,7 @@ pub unsafe extern "win64" fn ws_listen(s: usize, backlog: i32) -> i32 {
         save_errno();
         SOCKET_ERROR
     } else {
+        weave_common::socket_event::mark_socket_listening(s as i32);
         0
     }
 }
@@ -1540,9 +1541,18 @@ pub unsafe extern "win64" fn wsa_wait_for_multiple_events(
             if let Some(map) = map_opt {
                 for (&sock_fd, &(ref_handle, _mask)) in map.iter() {
                     if ref_handle == ev_handle {
+                        // Edge-triggered FD_WRITE: only include POLLOUT when write is armed.
+                        // Wine ref: dlls/ws2_32/socket.c — WFMO wakes only on events in
+                        // the socket's pending hmask. Listening sockets and idle connected
+                        // sockets always have POLLOUT ready on Linux; including it
+                        // unconditionally floods WSAWait with empty wakeups.
+                        let mut sock_events = libc::POLLIN | libc::POLLHUP;
+                        if weave_common::socket_event::is_socket_write_armed(sock_fd as i32) {
+                            sock_events |= libc::POLLOUT;
+                        }
                         pollfds.push(libc::pollfd {
                             fd: sock_fd as i32,
-                            events: libc::POLLIN | libc::POLLOUT | libc::POLLHUP,
+                            events: sock_events,
                             revents: 0,
                         });
                         pfd_to_event.push(ei);
@@ -1656,7 +1666,14 @@ pub unsafe extern "win64" fn wsa_enum_network_events(
 
     let mut mask: i32 = 0;
     if (pfd.revents & libc::POLLIN) != 0 {
-        mask |= 1; // FD_READ
+        // Wine ref: dlls/ws2_32/socket.c — sock_get_events: SS_LISTENING sockets
+        // map POLLIN to POLLEVENT_ACCEPT (FD_ACCEPT=8); connected sockets map to
+        // POLLEVENT_READ (FD_READ=1).
+        if weave_common::socket_event::is_socket_listening(s as i32) {
+            mask |= 8; // FD_ACCEPT
+        } else {
+            mask |= 1; // FD_READ
+        }
     }
     if (pfd.revents & libc::POLLOUT) != 0 {
         // Wine ref: dlls/ws2_32/socket.c — sock_get_events / get_sock_fd_events:
