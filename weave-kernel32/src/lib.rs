@@ -6743,12 +6743,43 @@ pub unsafe extern "win64" fn device_io_control(
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
 pub unsafe extern "win64" fn get_environment_variable_w(
-    _lp_name: *const u16,
-    _lp_buffer: *mut u16,
-    _n_size: u32,
+    lp_name: *const u16,
+    lp_buffer: *mut u16,
+    n_size: u32,
 ) -> u32 {
-    warn_once("GetEnvironmentVariableW");
-    0 // not found
+    if lp_name.is_null() {
+        set_last_error(203); // ERROR_ENVVAR_NOT_FOUND
+        return 0;
+    }
+    let mut len = 0usize;
+    while *lp_name.add(len) != 0 {
+        len += 1;
+    }
+    let slice = std::slice::from_raw_parts(lp_name, len);
+    let name = String::from_utf16_lossy(slice);
+    let c_name = match std::ffi::CString::new(name) {
+        Ok(s) => s,
+        Err(_) => {
+            set_last_error(203);
+            return 0;
+        }
+    };
+    let value_ptr = libc::getenv(c_name.as_ptr());
+    if value_ptr.is_null() {
+        set_last_error(203); // ERROR_ENVVAR_NOT_FOUND
+        return 0;
+    }
+    let cstr = std::ffi::CStr::from_ptr(value_ptr);
+    let bytes = cstr.to_bytes();
+    let utf16: Vec<u16> = String::from_utf8_lossy(bytes).encode_utf16().collect();
+    let chars_needed = utf16.len() as u32; // excluding NUL
+    if n_size == 0 || lp_buffer.is_null() || chars_needed + 1 > n_size {
+        // Buffer too small — return required size including NUL.
+        return chars_needed + 1;
+    }
+    std::ptr::copy_nonoverlapping(utf16.as_ptr(), lp_buffer, utf16.len());
+    *lp_buffer.add(utf16.len()) = 0;
+    chars_needed
 }
 
 // ── Misc ──────────────────────────────────────────────────────────────────────
