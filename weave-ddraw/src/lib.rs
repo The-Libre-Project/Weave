@@ -440,13 +440,40 @@ pub struct IDirectDraw4Vtbl {
     pub GetDeviceIdentifier: unsafe extern "win64" fn(*mut u8, *mut u8, u32) -> u32,
 }
 
+// Per-instance IDirectDraw4 object.
+//
+// Wine ref: dlls/ddraw/ddraw.c::ddraw4_SetCooperativeLevel — stores HWND + DWORD flags on
+// the ddraw struct. DirectDrawCreate allocates a fresh instance per call (see DDRAW_Create
+// in dlls/ddraw/main.c). Release at refcount zero frees the instance.
+//
+// COM ABI requirement: vtbl MUST be the first field (guest reads *this as the vtable pointer).
+//
+// Wine ref (DDSCL flags): dlls/ddraw/ddraw.c:419 — DDSCL_NORMAL used as default coop level.
+// DDSCL_EXCLUSIVE / DDSCL_FULLSCREEN / DDSCL_NORMAL are the main flags stored.
 #[repr(C)]
 pub struct FakeDirectDraw4 {
     pub vtbl: *const IDirectDraw4Vtbl,
+    pub refcount: core::sync::atomic::AtomicU32,
+    pub hwnd: core::sync::atomic::AtomicUsize,
+    pub coop_flags: core::sync::atomic::AtomicU32,
 }
 
-// SAFETY: vtable pointer is never mutated; safe to share across threads as a static.
+// SAFETY: vtable pointer is never mutated; all mutable state is atomic.
 unsafe impl Sync for FakeDirectDraw4 {}
+unsafe impl Send for FakeDirectDraw4 {}
+
+impl FakeDirectDraw4 {
+    fn new_boxed() -> *mut FakeDirectDraw4 {
+        use core::sync::atomic::{AtomicU32, AtomicUsize};
+        let boxed = Box::new(FakeDirectDraw4 {
+            vtbl: &DD4_VTBL,
+            refcount: AtomicU32::new(1),
+            hwnd: AtomicUsize::new(0),
+            coop_flags: AtomicU32::new(0),
+        });
+        Box::into_raw(boxed)
+    }
+}
 
 // ── IDirectDraw4 stub implementations ───────────────────────────────────────
 
@@ -457,11 +484,37 @@ unsafe extern "win64" fn dd_QueryInterface(
 ) -> u32 {
     E_NOINTERFACE
 }
-unsafe extern "win64" fn dd_AddRef(_this: *mut u8) -> u32 {
-    1
+unsafe extern "win64" fn dd_AddRef(this: *mut u8) -> u32 {
+    // Wine ref: dlls/ddraw/ddraw.c::ddraw7_AddRef — InterlockedIncrement on ref,
+    // returns new count.
+    if this.is_null() {
+        return 0;
+    }
+    let obj = unsafe { &*(this as *const FakeDirectDraw4) };
+    obj.refcount
+        .fetch_add(1, core::sync::atomic::Ordering::AcqRel)
+        + 1
 }
-unsafe extern "win64" fn dd_Release(_this: *mut u8) -> u32 {
-    1
+unsafe extern "win64" fn dd_Release(this: *mut u8) -> u32 {
+    // Wine ref: dlls/ddraw/ddraw.c::ddraw7_Release — InterlockedDecrement; at zero,
+    // free the instance (ddraw_destroy cleanup). We Box::from_raw to drop.
+    if this.is_null() {
+        return 0;
+    }
+    let obj = unsafe { &*(this as *const FakeDirectDraw4) };
+    let prev = obj
+        .refcount
+        .fetch_sub(1, core::sync::atomic::Ordering::AcqRel);
+    let new_count = prev.saturating_sub(1);
+    if new_count == 0 {
+        // Last reference — free the Box allocation.
+        // KNOWN-BUG-CLASSES: "State maps must deregister on close" — every Box allocated
+        // in DirectDrawCreate must be freed here when refcount hits zero.
+        unsafe {
+            drop(Box::from_raw(this as *mut FakeDirectDraw4));
+        }
+    }
+    new_count
 }
 unsafe extern "win64" fn dd_Compact(_this: *mut u8) -> u32 {
     DD_OK
@@ -571,7 +624,18 @@ unsafe extern "win64" fn dd_Initialize(_this: *mut u8, _guid: *const u8) -> u32 
 unsafe extern "win64" fn dd_RestoreDisplayMode(_this: *mut u8) -> u32 {
     DD_OK
 }
-unsafe extern "win64" fn dd_SetCooperativeLevel(_this: *mut u8, _hwnd: usize, _flags: u32) -> u32 {
+unsafe extern "win64" fn dd_SetCooperativeLevel(this: *mut u8, hwnd: usize, flags: u32) -> u32 {
+    // Wine ref: dlls/ddraw/ddraw.c::ddraw4_SetCooperativeLevel (line 1034) — signature
+    // (IDirectDraw4 *iface, HWND window, DWORD flags). Wine stores the window handle on
+    // the ddraw instance and records coop flags (DDSCL_NORMAL / DDSCL_EXCLUSIVE /
+    // DDSCL_FULLSCREEN). We mirror that state-store so later dispatches can honor it.
+    if this.is_null() {
+        return E_FAIL;
+    }
+    let obj = unsafe { &*(this as *const FakeDirectDraw4) };
+    obj.hwnd.store(hwnd, core::sync::atomic::Ordering::Release);
+    obj.coop_flags
+        .store(flags, core::sync::atomic::Ordering::Release);
     DD_OK
 }
 unsafe extern "win64" fn dd_SetDisplayMode(
@@ -663,10 +727,11 @@ static DD4_VTBL: IDirectDraw4Vtbl = IDirectDraw4Vtbl {
     GetDeviceIdentifier: dd_GetDeviceIdentifier,
 };
 
-static FAKE_DDRAW4: FakeDirectDraw4 = FakeDirectDraw4 { vtbl: &DD4_VTBL };
-
 // ── Exported API functions ───────────────────────────────────────────────────
-// Wine ref: dlls/ddraw/main.c::DirectDrawCreate — takes GUID*, IDirectDraw**, IUnknown*
+// Wine ref: dlls/ddraw/main.c::DirectDrawCreate — takes GUID*, IDirectDraw**, IUnknown*.
+// Wine's DirectDrawCreate allocates a fresh struct ddraw per call via DDRAW_Create; we
+// mirror that per-instance pattern with Box::into_raw. Release drops the Box when the
+// refcount reaches zero (see dd_Release).
 
 /// # Safety
 /// Called from Windows PE IAT — raw pointers from guest process.
@@ -678,7 +743,8 @@ pub unsafe extern "win64" fn DirectDrawCreate(
 ) -> u32 {
     eprintln!("[weave-ddraw] DirectDrawCreate called");
     if !lplpDD.is_null() {
-        *lplpDD = &FAKE_DDRAW4 as *const FakeDirectDraw4 as *mut u8;
+        let ptr = FakeDirectDraw4::new_boxed();
+        *lplpDD = ptr as *mut u8;
     }
     DD_OK
 }
@@ -694,7 +760,8 @@ pub unsafe extern "win64" fn DirectDrawCreateEx(
 ) -> u32 {
     eprintln!("[weave-ddraw] DirectDrawCreateEx called");
     if !lplpDD.is_null() {
-        *lplpDD = &FAKE_DDRAW4 as *const FakeDirectDraw4 as *mut u8;
+        let ptr = FakeDirectDraw4::new_boxed();
+        *lplpDD = ptr as *mut u8;
     }
     DD_OK
 }
@@ -783,4 +850,128 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         _ => return None,
     };
     Some(ptr)
+}
+
+// ── Tests ───────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use core::sync::atomic::Ordering;
+
+    /// DDSCL_NORMAL from Wine's include/ddraw.h — used as a sentinel coop flag.
+    const DDSCL_NORMAL_SENTINEL: u32 = 0x00000008;
+    /// Arbitrary fake HWND — not a real window handle; used only to verify storage.
+    const TEST_HWND: usize = 0xDEAD_BEEF;
+
+    /// Full lifecycle: Create → SetCooperativeLevel → verify stored → Release → freed.
+    ///
+    /// Sanity-check for the per-instance state plumbing:
+    /// 1. DirectDrawCreate returns a non-null pointer
+    /// 2. Vtable SetCooperativeLevel stores hwnd + flags on the instance
+    /// 3. Release decrements refcount and frees at zero (Box::from_raw drop)
+    #[test]
+    fn ddraw_instance_lifecycle() {
+        let mut out: *mut u8 = core::ptr::null_mut();
+        let hr = unsafe {
+            DirectDrawCreate(
+                core::ptr::null(),
+                &mut out as *mut *mut u8,
+                core::ptr::null_mut(),
+            )
+        };
+        assert_eq!(hr, DD_OK);
+        assert!(!out.is_null(), "DirectDrawCreate returned null instance");
+
+        // Inspect initial state: refcount = 1, hwnd = 0, coop_flags = 0.
+        let obj = unsafe { &*(out as *const FakeDirectDraw4) };
+        assert_eq!(obj.refcount.load(Ordering::Acquire), 1);
+        assert_eq!(obj.hwnd.load(Ordering::Acquire), 0);
+        assert_eq!(obj.coop_flags.load(Ordering::Acquire), 0);
+
+        // Call SetCooperativeLevel via the vtable (not via direct function pointer),
+        // to exercise the same path the guest takes.
+        let vtbl = unsafe { &*obj.vtbl };
+        let hr = unsafe { (vtbl.SetCooperativeLevel)(out, TEST_HWND, DDSCL_NORMAL_SENTINEL) };
+        assert_eq!(hr, DD_OK);
+
+        // Re-read state: verify hwnd + flags were stored on this specific instance.
+        assert_eq!(obj.hwnd.load(Ordering::Acquire), TEST_HWND);
+        assert_eq!(
+            obj.coop_flags.load(Ordering::Acquire),
+            DDSCL_NORMAL_SENTINEL
+        );
+
+        // Release drops refcount to zero and frees the Box.
+        let remaining = unsafe { (vtbl.Release)(out) };
+        assert_eq!(remaining, 0, "Release at refcount=1 must yield 0");
+        // NOTE: `out` is dangling here — do not dereference.
+    }
+
+    /// AddRef then Release twice — first Release keeps the object alive, second frees.
+    #[test]
+    fn ddraw_refcount_addref_release() {
+        let mut out: *mut u8 = core::ptr::null_mut();
+        unsafe {
+            DirectDrawCreate(
+                core::ptr::null(),
+                &mut out as *mut *mut u8,
+                core::ptr::null_mut(),
+            );
+        }
+        assert!(!out.is_null());
+
+        let vtbl = unsafe { &*(*(out as *const FakeDirectDraw4)).vtbl };
+
+        // AddRef: 1 → 2
+        let two = unsafe { (vtbl.AddRef)(out) };
+        assert_eq!(two, 2);
+
+        // Release: 2 → 1 (not freed)
+        let one = unsafe { (vtbl.Release)(out) };
+        assert_eq!(one, 1);
+
+        // State should still be intact — instance is still alive.
+        let obj = unsafe { &*(out as *const FakeDirectDraw4) };
+        assert_eq!(obj.refcount.load(Ordering::Acquire), 1);
+
+        // Release: 1 → 0 (freed)
+        let zero = unsafe { (vtbl.Release)(out) };
+        assert_eq!(zero, 0);
+    }
+
+    /// Two DirectDrawCreate calls must return distinct pointers.
+    #[test]
+    fn ddraw_instances_are_distinct() {
+        let mut a: *mut u8 = core::ptr::null_mut();
+        let mut b: *mut u8 = core::ptr::null_mut();
+        unsafe {
+            DirectDrawCreate(
+                core::ptr::null(),
+                &mut a as *mut *mut u8,
+                core::ptr::null_mut(),
+            );
+            DirectDrawCreate(
+                core::ptr::null(),
+                &mut b as *mut *mut u8,
+                core::ptr::null_mut(),
+            );
+        }
+        assert!(!a.is_null() && !b.is_null());
+        assert_ne!(a, b, "Per-instance allocation must yield distinct pointers");
+
+        // Store different state on each, confirm isolation.
+        let obj_a = unsafe { &*(a as *const FakeDirectDraw4) };
+        let obj_b = unsafe { &*(b as *const FakeDirectDraw4) };
+        obj_a.hwnd.store(0x1111, Ordering::Release);
+        obj_b.hwnd.store(0x2222, Ordering::Release);
+        assert_eq!(obj_a.hwnd.load(Ordering::Acquire), 0x1111);
+        assert_eq!(obj_b.hwnd.load(Ordering::Acquire), 0x2222);
+
+        // Free both.
+        let vtbl_a = unsafe { &*obj_a.vtbl };
+        let vtbl_b = unsafe { &*obj_b.vtbl };
+        assert_eq!(unsafe { (vtbl_a.Release)(a) }, 0);
+        assert_eq!(unsafe { (vtbl_b.Release)(b) }, 0);
+    }
 }
