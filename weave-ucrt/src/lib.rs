@@ -318,6 +318,9 @@ pub extern "win64" fn ucrt_abort() -> ! {
 /// machinery; on Linux that is libc::raise which dispatches through the
 /// installed sigaction handlers.
 pub extern "win64" fn ucrt_raise(sig: i32) -> i32 {
+    // Diagnostic: log every raise so wget's abort-path is visible.
+    // TODO: remove after wget_ws2_gate passes.
+    eprintln!("weave/ucrt: raise({sig}) called — about to deliver signal");
     unsafe { libc::raise(sig) }
 }
 
