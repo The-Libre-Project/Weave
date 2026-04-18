@@ -881,10 +881,11 @@ fn init_sspi_table() -> *const u8 {
     SSPI_TABLE_INIT.call_once(|| {
         let stub = sspi_stub_fn as *const () as usize as u64;
         // SAFETY: call_once guarantees exclusive access.
+        #[allow(static_mut_refs)]
         unsafe {
             SSPI_TABLE[0] = 1u64; // dwVersion = SECURITY_SUPPORT_PROVIDER_INTERFACE_VERSION (1)
-            for i in 1..33 {
-                SSPI_TABLE[i] = stub;
+            for slot in SSPI_TABLE.iter_mut().take(33).skip(1) {
+                *slot = stub;
             }
             // Override specific slots that callers actually invoke.
             // Indices = (struct_offset / 8): slot 0 = dwVersion, slot 1 = first fn ptr at offset 8.
@@ -1002,8 +1003,7 @@ pub unsafe extern "win64" fn win_if_nametoindex(if_name: *const u8) -> u32 {
     if if_name.is_null() {
         return 0;
     }
-    let ret = unsafe { libc::if_nametoindex(if_name as *const libc::c_char) };
-    ret
+    unsafe { libc::if_nametoindex(if_name as *const libc::c_char) }
 }
 
 pub fn resolve_iphlpapi(func: &str) -> Option<usize> {
