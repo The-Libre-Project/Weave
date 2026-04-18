@@ -6757,9 +6757,6 @@ pub unsafe extern "win64" fn get_environment_variable_w(
     }
     let slice = std::slice::from_raw_parts(lp_name, len);
     let name = String::from_utf16_lossy(slice);
-    // Diagnostic: log every variable name wget asks for.
-    // TODO: remove after wget_ws2_gate passes.
-    eprintln!("weave/GetEnvironmentVariableW: name={name:?} buf_size={n_size}");
     let c_name = match std::ffi::CString::new(name) {
         Ok(s) => s,
         Err(_) => {
