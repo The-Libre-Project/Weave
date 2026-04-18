@@ -157,6 +157,7 @@ pub unsafe extern "win64" fn unresolved_import_stub() -> u64 {
 /// `call [rax+N]` pattern, this is the table base and `rax_at_call + N` is
 /// the IAT slot.  We decode the CALL bytes before `ret_addr` to recover N,
 /// then look up the slot in the global map to log the function name directly.
+#[cfg(target_arch = "x86_64")]
 extern "win64" fn unresolved_import_stub_log(ret_addr: usize, rax_at_call: usize) {
     let slot_va = unsafe { decode_call_iat_slot(ret_addr, rax_at_call) };
     let name = slot_va.and_then(lookup_unresolved_slot);
