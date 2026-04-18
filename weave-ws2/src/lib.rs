@@ -1542,15 +1542,19 @@ pub unsafe extern "win64" fn wsa_wait_for_multiple_events(
                     "weave/WSAWait: event[{ei}] ready (revents={:#x})",
                     pfd.revents
                 );
-                return WSA_WAIT_EVENT_0 + ei;
+                let result = WSA_WAIT_EVENT_0 + ei;
+                eprintln!("weave/WSAWait: returning {result:#x}");
+                return result;
             }
         }
     }
     if ret == 0 {
         set_last_error(258); // WSA_WAIT_TIMEOUT
+        eprintln!("weave/WSAWait: returning 258 (WSA_WAIT_TIMEOUT)");
         return 258; // WSA_WAIT_TIMEOUT
     }
 
+    eprintln!("weave/WSAWait: returning WSA_WAIT_FAILED ({WSA_WAIT_FAILED:#x})");
     set_last_error(WSAEINVAL);
     WSA_WAIT_FAILED
 }

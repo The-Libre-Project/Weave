@@ -285,9 +285,9 @@ unsafe fn patch_inner(
             match resolve(&dll_name, &func_name) {
                 Some(addr) => unsafe {
                     std::ptr::write_unaligned(base.add(iat_rva + i * 8) as *mut u64, addr as u64);
-                    // Diagnostic: log key UCRT function patches.
+                    // Diagnostic: log ALL kernel32 and CRT patches to confirm CreateThread resolution.
                     // TODO: remove after curl_ws2_gate passes.
-                    if func_name == "__p___argc" || func_name == "_configure_narrow_argv" || func_name == "_initterm" {
+                    if dll_name.to_ascii_lowercase().contains("kernel32") || func_name == "__p___argc" || func_name == "_configure_narrow_argv" || func_name == "_initterm" {
                         eprintln!("weave/iat: patched {dll_name}!{func_name} → {addr:#x} at IAT slot {:#x}", base as usize + iat_rva + i * 8);
                     }
                 },

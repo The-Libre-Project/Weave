@@ -9142,11 +9142,22 @@ static EMPTY_ENV_A: [u8; 2] = [0u8, 0u8];
 // Wine ref: dlls/kernelbase/process.c — calls RtlQueryEnvironmentVariable_U on PEB->ProcessParameters->Environment;
 // returns required chars (excl NUL) on success, 0+ERROR_ENVVAR_NOT_FOUND if missing, required size+ERROR_INSUFFICIENT_BUFFER if too small
 pub unsafe extern "win64" fn get_environment_variable_a(
-    _lp_name: *const u8,
+    lp_name: *const u8,
     _lp_buffer: *mut u8,
     _n_size: u32,
 ) -> u32 {
     warn_once("GetEnvironmentVariableA");
+    // Diagnostic: log every variable name curl looks up.
+    // TODO: remove after curl_ws2_gate passes.
+    let var_name = if !lp_name.is_null() {
+        std::ffi::CStr::from_ptr(lp_name as *const i8)
+            .to_str()
+            .unwrap_or("<invalid>")
+            .to_owned()
+    } else {
+        "<null>".to_owned()
+    };
+    eprintln!("weave/GetEnvironmentVariableA: name={var_name:?} → not found");
     0 // not found
 }
 
