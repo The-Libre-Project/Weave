@@ -9161,30 +9161,45 @@ static EMPTY_ENV_W: [u16; 2] = [0u16, 0u16];
 /// Static empty narrow environment block (double-null-terminated).
 static EMPTY_ENV_A: [u8; 2] = [0u8, 0u8];
 
-/// GetEnvironmentVariableA: return 0 (variable not found).
+/// GetEnvironmentVariableA — libc::getenv proxy mirroring the W variant.
+///
+/// The A-variant byte-passes the name directly (no UTF-16 transcoding) since
+/// the Linux host environment is already UTF-8. On success writes the value
+/// bytes plus NUL into the caller's buffer and returns bytes-excl-NUL.
+/// On BUFFER_TOO_SMALL returns required-incl-NUL. On miss, sets LAST_ERROR
+/// to ERROR_ENVVAR_NOT_FOUND and returns 0.
 ///
 /// # Safety
-/// Pointer arguments are accepted but not dereferenced.
-// Wine ref: dlls/kernelbase/process.c — calls RtlQueryEnvironmentVariable_U on PEB->ProcessParameters->Environment;
-// returns required chars (excl NUL) on success, 0+ERROR_ENVVAR_NOT_FOUND if missing, required size+ERROR_INSUFFICIENT_BUFFER if too small
+/// `lp_name` must be a valid NUL-terminated C string or null.
+/// If `lp_buffer` is non-null, it must point to at least `n_size` writable bytes.
+// Wine ref: dlls/kernelbase/process.c — GetEnvironmentVariableA delegates to W via
+// RtlCreateUnicodeStringFromAsciiz, then back-converts. Contract: chars-excl-NUL on
+// success, required-size-incl-NUL on BUFFER_TOO_SMALL, 0+ERROR_ENVVAR_NOT_FOUND on miss.
 pub unsafe extern "win64" fn get_environment_variable_a(
     lp_name: *const u8,
-    _lp_buffer: *mut u8,
-    _n_size: u32,
+    lp_buffer: *mut u8,
+    n_size: u32,
 ) -> u32 {
-    warn_once("GetEnvironmentVariableA");
-    // Diagnostic: log every variable name curl looks up.
-    // TODO: remove after curl_ws2_gate passes.
-    let var_name = if !lp_name.is_null() {
-        std::ffi::CStr::from_ptr(lp_name as *const i8)
-            .to_str()
-            .unwrap_or("<invalid>")
-            .to_owned()
-    } else {
-        "<null>".to_owned()
-    };
-    eprintln!("weave/GetEnvironmentVariableA: name={var_name:?} → not found");
-    0 // not found
+    if lp_name.is_null() {
+        set_last_error(203); // ERROR_ENVVAR_NOT_FOUND
+        return 0;
+    }
+    let c_name = std::ffi::CStr::from_ptr(lp_name as *const i8);
+    let value_ptr = libc::getenv(c_name.as_ptr());
+    if value_ptr.is_null() {
+        set_last_error(203); // ERROR_ENVVAR_NOT_FOUND
+        return 0;
+    }
+    let value = std::ffi::CStr::from_ptr(value_ptr);
+    let bytes = value.to_bytes();
+    let bytes_needed = bytes.len() as u32; // excluding NUL
+    if n_size == 0 || lp_buffer.is_null() || bytes_needed + 1 > n_size {
+        // Buffer too small — return required size including NUL.
+        return bytes_needed + 1;
+    }
+    std::ptr::copy_nonoverlapping(bytes.as_ptr(), lp_buffer, bytes.len());
+    *lp_buffer.add(bytes.len()) = 0;
+    bytes_needed
 }
 
 /// SetEnvironmentVariableW: no-op, returns TRUE.
