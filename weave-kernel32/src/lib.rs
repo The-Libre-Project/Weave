@@ -6523,18 +6523,12 @@ pub unsafe extern "win64" fn create_thread(
     _dw_creation_flags: u32,
     lp_thread_id: *mut u32,
 ) -> usize {
-    eprintln!("weave/CreateThread: entry fn={lp_start_address:p} param={lp_parameter:p}");
     if lp_start_address.is_null() {
-        eprintln!("weave/CreateThread: null fn ptr — returning 0 (ERROR_INVALID_PARAMETER)");
         return 0;
     }
 
     let fn_addr = lp_start_address as usize;
     let param_addr = lp_parameter as usize;
-
-    eprintln!(
-        "weave/CreateThread: fn={lp_start_address:p} param={lp_parameter:p} (spawning thread)"
-    );
 
     let completion = Arc::new(handles::ThreadCompletion {
         result: std::sync::Mutex::new(None),
@@ -6550,7 +6544,6 @@ pub unsafe extern "win64" fn create_thread(
         let fn_ptr: unsafe extern "win64" fn(*mut u8) -> u32 =
             unsafe { std::mem::transmute(fn_addr as *const u8) };
         let ret = unsafe { fn_ptr(param_addr as *mut u8) };
-        eprintln!("weave/CreateThread: fn={fn_addr:#x} thread returned {ret}");
         let mut guard = completion_clone.result.lock().unwrap();
         *guard = Some(ret);
         completion_clone.condvar.notify_all();
