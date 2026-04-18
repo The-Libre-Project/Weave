@@ -312,6 +312,15 @@ pub extern "win64" fn ucrt_abort() -> ! {
     unsafe { libc::abort() }
 }
 
+/// raise — send a signal to the current process.
+///
+/// Wine ref: dlls/msvcrt/except.c — raise delegates to the host's signal
+/// machinery; on Linux that is libc::raise which dispatches through the
+/// installed sigaction handlers.
+pub extern "win64" fn ucrt_raise(sig: i32) -> i32 {
+    unsafe { libc::raise(sig) }
+}
+
 pub extern "win64" fn ucrt_cexit() {
     unsafe {
         libc::write(
@@ -3440,6 +3449,7 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "_errno" => stub!(ucrt_errno as extern "win64" fn() -> _),
         "strerror" => stub!(ucrt_strerror as extern "win64" fn(_) -> _),
         "perror" => stub!(ucrt_perror as unsafe extern "win64" fn(_)),
+        "raise" => stub!(ucrt_raise as extern "win64" fn(_) -> _),
         "_get_osfhandle" => stub!(ucrt_get_osfhandle as extern "win64" fn(_) -> _),
         "_fseeki64" | "fseek" => {
             stub!(ucrt_fseeki64 as unsafe extern "win64" fn(_, _, _) -> _)
