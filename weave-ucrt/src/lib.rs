@@ -308,8 +308,24 @@ pub extern "win64" fn ucrt__exit(code: i32) -> ! {
     unsafe { libc::_exit(code) }
 }
 
+/// abort — abnormal program termination.
+///
+/// Matches Wine's `dlls/msvcrt/exit.c:abort` (line 252) which calls
+/// `raise(SIGABRT)` and then falls through to `_exit(3)`.  Using `libc::abort`
+/// here is incorrect: glibc's abort() routes through `__libc_message`, tries
+/// to flush stdio (`_IO_list_all` walk), and ends up in `__vfscanf_internal`
+/// stream-cleanup territory.  When the guest's msvcrt-linked stdio has any
+/// partially-initialised FILE state, glibc abort's stdio flush dereferences
+/// through offsets that don't match Weave's stub FILE layout and raises
+/// SIGABRT inside glibc internals — masking the real abort call site.
+///
+/// Wine ref: dlls/msvcrt/exit.c:252 — abort() calls raise(SIGABRT) and then
+/// `_aexit_rtn(3)` (which is `_exit` by default, see line 60 of that file).
 pub extern "win64" fn ucrt_abort() -> ! {
-    unsafe { libc::abort() }
+    unsafe {
+        libc::raise(libc::SIGABRT);
+        libc::_exit(3);
+    }
 }
 
 /// raise — send a signal to the current process.
@@ -2757,6 +2773,78 @@ named_stub!(ucrt_dup2_stub, "_dup2");
 named_stub!(ucrt_flushall_stub, "_flushall");
 named_stub!(ucrt_chkstk_stub, "_chkstk");
 
+// ── __stdio_common_v*scanf family ────────────────────────────────────────────
+//
+// These are UCRTBASE exports that MinGW's stdio.h inline wrappers call for
+// sscanf / vsscanf / fscanf / vfscanf / swscanf / vswscanf / fwscanf / vfwscanf.
+//
+// Signature per Wine dlls/msvcrt/scanf.c:667 (`__stdio_common_vsscanf`) and
+// line 707 (`__stdio_common_vfscanf`):
+//
+//     int __cdecl __stdio_common_vsscanf(u64 options, const char *input,
+//                                        size_t length, const char *format,
+//                                        _locale_t locale, va_list valist);
+//     int __cdecl __stdio_common_vfscanf(u64 options, FILE *file,
+//                                        const char *format,
+//                                        _locale_t locale, va_list valist);
+//
+// Return value: number of successful conversions (0..N), or `EOF` on input
+// failure per Wine's vsnscanf_s_l delegation. Callers often check
+// `ret == EOF` (−1) or `ret >= expected_count`.
+//
+// Weave does not implement scanf parsing.  Returning 0 (zero conversions)
+// is safe — it matches "no input matched" and the caller handles it as
+// a non-fatal parse failure.
+//
+// Prior bug: these symbols were aliased to `ucrt_cexit` (a `void()` stub),
+// violating the `int(...)` ABI.  The first GP register return value was
+// whatever RAX held after `libc::write` returned (typically the count of
+// bytes written, ~19).  A caller reading that as a scanf conversion count
+// would treat it as "19 conversions succeeded" and dereference uninitialised
+// output buffers — a latent "stub returns value caller dereferences without
+// validation" instance (KNOWN-BUG-CLASSES:795).
+pub extern "win64" fn ucrt_stdio_common_vsscanf(
+    _options: u64,
+    _input: *const u8,
+    _length: usize,
+    _format: *const u8,
+    _locale: *const c_void,
+    _valist: *const c_void,
+) -> i32 {
+    0
+}
+
+pub extern "win64" fn ucrt_stdio_common_vfscanf(
+    _options: u64,
+    _file: *mut c_void,
+    _format: *const u8,
+    _locale: *const c_void,
+    _valist: *const c_void,
+) -> i32 {
+    0
+}
+
+pub extern "win64" fn ucrt_stdio_common_vswscanf(
+    _options: u64,
+    _input: *const u16,
+    _length: usize,
+    _format: *const u16,
+    _locale: *const c_void,
+    _valist: *const c_void,
+) -> i32 {
+    0
+}
+
+pub extern "win64" fn ucrt_stdio_common_vfwscanf(
+    _options: u64,
+    _file: *mut c_void,
+    _format: *const u16,
+    _locale: *const c_void,
+    _valist: *const c_void,
+) -> i32 {
+    0
+}
+
 /// ??1type_info@@UEAA@XZ — type_info destructor. No-op (no real RTTI objects).
 ///
 /// # Safety
@@ -3940,6 +4028,22 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "_chkstk" | "__chkstk" | "_alloca_probe" | "__alloca_probe" => {
             stub!(ucrt_chkstk_stub as extern "win64" fn())
         }
+        // __stdio_common_v*scanf — UCRTBASE scanf backends.  Proper int-returning
+        // stubs (return 0 = no conversions).  Previously aliased to ucrt_cexit
+        // which violated the `int(...)` ABI; see ucrt_stdio_common_vsscanf
+        // doc comment and Wine `dlls/msvcrt/scanf.c:667`.
+        "__stdio_common_vsscanf" => stub!(
+            ucrt_stdio_common_vsscanf as extern "win64" fn(_, _, _, _, _, _) -> _
+        ),
+        "__stdio_common_vfscanf" => stub!(
+            ucrt_stdio_common_vfscanf as extern "win64" fn(_, _, _, _, _) -> _
+        ),
+        "__stdio_common_vswscanf" => stub!(
+            ucrt_stdio_common_vswscanf as extern "win64" fn(_, _, _, _, _, _) -> _
+        ),
+        "__stdio_common_vfwscanf" => stub!(
+            ucrt_stdio_common_vfwscanf as extern "win64" fn(_, _, _, _, _) -> _
+        ),
         // Additional MSVCRT startup symbols seen in MinGW-compiled binaries.
         // All are no-ops or aliases — the CRT startup just needs them to resolve.
         "__getmainargs_to_utf8"
@@ -3960,10 +4064,6 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         | "_controlfp_s"
         | "_statusfp"
         | "_fpreset"
-        | "__stdio_common_vfscanf"
-        | "__stdio_common_vsscanf"
-        | "__stdio_common_vfwscanf"
-        | "__stdio_common_vswscanf"
         | "_pipe"
         | "_cwait"
         | "_spawnl"
@@ -4250,5 +4350,111 @@ mod tests {
         assert!(resolve("ucrtbase.dll", "__acrt_iob_func").is_some());
         // __iob_func is the legacy msvcrt alias; same implementation.
         assert!(resolve("msvcrt.dll", "__iob_func").is_some());
+    }
+
+    // ── Task 01b 3c-I: __stdio_common_v*scanf family ─────────────────────────
+
+    #[test]
+    fn stdio_common_vsscanf_returns_int_zero() {
+        // Previously aliased to ucrt_cexit (void-returning).  Callers read
+        // RAX as the conversion count.  Must return 0 (int) to signal
+        // "no conversions" cleanly instead of garbage.
+        // Wine ref: dlls/msvcrt/scanf.c:667 — int CDECL __stdio_common_vsscanf.
+        let rc = ucrt_stdio_common_vsscanf(
+            0,
+            core::ptr::null(),
+            0,
+            core::ptr::null(),
+            core::ptr::null(),
+            core::ptr::null(),
+        );
+        assert_eq!(rc, 0);
+    }
+
+    #[test]
+    fn stdio_common_vfscanf_returns_int_zero() {
+        // Wine ref: dlls/msvcrt/scanf.c:707 — int CDECL __stdio_common_vfscanf.
+        let rc = ucrt_stdio_common_vfscanf(
+            0,
+            core::ptr::null_mut(),
+            core::ptr::null(),
+            core::ptr::null(),
+            core::ptr::null(),
+        );
+        assert_eq!(rc, 0);
+    }
+
+    #[test]
+    fn stdio_common_vswscanf_returns_int_zero() {
+        let rc = ucrt_stdio_common_vswscanf(
+            0,
+            core::ptr::null(),
+            0,
+            core::ptr::null(),
+            core::ptr::null(),
+            core::ptr::null(),
+        );
+        assert_eq!(rc, 0);
+    }
+
+    #[test]
+    fn stdio_common_vfwscanf_returns_int_zero() {
+        let rc = ucrt_stdio_common_vfwscanf(
+            0,
+            core::ptr::null_mut(),
+            core::ptr::null(),
+            core::ptr::null(),
+            core::ptr::null(),
+        );
+        assert_eq!(rc, 0);
+    }
+
+    #[test]
+    fn stdio_common_scanf_family_resolves_via_resolver() {
+        // All four UCRTBASE scanf backends must resolve to real int-returning
+        // stubs, not to the void-returning `ucrt_cexit` alias.  Prior to
+        // Task 01b 3c-I these fell into the ucrt_cexit catch-all block which
+        // leaked `libc::write`'s byte count into RAX — a latent "stub returns
+        // value caller dereferences without validation" (KNOWN-BUG-CLASSES:795).
+        for dll in ["msvcrt.dll", "ucrtbase.dll"] {
+            assert!(
+                resolve(dll, "__stdio_common_vsscanf").is_some(),
+                "{dll}::__stdio_common_vsscanf"
+            );
+            assert!(
+                resolve(dll, "__stdio_common_vfscanf").is_some(),
+                "{dll}::__stdio_common_vfscanf"
+            );
+            assert!(
+                resolve(dll, "__stdio_common_vswscanf").is_some(),
+                "{dll}::__stdio_common_vswscanf"
+            );
+            assert!(
+                resolve(dll, "__stdio_common_vfwscanf").is_some(),
+                "{dll}::__stdio_common_vfwscanf"
+            );
+        }
+    }
+
+    #[test]
+    fn stdio_common_scanf_family_not_aliased_to_cexit() {
+        // Structural check: these must resolve to the dedicated int-returning
+        // stubs, not to ucrt_cexit (which returns void and leaves garbage
+        // in RAX).  Compares resolver-returned fn addresses against
+        // ucrt_cexit's address.
+        let cexit_addr = ucrt_cexit as *const () as usize;
+        for name in [
+            "__stdio_common_vsscanf",
+            "__stdio_common_vfscanf",
+            "__stdio_common_vswscanf",
+            "__stdio_common_vfwscanf",
+        ] {
+            let resolved = resolve("msvcrt.dll", name)
+                .unwrap_or_else(|| panic!("{name} should resolve"));
+            assert_ne!(
+                resolved, cexit_addr,
+                "{name} is incorrectly aliased to ucrt_cexit"
+            );
+        }
     }
 }
