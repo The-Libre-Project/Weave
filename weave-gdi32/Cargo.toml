@@ -8,3 +8,6 @@ description = "gdi32.dll stubs for Weave"
 [dependencies]
 weave-user32 = { path = "../weave-user32" }
 weave-common = { path = "../weave-common" }
+
+[dev-dependencies]
+weave-core = { path = "../weave-core" }

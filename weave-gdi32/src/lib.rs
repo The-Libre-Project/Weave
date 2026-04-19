@@ -1183,6 +1183,70 @@ pub unsafe extern "win64" fn get_text_extent_point32_w(
     1
 }
 
+// ── Resource-backed bitmap loaders ────────────────────────────────────────────
+
+/// LoadBitmapW: load an HBITMAP from `h_inst`'s RT_BITMAP resource by name.
+///
+/// Trampolines into `weave_user32::api::load_image_w` with `IMAGE_BITMAP` —
+/// that path already walks RT_BITMAP via `weave_core::resource::find_resource`
+/// (Task 09 walker, Task 10 LoadImageW), allocates an HBITMAP slot in
+/// `weave_user32::image_handles`, and honours `LR_SHARED` dedup. Wine takes
+/// the same shape (LoadBitmapW is a one-line call into LoadImageW with
+/// `IMAGE_BITMAP`), so we delegate rather than duplicating the walker.
+///
+/// Crate-boundary note: gdi32→user32 is the documented exception (see header).
+/// Routing bitmap loads through user32's `image_handles` avoids a parallel
+/// slab in gdi32 + keeps HBITMAP a single namespace.
+///
+/// # Safety
+/// `lp_bitmap_name` is either a UTF-16 string pointer or an
+/// `IS_INTRESOURCE`-style packed ordinal.
+// Wine ref: dlls/user32/cursoricon.c::LoadBitmapW — internally calls
+// LoadImageW(hInst, name, IMAGE_BITMAP, 0, 0, 0). Our delegation matches.
+pub unsafe extern "win64" fn load_bitmap_w(h_inst: usize, lp_bitmap_name: *const u16) -> usize {
+    const IMAGE_BITMAP: u32 = 0;
+    // SAFETY: forward caller contract on `lp_bitmap_name`.
+    unsafe {
+        weave_user32::api::load_image_w(h_inst, lp_bitmap_name as usize, IMAGE_BITMAP, 0, 0, 0)
+    }
+}
+
+/// LoadBitmapA: ANSI trampoline. For ordinal ids (`IS_INTRESOURCE`) we pass
+/// the value through unchanged; for string names we transcode CP_ACP→UTF-16
+/// on the heap and re-enter LoadBitmapW.
+///
+/// # Safety
+/// `lp_bitmap_name` is either an ordinal or a CP_ACP null-terminated string.
+// Wine ref: dlls/user32/cursoricon.c::LoadBitmapA — same delegate pattern as
+// LoadBitmapW after a CP_ACP→WCHAR conversion via MultiByteToWideChar.
+pub unsafe extern "win64" fn load_bitmap_a(h_inst: usize, lp_bitmap_name: *const u8) -> usize {
+    let name_usize = lp_bitmap_name as usize;
+    if name_usize >> 16 == 0 {
+        // Ordinal path — no deref.
+        // SAFETY: ordinal-as-pointer convention.
+        return unsafe { load_bitmap_w(h_inst, name_usize as *const u16) };
+    }
+    let mut bytes: Vec<u8> = Vec::new();
+    // SAFETY: caller contract — null-terminated CP_ACP string.
+    unsafe {
+        let mut p = lp_bitmap_name;
+        for _ in 0..32_768 {
+            let b = *p;
+            if b == 0 {
+                break;
+            }
+            bytes.push(b);
+            p = p.add(1);
+        }
+    }
+    // Latin-1 expansion is 1:1 to UTF-16 — adequate for resource names which
+    // are ASCII in practice. Real CP_ACP would call MultiByteToWideChar.
+    let mut wide: Vec<u16> = bytes.iter().map(|&b| b as u16).collect();
+    wide.push(0);
+    // SAFETY: `wide` outlives the call.
+    unsafe { load_bitmap_w(h_inst, wide.as_ptr()) }
+}
+
 // ── ICM (color-profile) stubs ─────────────────────────────────────────────────
 
 /// GetICMProfileW: return the path to the ICM color profile associated with
@@ -1451,6 +1515,12 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         ),
         // Device capabilities
         "GetDeviceCaps" => Some(get_device_caps as *const () as usize),
+        "LoadBitmapW" => {
+            Some(load_bitmap_w as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "LoadBitmapA" => {
+            Some(load_bitmap_a as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
         "GetICMProfileA" | "GetICMProfileW" => {
             Some(get_icm_profile_w as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize)
         }

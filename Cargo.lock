@@ -1338,6 +1338,7 @@ name = "weave-gdi32"
 version = "0.0.1"
 dependencies = [
  "weave-common",
+ "weave-core",
  "weave-user32",
 ]
 
