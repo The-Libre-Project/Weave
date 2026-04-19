@@ -1525,6 +1525,26 @@ pub unsafe extern "win64" fn ucrt_longjmp(_buf: *mut c_void, _val: i32) -> ! {
 pub extern "win64" fn ucrt_mb_cur_max_func() -> usize {
     1
 }
+
+/// `___lc_codepage_func` — return the current thread locale's ANSI codepage.
+///
+/// Wine ref: `dlls/msvcrt/locale.c:1045-1049` —
+/// ```c
+/// unsigned int CDECL ___lc_codepage_func(void)
+/// {
+///     return get_locinfo()->lc_codepage;
+/// }
+/// ```
+///
+/// Weave has no per-thread locinfo; wget (MinGW CRT) calls this during
+/// stdio init to pick an MBCS codepage for its `fprintf` path.  Returning
+/// `1252` (Windows-1252 / CP_ACP on en-US) matches the default MSVCRT
+/// "C" locale codepage observed on Windows and satisfies wget's decoder
+/// without pulling in a locale subsystem.  Returning 0 (unresolved) made
+/// wget loop in its retry-backoff init because the codepage probe failed.
+pub extern "win64" fn ucrt_lc_codepage_func() -> u32 {
+    1252
+}
 /// localeconv: return pointer to locale formatting structure.
 ///
 /// SDL2 (MinGW) calls localeconv() to get the decimal separator and
@@ -3264,6 +3284,45 @@ pub unsafe extern "win64" fn ucrt_mkgmtime64(tm: *mut u8) -> i64 {
     ret as i64
 }
 
+/// `clock` — wall-clock ticks since the MSVCRT "process start" reference
+/// point.  Units are `CLOCKS_PER_SEC = 1000` per Windows MSVCRT headers.
+///
+/// Wine ref: `dlls/msvcrt/time.c:698-704` —
+/// ```c
+/// clock_t CDECL clock(void)
+/// {
+///     LARGE_INTEGER systime;
+///     NtQuerySystemTime(&systime);
+///     return (systime.QuadPart - init_time) / (TICKSPERSEC / CLOCKS_PER_SEC);
+/// }
+/// ```
+/// `init_time` is captured once by `msvcrt_init_clock` at DLL init
+/// (`dlls/msvcrt/time.c:49-55`).  `TICKSPERSEC = 10_000_000` (100-ns NT
+/// ticks), `CLOCKS_PER_SEC = 1000` on Windows, so the divisor collapses
+/// to 10_000 — i.e. the result is milliseconds since process start.
+///
+/// Weave uses a lazily-initialised `std::time::Instant` anchor as its
+/// process-start reference, which is the closest `std` equivalent.
+///
+/// wget's retry-backoff loop (callsites 0x14005bb4b, 0x14005b496) calls
+/// `clock()` twice per iteration to compute elapsed time.  Returning 0
+/// (unresolved stub) made the loop never terminate.
+pub extern "win64" fn ucrt_clock() -> i32 {
+    use std::sync::OnceLock;
+    use std::time::Instant;
+    static START: OnceLock<Instant> = OnceLock::new();
+    let start = START.get_or_init(Instant::now);
+    // Windows clock_t is a 32-bit signed long on x64.  Saturate to i32::MAX
+    // after ~24 days — matches Windows' documented wrap behaviour adequately
+    // for Weave's short-running-app use case.
+    let ms = start.elapsed().as_millis();
+    if ms > i32::MAX as u128 {
+        i32::MAX
+    } else {
+        ms as i32
+    }
+}
+
 // ── Utility functions ─────────────────────────────────────────────────────────
 
 /// _byteswap_uint64 — swap byte order of a 64-bit unsigned integer.
@@ -3916,6 +3975,7 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "_wgetenv" => stub!(ucrt_wgetenv as unsafe extern "win64" fn(_) -> _),
         // locale / mb
         "___mb_cur_max_func" => stub!(ucrt_mb_cur_max_func as extern "win64" fn() -> _),
+        "___lc_codepage_func" => stub!(ucrt_lc_codepage_func as extern "win64" fn() -> _),
         "localeconv" => stub!(ucrt_localeconv as extern "win64" fn() -> _),
         "setlocale" => stub!(ucrt_setlocale as extern "win64" fn(_, _) -> _),
         "btowc" => stub!(ucrt_btowc as unsafe extern "win64" fn(_) -> _),
@@ -4099,6 +4159,7 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "_localtime64" => stub!(ucrt_localtime64 as unsafe extern "win64" fn(_) -> _),
         "_gmtime64" => stub!(ucrt_gmtime64 as unsafe extern "win64" fn(_) -> _),
         "_mkgmtime64" => stub!(ucrt_mkgmtime64 as unsafe extern "win64" fn(_) -> _),
+        "clock" => stub!(ucrt_clock as extern "win64" fn() -> _),
         "_byteswap_uint64" => stub!(ucrt_byteswap_uint64 as extern "win64" fn(_) -> _),
         "bsearch" => stub!(ucrt_bsearch as unsafe extern "win64" fn(_, _, _, _, _) -> _),
         "qsort" => stub!(ucrt_qsort as unsafe extern "win64" fn(_, _, _, _)),
@@ -4456,5 +4517,41 @@ mod tests {
                 "{name} is incorrectly aliased to ucrt_cexit"
             );
         }
+    }
+
+    #[test]
+    fn clock_resolves_and_returns_nonnegative_monotonic() {
+        // Resolver must expose `clock` under both msvcrt.dll and ucrtbase.dll
+        // since wget imports it from msvcrt.dll.
+        assert!(
+            resolve("msvcrt.dll", "clock").is_some(),
+            "msvcrt.dll::clock must resolve"
+        );
+        assert!(
+            resolve("ucrtbase.dll", "clock").is_some(),
+            "ucrtbase.dll::clock must resolve"
+        );
+        let t0 = ucrt_clock();
+        assert!(t0 >= 0, "clock() must be non-negative");
+        // Busy-wait briefly so monotonicity is observable even on fast boxes.
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let t1 = ucrt_clock();
+        assert!(t1 >= t0, "clock() must be monotonic: {t1} >= {t0}");
+    }
+
+    #[test]
+    fn lc_codepage_func_resolves_and_returns_cp_acp() {
+        assert!(
+            resolve("msvcrt.dll", "___lc_codepage_func").is_some(),
+            "msvcrt.dll::___lc_codepage_func must resolve"
+        );
+        assert!(
+            resolve("ucrtbase.dll", "___lc_codepage_func").is_some(),
+            "ucrtbase.dll::___lc_codepage_func must resolve"
+        );
+        // Default MSVCRT "C" locale codepage is CP_ACP=1252 on en-US.
+        // wget's locale decoder accepts any plausible CP; we lock the
+        // contract at 1252 so regressions surface.
+        assert_eq!(ucrt_lc_codepage_func(), 1252);
     }
 }
