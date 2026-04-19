@@ -110,19 +110,22 @@ fn load_bitmap_w_resolves_rt_bitmap() {
 }
 
 #[test]
-fn load_bitmap_a_ordinal_matches_w() {
+fn load_bitmap_a_ordinal_resolves() {
+    // Wine ref: dlls/user32/cursoricon.c::LoadBitmapA — the W/A pair both call
+    // LoadImageW(IMAGE_BITMAP, ..., fuLoad=0). Because LR_SHARED is NOT set,
+    // each call allocates a fresh image_handles slot — distinct handles, both
+    // referencing the same RT_BITMAP payload. We assert non-zero + correct
+    // ImageKind, NOT handle equality (that would require LR_SHARED).
     let buf = build_image();
     let base = buf.as_ptr() as usize;
     let hmodule = register_with_base("load_bitmap_probe_gate_a.dll", base);
 
     // SAFETY: ordinal-as-pointer convention.
     let h_a = unsafe { load_bitmap_a(hmodule, std::ptr::without_provenance::<u8>(1)) };
-    let h_w = unsafe { load_bitmap_w(hmodule, std::ptr::without_provenance::<u16>(1)) };
-    assert!(h_a != 0);
-    assert_eq!(
-        h_a, h_w,
-        "LoadBitmapA ordinal path should hit same LR_SHARED slot as W"
-    );
+    assert!(h_a != 0, "LoadBitmapA returned 0");
+    let entry = image_handles::get(h_a).expect("HBITMAP entry missing");
+    assert_eq!(entry.kind, ImageKind::Bitmap);
+    assert_eq!(entry.width, 24);
 }
 
 #[test]
