@@ -316,7 +316,16 @@ fn main() {
     });
 
     // ── 2. Load sections into memory ──────────────────────────────────────
-    let image = loader::load(&bytes).unwrap_or_else(|e| {
+    // Derive the module-handle name from the exe path's final component so
+    // the guest PE's loaded base is reachable via `module_handles::base_of`
+    // (task 09 step 3 — resource walker needs the base behind an HMODULE).
+    let exe_name = args
+        .exe
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("guest.exe")
+        .to_string();
+    let image = loader::load_with_name(&bytes, &exe_name).unwrap_or_else(|e| {
         eprintln!("weave: load failed: {e}");
         std::process::exit(1);
     });

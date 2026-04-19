@@ -44,6 +44,32 @@ impl Drop for LoadedImage {
 ///   3. Apply base relocations if ASLR placed us at a different address than preferred.
 ///   4. Set final memory permissions on each section (code=rx, data=rw, rodata=r).
 pub fn load(bytes: &[u8]) -> Result<LoadedImage, String> {
+    load_impl(bytes)
+}
+
+/// Like [`load`], but also registers the resulting PE's loaded base in
+/// `module_handles` under `name` (task 09 step 3).
+///
+/// `name` is used as the module-handle key — typically the basename of
+/// the exe path (e.g. `"hello.exe"`). Pass an empty string to skip the
+/// registration; this keeps the fuzzer and any future byte-only caller
+/// free of side effects on the global handle table.
+///
+/// Existing callers of `load(bytes)` keep working unchanged — they
+/// simply do not record a base.
+pub fn load_with_name(bytes: &[u8], name: &str) -> Result<LoadedImage, String> {
+    let image = load_impl(bytes)?;
+    if !name.is_empty() {
+        // HMODULE for the guest exe is the loaded base (Windows convention);
+        // record both the base and a synthetic handle under the exe name so
+        // kernel32 can reverse-lookup via `module_handles::base_of`.
+        let base = image.base as usize;
+        crate::module_handles::register_with_base(name, base);
+    }
+    Ok(image)
+}
+
+fn load_impl(bytes: &[u8]) -> Result<LoadedImage, String> {
     // Wrap in catch_unwind: goblin's TLS/reloc parsers can panic on crafted input.
     // (Confirmed by cargo-fuzz crash, 2026-04-05.)
     let pe = std::panic::catch_unwind(|| PE::parse(bytes))

@@ -18,6 +18,13 @@ struct HandleTable {
     name_to_handle: HashMap<String, usize>,
     /// Synthetic handle → DLL name.
     handle_to_name: HashMap<usize, String>,
+    /// Handle → loaded base address of the mapped PE image.
+    ///
+    /// Populated via `register_with_base` (task 09 step 3). The resource
+    /// walker reads this to convert an `HMODULE` into the image base it
+    /// needs for directory traversal. Only populated for modules whose
+    /// image Weave actually mapped — plain `register()` does not set it.
+    handle_to_base: HashMap<usize, usize>,
     /// Next handle to assign.
     next: usize,
 }
@@ -38,6 +45,7 @@ where
     let table = guard.get_or_insert_with(|| HandleTable {
         name_to_handle: HashMap::new(),
         handle_to_name: HashMap::new(),
+        handle_to_base: HashMap::new(),
         next: HANDLE_BASE,
     });
     f(table)
@@ -82,6 +90,45 @@ pub fn register_with_handle(dll_name: &str, handle: usize) {
         t.name_to_handle.insert(key.clone(), handle);
         t.handle_to_name.insert(handle, key);
     });
+}
+
+/// Register `dll_name` (case-insensitive), allocate (or reuse) a synthetic
+/// HMODULE, and record the loaded base address of the mapped PE image.
+///
+/// Used by the loader for the guest exe (task 09 step 3). Downstream code
+/// — in particular the resource walker — looks up the base via
+/// `base_of(handle)` to convert an `HMODULE` back into the image base
+/// pointer needed for directory traversal.
+///
+/// Returns the synthetic handle. If `dll_name` was previously registered
+/// via plain `register`, the existing handle is reused and its base is
+/// populated in place.
+pub fn register_with_base(dll_name: &str, base: usize) -> usize {
+    let key = dll_basename(dll_name);
+    with_table(0, |t| {
+        let handle = if let Some(&existing) = t.name_to_handle.get(&key) {
+            existing
+        } else {
+            let h = t.next;
+            t.next += 1;
+            t.name_to_handle.insert(key.clone(), h);
+            t.handle_to_name.insert(h, key);
+            h
+        };
+        t.handle_to_base.insert(handle, base);
+        handle
+    })
+}
+
+/// Return the loaded base address previously recorded for `handle` via
+/// `register_with_base`. Returns `None` for handles registered without a
+/// base (plain `register` / `register_with_handle`) or for unknown
+/// handles.
+pub fn base_of(handle: usize) -> Option<usize> {
+    if handle == 0 {
+        return None;
+    }
+    with_table(None, |t| t.handle_to_base.get(&handle).copied())
 }
 
 /// Extract the lowercase DLL basename from a path or bare name.
@@ -136,5 +183,33 @@ mod tests {
     #[test]
     fn dll_basename_with_path() {
         assert_eq!(dll_basename(r"C:\Windows\System32\ntdll.dll"), "ntdll.dll");
+    }
+
+    #[test]
+    fn register_with_base_stores_and_returns_base() {
+        let h = register_with_base("test_base_a.dll", 0x1234_5000);
+        assert!(h >= HANDLE_BASE);
+        assert_eq!(base_of(h), Some(0x1234_5000));
+    }
+
+    #[test]
+    fn base_of_unknown_handle_returns_none() {
+        // Pick a handle clearly outside anything we've allocated.
+        assert!(base_of(0xDEAD_BEEF).is_none());
+        assert!(base_of(0).is_none());
+    }
+
+    #[test]
+    fn plain_register_has_no_base() {
+        let h = register("test_base_nobase.dll");
+        assert!(base_of(h).is_none());
+    }
+
+    #[test]
+    fn register_with_base_reuses_existing_handle() {
+        let h1 = register("test_base_reuse.dll");
+        let h2 = register_with_base("test_base_reuse.dll", 0xAABB_C000);
+        assert_eq!(h1, h2);
+        assert_eq!(base_of(h2), Some(0xAABB_C000));
     }
 }
