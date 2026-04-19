@@ -512,10 +512,31 @@ use std::sync::OnceLock;
 
 static HEAP_COMMODE: OnceLock<usize> = OnceLock::new();
 static HEAP_FMODE: OnceLock<usize> = OnceLock::new();
-static HEAP_STDIO: OnceLock<[usize; 3]> = OnceLock::new();
-/// Contiguous fake FILE[3] array for the msvcrt `_iob` DATA import.
+/// Contiguous fake FILE[3] array shared by both the msvcrt `_iob` DATA import
+/// and the `__acrt_iob_func` FUNCTION import.
+///
 /// 64 bytes per slot — generous enough for any MSVC FILE struct layout.
-static IOB_ARRAY: OnceLock<Box<[u8; 192]>> = OnceLock::new();
+/// Before, `_iob` used this array but `__acrt_iob_func` returned three
+/// separate zero-initialised heap buffers.  That broke `stream_to_fd` (which
+/// assumes `stdin/stdout/stderr` are at consecutive +64 offsets in one array)
+/// and meant the FILE* returned by `__acrt_iob_func` had `_file`=0 for all
+/// three streams.  libc's fortified stdio path derefs those fields during
+/// `fprintf`/buffered I/O and faulted.
+///
+/// Wine ref: `dlls/msvcrt/file.c:265` — `__acrt_iob_func(idx)` returns
+/// `&MSVCRT__iob[idx].file` (or `&MSVCRT__iob[idx]` pre-_MSVCR_VER 140), so
+/// the three streams ARE contiguous entries of one array, not separate
+/// allocations.
+///
+/// Wine ref: `dlls/msvcrt/msvcrt.h:26-35` — FILE layout is
+/// `{char* _ptr; char* _base; int _cnt; int _flag; int _file; int _charbuf;
+///   int _bufsiz; char* _tmpfname;}` — `_file` at byte offset 24.
+///
+/// Wine ref: `include/msvcrt/corecrt_wstdio.h:26` — under `_UCRT` the FILE
+/// is opaque `{void* _Placeholder}`, so MinGW-against-ucrt only reads the
+/// pointer identity (no field deref).  Populating `_file` covers both the
+/// classic-msvcrt layout and the ucrt layout without harm.
+static IOB_ARRAY: OnceLock<usize> = OnceLock::new();
 
 /// Return the address of writable _fmode storage for DATA imports.
 ///
@@ -702,8 +723,37 @@ pub unsafe extern "win64" fn ucrt_p_fmode() -> *mut i32 {
 /// `_iob` in msvcrt.dll is a contiguous array of FILE structs. The IAT slot
 /// holds the array's base address directly (not address-of-pointer).
 /// 7-Zip and other msvcrt.dll users access stdin/stdout/stderr as `_iob + N*64`.
+///
+/// The same 192-byte array is used by `__acrt_iob_func` — see `IOB_ARRAY` doc.
+/// The array is heap-allocated (writable) and populated with a minimal
+/// MinGW-compatible layout: `_file` (byte offset 24) holds the fd number,
+/// `_flag` (byte offset 20) holds `_IOREAD | _IOWRT` so callers can tell the
+/// struct is initialised.
 pub fn iob_data_addr() -> usize {
-    IOB_ARRAY.get_or_init(|| Box::new([0u8; 192])).as_ptr() as usize
+    *IOB_ARRAY.get_or_init(|| {
+        // Leak a 192-byte writable buffer: three 64-byte FILE slots.
+        let buf: Box<[u8; 192]> = Box::new([0u8; 192]);
+        let base = Box::into_raw(buf) as *mut u8;
+        // Populate `_file` (int at byte offset 24) and `_flag`
+        // (int at byte offset 20) per the classic msvcrt `struct _iobuf`
+        // layout (see `IOB_ARRAY` doc).  Harmless for the ucrt opaque
+        // layout (those 8 bytes are past the single pointer field and
+        // nobody reads them under `_UCRT`).
+        //
+        // _IOREAD = 0x0001, _IOWRT = 0x0002  — Wine `dlls/msvcrt/msvcrt.h:38`.
+        const FLAG_RD: i32 = 0x0001;
+        const FLAG_WR: i32 = 0x0002;
+        unsafe {
+            for (i, flag) in [FLAG_RD, FLAG_WR, FLAG_WR].iter().enumerate() {
+                let slot = base.add(i * 64);
+                let flag_ptr = slot.add(20) as *mut i32;
+                let file_ptr = slot.add(24) as *mut i32;
+                *flag_ptr = *flag;
+                *file_ptr = i as i32; // stdin=0, stdout=1, stderr=2
+            }
+        }
+        base as usize
+    })
 }
 
 /// Map a FILE* to a Linux fd number.
@@ -777,30 +827,38 @@ pub unsafe extern "win64" fn ms_fflush(_stream: *mut c_void) -> i32 {
     0
 }
 
+/// `__acrt_iob_func(idx)` — return `FILE*` for stdin (0), stdout (1),
+/// stderr (2).
+///
+/// Returns a pointer into the shared `IOB_ARRAY` at stride 64 — the same
+/// array backing the `_iob` DATA import — so `stream_to_fd` and all stdio
+/// stubs that dispatch off the returned FILE* agree on the identity and fd
+/// of each stream.
+///
+/// Before this fix, this stub handed back three separate zero-initialised
+/// 256-byte heap buffers.  libc's fortified stdio path (called from
+/// wget's MinGW startup) dereferenced the returned FILE*'s `_file` and
+/// `_flag` fields: all three structs looked like stdin (fd=0, flag=0),
+/// which broke invariants and surfaced as a SIGSEGV downstream.
+///
+/// Wine ref: `dlls/msvcrt/file.c:265` —
+/// `static FILE* iob_get_file(int i) { return &MSVCRT__iob[i].file; }`
+/// and `dlls/msvcrt/file.c:981` — `__acrt_iob_func` is the ucrt alias.
+///
+/// Wine ref: `include/msvcrt/corecrt_wstdio.h:50-52` —
+/// `#define stdin  (__acrt_iob_func(0))`, stdout=1, stderr=2.
+///
+/// For out-of-range indices (wget passes only 0/1/2 but other callers
+/// may probe), we fall back to the stdout slot rather than NULL — NULL
+/// would re-introduce the fortified-deref SIGSEGV class that motivated
+/// this fix.
 pub extern "win64" fn ucrt_acrt_iob_func(fd: u32) -> *mut c_void {
-    // Heap-allocated 256-byte buffers for fake FILE structs.  MinGW CRT writes
-    // into these immediately after calling __acrt_iob_func; heap memory is
-    // always R+W so this avoids the RELRO SIGSEGV issue with static mut.
-    let ptrs = HEAP_STDIO.get_or_init(|| {
-        [
-            Box::into_raw(Box::new([0u8; 256])) as usize,
-            Box::into_raw(Box::new([0u8; 256])) as usize,
-            Box::into_raw(Box::new([0u8; 256])) as usize,
-        ]
-    });
-    unsafe {
-        libc::write(
-            2,
-            b"weave: stub __acrt_iob_func\n".as_ptr() as *const libc::c_void,
-            28,
-        )
+    let base = iob_data_addr();
+    let slot = match fd {
+        0..=2 => fd as usize,
+        _ => 1, // fall back to stdout rather than NULL
     };
-    match fd {
-        0 => ptrs[0] as *mut c_void,
-        1 => ptrs[1] as *mut c_void,
-        2 => ptrs[2] as *mut c_void,
-        _ => std::ptr::null_mut(),
-    }
+    (base + slot * 64) as *mut c_void
 }
 
 /// _amsg_exit — abnormal CRT termination (e.g. failed _onexit registration).
@@ -3997,5 +4055,80 @@ mod tests {
         // (Task 01b dispatch 3c-D).
         assert!(resolve("msvcrt.dll", "_open_osfhandle").is_some());
         assert!(resolve("ucrtbase.dll", "_open_osfhandle").is_some());
+    }
+
+    // ── Task 01b: __acrt_iob_func ────────────────────────────────────────────
+
+    #[test]
+    fn acrt_iob_func_returns_distinct_non_null_pointers_for_012() {
+        // Contract wget's MinGW startup depends on: three DIFFERENT FILE*
+        // values for stdin/stdout/stderr, every one dereferenceable without
+        // faulting (libc's fortified stdio path reads _file / _flag).
+        let p0 = ucrt_acrt_iob_func(0);
+        let p1 = ucrt_acrt_iob_func(1);
+        let p2 = ucrt_acrt_iob_func(2);
+        assert!(!p0.is_null() && !p1.is_null() && !p2.is_null());
+        assert_ne!(p0, p1);
+        assert_ne!(p1, p2);
+        assert_ne!(p0, p2);
+    }
+
+    #[test]
+    fn acrt_iob_func_matches_iob_data_layout() {
+        // Must share the same 192-byte contiguous array as the _iob DATA
+        // import so `stream_to_fd` (and any future code that indexes
+        // _iob + N*64) agrees on identity.  Before the fix, __acrt_iob_func
+        // returned its own three heap allocations that had no relation to
+        // iob_data_addr().
+        let base = iob_data_addr();
+        assert_eq!(ucrt_acrt_iob_func(0) as usize, base);
+        assert_eq!(ucrt_acrt_iob_func(1) as usize, base + 64);
+        assert_eq!(ucrt_acrt_iob_func(2) as usize, base + 128);
+    }
+
+    #[test]
+    fn acrt_iob_func_populates_file_field() {
+        // MinGW's _fileno(stdin)/_fileno(stdout)/_fileno(stderr) reads the
+        // `_file` field at byte offset 24 of the FILE struct.  Must hold
+        // 0/1/2 respectively.  Wine ref: dlls/msvcrt/msvcrt.h:26-35.
+        for fd in [0u32, 1, 2] {
+            let p = ucrt_acrt_iob_func(fd);
+            let file_field = unsafe { *(p.cast::<u8>().add(24) as *const i32) };
+            assert_eq!(
+                file_field, fd as i32,
+                "_file field at offset 24 for idx={fd}"
+            );
+        }
+    }
+
+    #[test]
+    fn acrt_iob_func_out_of_range_falls_back_to_stdout() {
+        // NULL is the dangerous return: libc fortified derefs on NULL
+        // trigger SIGSEGV.  Falling back to stdout is safer for the
+        // rare caller that probes indices > 2.
+        let p = ucrt_acrt_iob_func(3);
+        assert!(!p.is_null());
+    }
+
+    #[test]
+    fn acrt_iob_func_is_stable_across_calls() {
+        // Same index must return the same pointer every time — the FILE*
+        // identity is used by _lock_file / _unlock_file and by buffered-I/O
+        // state.  Before the fix, HEAP_STDIO satisfied this accidentally;
+        // ensure the unified array does too.
+        assert_eq!(ucrt_acrt_iob_func(0), ucrt_acrt_iob_func(0));
+        assert_eq!(ucrt_acrt_iob_func(1), ucrt_acrt_iob_func(1));
+        assert_eq!(ucrt_acrt_iob_func(2), ucrt_acrt_iob_func(2));
+    }
+
+    #[test]
+    fn acrt_iob_func_resolves_via_resolver() {
+        // Must be reachable through both msvcrt.dll and ucrtbase.dll DLL
+        // names.  wget.exe imports __acrt_iob_func from msvcrt.dll via
+        // MinGW's compat shim (dlls/msvcrt/iob.c in Wine).
+        assert!(resolve("msvcrt.dll", "__acrt_iob_func").is_some());
+        assert!(resolve("ucrtbase.dll", "__acrt_iob_func").is_some());
+        // __iob_func is the legacy msvcrt alias; same implementation.
+        assert!(resolve("msvcrt.dll", "__iob_func").is_some());
     }
 }
