@@ -257,12 +257,17 @@ pub unsafe extern "win64" fn trace_import_stub() -> u64 {
 }
 
 /// Decode a CALL instruction immediately before `ret_addr` to recover the IAT
-/// slot VA.  Handles four encodings:
+/// slot VA.  Handles five encodings:
 /// - `FF 90 dd dd dd dd` (6 bytes, `call [rax+disp32]`)
 /// - `FF 15 dd dd dd dd` (6 bytes, `call [rip+disp32]` — MinGW's dominant
-///   IAT dispatch form on x86_64; the slot is at `ret_addr + disp32`)
+///   direct-IAT dispatch form on x86_64; the slot is at `ret_addr + disp32`)
 /// - `FF 50 dd`          (3 bytes, `call [rax+disp8]`)
 /// - `FF 10`             (2 bytes, `call [rax]`)
+/// - `E8 dd dd dd dd`  → `FF 25 dd dd dd dd`  (MinGW `__imp_` jmp-thunk chain:
+///   guest `call rel32` into a 6-byte thunk that itself `jmp [rip+disp32]`s
+///   through the real IAT slot.  This is the dominant pattern for most imports
+///   in MinGW-built binaries — gcc emits a call to `__imp_Foo` by default,
+///   and `ld` materialises `__imp_Foo` as a local jmp-thunk.)
 ///
 /// Returns `None` if the bytes don't match any known pattern or the address
 /// range is inaccessible.
@@ -272,11 +277,20 @@ pub unsafe extern "win64" fn trace_import_stub() -> u64 {
 /// preceding it.  This is always true when called from `unresolved_import_stub`
 /// because `ret_addr` came from `[rsp]` inside a real CALL instruction.
 ///
+/// For the thunk-chase path the decoder also reads 6 bytes at the E8 target
+/// address.  That address is computed from the E8's rel32 operand.  If the
+/// target is unmapped the read will segfault — we rely on the caller only
+/// using this from a real CALL site (any CALL that successfully executed
+/// means its target was mapped and executable).  We still guard against a
+/// NULL or plausibly-garbage target by checking the 6 bytes match `FF 25`
+/// before trusting them; if they don't, we return None and the caller takes
+/// the lookup-miss path.
+///
 /// Not `#[cfg]`-gated: the decode logic is pure byte arithmetic and has no
 /// architecture-specific behavior, so it's compiled on all targets.  This
 /// allows the unit tests in this file to exercise it on aarch64 macOS host
 /// builds.  On non-x86_64 targets the only concern is that a caller must
-/// supply bytes that match one of the four patterns and a `ret_addr` that
+/// supply bytes that match one of the five patterns and a `ret_addr` that
 /// is a valid pointer — the function does not assume the host is x86.
 unsafe fn decode_call_iat_slot(ret_addr: usize, rax: usize) -> Option<usize> {
     if ret_addr < 6 {
@@ -294,12 +308,57 @@ unsafe fn decode_call_iat_slot(ret_addr: usize, rax: usize) -> Option<usize> {
     }
 
     // FF 15 dd dd dd dd → call [rip+disp32]  (6 bytes, starts at ret_addr-6)
-    // This is the dominant MinGW x86_64 IAT dispatch encoding.  RIP at decode
-    // time of the CALL is the address of the NEXT instruction = `ret_addr`.
-    // So `slot_va = ret_addr + disp32`.  `rax` is ignored for this form.
+    // This is the dominant MinGW x86_64 direct-IAT dispatch encoding.  RIP at
+    // decode time of the CALL is the address of the NEXT instruction =
+    // `ret_addr`.  So `slot_va = ret_addr + disp32`.  `rax` is ignored.
     if bytes[0] == 0xFF && bytes[1] == 0x15 {
         let disp = i32::from_le_bytes([bytes[2], bytes[3], bytes[4], bytes[5]]);
         return Some(ret_addr.wrapping_add_signed(disp as isize));
+    }
+
+    // E8 dd dd dd dd → near direct call (5 bytes, starts at ret_addr-5).
+    // By itself this is not an IAT dispatch, but MinGW emits it as a CALL to
+    // a local `__imp_Foo` jmp-thunk whose body is `FF 25 disp32` — i.e. a
+    // RIP-relative jmp *through* the real IAT slot.  We chase the thunk here
+    // to recover the slot VA.
+    //
+    // Arithmetic:
+    //   call_site      = ret_addr - 5
+    //   rel32          = i32 at bytes[2..6]  (bytes[1]=0xE8, bytes[2..6]=rel32)
+    //   target         = ret_addr + rel32   (rel32 is relative to the next-
+    //                                        instruction addr = ret_addr)
+    //   At `target`, the 6 bytes must be `FF 25 disp32`:
+    //   next_instr     = target + 6
+    //   disp32         = i32 at target[2..6]
+    //   slot_va        = next_instr + disp32
+    //
+    // The `FF 25` guard before dereferencing protects us from treating a
+    // plain E8 (non-thunk) direct call as an IAT dispatch — the vast
+    // majority of E8 targets are function prologues, not `FF 25` thunks,
+    // and those will decline here and fall through to the miss-stub path.
+    if bytes[1] == 0xE8 {
+        let rel32 = i32::from_le_bytes([bytes[2], bytes[3], bytes[4], bytes[5]]);
+        let target = ret_addr.wrapping_add_signed(rel32 as isize);
+        // Guard against obviously-bad targets before dereferencing.  A real
+        // mapped thunk lives inside the loaded image; NULL / tiny / highly
+        // misaligned targets cannot be one.  We don't have mapped-range
+        // access here, so this check is best-effort — a wildly bad target
+        // that happens to point to readable memory whose first two bytes are
+        // `FF 25` would still be decoded.  The likelihood is vanishingly
+        // small in practice (any `FF 25` that isn't a real IAT jmp-thunk
+        // would chase to a bogus slot VA that misses `RESOLVED_SLOT_MAP` and
+        // falls through to the lookup-miss path).
+        if target >= 6 {
+            let thunk = unsafe { std::slice::from_raw_parts(target as *const u8, 6) };
+            if thunk[0] == 0xFF && thunk[1] == 0x25 {
+                let disp32 = i32::from_le_bytes([thunk[2], thunk[3], thunk[4], thunk[5]]);
+                // slot_va = (target + 6) + disp32
+                let slot_va = target.wrapping_add(6).wrapping_add_signed(disp32 as isize);
+                return Some(slot_va);
+            }
+        }
+        // E8 that isn't an `__imp_` thunk: no IAT slot to report.
+        return None;
     }
 
     // FF 50 dd → call [rax+disp8]  (3 bytes, starts at ret_addr-3)
@@ -685,6 +744,84 @@ mod tests {
             build_call_iat_rip_relative(|ret_addr| ret_addr.wrapping_sub(0x1000));
         let decoded = unsafe { decode_call_iat_slot(ret_addr, 0) };
         assert_eq!(decoded, Some(slot_va));
+    }
+
+    /// Build two buffers:
+    ///   1. a "guest" buffer ending in `E8 rel32` whose target points at
+    ///   2. a "thunk" buffer whose first 6 bytes are `FF 25 disp32` pointing
+    ///      at `slot_va`.
+    ///
+    /// Returns (guest_buf, thunk_buf, ret_addr, slot_va).  Both buffers must
+    /// remain live (pinned by the caller) for the test duration so that the
+    /// decoder's dereferences land on valid memory.
+    fn build_call_impthunk_chain(
+        compute_slot: impl Fn(usize) -> usize,
+    ) -> (Vec<u8>, Vec<u8>, usize, usize) {
+        // Thunk buffer: 6 bytes of `FF 25 disp32` followed by padding.  We
+        // build the thunk first so we know its address, then compute the
+        // guest `E8 rel32` that points at it.
+        let mut thunk: Vec<u8> = Vec::with_capacity(16);
+        thunk.push(0xFF);
+        thunk.push(0x25);
+        thunk.extend_from_slice(&0i32.to_le_bytes()); // placeholder disp32
+        thunk.extend(std::iter::repeat(0x90u8).take(10)); // padding
+        let thunk_addr = thunk.as_ptr() as usize;
+        let next_instr = thunk_addr + 6;
+        let slot_va = compute_slot(next_instr);
+        let disp32 = (slot_va as isize - next_instr as isize) as i32;
+        thunk[2..6].copy_from_slice(&disp32.to_le_bytes());
+
+        // Guest buffer: 16 NOPs + `E8 rel32` where rel32 points at thunk_addr.
+        let mut guest: Vec<u8> = Vec::with_capacity(32);
+        guest.extend(std::iter::repeat(0x90u8).take(16));
+        guest.push(0xE8);
+        guest.extend_from_slice(&0i32.to_le_bytes()); // placeholder
+        let ret_addr = guest.as_ptr() as usize + guest.len();
+        let rel32 = (thunk_addr as isize - ret_addr as isize) as i32;
+        let len = guest.len();
+        guest[len - 4..len].copy_from_slice(&rel32.to_le_bytes());
+
+        (guest, thunk, ret_addr, slot_va)
+    }
+
+    #[test]
+    fn decode_call_iat_slot_impthunk_positive() {
+        // Slot sits ahead of the thunk.  Keep both buffers alive via _guard.
+        let (_guest, _thunk, ret_addr, slot_va) =
+            build_call_impthunk_chain(|next_instr| next_instr + 0x4000);
+        let decoded = unsafe { decode_call_iat_slot(ret_addr, 0xDEAD_BEEFusize) };
+        assert_eq!(decoded, Some(slot_va));
+    }
+
+    #[test]
+    fn decode_call_iat_slot_impthunk_negative_disp() {
+        // Slot sits behind the thunk (negative disp32 inside the thunk).
+        let (_guest, _thunk, ret_addr, slot_va) =
+            build_call_impthunk_chain(|next_instr| next_instr.wrapping_sub(0x800));
+        let decoded = unsafe { decode_call_iat_slot(ret_addr, 0) };
+        assert_eq!(decoded, Some(slot_va));
+    }
+
+    #[test]
+    fn decode_call_iat_slot_plain_e8_not_thunk_returns_none() {
+        // Guest E8 whose target is NOT `FF 25 ...` — just NOP padding.
+        // The decoder should decline rather than return a bogus slot VA.
+        let target_buf: Vec<u8> = vec![0x90u8; 16];
+        let target_addr = target_buf.as_ptr() as usize;
+
+        let mut guest: Vec<u8> = Vec::with_capacity(32);
+        guest.extend(std::iter::repeat(0x90u8).take(16));
+        guest.push(0xE8);
+        guest.extend_from_slice(&0i32.to_le_bytes());
+        let ret_addr = guest.as_ptr() as usize + guest.len();
+        let rel32 = (target_addr as isize - ret_addr as isize) as i32;
+        let len = guest.len();
+        guest[len - 4..len].copy_from_slice(&rel32.to_le_bytes());
+
+        let decoded = unsafe { decode_call_iat_slot(ret_addr, 0xDEAD_BEEFusize) };
+        assert_eq!(decoded, None);
+        drop(target_buf);
+        drop(guest);
     }
 
     #[test]
