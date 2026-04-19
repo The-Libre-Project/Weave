@@ -12633,4 +12633,65 @@ mod tests {
         // (which does not set last-error, breaking the loop exit).
         assert!(resolve("kernel32.dll", "GetNumberOfConsoleInputEvents").is_some());
     }
+
+    // ── GetEnvironmentVariableA ───────────────────────────────────────────────
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn get_environment_variable_a_resolves_via_resolver() {
+        // Same bug class as GetNumberOfConsoleInputEvents above: an IAT patch
+        // for GetEnvironmentVariableA must reach the real stub or callers that
+        // treat "not found" as fatal (e.g. wget) abort.
+        assert!(resolve("kernel32.dll", "GetEnvironmentVariableA").is_some());
+    }
+
+    #[test]
+    fn get_environment_variable_a_not_found_sets_last_error() {
+        let name = b"WEAVE_TEST_NONEXISTENT_VAR_XYZZY_8675309\0";
+        let mut buf = [0u8; 32];
+        let ret = unsafe {
+            get_environment_variable_a(name.as_ptr(), buf.as_mut_ptr(), buf.len() as u32)
+        };
+        assert_eq!(ret, 0);
+        assert_eq!(get_last_error(), 203); // ERROR_ENVVAR_NOT_FOUND
+    }
+
+    #[test]
+    fn get_environment_variable_a_success_writes_value() {
+        // Set a known variable for the duration of this test.
+        // SAFETY: setenv is not thread-safe but cargo test threads don't share
+        // this exact name; collision risk is negligible.
+        unsafe {
+            libc::setenv(
+                b"WEAVE_TEST_ENV_A_OK\0".as_ptr() as *const i8,
+                b"hello\0".as_ptr() as *const i8,
+                1,
+            );
+        }
+        let name = b"WEAVE_TEST_ENV_A_OK\0";
+        let mut buf = [0u8; 32];
+        let ret = unsafe {
+            get_environment_variable_a(name.as_ptr(), buf.as_mut_ptr(), buf.len() as u32)
+        };
+        assert_eq!(ret, 5); // "hello" — chars excl. NUL
+        assert_eq!(&buf[..6], b"hello\0");
+        unsafe { libc::unsetenv(b"WEAVE_TEST_ENV_A_OK\0".as_ptr() as *const i8) };
+    }
+
+    #[test]
+    fn get_environment_variable_a_buffer_too_small_returns_required_size() {
+        unsafe {
+            libc::setenv(
+                b"WEAVE_TEST_ENV_A_SMALL\0".as_ptr() as *const i8,
+                b"hello\0".as_ptr() as *const i8,
+                1,
+            );
+        }
+        let name = b"WEAVE_TEST_ENV_A_SMALL\0";
+        let mut buf = [0u8; 3];
+        let ret =
+            unsafe { get_environment_variable_a(name.as_ptr(), buf.as_mut_ptr(), buf.len() as u32) };
+        assert_eq!(ret, 6); // "hello" len + NUL
+        unsafe { libc::unsetenv(b"WEAVE_TEST_ENV_A_SMALL\0".as_ptr() as *const i8) };
+    }
 }
