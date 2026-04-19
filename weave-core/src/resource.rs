@@ -119,6 +119,78 @@ pub fn find_resource(
     image.data_entry_at(leaf_off)
 }
 
+/// Locate a resource and return a raw pointer to its `IMAGE_RESOURCE_DATA_ENTRY`
+/// within the mapped PE image — this is the canonical Win32 `HRSRC` value.
+///
+/// Wine ref: `dlls/kernelbase/loader.c`:
+///   * `LoadResource`: `LdrAccessResource(module, (IMAGE_RESOURCE_DATA_ENTRY *)rsrc, &ret, NULL)`
+///   * `SizeofResource`: `return ((IMAGE_RESOURCE_DATA_ENTRY *)rsrc)->Size;`
+///
+/// The Win32 contract is that the HRSRC is a direct pointer to the leaf
+/// `IMAGE_RESOURCE_DATA_ENTRY` (16 bytes: OffsetToData, Size, CodePage,
+/// Reserved). `LoadResource` and `SizeofResource` read fields from that
+/// struct — no allocation, no handle table. The pointer stays live for the
+/// lifetime of the mapped module, matching Wine's identity scheme.
+///
+/// # Safety
+/// Same contract as [`find_resource`]: `image_base` must point to a fully
+/// mapped PE image whose resource section is readable.
+pub fn find_resource_entry(
+    image_base: usize,
+    type_: ResourceId,
+    name: ResourceId,
+    lang: u16,
+) -> Option<usize> {
+    // SAFETY: caller contract.
+    let image = unsafe { ImageView::from_base(image_base)? };
+    let root = image.resource_root()?;
+
+    let type_dir_off = find_entry(root, &image, &type_, /*want_dir=*/ true)?;
+    let type_dir = image.dir_at(type_dir_off)?;
+
+    let name_dir_off = find_entry(type_dir, &image, &name, /*want_dir=*/ true)?;
+    let name_dir = image.dir_at(name_dir_off)?;
+
+    let leaf_off = find_lang_entry(name_dir, &image, lang)?;
+
+    // The leaf offset is relative to the start of the .rsrc section.
+    // The IMAGE_RESOURCE_DATA_ENTRY lives at image_base + rsrc_rva + leaf_off.
+    // Bounds-check against the section before handing out the pointer.
+    let _ = image.data_entry_at(leaf_off)?;
+    Some(image_base + image.rsrc_rva as usize + leaf_off as usize)
+}
+
+/// Read the `Size` field from an `IMAGE_RESOURCE_DATA_ENTRY` pointer returned
+/// by [`find_resource_entry`]. Used by `SizeofResource`.
+///
+/// # Safety
+/// `entry_ptr` must point to a valid `IMAGE_RESOURCE_DATA_ENTRY` (16 bytes)
+/// inside a mapped PE image. Passing any other value is UB.
+pub unsafe fn resource_entry_size(entry_ptr: usize) -> u32 {
+    // SAFETY: caller guarantees `entry_ptr` points to a 16-byte
+    // IMAGE_RESOURCE_DATA_ENTRY. We read only the Size field at +4.
+    let p = (entry_ptr + 4) as *const u8;
+    let bytes = unsafe { std::slice::from_raw_parts(p, 4) };
+    u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
+}
+
+/// Resolve an `HGLOBAL` for a resource: returns the address of the resource
+/// bytes themselves (`image_base + OffsetToData`). Used by `LoadResource`.
+///
+/// Wine ref: `LoadResource` → `LdrAccessResource` returns
+/// `(char *)module + entry->OffsetToData`.
+///
+/// # Safety
+/// `entry_ptr` must point to a valid `IMAGE_RESOURCE_DATA_ENTRY` inside the
+/// PE image whose base is `image_base`.
+pub unsafe fn resource_entry_data(image_base: usize, entry_ptr: usize) -> usize {
+    // SAFETY: caller contract above.
+    let p = entry_ptr as *const u8;
+    let bytes = unsafe { std::slice::from_raw_parts(p, 4) };
+    let offset_to_data = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize;
+    image_base + offset_to_data
+}
+
 // ---------------------------------------------------------------------------
 // Internals
 // ---------------------------------------------------------------------------
@@ -588,5 +660,30 @@ mod tests {
         let (buf, _) = build_image();
         let base = buf.as_ptr() as usize;
         assert!(find_resource(base, ResourceId::Id(6), ResourceId::Id(9999), 0x0409).is_none());
+    }
+
+    #[test]
+    fn find_resource_entry_returns_pointer_into_rsrc() {
+        let (buf, rsrc_rva) = build_image();
+        let base = buf.as_ptr() as usize;
+        let hrsrc = find_resource_entry(base, ResourceId::Id(6), ResourceId::Id(42), 0x0409)
+            .expect("should return HRSRC pointer");
+        // IMAGE_RESOURCE_DATA_ENTRY for id=42/en-US was written at
+        // rsrc + id_data_en_off (0x320). That's image_base + rsrc_rva + 0x320.
+        assert_eq!(hrsrc, base + rsrc_rva as usize + 0x320);
+
+        // SAFETY: hrsrc points into the buffer we built; the 16-byte
+        // IMAGE_RESOURCE_DATA_ENTRY is readable.
+        let size = unsafe { resource_entry_size(hrsrc) };
+        assert_eq!(size, 7); // "ENGLISH"
+
+        // SAFETY: same contract.
+        let hglobal = unsafe { resource_entry_data(base, hrsrc) };
+        // OffsetToData = rsrc_rva + 0x420 (the "ENGLISH" payload offset).
+        assert_eq!(hglobal, base + rsrc_rva as usize + 0x420);
+
+        // And the bytes at hglobal are indeed "ENGLISH".
+        let payload = unsafe { std::slice::from_raw_parts(hglobal as *const u8, 7) };
+        assert_eq!(payload, b"ENGLISH");
     }
 }

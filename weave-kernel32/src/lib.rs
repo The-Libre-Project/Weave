@@ -11919,37 +11919,107 @@ pub unsafe extern "win64" fn enum_system_locales_w(
     1
 }
 
-/// FindResourceA: locate a resource in a module. Returns NULL (not implemented).
+/// Translate a Win32 resource-name/type pointer (either `MAKEINTRESOURCE(n)`
+/// ordinal or a NUL-terminated UTF-16 string pointer) into a [`ResourceId`].
+///
+/// Wine ref: `IS_INTRESOURCE(x)` is `(((ULONG_PTR)(x)) >> 16) == 0`; values
+/// whose upper bits are all zero are ordinals, everything else is a pointer.
 ///
 /// # Safety
-/// Pointer arguments are accepted but not dereferenced.
+/// If `p` is not an ordinal (low 16 bits only), it must be a valid pointer
+/// to a NUL-terminated UTF-16 string readable for the length of that string.
+unsafe fn resource_id_from_ptr_w(p: usize) -> weave_core::resource::ResourceId {
+    if (p >> 16) == 0 {
+        return weave_core::resource::ResourceId::Id((p & 0xFFFF) as u16);
+    }
+    // SAFETY: caller contract — `p` is a UTF-16 C-string pointer.
+    let name = unsafe { read_cstr_w(p as *const u16) };
+    weave_core::resource::ResourceId::Name(name.encode_utf16().collect())
+}
+
+/// ANSI variant: ordinals are encoded the same way; string pointers are
+/// ANSI (CP_ACP in Wine; we treat as UTF-8-lossy since Weave's guest ANSI
+/// round-trip is not exact).
+///
+/// # Safety
+/// If `p` is not an ordinal, it must be a valid NUL-terminated ANSI string
+/// pointer readable for the length of that string.
+unsafe fn resource_id_from_ptr_a(p: usize) -> weave_core::resource::ResourceId {
+    if (p >> 16) == 0 {
+        return weave_core::resource::ResourceId::Id((p & 0xFFFF) as u16);
+    }
+    // SAFETY: caller contract.
+    let name = unsafe { read_cstr_a(p as *const u8) };
+    weave_core::resource::ResourceId::Name(name.encode_utf16().collect())
+}
+
+/// FindResourceA: locate a resource in a module. Delegates to FindResourceW
+/// after ANSI→UTF-16 name/type conversion.
+///
+/// # Safety
+/// Pointer arguments must be either small ordinals (`MAKEINTRESOURCEA`) or
+/// NUL-terminated ANSI strings readable for their length.
 // Wine ref: dlls/kernelbase/loader.c — converts ANSI name/type to Unicode if not IS_INTRESOURCE;
 // delegates to FindResourceExW(hModule, typeW, nameW, MAKELANGID(LANG_NEUTRAL, SUBLANG_NEUTRAL));
 // LdrFindResource_U returns an HRSRC (pointer into the PE image)
+// implemented 2026-04-19
 pub unsafe extern "win64" fn find_resource_a(
-    _h_module: usize,
-    _lp_name: *const u8,
-    _lp_type: *const u8,
+    h_module: usize,
+    lp_name: *const u8,
+    lp_type: *const u8,
 ) -> usize {
-    warn_once("FindResourceA");
-    0
+    // SAFETY: caller contract propagated to resource_id_from_ptr_a.
+    let name = unsafe { resource_id_from_ptr_a(lp_name as usize) };
+    let type_ = unsafe { resource_id_from_ptr_a(lp_type as usize) };
+    find_resource_common(h_module, name, type_)
 }
 
-/// FindResourceW: locate a named resource in a module. Returns NULL.
+/// FindResourceW: locate a named resource in a module via Wine's identity
+/// HRSRC scheme — returns a pointer to the `IMAGE_RESOURCE_DATA_ENTRY`
+/// inside the mapped PE image.
 ///
 /// # Safety
-/// Pointer arguments are accepted but not dereferenced.
+/// Pointer arguments must be either small ordinals (`MAKEINTRESOURCEW`) or
+/// NUL-terminated UTF-16 strings.
 // Wine ref: dlls/kernelbase/loader.c FindResourceW — delegates to
 // FindResourceExW(module, type, name, MAKELANGID(LANG_NEUTRAL, SUBLANG_NEUTRAL));
-// FindResourceExW calls LdrFindResource_U which walks the PE resource directory;
-// no real PE resource directory in Weave guest — return NULL + ERROR_RESOURCE_NAME_NOT_FOUND.
+// FindResourceExW calls LdrFindResource_U which walks the PE resource directory
+// and returns `(HRSRC)&entry` — the address of IMAGE_RESOURCE_DATA_ENTRY.
+// implemented 2026-04-19
 pub unsafe extern "win64" fn find_resource_w(
-    _h_module: usize,
-    _lp_name: *const u16,
-    _lp_type: *const u16,
+    h_module: usize,
+    lp_name: *const u16,
+    lp_type: *const u16,
 ) -> usize {
-    set_last_error(1814); // ERROR_RESOURCE_NAME_NOT_FOUND
-    0
+    // SAFETY: caller contract propagated.
+    let name = unsafe { resource_id_from_ptr_w(lp_name as usize) };
+    let type_ = unsafe { resource_id_from_ptr_w(lp_type as usize) };
+    find_resource_common(h_module, name, type_)
+}
+
+/// Shared body for FindResourceA/W: resolve module base via the handle
+/// table, walk the resource directory, return HRSRC (=address of
+/// IMAGE_RESOURCE_DATA_ENTRY) or 0 with ERROR_RESOURCE_NAME_NOT_FOUND set.
+fn find_resource_common(
+    h_module: usize,
+    name: weave_core::resource::ResourceId,
+    type_: weave_core::resource::ResourceId,
+) -> usize {
+    let base = match weave_core::module_handles::base_of(h_module) {
+        Some(b) => b,
+        None => {
+            set_last_error(1814); // ERROR_RESOURCE_NAME_NOT_FOUND
+            return 0;
+        }
+    };
+    // Wine's FindResourceW default lang = MAKELANGID(LANG_NEUTRAL, SUBLANG_NEUTRAL) = 0.
+    match weave_core::resource::find_resource_entry(base, type_, name, 0) {
+        Some(hrsrc) => hrsrc,
+        None => {
+            set_last_error(1814);
+            0
+        }
+    }
 }
 
 /// FreeResource: legacy 16-bit resource free. Always returns FALSE.
@@ -11959,28 +12029,48 @@ pub extern "win64" fn free_resource(_h_res_data: usize) -> i32 {
     0 // FALSE
 }
 
-/// LoadResource: load a resource into memory. Returns NULL (not implemented).
-// Wine ref: dlls/kernelbase/loader.c — calls LdrAccessResource(hModule, hRsrcInfo, &ptr, NULL);
-// returns a HGLOBAL which is actually a direct pointer into the PE image (no actual allocation)
-pub extern "win64" fn load_resource(_h_module: usize, _h_res_info: usize) -> usize {
-    warn_once("LoadResource");
-    0
+/// LoadResource: translate an HRSRC to an HGLOBAL pointing at the actual
+/// resource bytes. Wine's identity scheme: HGLOBAL = image_base + entry.OffsetToData.
+// Wine ref: dlls/kernelbase/loader.c LoadResource — calls
+//   LdrAccessResource(module, (IMAGE_RESOURCE_DATA_ENTRY *)rsrc, &ret, NULL);
+// LdrAccessResource returns `(char *)module + entry->OffsetToData`. The
+// returned HGLOBAL is a direct pointer into the PE image (no allocation).
+// implemented 2026-04-19
+pub extern "win64" fn load_resource(h_module: usize, h_res_info: usize) -> usize {
+    if h_res_info == 0 {
+        return 0;
+    }
+    let base = match weave_core::module_handles::base_of(h_module) {
+        Some(b) => b,
+        None => return 0,
+    };
+    // SAFETY: h_res_info came from find_resource_entry over this same module,
+    // so it points to a valid IMAGE_RESOURCE_DATA_ENTRY inside `base`'s image.
+    // Wine skips validation similarly — callers that fabricate HRSRCs hit UB.
+    unsafe { weave_core::resource::resource_entry_data(base, h_res_info) }
 }
 
-/// LockResource: return a pointer to locked resource data. Returns NULL.
-// Wine ref: dlls/kernelbase/loader.c — simply returns hResData cast to LPVOID; Win32 resources
-// are never actually locked (16-bit legacy API; on Win32 LoadResource already returns the pointer)
-pub extern "win64" fn lock_resource(_h_res_data: usize) -> usize {
-    warn_once("LockResource");
-    0
+/// LockResource: pure identity — HGLOBAL is already the bytes' address.
+// Wine ref: dlls/kernelbase/loader.c LockResource — body is literally
+// `return handle;`. Win32 resources are never actually locked (16-bit
+// legacy API; LoadResource already returned the pointer).
+// implemented 2026-04-19
+pub extern "win64" fn lock_resource(h_res_data: usize) -> usize {
+    h_res_data
 }
 
-/// SizeofResource: return the size of a resource. Returns 0.
-// Wine ref: dlls/kernelbase/loader.c — calls LdrFindResource_U to get the resource entry;
-// returns entry->DataSize field from IMAGE_RESOURCE_DATA_ENTRY; 0 on failure
-pub extern "win64" fn sizeof_resource(_h_module: usize, _h_res_info: usize) -> u32 {
-    warn_once("SizeofResource");
-    0
+/// SizeofResource: read `IMAGE_RESOURCE_DATA_ENTRY.Size` from the HRSRC.
+// Wine ref: dlls/kernelbase/loader.c SizeofResource — body is
+//   `if (!rsrc) return 0; return ((IMAGE_RESOURCE_DATA_ENTRY *)rsrc)->Size;`
+// The Size field is at offset +4 inside the 16-byte data entry struct.
+// implemented 2026-04-19
+pub extern "win64" fn sizeof_resource(_h_module: usize, h_res_info: usize) -> u32 {
+    if h_res_info == 0 {
+        return 0;
+    }
+    // SAFETY: h_res_info came from find_resource_entry; points at a valid
+    // IMAGE_RESOURCE_DATA_ENTRY (16 bytes) inside a mapped PE image.
+    unsafe { weave_core::resource::resource_entry_size(h_res_info) }
 }
 
 /// FILETIME layout (Windows).
