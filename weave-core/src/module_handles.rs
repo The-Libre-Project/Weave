@@ -131,6 +131,26 @@ pub fn base_of(handle: usize) -> Option<usize> {
     with_table(None, |t| t.handle_to_base.get(&handle).copied())
 }
 
+/// Register an identity mapping where the HMODULE value *is* the loaded
+/// base address (Windows convention: HMODULE == image base for a mapped
+/// PE). After this call, `base_of(base)` returns `Some(base)`.
+///
+/// This is what the loader uses for the guest exe: real Win32 code reaches
+/// into resources via `LoadStringW(GetModuleHandleW(NULL), ...)` which
+/// resolves to `seh::pe_base()` — the actual loaded base, not a synthetic
+/// handle. Without this mapping the resource walker can't translate.
+///
+/// No name is recorded — callers that also want a name lookup should use
+/// `register_with_handle` separately.
+pub fn register_image_base(base: usize) {
+    if base == 0 {
+        return;
+    }
+    with_table((), |t| {
+        t.handle_to_base.insert(base, base);
+    });
+}
+
 /// Extract the lowercase DLL basename from a path or bare name.
 ///
 /// `r"C:\Windows\System32\SHELL32.DLL"` → `"shell32.dll"`
@@ -211,5 +231,21 @@ mod tests {
         let h2 = register_with_base("test_base_reuse.dll", 0xAABB_C000);
         assert_eq!(h1, h2);
         assert_eq!(base_of(h2), Some(0xAABB_C000));
+    }
+
+    #[test]
+    fn register_image_base_is_identity() {
+        // The guest exe's HMODULE is its loaded base — `LoadStringW(GetModuleHandleW(NULL), ...)`
+        // passes the real base. After registration, `base_of(base)` must return the base.
+        let base: usize = 0x0000_0001_4000_0000;
+        register_image_base(base);
+        assert_eq!(base_of(base), Some(base));
+    }
+
+    #[test]
+    fn register_image_base_zero_noop() {
+        // Defensive — never insert 0 as a base.
+        register_image_base(0);
+        assert!(base_of(0).is_none());
     }
 }

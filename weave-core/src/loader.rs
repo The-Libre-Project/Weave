@@ -102,6 +102,13 @@ fn load_impl(bytes: &[u8]) -> Result<LoadedImage, String> {
         crate::progress::mark_phase("loaded_pe");
     }
 
+    // Register identity mapping so `base_of(base)` resolves for callers that
+    // pass the real PE base as HMODULE (the common case — e.g.
+    // `GetModuleHandleW(NULL)` returns `seh::pe_base()`). Without this the
+    // resource walker fails for guest exes regardless of whether they were
+    // loaded via `load` or `load_with_name`.
+    crate::module_handles::register_image_base(base as usize);
+
     Ok(LoadedImage {
         base,
         size: opt.windows_fields.size_of_image as usize,
