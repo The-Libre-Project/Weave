@@ -10251,6 +10251,46 @@ pub unsafe extern "win64" fn set_console_ctrl_handler(_handler_routine: usize, _
     1 // TRUE
 }
 
+/// GetNumberOfConsoleInputEvents: report pending console input events.
+///
+/// In Weave, stdin is a pipe (CI/Docker) or a real terminal fd — never a
+/// Windows console object.  The Windows contract for this API on a
+/// non-console handle is FALSE + `ERROR_INVALID_HANDLE`.  MinGW/CRT
+/// startup loops (e.g. wget's pre-send polling loop that cycles
+/// `WSAEnumNetworkEvents` → `ioctlsocket(FIONBIO)` → `GetNumberOfConsoleInputEvents`)
+/// check this return to decide "stdin is not a console, stop polling it"
+/// and exit the loop so actual work (`send()`) can proceed.
+///
+/// Before this fix, the symbol was unresolved; the stub trampoline
+/// returned 0 and also did not set last-error.  Callers that required
+/// FALSE-plus-`ERROR_INVALID_HANDLE` to break the loop kept spinning.
+///
+/// Wine ref: dlls/kernelbase/console.c:1219 —
+/// `GetNumberOfConsoleInputEvents(HANDLE handle, DWORD *count)` calls
+/// `console_ioctl(handle, IOCTL_CONDRV_GET_INPUT_COUNT, ...)`; the
+/// ioctl returns `ERROR_INVALID_HANDLE` for handles that are not
+/// console input handles (the ioctl is only serviced by conhost).
+/// That matches the Windows documented behaviour for non-console
+/// handles — FALSE + `ERROR_INVALID_HANDLE`.
+///
+/// We also defensively zero `*lp_count` when the pointer is non-null,
+/// matching what callers who ignore the return value may expect.
+///
+/// # Safety
+/// `lp_count` may be null, or a valid writable pointer to a `u32`.
+pub unsafe extern "win64" fn get_number_of_console_input_events(
+    _h_console_input: usize,
+    lp_count: *mut u32,
+) -> i32 {
+    unsafe {
+        if !lp_count.is_null() {
+            *lp_count = 0;
+        }
+    }
+    set_last_error(file_io::ERROR_INVALID_HANDLE);
+    0 // FALSE — stdin is not a console in Weave
+}
+
 // ── Task-01 additions — curl stubs ────────────────────────────────────────────
 
 /// CancelIo — cancel pending I/O on a file handle. Stub returns TRUE.
@@ -11224,6 +11264,10 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         ),
         "SetConsoleCtrlHandler" => Some(
             set_console_ctrl_handler as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
+        ),
+        "GetNumberOfConsoleInputEvents" => Some(
+            get_number_of_console_input_events as unsafe extern "win64" fn(_, _) -> _ as *const ()
+                as usize,
         ),
         // Task 2: File information functions
         "GetFileInformationByHandle" => Some(
@@ -12489,5 +12533,47 @@ mod tests {
         // Must return TIME_ZONE_ID_UNKNOWN (0), TIME_ZONE_ID_STANDARD (1),
         // or TIME_ZONE_ID_DAYLIGHT (2)
         assert!(result <= 2, "unexpected return code: {result}");
+    }
+
+    // ── Task 01b: GetNumberOfConsoleInputEvents ──────────────────────────────
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn get_number_of_console_input_events_returns_false_for_non_console() {
+        // stdin under `cargo test` is a pipe, not a Windows console object.
+        // Contract: FALSE (0) + SetLastError(ERROR_INVALID_HANDLE).  This
+        // is what wget's MinGW pre-send polling loop needs to see to stop
+        // spinning on stdin.
+        let stdin_handle: usize = 0;
+        let mut count: u32 = 0xdead_beef;
+        let result =
+            unsafe { get_number_of_console_input_events(stdin_handle, &mut count as *mut u32) };
+        assert_eq!(result, 0, "must return FALSE for a non-console handle");
+        assert_eq!(count, 0, "must zero the count output on failure");
+        assert_eq!(
+            weave_common::get_last_error(),
+            file_io::ERROR_INVALID_HANDLE,
+            "must set last-error to ERROR_INVALID_HANDLE per Windows contract"
+        );
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn get_number_of_console_input_events_tolerates_null_count() {
+        // Defensive: calling with a null out-pointer must not fault.
+        let stdin_handle: usize = 0;
+        let result =
+            unsafe { get_number_of_console_input_events(stdin_handle, std::ptr::null_mut()) };
+        assert_eq!(result, 0);
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn get_number_of_console_input_events_resolves_via_resolver() {
+        // Bug class: the symbol must be reachable through weave-kernel32's
+        // resolve() so wget's IAT patch gets the real stub instead of
+        // falling through to the "unresolved → returns 0" trampoline
+        // (which does not set last-error, breaking the loop exit).
+        assert!(resolve("kernel32.dll", "GetNumberOfConsoleInputEvents").is_some());
     }
 }
