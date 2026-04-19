@@ -35,3 +35,17 @@ tests/fixtures/bin/7z.dll
 tests/fixtures/bin/7zFM.exe
 /.docker-cargo/
 .claude/worktrees/
+.claude/scheduled_tasks.lock
+
+# Runtime / session artifacts
+/tmp-trace/
+/OBSERVER-STATE.md
+tests/fixtures/bin/extract_out/
+
+# weave-gui build artifacts
+/weave-gui/dist/
+/weave-gui/node_modules/
+/weave-gui/package-lock.json
+/weave-gui/src-tauri/gen/
+/weave-gui/src-tauri/Cargo.lock
+/weave-gui/src-tauri/target/
