@@ -13,6 +13,7 @@ pub mod prefix;
 pub mod progress;
 pub mod registry;
 pub mod resolve;
+pub mod resource;
 pub mod seh;
 pub mod teb;
 pub mod unwind;
