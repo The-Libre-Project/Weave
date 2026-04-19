@@ -18,6 +18,7 @@ pub mod class;
 pub mod clipboard;
 pub mod defs;
 pub mod font;
+pub mod image_handles;
 pub mod menu;
 pub mod queue;
 pub mod window;
@@ -690,8 +691,11 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
             Some(get_system_metrics_for_dpi as extern "win64" fn(_, _) -> _ as *const () as usize)
         }
         // Cursor / icon
-        "LoadCursorA" | "LoadCursorW" => {
+        "LoadCursorW" => {
             Some(load_cursor_w as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "LoadCursorA" => {
+            Some(load_cursor_a as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
         }
         "LoadIconW" => {
             Some(load_icon_w as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)

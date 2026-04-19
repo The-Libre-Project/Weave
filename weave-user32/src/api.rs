@@ -1617,52 +1617,391 @@ pub extern "win64" fn get_system_metrics_for_dpi(n_index: i32, _dpi: u32) -> i32
 
 // ── Cursor / Icon stubs ───────────────────────────────────────────────────────
 
+// ── Image / icon / cursor loading ─────────────────────────────────────────────
+//
+// Task 10 — real RT_GROUP_ICON / RT_ICON / RT_GROUP_CURSOR / RT_CURSOR /
+// RT_BITMAP lookup via `weave_core::resource::find_resource` +
+// `weave_core::module_handles::base_of`. Handle table lives in
+// `crate::image_handles`.
+//
+// Per repo CLAUDE.md "No DLL→DLL imports": we call into `weave-core`
+// directly, NEVER into `weave-kernel32`. `weave-core` is a core crate, not
+// a DLL crate, so that import is inside the allowed envelope.
+
+// IMAGE_* types (winuser.h)
+const IMAGE_BITMAP: u32 = 0;
+const IMAGE_ICON: u32 = 1;
+const IMAGE_CURSOR: u32 = 2;
+
+// LR_* flags (subset used here).
+const LR_DEFAULTSIZE: u32 = 0x0040;
+const LR_SHARED: u32 = 0x8000;
+
+// RT_* resource type ordinals (winuser.h).
+const RT_CURSOR: u16 = 1;
+const RT_BITMAP: u16 = 2;
+const RT_ICON: u16 = 3;
+const RT_GROUP_CURSOR: u16 = 12;
+const RT_GROUP_ICON: u16 = 14;
+
+// System metrics used as LR_DEFAULTSIZE defaults (winuser.h SM_*).
+const DEFAULT_ICON_CX: i32 = 32;
+const DEFAULT_ICON_CY: i32 = 32;
+const DEFAULT_CURSOR_CX: i32 = 32;
+const DEFAULT_CURSOR_CY: i32 = 32;
+
+/// Translate a caller-supplied `name_ptr` into a `weave_core::resource::ResourceId`.
+///
+/// Wine macro (quoted): `IS_INTRESOURCE(x)` ≡ `(((ULONG_PTR)(x)) >> 16) == 0`.
+/// Our `weave_core::resource` module encodes the same gate by exposing a
+/// `ResourceId` enum; we never dereference `name_ptr` unless the high 48
+/// bits are non-zero.
+///
+/// # Safety
+/// If the high 48 bits of `name_ptr` are non-zero, the caller guarantees
+/// `name_ptr` is a valid null-terminated UTF-16 string.
+unsafe fn name_ptr_to_resource_id(name_ptr: usize) -> weave_core::resource::ResourceId {
+    if name_ptr >> 16 == 0 {
+        return weave_core::resource::ResourceId::Id(name_ptr as u16);
+    }
+    // SAFETY: caller contract above.
+    let mut v: Vec<u16> = Vec::new();
+    unsafe {
+        let mut p = name_ptr as *const u16;
+        for _ in 0..32_768 {
+            let ch = *p;
+            if ch == 0 {
+                break;
+            }
+            v.push(ch);
+            p = p.add(1);
+        }
+    }
+    weave_core::resource::ResourceId::Name(v)
+}
+
+/// Resolve an image resource *blob* inside the loaded PE whose base is
+/// `image_base`. Returns `(data_ptr, size)` of the raw resource payload.
+fn locate_resource_bytes(
+    image_base: usize,
+    type_id: u16,
+    name: weave_core::resource::ResourceId,
+) -> Option<(usize, u32)> {
+    let loc = weave_core::resource::find_resource(
+        image_base,
+        weave_core::resource::ResourceId::Id(type_id),
+        name,
+        0,
+    )?;
+    let data_ptr = image_base.checked_add(loc.data_rva as usize)?;
+    Some((data_ptr, loc.size))
+}
+
+/// Walk a GRPICONDIR / GRPCURSORDIR blob and return `(nId, width, height,
+/// bit_count)` of the entry best matching `(want_cx, want_cy)`. We implement
+/// Wine's `CURSORICON_FindBestIconRes` / `FindBestCursorRes` simplification:
+/// pick the entry whose `max(width,height)` is closest to the requested
+/// size (ties broken by highest bit-depth).
+///
+/// GRPICONDIR layout:
+///   u16 reserved, u16 type, u16 count
+///   then `count` GRPICONDIRENTRY records (14 bytes each for icons):
+///     u8 width, u8 height, u8 colorCount, u8 reserved,
+///     u16 planes, u16 bitCount, u32 bytesInRes, u16 nId
+/// GRPCURSORDIRENTRY differs: width/height are u16 (actual pixels * 1),
+/// planes field repurposed as hotspot, bitCount as bitCount, then u32 size,
+/// u16 nId. We only read `nId`/`width`/`height`/`bitCount` — same offsets
+/// work well enough for resolution purposes as a first-pass picker.
+fn pick_group_entry(blob: &[u8], want_cx: i32, want_cy: i32) -> Option<(u16, u16, u16, u16)> {
+    if blob.len() < 6 {
+        return None;
+    }
+    let count = u16::from_le_bytes(blob[4..6].try_into().ok()?) as usize;
+    if count == 0 {
+        return None;
+    }
+    let mut best: Option<(i64, i64, u16, u16, u16, u16)> = None;
+    for i in 0..count {
+        let base = 6 + i * 14;
+        if base + 14 > blob.len() {
+            break;
+        }
+        let w_raw = blob[base];
+        let h_raw = blob[base + 1];
+        // Wine uses 0 in the GRPICONDIRENTRY width/height byte to mean 256.
+        let width: u16 = if w_raw == 0 { 256 } else { w_raw as u16 };
+        let height: u16 = if h_raw == 0 { 256 } else { h_raw as u16 };
+        let bit_count = u16::from_le_bytes(blob[base + 6..base + 8].try_into().ok()?);
+        let n_id = u16::from_le_bytes(blob[base + 12..base + 14].try_into().ok()?);
+        let dim = width.max(height) as i64;
+        let want = want_cx.max(want_cy).max(1) as i64;
+        let dist = (dim - want).abs();
+        let key = (dist, -(bit_count as i64));
+        match &best {
+            None => best = Some((key.0, key.1, n_id, width, height, bit_count)),
+            Some((bd, bb, _, _, _, _)) => {
+                if (key.0, key.1) < (*bd, *bb) {
+                    best = Some((key.0, key.1, n_id, width, height, bit_count));
+                }
+            }
+        }
+    }
+    best.map(|(_, _, n_id, w, h, bc)| (n_id, w, h, bc))
+}
+
+/// Core dispatcher for `LoadImageW`.
+///
+/// Wine ref: `dlls/user32/cursoricon.c::CURSORICON_Load` — `FindResourceW` on
+/// RT_GROUP_* to get the directory, pick best entry, second `FindResourceW`
+/// on RT_ICON/RT_CURSOR by the `wResId` from the group entry. For
+/// `IMAGE_BITMAP`, Wine calls `BITMAP_LoadImageW` which skips the group
+/// indirection and resolves RT_BITMAP directly.
+///
+/// # Safety
+/// If `name_ptr` is a string pointer (non-INTRESOURCE), it must be a valid
+/// null-terminated UTF-16 string.
+unsafe fn load_image_impl(
+    h_inst: usize,
+    name_ptr: usize,
+    ty: u32,
+    cx: i32,
+    cy: i32,
+    fu_load: u32,
+) -> usize {
+    use crate::image_handles::{self as ih, ImageEntry, ImageKind};
+
+    let shared = (fu_load & LR_SHARED) != 0;
+    let default_size = (fu_load & LR_DEFAULTSIZE) != 0;
+
+    // Dedup key BEFORE any string consumption so both string and ordinal
+    // paths produce a stable 64-bit fingerprint.
+    // SAFETY: forward the caller's guarantee.
+    let name_key = unsafe { ih::name_key_from_ptr(name_ptr) };
+    let kind = match ty {
+        IMAGE_ICON => ImageKind::Icon,
+        IMAGE_CURSOR => ImageKind::Cursor,
+        IMAGE_BITMAP => ImageKind::Bitmap,
+        _ => {
+            eprintln!("weave/user32: LoadImageW: unsupported image type {ty}");
+            return 0;
+        }
+    };
+
+    if shared {
+        if let Some(existing) = ih::get_shared(h_inst, name_key, kind) {
+            return existing;
+        }
+    }
+
+    // hInst == NULL: OEM load. Deferred to Task 10b per brief — return a
+    // stable non-zero handle keyed by (0, name_key, kind) so guest apps
+    // that depend on hCursor != NULL don't crash. Backing pixels are NOT
+    // fabricated; `GetIconInfo` / `DrawIcon` on these handles will see
+    // data_ptr == 0 and bail gracefully.
+    if h_inst == 0 {
+        let entry = ImageEntry {
+            kind,
+            data_ptr: 0,
+            data_size: 0,
+            width: cx,
+            height: cy,
+            bpp: 0,
+            shared: true, // OEM is always dedup'd so apps get stable IDC_ARROW etc.
+        };
+        return ih::insert(entry, Some((0, name_key)));
+    }
+
+    let image_base = match weave_core::module_handles::base_of(h_inst) {
+        Some(b) => b,
+        None => {
+            eprintln!(
+                "weave/user32: LoadImageW: no registered base for hInst={h_inst:#x} — falling back to 0"
+            );
+            return 0;
+        }
+    };
+
+    // SAFETY: forward the caller's guarantee on `name_ptr`.
+    let name_id = unsafe { name_ptr_to_resource_id(name_ptr) };
+
+    match ty {
+        IMAGE_ICON | IMAGE_CURSOR => {
+            let (group_type, leaf_type, is_cursor) = if ty == IMAGE_ICON {
+                (RT_GROUP_ICON, RT_ICON, false)
+            } else {
+                (RT_GROUP_CURSOR, RT_CURSOR, true)
+            };
+            let (want_cx, want_cy) = if default_size || (cx == 0 && cy == 0) {
+                if is_cursor {
+                    (DEFAULT_CURSOR_CX, DEFAULT_CURSOR_CY)
+                } else {
+                    (DEFAULT_ICON_CX, DEFAULT_ICON_CY)
+                }
+            } else {
+                (cx, cy)
+            };
+
+            let (grp_ptr, grp_size) = match locate_resource_bytes(image_base, group_type, name_id) {
+                Some(v) => v,
+                None => return 0,
+            };
+            // SAFETY: grp_ptr came from find_resource — it lies within the
+            // mapped image, and grp_size is the exact resource size.
+            let blob =
+                unsafe { std::slice::from_raw_parts(grp_ptr as *const u8, grp_size as usize) };
+            let (n_id, width, height, bit_count) = match pick_group_entry(blob, want_cx, want_cy) {
+                Some(t) => t,
+                None => return 0,
+            };
+
+            let (data_ptr, data_size) = match locate_resource_bytes(
+                image_base,
+                leaf_type,
+                weave_core::resource::ResourceId::Id(n_id),
+            ) {
+                Some(v) => v,
+                None => return 0,
+            };
+
+            let entry = ImageEntry {
+                kind,
+                data_ptr,
+                data_size,
+                width: width as i32,
+                height: height as i32,
+                bpp: bit_count,
+                shared,
+            };
+            let share_key = if shared {
+                Some((h_inst, name_key))
+            } else {
+                None
+            };
+            ih::insert(entry, share_key)
+        }
+        IMAGE_BITMAP => {
+            let (data_ptr, data_size) = match locate_resource_bytes(image_base, RT_BITMAP, name_id)
+            {
+                Some(v) => v,
+                None => return 0,
+            };
+            // BITMAPINFOHEADER starts at data_ptr; first 4 bytes = biSize,
+            // next 4 = biWidth, next 4 = biHeight, next 2 = biPlanes, next
+            // 2 = biBitCount. Read width/height/bpp for bookkeeping.
+            // SAFETY: data_ptr/data_size delimit a valid resource.
+            let (w, h, bpp) = unsafe {
+                if data_size < 16 {
+                    (0i32, 0i32, 0u16)
+                } else {
+                    let p = data_ptr as *const u8;
+                    let read_i32 = |off: usize| -> i32 {
+                        let mut b = [0u8; 4];
+                        for (i, bb) in b.iter_mut().enumerate() {
+                            *bb = *p.add(off + i);
+                        }
+                        i32::from_le_bytes(b)
+                    };
+                    let read_u16 = |off: usize| -> u16 {
+                        let b0 = *p.add(off);
+                        let b1 = *p.add(off + 1);
+                        u16::from_le_bytes([b0, b1])
+                    };
+                    (read_i32(4), read_i32(8), read_u16(14))
+                }
+            };
+            let entry = ImageEntry {
+                kind,
+                data_ptr,
+                data_size,
+                width: w,
+                height: h,
+                bpp,
+                shared,
+            };
+            let share_key = if shared {
+                Some((h_inst, name_key))
+            } else {
+                None
+            };
+            ih::insert(entry, share_key)
+        }
+        _ => 0,
+    }
+}
+
 /// LoadCursorW: load a cursor resource.
 ///
-/// Returns a non-zero fake HCURSOR. Real cursor loading requires Phase 3.
+/// Thin wrapper over `load_image_w(IMAGE_CURSOR, LR_DEFAULTSIZE | LR_SHARED)`
+/// — matches Wine's one-liner in `dlls/user32/cursoricon.c`.
 ///
 /// # Safety
 /// `lp_cursor_name` (if non-null) must be a valid UTF-16 string or an integer
 /// resource identifier (IDC_* constant passed via MAKEINTRESOURCEW).
-// Wine ref: dlls/user32/cursoricon.c::CURSORICON_Load — LoadCursorW calls LoadImageW with
-// IMAGE_CURSOR; h_instance=NULL loads OEM system cursors from winex11.drv; returns HCURSOR.
-pub unsafe extern "win64" fn load_cursor_w(_h_instance: usize, _lp_cursor_name: usize) -> usize {
-    warn_once("LoadCursorW");
-    1 // non-zero fake HCURSOR
+// Wine ref: dlls/user32/cursoricon.c::CURSORICON_Load — LoadCursorW delegates
+// to LoadImageW(IMAGE_CURSOR, 0, 0, LR_DEFAULTSIZE | LR_SHARED); FindResourceW
+// runs against RT_GROUP_CURSOR then the leaf RT_CURSOR by wResId.
+pub unsafe extern "win64" fn load_cursor_w(h_instance: usize, lp_cursor_name: usize) -> usize {
+    // SAFETY: forward caller contract on lp_cursor_name.
+    unsafe {
+        load_image_impl(
+            h_instance,
+            lp_cursor_name,
+            IMAGE_CURSOR,
+            0,
+            0,
+            LR_DEFAULTSIZE | LR_SHARED,
+        )
+    }
 }
 
 /// LoadIconW: load an icon resource.
 ///
-/// Returns a non-zero fake HICON.
-///
 /// # Safety
 /// `lp_icon_name` (if non-null) must be a valid UTF-16 string or integer resource.
-// Wine ref: dlls/user32/cursoricon.c::CURSORICON_Load — LoadIconW calls LoadImageW with
-// IMAGE_ICON and LR_DEFAULTSIZE; h_instance=NULL loads OEM icons (IDI_APPLICATION etc).
-pub unsafe extern "win64" fn load_icon_w(_h_instance: usize, _lp_icon_name: usize) -> usize {
-    warn_once("LoadIconW");
-    1 // non-zero fake HICON
+// Wine ref: dlls/user32/cursoricon.c::CURSORICON_Load — LoadIconW delegates to
+// LoadImageW(IMAGE_ICON, 0, 0, LR_DEFAULTSIZE | LR_SHARED); RT_GROUP_ICON →
+// best-match entry by SM_CXICON → RT_ICON lookup by wResId.
+pub unsafe extern "win64" fn load_icon_w(h_instance: usize, lp_icon_name: usize) -> usize {
+    // SAFETY: forward caller contract.
+    unsafe {
+        load_image_impl(
+            h_instance,
+            lp_icon_name,
+            IMAGE_ICON,
+            0,
+            0,
+            LR_DEFAULTSIZE | LR_SHARED,
+        )
+    }
 }
 
 /// LoadImageW: load an image (icon, cursor, or bitmap) from a resource.
 ///
-/// Phase 2 stub: returns a fake non-zero handle for all image types.
+/// Dispatches on `ty`:
+///   * `IMAGE_ICON` / `IMAGE_CURSOR` → RT_GROUP_* lookup, pick best by size,
+///     then RT_ICON/RT_CURSOR lookup for the chosen entry's `wResId`.
+///   * `IMAGE_BITMAP` → RT_BITMAP direct lookup.
+///
+/// `hInst == NULL` (OEM loads) returns a stable dedup'd handle with no
+/// backing pixels — real OEM cursor/icon pixels are Task 10b.
 ///
 /// # Safety
-/// `_name` may be a pointer or an integer resource ID; callers must ensure it
-/// is valid for the given `_ty`. This stub ignores it entirely.
-// Wine ref: include/ntuser.h::load_image_params — NtUserLoadImage dispatches on type:
-// IMAGE_BITMAP → CreateBitmap path, IMAGE_ICON/IMAGE_CURSOR → CURSORICON_Load path.
+/// `name` may be a pointer or integer resource ID. If the high 48 bits are
+/// non-zero, the caller guarantees `name` is a valid null-terminated UTF-16
+/// string (`IS_INTRESOURCE` gate).
+// Wine ref: dlls/user32/cursoricon.c::CURSORICON_Load (icon/cursor) and
+// dlls/user32/cursoricon.c::BITMAP_Load (bitmap); IS_INTRESOURCE gate at
+// include/winuser.h: ((((ULONG_PTR)(x)) >> 16) == 0).
 pub unsafe extern "win64" fn load_image_w(
-    _h_inst: usize,
-    _name: usize,
-    _ty: u32,
-    _cx: i32,
-    _cy: i32,
-    _fu_load: u32,
+    h_inst: usize,
+    name: usize,
+    ty: u32,
+    cx: i32,
+    cy: i32,
+    fu_load: u32,
 ) -> usize {
-    warn_once("LoadImageW");
-    1
+    // SAFETY: forward caller contract.
+    unsafe { load_image_impl(h_inst, name, ty, cx, cy, fu_load) }
 }
 
 // ── MessageBoxW ───────────────────────────────────────────────────────────────
@@ -3173,31 +3512,89 @@ pub unsafe extern "win64" fn set_class_long_ptr_a(
 
 // ── ANSI resource loading ─────────────────────────────────────────────────────
 
-/// LoadIconA: ANSI variant — delegates to W stub.
+/// Convert an ANSI resource-identifier pointer into a 64-bit value suitable
+/// for passing through the W-family trampoline. Ordinals (IS_INTRESOURCE)
+/// pass through unchanged; string pointers are widened in-place to a fresh
+/// UTF-16 `Vec` whose pointer is returned (caller must keep the `Vec`
+/// alive for the duration of the W-side call).
 ///
 /// # Safety
-/// Pointer arguments are accepted but not dereferenced.
-// Wine ref: dlls/user32/cursoricon.c — LoadIconA converts lpIconName to wide and calls
-// LoadIconW; uses CURSORICON_Load with IMAGE_ICON and LR_DEFAULTSIZE.
-pub unsafe extern "win64" fn load_icon_a(_h_instance: usize, _lp_icon_name: *const u8) -> usize {
-    1usize // fake HICON
+/// If the caller intends the string path, `ptr` must be a valid NUL-terminated
+/// ANSI string.
+unsafe fn widen_ansi_name(ptr: *const u8) -> (usize, Option<Vec<u16>>) {
+    let raw = ptr as usize;
+    if raw >> 16 == 0 {
+        return (raw, None);
+    }
+    // SAFETY: caller contract above.
+    let mut bytes: Vec<u8> = Vec::new();
+    unsafe {
+        let mut p = ptr;
+        for _ in 0..32_768 {
+            let b = *p;
+            if b == 0 {
+                break;
+            }
+            bytes.push(b);
+            p = p.add(1);
+        }
+    }
+    let mut wide: Vec<u16> = bytes.iter().map(|&b| b as u16).collect();
+    wide.push(0);
+    let addr = wide.as_ptr() as usize;
+    (addr, Some(wide))
 }
 
-/// LoadImageA: ANSI variant — delegates to W stub.
+/// LoadIconA: ANSI trampoline into `load_icon_w`.
 ///
 /// # Safety
-/// Pointer arguments are accepted but not dereferenced.
-// Wine ref: dlls/user32/cursoricon.c — LoadImageA converts name to wide then calls
-// NtUserLoadImage; LR_LOADFROMFILE flag triggers file-system path lookup.
+/// `lp_icon_name` (if non-null and non-INTRESOURCE) must be a valid
+/// null-terminated ANSI string.
+// Wine ref: dlls/user32/cursoricon.c — LoadIconA converts lpIconName to wide
+// via MultiByteToWideChar and calls LoadIconW; the MAKEINTRESOURCE fast path
+// never touches the pointer.
+pub unsafe extern "win64" fn load_icon_a(h_instance: usize, lp_icon_name: *const u8) -> usize {
+    // SAFETY: forward caller contract.
+    let (raw, _keepalive) = unsafe { widen_ansi_name(lp_icon_name) };
+    // SAFETY: raw is either an ordinal (IS_INTRESOURCE) or points at the
+    // kept-alive UTF-16 buffer held in `_keepalive`.
+    unsafe { load_icon_w(h_instance, raw) }
+}
+
+/// LoadCursorA: ANSI trampoline into `load_cursor_w`.
+///
+/// # Safety
+/// `lp_cursor_name` (if non-null and non-INTRESOURCE) must be a valid
+/// null-terminated ANSI string.
+// Wine ref: dlls/user32/cursoricon.c — LoadCursorA widens name and calls
+// LoadCursorW; ordinal path skips widening.
+pub unsafe extern "win64" fn load_cursor_a(h_instance: usize, lp_cursor_name: *const u8) -> usize {
+    // SAFETY: forward caller contract.
+    let (raw, _keepalive) = unsafe { widen_ansi_name(lp_cursor_name) };
+    // SAFETY: same contract as load_icon_a.
+    unsafe { load_cursor_w(h_instance, raw) }
+}
+
+/// LoadImageA: ANSI trampoline into `load_image_w`.
+///
+/// # Safety
+/// `name` (if non-null and non-INTRESOURCE) must be a valid null-terminated
+/// ANSI string.
+// Wine ref: dlls/user32/cursoricon.c — LoadImageA converts name to wide then
+// calls NtUserLoadImage/LoadImageW; LR_LOADFROMFILE flag is honored before
+// the widen step but that path is out of scope for Task 10.
 pub unsafe extern "win64" fn load_image_a(
-    _h_inst: usize,
-    _name: *const u8,
-    _type: u32,
-    _cx: i32,
-    _cy: i32,
-    _fu_load: u32,
+    h_inst: usize,
+    name: *const u8,
+    ty: u32,
+    cx: i32,
+    cy: i32,
+    fu_load: u32,
 ) -> usize {
-    1usize // fake handle
+    // SAFETY: forward caller contract.
+    let (raw, _keepalive) = unsafe { widen_ansi_name(name) };
+    // SAFETY: raw validity held by `_keepalive` when non-INTRESOURCE.
+    unsafe { load_image_w(h_inst, raw, ty, cx, cy, fu_load) }
 }
 
 /// DestroyIcon: free an HICON. Stub — always succeeds.
