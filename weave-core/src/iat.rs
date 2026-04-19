@@ -746,48 +746,71 @@ mod tests {
         assert_eq!(decoded, Some(slot_va));
     }
 
-    /// Build two buffers:
-    ///   1. a "guest" buffer ending in `E8 rel32` whose target points at
-    ///   2. a "thunk" buffer whose first 6 bytes are `FF 25 disp32` pointing
-    ///      at `slot_va`.
+    /// Build a single combined buffer containing:
+    ///   1. 16 NOPs + `E8 rel32` (the "guest" CALL),
+    ///   2. some padding so guest CALL bytes land in their own region,
+    ///   3. `FF 25 disp32` (the "__imp_" thunk) at a fixed offset.
     ///
-    /// Returns (guest_buf, thunk_buf, ret_addr, slot_va).  Both buffers must
-    /// remain live (pinned by the caller) for the test duration so that the
-    /// decoder's dereferences land on valid memory.
+    /// Both regions live in the SAME `Vec<u8>` allocation, which guarantees
+    /// the rel32 from guest to thunk fits in i32 — heap allocators routinely
+    /// place separate `Vec`s more than 2 GiB apart on 64-bit Linux, which
+    /// makes a two-allocation design fundamentally unsafe (the i32 truncation
+    /// of a >2 GiB delta sends the decoder dereferencing wild memory).
+    ///
+    /// Returns (combined_buf, ret_addr, slot_va).  The buffer must remain
+    /// live for the test duration so that the decoder's dereferences land on
+    /// valid memory.
     fn build_call_impthunk_chain(
         compute_slot: impl Fn(usize) -> usize,
-    ) -> (Vec<u8>, Vec<u8>, usize, usize) {
-        // Thunk buffer: 6 bytes of `FF 25 disp32` followed by padding.  We
-        // build the thunk first so we know its address, then compute the
-        // guest `E8 rel32` that points at it.
-        let mut thunk: Vec<u8> = Vec::with_capacity(16);
-        thunk.push(0xFF);
-        thunk.push(0x25);
-        thunk.extend_from_slice(&0i32.to_le_bytes()); // placeholder disp32
-        thunk.extend(std::iter::repeat(0x90u8).take(10)); // padding
-        let thunk_addr = thunk.as_ptr() as usize;
-        let next_instr = thunk_addr + 6;
-        let slot_va = compute_slot(next_instr);
-        let disp32 = (slot_va as isize - next_instr as isize) as i32;
-        thunk[2..6].copy_from_slice(&disp32.to_le_bytes());
+    ) -> (Vec<u8>, usize, usize) {
+        // Layout (offsets within the buffer):
+        //   [0..16]   16 NOPs (guest pre-CALL padding)
+        //   [16]      0xE8 (guest CALL opcode)
+        //   [17..21]  rel32 (filled in below)
+        //   [21..32]  11 NOP bytes of padding before the thunk
+        //   [32..34]  0xFF 0x25 (thunk JMP through IAT slot)
+        //   [34..38]  disp32 (filled in below)
+        //   [38..48]  10 NOP bytes of trailing padding
+        const GUEST_LEN: usize = 16 + 1 + 4; // 21 bytes through end of E8 rel32
+        const THUNK_OFF: usize = 32;
+        const TOTAL: usize = 48;
 
-        // Guest buffer: 16 NOPs + `E8 rel32` where rel32 points at thunk_addr.
-        let mut guest: Vec<u8> = Vec::with_capacity(32);
-        guest.extend(std::iter::repeat(0x90u8).take(16));
-        guest.push(0xE8);
-        guest.extend_from_slice(&0i32.to_le_bytes()); // placeholder
-        let ret_addr = guest.as_ptr() as usize + guest.len();
+        let mut buf: Vec<u8> = vec![0x90u8; TOTAL];
+        buf[16] = 0xE8; // guest CALL opcode
+        buf[THUNK_OFF] = 0xFF; // thunk JMP opcode
+        buf[THUNK_OFF + 1] = 0x25;
+
+        let base = buf.as_ptr() as usize;
+        let ret_addr = base + GUEST_LEN; // address just past E8 rel32
+        let thunk_addr = base + THUNK_OFF;
+        let next_instr = thunk_addr + 6; // address just past FF 25 disp32
+
+        // rel32 from guest to thunk. Both addresses are inside the same
+        // allocation, so the delta is bounded by TOTAL — well within i32.
         let rel32 = (thunk_addr as isize - ret_addr as isize) as i32;
-        let len = guest.len();
-        guest[len - 4..len].copy_from_slice(&rel32.to_le_bytes());
+        buf[GUEST_LEN - 4..GUEST_LEN].copy_from_slice(&rel32.to_le_bytes());
 
-        (guest, thunk, ret_addr, slot_va)
+        // disp32 from thunk's next-instruction to the slot. The synthetic
+        // slot_va does not need to be readable — the decoder only computes
+        // its address, never dereferences it. But we still bound the chosen
+        // delta to i32 range via the assertion below so the truncation cast
+        // can never silently produce a wild target.
+        let slot_va = compute_slot(next_instr);
+        let delta = slot_va as isize - next_instr as isize;
+        assert!(
+            i32::try_from(delta).is_ok(),
+            "test bug: chosen slot_va is out of i32 range from thunk's next_instr (delta={delta:#x})"
+        );
+        let disp32 = delta as i32;
+        buf[THUNK_OFF + 2..THUNK_OFF + 6].copy_from_slice(&disp32.to_le_bytes());
+
+        (buf, ret_addr, slot_va)
     }
 
     #[test]
     fn decode_call_iat_slot_impthunk_positive() {
-        // Slot sits ahead of the thunk.  Keep both buffers alive via _guard.
-        let (_guest, _thunk, ret_addr, slot_va) =
+        // Slot sits ahead of the thunk.  Keep buffer alive via _buf.
+        let (_buf, ret_addr, slot_va) =
             build_call_impthunk_chain(|next_instr| next_instr + 0x4000);
         let decoded = unsafe { decode_call_iat_slot(ret_addr, 0xDEAD_BEEFusize) };
         assert_eq!(decoded, Some(slot_va));
@@ -796,7 +819,7 @@ mod tests {
     #[test]
     fn decode_call_iat_slot_impthunk_negative_disp() {
         // Slot sits behind the thunk (negative disp32 inside the thunk).
-        let (_guest, _thunk, ret_addr, slot_va) =
+        let (_buf, ret_addr, slot_va) =
             build_call_impthunk_chain(|next_instr| next_instr.wrapping_sub(0x800));
         let decoded = unsafe { decode_call_iat_slot(ret_addr, 0) };
         assert_eq!(decoded, Some(slot_va));
@@ -806,22 +829,30 @@ mod tests {
     fn decode_call_iat_slot_plain_e8_not_thunk_returns_none() {
         // Guest E8 whose target is NOT `FF 25 ...` — just NOP padding.
         // The decoder should decline rather than return a bogus slot VA.
-        let target_buf: Vec<u8> = vec![0x90u8; 16];
-        let target_addr = target_buf.as_ptr() as usize;
+        //
+        // Co-locate the guest CALL bytes and the E8 target inside a single
+        // Vec<u8> so the rel32 between them is bounded by the buffer size
+        // (always within i32). Two separate Vec allocations are NOT safe on
+        // 64-bit Linux: the heap allocator can place them more than 2 GiB
+        // apart, and the i32 truncation of the delta would point the decoder
+        // at wild memory (segfault risk).
+        const GUEST_LEN: usize = 16 + 1 + 4;
+        const TARGET_OFF: usize = 32;
+        const TOTAL: usize = 48;
 
-        let mut guest: Vec<u8> = Vec::with_capacity(32);
-        guest.extend(std::iter::repeat(0x90u8).take(16));
-        guest.push(0xE8);
-        guest.extend_from_slice(&0i32.to_le_bytes());
-        let ret_addr = guest.as_ptr() as usize + guest.len();
+        let mut buf: Vec<u8> = vec![0x90u8; TOTAL];
+        buf[16] = 0xE8;
+        // Target region [TARGET_OFF..TARGET_OFF+16] is left as 0x90 NOPs —
+        // not `FF 25 ...`, so the decoder should fall through to None.
+
+        let base = buf.as_ptr() as usize;
+        let ret_addr = base + GUEST_LEN;
+        let target_addr = base + TARGET_OFF;
         let rel32 = (target_addr as isize - ret_addr as isize) as i32;
-        let len = guest.len();
-        guest[len - 4..len].copy_from_slice(&rel32.to_le_bytes());
+        buf[GUEST_LEN - 4..GUEST_LEN].copy_from_slice(&rel32.to_le_bytes());
 
         let decoded = unsafe { decode_call_iat_slot(ret_addr, 0xDEAD_BEEFusize) };
         assert_eq!(decoded, None);
-        drop(target_buf);
-        drop(guest);
     }
 
     #[test]
