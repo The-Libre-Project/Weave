@@ -1612,6 +1612,117 @@ pub extern "win64" fn ucrt_powf(x: f32, y: f32) -> f32 {
 // filesystem stubs
 pub extern "win64" fn ucrt_lock_file(_stream: *mut c_void) {}
 pub extern "win64" fn ucrt_unlock_file(_stream: *mut c_void) {}
+
+// ── msvcrt _lock / _unlock — recursive per-slot critical sections ────────────
+//
+// Wine ref: `dlls/msvcrt/lock.c:83` — `_lock(int locknum)` lazy-initialises
+// `lock_table[locknum].crit` (a Win32 CRITICAL_SECTION, which is recursive),
+// then `EnterCriticalSection`. `_unlock(int locknum)` calls `LeaveCriticalSection`.
+// MinGW-linked binaries that use msvcrt.dll for stdio synchronisation rely on
+// these to serialise file I/O across threads. MSVCRT's lock table has
+// `_TOTAL_LOCKS = 64` slots (mingw-w64 `mtdll.h`).
+//
+// When unresolved, wget (and any MinGW CRT consumer) silently skips the lock
+// and later corrupts shared msvcrt state — the corruption surfaces as a
+// SIGABRT inside libc's fortified-read path, far from the missing lock call.
+//
+// Weave implementation: `pthread_mutex_t` with `PTHREAD_MUTEX_RECURSIVE` to
+// match CRITICAL_SECTION semantics exactly. Lazy-initialised per slot via
+// `OnceLock`. Negative or out-of-range locknum is silently ignored — matches
+// msvcrt's lenient behaviour for trace callers passing speculative indices.
+
+#[cfg(target_os = "linux")]
+const MSVCRT_TOTAL_LOCKS: usize = 64;
+
+#[cfg(target_os = "linux")]
+struct RecursiveCs(std::cell::UnsafeCell<libc::pthread_mutex_t>);
+
+// SAFETY: pthread_mutex_t is designed for cross-thread access; we initialise
+// with PTHREAD_MUTEX_RECURSIVE and only ever call pthread_mutex_{lock,unlock}
+// on the same heap-stable address. The `UnsafeCell` is only needed because
+// libc's functions take `*mut` but we share the reference as `&'static`.
+#[cfg(target_os = "linux")]
+unsafe impl Sync for RecursiveCs {}
+
+#[cfg(target_os = "linux")]
+impl RecursiveCs {
+    fn new() -> Self {
+        let cell = std::cell::UnsafeCell::new(unsafe {
+            std::mem::zeroed::<libc::pthread_mutex_t>()
+        });
+        unsafe {
+            let mut attr: libc::pthread_mutexattr_t = std::mem::zeroed();
+            if libc::pthread_mutexattr_init(&mut attr) == 0 {
+                libc::pthread_mutexattr_settype(&mut attr, libc::PTHREAD_MUTEX_RECURSIVE);
+                libc::pthread_mutex_init(cell.get(), &attr);
+                libc::pthread_mutexattr_destroy(&mut attr);
+            }
+        }
+        Self(cell)
+    }
+    /// # Safety
+    /// Must be paired with a matching `unlock` on the same thread.
+    unsafe fn lock(&self) {
+        unsafe { libc::pthread_mutex_lock(self.0.get()) };
+    }
+    /// # Safety
+    /// Caller must currently hold the lock on this thread.
+    unsafe fn unlock(&self) {
+        unsafe { libc::pthread_mutex_unlock(self.0.get()) };
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn msvcrt_lock_table() -> &'static [std::sync::OnceLock<RecursiveCs>; MSVCRT_TOTAL_LOCKS] {
+    static TABLE: std::sync::OnceLock<[std::sync::OnceLock<RecursiveCs>; MSVCRT_TOTAL_LOCKS]> =
+        std::sync::OnceLock::new();
+    TABLE.get_or_init(|| std::array::from_fn(|_| std::sync::OnceLock::new()))
+}
+
+#[cfg(target_os = "linux")]
+fn msvcrt_cs(n: usize) -> &'static RecursiveCs {
+    msvcrt_lock_table()[n].get_or_init(RecursiveCs::new)
+}
+
+/// msvcrt `_lock(int locknum)` — acquire the recursive critical section for
+/// slot `locknum`. Lazy-init on first use. No-op for out-of-range indices.
+pub extern "win64" fn ucrt_lock(locknum: i32) {
+    #[cfg(target_os = "linux")]
+    {
+        if locknum < 0 {
+            return;
+        }
+        let n = locknum as usize;
+        if n >= MSVCRT_TOTAL_LOCKS {
+            return;
+        }
+        unsafe { msvcrt_cs(n).lock() };
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = locknum;
+    }
+}
+
+/// msvcrt `_unlock(int locknum)` — release the recursive critical section for
+/// slot `locknum`. No-op for out-of-range indices or non-held locks.
+pub extern "win64" fn ucrt_unlock(locknum: i32) {
+    #[cfg(target_os = "linux")]
+    {
+        if locknum < 0 {
+            return;
+        }
+        let n = locknum as usize;
+        if n >= MSVCRT_TOTAL_LOCKS {
+            return;
+        }
+        unsafe { msvcrt_cs(n).unlock() };
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = locknum;
+    }
+}
 pub extern "win64" fn ucrt_remove(_path: *const u8) -> i32 {
     0
 }
@@ -3695,6 +3806,8 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "_fdopen" => stub!(ucrt_fdopen as extern "win64" fn(_, _) -> _),
         "_lock_file" => stub!(ucrt_lock_file as extern "win64" fn(_)),
         "_unlock_file" => stub!(ucrt_unlock_file as extern "win64" fn(_)),
+        "_lock" => stub!(ucrt_lock as extern "win64" fn(_)),
+        "_unlock" => stub!(ucrt_unlock as extern "win64" fn(_)),
         "remove" => stub!(ucrt_remove as extern "win64" fn(_) -> _),
         "_fstat64" => stub!(ucrt_fstat64 as extern "win64" fn(_, _) -> _),
         "fopen" => stub!(ucrt_fopen as unsafe extern "win64" fn(_, _) -> _),
