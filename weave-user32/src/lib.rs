@@ -1069,6 +1069,9 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "LoadStringW" => Some(
             api::load_string_w as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
         ),
+        "LoadStringA" => Some(
+            api::load_string_a as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
+        ),
         "RegisterClipboardFormatW" => Some(
             api::register_clipboard_format_w as unsafe extern "win64" fn(_) -> _ as *const ()
                 as usize,

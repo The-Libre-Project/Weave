@@ -4837,26 +4837,225 @@ pub unsafe extern "win64" fn set_menu_item_info_w(
     0 // FALSE
 }
 
-/// LoadStringW — load a string from the application's resource table (Wide).
+/// LoadStringW — load a string from a module's RT_STRING resource table (Wide).
 ///
-/// Returns 0 (empty string) — stub, no resource loading.
+/// RT_STRING storage: bundles of 16 strings each, indexed by `(id >> 4) + 1`
+/// as the resource ordinal. Within a bundle, the string at index `id & 0x0F`
+/// is the target. Each string is length-prefixed UTF-16 (`u16 len; WCHAR[len]`)
+/// with NO null terminator in the resource itself.
+///
+/// Normal case (`n_buffer_max > 0`): copy up to `n_buffer_max - 1` UTF-16
+/// code units into `lp_buffer`, null-terminate, return count copied.
+///
+/// Special case (`n_buffer_max == 0`): write a pointer to the in-PE string
+/// data into `*(LPWSTR*)lp_buffer` and return the character count. No null
+/// terminator is written — caller uses the returned length.
+///
+/// `h_instance == NULL` or ID-not-found → return 0, write empty if buffer.
 ///
 /// # Safety
-/// If `lp_buffer` is non-null and `n_buffer_max` > 0, writes an empty
-/// null-terminated string.
-// Wine ref: dlls/user32/resource.c::LoadStringW — locates RT_STRING block via
-// FindResourceW((id>>4)+1); walks 16-string blocks (each entry: length u16 + chars);
-// buflen==0 special case: returns pointer to resource data in *buffer directly.
+/// `lp_buffer` must be null, writable for `n_buffer_max` UTF-16 units (normal
+/// case), or writable for one `LPWSTR` (when `n_buffer_max == 0`).
+// Wine ref: dlls/user32/resource.c::LoadStringW (lines 149-193) — verified via
+// jcodemunch get_symbol_source on local/wine-reference-182107cc:
+//   hrsrc = FindResourceW(instance, MAKEINTRESOURCEW((LOWORD(id)>>4)+1), RT_STRING);
+//   p = LockResource(hmem); string_num = resource_id & 0x000f;
+//   for (i = 0; i < string_num; i++) p += *p + 1;
+//   if (buflen == 0) { *((LPWSTR*)buffer) = p + 1; return *p; }
+//   i = min(buflen - 1, *p); memcpy(buffer, p + 1, i*sizeof(WCHAR)); buffer[i] = 0;
 pub unsafe extern "win64" fn load_string_w(
-    _h_instance: usize,
-    _u_id: u32,
+    h_instance: usize,
+    u_id: u32,
     lp_buffer: *mut u16,
     n_buffer_max: i32,
 ) -> i32 {
-    if !lp_buffer.is_null() && n_buffer_max > 0 {
-        unsafe { *lp_buffer = 0 };
+    if lp_buffer.is_null() {
+        return 0;
     }
-    0
+
+    // Pre-clear for failure paths (normal case only — cchMax==0 treats
+    // lp_buffer as LPWSTR* and we must not scribble over its destination).
+    let write_empty_on_fail = || {
+        if n_buffer_max > 0 {
+            unsafe { *lp_buffer = 0 };
+        }
+    };
+
+    // hInst==NULL: Wine resolves to user32 module for system strings. Out of
+    // scope for first pass (per task-11 brief) — treat as not found.
+    if h_instance == 0 {
+        write_empty_on_fail();
+        return 0;
+    }
+
+    // Locate bundle. Wine: LOWORD(id) >> 4 + 1.
+    let low_id = (u_id & 0xFFFF) as u16;
+    let bundle_ord = (low_id >> 4).wrapping_add(1);
+    let string_index = (low_id & 0x0F) as usize;
+
+    let image_base = match weave_core::module_handles::base_of(h_instance) {
+        Some(b) => b,
+        None => {
+            write_empty_on_fail();
+            return 0;
+        }
+    };
+
+    const RT_STRING: u16 = 6;
+    let loc = match weave_core::resource::find_resource(
+        image_base,
+        weave_core::resource::ResourceId::Id(RT_STRING),
+        weave_core::resource::ResourceId::Id(bundle_ord),
+        0,
+    ) {
+        Some(l) => l,
+        None => {
+            write_empty_on_fail();
+            return 0;
+        }
+    };
+
+    // Walk to the target entry. Each entry = u16 length + length WCHARs.
+    // We must bounds-check against `loc.size` — the bundle may legitimately
+    // contain fewer than 16 populated entries (trailing empties are a u16
+    // zero each, but malformed resources could truncate).
+    let bundle_ptr = match image_base.checked_add(loc.data_rva as usize) {
+        Some(p) => p as *const u16,
+        None => {
+            write_empty_on_fail();
+            return 0;
+        }
+    };
+    let bundle_u16_count = (loc.size as usize) / 2;
+
+    // Walk `string_index` length-prefixed entries, then read the target's
+    // length prefix. All reads bounds-checked against bundle_u16_count.
+    let mut cursor: usize = 0;
+    for _ in 0..string_index {
+        if cursor >= bundle_u16_count {
+            write_empty_on_fail();
+            return 0;
+        }
+        // SAFETY: bundle_ptr points into a mapped PE image; cursor < count.
+        let len = unsafe { *bundle_ptr.add(cursor) } as usize;
+        cursor = match cursor.checked_add(1).and_then(|c| c.checked_add(len)) {
+            Some(c) => c,
+            None => {
+                write_empty_on_fail();
+                return 0;
+            }
+        };
+    }
+    if cursor >= bundle_u16_count {
+        write_empty_on_fail();
+        return 0;
+    }
+    // SAFETY: cursor < count.
+    let target_len = unsafe { *bundle_ptr.add(cursor) } as usize;
+    if cursor + 1 + target_len > bundle_u16_count {
+        write_empty_on_fail();
+        return 0;
+    }
+    // SAFETY: chars in [cursor+1, cursor+1+target_len) are in-bounds.
+    let chars_ptr = unsafe { bundle_ptr.add(cursor + 1) };
+
+    // Empty string slot: Wine still returns 0 and null-terminates buffer.
+    if target_len == 0 {
+        if n_buffer_max == 0 {
+            // Pointer-return mode: hand back the (empty) source pointer.
+            // SAFETY: caller asserts lp_buffer is LPWSTR*.
+            unsafe { *(lp_buffer as *mut *const u16) = chars_ptr };
+            return 0;
+        }
+        write_empty_on_fail();
+        return 0;
+    }
+
+    if n_buffer_max == 0 {
+        // Special case: return pointer into the PE image. Caller treats
+        // lp_buffer as LPWSTR* and uses returned length (no null terminator
+        // in the source data).
+        // SAFETY: caller asserts lp_buffer is LPWSTR*; chars_ptr is in-bounds.
+        unsafe { *(lp_buffer as *mut *const u16) = chars_ptr };
+        return target_len as i32;
+    }
+    if n_buffer_max < 0 {
+        // Wine's `min(buflen - 1, *p)` with a negative buflen would underflow;
+        // treat as empty failure.
+        return 0;
+    }
+
+    // Normal copy: min(buflen - 1, len) chars, then null-terminate.
+    let to_copy = core::cmp::min((n_buffer_max - 1) as usize, target_len);
+    // SAFETY: lp_buffer is writable for n_buffer_max WCHARs; chars_ptr is
+    // readable for target_len WCHARs; to_copy <= both.
+    unsafe {
+        core::ptr::copy_nonoverlapping(chars_ptr, lp_buffer, to_copy);
+        *lp_buffer.add(to_copy) = 0;
+    }
+    to_copy as i32
+}
+
+/// LoadStringA — ANSI trampoline around `LoadStringW`.
+///
+/// Loads the string via `LoadStringW` into a temporary UTF-16 buffer (sized
+/// to match `n_buffer_max`, capped at a reasonable max), then converts to
+/// ANSI (CP_ACP ≈ CP1252 in Weave's current WideCharToMultiByte impl) into
+/// the caller's CHAR buffer. Null-terminates.
+///
+/// # Safety
+/// `lp_buffer` must be writable for `n_buffer_max` bytes.
+// Wine ref: dlls/user32/resource.c::LoadStringA (lines 198-224) — verified via
+// jcodemunch get_symbol_source on local/wine-reference-182107cc:
+//   if (!buflen) return -1;
+//   hrsrc = FindResourceW(instance, MAKEINTRESOURCEW((LOWORD(id)>>4)+1), RT_STRING);
+//   p = LockResource(hmem); id = resource_id & 0x000f;
+//   while (id--) p += *p + 1;
+//   RtlUnicodeToMultiByteN(buffer, buflen - 1, &retval, p + 1, *p * sizeof(WCHAR));
+//   buffer[retval] = 0;
+// Weave implementation: LoadStringW into a temp WCHAR buffer, then
+// convert to the caller's CHAR buffer via a simple CP_ACP (1252) conversion
+// (lossy ASCII fallback is acceptable — matches existing CP_ACP behavior
+// elsewhere in weave-user32, and ASCII is the common resource content).
+pub unsafe extern "win64" fn load_string_a(
+    h_instance: usize,
+    u_id: u32,
+    lp_buffer: *mut u8,
+    n_buffer_max: i32,
+) -> i32 {
+    // Wine: `if (!buflen) return -1;` — LoadStringA has no pointer-return mode.
+    if n_buffer_max == 0 {
+        return -1;
+    }
+    if lp_buffer.is_null() || n_buffer_max < 0 {
+        return 0;
+    }
+
+    // Allocate a wide temp buffer the same length as the caller's buffer.
+    // LoadStringW copies min(buflen-1, len) WCHARs; we size the temp to
+    // n_buffer_max so each ANSI byte has a corresponding WCHAR slot.
+    let wide_cap = n_buffer_max as usize;
+    let mut wide: Vec<u16> = vec![0u16; wide_cap];
+    // SAFETY: wide.as_mut_ptr() is valid for wide_cap WCHARs.
+    let copied = unsafe { load_string_w(h_instance, u_id, wide.as_mut_ptr(), n_buffer_max) };
+    if copied <= 0 {
+        // Null-terminate the ANSI buffer on failure.
+        // SAFETY: n_buffer_max > 0 checked above.
+        unsafe { *lp_buffer = 0 };
+        return 0;
+    }
+
+    // Narrow to CP_ACP (1252). Characters > 0xFF are replaced with '?'.
+    let copied_usize = copied as usize;
+    // SAFETY: lp_buffer is writable for n_buffer_max bytes; copied < n_buffer_max.
+    unsafe {
+        for (i, w) in wide.iter().take(copied_usize).enumerate() {
+            let b = if *w <= 0xFF { *w as u8 } else { b'?' };
+            *lp_buffer.add(i) = b;
+        }
+        *lp_buffer.add(copied_usize) = 0;
+    }
+    copied
 }
 
 /// RegisterClipboardFormatW — register a new clipboard format (Wide).
