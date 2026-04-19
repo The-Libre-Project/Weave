@@ -1586,8 +1586,45 @@ pub unsafe extern "win64" fn ucrt_ftelli64(stream: *mut c_void) -> i64 {
     unsafe { libc::ftello(stream as *mut libc::FILE) as i64 }
 }
 
-pub extern "win64" fn ucrt_get_osfhandle(_fd: i32) -> isize {
-    -1
+/// _open_osfhandle — wrap a Windows HANDLE in a CRT file descriptor.
+///
+/// Wine ref: dlls/msvcrt/file.c:2711-2745 — allocates a new CRT fd entry
+/// for the given HANDLE, sets WX_TTY/WX_PIPE/WX_OPEN flags based on
+/// GetFileType(), and returns the fd. Returns -1 on error.
+///
+/// In Weave, `ws_socket` returns the Linux fd directly as the "HANDLE"
+/// (see weave-ws2/src/lib.rs:324), so the HANDLE value IS already a valid
+/// int fd. We therefore round-trip it unchanged: `_open_osfhandle` returns
+/// `handle as i32`, and `_get_osfhandle` reverses it as `fd as isize`.
+/// This matches Wine's contract for the MinGW-static wget.exe path where
+/// the caller (`WSASocketW` → `_open_osfhandle` → `_get_osfhandle` →
+/// `setsockopt`) only requires that the fd round-trips to the original
+/// SOCKET value.
+///
+/// Oflags are ignored — Weave does not track CRT-level _O_BINARY/_O_TEXT
+/// distinctions. Returns -1 only if `handle` is negative (would collide
+/// with error sentinel).
+pub extern "win64" fn ucrt_open_osfhandle(handle: isize, _oflags: i32) -> i32 {
+    if handle < 0 {
+        return -1;
+    }
+    handle as i32
+}
+
+/// _get_osfhandle — retrieve the Windows HANDLE for a CRT file descriptor.
+///
+/// Wine ref: dlls/msvcrt/file.c — `_get_osfhandle(fd)` returns the HANDLE
+/// stored in the CRT ioinfo table for `fd`, or `INVALID_HANDLE_VALUE`
+/// (-1) if `fd` is out of range.
+///
+/// Inverse of `ucrt_open_osfhandle`: since sockets are the only case
+/// exercised by wget and ws_socket returns the Linux fd as the HANDLE,
+/// the fd value IS the HANDLE. Round-trip is identity.
+pub extern "win64" fn ucrt_get_osfhandle(fd: i32) -> isize {
+    if fd < 0 {
+        return -1;
+    }
+    fd as isize
 }
 
 // ── CRT stdio file I/O (fopen / fread / fclose / feof / ferror) ───────────────
@@ -3585,6 +3622,7 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "perror" => stub!(ucrt_perror as unsafe extern "win64" fn(_)),
         "raise" => stub!(ucrt_raise as extern "win64" fn(_) -> _),
         "_get_osfhandle" => stub!(ucrt_get_osfhandle as extern "win64" fn(_) -> _),
+        "_open_osfhandle" => stub!(ucrt_open_osfhandle as extern "win64" fn(_, _) -> _),
         "_fseeki64" | "fseek" => {
             stub!(ucrt_fseeki64 as unsafe extern "win64" fn(_, _, _) -> _)
         }
@@ -3915,5 +3953,49 @@ mod tests {
         unsafe { std::ptr::copy_nonoverlapping(p, tm_copy.as_mut_ptr(), 36) };
         let t2 = unsafe { ucrt_mkgmtime64(tm_copy.as_mut_ptr()) };
         assert_eq!(t2, t);
+    }
+
+    #[test]
+    fn open_osfhandle_returns_handle_as_fd() {
+        // A typical socket handle value from ws_socket (Linux fd, small int).
+        assert_eq!(ucrt_open_osfhandle(7, 0x8002), 7);
+        assert_eq!(ucrt_open_osfhandle(42, 0), 42);
+        // Zero is a legal (if rare) fd.
+        assert_eq!(ucrt_open_osfhandle(0, 0), 0);
+    }
+
+    #[test]
+    fn open_osfhandle_negative_handle_returns_error() {
+        // Negative handle is the Windows INVALID_HANDLE_VALUE sentinel (or
+        // any error) — return -1 to signal failure per the Wine contract.
+        assert_eq!(ucrt_open_osfhandle(-1, 0), -1);
+        assert_eq!(ucrt_open_osfhandle(isize::MIN, 0), -1);
+    }
+
+    #[test]
+    fn get_osfhandle_roundtrips_open_osfhandle() {
+        // _open_osfhandle then _get_osfhandle must yield the original
+        // handle value — this is the wget.exe path:
+        //   fd = _open_osfhandle(WSASocketW_result, 0x8002)
+        //   handle = _get_osfhandle(fd) → setsockopt(handle, ...)
+        for h in [0isize, 1, 7, 42, 1000] {
+            let fd = ucrt_open_osfhandle(h, 0x8002);
+            assert_eq!(ucrt_get_osfhandle(fd) as isize, h);
+        }
+    }
+
+    #[test]
+    fn get_osfhandle_negative_fd_returns_error() {
+        assert_eq!(ucrt_get_osfhandle(-1), -1);
+    }
+
+    #[test]
+    fn open_osfhandle_resolves_via_resolver() {
+        // Bug class: _open_osfhandle must be reachable through weave-ucrt's
+        // resolve() so wget's MinGW socket wrapper gets the real stub, not a
+        // no-op returning 0. Without this, wget spins in a retry loop
+        // (Task 01b dispatch 3c-D).
+        assert!(resolve("msvcrt.dll", "_open_osfhandle").is_some());
+        assert!(resolve("ucrtbase.dll", "_open_osfhandle").is_some());
     }
 }
