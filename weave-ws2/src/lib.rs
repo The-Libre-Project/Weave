@@ -1680,10 +1680,17 @@ pub unsafe extern "win64" fn wsa_enum_network_events(
     if lp_network_events.is_null() {
         return 0;
     }
-    // Zero the entire struct first.
-    std::ptr::write_bytes(lp_network_events, 0, 44);
 
     // Non-blocking poll on the socket fd to get real readiness.
+    // IMPORTANT: do NOT touch the caller's struct until we know we have events
+    // to write. Gnulib's rpl_select (lib/select.c) seeds lNetworkEvents with
+    // 0xDEADBEEF before calling us and then checks whether the sentinel was
+    // overwritten to detect "this API actually wrote something". Our earlier
+    // unconditional zero-fill destroyed the sentinel even on no-events, which
+    // made gnulib take the "events returned, but no match" branch and fall
+    // through to an arm-then-wait path that never wakes. Preserve the sentinel
+    // on no-events so gnulib's je at rpl_select's inner loop fires and the
+    // socket is pushed into the MsgWait handle array directly.
     let mut pfd = libc::pollfd {
         fd: s as i32,
         events: libc::POLLIN | libc::POLLOUT | libc::POLLHUP | libc::POLLRDHUP,
@@ -1692,11 +1699,15 @@ pub unsafe extern "win64" fn wsa_enum_network_events(
     let ret = libc::poll(&mut pfd, 1, 0); // timeout=0 → non-blocking
 
     if ret <= 0 {
-        // No events ready or error — return zero-filled struct (success).
+        // No events ready or error — return WITHOUT touching the struct so
+        // gnulib's 0xDEADBEEF sentinel stays intact.
         return 0;
     }
 
     let mut mask: i32 = 0;
+    // iErrorCode[FD_CONNECT_BIT=4] value; Some(code) iff FD_CONNECT is set.
+    let mut connect_ierr: Option<i32> = None;
+
     if (pfd.revents & libc::POLLIN) != 0 {
         // Wine ref: dlls/ws2_32/socket.c — sock_get_events: SS_LISTENING sockets
         // map POLLIN to POLLEVENT_ACCEPT (FD_ACCEPT=8); connected sockets map to
@@ -1729,19 +1740,11 @@ pub unsafe extern "win64" fn wsa_enum_network_events(
             // Transition out of connecting state regardless of outcome.
             weave_common::socket_event::clear_socket_connecting(s as i32);
             mask |= 0x10; // FD_CONNECT
-                          // iErrorCode[FD_CONNECT_BIT=4] at offset 4 + 4*4 = offset 20.
-                          // WSANETWORKEVENTS: long lNetworkEvents (4) + int iErrorCode[10] (40).
-                          // iErrorCode[4] starts at offset 4 + 4*4 = 20.
-            let wsa_err = if connect_err == 0 {
-                0i32
+            connect_ierr = Some(if connect_err == 0 {
+                0
             } else {
                 errno_to_wsa(connect_err)
-            };
-            std::ptr::copy_nonoverlapping(
-                wsa_err.to_le_bytes().as_ptr(),
-                lp_network_events.add(4 + 4 * 4), // iErrorCode[FD_CONNECT_BIT=4]
-                4,
-            );
+            });
         // Do NOT set FD_WRITE on this call — connect completion != write-ready.
         // plink will receive FD_WRITE on the next WSAEnumNetworkEvents call once
         // the socket is in the connected (not connecting) state.
@@ -1762,13 +1765,32 @@ pub unsafe extern "win64" fn wsa_enum_network_events(
         mask |= 32; // FD_CLOSE
     }
 
-    eprintln!(
-        "weave/WSAEnumNetworkEvents: socket={s} revents={:#x} mask={mask:#x}",
-        pfd.revents
-    );
+    if weave_core::ws2_trace::enabled() {
+        eprintln!(
+            "weave/WSAEnumNetworkEvents: socket={s} revents={:#x} mask={mask:#x}",
+            pfd.revents
+        );
+    }
 
-    // Write lNetworkEvents at offset 0 (little-endian i32).
+    // If no events to report, leave the struct untouched so gnulib's
+    // 0xDEADBEEF sentinel is preserved (see comment at entry).
+    if mask == 0 {
+        return 0;
+    }
+
+    // Events to report: zero the whole 44-byte struct, then write mask at
+    // offset 0 and iErrorCode[4] at offset 20 for FD_CONNECT.
+    // WSANETWORKEVENTS: long lNetworkEvents (4) + int iErrorCode[10] (40).
+    std::ptr::write_bytes(lp_network_events, 0, 44);
     std::ptr::copy_nonoverlapping(mask.to_le_bytes().as_ptr(), lp_network_events, 4);
+    if let Some(ierr) = connect_ierr {
+        // iErrorCode[FD_CONNECT_BIT=4] at offset 4 + 4*4 = 20.
+        std::ptr::copy_nonoverlapping(
+            ierr.to_le_bytes().as_ptr(),
+            lp_network_events.add(4 + 4 * 4),
+            4,
+        );
+    }
     0 // success
 }
 

@@ -2443,7 +2443,7 @@ fn curl_ws2_gate() {
 /// Landlock allow-set considerations do not apply.
 /// `--no-sandbox` required for /etc/hosts / DNS. Skipped on non-Linux.
 #[test]
-#[ignore = "Task 01b partial: _localtime64 + _open_osfhandle/_get_osfhandle fixed; wget now resolves DNS, opens TCP, sends HTTP GET, reaches response phase — then fails with 'Read error (Unknown error 138) in headers' (MinGW ECONNABORTED) and retries in a loop. New blocker is in the WS2 read/recv path on the HTTP response, distinct from the fd-walk loop and the original SIGABRT. Re-enable once the response-read failure is root-caused."]
+#[ignore = "Task 01b 3c-G: MsgWait-on-event hang fixed (GetConsoleMode now returns FALSE for sockets, so gnulib includes fd 6 in wfds and MsgWait n=2). Next failures: WSAEnumNetworkEvents leaves sentinel when socket POLLOUT fires on a connected non-WSAEventSelect-armed fd so gnulib loops; msvcrt._lock stub unresolved → SIGABRT later. Re-enable once FD_WRITE reporting + msvcrt CRT coverage land."]
 fn wget_ws2_gate() {
     if !cfg!(target_os = "linux") {
         eprintln!("skipping wget_ws2_gate — requires Linux");

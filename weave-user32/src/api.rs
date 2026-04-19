@@ -3722,23 +3722,223 @@ pub extern "win64" fn get_queue_status(_flags: u32) -> u32 {
     } // QS_POSTMESSAGE
 }
 
-/// MsgWaitForMultipleObjects: wait for objects or a message. Returns WAIT_TIMEOUT.
+/// MsgWaitForMultipleObjects: wait for objects or a message.
+///
+/// Contract (Wine ref: dlls/user32/message.c — calls NtUserMsgWaitForMultipleObjectsEx;
+/// which delegates to `wait_message` in dlls/win32u/message.c):
+/// - Returns `WAIT_OBJECT_0 + i` when `lp_handles[i]` became signalled
+/// - Returns `WAIT_OBJECT_0 + n_count` when a queued message matches `dw_wake_mask`
+/// - Returns `WAIT_TIMEOUT` (0x102) on timeout
+/// - Returns `WAIT_FAILED` (0xFFFFFFFF) on error
+///
+/// Previously stubbed to return WAIT_TIMEOUT immediately. That broke gnulib's
+/// Windows `select(2)` emulator (used by wget's `fd_read` path): gnulib registers
+/// an hEvent via WSAEventSelect then calls `MsgWaitForMultipleObjects(1, &hEvent,
+/// FALSE, timeout, QS_ALLINPUT)` to wait for socket readiness. When this returned
+/// WAIT_TIMEOUT instantly, gnulib's follow-up `select()` poll saw no ready fds
+/// and wget's caller set `errno = ETIMEDOUT` (MinGW errno 138) — "Read error
+/// (Unknown error 138) in headers".
+///
+/// Implementation mirrors weave-kernel32::wait_for_multiple_objects. For socket-
+/// event handles registered by WSAEventSelect we poll the underlying socket fd
+/// directly (its eventfd is never written); for plain eventfd handles we poll
+/// the eventfd; we also watch the message-queue wake pipe so posted messages
+/// unblock the wait.
 ///
 /// # Safety
-/// Pointer arguments are accepted but not dereferenced.
-// Wine ref: dlls/user32/message.c — calls NtUserMsgWaitForMultipleObjectsEx; dwWakeMask
-// is QS_* flags; returns WAIT_OBJECT_0+nCount if a message matches wakeMask.
+/// `lp_handles` must point to `n_count` HANDLE values, or be null.
+// Wine ref: dlls/kernelbase/sync.c:434 — WaitForMultipleObjectsEx contract;
+// dlls/win32u/message.c:wait_message — MsgWait variant adds the server queue at
+// handle_count, returning WAIT_OBJECT_0+count when a message wakes the wait.
 pub unsafe extern "win64" fn msg_wait_for_multiple_objects(
-    _n_count: u32,
-    _lp_handles: *const usize,
+    n_count: u32,
+    lp_handles: *const usize,
     _b_wait_all: i32,
-    _dw_milliseconds: u32,
+    dw_milliseconds: u32,
     _dw_wake_mask: u32,
 ) -> u32 {
-    // Stub: always return WAIT_TIMEOUT immediately.
-    // We do not dereference lp_handles — doing so with an untrusted n_count
-    // from the guest could walk into unmapped memory.
-    0x00000102u32 // WAIT_TIMEOUT
+    const WAIT_OBJECT_0: u32 = 0;
+    const WAIT_TIMEOUT: u32 = 0x00000102;
+    const WAIT_FAILED: u32 = 0xFFFF_FFFF;
+    const INFINITE: u32 = 0xFFFF_FFFF;
+
+    let trace = weave_core::ws2_trace::enabled();
+    if trace {
+        eprintln!("weave/MsgWait: n={n_count} ms={dw_milliseconds} mask={_dw_wake_mask:#x}");
+    }
+    if n_count == 0 || lp_handles.is_null() {
+        return WAIT_FAILED;
+    }
+    if trace {
+        for _i in 0..n_count as usize {
+            let _h = *lp_handles.add(_i);
+            eprintln!("weave/MsgWait:   handle[{_i}]={_h:#x}");
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        // Collect pollfds for each handle. Track the mapping back to handle index.
+        let mut pollfds: Vec<libc::pollfd> = Vec::with_capacity(n_count as usize + 1);
+        let mut pfd_to_handle_idx: Vec<usize> = Vec::with_capacity(n_count as usize);
+
+        for i in 0..n_count as usize {
+            let handle = *lp_handles.add(i);
+
+            // Event handle backed by eventfd.  WSAEventSelect-registered event
+            // handles have a reverse map to the socket fd — poll the socket
+            // directly since the eventfd is never written for socket events.
+            if let Some(efd) = weave_core::handles::get_event_fd(handle) {
+                if let Some(sock_fd) =
+                    weave_common::socket_event::get_socket_for_event(handle as u64)
+                {
+                    // Edge-triggered FD_WRITE: only include POLLOUT when armed.
+                    // Otherwise an idle connected socket is always writable and
+                    // MsgWait would wake instantly every call.
+                    // Wine ref: dlls/ws2_32/socket.c — sock_get_events respects hmask.
+                    let mut sock_events = libc::POLLIN | libc::POLLHUP | libc::POLLRDHUP;
+                    if weave_common::socket_event::is_socket_write_armed(sock_fd) {
+                        sock_events |= libc::POLLOUT;
+                    }
+                    pollfds.push(libc::pollfd {
+                        fd: sock_fd,
+                        events: sock_events,
+                        revents: 0,
+                    });
+                    pfd_to_handle_idx.push(i);
+                    continue;
+                }
+                // Plain event handle — poll its eventfd for readability.
+                pollfds.push(libc::pollfd {
+                    fd: efd,
+                    events: libc::POLLIN,
+                    revents: 0,
+                });
+                pfd_to_handle_idx.push(i);
+                continue;
+            }
+
+            // Thread-completion handle — cannot be multiplexed via poll (it is
+            // a condvar, not an fd). gnulib select only supplies hEvent handles
+            // here, so for now we simply omit thread handles from the poll set
+            // and let the timeout or another handle wake the wait. If a caller
+            // ever passes only a thread handle, `pollfds` will still contain
+            // the message wake pipe as a safety net.
+            if weave_core::handles::get_thread_completion(handle).is_some() {
+                continue;
+            }
+
+            // Socket-as-handle path — MinGW's gnulib select wrapper obtains a
+            // HANDLE for a socket fd via `_get_osfhandle(fd)`, which in our
+            // impl is the identity mapping (socket fd IS the handle). wget's
+            // I/O wait loop passes [hEvent, socket_handle] to MsgWait; we must
+            // poll the socket fd so POLLIN / POLLOUT wakes the wait.
+            //
+            // Wine ref: dlls/ws2_32/socket.c — socket handles on Windows are
+            // signalable objects. Our equivalent on Linux: fstat the fd and if
+            // it's a socket, include POLLIN|POLLOUT|POLLHUP in the pollfd.
+            //
+            // The handle value fits in a socket fd range (small positive int)
+            // — do a cheap fstat probe. If it is a socket, poll it.
+            let fd = handle as i32;
+            if fd > 0 && fd < 4096 {
+                let mut st: libc::stat = std::mem::zeroed();
+                if libc::fstat(fd, &mut st) == 0 && (st.st_mode & libc::S_IFMT) == libc::S_IFSOCK
+                {
+                    let mut sock_events = libc::POLLIN | libc::POLLHUP | libc::POLLRDHUP;
+                    if weave_common::socket_event::is_socket_write_armed(fd) {
+                        sock_events |= libc::POLLOUT;
+                    } else {
+                        // Without an explicit WSAEventSelect FD_WRITE arm,
+                        // still include POLLOUT because a blocking socket
+                        // passed directly as a HANDLE has no Windows-side
+                        // arming — the caller expects "connected + writable"
+                        // to wake the wait the first time and after recv().
+                        sock_events |= libc::POLLOUT;
+                    }
+                    pollfds.push(libc::pollfd {
+                        fd,
+                        events: sock_events,
+                        revents: 0,
+                    });
+                    pfd_to_handle_idx.push(i);
+                    continue;
+                }
+            }
+        }
+
+        // Always include the message-queue wake pipe so a posted message can
+        // unblock the wait. Wine equivalent: the server queue is handles[count].
+        crate::queue::init_wake_pipe();
+        let msg_wake_fd = crate::queue::wake_fd_read();
+        pollfds.push(libc::pollfd {
+            fd: msg_wake_fd,
+            events: libc::POLLIN,
+            revents: 0,
+        });
+        let msg_pfd_index = pollfds.len() - 1;
+
+        let timeout_ms: i32 = if dw_milliseconds == INFINITE {
+            -1
+        } else {
+            dw_milliseconds.min(i32::MAX as u32) as i32
+        };
+
+        let ret = libc::poll(
+            pollfds.as_mut_ptr(),
+            pollfds.len() as libc::nfds_t,
+            timeout_ms,
+        );
+
+        if trace {
+            eprintln!("weave/MsgWait: poll returned {} ret={}", pollfds.len(), ret);
+        }
+        if ret < 0 {
+            return WAIT_FAILED;
+        }
+        if ret == 0 {
+            return WAIT_TIMEOUT;
+        }
+
+        // Check the message wake pipe last, per Wine semantics (handles first).
+        for (pi, pfd) in pollfds.iter().enumerate() {
+            if pi == msg_pfd_index {
+                continue;
+            }
+            let ready = (pfd.revents
+                & (libc::POLLIN | libc::POLLOUT | libc::POLLHUP | libc::POLLRDHUP))
+                != 0;
+            if ready {
+                let hi = pfd_to_handle_idx[pi];
+                if trace {
+                    eprintln!(
+                        "weave/MsgWait: ready pi={pi} hi={hi} revents={:#x} → ret={}",
+                        pfd.revents,
+                        WAIT_OBJECT_0 + hi as u32
+                    );
+                }
+                return WAIT_OBJECT_0 + hi as u32;
+            }
+        }
+        if (pollfds[msg_pfd_index].revents & libc::POLLIN) != 0 {
+            // Drain one byte from the wake pipe so subsequent waits block again
+            // until the next post. Ignore errors — the pipe is non-blocking.
+            let mut scratch = [0u8; 64];
+            let _ = libc::read(
+                msg_wake_fd,
+                scratch.as_mut_ptr() as *mut libc::c_void,
+                scratch.len(),
+            );
+            return WAIT_OBJECT_0 + n_count;
+        }
+
+        WAIT_TIMEOUT
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (n_count, lp_handles, dw_milliseconds);
+        WAIT_TIMEOUT
+    }
 }
 
 // ── Mouse capture ─────────────────────────────────────────────────────────────

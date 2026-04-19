@@ -10080,17 +10080,68 @@ pub unsafe extern "win64" fn get_file_size_ex(h_file: usize, lp_file_size: *mut 
     1 // TRUE
 }
 
-/// GetConsoleMode: write 0 to mode, return TRUE.
+/// GetConsoleMode: return TRUE only for real tty/console handles; otherwise
+/// FALSE + ERROR_INVALID_HANDLE.
+///
+/// Wine ref: dlls/kernelbase/console.c:932 — calls console_ioctl
+/// (IOCTL_CONDRV_GET_MODE); the ioctl fails with STATUS_OBJECT_TYPE_MISMATCH
+/// for non-console handles, which BaseDllHandleError maps to FALSE +
+/// ERROR_INVALID_HANDLE.
+///
+/// Why this matters: gnulib's `IsConsoleHandle` (lib/select.c) is defined as
+/// `GetConsoleMode(h, &mode) != 0`. Gnulib's `rpl_select` then uses this to
+/// pre-classify fds before the MsgWait handle array is built. A stub that
+/// returns TRUE for every handle causes gnulib to misclassify sockets as
+/// consoles; its rfds pre-classification loop then silently drops them, and
+/// MsgWait waits on the hEvent alone — nothing ever signals it, infinite hang.
+/// Wget's "HTTP GET sent, waiting forever for response" bug was exactly this.
+///
+/// Weave has no real Windows console emulation. When the guest runs attached
+/// to a real Linux tty we return TRUE with a plausible cooked-mode value so
+/// console-aware apps get reasonable behavior; otherwise we return FALSE.
 ///
 /// # Safety
-/// `lp_mode` must be a valid writable pointer to a u32.
-// Wine ref: dlls/kernelbase/console.c:932 — calls console_ioctl(IOCTL_CONDRV_GET_MODE) into the
-// console driver; returns the mode flags word directly; Weave stubs it as 0
-pub unsafe extern "win64" fn get_console_mode(_h_console_handle: usize, lp_mode: *mut u32) -> i32 {
-    warn_once("GetConsoleMode");
+/// `lp_mode` must be a valid writable pointer to a u32 (or null).
+pub unsafe extern "win64" fn get_console_mode(h_console_handle: usize, lp_mode: *mut u32) -> i32 {
+    // Map handle to fd. Weave's non-kernel handles (sockets, files) are
+    // identity-mapped to Linux fds; STD_{INPUT,OUTPUT,ERROR}_HANDLE carry
+    // HANDLE_OFFSET=4 → fd=0,1,2 via the std_handle table. Cheap test: small
+    // positive integers that look like fds.
+    let fd: i32 = match h_console_handle {
+        // STD_INPUT_HANDLE / OUTPUT / ERROR encode stdin/stdout/stderr.
+        // (-10, -11, -12 as i32 → 0xFFFFFFF6 / 0xFFFFFFF5 / 0xFFFFFFF4 as usize)
+        0xFFFF_FFFF_FFFF_FFF6 => 0,
+        0xFFFF_FFFF_FFFF_FFF5 => 1,
+        0xFFFF_FFFF_FFFF_FFF4 => 2,
+        h if h > 0 && h < 4096 => h as i32,
+        _ => {
+            weave_common::set_last_error(6); // ERROR_INVALID_HANDLE
+            return 0; // FALSE
+        }
+    };
+
+    // Only real ttys count as "consoles" for our purposes. Sockets, pipes,
+    // regular files → not a console → FALSE + ERROR_INVALID_HANDLE.
+    #[cfg(target_os = "linux")]
+    {
+        if unsafe { libc::isatty(fd) } == 0 {
+            weave_common::set_last_error(6); // ERROR_INVALID_HANDLE
+            return 0; // FALSE
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = fd;
+        // Non-Linux builds: conservative — always report not-a-console.
+        weave_common::set_last_error(6);
+        return 0;
+    }
+
+    // Real tty: report ENABLE_PROCESSED_INPUT | ENABLE_LINE_INPUT |
+    // ENABLE_ECHO_INPUT (typical cooked-mode default on Windows console).
     unsafe {
         if !lp_mode.is_null() {
-            *lp_mode = 0;
+            *lp_mode = 0x0001 | 0x0002 | 0x0004;
         }
     }
     1 // TRUE
