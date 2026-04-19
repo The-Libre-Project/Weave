@@ -2964,6 +2964,34 @@ pub extern "win64" fn set_cursor_pos(_x: i32, _y: i32) -> i32 {
     1
 }
 
+/// # Safety
+/// `lp_rect` must point to a writable `Rect`.
+// Wine ref: dlls/win32u/cursoricon.c::NtUserGetClipCursor — returns the active
+// clip rectangle (the screen region the cursor is confined to). When no clip is
+// set, returns the full virtual-screen bounds. We have no clipping mechanism
+// today; return a generous virtual-screen rectangle and TRUE so callers like
+// SDL2 (which derefs the rect to compute window-relative coordinates) don't
+// segfault. Replacing the previous unresolved-stub behaviour where rax leftover
+// was treated as a RECT pointer.
+pub unsafe extern "win64" fn get_clip_cursor(lp_rect: *mut crate::defs::Rect) -> i32 {
+    if lp_rect.is_null() {
+        return 0;
+    }
+    unsafe {
+        (*lp_rect).left = 0;
+        (*lp_rect).top = 0;
+        (*lp_rect).right = 65535;
+        (*lp_rect).bottom = 65535;
+    }
+    1
+}
+
+// Wine ref: dlls/win32u/cursoricon.c::NtUserClipCursor — confines cursor to a
+// rectangle (or releases when NULL). No-op stub; return TRUE.
+pub extern "win64" fn clip_cursor(_lp_rect: *const crate::defs::Rect) -> i32 {
+    1
+}
+
 // Wine ref: dlls/win32u/window.c — NtUserEnableWindow sets/clears WS_DISABLED style;
 // sends WM_ENABLE(FALSE/TRUE) before changing state; returns previous disabled state.
 pub extern "win64" fn enable_window(_hwnd: usize, _b_enable: i32) -> i32 {

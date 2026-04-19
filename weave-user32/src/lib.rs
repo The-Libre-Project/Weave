@@ -837,6 +837,10 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
             Some(get_cursor_pos as unsafe extern "win64" fn(_) -> _ as *const () as usize)
         }
         "SetCursorPos" => Some(set_cursor_pos as *const () as usize),
+        "GetClipCursor" => {
+            Some(get_clip_cursor as unsafe extern "win64" fn(_) -> _ as *const () as usize)
+        }
+        "ClipCursor" => Some(clip_cursor as *const () as usize),
         "EnableWindow" => Some(enable_window as *const () as usize),
         "IsWindowEnabled" => Some(is_window_enabled as *const () as usize),
         "GetParent" => Some(get_parent as *const () as usize),
