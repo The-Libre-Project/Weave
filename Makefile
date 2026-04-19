@@ -10,7 +10,7 @@
 #   make test       — run full test suite in a Linux Docker container
 #   make ci         — build + lint + full test suite (mirrors CI pipeline)
 
-.PHONY: build lint test test-unit ci
+.PHONY: build lint test test-unit ci fixture-wget-probe
 
 # ── Build ──────────────────────────────────────────────────────────────────────
 
@@ -45,6 +45,12 @@ test:
 		-e CARGO_TARGET_DIR=/weave/docker-target \
 		rust:latest \
 		sh -c "apt-get update -qq && apt-get install -y -qq fonts-dejavu-core libpipewire-0.3-0 libpipewire-0.3-dev libclang-dev xvfb >/dev/null 2>&1; Xvfb :99 -screen 0 1280x720x24 & sleep 1; DISPLAY=:99 cargo test --features weave-winmm/pipewire-audio,weave-mmdevapi/pipewire-audio"
+
+# ── Fixture cross-compile (mingw-w64) ──────────────────────────────────────────
+# Requires x86_64-w64-mingw32-gcc on PATH. Output goes to tests/fixtures/bin/.
+
+fixture-wget-probe:
+	x86_64-w64-mingw32-gcc -O2 -o tests/fixtures/bin/wget_probe.exe tests/fixtures/src/wget_probe.c -lws2_32
 
 # ── Full CI mirror ─────────────────────────────────────────────────────────────
 
