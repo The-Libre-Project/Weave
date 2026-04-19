@@ -2861,6 +2861,115 @@ pub unsafe extern "win64" fn ucrt_gmtime64_s(result: *mut u8, time: *const i64) 
     0
 }
 
+// Thread-local scratch buffers for the non-`_s` variants (_localtime64 /
+// _gmtime64 / _ctime64). Wine's msvcrt keeps these in `thread_data_t`
+// (dlls/msvcrt/time.c:_localtime64 → `msvcrt_get_thread_data()->time_buffer`).
+// The returned pointer is valid until the next call on the same thread from
+// the same family — matching MSVCRT's documented contract.
+thread_local! {
+    static LOCALTIME_TM_BUF: std::cell::UnsafeCell<[u8; 36]>
+        = const { std::cell::UnsafeCell::new([0u8; 36]) };
+    static GMTIME_TM_BUF: std::cell::UnsafeCell<[u8; 36]>
+        = const { std::cell::UnsafeCell::new([0u8; 36]) };
+}
+
+/// _localtime64 — convert _time64_t to local time, returning a thread-local
+/// struct tm*.
+///
+/// Wine ref: dlls/msvcrt/time.c:413-424 — `_localtime64` fetches a per-thread
+/// `time_buffer`, delegates to `_localtime64_s` to fill it, and returns the
+/// buffer pointer (or NULL on invalid input). Callers (MinGW's `time.h`
+/// inline `localtime`, `ctime`, wget's startup code) dereference the returned
+/// `struct tm*` directly — so the value must be a real, populated buffer.
+///
+/// Before this implementation landed, `_localtime64` was an unresolved
+/// import: the IAT patcher wrote a null/trampoline pointer that wget's
+/// caller then dereferenced, aborting inside libc's fortified read. See
+/// `docs/findings/task-01b-wget-trace-3c-B-gdb.md`.
+///
+/// # Safety
+/// `time` may be null (returns NULL) or a pointer to a _time64_t.
+pub unsafe extern "win64" fn ucrt_localtime64(time: *const i64) -> *mut u8 {
+    if time.is_null() {
+        return std::ptr::null_mut();
+    }
+    LOCALTIME_TM_BUF.with(|cell| {
+        let buf = cell.get() as *mut u8;
+        if ucrt_localtime64_s(buf, time) != 0 {
+            std::ptr::null_mut()
+        } else {
+            buf
+        }
+    })
+}
+
+/// _gmtime64 — convert _time64_t to UTC, returning a thread-local struct tm*.
+///
+/// Wine ref: dlls/msvcrt/time.c:507-519 — same per-thread buffer pattern as
+/// `_localtime64`, delegating to `_gmtime64_s`.
+///
+/// # Safety
+/// `time` may be null (returns NULL) or a pointer to a _time64_t.
+pub unsafe extern "win64" fn ucrt_gmtime64(time: *const i64) -> *mut u8 {
+    if time.is_null() {
+        return std::ptr::null_mut();
+    }
+    GMTIME_TM_BUF.with(|cell| {
+        let buf = cell.get() as *mut u8;
+        if ucrt_gmtime64_s(buf, time) != 0 {
+            std::ptr::null_mut()
+        } else {
+            buf
+        }
+    })
+}
+
+/// _mkgmtime64 — inverse of `_gmtime64`: interpret a `struct tm` as UTC and
+/// return the corresponding _time64_t.
+///
+/// Wine ref: dlls/msvcrt/time.c:346-353 — `_mkgmtime64` delegates to
+/// `mktime_helper(tm, FALSE)`, which builds a SYSTEMTIME→FILETIME and
+/// converts to Unix seconds. POSIX equivalent is `timegm(3)`; we use that
+/// via libc. `tm_isdst` is ignored per the Wine comment.
+///
+/// Returns -1 on error.
+///
+/// # Safety
+/// `tm` must point to a readable 36-byte MSVCRT `struct tm`.
+pub unsafe extern "win64" fn ucrt_mkgmtime64(tm: *mut u8) -> i64 {
+    if tm.is_null() {
+        return -1;
+    }
+    let fields = tm as *const i32;
+    let mut linux_tm: libc::tm = std::mem::zeroed();
+    linux_tm.tm_sec = *fields;
+    linux_tm.tm_min = *fields.add(1);
+    linux_tm.tm_hour = *fields.add(2);
+    linux_tm.tm_mday = *fields.add(3);
+    linux_tm.tm_mon = *fields.add(4);
+    linux_tm.tm_year = *fields.add(5);
+    linux_tm.tm_wday = *fields.add(6);
+    linux_tm.tm_yday = *fields.add(7);
+    linux_tm.tm_isdst = -1; // ignored by timegm, matches Wine's "ignored" note
+    let ret = libc::timegm(&mut linux_tm);
+    if ret == -1 {
+        return -1;
+    }
+    // Write normalized fields back so the caller observes the canonical form
+    // (Wine's mktime_helper does this via GetSystemTimeAsFileTime roundtrip).
+    let out = tm as *mut i32;
+    *out = linux_tm.tm_sec;
+    *out.add(1) = linux_tm.tm_min;
+    *out.add(2) = linux_tm.tm_hour;
+    *out.add(3) = linux_tm.tm_mday;
+    *out.add(4) = linux_tm.tm_mon;
+    *out.add(5) = linux_tm.tm_year;
+    *out.add(6) = linux_tm.tm_wday;
+    *out.add(7) = linux_tm.tm_yday;
+    *out.add(8) = linux_tm.tm_isdst;
+    ret as i64
+}
+
 // ── Utility functions ─────────────────────────────────────────────────────────
 
 /// _byteswap_uint64 — swap byte order of a 64-bit unsigned integer.
@@ -3671,6 +3780,9 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "_difftime64" => stub!(ucrt_difftime64 as extern "win64" fn(_, _) -> _),
         "_localtime64_s" => stub!(ucrt_localtime64_s as unsafe extern "win64" fn(_, _) -> _),
         "_gmtime64_s" => stub!(ucrt_gmtime64_s as unsafe extern "win64" fn(_, _) -> _),
+        "_localtime64" => stub!(ucrt_localtime64 as unsafe extern "win64" fn(_) -> _),
+        "_gmtime64" => stub!(ucrt_gmtime64 as unsafe extern "win64" fn(_) -> _),
+        "_mkgmtime64" => stub!(ucrt_mkgmtime64 as unsafe extern "win64" fn(_) -> _),
         "_byteswap_uint64" => stub!(ucrt_byteswap_uint64 as extern "win64" fn(_) -> _),
         "bsearch" => stub!(ucrt_bsearch as unsafe extern "win64" fn(_, _, _, _, _) -> _),
         "qsort" => stub!(ucrt_qsort as unsafe extern "win64" fn(_, _, _, _)),
@@ -3718,5 +3830,90 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
             Some(ucrt_type_info_dtor as unsafe extern "win64" fn(_) as *const () as usize)
         }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Helper: decode the 9-int MSVCRT tm layout returned by _localtime64 /
+    /// _gmtime64.
+    unsafe fn read_tm(p: *const u8) -> [i32; 9] {
+        let mut out = [0i32; 9];
+        std::ptr::copy_nonoverlapping(p as *const i32, out.as_mut_ptr(), 9);
+        out
+    }
+
+    #[test]
+    fn gmtime64_epoch_fields() {
+        // Unix epoch: 1970-01-01 00:00:00 UTC → tm_year=70 (years since 1900),
+        // tm_mon=0 (Jan), tm_mday=1, rest zero.
+        let t: i64 = 0;
+        let p = unsafe { ucrt_gmtime64(&t as *const i64) };
+        assert!(!p.is_null(), "_gmtime64(0) must not return NULL");
+        let fields = unsafe { read_tm(p) };
+        assert_eq!(fields[0], 0, "tm_sec");
+        assert_eq!(fields[1], 0, "tm_min");
+        assert_eq!(fields[2], 0, "tm_hour");
+        assert_eq!(fields[3], 1, "tm_mday");
+        assert_eq!(fields[4], 0, "tm_mon");
+        assert_eq!(fields[5], 70, "tm_year (years since 1900)");
+        assert_eq!(fields[7], 0, "tm_yday");
+    }
+
+    #[test]
+    fn gmtime64_known_date() {
+        // 2000-01-01 00:00:00 UTC = 946684800
+        let t: i64 = 946684800;
+        let p = unsafe { ucrt_gmtime64(&t as *const i64) };
+        assert!(!p.is_null());
+        let fields = unsafe { read_tm(p) };
+        assert_eq!(fields[3], 1, "tm_mday");
+        assert_eq!(fields[4], 0, "tm_mon");
+        assert_eq!(fields[5], 100, "tm_year");
+    }
+
+    #[test]
+    fn localtime64_returns_nonnull_for_valid_time() {
+        // _localtime64 depends on the host timezone, so we only assert the
+        // contract wget relies on: a non-null, dereferenceable pointer.
+        let t: i64 = 1_700_000_000; // 2023-11-14 ~22:13 UTC
+        let p = unsafe { ucrt_localtime64(&t as *const i64) };
+        assert!(!p.is_null());
+        let fields = unsafe { read_tm(p) };
+        // Any valid tm has year >= 70 (1970+); mon in [0,11]; mday in [1,31].
+        assert!(fields[4] >= 0 && fields[4] <= 11);
+        assert!(fields[3] >= 1 && fields[3] <= 31);
+        assert!(fields[5] >= 70);
+    }
+
+    #[test]
+    fn localtime64_null_returns_null() {
+        let p = unsafe { ucrt_localtime64(std::ptr::null()) };
+        assert!(p.is_null());
+    }
+
+    #[test]
+    fn localtime64_buffer_is_thread_local_and_stable() {
+        let t: i64 = 1_700_000_000;
+        let p1 = unsafe { ucrt_localtime64(&t as *const i64) };
+        let p2 = unsafe { ucrt_localtime64(&t as *const i64) };
+        // Same thread → same buffer address. This is the contract wget's
+        // MinGW inline `localtime()` wrapper depends on.
+        assert_eq!(p1, p2);
+    }
+
+    #[test]
+    fn mkgmtime64_roundtrip() {
+        // gmtime(t) then mkgmtime(tm) must yield t back.
+        let t: i64 = 1_700_000_000;
+        let p = unsafe { ucrt_gmtime64(&t as *const i64) };
+        assert!(!p.is_null());
+        // Copy out so we don't mutate the thread-local buffer underneath us.
+        let mut tm_copy = [0u8; 36];
+        unsafe { std::ptr::copy_nonoverlapping(p, tm_copy.as_mut_ptr(), 36) };
+        let t2 = unsafe { ucrt_mkgmtime64(tm_copy.as_mut_ptr()) };
+        assert_eq!(t2, t);
     }
 }

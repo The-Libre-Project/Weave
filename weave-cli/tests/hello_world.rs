@@ -2443,7 +2443,7 @@ fn curl_ws2_gate() {
 /// Landlock allow-set considerations do not apply.
 /// `--no-sandbox` required for /etc/hosts / DNS. Skipped on non-Linux.
 #[test]
-#[ignore = "Task 01 pivoted to ws2_probe_ws2_gate; re-enable once CRT stub audit closes the MinGW+OpenSSL startup abort"]
+#[ignore = "Task 01b partial: _localtime64 fixed; wget now spins in an unresolved-import stub loop at caller ret=0x140001f85 with monotonically increasing rax — next blocker is a different msvcrt stub (distinct from the original SIGABRT). Re-enable once that stub chain is closed."]
 fn wget_ws2_gate() {
     if !cfg!(target_os = "linux") {
         eprintln!("skipping wget_ws2_gate — requires Linux");
