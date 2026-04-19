@@ -3843,8 +3843,7 @@ pub unsafe extern "win64" fn msg_wait_for_multiple_objects(
             let fd = handle as i32;
             if fd > 0 && fd < 4096 {
                 let mut st: libc::stat = std::mem::zeroed();
-                if libc::fstat(fd, &mut st) == 0 && (st.st_mode & libc::S_IFMT) == libc::S_IFSOCK
-                {
+                if libc::fstat(fd, &mut st) == 0 && (st.st_mode & libc::S_IFMT) == libc::S_IFSOCK {
                     let mut sock_events = libc::POLLIN | libc::POLLHUP | libc::POLLRDHUP;
                     if weave_common::socket_event::is_socket_write_armed(fd) {
                         sock_events |= libc::POLLOUT;

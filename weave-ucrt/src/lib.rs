@@ -1683,9 +1683,8 @@ unsafe impl Sync for RecursiveCs {}
 #[cfg(target_os = "linux")]
 impl RecursiveCs {
     fn new() -> Self {
-        let cell = std::cell::UnsafeCell::new(unsafe {
-            std::mem::zeroed::<libc::pthread_mutex_t>()
-        });
+        let cell =
+            std::cell::UnsafeCell::new(unsafe { std::mem::zeroed::<libc::pthread_mutex_t>() });
         unsafe {
             let mut attr: libc::pthread_mutexattr_t = std::mem::zeroed();
             if libc::pthread_mutexattr_init(&mut attr) == 0 {
@@ -3641,7 +3640,11 @@ pub unsafe extern "win64" fn ucrt_fileno(stream: *mut c_void) -> i32 {
 pub unsafe extern "win64" fn ucrt_read(fd: i32, buf: *mut c_void, count: u32) -> i32 {
     let ret = libc::read(fd, buf, count as usize);
     if weave_core::ws2_trace::enabled() {
-        let e = if ret < 0 { *libc::__errno_location() } else { 0 };
+        let e = if ret < 0 {
+            *libc::__errno_location()
+        } else {
+            0
+        };
         eprintln!("weave/ucrt_read: fd={fd} count={count} ret={ret} errno={e}");
     }
     ret as i32
@@ -4092,18 +4095,18 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         // stubs (return 0 = no conversions).  Previously aliased to ucrt_cexit
         // which violated the `int(...)` ABI; see ucrt_stdio_common_vsscanf
         // doc comment and Wine `dlls/msvcrt/scanf.c:667`.
-        "__stdio_common_vsscanf" => stub!(
-            ucrt_stdio_common_vsscanf as extern "win64" fn(_, _, _, _, _, _) -> _
-        ),
-        "__stdio_common_vfscanf" => stub!(
-            ucrt_stdio_common_vfscanf as extern "win64" fn(_, _, _, _, _) -> _
-        ),
-        "__stdio_common_vswscanf" => stub!(
-            ucrt_stdio_common_vswscanf as extern "win64" fn(_, _, _, _, _, _) -> _
-        ),
-        "__stdio_common_vfwscanf" => stub!(
-            ucrt_stdio_common_vfwscanf as extern "win64" fn(_, _, _, _, _) -> _
-        ),
+        "__stdio_common_vsscanf" => {
+            stub!(ucrt_stdio_common_vsscanf as extern "win64" fn(_, _, _, _, _, _) -> _)
+        }
+        "__stdio_common_vfscanf" => {
+            stub!(ucrt_stdio_common_vfscanf as extern "win64" fn(_, _, _, _, _) -> _)
+        }
+        "__stdio_common_vswscanf" => {
+            stub!(ucrt_stdio_common_vswscanf as extern "win64" fn(_, _, _, _, _, _) -> _)
+        }
+        "__stdio_common_vfwscanf" => {
+            stub!(ucrt_stdio_common_vfwscanf as extern "win64" fn(_, _, _, _, _) -> _)
+        }
         // Additional MSVCRT startup symbols seen in MinGW-compiled binaries.
         // All are no-ops or aliases — the CRT startup just needs them to resolve.
         "__getmainargs_to_utf8"
@@ -4510,8 +4513,8 @@ mod tests {
             "__stdio_common_vswscanf",
             "__stdio_common_vfwscanf",
         ] {
-            let resolved = resolve("msvcrt.dll", name)
-                .unwrap_or_else(|| panic!("{name} should resolve"));
+            let resolved =
+                resolve("msvcrt.dll", name).unwrap_or_else(|| panic!("{name} should resolve"));
             assert_ne!(
                 resolved, cexit_addr,
                 "{name} is incorrectly aliased to ucrt_cexit"

@@ -760,9 +760,7 @@ mod tests {
     /// Returns (combined_buf, ret_addr, slot_va).  The buffer must remain
     /// live for the test duration so that the decoder's dereferences land on
     /// valid memory.
-    fn build_call_impthunk_chain(
-        compute_slot: impl Fn(usize) -> usize,
-    ) -> (Vec<u8>, usize, usize) {
+    fn build_call_impthunk_chain(compute_slot: impl Fn(usize) -> usize) -> (Vec<u8>, usize, usize) {
         // Layout (offsets within the buffer):
         //   [0..16]   16 NOPs (guest pre-CALL padding)
         //   [16]      0xE8 (guest CALL opcode)
@@ -810,8 +808,7 @@ mod tests {
     #[test]
     fn decode_call_iat_slot_impthunk_positive() {
         // Slot sits ahead of the thunk.  Keep buffer alive via _buf.
-        let (_buf, ret_addr, slot_va) =
-            build_call_impthunk_chain(|next_instr| next_instr + 0x4000);
+        let (_buf, ret_addr, slot_va) = build_call_impthunk_chain(|next_instr| next_instr + 0x4000);
         let decoded = unsafe { decode_call_iat_slot(ret_addr, 0xDEAD_BEEFusize) };
         assert_eq!(decoded, Some(slot_va));
     }

@@ -12689,8 +12689,9 @@ mod tests {
         }
         let name = b"WEAVE_TEST_ENV_A_SMALL\0";
         let mut buf = [0u8; 3];
-        let ret =
-            unsafe { get_environment_variable_a(name.as_ptr(), buf.as_mut_ptr(), buf.len() as u32) };
+        let ret = unsafe {
+            get_environment_variable_a(name.as_ptr(), buf.as_mut_ptr(), buf.len() as u32)
+        };
         assert_eq!(ret, 6); // "hello" len + NUL
         unsafe { libc::unsetenv(b"WEAVE_TEST_ENV_A_SMALL\0".as_ptr() as *const i8) };
     }

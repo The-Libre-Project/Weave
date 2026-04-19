@@ -478,7 +478,11 @@ pub unsafe extern "win64" fn ws_send(s: usize, buf: *const u8, len: i32, flags: 
 pub unsafe extern "win64" fn ws_recv(s: usize, buf: *mut u8, len: i32, flags: i32) -> i32 {
     let ret = libc::recv(s as i32, buf as *mut libc::c_void, len as usize, flags);
     if weave_core::ws2_trace::enabled() {
-        let errno = if ret < 0 { *libc::__errno_location() } else { 0 };
+        let errno = if ret < 0 {
+            *libc::__errno_location()
+        } else {
+            0
+        };
         eprintln!("weave/ws_recv: s={s} len={len} flags={flags:#x} ret={ret} errno={errno}");
     }
     if ret < 0 {
