@@ -1401,6 +1401,66 @@ pub unsafe extern "win64" fn invalidate_rect(
     }
 }
 
+/// ValidateRect: remove a rectangle (or the whole window if NULL) from a
+/// window's update region. With no client-side region tracking today, this is
+/// a logical no-op — InvalidateRect posts WM_PAINT directly and BeginPaint
+/// clears the dirty state. Returning TRUE matches the Win32 success contract
+/// so callers don't take a failure branch.
+///
+/// # Safety
+/// `_lp_rect` (if non-null) must point to a valid `Rect`.
+// Wine ref: dlls/win32u/painting.c::NtUserValidateRect — subtracts the rect
+// from the update region (or clears it if rect == NULL); cancels any pending
+// WM_PAINT for the validated area. Real region tracking is M6+ work; for now
+// a TRUE return prevents the caller-derefs-uninit-rax crash class.
+pub unsafe extern "win64" fn validate_rect(_hwnd: usize, _lp_rect: *const Rect) -> i32 {
+    1
+}
+
+/// CopyImage: duplicate an HICON / HCURSOR / HBITMAP. Returns a new handle
+/// referencing the same underlying resource bytes (which live for the
+/// originating module's lifetime — same invariant `LoadImageW` relies on).
+///
+/// Honoured flags:
+/// * `LR_COPYRETURNORG` (0x0004) — return the source handle unchanged. Wine
+///   does this when no transformation is requested.
+/// * `LR_COPYDELETEORG` (0x0008) — would delete the source after copy. We
+///   ignore (no destruction path on shared handles); worst case a guest leaks
+///   one slot, never a crash.
+///
+/// `cx`/`cy` size hints are ignored; we don't rescale yet.
+///
+/// # Safety
+/// `h_image` should be a handle previously returned by `LoadImageW` /
+/// `LoadIconW` / `LoadCursorW` / `LoadBitmapW`. Unknown handles are returned
+/// as-is rather than producing NULL — callers that ignored the load return
+/// then re-fed garbage are no worse off than before.
+// Wine ref: dlls/user32/cursoricon.c::CopyImage — for HICON/HCURSOR delegates
+// to CopyIcon (NtUserCopyImage path); for HBITMAP creates a new DIB with the
+// same bits via CreateDIBSection. Our shallow-clone matches the behavioral
+// shape callers rely on (distinct handle, same pixels) without needing a
+// pixel-buffer copy that would never be observed differently in Weave.
+pub unsafe extern "win64" fn copy_image(
+    h_image: usize,
+    _u_type: u32,
+    _cx: i32,
+    _cy: i32,
+    fu_flags: u32,
+) -> usize {
+    use crate::image_handles as ih;
+    const LR_COPYRETURNORG: u32 = 0x0004;
+    if fu_flags & LR_COPYRETURNORG != 0 {
+        return h_image;
+    }
+    let entry = match ih::get(h_image) {
+        Some(e) => e,
+        None => return h_image, // unknown — pass-through is safer than NULL
+    };
+    let mut dup = entry.clone();
+    dup.shared = false; // copies are never LR_SHARED per Win32 contract
+    ih::insert(dup, None)
+}
+
 // ── Window title ──────────────────────────────────────────────────────────────
 
 /// SetWindowTextW: update the title bar text of a window.

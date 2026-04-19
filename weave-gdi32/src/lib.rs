@@ -1183,6 +1183,41 @@ pub unsafe extern "win64" fn get_text_extent_point32_w(
     1
 }
 
+// ── ICM (color-profile) stubs ─────────────────────────────────────────────────
+
+/// GetICMProfileW: return the path to the ICM color profile associated with
+/// `hdc`. We have no ICM support — write `*lp_buf_size = 0`, set the buffer
+/// to an empty string if writable, return FALSE.
+///
+/// SDL2's renderer queries this every frame on the back-buffer DC; the
+/// unresolved-import stub previously returned with leftover `rax` that the
+/// caller treated as a BOOL success and then dereferenced `psz_filename` as
+/// a populated path → flaky SIGSEGV in the same family as `GetClipCursor`.
+/// FALSE + zeroed out-params closes the deref hazard.
+///
+/// # Safety
+/// `lp_buf_size` and `psz_filename` (if non-null) must point to writable
+/// memory of the appropriate size.
+// Wine ref: dlls/gdi32/dc.c::GetICMProfileW — calls NtGdiGetICMProfile which
+// queries the device's WINEDC color-management state; on systems without an
+// installed profile, returns FALSE and writes zero into *lp_buf_size.
+pub unsafe extern "win64" fn get_icm_profile_w(
+    _hdc: usize,
+    lp_buf_size: *mut u32,
+    psz_filename: *mut u16,
+) -> i32 {
+    if !lp_buf_size.is_null() {
+        // SAFETY: caller-provided writable u32.
+        unsafe { *lp_buf_size = 0 };
+    }
+    if !psz_filename.is_null() {
+        // SAFETY: write a single NUL so callers that read the buffer without
+        // checking the BOOL return get a well-formed empty string.
+        unsafe { *psz_filename = 0 };
+    }
+    0
+}
+
 // ── Device capabilities ───────────────────────────────────────────────────────
 
 /// GetDeviceCaps: return device capabilities for a DC.
@@ -1416,6 +1451,9 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         ),
         // Device capabilities
         "GetDeviceCaps" => Some(get_device_caps as *const () as usize),
+        "GetICMProfileA" | "GetICMProfileW" => {
+            Some(get_icm_profile_w as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize)
+        }
         // DC state
         "GetClipBox" => {
             Some(get_clip_box as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)

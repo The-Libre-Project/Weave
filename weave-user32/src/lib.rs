@@ -659,6 +659,12 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "InvalidateRect" => {
             Some(invalidate_rect as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize)
         }
+        "ValidateRect" => {
+            Some(validate_rect as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "CopyImage" => {
+            Some(copy_image as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const () as usize)
+        }
         "GetUpdateRect" => {
             Some(get_update_rect as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize)
         }
