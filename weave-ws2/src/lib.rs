@@ -322,6 +322,9 @@ pub extern "win64" fn wsa_set_last_error(err: i32) {
 /// # Safety
 /// No pointer arguments.
 pub unsafe extern "win64" fn ws_socket(af: i32, type_: i32, protocol: i32) -> usize {
+    if weave_core::ws2_trace::enabled() {
+        eprintln!("weave/ws_socket: af={af} type={type_} protocol={protocol}");
+    }
     let fd = libc::socket(af_win_to_linux(af), type_, protocol);
     if fd < 0 {
         save_errno();
@@ -399,6 +402,9 @@ pub unsafe extern "win64" fn ws_closesocket(s: usize) -> i32 {
 /// # Safety
 /// `name` must point to a valid sockaddr of at least `namelen` bytes.
 pub unsafe extern "win64" fn ws_connect(s: usize, name: *const u8, namelen: i32) -> i32 {
+    if weave_core::ws2_trace::enabled() {
+        eprintln!("weave/ws_connect: s={s} namelen={namelen}");
+    }
     if name.is_null() {
         set_last_error(10014); // WSAEFAULT
         return SOCKET_ERROR;
@@ -431,6 +437,9 @@ pub unsafe extern "win64" fn ws_connect(s: usize, name: *const u8, namelen: i32)
 /// # Safety
 /// `buf` must point to at least `len` readable bytes.
 pub unsafe extern "win64" fn ws_send(s: usize, buf: *const u8, len: i32, flags: i32) -> i32 {
+    if weave_core::ws2_trace::enabled() {
+        eprintln!("weave/ws_send: s={s} len={len} flags={flags:#x}");
+    }
     let ret = libc::send(s as i32, buf as *const libc::c_void, len as usize, flags);
     if ret < 0 {
         let e = *libc::__errno_location();
@@ -455,6 +464,10 @@ pub unsafe extern "win64" fn ws_send(s: usize, buf: *const u8, len: i32, flags: 
 /// `buf` must point to at least `len` writable bytes.
 pub unsafe extern "win64" fn ws_recv(s: usize, buf: *mut u8, len: i32, flags: i32) -> i32 {
     let ret = libc::recv(s as i32, buf as *mut libc::c_void, len as usize, flags);
+    if weave_core::ws2_trace::enabled() {
+        let errno = if ret < 0 { *libc::__errno_location() } else { 0 };
+        eprintln!("weave/ws_recv: s={s} len={len} flags={flags:#x} ret={ret} errno={errno}");
+    }
     if ret < 0 {
         save_errno();
         SOCKET_ERROR
@@ -612,6 +625,12 @@ pub unsafe extern "win64" fn ws_select(
     exceptfds: *mut u8,
     timeout: *const u8,
 ) -> i32 {
+    if weave_core::ws2_trace::enabled() {
+        eprintln!(
+            "weave/ws_select: r={:p} w={:p} e={:p} t={:p}",
+            readfds, writefds, exceptfds, timeout
+        );
+    }
     let (mut lr, max_r) = win_fdset_to_linux(readfds);
     let (mut lw, max_w) = win_fdset_to_linux(writefds);
     let (mut le, max_e) = win_fdset_to_linux(exceptfds);
@@ -679,6 +698,12 @@ pub unsafe extern "win64" fn ws_getaddrinfo(
     p_hints: *const WinAddrInfo,
     pp_result: *mut *mut WinAddrInfo,
 ) -> i32 {
+    if weave_core::ws2_trace::enabled() {
+        eprintln!(
+            "weave/ws_getaddrinfo: node={:p} service={:p}",
+            p_node_name, p_service_name
+        );
+    }
     if pp_result.is_null() {
         return 10014; // WSAEFAULT
     }
@@ -781,6 +806,9 @@ pub unsafe extern "win64" fn ws_freeaddrinfo(p_addr_info: *mut WinAddrInfo) {
 /// # Safety
 /// `argp` must be a valid non-null pointer to a u32.
 pub unsafe extern "win64" fn ws_ioctlsocket(s: usize, cmd: u32, argp: *mut u32) -> i32 {
+    if weave_core::ws2_trace::enabled() {
+        eprintln!("weave/ws_ioctlsocket: s={s} cmd={cmd:#x}");
+    }
     if argp.is_null() {
         set_last_error(10014);
         return SOCKET_ERROR;

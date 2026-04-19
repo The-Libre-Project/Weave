@@ -6104,6 +6104,9 @@ pub unsafe extern "win64" fn open_event_w(
 /// poll/WaitForSingleObject/WaitForMultipleObjects.
 // Wine ref: dlls/kernelbase/sync.c:700 — calls NtSetEvent(handle, NULL); NULL for previous_state is valid
 pub extern "win64" fn set_event(h_event: usize) -> i32 {
+    if weave_core::ws2_trace::enabled() {
+        eprintln!("weave/SetEvent: h={h_event:#x}");
+    }
     #[cfg(target_os = "linux")]
     if let Some(efd) = handles::get_event_fd(h_event) {
         let val: u64 = 1;
@@ -7090,6 +7093,9 @@ pub extern "win64" fn tls_free(dw_tls_index: u32) -> i32 {
 // Wine ref: dlls/kernel32/sync.c — WaitForSingleObject wraps NtWaitForSingleObject;
 // WAIT_OBJECT_0=0, WAIT_TIMEOUT=0x102, WAIT_FAILED=0xFFFFFFFF; invalid handle → WAIT_FAILED.
 pub unsafe extern "win64" fn wait_for_single_object(h_handle: usize, dw_milliseconds: u32) -> u32 {
+    if weave_core::ws2_trace::enabled() {
+        eprintln!("weave/WaitForSingleObject: h={h_handle:#x} ms={dw_milliseconds}");
+    }
     const INVALID_HANDLE_VALUE: usize = usize::MAX;
     const WAIT_OBJECT_0: u32 = 0;
     const WAIT_TIMEOUT: u32 = 0x00000102;

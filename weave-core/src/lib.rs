@@ -16,3 +16,4 @@ pub mod resolve;
 pub mod seh;
 pub mod teb;
 pub mod unwind;
+pub mod ws2_trace;

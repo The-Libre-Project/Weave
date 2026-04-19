@@ -3382,6 +3382,10 @@ pub unsafe extern "win64" fn ucrt_fileno(stream: *mut c_void) -> i32 {
 /// `buf` must be a writable buffer of `count` bytes.
 pub unsafe extern "win64" fn ucrt_read(fd: i32, buf: *mut c_void, count: u32) -> i32 {
     let ret = libc::read(fd, buf, count as usize);
+    if weave_core::ws2_trace::enabled() {
+        let e = if ret < 0 { *libc::__errno_location() } else { 0 };
+        eprintln!("weave/ucrt_read: fd={fd} count={count} ret={ret} errno={e}");
+    }
     ret as i32
 }
 
@@ -3393,6 +3397,9 @@ pub unsafe extern "win64" fn ucrt_read(fd: i32, buf: *mut c_void, count: u32) ->
 /// # Safety
 /// `buf` must be a readable buffer of `count` bytes.
 pub unsafe extern "win64" fn ucrt_write(fd: i32, buf: *const c_void, count: u32) -> i32 {
+    if weave_core::ws2_trace::enabled() {
+        eprintln!("weave/ucrt_write: fd={fd} count={count}");
+    }
     let ret = libc::write(fd, buf, count as usize);
     ret as i32
 }
