@@ -428,6 +428,19 @@ pub unsafe extern "win64" fn ws_connect(s: usize, name: *const u8, namelen: i32)
         set_last_error(errno_to_wsa(e));
         SOCKET_ERROR
     } else {
+        // Synchronous connect success — Wine's sock_reselect arms the socket's
+        // write-pending state (hmask |= POLLEVENT_WRITE) on the SOCK_CONNECTING →
+        // SOCK_CONNECTED transition so the first WSAEnumNetworkEvents reports
+        // FD_CONNECT|FD_WRITE. Our EINPROGRESS/clear_connecting path fires on
+        // POLLOUT, but a same-process sync connect (loopback, pre-resolved IP)
+        // never passes through the connecting state and would leave
+        // SOCKET_WRITE_ARMED empty — gnulib/wget then spins because FD_WRITE
+        // never lights up. Record the terminal armed state here.
+        // Wine ref: server/sock.c:1125 get_poll_flags — POLLOUT is mapped to
+        // AFD_POLL_WRITE unconditionally for any non-SOCK_UNCONNECTED socket;
+        // a sync-connected socket is SOCK_CONNECTED so POLLOUT → AFD_POLL_WRITE.
+        weave_common::socket_event::clear_socket_connecting(s as i32);
+        weave_common::socket_event::arm_socket_write(s as i32);
         0
     }
 }
@@ -1749,16 +1762,25 @@ pub unsafe extern "win64" fn wsa_enum_network_events(
         // plink will receive FD_WRITE on the next WSAEnumNetworkEvents call once
         // the socket is in the connected (not connecting) state.
         } else {
-            // Edge-triggered FD_WRITE: only report if armed.
-            // Wine ref: dlls/ws2_32/socket.c — sock_get_events: after FD_WRITE is
-            // delivered, the bit is cleared from hmask. It is re-set only after a
-            // send() returns EWOULDBLOCK and the kernel signals write-space available.
-            // Linux POLLOUT is level-triggered (always set when send buf has space);
-            // we enforce edge semantics via SOCKET_WRITE_ARMED.
-            if weave_common::socket_event::is_socket_write_armed(s as i32) {
-                mask |= 2; // FD_WRITE
-                weave_common::socket_event::disarm_socket_write(s as i32);
-            }
+            // Connected socket with POLLOUT.
+            // Wine ref: server/sock.c:1125 get_poll_flags —
+            //   if (event & POLLOUT) flags |= AFD_POLL_WRITE;
+            // is unconditional for any non-SOCK_UNCONNECTED socket. Wine does
+            // NOT gate AFD_POLL_WRITE on the edge-trigger hmask at this layer;
+            // that gating happens one level up in sock_dispatch_events, which
+            // filters against the pending-mask AFTER the poll flags have been
+            // computed. A connection-mode fd whose send buffer has space must
+            // surface FD_WRITE to gnulib/wget on the first WSAEnumNetworkEvents
+            // call after connect, otherwise gnulib's rpl_select loop concludes
+            // "nothing actionable" and falls into its abort() path.
+            //
+            // We still disarm SOCKET_WRITE_ARMED after reporting so that WFMO /
+            // WSAWaitForMultipleEvents (which include POLLOUT in the poll mask
+            // only when armed) do not flood with level-triggered POLLOUT wakes
+            // on an idle, connected, send-buffer-empty socket. The arm bit is
+            // re-set by ws_send on EWOULDBLOCK/EAGAIN for the drain case.
+            mask |= 2; // FD_WRITE
+            weave_common::socket_event::disarm_socket_write(s as i32);
         }
     }
     if (pfd.revents & (libc::POLLHUP | libc::POLLRDHUP)) != 0 {
@@ -2172,5 +2194,150 @@ mod tests {
     #[test]
     fn resolve_unknown_function() {
         assert!(resolve("ws2_32.dll", "__nonexistent__").is_none());
+    }
+
+    // ── FD_WRITE / sync-connect arming regression tests ────────────────────
+    //
+    // These exercise the Wine server/sock.c:1125 get_poll_flags alignment:
+    //   - A connected socket with POLLOUT must surface FD_WRITE regardless
+    //     of whether SOCKET_WRITE_ARMED was previously set (matches Wine's
+    //     unconditional `if (event & POLLOUT) flags |= AFD_POLL_WRITE`).
+    //   - A synchronous ws_connect success path must record the terminal
+    //     SOCKET_WRITE_ARMED state so WFMO (which gates POLLOUT on the arm
+    //     bit to avoid flood wake-ups) includes POLLOUT on the first wait.
+    //
+    // The tests run on Linux (sockets) and are skipped on macOS.
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn sync_connect_arms_fd_write() {
+        // Bring up a listener on 127.0.0.1:ephemeral, then ws_connect to it.
+        // After the sync success return, is_socket_write_armed(fd) must be true.
+        unsafe {
+            let listener = libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0);
+            assert!(listener >= 0);
+            let mut addr: libc::sockaddr_in = std::mem::zeroed();
+            addr.sin_family = libc::AF_INET as u16;
+            addr.sin_port = 0;
+            addr.sin_addr.s_addr = u32::to_be(0x7F000001);
+            assert_eq!(
+                libc::bind(
+                    listener,
+                    &addr as *const _ as *const libc::sockaddr,
+                    std::mem::size_of::<libc::sockaddr_in>() as u32,
+                ),
+                0
+            );
+            assert_eq!(libc::listen(listener, 1), 0);
+            let mut out_addr: libc::sockaddr_in = std::mem::zeroed();
+            let mut out_len: u32 = std::mem::size_of::<libc::sockaddr_in>() as u32;
+            assert_eq!(
+                libc::getsockname(
+                    listener,
+                    &mut out_addr as *mut _ as *mut libc::sockaddr,
+                    &mut out_len,
+                ),
+                0
+            );
+
+            let client = libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0);
+            assert!(client >= 0);
+
+            // Build a Windows-layout sockaddr_in (same 16-byte layout as Linux
+            // for AF_INET so copy_sockaddr_win_to_linux is an identity copy).
+            let mut win_addr = [0u8; 16];
+            win_addr[0] = libc::AF_INET as u8;
+            win_addr[1] = 0;
+            win_addr[2..4].copy_from_slice(&out_addr.sin_port.to_ne_bytes());
+            win_addr[4..8].copy_from_slice(&out_addr.sin_addr.s_addr.to_ne_bytes());
+
+            // Ensure pre-state is NOT armed.
+            weave_common::socket_event::disarm_socket_write(client);
+            assert!(!weave_common::socket_event::is_socket_write_armed(client));
+
+            let rc = ws_connect(client as usize, win_addr.as_ptr(), 16);
+            assert_eq!(rc, 0, "ws_connect to local listener should succeed");
+            assert!(
+                weave_common::socket_event::is_socket_write_armed(client),
+                "sync ws_connect success must arm FD_WRITE",
+            );
+            assert!(
+                !weave_common::socket_event::is_socket_connecting(client),
+                "sync ws_connect success must clear the connecting state",
+            );
+
+            libc::close(client);
+            libc::close(listener);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn connected_pollout_yields_fd_write_even_when_disarmed() {
+        // Wine's server/sock.c get_poll_flags emits AFD_POLL_WRITE unconditionally
+        // on POLLOUT for connection-mode sockets. Verify our wsa_enum_network_events
+        // mirrors this: a connected socket with an empty send buffer + no prior arm
+        // must still report FD_WRITE (mask bit 0x2) to the caller.
+        unsafe {
+            let listener = libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0);
+            assert!(listener >= 0);
+            let mut addr: libc::sockaddr_in = std::mem::zeroed();
+            addr.sin_family = libc::AF_INET as u16;
+            addr.sin_port = 0;
+            addr.sin_addr.s_addr = u32::to_be(0x7F000001);
+            assert_eq!(
+                libc::bind(
+                    listener,
+                    &addr as *const _ as *const libc::sockaddr,
+                    std::mem::size_of::<libc::sockaddr_in>() as u32,
+                ),
+                0
+            );
+            assert_eq!(libc::listen(listener, 1), 0);
+            let mut out_addr: libc::sockaddr_in = std::mem::zeroed();
+            let mut out_len: u32 = std::mem::size_of::<libc::sockaddr_in>() as u32;
+            assert_eq!(
+                libc::getsockname(
+                    listener,
+                    &mut out_addr as *mut _ as *mut libc::sockaddr,
+                    &mut out_len,
+                ),
+                0
+            );
+
+            let client = libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0);
+            assert!(client >= 0);
+            assert_eq!(
+                libc::connect(
+                    client,
+                    &out_addr as *const _ as *const libc::sockaddr,
+                    std::mem::size_of::<libc::sockaddr_in>() as u32,
+                ),
+                0
+            );
+
+            // Force the socket into the "connected, not armed, not connecting,
+            // not listening" state — the exact condition that previously made
+            // wsa_enum_network_events swallow POLLOUT and return mask=0.
+            weave_common::socket_event::disarm_socket_write(client);
+            weave_common::socket_event::clear_socket_connecting(client);
+            weave_common::socket_event::unmark_socket_listening(client);
+
+            // WSANETWORKEVENTS = 44 bytes. Seed with gnulib's 0xDEADBEEF sentinel.
+            let mut events = [0u8; 44];
+            events[0..4].copy_from_slice(&0xDEADBEEFu32.to_le_bytes());
+
+            let rc = wsa_enum_network_events(client as usize, 0, events.as_mut_ptr());
+            assert_eq!(rc, 0);
+
+            let mask = u32::from_le_bytes([events[0], events[1], events[2], events[3]]);
+            assert!(
+                mask & 0x2 != 0,
+                "connected socket with POLLOUT must surface FD_WRITE (mask={mask:#x})",
+            );
+
+            libc::close(client);
+            libc::close(listener);
+        }
     }
 }
