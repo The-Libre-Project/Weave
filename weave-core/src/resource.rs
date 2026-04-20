@@ -191,6 +191,143 @@ pub unsafe fn resource_entry_data(image_base: usize, entry_ptr: usize) -> usize 
     image_base + offset_to_data
 }
 
+/// Enumerate all resource names under a given type in the PE resource directory.
+///
+/// Calls `callback(name_ptr)` for each name entry under `lp_type`, where
+/// `name_ptr` is:
+/// - An `IS_INTRESOURCE` ordinal cast to `*const u16` (value ≤ 0xFFFF) for
+///   numeric-ID entries.
+/// - A pointer to a null-terminated UTF-16 string allocated on the stack for
+///   named entries (mirrors Wine's `EnumResourceNamesExW` which copies the
+///   `IMAGE_RESOURCE_DIR_STRING_U` into a heap buffer and appends `L'\0'`).
+///
+/// Iteration stops early if the callback returns `false`. Returns `true` if
+/// the type was found (even if the callback stopped early), `false` if the
+/// type directory does not exist (caller should set `ERROR_RESOURCE_TYPE_NOT_FOUND`).
+///
+/// Wine ref: `dlls/kernelbase/loader.c::EnumResourceNamesExW` —
+///   * Type directory located via `LdrFindResourceDirectory_U(module, &info, 1, &resdir)`;
+///     Weave reuses `find_entry` from the root instead.
+///   * Named entries: `str->NameString` (at `basedir + et[i].NameOffset`,
+///     i.e. rsrc-section-relative from the root) is copied into a heap WCHAR
+///     buffer with a NUL appended, then passed as the `name` arg.
+///   * ID entries: `UIntToPtr(et[i].Id)` — raw ordinal in pointer form.
+///   * Returns `FALSE` early (stops enumeration) when `func(...)` returns `FALSE`.
+///   * `ERROR_RESOURCE_TYPE_NOT_FOUND` (1813) is set by the caller when the
+///     `LdrFindResourceDirectory_U` call for the type level returns an error.
+///
+/// # Safety
+/// `image_base` must point to a valid, fully mapped PE image whose `.rsrc`
+/// section is readable. `lp_type` must be either a `MAKEINTRESOURCE` ordinal
+/// (value ≤ 0xFFFF) or a valid pointer to a NUL-terminated UTF-16 string.
+pub unsafe fn enumerate_resource_names(
+    image_base: usize,
+    lp_type: *const u16,
+    callback: impl Fn(*const u16) -> bool,
+) -> bool {
+    // SAFETY: caller contract above.
+    let image = match unsafe { ImageView::from_base(image_base) } {
+        Some(v) => v,
+        None => return false,
+    };
+    let root = match image.resource_root() {
+        Some(r) => r,
+        None => return false,
+    };
+
+    // Decode lp_type into a ResourceId, mirroring `resource_id_from_ptr_w` in
+    // kernel32. IS_INTRESOURCE: upper 48 bits are zero.
+    let type_id = if (lp_type as usize >> 16) == 0 {
+        ResourceId::Id((lp_type as usize & 0xFFFF) as u16)
+    } else {
+        // SAFETY: caller guarantees lp_type is a valid NUL-terminated UTF-16 string.
+        let mut chars = Vec::new();
+        let mut p = lp_type;
+        loop {
+            let ch = unsafe { *p };
+            if ch == 0 {
+                break;
+            }
+            chars.push(ch);
+            p = unsafe { p.add(1) };
+        }
+        ResourceId::Name(chars)
+    };
+
+    // Level 1: locate the type entry → offset of the name-level directory.
+    let name_dir_off = match find_entry(root, &image, &type_id, /*want_dir=*/ true) {
+        Some(off) => off,
+        None => return false, // type not found
+    };
+    let name_dir = match image.dir_at(name_dir_off) {
+        Some(d) => d,
+        None => return false,
+    };
+
+    // Iterate all entries in the name-level directory (named first, then IDs).
+    let (num_named, num_id) = match dir_counts(name_dir) {
+        Some(c) => c,
+        None => return true,
+    };
+    let dir_base_off = match dir_offset_in_rsrc(&image, name_dir) {
+        Some(o) => o,
+        None => return true,
+    };
+    let entries_start = dir_base_off + RESDIR_SIZE;
+    let total = num_named + num_id;
+
+    for i in 0..total {
+        let entry_off = entries_start + i * RESDIR_ENTRY_SIZE;
+        let entry = match image.rsrc_slice_dyn(entry_off, RESDIR_ENTRY_SIZE) {
+            Some(e) => e,
+            None => break,
+        };
+        let name_or_id = u32::from_le_bytes(entry[0..4].try_into().unwrap_or([0; 4]));
+
+        let name_ptr: *const u16 = if (name_or_id & HIGH_BIT) != 0 {
+            // Named entry: IMAGE_RESOURCE_DIR_STRING_U at (rsrc_root + name_off).
+            // Wine: copies str->NameString[0..Length] into a heap WCHAR buf + NUL.
+            // We do the same with a local Vec<u16> and pass a pointer to it.
+            let name_off = (name_or_id & !HIGH_BIT) as usize;
+            let hdr = match image.rsrc_slice_dyn(name_off, 2) {
+                Some(h) => h,
+                None => continue,
+            };
+            let nlen = u16::from_le_bytes([hdr[0], hdr[1]]) as usize;
+            let chars_bytes = match image.rsrc_slice_dyn(name_off + 2, nlen * 2) {
+                Some(b) => b,
+                None => continue,
+            };
+            // Build a null-terminated WCHAR copy (matches Wine's heap-alloc + memcpy + NUL).
+            let mut buf: Vec<u16> = (0..nlen)
+                .map(|j| u16::from_le_bytes([chars_bytes[j * 2], chars_bytes[j * 2 + 1]]))
+                .collect();
+            buf.push(0u16); // NUL terminator
+
+            let ptr = buf.as_ptr();
+            // Keep `buf` alive across the callback by moving it into a named
+            // binding; the callback runs synchronously so this is sound.
+            let keep_alive = buf;
+            let cont = callback(ptr);
+            drop(keep_alive);
+            if !cont {
+                break;
+            }
+            continue; // already called callback above
+        } else {
+            // ID entry: pass the ordinal as IS_INTRESOURCE pointer.
+            let id = (name_or_id & 0xFFFF) as usize;
+            id as *const u16
+        };
+
+        if !callback(name_ptr) {
+            break;
+        }
+    }
+
+    true // type was found
+}
+
 // ---------------------------------------------------------------------------
 // Internals
 // ---------------------------------------------------------------------------
