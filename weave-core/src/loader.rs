@@ -65,6 +65,11 @@ pub fn load_with_name(bytes: &[u8], name: &str) -> Result<LoadedImage, String> {
         // kernel32 can reverse-lookup via `module_handles::base_of`.
         let base = image.base as usize;
         crate::module_handles::register_with_base(name, base);
+        // Also register the path so GetFileVersionInfoSizeW / GetFileVersionInfoW
+        // can locate the RT_VERSION resource without re-opening the file from disk.
+        // Wine ref: dlls/kernelbase/version.c — GetFileVersionInfoSizeExW opens
+        // the file by path via LoadLibraryExW; Weave uses the already-mapped base.
+        crate::module_handles::register_image_path(name, base);
     }
     Ok(image)
 }
