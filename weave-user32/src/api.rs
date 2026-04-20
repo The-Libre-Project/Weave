@@ -5246,12 +5246,12 @@ pub unsafe extern "win64" fn system_parameters_info_w(
         *(pv_param as *mut u32) = cb_size; // restore cbSize zeroed by write_bytes above
         let p32 = pv_param as *mut i32;
         // Integer metric fields
-        *p32.add(1) = 1;  // iBorderWidth  (+0x04)
+        *p32.add(1) = 1; // iBorderWidth  (+0x04)
         *p32.add(2) = 17; // iScrollWidth  (+0x08)
         *p32.add(3) = 17; // iScrollHeight (+0x0c)
         *p32.add(4) = 19; // iCaptionWidth (+0x10)
         *p32.add(5) = 19; // iCaptionHeight(+0x14)
-        // lfCaptionFont at +0x18 (92 bytes)
+                          // lfCaptionFont at +0x18 (92 bytes)
         {
             let lf = pv_param.add(0x18);
             *(lf as *mut i32) = -11; // lfHeight
@@ -5262,7 +5262,7 @@ pub unsafe extern "win64" fn system_parameters_info_w(
         }
         *p32.add(0x74 / 4) = 15; // iSmCaptionWidth  (+0x74)
         *p32.add(0x78 / 4) = 15; // iSmCaptionHeight (+0x78)
-        // lfSmCaptionFont at +0x7c (92 bytes)
+                                 // lfSmCaptionFont at +0x7c (92 bytes)
         {
             let lf = pv_param.add(0x7c);
             *(lf as *mut i32) = -11;
@@ -5273,7 +5273,7 @@ pub unsafe extern "win64" fn system_parameters_info_w(
         }
         *p32.add(0xd8 / 4) = 19; // iMenuWidth  (+0xd8)
         *p32.add(0xdc / 4) = 19; // iMenuHeight (+0xdc)
-        // lfMenuFont at +0xe0 (92 bytes)
+                                 // lfMenuFont at +0xe0 (92 bytes)
         {
             let lf = pv_param.add(0xe0);
             *(lf as *mut i32) = -11;
@@ -5316,10 +5316,10 @@ pub unsafe extern "win64" fn system_parameters_info_w(
         }
         // RECT: left, top, right, bottom
         let r = pv_param as *mut i32;
-        *r.add(0) = 0;    // left
-        *r.add(1) = 0;    // top
+        *r.add(0) = 0; // left
+        *r.add(1) = 0; // top
         *r.add(2) = 1024; // right
-        *r.add(3) = 768;  // bottom
+        *r.add(3) = 768; // bottom
         eprintln!("weave/user32: SystemParametersInfoW(SPI_GETWORKAREA) → TRUE");
         return 1; // TRUE
     }
