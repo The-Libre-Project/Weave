@@ -12026,33 +12026,59 @@ fn find_resource_common(
     }
 }
 
-/// EnumResourceNamesW: invoke `lp_enum_func` for each named resource of type
-/// `lp_type` in `h_module`. Stub returns FALSE + ERROR_RESOURCE_TYPE_NOT_FOUND
-/// without invoking the callback — semantically equivalent to "this module
-/// has no resources of that type". The PE walker in `weave-core::resource`
-/// does not expose a per-type name iterator yet (only point lookups via
-/// `find_resource_entry`); a real walker is queued for the M6 Notepad++ work
-/// where SciLexer enumeration becomes load-bearing.
-///
-/// Returning FALSE here is the safe shape because callers check the BOOL
-/// result; an unresolved-import stub previously returned uninitialised `rax`
-/// which guests could mis-interpret as success and then deref the
-/// never-populated callback pointer.
+/// EnumResourceNamesW: invoke `lp_enum_func(hModule, type, name, lParam)` for
+/// every resource name under `lp_type` in `h_module`.
 ///
 /// # Safety
-/// `lp_enum_func` (if invoked) must follow the `ENUMRESNAMEPROCW` ABI. We do
-/// not invoke it in the stub path.
-// Wine ref: dlls/kernelbase/loader.c::EnumResourceNamesW — walks the
-// IMAGE_RESOURCE_DIRECTORY entries for the given type and calls the callback
-// with each name; returns FALSE if the type directory is absent.
+/// `lp_enum_func` must be a valid `ENUMRESNAMEPROCW` function pointer following
+/// the Win64 ABI: `fn(HMODULE, LPCWSTR type, LPWSTR name, LONG_PTR lParam) -> BOOL`.
+/// `lp_type` must be a `MAKEINTRESOURCE` ordinal or a valid NUL-terminated
+/// UTF-16 string pointer. These are the caller's responsibility (same contract
+/// as the real Win32 API).
+// Wine ref: dlls/kernelbase/loader.c::EnumResourceNamesExW (line 872) —
+//   * Two-level `LdrFindResourceDirectory_U` calls: root → type directory → name directory.
+//   * Named entries: `str->NameString` (at `basedir + et[i].NameOffset`, rsrc-root-relative)
+//     is null-terminated and passed as the `name` arg; the IS_INTRESOURCE test
+//     (`(p >> 16) == 0`) distinguishes ordinals from string pointers.
+//   * ID entries: `UIntToPtr(et[i].Id)` passed directly.
+//   * Enumeration stops when callback returns FALSE.
+//   * Sets ERROR_RESOURCE_TYPE_NOT_FOUND (1813) when type directory lookup fails.
+// implemented 2026-04-19
 pub unsafe extern "win64" fn enum_resource_names_w(
-    _h_module: usize,
-    _lp_type: *const u16,
-    _lp_enum_func: usize,
-    _l_param: usize,
+    h_module: usize,
+    lp_type: *const u16,
+    lp_enum_func: usize,
+    l_param: usize,
 ) -> i32 {
-    set_last_error(1813); // ERROR_RESOURCE_TYPE_NOT_FOUND
-    0
+    let base = match weave_core::module_handles::base_of(h_module) {
+        Some(b) => b,
+        None => {
+            set_last_error(6); // ERROR_INVALID_HANDLE
+            return 0;
+        }
+    };
+
+    // Win64 callback: BOOL CALLBACK EnumResNameProcW(HMODULE, LPCWSTR type, LPWSTR name, LONG_PTR)
+    type EnumResNameProc = unsafe extern "win64" fn(usize, *const u16, *const u16, usize) -> i32;
+    // SAFETY: caller guarantees lp_enum_func follows this ABI.
+    let callback_fn: EnumResNameProc = unsafe { std::mem::transmute(lp_enum_func) };
+
+    // SAFETY: base is a valid mapped PE image (confirmed via module_handles);
+    // lp_type is caller-guaranteed to be a valid ordinal or UTF-16 string pointer.
+    let found = unsafe {
+        weave_core::resource::enumerate_resource_names(base, lp_type, |name_ptr| {
+            // SAFETY: callback_fn is the caller-supplied ENUMRESNAMEPROCW;
+            // name_ptr is either an IS_INTRESOURCE ordinal or a pointer to a
+            // null-terminated UTF-16 buf kept alive for the duration of this call.
+            callback_fn(h_module, lp_type, name_ptr, l_param) != 0
+        })
+    };
+
+    if !found {
+        set_last_error(1813); // ERROR_RESOURCE_TYPE_NOT_FOUND
+        return 0;
+    }
+    1 // TRUE — enumeration completed (or stopped early by callback returning FALSE)
 }
 
 /// FreeResource: legacy 16-bit resource free. Always returns FALSE.
