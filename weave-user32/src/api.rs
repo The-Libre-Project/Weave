@@ -5226,6 +5226,103 @@ pub unsafe extern "win64" fn system_parameters_info_w(
         eprintln!("weave/user32: SystemParametersInfoW(SPI_GETICONTITLELOGFONT) → TRUE");
         return 1; // TRUE
     }
+    // SPI_GETNONCLIENTMETRICS = 0x29 (41)
+    // Fills NONCLIENTMETRICSW. Vista+ layout = 340 bytes (XP = 336, no iPaddedBorderWidth).
+    // Wine ref: dlls/win32u/sysparams.c — validates ptr non-null, fills 5 LOGFONTWs from
+    // registry entries (CAPTIONLOGFONT, SMCAPTIONLOGFONT, MENULOGFONT, STATUSLOGFONT,
+    // MESSAGELOGFONT); sets iPaddedBorderWidth only when cbSize == sizeof(NONCLIENTMETRICSW)
+    // (340); returns FALSE on null ptr.
+    if u_action == 0x29 {
+        if pv_param.is_null() {
+            return 0;
+        }
+        // Read cbSize (u32 at offset 0) — caller sets this before calling
+        let cb_size = *(pv_param as *const u32);
+        if cb_size == 0 {
+            return 0;
+        }
+        // Zero the entire struct to cbSize bytes, then fill fields
+        std::ptr::write_bytes(pv_param, 0, cb_size as usize);
+        let p32 = pv_param as *mut i32;
+        // cbSize stays as caller wrote it — do not overwrite
+        // Integer metric fields
+        *p32.add(1) = 1;  // iBorderWidth  (+0x04)
+        *p32.add(2) = 17; // iScrollWidth  (+0x08)
+        *p32.add(3) = 17; // iScrollHeight (+0x0c)
+        *p32.add(4) = 19; // iCaptionWidth (+0x10)
+        *p32.add(5) = 19; // iCaptionHeight(+0x14)
+        // lfCaptionFont at +0x18 (92 bytes)
+        {
+            let lf = pv_param.add(0x18);
+            *(lf as *mut i32) = -11; // lfHeight
+            *(lf.add(0x10) as *mut i32) = 400; // lfWeight: FW_NORMAL
+            *lf.add(0x17) = 1; // lfCharSet: DEFAULT_CHARSET
+            let face: &[u16] = &[0x53, 0x65, 0x67, 0x6f, 0x65, 0x20, 0x55, 0x49, 0]; // "Segoe UI\0"
+            std::ptr::copy_nonoverlapping(face.as_ptr(), lf.add(0x1c) as *mut u16, face.len());
+        }
+        *p32.add(0x74 / 4) = 15; // iSmCaptionWidth  (+0x74)
+        *p32.add(0x78 / 4) = 15; // iSmCaptionHeight (+0x78)
+        // lfSmCaptionFont at +0x7c (92 bytes)
+        {
+            let lf = pv_param.add(0x7c);
+            *(lf as *mut i32) = -11;
+            *(lf.add(0x10) as *mut i32) = 400;
+            *lf.add(0x17) = 1;
+            let face: &[u16] = &[0x53, 0x65, 0x67, 0x6f, 0x65, 0x20, 0x55, 0x49, 0];
+            std::ptr::copy_nonoverlapping(face.as_ptr(), lf.add(0x1c) as *mut u16, face.len());
+        }
+        *p32.add(0xd8 / 4) = 19; // iMenuWidth  (+0xd8)
+        *p32.add(0xdc / 4) = 19; // iMenuHeight (+0xdc)
+        // lfMenuFont at +0xe0 (92 bytes)
+        {
+            let lf = pv_param.add(0xe0);
+            *(lf as *mut i32) = -11;
+            *(lf.add(0x10) as *mut i32) = 400;
+            *lf.add(0x17) = 1;
+            let face: &[u16] = &[0x53, 0x65, 0x67, 0x6f, 0x65, 0x20, 0x55, 0x49, 0];
+            std::ptr::copy_nonoverlapping(face.as_ptr(), lf.add(0x1c) as *mut u16, face.len());
+        }
+        // lfStatusFont at +0x13c (92 bytes)
+        {
+            let lf = pv_param.add(0x13c);
+            *(lf as *mut i32) = -11;
+            *(lf.add(0x10) as *mut i32) = 400;
+            *lf.add(0x17) = 1;
+            let face: &[u16] = &[0x53, 0x65, 0x67, 0x6f, 0x65, 0x20, 0x55, 0x49, 0];
+            std::ptr::copy_nonoverlapping(face.as_ptr(), lf.add(0x1c) as *mut u16, face.len());
+        }
+        // lfMessageFont at +0x198 (92 bytes)
+        {
+            let lf = pv_param.add(0x198);
+            *(lf as *mut i32) = -11;
+            *(lf.add(0x10) as *mut i32) = 400;
+            *lf.add(0x17) = 1;
+            let face: &[u16] = &[0x53, 0x65, 0x67, 0x6f, 0x65, 0x20, 0x55, 0x49, 0];
+            std::ptr::copy_nonoverlapping(face.as_ptr(), lf.add(0x1c) as *mut u16, face.len());
+        }
+        // iPaddedBorderWidth at +0x1f4 — only present in Vista+ layout (cbSize == 340)
+        // Wine: sets to 0 when cbSize == sizeof(NONCLIENTMETRICSW) (already zeroed above)
+        eprintln!("weave/user32: SystemParametersInfoW(SPI_GETNONCLIENTMETRICS) → TRUE");
+        return 1; // TRUE
+    }
+    // SPI_GETWORKAREA = 0x30 (48)
+    // Fills a RECT (4 × i32) with the usable desktop area. No taskbar in Weave, so the
+    // work area equals the full primary screen resolution.
+    // Wine ref: dlls/win32u/sysparams.c — validates ptr non-null; fills RECT from the primary
+    // monitor's work area (rcWork); returns FALSE on null ptr.
+    if u_action == 0x30 {
+        if pv_param.is_null() {
+            return 0;
+        }
+        // RECT: left, top, right, bottom
+        let r = pv_param as *mut i32;
+        *r.add(0) = 0;    // left
+        *r.add(1) = 0;    // top
+        *r.add(2) = 1024; // right
+        *r.add(3) = 768;  // bottom
+        eprintln!("weave/user32: SystemParametersInfoW(SPI_GETWORKAREA) → TRUE");
+        return 1; // TRUE
+    }
     eprintln!("weave/user32: SystemParametersInfoW(u_action={u_action:#x}) → FALSE (stub)");
     0 // FALSE
 }
