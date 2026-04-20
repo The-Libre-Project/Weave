@@ -5241,10 +5241,10 @@ pub unsafe extern "win64" fn system_parameters_info_w(
         if cb_size == 0 {
             return 0;
         }
-        // Zero the entire struct to cbSize bytes, then fill fields
+        // Zero the entire struct to cbSize bytes, then restore cbSize and fill fields
         std::ptr::write_bytes(pv_param, 0, cb_size as usize);
+        *(pv_param as *mut u32) = cb_size; // restore cbSize zeroed by write_bytes above
         let p32 = pv_param as *mut i32;
-        // cbSize stays as caller wrote it — do not overwrite
         // Integer metric fields
         *p32.add(1) = 1;  // iBorderWidth  (+0x04)
         *p32.add(2) = 17; // iScrollWidth  (+0x08)
