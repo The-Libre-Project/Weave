@@ -11542,116 +11542,352 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
 // version resource, then GetFileVersionInfoW to load it, then VerQueryValueW
 // to extract fields (ProductVersion, FileDescription, etc.).
 //
-// We stub all three as "no version info available". Apps that check the return
-// value will see FALSE/0 and skip the version display — correct headless behaviour.
+// Implementation strategy: look up the already-loaded image base by path via
+// weave-core's path→base registry, then walk the PE's RT_VERSION resource
+// using the existing resource walker. If the module is not loaded or has no
+// version resource, return 0 gracefully.
 //
-// Wine ref: dlls/version/version.c — GetFileVersionInfoSizeW walks PE resources
-// for RT_VERSION; VerQueryValueW parses the VS_VERSIONINFO structure.
+// Wine ref: dlls/kernelbase/version.c — GetFileVersionInfoSizeExW opens the
+// file by path via LoadLibraryExW(LOAD_LIBRARY_AS_IMAGE_RESOURCE) then calls
+// FindResourceW / SizeofResource. Weave uses the pre-registered loaded base
+// instead of re-opening from disk.
 
-/// GetFileVersionInfoSizeW — return the byte size of the version resource.
-///
-/// Returns 0 — no version resource available.
+/// Decode a NUL-terminated wide string to UTF-8. Returns None if ptr is null.
 ///
 /// # Safety
-/// `lp_filename` is a null-terminated wide path; we ignore it.
-/// `lpdw_handle` is an optional output DWORD; we set it to 0 if non-null.
-// Wine ref: dlls/kernelbase/version.c — opens PE with LdrGetDllHandle, calls
-// LdrFindResource_U/LdrAccessResource to locate RT_VERSION; sets *lpdwHandle=0 always;
-// returns total byte size of the VS_VERSIONINFO block, or 0 if not found
+/// `ptr` must be null or a valid pointer to a NUL-terminated UTF-16 sequence.
+unsafe fn wide_to_utf8(ptr: *const u16) -> Option<String> {
+    if ptr.is_null() {
+        return None;
+    }
+    let mut len = 0usize;
+    // SAFETY: caller guarantees a NUL-terminated sequence.
+    while unsafe { *ptr.add(len) } != 0 {
+        len += 1;
+    }
+    let slice = unsafe { std::slice::from_raw_parts(ptr, len) };
+    Some(String::from_utf16_lossy(slice))
+}
+
+/// GetFileVersionInfoSizeW — return the byte size needed to hold the version resource.
+///
+/// Locates the RT_VERSION resource in the already-loaded guest PE image.
+/// Sets `*lpdwHandle = 0` always (Wine contract: handle is always 0).
+/// Returns 0 if the module is not registered or has no version resource.
+///
+/// # Safety
+/// `lp_filename` must be a null-terminated wide string or null.
+/// `lpdw_handle` must be null or a writable `*mut u32`.
+///
+/// Wine ref: dlls/kernelbase/version.c — GetFileVersionInfoSizeExW: sets
+/// *ret_handle=0 always; returns `(SizeofResource() * 2) + 4` for PE32
+/// resources (extra space for A/W conversion buffer + "FE2X" sentinel).
+/// Weave returns `(raw_size * 2) + 4` to match the Wine buffer contract that
+/// GetFileVersionInfoExW consumers expect.
 pub unsafe extern "win64" fn get_file_version_info_size_w(
-    _lp_filename: *const u16,
+    lp_filename: *const u16,
     lpdw_handle: *mut u32,
 ) -> u32 {
     if !lpdw_handle.is_null() {
         unsafe { *lpdw_handle = 0 };
     }
-    0 // no version resource
+    let path = match unsafe { wide_to_utf8(lp_filename) } {
+        Some(p) => p,
+        None => return 0,
+    };
+    let base = match weave_core::module_handles::base_by_path(&path) {
+        Some(b) => b,
+        None => return 0,
+    };
+    let hrsrc = weave_core::resource::find_resource_entry(
+        base,
+        weave_core::resource::ResourceId::Id(weave_core::resource::RT_VERSION),
+        weave_core::resource::ResourceId::Id(weave_core::resource::VS_VERSION_INFO_ID),
+        0, // LANG_NEUTRAL — fall through to first available
+    );
+    match hrsrc {
+        Some(entry_ptr) => {
+            // SAFETY: entry_ptr is a valid IMAGE_RESOURCE_DATA_ENTRY pointer
+            // inside the mapped PE image at `base`.
+            let raw_size = unsafe { weave_core::resource::resource_entry_size(entry_ptr) };
+            // Mirror Wine's buffer contract: (len * 2) + 4.
+            // The *2 reserves room for A-call ANSI conversion; +4 is the "FE2X" sentinel.
+            // Wine ref: GetFileVersionInfoSizeExW case IMAGE_NT_SIGNATURE returns
+            // `(len * 2) + 4`.
+            (raw_size * 2) + 4
+        }
+        None => 0,
+    }
 }
 
-/// GetFileVersionInfoSizeA — ANSI variant.
+/// GetFileVersionInfoSizeA — ANSI variant; delegates to the W version.
 ///
 /// # Safety
-/// Same as GetFileVersionInfoSizeW.
-// Wine ref: dlls/kernelbase/version.c — converts ANSI filename via MultiByteToWideChar(CP_ACP),
-// then delegates to GetFileVersionInfoSizeExW(FILE_VER_GET_LOCALISED, wide, lpdwHandle)
+/// `lp_filename` must be null or a valid pointer to a NUL-terminated ANSI string.
+/// `lpdw_handle` must be null or a writable `*mut u32`.
+///
+/// Wine ref: dlls/kernelbase/version.c — GetFileVersionInfoSizeA converts the
+/// ANSI filename via RtlCreateUnicodeStringFromAsciiz then delegates to
+/// GetFileVersionInfoSizeExW(FILE_VER_GET_LOCALISED, wide, handle).
 pub unsafe extern "win64" fn get_file_version_info_size_a(
-    _lp_filename: *const u8,
+    lp_filename: *const u8,
     lpdw_handle: *mut u32,
 ) -> u32 {
     if !lpdw_handle.is_null() {
         unsafe { *lpdw_handle = 0 };
     }
-    0
+    let path = if lp_filename.is_null() {
+        return 0;
+    } else {
+        let mut len = 0usize;
+        // SAFETY: caller guarantees NUL-terminated ANSI string.
+        while unsafe { *lp_filename.add(len) } != 0 {
+            len += 1;
+        }
+        let bytes = unsafe { std::slice::from_raw_parts(lp_filename, len) };
+        String::from_utf8_lossy(bytes).into_owned()
+    };
+    let base = match weave_core::module_handles::base_by_path(&path) {
+        Some(b) => b,
+        None => return 0,
+    };
+    let hrsrc = weave_core::resource::find_resource_entry(
+        base,
+        weave_core::resource::ResourceId::Id(weave_core::resource::RT_VERSION),
+        weave_core::resource::ResourceId::Id(weave_core::resource::VS_VERSION_INFO_ID),
+        0,
+    );
+    match hrsrc {
+        Some(entry_ptr) => {
+            let raw_size = unsafe { weave_core::resource::resource_entry_size(entry_ptr) };
+            (raw_size * 2) + 4
+        }
+        None => 0,
+    }
 }
 
-/// GetFileVersionInfoW — load the version resource into a caller buffer.
+/// GetFileVersionInfoW — copy the raw VS_VERSIONINFO bytes into the caller's buffer.
 ///
-/// Returns FALSE — no resource to load.
+/// Returns 1 (TRUE) on success, 0 (FALSE) if the module is not registered,
+/// has no RT_VERSION resource, or if the buffer pointer is null.
 ///
 /// # Safety
-/// `lp_filename` is a wide path; `lp_data` is a writable buffer of `dw_len`
-/// bytes; we do not write to it.
-// Wine ref: dlls/kernelbase/version.c — opens module, locates RT_VERSION resource via
-// LdrFindResource_U, copies the raw VS_VERSIONINFO bytes into lp_data; zero-pads to dw_len
+/// `lp_filename` must be null or a valid NUL-terminated wide string.
+/// `lp_data` must be null or a writable buffer of at least `dw_len` bytes.
+///
+/// Wine ref: dlls/kernelbase/version.c — GetFileVersionInfoExW calls
+/// LoadLibraryExW(LOAD_LIBRARY_AS_IMAGE_RESOURCE), then FindResourceW /
+/// LoadResource / LockResource / memcpy(data, ptr, min(size, datasize));
+/// appends a 4-byte "FE2X" sentinel after the VS_VERSIONINFO data for
+/// GetFileVersionInfoSizeExW's *2+4 buffer contract.
 pub unsafe extern "win64" fn get_file_version_info_w(
-    _lp_filename: *const u16,
+    lp_filename: *const u16,
     _dw_handle: u32,
-    _dw_len: u32,
-    _lp_data: *mut u8,
+    dw_len: u32,
+    lp_data: *mut u8,
 ) -> i32 {
-    0 // FALSE
+    if lp_data.is_null() || dw_len == 0 {
+        return 0;
+    }
+    let path = match unsafe { wide_to_utf8(lp_filename) } {
+        Some(p) => p,
+        None => return 0,
+    };
+    let base = match weave_core::module_handles::base_by_path(&path) {
+        Some(b) => b,
+        None => return 0,
+    };
+    let hrsrc = weave_core::resource::find_resource_entry(
+        base,
+        weave_core::resource::ResourceId::Id(weave_core::resource::RT_VERSION),
+        weave_core::resource::ResourceId::Id(weave_core::resource::VS_VERSION_INFO_ID),
+        0,
+    );
+    let entry_ptr = match hrsrc {
+        Some(e) => e,
+        None => return 0,
+    };
+    // SAFETY: entry_ptr is a valid IMAGE_RESOURCE_DATA_ENTRY.
+    let (data_ptr, data_size) =
+        match unsafe { weave_core::resource::resource_entry_ptr_and_size(base, entry_ptr) } {
+            Some(x) => x,
+            None => return 0,
+        };
+    let copy_len = data_size.min(dw_len as usize);
+    // SAFETY: data_ptr and lp_data are valid, non-overlapping, copy_len bytes.
+    unsafe { std::ptr::copy_nonoverlapping(data_ptr, lp_data, copy_len) };
+    // Append Wine's "FE2X" sentinel if there is room (signals "32-bit resource").
+    // Wine ref: GetFileVersionInfoExW case IMAGE_NT_SIGNATURE:
+    //   `len = vvis->wLength + sizeof(signature);`
+    //   `if (datasize >= len) memcpy((char*)data + vvis->wLength, signature, sizeof(signature));`
+    // Weave mirrors this: write "FE2X" at offset copy_len if the buffer has room.
+    if (copy_len + 4) <= dw_len as usize {
+        let sentinel: [u8; 4] = *b"FE2X";
+        unsafe {
+            std::ptr::copy_nonoverlapping(sentinel.as_ptr(), lp_data.add(copy_len), 4);
+        }
+    }
+    1 // TRUE
 }
 
-/// GetFileVersionInfoA — ANSI variant of GetFileVersionInfoW.
+/// GetFileVersionInfoA — ANSI variant; converts path to UTF-8 and delegates.
 ///
 /// # Safety
-/// Same as GetFileVersionInfoW.
-// Wine ref: dlls/kernelbase/version.c — converts ANSI path via MultiByteToWideChar(CP_ACP),
-// then delegates to GetFileVersionInfoExW(FILE_VER_GET_LOCALISED, wide, handle, len, data)
+/// `lp_filename` must be null or a valid NUL-terminated ANSI string.
+/// `lp_data` must be null or a writable buffer of at least `dw_len` bytes.
+///
+/// Wine ref: dlls/kernelbase/version.c — GetFileVersionInfoA converts the ANSI
+/// filename via RtlCreateUnicodeStringFromAsciiz then calls GetFileVersionInfoExW.
 pub unsafe extern "win64" fn get_file_version_info_a(
-    _lp_filename: *const u8,
+    lp_filename: *const u8,
     _dw_handle: u32,
-    _dw_len: u32,
-    _lp_data: *mut u8,
+    dw_len: u32,
+    lp_data: *mut u8,
 ) -> i32 {
-    0 // FALSE
+    if lp_data.is_null() || dw_len == 0 {
+        return 0;
+    }
+    let path = if lp_filename.is_null() {
+        return 0;
+    } else {
+        let mut len = 0usize;
+        while unsafe { *lp_filename.add(len) } != 0 {
+            len += 1;
+        }
+        let bytes = unsafe { std::slice::from_raw_parts(lp_filename, len) };
+        String::from_utf8_lossy(bytes).into_owned()
+    };
+    let base = match weave_core::module_handles::base_by_path(&path) {
+        Some(b) => b,
+        None => return 0,
+    };
+    let hrsrc = weave_core::resource::find_resource_entry(
+        base,
+        weave_core::resource::ResourceId::Id(weave_core::resource::RT_VERSION),
+        weave_core::resource::ResourceId::Id(weave_core::resource::VS_VERSION_INFO_ID),
+        0,
+    );
+    let entry_ptr = match hrsrc {
+        Some(e) => e,
+        None => return 0,
+    };
+    let (data_ptr, data_size) =
+        match unsafe { weave_core::resource::resource_entry_ptr_and_size(base, entry_ptr) } {
+            Some(x) => x,
+            None => return 0,
+        };
+    let copy_len = data_size.min(dw_len as usize);
+    unsafe { std::ptr::copy_nonoverlapping(data_ptr, lp_data, copy_len) };
+    if (copy_len + 4) <= dw_len as usize {
+        let sentinel: [u8; 4] = *b"FE2X";
+        unsafe {
+            std::ptr::copy_nonoverlapping(sentinel.as_ptr(), lp_data.add(copy_len), 4);
+        }
+    }
+    1 // TRUE
 }
 
-/// VerQueryValueW — extract a sub-block from a version resource buffer.
+/// VerQueryValueW — extract a sub-block from a VS_VERSIONINFO buffer.
 ///
-/// Returns FALSE — the buffer is empty (we never loaded version data).
+/// Only the `"\"` root sub-block path is implemented; it returns a pointer to
+/// the `VS_FIXEDFILEINFO` value within the buffer and its byte length.
+/// All other sub-block paths return FALSE.
 ///
 /// # Safety
-/// All pointer arguments may be non-null; we write 0/NULL to lplp_buffer and
-/// pui_len to indicate "not found" rather than leaving them uninitialised.
-// Wine ref: dlls/kernelbase/version.c — "\" returns VS_FIXEDFILEINFO; "\VarFileInfo\Translation"
-// returns LANGID+CODEPAGE pairs; "\StringFileInfo\LLLLCCCC\Key" walks sub-blocks by WCHAR key;
-// VersionInfo32_QueryValue handles the 32-bit DWORD-aligned struct walking
+/// `p_block` must be null or a pointer to a `VS_VERSIONINFO` blob (as filled
+/// by `GetFileVersionInfoW`). `lp_sub_block` must be null or a NUL-terminated
+/// wide string. `lplp_buffer` and `pui_len` must be null or valid write targets.
+///
+/// Wine ref: dlls/kernelbase/version.c — VerQueryValueW dispatches to
+/// `VersionInfo32_QueryValue(pBlock, lpSubBlock, lplpBuffer, puLen, NULL)`.
+/// For the `"\"` root path, `VersionInfo32_QueryValue` returns immediately
+/// (the while loop has no iterations because `*lpSubBlock == L'\0'` after
+/// stripping leading backslashes) and points at `VersionInfo32_Value(info)`,
+/// which is `DWORD_ALIGN(info, info->szKey + wcslen(info->szKey) + 1)`.
+/// `wValueLength` for the root block equals `sizeof(VS_FIXEDFILEINFO) = 52`.
 pub unsafe extern "win64" fn ver_query_value_w(
-    _p_block: *const u8,
-    _lp_sub_block: *const u16,
+    p_block: *const u8,
+    lp_sub_block: *const u16,
     lplp_buffer: *mut *mut u8,
     pui_len: *mut u32,
 ) -> i32 {
+    // Clear outputs first so they're always valid on return.
     if !lplp_buffer.is_null() {
         unsafe { *lplp_buffer = std::ptr::null_mut() };
     }
     if !pui_len.is_null() {
         unsafe { *pui_len = 0 };
     }
-    0 // FALSE
+    if p_block.is_null() || lp_sub_block.is_null() {
+        return 0;
+    }
+
+    // Decode the sub-block path, stripping surrounding backslashes.
+    let sub = unsafe { wide_to_utf8(lp_sub_block) }.unwrap_or_default();
+    let sub = sub.trim_matches('\\');
+
+    if !sub.is_empty() {
+        // Non-root paths (StringFileInfo, VarFileInfo, …) not yet implemented.
+        // Wine ref: VersionInfo32_QueryValue walks child blocks via
+        // VersionInfo32_FindChild; Weave defers this until a caller needs it.
+        return 0;
+    }
+
+    // Root path "\" → return VS_FIXEDFILEINFO.
+    //
+    // VS_VERSION_INFO_STRUCT32 layout (all fields LE, DWORD-aligned):
+    //   offset 0: u16 wLength        — total length of this block
+    //   offset 2: u16 wValueLength   — byte length of Value (52 for VS_FIXEDFILEINFO)
+    //   offset 4: u16 wType          — 0 = binary, 1 = text
+    //   offset 6: WCHAR szKey[]      — NUL-terminated key, typically L"VS_VERSION_INFO"
+    //   then:     DWORD-aligned padding after szKey
+    //   then:     Value bytes (VS_FIXEDFILEINFO, 52 bytes)
+    //
+    // Wine ref: dlls/kernelbase/version.c — VersionInfo32_Value macro:
+    //   `DWORD_ALIGN(ver, ver->szKey + lstrlenW(ver->szKey) + 1)`
+    // We compute the same offset dynamically from the actual szKey content.
+
+    // Read wValueLength at offset 2.
+    let value_len = unsafe { u16::from_le_bytes([*p_block.add(2), *p_block.add(3)]) } as u32;
+    if value_len == 0 {
+        return 0; // empty value block — nothing to return
+    }
+
+    // Compute DWORD_ALIGN(header_end, after_szKey).
+    // Header fixed part: wLength(2) + wValueLength(2) + wType(2) = 6 bytes.
+    // szKey starts at offset 6; measure its length (WCHARs) dynamically.
+    let sz_key_ptr = unsafe { p_block.add(6) } as *const u16;
+    let mut key_wchars = 0usize;
+    while unsafe { *sz_key_ptr.add(key_wchars) } != 0 {
+        key_wchars += 1;
+    }
+    // After szKey NUL terminator: 6 + (key_wchars + 1) * 2 bytes consumed.
+    let after_key_bytes = 6 + (key_wchars + 1) * 2;
+    // DWORD_ALIGN: round up to next multiple of 4.
+    let value_offset = (after_key_bytes + 3) & !3;
+
+    // Point lplp_buffer at the Value field within p_block.
+    if !lplp_buffer.is_null() {
+        unsafe { *lplp_buffer = p_block.add(value_offset) as *mut u8 };
+    }
+    if !pui_len.is_null() {
+        unsafe { *pui_len = value_len };
+    }
+    1 // TRUE
 }
 
-/// VerQueryValueA — ANSI variant of VerQueryValueW.
+/// VerQueryValueA — ANSI variant; only the root `"\"` path is supported.
 ///
 /// # Safety
 /// Same as VerQueryValueW.
-// Wine ref: dlls/kernelbase/version.c — detects VS_VERSION_INFO_STRUCT16 vs STRUCT32 by
-// wType field; 16-bit uses ANSI string matching; 32-bit uses WCHAR; ANSI key is matched
-// case-insensitively via lstrcmpiA
+///
+/// Wine ref: dlls/kernelbase/version.c — VerQueryValueA detects 16-bit vs 32-bit
+/// block via VersionInfoIs16 (szKey[0] >= ' '); for 32-bit blocks converts the
+/// ANSI lpSubBlock to WCHAR then calls VersionInfo32_QueryValue. Weave handles
+/// the root path inline without the ANSI→wide conversion for simplicity.
 pub unsafe extern "win64" fn ver_query_value_a(
-    _p_block: *const u8,
-    _lp_sub_block: *const u8,
+    p_block: *const u8,
+    lp_sub_block: *const u8,
     lplp_buffer: *mut *mut u8,
     pui_len: *mut u32,
 ) -> i32 {
@@ -11661,7 +11897,44 @@ pub unsafe extern "win64" fn ver_query_value_a(
     if !pui_len.is_null() {
         unsafe { *pui_len = 0 };
     }
-    0 // FALSE
+    if p_block.is_null() {
+        return 0;
+    }
+    // Decode the ANSI sub-block path.
+    let sub = if lp_sub_block.is_null() {
+        String::new()
+    } else {
+        let mut len = 0usize;
+        while unsafe { *lp_sub_block.add(len) } != 0 {
+            len += 1;
+        }
+        let bytes = unsafe { std::slice::from_raw_parts(lp_sub_block, len) };
+        String::from_utf8_lossy(bytes).into_owned()
+    };
+    let sub = sub.trim_matches('\\');
+    if !sub.is_empty() {
+        return 0; // non-root paths not implemented
+    }
+
+    // Root "\" path — same logic as the W variant.
+    let value_len = unsafe { u16::from_le_bytes([*p_block.add(2), *p_block.add(3)]) } as u32;
+    if value_len == 0 {
+        return 0;
+    }
+    let sz_key_ptr = unsafe { p_block.add(6) } as *const u16;
+    let mut key_wchars = 0usize;
+    while unsafe { *sz_key_ptr.add(key_wchars) } != 0 {
+        key_wchars += 1;
+    }
+    let after_key_bytes = 6 + (key_wchars + 1) * 2;
+    let value_offset = (after_key_bytes + 3) & !3;
+    if !lplp_buffer.is_null() {
+        unsafe { *lplp_buffer = p_block.add(value_offset) as *mut u8 };
+    }
+    if !pui_len.is_null() {
+        unsafe { *pui_len = value_len };
+    }
+    1 // TRUE
 }
 
 /// Resolve a version.dll import.
