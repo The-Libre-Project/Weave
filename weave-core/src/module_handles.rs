@@ -9,7 +9,7 @@
 //! so synthetic handles will not collide with real mapped pointers.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 
 const HANDLE_BASE: usize = 0x7FFF_0001;
 
@@ -149,6 +149,68 @@ pub fn register_image_base(base: usize) {
     with_table((), |t| {
         t.handle_to_base.insert(base, base);
     });
+}
+
+// ---------------------------------------------------------------------------
+// Path → base registry
+// ---------------------------------------------------------------------------
+//
+// GetFileVersionInfoSizeW / GetFileVersionInfoW receive a **filesystem path**
+// (not an HMODULE). We need to map that back to a loaded image base so the
+// resource walker can find the RT_VERSION resource.
+//
+// The registry is populated by `register_image_path` (called from the loader
+// alongside `register_image_base`). It indexes both the full normalized path
+// and the bare filename so that "notepad.exe" queries succeed even if the
+// caller passed just the basename.
+//
+// Wine ref: dlls/kernelbase/version.c — GetFileVersionInfoSizeExW opens the
+// file via LoadLibraryExW(LOAD_LIBRARY_AS_IMAGE_RESOURCE) and then uses
+// FindResourceW / SizeofResource. Weave instead looks up the already-loaded
+// base; if the module is not loaded we return 0 gracefully.
+
+static PATH_TO_BASE: OnceLock<Mutex<HashMap<String, usize>>> = OnceLock::new();
+
+fn path_to_base_map() -> &'static Mutex<HashMap<String, usize>> {
+    PATH_TO_BASE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Register a loaded module's filesystem path → image base mapping.
+///
+/// Called by the loader immediately after mapping the guest PE, alongside
+/// `register_image_base`. Both the full normalized path and the bare filename
+/// are indexed so that callers using either form succeed.
+///
+/// Wine ref: dlls/kernelbase/version.c — GetFileVersionInfoSizeExW / ExW
+/// open the file by path to locate RT_VERSION; Weave pre-registers the path
+/// at load time so we avoid re-opening the file from disk.
+pub fn register_image_path(path: &str, base: usize) {
+    // Normalize: lowercase, forward-slashes, strip Windows drive prefix.
+    let norm = path.to_ascii_lowercase().replace('\\', "/");
+    let filename = norm.rsplit('/').next().unwrap_or(&norm).to_string();
+    if let Ok(mut m) = path_to_base_map().lock() {
+        m.insert(norm, base);
+        // Also index by bare filename so "notepad.exe" queries work.
+        m.insert(filename, base);
+    }
+}
+
+/// Look up a loaded base by path or bare filename.
+///
+/// Returns `None` if the module was never registered (module not yet loaded
+/// or loaded without a path). The caller should return 0 gracefully.
+///
+/// Wine ref: dlls/kernelbase/version.c — GetFileVersionInfoSizeExW returns 0
+/// (ERROR_RESOURCE_DATA_NOT_FOUND) when the resource cannot be located;
+/// Weave mirrors this by returning None → 0.
+pub fn base_by_path(path: &str) -> Option<usize> {
+    let norm = path.to_ascii_lowercase().replace('\\', "/");
+    let filename = norm.rsplit('/').next().unwrap_or(&norm).to_string();
+    if let Ok(m) = path_to_base_map().lock() {
+        m.get(&norm).or_else(|| m.get(&filename)).copied()
+    } else {
+        None
+    }
 }
 
 /// Extract the lowercase DLL basename from a path or bare name.

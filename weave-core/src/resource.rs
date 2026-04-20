@@ -26,6 +26,15 @@
 //! has no callers yet. Task 09 step 3/4 wires `weave-kernel32::FindResourceW`
 //! through here.
 
+/// Standard Win32 resource type ordinals (MAKEINTRESOURCE values).
+///
+/// Wine ref: winnt.h — RT_VERSION = 16, VS_FILE_INFO = RT_VERSION,
+/// VS_VERSION_INFO = 1 (the resource name ordinal for the main version block).
+pub const RT_VERSION: u16 = 16;
+/// The canonical resource *name* ordinal for the VS_VERSIONINFO block.
+/// Every PE stores its version info under (RT_VERSION=16, VS_VERSION_INFO=1).
+pub const VS_VERSION_INFO_ID: u16 = 1;
+
 // IMAGE_RESOURCE_DIRECTORY layout (Win32):
 //   DWORD Characteristics
 //   DWORD TimeDateStamp
@@ -189,6 +198,38 @@ pub unsafe fn resource_entry_data(image_base: usize, entry_ptr: usize) -> usize 
     let bytes = unsafe { std::slice::from_raw_parts(p, 4) };
     let offset_to_data = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize;
     image_base + offset_to_data
+}
+
+/// Return a `(*const u8, usize)` pair for the resource blob named by an HRSRC
+/// pointer previously returned by [`find_resource_entry`].
+///
+/// This is the compound helper used by `GetFileVersionInfoW`: it reads both
+/// `OffsetToData` (to form `image_base + offset`) and `Size` from the
+/// `IMAGE_RESOURCE_DATA_ENTRY` in a single call, avoiding two separate
+/// unsafe reads at the call site.
+///
+/// Wine ref: `dlls/kernelbase/version.c — GetFileVersionInfoExW`:
+///   `memcpy(data, LockResource(hMem), min(SizeofResource(...), datasize))`
+///   where `LockResource` returns `image_base + entry->OffsetToData` and
+///   `SizeofResource` returns `entry->Size`.
+///
+/// # Safety
+/// `entry_ptr` must point to a valid `IMAGE_RESOURCE_DATA_ENTRY` (16 bytes)
+/// inside the PE image whose base is `image_base`.
+pub unsafe fn resource_entry_ptr_and_size(
+    image_base: usize,
+    entry_ptr: usize,
+) -> Option<(*const u8, usize)> {
+    // SAFETY: caller guarantees a valid 16-byte IMAGE_RESOURCE_DATA_ENTRY.
+    let p = entry_ptr as *const u8;
+    let bytes = unsafe { std::slice::from_raw_parts(p, 8) };
+    let offset_to_data = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize;
+    let size = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]) as usize;
+    if size == 0 {
+        return None;
+    }
+    let data_ptr = image_base.checked_add(offset_to_data)?;
+    Some((data_ptr as *const u8, size))
 }
 
 /// Enumerate all resource names under a given type in the PE resource directory.
