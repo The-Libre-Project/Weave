@@ -11580,10 +11580,9 @@ unsafe fn wide_to_utf8(ptr: *const u16) -> Option<String> {
 /// `lpdw_handle` must be null or a writable `*mut u32`.
 ///
 /// Wine ref: dlls/kernelbase/version.c — GetFileVersionInfoSizeExW: sets
-/// *ret_handle=0 always; returns `(SizeofResource() * 2) + 4` for PE32
-/// resources (extra space for A/W conversion buffer + "FE2X" sentinel).
-/// Weave returns `(raw_size * 2) + 4` to match the Wine buffer contract that
-/// GetFileVersionInfoExW consumers expect.
+/// *ret_handle=0 always; returns `len + sizeof(DWORD)` where len is the raw
+/// RT_VERSION resource size and the DWORD is for the "FE2X"/"FE3X" trailer.
+/// That is `raw_size + 4` — no doubling.
 pub unsafe extern "win64" fn get_file_version_info_size_w(
     lp_filename: *const u16,
     lpdw_handle: *mut u32,
@@ -11610,11 +11609,7 @@ pub unsafe extern "win64" fn get_file_version_info_size_w(
             // SAFETY: entry_ptr is a valid IMAGE_RESOURCE_DATA_ENTRY pointer
             // inside the mapped PE image at `base`.
             let raw_size = unsafe { weave_core::resource::resource_entry_size(entry_ptr) };
-            // Mirror Wine's buffer contract: (len * 2) + 4.
-            // The *2 reserves room for A-call ANSI conversion; +4 is the "FE2X" sentinel.
-            // Wine ref: GetFileVersionInfoSizeExW case IMAGE_NT_SIGNATURE returns
-            // `(len * 2) + 4`.
-            (raw_size * 2) + 4
+            raw_size + 4 // +4 for the "FE2X" sentinel appended by GetFileVersionInfoW
         }
         None => 0,
     }
@@ -11660,7 +11655,7 @@ pub unsafe extern "win64" fn get_file_version_info_size_a(
     match hrsrc {
         Some(entry_ptr) => {
             let raw_size = unsafe { weave_core::resource::resource_entry_size(entry_ptr) };
-            (raw_size * 2) + 4
+            raw_size + 4 // +4 for the "FE2X" sentinel
         }
         None => 0,
     }
