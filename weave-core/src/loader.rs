@@ -114,6 +114,15 @@ fn load_impl(bytes: &[u8]) -> Result<LoadedImage, String> {
     // loaded via `load` or `load_with_name`.
     crate::module_handles::register_image_base(base as usize);
 
+    // If the PE was rebased (MAP_FIXED_NOREPLACE failed or was not attempted),
+    // the MSVC CRT reads OptionalHeader.ImageBase directly from the mapped
+    // header and passes it unchanged as hInst to resource APIs.  Register the
+    // preferred base as an alias → actual so base_of(preferred) resolves.
+    // When the PE landed at its preferred base the alias is a no-op (guarded
+    // inside register_image_base_alias).
+    let preferred_base = opt.windows_fields.image_base as usize;
+    crate::module_handles::register_image_base_alias(preferred_base, base as usize);
+
     Ok(LoadedImage {
         base,
         size: opt.windows_fields.size_of_image as usize,

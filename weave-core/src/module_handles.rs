@@ -151,6 +151,31 @@ pub fn register_image_base(base: usize) {
     });
 }
 
+/// Register a preferred-base alias so that `base_of(alias)` returns `actual`.
+///
+/// Used when a PE is rebased away from its `OptionalHeader.ImageBase`
+/// (preferred base). The MSVC CRT reads `ImageBase` directly from the mapped
+/// PE header and passes it unchanged as the `hInst` argument to resource
+/// APIs (`LoadStringW`, `FindResourceW`, etc.). If `MAP_FIXED_NOREPLACE`
+/// failed and the image landed at a different address, callers using the
+/// preferred base as HMODULE would get `base_of` → `None` and every resource
+/// call would return 0.
+///
+/// After this call, `base_of(alias)` returns `Some(actual)` so the resource
+/// walker can resolve the image regardless of whether the caller uses the
+/// preferred base or the real mapped base.
+///
+/// No-ops when `alias == actual` (identity already covered by
+/// `register_image_base`) or when either argument is 0.
+pub fn register_image_base_alias(alias: usize, actual: usize) {
+    if alias == 0 || actual == 0 || alias == actual {
+        return;
+    }
+    with_table((), |t| {
+        t.handle_to_base.insert(alias, actual);
+    });
+}
+
 // ---------------------------------------------------------------------------
 // Path → base registry
 // ---------------------------------------------------------------------------
@@ -309,5 +334,27 @@ mod tests {
         // Defensive — never insert 0 as a base.
         register_image_base(0);
         assert!(base_of(0).is_none());
+    }
+
+    #[test]
+    fn register_image_base_alias_maps_preferred_to_actual() {
+        // Simulates a PE rebased away from its preferred ImageBase.
+        // base_of(preferred) must return the actual mapped base.
+        let preferred: usize = 0x0000_0001_4000_0000; // typical MSVC x64 preferred base
+        let actual: usize = 0x0000_7F00_0000_0000; // where mmap actually landed
+        register_image_base(actual);
+        register_image_base_alias(preferred, actual);
+        assert_eq!(base_of(preferred), Some(actual));
+        assert_eq!(base_of(actual), Some(actual));
+    }
+
+    #[test]
+    fn register_image_base_alias_identity_is_noop() {
+        // When preferred == actual no extra entry is inserted; the identity
+        // mapping registered by register_image_base still satisfies the lookup.
+        let base: usize = 0x0000_0001_4000_1000;
+        register_image_base(base);
+        register_image_base_alias(base, base); // must not panic or overwrite
+        assert_eq!(base_of(base), Some(base));
     }
 }
