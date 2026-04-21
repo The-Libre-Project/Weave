@@ -414,9 +414,7 @@ fn notepad_plus_plus_portable_mode() {
 /// Fixture: same as notepad_plus_plus_portable_mode — tests/fixtures/npp/
 /// Temp dir: /tmp/weave_npp_resource_walk (distinct from WS1 /tmp/weave_npp_test)
 /// Timeout: 15 s
-// TODO: remove #[ignore] once Tier A green in CI
 #[test]
-#[ignore]
 fn notepad_plus_plus_resource_walk_mode() {
     if !cfg!(target_os = "linux") {
         eprintln!("skipping execution test — requires Linux");
