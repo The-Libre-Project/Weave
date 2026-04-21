@@ -18,6 +18,7 @@ use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicUsize, Ordering}
 use std::sync::{Mutex, OnceLock};
 use weave_common::stub::warn_once;
 use weave_core::progress::mark_phase;
+use weave_core::restrace;
 
 // ── Progress phase guards (fire exactly once) ────────────────────────────────
 
@@ -2002,7 +2003,7 @@ unsafe fn load_image_impl(
 // runs against RT_GROUP_CURSOR then the leaf RT_CURSOR by wResId.
 pub unsafe extern "win64" fn load_cursor_w(h_instance: usize, lp_cursor_name: usize) -> usize {
     // SAFETY: forward caller contract on lp_cursor_name.
-    unsafe {
+    let result = unsafe {
         load_image_impl(
             h_instance,
             lp_cursor_name,
@@ -2011,7 +2012,16 @@ pub unsafe extern "win64" fn load_cursor_w(h_instance: usize, lp_cursor_name: us
             0,
             LR_DEFAULTSIZE | LR_SHARED,
         )
-    }
+    };
+    restrace!(
+        "load_cursor_w hInst={h_instance:#x} name={lp_cursor_name:#x} → {}",
+        if result != 0 {
+            format!("hCursor={result:#x}")
+        } else {
+            "zero".to_string()
+        }
+    );
+    result
 }
 
 /// LoadIconW: load an icon resource.
@@ -2023,7 +2033,7 @@ pub unsafe extern "win64" fn load_cursor_w(h_instance: usize, lp_cursor_name: us
 // best-match entry by SM_CXICON → RT_ICON lookup by wResId.
 pub unsafe extern "win64" fn load_icon_w(h_instance: usize, lp_icon_name: usize) -> usize {
     // SAFETY: forward caller contract.
-    unsafe {
+    let result = unsafe {
         load_image_impl(
             h_instance,
             lp_icon_name,
@@ -2032,7 +2042,16 @@ pub unsafe extern "win64" fn load_icon_w(h_instance: usize, lp_icon_name: usize)
             0,
             LR_DEFAULTSIZE | LR_SHARED,
         )
-    }
+    };
+    restrace!(
+        "load_icon_w hInst={h_instance:#x} name={lp_icon_name:#x} → {}",
+        if result != 0 {
+            format!("hIcon={result:#x}")
+        } else {
+            "zero".to_string()
+        }
+    );
+    result
 }
 
 /// LoadImageW: load an image (icon, cursor, or bitmap) from a resource.
@@ -2061,7 +2080,16 @@ pub unsafe extern "win64" fn load_image_w(
     fu_load: u32,
 ) -> usize {
     // SAFETY: forward caller contract.
-    unsafe { load_image_impl(h_inst, name, ty, cx, cy, fu_load) }
+    let result = unsafe { load_image_impl(h_inst, name, ty, cx, cy, fu_load) };
+    restrace!(
+        "load_image_w hInst={h_inst:#x} name={name:#x} ty={ty} cx={cx} cy={cy} fuLoad={fu_load:#x} → {}",
+        if result != 0 {
+            format!("handle={result:#x}")
+        } else {
+            "zero".to_string()
+        }
+    );
+    result
 }
 
 // ── MessageBoxW ───────────────────────────────────────────────────────────────
@@ -3885,6 +3913,73 @@ pub unsafe extern "win64" fn create_dialog_param_a(
     0
 }
 
+/// CreateDialogIndirectParamW: create a modeless dialog box from a DLGTEMPLATE pointer.
+///
+/// Wine ref: dlls/user32/dialog.c::DIALOG_CreateIndirect — takes raw DLGTEMPLATE pointer
+/// (not a resource name); first check is `if (!dlgTemplate) return 0;`; modal_owner=NULL
+/// for CreateDialogIndirect (modeless); passes through DIALOG_CreateIndirect then returns
+/// HWND. Weave: null-checks template, then mirrors create_dialog_param_w stub body.
+///
+/// # Safety
+/// `lp_template` must be a valid DLGTEMPLATE pointer if non-null.
+/// `lp_dialog_func` must be a valid `DLGPROC` if non-zero.
+// Wine ref: dlls/user32/dialog.c::DIALOG_CreateIndirect — null template → return 0;
+// modal_owner=NULL distinguishes CreateDialogIndirect (modeless) from DialogBoxIndirect (modal).
+pub unsafe extern "win64" fn create_dialog_indirect_param_w(
+    _h_instance: usize,
+    lp_template: *const u8,
+    hwnd_parent: usize,
+    lp_dialog_func: usize,
+    dw_init_param: isize,
+) -> usize {
+    if lp_template.is_null() {
+        return 0;
+    }
+    if lp_dialog_func == 0 {
+        return 0;
+    }
+    // Create a minimal invisible window in the window table with the DLGPROC as wnd_proc.
+    // No X11 window is created (xcb_id=0) — dialog is purely logical.
+    let hwnd = window::create(window::WindowEntry {
+        class_name: "#32770".to_string(),
+        wnd_proc: lp_dialog_func,
+        title: String::new(),
+        style: 0x4000_0000, // WS_CLIPSIBLINGS
+        x: 0,
+        y: 0,
+        width: 1,
+        height: 1,
+        visible: false,
+        xcb_id: 0,
+        h_menu: 0,
+    });
+    // Call WM_INITDIALOG (0x0110) with hwnd_parent as wParam, dw_init_param as lParam.
+    let fn_ptr: unsafe extern "win64" fn(usize, u32, usize, isize) -> i32 =
+        unsafe { std::mem::transmute(lp_dialog_func) };
+    let _ = unsafe { fn_ptr(hwnd, 0x0110, hwnd_parent, dw_init_param) };
+    eprintln!("weave/user32: CreateDialogIndirectParamW → hwnd={hwnd:#x}");
+    hwnd
+}
+
+/// DialogBoxIndirectParamW: display a modal dialog box from a DLGTEMPLATE pointer (Wide).
+///
+/// Returns -1 (error) — stub. Modal message loop deferred.
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced beyond the null check.
+// Wine ref: dlls/user32/dialog.c::DIALOG_CreateIndirect — null template → return 0;
+// DialogBoxIndirect passes non-NULL modal_owner to DIALOG_CreateIndirect, then calls
+// DIALOG_DoDialogBox which runs the modal message loop; returns EndDialog value or -1 on error.
+pub unsafe extern "win64" fn dialog_box_indirect_param_w(
+    _h_instance: usize,
+    _lp_template: *const u8,
+    _hwnd_parent: usize,
+    _lp_dialog_func: usize,
+    _dw_init_param: isize,
+) -> isize {
+    -1
+}
+
 /// EndDialog: close a dialog box.
 // Wine ref: dlls/user32/dialog.c — EndDialog sets dialog's nResult field and posts
 // WM_NULL to unblock the modal message loop in DialogBox; DestroyWindow called after loop.
@@ -4957,6 +5052,9 @@ pub unsafe extern "win64" fn load_string_w(
     lp_buffer: *mut u16,
     n_buffer_max: i32,
 ) -> i32 {
+    restrace!(
+        "load_string_w hInst={h_instance:#x} id={u_id} cchMax={n_buffer_max}"
+    );
     if lp_buffer.is_null() {
         return 0;
     }
@@ -5520,6 +5618,10 @@ pub unsafe extern "win64" fn load_bitmap_w(
     _h_instance: usize,
     _lp_bitmap_name: *const u16,
 ) -> usize {
+    restrace!(
+        "load_bitmap_w hInst={_h_instance:#x} name={:#x} → zero",
+        _lp_bitmap_name as usize
+    );
     0 // NULL HBITMAP
 }
 
@@ -5993,5 +6095,62 @@ mod tests {
         let status = get_queue_status(0xFFFF);
         // Either 0 (empty) or QS_POSTMESSAGE (0x0008)
         assert!(status == 0 || status == 0x0008);
+    }
+
+    // ── Dialog Indirect stubs ─────────────────────────────────────────────────
+
+    #[test]
+    fn create_dialog_indirect_param_w_returns_hwnd_on_nonnull_template() {
+        // Use a static byte array as a stand-in for a DLGTEMPLATE pointer.
+        // We do not parse it — the stub only null-checks the pointer.
+        static FAKE_TEMPLATE: [u8; 18] = [0u8; 18];
+        // DLGPROC that does nothing and returns 0 — avoids the fn-ptr null-check.
+        unsafe extern "win64" fn noop_dlgproc(
+            _hwnd: usize,
+            _msg: u32,
+            _wparam: usize,
+            _lparam: isize,
+        ) -> i32 {
+            0
+        }
+        let lp_template = FAKE_TEMPLATE.as_ptr();
+        let lp_dialog_func = noop_dlgproc as usize;
+        let hwnd = unsafe { create_dialog_indirect_param_w(0, lp_template, 0, lp_dialog_func, 0) };
+        assert_ne!(
+            hwnd, 0,
+            "non-null template + non-null DLGPROC should return a valid hwnd"
+        );
+    }
+
+    #[test]
+    fn create_dialog_indirect_param_w_returns_null_on_null_template() {
+        unsafe extern "win64" fn noop_dlgproc(
+            _hwnd: usize,
+            _msg: u32,
+            _wparam: usize,
+            _lparam: isize,
+        ) -> i32 {
+            0
+        }
+        let hwnd = unsafe {
+            create_dialog_indirect_param_w(0, std::ptr::null(), 0, noop_dlgproc as usize, 0)
+        };
+        assert_eq!(hwnd, 0, "null template must return 0");
+    }
+
+    #[test]
+    fn dialog_box_indirect_param_w_returns_minus_one() {
+        static FAKE_TEMPLATE: [u8; 18] = [0u8; 18];
+        let result = unsafe { dialog_box_indirect_param_w(0, FAKE_TEMPLATE.as_ptr(), 0, 0, 0) };
+        assert_eq!(
+            result, -1,
+            "stub must return -1 (modal message loop deferred)"
+        );
+    }
+
+    #[test]
+    fn dialog_box_indirect_param_w_returns_same_on_null_template() {
+        let result = unsafe { dialog_box_indirect_param_w(0, std::ptr::null(), 0, 0, 0) };
+        assert_eq!(result, -1, "null template must also return -1");
     }
 }

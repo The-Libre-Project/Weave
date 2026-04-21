@@ -960,6 +960,10 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
             create_dialog_param_w as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const ()
                 as usize,
         ),
+        "CreateDialogIndirectParamW" => Some(
+            create_dialog_indirect_param_w as unsafe extern "win64" fn(_, _, _, _, _) -> _
+                as *const () as usize,
+        ),
         "EndDialog" => Some(end_dialog as *const () as usize),
         "GetDlgCtrlID" => Some(get_dlg_ctrl_id as *const () as usize),
         "GetDlgItem" => Some(get_dlg_item as *const () as usize),
@@ -1139,6 +1143,10 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "DialogBoxParamW" => Some(
             api::dialog_box_param_w as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const ()
                 as usize,
+        ),
+        "DialogBoxIndirectParamW" => Some(
+            api::dialog_box_indirect_param_w as unsafe extern "win64" fn(_, _, _, _, _) -> _
+                as *const () as usize,
         ),
         // Accessibility / event hooks
         "NotifyWinEvent" => Some(api::notify_win_event as *const () as usize),
