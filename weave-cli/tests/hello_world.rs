@@ -391,6 +391,317 @@ fn notepad_plus_plus_portable_mode() {
     );
 }
 
+/// `weave notepad++.exe` — NPP resource walk gate (M6e).
+///
+/// Tier A: verifies that resource APIs called during NPP startup emit non-zero
+/// return values via `WEAVE_RESOURCE_TRACE=1`. Specifically:
+///   A1 — LoadStringW returns bytes_copied > 0 for at least one call
+///   A2 — LoadIconW returns a non-zero hIcon for at least one call
+///   A3 — VerQueryValueW returns TRUE with valueLen >= 52 for at least one call
+///   A4 — for each of the top-5 resource APIs present in the trace, at least
+///        one call returns non-zero (zero-return rate < 100%)
+///
+/// Tier B: observational only (eprintln!, no assert):
+///   B1 — LoadMenuW call observed
+///   B2 — LoadAcceleratorsW call observed
+///   B3 — VerQueryValueW call with non-root sub-path
+///   B4 — FindResourceW call observed
+///
+/// Tier C: regression guard (inherited from WS1 Gate 3 / Gate 6):
+///   C1 — Scintilla GDI functions must not be unresolved
+///   C2 — Scintilla must receive SCI_APPENDTEXT with wp > 0
+///
+/// Fixture: same as notepad_plus_plus_portable_mode — tests/fixtures/npp/
+/// Temp dir: /tmp/weave_npp_resource_walk (distinct from WS1 /tmp/weave_npp_test)
+/// Timeout: 15 s
+// TODO: remove #[ignore] once Tier A green in CI
+#[test]
+#[ignore]
+fn notepad_plus_plus_resource_walk_mode() {
+    if !cfg!(target_os = "linux") {
+        eprintln!("skipping execution test — requires Linux");
+        return;
+    }
+
+    let manifest = env!("CARGO_MANIFEST_DIR");
+    let npp_dir = format!("{manifest}/../tests/fixtures/npp");
+    let npp_exe = format!("{npp_dir}/notepad++.exe");
+
+    if !std::path::Path::new(&npp_exe).exists() {
+        eprintln!("skipping: notepad++.exe not present in tests/fixtures/npp/");
+        return;
+    }
+
+    let weave_bin = env!("CARGO_BIN_EXE_weave");
+
+    let tmp_dir = std::path::PathBuf::from("/tmp/weave_npp_resource_walk");
+    if tmp_dir.exists() {
+        std::fs::remove_dir_all(&tmp_dir).expect("failed to clean temp npp resource walk dir");
+    }
+
+    fn copy_dir_all(src: &std::path::Path, dst: &std::path::Path) {
+        std::fs::create_dir_all(dst).expect("create_dir_all failed");
+        for entry in std::fs::read_dir(src).expect("read_dir failed") {
+            let entry = entry.expect("entry failed");
+            let dst_path = dst.join(entry.file_name());
+            if entry.file_type().expect("file_type failed").is_dir() {
+                copy_dir_all(&entry.path(), &dst_path);
+            } else {
+                std::fs::copy(entry.path(), &dst_path).expect("copy failed");
+            }
+        }
+    }
+    copy_dir_all(std::path::Path::new(&npp_dir), &tmp_dir);
+
+    let tmp_exe = tmp_dir.join("notepad++.exe");
+    let tmp_py = tmp_dir.join("test.py");
+
+    let start = std::time::Instant::now();
+    let mut child = std::process::Command::new(weave_bin)
+        .current_dir(&tmp_dir)
+        .arg(&tmp_exe)
+        .arg(&tmp_py)
+        .env("WEAVE_RESOURCE_TRACE", "1")
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|e| panic!("failed to spawn weave on notepad++.exe: {e}"));
+
+    let stderr_pipe = child.stderr.take().expect("stderr was piped");
+    let stderr_shared = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let stderr_writer = std::sync::Arc::clone(&stderr_shared);
+    let drain_thread = std::thread::spawn(move || {
+        use std::io::Read;
+        let mut buf = Vec::new();
+        let mut pipe = stderr_pipe;
+        let _ = pipe.read_to_end(&mut buf);
+        *stderr_writer.lock().unwrap() = buf;
+    });
+
+    let deadline = start + std::time::Duration::from_secs(15);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err(e) => panic!("wait failed: {e}"),
+        }
+    }
+    let elapsed = start.elapsed();
+
+    drain_thread.join().expect("stderr drain thread panicked");
+    let stderr_bytes = stderr_shared.lock().unwrap().clone();
+    let stderr = String::from_utf8_lossy(&stderr_bytes);
+    eprintln!("notepad++ resource-walk stderr ({elapsed:.1?}):\n{stderr}");
+
+    // --- Tier C (regression guard) ---
+
+    // C1: Scintilla GDI functions must not be unresolved (Phase 6b WS1 regression guard).
+    for func in &[
+        "GetTextExtentExPointW",
+        "EnumFontFamiliesExW",
+        "SetTextAlign",
+        "CreateRectRgn",
+        "GetObjectW",
+    ] {
+        assert!(
+            !stderr.contains(&format!("weave: unresolved: gdi32.dll::{func}")),
+            "C1: Scintilla GDI function {func} is still unresolved — Phase 6b WS1 regression.\nstderr: {stderr}"
+        );
+    }
+
+    // C2: Scintilla must receive SCI_APPENDTEXT with content.
+    let sci_content_loaded = stderr.lines().any(|l| {
+        if !l.contains("msg=2282(SCI_APPENDTEXT)") {
+            return false;
+        }
+        l.split("wp=")
+            .nth(1)
+            .and_then(|s| s.split_whitespace().next())
+            .and_then(|s| usize::from_str_radix(s.trim_start_matches("0x"), 16).ok())
+            .map(|wp| wp > 0)
+            .unwrap_or(false)
+    });
+    assert!(
+        sci_content_loaded,
+        "C2: Scintilla never received SCI_APPENDTEXT with content.\nstderr: {stderr}"
+    );
+
+    // --- Tier A (resource trace assertions) ---
+
+    // Collect all restrace lines once.
+    let restrace_lines: Vec<&str> = stderr
+        .lines()
+        .filter(|l| l.contains("restrace: "))
+        .collect();
+
+    // Helper: write diagnostic log on Tier A failure.
+    let write_diag = |reason: &str| {
+        let diag_path = "/tmp/weave_npp_resource_walk/diag.log";
+        let all_lines: Vec<&str> = stderr.lines().collect();
+        let last_200: Vec<&str> = all_lines.iter().rev().take(200).rev().cloned().collect();
+        let restrace_section: Vec<&str> = all_lines
+            .iter()
+            .filter(|l| l.contains("restrace: "))
+            .cloned()
+            .collect();
+        let mut content = format!("TIER A FAILURE: {reason}\n\n=== last 200 lines ===\n");
+        for l in &last_200 {
+            content.push_str(l);
+            content.push('\n');
+        }
+        content.push_str("\n=== restrace lines ===\n");
+        for l in &restrace_section {
+            content.push_str(l);
+            content.push('\n');
+        }
+        if let Err(e) = std::fs::write(diag_path, &content) {
+            eprintln!("warning: could not write diag log to {diag_path}: {e}");
+        } else {
+            eprintln!("diagnostic log written to: {diag_path}");
+        }
+    };
+
+    // A1: LoadStringW must return bytes_copied > 0 for at least one call.
+    let a1_pass = restrace_lines.iter().any(|l| {
+        if !l.contains("restrace: load_string_w") || !l.contains("bytes_copied=") {
+            return false;
+        }
+        // Parse "bytes_copied=N"
+        l.split("bytes_copied=")
+            .nth(1)
+            .and_then(|s| s.split_whitespace().next())
+            .and_then(|s| s.parse::<i32>().ok())
+            .map(|n| n > 0)
+            .unwrap_or(false)
+    });
+    if !a1_pass {
+        write_diag("A1: no load_string_w call with bytes_copied > 0");
+        panic!(
+            "A1 FAILED: no LoadStringW call returned bytes_copied > 0\n\
+             restrace lines:\n{}\nstderr: {stderr}",
+            restrace_lines.join("\n")
+        );
+    }
+
+    // A2: LoadIconW must return a non-zero hIcon for at least one call.
+    let a2_pass = restrace_lines.iter().any(|l| {
+        l.contains("restrace: load_icon_w") && l.contains("→ hIcon=") && !l.contains("→ zero")
+    });
+    if !a2_pass {
+        write_diag("A2: no load_icon_w call with non-zero hIcon");
+        panic!(
+            "A2 FAILED: no LoadIconW call returned a non-zero hIcon\n\
+             restrace lines:\n{}\nstderr: {stderr}",
+            restrace_lines.join("\n")
+        );
+    }
+
+    // A3: VerQueryValueW must return TRUE with valueLen >= 52 for at least one call.
+    let a3_pass = restrace_lines.iter().any(|l| {
+        if !l.contains("restrace: ver_query_value_w") || !l.contains("→ TRUE valueLen=") {
+            return false;
+        }
+        l.split("→ TRUE valueLen=")
+            .nth(1)
+            .and_then(|s| s.split_whitespace().next())
+            .and_then(|s| s.parse::<u32>().ok())
+            .map(|n| n >= 52)
+            .unwrap_or(false)
+    });
+    if !a3_pass {
+        write_diag("A3: no ver_query_value_w call with → TRUE valueLen >= 52");
+        panic!(
+            "A3 FAILED: no VerQueryValueW call returned TRUE with valueLen >= 52\n\
+             restrace lines:\n{}\nstderr: {stderr}",
+            restrace_lines.join("\n")
+        );
+    }
+
+    // A4: for each of the top-5 resource APIs present in the trace, at least
+    // one call must return non-zero (zero-return rate < 100%).
+    let top5 = [
+        ("find_resource_w", "→ zero"),
+        ("load_resource", "→ zero"),
+        ("load_string_w", "bytes_copied=0"),
+        ("load_icon_w", "→ zero"),
+        ("ver_query_value_w", "→ zero"),
+    ];
+    for (api, zero_marker) in &top5 {
+        let api_key = format!("restrace: {api}");
+        let api_lines: Vec<&&str> = restrace_lines
+            .iter()
+            .filter(|l| l.contains(api_key.as_str()))
+            .collect();
+        if api_lines.is_empty() {
+            // API not called — skip rate check.
+            continue;
+        }
+        let all_zero = api_lines.iter().all(|l| l.contains(zero_marker));
+        if all_zero {
+            let reason = format!(
+                "A4: all {api} calls returned zero ({} calls)",
+                api_lines.len()
+            );
+            write_diag(&reason);
+            panic!(
+                "A4 FAILED: all {} calls for {} returned zero\n\
+                 restrace lines:\n{}\nstderr: {stderr}",
+                api_lines.len(),
+                api,
+                restrace_lines.join("\n")
+            );
+        }
+    }
+
+    // --- Tier B (observations only — no assert) ---
+
+    if restrace_lines
+        .iter()
+        .any(|l| l.contains("restrace: load_menu_w"))
+    {
+        eprintln!("B1: LoadMenuW call observed in resource trace");
+    } else {
+        eprintln!("B1: LoadMenuW not observed (stub not yet traced or not called)");
+    }
+
+    if restrace_lines
+        .iter()
+        .any(|l| l.contains("restrace: load_accelerators_w"))
+    {
+        eprintln!("B2: LoadAcceleratorsW call observed in resource trace");
+    } else {
+        eprintln!("B2: LoadAcceleratorsW not observed (stub not yet traced or not called)");
+    }
+
+    if restrace_lines
+        .iter()
+        .any(|l| l.contains("restrace: ver_query_value_w") && l.contains("→ zero (non-root"))
+    {
+        eprintln!("B3: VerQueryValueW called with non-root sub-path (observed)");
+    } else {
+        eprintln!("B3: VerQueryValueW non-root path not observed");
+    }
+
+    if restrace_lines
+        .iter()
+        .any(|l| l.contains("restrace: find_resource_w"))
+    {
+        eprintln!("B4: FindResourceW call observed in resource trace");
+    } else {
+        eprintln!("B4: FindResourceW not observed (stub not yet traced or not called)");
+    }
+
+    eprintln!(
+        "M6e resource walk gate passed — elapsed={elapsed:.1?} restrace_count={}",
+        restrace_lines.len()
+    );
+}
+
 /// `weave i_view64.exe` — IrfanView 64-bit portable image viewer.
 ///
 /// Sprint 5 functional gate: IrfanView 4.73 (64-bit) must fully initialise its

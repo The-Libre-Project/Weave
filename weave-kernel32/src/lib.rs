@@ -11815,7 +11815,10 @@ pub unsafe extern "win64" fn ver_query_value_w(
         unsafe { *pui_len = 0 };
     }
     if p_block.is_null() || lp_sub_block.is_null() {
-        restrace!("ver_query_value_w pBlock={:#x} → zero (null args)", p_block as usize);
+        restrace!(
+            "ver_query_value_w pBlock={:#x} → zero (null args)",
+            p_block as usize
+        );
         return 0;
     }
 
@@ -11848,7 +11851,10 @@ pub unsafe extern "win64" fn ver_query_value_w(
     // Read wValueLength at offset 2.
     let value_len = unsafe { u16::from_le_bytes([*p_block.add(2), *p_block.add(3)]) } as u32;
     if value_len == 0 {
-        restrace!("ver_query_value_w pBlock={:#x} → zero (empty value block)", p_block as usize);
+        restrace!(
+            "ver_query_value_w pBlock={:#x} → zero (empty value block)",
+            p_block as usize
+        );
         return 0; // empty value block — nothing to return
     }
 

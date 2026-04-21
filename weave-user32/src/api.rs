@@ -5052,9 +5052,7 @@ pub unsafe extern "win64" fn load_string_w(
     lp_buffer: *mut u16,
     n_buffer_max: i32,
 ) -> i32 {
-    restrace!(
-        "load_string_w hInst={h_instance:#x} id={u_id} cchMax={n_buffer_max}"
-    );
+    restrace!("load_string_w hInst={h_instance:#x} id={u_id} cchMax={n_buffer_max}");
     if lp_buffer.is_null() {
         return 0;
     }
@@ -5179,7 +5177,9 @@ pub unsafe extern "win64" fn load_string_w(
         core::ptr::copy_nonoverlapping(chars_ptr, lp_buffer, to_copy);
         *lp_buffer.add(to_copy) = 0;
     }
-    to_copy as i32
+    let result = to_copy as i32;
+    restrace!("load_string_w hInst={h_instance:#x} id={u_id} → bytes_copied={result}");
+    result
 }
 
 /// LoadStringA — ANSI trampoline around `LoadStringW`.
