@@ -232,6 +232,16 @@ fn map_sections(
         );
     }
 
+    // Copy PE headers to base + 0.  Windows always maps the first SizeOfHeaders
+    // bytes at ImageBase + 0; the resource walker reads the MZ/NT headers there.
+    let headers_size = opt.windows_fields.size_of_headers as usize;
+    let headers_copy = headers_size.min(bytes.len());
+    if headers_copy > 0 {
+        unsafe {
+            ptr::copy_nonoverlapping(bytes.as_ptr(), base, headers_copy);
+        }
+    }
+
     // Copy sections from file into their virtual address slots.
     for section in &pe.sections {
         let vaddr = section.virtual_address as usize;
