@@ -1206,6 +1206,7 @@ pub unsafe extern "win64" fn get_text_extent_point32_w(
 pub unsafe extern "win64" fn load_bitmap_w(h_inst: usize, lp_bitmap_name: *const u16) -> usize {
     const IMAGE_BITMAP: u32 = 0;
     // SAFETY: forward caller contract on `lp_bitmap_name`.
+    // restrace: fires via load_image_w in weave-user32 (weave-core not a direct dep here).
     unsafe {
         weave_user32::api::load_image_w(h_inst, lp_bitmap_name as usize, IMAGE_BITMAP, 0, 0, 0)
     }

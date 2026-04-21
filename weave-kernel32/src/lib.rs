@@ -28,6 +28,7 @@ use std::sync::Arc;
 use weave_common::stub::warn_once;
 use weave_common::{STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE};
 use weave_core::progress::mark_phase;
+use weave_core::restrace;
 use weave_core::{file_io, handles};
 
 // ── File mapping table ────────────────────────────────────────────────────────
@@ -11814,6 +11815,7 @@ pub unsafe extern "win64" fn ver_query_value_w(
         unsafe { *pui_len = 0 };
     }
     if p_block.is_null() || lp_sub_block.is_null() {
+        restrace!("ver_query_value_w pBlock={:#x} → zero (null args)", p_block as usize);
         return 0;
     }
 
@@ -11825,6 +11827,7 @@ pub unsafe extern "win64" fn ver_query_value_w(
         // Non-root paths (StringFileInfo, VarFileInfo, …) not yet implemented.
         // Wine ref: VersionInfo32_QueryValue walks child blocks via
         // VersionInfo32_FindChild; Weave defers this until a caller needs it.
+        restrace!("ver_query_value_w sub=\"{sub}\" → zero (non-root unimplemented)");
         return 0;
     }
 
@@ -11845,6 +11848,7 @@ pub unsafe extern "win64" fn ver_query_value_w(
     // Read wValueLength at offset 2.
     let value_len = unsafe { u16::from_le_bytes([*p_block.add(2), *p_block.add(3)]) } as u32;
     if value_len == 0 {
+        restrace!("ver_query_value_w pBlock={:#x} → zero (empty value block)", p_block as usize);
         return 0; // empty value block — nothing to return
     }
 
@@ -11868,6 +11872,10 @@ pub unsafe extern "win64" fn ver_query_value_w(
     if !pui_len.is_null() {
         unsafe { *pui_len = value_len };
     }
+    restrace!(
+        "ver_query_value_w pBlock={:#x} → TRUE valueLen={value_len}",
+        p_block as usize
+    );
     1 // TRUE
 }
 
@@ -12266,7 +12274,18 @@ pub unsafe extern "win64" fn find_resource_w(
     // SAFETY: caller contract propagated.
     let name = unsafe { resource_id_from_ptr_w(lp_name as usize) };
     let type_ = unsafe { resource_id_from_ptr_w(lp_type as usize) };
-    find_resource_common(h_module, name, type_)
+    let result = find_resource_common(h_module, name, type_);
+    restrace!(
+        "find_resource_w hInst={h_module:#x} type={:#x} name={:#x} → {}",
+        lp_type as usize,
+        lp_name as usize,
+        if result != 0 {
+            format!("hrsrc={result:#x}")
+        } else {
+            "zero".to_string()
+        }
+    );
+    result
 }
 
 /// Shared body for FindResourceA/W: resolve module base via the handle
@@ -12322,6 +12341,10 @@ pub unsafe extern "win64" fn enum_resource_names_w(
         Some(b) => b,
         None => {
             set_last_error(6); // ERROR_INVALID_HANDLE
+            restrace!(
+                "enum_resource_names_w hInst={h_module:#x} type={:#x} → zero (invalid handle)",
+                lp_type as usize
+            );
             return 0;
         }
     };
@@ -12331,10 +12354,13 @@ pub unsafe extern "win64" fn enum_resource_names_w(
     // SAFETY: caller guarantees lp_enum_func follows this ABI.
     let callback_fn: EnumResNameProc = unsafe { std::mem::transmute(lp_enum_func) };
 
+    let count = std::cell::Cell::new(0usize);
+
     // SAFETY: base is a valid mapped PE image (confirmed via module_handles);
     // lp_type is caller-guaranteed to be a valid ordinal or UTF-16 string pointer.
     let found = unsafe {
         weave_core::resource::enumerate_resource_names(base, lp_type, |name_ptr| {
+            count.set(count.get() + 1);
             // SAFETY: callback_fn is the caller-supplied ENUMRESNAMEPROCW;
             // name_ptr is either an IS_INTRESOURCE ordinal or a pointer to a
             // null-terminated UTF-16 buf kept alive for the duration of this call.
@@ -12344,8 +12370,17 @@ pub unsafe extern "win64" fn enum_resource_names_w(
 
     if !found {
         set_last_error(1813); // ERROR_RESOURCE_TYPE_NOT_FOUND
+        restrace!(
+            "enum_resource_names_w hInst={h_module:#x} type={:#x} → zero (type not found)",
+            lp_type as usize
+        );
         return 0;
     }
+    restrace!(
+        "enum_resource_names_w hInst={h_module:#x} type={:#x} → count={}",
+        lp_type as usize,
+        count.get()
+    );
     1 // TRUE — enumeration completed (or stopped early by callback returning FALSE)
 }
 

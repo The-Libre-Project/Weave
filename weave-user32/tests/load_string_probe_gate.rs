@@ -223,3 +223,42 @@ fn load_string_a_zero_buflen_returns_minus_one() {
     let n = unsafe { load_string_a(hmodule, 1, core::ptr::null_mut(), 0) };
     assert_eq!(n, -1);
 }
+
+/// Verify that `load_string_w` behaves correctly when `WEAVE_RESOURCE_TRACE=1`
+/// is set. The restrace! macro must not alter return values or corrupt output.
+///
+/// Note: the OnceLock in `weave_core::resource_trace::enabled()` caches the
+/// env-var state on first call. In a test binary, this test may run after
+/// `enabled_matches_env` has already initialized the lock to `false`. The
+/// behavior-under-trace path is validated here; the env-gate itself is
+/// covered by `weave_core::resource_trace::tests::enabled_matches_env`.
+///
+/// To observe actual restrace output: run with `WEAVE_RESOURCE_TRACE=1`.
+#[test]
+fn load_string_w_with_trace_env_returns_correct_values() {
+    // Set env before any call in this binary initializes the OnceLock.
+    // SAFETY: single-threaded test environment.
+    unsafe { std::env::set_var("WEAVE_RESOURCE_TRACE", "1") };
+
+    let buf = build_image();
+    let base = buf.as_ptr() as usize;
+    let hmodule = register_with_base("load_string_probe_trace.dll", base);
+    assert!(hmodule != 0);
+
+    let mut out = [0u16; 64];
+
+    // Behavior must be identical regardless of trace state.
+    // SAFETY: buffer is writable for 64 WCHARs.
+    let n = unsafe { load_string_w(hmodule, 1, out.as_mut_ptr(), 64) };
+    assert_eq!(n, 5, "LoadStringW(id=1) must return 5 with trace enabled");
+    let got = String::from_utf16_lossy(&out[..n as usize]);
+    assert_eq!(got, "Hello");
+    assert_eq!(out[n as usize], 0, "null terminator must be present");
+
+    // ID 2 → "Weave"
+    let mut out2 = [0u16; 64];
+    // SAFETY: as above.
+    let n2 = unsafe { load_string_w(hmodule, 2, out2.as_mut_ptr(), 64) };
+    assert_eq!(n2, 5);
+    assert_eq!(String::from_utf16_lossy(&out2[..n2 as usize]), "Weave");
+}

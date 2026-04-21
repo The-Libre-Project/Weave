@@ -17,4 +17,5 @@ pub mod resource;
 pub mod seh;
 pub mod teb;
 pub mod unwind;
+pub mod resource_trace;
 pub mod ws2_trace;
