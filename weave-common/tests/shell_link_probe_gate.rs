@@ -42,7 +42,7 @@ fn shell_link_save_callback_receives_correct_data() {
 
         // The COM object pointer is the address of the vtable-pointer field (first
         // field of repr(C) ShellLinkObject). Dereference to get the vtable pointer.
-        let vtable: *const usize = *obj as *const usize;
+        let vtable: *const usize = (*obj).vtable as *const usize;
 
         // ── SetPath (slot 20) ────────────────────────────────────────────────
         let path_w: Vec<u16> = "C:\\Program Files\\MyApp\\myapp.exe"
