@@ -71,11 +71,12 @@ fn unknown_rop_lies_true() {
 }
 
 #[test]
-fn patcopy_rejects_non_solid_brush() {
+fn patcopy_non_solid_brush_lies_true() {
     // Simulate a "non-solid" brush by putting a Pen in the h_brush slot — the
-    // dispatcher probes `GdiKind::Brush` and falls through to Unknown for any
-    // other variant. Stock brushes are always solid; allocated Brush handles
-    // are also solid in Weave today. Hatch brushes will land here once added.
+    // dispatcher probes `GdiKind::Brush` and falls through to `RopPlan::Unknown`
+    // for any other variant. Unknown ROPs (and this fall-through case) lie
+    // TRUE per the task-17 CI fix — see bit_blt's RopPlan::Unknown arm. Real
+    // hatch-brush support remains a later task.
     let (src_dc, dst_dc, src_bm, dst_bm) = make_pair();
 
     // Build a Pen handle and force it into dst_dc's h_brush.
@@ -87,7 +88,10 @@ fn patcopy_rejects_non_solid_brush() {
     weave_gdi32::dc::with_mut(dst_dc, |dc| dc.h_brush = pen);
 
     let r = bit_blt(dst_dc, 0, 0, 4, 4, src_dc, 0, 0, PATCOPY);
-    assert_eq!(r, 0, "PATCOPY with non-brush h_brush should return 0");
+    assert_eq!(
+        r, 1,
+        "PATCOPY with non-brush h_brush lies TRUE (Unknown arm)"
+    );
 
     let _ = delete_object(pen);
     let _ = delete_object(src_bm);
