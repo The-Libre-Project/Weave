@@ -2758,22 +2758,285 @@ pub unsafe extern "win64" fn transparent_blt(
     1
 }
 
-/// GradientFill — fill a rectangle or triangle with a colour gradient.
+/// GradientFill — fill a rectangle with a colour gradient between two vertices.
+///
+/// TRIVERTEX layout (16 bytes): `{ LONG x; LONG y; USHORT Red, Green, Blue, Alpha; }`.
+/// Colour channels are 16-bit; Wine divides by 256 to reach the 8-bit dest
+/// channel (so a vertex channel of 0xFF00 yields 0xFF after scaling).
+///
+/// GRADIENT_RECT layout (8 bytes): `{ ULONG UpperLeft, LowerRight; }` — both
+/// are vertex-array indices. TRIANGLE mode uses GRADIENT_TRIANGLE (12 bytes)
+/// and is deferred to a follow-up task.
+///
+/// Validation (mirrors `NtGdiGradientFill` in dlls/win32u/painting.c):
+///   * pVertex / pMesh NULL, nVertex==0, nMesh==0, mode > 2 → FALSE.
+///   * Any mesh vertex index >= nVertex → FALSE (no panic).
+///
+/// Interpolation (mirrors X11DRV_GradientFill graphics.c:1519/1569):
+///   colour[c] = (v0[c] * (d - i) + v1[c] * i) / d / 256
+/// where d = dx for RECT_H, dy for RECT_V; i walks 0..d. Dest alpha is
+/// forced to 0xFF (first-pass scope — vertex alpha is ignored).
+///
+/// First-pass scope: 32-bit ARGB memory DC destination only, RECT_H + RECT_V.
+/// TRIANGLE returns FALSE with a rate-limited stderr trace.
+///
+/// Wine ref: dlls/win32u/painting.c::NtGdiGradientFill — validates mode and
+/// vertex-index bounds before delegating to the driver. dlls/win32u/bitblt.c
+/// ::nulldrv_GradientFill computes the bounding rect as
+/// `min/max(pts[v])` over every referenced vertex.
+/// Wine ref: dlls/winex11.drv/graphics.c::X11DRV_GradientFill — the RECT_H/V
+/// branches use `(v0*(d-i) + v1*i) / d / 256` per channel and skip when d==0.
 ///
 /// # Safety
-/// `pVertex` and `pMesh` are caller-supplied structs; we ignore them.
-// Wine ref: dlls/msimg32/msimg32.c — GradientFill calls NtGdiGradientFill; ulMode is
-// GRADIENT_FILL_RECT_H(0), GRADIENT_FILL_RECT_V(1), or GRADIENT_FILL_TRIANGLE(2);
-// pVertex is TRIVERTEX array; nVertex must match pMesh references or return FALSE.
+/// `p_vertex` points to `n_vertex * 16` readable bytes; `p_mesh` points to
+/// `n_mesh * 8` readable bytes (for RECT_H/RECT_V). Null pointers are
+/// rejected without dereference.
 pub unsafe extern "win64" fn gradient_fill(
-    _hdc: usize,
-    _p_vertex: *const u8,
-    _n_vertex: u32,
-    _p_mesh: *const u8,
-    _n_mesh: u32,
-    _ul_mode: u32,
+    hdc: usize,
+    p_vertex: *const u8,
+    n_vertex: u32,
+    p_mesh: *const u8,
+    n_mesh: u32,
+    ul_mode: u32,
 ) -> i32 {
-    0 // FALSE
+    const GRADIENT_FILL_RECT_H: u32 = 0;
+    const GRADIENT_FILL_RECT_V: u32 = 1;
+    const GRADIENT_FILL_TRIANGLE: u32 = 2;
+
+    if p_vertex.is_null() || p_mesh.is_null() || n_vertex == 0 || n_mesh == 0 {
+        return 0;
+    }
+    if ul_mode > GRADIENT_FILL_TRIANGLE {
+        return 0;
+    }
+    if ul_mode == GRADIENT_FILL_TRIANGLE {
+        static NO_TRI: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        if NO_TRI.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 4 {
+            eprintln!("weave/gdi32: GradientFill TRIANGLE not yet supported");
+        }
+        return 0;
+    }
+
+    // Parse TRIVERTEX array with unaligned reads — caller alignment not
+    // guaranteed. Each vertex is exactly 16 bytes: x(i32) y(i32) R/G/B/A(u16).
+    struct TriVertex {
+        x: i32,
+        y: i32,
+        r: u16,
+        g: u16,
+        b: u16,
+        _a: u16,
+    }
+    let mut verts: Vec<TriVertex> = Vec::with_capacity(n_vertex as usize);
+    for i in 0..n_vertex as usize {
+        let base = p_vertex.add(i * 16);
+        let x = (base.cast::<i32>()).read_unaligned();
+        let y = (base.add(4).cast::<i32>()).read_unaligned();
+        let r = (base.add(8).cast::<u16>()).read_unaligned();
+        let g = (base.add(10).cast::<u16>()).read_unaligned();
+        let b = (base.add(12).cast::<u16>()).read_unaligned();
+        let a = (base.add(14).cast::<u16>()).read_unaligned();
+        verts.push(TriVertex {
+            x,
+            y,
+            r,
+            g,
+            b,
+            _a: a,
+        });
+    }
+
+    // Parse GRADIENT_RECT array (8 bytes each: UpperLeft(u32) LowerRight(u32))
+    // and validate every vertex index against nVertex — matches the
+    // NtGdiGradientFill early-reject loop.
+    let mut mesh: Vec<(u32, u32)> = Vec::with_capacity(n_mesh as usize);
+    for i in 0..n_mesh as usize {
+        let base = p_mesh.add(i * 8);
+        let ul = (base.cast::<u32>()).read_unaligned();
+        let lr = (base.add(4).cast::<u32>()).read_unaligned();
+        if ul >= n_vertex || lr >= n_vertex {
+            return 0;
+        }
+        mesh.push((ul, lr));
+    }
+
+    // Resolve dest bits — require a 32bpp memory-DC backing bitmap.
+    let dst_info: Option<(u32, u32, usize, u16)> = dc::with(hdc, |dc| {
+        let bmp = dc.selected_bitmap;
+        if bmp == 0 {
+            return None;
+        }
+        objects::get(bmp, |kind| match kind {
+            objects::GdiKind::DibSection {
+                width,
+                height,
+                bits_ptr,
+                bpp,
+            }
+            | objects::GdiKind::Bitmap {
+                width,
+                height,
+                bits_ptr,
+                bpp,
+            } => Some((*width, *height, *bits_ptr, *bpp)),
+            _ => None,
+        })
+        .flatten()
+    });
+    let (dst_w, dst_h, dst_ptr, dst_bpp) = match dst_info {
+        Some(v) => v,
+        None => {
+            static NO_WIN_DC: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+            if NO_WIN_DC.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 4 {
+                eprintln!("weave/gdi32: GradientFill dest must be a memory DC with a 32bpp bitmap");
+            }
+            return 0;
+        }
+    };
+    if dst_bpp != 32 {
+        static BAD_DST_BPP: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        if BAD_DST_BPP.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 4 {
+            eprintln!("weave/gdi32: GradientFill dst bpp={dst_bpp} unsupported (32-bit only)");
+        }
+        return 0;
+    }
+
+    let dst_stride = dst_w as usize * 4;
+    let dst_bytes =
+        unsafe { std::slice::from_raw_parts_mut(dst_ptr as *mut u8, dst_h as usize * dst_stride) };
+
+    // Track the overall bounding rect of painted pixels so we can issue one
+    // CPU→pixmap upload at the end (mirrors alpha_blend's trailing
+    // put_bits_to_pixmap_at).
+    let mut dirty_x0 = i32::MAX;
+    let mut dirty_y0 = i32::MAX;
+    let mut dirty_x1 = i32::MIN;
+    let mut dirty_y1 = i32::MIN;
+
+    for &(ul_idx, lr_idx) in &mesh {
+        let v0 = &verts[ul_idx as usize];
+        let v1 = &verts[lr_idx as usize];
+
+        // Geometric bounding box — Wine does min/max over the referenced
+        // vertices, so upper-left/lower-right ordering is not assumed.
+        let x0 = v0.x.min(v1.x);
+        let y0 = v0.y.min(v1.y);
+        let x1 = v0.x.max(v1.x);
+        let y1 = v0.y.max(v1.y);
+
+        // Zero-area rects contribute nothing — graphics.c bails when dx==0.
+        if x1 <= x0 || y1 <= y0 {
+            continue;
+        }
+
+        // Clip to dest bitmap.
+        let cx0 = x0.max(0);
+        let cy0 = y0.max(0);
+        let cx1 = x1.min(dst_w as i32);
+        let cy1 = y1.min(dst_h as i32);
+        if cx1 <= cx0 || cy1 <= cy0 {
+            continue;
+        }
+
+        // Wine swaps v0/v1 when the walk direction is negative — but we've
+        // already min/max'd, so the effective gradient endpoints are the
+        // lexically ordered pair. For interpolation we need the colour that
+        // belongs to the low end of the axis vs the high end.
+        let (lo_r, lo_g, lo_b, hi_r, hi_g, hi_b) = match ul_mode {
+            GRADIENT_FILL_RECT_H => {
+                if v0.x <= v1.x {
+                    (v0.r, v0.g, v0.b, v1.r, v1.g, v1.b)
+                } else {
+                    (v1.r, v1.g, v1.b, v0.r, v0.g, v0.b)
+                }
+            }
+            GRADIENT_FILL_RECT_V => {
+                if v0.y <= v1.y {
+                    (v0.r, v0.g, v0.b, v1.r, v1.g, v1.b)
+                } else {
+                    (v1.r, v1.g, v1.b, v0.r, v0.g, v0.b)
+                }
+            }
+            _ => unreachable!(),
+        };
+
+        match ul_mode {
+            GRADIENT_FILL_RECT_H => {
+                let dx = (x1 - x0) as u32;
+                for ix in cx0..cx1 {
+                    // Distance from the low-x end, pre-clip, so that the
+                    // colour sampled at ix is independent of clipping.
+                    let i = (ix - x0) as u32;
+                    let r = ((lo_r as u32 * (dx - i) + hi_r as u32 * i) / dx / 256) as u8;
+                    let g = ((lo_g as u32 * (dx - i) + hi_g as u32 * i) / dx / 256) as u8;
+                    let b = ((lo_b as u32 * (dx - i) + hi_b as u32 * i) / dx / 256) as u8;
+                    for iy in cy0..cy1 {
+                        let off = iy as usize * dst_stride + ix as usize * 4;
+                        dst_bytes[off] = b;
+                        dst_bytes[off + 1] = g;
+                        dst_bytes[off + 2] = r;
+                        dst_bytes[off + 3] = 0xFF;
+                    }
+                }
+            }
+            GRADIENT_FILL_RECT_V => {
+                let dy = (y1 - y0) as u32;
+                for iy in cy0..cy1 {
+                    let i = (iy - y0) as u32;
+                    let r = ((lo_r as u32 * (dy - i) + hi_r as u32 * i) / dy / 256) as u8;
+                    let g = ((lo_g as u32 * (dy - i) + hi_g as u32 * i) / dy / 256) as u8;
+                    let b = ((lo_b as u32 * (dy - i) + hi_b as u32 * i) / dy / 256) as u8;
+                    for ix in cx0..cx1 {
+                        let off = iy as usize * dst_stride + ix as usize * 4;
+                        dst_bytes[off] = b;
+                        dst_bytes[off + 1] = g;
+                        dst_bytes[off + 2] = r;
+                        dst_bytes[off + 3] = 0xFF;
+                    }
+                }
+            }
+            _ => unreachable!(),
+        }
+
+        dirty_x0 = dirty_x0.min(cx0);
+        dirty_y0 = dirty_y0.min(cy0);
+        dirty_x1 = dirty_x1.max(cx1);
+        dirty_y1 = dirty_y1.max(cy1);
+    }
+
+    if dirty_x1 <= dirty_x0 || dirty_y1 <= dirty_y0 {
+        // Nothing was actually painted — still a valid TRUE per Wine
+        // (graphics.c returns TRUE even after every rect hit dx==0).
+        return 1;
+    }
+
+    // Upload the painted band to the drawable — mirrors alpha_blend /
+    // transparent_blt tail.
+    let dst_draw = dc::with(hdc, |dc| dc.drawable());
+    if dst_draw != 0 {
+        let band_w = (dirty_x1 - dirty_x0) as usize;
+        let band_h = (dirty_y1 - dirty_y0) as usize;
+        let mut band = vec![0u8; band_w * band_h * 4];
+        for row in 0..band_h {
+            let dy = dirty_y0 as usize + row;
+            let src_row_off = dy * dst_stride + dirty_x0 as usize * 4;
+            let dst_row_off = row * band_w * 4;
+            band[dst_row_off..dst_row_off + band_w * 4]
+                .copy_from_slice(&dst_bytes[src_row_off..src_row_off + band_w * 4]);
+        }
+        weave_user32::backend::put_bits_to_pixmap_at(
+            dst_draw,
+            dirty_x0 as i16,
+            dirty_y0 as i16,
+            band_w as u16,
+            band_h as u16,
+            band_w * 4,
+            &band,
+            32,
+        );
+    }
+
+    1
 }
 
 /// Resolve a gdi32.dll or msimg32.dll import added in Sprint 5.
