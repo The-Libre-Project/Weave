@@ -5670,19 +5670,159 @@ pub unsafe extern "win64" fn send_dlg_item_message_w(
     0
 }
 
-/// LoadAcceleratorsW — load an accelerator table resource (Wide). Returns NULL.
+/// LoadAcceleratorsW — load an accelerator table resource (Wide).
+///
+/// Looks up RT_ACCELERATOR (ordinal 9) in the PE resource directory of the
+/// module identified by `h_inst`. On success, registers a stable synthetic
+/// HACCEL in the `accel_handles` slab keyed on `(h_inst, name_key)` and
+/// returns it; duplicate calls with the same key return the same handle.
+/// On any failure (NULL hInst, unknown module, missing resource) returns
+/// NULL.
+///
+/// Weave stores the raw `{ptr, size}` of the resource blob — it does NOT
+/// decode the `PE_ACCEL` entries. `TranslateAcceleratorW` is still a stub,
+/// so the handle is never dereferenced in practice; its purpose is to let
+/// guests distinguish present vs absent accelerator tables.
 ///
 /// # Safety
-/// Pointer arguments are accepted but not dereferenced.
-// Wine ref: dlls/user32/resource.c — loads RT_ACCELERATOR resource via FindResourceW/
-// LoadResource; each entry is ACCEL struct (fVirt, key, cmd); table handle is not freed
-// by the application — lifetime tied to the module.
+/// If `lp_table_name` is not an ordinal (`IS_INTRESOURCE`), the caller
+/// guarantees it points to a valid null-terminated UTF-16 string.
+// Wine ref: dlls/user32/resource.c::LoadAcceleratorsW —
+//   if (!(rsrc = FindResourceW( instance, name, (LPWSTR)RT_ACCELERATOR ))) return 0;
+//   pe_table = LoadResource( instance, rsrc );
+//   count = SizeofResource( instance, rsrc ) / sizeof(*pe_table);
+//   if (!count) return 0;
+//   ...
+//   handle = NtUserCreateAcceleratorTable( table, count );
+// RT_ACCELERATOR = MAKEINTRESOURCE(9) per include/winuser.h. Failure mode:
+// missing resource → 0; empty table → 0. Wine then copies each 8-byte
+// PE_ACCEL (fVirt, key, cmd, pad) into an ACCEL and hands the array to
+// NtUserCreateAcceleratorTable, which owns the kernel object. Weave stops
+// at the resource lookup and stores the raw blob — out of scope: parsing
+// the ACCEL entries, TranslateAcceleratorW semantics, DestroyAcceleratorTable.
 pub unsafe extern "win64" fn load_accelerators_w(
-    _h_inst: usize,
-    _lp_table_name: *const u16,
+    h_inst: usize,
+    lp_table_name: *const u16,
 ) -> usize {
-    eprintln!("weave/user32: LoadAcceleratorsW → NULL (diag)");
-    0 // NULL
+    restrace!(
+        "load_accelerators_w hInst={h_inst:#x} name={:#x}",
+        lp_table_name as usize
+    );
+
+    // Wine: hInst==NULL would resolve to user32's module for system
+    // accelerators. Out of scope — return NULL.
+    if h_inst == 0 {
+        return 0;
+    }
+
+    let image_base = match weave_core::module_handles::base_of(h_inst) {
+        Some(b) => b,
+        None => return 0,
+    };
+
+    // Classify the name via IS_INTRESOURCE and build a ResourceId.
+    let name_ptr = lp_table_name as usize;
+    let name_id = if name_ptr >> 16 == 0 {
+        weave_core::resource::ResourceId::Id(name_ptr as u16)
+    } else {
+        // SAFETY: caller contract — ptr is a valid NUL-terminated UTF-16
+        // string when it's not an ordinal.
+        let mut wchars: Vec<u16> = Vec::new();
+        unsafe {
+            let mut p = lp_table_name;
+            for _ in 0..32_768 {
+                let ch = *p;
+                if ch == 0 {
+                    break;
+                }
+                wchars.push(ch);
+                p = p.add(1);
+            }
+        }
+        weave_core::resource::ResourceId::Name(wchars)
+    };
+
+    const RT_ACCELERATOR: u16 = 9;
+    let entry_ptr = match weave_core::resource::find_resource_entry(
+        image_base,
+        weave_core::resource::ResourceId::Id(RT_ACCELERATOR),
+        name_id,
+        0,
+    ) {
+        Some(p) => p,
+        None => return 0,
+    };
+
+    // Read the IMAGE_RESOURCE_DATA_ENTRY to get (blob_ptr, size).
+    // SAFETY: find_resource_entry returned a pointer to a valid, bounds-
+    // checked IMAGE_RESOURCE_DATA_ENTRY within the mapped image.
+    let (blob_ptr, size) = match unsafe {
+        weave_core::resource::resource_entry_ptr_and_size(image_base, entry_ptr)
+    } {
+        Some((p, s)) => (p as usize, s as u32),
+        None => return 0,
+    };
+
+    // SAFETY: name_ptr has already been classified above; `name_key_from_wide_ptr`
+    // applies the same IS_INTRESOURCE gate before dereferencing.
+    let name_key = unsafe { crate::accel_handles::name_key_from_wide_ptr(name_ptr) };
+    crate::accel_handles::register(
+        h_inst,
+        name_key,
+        crate::accel_handles::AccelBlob {
+            ptr: blob_ptr,
+            size,
+        },
+    )
+}
+
+/// LoadAcceleratorsA — ANSI form of LoadAcceleratorsW.
+///
+/// Per Wine, the name argument is interpreted via `IS_INTRESOURCE`: small
+/// integers are ordinals (no string deref), everything else is an LPCSTR.
+/// This implementation converts string names to UTF-16 (CP_ACP, 1-byte
+/// pass-through since resource names are ASCII in practice) and
+/// trampolines to `load_accelerators_w`.
+///
+/// # Safety
+/// If `lp_table_name` is not an ordinal, caller guarantees it points to a
+/// valid NUL-terminated byte string.
+// Wine ref: dlls/user32/resource.c::LoadAcceleratorsA —
+//   if (IS_INTRESOURCE(lpTableName)) return LoadAcceleratorsW( instance, (LPCWSTR)lpTableName );
+//   len = MultiByteToWideChar( CP_ACP, 0, lpTableName, -1, NULL, 0 );
+//   ...
+//   result = LoadAcceleratorsW(instance,uni);
+// IS_INTRESOURCE preserves ordinals across A/W without any string deref;
+// string names are widened via CP_ACP. Weave's W implementation handles
+// both, so we widen the name here and delegate.
+pub unsafe extern "win64" fn load_accelerators_a(
+    h_inst: usize,
+    lp_table_name: *const u8,
+) -> usize {
+    let name_ptr = lp_table_name as usize;
+    if name_ptr >> 16 == 0 {
+        // Ordinal path: reinterpret as u16 ordinal directly — no string deref.
+        // SAFETY: w-form's IS_INTRESOURCE branch does not dereference.
+        return unsafe { load_accelerators_w(h_inst, lp_table_name as *const u16) };
+    }
+    // String path: widen ASCII/CP_ACP to UTF-16 and call through.
+    // SAFETY: caller contract — lp_table_name is a valid NUL-terminated byte string.
+    let wide: Vec<u16> = unsafe {
+        let mut out: Vec<u16> = Vec::new();
+        let mut p = lp_table_name;
+        for _ in 0..32_768 {
+            let b = *p;
+            if b == 0 {
+                break;
+            }
+            out.push(b as u16);
+            p = p.add(1);
+        }
+        out.push(0);
+        out
+    };
+    // SAFETY: `wide` is NUL-terminated and lives for the call.
+    unsafe { load_accelerators_w(h_inst, wide.as_ptr()) }
 }
 
 /// TranslateAcceleratorW — translate accelerator keystrokes (Wide). Returns 0.

@@ -12,6 +12,7 @@
 //! - `backend` — X11 connection + event translation (Linux-only via x11rb)
 //! - `api`     — Win32 API function implementations
 
+pub mod accel_handles;
 pub mod api;
 pub mod backend;
 pub mod class;
@@ -1128,6 +1129,9 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         ),
         "LoadAcceleratorsW" => Some(
             api::load_accelerators_w as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
+        ),
+        "LoadAcceleratorsA" => Some(
+            api::load_accelerators_a as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
         ),
         "TranslateAcceleratorW" => Some(
             api::translate_accelerator_w as unsafe extern "win64" fn(_, _, _) -> _ as *const ()
