@@ -6,7 +6,8 @@
 //!     DSTINVERT, WHITENESS, BLACKNESS) return 1 (TRUE).
 //!   * Unknown ROPs lie TRUE (pre-17 behaviour; avoids guest crashes).
 //!   * PATCOPY with a solid brush returns 1; with a non-brush handle selected
-//!     as h_brush (simulated via a pen handle) returns 0.
+//!     as h_brush (simulated via a pen handle) falls through RopPlan::Unknown
+//!     and also lies TRUE.
 //!   * `copy_area_with_rop` and `fill_rect_with_rop` are reachable entry
 //!     points on the user32 backend.
 //!
