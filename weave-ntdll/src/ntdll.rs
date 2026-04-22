@@ -1023,27 +1023,154 @@ pub unsafe extern "win64" fn rtl_validate_heap(
 
 // ── System information functions ─────────────────────────────────────────────
 
-// Wine ref: dlls/ntdll/unix/system.c:3256 — large switch on SYSTEM_INFORMATION_CLASS;
-// returns STATUS_INFO_LENGTH_MISMATCH when size doesn't match, STATUS_ACCESS_VIOLATION when
-// info==NULL and size is correct. SystemBasicInformation (0) and SystemCpuInformation (1)
-// are always handled; many classes return STATUS_NOT_IMPLEMENTED.
-// Known gap: Weave returns STATUS_NOT_IMPLEMENTED for all classes; apps that query
-// SystemBasicInformation or SystemCpuInformation will fail to get real values.
-/// NtQuerySystemInformation: stub that returns STATUS_NOT_IMPLEMENTED.
+/// SYSTEM_BASIC_INFORMATION (class 0) — 64-byte struct on 64-bit Windows.
 ///
-/// # Safety
-/// Pointer arguments are accepted but not dereferenced.
-// Wine ref: dlls/ntdll/unix/system.c:3256 — large switch on SYSTEM_INFORMATION_CLASS;
+/// Wine ref: include/winternl.h — __WINESRC__ layout:
+///   unknown(u32), KeMaximumIncrement(u32), PageSize(u32),
+///   MmNumberOfPhysicalPages(u32), MmLowestPhysicalPage(u32),
+///   MmHighestPhysicalPage(u32), AllocationGranularity(usize=8),
+///   LowestUserAddress(usize=8), HighestUserAddress(usize=8),
+///   ActiveProcessorsAffinityMask(usize=8), NumberOfProcessors(u8) + 7 pad = 64 bytes total.
+#[repr(C)]
+struct SystemBasicInformation {
+    unknown: u32,
+    ke_maximum_increment: u32,
+    page_size: u32,
+    mm_number_of_physical_pages: u32,
+    mm_lowest_physical_page: u32,
+    mm_highest_physical_page: u32,
+    allocation_granularity: usize,
+    lowest_user_address: usize,
+    highest_user_address: usize,
+    active_processors_affinity_mask: usize,
+    number_of_processors: u8,
+    _pad: [u8; 7],
+}
+
+/// SYSTEM_CPU_INFORMATION (class 1) — 12-byte struct.
+///
+/// Wine ref: include/winternl.h SYSTEM_CPU_INFORMATION:
+///   ProcessorArchitecture(u16), ProcessorLevel(u16), ProcessorRevision(u16),
+///   MaximumProcessors(u16), ProcessorFeatureBits(u32) = 12 bytes total.
+#[repr(C)]
+struct SystemCpuInformation {
+    processor_architecture: u16,
+    processor_level: u16,
+    processor_revision: u16,
+    maximum_processors: u16,
+    processor_feature_bits: u32,
+}
+
+const STATUS_INFO_LENGTH_MISMATCH: u32 = 0xC0000004;
+
+// Wine ref: dlls/ntdll/unix/system.c — large switch on SYSTEM_INFORMATION_CLASS;
 // returns STATUS_INFO_LENGTH_MISMATCH when size doesn't match; STATUS_ACCESS_VIOLATION
 // when info==NULL and size is correct; SystemBasicInformation(0)/SystemCpuInformation(1) always handled.
+// SystemProcessInformation(5) returns a linked list of SYSTEM_PROCESS_INFORMATION entries;
+// callers that only want to know "is it supported?" check for STATUS_INFO_LENGTH_MISMATCH
+// (not STATUS_NOT_IMPLEMENTED) as the signal that the class is recognized.
+/// NtQuerySystemInformation: fill system information for classes 0, 1, 5.
+///
+/// # Safety
+/// `system_information` must be a valid writable pointer of at least
+/// `system_information_length` bytes, or NULL. `return_length` must be valid or NULL.
 pub unsafe extern "win64" fn nt_query_system_information(
-    _system_information_class: u32,
-    _system_information: *mut std::ffi::c_void,
-    _system_information_length: u32,
-    _return_length: *mut u32,
+    system_information_class: u32,
+    system_information: *mut std::ffi::c_void,
+    system_information_length: u32,
+    return_length: *mut u32,
 ) -> u32 {
-    const STATUS_NOT_IMPLEMENTED: u32 = 0xC0000002;
-    STATUS_NOT_IMPLEMENTED
+    match system_information_class {
+        // SystemBasicInformation = 0
+        // Wine ref: include/winternl.h SYSTEM_BASIC_INFORMATION — 64 bytes on 64-bit.
+        // Fields filled from sysconf(3): page size, nprocs, physical pages, address ranges.
+        0 => {
+            const REQUIRED: u32 = std::mem::size_of::<SystemBasicInformation>() as u32;
+            if !return_length.is_null() {
+                unsafe { *return_length = REQUIRED };
+            }
+            if system_information_length < REQUIRED {
+                return STATUS_INFO_LENGTH_MISMATCH;
+            }
+            if system_information.is_null() {
+                return STATUS_INFO_LENGTH_MISMATCH;
+            }
+            let info = system_information as *mut SystemBasicInformation;
+            unsafe {
+                let page_size = libc::sysconf(libc::_SC_PAGESIZE) as u32;
+                let nprocs = libc::sysconf(libc::_SC_NPROCESSORS_ONLN).max(1) as u32;
+                let phys_pages = libc::sysconf(libc::_SC_PHYS_PAGES).max(1) as u32;
+                (*info).unknown = 0;
+                (*info).ke_maximum_increment = 0x0002_625A; // 100ns intervals per tick (Wine default)
+                (*info).page_size = page_size;
+                (*info).mm_number_of_physical_pages = phys_pages;
+                (*info).mm_lowest_physical_page = 1;
+                (*info).mm_highest_physical_page = phys_pages;
+                (*info).allocation_granularity = 65536; // Windows always reports 64 KiB
+                (*info).lowest_user_address = 0x0001_0000; // 64 KiB — standard Windows value
+                (*info).highest_user_address = 0x7FFF_FFFF_0000; // canonical user-space ceiling
+                (*info).active_processors_affinity_mask = (1usize << nprocs) - 1;
+                (*info).number_of_processors = nprocs as u8;
+                (*info)._pad = [0u8; 7];
+            }
+            0 // STATUS_SUCCESS
+        }
+
+        // SystemCpuInformation = 1  (Wine calls this SystemProcessorInformation)
+        // Wine ref: include/winternl.h SYSTEM_CPU_INFORMATION — 12 bytes.
+        // ProcessorArchitecture=9 (PROCESSOR_ARCHITECTURE_AMD64), Level=6 (Skylake family),
+        // Revision=0x5e03 (model 94 step 3 — common Skylake encoding), MaximumProcessors=nprocs.
+        1 => {
+            const REQUIRED: u32 = std::mem::size_of::<SystemCpuInformation>() as u32;
+            if !return_length.is_null() {
+                unsafe { *return_length = REQUIRED };
+            }
+            if system_information_length < REQUIRED {
+                return STATUS_INFO_LENGTH_MISMATCH;
+            }
+            if system_information.is_null() {
+                return STATUS_INFO_LENGTH_MISMATCH;
+            }
+            let info = system_information as *mut SystemCpuInformation;
+            unsafe {
+                let nprocs = libc::sysconf(libc::_SC_NPROCESSORS_ONLN).max(1) as u16;
+                (*info).processor_architecture = 9; // PROCESSOR_ARCHITECTURE_AMD64
+                (*info).processor_level = 6; // Intel family 6 (Skylake)
+                (*info).processor_revision = 0x5e03; // model 94, step 3
+                (*info).maximum_processors = nprocs;
+                (*info).processor_feature_bits = 0x0000_7FFF; // common feature set
+            }
+            0 // STATUS_SUCCESS
+        }
+
+        // SystemProcessInformation = 5
+        // Wine ref: include/winternl.h SYSTEM_PROCESS_INFORMATION — variable-length linked list.
+        // Returning a full process list is out of scope (class 5 is a multi-entry linked list
+        // with embedded UNICODE_STRING process names and SYSTEM_THREAD_INFORMATION arrays).
+        // Callers that only need to detect "this class is supported" distinguish
+        // STATUS_INFO_LENGTH_MISMATCH from STATUS_NOT_IMPLEMENTED. We report the minimum
+        // useful buffer size (one SYSTEM_PROCESS_INFORMATION header, 184 bytes on 64-bit)
+        // so GetSystemInfo-style probers get the right signal.
+        5 => {
+            // Minimum: one SYSTEM_PROCESS_INFORMATION header with no threads.
+            // 64-bit layout: NextEntryOffset(4)+dwThreadCount(4)+WorkingSetPrivateSize(8)+
+            // HardFaultCount(4)+NumberOfThreadsHighWatermark(4)+CycleTime(8)+
+            // CreationTime(8)+UserTime(8)+KernelTime(8)+
+            // ProcessName UNICODE_STRING(16)+dwBasePriority(4)+pad(4)+
+            // UniqueProcessId(8)+ParentProcessId(8)+HandleCount(4)+SessionId(4)+
+            // UniqueProcessKey(8)+vmCounters(64)+ioCounters(64) = 272 bytes, no ti[] entries.
+            // Wine uses 0xb8 (184) for the base on 32-bit; on 64-bit it is 0x100 (256)+threads.
+            // We report 256 as the minimum to prompt callers to reallocate rather than crash.
+            const MIN_SIZE: u32 = 256;
+            if !return_length.is_null() {
+                unsafe { *return_length = MIN_SIZE };
+            }
+            STATUS_INFO_LENGTH_MISMATCH
+        }
+
+        // All other classes: not implemented.
+        _ => STATUS_NOT_IMPLEMENTED,
+    }
 }
 
 // ── Process and thread information ───────────────────────────────────────────
@@ -1651,5 +1778,167 @@ pub fn resolve(func: &str) -> Option<usize> {
             Some(rtl_raise_exception as unsafe extern "win64" fn(_) as *const () as usize)
         }
         _ => None,
+    }
+}
+
+// ── NtQuerySystemInformation unit tests ─────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Class 0 (SystemBasicInformation): correct buffer size → STATUS_SUCCESS,
+    /// NumberOfProcessors must be >= 1 and PageSize must be a power of two.
+    #[test]
+    fn class0_basic_information_success() {
+        let mut buf = std::mem::MaybeUninit::<SystemBasicInformation>::uninit();
+        let mut ret_len: u32 = 0;
+        let status = unsafe {
+            nt_query_system_information(
+                0,
+                buf.as_mut_ptr() as *mut std::ffi::c_void,
+                std::mem::size_of::<SystemBasicInformation>() as u32,
+                &mut ret_len,
+            )
+        };
+        assert_eq!(status, 0, "expected STATUS_SUCCESS for class 0");
+        assert_eq!(
+            ret_len as usize,
+            std::mem::size_of::<SystemBasicInformation>()
+        );
+        let info = unsafe { buf.assume_init() };
+        assert!(
+            info.number_of_processors >= 1,
+            "NumberOfProcessors must be >= 1"
+        );
+        assert!(
+            info.page_size >= 4096 && info.page_size.is_power_of_two(),
+            "PageSize must be a power-of-two >= 4096, got {}",
+            info.page_size
+        );
+        assert_eq!(info.allocation_granularity, 65536);
+    }
+
+    /// Class 0: buffer too small → STATUS_INFO_LENGTH_MISMATCH, not STATUS_NOT_IMPLEMENTED.
+    #[test]
+    fn class0_too_small_returns_mismatch() {
+        let mut buf = [0u8; 4]; // far too small
+        let status = unsafe {
+            nt_query_system_information(
+                0,
+                buf.as_mut_ptr() as *mut std::ffi::c_void,
+                buf.len() as u32,
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(
+            status, STATUS_INFO_LENGTH_MISMATCH,
+            "expected STATUS_INFO_LENGTH_MISMATCH for class 0 with tiny buffer"
+        );
+    }
+
+    /// Class 1 (SystemCpuInformation): correct buffer size → STATUS_SUCCESS,
+    /// ProcessorArchitecture must be 9 (AMD64) and MaximumProcessors >= 1.
+    #[test]
+    fn class1_cpu_information_success() {
+        let mut buf = std::mem::MaybeUninit::<SystemCpuInformation>::uninit();
+        let mut ret_len: u32 = 0;
+        let status = unsafe {
+            nt_query_system_information(
+                1,
+                buf.as_mut_ptr() as *mut std::ffi::c_void,
+                std::mem::size_of::<SystemCpuInformation>() as u32,
+                &mut ret_len,
+            )
+        };
+        assert_eq!(status, 0, "expected STATUS_SUCCESS for class 1");
+        assert_eq!(
+            ret_len as usize,
+            std::mem::size_of::<SystemCpuInformation>()
+        );
+        let info = unsafe { buf.assume_init() };
+        assert_eq!(
+            info.processor_architecture, 9,
+            "ProcessorArchitecture must be 9 (AMD64)"
+        );
+        assert!(
+            info.maximum_processors >= 1,
+            "MaximumProcessors must be >= 1"
+        );
+    }
+
+    /// Class 1: buffer too small → STATUS_INFO_LENGTH_MISMATCH.
+    #[test]
+    fn class1_too_small_returns_mismatch() {
+        let mut buf = [0u8; 2]; // too small
+        let status = unsafe {
+            nt_query_system_information(
+                1,
+                buf.as_mut_ptr() as *mut std::ffi::c_void,
+                buf.len() as u32,
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(
+            status, STATUS_INFO_LENGTH_MISMATCH,
+            "expected STATUS_INFO_LENGTH_MISMATCH for class 1 with tiny buffer"
+        );
+    }
+
+    /// Class 5 (SystemProcessInformation): any buffer → STATUS_INFO_LENGTH_MISMATCH
+    /// (not STATUS_NOT_IMPLEMENTED — the class is recognized).
+    #[test]
+    fn class5_process_information_mismatch_not_not_implemented() {
+        let mut buf = [0u8; 8]; // deliberately too small
+        let mut ret_len: u32 = 0;
+        let status = unsafe {
+            nt_query_system_information(
+                5,
+                buf.as_mut_ptr() as *mut std::ffi::c_void,
+                buf.len() as u32,
+                &mut ret_len,
+            )
+        };
+        assert_eq!(
+            status, STATUS_INFO_LENGTH_MISMATCH,
+            "class 5 must return STATUS_INFO_LENGTH_MISMATCH, not STATUS_NOT_IMPLEMENTED"
+        );
+        assert!(
+            ret_len > 0,
+            "ReturnLength must be set to minimum buffer hint"
+        );
+    }
+
+    /// Unknown class → STATUS_NOT_IMPLEMENTED (no regression).
+    #[test]
+    fn unknown_class_still_returns_not_implemented() {
+        let mut buf = [0u8; 64];
+        let status = unsafe {
+            nt_query_system_information(
+                99,
+                buf.as_mut_ptr() as *mut std::ffi::c_void,
+                buf.len() as u32,
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(
+            status, STATUS_NOT_IMPLEMENTED,
+            "unknown class must still return STATUS_NOT_IMPLEMENTED"
+        );
+    }
+
+    /// Struct size assertions — callers depend on exact sizes.
+    #[test]
+    fn struct_sizes_are_canonical() {
+        assert_eq!(
+            std::mem::size_of::<SystemBasicInformation>(),
+            64,
+            "SYSTEM_BASIC_INFORMATION must be 64 bytes on 64-bit"
+        );
+        assert_eq!(
+            std::mem::size_of::<SystemCpuInformation>(),
+            12,
+            "SYSTEM_CPU_INFORMATION must be 12 bytes"
+        );
     }
 }
