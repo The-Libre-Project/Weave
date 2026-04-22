@@ -1,5 +1,6 @@
 //! Shared types for Weave — Windows type aliases, handle constants, and errors.
 
+pub mod com;
 pub mod error;
 pub mod last_error;
 pub mod path;

@@ -26,6 +26,8 @@
 
 use std::cell::Cell;
 
+use weave_common::com::shell_link::{create_shell_link, CLSID_SHELL_LINK};
+
 // ── COM HRESULT constants ─────────────────────────────────────────────────────
 
 const S_OK: u32 = 0x0000_0000;
@@ -146,8 +148,18 @@ pub unsafe extern "win64" fn co_create_instance(
         None => return E_INVALIDARG,
     };
 
+    // CLSID_ShellLink — dispatch to weave-common IShellLink foundation.
+    if clsid == CLSID_SHELL_LINK {
+        eprintln!("weave/ole32: CoCreateInstance: CLSID_ShellLink → create_shell_link");
+        // SAFETY: rclsid and riid are valid (rclsid was just read above; riid is passed
+        // through unchanged). ppv is non-null (checked above). create_shell_link validates
+        // ppv internally.
+        let ppv_ptr = ppv as *mut *mut ();
+        return unsafe { create_shell_link(rclsid, _riid, ppv_ptr) };
+    }
+
     eprintln!(
-        "weave/ole32: CoCreateInstance: CLSID {:02x?} (stub — REGDB_E_CLASSNOTREG)",
+        "weave/ole32: CoCreateInstance: CLSID {:02x?} (unknown — REGDB_E_CLASSNOTREG)",
         clsid
     );
 
