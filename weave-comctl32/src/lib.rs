@@ -7,6 +7,23 @@
 //! For Phase 6: PuTTY and 7-Zip need these imports resolved at load time.
 //! Real common control behaviour (SysTreeView32, SysListView32 window procs)
 //! is deferred to a later phase.
+//!
+//! # Crate boundary note
+//!
+//! `weave-comctl32` directly imports `weave-user32`. This violates the general
+//! architecture rule that DLL crates should not import each other (shared types
+//! belong in `weave-common`). The exception is intentional and mirrors real
+//! Windows: comctl32 common-control classes (ImageList, TreeView, ListView,
+//! StatusBar) are real Win32 window classes whose creation flows through
+//! `CreateWindowExW`. Because window class registration and HWND lifetime are
+//! owned by user32, comctl32 must call directly into user32's API surface to
+//! create those windows — it cannot go through weave-common, which has no
+//! Win32 window-management types.
+//!
+//! Extraction was considered: moving `CreateWindowExW` to `weave-common` would
+//! hollow user32 (all window state lives there) or create a circular dependency
+//! (common needing user32 internals). The coupling is accepted as-is. Do not
+//! add further DLL→DLL imports without a similar written justification.
 
 #![allow(non_snake_case)]
 
