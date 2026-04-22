@@ -4863,6 +4863,15 @@ fn load_library_impl(name: &str) -> usize {
                 // HMODULE == image base address (Windows convention).  Register
                 // this so GetProcAddress / GetModuleFileName can map handle→name.
                 module_handles::register_with_handle(name, image_base);
+                // Loader: share path-registry convention with load_with_name
+                // (weave-core::loader). `register_image_path` normalizes to
+                // lowercase + forward-slashes and also indexes the bare
+                // basename — pass the guest-supplied `name` verbatim so that
+                // GetFileVersionInfoSizeW / FindResourceW by-path lookups
+                // resolve identically whether the module was mapped via the
+                // exe load path (load_with_name) or dynamically via
+                // LoadLibraryW (this site).
+                module_handles::register_image_path(name, image_base);
 
                 // Invoke DllMain(hinstDLL, DLL_PROCESS_ATTACH, NULL) if present.
                 // Must happen after IAT patching so the DLL's imports resolve

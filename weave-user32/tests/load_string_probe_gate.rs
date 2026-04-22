@@ -13,7 +13,7 @@
 //! synthetic PE fixture lives in a single contiguous `Vec<u8>`. No second
 //! allocation, no split image.
 
-use weave_core::module_handles::register_with_base;
+use weave_core::module_handles::{base_by_path, register_image_path, register_with_base};
 use weave_user32::api::{load_string_a, load_string_w};
 
 const HIGH_BIT: u32 = 0x8000_0000;
@@ -222,6 +222,51 @@ fn load_string_a_zero_buflen_returns_minus_one() {
     // SAFETY: n_buffer_max==0 path does not deref lp_buffer.
     let n = unsafe { load_string_a(hmodule, 1, core::ptr::null_mut(), 0) };
     assert_eq!(n, -1);
+}
+
+/// Integration probe: LoadLibraryW-style registration (kernel32's
+/// `load_library_impl`) must produce a module whose resources are
+/// reachable by LoadStringW — mirrors the exe-load path (load_with_name).
+///
+/// Regression guard for the "Loader-path-conditional registration" class:
+/// DLLs loaded via LoadLibraryW were previously not path-registered, so
+/// FindResourceW / GetFileVersionInfoSizeW by-path lookups silently
+/// returned 0. After the fix, the path registry is populated at the
+/// dynamic-loader site too.
+#[test]
+fn load_library_then_load_string_succeeds() {
+    let buf = build_image();
+    let base = buf.as_ptr() as usize;
+
+    // Simulate the kernel32 LoadLibraryW dispatch path (load_library_impl):
+    // it calls register_with_handle(name, image_base) plus the newly-added
+    // register_image_path(name, image_base). We use register_with_base here
+    // to get a working synthetic HMODULE for LoadStringW (HMODULE plumbing
+    // is covered elsewhere; this gate focuses on the path-registry close).
+    // The guest name is a Windows-style path — the most realistic input.
+    let guest_name = r"C:\Windows\System32\loadlib_probe.dll";
+    let hmodule = register_with_base(guest_name, base);
+    register_image_path(guest_name, base);
+    assert!(hmodule != 0);
+
+    // Path-registry parity: both the full path and the bare basename
+    // must resolve to the registered base — matches load_with_name's
+    // registry entry shape (exe-load path). This is the regression guard
+    // for "Loader-path-conditional registration".
+    assert_eq!(base_by_path(guest_name), Some(base));
+    assert_eq!(base_by_path("loadlib_probe.dll"), Some(base));
+
+    // End-to-end: LoadStringW on the HMODULE returned by the dynamic
+    // loader must find the RT_STRING bundle — i.e. the module is
+    // fully resource-addressable, not just path-registered.
+    let mut out = [0u16; 64];
+    // SAFETY: buffer is writable for 64 WCHARs; hmodule resolves to the PE fixture.
+    let n = unsafe { load_string_w(hmodule, 1, out.as_mut_ptr(), 64) };
+    assert_eq!(
+        n, 5,
+        "LoadStringW on LoadLibraryW-registered DLL must find RT_STRING"
+    );
+    assert_eq!(String::from_utf16_lossy(&out[..n as usize]), "Hello");
 }
 
 /// Verify that `load_string_w` behaves correctly when `WEAVE_RESOURCE_TRACE=1`

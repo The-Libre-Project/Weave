@@ -69,6 +69,13 @@ pub fn load_with_name(bytes: &[u8], name: &str) -> Result<LoadedImage, String> {
         // can locate the RT_VERSION resource without re-opening the file from disk.
         // Wine ref: dlls/kernelbase/version.c — GetFileVersionInfoSizeExW opens
         // the file by path via LoadLibraryExW; Weave uses the already-mapped base.
+        //
+        // Loader: shared path-registry convention with weave-kernel32's
+        // `load_library_impl` (LoadLibraryW dispatch). `register_image_path`
+        // normalizes to lowercase + forward-slashes and also indexes the bare
+        // basename, so a guest passing either a bare name or a full Windows
+        // path resolves to the same registry entry regardless of which loader
+        // site mapped the image. Any third loader site must call this too.
         crate::module_handles::register_image_path(name, base);
     }
     Ok(image)

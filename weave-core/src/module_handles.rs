@@ -348,6 +348,70 @@ mod tests {
         assert_eq!(base_of(actual), Some(actual));
     }
 
+    // --- Loader-path-conditional registration regression tests -----------
+    // These tests pin the path-registry convention shared by
+    // weave-core::loader::load_with_name (exe load) and
+    // weave-kernel32::load_library_impl (dynamic LoadLibraryW dispatch).
+    // If this convention drifts, LoadLibraryW-loaded DLLs silently fail
+    // GetFileVersionInfoSizeW / FindResourceW by-path lookups.
+
+    #[test]
+    fn load_dll_registers_path() {
+        // Simulate the kernel32 LoadLibraryW dispatch registering a
+        // dynamically-loaded DLL. After registration, base_by_path must
+        // resolve for both the full path and the bare basename — exactly
+        // what the exe-load path (load_with_name) produces.
+        let base: usize = 0x0000_7F11_2233_0000;
+        register_image_path("shell32.dll", base);
+        assert_eq!(base_by_path("shell32.dll"), Some(base));
+        assert_eq!(base_by_path("SHELL32.DLL"), Some(base));
+    }
+
+    #[test]
+    fn load_dll_and_load_with_name_share_convention() {
+        // The exe-load site passes the basename; the dynamic-loader site
+        // may pass a full Windows-style path. Both forms must land in the
+        // same registry entry so FindResourceW / GetFileVersionInfoSizeW
+        // resolve identically regardless of which loader mapped the image.
+        let exe_base: usize = 0x0000_7F22_3344_0000;
+        let dll_base: usize = 0x0000_7F33_4455_0000;
+
+        // Exe-load convention (load_with_name): bare basename.
+        register_image_path("hello.exe", exe_base);
+        // Dynamic-loader convention (load_library_impl): Windows-style path.
+        register_image_path(r"C:\Windows\System32\version.dll", dll_base);
+
+        // Both forms resolvable via basename and full-path lookups.
+        assert_eq!(base_by_path("hello.exe"), Some(exe_base));
+        assert_eq!(base_by_path("version.dll"), Some(dll_base));
+        assert_eq!(
+            base_by_path(r"C:\Windows\System32\version.dll"),
+            Some(dll_base)
+        );
+        // And the entries don't collide.
+        assert_ne!(base_by_path("hello.exe"), base_by_path("version.dll"));
+    }
+
+    #[test]
+    fn case_sensitivity_behaves_as_expected() {
+        // Convention: register_image_path lowercases (ASCII). Callers passing
+        // mixed-case names or Windows-style backslashes MUST resolve to the
+        // same entry as the lowercase-forward-slash canonical form. Pins the
+        // exact normalization so a third loader site can match it.
+        let base: usize = 0x0000_7F44_5566_0000;
+        register_image_path(r"C:\Windows\System32\COMCTL32.dll", base);
+        assert_eq!(base_by_path("comctl32.dll"), Some(base));
+        assert_eq!(base_by_path("COMCTL32.DLL"), Some(base));
+        assert_eq!(
+            base_by_path(r"c:\windows\system32\comctl32.dll"),
+            Some(base)
+        );
+        assert_eq!(
+            base_by_path(r"C:\Windows\System32\COMCTL32.dll"),
+            Some(base)
+        );
+    }
+
     #[test]
     fn register_image_base_alias_identity_is_noop() {
         // When preferred == actual no extra entry is inserted; the identity
