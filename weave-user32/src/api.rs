@@ -9,6 +9,7 @@
 use crate::backend;
 use crate::class::{self, ClassEntry};
 use crate::defs::*;
+use crate::input;
 use crate::menu;
 use crate::queue::{self, MsgEntry};
 use crate::window::{self, WindowEntry};
@@ -3183,17 +3184,35 @@ pub extern "win64" fn are_dpi_awareness_contexts_equal(
 // ── Input state stubs ─────────────────────────────────────────────────────────
 
 /// GetKeyState: return the state of a virtual key.
-// Wine ref: dlls/win32u/input.c::get_key_state — reads from the per-thread async key state
-// table; high bit set = key down, low bit = toggled (for lock keys); snapshot at last message.
-pub extern "win64" fn get_key_state(_n_virt_key: i32) -> i16 {
-    0
+//
+// Wine ref: dlls/win32u/input.c SERVER_START_REQ(get_key_state) — bit-packing formula:
+//   if (reply->state & 0x80) ret |= 0x8000;  // bit 7 of state byte → bit 15 of SHORT
+//   if (reply->state & 0x40) ret |= 0x0001;  // bit 6 (pressed-since-last-call) → bit 0
+// Weave uses bit 0 of the VK byte (toggle) directly rather than the transient bit 6.
+// Out-of-bounds nVirtKey (> 255 or < 0) returns 0 per Windows behaviour.
+pub extern "win64" fn get_key_state(n_virt_key: i32) -> i16 {
+    if !(0..=255).contains(&n_virt_key) {
+        return 0;
+    }
+    let state = input::vk_state(n_virt_key as u8);
+    // Bit 7 (0x80) → bit 15 (0x8000) of the returned SHORT; bit 0 (toggle) stays at bit 0.
+    let high = ((state & 0x80) as i16) << 8;
+    let low = (state & 0x01) as i16;
+    high | low
 }
 
 /// GetAsyncKeyState: return the state of a virtual key (async).
-// Wine ref: dlls/win32u/input.c::get_async_keyboard_state — queries the live hardware key
-// state from the server (not the message-time snapshot); high bit = currently pressed.
-pub extern "win64" fn get_async_key_state(_v_key: i32) -> i16 {
-    0
+//
+// Wine ref: dlls/win32u/input.c SERVER_START_REQ(get_key_state) with async=1 — same
+// bit-packing: bit 7 of state byte → bit 15 of SHORT (key currently down).
+// Bit 0 (pressed-since-last-call) is always 0 in Weave — we do not track the transient flag.
+pub extern "win64" fn get_async_key_state(v_key: i32) -> i16 {
+    if !(0..=255).contains(&v_key) {
+        return 0;
+    }
+    let state = input::vk_state(v_key as u8);
+    // Only high bit: bit 7 → bit 15; bit 0 always 0 (no pressed-since-last-call tracking).
+    ((state & 0x80) as i16) << 8
 }
 
 /// MapVirtualKeyW: map a virtual key code to a scan code or character.
@@ -3234,13 +3253,19 @@ pub extern "win64" fn vk_key_scan_w(_ch: u16) -> i16 {
 
 /// # Safety
 /// `lp_key_state` must be a valid pointer to 256 bytes if non-null.
-// Wine ref: dlls/win32u/input.c — NtUserGetKeyboardState copies the 256-byte per-thread
-// key state table (snapshot at last GetMessage call) into caller's buffer; returns TRUE.
+//
+// Wine ref: dlls/win32u/input.c::get_async_keyboard_state — copies the 256-byte desktop
+// shared-memory keystate array into the caller's buffer via memcpy; returns TRUE on success,
+// FALSE (and zeroes the buffer) on server error. Weave reads from the process-global VK_STATE
+// table (input::snapshot) — equivalent for our single-process model.
 pub unsafe extern "win64" fn get_keyboard_state(lp_key_state: *mut u8) -> i32 {
-    if !lp_key_state.is_null() {
-        unsafe { std::ptr::write_bytes(lp_key_state, 0, 256) };
+    if lp_key_state.is_null() {
+        return 0; // FALSE — null buffer
     }
-    1
+    let snap = input::snapshot();
+    // SAFETY: caller guarantees `lp_key_state` points to at least 256 bytes.
+    unsafe { std::ptr::copy_nonoverlapping(snap.as_ptr(), lp_key_state, 256) };
+    1 // TRUE
 }
 
 /// # Safety
@@ -6714,5 +6739,61 @@ mod tests {
             result, 1,
             "second table entry must be reachable and return 1"
         );
+    }
+
+    // ── Task 24: GetKeyState / GetAsyncKeyState / GetKeyboardState ────────────
+
+    #[test]
+    fn get_key_state_reflects_input_table() {
+        input::test_reset();
+        input::set_vk_down(b'A', true, None);
+        let result = get_key_state(b'A' as i32);
+        // Bit 15 must be set when key is down (result is negative as i16, or & 0x8000u16 != 0)
+        assert!(
+            (result as u16) & 0x8000 != 0,
+            "get_key_state must reflect key-down: high bit set"
+        );
+        input::test_reset();
+    }
+
+    #[test]
+    fn get_async_key_state_same_path() {
+        input::test_reset();
+        input::set_vk_down(b'Z', true, None);
+        let result = get_async_key_state(b'Z' as i32);
+        assert!(
+            (result as u16) & 0x8000 != 0,
+            "get_async_key_state must reflect key-down: high bit set"
+        );
+        // Bit 0 must always be 0 (no pressed-since-last-call tracking in Weave)
+        assert_eq!(result & 0x0001, 0, "get_async_key_state bit 0 must be 0");
+        input::test_reset();
+    }
+
+    #[test]
+    fn get_keyboard_state_copies_snapshot() {
+        input::test_reset();
+        input::set_vk_down(0x41, true, None); // VK_A
+        input::set_vk_down(0xA0, true, None); // VK_LSHIFT
+
+        let mut buf = [0u8; 256];
+        let result = unsafe { get_keyboard_state(buf.as_mut_ptr()) };
+        assert_eq!(result, 1, "get_keyboard_state must return TRUE");
+        assert_eq!(buf[0x41] & 0x80, 0x80, "VK_A must be marked down in buffer");
+        assert_eq!(
+            buf[0xA0] & 0x80,
+            0x80,
+            "VK_LSHIFT must be marked down in buffer"
+        );
+        assert_eq!(buf[0x42], 0, "VK_B must not be set in buffer");
+        input::test_reset();
+    }
+
+    #[test]
+    fn get_key_state_oob_returns_zero() {
+        // Out-of-bounds nVirtKey must return 0 without panic
+        assert_eq!(get_key_state(1000), 0, "nVirtKey=1000 must return 0");
+        assert_eq!(get_key_state(-1), 0, "nVirtKey=-1 must return 0");
+        assert_eq!(get_key_state(256), 0, "nVirtKey=256 must return 0");
     }
 }
