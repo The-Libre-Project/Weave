@@ -6395,6 +6395,10 @@ pub unsafe extern "win64" fn char_lower_buff_w(lpsz: *mut u16, cch_length: u32) 
 mod tests {
     use super::*;
 
+    // Serializes tests that read/write the global VK_STATE table so parallel
+    // test threads cannot race on test_reset() / set_vk_down().
+    static INPUT_TEST_LOCK: Mutex<()> = Mutex::new(());
+
     // ── WS5: SetCaretPos / GetCaretPos ────────────────────────────────────────
 
     #[test]
@@ -6773,6 +6777,7 @@ mod tests {
 
     #[test]
     fn get_key_state_reflects_input_table() {
+        let _guard = INPUT_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         input::test_reset();
         input::set_vk_down(b'A', true, None);
         let result = get_key_state(b'A' as i32);
@@ -6786,6 +6791,7 @@ mod tests {
 
     #[test]
     fn get_async_key_state_same_path() {
+        let _guard = INPUT_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         input::test_reset();
         input::set_vk_down(b'Z', true, None);
         let result = get_async_key_state(b'Z' as i32);
@@ -6800,6 +6806,7 @@ mod tests {
 
     #[test]
     fn get_keyboard_state_copies_snapshot() {
+        let _guard = INPUT_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         input::test_reset();
         input::set_vk_down(0x41, true, None); // VK_A
         input::set_vk_down(0xA0, true, None); // VK_LSHIFT
