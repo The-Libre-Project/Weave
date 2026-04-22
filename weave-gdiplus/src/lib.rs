@@ -322,7 +322,12 @@ pub unsafe extern "win64" fn GdipCreateBitmapFromStream(
 
 /// GdipCreateBitmapFromHBITMAP — wrap a GDI HBITMAP in a GpBitmap.
 ///
-/// Wine ref: dlls/gdiplus/image.c — creates a GpBitmap backed by the GDI bitmap.
+/// Wine ref: dlls/gdiplus/image.c:5412 — both `hbm` and `bitmap` NULL → InvalidParameter;
+/// calls GetObjectA(hbm) to read the BITMAP struct — if that fails (wrong handle type) →
+/// InvalidParameter; derives PixelFormat from bmBitsPixel: 1/4/8/16/24/32/48 bpp supported,
+/// anything else → InvalidParameter (not NotImplemented). Then creates via
+/// GdipCreateBitmapFromScan0 and copies pixels via GetDIBits with a negative biHeight to
+/// ensure top-down row order.
 ///
 /// # Safety
 /// `hbm` is a GDI bitmap handle. `bitmap` is a writable slot.
@@ -1176,8 +1181,12 @@ pub extern "win64" fn GdipDrawLineI(
 
 /// GdipDrawString — draw a UTF-16 string using a GpFont and GpBrush.
 ///
-/// Wine ref: dlls/gdiplus/graphics.c — GdipDrawString is the primary text
-/// rendering entry point in GDI+.
+/// Wine ref: dlls/gdiplus/graphics.c:6136 — all five of graphics/string/font/brush/rect
+/// being NULL → InvalidParameter (each checked individually); graphics->busy → ObjectBusy.
+/// Adds a horizontal margin of font->emSize/6.0 on each side unless the format is
+/// generic_typographic (in which case margin_x=0.0). When line_align != Near, calls
+/// GdipMeasureString internally to compute the vertical offsety for Center/Far alignment.
+/// Width/height capped at 1<<23 to avoid integer overflow in the layout engine.
 ///
 /// # Safety
 /// `string` is a UTF-16 string of `length` chars (or -1 for null-terminated).
@@ -1227,7 +1236,10 @@ pub unsafe extern "win64" fn GdipMeasureString(
 
 /// GdipCreateSolidFill — create a solid-colour brush.
 ///
-/// Wine ref: dlls/gdiplus/brush.c — allocates a GpSolidFill struct.
+/// Wine ref: dlls/gdiplus/brush.c:754 — only `sf==NULL` is checked (InvalidParameter);
+/// the ARGB `color` value is accepted without validation (any 32-bit value is stored).
+/// Allocates with calloc; sets `brush.bt = BrushTypeSolidColor` and stores the ARGB.
+/// Returns Ok, not NotImplemented, on success — the object is immediately usable.
 ///
 /// # Safety
 /// `brush` must be a writable pointer slot.
@@ -1297,7 +1309,11 @@ pub unsafe extern "win64" fn GdipCreateTexture(
 
 /// GdipCreatePen1 — create a pen from a colour and width.
 ///
-/// Wine ref: dlls/gdiplus/pen.c — GdipCreatePen1 allocates a GpPen.
+/// Wine ref: dlls/gdiplus/pen.c:146 — GdipCreatePen1 is a thin wrapper: it calls
+/// GdipCreateSolidFill → GdipCreatePen2 → GdipDeleteBrush; the NULL pen check is in
+/// GdipCreatePen2, not here. GdipCreatePen2 initialises defaults: miterlimit=10.0,
+/// join=LineJoinMiter, endcap=LineCapFlat, dash=DashStyleSolid. Only UnitWorld and
+/// UnitPixel are supported; other units return NotImplemented (not InvalidParameter).
 ///
 /// # Safety
 /// `pen` must be a writable pointer slot.
@@ -1341,7 +1357,12 @@ pub extern "win64" fn GdipDeletePen(_pen: usize) -> i32 {
 
 /// GdipCreateFontFamilyFromName — look up a font family by name.
 ///
-/// Wine ref: dlls/gdiplus/font.c — queries the installed font list.
+/// Wine ref: dlls/gdiplus/font.c:701 — `name==NULL || family==NULL` → InvalidParameter;
+/// when `collection==NULL`, Wine calls GdipNewInstalledFontCollection() to get the system
+/// collection. Uses EnumFontFamiliesW + is_font_installed_proc to confirm existence, then
+/// does a case-insensitive wcsicmp search in collection->FontFamilies. Returns
+/// FontFamilyNotFound (status 14) — not InvalidParameter — when the name doesn't match
+/// any installed font.
 ///
 /// # Safety
 /// `name` is a null-terminated UTF-16 font name. `font_collection` may be NULL.
