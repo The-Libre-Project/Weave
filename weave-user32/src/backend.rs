@@ -628,6 +628,85 @@ mod inner {
         let _ = g.conn.flush();
     }
 
+    /// Upload an already-laid-out pixel buffer to a sub-rectangle of a drawable.
+    ///
+    /// Unlike `put_dib_to_pixmap` (which uploads a full DibSection-shaped bitmap
+    /// at origin 0,0), this helper targets `(dst_x, dst_y)` and accepts rows in
+    /// top-down order with a caller-provided stride. `SetDIBitsToDevice` uses
+    /// this to push a horizontal band of a caller-owned DIB directly to a DC's
+    /// drawable.
+    ///
+    /// Wine ref: dlls/winex11.drv/bitblt.c::X11DRV_PutImage — hands the bits to
+    /// xcb_put_image with ImageFormat::Z_PIXMAP at the destination coordinates.
+    ///
+    /// `rows` must contain exactly `height` rows of `stride` bytes each, already
+    /// in top-down order (caller flips bottom-up DIBs before calling). 32bpp
+    /// passes BGRA bytes through; X11 depth-24 ignores the A byte.
+    #[allow(clippy::too_many_arguments)]
+    pub fn put_bits_to_pixmap_at(
+        drawable: u32,
+        dst_x: i16,
+        dst_y: i16,
+        width: u16,
+        height: u16,
+        stride: usize,
+        rows: &[u8],
+        bpp: u16,
+    ) {
+        if drawable == 0 || width == 0 || height == 0 {
+            return;
+        }
+        if bpp != 32 {
+            return;
+        }
+        if rows.len() < stride * height as usize {
+            return;
+        }
+        let x11 = match x11() {
+            Some(m) => m,
+            None => return,
+        };
+        let g = match lock_x11(x11) {
+            Some(g) => g,
+            None => return,
+        };
+
+        // x11rb's put_image expects a tightly packed width*4 bytes per row
+        // buffer (no padding). If stride already matches width*4, send as-is;
+        // otherwise repack.
+        let row_bytes = width as usize * 4;
+        let packed: Vec<u8> = if stride == row_bytes {
+            rows[..stride * height as usize].to_vec()
+        } else {
+            let mut out = vec![0u8; row_bytes * height as usize];
+            for row in 0..height as usize {
+                let src = &rows[row * stride..row * stride + row_bytes];
+                out[row * row_bytes..(row + 1) * row_bytes].copy_from_slice(src);
+            }
+            out
+        };
+
+        let gc_id: Gcontext = match g.conn.generate_id() {
+            Ok(id) => id,
+            Err(_) => return,
+        };
+        let _ = g.conn.create_gc(gc_id, drawable, &CreateGCAux::new());
+        let _ = g.conn.put_image(
+            ImageFormat::Z_PIXMAP,
+            drawable,
+            gc_id,
+            width,
+            height,
+            dst_x,
+            dst_y,
+            0, // left_pad
+            g.depth,
+            &packed,
+        );
+        let _ = g.conn.free_gc(gc_id);
+        let _ = g.conn.flush();
+    }
+
     /// Destroy an X11 window.
     /// Free an X11 Pixmap.
     ///
@@ -1360,8 +1439,9 @@ pub const GX_SET: u32 = 15;
 pub use inner::{
     colorref_to_pixel, configure_window, copy_area, copy_area_with_rop, create_pixmap,
     create_window, destroy_window, draw_filled_rect, draw_line, draw_rect_outline, draw_text,
-    draw_text_utf16, fill_rect_with_rop, free_pixmap, is_available, poll_event, put_dib_to_pixmap,
-    screen_size, set_title, show_window, system_dpi, wait_event,
+    draw_text_utf16, fill_rect_with_rop, free_pixmap, is_available, poll_event,
+    put_bits_to_pixmap_at, put_dib_to_pixmap, screen_size, set_title, show_window, system_dpi,
+    wait_event,
 };
 
 // ── No-op stubs for non-Linux platforms (macOS dev builds) ───────────────────
@@ -1473,6 +1553,20 @@ pub unsafe fn put_dib_to_pixmap(
     _width: u32,
     _height: u32,
     _bits_ptr: usize,
+    _bpp: u16,
+) {
+}
+
+#[cfg(not(target_os = "linux"))]
+#[allow(clippy::too_many_arguments)]
+pub fn put_bits_to_pixmap_at(
+    _drawable: u32,
+    _dst_x: i16,
+    _dst_y: i16,
+    _width: u16,
+    _height: u16,
+    _stride: usize,
+    _rows: &[u8],
     _bpp: u16,
 ) {
 }

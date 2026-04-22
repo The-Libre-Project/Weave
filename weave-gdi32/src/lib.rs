@@ -52,7 +52,6 @@ pub mod objects;
 
 use defs::*;
 use objects::GdiKind;
-use weave_common::stub::warn_once;
 
 // ── Pixel helpers ─────────────────────────────────────────────────────────────
 
@@ -1477,26 +1476,174 @@ pub unsafe extern "win64" fn create_dib_section(
     })
 }
 
-/// SetDIBitsToDevice: copy DIB pixels to a device (stub).
-// Wine ref: dlls/win32u/dib.c — NtGdiSetDIBitsToDevice validates BITMAPINFO header
-// (biHeight<0 = top-down DIB); StartScan/cLines select a horizontal band; clips to
-// DC clip region; DIB_PAL_COLORS in ColorUse maps table entries through current palette.
-pub extern "win64" fn set_dib_bits_to_device(
-    _hdc: usize,
-    _x_dest: i32,
-    _y_dest: i32,
-    _w: u32,
-    _h: u32,
+/// SetDIBitsToDevice: copy a horizontal band of a caller-owned DIB straight to
+/// a device.
+///
+/// Parses the caller-supplied `BITMAPINFOHEADER`, slices `cLines` scanlines
+/// starting at `uStartScan`, and uploads the band to the destination DC's
+/// drawable at `(xDest, yDest)`. Bottom-up DIBs (biHeight > 0) are re-emitted
+/// in top-down order before upload so the X server receives scanlines in
+/// natural draw order.
+///
+/// First-pass scope: 32-bit BI_RGB DIBs with `DIB_RGB_COLORS`. Every other
+/// combination (24/16/8-bit depths, BI_BITFIELDS / BI_RLE*, DIB_PAL_COLORS)
+/// returns 0 with a rate-limited stderr trace. Null `lpBits` or null
+/// `lpBitsInfo` return 0 without panicking.
+///
+/// Returns the number of scanlines uploaded on success; 0 on any rejection.
+///
+/// Wine ref: dlls/win32u/dib.c::nulldrv_SetDIBitsToDevice — clamps `lines` to
+/// `height - startscan` for bottom-up DIBs when `startscan + lines > height`,
+/// returns 0 if `startscan >= height`, rejects `lines == 0` early, and returns
+/// the final `lines` count after PutImage. Stride formula (Windows DIB rows
+/// are DWORD-aligned): `stride = ((|biWidth| * biBitCount + 31) / 32) * 4`
+/// — identical to the formula used in `create_dib_section` above.
+///
+/// # Safety
+/// `lp_v_bits` must point to at least `stride * (uStartScan + cLines)` bytes
+/// for bottom-up DIBs (rows below the band are addressed to compute offsets
+/// when re-emitting top-down). `lpbmi` must point to a readable
+/// `BITMAPINFOHEADER`.
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "win64" fn set_dib_bits_to_device(
+    hdc: usize,
+    x_dest: i32,
+    y_dest: i32,
+    w: u32,
+    h: u32,
     _x_src: i32,
     _y_src: i32,
-    _start_scan: u32,
-    _c_lines: u32,
-    _lp_v_bits: *const u8,
-    _lpbmi: usize,
-    _color_use: u32,
+    start_scan: u32,
+    c_lines: u32,
+    lp_v_bits: *const u8,
+    lpbmi: usize,
+    color_use: u32,
 ) -> i32 {
-    warn_once("SetDIBitsToDevice");
-    0
+    if lpbmi == 0 || lp_v_bits.is_null() || c_lines == 0 || w == 0 || h == 0 {
+        return 0;
+    }
+
+    // DIB_RGB_COLORS == 0, DIB_PAL_COLORS == 1. First pass supports RGB only.
+    if color_use != 0 {
+        static UNSUPPORTED_COLORUSE: std::sync::atomic::AtomicU32 =
+            std::sync::atomic::AtomicU32::new(0);
+        if UNSUPPORTED_COLORUSE.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 4 {
+            eprintln!(
+                "weave/gdi32: SetDIBitsToDevice color_use={color_use} unsupported (DIB_RGB_COLORS only)"
+            );
+        }
+        return 0;
+    }
+
+    // Parse BITMAPINFOHEADER — same offsets used in create_dib_section:
+    //   +4 biWidth(i32), +8 biHeight(i32), +14 biBitCount(u16), +16 biCompression(u32)
+    let (bi_width, bi_height, bi_bit_count, bi_compression) = unsafe {
+        let w_ptr = (lpbmi + 4) as *const i32;
+        let h_ptr = (lpbmi + 8) as *const i32;
+        let bc_ptr = (lpbmi + 14) as *const u16;
+        let comp_ptr = (lpbmi + 16) as *const u32;
+        (*w_ptr, *h_ptr, *bc_ptr, *comp_ptr)
+    };
+
+    // BI_RGB = 0. BI_BITFIELDS = 3, BI_RLE4/8 rejected.
+    if bi_compression != 0 {
+        static UNSUPPORTED_COMP: std::sync::atomic::AtomicU32 =
+            std::sync::atomic::AtomicU32::new(0);
+        if UNSUPPORTED_COMP.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 4 {
+            eprintln!(
+                "weave/gdi32: SetDIBitsToDevice compression={bi_compression} unsupported (BI_RGB only)"
+            );
+        }
+        return 0;
+    }
+
+    if bi_bit_count != 32 {
+        static UNSUPPORTED_BPP: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        if UNSUPPORTED_BPP.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 4 {
+            eprintln!(
+                "weave/gdi32: SetDIBitsToDevice bpp={bi_bit_count} unsupported (32-bit only)"
+            );
+        }
+        return 0;
+    }
+
+    let abs_width = bi_width.unsigned_abs();
+    let abs_height = bi_height.unsigned_abs();
+    let top_down = bi_height < 0;
+    if abs_width == 0 || abs_height == 0 {
+        return 0;
+    }
+
+    // Wine clamp: startscan >= height → return 0; lines > height - startscan
+    // → clamp to height - startscan (bottom-up path).
+    if start_scan >= abs_height {
+        return 0;
+    }
+    let mut lines = c_lines;
+    if lines > abs_height - start_scan {
+        lines = abs_height - start_scan;
+    }
+
+    // Stride formula (Wine ref: dlls/win32u/dib.c get_dib_stride):
+    //   stride = ((|biWidth| * biBitCount + 31) / 32) * 4
+    let stride = ((abs_width as u64 * bi_bit_count as u64).div_ceil(32) * 4) as usize;
+    let lines_usize = lines as usize;
+    let band_bytes = stride.saturating_mul(lines_usize);
+    if band_bytes == 0 {
+        return 0;
+    }
+
+    // Slice the source band. For bottom-up DIBs the scanline at "startscan"
+    // counted from the bottom sits at offset `(height - 1 - startscan) * stride`
+    // and rows above it step DOWN in memory — so the band runs from
+    // `(height - startscan - lines) * stride` for `lines * stride` bytes, and
+    // we re-emit it reversed into a top-down scratch before upload. Top-down
+    // DIBs pass through directly: band at `startscan * stride`.
+    let src_band_offset = if top_down {
+        start_scan as usize * stride
+    } else {
+        (abs_height as usize - start_scan as usize - lines_usize) * stride
+    };
+    let src_slice =
+        unsafe { std::slice::from_raw_parts(lp_v_bits.add(src_band_offset), band_bytes) };
+
+    let top_down_rows: Vec<u8> = if top_down {
+        src_slice.to_vec()
+    } else {
+        // Reverse row order so caller-supplied bottom-up becomes top-down.
+        let mut out = vec![0u8; band_bytes];
+        for row in 0..lines_usize {
+            let src_row =
+                &src_slice[(lines_usize - 1 - row) * stride..(lines_usize - row) * stride];
+            out[row * stride..(row + 1) * stride].copy_from_slice(src_row);
+        }
+        out
+    };
+
+    // Resolve destination drawable.
+    let dst_draw = dc::with(hdc, |dc| dc.drawable());
+    if dst_draw == 0 {
+        return 0;
+    }
+
+    // Upload width is the lesser of w and abs_width — Wine intersects against
+    // the source rect. We keep it simple: clamp upload width to whatever the
+    // caller requested AND the DIB actually provides.
+    let upload_w = w.min(abs_width) as u16;
+    let upload_h = lines as u16;
+
+    weave_user32::backend::put_bits_to_pixmap_at(
+        dst_draw,
+        x_dest as i16,
+        y_dest as i16,
+        upload_w,
+        upload_h,
+        stride,
+        &top_down_rows,
+        bi_bit_count,
+    );
+
+    lines as i32
 }
 
 // ── Text metrics ──────────────────────────────────────────────────────────────
@@ -1919,7 +2066,11 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
             create_dib_section as unsafe extern "win64" fn(_, _, _, _, _, _) -> _ as *const ()
                 as usize,
         ),
-        "SetDIBitsToDevice" => Some(set_dib_bits_to_device as *const () as usize),
+        "SetDIBitsToDevice" => Some(
+            set_dib_bits_to_device
+                as unsafe extern "win64" fn(_, _, _, _, _, _, _, _, _, _, _, _) -> _
+                as *const () as usize,
+        ),
         // Text metrics
         "GetTextMetricsW" => {
             Some(get_text_metrics_w as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
