@@ -63,6 +63,44 @@ fn resolve(dll: &str, func: &str) -> Option<usize> {
         .or_else(|| dll_registry::lookup(dll, func))
 }
 
+/// Resolve the six bridged XDG user directories to real Linux `PathBuf`s.
+///
+/// For each directory, tries `xdg-user-dir <NAME>` first, then falls back to
+/// `$HOME/<dir>` if the command is unavailable or returns empty output.
+fn resolve_xdg_user_dirs() -> Vec<std::path::PathBuf> {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
+
+    let entries: &[(&str, &str)] = &[
+        ("DOCUMENTS", "Documents"),
+        ("DOWNLOAD", "Downloads"),
+        ("DESKTOP", "Desktop"),
+        ("MUSIC", "Music"),
+        ("PICTURES", "Pictures"),
+        ("VIDEOS", "Videos"),
+    ];
+
+    entries
+        .iter()
+        .map(|(xdg_name, fallback)| {
+            // Try xdg-user-dir.
+            if let Ok(output) = std::process::Command::new("xdg-user-dir")
+                .arg(xdg_name)
+                .output()
+            {
+                if output.status.success() {
+                    let raw = String::from_utf8_lossy(&output.stdout);
+                    let trimmed = raw.trim();
+                    if !trimmed.is_empty() {
+                        return std::path::PathBuf::from(trimmed);
+                    }
+                }
+            }
+            // Fallback.
+            std::path::PathBuf::from(format!("{home}/{fallback}"))
+        })
+        .collect()
+}
+
 fn handle_prefix_cmd(args: &[String]) -> ! {
     let usage = || {
         eprintln!("usage: weave prefix <create|list|launch|delete> [args...]");
@@ -412,12 +450,33 @@ fn main() {
     // ── 4. Apply filesystem sandbox ───────────────────────────────────────
     // Allowlist the exe's own directory for read-only access so apps can open
     // config files, data files, and DLLs that live beside the executable.
-    // All other filesystem paths remain denied by default.
+    // Also allowlist the six bridged XDG user dirs so Windows apps can read
+    // and write Documents, Downloads, Desktop, Music, Pictures, and Videos
+    // in the user's real home directory.
     let exe_abs = args.exe.canonicalize().unwrap_or_else(|_| args.exe.clone());
     let exe_dir = exe_abs
         .parent()
         .unwrap_or_else(|| std::path::Path::new("."));
-    weave_sandbox::apply(!args.no_sandbox, &[exe_dir]);
+
+    // Resolve XDG user dirs.  Try `xdg-user-dir <NAME>` first; fall back to
+    // $HOME/<dir> if the command is not available or returns empty output.
+    let xdg_dirs = resolve_xdg_user_dirs();
+
+    // Build the allowed-paths slice: exe dir first, then bridged user dirs
+    // that actually exist on disk (skip non-existent dirs silently).
+    let mut allowed: Vec<&std::path::Path> = vec![exe_dir];
+    for p in &xdg_dirs {
+        if p.exists() {
+            allowed.push(p.as_path());
+        } else {
+            eprintln!(
+                "weave: sandbox: skipping non-existent user dir {}",
+                p.display()
+            );
+        }
+    }
+
+    weave_sandbox::apply(!args.no_sandbox, &allowed);
 
     // ── 5. Initialise TEB / PEB / TLS ────────────────────────────────────
     let _teb = teb::setup(&image).unwrap_or_else(|e| {

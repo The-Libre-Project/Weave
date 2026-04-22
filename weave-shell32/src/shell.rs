@@ -54,6 +54,10 @@ pub(crate) struct NotifyIconDataW {
 
 const CSIDL_DESKTOP: i32 = 0x0000;
 const CSIDL_PERSONAL: i32 = 0x0005; // My Documents
+const CSIDL_MYMUSIC: i32 = 0x000D;
+const CSIDL_MYVIDEO: i32 = 0x000E;
+const CSIDL_DESKTOPDIRECTORY: i32 = 0x0010; // filesystem Desktop dir
+const CSIDL_MYPICTURES: i32 = 0x0027;
 const CSIDL_APPDATA: i32 = 0x001a; // Roaming AppData
 const CSIDL_LOCAL_APPDATA: i32 = 0x001c;
 const CSIDL_PROGRAM_FILES: i32 = 0x0026;
@@ -64,29 +68,77 @@ const CSIDL_COMMON_APPDATA: i32 = 0x0023;
 const CSIDL_PROFILE: i32 = 0x0028; // user profile root
 
 // ── KNOWNFOLDERID GUIDs (as raw byte arrays for comparison) ──────────────────
-// Only the most common ones used by Win32 apps.
+// Little-endian byte representation matching the Windows GUID layout.
 
+// {B4BFCC3A-DB2C-424C-B029-7FE99A87C641}
 const FOLDERID_DESKTOP: [u8; 16] = [
-    0xB4, 0xBF, 0xCE, 0xB6, 0xA1, 0xB8, 0x1A, 0x4E, 0xB6, 0x00, 0x58, 0x61, 0x28, 0xB6, 0xB4, 0x56,
+    0x3A, 0xCC, 0xBF, 0xB4, 0x2C, 0xDB, 0x4C, 0x42, 0xB0, 0x29, 0x7F, 0xE9, 0x9A, 0x87, 0xC6, 0x41,
 ];
+// {FDD39AD0-238F-46AF-ADB4-6C85480369C7}
 const FOLDERID_DOCUMENTS: [u8; 16] = [
-    0xEC, 0x4F, 0x2D, 0xFD, 0xD5, 0x26, 0x29, 0x4C, 0x96, 0x25, 0x9B, 0x82, 0x87, 0xCE, 0x50, 0x6E,
+    0xD0, 0x9A, 0xD3, 0xFD, 0x8F, 0x23, 0xAF, 0x46, 0xAD, 0xB4, 0x6C, 0x85, 0x48, 0x03, 0x69, 0xC7,
 ];
+// {4BD8D571-6D19-48D3-BE97-422220080E43}
+const FOLDERID_MUSIC: [u8; 16] = [
+    0x71, 0xD5, 0xD8, 0x4B, 0x19, 0x6D, 0xD3, 0x48, 0xBE, 0x97, 0x42, 0x22, 0x20, 0x08, 0x0E, 0x43,
+];
+// {33E28130-4E1E-4676-835A-98395C3BC3BB}
+const FOLDERID_PICTURES: [u8; 16] = [
+    0x30, 0x81, 0xE2, 0x33, 0x1E, 0x4E, 0x76, 0x46, 0x83, 0x5A, 0x98, 0x39, 0x5C, 0x3B, 0xC3, 0xBB,
+];
+// {18989B1D-99B5-455B-841C-AB7C74E4DDFC}
+const FOLDERID_VIDEOS: [u8; 16] = [
+    0x1D, 0x9B, 0x98, 0x18, 0xB5, 0x99, 0x5B, 0x45, 0x84, 0x1C, 0xAB, 0x7C, 0x74, 0xE4, 0xDD, 0xFC,
+];
+// {374DE290-123F-4565-9164-39C4925E467B}
+const FOLDERID_DOWNLOADS: [u8; 16] = [
+    0x90, 0xE2, 0x4D, 0x37, 0x3F, 0x12, 0x65, 0x45, 0x91, 0x64, 0x39, 0xC4, 0x92, 0x5E, 0x46, 0x7B,
+];
+// {3EB685DB-65F9-4CF6-A03A-E3EF65729F3D}
 const FOLDERID_ROAMING_APP_DATA: [u8; 16] = [
     0x3E, 0xB6, 0x85, 0xDB, 0x65, 0xF9, 0xF0, 0x40, 0x9D, 0xDE, 0x8C, 0x16, 0xAE, 0x37, 0xE4, 0x01,
 ];
+// {F1B32785-6FBA-4FCF-9D55-7B8E7F157091}
 const FOLDERID_LOCAL_APP_DATA: [u8; 16] = [
     0xF1, 0xB3, 0x2B, 0xF7, 0x07, 0xBB, 0xFC, 0x4A, 0xA6, 0x00, 0x1F, 0x34, 0xB4, 0x47, 0xD3, 0x62,
 ];
+// {905e63b6-c1bf-494e-b29c-65b732d3d21a}
 const FOLDERID_PROGRAM_FILES: [u8; 16] = [
     0x19, 0x55, 0xAA, 0x90, 0xE3, 0xAF, 0xD3, 0x11, 0xA0, 0xEA, 0x00, 0x80, 0xC7, 0x39, 0x1E, 0xA7,
 ];
+// {F38BF404-1D43-42F2-9305-67DE0B28FC23}
 const FOLDERID_WINDOWS: [u8; 16] = [
     0xF3, 0x8B, 0xF4, 0x1C, 0xBC, 0xE3, 0xD1, 0x11, 0xB4, 0xBF, 0x00, 0x80, 0xC7, 0x39, 0x1E, 0xA7,
 ];
+// {1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}
 const FOLDERID_SYSTEM: [u8; 16] = [
     0xF4, 0x8B, 0xF4, 0x1C, 0xBC, 0xE3, 0xD1, 0x11, 0xB4, 0xBF, 0x00, 0x80, 0xC7, 0x39, 0x1E, 0xA7,
 ];
+
+// ── XDG user-dir resolver ─────────────────────────────────────────────────────
+//
+// Returns the real Linux path for a named user directory (e.g. "DOCUMENTS").
+// Tries `xdg-user-dir <name>` first; falls back to `$HOME/<fallback>` if the
+// command is unavailable or returns an empty result.
+
+fn xdg_user_dir(name: &str, fallback: &str) -> String {
+    // Try xdg-user-dir first (available on most Linux desktops).
+    if let Ok(output) = std::process::Command::new("xdg-user-dir")
+        .arg(name)
+        .output()
+    {
+        if output.status.success() {
+            let raw = String::from_utf8_lossy(&output.stdout);
+            let trimmed = raw.trim();
+            if !trimmed.is_empty() {
+                return trimmed.to_string();
+            }
+        }
+    }
+    // Fall back to $HOME/<fallback>.
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
+    format!("{home}/{fallback}")
+}
 
 // ── Helper: Win32 path → UTF-16 buffer ───────────────────────────────────────
 
@@ -105,11 +157,22 @@ fn write_win_path(win_path: &str, buf: *mut u16, capacity: usize) {
     unsafe { *buf.add(i) = 0 };
 }
 
-/// Map a CSIDL to its Win32 path relative to the fake Windows root.
+/// Map a CSIDL to a path string.
+///
+/// Bridged CSIDLs (Documents, Desktop, Music, Pictures, Videos) return the
+/// real Linux XDG directory path so that the Windows app reads/writes the
+/// user's actual home directories. Non-bridged CSIDLs return prefix-relative
+/// Windows paths as before.
 fn csidl_to_win_path(n_folder: i32) -> Option<String> {
     match n_folder & 0xFF {
+        // Bridged: return real Linux XDG paths (Landlock-allowed by weave-cli).
+        CSIDL_PERSONAL => Some(xdg_user_dir("DOCUMENTS", "Documents")),
+        CSIDL_DESKTOPDIRECTORY => Some(xdg_user_dir("DESKTOP", "Desktop")),
+        CSIDL_MYMUSIC => Some(xdg_user_dir("MUSIC", "Music")),
+        CSIDL_MYPICTURES => Some(xdg_user_dir("PICTURES", "Pictures")),
+        CSIDL_MYVIDEO => Some(xdg_user_dir("VIDEOS", "Videos")),
+        // Non-bridged: prefix-relative fake Windows paths.
         CSIDL_DESKTOP => Some(r"C:\Users\User\Desktop".to_string()),
-        CSIDL_PERSONAL => Some(r"C:\Users\User\Documents".to_string()),
         CSIDL_APPDATA => Some(r"C:\Users\User\AppData\Roaming".to_string()),
         CSIDL_LOCAL_APPDATA => Some(r"C:\Users\User\AppData\Local".to_string()),
         CSIDL_PROGRAM_FILES => Some(r"C:\Program Files".to_string()),
@@ -122,14 +185,32 @@ fn csidl_to_win_path(n_folder: i32) -> Option<String> {
     }
 }
 
-/// Map a KNOWNFOLDERID (16-byte GUID) to a Win32 path.
+/// Map a KNOWNFOLDERID (16-byte GUID) to a path string.
+///
+/// Bridged FOLDERIDs (Documents, Desktop, Music, Pictures, Videos, Downloads)
+/// return the real Linux XDG directory path. Non-bridged GUIDs return
+/// prefix-relative Windows paths as before.
 fn known_folder_guid_to_win_path(guid: &[u8; 16]) -> Option<String> {
-    if guid == &FOLDERID_DESKTOP {
-        return Some(r"C:\Users\User\Desktop".to_string());
-    }
+    // Bridged: return real Linux XDG paths.
     if guid == &FOLDERID_DOCUMENTS {
-        return Some(r"C:\Users\User\Documents".to_string());
+        return Some(xdg_user_dir("DOCUMENTS", "Documents"));
     }
+    if guid == &FOLDERID_DESKTOP {
+        return Some(xdg_user_dir("DESKTOP", "Desktop"));
+    }
+    if guid == &FOLDERID_MUSIC {
+        return Some(xdg_user_dir("MUSIC", "Music"));
+    }
+    if guid == &FOLDERID_PICTURES {
+        return Some(xdg_user_dir("PICTURES", "Pictures"));
+    }
+    if guid == &FOLDERID_VIDEOS {
+        return Some(xdg_user_dir("VIDEOS", "Videos"));
+    }
+    if guid == &FOLDERID_DOWNLOADS {
+        return Some(xdg_user_dir("DOWNLOAD", "Downloads"));
+    }
+    // Non-bridged: prefix-relative Windows paths.
     if guid == &FOLDERID_ROAMING_APP_DATA {
         return Some(r"C:\Users\User\AppData\Roaming".to_string());
     }
@@ -148,11 +229,21 @@ fn known_folder_guid_to_win_path(guid: &[u8; 16]) -> Option<String> {
     None
 }
 
-/// Ensure the on-disk directory for a Win32 path exists in the prefix.
-fn ensure_linux_dir(win_path: &str) {
-    let translator = weave_common::path::WinPathTranslator::new(prefix::get().to_path_buf());
-    if let Ok(p) = translator.to_linux_str(win_path) {
-        let _ = std::fs::create_dir_all(&p);
+/// Ensure the on-disk directory for a path exists.
+///
+/// Accepts either a real Linux path (bridged dirs) or a Windows-style path
+/// (prefix-relative dirs). Linux paths (starting with `/`) are used directly;
+/// Windows paths are translated via `WinPathTranslator`.
+fn ensure_linux_dir(path: &str) {
+    if path.starts_with('/') {
+        // Real Linux path — bridged user dir.
+        let _ = std::fs::create_dir_all(path);
+    } else {
+        // Windows-style prefix-relative path.
+        let translator = weave_common::path::WinPathTranslator::new(prefix::get().to_path_buf());
+        if let Ok(p) = translator.to_linux_str(path) {
+            let _ = std::fs::create_dir_all(&p);
+        }
     }
 }
 
