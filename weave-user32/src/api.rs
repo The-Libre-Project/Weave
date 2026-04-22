@@ -5465,18 +5465,118 @@ pub unsafe extern "win64" fn child_window_from_point_ex(
     0 // NULL
 }
 
-/// LoadMenuW — load a menu resource (Wide). Returns a fake non-null HMENU handle.
+/// LoadMenuW — locate an RT_MENU resource in `h_instance` and return a
+/// synthetic, stable HMENU for `(h_instance, name)`.
 ///
 /// # Safety
-/// Pointer arguments are accepted but not dereferenced.
-// Wine ref: dlls/user32/menu.c::MENU_ParseResource — loads RT_MENU resource, creates
-// HMENU via CreateMenu, then walks MENU/MENUEX resource bytes; MENUEX format uses
-// MENUEX_TEMPLATE_ITEM with dwType/dwState/menuId/bResInfo fields.
-// Hypothesis (2026-04-13): returning NULL causes SciTE to call exit(0) immediately
-// after ShowWindow(toolbar) in WM_CREATE — zero Win32 calls, pure C++ null-check path.
-pub unsafe extern "win64" fn load_menu_w(_h_instance: usize, _lp_menu_name: *const u16) -> usize {
-    eprintln!("weave/user32: LoadMenuW → fake 0x1");
-    1 // fake HMENU — non-null so callers don't bail
+/// If `lp_menu_name` is not an ordinal (`IS_INTRESOURCE`), the caller
+/// guarantees it points to a valid null-terminated UTF-16 string.
+// Wine ref: dlls/user32/menu.c::LoadMenuW (lines 560–566) —
+//   HRSRC hrsrc = FindResourceW( instance, name, (LPWSTR)RT_MENU );
+//   if (!hrsrc) return 0;
+//   return LoadMenuIndirectW( LoadResource( instance, hrsrc ));
+// RT_MENU = MAKEINTRESOURCE(4) per include/winuser.h:816. Failure mode:
+// missing resource → NULL; everything else goes through LoadMenuIndirectW
+// which parses the MENU/MENUEX template. Weave stops at the resource
+// lookup and hands out a synthetic HMENU via the menu_handles slab; we
+// do NOT parse the template (out of scope for this brief).
+pub unsafe extern "win64" fn load_menu_w(h_instance: usize, lp_menu_name: *const u16) -> usize {
+    restrace!("load_menu_w hInst={h_instance:#x} name={:#x}", lp_menu_name as usize);
+
+    // Wine: hInst==NULL resolves to the user32 module for system menus.
+    // Out of scope for the first pass — return NULL.
+    if h_instance == 0 {
+        return 0;
+    }
+
+    let image_base = match weave_core::module_handles::base_of(h_instance) {
+        Some(b) => b,
+        None => return 0,
+    };
+
+    // Classify the name via IS_INTRESOURCE and build a ResourceId.
+    let name_ptr = lp_menu_name as usize;
+    let name_id = if name_ptr >> 16 == 0 {
+        weave_core::resource::ResourceId::Id(name_ptr as u16)
+    } else {
+        // SAFETY: caller contract — ptr is a valid NUL-terminated UTF-16
+        // string when it's not an ordinal.
+        let mut wchars: Vec<u16> = Vec::new();
+        unsafe {
+            let mut p = lp_menu_name;
+            for _ in 0..32_768 {
+                let ch = *p;
+                if ch == 0 {
+                    break;
+                }
+                wchars.push(ch);
+                p = p.add(1);
+            }
+        }
+        weave_core::resource::ResourceId::Name(wchars)
+    };
+
+    const RT_MENU: u16 = 4;
+    if weave_core::resource::find_resource(
+        image_base,
+        weave_core::resource::ResourceId::Id(RT_MENU),
+        name_id,
+        0,
+    )
+    .is_none()
+    {
+        return 0;
+    }
+
+    // SAFETY: name_ptr has already been classified above; `name_key_from_wide_ptr`
+    // applies the same IS_INTRESOURCE gate before dereferencing.
+    let name_key = unsafe { crate::menu_handles::name_key_from_wide_ptr(name_ptr) };
+    crate::menu_handles::register(h_instance, name_key)
+}
+
+/// LoadMenuA — ANSI form of LoadMenuW.
+///
+/// Per Wine, the name argument is interpreted via `IS_INTRESOURCE`: small
+/// integers are ordinals (no string deref), everything else is an LPCSTR.
+/// This stub converts string names to UTF-16 (CP_ACP, 1-byte pass-through
+/// since resource names are ASCII in practice) and trampolines to
+/// `load_menu_w`.
+///
+/// # Safety
+/// If `lp_menu_name` is not an ordinal, caller guarantees it points to a
+/// valid NUL-terminated byte string.
+// Wine ref: dlls/user32/menu.c::LoadMenuA (lines 549–555) —
+//   HRSRC hrsrc = FindResourceA( instance, name, (LPSTR)RT_MENU );
+//   if (!hrsrc) return 0;
+//   return LoadMenuIndirectA( LoadResource( instance, hrsrc ));
+// IS_INTRESOURCE preserves ordinals across A/W; string names are widened
+// by FindResourceA internally. Weave's W implementation handles both, so
+// we widen the name here and delegate.
+pub unsafe extern "win64" fn load_menu_a(h_instance: usize, lp_menu_name: *const u8) -> usize {
+    let name_ptr = lp_menu_name as usize;
+    if name_ptr >> 16 == 0 {
+        // Ordinal path: reinterpret as u16 ordinal directly — no string deref.
+        // SAFETY: w-form's IS_INTRESOURCE branch does not dereference.
+        return unsafe { load_menu_w(h_instance, lp_menu_name as *const u16) };
+    }
+    // String path: widen ASCII/CP_ACP to UTF-16 and call through.
+    // SAFETY: caller contract — lp_menu_name is a valid NUL-terminated byte string.
+    let wide: Vec<u16> = unsafe {
+        let mut out: Vec<u16> = Vec::new();
+        let mut p = lp_menu_name;
+        for _ in 0..32_768 {
+            let b = *p;
+            if b == 0 {
+                break;
+            }
+            out.push(b as u16);
+            p = p.add(1);
+        }
+        out.push(0);
+        out
+    };
+    // SAFETY: `wide` is NUL-terminated and lives for the call.
+    unsafe { load_menu_w(h_instance, wide.as_ptr()) }
 }
 
 /// SetMenu — attach or remove a menu from a top-level window.

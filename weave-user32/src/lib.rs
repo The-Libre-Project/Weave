@@ -20,6 +20,7 @@ pub mod defs;
 pub mod font;
 pub mod image_handles;
 pub mod menu;
+pub mod menu_handles;
 pub mod queue;
 pub mod window;
 
@@ -1107,6 +1108,9 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         ),
         "LoadMenuW" => {
             Some(api::load_menu_w as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "LoadMenuA" => {
+            Some(api::load_menu_a as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
         }
         "DrawMenuBar" => {
             Some(api::draw_menu_bar as unsafe extern "win64" fn(_) -> _ as *const () as usize)
