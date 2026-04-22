@@ -11792,11 +11792,196 @@ pub unsafe extern "win64" fn get_file_version_info_a(
     1 // TRUE
 }
 
+// ── VS_VERSIONINFO block walker (bounds-checked) ─────────────────────────────
+//
+// Wine ref: dlls/kernelbase/version.c — VS_VERSION_INFO_STRUCT32 layout:
+//   WORD wLength; WORD wValueLength; WORD wType; WCHAR szKey[]; (DWORD padding)
+//   BYTE Value[]; (DWORD padding) VS_VERSION_INFO_STRUCT32 Children[];
+//
+// Wine `DWORD_ALIGN(base, ptr)` macro:
+//   `(LPBYTE)(base) + ((((LPBYTE)(ptr) - (LPBYTE)(base)) + 3) & ~3)`
+// i.e. round the offset-from-base up to the next multiple of 4.
+//
+// Wine `VersionInfo32_Value(ver)`:
+//   `DWORD_ALIGN(ver, ver->szKey + lstrlenW(ver->szKey) + 1)`
+// i.e. after the NUL terminator of szKey, pad to 4-byte boundary relative to
+// the block's own base. That byte offset is where the Value[] bytes start.
+//
+// Wine `VersionInfo32_Next(ver)`:
+//   `VersionInfo32_Value(ver) + ((wValueLength * (wType?2:1) + 3) & ~3)`
+// i.e. wValueLength is in WCHARs when wType==1 (text) and bytes when wType==0
+// (binary); multiply up to bytes then pad to 4. That lands on the next sibling.
+//
+// Wine `VersionInfo32_FindChild`:
+//   iterates children while `(char*)child < (char*)info + info->wLength`,
+//   case-insensitive key compare with NUL check, advances via
+//   `VersionInfo32_Next(child)`. Returns NULL on no-match or zero-length entry.
+
+/// A view over a single VS_VERSION_INFO_STRUCT32 entry within a larger block.
+///
+/// Construction is bounds-checked against the enclosing slice. Readers must
+/// never dereference raw pointers past `entry.as_ptr().add(entry.len())`.
+#[derive(Clone, Copy)]
+struct VerEntry<'a> {
+    /// Full bytes of this entry — [0..wLength) measured from entry start.
+    entry: &'a [u8],
+    w_value_length: u16,
+    w_type: u16,
+    /// Byte offset from entry[0] where the Value[] bytes begin (after szKey
+    /// NUL and DWORD padding). Guaranteed `<= entry.len()` on construction.
+    value_offset: usize,
+    /// Length of szKey in WCHARs, NOT including the NUL terminator.
+    key_wchars: usize,
+}
+
+impl<'a> VerEntry<'a> {
+    /// Parse a version-info entry at the start of `buf`. Returns `None` on any
+    /// bounds or structural failure — never panics on malformed input.
+    fn parse(buf: &'a [u8]) -> Option<VerEntry<'a>> {
+        // Fixed header: wLength(2) + wValueLength(2) + wType(2) = 6 bytes.
+        let w_length = u16::from_le_bytes(buf.get(0..2)?.try_into().ok()?) as usize;
+        let w_value_length = u16::from_le_bytes(buf.get(2..4)?.try_into().ok()?);
+        let w_type = u16::from_le_bytes(buf.get(4..6)?.try_into().ok()?);
+
+        // wLength must cover the fixed header and szKey + NUL, and fit in buf.
+        if w_length < 8 || w_length > buf.len() {
+            return None;
+        }
+        let entry = buf.get(..w_length)?;
+
+        // Walk szKey (UTF-16) until NUL. Key bytes live at offsets 6.. within
+        // the entry; bound the search by the entry length so a missing NUL
+        // cannot read into the next block.
+        let mut key_wchars = 0usize;
+        loop {
+            let off = 6 + key_wchars * 2;
+            let slice = entry.get(off..off + 2)?;
+            let w = u16::from_le_bytes([slice[0], slice[1]]);
+            if w == 0 {
+                break;
+            }
+            key_wchars += 1;
+        }
+
+        // Offset just past the szKey NUL.
+        let after_key = 6 + (key_wchars + 1) * 2;
+        // DWORD_ALIGN from entry base: round up to next multiple of 4.
+        let value_offset = (after_key + 3) & !3;
+        if value_offset > entry.len() {
+            return None;
+        }
+        Some(VerEntry {
+            entry,
+            w_value_length,
+            w_type,
+            value_offset,
+            key_wchars,
+        })
+    }
+
+    /// szKey bytes as UTF-16 little-endian (no NUL). Keys are ASCII-ish in
+    /// practice (e.g. "StringFileInfo", "040904b0") so compare decoded.
+    fn key_utf16(&self) -> Vec<u16> {
+        let mut out = Vec::with_capacity(self.key_wchars);
+        for i in 0..self.key_wchars {
+            let off = 6 + i * 2;
+            // The entry length was validated to cover the full szKey during
+            // parse(), so this range is always in-bounds; fall back to 0 on
+            // any unexpected truncation rather than panicking.
+            if let Some(slice) = self.entry.get(off..off + 2) {
+                out.push(u16::from_le_bytes([slice[0], slice[1]]));
+            }
+        }
+        out
+    }
+
+    /// Wine: `wValueLength` is WCHAR count when wType==1, byte count when ==0.
+    /// Convert to bytes for range arithmetic.
+    fn value_byte_len(&self) -> usize {
+        let mult = if self.w_type == 1 { 2 } else { 1 };
+        (self.w_value_length as usize).saturating_mul(mult)
+    }
+
+    /// Start of Children[] within the entry, in bytes. That's:
+    /// `value_offset + DWORD_ALIGN(value_byte_len)`.
+    fn children_offset(&self) -> usize {
+        let padded = (self.value_byte_len() + 3) & !3;
+        self.value_offset.saturating_add(padded)
+    }
+
+    /// A slice of bytes covering this entry's children, bounded by wLength.
+    fn children_bytes(&self) -> &'a [u8] {
+        let start = self.children_offset().min(self.entry.len());
+        &self.entry[start..]
+    }
+
+}
+
+/// Case-insensitive ASCII-ish UTF-16 compare (Wine uses wcsnicmp). VS_VERSION
+/// keys are ASCII in practice (`StringFileInfo`, `VarFileInfo`, hex codepage
+/// tags), so ASCII folding matches Wine's behavior for every realistic input.
+fn wstr_eq_ignore_ascii_case(a: &[u16], b: &[u16]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b.iter()).all(|(x, y)| {
+        let xf = if (b'A' as u16..=b'Z' as u16).contains(x) {
+            x + 32
+        } else {
+            *x
+        };
+        let yf = if (b'A' as u16..=b'Z' as u16).contains(y) {
+            y + 32
+        } else {
+            *y
+        };
+        xf == yf
+    })
+}
+
+/// Walk immediate children of `parent` looking for the one whose szKey matches
+/// `key` (case-insensitive, no partials). Returns None on miss or malformed
+/// traversal — never panics.
+///
+/// Wine ref: dlls/kernelbase/version.c::VersionInfo32_FindChild — iterates
+/// `while (char*)child < (char*)info + info->wLength`, compares with
+/// `wcsnicmp`, aborts on `!child->wLength` to avoid infinite loops.
+fn find_child_by_key<'a>(parent: &VerEntry<'a>, key: &[u16]) -> Option<VerEntry<'a>> {
+    let mut bytes = parent.children_bytes();
+    while !bytes.is_empty() {
+        let child = VerEntry::parse(bytes)?;
+        if child.entry.is_empty() {
+            return None;
+        }
+        let child_key = child.key_utf16();
+        if wstr_eq_ignore_ascii_case(&child_key, key) {
+            return Some(child);
+        }
+        // Advance by the child's own DWORD-padded length. Wine uses the raw
+        // wLength for the sibling stride, then DWORD-aligns at the start of
+        // the next entry via VersionInfo32_Next — which for our purposes is
+        // equivalent to `(wLength + 3) & ~3` relative to entry start, but
+        // kept inside the parent's children slice.
+        let advance = (child.entry.len() + 3) & !3;
+        if advance == 0 || advance > bytes.len() {
+            return None;
+        }
+        bytes = &bytes[advance..];
+    }
+    None
+}
+
 /// VerQueryValueW — extract a sub-block from a VS_VERSIONINFO buffer.
 ///
-/// Only the `"\"` root sub-block path is implemented; it returns a pointer to
-/// the `VS_FIXEDFILEINFO` value within the buffer and its byte length.
-/// All other sub-block paths return FALSE.
+/// Handles three path shapes:
+/// - `L"\\"` → pointer to the root `VS_FIXEDFILEINFO` (`puLen` = bytes).
+/// - `L"\\StringFileInfo\\<lang-cp>\\<key>"` → UTF-16 string value
+///   (`puLen` = character count including NUL terminator, per Wine).
+/// - `L"\\VarFileInfo\\Translation"` → array of DWORDs
+///   (`puLen` = byte count).
+///
+/// On miss, malformed block, or null input, returns FALSE with outputs cleared.
+/// Bounds-checked — never panics on malformed fixtures.
 ///
 /// # Safety
 /// `p_block` must be null or a pointer to a `VS_VERSIONINFO` blob (as filled
@@ -11804,12 +11989,13 @@ pub unsafe extern "win64" fn get_file_version_info_a(
 /// wide string. `lplp_buffer` and `pui_len` must be null or valid write targets.
 ///
 /// Wine ref: dlls/kernelbase/version.c — VerQueryValueW dispatches to
-/// `VersionInfo32_QueryValue(pBlock, lpSubBlock, lplpBuffer, puLen, NULL)`.
-/// For the `"\"` root path, `VersionInfo32_QueryValue` returns immediately
-/// (the while loop has no iterations because `*lpSubBlock == L'\0'` after
-/// stripping leading backslashes) and points at `VersionInfo32_Value(info)`,
-/// which is `DWORD_ALIGN(info, info->szKey + wcslen(info->szKey) + 1)`.
-/// `wValueLength` for the root block equals `sizeof(VS_FIXEDFILEINFO) = 52`.
+/// `VersionInfo32_QueryValue(pBlock, lpSubBlock, lplpBuffer, puLen, NULL)`
+/// which splits the path on '\\', calls `VersionInfo32_FindChild` per segment,
+/// and on the final entry writes `*lplpBuffer = VersionInfo32_Value(info);
+/// *puLen = info->wValueLength;`. `wValueLength` is a WCHAR count for text
+/// entries (wType==1, includes NUL terminator) and a byte count for binary
+/// entries (wType==0). Padding between entries is 32-bit aligned via
+/// `DWORD_ALIGN` relative to the entry base.
 pub unsafe extern "win64" fn ver_query_value_w(
     p_block: *const u8,
     lp_sub_block: *const u16,
@@ -11831,128 +12017,152 @@ pub unsafe extern "win64" fn ver_query_value_w(
         return 0;
     }
 
-    // Decode the sub-block path, stripping surrounding backslashes.
-    let sub = unsafe { wide_to_utf8(lp_sub_block) }.unwrap_or_default();
-    let sub = sub.trim_matches('\\');
-
-    if !sub.is_empty() {
-        // Non-root paths (StringFileInfo, VarFileInfo, …) not yet implemented.
-        // Wine ref: VersionInfo32_QueryValue walks child blocks via
-        // VersionInfo32_FindChild; Weave defers this until a caller needs it.
-        restrace!("ver_query_value_w sub=\"{sub}\" → zero (non-root unimplemented)");
-        return 0;
-    }
-
-    // Root path "\" → return VS_FIXEDFILEINFO.
-    //
-    // VS_VERSION_INFO_STRUCT32 layout (all fields LE, DWORD-aligned):
-    //   offset 0: u16 wLength        — total length of this block
-    //   offset 2: u16 wValueLength   — byte length of Value (52 for VS_FIXEDFILEINFO)
-    //   offset 4: u16 wType          — 0 = binary, 1 = text
-    //   offset 6: WCHAR szKey[]      — NUL-terminated key, typically L"VS_VERSION_INFO"
-    //   then:     DWORD-aligned padding after szKey
-    //   then:     Value bytes (VS_FIXEDFILEINFO, 52 bytes)
-    //
-    // Wine ref: dlls/kernelbase/version.c — VersionInfo32_Value macro:
-    //   `DWORD_ALIGN(ver, ver->szKey + lstrlenW(ver->szKey) + 1)`
-    // We compute the same offset dynamically from the actual szKey content.
-
-    // Read wValueLength at offset 2.
-    let value_len = unsafe { u16::from_le_bytes([*p_block.add(2), *p_block.add(3)]) } as u32;
-    if value_len == 0 {
+    // The total block length lives in the first WORD of the root entry.
+    // Read it with the raw pointer (we don't have a slice yet) to establish
+    // a bounded view, then do everything else through slices.
+    let w_length = unsafe { u16::from_le_bytes([*p_block, *p_block.add(1)]) } as usize;
+    if w_length < 8 {
         restrace!(
-            "ver_query_value_w pBlock={:#x} → zero (empty value block)",
+            "ver_query_value_w pBlock={:#x} → zero (wLength<8)",
             p_block as usize
         );
-        return 0; // empty value block — nothing to return
+        return 0;
+    }
+    let block: &[u8] = unsafe { std::slice::from_raw_parts(p_block, w_length) };
+    let base_addr = p_block as usize;
+
+    let root = match VerEntry::parse(block) {
+        Some(r) => r,
+        None => {
+            restrace!(
+                "ver_query_value_w pBlock={:#x} → zero (malformed root)",
+                base_addr
+            );
+            return 0;
+        }
+    };
+
+    // Decode the sub-block path (UTF-16 → UTF-8) for traversal.
+    let sub = unsafe { wide_to_utf8(lp_sub_block) }.unwrap_or_default();
+    let sub_trim = sub.trim_matches('\\');
+
+    // Root path: write FIXEDFILEINFO pointer and its byte count.
+    if sub_trim.is_empty() {
+        if root.w_value_length == 0 {
+            restrace!(
+                "ver_query_value_w pBlock={:#x} → zero (empty root value)",
+                base_addr
+            );
+            return 0;
+        }
+        if !lplp_buffer.is_null() {
+            unsafe { *lplp_buffer = p_block.add(root.value_offset) as *mut u8 };
+        }
+        if !pui_len.is_null() {
+            // Root is binary (wType==0); wValueLength is already byte count.
+            unsafe { *pui_len = root.w_value_length as u32 };
+        }
+        restrace!(
+            "ver_query_value_w pBlock={:#x} root → TRUE valueLen={}",
+            base_addr,
+            root.w_value_length
+        );
+        return 1;
     }
 
-    // Compute DWORD_ALIGN(header_end, after_szKey).
-    // Header fixed part: wLength(2) + wValueLength(2) + wType(2) = 6 bytes.
-    // szKey starts at offset 6; measure its length (WCHARs) dynamically.
-    let sz_key_ptr = unsafe { p_block.add(6) } as *const u16;
-    let mut key_wchars = 0usize;
-    while unsafe { *sz_key_ptr.add(key_wchars) } != 0 {
-        key_wchars += 1;
+    // Walk segments. Wine's loop splits on '\\' and skips empty segments.
+    let mut current = root;
+    // Offset (in bytes, from block[0]) of `current.entry[0]`. Used to compute
+    // the absolute pointer to the value on the final segment.
+    let mut current_offset: usize = 0;
+    for segment in sub_trim.split('\\') {
+        if segment.is_empty() {
+            continue;
+        }
+        // Encode the segment as UTF-16 (no NUL).
+        let key_wide: Vec<u16> = segment.encode_utf16().collect();
+        let child = match find_child_by_key(&current, &key_wide) {
+            Some(c) => c,
+            None => {
+                restrace!(
+                    "ver_query_value_w sub=\"{}\" → zero (miss \"{}\")",
+                    sub_trim,
+                    segment
+                );
+                return 0;
+            }
+        };
+        // Compute where the child's entry lives relative to the block base.
+        // child.entry is a sub-slice of block, so we can recover its offset
+        // via pointer arithmetic against block[0]. Safe because both slices
+        // share provenance.
+        let child_offset = (child.entry.as_ptr() as usize).saturating_sub(base_addr);
+        if child_offset >= w_length {
+            return 0;
+        }
+        current = child;
+        current_offset = child_offset;
     }
-    // After szKey NUL terminator: 6 + (key_wchars + 1) * 2 bytes consumed.
-    let after_key_bytes = 6 + (key_wchars + 1) * 2;
-    // DWORD_ALIGN: round up to next multiple of 4.
-    let value_offset = (after_key_bytes + 3) & !3;
 
-    // Point lplp_buffer at the Value field within p_block.
+    // Final entry: write value pointer and Wine's puLen convention.
+    // puLen = wValueLength (raw): WCHAR count for text (incl. NUL), bytes for
+    // binary. This matches Wine `*puLen = info->wValueLength;` verbatim.
+    let value_abs = current_offset + current.value_offset;
+    if value_abs >= w_length {
+        restrace!(
+            "ver_query_value_w sub=\"{}\" → zero (value OOB)",
+            sub_trim
+        );
+        return 0;
+    }
     if !lplp_buffer.is_null() {
-        unsafe { *lplp_buffer = p_block.add(value_offset) as *mut u8 };
+        unsafe { *lplp_buffer = p_block.add(value_abs) as *mut u8 };
     }
     if !pui_len.is_null() {
-        unsafe { *pui_len = value_len };
+        unsafe { *pui_len = current.w_value_length as u32 };
     }
     restrace!(
-        "ver_query_value_w pBlock={:#x} → TRUE valueLen={value_len}",
-        p_block as usize
+        "ver_query_value_w sub=\"{}\" → TRUE wValueLength={} wType={}",
+        sub_trim,
+        current.w_value_length,
+        current.w_type
     );
-    1 // TRUE
+    1
 }
 
-/// VerQueryValueA — ANSI variant; only the root `"\"` path is supported.
+/// VerQueryValueA — ANSI variant; widens the sub-block path to UTF-16 and
+/// dispatches to [`ver_query_value_w`].
 ///
 /// # Safety
 /// Same as VerQueryValueW.
 ///
-/// Wine ref: dlls/kernelbase/version.c — VerQueryValueA detects 16-bit vs 32-bit
-/// block via VersionInfoIs16 (szKey[0] >= ' '); for 32-bit blocks converts the
-/// ANSI lpSubBlock to WCHAR then calls VersionInfo32_QueryValue. Weave handles
-/// the root path inline without the ANSI→wide conversion for simplicity.
+/// Wine ref: dlls/kernelbase/version.c — VerQueryValueA detects 16-bit vs
+/// 32-bit block via `VersionInfoIs16` (szKey[0] >= ' '); for 32-bit blocks
+/// widens lpSubBlock via MultiByteToWideChar(CP_ACP,...) then calls
+/// `VersionInfo32_QueryValue`. Weave only supports 32-bit blocks and uses a
+/// simple CP_ACP-equivalent widen (treat each byte as a 16-bit code unit).
 pub unsafe extern "win64" fn ver_query_value_a(
     p_block: *const u8,
     lp_sub_block: *const u8,
     lplp_buffer: *mut *mut u8,
     pui_len: *mut u32,
 ) -> i32 {
-    if !lplp_buffer.is_null() {
-        unsafe { *lplp_buffer = std::ptr::null_mut() };
-    }
-    if !pui_len.is_null() {
-        unsafe { *pui_len = 0 };
-    }
-    if p_block.is_null() {
-        return 0;
-    }
-    // Decode the ANSI sub-block path.
-    let sub = if lp_sub_block.is_null() {
-        String::new()
+    // Widen lpSubBlock (or use L"" if null). CP_ACP defaults to Windows-1252;
+    // VS_VERSIONINFO path keys are ASCII-only (\\, StringFileInfo, hex tags),
+    // so byte-wise widening is sufficient.
+    let wide: Vec<u16> = if lp_sub_block.is_null() {
+        vec![0]
     } else {
         let mut len = 0usize;
         while unsafe { *lp_sub_block.add(len) } != 0 {
             len += 1;
         }
         let bytes = unsafe { std::slice::from_raw_parts(lp_sub_block, len) };
-        String::from_utf8_lossy(bytes).into_owned()
+        let mut v: Vec<u16> = bytes.iter().map(|&b| b as u16).collect();
+        v.push(0);
+        v
     };
-    let sub = sub.trim_matches('\\');
-    if !sub.is_empty() {
-        return 0; // non-root paths not implemented
-    }
-
-    // Root "\" path — same logic as the W variant.
-    let value_len = unsafe { u16::from_le_bytes([*p_block.add(2), *p_block.add(3)]) } as u32;
-    if value_len == 0 {
-        return 0;
-    }
-    let sz_key_ptr = unsafe { p_block.add(6) } as *const u16;
-    let mut key_wchars = 0usize;
-    while unsafe { *sz_key_ptr.add(key_wchars) } != 0 {
-        key_wchars += 1;
-    }
-    let after_key_bytes = 6 + (key_wchars + 1) * 2;
-    let value_offset = (after_key_bytes + 3) & !3;
-    if !lplp_buffer.is_null() {
-        unsafe { *lplp_buffer = p_block.add(value_offset) as *mut u8 };
-    }
-    if !pui_len.is_null() {
-        unsafe { *pui_len = value_len };
-    }
-    1 // TRUE
+    unsafe { ver_query_value_w(p_block, wide.as_ptr(), lplp_buffer, pui_len) }
 }
 
 /// Resolve a version.dll import.
@@ -13161,5 +13371,387 @@ mod tests {
         };
         assert_eq!(ret, 6); // "hello" len + NUL
         unsafe { libc::unsetenv(b"WEAVE_TEST_ENV_A_SMALL\0".as_ptr() as *const i8) };
+    }
+
+    // ── VerQueryValueW: VS_VERSIONINFO block walker ───────────────────────────
+
+    /// Write a VS_VERSION_INFO_STRUCT32 entry to `out` and return its length.
+    /// `key` is a UTF-16 key (no NUL — this helper appends it). `value` is the
+    /// raw value bytes (caller provides correct `w_type`-appropriate payload).
+    /// After the value, DWORD padding is applied so children begin 4-aligned.
+    /// `w_value_length` follows Wine's convention: WCHAR count when wType==1,
+    /// byte count when wType==0.
+    fn emit_entry(
+        out: &mut Vec<u8>,
+        key: &[u16],
+        w_value_length: u16,
+        w_type: u16,
+        value: &[u8],
+        children: &[u8],
+    ) -> usize {
+        let start = out.len();
+        // Placeholder for wLength.
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out.extend_from_slice(&w_value_length.to_le_bytes());
+        out.extend_from_slice(&w_type.to_le_bytes());
+        // szKey + NUL.
+        for &w in key {
+            out.extend_from_slice(&w.to_le_bytes());
+        }
+        out.extend_from_slice(&0u16.to_le_bytes());
+        // DWORD-align relative to the entry start.
+        while !(out.len() - start).is_multiple_of(4) {
+            out.push(0);
+        }
+        // Value bytes.
+        out.extend_from_slice(value);
+        // DWORD-align after the value so children start on a 4-byte boundary.
+        while !(out.len() - start).is_multiple_of(4) {
+            out.push(0);
+        }
+        // Children (already expected to be contiguous DWORD-aligned entries).
+        out.extend_from_slice(children);
+        let total = out.len() - start;
+        // Patch in wLength.
+        let len_bytes = (total as u16).to_le_bytes();
+        out[start] = len_bytes[0];
+        out[start + 1] = len_bytes[1];
+        total
+    }
+
+    fn utf16_of(s: &str) -> Vec<u16> {
+        s.encode_utf16().collect()
+    }
+
+    /// Build a minimal well-formed VS_VERSIONINFO block with:
+    ///   VS_VERSION_INFO (52-byte fake FIXEDFILEINFO)
+    ///     StringFileInfo
+    ///       040904b0
+    ///         ProductName = L"Weave\0"   (6 WCHARs incl. NUL)
+    ///     VarFileInfo
+    ///       Translation = [0x04B00409]   (4 bytes)
+    fn build_fixture() -> Vec<u8> {
+        // ProductName string entry: wType=1 (text), wValueLength = char count
+        // including NUL (Wine: "string values return char count incl. null").
+        let pname_value_utf16: Vec<u16> = "Weave\0".encode_utf16().collect();
+        let pname_value_bytes: Vec<u8> = pname_value_utf16
+            .iter()
+            .flat_map(|w| w.to_le_bytes())
+            .collect();
+        let mut pname_entry = Vec::new();
+        emit_entry(
+            &mut pname_entry,
+            &utf16_of("ProductName"),
+            pname_value_utf16.len() as u16, // char count incl. NUL = 6
+            1,
+            &pname_value_bytes,
+            &[],
+        );
+
+        // StringTable "040904b0" has no value (wValueLength=0, wType=1) and
+        // contains the ProductName child.
+        let mut strtable = Vec::new();
+        emit_entry(
+            &mut strtable,
+            &utf16_of("040904b0"),
+            0,
+            1,
+            &[],
+            &pname_entry,
+        );
+
+        // StringFileInfo container.
+        let mut sfi = Vec::new();
+        emit_entry(&mut sfi, &utf16_of("StringFileInfo"), 0, 1, &[], &strtable);
+
+        // Translation: single DWORD (LANGID 0x0409 | CP 0x04B0).
+        let trans_value: [u8; 4] = 0x04B00409u32.to_le_bytes();
+        let mut trans_entry = Vec::new();
+        emit_entry(
+            &mut trans_entry,
+            &utf16_of("Translation"),
+            4, // wType=0 → bytes
+            0,
+            &trans_value,
+            &[],
+        );
+
+        // VarFileInfo container.
+        let mut vfi = Vec::new();
+        emit_entry(&mut vfi, &utf16_of("VarFileInfo"), 0, 1, &[], &trans_entry);
+
+        // Root: fake 52-byte FIXEDFILEINFO payload + SFI + VFI children.
+        let ffi = vec![0u8; 52];
+        let mut children = Vec::new();
+        children.extend_from_slice(&sfi);
+        children.extend_from_slice(&vfi);
+
+        let mut root = Vec::new();
+        emit_entry(
+            &mut root,
+            &utf16_of("VS_VERSION_INFO"),
+            52, // wType=0 → byte count
+            0,
+            &ffi,
+            &children,
+        );
+        root
+    }
+
+    #[test]
+    fn ver_query_value_w_root_path_still_works() {
+        let block = build_fixture();
+        let path: Vec<u16> = "\\\0".encode_utf16().collect();
+        let mut out_ptr: *mut u8 = std::ptr::null_mut();
+        let mut out_len: u32 = 0;
+        let ret = unsafe {
+            ver_query_value_w(block.as_ptr(), path.as_ptr(), &mut out_ptr, &mut out_len)
+        };
+        assert_eq!(ret, 1, "root path must still return TRUE");
+        assert_eq!(out_len, 52, "root puLen = sizeof(VS_FIXEDFILEINFO)");
+        assert!(!out_ptr.is_null());
+    }
+
+    #[test]
+    fn ver_query_value_w_string_file_info_lookup() {
+        let block = build_fixture();
+        let path: Vec<u16> =
+            "\\StringFileInfo\\040904b0\\ProductName\0".encode_utf16().collect();
+        let mut out_ptr: *mut u8 = std::ptr::null_mut();
+        let mut out_len: u32 = 0;
+        let ret = unsafe {
+            ver_query_value_w(block.as_ptr(), path.as_ptr(), &mut out_ptr, &mut out_len)
+        };
+        assert_eq!(ret, 1);
+        // Wine: puLen = char count incl. NUL terminator for wType==1 entries.
+        assert_eq!(out_len, 6, "\"Weave\\0\" is 6 wchars incl. NUL");
+        assert!(!out_ptr.is_null());
+        let bytes = unsafe { std::slice::from_raw_parts(out_ptr, 6 * 2) };
+        let decoded: Vec<u16> = bytes
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        assert_eq!(decoded, "Weave\0".encode_utf16().collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn ver_query_value_w_var_file_info_translation() {
+        let block = build_fixture();
+        let path: Vec<u16> = "\\VarFileInfo\\Translation\0".encode_utf16().collect();
+        let mut out_ptr: *mut u8 = std::ptr::null_mut();
+        let mut out_len: u32 = 0;
+        let ret = unsafe {
+            ver_query_value_w(block.as_ptr(), path.as_ptr(), &mut out_ptr, &mut out_len)
+        };
+        assert_eq!(ret, 1);
+        // Translation is wType==0 → puLen is byte count.
+        assert_eq!(out_len, 4);
+        let bytes = unsafe { std::slice::from_raw_parts(out_ptr, 4) };
+        assert_eq!(bytes, &[0x09, 0x04, 0xB0, 0x04]);
+    }
+
+    #[test]
+    fn ver_query_value_w_missing_string_returns_false() {
+        let block = build_fixture();
+        let path: Vec<u16> =
+            "\\StringFileInfo\\040904b0\\DoesNotExist\0".encode_utf16().collect();
+        let mut out_ptr: *mut u8 = std::ptr::null_mut();
+        let mut out_len: u32 = 0;
+        let ret = unsafe {
+            ver_query_value_w(block.as_ptr(), path.as_ptr(), &mut out_ptr, &mut out_len)
+        };
+        assert_eq!(ret, 0);
+        assert!(out_ptr.is_null());
+        assert_eq!(out_len, 0);
+    }
+
+    #[test]
+    fn ver_query_value_w_missing_intermediate_returns_false() {
+        let block = build_fixture();
+        let path: Vec<u16> = "\\NotAContainer\\Foo\0".encode_utf16().collect();
+        let mut out_ptr: *mut u8 = std::ptr::null_mut();
+        let mut out_len: u32 = 0;
+        let ret = unsafe {
+            ver_query_value_w(block.as_ptr(), path.as_ptr(), &mut out_ptr, &mut out_len)
+        };
+        assert_eq!(ret, 0);
+    }
+
+    #[test]
+    fn ver_query_value_w_case_insensitive_codepage_tag() {
+        // Wine uses wcsnicmp — "040904B0" must resolve same as "040904b0".
+        let block = build_fixture();
+        let path: Vec<u16> =
+            "\\StringFileInfo\\040904B0\\ProductName\0".encode_utf16().collect();
+        let mut out_ptr: *mut u8 = std::ptr::null_mut();
+        let mut out_len: u32 = 0;
+        let ret = unsafe {
+            ver_query_value_w(block.as_ptr(), path.as_ptr(), &mut out_ptr, &mut out_len)
+        };
+        assert_eq!(ret, 1);
+        assert_eq!(out_len, 6);
+    }
+
+    #[test]
+    fn ver_query_value_w_padding_alignment() {
+        // Emit a ProductName with an odd-length key → forces the value_offset
+        // to require real 32-bit padding (not a no-op). "Odd" key has 3 chars,
+        // giving (6 + 4*2) = 14 bytes before value; DWORD_ALIGN → 16. If the
+        // walker miscomputed padding it would point at the wrong bytes.
+        let key_odd = utf16_of("Odd");
+        let pname_utf16: Vec<u16> = "X\0".encode_utf16().collect();
+        let pname_bytes: Vec<u8> = pname_utf16
+            .iter()
+            .flat_map(|w| w.to_le_bytes())
+            .collect();
+        let mut odd_entry = Vec::new();
+        emit_entry(
+            &mut odd_entry,
+            &key_odd,
+            pname_utf16.len() as u16,
+            1,
+            &pname_bytes,
+            &[],
+        );
+
+        let mut strtable = Vec::new();
+        emit_entry(
+            &mut strtable,
+            &utf16_of("040904b0"),
+            0,
+            1,
+            &[],
+            &odd_entry,
+        );
+        let mut sfi = Vec::new();
+        emit_entry(&mut sfi, &utf16_of("StringFileInfo"), 0, 1, &[], &strtable);
+
+        let mut root = Vec::new();
+        emit_entry(
+            &mut root,
+            &utf16_of("VS_VERSION_INFO"),
+            52,
+            0,
+            &[0u8; 52],
+            &sfi,
+        );
+
+        let path: Vec<u16> = "\\StringFileInfo\\040904b0\\Odd\0".encode_utf16().collect();
+        let mut out_ptr: *mut u8 = std::ptr::null_mut();
+        let mut out_len: u32 = 0;
+        let ret = unsafe {
+            ver_query_value_w(root.as_ptr(), path.as_ptr(), &mut out_ptr, &mut out_len)
+        };
+        assert_eq!(ret, 1);
+        assert_eq!(out_len, 2);
+        let bytes = unsafe { std::slice::from_raw_parts(out_ptr, 4) };
+        assert_eq!(bytes, &[b'X', 0, 0, 0]);
+    }
+
+    #[test]
+    fn ver_query_value_w_malformed_block_no_panic() {
+        // Truncated header — first WORD claims wLength=100 but slice is short.
+        let mut bogus = Vec::new();
+        bogus.extend_from_slice(&100u16.to_le_bytes()); // wLength
+        bogus.extend_from_slice(&0u16.to_le_bytes()); // wValueLength
+        bogus.extend_from_slice(&1u16.to_le_bytes()); // wType
+        // Missing szKey + NUL and everything else.
+        // Note: the current impl trusts wLength for slice bounds, so the
+        // caller's invariant "wLength bytes are readable" is what protects us
+        // in production — but our block-walker must still not panic when the
+        // trusted region is itself malformed. Give it a full 100 bytes of
+        // random noise to make the check meaningful.
+        bogus.resize(100, 0xAA);
+
+        let path: Vec<u16> = "\\StringFileInfo\\Foo\\Bar\0".encode_utf16().collect();
+        let mut out_ptr: *mut u8 = std::ptr::null_mut();
+        let mut out_len: u32 = 0;
+        let ret = unsafe {
+            ver_query_value_w(bogus.as_ptr(), path.as_ptr(), &mut out_ptr, &mut out_len)
+        };
+        // Could be 0 (miss) or 0 (malformed) — the contract is *no panic* and
+        // *no true return* on a block this malformed.
+        assert_eq!(ret, 0);
+    }
+
+    #[test]
+    fn ver_query_value_w_fuzzed_length_no_panic() {
+        // Start from a good fixture, then fuzz the root wLength to a small,
+        // non-zero but clearly-too-short value. The walker must bail cleanly.
+        let mut block = build_fixture();
+        block[0] = 10;
+        block[1] = 0;
+        let path: Vec<u16> =
+            "\\StringFileInfo\\040904b0\\ProductName\0".encode_utf16().collect();
+        let mut out_ptr: *mut u8 = std::ptr::null_mut();
+        let mut out_len: u32 = 0;
+        let ret = unsafe {
+            ver_query_value_w(block.as_ptr(), path.as_ptr(), &mut out_ptr, &mut out_len)
+        };
+        assert_eq!(ret, 0);
+    }
+
+    #[test]
+    fn ver_query_value_w_null_args() {
+        let mut out_ptr: *mut u8 = std::ptr::null_mut();
+        let mut out_len: u32 = 0;
+        let path: Vec<u16> = "\\\0".encode_utf16().collect();
+        let ret1 = unsafe {
+            ver_query_value_w(
+                std::ptr::null(),
+                path.as_ptr(),
+                &mut out_ptr,
+                &mut out_len,
+            )
+        };
+        assert_eq!(ret1, 0);
+        let block = build_fixture();
+        let ret2 = unsafe {
+            ver_query_value_w(
+                block.as_ptr(),
+                std::ptr::null(),
+                &mut out_ptr,
+                &mut out_len,
+            )
+        };
+        assert_eq!(ret2, 0);
+    }
+
+    #[test]
+    fn find_child_by_key_walker_finds_siblings() {
+        let block = build_fixture();
+        let root = VerEntry::parse(&block).expect("root parses");
+        let sfi = find_child_by_key(&root, &utf16_of("StringFileInfo"))
+            .expect("StringFileInfo found");
+        assert_eq!(sfi.w_type, 1);
+        let vfi = find_child_by_key(&root, &utf16_of("VarFileInfo"))
+            .expect("VarFileInfo found (sibling after StringFileInfo)");
+        assert_eq!(vfi.w_type, 1);
+        assert!(find_child_by_key(&root, &utf16_of("Missing")).is_none());
+    }
+
+    #[test]
+    fn ver_entry_parse_rejects_truncated() {
+        let buf = vec![0u8; 3]; // shorter than fixed header
+        assert!(VerEntry::parse(&buf).is_none());
+    }
+
+    #[test]
+    fn ver_query_value_a_widens_path() {
+        let block = build_fixture();
+        // ANSI path.
+        let mut path = b"\\StringFileInfo\\040904b0\\ProductName\0".to_vec();
+        let mut out_ptr: *mut u8 = std::ptr::null_mut();
+        let mut out_len: u32 = 0;
+        let ret = unsafe {
+            ver_query_value_a(
+                block.as_ptr(),
+                path.as_mut_ptr(),
+                &mut out_ptr,
+                &mut out_len,
+            )
+        };
+        assert_eq!(ret, 1);
+        assert_eq!(out_len, 6);
     }
 }
