@@ -524,8 +524,8 @@ pub fn char_to_vk(ch: u16) -> Option<(u8, u8)> {
     CHAR_TO_VK[ch as usize]
 }
 
-/// Reset all VK state to zero. Used only in unit tests to ensure a clean slate.
-#[cfg(test)]
+/// Reset all VK state to zero. Used in unit tests and integration test probe gates
+/// to ensure a clean keyboard state before each test case.
 pub fn test_reset() {
     let mut state = lock();
     *state = [0u8; 256];
