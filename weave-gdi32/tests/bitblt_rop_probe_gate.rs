@@ -4,7 +4,7 @@
 //!
 //!   * Known ROPs (SRCCOPY, NOTSRCCOPY, SRCINVERT, SRCAND, SRCPAINT,
 //!     DSTINVERT, WHITENESS, BLACKNESS) return 1 (TRUE).
-//!   * Unknown ROPs return 0 (FALSE).
+//!   * Unknown ROPs lie TRUE (pre-17 behaviour; avoids guest crashes).
 //!   * PATCOPY with a solid brush returns 1; with a non-brush handle selected
 //!     as h_brush (simulated via a pen handle) returns 0.
 //!   * `copy_area_with_rop` and `fill_rect_with_rop` are reachable entry
@@ -56,11 +56,14 @@ fn known_rops_return_true() {
 }
 
 #[test]
-fn unknown_rop_returns_false() {
+fn unknown_rop_lies_true() {
     let (src_dc, dst_dc, src_bm, dst_bm) = make_pair();
     // 0x00AA_0029 (D) — a documented ROP3 not in our dispatcher table.
+    // We lie TRUE on unknown ROPs so guests that don't check the return value
+    // continue rendering (SDL2 testsprite2 SIGSEGVs on 0 return — see task-17
+    // CI fix note in bit_blt's RopPlan::Unknown arm).
     let r = bit_blt(dst_dc, 0, 0, 4, 4, src_dc, 0, 0, 0x00AA_0029);
-    assert_eq!(r, 0, "unknown ROP should return 0");
+    assert_eq!(r, 1, "unknown ROP should lie TRUE to avoid guest crashes");
     let _ = delete_object(src_bm);
     let _ = delete_object(dst_bm);
     let _ = delete_object(src_dc);

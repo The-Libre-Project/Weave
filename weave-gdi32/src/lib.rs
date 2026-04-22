@@ -932,7 +932,18 @@ pub extern "win64" fn bit_blt(
         _ => RopPlan::Unknown,
     };
     match plan {
-        RopPlan::Unknown => 0, // FALSE — callers may branch on unknown ROPs
+        RopPlan::Unknown => {
+            // Pre-task-17 behaviour: return TRUE on unknown ROPs so guests
+            // that don't check the return value continue rendering. SDL2's
+            // testsprite2 hits a non-SRCCOPY ROP at ~5s post-render and
+            // SIGSEGVs in sdl2.dll when BitBlt returns 0 (crash at
+            // NULL+0x1c8). Log the ROP so we can grow coverage over time.
+            static UNK: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+            if UNK.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 8 {
+                eprintln!("weave/gdi32: BitBlt unrecognised ROP {rop:#010x} → lying TRUE");
+            }
+            1
+        }
         RopPlan::Pattern(gx_func, pixel) => {
             weave_user32::backend::fill_rect_with_rop(
                 dst_draw, x as i16, y as i16, cx as u16, cy as u16, gx_func, pixel,
