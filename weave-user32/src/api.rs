@@ -5905,6 +5905,11 @@ pub unsafe extern "win64" fn load_accelerators_a(h_inst: usize, lp_table_name: *
 //   path; WM_CHAR/WM_SYSCHAR for non-FVIRTKEY path. On match: send_message(hwnd, WM_COMMAND,
 //   0x10000|cmd, 0) for regular menu items; WM_SYSCOMMAND for system menu (deferred here).
 //   Return TRUE if matched, FALSE otherwise.
+// Wine ref (modifier-mask block, line ~1710): mask = 0; if NtUserGetKeyState(VK_CONTROL) &
+//   0x8000: mask |= FCONTROL; if NtUserGetKeyState(VK_MENU) & 0x8000: mask |= FALT; if
+//   NtUserGetKeyState(VK_SHIFT) & 0x8000: mask |= FSHIFT; FVIRTKEY path then checks
+//   mask == (fVirt & (FSHIFT|FCONTROL|FALT)); non-FVIRTKEY (WM_CHAR) path only checks
+//   (mask & FALT) == (fVirt & FALT).
 pub unsafe extern "win64" fn translate_accelerator_w(
     h_wnd: usize,
     h_acc_table: usize,
@@ -5981,27 +5986,17 @@ pub unsafe extern "win64" fn translate_accelerator_w(
             continue;
         }
 
-        // Compute current modifier state from MSG.l_param extended bits.
-        // l_param bit 29 = context code (ALT held for WM_SYSKEYDOWN/WM_SYSCHAR).
-        let alt_down =
-            (msg.l_param & 0x2000_0000) != 0 || matches!(msg.message, WM_SYSKEYDOWN | WM_SYSCHAR);
-        // For modifier checking in the FVIRTKEY path we rely on l_param; for a real
-        // implementation GetKeyState would be called, but Weave has no keyboard state
-        // table. Instead we derive shift/ctrl from the message context:
-        // WM_KEYDOWN/WM_SYSKEYDOWN carry no inline shift state — use 0 as best effort.
-        // This is sufficient for Ctrl+letter (FCONTROL, no FSHIFT) and Alt+letter
-        // accelerators that are the vast majority of application accelerators.
-        let shift_down = false; // no keyboard state table in Weave yet
-        let ctrl_down = false; // ditto
-
+        // Build modifier mask from the live VK state table via GetKeyState.
+        // Wine ref (modifier-mask block, menu.c line ~1710): queries NtUserGetKeyState for
+        // VK_CONTROL (0x11), VK_MENU (0x12), VK_SHIFT (0x10); bit 15 set means key is down.
         let mut mask: u8 = 0;
-        if shift_down {
+        if (get_key_state(0x10 /* VK_SHIFT */) as u16) & 0x8000 != 0 {
             mask |= FSHIFT;
         }
-        if ctrl_down {
+        if (get_key_state(0x11 /* VK_CONTROL */) as u16) & 0x8000 != 0 {
             mask |= FCONTROL;
         }
-        if alt_down {
+        if (get_key_state(0x12 /* VK_MENU */) as u16) & 0x8000 != 0 {
             mask |= FALT;
         }
 
