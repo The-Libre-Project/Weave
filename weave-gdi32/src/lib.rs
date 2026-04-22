@@ -2547,26 +2547,215 @@ pub unsafe extern "win64" fn alpha_blend(
 
 /// TransparentBlt — blit with a transparent colour key.
 ///
+/// Copies source pixels to the destination, leaving destination pixels
+/// untouched wherever the matching source pixel equals `cr_transparent`.
+/// COLORREF is `0x00BBGGRR`; exact match only, no tolerance.
+///
+/// First-pass scope: 32-bit ARGB memory-DC source + dest, equal dimensions.
+/// Mismatched dimensions, non-32bpp bitmaps, window-DC dest, or zero area
+/// return FALSE with a rate-limited stderr trace. Stretch-and-key is a
+/// follow-up task.
+///
+/// Wine ref: dlls/win32u/bitblt.c::NtGdiTransparentBlt — builds a 1bpp mask
+/// from the source by `SetBkColor(crTransparent)` + `StretchBlt`, then uses
+/// that mask to `BitBlt` only the non-keyed pixels onto the destination
+/// (mask bit 1 = keyed pixel, skipped). COLORREF is exact match; no
+/// tolerance, no fuzz. We achieve the same result with a direct per-pixel
+/// CPU skip loop — cheaper on a 32bpp round-trip than building a 1bpp mask.
+///
 /// # Safety
-/// All HDC arguments are ignored.
-// Wine ref: dlls/msimg32/msimg32.c — TransparentBlt calls NtGdiTransparentBlt;
-// crTransparent color is matched exactly (no tolerance); src pixels matching the key
-// are skipped; the blit is stretched if src and dst dimensions differ.
+/// `hdc_dest` and `hdc_src` must be valid DC handles whose selected bitmaps
+/// expose 32bpp backing buffers reachable via `objects::get`.
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "win64" fn transparent_blt(
-    _hdc_dest: usize,
-    _x_origin_dest: i32,
-    _y_origin_dest: i32,
-    _w_dest: i32,
-    _h_dest: i32,
-    _hdc_src: usize,
-    _x_origin_src: i32,
-    _y_origin_src: i32,
-    _w_src: i32,
-    _h_src: i32,
-    _cr_transparent: u32,
+    hdc_dest: usize,
+    x_origin_dest: i32,
+    y_origin_dest: i32,
+    w_dest: i32,
+    h_dest: i32,
+    hdc_src: usize,
+    x_origin_src: i32,
+    y_origin_src: i32,
+    w_src: i32,
+    h_src: i32,
+    cr_transparent: u32,
 ) -> i32 {
-    0 // FALSE
+    if w_dest <= 0 || h_dest <= 0 || w_src <= 0 || h_src <= 0 {
+        return 0;
+    }
+
+    // Stretch-and-key is deferred; equal-dim only this pass.
+    if w_src != w_dest || h_src != h_dest {
+        static NO_SCALE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        if NO_SCALE.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 4 {
+            eprintln!(
+                "weave/gdi32: TransparentBlt scale not yet supported ({w_src}x{h_src} -> {w_dest}x{h_dest})"
+            );
+        }
+        return 0;
+    }
+
+    // Resolve source bits (memory-DC with a 32bpp Bitmap or DibSection).
+    let src_info: Option<(u32, u32, usize, u16)> = dc::with(hdc_src, |dc| {
+        let bmp = dc.selected_bitmap;
+        if bmp == 0 {
+            return None;
+        }
+        objects::get(bmp, |kind| match kind {
+            objects::GdiKind::DibSection {
+                width,
+                height,
+                bits_ptr,
+                bpp,
+            }
+            | objects::GdiKind::Bitmap {
+                width,
+                height,
+                bits_ptr,
+                bpp,
+            } => Some((*width, *height, *bits_ptr, *bpp)),
+            _ => None,
+        })
+        .flatten()
+    });
+    let (src_w, src_h, src_ptr, src_bpp) = match src_info {
+        Some(v) => v,
+        None => return 0,
+    };
+    if src_bpp != 32 {
+        static BAD_SRC_BPP: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        if BAD_SRC_BPP.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 4 {
+            eprintln!("weave/gdi32: TransparentBlt src bpp={src_bpp} unsupported (32-bit only)");
+        }
+        return 0;
+    }
+
+    // Resolve dest bits — must be a memory DC with a 32bpp backing bitmap.
+    let dst_info: Option<(u32, u32, usize, u16)> = dc::with(hdc_dest, |dc| {
+        let bmp = dc.selected_bitmap;
+        if bmp == 0 {
+            return None;
+        }
+        objects::get(bmp, |kind| match kind {
+            objects::GdiKind::DibSection {
+                width,
+                height,
+                bits_ptr,
+                bpp,
+            }
+            | objects::GdiKind::Bitmap {
+                width,
+                height,
+                bits_ptr,
+                bpp,
+            } => Some((*width, *height, *bits_ptr, *bpp)),
+            _ => None,
+        })
+        .flatten()
+    });
+    let (dst_w, dst_h, dst_ptr, dst_bpp) = match dst_info {
+        Some(v) => v,
+        None => {
+            static NO_WIN_DC: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+            if NO_WIN_DC.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 4 {
+                eprintln!(
+                    "weave/gdi32: TransparentBlt dest must be a memory DC with a 32bpp bitmap"
+                );
+            }
+            return 0;
+        }
+    };
+    if dst_bpp != 32 {
+        static BAD_DST_BPP: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        if BAD_DST_BPP.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 4 {
+            eprintln!("weave/gdi32: TransparentBlt dst bpp={dst_bpp} unsupported (32-bit only)");
+        }
+        return 0;
+    }
+
+    // Bounds-clip source and dest rectangles against their bitmaps.
+    if x_origin_src < 0
+        || y_origin_src < 0
+        || x_origin_dest < 0
+        || y_origin_dest < 0
+        || (x_origin_src as i64 + w_src as i64) > src_w as i64
+        || (y_origin_src as i64 + h_src as i64) > src_h as i64
+        || (x_origin_dest as i64 + w_dest as i64) > dst_w as i64
+        || (y_origin_dest as i64 + h_dest as i64) > dst_h as i64
+    {
+        return 0;
+    }
+
+    // Reassemble crTransparent (0x00BBGGRR) into the low-24 bits of an ARGB
+    // u32 (0x00RRGGBB) so we can compare against `pixel & 0x00FFFFFF`.
+    //   COLORREF: B=bits 16-23, G=bits 8-15, R=bits 0-7.
+    //   ARGB u32 (little-endian BGRA in memory): R=16-23, G=8-15, B=0-7.
+    let key_rgb = ((cr_transparent & 0x0000_00FF) << 16)   // R → bits 16-23
+        | (cr_transparent & 0x0000_FF00)                   // G stays at 8-15
+        | ((cr_transparent & 0x00FF_0000) >> 16); // B → bits 0-7
+
+    let w = w_src as usize;
+    let h = h_src as usize;
+    let src_stride = src_w as usize * 4;
+    let dst_stride = dst_w as usize * 4;
+
+    let src_bytes =
+        unsafe { std::slice::from_raw_parts(src_ptr as *const u8, src_h as usize * src_stride) };
+    let dst_bytes =
+        unsafe { std::slice::from_raw_parts_mut(dst_ptr as *mut u8, dst_h as usize * dst_stride) };
+
+    for row in 0..h {
+        let sy = y_origin_src as usize + row;
+        let dy = y_origin_dest as usize + row;
+        for col in 0..w {
+            let sx = x_origin_src as usize + col;
+            let dx = x_origin_dest as usize + col;
+            let s_off = sy * src_stride + sx * 4;
+            let d_off = dy * dst_stride + dx * 4;
+            // Source pixel as u32 0xAARRGGBB (little-endian from BGRA memory).
+            let sb = src_bytes[s_off] as u32;
+            let sg = src_bytes[s_off + 1] as u32;
+            let sr = src_bytes[s_off + 2] as u32;
+            let sa = src_bytes[s_off + 3] as u32;
+            let src_rgb = (sr << 16) | (sg << 8) | sb;
+            if src_rgb == key_rgb {
+                // Keyed pixel — destination untouched.
+                continue;
+            }
+            dst_bytes[d_off] = sb as u8;
+            dst_bytes[d_off + 1] = sg as u8;
+            dst_bytes[d_off + 2] = sr as u8;
+            dst_bytes[d_off + 3] = sa as u8;
+        }
+    }
+
+    // Upload the composited dest band so subsequent server-side copies see
+    // the updated pixels — mirrors AlphaBlend (task 20).
+    let dst_draw = dc::with(hdc_dest, |dc| dc.drawable());
+    if dst_draw != 0 {
+        let band_w = w_dest as usize;
+        let band_h = h_dest as usize;
+        let mut band = vec![0u8; band_w * band_h * 4];
+        for row in 0..band_h {
+            let dy = y_origin_dest as usize + row;
+            let src_row_off = dy * dst_stride + x_origin_dest as usize * 4;
+            let dst_row_off = row * band_w * 4;
+            band[dst_row_off..dst_row_off + band_w * 4]
+                .copy_from_slice(&dst_bytes[src_row_off..src_row_off + band_w * 4]);
+        }
+        weave_user32::backend::put_bits_to_pixmap_at(
+            dst_draw,
+            x_origin_dest as i16,
+            y_origin_dest as i16,
+            w_dest as u16,
+            h_dest as u16,
+            band_w * 4,
+            &band,
+            32,
+        );
+    }
+
+    1
 }
 
 /// GradientFill — fill a rectangle or triangle with a colour gradient.
