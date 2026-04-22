@@ -11,26 +11,22 @@ use std::sync::OnceLock;
 
 /// CLSID_ShellLink = {00021401-0000-0000-C000-000000000046} (little-endian wire bytes)
 pub const CLSID_SHELL_LINK: [u8; 16] = [
-    0x01, 0x14, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x46,
+    0x01, 0x14, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46,
 ];
 
 /// IID_IShellLinkW = {000214F9-0000-0000-C000-000000000046} (little-endian wire bytes)
 pub const IID_ISHELL_LINK_W: [u8; 16] = [
-    0xF9, 0x14, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x46,
+    0xF9, 0x14, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46,
 ];
 
 /// IID_IUnknown = {00000000-0000-0000-C000-000000000046}
 const IID_IUNKNOWN: [u8; 16] = [
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x46,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46,
 ];
 
 /// IID_IPersistFile = {0000010B-0000-0000-C000-000000000046}
 const IID_IPERSIST_FILE: [u8; 16] = [
-    0x0B, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x46,
+    0x0B, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46,
 ];
 
 // ── Vtable slot counts ────────────────────────────────────────────────────────
@@ -88,11 +84,9 @@ fn shell_link_vtable() -> &'static [usize; VTABLE_SLOTS] {
             as unsafe extern "win64" fn(*mut ShellLinkObject, *const u8, *mut *mut ()) -> u32
             as usize;
         // Slot 1: AddRef
-        v[1] =
-            shell_link_add_ref as unsafe extern "win64" fn(*mut ShellLinkObject) -> u32 as usize;
+        v[1] = shell_link_add_ref as unsafe extern "win64" fn(*mut ShellLinkObject) -> u32 as usize;
         // Slot 2: Release
-        v[2] =
-            shell_link_release as unsafe extern "win64" fn(*mut ShellLinkObject) -> u32 as usize;
+        v[2] = shell_link_release as unsafe extern "win64" fn(*mut ShellLinkObject) -> u32 as usize;
         // Slots 3-6: Get* methods — leave 0 (not called by installers)
         // Slot 7: SetDescription
         v[7] = shell_link_set_description
@@ -111,8 +105,7 @@ fn shell_link_vtable() -> &'static [usize; VTABLE_SLOTS] {
         // Slots 12-14: GetHotkey, SetHotkey, GetShowCmd — leave 0
         // Slot 15: SetShowCmd
         v[15] = shell_link_set_show_cmd
-            as unsafe extern "win64" fn(*mut ShellLinkObject, i32) -> u32
-            as usize;
+            as unsafe extern "win64" fn(*mut ShellLinkObject, i32) -> u32 as usize;
         // Slot 16: GetIconLocation — leave 0
         // Slot 17: SetIconLocation
         v[17] = shell_link_set_icon_location
@@ -129,11 +122,106 @@ fn shell_link_vtable() -> &'static [usize; VTABLE_SLOTS] {
 
 /// Returns a reference to the lazily-initialized IPersistFile vtable.
 ///
-/// All slots are 0 except Save (slot 6) — TASK-9 fills that in. Built via
-/// `OnceLock` for the same reason as `shell_link_vtable`.
+/// Slot 6 (Save) is wired to `persist_file_save`. All other slots are 0.
+/// Built via `OnceLock` for the same reason as `shell_link_vtable`.
 fn persist_file_vtable() -> &'static [usize; PERSIST_FILE_SLOTS] {
     static VTABLE: OnceLock<[usize; PERSIST_FILE_SLOTS]> = OnceLock::new();
-    VTABLE.get_or_init(|| [0usize; PERSIST_FILE_SLOTS])
+    VTABLE.get_or_init(|| {
+        let mut v = [0usize; PERSIST_FILE_SLOTS];
+        // Slot 6: Save
+        v[6] =
+            persist_file_save as unsafe extern "win64" fn(*mut (), *const u16, i32) -> u32 as usize;
+        v
+    })
+}
+
+// ── ShellLinkSaveData + callback registry ────────────────────────────────────
+
+/// Data snapshot passed to the `IPersistFile::Save` callback.
+///
+/// Represents the shortcut state collected by the Set* methods plus the
+/// destination `.lnk` path the installer passed to `IPersistFile::Save`.
+#[derive(Clone)]
+pub struct ShellLinkSaveData {
+    pub path: Option<String>,
+    pub arguments: Option<String>,
+    pub description: Option<String>,
+    pub working_dir: Option<String>,
+    pub icon_path: Option<String>,
+    pub icon_index: i32,
+    /// The UTF-8 decoded value of the `pszFileName` argument passed to
+    /// `IPersistFile::Save` — typically an absolute Windows path ending in `.lnk`.
+    pub lnk_dest_path: String,
+}
+
+/// Callback type invoked by `IPersistFile::Save`. The function receives a
+/// reference to the shortcut data and returns `Ok(())` on success or an error
+/// message on failure.
+pub type SaveCallback = fn(&ShellLinkSaveData) -> Result<(), String>;
+
+/// Global fallback callback invoked by `persist_file_save` when no per-object
+/// callback is set. Registered once at startup by the embedding layer.
+static GLOBAL_SAVE_CALLBACK: OnceLock<SaveCallback> = OnceLock::new();
+
+/// Register a global `IPersistFile::Save` callback.
+///
+/// Called by the CLI or integration layer at startup so that every
+/// `IPersistFile::Save` call on any `IShellLink` object produces a `.desktop`
+/// file. The callback is invoked after the per-object callback (if any).
+/// Registrations after the first are silently ignored (OnceLock semantics).
+pub fn register_save_callback(f: SaveCallback) {
+    let _ = GLOBAL_SAVE_CALLBACK.set(f);
+}
+
+// ── IPersistFile::Save implementation ────────────────────────────────────────
+
+// Wine ref: dlls/shell32/shelllink.c — IPersistFile_fnSave: calls SHGetPathFromIDList
+// to resolve the pidl, then calls `IShellLink_fnSave` which writes an `.lnk` binary.
+// We do not write `.lnk` binary format; instead we invoke the save callback so the
+// embedding layer can produce a `.desktop` file. Always returns S_OK so installers
+// continue normally.
+unsafe extern "win64" fn persist_file_save(
+    this: *mut (), // pointer to the persist_file_vtable field, NOT to the object base
+    psz_file_name: *const u16,
+    _f_remember: i32,
+) -> u32 {
+    // Recover ShellLinkObject from the IPersistFile sub-object pointer.
+    // QueryInterface(IID_IPersistFile) returned `&raw mut obj.persist_file_vtable`,
+    // so `this` points at that field. Subtract its byte offset to get the base.
+    use std::mem::offset_of;
+    let obj = (this as *mut u8).sub(offset_of!(ShellLinkObject, persist_file_vtable))
+        as *mut ShellLinkObject;
+
+    let lnk_path = decode_wide(psz_file_name);
+    let state = &(*obj).state;
+
+    let data = ShellLinkSaveData {
+        path: state.path.clone(),
+        arguments: state.arguments.clone(),
+        description: state.description.clone(),
+        working_dir: state.working_dir.clone(),
+        icon_path: state.icon_path.clone(),
+        icon_index: state.icon_index,
+        lnk_dest_path: lnk_path.clone(),
+    };
+
+    // Try per-object callback first, then global fallback.
+    let cb = state
+        .save_callback
+        .or_else(|| GLOBAL_SAVE_CALLBACK.get().copied());
+
+    match cb {
+        Some(f) => {
+            if let Err(e) = f(&data) {
+                eprintln!("weave/common: IPersistFile::Save callback error: {e}");
+            }
+        }
+        None => {
+            eprintln!("weave/common: IPersistFile::Save({lnk_path:?}) — no callback registered");
+        }
+    }
+
+    0 // S_OK — never block the installer
 }
 
 // ── COM object layout ─────────────────────────────────────────────────────────
@@ -151,6 +239,10 @@ pub struct ShellLinkState {
     pub icon_index: i32,
     pub description: Option<String>,
     pub show_cmd: i32,
+    /// Per-object callback invoked by `IPersistFile::Save`. Takes priority over
+    /// the global callback registered via `register_save_callback`. Set to `None`
+    /// to use the global fallback.
+    pub save_callback: Option<SaveCallback>,
 }
 
 /// The on-heap COM object: vtable pointer first (Windows COM ABI), then the
@@ -350,6 +442,7 @@ pub unsafe extern "win64" fn create_shell_link(
             icon_index: 0,
             description: None,
             show_cmd: 0,
+            save_callback: None,
         },
     });
 

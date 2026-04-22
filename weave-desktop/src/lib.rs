@@ -122,6 +122,40 @@ pub fn install_desktop_file(app_id: &str, content: &str) -> Result<PathBuf, Desk
     Ok(path)
 }
 
+/// Write a `.desktop` file into an arbitrary destination directory.
+///
+/// Unlike `install_desktop_file`, this function writes directly to `dest_dir`
+/// rather than the user's `~/.local/share/applications`. Used by the
+/// `IPersistFile::Save` callback to place shortcuts relative to a prefix.
+///
+/// The filename is derived from `name` by replacing characters that are illegal
+/// in filenames (anything other than alphanumerics, `-`, `_`, `.`) with `-`.
+pub fn write_shortcut(
+    name: &str,
+    exec_cmd: &str,
+    icon_path: Option<&str>,
+    dest_dir: &std::path::Path,
+) -> Result<std::path::PathBuf, DesktopError> {
+    let slug: String = name
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' || c == '.' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let filename = format!("{slug}.desktop");
+    let dest = dest_dir.join(&filename);
+    let icon_line = icon_path.map(|p| format!("Icon={p}\n")).unwrap_or_default();
+    let content = format!(
+        "[Desktop Entry]\nVersion=1.0\nType=Application\nName={name}\nExec={exec_cmd}\n{icon_line}Terminal=false\n"
+    );
+    fs::write(&dest, content)?;
+    Ok(dest)
+}
+
 /// Removes a previously installed `.desktop` file.
 ///
 /// Returns `Ok(())` even if the file did not exist.
