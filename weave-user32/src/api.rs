@@ -5481,7 +5481,10 @@ pub unsafe extern "win64" fn child_window_from_point_ex(
 // lookup and hands out a synthetic HMENU via the menu_handles slab; we
 // do NOT parse the template (out of scope for this brief).
 pub unsafe extern "win64" fn load_menu_w(h_instance: usize, lp_menu_name: *const u16) -> usize {
-    restrace!("load_menu_w hInst={h_instance:#x} name={:#x}", lp_menu_name as usize);
+    restrace!(
+        "load_menu_w hInst={h_instance:#x} name={:#x}",
+        lp_menu_name as usize
+    );
 
     // Wine: hInst==NULL resolves to the user32 module for system menus.
     // Out of scope for the first pass — return NULL.
@@ -5756,12 +5759,11 @@ pub unsafe extern "win64" fn load_accelerators_w(
     // Read the IMAGE_RESOURCE_DATA_ENTRY to get (blob_ptr, size).
     // SAFETY: find_resource_entry returned a pointer to a valid, bounds-
     // checked IMAGE_RESOURCE_DATA_ENTRY within the mapped image.
-    let (blob_ptr, size) = match unsafe {
-        weave_core::resource::resource_entry_ptr_and_size(image_base, entry_ptr)
-    } {
-        Some((p, s)) => (p as usize, s as u32),
-        None => return 0,
-    };
+    let (blob_ptr, size) =
+        match unsafe { weave_core::resource::resource_entry_ptr_and_size(image_base, entry_ptr) } {
+            Some((p, s)) => (p as usize, s as u32),
+            None => return 0,
+        };
 
     // SAFETY: name_ptr has already been classified above; `name_key_from_wide_ptr`
     // applies the same IS_INTRESOURCE gate before dereferencing.
@@ -5795,10 +5797,7 @@ pub unsafe extern "win64" fn load_accelerators_w(
 // IS_INTRESOURCE preserves ordinals across A/W without any string deref;
 // string names are widened via CP_ACP. Weave's W implementation handles
 // both, so we widen the name here and delegate.
-pub unsafe extern "win64" fn load_accelerators_a(
-    h_inst: usize,
-    lp_table_name: *const u8,
-) -> usize {
+pub unsafe extern "win64" fn load_accelerators_a(h_inst: usize, lp_table_name: *const u8) -> usize {
     let name_ptr = lp_table_name as usize;
     if name_ptr >> 16 == 0 {
         // Ordinal path: reinterpret as u16 ordinal directly — no string deref.

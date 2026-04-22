@@ -11914,7 +11914,6 @@ impl<'a> VerEntry<'a> {
         let start = self.children_offset().min(self.entry.len());
         &self.entry[start..]
     }
-
 }
 
 /// Case-insensitive ASCII-ish UTF-16 compare (Wine uses wcsnicmp). VS_VERSION
@@ -12109,10 +12108,7 @@ pub unsafe extern "win64" fn ver_query_value_w(
     // binary. This matches Wine `*puLen = info->wValueLength;` verbatim.
     let value_abs = current_offset + current.value_offset;
     if value_abs >= w_length {
-        restrace!(
-            "ver_query_value_w sub=\"{}\" → zero (value OOB)",
-            sub_trim
-        );
+        restrace!("ver_query_value_w sub=\"{}\" → zero (value OOB)", sub_trim);
         return 0;
     }
     if !lplp_buffer.is_null() {
@@ -13504,9 +13500,8 @@ mod tests {
         let path: Vec<u16> = "\\\0".encode_utf16().collect();
         let mut out_ptr: *mut u8 = std::ptr::null_mut();
         let mut out_len: u32 = 0;
-        let ret = unsafe {
-            ver_query_value_w(block.as_ptr(), path.as_ptr(), &mut out_ptr, &mut out_len)
-        };
+        let ret =
+            unsafe { ver_query_value_w(block.as_ptr(), path.as_ptr(), &mut out_ptr, &mut out_len) };
         assert_eq!(ret, 1, "root path must still return TRUE");
         assert_eq!(out_len, 52, "root puLen = sizeof(VS_FIXEDFILEINFO)");
         assert!(!out_ptr.is_null());
@@ -13515,13 +13510,13 @@ mod tests {
     #[test]
     fn ver_query_value_w_string_file_info_lookup() {
         let block = build_fixture();
-        let path: Vec<u16> =
-            "\\StringFileInfo\\040904b0\\ProductName\0".encode_utf16().collect();
+        let path: Vec<u16> = "\\StringFileInfo\\040904b0\\ProductName\0"
+            .encode_utf16()
+            .collect();
         let mut out_ptr: *mut u8 = std::ptr::null_mut();
         let mut out_len: u32 = 0;
-        let ret = unsafe {
-            ver_query_value_w(block.as_ptr(), path.as_ptr(), &mut out_ptr, &mut out_len)
-        };
+        let ret =
+            unsafe { ver_query_value_w(block.as_ptr(), path.as_ptr(), &mut out_ptr, &mut out_len) };
         assert_eq!(ret, 1);
         // Wine: puLen = char count incl. NUL terminator for wType==1 entries.
         assert_eq!(out_len, 6, "\"Weave\\0\" is 6 wchars incl. NUL");
@@ -13540,9 +13535,8 @@ mod tests {
         let path: Vec<u16> = "\\VarFileInfo\\Translation\0".encode_utf16().collect();
         let mut out_ptr: *mut u8 = std::ptr::null_mut();
         let mut out_len: u32 = 0;
-        let ret = unsafe {
-            ver_query_value_w(block.as_ptr(), path.as_ptr(), &mut out_ptr, &mut out_len)
-        };
+        let ret =
+            unsafe { ver_query_value_w(block.as_ptr(), path.as_ptr(), &mut out_ptr, &mut out_len) };
         assert_eq!(ret, 1);
         // Translation is wType==0 → puLen is byte count.
         assert_eq!(out_len, 4);
@@ -13553,13 +13547,13 @@ mod tests {
     #[test]
     fn ver_query_value_w_missing_string_returns_false() {
         let block = build_fixture();
-        let path: Vec<u16> =
-            "\\StringFileInfo\\040904b0\\DoesNotExist\0".encode_utf16().collect();
+        let path: Vec<u16> = "\\StringFileInfo\\040904b0\\DoesNotExist\0"
+            .encode_utf16()
+            .collect();
         let mut out_ptr: *mut u8 = std::ptr::null_mut();
         let mut out_len: u32 = 0;
-        let ret = unsafe {
-            ver_query_value_w(block.as_ptr(), path.as_ptr(), &mut out_ptr, &mut out_len)
-        };
+        let ret =
+            unsafe { ver_query_value_w(block.as_ptr(), path.as_ptr(), &mut out_ptr, &mut out_len) };
         assert_eq!(ret, 0);
         assert!(out_ptr.is_null());
         assert_eq!(out_len, 0);
@@ -13571,9 +13565,8 @@ mod tests {
         let path: Vec<u16> = "\\NotAContainer\\Foo\0".encode_utf16().collect();
         let mut out_ptr: *mut u8 = std::ptr::null_mut();
         let mut out_len: u32 = 0;
-        let ret = unsafe {
-            ver_query_value_w(block.as_ptr(), path.as_ptr(), &mut out_ptr, &mut out_len)
-        };
+        let ret =
+            unsafe { ver_query_value_w(block.as_ptr(), path.as_ptr(), &mut out_ptr, &mut out_len) };
         assert_eq!(ret, 0);
     }
 
@@ -13581,13 +13574,13 @@ mod tests {
     fn ver_query_value_w_case_insensitive_codepage_tag() {
         // Wine uses wcsnicmp — "040904B0" must resolve same as "040904b0".
         let block = build_fixture();
-        let path: Vec<u16> =
-            "\\StringFileInfo\\040904B0\\ProductName\0".encode_utf16().collect();
+        let path: Vec<u16> = "\\StringFileInfo\\040904B0\\ProductName\0"
+            .encode_utf16()
+            .collect();
         let mut out_ptr: *mut u8 = std::ptr::null_mut();
         let mut out_len: u32 = 0;
-        let ret = unsafe {
-            ver_query_value_w(block.as_ptr(), path.as_ptr(), &mut out_ptr, &mut out_len)
-        };
+        let ret =
+            unsafe { ver_query_value_w(block.as_ptr(), path.as_ptr(), &mut out_ptr, &mut out_len) };
         assert_eq!(ret, 1);
         assert_eq!(out_len, 6);
     }
@@ -13600,10 +13593,7 @@ mod tests {
         // walker miscomputed padding it would point at the wrong bytes.
         let key_odd = utf16_of("Odd");
         let pname_utf16: Vec<u16> = "X\0".encode_utf16().collect();
-        let pname_bytes: Vec<u8> = pname_utf16
-            .iter()
-            .flat_map(|w| w.to_le_bytes())
-            .collect();
+        let pname_bytes: Vec<u8> = pname_utf16.iter().flat_map(|w| w.to_le_bytes()).collect();
         let mut odd_entry = Vec::new();
         emit_entry(
             &mut odd_entry,
@@ -13615,14 +13605,7 @@ mod tests {
         );
 
         let mut strtable = Vec::new();
-        emit_entry(
-            &mut strtable,
-            &utf16_of("040904b0"),
-            0,
-            1,
-            &[],
-            &odd_entry,
-        );
+        emit_entry(&mut strtable, &utf16_of("040904b0"), 0, 1, &[], &odd_entry);
         let mut sfi = Vec::new();
         emit_entry(&mut sfi, &utf16_of("StringFileInfo"), 0, 1, &[], &strtable);
 
@@ -13639,9 +13622,8 @@ mod tests {
         let path: Vec<u16> = "\\StringFileInfo\\040904b0\\Odd\0".encode_utf16().collect();
         let mut out_ptr: *mut u8 = std::ptr::null_mut();
         let mut out_len: u32 = 0;
-        let ret = unsafe {
-            ver_query_value_w(root.as_ptr(), path.as_ptr(), &mut out_ptr, &mut out_len)
-        };
+        let ret =
+            unsafe { ver_query_value_w(root.as_ptr(), path.as_ptr(), &mut out_ptr, &mut out_len) };
         assert_eq!(ret, 1);
         assert_eq!(out_len, 2);
         let bytes = unsafe { std::slice::from_raw_parts(out_ptr, 4) };
@@ -13655,20 +13637,19 @@ mod tests {
         bogus.extend_from_slice(&100u16.to_le_bytes()); // wLength
         bogus.extend_from_slice(&0u16.to_le_bytes()); // wValueLength
         bogus.extend_from_slice(&1u16.to_le_bytes()); // wType
-        // Missing szKey + NUL and everything else.
-        // Note: the current impl trusts wLength for slice bounds, so the
-        // caller's invariant "wLength bytes are readable" is what protects us
-        // in production — but our block-walker must still not panic when the
-        // trusted region is itself malformed. Give it a full 100 bytes of
-        // random noise to make the check meaningful.
+                                                      // Missing szKey + NUL and everything else.
+                                                      // Note: the current impl trusts wLength for slice bounds, so the
+                                                      // caller's invariant "wLength bytes are readable" is what protects us
+                                                      // in production — but our block-walker must still not panic when the
+                                                      // trusted region is itself malformed. Give it a full 100 bytes of
+                                                      // random noise to make the check meaningful.
         bogus.resize(100, 0xAA);
 
         let path: Vec<u16> = "\\StringFileInfo\\Foo\\Bar\0".encode_utf16().collect();
         let mut out_ptr: *mut u8 = std::ptr::null_mut();
         let mut out_len: u32 = 0;
-        let ret = unsafe {
-            ver_query_value_w(bogus.as_ptr(), path.as_ptr(), &mut out_ptr, &mut out_len)
-        };
+        let ret =
+            unsafe { ver_query_value_w(bogus.as_ptr(), path.as_ptr(), &mut out_ptr, &mut out_len) };
         // Could be 0 (miss) or 0 (malformed) — the contract is *no panic* and
         // *no true return* on a block this malformed.
         assert_eq!(ret, 0);
@@ -13681,13 +13662,13 @@ mod tests {
         let mut block = build_fixture();
         block[0] = 10;
         block[1] = 0;
-        let path: Vec<u16> =
-            "\\StringFileInfo\\040904b0\\ProductName\0".encode_utf16().collect();
+        let path: Vec<u16> = "\\StringFileInfo\\040904b0\\ProductName\0"
+            .encode_utf16()
+            .collect();
         let mut out_ptr: *mut u8 = std::ptr::null_mut();
         let mut out_len: u32 = 0;
-        let ret = unsafe {
-            ver_query_value_w(block.as_ptr(), path.as_ptr(), &mut out_ptr, &mut out_len)
-        };
+        let ret =
+            unsafe { ver_query_value_w(block.as_ptr(), path.as_ptr(), &mut out_ptr, &mut out_len) };
         assert_eq!(ret, 0);
     }
 
@@ -13697,22 +13678,12 @@ mod tests {
         let mut out_len: u32 = 0;
         let path: Vec<u16> = "\\\0".encode_utf16().collect();
         let ret1 = unsafe {
-            ver_query_value_w(
-                std::ptr::null(),
-                path.as_ptr(),
-                &mut out_ptr,
-                &mut out_len,
-            )
+            ver_query_value_w(std::ptr::null(), path.as_ptr(), &mut out_ptr, &mut out_len)
         };
         assert_eq!(ret1, 0);
         let block = build_fixture();
         let ret2 = unsafe {
-            ver_query_value_w(
-                block.as_ptr(),
-                std::ptr::null(),
-                &mut out_ptr,
-                &mut out_len,
-            )
+            ver_query_value_w(block.as_ptr(), std::ptr::null(), &mut out_ptr, &mut out_len)
         };
         assert_eq!(ret2, 0);
     }
@@ -13721,8 +13692,8 @@ mod tests {
     fn find_child_by_key_walker_finds_siblings() {
         let block = build_fixture();
         let root = VerEntry::parse(&block).expect("root parses");
-        let sfi = find_child_by_key(&root, &utf16_of("StringFileInfo"))
-            .expect("StringFileInfo found");
+        let sfi =
+            find_child_by_key(&root, &utf16_of("StringFileInfo")).expect("StringFileInfo found");
         assert_eq!(sfi.w_type, 1);
         let vfi = find_child_by_key(&root, &utf16_of("VarFileInfo"))
             .expect("VarFileInfo found (sibling after StringFileInfo)");

@@ -112,7 +112,10 @@ fn load_accelerators_w_present_returns_nonnull() {
 
     // SAFETY: ordinal path — no deref of the name pointer.
     let h = unsafe { load_accelerators_w(hmodule, makeintresource_w(1)) };
-    assert!(h != 0, "LoadAcceleratorsW(MAKEINTRESOURCE(1)) expected non-null");
+    assert!(
+        h != 0,
+        "LoadAcceleratorsW(MAKEINTRESOURCE(1)) expected non-null"
+    );
     assert!(
         h >= ACCEL_HANDLE_BASE,
         "HACCEL must come from the accel_handles slab"
@@ -131,7 +134,10 @@ fn load_accelerators_w_duplicate_call_dedups() {
     let h1 = unsafe { load_accelerators_w(hmodule, makeintresource_w(1)) };
     let h2 = unsafe { load_accelerators_w(hmodule, makeintresource_w(1)) };
     assert_ne!(h1, 0);
-    assert_eq!(h1, h2, "duplicate LoadAcceleratorsW must return the same HACCEL");
+    assert_eq!(
+        h1, h2,
+        "duplicate LoadAcceleratorsW must return the same HACCEL"
+    );
 }
 
 #[test]
@@ -166,5 +172,8 @@ fn load_accelerators_a_ordinal_trampoline_matches_w() {
     // SAFETY: ordinal path.
     let h_a = unsafe { load_accelerators_a(hmodule, 1usize as *const u8) };
     assert_ne!(h_w, 0);
-    assert_eq!(h_w, h_a, "LoadAcceleratorsA ordinal path must share the HACCEL from W");
+    assert_eq!(
+        h_w, h_a,
+        "LoadAcceleratorsA ordinal path must share the HACCEL from W"
+    );
 }

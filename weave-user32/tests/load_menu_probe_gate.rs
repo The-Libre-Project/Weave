@@ -110,7 +110,10 @@ fn load_menu_w_present_returns_nonnull() {
     // SAFETY: ordinal path — no deref of the name pointer.
     let h = unsafe { load_menu_w(hmodule, makeintresource_w(1)) };
     assert!(h != 0, "LoadMenuW(MAKEINTRESOURCE(1)) expected non-null");
-    assert!(h >= MENU_HANDLE_BASE, "HMENU must come from the menu_handles slab");
+    assert!(
+        h >= MENU_HANDLE_BASE,
+        "HMENU must come from the menu_handles slab"
+    );
 }
 
 #[test]
@@ -158,5 +161,8 @@ fn load_menu_a_ordinal_trampoline_matches_w() {
     // SAFETY: ordinal path.
     let h_a = unsafe { load_menu_a(hmodule, 1usize as *const u8) };
     assert_ne!(h_w, 0);
-    assert_eq!(h_w, h_a, "LoadMenuA ordinal path must share the HMENU from W");
+    assert_eq!(
+        h_w, h_a,
+        "LoadMenuA ordinal path must share the HMENU from W"
+    );
 }

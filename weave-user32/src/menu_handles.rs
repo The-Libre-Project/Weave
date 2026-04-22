@@ -129,7 +129,9 @@ pub fn lookup(handle: usize) -> Option<(usize, u64)> {
     if handle == 0 {
         return None;
     }
-    with_table(None, |t| t.alive.get(&handle).map(|k| (k.hinst, k.name_key)))
+    with_table(None, |t| {
+        t.alive.get(&handle).map(|k| (k.hinst, k.name_key))
+    })
 }
 
 #[cfg(test)]

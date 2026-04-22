@@ -147,9 +147,7 @@ pub fn lookup(handle: usize) -> Option<(usize, u64, AccelBlob)> {
         return None;
     }
     with_table(None, |t| {
-        t.alive
-            .get(&handle)
-            .map(|(k, b)| (k.hinst, k.name_key, *b))
+        t.alive.get(&handle).map(|(k, b)| (k.hinst, k.name_key, *b))
     })
 }
 
