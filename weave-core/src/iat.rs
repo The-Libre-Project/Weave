@@ -13,6 +13,257 @@ use goblin::pe::PE;
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
+// ---------------------------------------------------------------------------
+// Per-slot tracer stub allocator (x86_64 only)
+// ---------------------------------------------------------------------------
+//
+// Each resolved IAT slot gets its own executable stub that:
+//   1. Saves all win64 caller-saved registers (same set as trace_import_stub).
+//   2. Loads slot_va as a 64-bit immediate into rcx (first win64 arg).
+//   3. Calls trace_slot_log_by_va(slot_va) -> real_fn via an absolute r11 call.
+//   4. Restores all saved registers.
+//   5. Tail-jumps into the real function via r10.
+//
+// This eliminates the decode_call_iat_slot dependency for MSVC-compiled
+// binaries (NPP, etc.) whose imports go through multi-instruction wrapper
+// thunks that decode_call_iat_slot cannot recognise.
+
+/// Looks up `slot_va` in RESOLVED_SLOT_MAP, emits one trace line to stderr,
+/// and returns the real function address.  Returns `trace_lookup_miss_stub`
+/// (→ 0) if the slot is not found.
+///
+/// Called from per-slot exec stubs with win64 ABI: `slot_va` arrives in rcx,
+/// return value goes into rax.
+#[cfg(target_arch = "x86_64")]
+extern "win64" fn trace_slot_log_by_va(slot_va: usize) -> usize {
+    if let Ok(map) = resolved_slot_map().lock() {
+        if let Some((name, real_fn)) = map.get(&slot_va) {
+            eprintln!("weave/iat-trace: {name}");
+            return *real_fn;
+        }
+    }
+    trace_lookup_miss_stub as *const () as usize
+}
+
+/// Slab allocator backed by a single `mmap(MAP_ANONYMOUS|MAP_PRIVATE,
+/// PROT_EXEC|PROT_WRITE)` region.  Each stub occupies exactly `STUB_STRIDE`
+/// bytes.  Allocation is append-only — no free.
+#[cfg(target_arch = "x86_64")]
+struct SlabAlloc {
+    base: *mut u8,
+    capacity: usize,
+    used: usize,
+}
+
+#[cfg(target_arch = "x86_64")]
+// SAFETY: SlabAlloc is only accessed through a Mutex<SlabAlloc> and the raw
+// pointer points to mmap-owned memory that lives for the process lifetime.
+unsafe impl Send for SlabAlloc {}
+
+#[cfg(target_arch = "x86_64")]
+impl SlabAlloc {
+    /// Size of each per-slot stub, padded to a 16-byte boundary.
+    /// Template is 147 bytes; rounded up to 160 so each stub starts on a
+    /// 16-byte boundary (cleaner disassembly, no functional requirement).
+    const STUB_STRIDE: usize = 160;
+
+    /// Number of pages to allocate for the exec slab.  4 pages × 4 KiB =
+    /// 16 KiB, which holds 102 stubs — more than enough for NPP's ~83 imports.
+    const SLAB_PAGES: usize = 4;
+
+    /// Try to create a new slab.  Returns `None` if `mmap` fails.
+    fn try_new() -> Option<Self> {
+        let capacity = Self::SLAB_PAGES * 4096;
+        let ptr = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                capacity,
+                libc::PROT_EXEC | libc::PROT_WRITE,
+                libc::MAP_ANONYMOUS | libc::MAP_PRIVATE,
+                -1,
+                0,
+            )
+        };
+        if ptr == libc::MAP_FAILED || ptr.is_null() {
+            return None;
+        }
+        Some(Self {
+            base: ptr as *mut u8,
+            capacity,
+            used: 0,
+        })
+    }
+
+    /// Allocate one stub slot and write the per-slot stub template into it.
+    ///
+    /// `slot_va`     — the IAT slot's virtual address (embedded as imm64 so
+    ///                 the stub does not need decode_call_iat_slot at runtime).
+    /// `log_fn_addr` — absolute address of `trace_slot_log_by_va` to embed.
+    ///
+    /// Returns the stub start address, or `None` if the slab is exhausted.
+    fn alloc_stub(&mut self, slot_va: usize, log_fn_addr: usize) -> Option<usize> {
+        if self.used + Self::STUB_STRIDE > self.capacity {
+            return None;
+        }
+        let stub = unsafe { self.base.add(self.used) };
+        Self::write_stub(stub, slot_va, log_fn_addr);
+        self.used += Self::STUB_STRIDE;
+        Some(stub as usize)
+    }
+
+    /// Write the per-slot stub machine code template into `buf`.
+    ///
+    /// Register contract (identical to `trace_import_stub`):
+    ///   On stub entry:
+    ///     [rsp]            = caller's return address (pushed by their CALL)
+    ///     rax              = caller's rax (vtable base for `call [rax+N]`)
+    ///     rcx/rdx/r8/r9   = caller's first four integer args
+    ///     xmm0..xmm3      = caller's first four float args
+    ///
+    ///   After `sub rsp, 0xA8` (rsp becomes 0 mod 16 — callee-aligned):
+    ///     [rsp+0x00..0x1F] shadow space for callee
+    ///     [rsp+0x20]       saved rcx
+    ///     [rsp+0x28]       saved rdx
+    ///     [rsp+0x30]       saved r8
+    ///     [rsp+0x38]       saved r9
+    ///     [rsp+0x40..0x4F] saved xmm0
+    ///     [rsp+0x50..0x5F] saved xmm1
+    ///     [rsp+0x60..0x6F] saved xmm2
+    ///     [rsp+0x70..0x7F] saved xmm3
+    ///     [rsp+0x80]       real_fn (written after log call returns)
+    ///     [rsp+0xA8]       caller's original return address (pushed by CALL)
+    ///
+    ///   r10 = saved rax (caller's original rax; preserved across the log call
+    ///         via the save at offset 0 and reload at offset 129)
+    ///   r11 = scratch (used as indirect-call target for log fn; volatile in win64)
+    ///
+    /// Stub layout (offsets in `STUB_STRIDE`-byte slot):
+    ///   +0   mov r10, rax              4D 89 C2              (3 bytes)
+    ///   +3   sub rsp, 0xA8             48 81 EC A8 00 00 00  (7 bytes)
+    ///   +10  mov [rsp+0x20], rcx       48 89 4C 24 20        (5 bytes)
+    ///   +15  mov [rsp+0x28], rdx       48 89 54 24 28        (5 bytes)
+    ///   +20  mov [rsp+0x30], r8        4C 89 44 24 30        (5 bytes)
+    ///   +25  mov [rsp+0x38], r9        4C 89 4C 24 38        (5 bytes)
+    ///   +30  movdqu [rsp+0x40], xmm0   F3 0F 7F 44 24 40     (6 bytes)
+    ///   +36  movdqu [rsp+0x50], xmm1   F3 0F 7F 4C 24 50     (6 bytes)
+    ///   +42  movdqu [rsp+0x60], xmm2   F3 0F 7F 54 24 60     (6 bytes)
+    ///   +48  movdqu [rsp+0x70], xmm3   F3 0F 7F 5C 24 70     (6 bytes)
+    ///   +54  mov rcx, imm64            48 B9 <slot_va>       (10 bytes; imm at +56)
+    ///   +64  mov r11, imm64            49 BB <log_fn_addr>   (10 bytes; imm at +66)
+    ///   +74  call r11                  41 FF D3              (3 bytes)
+    ///   +77  mov [rsp+0x80], rax       48 89 84 24 80 00 00 00 (8 bytes)
+    ///   +85  mov rcx, [rsp+0x20]       48 8B 4C 24 20        (5 bytes)
+    ///   +90  mov rdx, [rsp+0x28]       48 8B 54 24 28        (5 bytes)
+    ///   +95  mov r8, [rsp+0x30]        4C 8B 44 24 30        (5 bytes)
+    ///   +100 mov r9, [rsp+0x38]        4C 8B 4C 24 38        (5 bytes)
+    ///   +105 movdqu xmm0, [rsp+0x40]   F3 0F 6F 44 24 40     (6 bytes)
+    ///   +111 movdqu xmm1, [rsp+0x50]   F3 0F 6F 4C 24 50     (6 bytes)
+    ///   +117 movdqu xmm2, [rsp+0x60]   F3 0F 6F 54 24 60     (6 bytes)
+    ///   +123 movdqu xmm3, [rsp+0x70]   F3 0F 6F 5C 24 70     (6 bytes)
+    ///   +129 mov r10, [rsp+0x80]       4C 8B 94 24 80 00 00 00 (8 bytes)
+    ///   +137 add rsp, 0xA8             48 81 C4 A8 00 00 00  (7 bytes)
+    ///   +144 jmp r10                   41 FF E2              (3 bytes)
+    ///   Total used: 147 bytes.  Remaining 13 bytes (144..160) are 0x90 NOPs.
+    fn write_stub(buf: *mut u8, slot_va: usize, log_fn_addr: usize) {
+        // SAFETY: buf points into a live mmap region of at least STUB_STRIDE bytes.
+        let b = unsafe { std::slice::from_raw_parts_mut(buf, Self::STUB_STRIDE) };
+
+        // Fill with NOPs first so trailing bytes are harmless.
+        b.fill(0x90);
+
+        #[rustfmt::skip]
+        let template: [u8; 147] = [
+            // +0  mov r10, rax
+            0x4D, 0x89, 0xC2,
+            // +3  sub rsp, 0xA8
+            0x48, 0x81, 0xEC, 0xA8, 0x00, 0x00, 0x00,
+            // +10 mov [rsp+0x20], rcx
+            0x48, 0x89, 0x4C, 0x24, 0x20,
+            // +15 mov [rsp+0x28], rdx
+            0x48, 0x89, 0x54, 0x24, 0x28,
+            // +20 mov [rsp+0x30], r8
+            0x4C, 0x89, 0x44, 0x24, 0x30,
+            // +25 mov [rsp+0x38], r9
+            0x4C, 0x89, 0x4C, 0x24, 0x38,
+            // +30 movdqu [rsp+0x40], xmm0
+            0xF3, 0x0F, 0x7F, 0x44, 0x24, 0x40,
+            // +36 movdqu [rsp+0x50], xmm1
+            0xF3, 0x0F, 0x7F, 0x4C, 0x24, 0x50,
+            // +42 movdqu [rsp+0x60], xmm2
+            0xF3, 0x0F, 0x7F, 0x54, 0x24, 0x60,
+            // +48 movdqu [rsp+0x70], xmm3
+            0xF3, 0x0F, 0x7F, 0x5C, 0x24, 0x70,
+            // +54 mov rcx, imm64  (slot_va; imm64 at offset +56)
+            0x48, 0xB9,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            // +64 mov r11, imm64  (log_fn_addr; imm64 at offset +66)
+            0x49, 0xBB,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            // +74 call r11
+            0x41, 0xFF, 0xD3,
+            // +77 mov [rsp+0x80], rax
+            0x48, 0x89, 0x84, 0x24, 0x80, 0x00, 0x00, 0x00,
+            // +85 mov rcx, [rsp+0x20]
+            0x48, 0x8B, 0x4C, 0x24, 0x20,
+            // +90 mov rdx, [rsp+0x28]
+            0x48, 0x8B, 0x54, 0x24, 0x28,
+            // +95 mov r8, [rsp+0x30]
+            0x4C, 0x8B, 0x44, 0x24, 0x30,
+            // +100 mov r9, [rsp+0x38]
+            0x4C, 0x8B, 0x4C, 0x24, 0x38,
+            // +105 movdqu xmm0, [rsp+0x40]
+            0xF3, 0x0F, 0x6F, 0x44, 0x24, 0x40,
+            // +111 movdqu xmm1, [rsp+0x50]
+            0xF3, 0x0F, 0x6F, 0x4C, 0x24, 0x50,
+            // +117 movdqu xmm2, [rsp+0x60]
+            0xF3, 0x0F, 0x6F, 0x54, 0x24, 0x60,
+            // +123 movdqu xmm3, [rsp+0x70]
+            0xF3, 0x0F, 0x6F, 0x5C, 0x24, 0x70,
+            // +129 mov r10, [rsp+0x80]
+            0x4C, 0x8B, 0x94, 0x24, 0x80, 0x00, 0x00, 0x00,
+            // +137 add rsp, 0xA8
+            0x48, 0x81, 0xC4, 0xA8, 0x00, 0x00, 0x00,
+            // +144 jmp r10
+            0x41, 0xFF, 0xE2,
+        ];
+
+        b[..147].copy_from_slice(&template);
+
+        // Patch slot_va immediate at offset 56.
+        b[56..64].copy_from_slice(&(slot_va as u64).to_le_bytes());
+
+        // Patch log_fn_addr immediate at offset 66.
+        b[66..74].copy_from_slice(&(log_fn_addr as u64).to_le_bytes());
+    }
+}
+
+/// Global exec-slab for per-slot tracer stubs.
+#[cfg(target_arch = "x86_64")]
+static STUB_SLAB: OnceLock<Mutex<Option<SlabAlloc>>> = OnceLock::new();
+
+#[cfg(target_arch = "x86_64")]
+fn stub_slab() -> &'static Mutex<Option<SlabAlloc>> {
+    STUB_SLAB.get_or_init(|| Mutex::new(SlabAlloc::try_new()))
+}
+
+/// Allocate a per-slot exec stub for `slot_va` → `real_fn_addr` and return
+/// its address.  On allocation failure (mmap failed or slab exhausted),
+/// returns `real_fn_addr` directly so the tracer degrades silently to a
+/// normal (untraced) call.
+#[cfg(target_arch = "x86_64")]
+fn alloc_per_slot_stub(slot_va: usize, real_fn_addr: usize) -> usize {
+    let log_fn = trace_slot_log_by_va as *const () as usize;
+    if let Ok(mut guard) = stub_slab().lock() {
+        if let Some(ref mut slab) = *guard {
+            if let Some(stub_addr) = slab.alloc_stub(slot_va, log_fn) {
+                return stub_addr;
+            }
+        }
+    }
+    // Fallback: tracer disabled for this slot; write real fn directly.
+    real_fn_addr
+}
+
 /// Global map: unresolved IAT slot VA → "dll::func".
 /// Populated at `patch_best_effort` time; queried by `unresolved_import_stub_log`
 /// at call time to identify which function fired.
@@ -598,7 +849,14 @@ unsafe fn patch_inner(
                         if let Ok(mut map) = resolved_slot_map().lock() {
                             map.insert(slot_va, (format!("{dll_name}::{func_name}"), addr));
                         }
-                        trace_import_stub as *const () as u64
+                        // Allocate a per-slot exec stub that embeds slot_va
+                        // as an immediate.  This avoids the decode_call_iat_slot
+                        // dependency that fails for MSVC wrapper thunks (the
+                        // E8 → preamble → FF25 shape used by NPP and similar
+                        // MSVC-compiled binaries).  Falls back to addr directly
+                        // if the slab is unavailable (tracer silently disabled
+                        // for that slot).
+                        alloc_per_slot_stub(slot_va, addr) as u64
                     } else {
                         addr as u64
                     };
