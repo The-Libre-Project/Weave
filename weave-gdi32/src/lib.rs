@@ -1012,10 +1012,26 @@ pub extern "win64" fn bit_blt(
     }
 }
 
-/// StretchBlt: stretched bit-block transfer (stub).
-// Wine ref: dlls/win32u/bitblt.c — NtGdiStretchBlt uses stretch_blt_mode
-// (COLORONCOLOR=3 deletes rows/cols; HALFTONE=4 uses averaging); negative w/h
-// mirror the image; returns FALSE if src and dst DCs have incompatible formats.
+/// StretchBlt: stretched bit-block transfer.
+///
+/// Scales the source rectangle to fit the destination rectangle using the
+/// DC's current StretchBlt filter mode. Weave implements COLORONCOLOR
+/// (nearest-neighbor) only — the default Wine uses for all depths and the
+/// mode apps like IrfanView expect.
+///
+/// Strategy: CPU-side nearest-neighbor scale from the source bitmap's
+/// `bits_ptr` into a scratch buffer sized to the destination rectangle,
+/// upload that scratch to a temporary X11 Pixmap via `put_dib_to_pixmap`,
+/// then route the final blit to the destination drawable through the
+/// Task-17 ROP dispatch path (SRCCOPY → lean `copy_area`; others →
+/// `copy_area_with_rop`). Negative `w_dest`/`h_dest` mirror the output by
+/// stepping through the dest pixels in reverse.
+///
+/// Wine ref: dlls/win32u/bitblt.c::stretch_bits — malloc(dst biSizeImage),
+/// call stretch_bitmapinfo (nearest-neighbor for non-HALFTONE modes), then
+/// transfer to the destination. dlls/winex11.drv/bitblt.c::X11DRV_StretchBlt
+/// performs the scale on the CPU then uploads via XPutImage.
+#[allow(clippy::too_many_arguments)]
 pub extern "win64" fn stretch_blt(
     hdc_dest: usize,
     x_dest: i32,
@@ -1029,18 +1045,248 @@ pub extern "win64" fn stretch_blt(
     h_src: i32,
     rop: u32,
 ) -> i32 {
-    let _ = (
-        hdc_dest, x_dest, y_dest, w_dest, h_dest, hdc_src, x_src, y_src, w_src, h_src, rop,
-    );
+    // Zero-area source or destination: Wine returns FALSE.
+    if w_dest == 0 || h_dest == 0 || w_src == 0 || h_src == 0 {
+        return 0;
+    }
+
+    let mode = dc::with(hdc_dest, |dc| dc.stretch_blt_mode);
+
+    // Only COLORONCOLOR (nearest-neighbor) is implemented. HALFTONE /
+    // BLACKONWHITE / WHITEONBLACK return FALSE with a traced warning so
+    // callers learn to expect it. Wine renders all non-HALFTONE modes as
+    // nearest-neighbor anyway, but staying strict here keeps the surface
+    // honest until linear-averaging lands in a later task.
+    if mode != defs::COLORONCOLOR {
+        static UNSUPPORTED_MODE: std::sync::atomic::AtomicU32 =
+            std::sync::atomic::AtomicU32::new(0);
+        if UNSUPPORTED_MODE.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 8 {
+            eprintln!("weave/gdi32: StretchBlt mode={mode} unsupported (COLORONCOLOR only)");
+        }
+        return 0;
+    }
+
+    // Resolve src bitmap info. Bitmap and DibSection share the same 32bpp
+    // ARGB layout in Weave (see create_compatible_bitmap).
+    let src_info: Option<(u32, u32, usize, u16)> = dc::with(hdc_src, |dc| {
+        let bmp = dc.selected_bitmap;
+        if bmp == 0 {
+            return None;
+        }
+        objects::get(bmp, |kind| match kind {
+            objects::GdiKind::DibSection {
+                width,
+                height,
+                bits_ptr,
+                bpp,
+            }
+            | objects::GdiKind::Bitmap {
+                width,
+                height,
+                bits_ptr,
+                bpp,
+            } => Some((*width, *height, *bits_ptr, *bpp)),
+            _ => None,
+        })
+        .flatten()
+    });
+
+    let (src_w, src_h, src_ptr, src_bpp) = match src_info {
+        Some(v) => v,
+        None => {
+            // No source bitmap — nothing to scale. Return FALSE.
+            return 0;
+        }
+    };
+
+    // 32-bit ARGB only for the first pass. 8/16/24-bit DIBs return FALSE;
+    // widening the scale path to other depths is deferred.
+    if src_bpp != 32 {
+        static UNSUPPORTED_BPP: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        if UNSUPPORTED_BPP.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 4 {
+            eprintln!("weave/gdi32: StretchBlt src bpp={src_bpp} unsupported (32-bit only)");
+        }
+        return 0;
+    }
+
+    // Absolute destination size for the scratch buffer; mirroring is applied
+    // through the step direction when walking the dest grid.
+    let abs_w_dest = w_dest.unsigned_abs() as usize;
+    let abs_h_dest = h_dest.unsigned_abs() as usize;
+
+    // Guard against overflow in the scratch allocation (treat as FALSE).
+    let scratch_pixels = match abs_w_dest.checked_mul(abs_h_dest) {
+        Some(v) => v,
+        None => return 0,
+    };
+    let scratch_bytes = match scratch_pixels.checked_mul(4) {
+        Some(v) => v,
+        None => return 0,
+    };
+
+    // Nearest-neighbor scale into the scratch buffer.
+    // Wine ref: dlls/win32u/bitblt.c::stretch_bitmapinfo — for COLORONCOLOR
+    // the formula reduces to src_idx = src_origin + dst_idx * src_span /
+    // dst_span (integer divide). Negative dst spans mirror via the step
+    // direction of the walk; negative src spans do the same for the source.
+    let src_row_stride = src_w as usize * 4;
+    let mut scratch = vec![0u8; scratch_bytes];
+    let src_bytes = unsafe {
+        std::slice::from_raw_parts(src_ptr as *const u8, src_h as usize * src_row_stride)
+    };
+
+    let src_x_start: i64 = x_src as i64;
+    let src_y_start: i64 = y_src as i64;
+    let src_w_signed: i64 = w_src as i64;
+    let src_h_signed: i64 = h_src as i64;
+
+    // Dest-walk direction. w_dest/h_dest < 0 flip the destination output;
+    // for the scratch we simply walk destination pixels in reverse order.
+    let flip_x = w_dest < 0;
+    let flip_y = h_dest < 0;
+
+    for dy in 0..abs_h_dest {
+        // Compute which source row maps to this dest row. Using the signed
+        // src span preserves the mirror-on-negative-src behaviour Wine
+        // documents; COLORONCOLOR always floors toward the origin.
+        let dy_out = if flip_y { abs_h_dest - 1 - dy } else { dy };
+        let sy_signed = src_y_start + (dy as i64 * src_h_signed) / (abs_h_dest.max(1) as i64);
+        // Clamp to source bounds defensively. If src_y_start + span slides
+        // outside the bitmap, Wine leaves undefined garbage there; we clamp
+        // to keep the scratch deterministic.
+        let sy = if sy_signed < 0 {
+            0
+        } else if sy_signed >= src_h as i64 {
+            (src_h as i64 - 1).max(0)
+        } else {
+            sy_signed
+        } as usize;
+        for dx in 0..abs_w_dest {
+            let dx_out = if flip_x { abs_w_dest - 1 - dx } else { dx };
+            let sx_signed = src_x_start + (dx as i64 * src_w_signed) / (abs_w_dest.max(1) as i64);
+            let sx = if sx_signed < 0 {
+                0
+            } else if sx_signed >= src_w as i64 {
+                (src_w as i64 - 1).max(0)
+            } else {
+                sx_signed
+            } as usize;
+            let src_off = sy * src_row_stride + sx * 4;
+            let dst_off = (dy_out * abs_w_dest + dx_out) * 4;
+            // Bounds check — clamping above should guarantee in-range but
+            // keep the copy safe if abs_w_src/abs_h_src is 0 (handled via
+            // the clamp when src_w_signed is 0, though we short-circuited
+            // zero-area src at the top).
+            if src_off + 4 <= src_bytes.len() && dst_off + 4 <= scratch.len() {
+                scratch[dst_off..dst_off + 4].copy_from_slice(&src_bytes[src_off..src_off + 4]);
+            }
+        }
+    }
+
+    // Upload scratch to a temporary Pixmap the same size as the scaled
+    // output, then blit that Pixmap into the destination drawable at
+    // (x_dest, y_dest). Using a temp Pixmap lets us reuse the existing
+    // put_dib_to_pixmap + copy_area helpers without introducing a new
+    // "put rect at offset" backend entry point.
+    let dst_draw = dc::with(hdc_dest, |dc| dc.drawable());
+    if dst_draw == 0 {
+        return 0;
+    }
+
+    let scratch_ptr = scratch.as_ptr() as usize;
+    let tmp_pixmap =
+        weave_user32::backend::create_pixmap(dst_draw, abs_w_dest as u16, abs_h_dest as u16);
+    if tmp_pixmap == 0 {
+        // Backend unavailable (headless macOS, no X11). Return TRUE per the
+        // Task-17 "lie TRUE" policy for dispatch-reached-backend cases so
+        // callers that ignore the return value keep running. The CPU scale
+        // above already ran — skipping only the server-side upload.
+        return 1;
+    }
+    unsafe {
+        weave_user32::backend::put_dib_to_pixmap(
+            tmp_pixmap,
+            abs_w_dest as u32,
+            abs_h_dest as u32,
+            scratch_ptr,
+            32,
+        );
+    }
+
+    // Route the final Pixmap→dest blit through the Task-17 ROP dispatch.
+    // SRCCOPY takes the lean `copy_area`; other source ROPs go through
+    // `copy_area_with_rop`. Non-source ROPs (PATCOPY, DSTINVERT, etc.)
+    // do not apply to StretchBlt's pattern slot in this first cut — we
+    // still accept them but just drop the source contribution (they
+    // would need a separate fill pass we haven't wired yet).
+    let gx_func = match rop {
+        defs::SRCCOPY => Some(weave_user32::backend::GX_COPY),
+        defs::NOTSRCCOPY => Some(weave_user32::backend::GX_COPY_INVERTED),
+        defs::SRCINVERT => Some(weave_user32::backend::GX_XOR),
+        defs::SRCAND => Some(weave_user32::backend::GX_AND),
+        defs::SRCPAINT => Some(weave_user32::backend::GX_OR),
+        _ => None,
+    };
+
+    match gx_func {
+        Some(gx) if gx == weave_user32::backend::GX_COPY => {
+            weave_user32::backend::copy_area(
+                tmp_pixmap,
+                dst_draw,
+                0,
+                0,
+                x_dest as i16,
+                y_dest as i16,
+                abs_w_dest as u16,
+                abs_h_dest as u16,
+            );
+        }
+        Some(gx) => {
+            weave_user32::backend::copy_area_with_rop(
+                tmp_pixmap,
+                dst_draw,
+                0,
+                0,
+                x_dest as i16,
+                y_dest as i16,
+                abs_w_dest as u16,
+                abs_h_dest as u16,
+                gx,
+            );
+        }
+        None => {
+            // Unknown/unsupported ROP — log once and lie TRUE (same policy
+            // as bit_blt's RopPlan::Unknown arm; see Task-17 CI fix).
+            static UNK: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+            if UNK.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 8 {
+                eprintln!("weave/gdi32: StretchBlt unrecognised ROP {rop:#010x} → lying TRUE");
+            }
+        }
+    }
+
+    weave_user32::backend::free_pixmap(tmp_pixmap);
     1
 }
 
-/// SetStretchBltMode: set the bitmap-stretching mode (stub).
-// Wine ref: dlls/win32u/dc.c::set_stretch_blt_mode — stores mode in
-// dc->attr->stretch_blt_mode; returns previous mode; HALFTONE(4) requires
-// SetBrushOrgEx to align the halftone brush, which is skipped here.
-pub extern "win64" fn set_stretch_blt_mode(_hdc: usize, _mode: i32) -> i32 {
-    1
+/// SetStretchBltMode: set the bitmap-stretching mode.
+///
+/// Stores the mode on the DC and returns the previous mode. Valid modes are
+/// BLACKONWHITE(1), WHITEONBLACK(2), COLORONCOLOR(3), HALFTONE(4). Weave's
+/// stretch_blt only honours COLORONCOLOR; other modes return FALSE from
+/// StretchBlt but the mode is still stored here so round-tripping the DC
+/// state works (SaveDC/RestoreDC, GetStretchBltMode).
+///
+/// Wine ref: dlls/win32u/dc.c::set_stretch_blt_mode — reads the current
+/// mode from dc->attr->stretch_blt_mode, writes the new one, and returns
+/// the old value. HALFTONE(4) requires SetBrushOrgEx to align the halftone
+/// brush, which Wine honours but Weave skips.
+pub extern "win64" fn set_stretch_blt_mode(hdc: usize, mode: i32) -> i32 {
+    let mut prev = defs::COLORONCOLOR;
+    dc::with_mut(hdc, |dc| {
+        prev = dc.stretch_blt_mode;
+        dc.stretch_blt_mode = mode;
+    });
+    prev
 }
 
 /// SetROP2: set the foreground mix mode (stub).

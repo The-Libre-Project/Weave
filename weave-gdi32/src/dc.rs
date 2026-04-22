@@ -40,6 +40,13 @@ pub struct DcState {
     pub pen_pos: Point,      // current pen position (MoveToEx/LineTo)
     pub viewport_org: Point, // viewport origin (SetViewportOrgEx)
     pub window_org: Point,   // window origin (SetWindowOrgEx)
+    /// StretchBlt filter mode (SetStretchBltMode).
+    ///
+    /// Wine ref: dlls/win32u/dc.c — default stretch_blt_mode is BLACKONWHITE(1)
+    /// per Windows spec, but Wine's rendering path treats all non-HALFTONE modes
+    /// as nearest-neighbor. Weave defaults to COLORONCOLOR(3) which is what
+    /// Windows docs recommend and what real-world apps (IrfanView etc.) rely on.
+    pub stretch_blt_mode: i32,
 }
 
 impl DcState {
@@ -58,6 +65,7 @@ impl DcState {
             pen_pos: Point { x: 0, y: 0 },
             viewport_org: Point { x: 0, y: 0 },
             window_org: Point { x: 0, y: 0 },
+            stretch_blt_mode: COLORONCOLOR,
         }
     }
 }

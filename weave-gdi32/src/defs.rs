@@ -65,6 +65,22 @@ pub const COMPLEXREGION: i32 = 3;
 // ── Font type flags for EnumFontFamiliesEx callback ──────────────────────────
 pub const TRUETYPE_FONTTYPE: u32 = 0x0004;
 
+// ── StretchBlt filter modes (SetStretchBltMode) ───────────────────────────────
+// Wine ref: dlls/win32u/dc.c::set_stretch_blt_mode — stored in dc->attr->stretch_blt_mode.
+// BLACKONWHITE/STRETCH_ANDSCANS (1): AND pixels when shrinking (preserves black).
+// WHITEONBLACK/STRETCH_ORSCANS (2): OR pixels when shrinking (preserves white).
+// COLORONCOLOR/STRETCH_DELETESCANS (3): delete rows/cols — nearest-neighbor, the
+// default used by Wine for all depths.
+// HALFTONE (4): linear-averaging filter; requires SetBrushOrgEx for brush alignment.
+pub const BLACKONWHITE: i32 = 1;
+pub const WHITEONBLACK: i32 = 2;
+pub const COLORONCOLOR: i32 = 3;
+pub const HALFTONE: i32 = 4;
+pub const STRETCH_ANDSCANS: i32 = BLACKONWHITE;
+pub const STRETCH_ORSCANS: i32 = WHITEONBLACK;
+pub const STRETCH_DELETESCANS: i32 = COLORONCOLOR;
+pub const STRETCH_HALFTONE: i32 = HALFTONE;
+
 // ── R2 mix mode (ROP2) ────────────────────────────────────────────────────────
 pub const R2_COPYPEN: i32 = 13;
 
