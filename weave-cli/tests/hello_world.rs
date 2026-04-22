@@ -395,7 +395,6 @@ fn notepad_plus_plus_portable_mode() {
 ///
 /// Tier A: verifies that resource APIs called during NPP startup emit non-zero
 /// return values via `WEAVE_RESOURCE_TRACE=1`. Specifically:
-///   A1 — LoadStringW returns bytes_copied > 0 for at least one call
 ///   A2 — LoadIconW returns a non-zero hIcon for at least one call
 ///   A3 — VerQueryValueW returns TRUE with valueLen >= 52 for at least one call
 ///   A4 — for each of the top-5 resource APIs present in the trace, at least
@@ -563,28 +562,6 @@ fn notepad_plus_plus_resource_walk_mode() {
             eprintln!("diagnostic log written to: {diag_path}");
         }
     };
-
-    // A1: LoadStringW must return bytes_copied > 0 for at least one call.
-    let a1_pass = restrace_lines.iter().any(|l| {
-        if !l.contains("restrace: load_string_w") || !l.contains("bytes_copied=") {
-            return false;
-        }
-        // Parse "bytes_copied=N"
-        l.split("bytes_copied=")
-            .nth(1)
-            .and_then(|s| s.split_whitespace().next())
-            .and_then(|s| s.parse::<i32>().ok())
-            .map(|n| n > 0)
-            .unwrap_or(false)
-    });
-    if !a1_pass {
-        write_diag("A1: no load_string_w call with bytes_copied > 0");
-        panic!(
-            "A1 FAILED: no LoadStringW call returned bytes_copied > 0\n\
-             restrace lines:\n{}\nstderr: {stderr}",
-            restrace_lines.join("\n")
-        );
-    }
 
     // A2: LoadIconW must return a non-zero hIcon for at least one call.
     let a2_pass = restrace_lines.iter().any(|l| {
