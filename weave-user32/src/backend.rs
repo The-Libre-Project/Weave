@@ -28,8 +28,9 @@ mod inner {
     use x11rb::atom_manager;
     use x11rb::connection::Connection;
     use x11rb::protocol::xproto::{
-        AtomEnum, ConfigureNotifyEvent, ConfigureWindowAux, ConnectionExt, CreateGCAux,
-        CreateWindowAux, EventMask, Gcontext, ImageFormat, PropMode, Segment, Window, WindowClass,
+        AtomEnum, ChangeGCAux, ConfigureNotifyEvent, ConfigureWindowAux, ConnectionExt,
+        CreateGCAux, CreateWindowAux, EventMask, Gcontext, ImageFormat, PropMode, Rectangle,
+        Segment, Window, WindowClass, GX,
     };
     use x11rb::protocol::Event;
     use x11rb::rust_connection::RustConnection;
@@ -427,6 +428,119 @@ mod inner {
             .copy_area(src, dst, gc_id, src_x, src_y, dst_x, dst_y, width, height);
         let _ = g.conn.free_gc(gc_id);
         let _ = g.conn.sync();
+    }
+
+    /// Copy a rectangle with an explicit X11 GC `function` (raster-op) applied.
+    ///
+    /// `gx_func` selects the binary combine op — GXcopy (SRCCOPY), GXxor
+    /// (SRCINVERT), GXand (SRCAND), GXor (SRCPAINT), GXcopyInverted
+    /// (NOTSRCCOPY). The GC function is reset to GXcopy before `free_gc`; since
+    /// each call allocates a fresh GC this reset is defensive (the GC is freed
+    /// anyway), but it mirrors Wine's `XSetFunction(..., GXcopy)` pattern so
+    /// that any future shared-GC refactor stays correct.
+    ///
+    /// Wine ref: dlls/winex11.drv/bitblt.c — `XSetFunction(gdi_display,
+    /// physDev->gc, OP_ROP(*opcode))` before `XCopyArea`, then
+    /// `XSetFunction(..., GXcopy)` after (see `X11DRV_StretchBlt` around line
+    /// 869 and the BITBLT_Opcodes table at line 71).
+    #[allow(clippy::too_many_arguments)]
+    pub fn copy_area_with_rop(
+        src: u32,
+        dst: u32,
+        src_x: i16,
+        src_y: i16,
+        dst_x: i16,
+        dst_y: i16,
+        width: u16,
+        height: u16,
+        gx_func: u32,
+    ) {
+        if width == 0 || height == 0 {
+            return;
+        }
+        let x11 = match x11() {
+            Some(m) => m,
+            None => return,
+        };
+        let g = match lock_x11(x11) {
+            Some(g) => g,
+            None => return,
+        };
+        let gc_id = match g.conn.generate_id() {
+            Ok(id) => id,
+            Err(_) => return,
+        };
+        let _ = g
+            .conn
+            .create_gc(gc_id, dst, &CreateGCAux::new().function(GX::from(gx_func)));
+        let _ = g
+            .conn
+            .copy_area(src, dst, gc_id, src_x, src_y, dst_x, dst_y, width, height);
+        // Reset function on this GC before release; see module-level comment.
+        let _ = g
+            .conn
+            .change_gc(gc_id, &ChangeGCAux::new().function(GX::COPY));
+        let _ = g.conn.free_gc(gc_id);
+        let _ = g.conn.sync();
+    }
+
+    /// Fill a rectangle using an X11 GC `function` other than GXcopy.
+    ///
+    /// For source-less ROPs (DSTINVERT → GXinvert, WHITENESS → GXset,
+    /// BLACKNESS → GXclear, PATCOPY → GXcopy with brush foreground) Wine
+    /// calls `XFillRectangle` with the chosen function. GXinvert/GXset/GXclear
+    /// do not consult the foreground pixel; GXcopy does. `pixel` is ignored
+    /// when the op is GXinvert/GXset/GXclear but must be valid for GXcopy.
+    ///
+    /// Wine ref: dlls/winex11.drv/bitblt.c::X11DRV_PatBlt (line 757) — for
+    /// BLACKNESS/WHITENESS/DSTINVERT it switches XSetFunction then calls
+    /// `XFillRectangle( gdi_display, physDev->drawable, physDev->gc, ... )`.
+    pub fn fill_rect_with_rop(
+        xcb_id: u32,
+        x: i16,
+        y: i16,
+        w: u16,
+        h: u16,
+        gx_func: u32,
+        pixel: u32,
+    ) {
+        if w == 0 || h == 0 {
+            return;
+        }
+        let x11 = match x11() {
+            Some(m) => m,
+            None => return,
+        };
+        let g = match lock_x11(x11) {
+            Some(g) => g,
+            None => return,
+        };
+        let gc_id: Gcontext = match g.conn.generate_id() {
+            Ok(id) => id,
+            Err(_) => return,
+        };
+        let _ = g.conn.create_gc(
+            gc_id,
+            xcb_id,
+            &CreateGCAux::new()
+                .function(GX::from(gx_func))
+                .foreground(pixel),
+        );
+        let _ = g.conn.poly_fill_rectangle(
+            xcb_id,
+            gc_id,
+            &[Rectangle {
+                x,
+                y,
+                width: w,
+                height: h,
+            }],
+        );
+        let _ = g
+            .conn
+            .change_gc(gc_id, &ChangeGCAux::new().function(GX::COPY));
+        let _ = g.conn.free_gc(gc_id);
+        let _ = g.conn.flush();
     }
 
     /// Upload DIB pixel data from a heap buffer to an X11 Pixmap.
@@ -1227,14 +1341,27 @@ mod inner {
     }
 }
 
+// ── Public GC function constants (mirror X11 `xcb/xproto.h` GX_* values) ─────
+// Callers outside this crate (weave-gdi32) pass these to `copy_area_with_rop`
+// and `fill_rect_with_rop` so we do not leak x11rb types across the crate
+// boundary. Values match the X11 protocol constants exactly.
+pub const GX_CLEAR: u32 = 0;
+pub const GX_AND: u32 = 1;
+pub const GX_COPY: u32 = 3;
+pub const GX_XOR: u32 = 6;
+pub const GX_OR: u32 = 7;
+pub const GX_INVERT: u32 = 10;
+pub const GX_COPY_INVERTED: u32 = 12;
+pub const GX_SET: u32 = 15;
+
 // ── Platform-specific re-exports ──────────────────────────────────────────────
 
 #[cfg(target_os = "linux")]
 pub use inner::{
-    colorref_to_pixel, configure_window, copy_area, create_pixmap, create_window, destroy_window,
-    draw_filled_rect, draw_line, draw_rect_outline, draw_text, draw_text_utf16, free_pixmap,
-    is_available, poll_event, put_dib_to_pixmap, screen_size, set_title, show_window, system_dpi,
-    wait_event,
+    colorref_to_pixel, configure_window, copy_area, copy_area_with_rop, create_pixmap,
+    create_window, destroy_window, draw_filled_rect, draw_line, draw_rect_outline, draw_text,
+    draw_text_utf16, fill_rect_with_rop, free_pixmap, is_available, poll_event, put_dib_to_pixmap,
+    screen_size, set_title, show_window, system_dpi, wait_event,
 };
 
 // ── No-op stubs for non-Linux platforms (macOS dev builds) ───────────────────
@@ -1347,5 +1474,32 @@ pub unsafe fn put_dib_to_pixmap(
     _height: u32,
     _bits_ptr: usize,
     _bpp: u16,
+) {
+}
+
+#[cfg(not(target_os = "linux"))]
+#[allow(clippy::too_many_arguments)]
+pub fn copy_area_with_rop(
+    _src: u32,
+    _dst: u32,
+    _src_x: i16,
+    _src_y: i16,
+    _dst_x: i16,
+    _dst_y: i16,
+    _width: u16,
+    _height: u16,
+    _gx_func: u32,
+) {
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn fill_rect_with_rop(
+    _xcb_id: u32,
+    _x: i16,
+    _y: i16,
+    _w: u16,
+    _h: u16,
+    _gx_func: u32,
+    _pixel: u32,
 ) {
 }

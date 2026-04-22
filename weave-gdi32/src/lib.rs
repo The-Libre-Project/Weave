@@ -881,49 +881,108 @@ pub extern "win64" fn bit_blt(
     if BB.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 30 {
         eprintln!("weave/gdi32: BitBlt dst={dst_draw:#x} src={src_draw:#x} ({x},{y}) {cx}x{cy}");
     }
-    if dst_draw == 0 || src_draw == 0 {
+    if dst_draw == 0 {
         return 0;
     }
-    if rop != defs::SRCCOPY {
-        return 1; // TODO: other ROP codes
-    }
-    // If the source DC has a bitmap selected (DDB via CreateCompatibleBitmap
-    // or a DibSection), upload its CPU-side pixel buffer to the server-side
-    // Pixmap before XCopyArea. Both variants share the same 32-bit ARGB layout
-    // in Weave, so the sync path is identical.
+    // Classify the ROP.  Source ROPs need src_draw and a DIB sync; pattern-only
+    // ROPs (PATCOPY/DSTINVERT/WHITENESS/BLACKNESS) ignore the source entirely.
     //
-    // Wine ref: dlls/winex11.drv/bitmap.c — X11DRV_PutImage syncs DIB→Pixmap.
-    let dib_info: Option<(u32, u32, usize, u16)> = dc::with(hdc_src, |dc| {
-        let bmp = dc.selected_bitmap;
-        if bmp == 0 {
-            return None;
-        }
-        objects::get(bmp, |kind| match kind {
-            objects::GdiKind::DibSection {
-                width,
-                height,
-                bits_ptr,
-                bpp,
+    // Wine ref: dlls/winex11.drv/bitblt.c — BITBLT_Opcodes[ROP>>16] row maps
+    // each top-byte to a single X11 GX op:
+    //   0x00 BLACKNESS  → GXclear        (no source)
+    //   0x33 NOTSRCCOPY → GXcopyInverted (source)
+    //   0x55 DSTINVERT  → GXinvert       (no source)
+    //   0x66 SRCINVERT  → GXxor          (source)
+    //   0x88 SRCAND     → GXand          (source)
+    //   0xCC SRCCOPY    → GXcopy         (source)
+    //   0xEE SRCPAINT   → GXor           (source)
+    //   0xF0 PATCOPY    → GXcopy         (no source, brush as fg)
+    //   0xFF WHITENESS  → GXset          (no source)
+    // See BITBLT_Opcodes table (line 71) and X11DRV_PatBlt (line 757).
+    enum RopPlan {
+        Source(u32),       // gx_func applied to XCopyArea(src → dst)
+        Pattern(u32, u32), // gx_func + foreground pixel applied to XFillRectangle
+        Unknown,
+    }
+    let plan = match rop {
+        defs::SRCCOPY => RopPlan::Source(weave_user32::backend::GX_COPY),
+        defs::NOTSRCCOPY => RopPlan::Source(weave_user32::backend::GX_COPY_INVERTED),
+        defs::SRCINVERT => RopPlan::Source(weave_user32::backend::GX_XOR),
+        defs::SRCAND => RopPlan::Source(weave_user32::backend::GX_AND),
+        defs::SRCPAINT => RopPlan::Source(weave_user32::backend::GX_OR),
+        defs::DSTINVERT => RopPlan::Pattern(weave_user32::backend::GX_INVERT, 0),
+        defs::WHITENESS => RopPlan::Pattern(weave_user32::backend::GX_SET, 0xFFFF_FFFF),
+        defs::BLACKNESS => RopPlan::Pattern(weave_user32::backend::GX_CLEAR, 0),
+        defs::PATCOPY => {
+            // PATCOPY requires a solid brush; hatch/pattern brushes return
+            // FALSE until Weave grows a stipple path.  Resolve the brush color
+            // here so the match arm can carry it through.
+            let brush_h = dc::with(hdc_dest, |dc| dc.h_brush);
+            let resolved = objects::get(brush_h, |k| matches!(k, objects::GdiKind::Brush { .. }));
+            // Stock brushes are not in the table (is_stock) but are all solid.
+            let is_solid = objects::is_stock(brush_h) || resolved.unwrap_or(false);
+            if !is_solid {
+                RopPlan::Unknown
+            } else {
+                let color = objects::brush_color(brush_h);
+                let pixel = weave_user32::backend::colorref_to_pixel(color);
+                RopPlan::Pattern(weave_user32::backend::GX_COPY, pixel)
             }
-            | objects::GdiKind::Bitmap {
-                width,
-                height,
-                bits_ptr,
-                bpp,
-            } => Some((*width, *height, *bits_ptr, *bpp)),
-            _ => None,
-        })
-        .flatten()
-    });
-    if let Some((dib_w, dib_h, bits_ptr, bpp)) = dib_info {
-        unsafe {
-            weave_user32::backend::put_dib_to_pixmap(src_draw, dib_w, dib_h, bits_ptr, bpp);
+        }
+        _ => RopPlan::Unknown,
+    };
+    match plan {
+        RopPlan::Unknown => 0, // FALSE — callers may branch on unknown ROPs
+        RopPlan::Pattern(gx_func, pixel) => {
+            weave_user32::backend::fill_rect_with_rop(
+                dst_draw, x as i16, y as i16, cx as u16, cy as u16, gx_func, pixel,
+            );
+            1
+        }
+        RopPlan::Source(gx_func) => {
+            if src_draw == 0 {
+                return 0;
+            }
+            // If the source DC has a bitmap selected (DDB via CreateCompatibleBitmap
+            // or a DibSection), upload its CPU-side pixel buffer to the server-side
+            // Pixmap before XCopyArea. Both variants share the same 32-bit ARGB layout
+            // in Weave, so the sync path is identical.
+            //
+            // Wine ref: dlls/winex11.drv/bitmap.c — X11DRV_PutImage syncs DIB→Pixmap.
+            let dib_info: Option<(u32, u32, usize, u16)> = dc::with(hdc_src, |dc| {
+                let bmp = dc.selected_bitmap;
+                if bmp == 0 {
+                    return None;
+                }
+                objects::get(bmp, |kind| match kind {
+                    objects::GdiKind::DibSection {
+                        width,
+                        height,
+                        bits_ptr,
+                        bpp,
+                    }
+                    | objects::GdiKind::Bitmap {
+                        width,
+                        height,
+                        bits_ptr,
+                        bpp,
+                    } => Some((*width, *height, *bits_ptr, *bpp)),
+                    _ => None,
+                })
+                .flatten()
+            });
+            if let Some((dib_w, dib_h, bits_ptr, bpp)) = dib_info {
+                unsafe {
+                    weave_user32::backend::put_dib_to_pixmap(src_draw, dib_w, dib_h, bits_ptr, bpp);
+                }
+            }
+            weave_user32::backend::copy_area_with_rop(
+                src_draw, dst_draw, x1 as i16, y1 as i16, x as i16, y as i16, cx as u16, cy as u16,
+                gx_func,
+            );
+            1
         }
     }
-    weave_user32::backend::copy_area(
-        src_draw, dst_draw, x1 as i16, y1 as i16, x as i16, y as i16, cx as u16, cy as u16,
-    );
-    1
 }
 
 /// StretchBlt: stretched bit-block transfer (stub).

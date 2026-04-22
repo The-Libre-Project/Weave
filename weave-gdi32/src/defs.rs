@@ -96,7 +96,20 @@ pub const RC_STRETCHBLT: i32 = 0x0800;
 pub const RC_FLOODFILL: i32 = 0x1000;
 pub const RC_STRETCHDIB: i32 = 0x2000;
 pub const RC_DEVBITS: i32 = 0x8000;
-pub const SRCCOPY: u32 = 0xCC0020;
+// ── Ternary raster-op codes (BitBlt / PatBlt ROP3) ───────────────────────────
+// Wine ref: dlls/winex11.drv/bitblt.c — BITBLT_Opcodes table rows 0x00/0x33/0x55/
+// 0x66/0x88/0xcc/0xee/0xf0/0xff map each of the high byte of the ROP3 code to a
+// single X11 GC `function` op (GXclear / GXcopyInverted / GXinvert / GXxor /
+// GXand / GXcopy / GXor / GXcopy / GXset respectively). See also X11DRV_PatBlt.
+pub const SRCCOPY: u32 = 0x00CC_0020; // dest = src
+pub const SRCPAINT: u32 = 0x00EE_0086; // dest |= src
+pub const SRCAND: u32 = 0x0088_00C6; // dest &= src
+pub const SRCINVERT: u32 = 0x0066_0046; // dest ^= src
+pub const NOTSRCCOPY: u32 = 0x0033_0008; // dest = ~src
+pub const DSTINVERT: u32 = 0x0055_0009; // dest = ~dest
+pub const PATCOPY: u32 = 0x00F0_0021; // dest = pattern
+pub const BLACKNESS: u32 = 0x0000_0042; // dest = black
+pub const WHITENESS: u32 = 0x00FF_0062; // dest = white
 pub const RASTER_CAPS_DISPLAY: i32 = RC_BITBLT
     | RC_BITMAP64
     | RC_GDI20_OUTPUT
