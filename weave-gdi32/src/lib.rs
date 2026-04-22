@@ -148,13 +148,56 @@ pub unsafe extern "win64" fn create_font_indirect_w(lplf: *const LogFontW) -> us
 
 /// DeleteObject: free an allocated GDI object.
 ///
+/// For `Bitmap` and `DibSection` handles, also reconstructs the leaked pixel
+/// buffer via `Box::from_raw` and drops it, so `CreateCompatibleBitmap` /
+/// `CreateDIBSection` + `DeleteObject` does not leak memory per round-trip.
+///
 /// Wine ref: dlls/win32u/gdiobj.c — NtGdiDeleteObjectApp; returns FALSE if the object is
 /// a stock object (stock objects cannot be deleted). Weave: stock handles are not freed.
 pub extern "win64" fn delete_object(h_object: usize) -> i32 {
     if h_object == 0 {
         return 0;
     }
-    objects::free(h_object) as i32
+    // Snapshot the backing-buffer info before dropping the handle entry.
+    let buf_info: Option<(usize, usize)> = objects::get(h_object, |kind| match kind {
+        GdiKind::Bitmap {
+            width,
+            height,
+            bits_ptr,
+            bpp,
+        }
+        | GdiKind::DibSection {
+            width,
+            height,
+            bits_ptr,
+            bpp,
+        } => {
+            // Match CreateDIBSection's stride rule (dword-aligned rows) so
+            // both entry points round-trip through Box::from_raw correctly.
+            let stride = (u64::from(*width) * u64::from(*bpp)).div_ceil(32) * 4;
+            let size = (stride * u64::from(*height)).max(1) as usize;
+            Some((*bits_ptr, size))
+        }
+        _ => None,
+    })
+    .flatten();
+    let ok = objects::free(h_object);
+    if ok {
+        if let Some((ptr, size)) = buf_info {
+            if ptr != 0 {
+                // Reconstruct the boxed slice we leaked at creation time.
+                // SAFETY: ptr was produced by Box::leak(Box<[u8]> of `size`
+                // bytes) in create_compatible_bitmap / create_dib_section /
+                // create_compatible_dc's stub allocation; we are the sole
+                // owner by virtue of just removing the handle entry.
+                unsafe {
+                    let slice = std::slice::from_raw_parts_mut(ptr as *mut u8, size);
+                    drop(Box::from_raw(slice as *mut [u8]));
+                }
+            }
+        }
+    }
+    ok as i32
 }
 
 /// GetStockObject: return a stock GDI object handle.
@@ -223,7 +266,8 @@ pub extern "win64" fn select_object(hdc: usize, h_gdi_obj: usize) -> usize {
                     old = dc.h_font;
                     dc.h_font = h_gdi_obj;
                 }
-                GdiKind::Bitmap { width, height } | GdiKind::DibSection { width, height, .. } => {
+                GdiKind::Bitmap { width, height, .. }
+                | GdiKind::DibSection { width, height, .. } => {
                     old = dc.selected_bitmap;
                     dc.selected_bitmap = h_gdi_obj;
                     if dc.pixmap.is_none() {
@@ -843,10 +887,10 @@ pub extern "win64" fn bit_blt(
     if rop != defs::SRCCOPY {
         return 1; // TODO: other ROP codes
     }
-    // If the source DC has a DibSection selected, upload its CPU-side pixel
-    // buffer to the server-side Pixmap before XCopyArea.  SDL2's software
-    // renderer writes directly into the DibSection heap buffer; without this
-    // sync the Pixmap contains only the zeroed initial state.
+    // If the source DC has a bitmap selected (DDB via CreateCompatibleBitmap
+    // or a DibSection), upload its CPU-side pixel buffer to the server-side
+    // Pixmap before XCopyArea. Both variants share the same 32-bit ARGB layout
+    // in Weave, so the sync path is identical.
     //
     // Wine ref: dlls/winex11.drv/bitmap.c — X11DRV_PutImage syncs DIB→Pixmap.
     let dib_info: Option<(u32, u32, usize, u16)> = dc::with(hdc_src, |dc| {
@@ -854,18 +898,20 @@ pub extern "win64" fn bit_blt(
         if bmp == 0 {
             return None;
         }
-        objects::get(bmp, |kind| {
-            if let objects::GdiKind::DibSection {
+        objects::get(bmp, |kind| match kind {
+            objects::GdiKind::DibSection {
                 width,
                 height,
                 bits_ptr,
                 bpp,
-            } = kind
-            {
-                Some((*width, *height, *bits_ptr, *bpp))
-            } else {
-                None
             }
+            | objects::GdiKind::Bitmap {
+                width,
+                height,
+                bits_ptr,
+                bpp,
+            } => Some((*width, *height, *bits_ptr, *bpp)),
+            _ => None,
         })
         .flatten()
     });
@@ -955,10 +1001,18 @@ pub extern "win64" fn create_compatible_dc(hdc: usize) -> usize {
         parent_hwnd
     };
     // Allocate a unique GDI handle for this memory DC.
-    // Bitmap is a no-payload kind — used here purely for handle uniqueness.
+    // Bitmap is used here purely for handle uniqueness — the 1×1 pixel buffer
+    // is never drawn into (nothing ever SelectObjects this handle as a bitmap;
+    // it is used as a DC handle). Leak a 4-byte stub so DeleteObject can still
+    // reconstruct a consistent boxed slice for any handle of this variant.
+    let stub_buf = vec![0u8; 4].into_boxed_slice();
+    let stub_ptr = stub_buf.as_ptr() as usize;
+    Box::leak(stub_buf);
     let mem_dc = objects::alloc(GdiKind::Bitmap {
         width: 1,
         height: 1,
+        bits_ptr: stub_ptr,
+        bpp: 32,
     });
     // Bind the new memory DC to the parent window so xcb_for() resolves correctly.
     dc::with_mut(mem_dc, |dc| dc.hwnd = parent_hwnd);
@@ -1001,14 +1055,42 @@ pub extern "win64" fn delete_dc(hdc: usize) -> i32 {
     1
 }
 
-/// CreateCompatibleBitmap: create a bitmap compatible with a DC (stub).
-// Wine ref: dlls/win32u/bitmap.c — NtGdiCreateCompatibleBitmap uses the DC's bit depth;
-// cx/cy of 0 creates a 1×1 bitmap (not NULL); returns NULL only on alloc failure.
-// A DC-compatible bitmap inherits depth from hdc (screen DC → display depth, mem DC → 1bpp).
+/// CreateCompatibleBitmap: create a bitmap compatible with a DC.
+///
+/// Allocates a zero-filled 32-bit ARGB pixel buffer sized `cx * cy * 4` bytes
+/// and leaks it for the bitmap's lifetime. `DeleteObject` reconstructs and
+/// drops the buffer. Weave flattens Wine's depth-inheritance rule (screen DC →
+/// display depth, mem DC → selected bitmap's depth) to 32-bit ARGB so the
+/// BitBlt DIB→Pixmap sync path has a single uniform format to handle.
+// Wine ref: dlls/win32u/bitmap.c::NtGdiCreateCompatibleBitmap — returns 0 if
+// width==0 || height==0; for a non-MEMDC delegates to NtGdiCreateBitmap with
+// PLANES/BITSPIXEL from the DC; for a MEMDC with a DDB selected, matches its
+// planes/bpp; for a MEMDC with a DIBSection selected, returns a DIBSection
+// with the same BITMAPINFOHEADER (width/height overridden).
 pub extern "win64" fn create_compatible_bitmap(_hdc: usize, cx: i32, cy: i32) -> usize {
-    let width = cx.unsigned_abs().max(1);
-    let height = cy.unsigned_abs().max(1);
-    objects::alloc(GdiKind::Bitmap { width, height })
+    // Wine returns 0 when either dimension is 0; mirror that, but tolerate
+    // negative dimensions by taking the absolute value (Windows does the same
+    // via NtGdiCreateBitmap's MAX_BITMAP clamp).
+    if cx == 0 || cy == 0 {
+        return 0;
+    }
+    let width = cx.unsigned_abs();
+    let height = cy.unsigned_abs();
+    const BPP: u16 = 32;
+    let size = (width as usize)
+        .saturating_mul(height as usize)
+        .saturating_mul((BPP / 8) as usize)
+        .max(1);
+    let buf = vec![0u8; size].into_boxed_slice();
+    let bits_ptr = buf.as_ptr() as usize;
+    // Leak for the lifetime of the handle; DeleteObject reclaims.
+    Box::leak(buf);
+    objects::alloc(GdiKind::Bitmap {
+        width,
+        height,
+        bits_ptr,
+        bpp: BPP,
+    })
 }
 
 /// CreateDIBSection: create a DIB section with a CPU-accessible pixel buffer.
@@ -2213,9 +2295,9 @@ pub extern "win64" fn create_bitmap(
     _n_bit_count: u32,
     _lp_bits: usize,
 ) -> usize {
-    let width = n_width.unsigned_abs().max(1);
-    let height = n_height.unsigned_abs().max(1);
-    objects::alloc(GdiKind::Bitmap { width, height })
+    // Delegate to create_compatible_bitmap so both DDB entry points share the
+    // same 32-bit ARGB backing-buffer allocation and DeleteObject free path.
+    create_compatible_bitmap(0, n_width, n_height)
 }
 
 /// GetDIBits: copy pixel data from a bitmap into a DIB. Returns 0 (stub).
@@ -2515,7 +2597,9 @@ pub unsafe extern "win64" fn get_object_w(h: usize, c: i32, pv: *mut u8) -> i32 
                 written = 16;
             }
         }
-        GdiKind::Bitmap { .. } | GdiKind::DibSection { .. } | GdiKind::Region => {}
+        GdiKind::Bitmap { .. } | GdiKind::DibSection { .. } | GdiKind::Region => {
+            // TODO: fill BITMAP/DIBSECTION buffers when a caller needs them.
+        }
     });
     written
 }

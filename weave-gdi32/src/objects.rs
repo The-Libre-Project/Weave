@@ -26,9 +26,23 @@ pub enum GdiKind {
         italic: bool,
         face: [u16; 32],
     },
+    /// Device-dependent bitmap (DDB) allocated via `CreateCompatibleBitmap` /
+    /// `CreateBitmap`. Weave treats every compatible bitmap as 32-bit ARGB
+    /// regardless of the source DC's depth — the depth-inheritance rule in
+    /// Wine's `NtGdiCreateCompatibleBitmap` (dlls/win32u/bitmap.c) is flattened
+    /// to match our X11 TrueColor backend.
+    ///
+    /// Kept distinct from `DibSection` even though the storage now looks the
+    /// same: a DDB has no caller-visible bits pointer (GetDIBits only) and may
+    /// gain pre-multiplied alpha semantics later without affecting DibSection.
+    ///
+    /// `bits_ptr` is a heap buffer leaked for the object's lifetime, sized
+    /// `width * height * (bpp / 8)` bytes.
     Bitmap {
         width: u32,
         height: u32,
+        bits_ptr: usize,
+        bpp: u16,
     },
     /// DIB section — CPU-accessible bitmap with a caller-visible bits pointer.
     ///
