@@ -976,10 +976,26 @@ pub extern "win64" fn bit_blt(
                     weave_user32::backend::put_dib_to_pixmap(src_draw, dib_w, dib_h, bits_ptr, bpp);
                 }
             }
-            weave_user32::backend::copy_area_with_rop(
-                src_draw, dst_draw, x1 as i16, y1 as i16, x as i16, y as i16, cx as u16, cy as u16,
-                gx_func,
-            );
+            // Fast path: SRCCOPY (GXcopy) is by far the hottest BitBlt ROP
+            // (SDL2's testsprite2 fires it 60×/s). Route it through the
+            // lean `copy_area` helper which skips the redundant
+            // `change_gc(GX::COPY)` round-trip needed only when the GC's
+            // function was changed away from GXcopy. Non-SRCCOPY source
+            // ROPs still flow through `copy_area_with_rop`.
+            //
+            // Wine ref: dlls/winex11.drv/bitblt.c — X11DRV_BitBlt
+            // optimises SRCCOPY by not calling XSetFunction at all.
+            if gx_func == weave_user32::backend::GX_COPY {
+                weave_user32::backend::copy_area(
+                    src_draw, dst_draw, x1 as i16, y1 as i16, x as i16, y as i16, cx as u16,
+                    cy as u16,
+                );
+            } else {
+                weave_user32::backend::copy_area_with_rop(
+                    src_draw, dst_draw, x1 as i16, y1 as i16, x as i16, y as i16, cx as u16,
+                    cy as u16, gx_func,
+                );
+            }
             1
         }
     }
