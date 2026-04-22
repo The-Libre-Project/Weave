@@ -2285,26 +2285,264 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
 
 /// AlphaBlend — alpha-composite a source DC onto a destination DC.
 ///
+/// Implements the AC_SRC_OVER blend op for 32-bit ARGB memory-DC source and
+/// destination with matching dimensions. Other configurations (scale, non-32bpp,
+/// window-DC dest, BlendOp != 0, BlendFlags != 0) return FALSE with a traced
+/// warning so callers observe the rejection and can fall back.
+///
+/// BLENDFUNCTION byte layout (packed into a u64 on win64):
+///   byte 0  BlendOp              — must be AC_SRC_OVER (0)
+///   byte 1  BlendFlags           — must be 0
+///   byte 2  SourceConstantAlpha  — 0..=255 scales effective source alpha
+///   byte 3  AlphaFormat          — AC_SRC_ALPHA (1) means premultiplied source
+///
+/// Premultiplied (AC_SRC_ALPHA=1): `dst = src*SCA/255 + dst*(1 - src.a*SCA/255)`
+/// Straight (AC_SRC_ALPHA=0):      `dst = src*(SCA/255) + dst*(1 - SCA/255)`
+///
+/// Wine ref: dlls/win32u/bitblt.c::nulldrv_BlendImage — rejects BI_BITFIELDS when
+/// AC_SRC_ALPHA is set (premultiplied source requires A8R8G8B8); requires
+/// `src->width == dst->width && src->height == dst->height` or returns
+/// ERROR_TRANSFORM_NOT_SUPPORTED; calls `blend_bitmapinfo` for per-pixel
+/// source-over composite. Wine test dlls/gdi32/tests/dib.c::test_alpha_blend
+/// pins the MulDiv255 rounding `(a*b + 127) / 255` idiom for alpha math.
+///
 /// # Safety
-/// All HDC and BLENDFUNCTION arguments are ignored in this stub.
-// Wine ref: dlls/msimg32/msimg32.c — AlphaBlend calls NtGdiAlphaBlend; BLENDFUNCTION
-// SourceAlpha=AC_SRC_ALPHA(1) + AlphaFormat=AC_SRC_OVER(0) is the standard per-pixel
-// alpha path; returns FALSE if source and destination DCs are incompatible.
+/// `hdc_dest` and `hdc_src` must be DC handles whose selected bitmaps (if any)
+/// have valid `bits_ptr` allocations covering `width*height*4` bytes.
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "win64" fn alpha_blend(
-    _hdc_dest: usize,
-    _x_origin_dest: i32,
-    _y_origin_dest: i32,
-    _w_dest: i32,
-    _h_dest: i32,
-    _hdc_src: usize,
-    _x_origin_src: i32,
-    _y_origin_src: i32,
-    _w_src: i32,
-    _h_src: i32,
-    _blend_function: u64, // BLENDFUNCTION packs into a u64 on x64 ABI
+    hdc_dest: usize,
+    x_origin_dest: i32,
+    y_origin_dest: i32,
+    w_dest: i32,
+    h_dest: i32,
+    hdc_src: usize,
+    x_origin_src: i32,
+    y_origin_src: i32,
+    w_src: i32,
+    h_src: i32,
+    blend_function: u64, // BLENDFUNCTION packs into a u64 on x64 ABI
 ) -> i32 {
-    0 // FALSE — not supported in headless
+    // Unpack BLENDFUNCTION — generated.c tests pin these byte offsets.
+    let blend_op = (blend_function & 0xFF) as u8;
+    let blend_flags = ((blend_function >> 8) & 0xFF) as u8;
+    let src_const_alpha = ((blend_function >> 16) & 0xFF) as u8;
+    let alpha_format = ((blend_function >> 24) & 0xFF) as u8;
+
+    const AC_SRC_OVER: u8 = 0x00;
+    const AC_SRC_ALPHA: u8 = 0x01;
+
+    if blend_op != AC_SRC_OVER || blend_flags != 0 {
+        static BAD_OP: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        if BAD_OP.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 4 {
+            eprintln!(
+                "weave/gdi32: AlphaBlend BlendOp={blend_op:#x} Flags={blend_flags:#x} unsupported"
+            );
+        }
+        return 0;
+    }
+
+    if w_dest <= 0 || h_dest <= 0 || w_src <= 0 || h_src <= 0 {
+        return 0;
+    }
+
+    // Scale-and-blend is deferred — this first pass handles equal-dim only.
+    if w_src != w_dest || h_src != h_dest {
+        static NO_SCALE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        if NO_SCALE.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 4 {
+            eprintln!(
+                "weave/gdi32: AlphaBlend scale not yet supported ({w_src}x{h_src} -> {w_dest}x{h_dest})"
+            );
+        }
+        return 0;
+    }
+
+    // Resolve source bits (memory-DC with a 32bpp Bitmap or DibSection selected).
+    let src_info: Option<(u32, u32, usize, u16)> = dc::with(hdc_src, |dc| {
+        let bmp = dc.selected_bitmap;
+        if bmp == 0 {
+            return None;
+        }
+        objects::get(bmp, |kind| match kind {
+            objects::GdiKind::DibSection {
+                width,
+                height,
+                bits_ptr,
+                bpp,
+            }
+            | objects::GdiKind::Bitmap {
+                width,
+                height,
+                bits_ptr,
+                bpp,
+            } => Some((*width, *height, *bits_ptr, *bpp)),
+            _ => None,
+        })
+        .flatten()
+    });
+    let (src_w, src_h, src_ptr, src_bpp) = match src_info {
+        Some(v) => v,
+        None => return 0,
+    };
+    if src_bpp != 32 {
+        static BAD_SRC_BPP: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        if BAD_SRC_BPP.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 4 {
+            eprintln!("weave/gdi32: AlphaBlend src bpp={src_bpp} unsupported (32-bit only)");
+        }
+        return 0;
+    }
+
+    // Resolve dest bits — must be a memory DC with a 32bpp backing bitmap.
+    let dst_info: Option<(u32, u32, usize, u16)> = dc::with(hdc_dest, |dc| {
+        let bmp = dc.selected_bitmap;
+        if bmp == 0 {
+            return None;
+        }
+        objects::get(bmp, |kind| match kind {
+            objects::GdiKind::DibSection {
+                width,
+                height,
+                bits_ptr,
+                bpp,
+            }
+            | objects::GdiKind::Bitmap {
+                width,
+                height,
+                bits_ptr,
+                bpp,
+            } => Some((*width, *height, *bits_ptr, *bpp)),
+            _ => None,
+        })
+        .flatten()
+    });
+    let (dst_w, dst_h, dst_ptr, dst_bpp) = match dst_info {
+        Some(v) => v,
+        None => {
+            // No CPU-side dest buffer — window-DC dest needs an XGetImage round-trip
+            // we don't do yet. Defer.
+            static NO_WIN_DC: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+            if NO_WIN_DC.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 4 {
+                eprintln!("weave/gdi32: AlphaBlend dest must be a memory DC with a 32bpp bitmap");
+            }
+            return 0;
+        }
+    };
+    if dst_bpp != 32 {
+        static BAD_DST_BPP: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        if BAD_DST_BPP.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 4 {
+            eprintln!("weave/gdi32: AlphaBlend dst bpp={dst_bpp} unsupported (32-bit only)");
+        }
+        return 0;
+    }
+
+    // Bounds-clip the source/dest rectangles against their bitmap dimensions —
+    // anything outside the bitmap is skipped. Wine clips in `clip_visrect` plus
+    // the `bitblt_coords` intersection; we do the simpler CPU clip here.
+    if x_origin_src < 0
+        || y_origin_src < 0
+        || x_origin_dest < 0
+        || y_origin_dest < 0
+        || (x_origin_src as i64 + w_src as i64) > src_w as i64
+        || (y_origin_src as i64 + h_src as i64) > src_h as i64
+        || (x_origin_dest as i64 + w_dest as i64) > dst_w as i64
+        || (y_origin_dest as i64 + h_dest as i64) > dst_h as i64
+    {
+        return 0;
+    }
+
+    let w = w_src as usize;
+    let h = h_src as usize;
+    let src_stride = src_w as usize * 4;
+    let dst_stride = dst_w as usize * 4;
+    let sca = src_const_alpha as u32;
+    let premul = alpha_format == AC_SRC_ALPHA;
+
+    // MulDiv255 rounded — Wine's `((a * b) + 127) / 255` idiom; gives the
+    // alpha-blend-accurate result without a divide instruction.
+    #[inline]
+    fn muldiv255(a: u32, b: u32) -> u32 {
+        ((a * b) + 127) / 255
+    }
+
+    let src_bytes =
+        unsafe { std::slice::from_raw_parts(src_ptr as *const u8, src_h as usize * src_stride) };
+    let dst_bytes =
+        unsafe { std::slice::from_raw_parts_mut(dst_ptr as *mut u8, dst_h as usize * dst_stride) };
+
+    for row in 0..h {
+        let sy = y_origin_src as usize + row;
+        let dy = y_origin_dest as usize + row;
+        for col in 0..w {
+            let sx = x_origin_src as usize + col;
+            let dx = x_origin_dest as usize + col;
+            let s_off = sy * src_stride + sx * 4;
+            let d_off = dy * dst_stride + dx * 4;
+            // BGRA in memory (little-endian DWORD = AARRGGBB).
+            let sb = src_bytes[s_off] as u32;
+            let sg = src_bytes[s_off + 1] as u32;
+            let sr = src_bytes[s_off + 2] as u32;
+            let sa = src_bytes[s_off + 3] as u32;
+            let db = dst_bytes[d_off] as u32;
+            let dg = dst_bytes[d_off + 1] as u32;
+            let dr = dst_bytes[d_off + 2] as u32;
+            let da = dst_bytes[d_off + 3] as u32;
+
+            // Effective source alpha for the inverse-alpha blend term.
+            // Both paths compute this the same way: sa_eff = sa * SCA / 255.
+            let sa_eff = muldiv255(sa, sca);
+            let inv_a = 255 - sa_eff;
+
+            let (out_b, out_g, out_r, out_a) = if premul {
+                // Premultiplied: src channels already carry sa, so scale only by SCA/255.
+                let b = muldiv255(sb, sca) + muldiv255(db, inv_a);
+                let g = muldiv255(sg, sca) + muldiv255(dg, inv_a);
+                let r = muldiv255(sr, sca) + muldiv255(dr, inv_a);
+                let a = sa_eff + muldiv255(da, inv_a);
+                (b, g, r, a)
+            } else {
+                // Straight alpha: multiply src by sa_eff on the fly.
+                let b = muldiv255(sb, sa_eff) + muldiv255(db, inv_a);
+                let g = muldiv255(sg, sa_eff) + muldiv255(dg, inv_a);
+                let r = muldiv255(sr, sa_eff) + muldiv255(dr, inv_a);
+                let a = sa_eff + muldiv255(da, inv_a);
+                (b, g, r, a)
+            };
+
+            dst_bytes[d_off] = out_b.min(255) as u8;
+            dst_bytes[d_off + 1] = out_g.min(255) as u8;
+            dst_bytes[d_off + 2] = out_r.min(255) as u8;
+            dst_bytes[d_off + 3] = out_a.min(255) as u8;
+        }
+    }
+
+    // Upload the composited band to the dest drawable so subsequent server-side
+    // copies see the updated pixels. Mirrors set_dib_bits_to_device (task 19).
+    let dst_draw = dc::with(hdc_dest, |dc| dc.drawable());
+    if dst_draw != 0 {
+        // Slice the composited band out of the dest bits, row-major top-down.
+        let band_w = w_dest as usize;
+        let band_h = h_dest as usize;
+        let mut band = vec![0u8; band_w * band_h * 4];
+        for row in 0..band_h {
+            let dy = y_origin_dest as usize + row;
+            let src_row_off = dy * dst_stride + x_origin_dest as usize * 4;
+            let dst_row_off = row * band_w * 4;
+            band[dst_row_off..dst_row_off + band_w * 4]
+                .copy_from_slice(&dst_bytes[src_row_off..src_row_off + band_w * 4]);
+        }
+        weave_user32::backend::put_bits_to_pixmap_at(
+            dst_draw,
+            x_origin_dest as i16,
+            y_origin_dest as i16,
+            w_dest as u16,
+            h_dest as u16,
+            band_w * 4,
+            &band,
+            32,
+        );
+    }
+
+    1
 }
 
 /// TransparentBlt — blit with a transparent colour key.
