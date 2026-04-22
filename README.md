@@ -256,6 +256,8 @@ This produces a prioritized implementation roadmap: start with the most-called f
 
 Weave's modular DLL crate system is designed for distributed contribution. Pick a DLL, pick a function, implement it, test it, submit a PR. You don't need to understand the entire system to make a meaningful contribution.
 
+- [Validation tiers](docs/VALIDATION-TIERS.md) — binary-contract gate model for milestones
+
 The AI-assisted stub generation pipeline produces initial function signatures and basic implementations from Microsoft's public documentation. Contributors review, correct, and extend these stubs with real-world testing.
 
 Priority areas:
