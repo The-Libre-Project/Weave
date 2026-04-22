@@ -1,5 +1,6 @@
 use clap::Parser;
 use std::path::PathBuf;
+use weave_common::com::shell_link::ShellLinkSaveData;
 use weave_core::{cfg, cmdline, dll_registry, exec, iat, loader, pe, prefix, registry, seh, teb};
 use weave_installer::PrefixManager;
 
@@ -212,6 +213,45 @@ fn handle_prefix_cmd(args: &[String]) -> ! {
             std::process::exit(0);
         }
         _ => usage(),
+    }
+}
+
+/// IPersistFile::Save callback — writes a .desktop launcher to
+/// ~/.local/share/applications/ when an installer creates a shortcut.
+fn shell_link_save_callback(data: &ShellLinkSaveData) -> Result<(), String> {
+    let exe_path = match &data.path {
+        Some(p) if !p.is_empty() => p.as_str(),
+        _ => return Ok(()),
+    };
+    let name = data
+        .description
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            std::path::Path::new(&data.lnk_dest_path)
+                .file_stem()
+                .and_then(|s| s.to_str())
+        })
+        .unwrap_or("Weave App");
+    let mut exec_cmd = format!("weave \"{exe_path}\"");
+    if let Some(args) = &data.arguments {
+        if !args.is_empty() {
+            exec_cmd = format!("{exec_cmd} {args}");
+        }
+    }
+    let home = std::env::var("HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::path::PathBuf::from("/tmp"));
+    let dest_dir = home.join(".local/share/applications");
+    std::fs::create_dir_all(&dest_dir)
+        .map_err(|e| format!("weave: could not create applications dir: {e}"))?;
+    let icon = data.icon_path.as_deref();
+    match weave_desktop::write_shortcut(name, &exec_cmd, icon, &dest_dir) {
+        Ok(path) => {
+            eprintln!("weave: installed shortcut: {}", path.display());
+            Ok(())
+        }
+        Err(e) => Err(format!("weave: failed to write shortcut: {e}")),
     }
 }
 
@@ -498,6 +538,11 @@ fn main() {
     // LoadLibraryExW / GetProcAddress stubs call back into this resolver
     // at runtime. Must be set before the PE entry point runs.
     weave_core::resolve::set(resolve);
+
+    // ── 6.7. Register IShellLink save callback ────────────────────────
+    // Installers call CoCreateInstance(CLSID_ShellLink) → IPersistFile::Save
+    // to create desktop shortcuts. Write a .desktop file for each Save call.
+    weave_common::com::shell_link::register_save_callback(shell_link_save_callback);
 
     eprintln!("weave: TEB ready — jumping in");
 

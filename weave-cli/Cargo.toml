@@ -34,9 +34,10 @@ weave-gdiplus = { path = "../weave-gdiplus" }
 weave-ddraw = { path = "../weave-ddraw" }
 weave-sandbox = { path = "../weave-sandbox" }
 weave-installer = { path = "../weave-installer" }
+weave-common = { path = "../weave-common" }
+weave-desktop = { path = "../weave-desktop" }
 clap = { version = "4", features = ["derive"] }
 libc = "0.2"
 
 [dev-dependencies]
-weave-desktop = { path = "../weave-desktop" }
 tempfile = "3"
