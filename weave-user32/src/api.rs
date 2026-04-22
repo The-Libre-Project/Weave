@@ -3216,17 +3216,42 @@ pub extern "win64" fn get_async_key_state(v_key: i32) -> i16 {
 }
 
 /// MapVirtualKeyW: map a virtual key code to a scan code or character.
+//
 // Wine ref: dlls/win32u/driver.c::nulldrv_MapVirtualKeyEx — dispatches to keyboard driver;
-// MAPVK_VK_TO_VSC, MAPVK_VSC_TO_VK, MAPVK_VK_TO_CHAR, MAPVK_VSC_TO_VK_EX are the 4 modes.
-pub extern "win64" fn map_virtual_key_w(_u_code: u32, _u_map_type: u32) -> u32 {
-    0
+// MAPVK_VK_TO_VSC (0): VK → scan code; MAPVK_VSC_TO_VK (1): scan → generic VK;
+// MAPVK_VK_TO_CHAR (2): VK → unshifted char; MAPVK_VSC_TO_VK_EX (3): scan → VK
+// (Wine returns L/R-distinct VKs for 3, but we collapse to generic — same table as 1).
+pub extern "win64" fn map_virtual_key_w(u_code: u32, u_map_type: u32) -> u32 {
+    // Delegate to the Ex variant with HKL=0 (current layout).
+    map_virtual_key_ex_w(u_code, u_map_type, 0)
 }
 
 /// MapVirtualKeyExW: map a virtual key code to a scan code or character (extended).
+//
 // Wine ref: dlls/win32u/driver.c::loaderdrv_MapVirtualKeyEx — layout-aware version of
 // MapVirtualKeyW; uses the HKL to pick the keyboard driver for the given layout.
-pub extern "win64" fn map_virtual_key_ex_w(_u_code: u32, _u_map_type: u32, _dwhkl: usize) -> u32 {
-    0
+// Weave bakes in US QWERTY only (HKL ignored).
+pub extern "win64" fn map_virtual_key_ex_w(u_code: u32, u_map_type: u32, _dwhkl: usize) -> u32 {
+    // MAPVK_VK_TO_VSC = 0, MAPVK_VSC_TO_VK = 1, MAPVK_VK_TO_CHAR = 2,
+    // MAPVK_VSC_TO_VK_EX = 3 (extended — same result as 1 for Weave).
+    match u_map_type {
+        0 => {
+            // VK → scan code.
+            let vk = u_code as u8;
+            input::vk_to_vsc(vk) as u32
+        }
+        1 | 3 => {
+            // scan code → VK (generic; L/R pairs collapsed for mode 1).
+            let vsc = u_code as u8;
+            input::vsc_to_vk(vsc) as u32
+        }
+        2 => {
+            // VK → unshifted character (uppercase for letters).
+            let vk = u_code as u8;
+            input::vk_to_char(vk) as u32
+        }
+        _ => 0,
+    }
 }
 
 /// GetKeyboardLayout: return the keyboard layout for the current thread.
@@ -3245,10 +3270,18 @@ pub unsafe extern "win64" fn get_keyboard_layout_list(_n_buff: i32, _lp_list: us
 }
 
 /// VkKeyScanW: translate a character to a virtual key code.
+//
 // Wine ref: dlls/win32u/driver.c::nulldrv_VkKeyScanEx — VkKeyScanW calls VkKeyScanExW with
-// current HKL; high byte = shift state (0=none,1=shift,2=ctrl); returns -1 if no mapping.
-pub extern "win64" fn vk_key_scan_w(_ch: u16) -> i16 {
-    -1i16
+// current HKL; high byte = modifier state (0=none, 1=SHIFT, 2=CTRL); returns -1 (0xFFFF) if
+// no mapping exists. Weave bakes in ASCII US QWERTY; non-ASCII or unmapped chars → -1.
+pub extern "win64" fn vk_key_scan_w(ch: u16) -> i16 {
+    match input::char_to_vk(ch) {
+        Some((vk, mods)) => {
+            // Pack: low byte = VK code, high byte = modifier flags.
+            (((mods as u16) << 8) | (vk as u16)) as i16
+        }
+        None => -1i16,
+    }
 }
 
 /// # Safety
