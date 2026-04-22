@@ -1298,6 +1298,21 @@ mod inner {
             }
 
             Event::KeyPress(ev) => {
+                // Update the process-global VK state table unconditionally —
+                // keyboard state is not scoped to a window.
+                // Wine ref: dlls/winex11.drv/keyboard.c — X11DRV_KeyEvent updates
+                // the per-thread key state table on every KeyPress/KeyRelease
+                // regardless of focus.
+                if let Some(vk8) = crate::input::keycode_to_vk(ev.detail) {
+                    // VK_CAPITAL (0x14): toggle bit flips on each press.
+                    // NUMLOCK (0x90) and SCROLLLOCK (0x91) toggle tracking: TODO.
+                    let toggle = if vk8 == 0x14 {
+                        Some(crate::input::vk_state(vk8) & 0x01 == 0)
+                    } else {
+                        None
+                    };
+                    crate::input::set_vk_down(vk8, true, toggle);
+                }
                 let hwnd = window::hwnd_for_xcb(ev.event);
                 if hwnd != 0 {
                     let vk = x11_keycode_to_vk(ev.detail);
@@ -1317,6 +1332,11 @@ mod inner {
             }
 
             Event::KeyRelease(ev) => {
+                // Update the process-global VK state table unconditionally.
+                if let Some(vk8) = crate::input::keycode_to_vk(ev.detail) {
+                    // Toggle bit is not modified on release — only on press.
+                    crate::input::set_vk_down(vk8, false, None);
+                }
                 let hwnd = window::hwnd_for_xcb(ev.event);
                 if hwnd != 0 {
                     let vk = x11_keycode_to_vk(ev.detail);

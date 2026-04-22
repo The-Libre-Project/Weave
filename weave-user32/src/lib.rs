@@ -20,6 +20,7 @@ pub mod clipboard;
 pub mod defs;
 pub mod font;
 pub mod image_handles;
+pub mod input;
 pub mod menu;
 pub mod menu_handles;
 pub mod queue;
