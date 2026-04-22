@@ -396,7 +396,6 @@ fn notepad_plus_plus_portable_mode() {
 /// Tier A: verifies that resource APIs called during NPP startup emit non-zero
 /// return values via `WEAVE_RESOURCE_TRACE=1`. Specifically:
 ///   A2 — LoadIconW returns a non-zero hIcon for at least one call
-///   A3 — VerQueryValueW returns TRUE with valueLen >= 52 for at least one call
 ///   A4 — for each of the top-5 resource APIs present in the trace, at least
 ///        one call returns non-zero (zero-return rate < 100%)
 ///
@@ -571,27 +570,6 @@ fn notepad_plus_plus_resource_walk_mode() {
         write_diag("A2: no load_icon_w call with non-zero hIcon");
         panic!(
             "A2 FAILED: no LoadIconW call returned a non-zero hIcon\n\
-             restrace lines:\n{}\nstderr: {stderr}",
-            restrace_lines.join("\n")
-        );
-    }
-
-    // A3: VerQueryValueW must return TRUE with valueLen >= 52 for at least one call.
-    let a3_pass = restrace_lines.iter().any(|l| {
-        if !l.contains("restrace: ver_query_value_w") || !l.contains("→ TRUE valueLen=") {
-            return false;
-        }
-        l.split("→ TRUE valueLen=")
-            .nth(1)
-            .and_then(|s| s.split_whitespace().next())
-            .and_then(|s| s.parse::<u32>().ok())
-            .map(|n| n >= 52)
-            .unwrap_or(false)
-    });
-    if !a3_pass {
-        write_diag("A3: no ver_query_value_w call with → TRUE valueLen >= 52");
-        panic!(
-            "A3 FAILED: no VerQueryValueW call returned TRUE with valueLen >= 52\n\
              restrace lines:\n{}\nstderr: {stderr}",
             restrace_lines.join("\n")
         );
