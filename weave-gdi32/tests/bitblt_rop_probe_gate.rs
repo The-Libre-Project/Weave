@@ -25,6 +25,31 @@ use weave_gdi32::{
     bit_blt, create_compatible_bitmap, create_compatible_dc, delete_object, select_object,
 };
 
+// ── ROP lie boundary rule ────────────────────────────────────────────────────
+//
+// This rule was established during Task 17 after three consecutive CI-fix
+// commits (9235dcc → 521e9a1 → 323fbcf) caused by ambiguous probe-gate
+// expectations. Document it here so the next engineer adding a ROP does not
+// repeat the same rework cycle.
+//
+//  1. SRCCOPY uses the lean copy_area path — it does NOT enter the ROP dispatch
+//     table at all. No ROP logic is applied; the fast path handles it directly.
+//
+//  2. Unknown / unimplemented ROP codes lie TRUE (return 1) without drawing
+//     anything. This prevents guest crashes: Win32 programs routinely check the
+//     return value but almost never validate pixel output for obscure ROPs.
+//     SDL2 testsprite2 is a concrete example — it SIGSEGVs on a 0 return from
+//     BitBlt (see bit_blt's RopPlan::Unknown arm comment).
+//
+//  3. Partially-implemented ROPs (e.g. PATCOPY): execute the ROP logic, but if
+//     the selected brush type is unsupported (anything other than GdiKind::Brush)
+//     fall through to RopPlan::Unknown and also lie TRUE. Real hatch-brush or
+//     pattern-brush support is deferred to a later task.
+//
+// Do not weaken this contract without updating this comment and adding a
+// matching test case that documents the new behaviour.
+// ─────────────────────────────────────────────────────────────────────────────
+
 /// Drive `bit_blt` and return the 0/1 result for each ROP code.
 ///
 /// Uses two memory DCs with 4×4 compatible bitmaps selected into each. On a
