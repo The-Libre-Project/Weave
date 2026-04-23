@@ -14,3 +14,7 @@ libc = "0.2"
 [[test]]
 name = "disk_free_space_probe_gate"
 path = "tests/disk_free_space_probe_gate.rs"
+
+[[test]]
+name = "console_mode_probe_gate"
+path = "tests/console_mode_probe_gate.rs"

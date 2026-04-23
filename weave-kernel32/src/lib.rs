@@ -10646,14 +10646,73 @@ pub unsafe extern "win64" fn get_console_mode(h_console_handle: usize, lp_mode: 
     1 // TRUE
 }
 
-/// SetConsoleMode: no-op, return TRUE.
+/// SetConsoleMode: apply Win32 console mode flags to the underlying TTY via tcsetattr(2).
+///
+/// Maps `ENABLE_LINE_INPUT` (0x0002) → ICANON, `ENABLE_ECHO_INPUT` (0x0004) → ECHO,
+/// `ENABLE_PROCESSED_INPUT` (0x0001) → ISIG. Output-only flags have no direct termios
+/// equivalent and are silently accepted (no-op). Non-TTY fds (pipes, files) and unknown
+/// handles succeed as a no-op. This is best-effort: if tcgetattr/tcsetattr fails for any
+/// reason we still return TRUE.
 ///
 /// # Safety
 /// No pointer arguments are dereferenced.
-// Wine ref: dlls/kernelbase/console.c:1633 — calls console_ioctl(IOCTL_CONDRV_SET_MODE) passing
-// &mode as input buffer; Weave stubs to no-op
-pub unsafe extern "win64" fn set_console_mode(_h_console_handle: usize, _dw_mode: u32) -> i32 {
-    warn_once("SetConsoleMode");
+// Wine ref: dlls/kernelbase/console.c — SetConsoleMode; on Windows calls console_ioctl
+// (IOCTL_CONDRV_SET_MODE); on Linux we map to termios attributes directly.
+pub unsafe extern "win64" fn set_console_mode(h_console_handle: usize, dw_mode: u32) -> i32 {
+    // Resolve handle → Linux fd. Unknown/invalid handles are a silent no-op (TRUE), not an error.
+    let fd = match handles::get_fd(h_console_handle) {
+        Some(fd) => fd,
+        None => return 1, // not a file handle — no-op, TRUE
+    };
+
+    #[cfg(target_os = "linux")]
+    {
+        // Non-TTY fds (pipes, sockets, regular files) succeed silently.
+        if unsafe { libc::isatty(fd) } == 0 {
+            return 1; // TRUE — non-TTY is not an error
+        }
+
+        let mut termios: libc::termios = unsafe { std::mem::zeroed() };
+        // Read current termios state. If it fails, return TRUE (best-effort).
+        if unsafe { libc::tcgetattr(fd, &mut termios) } != 0 {
+            return 1; // TRUE — best-effort
+        }
+
+        // Apply input-mode flags. Output-mode flags (ENABLE_PROCESSED_OUTPUT 0x0001,
+        // ENABLE_WRAP_AT_EOL_OUTPUT 0x0002) have no termios equivalent — they are
+        // intentionally not mapped. We apply termios changes regardless of handle direction:
+        // if an output handle is backed by a real TTY, applying these flags is harmless.
+        const ENABLE_PROCESSED_INPUT: u32 = 0x0001;
+        const ENABLE_LINE_INPUT: u32 = 0x0002;
+        const ENABLE_ECHO_INPUT: u32 = 0x0004;
+
+        if dw_mode & ENABLE_LINE_INPUT != 0 {
+            termios.c_lflag |= libc::ICANON;
+        } else {
+            termios.c_lflag &= !libc::ICANON;
+        }
+
+        if dw_mode & ENABLE_ECHO_INPUT != 0 {
+            termios.c_lflag |= libc::ECHO;
+        } else {
+            termios.c_lflag &= !libc::ECHO;
+        }
+
+        if dw_mode & ENABLE_PROCESSED_INPUT != 0 {
+            termios.c_lflag |= libc::ISIG;
+        } else {
+            termios.c_lflag &= !libc::ISIG;
+        }
+
+        // Apply — TCSANOW takes effect immediately. Errors are silently ignored (best-effort).
+        let _ = unsafe { libc::tcsetattr(fd, libc::TCSANOW, &termios) };
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (fd, dw_mode);
+    }
+
     1 // TRUE
 }
 
