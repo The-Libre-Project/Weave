@@ -93,7 +93,8 @@ fn set_std_handle_invalid_handle_value_is_stored_not_cleared() {
     unsafe { set_std_handle(STD_OUTPUT_HANDLE, invalid_handle_value) };
     let result = unsafe { get_std_handle(STD_OUTPUT_HANDLE) };
     assert_eq!(
-        result, usize::MAX,
+        result,
+        usize::MAX,
         "GetStdHandle(STD_OUTPUT_HANDLE) must return INVALID_HANDLE_VALUE (usize::MAX) \
          after SetStdHandle(STD_OUTPUT_HANDLE, INVALID_HANDLE_VALUE), got {result:#x}"
     );
