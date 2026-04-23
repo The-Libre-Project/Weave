@@ -12,12 +12,7 @@
 
 /// Single no-op stub for all remaining function symbols.
 /// Win64 ABI places return value in RAX; returning 0 covers void, ptr, and int return types.
-pub unsafe extern "win64" fn msvcp_noop(
-    _a: usize,
-    _b: usize,
-    _c: usize,
-    _d: usize,
-) -> usize {
+pub unsafe extern "win64" fn msvcp_noop(_a: usize, _b: usize, _c: usize, _d: usize) -> usize {
     0
 }
 
@@ -342,7 +337,11 @@ mod tests {
 
     #[test]
     fn resolve_cerr_data_symbol() {
-        let addr = resolve("msvcp140.dll", "?cerr@std@@3V?$basic_ostream@DU?$char_traits@D@std@@@1@A").unwrap();
+        let addr = resolve(
+            "msvcp140.dll",
+            "?cerr@std@@3V?$basic_ostream@DU?$char_traits@D@std@@@1@A",
+        )
+        .unwrap();
         assert_ne!(addr, 0);
     }
 

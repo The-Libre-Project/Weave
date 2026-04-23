@@ -4245,9 +4245,7 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
             Some(ucrt_vcrt_init_cs as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize)
         }
         "__std_exception_copy" => {
-            Some(
-                ucrt_std_exception_copy as unsafe extern "win64" fn(_, _) as *const () as usize,
-            )
+            Some(ucrt_std_exception_copy as unsafe extern "win64" fn(_, _) as *const () as usize)
         }
         "__std_exception_destroy" => {
             Some(ucrt_std_exception_destroy as unsafe extern "win64" fn(_) as *const () as usize)

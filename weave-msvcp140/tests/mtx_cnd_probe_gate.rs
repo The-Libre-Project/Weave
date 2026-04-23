@@ -17,7 +17,10 @@ fn zeroed_buf() -> [u8; 64] {
 fn a2_mtx_init_in_situ_returns_zero() {
     let mut buf = zeroed_buf();
     let ret = unsafe { mtx_init_in_situ(buf.as_mut_ptr() as *mut c_void, 0) };
-    assert_eq!(ret, 0, "A2: _Mtx_init_in_situ must return 0 (_Thrd_success)");
+    assert_eq!(
+        ret, 0,
+        "A2: _Mtx_init_in_situ must return 0 (_Thrd_success)"
+    );
     // cleanup
     unsafe {
         mtx_destroy_in_situ(buf.as_mut_ptr() as *mut c_void, 0, 0, 0);
