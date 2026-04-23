@@ -987,6 +987,10 @@ except Exception:
 ///
 /// Skipped gracefully if testsprite2.exe is absent from fixtures.
 #[test]
+#[ignore = "Xvfb timing race — flaky in CI; see KNOWN-BUG-CLASSES.md. Re-enable when Xvfb startup is deterministic."]
+// Quarantined 2026-04-23: produced 3 retry commits in 2 days (43ef54e, 3cbfa40, 4b40dea).
+// Root cause: Xvfb is not fully ready when the test starts, causing a timing-sensitive failure.
+// Fix required: deterministic Xvfb startup (readiness probe) or test isolation before re-enabling.
 fn testsprite2_sdl2_gate1_smoke() {
     if !cfg!(target_os = "linux") {
         eprintln!("skipping execution test — requires Linux");
