@@ -26,6 +26,10 @@ static LAST_HEAP_FREE: AtomicUsize = AtomicUsize::new(0);
 /// to trace whether/how NPP reads the file.  TODO: remove once Gate 6 is green.
 static TEST_PY_HANDLE: AtomicUsize = AtomicUsize::new(0);
 
+/// Process-global top-level exception filter installed via SetUnhandledExceptionFilter.
+/// 0 means no handler installed (default: no filter).
+static UEF_HANDLER: AtomicUsize = AtomicUsize::new(0);
+
 /// Process-global override table for SetStdHandle / GetStdHandle.
 /// Slots: [0]=stdin, [1]=stdout, [2]=stderr.
 /// Sentinel value usize::MAX means "no override — fall back to default constant".
@@ -855,12 +859,12 @@ pub extern "win64" fn delete_critical_section(_lp_critical_section: *mut u8) {}
 
 /// SetUnhandledExceptionFilter: install a top-level exception filter.
 ///
-/// Phase 1: accepted and ignored — returns null (no previous filter).
-// Wine ref: dlls/kernelbase/debug.c:453 — stores filter via
-// InterlockedExchangePointer into top_filter; returns the previous filter.
-pub extern "win64" fn set_unhandled_exception_filter(_lp_top_level_handler: usize) -> usize {
-    warn_once("SetUnhandledExceptionFilter");
-    0
+/// Stores the handler in UEF_HANDLER and returns the previous handler pointer.
+/// Passing 0 (NULL) clears the handler.
+// Wine ref: dlls/kernelbase/except.c — stores filter via InterlockedExchangePointer;
+// returns the previous filter. NULL argument clears the handler.
+pub extern "win64" fn set_unhandled_exception_filter(lp_top_level_handler: usize) -> usize {
+    UEF_HANDLER.swap(lp_top_level_handler, Ordering::SeqCst)
 }
 
 /// IsDBCSLeadByte: test whether a byte is a lead byte in the current DBCS.
@@ -7706,15 +7710,24 @@ pub unsafe extern "win64" fn rtl_unwind(
     std::process::abort();
 }
 
-/// UnhandledExceptionFilter — returns EXCEPTION_EXECUTE_HANDLER (1).
+/// UnhandledExceptionFilter — calls the stored handler if one is installed,
+/// otherwise returns EXCEPTION_CONTINUE_SEARCH (0).
 ///
 /// # Safety
-/// `_exception_pointers` is accepted but not dereferenced.
-// Wine ref: dlls/kernelbase/thread.c:1043 — called as SEH filter; on unhandled exception calls
-// TerminateThread(GetCurrentThread(), GetExceptionCode()); user filter set via SetUnhandledExceptionFilter is called first
-pub unsafe extern "win64" fn unhandled_exception_filter(_exception_pointers: *mut u8) -> i32 {
-    warn_once("UnhandledExceptionFilter");
-    1 // EXCEPTION_EXECUTE_HANDLER
+/// `exception_pointers` is forwarded to the user-installed filter; the caller
+/// is responsible for ensuring it is valid (or null for testing purposes).
+// Wine ref: dlls/kernelbase/except.c — calls user filter if present with EXCEPTION_POINTERS*;
+// returns its result. If no filter installed, returns EXCEPTION_CONTINUE_SEARCH.
+pub unsafe extern "win64" fn unhandled_exception_filter(exception_pointers: *mut u8) -> i32 {
+    let handler = UEF_HANDLER.load(Ordering::SeqCst);
+    if handler == 0 {
+        return 0; // EXCEPTION_CONTINUE_SEARCH
+    }
+    // SAFETY: handler was stored via set_unhandled_exception_filter as a valid
+    // extern "win64" fn pointer. transmute from usize to fn ptr is the same
+    // pattern used by the IAT trampoline in weave-core/src/iat.rs.
+    let f: unsafe extern "win64" fn(*mut u8) -> i32 = std::mem::transmute(handler);
+    f(exception_pointers)
 }
 
 // ── lstr* string functions ───────────────────────────────────────────────────

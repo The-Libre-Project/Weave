@@ -22,3 +22,7 @@ path = "tests/console_mode_probe_gate.rs"
 [[test]]
 name = "std_handle_table_probe_gate"
 path = "tests/std_handle_table_probe_gate.rs"
+
+[[test]]
+name = "unhandled_exception_filter_probe_gate"
+path = "tests/unhandled_exception_filter_probe_gate.rs"
