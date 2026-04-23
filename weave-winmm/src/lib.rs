@@ -477,7 +477,10 @@ pub unsafe extern "win64" fn wave_out_open(
             instance,
             flags,
         };
-        wave_out_session_mutex().lock().unwrap().replace(session);
+        wave_out_session_mutex()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .replace(session);
 
         if !phwo.is_null() {
             unsafe {

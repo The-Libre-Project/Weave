@@ -68,14 +68,14 @@ fn window_extra() -> &'static Mutex<HashMap<usize, WindowExtra>> {
 fn get_extra<R, F: FnOnce(&WindowExtra) -> R>(hwnd: usize, f: F, default: R) -> R {
     window_extra()
         .lock()
-        .unwrap()
+        .unwrap_or_else(|p| p.into_inner())
         .get(&hwnd)
         .map(f)
         .unwrap_or(default)
 }
 
 fn set_extra<F: FnOnce(&mut WindowExtra)>(hwnd: usize, f: F) {
-    let mut map = window_extra().lock().unwrap();
+    let mut map = window_extra().lock().unwrap_or_else(|p| p.into_inner());
     let entry = map.entry(hwnd).or_insert(WindowExtra {
         ex_style: 0,
         user_data: 0,
@@ -427,7 +427,10 @@ pub extern "win64" fn destroy_window(hwnd: usize) -> i32 {
 
     backend::destroy_window(xcb);
     window::remove(hwnd);
-    window_extra().lock().unwrap().remove(&hwnd);
+    window_extra()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .remove(&hwnd);
     1 // TRUE
 }
 
@@ -2780,7 +2783,7 @@ pub extern "win64" fn set_window_long_ptr_w(
         _ if n_index >= 0 => {
             // Extra bytes: n_index is a byte offset; writes a pointer-sized (8-byte) value.
             let offset = n_index as usize;
-            let mut map = window_extra().lock().unwrap();
+            let mut map = window_extra().lock().unwrap_or_else(|p| p.into_inner());
             if let Some(e) = map.get_mut(&hwnd) {
                 if offset + 8 <= e.extra_bytes.len() {
                     let old =
@@ -4305,7 +4308,10 @@ pub unsafe extern "win64" fn set_timer(
     } else {
         n_id_event
     };
-    timer_table().lock().unwrap().insert((h_wnd, id), id);
+    timer_table()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .insert((h_wnd, id), id);
     eprintln!("weave/user32: SetTimer hwnd={h_wnd:#x} id={id:#x} elapse={_u_elapse}ms → WM_TIMER NOT FIRED (Phase 5 gap)");
     id
 }
@@ -4316,7 +4322,10 @@ pub unsafe extern "win64" fn set_timer(
 /// to the server; returns FALSE (sets ERROR_INVALID_PARAMETER) if the timer
 /// does not exist for the given (hwnd, id) pair.
 pub extern "win64" fn kill_timer(h_wnd: usize, u_id_event: usize) -> i32 {
-    let removed = timer_table().lock().unwrap().remove(&(h_wnd, u_id_event));
+    let removed = timer_table()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .remove(&(h_wnd, u_id_event));
     if removed.is_some() {
         1
     } else {
@@ -4663,7 +4672,7 @@ pub unsafe extern "win64" fn get_scroll_info(
     const SIF_TRACKPOS: u32 = 0x0010;
     let state = scroll_state()
         .lock()
-        .unwrap()
+        .unwrap_or_else(|p| p.into_inner())
         .get(&(hwnd, n_bar))
         .cloned()
         .unwrap_or_default();
@@ -4709,7 +4718,7 @@ pub unsafe extern "win64" fn set_scroll_info(
     const SIF_PAGE: u32 = 0x0002;
     const SIF_POS: u32 = 0x0004;
     let si = unsafe { &*lp_si };
-    let mut table = scroll_state().lock().unwrap();
+    let mut table = scroll_state().lock().unwrap_or_else(|p| p.into_inner());
     let state = table.entry((hwnd, n_bar)).or_default();
     if si.f_mask & SIF_RANGE != 0 {
         if si.n_min > si.n_max {

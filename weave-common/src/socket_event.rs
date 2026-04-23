@@ -23,7 +23,7 @@ static EVENT_SOCKET_MAP: Mutex<Option<HashMap<u64, i32>>> = Mutex::new(None);
 
 #[cfg(target_os = "linux")]
 fn map() -> std::sync::MutexGuard<'static, Option<HashMap<u64, i32>>> {
-    let mut g = EVENT_SOCKET_MAP.lock().unwrap();
+    let mut g = EVENT_SOCKET_MAP.lock().unwrap_or_else(|p| p.into_inner());
     if g.is_none() {
         *g = Some(HashMap::new());
     }
@@ -85,7 +85,7 @@ static SOCKET_CONNECTING: Mutex<Option<HashSet<i32>>> = Mutex::new(None);
 
 #[cfg(target_os = "linux")]
 fn connecting_set() -> std::sync::MutexGuard<'static, Option<HashSet<i32>>> {
-    let mut g = SOCKET_CONNECTING.lock().unwrap();
+    let mut g = SOCKET_CONNECTING.lock().unwrap_or_else(|p| p.into_inner());
     if g.is_none() {
         *g = Some(HashSet::new());
     }
@@ -159,7 +159,7 @@ static SOCKET_WRITE_ARMED: Mutex<Option<HashSet<i32>>> = Mutex::new(None);
 
 #[cfg(target_os = "linux")]
 fn write_armed_set() -> std::sync::MutexGuard<'static, Option<HashSet<i32>>> {
-    let mut g = SOCKET_WRITE_ARMED.lock().unwrap();
+    let mut g = SOCKET_WRITE_ARMED.lock().unwrap_or_else(|p| p.into_inner());
     if g.is_none() {
         *g = Some(HashSet::new());
     }
@@ -220,7 +220,7 @@ static SOCKET_LISTENING: Mutex<Option<HashSet<i32>>> = Mutex::new(None);
 
 #[cfg(target_os = "linux")]
 fn listening_set() -> std::sync::MutexGuard<'static, Option<HashSet<i32>>> {
-    let mut g = SOCKET_LISTENING.lock().unwrap();
+    let mut g = SOCKET_LISTENING.lock().unwrap_or_else(|p| p.into_inner());
     if g.is_none() {
         *g = Some(HashSet::new());
     }

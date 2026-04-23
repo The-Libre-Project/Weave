@@ -39,7 +39,7 @@ fn menus() -> &'static Mutex<MenuTable> {
 }
 
 fn alloc_menu() -> usize {
-    let mut m = menus().lock().unwrap();
+    let mut m = menus().lock().unwrap_or_else(|p| p.into_inner());
     let id = m.next_id;
     m.next_id += 1;
     m.menus.insert(id, Vec::new());
@@ -102,7 +102,7 @@ pub unsafe extern "win64" fn append_menu_w(
         String::new()
     };
 
-    let mut m = menus().lock().unwrap();
+    let mut m = menus().lock().unwrap_or_else(|p| p.into_inner());
     let items = match m.menus.get_mut(&h_menu) {
         Some(v) => v,
         None => return 0, // invalid HMENU
@@ -171,7 +171,7 @@ pub extern "win64" fn get_menu(hwnd: usize) -> usize {
 // Wine ref: dlls/win32u/menu.c — NtUserDestroyMenu; recursively frees all popup
 // submenus before freeing the parent; frees string item text via free().
 pub extern "win64" fn destroy_menu(h_menu: usize) -> i32 {
-    let mut m = menus().lock().unwrap();
+    let mut m = menus().lock().unwrap_or_else(|p| p.into_inner());
     m.menus.remove(&h_menu).map(|_| 1).unwrap_or(0)
 }
 
@@ -211,7 +211,7 @@ pub extern "win64" fn track_popup_menu_ex(
 ///
 /// Like AppendMenuW but takes an already-decoded Rust String.
 pub fn append_menu_raw(h_menu: usize, u_flags: u32, u_id_new_item: usize, text: String) -> i32 {
-    let mut m = menus().lock().unwrap();
+    let mut m = menus().lock().unwrap_or_else(|p| p.into_inner());
     let items = match m.menus.get_mut(&h_menu) {
         Some(v) => v,
         None => return 0,
@@ -226,7 +226,7 @@ pub fn append_menu_raw(h_menu: usize, u_flags: u32, u_id_new_item: usize, text: 
 
 /// delete_item: remove a menu item by position or command id.
 pub fn delete_item(h_menu: usize, u_position: u32, u_flags: u32) {
-    let mut m = menus().lock().unwrap();
+    let mut m = menus().lock().unwrap_or_else(|p| p.into_inner());
     let items = match m.menus.get_mut(&h_menu) {
         Some(v) => v,
         None => return,
@@ -259,7 +259,7 @@ pub unsafe extern "win64" fn get_menu_string_w(
     n_max_count: i32,
     u_flags: u32,
 ) -> i32 {
-    let m = menus().lock().unwrap();
+    let m = menus().lock().unwrap_or_else(|p| p.into_inner());
     let items = match m.menus.get(&h_menu) {
         Some(v) => v,
         None => {
@@ -323,7 +323,7 @@ pub extern "win64" fn set_menu_item_bitmaps(
 /// item returns (submenu_count << 8) | (item_flags | MF_POPUP); for a command
 /// returns item_flags. Returns (UINT)-1 = 0xFFFFFFFF if not found.
 pub extern "win64" fn get_menu_state(h_menu: usize, u_id: u32, u_flags: u32) -> u32 {
-    let m = menus().lock().unwrap();
+    let m = menus().lock().unwrap_or_else(|p| p.into_inner());
     let items = match m.menus.get(&h_menu) {
         Some(v) => v,
         None => return u32::MAX,
@@ -364,7 +364,7 @@ pub unsafe extern "win64" fn modify_menu_w(
     u_id_new_item: usize,
     lp_new_item: *const u16,
 ) -> i32 {
-    let mut m = menus().lock().unwrap();
+    let mut m = menus().lock().unwrap_or_else(|p| p.into_inner());
     let items = match m.menus.get_mut(&h_menu) {
         Some(v) => v,
         None => return 0,
@@ -403,7 +403,7 @@ pub extern "win64" fn get_menu_item_id(h_menu: usize, n_pos: i32) -> u32 {
     if n_pos < 0 {
         return u32::MAX;
     }
-    let m = menus().lock().unwrap();
+    let m = menus().lock().unwrap_or_else(|p| p.into_inner());
     let items = match m.menus.get(&h_menu) {
         Some(v) => v,
         None => return u32::MAX,
@@ -422,7 +422,7 @@ pub extern "win64" fn get_sub_menu(h_menu: usize, n_pos: i32) -> usize {
     if n_pos < 0 {
         return 0;
     }
-    let m = menus().lock().unwrap();
+    let m = menus().lock().unwrap_or_else(|p| p.into_inner());
     let items = match m.menus.get(&h_menu) {
         Some(v) => v,
         None => return 0,
@@ -437,7 +437,7 @@ pub extern "win64" fn get_sub_menu(h_menu: usize, n_pos: i32) -> usize {
 // Wine ref: dlls/win32u/menu.c:1359 — grab_menu_ptr fails on invalid handle → returns -1
 // (not 0); valid handle returns menu->nItems directly.
 pub extern "win64" fn get_menu_item_count(h_menu: usize) -> i32 {
-    let m = menus().lock().unwrap();
+    let m = menus().lock().unwrap_or_else(|p| p.into_inner());
     m.menus.get(&h_menu).map(|v| v.len() as i32).unwrap_or(-1)
 }
 
@@ -447,7 +447,7 @@ pub extern "win64" fn get_menu_item_count(h_menu: usize) -> i32 {
 // Wine ref: dlls/win32u/menu.c — NtUserCheckMenuItem; uses find_menu_item, returns
 // previous (fState & MFS_CHECKED) cast to DWORD; returns -1 (0xFFFFFFFF) if not found.
 pub extern "win64" fn check_menu_item(h_menu: usize, u_id_check_item: u32, u_check: u32) -> u32 {
-    let mut m = menus().lock().unwrap();
+    let mut m = menus().lock().unwrap_or_else(|p| p.into_inner());
     let items = match m.menus.get_mut(&h_menu) {
         Some(v) => v,
         None => return u32::MAX, // MF_ERROR
@@ -477,7 +477,7 @@ pub extern "win64" fn check_menu_item(h_menu: usize, u_id_check_item: u32, u_che
 // new flags in item->fState masked to (MFS_GRAYED|MFS_DISABLED); returns previous
 // enable state or -1 if item not found.
 pub extern "win64" fn enable_menu_item(h_menu: usize, u_id_enable_item: u32, u_enable: u32) -> i32 {
-    let mut m = menus().lock().unwrap();
+    let mut m = menus().lock().unwrap_or_else(|p| p.into_inner());
     let items = match m.menus.get_mut(&h_menu) {
         Some(v) => v,
         None => return -1,
