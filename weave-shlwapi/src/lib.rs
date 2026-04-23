@@ -631,7 +631,9 @@ mod tests {
         let file: Vec<u16> = "bar.txt".encode_utf16().chain([0]).collect();
         let result = unsafe { PathCombineW(dest.as_mut_ptr(), dir.as_ptr(), file.as_ptr()) };
         assert!(!result.is_null());
-        let s = String::from_utf16_lossy(&dest[..dest.iter().position(|&c| c == 0).unwrap_or(dest.len())]);
+        let s = String::from_utf16_lossy(
+            &dest[..dest.iter().position(|&c| c == 0).unwrap_or(dest.len())],
+        );
         assert_eq!(s, "Z:\\foo\\bar.txt");
     }
 
@@ -642,7 +644,9 @@ mod tests {
         let file: Vec<u16> = "Z:\\abs\\bar.txt".encode_utf16().chain([0]).collect();
         let result = unsafe { PathCombineW(dest.as_mut_ptr(), dir.as_ptr(), file.as_ptr()) };
         assert!(!result.is_null());
-        let s = String::from_utf16_lossy(&dest[..dest.iter().position(|&c| c == 0).unwrap_or(dest.len())]);
+        let s = String::from_utf16_lossy(
+            &dest[..dest.iter().position(|&c| c == 0).unwrap_or(dest.len())],
+        );
         assert_eq!(s, "Z:\\abs\\bar.txt");
     }
 
