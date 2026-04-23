@@ -5457,32 +5457,77 @@ pub unsafe extern "win64" fn move_file_with_progress_w(
 
 /// GetDiskFreeSpaceW — return disk free/total space information.
 ///
-/// Returns stub values: 10 GB free, 100 GB total.
+/// Queries the real filesystem via `statvfs(2)` and returns cluster-level
+/// disk space information. Null `lpRootPathName` defaults to `"/"`.
 ///
 /// # Safety
 /// Output pointer arguments must be writable or null.
 // Wine ref: dlls/kernelbase/volume.c:656 — opens root path via NtOpenFile then calls
-// NtQueryVolumeInformationFile(FileFsSizeInformation); on Win9x clusters are capped to
-// 65535 and total size to 2GB; NULL root defaults to current directory.
+// NtQueryVolumeInformationFile(FileFsSizeInformation); NULL root defaults to current
+// directory; writes SectorsPerAllocationUnit, BytesPerSector, free and total cluster
+// counts (Win32 mode only — we skip the Win9x 2GB/65535 cap).
 pub unsafe extern "win64" fn get_disk_free_space_w(
-    _lp_root_path_name: *const u16,
+    lp_root_path_name: *const u16,
     lp_sectors_per_cluster: *mut u32,
     lp_bytes_per_sector: *mut u32,
     lp_number_of_free_clusters: *mut u32,
     lp_total_number_of_clusters: *mut u32,
 ) -> i32 {
-    warn_once("GetDiskFreeSpaceW");
+    const ERROR_INVALID_PARAMETER: u32 = 87;
+
+    // Resolve the query path: translate Win32 wide string, or fall back to "/".
+    let query_path: std::ffi::CString = if lp_root_path_name.is_null() {
+        std::ffi::CString::new("/").unwrap()
+    } else {
+        // Decode the wide string.
+        let mut len = 0usize;
+        while len < 32768 && unsafe { *lp_root_path_name.add(len) } != 0 {
+            len += 1;
+        }
+        let win_path =
+            unsafe { String::from_utf16_lossy(std::slice::from_raw_parts(lp_root_path_name, len)) };
+        match weave_core::file_io::translate_win_path(&win_path) {
+            Ok(p) => match std::ffi::CString::new(p.as_os_str().as_encoded_bytes()) {
+                Ok(s) => s,
+                Err(_) => std::ffi::CString::new("/").unwrap(),
+            },
+            Err(_) => std::ffi::CString::new("/").unwrap(),
+        }
+    };
+
+    let mut sv: libc::statvfs = unsafe { std::mem::zeroed() };
+    let ret = unsafe { libc::statvfs(query_path.as_ptr(), &mut sv) };
+    if ret != 0 {
+        set_last_error(ERROR_INVALID_PARAMETER);
+        return 0; // FALSE
+    }
+
+    // Derive cluster geometry from filesystem fragment size.
+    // f_frsize is the fundamental block size used for f_bavail/f_bfree/f_blocks.
+    // Fix bytes-per-sector at 512 (standard Windows assumption).
+    // Sectors-per-cluster = f_frsize / 512, clamped to at least 1.
+    const BYTES_PER_SECTOR: u32 = 512;
+    let frsize = sv.f_frsize.max(512);
+    let sectors_per_cluster = (frsize / 512).min(u32::MAX as u64) as u32;
+
+    // Free and total clusters: capped to u32::MAX (Wine does the same
+    // to avoid overflow on very large volumes — u.LowPart truncation).
+    // f_bfree counts free blocks; each block is 1 cluster in this model.
+    let free_clusters = sv.f_bfree.min(u32::MAX as u64) as u32;
+    // Total clusters from f_blocks, capped.
+    let total_clusters = sv.f_blocks.min(u32::MAX as u64) as u32;
+
     if !lp_sectors_per_cluster.is_null() {
-        unsafe { *lp_sectors_per_cluster = 8 };
+        unsafe { *lp_sectors_per_cluster = sectors_per_cluster };
     }
     if !lp_bytes_per_sector.is_null() {
-        unsafe { *lp_bytes_per_sector = 512 };
+        unsafe { *lp_bytes_per_sector = BYTES_PER_SECTOR };
     }
     if !lp_number_of_free_clusters.is_null() {
-        unsafe { *lp_number_of_free_clusters = 2_621_440 };
+        unsafe { *lp_number_of_free_clusters = free_clusters };
     }
     if !lp_total_number_of_clusters.is_null() {
-        unsafe { *lp_total_number_of_clusters = 26_214_400 };
+        unsafe { *lp_total_number_of_clusters = total_clusters };
     }
     1 // TRUE
 }
@@ -8813,30 +8858,71 @@ pub unsafe extern "win64" fn get_drive_type_a(lp_root_path_name: *const u8) -> u
     }
 }
 
-/// GetDiskFreeSpaceExW: get disk space information for drive C:.
+/// GetDiskFreeSpaceExW: get disk space information for the given path.
+///
+/// Queries the real filesystem via `statvfs(2)`. Null `lpDirectoryName`
+/// defaults to `"/"`. All three output pointers are individually nullable.
 ///
 /// # Safety
-/// `lp_directory_name` is ignored.
 /// `lp_free_bytes_available_to_caller`, `lp_total_number_of_bytes`,
-/// `lp_total_number_of_free_bytes` must be valid pointers or NULL.
-// Wine ref: dlls/kernelbase/volume.c:614 — opens device root, calls NtQueryVolumeInformationFile(FileFsSizeInformation);
-// avail quota FIXME: does not account for per-user disk quotas; computes bytes as AllocationUnits*SectorsPerUnit*BytesPerSector
+/// `lp_total_number_of_free_bytes` must be valid writable pointers or NULL.
+// Wine ref: dlls/kernelbase/volume.c:614 — opens device root, calls
+// NtQueryVolumeInformationFile(FileFsSizeInformation); avail uses
+// AvailableAllocationUnits (no per-user quota accounting in Wine either);
+// bytes = AllocationUnits * SectorsPerUnit * BytesPerSector.
 pub unsafe extern "win64" fn get_disk_free_space_ex_w(
-    _lp_directory_name: *const u16,
+    lp_directory_name: *const u16,
     lp_free_bytes_available_to_caller: *mut u64,
     lp_total_number_of_bytes: *mut u64,
     lp_total_number_of_free_bytes: *mut u64,
 ) -> i32 {
-    warn_once("GetDiskFreeSpaceExW");
-    // Write fake values: 100GB free/available, 500GB total
+    const ERROR_INVALID_PARAMETER: u32 = 87;
+
+    // Resolve the query path: translate Win32 wide string, or fall back to "/".
+    let query_path: std::ffi::CString = if lp_directory_name.is_null() {
+        std::ffi::CString::new("/").unwrap()
+    } else {
+        // Decode the wide string.
+        let mut len = 0usize;
+        while len < 32768 && unsafe { *lp_directory_name.add(len) } != 0 {
+            len += 1;
+        }
+        let win_path =
+            unsafe { String::from_utf16_lossy(std::slice::from_raw_parts(lp_directory_name, len)) };
+        match weave_core::file_io::translate_win_path(&win_path) {
+            Ok(p) => match std::ffi::CString::new(p.as_os_str().as_encoded_bytes()) {
+                Ok(s) => s,
+                Err(_) => std::ffi::CString::new("/").unwrap(),
+            },
+            Err(_) => std::ffi::CString::new("/").unwrap(),
+        }
+    };
+
+    let mut sv: libc::statvfs = unsafe { std::mem::zeroed() };
+    let ret = unsafe { libc::statvfs(query_path.as_ptr(), &mut sv) };
+    if ret != 0 {
+        set_last_error(ERROR_INVALID_PARAMETER);
+        return 0; // FALSE
+    }
+
+    // f_frsize is the fragment size used as the multiplier for block counts.
+    let frsize = sv.f_frsize;
+
+    // free_bytes_available = f_bavail (unprivileged free) * frsize
+    let free_bytes_available = sv.f_bavail.saturating_mul(frsize);
+    // total_bytes = f_blocks * frsize
+    let total_bytes = sv.f_blocks.saturating_mul(frsize);
+    // total_free_bytes = f_bfree * frsize (includes reserved blocks)
+    let total_free_bytes = sv.f_bfree.saturating_mul(frsize);
+
     if !lp_free_bytes_available_to_caller.is_null() {
-        unsafe { *lp_free_bytes_available_to_caller = 100 * 1024 * 1024 * 1024u64 };
+        unsafe { *lp_free_bytes_available_to_caller = free_bytes_available };
     }
     if !lp_total_number_of_bytes.is_null() {
-        unsafe { *lp_total_number_of_bytes = 500 * 1024 * 1024 * 1024u64 };
+        unsafe { *lp_total_number_of_bytes = total_bytes };
     }
     if !lp_total_number_of_free_bytes.is_null() {
-        unsafe { *lp_total_number_of_free_bytes = 100 * 1024 * 1024 * 1024u64 };
+        unsafe { *lp_total_number_of_free_bytes = total_free_bytes };
     }
     1 // TRUE
 }
