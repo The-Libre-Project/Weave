@@ -100,8 +100,7 @@ unsafe impl Sync for SemWrapper {}
 
 struct SemEntry {
     sem: Box<SemWrapper>,
-    // max_count is read by ReleaseSemaphore (TASK-2) to enforce the ceiling.
-    #[allow(dead_code)]
+    // max_count is enforced by ReleaseSemaphore to prevent exceeding the ceiling.
     max_count: i32,
 }
 
@@ -6407,15 +6406,87 @@ pub unsafe extern "win64" fn create_semaphore_a(
         std::ptr::null(),
     )
 }
-/// ReleaseSemaphore — no-op stub, returns TRUE.
-// Wine ref: dlls/kernelbase/sync.c:846 — calls NtReleaseSemaphore(handle, count, (PULONG)previous)
-pub extern "win64" fn release_semaphore(
-    _h_semaphore: usize,
-    _l_release_count: i32,
-    _lp_previous_count: *mut i32,
+/// ReleaseSemaphore — increment a POSIX-backed semaphore by `l_release_count`.
+///
+/// Behavioral contract (Wine ref: server/semaphore.c:88 — release_semaphore):
+///   - count must be ≥ 1; 0 or negative → FALSE + ERROR_INVALID_PARAMETER.
+///   - If current_value + count > max_count → FALSE + ERROR_TOO_MANY_POSTS (298 / 0x12A).
+///   - On success, writes previous count to *lp_previous_count if non-null, returns TRUE.
+///   - On failure, does not modify *lp_previous_count.
+///
+/// # Known limitation
+/// `sem_getvalue` + N×`sem_post` is not atomic.  In Weave's current single-process
+/// model this window is safe; a multi-process named-semaphore implementation would
+/// need a futex-based approach.
+///
+/// # Safety
+/// `lp_previous_count` must be null or a valid aligned `*mut i32`.
+// Wine ref: server/semaphore.c:88 — checks count overflow vs sem->max, writes prev,
+// then increments; mirrors NtReleaseSemaphore → STATUS_SEMAPHORE_LIMIT_EXCEEDED on overflow.
+pub unsafe extern "win64" fn release_semaphore(
+    h_semaphore: usize,
+    l_release_count: i32,
+    lp_previous_count: *mut i32,
 ) -> i32 {
-    warn_once("ReleaseSemaphore");
-    1
+    // ERROR_INVALID_PARAMETER (87 / 0x57): count must be ≥ 1.
+    if l_release_count < 1 {
+        set_last_error(0x57); // ERROR_INVALID_PARAMETER
+        return 0;
+    }
+
+    let table = match sem_table()
+        .lock()
+        .map_err(|e| eprintln!("weave: semaphore table mutex poisoned: {e}"))
+        .ok()
+    {
+        Some(g) => g,
+        None => {
+            set_last_error(6); // ERROR_INVALID_HANDLE
+            return 0;
+        }
+    };
+
+    let entry = match table.get(&h_semaphore) {
+        Some(e) => e,
+        None => {
+            set_last_error(6); // ERROR_INVALID_HANDLE
+            return 0;
+        }
+    };
+
+    // Read current semaphore value before posting.
+    let mut prev: libc::c_int = 0;
+    let rc = unsafe {
+        libc::sem_getvalue(
+            &entry.sem.0 as *const libc::sem_t as *mut libc::sem_t,
+            &mut prev,
+        )
+    };
+    if rc != 0 {
+        set_last_error(6); // ERROR_INVALID_HANDLE (sem_getvalue failure is unexpected)
+        return 0;
+    }
+
+    // ERROR_TOO_MANY_POSTS (298 / 0x12A): releasing would exceed max_count.
+    if prev + l_release_count > entry.max_count {
+        set_last_error(0x12A); // ERROR_TOO_MANY_POSTS
+        return 0;
+    }
+
+    // Post l_release_count times. Not atomic with the sem_getvalue above —
+    // acceptable for Weave's single-process model (see known limitation above).
+    for _ in 0..l_release_count {
+        unsafe {
+            libc::sem_post(&entry.sem.0 as *const libc::sem_t as *mut libc::sem_t);
+        }
+    }
+
+    // Write previous count only on success.
+    if !lp_previous_count.is_null() {
+        unsafe { *lp_previous_count = prev };
+    }
+
+    1 // TRUE
 }
 
 /// CreateSemaphoreW — create an anonymous POSIX-backed semaphore.
