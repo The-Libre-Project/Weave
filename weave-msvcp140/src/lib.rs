@@ -2,13 +2,14 @@
 //!
 //! All 80 imports used by NXEngine-evo (nx.exe) are resolved here.
 //! Function stubs are no-op — they accept any Win64 arguments and return 0.
-//! Real implementations of _Mtx_*, _Cnd_*, _Thrd_* come in TASK-3/TASK-4.
+//! Real pthread implementations for _Mtx_* and _Cnd_* added in TASK-3.
+//! Real implementations of _Thrd_* come in TASK-4.
 //!
 //! Wine ref: dlls/msvcp140/msvcp140.c — _Mtx_init_in_situ(mtx, flags),
 //!   _Mtx_lock(mtx) returns _Thrd_success = 0.
 //! Do NOT add warn_once logging here — these methods are called many times per frame.
 
-/// Single no-op stub for all 76 function symbols.
+/// Single no-op stub for all remaining function symbols.
 /// Win64 ABI places return value in RAX; returning 0 covers void, ptr, and int return types.
 pub unsafe extern "win64" fn msvcp_noop(
     _a: usize,
@@ -17,6 +18,126 @@ pub unsafe extern "win64" fn msvcp_noop(
     _d: usize,
 ) -> usize {
     0
+}
+
+// ── Real pthread-backed implementations ──────────────────────────────────────
+
+/// _Mtx_init_in_situ — initialize a pthread_mutex_t at the caller-provided address.
+/// Wine ref: dlls/msvcp140/msvcp140.c — _Mtx_init_in_situ: in-place pthread_mutex_init;
+///   flags&0x100=recursive; returns _Thrd_success=0.
+/// The caller owns the memory. No Weave-side allocation occurs.
+pub unsafe extern "win64" fn mtx_init_in_situ(mtx: *mut libc::c_void, flags: i32) -> i32 {
+    #[cfg(target_os = "linux")]
+    {
+        let mut attr: libc::pthread_mutexattr_t = core::mem::zeroed();
+        libc::pthread_mutexattr_init(&mut attr);
+        if flags & 0x100 != 0 {
+            libc::pthread_mutexattr_settype(&mut attr, libc::PTHREAD_MUTEX_RECURSIVE);
+        }
+        let ret = libc::pthread_mutex_init(mtx as *mut libc::pthread_mutex_t, &attr);
+        libc::pthread_mutexattr_destroy(&mut attr);
+        ret
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (mtx, flags);
+        0
+    }
+}
+
+/// _Mtx_destroy_in_situ — destroy the pthread_mutex_t at the caller-provided address.
+/// Wine ref: dlls/msvcp140/msvcp140.c — calls pthread_mutex_destroy; caller owns memory.
+pub unsafe extern "win64" fn mtx_destroy_in_situ(
+    mtx: *mut libc::c_void,
+    _b: usize,
+    _c: usize,
+    _d: usize,
+) -> usize {
+    #[cfg(target_os = "linux")]
+    {
+        libc::pthread_mutex_destroy(mtx as *mut libc::pthread_mutex_t);
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = mtx;
+    }
+    0
+}
+
+/// _Mtx_lock — pthread_mutex_lock on the caller-provided mutex.
+/// Wine ref: dlls/msvcp140/msvcp140.c — _Mtx_lock: pthread_mutex_lock; returns _Thrd_success=0.
+pub unsafe extern "win64" fn mtx_lock(
+    mtx: *mut libc::c_void,
+    _b: usize,
+    _c: usize,
+    _d: usize,
+) -> i32 {
+    #[cfg(target_os = "linux")]
+    {
+        libc::pthread_mutex_lock(mtx as *mut libc::pthread_mutex_t)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = mtx;
+        0
+    }
+}
+
+/// _Mtx_unlock — pthread_mutex_unlock on the caller-provided mutex.
+/// Wine ref: dlls/msvcp140/msvcp140.c — _Mtx_unlock: pthread_mutex_unlock; returns _Thrd_success=0.
+pub unsafe extern "win64" fn mtx_unlock(
+    mtx: *mut libc::c_void,
+    _b: usize,
+    _c: usize,
+    _d: usize,
+) -> i32 {
+    #[cfg(target_os = "linux")]
+    {
+        libc::pthread_mutex_unlock(mtx as *mut libc::pthread_mutex_t)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = mtx;
+        0
+    }
+}
+
+/// _Cnd_destroy_in_situ — destroy the pthread_cond_t at the caller-provided address.
+/// Wine ref: dlls/msvcp140/msvcp140.c — _Cnd_destroy_in_situ: pthread_cond_destroy; caller owns memory.
+pub unsafe extern "win64" fn cnd_destroy_in_situ(
+    cnd: *mut libc::c_void,
+    _b: usize,
+    _c: usize,
+    _d: usize,
+) -> usize {
+    #[cfg(target_os = "linux")]
+    {
+        libc::pthread_cond_destroy(cnd as *mut libc::pthread_cond_t);
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = cnd;
+    }
+    0
+}
+
+/// _Cnd_signal — pthread_cond_signal on the caller-provided condition variable.
+/// Wine ref: dlls/msvcp140/msvcp140.c — _Cnd_signal: pthread_cond_signal; returns _Thrd_success=0.
+pub unsafe extern "win64" fn cnd_signal(
+    cnd: *mut libc::c_void,
+    _b: usize,
+    _c: usize,
+    _d: usize,
+) -> i32 {
+    #[cfg(target_os = "linux")]
+    {
+        libc::pthread_cond_signal(cnd as *mut libc::pthread_cond_t)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = cnd;
+        0
+    }
 }
 
 // DATA symbols — callers read these addresses directly from the IAT.
@@ -139,15 +260,16 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         | "?widen@?$basic_ios@DU?$char_traits@D@std@@@std@@QEBADD@Z"
         | "?xsgetn@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MEAA_JPEAD_J@Z"
         | "?xsputn@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MEAA_JPEBD_J@Z"
-        | "_Cnd_destroy_in_situ"
-        | "_Cnd_signal"
-        | "_Mtx_destroy_in_situ"
-        | "_Mtx_init_in_situ"
-        | "_Mtx_lock"
-        | "_Mtx_unlock"
         | "_Thrd_id"
         | "_Thrd_join"
         | "_Xtime_get_ticks" => msvcp_noop as *const () as usize,
+
+        "_Mtx_init_in_situ" => mtx_init_in_situ as *const () as usize,
+        "_Mtx_destroy_in_situ" => mtx_destroy_in_situ as *const () as usize,
+        "_Mtx_lock" => mtx_lock as *const () as usize,
+        "_Mtx_unlock" => mtx_unlock as *const () as usize,
+        "_Cnd_destroy_in_situ" => cnd_destroy_in_situ as *const () as usize,
+        "_Cnd_signal" => cnd_signal as *const () as usize,
 
         _ => return None,
     };
