@@ -1545,15 +1545,17 @@ fn nxengine_gate1_smoke() {
         "nxengine Gate 1 FAIL: PE did not load — IAT resolution crashed before entry point.\nstderr:\n{stderr}"
     );
 
-    // Soft diagnostics — warn only.
-    if let Some(false) | None = pixel_result {
-        eprintln!("nxengine pixel WARN — screen black at 5s; rendering or init incomplete");
-    }
-    if !stderr.contains("weave/user32: CreateWindow") && !stderr.contains("RegisterClassEx") {
-        eprintln!(
-            "nxengine window WARN — no CreateWindow seen; game may not have reached SDL2 init"
-        );
-    }
+    // A2: Game must reach SDL2 init — CreateWindow or RegisterClassEx seen in stderr.
+    assert!(
+        stderr.contains("weave/user32: CreateWindow") || stderr.contains("RegisterClassEx"),
+        "nxengine M7 Gate A2 FAIL: no CreateWindow seen in 20s — game did not reach SDL2 init.\nstderr: {stderr}"
+    );
+
+    // A3: Screen must be non-black at 5s — Xvfb has rendered content.
+    assert!(
+        matches!(pixel_result, Some(true)),
+        "nxengine M7 Gate A3 FAIL: screen black at 5s — render loop did not reach X11.\nstderr: {stderr}"
+    );
 }
 
 /// `weave putty.exe -ssh localhost 22` — PuTTY SSH engine; M3 Gate 1.
