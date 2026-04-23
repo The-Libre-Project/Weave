@@ -3,7 +3,6 @@ use std::path::PathBuf;
 use weave_common::com::shell_link::ShellLinkSaveData;
 use weave_core::{cfg, cmdline, dll_registry, exec, iat, loader, pe, prefix, registry, seh, teb};
 use weave_installer::PrefixManager;
-use weave_msvcp140;
 
 mod arch;
 
