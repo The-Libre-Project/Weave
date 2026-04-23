@@ -26,6 +26,26 @@ static LAST_HEAP_FREE: AtomicUsize = AtomicUsize::new(0);
 /// to trace whether/how NPP reads the file.  TODO: remove once Gate 6 is green.
 static TEST_PY_HANDLE: AtomicUsize = AtomicUsize::new(0);
 
+/// Process-global override table for SetStdHandle / GetStdHandle.
+/// Slots: [0]=stdin, [1]=stdout, [2]=stderr.
+/// Sentinel value usize::MAX means "no override — fall back to default constant".
+static STD_HANDLE_OVERRIDES: [AtomicUsize; 3] = [
+    AtomicUsize::new(usize::MAX),
+    AtomicUsize::new(usize::MAX),
+    AtomicUsize::new(usize::MAX),
+];
+
+/// Map a Windows nStdHandle value to an index into STD_HANDLE_OVERRIDES.
+/// Returns None for unknown nStdHandle values.
+fn std_slot(n: u32) -> Option<usize> {
+    match n {
+        STD_INPUT_HANDLE => Some(0),
+        STD_OUTPUT_HANDLE => Some(1),
+        STD_ERROR_HANDLE => Some(2),
+        _ => None,
+    }
+}
+
 use std::sync::Arc;
 use weave_common::stub::warn_once;
 use weave_common::{STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE};
@@ -324,17 +344,27 @@ fn locale_number_lookup(lc_type: u32) -> u32 {
 
 /// GetStdHandle: return the Weave HANDLE for stdin/stdout/stderr.
 ///
-/// Returns handle constants from the global handle table (4/5/6 for
-/// stdin/stdout/stderr). These map to Linux fds 0/1/2 in the table.
-// Wine ref: dlls/kernelbase/process.c:1385 — reads hStdInput/hStdOutput/hStdError
-// directly from PEB->ProcessParameters; returns INVALID_HANDLE_VALUE + sets
-// ERROR_INVALID_HANDLE for unknown std_handle values.
+/// Checks the process-global override table first (written by SetStdHandle).
+/// If no override is set (sentinel usize::MAX), falls back to the default
+/// handle constants. Returns INVALID_HANDLE_VALUE (usize::MAX) for unknown
+/// nStdHandle values.
+// Wine ref: dlls/kernelbase/console.c — reads from process STD handle table;
+// returns INVALID_HANDLE_VALUE for unknown nStdHandle values.
 pub extern "win64" fn get_std_handle(n_std_handle: u32) -> usize {
+    let slot = match std_slot(n_std_handle) {
+        Some(s) => s,
+        None => return usize::MAX, // INVALID_HANDLE_VALUE
+    };
+    let override_val = STD_HANDLE_OVERRIDES[slot].load(Ordering::Relaxed);
+    if override_val != usize::MAX {
+        return override_val;
+    }
+    // No override — fall back to default constants.
     match n_std_handle {
         STD_INPUT_HANDLE => handles::STDIN_HANDLE,
         STD_OUTPUT_HANDLE => handles::STDOUT_HANDLE,
         STD_ERROR_HANDLE => handles::STDERR_HANDLE,
-        _ => usize::MAX, // INVALID_HANDLE_VALUE
+        _ => usize::MAX,
     }
 }
 
@@ -12755,11 +12785,21 @@ pub extern "win64" fn mul_div(n_number: i32, n_numerator: i32, n_denominator: i3
     result as i32
 }
 
-/// SetStdHandle: set stdin/stdout/stderr handle. Returns TRUE.
-// Wine ref: dlls/kernelbase/process.c — stores handle in PEB->ProcessParameters->hStdInput/Output/Error
-// indexed by (nStdHandle - STD_INPUT_HANDLE); invalid nStdHandle → ERROR_INVALID_PARAMETER
-pub extern "win64" fn set_std_handle(_n_std_handle: u32, _h_handle: usize) -> i32 {
-    warn_once("SetStdHandle");
+/// SetStdHandle: store a handle in the process-global STD handle override table.
+///
+/// Returns TRUE (1) on success, FALSE (0) + ERROR_INVALID_PARAMETER if
+/// nStdHandle is not one of STD_INPUT_HANDLE / STD_OUTPUT_HANDLE / STD_ERROR_HANDLE.
+// Wine ref: dlls/kernelbase/console.c — stores hHandle into process STD table;
+// invalid nStdHandle → SetLastError(ERROR_INVALID_PARAMETER), return FALSE.
+pub extern "win64" fn set_std_handle(n_std_handle: u32, h_handle: usize) -> i32 {
+    let slot = match std_slot(n_std_handle) {
+        Some(s) => s,
+        None => {
+            set_last_error(0x57); // ERROR_INVALID_PARAMETER
+            return 0;
+        }
+    };
+    STD_HANDLE_OVERRIDES[slot].store(h_handle, Ordering::Relaxed);
     1
 }
 
