@@ -2669,6 +2669,33 @@ pub extern "win64" fn ucrt_terminate() -> ! {
     unsafe { libc::abort() }
 }
 
+/// `__std_terminate` — VCRUNTIME140.dll terminate hook. Calls abort().
+/// Wine ref: dlls/msvcp140/msvcp140.c — __std_terminate calls terminate() → abort().
+pub unsafe extern "win64" fn ucrt_std_terminate() -> ! {
+    libc::abort()
+}
+
+/// `__vcrt_InitializeCriticalSectionEx` — VCRUNTIME140.dll internal CS init.
+/// Called by the MSVC CRT to initialise its own CRITICAL_SECTION during startup.
+/// Calls pthread_mutex_init directly — does not go through the kernel32 handle table.
+/// Returns TRUE (1).
+pub unsafe extern "win64" fn ucrt_vcrt_init_cs(
+    cs: *mut libc::pthread_mutex_t,
+    _spin: u32,
+    _flags: u32,
+) -> i32 {
+    libc::pthread_mutex_init(cs, core::ptr::null());
+    1 // TRUE
+}
+
+/// `__std_exception_copy` — copy an MSVC exception object.
+/// No-op is safe for NXEngine which uses C++ exceptions only on error paths.
+pub unsafe extern "win64" fn ucrt_std_exception_copy(_src: *const (), _dst: *mut ()) {}
+
+/// `__std_exception_destroy` — destroy an MSVC exception object.
+/// No-op is safe for NXEngine which uses C++ exceptions only on error paths.
+pub unsafe extern "win64" fn ucrt_std_exception_destroy(_exc: *mut ()) {}
+
 // ── Sprint A: confirmed bug fixes ─────────────────────────────────────────────
 
 /// _isatty — test whether a CRT fd refers to a terminal.
@@ -4208,6 +4235,28 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         }
         "??1type_info@@UEAA@XZ" => {
             Some(ucrt_type_info_dtor as unsafe extern "win64" fn(_) as *const () as usize)
+        }
+        // VCRUNTIME140.dll gaps — TASK-4
+        "__std_terminate" => {
+            Some(ucrt_std_terminate as unsafe extern "win64" fn() -> ! as *const () as usize)
+        }
+        "__vcrt_InitializeCriticalSectionEx" => {
+            Some(ucrt_vcrt_init_cs as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize)
+        }
+        "__std_exception_copy" => {
+            Some(
+                ucrt_std_exception_copy as unsafe extern "win64" fn(_, _) as *const () as usize,
+            )
+        }
+        "__std_exception_destroy" => {
+            Some(ucrt_std_exception_destroy as unsafe extern "win64" fn(_) as *const () as usize)
+        }
+        "__intrinsic_setjmp" => {
+            // Alias to the existing setjmpex implementation — same semantics, no "ex" suffix.
+            Some(
+                ucrt_intrinsic_setjmpex as unsafe extern "win64" fn(_, _) -> _ as *const ()
+                    as usize,
+            )
         }
         _ => None,
     }

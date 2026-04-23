@@ -3,6 +3,7 @@
 //! All 80 imports used by NXEngine-evo (nx.exe) are resolved here.
 //! Function stubs are no-op — they accept any Win64 arguments and return 0.
 //! Real pthread implementations for _Mtx_* and _Cnd_* added in TASK-3.
+#![allow(clippy::missing_safety_doc)]
 //! Real implementations of _Thrd_* come in TASK-4.
 //!
 //! Wine ref: dlls/msvcp140/msvcp140.c — _Mtx_init_in_situ(mtx, flags),
@@ -119,6 +120,43 @@ pub unsafe extern "win64" fn cnd_destroy_in_situ(
         let _ = cnd;
     }
     0
+}
+
+// ── Real _Thrd_* and _Xtime_get_ticks implementations ────────────────────────
+
+/// _Thrd_id — return current thread ID.
+/// Wine ref: dlls/msvcp140/msvcp140.c — _Thrd_id: returns GetCurrentThreadId(); maps to gettid() on Linux.
+pub extern "win64" fn msvcp_thrd_id() -> u32 {
+    #[cfg(target_os = "linux")]
+    unsafe {
+        libc::gettid() as u32
+    }
+    #[cfg(not(target_os = "linux"))]
+    1
+}
+
+/// _Thrd_join — join a thread by its OS handle.
+/// Wine ref: dlls/msvcp140/msvcp140.c — _Thrd_join: WaitForSingleObject + CloseHandle;
+///   stub-safe since _Thrd_create is no-op returning 0 (handle == 0 → nothing to join).
+pub unsafe extern "win64" fn msvcp_thrd_join(_thr: usize, code: *mut i32) -> i32 {
+    if !code.is_null() {
+        *code = 0;
+    }
+    0 // _Thrd_success
+}
+
+/// _Xtime_get_ticks — return 100-ns ticks since 1601-01-01 (FILETIME epoch).
+/// Wine ref: dlls/msvcp140/msvcp140.c — _Xtime_get_ticks: FILETIME 100-ns intervals since 1601-01-01.
+pub extern "win64" fn msvcp_xtime_get_ticks() -> u64 {
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    unsafe {
+        libc::clock_gettime(libc::CLOCK_REALTIME, &mut ts);
+    }
+    let unix_100ns = ts.tv_sec as u64 * 10_000_000 + ts.tv_nsec as u64 / 100;
+    unix_100ns + 116_444_736_000_000_000
 }
 
 /// _Cnd_signal — pthread_cond_signal on the caller-provided condition variable.
@@ -260,9 +298,11 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         | "?widen@?$basic_ios@DU?$char_traits@D@std@@@std@@QEBADD@Z"
         | "?xsgetn@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MEAA_JPEAD_J@Z"
         | "?xsputn@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MEAA_JPEBD_J@Z"
-        | "_Thrd_id"
-        | "_Thrd_join"
-        | "_Xtime_get_ticks" => msvcp_noop as *const () as usize,
+        => msvcp_noop as *const () as usize,
+
+        "_Thrd_id" => msvcp_thrd_id as *const () as usize,
+        "_Thrd_join" => msvcp_thrd_join as *const () as usize,
+        "_Xtime_get_ticks" => msvcp_xtime_get_ticks as *const () as usize,
 
         "_Mtx_init_in_situ" => mtx_init_in_situ as *const () as usize,
         "_Mtx_destroy_in_situ" => mtx_destroy_in_situ as *const () as usize,
