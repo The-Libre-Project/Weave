@@ -1,6 +1,8 @@
 //! kernel32.dll stubs for Weave.
 //!
-//! Critical section stubs are no-ops (Phase 1/2 is single-threaded).
+//! Critical sections are real: EnterCriticalSection blocks via spin+yield,
+//! LeaveCriticalSection releases atomically, TryEnterCriticalSection returns
+//! FALSE under contention. All three honour recursive entry (same-TID re-enter).
 //! VirtualProtect/VirtualQuery delegate to mprotect/mincore.
 //! WriteConsoleW converts UTF-16 to UTF-8 and writes to the Linux fd.
 //! CreateFileW/ReadFile/WriteFile/CloseHandle delegate to weave-core file_io.
@@ -707,19 +709,112 @@ pub unsafe extern "win64" fn initialize_critical_section(lp_critical_section: *m
     unsafe { *(lp_critical_section.add(8) as *mut i32) = -1 };
 }
 
-/// EnterCriticalSection: acquire the critical section.
+/// EnterCriticalSection: acquire the critical section (blocking spin).
 ///
-/// Phase 1: single-threaded no-op.
-// Wine ref: dlls/ntdll/sync.c — RtlEnterCriticalSection: spins on LockCount,
-// then waits on NtWaitForKeyedEvent if contended; sets OwningThread to current TID.
-pub extern "win64" fn enter_critical_section(_lp_critical_section: *mut u8) {}
+/// RTL_CRITICAL_SECTION layout (offsets in bytes):
+///   0  DebugInfo (8 bytes, ptr — unused)
+///   8  LockCount (i32: -1=unlocked, ≥0=locked; +1 per recursive hold)
+///  12  RecursionCount (i32: 0=not held, ≥1=depth)
+///  16  OwningThread (usize: Linux TID, 0=none)
+///  24  LockSemaphore (HANDLE — unused)
+///  32  SpinCount (usize — ignored)
+///
+/// # Safety
+/// `lp_critical_section` must point to at least 40 bytes of writable,
+/// 4-byte-aligned memory (the Windows CRITICAL_SECTION struct).
+// Wine ref: dlls/ntdll/sync.c — RtlEnterCriticalSection: spins on LockCount
+// CAS(-1 → 0); on success sets OwningThread = NtCurrentTeb()->ClientId.UniqueThread
+// and RecursionCount = 1 (or increments both for recursive entry). For contended
+// case Wine falls through to NtWaitForKeyedEvent; we use sched_yield + nanosleep.
+pub unsafe extern "win64" fn enter_critical_section(lp_critical_section: *mut u8) {
+    if lp_critical_section.is_null() {
+        return;
+    }
+    // SAFETY: caller guarantees valid 40-byte struct; offset 16 (usize) is 8-byte aligned.
+    let owning_thread_ptr = unsafe { lp_critical_section.add(16) as *mut usize };
+    let tid = unsafe { libc::syscall(libc::SYS_gettid) as usize };
+    // Recursive entry: same thread already owns the CS.
+    if unsafe { std::ptr::read_volatile(owning_thread_ptr) } == tid {
+        // SAFETY: RecursionCount at offset 12, i32.
+        let rec_ptr = unsafe { lp_critical_section.add(12) as *mut i32 };
+        // SAFETY: LockCount at offset 8, i32.
+        let lock_ptr = unsafe { lp_critical_section.add(8) as *mut i32 };
+        unsafe {
+            let rc = std::ptr::read_volatile(rec_ptr);
+            std::ptr::write_volatile(rec_ptr, rc + 1);
+            let lc = std::ptr::read_volatile(lock_ptr);
+            std::ptr::write_volatile(lock_ptr, lc + 1);
+        }
+        return;
+    }
+    // Fast path / spin loop: CAS LockCount from -1 → 0.
+    // SAFETY: LockCount at offset 8, 4-byte aligned.
+    let lock_atomic = unsafe { &*(lp_critical_section.add(8) as *const AtomicI32) };
+    let rec_ptr = unsafe { lp_critical_section.add(12) as *mut i32 };
+    const SPIN_LIMIT: u32 = 4_000;
+    let mut spins: u32 = 0;
+    loop {
+        match lock_atomic.compare_exchange(-1, 0, Ordering::AcqRel, Ordering::Acquire) {
+            Ok(_) => {
+                // Acquired — set owner and recursion depth.
+                unsafe {
+                    std::ptr::write_volatile(owning_thread_ptr, tid);
+                    std::ptr::write_volatile(rec_ptr, 1);
+                }
+                return;
+            }
+            Err(_) => {
+                spins += 1;
+                if spins < SPIN_LIMIT {
+                    unsafe { libc::sched_yield() };
+                } else {
+                    // Back off: sleep 1 ms to avoid burning CPU in CI.
+                    let ts = libc::timespec {
+                        tv_sec: 0,
+                        tv_nsec: 1_000_000,
+                    };
+                    unsafe { libc::nanosleep(&ts, std::ptr::null_mut()) };
+                    spins = 0;
+                }
+            }
+        }
+    }
+}
 
 /// LeaveCriticalSection: release the critical section.
 ///
-/// Phase 1: single-threaded no-op.
+/// # Safety
+/// `lp_critical_section` must point to the same valid CRITICAL_SECTION struct
+/// that was passed to EnterCriticalSection.
 // Wine ref: dlls/ntdll/sync.c — RtlLeaveCriticalSection: decrements RecursionCount;
-// when it hits 0 clears OwningThread and releases via NtReleaseKeyedEvent.
-pub extern "win64" fn leave_critical_section(_lp_critical_section: *mut u8) {}
+// when it reaches 0, clears OwningThread and stores -1 to LockCount via Interlocked
+// exchange. Waiter wake-up (NtReleaseKeyedEvent) only fires when LockCount was > 0
+// before the decrement (i.e. there were waiters); we skip the wake because our Enter
+// spins rather than blocking on a kernel object.
+pub unsafe extern "win64" fn leave_critical_section(lp_critical_section: *mut u8) {
+    if lp_critical_section.is_null() {
+        return;
+    }
+    // SAFETY: offsets verified against RTL_CRITICAL_SECTION layout above.
+    let lock_atomic = unsafe { &*(lp_critical_section.add(8) as *const AtomicI32) };
+    let rec_ptr = unsafe { lp_critical_section.add(12) as *mut i32 };
+    let owning_thread_ptr = unsafe { lp_critical_section.add(16) as *mut usize };
+    unsafe {
+        let rc = std::ptr::read_volatile(rec_ptr);
+        if rc > 1 {
+            // Recursive hold: unwind one level.
+            std::ptr::write_volatile(rec_ptr, rc - 1);
+            // Decrement LockCount to match (mirrors recursive Enter increment).
+            let lc = lock_atomic.load(Ordering::Relaxed);
+            lock_atomic.store(lc - 1, Ordering::Release);
+        } else {
+            // Final release: clear owner first, then unlock.
+            std::ptr::write_volatile(rec_ptr, 0);
+            std::ptr::write_volatile(owning_thread_ptr, 0);
+            lock_atomic.store(-1, Ordering::Release);
+        }
+    }
+}
 
 /// DeleteCriticalSection: free resources associated with a critical section.
 ///
@@ -7209,15 +7304,52 @@ pub unsafe extern "win64" fn wait_for_single_object_ex(
     wait_for_single_object(h_handle, dw_milliseconds)
 }
 
-/// TryEnterCriticalSection — no-op stub; always succeeds (single-threaded).
+/// TryEnterCriticalSection — non-blocking acquire attempt.
+///
+/// Returns 1 (TRUE) if the CS was acquired (including recursive re-entry by the
+/// owning thread), 0 (FALSE) if another thread currently holds the CS.
 ///
 /// # Safety
-/// `_lp_critical_section` must be a valid pointer.
-// Wine ref: dlls/ntdll/sync.c — RTL_CRITICAL_SECTION.LockCount starts at -1 (unlocked);
-// TryEnterCriticalSection uses InterlockedCompareExchange on LockCount; returns FALSE if owned.
-pub unsafe extern "win64" fn try_enter_critical_section(_lp_critical_section: *mut usize) -> i32 {
-    warn_once("TryEnterCriticalSection");
-    1 // TRUE — always succeeds in single-threaded context
+/// `lp_critical_section` must point to a valid, initialised RTL_CRITICAL_SECTION
+/// (at least 40 bytes, 4-byte aligned at the LockCount field).
+// Wine ref: dlls/ntdll/sync.c — RtlTryEnterCriticalSection: reads OwningThread;
+// if equal to NtCurrentTeb()->ClientId.UniqueThread increments LockCount and
+// RecursionCount (recursive path) and returns TRUE. Otherwise attempts
+// InterlockedCompareExchange(-1 → 0) on LockCount; returns TRUE on success,
+// FALSE if the exchange fails (another thread owns the CS).
+pub unsafe extern "win64" fn try_enter_critical_section(lp_critical_section: *mut usize) -> i32 {
+    if lp_critical_section.is_null() {
+        return 0; // FALSE — invalid pointer
+    }
+    let cs = lp_critical_section as *mut u8;
+    // SAFETY: layout documented above; offsets are within the 40-byte struct.
+    let owning_thread_ptr = unsafe { cs.add(16) as *mut usize };
+    let tid = unsafe { libc::syscall(libc::SYS_gettid) as usize };
+    // Recursive path: same thread already owns the CS.
+    if unsafe { std::ptr::read_volatile(owning_thread_ptr) } == tid {
+        let rec_ptr = unsafe { cs.add(12) as *mut i32 };
+        let lock_atomic = unsafe { &*(cs.add(8) as *const AtomicI32) };
+        unsafe {
+            let rc = std::ptr::read_volatile(rec_ptr);
+            std::ptr::write_volatile(rec_ptr, rc + 1);
+        }
+        lock_atomic.fetch_add(1, Ordering::AcqRel);
+        return 1; // TRUE
+    }
+    // Non-recursive path: attempt a single CAS.
+    let lock_atomic = unsafe { &*(cs.add(8) as *const AtomicI32) };
+    match lock_atomic.compare_exchange(-1, 0, Ordering::AcqRel, Ordering::Acquire) {
+        Ok(_) => {
+            // Acquired — set owner and recursion depth.
+            let rec_ptr = unsafe { cs.add(12) as *mut i32 };
+            unsafe {
+                std::ptr::write_volatile(owning_thread_ptr, tid);
+                std::ptr::write_volatile(rec_ptr, 1);
+            }
+            1 // TRUE
+        }
+        Err(_) => 0, // FALSE — another thread owns it
+    }
 }
 
 /// SwitchToThread — yield the processor to another runnable thread.
@@ -14187,5 +14319,135 @@ mod tests {
             get_ret2, 0,
             "GetEnvironmentVariableA should return 0 after delete"
         );
+    }
+
+    // ── CriticalSection: two-thread mutual exclusion + TryEnter false return ──
+    //
+    // This test is cfg-gated to x86_64-linux only because:
+    //   - `libc::SYS_gettid` is a Linux-only syscall (absent on macOS).
+    //   - The test exercises real kernel-TID-based ownership; macOS threads
+    //     use pthreads TIDs which are not equivalent.
+    //   - It uses `cfg(target_os = "linux")` rather than target_arch because
+    //     the portability constraint is the OS ABI, not the CPU architecture.
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[test]
+    fn critical_section_two_thread_mutual_exclusion_and_try_enter_false() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        // Allocate a 40-byte, 8-byte aligned buffer for the CRITICAL_SECTION.
+        // We use Box<[u64; 5]> (5 × 8 = 40 bytes, naturally 8-byte aligned).
+        let cs_storage: Box<[u64; 5]> = Box::new([0u64; 5]);
+        let cs_ptr = Box::into_raw(cs_storage) as *mut u8;
+
+        // Initialise the CS: zeroes all fields, sets LockCount = -1.
+        unsafe { initialize_critical_section(cs_ptr) };
+
+        // Flag: TryEnterCriticalSection returned FALSE at least once.
+        let try_enter_returned_false = Arc::new(AtomicBool::new(false));
+        let try_enter_returned_false_clone = Arc::clone(&try_enter_returned_false);
+
+        // Thread 1 holds the CS for ~50 ms, then releases.
+        let cs_ptr_t1 = cs_ptr as usize; // send raw ptr across thread boundary as usize
+        let t1 = std::thread::spawn(move || {
+            let cs = cs_ptr_t1 as *mut u8;
+            unsafe { enter_critical_section(cs) };
+            // Hold the CS for 50 ms — long enough for thread 2 to observe it locked.
+            let ts = libc::timespec {
+                tv_sec: 0,
+                tv_nsec: 50_000_000, // 50 ms
+            };
+            unsafe { libc::nanosleep(&ts, std::ptr::null_mut()) };
+            unsafe { leave_critical_section(cs) };
+        });
+
+        // Thread 2 waits 10 ms then polls TryEnterCriticalSection until it
+        // returns FALSE, records the fact, and then waits until it can acquire.
+        let cs_ptr_t2 = cs_ptr as usize;
+        let t2 = std::thread::spawn(move || {
+            // Give thread 1 a head start.
+            let ts_wait = libc::timespec {
+                tv_sec: 0,
+                tv_nsec: 10_000_000, // 10 ms
+            };
+            unsafe { libc::nanosleep(&ts_wait, std::ptr::null_mut()) };
+
+            // Poll TryEnter until we see FALSE (CS held by thread 1).
+            let mut saw_false = false;
+            for _ in 0..500 {
+                let result = unsafe { try_enter_critical_section(cs_ptr_t2 as *mut usize) };
+                if result == 0 {
+                    saw_false = true;
+                    break;
+                }
+                // If we got TRUE here, leave immediately and retry — thread 1
+                // may not have entered yet (race on startup).
+                unsafe { leave_critical_section(cs_ptr_t2 as *mut u8) };
+                let ts_yield = libc::timespec {
+                    tv_sec: 0,
+                    tv_nsec: 1_000_000, // 1 ms
+                };
+                unsafe { libc::nanosleep(&ts_yield, std::ptr::null_mut()) };
+            }
+            try_enter_returned_false_clone.store(saw_false, Ordering::SeqCst);
+
+            // Now block until we can acquire (thread 1 will release after 50 ms).
+            unsafe { enter_critical_section(cs_ptr_t2 as *mut u8) };
+            unsafe { leave_critical_section(cs_ptr_t2 as *mut u8) };
+        });
+
+        t1.join().expect("thread 1 panicked");
+        t2.join().expect("thread 2 panicked");
+
+        // Free the CS storage.
+        let _ = unsafe { Box::from_raw(cs_ptr as *mut [u64; 5]) };
+
+        assert!(
+            try_enter_returned_false.load(Ordering::SeqCst),
+            "TryEnterCriticalSection must return FALSE when another thread holds the CS"
+        );
+    }
+
+    // ── CriticalSection: recursive enter/leave ────────────────────────────────
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn critical_section_recursive_enter_leave() {
+        // Allocate a fresh 40-byte CS.
+        let cs_storage: Box<[u64; 5]> = Box::new([0u64; 5]);
+        let cs_ptr = Box::into_raw(cs_storage) as *mut u8;
+        unsafe { initialize_critical_section(cs_ptr) };
+
+        // Enter twice (recursive).
+        unsafe { enter_critical_section(cs_ptr) };
+        unsafe { enter_critical_section(cs_ptr) };
+
+        // RecursionCount at offset 12 should be 2.
+        let rec: i32 = unsafe { std::ptr::read_volatile(cs_ptr.add(12) as *const i32) };
+        assert_eq!(
+            rec, 2,
+            "RecursionCount must be 2 after two recursive enters"
+        );
+
+        // LockCount at offset 8 should be 1 (initial 0 + 1 for the second enter).
+        let lc: i32 = unsafe { std::ptr::read_volatile(cs_ptr.add(8) as *const i32) };
+        assert_eq!(lc, 1, "LockCount must be 1 after two recursive enters");
+
+        // Leave once — still held.
+        unsafe { leave_critical_section(cs_ptr) };
+        let rec2: i32 = unsafe { std::ptr::read_volatile(cs_ptr.add(12) as *const i32) };
+        assert_eq!(rec2, 1, "RecursionCount must be 1 after one leave");
+
+        // Leave again — fully released.
+        unsafe { leave_critical_section(cs_ptr) };
+        let lc_final: i32 = unsafe { std::ptr::read_volatile(cs_ptr.add(8) as *const i32) };
+        assert_eq!(
+            lc_final, -1,
+            "LockCount must be -1 (unlocked) after full release"
+        );
+        let owner: usize = unsafe { std::ptr::read_volatile(cs_ptr.add(16) as *const usize) };
+        assert_eq!(owner, 0, "OwningThread must be 0 after full release");
+
+        let _ = unsafe { Box::from_raw(cs_ptr as *mut [u64; 5]) };
     }
 }
