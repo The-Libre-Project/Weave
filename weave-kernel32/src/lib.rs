@@ -9913,35 +9913,125 @@ pub unsafe extern "win64" fn set_file_pointer_ex(
     }
 }
 
-/// GetFileTime: stub that returns TRUE without filling timestamps.
+/// GetFileTime: read creation, last-access, and last-write timestamps from an open file handle.
+///
+/// NULL pointers for any of the three output args are silently skipped (not an error).
+/// On unknown handle or fstat failure, returns FALSE and sets LastError.
 ///
 /// # Safety
-/// Pointer arguments are accepted but not dereferenced.
+/// Each non-null pointer arg must point to a valid writable u64 (FILETIME).
 // Wine ref: dlls/kernelbase/file.c:3258 — calls NtQueryInformationFile(FileBasicInformation);
-// unpacks LARGE_INTEGER fields into creation/access/write FILETIME structs; NULL pointers skipped
+// unpacks LARGE_INTEGER fields into creation/access/write FILETIME structs; NULL pointers skipped.
+// Weave maps directly to fstat(2): st_ctime (change-time) serves as creation-time proxy on Linux.
 pub unsafe extern "win64" fn get_file_time(
-    _h_file: usize,
-    _lp_creation_time: *mut u64,
-    _lp_last_access_time: *mut u64,
-    _lp_last_write_time: *mut u64,
+    h_file: usize,
+    lp_creation_time: *mut u64,
+    lp_last_access_time: *mut u64,
+    lp_last_write_time: *mut u64,
 ) -> i32 {
-    warn_once("GetFileTime");
+    let fd = match handles::get_fd(h_file) {
+        Some(fd) => fd,
+        None => {
+            set_last_error(file_io::ERROR_INVALID_HANDLE);
+            return 0; // FALSE
+        }
+    };
+
+    let mut stat = unsafe { std::mem::zeroed::<libc::stat>() };
+    if unsafe { libc::fstat(fd, &mut stat) } != 0 {
+        set_last_error(file_io::ERROR_INVALID_HANDLE);
+        return 0; // FALSE
+    }
+
+    // Convert Unix timespec fields to Windows FILETIME (100-ns intervals since 1601-01-01).
+    // Offset between 1601-01-01 and 1970-01-01 = 11,644,473,600 seconds.
+    let to_filetime = |secs: i64, nsecs: i64| -> u64 {
+        let secs_since_1601 = secs.saturating_add(11_644_473_600) as u64;
+        secs_since_1601 * 10_000_000 + (nsecs as u64) / 100
+    };
+
+    // Linux st_ctime is change-time, not birth/creation time; used as best-effort proxy.
+    if !lp_creation_time.is_null() {
+        unsafe { *lp_creation_time = to_filetime(stat.st_ctime, stat.st_ctime_nsec) };
+    }
+    if !lp_last_access_time.is_null() {
+        unsafe { *lp_last_access_time = to_filetime(stat.st_atime, stat.st_atime_nsec) };
+    }
+    if !lp_last_write_time.is_null() {
+        unsafe { *lp_last_write_time = to_filetime(stat.st_mtime, stat.st_mtime_nsec) };
+    }
+
+    set_last_error(0);
     1 // TRUE
 }
 
-/// SetFileTime: no-op stub that returns TRUE.
+/// SetFileTime: update last-access and/or last-write timestamps on an open file handle.
+///
+/// NULL pointers are skipped (mapped to UTIME_OMIT on Linux). Creation time cannot be
+/// set on Linux (ctime is change-time); if only lp_creation_time is non-null, returns TRUE
+/// silently without calling futimens.
+/// On unknown handle or futimens failure, returns FALSE and sets LastError.
 ///
 /// # Safety
-/// Pointer arguments are accepted but not dereferenced.
+/// Each non-null pointer arg must point to a valid readable u64 (FILETIME).
 // Wine ref: dlls/kernelbase/file.c:3919 — zeroes FILE_BASIC_INFORMATION then packs only the
-// non-null FILETIME args into it; zero-filled fields are ignored by NtSetInformationFile
+// non-null FILETIME args into it; zero-filled fields are ignored by NtSetInformationFile.
+// Weave maps directly to futimens(2) rather than NtSetInformationFile.
 pub unsafe extern "win64" fn set_file_time(
-    _h_file: usize,
-    _lp_creation_time: *const u64,
-    _lp_last_access_time: *const u64,
-    _lp_last_write_time: *const u64,
+    h_file: usize,
+    _lp_creation_time: *const u64, // Linux cannot set creation time; accepted for ABI compatibility
+    lp_last_access_time: *const u64,
+    lp_last_write_time: *const u64,
 ) -> i32 {
-    warn_once("SetFileTime");
+    let fd = match handles::get_fd(h_file) {
+        Some(fd) => fd,
+        None => {
+            set_last_error(file_io::ERROR_INVALID_HANDLE);
+            return 0; // FALSE
+        }
+    };
+
+    // Convert Windows FILETIME (100-ns since 1601-01-01) to Unix timespec.
+    // 116,444,736,000,000,000 = 100-ns intervals from 1601-01-01 to 1970-01-01.
+    let to_timespec = |ft: u64| -> libc::timespec {
+        let intervals_since_unix = ft.saturating_sub(116_444_736_000_000_000);
+        libc::timespec {
+            tv_sec: (intervals_since_unix / 10_000_000) as i64,
+            tv_nsec: ((intervals_since_unix % 10_000_000) * 100) as i64,
+        }
+    };
+
+    // If only creation time is given, Linux cannot set ctime — silently succeed.
+    if lp_last_access_time.is_null() && lp_last_write_time.is_null() {
+        set_last_error(0);
+        return 1; // TRUE — creation-time-only set is a no-op on Linux
+    }
+
+    // Build [atime, mtime] pair; use UTIME_OMIT for NULL args.
+    let omit = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: libc::UTIME_OMIT,
+    };
+    let times = [
+        if lp_last_access_time.is_null() {
+            omit
+        } else {
+            to_timespec(unsafe { *lp_last_access_time })
+        },
+        if lp_last_write_time.is_null() {
+            omit
+        } else {
+            to_timespec(unsafe { *lp_last_write_time })
+        },
+    ];
+
+    let ret = unsafe { libc::futimens(fd, times.as_ptr()) };
+    if ret != 0 {
+        set_last_error(file_io::ERROR_INVALID_HANDLE);
+        return 0; // FALSE
+    }
+
+    set_last_error(0);
     1 // TRUE
 }
 
