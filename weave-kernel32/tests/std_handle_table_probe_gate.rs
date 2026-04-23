@@ -82,3 +82,31 @@ fn set_std_handle_returns_false_for_invalid_std_handle() {
         "SetStdHandle(0xBEEF, 0) must return FALSE (0) for invalid nStdHandle, got {ret}"
     );
 }
+
+#[test]
+fn set_std_handle_invalid_handle_value_is_stored_not_cleared() {
+    // Tier A assertion 6 (TASK-4): SetStdHandle(STD_OUTPUT_HANDLE, INVALID_HANDLE_VALUE)
+    // must store usize::MAX as a real override, not silently clear the slot.
+    // Previously the NO_OVERRIDE sentinel was usize::MAX, causing INVALID_HANDLE_VALUE
+    // to be misinterpreted as "no override". After the fix, the sentinel is usize::MAX - 1.
+    let invalid_handle_value: usize = usize::MAX; // INVALID_HANDLE_VALUE on Win32
+    unsafe { set_std_handle(STD_OUTPUT_HANDLE, invalid_handle_value) };
+    let result = unsafe { get_std_handle(STD_OUTPUT_HANDLE) };
+    assert_eq!(
+        result, usize::MAX,
+        "GetStdHandle(STD_OUTPUT_HANDLE) must return INVALID_HANDLE_VALUE (usize::MAX) \
+         after SetStdHandle(STD_OUTPUT_HANDLE, INVALID_HANDLE_VALUE), got {result:#x}"
+    );
+    // Restore slot to NO_OVERRIDE sentinel so subsequent tests see the default constant.
+    // NO_OVERRIDE = usize::MAX - 1 — the only value that cannot be a real Win32 handle.
+    let no_override_sentinel: usize = usize::MAX - 1;
+    unsafe { set_std_handle(STD_OUTPUT_HANDLE, no_override_sentinel) };
+    // Confirm the slot is back to the default constant after restore.
+    let restored = unsafe { get_std_handle(STD_OUTPUT_HANDLE) };
+    assert_eq!(
+        restored,
+        handles::STDOUT_HANDLE,
+        "GetStdHandle(STD_OUTPUT_HANDLE) must return STDOUT_HANDLE after restoring \
+         NO_OVERRIDE sentinel, got {restored:#x}"
+    );
+}

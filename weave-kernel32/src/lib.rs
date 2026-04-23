@@ -27,11 +27,16 @@ static UEF_HANDLER: AtomicUsize = AtomicUsize::new(0);
 
 /// Process-global override table for SetStdHandle / GetStdHandle.
 /// Slots: [0]=stdin, [1]=stdout, [2]=stderr.
-/// Sentinel value usize::MAX means "no override — fall back to default constant".
+/// Sentinel value NO_OVERRIDE means "no override — fall back to default constant".
+/// We use usize::MAX - 1 rather than usize::MAX so that INVALID_HANDLE_VALUE
+/// (usize::MAX) can be stored as a valid override (e.g. SetStdHandle closing a handle).
+/// Win32 handles are always < 2^31 and multiples of 4, so usize::MAX - 1 cannot
+/// collide with any real handle.
+const NO_OVERRIDE: usize = usize::MAX - 1;
 static STD_HANDLE_OVERRIDES: [AtomicUsize; 3] = [
-    AtomicUsize::new(usize::MAX),
-    AtomicUsize::new(usize::MAX),
-    AtomicUsize::new(usize::MAX),
+    AtomicUsize::new(NO_OVERRIDE),
+    AtomicUsize::new(NO_OVERRIDE),
+    AtomicUsize::new(NO_OVERRIDE),
 ];
 
 /// Map a Windows nStdHandle value to an index into STD_HANDLE_OVERRIDES.
@@ -344,7 +349,7 @@ fn locale_number_lookup(lc_type: u32) -> u32 {
 /// GetStdHandle: return the Weave HANDLE for stdin/stdout/stderr.
 ///
 /// Checks the process-global override table first (written by SetStdHandle).
-/// If no override is set (sentinel usize::MAX), falls back to the default
+/// If no override is set (sentinel NO_OVERRIDE), falls back to the default
 /// handle constants. Returns INVALID_HANDLE_VALUE (usize::MAX) for unknown
 /// nStdHandle values.
 // Wine ref: dlls/kernelbase/console.c — reads from process STD handle table;
@@ -355,7 +360,7 @@ pub extern "win64" fn get_std_handle(n_std_handle: u32) -> usize {
         None => return usize::MAX, // INVALID_HANDLE_VALUE
     };
     let override_val = STD_HANDLE_OVERRIDES[slot].load(Ordering::Relaxed);
-    if override_val != usize::MAX {
+    if override_val != NO_OVERRIDE {
         return override_val;
     }
     // No override — fall back to default constants.
