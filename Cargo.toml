@@ -23,6 +23,7 @@ members = [
     "weave-shlwapi",
     "weave-gdiplus",
     "weave-ddraw",
+    "weave-msvcp140",
 ]
 resolver = "2"
 

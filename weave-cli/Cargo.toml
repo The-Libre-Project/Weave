@@ -24,6 +24,7 @@ weave-winmm = { path = "../weave-winmm" }
 weave-plugin-system = { path = "../weave-plugin-system" }
 weave-vm-fallback = { path = "../weave-vm-fallback" }
 weave-ucrt = { path = "../weave-ucrt" }
+weave-msvcp140 = { path = "../weave-msvcp140" }
 weave-vulkan = { path = "../weave-vulkan" }
 weave-ws2 = { path = "../weave-ws2" }
 weave-comctl32 = { path = "../weave-comctl32" }

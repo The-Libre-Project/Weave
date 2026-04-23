@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use weave_common::com::shell_link::ShellLinkSaveData;
 use weave_core::{cfg, cmdline, dll_registry, exec, iat, loader, pe, prefix, registry, seh, teb};
 use weave_installer::PrefixManager;
+use weave_msvcp140;
 
 mod arch;
 
@@ -49,6 +50,7 @@ fn resolve(dll: &str, func: &str) -> Option<usize> {
         .or_else(|| weave_xinput::resolve(dll, func))
         .or_else(|| weave_winmm::resolve(dll, func))
         .or_else(|| weave_ucrt::resolve(dll, func))
+        .or_else(|| weave_msvcp140::resolve(dll, func))
         .or_else(|| weave_vulkan::resolve(dll, func))
         .or_else(|| weave_ws2::resolve(dll, func))
         .or_else(|| weave_comctl32::resolve(dll, func))

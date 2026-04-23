@@ -1,0 +1,11 @@
+[package]
+name = "weave-msvcp140"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "MSVCP140.dll C++ runtime stubs for Weave"
+
+[dependencies]
+libc = "0.2"
+weave-core = { path = "../weave-core" }
