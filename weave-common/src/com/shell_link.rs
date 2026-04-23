@@ -256,6 +256,31 @@ pub struct ShellLinkState {
 /// For QueryInterface(IID_IPersistFile) the returned pointer is
 /// `&raw mut (*this).persist_file_vtable` — the COM caller expects the returned
 /// pointer to point directly at the IPersistFile vtable-pointer field.
+///
+/// # Probe-gate vtable dereference — correct vs. wrong pattern
+///
+/// When a test or probe gate receives `obj: *const *const ShellLinkObject` (the
+/// pointer-to-COM-object that CoCreateInstance wrote into `*ppv`), use:
+///
+/// ```text
+/// // CORRECT: dereference the object pointer, then access the named vtable field.
+/// let vtable = (*obj).vtable as *const usize;
+/// let slot_fn: SlotFnType = transmute(*vtable.add(N));
+/// ```
+///
+/// Do NOT write:
+///
+/// ```text
+/// // WRONG (commit ea52048 fixed this exact bug): casting *obj directly to
+/// // *const usize treats the vtable-pointer bit-pattern as a usize — the
+/// // address arithmetic that follows walks from the wrong base.
+/// let vtable = *obj as *const usize;
+/// ```
+///
+/// The distinction: `obj` is `*const *const ShellLinkObject`.  `*obj` gives a
+/// `*const ShellLinkObject` — the whole object pointer, not the vtable field.
+/// `(*obj).vtable` gives `*const [usize; N]`, which is the vtable pointer.
+/// Only that second form is correct.
 #[repr(C)]
 pub struct ShellLinkObject {
     /// Pointer to the static IShellLinkW vtable array. Must be the first field (COM ABI).
