@@ -9326,30 +9326,103 @@ pub unsafe extern "win64" fn get_environment_variable_a(
     bytes_needed
 }
 
-/// SetEnvironmentVariableW: no-op, returns TRUE.
+/// SetEnvironmentVariableW — modifies the process environment via libc::setenv / libc::unsetenv.
+///
+/// Behavior per Wine dlls/kernelbase/process.c:1723:
+/// - NULL name → FALSE + ERROR_INVALID_PARAMETER
+/// - name containing '=' → FALSE + ERROR_INVALID_PARAMETER
+/// - NULL value → unsetenv(name) → TRUE
+/// - non-null value → setenv(name, value, 1) → TRUE
 ///
 /// # Safety
-/// Pointer arguments are accepted but not dereferenced.
-// Wine ref: dlls/kernelbase/process.c:1723 — calls RtlSetEnvironmentVariable(NULL, &nameW, &valueW);
-// NULL value deletes the variable; NULL env param means current process environment
+/// `lp_name` must be a valid NUL-terminated UTF-16 string or null.
+/// `lp_value` must be a valid NUL-terminated UTF-16 string or null.
+// Wine ref: dlls/kernelbase/process.c:1723 — calls RtlSetEnvironmentVariable(NULL, &us_name, &us_value);
+// NULL value deletes the variable; NULL name returns ERROR_ENVVAR_NOT_FOUND (we use
+// ERROR_INVALID_PARAMETER per MSDN); name containing '=' is rejected by RtlSetEnvironmentVariable.
 pub unsafe extern "win64" fn set_environment_variable_w(
-    _lp_name: *const u16,
-    _lp_value: *const u16,
+    lp_name: *const u16,
+    lp_value: *const u16,
 ) -> i32 {
-    warn_once("SetEnvironmentVariableW");
+    if lp_name.is_null() {
+        set_last_error(87); // ERROR_INVALID_PARAMETER
+        return 0; // FALSE
+    }
+    // Decode UTF-16 name.
+    let mut len = 0usize;
+    while *lp_name.add(len) != 0 {
+        len += 1;
+    }
+    let name_slice = std::slice::from_raw_parts(lp_name, len);
+    let name = String::from_utf16_lossy(name_slice);
+    // Name must not contain '='.
+    if name.contains('=') {
+        set_last_error(87); // ERROR_INVALID_PARAMETER
+        return 0; // FALSE
+    }
+    // Build a NUL-terminated C string for the name.
+    let c_name = match std::ffi::CString::new(name) {
+        Ok(s) => s,
+        Err(_) => {
+            // Interior NUL byte in name — invalid parameter.
+            set_last_error(87); // ERROR_INVALID_PARAMETER
+            return 0; // FALSE
+        }
+    };
+    if lp_value.is_null() {
+        // NULL value → delete the variable.
+        libc::unsetenv(c_name.as_ptr());
+    } else {
+        // Decode UTF-16 value.
+        let mut vlen = 0usize;
+        while *lp_value.add(vlen) != 0 {
+            vlen += 1;
+        }
+        let value_slice = std::slice::from_raw_parts(lp_value, vlen);
+        let value = String::from_utf16_lossy(value_slice);
+        let c_value = match std::ffi::CString::new(value) {
+            Ok(s) => s,
+            Err(_) => {
+                set_last_error(87); // ERROR_INVALID_PARAMETER
+                return 0; // FALSE
+            }
+        };
+        libc::setenv(c_name.as_ptr(), c_value.as_ptr(), 1);
+    }
     1 // TRUE
 }
 
-/// SetEnvironmentVariableA: no-op, returns TRUE.
+/// SetEnvironmentVariableA — modifies the process environment via libc::setenv / libc::unsetenv.
+///
+/// Delegates to the W variant after passing the narrow (UTF-8/OEM) strings through directly,
+/// mirroring Wine's approach of up-converting via RtlCreateUnicodeStringFromAsciiz then calling
+/// SetEnvironmentVariableW. We call libc directly here to avoid an intermediate wide conversion.
 ///
 /// # Safety
-/// Pointer arguments are accepted but not dereferenced.
-// Wine ref: dlls/kernelbase/process.c:1696 — converts name and value via RtlCreateUnicodeStringFromAsciiz then delegates to SetEnvironmentVariableW
+/// `lp_name` must be a valid NUL-terminated C string or null.
+/// `lp_value` must be a valid NUL-terminated C string or null.
+// Wine ref: dlls/kernelbase/process.c:1696 — converts name/value via RtlCreateUnicodeStringFromAsciiz
+// then delegates to SetEnvironmentVariableW; NULL name → FALSE.
 pub unsafe extern "win64" fn set_environment_variable_a(
-    _lp_name: *const u8,
-    _lp_value: *const u8,
+    lp_name: *const u8,
+    lp_value: *const u8,
 ) -> i32 {
-    warn_once("SetEnvironmentVariableA");
+    if lp_name.is_null() {
+        set_last_error(87); // ERROR_INVALID_PARAMETER
+        return 0; // FALSE
+    }
+    let c_name = std::ffi::CStr::from_ptr(lp_name as *const i8);
+    // Name must not contain '='.
+    if c_name.to_bytes().contains(&b'=') {
+        set_last_error(87); // ERROR_INVALID_PARAMETER
+        return 0; // FALSE
+    }
+    if lp_value.is_null() {
+        libc::unsetenv(c_name.as_ptr());
+    } else {
+        let c_value = std::ffi::CStr::from_ptr(lp_value as *const i8);
+        libc::setenv(c_name.as_ptr(), c_value.as_ptr(), 1);
+    }
     1 // TRUE
 }
 
@@ -13989,5 +14062,130 @@ mod tests {
 
         // Cleanup: restore write bits so the temp file can be deleted
         std::fs::remove_file(&tmp).ok();
+    }
+
+    // ── SetEnvironmentVariableW / GetEnvironmentVariableW round-trip ──────────
+
+    #[test]
+    fn set_environment_variable_w_set_get_delete_roundtrip() {
+        // Encode name and value as UTF-16 with NUL terminator.
+        let name_utf16: Vec<u16> = "WEAVE_TEST_ENV_VAR_W\0".encode_utf16().collect();
+        let value_utf16: Vec<u16> = "hello\0".encode_utf16().collect();
+
+        // Set the variable.
+        let set_ret =
+            unsafe { set_environment_variable_w(name_utf16.as_ptr(), value_utf16.as_ptr()) };
+        assert_eq!(
+            set_ret, 1,
+            "SetEnvironmentVariableW should return TRUE on set"
+        );
+
+        // Get it back — should return 5 ("hello" excl. NUL).
+        let name_get: Vec<u16> = "WEAVE_TEST_ENV_VAR_W\0".encode_utf16().collect();
+        let mut buf = [0u16; 32];
+        let get_ret = unsafe {
+            get_environment_variable_w(name_get.as_ptr(), buf.as_mut_ptr(), buf.len() as u32)
+        };
+        assert_eq!(
+            get_ret, 5,
+            "GetEnvironmentVariableW should return 5 for 'hello'"
+        );
+        let actual: String = String::from_utf16_lossy(&buf[..5]);
+        assert_eq!(
+            actual, "hello",
+            "GetEnvironmentVariableW buffer should contain 'hello'"
+        );
+
+        // Delete the variable (NULL value).
+        let del_ret = unsafe { set_environment_variable_w(name_utf16.as_ptr(), std::ptr::null()) };
+        assert_eq!(
+            del_ret, 1,
+            "SetEnvironmentVariableW should return TRUE on delete"
+        );
+
+        // Get after delete — should return 0 (not found).
+        let mut buf2 = [0u16; 32];
+        let get_ret2 = unsafe {
+            get_environment_variable_w(name_get.as_ptr(), buf2.as_mut_ptr(), buf2.len() as u32)
+        };
+        assert_eq!(
+            get_ret2, 0,
+            "GetEnvironmentVariableW should return 0 after delete"
+        );
+    }
+
+    #[test]
+    fn set_environment_variable_w_null_name_returns_false() {
+        let ret = unsafe { set_environment_variable_w(std::ptr::null(), std::ptr::null()) };
+        assert_eq!(
+            ret, 0,
+            "SetEnvironmentVariableW(NULL name) should return FALSE"
+        );
+        assert_eq!(
+            get_last_error(),
+            87,
+            "SetEnvironmentVariableW(NULL name) should set ERROR_INVALID_PARAMETER"
+        );
+    }
+
+    #[test]
+    fn set_environment_variable_w_name_with_equals_returns_false() {
+        let name_utf16: Vec<u16> = "BAD=NAME\0".encode_utf16().collect();
+        let value_utf16: Vec<u16> = "val\0".encode_utf16().collect();
+        let ret = unsafe { set_environment_variable_w(name_utf16.as_ptr(), value_utf16.as_ptr()) };
+        assert_eq!(
+            ret, 0,
+            "SetEnvironmentVariableW(name with '=') should return FALSE"
+        );
+        assert_eq!(
+            get_last_error(),
+            87,
+            "SetEnvironmentVariableW(name with '=') should set ERROR_INVALID_PARAMETER"
+        );
+    }
+
+    #[test]
+    fn set_environment_variable_a_set_get_delete_roundtrip() {
+        let name = b"WEAVE_TEST_ENV_VAR_A\0";
+        let value = b"world\0";
+
+        // Set the variable.
+        let set_ret = unsafe { set_environment_variable_a(name.as_ptr(), value.as_ptr()) };
+        assert_eq!(
+            set_ret, 1,
+            "SetEnvironmentVariableA should return TRUE on set"
+        );
+
+        // Get it back via the A variant.
+        let mut buf = [0u8; 32];
+        let get_ret = unsafe {
+            get_environment_variable_a(name.as_ptr(), buf.as_mut_ptr(), buf.len() as u32)
+        };
+        assert_eq!(
+            get_ret, 5,
+            "GetEnvironmentVariableA should return 5 for 'world'"
+        );
+        assert_eq!(
+            &buf[..6],
+            b"world\0",
+            "GetEnvironmentVariableA buffer should contain 'world'"
+        );
+
+        // Delete the variable.
+        let del_ret = unsafe { set_environment_variable_a(name.as_ptr(), std::ptr::null()) };
+        assert_eq!(
+            del_ret, 1,
+            "SetEnvironmentVariableA should return TRUE on delete"
+        );
+
+        // Get after delete — should return 0.
+        let mut buf2 = [0u8; 32];
+        let get_ret2 = unsafe {
+            get_environment_variable_a(name.as_ptr(), buf2.as_mut_ptr(), buf2.len() as u32)
+        };
+        assert_eq!(
+            get_ret2, 0,
+            "GetEnvironmentVariableA should return 0 after delete"
+        );
     }
 }
