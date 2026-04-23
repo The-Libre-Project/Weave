@@ -7,6 +7,7 @@
 //!
 //! Handled DLL namespaces (case-insensitive):
 //!   api-ms-win-crt-*   ucrtbase.dll   msvcrt.dll
+#![allow(clippy::missing_safety_doc)]
 
 use libc::c_void;
 
