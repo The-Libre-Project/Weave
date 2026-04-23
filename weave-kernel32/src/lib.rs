@@ -12,7 +12,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 
 /// Tracks the most recently freed heap address so consecutive double-frees
 /// of the same pointer are silently ignored.  Windows HeapFree returns FALSE
@@ -82,6 +82,96 @@ fn lock_file_mappings<'a>(
     m.lock()
         .map_err(|e| eprintln!("weave: weave-kernel32: file mappings mutex poisoned: {e}"))
         .ok()
+}
+
+// ── Semaphore table ───────────────────────────────────────────────────────────
+//
+// Each CreateSemaphoreW/A allocates a heap-pinned sem_t via Box and stores it
+// here, keyed by a monotonically-incrementing handle value starting at
+// SEMAPHORE_HANDLE_BASE.  The Box guarantees the sem_t address is stable after
+// sem_init — never move a SemWrapper out of its Box.
+//
+// Named semaphores are out of scope; lp_name is ignored.
+
+/// sem_t is not Send/Sync by default; this newtype opts in.
+struct SemWrapper(libc::sem_t);
+unsafe impl Send for SemWrapper {}
+unsafe impl Sync for SemWrapper {}
+
+struct SemEntry {
+    sem: Box<SemWrapper>,
+    // max_count is read by ReleaseSemaphore (TASK-2) to enforce the ceiling.
+    #[allow(dead_code)]
+    max_count: i32,
+}
+
+const SEMAPHORE_HANDLE_BASE: usize = 0x8FFF_0001;
+static SEMAPHORE_NEXT: AtomicUsize = AtomicUsize::new(SEMAPHORE_HANDLE_BASE);
+static SEMAPHORE_TABLE: OnceLock<Mutex<HashMap<usize, SemEntry>>> = OnceLock::new();
+
+fn sem_table() -> &'static Mutex<HashMap<usize, SemEntry>> {
+    SEMAPHORE_TABLE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Create a POSIX-backed anonymous semaphore and return its Weave handle.
+/// Returns 0 (NULL) on invalid arguments or allocation failure.
+/// Wine ref: dlls/kernelbase/sync.c:796 — CreateSemaphoreW delegates to
+/// CreateSemaphoreExW(sa, initial, max, name, 0, SEMAPHORE_ALL_ACCESS) →
+/// NtCreateSemaphore.  max=0 or initial>max → STATUS_INVALID_PARAMETER →
+/// ERROR_INVALID_PARAMETER → NULL handle.
+fn create_semaphore_impl(l_initial_count: i32, l_maximum_count: i32) -> usize {
+    // Validate: max must be > 0 and initial must be ≤ max.
+    if l_maximum_count <= 0 || l_initial_count < 0 || l_initial_count > l_maximum_count {
+        return 0;
+    }
+
+    // Allocate a zeroed sem_t on the heap.  Box pins the address.
+    let mut entry = Box::new(SemWrapper(unsafe { std::mem::zeroed::<libc::sem_t>() }));
+
+    // sem_init(pshared=0 → process-local, value=initial_count)
+    let rc = unsafe { libc::sem_init(&mut entry.0 as *mut libc::sem_t, 0, l_initial_count as u32) };
+    if rc != 0 {
+        return 0;
+    }
+
+    let handle = SEMAPHORE_NEXT.fetch_add(1, Ordering::Relaxed);
+    let sem_entry = SemEntry {
+        sem: entry,
+        max_count: l_maximum_count,
+    };
+
+    let mut table = match sem_table()
+        .lock()
+        .map_err(|e| eprintln!("weave: semaphore table mutex poisoned: {e}"))
+        .ok()
+    {
+        Some(g) => g,
+        None => return 0,
+    };
+    table.insert(handle, sem_entry);
+    handle
+}
+
+/// Look up a semaphore handle and return its current value via sem_getvalue.
+/// Returns None if the handle is not in the table.
+pub fn semaphore_getvalue(handle: usize) -> Option<i32> {
+    let table = sem_table()
+        .lock()
+        .map_err(|e| eprintln!("weave: semaphore table mutex poisoned: {e}"))
+        .ok()?;
+    let entry = table.get(&handle)?;
+    let mut val: libc::c_int = 0;
+    let rc = unsafe {
+        libc::sem_getvalue(
+            &entry.sem.0 as *const libc::sem_t as *mut libc::sem_t,
+            &mut val,
+        )
+    };
+    if rc == 0 {
+        Some(val)
+    } else {
+        None
+    }
 }
 
 /// Allocate a mapping slot and return its handle.
@@ -6293,21 +6383,29 @@ pub extern "win64" fn reset_event(h_event: usize) -> i32 {
     1
 }
 
-/// CreateSemaphoreA — returns a fake handle (1).
+/// CreateSemaphoreA — ANSI trampoline to CreateSemaphoreW.
+///
+/// Converts the ANSI name (out of scope; ignored) and delegates to the Wide
+/// implementation.  All integer arguments pass through unchanged.
 ///
 /// # Safety
-/// Pointer arguments are accepted but not dereferenced.
-// Wine ref: dlls/kernelbase/sync.c — CreateSemaphoreA converts name via
+/// Pointer arguments may be null; lp_name is ignored (named semaphores out of scope).
+// Wine ref: dlls/kernelbase/sync.c:796 — CreateSemaphoreA converts name via
 // RtlCreateUnicodeStringFromAsciiz then delegates to CreateSemaphoreW →
 // CreateSemaphoreExW → NtCreateSemaphore. STATUS_OBJECT_NAME_EXISTS → ERROR_ALREADY_EXISTS.
 pub unsafe extern "win64" fn create_semaphore_a(
-    _lp_semaphore_attributes: *const u8,
-    _l_initial_count: i32,
-    _l_maximum_count: i32,
+    lp_semaphore_attributes: *const u8,
+    l_initial_count: i32,
+    l_maximum_count: i32,
     _lp_name: *const u8,
 ) -> usize {
-    warn_once("CreateSemaphoreA");
-    1 // fake handle
+    // Named semaphores are out of scope; pass null for name.
+    create_semaphore_w(
+        lp_semaphore_attributes,
+        l_initial_count,
+        l_maximum_count,
+        std::ptr::null(),
+    )
 }
 /// ReleaseSemaphore — no-op stub, returns TRUE.
 // Wine ref: dlls/kernelbase/sync.c:846 — calls NtReleaseSemaphore(handle, count, (PULONG)previous)
@@ -6320,24 +6418,25 @@ pub extern "win64" fn release_semaphore(
     1
 }
 
-/// CreateSemaphoreW — create or open a named semaphore (Wide).
+/// CreateSemaphoreW — create an anonymous POSIX-backed semaphore.
 ///
-/// Returns a fake non-zero handle. 7-Zip uses semaphores for parallel
-/// compression; with a stub the single-threaded fallback path runs.
+/// Returns a non-zero Weave handle on success, 0 (NULL) on failure.
+/// Named semaphores (lp_name != null) are out of scope; name is ignored.
+/// Validates: max_count > 0, 0 ≤ initial_count ≤ max_count.
 ///
 /// # Safety
-/// Pointer arguments are ignored.
-// Wine ref: dlls/kernelbase/sync.c — CreateSemaphoreW delegates to
+/// lp_semaphore_attributes and lp_name are ignored (may be null).
+// Wine ref: dlls/kernelbase/sync.c:796 — CreateSemaphoreW delegates to
 // CreateSemaphoreExW(sa, initial, max, name, 0, SEMAPHORE_ALL_ACCESS) →
-// NtCreateSemaphore. STATUS_OBJECT_NAME_EXISTS → ERROR_ALREADY_EXISTS.
+// NtCreateSemaphore.  STATUS_INVALID_PARAMETER when max=0 or initial>max.
+// STATUS_OBJECT_NAME_EXISTS → ERROR_ALREADY_EXISTS (named path, out of scope).
 pub unsafe extern "win64" fn create_semaphore_w(
     _lp_semaphore_attributes: *const u8,
-    _l_initial_count: i32,
-    _l_maximum_count: i32,
+    l_initial_count: i32,
+    l_maximum_count: i32,
     _lp_name: *const u16,
 ) -> usize {
-    warn_once("CreateSemaphoreW");
-    1 // fake HANDLE
+    create_semaphore_impl(l_initial_count, l_maximum_count)
 }
 
 /// SetFileApisToOEM — switch file APIs to OEM character set. No-op.

@@ -26,3 +26,7 @@ path = "tests/std_handle_table_probe_gate.rs"
 [[test]]
 name = "unhandled_exception_filter_probe_gate"
 path = "tests/unhandled_exception_filter_probe_gate.rs"
+
+[[test]]
+name = "semaphore_probe_gate"
+path = "tests/semaphore_probe_gate.rs"
