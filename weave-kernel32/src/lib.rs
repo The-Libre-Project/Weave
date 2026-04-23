@@ -11037,18 +11037,120 @@ pub unsafe extern "win64" fn set_console_text_attribute(
     1 // TRUE
 }
 
-/// SetConsoleCtrlHandler: set console control handler.
+// ── SetConsoleCtrlHandler state ──────────────────────────────────────────────
+//
+// Wine ref: dlls/kernelbase/console.c:1502 — NULL func toggles ConsoleFlags bit
+// 1 in PEB->ProcessParameters; non-NULL func add=TRUE prepends to ctrl_handler
+// linked-list; add=FALSE walks list and removes first match; not found →
+// SetLastError(ERROR_INVALID_PARAMETER) + return FALSE.
+//
+// Weave mapping: linked list → Vec<usize> protected by Mutex; ConsoleFlags bit →
+// CTRL_IGNORE AtomicBool; one-time sigaction install guarded by SIGNAL_INSTALLED.
+
+/// Handler function pointers (as usize), newest appended last.
+/// Iterate in reverse (newest-first) when dispatching.
+static CTRL_HANDLERS: OnceLock<Mutex<Vec<usize>>> = OnceLock::new();
+
+/// When true, Ctrl+C / Ctrl+Break signals are silently ignored (NULL-func + add=TRUE).
+static CTRL_IGNORE: AtomicBool = AtomicBool::new(false);
+
+/// Guards one-time sigaction install — set to true after SIGINT/SIGTERM are hooked.
+static SIGNAL_INSTALLED: AtomicBool = AtomicBool::new(false);
+
+fn ctrl_handlers() -> &'static Mutex<Vec<usize>> {
+    CTRL_HANDLERS.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+/// CTRL event identifiers (matches Windows CTRL_*_EVENT constants).
+const CTRL_C_EVENT: u32 = 0;
+const CTRL_CLOSE_EVENT: u32 = 2;
+
+/// Signal handler dispatched by SIGINT and SIGTERM.
 ///
-/// No-op. Return TRUE.
+/// Must be `extern "C"` — the kernel calls this directly.
+/// Uses try_lock() to avoid deadlock: if the mutex is held by the main thread
+/// at signal delivery time we skip the handler chain silently (documented
+/// degradation — holding a lock across signal delivery is caller's problem).
+extern "C" fn ctrl_signal_dispatch(sig: i32) {
+    if CTRL_IGNORE.load(Ordering::Relaxed) {
+        return;
+    }
+    let event = if sig == libc::SIGTERM {
+        CTRL_CLOSE_EVENT
+    } else {
+        CTRL_C_EVENT
+    };
+    // try_lock: if mutex is contended at signal delivery time, skip silently.
+    if let Ok(handlers) = ctrl_handlers().try_lock() {
+        // Iterate newest-first (reverse of insertion order).
+        for &fn_ptr in handlers.iter().rev() {
+            // SAFETY: fn_ptr was stored from a valid extern "win64" fn cast.
+            let handler: unsafe extern "win64" fn(u32) -> i32 =
+                unsafe { std::mem::transmute(fn_ptr) };
+            let handled = unsafe { handler(event) };
+            if handled != 0 {
+                break; // handler returned TRUE — stop chain
+            }
+        }
+    }
+}
+
+/// Install SIGINT and SIGTERM sigaction handlers exactly once.
+fn install_signal_handlers_once() {
+    if SIGNAL_INSTALLED
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return; // already installed
+    }
+    // SAFETY: sigaction is safe to call before any threads diverge and we only
+    // store a plain extern "C" fn pointer — no closures, no allocations.
+    unsafe {
+        let sa = libc::sigaction {
+            sa_sigaction: ctrl_signal_dispatch as *const () as libc::sighandler_t,
+            sa_mask: std::mem::zeroed(),
+            sa_flags: libc::SA_RESTART,
+            #[cfg(target_os = "linux")]
+            sa_restorer: None,
+        };
+        libc::sigaction(libc::SIGINT, &sa, std::ptr::null_mut());
+        libc::sigaction(libc::SIGTERM, &sa, std::ptr::null_mut());
+    }
+}
+
+/// SetConsoleCtrlHandler: maintain a process-global handler list and install
+/// a real sigaction on first registration.
 ///
 /// # Safety
-/// Pointer arguments are accepted but not dereferenced.
-// Wine ref: dlls/kernelbase/console.c:1502 — NULL func toggles ConsoleFlags bit 1 in PEB->ProcessParameters;
-// non-NULL func: add allocates ctrl_handler linked-list node; remove walks list and frees it;
-// removing default_handler → ERROR_INVALID_PARAMETER
-pub unsafe extern "win64" fn set_console_ctrl_handler(_handler_routine: usize, _add: i32) -> i32 {
-    warn_once("SetConsoleCtrlHandler");
-    1 // TRUE
+/// `handler_routine` must be 0 (NULL) or a valid `extern "win64" fn(u32) -> i32`
+/// function pointer cast to usize.
+// Wine ref: dlls/kernelbase/console.c:1502 — NULL func toggles ConsoleFlags bit;
+// non-NULL add=TRUE prepends; add=FALSE removes first match or ERROR_INVALID_PARAMETER.
+pub unsafe extern "win64" fn set_console_ctrl_handler(handler_routine: usize, add: i32) -> i32 {
+    if handler_routine == 0 {
+        // NULL func: toggle CTRL_IGNORE flag
+        CTRL_IGNORE.store(add != 0, Ordering::Release);
+        return 1; // TRUE
+    }
+
+    let handlers = ctrl_handlers();
+    let mut guard = handlers.lock().unwrap_or_else(|e| e.into_inner());
+
+    if add != 0 {
+        // add=TRUE: append (newest last; dispatch iterates in reverse)
+        guard.push(handler_routine);
+        install_signal_handlers_once();
+        1 // TRUE
+    } else {
+        // add=FALSE: remove first match
+        if let Some(pos) = guard.iter().position(|&p| p == handler_routine) {
+            guard.remove(pos);
+            1 // TRUE
+        } else {
+            weave_common::set_last_error(0x57); // ERROR_INVALID_PARAMETER
+            0 // FALSE
+        }
+    }
 }
 
 /// GetNumberOfConsoleInputEvents: report pending console input events.

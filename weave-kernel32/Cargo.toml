@@ -30,3 +30,7 @@ path = "tests/unhandled_exception_filter_probe_gate.rs"
 [[test]]
 name = "semaphore_probe_gate"
 path = "tests/semaphore_probe_gate.rs"
+
+[[test]]
+name = "console_ctrl_probe_gate"
+path = "tests/console_ctrl_probe_gate.rs"
