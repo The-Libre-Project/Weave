@@ -765,20 +765,19 @@ pub unsafe extern "win64" fn enter_critical_section(lp_critical_section: *mut u8
         return;
     }
     // SAFETY: caller guarantees valid 40-byte struct; offset 16 (usize) is 8-byte aligned.
-    let owning_thread_ptr = unsafe { lp_critical_section.add(16) as *mut usize };
+    let owning_atomic = unsafe { &*(lp_critical_section.add(16) as *const AtomicUsize) };
     let tid = unsafe { libc::syscall(libc::SYS_gettid) as usize };
     // Recursive entry: same thread already owns the CS.
-    if unsafe { std::ptr::read_volatile(owning_thread_ptr) } == tid {
+    if owning_atomic.load(Ordering::Acquire) == tid {
         // SAFETY: RecursionCount at offset 12, i32.
         let rec_ptr = unsafe { lp_critical_section.add(12) as *mut i32 };
         // SAFETY: LockCount at offset 8, i32.
-        let lock_ptr = unsafe { lp_critical_section.add(8) as *mut i32 };
+        let lock_atomic = unsafe { &*(lp_critical_section.add(8) as *const AtomicI32) };
         unsafe {
             let rc = std::ptr::read_volatile(rec_ptr);
             std::ptr::write_volatile(rec_ptr, rc + 1);
-            let lc = std::ptr::read_volatile(lock_ptr);
-            std::ptr::write_volatile(lock_ptr, lc + 1);
         }
+        lock_atomic.fetch_add(1, Ordering::AcqRel);
         return;
     }
     // Fast path / spin loop: CAS LockCount from -1 → 0.
@@ -791,10 +790,8 @@ pub unsafe extern "win64" fn enter_critical_section(lp_critical_section: *mut u8
         match lock_atomic.compare_exchange(-1, 0, Ordering::AcqRel, Ordering::Acquire) {
             Ok(_) => {
                 // Acquired — set owner and recursion depth.
-                unsafe {
-                    std::ptr::write_volatile(owning_thread_ptr, tid);
-                    std::ptr::write_volatile(rec_ptr, 1);
-                }
+                owning_atomic.store(tid, Ordering::Release);
+                unsafe { std::ptr::write_volatile(rec_ptr, 1) };
                 return;
             }
             Err(_) => {
@@ -832,21 +829,19 @@ pub unsafe extern "win64" fn leave_critical_section(lp_critical_section: *mut u8
     // SAFETY: offsets verified against RTL_CRITICAL_SECTION layout above.
     let lock_atomic = unsafe { &*(lp_critical_section.add(8) as *const AtomicI32) };
     let rec_ptr = unsafe { lp_critical_section.add(12) as *mut i32 };
-    let owning_thread_ptr = unsafe { lp_critical_section.add(16) as *mut usize };
-    unsafe {
-        let rc = std::ptr::read_volatile(rec_ptr);
-        if rc > 1 {
-            // Recursive hold: unwind one level.
-            std::ptr::write_volatile(rec_ptr, rc - 1);
-            // Decrement LockCount to match (mirrors recursive Enter increment).
-            let lc = lock_atomic.load(Ordering::Relaxed);
-            lock_atomic.store(lc - 1, Ordering::Release);
-        } else {
-            // Final release: clear owner first, then unlock.
-            std::ptr::write_volatile(rec_ptr, 0);
-            std::ptr::write_volatile(owning_thread_ptr, 0);
-            lock_atomic.store(-1, Ordering::Release);
-        }
+    // SAFETY: offset 16 is 8-byte aligned; AtomicUsize has the same layout as usize.
+    let owning_atomic = unsafe { &*(lp_critical_section.add(16) as *const AtomicUsize) };
+    let rc = unsafe { std::ptr::read_volatile(rec_ptr) };
+    if rc > 1 {
+        // Recursive hold: unwind one level.
+        unsafe { std::ptr::write_volatile(rec_ptr, rc - 1) };
+        // Decrement LockCount to match (mirrors recursive Enter increment).
+        lock_atomic.fetch_sub(1, Ordering::Release);
+    } else {
+        // Final release: clear owner first, then unlock.
+        unsafe { std::ptr::write_volatile(rec_ptr, 0) };
+        owning_atomic.store(0, Ordering::Release);
+        lock_atomic.store(-1, Ordering::Release);
     }
 }
 
@@ -7380,11 +7375,11 @@ pub unsafe extern "win64" fn try_enter_critical_section(lp_critical_section: *mu
         return 0; // FALSE — invalid pointer
     }
     let cs = lp_critical_section as *mut u8;
-    // SAFETY: layout documented above; offsets are within the 40-byte struct.
-    let owning_thread_ptr = unsafe { cs.add(16) as *mut usize };
+    // SAFETY: layout documented above; offset 16 is 8-byte aligned; AtomicUsize has same layout as usize.
+    let owning_atomic = unsafe { &*(cs.add(16) as *const AtomicUsize) };
     let tid = unsafe { libc::syscall(libc::SYS_gettid) as usize };
     // Recursive path: same thread already owns the CS.
-    if unsafe { std::ptr::read_volatile(owning_thread_ptr) } == tid {
+    if owning_atomic.load(Ordering::Acquire) == tid {
         let rec_ptr = unsafe { cs.add(12) as *mut i32 };
         let lock_atomic = unsafe { &*(cs.add(8) as *const AtomicI32) };
         unsafe {
@@ -7400,10 +7395,8 @@ pub unsafe extern "win64" fn try_enter_critical_section(lp_critical_section: *mu
         Ok(_) => {
             // Acquired — set owner and recursion depth.
             let rec_ptr = unsafe { cs.add(12) as *mut i32 };
-            unsafe {
-                std::ptr::write_volatile(owning_thread_ptr, tid);
-                std::ptr::write_volatile(rec_ptr, 1);
-            }
+            owning_atomic.store(tid, Ordering::Release);
+            unsafe { std::ptr::write_volatile(rec_ptr, 1) };
             1 // TRUE
         }
         Err(_) => 0, // FALSE — another thread owns it
