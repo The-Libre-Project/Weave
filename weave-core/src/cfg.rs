@@ -1577,3 +1577,56 @@ unsafe extern "win64" fn weave_cfg_check_stub() {
 // On non-x86_64 (macOS ARM64 build for unit tests) provide a no-op.
 #[cfg(not(target_arch = "x86_64"))]
 fn weave_cfg_check_stub() {}
+
+#[cfg(all(test, target_os = "linux", target_arch = "x86_64"))]
+mod tests {
+    use super::*;
+    use std::arch::asm;
+
+    static mut CHECK_STUB_TARGET_CALLED: bool = false;
+
+    unsafe extern "win64" fn dummy_target() {
+        unsafe {
+            CHECK_STUB_TARGET_CALLED = true;
+        }
+    }
+
+    #[test]
+    fn check_stub_returns_without_jumping_and_preserves_call_target() {
+        let rcx_in = dummy_target as *const () as usize;
+        let rax_sentinel = 0xDEAD_BEEF_DEAD_BEEFusize;
+        let stub = weave_cfg_check_stub as *const ();
+
+        let rcx_out: usize;
+        let rax_out: usize;
+        let returned_here: usize;
+
+        unsafe {
+            CHECK_STUB_TARGET_CALLED = false;
+
+            asm!(
+                "mov rcx, {rcx_in}",
+                "mov rax, {rax_sentinel}",
+                "call {stub}",
+                "mov r12, rcx",
+                "mov r13, rax",
+                "mov r14, 1",
+                rcx_in = in(reg) rcx_in,
+                rax_sentinel = in(reg) rax_sentinel,
+                stub = in(reg) stub,
+                lateout("r12") rcx_out,
+                lateout("r13") rax_out,
+                lateout("r14") returned_here,
+                clobber_abi("win64"),
+            );
+        }
+
+        assert_eq!(returned_here, 1, "check stub did not return to caller");
+        assert!(
+            unsafe { !CHECK_STUB_TARGET_CALLED },
+            "check stub jumped to the target instead of returning"
+        );
+        assert_eq!(rcx_out, rcx_in, "check stub clobbered RCX target");
+        assert_eq!(rax_out, rax_sentinel, "check stub clobbered RAX");
+    }
+}
