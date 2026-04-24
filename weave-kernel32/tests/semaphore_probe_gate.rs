@@ -21,6 +21,7 @@
 use std::ptr::{null, null_mut};
 use weave_kernel32::{
     create_semaphore_a, create_semaphore_w, release_semaphore, semaphore_getvalue,
+    wait_for_single_object,
 };
 
 #[test]
@@ -89,4 +90,87 @@ fn semaphore_release_probe_gate() {
     assert_eq!(ok, 0, "over-max release must return FALSE");
     // value must not have changed
     assert_eq!(semaphore_getvalue(handle).unwrap(), 3);
+}
+
+// ── TASK-3: WaitForSingleObject semaphore dispatch ─────────────────────────
+
+#[test]
+fn wfso_semaphore_count1_nonblocking() {
+    // TASK-3 assertion 1: count=1 handle → timeout=0 → WAIT_OBJECT_0.
+    // TASK-3 assertion 2: second wait with timeout=0 → WAIT_TIMEOUT (count now 0).
+    const WAIT_OBJECT_0: u32 = 0;
+    const WAIT_TIMEOUT: u32 = 0x0000_0102;
+
+    let handle = unsafe { create_semaphore_w(null(), 1, 1, null()) };
+    assert_ne!(handle, 0, "handle must be non-NULL");
+
+    let r = unsafe { wait_for_single_object(handle, 0) };
+    assert_eq!(
+        r, WAIT_OBJECT_0,
+        "first WFSO(timeout=0) on count=1 must be WAIT_OBJECT_0"
+    );
+
+    let r2 = unsafe { wait_for_single_object(handle, 0) };
+    assert_eq!(
+        r2, WAIT_TIMEOUT,
+        "second WFSO(timeout=0) on count=0 must be WAIT_TIMEOUT"
+    );
+}
+
+#[test]
+fn wfso_semaphore_release_then_wait() {
+    // TASK-3 assertion 3: create(0,1) → wait(0)=TIMEOUT → release → wait(0)=WAIT_OBJECT_0.
+    const WAIT_OBJECT_0: u32 = 0;
+    const WAIT_TIMEOUT: u32 = 0x0000_0102;
+
+    let handle = unsafe { create_semaphore_w(null(), 0, 1, null()) };
+    assert_ne!(handle, 0);
+
+    let r = unsafe { wait_for_single_object(handle, 0) };
+    assert_eq!(r, WAIT_TIMEOUT, "WFSO on count=0 must be WAIT_TIMEOUT");
+
+    let ok = unsafe { release_semaphore(handle, 1, null_mut()) };
+    assert_ne!(ok, 0, "ReleaseSemaphore must succeed");
+
+    let r2 = unsafe { wait_for_single_object(handle, 0) };
+    assert_eq!(
+        r2, WAIT_OBJECT_0,
+        "WFSO after release must be WAIT_OBJECT_0"
+    );
+}
+
+#[test]
+fn wfso_semaphore_finite_timeout() {
+    // TASK-3 assertion 4 (optional): wait on count=0 with 10ms → WAIT_TIMEOUT.
+    const WAIT_TIMEOUT: u32 = 0x0000_0102;
+
+    let handle = unsafe { create_semaphore_w(null(), 0, 1, null()) };
+    assert_ne!(handle, 0);
+
+    let r = unsafe { wait_for_single_object(handle, 10) };
+    assert_eq!(
+        r, WAIT_TIMEOUT,
+        "WFSO(10ms) on count=0 must be WAIT_TIMEOUT"
+    );
+}
+
+#[test]
+fn wfso_semaphore_threaded_release() {
+    // TASK-3 assertion 5 (optional): thread releases after 50ms; WFSO(1000) = WAIT_OBJECT_0.
+    const WAIT_OBJECT_0: u32 = 0;
+
+    let handle = unsafe { create_semaphore_w(null(), 0, 1, null()) };
+    assert_ne!(handle, 0);
+
+    let handle_copy = handle;
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        unsafe { release_semaphore(handle_copy, 1, null_mut()) };
+    });
+
+    let r = unsafe { wait_for_single_object(handle, 1000) };
+    assert_eq!(
+        r, WAIT_OBJECT_0,
+        "WFSO(1000ms) must be WAIT_OBJECT_0 after threaded release"
+    );
 }

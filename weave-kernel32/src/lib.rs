@@ -12,7 +12,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 /// Tracks the most recently freed heap address so consecutive double-frees
 /// of the same pointer are silently ignored.  Windows HeapFree returns FALSE
@@ -50,7 +50,6 @@ fn std_slot(n: u32) -> Option<usize> {
     }
 }
 
-use std::sync::Arc;
 use weave_common::stub::warn_once;
 use weave_common::{STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE};
 use weave_core::progress::mark_phase;
@@ -99,7 +98,7 @@ unsafe impl Send for SemWrapper {}
 unsafe impl Sync for SemWrapper {}
 
 struct SemEntry {
-    sem: Box<SemWrapper>,
+    sem: Arc<SemWrapper>,
     // max_count is enforced by ReleaseSemaphore to prevent exceeding the ceiling.
     max_count: i32,
 }
@@ -124,18 +123,26 @@ fn create_semaphore_impl(l_initial_count: i32, l_maximum_count: i32) -> usize {
         return 0;
     }
 
-    // Allocate a zeroed sem_t on the heap.  Box pins the address.
-    let mut entry = Box::new(SemWrapper(unsafe { std::mem::zeroed::<libc::sem_t>() }));
+    // Initialise sem_t on the stack, then move into Arc (which pins it on the heap).
+    // Arc lets wait_for_single_object clone the entry, drop the table lock, and
+    // then block without holding the mutex.
+    let mut raw_sem = SemWrapper(unsafe { std::mem::zeroed::<libc::sem_t>() });
 
     // sem_init(pshared=0 → process-local, value=initial_count)
-    let rc = unsafe { libc::sem_init(&mut entry.0 as *mut libc::sem_t, 0, l_initial_count as u32) };
+    let rc = unsafe {
+        libc::sem_init(
+            &mut raw_sem.0 as *mut libc::sem_t,
+            0,
+            l_initial_count as u32,
+        )
+    };
     if rc != 0 {
         return 0;
     }
 
     let handle = SEMAPHORE_NEXT.fetch_add(1, Ordering::Relaxed);
     let sem_entry = SemEntry {
-        sem: entry,
+        sem: Arc::new(raw_sem),
         max_count: l_maximum_count,
     };
 
@@ -7547,6 +7554,97 @@ pub unsafe extern "win64" fn wait_for_single_object(h_handle: usize, dw_millisec
         }
         eprintln!("weave/WFSO: handle={h_handle:#x} → WAIT_TIMEOUT (eventfd poll timed out)");
         return WAIT_TIMEOUT;
+    }
+
+    // Semaphore handle — clone the Arc out of the table so we can block without
+    // holding the mutex.
+    // Wine ref: dlls/kernelbase/sync.c — WaitForSingleObject on a semaphore handle
+    // decrements the count atomically; WAIT_OBJECT_0 on success, WAIT_TIMEOUT on
+    // expiry, WAIT_FAILED on invalid handle or unexpected error.
+    #[cfg(target_os = "linux")]
+    {
+        let sem_arc: Option<Arc<SemWrapper>> = {
+            let tbl = sem_table()
+                .lock()
+                .map_err(|e| eprintln!("weave: semaphore table mutex poisoned: {e}"))
+                .ok();
+            tbl.and_then(|t| t.get(&h_handle).map(|e| Arc::clone(&e.sem)))
+        };
+
+        if let Some(sem_arc) = sem_arc {
+            // SAFETY: Arc keeps the sem_t alive; address is stable for the Arc lifetime.
+            let sem_ptr = &sem_arc.0 as *const libc::sem_t as *mut libc::sem_t;
+
+            if dw_milliseconds == 0 {
+                // Non-blocking: try to decrement without waiting.
+                let rc = unsafe { libc::sem_trywait(sem_ptr) };
+                if rc == 0 {
+                    eprintln!("weave/WFSO: handle={h_handle:#x} → WAIT_OBJECT_0 (sem trywait)");
+                    return WAIT_OBJECT_0;
+                }
+                let err = unsafe { *libc::__errno_location() };
+                if err == libc::EAGAIN {
+                    eprintln!(
+                        "weave/WFSO: handle={h_handle:#x} → WAIT_TIMEOUT (sem trywait EAGAIN)"
+                    );
+                    return WAIT_TIMEOUT;
+                }
+                eprintln!(
+                    "weave/WFSO: handle={h_handle:#x} → WAIT_FAILED (sem trywait errno={err})"
+                );
+                return WAIT_FAILED;
+            } else if dw_milliseconds == INFINITE {
+                loop {
+                    let rc = unsafe { libc::sem_wait(sem_ptr) };
+                    if rc == 0 {
+                        eprintln!("weave/WFSO: handle={h_handle:#x} → WAIT_OBJECT_0 (sem wait)");
+                        return WAIT_OBJECT_0;
+                    }
+                    let err = unsafe { *libc::__errno_location() };
+                    if err == libc::EINTR {
+                        continue;
+                    }
+                    eprintln!(
+                        "weave/WFSO: handle={h_handle:#x} → WAIT_FAILED (sem wait errno={err})"
+                    );
+                    return WAIT_FAILED;
+                }
+            } else {
+                // Finite timeout: compute absolute CLOCK_REALTIME deadline for sem_timedwait.
+                let mut ts = libc::timespec {
+                    tv_sec: 0,
+                    tv_nsec: 0,
+                };
+                unsafe { libc::clock_gettime(libc::CLOCK_REALTIME, &mut ts) };
+                ts.tv_sec += (dw_milliseconds / 1000) as libc::time_t;
+                ts.tv_nsec += ((dw_milliseconds % 1000) * 1_000_000) as libc::c_long;
+                if ts.tv_nsec >= 1_000_000_000 {
+                    ts.tv_sec += 1;
+                    ts.tv_nsec -= 1_000_000_000;
+                }
+                loop {
+                    let rc = unsafe { libc::sem_timedwait(sem_ptr, &ts) };
+                    if rc == 0 {
+                        eprintln!(
+                            "weave/WFSO: handle={h_handle:#x} → WAIT_OBJECT_0 (sem timedwait)"
+                        );
+                        return WAIT_OBJECT_0;
+                    }
+                    let err = unsafe { *libc::__errno_location() };
+                    if err == libc::ETIMEDOUT {
+                        eprintln!(
+                            "weave/WFSO: handle={h_handle:#x} → WAIT_TIMEOUT (sem timedwait)"
+                        );
+                        return WAIT_TIMEOUT;
+                    }
+                    if err == libc::EINTR {
+                        continue;
+                    }
+                    eprintln!("weave/WFSO: handle={h_handle:#x} → WAIT_FAILED (sem timedwait errno={err})");
+                    return WAIT_FAILED;
+                }
+            }
+        }
     }
 
     // Legacy stub handles (1 = mutex, 2 = event) — return success immediately.
