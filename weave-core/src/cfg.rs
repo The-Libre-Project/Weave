@@ -174,26 +174,48 @@ pub fn setup(pe_bytes: &[u8], base: *mut u8) {
     // Same ABI-induced false-positive as above; patch the int to nop nop.
     disable_fastfail_gs(pe_bytes, base);
 
-    // Patch _guard_check_icall_fptr and _guard_dispatch_icall_fptr to our stub.
-    // Both slots are writable .data-like pages (in the .00cfg section which is r+w on Linux
-    // after mprotect). We temporarily make them writable if needed.
-    let stub_addr = weave_cfg_dispatch_stub as *const () as usize;
+    // Patch _guard_check_icall_fptr and _guard_dispatch_icall_fptr to their
+    // respective stubs.  The two slots have different ABIs:
+    //
+    //   check_fptr_va   → weave_cfg_check_stub    (RCX-input, validate, RET)
+    //   dispatch_fptr_va → weave_cfg_dispatch_stub (RAX-input, validate, JMP)
+    //
+    // They must NOT share the same stub: NXEngine's CRT startup uses the check
+    // variant (nx.exe!0x1400a8cd8 calls check_fptr then does `call *rsi`).
+    // Routing check_fptr through the dispatch stub causes Weave to validate
+    // stale RAX instead of the real target in RCX, leading to spurious BAD
+    // dispatches and occasional valid-but-wrong JMPs that corrupt CRT state.
+    let dispatch_stub_addr = weave_cfg_dispatch_stub as *const () as usize;
+    let check_stub_addr = weave_cfg_check_stub as *const () as usize;
 
-    for &slot_va in &[check_fptr_va, dispatch_fptr_va] {
-        if slot_va == 0 {
-            continue;
-        }
-        let slot_ptr = slot_va as *mut usize;
+    let page_size = 4096usize;
 
-        // Make the page writable, write the stub address, restore to read-only.
-        let page_size = 4096usize;
-        let page_base = (slot_va & !(page_size - 1)) as *mut libc::c_void;
+    // Patch check slot → check stub.
+    if check_fptr_va != 0 {
+        let slot_ptr = check_fptr_va as *mut usize;
+        let page_base = (check_fptr_va & !(page_size - 1)) as *mut libc::c_void;
         unsafe {
             libc::mprotect(page_base, page_size, libc::PROT_READ | libc::PROT_WRITE);
-            *slot_ptr = stub_addr;
+            *slot_ptr = check_stub_addr;
             libc::mprotect(page_base, page_size, libc::PROT_READ);
         }
-        eprintln!("weave: CFG: patched slot {slot_va:#x} → weave_cfg_dispatch ({stub_addr:#x})");
+        eprintln!(
+            "weave: CFG: patched check slot {check_fptr_va:#x} → weave_cfg_check ({check_stub_addr:#x})"
+        );
+    }
+
+    // Patch dispatch slot → dispatch stub.
+    if dispatch_fptr_va != 0 {
+        let slot_ptr = dispatch_fptr_va as *mut usize;
+        let page_base = (dispatch_fptr_va & !(page_size - 1)) as *mut libc::c_void;
+        unsafe {
+            libc::mprotect(page_base, page_size, libc::PROT_READ | libc::PROT_WRITE);
+            *slot_ptr = dispatch_stub_addr;
+            libc::mprotect(page_base, page_size, libc::PROT_READ);
+        }
+        eprintln!(
+            "weave: CFG: patched dispatch slot {dispatch_fptr_va:#x} → weave_cfg_dispatch ({dispatch_stub_addr:#x})"
+        );
     }
 
     // Also patch every non-zero slot in the .00cfg section.
@@ -202,7 +224,7 @@ pub fn setup(pe_bytes: &[u8], base: *mut u8) {
     // (e.g. [+0x18], [+0x20]).  Those can point to addresses beyond the .text
     // VirtualSize that are zero-filled by the loader — executing zeros silently
     // corrupts the CRT init chain (_initterm_e dispatches through them).
-    patch_cfg_section_slots(pe_bytes, base, stub_addr);
+    patch_cfg_section_slots(pe_bytes, base, dispatch_stub_addr);
 
     // Guard 4: record the executable text range of this PE so the dispatch stub
     // can reject targets that fall in data/BSS sections.
@@ -1448,3 +1470,105 @@ unsafe extern "win64" fn weave_cfg_dispatch_stub() {
 // On non-x86_64 (macOS ARM64 build for unit tests) provide a no-op.
 #[cfg(not(target_arch = "x86_64"))]
 fn weave_cfg_dispatch_stub() {}
+
+// ── CFG check stub ────────────────────────────────────────────────────────────
+//
+// Windows ABI for `__guard_check_icall_fptr`:
+//   - Input:    RCX = target function pointer to validate
+//   - Behavior: validate only — do NOT jump.  Caller issues the real `call rcx`.
+//   - Return:   RET with RCX preserved (caller uses it for the subsequent call).
+//
+// This is distinct from `__guard_dispatch_icall_fptr` (RAX-input, JMP).
+// Both must be separate stubs — sharing the dispatch stub (RAX/JMP) for the
+// check slot causes Weave to validate stale RAX instead of the real target.
+//
+// On BAD: RET with RCX preserved.  Zeroing RCX would convert a mis-flagged
+// false-BAD into a hard AV on the subsequent `call rcx`.  RET-on-BAD lets the
+// caller proceed; if the target is genuinely bad it will fault loudly there.
+//
+// Stack layout after `sub rsp, 32` (same shape as dispatch stub):
+//   [rsp+ 0..31]  shadow space
+//   [rsp+32]      r11
+//   [rsp+40]      r10
+//   [rsp+48]      r9
+//   [rsp+56]      r8
+//   [rsp+64]      rdx
+//   [rsp+72]      rcx  ← original RCX (the target to validate)
+//   [rsp+80]      rax
+//   [rsp+88]      return address (instruction after `call [check_fptr]` in PE)
+//
+// Note: RAX is pushed first so that [rsp+72] == saved RCX (same offset as the
+// dispatch stub's [rsp+72] == saved RCX, which differs from [rsp+80] == saved RAX).
+#[cfg(target_arch = "x86_64")]
+#[unsafe(naked)]
+unsafe extern "win64" fn weave_cfg_check_stub() {
+    std::arch::naked_asm!(
+        // Save caller-save regs.  Push RAX first so offsets match the dispatch stub.
+        "push rax",
+        "push rcx",
+        "push rdx",
+        "push r8",
+        "push r9",
+        "push r10",
+        "push r11",
+        "sub rsp, 32",
+        // Win64 arg1 = RCX (the target to validate); arg2 = return address.
+        // After 7 pushes (56 bytes) + sub 32: saved RCX is at [rsp+72].
+        "mov rcx, [rsp + 72]",   // arg1 = target (original RCX)
+        "mov rdx, [rsp + 88]",   // arg2 = caller return address
+        "call {debug}",
+        "add rsp, 32",
+        "pop r11",
+        "pop r10",
+        "pop r9",
+        "pop r8",
+        "pop rdx",
+        "pop rcx",
+        "pop rax",
+        // Validate RCX (the target).  On BAD: RET with RCX preserved.
+        // On OK: also RET — caller will issue `call rcx` itself.
+        //
+        // ── Guard 1: explicit null ─────────────────────────────────────────
+        "test rcx, rcx",
+        "jz 2f",
+        // ── Guard 1b: minimum valid address ───────────────────────────────
+        "cmp rcx, 0x10000",
+        "jb 2f",
+        // ── Guard 2: canonical user-space (bits 63:47 must be zero) ───────
+        "mov r11, rcx",
+        "shr r11, 47",
+        "jnz 2f",
+        // ── Guard 3: below Linux stack range ──────────────────────────────
+        "mov r11, rcx",
+        "shr r11, 40",
+        "cmp r11, 0x70",
+        "jae 2f",
+        // ── Guard 4: reject non-executable PE sections ────────────────────
+        "lea r11, [rip + {ts}]",
+        "mov r11, qword ptr [r11]",
+        "test r11, r11",
+        "jz 3f",                      // guard not initialised → allow
+        "lea r11, [rip + {ie}]",
+        "mov r11, qword ptr [r11]",
+        "cmp rcx, r11",
+        "jae 3f",                     // outside PE entirely → allow
+        "lea r11, [rip + {te}]",
+        "mov r11, qword ptr [r11]",
+        "cmp rcx, r11",
+        "jae 2f",                     // PE data section → reject
+        "3:",
+        // OK path: RET — RCX preserved for caller's `call rcx`.
+        "ret",
+        // BAD path: also RET — RCX preserved (do NOT zero it).
+        "2:",
+        "ret",
+        debug = sym weave_cfg_do_debug,
+        ts = sym CFG_PE_TEXT_START,
+        te = sym CFG_PE_TEXT_END,
+        ie = sym CFG_PE_IMAGE_END,
+    )
+}
+
+// On non-x86_64 (macOS ARM64 build for unit tests) provide a no-op.
+#[cfg(not(target_arch = "x86_64"))]
+fn weave_cfg_check_stub() {}
