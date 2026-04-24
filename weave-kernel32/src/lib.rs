@@ -155,9 +155,6 @@ fn create_semaphore_impl(l_initial_count: i32, l_maximum_count: i32) -> usize {
         None => return 0,
     };
     table.insert(handle, sem_entry);
-    eprintln!(
-        "weave/CreateSemaphore: handle={handle:#x} initial={l_initial_count} max={l_maximum_count}"
-    );
     handle
 }
 
@@ -7512,7 +7509,9 @@ pub unsafe extern "win64" fn wait_for_single_object(h_handle: usize, dw_millisec
     const WAIT_FAILED: u32 = 0xFFFFFFFF;
     const INFINITE: u32 = 0xFFFF_FFFF;
 
-    eprintln!("weave/WFSO: handle={h_handle:#x} timeout={dw_milliseconds}ms");
+    if weave_core::ws2_trace::enabled() {
+        eprintln!("weave/WFSO: handle={h_handle:#x} timeout={dw_milliseconds}ms");
+    }
 
     if h_handle == 0 || h_handle == INVALID_HANDLE_VALUE {
         eprintln!("weave/WFSO: handle={h_handle:#x} → WAIT_FAILED (invalid)");
@@ -7601,23 +7600,13 @@ pub unsafe extern "win64" fn wait_for_single_object(h_handle: usize, dw_millisec
             // SAFETY: Arc keeps the sem_t alive; address is stable for the Arc lifetime.
             let sem_ptr = &sem_arc.0 as *const libc::sem_t as *mut libc::sem_t;
 
-            // Diagnostic: log sem count every 100_000th hit on this dispatch path.
-            // Identifies runaway-drain patterns (huge initial_count or stuck caller loop).
-            static SEM_WAIT_COUNTER: AtomicUsize = AtomicUsize::new(0);
-            let n = SEM_WAIT_COUNTER.fetch_add(1, Ordering::Relaxed);
-            if n % 100_000 == 0 {
-                let mut val: libc::c_int = 0;
-                unsafe { libc::sem_getvalue(sem_ptr, &mut val) };
-                eprintln!(
-                    "weave/WFSO-diag: hit #{n} handle={h_handle:#x} sem_getvalue={val} timeout={dw_milliseconds}"
-                );
-            }
-
             if dw_milliseconds == 0 {
                 // Non-blocking: try to decrement without waiting.
                 let rc = unsafe { libc::sem_trywait(sem_ptr) };
                 if rc == 0 {
-                    eprintln!("weave/WFSO: handle={h_handle:#x} → WAIT_OBJECT_0 (sem trywait)");
+                    if weave_core::ws2_trace::enabled() {
+                        eprintln!("weave/WFSO: handle={h_handle:#x} → WAIT_OBJECT_0 (sem trywait)");
+                    }
                     return WAIT_OBJECT_0;
                 }
                 let err = unsafe { *libc::__errno_location() };
@@ -7635,7 +7624,9 @@ pub unsafe extern "win64" fn wait_for_single_object(h_handle: usize, dw_millisec
                 loop {
                     let rc = unsafe { libc::sem_wait(sem_ptr) };
                     if rc == 0 {
-                        eprintln!("weave/WFSO: handle={h_handle:#x} → WAIT_OBJECT_0 (sem wait)");
+                        if weave_core::ws2_trace::enabled() {
+                            eprintln!("weave/WFSO: handle={h_handle:#x} → WAIT_OBJECT_0 (sem wait)");
+                        }
                         return WAIT_OBJECT_0;
                     }
                     let err = unsafe { *libc::__errno_location() };
@@ -7663,9 +7654,11 @@ pub unsafe extern "win64" fn wait_for_single_object(h_handle: usize, dw_millisec
                 loop {
                     let rc = unsafe { libc::sem_timedwait(sem_ptr, &ts) };
                     if rc == 0 {
-                        eprintln!(
-                            "weave/WFSO: handle={h_handle:#x} → WAIT_OBJECT_0 (sem timedwait)"
-                        );
+                        if weave_core::ws2_trace::enabled() {
+                            eprintln!(
+                                "weave/WFSO: handle={h_handle:#x} → WAIT_OBJECT_0 (sem timedwait)"
+                            );
+                        }
                         return WAIT_OBJECT_0;
                     }
                     let err = unsafe { *libc::__errno_location() };
