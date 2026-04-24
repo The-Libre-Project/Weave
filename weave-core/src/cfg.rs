@@ -79,11 +79,11 @@ unsafe extern "win64" fn weave_cfg_do_debug(rax_val: usize, caller_rip: usize) {
     } else {
         0
     };
-    let canonical = (rax_val >> 47) == 0 && rax_val != 0;
+    let will_jump = rax_val != 0 && (rax_val >> 47) == 0 && (rax_val >> 40) < 0x70;
     eprintln!(
         "weave: CFG dispatch[{n}]: target={rax_val:#018x} caller={caller_rip:#018x} \
          cookie={live_cookie:#018x} {}",
-        if canonical { "OK→jmp" } else { "BAD→ret0" }
+        if will_jump { "OK→jmp" } else { "BAD→ret0" }
     );
 }
 
@@ -1328,6 +1328,14 @@ unsafe extern "win64" fn weave_cfg_dispatch_stub() {
         "mov r11, rax",
         "shr r11, 47",
         "jnz 2f",
+        // ── Guard 3: below Linux stack range (reject 0x7x_xxxx_xxxx_xxxx) ───
+        // Linux stack lives at ~0x7FFF_xxxx_xxxx; Weave stubs at ~0x56_xxxx_xxxx;
+        // PE at 0x140_xxxx_xxxx.  Checking bits 63:40 >= 0x70 rejects stack
+        // addresses while allowing PE and Weave-stub targets.
+        "mov r11, rax",
+        "shr r11, 40",
+        "cmp r11, 0x70",
+        "jae 2f",
         "jmp rax",
         // ── Fail path: bad target — return 0 so callers see a clean NULL ──
         "2:",
