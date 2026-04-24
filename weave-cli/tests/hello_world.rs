@@ -1499,6 +1499,7 @@ fn nxengine_gate1_smoke() {
         .args(["--no-sandbox", &exe])
         .env("DISPLAY", ":99")
         .env("SDL_AUDIODRIVER", "dummy")
+        .env("WEAVE_IAT_TRACE", "1")
         .stderr(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .spawn()
