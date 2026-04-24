@@ -6796,6 +6796,44 @@ pub unsafe extern "win64" fn sleep_condition_variable_srw(
     1 // TRUE
 }
 
+/// SleepConditionVariableCS: atomically release a CRITICAL_SECTION and wait on a condvar.
+///
+/// Releases the critical section, futex-waits for a Wake call, then reacquires it.
+/// # Safety
+/// `condition_variable` and `critical_section` must be valid, non-null pointers.
+// Wine ref: dlls/ntdll/sync.c:766 — RtlSleepConditionVariableCS: snapshots condvar value,
+// calls RtlLeaveCriticalSection, RtlWaitOnAddress, then RtlEnterCriticalSection.
+pub unsafe extern "win64" fn sleep_condition_variable_cs(
+    condition_variable: *mut usize,
+    critical_section: *mut u8,
+    dw_milliseconds: u32,
+) -> i32 {
+    if condition_variable.is_null() || critical_section.is_null() {
+        return 0;
+    }
+    let cv_ptr = condition_variable as *const u32;
+    let captured_val = unsafe { std::ptr::read_volatile(cv_ptr) };
+    unsafe { leave_critical_section(critical_section) };
+    let timeout_storage: libc::timespec;
+    let timeout_ptr: *const libc::timespec = if dw_milliseconds == 0xFFFF_FFFF {
+        std::ptr::null()
+    } else {
+        timeout_storage = libc::timespec {
+            tv_sec: (dw_milliseconds / 1000) as libc::time_t,
+            tv_nsec: ((dw_milliseconds % 1000) * 1_000_000) as libc::c_long,
+        };
+        &timeout_storage
+    };
+    let ret = unsafe { futex_wait(cv_ptr, captured_val, timeout_ptr) };
+    unsafe { enter_critical_section(critical_section) };
+    let errno = unsafe { *libc::__errno_location() };
+    if ret == -1 && errno == libc::ETIMEDOUT {
+        set_last_error(0x5B4); // ERROR_TIMEOUT
+        return 0;
+    }
+    1
+}
+
 /// WakeConditionVariable: wake one thread waiting on a condition variable.
 ///
 /// Increments the condvar value and issues FUTEX_WAKE(1).
@@ -11627,6 +11665,10 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         }
         "SleepConditionVariableSRW" => Some(
             sleep_condition_variable_srw as unsafe extern "win64" fn(_, _, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "SleepConditionVariableCS" => Some(
+            sleep_condition_variable_cs as unsafe extern "win64" fn(_, _, _) -> _ as *const ()
                 as usize,
         ),
         "WakeConditionVariable" => {
