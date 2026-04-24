@@ -2745,15 +2745,33 @@ pub unsafe extern "win64" fn ucrt_std_terminate() -> ! {
 }
 
 /// `__vcrt_InitializeCriticalSectionEx` — VCRUNTIME140.dll internal CS init.
+///
 /// Called by the MSVC CRT to initialise its own CRITICAL_SECTION during startup.
-/// Calls pthread_mutex_init directly — does not go through the kernel32 handle table.
-/// Returns TRUE (1).
-pub unsafe extern "win64" fn ucrt_vcrt_init_cs(
-    cs: *mut libc::pthread_mutex_t,
-    _spin: u32,
-    _flags: u32,
-) -> i32 {
-    libc::pthread_mutex_init(cs, core::ptr::null());
+/// The first argument is a Windows `CRITICAL_SECTION` (RTL_CRITICAL_SECTION
+/// layout: DebugInfo(8) + LockCount(i32) + RecursionCount(i32) +
+/// OwningThread(usize) + LockSemaphore(usize) + SpinCount(usize) = 40 bytes),
+/// **not** a `pthread_mutex_t`. We mirror
+/// `weave-kernel32::initialize_critical_section_ex` here (zero 40 bytes, then
+/// LockCount = -1) — keeping crate independence per the no-DLL→DLL-imports
+/// rule. Returns TRUE (1).
+///
+/// Wine ref: dlls/vcruntime140/main.c — __vcrt_InitializeCriticalSectionEx
+/// delegates to InitializeCriticalSectionEx; flags include
+/// CRITICAL_SECTION_NO_DEBUG_INFO; spin count stored unchanged in SpinCount.
+///
+/// # Safety
+/// `cs` must point to ≥40 bytes of writable memory (the Windows
+/// CRITICAL_SECTION struct).
+pub unsafe extern "win64" fn ucrt_vcrt_init_cs(cs: *mut u8, _spin: u32, _flags: u32) -> i32 {
+    if cs.is_null() {
+        return 0; // FALSE
+    }
+    unsafe {
+        std::ptr::write_bytes(cs, 0, 40);
+        // Offset 8 = LockCount (i32). -1 means "unlocked" in the legacy
+        // RTL_CRITICAL_SECTION encoding both Wine and Weave use.
+        *(cs.add(8) as *mut i32) = -1;
+    }
     1 // TRUE
 }
 
