@@ -1490,10 +1490,15 @@ fn nxengine_gate1_smoke() {
     let start = std::time::Instant::now();
 
     // Spawn with CWD = game dir so nx.exe finds its data files next to itself.
+    // SDL_AUDIODRIVER=dummy: SDL2 reads this before any audio init and uses a
+    // no-op driver, bypassing the WinMM/WASAPI path that blocks in
+    // SleepConditionVariableCS(INFINITE) when PipeWire is absent in CI.
+    // SDL_VIDEODRIVER is NOT set — we need the real video driver to see CreateWindow.
     let mut child = std::process::Command::new(weave_bin)
         .current_dir(&game_dir)
         .args(["--no-sandbox", &exe])
         .env("DISPLAY", ":99")
+        .env("SDL_AUDIODRIVER", "dummy")
         .stderr(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .spawn()
