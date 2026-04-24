@@ -91,6 +91,7 @@ unsafe extern "win64" fn weave_cfg_do_debug(rax_val: usize, caller_rip: usize) {
     let text_start = CFG_PE_TEXT_START.load(Ordering::Relaxed);
     let image_end = CFG_PE_IMAGE_END.load(Ordering::Relaxed);
     let will_jump = rax_val != 0
+        && rax_val >= 0x10000
         && (rax_val >> 47) == 0
         && (rax_val >> 40) < 0x70
         && (text_start == 0
@@ -1396,6 +1397,11 @@ unsafe extern "win64" fn weave_cfg_dispatch_stub() {
         // ── Guard 1: explicit null ─────────────────────────────────────────
         "test rax, rax",
         "jz 2f",
+        // ── Guard 1b: minimum valid address (< 0x10000 is never a fn ptr) ──
+        // Catches tiny integers (e.g. 0x1c) that appear when a struct pointer
+        // was set to null by a prior BAD→ret0 and code dereferences ptr+offset.
+        "cmp rax, 0x10000",
+        "jb 2f",
         // ── Guard 2: canonical user-space address (bits 63:47 must be zero) ─
         // R11 is Win64 caller-saved — scratch use is fine here.
         "mov r11, rax",
