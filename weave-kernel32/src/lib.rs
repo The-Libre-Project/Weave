@@ -8129,6 +8129,60 @@ pub unsafe extern "win64" fn lstrlen_w(lp_string: *const u16) -> i32 {
     }
 }
 
+/// lstrcatA — append ANSI string.
+///
+// Wine ref: dlls/kernel32 — lstrcatA is strcat; appends src to dst in-place;
+// returns dst pointer; no bounds checking; NULL src/dst is undefined behavior
+/// # Safety
+/// `lp_string1` must be writable and null-terminated with space for `lp_string2`.
+/// `lp_string2` must be a valid null-terminated UTF-8 string.
+pub unsafe extern "win64" fn lstrcat_a(lp_string1: *mut u8, lp_string2: *const u8) -> *mut u8 {
+    unsafe {
+        let mut dst = lp_string1;
+        while *dst != 0 {
+            dst = dst.add(1);
+        }
+        let mut src = lp_string2;
+        loop {
+            let c = *src;
+            *dst = c;
+            if c == 0 {
+                break;
+            }
+            dst = dst.add(1);
+            src = src.add(1);
+        }
+    }
+    lp_string1
+}
+
+/// lstrcatW — append wide string.
+///
+// Wine ref: dlls/kernel32 — lstrcatW is wcscat; appends src to dst in-place;
+// returns dst pointer; no bounds checking; NULL src/dst is undefined behavior
+/// # Safety
+/// `lp_string1` must be writable and null-terminated with space for `lp_string2`.
+/// `lp_string2` must be a valid null-terminated UTF-16 string.
+pub unsafe extern "win64" fn lstrcat_w(lp_string1: *mut u16, lp_string2: *const u16) -> *mut u16 {
+    unsafe {
+        let mut dst = lp_string1;
+        while *dst != 0 {
+            dst = dst.add(1);
+        }
+        let mut src = lp_string2;
+        loop {
+            let c = *src;
+            *dst = c;
+            if c == 0 {
+                break;
+            }
+            dst = dst.add(1);
+            src = src.add(1);
+        }
+    }
+    lp_string1
+}
+
 /// lstrcpyA — copy ANSI string.
 ///
 // Wine ref: dlls/kernel32 — lstrcpyA/W are strcpy/wcscpy wrappers; buffer overrun is
@@ -11922,6 +11976,10 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
             Some(lstrlen_a as unsafe extern "win64" fn(_) -> _ as *const () as usize)
         }
         "lstrlenW" => Some(lstrlen_w as unsafe extern "win64" fn(_) -> _ as *const () as usize),
+        "lstrcatA" | "lstrcat" => {
+            Some(lstrcat_a as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "lstrcatW" => Some(lstrcat_w as unsafe extern "win64" fn(_, _) -> _ as *const () as usize),
         "lstrcpyA" | "lstrcpy" => {
             Some(lstrcpy_a as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
         }
