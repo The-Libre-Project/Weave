@@ -1545,15 +1545,16 @@ fn nxengine_gate1_smoke() {
         "nxengine Gate 1 FAIL: PE did not load — IAT resolution crashed before entry point.\nstderr:\n{stderr}"
     );
 
-    // A2 (soft — blocked pending 402ms early-exit investigation):
-    // NXEngine exits at ~402ms after MSVCP140 fix; hasn't reached SDL2 init yet.
-    if stderr.contains("weave/user32: CreateWindow") || stderr.contains("RegisterClassEx") {
-        eprintln!("gate A2: CreateWindow seen ✓");
-    } else {
-        eprintln!("gate A2 WARN: no CreateWindow seen — game exited before SDL2 init (elapsed {elapsed:.1?})");
-    }
+    // A2: NXEngine must reach SDL2 CreateWindow (SDL_app class).
+    // Fixed in TASK-6: _get_narrow_winmain_command_line now returns a static empty C string
+    // instead of NULL, unblocking the MSVC CRT startup path past the 402ms exit point.
+    assert!(
+        stderr.contains("weave/user32: CreateWindow"),
+        "nxengine Gate A2 FAIL: SDL2 CreateWindow not seen — game exited before SDL2 init (elapsed {elapsed:.1?}).\nstderr:\n{stderr}"
+    );
+    eprintln!("gate A2: CreateWindow seen ✓");
 
-    // A3 (soft — blocked pending A2):
+    // A3 (soft — _Thrd_create still a no-op, SDL2 render thread not starting):
     if matches!(pixel_result, Some(true)) {
         eprintln!("gate A3: non-black pixels at 5s ✓");
     } else {

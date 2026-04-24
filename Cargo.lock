@@ -1268,6 +1268,7 @@ dependencies = [
  "weave-installer",
  "weave-kernel32",
  "weave-mmdevapi",
+ "weave-msvcp140",
  "weave-ntdll",
  "weave-ole32",
  "weave-oleaut32",
@@ -1376,6 +1377,14 @@ version = "0.0.1"
 dependencies = [
  "pipewire",
  "weave-common",
+]
+
+[[package]]
+name = "weave-msvcp140"
+version = "0.0.1"
+dependencies = [
+ "libc",
+ "weave-core",
 ]
 
 [[package]]
