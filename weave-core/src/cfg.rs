@@ -40,6 +40,12 @@ const DEFAULT_COOKIE: u64 = 0x0000_2b99_2ddf_a232;
 // Written once by `setup`, read by the naked stub at every CFG indirect call.
 static SECURITY_COOKIE_VA: AtomicUsize = AtomicUsize::new(0);
 
+// Guard 4: executable text range of the loaded PE image.
+// Written once by `setup`; dispatch stub rejects PE-range targets outside this window.
+// Zero means "not initialised — skip guard".
+static CFG_PE_TEXT_START: AtomicUsize = AtomicUsize::new(0);
+static CFG_PE_TEXT_END: AtomicUsize = AtomicUsize::new(0);
+
 // Total CFG dispatch stub invocations.  Incremented on every call (even after
 // the log limit).  Readable via `cfg_dispatch_count()` for crash reports.
 #[cfg(target_arch = "x86_64")]
@@ -79,7 +85,13 @@ unsafe extern "win64" fn weave_cfg_do_debug(rax_val: usize, caller_rip: usize) {
     } else {
         0
     };
-    let will_jump = rax_val != 0 && (rax_val >> 47) == 0 && (rax_val >> 40) < 0x70;
+    let text_start = CFG_PE_TEXT_START.load(Ordering::Relaxed);
+    let will_jump = rax_val != 0
+        && (rax_val >> 47) == 0
+        && (rax_val >> 40) < 0x70
+        && (text_start == 0
+            || rax_val < text_start  // not in PE range (Weave stubs, etc)
+            || rax_val < CFG_PE_TEXT_END.load(Ordering::Relaxed)); // in PE .text
     eprintln!(
         "weave: CFG dispatch[{n}]: target={rax_val:#018x} caller={caller_rip:#018x} \
          cookie={live_cookie:#018x} {}",
@@ -186,6 +198,10 @@ pub fn setup(pe_bytes: &[u8], base: *mut u8) {
     // VirtualSize that are zero-filled by the loader — executing zeros silently
     // corrupts the CRT init chain (_initterm_e dispatches through them).
     patch_cfg_section_slots(pe_bytes, base, stub_addr);
+
+    // Guard 4: record the executable text range of this PE so the dispatch stub
+    // can reject targets that fall in data/BSS sections.
+    init_pe_text_range(pe_bytes, base);
 
     // Prime XFG lazy-init slots in BSS with the DEFAULT security cookie value.
     //
@@ -943,6 +959,52 @@ pub fn disable_fastfail_gs(pe_bytes: &[u8], base: *mut u8) {
     }
 }
 
+/// Walk PE section headers and record the VA range of the first executable
+/// section (.text) in `CFG_PE_TEXT_START` / `CFG_PE_TEXT_END`.
+///
+/// Guard 4 uses these to reject CFG dispatch targets that sit inside the PE
+/// image but outside the executable section (e.g. .data, .rdata, BSS).
+fn init_pe_text_range(pe_bytes: &[u8], base: *mut u8) {
+    let base_usize = base as usize;
+    let pe_off = match read_u32(pe_bytes, 0x3c) {
+        Some(x) => x as usize,
+        None => return,
+    };
+    let num_sections = match read_u16(pe_bytes, pe_off + 6) {
+        Some(x) => x as usize,
+        None => return,
+    };
+    let sec_table_off = pe_off + 24 + 240;
+
+    for i in 0..num_sections {
+        let s = sec_table_off + i * 40;
+        let chars = match read_u32(pe_bytes, s + 36) {
+            Some(x) => x,
+            None => continue,
+        };
+        // IMAGE_SCN_MEM_EXECUTE (0x20000000)
+        if chars & 0x2000_0000 == 0 {
+            continue;
+        }
+        let rva = match read_u32(pe_bytes, s + 12) {
+            Some(x) => x as usize,
+            None => continue,
+        };
+        let vsize = match read_u32(pe_bytes, s + 8) {
+            Some(x) => x as usize,
+            None => continue,
+        };
+        let text_start = base_usize + rva;
+        let text_end = text_start + vsize;
+        CFG_PE_TEXT_START.store(text_start, Ordering::Relaxed);
+        CFG_PE_TEXT_END.store(text_end, Ordering::Relaxed);
+        eprintln!(
+            "weave: CFG: Guard4 text range [{text_start:#x}, {text_end:#x})"
+        );
+        return; // first executable section is .text — done
+    }
+}
+
 /// Scan the .00cfg section of the loaded PE image and patch every non-zero
 /// 8-byte slot to `stub_addr`.
 ///
@@ -1336,12 +1398,31 @@ unsafe extern "win64" fn weave_cfg_dispatch_stub() {
         "shr r11, 40",
         "cmp r11, 0x70",
         "jae 2f",
+        // ── Guard 4: reject non-executable PE sections (.data, .rdata, BSS) ──
+        // CFG_PE_TEXT_START/END are set at load time.  If a target is within
+        // the PE image but outside [text_start, text_end) it is a data address
+        // (e.g. a callback-return-value that happens to be a PE data pointer)
+        // and must not be executed.
+        // r11 is scratch (Win64 caller-saved).
+        "mov r11, {ts}",              // r11 = address of CFG_PE_TEXT_START
+        "mov r11, qword ptr [r11]",   // r11 = text_start value
+        "test r11, r11",
+        "jz 3f",                      // guard not initialised → allow
+        "cmp rax, r11",
+        "jb 3f",                      // rax < text_start → Weave/SO range → allow
+        "mov r11, {te}",              // r11 = address of CFG_PE_TEXT_END
+        "mov r11, qword ptr [r11]",   // r11 = text_end value
+        "cmp rax, r11",
+        "jae 2f",                     // rax >= text_end → PE data → reject
+        "3:",
         "jmp rax",
         // ── Fail path: bad target — return 0 so callers see a clean NULL ──
         "2:",
         "xor eax, eax",
         "ret",
         debug = sym weave_cfg_do_debug,
+        ts = sym CFG_PE_TEXT_START,
+        te = sym CFG_PE_TEXT_END,
     )
 }
 
