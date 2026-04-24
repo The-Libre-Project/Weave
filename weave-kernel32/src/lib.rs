@@ -5173,6 +5173,7 @@ fn is_emulated_dll(key: &str) -> bool {
             | "version.dll"
             | "ucrtbase.dll"
             | "msvcrt.dll"
+            | "psapi.dll"
     )
 }
 
@@ -5970,6 +5971,28 @@ pub unsafe extern "win64" fn get_module_file_name_w(
         *lp_filename.add(copy_len) = 0; // null terminator
     }
     copy_len as u32
+}
+
+/// GetModuleFileNameExW — psapi.dll / K32GetModuleFileNameExW variant.
+///
+/// SDL2's `SDL_GetBasePath()` calls this to obtain the exe path.
+/// For the current-process + NULL-module case (the only case SDL2 uses),
+/// behaviour is identical to `GetModuleFileNameW(NULL, ...)`, so we
+/// ignore `h_process` and delegate.
+///
+/// # Safety
+/// `lp_filename` must be a writable buffer of at least `n_size` wide chars.
+// Wine ref: dlls/psapi/psapi.c — K32GetModuleFileNameExW calls
+// NtQueryVirtualMemory(MemoryMappedFilenameInformation) for current process +
+// NULL module, which yields the exe image path; for SDL2's use case the
+// existing GetModuleFileNameW(NULL) path already returns the correct value.
+pub unsafe extern "win64" fn get_module_file_name_ex_w(
+    _h_process: usize,
+    h_module: usize,
+    lp_filename: *mut u16,
+    n_size: u32,
+) -> u32 {
+    unsafe { get_module_file_name_w(h_module, lp_filename, n_size) }
 }
 
 /// GetModuleFileNameA — return the file path for a module handle (ANSI).
@@ -11730,6 +11753,12 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "GetModuleFileNameA" => Some(
             get_module_file_name_a as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
         ),
+        // K32GetModuleFileNameExW — kernel32 re-export of the psapi function;
+        // some callers import it directly from kernel32.
+        "K32GetModuleFileNameExW" => Some(
+            get_module_file_name_ex_w as unsafe extern "win64" fn(_, _, _, _) -> _ as *const ()
+                as usize,
+        ),
         // Process / thread identity
         "GetCurrentProcess" => Some(get_current_process as *const () as usize),
         "GetCurrentThread" => Some(get_current_thread as *const () as usize),
@@ -13258,6 +13287,26 @@ pub fn resolve_version(dll: &str, func: &str) -> Option<usize> {
         "VerQueryValueA" => ver_query_value_a as *const () as usize,
         _ => return None,
     })
+}
+
+/// Resolve a psapi.dll import.
+///
+/// SDL2's `SDL_GetBasePath()` loads psapi.dll at runtime and calls
+/// `GetModuleFileNameExW` to locate the executable.  We emulate the subset
+/// SDL2 needs (current-process + NULL module → exe path).
+// Wine ref: not implemented in Wine — Weave-internal IAT resolver for psapi.dll;
+// maps the two common export names to get_module_file_name_ex_w.
+pub fn resolve_psapi(dll: &str, func: &str) -> Option<usize> {
+    if !dll.eq_ignore_ascii_case("psapi.dll") && !dll.eq_ignore_ascii_case("psapi") {
+        return None;
+    }
+    match func {
+        "GetModuleFileNameExW" | "K32GetModuleFileNameExW" => Some(
+            get_module_file_name_ex_w as unsafe extern "win64" fn(_, _, _, _) -> _ as *const ()
+                as usize,
+        ),
+        _ => None,
+    }
 }
 
 // ── PuTTY gap-fill: missing kernel32 stubs ────────────────────────────────────

@@ -60,6 +60,8 @@ fn resolve(dll: &str, func: &str) -> Option<usize> {
         .or_else(|| weave_gdiplus::resolve(dll, func))
         // version.dll — file version info (Sprint 5 IrfanView)
         .or_else(|| weave_kernel32::resolve_version(dll, func))
+        // psapi.dll — process/module info (SDL2 SDL_GetBasePath uses GetModuleFileNameExW)
+        .or_else(|| weave_kernel32::resolve_psapi(dll, func))
         // ddraw.dll — DirectDraw 5 COM stubs (Cave Story and DirectDraw games)
         .or_else(|| weave_ddraw::resolve(dll, func))
         .or_else(|| dll_registry::lookup(dll, func))
