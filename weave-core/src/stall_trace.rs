@@ -15,11 +15,17 @@
 //!
 //! Output format:
 //! ```text
-//! weave/stall t=500ms n=3 [tid=123 nx futex] [tid=124 stall-trace -1] [tid=125 sdl-video poll]
+//! weave/stall t=500ms n=3 [tid=123 nx sc=202 pc=0x7f...] [tid=124 stall-trace sc=0 pc=0x55...]
 //! ```
-//! `syscall` is the number at the head of `/proc/self/task/<tid>/syscall` (or
-//! `-1` when the thread is running user-space code). See syscall(2) / the arch
-//! syscall table for the mapping.
+//! `sc` is the first token of `/proc/self/task/<tid>/syscall`: the syscall
+//! number when the thread is in a kernel call, `-1` when blocked in a
+//! non-syscall kernel path, or the literal `running` when executing user-space
+//! code. See syscall(2) / the arch syscall table.
+//!
+//! `pc` is the last token of the same file — the user-space program counter at
+//! syscall entry when `sc` is numeric. When `sc=running` there is no PC to
+//! read from `/proc/.../syscall`, so `pc` is backfilled from
+//! `/proc/.../stat` field 30 (kstkeip / last kernel-observed PC).
 
 use std::sync::OnceLock;
 
@@ -73,13 +79,36 @@ fn sampler_loop() {
                 .trim()
                 .to_string();
             // /proc/self/task/<tid>/syscall format:
-            //   "<nr> <arg0> <arg1> ... <sp> <pc>"
-            //   "running" (sometimes — kernel version dependent)
-            //   "-1 0x<sp> 0x<pc>" if not in a syscall
+            //   "<nr> <arg0> <arg1> ... <sp> <pc>"   — thread in a numbered syscall
+            //   "running"                             — thread in user-space
+            //   "-1 0x<sp> 0x<pc>"                    — blocked in non-syscall kernel path
             let syscall_raw = std::fs::read_to_string(format!("/proc/self/task/{tid}/syscall"))
                 .unwrap_or_default();
-            let sc_nr = syscall_raw.split_whitespace().next().unwrap_or("?");
-            threads.push_str(&format!(" [tid={tid} {comm} sc={sc_nr}]"));
+            let toks: Vec<&str> = syscall_raw.split_whitespace().collect();
+            let (sc_nr, mut pc) = match toks.split_first() {
+                Some((first, rest)) if !rest.is_empty() => {
+                    (*first, rest.last().copied().unwrap_or("-").to_string())
+                }
+                Some((first, _)) => (*first, "-".to_string()),
+                None => ("?", "-".to_string()),
+            };
+            // When the thread is running user code, /proc/.../syscall has no PC.
+            // Fall back to /proc/.../stat field 30 (kstkeip) so we still get a
+            // location for purely user-space stalls. Stat's comm field is in
+            // parens and can contain spaces — split from the last ')'.
+            if pc == "-" {
+                if let Ok(stat) = std::fs::read_to_string(format!("/proc/self/task/{tid}/stat")) {
+                    if let Some(post_comm) = stat.rsplit_once(')').map(|(_, r)| r) {
+                        let fields: Vec<&str> = post_comm.split_whitespace().collect();
+                        // fields[0] = state (field 3), so kstkeip (field 30) = fields[27].
+                        // kstkeip is printed as %lu (unsigned decimal); reformat as hex.
+                        if let Some(kstkeip) = fields.get(27).and_then(|s| s.parse::<u64>().ok()) {
+                            pc = format!("0x{kstkeip:x}");
+                        }
+                    }
+                }
+            }
+            threads.push_str(&format!(" [tid={tid} {comm} sc={sc_nr} pc={pc}]"));
             n += 1;
         }
         line.push_str(&format!(" n={n}{threads}"));
