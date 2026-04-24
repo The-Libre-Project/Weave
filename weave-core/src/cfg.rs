@@ -45,6 +45,9 @@ static SECURITY_COOKIE_VA: AtomicUsize = AtomicUsize::new(0);
 // Zero means "not initialised — skip guard".
 static CFG_PE_TEXT_START: AtomicUsize = AtomicUsize::new(0);
 static CFG_PE_TEXT_END: AtomicUsize = AtomicUsize::new(0);
+// End of the whole PE image (base + SizeOfImage). Used by Guard 4 to distinguish
+// "outside PE entirely" (Weave stubs at 0x55...) from "PE data section".
+static CFG_PE_IMAGE_END: AtomicUsize = AtomicUsize::new(0);
 
 // Total CFG dispatch stub invocations.  Incremented on every call (even after
 // the log limit).  Readable via `cfg_dispatch_count()` for crash reports.
@@ -86,11 +89,12 @@ unsafe extern "win64" fn weave_cfg_do_debug(rax_val: usize, caller_rip: usize) {
         0
     };
     let text_start = CFG_PE_TEXT_START.load(Ordering::Relaxed);
+    let image_end = CFG_PE_IMAGE_END.load(Ordering::Relaxed);
     let will_jump = rax_val != 0
         && (rax_val >> 47) == 0
         && (rax_val >> 40) < 0x70
         && (text_start == 0
-            || rax_val < text_start  // not in PE range (Weave stubs, etc)
+            || rax_val >= image_end  // outside PE entirely (Weave stubs 0x55...)
             || rax_val < CFG_PE_TEXT_END.load(Ordering::Relaxed)); // in PE .text
     eprintln!(
         "weave: CFG dispatch[{n}]: target={rax_val:#018x} caller={caller_rip:#018x} \
@@ -974,6 +978,11 @@ fn init_pe_text_range(pe_bytes: &[u8], base: *mut u8) {
         Some(x) => x as usize,
         None => return,
     };
+    // SizeOfImage is at optional-header offset 56 (PE32+: pe_off + 24 + 56)
+    let size_of_image = match read_u32(pe_bytes, pe_off + 80) {
+        Some(x) => x as usize,
+        None => return,
+    };
     let sec_table_off = pe_off + 24 + 240;
 
     for i in 0..num_sections {
@@ -996,10 +1005,12 @@ fn init_pe_text_range(pe_bytes: &[u8], base: *mut u8) {
         };
         let text_start = base_usize + rva;
         let text_end = text_start + vsize;
+        let image_end = base_usize + size_of_image;
         CFG_PE_TEXT_START.store(text_start, Ordering::Relaxed);
         CFG_PE_TEXT_END.store(text_end, Ordering::Relaxed);
+        CFG_PE_IMAGE_END.store(image_end, Ordering::Relaxed);
         eprintln!(
-            "weave: CFG: Guard4 text range [{text_start:#x}, {text_end:#x})"
+            "weave: CFG: Guard4 text [{text_start:#x}, {text_end:#x}) image_end {image_end:#x}"
         );
         return; // first executable section is .text — done
     }
@@ -1399,21 +1410,22 @@ unsafe extern "win64" fn weave_cfg_dispatch_stub() {
         "cmp r11, 0x70",
         "jae 2f",
         // ── Guard 4: reject non-executable PE sections (.data, .rdata, BSS) ──
-        // CFG_PE_TEXT_START/END are set at load time.  If a target is within
-        // the PE image but outside [text_start, text_end) it is a data address
-        // (e.g. a callback-return-value that happens to be a PE data pointer)
-        // and must not be executed.
+        // Targets outside the PE image entirely (Weave stubs at 0x55..., Linux
+        // .so) are always allowed.  Only targets inside [image_base, image_end)
+        // that fall outside [text_start, text_end) are data and must be rejected.
         // r11 is scratch (Win64 caller-saved).
-        "lea r11, [rip + {ts}]",      // r11 = &CFG_PE_TEXT_START (RIP-relative, PIE-safe)
-        "mov r11, qword ptr [r11]",   // r11 = text_start value
+        "lea r11, [rip + {ts}]",      // r11 = &CFG_PE_TEXT_START
+        "mov r11, qword ptr [r11]",   // r11 = text_start
         "test r11, r11",
         "jz 3f",                      // guard not initialised → allow
+        "lea r11, [rip + {ie}]",      // r11 = &CFG_PE_IMAGE_END
+        "mov r11, qword ptr [r11]",   // r11 = image_end
         "cmp rax, r11",
-        "jb 3f",                      // rax < text_start → Weave/SO range → allow
-        "lea r11, [rip + {te}]",      // r11 = &CFG_PE_TEXT_END (RIP-relative, PIE-safe)
-        "mov r11, qword ptr [r11]",   // r11 = text_end value
+        "jae 3f",                     // rax >= image_end → outside PE (Weave stubs 0x55...) → allow
+        "lea r11, [rip + {te}]",      // r11 = &CFG_PE_TEXT_END
+        "mov r11, qword ptr [r11]",   // r11 = text_end
         "cmp rax, r11",
-        "jae 2f",                     // rax >= text_end → PE data → reject
+        "jae 2f",                     // text_end <= rax < image_end → PE data → reject
         "3:",
         "jmp rax",
         // ── Fail path: bad target — return 0 so callers see a clean NULL ──
@@ -1423,6 +1435,7 @@ unsafe extern "win64" fn weave_cfg_dispatch_stub() {
         debug = sym weave_cfg_do_debug,
         ts = sym CFG_PE_TEXT_START,
         te = sym CFG_PE_TEXT_END,
+        ie = sym CFG_PE_IMAGE_END,
     )
 }
 
