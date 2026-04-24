@@ -1499,6 +1499,10 @@ fn nxengine_gate1_smoke() {
         .args(["--no-sandbox", &exe])
         .env("DISPLAY", ":99")
         .env("SDL_AUDIODRIVER", "dummy")
+        // Diagnostic: sample /proc/self/task every second so we can see where
+        // each PE/Weave thread is stuck when CreateWindow is never reached.
+        // Remove this env after Gate A2 root cause lands.
+        .env("WEAVE_STALL_TRACE", "1")
         .stderr(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .spawn()

@@ -344,6 +344,10 @@ fn main() {
     weave_plugin_system::load_plugins(&weave_core::prefix::plugins_dir());
     registry::populate();
 
+    // Diagnostic: if WEAVE_STALL_TRACE=1, spawn a periodic thread sampler. Off
+    // by default.
+    weave_core::stall_trace::start_if_enabled();
+
     // ── 1. Pre-load DLLs from the prefix ──────────────────────────────────
     // DLLs are loaded in dependency order so that each DLL's IAT can be
     // patched using exports from DLLs already registered.

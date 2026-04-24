@@ -16,6 +16,7 @@ pub mod resolve;
 pub mod resource;
 pub mod resource_trace;
 pub mod seh;
+pub mod stall_trace;
 pub mod teb;
 pub mod unwind;
 pub mod ws2_trace;
