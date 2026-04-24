@@ -155,6 +155,9 @@ fn create_semaphore_impl(l_initial_count: i32, l_maximum_count: i32) -> usize {
         None => return 0,
     };
     table.insert(handle, sem_entry);
+    eprintln!(
+        "weave/CreateSemaphore: handle={handle:#x} initial={l_initial_count} max={l_maximum_count}"
+    );
     handle
 }
 
@@ -7597,6 +7600,18 @@ pub unsafe extern "win64" fn wait_for_single_object(h_handle: usize, dw_millisec
         if let Some(sem_arc) = sem_arc {
             // SAFETY: Arc keeps the sem_t alive; address is stable for the Arc lifetime.
             let sem_ptr = &sem_arc.0 as *const libc::sem_t as *mut libc::sem_t;
+
+            // Diagnostic: log sem count every 100_000th hit on this dispatch path.
+            // Identifies runaway-drain patterns (huge initial_count or stuck caller loop).
+            static SEM_WAIT_COUNTER: AtomicUsize = AtomicUsize::new(0);
+            let n = SEM_WAIT_COUNTER.fetch_add(1, Ordering::Relaxed);
+            if n % 100_000 == 0 {
+                let mut val: libc::c_int = 0;
+                unsafe { libc::sem_getvalue(sem_ptr, &mut val) };
+                eprintln!(
+                    "weave/WFSO-diag: hit #{n} handle={h_handle:#x} sem_getvalue={val} timeout={dw_milliseconds}"
+                );
+            }
 
             if dw_milliseconds == 0 {
                 // Non-blocking: try to decrement without waiting.
