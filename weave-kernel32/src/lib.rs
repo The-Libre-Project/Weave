@@ -9624,6 +9624,32 @@ pub unsafe extern "win64" fn get_time_zone_information(lp_time_zone_information:
     }
 }
 
+/// GetDynamicTimeZoneInformation — fill DYNAMIC_TIME_ZONE_INFORMATION struct.
+///
+/// DYNAMIC_TIME_ZONE_INFORMATION is TIME_ZONE_INFORMATION (172 bytes) plus
+/// TimeZoneKeyName (WCHAR[128] = 256 bytes) plus DynamicDaylightTimeDisabled (BOOL = 4 bytes)
+/// = 432 bytes total. Delegates to the same localtime_r logic as GetTimeZoneInformation
+/// for the first 172 bytes, zero-fills the extended fields.
+///
+/// Returns TIME_ZONE_ID_STANDARD (1), TIME_ZONE_ID_DAYLIGHT (2), or
+/// TIME_ZONE_ID_UNKNOWN (0xFFFFFFFF) on error.
+///
+/// # Safety
+/// `lp_time_zone_information` must be a valid writable pointer to a 432-byte struct.
+// Wine ref: dlls/kernelbase/locale.c:6294 — reads from registry
+// HKLM\...\TimeZoneInformation; Weave uses localtime_r as a safe approximation.
+pub unsafe extern "win64" fn get_dynamic_time_zone_information(
+    lp_time_zone_information: *mut u8,
+) -> u32 {
+    if lp_time_zone_information.is_null() {
+        return 0xFFFF_FFFF; // TIME_ZONE_ID_UNKNOWN / error
+    }
+    // Zero the full 432-byte DYNAMIC_TIME_ZONE_INFORMATION struct first.
+    unsafe { std::ptr::write_bytes(lp_time_zone_information, 0, 432) };
+    // Delegate the base TIME_ZONE_INFORMATION fields to the existing implementation.
+    unsafe { get_time_zone_information(lp_time_zone_information) }
+}
+
 /// GetSystemTime: fill a SYSTEMTIME struct with current UTC time.
 ///
 /// # Safety
@@ -12080,6 +12106,10 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         ),
         "GetTimeZoneInformation" => Some(
             get_time_zone_information as unsafe extern "win64" fn(_) -> _ as *const () as usize,
+        ),
+        "GetDynamicTimeZoneInformation" => Some(
+            get_dynamic_time_zone_information as unsafe extern "win64" fn(_) -> _ as *const ()
+                as usize,
         ),
         // String comparison
         "CompareStringW" => Some(

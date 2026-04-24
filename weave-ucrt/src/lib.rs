@@ -395,6 +395,63 @@ pub extern "win64" fn ucrt_setusermatherr(_fn: *const c_void) {
     };
 }
 
+// ── CRT runtime stubs — NXEngine / MSVC CRT startup path ────────────────────
+//
+// These are called by the MSVC CRT startup (exe_common.inl) before WinMain.
+// Returning wrong values here causes the startup to call exit(0) or crash.
+
+/// _get_narrow_winmain_command_line — returns the ANSI command line string.
+///
+/// Wine ref: dlls/msvcrt/wincmdln.c — returns a `char*` to the command-line
+/// string used by the narrow WinMain entry point.  A NULL return causes the
+/// MSVC CRT startup to crash (it calls GetCommandLineA and parses it; the
+/// exe_common.inl path unconditionally passes the result to main()).
+/// Safe stub: return a pointer to a static null-terminated empty string.
+static NARROW_CMDLINE: [u8; 1] = [0u8];
+pub unsafe extern "win64" fn ucrt_get_narrow_winmain_command_line() -> *const u8 {
+    NARROW_CMDLINE.as_ptr()
+}
+
+/// _invalid_parameter_noinfo — called by MSVC CRT on invalid parameters (no info).
+///
+/// Wine ref: dlls/msvcrt/except.c — void no-op stub; callers do not check
+/// the return value, they abort independently if needed.
+pub unsafe extern "win64" fn ucrt_invalid_parameter_noinfo() {}
+
+/// _invalid_parameter_noinfo_noreturn — same as above, marked noreturn in MSVC.
+///
+/// Wine ref: dlls/msvcrt/except.c — safe to return on Linux (the caller may
+/// call exit() itself, but returning is not UB for our stub).
+pub unsafe extern "win64" fn ucrt_invalid_parameter_noinfo_noreturn() {}
+
+/// _register_thread_local_exe_atexit_callback — register per-thread atexit fn.
+///
+/// Wine ref: dlls/msvcrt/exit.c — registers a callback for thread-local
+/// cleanup at exe exit.  Safe stub: ignore the function pointer, return 0.
+pub unsafe extern "win64" fn ucrt_register_thread_local_exe_atexit_callback(
+    _fn: *const c_void,
+) -> i32 {
+    0
+}
+
+/// _seh_filter_exe — SEH exception filter for EXE modules.
+///
+/// Wine ref: dlls/msvcrt/except.c — called from the SEH __except filter
+/// expression in exe_common.inl.  Returns EXCEPTION_EXECUTE_HANDLER (1)
+/// to execute the handler (which calls exit()).  Returning 0 would mean
+/// EXCEPTION_CONTINUE_SEARCH and propagate the exception.
+pub unsafe extern "win64" fn ucrt_seh_filter_exe(_code: u32, _info: *const c_void) -> i32 {
+    1 // EXCEPTION_EXECUTE_HANDLER
+}
+
+/// _callnewh — call the new_handler if allocation fails.
+///
+/// Wine ref: dlls/msvcrt/heap.c — calls the installed new_handler(size).
+/// Safe stub: no new_handler installed, return 0 (handler not called).
+pub unsafe extern "win64" fn ucrt_callnewh(_size: usize) -> i32 {
+    0
+}
+
 // ── _initterm / _initterm_e — runs C++ static constructors ───────────────────
 //
 // Each entry is a function pointer (or NULL/padding).  _initterm calls void()
@@ -567,6 +624,17 @@ pub fn fmode_data_addr() -> usize {
 /// Return the address of writable _commode storage for DATA imports.
 pub fn commode_data_addr() -> usize {
     *HEAP_COMMODE.get_or_init(|| Box::into_raw(Box::new(0i32)) as usize)
+}
+
+/// _set_fmode — set the default file translation mode (_O_TEXT or _O_BINARY).
+///
+/// Wine ref: dlls/msvcrt/file.c — writes the value to the global _fmode variable.
+/// Returns 0 on success, errno on failure (EINVAL if mode is invalid).
+/// Safe stub: write to our heap-backed _fmode storage, return 0.
+pub extern "win64" fn ucrt_set_fmode(mode: i32) -> i32 {
+    let addr = fmode_data_addr() as *mut i32;
+    unsafe { *addr = mode };
+    0
 }
 
 static HEAP_MB_CUR_MAX: OnceLock<usize> = OnceLock::new();
@@ -3920,6 +3988,26 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "_initialize_narrow_environment" => {
             stub!(ucrt_initialize_narrow_environment as extern "win64" fn() -> _)
         }
+        "_get_narrow_winmain_command_line" => {
+            stub!(ucrt_get_narrow_winmain_command_line as unsafe extern "win64" fn() -> _)
+        }
+        "_invalid_parameter_noinfo" => {
+            stub!(ucrt_invalid_parameter_noinfo as unsafe extern "win64" fn())
+        }
+        "_invalid_parameter_noinfo_noreturn" => {
+            stub!(ucrt_invalid_parameter_noinfo_noreturn as unsafe extern "win64" fn())
+        }
+        "_register_thread_local_exe_atexit_callback" => {
+            stub!(
+                ucrt_register_thread_local_exe_atexit_callback as unsafe extern "win64" fn(_) -> _
+            )
+        }
+        "_seh_filter_exe" => {
+            stub!(ucrt_seh_filter_exe as unsafe extern "win64" fn(_, _) -> _)
+        }
+        "_callnewh" => {
+            stub!(ucrt_callnewh as unsafe extern "win64" fn(_) -> _)
+        }
         "_set_invalid_parameter_handler" => {
             stub!(ucrt_set_invalid_parameter_handler as extern "win64" fn(_) -> _)
         }
@@ -4101,6 +4189,7 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "_doserrno" | "__doserrno" => Some(doserrno_data_addr()),
         // Legacy MSVCRT aliases — older MinGW CRT startup code uses these names
         "_fmode" => Some(fmode_data_addr()),
+        "_set_fmode" => stub!(ucrt_set_fmode as extern "win64" fn(_) -> _),
         "_commode" => Some(commode_data_addr()),
         "__mb_cur_max" => Some(mb_cur_max_data_addr()),
         "_stricmp" | "_strcmpi" => stub!(ucrt_strcmp as unsafe extern "win64" fn(_, _) -> _),
@@ -4231,7 +4320,7 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
             ucrt_cxx_frame_handler as unsafe extern "win64" fn(_, _, _, _) -> _ as *const ()
                 as usize,
         ),
-        "?terminate@@YAXXZ" => {
+        "terminate" | "?terminate@@YAXXZ" => {
             Some(ucrt_terminate as extern "win64" fn() -> ! as *const () as usize)
         }
         "??1type_info@@UEAA@XZ" => {
