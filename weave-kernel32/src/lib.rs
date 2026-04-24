@@ -6724,28 +6724,43 @@ pub unsafe extern "win64" fn release_srw_lock_shared(srw_lock: *mut usize) {
     }
 }
 
-/// InitializeConditionVariable: zero-initialise a CONDITION_VARIABLE.
+// Side-channel counter table for condition variables.
+//
+// Windows CONDITION_VARIABLE uses the condvar ADDRESS as a keyed-event identity —
+// the kernel never requires the Ptr field to be writable. MSVC CRT startup probes
+// condvar availability by calling WakeAllConditionVariable(pfn_InitializeConditionVariable),
+// passing a function pointer (r-xp memory) as the "condvar". Writing to that address
+// (as a naive futex implementation would) causes SIGSEGV. We mirror the Windows keyed-event
+// model: the condvar address is just a KEY; all waiter state lives in this side table.
+const CV_TABLE_SIZE: usize = 4096;
+#[allow(clippy::declare_interior_mutable_const)]
+static CV_COUNTERS: [AtomicI32; CV_TABLE_SIZE] = {
+    const Z: AtomicI32 = AtomicI32::new(0);
+    [Z; CV_TABLE_SIZE]
+};
+
+#[inline]
+fn cv_counter(addr: usize) -> &'static AtomicI32 {
+    &CV_COUNTERS[(addr >> 3) & (CV_TABLE_SIZE - 1)]
+}
+
+/// InitializeConditionVariable: no-op — counter lives in CV_COUNTERS keyed by address.
 ///
 /// # Safety
-/// `condition_variable` must be a valid writable pointer to a PVOID-sized slot.
-// Wine ref: dlls/ntdll/sync.c:712 — RtlInitializeConditionVariable: sets variable->Ptr = NULL.
-pub unsafe extern "win64" fn initialize_condition_variable(condition_variable: *mut usize) {
-    if !condition_variable.is_null() {
-        unsafe { *condition_variable = 0 };
-    }
-}
+/// No requirements on `condition_variable` — we never read or write the condvar memory.
+// Wine ref: dlls/ntdll/sync.c:712 — RtlInitializeConditionVariable sets variable->Ptr = NULL.
+// We intentionally do not write to condition_variable: MSVC CRT passes function pointer
+// addresses (r-xp memory) here during capability probing; writing crashes.
+pub unsafe extern "win64" fn initialize_condition_variable(_condition_variable: *mut usize) {}
 
 /// SleepConditionVariableSRW: atomically release the SRW lock and wait on the condvar.
 ///
-/// Captures the current condvar value, releases the lock (shared or exclusive based on
-/// `flags`), futex-waits for the condvar to be incremented by a Wake call, then
-/// reacquires the lock. Returns TRUE on wake, FALSE on timeout.
+/// Snapshots the side-channel counter for this condvar address, releases the lock,
+/// futex-waits for the counter to change (set by a Wake call), then reacquires the lock.
 ///
 /// # Safety
-/// `condition_variable` and `srw_lock` must be valid, non-null pointers.
-// Wine ref: dlls/ntdll/sync.c:799 — RtlSleepConditionVariableSRW: snapshots *(int*)&variable->Ptr,
-// releases lock (shared or exclusive per flags & RTL_CONDITION_VARIABLE_LOCKMODE_SHARED),
-// calls RtlWaitOnAddress(&variable->Ptr, &value, 4, timeout), reacquires lock.
+/// `condition_variable` and `srw_lock` must be non-null.
+// Wine ref: dlls/ntdll/sync.c:799 — RtlSleepConditionVariableSRW.
 pub unsafe extern "win64" fn sleep_condition_variable_srw(
     condition_variable: *mut usize,
     srw_lock: *mut usize,
@@ -6756,18 +6771,15 @@ pub unsafe extern "win64" fn sleep_condition_variable_srw(
         return 0;
     }
 
-    // Snapshot the current condvar value (low 32 bits).
-    let cv_ptr = condition_variable as *const u32;
-    let captured_val = unsafe { std::ptr::read_volatile(cv_ptr) };
+    let counter = cv_counter(condition_variable as usize);
+    let snapshot = counter.load(Ordering::Acquire);
 
-    // Release the SRW lock.
     if flags & CONDITION_VARIABLE_LOCKMODE_SHARED != 0 {
         unsafe { release_srw_lock_shared(srw_lock) };
     } else {
         unsafe { release_srw_lock_exclusive(srw_lock) };
     }
 
-    // Build optional timeout.
     let timeout_storage: libc::timespec;
     let timeout_ptr: *const libc::timespec = if dw_milliseconds == 0xFFFF_FFFF {
         std::ptr::null()
@@ -6779,9 +6791,8 @@ pub unsafe extern "win64" fn sleep_condition_variable_srw(
         &timeout_storage
     };
 
-    let ret = unsafe { futex_wait(cv_ptr, captured_val, timeout_ptr) };
+    let ret = unsafe { futex_wait(counter.as_ptr() as *const u32, snapshot as u32, timeout_ptr) };
 
-    // Reacquire the lock regardless of wait result.
     if flags & CONDITION_VARIABLE_LOCKMODE_SHARED != 0 {
         unsafe { acquire_srw_lock_shared(srw_lock) };
     } else {
@@ -6791,18 +6802,16 @@ pub unsafe extern "win64" fn sleep_condition_variable_srw(
     let errno = unsafe { *libc::__errno_location() };
     if ret == -1 && errno == libc::ETIMEDOUT {
         set_last_error(0x5B4); // ERROR_TIMEOUT
-        return 0; // FALSE
+        return 0;
     }
-    1 // TRUE
+    1
 }
 
 /// SleepConditionVariableCS: atomically release a CRITICAL_SECTION and wait on a condvar.
 ///
-/// Releases the critical section, futex-waits for a Wake call, then reacquires it.
 /// # Safety
-/// `condition_variable` and `critical_section` must be valid, non-null pointers.
-// Wine ref: dlls/ntdll/sync.c:766 — RtlSleepConditionVariableCS: snapshots condvar value,
-// calls RtlLeaveCriticalSection, RtlWaitOnAddress, then RtlEnterCriticalSection.
+/// `condition_variable` and `critical_section` must be non-null.
+// Wine ref: dlls/ntdll/sync.c:766 — RtlSleepConditionVariableCS.
 pub unsafe extern "win64" fn sleep_condition_variable_cs(
     condition_variable: *mut usize,
     critical_section: *mut u8,
@@ -6811,9 +6820,12 @@ pub unsafe extern "win64" fn sleep_condition_variable_cs(
     if condition_variable.is_null() || critical_section.is_null() {
         return 0;
     }
-    let cv_ptr = condition_variable as *const u32;
-    let captured_val = unsafe { std::ptr::read_volatile(cv_ptr) };
+
+    let counter = cv_counter(condition_variable as usize);
+    let snapshot = counter.load(Ordering::Acquire);
+
     unsafe { leave_critical_section(critical_section) };
+
     let timeout_storage: libc::timespec;
     let timeout_ptr: *const libc::timespec = if dw_milliseconds == 0xFFFF_FFFF {
         std::ptr::null()
@@ -6824,8 +6836,11 @@ pub unsafe extern "win64" fn sleep_condition_variable_cs(
         };
         &timeout_storage
     };
-    let ret = unsafe { futex_wait(cv_ptr, captured_val, timeout_ptr) };
+
+    let ret = unsafe { futex_wait(counter.as_ptr() as *const u32, snapshot as u32, timeout_ptr) };
+
     unsafe { enter_critical_section(critical_section) };
+
     let errno = unsafe { *libc::__errno_location() };
     if ret == -1 && errno == libc::ETIMEDOUT {
         set_last_error(0x5B4); // ERROR_TIMEOUT
@@ -6836,34 +6851,30 @@ pub unsafe extern "win64" fn sleep_condition_variable_cs(
 
 /// WakeConditionVariable: wake one thread waiting on a condition variable.
 ///
-/// Increments the condvar value and issues FUTEX_WAKE(1).
 /// # Safety
-/// `condition_variable` must be a valid pointer to a PVOID-sized condvar slot.
-// Wine ref: dlls/ntdll/sync.c:731 — RtlWakeConditionVariable: InterlockedIncrement on
-// variable->Ptr then RtlWakeAddressSingle(variable).
+/// `condition_variable` must be non-null (value may be any address including r-xp).
+// Wine ref: dlls/ntdll/sync.c:731 — RtlWakeConditionVariable.
 pub unsafe extern "win64" fn wake_condition_variable(condition_variable: *mut usize) {
     if condition_variable.is_null() {
         return;
     }
-    let cv_atomic = unsafe { &*(condition_variable as *const AtomicI32) };
-    cv_atomic.fetch_add(1, Ordering::Release);
-    unsafe { futex_wake(condition_variable as *const u32, 1) };
+    let counter = cv_counter(condition_variable as usize);
+    counter.fetch_add(1, Ordering::Release);
+    unsafe { futex_wake(counter.as_ptr() as *const u32, 1) };
 }
 
 /// WakeAllConditionVariable: wake all threads waiting on a condition variable.
 ///
-/// Increments the condvar value and issues FUTEX_WAKE(INT_MAX).
 /// # Safety
-/// `condition_variable` must be a valid pointer to a PVOID-sized condvar slot.
-// Wine ref: dlls/ntdll/sync.c:745 — RtlWakeAllConditionVariable: InterlockedIncrement
-// on variable->Ptr then RtlWakeAddressAll(variable).
+/// `condition_variable` must be non-null (value may be any address including r-xp).
+// Wine ref: dlls/ntdll/sync.c:745 — RtlWakeAllConditionVariable.
 pub unsafe extern "win64" fn wake_all_condition_variable(condition_variable: *mut usize) {
     if condition_variable.is_null() {
         return;
     }
-    let cv_atomic = unsafe { &*(condition_variable as *const AtomicI32) };
-    cv_atomic.fetch_add(1, Ordering::Release);
-    unsafe { futex_wake(condition_variable as *const u32, i32::MAX) };
+    let counter = cv_counter(condition_variable as usize);
+    counter.fetch_add(1, Ordering::Release);
+    unsafe { futex_wake(counter.as_ptr() as *const u32, i32::MAX) };
 }
 
 // ── Threads ───────────────────────────────────────────────────────────────────
