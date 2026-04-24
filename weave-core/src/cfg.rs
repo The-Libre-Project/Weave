@@ -1404,13 +1404,13 @@ unsafe extern "win64" fn weave_cfg_dispatch_stub() {
         // (e.g. a callback-return-value that happens to be a PE data pointer)
         // and must not be executed.
         // r11 is scratch (Win64 caller-saved).
-        "mov r11, {ts}",              // r11 = address of CFG_PE_TEXT_START
+        "lea r11, [rip + {ts}]",      // r11 = &CFG_PE_TEXT_START (RIP-relative, PIE-safe)
         "mov r11, qword ptr [r11]",   // r11 = text_start value
         "test r11, r11",
         "jz 3f",                      // guard not initialised → allow
         "cmp rax, r11",
         "jb 3f",                      // rax < text_start → Weave/SO range → allow
-        "mov r11, {te}",              // r11 = address of CFG_PE_TEXT_END
+        "lea r11, [rip + {te}]",      // r11 = &CFG_PE_TEXT_END (RIP-relative, PIE-safe)
         "mov r11, qword ptr [r11]",   // r11 = text_end value
         "cmp rax, r11",
         "jae 2f",                     // rax >= text_end → PE data → reject
