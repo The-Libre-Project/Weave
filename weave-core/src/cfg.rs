@@ -190,7 +190,20 @@ pub fn setup(pe_bytes: &[u8], base: *mut u8) {
 
     let page_size = 4096usize;
 
-    // Patch check slot → check stub.
+    // First, patch every non-zero slot in the .00cfg section to dispatch_stub.
+    // The Load Config Directory only names two slots (check + dispatch), but
+    // MSVC XFG adds additional "xfg_dispatch_nop" variants at further offsets
+    // (e.g. [+0x18], [+0x20]).  Those can point to addresses beyond the .text
+    // VirtualSize that are zero-filled by the loader — executing zeros silently
+    // corrupts the CRT init chain (_initterm_e dispatches through them).
+    //
+    // This must run BEFORE the individual slot patches below so that the section
+    // scan does not overwrite the check slot (which has a different stub) after
+    // we've already written it.
+    patch_cfg_section_slots(pe_bytes, base, dispatch_stub_addr);
+
+    // Patch check slot → check stub (AFTER the section scan so it is not
+    // overwritten back to dispatch_stub by patch_cfg_section_slots).
     if check_fptr_va != 0 {
         let slot_ptr = check_fptr_va as *mut usize;
         let page_base = (check_fptr_va & !(page_size - 1)) as *mut libc::c_void;
@@ -217,14 +230,6 @@ pub fn setup(pe_bytes: &[u8], base: *mut u8) {
             "weave: CFG: patched dispatch slot {dispatch_fptr_va:#x} → weave_cfg_dispatch ({dispatch_stub_addr:#x})"
         );
     }
-
-    // Also patch every non-zero slot in the .00cfg section.
-    // The Load Config Directory only names two slots (check + dispatch), but
-    // MSVC XFG adds additional "xfg_dispatch_nop" variants at further offsets
-    // (e.g. [+0x18], [+0x20]).  Those can point to addresses beyond the .text
-    // VirtualSize that are zero-filled by the loader — executing zeros silently
-    // corrupts the CRT init chain (_initterm_e dispatches through them).
-    patch_cfg_section_slots(pe_bytes, base, dispatch_stub_addr);
 
     // Guard 4: record the executable text range of this PE so the dispatch stub
     // can reject targets that fall in data/BSS sections.
