@@ -2,6 +2,10 @@
 //!
 //! Tests are skipped on non-Linux platforms (the dev machine is macOS ARM64).
 
+mod common;
+
+use common::capability::{CapabilityClass, CapabilityOutcome, CapabilityReport};
+
 fn run_weave(fixture_name: &str) -> std::process::Output {
     let weave_bin = env!("CARGO_BIN_EXE_weave");
     let fixture = format!(
@@ -95,6 +99,22 @@ fn seven_zip_list_archive() {
         stdout.contains("world.txt"),
         "archive listing did not contain 'world.txt'.\nstdout: {stdout}\nstderr: {stderr}"
     );
+
+    // --- Capability taxonomy (TASK-META-06) ---
+    // 7za.exe `l` exercises: process startup + reading the archive file.
+    // It does NOT write, do network, audio, or printing in this gate.
+    let mut cap = CapabilityReport::for_app("7za.exe");
+    cap.declare(CapabilityClass::Launches);
+    cap.declare(CapabilityClass::OpensFile);
+    cap.record(
+        CapabilityClass::Launches,
+        CapabilityOutcome::pass("7za.exe exited 0 after listing archive"),
+    );
+    cap.record(
+        CapabilityClass::OpensFile,
+        CapabilityOutcome::pass("test.7z entries 'hello.txt' and 'world.txt' present in stdout"),
+    );
+    cap.emit();
 }
 
 /// `weave putty.exe` — PuTTY GUI; we check that HeapAlloc is called during CRT init.
@@ -653,6 +673,30 @@ fn notepad_plus_plus_resource_walk_mode() {
         "M6e resource walk gate passed — elapsed={elapsed:.1?} restrace_count={}",
         restrace_lines.len()
     );
+
+    // --- Capability taxonomy (TASK-META-06) ---
+    // The resource-walk gate exercises: NPP startup (launches) and reading a
+    // .py file given on the command line (opens_file — confirmed by C2:
+    // SCI_APPENDTEXT delivered with content). It does NOT exercise saves_file
+    // (no write-back gate), network, audio, or printing.
+    //
+    // sandbox_permissions is *implicitly* exercised — the binary runs under
+    // the sandbox without --no-sandbox — but no positive/negative permission
+    // claim is asserted in this gate, so it is not declared.
+    let mut cap = CapabilityReport::for_app("notepad++.exe");
+    cap.declare(CapabilityClass::Launches);
+    cap.declare(CapabilityClass::OpensFile);
+    cap.record(
+        CapabilityClass::Launches,
+        CapabilityOutcome::pass("NPP reached resource-trace steady state within 15s"),
+    );
+    cap.record(
+        CapabilityClass::OpensFile,
+        CapabilityOutcome::pass(
+            "C2: SCI_APPENDTEXT delivered to Scintilla with wp>0 — test.py contents reached editor",
+        ),
+    );
+    cap.emit();
 }
 
 /// `weave i_view64.exe` — IrfanView 64-bit portable image viewer.
@@ -1567,6 +1611,28 @@ fn nxengine_gate1_smoke() {
         "nxengine Gate A3 FAIL: screen black at 5s — render loop not reached (pixel_result={pixel_result:?}, elapsed {elapsed:.1?}).\nstderr:\n{stderr}"
     );
     eprintln!("gate A3: non-black pixels at 5s ✓");
+
+    // --- Capability taxonomy (TASK-META-06) ---
+    // NXEngine Gate 1 exercises: launches (PE load + CreateWindow + first
+    // frame). Audio is INTENTIONALLY bypassed (SDL_AUDIODRIVER=dummy) — the
+    // audio path is not driven, so audio is declared as untested rather than
+    // being silently omitted. PROJECT-TRUTH.md flags "no game with audio
+    // runs end-to-end" as a non-negotiable gap; the untested marker here is
+    // the test-side echo of that gap.
+    let mut cap = CapabilityReport::for_app("nx.exe");
+    cap.declare(CapabilityClass::Launches);
+    cap.declare(CapabilityClass::Audio);
+    cap.record(
+        CapabilityClass::Launches,
+        CapabilityOutcome::pass(
+            "A1+A2+A3: PE loaded, CreateWindow seen, non-black pixels at 5s",
+        ),
+    );
+    cap.record(
+        CapabilityClass::Audio,
+        CapabilityOutcome::untested("SDL_AUDIODRIVER=dummy forces no-op audio backend in CI"),
+    );
+    cap.emit();
 }
 
 /// `weave putty.exe -ssh localhost 22` — PuTTY SSH engine; M3 Gate 1.
