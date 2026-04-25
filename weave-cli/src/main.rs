@@ -40,6 +40,8 @@ fn resolve(dll: &str, func: &str) -> Option<usize> {
         .or_else(|| weave_kernel32::resolve(dll, func))
         .or_else(|| weave_advapi32::resolve(dll, func))
         .or_else(|| weave_user32::resolve(dll, func))
+        // shcore.dll — DPI awareness APIs (GetDpiForMonitor, SetProcessDpiAwareness, ...)
+        .or_else(|| weave_user32::resolve_shcore(dll, func))
         .or_else(|| weave_gdi32::resolve(dll, func))
         // msimg32.dll — alpha-blending, transparent blit (Sprint 5 IrfanView)
         .or_else(|| weave_gdi32::resolve_msimg32(dll, func))

@@ -3184,6 +3184,54 @@ pub extern "win64" fn are_dpi_awareness_contexts_equal(
     (dpi_context_a == dpi_context_b) as i32
 }
 
+// ── SHCORE stubs (DPI functions exported by shcore.dll on Win8+) ─────────────
+
+/// GetDpiForMonitor: return the DPI of a specific monitor.
+// Wine ref: dlls/shcore/main.c::GetDpiForMonitor — queries monitor DPI from registry
+// or defaults to USER_DEFAULT_SCREEN_DPI (96). SDL2 calls this optionally via dynamic
+// GetProcAddress; if the function is absent SDL2 falls back to 96 DPI. We always return
+// 96 and S_OK so SDL2 treats the monitor as system-DPI-aware without dynamic lookup.
+/// # Safety
+/// dpi_x and dpi_y must be valid pointers to u32, or null.
+pub unsafe extern "win64" fn get_dpi_for_monitor(
+    _h_monitor: usize,
+    _dpi_type: u32,
+    dpi_x: *mut u32,
+    dpi_y: *mut u32,
+) -> i32 {
+    if !dpi_x.is_null() {
+        unsafe { *dpi_x = 96 };
+    }
+    if !dpi_y.is_null() {
+        unsafe { *dpi_y = 96 };
+    }
+    0 // S_OK
+}
+
+/// SetProcessDpiAwareness: set DPI awareness for the calling process.
+// Wine ref: dlls/shcore/main.c::SetProcessDpiAwareness — validates value (0-2),
+// stores it, then calls SetProcessDpiAwarenessInternal. Weave has no per-monitor DPI
+// tracking so we accept any value and return S_OK.
+pub extern "win64" fn set_process_dpi_awareness(_value: u32) -> i32 {
+    0 // S_OK
+}
+
+/// GetProcessDpiAwareness: query the DPI awareness of a process.
+// Wine ref: dlls/shcore/main.c::GetProcessDpiAwareness — retrieves stored value;
+// defaults to PROCESS_DPI_UNAWARE (0) if never set. SDL2 calls this to decide whether
+// to scale mouse coordinates. We report PROCESS_SYSTEM_DPI_AWARE (1).
+/// # Safety
+/// value must be a valid pointer to u32, or null.
+pub unsafe extern "win64" fn get_process_dpi_awareness(
+    _h_process: usize,
+    value: *mut u32,
+) -> i32 {
+    if !value.is_null() {
+        unsafe { *value = 1 }; // PROCESS_SYSTEM_DPI_AWARE
+    }
+    0 // S_OK
+}
+
 // ── Input state stubs ─────────────────────────────────────────────────────────
 
 /// GetKeyState: return the state of a virtual key.

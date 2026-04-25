@@ -5175,6 +5175,7 @@ fn is_emulated_dll(key: &str) -> bool {
             | "ucrtbase.dll"
             | "msvcrt.dll"
             | "psapi.dll"
+            | "shcore.dll"
     )
 }
 
