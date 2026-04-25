@@ -1499,16 +1499,6 @@ fn nxengine_gate1_smoke() {
         .args(["--no-sandbox", &exe])
         .env("DISPLAY", ":99")
         .env("SDL_AUDIODRIVER", "dummy")
-        // Diagnostic: sample /proc/self/task every second so we can see where
-        // each PE/Weave thread is stuck when CreateWindow is never reached.
-        // Remove this env after Gate A2 root cause lands.
-        .env("WEAVE_STALL_TRACE", "1")
-        // Diagnostic: log every IAT call. Round-3 stall trace showed the main
-        // thread spending ~95% of 20s in libc nanosleep — the PE must be
-        // invoking some Win32 sleep-like API (Sleep / SDL_Delay / WFSO with
-        // timeout) on a tight polling loop. IAT trace will name the call.
-        // Combined with stall trace ~61 KiB total stderr, under 64 KiB pipe.
-        .env("WEAVE_IAT_TRACE", "1")
         .stderr(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .spawn()

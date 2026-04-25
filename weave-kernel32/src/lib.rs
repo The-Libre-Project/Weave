@@ -794,15 +794,6 @@ pub unsafe extern "win64" fn virtual_free_ex(
 // NULL timeout to NtDelayExecution, sleeping indefinitely.
 pub extern "win64" fn sleep(dw_milliseconds: u32) {
     // Diagnostic counter — log at powers of 10 so a runaway Sleep loop is
-    // visible without spamming. Remove once nxengine A2 stall is closed.
-    {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static SLEEP_COUNT: AtomicU64 = AtomicU64::new(0);
-        let n = SLEEP_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
-        if matches!(n, 1 | 10 | 100 | 1000 | 10000 | 100000 | 1000000) {
-            eprintln!("weave/kernel32: Sleep called {n} times (ms={dw_milliseconds})");
-        }
-    }
     let ts = libc::timespec {
         tv_sec: (dw_milliseconds / 1000) as i64,
         tv_nsec: ((dw_milliseconds % 1000) * 1_000_000) as i64,
@@ -906,22 +897,6 @@ pub unsafe extern "win64" fn enter_critical_section(lp_critical_section: *mut u8
                     unsafe { libc::sched_yield() };
                 } else {
                     // Back off: sleep 1 ms to avoid burning CPU in CI.
-                    // Diagnostic counter — fires every SPIN_LIMIT (4000) yields.
-                    // Logs at powers of 10 so a stuck CS spin is visible without
-                    // spamming. Remove once nxengine A2 stall is closed.
-                    {
-                        use std::sync::atomic::AtomicU64;
-                        static CS_BACKOFF_COUNT: AtomicU64 = AtomicU64::new(0);
-                        let n = CS_BACKOFF_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
-                        if matches!(n, 1 | 10 | 100 | 1000 | 10000 | 100000) {
-                            let cs_addr = lp_critical_section as usize;
-                            let lc = lock_atomic.load(Ordering::Relaxed);
-                            let owner = owning_atomic.load(Ordering::Relaxed);
-                            eprintln!(
-                                "weave/kernel32: enter_critical_section back-off count={n} cs={cs_addr:#x} LockCount={lc} OwningThread={owner:#x} self_tid={tid:#x}"
-                            );
-                        }
-                    }
                     let ts = libc::timespec {
                         tv_sec: 0,
                         tv_nsec: 1_000_000,
@@ -6875,21 +6850,6 @@ pub unsafe extern "win64" fn sleep_condition_variable_cs(
 ) -> i32 {
     if condition_variable.is_null() || critical_section.is_null() {
         return 0;
-    }
-
-    // Diagnostic counter — log at powers of 10. nxengine A2 trace shows MSVC
-    // CRT calls SleepConditionVariableCS via cached pointer (bypasses IAT
-    // trace); count surfaces the call rate. Remove once A2 stall is closed.
-    {
-        use std::sync::atomic::AtomicU64;
-        static SCVCS_COUNT: AtomicU64 = AtomicU64::new(0);
-        let n = SCVCS_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
-        if matches!(n, 1 | 10 | 100 | 1000 | 10000 | 100000) {
-            eprintln!(
-                "weave/kernel32: SleepConditionVariableCS count={n} ms={dw_milliseconds} cv={:#x} cs={:#x}",
-                condition_variable as usize, critical_section as usize
-            );
-        }
     }
 
     let counter = cv_counter(condition_variable as usize);
