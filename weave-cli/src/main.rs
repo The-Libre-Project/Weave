@@ -445,6 +445,11 @@ fn main() {
             }
         }
 
+        // Two-pass load: first register all exports, then patch all IATs.
+        // This ensures that when sdl2_mixer.dll's IAT is patched, SDL2.dll's
+        // exports are already registered (regardless of HashMap iteration order).
+        let mut side_dlls: Vec<(String, Vec<u8>, *mut u8)> = Vec::new();
+
         for (dll_name, orig_name) in &import_dlls {
             // Try original import-table case first, then lowercase fallback.
             let dll_bytes = std::fs::read(exe_dir.join(orig_name))
@@ -455,19 +460,24 @@ fn main() {
             };
             match loader::load_dll(&dll_bytes) {
                 Ok((image, exports)) => {
-                    unsafe {
-                        iat::patch_best_effort(&dll_bytes, image.base, resolve, |d, f, va| {
-                            eprintln!(
-                                "weave: {dll_name}: unresolved import {d}!{f} at iat={va:#x} (skipped)"
-                            );
-                        });
-                    }
+                    let base = image.base;
                     dll_registry::register(dll_name.clone(), image, exports);
                     eprintln!("weave: pre-loaded {dll_name} from exe dir");
+                    side_dlls.push((dll_name.clone(), dll_bytes, base));
                 }
                 Err(e) => {
                     eprintln!("weave: warning: could not load {dll_name} from exe dir: {e}");
                 }
+            }
+        }
+
+        for (dll_name, dll_bytes, base) in &side_dlls {
+            unsafe {
+                iat::patch_best_effort(dll_bytes, *base, resolve, |d, f, va| {
+                    eprintln!(
+                        "weave: {dll_name}: unresolved import {d}!{f} at iat={va:#x} (skipped)"
+                    );
+                });
             }
         }
     }
