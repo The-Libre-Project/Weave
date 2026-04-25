@@ -447,7 +447,7 @@ fn print_weave_crash(
         }
     };
     let stack_top = read_u64_at(rsp); // [RSP]   — ret addr if call crashed
-    let stack_prev = read_u64_at(rsp - 8); // [RSP-8] — ret addr if ret crashed
+    let stack_prev = read_u64_at(rsp.saturating_sub(8)); // [RSP-8] — ret addr if ret crashed
 
     // Build message using only stack buffers (no heap) for signal safety.
     let mut msg = [0u8; 768];
