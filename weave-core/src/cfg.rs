@@ -1481,7 +1481,7 @@ fn weave_cfg_dispatch_stub() {}
 // Windows ABI for `__guard_check_icall_fptr`:
 //   - Input:    RCX = target function pointer to validate
 //   - Behavior: validate only — do NOT jump.  Caller issues the real `call rcx`.
-//   - Return:   RET with RCX preserved (caller uses it for the subsequent call).
+//   - Return:   RET with ALL registers preserved except R11 (Win64 caller-saved).
 //
 // This is distinct from `__guard_dispatch_icall_fptr` (RAX-input, JMP).
 // Both must be separate stubs — sharing the dispatch stub (RAX/JMP) for the
@@ -1491,48 +1491,14 @@ fn weave_cfg_dispatch_stub() {}
 // false-BAD into a hard AV on the subsequent `call rcx`.  RET-on-BAD lets the
 // caller proceed; if the target is genuinely bad it will fault loudly there.
 //
-// Stack layout after `sub rsp, 32` (same shape as dispatch stub):
-//   [rsp+ 0..31]  shadow space
-//   [rsp+32]      r11
-//   [rsp+40]      r10
-//   [rsp+48]      r9
-//   [rsp+56]      r8
-//   [rsp+64]      rdx
-//   [rsp+72]      rcx  ← original RCX (the target to validate)
-//   [rsp+80]      rax
-//   [rsp+88]      return address (instruction after `call [check_fptr]` in PE)
-//
-// Note: RAX is pushed first so that [rsp+72] == saved RCX (same offset as the
-// dispatch stub's [rsp+72] == saved RCX, which differs from [rsp+80] == saved RAX).
+// No push/pop needed: R11 is the only scratch register used and it is Win64
+// caller-saved, so the caller never expects it to survive across a call.
+// RAX and all other registers are never written — they are automatically preserved.
+// No debug call: the check stub always RETs; there is no JMP decision to audit.
 #[cfg(target_arch = "x86_64")]
 #[unsafe(naked)]
 unsafe extern "win64" fn weave_cfg_check_stub() {
     std::arch::naked_asm!(
-        // Save caller-save regs.  Push RAX first so offsets match the dispatch stub.
-        "push rax",
-        "push rcx",
-        "push rdx",
-        "push r8",
-        "push r9",
-        "push r10",
-        "push r11",
-        "sub rsp, 32",
-        // Win64 arg1 = RCX (the target to validate); arg2 = return address.
-        // After 7 pushes (56 bytes) + sub 32: saved RCX is at [rsp+72].
-        "mov rcx, [rsp + 72]",   // arg1 = target (original RCX)
-        "mov rdx, [rsp + 88]",   // arg2 = caller return address
-        "call {debug}",
-        "add rsp, 32",
-        "pop r11",
-        "pop r10",
-        "pop r9",
-        "pop r8",
-        "pop rdx",
-        "pop rcx",
-        "pop rax",
-        // Validate RCX (the target).  On BAD: RET with RCX preserved.
-        // On OK: also RET — caller will issue `call rcx` itself.
-        //
         // ── Guard 1: explicit null ─────────────────────────────────────────
         "test rcx, rcx",
         "jz 2f",
@@ -1567,7 +1533,6 @@ unsafe extern "win64" fn weave_cfg_check_stub() {
         // BAD path: also RET — RCX preserved (do NOT zero it).
         "2:",
         "ret",
-        debug = sym weave_cfg_do_debug,
         ts = sym CFG_PE_TEXT_START,
         te = sym CFG_PE_TEXT_END,
         ie = sym CFG_PE_IMAGE_END,
