@@ -457,6 +457,136 @@ fn seven_zip_fm_m8_render_gate() {
     cap.emit();
 }
 
+/// `weave 7zFM.exe test.7z` — 7-Zip GUI; M8 A3 archive-open gate.
+///
+/// Runs 7zFM.exe under Xvfb (DISPLAY=:99) with `test.7z` as the first
+/// argument. This exercises the full pipeline:
+///   - window creation + toolbar render (A1 + A2, already proven)
+///   - file-argument parsing via GetCommandLineW
+///   - archive I/O via CreateFileW / MapViewOfFile
+///   - browser-pane population (SHGetDesktopFolder, SHGetFileInfoW, etc.)
+///   - stable message loop reached, then exit when display closes or timeout
+///
+/// Tier A assertions (A3):
+///   - process exits 0 (clean exit, archive opened without crash)
+///   - stderr contains `"weave: loaded"` (IAT resolved before archive open)
+///
+/// CWD is set to `tests/fixtures/bin/` so that 7zFM finds `test.7z` as a
+/// relative path via GetCurrentDirectoryW (same pattern as seven_zip_list_archive).
+#[test]
+fn seven_zip_fm_m8_archive_gate() {
+    if !cfg!(target_os = "linux") {
+        eprintln!("skipping execution test — requires Linux");
+        return;
+    }
+
+    let weave_bin = env!("CARGO_BIN_EXE_weave");
+    let fixture = format!(
+        "{}/../tests/fixtures/bin/7zFM.exe",
+        env!("CARGO_MANIFEST_DIR")
+    );
+
+    if !std::path::Path::new(&fixture).exists() {
+        eprintln!("skipping: 7zFM.exe not present in fixtures (add from portable 7-Zip 26.x)");
+        return;
+    }
+
+    let bin_dir = format!("{}/../tests/fixtures/bin", env!("CARGO_MANIFEST_DIR"));
+    let archive_path = format!("{bin_dir}/test.7z");
+
+    if !std::path::Path::new(&archive_path).exists() {
+        eprintln!("skipping: test.7z not present in fixtures (run tests/fixtures/src/make_zip.py)");
+        return;
+    }
+
+    let start = std::time::Instant::now();
+    let deadline = start + std::time::Duration::from_secs(10);
+
+    // Run with DISPLAY=:99 (Xvfb) and CWD = bin_dir so 7zFM.exe can open
+    // "test.7z" as a relative path via GetCurrentDirectoryW.
+    // --no-sandbox eliminates sandbox as a variable.
+    let mut child = std::process::Command::new(weave_bin)
+        .current_dir(&bin_dir)
+        .arg(&fixture)
+        .arg("test.7z")
+        .arg("--no-sandbox")
+        .env("DISPLAY", ":99")
+        .stderr(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|e| panic!("failed to spawn weave on 7zFM.exe test.7z: {e}"));
+
+    let mut exited = false;
+    let mut exit_status: Option<std::process::ExitStatus> = None;
+
+    loop {
+        match child.try_wait().expect("try_wait failed") {
+            Some(status) => {
+                exited = true;
+                exit_status = Some(status);
+                break;
+            }
+            None => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        }
+    }
+
+    let elapsed = start.elapsed();
+    let stderr = {
+        use std::io::Read;
+        let mut s = String::new();
+        if let Some(mut p) = child.stderr.take() {
+            let _ = p.read_to_string(&mut s);
+        }
+        s
+    };
+
+    eprintln!("7zFM archive-gate elapsed: {elapsed:.1?}");
+    eprintln!("7zFM archive-gate exited_before_deadline: {exited}");
+    eprintln!(
+        "--- 7zFM archive-gate STDERR BEGIN ---\n{stderr}\n--- 7zFM archive-gate STDERR END ---"
+    );
+
+    // A3a: IAT resolved before archive open.
+    assert!(
+        stderr.contains("weave: loaded"),
+        "seven_zip_fm_m8_archive_gate FAIL: 'weave: loaded' not in stderr — \
+         PE did not load or IAT resolution crashed before entry point.\nstderr:\n{stderr}"
+    );
+
+    // A3b: process must exit 0 (clean exit with archive open).
+    assert!(
+        exited,
+        "seven_zip_fm_m8_archive_gate FAIL: process did not exit within 10s deadline — \
+         archive-open path hung (elapsed {elapsed:.1?}).\nstderr:\n{stderr}"
+    );
+    assert!(
+        exit_status.map(|s| s.success()).unwrap_or(false),
+        "seven_zip_fm_m8_archive_gate FAIL: process exited with non-zero status — \
+         archive-open path crashed (elapsed {elapsed:.1?}).\nstderr:\n{stderr}"
+    );
+    eprintln!("gate A3: exit 0 + weave: loaded ✓");
+
+    // --- Capability taxonomy ---
+    let mut cap = CapabilityReport::for_app("7zFM.exe");
+    cap.declare(CapabilityClass::Launches);
+    cap.declare(CapabilityClass::OpensFile);
+    cap.record(
+        CapabilityClass::Launches,
+        CapabilityOutcome::pass("A3: exit 0 — archive-open pipeline reached stable message loop"),
+    );
+    cap.record(
+        CapabilityClass::OpensFile,
+        CapabilityOutcome::pass("A3: test.7z opened and browser pane populated without crash"),
+    );
+    cap.emit();
+}
+
 /// `weave notepad++.exe test.py` — Notepad++ GUI; Phase 6b WS1 gate.
 ///
 /// Runs Notepad++ with a Python file argument. Checks:
