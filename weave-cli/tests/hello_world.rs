@@ -1624,9 +1624,7 @@ fn nxengine_gate1_smoke() {
     cap.declare(CapabilityClass::Audio);
     cap.record(
         CapabilityClass::Launches,
-        CapabilityOutcome::pass(
-            "A1+A2+A3: PE loaded, CreateWindow seen, non-black pixels at 5s",
-        ),
+        CapabilityOutcome::pass("A1+A2+A3: PE loaded, CreateWindow seen, non-black pixels at 5s"),
     );
     cap.record(
         CapabilityClass::Audio,
