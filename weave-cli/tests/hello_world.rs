@@ -243,6 +243,115 @@ fn seven_zip_fm_crt_init_completes() {
     );
 }
 
+/// `weave 7zFM.exe` — 7-Zip GUI; M8 A1 window-creation gate.
+///
+/// Asserts that 7zFM.exe reaches `CreateWindowExW` and receives a non-zero HWND,
+/// proving that window class registration and the HWND table wiring are correct.
+///
+/// Tier A assertions:
+/// - `stderr` contains `"weave/user32: CreateWindow class="` (CreateWindowExW was called)
+/// - at least one `"weave/user32: WM_CREATE class=... hwnd=0x<N>"` line has a non-zero HWND
+///
+/// Capability taxonomy: Launches + (window created, mapped to RendersWindow when variant added)
+#[test]
+fn seven_zip_fm_m8_window_gate() {
+    if !cfg!(target_os = "linux") {
+        eprintln!("skipping execution test — requires Linux");
+        return;
+    }
+
+    let weave_bin = env!("CARGO_BIN_EXE_weave");
+    let fixture = format!(
+        "{}/../tests/fixtures/bin/7zFM.exe",
+        env!("CARGO_MANIFEST_DIR")
+    );
+
+    if !std::path::Path::new(&fixture).exists() {
+        eprintln!("skipping: 7zFM.exe not present in fixtures (add from portable 7-Zip 26.x)");
+        return;
+    }
+
+    // 7zFM.exe may hang in the message loop in headless Docker; cap at 15 s.
+    let mut child = std::process::Command::new(weave_bin)
+        .arg(&fixture)
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|e| panic!("failed to spawn weave on 7zFM.exe: {e}"));
+
+    // Drain stderr concurrently to avoid blocking the child on the pipe buffer.
+    let stderr_pipe = child.stderr.take().expect("stderr was piped");
+    let stderr_shared = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let stderr_writer = std::sync::Arc::clone(&stderr_shared);
+    let drain_thread = std::thread::spawn(move || {
+        use std::io::Read;
+        let mut buf = Vec::new();
+        let mut pipe = stderr_pipe;
+        let _ = pipe.read_to_end(&mut buf);
+        *stderr_writer.lock().unwrap() = buf;
+    });
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err(e) => panic!("wait failed: {e}"),
+        }
+    }
+
+    drain_thread.join().expect("stderr drain thread panicked");
+    let stderr_bytes = stderr_shared.lock().unwrap().clone();
+    let stderr = String::from_utf8_lossy(&stderr_bytes);
+    eprintln!("7zFM m8-window-gate stderr:\n{stderr}");
+
+    // Gate A1a: CreateWindowExW must have been called.
+    assert!(
+        stderr.contains("weave/user32: CreateWindow class="),
+        "seven_zip_fm_m8_window_gate FAIL: CreateWindowExW was never called — \
+         7zFM.exe exited before reaching window creation.\nstderr: {stderr}"
+    );
+
+    // Gate A1b: at least one window must have received a non-zero HWND.
+    // Log format: "weave/user32: WM_CREATE class=<class> hwnd=0x<N> → <ret>"
+    let nonzero_hwnd = stderr.lines().any(|line| {
+        if !line.contains("weave/user32: WM_CREATE") {
+            return false;
+        }
+        // Extract "hwnd=0x<hex>" from the line.
+        if let Some(hwnd_start) = line.find("hwnd=0x") {
+            let rest = &line[hwnd_start + "hwnd=0x".len()..];
+            let hex_end = rest
+                .find(|c: char| !c.is_ascii_hexdigit())
+                .unwrap_or(rest.len());
+            let hex_str = &rest[..hex_end];
+            if let Ok(hwnd_val) = u64::from_str_radix(hex_str, 16) {
+                return hwnd_val != 0;
+            }
+        }
+        false
+    });
+    assert!(
+        nonzero_hwnd,
+        "seven_zip_fm_m8_window_gate FAIL: all WM_CREATE lines have hwnd=0x0 — \
+         CreateWindowExW returned NULL for every window.\nstderr: {stderr}"
+    );
+
+    // --- Capability taxonomy ---
+    let mut cap = CapabilityReport::for_app("7zFM.exe");
+    cap.declare(CapabilityClass::Launches);
+    cap.record(
+        CapabilityClass::Launches,
+        CapabilityOutcome::pass("7zFM.exe reached CreateWindowExW and obtained a non-zero HWND"),
+    );
+    cap.emit();
+}
+
 /// `weave notepad++.exe test.py` — Notepad++ GUI; Phase 6b WS1 gate.
 ///
 /// Runs Notepad++ with a Python file argument. Checks:
