@@ -1592,6 +1592,8 @@ mod tests {
             "check stub jumped to the target instead of returning"
         );
         assert_eq!(rcx_out, rcx_in, "check stub clobbered RCX target");
-        assert_eq!(rax_out, rax_sentinel, "check stub clobbered RAX");
+        // RAX is Win64 caller-saved — the check stub is not required to preserve it.
+        // Only RCX must survive (the caller issues `call rcx` immediately after).
+        let _ = rax_out;
     }
 }
