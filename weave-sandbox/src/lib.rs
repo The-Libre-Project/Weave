@@ -29,6 +29,8 @@ use landlock::{
     RulesetCreatedAttr, RulesetStatus, ABI,
 };
 
+use std::sync::atomic::{AtomicU8, Ordering};
+
 /// Result of attempting to apply the sandbox.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SandboxStatus {
@@ -42,6 +44,79 @@ pub enum SandboxStatus {
     Disabled,
 }
 
+// ──────────────────────────────────────────────────────────────────────────
+// Runtime invariant: is the sandbox active right now?
+//
+// "Active" is defined per-OS:
+//   - Linux: Landlock returned `FullyEnforced` or `PartiallyEnforced`. After
+//     `restrict_self()` succeeds at either level, path-based filesystem access
+//     is restricted to the allowlisted paths for the lifetime of the process.
+//     The restriction is irreversible.
+//   - Non-Linux (macOS/Windows dev hosts): no OS sandbox primitive is wired
+//     up. `is_sandbox_active()` always returns false. Launching a Win32 guest
+//     on these hosts therefore always panics through `assert_sandboxed!()` —
+//     this is intentional. Guest execution on a dev machine without an
+//     OS-level containment boundary is forbidden.
+//
+// The state is a single process-global `AtomicU8` set exactly once by
+// `apply()`. There is no API to clear it: once active, always active for the
+// lifetime of the process (matching Landlock's irreversibility).
+// ──────────────────────────────────────────────────────────────────────────
+
+const SANDBOX_UNSET: u8 = 0;
+const SANDBOX_ACTIVE: u8 = 1;
+const SANDBOX_NOT_ACTIVE: u8 = 2;
+
+static SANDBOX_STATE: AtomicU8 = AtomicU8::new(SANDBOX_UNSET);
+
+/// Returns `true` iff the sandbox is currently active in this process.
+///
+/// "Active" means `apply()` has been called and returned `Active` or
+/// `Partial` (Linux Landlock fully or partially enforced). Any other state —
+/// including "apply() not yet called" — returns `false`.
+///
+/// This is the single canonical check. Do not invent parallel state.
+pub fn is_sandbox_active() -> bool {
+    SANDBOX_STATE.load(Ordering::SeqCst) == SANDBOX_ACTIVE
+}
+
+/// Internal: record the outcome of `apply()` into the global state.
+fn record_status(status: SandboxStatus) {
+    let value = match status {
+        SandboxStatus::Active | SandboxStatus::Partial => SANDBOX_ACTIVE,
+        SandboxStatus::Unavailable | SandboxStatus::Disabled => SANDBOX_NOT_ACTIVE,
+    };
+    SANDBOX_STATE.store(value, Ordering::SeqCst);
+}
+
+/// Panic if the sandbox is not currently active.
+///
+/// Call this at every binary entry point, immediately before transferring
+/// control to guest Win32 code. The macro takes one argument: a static
+/// string naming the entry point (e.g. `"weave-cli"`). The panic message is
+/// stable and machine-greppable: it always begins with
+/// `weave: SANDBOX INVARIANT VIOLATION`.
+///
+/// Unsandboxed Win32 execution is forbidden by the security model
+/// documented in `docs/SECURITY_AUDIT.md`. The OS-level containment
+/// boundary IS the security boundary; without it the in-process execution
+/// model has no containment at all.
+#[macro_export]
+macro_rules! assert_sandboxed {
+    ($entry_point:expr) => {{
+        if !$crate::is_sandbox_active() {
+            panic!(
+                "weave: SANDBOX INVARIANT VIOLATION at entry point `{}`: \
+                 sandbox is not active. Unsandboxed Win32 guest execution is \
+                 forbidden. See docs/SECURITY_AUDIT.md. \
+                 (If you set WEAVE_DISABLE_SANDBOX=1 or passed --no-sandbox, \
+                 that is precisely what this assert is here to block.)",
+                $entry_point
+            );
+        }
+    }};
+}
+
 /// Apply the Landlock filesystem sandbox to the current process.
 ///
 /// Call this after IAT patching but before jumping to the PE entry point.
@@ -53,8 +128,20 @@ pub enum SandboxStatus {
 ///
 /// If `enabled` is false the sandbox is skipped entirely (for `--no-sandbox`).
 pub fn apply(enabled: bool, allowed_read_paths: &[&std::path::Path]) -> SandboxStatus {
-    if !enabled {
-        eprintln!("weave: sandbox disabled (--no-sandbox)");
+    // Honor an environment-variable kill switch so CI can verify the
+    // assert-sandboxed invariant fires when sandboxing is bypassed. This is
+    // intentionally identical in effect to passing `--no-sandbox`.
+    let env_disabled = std::env::var_os("WEAVE_DISABLE_SANDBOX")
+        .map(|v| !v.is_empty() && v != "0")
+        .unwrap_or(false);
+
+    if !enabled || env_disabled {
+        if env_disabled {
+            eprintln!("weave: sandbox disabled (WEAVE_DISABLE_SANDBOX=1)");
+        } else {
+            eprintln!("weave: sandbox disabled (--no-sandbox)");
+        }
+        record_status(SandboxStatus::Disabled);
         return SandboxStatus::Disabled;
     }
 
@@ -62,11 +149,16 @@ pub fn apply(enabled: bool, allowed_read_paths: &[&std::path::Path]) -> SandboxS
     {
         let _ = allowed_read_paths;
         // Landlock is Linux-only. On macOS (dev machine) skip silently.
+        record_status(SandboxStatus::Unavailable);
         return SandboxStatus::Unavailable;
     }
 
     #[cfg(target_os = "linux")]
-    apply_landlock(allowed_read_paths)
+    {
+        let status = apply_landlock(allowed_read_paths);
+        record_status(status);
+        status
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -179,6 +271,56 @@ mod tests {
         // On macOS (the dev machine), Landlock is not available.
         // apply(true, _) must return Unavailable without panicking.
         assert_eq!(apply(true, &[]), SandboxStatus::Unavailable);
+    }
+
+    use std::sync::Mutex;
+
+    /// Shared mutex guarding `SANDBOX_STATE` mutations across the test
+    /// cases below. Cargo runs unit tests in parallel within one process;
+    /// without serialization, two state-mutating tests can race and
+    /// produce flaky panics.
+    static STATE_MUTEX: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn test_assert_sandboxed_panics_when_inactive() {
+        let _g = STATE_MUTEX.lock().unwrap();
+        SANDBOX_STATE.store(SANDBOX_NOT_ACTIVE, Ordering::SeqCst);
+        assert!(!is_sandbox_active());
+        let result = std::panic::catch_unwind(|| {
+            assert_sandboxed!("test-entry-point");
+        });
+        let err = result.expect_err("assert_sandboxed! must panic when sandbox is inactive");
+        let msg = err
+            .downcast_ref::<String>()
+            .map(|s| s.as_str())
+            .or_else(|| err.downcast_ref::<&'static str>().copied())
+            .unwrap_or("");
+        assert!(
+            msg.contains("SANDBOX INVARIANT VIOLATION"),
+            "panic message must contain the invariant marker, got: {msg}"
+        );
+        assert!(
+            msg.contains("test-entry-point"),
+            "panic message must name the entry point, got: {msg}"
+        );
+        SANDBOX_STATE.store(SANDBOX_UNSET, Ordering::SeqCst);
+    }
+
+    #[test]
+    fn test_assert_sandboxed_passes_when_active() {
+        let _g = STATE_MUTEX.lock().unwrap();
+        SANDBOX_STATE.store(SANDBOX_ACTIVE, Ordering::SeqCst);
+        assert!(is_sandbox_active());
+        // Must not panic.
+        assert_sandboxed!("test-entry-point");
+        SANDBOX_STATE.store(SANDBOX_UNSET, Ordering::SeqCst);
+    }
+
+    #[test]
+    fn test_is_sandbox_active_unset_returns_false() {
+        let _g = STATE_MUTEX.lock().unwrap();
+        SANDBOX_STATE.store(SANDBOX_UNSET, Ordering::SeqCst);
+        assert!(!is_sandbox_active());
     }
 
     #[test]

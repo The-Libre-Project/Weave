@@ -537,6 +537,16 @@ fn main() {
 
     weave_sandbox::apply(!args.no_sandbox, &allowed);
 
+    // ── 4.5. Sandbox runtime invariant — release blocker ─────────────────
+    // After `apply()` runs, the sandbox state is committed. This assert is
+    // the single point at which "the sandbox is active" stops being a design
+    // claim and becomes a verified runtime invariant. If anything above this
+    // line went wrong — `--no-sandbox`, `WEAVE_DISABLE_SANDBOX=1`, an old
+    // kernel without Landlock, an unsupported host OS — we panic here, before
+    // a single byte of guest Win32 code can run. The CI gate
+    // `sandbox_invariant_blocks_unsandboxed_launch` verifies this fires.
+    weave_sandbox::assert_sandboxed!("weave-cli");
+
     // ── 5. Initialise TEB / PEB / TLS ────────────────────────────────────
     let _teb = teb::setup(&image).unwrap_or_else(|e| {
         eprintln!("weave: TEB setup failed: {e}");
