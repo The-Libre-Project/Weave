@@ -214,6 +214,39 @@ fn apply_landlock(allowed_read_paths: &[&std::path::Path]) -> SandboxStatus {
         }
     };
 
+    // DNS resolution requires read access to a small set of system files:
+    //   /etc/hosts       — static hostname→IP mappings
+    //   /etc/resolv.conf — nameserver configuration
+    //   /etc/nsswitch.conf — name service switch order (glibc getaddrinfo)
+    // Add read-only rules for each file that exists on this host.
+    // Non-existent files are silently skipped (minimal-permission principle).
+    let ro_access = AccessFs::ReadFile | AccessFs::ReadDir;
+    let dns_files: &[&str] = &[
+        "/etc/hosts",
+        "/etc/resolv.conf",
+        "/etc/nsswitch.conf",
+    ];
+    let ruleset = dns_files.iter().try_fold(
+        ruleset,
+        |r, path| -> Result<_, Box<dyn std::error::Error>> {
+            let p = std::path::Path::new(path);
+            if p.exists() {
+                let fd = PathFd::new(p)?;
+                Ok(r.add_rule(PathBeneath::new(fd, ro_access))?)
+            } else {
+                Ok(r)
+            }
+        },
+    );
+
+    let ruleset = match ruleset {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("weave: sandbox unavailable ({e}); running without filesystem isolation");
+            return SandboxStatus::Unavailable;
+        }
+    };
+
     let result = ruleset.restrict_self();
 
     match result {

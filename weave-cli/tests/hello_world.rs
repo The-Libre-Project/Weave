@@ -2907,7 +2907,7 @@ fn wget_ws2_gate() {
     eprintln!("wget_ws2_gate: all gates passed — wget.exe HTTP GET to example.com succeeded");
 }
 
-/// `weave --no-sandbox ws2_probe.exe` — Task 01 active gate (post second pivot).
+/// `weave ws2_probe.exe` — Task 01 active gate (post second pivot).
 ///
 /// Custom-built minimal TCP client (`tests/fixtures/src/ws2_probe.c`) that does
 /// WSAStartup → getaddrinfo("example.com",80) → socket → connect → send(GET) →
@@ -2923,7 +2923,7 @@ fn wget_ws2_gate() {
 ///   2. ws2_probe.exe exits 0
 ///   3. stdout contains "Example Domain"
 ///
-/// `--no-sandbox` required for DNS (/etc/hosts). Skipped on non-Linux.
+/// DNS resolution is permitted by the sandbox (TASK-META-09). Skipped on non-Linux.
 #[test]
 fn ws2_probe_ws2_gate() {
     if !cfg!(target_os = "linux") {
@@ -3061,7 +3061,7 @@ fn ws2_probe_ws2_gate() {
 ///   2. wget_probe.exe exits 0
 ///   3. stdout contains "Example Domain"
 ///
-/// `--no-sandbox` required for DNS (/etc/hosts). Skipped on non-Linux.
+/// DNS resolution is permitted by the sandbox (TASK-META-09). Skipped on non-Linux.
 #[test]
 fn wget_probe_ws2_gate() {
     if !cfg!(target_os = "linux") {
