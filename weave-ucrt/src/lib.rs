@@ -1986,6 +1986,21 @@ pub unsafe extern "win64" fn ucrt_wfopen(path: *const u16, mode: *const u16) -> 
     result as *mut c_void
 }
 
+/// _wfsopen — open a shared file by wide path (sharing flags ignored on Linux).
+///
+/// Wine ref: dlls/msvcrt/file.c — _wfsopen(path, mode, shflag) is _wfopen with
+/// sharing flags; shflag has no Linux equivalent and is discarded.
+///
+/// # Safety
+/// `path` and `mode` must be valid null-terminated UTF-16 strings.
+pub unsafe extern "win64" fn ucrt_wfsopen(
+    path: *const u16,
+    mode: *const u16,
+    _sh_flag: i32,
+) -> *mut c_void {
+    unsafe { ucrt_wfopen(path, mode) }
+}
+
 /// fread — read `count` items of `size` bytes from a libc-backed FILE stream.
 ///
 /// # Safety
@@ -4096,6 +4111,7 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "_fstat64" => stub!(ucrt_fstat64 as extern "win64" fn(_, _) -> _),
         "fopen" => stub!(ucrt_fopen as unsafe extern "win64" fn(_, _) -> _),
         "_wfopen" => stub!(ucrt_wfopen as unsafe extern "win64" fn(_, _) -> _),
+        "_wfsopen" => stub!(ucrt_wfsopen as unsafe extern "win64" fn(_, _, _) -> _),
         "fread" => stub!(ucrt_fread as unsafe extern "win64" fn(_, _, _, _) -> _),
         "fclose" => stub!(ucrt_fclose as unsafe extern "win64" fn(_) -> _),
         "feof" => stub!(ucrt_feof as unsafe extern "win64" fn(_) -> _),
