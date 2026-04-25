@@ -1499,6 +1499,8 @@ fn nxengine_gate1_smoke() {
         .args(["--no-sandbox", &exe])
         .env("DISPLAY", ":99")
         .env("SDL_AUDIODRIVER", "dummy")
+        .env("SDL_RENDER_DRIVER", "software")
+        .env("SDL_FRAMEBUFFER_ACCELERATION", "0")
         .stderr(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .spawn()
