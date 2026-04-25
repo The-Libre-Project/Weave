@@ -221,11 +221,7 @@ fn apply_landlock(allowed_read_paths: &[&std::path::Path]) -> SandboxStatus {
     // Add read-only rules for each file that exists on this host.
     // Non-existent files are silently skipped (minimal-permission principle).
     let ro_access = AccessFs::ReadFile | AccessFs::ReadDir;
-    let dns_files: &[&str] = &[
-        "/etc/hosts",
-        "/etc/resolv.conf",
-        "/etc/nsswitch.conf",
-    ];
+    let dns_files: &[&str] = &["/etc/hosts", "/etc/resolv.conf", "/etc/nsswitch.conf"];
     let ruleset = dns_files.iter().try_fold(
         ruleset,
         |r, path| -> Result<_, Box<dyn std::error::Error>> {
