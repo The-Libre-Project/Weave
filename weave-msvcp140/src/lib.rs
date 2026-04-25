@@ -119,8 +119,25 @@ pub unsafe extern "win64" fn cnd_destroy_in_situ(
 
 // ── Real _Thrd_* and _Xtime_get_ticks implementations ────────────────────────
 
+/// Heap-allocated context passed to pthread; carries the Win64 thread function + arg.
+struct ThrdCtx {
+    func: unsafe extern "win64" fn(*mut libc::c_void) -> i32,
+    arg: *mut libc::c_void,
+}
+
+/// pthread start routine (System V ABI — arg in RDI).
+/// Recovers ThrdCtx from the raw pointer, then calls the Win64 PE function with
+/// arg in RCX (Rust's `extern "win64"` emits the correct call sequence).
+extern "C" fn thrd_start(arg: *mut libc::c_void) -> *mut libc::c_void {
+    unsafe {
+        let ctx = Box::from_raw(arg as *mut ThrdCtx);
+        let result = (ctx.func)(ctx.arg);
+        result as usize as *mut libc::c_void
+    }
+}
+
 /// _Thrd_id — return current thread ID.
-/// Wine ref: dlls/msvcp140/msvcp140.c — _Thrd_id: returns GetCurrentThreadId(); maps to gettid() on Linux.
+/// Wine ref: dlls/msvcp90/misc.c — _Thrd_id: returns GetCurrentThreadId(); maps to gettid() on Linux.
 pub extern "win64" fn msvcp_thrd_id() -> u32 {
     #[cfg(target_os = "linux")]
     unsafe {
@@ -130,14 +147,71 @@ pub extern "win64" fn msvcp_thrd_id() -> u32 {
     1
 }
 
-/// _Thrd_join — join a thread by its OS handle.
-/// Wine ref: dlls/msvcp140/msvcp140.c — _Thrd_join: WaitForSingleObject + CloseHandle;
-///   stub-safe since _Thrd_create is no-op returning 0 (handle == 0 → nothing to join).
-pub unsafe extern "win64" fn msvcp_thrd_join(_thr: usize, code: *mut i32) -> i32 {
-    if !code.is_null() {
-        *code = 0;
+/// _Thrd_create — create a native thread running proc(arg).
+/// Wine ref: dlls/msvcp90/misc.c — _Thrd_create: wraps proc in thread_proc_wrapper, calls
+///   _beginthreadex; thr->hnd=HANDLE, thr->id=thread_id; _THRD_ERROR=4.
+/// _Thrd_t layout (Win64 x64): {void* hnd @ 0 (8 bytes), unsigned id @ 8 (4 bytes), pad 4}.
+/// In Weave: pthread_create with Win64→SysV ABI trampoline; pthread_t stored at thr→hnd.
+pub unsafe extern "win64" fn msvcp_thrd_create(
+    thr: *mut libc::c_void,
+    func: unsafe extern "win64" fn(*mut libc::c_void) -> i32,
+    arg: *mut libc::c_void,
+) -> i32 {
+    #[cfg(target_os = "linux")]
+    {
+        let ctx = Box::new(ThrdCtx { func, arg });
+        let ctx_ptr = Box::into_raw(ctx) as *mut libc::c_void;
+        let mut pthread: libc::pthread_t = 0;
+        let ret = libc::pthread_create(&mut pthread, std::ptr::null(), thrd_start, ctx_ptr);
+        if ret == 0 {
+            *(thr as *mut libc::pthread_t) = pthread;
+            *((thr as *mut u8).add(8) as *mut u32) = 0;
+            0
+        } else {
+            drop(Box::from_raw(ctx_ptr as *mut ThrdCtx));
+            4 // _THRD_ERROR
+        }
     }
-    0 // _Thrd_success
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (thr, func, arg);
+        4
+    }
+}
+
+/// _Thrd_join — join a thread by its pthread handle stored in _Thrd_t.hnd.
+/// Wine ref: dlls/msvcp90/misc.c — _Thrd_join: WaitForSingleObject(thr.hnd, INFINITE) +
+///   GetExitCodeThread + CloseHandle; returns 0=success, _THRD_ERROR=4.
+/// thr_ptr is an implicit pointer to _Thrd_t (Win64 passes 16-byte struct by hidden pointer).
+pub unsafe extern "win64" fn msvcp_thrd_join(thr_ptr: usize, code: *mut i32) -> i32 {
+    #[cfg(target_os = "linux")]
+    {
+        let pthread = *(thr_ptr as *const libc::pthread_t);
+        if pthread == 0 {
+            if !code.is_null() {
+                *code = 0;
+            }
+            return 0;
+        }
+        let mut retval: *mut libc::c_void = std::ptr::null_mut();
+        let ret = libc::pthread_join(pthread, &mut retval);
+        if ret == 0 {
+            if !code.is_null() {
+                *code = retval as usize as i32;
+            }
+            0
+        } else {
+            4 // _THRD_ERROR
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = thr_ptr;
+        if !code.is_null() {
+            *code = 0;
+        }
+        0
+    }
 }
 
 /// _Xtime_get_ticks — return 100-ns ticks since 1601-01-01 (FILETIME epoch).
@@ -296,6 +370,7 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         => msvcp_noop as *const () as usize,
 
         "_Thrd_id" => msvcp_thrd_id as *const () as usize,
+        "_Thrd_create" => msvcp_thrd_create as *const () as usize,
         "_Thrd_join" => msvcp_thrd_join as *const () as usize,
         "_Xtime_get_ticks" => msvcp_xtime_get_ticks as *const () as usize,
 
