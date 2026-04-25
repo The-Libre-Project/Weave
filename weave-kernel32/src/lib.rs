@@ -7627,7 +7627,9 @@ pub unsafe extern "win64" fn wait_for_single_object(h_handle: usize, dw_millisec
                     let rc = unsafe { libc::sem_wait(sem_ptr) };
                     if rc == 0 {
                         if weave_core::ws2_trace::enabled() {
-                            eprintln!("weave/WFSO: handle={h_handle:#x} → WAIT_OBJECT_0 (sem wait)");
+                            eprintln!(
+                                "weave/WFSO: handle={h_handle:#x} → WAIT_OBJECT_0 (sem wait)"
+                            );
                         }
                         return WAIT_OBJECT_0;
                     }

@@ -3222,10 +3222,7 @@ pub extern "win64" fn set_process_dpi_awareness(_value: u32) -> i32 {
 // to scale mouse coordinates. We report PROCESS_SYSTEM_DPI_AWARE (1).
 /// # Safety
 /// value must be a valid pointer to u32, or null.
-pub unsafe extern "win64" fn get_process_dpi_awareness(
-    _h_process: usize,
-    value: *mut u32,
-) -> i32 {
+pub unsafe extern "win64" fn get_process_dpi_awareness(_h_process: usize, value: *mut u32) -> i32 {
     if !value.is_null() {
         unsafe { *value = 1 }; // PROCESS_SYSTEM_DPI_AWARE
     }

@@ -32,8 +32,8 @@
 //! at the moment the signal was delivered. Only printed for the profile
 //! target; other threads show `prof=-`.
 
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
+use std::sync::OnceLock;
 
 static STALL_TRACE_ENABLED: OnceLock<bool> = OnceLock::new();
 static TARGET_TID: AtomicI32 = AtomicI32::new(0);
