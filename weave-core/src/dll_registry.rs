@@ -64,3 +64,15 @@ pub fn lookup(dll: &str, func: &str) -> Option<usize> {
     let reg = lock_registry(registry())?;
     reg.get(&dll.to_lowercase())?.exports.get(func).copied()
 }
+
+/// Check whether a DLL is currently registered (regardless of which exports it has).
+///
+/// Used by the LoadLibrary transitive-load path to avoid re-mapping a DLL that's
+/// already been loaded into the process address space.
+pub fn is_registered(dll: &str) -> bool {
+    if let Some(reg) = lock_registry(registry()) {
+        reg.contains_key(&dll.to_lowercase())
+    } else {
+        false
+    }
+}

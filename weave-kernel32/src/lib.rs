@@ -5036,6 +5036,28 @@ fn load_library_impl(name: &str) -> usize {
             Ok((image, exports)) => {
                 let image_base = image.base as usize;
                 let dll_entry = image.entry_point;
+                // Transitive pre-load: a dynamically-loaded PE (e.g. libpng16-16.dll
+                // pulled in by SDL2_image's IMG_Init) may import other native PE DLLs
+                // (e.g. zlib1.dll) that live in the same directory but were not in
+                // the main exe's import table. Walk this DLL's imports and load any
+                // that aren't yet registered. Done before IAT patching so the
+                // patcher resolves zlib1.dll!crc32 to the real PE export.
+                if let Ok(parsed) = weave_core::pe::parse(&bytes) {
+                    let parent_dir = path.parent().map(|p| p.to_path_buf());
+                    for imp in &parsed.imports {
+                        let dep_key = imp.dll.to_lowercase();
+                        if dep_key == key || dll_registry::is_registered(&dep_key) {
+                            continue;
+                        }
+                        if let Some(dir) = parent_dir.as_deref() {
+                            let dep_path = dir.join(&imp.dll);
+                            let dep_path_lc = dir.join(&dep_key);
+                            if dep_path.exists() || dep_path_lc.exists() {
+                                let _ = load_library_impl(&imp.dll);
+                            }
+                        }
+                    }
+                }
                 // Patch the loaded DLL's own IAT using the global resolver.
                 // SAFETY: `bytes` is the raw PE image just parsed by `load_dll`;
                 // `image.base` is the virtual address at which it was mapped into this
