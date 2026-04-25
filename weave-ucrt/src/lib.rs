@@ -1530,6 +1530,51 @@ pub unsafe extern "win64" fn ucrt_intrinsic_setjmpex(
     0
 }
 
+/// `_setjmp` — full register save into MSVC _JUMP_BUFFER (msvcrt.dll variant).
+///
+/// Wine ref: dlls/msvcrt/except.c — MSVCRT__setjmp does the full register save
+/// inline (the C-library variant, not the compiler intrinsic). libpng on MSVC
+/// uses this for its error-recovery path; without it the IAT slot returns 0
+/// without saving anything, so a later png_error→longjmp restores zeroed state
+/// (RIP=0, RSP=0) and crashes.
+///
+/// Win64 entry: RCX = jmp_buf ptr. Returns 0 (in RAX) on first call.
+/// Layout matches `ucrt_longjmp` exactly — see that function's docs for offsets.
+#[cfg(target_arch = "x86_64")]
+#[unsafe(naked)]
+pub unsafe extern "win64" fn ucrt_setjmp(_buf: *mut c_void) -> i32 {
+    core::arch::naked_asm!(
+        // RCX = buf. Save all callee-preserved state for longjmp to restore.
+        "mov   qword ptr [rcx + 0x00], 0", // Frame = 0 (skip RtlUnwind)
+        "mov   qword ptr [rcx + 0x08], rbx", // Rbx
+        "lea   rax, [rsp + 8]",            // Caller's RSP (post-call return addr)
+        "mov   qword ptr [rcx + 0x10], rax", // Rsp
+        "mov   qword ptr [rcx + 0x18], rbp", // Rbp
+        "mov   qword ptr [rcx + 0x20], rsi", // Rsi
+        "mov   qword ptr [rcx + 0x28], rdi", // Rdi
+        "mov   qword ptr [rcx + 0x30], r12", // R12
+        "mov   qword ptr [rcx + 0x38], r13", // R13
+        "mov   qword ptr [rcx + 0x40], r14", // R14
+        "mov   qword ptr [rcx + 0x48], r15", // R15
+        "mov   rax, qword ptr [rsp]",      // Caller's RIP (return addr on stack)
+        "mov   qword ptr [rcx + 0x50], rax", // Rip
+        "stmxcsr dword ptr [rcx + 0x58]",  // MxCsr
+        "fnstcw  word ptr [rcx + 0x5c]",   // FpCsr
+        "movdqu xmmword ptr [rcx + 0x60], xmm6",
+        "movdqu xmmword ptr [rcx + 0x70], xmm7",
+        "movdqu xmmword ptr [rcx + 0x80], xmm8",
+        "movdqu xmmword ptr [rcx + 0x90], xmm9",
+        "movdqu xmmword ptr [rcx + 0xa0], xmm10",
+        "movdqu xmmword ptr [rcx + 0xb0], xmm11",
+        "movdqu xmmword ptr [rcx + 0xc0], xmm12",
+        "movdqu xmmword ptr [rcx + 0xd0], xmm13",
+        "movdqu xmmword ptr [rcx + 0xe0], xmm14",
+        "movdqu xmmword ptr [rcx + 0xf0], xmm15",
+        "xor   eax, eax", // return 0 (first call)
+        "ret",
+    )
+}
+
 /// `longjmp` — restore CPU state saved by `setjmp` and return `val` to the caller.
 ///
 /// Wine ref: dlls/ntdll/signal_x86_64.c — longjmp_regs (direct-restore path, Frame==0):
@@ -4379,6 +4424,10 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
                 ucrt_intrinsic_setjmpex as unsafe extern "win64" fn(_, _) -> _ as *const ()
                     as usize,
             )
+        }
+        "_setjmp" => {
+            // msvcrt.dll's C-library setjmp — full register save in asm.
+            Some(ucrt_setjmp as unsafe extern "win64" fn(_) -> _ as *const () as usize)
         }
         _ => None,
     }
