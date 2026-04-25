@@ -1561,12 +1561,15 @@ fn nxengine_gate1_smoke() {
     );
     eprintln!("gate A2: CreateWindow seen ✓");
 
-    // A3 (soft — _Thrd_create still a no-op, SDL2 render thread not starting):
-    if matches!(pixel_result, Some(true)) {
-        eprintln!("gate A3: non-black pixels at 5s ✓");
-    } else {
-        eprintln!("gate A3 WARN: screen black at 5s — render loop not reached (pixel_result={pixel_result:?})");
-    }
+    // A3 (hard): non-black pixels at 5s — render loop reached and drawing.
+    // Unblocked by: _Thrd_create (bd498cf), msvcrt._setjmp (990263f), and
+    // transitive DLL load for zlib1.dll (666c8a5). SDL_RENDER_DRIVER=software
+    // bypasses D3D9/OpenGL probing.
+    assert!(
+        matches!(pixel_result, Some(true)),
+        "nxengine Gate A3 FAIL: screen black at 5s — render loop not reached (pixel_result={pixel_result:?}, elapsed {elapsed:.1?}).\nstderr:\n{stderr}"
+    );
+    eprintln!("gate A3: non-black pixels at 5s ✓");
 }
 
 /// `weave putty.exe -ssh localhost 22` — PuTTY SSH engine; M3 Gate 1.
