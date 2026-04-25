@@ -352,6 +352,111 @@ fn seven_zip_fm_m8_window_gate() {
     cap.emit();
 }
 
+/// `weave 7zFM.exe` — 7-Zip GUI; M8 A2 pixel-render gate.
+///
+/// Runs 7zFM.exe under Xvfb (DISPLAY=:99) and asserts that the Xvfb screen
+/// contains non-black pixels at the 3-second mark, proving that the Win32 GDI
+/// paint path reaches the X11 back-end and draws at least one window frame.
+///
+/// Tier A assertions:
+/// - `sample_display_pixels_99()` returns `Some(true)` at 3 s (A2: non-black
+///   pixels observed on Xvfb display :99)
+///
+/// Capability taxonomy: Launches (render path confirmed)
+#[test]
+fn seven_zip_fm_m8_render_gate() {
+    if !cfg!(target_os = "linux") {
+        eprintln!("skipping execution test — requires Linux");
+        return;
+    }
+
+    let weave_bin = env!("CARGO_BIN_EXE_weave");
+    let fixture = format!(
+        "{}/../tests/fixtures/bin/7zFM.exe",
+        env!("CARGO_MANIFEST_DIR")
+    );
+
+    if !std::path::Path::new(&fixture).exists() {
+        eprintln!("skipping: 7zFM.exe not present in fixtures (add from portable 7-Zip 26.x)");
+        return;
+    }
+
+    let bin_dir = format!("{}/../tests/fixtures/bin", env!("CARGO_MANIFEST_DIR"));
+    let start = std::time::Instant::now();
+
+    // Run with DISPLAY=:99 (Xvfb) so Win32 windows are drawn to the virtual
+    // framebuffer.  --no-sandbox eliminates sandbox as a variable on first run.
+    let mut child = std::process::Command::new(weave_bin)
+        .current_dir(&bin_dir)
+        .arg(&fixture)
+        .arg("--no-sandbox")
+        .env("DISPLAY", ":99")
+        .stderr(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|e| panic!("failed to spawn weave on 7zFM.exe: {e}"));
+
+    let pixel_check_at = start + std::time::Duration::from_secs(3);
+    let deadline = start + std::time::Duration::from_secs(15);
+    let mut pixel_result: Option<bool> = None;
+    let mut exited = false;
+
+    loop {
+        let now = std::time::Instant::now();
+        match child.try_wait().expect("try_wait failed") {
+            Some(_) => {
+                exited = true;
+                break;
+            }
+            None => {
+                if pixel_result.is_none() && now >= pixel_check_at {
+                    pixel_result = sample_display_pixels_99();
+                    println!("gate A2: 7zFM pixel_check → {:?}", pixel_result);
+                }
+                if now >= deadline {
+                    let _ = child.kill();
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        }
+    }
+
+    let elapsed = start.elapsed();
+    let stderr = {
+        use std::io::Read;
+        let mut s = String::new();
+        if let Some(mut p) = child.stderr.take() {
+            let _ = p.read_to_string(&mut s);
+        }
+        s
+    };
+
+    eprintln!("7zFM render-gate elapsed: {elapsed:.1?}");
+    eprintln!("7zFM render-gate exited_before_deadline: {exited}");
+    eprintln!(
+        "--- 7zFM render-gate STDERR BEGIN ---\n{stderr}\n--- 7zFM render-gate STDERR END ---"
+    );
+
+    // A2: non-black pixels at 3 s — render path confirmed.
+    assert!(
+        matches!(pixel_result, Some(true)),
+        "seven_zip_fm_m8_render_gate FAIL: screen black at 3s — \
+         Win32 paint path did not reach X11 back-end \
+         (pixel_result={pixel_result:?}, elapsed {elapsed:.1?}).\nstderr:\n{stderr}"
+    );
+    eprintln!("gate A2: non-black pixels at 3s ✓");
+
+    // --- Capability taxonomy ---
+    let mut cap = CapabilityReport::for_app("7zFM.exe");
+    cap.declare(CapabilityClass::Launches);
+    cap.record(
+        CapabilityClass::Launches,
+        CapabilityOutcome::pass("A2: non-black pixels at 3s — Win32 paint path reached X11"),
+    );
+    cap.emit();
+}
+
 /// `weave notepad++.exe test.py` — Notepad++ GUI; Phase 6b WS1 gate.
 ///
 /// Runs Notepad++ with a Python file argument. Checks:
