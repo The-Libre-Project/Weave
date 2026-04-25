@@ -1015,7 +1015,6 @@ fn testsprite2_sdl2_gate1_smoke() {
     let mut child = std::process::Command::new(weave_bin)
         .current_dir(&bin_dir)
         .arg(&exe)
-        .arg("--no-sandbox")
         .env("DISPLAY", ":99")
         .stderr(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -1210,7 +1209,6 @@ fn waveout_gate1_smoke() {
     let mut child = std::process::Command::new(weave_bin)
         .current_dir(&bin_dir)
         .arg(&exe)
-        .arg("--no-sandbox")
         .env("DISPLAY", ":99")
         .stderr(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -1355,7 +1353,6 @@ fn sdl2_audio_gate1_smoke() {
     let mut child = std::process::Command::new(weave_bin)
         .current_dir(&bin_dir)
         .arg(&exe)
-        .arg("--no-sandbox")
         .env("DISPLAY", ":99")
         .stderr(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -1496,7 +1493,7 @@ fn nxengine_gate1_smoke() {
     // SDL_VIDEODRIVER is NOT set — we need the real video driver to see CreateWindow.
     let mut child = std::process::Command::new(weave_bin)
         .current_dir(&game_dir)
-        .args(["--no-sandbox", &exe])
+        .args([&exe])
         .env("DISPLAY", ":99")
         .env("SDL_AUDIODRIVER", "dummy")
         .env("SDL_RENDER_DRIVER", "software")
@@ -1928,7 +1925,6 @@ fn putty_m3_plink_gate() {
 
     let start = std::time::Instant::now();
     let mut child = std::process::Command::new(weave_bin)
-        .arg("--no-sandbox")
         .arg(&fixture)
         .arg("-batch")
         .arg("-pw")
@@ -2591,7 +2587,6 @@ fn curl_ws2_gate() {
 
     let start = std::time::Instant::now();
     let mut child = std::process::Command::new(weave_bin)
-        .arg("--no-sandbox")
         .arg(&fixture)
         .arg("--no-progress-meter")
         .arg("http://example.com")
@@ -2746,7 +2741,6 @@ fn wget_ws2_gate() {
 
     let start = std::time::Instant::now();
     let mut child = std::process::Command::new(weave_bin)
-        .arg("--no-sandbox")
         .arg(&fixture)
         .arg("-q") // quiet: no progress bar on stderr
         .arg("-O")
@@ -2887,7 +2881,6 @@ fn ws2_probe_ws2_gate() {
 
     let start = std::time::Instant::now();
     let mut child = std::process::Command::new(weave_bin)
-        .arg("--no-sandbox")
         .arg(&fixture)
         .stderr(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -3026,7 +3019,6 @@ fn wget_probe_ws2_gate() {
 
     let start = std::time::Instant::now();
     let mut child = std::process::Command::new(weave_bin)
-        .arg("--no-sandbox")
         .arg(&fixture)
         .stderr(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -3163,7 +3155,6 @@ fn ddraw_basic_blt_gate() {
     let mut child = std::process::Command::new(weave_bin)
         .current_dir(&bin_dir)
         .arg(&exe)
-        .arg("--no-sandbox")
         .env("DISPLAY", ":99")
         .stderr(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
