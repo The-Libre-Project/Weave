@@ -594,10 +594,12 @@ cmd_thunk!(void vk_cmd_debug_marker_insert_ext, "vkCmdDebugMarkerInsertEXT", (co
 
 /// vkGetInstanceProcAddr — primary Vulkan function loader.
 ///
-/// Returns our wrapper for intercepted functions; delegates to the real Linux
-/// Vulkan loader for everything else.
+/// Returns our `extern "win64"` wrapper for every intercepted function.
+/// Returns NULL for any function not in the dispatch table — never returns a
+/// raw SysV host-library pointer, which would cause an ABI mismatch crash when
+/// DXVK (Win64 caller) invokes it.
 pub unsafe extern "win64" fn vk_get_instance_proc_addr(
-    instance: VkInstance,
+    _instance: VkInstance,
     p_name: *const c_char,
 ) -> PFN_vkVoidFunction {
     if p_name.is_null() {
@@ -898,7 +900,26 @@ pub unsafe extern "win64" fn vk_get_instance_proc_addr(
         "vkCmdDebugMarkerBeginEXT" => vk_cmd_debug_marker_begin_ext as PFN_vkVoidFunction,
         "vkCmdDebugMarkerEndEXT" => vk_cmd_debug_marker_end_ext as PFN_vkVoidFunction,
         "vkCmdDebugMarkerInsertEXT" => vk_cmd_debug_marker_insert_ext as PFN_vkVoidFunction,
-        _ => real_fn(instance, name),
+        // Physical-device external-object property queries — return no-op thunks that
+        // zero-fill the output struct, signalling "no external support" (valid behaviour).
+        "vkGetPhysicalDeviceExternalSemaphoreProperties"
+        | "vkGetPhysicalDeviceExternalSemaphorePropertiesKHR" => {
+            vk_get_physical_device_external_semaphore_properties as PFN_vkVoidFunction
+        }
+        "vkGetPhysicalDeviceExternalFenceProperties"
+        | "vkGetPhysicalDeviceExternalFencePropertiesKHR" => {
+            vk_get_physical_device_external_fence_properties as PFN_vkVoidFunction
+        }
+        "vkGetPhysicalDeviceExternalBufferProperties"
+        | "vkGetPhysicalDeviceExternalBufferPropertiesKHR" => {
+            vk_get_physical_device_external_buffer_properties as PFN_vkVoidFunction
+        }
+        // Safety fence: for any Vulkan function not in our dispatch table, return NULL.
+        // Returning the raw SysV host-library pointer would cause an ABI mismatch crash
+        // when DXVK (Win64 caller) calls it — Win64 passes args in RCX/RDX/R8/R9
+        // but SysV expects them in RDI/RSI/RDX/RCX.  NULL signals "not available" and
+        // DXVK's feature-detection paths handle NULL gracefully.
+        _ => std::ptr::null(),
     }
 }
 
@@ -1091,6 +1112,83 @@ pub unsafe extern "win64" fn vk_destroy_surface_khr(
     let destroy: unsafe extern "C" fn(VkInstance, VkSurfaceKHR, *const c_void) =
         unsafe { std::mem::transmute(fn_ptr) };
     unsafe { destroy(instance, surface, p_allocator) };
+}
+
+// ── External-object property stubs ───────────────────────────────────────────
+//
+// These three functions are queried by DXVK during device initialisation to
+// discover external-handle support.  On Weave there is no cross-process sharing
+// infrastructure, so the answer is always "no external handles supported".
+// Each stub writes zeros into the output struct (compatible_handle_types = 0,
+// export_from_imported_handle_types = 0, external_semaphore_features = 0, etc.)
+// which is a valid "not supported" response per the Vulkan spec.
+//
+// Wine ref: dlls/winevulkan/vulkan.c — the Wine Vulkan wrapper forwards these
+// to the host loader unchanged; the host returns driver-specific capabilities.
+// Weave returns "none" unconditionally because we have no OS-level sharing.
+
+/// vkGetPhysicalDeviceExternalSemaphoreProperties — reports no external support.
+///
+/// Zeroes the VkExternalSemaphoreProperties output, signalling that no external
+/// semaphore handle types are compatible with this physical device in Weave.
+// Wine ref: dlls/winevulkan/vulkan.c — forwarded to host vkGetPhysicalDeviceExternalSemaphoreProperties;
+// Weave has no shared-semaphore infrastructure so we always report zero support.
+pub unsafe extern "win64" fn vk_get_physical_device_external_semaphore_properties(
+    _physical_device: VkPhysicalDevice,
+    _p_external_semaphore_info: *const c_void,
+    p_external_semaphore_properties: *mut c_void,
+) {
+    // VkExternalSemaphoreProperties: { sType(u32), _pad(4), pNext(*void), flags×3(u32) }
+    // Header = 4 (sType) + 4 (align padding) + 8 (pNext) = 16 bytes; flags start at offset 16.
+    if !p_external_semaphore_properties.is_null() {
+        let flags_ptr = unsafe { (p_external_semaphore_properties as *mut u8).add(16) as *mut u32 };
+        unsafe { flags_ptr.write(0) }; // exportFromImportedHandleTypes
+        unsafe { flags_ptr.add(1).write(0) }; // compatibleHandleTypes
+        unsafe { flags_ptr.add(2).write(0) }; // externalSemaphoreFeatures
+    }
+}
+
+/// vkGetPhysicalDeviceExternalFenceProperties — reports no external support.
+///
+/// Zeroes the VkExternalFenceProperties output, signalling that no external
+/// fence handle types are compatible with this physical device in Weave.
+// Wine ref: dlls/winevulkan/vulkan.c — forwarded to host vkGetPhysicalDeviceExternalFenceProperties;
+// Weave has no shared-fence infrastructure so we always report zero support.
+pub unsafe extern "win64" fn vk_get_physical_device_external_fence_properties(
+    _physical_device: VkPhysicalDevice,
+    _p_external_fence_info: *const c_void,
+    p_external_fence_properties: *mut c_void,
+) {
+    // VkExternalFenceProperties: { sType(u32), _pad(4), pNext(*void), flags×3(u32) }
+    // Flags start at offset 16 (same header layout as all Vk*Properties structs).
+    if !p_external_fence_properties.is_null() {
+        let flags_ptr = unsafe { (p_external_fence_properties as *mut u8).add(16) as *mut u32 };
+        unsafe { flags_ptr.write(0) }; // exportFromImportedHandleTypes
+        unsafe { flags_ptr.add(1).write(0) }; // compatibleHandleTypes
+        unsafe { flags_ptr.add(2).write(0) }; // externalFenceFeatures
+    }
+}
+
+/// vkGetPhysicalDeviceExternalBufferProperties — reports no external support.
+///
+/// Zeroes the VkExternalBufferProperties output, signalling that no external
+/// buffer handle types are compatible with this physical device in Weave.
+// Wine ref: dlls/winevulkan/vulkan.c — forwarded to host vkGetPhysicalDeviceExternalBufferProperties;
+// Weave has no external-memory infrastructure so we always report zero support.
+pub unsafe extern "win64" fn vk_get_physical_device_external_buffer_properties(
+    _physical_device: VkPhysicalDevice,
+    _p_external_buffer_info: *const c_void,
+    p_external_buffer_properties: *mut c_void,
+) {
+    // VkExternalBufferProperties: { sType(u32), _pad(4), pNext(*void),
+    //   VkExternalMemoryProperties{ externalMemoryFeatures, exportFromImportedHandleTypes,
+    //   compatibleHandleTypes }(u32×3) } — flags start at offset 16.
+    if !p_external_buffer_properties.is_null() {
+        let flags_ptr = unsafe { (p_external_buffer_properties as *mut u8).add(16) as *mut u32 };
+        unsafe { flags_ptr.write(0) }; // externalMemoryFeatures
+        unsafe { flags_ptr.add(1).write(0) }; // exportFromImportedHandleTypes
+        unsafe { flags_ptr.add(2).write(0) }; // compatibleHandleTypes
+    }
 }
 
 // ── Resolver ──────────────────────────────────────────────────────────────────
