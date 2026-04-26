@@ -2000,7 +2000,9 @@ fn vulkan_shim_probe_gate() {
     let fixture = format!("{manifest}/../tests/fixtures/bin/vulkan_probe.exe");
 
     if !std::path::Path::new(&fixture).exists() {
-        eprintln!("skipping: vulkan_probe.exe not present in tests/fixtures/bin/ — run CI to compile it");
+        eprintln!(
+            "skipping: vulkan_probe.exe not present in tests/fixtures/bin/ — run CI to compile it"
+        );
         return;
     }
 
@@ -2038,7 +2040,10 @@ fn vulkan_shim_probe_gate() {
         "vulkan_shim_probe_gate A3 FAIL: stderr contains unresolved import for vulkan\nstderr:\n{stderr}"
     );
 
-    eprintln!("vulkan_shim_probe_gate: all gates passed — stdout: {}", stdout.trim());
+    eprintln!(
+        "vulkan_shim_probe_gate: all gates passed — stdout: {}",
+        stdout.trim()
+    );
 }
 
 /// `weave putty.exe -ssh localhost 22` — PuTTY SSH engine; M3 Gate 1.
