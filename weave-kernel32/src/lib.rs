@@ -5938,6 +5938,7 @@ pub unsafe extern "win64" fn find_next_stream_w(
 // then delegates to GetModuleHandleExW(UNCHANGED_REFCOUNT, name, &module); NULL returns
 // NtCurrentTeb()->Peb->ImageBaseAddress (the main exe base).
 pub unsafe extern "win64" fn get_module_handle_a(lp_module_name: *const u8) -> usize {
+    eprintln!("weave/kernel32: GetModuleHandleA entry");
     if lp_module_name.is_null() {
         return weave_core::seh::pe_base();
     }
@@ -6701,6 +6702,7 @@ pub unsafe extern "win64" fn dos_date_time_to_file_time(
 // exclusive_waiters by 2 before the loop; CAS on owners==0 to set owners=1 and
 // clear the waiter count; futex-waits on &owners when contended.
 pub unsafe extern "win64" fn acquire_srw_lock_exclusive(srw_lock: *mut usize) {
+    eprintln!("weave/kernel32: AcquireSRWLockExclusive entry");
     let p = unsafe { srw_state_ptr(srw_lock) };
     let atomic = unsafe { &*(p as *const AtomicI32) };
 
@@ -7235,6 +7237,7 @@ pub unsafe extern "win64" fn get_environment_variable_w(
     lp_buffer: *mut u16,
     n_size: u32,
 ) -> u32 {
+    eprintln!("weave/kernel32: GetEnvironmentVariableW entry");
     if lp_name.is_null() {
         set_last_error(203); // ERROR_ENVVAR_NOT_FOUND
         return 0;
