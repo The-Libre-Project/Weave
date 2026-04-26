@@ -69,6 +69,16 @@ pub fn register(dll_name: &str) -> usize {
     })
 }
 
+/// Look up the synthetic HMODULE for `dll_name` without creating one.
+///
+/// Returns `None` if the DLL has not been registered (i.e. never loaded via
+/// `register` or `LoadLibraryA`). Use instead of `register` when the caller
+/// must distinguish "not loaded" (None/0) from "loaded" (Some(handle)).
+pub fn find(dll_name: &str) -> Option<usize> {
+    let key = dll_basename(dll_name);
+    with_table(None, |t| t.name_to_handle.get(&key).copied())
+}
+
 /// Look up the DLL name for an HMODULE returned by `register()` or
 /// `register_with_handle()`. Returns `None` if the handle is unknown.
 pub fn lookup(handle: usize) -> Option<String> {

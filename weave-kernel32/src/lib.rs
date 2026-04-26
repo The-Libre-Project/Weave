@@ -5159,6 +5159,46 @@ fn load_library_impl(name: &str) -> usize {
     handle
 }
 
+/// Return true if `key` (lowercase DLL basename) is a Win32 system DLL that is
+/// implicitly loaded in every Windows process without requiring an explicit
+/// LoadLibraryA call.
+///
+/// These DLLs should always yield a non-NULL HMODULE from GetModuleHandleA
+/// regardless of whether LoadLibraryA was called.  Contrast with device-specific
+/// DLLs (vulkan-1.dll, xinput*, mmdevapi, ws2_32) that Windows only exposes
+/// after an explicit Load — if GetModuleHandleA returns non-NULL for those
+/// before they are loaded, callers skip LoadLibraryA and bypass Weave's win64
+/// thunk registration (the root cause of the DXVK Vulkan dispatch bug).
+fn is_always_present_dll(key: &str) -> bool {
+    if key.starts_with("api-ms-win-") {
+        return true;
+    }
+    matches!(
+        key,
+        "ntdll.dll"
+            | "kernel32.dll"
+            | "advapi32.dll"
+            | "user32.dll"
+            | "uxtheme.dll"
+            | "dwmapi.dll"
+            | "gdi32.dll"
+            | "msimg32.dll"
+            | "shell32.dll"
+            | "ole32.dll"
+            | "winmm.dll"
+            | "comctl32.dll"
+            | "oleaut32.dll"
+            | "imm32.dll"
+            | "shlwapi.dll"
+            | "gdiplus.dll"
+            | "version.dll"
+            | "ucrtbase.dll"
+            | "msvcrt.dll"
+            | "psapi.dll"
+            | "shcore.dll"
+    )
+}
+
 /// Return true if `key` (lowercase DLL basename, e.g. `"kernel32.dll"`) is a
 /// DLL that Weave actually emulates via its stub resolver chain.  Only these
 /// DLLs should receive a synthetic HMODULE when they are not found on disk;
@@ -5900,7 +5940,19 @@ pub unsafe extern "win64" fn get_module_handle_a(lp_module_name: *const u8) -> u
         return weave_core::seh::pe_base();
     }
     let name = unsafe { read_cstr_a(lp_module_name) };
-    weave_core::module_handles::register(&name)
+    let key = {
+        let base = name.rsplit(['\\', '/']).next().unwrap_or(&name);
+        base.to_ascii_lowercase()
+    };
+    if is_always_present_dll(&key) {
+        weave_core::module_handles::register(&name)
+    } else {
+        let h = weave_core::module_handles::find(&name).unwrap_or(0);
+        if h == 0 {
+            eprintln!("weave/kernel32: GetModuleHandleA({name:?}) → NULL (not loaded)");
+        }
+        h
+    }
 }
 
 /// GetModuleHandleW — get a handle to an already-loaded module (wide).
@@ -5913,7 +5965,19 @@ pub unsafe extern "win64" fn get_module_handle_w(lp_module_name: *const u16) -> 
         return weave_core::seh::pe_base();
     }
     let name = unsafe { read_cstr_w(lp_module_name) };
-    weave_core::module_handles::register(&name)
+    let key = {
+        let base = name.rsplit(['\\', '/']).next().unwrap_or(&name);
+        base.to_ascii_lowercase()
+    };
+    if is_always_present_dll(&key) {
+        weave_core::module_handles::register(&name)
+    } else {
+        let h = weave_core::module_handles::find(&name).unwrap_or(0);
+        if h == 0 {
+            eprintln!("weave/kernel32: GetModuleHandleW({name:?}) → NULL (not loaded)");
+        }
+        h
+    }
 }
 
 /// GetModuleHandleExA — extended module handle lookup (ANSI).
