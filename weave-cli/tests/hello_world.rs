@@ -2171,8 +2171,9 @@ fn d3d9_probe_m9_a1_gate() {
         s
     });
 
-    let pixel_check_at = start + std::time::Duration::from_secs(3);
-    let deadline = start + std::time::Duration::from_secs(10);
+    // Mesa/lavapipe Vulkan device creation takes ~15-20s on CI; sample after 20s.
+    let pixel_check_at = start + std::time::Duration::from_secs(20);
+    let deadline = start + std::time::Duration::from_secs(60);
     let mut pixel_result: Option<bool> = None;
     let mut killed_by_deadline = false;
 
@@ -2186,7 +2187,7 @@ fn d3d9_probe_m9_a1_gate() {
                 if pixel_result.is_none() && now >= pixel_check_at {
                     pixel_result = sample_display_pixels_99();
                     eprintln!(
-                        "d3d9_probe_m9_a1_gate: pixel_check at 3s → {:?}",
+                        "d3d9_probe_m9_a1_gate: pixel_check at 20s → {:?}",
                         pixel_result
                     );
                 }
@@ -2219,7 +2220,7 @@ fn d3d9_probe_m9_a1_gate() {
     // A2: non-black pixels at 3s — DXVK render path reached.
     assert!(
         matches!(pixel_result, Some(true)),
-        "d3d9_probe_m9_a1_gate A2 FAIL: screen black at 3s — DXVK render loop not reached \
+        "d3d9_probe_m9_a1_gate A2 FAIL: screen black at 20s — DXVK render loop not reached \
 (pixel_result={pixel_result:?}, elapsed {elapsed:.1?}).\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
     eprintln!("d3d9_probe_m9_a1_gate A2: non-black pixels at 3s ✓");
