@@ -6702,7 +6702,6 @@ pub unsafe extern "win64" fn dos_date_time_to_file_time(
 // exclusive_waiters by 2 before the loop; CAS on owners==0 to set owners=1 and
 // clear the waiter count; futex-waits on &owners when contended.
 pub unsafe extern "win64" fn acquire_srw_lock_exclusive(srw_lock: *mut usize) {
-    eprintln!("weave/kernel32: AcquireSRWLockExclusive entry");
     let p = unsafe { srw_state_ptr(srw_lock) };
     let atomic = unsafe { &*(p as *const AtomicI32) };
 
