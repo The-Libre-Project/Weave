@@ -36,11 +36,15 @@ tests/fixtures/bin/7zFM.exe
 /.docker-cargo/
 .claude/worktrees/
 .claude/scheduled_tasks.lock
+.claude/settings.local.json
 
 # Runtime / session artifacts
 /tmp-trace/
 /OBSERVER-STATE.md
 tests/fixtures/bin/extract_out/
+
+# NXEngine fixture — binary game files, not tracked
+tests/fixtures/nxengine/
 
 # weave-gui build artifacts
 /weave-gui/dist/
