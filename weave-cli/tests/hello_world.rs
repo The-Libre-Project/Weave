@@ -2007,7 +2007,7 @@ fn vulkan_shim_probe_gate() {
     let weave_bin = env!("CARGO_BIN_EXE_weave");
 
     let output = std::process::Command::new(weave_bin)
-        .args(["--no-sandbox", &fixture])
+        .arg(&fixture)
         .output()
         .unwrap_or_else(|e| panic!("failed to spawn weave on vulkan_probe.exe: {e}"));
 
