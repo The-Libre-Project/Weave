@@ -2046,6 +2046,77 @@ fn vulkan_shim_probe_gate() {
     );
 }
 
+/// `weave dxvk_probe.exe` — DXVK d3d9.dll load probe; M9 Gate 9b.
+///
+/// Loads d3d9.dll via LoadLibraryA, resolves Direct3DCreate9 via GetProcAddress,
+/// and asserts the function pointer is non-NULL. This verifies that Weave can
+/// load DXVK's pre-built d3d9.dll and serve its IAT without an unresolved-import
+/// crash.
+///
+/// Tier A assertions:
+///   A1: exit status 0
+///   A2: stdout contains "dxvk OK"
+///   A3: stderr does NOT contain "unresolved import" for d3d9
+///
+/// Skipped gracefully if dxvk_probe.exe is absent from fixtures.
+#[test]
+fn dxvk_load_probe_gate() {
+    if !cfg!(target_os = "linux") {
+        eprintln!("skipping dxvk_load_probe_gate — requires Linux");
+        return;
+    }
+
+    let manifest = env!("CARGO_MANIFEST_DIR");
+    let fixture = format!("{manifest}/../tests/fixtures/d3d9/dxvk_probe.exe");
+
+    if !std::path::Path::new(&fixture).exists() {
+        eprintln!(
+            "skipping: dxvk_probe.exe not present in tests/fixtures/d3d9/ — run CI to compile it"
+        );
+        return;
+    }
+
+    let weave_bin = env!("CARGO_BIN_EXE_weave");
+
+    let output = std::process::Command::new(weave_bin)
+        .arg(&fixture)
+        .current_dir(format!("{manifest}/../tests/fixtures/d3d9/"))
+        .output()
+        .unwrap_or_else(|e| panic!("failed to spawn weave on dxvk_probe.exe: {e}"));
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    if !output.status.success() || !stdout.contains("dxvk OK") {
+        eprintln!("--- dxvk_load_probe_gate STDERR BEGIN ---\n{stderr}\n--- dxvk_load_probe_gate STDERR END ---");
+        eprintln!("--- dxvk_load_probe_gate STDOUT BEGIN ---\n{stdout}\n--- dxvk_load_probe_gate STDOUT END ---");
+    }
+
+    // A1: exit status 0
+    assert!(
+        output.status.success(),
+        "dxvk_load_probe_gate A1 FAIL: dxvk_probe.exe exited with non-zero status {:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+        output.status.code()
+    );
+
+    // A2: stdout contains "dxvk OK"
+    assert!(
+        stdout.contains("dxvk OK"),
+        "dxvk_load_probe_gate A2 FAIL: stdout does not contain \"dxvk OK\"\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+
+    // A3: no unresolved import for d3d9
+    assert!(
+        !stderr.contains("unresolved import") || !stderr.to_lowercase().contains("d3d9"),
+        "dxvk_load_probe_gate A3 FAIL: stderr contains unresolved import for d3d9\nstderr:\n{stderr}"
+    );
+
+    eprintln!(
+        "dxvk_load_probe_gate: all gates passed — stdout: {}",
+        stdout.trim()
+    );
+}
+
 /// `weave putty.exe -ssh localhost 22` — PuTTY SSH engine; M3 Gate 1.
 ///
 /// Runs PuTTY with `-ssh localhost 22` under Weave with DISPLAY=:99 (Xvfb).
