@@ -30,11 +30,16 @@ const TLS_SLOTS: usize = 64;
 // Minimum size for the per-thread TLS data block (in bytes).
 const TLS_DATA_MIN: usize = 256;
 
+// TEB reservation size. Real Windows 10 x64 per-thread data (static TLS, NT
+// heap thread state, CRT per-thread vars) has been observed at GS+0x68e10
+// (~429KB) under DXVK/MinGW builds. 512KB covers that with margin.
+const TEB_SIZE: usize = 0x80000;
+
 /// Holds the allocated TEB, PEB, ProcessParameters, and TLS buffers.
 /// Must stay alive for the lifetime of the process.
 #[allow(dead_code)]
 pub struct TebState {
-    teb: Box<[u8; 4096]>,
+    teb: Box<[u8]>,
     peb: Box<[u8; 4096]>,
     params: Box<[u8; 4096]>,
     tls_slots: Box<[u64; TLS_SLOTS]>,
@@ -49,7 +54,7 @@ pub struct TebState {
 /// On non-Linux platforms this is a no-op at runtime (GS won't be set) but
 /// the function still returns `Ok(state)` so the caller can hold the memory.
 pub fn setup(image: &LoadedImage) -> Result<TebState, String> {
-    let mut teb = Box::new([0u8; 4096]);
+    let mut teb = vec![0u8; TEB_SIZE].into_boxed_slice();
     let mut peb = Box::new([0u8; 4096]);
     let mut params = Box::new([0u8; 4096]);
 
