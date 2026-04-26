@@ -7040,6 +7040,12 @@ pub unsafe extern "win64" fn create_thread(
     // for the duration of the spawned thread.  `param_addr` is forwarded as the
     // sole RCX argument, matching LPTHREAD_START_ROUTINE exactly on x86-64.
     let join_handle = std::thread::spawn(move || {
+        // Set up a TEB for this thread and point GS at it.  PE code accesses
+        // TEB fields via GS-relative loads (gs:[0x10], gs:[0x58], etc.).  Without
+        // this, GS points to the pthread TCB and any gs:[offset] read returns
+        // garbage, causing the thread to crash immediately when the PE function
+        // dereferences the result.  Keep _teb alive until thread exit.
+        let _teb = weave_core::teb::setup_thread();
         let fn_ptr: unsafe extern "win64" fn(*mut u8) -> u32 =
             unsafe { std::mem::transmute(fn_addr as *const u8) };
         let ret = unsafe { fn_ptr(param_addr as *mut u8) };

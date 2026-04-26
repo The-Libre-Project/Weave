@@ -21,12 +21,19 @@
 //! has no TLS). This is the minimum needed to keep CRT startup code from
 //! crashing when it reads its per-thread state via GS:[0x58].
 
+use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
+
 use crate::handles;
 use crate::loader::LoadedImage;
 
 // Number of TLS pointer slots to allocate.  The Windows CRT only uses slot 0
 // in a single-threaded process, so 64 gives plenty of headroom.
 const TLS_SLOTS: usize = 64;
+
+// TLS template from the main PE image — set in setup(), read in setup_thread().
+// tls_data is a pointer into the mapped PE image and lives for the process lifetime.
+static PE_TLS_SRC: AtomicPtr<u8> = AtomicPtr::new(std::ptr::null_mut());
+static PE_TLS_SRC_SIZE: AtomicUsize = AtomicUsize::new(0);
 // Minimum size for the per-thread TLS data block (in bytes).
 const TLS_DATA_MIN: usize = 256;
 
@@ -60,6 +67,11 @@ pub fn setup(image: &LoadedImage) -> Result<TebState, String> {
 
     // ── TLS slot array and per-thread data block ──────────────────────────
     let mut tls_slots = Box::new([0u64; TLS_SLOTS]);
+
+    // Store TLS template for threads spawned later via CreateThread.
+    // The PE image stays mapped for the process lifetime, so this pointer is valid.
+    PE_TLS_SRC.store(image.tls_data as *mut u8, Ordering::Relaxed);
+    PE_TLS_SRC_SIZE.store(image.tls_data_size, Ordering::Relaxed);
 
     let tls_size = image.tls_data_size.max(TLS_DATA_MIN);
     let mut tls_data = vec![0u8; tls_size].into_boxed_slice();
@@ -152,4 +164,84 @@ pub fn setup(image: &LoadedImage) -> Result<TebState, String> {
 
 unsafe fn write_u64(base: *mut u8, offset: usize, value: u64) {
     *(base.add(offset) as *mut u64) = value;
+}
+
+/// Allocate and initialise a TEB for a thread spawned via CreateThread.
+///
+/// Must be called at the top of the thread closure, before any PE code runs.
+/// The returned `TebState` must be kept alive until the thread exits — drop it
+/// at end of scope so GS-relative memory stays valid for the thread's lifetime.
+///
+/// Uses the TLS template stored by `setup()` so each thread gets its own
+/// initialised copy of the PE's static TLS data.
+pub fn setup_thread() -> TebState {
+    let mut teb = vec![0u8; TEB_SIZE].into_boxed_slice();
+    let mut peb = Box::new([0u8; 4096]);
+    let mut params = Box::new([0u8; 4096]);
+    let mut tls_slots = Box::new([0u64; TLS_SLOTS]);
+
+    let src_ptr = PE_TLS_SRC.load(Ordering::Relaxed);
+    let src_size = PE_TLS_SRC_SIZE.load(Ordering::Relaxed);
+    let tls_size = src_size.max(TLS_DATA_MIN);
+    let mut tls_data = vec![0u8; tls_size].into_boxed_slice();
+
+    if !src_ptr.is_null() && src_size > 0 {
+        unsafe {
+            std::ptr::copy_nonoverlapping(src_ptr, tls_data.as_mut_ptr(), src_size);
+        }
+    }
+
+    let teb_ptr = teb.as_mut_ptr();
+    let peb_ptr = peb.as_mut_ptr();
+    let params_ptr = params.as_mut_ptr();
+    let tls_slots_ptr = tls_slots.as_mut_ptr();
+    let tls_data_ptr = tls_data.as_mut_ptr();
+
+    #[cfg(target_os = "linux")]
+    let (stack_base, stack_limit) = {
+        let mut attr: libc::pthread_attr_t = unsafe { std::mem::zeroed() };
+        let mut stack_addr: *mut libc::c_void = std::ptr::null_mut();
+        let mut stack_size: libc::size_t = 0;
+        unsafe {
+            libc::pthread_getattr_np(libc::pthread_self(), &mut attr);
+            libc::pthread_attr_getstack(&attr, &mut stack_addr, &mut stack_size);
+            libc::pthread_attr_destroy(&mut attr);
+        }
+        let low = stack_addr as u64;
+        let high = low + stack_size as u64;
+        (high, low)
+    };
+
+    #[cfg(not(target_os = "linux"))]
+    let (stack_base, stack_limit) = (0u64, 0u64);
+
+    unsafe {
+        (*tls_slots_ptr) = tls_data_ptr as u64;
+        write_u64(teb_ptr, 0x008, stack_base);
+        write_u64(teb_ptr, 0x010, stack_limit);
+        write_u64(teb_ptr, 0x030, teb_ptr as u64);
+        write_u64(teb_ptr, 0x058, tls_slots_ptr as u64);
+        write_u64(teb_ptr, 0x060, peb_ptr as u64);
+        write_u64(peb_ptr, 0x020, params_ptr as u64);
+        write_u64(params_ptr, 0x028, handles::STDOUT_HANDLE as u64);
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let ret = unsafe { libc::syscall(libc::SYS_arch_prctl, 0x1001i64, teb_ptr as i64) };
+        if ret != 0 {
+            eprintln!(
+                "weave: CreateThread TEB arch_prctl failed: {}",
+                std::io::Error::last_os_error()
+            );
+        }
+    }
+
+    TebState {
+        teb,
+        peb,
+        params,
+        tls_slots,
+        tls_data,
+    }
 }
