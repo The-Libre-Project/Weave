@@ -37,37 +37,44 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT m, WPARAM w, LPARAM l) {
 }
 
 int main(void) {
+    fprintf(stderr, "d3d9_probe: STEP 1 GetModuleHandleA\n");
     /* 1. Register window class and create an 320x240 window */
     WNDCLASSA wc = {0};
     wc.lpfnWndProc   = wnd_proc;
     wc.hInstance     = GetModuleHandleA(NULL);
+    fprintf(stderr, "d3d9_probe: STEP 2 RegisterClassA hInstance=%p\n", (void*)wc.hInstance);
     wc.lpszClassName = "d3d9_probe_class";
     if (!RegisterClassA(&wc)) {
         fprintf(stderr, "d3d9_probe: RegisterClassA failed\n"); return 1;
     }
+    fprintf(stderr, "d3d9_probe: STEP 3 CreateWindowExA\n");
     HWND hwnd = CreateWindowExA(0, "d3d9_probe_class", "d3d9_probe",
                                 WS_POPUP, 0, 0, 320, 240,
                                 NULL, NULL, wc.hInstance, NULL);
     if (!hwnd) {
         fprintf(stderr, "d3d9_probe: CreateWindowExA failed\n"); return 2;
     }
+    fprintf(stderr, "d3d9_probe: STEP 4 LoadLibraryA hwnd=%p\n", (void*)hwnd);
 
     /* 2. Load d3d9.dll and get Direct3DCreate9 */
     HMODULE hd3d9 = LoadLibraryA("d3d9.dll");
     if (!hd3d9) {
         fprintf(stderr, "d3d9_probe: LoadLibraryA(d3d9.dll) failed\n"); return 3;
     }
+    fprintf(stderr, "d3d9_probe: STEP 5 GetProcAddress\n");
     PFN_Direct3DCreate9 pCreate9 =
         (PFN_Direct3DCreate9)GetProcAddress(hd3d9, "Direct3DCreate9");
     if (!pCreate9) {
         fprintf(stderr, "d3d9_probe: GetProcAddress(Direct3DCreate9) failed\n"); return 4;
     }
 
+    fprintf(stderr, "d3d9_probe: STEP 6 Direct3DCreate9\n");
     /* 3. Create IDirect3D9 */
     void* d3d9 = pCreate9(D3D_SDK_VERSION);
     if (!d3d9) {
         fprintf(stderr, "d3d9_probe: Direct3DCreate9 returned NULL\n"); return 5;
     }
+    fprintf(stderr, "d3d9_probe: STEP 7 CreateDevice d3d9=%p\n", d3d9);
 
     /* 4. Create device */
     D3DPRESENT_PARAMETERS pp = {0};
@@ -86,6 +93,7 @@ int main(void) {
     if (hr != D3D_OK || !dev) {
         fprintf(stderr, "d3d9_probe: CreateDevice failed hr=0x%08lx\n", hr); return 6;
     }
+    fprintf(stderr, "d3d9_probe: STEP 8 Clear dev=%p\n", dev);
 
     /* 5. Clear to solid red 0xFFFF0000 */
     PFN_Clear pClear = (PFN_Clear)vtfn(dev, 43);
@@ -93,6 +101,7 @@ int main(void) {
     if (hr != D3D_OK) {
         fprintf(stderr, "d3d9_probe: Clear failed hr=0x%08lx\n", hr); return 7;
     }
+    fprintf(stderr, "d3d9_probe: STEP 9 Present\n");
 
     /* 6. Present */
     PFN_Present pPresent = (PFN_Present)vtfn(dev, 17);
@@ -101,6 +110,7 @@ int main(void) {
         fprintf(stderr, "d3d9_probe: Present failed hr=0x%08lx\n", hr); return 8;
     }
 
+    fprintf(stderr, "d3d9_probe: STEP 10 done\n");
     printf("d3d9_probe OK\n");
     return 0;
 }
