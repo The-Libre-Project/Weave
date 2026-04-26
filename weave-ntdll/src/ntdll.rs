@@ -1777,8 +1777,23 @@ pub fn resolve(func: &str) -> Option<usize> {
         "RtlRaiseException" => {
             Some(rtl_raise_exception as unsafe extern "win64" fn(_) as *const () as usize)
         }
+        // Wine presence marker — DXVK calls GetProcAddress(ntdll, "__wine_dbg_output") to
+        // detect whether it's running under Wine.  Returning a non-NULL address causes DXVK
+        // to use its Wine/winevulkan Vulkan-loading path, which is what Weave supports.
+        "__wine_dbg_output" => Some(wine_dbg_output as unsafe extern "win64" fn(_) -> _ as *const () as usize),
         _ => None,
     }
+}
+
+/// __wine_dbg_output — Wine debug output sink.
+///
+/// DXVK calls GetProcAddress(ntdll, "__wine_dbg_output") to detect Wine.
+/// Weave exposes this so DXVK uses the Wine/winevulkan Vulkan-loading path.
+///
+/// # Safety
+/// `str` must be null or a valid null-terminated UTF-8/ASCII string.
+pub unsafe extern "win64" fn wine_dbg_output(_str: *const u8) -> i32 {
+    0
 }
 
 // ── NtQuerySystemInformation unit tests ─────────────────────────────────────

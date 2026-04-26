@@ -991,9 +991,15 @@ pub unsafe extern "win64" fn vk_create_instance(
             vec![EXT_XCB_SURFACE.as_ptr() as *const c_char]
         };
 
+    // Strip VkDebugUtilsMessengerCreateInfoEXT nodes from pNext.
+    // These contain Win64 pfnUserCallback pointers; lavapipe calls them with
+    // SysV ABI → register corruption → SIGSEGV. NULL out the entire pNext chain
+    // since we don't need debug callbacks for lavapipe device init on CI.
+    let clean_p_next: *const c_void = std::ptr::null();
+
     let patched = VkInstanceCreateInfo {
         s_type: info.s_type,
-        p_next: info.p_next,
+        p_next: clean_p_next,
         flags: info.flags,
         p_application_info: info.p_application_info,
         enabled_layer_count: info.enabled_layer_count,
@@ -1217,9 +1223,14 @@ pub unsafe extern "win64" fn vk_get_physical_device_external_buffer_properties(
 
 // ── Resolver ──────────────────────────────────────────────────────────────────
 
-/// Resolve a `vulkan-1.dll` import to a Weave stub address.
+/// Resolve a `vulkan-1.dll` or `winevulkan.dll` import to a Weave stub address.
+///
+/// `winevulkan.dll` is treated as an alias for `vulkan-1.dll`: DXVK loaded via the
+/// Wine code path (triggered by our `__wine_dbg_output` presence marker in ntdll)
+/// will call LoadLibraryA("winevulkan.dll") and then GetProcAddress on that handle.
+/// Both DLL names map to the same win64 thunk set so the call chain is identical.
 pub fn resolve(dll: &str, func: &str) -> Option<usize> {
-    if !dll.eq_ignore_ascii_case("vulkan-1.dll") {
+    if !dll.eq_ignore_ascii_case("vulkan-1.dll") && !dll.eq_ignore_ascii_case("winevulkan.dll") {
         return None;
     }
     match func {

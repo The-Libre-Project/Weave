@@ -5226,6 +5226,7 @@ fn is_emulated_dll(key: &str) -> bool {
             | "xinput9_1_0.dll"
             | "winmm.dll"
             | "vulkan-1.dll"
+            | "winevulkan.dll"
             | "ws2_32.dll"
             | "wsock32.dll"
             | "comctl32.dll"
@@ -5944,15 +5945,13 @@ pub unsafe extern "win64" fn get_module_handle_a(lp_module_name: *const u8) -> u
         let base = name.rsplit(['\\', '/']).next().unwrap_or(&name);
         base.to_ascii_lowercase()
     };
-    if is_always_present_dll(&key) {
+    let h = if is_always_present_dll(&key) {
         weave_core::module_handles::register(&name)
     } else {
-        let h = weave_core::module_handles::find(&name).unwrap_or(0);
-        if h == 0 {
-            eprintln!("weave/kernel32: GetModuleHandleA({name:?}) → NULL (not loaded)");
-        }
-        h
-    }
+        weave_core::module_handles::find(&name).unwrap_or(0)
+    };
+    eprintln!("weave/kernel32: GetModuleHandleA({name:?}) → {h:#x}");
+    h
 }
 
 /// GetModuleHandleW — get a handle to an already-loaded module (wide).
@@ -5969,15 +5968,13 @@ pub unsafe extern "win64" fn get_module_handle_w(lp_module_name: *const u16) -> 
         let base = name.rsplit(['\\', '/']).next().unwrap_or(&name);
         base.to_ascii_lowercase()
     };
-    if is_always_present_dll(&key) {
+    let h = if is_always_present_dll(&key) {
         weave_core::module_handles::register(&name)
     } else {
-        let h = weave_core::module_handles::find(&name).unwrap_or(0);
-        if h == 0 {
-            eprintln!("weave/kernel32: GetModuleHandleW({name:?}) → NULL (not loaded)");
-        }
-        h
-    }
+        weave_core::module_handles::find(&name).unwrap_or(0)
+    };
+    eprintln!("weave/kernel32: GetModuleHandleW({name:?}) → {h:#x}");
+    h
 }
 
 /// GetModuleHandleExA — extended module handle lookup (ANSI).
