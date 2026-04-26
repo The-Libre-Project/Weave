@@ -1977,6 +1977,70 @@ fn nxengine_gate1_smoke() {
     cap.emit();
 }
 
+/// `weave vulkan_probe.exe` — Vulkan shim end-to-end probe; M9 Gate A0-prereq.
+///
+/// Loads vulkan-1.dll via LoadLibraryA, resolves vkEnumerateInstanceExtensionProperties
+/// via GetProcAddress, calls it, and asserts VK_SUCCESS (0). This verifies that
+/// weave-vulkan's dlopen→libvulkan.so.1 shim is wired and functional.
+///
+/// Tier A assertions:
+///   A1: exit status 0
+///   A2: stdout contains "vulkan OK"
+///   A3: stderr does NOT contain "unresolved import" for vulkan-1.dll
+///
+/// Skipped gracefully if vulkan_probe.exe is absent from fixtures.
+#[test]
+fn vulkan_shim_probe_gate() {
+    if !cfg!(target_os = "linux") {
+        eprintln!("skipping vulkan_shim_probe_gate — requires Linux");
+        return;
+    }
+
+    let manifest = env!("CARGO_MANIFEST_DIR");
+    let fixture = format!("{manifest}/../tests/fixtures/bin/vulkan_probe.exe");
+
+    if !std::path::Path::new(&fixture).exists() {
+        eprintln!("skipping: vulkan_probe.exe not present in tests/fixtures/bin/ — run CI to compile it");
+        return;
+    }
+
+    let weave_bin = env!("CARGO_BIN_EXE_weave");
+
+    let output = std::process::Command::new(weave_bin)
+        .args(["--no-sandbox", &fixture])
+        .output()
+        .unwrap_or_else(|e| panic!("failed to spawn weave on vulkan_probe.exe: {e}"));
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    if !output.status.success() || !stdout.contains("vulkan OK") {
+        eprintln!("--- vulkan_shim_probe_gate STDERR BEGIN ---\n{stderr}\n--- vulkan_shim_probe_gate STDERR END ---");
+        eprintln!("--- vulkan_shim_probe_gate STDOUT BEGIN ---\n{stdout}\n--- vulkan_shim_probe_gate STDOUT END ---");
+    }
+
+    // A1: exit status 0
+    assert!(
+        output.status.success(),
+        "vulkan_shim_probe_gate A1 FAIL: vulkan_probe.exe exited with non-zero status {:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+        output.status.code()
+    );
+
+    // A2: stdout contains "vulkan OK"
+    assert!(
+        stdout.contains("vulkan OK"),
+        "vulkan_shim_probe_gate A2 FAIL: stdout does not contain \"vulkan OK\"\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+
+    // A3: no unresolved import for vulkan-1.dll
+    assert!(
+        !stderr.contains("unresolved import") || !stderr.to_lowercase().contains("vulkan"),
+        "vulkan_shim_probe_gate A3 FAIL: stderr contains unresolved import for vulkan\nstderr:\n{stderr}"
+    );
+
+    eprintln!("vulkan_shim_probe_gate: all gates passed — stdout: {}", stdout.trim());
+}
+
 /// `weave putty.exe -ssh localhost 22` — PuTTY SSH engine; M3 Gate 1.
 ///
 /// Runs PuTTY with `-ssh localhost 22` under Weave with DISPLAY=:99 (Xvfb).
