@@ -1716,6 +1716,14 @@ pub fn resolve(func: &str) -> Option<usize> {
         "CryptGenRandom" => {
             Some(crypt_gen_random as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize)
         }
+        // ── DXVK d3d9.dll gap stubs ────────────────────────────────────────
+        "AllocateLocallyUniqueId" => Some(
+            allocate_locally_unique_id as unsafe extern "win64" fn(_) -> _ as *const () as usize,
+        ),
+        "RegNotifyChangeKeyValue" => Some(
+            reg_notify_change_key_value as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const ()
+                as usize,
+        ),
         _ => None,
     }
 }
@@ -2044,6 +2052,33 @@ pub unsafe extern "win64" fn set_security_descriptor_owner(
     _b_owner_defaulted: i32,
 ) -> i32 {
     1
+}
+
+// ── DXVK d3d9.dll gap stubs ───────────────────────────────────────────────────
+
+/// AllocateLocallyUniqueId — fill a LUID with zeros; return FALSE.
+///
+/// # Safety
+/// `luid`, if non-null, must point to a writable 8-byte aligned u64.
+pub unsafe extern "win64" fn allocate_locally_unique_id(luid: *mut u64) -> i32 {
+    if !luid.is_null() {
+        // SAFETY: caller guarantees `luid` is a valid writable u64 pointer.
+        unsafe {
+            *luid = 0;
+        }
+    }
+    0 // FALSE
+}
+
+/// RegNotifyChangeKeyValue — not supported; return ERROR_NOT_SUPPORTED.
+pub unsafe extern "win64" fn reg_notify_change_key_value(
+    _key: usize,
+    _subtree: i32,
+    _filter: u32,
+    _event: usize,
+    _async: i32,
+) -> i32 {
+    50 // ERROR_NOT_SUPPORTED
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

@@ -4006,6 +4006,44 @@ pub unsafe extern "win64" fn ucrt_unlink(path: *const u8) -> i32 {
     }
 }
 
+// ── DXVK d3d9.dll gap stubs ──────────────────────────────────────────────────
+
+/// _filelengthi64 — return the length of an open file descriptor (64-bit).
+///
+/// Stub: returns -1 to signal error. DXVK queries this to size staging buffers;
+/// a -1 result causes it to fall back to other sizing logic.
+pub extern "win64" fn ucrt_filelengthi64(_fh: i32) -> i64 {
+    -1i64
+}
+
+/// _ultoa — convert an unsigned long to an ASCII string in the given radix.
+///
+/// Writes the null-terminated result into `buf` and returns `buf`.
+/// Supports decimal (radix 10) and hexadecimal (radix 16); other radices fall
+/// back to decimal. Returns `buf` unchanged if `buf` is null.
+///
+/// # Safety
+/// `buf`, if non-null, must point to a writable buffer large enough to hold
+/// the output (≤11 bytes for decimal u32, ≤9 bytes for hex u32, plus null).
+pub unsafe extern "win64" fn ucrt_ultoa(val: u32, buf: *mut u8, radix: i32) -> *mut u8 {
+    if buf.is_null() {
+        return buf;
+    }
+    let s = match radix {
+        16 => format!("{val:x}"),
+        _ => format!("{val}"),
+    };
+    let bytes = s.as_bytes();
+    // SAFETY: caller guarantees buf is writable for at least bytes.len()+1 bytes.
+    unsafe {
+        for (i, &b) in bytes.iter().enumerate() {
+            *buf.add(i) = b;
+        }
+        *buf.add(bytes.len()) = 0;
+    }
+    buf
+}
+
 /// Resolve a UCRT import to a stub address.
 pub fn resolve(dll: &str, func: &str) -> Option<usize> {
     if !is_ucrt_dll(dll) {
@@ -4429,6 +4467,9 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
             // msvcrt.dll's C-library setjmp — full register save in asm.
             Some(ucrt_setjmp as unsafe extern "win64" fn(_) -> _ as *const () as usize)
         }
+        // ── DXVK d3d9.dll gap stubs ────────────────────────────────────────
+        "_filelengthi64" => stub!(ucrt_filelengthi64 as extern "win64" fn(_) -> _),
+        "_ultoa" => stub!(ucrt_ultoa as unsafe extern "win64" fn(_, _, _) -> _),
         _ => None,
     }
 }

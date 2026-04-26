@@ -1191,6 +1191,39 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "CharLowerBuffW" => Some(
             api::char_lower_buff_w as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
         ),
+        // ── DXVK d3d9.dll gap stubs ────────────────────────────────────────
+        "CallWindowProcA" => Some(
+            api::call_window_proc_a as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "DestroyCursor" => {
+            Some(api::destroy_cursor as unsafe extern "win64" fn(_) -> _ as *const () as usize)
+        }
+        "DisplayConfigGetDeviceInfo" => Some(
+            api::display_config_get_device_info as unsafe extern "win64" fn(_) -> _ as *const ()
+                as usize,
+        ),
+        "EnumDisplayDevicesA" => Some(
+            api::enum_display_devices_a as unsafe extern "win64" fn(_, _, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "GetDCEx" => {
+            Some(api::get_dc_ex as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize)
+        }
+        "GetDisplayConfigBufferSizes" => Some(
+            api::get_display_config_buffer_sizes as unsafe extern "win64" fn(_, _, _) -> _
+                as *const () as usize,
+        ),
+        "IsWindowUnicode" => {
+            Some(api::is_window_unicode as unsafe extern "win64" fn(_) -> _ as *const () as usize)
+        }
+        "QueryDisplayConfig" => Some(
+            api::query_display_config as unsafe extern "win64" fn(_, _, _, _, _, _) -> _
+                as *const () as usize,
+        ),
+        "SetRect" => Some(
+            api::set_rect as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const () as usize,
+        ),
         _ => None,
     }
 }

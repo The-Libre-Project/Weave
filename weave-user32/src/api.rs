@@ -6443,6 +6443,116 @@ pub unsafe extern "win64" fn char_lower_buff_w(lpsz: *mut u16, cch_length: u32) 
     cch_length
 }
 
+// ── DXVK d3d9.dll gap stubs ───────────────────────────────────────────────────
+
+/// CallWindowProcA — dispatch a message to a wndproc (ANSI variant).
+///
+/// Stub: returns 0. A real implementation would dispatch to the proc pointer,
+/// handling possible interprocess thunks for ANSI↔Unicode conversion.
+///
+/// # Safety
+/// All pointer arguments are accepted but not dereferenced by this stub.
+pub unsafe extern "win64" fn call_window_proc_a(
+    _proc: usize,
+    _hwnd: usize,
+    _msg: u32,
+    _wparam: usize,
+    _lparam: isize,
+) -> isize {
+    0
+}
+
+/// DestroyCursor — destroy a cursor object; return TRUE (no-op).
+///
+/// # Safety
+/// `_cursor` is accepted but not dereferenced.
+pub unsafe extern "win64" fn destroy_cursor(_cursor: usize) -> i32 {
+    1 // TRUE
+}
+
+/// DisplayConfigGetDeviceInfo — return ERROR_NOT_SUPPORTED.
+///
+/// # Safety
+/// `_p` is accepted but not dereferenced.
+pub unsafe extern "win64" fn display_config_get_device_info(_p: *mut std::ffi::c_void) -> i32 {
+    50 // ERROR_NOT_SUPPORTED
+}
+
+/// EnumDisplayDevicesA — ANSI variant; no devices; return FALSE.
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn enum_display_devices_a(
+    _dev: *const u8,
+    _n: u32,
+    _info: *mut std::ffi::c_void,
+    _flags: u32,
+) -> i32 {
+    0 // FALSE — no devices
+}
+
+/// GetDCEx — extended GetDC with clip region and flags; return NULL (stub).
+///
+/// # Safety
+/// All arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn get_dc_ex(_hwnd: usize, _clip: usize, _flags: u32) -> usize {
+    0 // NULL
+}
+
+/// GetDisplayConfigBufferSizes — return ERROR_NOT_SUPPORTED.
+///
+/// # Safety
+/// `_num_paths` and `_num_modes` are accepted but not written.
+pub unsafe extern "win64" fn get_display_config_buffer_sizes(
+    _flags: u32,
+    _num_paths: *mut u32,
+    _num_modes: *mut u32,
+) -> i32 {
+    50 // ERROR_NOT_SUPPORTED
+}
+
+/// IsWindowUnicode — return TRUE (Weave windows are always Unicode).
+///
+/// # Safety
+/// `_hwnd` is accepted but not dereferenced.
+pub unsafe extern "win64" fn is_window_unicode(_hwnd: usize) -> i32 {
+    1 // TRUE
+}
+
+/// QueryDisplayConfig — return ERROR_NOT_SUPPORTED.
+///
+/// # Safety
+/// All pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn query_display_config(
+    _flags: u32,
+    _num_paths: *mut u32,
+    _paths: *mut std::ffi::c_void,
+    _num_modes: *mut u32,
+    _modes: *mut std::ffi::c_void,
+    _top: *mut std::ffi::c_void,
+) -> i32 {
+    50 // ERROR_NOT_SUPPORTED
+}
+
+/// SetRect — fill a RECT structure with [x1, y1, x2, y2]; return TRUE.
+///
+/// RECT layout: four consecutive i32 fields (left, top, right, bottom).
+///
+/// # Safety
+/// `lp_rc`, if non-null, must point to writable storage for four i32 values (16 bytes).
+pub unsafe extern "win64" fn set_rect(lp_rc: *mut i32, x1: i32, y1: i32, x2: i32, y2: i32) -> i32 {
+    if !lp_rc.is_null() {
+        // SAFETY: caller guarantees lp_rc points to 16 bytes of writable i32 storage.
+        unsafe {
+            *lp_rc = x1;
+            *lp_rc.add(1) = y1;
+            *lp_rc.add(2) = x2;
+            *lp_rc.add(3) = y2;
+        }
+    }
+    1 // TRUE
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
