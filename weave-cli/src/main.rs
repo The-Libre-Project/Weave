@@ -535,6 +535,21 @@ fn main() {
         }
     }
 
+    // Vulkan support: libvulkan.so.1 (loader), Mesa ICDs (lavapipe/radeon/intel),
+    // and Vulkan ICD JSON configs. Skip silently if not present.
+    let vulkan_sys_paths: &[&str] = &[
+        "/usr/lib/x86_64-linux-gnu",
+        "/usr/lib64",
+        "/usr/share/vulkan",
+        "/etc/vulkan",
+    ];
+    for path_str in vulkan_sys_paths {
+        let p = std::path::Path::new(path_str);
+        if p.exists() {
+            allowed.push(p);
+        }
+    }
+
     weave_sandbox::apply(!args.no_sandbox, &allowed);
 
     // ── 4.5. Sandbox runtime invariant — release blocker ─────────────────
