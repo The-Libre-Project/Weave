@@ -626,6 +626,7 @@ pub unsafe extern "win64" fn vk_get_instance_proc_addr(
         Ok(s) => s,
         Err(_) => return std::ptr::null(),
     };
+    eprintln!("weave-vulkan: vk_get_instance_proc_addr({name:?})");
 
     match name {
         "vkGetInstanceProcAddr" => vk_get_instance_proc_addr as PFN_vkVoidFunction,

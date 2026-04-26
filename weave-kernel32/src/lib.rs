@@ -4998,6 +4998,7 @@ fn load_library_impl(name: &str) -> usize {
     use weave_core::{
         dll_registry, exe_path, file_io, iat, loader, module_handles, prefix, resolve,
     };
+    eprintln!("weave/kernel32: load_library_impl({name:?})");
 
     let key = {
         let base = name.rsplit(['\\', '/']).next().unwrap_or(name);
