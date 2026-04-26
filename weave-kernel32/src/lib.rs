@@ -5278,6 +5278,7 @@ unsafe fn read_cstr_w(p: *const u16) -> String {
 // LoadLibraryExA(name, 0, 0); no flags processing here.
 pub unsafe extern "win64" fn load_library_a(lp_file_name: *const u8) -> usize {
     let name = unsafe { read_cstr_a(lp_file_name) };
+    eprintln!("weave/kernel32: LoadLibraryA({name:?}) entry");
     if name.is_empty() {
         return 0;
     }
@@ -6055,6 +6056,7 @@ pub unsafe extern "win64" fn get_module_file_name_w(
         std::ptr::copy_nonoverlapping(wide.as_ptr(), lp_filename, copy_len);
         *lp_filename.add(copy_len) = 0; // null terminator
     }
+    eprintln!("weave/kernel32: GetModuleFileNameW returning {copy_len}");
     copy_len as u32
 }
 
