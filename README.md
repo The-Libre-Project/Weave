@@ -12,7 +12,7 @@ Concretely, today:
 
 - A Rust PE loader and ntdll syscall gateway exist and work end-to-end on the supported corpus.
 - A small set of Win32 DLLs is implemented as separate Rust crates (kernel32, user32, gdi32, ntdll, ws2_32, comctl32, oleaut32, shlwapi, gdiplus, ucrt, etc.). Coverage within each is partial; many functions are stubs.
-- Every app runs inside a Bubblewrap + Landlock + seccomp sandbox by default. Relaxing permissions is opt-in.
+- Every app runs inside a Landlock filesystem sandbox by default. Bubblewrap process containment, seccomp syscall filtering, and per-app network isolation are roadmap, not shipped. Relaxing the Landlock allowlist is opt-in.
 - The supported-app list is short and per-release-tier. The current end-to-end gates that are green in CI (not `#[ignore]`'d) are: **NXEngine-evo** (SDL2 game, software renderer, dummy audio), **SDL2 testsprite2** (rendering smoke), and a **Notepad++ resource walk**. Apps not on the list are not supported. See [`PROJECT-TRUTH.md`](PROJECT-TRUTH.md) for the live list and known gaps.
 - DXVK / VKD3D, ARM64, GUI manager, plugin system, compat DB, hardware-accelerated games, real network clients, and the install flow are scaffolded or in progress — not shipped. See [`ROADMAP.md`](ROADMAP.md) for honest per-phase status.
 
@@ -48,7 +48,7 @@ A few things that fall out of starting over:
 
 **The graphics stack is simpler than it looks.** DXVK — the battle-tested DirectX-to-Vulkan translation layer that ships inside Steam's Proton — has a fully maintained native Linux build mode (`dxvk-native`) that has *zero* Wine dependencies. It loads `libvulkan.so` directly. The Wine-specific code paths are simply absent in the native build. This means Weave can host DXVK directly. (Wired up in scaffolding; no game has rendered a frame through it yet — see ROADMAP Phase 3.)
 
-**Sandboxing is a default, not a feature.** Wine runs with full user permissions. In Weave, isolation is the starting state. Each application runs in its own namespace with Landlock filesystem restrictions and seccomp syscall filtering. Relaxing permissions requires explicit action.
+**Sandboxing is a default, not a feature.** Wine runs with full user permissions. In Weave, isolation is the starting state. Today this means Landlock filesystem restrictions applied before guest code runs; bubblewrap process containment and seccomp syscall filtering are roadmap. Relaxing the Landlock allowlist requires explicit action.
 
 **Modularity is structural.** Every Windows DLL is a separate Rust crate. Adding a function to `kernel32` doesn't require understanding `user32`. Contributors can own individual shims, publish independent patches, and test in isolation.
 
@@ -56,7 +56,7 @@ A few things that fall out of starting over:
 
 **Rust-native.** The entire core — PE loader, ntdll gateway, syscall dispatcher — is written in Rust. Memory safety eliminates entire classes of bugs that have existed in Wine for decades. (See the "Security framing" note above for what this does and doesn't buy you.)
 
-**Sandboxed by default.** Every Windows application runs in its own isolated environment using Landlock, bubblewrap, and user namespaces. No Windows program gets access to your home directory unless you explicitly allow it.
+**Sandboxed by default.** Every Windows application runs with Landlock filesystem restrictions applied before guest code begins executing — paths outside the allowlisted prefix and bridged user-data dirs are blocked at the kernel level. Bubblewrap process containment and user-namespace isolation are roadmap, not shipped today.
 
 **Cross-architecture (planned).** Native x86_64 today; first-class ARM64 via integrated FEX/Box64 CPU translation is a roadmap target, not a shipped capability.
 
@@ -72,13 +72,15 @@ Rust-based API translation maps Windows system calls to Linux equivalents. Graph
 
 #### Weave Sandbox — isolation
 
-Always active. Every application runs inside a bubblewrap container with:
-- Its own user namespace (no access to host user context)
-- Landlock filesystem restrictions (app sees only its own prefix + explicitly shared directories)
-- seccomp syscall filtering (blocks dangerous kernel calls)
-- Network isolation available per-app
+What's actually shipped today:
+- **Landlock filesystem restrictions** — applied after the PE is loaded and the IAT is patched but before guest code runs; the app sees only its own prefix plus explicitly bridged user-data directories. Requires Linux 5.13+; on older kernels the restriction is silently skipped and a diagnostic line is printed.
 
-This is not optional. Sandboxing is the default state. Users can relax permissions per-app if needed, but the safe path requires no configuration.
+What's *not* shipped today (roadmap):
+- **Bubblewrap process containment** and **user-namespace isolation** — Phase 4+ target. The current model runs the guest PE in Weave's own address space.
+- **seccomp syscall filtering** — incompatible with the current in-process model. Because the PE shares Weave's address space, any seccomp filter would have to allowlist every syscall Weave itself uses (mmap, write, exit, …), which gives the guest the same syscall surface anyway. Real syscall isolation requires the out-of-process redesign. (See [`weave-sandbox/src/lib.rs`](weave-sandbox/src/lib.rs) lines 7–12.)
+- **Per-app network isolation** — not implemented; guest code uses the host network stack.
+
+The Landlock layer is not optional and is on by default. Users can adjust the path allowlist, but the safe default requires no configuration.
 
 If an app on the supported list doesn't work, the right answer is to fix the underlying gap — not to hide it behind a fallback runtime.
 
@@ -140,15 +142,17 @@ For honest per-phase status (what's complete vs. code-exists vs. scaffolded vs. 
 
 ## Security model
 
-| Layer | Protection |
-|-------|-----------|
-| Process isolation | Each app in its own user namespace |
-| Filesystem | Landlock restrictions — app sees only its prefix + shared dirs |
-| Syscalls | seccomp filtering blocks dangerous kernel calls |
-| Network | Per-app network isolation available |
-| No root required | Weave never needs elevated privileges |
+| Layer | Status today |
+|-------|-------------|
+| Filesystem | **Implemented.** Landlock restrictions — guest sees only its prefix + bridged user-data dirs. Requires Linux 5.13+; silently skipped (with diagnostic) on older kernels. |
+| Process isolation | **Roadmap.** Bubblewrap + user namespaces — Phase 4+ (out-of-process model). |
+| Syscalls | **Roadmap.** seccomp filtering — blocked by the current in-process design (see footnote). |
+| Network | **Roadmap.** Per-app network isolation — not implemented; guest uses the host network stack. |
+| No root required | **Implemented.** Weave never needs elevated privileges. |
 
-Windows malware that runs through Weave is contained by default. It cannot access your files, your network, or your system without explicit permission. As noted above, this containment is the load-bearing piece — Rust by itself does not make a Win32 host safe; the sandbox does.
+Footnote on seccomp: the PE binary today shares Weave's address space, so a seccomp filter would have to allowlist every syscall Weave itself needs (mmap, write, exit, …) — which gives the guest the same syscall surface anyway. Meaningful syscall isolation requires moving the guest into a separate process; that's Phase 4+. See [`weave-sandbox/src/lib.rs`](weave-sandbox/src/lib.rs) lines 7–12.
+
+Today, Landlock restricts path-based filesystem access outside the allowlisted prefix and the explicitly bridged user-data directories (see [`docs/design/USER-DATA-BRIDGE-POLICY.md`](docs/design/USER-DATA-BRIDGE-POLICY.md) for the trade-off between isolation and the user-data bridge). Network and syscall isolation are not yet implemented. Containment of file access is real; broader containment of network and kernel surface is roadmap, not shipped.
 
 For the security audit posture see [`docs/SECURITY_AUDIT.md`](docs/SECURITY_AUDIT.md) and [`SECURITY.md`](SECURITY.md).
 
@@ -160,7 +164,7 @@ For the security audit posture see [`docs/SECURITY_AUDIT.md`](docs/SECURITY_AUDI
 - **Build:** Cargo workspace
 - **Graphics:** Vulkan (via ash/vulkano), DXVK, VKD3D-Proton (target)
 - **Audio:** PipeWire (via pipewire-rs) (target)
-- **Sandbox:** bubblewrap, Landlock, seccomp
+- **Sandbox:** Landlock (bubblewrap and seccomp are roadmap)
 - **Cross-arch (planned):** FEX-Emu / Box64 for ARM64 → x86_64 translation
 - **GUI (planned):** Tauri 2 (Rust + Svelte)
 - **License:** MIT
