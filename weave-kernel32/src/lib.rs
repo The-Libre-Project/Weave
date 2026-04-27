@@ -7243,7 +7243,6 @@ pub unsafe extern "win64" fn get_environment_variable_w(
     lp_buffer: *mut u16,
     n_size: u32,
 ) -> u32 {
-    eprintln!("weave/kernel32: GetEnvironmentVariableW entry");
     if lp_name.is_null() {
         set_last_error(203); // ERROR_ENVVAR_NOT_FOUND
         return 0;
@@ -7261,19 +7260,9 @@ pub unsafe extern "win64" fn get_environment_variable_w(
             return 0;
         }
     };
-    eprintln!(
-        "weave/kernel32: GetEnvironmentVariableW name={:?} pre-getenv",
-        c_name
-    );
     let value_ptr = libc::getenv(c_name.as_ptr());
-    eprintln!(
-        "weave/kernel32: GetEnvironmentVariableW post-getenv ptr={:p}",
-        value_ptr
-    );
     if value_ptr.is_null() {
-        eprintln!("weave/kernel32: GetEnvironmentVariableW null path entered");
         set_last_error(203); // ERROR_ENVVAR_NOT_FOUND
-        eprintln!("weave/kernel32: GetEnvironmentVariableW set_last_error returned");
         return 0;
     }
     let cstr = std::ffi::CStr::from_ptr(value_ptr);
