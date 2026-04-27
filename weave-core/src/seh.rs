@@ -450,7 +450,10 @@ fn print_weave_crash(
     let stack_prev = read_u64_at(rsp.saturating_sub(8)); // [RSP-8] — ret addr if ret crashed
 
     // Build message using only stack buffers (no heap) for signal safety.
-    let mut msg = [0u8; 768];
+    // Sized to fit the full register block + the "RIP maps = ..." line which
+    // identifies the library RIP belongs to — without that line, diagnosing
+    // a "CRASH in Weave stub" requires manual mmap arithmetic.
+    let mut msg = [0u8; 1536];
     let mut pos = 0usize;
 
     macro_rules! push {

@@ -7261,7 +7261,15 @@ pub unsafe extern "win64" fn get_environment_variable_w(
             return 0;
         }
     };
+    eprintln!(
+        "weave/kernel32: GetEnvironmentVariableW name={:?} pre-getenv",
+        c_name
+    );
     let value_ptr = libc::getenv(c_name.as_ptr());
+    eprintln!(
+        "weave/kernel32: GetEnvironmentVariableW post-getenv ptr={:p}",
+        value_ptr
+    );
     if value_ptr.is_null() {
         set_last_error(203); // ERROR_ENVVAR_NOT_FOUND
         return 0;
