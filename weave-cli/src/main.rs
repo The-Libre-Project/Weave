@@ -343,7 +343,7 @@ fn main() {
         prefix::set(p);
     }
     prefix::ensure_dirs();
-    weave_plugin_system::load_plugins(&weave_core::prefix::plugins_dir());
+    // Plugin loader removed — see weave-plugin-system/src/lib.rs (no shipped consumers; security: prefix-local .so loading pre-sandbox).
     registry::populate();
 
     // Diagnostic: if WEAVE_STALL_TRACE=1, spawn a periodic thread sampler. Off

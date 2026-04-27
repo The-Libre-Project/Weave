@@ -1,5 +1,16 @@
 //! Weave plugin system.
 //!
+//! NOTE (2026-04-26): The `load_plugins` loader is no longer invoked from any
+//! binary. The previous call site in `weave-cli` was removed because the
+//! loader runs **before** the Landlock sandbox is applied and would dlopen
+//! arbitrary native `.so` files from a user-writable prefix directory with no
+//! signature verification — i.e. unsandboxed native code execution from a
+//! user-writable path. There are no shipped plugin consumers today. This
+//! crate is preserved (and `lookup` is still wired into `weave-cli`'s
+//! resolver as a no-op fallthrough) for a future signed-plugin design, but
+//! `load_plugins` is intentionally not called from any binary until that
+//! design exists.
+//!
 //! Plugins are native Linux `.so` files placed in `{prefix}/plugins/`. Each
 //! plugin exports one C-ABI entry point:
 //!

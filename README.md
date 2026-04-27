@@ -103,9 +103,9 @@ weave-winspool/      # Printing → CUPS
 
 Each crate is independently versioned, tested, and publishable. Community contributors can implement a single DLL function without understanding the full system. AI-assisted tooling generates initial stubs from Microsoft's public documentation, which contributors then refine and test.
 
-#### Plugin system (planned)
+#### Plugin system (disabled)
 
-Third-party `.so` plugins can register custom API implementations at runtime. Loader infrastructure exists; no plugins are shipped today.
+Third-party `.so` plugins were intended to register custom API implementations at runtime. The loader is **currently disabled**: prefix-local `.so` loading from a user-writable directory was unsafe by design (it ran before the Landlock sandbox and would dlopen arbitrary native code without signature verification), and no plugins are shipped. The loader crate is preserved for a future signed-plugin model and is not wired up to any binary.
 
 ### Compatibility approach
 
