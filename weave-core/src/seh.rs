@@ -468,6 +468,14 @@ fn print_weave_crash(
     let stack_top = read_u64_at(rsp); // [RSP]   — ret addr if call crashed
     let stack_prev = read_u64_at(rsp.saturating_sub(8)); // [RSP-8] — ret addr if ret crashed
 
+    // Read 16 quadwords from RSP onwards — gives a window into the caller's frame
+    // so we can spot return addresses in the PE (0x140...), d3d9.dll (0x270...),
+    // or Weave (0x55...) ranges and reconstruct the call chain.
+    let mut stack_window = [0u64; 16];
+    for (i, slot) in stack_window.iter_mut().enumerate() {
+        *slot = read_u64_at(rsp.wrapping_add((i as u64) * 8));
+    }
+
     // Build message using only stack buffers (no heap) for signal safety.
     // Sized to fit the full register block + the "RIP maps = ..." line which
     // identifies the library RIP belongs to — without that line, diagnosing
@@ -546,6 +554,17 @@ fn print_weave_crash(
     push!(b"\nweave:   [RSP-8]   = ");
     push_hex!(stack_prev, 8);
     push!(b"  (ret addr if ret faulted)");
+
+    // Stack window — 16 quadwords from RSP. Look for code-pointer-shaped values
+    // (0x14...PE, 0x27...d3d9.dll, 0x55...Weave PIE, 0x7f...libc) to reconstruct
+    // the call chain when [RSP] is zeroed.
+    for (i, &val) in stack_window.iter().enumerate() {
+        push!(b"\nweave:   [RSP+");
+        let offset = (i * 8) as u64;
+        push_hex!(offset, 2);
+        push!(b"]  = ");
+        push_hex!(val, 8);
+    }
 
     // Look up /proc/self/maps to find which library RIP is in.
     // Async-signal-safe: only open/read/close syscalls + stack buffers.
