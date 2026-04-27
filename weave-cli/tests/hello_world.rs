@@ -2156,12 +2156,6 @@ fn d3d9_probe_m9_a1_gate() {
         .current_dir(&d3d9_dir)
         .env("DISPLAY", ":99")
         .env("SDL_AUDIODRIVER", "dummy")
-        // DXVK's findProfile uses std::regex with std::regex::extended which has
-        // documented locale-dependent crashes (config.cpp:1684). Force C locale to
-        // avoid the M9-arc crash where DXVK's regex compilation lands a corrupted
-        // function pointer in libc.so getnetent_r epilogue.
-        .env("LC_ALL", "C")
-        .env("LANG", "C")
         .stderr(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .spawn()
