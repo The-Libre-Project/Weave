@@ -550,6 +550,17 @@ fn main() {
         }
     }
 
+    // ── DEBUG: dump /proc/self/maps before sandbox apply so we can map any
+    // future crash RIP to a library.  The seh.rs maps lookup at crash time
+    // has been silent across the M9 d3d9 arc — Landlock likely blocks /proc
+    // post-apply.  Tagged "weave/maps:" for greppability.
+    #[cfg(target_os = "linux")]
+    if let Ok(maps) = std::fs::read_to_string("/proc/self/maps") {
+        for line in maps.lines() {
+            eprintln!("weave/maps: {line}");
+        }
+    }
+
     weave_sandbox::apply(!args.no_sandbox, &allowed);
 
     // ── 4.5. Sandbox runtime invariant — release blocker ─────────────────
@@ -589,6 +600,18 @@ fn main() {
     weave_common::com::shell_link::register_save_callback(shell_link_save_callback);
 
     eprintln!("weave: TEB ready — jumping in");
+
+    // Try a second maps dump after sandbox apply.  If the partial sandbox
+    // doesn't block /proc, we get a more complete picture (later-loaded libs
+    // like libvulkan would still be missing — they dlopen at runtime).
+    #[cfg(target_os = "linux")]
+    if let Ok(maps) = std::fs::read_to_string("/proc/self/maps") {
+        for line in maps.lines() {
+            eprintln!("weave/maps2: {line}");
+        }
+    } else {
+        eprintln!("weave/maps2: blocked by sandbox");
+    }
 
     // ── DEBUG: print first 16 bytes at entry point and GS base ───────────
     #[cfg(target_os = "linux")]
