@@ -376,11 +376,12 @@ fn print_weave_crash(
     let rsp = gregs[libc::REG_RSP as usize] as u64;
     let r8 = gregs[libc::REG_R8 as usize] as u64;
 
-    // Read 8 bytes at fault address safely via /proc/self/mem.
-    let fault_preview = {
+    // Read 8 bytes at fault address and 16 bytes at RIP via /proc/self/mem.
+    let (fault_preview, rip_preview) = {
         let path = b"/proc/self/mem\0";
         let fd = unsafe { libc::open(path.as_ptr() as *const libc::c_char, libc::O_RDONLY) };
-        let mut hex = [b'?'; 23]; // "?? ?? ?? ?? ?? ?? ?? ??"
+        let mut fault_hex = [b'?'; 23]; // "?? ?? ?? ?? ?? ?? ?? ??"
+        let mut rip_hex = [b'?'; 47]; // 16 bytes formatted as hex
         if fd >= 0 {
             let mut buf = [0u8; 8];
             let n = unsafe {
@@ -391,21 +392,39 @@ fn print_weave_crash(
                     fault_addr as i64,
                 )
             };
-            unsafe { libc::close(fd) };
             if n > 0 {
-                // Format as hex without std::fmt (async-signal-safe enough for abort path)
-                let _ = n; // silence unused
-                hex = *b"?? ?? ?? ?? ?? ?? ?? ??";
+                fault_hex = *b"?? ?? ?? ?? ?? ?? ?? ??";
                 let nibble = |v: u8| if v < 10 { b'0' + v } else { b'a' + v - 10 };
                 for (i, &byte) in buf[..n as usize].iter().enumerate() {
-                    if i * 3 + 1 < hex.len() {
-                        hex[i * 3] = nibble(byte >> 4);
-                        hex[i * 3 + 1] = nibble(byte & 0xf);
+                    if i * 3 + 1 < fault_hex.len() {
+                        fault_hex[i * 3] = nibble(byte >> 4);
+                        fault_hex[i * 3 + 1] = nibble(byte & 0xf);
+                    }
+                }
+            }
+            // Bytes at RIP — lets us disassemble the crashing instruction post-mortem.
+            let mut rbuf = [0u8; 16];
+            let rn = unsafe {
+                libc::pread(
+                    fd,
+                    rbuf.as_mut_ptr() as *mut libc::c_void,
+                    16,
+                    rip as i64,
+                )
+            };
+            unsafe { libc::close(fd) };
+            if rn > 0 {
+                rip_hex = *b"?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ??";
+                let nibble = |v: u8| if v < 10 { b'0' + v } else { b'a' + v - 10 };
+                for (i, &byte) in rbuf[..rn as usize].iter().enumerate() {
+                    if i * 3 + 1 < rip_hex.len() {
+                        rip_hex[i * 3] = nibble(byte >> 4);
+                        rip_hex[i * 3 + 1] = nibble(byte & 0xf);
                     }
                 }
             }
         }
-        hex
+        (fault_hex, rip_hex)
     };
 
     let sig_name: &[u8] = match sig {
@@ -493,6 +512,14 @@ fn print_weave_crash(
     push_hex!(fault_addr, 8);
     push!(b"  [");
     for &b in &fault_preview {
+        if pos < msg.len() - 1 {
+            msg[pos] = b;
+            pos += 1;
+        }
+    }
+    push!(b"]");
+    push!(b"\nweave:   bytes@RIP = [");
+    for &b in &rip_preview {
         if pos < msg.len() - 1 {
             msg[pos] = b;
             pos += 1;

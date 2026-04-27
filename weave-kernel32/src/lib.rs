@@ -7271,7 +7271,9 @@ pub unsafe extern "win64" fn get_environment_variable_w(
         value_ptr
     );
     if value_ptr.is_null() {
+        eprintln!("weave/kernel32: GetEnvironmentVariableW null path entered");
         set_last_error(203); // ERROR_ENVVAR_NOT_FOUND
+        eprintln!("weave/kernel32: GetEnvironmentVariableW set_last_error returned");
         return 0;
     }
     let cstr = std::ffi::CStr::from_ptr(value_ptr);
