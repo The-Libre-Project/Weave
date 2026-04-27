@@ -110,6 +110,23 @@ pub unsafe extern "win64" fn ucrt_memcpy(
     src: *const c_void,
     n: usize,
 ) -> *mut c_void {
+    // Sanity guard — DXVK's findProfile path indirectly invokes memcpy with
+    // n=0xFFFFFFFF (a 32-bit -1 zero-extended to size_t) when querying
+    // _filelengthi64-style size sentinels.  The SIMD-optimised libc memcpy
+    // reads up to 12 KB ahead of `src` for prefetching and faults past the
+    // source allocation.  Cap n at 256 MB — any caller passing more is
+    // either confused or doing something we can't honour anyway.  See
+    // CI-FAIL-LADDER.md M9 d3d9 arc Fail #13.
+    if n >= 0x10000000 {
+        static LOGGED: std::sync::atomic::AtomicBool =
+            std::sync::atomic::AtomicBool::new(false);
+        if !LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            eprintln!(
+                "weave/ucrt: memcpy size guard tripped — n={n:#x} ({n}); skipping copy"
+            );
+        }
+        return dst;
+    }
     unsafe { libc::memcpy(dst, src, n) }
 }
 
@@ -120,6 +137,12 @@ pub unsafe extern "win64" fn ucrt_memmove(
     src: *const c_void,
     n: usize,
 ) -> *mut c_void {
+    // Same sanity guard as ucrt_memcpy — a -1 sentinel narrowed to DWORD then
+    // zero-extended to size_t arrives as n=0xFFFFFFFF and crashes libc memmove
+    // identically to memcpy.  See ucrt_memcpy comment.
+    if n >= 0x10000000 {
+        return dst;
+    }
     unsafe { libc::memmove(dst, src, n) }
 }
 
@@ -4010,10 +4033,24 @@ pub unsafe extern "win64" fn ucrt_unlink(path: *const u8) -> i32 {
 
 /// _filelengthi64 — return the length of an open file descriptor (64-bit).
 ///
-/// Stub: returns -1 to signal error. DXVK queries this to size staging buffers;
-/// a -1 result causes it to fall back to other sizing logic.
-pub extern "win64" fn ucrt_filelengthi64(_fh: i32) -> i64 {
-    -1i64
+/// Returns the file size via fstat. Falls back to 0 (not -1) on failure
+/// because DXVK and other callers downcast the result to a 32-bit DWORD field
+/// (4GB-as-size_t = 0xFFFFFFFF) and pass it to memcpy without bounds-checking.
+/// Returning -1 was the original cause of the M9 d3d9 SteamDeck crash —
+/// DXVK's findProfile path indirectly invokes a memcpy whose `size` is this
+/// stub's return value, narrowed to DWORD.  See CI-FAIL-LADDER.md Fail #1-#13.
+// Wine ref: dlls/msvcrt/file.c::_filelengthi64 — calls _fstati64 internally
+// and returns st_size; returns -1 only when fstat fails.
+pub extern "win64" fn ucrt_filelengthi64(fh: i32) -> i64 {
+    if fh < 0 {
+        return 0;
+    }
+    let mut st: libc::stat64 = unsafe { std::mem::zeroed() };
+    let r = unsafe { libc::fstat64(fh, &mut st) };
+    if r != 0 {
+        return 0;
+    }
+    st.st_size
 }
 
 /// _ultoa — convert an unsigned long to an ASCII string in the given radix.
