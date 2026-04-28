@@ -3927,3 +3927,130 @@ fn ddraw_basic_blt_gate() {
         "ddraw_basic_blt_gate: all gates passed — DirectDraw Lock/Blt/verify path confirmed end-to-end"
     );
 }
+
+/// M8a/b — `weave 7za.exe x test.7z -o<out>` byte-compare extraction gate.
+///
+/// Authored under sub-brief M8a/b — currently `#[ignore]`'d. M8a/c removes the
+/// ignore once compile + lint validation lands green and the runtime extraction
+/// path is ready to be exercised.
+///
+/// Tier A assertions (see `docs/milestones/M8a-7zFM-byte-compare.md`):
+///   A1: `weave 7za.exe x test.7z -o<out_dir>` exits with code 0.
+///   A2: `<out_dir>/plaintext.txt` exists after the call returns.
+///   A3 (load-bearing): extracted bytes byte-for-byte equal
+///       `include_bytes!("../../tests/fixtures/sevenzip/m8a/plaintext.txt")`.
+///
+/// The fixture (`tests/fixtures/sevenzip/m8a/plaintext.txt`) is exactly 18
+/// bytes (the literal `weave-m8a-fixture\n`). The M8a doc text references 19
+/// bytes — that is an off-by-one in the doc; the README in the fixture
+/// directory is authoritative.
+#[test]
+#[ignore = "M8a/b: gate authored ignore-gated; M8a/c removes the ignore once 7za extract path is exercised under weave"]
+fn seven_zip_a_extract_gate() {
+    if !cfg!(target_os = "linux") {
+        eprintln!("skipping seven_zip_a_extract_gate — requires Linux");
+        return;
+    }
+
+    let manifest = env!("CARGO_MANIFEST_DIR");
+    let bin_dir = format!("{manifest}/../tests/fixtures/bin");
+    let seven_zip = format!("{bin_dir}/7za.exe");
+    let fixture_dir = format!("{manifest}/../tests/fixtures/sevenzip/m8a");
+    let archive = format!("{fixture_dir}/test.7z");
+
+    if !std::path::Path::new(&seven_zip).exists() {
+        eprintln!("skipping: 7za.exe not present in tests/fixtures/bin/");
+        return;
+    }
+    if !std::path::Path::new(&archive).exists() {
+        eprintln!("skipping: test.7z not present in tests/fixtures/sevenzip/m8a/");
+        return;
+    }
+
+    // Test-name-prefixed out_dir avoids collisions with parallel gates and
+    // with M8a's own doc-spec path `/tmp/m8a-out`.
+    let out_dir = std::path::PathBuf::from("/tmp/m8a-out-extract-gate");
+
+    // Pre-cleanup (idempotent).
+    let _ = std::fs::remove_dir_all(&out_dir);
+    std::fs::create_dir_all(&out_dir)
+        .unwrap_or_else(|e| panic!("failed to create out_dir {}: {e}", out_dir.display()));
+
+    let weave_bin = env!("CARGO_BIN_EXE_weave");
+
+    // Run: weave 7za.exe x <archive> -o<out_dir> -y
+    // -y: assume yes (non-interactive); matches sevenzip_m4_extraction_gate.
+    let output = std::process::Command::new(weave_bin)
+        .arg(&seven_zip)
+        .arg("x")
+        .arg(&archive)
+        .arg(format!("-o{}", out_dir.display()))
+        .arg("-y")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run weave on 7za.exe x: {e}"));
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    eprintln!("seven_zip_a_extract_gate: exit: {}", output.status);
+    eprintln!("--- 7za stdout ---\n{stdout}");
+    eprintln!("--- 7za stderr ---\n{stderr}");
+
+    // A1: exit code 0.
+    assert!(
+        output.status.success(),
+        "seven_zip_a_extract_gate A1 FAIL: weave 7za.exe x exited non-zero: {}\n\
+         stdout: {stdout}\nstderr: {stderr}",
+        output.status
+    );
+
+    // A2: plaintext.txt exists in out_dir.
+    let extracted = out_dir.join("plaintext.txt");
+    assert!(
+        extracted.exists(),
+        "seven_zip_a_extract_gate A2 FAIL: extracted file missing at {}\n\
+         out_dir contents: {:?}\nstdout: {stdout}\nstderr: {stderr}",
+        extracted.display(),
+        std::fs::read_dir(&out_dir)
+            .map(|r| r
+                .filter_map(|e| e.ok())
+                .map(|e| e.file_name())
+                .collect::<Vec<_>>())
+            .unwrap_or_default()
+    );
+
+    // A3 (load-bearing): byte-for-byte equality with the fixture plaintext.
+    let actual = std::fs::read(&extracted)
+        .unwrap_or_else(|e| panic!("failed to read extracted plaintext.txt: {e}"));
+    let expected: &[u8] = include_bytes!("../../tests/fixtures/sevenzip/m8a/plaintext.txt");
+
+    if actual.as_slice() != expected {
+        let first_diff = actual
+            .iter()
+            .zip(expected.iter())
+            .position(|(a, b)| a != b)
+            .map(|i| i.to_string())
+            .unwrap_or_else(|| format!("length-only (actual={}, expected={})", actual.len(), expected.len()));
+        panic!(
+            "seven_zip_a_extract_gate A3 FAIL: extracted bytes != fixture bytes.\n\
+             actual len:   {}\n\
+             expected len: {}\n\
+             first differing index: {first_diff}\n\
+             actual (first 64):   {:?}\n\
+             expected (first 64): {:?}\n\
+             stdout: {stdout}\nstderr: {stderr}",
+            actual.len(),
+            expected.len(),
+            &actual[..actual.len().min(64)],
+            &expected[..expected.len().min(64)],
+        );
+    }
+
+    eprintln!(
+        "seven_zip_a_extract_gate: all Tier A gates passed — {} bytes match fixture",
+        actual.len()
+    );
+
+    // Post-cleanup (best effort — pre-cleanup on next run is idempotent).
+    let _ = std::fs::remove_dir_all(&out_dir);
+}
