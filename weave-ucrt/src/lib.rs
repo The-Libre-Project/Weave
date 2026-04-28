@@ -124,13 +124,33 @@ pub unsafe extern "win64" fn ucrt_memcpy(
             eprintln!(
                 "weave/ucrt: memcpy size guard tripped — n={n:#x} ({n}); skipping copy"
             );
+            // M9A/b — read [rbp+8] directly to surface the guest PE caller's
+            // return address as an integer. std::backtrace can't symbolize
+            // guest frames (they show as <unknown>); pairing a raw RIP with
+            // the loaded base of d3d9.dll plus `objdump -d` pins the DXVK
+            // function. Diagnostic only — removed in M9A/d.
+            #[cfg(target_arch = "x86_64")]
+            let caller_ra: usize = {
+                let ra: usize;
+                unsafe {
+                    core::arch::asm!(
+                        "mov {0}, [rbp + 8]",
+                        out(reg) ra,
+                        options(nomem, preserves_flags),
+                    );
+                }
+                ra
+            };
+            #[cfg(not(target_arch = "x86_64"))]
+            let caller_ra: usize = 0; // non-x86 build: not the CI target, just compile-clean
             // M9 d3d9_probe diagnostic — pin caller of underflowed memcpy.
             // Remove after M9 root cause is fixed.
             eprintln!(
-                "weave/ucrt: memcpy guard tripped — dst={:#x} src={:#x} n={:#x}\nbacktrace:\n{}",
+                "weave/ucrt: memcpy guard tripped — dst={:#x} src={:#x} n={:#x} caller_ra={:#x}\nbacktrace:\n{}",
                 dst as usize,
                 src as usize,
                 n,
+                caller_ra,
                 std::backtrace::Backtrace::force_capture()
             );
         }
