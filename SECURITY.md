@@ -19,7 +19,7 @@ The actual safety story is therefore **Rust + strict pointer validation + sandbo
 
 - **Rust** removes the easiest, most common memory-safety bugs and makes the remaining unsafe surface auditable (it's the `unsafe { }` blocks; you can grep for it).
 - **Strict pointer validation** at every Win32 entry point ensures guest-supplied pointers are bounds-checked, alignment-checked, and zero-checked before any host code dereferences them.
-- **Sandboxing** (Bubblewrap + Landlock + seccomp, on by default) ensures that *even when something goes wrong in the host*, the guest cannot reach the user's home directory, network, or system without explicit permission.
+- **Sandboxing** ensures that *even when something goes wrong in the host*, the guest's reach is reduced. Today this is **Landlock filesystem isolation only**, applied before guest code runs; bubblewrap process containment, seccomp syscall filtering, and per-app network isolation are roadmap, not shipped. The current Landlock layer prevents the guest from reading or writing paths outside its prefix and the explicitly bridged user-data dirs, but does not constrain network or syscall surface.
 
 Sandboxing is the load-bearing piece. Rust is the multiplier. Neither alone is the claim, and we don't make either alone.
 
