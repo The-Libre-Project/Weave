@@ -6478,17 +6478,46 @@ pub unsafe extern "win64" fn display_config_get_device_info(_p: *mut std::ffi::c
     50 // ERROR_NOT_SUPPORTED
 }
 
-/// EnumDisplayDevicesA — ANSI variant; no devices; return FALSE.
+/// EnumDisplayDevicesA — ANSI variant; expose the same single adapter as W.
 ///
 /// # Safety
-/// Pointer arguments are accepted but not dereferenced.
+/// `info` must point to a caller-allocated DISPLAY_DEVICEA (cb must be set).
 pub unsafe extern "win64" fn enum_display_devices_a(
     _dev: *const u8,
-    _n: u32,
-    _info: *mut std::ffi::c_void,
+    n: u32,
+    info: *mut std::ffi::c_void,
     _flags: u32,
 ) -> i32 {
-    0 // FALSE — no devices
+    // Weave presents exactly one display adapter (and one monitor per adapter).
+    if n > 0 || info.is_null() {
+        return 0; // FALSE — no more devices
+    }
+
+    // DISPLAY_DEVICEA layout:
+    //   offset   0: cb           (u32)
+    //   offset   4: DeviceName   (char × 32)
+    //   offset  36: DeviceString (char × 128)
+    //   offset 164: StateFlags   (u32)
+    //   offset 168: DeviceID     (char × 128)
+    //   offset 296: DeviceKey    (char × 128)
+    let base = info as *mut u8;
+
+    let name = b"\\\\.\\DISPLAY1\0";
+    let name_ptr = unsafe { base.add(4) };
+    for (i, &c) in name.iter().enumerate().take(32) {
+        unsafe { name_ptr.add(i).write(c) };
+    }
+
+    let device_string = b"Generic Display\0";
+    let device_string_ptr = unsafe { base.add(36) };
+    for (i, &c) in device_string.iter().enumerate().take(128) {
+        unsafe { device_string_ptr.add(i).write(c) };
+    }
+
+    // DISPLAY_DEVICE_ATTACHED_TO_DESKTOP | DISPLAY_DEVICE_PRIMARY_DEVICE
+    unsafe { (base.add(164) as *mut u32).write(0x0000_0001 | 0x0000_0004) };
+
+    1 // TRUE
 }
 
 /// GetDCEx — extended GetDC with clip region and flags; return NULL (stub).
