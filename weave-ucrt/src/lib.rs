@@ -239,6 +239,53 @@ pub unsafe extern "win64" fn ucrt_strcmp(s1: *const u8, s2: *const u8) -> i32 {
     unsafe { libc::strcmp(s1 as _, s2 as _) }
 }
 
+/// `strxfrm(dst, src, n)` — transform `src` according to the current locale's
+/// collation rules, writing at most `n` bytes to `dst`.  Returns the number of
+/// bytes that *would* be required to store the transformed string (excluding the
+/// null terminator), i.e. `strlen(src)` in the C locale (no transformation).
+///
+/// # Wine ref: dlls/msvcrt/locale.c — strxfrm in C locale is identity;
+///   returns strlen(src) and copies src → dst when n > 0.
+///
+/// # Safety
+/// `src` must be a valid null-terminated byte string.
+/// `dst` must be writable for at least `n` bytes, or may be null when `n == 0`.
+pub unsafe extern "win64" fn ucrt_strxfrm(dst: *mut u8, src: *const u8, n: usize) -> usize {
+    unsafe {
+        let src_len = libc::strlen(src as _);
+        if !dst.is_null() && n > 0 {
+            // Copy min(src_len, n-1) bytes then null-terminate.
+            let copy = if src_len < n { src_len } else { n - 1 };
+            std::ptr::copy_nonoverlapping(src, dst, copy);
+            *dst.add(copy) = 0;
+        }
+        src_len
+    }
+}
+
+/// `wcsxfrm(dst, src, n)` — wide-char analogue of strxfrm.  In the C locale
+/// this is an identity transform: returns `wcslen(src)` and copies src → dst.
+///
+/// # Wine ref: dlls/msvcrt/locale.c — wcsxfrm mirrors strxfrm behaviour.
+///
+/// # Safety
+/// `src` must be a valid null-terminated UTF-16 (u16) string.
+/// `dst` must be writable for at least `n` u16 units, or may be null when `n == 0`.
+pub unsafe extern "win64" fn ucrt_wcsxfrm(dst: *mut u16, src: *const u16, n: usize) -> usize {
+    unsafe {
+        let mut src_len = 0usize;
+        while *src.add(src_len) != 0 {
+            src_len += 1;
+        }
+        if !dst.is_null() && n > 0 {
+            let copy = if src_len < n { src_len } else { n - 1 };
+            std::ptr::copy_nonoverlapping(src, dst, copy);
+            *dst.add(copy) = 0;
+        }
+        src_len
+    }
+}
+
 /// # Safety
 /// `s` must be a valid null-terminated byte string.
 pub unsafe extern "win64" fn ucrt_strchr(s: *const u8, c: i32) -> *mut u8 {
@@ -4167,9 +4214,10 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "strlen" => stub!(ucrt_strlen as unsafe extern "win64" fn(_) -> _),
         "wcslen" => stub!(ucrt_wcslen as unsafe extern "win64" fn(_) -> _),
         "strncmp" => stub!(ucrt_strncmp as unsafe extern "win64" fn(_, _, _) -> _),
-        "strcmp" | "strcoll" | "strxfrm" => {
+        "strcmp" | "strcoll" => {
             stub!(ucrt_strcmp as unsafe extern "win64" fn(_, _) -> _)
         }
+        "strxfrm" => stub!(ucrt_strxfrm as unsafe extern "win64" fn(_, _, _) -> _),
         "strchr" => stub!(ucrt_strchr as unsafe extern "win64" fn(_, _) -> _),
         "_strdup" => stub!(ucrt_strdup as unsafe extern "win64" fn(_) -> _),
         "strncpy" => stub!(ucrt_strncpy as unsafe extern "win64" fn(_, _, _) -> _),
@@ -4179,7 +4227,8 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "_wcsicmp" => stub!(ucrt_wcsicmp as unsafe extern "win64" fn(_, _) -> _),
         "_wcsnicmp" => stub!(ucrt_wcsnicmp as unsafe extern "win64" fn(_, _, _) -> _),
         "wcsnlen" => stub!(ucrt_wcsnlen as unsafe extern "win64" fn(_, _) -> _),
-        "wcscoll" | "wcsxfrm" => stub!(ucrt_wcsicmp as unsafe extern "win64" fn(_, _) -> _),
+        "wcscoll" => stub!(ucrt_wcsicmp as unsafe extern "win64" fn(_, _) -> _),
+        "wcsxfrm" => stub!(ucrt_wcsxfrm as unsafe extern "win64" fn(_, _, _) -> _),
         "towlower" => stub!(ucrt_towlower as extern "win64" fn(_) -> _),
         "towupper" => stub!(ucrt_towupper as extern "win64" fn(_) -> _),
         "iswctype" => stub!(ucrt_iswctype as extern "win64" fn(_, _) -> _),
@@ -4909,5 +4958,65 @@ mod tests {
         // wget's locale decoder accepts any plausible CP; we lock the
         // contract at 1252 so regressions surface.
         assert_eq!(ucrt_lc_codepage_func(), 1252);
+    }
+
+    // ── strxfrm / wcsxfrm ────────────────────────────────────────────────────
+    // Root-cause regression tests for M9A: strxfrm was mapped to ucrt_strcmp
+    // (2-arg, returns int), which returned a negative comparison result used as
+    // size_t n2 in std::string::_M_replace → n2 ≈ 0xffffffff → memcpy guard trip.
+    // The correct contract: strxfrm returns strlen(src) in the C locale.
+
+    #[test]
+    fn strxfrm_returns_src_len_not_comparison() {
+        // "hello" has length 5 — must return 5, not a strcmp-style int.
+        let src = b"hello\0";
+        let mut dst = [0u8; 16];
+        let ret = unsafe { ucrt_strxfrm(dst.as_mut_ptr(), src.as_ptr(), dst.len()) };
+        assert_eq!(ret, 5, "strxfrm must return strlen(src), not a comparison int");
+        // dst must be a copy of src (identity transform in C locale)
+        assert_eq!(&dst[..5], b"hello");
+        assert_eq!(dst[5], 0, "null terminator must be written");
+    }
+
+    #[test]
+    fn strxfrm_size_query_n0() {
+        // When n==0 dst may be null; return value is still strlen(src).
+        let src = b"world\0";
+        let ret = unsafe { ucrt_strxfrm(std::ptr::null_mut(), src.as_ptr(), 0) };
+        assert_eq!(ret, 5, "strxfrm(NULL, src, 0) must return strlen(src)");
+    }
+
+    #[test]
+    fn strxfrm_resolver_maps_3_args() {
+        // Confirm the resolver returns Some for strxfrm (regression: was aliased
+        // to ucrt_strcmp which has a different arity in the function pointer type).
+        assert!(
+            resolve("msvcrt.dll", "strxfrm").is_some(),
+            "msvcrt.dll::strxfrm must resolve"
+        );
+        assert!(
+            resolve("ucrtbase.dll", "strxfrm").is_some(),
+            "ucrtbase.dll::strxfrm must resolve"
+        );
+    }
+
+    #[test]
+    fn wcsxfrm_returns_src_len() {
+        // u16 "hi" has wcslen=2; wcsxfrm must return 2.
+        let src: &[u16] = &[b'h' as u16, b'i' as u16, 0];
+        let mut dst = [0u16; 8];
+        let ret = unsafe { ucrt_wcsxfrm(dst.as_mut_ptr(), src.as_ptr(), dst.len()) };
+        assert_eq!(ret, 2, "wcsxfrm must return wcslen(src)");
+        assert_eq!(dst[0], b'h' as u16);
+        assert_eq!(dst[1], b'i' as u16);
+        assert_eq!(dst[2], 0, "null terminator must be written");
+    }
+
+    #[test]
+    fn wcsxfrm_resolver_maps_3_args() {
+        assert!(
+            resolve("msvcrt.dll", "wcsxfrm").is_some(),
+            "msvcrt.dll::wcsxfrm must resolve"
+        );
     }
 }
