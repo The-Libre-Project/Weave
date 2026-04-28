@@ -437,6 +437,31 @@ inst_thunk!(vk_get_physical_device_surface_present_modes_khr, "vkGetPhysicalDevi
 inst_thunk!(vk_get_physical_device_surface_capabilities2_khr, "vkGetPhysicalDeviceSurfaceCapabilities2KHR", VkResult, (physical_device: VkPhysicalDevice, p_surface_info: *const c_void, p_capabilities: *mut c_void));
 inst_thunk!(vk_get_physical_device_calibrateable_time_domains_ext, "vkGetPhysicalDeviceCalibrateableTimeDomainsEXT", VkResult, (physical_device: VkPhysicalDevice, p_count: *mut u32, p_domains: *mut u32));
 inst_thunk!(vk_get_physical_device_sparse_image_format_properties, "vkGetPhysicalDeviceSparseImageFormatProperties", VkResult, (physical_device: VkPhysicalDevice, format: u32, ty: u32, samples: u32, usage: u32, tiling: u32, p_count: *mut u32, p_properties: *mut c_void));
+inst_thunk!(void vk_get_physical_device_sparse_image_format_properties2,
+    "vkGetPhysicalDeviceSparseImageFormatProperties2",
+    (physical_device: VkPhysicalDevice, p_format_info: *const c_void, p_property_count: *mut u32, p_properties: *mut c_void));
+inst_thunk!(vk_get_physical_device_surface_formats2_khr,
+    "vkGetPhysicalDeviceSurfaceFormats2KHR", VkResult,
+    (physical_device: VkPhysicalDevice, p_surface_info: *const c_void, p_surface_format_count: *mut u32, p_surface_formats: *mut c_void));
+inst_thunk!(vk_get_physical_device_surface_present_modes2_ext,
+    "vkGetPhysicalDeviceSurfacePresentModes2EXT", VkResult,
+    (physical_device: VkPhysicalDevice, p_surface_info: *const c_void, p_present_mode_count: *mut u32, p_present_modes: *mut c_void));
+dev_thunk!(vk_release_swapchain_images_ext,
+    "vkReleaseSwapchainImagesEXT", VkResult,
+    (device, p_release_info: *const c_void));
+/// vkGetPhysicalDeviceWin32PresentationSupportKHR — manual implementation.
+/// VK_KHR_win32_surface is Windows-only and the Linux Vulkan loader does not expose it.
+/// Passing through via inst_thunk! would return null and silently yield VK_FALSE.
+/// Weave translates Win32 HWND surfaces to XCB surfaces, so presentation is always
+/// supported: return VK_TRUE (1).
+pub unsafe extern "win64" fn vk_get_physical_device_win32_presentation_support_khr(
+    _physical_device: VkPhysicalDevice,
+    _queue_family_index: u32,
+) -> u32 {
+    // Win32→XCB translation: we always have a valid XCB surface for any HWND,
+    // so presentation is always supported.
+    1
+}
 
 // Device functions
 dev_thunk!(void vk_destroy_device, "vkDestroyDevice", (device, p_allocator: *const c_void));
@@ -931,6 +956,22 @@ pub unsafe extern "win64" fn vk_get_instance_proc_addr(
         "vkGetPhysicalDeviceExternalBufferProperties"
         | "vkGetPhysicalDeviceExternalBufferPropertiesKHR" => {
             vk_get_physical_device_external_buffer_properties as PFN_vkVoidFunction
+        }
+        "vkGetPhysicalDeviceSparseImageFormatProperties2"
+        | "vkGetPhysicalDeviceSparseImageFormatProperties2KHR" => {
+            vk_get_physical_device_sparse_image_format_properties2 as PFN_vkVoidFunction
+        }
+        "vkGetPhysicalDeviceSurfaceFormats2KHR" => {
+            vk_get_physical_device_surface_formats2_khr as PFN_vkVoidFunction
+        }
+        "vkGetPhysicalDeviceWin32PresentationSupportKHR" => {
+            vk_get_physical_device_win32_presentation_support_khr as PFN_vkVoidFunction
+        }
+        "vkGetPhysicalDeviceSurfacePresentModes2EXT" => {
+            vk_get_physical_device_surface_present_modes2_ext as PFN_vkVoidFunction
+        }
+        "vkReleaseSwapchainImagesEXT" => {
+            vk_release_swapchain_images_ext as PFN_vkVoidFunction
         }
         // Safety fence: for any Vulkan function not in our dispatch table, return NULL.
         // Returning the raw SysV host-library pointer would cause an ABI mismatch crash
