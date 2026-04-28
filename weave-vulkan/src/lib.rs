@@ -403,6 +403,9 @@ pub unsafe extern "win64" fn vk_enumerate_physical_devices(instance: VkInstance,
     let f: unsafe extern "C" fn(VkInstance, *mut u32, *mut VkPhysicalDevice) -> VkResult = unsafe { std::mem::transmute(f) };
     let r = unsafe { f(instance, p_count, p_devices) };
     eprintln!("weave-vulkan: vk_enumerate_physical_devices RETURN result={}", r);
+    if !p_count.is_null() {
+        eprintln!("weave-vulkan: vk_enumerate_physical_devices count={}", unsafe { *p_count });
+    }
     r
 }
 inst_thunk!(void vk_get_physical_device_properties, "vkGetPhysicalDeviceProperties", (physical_device: VkPhysicalDevice, p_properties: *mut c_void));
