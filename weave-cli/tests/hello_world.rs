@@ -3945,7 +3945,6 @@ fn ddraw_basic_blt_gate() {
 /// bytes — that is an off-by-one in the doc; the README in the fixture
 /// directory is authoritative.
 #[test]
-#[ignore = "M8a/b: gate authored ignore-gated; M8a/c removes the ignore once 7za extract path is exercised under weave"]
 fn seven_zip_a_extract_gate() {
     if !cfg!(target_os = "linux") {
         eprintln!("skipping seven_zip_a_extract_gate — requires Linux");
