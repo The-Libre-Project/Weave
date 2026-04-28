@@ -124,6 +124,15 @@ pub unsafe extern "win64" fn ucrt_memcpy(
             eprintln!(
                 "weave/ucrt: memcpy size guard tripped — n={n:#x} ({n}); skipping copy"
             );
+            // M9 d3d9_probe diagnostic — pin caller of underflowed memcpy.
+            // Remove after M9 root cause is fixed.
+            eprintln!(
+                "weave/ucrt: memcpy guard tripped — dst={:#x} src={:#x} n={:#x}\nbacktrace:\n{}",
+                dst as usize,
+                src as usize,
+                n,
+                std::backtrace::Backtrace::force_capture()
+            );
         }
         return dst;
     }
