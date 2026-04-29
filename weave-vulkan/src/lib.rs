@@ -309,6 +309,7 @@ fn real_device_fn(device: VkDevice, name: &str) -> PFN_vkVoidFunction {
 macro_rules! inst_thunk {
     ($name:ident, $real:literal, $ret:ty, ($($arg:ident : $ty:ty),*)) => {
         pub unsafe extern "win64" fn $name($($arg: $ty),*) -> $ret {
+            eprintln!("weave-vulkan: thunk> {}", $real);
             let f = real_fn(stored_instance(), $real);
             if f.is_null() { return std::mem::zeroed(); }
             // SAFETY: `f` is the `PFN_vkVoidFunction` returned by
@@ -322,6 +323,7 @@ macro_rules! inst_thunk {
     };
     (void $name:ident, $real:literal, ($($arg:ident : $ty:ty),*)) => {
         pub unsafe extern "win64" fn $name($($arg: $ty),*) {
+            eprintln!("weave-vulkan: thunk> {}", $real);
             let f = real_fn(stored_instance(), $real);
             if f.is_null() { return; }
             // SAFETY: `f` is the `PFN_vkVoidFunction` returned by
@@ -339,6 +341,7 @@ macro_rules! inst_thunk {
 macro_rules! dev_thunk {
     ($name:ident, $real:literal, $ret:ty, ($dev:ident, $($arg:ident : $ty:ty),*)) => {
         pub unsafe extern "win64" fn $name($dev: VkDevice, $($arg: $ty),*) -> $ret {
+            eprintln!("weave-vulkan: thunk> {}", $real);
             let f = real_device_fn($dev, $real);
             if f.is_null() { return std::mem::zeroed(); }
             // SAFETY: `f` is the `PFN_vkVoidFunction` returned by
@@ -352,6 +355,7 @@ macro_rules! dev_thunk {
     };
     (void $name:ident, $real:literal, ($dev:ident, $($arg:ident : $ty:ty),*)) => {
         pub unsafe extern "win64" fn $name($dev: VkDevice, $($arg: $ty),*) {
+            eprintln!("weave-vulkan: thunk> {}", $real);
             let f = real_device_fn($dev, $real);
             if f.is_null() { return; }
             // SAFETY: `f` is the `PFN_vkVoidFunction` returned by
@@ -369,6 +373,7 @@ macro_rules! dev_thunk {
 macro_rules! cmd_thunk {
     (void $name:ident, $real:literal, ($cb:ident, $($arg:ident : $ty:ty),*)) => {
         pub unsafe extern "win64" fn $name($cb: VkCommandBuffer, $($arg: $ty),*) {
+            eprintln!("weave-vulkan: thunk> {}", $real);
             let f = real_fn(stored_instance(), $real);
             if f.is_null() { return; }
             // SAFETY: `f` is the `PFN_vkVoidFunction` for the command-buffer
@@ -382,6 +387,7 @@ macro_rules! cmd_thunk {
     };
     ($name:ident, $real:literal, $ret:ty, ($cb:ident, $($arg:ident : $ty:ty),*)) => {
         pub unsafe extern "win64" fn $name($cb: VkCommandBuffer, $($arg: $ty),*) -> $ret {
+            eprintln!("weave-vulkan: thunk> {}", $real);
             let f = real_fn(stored_instance(), $real);
             if f.is_null() { return std::mem::zeroed(); }
             // SAFETY: `f` is the `PFN_vkVoidFunction` for the command-buffer
