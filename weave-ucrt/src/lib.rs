@@ -105,75 +105,19 @@ pub extern "win64" fn ucrt_set_new_mode(_mode: i32) -> i32 {
 
 /// # Safety
 /// `dst` must be writable for `n` bytes and must not overlap with `src`. `src` must be valid for `n` bytes.
-//
-// M9A/b iter 2 — restructured as a naked-asm thunk so we can capture the
-// caller's saved RIP at function entry, BEFORE any prologue clobbers regs.
-// Win64 ABI: rcx=dst, rdx=src, r8=n, r9=4th arg. At function entry [rsp]
-// holds the caller's return address (saved by the `call` instruction).
-// We load r9 = [rsp] and tail-jmp to the impl, which receives caller_ra as
-// its 4th arg. iter 1 (commit 3d444e2) read [rbp+8] inline and got 0x0 —
-// frame pointer was elided or rbp clobbered before the asm executed.
-#[cfg(target_arch = "x86_64")]
-#[unsafe(naked)]
-#[no_mangle]
 pub unsafe extern "win64" fn ucrt_memcpy(
-    _dst: *mut c_void,
-    _src: *const c_void,
-    _n: usize,
-) -> *mut c_void {
-    core::arch::naked_asm!(
-        "mov r9, [rsp]",
-        "jmp {impl_fn}",
-        impl_fn = sym ucrt_memcpy_impl,
-    )
-}
-
-// Non-x86_64 fallback (macOS dev): forward without caller_ra capture.
-#[cfg(not(target_arch = "x86_64"))]
-pub unsafe extern "C" fn ucrt_memcpy(
     dst: *mut c_void,
     src: *const c_void,
     n: usize,
 ) -> *mut c_void {
-    unsafe { ucrt_memcpy_impl(dst, src, n, 0) }
-}
-
-unsafe extern "win64" fn ucrt_memcpy_impl(
-    dst: *mut c_void,
-    src: *const c_void,
-    n: usize,
-    caller_ra: usize,
-) -> *mut c_void {
-    // Sanity guard — DXVK's findProfile path indirectly invokes memcpy with
-    // n=0xFFFFFFFF (a 32-bit -1 zero-extended to size_t) when querying
-    // _filelengthi64-style size sentinels.  The SIMD-optimised libc memcpy
-    // reads up to 12 KB ahead of `src` for prefetching and faults past the
-    // source allocation.  Cap n at 256 MB — any caller passing more is
-    // either confused or doing something we can't honour anyway.  See
+    // Sanity guard — DXVK's _M_replace path passes n values that have
+    // underflowed to ~0xFFFFFFxx (32-bit -1 zero-extended to size_t).  The
+    // SIMD-optimised libc memcpy faults past the source allocation on such
+    // sizes.  Cap at 256 MB — any caller passing more is confused.  Root cause
+    // fixed in commit 749a03e (strxfrm/wcsxfrm aliased to wrong-arity
+    // ucrt_strcmp); guard retained as defence-in-depth.  See
     // CI-FAIL-LADDER.md M9 d3d9 arc Fail #13.
     if n >= 0x10000000 {
-        // M9A/b iter 2 — replace the LOGGED one-shot with a 100-cap counter
-        // so all guard trips surface in one CI run (we suspect multiple
-        // distinct call sites trip at startup with different n values).
-        // Defense vs log flood per commit 9bee9b4 lesson.
-        static GUARD_LOG_COUNT: std::sync::atomic::AtomicUsize =
-            std::sync::atomic::AtomicUsize::new(0);
-        const MAX_GUARD_LOGS: usize = 100;
-        let count = GUARD_LOG_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        if count < MAX_GUARD_LOGS {
-            eprintln!("weave/ucrt: memcpy size guard tripped — n={n:#x} ({n}); skipping copy");
-            // M9 d3d9_probe diagnostic — pin caller of underflowed memcpy.
-            // Remove after M9 root cause is fixed.
-            eprintln!(
-                "weave/ucrt: memcpy guard tripped — dst={:#x} src={:#x} n={:#x} caller_ra={:#x}",
-                dst as usize, src as usize, n, caller_ra,
-            );
-            if count == MAX_GUARD_LOGS - 1 {
-                eprintln!(
-                    "weave/ucrt: memcpy guard log capped at {MAX_GUARD_LOGS} entries; further trips suppressed"
-                );
-            }
-        }
         return dst;
     }
     unsafe { libc::memcpy(dst, src, n) }
