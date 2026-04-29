@@ -531,6 +531,21 @@ pub fn test_reset() {
     *state = [0u8; 256];
 }
 
+/// Process-global serializing lock for tests that read/write `VK_STATE`.
+///
+/// Cargo runs `#[test]` functions within a single test binary in parallel by
+/// default. `test_reset()` only briefly locks `VK_STATE` to clear it — it does
+/// NOT serialize a whole test case against another. Integration tests in
+/// `weave-user32/tests/` that set VK bits, call into APIs that read VK state,
+/// and then assert on the result must hold this lock for the full duration of
+/// the case to prevent cross-test contamination.
+///
+/// Always `pub` (rather than `#[cfg(test)]`) because integration tests in
+/// `tests/*.rs` are compiled as separate crates linking against the library
+/// build of `weave-user32` — `cfg(test)` items in this lib.rs are NOT visible
+/// to them. An idle `Mutex<()>` static has negligible cost in production.
+pub static TEST_VK_LOCK: Mutex<()> = Mutex::new(());
+
 #[cfg(test)]
 mod tests {
     use super::*;

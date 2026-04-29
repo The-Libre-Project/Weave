@@ -55,6 +55,9 @@ fn make_msg(message: u32, w_param: usize) -> Msg {
 /// Case A: VK_CONTROL is down, FVIRTKEY|FCONTROL accel for VK_S → must match (returns 1).
 #[test]
 fn case_a_ctrl_down_ctrl_s_accel_matches() {
+    let _guard = input::TEST_VK_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
     input::test_reset();
 
     // Register HACCEL: FVIRTKEY | FCONTROL, VK_S, cmd=0xC0DE
@@ -87,6 +90,9 @@ fn case_a_ctrl_down_ctrl_s_accel_matches() {
 /// Case B: VK_CONTROL is NOT down, FVIRTKEY|FCONTROL accel for VK_S → no match (returns 0).
 #[test]
 fn case_b_ctrl_not_down_ctrl_s_accel_no_match() {
+    let _guard = input::TEST_VK_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
     input::test_reset();
 
     let blob = make_single_accel_blob(FVIRTKEY | FCONTROL, VK_S, 0xC0DE);
@@ -116,6 +122,9 @@ fn case_b_ctrl_not_down_ctrl_s_accel_no_match() {
 /// Case C: VK_CONTROL + VK_SHIFT both down, accel only requires FCONTROL (no FSHIFT) → no match.
 #[test]
 fn case_c_extra_shift_prevents_match() {
+    let _guard = input::TEST_VK_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
     input::test_reset();
 
     // Accel: FVIRTKEY | FCONTROL only (no FSHIFT in fVirt).
@@ -149,6 +158,9 @@ fn case_c_extra_shift_prevents_match() {
 /// Case D: VK_CONTROL is down but message is WM_CHAR — FVIRTKEY accel does not match WM_CHAR.
 #[test]
 fn case_d_wm_char_does_not_match_fvirtkey_accel() {
+    let _guard = input::TEST_VK_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
     input::test_reset();
 
     // Accel: FVIRTKEY | FCONTROL for VK_S.
