@@ -4030,7 +4030,13 @@ fn seven_zip_a_extract_gate() {
             .zip(expected.iter())
             .position(|(a, b)| a != b)
             .map(|i| i.to_string())
-            .unwrap_or_else(|| format!("length-only (actual={}, expected={})", actual.len(), expected.len()));
+            .unwrap_or_else(|| {
+                format!(
+                    "length-only (actual={}, expected={})",
+                    actual.len(),
+                    expected.len()
+                )
+            });
         panic!(
             "seven_zip_a_extract_gate A3 FAIL: extracted bytes != fixture bytes.\n\
              actual len:   {}\n\

@@ -404,14 +404,8 @@ fn print_weave_crash(
             }
             // Bytes at RIP — lets us disassemble the crashing instruction post-mortem.
             let mut rbuf = [0u8; 16];
-            let rn = unsafe {
-                libc::pread(
-                    fd,
-                    rbuf.as_mut_ptr() as *mut libc::c_void,
-                    16,
-                    rip as i64,
-                )
-            };
+            let rn =
+                unsafe { libc::pread(fd, rbuf.as_mut_ptr() as *mut libc::c_void, 16, rip as i64) };
             unsafe { libc::close(fd) };
             if rn > 0 {
                 rip_hex = *b"?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ?? ??";

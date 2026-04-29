@@ -1780,7 +1780,9 @@ pub fn resolve(func: &str) -> Option<usize> {
         // Wine presence marker — DXVK calls GetProcAddress(ntdll, "__wine_dbg_output") to
         // detect whether it's running under Wine.  Returning a non-NULL address causes DXVK
         // to use its Wine/winevulkan Vulkan-loading path, which is what Weave supports.
-        "__wine_dbg_output" => Some(wine_dbg_output as unsafe extern "win64" fn(_) -> _ as *const () as usize),
+        "__wine_dbg_output" => {
+            Some(wine_dbg_output as unsafe extern "win64" fn(_) -> _ as *const () as usize)
+        }
         _ => None,
     }
 }

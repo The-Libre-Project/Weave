@@ -159,20 +159,14 @@ unsafe extern "win64" fn ucrt_memcpy_impl(
         static GUARD_LOG_COUNT: std::sync::atomic::AtomicUsize =
             std::sync::atomic::AtomicUsize::new(0);
         const MAX_GUARD_LOGS: usize = 100;
-        let count =
-            GUARD_LOG_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let count = GUARD_LOG_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if count < MAX_GUARD_LOGS {
-            eprintln!(
-                "weave/ucrt: memcpy size guard tripped — n={n:#x} ({n}); skipping copy"
-            );
+            eprintln!("weave/ucrt: memcpy size guard tripped — n={n:#x} ({n}); skipping copy");
             // M9 d3d9_probe diagnostic — pin caller of underflowed memcpy.
             // Remove after M9 root cause is fixed.
             eprintln!(
                 "weave/ucrt: memcpy guard tripped — dst={:#x} src={:#x} n={:#x} caller_ra={:#x}",
-                dst as usize,
-                src as usize,
-                n,
-                caller_ra,
+                dst as usize, src as usize, n, caller_ra,
             );
             if count == MAX_GUARD_LOGS - 1 {
                 eprintln!(
@@ -4972,7 +4966,10 @@ mod tests {
         let src = b"hello\0";
         let mut dst = [0u8; 16];
         let ret = unsafe { ucrt_strxfrm(dst.as_mut_ptr(), src.as_ptr(), dst.len()) };
-        assert_eq!(ret, 5, "strxfrm must return strlen(src), not a comparison int");
+        assert_eq!(
+            ret, 5,
+            "strxfrm must return strlen(src), not a comparison int"
+        );
         // dst must be a copy of src (identity transform in C locale)
         assert_eq!(&dst[..5], b"hello");
         assert_eq!(dst[5], 0, "null terminator must be written");

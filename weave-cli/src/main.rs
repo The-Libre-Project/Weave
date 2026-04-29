@@ -542,9 +542,9 @@ fn main() {
         "/usr/lib64",
         "/usr/share/vulkan",
         "/etc/vulkan",
-        "/dev/dri",           // DRM render nodes — lavapipe needs these to enumerate
-        "/sys/dev/char",      // character device sysfs symlinks
-        "/sys/class/drm",     // DRM class sysfs entries
+        "/dev/dri",       // DRM render nodes — lavapipe needs these to enumerate
+        "/sys/dev/char",  // character device sysfs symlinks
+        "/sys/class/drm", // DRM class sysfs entries
     ];
     for path_str in vulkan_sys_paths {
         let p = std::path::Path::new(path_str);
