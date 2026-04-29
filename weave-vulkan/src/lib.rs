@@ -857,9 +857,59 @@ dev_thunk!(vk_create_query_pool, "vkCreateQueryPool", VkResult, (device, p_info:
 dev_thunk!(void vk_destroy_query_pool, "vkDestroyQueryPool", (device, query_pool: VkQueryPool, p_allocator: *const c_void));
 dev_thunk!(vk_get_query_pool_results, "vkGetQueryPoolResults", VkResult, (device, query_pool: VkQueryPool, first_query: u32, query_count: u32, data_size: usize, p_data: *mut c_void, stride: VkDeviceSize, flags: VkQueryResultFlags));
 dev_thunk!(void vk_reset_query_pool, "vkResetQueryPool", (device, query_pool: VkQueryPool, first_query: u32, query_count: u32));
-dev_thunk!(vk_create_swapchain_khr, "vkCreateSwapchainKHR", VkResult, (device, p_info: *const c_void, p_allocator: *const c_void, p_swapchain: *mut VkSwapchainKHR));
+pub unsafe extern "win64" fn vk_create_swapchain_khr(
+    device: VkDevice,
+    p_info: *const c_void,
+    p_allocator: *const c_void,
+    p_swapchain: *mut VkSwapchainKHR,
+) -> VkResult {
+    eprintln!(
+        "weave-vulkan: vk_create_swapchain_khr ENTER device={:p} p_info={p_info:p} p_swapchain={p_swapchain:p}",
+        device as *const ()
+    );
+    let f = real_device_fn(device, "vkCreateSwapchainKHR");
+    if f.is_null() {
+        eprintln!("weave-vulkan: vk_create_swapchain_khr: real fn NULL");
+        return unsafe { std::mem::zeroed() };
+    }
+    let f: unsafe extern "C" fn(
+        VkDevice,
+        *const c_void,
+        *const c_void,
+        *mut VkSwapchainKHR,
+    ) -> VkResult = unsafe { std::mem::transmute(f) };
+    eprintln!("weave-vulkan: vk_create_swapchain_khr: calling real");
+    let r = unsafe { f(device, p_info, p_allocator, p_swapchain) };
+    eprintln!(
+        "weave-vulkan: vk_create_swapchain_khr RETURN {r}, swapchain=0x{:x}",
+        if p_swapchain.is_null() {
+            0
+        } else {
+            unsafe { *p_swapchain }
+        }
+    );
+    r
+}
 dev_thunk!(void vk_destroy_swapchain_khr, "vkDestroySwapchainKHR", (device, swapchain: VkSwapchainKHR, p_allocator: *const c_void));
-dev_thunk!(vk_get_swapchain_images_khr, "vkGetSwapchainImagesKHR", VkResult, (device, swapchain: VkSwapchainKHR, p_count: *mut u32, p_images: *mut VkImage));
+pub unsafe extern "win64" fn vk_get_swapchain_images_khr(
+    device: VkDevice,
+    swapchain: VkSwapchainKHR,
+    p_count: *mut u32,
+    p_images: *mut VkImage,
+) -> VkResult {
+    eprintln!(
+        "weave-vulkan: vk_get_swapchain_images_khr ENTER swapchain=0x{swapchain:x} p_images={p_images:p}"
+    );
+    let f = real_device_fn(device, "vkGetSwapchainImagesKHR");
+    if f.is_null() {
+        return unsafe { std::mem::zeroed() };
+    }
+    let f: unsafe extern "C" fn(VkDevice, VkSwapchainKHR, *mut u32, *mut VkImage) -> VkResult =
+        unsafe { std::mem::transmute(f) };
+    let r = unsafe { f(device, swapchain, p_count, p_images) };
+    eprintln!("weave-vulkan: vk_get_swapchain_images_khr RETURN {r}");
+    r
+}
 dev_thunk!(vk_acquire_next_image_khr, "vkAcquireNextImageKHR", VkResult, (device, swapchain: VkSwapchainKHR, timeout: u64, semaphore: VkSemaphore, fence: VkFence, p_image_index: *mut u32));
 dev_thunk!(vk_acquire_next_image2_khr, "vkAcquireNextImage2KHR", VkResult, (device, p_info: *const c_void, p_image_index: *mut u32));
 dev_thunk!(vk_get_device_group_present_capabilities_khr, "vkGetDeviceGroupPresentCapabilitiesKHR", VkResult, (device, p_device_group_present_capabilities: *mut c_void));
