@@ -777,10 +777,83 @@ dev_thunk!(void vk_destroy_device, "vkDestroyDevice", (device, p_allocator: *con
 dev_thunk!(void vk_get_device_queue, "vkGetDeviceQueue", (device, queue_family_index: u32, queue_index: u32, p_queue: *mut VkQueue));
 dev_thunk!(void vk_get_device_queue2, "vkGetDeviceQueue2", (device, p_info: *const c_void, p_queue: *mut VkQueue));
 dev_thunk!(vk_device_wait_idle, "vkDeviceWaitIdle", VkResult, (device,));
-dev_thunk!(vk_queue_submit, "vkQueueSubmit", VkResult, (device, queue: VkQueue, submit_count: u32, p_submits: *const c_void, fence: VkFence));
-dev_thunk!(vk_queue_submit2, "vkQueueSubmit2", VkResult, (device, queue: VkQueue, submit_count: u32, p_submits: *const c_void, fence: VkFence));
-dev_thunk!(vk_queue_wait_idle, "vkQueueWaitIdle", VkResult, (device, queue: VkQueue));
-dev_thunk!(vk_queue_present_khr, "vkQueuePresentKHR", VkResult, (device, queue: VkQueue, p_present_info: *const c_void));
+// Queue-first thunks: real Vulkan signature has VkQueue as the first arg, not
+// VkDevice.  We resolve via vkGetInstanceProcAddr (which since 1.2 returns
+// dispatchable-trampoline pointers for device-level procs).
+pub unsafe extern "win64" fn vk_queue_submit(
+    queue: VkQueue,
+    submit_count: u32,
+    p_submits: *const c_void,
+    fence: VkFence,
+) -> VkResult {
+    eprintln!(
+        "weave-vulkan: vk_queue_submit ENTER queue={:p} count={submit_count} fence=0x{fence:x}",
+        queue as *const ()
+    );
+    let f = real_fn(stored_instance(), "vkQueueSubmit");
+    if f.is_null() {
+        eprintln!("weave-vulkan: vk_queue_submit: real fn NULL");
+        return unsafe { std::mem::zeroed() };
+    }
+    let f: unsafe extern "C" fn(VkQueue, u32, *const c_void, VkFence) -> VkResult =
+        unsafe { std::mem::transmute(f) };
+    let r = unsafe { f(queue, submit_count, p_submits, fence) };
+    eprintln!("weave-vulkan: vk_queue_submit RETURN {r}");
+    r
+}
+pub unsafe extern "win64" fn vk_queue_submit2(
+    queue: VkQueue,
+    submit_count: u32,
+    p_submits: *const c_void,
+    fence: VkFence,
+) -> VkResult {
+    eprintln!(
+        "weave-vulkan: vk_queue_submit2 ENTER queue={:p} count={submit_count} fence=0x{fence:x}",
+        queue as *const ()
+    );
+    let f = real_fn(stored_instance(), "vkQueueSubmit2");
+    if f.is_null() {
+        eprintln!("weave-vulkan: vk_queue_submit2: real fn NULL");
+        return unsafe { std::mem::zeroed() };
+    }
+    let f: unsafe extern "C" fn(VkQueue, u32, *const c_void, VkFence) -> VkResult =
+        unsafe { std::mem::transmute(f) };
+    let r = unsafe { f(queue, submit_count, p_submits, fence) };
+    eprintln!("weave-vulkan: vk_queue_submit2 RETURN {r}");
+    r
+}
+pub unsafe extern "win64" fn vk_queue_wait_idle(queue: VkQueue) -> VkResult {
+    eprintln!(
+        "weave-vulkan: vk_queue_wait_idle ENTER queue={:p}",
+        queue as *const ()
+    );
+    let f = real_fn(stored_instance(), "vkQueueWaitIdle");
+    if f.is_null() {
+        return unsafe { std::mem::zeroed() };
+    }
+    let f: unsafe extern "C" fn(VkQueue) -> VkResult = unsafe { std::mem::transmute(f) };
+    let r = unsafe { f(queue) };
+    eprintln!("weave-vulkan: vk_queue_wait_idle RETURN {r}");
+    r
+}
+pub unsafe extern "win64" fn vk_queue_present_khr(
+    queue: VkQueue,
+    p_present_info: *const c_void,
+) -> VkResult {
+    eprintln!(
+        "weave-vulkan: vk_queue_present_khr ENTER queue={:p} info={p_present_info:p}",
+        queue as *const ()
+    );
+    let f = real_fn(stored_instance(), "vkQueuePresentKHR");
+    if f.is_null() {
+        return unsafe { std::mem::zeroed() };
+    }
+    let f: unsafe extern "C" fn(VkQueue, *const c_void) -> VkResult =
+        unsafe { std::mem::transmute(f) };
+    let r = unsafe { f(queue, p_present_info) };
+    eprintln!("weave-vulkan: vk_queue_present_khr RETURN {r}");
+    r
+}
 dev_thunk!(vk_allocate_memory, "vkAllocateMemory", VkResult, (device, p_info: *const c_void, p_allocator: *const c_void, p_memory: *mut VkDeviceMemory));
 dev_thunk!(void vk_free_memory, "vkFreeMemory", (device, memory: VkDeviceMemory, p_allocator: *const c_void));
 dev_thunk!(vk_map_memory, "vkMapMemory", VkResult, (device, memory: VkDeviceMemory, offset: VkDeviceSize, size: VkDeviceSize, flags: VkMemoryMapFlags, pp_data: *mut *mut c_void));
