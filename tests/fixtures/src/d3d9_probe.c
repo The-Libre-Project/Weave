@@ -49,11 +49,15 @@ int main(void) {
     }
     fprintf(stderr, "d3d9_probe: STEP 3 CreateWindowExA\n");
     HWND hwnd = CreateWindowExA(0, "d3d9_probe_class", "d3d9_probe",
-                                WS_POPUP, 0, 0, 320, 240,
+                                WS_POPUP | WS_VISIBLE, 0, 0, 320, 240,
                                 NULL, NULL, wc.hInstance, NULL);
     if (!hwnd) {
         fprintf(stderr, "d3d9_probe: CreateWindowExA failed\n"); return 2;
     }
+    /* Ensure the X11 window is mapped before DXVK creates a Vulkan surface
+       on it.  Weave's user32 only maps when WS_VISIBLE is set on the style. */
+    ShowWindow(hwnd, SW_SHOW);
+    UpdateWindow(hwnd);
     fprintf(stderr, "d3d9_probe: STEP 4 LoadLibraryA hwnd=%p\n", (void*)hwnd);
 
     /* 2. Load d3d9.dll and get Direct3DCreate9 */
