@@ -112,5 +112,13 @@ int main(void) {
 
     fprintf(stderr, "d3d9_probe: STEP 10 done\n");
     printf("d3d9_probe OK\n");
+
+    /* Hold the window long enough for the gate's pixel sampler (which fires
+       at the 20s mark of the 60s deadline) to read red back from the X
+       server.  Without this the probe exits in ~400ms and the surface is
+       destroyed before any sample is taken. */
+    fflush(stderr);
+    fflush(stdout);
+    Sleep(25000);
     return 0;
 }
