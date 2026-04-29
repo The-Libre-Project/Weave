@@ -396,15 +396,28 @@ macro_rules! cmd_thunk {
 }
 
 // Physical-device functions
-pub unsafe extern "win64" fn vk_enumerate_physical_devices(instance: VkInstance, p_count: *mut u32, p_devices: *mut VkPhysicalDevice) -> VkResult {
+pub unsafe extern "win64" fn vk_enumerate_physical_devices(
+    instance: VkInstance,
+    p_count: *mut u32,
+    p_devices: *mut VkPhysicalDevice,
+) -> VkResult {
     eprintln!("weave-vulkan: vk_enumerate_physical_devices ENTER");
     let f = real_fn(stored_instance(), "vkEnumeratePhysicalDevices");
-    if f.is_null() { return unsafe { std::mem::zeroed() }; }
-    let f: unsafe extern "C" fn(VkInstance, *mut u32, *mut VkPhysicalDevice) -> VkResult = unsafe { std::mem::transmute(f) };
+    if f.is_null() {
+        return unsafe { std::mem::zeroed() };
+    }
+    let f: unsafe extern "C" fn(VkInstance, *mut u32, *mut VkPhysicalDevice) -> VkResult =
+        unsafe { std::mem::transmute(f) };
     let r = unsafe { f(instance, p_count, p_devices) };
-    eprintln!("weave-vulkan: vk_enumerate_physical_devices RETURN result={}", r);
+    eprintln!(
+        "weave-vulkan: vk_enumerate_physical_devices RETURN result={}",
+        r
+    );
     if !p_count.is_null() {
-        eprintln!("weave-vulkan: vk_enumerate_physical_devices count={}", unsafe { *p_count });
+        eprintln!(
+            "weave-vulkan: vk_enumerate_physical_devices count={}",
+            unsafe { *p_count }
+        );
     }
     r
 }
@@ -420,13 +433,61 @@ inst_thunk!(void vk_get_physical_device_format_properties, "vkGetPhysicalDeviceF
 inst_thunk!(void vk_get_physical_device_format_properties2, "vkGetPhysicalDeviceFormatProperties2", (physical_device: VkPhysicalDevice, format: VkFormat, p_properties: *mut c_void));
 inst_thunk!(vk_get_physical_device_image_format_properties, "vkGetPhysicalDeviceImageFormatProperties", VkResult, (physical_device: VkPhysicalDevice, format: u32, ty: u32, tiling: u32, usage: u32, flags: u32, p_properties: *mut c_void));
 inst_thunk!(vk_get_physical_device_image_format_properties2, "vkGetPhysicalDeviceImageFormatProperties2", VkResult, (physical_device: VkPhysicalDevice, p_info: *const c_void, p_properties: *mut c_void));
-inst_thunk!(vk_enumerate_device_extension_properties, "vkEnumerateDeviceExtensionProperties", VkResult, (physical_device: VkPhysicalDevice, p_layer: *const c_char, p_count: *mut u32, p_properties: *mut c_void));
+pub unsafe extern "win64" fn vk_enumerate_device_extension_properties(
+    physical_device: VkPhysicalDevice,
+    p_layer: *const c_char,
+    p_count: *mut u32,
+    p_properties: *mut c_void,
+) -> VkResult {
+    let f = real_fn(stored_instance(), "vkEnumerateDeviceExtensionProperties");
+    if f.is_null() {
+        return unsafe { std::mem::zeroed() };
+    }
+    let f: unsafe extern "C" fn(
+        VkPhysicalDevice,
+        *const c_char,
+        *mut u32,
+        *mut c_void,
+    ) -> VkResult = unsafe { std::mem::transmute(f) };
+    let r = unsafe { f(physical_device, p_layer, p_count, p_properties) };
+    // Dump the list once, when DXVK fills the array (p_properties != NULL).
+    // VkExtensionProperties layout: char extensionName[256]; uint32_t specVersion;
+    if !p_properties.is_null() && !p_count.is_null() {
+        let count = unsafe { *p_count } as usize;
+        eprintln!(
+            "weave-vulkan: vk_enumerate_device_extension_properties returned {count} extensions:"
+        );
+        let stride: usize = 256 + 4;
+        for i in 0..count {
+            let entry = unsafe { (p_properties as *const u8).add(i * stride) } as *const c_char;
+            let name = unsafe { CStr::from_ptr(entry) }.to_string_lossy();
+            let spec = unsafe { *(entry.add(256) as *const u32) };
+            eprintln!("weave-vulkan:   ext[{i}] {name} v{spec}");
+        }
+    }
+    r
+}
 inst_thunk!(vk_enumerate_device_layer_properties, "vkEnumerateDeviceLayerProperties", VkResult, (physical_device: VkPhysicalDevice, p_count: *mut u32, p_properties: *mut c_void));
-pub unsafe extern "win64" fn vk_create_device(physical_device: VkPhysicalDevice, p_create_info: *const c_void, p_allocator: *const c_void, p_device: *mut VkDevice) -> VkResult {
-    eprintln!("weave-vulkan: vk_create_device ENTER physical_device={:p}", physical_device as *const ());
+pub unsafe extern "win64" fn vk_create_device(
+    physical_device: VkPhysicalDevice,
+    p_create_info: *const c_void,
+    p_allocator: *const c_void,
+    p_device: *mut VkDevice,
+) -> VkResult {
+    eprintln!(
+        "weave-vulkan: vk_create_device ENTER physical_device={:p}",
+        physical_device as *const ()
+    );
     let f = real_fn(stored_instance(), "vkCreateDevice");
-    if f.is_null() { return unsafe { std::mem::zeroed() }; }
-    let f: unsafe extern "C" fn(VkPhysicalDevice, *const c_void, *const c_void, *mut VkDevice) -> VkResult = unsafe { std::mem::transmute(f) };
+    if f.is_null() {
+        return unsafe { std::mem::zeroed() };
+    }
+    let f: unsafe extern "C" fn(
+        VkPhysicalDevice,
+        *const c_void,
+        *const c_void,
+        *mut VkDevice,
+    ) -> VkResult = unsafe { std::mem::transmute(f) };
     eprintln!("weave-vulkan: vk_create_device calling real vkCreateDevice");
     let r = unsafe { f(physical_device, p_create_info, p_allocator, p_device) };
     eprintln!("weave-vulkan: vk_create_device RETURN result={}", r);
@@ -693,9 +754,7 @@ pub unsafe extern "win64" fn vk_get_instance_proc_addr(
         Ok(s) => s,
         Err(_) => return std::ptr::null(),
     };
-    eprintln!("weave-vulkan: vk_get_instance_proc_addr({name:?})");
-
-    match name {
+    let result: PFN_vkVoidFunction = match name {
         "vkGetInstanceProcAddr" => vk_get_instance_proc_addr as PFN_vkVoidFunction,
         "vkCreateInstance" => vk_create_instance as PFN_vkVoidFunction,
         "vkEnumerateInstanceExtensionProperties" => {
@@ -925,9 +984,7 @@ pub unsafe extern "win64" fn vk_get_instance_proc_addr(
         "vkGetMemoryWin32HandlePropertiesKHR" => {
             vk_get_memory_win32_handle_properties_khr as PFN_vkVoidFunction
         }
-        "vkGetSemaphoreWin32HandleKHR" => {
-            vk_get_semaphore_win32_handle_khr as PFN_vkVoidFunction
-        }
+        "vkGetSemaphoreWin32HandleKHR" => vk_get_semaphore_win32_handle_khr as PFN_vkVoidFunction,
         "vkImportSemaphoreWin32HandleKHR" => {
             vk_import_semaphore_win32_handle_khr as PFN_vkVoidFunction
         }
@@ -979,9 +1036,7 @@ pub unsafe extern "win64" fn vk_get_instance_proc_addr(
         "vkCmdSetStencilTestEnable" | "vkCmdSetStencilTestEnableEXT" => {
             vk_cmd_set_stencil_test_enable as PFN_vkVoidFunction
         }
-        "vkCmdSetStencilOp" | "vkCmdSetStencilOpEXT" => {
-            vk_cmd_set_stencil_op as PFN_vkVoidFunction
-        }
+        "vkCmdSetStencilOp" | "vkCmdSetStencilOpEXT" => vk_cmd_set_stencil_op as PFN_vkVoidFunction,
         "vkCmdSetRasterizerDiscardEnable" | "vkCmdSetRasterizerDiscardEnableEXT" => {
             vk_cmd_set_rasterizer_discard_enable as PFN_vkVoidFunction
         }
@@ -1065,9 +1120,7 @@ pub unsafe extern "win64" fn vk_get_instance_proc_addr(
         "vkCmdBeginRendering" | "vkCmdBeginRenderingKHR" => {
             vk_cmd_begin_rendering as PFN_vkVoidFunction
         }
-        "vkCmdEndRendering" | "vkCmdEndRenderingKHR" => {
-            vk_cmd_end_rendering as PFN_vkVoidFunction
-        }
+        "vkCmdEndRendering" | "vkCmdEndRenderingKHR" => vk_cmd_end_rendering as PFN_vkVoidFunction,
         "vkCmdExecuteCommands" => vk_cmd_execute_commands as PFN_vkVoidFunction,
         "vkCmdBindDescriptorSets2" | "vkCmdBindDescriptorSets2KHR" => {
             vk_cmd_bind_descriptor_sets2 as PFN_vkVoidFunction
@@ -1109,16 +1162,23 @@ pub unsafe extern "win64" fn vk_get_instance_proc_addr(
         "vkGetPhysicalDeviceSurfacePresentModes2EXT" => {
             vk_get_physical_device_surface_present_modes2_ext as PFN_vkVoidFunction
         }
-        "vkReleaseSwapchainImagesEXT" => {
-            vk_release_swapchain_images_ext as PFN_vkVoidFunction
-        }
+        "vkReleaseSwapchainImagesEXT" => vk_release_swapchain_images_ext as PFN_vkVoidFunction,
         // Safety fence: for any Vulkan function not in our dispatch table, return NULL.
         // Returning the raw SysV host-library pointer would cause an ABI mismatch crash
         // when DXVK (Win64 caller) calls it — Win64 passes args in RCX/RDX/R8/R9
         // but SysV expects them in RDI/RSI/RDX/RCX.  NULL signals "not available" and
         // DXVK's feature-detection paths handle NULL gracefully.
         _ => std::ptr::null(),
+    };
+    if result.is_null() {
+        eprintln!("weave-vulkan: vk_get_instance_proc_addr({name:?}) -> NULL");
+    } else {
+        eprintln!(
+            "weave-vulkan: vk_get_instance_proc_addr({name:?}) -> 0x{:x}",
+            result as usize
+        );
     }
+    result
 }
 
 /// vkCreateInstance — swap VK_KHR_win32_surface → VK_KHR_xcb_surface.
@@ -1127,7 +1187,10 @@ pub unsafe extern "win64" fn vk_create_instance(
     p_allocator: *const c_void,
     p_instance: *mut VkInstance,
 ) -> VkResult {
-    eprintln!("weave-vulkan: vk_create_instance ENTER p_create_info={:p}", p_create_info);
+    eprintln!(
+        "weave-vulkan: vk_create_instance ENTER p_create_info={:p}",
+        p_create_info
+    );
     let vk = match vulkan() {
         Some(v) => v,
         None => return VK_ERROR_FEATURE_NOT_PRESENT,
@@ -1135,12 +1198,18 @@ pub unsafe extern "win64" fn vk_create_instance(
 
     if p_create_info.is_null() {
         let r = unsafe { (vk.create_instance)(p_create_info, p_allocator, p_instance) };
-        eprintln!("weave-vulkan: vk_create_instance RETURN (null ci) result={}", r);
+        eprintln!(
+            "weave-vulkan: vk_create_instance RETURN (null ci) result={}",
+            r
+        );
         return r;
     }
 
     let info = unsafe { &*p_create_info };
-    eprintln!("weave-vulkan: vk_create_instance p_next={:p} ext_count={}", info.p_next, info.enabled_extension_count);
+    eprintln!(
+        "weave-vulkan: vk_create_instance p_next={:p} ext_count={}",
+        info.p_next, info.enabled_extension_count
+    );
     let ext_count = info.enabled_extension_count as usize;
 
     let new_exts: Vec<*const c_char> =
@@ -1191,7 +1260,10 @@ pub unsafe extern "win64" fn vk_create_instance(
 
     eprintln!("weave-vulkan: vk_create_instance calling real vkCreateInstance");
     let result = unsafe { (vk.create_instance)(&patched, p_allocator, p_instance) };
-    eprintln!("weave-vulkan: vk_create_instance real vkCreateInstance returned {}", result);
+    eprintln!(
+        "weave-vulkan: vk_create_instance real vkCreateInstance returned {}",
+        result
+    );
     if result == VK_SUCCESS && !p_instance.is_null() {
         INSTANCE.store(unsafe { *p_instance } as usize, Ordering::Release);
     }
