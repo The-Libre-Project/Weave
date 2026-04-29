@@ -53,3 +53,6 @@ tests/fixtures/nxengine/
 /weave-gui/src-tauri/gen/
 /weave-gui/src-tauri/Cargo.lock
 /weave-gui/src-tauri/target/
+
+# Internal strategy and design docs — kept private, not for end users
+docs/
