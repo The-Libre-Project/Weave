@@ -550,6 +550,14 @@ dev_thunk!(void vk_get_buffer_memory_requirements, "vkGetBufferMemoryRequirement
 dev_thunk!(void vk_get_buffer_memory_requirements2, "vkGetBufferMemoryRequirements2", (device, p_info: *const c_void, p_requirements: *mut c_void));
 dev_thunk!(void vk_get_image_memory_requirements, "vkGetImageMemoryRequirements", (device, image: VkImage, p_requirements: *mut c_void));
 dev_thunk!(void vk_get_image_memory_requirements2, "vkGetImageMemoryRequirements2", (device, p_info: *const c_void, p_requirements: *mut c_void));
+// Core 1.3 unparameterised mem-req queries (DXVK 2.x dispatch table) + sparse fallthrough.
+dev_thunk!(void vk_get_device_buffer_memory_requirements, "vkGetDeviceBufferMemoryRequirements", (device, p_info: *const c_void, p_requirements: *mut c_void));
+dev_thunk!(void vk_get_device_image_memory_requirements, "vkGetDeviceImageMemoryRequirements", (device, p_info: *const c_void, p_requirements: *mut c_void));
+dev_thunk!(void vk_get_device_image_sparse_memory_requirements, "vkGetDeviceImageSparseMemoryRequirements", (device, p_info: *const c_void, p_count: *mut u32, p_props: *mut c_void));
+dev_thunk!(void vk_get_image_sparse_memory_requirements, "vkGetImageSparseMemoryRequirements", (device, image: VkImage, p_count: *mut u32, p_props: *mut c_void));
+dev_thunk!(void vk_get_image_sparse_memory_requirements2, "vkGetImageSparseMemoryRequirements2", (device, p_info: *const c_void, p_count: *mut u32, p_props: *mut c_void));
+dev_thunk!(vk_get_pipeline_cache_data, "vkGetPipelineCacheData", VkResult, (device, cache: VkPipelineCache, p_size: *mut usize, p_data: *mut c_void));
+dev_thunk!(vk_merge_pipeline_caches, "vkMergePipelineCaches", VkResult, (device, dst: VkPipelineCache, src_count: u32, p_src: *const VkPipelineCache));
 dev_thunk!(vk_create_buffer, "vkCreateBuffer", VkResult, (device, p_info: *const c_void, p_allocator: *const c_void, p_buffer: *mut VkBuffer));
 dev_thunk!(void vk_destroy_buffer, "vkDestroyBuffer", (device, buffer: VkBuffer, p_allocator: *const c_void));
 dev_thunk!(vk_create_image, "vkCreateImage", VkResult, (device, p_info: *const c_void, p_allocator: *const c_void, p_image: *mut VkImage));
@@ -865,6 +873,24 @@ pub unsafe extern "win64" fn vk_get_instance_proc_addr(
         "vkGetImageMemoryRequirements2" | "vkGetImageMemoryRequirements2KHR" => {
             vk_get_image_memory_requirements2 as PFN_vkVoidFunction
         }
+        "vkGetDeviceBufferMemoryRequirements" | "vkGetDeviceBufferMemoryRequirementsKHR" => {
+            vk_get_device_buffer_memory_requirements as PFN_vkVoidFunction
+        }
+        "vkGetDeviceImageMemoryRequirements" | "vkGetDeviceImageMemoryRequirementsKHR" => {
+            vk_get_device_image_memory_requirements as PFN_vkVoidFunction
+        }
+        "vkGetDeviceImageSparseMemoryRequirements"
+        | "vkGetDeviceImageSparseMemoryRequirementsKHR" => {
+            vk_get_device_image_sparse_memory_requirements as PFN_vkVoidFunction
+        }
+        "vkGetImageSparseMemoryRequirements" => {
+            vk_get_image_sparse_memory_requirements as PFN_vkVoidFunction
+        }
+        "vkGetImageSparseMemoryRequirements2" | "vkGetImageSparseMemoryRequirements2KHR" => {
+            vk_get_image_sparse_memory_requirements2 as PFN_vkVoidFunction
+        }
+        "vkGetPipelineCacheData" => vk_get_pipeline_cache_data as PFN_vkVoidFunction,
+        "vkMergePipelineCaches" => vk_merge_pipeline_caches as PFN_vkVoidFunction,
         "vkCreateBuffer" => vk_create_buffer as PFN_vkVoidFunction,
         "vkDestroyBuffer" => vk_destroy_buffer as PFN_vkVoidFunction,
         "vkCreateImage" => vk_create_image as PFN_vkVoidFunction,
