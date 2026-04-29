@@ -931,6 +931,8 @@ pub unsafe extern "win64" fn vk_get_instance_proc_addr(
         "vkImportSemaphoreWin32HandleKHR" => {
             vk_import_semaphore_win32_handle_khr as PFN_vkVoidFunction
         }
+        "wine_vkAcquireKeyedMutex" => wine_vkAcquireKeyedMutex as PFN_vkVoidFunction,
+        "wine_vkReleaseKeyedMutex" => wine_vkReleaseKeyedMutex as PFN_vkVoidFunction,
         "vkAcquireFullScreenExclusiveModeEXT" => {
             vk_acquire_full_screen_exclusive_mode_ext as PFN_vkVoidFunction
         }
@@ -1398,6 +1400,30 @@ pub unsafe extern "win64" fn vk_get_physical_device_external_buffer_properties(
         unsafe { flags_ptr.add(1).write(0) }; // exportFromImportedHandleTypes
         unsafe { flags_ptr.add(2).write(0) }; // compatibleHandleTypes
     }
+}
+
+// ── Wine-specific keyed-mutex helpers ────────────────────────────────────────
+//
+// DXVK's Wine path looks up these helpers on winevulkan. They are only needed
+// for Win32 shared-resource synchronization via keyed mutexes. Weave does not
+// implement that cross-process sharing model, so the functions exist only to
+// report "not supported" without crashing the loader path.
+
+pub unsafe extern "win64" fn wine_vkAcquireKeyedMutex(
+    _device: VkDevice,
+    _memory: VkDeviceMemory,
+    _key: u64,
+    _timeout_ms: u32,
+) -> VkResult {
+    VK_ERROR_FEATURE_NOT_PRESENT
+}
+
+pub unsafe extern "win64" fn wine_vkReleaseKeyedMutex(
+    _device: VkDevice,
+    _memory: VkDeviceMemory,
+    _key: u64,
+) -> VkResult {
+    VK_ERROR_FEATURE_NOT_PRESENT
 }
 
 // ── Resolver ──────────────────────────────────────────────────────────────────
