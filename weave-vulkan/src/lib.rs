@@ -395,6 +395,163 @@ macro_rules! cmd_thunk {
     };
 }
 
+// ── Named abort stubs (DXVK NULL-call diagnostic) ────────────────────────────
+//
+// DXVK builds an internal dispatch table by querying every proc-addr name it
+// knows.  For procs we don't implement we'd return NULL; DXVK then `call NULL`
+// → RIP=0 with no clue which proc was invoked.  These stubs replace NULL for
+// names where we suspect DXVK might actually invoke the proc, printing the
+// name and aborting cleanly so CI logs identify the culprit.
+//
+// The stubs are zero-arg `extern "win64"` functions.  Win64 ABI passes the
+// first 4 args in RCX/RDX/R8/R9; an N-arg caller and a 0-arg callee disagree
+// on stack layout but the callee never reads args, so the abort is reached.
+macro_rules! null_abort_stub {
+    ($name:ident, $real:literal) => {
+        pub unsafe extern "win64" fn $name() -> ! {
+            eprintln!(
+                "weave-vulkan: STUB ABORT — DXVK invoked unimplemented proc: {}",
+                $real
+            );
+            std::process::abort();
+        }
+    };
+}
+
+null_abort_stub!(stub_vk_cmd_set_depth_bias2_ext, "vkCmdSetDepthBias2EXT");
+null_abort_stub!(stub_vk_queue_bind_sparse, "vkQueueBindSparse");
+null_abort_stub!(
+    stub_vk_get_shader_module_create_info_identifier_ext,
+    "vkGetShaderModuleCreateInfoIdentifierEXT"
+);
+null_abort_stub!(
+    stub_vk_get_shader_module_identifier_ext,
+    "vkGetShaderModuleIdentifierEXT"
+);
+// Transform feedback (DXVK uses for d3d9 stream-out)
+null_abort_stub!(
+    stub_vk_cmd_bind_transform_feedback_buffers_ext,
+    "vkCmdBindTransformFeedbackBuffersEXT"
+);
+null_abort_stub!(
+    stub_vk_cmd_begin_transform_feedback_ext,
+    "vkCmdBeginTransformFeedbackEXT"
+);
+null_abort_stub!(
+    stub_vk_cmd_end_transform_feedback_ext,
+    "vkCmdEndTransformFeedbackEXT"
+);
+null_abort_stub!(
+    stub_vk_cmd_draw_indirect_byte_count_ext,
+    "vkCmdDrawIndirectByteCountEXT"
+);
+null_abort_stub!(
+    stub_vk_cmd_begin_query_indexed_ext,
+    "vkCmdBeginQueryIndexedEXT"
+);
+null_abort_stub!(stub_vk_cmd_end_query_indexed_ext, "vkCmdEndQueryIndexedEXT");
+// Conditional rendering
+null_abort_stub!(
+    stub_vk_cmd_begin_conditional_rendering_ext,
+    "vkCmdBeginConditionalRenderingEXT"
+);
+null_abort_stub!(
+    stub_vk_cmd_end_conditional_rendering_ext,
+    "vkCmdEndConditionalRenderingEXT"
+);
+// Extended dynamic state 3
+null_abort_stub!(
+    stub_vk_cmd_set_tessellation_domain_origin_ext,
+    "vkCmdSetTessellationDomainOriginEXT"
+);
+null_abort_stub!(
+    stub_vk_cmd_set_depth_clamp_enable_ext,
+    "vkCmdSetDepthClampEnableEXT"
+);
+null_abort_stub!(stub_vk_cmd_set_polygon_mode_ext, "vkCmdSetPolygonModeEXT");
+null_abort_stub!(
+    stub_vk_cmd_set_rasterization_samples_ext,
+    "vkCmdSetRasterizationSamplesEXT"
+);
+null_abort_stub!(stub_vk_cmd_set_sample_mask_ext, "vkCmdSetSampleMaskEXT");
+null_abort_stub!(
+    stub_vk_cmd_set_alpha_to_coverage_enable_ext,
+    "vkCmdSetAlphaToCoverageEnableEXT"
+);
+null_abort_stub!(
+    stub_vk_cmd_set_alpha_to_one_enable_ext,
+    "vkCmdSetAlphaToOneEnableEXT"
+);
+null_abort_stub!(
+    stub_vk_cmd_set_logic_op_enable_ext,
+    "vkCmdSetLogicOpEnableEXT"
+);
+null_abort_stub!(
+    stub_vk_cmd_set_color_blend_enable_ext,
+    "vkCmdSetColorBlendEnableEXT"
+);
+null_abort_stub!(
+    stub_vk_cmd_set_color_blend_equation_ext,
+    "vkCmdSetColorBlendEquationEXT"
+);
+null_abort_stub!(
+    stub_vk_cmd_set_color_write_mask_ext,
+    "vkCmdSetColorWriteMaskEXT"
+);
+null_abort_stub!(
+    stub_vk_cmd_set_rasterization_stream_ext,
+    "vkCmdSetRasterizationStreamEXT"
+);
+null_abort_stub!(
+    stub_vk_cmd_set_conservative_rasterization_mode_ext,
+    "vkCmdSetConservativeRasterizationModeEXT"
+);
+null_abort_stub!(
+    stub_vk_cmd_set_extra_primitive_overestimation_size_ext,
+    "vkCmdSetExtraPrimitiveOverestimationSizeEXT"
+);
+null_abort_stub!(
+    stub_vk_cmd_set_depth_clip_enable_ext,
+    "vkCmdSetDepthClipEnableEXT"
+);
+null_abort_stub!(
+    stub_vk_cmd_set_line_rasterization_mode_ext,
+    "vkCmdSetLineRasterizationModeEXT"
+);
+// Debug-utils labels (cmd-buffer level)
+null_abort_stub!(
+    stub_vk_cmd_begin_debug_utils_label_ext,
+    "vkCmdBeginDebugUtilsLabelEXT"
+);
+null_abort_stub!(
+    stub_vk_cmd_end_debug_utils_label_ext,
+    "vkCmdEndDebugUtilsLabelEXT"
+);
+null_abort_stub!(
+    stub_vk_cmd_insert_debug_utils_label_ext,
+    "vkCmdInsertDebugUtilsLabelEXT"
+);
+null_abort_stub!(
+    stub_vk_queue_begin_debug_utils_label_ext,
+    "vkQueueBeginDebugUtilsLabelEXT"
+);
+null_abort_stub!(
+    stub_vk_queue_end_debug_utils_label_ext,
+    "vkQueueEndDebugUtilsLabelEXT"
+);
+null_abort_stub!(
+    stub_vk_queue_insert_debug_utils_label_ext,
+    "vkQueueInsertDebugUtilsLabelEXT"
+);
+null_abort_stub!(
+    stub_vk_set_debug_utils_object_name_ext,
+    "vkSetDebugUtilsObjectNameEXT"
+);
+null_abort_stub!(
+    stub_vk_set_debug_utils_object_tag_ext,
+    "vkSetDebugUtilsObjectTagEXT"
+);
+
 // Physical-device functions
 pub unsafe extern "win64" fn vk_enumerate_physical_devices(
     instance: VkInstance,
@@ -1189,6 +1346,97 @@ pub unsafe extern "win64" fn vk_get_instance_proc_addr(
             vk_get_physical_device_surface_present_modes2_ext as PFN_vkVoidFunction
         }
         "vkReleaseSwapchainImagesEXT" => vk_release_swapchain_images_ext as PFN_vkVoidFunction,
+        // ── Diagnostic abort stubs ───────────────────────────────────────────
+        // Procs DXVK queries unconditionally; replace NULL with a named-abort
+        // thunk so CI logs identify which one DXVK actually invokes.
+        "vkCmdSetDepthBias2EXT" => stub_vk_cmd_set_depth_bias2_ext as PFN_vkVoidFunction,
+        "vkQueueBindSparse" => stub_vk_queue_bind_sparse as PFN_vkVoidFunction,
+        "vkGetShaderModuleCreateInfoIdentifierEXT" => {
+            stub_vk_get_shader_module_create_info_identifier_ext as PFN_vkVoidFunction
+        }
+        "vkGetShaderModuleIdentifierEXT" => {
+            stub_vk_get_shader_module_identifier_ext as PFN_vkVoidFunction
+        }
+        "vkCmdBindTransformFeedbackBuffersEXT" => {
+            stub_vk_cmd_bind_transform_feedback_buffers_ext as PFN_vkVoidFunction
+        }
+        "vkCmdBeginTransformFeedbackEXT" => {
+            stub_vk_cmd_begin_transform_feedback_ext as PFN_vkVoidFunction
+        }
+        "vkCmdEndTransformFeedbackEXT" => {
+            stub_vk_cmd_end_transform_feedback_ext as PFN_vkVoidFunction
+        }
+        "vkCmdDrawIndirectByteCountEXT" => {
+            stub_vk_cmd_draw_indirect_byte_count_ext as PFN_vkVoidFunction
+        }
+        "vkCmdBeginQueryIndexedEXT" => stub_vk_cmd_begin_query_indexed_ext as PFN_vkVoidFunction,
+        "vkCmdEndQueryIndexedEXT" => stub_vk_cmd_end_query_indexed_ext as PFN_vkVoidFunction,
+        "vkCmdBeginConditionalRenderingEXT" => {
+            stub_vk_cmd_begin_conditional_rendering_ext as PFN_vkVoidFunction
+        }
+        "vkCmdEndConditionalRenderingEXT" => {
+            stub_vk_cmd_end_conditional_rendering_ext as PFN_vkVoidFunction
+        }
+        "vkCmdSetTessellationDomainOriginEXT" => {
+            stub_vk_cmd_set_tessellation_domain_origin_ext as PFN_vkVoidFunction
+        }
+        "vkCmdSetDepthClampEnableEXT" => {
+            stub_vk_cmd_set_depth_clamp_enable_ext as PFN_vkVoidFunction
+        }
+        "vkCmdSetPolygonModeEXT" => stub_vk_cmd_set_polygon_mode_ext as PFN_vkVoidFunction,
+        "vkCmdSetRasterizationSamplesEXT" => {
+            stub_vk_cmd_set_rasterization_samples_ext as PFN_vkVoidFunction
+        }
+        "vkCmdSetSampleMaskEXT" => stub_vk_cmd_set_sample_mask_ext as PFN_vkVoidFunction,
+        "vkCmdSetAlphaToCoverageEnableEXT" => {
+            stub_vk_cmd_set_alpha_to_coverage_enable_ext as PFN_vkVoidFunction
+        }
+        "vkCmdSetAlphaToOneEnableEXT" => {
+            stub_vk_cmd_set_alpha_to_one_enable_ext as PFN_vkVoidFunction
+        }
+        "vkCmdSetLogicOpEnableEXT" => stub_vk_cmd_set_logic_op_enable_ext as PFN_vkVoidFunction,
+        "vkCmdSetColorBlendEnableEXT" => {
+            stub_vk_cmd_set_color_blend_enable_ext as PFN_vkVoidFunction
+        }
+        "vkCmdSetColorBlendEquationEXT" => {
+            stub_vk_cmd_set_color_blend_equation_ext as PFN_vkVoidFunction
+        }
+        "vkCmdSetColorWriteMaskEXT" => stub_vk_cmd_set_color_write_mask_ext as PFN_vkVoidFunction,
+        "vkCmdSetRasterizationStreamEXT" => {
+            stub_vk_cmd_set_rasterization_stream_ext as PFN_vkVoidFunction
+        }
+        "vkCmdSetConservativeRasterizationModeEXT" => {
+            stub_vk_cmd_set_conservative_rasterization_mode_ext as PFN_vkVoidFunction
+        }
+        "vkCmdSetExtraPrimitiveOverestimationSizeEXT" => {
+            stub_vk_cmd_set_extra_primitive_overestimation_size_ext as PFN_vkVoidFunction
+        }
+        "vkCmdSetDepthClipEnableEXT" => stub_vk_cmd_set_depth_clip_enable_ext as PFN_vkVoidFunction,
+        "vkCmdSetLineRasterizationModeEXT" => {
+            stub_vk_cmd_set_line_rasterization_mode_ext as PFN_vkVoidFunction
+        }
+        "vkCmdBeginDebugUtilsLabelEXT" => {
+            stub_vk_cmd_begin_debug_utils_label_ext as PFN_vkVoidFunction
+        }
+        "vkCmdEndDebugUtilsLabelEXT" => stub_vk_cmd_end_debug_utils_label_ext as PFN_vkVoidFunction,
+        "vkCmdInsertDebugUtilsLabelEXT" => {
+            stub_vk_cmd_insert_debug_utils_label_ext as PFN_vkVoidFunction
+        }
+        "vkQueueBeginDebugUtilsLabelEXT" => {
+            stub_vk_queue_begin_debug_utils_label_ext as PFN_vkVoidFunction
+        }
+        "vkQueueEndDebugUtilsLabelEXT" => {
+            stub_vk_queue_end_debug_utils_label_ext as PFN_vkVoidFunction
+        }
+        "vkQueueInsertDebugUtilsLabelEXT" => {
+            stub_vk_queue_insert_debug_utils_label_ext as PFN_vkVoidFunction
+        }
+        "vkSetDebugUtilsObjectNameEXT" => {
+            stub_vk_set_debug_utils_object_name_ext as PFN_vkVoidFunction
+        }
+        "vkSetDebugUtilsObjectTagEXT" => {
+            stub_vk_set_debug_utils_object_tag_ext as PFN_vkVoidFunction
+        }
         // Safety fence: for any Vulkan function not in our dispatch table, return NULL.
         // Returning the raw SysV host-library pointer would cause an ABI mismatch crash
         // when DXVK (Win64 caller) calls it — Win64 passes args in RCX/RDX/R8/R9
