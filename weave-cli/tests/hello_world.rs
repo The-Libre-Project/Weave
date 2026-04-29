@@ -4084,7 +4084,9 @@ fn testsprite2_d3d9_gate() {
     let exe = format!("{bin_dir}/testsprite2.exe");
 
     if !std::path::Path::new(&exe).exists() {
-        eprintln!("skipping: testsprite2.exe not present in tests/fixtures/bin/ — fixture required");
+        eprintln!(
+            "skipping: testsprite2.exe not present in tests/fixtures/bin/ — fixture required"
+        );
         return;
     }
 
@@ -4181,7 +4183,9 @@ fn testsprite2_d3d9_gate() {
     cap.declare(CapabilityClass::Audio);
     cap.record(
         CapabilityClass::Launches,
-        CapabilityOutcome::pass("A1: PE loaded, SDL2 D3D9 renderer reached, non-black pixels at 20s"),
+        CapabilityOutcome::pass(
+            "A1: PE loaded, SDL2 D3D9 renderer reached, non-black pixels at 20s",
+        ),
     );
     cap.record(
         CapabilityClass::Audio,
