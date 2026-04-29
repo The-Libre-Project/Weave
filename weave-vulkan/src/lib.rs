@@ -1605,25 +1605,44 @@ pub unsafe extern "win64" fn vk_create_win32_surface_khr(
     p_allocator: *const c_void,
     p_surface: *mut VkSurfaceKHR,
 ) -> VkResult {
+    eprintln!(
+        "weave-vulkan: vk_create_win32_surface_khr ENTER instance={:p} p_create_info={:p} p_surface={:p}",
+        instance, p_create_info, p_surface
+    );
     if p_create_info.is_null() || p_surface.is_null() {
+        eprintln!(
+            "weave-vulkan: vk_create_win32_surface_khr: null in/out, returning FEATURE_NOT_PRESENT"
+        );
         return VK_ERROR_FEATURE_NOT_PRESENT;
     }
     let info = unsafe { &*p_create_info };
+    eprintln!(
+        "weave-vulkan: vk_create_win32_surface_khr: hwnd=0x{:x} hinstance={:p}",
+        info.hwnd, info.hinstance
+    );
 
     let xcb_win = weave_user32::window::xcb_id(info.hwnd);
+    eprintln!("weave-vulkan: vk_create_win32_surface_khr: xcb_id={xcb_win}");
     if xcb_win == 0 {
+        eprintln!("weave-vulkan: vk_create_win32_surface_khr: hwnd not registered, returning FEATURE_NOT_PRESENT");
         return VK_ERROR_FEATURE_NOT_PRESENT;
     }
 
     let conn = match xcb_connection() {
         Some(c) => c,
-        None => return VK_ERROR_FEATURE_NOT_PRESENT,
+        None => {
+            eprintln!("weave-vulkan: vk_create_win32_surface_khr: xcb_connection() = None, returning FEATURE_NOT_PRESENT");
+            return VK_ERROR_FEATURE_NOT_PRESENT;
+        }
     };
+    eprintln!("weave-vulkan: vk_create_win32_surface_khr: xcb_connection={conn:p}");
 
     let fn_ptr = real_fn(instance, "vkCreateXcbSurfaceKHR");
     if fn_ptr.is_null() {
+        eprintln!("weave-vulkan: vk_create_win32_surface_khr: real vkCreateXcbSurfaceKHR is NULL, returning EXT_NOT_PRESENT");
         return VK_ERROR_EXTENSION_NOT_PRESENT;
     }
+    eprintln!("weave-vulkan: vk_create_win32_surface_khr: real fn_ptr={fn_ptr:p}");
     // SAFETY: `fn_ptr` is the `PFN_vkVoidFunction` returned by
     // `vkGetInstanceProcAddr(instance, "vkCreateXcbSurfaceKHR")`.  The Vulkan
     // specification (VK_KHR_xcb_surface) defines `vkCreateXcbSurfaceKHR` to have
@@ -1646,7 +1665,13 @@ pub unsafe extern "win64" fn vk_create_win32_surface_khr(
         window: xcb_win,
     };
 
-    unsafe { create_xcb(instance, &xcb_info, p_allocator, p_surface) }
+    eprintln!("weave-vulkan: vk_create_win32_surface_khr: calling real vkCreateXcbSurfaceKHR");
+    let r = unsafe { create_xcb(instance, &xcb_info, p_allocator, p_surface) };
+    eprintln!(
+        "weave-vulkan: vk_create_win32_surface_khr: real returned {r}, surface=0x{:x}",
+        unsafe { *p_surface }
+    );
+    r
 }
 
 /// vkDestroySurfaceKHR — passthrough.
