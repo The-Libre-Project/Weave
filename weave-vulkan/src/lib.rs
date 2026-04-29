@@ -651,10 +651,91 @@ pub unsafe extern "win64" fn vk_create_device(
     r
 }
 inst_thunk!(void vk_destroy_instance, "vkDestroyInstance", (instance: VkInstance, p_allocator: *const c_void));
-inst_thunk!(vk_get_physical_device_surface_support_khr, "vkGetPhysicalDeviceSurfaceSupportKHR", VkResult, (physical_device: VkPhysicalDevice, queue_family_index: u32, surface: VkSurfaceKHR, p_supported: *mut u32));
-inst_thunk!(vk_get_physical_device_surface_capabilities_khr, "vkGetPhysicalDeviceSurfaceCapabilitiesKHR", VkResult, (physical_device: VkPhysicalDevice, surface: VkSurfaceKHR, p_capabilities: *mut c_void));
-inst_thunk!(vk_get_physical_device_surface_formats_khr, "vkGetPhysicalDeviceSurfaceFormatsKHR", VkResult, (physical_device: VkPhysicalDevice, surface: VkSurfaceKHR, p_count: *mut u32, p_formats: *mut c_void));
-inst_thunk!(vk_get_physical_device_surface_present_modes_khr, "vkGetPhysicalDeviceSurfacePresentModesKHR", VkResult, (physical_device: VkPhysicalDevice, surface: VkSurfaceKHR, p_count: *mut u32, p_modes: *mut u32));
+pub unsafe extern "win64" fn vk_get_physical_device_surface_support_khr(
+    physical_device: VkPhysicalDevice,
+    queue_family_index: u32,
+    surface: VkSurfaceKHR,
+    p_supported: *mut u32,
+) -> VkResult {
+    eprintln!(
+        "weave-vulkan: vk_get_physical_device_surface_support_khr ENTER pdev={:p} qfi={queue_family_index} surface=0x{surface:x}",
+        physical_device as *const ()
+    );
+    let f = real_fn(stored_instance(), "vkGetPhysicalDeviceSurfaceSupportKHR");
+    if f.is_null() {
+        return unsafe { std::mem::zeroed() };
+    }
+    let f: unsafe extern "C" fn(VkPhysicalDevice, u32, VkSurfaceKHR, *mut u32) -> VkResult =
+        unsafe { std::mem::transmute(f) };
+    let r = unsafe { f(physical_device, queue_family_index, surface, p_supported) };
+    eprintln!("weave-vulkan: vk_get_physical_device_surface_support_khr RETURN {r}");
+    r
+}
+pub unsafe extern "win64" fn vk_get_physical_device_surface_capabilities_khr(
+    physical_device: VkPhysicalDevice,
+    surface: VkSurfaceKHR,
+    p_capabilities: *mut c_void,
+) -> VkResult {
+    eprintln!(
+        "weave-vulkan: vk_get_physical_device_surface_capabilities_khr ENTER pdev={:p} surface=0x{surface:x}",
+        physical_device as *const ()
+    );
+    let f = real_fn(
+        stored_instance(),
+        "vkGetPhysicalDeviceSurfaceCapabilitiesKHR",
+    );
+    if f.is_null() {
+        return unsafe { std::mem::zeroed() };
+    }
+    let f: unsafe extern "C" fn(VkPhysicalDevice, VkSurfaceKHR, *mut c_void) -> VkResult =
+        unsafe { std::mem::transmute(f) };
+    let r = unsafe { f(physical_device, surface, p_capabilities) };
+    eprintln!("weave-vulkan: vk_get_physical_device_surface_capabilities_khr RETURN {r}");
+    r
+}
+pub unsafe extern "win64" fn vk_get_physical_device_surface_formats_khr(
+    physical_device: VkPhysicalDevice,
+    surface: VkSurfaceKHR,
+    p_count: *mut u32,
+    p_formats: *mut c_void,
+) -> VkResult {
+    eprintln!(
+        "weave-vulkan: vk_get_physical_device_surface_formats_khr ENTER pdev={:p} surface=0x{surface:x} p_formats={p_formats:p}",
+        physical_device as *const ()
+    );
+    let f = real_fn(stored_instance(), "vkGetPhysicalDeviceSurfaceFormatsKHR");
+    if f.is_null() {
+        return unsafe { std::mem::zeroed() };
+    }
+    let f: unsafe extern "C" fn(VkPhysicalDevice, VkSurfaceKHR, *mut u32, *mut c_void) -> VkResult =
+        unsafe { std::mem::transmute(f) };
+    let r = unsafe { f(physical_device, surface, p_count, p_formats) };
+    eprintln!("weave-vulkan: vk_get_physical_device_surface_formats_khr RETURN {r}");
+    r
+}
+pub unsafe extern "win64" fn vk_get_physical_device_surface_present_modes_khr(
+    physical_device: VkPhysicalDevice,
+    surface: VkSurfaceKHR,
+    p_count: *mut u32,
+    p_modes: *mut u32,
+) -> VkResult {
+    eprintln!(
+        "weave-vulkan: vk_get_physical_device_surface_present_modes_khr ENTER pdev={:p} surface=0x{surface:x} p_modes={p_modes:p}",
+        physical_device as *const ()
+    );
+    let f = real_fn(
+        stored_instance(),
+        "vkGetPhysicalDeviceSurfacePresentModesKHR",
+    );
+    if f.is_null() {
+        return unsafe { std::mem::zeroed() };
+    }
+    let f: unsafe extern "C" fn(VkPhysicalDevice, VkSurfaceKHR, *mut u32, *mut u32) -> VkResult =
+        unsafe { std::mem::transmute(f) };
+    let r = unsafe { f(physical_device, surface, p_count, p_modes) };
+    eprintln!("weave-vulkan: vk_get_physical_device_surface_present_modes_khr RETURN {r}");
+    r
+}
 inst_thunk!(vk_get_physical_device_surface_capabilities2_khr, "vkGetPhysicalDeviceSurfaceCapabilities2KHR", VkResult, (physical_device: VkPhysicalDevice, p_surface_info: *const c_void, p_capabilities: *mut c_void));
 inst_thunk!(vk_get_physical_device_calibrateable_time_domains_ext, "vkGetPhysicalDeviceCalibrateableTimeDomainsEXT", VkResult, (physical_device: VkPhysicalDevice, p_count: *mut u32, p_domains: *mut u32));
 inst_thunk!(vk_get_physical_device_sparse_image_format_properties, "vkGetPhysicalDeviceSparseImageFormatProperties", VkResult, (physical_device: VkPhysicalDevice, format: u32, ty: u32, samples: u32, usage: u32, tiling: u32, p_count: *mut u32, p_properties: *mut c_void));
@@ -679,6 +760,7 @@ pub unsafe extern "win64" fn vk_get_physical_device_win32_presentation_support_k
     _physical_device: VkPhysicalDevice,
     _queue_family_index: u32,
 ) -> u32 {
+    eprintln!("weave-vulkan: vk_get_physical_device_win32_presentation_support_khr ENTER");
     // Win32→XCB translation: we always have a valid XCB surface for any HWND,
     // so presentation is always supported.
     1
