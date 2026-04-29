@@ -82,6 +82,7 @@ type VkShaderStageFlags = u32;
 type VkFormat = u32;
 
 const VK_SUCCESS: VkResult = 0;
+const VK_INCOMPLETE: VkResult = 5;
 const VK_ERROR_FEATURE_NOT_PRESENT: VkResult = -8;
 const VK_ERROR_EXTENSION_NOT_PRESENT: VkResult = -7;
 
@@ -433,6 +434,28 @@ inst_thunk!(void vk_get_physical_device_format_properties, "vkGetPhysicalDeviceF
 inst_thunk!(void vk_get_physical_device_format_properties2, "vkGetPhysicalDeviceFormatProperties2", (physical_device: VkPhysicalDevice, format: VkFormat, p_properties: *mut c_void));
 inst_thunk!(vk_get_physical_device_image_format_properties, "vkGetPhysicalDeviceImageFormatProperties", VkResult, (physical_device: VkPhysicalDevice, format: u32, ty: u32, tiling: u32, usage: u32, flags: u32, p_properties: *mut c_void));
 inst_thunk!(vk_get_physical_device_image_format_properties2, "vkGetPhysicalDeviceImageFormatProperties2", VkResult, (physical_device: VkPhysicalDevice, p_info: *const c_void, p_properties: *mut c_void));
+// Device extensions whose procs DXVK queries unconditionally once the
+// extension is enabled.  We don't thunk those procs (we'd return NULL via
+// the safety fence in vk_get_instance_proc_addr), and DXVK then crashes on
+// `call NULL`.  Strip the extensions from the advertised list so DXVK
+// never enables them in the first place.
+const STRIPPED_DEVICE_EXTS: &[&str] = &[
+    "VK_EXT_transform_feedback",
+    "VK_EXT_extended_dynamic_state3",
+    "VK_EXT_conditional_rendering",
+    "VK_EXT_shader_module_identifier",
+];
+
+const VK_EXT_PROP_STRIDE: usize = 256 + 4;
+
+unsafe fn ext_name_at(buf: *const u8, i: usize) -> &'static str {
+    let entry = unsafe { buf.add(i * VK_EXT_PROP_STRIDE) } as *const c_char;
+    match unsafe { CStr::from_ptr(entry) }.to_str() {
+        Ok(s) => unsafe { std::mem::transmute::<&str, &'static str>(s) },
+        Err(_) => "",
+    }
+}
+
 pub unsafe extern "win64" fn vk_enumerate_device_extension_properties(
     physical_device: VkPhysicalDevice,
     p_layer: *const c_char,
@@ -449,23 +472,86 @@ pub unsafe extern "win64" fn vk_enumerate_device_extension_properties(
         *mut u32,
         *mut c_void,
     ) -> VkResult = unsafe { std::mem::transmute(f) };
-    let r = unsafe { f(physical_device, p_layer, p_count, p_properties) };
-    // Dump the list once, when DXVK fills the array (p_properties != NULL).
-    // VkExtensionProperties layout: char extensionName[256]; uint32_t specVersion;
-    if !p_properties.is_null() && !p_count.is_null() {
-        let count = unsafe { *p_count } as usize;
-        eprintln!(
-            "weave-vulkan: vk_enumerate_device_extension_properties returned {count} extensions:"
-        );
-        let stride: usize = 256 + 4;
-        for i in 0..count {
-            let entry = unsafe { (p_properties as *const u8).add(i * stride) } as *const c_char;
-            let name = unsafe { CStr::from_ptr(entry) }.to_string_lossy();
-            let spec = unsafe { *(entry.add(256) as *const u32) };
-            eprintln!("weave-vulkan:   ext[{i}] {name} v{spec}");
+
+    if p_count.is_null() {
+        return unsafe { f(physical_device, p_layer, p_count, p_properties) };
+    }
+
+    // Always enumerate the full host list into our own buffer so we know
+    // the filtered count regardless of whether the caller wants names yet.
+    let mut full_count: u32 = 0;
+    let r0 = unsafe {
+        f(
+            physical_device,
+            p_layer,
+            &mut full_count,
+            std::ptr::null_mut(),
+        )
+    };
+    if r0 != VK_SUCCESS {
+        return r0;
+    }
+    let mut buf = vec![0u8; full_count as usize * VK_EXT_PROP_STRIDE];
+    let mut got = full_count;
+    let r1 = unsafe {
+        f(
+            physical_device,
+            p_layer,
+            &mut got,
+            buf.as_mut_ptr() as *mut c_void,
+        )
+    };
+    if r1 != VK_SUCCESS {
+        return r1;
+    }
+
+    // Build filtered index list.
+    let mut keep: Vec<usize> = Vec::with_capacity(got as usize);
+    for i in 0..got as usize {
+        let name = unsafe { ext_name_at(buf.as_ptr(), i) };
+        if !STRIPPED_DEVICE_EXTS.contains(&name) {
+            keep.push(i);
         }
     }
-    r
+    let filtered = keep.len() as u32;
+
+    if p_properties.is_null() {
+        unsafe { *p_count = filtered };
+        eprintln!(
+            "weave-vulkan: vk_enumerate_device_extension_properties count={filtered} (stripped {} of {} host exts)",
+            got - filtered,
+            got
+        );
+        return VK_SUCCESS;
+    }
+
+    // Caller-provided buffer: copy up to *p_count filtered entries.
+    let cap = unsafe { *p_count } as usize;
+    let n = std::cmp::min(cap, keep.len());
+    for (dst_i, src_i) in keep.iter().take(n).enumerate() {
+        let src = unsafe { buf.as_ptr().add(src_i * VK_EXT_PROP_STRIDE) };
+        let dst = unsafe { (p_properties as *mut u8).add(dst_i * VK_EXT_PROP_STRIDE) };
+        unsafe { std::ptr::copy_nonoverlapping(src, dst, VK_EXT_PROP_STRIDE) };
+    }
+    unsafe { *p_count = n as u32 };
+
+    eprintln!(
+        "weave-vulkan: vk_enumerate_device_extension_properties wrote {n} extensions (filtered {} of {} host):",
+        got - filtered,
+        got
+    );
+    for i in 0..n {
+        let name = unsafe { ext_name_at(p_properties as *const u8, i) };
+        let entry = unsafe { (p_properties as *const u8).add(i * VK_EXT_PROP_STRIDE) };
+        let spec = unsafe { *(entry.add(256) as *const u32) };
+        eprintln!("weave-vulkan:   ext[{i}] {name} v{spec}");
+    }
+
+    if n < keep.len() {
+        VK_INCOMPLETE
+    } else {
+        VK_SUCCESS
+    }
 }
 inst_thunk!(vk_enumerate_device_layer_properties, "vkEnumerateDeviceLayerProperties", VkResult, (physical_device: VkPhysicalDevice, p_count: *mut u32, p_properties: *mut c_void));
 pub unsafe extern "win64" fn vk_create_device(
