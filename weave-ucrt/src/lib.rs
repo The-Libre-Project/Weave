@@ -2212,6 +2212,10 @@ pub unsafe extern "win64" fn ucrt_fopen(path: *const u8, mode: *const u8) -> *mu
         Err(_) => return std::ptr::null_mut(),
     };
     let result = unsafe { libc::fopen(path_cstr.as_ptr(), mode as *const libc::c_char) };
+    eprintln!(
+        "[weave:fio:fopen] win={win_path:?} linux={linux_path:?} ok={}",
+        !result.is_null()
+    );
     result as *mut c_void
 }
 
@@ -2244,6 +2248,10 @@ pub unsafe extern "win64" fn ucrt_wfopen(path: *const u16, mode: *const u16) -> 
         Err(_) => return std::ptr::null_mut(),
     };
     let result = unsafe { libc::fopen(path_cstr.as_ptr(), mode_cstr.as_ptr()) };
+    eprintln!(
+        "[weave:fio:wfopen] win={win_path:?} linux={linux_path:?} ok={}",
+        !result.is_null()
+    );
     result as *mut c_void
 }
 

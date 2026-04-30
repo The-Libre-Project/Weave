@@ -74,6 +74,10 @@ pub unsafe extern "win64" fn msvcp_fiopen(
         }
     };
     let result = libc::fopen(path_cstr.as_ptr(), mode_str.as_ptr() as *const libc::c_char);
+    eprintln!(
+        "[weave:fio:fiopen] win={win_path:?} linux={linux_path:?} mode=0x{mode:02x} ok={}",
+        !result.is_null()
+    );
     result as *mut libc::c_void
 }
 
