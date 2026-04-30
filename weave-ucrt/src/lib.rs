@@ -959,12 +959,17 @@ pub unsafe extern "win64" fn ms_fputs(s: *const u8, stream: *mut c_void) -> i32 
     0
 }
 
-/// fgetc — read a character from a FILE stream. Returns EOF (-1) as stub.
+/// fgetc — read a character from a FILE stream.
+///
+/// Wine ref: dlls/msvcrt/file.c — fgetc delegates to libc fgetc.
 ///
 /// # Safety
-/// `stream` is accepted but stdin reads are not implemented.
-pub unsafe extern "win64" fn ms_fgetc(_stream: *mut c_void) -> i32 {
-    -1 // EOF
+/// `stream` must be a valid FILE* obtained from fopen/wfopen, or null.
+pub unsafe extern "win64" fn ms_fgetc(stream: *mut c_void) -> i32 {
+    if stream.is_null() {
+        return -1; // EOF
+    }
+    unsafe { libc::fgetc(stream as *mut libc::FILE) }
 }
 
 /// fflush — flush a FILE stream. Returns 0 (success). No-op stub.
@@ -1148,6 +1153,52 @@ pub unsafe extern "win64" fn ucrt_stdio_common_vsprintf(
         unsafe { vsnprintf(std::ptr::null_mut(), 0, format, &mut va_tag) }
     } else {
         unsafe { vsnprintf(buf, buf_count, format, &mut va_tag) }
+    }
+}
+
+/// `__stdio_common_vsnprintf_s` — size-limited secure sprintf variant.
+///
+/// Wine ref: dlls/msvcrt/printf.c — `__stdio_common_vsnprintf_s` has an extra
+/// `count` argument (max chars to write, not counting null terminator) compared
+/// to `__stdio_common_vsprintf`. When `count == SIZE_MAX` (0xFFFF_FFFF_FFFF_FFFF)
+/// the limit is the buffer size. Always null-terminates if buf is non-null and
+/// buf_count > 0.
+///
+/// # Safety
+/// `buf` must be writable for `buf_count` bytes. `format` must be a valid C string.
+/// `args` must be a valid Windows-x64 va_list.
+pub unsafe extern "win64" fn ucrt_stdio_common_vsnprintf_s(
+    _options: u64,
+    buf: *mut u8,
+    buf_count: usize,
+    count: usize,
+    format: *const u8,
+    _locale: *const c_void,
+    args: *mut c_void,
+) -> i32 {
+    if format.is_null() {
+        return -1;
+    }
+    let limit = if count == usize::MAX || count >= buf_count {
+        buf_count
+    } else {
+        count + 1 // +1 for null terminator
+    };
+    let mut va_tag = VaListTag {
+        gp_offset: 48,
+        fp_offset: 176,
+        overflow_arg_area: args,
+        reg_save_area: std::ptr::null_mut(),
+    };
+    if buf.is_null() || buf_count == 0 {
+        unsafe { vsnprintf(std::ptr::null_mut(), 0, format, &mut va_tag) }
+    } else {
+        let ret = unsafe { vsnprintf(buf, limit, format, &mut va_tag) };
+        // Ensure null termination on truncation.
+        if ret >= limit as i32 && buf_count > 0 {
+            unsafe { *buf.add(buf_count - 1) = 0 };
+        }
+        ret
     }
 }
 
@@ -1404,6 +1455,56 @@ pub extern "win64" fn ucrt_asin(x: f64) -> f64 {
 }
 pub extern "win64" fn ucrt_acos(x: f64) -> f64 {
     x.acos()
+}
+
+pub extern "win64" fn ucrt_round(x: f64) -> f64 {
+    x.round()
+}
+
+/// `_dsign` — return sign bit of a double.
+///
+/// Wine ref: dlls/msvcrt/math.c — _dsign returns non-zero if x < 0.
+pub extern "win64" fn ucrt_dsign(x: f64) -> i32 {
+    if x.is_sign_negative() {
+        1
+    } else {
+        0
+    }
+}
+
+/// `_ldsign` — return sign bit of a long double (treated as f64 on Win64).
+pub extern "win64" fn ucrt_ldsign(x: f64) -> i32 {
+    ucrt_dsign(x)
+}
+
+/// `_dtest` — classify a double pointer value (FP class code).
+///
+/// Wine ref: dlls/msvcrt/math.c — returns: 0=zero, 1=finite, 2=infinite, 3=NaN.
+///
+/// # Safety
+/// `x` must be a valid pointer to an f64, or null.
+pub unsafe extern "win64" fn ucrt_dtest(x: *const f64) -> i16 {
+    if x.is_null() {
+        return 0;
+    }
+    let v = unsafe { *x };
+    if v.is_nan() {
+        3
+    } else if v.is_infinite() {
+        2
+    } else if v == 0.0 {
+        0
+    } else {
+        1
+    }
+}
+
+/// `_ldtest` — classify a long double pointer (treated as f64 on Win64).
+///
+/// # Safety
+/// `x` must be a valid pointer to an f64, or null.
+pub unsafe extern "win64" fn ucrt_ldtest(x: *const f64) -> i16 {
+    unsafe { ucrt_dtest(x) }
 }
 
 // Single-precision (f32) math delegates.
@@ -1967,6 +2068,63 @@ pub unsafe extern "win64" fn ucrt_ftelli64(stream: *mut c_void) -> i64 {
     unsafe { libc::ftello(stream as *mut libc::FILE) as i64 }
 }
 
+/// fgetpos — store the current file position in `*pos`.
+///
+/// Wine ref: dlls/msvcrt/file.c — fgetpos records the byte offset via ftello;
+/// Windows fpos_t is a plain i64, so we store the raw offset directly.
+///
+/// # Safety
+/// `stream` must be a valid FILE*. `pos` must be writable.
+pub unsafe extern "win64" fn ucrt_fgetpos(stream: *mut c_void, pos: *mut i64) -> i32 {
+    if stream.is_null() || pos.is_null() {
+        return -1;
+    }
+    let off = unsafe { libc::ftello(stream as *mut libc::FILE) };
+    if off == -1 {
+        return -1;
+    }
+    unsafe { *pos = off };
+    0
+}
+
+/// fsetpos — seek to the position recorded by fgetpos.
+///
+/// Wine ref: dlls/msvcrt/file.c — fsetpos on POSIX maps to fseeko(SEEK_SET).
+///
+/// # Safety
+/// `stream` must be a valid FILE*. `pos` must point to a value from fgetpos.
+pub unsafe extern "win64" fn ucrt_fsetpos(stream: *mut c_void, pos: *const i64) -> i32 {
+    if stream.is_null() || pos.is_null() {
+        return -1;
+    }
+    unsafe {
+        libc::fseeko(
+            stream as *mut libc::FILE,
+            *pos as libc::off_t,
+            libc::SEEK_SET,
+        )
+    }
+}
+
+/// `_get_stream_buffer_pointers` — expose FILE internal buffer state.
+///
+/// Wine ref: dlls/msvcrt/file.c — returns pointers to `base`, `ptr`, and
+/// `count` fields of the FILE struct for low-level buffer manipulation.
+/// Linux libc FILE is opaque; this usage pattern (SciTE/MSVCP internal)
+/// checks pointer identity only and does not dereference. Return -1 so
+/// callers fall back to standard I/O paths.
+///
+/// # Safety
+/// All pointer arguments accepted and ignored.
+pub unsafe extern "win64" fn ucrt_get_stream_buffer_pointers(
+    _stream: *mut c_void,
+    _base: *mut *mut u8,
+    _ptr: *mut *mut u8,
+    _count: *mut i32,
+) -> i32 {
+    -1
+}
+
 /// _open_osfhandle — wrap a Windows HANDLE in a CRT file descriptor.
 ///
 /// Wine ref: dlls/msvcrt/file.c:2711-2745 — allocates a new CRT fd entry
@@ -2054,11 +2212,6 @@ pub unsafe extern "win64" fn ucrt_fopen(path: *const u8, mode: *const u8) -> *mu
         Err(_) => return std::ptr::null_mut(),
     };
     let result = unsafe { libc::fopen(path_cstr.as_ptr(), mode as *const libc::c_char) };
-    eprintln!(
-        "weave/ucrt_fopen: {:?} → {:?}",
-        linux_path,
-        if result.is_null() { "NULL" } else { "OK" }
-    );
     result as *mut c_void
 }
 
@@ -2091,12 +2244,6 @@ pub unsafe extern "win64" fn ucrt_wfopen(path: *const u16, mode: *const u16) -> 
         Err(_) => return std::ptr::null_mut(),
     };
     let result = unsafe { libc::fopen(path_cstr.as_ptr(), mode_cstr.as_ptr()) };
-    eprintln!(
-        "weave/ucrt_wfopen: {:?} mode={:?} → {}",
-        linux_path,
-        mode_str,
-        if result.is_null() { "NULL" } else { "OK" }
-    );
     result as *mut c_void
 }
 
@@ -4254,6 +4401,11 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "__stdio_common_vsprintf" | "__stdio_common_vswprintf" => {
             stub!(ucrt_stdio_common_vsprintf as unsafe extern "win64" fn(_, _, _, _, _, _) -> _)
         }
+        "__stdio_common_vsnprintf_s" => {
+            stub!(
+                ucrt_stdio_common_vsnprintf_s as unsafe extern "win64" fn(_, _, _, _, _, _, _) -> _
+            )
+        }
         "_iob" => Some(iob_data_addr()),
         "fputc" => Some(ms_fputc as unsafe extern "win64" fn(_, _) -> _ as *const () as usize),
         "fputs" => Some(ms_fputs as unsafe extern "win64" fn(_, _) -> _ as *const () as usize),
@@ -4282,6 +4434,11 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "_wfsopen" => stub!(ucrt_wfsopen as unsafe extern "win64" fn(_, _, _) -> _),
         "fread" => stub!(ucrt_fread as unsafe extern "win64" fn(_, _, _, _) -> _),
         "fclose" => stub!(ucrt_fclose as unsafe extern "win64" fn(_) -> _),
+        "fgetpos" => stub!(ucrt_fgetpos as unsafe extern "win64" fn(_, _) -> _),
+        "fsetpos" => stub!(ucrt_fsetpos as unsafe extern "win64" fn(_, _) -> _),
+        "_get_stream_buffer_pointers" => {
+            stub!(ucrt_get_stream_buffer_pointers as unsafe extern "win64" fn(_, _, _, _) -> _)
+        }
         "feof" => stub!(ucrt_feof as unsafe extern "win64" fn(_) -> _),
         "ferror" => stub!(ucrt_ferror as unsafe extern "win64" fn(_) -> _),
         "snprintf" | "_snprintf" => {
@@ -4322,6 +4479,11 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "atan2" => stub!(ucrt_atan2 as extern "win64" fn(_, _) -> _),
         "asin" => stub!(ucrt_asin as extern "win64" fn(_) -> _),
         "acos" => stub!(ucrt_acos as extern "win64" fn(_) -> _),
+        "round" => stub!(ucrt_round as extern "win64" fn(_) -> _),
+        "_dsign" => stub!(ucrt_dsign as extern "win64" fn(_) -> _),
+        "_ldsign" => stub!(ucrt_ldsign as extern "win64" fn(_) -> _),
+        "_dtest" => stub!(ucrt_dtest as unsafe extern "win64" fn(_) -> _),
+        "_ldtest" => stub!(ucrt_ldtest as unsafe extern "win64" fn(_) -> _),
         // math — single precision
         "sinf" => stub!(ucrt_sinf as extern "win64" fn(_) -> _),
         "cosf" => stub!(ucrt_cosf as extern "win64" fn(_) -> _),

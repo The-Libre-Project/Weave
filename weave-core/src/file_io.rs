@@ -90,20 +90,11 @@ pub fn win32_disposition_to_nt(win32: u32) -> u32 {
 /// backslashes replaced by forward slashes — is a valid Linux absolute path
 /// that does exist, and returns that instead.
 pub fn translate_win_path(win_path: &str) -> Result<std::path::PathBuf, i32> {
-    let translated = prefix::translator().to_linux_str(win_path).map_err(|e| {
-        if win_path.to_ascii_lowercase().ends_with(".fnt") {
-            eprintln!("weave/file_io: translate .fnt FAILED err={e:?} win={win_path:?}");
-        }
-        STATUS_UNSUCCESSFUL
-    })?;
+    let translated = prefix::translator()
+        .to_linux_str(win_path)
+        .map_err(|_| STATUS_UNSUCCESSFUL)?;
 
     // Fast path: the translated path exists — use it directly.
-    if win_path.to_ascii_lowercase().ends_with(".fnt") {
-        eprintln!(
-            "weave/file_io: translate .fnt win={win_path:?} → linux={translated:?} exists={}",
-            translated.exists()
-        );
-    }
     if translated.exists() {
         return Ok(translated);
     }
@@ -170,12 +161,6 @@ pub fn open_file(win_path: &str, desired_access: u32, nt_disposition: u32) -> Re
             }
         }
         if fd < 0 {
-            // Diagnostic: log any .fnt open failure to identify font load root cause.
-            if win_path.to_ascii_lowercase().ends_with(".fnt") {
-                eprintln!(
-                    "weave/file_io: open ENOENT win={win_path:?} linux={linux_path:?} errno={errno:?}"
-                );
-            }
             return Err(errno_to_ntstatus());
         }
     }

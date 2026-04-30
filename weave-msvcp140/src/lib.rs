@@ -41,10 +41,7 @@ pub unsafe extern "win64" fn msvcp_fiopen(
     let win_path = String::from_utf16_lossy(wide).to_owned();
     let linux_path = match weave_core::file_io::translate_win_path(&win_path) {
         Ok(p) => p,
-        Err(_) => {
-            eprintln!("weave/msvcp_fiopen: translate FAILED win={win_path:?}");
-            return std::ptr::null_mut();
-        }
+        Err(_) => return std::ptr::null_mut(),
     };
     let path_cstr = match std::ffi::CString::new(linux_path.as_os_str().as_bytes()) {
         Ok(s) => s,
@@ -77,11 +74,6 @@ pub unsafe extern "win64" fn msvcp_fiopen(
         }
     };
     let result = libc::fopen(path_cstr.as_ptr(), mode_str.as_ptr() as *const libc::c_char);
-    eprintln!(
-        "weave/msvcp_fiopen: {:?} mode={mode:#x} → {}",
-        linux_path,
-        if result.is_null() { "NULL" } else { "OK" }
-    );
     result as *mut libc::c_void
 }
 
