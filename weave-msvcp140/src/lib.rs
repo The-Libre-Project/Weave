@@ -16,6 +16,75 @@ pub unsafe extern "win64" fn msvcp_noop(_a: usize, _b: usize, _c: usize, _d: usi
     0
 }
 
+/// `std::_Fiopen(filename, mode, prot)` — open a file on behalf of std::ifstream/ofstream.
+///
+/// Wine ref: dlls/msvcp140/msvcp140.c — _Fiopen maps ios_base::openmode bits to fopen
+/// mode string; prot (Win32 sharing flags) is ignored on Linux.
+/// ios_base::openmode: in=0x01, out=0x02, ate=0x04, app=0x08, trunc=0x10, binary=0x20
+pub unsafe extern "win64" fn msvcp_fiopen(
+    filename: *const u16,
+    mode: i32,
+    _prot: i32,
+) -> *mut libc::c_void {
+    use std::os::unix::ffi::OsStrExt;
+    if filename.is_null() {
+        return std::ptr::null_mut();
+    }
+    let len = {
+        let mut n = 0usize;
+        while n < 32768 && *filename.add(n) != 0 {
+            n += 1;
+        }
+        n
+    };
+    let wide = std::slice::from_raw_parts(filename, len);
+    let win_path = String::from_utf16_lossy(wide).to_owned();
+    let linux_path = match weave_core::file_io::translate_win_path(&win_path) {
+        Ok(p) => p,
+        Err(_) => {
+            eprintln!("weave/msvcp_fiopen: translate FAILED win={win_path:?}");
+            return std::ptr::null_mut();
+        }
+    };
+    let path_cstr = match std::ffi::CString::new(linux_path.as_os_str().as_bytes()) {
+        Ok(s) => s,
+        Err(_) => return std::ptr::null_mut(),
+    };
+    let r = (mode & 0x01) != 0;
+    let w = (mode & 0x02) != 0;
+    let a = (mode & 0x08) != 0;
+    let t = (mode & 0x10) != 0;
+    let b = (mode & 0x20) != 0;
+    let mode_str: &[u8] = match (r, w, a, t, b) {
+        (true, false, false, _, false) => b"r\0",
+        (true, false, false, _, true) => b"rb\0",
+        (false, true, false, _, false) => b"w\0",
+        (false, true, false, _, true) => b"wb\0",
+        (false, true, true, _, false) => b"a\0",
+        (false, true, true, _, true) => b"ab\0",
+        (true, true, false, false, false) => b"r+\0",
+        (true, true, false, false, true) => b"r+b\0",
+        (true, true, false, true, false) => b"w+\0",
+        (true, true, false, true, true) => b"w+b\0",
+        (true, true, true, _, false) => b"a+\0",
+        (true, true, true, _, true) => b"a+b\0",
+        _ => {
+            if b {
+                b"rb\0"
+            } else {
+                b"r\0"
+            }
+        }
+    };
+    let result = libc::fopen(path_cstr.as_ptr(), mode_str.as_ptr() as *const libc::c_char);
+    eprintln!(
+        "weave/msvcp_fiopen: {:?} mode={mode:#x} → {}",
+        linux_path,
+        if result.is_null() { "NULL" } else { "OK" }
+    );
+    result as *mut libc::c_void
+}
+
 // ── Real pthread-backed implementations ──────────────────────────────────────
 
 /// _Mtx_init_in_situ — initialize a pthread_mutex_t at the caller-provided address.
@@ -321,7 +390,6 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         | "??Bid@locale@std@@QEAA_KXZ"
         | "?_Addfac@_Locimp@locale@std@@AEAAXPEAVfacet@23@_K@Z"
         | "?_Decref@facet@locale@std@@UEAAPEAV_Facet_base@3@XZ"
-        | "?_Fiopen@std@@YAPEAU_iobuf@@PEB_WHH@Z"
         | "?_Getcat@?$codecvt@DDU_Mbstatet@@@std@@SA_KPEAPEBVfacet@locale@2@PEBV42@@Z"
         | "?_Getcvt@_Locinfo@std@@QEBA?AU_Cvtvec@@XZ"
         | "?_Getfalse@_Locinfo@std@@QEBAPEBDXZ"
@@ -368,6 +436,11 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         | "?xsgetn@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MEAA_JPEAD_J@Z"
         | "?xsputn@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MEAA_JPEBD_J@Z"
         => msvcp_noop as *const () as usize,
+
+        "?_Fiopen@std@@YAPEAU_iobuf@@PEB_WHH@Z" => {
+            msvcp_fiopen as unsafe extern "win64" fn(*const u16, i32, i32) -> *mut libc::c_void
+                as *const () as usize
+        }
 
         "_Thrd_id" => msvcp_thrd_id as *const () as usize,
         "_Thrd_create" => msvcp_thrd_create as *const () as usize,

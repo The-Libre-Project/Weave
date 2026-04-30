@@ -4273,7 +4273,10 @@ fn nxengine_d3d9_gate() {
             None => {
                 if pixel_result.is_none() && now >= pixel_check_at {
                     pixel_result = sample_display_pixels_99();
-                    eprintln!("nxengine_d3d9_gate: pixel_check at 20s → {:?}", pixel_result);
+                    eprintln!(
+                        "nxengine_d3d9_gate: pixel_check at 20s → {:?}",
+                        pixel_result
+                    );
                 }
                 if now >= deadline {
                     let _ = child.kill();
