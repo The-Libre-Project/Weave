@@ -395,7 +395,6 @@ macro_rules! cmd_thunk {
     };
 }
 
-
 // EXT command-buffer thunks (DXVK D3D9 render path)
 cmd_thunk!(void vk_cmd_set_depth_bias2_ext, "vkCmdSetDepthBias2EXT", (command_buffer, p_depth_bias_info: *const c_void));
 // Transform feedback (DXVK uses for d3d9 stream-out)
@@ -1457,9 +1456,7 @@ pub unsafe extern "win64" fn vk_get_instance_proc_addr(
         "vkCmdBeginTransformFeedbackEXT" => {
             vk_cmd_begin_transform_feedback_ext as PFN_vkVoidFunction
         }
-        "vkCmdEndTransformFeedbackEXT" => {
-            vk_cmd_end_transform_feedback_ext as PFN_vkVoidFunction
-        }
+        "vkCmdEndTransformFeedbackEXT" => vk_cmd_end_transform_feedback_ext as PFN_vkVoidFunction,
         "vkCmdDrawIndirectByteCountEXT" => {
             vk_cmd_draw_indirect_byte_count_ext as PFN_vkVoidFunction
         }
@@ -1474,9 +1471,7 @@ pub unsafe extern "win64" fn vk_get_instance_proc_addr(
         "vkCmdSetTessellationDomainOriginEXT" => {
             vk_cmd_set_tessellation_domain_origin_ext as PFN_vkVoidFunction
         }
-        "vkCmdSetDepthClampEnableEXT" => {
-            vk_cmd_set_depth_clamp_enable_ext as PFN_vkVoidFunction
-        }
+        "vkCmdSetDepthClampEnableEXT" => vk_cmd_set_depth_clamp_enable_ext as PFN_vkVoidFunction,
         "vkCmdSetPolygonModeEXT" => vk_cmd_set_polygon_mode_ext as PFN_vkVoidFunction,
         "vkCmdSetRasterizationSamplesEXT" => {
             vk_cmd_set_rasterization_samples_ext as PFN_vkVoidFunction
@@ -1485,13 +1480,9 @@ pub unsafe extern "win64" fn vk_get_instance_proc_addr(
         "vkCmdSetAlphaToCoverageEnableEXT" => {
             vk_cmd_set_alpha_to_coverage_enable_ext as PFN_vkVoidFunction
         }
-        "vkCmdSetAlphaToOneEnableEXT" => {
-            vk_cmd_set_alpha_to_one_enable_ext as PFN_vkVoidFunction
-        }
+        "vkCmdSetAlphaToOneEnableEXT" => vk_cmd_set_alpha_to_one_enable_ext as PFN_vkVoidFunction,
         "vkCmdSetLogicOpEnableEXT" => vk_cmd_set_logic_op_enable_ext as PFN_vkVoidFunction,
-        "vkCmdSetColorBlendEnableEXT" => {
-            vk_cmd_set_color_blend_enable_ext as PFN_vkVoidFunction
-        }
+        "vkCmdSetColorBlendEnableEXT" => vk_cmd_set_color_blend_enable_ext as PFN_vkVoidFunction,
         "vkCmdSetColorBlendEquationEXT" => {
             vk_cmd_set_color_blend_equation_ext as PFN_vkVoidFunction
         }
@@ -1509,9 +1500,7 @@ pub unsafe extern "win64" fn vk_get_instance_proc_addr(
         "vkCmdSetLineRasterizationModeEXT" => {
             vk_cmd_set_line_rasterization_mode_ext as PFN_vkVoidFunction
         }
-        "vkCmdBeginDebugUtilsLabelEXT" => {
-            vk_cmd_begin_debug_utils_label_ext as PFN_vkVoidFunction
-        }
+        "vkCmdBeginDebugUtilsLabelEXT" => vk_cmd_begin_debug_utils_label_ext as PFN_vkVoidFunction,
         "vkCmdEndDebugUtilsLabelEXT" => vk_cmd_end_debug_utils_label_ext as PFN_vkVoidFunction,
         "vkCmdInsertDebugUtilsLabelEXT" => {
             vk_cmd_insert_debug_utils_label_ext as PFN_vkVoidFunction
@@ -1519,18 +1508,12 @@ pub unsafe extern "win64" fn vk_get_instance_proc_addr(
         "vkQueueBeginDebugUtilsLabelEXT" => {
             vk_queue_begin_debug_utils_label_ext as PFN_vkVoidFunction
         }
-        "vkQueueEndDebugUtilsLabelEXT" => {
-            vk_queue_end_debug_utils_label_ext as PFN_vkVoidFunction
-        }
+        "vkQueueEndDebugUtilsLabelEXT" => vk_queue_end_debug_utils_label_ext as PFN_vkVoidFunction,
         "vkQueueInsertDebugUtilsLabelEXT" => {
             vk_queue_insert_debug_utils_label_ext as PFN_vkVoidFunction
         }
-        "vkSetDebugUtilsObjectNameEXT" => {
-            vk_set_debug_utils_object_name_ext as PFN_vkVoidFunction
-        }
-        "vkSetDebugUtilsObjectTagEXT" => {
-            vk_set_debug_utils_object_tag_ext as PFN_vkVoidFunction
-        }
+        "vkSetDebugUtilsObjectNameEXT" => vk_set_debug_utils_object_name_ext as PFN_vkVoidFunction,
+        "vkSetDebugUtilsObjectTagEXT" => vk_set_debug_utils_object_tag_ext as PFN_vkVoidFunction,
         // Safety fence: for any Vulkan function not in our dispatch table, return NULL.
         // Returning the raw SysV host-library pointer would cause an ABI mismatch crash
         // when DXVK (Win64 caller) calls it — Win64 passes args in RCX/RDX/R8/R9
