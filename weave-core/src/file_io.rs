@@ -154,12 +154,19 @@ pub fn open_file(win_path: &str, desired_access: u32, nt_disposition: u32) -> Re
     let mut fd = unsafe { libc::open(path_cstr.as_ptr(), oflags, 0o666_i32) };
     if fd < 0 {
         // Windows is case-insensitive; try a case-folded filename lookup on ENOENT.
-        if std::io::Error::last_os_error().raw_os_error() == Some(libc::ENOENT) {
+        let errno = std::io::Error::last_os_error().raw_os_error();
+        if errno == Some(libc::ENOENT) {
             if let Some(folded) = case_fold_lookup(std::path::Path::new(&linux_path)) {
                 fd = unsafe { libc::open(folded.as_ptr(), oflags, 0o666_i32) };
             }
         }
         if fd < 0 {
+            // Diagnostic: log any .fnt open failure to identify font load root cause.
+            if win_path.to_ascii_lowercase().ends_with(".fnt") {
+                eprintln!(
+                    "weave/file_io: open ENOENT win={win_path:?} linux={linux_path:?} errno={errno:?}"
+                );
+            }
             return Err(errno_to_ntstatus());
         }
     }
