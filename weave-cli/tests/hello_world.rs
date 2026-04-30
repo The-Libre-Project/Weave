@@ -4072,7 +4072,6 @@ fn seven_zip_a_extract_gate() {
 ///
 /// Skipped gracefully if testsprite2.exe is absent from fixtures.
 #[test]
-#[ignore = "SIGABRT after second vkCreateDevice — SDL2 loads D3D9.DLL twice; weave-vulkan global VkInstance corrupted by second vkCreateInstance; fix required in weave-vulkan (out of scope for TASK-9d)"]
 fn testsprite2_d3d9_gate() {
     if !cfg!(target_os = "linux") {
         eprintln!("skipping testsprite2_d3d9_gate — requires Linux");
