@@ -5005,6 +5005,30 @@ fn load_library_impl(name: &str) -> usize {
         base.to_ascii_lowercase()
     };
 
+    // Wine ref: dlls/ntdll/loader.c::LdrLoadDll — on every LoadLibrary call
+    // Windows searches PEB.Ldr.InMemoryOrderModuleList by canonical path first;
+    // if the module is already present it increments the refcount and returns
+    // the existing base address without calling DllMain again.
+    //
+    // Weave mirrors this: if the DLL is already registered (real disk-loaded or
+    // synthetic/emulated), return the existing HMODULE immediately so that
+    // callers such as SDL2 that invoke LoadLibrary("D3D9.DLL") twice receive
+    // the same handle on the second call and DllMain is not re-entered.
+    if dll_registry::is_registered(&key) {
+        if let Some(existing) = module_handles::find(name) {
+            eprintln!(
+                "weave/kernel32: LoadLibrary({name:?}) → existing handle {existing:#x} (already loaded)"
+            );
+            return existing;
+        }
+    } else if let Some(existing) = module_handles::find(name) {
+        // Synthetic / emulated DLL already registered — return immediately.
+        eprintln!(
+            "weave/kernel32: LoadLibrary({name:?}) → existing synthetic handle {existing:#x} (already loaded)"
+        );
+        return existing;
+    }
+
     // Build candidate Linux paths to try, in priority order.
     let mut candidates: Vec<std::path::PathBuf> = Vec::new();
 
