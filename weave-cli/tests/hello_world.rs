@@ -4192,3 +4192,128 @@ fn testsprite2_d3d9_gate() {
     );
     cap.emit();
 }
+
+/// nxengine_d3d9_gate — M9 A3
+///
+/// Runs nx.exe (Cave Story / NXEngine-evo) with SDL_RENDER_DRIVER=direct3d,
+/// without SDL_RENDER_DRIVER=software. Retires the M7 software-renderer
+/// workaround. Proves the SDL2→DXVK→Vulkan path works for a real game binary.
+///
+/// Tier A assertions:
+///   A1: sample_display_pixels_99() returns Some(true) at 20s (non-black pixels via D3D9)
+///
+/// Skipped gracefully if nx.exe is absent from fixtures.
+#[test]
+fn nxengine_d3d9_gate() {
+    if !cfg!(target_os = "linux") {
+        eprintln!("skipping nxengine_d3d9_gate — requires Linux");
+        return;
+    }
+
+    let manifest = env!("CARGO_MANIFEST_DIR");
+    let game_dir = format!("{manifest}/../tests/fixtures/nxengine");
+    let exe = format!("{game_dir}/nx.exe");
+
+    if !std::path::Path::new(&exe).exists() {
+        eprintln!("skipping: nx.exe not present in tests/fixtures/nxengine/ — run CI or download NXEngine-evo manually");
+        return;
+    }
+
+    let weave_bin = env!("CARGO_BIN_EXE_weave");
+    let start = std::time::Instant::now();
+
+    // CWD = game_dir so nx.exe finds its data files next to itself.
+    // SDL_RENDER_DRIVER=direct3d: forces D3D9 path — no software fallback.
+    // SDL_AUDIODRIVER=dummy: prevents audio init hang in CI.
+    // SDL_FRAMEBUFFER_ACCELERATION=0: avoids Xvfb accel quirks.
+    let mut child = std::process::Command::new(weave_bin)
+        .current_dir(&game_dir)
+        .arg(&exe)
+        .env("DISPLAY", ":99")
+        .env("SDL_RENDER_DRIVER", "direct3d")
+        .env("SDL_AUDIODRIVER", "dummy")
+        .env("SDL_FRAMEBUFFER_ACCELERATION", "0")
+        .stderr(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|e| panic!("failed to spawn weave on nx.exe: {e}"));
+
+    // Drain stderr concurrently — DXVK/lavapipe output is voluminous.
+    let stderr_pipe = child.stderr.take().expect("stderr was piped");
+    let stderr_handle = std::thread::spawn(move || {
+        use std::io::Read;
+        let mut buf = String::new();
+        let mut r = stderr_pipe;
+        let _ = r.read_to_string(&mut buf);
+        buf
+    });
+
+    // Mesa/lavapipe Vulkan device creation takes ~15-20s on CI; sample after 20s.
+    // deadline at 60s — nx.exe runs indefinitely once in game loop, kill at deadline.
+    let pixel_check_at = start + std::time::Duration::from_secs(20);
+    let deadline = start + std::time::Duration::from_secs(60);
+    let mut pixel_result: Option<bool> = None;
+    let mut killed_by_deadline = false;
+
+    loop {
+        let now = std::time::Instant::now();
+        match child.try_wait().expect("try_wait failed") {
+            Some(_) => {
+                break;
+            }
+            None => {
+                if pixel_result.is_none() && now >= pixel_check_at {
+                    pixel_result = sample_display_pixels_99();
+                    eprintln!("nxengine_d3d9_gate: pixel_check at 20s → {:?}", pixel_result);
+                }
+                if now >= deadline {
+                    let _ = child.kill();
+                    killed_by_deadline = true;
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        }
+    }
+
+    let elapsed = start.elapsed();
+    let stderr = stderr_handle.join().unwrap_or_default();
+    let stdout = {
+        use std::io::Read;
+        let mut s = String::new();
+        if let Some(mut p) = child.stdout.take() {
+            let _ = p.read_to_string(&mut s);
+        }
+        s
+    };
+
+    eprintln!("nxengine_d3d9_gate elapsed: {elapsed:.1?}");
+    eprintln!("nxengine_d3d9_gate killed_by_deadline: {killed_by_deadline}");
+    eprintln!("--- nxengine STDERR BEGIN ---\n{stderr}\n--- nxengine STDERR END ---");
+
+    // A1: non-black pixels at 20s — SDL2 D3D9 renderer reached and DXVK rendered.
+    assert!(
+        matches!(pixel_result, Some(true)),
+        "nxengine_d3d9_gate A1 FAIL: screen black at 20s — D3D9 render loop not reached \
+(pixel_result={pixel_result:?}, elapsed {elapsed:.1?}).\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    eprintln!("nxengine_d3d9_gate A1: non-black pixels at 20s ✓");
+
+    eprintln!("nxengine_d3d9_gate: all gates passed");
+
+    // --- Capability taxonomy (TASK-META-06) ---
+    let mut cap = CapabilityReport::for_app("nx.exe");
+    cap.declare(CapabilityClass::Launches);
+    cap.declare(CapabilityClass::Audio);
+    cap.record(
+        CapabilityClass::Launches,
+        CapabilityOutcome::pass(
+            "A1: PE loaded, SDL2 D3D9 renderer reached, non-black pixels at 20s",
+        ),
+    );
+    cap.record(
+        CapabilityClass::Audio,
+        CapabilityOutcome::untested("SDL_AUDIODRIVER=dummy forces no-op audio backend in CI"),
+    );
+    cap.emit();
+}
