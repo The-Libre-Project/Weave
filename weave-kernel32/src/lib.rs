@@ -10421,6 +10421,79 @@ pub unsafe extern "win64" fn compare_string_w(
     }
 }
 
+/// CompareStringA: compare two ANSI strings with optional case folding (ANSI wrapper for CompareStringW).
+///
+/// # Safety
+/// `lp_string1` and `lp_string2` must be valid pointers to null-terminated ANSI (byte) strings,
+/// or point to at least `cch_count1`/`cch_count2` bytes respectively when counts are non-negative.
+// Wine ref: dlls/kernelbase/locale.c — CompareStringA validates args, converts ANSI→UTF-16 via
+// MultiByteToWideChar(CP_ACP), then delegates to CompareStringW; null str1/str2 →
+// ERROR_INVALID_PARAMETER; Weave treats each ANSI byte as its Unicode codepoint (ASCII superset
+// sufficient for SDL2 renderer-name matching with NORM_IGNORECASE + ASCII inputs)
+pub unsafe extern "win64" fn compare_string_a(
+    _locale: u32,
+    dw_cmp_flags: u32,
+    lp_string1: *const u8,
+    cch_count1: i32,
+    lp_string2: *const u8,
+    cch_count2: i32,
+) -> i32 {
+    if lp_string1.is_null() || lp_string2.is_null() {
+        set_last_error(87); // ERROR_INVALID_PARAMETER
+        return 0;
+    }
+
+    let len1 = if cch_count1 == -1 {
+        let mut len = 0usize;
+        while *lp_string1.add(len) != 0 {
+            len += 1;
+        }
+        len
+    } else {
+        cch_count1 as usize
+    };
+
+    let len2 = if cch_count2 == -1 {
+        let mut len = 0usize;
+        while *lp_string2.add(len) != 0 {
+            len += 1;
+        }
+        len
+    } else {
+        cch_count2 as usize
+    };
+
+    let case_insensitive =
+        (dw_cmp_flags & NORM_IGNORECASE) != 0 || (dw_cmp_flags & LINGUISTIC_IGNORECASE) != 0;
+
+    // Promote ANSI bytes to u16 code units (identity mapping for ASCII/Latin-1) and compare.
+    // This is behaviorally equivalent to Wine's ANSI→UTF-16 conversion for ASCII inputs.
+    let min_len = len1.min(len2);
+    for i in 0..min_len {
+        let mut c1 = *lp_string1.add(i) as u16;
+        let mut c2 = *lp_string2.add(i) as u16;
+
+        if case_insensitive && (c1 as u8).is_ascii_uppercase() {
+            c1 += 32;
+        }
+        if case_insensitive && (c2 as u8).is_ascii_uppercase() {
+            c2 += 32;
+        }
+
+        if c1 < c2 {
+            return CSTR_LESS_THAN;
+        } else if c1 > c2 {
+            return CSTR_GREATER_THAN;
+        }
+    }
+
+    match len1.cmp(&len2) {
+        std::cmp::Ordering::Less => CSTR_LESS_THAN,
+        std::cmp::Ordering::Equal => CSTR_EQUAL,
+        std::cmp::Ordering::Greater => CSTR_GREATER_THAN,
+    }
+}
+
 /// CompareStringOrdinal: compare two UTF-16 strings with optional case folding.
 ///
 /// # Safety
@@ -12455,6 +12528,10 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
                 as usize,
         ),
         // String comparison
+        "CompareStringA" => Some(
+            compare_string_a as unsafe extern "win64" fn(_, _, _, _, _, _) -> _ as *const ()
+                as usize,
+        ),
         "CompareStringW" => Some(
             compare_string_w as unsafe extern "win64" fn(_, _, _, _, _, _) -> _ as *const ()
                 as usize,
