@@ -4219,6 +4219,15 @@ fn nxengine_d3d9_gate() {
         return;
     }
 
+    // SDL2's D3D9 renderer calls LoadLibraryA("d3d9.dll") with no path; Weave
+    // resolves it from CWD (game_dir). Copy from bin/ if not already present.
+    let d3d9_src = format!("{manifest}/../tests/fixtures/bin/d3d9.dll");
+    let d3d9_dst = format!("{game_dir}/d3d9.dll");
+    if std::path::Path::new(&d3d9_src).exists() && !std::path::Path::new(&d3d9_dst).exists() {
+        std::fs::copy(&d3d9_src, &d3d9_dst)
+            .unwrap_or_else(|e| panic!("failed to copy d3d9.dll into nxengine fixture dir: {e}"));
+    }
+
     let weave_bin = env!("CARGO_BIN_EXE_weave");
     let start = std::time::Instant::now();
 
