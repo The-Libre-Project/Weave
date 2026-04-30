@@ -92,9 +92,20 @@ pub fn win32_disposition_to_nt(win32: u32) -> u32 {
 pub fn translate_win_path(win_path: &str) -> Result<std::path::PathBuf, i32> {
     let translated = prefix::translator()
         .to_linux_str(win_path)
-        .map_err(|_| STATUS_UNSUCCESSFUL)?;
+        .map_err(|e| {
+            if win_path.to_ascii_lowercase().ends_with(".fnt") {
+                eprintln!("weave/file_io: translate .fnt FAILED err={e:?} win={win_path:?}");
+            }
+            STATUS_UNSUCCESSFUL
+        })?;
 
     // Fast path: the translated path exists — use it directly.
+    if win_path.to_ascii_lowercase().ends_with(".fnt") {
+        eprintln!(
+            "weave/file_io: translate .fnt win={win_path:?} → linux={translated:?} exists={}",
+            translated.exists()
+        );
+    }
     if translated.exists() {
         return Ok(translated);
     }
