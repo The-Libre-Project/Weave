@@ -2091,6 +2091,12 @@ pub unsafe extern "win64" fn ucrt_wfopen(path: *const u16, mode: *const u16) -> 
         Err(_) => return std::ptr::null_mut(),
     };
     let result = unsafe { libc::fopen(path_cstr.as_ptr(), mode_cstr.as_ptr()) };
+    eprintln!(
+        "weave/ucrt_wfopen: {:?} mode={:?} → {}",
+        linux_path,
+        mode_str,
+        if result.is_null() { "NULL" } else { "OK" }
+    );
     result as *mut c_void
 }
 
