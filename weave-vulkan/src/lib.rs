@@ -511,10 +511,6 @@ null_abort_stub!(
     "vkCmdSetExtraPrimitiveOverestimationSizeEXT"
 );
 null_abort_stub!(
-    stub_vk_cmd_set_depth_clip_enable_ext,
-    "vkCmdSetDepthClipEnableEXT"
-);
-null_abort_stub!(
     stub_vk_cmd_set_line_rasterization_mode_ext,
     "vkCmdSetLineRasterizationModeEXT"
 );
@@ -1104,6 +1100,10 @@ cmd_thunk!(void vk_cmd_push_descriptor_set_with_template_khr, "vkCmdPushDescript
 cmd_thunk!(void vk_cmd_debug_marker_begin_ext, "vkCmdDebugMarkerBeginEXT", (command_buffer, p_marker_info: *const c_void));
 cmd_thunk!(void vk_cmd_debug_marker_end_ext, "vkCmdDebugMarkerEndEXT", (command_buffer,));
 cmd_thunk!(void vk_cmd_debug_marker_insert_ext, "vkCmdDebugMarkerInsertEXT", (command_buffer, p_marker_info: *const c_void));
+// VK_EXT_depth_clip_enable — lavapipe v1; DXVK calls during D3D9 first render frame.
+// Wine ref: dlls/vulkan-1/vulkan.c — pass-through to ICDs; no side effects beyond
+// recording the dynamic-state command in the command buffer.
+cmd_thunk!(void vk_cmd_set_depth_clip_enable_ext, "vkCmdSetDepthClipEnableEXT", (command_buffer, depth_clip_enable: u32));
 
 // ── Exported Vulkan stubs (extern "win64") ────────────────────────────────────
 
@@ -1616,7 +1616,7 @@ pub unsafe extern "win64" fn vk_get_instance_proc_addr(
         "vkCmdSetExtraPrimitiveOverestimationSizeEXT" => {
             stub_vk_cmd_set_extra_primitive_overestimation_size_ext as PFN_vkVoidFunction
         }
-        "vkCmdSetDepthClipEnableEXT" => stub_vk_cmd_set_depth_clip_enable_ext as PFN_vkVoidFunction,
+        "vkCmdSetDepthClipEnableEXT" => vk_cmd_set_depth_clip_enable_ext as PFN_vkVoidFunction,
         "vkCmdSetLineRasterizationModeEXT" => {
             stub_vk_cmd_set_line_rasterization_mode_ext as PFN_vkVoidFunction
         }
