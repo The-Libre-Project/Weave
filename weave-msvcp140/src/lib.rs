@@ -16,6 +16,31 @@ pub unsafe extern "win64" fn msvcp_noop(_a: usize, _b: usize, _c: usize, _d: usi
     0
 }
 
+// ── Fake vtable tables and virtual base tables ────────────────────────────────
+//
+// These are all-zero fake vtables used by the constructor stubs below.
+// Virtual calls through these vtables are routed via IAT-patched real methods anyway;
+// the vtable pointer just needs to be non-null for layout validity.
+//
+// Wine ref: dlls/msvcp60/ios.c — basic_streambuf_char_vtable, basic_ios_char_vtable, etc.
+static FAKE_STREAMBUF_VTABLE: [usize; 16] = [0usize; 16];
+static FAKE_IOS_VTABLE: [usize; 16] = [0usize; 16];
+static FAKE_ISTREAM_VTABLE: [usize; 16] = [0usize; 16];
+static FAKE_OSTREAM_VTABLE: [usize; 16] = [0usize; 16];
+static FAKE_IOSTREAM_VTABLE: [usize; 16] = [0usize; 16];
+
+// Virtual base tables (vbtable): [0i32, byte_offset_to_virtual_basic_ios_char]
+// Wine ref: dlls/msvcp60/ios.c — basic_istream_char_vbtable, basic_ostream_char_vbtable,
+//           basic_iostream_char_vbtable1, basic_iostream_char_vbtable2.
+// basic_istream_char own fields = 0x10 → ios at this+0x10
+// basic_ostream_char own fields = 0x08 → ios at this+0x08
+// basic_iostream_char: istream part (base1) at +0x00, ostream part (base2) at +0x10
+//   → from base1: ios at this+0x18; from base2: ios at base2+0x10
+static BASIC_ISTREAM_VBTABLE: [i32; 2] = [0i32, 0x10i32];
+static BASIC_OSTREAM_VBTABLE: [i32; 2] = [0i32, 0x08i32];
+static BASIC_IOSTREAM_VBTABLE1: [i32; 2] = [0i32, 0x18i32];
+static BASIC_IOSTREAM_VBTABLE2: [i32; 2] = [0i32, 0x10i32];
+
 // ── Fake locale infrastructure ────────────────────────────────────────────────
 //
 // NXEngine inlines locale::_Getfacet() which navigates:
@@ -78,6 +103,200 @@ fn get_fake_locale_data() -> &'static FakeLocaleData {
         b.farray = locimp_addr; // farray[0] = locimp itself (non-null, any facet*)
         b
     })
+}
+
+// ── Constructor helper utilities ───────────────────────────────────────────────
+
+/// Write a pointer-sized value at `base + off`.
+/// Wine ref: used throughout dlls/msvcp60/ios.c for field initialization.
+#[inline(always)]
+unsafe fn write_ptr(base: *mut u8, off: usize, val: *const u8) {
+    *(base.add(off) as *mut *const u8) = val;
+}
+
+/// Initialize the self-referential pointer fields of a basic_streambuf_char.
+/// Wine ref: dlls/msvcp60/ios.c basic_streambuf_char__Init_empty line 757 —
+///   sets prbuf=&rbuf, pwbuf=&wbuf, prpos=&rpos, pwpos=&wpos, prsize=&rsize, pwsize=&wsize.
+unsafe fn streambuf_init_empty(this: *mut u8) {
+    write_ptr(this, 0x50, this.add(0x40)); // prbuf  = &rbuf
+    write_ptr(this, 0x58, this.add(0x48)); // pwbuf  = &wbuf
+    write_ptr(this, 0x70, this.add(0x60)); // prpos  = &rpos
+    write_ptr(this, 0x78, this.add(0x68)); // pwpos  = &wpos
+    // prsize/pwsize point to int fields — cast to *const u8 for write_ptr uniformity
+    write_ptr(this, 0x88, this.add(0x80)); // prsize = &rsize
+    write_ptr(this, 0x90, this.add(0x84)); // pwsize = &wsize
+    // rbuf/wbuf/rpos/wpos already zero from calloc; rsize/wsize = 0
+}
+
+// ── 6 constructor implementations ─────────────────────────────────────────────
+
+/// `basic_streambuf<char>::_Init()` — initialize self-referential pointer fields only.
+/// Called after memory is already zeroed; does not write vtable or locale.
+/// Wine ref: dlls/msvcp60/ios.c basic_streambuf_char__Init_empty line 757.
+pub unsafe extern "win64" fn msvcp_streambuf_init(
+    this: *mut u8,
+    _b: usize,
+    _c: usize,
+    _d: usize,
+) -> *mut u8 {
+    if !this.is_null() {
+        streambuf_init_empty(this);
+    }
+    this
+}
+
+/// `basic_streambuf<char>::basic_streambuf()` — default constructor.
+/// Zeroes the struct, writes fake vtable + fake locale ptr, sets self-referential pointers.
+/// Wine ref: dlls/msvcp60/ios.c basic_streambuf_char_ctor ~line 830 — calls _Init_empty.
+pub unsafe extern "win64" fn msvcp_streambuf_ctor(
+    this: *mut u8,
+    _b: usize,
+    _c: usize,
+    _d: usize,
+) -> *mut u8 {
+    if this.is_null() {
+        return this;
+    }
+    // Zero the whole struct (0xA0 bytes)
+    std::ptr::write_bytes(this, 0u8, 0xA0);
+    // Write fake vtable at +0x00
+    write_ptr(this, 0x00, FAKE_STREAMBUF_VTABLE.as_ptr() as *const u8);
+    // Write fake locale pointer at +0x98
+    let locale_ptr = get_fake_locale_data() as *const FakeLocaleData as *const u8;
+    write_ptr(this, 0x98, locale_ptr);
+    // Set self-referential pointer fields
+    streambuf_init_empty(this);
+    this
+}
+
+/// `basic_ios<char>::basic_ios()` — default constructor (no streambuf argument).
+/// Zero-inits ios_base fields, writes fake vtable, sets fmtfl defaults, fillch=' '.
+/// Note: strbuf and stream are NOT set here — set by basic_ios_char_init.
+/// Wine ref: dlls/msvcp60/ios.c basic_ios_char_ctor line 4047 — calls ios_base_ctor,
+///   writes ios_base vtable.
+pub unsafe extern "win64" fn msvcp_basic_ios_ctor(
+    this: *mut u8,
+    _b: usize,
+    _c: usize,
+    _d: usize,
+) -> *mut u8 {
+    if this.is_null() {
+        return this;
+    }
+    // Zero the whole basic_ios_char (0x60 bytes)
+    std::ptr::write_bytes(this, 0u8, 0x60);
+    // Write ios_base fake vtable at +0x00
+    write_ptr(this, 0x00, FAKE_IOS_VTABLE.as_ptr() as *const u8);
+    // Set fmtfl defaults: skipws(0x1000) | dec(0x0008) = 0x1008 at +0x10
+    *(this.add(0x10) as *mut u32) = 0x1008u32;
+    // fillch = ' ' at basic_ios_char+0x58
+    *this.add(0x58) = b' ';
+    this
+}
+
+/// Internal: call basic_ios_char_init logic on `base` with `sb`.
+/// Wine ref: dlls/msvcp60/ios.c basic_ios_char_init line 4059 —
+///   sets strbuf=sb, stream=NULL, fillch=' '.
+#[inline(always)]
+unsafe fn ios_char_init(base: *mut u8, sb: *mut u8) {
+    // base->strbuf = sb at basic_ios_char+0x48
+    write_ptr(base, 0x48, sb as *const u8);
+    // base->stream = NULL at basic_ios_char+0x50
+    write_ptr(base, 0x50, std::ptr::null());
+    // base->fillch = ' ' at basic_ios_char+0x58
+    *base.add(0x58) = b' ';
+}
+
+/// `basic_istream<char>::basic_istream(basic_streambuf*, bool)` — constructor.
+/// Writes vbtable, locates virtual basic_ios_char base, zero-inits it, then calls
+/// basic_ios_char_init to set strbuf=sb.
+/// Wine ref: dlls/msvcp60/ios.c basic_istream_char_ctor line 6074 — writes vbtable,
+///   calls basic_ios_char_ctor (virt_init=true path), sets count=0, calls basic_ios_char_init.
+pub unsafe extern "win64" fn msvcp_istream_ctor(
+    this: *mut u8,
+    sb: *mut u8,
+    _isstd: usize,
+    _d: usize,
+) -> *mut u8 {
+    if this.is_null() {
+        return this;
+    }
+    // Write vbtable pointer at this+0x00
+    write_ptr(this, 0x00, BASIC_ISTREAM_VBTABLE.as_ptr() as *const u8);
+    // Locate virtual basic_ios_char via vbtable[1] offset
+    let vbase_off = BASIC_ISTREAM_VBTABLE[1] as usize;
+    let base = this.add(vbase_off);
+    // Zero-init and write ios vtable (basic_ios_char_ctor logic)
+    std::ptr::write_bytes(base, 0u8, 0x60);
+    write_ptr(base, 0x00, FAKE_ISTREAM_VTABLE.as_ptr() as *const u8);
+    *(base.add(0x10) as *mut u32) = 0x1008u32; // fmtfl defaults
+    *base.add(0x58) = b' ';                    // fillch
+    // count = 0 at this+0x08
+    *(this.add(0x08) as *mut i64) = 0i64;
+    // basic_ios_char_init: strbuf=sb, stream=NULL, fillch=' '
+    ios_char_init(base, sb);
+    this
+}
+
+/// `basic_ostream<char>::basic_ostream(basic_streambuf*, bool)` — constructor.
+/// Wine ref: dlls/msvcp60/ios.c basic_ostream_char_ctor line 4510 — writes vbtable,
+///   calls basic_ios_char_ctor (virt_init=true), calls basic_ios_char_init (init=true).
+pub unsafe extern "win64" fn msvcp_ostream_ctor(
+    this: *mut u8,
+    sb: *mut u8,
+    _isstd: usize,
+    _d: usize,
+) -> *mut u8 {
+    if this.is_null() {
+        return this;
+    }
+    // Write vbtable pointer at this+0x00
+    write_ptr(this, 0x00, BASIC_OSTREAM_VBTABLE.as_ptr() as *const u8);
+    // Locate virtual basic_ios_char via vbtable[1] offset
+    let vbase_off = BASIC_OSTREAM_VBTABLE[1] as usize;
+    let base = this.add(vbase_off);
+    // Zero-init and write ios vtable
+    std::ptr::write_bytes(base, 0u8, 0x60);
+    write_ptr(base, 0x00, FAKE_OSTREAM_VTABLE.as_ptr() as *const u8);
+    *(base.add(0x10) as *mut u32) = 0x1008u32; // fmtfl defaults
+    *base.add(0x58) = b' ';                    // fillch
+    // basic_ios_char_init: strbuf=sb, stream=NULL, fillch=' '
+    ios_char_init(base, sb);
+    this
+}
+
+/// `basic_iostream<char>::basic_iostream(basic_streambuf*)` — constructor.
+/// Writes both istream and ostream vbtables, zero-inits shared virtual basic_ios_char,
+/// then calls basic_ios_char_init via the istream path.
+/// Wine ref: dlls/msvcp60/ios.c basic_iostream_char_ctor line 8309 — writes both
+///   vbtables (virt_init=true), calls basic_istream_char_ctor(base1, strbuf, F, F),
+///   calls basic_ostream_char_ctor(base2, NULL, F, F, F).
+pub unsafe extern "win64" fn msvcp_iostream_ctor(
+    this: *mut u8,
+    sb: *mut u8,
+    _c: usize,
+    _d: usize,
+) -> *mut u8 {
+    if this.is_null() {
+        return this;
+    }
+    // Write istream vbtable at base1=this+0x00
+    write_ptr(this, 0x00, BASIC_IOSTREAM_VBTABLE1.as_ptr() as *const u8);
+    // Write ostream vbtable at base2=this+0x10
+    write_ptr(this, 0x10, BASIC_IOSTREAM_VBTABLE2.as_ptr() as *const u8);
+    // Locate virtual basic_ios_char via base1 vbtable[1] offset from this
+    let vbase_off = BASIC_IOSTREAM_VBTABLE1[1] as usize;
+    let base = this.add(vbase_off);
+    // Zero-init and write iostream ios vtable (basic_ios_char_ctor)
+    std::ptr::write_bytes(base, 0u8, 0x60);
+    write_ptr(base, 0x00, FAKE_IOSTREAM_VTABLE.as_ptr() as *const u8);
+    *(base.add(0x10) as *mut u32) = 0x1008u32; // fmtfl defaults
+    *base.add(0x58) = b' ';                    // fillch
+    // base1.count = 0 at this+0x08 (istream gcount field)
+    *(this.add(0x08) as *mut i64) = 0i64;
+    // basic_ios_char_init: strbuf=sb, stream=NULL, fillch=' '
+    ios_char_init(base, sb);
+    this
 }
 
 /// `basic_streambuf::getloc()` — returns a locale copy via Windows x64 sret.
@@ -551,13 +770,40 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
             &LOCALE_ID_NUMPUNCT as *const usize as usize
         }
 
+        // ── Constructor implementations ───────────────────────────────────────────
+        // Wine ref: dlls/msvcp60/ios.c — basic_streambuf_char_ctor ~line 830
+        "??0?$basic_streambuf@DU?$char_traits@D@std@@@std@@IEAA@XZ" => {
+            msvcp_streambuf_ctor as unsafe extern "win64" fn(*mut u8, usize, usize, usize) -> *mut u8
+                as *const () as usize
+        }
+        // Wine ref: dlls/msvcp60/ios.c — basic_streambuf_char__Init_empty line 757
+        "?_Init@?$basic_streambuf@DU?$char_traits@D@std@@@std@@IEAAXXZ" => {
+            msvcp_streambuf_init as unsafe extern "win64" fn(*mut u8, usize, usize, usize) -> *mut u8
+                as *const () as usize
+        }
+        // Wine ref: dlls/msvcp60/ios.c — basic_ios_char_ctor line 4047
+        "??0?$basic_ios@DU?$char_traits@D@std@@@std@@IEAA@XZ" => {
+            msvcp_basic_ios_ctor as unsafe extern "win64" fn(*mut u8, usize, usize, usize) -> *mut u8
+                as *const () as usize
+        }
+        // Wine ref: dlls/msvcp60/ios.c — basic_istream_char_ctor line 6074
+        "??0?$basic_istream@DU?$char_traits@D@std@@@std@@QEAA@PEAV?$basic_streambuf@DU?$char_traits@D@std@@@1@_N@Z" => {
+            msvcp_istream_ctor as unsafe extern "win64" fn(*mut u8, *mut u8, usize, usize) -> *mut u8
+                as *const () as usize
+        }
+        // Wine ref: dlls/msvcp60/ios.c — basic_ostream_char_ctor line 4510
+        "??0?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAA@PEAV?$basic_streambuf@DU?$char_traits@D@std@@@1@_N@Z" => {
+            msvcp_ostream_ctor as unsafe extern "win64" fn(*mut u8, *mut u8, usize, usize) -> *mut u8
+                as *const () as usize
+        }
+        // Wine ref: dlls/msvcp60/ios.c — basic_iostream_char_ctor line 8309
+        "??0?$basic_iostream@DU?$char_traits@D@std@@@std@@QEAA@PEAV?$basic_streambuf@DU?$char_traits@D@std@@@1@@Z" => {
+            msvcp_iostream_ctor as unsafe extern "win64" fn(*mut u8, *mut u8, usize, usize) -> *mut u8
+                as *const () as usize
+        }
+
         // ── Function symbols — all map to msvcp_noop ──────────────────────────────
-        "??0?$basic_ios@DU?$char_traits@D@std@@@std@@IEAA@XZ"
-        | "??0?$basic_iostream@DU?$char_traits@D@std@@@std@@QEAA@PEAV?$basic_streambuf@DU?$char_traits@D@std@@@1@@Z"
-        | "??0?$basic_istream@DU?$char_traits@D@std@@@std@@QEAA@PEAV?$basic_streambuf@DU?$char_traits@D@std@@@1@_N@Z"
-        | "??0?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAA@PEAV?$basic_streambuf@DU?$char_traits@D@std@@@1@_N@Z"
-        | "??0?$basic_streambuf@DU?$char_traits@D@std@@@std@@IEAA@XZ"
-        | "??0?$codecvt@_WDU_Mbstatet@@@std@@QEAA@_K@Z"
+        "??0?$codecvt@_WDU_Mbstatet@@@std@@QEAA@_K@Z"
         | "??0_Locinfo@std@@QEAA@PEBD@Z"
         | "??0_Lockit@std@@QEAA@H@Z"
         | "??0facet@locale@std@@IEAA@_K@Z"
@@ -585,7 +831,6 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         | "?_Getlconv@_Locinfo@std@@QEBAPEBUlconv@@XZ"
         | "?_Gettrue@_Locinfo@std@@QEBAPEBDXZ"
         | "?_Incref@facet@locale@std@@UEAAXXZ"
-        | "?_Init@?$basic_streambuf@DU?$char_traits@D@std@@@std@@IEAAXXZ"
         | "?_Init@locale@std@@CAPEAV_Locimp@12@_N@Z"
         | "?_Lock@?$basic_streambuf@DU?$char_traits@D@std@@@std@@UEAAXXZ"
         | "?_New_Locimp@_Locimp@locale@std@@CAPEAV123@AEBV123@@Z"
