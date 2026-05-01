@@ -969,9 +969,7 @@ pub unsafe extern "win64" fn ms_fgetc(stream: *mut c_void) -> i32 {
     if stream.is_null() {
         return -1; // EOF
     }
-    let r = unsafe { libc::fgetc(stream as *mut libc::FILE) };
-    eprintln!("[weave:ucrt] fgetc fp={:p} -> 0x{:02x}", stream, r);
-    r
+    unsafe { libc::fgetc(stream as *mut libc::FILE) }
 }
 
 /// fflush — flush a FILE stream. Returns 0 (success). No-op stub.
@@ -2056,12 +2054,7 @@ pub unsafe extern "win64" fn ucrt_fseeki64(stream: *mut c_void, offset: i64, ori
     if stream.is_null() {
         return -1;
     }
-    let r = unsafe { libc::fseeko(stream as *mut libc::FILE, offset as libc::off_t, origin) };
-    eprintln!(
-        "[weave:ucrt] _fseeki64 fp={:p} off={} origin={} -> {}",
-        stream, offset, origin, r
-    );
-    r
+    unsafe { libc::fseeko(stream as *mut libc::FILE, offset as libc::off_t, origin) }
 }
 
 /// _ftelli64 / ftell — return the current position in a libc-backed FILE stream.
@@ -2072,9 +2065,7 @@ pub unsafe extern "win64" fn ucrt_ftelli64(stream: *mut c_void) -> i64 {
     if stream.is_null() {
         return -1;
     }
-    let r = unsafe { libc::ftello(stream as *mut libc::FILE) as i64 };
-    eprintln!("[weave:ucrt] _ftelli64 fp={:p} -> {}", stream, r);
-    r
+    unsafe { libc::ftello(stream as *mut libc::FILE) as i64 }
 }
 
 /// fgetpos — store the current file position in `*pos`.
@@ -2090,11 +2081,9 @@ pub unsafe extern "win64" fn ucrt_fgetpos(stream: *mut c_void, pos: *mut i64) ->
     }
     let off = unsafe { libc::ftello(stream as *mut libc::FILE) };
     if off == -1 {
-        eprintln!("[weave:ucrt] fgetpos fp={:p} -> ERR", stream);
         return -1;
     }
     unsafe { *pos = off };
-    eprintln!("[weave:ucrt] fgetpos fp={:p} -> pos={}", stream, off);
     0
 }
 
@@ -2108,10 +2097,13 @@ pub unsafe extern "win64" fn ucrt_fsetpos(stream: *mut c_void, pos: *const i64) 
     if stream.is_null() || pos.is_null() {
         return -1;
     }
-    let p = unsafe { *pos };
-    let r = unsafe { libc::fseeko(stream as *mut libc::FILE, p as libc::off_t, libc::SEEK_SET) };
-    eprintln!("[weave:ucrt] fsetpos fp={:p} pos={} -> {}", stream, p, r);
-    r
+    unsafe {
+        libc::fseeko(
+            stream as *mut libc::FILE,
+            *pos as libc::off_t,
+            libc::SEEK_SET,
+        )
+    }
 }
 
 /// Backing slots for `_get_stream_buffer_pointers` outparams.
@@ -2142,7 +2134,7 @@ static FAKE_FILE_BUFFER_SLOTS: [usize; 3] = [0, 0, 0];
 /// `base`, `ptr`, and `count` must each be either NULL or point to a writable
 /// 8-byte slot (the inlined caller always passes valid stack-local slots).
 pub unsafe extern "win64" fn ucrt_get_stream_buffer_pointers(
-    stream: *mut c_void,
+    _stream: *mut c_void,
     base: *mut *mut u8,
     ptr: *mut *mut u8,
     count: *mut *mut i32,
@@ -2157,13 +2149,6 @@ pub unsafe extern "win64" fn ucrt_get_stream_buffer_pointers(
     if !count.is_null() {
         *count = slot_addr(2) as *mut i32;
     }
-    eprintln!(
-        "[weave:ucrt] _get_stream_buffer_pointers fp={:p} base_slot=0x{:x} ptr_slot=0x{:x} count_slot=0x{:x}",
-        stream,
-        slot_addr(0),
-        slot_addr(1),
-        slot_addr(2)
-    );
     0
 }
 
@@ -2247,36 +2232,20 @@ pub unsafe extern "win64" fn ucrt_fopen(path: *const u8, mode: *const u8) -> *mu
     };
     let linux_path = match weave_core::file_io::translate_win_path(&win_path) {
         Ok(p) => p,
-        Err(e) => {
-            eprintln!(
-                "[weave:ucrt] fopen: translate_win_path(\"{}\") -> Err({})",
-                win_path, e
-            );
-            return std::ptr::null_mut();
-        }
+        Err(_) => return std::ptr::null_mut(),
     };
     let path_cstr = match std::ffi::CString::new(linux_path.as_os_str().as_bytes()) {
         Ok(s) => s,
         Err(_) => return std::ptr::null_mut(),
     };
     let mut result = unsafe { libc::fopen(path_cstr.as_ptr(), mode as *const libc::c_char) };
-    let errno_first = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
-    let mut used_fallback = false;
     if result.is_null() {
+        // Case-fold + extension-prefix fallback (handles Win32 buffer truncation
+        // where e.g. "font_1.fn" is passed but "font_1.fnt" exists on disk).
         if let Some(folded) = weave_core::file_io::case_fold_lookup(&linux_path) {
             result = unsafe { libc::fopen(folded.as_ptr(), mode as *const libc::c_char) };
-            used_fallback = true;
         }
     }
-    eprintln!(
-        "[weave:ucrt] fopen win=\"{}\" linux=\"{}\" fp={:p} errno={} fallback={} exists={}",
-        win_path,
-        linux_path.display(),
-        result,
-        errno_first,
-        used_fallback,
-        linux_path.exists()
-    );
     result as *mut c_void
 }
 
@@ -2290,64 +2259,34 @@ pub unsafe extern "win64" fn ucrt_wfopen(path: *const u16, mode: *const u16) -> 
     use std::os::unix::ffi::OsStrExt;
     let win_path = match decode_wide(path, 32_768) {
         Some(s) => s,
-        None => {
-            eprintln!("[weave:ucrt] _wfopen: decode_wide(path) failed");
-            return std::ptr::null_mut();
-        }
+        None => return std::ptr::null_mut(),
     };
     let mode_str = match decode_wide(mode, 64) {
         Some(s) => s,
-        None => {
-            eprintln!("[weave:ucrt] _wfopen: decode_wide(mode) failed");
-            return std::ptr::null_mut();
-        }
+        None => return std::ptr::null_mut(),
     };
     let linux_path = match weave_core::file_io::translate_win_path(&win_path) {
         Ok(p) => p,
-        Err(e) => {
-            eprintln!(
-                "[weave:ucrt] _wfopen: translate_win_path(\"{}\") -> Err({})",
-                win_path, e
-            );
-            return std::ptr::null_mut();
-        }
+        Err(_) => return std::ptr::null_mut(),
     };
     let path_cstr = match std::ffi::CString::new(linux_path.as_os_str().as_bytes()) {
         Ok(s) => s,
-        Err(_) => {
-            eprintln!(
-                "[weave:ucrt] _wfopen: CString::new failed for linux=\"{}\"",
-                linux_path.display()
-            );
-            return std::ptr::null_mut();
-        }
+        Err(_) => return std::ptr::null_mut(),
     };
     let mode_cstr = match std::ffi::CString::new(mode_str.as_bytes()) {
         Ok(s) => s,
-        Err(_) => {
-            eprintln!("[weave:ucrt] _wfopen: CString::new failed for mode");
-            return std::ptr::null_mut();
-        }
+        Err(_) => return std::ptr::null_mut(),
     };
     let mut result = unsafe { libc::fopen(path_cstr.as_ptr(), mode_cstr.as_ptr()) };
-    let errno_first = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
-    let mut used_fallback = false;
     if result.is_null() {
+        // Case-fold + extension-prefix fallback (handles Win32 buffer truncation
+        // where e.g. "sprites.si" is passed but "sprites.sif" exists on disk).
+        // Confirmed via nxengine_d3d9_gate CI run 25237583085: the SIFLoader
+        // passes a path one char short of `.sif`, identical to font_1.fn → .fnt.
         if let Some(folded) = weave_core::file_io::case_fold_lookup(&linux_path) {
             result = unsafe { libc::fopen(folded.as_ptr(), mode_cstr.as_ptr()) };
-            used_fallback = true;
         }
     }
-    eprintln!(
-        "[weave:ucrt] _wfopen win=\"{}\" linux=\"{}\" mode=\"{}\" fp={:p} errno={} fallback={} exists={}",
-        win_path,
-        linux_path.display(),
-        mode_str,
-        result,
-        errno_first,
-        used_fallback,
-        linux_path.exists()
-    );
     result as *mut c_void
 }
 
@@ -2380,23 +2319,7 @@ pub unsafe extern "win64" fn ucrt_fread(
     if buf.is_null() || stream.is_null() || size == 0 {
         return 0;
     }
-    let got = unsafe { libc::fread(buf, size, count, stream as *mut libc::FILE) };
-    let total = size.saturating_mul(got);
-    let preview_n = core::cmp::min(total, 8);
-    let mut buf_str = String::new();
-    for i in 0..preview_n {
-        let b = unsafe { *(buf as *const u8).add(i) };
-        buf_str.push_str(&format!("{:02x} ", b));
-    }
-    eprintln!(
-        "[weave:ucrt] fread fp={:p} size={} count={} -> {} first={}",
-        stream,
-        size,
-        count,
-        got,
-        buf_str.trim_end()
-    );
-    got
+    unsafe { libc::fread(buf, size, count, stream as *mut libc::FILE) }
 }
 
 /// fclose — close a libc-backed FILE stream.
