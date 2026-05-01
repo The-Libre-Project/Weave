@@ -505,6 +505,7 @@ pub unsafe extern "win64" fn msvcp_fiopen(
         }
     };
     let mut result = libc::fopen(path_cstr.as_ptr(), mode_str.as_ptr() as *const libc::c_char);
+    let mode_disp = std::str::from_utf8_unchecked(&mode_str[..mode_str.len() - 1]);
     if result.is_null() {
         // Case-fold + extension-prefix fallback (handles Win32 buffer truncation
         // where "font_1.fn" is passed but "font_1.fnt" exists on disk).
@@ -512,13 +513,65 @@ pub unsafe extern "win64" fn msvcp_fiopen(
             result = libc::fopen(folded.as_ptr(), mode_str.as_ptr() as *const libc::c_char);
         }
     }
+    eprintln!(
+        "[weave:msvcp] _Fiopen win=\"{}\" linux=\"{}\" mode_bits=0x{:02x} fopen=\"{}\" fp={:p}",
+        win_path,
+        linux_path.display(),
+        mode,
+        mode_disp,
+        result
+    );
     if !result.is_null() {
         if let Ok(mut guard) = MSVCP_OPEN_FP.lock() {
-            eprintln!("[weave:msvcp] _Fiopen: registering fp={:p}", result);
+            *guard = Some(result as usize);
+        }
+        if let Ok(mut guard) = MSVCP_TRACE_FP.lock() {
             *guard = Some(result as usize);
         }
     }
     result as *mut libc::c_void
+}
+
+/// Diagnostic: tracks the most recent `_Fiopen` fp so weave-ucrt stdio stubs
+/// can decide whether to log activity. Read by `ucrt::set_msvcp_fp_getter`.
+pub static MSVCP_TRACE_FP: std::sync::Mutex<Option<usize>> = std::sync::Mutex::new(None);
+
+/// Returns the most recently registered `_Fiopen` fp, or 0 if none.
+/// Exposed for diagnostic logging in `weave-ucrt`.
+pub extern "C" fn msvcp_trace_fp() -> usize {
+    MSVCP_TRACE_FP.lock().ok().and_then(|g| *g).unwrap_or(0)
+}
+
+/// Diagnostic stub for `basic_ios<char>::clear(state, reraise)`. Logs the call
+/// but otherwise no-ops; matches Wine semantics of "set state to `state`" but
+/// without writing to the ios state field (we don't yet know its offset for
+/// nx.exe).
+pub unsafe extern "win64" fn msvcp_basic_ios_clear(
+    this: *const u8,
+    state: i32,
+    reraise: u8,
+    _d: usize,
+) -> usize {
+    eprintln!(
+        "[weave:msvcp] basic_ios::clear this={:p} state=0x{:x} reraise={}",
+        this, state, reraise
+    );
+    0
+}
+
+/// Diagnostic stub for `basic_ios<char>::setstate(state, reraise)`. Logs the
+/// call but otherwise no-ops; same caveat as `msvcp_basic_ios_clear`.
+pub unsafe extern "win64" fn msvcp_basic_ios_setstate(
+    this: *const u8,
+    state: i32,
+    reraise: u8,
+    _d: usize,
+) -> usize {
+    eprintln!(
+        "[weave:msvcp] basic_ios::setstate this={:p} state=0x{:x} reraise={}",
+        this, state, reraise
+    );
+    0
 }
 
 // ── Real pthread-backed implementations ──────────────────────────────────────
@@ -871,7 +924,6 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         | "?_Xbad_function_call@std@@YAXXZ"
         | "?_Xlength_error@std@@YAXPEBD@Z"
         | "?_Xout_of_range@std@@YAXPEBD@Z"
-        | "?clear@?$basic_ios@DU?$char_traits@D@std@@@std@@QEAAXH_N@Z"
         | "?flush@?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV12@XZ"
         | "?imbue@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MEAAXAEBVlocale@2@@Z"
         | "?in@?$codecvt@DDU_Mbstatet@@@std@@QEBAHAEAU_Mbstatet@@PEBD1AEAPEBDPEAD3AEAPEAD@Z"
@@ -879,7 +931,6 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         | "?out@?$codecvt@_WDU_Mbstatet@@@std@@QEBAHAEAU_Mbstatet@@PEB_W1AEAPEB_WPEAD3AEAPEAD@Z"
         | "?put@?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV12@D@Z"
         | "?setbuf@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MEAAPEAV12@PEAD_J@Z"
-        | "?setstate@?$basic_ios@DU?$char_traits@D@std@@@std@@QEAAXH_N@Z"
         | "?setw@std@@YA?AU?$_Smanip@_J@1@_J@Z"
         | "?showmanyc@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MEAA_JXZ"
         | "?sputc@?$basic_streambuf@DU?$char_traits@D@std@@@std@@QEAAHD@Z"
@@ -915,6 +966,14 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
 
         "?always_noconv@codecvt_base@std@@QEBA_NXZ" => {
             msvcp_always_noconv as *const () as usize
+        }
+        "?clear@?$basic_ios@DU?$char_traits@D@std@@@std@@QEAAXH_N@Z" => {
+            msvcp_basic_ios_clear as unsafe extern "win64" fn(*const u8, i32, u8, usize) -> usize
+                as *const () as usize
+        }
+        "?setstate@?$basic_ios@DU?$char_traits@D@std@@@std@@QEAAXH_N@Z" => {
+            msvcp_basic_ios_setstate as unsafe extern "win64" fn(*const u8, i32, u8, usize) -> usize
+                as *const () as usize
         }
         "?getloc@?$basic_streambuf@DU?$char_traits@D@std@@@std@@QEBA?AVlocale@2@XZ" => {
             msvcp_getloc as *const () as usize

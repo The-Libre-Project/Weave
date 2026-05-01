@@ -969,7 +969,9 @@ pub unsafe extern "win64" fn ms_fgetc(stream: *mut c_void) -> i32 {
     if stream.is_null() {
         return -1; // EOF
     }
-    unsafe { libc::fgetc(stream as *mut libc::FILE) }
+    let r = unsafe { libc::fgetc(stream as *mut libc::FILE) };
+    eprintln!("[weave:ucrt] fgetc fp={:p} -> 0x{:02x}", stream, r);
+    r
 }
 
 /// fflush — flush a FILE stream. Returns 0 (success). No-op stub.
@@ -2054,7 +2056,12 @@ pub unsafe extern "win64" fn ucrt_fseeki64(stream: *mut c_void, offset: i64, ori
     if stream.is_null() {
         return -1;
     }
-    unsafe { libc::fseeko(stream as *mut libc::FILE, offset as libc::off_t, origin) }
+    let r = unsafe { libc::fseeko(stream as *mut libc::FILE, offset as libc::off_t, origin) };
+    eprintln!(
+        "[weave:ucrt] _fseeki64 fp={:p} off={} origin={} -> {}",
+        stream, offset, origin, r
+    );
+    r
 }
 
 /// _ftelli64 / ftell — return the current position in a libc-backed FILE stream.
@@ -2065,7 +2072,9 @@ pub unsafe extern "win64" fn ucrt_ftelli64(stream: *mut c_void) -> i64 {
     if stream.is_null() {
         return -1;
     }
-    unsafe { libc::ftello(stream as *mut libc::FILE) as i64 }
+    let r = unsafe { libc::ftello(stream as *mut libc::FILE) as i64 };
+    eprintln!("[weave:ucrt] _ftelli64 fp={:p} -> {}", stream, r);
+    r
 }
 
 /// fgetpos — store the current file position in `*pos`.
@@ -2081,9 +2090,11 @@ pub unsafe extern "win64" fn ucrt_fgetpos(stream: *mut c_void, pos: *mut i64) ->
     }
     let off = unsafe { libc::ftello(stream as *mut libc::FILE) };
     if off == -1 {
+        eprintln!("[weave:ucrt] fgetpos fp={:p} -> ERR", stream);
         return -1;
     }
     unsafe { *pos = off };
+    eprintln!("[weave:ucrt] fgetpos fp={:p} -> pos={}", stream, off);
     0
 }
 
@@ -2097,13 +2108,10 @@ pub unsafe extern "win64" fn ucrt_fsetpos(stream: *mut c_void, pos: *const i64) 
     if stream.is_null() || pos.is_null() {
         return -1;
     }
-    unsafe {
-        libc::fseeko(
-            stream as *mut libc::FILE,
-            *pos as libc::off_t,
-            libc::SEEK_SET,
-        )
-    }
+    let p = unsafe { *pos };
+    let r = unsafe { libc::fseeko(stream as *mut libc::FILE, p as libc::off_t, libc::SEEK_SET) };
+    eprintln!("[weave:ucrt] fsetpos fp={:p} pos={} -> {}", stream, p, r);
+    r
 }
 
 /// Backing slots for `_get_stream_buffer_pointers` outparams.
@@ -2134,7 +2142,7 @@ static FAKE_FILE_BUFFER_SLOTS: [usize; 3] = [0, 0, 0];
 /// `base`, `ptr`, and `count` must each be either NULL or point to a writable
 /// 8-byte slot (the inlined caller always passes valid stack-local slots).
 pub unsafe extern "win64" fn ucrt_get_stream_buffer_pointers(
-    _stream: *mut c_void,
+    stream: *mut c_void,
     base: *mut *mut u8,
     ptr: *mut *mut u8,
     count: *mut *mut i32,
@@ -2149,6 +2157,13 @@ pub unsafe extern "win64" fn ucrt_get_stream_buffer_pointers(
     if !count.is_null() {
         *count = slot_addr(2) as *mut i32;
     }
+    eprintln!(
+        "[weave:ucrt] _get_stream_buffer_pointers fp={:p} base_slot=0x{:x} ptr_slot=0x{:x} count_slot=0x{:x}",
+        stream,
+        slot_addr(0),
+        slot_addr(1),
+        slot_addr(2)
+    );
     0
 }
 
@@ -2303,7 +2318,23 @@ pub unsafe extern "win64" fn ucrt_fread(
     if buf.is_null() || stream.is_null() || size == 0 {
         return 0;
     }
-    unsafe { libc::fread(buf, size, count, stream as *mut libc::FILE) }
+    let got = unsafe { libc::fread(buf, size, count, stream as *mut libc::FILE) };
+    let total = size.saturating_mul(got);
+    let preview_n = core::cmp::min(total, 8);
+    let mut buf_str = String::new();
+    for i in 0..preview_n {
+        let b = unsafe { *(buf as *const u8).add(i) };
+        buf_str.push_str(&format!("{:02x} ", b));
+    }
+    eprintln!(
+        "[weave:ucrt] fread fp={:p} size={} count={} -> {} first={}",
+        stream,
+        size,
+        count,
+        got,
+        buf_str.trim_end()
+    );
+    got
 }
 
 /// fclose — close a libc-backed FILE stream.
