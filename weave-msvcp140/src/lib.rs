@@ -43,6 +43,27 @@ unsafe impl Sync for FakeLocaleData {}
 
 static FAKE_LOCALE_DATA: std::sync::OnceLock<Box<FakeLocaleData>> = std::sync::OnceLock::new();
 
+// ── File I/O registry ─────────────────────────────────────────────────────────
+// `_Fiopen` returns a libc FILE* that nx.exe stores inside its basic_filebuf
+// object. When read()/seekg()/tellg() are called, we scan the caller's `this`
+// for a word matching any registered FILE* and forward to libc.
+static MSVCP_OPEN_FP: std::sync::Mutex<Vec<usize>> = std::sync::Mutex::new(Vec::new());
+
+/// Scan `[obj, obj+512)` at 8-byte strides for any registered FILE* value.
+unsafe fn find_fp_near(obj: *const u8) -> Option<*mut libc::FILE> {
+    let guard = MSVCP_OPEN_FP.lock().ok()?;
+    if guard.is_empty() {
+        return None;
+    }
+    for i in (16usize..512).step_by(8) {
+        let word = *((obj as usize).wrapping_add(i) as *const usize);
+        if guard.contains(&word) {
+            return Some(word as *mut libc::FILE);
+        }
+    }
+    None
+}
+
 fn get_fake_locale_data() -> &'static FakeLocaleData {
     FAKE_LOCALE_DATA.get_or_init(|| {
         let noop = msvcp_noop as *const () as usize;
@@ -95,6 +116,78 @@ pub unsafe extern "win64" fn msvcp_always_noconv(
     _d: usize,
 ) -> u8 {
     1
+}
+
+/// `basic_istream<char>::read(char* buf, streamsize n)` — read n bytes from the file.
+///
+/// Win64: RCX=this, RDX=buf, R8=n (i64). Returns basic_istream<char>& (= this).
+/// Scans the ifstream object memory for a registered FILE* and calls libc::fread.
+///
+/// Wine ref: dlls/msvcp90/ios.c:basic_istream_char_read_r — calls sgetn on rdbuf.
+pub unsafe extern "win64" fn msvcp_read(this: *mut u8, buf: *mut u8, n: i64) -> *mut u8 {
+    if let Some(fp) = find_fp_near(this) {
+        if n > 0 && !buf.is_null() {
+            libc::fread(buf as *mut libc::c_void, 1, n as usize, fp);
+        }
+    }
+    this
+}
+
+/// `basic_istream<char>::seekg(streamoff off, int dir)` — seek within the file.
+///
+/// Win64: RCX=this, RDX=off (i64), R8=dir (int; beg=0/cur=1/end=2). Returns istream&.
+/// Wine ref: dlls/msvcp90/ios.c:basic_istream_char_seekg — calls pubseekoff on rdbuf.
+pub unsafe extern "win64" fn msvcp_seekg(this: *mut u8, offset: i64, whence: i32) -> *mut u8 {
+    if let Some(fp) = find_fp_near(this) {
+        libc::fseek(fp, offset as libc::c_long, whence);
+    }
+    this
+}
+
+/// `basic_istream<char>::tellg()` — return current file position.
+///
+/// Win64 sret: RCX=this, RDX=fpos<mbstate_t>* return buffer. Returns RDX.
+/// fpos<mbstate_t> = { streamoff _Myoff (i64 @ +0), mbstate_t _Fac (8 bytes @ +8) }
+/// Wine ref: dlls/msvcp90/ios.c:basic_istream_char_tellg — calls pubseekoff on rdbuf.
+pub unsafe extern "win64" fn msvcp_tellg(
+    this: *const u8,
+    ret: *mut i64,
+    _c: usize,
+    _d: usize,
+) -> *mut i64 {
+    let pos = if let Some(fp) = find_fp_near(this) {
+        libc::ftell(fp) as i64
+    } else {
+        -1
+    };
+    *ret = pos;
+    *ret.add(1) = 0; // mbstate_t zeroed
+    ret
+}
+
+/// `basic_streambuf<char>::xsgetn(char* buf, streamsize n)` — read n chars from buffer.
+///
+/// Win64: RCX=this (filebuf*), RDX=buf, R8=n. Returns streamsize (i64) bytes read.
+/// Wine ref: dlls/msvcp90/ios.c:basic_streambuf_char_xsgetn_s — fread-backed.
+pub unsafe extern "win64" fn msvcp_xsgetn(this: *const u8, buf: *mut u8, n: i64) -> i64 {
+    if let Some(fp) = find_fp_near(this) {
+        if n > 0 && !buf.is_null() {
+            return libc::fread(buf as *mut libc::c_void, 1, n as usize, fp) as i64;
+        }
+    }
+    0
+}
+
+/// `basic_streambuf<char>::sbumpc()` — read and advance one character.
+///
+/// Win64: RCX=this (streambuf*). Returns int (char as unsigned, or EOF=-1).
+/// Wine ref: dlls/msvcp90/ios.c:basic_streambuf_char_sbumpc — inline in Wine.
+pub unsafe extern "win64" fn msvcp_sbumpc(this: *const u8, _b: usize, _c: usize, _d: usize) -> i32 {
+    if let Some(fp) = find_fp_near(this) {
+        let c = libc::fgetc(fp);
+        return if c == libc::EOF { -1 } else { c };
+    }
+    -1
 }
 
 /// `std::_Fiopen(filename, mode, prot)` — open a file on behalf of std::ifstream/ofstream.
@@ -160,6 +253,11 @@ pub unsafe extern "win64" fn msvcp_fiopen(
         // where "font_1.fn" is passed but "font_1.fnt" exists on disk).
         if let Some(folded) = weave_core::file_io::case_fold_lookup(&linux_path) {
             result = libc::fopen(folded.as_ptr(), mode_str.as_ptr() as *const libc::c_char);
+        }
+    }
+    if !result.is_null() {
+        if let Ok(mut guard) = MSVCP_OPEN_FP.lock() {
+            guard.push(result as usize);
         }
     }
     result as *mut libc::c_void
@@ -496,9 +594,6 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         | "?out@?$codecvt@DDU_Mbstatet@@@std@@QEBAHAEAU_Mbstatet@@PEBD1AEAPEBDPEAD3AEAPEAD@Z"
         | "?out@?$codecvt@_WDU_Mbstatet@@@std@@QEBAHAEAU_Mbstatet@@PEB_W1AEAPEB_WPEAD3AEAPEAD@Z"
         | "?put@?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV12@D@Z"
-        | "?read@?$basic_istream@DU?$char_traits@D@std@@@std@@QEAAAEAV12@PEAD_J@Z"
-        | "?sbumpc@?$basic_streambuf@DU?$char_traits@D@std@@@std@@QEAAHXZ"
-        | "?seekg@?$basic_istream@DU?$char_traits@D@std@@@std@@QEAAAEAV12@_JH@Z"
         | "?setbuf@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MEAAPEAV12@PEAD_J@Z"
         | "?setstate@?$basic_ios@DU?$char_traits@D@std@@@std@@QEAAXH_N@Z"
         | "?setw@std@@YA?AU?$_Smanip@_J@1@_J@Z"
@@ -506,14 +601,33 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         | "?sputc@?$basic_streambuf@DU?$char_traits@D@std@@@std@@QEAAHD@Z"
         | "?sputn@?$basic_streambuf@DU?$char_traits@D@std@@@std@@QEAA_JPEBD_J@Z"
         | "?sync@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MEAAHXZ"
-        | "?tellg@?$basic_istream@DU?$char_traits@D@std@@@std@@QEAA?AV?$fpos@U_Mbstatet@@@2@XZ"
         | "?uflow@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MEAAHXZ"
         | "?uncaught_exception@std@@YA_NXZ"
         | "?unshift@?$codecvt@DDU_Mbstatet@@@std@@QEBAHAEAU_Mbstatet@@PEAD1AEAPEAD@Z"
         | "?widen@?$basic_ios@DU?$char_traits@D@std@@@std@@QEBADD@Z"
-        | "?xsgetn@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MEAA_JPEAD_J@Z"
         | "?xsputn@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MEAA_JPEBD_J@Z"
         => msvcp_noop as *const () as usize,
+
+        "?read@?$basic_istream@DU?$char_traits@D@std@@@std@@QEAAAEAV12@PEAD_J@Z" => {
+            msvcp_read as unsafe extern "win64" fn(*mut u8, *mut u8, i64) -> *mut u8
+                as *const () as usize
+        }
+        "?seekg@?$basic_istream@DU?$char_traits@D@std@@@std@@QEAAAEAV12@_JH@Z" => {
+            msvcp_seekg as unsafe extern "win64" fn(*mut u8, i64, i32) -> *mut u8
+                as *const () as usize
+        }
+        "?tellg@?$basic_istream@DU?$char_traits@D@std@@@std@@QEAA?AV?$fpos@U_Mbstatet@@@2@XZ" => {
+            msvcp_tellg as unsafe extern "win64" fn(*const u8, *mut i64, usize, usize) -> *mut i64
+                as *const () as usize
+        }
+        "?xsgetn@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MEAA_JPEAD_J@Z" => {
+            msvcp_xsgetn as unsafe extern "win64" fn(*const u8, *mut u8, i64) -> i64
+                as *const () as usize
+        }
+        "?sbumpc@?$basic_streambuf@DU?$char_traits@D@std@@@std@@QEAAHXZ" => {
+            msvcp_sbumpc as unsafe extern "win64" fn(*const u8, usize, usize, usize) -> i32
+                as *const () as usize
+        }
 
         "?always_noconv@codecvt_base@std@@QEBA_NXZ" => {
             msvcp_always_noconv as *const () as usize
