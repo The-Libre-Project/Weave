@@ -44,24 +44,19 @@ unsafe impl Sync for FakeLocaleData {}
 static FAKE_LOCALE_DATA: std::sync::OnceLock<Box<FakeLocaleData>> = std::sync::OnceLock::new();
 
 // ── File I/O registry ─────────────────────────────────────────────────────────
-// `_Fiopen` returns a libc FILE* that nx.exe stores inside its basic_filebuf
-// object. When read()/seekg()/tellg() are called, we scan the caller's `this`
-// for a word matching any registered FILE* and forward to libc.
-static MSVCP_OPEN_FP: std::sync::Mutex<Vec<usize>> = std::sync::Mutex::new(Vec::new());
+// `_Fiopen` registers the most recently opened FILE*. read/seekg/tellg/xsgetn/
+// sbumpc use this directly — no object-memory scan. NXEngine opens files
+// sequentially so the last registered fp is always the active one.
+//
+// The scan-based approach (scanning `this` memory for a matching FILE*) was
+// removed because `this` for istream methods is basic_istream*, not basic_filebuf*,
+// so the FILE* isn't in that memory range; and when `this` is corrupted the
+// scan itself faults (Fail #5: SIGSEGV at fault=obj+16 with garbage this).
+static MSVCP_OPEN_FP: std::sync::Mutex<Option<usize>> = std::sync::Mutex::new(None);
 
-/// Scan `[obj, obj+512)` at 8-byte strides for any registered FILE* value.
-unsafe fn find_fp_near(obj: *const u8) -> Option<*mut libc::FILE> {
+fn get_current_fp() -> Option<*mut libc::FILE> {
     let guard = MSVCP_OPEN_FP.lock().ok()?;
-    if guard.is_empty() {
-        return None;
-    }
-    for i in (16usize..512).step_by(8) {
-        let word = *((obj as usize).wrapping_add(i) as *const usize);
-        if guard.contains(&word) {
-            return Some(word as *mut libc::FILE);
-        }
-    }
-    None
+    (*guard).map(|p| p as *mut libc::FILE)
 }
 
 fn get_fake_locale_data() -> &'static FakeLocaleData {
@@ -125,10 +120,13 @@ pub unsafe extern "win64" fn msvcp_always_noconv(
 ///
 /// Wine ref: dlls/msvcp90/ios.c:basic_istream_char_read_r — calls sgetn on rdbuf.
 pub unsafe extern "win64" fn msvcp_read(this: *mut u8, buf: *mut u8, n: i64) -> *mut u8 {
-    if let Some(fp) = find_fp_near(this) {
+    if let Some(fp) = get_current_fp() {
         if n > 0 && !buf.is_null() {
-            libc::fread(buf as *mut libc::c_void, 1, n as usize, fp);
+            let got = libc::fread(buf as *mut libc::c_void, 1, n as usize, fp);
+            eprintln!("[weave:msvcp] read: requested={} got={}", n, got);
         }
+    } else {
+        eprintln!("[weave:msvcp] read: no active fp (this={:p})", this);
     }
     this
 }
@@ -138,8 +136,11 @@ pub unsafe extern "win64" fn msvcp_read(this: *mut u8, buf: *mut u8, n: i64) -> 
 /// Win64: RCX=this, RDX=off (i64), R8=dir (int; beg=0/cur=1/end=2). Returns istream&.
 /// Wine ref: dlls/msvcp90/ios.c:basic_istream_char_seekg — calls pubseekoff on rdbuf.
 pub unsafe extern "win64" fn msvcp_seekg(this: *mut u8, offset: i64, whence: i32) -> *mut u8 {
-    if let Some(fp) = find_fp_near(this) {
-        libc::fseek(fp, offset as libc::c_long, whence);
+    if let Some(fp) = get_current_fp() {
+        let ret = libc::fseek(fp, offset as libc::c_long, whence);
+        eprintln!("[weave:msvcp] seekg: off={} whence={} ret={}", offset, whence, ret);
+    } else {
+        eprintln!("[weave:msvcp] seekg: no active fp (this={:p})", this);
     }
     this
 }
@@ -155,9 +156,12 @@ pub unsafe extern "win64" fn msvcp_tellg(
     _c: usize,
     _d: usize,
 ) -> *mut i64 {
-    let pos = if let Some(fp) = find_fp_near(this) {
-        libc::ftell(fp) as i64
+    let pos = if let Some(fp) = get_current_fp() {
+        let p = libc::ftell(fp) as i64;
+        eprintln!("[weave:msvcp] tellg: pos={} (this={:p})", p, this);
+        p
     } else {
+        eprintln!("[weave:msvcp] tellg: no active fp (this={:p})", this);
         -1
     };
     *ret = pos;
@@ -170,10 +174,14 @@ pub unsafe extern "win64" fn msvcp_tellg(
 /// Win64: RCX=this (filebuf*), RDX=buf, R8=n. Returns streamsize (i64) bytes read.
 /// Wine ref: dlls/msvcp90/ios.c:basic_streambuf_char_xsgetn_s — fread-backed.
 pub unsafe extern "win64" fn msvcp_xsgetn(this: *const u8, buf: *mut u8, n: i64) -> i64 {
-    if let Some(fp) = find_fp_near(this) {
+    if let Some(fp) = get_current_fp() {
         if n > 0 && !buf.is_null() {
-            return libc::fread(buf as *mut libc::c_void, 1, n as usize, fp) as i64;
+            let got = libc::fread(buf as *mut libc::c_void, 1, n as usize, fp) as i64;
+            eprintln!("[weave:msvcp] xsgetn: requested={} got={} (this={:p})", n, got, this);
+            return got;
         }
+    } else {
+        eprintln!("[weave:msvcp] xsgetn: no active fp (this={:p})", this);
     }
     0
 }
@@ -183,10 +191,11 @@ pub unsafe extern "win64" fn msvcp_xsgetn(this: *const u8, buf: *mut u8, n: i64)
 /// Win64: RCX=this (streambuf*). Returns int (char as unsigned, or EOF=-1).
 /// Wine ref: dlls/msvcp90/ios.c:basic_streambuf_char_sbumpc — inline in Wine.
 pub unsafe extern "win64" fn msvcp_sbumpc(this: *const u8, _b: usize, _c: usize, _d: usize) -> i32 {
-    if let Some(fp) = find_fp_near(this) {
+    if let Some(fp) = get_current_fp() {
         let c = libc::fgetc(fp);
         return if c == libc::EOF { -1 } else { c };
     }
+    eprintln!("[weave:msvcp] sbumpc: no active fp (this={:p})", this);
     -1
 }
 
@@ -257,7 +266,8 @@ pub unsafe extern "win64" fn msvcp_fiopen(
     }
     if !result.is_null() {
         if let Ok(mut guard) = MSVCP_OPEN_FP.lock() {
-            guard.push(result as usize);
+            eprintln!("[weave:msvcp] _Fiopen: registering fp={:p}", result);
+            *guard = Some(result as usize);
         }
     }
     result as *mut libc::c_void
