@@ -2247,13 +2247,36 @@ pub unsafe extern "win64" fn ucrt_fopen(path: *const u8, mode: *const u8) -> *mu
     };
     let linux_path = match weave_core::file_io::translate_win_path(&win_path) {
         Ok(p) => p,
-        Err(_) => return std::ptr::null_mut(),
+        Err(e) => {
+            eprintln!(
+                "[weave:ucrt] fopen: translate_win_path(\"{}\") -> Err({})",
+                win_path, e
+            );
+            return std::ptr::null_mut();
+        }
     };
     let path_cstr = match std::ffi::CString::new(linux_path.as_os_str().as_bytes()) {
         Ok(s) => s,
         Err(_) => return std::ptr::null_mut(),
     };
-    let result = unsafe { libc::fopen(path_cstr.as_ptr(), mode as *const libc::c_char) };
+    let mut result = unsafe { libc::fopen(path_cstr.as_ptr(), mode as *const libc::c_char) };
+    let errno_first = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+    let mut used_fallback = false;
+    if result.is_null() {
+        if let Some(folded) = weave_core::file_io::case_fold_lookup(&linux_path) {
+            result = unsafe { libc::fopen(folded.as_ptr(), mode as *const libc::c_char) };
+            used_fallback = true;
+        }
+    }
+    eprintln!(
+        "[weave:ucrt] fopen win=\"{}\" linux=\"{}\" fp={:p} errno={} fallback={} exists={}",
+        win_path,
+        linux_path.display(),
+        result,
+        errno_first,
+        used_fallback,
+        linux_path.exists()
+    );
     result as *mut c_void
 }
 
@@ -2267,25 +2290,64 @@ pub unsafe extern "win64" fn ucrt_wfopen(path: *const u16, mode: *const u16) -> 
     use std::os::unix::ffi::OsStrExt;
     let win_path = match decode_wide(path, 32_768) {
         Some(s) => s,
-        None => return std::ptr::null_mut(),
+        None => {
+            eprintln!("[weave:ucrt] _wfopen: decode_wide(path) failed");
+            return std::ptr::null_mut();
+        }
     };
     let mode_str = match decode_wide(mode, 64) {
         Some(s) => s,
-        None => return std::ptr::null_mut(),
+        None => {
+            eprintln!("[weave:ucrt] _wfopen: decode_wide(mode) failed");
+            return std::ptr::null_mut();
+        }
     };
     let linux_path = match weave_core::file_io::translate_win_path(&win_path) {
         Ok(p) => p,
-        Err(_) => return std::ptr::null_mut(),
+        Err(e) => {
+            eprintln!(
+                "[weave:ucrt] _wfopen: translate_win_path(\"{}\") -> Err({})",
+                win_path, e
+            );
+            return std::ptr::null_mut();
+        }
     };
     let path_cstr = match std::ffi::CString::new(linux_path.as_os_str().as_bytes()) {
         Ok(s) => s,
-        Err(_) => return std::ptr::null_mut(),
+        Err(_) => {
+            eprintln!(
+                "[weave:ucrt] _wfopen: CString::new failed for linux=\"{}\"",
+                linux_path.display()
+            );
+            return std::ptr::null_mut();
+        }
     };
     let mode_cstr = match std::ffi::CString::new(mode_str.as_bytes()) {
         Ok(s) => s,
-        Err(_) => return std::ptr::null_mut(),
+        Err(_) => {
+            eprintln!("[weave:ucrt] _wfopen: CString::new failed for mode");
+            return std::ptr::null_mut();
+        }
     };
-    let result = unsafe { libc::fopen(path_cstr.as_ptr(), mode_cstr.as_ptr()) };
+    let mut result = unsafe { libc::fopen(path_cstr.as_ptr(), mode_cstr.as_ptr()) };
+    let errno_first = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+    let mut used_fallback = false;
+    if result.is_null() {
+        if let Some(folded) = weave_core::file_io::case_fold_lookup(&linux_path) {
+            result = unsafe { libc::fopen(folded.as_ptr(), mode_cstr.as_ptr()) };
+            used_fallback = true;
+        }
+    }
+    eprintln!(
+        "[weave:ucrt] _wfopen win=\"{}\" linux=\"{}\" mode=\"{}\" fp={:p} errno={} fallback={} exists={}",
+        win_path,
+        linux_path.display(),
+        mode_str,
+        result,
+        errno_first,
+        used_fallback,
+        linux_path.exists()
+    );
     result as *mut c_void
 }
 
