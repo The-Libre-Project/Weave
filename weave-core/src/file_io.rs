@@ -248,28 +248,39 @@ fn errno_to_ntstatus() -> i32 {
 
 /// Convert a `PathBuf` to a null-terminated `Vec<u8>` suitable for libc calls.
 /// Returns `None` if the path contains interior null bytes.
-fn path_to_cstring(path: &std::path::Path) -> Option<std::ffi::CString> {
+pub fn path_to_cstring(path: &std::path::Path) -> Option<std::ffi::CString> {
     use std::os::unix::ffi::OsStrExt;
     std::ffi::CString::new(path.as_os_str().as_bytes()).ok()
 }
 
-/// Case-insensitive path lookup: scan the parent directory for an entry whose
-/// name matches `path`'s filename component case-insensitively.
+/// Case-insensitive path lookup with extension-prefix fallback.
 ///
-/// Windows is case-insensitive; Linux is not. When a direct `open()` fails with
-/// ENOENT, this function lets us recover by finding the actual on-disk name.
+/// Two-pass scan of the parent directory:
+///   Pass 1 — exact case-insensitive match (Windows semantics).
+///   Pass 2 — prefix match: the requested name is a prefix of a real name.
+///             Handles Win32 buffer-size truncation (e.g. "font_1.fn" →
+///             "font_1.fnt") where the caller's path buffer was one char too
+///             small and the final extension character was lost.
+///
 /// Only the final component is folded — callers needing full-depth folding must
 /// call this recursively on each component (deferred to Phase 3).
-fn case_fold_lookup(path: &std::path::Path) -> Option<std::ffi::CString> {
+pub fn case_fold_lookup(path: &std::path::Path) -> Option<std::ffi::CString> {
     let parent = path.parent()?;
     let filename = path.file_name()?;
     let filename_lower = filename.to_string_lossy().to_lowercase();
 
+    let mut prefix_match: Option<std::ffi::CString> = None;
     for entry in std::fs::read_dir(parent).ok()?.flatten() {
         let name = entry.file_name();
-        if name.to_string_lossy().to_lowercase() == filename_lower {
+        let name_lower = name.to_string_lossy().to_lowercase();
+        if name_lower == filename_lower {
             return path_to_cstring(&parent.join(name));
         }
+        // Extension-prefix: requested name is a truncated version of the real
+        // name (only collect the first match to avoid ambiguity).
+        if prefix_match.is_none() && name_lower.starts_with(&*filename_lower) {
+            prefix_match = path_to_cstring(&parent.join(name));
+        }
     }
-    None
+    prefix_match
 }

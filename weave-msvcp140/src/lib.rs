@@ -73,7 +73,14 @@ pub unsafe extern "win64" fn msvcp_fiopen(
             }
         }
     };
-    let result = libc::fopen(path_cstr.as_ptr(), mode_str.as_ptr() as *const libc::c_char);
+    let mut result = libc::fopen(path_cstr.as_ptr(), mode_str.as_ptr() as *const libc::c_char);
+    if result.is_null() {
+        // Case-fold + extension-prefix fallback (handles Win32 buffer truncation
+        // where "font_1.fn" is passed but "font_1.fnt" exists on disk).
+        if let Some(folded) = weave_core::file_io::case_fold_lookup(&linux_path) {
+            result = libc::fopen(folded.as_ptr(), mode_str.as_ptr() as *const libc::c_char);
+        }
+    }
     eprintln!(
         "[weave:fio:fiopen] win={win_path:?} linux={linux_path:?} mode=0x{mode:02x} ok={}",
         !result.is_null()
