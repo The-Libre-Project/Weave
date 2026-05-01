@@ -122,10 +122,10 @@ unsafe fn streambuf_init_empty(this: *mut u8) {
     write_ptr(this, 0x58, this.add(0x48)); // pwbuf  = &wbuf
     write_ptr(this, 0x70, this.add(0x60)); // prpos  = &rpos
     write_ptr(this, 0x78, this.add(0x68)); // pwpos  = &wpos
-    // prsize/pwsize point to int fields — cast to *const u8 for write_ptr uniformity
+                                           // prsize/pwsize point to int fields — cast to *const u8 for write_ptr uniformity
     write_ptr(this, 0x88, this.add(0x80)); // prsize = &rsize
     write_ptr(this, 0x90, this.add(0x84)); // pwsize = &wsize
-    // rbuf/wbuf/rpos/wpos already zero from calloc; rsize/wsize = 0
+                                           // rbuf/wbuf/rpos/wpos already zero from calloc; rsize/wsize = 0
 }
 
 // ── 6 constructor implementations ─────────────────────────────────────────────
@@ -180,7 +180,6 @@ pub unsafe extern "win64" fn msvcp_basic_ios_ctor(
     _c: usize,
     _d: usize,
 ) -> *mut u8 {
-    eprintln!("[weave:msvcp] ios_ctor this={:p}", this);
     if this.is_null() {
         return this;
     }
@@ -192,14 +191,6 @@ pub unsafe extern "win64" fn msvcp_basic_ios_ctor(
     *(this.add(0x10) as *mut u32) = 0x1008u32;
     // fillch = ' ' at basic_ios_char+0x58
     *this.add(0x58) = b' ';
-    // MSVC _Pmybuf: when this ios is embedded in a basic_istream at offset 0x10 from
-    // the complete object, this+0x08 is complete_this+0x18 (_Pmybuf field), and
-    // this+0x48 is complete_this+0x58 (_Mystrbuf field). Write the pointer now so that
-    // if ios_ctor runs after istream_ctor, the _Pmybuf value is not zero.
-    // Belt-and-suspenders with the write in msvcp_istream_ctor.
-    // Wine ref: dlls/msvcp90/ios.c — basic_ios_char_ctor (MSVC ABI extension)
-    std::ptr::write(this.add(0x08) as *mut usize, this.add(0x48) as usize);
-    eprintln!("[weave:msvcp] ios_ctor wrote _Pmybuf at this+0x08={:p} value={:#x}", this.add(0x08), this.add(0x48) as usize);
     this
 }
 
@@ -239,17 +230,18 @@ pub unsafe extern "win64" fn msvcp_istream_ctor(
     std::ptr::write_bytes(base, 0u8, 0x60);
     write_ptr(base, 0x00, FAKE_ISTREAM_VTABLE.as_ptr() as *const u8);
     *(base.add(0x10) as *mut u32) = 0x1008u32; // fmtfl defaults
-    *base.add(0x58) = b' ';                    // fillch
-    // count = 0 at this+0x08
+    *base.add(0x58) = b' '; // fillch
+                            // count = 0 at this+0x08
     *(this.add(0x08) as *mut i64) = 0i64;
     // basic_ios_char_init: strbuf=sb, stream=NULL, fillch=' '
     ios_char_init(base, sb);
-    // MSVC: _Pmybuf = &ios._Mystrbuf — fast rdbuf double-pointer used by dtor at nx.exe RVA 0x55e3e
-    // Wine ref: dlls/msvcp90/istream.c — basic_istream_char_ctor_rdbuf (MSVC ABI extension, not in Wine source)
-    // ios._Mystrbuf is at base+0x48 = this+0x58; this+0x18 must hold its address so
-    // the destructor's `mov rcx,[this+0x18]; cmp [rcx],filebuf` does not fault on NULL.
-    std::ptr::write(this.add(0x18) as *mut usize, this.add(0x58) as usize);
-    eprintln!("[weave:msvcp] istream_ctor this={:p} _isstd={} this+0x18={:#x}", this, _isstd, std::ptr::read(this.add(0x18) as *const usize));
+    // Note: previous attempts to write a "_Pmybuf" double-pointer at this+0x18
+    // (Fail #7) and at ios+0x08 (Fail #8) did not move the crash at nx.exe
+    // RVA 0x55e3e. Binary analysis (2026-05-01) showed the crashing dereference
+    // is on filebuf+0x18 (the embedded basic_filebuf at complete+0x10), not on
+    // istream+0x18. filebuf+0x18 is populated by inlined basic_filebuf::open
+    // (RVA 0x56a60) from `_get_stream_buffer_pointers` outparams; the real fix
+    // is in `weave-ucrt::ucrt_get_stream_buffer_pointers`.
     this
 }
 
@@ -274,8 +266,8 @@ pub unsafe extern "win64" fn msvcp_ostream_ctor(
     std::ptr::write_bytes(base, 0u8, 0x60);
     write_ptr(base, 0x00, FAKE_OSTREAM_VTABLE.as_ptr() as *const u8);
     *(base.add(0x10) as *mut u32) = 0x1008u32; // fmtfl defaults
-    *base.add(0x58) = b' ';                    // fillch
-    // basic_ios_char_init: strbuf=sb, stream=NULL, fillch=' '
+    *base.add(0x58) = b' '; // fillch
+                            // basic_ios_char_init: strbuf=sb, stream=NULL, fillch=' '
     ios_char_init(base, sb);
     this
 }
@@ -306,8 +298,8 @@ pub unsafe extern "win64" fn msvcp_iostream_ctor(
     std::ptr::write_bytes(base, 0u8, 0x60);
     write_ptr(base, 0x00, FAKE_IOSTREAM_VTABLE.as_ptr() as *const u8);
     *(base.add(0x10) as *mut u32) = 0x1008u32; // fmtfl defaults
-    *base.add(0x58) = b' ';                    // fillch
-    // base1.count = 0 at this+0x08 (istream gcount field)
+    *base.add(0x58) = b' '; // fillch
+                            // base1.count = 0 at this+0x08 (istream gcount field)
     *(this.add(0x08) as *mut i64) = 0i64;
     // basic_ios_char_init: strbuf=sb, stream=NULL, fillch=' '
     ios_char_init(base, sb);
@@ -372,7 +364,10 @@ pub unsafe extern "win64" fn msvcp_read(this: *mut u8, buf: *mut u8, n: i64) -> 
 pub unsafe extern "win64" fn msvcp_seekg(this: *mut u8, offset: i64, whence: i32) -> *mut u8 {
     if let Some(fp) = get_current_fp() {
         let ret = libc::fseek(fp, offset as libc::c_long, whence);
-        eprintln!("[weave:msvcp] seekg: off={} whence={} ret={}", offset, whence, ret);
+        eprintln!(
+            "[weave:msvcp] seekg: off={} whence={} ret={}",
+            offset, whence, ret
+        );
     } else {
         eprintln!("[weave:msvcp] seekg: no active fp (this={:p})", this);
     }
@@ -411,7 +406,10 @@ pub unsafe extern "win64" fn msvcp_xsgetn(this: *const u8, buf: *mut u8, n: i64)
     if let Some(fp) = get_current_fp() {
         if n > 0 && !buf.is_null() {
             let got = libc::fread(buf as *mut libc::c_void, 1, n as usize, fp) as i64;
-            eprintln!("[weave:msvcp] xsgetn: requested={} got={} (this={:p})", n, got, this);
+            eprintln!(
+                "[weave:msvcp] xsgetn: requested={} got={} (this={:p})",
+                n, got, this
+            );
             return got;
         }
     } else {

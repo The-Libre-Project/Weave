@@ -2106,23 +2106,50 @@ pub unsafe extern "win64" fn ucrt_fsetpos(stream: *mut c_void, pos: *const i64) 
     }
 }
 
+/// Backing slots for `_get_stream_buffer_pointers` outparams.
+///
+/// MSVC's inlined `basic_filebuf::open` calls `_get_stream_buffer_pointers(file,
+/// &out_base, &out_ptr, &out_count)` and stores the three returned pointers
+/// directly into the filebuf at offsets 0x18 / 0x38 / 0x50 (also duplicated at
+/// 0x20 / 0x40 / 0x58). The matching inlined dtor then dereferences
+/// filebuf+0x18 to compare `*p` against `&filebuf->_Mychar` (filebuf+0x70). If
+/// `*p` matches, it writes back through filebuf+0x18 / +0x38 / +0x50.
+///
+/// Linux libc's FILE is opaque, so we cannot return real `&FILE->_base` etc.
+/// Instead we hand back a stable static slot whose value is always zero. The
+/// dtor's `*p == filebuf+0x70` test then fails (`0 != filebuf+0x70`) and the
+/// write-back branch is skipped — no fault, no corruption.
+///
+/// Verified against nxengine `nx.exe` RVA 0x56a60 (inlined open) and RVA
+/// 0x55e3e (inlined dtor) on 2026-05-01.
+static FAKE_FILE_BUFFER_SLOTS: [usize; 3] = [0, 0, 0];
+
 /// `_get_stream_buffer_pointers` — expose FILE internal buffer state.
 ///
-/// Wine ref: dlls/msvcrt/file.c — returns pointers to `base`, `ptr`, and
-/// `count` fields of the FILE struct for low-level buffer manipulation.
-/// Linux libc FILE is opaque; this usage pattern (SciTE/MSVCP internal)
-/// checks pointer identity only and does not dereference. Return -1 so
-/// callers fall back to standard I/O paths.
+/// Win64 calling convention: rcx=stream, rdx=&out_base, r8=&out_ptr,
+/// r9=&out_count. Caller writes the dereferenced values into a basic_filebuf
+/// without checking the return code.
 ///
 /// # Safety
-/// All pointer arguments accepted and ignored.
+/// `base`, `ptr`, and `count` must each be either NULL or point to a writable
+/// 8-byte slot (the inlined caller always passes valid stack-local slots).
 pub unsafe extern "win64" fn ucrt_get_stream_buffer_pointers(
     _stream: *mut c_void,
-    _base: *mut *mut u8,
-    _ptr: *mut *mut u8,
-    _count: *mut i32,
+    base: *mut *mut u8,
+    ptr: *mut *mut u8,
+    count: *mut *mut i32,
 ) -> i32 {
-    -1
+    let slot_addr = |i: usize| &FAKE_FILE_BUFFER_SLOTS[i] as *const usize as usize;
+    if !base.is_null() {
+        *base = slot_addr(0) as *mut u8;
+    }
+    if !ptr.is_null() {
+        *ptr = slot_addr(1) as *mut u8;
+    }
+    if !count.is_null() {
+        *count = slot_addr(2) as *mut i32;
+    }
+    0
 }
 
 /// _open_osfhandle — wrap a Windows HANDLE in a CRT file descriptor.
