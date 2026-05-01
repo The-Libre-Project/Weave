@@ -180,6 +180,7 @@ pub unsafe extern "win64" fn msvcp_basic_ios_ctor(
     _c: usize,
     _d: usize,
 ) -> *mut u8 {
+    eprintln!("[weave:msvcp] ios_ctor this={:p}", this);
     if this.is_null() {
         return this;
     }
@@ -191,6 +192,14 @@ pub unsafe extern "win64" fn msvcp_basic_ios_ctor(
     *(this.add(0x10) as *mut u32) = 0x1008u32;
     // fillch = ' ' at basic_ios_char+0x58
     *this.add(0x58) = b' ';
+    // MSVC _Pmybuf: when this ios is embedded in a basic_istream at offset 0x10 from
+    // the complete object, this+0x08 is complete_this+0x18 (_Pmybuf field), and
+    // this+0x48 is complete_this+0x58 (_Mystrbuf field). Write the pointer now so that
+    // if ios_ctor runs after istream_ctor, the _Pmybuf value is not zero.
+    // Belt-and-suspenders with the write in msvcp_istream_ctor.
+    // Wine ref: dlls/msvcp90/ios.c — basic_ios_char_ctor (MSVC ABI extension)
+    std::ptr::write(this.add(0x08) as *mut usize, this.add(0x48) as usize);
+    eprintln!("[weave:msvcp] ios_ctor wrote _Pmybuf at this+0x08={:p} value={:#x}", this.add(0x08), this.add(0x48) as usize);
     this
 }
 
@@ -240,6 +249,7 @@ pub unsafe extern "win64" fn msvcp_istream_ctor(
     // ios._Mystrbuf is at base+0x48 = this+0x58; this+0x18 must hold its address so
     // the destructor's `mov rcx,[this+0x18]; cmp [rcx],filebuf` does not fault on NULL.
     std::ptr::write(this.add(0x18) as *mut usize, this.add(0x58) as usize);
+    eprintln!("[weave:msvcp] istream_ctor this={:p} _isstd={} this+0x18={:#x}", this, _isstd, std::ptr::read(this.add(0x18) as *const usize));
     this
 }
 
