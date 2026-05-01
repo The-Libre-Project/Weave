@@ -16,6 +16,87 @@ pub unsafe extern "win64" fn msvcp_noop(_a: usize, _b: usize, _c: usize, _d: usi
     0
 }
 
+// ── Fake locale infrastructure ────────────────────────────────────────────────
+//
+// NXEngine inlines locale::_Getfacet() which navigates:
+//   locale* this → [+8] = _Locimp* impl
+//   impl → [+0x10] = facet** farray, [+0x18] = size_t nfacets
+// After _Getfacet, the locale._Ptr is "decremented" via impl->vtable[2].
+//
+// We construct a minimal static structure that satisfies these accesses without
+// implementing the full locale machinery.
+//
+// Wine ref: dlls/msvcp90/locale.c — _Locimp layout, facet base, _Getfacet().
+#[repr(C)]
+struct FakeLocaleData {
+    vtable: [usize; 8],    // fake vtable — all entries = msvcp_noop
+    locimp_vtable: usize,  // _Locimp.vtable (= &self.vtable[0]); at locimp+0x00
+    locimp_refs: usize,    // _Locimp._Refs = 1;                   at locimp+0x08
+    locimp_farray: usize,  // _Locimp._Farray (= &self.farray);    at locimp+0x10
+    locimp_nfacets: usize, // _Locimp._Nfacets = 1;                at locimp+0x18
+    farray: usize,         // farray[0] = locimp addr (non-null facet*)
+}
+
+// SAFETY: all fields are usize; no interior mutability; written once before first read.
+unsafe impl Send for FakeLocaleData {}
+unsafe impl Sync for FakeLocaleData {}
+
+static FAKE_LOCALE_DATA: std::sync::OnceLock<Box<FakeLocaleData>> = std::sync::OnceLock::new();
+
+fn get_fake_locale_data() -> &'static FakeLocaleData {
+    FAKE_LOCALE_DATA.get_or_init(|| {
+        let noop = msvcp_noop as *const () as usize;
+        let mut b = Box::new(FakeLocaleData {
+            vtable: [noop; 8],
+            locimp_vtable: 0,
+            locimp_refs: 1,
+            locimp_farray: 0,
+            locimp_nfacets: 1,
+            farray: 0,
+        });
+        let vtable_addr = b.vtable.as_ptr() as usize;
+        let locimp_addr = &b.locimp_vtable as *const usize as usize;
+        let farray_addr = &b.farray as *const usize as usize;
+        b.locimp_vtable = vtable_addr;
+        b.locimp_farray = farray_addr;
+        b.farray = locimp_addr; // farray[0] = locimp itself (non-null, any facet*)
+        b
+    })
+}
+
+/// `basic_streambuf::getloc()` — returns a locale copy via Windows x64 sret.
+///
+/// Calling convention (MSVC member function returning large struct):
+///   RCX = this (basic_streambuf*), RDX = locale return destination.
+/// Writes a fake locale {cookie=0, _Ptr=fake_locimp} to *ret and returns ret in RAX.
+///
+/// Wine ref: dlls/msvcp90/ios.c:basic_streambuf_getloc — returns _Mylocale copy.
+pub unsafe extern "win64" fn msvcp_getloc(
+    _this: usize,
+    ret: *mut usize,
+    _c: usize,
+    _d: usize,
+) -> *mut usize {
+    let data = get_fake_locale_data();
+    let locimp_addr = &data.locimp_vtable as *const usize as usize;
+    *ret = 0; // locale.cookie = 0 (unused field)
+    *ret.add(1) = locimp_addr; // locale._Ptr = &fake _Locimp
+    ret
+}
+
+/// `codecvt_base::always_noconv()` — returns true for char→char (no conversion needed).
+///
+/// Wine ref: dlls/msvcp90/locale.c:codecvt_base_always_noconv — returns TRUE for
+/// the narrow-char specialization; _Cvt is set to NULL in the caller (basic_filebuf::open).
+pub unsafe extern "win64" fn msvcp_always_noconv(
+    _this: usize,
+    _b: usize,
+    _c: usize,
+    _d: usize,
+) -> u8 {
+    1
+}
+
 /// `std::_Fiopen(filename, mode, prot)` — open a file on behalf of std::ifstream/ofstream.
 ///
 /// Wine ref: dlls/msvcp140/msvcp140.c — _Fiopen maps ios_base::openmode bits to fopen
@@ -81,10 +162,6 @@ pub unsafe extern "win64" fn msvcp_fiopen(
             result = libc::fopen(folded.as_ptr(), mode_str.as_ptr() as *const libc::c_char);
         }
     }
-    eprintln!(
-        "[weave:fio:fiopen] win={win_path:?} linux={linux_path:?} mode=0x{mode:02x} ok={}",
-        !result.is_null()
-    );
     result as *mut libc::c_void
 }
 
@@ -412,10 +489,8 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         | "?_Xbad_function_call@std@@YAXXZ"
         | "?_Xlength_error@std@@YAXPEBD@Z"
         | "?_Xout_of_range@std@@YAXPEBD@Z"
-        | "?always_noconv@codecvt_base@std@@QEBA_NXZ"
         | "?clear@?$basic_ios@DU?$char_traits@D@std@@@std@@QEAAXH_N@Z"
         | "?flush@?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV12@XZ"
-        | "?getloc@?$basic_streambuf@DU?$char_traits@D@std@@@std@@QEBA?AVlocale@2@XZ"
         | "?imbue@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MEAAXAEBVlocale@2@@Z"
         | "?in@?$codecvt@DDU_Mbstatet@@@std@@QEBAHAEAU_Mbstatet@@PEBD1AEAPEBDPEAD3AEAPEAD@Z"
         | "?out@?$codecvt@DDU_Mbstatet@@@std@@QEBAHAEAU_Mbstatet@@PEBD1AEAPEBDPEAD3AEAPEAD@Z"
@@ -439,6 +514,13 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         | "?xsgetn@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MEAA_JPEAD_J@Z"
         | "?xsputn@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MEAA_JPEBD_J@Z"
         => msvcp_noop as *const () as usize,
+
+        "?always_noconv@codecvt_base@std@@QEBA_NXZ" => {
+            msvcp_always_noconv as *const () as usize
+        }
+        "?getloc@?$basic_streambuf@DU?$char_traits@D@std@@@std@@QEBA?AVlocale@2@XZ" => {
+            msvcp_getloc as *const () as usize
+        }
 
         "?_Fiopen@std@@YAPEAU_iobuf@@PEB_WHH@Z" => {
             msvcp_fiopen as unsafe extern "win64" fn(*const u16, i32, i32) -> *mut libc::c_void
