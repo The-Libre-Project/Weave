@@ -235,6 +235,11 @@ pub unsafe extern "win64" fn msvcp_istream_ctor(
     *(this.add(0x08) as *mut i64) = 0i64;
     // basic_ios_char_init: strbuf=sb, stream=NULL, fillch=' '
     ios_char_init(base, sb);
+    // MSVC: _Pmybuf = &ios._Mystrbuf — fast rdbuf double-pointer used by dtor at nx.exe RVA 0x55e3e
+    // Wine ref: dlls/msvcp90/istream.c — basic_istream_char_ctor_rdbuf (MSVC ABI extension, not in Wine source)
+    // ios._Mystrbuf is at base+0x48 = this+0x58; this+0x18 must hold its address so
+    // the destructor's `mov rcx,[this+0x18]; cmp [rcx],filebuf` does not fault on NULL.
+    std::ptr::write(this.add(0x18) as *mut usize, this.add(0x58) as usize);
     this
 }
 
