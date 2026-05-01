@@ -30,13 +30,22 @@ static FAKE_OSTREAM_VTABLE: [usize; 16] = [0usize; 16];
 static FAKE_IOSTREAM_VTABLE: [usize; 16] = [0usize; 16];
 
 // Virtual base tables (vbtable): [0i32, byte_offset_to_virtual_basic_ios_char]
-// Wine ref: dlls/msvcp60/ios.c — basic_istream_char_vbtable, basic_ostream_char_vbtable,
-//           basic_iostream_char_vbtable1, basic_iostream_char_vbtable2.
-// basic_istream_char own fields = 0x10 → ios at this+0x10
-// basic_ostream_char own fields = 0x08 → ios at this+0x08
-// basic_iostream_char: istream part (base1) at +0x00, ostream part (base2) at +0x10
-//   → from base1: ios at this+0x18; from base2: ios at base2+0x10
-static BASIC_ISTREAM_VBTABLE: [i32; 2] = [0i32, 0x10i32];
+// basic_istream offset is binary-specific. NXEngine's nx.exe MSVC layout places
+// the basic_ios virtual base at complete+0xB0 (not Wine's +0x10). Disassembly
+// at nx.exe RVA 0x55310:
+//   140055341  add rcx, 0xb0          ; this for basic_ios ctor
+//   140055348  call basic_ios_ctor    ; this = complete+0xB0
+//   140055357  lea rbx, [rdi+0x10]    ; sb = embedded basic_filebuf
+//   140055364  mov rcx, rdi           ; this = complete (for istream ctor)
+//   140055367  call basic_istream_ctor ; this=complete, sb=complete+0x10
+// The user code reads vtable[+4]=0xB0 after our ctor returns to install the
+// derived basic_ios vtable at complete+0xB0 — so vbtable[+4] must equal 0xB0
+// for the RTTI adjustment to land on the basic_ios subobject.
+//
+// ostream/iostream offsets are unchanged from Wine reference; nx.exe does not
+// instantiate either, so a binary-specific override is not needed yet.
+// Wine ref: dlls/msvcp60/ios.c — basic_ostream_char_vbtable, basic_iostream_char_vbtable*.
+static BASIC_ISTREAM_VBTABLE: [i32; 2] = [0i32, 0xB0i32];
 static BASIC_OSTREAM_VBTABLE: [i32; 2] = [0i32, 0x08i32];
 static BASIC_IOSTREAM_VBTABLE1: [i32; 2] = [0i32, 0x18i32];
 static BASIC_IOSTREAM_VBTABLE2: [i32; 2] = [0i32, 0x10i32];
@@ -208,8 +217,13 @@ unsafe fn ios_char_init(base: *mut u8, sb: *mut u8) {
 }
 
 /// `basic_istream<char>::basic_istream(basic_streambuf*, bool)` — constructor.
-/// Writes vbtable, locates virtual basic_ios_char base, zero-inits it, then calls
-/// basic_ios_char_init to set strbuf=sb.
+/// Writes vbtable, locates virtual basic_ios_char base (at this+0xB0 for
+/// NXEngine's MSVC layout), zero-inits it, then calls basic_ios_char_init to
+/// set strbuf=sb at ios+0x48 (= complete+0xF8).
+/// In nx.exe the user binary already invoked basic_ios ctor with this=complete+0xB0
+/// before reaching this function (see RVA 0x55310), so the basic_ios fields
+/// here are mostly idempotent — but we re-write them to match Wine's
+/// virt_init=true path and to land _Mystrbuf=sb.
 /// Wine ref: dlls/msvcp60/ios.c basic_istream_char_ctor line 6074 — writes vbtable,
 ///   calls basic_ios_char_ctor (virt_init=true path), sets count=0, calls basic_ios_char_init.
 pub unsafe extern "win64" fn msvcp_istream_ctor(
@@ -234,14 +248,16 @@ pub unsafe extern "win64" fn msvcp_istream_ctor(
                             // count = 0 at this+0x08
     *(this.add(0x08) as *mut i64) = 0i64;
     // basic_ios_char_init: strbuf=sb, stream=NULL, fillch=' '
+    // For nx.exe this lands _Mystrbuf at complete+0xF8 (= 0xB0 + 0x48),
+    // pointing at the embedded basic_filebuf at complete+0x10.
     ios_char_init(base, sb);
     // Note: previous attempts to write a "_Pmybuf" double-pointer at this+0x18
     // (Fail #7) and at ios+0x08 (Fail #8) did not move the crash at nx.exe
     // RVA 0x55e3e. Binary analysis (2026-05-01) showed the crashing dereference
     // is on filebuf+0x18 (the embedded basic_filebuf at complete+0x10), not on
     // istream+0x18. filebuf+0x18 is populated by inlined basic_filebuf::open
-    // (RVA 0x56a60) from `_get_stream_buffer_pointers` outparams; the real fix
-    // is in `weave-ucrt::ucrt_get_stream_buffer_pointers`.
+    // (RVA 0x56a60) from `_get_stream_buffer_pointers` outparams; that fix
+    // landed in `weave-ucrt::ucrt_get_stream_buffer_pointers` (commit 4a8991a).
     this
 }
 
