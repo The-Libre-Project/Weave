@@ -35,6 +35,15 @@ pub(crate) static PE_SIZE: AtomicUsize = AtomicUsize::new(0);
 pub(crate) static PDATA_RVA: AtomicUsize = AtomicUsize::new(0);
 pub(crate) static PDATA_SIZE: AtomicUsize = AtomicUsize::new(0);
 
+// ── TASK-10h diagnostic: published address of the std::cerr ostream object ──
+//
+// `weave-msvcp140::cerr_addr` writes the heap-allocated cerr object base here
+// once it is constructed. The signal handler reads it when the guest faults
+// at `nx.exe` RVA 0x958b5 to decide whether `rcx` is the cerr object, a
+// stack-constructed ostream, or something else entirely. Diagnostic-only —
+// remove once the ostream owner at 0x958b5 is identified.
+pub static OSTREAM_DIAG_CERR_ADDR: AtomicUsize = AtomicUsize::new(0);
+
 // ── SEH runaway cap ──────────────────────────────────────────────────────────
 //
 // When a guest fault is dispatched through the SEH chain and no handler
@@ -266,6 +275,18 @@ unsafe extern "C" fn on_fatal_signal(
             libc::write(2, buf.as_ptr() as *const _, pos);
         }
         let win_code = signal_to_exception_code(sig);
+
+        // ── TASK-10h: targeted ostream-object dump at NXEngine RVA 0x958b5 ──
+        // Triggers only for the specific helper at `nx.exe` RVA 0x958b5 that
+        // dereferences `[rcx]` and `*(i32*)([rcx]+4)`. Logs rcx/rdx/rax,
+        // checked reads via /proc/self/mem (so we never cause a secondary
+        // SIGSEGV), comparison to the published CERR_OBJ_ADDR, and a short
+        // hex window inside `rcx` and `[rcx]`. Diagnostic-only.
+        if rva == 0x000958b5 {
+            unsafe {
+                dump_ostream_crash_0x958b5(uctx);
+            }
+        }
 
         // Try to dispatch through SEH. If a handler catches it, the ucontext
         // is updated and we return from the signal handler to resume PE code.
@@ -878,6 +899,273 @@ fn print_crash_report(
     );
 
     unsafe { libc::write(2, msg.as_ptr() as *const libc::c_void, msg.len()) };
+}
+
+// ── TASK-10h diagnostic dump ──────────────────────────────────────────────────
+//
+// One-shot async-signal-safe dump for the NXEngine ostream-helper crash at
+// `nx.exe` RVA 0x958b5. Reads the candidate ostream object via /proc/self/mem
+// so an invalid `rcx` cannot cause a secondary SIGSEGV. Only runs when the
+// faulting RVA matches; remove together with `OSTREAM_DIAG_CERR_ADDR` once
+// the crash owner is identified.
+#[cfg(target_os = "linux")]
+unsafe fn dump_ostream_crash_0x958b5(uctx: *const libc::ucontext_t) {
+    let gregs = unsafe { (*uctx).uc_mcontext.gregs };
+    let rcx = gregs[libc::REG_RCX as usize] as u64;
+    let rdx = gregs[libc::REG_RDX as usize] as u64;
+    let rax = gregs[libc::REG_RAX as usize] as u64;
+    let rsp = gregs[libc::REG_RSP as usize] as u64;
+    let rsi = gregs[libc::REG_RSI as usize] as u64;
+    let cerr = OSTREAM_DIAG_CERR_ADDR.load(Ordering::Relaxed) as u64;
+
+    let mem_path = b"/proc/self/mem\0";
+    let fd = unsafe { libc::open(mem_path.as_ptr() as *const libc::c_char, libc::O_RDONLY) };
+
+    let mut msg = [0u8; 2048];
+    let mut pos = 0usize;
+    macro_rules! push_b {
+        ($s:expr) => {
+            for &b in $s {
+                if pos < msg.len() - 1 {
+                    msg[pos] = b;
+                    pos += 1;
+                }
+            }
+        };
+    }
+    let nibble = |n: u64| {
+        if n < 10 {
+            b'0' + n as u8
+        } else {
+            b'a' + n as u8 - 10
+        }
+    };
+    macro_rules! push_hex {
+        ($v:expr, $w:expr) => {{
+            let v: u64 = $v as u64;
+            push_b!(b"0x");
+            let digits: u32 = $w * 2;
+            for shift in (0..digits).rev() {
+                let n = (v >> (shift * 4)) & 0xf;
+                if pos < msg.len() - 1 {
+                    msg[pos] = nibble(n);
+                    pos += 1;
+                }
+            }
+        }};
+    }
+
+    let read_u64 = |addr: u64| -> Option<u64> {
+        if fd < 0 || addr == 0 {
+            return None;
+        }
+        let mut v = 0u64;
+        let n = unsafe { libc::pread(fd, &mut v as *mut u64 as *mut libc::c_void, 8, addr as i64) };
+        if n == 8 {
+            Some(v)
+        } else {
+            None
+        }
+    };
+    let read_bytes = |addr: u64, out: &mut [u8]| -> isize {
+        if fd < 0 || addr == 0 {
+            return -1;
+        }
+        unsafe {
+            libc::pread(
+                fd,
+                out.as_mut_ptr() as *mut libc::c_void,
+                out.len(),
+                addr as i64,
+            )
+        }
+    };
+
+    push_b!(b"\nweave: TASK-10h dump @ rva=0x000958b5\n");
+    push_b!(b"weave:   rcx       = ");
+    push_hex!(rcx, 8);
+    push_b!(b"\nweave:   rdx       = ");
+    push_hex!(rdx, 8);
+    push_b!(b"\nweave:   rax       = ");
+    push_hex!(rax, 8);
+    push_b!(b"\nweave:   rsi       = ");
+    push_hex!(rsi, 8);
+    push_b!(b"\nweave:   rsp       = ");
+    push_hex!(rsp, 8);
+    push_b!(b"\nweave:   CERR_OBJ  = ");
+    push_hex!(cerr, 8);
+    let cerr_eq = cerr != 0 && cerr == rcx;
+    let cerr_near =
+        cerr != 0 && rcx >= cerr.saturating_sub(0x100) && rcx <= cerr.saturating_add(0x100);
+    push_b!(b"\nweave:   rcx==CERR = ");
+    push_b!(if cerr_eq { b"yes" } else { b"no " });
+    push_b!(b"   rcx~CERR(\xC2\xB1256) = ");
+    push_b!(if cerr_near { b"yes" } else { b"no " });
+
+    let pe_base = PE_BASE.load(Ordering::Relaxed) as u64;
+    let pe_end = pe_base + PE_SIZE.load(Ordering::Relaxed) as u64;
+    let in_pe = pe_base != 0 && rcx >= pe_base && rcx < pe_end;
+    let near_rsp =
+        rsp != 0 && rcx >= rsp.saturating_sub(0x10000) && rcx <= rsp.saturating_add(0x10000);
+    push_b!(b"\nweave:   rcx in PE = ");
+    push_b!(if in_pe { b"yes" } else { b"no " });
+    push_b!(b"   rcx near rsp(\xC2\xB164k) = ");
+    push_b!(if near_rsp { b"yes" } else { b"no " });
+
+    // Return address candidates from the guest stack:
+    //   [rsp]   — set by the call to 0x140095880 (this helper)
+    //   [rsp+8] — set if the helper has already pushed a saved register
+    if let Some(v) = read_u64(rsp) {
+        push_b!(b"\nweave:   [rsp]     = ");
+        push_hex!(v, 8);
+        if pe_base != 0 && v >= pe_base && v < pe_end {
+            push_b!(b"  (PE rva ");
+            push_hex!((v - pe_base) as u32, 4);
+            push_b!(b")");
+        }
+    }
+    if let Some(v) = read_u64(rsp + 8) {
+        push_b!(b"\nweave:   [rsp+8]   = ");
+        push_hex!(v, 8);
+        if pe_base != 0 && v >= pe_base && v < pe_end {
+            push_b!(b"  (PE rva ");
+            push_hex!((v - pe_base) as u32, 4);
+            push_b!(b")");
+        }
+    }
+
+    // [rcx] — vbtable/vtable pointer
+    if let Some(vt) = read_u64(rcx) {
+        push_b!(b"\nweave:   [rcx]     = ");
+        push_hex!(vt, 8);
+        // *(i32 *)([rcx] + 4) — signed offset to virtual basic_ios subobject
+        let mut off_buf = [0u8; 4];
+        let n = read_bytes(vt + 4, &mut off_buf);
+        if n == 4 {
+            let off = i32::from_le_bytes(off_buf);
+            push_b!(b"\nweave:   *(i32*)([rcx]+4) = ");
+            push_hex!(off as u32, 4);
+            push_b!(b"  (= ");
+            // signed-decimal, small range
+            let ov = off as i64;
+            if ov < 0 {
+                push_b!(b"-");
+                let av = (-ov) as u64;
+                let mut tmp = [0u8; 20];
+                let mut tn = 0;
+                let mut x = av;
+                if x == 0 {
+                    tmp[tn] = b'0';
+                    tn += 1;
+                } else {
+                    while x > 0 {
+                        tmp[tn] = b'0' + (x % 10) as u8;
+                        tn += 1;
+                        x /= 10;
+                    }
+                }
+                for i in (0..tn).rev() {
+                    if pos < msg.len() - 1 {
+                        msg[pos] = tmp[i];
+                        pos += 1;
+                    }
+                }
+            } else {
+                let mut tmp = [0u8; 20];
+                let mut tn = 0;
+                let mut x = ov as u64;
+                if x == 0 {
+                    tmp[tn] = b'0';
+                    tn += 1;
+                } else {
+                    while x > 0 {
+                        tmp[tn] = b'0' + (x % 10) as u8;
+                        tn += 1;
+                        x /= 10;
+                    }
+                }
+                for i in (0..tn).rev() {
+                    if pos < msg.len() - 1 {
+                        msg[pos] = tmp[i];
+                        pos += 1;
+                    }
+                }
+            }
+            push_b!(b")");
+        } else {
+            push_b!(b"\nweave:   *(i32*)([rcx]+4) = (unreadable)");
+        }
+        // First 0x20 bytes at [rcx] (vtable region)
+        let mut vt_buf = [0u8; 0x20];
+        let n = read_bytes(vt, &mut vt_buf);
+        push_b!(b"\nweave:   bytes@[rcx] = ");
+        if n > 0 {
+            for i in 0..(n as usize).min(vt_buf.len()) {
+                let b = vt_buf[i];
+                if pos < msg.len() - 1 {
+                    msg[pos] = nibble((b >> 4) as u64);
+                    pos += 1;
+                }
+                if pos < msg.len() - 1 {
+                    msg[pos] = nibble((b & 0xf) as u64);
+                    pos += 1;
+                }
+                if i + 1 < (n as usize).min(vt_buf.len()) && pos < msg.len() - 1 {
+                    msg[pos] = b' ';
+                    pos += 1;
+                }
+            }
+        } else {
+            push_b!(b"(unreadable)");
+        }
+    } else {
+        push_b!(b"\nweave:   [rcx]     = (unreadable)");
+    }
+
+    // First 0x80 bytes at rcx itself
+    let mut rcx_buf = [0u8; 0x80];
+    let n = read_bytes(rcx, &mut rcx_buf);
+    push_b!(b"\nweave:   bytes@rcx  = ");
+    if n > 0 {
+        let nn = (n as usize).min(rcx_buf.len());
+        for (i, &b) in rcx_buf.iter().take(nn).enumerate() {
+            if pos < msg.len() - 1 {
+                msg[pos] = nibble((b >> 4) as u64);
+                pos += 1;
+            }
+            if pos < msg.len() - 1 {
+                msg[pos] = nibble((b & 0xf) as u64);
+                pos += 1;
+            }
+            if i + 1 < nn && pos < msg.len() - 1 {
+                msg[pos] = if (i + 1) % 16 == 0 { b'\n' } else { b' ' };
+                pos += 1;
+                if (i + 1) % 16 == 0 {
+                    push_b!(b"weave:                ");
+                }
+            }
+        }
+    } else {
+        push_b!(b"(unreadable)");
+    }
+
+    // [rdx + 0x10] — used as r12 by the helper (asm fact)
+    if let Some(v) = read_u64(rdx + 0x10) {
+        push_b!(b"\nweave:   [rdx+0x10]= ");
+        push_hex!(v, 8);
+    } else {
+        push_b!(b"\nweave:   [rdx+0x10]= (unreadable)");
+    }
+
+    push_b!(b"\n");
+    if fd >= 0 {
+        unsafe {
+            libc::close(fd);
+        }
+    }
+    unsafe {
+        libc::write(2, msg.as_ptr() as *const libc::c_void, pos);
+    }
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
