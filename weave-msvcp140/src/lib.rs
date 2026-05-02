@@ -273,11 +273,6 @@ pub unsafe extern "win64" fn msvcp_istream_ctor(
     this
 }
 
-// TASK-10h diagnostic: gate ostream-ctor logging to the first few invocations.
-// User-binary call sites (e.g. nx.exe RVA 0x1400949ab) construct ostreams on
-// the stack repeatedly inside loops; logging every call would flood CI.
-static OSTREAM_CTOR_LOG_COUNT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-
 /// `basic_ostream<char>::basic_ostream(basic_streambuf*, bool)` — constructor.
 /// Wine ref: dlls/msvcp60/ios.c basic_ostream_char_ctor line 4510 — writes vbtable,
 ///   calls basic_ios_char_ctor (virt_init=true), calls basic_ios_char_init (init=true).
@@ -302,35 +297,6 @@ pub unsafe extern "win64" fn msvcp_ostream_ctor(
     *base.add(0x58) = b' '; // fillch
                             // basic_ios_char_init: strbuf=sb, stream=NULL, fillch=' '
     ios_char_init(base, sb);
-    // ── TASK-10h diagnostic: log first 4 ctor invocations ───────────────────
-    let n = OSTREAM_CTOR_LOG_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    if n < 4 {
-        let vt = *(this as *const usize);
-        let vbtable_off = if vt != 0 {
-            *((vt + 4) as *const i32)
-        } else {
-            0
-        };
-        eprintln!(
-            "weave: TASK-10h ostream_ctor#{} this=0x{:x} sb=0x{:x} *this=0x{:x} vbtable[+4]={:#x} ios=0x{:x}",
-            n,
-            this as usize,
-            sb as usize,
-            vt,
-            vbtable_off,
-            base as usize,
-        );
-        eprintln!(
-            "weave: TASK-10h ostream_ctor#{} ios +0x10=0x{:x} +0x18=0x{:x} +0x28=0x{:x} +0x48=0x{:x} +0x50=0x{:x} +0x58=0x{:x}",
-            n,
-            *(base.add(0x10) as *const u64),
-            *(base.add(0x18) as *const u64),
-            *(base.add(0x28) as *const u64),
-            *(base.add(0x48) as *const u64),
-            *(base.add(0x50) as *const u64),
-            *(base.add(0x58) as *const u64),
-        );
-    }
     this
 }
 
@@ -825,40 +791,6 @@ fn cerr_addr() -> usize {
             let vbase_off = BASIC_OSTREAM_VBTABLE[1] as usize;
             let base = raw.add(vbase_off);
             *(base.add(0x28) as *mut *const u8) = sb_raw;
-        }
-        // ── TASK-10h diagnostic ──────────────────────────────────────────────
-        // Publish the cerr object address to weave-core's signal handler so it
-        // can compare against `rcx` at the 0x958b5 fault site, and emit the
-        // ios-subobject snapshot the analysis brief asks for. Logged once
-        // (this closure runs through OnceLock::get_or_init).
-        weave_core::seh::OSTREAM_DIAG_CERR_ADDR
-            .store(raw as usize, std::sync::atomic::Ordering::Relaxed);
-        unsafe {
-            let vt = *(raw as *const usize);
-            let vbase_off = BASIC_OSTREAM_VBTABLE[1] as usize;
-            let base = raw.add(vbase_off);
-            let vbtable_off = if vt != 0 {
-                *((vt + 4) as *const i32)
-            } else {
-                0
-            };
-            eprintln!(
-                "weave: TASK-10h cerr init this=0x{:x} sb=0x{:x} *this=0x{:x} vbtable[+4]={:#x} ios_base=0x{:x}",
-                raw as usize,
-                sb_raw as usize,
-                vt,
-                vbtable_off,
-                base as usize,
-            );
-            eprintln!(
-                "weave: TASK-10h cerr ios fields +0x10=0x{:x} +0x18=0x{:x} +0x28=0x{:x} +0x48=0x{:x} +0x50=0x{:x} +0x58=0x{:x}",
-                *(base.add(0x10) as *const u64),
-                *(base.add(0x18) as *const u64),
-                *(base.add(0x28) as *const u64),
-                *(base.add(0x48) as *const u64),
-                *(base.add(0x50) as *const u64),
-                *(base.add(0x58) as *const u64),
-            );
         }
         raw as usize
     })
