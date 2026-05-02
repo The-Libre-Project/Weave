@@ -42,11 +42,23 @@ static FAKE_IOSTREAM_VTABLE: [usize; 16] = [0usize; 16];
 // derived basic_ios vtable at complete+0xB0 — so vbtable[+4] must equal 0xB0
 // for the RTTI adjustment to land on the basic_ios subobject.
 //
-// ostream/iostream offsets are unchanged from Wine reference; nx.exe does not
-// instantiate either, so a binary-specific override is not needed yet.
+// basic_ostream offset is also binary-specific. NXEngine's nx.exe MSVC layout
+// places the basic_ios virtual base at complete+0x88 (not Wine's +0x08). The
+// stack-ostream call site at nx.exe RVA 0x14094939e allocates `this` then,
+// after the ctor returns, the helper at 0x140095880 reads:
+//   mov rax, [rsp+0x70]              ; rax = [this] = our vbtable ptr
+//   movsxd rcx, dword ptr [rax+4]    ; rcx = BASIC_OSTREAM_VBTABLE[1]
+//   ...
+//   lea edx, [rcx-0x88]              ; edx = vbtable[1] - 0x88
+//   mov dword ptr [rsp+rcx+0x6c], edx ; write at this + (vbtable[1]) + (-4)
+// With vbtable[1]=0x08, that store lands at this+4 with value 0xffffff80,
+// shredding the upper half of the vbtable pointer (TASK-10h, CI 25243021648).
+// With vbtable[1]=0x88, edx=0 and the store lands at this+0x84 — a benign
+// in-frame slot — and downstream reads of [this + vbase + 0x28]/[+0x48] hit
+// the basic_ios subobject we initialised, mirroring the istream 0xB0 fix.
 // Wine ref: dlls/msvcp60/ios.c — basic_ostream_char_vbtable, basic_iostream_char_vbtable*.
 static BASIC_ISTREAM_VBTABLE: [i32; 2] = [0i32, 0xB0i32];
-static BASIC_OSTREAM_VBTABLE: [i32; 2] = [0i32, 0x08i32];
+static BASIC_OSTREAM_VBTABLE: [i32; 2] = [0i32, 0x88i32];
 static BASIC_IOSTREAM_VBTABLE1: [i32; 2] = [0i32, 0x18i32];
 static BASIC_IOSTREAM_VBTABLE2: [i32; 2] = [0i32, 0x10i32];
 
@@ -794,9 +806,13 @@ fn cerr_addr() -> usize {
         // SAFETY: layout is non-zero-sized and well-aligned; allocator returns
         // either null (we'd crash later anyway) or a valid pointer to 0xA0 bytes.
         let sb_raw = unsafe { std::alloc::alloc_zeroed(sb_layout) };
-        // Allocate the complete ostream object. 256 bytes covers vbtable +
-        // virtual basic_ios subobject (which sits at this+0x08 per BASIC_OSTREAM_VBTABLE).
-        let layout = std::alloc::Layout::from_size_align(256, 16).unwrap();
+        // Allocate the complete ostream object. 384 bytes covers the prefix
+        // bytes that user code scribbles at this+0x80..0x88 (e.g. the
+        // `mov [rsp+rcx+0x6c], edx` store landing at this+0x84 with vbase
+        // 0x88) plus the virtual basic_ios subobject at this+0x88..this+0xE8
+        // and the ios+0x28 streambuf-pointer slot at this+0xB0. Bumped from
+        // 256 when BASIC_OSTREAM_VBTABLE[1] moved 0x08 → 0x88.
+        let layout = std::alloc::Layout::from_size_align(384, 16).unwrap();
         let raw = unsafe { std::alloc::alloc_zeroed(layout) };
         unsafe {
             msvcp_streambuf_ctor(sb_raw, 0, 0, 0);
