@@ -364,11 +364,8 @@ pub unsafe extern "win64" fn msvcp_always_noconv(
 pub unsafe extern "win64" fn msvcp_read(this: *mut u8, buf: *mut u8, n: i64) -> *mut u8 {
     if let Some(fp) = get_current_fp() {
         if n > 0 && !buf.is_null() {
-            let got = libc::fread(buf as *mut libc::c_void, 1, n as usize, fp);
-            eprintln!("[weave:msvcp] read: requested={} got={}", n, got);
+            libc::fread(buf as *mut libc::c_void, 1, n as usize, fp);
         }
-    } else {
-        eprintln!("[weave:msvcp] read: no active fp (this={:p})", this);
     }
     this
 }
@@ -379,13 +376,7 @@ pub unsafe extern "win64" fn msvcp_read(this: *mut u8, buf: *mut u8, n: i64) -> 
 /// Wine ref: dlls/msvcp90/ios.c:basic_istream_char_seekg — calls pubseekoff on rdbuf.
 pub unsafe extern "win64" fn msvcp_seekg(this: *mut u8, offset: i64, whence: i32) -> *mut u8 {
     if let Some(fp) = get_current_fp() {
-        let ret = libc::fseek(fp, offset as libc::c_long, whence);
-        eprintln!(
-            "[weave:msvcp] seekg: off={} whence={} ret={}",
-            offset, whence, ret
-        );
-    } else {
-        eprintln!("[weave:msvcp] seekg: no active fp (this={:p})", this);
+        libc::fseek(fp, offset as libc::c_long, whence);
     }
     this
 }
@@ -396,17 +387,14 @@ pub unsafe extern "win64" fn msvcp_seekg(this: *mut u8, offset: i64, whence: i32
 /// fpos<mbstate_t> = { streamoff _Myoff (i64 @ +0), mbstate_t _Fac (8 bytes @ +8) }
 /// Wine ref: dlls/msvcp90/ios.c:basic_istream_char_tellg — calls pubseekoff on rdbuf.
 pub unsafe extern "win64" fn msvcp_tellg(
-    this: *const u8,
+    _this: *const u8,
     ret: *mut i64,
     _c: usize,
     _d: usize,
 ) -> *mut i64 {
     let pos = if let Some(fp) = get_current_fp() {
-        let p = libc::ftell(fp) as i64;
-        eprintln!("[weave:msvcp] tellg: pos={} (this={:p})", p, this);
-        p
+        libc::ftell(fp) as i64
     } else {
-        eprintln!("[weave:msvcp] tellg: no active fp (this={:p})", this);
         -1
     };
     *ret = pos;
@@ -418,18 +406,11 @@ pub unsafe extern "win64" fn msvcp_tellg(
 ///
 /// Win64: RCX=this (filebuf*), RDX=buf, R8=n. Returns streamsize (i64) bytes read.
 /// Wine ref: dlls/msvcp90/ios.c:basic_streambuf_char_xsgetn_s — fread-backed.
-pub unsafe extern "win64" fn msvcp_xsgetn(this: *const u8, buf: *mut u8, n: i64) -> i64 {
+pub unsafe extern "win64" fn msvcp_xsgetn(_this: *const u8, buf: *mut u8, n: i64) -> i64 {
     if let Some(fp) = get_current_fp() {
         if n > 0 && !buf.is_null() {
-            let got = libc::fread(buf as *mut libc::c_void, 1, n as usize, fp) as i64;
-            eprintln!(
-                "[weave:msvcp] xsgetn: requested={} got={} (this={:p})",
-                n, got, this
-            );
-            return got;
+            return libc::fread(buf as *mut libc::c_void, 1, n as usize, fp) as i64;
         }
-    } else {
-        eprintln!("[weave:msvcp] xsgetn: no active fp (this={:p})", this);
     }
     0
 }
@@ -438,12 +419,16 @@ pub unsafe extern "win64" fn msvcp_xsgetn(this: *const u8, buf: *mut u8, n: i64)
 ///
 /// Win64: RCX=this (streambuf*). Returns int (char as unsigned, or EOF=-1).
 /// Wine ref: dlls/msvcp90/ios.c:basic_streambuf_char_sbumpc — inline in Wine.
-pub unsafe extern "win64" fn msvcp_sbumpc(this: *const u8, _b: usize, _c: usize, _d: usize) -> i32 {
+pub unsafe extern "win64" fn msvcp_sbumpc(
+    _this: *const u8,
+    _b: usize,
+    _c: usize,
+    _d: usize,
+) -> i32 {
     if let Some(fp) = get_current_fp() {
         let c = libc::fgetc(fp);
         return if c == libc::EOF { -1 } else { c };
     }
-    eprintln!("[weave:msvcp] sbumpc: no active fp (this={:p})", this);
     -1
 }
 
@@ -757,10 +742,43 @@ pub unsafe extern "win64" fn cnd_signal(
 static BADOFF: i64 = -1;
 
 /// ?cerr@std@@3V?$basic_ostream@DU?$char_traits@D@std@@@1@A — the cerr global object.
-/// 128 bytes covers the ostream object layout. Zero-initialized; callers that invoke
-/// methods through cerr's vtable (offset 0) will get a null vtable pointer, which
-/// may crash later — acceptable for TASK-2, fixed when ostream is implemented.
-static CERR_OBJ: [u8; 128] = [0u8; 128];
+/// Backed by a heap-allocated ostream initialised through `msvcp_ostream_ctor` with a
+/// minimal fake streambuf, exposed via a `OnceLock<usize>` so the address is stable
+/// across resolve() calls. Inlined logging helpers in user binaries (e.g. NXEngine
+/// nx.exe RVA 0x958b5) read the vbtable at this+0x00, sign-extend vbtable[+4] to get
+/// the virtual basic_ios offset, then deref fields inside the ios subobject — all of
+/// which now address valid initialised memory rather than a `[0u8; 128]` blob.
+static CERR_OBJ_ADDR: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+
+/// Allocate and initialise the static `std::cerr` ostream the first time it is
+/// requested. Subsequent calls return the same address.
+fn cerr_addr() -> usize {
+    *CERR_OBJ_ADDR.get_or_init(|| {
+        // Allocate a fake streambuf first so the ostream's strbuf field points at
+        // a real object with a non-null vtable. 0xA0 matches msvcp_streambuf_ctor.
+        let sb_layout = std::alloc::Layout::from_size_align(0xA0, 16).unwrap();
+        // SAFETY: layout is non-zero-sized and well-aligned; allocator returns
+        // either null (we'd crash later anyway) or a valid pointer to 0xA0 bytes.
+        let sb_raw = unsafe { std::alloc::alloc_zeroed(sb_layout) };
+        // Allocate the complete ostream object. 256 bytes covers vbtable +
+        // virtual basic_ios subobject (which sits at this+0x08 per BASIC_OSTREAM_VBTABLE).
+        let layout = std::alloc::Layout::from_size_align(256, 16).unwrap();
+        let raw = unsafe { std::alloc::alloc_zeroed(layout) };
+        unsafe {
+            msvcp_streambuf_ctor(sb_raw, 0, 0, 0);
+            msvcp_ostream_ctor(raw, sb_raw, 0, 0);
+            // Inlined ostream helper at nx.exe RVA 0x958b5 also reads
+            // *(this + vbase + 0x28) and dereferences the result. ios+0x28 is not
+            // populated by basic_ios_char_init in our model, so point it at the
+            // streambuf — its first slot is a valid vtable pointer, so any further
+            // virtual deref lands in our fake-vtable region rather than crashing.
+            let vbase_off = BASIC_OSTREAM_VBTABLE[1] as usize;
+            let base = raw.add(vbase_off);
+            *(base.add(0x28) as *mut *const u8) = sb_raw;
+        }
+        raw as usize
+    })
+}
 
 /// ?id@?$codecvt@DDU_Mbstatet@@@std@@2V0locale@2@A — locale::id for codecvt<char,char>
 static LOCALE_ID_CODECVT_DD: usize = 0;
@@ -786,7 +804,7 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
             &BADOFF as *const i64 as usize
         }
         "?cerr@std@@3V?$basic_ostream@DU?$char_traits@D@std@@@1@A" => {
-            CERR_OBJ.as_ptr() as usize
+            cerr_addr()
         }
         "?id@?$codecvt@DDU_Mbstatet@@@std@@2V0locale@2@A" => {
             &LOCALE_ID_CODECVT_DD as *const usize as usize

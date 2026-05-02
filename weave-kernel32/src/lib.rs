@@ -3849,6 +3849,9 @@ pub unsafe extern "win64" fn multi_byte_to_wide_char(
         set_last_error(87); // ERROR_INVALID_PARAMETER
         return 0;
     }
+    // Wine ref: dlls/kernelbase/locale.c — when srclen<0, the source NUL is included in
+    // the conversion and the returned size includes the wide NUL terminator. When the
+    // destination is too small, return 0 + ERROR_INSUFFICIENT_BUFFER (no truncation).
     let null_terminated = cb_multi_byte < 0;
     let bytes: &[u8] = if null_terminated {
         let mut len = 0usize;
@@ -3859,33 +3862,26 @@ pub unsafe extern "win64" fn multi_byte_to_wide_char(
             set_last_error(87); // ERROR_INVALID_PARAMETER
             return 0;
         }
-        unsafe { std::slice::from_raw_parts(lp_multi_byte_str, len) }
+        // Include the trailing NUL so the wide output also has a NUL.
+        unsafe { std::slice::from_raw_parts(lp_multi_byte_str, len + 1) }
     } else {
         unsafe { std::slice::from_raw_parts(lp_multi_byte_str, cb_multi_byte as usize) }
     };
     let wide: Vec<u16> = String::from_utf8_lossy(bytes).encode_utf16().collect();
+    let required = wide.len();
     if lp_wide_char_str.is_null() || cch_wide_char == 0 {
-        return (wide.len() + if null_terminated { 1 } else { 0 }) as i32;
+        return required as i32;
     }
     let cap = cch_wide_char as usize;
-    if null_terminated {
-        // Null-terminated source: reserve one slot for the null terminator.
-        let copy_len = wide.len().min(cap.saturating_sub(1));
-        unsafe {
-            std::ptr::copy_nonoverlapping(wide.as_ptr(), lp_wide_char_str, copy_len);
-            *lp_wide_char_str.add(copy_len) = 0;
-        }
-        set_last_error(0);
-        (copy_len + 1) as i32
-    } else {
-        // Counted source: copy exactly min(wide, cap) chars. No null added.
-        let copy_len = wide.len().min(cap);
-        unsafe {
-            std::ptr::copy_nonoverlapping(wide.as_ptr(), lp_wide_char_str, copy_len);
-        }
-        set_last_error(0);
-        copy_len as i32
+    if cap < required {
+        set_last_error(122); // ERROR_INSUFFICIENT_BUFFER
+        return 0;
     }
+    unsafe {
+        std::ptr::copy_nonoverlapping(wide.as_ptr(), lp_wide_char_str, required);
+    }
+    set_last_error(0);
+    required as i32
 }
 
 /// GetStartupInfoA: return process startup parameters (ANSI variant).
@@ -15390,5 +15386,122 @@ mod tests {
         assert_eq!(owner, 0, "OwningThread must be 0 after full release");
 
         let _ = unsafe { Box::from_raw(cs_ptr as *mut [u64; 5]) };
+    }
+
+    // ── multi_byte_to_wide_char ──────────────────────────────────────────────
+    //
+    // Regression coverage for the NXEngine sprites.sif/music.json truncation
+    // (CI run 25237583085). The previous `min(wide.len(), cap-1)` reservation
+    // lopped one character off when the caller sized the output exactly to the
+    // source length without including the NUL slot.
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn mbtowc_query_size_includes_terminator_for_null_terminated_source() {
+        // "sprites.sif" + NUL = 12 wide units required.
+        let src = b"sprites.sif\0";
+        let n =
+            unsafe { multi_byte_to_wide_char(65001, 0, src.as_ptr(), -1, std::ptr::null_mut(), 0) };
+        assert_eq!(n, 12);
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn mbtowc_query_size_excludes_terminator_for_counted_source() {
+        // 11 chars, no NUL — counted mode does not append one.
+        let src = b"sprites.sif";
+        let n = unsafe {
+            multi_byte_to_wide_char(
+                65001,
+                0,
+                src.as_ptr(),
+                src.len() as i32,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        assert_eq!(n, 11);
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn mbtowc_exact_buffer_preserves_sprites_sif() {
+        let src = b"sprites.sif\0";
+        let mut buf = [0u16; 12];
+        let n = unsafe {
+            multi_byte_to_wide_char(
+                65001,
+                0,
+                src.as_ptr(),
+                -1,
+                buf.as_mut_ptr(),
+                buf.len() as i32,
+            )
+        };
+        assert_eq!(n, 12);
+        let s = String::from_utf16(&buf[..11]).unwrap();
+        assert_eq!(s, "sprites.sif");
+        assert_eq!(buf[11], 0);
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn mbtowc_exact_buffer_preserves_music_json() {
+        let src = b"music.json\0";
+        let mut buf = [0u16; 11];
+        let n = unsafe {
+            multi_byte_to_wide_char(
+                65001,
+                0,
+                src.as_ptr(),
+                -1,
+                buf.as_mut_ptr(),
+                buf.len() as i32,
+            )
+        };
+        assert_eq!(n, 11);
+        let s = String::from_utf16(&buf[..10]).unwrap();
+        assert_eq!(s, "music.json");
+        assert_eq!(buf[10], 0);
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn mbtowc_counted_source_does_not_append_terminator() {
+        let src = b"sprites.sif";
+        let mut buf = [0xAAAAu16; 11];
+        let n = unsafe {
+            multi_byte_to_wide_char(
+                65001,
+                0,
+                src.as_ptr(),
+                src.len() as i32,
+                buf.as_mut_ptr(),
+                buf.len() as i32,
+            )
+        };
+        assert_eq!(n, 11);
+        let s = String::from_utf16(&buf).unwrap();
+        assert_eq!(s, "sprites.sif");
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn mbtowc_too_small_destination_returns_insufficient_buffer() {
+        let src = b"sprites.sif\0";
+        let mut buf = [0u16; 10]; // smaller than required 12 (chars + NUL)
+        set_last_error(0);
+        let n = unsafe {
+            multi_byte_to_wide_char(
+                65001,
+                0,
+                src.as_ptr(),
+                -1,
+                buf.as_mut_ptr(),
+                buf.len() as i32,
+            )
+        };
+        assert_eq!(n, 0);
+        assert_eq!(get_last_error(), 122); // ERROR_INSUFFICIENT_BUFFER
     }
 }
