@@ -3874,6 +3874,23 @@ pub unsafe extern "win64" fn multi_byte_to_wide_char(
     }
     let cap = cch_wide_char as usize;
     if cap < required {
+        // Microsoft Windows behaviour: on ERROR_INSUFFICIENT_BUFFER the destination
+        // "contains an arbitrary number of converted characters" (i.e. partial output
+        // is written). For null-terminated source, leave a usable NUL-terminated
+        // prefix when there is room — NXEngine sizes its wide buffer to strlen(src)
+        // (no +1 for NUL) and the case-fold + extension-prefix fallback in
+        // `_wfopen` (weave-ucrt) uses that prefix to recover the real path.
+        unsafe {
+            if null_terminated {
+                if cap > 0 {
+                    let copy_len = cap - 1;
+                    std::ptr::copy_nonoverlapping(wide.as_ptr(), lp_wide_char_str, copy_len);
+                    *lp_wide_char_str.add(copy_len) = 0;
+                }
+            } else {
+                std::ptr::copy_nonoverlapping(wide.as_ptr(), lp_wide_char_str, cap);
+            }
+        }
         set_last_error(122); // ERROR_INSUFFICIENT_BUFFER
         return 0;
     }
@@ -15503,5 +15520,33 @@ mod tests {
         };
         assert_eq!(n, 0);
         assert_eq!(get_last_error(), 122); // ERROR_INSUFFICIENT_BUFFER
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn mbtowc_too_small_destination_writes_nul_terminated_prefix() {
+        // NXEngine sizes its wide buffer to strlen(src) (no +1 for NUL); the
+        // case-fold + extension-prefix fallback in `_wfopen` recovers the real
+        // path from the truncated prefix. Verify the prefix is preserved on
+        // ERROR_INSUFFICIENT_BUFFER for cb<0.
+        let src = b"font_1.fnt\0";
+        let mut buf = [0xAAAAu16; 10]; // strlen("font_1.fnt") = 10, required = 11
+        set_last_error(0);
+        let n = unsafe {
+            multi_byte_to_wide_char(
+                65001,
+                0,
+                src.as_ptr(),
+                -1,
+                buf.as_mut_ptr(),
+                buf.len() as i32,
+            )
+        };
+        assert_eq!(n, 0);
+        assert_eq!(get_last_error(), 122);
+        // Expect 9 chars of "font_1.fn" + trailing NUL
+        let s = String::from_utf16(&buf[..9]).unwrap();
+        assert_eq!(s, "font_1.fn");
+        assert_eq!(buf[9], 0);
     }
 }
