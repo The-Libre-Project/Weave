@@ -530,6 +530,49 @@ pub unsafe extern "win64" fn msvcp_op_lshift_ios_base_manip(
     ostream
 }
 
+/// `operator<<(basic_ostream&, T)` for the value-formatting overloads — pass-through.
+///
+/// MSVC inlines `os << x` chains as direct calls to the `op<<` IAT slot. The
+/// previous `msvcp_noop` mapping returned 0, which the user binary stored in
+/// RCX for the next link in the chain — the next `op<<` (or any subsequent
+/// helper like nx.exe's `0x1400639e0` ostream-output-string fn) then read
+/// `[NULL]` and faulted (CI 25286149815, fault rva 0x000063a29 from caller
+/// at 0x140094a0d via the unsigned-int overload at IAT 0x1400b82f8).
+///
+/// Stub semantics: skip formatting, return the ostream so chaining works.
+/// nx.exe never observes formatted text on the gate path (the d3d9 frame
+/// content is what's checked), so the missing format is invisible.
+pub unsafe extern "win64" fn msvcp_op_lshift_passthrough(
+    ostream: *mut u8,
+    _arg: usize,
+    _c: usize,
+    _d: usize,
+) -> *mut u8 {
+    ostream
+}
+
+/// `operator<<(basic_ostream&, basic_ostream& (*)(basic_ostream&))` —
+/// apply ostream manipulator (e.g. `std::endl`, `std::flush`).
+///
+/// Same NULL-rcx-cascade hazard as the ios_base-manip overload. Invokes the
+/// manipulator on the ostream and returns the ostream.
+///
+/// Wine ref: dlls/msvcp90/ios.c:basic_ostream_print_manip_os — calls
+///   `manip(os)`, returns os.
+pub unsafe extern "win64" fn msvcp_op_lshift_ostream_manip(
+    ostream: *mut u8,
+    pf: Option<unsafe extern "win64" fn(*mut u8) -> *mut u8>,
+    _c: usize,
+    _d: usize,
+) -> *mut u8 {
+    if !ostream.is_null() {
+        if let Some(pf) = pf {
+            pf(ostream);
+        }
+    }
+    ostream
+}
+
 /// `std::_Fiopen(filename, mode, prot)` — open a file on behalf of std::ifstream/ofstream.
 ///
 /// Wine ref: dlls/msvcp140/msvcp140.c — _Fiopen maps ios_base::openmode bits to fopen
@@ -965,9 +1008,6 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         | "??1_Lockit@std@@QEAA@XZ"
         | "??1facet@locale@std@@MEAA@XZ"
         | "??4?$_Yarn@D@std@@QEAAAEAV01@PEBD@Z"
-        | "??6?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV01@H@Z"
-        | "??6?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV01@I@Z"
-        | "??6?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV01@P6AAEAV01@AEAV01@@Z@Z"
         | "??Bid@locale@std@@QEAA_KXZ"
         | "?_Addfac@_Locimp@locale@std@@AEAAXPEAVfacet@23@_K@Z"
         | "?_Decref@facet@locale@std@@UEAAPEAV_Facet_base@3@XZ"
@@ -1043,6 +1083,21 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
                     usize,
                     usize,
                 ) -> *mut u8 as *const () as usize
+        }
+        "??6?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV01@P6AAEAV01@AEAV01@@Z@Z" => {
+            msvcp_op_lshift_ostream_manip
+                as unsafe extern "win64" fn(
+                    *mut u8,
+                    Option<unsafe extern "win64" fn(*mut u8) -> *mut u8>,
+                    usize,
+                    usize,
+                ) -> *mut u8 as *const () as usize
+        }
+        "??6?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV01@H@Z"
+        | "??6?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV01@I@Z" => {
+            msvcp_op_lshift_passthrough
+                as unsafe extern "win64" fn(*mut u8, usize, usize, usize) -> *mut u8
+                as *const () as usize
         }
 
         "?always_noconv@codecvt_base@std@@QEBA_NXZ" => {
