@@ -444,6 +444,57 @@ pub unsafe extern "win64" fn msvcp_sbumpc(
     -1
 }
 
+/// `_Smanip<streamsize>::pfn` — apply function for `std::setw` manipulator.
+///
+/// MSVC inlines `operator<<(basic_ostream&, _Smanip<T>)` so the user binary
+/// dereferences the manipulator at the call site:
+///
+/// ```asm
+///     mov rdx, qword ptr [rdi + 0x8]   ; rdx = manip.arg
+///     call qword ptr [rdi]             ; call manip.pfn
+/// ```
+///
+/// where `rdi` is the `_Smanip<streamsize>` slot returned from `setw`. The
+/// inlined op<< sets RCX to the basic_ios before the call. Real `setw` would
+/// set the field width on the ios; for stub purposes we just pass-through —
+/// nx.exe never observes the formatted output, so width has no behavioural
+/// consequence.
+pub unsafe extern "win64" fn msvcp_setw_apply(
+    ios: *mut u8,
+    _arg: i64,
+    _c: usize,
+    _d: usize,
+) -> *mut u8 {
+    ios
+}
+
+/// `std::setw(streamsize n)` — return a 16-byte `_Smanip<streamsize>` by sret.
+///
+/// Win64 ABI for a 16-byte non-trivial aggregate return: hidden first
+/// parameter in RCX is the caller-allocated return slot, real arg shifts to
+/// RDX. Layout of the slot is `{ pfn @ +0; arg @ +8 }` — confirmed by the
+/// nx.exe inlined-op<< sequence at RVA 0x14094991..0x1400949ea.
+///
+/// Replaces the previous `msvcp_noop` mapping which returned 0 in RAX,
+/// causing the user binary to dereference NULL+8 immediately after the
+/// inlined op<< (CI 25253395641, fault at RVA 0x000949e6 fault=0x8).
+///
+/// Wine ref: dlls/msvcp90/iosfwd.c:setw — constructs `_Smanip` with
+///   `pfn = setw_helper` and `arg = n`; setw_helper invokes
+///   `basic_ios::width(n)` on the streamed ios.
+pub unsafe extern "win64" fn msvcp_setw(
+    ret: *mut usize,
+    n: i64,
+    _c: usize,
+    _d: usize,
+) -> *mut usize {
+    if !ret.is_null() {
+        *ret = msvcp_setw_apply as *const () as usize; // pfn @ +0
+        *ret.add(1) = n as usize; // arg @ +8
+    }
+    ret
+}
+
 /// `std::_Fiopen(filename, mode, prot)` — open a file on behalf of std::ifstream/ofstream.
 ///
 /// Wine ref: dlls/msvcp140/msvcp140.c — _Fiopen maps ios_base::openmode bits to fopen
@@ -913,7 +964,6 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         | "?put@?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV12@D@Z"
         | "?setbuf@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MEAAPEAV12@PEAD_J@Z"
         | "?setstate@?$basic_ios@DU?$char_traits@D@std@@@std@@QEAAXH_N@Z"
-        | "?setw@std@@YA?AU?$_Smanip@_J@1@_J@Z"
         | "?showmanyc@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MEAA_JXZ"
         | "?sputc@?$basic_streambuf@DU?$char_traits@D@std@@@std@@QEAAHD@Z"
         | "?sputn@?$basic_streambuf@DU?$char_traits@D@std@@@std@@QEAA_JPEBD_J@Z"
@@ -943,6 +993,11 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         }
         "?sbumpc@?$basic_streambuf@DU?$char_traits@D@std@@@std@@QEAAHXZ" => {
             msvcp_sbumpc as unsafe extern "win64" fn(*const u8, usize, usize, usize) -> i32
+                as *const () as usize
+        }
+
+        "?setw@std@@YA?AU?$_Smanip@_J@1@_J@Z" => {
+            msvcp_setw as unsafe extern "win64" fn(*mut usize, i64, usize, usize) -> *mut usize
                 as *const () as usize
         }
 
