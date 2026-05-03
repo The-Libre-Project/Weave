@@ -495,6 +495,41 @@ pub unsafe extern "win64" fn msvcp_setw(
     ret
 }
 
+/// `operator<<(basic_ostream&, ios_base& (*)(ios_base&))` — apply ios_base manipulator.
+///
+/// Called for things like `os << std::dec` where `std::dec` is a function
+/// pointer with signature `ios_base& (ios_base&)`. nx.exe at RVA 0x1400949c9
+/// invokes the IAT slot for this op<< (see imports table: 0x1400b82f0). The
+/// previous `msvcp_noop` mapping returned 0, which the user binary stored in
+/// rbx and then dereferenced at RVA 0x000949ec — `mov (%rbx), %rax` faulted
+/// at NULL (CI 25285854751).
+///
+/// Implementation: locate the ios_base subobject via the ostream's vbtable
+/// (slot at this+0; offset at vbtable[+4] — 0x88 for nx.exe's MSVC layout
+/// per `BASIC_OSTREAM_VBTABLE`), invoke the manipulator on it, and return
+/// the original ostream so the chained `op<< … op<< … op<<` sequence keeps
+/// rbx non-null.
+///
+/// Wine ref: dlls/msvcp90/ios.c:basic_ostream_print_manip — calls
+///   `manip(*basic_ios::ios_base())`, returns ostream.
+pub unsafe extern "win64" fn msvcp_op_lshift_ios_base_manip(
+    ostream: *mut u8,
+    pf: Option<unsafe extern "win64" fn(*mut u8) -> *mut u8>,
+    _c: usize,
+    _d: usize,
+) -> *mut u8 {
+    if !ostream.is_null() {
+        if let Some(pf) = pf {
+            let vbtable_ptr = *(ostream as *const *const u8);
+            if !vbtable_ptr.is_null() {
+                let off = *(vbtable_ptr.add(4) as *const i32) as usize;
+                pf(ostream.add(off));
+            }
+        }
+    }
+    ostream
+}
+
 /// `std::_Fiopen(filename, mode, prot)` — open a file on behalf of std::ifstream/ofstream.
 ///
 /// Wine ref: dlls/msvcp140/msvcp140.c — _Fiopen maps ios_base::openmode bits to fopen
@@ -933,7 +968,6 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         | "??6?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV01@H@Z"
         | "??6?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV01@I@Z"
         | "??6?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV01@P6AAEAV01@AEAV01@@Z@Z"
-        | "??6?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV01@P6AAEAVios_base@1@AEAV21@@Z@Z"
         | "??Bid@locale@std@@QEAA_KXZ"
         | "?_Addfac@_Locimp@locale@std@@AEAAXPEAVfacet@23@_K@Z"
         | "?_Decref@facet@locale@std@@UEAAPEAV_Facet_base@3@XZ"
@@ -999,6 +1033,16 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "?setw@std@@YA?AU?$_Smanip@_J@1@_J@Z" => {
             msvcp_setw as unsafe extern "win64" fn(*mut usize, i64, usize, usize) -> *mut usize
                 as *const () as usize
+        }
+
+        "??6?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV01@P6AAEAVios_base@1@AEAV21@@Z@Z" => {
+            msvcp_op_lshift_ios_base_manip
+                as unsafe extern "win64" fn(
+                    *mut u8,
+                    Option<unsafe extern "win64" fn(*mut u8) -> *mut u8>,
+                    usize,
+                    usize,
+                ) -> *mut u8 as *const () as usize
         }
 
         "?always_noconv@codecvt_base@std@@QEBA_NXZ" => {
