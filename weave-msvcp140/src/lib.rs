@@ -198,7 +198,7 @@ fn discard_sink_ptr() -> *mut u8 {
     }) as *mut u8
 }
 
-unsafe fn init_discard_streambuf_ms_layout(sb: *mut u8) {
+pub unsafe fn init_discard_streambuf_ms_layout(sb: *mut u8) {
     let sink = discard_sink_ptr() as *const u8;
     write_ptr(sb, 0x18, sink);
     write_ptr(sb, 0x20, sink);
@@ -208,6 +208,10 @@ unsafe fn init_discard_streambuf_ms_layout(sb: *mut u8) {
     write_ptr(sb, 0x58, sink);
     *(sb.add(0x68) as *mut i64) = 0; // count
     *(sb.add(0x70) as *mut u32) = 0; // flags
+    eprintln!(
+        "[weave-msvcp140] init_discard_streambuf_ms_layout: sb={:p} sink={:p}",
+        sb, sink
+    );
 }
 
 // ── 6 constructor implementations ─────────────────────────────────────────────
@@ -352,6 +356,37 @@ pub unsafe extern "win64" fn msvcp_ostream_ctor(
     if this.is_null() {
         return this;
     }
+    // If the caller supplies a null streambuf (or one below 0x10000, which is
+    // always unmapped on Linux and indicates an uninitialized/bogus pointer),
+    // allocate a fresh discard streambuf so downstream inlined ostream helpers
+    // in user binaries (e.g. nx.exe) can chase [+0x18..+0x58] pointer fields
+    // through to valid sink storage rather than faulting on NULL.
+    let effective_sb = if (sb as usize) < 0x10000 {
+        eprintln!(
+            "[weave-msvcp140] msvcp_ostream_ctor: sb={:p} is null/suspect — allocating discard streambuf (this={:p})",
+            sb, this
+        );
+        let sb_layout = std::alloc::Layout::from_size_align(0xA0, 16).unwrap();
+        let sb_raw = std::alloc::alloc_zeroed(sb_layout);
+        // Apply the full ctor (vtable, locale, self-refs) then overlay the MSVC
+        // discard layout so [+0x18..+0x58] pointer chases land in DISCARD_SINK.
+        msvcp_streambuf_ctor(sb_raw, 0, 0, 0);
+        sb_raw
+    } else {
+        // Caller supplied a real streambuf — overlay the MSVC discard layout in
+        // case it was constructed without it (e.g. by msvcp_streambuf_init which
+        // only calls streambuf_init_empty and skips the discard overlay). If the
+        // slots are already backed by valid pointers this is a benign no-op.
+        init_discard_streambuf_ms_layout(sb);
+        eprintln!(
+            "[weave-msvcp140] msvcp_ostream_ctor: this={:p} sb={:p} [+0x40]={:p} [+0x70]={:#x}",
+            this,
+            sb,
+            *(sb.add(0x40) as *const *const u8),
+            *(sb.add(0x70) as *const u32) as usize,
+        );
+        sb
+    };
     // Write vbtable pointer at this+0x00
     write_ptr(this, 0x00, BASIC_OSTREAM_VBTABLE.as_ptr() as *const u8);
     // Locate virtual basic_ios_char via vbtable[1] offset
@@ -362,8 +397,8 @@ pub unsafe extern "win64" fn msvcp_ostream_ctor(
     write_ptr(base, 0x00, FAKE_OSTREAM_VTABLE.as_ptr() as *const u8);
     *(base.add(0x10) as *mut u32) = 0x1008u32; // fmtfl defaults
     *base.add(0x58) = b' '; // fillch
-                            // basic_ios_char_init: strbuf=sb, stream=NULL, fillch=' '
-    ios_char_init(base, sb);
+                            // basic_ios_char_init: strbuf=effective_sb, stream=NULL, fillch=' '
+    ios_char_init(base, effective_sb);
     this
 }
 
