@@ -180,12 +180,26 @@ unsafe fn streambuf_init_empty(this: *mut u8) {
 // streambuf that passively absorbs the inlined field reads on the cerr-style
 // logging path. Real I/O stays on the libc::fread / libc::fseek path through
 // `MSVCP_OPEN_FP`, which doesn't touch these fields.
-#[repr(C, align(16))]
-struct DiscardSink([u8; 256]);
-static DISCARD_SINK: DiscardSink = DiscardSink([0u8; 256]);
+//
+// The sink is heap-allocated (not a `static [u8; N]`) because some inlined
+// helper branches in nx.exe write through these pointer chases — a static
+// non-mut buffer lives in `.rodata` and would fault on first write. Heap
+// memory is RW by default. Single 256-byte alloc shared by every discard
+// streambuf; never freed; never read meaningfully by us — it just absorbs.
+static DISCARD_SINK_PTR: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+
+fn discard_sink_ptr() -> *mut u8 {
+    *DISCARD_SINK_PTR.get_or_init(|| {
+        let layout = std::alloc::Layout::from_size_align(256, 16).unwrap();
+        // SAFETY: layout is non-zero-sized and well-aligned; alloc_zeroed
+        // returns either null (we'd crash later anyway) or a 256-byte RW
+        // buffer the OS guarantees stays mapped for the process lifetime.
+        unsafe { std::alloc::alloc_zeroed(layout) as usize }
+    }) as *mut u8
+}
 
 unsafe fn init_discard_streambuf_ms_layout(sb: *mut u8) {
-    let sink = &DISCARD_SINK as *const _ as *const u8;
+    let sink = discard_sink_ptr() as *const u8;
     write_ptr(sb, 0x18, sink);
     write_ptr(sb, 0x20, sink);
     write_ptr(sb, 0x38, sink);
@@ -982,7 +996,8 @@ fn cerr_addr() -> usize {
         // layout moves the gate past nx.exe RVA 0x6367e. Remove on confirm.
         eprintln!(
             "weave: msvcp140 cerr discard streambuf MS layout applied (sb=0x{:x}, sink=0x{:x})",
-            sb_raw as usize, &DISCARD_SINK as *const _ as usize,
+            sb_raw as usize,
+            discard_sink_ptr() as usize,
         );
         raw as usize
     })
