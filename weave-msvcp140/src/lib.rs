@@ -149,6 +149,53 @@ unsafe fn streambuf_init_empty(this: *mut u8) {
                                            // rbuf/wbuf/rpos/wpos already zero from calloc; rsize/wsize = 0
 }
 
+// ── Discard streambuf — MSVC field layout ────────────────────────────────────
+//
+// nx.exe is MSVC-built; its inlined ostream-output helpers walk basic_streambuf
+// internal fields at offsets that don't match Wine's layout. Each of those
+// reads is shaped `[rcx+OFF] → [[rcx+OFF]]` — a pointer-to-pointer chase. Our
+// historical fake streambuf zero-initialised these slots, so MSVC's inlined
+// reads got NULL on the inner deref.
+//
+// Confirmed from disassembly of nx.exe's helper at RVA 0x140063650 (CI run
+// 25287337817, fault rva 0x000063a29 → then 0x0006367e once the op<<-noop
+// cascade was unblocked):
+//
+//   mov 0x70(%rcx), %edx      ; flags @ +0x70 (i32)
+//   mov 0x40(%rcx), %rax      ; ptr @ +0x40
+//   mov (%rax), %r9           ; deref → faulted on NULL
+//   mov 0x68(%rcx), %r8       ; count @ +0x68 (i64)
+//   mov 0x20(%rcx), %rax      ; ptr @ +0x20
+//   ...
+//   mov 0x38(%rcx), %rax      ; ptr @ +0x38
+//   mov 0x50(%rcx), %rax      ; ptr @ +0x50 (i32 deref via movslq)
+//   mov 0x18(%rcx), %rax      ; ptr @ +0x18
+//
+// `init_discard_streambuf_ms_layout` populates every one of those slots with
+// a valid pointer into a static zero buffer (`DISCARD_SINK`) so the inner
+// deref reads zero (not faults). Flags at +0x70 stay 0 so the helper falls
+// through both branch arms without taking either "active write" path.
+//
+// This is *not* a real MSVC basic_streambuf implementation — it is a discard
+// streambuf that passively absorbs the inlined field reads on the cerr-style
+// logging path. Real I/O stays on the libc::fread / libc::fseek path through
+// `MSVCP_OPEN_FP`, which doesn't touch these fields.
+#[repr(C, align(16))]
+struct DiscardSink([u8; 256]);
+static DISCARD_SINK: DiscardSink = DiscardSink([0u8; 256]);
+
+unsafe fn init_discard_streambuf_ms_layout(sb: *mut u8) {
+    let sink = &DISCARD_SINK as *const _ as *const u8;
+    write_ptr(sb, 0x18, sink);
+    write_ptr(sb, 0x20, sink);
+    write_ptr(sb, 0x38, sink);
+    write_ptr(sb, 0x40, sink);
+    write_ptr(sb, 0x50, sink);
+    write_ptr(sb, 0x58, sink);
+    *(sb.add(0x68) as *mut i64) = 0; // count
+    *(sb.add(0x70) as *mut u32) = 0; // flags
+}
+
 // ── 6 constructor implementations ─────────────────────────────────────────────
 
 /// `basic_streambuf<char>::_Init()` — initialize self-referential pointer fields only.
@@ -185,8 +232,14 @@ pub unsafe extern "win64" fn msvcp_streambuf_ctor(
     // Write fake locale pointer at +0x98
     let locale_ptr = get_fake_locale_data() as *const FakeLocaleData as *const u8;
     write_ptr(this, 0x98, locale_ptr);
-    // Set self-referential pointer fields
+    // Set self-referential pointer fields (Wine layout — kept for callers that
+    // depend on prbuf/pwbuf/prpos/pwpos/prsize/pwsize self-references).
     streambuf_init_empty(this);
+    // Overlay the MSVC discard layout so inlined ostream-output helpers in
+    // user binaries (e.g. nx.exe) can chase [+0x18..+0x58] pointers through
+    // to a valid sink buffer instead of NULL. Overwrites the +0x70 i32 slot
+    // (Wine wrote a pointer there; MSVC reads it as i32 flags).
+    init_discard_streambuf_ms_layout(this);
     this
 }
 
@@ -911,6 +964,10 @@ fn cerr_addr() -> usize {
         let raw = unsafe { std::alloc::alloc_zeroed(layout) };
         unsafe {
             msvcp_streambuf_ctor(sb_raw, 0, 0, 0);
+            // Defensive: re-apply the MSVC discard overlay even though
+            // msvcp_streambuf_ctor already does. Keeps cerr's streambuf
+            // independent of any future refactor of the ctor's init order.
+            init_discard_streambuf_ms_layout(sb_raw);
             msvcp_ostream_ctor(raw, sb_raw, 0, 0);
             // Inlined ostream helper at nx.exe RVA 0x958b5 also reads
             // *(this + vbase + 0x28) and dereferences the result. ios+0x28 is not
@@ -921,6 +978,12 @@ fn cerr_addr() -> usize {
             let base = raw.add(vbase_off);
             *(base.add(0x28) as *mut *const u8) = sb_raw;
         }
+        // One-line diagnostic so the next CI run shows whether the discard
+        // layout moves the gate past nx.exe RVA 0x6367e. Remove on confirm.
+        eprintln!(
+            "weave: msvcp140 cerr discard streambuf MS layout applied (sb=0x{:x}, sink=0x{:x})",
+            sb_raw as usize, &DISCARD_SINK as *const _ as usize,
+        );
         raw as usize
     })
 }
