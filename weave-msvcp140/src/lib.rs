@@ -992,13 +992,6 @@ fn cerr_addr() -> usize {
             let base = raw.add(vbase_off);
             *(base.add(0x28) as *mut *const u8) = sb_raw;
         }
-        // One-line diagnostic so the next CI run shows whether the discard
-        // layout moves the gate past nx.exe RVA 0x6367e. Remove on confirm.
-        eprintln!(
-            "weave: msvcp140 cerr discard streambuf MS layout applied (sb=0x{:x}, sink=0x{:x})",
-            sb_raw as usize,
-            discard_sink_ptr() as usize,
-        );
         raw as usize
     })
 }
