@@ -1176,8 +1176,8 @@ mod inner {
 
     /// Translate one X11 event into one or more Win32 queue messages.
     fn translate_event(event: Event, x11: &Mutex<X11State>) {
-        let wm_delete_window = match lock_x11(x11) {
-            Some(g) => g.atoms.WM_DELETE_WINDOW,
+        let (wm_protocols, wm_delete_window) = match lock_x11(x11) {
+            Some(g) => (g.atoms.WM_PROTOCOLS, g.atoms.WM_DELETE_WINDOW),
             None => return,
         };
 
@@ -1196,19 +1196,47 @@ mod inner {
         eprintln!("weave/x11: event {event_tag}");
 
         match event {
-            // User clicked the window manager's close button.
-            Event::ClientMessage(ev) if ev.data.as_data32()[0] == wm_delete_window => {
-                let hwnd = window::hwnd_for_xcb(ev.window);
-                if hwnd != 0 {
-                    queue::post(MsgEntry {
-                        hwnd,
-                        message: WM_CLOSE,
-                        w_param: 0,
-                        l_param: 0,
-                        time: 0,
-                        pt_x: 0,
-                        pt_y: 0,
-                    });
+            // Step 1 — Prove the ClientMessage: log type and data[0] before any
+            // close decision so we can see exactly what the WM is sending us.
+            //
+            // Step 2 — Fix the classification: only post WM_CLOSE when BOTH
+            //   message_type == WM_PROTOCOLS  AND  data[0] == WM_DELETE_WINDOW.
+            // Any other ClientMessage (wrong type, _NET_WM_PING, focus atoms,
+            // etc.) is ignored — standard Xlib WM_DELETE_WINDOW protocol.
+            Event::ClientMessage(ev) => {
+                let data32 = ev.data.as_data32();
+                let msg_type = ev.type_;
+                let data0 = data32[0];
+
+                let is_wm_protocols = msg_type == wm_protocols;
+                let is_delete_window = data0 == wm_delete_window;
+                let action = if is_wm_protocols && is_delete_window {
+                    "WM_CLOSE"
+                } else if is_wm_protocols {
+                    "ignored (WM_PROTOCOLS but data[0] != WM_DELETE_WINDOW)"
+                } else {
+                    "ignored (message_type != WM_PROTOCOLS)"
+                };
+
+                eprintln!(
+                    "weave/user32: X11 ClientMessage type={:#x}(WM_PROTOCOLS={}) \
+                     data[0]={:#x}(WM_DELETE_WINDOW={}) → {action}",
+                    msg_type, is_wm_protocols, data0, is_delete_window,
+                );
+
+                if is_wm_protocols && is_delete_window {
+                    let hwnd = window::hwnd_for_xcb(ev.window);
+                    if hwnd != 0 {
+                        queue::post(MsgEntry {
+                            hwnd,
+                            message: WM_CLOSE,
+                            w_param: 0,
+                            l_param: 0,
+                            time: 0,
+                            pt_x: 0,
+                            pt_y: 0,
+                        });
+                    }
                 }
             }
 
