@@ -3874,20 +3874,16 @@ pub unsafe extern "win64" fn multi_byte_to_wide_char(
     }
     let cap = cch_wide_char as usize;
     if cap < required {
-        // Microsoft Windows behaviour: on ERROR_INSUFFICIENT_BUFFER the destination
-        // "contains an arbitrary number of converted characters" (i.e. partial output
-        // is written). For null-terminated source, leave a usable NUL-terminated
-        // prefix when there is room — NXEngine sizes its wide buffer to strlen(src)
-        // (no +1 for NUL) and the case-fold + extension-prefix fallback in
-        // `_wfopen` (weave-ucrt) uses that prefix to recover the real path.
+        // Windows INSUFFICIENT_BUFFER behaviour: write as many converted chars as fit
+        // (cap), without a NUL terminator. The caller is responsible for null-termination
+        // via its own zero-initialized buffer. Writing cap-1 + explicit NUL loses the
+        // last character — e.g. "Kings.pxe" (9 chars) with cap=9 would truncate to
+        // "Kings.px" (8 chars + NUL), making case-fold lookup ambiguous between
+        // Kings.pxe and Kings.pxm.
+        // Wine ref: dlls/kernel32/locale.c — WideCharToMultiByte truncates to count,
+        // no terminator written on INSUFFICIENT_BUFFER; MultiByteToWideChar is symmetric.
         unsafe {
-            if null_terminated {
-                if cap > 0 {
-                    let copy_len = cap - 1;
-                    std::ptr::copy_nonoverlapping(wide.as_ptr(), lp_wide_char_str, copy_len);
-                    *lp_wide_char_str.add(copy_len) = 0;
-                }
-            } else {
+            if cap > 0 {
                 std::ptr::copy_nonoverlapping(wide.as_ptr(), lp_wide_char_str, cap);
             }
         }
