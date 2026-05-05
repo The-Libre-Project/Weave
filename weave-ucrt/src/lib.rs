@@ -2263,6 +2263,34 @@ pub unsafe extern "win64" fn ucrt_fopen(path: *const u8, mode: *const u8) -> *mu
 /// valid null-terminated UTF-16 mode string (e.g. L"r", L"rb").
 pub unsafe extern "win64" fn ucrt_wfopen(path: *const u16, mode: *const u16) -> *mut c_void {
     use std::os::unix::ffi::OsStrExt;
+
+    // Diagnostic: raw u16 dump for Kings.px/.pxe/.pxm paths to locate truncation source.
+    // Filter happens before decode so we see the buffer as NXEngine left it.
+    if !path.is_null() {
+        // Peek up to 16 u16 units to check for "Kings" prefix (0x4B,0x69,0x6E,0x67,0x73).
+        let units: Vec<u16> = (0..16_usize).map(|i| unsafe { *path.add(i) }).collect();
+        let is_kings = units[0] == 0x4B
+            && units[1] == 0x69
+            && units[2] == 0x6E
+            && units[3] == 0x67
+            && units[4] == 0x73;
+        // Also check for path ending in Kings segment (scan for 'K' then verify suffix).
+        let has_kings_in_path = (0..14_usize).any(|i| {
+            units[i] == 0x4B   // 'K'
+                && units[i + 1] == 0x69 // 'i'
+                && units[i + 2] == 0x6E // 'n'
+                && units[i + 3] == 0x67 // 'g'
+                && units[i + 4] == 0x73 // 's'
+        });
+        if is_kings || has_kings_in_path {
+            let nul_pos = units.iter().position(|&u| u == 0).unwrap_or(16);
+            eprintln!(
+                "weave/wfopen[raw] ptr={:p} units[0..16]={:04x?} first_nul={}",
+                path, units, nul_pos
+            );
+        }
+    }
+
     let win_path = match decode_wide(path, 32_768) {
         Some(s) => s,
         None => return std::ptr::null_mut(),
