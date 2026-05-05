@@ -28,6 +28,9 @@ static PHASE_CREATE_WINDOW: AtomicBool = AtomicBool::new(false);
 static PHASE_GET_MESSAGE: AtomicBool = AtomicBool::new(false);
 static PHASE_WM_PAINT_DISPATCHED: AtomicBool = AtomicBool::new(false);
 static PHASE_SCI_GETLENGTH: AtomicBool = AtomicBool::new(false);
+// Fires once on first ShowWindow(SW_HIDE) — marks the boundary between startup/render
+// and teardown. Used to order unresolved-stub firings relative to shutdown start.
+static PHASE_SW_HIDE_FIRST: AtomicBool = AtomicBool::new(false);
 
 // ── Scroll bar per-(hwnd,bar) state ──────────────────────────────────────────
 
@@ -364,6 +367,12 @@ pub extern "win64" fn show_window(hwnd: usize, n_cmd_show: i32) -> i32 {
 
     let show = !matches!(n_cmd_show, SW_HIDE);
 
+    // Ordering marker: first SW_HIDE is the boundary between render loop and teardown.
+    // Any unresolved-stub firings after this line are teardown-only.
+    if !show && !PHASE_SW_HIDE_FIRST.swap(true, Ordering::Relaxed) {
+        eprintln!("weave/user32: ShowWindow SW_HIDE first-fire — teardown sequence begins (hwnd={hwnd:#x})");
+    }
+
     let xcb = window::xcb_id(hwnd);
     eprintln!("weave/user32: ShowWindow hwnd={hwnd:#x} cmd={n_cmd_show} show={show} xcb={xcb:#x}");
     window::with_mut(hwnd, |e| e.visible = show);
@@ -418,6 +427,7 @@ pub extern "win64" fn update_window(hwnd: usize) -> i32 {
 // the last message a window receives; WM_DESTROY precedes it.
 pub extern "win64" fn destroy_window(hwnd: usize) -> i32 {
     let xcb = window::xcb_id(hwnd);
+    eprintln!("weave/user32: DestroyWindow hwnd={hwnd:#x} xcb={xcb:#x}");
 
     // WM_DESTROY first, then WM_NCDESTROY (Wine order: send_destroy_message → destroy_window).
     if let Some(proc_addr) = window::with(hwnd, |e| e.wnd_proc) {
@@ -539,12 +549,19 @@ pub unsafe extern "win64" fn get_message_w(
                 );
             }
             fill_msg(lp_msg, &entry);
-            return if entry.message == WM_QUIT { 0 } else { 1 };
+            if entry.message == WM_QUIT {
+                eprintln!(
+                    "weave/user32: GetMessageW → WM_QUIT (exit_code={}) — shutdown begins",
+                    entry.w_param
+                );
+                return 0;
+            }
+            return 1;
         }
         // Block on the X11 connection for the next event.
         if !backend::wait_event() {
             // Connection lost or no display — return WM_QUIT.
-            eprintln!("weave/user32: GetMessageW → WM_QUIT (no display)");
+            eprintln!("weave/user32: GetMessageW → WM_QUIT (no display) — shutdown begins");
             let quit = MsgEntry {
                 hwnd: 0,
                 message: WM_QUIT,
@@ -1219,6 +1236,7 @@ pub extern "win64" fn def_window_proc_w(
 ) -> isize {
     match msg {
         WM_CLOSE => {
+            eprintln!("weave/user32: DefWindowProcW WM_CLOSE hwnd={hwnd:#x} → DestroyWindow");
             destroy_window(hwnd);
             0
         }
@@ -1228,6 +1246,7 @@ pub extern "win64" fn def_window_proc_w(
             // (typically done in WM_DESTROY of the main window). Posting WM_QUIT here
             // breaks SDL2 which creates/destroys multiple test windows during renderer
             // selection and expects WM_DESTROY to be silent in DefWindowProc.
+            eprintln!("weave/user32: DefWindowProcW WM_DESTROY hwnd={hwnd:#x} (no-op — app must PostQuitMessage)");
             0
         }
         WM_PAINT => {

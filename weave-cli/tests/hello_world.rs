@@ -4257,6 +4257,17 @@ fn nxengine_d3d9_gate() {
         buf
     });
 
+    // Drain stdout concurrently — NXEngine logs Pixtone and engine errors to stdout.
+    // Reading after process exit risks deadlock if the pipe buffer fills; drain in parallel.
+    let stdout_pipe = child.stdout.take().expect("stdout was piped");
+    let stdout_handle = std::thread::spawn(move || {
+        use std::io::Read;
+        let mut buf = String::new();
+        let mut r = stdout_pipe;
+        let _ = r.read_to_string(&mut buf);
+        buf
+    });
+
     // Mesa/lavapipe Vulkan device creation takes ~15-20s on CI; sample after 20s.
     // deadline at 60s — nx.exe runs indefinitely once in game loop, kill at deadline.
     let pixel_check_at = start + std::time::Duration::from_secs(20);
@@ -4290,17 +4301,11 @@ fn nxengine_d3d9_gate() {
 
     let elapsed = start.elapsed();
     let stderr = stderr_handle.join().unwrap_or_default();
-    let stdout = {
-        use std::io::Read;
-        let mut s = String::new();
-        if let Some(mut p) = child.stdout.take() {
-            let _ = p.read_to_string(&mut s);
-        }
-        s
-    };
+    let stdout = stdout_handle.join().unwrap_or_default();
 
     eprintln!("nxengine_d3d9_gate elapsed: {elapsed:.1?}");
     eprintln!("nxengine_d3d9_gate killed_by_deadline: {killed_by_deadline}");
+    eprintln!("--- nxengine STDOUT BEGIN ---\n{stdout}\n--- nxengine STDOUT END ---");
     eprintln!("--- nxengine STDERR BEGIN ---\n{stderr}\n--- nxengine STDERR END ---");
 
     // A1: non-black pixels at 20s — SDL2 D3D9 renderer reached and DXVK rendered.
