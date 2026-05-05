@@ -269,7 +269,11 @@ pub fn case_fold_lookup(path: &std::path::Path) -> Option<std::ffi::CString> {
     let filename = path.file_name()?;
     let filename_lower = filename.to_string_lossy().to_lowercase();
 
-    let mut prefix_match: Option<std::ffi::CString> = None;
+    // Collect all prefix matches to pick the lowest alphabetically.
+    // read_dir order is filesystem-dependent; sorting gives deterministic
+    // results when multiple files share a common prefix (e.g. Kings.pxe and
+    // Kings.pxm both start with Kings.px — sort ensures Kings.pxe wins).
+    let mut prefix_matches: Vec<std::ffi::OsString> = Vec::new();
     for entry in std::fs::read_dir(parent).ok()?.flatten() {
         let name = entry.file_name();
         let name_lower = name.to_string_lossy().to_lowercase();
@@ -277,10 +281,16 @@ pub fn case_fold_lookup(path: &std::path::Path) -> Option<std::ffi::CString> {
             return path_to_cstring(&parent.join(name));
         }
         // Extension-prefix: requested name is a truncated version of the real
-        // name (only collect the first match to avoid ambiguity).
-        if prefix_match.is_none() && name_lower.starts_with(&*filename_lower) {
-            prefix_match = path_to_cstring(&parent.join(name));
+        // name.  Collect all candidates; we sort below to pick consistently.
+        if name_lower.starts_with(&*filename_lower) {
+            prefix_matches.push(name);
         }
     }
-    prefix_match
+    // Sort ascending so the alphabetically-first extension wins.
+    // For Kings.px → [Kings.pxe, Kings.pxm]: pxe < pxm → Kings.pxe returned.
+    prefix_matches.sort_unstable();
+    prefix_matches
+        .into_iter()
+        .next()
+        .and_then(|name| path_to_cstring(&parent.join(name)))
 }

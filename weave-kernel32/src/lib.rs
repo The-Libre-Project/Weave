@@ -7304,6 +7304,12 @@ pub unsafe extern "win64" fn get_environment_variable_w(
     };
     let value_ptr = libc::getenv(c_name.as_ptr());
     if value_ptr.is_null() {
+        // Narrow SDL/AUDIO trace — confirms dummy-audio env visibility.
+        let name_str = c_name.to_string_lossy();
+        let name_upper = name_str.to_ascii_uppercase();
+        if name_upper.contains("SDL") || name_upper.contains("AUDIO") {
+            eprintln!("weave/GetEnvironmentVariableW: {:?} → NOT_FOUND", name_str);
+        }
         set_last_error(203); // ERROR_ENVVAR_NOT_FOUND
         return 0;
     }
@@ -7311,6 +7317,18 @@ pub unsafe extern "win64" fn get_environment_variable_w(
     let bytes = cstr.to_bytes();
     let utf16: Vec<u16> = String::from_utf8_lossy(bytes).encode_utf16().collect();
     let chars_needed = utf16.len() as u32; // excluding NUL
+                                           // Narrow SDL/AUDIO trace.
+    {
+        let name_str = c_name.to_string_lossy();
+        let name_upper = name_str.to_ascii_uppercase();
+        if name_upper.contains("SDL") || name_upper.contains("AUDIO") {
+            eprintln!(
+                "weave/GetEnvironmentVariableW: {:?} → {:?}",
+                name_str,
+                std::ffi::CStr::from_ptr(value_ptr).to_string_lossy()
+            );
+        }
+    }
     if n_size == 0 || lp_buffer.is_null() || chars_needed + 1 > n_size {
         // Buffer too small — return required size including NUL.
         return chars_needed + 1;
@@ -10111,12 +10129,30 @@ pub unsafe extern "win64" fn get_environment_variable_a(
     let c_name = std::ffi::CStr::from_ptr(lp_name as *const i8);
     let value_ptr = libc::getenv(c_name.as_ptr());
     if value_ptr.is_null() {
+        // Narrow SDL/AUDIO trace — helps confirm dummy-audio env is visible to SDL2.
+        let name_str = c_name.to_string_lossy();
+        let name_upper = name_str.to_ascii_uppercase();
+        if name_upper.contains("SDL") || name_upper.contains("AUDIO") {
+            eprintln!("weave/GetEnvironmentVariableA: {:?} → NOT_FOUND", name_str);
+        }
         set_last_error(203); // ERROR_ENVVAR_NOT_FOUND
         return 0;
     }
     let value = std::ffi::CStr::from_ptr(value_ptr);
     let bytes = value.to_bytes();
     let bytes_needed = bytes.len() as u32; // excluding NUL
+                                           // Narrow SDL/AUDIO trace — confirms SDL_AUDIODRIVER=dummy is returned.
+    {
+        let name_str = c_name.to_string_lossy();
+        let name_upper = name_str.to_ascii_uppercase();
+        if name_upper.contains("SDL") || name_upper.contains("AUDIO") {
+            eprintln!(
+                "weave/GetEnvironmentVariableA: {:?} → {:?}",
+                name_str,
+                value.to_string_lossy()
+            );
+        }
+    }
     if n_size == 0 || lp_buffer.is_null() || bytes_needed + 1 > n_size {
         // Buffer too small — return required size including NUL.
         return bytes_needed + 1;

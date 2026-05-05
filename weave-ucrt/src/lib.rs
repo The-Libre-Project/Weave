@@ -2283,7 +2283,13 @@ pub unsafe extern "win64" fn ucrt_wfopen(path: *const u16, mode: *const u16) -> 
         // where e.g. "sprites.si" is passed but "sprites.sif" exists on disk).
         // Confirmed via nxengine_d3d9_gate CI run 25237583085: the SIFLoader
         // passes a path one char short of `.sif`, identical to font_1.fn → .fnt.
+        // Also handles Kings.pxe → Kings.px (MultiByteToWideChar truncates by 1
+        // when NXEngine sizes the wide buffer to strlen(src) instead of strlen+1).
         if let Some(folded) = weave_core::file_io::case_fold_lookup(&linux_path) {
+            eprintln!(
+                "weave/wfopen: case_fold fallback {:?} → {:?}",
+                linux_path, folded
+            );
             result = unsafe { libc::fopen(folded.as_ptr(), mode_cstr.as_ptr()) };
         }
     }
