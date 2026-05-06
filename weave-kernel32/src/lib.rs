@@ -3849,6 +3849,57 @@ pub unsafe extern "win64" fn multi_byte_to_wide_char(
         set_last_error(87); // ERROR_INVALID_PARAMETER
         return 0;
     }
+    // DIAGNOSTIC (Fail #10 arc): trace MBtoWC for `.px`-suffixed paths to localize
+    // Kings.px/fx96.px truncation. Filter on raw narrow bytes so we catch every call
+    // regardless of the cb_multi_byte mode the caller used.
+    let trace_px = unsafe {
+        let probe_len = if cb_multi_byte > 0 {
+            (cb_multi_byte as usize).min(512)
+        } else {
+            // null-terminated path: scan up to first NUL or 512 bytes
+            let mut n = 0usize;
+            while n < 512 && *lp_multi_byte_str.add(n) != 0 {
+                n += 1;
+            }
+            n
+        };
+        let probe = std::slice::from_raw_parts(lp_multi_byte_str, probe_len);
+        probe.windows(3).any(|w| w == b".px")
+    };
+    if trace_px {
+        let scan_len = if cb_multi_byte > 0 {
+            (cb_multi_byte as usize).min(96)
+        } else {
+            let mut n = 0usize;
+            while n < 96 && unsafe { *lp_multi_byte_str.add(n) } != 0 {
+                n += 1;
+            }
+            n
+        };
+        let probe = unsafe { std::slice::from_raw_parts(lp_multi_byte_str, scan_len) };
+        let decoded = String::from_utf8_lossy(probe);
+        let tail_lo = scan_len.saturating_sub(20);
+        let tail_bytes: Vec<String> =
+            probe[tail_lo..].iter().map(|b| format!("{b:02x}")).collect();
+        eprintln!(
+            "weave/MBtoWC[entry] cb={cb_multi_byte} cap={cch_wide_char} dst={:p} src_decoded={:?} src_tail[{tail_lo}..]=[{}]",
+            lp_wide_char_str,
+            decoded,
+            tail_bytes.join(", ")
+        );
+        // Pre-write destination tail (detect pre-zeroed buffer hypothesis)
+        if !lp_wide_char_str.is_null() && cch_wide_char > 0 {
+            let dst_cap = cch_wide_char as usize;
+            let pre_lo = dst_cap.saturating_sub(8);
+            let pre_tail: Vec<String> = (pre_lo..dst_cap)
+                .map(|i| format!("{:04x}", unsafe { *lp_wide_char_str.add(i) }))
+                .collect();
+            eprintln!(
+                "weave/MBtoWC[entry] dst_pre_tail[{pre_lo}..{dst_cap}]=[{}]",
+                pre_tail.join(", ")
+            );
+        }
+    }
     // Wine ref: dlls/kernelbase/locale.c — when srclen<0, the source NUL is included in
     // the conversion and the returned size includes the wide NUL terminator. When the
     // destination is too small, return 0 + ERROR_INSUFFICIENT_BUFFER (no truncation).
@@ -3870,6 +3921,11 @@ pub unsafe extern "win64" fn multi_byte_to_wide_char(
     let wide: Vec<u16> = String::from_utf8_lossy(bytes).encode_utf16().collect();
     let required = wide.len();
     if lp_wide_char_str.is_null() || cch_wide_char == 0 {
+        if trace_px {
+            eprintln!(
+                "weave/MBtoWC[exit-sizing] required={required} ret={required} (no dst write)"
+            );
+        }
         return required as i32;
     }
     let cap = cch_wide_char as usize;
@@ -3888,13 +3944,48 @@ pub unsafe extern "win64" fn multi_byte_to_wide_char(
             }
         }
         set_last_error(122); // ERROR_INSUFFICIENT_BUFFER
+        if trace_px {
+            unsafe { trace_mbtowc_exit("INSUFFICIENT_BUFFER", lp_wide_char_str, cap, required, cap, 0) };
+        }
         return 0;
     }
     unsafe {
         std::ptr::copy_nonoverlapping(wide.as_ptr(), lp_wide_char_str, required);
     }
     set_last_error(0);
+    if trace_px {
+        unsafe { trace_mbtowc_exit("OK", lp_wide_char_str, cap, required, required, required as i32) };
+    }
     required as i32
+}
+
+/// Diagnostic helper for MultiByteToWideChar (Fail #10 arc). Logs return path,
+/// destination first-NUL position, and tail bytes after the write.
+unsafe fn trace_mbtowc_exit(
+    path: &str,
+    dst: *mut u16,
+    cap: usize,
+    required: usize,
+    written: usize,
+    ret: i32,
+) {
+    let scan = cap.min(written + 8).min(96);
+    let mut first_nul: Option<usize> = None;
+    for i in 0..scan {
+        if unsafe { *dst.add(i) } == 0 {
+            first_nul = Some(i);
+            break;
+        }
+    }
+    let tail_lo = scan.saturating_sub(12);
+    let tail: Vec<String> = (tail_lo..scan)
+        .map(|i| format!("{:04x}", unsafe { *dst.add(i) }))
+        .collect();
+    let last_err = get_last_error();
+    eprintln!(
+        "weave/MBtoWC[exit-{path}] cap={cap} required={required} written={written} ret={ret} last_err={last_err} dst_first_nul={first_nul:?} dst_tail[{tail_lo}..{scan}]=[{}]",
+        tail.join(", ")
+    );
 }
 
 /// GetStartupInfoA: return process startup parameters (ANSI variant).
