@@ -1208,7 +1208,19 @@ pub unsafe extern "win64" fn ucrt_stdio_common_vsprintf(
         // Count-only mode: return number of chars that would be written.
         unsafe { vsnprintf(std::ptr::null_mut(), 0, format, &mut va_tag) }
     } else {
-        unsafe { vsnprintf(buf, buf_count, format, &mut va_tag) }
+        // MSVC's CRT signals "unbounded buffer" for plain sprintf by passing
+        // (size_t)-1 = SIZE_MAX as buf_count. Forwarding SIZE_MAX directly to
+        // libc::vsnprintf produces a 1-char-short write (glibc's bound-check
+        // arithmetic at the extreme value is not reliable). Clamp any
+        // suspiciously-large bound to i32::MAX (~2 GB) which is well above
+        // any realistic buffer size yet small enough to keep glibc's bound
+        // arithmetic well-defined.
+        let safe_n = if buf_count > i32::MAX as usize {
+            i32::MAX as usize
+        } else {
+            buf_count
+        };
+        unsafe { vsnprintf(buf, safe_n, format, &mut va_tag) }
     };
     if trace && !buf.is_null() && buf_count > 0 {
         eprintln!(
@@ -1326,7 +1338,10 @@ pub unsafe extern "win64" fn ucrt_sprintf(
         overflow_arg_area: args,
         reg_save_area: std::ptr::null_mut(),
     };
-    let ret = unsafe { vsnprintf(buf, usize::MAX, format, &mut va_tag) };
+    // libc::vsnprintf with n=SIZE_MAX writes 1 char fewer than expected
+    // (glibc bound-check arithmetic at the extreme value). Use i32::MAX as
+    // the unbounded sentinel — far larger than any realistic buffer.
+    let ret = unsafe { vsnprintf(buf, i32::MAX as usize, format, &mut va_tag) };
     if trace {
         eprintln!(
             "weave/ucrt_sprintf[.px][exit] ret={ret} buf_post({})",
