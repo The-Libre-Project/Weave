@@ -6601,6 +6601,321 @@ pub unsafe extern "win64" fn set_rect(lp_rc: *mut i32, x1: i32, y1: i32, x2: i32
     1 // TRUE
 }
 
+// ── SDL2 gap-fill: raw input, device notification, thread messages, misc ──────
+//
+// SDL2 imports these via its static IAT. Without them Weave patches every slot
+// with unresolved_import_stub (→ 0), causing per-frame noise in CI logs and
+// potential misbehaviour in SDL2's event pump and D3D9 render path.
+
+/// PostThreadMessageW — post a message to the queue of a specific thread.
+///
+/// Returns TRUE (success). Weave has a single-threaded message model; posting
+/// to any thread ID is treated as posting to the global queue.
+///
+/// # Safety
+/// All arguments are value-passed; no pointers.
+// Wine ref: dlls/win32u/message.c — NtUserPostThreadMessage validates the
+// thread ID against the system thread list; if invalid, sets ERROR_INVALID_THREAD_ID
+// and returns FALSE.  Weave: always TRUE — single-thread model.
+pub extern "win64" fn post_thread_message_w(
+    _id_thread: u32,
+    _msg: u32,
+    _w_param: usize,
+    _l_param: isize,
+) -> i32 {
+    1 // TRUE
+}
+
+/// GetRawInputData — copy raw input data from an HRAWINPUT handle.
+///
+/// Returns 0 with *pcbSize set to 0 — no raw-input data in Weave's model.
+/// SDL2 treats 0 bytes as "no data" and continues; the render loop is unaffected.
+///
+/// # Safety
+/// `pcbSize` must be a valid pointer to a u32 if non-null.
+// Wine ref: dlls/user32/rawinput.c — GetRawInputData validates cbSizeHeader, then
+// copies RAWINPUTHEADER + device-specific data into pData; returns -1 (UINT_MAX)
+// on invalid header size.  Weave: always 0 bytes (no raw input subsystem).
+pub unsafe extern "win64" fn get_raw_input_data(
+    _h_raw_input: usize,
+    _ui_command: u32,
+    _p_data: *mut u8,
+    pcb_size: *mut u32,
+    _cb_size_header: u32,
+) -> u32 {
+    if !pcb_size.is_null() {
+        unsafe { *pcb_size = 0 };
+    }
+    0
+}
+
+/// RegisterRawInputDevices — register or unregister devices for raw input.
+///
+/// Returns TRUE — Weave has no raw input subsystem but SDL2 expects success
+/// to proceed with its input initialisation path.
+///
+/// # Safety
+/// `p_raw_input_devices` is not dereferenced.
+// Wine ref: dlls/user32/rawinput.c — validates each RAWINPUTDEVICE's usUsagePage
+// and usUsage; writes the registrations into a global table.  Weave: no-op TRUE.
+pub unsafe extern "win64" fn register_raw_input_devices(
+    _p_raw_input_devices: *const u8,
+    _ui_num_devices: u32,
+    _cb_size: u32,
+) -> i32 {
+    1 // TRUE
+}
+
+/// GetRawInputDeviceList — enumerate all attached raw input devices.
+///
+/// Writes 0 to *puiNumDevices and returns 0 — no raw input devices in Weave.
+///
+/// # Safety
+/// `pui_num_devices` must be a valid pointer to a u32 if non-null.
+// Wine ref: dlls/user32/rawinput.c — fills pRawInputDeviceList with RAWINPUTDEVICELIST
+// entries (hDevice + dwType) and sets *puiNumDevices; NULL pRawInputDeviceList is
+// legal and just returns the count without filling.
+pub unsafe extern "win64" fn get_raw_input_device_list(
+    _p_raw_input_device_list: *mut u8,
+    pui_num_devices: *mut u32,
+    _cb_size: u32,
+) -> u32 {
+    if !pui_num_devices.is_null() {
+        unsafe { *pui_num_devices = 0 };
+    }
+    0
+}
+
+/// GetRawInputDeviceInfoA — retrieve information about a raw input device (ANSI).
+///
+/// Returns UINT_MAX (error) — no raw input devices in Weave.
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+// Wine ref: dlls/user32/rawinput.c — fills pcbSize with the required buffer
+// size when pData is NULL; copies device info when pData is non-NULL.
+// Returns -1 (UINT_MAX) on invalid hDevice.
+pub unsafe extern "win64" fn get_raw_input_device_info_a(
+    _h_device: usize,
+    _ui_command: u32,
+    _p_data: *mut u8,
+    _pcb_size: *mut u32,
+) -> u32 {
+    u32::MAX // UINT_MAX — invalid device
+}
+
+/// RegisterDeviceNotificationW — register for device-change notifications.
+///
+/// Returns a fake non-NULL handle (1) so SDL2 considers registration successful.
+/// SDL2 stores this handle and calls UnregisterDeviceNotification at shutdown.
+///
+/// # Safety
+/// `p_notification_filter` is accepted but not dereferenced.
+// Wine ref: dlls/user32/message.c — allocates a DEVICE_NOTIFICATION_DETAILS struct
+// and returns its pointer as HDEVNOTIFY; NULL on failure.  Weave: fake handle 1.
+pub unsafe extern "win64" fn register_device_notification_w(
+    _h_recipient: usize,
+    _p_notification_filter: *const u8,
+    _flags: u32,
+) -> usize {
+    1 // HDEVNOTIFY — fake non-NULL handle
+}
+
+/// UnregisterDeviceNotification — cancel a device notification registration.
+///
+/// Returns TRUE. Weave's fake handle (1) is silently accepted.
+// Wine ref: dlls/user32/message.c — frees the DEVICE_NOTIFICATION_DETAILS struct.
+// Weave: no-op TRUE.
+pub extern "win64" fn unregister_device_notification(_h_notify: usize) -> i32 {
+    1 // TRUE
+}
+
+/// PtInRect — test whether a point lies within a rectangle.
+///
+/// Returns TRUE if pt.x is in [left, right) and pt.y is in [top, bottom).
+/// RECT layout: left, top, right, bottom (four consecutive i32 values).
+///
+/// Win64 ABI: POINT (8 bytes, two i32 fields) is passed packed in a single
+/// 64-bit register — x in bits 0-31, y in bits 32-63.
+///
+/// # Safety
+/// `lp_rc` must point to a valid RECT (16 bytes, four i32 fields) if non-null.
+// Wine ref: dlls/user32/misc.c — PtInRect checks left≤x<right && top≤y<bottom;
+// an empty rect (left≥right or top≥bottom) always returns FALSE.
+pub unsafe extern "win64" fn pt_in_rect(lp_rc: *const i32, pt_packed: u64) -> i32 {
+    if lp_rc.is_null() {
+        return 0;
+    }
+    let pt_x = (pt_packed & 0xFFFF_FFFF) as i32;
+    let pt_y = (pt_packed >> 32) as i32;
+    // SAFETY: caller guarantees lp_rc points to a valid RECT (16 bytes).
+    let left = unsafe { *lp_rc };
+    let top = unsafe { *lp_rc.add(1) };
+    let right = unsafe { *lp_rc.add(2) };
+    let bottom = unsafe { *lp_rc.add(3) };
+    if pt_x >= left && pt_x < right && pt_y >= top && pt_y < bottom {
+        1 // TRUE
+    } else {
+        0 // FALSE
+    }
+}
+
+/// TrackMouseEvent — post hover and leave messages for mouse tracking.
+///
+/// Returns TRUE — Weave generates no hover/leave events but SDL2 does not
+/// depend on them for rendering correctness.
+///
+/// # Safety
+/// `lp_event_track` is accepted but not dereferenced.
+// Wine ref: dlls/user32/input.c — sets a timer to fire WM_MOUSEHOVER/WM_MOUSELEAVE
+// when the mouse enters/leaves the client area; HOVER_DEFAULT maps to the system
+// hover time (400ms by default).  Weave: no-op TRUE.
+pub unsafe extern "win64" fn track_mouse_event(_lp_event_track: *mut u8) -> i32 {
+    1 // TRUE
+}
+
+/// GetMessageExtraInfo — return the extra-message-info value for the last message.
+///
+/// Returns 0 — no extra info in Weave's message model.
+// Wine ref: dlls/user32/message.c — returns the thread-local extra_info field
+// set by SetMessageExtraInfo; defaults to 0.  Weave: always 0.
+pub extern "win64" fn get_message_extra_info() -> isize {
+    0
+}
+
+/// GetClipboardSequenceNumber — return the clipboard update sequence counter.
+///
+/// Returns 0 — clipboard sequence is unsupported in Weave.
+/// SDL2 uses this to detect clipboard changes; returning 0 means "no change".
+// Wine ref: dlls/user32/clipboard.c — reads a process-local counter incremented
+// on each clipboard operation.  Weave: always 0.
+pub extern "win64" fn get_clipboard_sequence_number() -> u32 {
+    0
+}
+
+/// SetLayeredWindowAttributes — set transparency attributes for a layered window.
+///
+/// Returns TRUE — layered windows are not composited in Weave but the call
+/// must succeed so SDL2 can continue window initialisation.
+///
+/// # Safety
+/// All arguments are value-passed; no pointers.
+// Wine ref: dlls/user32/winpos.c — validates the WS_EX_LAYERED style, updates
+// the window's alpha/colorkey, and invalidates the window.  Weave: no-op TRUE.
+pub extern "win64" fn set_layered_window_attributes(
+    _hwnd: usize,
+    _cr_key: u32,
+    _b_alpha: u8,
+    _dw_flags: u32,
+) -> i32 {
+    1 // TRUE
+}
+
+/// SetWindowRgn — set the window's clipping region.
+///
+/// Returns non-zero (success). Weave ignores the region — the full window
+/// rectangle is always the visible area.
+///
+/// # Safety
+/// `h_rgn` is an opaque GDI handle; the window takes ownership (we don't free it).
+// Wine ref: dlls/win32u/window.c — NtUserSetWindowRgn validates the window,
+// copies the region, and invalidates; the HRGN ownership transfers on success.
+// Weave: no-op, returns 1.
+pub extern "win64" fn set_window_rgn(_hwnd: usize, _h_rgn: usize, _b_redraw: i32) -> i32 {
+    1 // non-zero = success
+}
+
+/// ToUnicode — translate a virtual key to Unicode characters.
+///
+/// Returns 0 — no translation performed. SDL2 falls back to its own key
+/// mapping when ToUnicode returns 0.
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+// Wine ref: dlls/win32u/keyboard.c — NtUserToUnicodeEx applies the keyboard
+// layout to translate VK+scancode to UTF-16; returns char count, 0 for no
+// translation, or -1 for a dead key.  Weave: always 0.
+pub unsafe extern "win64" fn to_unicode(
+    _w_virt_key: u32,
+    _w_scan_code: u32,
+    _lp_key_state: *const u8,
+    _pw_sz_buff: *mut u16,
+    _cch_buff: i32,
+    _w_flags: u32,
+) -> i32 {
+    0 // no chars translated
+}
+
+/// UnregisterClassA — unregister a window class (ANSI name).
+///
+/// Returns TRUE. In Weave's single-process model unregistering a class is a
+/// no-op; the class table is not modified.
+///
+/// # Safety
+/// `lp_class_name` is accepted but not dereferenced.
+// Wine ref: dlls/win32u/class.c — NtUserUnregisterClass removes the class from
+// the global class list; fails (FALSE) if any windows of the class exist.
+// Weave: always TRUE (class table retained for process lifetime).
+pub unsafe extern "win64" fn unregister_class_a(
+    _lp_class_name: *const u8,
+    _h_instance: usize,
+) -> i32 {
+    1 // TRUE
+}
+
+/// UnregisterClassW — unregister a window class (wide name).
+///
+/// Returns TRUE. See UnregisterClassA.
+///
+/// # Safety
+/// `lp_class_name` is accepted but not dereferenced.
+// Wine ref: dlls/win32u/class.c — NtUserUnregisterClass.  Weave: always TRUE.
+pub unsafe extern "win64" fn unregister_class_w(
+    _lp_class_name: *const u16,
+    _h_instance: usize,
+) -> i32 {
+    1 // TRUE
+}
+
+/// CreateIconFromResource — create an icon or cursor from raw resource bits.
+///
+/// Returns a fake non-NULL HICON (1). SDL2 uses this to set the window icon;
+/// a stub value prevents crashes on subsequent DestroyIcon(hIcon).
+///
+/// # Safety
+/// `presbits` is accepted but not dereferenced.
+// Wine ref: dlls/win32u/cursoricon.c — creates a CURSORICON object from
+// the DIB/ANI resource bytes; returns NULL on parse failure.
+// Weave: fake handle — DestroyIcon(1) returns FALSE, which SDL2 ignores.
+pub unsafe extern "win64" fn create_icon_from_resource(
+    _presbits: *const u8,
+    _dw_res_size: u32,
+    _f_icon: i32,
+    _dw_ver: u32,
+) -> usize {
+    1 // fake HICON — non-NULL so SDL2 does not retry
+}
+
+/// GetClassInfoExW — retrieve extended window class info (wide name).
+///
+/// Delegates to GetClassInfoW. SDL2 calls this on startup to check
+/// whether its window class is already registered.
+///
+/// # Safety
+/// Pointer arguments must satisfy the same preconditions as GetClassInfoW.
+// Wine ref: dlls/win32u/class.c — NtUserGetClassInfoEx fills WNDCLASSEXW
+// including cbSize, hIconSm, and lpszMenuName; GetClassInfoW fills the
+// smaller WNDCLASSW (without hIconSm).  Weave reuses the W variant.
+pub unsafe extern "win64" fn get_class_info_ex_w(
+    h_instance: usize,
+    lp_class_name: *const u16,
+    lp_wnd_class_ex: *mut u8,
+) -> i32 {
+    // Delegate to the non-Ex variant — the extra WNDCLASSEXW fields (cbSize,
+    // hIconSm) are left at whatever the caller zero-initialised them to.
+    get_class_info_w(h_instance, lp_class_name, lp_wnd_class_ex)
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]

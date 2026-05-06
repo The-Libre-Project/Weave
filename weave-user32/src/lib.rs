@@ -1224,6 +1224,63 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "SetRect" => Some(
             api::set_rect as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const () as usize,
         ),
+        // ── SDL2 gap-fill: raw input, device notifications, misc ──────────────
+        "PostThreadMessageW" => Some(api::post_thread_message_w as *const () as usize),
+        "GetRawInputData" => Some(
+            api::get_raw_input_data as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "RegisterRawInputDevices" => Some(
+            api::register_raw_input_devices as unsafe extern "win64" fn(_, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "GetRawInputDeviceList" => Some(
+            api::get_raw_input_device_list as unsafe extern "win64" fn(_, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "GetRawInputDeviceInfoA" => Some(
+            api::get_raw_input_device_info_a as unsafe extern "win64" fn(_, _, _, _) -> _
+                as *const () as usize,
+        ),
+        "RegisterDeviceNotificationW" => Some(
+            api::register_device_notification_w as unsafe extern "win64" fn(_, _, _) -> _
+                as *const () as usize,
+        ),
+        "UnregisterDeviceNotification" => {
+            Some(api::unregister_device_notification as *const () as usize)
+        }
+        "PtInRect" => {
+            Some(api::pt_in_rect as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "TrackMouseEvent" => {
+            Some(api::track_mouse_event as unsafe extern "win64" fn(_) -> _ as *const () as usize)
+        }
+        "GetMessageExtraInfo" => Some(api::get_message_extra_info as *const () as usize),
+        "GetClipboardSequenceNumber" => {
+            Some(api::get_clipboard_sequence_number as *const () as usize)
+        }
+        "SetLayeredWindowAttributes" => {
+            Some(api::set_layered_window_attributes as *const () as usize)
+        }
+        "SetWindowRgn" => Some(api::set_window_rgn as *const () as usize),
+        "ToUnicode" => Some(
+            api::to_unicode as unsafe extern "win64" fn(_, _, _, _, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "UnregisterClassA" => Some(
+            api::unregister_class_a as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
+        ),
+        "UnregisterClassW" => Some(
+            api::unregister_class_w as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
+        ),
+        "CreateIconFromResource" => Some(
+            api::create_icon_from_resource as unsafe extern "win64" fn(_, _, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "GetClassInfoExW" => Some(
+            api::get_class_info_ex_w as unsafe extern "win64" fn(_, _, _) -> _ as *const ()
+                as usize,
+        ),
         _ => None,
     }
 }

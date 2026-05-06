@@ -625,10 +625,7 @@ unsafe fn decode_call_iat_slot(ret_addr: usize, rax: usize) -> Option<usize> {
             // Scan forward up to 32 bytes from target for a FF 25 pattern.
             // Limit: 6 bytes minimum remain (FF 25 + 4-byte disp32).
             const MSVC_SCAN_LIMIT: usize = 32;
-            let scan_len = MSVC_SCAN_LIMIT.min(64); // never read past a safe bound
-            if target + scan_len + 6 > usize::MAX {
-                return None;
-            }
+            let scan_len = MSVC_SCAN_LIMIT;
             let scan = unsafe { std::slice::from_raw_parts(target as *const u8, scan_len + 6) };
             for off in 0..scan_len {
                 if scan[off] == 0xFF && scan[off + 1] == 0x25 {
