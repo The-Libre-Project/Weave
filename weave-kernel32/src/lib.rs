@@ -2405,10 +2405,6 @@ pub unsafe extern "win64" fn create_file_a(
 
     let nt_disposition = file_io::win32_disposition_to_nt(dw_creation_disposition);
 
-    if win_path.to_ascii_lowercase().ends_with(".fnt") {
-        eprintln!("weave/CreateFileA: fnt open path={win_path:?}");
-    }
-
     match file_io::open_file(&win_path, dw_desired_access, nt_disposition) {
         Ok(handle) => {
             set_last_error(0);
@@ -2486,14 +2482,13 @@ pub unsafe extern "win64" fn create_file_w(
         eprintln!("DIAG: file_opens_n={fot} path={win_path:?}");
     }
 
-    // Log write-opens always; log .fnt and .bmp read-opens for diagnostics.
+    // Log write-opens always; log .bmp read-opens for diagnostics.
     const GENERIC_WRITE: u32 = 0x40000000;
     let path_lower = win_path.to_ascii_lowercase();
     let is_bmp = path_lower.ends_with(".bmp");
-    let is_fnt = path_lower.ends_with(".fnt");
     if dw_desired_access & GENERIC_WRITE != 0 {
         eprintln!("weave/CreateFileW: write-open path={win_path:?} access={dw_desired_access:#x}");
-    } else if is_bmp || is_fnt {
+    } else if is_bmp {
         eprintln!("weave/CreateFileW: read-open path={win_path:?} access={dw_desired_access:#x} disp={dw_creation_disposition:#x}");
     }
 
