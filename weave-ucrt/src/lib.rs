@@ -2264,29 +2264,32 @@ pub unsafe extern "win64" fn ucrt_fopen(path: *const u8, mode: *const u8) -> *mu
 pub unsafe extern "win64" fn ucrt_wfopen(path: *const u16, mode: *const u16) -> *mut c_void {
     use std::os::unix::ffi::OsStrExt;
 
-    // Diagnostic: raw u16 dump for Kings.px/.pxe/.pxm paths to locate truncation source.
-    // Filter happens before decode so we see the buffer as NXEngine left it.
+    // Diagnostic: raw u16 dump for any .px path — locate truncation source.
+    // Strategy: decode up to 256 units to get the string, filter on ".px" in the
+    // decoded result, then dump the raw tail units to show exactly what's in the
+    // buffer where the extension should be and where NUL sits.
     if !path.is_null() {
-        // Peek up to 16 u16 units to check for "Kings" prefix (0x4B,0x69,0x6E,0x67,0x73).
-        let units: Vec<u16> = (0..16_usize).map(|i| unsafe { *path.add(i) }).collect();
-        let is_kings = units[0] == 0x4B
-            && units[1] == 0x69
-            && units[2] == 0x6E
-            && units[3] == 0x67
-            && units[4] == 0x73;
-        // Also check for path ending in Kings segment (scan for 'K' then verify suffix).
-        let has_kings_in_path = (0..14_usize).any(|i| {
-            units[i] == 0x4B   // 'K'
-                && units[i + 1] == 0x69 // 'i'
-                && units[i + 2] == 0x6E // 'n'
-                && units[i + 3] == 0x67 // 'g'
-                && units[i + 4] == 0x73 // 's'
-        });
-        if is_kings || has_kings_in_path {
-            let nul_pos = units.iter().position(|&u| u == 0).unwrap_or(16);
+        let mut nul_pos = 0usize;
+        while nul_pos < 256 && unsafe { *path.add(nul_pos) } != 0 {
+            nul_pos += 1;
+        }
+        let peek_decoded =
+            String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(path, nul_pos) });
+        if peek_decoded.contains(".px") {
+            // Dump the last 20 raw u16 units (covering the extension and NUL region).
+            let dump_start = nul_pos.saturating_sub(16);
+            let dump_end = nul_pos + 4; // include 4 units past first NUL
+            let raw: Vec<u16> = (dump_start..dump_end)
+                .map(|i| unsafe { *path.add(i) })
+                .collect();
             eprintln!(
-                "weave/wfopen[raw] ptr={:p} units[0..16]={:04x?} first_nul={}",
-                path, units, nul_pos
+                "weave/wfopen[raw] ptr={:p} first_nul={} decoded={:?} tail_u16[{}..+{}]={:04x?}",
+                path,
+                nul_pos,
+                peek_decoded,
+                dump_start,
+                dump_end - dump_start,
+                raw
             );
         }
     }
