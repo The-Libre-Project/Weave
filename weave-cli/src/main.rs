@@ -333,8 +333,20 @@ fn main() {
     // Store the exe path as a Windows path (Z:\...) so GetModuleFileNameW(NULL)
     // can return the real location, letting apps like Notepad++ find their
     // plugins folder relative to the executable.
+    //
+    // Do NOT call canonicalize() here — that resolves symlinks and would defeat
+    // short-path symlinks used to work around NXEngine's fixed-size path buffers
+    // (e.g. /tmp/nx → tests/fixtures/nxengine). Make absolute without following
+    // symlinks: if the path is already absolute, use it as-is; if relative,
+    // join with CWD (which also does not resolve symlinks).
     {
-        let abs = args.exe.canonicalize().unwrap_or_else(|_| args.exe.clone());
+        let abs = if args.exe.is_absolute() {
+            args.exe.clone()
+        } else {
+            std::env::current_dir()
+                .unwrap_or_else(|_| std::path::PathBuf::from("."))
+                .join(&args.exe)
+        };
         let win_path = format!("Z:{}", abs.to_string_lossy().replace('/', "\\"));
         weave_core::exe_path::set(&win_path);
     }
