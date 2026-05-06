@@ -269,6 +269,20 @@ fn alloc_per_slot_stub(slot_va: usize, real_fn_addr: usize) -> usize {
 /// at call time to identify which function fired.
 static UNRESOLVED_SLOT_MAP: OnceLock<Mutex<HashMap<usize, String>>> = OnceLock::new();
 
+/// Per-slot call counter — suppresses repeated logs after the first few fires
+/// to avoid flooding CI output with per-frame unresolved stub noise.
+/// Key: slot_va (or ret_addr when slot decode fails).  Value: call count.
+static UNRESOLVED_CALL_COUNT: OnceLock<Mutex<HashMap<usize, u64>>> = OnceLock::new();
+
+fn unresolved_call_count_map() -> &'static Mutex<HashMap<usize, u64>> {
+    UNRESOLVED_CALL_COUNT.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Maximum times a single unresolved slot is logged before being suppressed.
+/// Chosen to catch first-call (init), first frame, and a handful more — enough
+/// to confirm per-frame vs one-shot without flooding CI stderr.
+const UNRESOLVED_LOG_CAP: u64 = 5;
+
 fn slot_map() -> &'static Mutex<HashMap<usize, String>> {
     UNRESOLVED_SLOT_MAP.get_or_init(|| Mutex::new(HashMap::new()))
 }
@@ -607,6 +621,28 @@ unsafe fn decode_call_iat_slot(ret_addr: usize, rax: usize) -> Option<usize> {
                 let slot_va = target.wrapping_add(6).wrapping_add_signed(disp32 as isize);
                 return Some(slot_va);
             }
+            // MSVC __imp_ wrapper: multi-instruction preamble before FF 25 disp32.
+            // Scan forward up to 32 bytes from target for a FF 25 pattern.
+            // Limit: 6 bytes minimum remain (FF 25 + 4-byte disp32).
+            const MSVC_SCAN_LIMIT: usize = 32;
+            let scan_len = MSVC_SCAN_LIMIT.min(64); // never read past a safe bound
+            if target + scan_len + 6 > usize::MAX {
+                return None;
+            }
+            let scan = unsafe { std::slice::from_raw_parts(target as *const u8, scan_len + 6) };
+            for off in 0..scan_len {
+                if scan[off] == 0xFF && scan[off + 1] == 0x25 {
+                    let disp32 = i32::from_le_bytes([
+                        scan[off + 2],
+                        scan[off + 3],
+                        scan[off + 4],
+                        scan[off + 5],
+                    ]);
+                    let ff25_next = target.wrapping_add(off + 6);
+                    let slot_va = ff25_next.wrapping_add_signed(disp32 as isize);
+                    return Some(slot_va);
+                }
+            }
         }
         // E8 that isn't an `__imp_` thunk: no IAT slot to report.
         return None;
@@ -712,12 +748,36 @@ pub unsafe extern "win64" fn unresolved_import_stub() -> u64 {
 extern "win64" fn unresolved_import_stub_log(ret_addr: usize, rax_at_call: usize) {
     let slot_va = unsafe { decode_call_iat_slot(ret_addr, rax_at_call) };
     let name = slot_va.and_then(lookup_unresolved_slot);
+
+    // Dedup key: prefer the decoded slot VA; fall back to ret_addr so that
+    // undecoded call sites still get suppressed after UNRESOLVED_LOG_CAP fires
+    // (avoids per-frame log flooding while still producing a few lines per site).
+    let dedup_key = slot_va.unwrap_or(ret_addr);
+    let call_n = {
+        let mut map = match unresolved_call_count_map().lock() {
+            Ok(m) => m,
+            Err(_) => return,
+        };
+        let entry = map.entry(dedup_key).or_insert(0);
+        *entry += 1;
+        *entry
+    };
+    if call_n > UNRESOLVED_LOG_CAP {
+        // Emit a one-time "suppressed" notice on the cap+1 fire.
+        if call_n == UNRESOLVED_LOG_CAP + 1 {
+            eprintln!(
+                "weave: unresolved stub at {dedup_key:#x} — suppressing further logs (fired {UNRESOLVED_LOG_CAP}x)"
+            );
+        }
+        return;
+    }
+
     match name {
         Some(n) => eprintln!(
-            "weave: unresolved: {n} (ret={ret_addr:#x} rax={rax_at_call:#x})"
+            "weave: unresolved: {n} #{call_n} (ret={ret_addr:#x} rax={rax_at_call:#x})"
         ),
         None => eprintln!(
-            "weave: unresolved import stub fired (ret={ret_addr:#x} rax={rax_at_call:#x} slot={:#x})",
+            "weave: unresolved import stub fired #{call_n} (ret={ret_addr:#x} rax={rax_at_call:#x} slot={:#x})",
             slot_va.unwrap_or(0)
         ),
     }
