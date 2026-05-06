@@ -2269,6 +2269,25 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "EndDoc" => Some(end_doc as *const () as usize),
         "EndPage" => Some(end_page as *const () as usize),
         "AbortDoc" => Some(abort_doc as *const () as usize),
+        // OpenGL pixel format
+        "ChoosePixelFormat" => {
+            Some(choose_pixel_format as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "SetPixelFormat" => {
+            Some(set_pixel_format as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize)
+        }
+        "GetPixelFormat" => Some(get_pixel_format as *const () as usize),
+        "DescribePixelFormat" => Some(
+            describe_pixel_format as unsafe extern "win64" fn(_, _, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "SwapBuffers" => Some(swap_buffers as *const () as usize),
+        "GetDeviceGammaRamp" => {
+            Some(get_device_gamma_ramp as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "SetDeviceGammaRamp" => {
+            Some(set_device_gamma_ramp as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
         _ => None,
     }
 }
@@ -4288,4 +4307,96 @@ pub extern "win64" fn end_page(_hdc: usize) -> i32 {
 // discards any buffered output; returns FALSE if no job is active.
 pub extern "win64" fn abort_doc(_hdc: usize) -> i32 {
     1
+}
+
+// ── OpenGL pixel format stubs ─────────────────────────────────────────────────
+//
+// SDL2's Direct3D renderer calls these during device setup to negotiate a pixel
+// format on the DC. Weave does not implement OpenGL; DXVK handles all presentation
+// via Vulkan. Returning a valid-looking pixel format index (1) allows SDL2 to
+// proceed past the negotiation step without falling back to a software blitter.
+
+/// ChoosePixelFormat — select a pixel format index matching a PIXELFORMATDESCRIPTOR.
+///
+/// # Safety
+/// `ppfd` is accepted but not dereferenced.
+// Wine ref: dlls/win32u/opengl.c — calls NtGdiDescribePixelFormat to find a
+// matching format; returns the index (1-based) of the closest match or 0 on failure.
+// Returning 1 is safe: SDL2 treats any nonzero value as success.
+pub unsafe extern "win64" fn choose_pixel_format(_hdc: usize, _ppfd: *const u8) -> i32 {
+    1
+}
+
+/// SetPixelFormat — associate a pixel format with a DC.
+///
+/// # Safety
+/// `ppfd` is accepted but not dereferenced.
+// Wine ref: dlls/win32u/opengl.c — calls NtGdiSetPixelFormat; returns TRUE on
+// success, FALSE if format already set or index out of range.
+// Returning TRUE (1) is safe; SDL2 continues after a successful SetPixelFormat.
+pub unsafe extern "win64" fn set_pixel_format(_hdc: usize, _fmt: i32, _ppfd: *const u8) -> i32 {
+    1
+}
+
+/// GetPixelFormat — return the current pixel format index for a DC.
+///
+// Wine ref: dlls/win32u/opengl.c — calls NtGdiGetPixelFormat; returns the
+// 1-based index previously set by SetPixelFormat, or 0 if none.
+pub extern "win64" fn get_pixel_format(_hdc: usize) -> i32 {
+    1
+}
+
+/// DescribePixelFormat — fill a PIXELFORMATDESCRIPTOR for a given format index.
+///
+/// Writes 40 zero bytes to `ppfd` when it is non-null and `bytes >= 40`.
+/// Returns 1 (the number of available pixel formats).
+///
+/// # Safety
+/// `ppfd` must point to at least `bytes` writable bytes when non-null.
+// Wine ref: dlls/win32u/opengl.c — calls NtGdiDescribePixelFormat; returns the
+// maximum valid format index (total number of pixel formats for the DC).
+// Writing a zeroed descriptor is safe: SDL2 reads it only for informational hints.
+pub unsafe extern "win64" fn describe_pixel_format(
+    _hdc: usize,
+    _fmt: i32,
+    bytes: u32,
+    ppfd: *mut u8,
+) -> i32 {
+    if !ppfd.is_null() && bytes >= 40 {
+        std::ptr::write_bytes(ppfd, 0, 40);
+    }
+    1
+}
+
+/// SwapBuffers — present an OpenGL backbuffer to the screen.
+///
+/// No-op in Weave: DXVK handles all frame presentation via Vulkan. Returns TRUE.
+// Wine ref: dlls/win32u/opengl.c — calls NtGdiSwapBuffers which calls the
+// driver's SwapBuffers entry; Weave has no GL context so this is a safe no-op.
+pub extern "win64" fn swap_buffers(_hdc: usize) -> i32 {
+    1
+}
+
+/// GetDeviceGammaRamp — read the hardware gamma curve for a DC.
+///
+/// Returns FALSE: Weave does not support hardware gamma adjustment.
+///
+/// # Safety
+/// `ramp` is accepted but not dereferenced.
+// Wine ref: dlls/win32u/dibdrv/dc.c — returns FALSE when the driver does not
+// support gamma (dibdrv_GetDeviceGammaRamp always returns FALSE).
+pub unsafe extern "win64" fn get_device_gamma_ramp(_hdc: usize, _ramp: *mut u8) -> i32 {
+    0
+}
+
+/// SetDeviceGammaRamp — set the hardware gamma curve for a DC.
+///
+/// Returns FALSE: Weave does not support hardware gamma adjustment.
+///
+/// # Safety
+/// `ramp` is accepted but not dereferenced.
+// Wine ref: dlls/win32u/dibdrv/dc.c — returns FALSE when the driver does not
+// support gamma (dibdrv_SetDeviceGammaRamp always returns FALSE).
+pub unsafe extern "win64" fn set_device_gamma_ramp(_hdc: usize, _ramp: *mut u8) -> i32 {
+    0
 }
