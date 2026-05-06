@@ -1292,15 +1292,21 @@ fn scite_portable_mode() {
     );
 }
 
+#[derive(Debug, Clone)]
+struct PixelSample {
+    found: bool,
+    sampled: u32,
+    bright: u32,
+    min: u64,
+    max: u64,
+}
+
 /// Sample the X11 display `:99` for non-trivial (non-black) pixels.
 ///
 /// Uses Python3 + ctypes + libX11.so.6 (available via libx11-dev in CI).
-/// Samples a 640×480 grid at 8-pixel intervals.  Returns:
-///   `Some(true)` — found a pixel brighter than #141414
-///   `Some(false)` — all sampled pixels are near-black
-///   `None` — Python3 or libX11 unavailable (skips the check)
+/// Samples the whole 1280×720 Xvfb screen at 16-pixel intervals.
 #[cfg(target_os = "linux")]
-fn sample_display_pixels_99() -> Option<bool> {
+fn sample_display_pixels_99_detailed() -> Option<PixelSample> {
     // Raw string — Python braces don't conflict with Rust format.
     // Sample the whole 1280x720 Xvfb screen at 16-pixel intervals (~3600 samples).
     // SDL2 testsprite2 opens centered on a 1280x720 screen → ~(320,120).
@@ -1323,11 +1329,20 @@ try:
         x.XCloseDisplay(dpy)
         sys.exit(43)
     threshold = 0x141414  # any channel > 20 counts as "not black"
-    found = any(x.XGetPixel(img, xi, yi) > threshold
-                for xi in range(0, 1280, 16) for yi in range(0, 720, 16))
+    sampled = 0
+    bright = 0
+    min_px = None
+    max_px = 0
+    for xi in range(0, 1280, 16):
+        for yi in range(0, 720, 16):
+            px = int(x.XGetPixel(img, xi, yi))
+            sampled += 1
+            if min_px is None or px < min_px: min_px = px
+            if px > max_px: max_px = px
+            if px > threshold: bright += 1
     x.XDestroyImage(img)
     x.XCloseDisplay(dpy)
-    print(1 if found else 0)
+    print(f"found={1 if bright else 0} sampled={sampled} bright={bright} min={min_px or 0} max={max_px}")
 except Exception:
     import traceback; traceback.print_exc()
     sys.exit(44)
@@ -1347,15 +1362,45 @@ except Exception:
             None
         }
         _ if !out.status.success() => None,
-        _ => match String::from_utf8_lossy(&out.stdout).trim() {
-            "1" => Some(true),
-            "0" => Some(false),
-            s => {
-                eprintln!("gate2/pixel-sampler: unexpected output: {s:?}");
-                None
+        _ => {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let mut sample = PixelSample {
+                found: false,
+                sampled: 0,
+                bright: 0,
+                min: 0,
+                max: 0,
+            };
+            for field in stdout.split_whitespace() {
+                if let Some((key, value)) = field.split_once('=') {
+                    match key {
+                        "found" => sample.found = value == "1",
+                        "sampled" => sample.sampled = value.parse().ok()?,
+                        "bright" => sample.bright = value.parse().ok()?,
+                        "min" => sample.min = value.parse().ok()?,
+                        "max" => sample.max = value.parse().ok()?,
+                        _ => {}
+                    }
+                }
             }
-        },
+            Some(sample)
+        }
     }
+}
+
+#[cfg(target_os = "linux")]
+fn sample_display_pixels_99() -> Option<bool> {
+    sample_display_pixels_99_detailed().map(|sample| sample.found)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn sample_display_pixels_99_detailed() -> Option<PixelSample> {
+    None
+}
+
+#[cfg(not(target_os = "linux"))]
+fn sample_display_pixels_99() -> Option<bool> {
+    None
 }
 
 /// `weave testsprite2.exe` — SDL2 test binary; WS2 Gate 1 + Gate 2 smoke test.
@@ -4269,6 +4314,7 @@ fn nxengine_d3d9_gate() {
         .env("SDL_RENDER_DRIVER", "direct3d")
         .env("SDL_AUDIODRIVER", "dummy")
         .env("SDL_FRAMEBUFFER_ACCELERATION", "0")
+        .env("WEAVE_D3D9_TRACE", "1")
         .stderr(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .spawn()
@@ -4300,6 +4346,7 @@ fn nxengine_d3d9_gate() {
     let pixel_check_at = start + std::time::Duration::from_secs(20);
     let deadline = start + std::time::Duration::from_secs(60);
     let mut pixel_result: Option<bool> = None;
+    let mut pixel_sample: Option<PixelSample> = None;
     let mut killed_by_deadline = false;
 
     loop {
@@ -4310,11 +4357,36 @@ fn nxengine_d3d9_gate() {
             }
             None => {
                 if pixel_result.is_none() && now >= pixel_check_at {
-                    pixel_result = sample_display_pixels_99();
+                    let sample_elapsed = start.elapsed();
+                    pixel_sample = sample_display_pixels_99_detailed();
+                    pixel_result = pixel_sample.as_ref().map(|sample| sample.found);
                     eprintln!(
-                        "nxengine_d3d9_gate: pixel_check at 20s → {:?}",
-                        pixel_result
+                        "nxengine_d3d9_gate: pixel_check at 20s → {:?} detail={:?}",
+                        pixel_result, pixel_sample
                     );
+                    if pixel_result == Some(false) {
+                        // Diagnostics: distinguish truly-black framebuffer from sampler failure.
+                        match &pixel_sample {
+                            None => {
+                                eprintln!(
+                                    "nxengine_d3d9_gate [diag]: XGetImage returned null or python failed \
+                                     — sampler got no image at t={sample_elapsed:.1?}"
+                                );
+                            }
+                            Some(s) => {
+                                eprintln!(
+                                    "nxengine_d3d9_gate [diag]: XGetImage succeeded, window=1280x720 \
+                                     sampled={} above_threshold={} min_px={:#010x} max_px={:#010x} t={sample_elapsed:.1?}",
+                                    s.sampled, s.bright, s.min, s.max
+                                );
+                                eprintln!(
+                                    "nxengine_d3d9_gate [diag]: {} — all {} pixels are at or below black threshold",
+                                    if s.max == 0 { "FULLY_BLACK" } else { "NEAR_BLACK" },
+                                    s.sampled
+                                );
+                            }
+                        }
+                    }
                 }
                 if now >= deadline {
                     let _ = child.kill();
@@ -4332,6 +4404,7 @@ fn nxengine_d3d9_gate() {
 
     eprintln!("nxengine_d3d9_gate elapsed: {elapsed:.1?}");
     eprintln!("nxengine_d3d9_gate killed_by_deadline: {killed_by_deadline}");
+    eprintln!("nxengine_d3d9_gate pixel_sample: {pixel_sample:?}");
     eprintln!("--- nxengine STDOUT BEGIN ---\n{stdout}\n--- nxengine STDOUT END ---");
     eprintln!("--- nxengine STDERR BEGIN ---\n{stderr}\n--- nxengine STDERR END ---");
 
@@ -4339,7 +4412,7 @@ fn nxengine_d3d9_gate() {
     assert!(
         matches!(pixel_result, Some(true)),
         "nxengine_d3d9_gate A1 FAIL: screen black at 20s — D3D9 render loop not reached \
-(pixel_result={pixel_result:?}, elapsed {elapsed:.1?}).\nstdout:\n{stdout}\nstderr:\n{stderr}"
+(pixel_result={pixel_result:?}, pixel_sample={pixel_sample:?}, elapsed {elapsed:.1?}).\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
     eprintln!("nxengine_d3d9_gate A1: non-black pixels at 20s ✓");
 
