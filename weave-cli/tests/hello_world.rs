@@ -4220,7 +4220,7 @@ fn nxengine_d3d9_gate() {
     }
 
     // SDL2's D3D9 renderer calls LoadLibraryA("d3d9.dll") with no path; Weave
-    // resolves it from CWD (game_dir). Copy from bin/ if not already present.
+    // resolves it from CWD. Copy into the real fixture dir (accessible via symlink too).
     let d3d9_src = format!("{manifest}/../tests/fixtures/bin/d3d9.dll");
     let d3d9_dst = format!("{game_dir}/d3d9.dll");
     if std::path::Path::new(&d3d9_src).exists() && !std::path::Path::new(&d3d9_dst).exists() {
@@ -4228,16 +4228,43 @@ fn nxengine_d3d9_gate() {
             .unwrap_or_else(|e| panic!("failed to copy d3d9.dll into nxengine fixture dir: {e}"));
     }
 
+    // NXEngine's narrow path buffers are sized exactly for short install paths.
+    // The GitHub Actions checkout puts the repo at ~/work/Weave/Weave/ (repo name
+    // doubled), making the full fixture path 73+ chars — NXEngine's snprintf
+    // truncates to 72 chars + NUL, dropping the last extension char (Kings.pxm →
+    // Kings.px, fx96.pxt → fx96.px). GetModuleFileNameW reports argv[0], so we
+    // must launch through the symlink path — setting current_dir alone is not enough.
+    const SHORT_LINK: &str = "/tmp/nx";
+    let short_link = std::path::Path::new(SHORT_LINK);
+    if short_link.exists() || short_link.symlink_metadata().is_ok() {
+        // Replace existing symlink; refuse to clobber a real directory.
+        let meta = short_link
+            .symlink_metadata()
+            .unwrap_or_else(|e| panic!("symlink_metadata({SHORT_LINK}): {e}"));
+        assert!(
+            meta.file_type().is_symlink(),
+            "{SHORT_LINK} exists but is not a symlink — refusing to overwrite; \
+             move or delete it and retry"
+        );
+        std::fs::remove_file(short_link)
+            .unwrap_or_else(|e| panic!("failed to remove stale symlink {SHORT_LINK}: {e}"));
+    }
+    let game_dir_abs = std::fs::canonicalize(&game_dir)
+        .unwrap_or_else(|e| panic!("canonicalize({game_dir}): {e}"));
+    std::os::unix::fs::symlink(&game_dir_abs, short_link)
+        .unwrap_or_else(|e| panic!("symlink({SHORT_LINK} → {game_dir_abs:?}): {e}"));
+    let short_exe = format!("{SHORT_LINK}/nx.exe");
+
     let weave_bin = env!("CARGO_BIN_EXE_weave");
     let start = std::time::Instant::now();
 
-    // CWD = game_dir so nx.exe finds its data files next to itself.
+    // CWD = SHORT_LINK so nx.exe finds its data files next to itself via the short path.
     // SDL_RENDER_DRIVER=direct3d: forces D3D9 path — no software fallback.
     // SDL_AUDIODRIVER=dummy: prevents audio init hang in CI.
     // SDL_FRAMEBUFFER_ACCELERATION=0: avoids Xvfb accel quirks.
     let mut child = std::process::Command::new(weave_bin)
-        .current_dir(&game_dir)
-        .arg(&exe)
+        .current_dir(SHORT_LINK)
+        .arg(&short_exe)
         .env("DISPLAY", ":99")
         .env("SDL_RENDER_DRIVER", "direct3d")
         .env("SDL_AUDIODRIVER", "dummy")
