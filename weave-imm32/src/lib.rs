@@ -64,6 +64,137 @@ pub unsafe extern "win64" fn imm_set_composition_window(
     1 // TRUE
 }
 
+/// ImmAssociateContext — associate/disassociate an IME context with a window.
+///
+/// SDL2 calls this at window creation with himc=NULL to detach IME.
+/// Returns NULL (previous context, no IME active).
+///
+/// Wine ref: dlls/imm32/imm.c — stores HIMC in window property; returns previous HIMC.
+///
+/// # Safety
+/// Arguments are ignored.
+pub unsafe extern "win64" fn imm_associate_context(_hwnd: usize, _himc: usize) -> usize {
+    0 // NULL — no previous IME context
+}
+
+/// ImmGetCandidateListW — get the candidate list for an input context.
+///
+/// Returns 0 (no candidates; no IME active).
+///
+/// Wine ref: dlls/imm32/imm.c — returns required buffer size or 0 if no candidates.
+///
+/// # Safety
+/// Arguments are ignored.
+pub unsafe extern "win64" fn imm_get_candidate_list_w(
+    _himc: usize,
+    _index: u32,
+    _dest: *mut u8,
+    _bytes: u32,
+) -> u32 {
+    0
+}
+
+/// ImmGetIMEFileNameA — get the filename of the current IME.
+///
+/// SDL2 calls this to detect IME presence. Returns 0 (no chars written, no IME).
+///
+/// Wine ref: dlls/imm32/imm.c — fills buf with IME filename; returns chars written.
+///
+/// # Safety
+/// Arguments are ignored.
+pub unsafe extern "win64" fn imm_get_ime_file_name_a(
+    _hkl: usize,
+    _buf: *mut u8,
+    _count: u32,
+) -> u32 {
+    0
+}
+
+/// ImmNotifyIME — notify the IME of an event.
+///
+/// Returns TRUE (success no-op).
+///
+/// Wine ref: dlls/imm32/imm.c::ImmNotifyIME — dispatches IME notification action.
+///
+/// # Safety
+/// Arguments are ignored.
+pub unsafe extern "win64" fn imm_notify_ime(
+    _himc: usize,
+    _action: u32,
+    _index: u32,
+    _value: u32,
+) -> i32 {
+    1 // TRUE
+}
+
+/// ImmSetCompositionStringW — set the composition string.
+///
+/// Returns TRUE (success no-op).
+///
+/// Wine ref: dlls/imm32/imm.c — sets composition/reading string data in HIMC.
+///
+/// # Safety
+/// Arguments are ignored.
+pub unsafe extern "win64" fn imm_set_composition_string_w(
+    _himc: usize,
+    _index: u32,
+    _comp: *const u8,
+    _comp_len: u32,
+    _read: *const u8,
+    _read_len: u32,
+) -> i32 {
+    1 // TRUE
+}
+
+/// ImmLockIMC — lock an input method context.
+///
+/// SDL2 loads imm32.dll dynamically then GetProcAddress for this.
+/// Returns NULL (no IME active).
+///
+/// Wine ref: dlls/imm32/imm.c — increments HIMC lock count; returns INPUTCONTEXT*.
+///
+/// # Safety
+/// Arguments are ignored.
+pub unsafe extern "win64" fn imm_lock_imc(_himc: usize) -> usize {
+    0 // NULL
+}
+
+/// ImmUnlockIMC — unlock an input method context.
+///
+/// Returns TRUE (success no-op).
+///
+/// Wine ref: dlls/imm32/imm.c — decrements HIMC lock count.
+///
+/// # Safety
+/// Arguments are ignored.
+pub unsafe extern "win64" fn imm_unlock_imc(_himc: usize) -> i32 {
+    1 // TRUE
+}
+
+/// ImmLockIMCC — lock an IME component container.
+///
+/// Returns NULL (no IME active).
+///
+/// Wine ref: dlls/imm32/imm.c — locks HIMCC component; returns pointer to data.
+///
+/// # Safety
+/// Arguments are ignored.
+pub unsafe extern "win64" fn imm_lock_imcc(_himcc: usize) -> usize {
+    0 // NULL
+}
+
+/// ImmUnlockIMCC — unlock an IME component container.
+///
+/// Returns TRUE (success no-op).
+///
+/// Wine ref: dlls/imm32/imm.c — unlocks HIMCC component.
+///
+/// # Safety
+/// Arguments are ignored.
+pub unsafe extern "win64" fn imm_unlock_imcc(_himcc: usize) -> i32 {
+    1 // TRUE
+}
+
 /// Resolve an imm32.dll import to a function pointer.
 pub fn resolve(dll: &str, func: &str) -> Option<usize> {
     if !dll.eq_ignore_ascii_case("imm32.dll") {
@@ -75,6 +206,35 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "ImmGetCompositionStringW" => Some(imm_get_composition_string_w as *const () as usize),
         "ImmSetCompositionFontA" => Some(imm_set_composition_font_a as *const () as usize),
         "ImmSetCompositionWindow" => Some(imm_set_composition_window as *const () as usize),
+        "ImmAssociateContext" => {
+            Some(imm_associate_context as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "ImmGetCandidateListW" => Some(
+            imm_get_candidate_list_w as unsafe extern "win64" fn(_, _, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "ImmGetIMEFileNameA" => Some(
+            imm_get_ime_file_name_a as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
+        ),
+        "ImmNotifyIME" => {
+            Some(imm_notify_ime as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize)
+        }
+        "ImmSetCompositionStringW" => Some(
+            imm_set_composition_string_w as unsafe extern "win64" fn(_, _, _, _, _, _) -> _
+                as *const () as usize,
+        ),
+        "ImmLockIMC" => {
+            Some(imm_lock_imc as unsafe extern "win64" fn(_) -> _ as *const () as usize)
+        }
+        "ImmUnlockIMC" => {
+            Some(imm_unlock_imc as unsafe extern "win64" fn(_) -> _ as *const () as usize)
+        }
+        "ImmLockIMCC" => {
+            Some(imm_lock_imcc as unsafe extern "win64" fn(_) -> _ as *const () as usize)
+        }
+        "ImmUnlockIMCC" => {
+            Some(imm_unlock_imcc as unsafe extern "win64" fn(_) -> _ as *const () as usize)
+        }
         _ => None,
     }
 }
@@ -91,6 +251,15 @@ mod tests {
             "ImmGetCompositionStringW",
             "ImmSetCompositionFontA",
             "ImmSetCompositionWindow",
+            "ImmAssociateContext",
+            "ImmGetCandidateListW",
+            "ImmGetIMEFileNameA",
+            "ImmNotifyIME",
+            "ImmSetCompositionStringW",
+            "ImmLockIMC",
+            "ImmUnlockIMC",
+            "ImmLockIMCC",
+            "ImmUnlockIMCC",
         ];
         for f in &funcs {
             assert!(resolve("imm32.dll", f).is_some(), "missing: {f}");

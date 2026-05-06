@@ -542,6 +542,26 @@ pub unsafe extern "win64" fn do_drag_drop(
     0x0004_0101u32 as i32 // DRAGDROP_S_CANCEL
 }
 
+// ── PropVariant ───────────────────────────────────────────────────────────────
+
+// Wine ref: dlls/ole32/ole2.c::PropVariantClear — reads vt field; frees heap-allocated members
+// (BSTR, LPWSTR, LPSTR, vector variants, etc.); zeroes the struct; returns S_OK.
+/// PropVariantClear: clear a PROPVARIANT and free any heap-allocated members.
+///
+/// The PROPVARIANT struct is 24 bytes: first 2 bytes are `vt` (VARTYPE),
+/// 6 bytes padding, then 16 bytes union payload. This stub zeroes all 24 bytes
+/// (safe for the no-allocation case SDL2 triggers after COM device enumeration).
+/// Returns `S_OK` (0).
+///
+/// # Safety
+/// `pvar` must be null or a valid pointer to a 24-byte PROPVARIANT buffer.
+pub unsafe extern "win64" fn prop_variant_clear(pvar: *mut u8) -> u32 {
+    if !pvar.is_null() {
+        unsafe { std::ptr::write_bytes(pvar, 0, 24) };
+    }
+    S_OK
+}
+
 // ── Resolver ──────────────────────────────────────────────────────────────────
 
 /// Resolve a `ole32.dll` or `combase.dll` import to a stub address.
@@ -609,6 +629,10 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         }
         "DoDragDrop" => {
             Some(do_drag_drop as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize)
+        }
+        // PropVariant
+        "PropVariantClear" => {
+            Some(prop_variant_clear as unsafe extern "win64" fn(_) -> _ as *const () as usize)
         }
         _ => None,
     }
