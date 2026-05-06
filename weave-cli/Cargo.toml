@@ -33,6 +33,7 @@ weave-imm32 = { path = "../weave-imm32" }
 weave-shlwapi = { path = "../weave-shlwapi" }
 weave-gdiplus = { path = "../weave-gdiplus" }
 weave-ddraw = { path = "../weave-ddraw" }
+weave-setupapi = { path = "../weave-setupapi" }
 weave-sandbox = { path = "../weave-sandbox" }
 weave-installer = { path = "../weave-installer" }
 weave-common = { path = "../weave-common" }

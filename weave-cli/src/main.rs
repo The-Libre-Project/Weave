@@ -50,6 +50,8 @@ fn resolve(dll: &str, func: &str) -> Option<usize> {
         .or_else(|| weave_mmdevapi::resolve(dll, func))
         .or_else(|| weave_xinput::resolve(dll, func))
         .or_else(|| weave_winmm::resolve(dll, func))
+        // setupapi.dll — HID device enumeration (returns empty set for headless CI)
+        .or_else(|| weave_setupapi::resolve(dll, func))
         .or_else(|| weave_ucrt::resolve(dll, func))
         .or_else(|| weave_msvcp140::resolve(dll, func))
         .or_else(|| weave_vulkan::resolve(dll, func))

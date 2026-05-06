@@ -24,6 +24,7 @@ members = [
     "weave-gdiplus",
     "weave-ddraw",
     "weave-msvcp140",
+    "weave-setupapi",
 ]
 resolver = "2"
 
