@@ -28,6 +28,48 @@ struct VaListTag {
     reg_save_area: *mut c_void,     // null (no GP/FP reg save needed)
 }
 
+/// Diagnostic helper (Fail #11 arc — Kings.px / fx96.px truncation localization).
+/// Returns true if the C string at `ptr` contains the substring `.px` within
+/// the first 256 bytes. Bounded scan to avoid scanning past invalid pointers.
+#[inline]
+unsafe fn px_trace_narrow(ptr: *const u8) -> bool {
+    if ptr.is_null() {
+        return false;
+    }
+    let mut buf = [0u8; 256];
+    let mut n = 0usize;
+    while n < 256 {
+        let b = unsafe { *ptr.add(n) };
+        if b == 0 {
+            break;
+        }
+        buf[n] = b;
+        n += 1;
+    }
+    buf[..n].windows(3).any(|w| w == b".px")
+}
+
+/// Format a hex byte tail of length up to 20 from a narrow C string for
+/// inclusion in diagnostic logs. Stops at NUL or `max` bytes.
+unsafe fn px_dump_narrow(ptr: *const u8, max: usize) -> String {
+    if ptr.is_null() {
+        return String::from("(null)");
+    }
+    let mut len = 0usize;
+    while len < max {
+        if unsafe { *ptr.add(len) } == 0 {
+            break;
+        }
+        len += 1;
+    }
+    let probe = unsafe { std::slice::from_raw_parts(ptr, len) };
+    let decoded = String::from_utf8_lossy(probe);
+    let tail_lo = len.saturating_sub(20);
+    let tail: Vec<String> =
+        probe[tail_lo..].iter().map(|b| format!("{b:02x}")).collect();
+    format!("len={len} decoded={decoded:?} tail[{tail_lo}..]=[{}]", tail.join(", "))
+}
+
 extern "C" {
     // Linux x86-64: va_list is *__va_list_tag — passed as *mut VaListTag.
     fn vsnprintf(s: *mut u8, n: usize, format: *const u8, ap: *mut VaListTag) -> i32;
@@ -162,7 +204,14 @@ pub unsafe extern "win64" fn ucrt_memchr(s: *const c_void, c: i32, n: usize) -> 
 /// # Safety
 /// `s` must be a valid null-terminated byte string.
 pub unsafe extern "win64" fn ucrt_strlen(s: *const u8) -> usize {
-    unsafe { libc::strlen(s as _) }
+    let ret = unsafe { libc::strlen(s as _) };
+    if unsafe { px_trace_narrow(s) } {
+        eprintln!(
+            "weave/ucrt_strlen[.px] ptr={s:p} ret={ret} {}",
+            unsafe { px_dump_narrow(s, 96) }
+        );
+    }
+    ret
 }
 
 /// # Safety
@@ -1142,18 +1191,32 @@ pub unsafe extern "win64" fn ucrt_stdio_common_vsprintf(
     if format.is_null() {
         return -1;
     }
+    let trace = unsafe { px_trace_narrow(format) };
+    if trace {
+        eprintln!(
+            "weave/__stdio_common_vsprintf[.px][entry] buf={buf:p} buf_count={buf_count} fmt({})",
+            unsafe { px_dump_narrow(format, 96) }
+        );
+    }
     let mut va_tag = VaListTag {
         gp_offset: 48,  // 6 GP regs × 8 bytes = 48 → all exhausted
         fp_offset: 176, // 48 + 8 XMM regs × 16 bytes = 176 → all exhausted
         overflow_arg_area: args,
         reg_save_area: std::ptr::null_mut(),
     };
-    if buf.is_null() || buf_count == 0 {
+    let ret = if buf.is_null() || buf_count == 0 {
         // Count-only mode: return number of chars that would be written.
         unsafe { vsnprintf(std::ptr::null_mut(), 0, format, &mut va_tag) }
     } else {
         unsafe { vsnprintf(buf, buf_count, format, &mut va_tag) }
+    };
+    if trace && !buf.is_null() && buf_count > 0 {
+        eprintln!(
+            "weave/__stdio_common_vsprintf[.px][exit] ret={ret} buf_post({})",
+            unsafe { px_dump_narrow(buf, 128) }
+        );
     }
+    ret
 }
 
 /// `__stdio_common_vsnprintf_s` — size-limited secure sprintf variant.
@@ -1250,13 +1313,27 @@ pub unsafe extern "win64" fn ucrt_sprintf(
     if format.is_null() || buf.is_null() {
         return -1;
     }
+    let trace = unsafe { px_trace_narrow(format) };
+    if trace {
+        eprintln!(
+            "weave/ucrt_sprintf[.px][entry] buf={buf:p} fmt({})",
+            unsafe { px_dump_narrow(format, 96) }
+        );
+    }
     let mut va_tag = VaListTag {
         gp_offset: 48,
         fp_offset: 176,
         overflow_arg_area: args,
         reg_save_area: std::ptr::null_mut(),
     };
-    unsafe { vsnprintf(buf, usize::MAX, format, &mut va_tag) }
+    let ret = unsafe { vsnprintf(buf, usize::MAX, format, &mut va_tag) };
+    if trace {
+        eprintln!(
+            "weave/ucrt_sprintf[.px][exit] ret={ret} buf_post({})",
+            unsafe { px_dump_narrow(buf, 128) }
+        );
+    }
+    ret
 }
 
 /// printf — write formatted output to stdout.
@@ -2640,7 +2717,16 @@ pub unsafe extern "win64" fn ucrt_winitenv() -> *mut *mut u16 {
 /// # Safety
 /// `dst` must be writable for the length of `src` plus null terminator.
 pub unsafe extern "win64" fn ucrt_strcpy(dst: *mut u8, src: *const u8) -> *mut u8 {
-    unsafe { libc::strcpy(dst as _, src as _) as *mut u8 }
+    let trace = unsafe { px_trace_narrow(src) };
+    let ret = unsafe { libc::strcpy(dst as _, src as _) as *mut u8 };
+    if trace {
+        let post = unsafe { libc::strlen(dst as _) };
+        eprintln!(
+            "weave/ucrt_strcpy[.px] dst={dst:p} src={src:p} src({}) dst_post_len={post}",
+            unsafe { px_dump_narrow(src, 96) }
+        );
+    }
+    ret
 }
 
 /// strcat: concatenate two null-terminated strings.
@@ -2648,7 +2734,17 @@ pub unsafe extern "win64" fn ucrt_strcpy(dst: *mut u8, src: *const u8) -> *mut u
 /// # Safety
 /// `dst` must be writable for the combined length of both strings plus null terminator.
 pub unsafe extern "win64" fn ucrt_strcat(dst: *mut u8, src: *const u8) -> *mut u8 {
-    unsafe { libc::strcat(dst as _, src as _) as *mut u8 }
+    let trace = unsafe { px_trace_narrow(src) };
+    let pre_len = if trace { unsafe { libc::strlen(dst as _) } } else { 0 };
+    let ret = unsafe { libc::strcat(dst as _, src as _) as *mut u8 };
+    if trace {
+        let post = unsafe { libc::strlen(dst as _) };
+        eprintln!(
+            "weave/ucrt_strcat[.px] dst={dst:p} src={src:p} src({}) dst_pre_len={pre_len} dst_post_len={post}",
+            unsafe { px_dump_narrow(src, 96) }
+        );
+    }
+    ret
 }
 
 /// strstr: find the first occurrence of needle in haystack.
@@ -3361,6 +3457,13 @@ pub unsafe extern "win64" fn ucrt_strncpy_s(
     src: *const u8,
     count: usize,
 ) -> i32 {
+    let trace = unsafe { px_trace_narrow(src) };
+    if trace {
+        eprintln!(
+            "weave/ucrt_strncpy_s[.px][entry] dst={dst:p} size_dst={size_dst} src={src:p} count={count} src({})",
+            unsafe { px_dump_narrow(src, 96) }
+        );
+    }
     if dst.is_null() || size_dst == 0 {
         return 22; // EINVAL
     }
@@ -3374,11 +3477,23 @@ pub unsafe extern "win64" fn ucrt_strncpy_s(
         let c = *src.add(i);
         *dst.add(i) = c;
         if c == 0 {
+            if trace {
+                eprintln!(
+                    "weave/ucrt_strncpy_s[.px][exit] copied={i} (src NUL hit) dst({})",
+                    unsafe { px_dump_narrow(dst, 96) }
+                );
+            }
             return 0;
         }
         i += 1;
     }
     *dst.add(i) = 0;
+    if trace {
+        eprintln!(
+            "weave/ucrt_strncpy_s[.px][exit] copied={i} copy_max={copy_max} (capped) dst({})",
+            unsafe { px_dump_narrow(dst, 96) }
+        );
+    }
     // If count > copy_max and src still has chars, truncation occurred = ERANGE
     if count > copy_max && !src.add(i).is_null() && *src.add(i) != 0 {
         *dst = 0; // truncate-to-empty on overflow (strncpy_s MSVCRT behavior)
