@@ -15581,4 +15581,107 @@ mod tests {
         assert_eq!(s, "font_1.fn");
         assert_eq!(buf[9], 0);
     }
+
+    // ── .px* full-path contracts (Contract 2) ───────────────────────────────
+    //
+    // NXEngine calls MultiByteToWideChar with the full sprite/stage paths.
+    // Before the fix (commit a6ddfc2 arc), the previous `min(wide.len(), cap-1)`
+    // reservation dropped the final extension character (e.g. "Kings.pxm" → 9
+    // chars with buf sized to 9 would truncate to "Kings.px" + NUL).
+    //
+    // These tests use the exact paths from the CI failure log (CI run 25237583085)
+    // routed through /tmp/nx symlink (commit a3156f8).
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn mbtowc_kings_pxm_query_size() {
+        // "Z:\\tmp\\nx\\data/Stage/Kings.pxm\0" — cb_multi_byte=-1 → required
+        // size includes NUL → 31 wide units (30 chars + 1 NUL).
+        let src = b"Z:\\tmp\\nx\\data/Stage/Kings.pxm\0";
+        let n =
+            unsafe { multi_byte_to_wide_char(65001, 0, src.as_ptr(), -1, std::ptr::null_mut(), 0) };
+        assert_eq!(
+            n, 31,
+            "Kings.pxm path: query must return 31 (30 chars + NUL)"
+        );
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn mbtowc_kings_pxm_exact_buffer_preserves_extension() {
+        // Exact-fit buffer (31 wide units) must not truncate the 'm'.
+        let src = b"Z:\\tmp\\nx\\data/Stage/Kings.pxm\0";
+        let mut buf = [0u16; 31];
+        let n = unsafe {
+            multi_byte_to_wide_char(
+                65001,
+                0,
+                src.as_ptr(),
+                -1,
+                buf.as_mut_ptr(),
+                buf.len() as i32,
+            )
+        };
+        assert_eq!(n, 31);
+        let s = String::from_utf16(&buf[..30]).unwrap();
+        assert_eq!(s, "Z:\\tmp\\nx\\data/Stage/Kings.pxm");
+        assert_eq!(buf[30], 0, "NUL terminator must be present");
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn mbtowc_kings_pxe_exact_buffer_preserves_extension() {
+        // "Kings.pxe" variant — same length, different final char.
+        let src = b"Z:\\tmp\\nx\\data/Stage/Kings.pxe\0";
+        let mut buf = [0u16; 31];
+        let n = unsafe {
+            multi_byte_to_wide_char(
+                65001,
+                0,
+                src.as_ptr(),
+                -1,
+                buf.as_mut_ptr(),
+                buf.len() as i32,
+            )
+        };
+        assert_eq!(n, 31);
+        let s = String::from_utf16(&buf[..30]).unwrap();
+        assert_eq!(s, "Z:\\tmp\\nx\\data/Stage/Kings.pxe");
+        assert_eq!(buf[30], 0);
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn mbtowc_pxt_exact_buffer_preserves_extension() {
+        // "Z:\\tmp\\nx\\data/pxt/fx96.pxt\0" — 28 chars + NUL = 29 wide units.
+        let src = b"Z:\\tmp\\nx\\data/pxt/fx96.pxt\0";
+        let mut buf = [0u16; 28];
+        let n = unsafe {
+            multi_byte_to_wide_char(
+                65001,
+                0,
+                src.as_ptr(),
+                -1,
+                buf.as_mut_ptr(),
+                buf.len() as i32,
+            )
+        };
+        assert_eq!(n, 28);
+        let s = String::from_utf16(&buf[..27]).unwrap();
+        assert_eq!(s, "Z:\\tmp\\nx\\data/pxt/fx96.pxt");
+        assert_eq!(buf[27], 0);
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn mbtowc_pxt_query_size_includes_terminator() {
+        // cb_multi_byte=-1 → required size includes NUL.
+        let src = b"Z:\\tmp\\nx\\data/pxt/fx96.pxt\0";
+        let n =
+            unsafe { multi_byte_to_wide_char(65001, 0, src.as_ptr(), -1, std::ptr::null_mut(), 0) };
+        assert_eq!(
+            n, 28,
+            "fx96.pxt path: query must return 28 (27 chars + NUL)"
+        );
+    }
 }

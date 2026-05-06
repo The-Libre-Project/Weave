@@ -1118,6 +1118,24 @@ pub unsafe extern "win64" fn ucrt_stdio_common_vfprintf(
     written
 }
 
+/// Clamp a vsnprintf `n` argument so it never reaches glibc with SIZE_MAX.
+///
+/// MSVC's CRT passes `(size_t)-1` (SIZE_MAX) as the buffer bound for plain
+/// `sprintf`-style calls that have no size limit.  Forwarding SIZE_MAX directly
+/// to glibc's `vsnprintf` produces a 1-char-short write (glibc's bound-check
+/// arithmetic is unreliable at the extreme value — confirmed in CI run
+/// 25237583085: `fmt="Stage/%s.pxm" ret=15 buf_post(len=14 decoded="Stage/Kings.px")`).
+/// Clamping to `i32::MAX` (~2 GiB) is well above any realistic buffer yet keeps
+/// glibc's arithmetic well-defined.
+#[inline]
+pub(crate) fn clamp_vsnprintf_n(n: usize) -> usize {
+    if n > i32::MAX as usize {
+        i32::MAX as usize
+    } else {
+        n
+    }
+}
+
 /// __stdio_common_vsprintf — core sprintf dispatch used by UCRT and MinGW CRT.
 ///
 /// Implementation: Windows x64 va_list is a char* into a contiguous 8-byte
@@ -1152,19 +1170,7 @@ pub unsafe extern "win64" fn ucrt_stdio_common_vsprintf(
         // Count-only mode: return number of chars that would be written.
         unsafe { vsnprintf(std::ptr::null_mut(), 0, format, &mut va_tag) }
     } else {
-        // MSVC's CRT signals "unbounded buffer" for plain sprintf by passing
-        // (size_t)-1 = SIZE_MAX as buf_count. Forwarding SIZE_MAX directly to
-        // libc::vsnprintf produces a 1-char-short write (glibc's bound-check
-        // arithmetic at the extreme value is not reliable). Clamp any
-        // suspiciously-large bound to i32::MAX (~2 GB) which is well above
-        // any realistic buffer size yet small enough to keep glibc's bound
-        // arithmetic well-defined.
-        let safe_n = if buf_count > i32::MAX as usize {
-            i32::MAX as usize
-        } else {
-            buf_count
-        };
-        unsafe { vsnprintf(buf, safe_n, format, &mut va_tag) }
+        unsafe { vsnprintf(buf, clamp_vsnprintf_n(buf_count), format, &mut va_tag) }
     };
     ret
 }
@@ -1270,9 +1276,9 @@ pub unsafe extern "win64" fn ucrt_sprintf(
         reg_save_area: std::ptr::null_mut(),
     };
     // libc::vsnprintf with n=SIZE_MAX writes 1 char fewer than expected
-    // (glibc bound-check arithmetic at the extreme value). Use i32::MAX as
-    // the unbounded sentinel — far larger than any realistic buffer.
-    unsafe { vsnprintf(buf, i32::MAX as usize, format, &mut va_tag) }
+    // (glibc bound-check arithmetic at the extreme value). Clamp via the
+    // shared sentinel — far larger than any realistic buffer.
+    unsafe { vsnprintf(buf, clamp_vsnprintf_n(usize::MAX), format, &mut va_tag) }
 }
 
 /// printf — write formatted output to stdout.
@@ -5197,5 +5203,70 @@ mod tests {
             resolve("msvcrt.dll", "wcsxfrm").is_some(),
             "msvcrt.dll::wcsxfrm must resolve"
         );
+    }
+
+    // ── clamp_vsnprintf_n — SIZE_MAX sentinel (Contract 1) ──────────────────
+    //
+    // Locks the fix from commit a6ddfc2: forwarding SIZE_MAX to glibc vsnprintf
+    // produced N-1 writes (CI run 25237583085, fmt="Stage/%s.pxm" ret=15
+    // buf_post len=14 decoded="Stage/Kings.px"). The clamp must map any
+    // buf_count above i32::MAX to exactly i32::MAX, and leave smaller values
+    // unchanged.
+
+    #[test]
+    fn clamp_vsnprintf_n_maps_size_max_to_i32_max() {
+        // MSVC plain sprintf passes SIZE_MAX as the unbounded sentinel.
+        // After clamping, glibc receives i32::MAX — a well-defined bound.
+        assert_eq!(clamp_vsnprintf_n(usize::MAX), i32::MAX as usize);
+    }
+
+    #[test]
+    fn clamp_vsnprintf_n_maps_i32_max_plus_one_to_i32_max() {
+        let just_over = (i32::MAX as usize) + 1;
+        assert_eq!(clamp_vsnprintf_n(just_over), i32::MAX as usize);
+    }
+
+    #[test]
+    fn clamp_vsnprintf_n_preserves_small_values() {
+        // Typical real buffer sizes must pass through unchanged.
+        for n in [0usize, 1, 15, 256, 4096, i32::MAX as usize] {
+            assert_eq!(clamp_vsnprintf_n(n), n, "expected identity for n={n}");
+        }
+    }
+
+    // ── decode_wide — NUL-scan should reach the full string length ───────────
+    //
+    // Contract 3: _wfopen receives first_nul at the full string length for
+    // .pxm/.pxe/.pxt paths. Verify decode_wide finds the terminator at the
+    // correct offset so no character is lost before the path reaches fopen.
+
+    #[test]
+    fn decode_wide_pxm_path_full_length() {
+        // "Z:\\tmp\\nx\\data/Stage/Kings.pxm" — 31 chars
+        let src = "Z:\\tmp\\nx\\data/Stage/Kings.pxm";
+        let wide: Vec<u16> = src.encode_utf16().chain(std::iter::once(0)).collect();
+        let result = decode_wide(wide.as_ptr(), 32_768).unwrap();
+        assert_eq!(result, src, "decode_wide must not truncate .pxm extension");
+        assert_eq!(
+            result.len(),
+            30,
+            "all 30 chars including the 'm' must survive"
+        );
+    }
+
+    #[test]
+    fn decode_wide_pxe_path_full_length() {
+        let src = "Z:\\tmp\\nx\\data/Stage/Kings.pxe";
+        let wide: Vec<u16> = src.encode_utf16().chain(std::iter::once(0)).collect();
+        let result = decode_wide(wide.as_ptr(), 32_768).unwrap();
+        assert_eq!(result, src, "decode_wide must not truncate .pxe extension");
+    }
+
+    #[test]
+    fn decode_wide_pxt_path_full_length() {
+        let src = "Z:\\tmp\\nx\\data/pxt/fx96.pxt";
+        let wide: Vec<u16> = src.encode_utf16().chain(std::iter::once(0)).collect();
+        let result = decode_wide(wide.as_ptr(), 32_768).unwrap();
+        assert_eq!(result, src, "decode_wide must not truncate .pxt extension");
     }
 }
