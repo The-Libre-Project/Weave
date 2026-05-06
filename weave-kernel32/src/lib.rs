@@ -11,7 +11,7 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 /// Tracks the most recently freed heap address so consecutive double-frees
@@ -551,6 +551,16 @@ pub extern "win64" fn get_last_error() -> u32 {
 // SetLastError(0) is a common pattern to clear error before a call.
 pub extern "win64" fn set_last_error(dw_err_code: u32) {
     weave_common::set_last_error(dw_err_code);
+}
+
+/// Process-global error mode flags set via SetErrorMode.
+/// Windows default is 0 (all error dialogs enabled).
+static ERROR_MODE: AtomicU32 = AtomicU32::new(0);
+
+/// SetErrorMode: set the process error-mode flags and return the previous value.
+// Wine ref: dlls/kernelbase/process.c — stores value per-process and returns old value.
+pub unsafe extern "win64" fn set_error_mode(u_mode: u32) -> u32 {
+    ERROR_MODE.swap(u_mode, Ordering::Relaxed)
 }
 
 /// VirtualProtect: change memory protection on a region.
@@ -11812,6 +11822,9 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         }
         "GetLastError" => Some(get_last_error as *const () as usize),
         "SetLastError" => Some(set_last_error as *const () as usize),
+        "SetErrorMode" => {
+            Some(set_error_mode as unsafe extern "win64" fn(_) -> _ as *const () as usize)
+        }
         "VirtualProtect" => {
             Some(virtual_protect as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize)
         }
