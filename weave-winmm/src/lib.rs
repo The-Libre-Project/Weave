@@ -730,6 +730,122 @@ pub unsafe extern "win64" fn wave_out_get_id(_hwo: usize, pud_device_id: *mut u3
     0 // MMSYSERR_NOERROR
 }
 
+// ── waveIn stubs ─────────────────────────────────────────────────────────────
+
+/// waveInOpen: open a waveform-audio input device.
+/// Wine ref: dlls/winmm/waveform.c::waveInOpen — writes handle to *phwi.
+/// Since waveInGetNumDevs returns 0, no device is available; return MMSYSERR_NODRIVER.
+///
+/// # Safety
+/// `phwi` must be null or a valid pointer to a usize. Other pointer args are
+/// accepted but not dereferenced.
+pub unsafe extern "win64" fn wave_in_open(
+    _phwi: *mut usize,
+    _dev_id: u32,
+    _pwfx: *const u8,
+    _callback: usize,
+    _instance: usize,
+    _flags: u32,
+) -> u32 {
+    6 // MMSYSERR_NODRIVER
+}
+
+/// waveInClose: close a waveform-audio input device.
+/// Wine ref: dlls/winmm/waveform.c::waveInClose.
+pub extern "win64" fn wave_in_close(_hwi: usize) -> u32 {
+    0 // MMSYSERR_NOERROR
+}
+
+/// waveInPrepareHeader: prepare a buffer for audio capture.
+/// Wine ref: dlls/winmm/waveform.c.
+///
+/// # Safety
+/// `pwh` is accepted but not dereferenced.
+pub unsafe extern "win64" fn wave_in_prepare_header(
+    _hwi: usize,
+    _pwh: *const u8,
+    _cbwh: u32,
+) -> u32 {
+    0 // MMSYSERR_NOERROR
+}
+
+/// waveInUnprepareHeader: unprepare a capture buffer.
+/// Wine ref: dlls/winmm/waveform.c.
+///
+/// # Safety
+/// `pwh` is accepted but not dereferenced.
+pub unsafe extern "win64" fn wave_in_unprepare_header(
+    _hwi: usize,
+    _pwh: *const u8,
+    _cbwh: u32,
+) -> u32 {
+    0 // MMSYSERR_NOERROR
+}
+
+/// waveInAddBuffer: queue a buffer for capture.
+/// Wine ref: dlls/winmm/waveform.c.
+///
+/// # Safety
+/// `pwh` is accepted but not dereferenced.
+pub unsafe extern "win64" fn wave_in_add_buffer(_hwi: usize, _pwh: *const u8, _cbwh: u32) -> u32 {
+    0 // MMSYSERR_NOERROR
+}
+
+/// waveInStart: start audio capture.
+/// Wine ref: dlls/winmm/waveform.c.
+pub extern "win64" fn wave_in_start(_hwi: usize) -> u32 {
+    0 // MMSYSERR_NOERROR
+}
+
+/// waveInReset: stop capture and reset the device.
+/// Wine ref: dlls/winmm/waveform.c.
+pub extern "win64" fn wave_in_reset(_hwi: usize) -> u32 {
+    0 // MMSYSERR_NOERROR
+}
+
+/// waveInGetDevCapsW: get capabilities of a wave input device (Wide).
+/// Wine ref: dlls/winmm/waveform.c — fills a WAVEINCAPSW struct (64 bytes).
+/// Since no device is present, write an all-zero struct.
+///
+/// # Safety
+/// `pwic` must be null or a valid pointer to at least `cbwic` bytes.
+pub unsafe extern "win64" fn wave_in_get_dev_caps_w(
+    _dev_id: u32,
+    pwic: *mut u8,
+    cbwic: u32,
+) -> u32 {
+    if !pwic.is_null() && cbwic >= 64 {
+        unsafe {
+            std::ptr::write_bytes(pwic, 0, 64);
+        }
+    }
+    0 // MMSYSERR_NOERROR
+}
+
+/// waveOutGetErrorTextW: get a text description of a waveOut error.
+/// Wine ref: dlls/winmm/winmm.c::waveOutGetErrorTextW — writes error string into pszText.
+/// Writes "Unknown error\0" as UTF-16LE for any error code.
+///
+/// # Safety
+/// `psz_text` must be null or a valid pointer to at least `cch_text` u16 values.
+pub unsafe extern "win64" fn wave_out_get_error_text_w(
+    _err: u32,
+    psz_text: *mut u16,
+    cch_text: u32,
+) -> u32 {
+    // "Unknown error\0" as UTF-16LE (13 chars + NUL = 14 u16 values)
+    const UNKNOWN: [u16; 14] = [
+        85, 110, 107, 110, 111, 119, 110, 32, 101, 114, 114, 111, 114, 0,
+    ];
+    if !psz_text.is_null() && cch_text > 0 {
+        let to_copy = (cch_text as usize).min(UNKNOWN.len());
+        unsafe {
+            std::ptr::copy_nonoverlapping(UNKNOWN.as_ptr(), psz_text, to_copy);
+        }
+    }
+    0 // MMSYSERR_NOERROR
+}
+
 /// Returns true for any DLL name this crate handles.
 fn is_winmm_dll(dll: &str) -> bool {
     dll.eq_ignore_ascii_case("winmm.dll")
@@ -834,6 +950,40 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "waveOutGetID" => Some(
             wave_out_get_id as unsafe extern "win64" fn(usize, *mut u32) -> u32 as *const ()
                 as usize,
+        ),
+        "waveInOpen" => Some(
+            wave_in_open
+                as unsafe extern "win64" fn(*mut usize, u32, *const u8, usize, usize, u32) -> u32
+                as *const () as usize,
+        ),
+        "waveInClose" => {
+            Some(wave_in_close as extern "win64" fn(usize) -> u32 as *const () as usize)
+        }
+        "waveInPrepareHeader" => Some(
+            wave_in_prepare_header as unsafe extern "win64" fn(usize, *const u8, u32) -> u32
+                as *const () as usize,
+        ),
+        "waveInUnprepareHeader" => Some(
+            wave_in_unprepare_header as unsafe extern "win64" fn(usize, *const u8, u32) -> u32
+                as *const () as usize,
+        ),
+        "waveInAddBuffer" => Some(
+            wave_in_add_buffer as unsafe extern "win64" fn(usize, *const u8, u32) -> u32
+                as *const () as usize,
+        ),
+        "waveInStart" => {
+            Some(wave_in_start as extern "win64" fn(usize) -> u32 as *const () as usize)
+        }
+        "waveInReset" => {
+            Some(wave_in_reset as extern "win64" fn(usize) -> u32 as *const () as usize)
+        }
+        "waveInGetDevCapsW" => Some(
+            wave_in_get_dev_caps_w as unsafe extern "win64" fn(u32, *mut u8, u32) -> u32
+                as *const () as usize,
+        ),
+        "waveOutGetErrorTextW" => Some(
+            wave_out_get_error_text_w as unsafe extern "win64" fn(u32, *mut u16, u32) -> u32
+                as *const () as usize,
         ),
         _ => None,
     }
