@@ -1299,6 +1299,8 @@ struct PixelSample {
     bright: u32,
     min: u64,
     max: u64,
+    /// X11 root window XID used for XGetImage (display :99).
+    root_xid: u64,
 }
 
 /// Sample the X11 display `:99` for non-trivial (non-black) pixels.
@@ -1342,7 +1344,7 @@ try:
             if px > threshold: bright += 1
     x.XDestroyImage(img)
     x.XCloseDisplay(dpy)
-    print(f"found={1 if bright else 0} sampled={sampled} bright={bright} min={min_px or 0} max={max_px}")
+    print(f"found={1 if bright else 0} sampled={sampled} bright={bright} min={min_px or 0} max={max_px} root_xid={root}")
 except Exception:
     import traceback; traceback.print_exc()
     sys.exit(44)
@@ -1370,6 +1372,7 @@ except Exception:
                 bright: 0,
                 min: 0,
                 max: 0,
+                root_xid: 0,
             };
             for field in stdout.split_whitespace() {
                 if let Some((key, value)) = field.split_once('=') {
@@ -1379,10 +1382,15 @@ except Exception:
                         "bright" => sample.bright = value.parse().ok()?,
                         "min" => sample.min = value.parse().ok()?,
                         "max" => sample.max = value.parse().ok()?,
+                        "root_xid" => sample.root_xid = value.parse().ok()?,
                         _ => {}
                     }
                 }
             }
+            eprintln!(
+                "pixel-sampler [diag]: sampling root XID={:#x} on display :99",
+                sample.root_xid
+            );
             Some(sample)
         }
     }

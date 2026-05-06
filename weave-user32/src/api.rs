@@ -3555,6 +3555,8 @@ pub unsafe extern "win64" fn create_window_ex_a(
     let xcb_id =
         backend::create_window(&title, x11_x, x11_y, width, height, visible, parent_xcb_id);
 
+    eprintln!("weave/user32: CreateWindowA class={class_name:?} title={title:?} pos=({abs_x},{abs_y}) size={width}x{height} visible={visible} style={dw_style:#010x} xcb={xcb_id:#x} parent_xcb={parent_xcb_id:#x}");
+
     let hwnd = window::create(window::WindowEntry {
         class_name: class_name.clone(),
         wnd_proc: cls.wnd_proc,
