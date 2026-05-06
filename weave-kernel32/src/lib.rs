@@ -5556,6 +5556,84 @@ pub unsafe extern "win64" fn process32_next_w(_h_snapshot: usize, _lppe: *mut u8
     0 // FALSE
 }
 
+/// Process32First — retrieve first process from a toolhelp snapshot (ANSI).
+///
+/// Returns FALSE — no processes in stub snapshot.
+///
+/// # Safety
+/// `lppe` is accepted but not dereferenced.
+// Wine ref: dlls/kernel32/toolhelp.c — checks TH32CS_SNAPPROCESS flag; fills PROCESSENTRY32
+// (ANSI variant) from the snapshot buffer; otherwise identical logic to Process32FirstW.
+pub unsafe extern "win64" fn process32_first(_h_snapshot: usize, _lppe: *mut u8) -> i32 {
+    warn_once("Process32First");
+    0 // FALSE
+}
+
+/// Process32Next — retrieve next process from a toolhelp snapshot (ANSI).
+///
+/// Returns FALSE — no more processes.
+///
+/// # Safety
+/// `lppe` is accepted but not dereferenced.
+// Wine ref: dlls/kernel32/toolhelp.c — advances internal snapshot offset; returns
+// ERROR_NO_MORE_FILES when exhausted (ANSI variant of Process32NextW).
+pub unsafe extern "win64" fn process32_next(_h_snapshot: usize, _lppe: *mut u8) -> i32 {
+    warn_once("Process32Next");
+    0 // FALSE
+}
+
+// ── Power management ─────────────────────────────────────────────────────────
+
+/// GetSystemPowerStatus — fill a SYSTEM_POWER_STATUS struct with battery/AC info.
+///
+/// Returns FALSE (0). Writes 12 zero bytes to the struct if the pointer is non-null.
+/// SDL2 has an explicit fallback when this returns FALSE.
+///
+/// # Safety
+/// `lp` must be either null or point to at least 12 writable bytes.
+// Wine ref: dlls/kernel32/powermgnt.c — calls NtPowerInformation(SystemPowerStatusInformation);
+// fills ACLineStatus, BatteryFlag, BatteryLifePercent, Reserved1, BatteryLifeTime,
+// BatteryFullLifeTime (12 bytes total); returns FALSE on error.
+pub unsafe extern "win64" fn get_system_power_status(lp: *mut u8) -> i32 {
+    warn_once("GetSystemPowerStatus");
+    if !lp.is_null() {
+        std::ptr::write_bytes(lp, 0, 12);
+    }
+    0 // FALSE
+}
+
+/// SetThreadExecutionState — prevent system sleep during video playback.
+///
+/// Returns the previous execution state (stubbed as ES_CONTINUOUS = 0x80000001).
+/// SDL2 calls this with ES_DISPLAY_REQUIRED|ES_CONTINUOUS and ignores the return
+/// value except for logging.
+// Wine ref: dlls/kernel32/powermgnt.c — calls NtSetThreadExecutionState; saves and
+// returns the previous state flags; ES_CONTINUOUS (0x80000000) indicates a persistent
+// override that stays until cleared.
+pub extern "win64" fn set_thread_execution_state(_es_flags: u32) -> u32 {
+    warn_once("SetThreadExecutionState");
+    0x80000001u32 // previous state: ES_CONTINUOUS
+}
+
+/// RtlAddFunctionTable — register a dynamic unwind function table for SEH on x64.
+///
+/// Returns TRUE (1). SDL2 calls this at init for its own exception handler table.
+/// Weave does not implement SEH unwinding through dynamic tables, so we accept the
+/// call and return success.
+///
+/// # Safety
+/// `function_table` and `base_address` are accepted but not dereferenced.
+// Wine ref: dlls/ntdll/signal_x86_64.c — inserts the RUNTIME_FUNCTION table into a
+// sorted list protected by a critical section; used by JIT engines and dynamic code.
+pub unsafe extern "win64" fn rtl_add_function_table(
+    _function_table: *const u8,
+    _entry_count: u32,
+    _base_address: u64,
+) -> u8 {
+    warn_once("RtlAddFunctionTable");
+    1 // TRUE
+}
+
 // ── Locale / language ────────────────────────────────────────────────────────
 
 /// GetUserDefaultLangID — return the default language identifier.
@@ -12532,6 +12610,21 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "Process32NextW" => {
             Some(process32_next_w as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
         }
+        "Process32First" => {
+            Some(process32_first as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "Process32Next" => {
+            Some(process32_next as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "GetSystemPowerStatus" => {
+            Some(get_system_power_status as unsafe extern "win64" fn(_) -> _ as *const () as usize)
+        }
+        "SetThreadExecutionState" => {
+            Some(set_thread_execution_state as extern "win64" fn(_) -> _ as *const () as usize)
+        }
+        "RtlAddFunctionTable" => Some(
+            rtl_add_function_table as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
+        ),
         "GetUserDefaultLangID" => Some(get_user_default_lang_id as *const () as usize),
         "CopyFileExW" => Some(
             copy_file_ex_w as unsafe extern "win64" fn(_, _, _, _, _, _) -> _ as *const () as usize,
