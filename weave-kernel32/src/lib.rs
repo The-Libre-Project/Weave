@@ -2586,7 +2586,7 @@ pub unsafe extern "win64" fn read_file(
             let ovl = lp_overlapped as *mut usize;
             unsafe {
                 std::ptr::write_volatile(ovl, 0xC000_0001); // STATUS_UNSUCCESSFUL → Internal
-                std::ptr::write_volatile(ovl.add(1), 0);    // InternalHigh = 0
+                std::ptr::write_volatile(ovl.add(1), 0); // InternalHigh = 0
             }
         }
         set_last_error(file_io::ERROR_ACCESS_DENIED);
@@ -2597,7 +2597,7 @@ pub unsafe extern "win64" fn read_file(
         if lp_overlapped != 0 {
             let ovl = lp_overlapped as *mut usize;
             unsafe {
-                std::ptr::write_volatile(ovl, 0);                // Internal = STATUS_SUCCESS
+                std::ptr::write_volatile(ovl, 0); // Internal = STATUS_SUCCESS
                 std::ptr::write_volatile(ovl.add(1), n as usize); // InternalHigh = bytes read
             }
         }
@@ -2665,7 +2665,7 @@ pub unsafe extern "win64" fn write_file(
             let ovl = lp_overlapped as *mut usize;
             unsafe {
                 std::ptr::write_volatile(ovl, 0xC000_0001); // STATUS_UNSUCCESSFUL → Internal
-                std::ptr::write_volatile(ovl.add(1), 0);    // InternalHigh = 0
+                std::ptr::write_volatile(ovl.add(1), 0); // InternalHigh = 0
             }
         }
         set_last_error(file_io::ERROR_ACCESS_DENIED);
@@ -2676,7 +2676,7 @@ pub unsafe extern "win64" fn write_file(
         if lp_overlapped != 0 {
             let ovl = lp_overlapped as *mut usize;
             unsafe {
-                std::ptr::write_volatile(ovl, 0);                // Internal = STATUS_SUCCESS
+                std::ptr::write_volatile(ovl, 0); // Internal = STATUS_SUCCESS
                 std::ptr::write_volatile(ovl.add(1), n as usize); // InternalHigh = bytes written
             }
         }
