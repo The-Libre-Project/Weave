@@ -280,7 +280,7 @@ fn clines_clamped_to_height_minus_startscan() {
 }
 
 #[test]
-fn valid_24bit_birgb_returns_clines() {
+fn valid_24bit_set_dib_bits_returns_clines() {
     // SetDIBits: 24-bit BGR source → internal BGRA store; returns c_lines.
     let (dc, bm) = make_dc();
     let bi = make_bi(4, 4, 24, 0);
