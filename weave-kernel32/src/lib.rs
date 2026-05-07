@@ -558,6 +558,9 @@ pub extern "win64" fn set_last_error(dw_err_code: u32) {
 static ERROR_MODE: AtomicU32 = AtomicU32::new(0);
 
 /// SetErrorMode: set the process error-mode flags and return the previous value.
+///
+/// # Safety
+/// Called from Windows PE code via IAT; parameters are caller-supplied Win32 values.
 // Wine ref: dlls/kernelbase/process.c — stores value per-process and returns old value.
 pub unsafe extern "win64" fn set_error_mode(u_mode: u32) -> u32 {
     ERROR_MODE.swap(u_mode, Ordering::Relaxed)
