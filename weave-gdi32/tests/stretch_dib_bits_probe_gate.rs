@@ -96,7 +96,7 @@ fn scale_up_returns_dest_height() {
 }
 
 #[test]
-fn unsupported_bpp_24_returns_0() {
+fn valid_24bit_birgb_returns_dest_height() {
     let (dc, bm) = make_dc();
     let bi = make_bi(4, 4, 24, 0);
     let pixels = [0u8; 4 * 4 * 3];
@@ -117,7 +117,7 @@ fn unsupported_bpp_24_returns_0() {
             SRCCOPY,
         )
     };
-    assert_eq!(r, 0, "24bpp should return 0 (unsupported)");
+    assert_eq!(r, 4, "24bpp BI_RGB should return nDestHeight=4");
     let _ = delete_object(bm);
     let _ = delete_object(dc);
 }

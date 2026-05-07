@@ -8,7 +8,7 @@
 //!
 //! Covered:
 //!   * Valid 32-bit BI_RGB DIB → returns c_lines.
-//!   * biBitCount=24 → returns 0 (unsupported bpp).
+//!   * biBitCount=24 → returns c_lines (24-bit BGR supported).
 //!   * biCompression=BI_BITFIELDS (3) → returns 0 (unsupported compression).
 //!   * Null lp_v_bits → returns 0 without panicking.
 //!   * Null lpbmi → returns 0 without panicking.
@@ -105,10 +105,10 @@ fn top_down_dib_returns_clines() {
 }
 
 #[test]
-fn bitcount_24_rejected() {
+fn valid_24bit_birgb_returns_clines() {
     let (dc, bm) = make_dc();
     let bi = make_bi(4, 4, 24, 0);
-    let pixels = [0u8; 4 * 4 * 4];
+    let pixels = [0u8; 4 * 4 * 3]; // 4x4 BGR (3 bytes/pixel)
     let r = unsafe {
         set_dib_bits_to_device(
             dc,
@@ -125,10 +125,7 @@ fn bitcount_24_rejected() {
             0,
         )
     };
-    assert_eq!(
-        r, 0,
-        "24bpp DIB should be rejected (first pass is 32-bit only)"
-    );
+    assert_eq!(r, 4, "24bpp BI_RGB should return c_lines");
     let _ = delete_object(bm);
     let _ = delete_object(dc);
 }

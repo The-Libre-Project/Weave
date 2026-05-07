@@ -1360,10 +1360,10 @@ pub unsafe extern "win64" fn stretch_di_bits(
         return 0;
     }
 
-    if bi_bit_count != 32 {
+    if bi_bit_count != 32 && bi_bit_count != 24 {
         static UNSUPPORTED_BPP: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
         if UNSUPPORTED_BPP.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 4 {
-            eprintln!("weave/gdi32: StretchDIBits bpp={bi_bit_count} unsupported (32-bit only)");
+            eprintln!("weave/gdi32: StretchDIBits bpp={bi_bit_count} unsupported (24/32-bit only)");
         }
         return 0;
     }
@@ -1378,6 +1378,7 @@ pub unsafe extern "win64" fn stretch_di_bits(
     // Stride: ((|biWidth| × biBitCount + 31) / 32) × 4
     // Wine ref: dlls/win32u/dib.c::get_dib_stride
     let stride = ((dib_w as u64 * bi_bit_count as u64).div_ceil(32) * 4) as usize;
+    let src_px = bi_bit_count as usize / 8; // bytes per source pixel (3 or 4)
     let total_bytes = stride.saturating_mul(dib_h);
     let dib_data = unsafe { std::slice::from_raw_parts(lp_bits, total_bytes) };
 
@@ -1426,10 +1427,18 @@ pub unsafe extern "win64" fn stretch_di_bits(
             let dx_out = if flip_x { abs_w_dest - 1 - dx } else { dx };
             let src_col = xs0 + (dx * eff_src_w) / abs_w_dest.max(1);
             let src_col = src_col.min(dib_w.saturating_sub(1));
-            let src_off = row_base + src_col * 4;
+            let src_off = row_base + src_col * src_px;
             let dst_off = (dy_out * abs_w_dest + dx_out) * 4;
-            if src_off + 4 <= dib_data.len() && dst_off + 4 <= scratch.len() {
-                scratch[dst_off..dst_off + 4].copy_from_slice(&dib_data[src_off..src_off + 4]);
+            if src_off + src_px <= dib_data.len() && dst_off + 4 <= scratch.len() {
+                if src_px == 4 {
+                    scratch[dst_off..dst_off + 4].copy_from_slice(&dib_data[src_off..src_off + 4]);
+                } else {
+                    // 24-bit BGR → BGRA (alpha=0xFF)
+                    scratch[dst_off] = dib_data[src_off];
+                    scratch[dst_off + 1] = dib_data[src_off + 1];
+                    scratch[dst_off + 2] = dib_data[src_off + 2];
+                    scratch[dst_off + 3] = 0xFF;
+                }
             }
         }
     }
@@ -1774,11 +1783,11 @@ pub unsafe extern "win64" fn set_dib_bits_to_device(
         return 0;
     }
 
-    if bi_bit_count != 32 {
+    if bi_bit_count != 32 && bi_bit_count != 24 {
         static UNSUPPORTED_BPP: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
         if UNSUPPORTED_BPP.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 4 {
             eprintln!(
-                "weave/gdi32: SetDIBitsToDevice bpp={bi_bit_count} unsupported (32-bit only)"
+                "weave/gdi32: SetDIBitsToDevice bpp={bi_bit_count} unsupported (24/32-bit only)"
             );
         }
         return 0;
@@ -1849,16 +1858,46 @@ pub unsafe extern "win64" fn set_dib_bits_to_device(
     let upload_w = w.min(abs_width) as u16;
     let upload_h = lines as u16;
 
-    weave_user32::backend::put_bits_to_pixmap_at(
-        dst_draw,
-        x_dest as i16,
-        y_dest as i16,
-        upload_w,
-        upload_h,
-        stride,
-        &top_down_rows,
-        bi_bit_count,
-    );
+    // put_bits_to_pixmap_at only accepts 32-bit BGRA. For 24-bit BGR input,
+    // expand each pixel to BGRA (alpha=0xFF) before upload.
+    if bi_bit_count == 24 {
+        let src_stride_24 = stride;
+        let dst_stride_32 = abs_width as usize * 4;
+        let mut expanded = vec![0u8; dst_stride_32 * lines_usize];
+        for row in 0..lines_usize {
+            for col in 0..abs_width as usize {
+                let s = row * src_stride_24 + col * 3;
+                let d = row * dst_stride_32 + col * 4;
+                if s + 3 <= top_down_rows.len() && d + 4 <= expanded.len() {
+                    expanded[d] = top_down_rows[s];
+                    expanded[d + 1] = top_down_rows[s + 1];
+                    expanded[d + 2] = top_down_rows[s + 2];
+                    expanded[d + 3] = 0xFF;
+                }
+            }
+        }
+        weave_user32::backend::put_bits_to_pixmap_at(
+            dst_draw,
+            x_dest as i16,
+            y_dest as i16,
+            upload_w,
+            upload_h,
+            dst_stride_32,
+            &expanded,
+            32,
+        );
+    } else {
+        weave_user32::backend::put_bits_to_pixmap_at(
+            dst_draw,
+            x_dest as i16,
+            y_dest as i16,
+            upload_w,
+            upload_h,
+            stride,
+            &top_down_rows,
+            bi_bit_count,
+        );
+    }
 
     lines as i32
 }
