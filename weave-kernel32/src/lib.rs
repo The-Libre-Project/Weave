@@ -7370,14 +7370,15 @@ pub unsafe extern "win64" fn create_thread(
 // Wine ref: dlls/kernel32/thread.c — valid priority range is [-15, 15]; THREAD_PRIORITY_NORMAL
 // is 0, returned as the default for threads not explicitly assigned a priority.
 pub extern "win64" fn get_thread_priority(_h_thread: usize) -> i32 {
-    warn_once("GetThreadPriority");
+    // Wine ref: dlls/kernelbase/thread.c — NtQueryInformationThread(ThreadBasePriority).
+    // Weave threads start at NORMAL; Linux scheduler priority is opaque to the guest.
     0 // THREAD_PRIORITY_NORMAL
 }
-/// SetThreadPriority — no-op stub, returns TRUE.
+/// SetThreadPriority — no-op, returns TRUE.
 // Wine ref: dlls/kernelbase/thread.c::SetThreadPriority:617 — calls
 // NtSetInformationThread(ThreadBasePriority, &priority); valid range is [-15,15].
 pub extern "win64" fn set_thread_priority(_h_thread: usize, _n_priority: i32) -> i32 {
-    warn_once("SetThreadPriority");
+    // Linux thread priority requires SCHED_FIFO/SCHED_RR and root; silently accept.
     1
 }
 /// GetThreadContext — not supported, returns FALSE.
@@ -11723,22 +11724,46 @@ pub unsafe extern "win64" fn write_console_a(
 /// Pointer argument is accepted but not dereferenced.
 // Wine ref: dlls/kernelbase/console.c:1736 — calls console_ioctl(IOCTL_CONDRV_SET_TITLE)
 // with title bytes = lstrlenW(title)*sizeof(WCHAR); no null terminator sent in ioctl.
-pub unsafe extern "win64" fn set_console_title_w(_lp_console_title: *const u16) -> i32 {
-    warn_once("SetConsoleTitleW");
-    1 // TRUE
+pub unsafe extern "win64" fn set_console_title_w(lp_console_title: *const u16) -> i32 {
+    // Wine ref: dlls/kernelbase/console.c — IOCTL_CONDRV_SET_TITLE to condrv driver.
+    // Weave: write OSC 0 escape sequence to stderr (sets terminal window title).
+    if lp_console_title.is_null() {
+        set_last_error(87);
+        return 0;
+    }
+    let title = unsafe {
+        let mut len = 0;
+        while *lp_console_title.add(len) != 0 {
+            len += 1;
+        }
+        std::slice::from_raw_parts(lp_console_title, len)
+    };
+    let s = String::from_utf16_lossy(title);
+    let esc = format!("\x1b]0;{s}\x07");
+    unsafe { libc::write(2, esc.as_ptr() as *const libc::c_void, esc.len()) };
+    set_last_error(0);
+    1
 }
 
 /// SetConsoleTitleA: set console title (ANSI version).
 ///
-/// No-op. Return TRUE.
+/// Reads null-terminated ANSI string and writes OSC 0 escape to stderr.
 ///
 /// # Safety
-/// Pointer argument is accepted but not dereferenced.
-// Wine ref: dlls/kernelbase/console.c — SetConsoleTitleA converts via MultiByteToWideChar
-// then delegates to SetConsoleTitleW; codepage is CP_ACP.
-pub unsafe extern "win64" fn set_console_title_a(_lp_console_title: *const u8) -> i32 {
-    warn_once("SetConsoleTitleA");
-    1 // TRUE
+/// `lp_console_title` must be a valid null-terminated byte string or NULL.
+// Wine ref: dlls/kernelbase/console.c — converts via MultiByteToWideChar(CP_ACP)
+// then delegates to SetConsoleTitleW.
+pub unsafe extern "win64" fn set_console_title_a(lp_console_title: *const u8) -> i32 {
+    if lp_console_title.is_null() {
+        set_last_error(87);
+        return 0;
+    }
+    let s = unsafe { std::ffi::CStr::from_ptr(lp_console_title as *const libc::c_char) }
+        .to_string_lossy();
+    let esc = format!("\x1b]0;{s}\x07");
+    unsafe { libc::write(2, esc.as_ptr() as *const libc::c_void, esc.len()) };
+    set_last_error(0);
+    1
 }
 
 /// GetConsoleTitleW: get console title (wide version).
@@ -11814,10 +11839,30 @@ pub unsafe extern "win64" fn get_console_screen_buffer_info(
 // SET_CONSOLE_OUTPUT_INFO_ATTR flag; condrv_output_info_params.info.attr = attr.
 pub unsafe extern "win64" fn set_console_text_attribute(
     _h_console_output: usize,
-    _w_attributes: u16,
+    w_attributes: u16,
 ) -> i32 {
-    warn_once("SetConsoleTextAttribute");
-    1 // TRUE
+    // Wine ref: dlls/kernelbase/console.c — IOCTL_CONDRV_SET_OUTPUT_INFO to condrv.
+    // Weave: translate Windows BGR color bits to ANSI SGR escape on stderr.
+    // Win bits 0-2 = FG color (B,G,R), bit 3 = FG bright; bits 4-6 = BG, bit 7 = BG bright.
+    fn reorder(c: u8) -> u8 {
+        // Win BGR → ANSI RGB: swap bit 0 (B) and bit 2 (R)
+        ((c & 4) >> 2) | (c & 2) | ((c & 1) << 2)
+    }
+    let fg = reorder((w_attributes & 0x07) as u8);
+    let bg = reorder(((w_attributes >> 4) & 0x07) as u8);
+    let fg_code = if w_attributes & 0x08 != 0 {
+        90 + fg
+    } else {
+        30 + fg
+    };
+    let bg_code = if w_attributes & 0x80 != 0 {
+        100 + bg
+    } else {
+        40 + bg
+    };
+    let esc = format!("\x1b[{fg_code};{bg_code}m");
+    unsafe { libc::write(2, esc.as_ptr() as *const libc::c_void, esc.len()) };
+    1
 }
 
 // ── SetConsoleCtrlHandler state ──────────────────────────────────────────────
