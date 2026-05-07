@@ -1865,8 +1865,15 @@ pub extern "win64" fn get_device_caps(hdc: usize, n_index: i32) -> i32 {
         // Wine ref: dlls/win32u/driver.c::nulldrv_GetDeviceCaps — standard display raster caps.
         // RC_DI_BITMAP / RC_DIBTODEV now safe: GetDIBits and SetDIBitsToDevice are real.
         // RC_FLOODFILL / RC_BIGFONT / RC_DEVBITS omitted — those paths not yet implemented.
-        RASTERCAPS => RC_BITBLT | RC_BITMAP64 | RC_GDI20_OUTPUT
-            | RC_DI_BITMAP | RC_DIBTODEV | RC_STRETCHBLT | RC_STRETCHDIB,
+        RASTERCAPS => {
+            RC_BITBLT
+                | RC_BITMAP64
+                | RC_GDI20_OUTPUT
+                | RC_DI_BITMAP
+                | RC_DIBTODEV
+                | RC_STRETCHBLT
+                | RC_STRETCHDIB
+        }
         _ => 0,
     }
 }
@@ -3516,10 +3523,18 @@ pub unsafe extern "win64" fn get_dib_bits(
     }
 
     let bmp = objects::get(h_bm, |kind| match kind {
-        GdiKind::Bitmap { width, height, bits_ptr, bpp }
-        | GdiKind::DibSection { width, height, bits_ptr, bpp } => {
-            Some((*width, *height, *bits_ptr, *bpp))
+        GdiKind::Bitmap {
+            width,
+            height,
+            bits_ptr,
+            bpp,
         }
+        | GdiKind::DibSection {
+            width,
+            height,
+            bits_ptr,
+            bpp,
+        } => Some((*width, *height, *bits_ptr, *bpp)),
         _ => None,
     });
     let Some(Some((bmp_w, bmp_h, bits_ptr, bmp_bpp))) = bmp else {
@@ -3539,9 +3554,9 @@ pub unsafe extern "win64" fn get_dib_bits(
             (p as *mut u32).write_unaligned(40);
             (p.add(4) as *mut i32).write_unaligned(bmp_w as i32);
             (p.add(8) as *mut i32).write_unaligned(bmp_h as i32); // bottom-up
-            (p.add(12) as *mut u16).write_unaligned(1);            // biPlanes
-            (p.add(14) as *mut u16).write_unaligned(32);           // biBitCount
-            (p.add(16) as *mut u32).write_unaligned(0);            // BI_RGB
+            (p.add(12) as *mut u16).write_unaligned(1); // biPlanes
+            (p.add(14) as *mut u16).write_unaligned(32); // biBitCount
+            (p.add(16) as *mut u32).write_unaligned(0); // BI_RGB
             (p.add(20) as *mut u32).write_unaligned(size_image);
             (p.add(24) as *mut i32).write_unaligned(0);
             (p.add(28) as *mut i32).write_unaligned(0);
@@ -4316,10 +4331,18 @@ pub unsafe extern "win64" fn set_dib_bits(
     }
 
     let bmp = objects::get(h_bm, |kind| match kind {
-        GdiKind::Bitmap { width, height, bits_ptr, bpp }
-        | GdiKind::DibSection { width, height, bits_ptr, bpp } => {
-            Some((*width, *height, *bits_ptr, *bpp))
+        GdiKind::Bitmap {
+            width,
+            height,
+            bits_ptr,
+            bpp,
         }
+        | GdiKind::DibSection {
+            width,
+            height,
+            bits_ptr,
+            bpp,
+        } => Some((*width, *height, *bits_ptr, *bpp)),
         _ => None,
     });
     let Some(Some((bmp_w, bmp_h, bits_ptr, bmp_bpp))) = bmp else {
