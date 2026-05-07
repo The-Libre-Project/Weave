@@ -3804,18 +3804,31 @@ pub unsafe extern "win64" fn get_dib_bits(
         return 0;
     }
 
-    let internal_stride = (bmp_w as usize) * 4;
+    // Caller's requested output biBitCount (offset +14 in BITMAPINFOHEADER).
+    // 0 means "query, use native"; treat as 32. Reject anything other than 24/32.
+    // Wine ref: dlls/win32u/dib.c::get_dib_bits — reads bi.biBitCount to select
+    // output format; converts internal BGRA to the requested depth on copy.
+    let bi_bit_count_req = unsafe { *((lpbmi + 14) as *const u16) };
+    let out_bpp: u16 = match bi_bit_count_req {
+        0 | 32 => 32,
+        24 => 24,
+        _ => return 0,
+    };
+
+    // Stride for requested output format (Wine ref: dlls/win32u/dib.c::get_dib_stride).
+    let out_stride = (bmp_w as usize * out_bpp as usize).div_ceil(32) * 4;
+    let internal_stride = bmp_w as usize * 4;
 
     // Query mode: fill BITMAPINFOHEADER, return scan-line count, no copy.
     if lp_vbits == 0 {
-        let size_image = internal_stride as u32 * bmp_h;
+        let size_image = out_stride as u32 * bmp_h;
         unsafe {
             let p = lpbmi as *mut u8;
             (p as *mut u32).write_unaligned(40);
             (p.add(4) as *mut i32).write_unaligned(bmp_w as i32);
             (p.add(8) as *mut i32).write_unaligned(bmp_h as i32); // bottom-up
             (p.add(12) as *mut u16).write_unaligned(1); // biPlanes
-            (p.add(14) as *mut u16).write_unaligned(32); // biBitCount
+            (p.add(14) as *mut u16).write_unaligned(out_bpp); // biBitCount
             (p.add(16) as *mut u32).write_unaligned(0); // BI_RGB
             (p.add(20) as *mut u32).write_unaligned(size_image);
             (p.add(24) as *mut i32).write_unaligned(0);
@@ -3851,8 +3864,19 @@ pub unsafe extern "win64" fn get_dib_bits(
         }
         unsafe {
             let src = (bits_ptr + src_row * internal_stride) as *const u8;
-            let dst_row = dst.add(i * internal_stride);
-            std::ptr::copy_nonoverlapping(src, dst_row, internal_stride);
+            let dst_row = dst.add(i * out_stride);
+            if out_bpp == 32 {
+                std::ptr::copy_nonoverlapping(src, dst_row, internal_stride);
+            } else {
+                // 24-bit output: BGRA → BGR (drop alpha byte).
+                for col in 0..bmp_w as usize {
+                    let s = src.add(col * 4);
+                    let d = dst_row.add(col * 3);
+                    *d = *s;
+                    *d.add(1) = *s.add(1);
+                    *d.add(2) = *s.add(2);
+                }
+            }
         }
     }
     lines as i32
