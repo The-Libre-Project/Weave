@@ -1142,7 +1142,16 @@ pub unsafe extern "win64" fn vk_cmd_copy_buffer_to_image(
     }
     let f: unsafe extern "C" fn(VkCommandBuffer, VkBuffer, VkImage, u32, u32, *const c_void) =
         unsafe { std::mem::transmute(f) };
-    unsafe { f(command_buffer, src_buffer, dst_image, dst_layout, region_count, p_regions) }
+    unsafe {
+        f(
+            command_buffer,
+            src_buffer,
+            dst_image,
+            dst_layout,
+            region_count,
+            p_regions,
+        )
+    }
 }
 pub unsafe extern "win64" fn vk_cmd_copy_buffer_to_image2(
     command_buffer: VkCommandBuffer,
