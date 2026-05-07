@@ -1862,12 +1862,11 @@ pub extern "win64" fn get_device_caps(hdc: usize, n_index: i32) -> i32 {
         PLANES => 1,
         LOGPIXELSX => 96,
         LOGPIXELSY => 96,
-        // Wine ref: dlls/win32u/driver.c::nulldrv_GetDeviceCaps — standard display raster caps
-        // TODO: return RASTER_CAPS_DISPLAY once CreateDIBSection/BitBlt are real implementations.
-        // IrfanView (and likely others) branch into DIB code paths when RC_DI_BITMAP/RC_DIBTODEV
-        // are set; our stubs return NULL without initialising ppvBits, causing heap corruption.
-        // Returning 0 keeps apps on the non-DIB path until Phase 3 GDI is real.
-        RASTERCAPS => 0,
+        // Wine ref: dlls/win32u/driver.c::nulldrv_GetDeviceCaps — standard display raster caps.
+        // RC_DI_BITMAP / RC_DIBTODEV now safe: GetDIBits and SetDIBitsToDevice are real.
+        // RC_FLOODFILL / RC_BIGFONT / RC_DEVBITS omitted — those paths not yet implemented.
+        RASTERCAPS => RC_BITBLT | RC_BITMAP64 | RC_GDI20_OUTPUT
+            | RC_DI_BITMAP | RC_DIBTODEV | RC_STRETCHBLT | RC_STRETCHDIB,
         _ => 0,
     }
 }
@@ -3492,23 +3491,96 @@ pub extern "win64" fn create_bitmap(
     create_compatible_bitmap(0, n_width, n_height)
 }
 
-/// GetDIBits: copy pixel data from a bitmap into a DIB. Returns 0 (stub).
+/// GetDIBits: copy pixel data from a bitmap into a DIB.
 ///
 /// # Safety
-/// Pointer arguments are accepted but not fully used.
-// Wine ref: dlls/win32u/dib.c — NtGdiGetDIBitsInternal copies scan lines from hbm into
-// lpvBits; negative biHeight in lpbmi means top-down output; uStartScan+cLines must not
-// exceed bitmap height or it clips; DIB_PAL_COLORS usage maps colors through palette.
+/// `lpbmi` must point to a readable BITMAPINFOHEADER (40 bytes). When
+/// `lp_vbits != 0` it must be a writable buffer sized for the requested scan
+/// lines. Phase 2: 32-bit BI_RGB only.
+// Wine ref: dlls/gdi32/objects.c::GetDIBits → NtGdiGetDIBitsInternal;
+// dlls/win32u/bitmap.c::NtGdiGetBitmapBits — get_image_from_bitmap extracts
+// scan lines; biHeight < 0 in lpbmi → top-down output; startscan counts from
+// the bottom for bottom-up bitmaps; lp_vbits == 0 → query mode, fills header
+// and returns bitmap height without copying pixels.
 pub unsafe extern "win64" fn get_dib_bits(
     _hdc: usize,
-    _h_bm: usize,
-    _start: u32,
-    _c_lines: u32,
-    _lp_vbits: usize,
-    _lpbmi: usize,
+    h_bm: usize,
+    start: u32,
+    c_lines: u32,
+    lp_vbits: usize,
+    lpbmi: usize,
     _usage: u32,
 ) -> i32 {
-    0
+    if h_bm == 0 || lpbmi == 0 {
+        return 0;
+    }
+
+    let bmp = objects::get(h_bm, |kind| match kind {
+        GdiKind::Bitmap { width, height, bits_ptr, bpp }
+        | GdiKind::DibSection { width, height, bits_ptr, bpp } => {
+            Some((*width, *height, *bits_ptr, *bpp))
+        }
+        _ => None,
+    });
+    let Some(Some((bmp_w, bmp_h, bits_ptr, bmp_bpp))) = bmp else {
+        return 0;
+    };
+    if bmp_bpp != 32 || bmp_w == 0 || bmp_h == 0 {
+        return 0;
+    }
+
+    let internal_stride = (bmp_w as usize) * 4;
+
+    // Query mode: fill BITMAPINFOHEADER, return scan-line count, no copy.
+    if lp_vbits == 0 {
+        let size_image = internal_stride as u32 * bmp_h;
+        unsafe {
+            let p = lpbmi as *mut u8;
+            (p as *mut u32).write_unaligned(40);
+            (p.add(4) as *mut i32).write_unaligned(bmp_w as i32);
+            (p.add(8) as *mut i32).write_unaligned(bmp_h as i32); // bottom-up
+            (p.add(12) as *mut u16).write_unaligned(1);            // biPlanes
+            (p.add(14) as *mut u16).write_unaligned(32);           // biBitCount
+            (p.add(16) as *mut u32).write_unaligned(0);            // BI_RGB
+            (p.add(20) as *mut u32).write_unaligned(size_image);
+            (p.add(24) as *mut i32).write_unaligned(0);
+            (p.add(28) as *mut i32).write_unaligned(0);
+            (p.add(32) as *mut u32).write_unaligned(0);
+            (p.add(36) as *mut u32).write_unaligned(0);
+        }
+        return bmp_h as i32;
+    }
+
+    // biHeight < 0 in caller's header → top-down output; > 0 → bottom-up.
+    let bi_height = unsafe { *((lpbmi + 8) as *const i32) };
+    let top_down_output = bi_height < 0;
+
+    if start >= bmp_h || c_lines == 0 {
+        return 0;
+    }
+    let lines = c_lines.min(bmp_h - start);
+
+    // Internal storage is top-down (row 0 = topmost pixel row).
+    // Bottom-up output row i = scan line (start+i) from the bottom
+    //   = internal row (bmp_h - 1 - start - i).
+    // Top-down output row i = internal row (start + i).
+    let dst = lp_vbits as *mut u8;
+    for i in 0..lines as usize {
+        let src_row = if top_down_output {
+            start as usize + i
+        } else {
+            (bmp_h as usize).wrapping_sub(1 + start as usize + i)
+        };
+        if src_row >= bmp_h as usize {
+            break;
+        }
+        unsafe {
+            let src = (bits_ptr + src_row * internal_stride) as *const u8;
+            let dst_row = dst.add(i * internal_stride);
+            std::ptr::copy_nonoverlapping(src, dst_row, internal_stride);
+        }
+    }
+    lines as i32
 }
 
 /// ExcludeClipRect: exclude a rectangle from the clipping region. Returns SIMPLEREGION (2).
@@ -4221,23 +4293,87 @@ pub unsafe extern "win64" fn set_brush_org_ex(
     1
 }
 
-/// SetDIBits: set pixel data in a device-independent bitmap. Returns 0 (stub).
-///
-/// Wine ref: dlls/win32u/bitblt.c::NtGdiSetDIBits — validates the BITMAPINFO header,
-/// converts DIB pixels to the target bitmap's format, copies scan lines. Phase 2 stub.
+/// SetDIBits: write pixel data from a DIB into a device-dependent bitmap.
 ///
 /// # Safety
-/// Pointer arguments are accepted but not dereferenced.
+/// `lp_bits` must point to at least `stride * c_lines` readable bytes.
+/// `lp_bmi` must point to a readable BITMAPINFOHEADER. Phase 2: 32-bit BI_RGB only.
+// Wine ref: dlls/win32u/dib.c::set_di_bits — validates BITMAPINFO, builds
+// bitblt_coords for [startscan, startscan+lines), calls put_image_into_bitmap;
+// biHeight > 0 → source is bottom-up (row 0 = bottom of image); biHeight < 0
+// → source is top-down; startscan counts from the bottom for bottom-up bitmaps.
 pub unsafe extern "win64" fn set_dib_bits(
     _hdc: usize,
-    _hbm: usize,
-    _start: u32,
-    _c_lines: u32,
-    _lp_bits: *const u8,
-    _lp_bmi: usize,
+    h_bm: usize,
+    start: u32,
+    c_lines: u32,
+    lp_bits: *const u8,
+    lp_bmi: usize,
     _color_use: u32,
 ) -> i32 {
-    0
+    if h_bm == 0 || lp_bits.is_null() || lp_bmi == 0 || c_lines == 0 {
+        return 0;
+    }
+
+    let bmp = objects::get(h_bm, |kind| match kind {
+        GdiKind::Bitmap { width, height, bits_ptr, bpp }
+        | GdiKind::DibSection { width, height, bits_ptr, bpp } => {
+            Some((*width, *height, *bits_ptr, *bpp))
+        }
+        _ => None,
+    });
+    let Some(Some((bmp_w, bmp_h, bits_ptr, bmp_bpp))) = bmp else {
+        return 0;
+    };
+    if bmp_bpp != 32 || bmp_w == 0 || bmp_h == 0 {
+        return 0;
+    }
+
+    // Parse BITMAPINFOHEADER — only 32-bit BI_RGB accepted.
+    let (bi_width, bi_height, bi_bpp, bi_comp) = unsafe {
+        let w = *((lp_bmi + 4) as *const i32);
+        let h = *((lp_bmi + 8) as *const i32);
+        let bpp = *((lp_bmi + 14) as *const u16);
+        let comp = *((lp_bmi + 16) as *const u32);
+        (w, h, bpp, comp)
+    };
+    if bi_bpp != 32 || bi_comp != 0 || bi_width <= 0 {
+        return 0;
+    }
+
+    let src_w = bi_width.unsigned_abs();
+    let abs_src_h = bi_height.unsigned_abs();
+    let top_down_src = bi_height < 0;
+
+    if start >= bmp_h || start >= abs_src_h {
+        return 0;
+    }
+    let lines = c_lines.min(bmp_h - start).min(abs_src_h - start);
+
+    let src_stride = (src_w as usize) * 4;
+    let dst_stride = (bmp_w as usize) * 4;
+    let copy_len = src_stride.min(dst_stride);
+
+    // Internal storage is top-down (row 0 = topmost pixel row).
+    // Bottom-up source: input row 0 = scan line `start` from the bottom
+    //   = internal row (bmp_h - 1 - start). Row i → internal row (bmp_h-1-start-i).
+    // Top-down source: input row i → internal row (start + i).
+    for i in 0..lines as usize {
+        let (src_row, dst_row) = if top_down_src {
+            (start as usize + i, start as usize + i)
+        } else {
+            (i, (bmp_h as usize).wrapping_sub(1 + start as usize + i))
+        };
+        if dst_row >= bmp_h as usize {
+            break;
+        }
+        unsafe {
+            let src = lp_bits.add(src_row * src_stride);
+            let dst = (bits_ptr + dst_row * dst_stride) as *mut u8;
+            std::ptr::copy_nonoverlapping(src, dst, copy_len);
+        }
+    }
+    lines as i32
 }
 
 /// DPtoLP: convert device coordinates to logical coordinates.
