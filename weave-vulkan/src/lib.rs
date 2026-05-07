@@ -1214,8 +1214,21 @@ pub unsafe extern "win64" fn vk_cmd_clear_attachments(
         None
     };
     if let Some(seq) = seq {
+        // VkClearAttachment layout: aspectMask(u32) + colorAttachment(u32) + clearValue([f32;4])
+        // Total: 24 bytes per entry. clearValue starts at offset 8.
+        let color_str = if !p_attachments.is_null() && attachment_count > 0 {
+            let base = p_attachments as *const u8;
+            let aspect = unsafe { (base as *const u32).read() };
+            let color = unsafe { std::ptr::read(base.add(8) as *const [f32; 4]) };
+            format!(
+                "aspect=0x{aspect:x} color=[{:.3},{:.3},{:.3},{:.3}]",
+                color[0], color[1], color[2], color[3]
+            )
+        } else {
+            "null".to_string()
+        };
         d3d9_trace!(
-            "vkCmdClearAttachments#{seq} attachments={attachment_count} rects={rect_count}"
+            "vkCmdClearAttachments#{seq} attachments={attachment_count} rects={rect_count} {color_str}"
         );
     }
     let f = real_fn(stored_instance(), "vkCmdClearAttachments");
