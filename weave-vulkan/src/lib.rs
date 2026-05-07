@@ -1357,15 +1357,15 @@ pub unsafe extern "win64" fn vk_cmd_begin_rendering(
     p_rendering_info: *const c_void,
 ) {
     // VkRenderingInfo offsets (spec, 64-bit):
-    //   0: sType(u32), 8: pNext(*), 16: flags(u32), 24: renderArea(16B),
-    //   40: layerCount(u32), 44: viewMask(u32), 48: colorAttachmentCount(u32),
-    //   56: pColorAttachments(*), 64: pDepthAttachment(*), 72: pStencilAttachment(*)
+    //   0: sType(u32), 8: pNext(*), 16: flags(u32), 20: renderArea(VkRect2D=16B),
+    //   36: layerCount(u32), 40: viewMask(u32), 44: colorAttachmentCount(u32),
+    //   48: pColorAttachments(*), 56: pDepthAttachment(*), 64: pStencilAttachment(*)
     // VkRenderingAttachmentInfo offsets:
     //   44: loadOp(u32, CLEAR=1), 52: clearValue([f32;4])
     if d3d9_trace_enabled() && !p_rendering_info.is_null() {
         let base = p_rendering_info as *const u8;
-        let color_count = unsafe { (base.add(48) as *const u32).read() };
-        let p_color = unsafe { (base.add(56) as *const *const u8).read() };
+        let color_count = unsafe { (base.add(44) as *const u32).read() };
+        let p_color = unsafe { (base.add(48) as *const *const u8).read() };
         let color_str = if color_count > 0 && !p_color.is_null() {
             let load_op = unsafe { (p_color.add(44) as *const u32).read() };
             let clear = unsafe { std::ptr::read(p_color.add(52) as *const [f32; 4]) };
