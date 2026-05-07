@@ -1288,6 +1288,223 @@ pub extern "win64" fn set_stretch_blt_mode(hdc: usize, mode: i32) -> i32 {
     prev
 }
 
+/// StretchDIBits: copy a source rectangle from a DIB to a destination DC with scaling.
+///
+/// First-pass scope: 32-bit BI_RGB, DIB_RGB_COLORS (iUsage=0), SRCCOPY + simple ROPs.
+/// 8/16/24-bit depths, BI_BITFIELDS, and DIB_PAL_COLORS deferred — return 0 with a
+/// one-time diagnostic. Non-source ROPs lie TRUE (same policy as StretchBlt/BitBlt).
+///
+/// Returns: nDestHeight (number of destination scan lines written) on success, 0 on error.
+///
+/// # Safety
+/// `lp_bits` must point to at least `stride × |biHeight|` bytes where
+/// `stride = ((|biWidth| × biBitCount + 31) / 32) × 4`.
+/// `lpbmi` must point to a readable BITMAPINFOHEADER (40 bytes minimum).
+// Wine ref: dlls/win32u/bitblt.c::NtGdiStretchDIBitsAndColor — validates header, clips
+// src rect to DIB bounds, calls stretch_bits (nearest-neighbor for COLORONCOLOR), then
+// driver StretchBlt. Returns dst.visrect.bottom - dst.visrect.top on success.
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "win64" fn stretch_di_bits(
+    hdc: usize,
+    x_dest: i32,
+    y_dest: i32,
+    n_dest_width: i32,
+    n_dest_height: i32,
+    x_src: i32,
+    y_src: i32,
+    n_src_width: i32,
+    n_src_height: i32,
+    lp_bits: *const u8,
+    lpbmi: usize,
+    i_usage: u32,
+    dw_rop: u32,
+) -> i32 {
+    if lpbmi == 0 || lp_bits.is_null() {
+        return 0;
+    }
+    if n_dest_width == 0 || n_dest_height == 0 || n_src_width == 0 || n_src_height == 0 {
+        return 0;
+    }
+
+    // DIB_RGB_COLORS == 0. DIB_PAL_COLORS not supported first pass.
+    if i_usage != 0 {
+        static UNSUPPORTED_USAGE: std::sync::atomic::AtomicU32 =
+            std::sync::atomic::AtomicU32::new(0);
+        if UNSUPPORTED_USAGE.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 4 {
+            eprintln!(
+                "weave/gdi32: StretchDIBits i_usage={i_usage} unsupported (DIB_RGB_COLORS only)"
+            );
+        }
+        return 0;
+    }
+
+    // Parse BITMAPINFOHEADER — same offsets as SetDIBitsToDevice / GetDIBits.
+    //   +4  biWidth (i32), +8 biHeight (i32), +14 biBitCount (u16), +16 biCompression (u32)
+    let (bi_width, bi_height, bi_bit_count, bi_compression) = unsafe {
+        (
+            *((lpbmi + 4) as *const i32),
+            *((lpbmi + 8) as *const i32),
+            *((lpbmi + 14) as *const u16),
+            *((lpbmi + 16) as *const u32),
+        )
+    };
+
+    if bi_compression != 0 {
+        static UNSUPPORTED_COMP: std::sync::atomic::AtomicU32 =
+            std::sync::atomic::AtomicU32::new(0);
+        if UNSUPPORTED_COMP.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 4 {
+            eprintln!(
+                "weave/gdi32: StretchDIBits compression={bi_compression} unsupported (BI_RGB only)"
+            );
+        }
+        return 0;
+    }
+
+    if bi_bit_count != 32 {
+        static UNSUPPORTED_BPP: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        if UNSUPPORTED_BPP.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 4 {
+            eprintln!("weave/gdi32: StretchDIBits bpp={bi_bit_count} unsupported (32-bit only)");
+        }
+        return 0;
+    }
+
+    let dib_w = bi_width.unsigned_abs() as usize;
+    let dib_h = bi_height.unsigned_abs() as usize;
+    let top_down = bi_height < 0;
+    if dib_w == 0 || dib_h == 0 {
+        return 0;
+    }
+
+    // Stride: ((|biWidth| × biBitCount + 31) / 32) × 4
+    // Wine ref: dlls/win32u/dib.c::get_dib_stride
+    let stride = ((dib_w as u64 * bi_bit_count as u64).div_ceil(32) * 4) as usize;
+    let total_bytes = stride.saturating_mul(dib_h);
+    let dib_data = unsafe { std::slice::from_raw_parts(lp_bits, total_bytes) };
+
+    // Clip source rect to DIB bounds (Wine: clip before scale).
+    let xs0 = x_src.clamp(0, dib_w as i32) as usize;
+    let ys0 = y_src.clamp(0, dib_h as i32) as usize;
+    let xs1 = (x_src + n_src_width.abs()).clamp(0, dib_w as i32) as usize;
+    let ys1 = (y_src + n_src_height.abs()).clamp(0, dib_h as i32) as usize;
+    let eff_src_w = xs1.saturating_sub(xs0);
+    let eff_src_h = ys1.saturating_sub(ys0);
+    if eff_src_w == 0 || eff_src_h == 0 {
+        return 0;
+    }
+
+    let abs_w_dest = n_dest_width.unsigned_abs() as usize;
+    let abs_h_dest = n_dest_height.unsigned_abs() as usize;
+    let scratch_bytes = match abs_w_dest
+        .checked_mul(abs_h_dest)
+        .and_then(|p| p.checked_mul(4))
+    {
+        Some(v) => v,
+        None => return 0,
+    };
+
+    // Nearest-neighbor scale into a top-down BGRA scratch buffer.
+    // Negative src or dest dimensions mirror independently; XOR gives net flip.
+    // Wine ref: dlls/win32u/bitblt.c::stretch_bitmapinfo — COLORONCOLOR formula:
+    //   src_idx = src_origin + dst_idx * src_span / dst_span (floor).
+    let flip_x = (n_dest_width < 0) ^ (n_src_width < 0);
+    let flip_y = (n_dest_height < 0) ^ (n_src_height < 0);
+
+    let mut scratch = vec![0u8; scratch_bytes];
+    for dy in 0..abs_h_dest {
+        let dy_out = if flip_y { abs_h_dest - 1 - dy } else { dy };
+        // Map dest row → source row in the DIB (top-down normalized).
+        let src_row_logical = ys0 + (dy * eff_src_h) / abs_h_dest.max(1);
+        let src_row_logical = src_row_logical.min(dib_h.saturating_sub(1));
+        // Convert logical row (top-down) to physical DIB row offset.
+        let phys_row = if top_down {
+            src_row_logical
+        } else {
+            dib_h - 1 - src_row_logical
+        };
+        let row_base = phys_row * stride;
+        for dx in 0..abs_w_dest {
+            let dx_out = if flip_x { abs_w_dest - 1 - dx } else { dx };
+            let src_col = xs0 + (dx * eff_src_w) / abs_w_dest.max(1);
+            let src_col = src_col.min(dib_w.saturating_sub(1));
+            let src_off = row_base + src_col * 4;
+            let dst_off = (dy_out * abs_w_dest + dx_out) * 4;
+            if src_off + 4 <= dib_data.len() && dst_off + 4 <= scratch.len() {
+                scratch[dst_off..dst_off + 4].copy_from_slice(&dib_data[src_off..src_off + 4]);
+            }
+        }
+    }
+
+    let dst_draw = dc::with(hdc, |dc| dc.drawable());
+    if dst_draw == 0 {
+        return abs_h_dest as i32;
+    }
+
+    let scratch_ptr = scratch.as_ptr() as usize;
+    let tmp_pixmap =
+        weave_user32::backend::create_pixmap(dst_draw, abs_w_dest as u16, abs_h_dest as u16);
+    if tmp_pixmap == 0 {
+        // Headless — CPU scale ran; skip X11 upload (lie success per Task-17 policy).
+        return abs_h_dest as i32;
+    }
+    unsafe {
+        weave_user32::backend::put_dib_to_pixmap(
+            tmp_pixmap,
+            abs_w_dest as u32,
+            abs_h_dest as u32,
+            scratch_ptr,
+            32,
+        );
+    }
+
+    let gx_func = match dw_rop {
+        defs::SRCCOPY => Some(weave_user32::backend::GX_COPY),
+        defs::NOTSRCCOPY => Some(weave_user32::backend::GX_COPY_INVERTED),
+        defs::SRCINVERT => Some(weave_user32::backend::GX_XOR),
+        defs::SRCAND => Some(weave_user32::backend::GX_AND),
+        defs::SRCPAINT => Some(weave_user32::backend::GX_OR),
+        _ => None,
+    };
+
+    match gx_func {
+        Some(gx) if gx == weave_user32::backend::GX_COPY => {
+            weave_user32::backend::copy_area(
+                tmp_pixmap,
+                dst_draw,
+                0,
+                0,
+                x_dest as i16,
+                y_dest as i16,
+                abs_w_dest as u16,
+                abs_h_dest as u16,
+            );
+        }
+        Some(gx) => {
+            weave_user32::backend::copy_area_with_rop(
+                tmp_pixmap,
+                dst_draw,
+                0,
+                0,
+                x_dest as i16,
+                y_dest as i16,
+                abs_w_dest as u16,
+                abs_h_dest as u16,
+                gx,
+            );
+        }
+        None => {
+            static UNK: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+            if UNK.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 8 {
+                eprintln!(
+                    "weave/gdi32: StretchDIBits unrecognised ROP {dw_rop:#010x} → lying TRUE"
+                );
+            }
+        }
+    }
+
+    weave_user32::backend::free_pixmap(tmp_pixmap);
+    abs_h_dest as i32
+}
+
 /// SetROP2: set the foreground mix mode (stub).
 // Wine ref: dlls/win32u/dc.c — stores rop2 in dc->attr->rop_mode; valid range 1..16
 // (R2_BLACK..R2_WHITE); returns previous mode; out-of-range values stored as-is.
@@ -2059,6 +2276,10 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "PatBlt" => Some(pat_blt as *const () as usize),
         "BitBlt" => Some(bit_blt as *const () as usize),
         "StretchBlt" => Some(stretch_blt as *const () as usize),
+        "StretchDIBits" => Some(
+            stretch_di_bits as unsafe extern "win64" fn(_, _, _, _, _, _, _, _, _, _, _, _, _) -> _
+                as *const () as usize,
+        ),
         "SetStretchBltMode" => Some(set_stretch_blt_mode as *const () as usize),
         "SetROP2" => Some(set_rop2 as *const () as usize),
         // Memory DCs and bitmaps
