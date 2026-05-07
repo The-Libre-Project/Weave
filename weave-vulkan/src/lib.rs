@@ -1352,7 +1352,39 @@ cmd_thunk!(void vk_cmd_next_subpass, "vkCmdNextSubpass", (command_buffer, conten
 cmd_thunk!(void vk_cmd_next_subpass2, "vkCmdNextSubpass2", (command_buffer, p_subpass_begin_info: *const c_void, p_subpass_end_info: *const c_void));
 cmd_thunk!(void vk_cmd_end_render_pass, "vkCmdEndRenderPass", (command_buffer,));
 cmd_thunk!(void vk_cmd_end_render_pass2, "vkCmdEndRenderPass2", (command_buffer, p_subpass_end_info: *const c_void));
-cmd_thunk!(void vk_cmd_begin_rendering, "vkCmdBeginRendering", (command_buffer, p_rendering_info: *const c_void));
+pub unsafe extern "win64" fn vk_cmd_begin_rendering(
+    command_buffer: VkCommandBuffer,
+    p_rendering_info: *const c_void,
+) {
+    // VkRenderingInfo offsets (spec, 64-bit):
+    //   0: sType(u32), 8: pNext(*), 16: flags(u32), 24: renderArea(16B),
+    //   40: layerCount(u32), 44: viewMask(u32), 48: colorAttachmentCount(u32),
+    //   56: pColorAttachments(*), 64: pDepthAttachment(*), 72: pStencilAttachment(*)
+    // VkRenderingAttachmentInfo offsets:
+    //   44: loadOp(u32, CLEAR=1), 52: clearValue([f32;4])
+    if d3d9_trace_enabled() && !p_rendering_info.is_null() {
+        let base = p_rendering_info as *const u8;
+        let color_count = unsafe { (base.add(48) as *const u32).read() };
+        let p_color = unsafe { (base.add(56) as *const *const u8).read() };
+        let color_str = if color_count > 0 && !p_color.is_null() {
+            let load_op = unsafe { (p_color.add(44) as *const u32).read() };
+            let clear = unsafe { std::ptr::read(p_color.add(52) as *const [f32; 4]) };
+            format!(
+                "loadOp={load_op} clear=[{:.3},{:.3},{:.3},{:.3}]",
+                clear[0], clear[1], clear[2], clear[3]
+            )
+        } else {
+            "no-color".to_string()
+        };
+        d3d9_trace!("vkCmdBeginRendering color_att={color_count} {color_str}");
+    }
+    let f = real_fn(stored_instance(), "vkCmdBeginRendering");
+    if f.is_null() {
+        return;
+    }
+    let f: unsafe extern "C" fn(VkCommandBuffer, *const c_void) = unsafe { std::mem::transmute(f) };
+    unsafe { f(command_buffer, p_rendering_info) }
+}
 cmd_thunk!(void vk_cmd_end_rendering, "vkCmdEndRendering", (command_buffer,));
 cmd_thunk!(void vk_cmd_execute_commands, "vkCmdExecuteCommands", (command_buffer, command_buffer_count: u32, p_command_buffers: *const VkCommandBuffer));
 cmd_thunk!(void vk_cmd_bind_descriptor_sets2, "vkCmdBindDescriptorSets2", (command_buffer, p_bind_descriptor_sets_info: *const c_void));
