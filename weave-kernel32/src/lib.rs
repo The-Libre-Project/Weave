@@ -15657,11 +15657,10 @@ mod tests {
 
     #[cfg(target_arch = "x86_64")]
     #[test]
-    fn mbtowc_too_small_destination_writes_nul_terminated_prefix() {
-        // NXEngine sizes its wide buffer to strlen(src) (no +1 for NUL); the
-        // case-fold + extension-prefix fallback in `_wfopen` recovers the real
-        // path from the truncated prefix. Verify the prefix is preserved on
-        // ERROR_INSUFFICIENT_BUFFER for cb<0.
+    fn mbtowc_too_small_destination_writes_cap_chars_no_nul() {
+        // NXEngine sizes its wide buffer to strlen(src) (no +1 for NUL).
+        // Wine ref: WideCharToMultiByte truncates to count with no NUL terminator on
+        // INSUFFICIENT_BUFFER; MultiByteToWideChar is symmetric — writes cap chars, no NUL.
         let src = b"font_1.fnt\0";
         let mut buf = [0xAAAAu16; 10]; // strlen("font_1.fnt") = 10, required = 11
         set_last_error(0);
@@ -15677,10 +15676,9 @@ mod tests {
         };
         assert_eq!(n, 0);
         assert_eq!(get_last_error(), 122);
-        // Expect 9 chars of "font_1.fn" + trailing NUL
-        let s = String::from_utf16(&buf[..9]).unwrap();
-        assert_eq!(s, "font_1.fn");
-        assert_eq!(buf[9], 0);
+        // Expect all 10 chars "font_1.fnt" written, no NUL (cap chars, Wine symmetric behaviour)
+        let s = String::from_utf16(&buf[..10]).unwrap();
+        assert_eq!(s, "font_1.fnt");
     }
 
     // ── .px* full-path contracts (Contract 2) ───────────────────────────────
