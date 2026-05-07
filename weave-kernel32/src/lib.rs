@@ -13811,58 +13811,319 @@ pub unsafe extern "win64" fn get_cp_info(code_page: u32, lp_cp_info: *mut CpInfo
     1
 }
 
-/// GetDateFormatW: format a date as a string. Returns stub "2026-01-01\0".
+/// GetDateFormatW: format a date as a localized string.
 ///
 /// # Safety
-/// `lp_date_str` must be a writable buffer of at least `cch_date` wide chars.
-// Wine ref: dlls/kernelbase/locale.c — cchDate==0 returns required size; uses SYSTEMTIME if
-// lpDate==NULL (current local time via GetLocalTime); expands format tokens d/dd/M/MM/y/yy/yyyy;
-// locale-aware month/day names from NLS data tables
+/// `lp_date` is a *const SystemTime or null (null → current local time).
+/// `lp_format` is a null-terminated UTF-16 custom format string or null.
+/// `lp_date_str` must be writable for at least `cch_date` wide chars when non-zero.
+// Wine ref: dlls/kernelbase/locale.c:7925 — get_date_format: lpDate=NULL → GetLocalTime;
+// cchDate=0 → return required buffer size (including NUL); tokens: d/dd (day), ddd/dddd
+// (abbrev/full day name), M/MM (month), MMM/MMMM (abbrev/full month), y/yy (2-digit year),
+// yyy+ (4-digit year), 'text' (literal). Mutually-exclusive flag combos → ERROR_INVALID_FLAGS.
 pub unsafe extern "win64" fn get_date_format_w(
     _locale: u32,
-    _dw_flags: u32,
-    _lp_date: usize,
-    _lp_format: *const u16,
+    dw_flags: u32,
+    lp_date: usize,
+    lp_format: *const u16,
     lp_date_str: *mut u16,
     cch_date: i32,
 ) -> i32 {
-    warn_once("GetDateFormatW");
-    let s: Vec<u16> = "2026-01-01"
-        .encode_utf16()
-        .chain(std::iter::once(0))
-        .collect();
-    let copy = (s.len()).min(cch_date as usize);
-    if !lp_date_str.is_null() && cch_date > 0 {
-        unsafe { std::ptr::copy_nonoverlapping(s.as_ptr(), lp_date_str, copy) };
+    // Read SYSTEMTIME or fall back to current local time.
+    let st: SystemTime = if lp_date != 0 {
+        unsafe { std::ptr::read(lp_date as *const SystemTime) }
+    } else {
+        let mut tv = libc::timeval {
+            tv_sec: 0,
+            tv_usec: 0,
+        };
+        unsafe { libc::gettimeofday(&mut tv, std::ptr::null_mut()) };
+        let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+        unsafe { libc::localtime_r(&tv.tv_sec, &mut tm) };
+        SystemTime {
+            w_year: (tm.tm_year + 1900) as u16,
+            w_month: (tm.tm_mon + 1) as u16,
+            w_day_of_week: tm.tm_wday as u16,
+            w_day: tm.tm_mday as u16,
+            w_hour: tm.tm_hour as u16,
+            w_minute: tm.tm_min as u16,
+            w_second: tm.tm_sec as u16,
+            w_milliseconds: 0,
+        }
+    };
+
+    // Build format string. Custom format overrides flags; flags select the locale pattern.
+    let fmt: Vec<u16> = if !lp_format.is_null() {
+        let mut len = 0usize;
+        while unsafe { *lp_format.add(len) } != 0 {
+            len += 1;
+        }
+        unsafe { std::slice::from_raw_parts(lp_format, len) }.to_vec()
+    } else {
+        const DATE_LONGDATE: u32 = 0x02;
+        let s = if dw_flags & DATE_LONGDATE != 0 {
+            "MMMM d, yyyy"
+        } else {
+            "M/d/yyyy"
+        };
+        s.encode_utf16().collect()
+    };
+
+    // Expand format tokens → UTF-16 output.
+    // Wine ref: dlls/kernelbase/locale.c:7977 — same token set.
+    const MONTH_ABBREV: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    const MONTH_FULL: [&str; 12] = [
+        "January",
+        "February",
+        "March",
+        "April",
+        "May",
+        "June",
+        "July",
+        "August",
+        "September",
+        "October",
+        "November",
+        "December",
+    ];
+    const DAY_ABBREV: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+    const DAY_FULL: [&str; 7] = [
+        "Sunday",
+        "Monday",
+        "Tuesday",
+        "Wednesday",
+        "Thursday",
+        "Friday",
+        "Saturday",
+    ];
+
+    let mut output: Vec<u16> = Vec::with_capacity(64);
+    let mut i = 0usize;
+    while i < fmt.len() {
+        let ch = fmt[i];
+        // Count run of identical chars (determines token width: d vs dd vs ddd etc.)
+        let mut count = 1usize;
+        while i + count < fmt.len() && fmt[i + count] == ch {
+            count += 1;
+        }
+        match ch as u8 {
+            b'd' => {
+                let dow = st.w_day_of_week as usize;
+                let s = match count {
+                    1 => format!("{}", st.w_day),
+                    2 => format!("{:02}", st.w_day),
+                    3 => DAY_ABBREV.get(dow).copied().unwrap_or("?").to_string(),
+                    _ => DAY_FULL.get(dow).copied().unwrap_or("?").to_string(),
+                };
+                output.extend(s.encode_utf16());
+                i += count;
+            }
+            b'M' => {
+                let mi = st.w_month.saturating_sub(1) as usize;
+                let s = match count {
+                    1 => format!("{}", st.w_month),
+                    2 => format!("{:02}", st.w_month),
+                    3 => MONTH_ABBREV.get(mi).copied().unwrap_or("?").to_string(),
+                    _ => MONTH_FULL.get(mi).copied().unwrap_or("?").to_string(),
+                };
+                output.extend(s.encode_utf16());
+                i += count;
+            }
+            b'y' => {
+                let s = if count <= 2 {
+                    format!("{:02}", st.w_year % 100)
+                } else {
+                    format!("{:04}", st.w_year)
+                };
+                output.extend(s.encode_utf16());
+                i += count;
+            }
+            b'\'' => {
+                // Quoted literal: 'text' — copy inner chars verbatim.
+                i += 1;
+                while i < fmt.len() {
+                    if fmt[i] == b'\'' as u16 {
+                        i += 1;
+                        break;
+                    }
+                    output.push(fmt[i]);
+                    i += 1;
+                }
+            }
+            _ => {
+                output.push(ch);
+                i += 1;
+            }
+        }
     }
-    copy as i32
+    output.push(0); // NUL terminator
+
+    let needed = output.len() as i32;
+    if cch_date == 0 {
+        return needed;
+    }
+    if lp_date_str.is_null() || cch_date < needed {
+        set_last_error(122); // ERROR_INSUFFICIENT_BUFFER
+        return 0;
+    }
+    unsafe { std::ptr::copy_nonoverlapping(output.as_ptr(), lp_date_str, output.len()) };
+    needed
 }
 
-/// GetTimeFormatW: format a time as a string. Returns stub "00:00:00\0".
+/// GetTimeFormatW: format a time as a localized string.
 ///
 /// # Safety
-/// `lp_time_str` must be a writable buffer of at least `cch_time` wide chars.
-// Wine ref: dlls/kernelbase/locale.c — cchTime==0 returns required size; TIME_NOSECONDS strips
-// seconds; TIME_NOTIMEMARKER strips AM/PM; h/hh/H/HH/m/mm/s/ss/tt tokens expanded from SYSTEMTIME;
-// locale NLS table supplies AM/PM strings
+/// `lp_time` is a *const SystemTime or null (null → current local time).
+/// `lp_format` is a null-terminated UTF-16 custom format string or null.
+/// `lp_time_str` must be writable for at least `cch_time` wide chars when non-zero.
+// Wine ref: dlls/kernelbase/locale.c — get_time_format: lpTime=NULL → GetLocalTime;
+// cchTime=0 → return required size; tokens: h/hh (12h), H/HH (24h), m/mm, s/ss, t/tt (AM/PM).
+// TIME_NOSECONDS(0x02) skips s/ss; TIME_FORCE24HOURFORMAT(0x08) forces H/HH even for h/hh.
 pub unsafe extern "win64" fn get_time_format_w(
     _locale: u32,
-    _dw_flags: u32,
-    _lp_time: usize,
-    _lp_format: *const u16,
+    dw_flags: u32,
+    lp_time: usize,
+    lp_format: *const u16,
     lp_time_str: *mut u16,
     cch_time: i32,
 ) -> i32 {
-    warn_once("GetTimeFormatW");
-    let s: Vec<u16> = "00:00:00"
-        .encode_utf16()
-        .chain(std::iter::once(0))
-        .collect();
-    let copy = (s.len()).min(cch_time as usize);
-    if !lp_time_str.is_null() && cch_time > 0 {
-        unsafe { std::ptr::copy_nonoverlapping(s.as_ptr(), lp_time_str, copy) };
+    // Read SYSTEMTIME or fall back to current local time.
+    let st: SystemTime = if lp_time != 0 {
+        unsafe { std::ptr::read(lp_time as *const SystemTime) }
+    } else {
+        let mut tv = libc::timeval {
+            tv_sec: 0,
+            tv_usec: 0,
+        };
+        unsafe { libc::gettimeofday(&mut tv, std::ptr::null_mut()) };
+        let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+        unsafe { libc::localtime_r(&tv.tv_sec, &mut tm) };
+        SystemTime {
+            w_year: (tm.tm_year + 1900) as u16,
+            w_month: (tm.tm_mon + 1) as u16,
+            w_day_of_week: tm.tm_wday as u16,
+            w_day: tm.tm_mday as u16,
+            w_hour: tm.tm_hour as u16,
+            w_minute: tm.tm_min as u16,
+            w_second: tm.tm_sec as u16,
+            w_milliseconds: 0,
+        }
+    };
+
+    const TIME_NOSECONDS: u32 = 0x02;
+    const TIME_NOTIMEMARKER: u32 = 0x04;
+    const TIME_FORCE24HOURFORMAT: u32 = 0x08;
+    let no_seconds = dw_flags & TIME_NOSECONDS != 0;
+    let no_marker = dw_flags & TIME_NOTIMEMARKER != 0;
+    let force24 = dw_flags & TIME_FORCE24HOURFORMAT != 0;
+
+    // Build format string.
+    let fmt: Vec<u16> = if !lp_format.is_null() {
+        let mut len = 0usize;
+        while unsafe { *lp_format.add(len) } != 0 {
+            len += 1;
+        }
+        unsafe { std::slice::from_raw_parts(lp_format, len) }.to_vec()
+    } else {
+        let s = if no_seconds { "h:mm tt" } else { "h:mm:ss tt" };
+        s.encode_utf16().collect()
+    };
+
+    let hour12 = if st.w_hour == 0 {
+        12u16
+    } else if st.w_hour > 12 {
+        st.w_hour - 12
+    } else {
+        st.w_hour
+    };
+    let ampm = if st.w_hour < 12 { "AM" } else { "PM" };
+
+    let mut output: Vec<u16> = Vec::with_capacity(32);
+    let mut i = 0usize;
+    while i < fmt.len() {
+        let ch = fmt[i];
+        let mut count = 1usize;
+        while i + count < fmt.len() && fmt[i + count] == ch {
+            count += 1;
+        }
+        match ch as u8 {
+            b'h' => {
+                let hour = if force24 { st.w_hour } else { hour12 };
+                let s = if count == 1 {
+                    format!("{}", hour)
+                } else {
+                    format!("{:02}", hour)
+                };
+                output.extend(s.encode_utf16());
+                i += count;
+            }
+            b'H' => {
+                let s = if count == 1 {
+                    format!("{}", st.w_hour)
+                } else {
+                    format!("{:02}", st.w_hour)
+                };
+                output.extend(s.encode_utf16());
+                i += count;
+            }
+            b'm' => {
+                let s = if count == 1 {
+                    format!("{}", st.w_minute)
+                } else {
+                    format!("{:02}", st.w_minute)
+                };
+                output.extend(s.encode_utf16());
+                i += count;
+            }
+            b's' => {
+                if !no_seconds {
+                    let s = if count == 1 {
+                        format!("{}", st.w_second)
+                    } else {
+                        format!("{:02}", st.w_second)
+                    };
+                    output.extend(s.encode_utf16());
+                }
+                i += count;
+            }
+            b't' => {
+                if !no_marker {
+                    let marker = if count == 1 { &ampm[..1] } else { ampm };
+                    output.extend(marker.encode_utf16());
+                }
+                i += count;
+            }
+            b'\'' => {
+                i += 1;
+                while i < fmt.len() {
+                    if fmt[i] == b'\'' as u16 {
+                        i += 1;
+                        break;
+                    }
+                    output.push(fmt[i]);
+                    i += 1;
+                }
+            }
+            _ => {
+                output.push(ch);
+                i += 1;
+            }
+        }
     }
-    copy as i32
+    output.push(0); // NUL terminator
+
+    let needed = output.len() as i32;
+    if cch_time == 0 {
+        return needed;
+    }
+    if lp_time_str.is_null() || cch_time < needed {
+        set_last_error(122); // ERROR_INSUFFICIENT_BUFFER
+        return 0;
+    }
+    unsafe { std::ptr::copy_nonoverlapping(output.as_ptr(), lp_time_str, output.len()) };
+    needed
 }
 
 /// MEMORYSTATUS layout (Windows 9x/NT).

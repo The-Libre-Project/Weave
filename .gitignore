@@ -56,3 +56,6 @@ tests/fixtures/nxengine/
 
 # Internal strategy and design docs — kept private, not for end users
 docs/
+!docs/
+docs/*
+!docs/ERA3-ROADMAP.md
