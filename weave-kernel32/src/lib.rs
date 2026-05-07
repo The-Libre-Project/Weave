@@ -1458,8 +1458,9 @@ pub unsafe extern "win64" fn set_handle_information(
     _dw_mask: u32,
     _dw_flags: u32,
 ) -> i32 {
-    warn_once("SetHandleInformation");
-    1 // TRUE
+    // Wine ref: dlls/kernelbase/handle.c — NtSetInformationObject(ObjectHandleFlags).
+    // Weave: handle inheritance and protection flags are not tracked; accept silently.
+    1
 }
 
 // ── Task 2 — One-time init + waitable timers ─────────────────────────────────
@@ -2182,9 +2183,13 @@ pub extern "win64" fn global_unlock(_h_mem: usize) -> i32 {
 /// Phase 2: we don't track sizes; returns 0 (stub).
 // Wine ref: dlls/kernelbase/memory.c — delegates to LocalSize; calls
 // HeapSize on the underlying allocation; returns 0 for NULL or invalid handles.
-pub extern "win64" fn global_size(_h_mem: usize) -> usize {
-    warn_once("GlobalSize");
-    0
+pub extern "win64" fn global_size(h_mem: usize) -> usize {
+    // Wine ref: dlls/kernelbase/memory.c — RtlSizeHeap on the underlying block;
+    // GMEM_FIXED allocations store the heap pointer directly as the handle.
+    if h_mem == 0 {
+        return 0;
+    }
+    unsafe { libc::malloc_usable_size(h_mem as *mut _) }
 }
 
 /// LocalAlloc: allocate a block of local memory (alias for GlobalAlloc).
@@ -3433,9 +3438,15 @@ pub unsafe extern "win64" fn wait_for_input_idle(_h_process: usize, _dw_millisec
 /// Pointer arguments are accepted but not dereferenced.
 // Wine ref: dlls/kernelbase/process.c:886 — calls NtQueryInformationProcess(ProcessBasicInformation);
 // returns pbi.UniqueProcessId; returns 0 on NT error (sets LastError via set_ntstatus).
-pub unsafe extern "win64" fn get_process_id(_process: usize) -> u32 {
-    warn_once("GetProcessId");
-    1000 // fake PID
+pub unsafe extern "win64" fn get_process_id(process: usize) -> u32 {
+    // Wine ref: dlls/kernelbase/process.c — NtQueryInformationProcess(ProcessBasicInformation)
+    // → UniqueProcessId. Pseudo-handle (usize::MAX) = current process → getpid().
+    // Handles from OpenProcess store the PID directly as the handle value.
+    if process == usize::MAX || process == 0 {
+        unsafe { libc::getpid() as u32 }
+    } else {
+        process as u32
+    }
 }
 
 /// # Safety
@@ -7515,11 +7526,10 @@ pub extern "win64" fn get_active_processor_count(group_number: u16) -> u32 {
 /// # Safety
 /// `lp_flags` must be a valid writable pointer or NULL.
 pub unsafe extern "win64" fn get_handle_information(_h_object: usize, lp_flags: *mut u32) -> i32 {
-    warn_once("GetHandleInformation");
-    unsafe {
-        if !lp_flags.is_null() {
-            *lp_flags = 0;
-        }
+    // Wine ref: dlls/kernelbase/handle.c — NtQueryObject(ObjectHandleFlags).
+    // Weave: no handle flags tracked; report 0 (non-inheritable, non-protected).
+    if !lp_flags.is_null() {
+        unsafe { *lp_flags = 0 };
     }
     1
 }
@@ -10559,8 +10569,9 @@ pub extern "win64" fn get_environment_strings_a() -> usize {
 /// `penv` is accepted but not dereferenced.
 // Wine ref: dlls/kernelbase/process.c — frees the heap allocation returned by GetEnvironmentStringsW; NULL is accepted
 pub unsafe extern "win64" fn free_environment_strings_w(_penv: *mut u16) -> i32 {
-    warn_once("FreeEnvironmentStringsW");
-    1 // TRUE
+    // Wine ref: dlls/kernelbase/process.c — frees heap block from GetEnvironmentStringsW.
+    // Weave: GetEnvironmentStringsW returns a static array pointer; nothing to free.
+    1
 }
 
 /// FreeEnvironmentStringsA: no-op, returns TRUE.
@@ -10569,8 +10580,9 @@ pub unsafe extern "win64" fn free_environment_strings_w(_penv: *mut u16) -> i32 
 /// `penv` is accepted but not dereferenced.
 // Wine ref: dlls/kernelbase/process.c — frees the heap allocation returned by GetEnvironmentStringsA; NULL is accepted
 pub unsafe extern "win64" fn free_environment_strings_a(_penv: *mut u8) -> i32 {
-    warn_once("FreeEnvironmentStringsA");
-    1 // TRUE
+    // Wine ref: dlls/kernelbase/process.c — frees heap block from GetEnvironmentStringsA.
+    // Weave: GetEnvironmentStringsA returns a static array pointer; nothing to free.
+    1
 }
 
 // ── Locale functions ────────────────────────────────────────────────────────
@@ -13915,7 +13927,9 @@ pub fn resolve_psapi(dll: &str, func: &str) -> Option<usize> {
 // Wine ref: dlls/win32u/driver.c — dispatches to the display driver's pBeep callback (e.g.
 // X11DRV_Beep calls XBell); nulldrv_Beep is a no-op; Weave has no audio output
 pub extern "win64" fn beep(_dw_freq: u32, _dw_duration: u32) -> i32 {
-    warn_once("Beep");
+    // Wine ref: dlls/kernelbase/utils.c — NtDeviceIoControlFile on \Device\Beep.
+    // Weave: write BEL character to stderr (terminal bell).
+    unsafe { libc::write(2, b"\x07".as_ptr() as *const libc::c_void, 1) };
     1
 }
 
