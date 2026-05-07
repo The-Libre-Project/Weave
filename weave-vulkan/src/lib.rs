@@ -847,7 +847,30 @@ dev_thunk!(vk_get_pipeline_cache_data, "vkGetPipelineCacheData", VkResult, (devi
 dev_thunk!(vk_merge_pipeline_caches, "vkMergePipelineCaches", VkResult, (device, dst: VkPipelineCache, src_count: u32, p_src: *const VkPipelineCache));
 dev_thunk!(vk_create_buffer, "vkCreateBuffer", VkResult, (device, p_info: *const c_void, p_allocator: *const c_void, p_buffer: *mut VkBuffer));
 dev_thunk!(void vk_destroy_buffer, "vkDestroyBuffer", (device, buffer: VkBuffer, p_allocator: *const c_void));
-dev_thunk!(vk_create_image, "vkCreateImage", VkResult, (device, p_info: *const c_void, p_allocator: *const c_void, p_image: *mut VkImage));
+pub unsafe extern "win64" fn vk_create_image(
+    device: VkDevice,
+    p_info: *const c_void,
+    p_allocator: *const c_void,
+    p_image: *mut VkImage,
+) -> VkResult {
+    // VkImageCreateInfo offsets (spec, 64-bit):
+    //   0: sType(u32), 8: pNext(*), 16: flags(u32), 20: imageType(u32),
+    //   24: format(u32), 28: extent.width(u32), 32: extent.height(u32)
+    if d3d9_trace_enabled() && !p_info.is_null() {
+        let base = p_info as *const u8;
+        let fmt = unsafe { (base.add(24) as *const u32).read() };
+        let w = unsafe { (base.add(28) as *const u32).read() };
+        let h = unsafe { (base.add(32) as *const u32).read() };
+        d3d9_trace!("vkCreateImage fmt={fmt} {w}x{h}");
+    }
+    let f = real_device_fn(device, "vkCreateImage");
+    if f.is_null() {
+        return unsafe { std::mem::zeroed() };
+    }
+    let f: unsafe extern "C" fn(VkDevice, *const c_void, *const c_void, *mut VkImage) -> VkResult =
+        unsafe { std::mem::transmute(f) };
+    unsafe { f(device, p_info, p_allocator, p_image) }
+}
 dev_thunk!(void vk_destroy_image, "vkDestroyImage", (device, image: VkImage, p_allocator: *const c_void));
 dev_thunk!(void vk_get_image_subresource_layout, "vkGetImageSubresourceLayout", (device, image: VkImage, p_subresource: *const c_void, p_layout: *mut c_void));
 dev_thunk!(vk_create_image_view, "vkCreateImageView", VkResult, (device, p_info: *const c_void, p_allocator: *const c_void, p_view: *mut VkImageView));
