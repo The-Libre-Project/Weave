@@ -2265,13 +2265,7 @@ pub unsafe extern "win64" fn ucrt_fopen(path: *const u8, mode: *const u8) -> *mu
         // Case-fold + extension-prefix fallback (handles Win32 buffer truncation
         // where e.g. "font_1.fn" is passed but "font_1.fnt" exists on disk).
         if let Some(folded) = weave_core::file_io::case_fold_lookup(&linux_path) {
-            eprintln!(
-                "weave/fopen: case_fold fallback {:?} → {:?}",
-                linux_path, folded
-            );
             result = unsafe { libc::fopen(folded.as_ptr(), mode as *const libc::c_char) };
-        } else {
-            eprintln!("weave/fopen: MISS {:?} (no case_fold match)", linux_path);
         }
     }
     result as *mut c_void
@@ -2313,10 +2307,6 @@ pub unsafe extern "win64" fn ucrt_wfopen(path: *const u16, mode: *const u16) -> 
         // Confirmed via nxengine_d3d9_gate CI run 25237583085: the SIFLoader
         // passes a path one char short of `.sif`, identical to font_1.fn → .fnt.
         if let Some(folded) = weave_core::file_io::case_fold_lookup(&linux_path) {
-            eprintln!(
-                "weave/wfopen: case_fold fallback {:?} → {:?}",
-                linux_path, folded
-            );
             result = unsafe { libc::fopen(folded.as_ptr(), mode_cstr.as_ptr()) };
         }
     }

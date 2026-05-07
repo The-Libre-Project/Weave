@@ -30,7 +30,10 @@
 #![allow(clippy::missing_safety_doc)]
 
 use std::ffi::{c_char, c_void, CStr, CString};
-use std::sync::OnceLock;
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    OnceLock,
+};
 
 // ── Vulkan type aliases ───────────────────────────────────────────────────────
 
@@ -89,6 +92,45 @@ const VK_STRUCTURE_TYPE_XCB_SURFACE_CREATE_INFO_KHR: u32 = 1_000_005_000;
 
 const EXT_WIN32_SURFACE: &[u8] = b"VK_KHR_win32_surface\0";
 const EXT_XCB_SURFACE: &[u8] = b"VK_KHR_xcb_surface\0";
+
+static D3D9_TRACE_ENABLED: OnceLock<bool> = OnceLock::new();
+static D3D9_TRACE_START: OnceLock<std::time::Instant> = OnceLock::new();
+static D3D9_SUBMIT_COUNT: AtomicU64 = AtomicU64::new(0);
+static D3D9_PRESENT_COUNT: AtomicU64 = AtomicU64::new(0);
+static D3D9_DRAW_COUNT: AtomicU64 = AtomicU64::new(0);
+static D3D9_CLEAR_COUNT: AtomicU64 = AtomicU64::new(0);
+
+fn d3d9_trace_enabled() -> bool {
+    *D3D9_TRACE_ENABLED.get_or_init(|| {
+        std::env::var("WEAVE_D3D9_TRACE")
+            .map(|v| v == "1")
+            .unwrap_or(false)
+    })
+}
+
+fn d3d9_trace_ms() -> u128 {
+    D3D9_TRACE_START
+        .get_or_init(std::time::Instant::now)
+        .elapsed()
+        .as_millis()
+}
+
+fn d3d9_trace_counts() -> (u64, u64, u64, u64) {
+    (
+        D3D9_SUBMIT_COUNT.load(Ordering::Relaxed),
+        D3D9_PRESENT_COUNT.load(Ordering::Relaxed),
+        D3D9_DRAW_COUNT.load(Ordering::Relaxed),
+        D3D9_CLEAR_COUNT.load(Ordering::Relaxed),
+    )
+}
+
+macro_rules! d3d9_trace {
+    ($($arg:tt)*) => {
+        if d3d9_trace_enabled() {
+            eprintln!("weave/d3d9-trace t={}ms {}", d3d9_trace_ms(), format_args!($($arg)*));
+        }
+    };
+}
 
 // ── Vulkan structures ─────────────────────────────────────────────────────────
 
@@ -262,7 +304,7 @@ fn xcb_connection() -> Option<*mut c_void> {
 // We store it when vkCreateInstance succeeds (single-instance assumption,
 // which covers all games).
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::AtomicUsize;
 static INSTANCE: AtomicUsize = AtomicUsize::new(0);
 
 fn stored_instance() -> VkInstance {
@@ -666,6 +708,17 @@ pub unsafe extern "win64" fn vk_queue_submit(
     p_submits: *const c_void,
     fence: VkFence,
 ) -> VkResult {
+    let seq = if d3d9_trace_enabled() {
+        Some(D3D9_SUBMIT_COUNT.fetch_add(1, Ordering::Relaxed) + 1)
+    } else {
+        None
+    };
+    if let Some(seq) = seq {
+        let (_, presents, draws, clears) = d3d9_trace_counts();
+        d3d9_trace!(
+            "vkQueueSubmit#{seq} ENTER submits={submit_count} fence=0x{fence:x} draws={draws} clears={clears} presents={presents}"
+        );
+    }
     eprintln!(
         "weave-vulkan: vk_queue_submit ENTER queue={:p} count={submit_count} fence=0x{fence:x}",
         queue as *const ()
@@ -678,6 +731,9 @@ pub unsafe extern "win64" fn vk_queue_submit(
     let f: unsafe extern "C" fn(VkQueue, u32, *const c_void, VkFence) -> VkResult =
         unsafe { std::mem::transmute(f) };
     let r = unsafe { f(queue, submit_count, p_submits, fence) };
+    if let Some(seq) = seq {
+        d3d9_trace!("vkQueueSubmit#{seq} RETURN {r}");
+    }
     eprintln!("weave-vulkan: vk_queue_submit RETURN {r}");
     r
 }
@@ -687,6 +743,17 @@ pub unsafe extern "win64" fn vk_queue_submit2(
     p_submits: *const c_void,
     fence: VkFence,
 ) -> VkResult {
+    let seq = if d3d9_trace_enabled() {
+        Some(D3D9_SUBMIT_COUNT.fetch_add(1, Ordering::Relaxed) + 1)
+    } else {
+        None
+    };
+    if let Some(seq) = seq {
+        let (_, presents, draws, clears) = d3d9_trace_counts();
+        d3d9_trace!(
+            "vkQueueSubmit2#{seq} ENTER submits={submit_count} fence=0x{fence:x} draws={draws} clears={clears} presents={presents}"
+        );
+    }
     eprintln!(
         "weave-vulkan: vk_queue_submit2 ENTER queue={:p} count={submit_count} fence=0x{fence:x}",
         queue as *const ()
@@ -699,6 +766,9 @@ pub unsafe extern "win64" fn vk_queue_submit2(
     let f: unsafe extern "C" fn(VkQueue, u32, *const c_void, VkFence) -> VkResult =
         unsafe { std::mem::transmute(f) };
     let r = unsafe { f(queue, submit_count, p_submits, fence) };
+    if let Some(seq) = seq {
+        d3d9_trace!("vkQueueSubmit2#{seq} RETURN {r}");
+    }
     eprintln!("weave-vulkan: vk_queue_submit2 RETURN {r}");
     r
 }
@@ -720,6 +790,17 @@ pub unsafe extern "win64" fn vk_queue_present_khr(
     queue: VkQueue,
     p_present_info: *const c_void,
 ) -> VkResult {
+    let seq = if d3d9_trace_enabled() {
+        Some(D3D9_PRESENT_COUNT.fetch_add(1, Ordering::Relaxed) + 1)
+    } else {
+        None
+    };
+    if let Some(seq) = seq {
+        let (submits, _, draws, clears) = d3d9_trace_counts();
+        d3d9_trace!(
+            "vkQueuePresentKHR#{seq} ENTER submits={submits} draws={draws} clears={clears}"
+        );
+    }
     eprintln!(
         "weave-vulkan: vk_queue_present_khr ENTER queue={:p} info={p_present_info:p}",
         queue as *const ()
@@ -731,6 +812,12 @@ pub unsafe extern "win64" fn vk_queue_present_khr(
     let f: unsafe extern "C" fn(VkQueue, *const c_void) -> VkResult =
         unsafe { std::mem::transmute(f) };
     let r = unsafe { f(queue, p_present_info) };
+    if let Some(seq) = seq {
+        let (submits, presents, draws, clears) = d3d9_trace_counts();
+        d3d9_trace!(
+            "vkQueuePresentKHR#{seq} RETURN {r} totals submits={submits} presents={presents} draws={draws} clears={clears}"
+        );
+    }
     eprintln!("weave-vulkan: vk_queue_present_khr RETURN {r}");
     r
 }
@@ -826,6 +913,20 @@ pub unsafe extern "win64" fn vk_create_swapchain_khr(
         "weave-vulkan: vk_create_swapchain_khr ENTER device={:p} p_info={p_info:p} p_swapchain={p_swapchain:p}",
         device as *const ()
     );
+    // Log D3D9 CreateDevice-equivalent parameters: backbuffer format, extent, present mode.
+    // VkSwapchainCreateInfoKHR field offsets (Vulkan spec, 64-bit):
+    //   36: imageFormat (u32), 44: imageExtent.width (u32), 48: imageExtent.height (u32),
+    //   88: presentMode (u32)
+    if d3d9_trace_enabled() && !p_info.is_null() {
+        let base = p_info as *const u8;
+        let img_fmt = unsafe { (base.add(36) as *const u32).read() };
+        let img_w = unsafe { (base.add(44) as *const u32).read() };
+        let img_h = unsafe { (base.add(48) as *const u32).read() };
+        let present_mode = unsafe { (base.add(88) as *const u32).read() };
+        d3d9_trace!(
+            "vkCreateSwapchainKHR fmt={img_fmt} extent={img_w}x{img_h} present_mode={present_mode}"
+        );
+    }
     let f = real_device_fn(device, "vkCreateSwapchainKHR");
     if f.is_null() {
         eprintln!("weave-vulkan: vk_create_swapchain_khr: real fn NULL");
@@ -934,8 +1035,75 @@ cmd_thunk!(void vk_cmd_set_stencil_op, "vkCmdSetStencilOp", (command_buffer, fac
 cmd_thunk!(void vk_cmd_set_rasterizer_discard_enable, "vkCmdSetRasterizerDiscardEnable", (command_buffer, rasterizer_discard_enable: u32));
 cmd_thunk!(void vk_cmd_set_depth_bias_enable, "vkCmdSetDepthBiasEnable", (command_buffer, depth_bias_enable: u32));
 cmd_thunk!(void vk_cmd_set_primitive_restart_enable, "vkCmdSetPrimitiveRestartEnable", (command_buffer, primitive_restart_enable: u32));
-cmd_thunk!(void vk_cmd_draw, "vkCmdDraw", (command_buffer, vertex_count: u32, instance_count: u32, first_vertex: u32, first_instance: u32));
-cmd_thunk!(void vk_cmd_draw_indexed, "vkCmdDrawIndexed", (command_buffer, index_count: u32, instance_count: u32, first_index: u32, vertex_offset: i32, first_instance: u32));
+pub unsafe extern "win64" fn vk_cmd_draw(
+    command_buffer: VkCommandBuffer,
+    vertex_count: u32,
+    instance_count: u32,
+    first_vertex: u32,
+    first_instance: u32,
+) {
+    let seq = if d3d9_trace_enabled() {
+        Some(D3D9_DRAW_COUNT.fetch_add(1, Ordering::Relaxed) + 1)
+    } else {
+        None
+    };
+    if let Some(seq) = seq {
+        d3d9_trace!(
+            "vkCmdDraw#{seq} vertices={vertex_count} instances={instance_count} first_vertex={first_vertex} first_instance={first_instance}"
+        );
+    }
+    let f = real_fn(stored_instance(), "vkCmdDraw");
+    if f.is_null() {
+        return;
+    }
+    let f: unsafe extern "C" fn(VkCommandBuffer, u32, u32, u32, u32) =
+        unsafe { std::mem::transmute(f) };
+    unsafe {
+        f(
+            command_buffer,
+            vertex_count,
+            instance_count,
+            first_vertex,
+            first_instance,
+        )
+    }
+}
+
+pub unsafe extern "win64" fn vk_cmd_draw_indexed(
+    command_buffer: VkCommandBuffer,
+    index_count: u32,
+    instance_count: u32,
+    first_index: u32,
+    vertex_offset: i32,
+    first_instance: u32,
+) {
+    let seq = if d3d9_trace_enabled() {
+        Some(D3D9_DRAW_COUNT.fetch_add(1, Ordering::Relaxed) + 1)
+    } else {
+        None
+    };
+    if let Some(seq) = seq {
+        d3d9_trace!(
+            "vkCmdDrawIndexed#{seq} indices={index_count} instances={instance_count} first_index={first_index} vertex_offset={vertex_offset} first_instance={first_instance}"
+        );
+    }
+    let f = real_fn(stored_instance(), "vkCmdDrawIndexed");
+    if f.is_null() {
+        return;
+    }
+    let f: unsafe extern "C" fn(VkCommandBuffer, u32, u32, u32, i32, u32) =
+        unsafe { std::mem::transmute(f) };
+    unsafe {
+        f(
+            command_buffer,
+            index_count,
+            instance_count,
+            first_index,
+            vertex_offset,
+            first_instance,
+        )
+    }
+}
 cmd_thunk!(void vk_cmd_draw_indirect, "vkCmdDrawIndirect", (command_buffer, buffer: VkBuffer, offset: VkDeviceSize, draw_count: u32, stride: u32));
 cmd_thunk!(void vk_cmd_draw_indirect_count, "vkCmdDrawIndirectCount", (command_buffer, buffer: VkBuffer, offset: VkDeviceSize, count_buffer: VkBuffer, count_buffer_offset: VkDeviceSize, max_draw_count: u32, stride: u32));
 cmd_thunk!(void vk_cmd_draw_indexed_indirect, "vkCmdDrawIndexedIndirect", (command_buffer, buffer: VkBuffer, offset: VkDeviceSize, draw_count: u32, stride: u32));
@@ -954,9 +1122,118 @@ cmd_thunk!(void vk_cmd_copy_image_to_buffer, "vkCmdCopyImageToBuffer", (command_
 cmd_thunk!(void vk_cmd_copy_image_to_buffer2, "vkCmdCopyImageToBuffer2", (command_buffer, p_copy_image_to_buffer_info: *const c_void));
 cmd_thunk!(void vk_cmd_update_buffer, "vkCmdUpdateBuffer", (command_buffer, dst_buffer: VkBuffer, dst_offset: VkDeviceSize, data_size: VkDeviceSize, p_data: *const c_void));
 cmd_thunk!(void vk_cmd_fill_buffer, "vkCmdFillBuffer", (command_buffer, dst_buffer: VkBuffer, dst_offset: VkDeviceSize, size: VkDeviceSize, data: u32));
-cmd_thunk!(void vk_cmd_clear_color_image, "vkCmdClearColorImage", (command_buffer, image: VkImage, image_layout: u32, p_color: *const c_void, range_count: u32, p_ranges: *const c_void));
-cmd_thunk!(void vk_cmd_clear_depth_stencil_image, "vkCmdClearDepthStencilImage", (command_buffer, image: VkImage, image_layout: u32, p_depth_stencil: *const c_void, range_count: u32, p_ranges: *const c_void));
-cmd_thunk!(void vk_cmd_clear_attachments, "vkCmdClearAttachments", (command_buffer, attachment_count: u32, p_attachments: *const c_void, rect_count: u32, p_rects: *const c_void));
+pub unsafe extern "win64" fn vk_cmd_clear_color_image(
+    command_buffer: VkCommandBuffer,
+    image: VkImage,
+    image_layout: u32,
+    p_color: *const c_void,
+    range_count: u32,
+    p_ranges: *const c_void,
+) {
+    let seq = if d3d9_trace_enabled() {
+        Some(D3D9_CLEAR_COUNT.fetch_add(1, Ordering::Relaxed) + 1)
+    } else {
+        None
+    };
+    if let Some(seq) = seq {
+        // VkClearColorValue is a [f32; 4] / [i32; 4] / [u32; 4] union — read as f32.
+        let color_str = if !p_color.is_null() {
+            let c = unsafe { std::ptr::read(p_color as *const [f32; 4]) };
+            format!("[{:.3},{:.3},{:.3},{:.3}]", c[0], c[1], c[2], c[3])
+        } else {
+            "null".to_string()
+        };
+        d3d9_trace!(
+            "vkCmdClearColorImage#{seq} image=0x{image:x} layout={image_layout} ranges={range_count} color={color_str}"
+        );
+    }
+    let f = real_fn(stored_instance(), "vkCmdClearColorImage");
+    if f.is_null() {
+        return;
+    }
+    let f: unsafe extern "C" fn(VkCommandBuffer, VkImage, u32, *const c_void, u32, *const c_void) =
+        unsafe { std::mem::transmute(f) };
+    unsafe {
+        f(
+            command_buffer,
+            image,
+            image_layout,
+            p_color,
+            range_count,
+            p_ranges,
+        )
+    }
+}
+
+pub unsafe extern "win64" fn vk_cmd_clear_depth_stencil_image(
+    command_buffer: VkCommandBuffer,
+    image: VkImage,
+    image_layout: u32,
+    p_depth_stencil: *const c_void,
+    range_count: u32,
+    p_ranges: *const c_void,
+) {
+    let seq = if d3d9_trace_enabled() {
+        Some(D3D9_CLEAR_COUNT.fetch_add(1, Ordering::Relaxed) + 1)
+    } else {
+        None
+    };
+    if let Some(seq) = seq {
+        d3d9_trace!(
+            "vkCmdClearDepthStencilImage#{seq} image=0x{image:x} layout={image_layout} ranges={range_count}"
+        );
+    }
+    let f = real_fn(stored_instance(), "vkCmdClearDepthStencilImage");
+    if f.is_null() {
+        return;
+    }
+    let f: unsafe extern "C" fn(VkCommandBuffer, VkImage, u32, *const c_void, u32, *const c_void) =
+        unsafe { std::mem::transmute(f) };
+    unsafe {
+        f(
+            command_buffer,
+            image,
+            image_layout,
+            p_depth_stencil,
+            range_count,
+            p_ranges,
+        )
+    }
+}
+
+pub unsafe extern "win64" fn vk_cmd_clear_attachments(
+    command_buffer: VkCommandBuffer,
+    attachment_count: u32,
+    p_attachments: *const c_void,
+    rect_count: u32,
+    p_rects: *const c_void,
+) {
+    let seq = if d3d9_trace_enabled() {
+        Some(D3D9_CLEAR_COUNT.fetch_add(1, Ordering::Relaxed) + 1)
+    } else {
+        None
+    };
+    if let Some(seq) = seq {
+        d3d9_trace!(
+            "vkCmdClearAttachments#{seq} attachments={attachment_count} rects={rect_count}"
+        );
+    }
+    let f = real_fn(stored_instance(), "vkCmdClearAttachments");
+    if f.is_null() {
+        return;
+    }
+    let f: unsafe extern "C" fn(VkCommandBuffer, u32, *const c_void, u32, *const c_void) =
+        unsafe { std::mem::transmute(f) };
+    unsafe {
+        f(
+            command_buffer,
+            attachment_count,
+            p_attachments,
+            rect_count,
+            p_rects,
+        )
+    }
+}
 cmd_thunk!(void vk_cmd_resolve_image, "vkCmdResolveImage", (command_buffer, src_image: VkImage, src_layout: u32, dst_image: VkImage, dst_layout: u32, region_count: u32, p_regions: *const c_void));
 cmd_thunk!(void vk_cmd_resolve_image2, "vkCmdResolveImage2", (command_buffer, p_resolve_image_info: *const c_void));
 cmd_thunk!(void vk_cmd_set_event, "vkCmdSetEvent", (command_buffer, event: VkEvent, stage_mask: VkPipelineStageFlags));

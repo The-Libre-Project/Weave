@@ -1274,6 +1274,7 @@ dependencies = [
  "weave-oleaut32",
  "weave-plugin-system",
  "weave-sandbox",
+ "weave-setupapi",
  "weave-shell32",
  "weave-shlwapi",
  "weave-ucrt",
@@ -1430,6 +1431,10 @@ version = "0.0.1"
 dependencies = [
  "landlock",
 ]
+
+[[package]]
+name = "weave-setupapi"
+version = "0.0.1"
 
 [[package]]
 name = "weave-shell32"
