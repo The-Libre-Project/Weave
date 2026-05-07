@@ -1285,7 +1285,6 @@ pub unsafe extern "win64" fn set_thread_description(
     _h_thread: usize,
     _lp_thread_description: *const u16,
 ) -> i32 {
-    warn_once("SetThreadDescription");
     0 // S_OK
 }
 
@@ -1323,7 +1322,6 @@ pub unsafe extern "win64" fn create_timer_queue_timer(
     _period: u32,
     _flags: u32,
 ) -> i32 {
-    warn_once("CreateTimerQueueTimer");
     if !ph_new_timer.is_null() {
         unsafe { *ph_new_timer = 1 };
     }
@@ -1342,8 +1340,7 @@ pub unsafe extern "win64" fn delete_timer_queue_timer(
     _timer: usize,
     _completion_event: usize,
 ) -> i32 {
-    warn_once("DeleteTimerQueueTimer");
-    1 // TRUE
+    1
 }
 
 /// SetThreadAffinityMask: set the processor affinity mask for a thread.
@@ -1364,8 +1361,7 @@ pub unsafe extern "win64" fn set_thread_affinity_mask(
     _h_thread: usize,
     _dw_thread_affinity_mask: usize,
 ) -> usize {
-    warn_once("SetThreadAffinityMask");
-    1 // previous mask
+    1 // previous mask (single-CPU: mask = 1)
 }
 
 // ── Task 1 — System query stubs ──────────────────────────────────────────────
@@ -1549,8 +1545,7 @@ pub unsafe extern "win64" fn create_waitable_timer_w(
     _b_manual_reset: i32,
     _lp_timer_name: *const u16,
 ) -> usize {
-    warn_once("CreateWaitableTimerW");
-    1 // fake handle
+    1 // fake handle — timerfd not wired up
 }
 
 /// CreateWaitableTimerA: create a waitable timer (ANSI version).
@@ -1566,8 +1561,7 @@ pub unsafe extern "win64" fn create_waitable_timer_a(
     _b_manual_reset: i32,
     _lp_timer_name: usize,
 ) -> usize {
-    warn_once("CreateWaitableTimerA");
-    1 // fake handle
+    1 // fake handle — timerfd not wired up
 }
 
 /// SetWaitableTimer: set a waitable timer.
@@ -1586,8 +1580,7 @@ pub unsafe extern "win64" fn set_waitable_timer(
     _lp_arg_to_completion_routine: usize,
     _f_resume: i32,
 ) -> i32 {
-    warn_once("SetWaitableTimer");
-    1 // TRUE
+    1 // no real timer to set; callers typically use WFSO on the handle which returns immediately
 }
 
 /// CancelWaitableTimer: cancel a waitable timer.
@@ -1599,8 +1592,7 @@ pub unsafe extern "win64" fn set_waitable_timer(
 // Wine ref: dlls/kernelbase/sync.c:938 — calls NtCancelTimer; sets
 // *pfPreviousState to timer's signaled state before cancellation.
 pub unsafe extern "win64" fn cancel_waitable_timer(_h_timer: usize) -> i32 {
-    warn_once("CancelWaitableTimer");
-    1 // TRUE
+    1
 }
 
 // ── Task 3 — ExpandEnvironmentStrings, SearchPath, GetTempFileName ──────────
@@ -2119,8 +2111,7 @@ pub extern "win64" fn c_specific_handler(
     _context_record: usize,
     _dispatcher_context: usize,
 ) -> i32 {
-    warn_once("__C_specific_handler");
-    1 // ExceptionContinueSearch
+    1 // ExceptionContinueSearch — Weave does not implement SEH scope tables
 }
 
 // ── Heap / global memory ──────────────────────────────────────────────────────
@@ -2254,8 +2245,7 @@ pub extern "win64" fn heap_create(
     _dw_initial_size: usize,
     _dw_maximum_size: usize,
 ) -> usize {
-    warn_once("HeapCreate");
-    1usize // fake process heap handle
+    1usize // fake process heap handle — Weave uses single libc allocator
 }
 
 /// HeapDestroy: destroy a heap (no-op).
@@ -2264,8 +2254,7 @@ pub extern "win64" fn heap_create(
 // Wine ref: dlls/kernelbase/memory.c:750 — calls RtlDestroyHeap; returns TRUE
 // if NULL returned (success), FALSE + ERROR_INVALID_HANDLE if handle was invalid.
 pub extern "win64" fn heap_destroy(_h_heap: usize) -> i32 {
-    warn_once("HeapDestroy");
-    1 // TRUE
+    1
 }
 
 /// HeapAlloc: allocate memory from the heap.
@@ -3150,7 +3139,6 @@ pub unsafe extern "win64" fn get_product_info(
     _dw_sp_minor_version: u32,
     pdw_returned_product_type: *mut u32,
 ) -> i32 {
-    warn_once("GetProductInfo");
     if !pdw_returned_product_type.is_null() {
         unsafe { *pdw_returned_product_type = 0x30 }; // PRODUCT_PROFESSIONAL
     }
@@ -3168,7 +3156,6 @@ pub unsafe extern "win64" fn register_application_restart(
     _pwz_commandline: *const u16,
     _dw_flags: u32,
 ) -> i32 {
-    warn_once("RegisterApplicationRestart");
     0 // S_OK
 }
 
@@ -3176,7 +3163,6 @@ pub unsafe extern "win64" fn register_application_restart(
 ///
 /// Wine ref: dlls/kernel32/process.c — stub returning S_OK.
 pub extern "win64" fn unregister_application_restart() -> i32 {
-    warn_once("UnregisterApplicationRestart");
     0 // S_OK
 }
 
@@ -3430,8 +3416,7 @@ pub unsafe extern "win64" fn create_process_a(
 // if it's processing messages; returns WAIT_OBJECT_0 when idle,
 // WAIT_TIMEOUT (258) if timeout expires, WAIT_FAILED on error.
 pub unsafe extern "win64" fn wait_for_input_idle(_h_process: usize, _dw_milliseconds: u32) -> u32 {
-    warn_once("WaitForInputIdle");
-    258 // WAIT_TIMEOUT
+    0 // WAIT_OBJECT_0 — process immediately ready (no real message loop to wait on)
 }
 
 /// # Safety
@@ -3458,8 +3443,7 @@ pub unsafe extern "win64" fn open_thread(
     _b_inherit_handle: i32,
     _dw_thread_id: u32,
 ) -> usize {
-    warn_once("OpenThread");
-    0x100 // fake non-null handle
+    0x100 // fake non-null thread handle
 }
 
 /// # Safety
@@ -3467,8 +3451,7 @@ pub unsafe extern "win64" fn open_thread(
 // Wine ref: dlls/kernelbase/thread.c:296 — NtQueryInformationThread(ThreadBasicInformation);
 // returns tbi.ClientId.UniqueThread cast to DWORD; returns 0 on error.
 pub unsafe extern "win64" fn get_thread_id(_thread: usize) -> u32 {
-    warn_once("GetThreadId");
-    42 // fake thread ID
+    42 // fake thread ID — handle→TID map not yet implemented
 }
 
 // ── File time operations ─────────────────────────────────────────────────────
@@ -3619,8 +3602,7 @@ pub unsafe extern "win64" fn system_time_to_tz_specific_local_time(
 // returns ERROR_ACCESS_DENIED if console already attached; spawns conhost.exe as DETACHED_PROCESS with
 // a server handle passed via PROC_THREAD_ATTRIBUTE_HANDLE_LIST; sets ConsoleHandle in PEB on success.
 pub extern "win64" fn alloc_console() -> i32 {
-    warn_once("AllocConsole");
-    1 // TRUE
+    1 // already on a terminal; nothing to allocate
 }
 
 /// FreeConsole: detach the process from its console.
@@ -3630,8 +3612,7 @@ pub extern "win64" fn alloc_console() -> i32 {
 // also closes std handles if console_flags has CONSOLE_INPUT/OUTPUT/ERROR_HANDLE bits set;
 // sets ConsoleHandle=NULL in PEB; always returns TRUE.
 pub extern "win64" fn free_console() -> i32 {
-    warn_once("FreeConsole");
-    1 // TRUE
+    1
 }
 
 /// AttachConsole: attach the calling process to the console of another process.
@@ -3644,8 +3625,7 @@ pub extern "win64" fn free_console() -> i32 {
 // already attached; calls create_console_connection + IOCTL_CONDRV_BIND_PID with the target pid;
 // calls FreeConsole() on any error to clean up partial state.
 pub unsafe extern "win64" fn attach_console(_dw_process_id: u32) -> i32 {
-    warn_once("AttachConsole");
-    1 // TRUE
+    1
 }
 
 /// GetConsoleWindow: retrieve the window handle for the console.
@@ -4760,9 +4740,7 @@ pub unsafe extern "win64" fn verify_version_info_w(
     _type_mask: u32,
     _condition_mask: u64,
 ) -> i32 {
-    warn_once("VerifyVersionInfoW");
-    // Always return TRUE for version checks
-    1
+    1 // always TRUE — Weave reports Windows 10; version checks pass unconditionally
 }
 
 /// Windows WIN32_FILE_ATTRIBUTE_DATA structure.
@@ -5437,8 +5415,7 @@ pub unsafe extern "win64" fn load_library_ex_w(
 /// FreeLibrary is a no-op returning TRUE. Synthetic handles have no resources
 /// to release; real loaded DLLs (if any) remain mapped for the process lifetime.
 pub extern "win64" fn free_library(_h_module: usize) -> i32 {
-    warn_once("FreeLibrary");
-    1 // TRUE
+    1 // no refcount in Weave module map; DLLs stay mapped for process lifetime
 }
 
 /// SetDefaultDllDirectories — restrict DLL search paths (security hardening).
@@ -5449,8 +5426,7 @@ pub extern "win64" fn free_library(_h_module: usize) -> i32 {
 // LdrSetDefaultDllDirectories; sets the safe-DLL-search-mode flags for the process.
 // Invalid flags combination → error from LdrSetDefaultDllDirectories. Weave: no-op.
 pub extern "win64" fn set_default_dll_directories(_directory_flags: u32) -> i32 {
-    warn_once("SetDefaultDllDirectories");
-    1 // TRUE
+    1
 }
 
 /// AddDllDirectory — add a directory to the DLL search path.
@@ -5462,8 +5438,7 @@ pub extern "win64" fn set_default_dll_directories(_directory_flags: u32) -> i32 
 // Wine ref: dlls/kernelbase/loader.c:191 — calls LdrAddDllDirectory which allocates a
 // UNICODE_STRING node in the NT loader's DLL directory list; returns the node pointer as cookie.
 pub unsafe extern "win64" fn add_dll_directory(_new_directory: *const u16) -> usize {
-    warn_once("AddDllDirectory");
-    1 // fake DLL_DIRECTORY_COOKIE
+    1 // fake DLL_DIRECTORY_COOKIE — search path not implemented
 }
 
 /// RemoveDllDirectory — remove a directory from the DLL search path.
@@ -5472,8 +5447,7 @@ pub unsafe extern "win64" fn add_dll_directory(_new_directory: *const u16) -> us
 // Wine ref: dlls/kernelbase/loader.c:603 — calls LdrRemoveDllDirectory(cookie);
 // the cookie is the UNICODE_STRING node pointer allocated by AddDllDirectory.
 pub extern "win64" fn remove_dll_directory(_cookie: usize) -> i32 {
-    warn_once("RemoveDllDirectory");
-    1 // TRUE
+    1
 }
 
 /// SetDllDirectoryW — set a single DLL search directory (Wide).
@@ -5485,8 +5459,7 @@ pub extern "win64" fn remove_dll_directory(_cookie: usize) -> i32 {
 // Wine ref: dlls/kernelbase/loader.c — SetDllDirectoryW calls LdrSetDefaultDllDirectories
 // internally to override the safe-DLL-search-mode directory; NULL restores default behavior.
 pub unsafe extern "win64" fn set_dll_directory_w(_lp_path_name: *const u16) -> i32 {
-    warn_once("SetDllDirectoryW");
-    1 // TRUE
+    1
 }
 
 /// GetProcAddress — resolve a function by module handle + name.
@@ -5789,11 +5762,12 @@ pub unsafe extern "win64" fn process32_next(h_snapshot: usize, lppe: *mut u8) ->
 // fills ACLineStatus, BatteryFlag, BatteryLifePercent, Reserved1, BatteryLifeTime,
 // BatteryFullLifeTime (12 bytes total); returns FALSE on error.
 pub unsafe extern "win64" fn get_system_power_status(lp: *mut u8) -> i32 {
-    warn_once("GetSystemPowerStatus");
+    // AC power, 100% battery — closest approximation on a Linux host without battery
     if !lp.is_null() {
-        std::ptr::write_bytes(lp, 0, 12);
+        unsafe { std::ptr::write_bytes(lp, 0, 12) };
+        unsafe { *lp = 1 }; // ACLineStatus = AC_LINE_ONLINE
     }
-    0 // FALSE
+    1
 }
 
 /// SetThreadExecutionState — prevent system sleep during video playback.
@@ -5805,8 +5779,7 @@ pub unsafe extern "win64" fn get_system_power_status(lp: *mut u8) -> i32 {
 // returns the previous state flags; ES_CONTINUOUS (0x80000000) indicates a persistent
 // override that stays until cleared.
 pub extern "win64" fn set_thread_execution_state(_es_flags: u32) -> u32 {
-    warn_once("SetThreadExecutionState");
-    0x80000001u32 // previous state: ES_CONTINUOUS
+    0x80000001u32 // ES_CONTINUOUS — previous state; Linux has no sleep inhibit API here
 }
 
 /// RtlAddFunctionTable — register a dynamic unwind function table for SEH on x64.
@@ -5824,8 +5797,7 @@ pub unsafe extern "win64" fn rtl_add_function_table(
     _entry_count: u32,
     _base_address: u64,
 ) -> u8 {
-    warn_once("RtlAddFunctionTable");
-    1 // TRUE
+    1 // Weave does not unwind through dynamic tables; accept silently
 }
 
 // ── Locale / language ────────────────────────────────────────────────────────
@@ -6176,7 +6148,7 @@ pub unsafe extern "win64" fn find_first_change_notification_w(
     _b_watch_subtree: i32,
     _dw_notify_filter: u32,
 ) -> usize {
-    warn_once("FindFirstChangeNotificationW");
+    set_last_error(1); // ERROR_INVALID_FUNCTION — inotify not wired up
     usize::MAX // INVALID_HANDLE_VALUE
 }
 
@@ -6189,8 +6161,7 @@ pub unsafe extern "win64" fn find_first_change_notification_w(
 // Wine ref: dlls/kernelbase/file.c:1199 — calls NtNotifyChangeDirectoryFile again on the
 // same directory handle returned by FindFirstChangeNotificationW; returns STATUS_PENDING.
 pub unsafe extern "win64" fn find_next_change_notification(_h_change_handle: usize) -> i32 {
-    warn_once("FindNextChangeNotification");
-    0 // FALSE
+    0 // FALSE — no real change notification handle
 }
 
 /// FindCloseChangeNotification — close a change notification handle.
@@ -6202,8 +6173,7 @@ pub unsafe extern "win64" fn find_next_change_notification(_h_change_handle: usi
 // Wine ref: dlls/kernelbase/file.c:1134 — calls NtClose on the directory handle that was
 // returned by FindFirstChangeNotificationW; handle is the same dir fd used for watching.
 pub unsafe extern "win64" fn find_close_change_notification(_h_change_handle: usize) -> i32 {
-    warn_once("FindCloseChangeNotification");
-    1 // TRUE
+    1
 }
 
 // ── NTFS streams ─────────────────────────────────────────────────────────────
@@ -6223,8 +6193,8 @@ pub unsafe extern "win64" fn find_first_stream_w(
     _lp_find_stream_data: *mut u8,
     _dw_flags: u32,
 ) -> usize {
-    warn_once("FindFirstStreamW");
-    usize::MAX // INVALID_HANDLE_VALUE
+    set_last_error(87); // ERROR_INVALID_PARAMETER — NTFS streams not supported
+    usize::MAX
 }
 
 /// FindNextStreamW — enumerate alternate data streams (next entry).
@@ -6239,7 +6209,6 @@ pub unsafe extern "win64" fn find_next_stream_w(
     _h_find_stream: usize,
     _lp_find_stream_data: *mut u8,
 ) -> i32 {
-    warn_once("FindNextStreamW");
     0 // FALSE
 }
 
@@ -6649,8 +6618,8 @@ pub extern "win64" fn is_debugger_present() -> i32 {
 // Wine ref: dlls/kernelbase/debug.c — raises DBG_PRINTEXCEPTION_C (0x40010006) via NtRaiseException;
 // if no debugger is attached the exception is caught internally; also sends to console via NtDeviceIoControlFile
 pub unsafe extern "win64" fn output_debug_string_a(_lp_output_string: *const u8) {
-    warn_once("OutputDebugStringA");
-    // silently discard
+    // silently discard — no debugger attached; Wine raises DBG_PRINTEXCEPTION_C which
+    // is caught internally when no debugger is present
 }
 
 /// OutputDebugStringW — silently discards the string.
@@ -6758,8 +6727,7 @@ pub unsafe extern "win64" fn open_event_a(
     _b_inherit_handle: i32,
     _lp_name: *const u8,
 ) -> usize {
-    warn_once("OpenEventA");
-    2 // fake non-null handle
+    2 // fake non-null event handle
 }
 
 /// OpenEventW — returns a fake non-null handle (2).
@@ -6775,8 +6743,7 @@ pub unsafe extern "win64" fn open_event_w(
     _b_inherit_handle: i32,
     _lp_name: *const u16,
 ) -> usize {
-    warn_once("OpenEventW");
-    2 // fake non-null handle
+    2 // fake non-null event handle
 }
 
 /// SetEvent — signal a Win32 event object.
@@ -6947,7 +6914,7 @@ pub unsafe extern "win64" fn create_semaphore_w(
 /// SetFileApisToOEM — switch file APIs to OEM character set. No-op.
 // Wine ref: dlls/kernelbase/file.c:2970 — sets global oem_file_apis = TRUE; checked by file name conversion helpers
 pub extern "win64" fn set_file_apis_to_oem() {
-    warn_once("SetFileApisToOEM");
+    // OEM file APIs not tracked; file names go through WinPathTranslator regardless
 }
 
 /// OpenFileMappingW — open a named file-mapping object (Wide).
@@ -7470,7 +7437,8 @@ pub unsafe extern "win64" fn get_process_affinity_mask(
     lp_process_affinity_mask: *mut usize,
     lp_system_affinity_mask: *mut usize,
 ) -> i32 {
-    warn_once("GetProcessAffinityMask");
+    // Wine ref: dlls/kernelbase/process.c — NtQueryInformationProcess(ProcessAffinityMask).
+    // Report single-CPU affinity (mask=1); Linux scheduler ignores Windows affinity.
     unsafe {
         if !lp_process_affinity_mask.is_null() {
             *lp_process_affinity_mask = 1;
@@ -7492,8 +7460,7 @@ pub unsafe extern "win64" fn set_process_affinity_mask(
     _h_process: usize,
     _dw_process_affinity_mask: usize,
 ) -> i32 {
-    warn_once("SetProcessAffinityMask");
-    1
+    1 // Linux scheduler ignores Windows affinity masks
 }
 
 /// GetActiveProcessorGroupCount — returns the number of processor groups.
@@ -8414,8 +8381,7 @@ pub unsafe extern "win64" fn create_mutex_ex_a(
     _dw_flags: u32,
     _dw_desired_access: u32,
 ) -> usize {
-    warn_once("CreateMutexExA");
-    1 // fake handle
+    1 // fake handle — ANSI name ignored; same semantics as CreateMutexExW
 }
 
 /// CreateMutexExW — returns a fake handle (1).
@@ -8451,8 +8417,7 @@ pub unsafe extern "win64" fn create_mutex_ex_w(
 /// ReleaseMutex — no-op stub, returns TRUE.
 // Wine ref: dlls/kernelbase/sync.c:782 — calls NtReleaseMutant(handle, NULL); NULL previous_count is valid
 pub extern "win64" fn release_mutex(_h_mutex: usize) -> i32 {
-    warn_once("ReleaseMutex");
-    1
+    1 // fake mutex handle; real POSIX mutex is in SEMAPHORE_TABLE when created via CreateMutexW
 }
 
 /// RtlUnwind — no-op stub (unwinding not implemented).
@@ -9799,8 +9764,8 @@ pub unsafe extern "win64" fn get_exit_code_process(
     _h_process: usize,
     lp_exit_code: *mut u32,
 ) -> i32 {
-    warn_once("GetExitCodeProcess");
-    // Write STILL_ACTIVE (259) to indicate process is still running
+    // Wine ref: dlls/kernelbase/process.c — NtQueryInformationProcess(ProcessBasicInformation).
+    // Weave: no child process tracking; report STILL_ACTIVE for any handle.
     if !lp_exit_code.is_null() {
         unsafe { *lp_exit_code = 259 };
     }
@@ -9814,8 +9779,8 @@ pub unsafe extern "win64" fn get_exit_code_process(
 // Wine ref: dlls/kernelbase/thread.c:218 — calls NtQueryInformationThread(ThreadBasicInformation);
 // reads info.ExitStatus; STILL_ACTIVE (259) means thread is still running
 pub unsafe extern "win64" fn get_exit_code_thread(_h_thread: usize, lp_exit_code: *mut u32) -> i32 {
-    warn_once("GetExitCodeThread");
-    // Write STILL_ACTIVE (259) to indicate thread is still running
+    // Wine ref: dlls/kernelbase/thread.c — NtQueryInformationThread(ThreadBasicInformation).
+    // Weave: thread handle→completion map exists but exit code not exposed here; report STILL_ACTIVE.
     if !lp_exit_code.is_null() {
         unsafe { *lp_exit_code = 259 };
     }
@@ -10216,8 +10181,7 @@ pub unsafe extern "win64" fn heap_set_information(
     _heap_information: *mut u8,
     _heap_information_length: usize,
 ) -> i32 {
-    warn_once("HeapSetInformation");
-    1 // TRUE
+    1 // heap information classes (LFH, termination) are no-ops over libc allocator
 }
 
 /// SetHandleCount: legacy stub that returns the input value.
@@ -10237,8 +10201,7 @@ pub extern "win64" fn get_thread_locale() -> u32 {
 // Wine ref: dlls/kernelbase/thread.c:598 — calls ConvertDefaultLocale then IsValidLocale;
 // stores into NtCurrentTeb()->CurrentLocale; invalid locale → ERROR_INVALID_PARAMETER
 pub extern "win64" fn set_thread_locale(_locale: u32) -> i32 {
-    warn_once("SetThreadLocale");
-    1 // TRUE
+    1 // locale not tracked per-thread; GetThreadLocale always returns en-US
 }
 
 /// SetThreadStackGuarantee: no-op, returns TRUE.
@@ -10248,8 +10211,7 @@ pub extern "win64" fn set_thread_locale(_locale: u32) -> i32 {
 /// # Safety
 /// Pointer argument is accepted but not dereferenced.
 pub unsafe extern "win64" fn set_thread_stack_guarantee(_stack_size_in_bytes: *mut u32) -> i32 {
-    warn_once("SetThreadStackGuarantee");
-    1 // TRUE
+    1 // Linux stack guard pages are controlled by ulimit, not per-thread
 }
 
 /// GetTimeZoneInformation — fill TIME_ZONE_INFORMATION from the local timezone.
@@ -11787,7 +11749,7 @@ pub unsafe extern "win64" fn set_console_title_a(lp_console_title: *const u8) ->
 // Wine ref: dlls/kernelbase/console.c:1105 — delegates to get_console_title(title, size, TRUE);
 // TRUE = current title (vs FALSE = original title for GetConsoleOriginalTitleW).
 pub unsafe extern "win64" fn get_console_title_w(lp_console_title: *mut u16, n_size: u32) -> u32 {
-    warn_once("GetConsoleTitleW");
+    // title not stored in Weave (SetConsoleTitleW writes OSC escape only); return empty
     if !lp_console_title.is_null() && n_size > 0 {
         unsafe { *lp_console_title = 0 };
     }
@@ -11803,7 +11765,7 @@ pub unsafe extern "win64" fn get_console_title_w(lp_console_title: *mut u16, n_s
 // Wine ref: dlls/kernelbase/console.c::GetConsoleTitleA:1086 — calls get_console_title into
 // a wide buffer, then WideCharToMultiByte(CP_ACP) to fill ANSI output.
 pub unsafe extern "win64" fn get_console_title_a(lp_console_title: *mut u8, n_size: u32) -> u32 {
-    warn_once("GetConsoleTitleA");
+    // title not stored in Weave; return empty
     if !lp_console_title.is_null() && n_size > 0 {
         unsafe { *lp_console_title = 0 };
     }
