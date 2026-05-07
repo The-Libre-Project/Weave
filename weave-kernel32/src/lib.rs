@@ -2549,7 +2549,7 @@ pub unsafe extern "win64" fn read_file(
     lp_buffer: *mut u8,
     n_bytes_to_read: u32,
     lp_bytes_read: *mut u32,
-    _lp_overlapped: usize, // ignored — synchronous I/O only
+    lp_overlapped: usize,
 ) -> i32 {
     // Pointer validation: null buffer with non-zero read size is an error.
     if lp_buffer.is_null() && n_bytes_to_read > 0 {
@@ -2581,10 +2581,26 @@ pub unsafe extern "win64" fn read_file(
     }
 
     if n < 0 {
+        // Populate OVERLAPPED completion fields so GetOverlappedResult can read them.
+        if lp_overlapped != 0 {
+            let ovl = lp_overlapped as *mut usize;
+            unsafe {
+                std::ptr::write_volatile(ovl, 0xC000_0001); // STATUS_UNSUCCESSFUL → Internal
+                std::ptr::write_volatile(ovl.add(1), 0);    // InternalHigh = 0
+            }
+        }
         set_last_error(file_io::ERROR_ACCESS_DENIED);
         eprintln!("weave/ReadFile: exit handle={h_file:#x} fd={fd} → FALSE (read err)");
         0 // FALSE
     } else {
+        // Populate OVERLAPPED completion fields so GetOverlappedResult can read them.
+        if lp_overlapped != 0 {
+            let ovl = lp_overlapped as *mut usize;
+            unsafe {
+                std::ptr::write_volatile(ovl, 0);                // Internal = STATUS_SUCCESS
+                std::ptr::write_volatile(ovl.add(1), n as usize); // InternalHigh = bytes read
+            }
+        }
         set_last_error(0);
         1 // TRUE
     }
@@ -2606,7 +2622,7 @@ pub unsafe extern "win64" fn write_file(
     lp_buffer: *const u8,
     n_bytes_to_write: u32,
     lp_bytes_written: *mut u32,
-    _lp_overlapped: usize, // ignored — synchronous I/O only
+    lp_overlapped: usize,
 ) -> i32 {
     // Pointer validation: null buffer with non-zero write size is an error.
     if lp_buffer.is_null() && n_bytes_to_write > 0 {
@@ -2644,10 +2660,26 @@ pub unsafe extern "win64" fn write_file(
     }
 
     if n < 0 {
+        // Populate OVERLAPPED completion fields so GetOverlappedResult can read them.
+        if lp_overlapped != 0 {
+            let ovl = lp_overlapped as *mut usize;
+            unsafe {
+                std::ptr::write_volatile(ovl, 0xC000_0001); // STATUS_UNSUCCESSFUL → Internal
+                std::ptr::write_volatile(ovl.add(1), 0);    // InternalHigh = 0
+            }
+        }
         set_last_error(file_io::ERROR_ACCESS_DENIED);
         eprintln!("weave/WriteFile: error handle={h_file:#x} fd={fd} → write failed");
         0 // FALSE
     } else {
+        // Populate OVERLAPPED completion fields so GetOverlappedResult can read them.
+        if lp_overlapped != 0 {
+            let ovl = lp_overlapped as *mut usize;
+            unsafe {
+                std::ptr::write_volatile(ovl, 0);                // Internal = STATUS_SUCCESS
+                std::ptr::write_volatile(ovl.add(1), n as usize); // InternalHigh = bytes written
+            }
+        }
         set_last_error(0);
         1 // TRUE
     }
@@ -7227,12 +7259,16 @@ pub extern "win64" fn suspend_thread(_h_thread: usize) -> u32 {
     warn_once("SuspendThread");
     u32::MAX // failure
 }
-/// ResumeThread — not supported, returns DWORD(-1) (failure).
+/// ResumeThread — returns 1 (previous suspend count was 1, now running).
+///
+/// Weave ignores CREATE_SUSPENDED (thread starts immediately), so by the time a
+/// caller calls ResumeThread the thread is already running. Returning 1 satisfies
+/// the common `if (ResumeThread(h) == (DWORD)-1)` failure-check pattern.
 // Wine ref: dlls/kernelbase/thread.c — calls NtResumeThread; returns previous suspend count
-// or ~0U on failure
+// (1 = was suspended, now resumed) or ~0U on failure. Weave: thread was never truly
+// suspended (flag ignored in create_thread), so 1 is the correct "was suspended" reply.
 pub extern "win64" fn resume_thread(_h_thread: usize) -> u32 {
-    warn_once("ResumeThread");
-    u32::MAX // failure
+    1 // previous suspend count — was 1 (suspended), now 0 (running)
 }
 
 // ── Process ───────────────────────────────────────────────────────────────────
@@ -14206,24 +14242,60 @@ pub unsafe extern "win64" fn get_thread_times(
 }
 
 /// GetOverlappedResult: query the result of an async I/O operation.
-/// Returns FALSE (no async I/O support yet).
 ///
 /// # Safety
+/// `lp_overlapped` must point to a valid OVERLAPPED struct or be null.
 /// `lp_number_of_bytes_transferred` must be writable if non-null.
-// Wine ref: dlls/kernelbase/file.c:3323 — reads overlapped->Internal (STATUS) via ReadAcquire for
-// acquire semantics; STATUS_PENDING + bWait → WaitForSingleObject(event/file, INFINITE);
-// *result = overlapped->InternalHigh (byte count set by async completion)
+// Wine ref: dlls/kernelbase/file.c:3323 — ReadAcquire(&overlapped->Internal); STATUS_PENDING +
+// bWait=TRUE → WaitForSingleObject(hEvent||file, INFINITE); else ERROR_IO_INCOMPLETE.
+// On completion: *result = InternalHigh; SetLastError(RtlNtStatusToDosError(status));
+// return !status (TRUE on STATUS_SUCCESS).
 pub unsafe extern "win64" fn get_overlapped_result(
     _h_file: usize,
-    _lp_overlapped: usize,
+    lp_overlapped: usize,
     lp_number_of_bytes_transferred: *mut u32,
-    _b_wait: i32,
+    b_wait: i32,
 ) -> i32 {
-    warn_once("GetOverlappedResult");
-    if !lp_number_of_bytes_transferred.is_null() {
-        unsafe { *lp_number_of_bytes_transferred = 0 };
+    const STATUS_PENDING: usize = 0x103;
+
+    if lp_overlapped == 0 {
+        set_last_error(87); // ERROR_INVALID_PARAMETER
+        return 0;
     }
-    0 // FALSE
+
+    // OVERLAPPED layout (x86-64): Internal @ +0, InternalHigh @ +8.
+    // read_volatile approximates Wine's ReadAcquire acquire-load.
+    // SAFETY: lp_overlapped is non-null (checked) and points to a valid OVERLAPPED per caller.
+    let ovl = lp_overlapped as *const usize;
+    let status = unsafe { std::ptr::read_volatile(ovl) };
+
+    if status == STATUS_PENDING {
+        // Weave is synchronous-only — no async completion infrastructure to wait on.
+        if b_wait != 0 {
+            eprintln!(
+                "weave/GetOverlappedResult: STATUS_PENDING bWait=TRUE — \
+                 sync-only, returning IO_INCOMPLETE"
+            );
+        }
+        if !lp_number_of_bytes_transferred.is_null() {
+            unsafe { *lp_number_of_bytes_transferred = 0 };
+        }
+        set_last_error(996); // ERROR_IO_INCOMPLETE
+        return 0; // FALSE
+    }
+
+    let internal_high = unsafe { std::ptr::read_volatile(ovl.add(1)) };
+    if !lp_number_of_bytes_transferred.is_null() {
+        unsafe { *lp_number_of_bytes_transferred = internal_high as u32 };
+    }
+
+    if status == 0 {
+        set_last_error(0);
+        1 // TRUE — STATUS_SUCCESS
+    } else {
+        set_last_error(31); // ERROR_GEN_FAILURE — real impl would call RtlNtStatusToDosError
+        0 // FALSE
+    }
 }
 
 /// RtlPcToFileHeader: return the module base for a code address.
