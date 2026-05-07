@@ -2361,10 +2361,15 @@ pub unsafe extern "win64" fn heap_free(
 pub extern "win64" fn heap_size(
     _h_heap: usize,
     _dw_flags: u32,
-    _lp_mem: *const std::ffi::c_void,
+    lp_mem: *const std::ffi::c_void,
 ) -> usize {
-    warn_once("HeapSize");
-    0
+    // Wine ref: dlls/ntdll/heap.c — RtlSizeHeap returns (SIZE_T)-1 on NULL/invalid block;
+    // on success returns the usable allocation size. Weave heap uses libc malloc so
+    // malloc_usable_size gives the real answer.
+    if lp_mem.is_null() {
+        return usize::MAX;
+    }
+    unsafe { libc::malloc_usable_size(lp_mem as *mut _) }
 }
 
 /// GetProcessHeap: return the process heap handle.
@@ -7425,10 +7430,21 @@ pub extern "win64" fn resume_thread(_h_thread: usize) -> u32 {
 pub unsafe extern "win64" fn open_process(
     _dw_desired_access: u32,
     _b_inherit_handle: i32,
-    _dw_process_id: u32,
+    dw_process_id: u32,
 ) -> usize {
-    warn_once("OpenProcess");
-    0
+    // Wine ref: dlls/kernelbase/process.c — NtOpenProcess with CLIENT_ID;
+    // pid=0 → ERROR_INVALID_PARAMETER; nonexistent pid → ERROR_INVALID_PARAMETER.
+    // Weave: validate via /proc, return pid as handle (non-NULL, harmless to CloseHandle).
+    if dw_process_id == 0 {
+        set_last_error(87);
+        return 0;
+    }
+    if !std::path::Path::new(&format!("/proc/{dw_process_id}")).exists() {
+        set_last_error(87);
+        return 0;
+    }
+    set_last_error(0);
+    dw_process_id as usize
 }
 
 /// GetProcessAffinityMask — reports single-CPU affinity.
@@ -14774,14 +14790,25 @@ pub unsafe extern "win64" fn create_pipe(
     _lp_pipe_attributes: usize,
     _n_size: u32,
 ) -> i32 {
-    warn_once("CreatePipe");
-    if !lp_read_pipe.is_null() {
-        unsafe { *lp_read_pipe = usize::MAX }; // INVALID_HANDLE_VALUE
+    // Wine ref: dlls/kernelbase/file.c — calls NtCreateNamedPipeFile with empty name
+    // for anonymous pipe; Weave uses pipe(2) and wraps fds as File handles.
+    if lp_read_pipe.is_null() || lp_write_pipe.is_null() {
+        set_last_error(87);
+        return 0;
     }
-    if !lp_write_pipe.is_null() {
-        unsafe { *lp_write_pipe = usize::MAX };
+    let mut fds: [libc::c_int; 2] = [-1, -1];
+    if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+        set_last_error(8); // ERROR_NOT_ENOUGH_MEMORY
+        return 0;
     }
-    0 // FALSE
+    let read_handle = handles::alloc(handles::HandleKind::File(fds[0]));
+    let write_handle = handles::alloc(handles::HandleKind::File(fds[1]));
+    unsafe {
+        *lp_read_pipe = read_handle;
+        *lp_write_pipe = write_handle;
+    }
+    set_last_error(0);
+    1
 }
 
 /// ReadConsoleW: read from the console. Returns FALSE (no console input).
