@@ -1166,13 +1166,12 @@ pub unsafe extern "win64" fn ucrt_stdio_common_vsprintf(
         overflow_arg_area: args,
         reg_save_area: std::ptr::null_mut(),
     };
-    let ret = if buf.is_null() || buf_count == 0 {
+    if buf.is_null() || buf_count == 0 {
         // Count-only mode: return number of chars that would be written.
         unsafe { vsnprintf(std::ptr::null_mut(), 0, format, &mut va_tag) }
     } else {
         unsafe { vsnprintf(buf, clamp_vsnprintf_n(buf_count), format, &mut va_tag) }
-    };
-    ret
+    }
 }
 
 /// `__stdio_common_vsnprintf_s` — size-limited secure sprintf variant.
