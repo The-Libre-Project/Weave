@@ -4019,9 +4019,9 @@ fn seven_zip_a_extract_gate() {
         return;
     }
 
-    // Test-name-prefixed out_dir avoids collisions with parallel gates and
-    // with M8a's own doc-spec path `/tmp/m8a-out`.
-    let out_dir = std::path::PathBuf::from("/tmp/m8a-out-extract-gate");
+    // Sandbox Landlock covers the fixture bin_dir but NOT /tmp — use a
+    // subdir of bin_dir, same pattern as sevenzip_m4_extraction_gate.
+    let out_dir = std::path::PathBuf::from(&bin_dir).join("m8a_extract_out");
 
     // Pre-cleanup (idempotent).
     let _ = std::fs::remove_dir_all(&out_dir);
