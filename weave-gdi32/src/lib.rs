@@ -4596,7 +4596,7 @@ pub unsafe extern "win64" fn set_brush_org_ex(
 ///
 /// # Safety
 /// `lp_bits` must point to at least `stride * c_lines` readable bytes.
-/// `lp_bmi` must point to a readable BITMAPINFOHEADER. Phase 2: 32-bit BI_RGB only.
+/// `lp_bmi` must point to a readable BITMAPINFOHEADER. Phase 2: 32-bit and 24-bit BI_RGB.
 // Wine ref: dlls/win32u/dib.c::set_di_bits — validates BITMAPINFO, builds
 // bitblt_coords for [startscan, startscan+lines), calls put_image_into_bitmap;
 // biHeight > 0 → source is bottom-up (row 0 = bottom of image); biHeight < 0
@@ -4636,7 +4636,7 @@ pub unsafe extern "win64" fn set_dib_bits(
         return 0;
     }
 
-    // Parse BITMAPINFOHEADER — only 32-bit BI_RGB accepted.
+    // Parse BITMAPINFOHEADER — 32-bit and 24-bit BI_RGB accepted.
     let (bi_width, bi_height, bi_bpp, bi_comp) = unsafe {
         let w = *((lp_bmi + 4) as *const i32);
         let h = *((lp_bmi + 8) as *const i32);
@@ -4644,7 +4644,7 @@ pub unsafe extern "win64" fn set_dib_bits(
         let comp = *((lp_bmi + 16) as *const u32);
         (w, h, bpp, comp)
     };
-    if bi_bpp != 32 || bi_comp != 0 || bi_width <= 0 {
+    if (bi_bpp != 32 && bi_bpp != 24) || bi_comp != 0 || bi_width <= 0 {
         return 0;
     }
 
@@ -4657,9 +4657,9 @@ pub unsafe extern "win64" fn set_dib_bits(
     }
     let lines = c_lines.min(bmp_h - start).min(abs_src_h - start);
 
-    let src_stride = (src_w as usize) * 4;
+    // Source stride is DWORD-aligned: round up to 32-bit boundary.
+    let src_stride = (src_w as usize * bi_bpp as usize).div_ceil(32) * 4;
     let dst_stride = (bmp_w as usize) * 4;
-    let copy_len = src_stride.min(dst_stride);
 
     // Internal storage is top-down (row 0 = topmost pixel row).
     // Bottom-up source: input row 0 = scan line `start` from the bottom
@@ -4677,7 +4677,21 @@ pub unsafe extern "win64" fn set_dib_bits(
         unsafe {
             let src = lp_bits.add(src_row * src_stride);
             let dst = (bits_ptr + dst_row * dst_stride) as *mut u8;
-            std::ptr::copy_nonoverlapping(src, dst, copy_len);
+            if bi_bpp == 32 {
+                let copy_len = src_stride.min(dst_stride);
+                std::ptr::copy_nonoverlapping(src, dst, copy_len);
+            } else {
+                // 24-bit BGR → expand to BGRA (alpha = 0xFF) for the internal store.
+                let px_count = (src_w as usize).min(bmp_w as usize);
+                for px in 0..px_count {
+                    let s = src.add(px * 3);
+                    let d = dst.add(px * 4);
+                    *d = *s; // B
+                    *d.add(1) = *s.add(1); // G
+                    *d.add(2) = *s.add(2); // R
+                    *d.add(3) = 0xFF; // A
+                }
+            }
         }
     }
     lines as i32

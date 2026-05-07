@@ -17,7 +17,7 @@
 //!   * start_scan + c_lines > height → clamped to height-start_scan.
 
 use weave_gdi32::{
-    create_compatible_bitmap, create_compatible_dc, delete_object, select_object,
+    create_compatible_bitmap, create_compatible_dc, delete_object, select_object, set_dib_bits,
     set_dib_bits_to_device,
 };
 
@@ -275,6 +275,18 @@ fn clines_clamped_to_height_minus_startscan() {
         r, 3,
         "c_lines should clamp to height - start_scan (4 - 1 = 3)"
     );
+    let _ = delete_object(bm);
+    let _ = delete_object(dc);
+}
+
+#[test]
+fn valid_24bit_birgb_returns_clines() {
+    // SetDIBits: 24-bit BGR source → internal BGRA store; returns c_lines.
+    let (dc, bm) = make_dc();
+    let bi = make_bi(4, 4, 24, 0);
+    let pixels = [0u8; 4 * 4 * 3]; // 4x4 BGR (3 bytes/pixel, DWORD-aligned row)
+    let r = unsafe { set_dib_bits(dc, bm, 0, 4, pixels.as_ptr(), bi.as_ptr() as usize, 0) };
+    assert_eq!(r, 4, "24bpp BI_RGB SetDIBits should return c_lines");
     let _ = delete_object(bm);
     let _ = delete_object(dc);
 }
