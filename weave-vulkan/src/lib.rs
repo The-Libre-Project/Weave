@@ -31,7 +31,7 @@
 
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::sync::{
-    atomic::{AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
     OnceLock,
 };
 
@@ -100,6 +100,7 @@ static D3D9_PRESENT_COUNT: AtomicU64 = AtomicU64::new(0);
 static D3D9_DRAW_COUNT: AtomicU64 = AtomicU64::new(0);
 static D3D9_CLEAR_COUNT: AtomicU64 = AtomicU64::new(0);
 static D3D9_UPLOAD_COUNT: AtomicU64 = AtomicU64::new(0);
+static D3D9_BEGIN_RENDERING_LOGGED: AtomicBool = AtomicBool::new(false);
 
 fn d3d9_trace_enabled() -> bool {
     *D3D9_TRACE_ENABLED.get_or_init(|| {
@@ -1385,7 +1386,11 @@ pub unsafe extern "win64" fn vk_cmd_begin_rendering(
     //   48: pColorAttachments(*), 56: pDepthAttachment(*), 64: pStencilAttachment(*)
     // VkRenderingAttachmentInfo offsets:
     //   44: loadOp(u32, CLEAR=1), 52: clearValue([f32;4])
-    if d3d9_trace_enabled() && !p_rendering_info.is_null() {
+    // Log only the first BeginRendering call — avoid eprintln! overhead on every render pass.
+    if d3d9_trace_enabled()
+        && !p_rendering_info.is_null()
+        && !D3D9_BEGIN_RENDERING_LOGGED.swap(true, Ordering::Relaxed)
+    {
         let base = p_rendering_info as *const u8;
         let color_count = unsafe { (base.add(44) as *const u32).read() };
         let p_color = unsafe { (base.add(48) as *const *const u8).read() };
@@ -1399,7 +1404,7 @@ pub unsafe extern "win64" fn vk_cmd_begin_rendering(
         } else {
             "no-color".to_string()
         };
-        d3d9_trace!("vkCmdBeginRendering color_att={color_count} {color_str}");
+        d3d9_trace!("vkCmdBeginRendering[first] color_att={color_count} {color_str}");
     }
     let f = real_fn(stored_instance(), "vkCmdBeginRendering");
     if f.is_null() {
