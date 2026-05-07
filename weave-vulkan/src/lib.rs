@@ -99,6 +99,7 @@ static D3D9_SUBMIT_COUNT: AtomicU64 = AtomicU64::new(0);
 static D3D9_PRESENT_COUNT: AtomicU64 = AtomicU64::new(0);
 static D3D9_DRAW_COUNT: AtomicU64 = AtomicU64::new(0);
 static D3D9_CLEAR_COUNT: AtomicU64 = AtomicU64::new(0);
+static D3D9_UPLOAD_COUNT: AtomicU64 = AtomicU64::new(0);
 
 fn d3d9_trace_enabled() -> bool {
     *D3D9_TRACE_ENABLED.get_or_init(|| {
@@ -115,12 +116,13 @@ fn d3d9_trace_ms() -> u128 {
         .as_millis()
 }
 
-fn d3d9_trace_counts() -> (u64, u64, u64, u64) {
+fn d3d9_trace_counts() -> (u64, u64, u64, u64, u64) {
     (
         D3D9_SUBMIT_COUNT.load(Ordering::Relaxed),
         D3D9_PRESENT_COUNT.load(Ordering::Relaxed),
         D3D9_DRAW_COUNT.load(Ordering::Relaxed),
         D3D9_CLEAR_COUNT.load(Ordering::Relaxed),
+        D3D9_UPLOAD_COUNT.load(Ordering::Relaxed),
     )
 }
 
@@ -714,9 +716,9 @@ pub unsafe extern "win64" fn vk_queue_submit(
         None
     };
     if let Some(seq) = seq {
-        let (_, presents, draws, clears) = d3d9_trace_counts();
+        let (_, presents, draws, clears, uploads) = d3d9_trace_counts();
         d3d9_trace!(
-            "vkQueueSubmit#{seq} ENTER submits={submit_count} fence=0x{fence:x} draws={draws} clears={clears} presents={presents}"
+            "vkQueueSubmit#{seq} ENTER submits={submit_count} fence=0x{fence:x} draws={draws} clears={clears} uploads={uploads} presents={presents}"
         );
     }
     eprintln!(
@@ -749,9 +751,9 @@ pub unsafe extern "win64" fn vk_queue_submit2(
         None
     };
     if let Some(seq) = seq {
-        let (_, presents, draws, clears) = d3d9_trace_counts();
+        let (_, presents, draws, clears, uploads) = d3d9_trace_counts();
         d3d9_trace!(
-            "vkQueueSubmit2#{seq} ENTER submits={submit_count} fence=0x{fence:x} draws={draws} clears={clears} presents={presents}"
+            "vkQueueSubmit2#{seq} ENTER submits={submit_count} fence=0x{fence:x} draws={draws} clears={clears} uploads={uploads} presents={presents}"
         );
     }
     eprintln!(
@@ -796,9 +798,9 @@ pub unsafe extern "win64" fn vk_queue_present_khr(
         None
     };
     if let Some(seq) = seq {
-        let (submits, _, draws, clears) = d3d9_trace_counts();
+        let (submits, _, draws, clears, uploads) = d3d9_trace_counts();
         d3d9_trace!(
-            "vkQueuePresentKHR#{seq} ENTER submits={submits} draws={draws} clears={clears}"
+            "vkQueuePresentKHR#{seq} ENTER submits={submits} draws={draws} clears={clears} uploads={uploads}"
         );
     }
     eprintln!(
@@ -813,9 +815,9 @@ pub unsafe extern "win64" fn vk_queue_present_khr(
         unsafe { std::mem::transmute(f) };
     let r = unsafe { f(queue, p_present_info) };
     if let Some(seq) = seq {
-        let (submits, presents, draws, clears) = d3d9_trace_counts();
+        let (submits, presents, draws, clears, uploads) = d3d9_trace_counts();
         d3d9_trace!(
-            "vkQueuePresentKHR#{seq} RETURN {r} totals submits={submits} presents={presents} draws={draws} clears={clears}"
+            "vkQueuePresentKHR#{seq} RETURN {r} totals submits={submits} presents={presents} draws={draws} clears={clears} uploads={uploads}"
         );
     }
     eprintln!("weave-vulkan: vk_queue_present_khr RETURN {r}");
@@ -1116,8 +1118,51 @@ cmd_thunk!(void vk_cmd_copy_image, "vkCmdCopyImage", (command_buffer, src_image:
 cmd_thunk!(void vk_cmd_copy_image2, "vkCmdCopyImage2", (command_buffer, p_copy_image_info: *const c_void));
 cmd_thunk!(void vk_cmd_blit_image, "vkCmdBlitImage", (command_buffer, src_image: VkImage, src_layout: u32, dst_image: VkImage, dst_layout: u32, region_count: u32, p_regions: *const c_void, filter: u32));
 cmd_thunk!(void vk_cmd_blit_image2, "vkCmdBlitImage2", (command_buffer, p_blit_image_info: *const c_void));
-cmd_thunk!(void vk_cmd_copy_buffer_to_image, "vkCmdCopyBufferToImage", (command_buffer, src_buffer: VkBuffer, dst_image: VkImage, dst_layout: u32, region_count: u32, p_regions: *const c_void));
-cmd_thunk!(void vk_cmd_copy_buffer_to_image2, "vkCmdCopyBufferToImage2", (command_buffer, p_copy_buffer_to_image_info: *const c_void));
+pub unsafe extern "win64" fn vk_cmd_copy_buffer_to_image(
+    command_buffer: VkCommandBuffer,
+    src_buffer: VkBuffer,
+    dst_image: VkImage,
+    dst_layout: u32,
+    region_count: u32,
+    p_regions: *const c_void,
+) {
+    let seq = if d3d9_trace_enabled() {
+        Some(D3D9_UPLOAD_COUNT.fetch_add(1, Ordering::Relaxed) + 1)
+    } else {
+        None
+    };
+    if let Some(seq) = seq {
+        d3d9_trace!(
+            "vkCmdCopyBufferToImage#{seq} src=0x{src_buffer:x} dst=0x{dst_image:x} layout={dst_layout} regions={region_count}"
+        );
+    }
+    let f = real_fn(stored_instance(), "vkCmdCopyBufferToImage");
+    if f.is_null() {
+        return;
+    }
+    let f: unsafe extern "C" fn(VkCommandBuffer, VkBuffer, VkImage, u32, u32, *const c_void) =
+        unsafe { std::mem::transmute(f) };
+    unsafe { f(command_buffer, src_buffer, dst_image, dst_layout, region_count, p_regions) }
+}
+pub unsafe extern "win64" fn vk_cmd_copy_buffer_to_image2(
+    command_buffer: VkCommandBuffer,
+    p_copy_buffer_to_image_info: *const c_void,
+) {
+    let seq = if d3d9_trace_enabled() {
+        Some(D3D9_UPLOAD_COUNT.fetch_add(1, Ordering::Relaxed) + 1)
+    } else {
+        None
+    };
+    if let Some(seq) = seq {
+        d3d9_trace!("vkCmdCopyBufferToImage2#{seq}");
+    }
+    let f = real_fn(stored_instance(), "vkCmdCopyBufferToImage2");
+    if f.is_null() {
+        return;
+    }
+    let f: unsafe extern "C" fn(VkCommandBuffer, *const c_void) = unsafe { std::mem::transmute(f) };
+    unsafe { f(command_buffer, p_copy_buffer_to_image_info) }
+}
 cmd_thunk!(void vk_cmd_copy_image_to_buffer, "vkCmdCopyImageToBuffer", (command_buffer, src_image: VkImage, src_layout: u32, dst_buffer: VkBuffer, region_count: u32, p_regions: *const c_void));
 cmd_thunk!(void vk_cmd_copy_image_to_buffer2, "vkCmdCopyImageToBuffer2", (command_buffer, p_copy_image_to_buffer_info: *const c_void));
 cmd_thunk!(void vk_cmd_update_buffer, "vkCmdUpdateBuffer", (command_buffer, dst_buffer: VkBuffer, dst_offset: VkDeviceSize, data_size: VkDeviceSize, p_data: *const c_void));
