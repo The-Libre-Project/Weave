@@ -5547,74 +5547,217 @@ pub extern "win64" fn get_version() -> u32 {
 
 // ── Process/toolhelp ─────────────────────────────────────────────────────────
 
+#[derive(Clone)]
+struct SnapProcEntry {
+    pid: u32,
+    ppid: u32,
+    threads: u32,
+    name_w: Vec<u16>, // UTF-16, null-terminated, ≤260 elements
+}
+
+struct ToolhelpSnap {
+    processes: Vec<SnapProcEntry>,
+    proc_pos: usize,
+}
+
+static SNAP_TABLE: OnceLock<Mutex<HashMap<usize, ToolhelpSnap>>> = OnceLock::new();
+static SNAP_NEXT: AtomicUsize = AtomicUsize::new(0x8800_0001);
+
+fn snap_table() -> &'static Mutex<HashMap<usize, ToolhelpSnap>> {
+    SNAP_TABLE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn enumerate_linux_processes() -> Vec<SnapProcEntry> {
+    let mut result = Vec::new();
+    let Ok(dir) = std::fs::read_dir("/proc") else {
+        return result;
+    };
+    for entry in dir.flatten() {
+        let fname = entry.file_name();
+        let s = fname.to_string_lossy();
+        let Ok(pid) = s.parse::<u32>() else { continue };
+        let stat_path = format!("/proc/{pid}/stat");
+        let Ok(content) = std::fs::read_to_string(&stat_path) else {
+            continue;
+        };
+        let Some(open) = content.find('(') else {
+            continue;
+        };
+        let Some(close) = content.rfind(')') else {
+            continue;
+        };
+        let name = &content[open + 1..close];
+        let rest: Vec<&str> = content[close + 2..].split_whitespace().collect();
+        let ppid: u32 = rest.get(1).and_then(|v| v.parse().ok()).unwrap_or(0);
+        // /proc/pid/stat field 20 (1-based) = num_threads; 0-based after state: index 17
+        let threads: u32 = rest.get(17).and_then(|v| v.parse().ok()).unwrap_or(1);
+        let mut name_w: Vec<u16> = name.encode_utf16().take(259).collect();
+        name_w.push(0);
+        result.push(SnapProcEntry {
+            pid,
+            ppid,
+            threads,
+            name_w,
+        });
+    }
+    result.sort_unstable_by_key(|e| e.pid);
+    result
+}
+
+// Write PROCESSENTRY32W into the buffer at `lppe`.
+// x64 layout: dwSize(+0) cntUsage(+4) th32ProcessID(+8) _pad(+12)
+// th32DefaultHeapID(+16) th32ModuleID(+24) cntThreads(+28) th32ParentProcessID(+32)
+// pcPriClassBase(+36) dwFlags(+40) szExeFile(+44, 260×u16) — sizeof = 568.
+unsafe fn write_process_entry_w(lppe: *mut u8, e: &SnapProcEntry) {
+    unsafe {
+        std::ptr::write_unaligned(lppe.add(0) as *mut u32, 568);
+        std::ptr::write_unaligned(lppe.add(4) as *mut u32, 0); // cntUsage (unused)
+        std::ptr::write_unaligned(lppe.add(8) as *mut u32, e.pid);
+        std::ptr::write_unaligned(lppe.add(12) as *mut u32, 0); // implicit pad
+        std::ptr::write_unaligned(lppe.add(16) as *mut u64, 0); // th32DefaultHeapID (unused)
+        std::ptr::write_unaligned(lppe.add(24) as *mut u32, 0); // th32ModuleID (unused)
+        std::ptr::write_unaligned(lppe.add(28) as *mut u32, e.threads);
+        std::ptr::write_unaligned(lppe.add(32) as *mut u32, e.ppid);
+        std::ptr::write_unaligned(lppe.add(36) as *mut i32, 8); // pcPriClassBase NORMAL
+        std::ptr::write_unaligned(lppe.add(40) as *mut u32, 0); // dwFlags (unused)
+        let dst = lppe.add(44) as *mut u16;
+        let len = e.name_w.len().min(260);
+        std::ptr::copy_nonoverlapping(e.name_w.as_ptr(), dst, len);
+    }
+}
+
 /// CreateToolhelp32Snapshot — create a snapshot of processes/threads/modules.
 ///
-/// Returns INVALID_HANDLE_VALUE (stub — no real snapshot).
+/// Reads /proc to enumerate live Linux processes when TH32CS_SNAPPROCESS is set.
+/// Returns INVALID_HANDLE_VALUE on allocation failure.
 ///
 /// # Safety
 /// No pointer dereferences.
 // Wine ref: dlls/kernel32/toolhelp.c — calls NtQuerySystemInformation(SystemProcessInformation)
-// to populate the snapshot; stores PROCESSENTRY32W/THREADENTRY32/MODULEENTRY32W structs
-// in a heap-allocated block; returns a handle to the snapshot object.
+// to populate the snapshot; stores PROCESSENTRY32W structs in a heap-allocated block;
+// returns a handle to the snapshot object.
 pub unsafe extern "win64" fn create_toolhelp32_snapshot(
-    _dw_flags: u32,
+    dw_flags: u32,
     _th32_process_id: u32,
 ) -> usize {
-    warn_once("CreateToolhelp32Snapshot");
-    usize::MAX // INVALID_HANDLE_VALUE
+    const TH32CS_SNAPPROCESS: u32 = 0x2;
+    let processes = if dw_flags & TH32CS_SNAPPROCESS != 0 {
+        enumerate_linux_processes()
+    } else {
+        Vec::new()
+    };
+    let snap = ToolhelpSnap {
+        processes,
+        proc_pos: 0,
+    };
+    let handle = SNAP_NEXT.fetch_add(1, Ordering::Relaxed);
+    snap_table().lock().unwrap().insert(handle, snap);
+    handle
 }
 
 /// Process32FirstW — retrieve first process from a toolhelp snapshot.
 ///
-/// Returns FALSE — no processes in stub snapshot.
+/// Resets position to the first entry and fills PROCESSENTRY32W.
+/// Returns FALSE + ERROR_NO_MORE_FILES if the snapshot has no processes.
 ///
 /// # Safety
-/// `lppe` is accepted but not dereferenced.
-// Wine ref: dlls/kernel32/toolhelp.c — checks that hSnapshot is a valid snapshot handle
-// and that TH32CS_SNAPPROCESS flag was set; returns ERROR_INVALID_PARAMETER otherwise;
-// fills PROCESSENTRY32W from the snapshot buffer.
-pub unsafe extern "win64" fn process32_first_w(_h_snapshot: usize, _lppe: *mut u8) -> i32 {
-    warn_once("Process32FirstW");
-    0 // FALSE
+/// `lppe` must point to a valid PROCESSENTRY32W buffer with dwSize pre-set.
+// Wine ref: dlls/kernel32/toolhelp.c — checks valid snapshot handle; fills PROCESSENTRY32W
+// from internal buffer; returns ERROR_NO_MORE_FILES if count is zero.
+pub unsafe extern "win64" fn process32_first_w(h_snapshot: usize, lppe: *mut u8) -> i32 {
+    if lppe.is_null() {
+        set_last_error(87);
+        return 0;
+    }
+    let provided = unsafe { std::ptr::read_unaligned(lppe as *const u32) };
+    if (provided as usize) < 568 {
+        set_last_error(24); // ERROR_BAD_LENGTH
+        return 0;
+    }
+    let entry = {
+        let mut table = snap_table().lock().unwrap();
+        let Some(snap) = table.get_mut(&h_snapshot) else {
+            set_last_error(6); // ERROR_INVALID_HANDLE
+            return 0;
+        };
+        snap.proc_pos = 0;
+        snap.processes.first().cloned()
+    };
+    match entry {
+        None => {
+            set_last_error(18); // ERROR_NO_MORE_FILES
+            0
+        }
+        Some(e) => {
+            unsafe { write_process_entry_w(lppe, &e) };
+            set_last_error(0);
+            1
+        }
+    }
 }
 
 /// Process32NextW — retrieve next process from a toolhelp snapshot.
 ///
-/// Returns FALSE — no more processes.
+/// Advances the snapshot position. Returns FALSE + ERROR_NO_MORE_FILES when exhausted.
 ///
 /// # Safety
-/// `lppe` is accepted but not dereferenced.
+/// `lppe` must point to a valid PROCESSENTRY32W buffer with dwSize pre-set.
 // Wine ref: dlls/kernel32/toolhelp.c — advances the internal offset into the snapshot
 // buffer; returns ERROR_NO_MORE_FILES when exhausted (NOT ERROR_NO_MORE_ITEMS).
-pub unsafe extern "win64" fn process32_next_w(_h_snapshot: usize, _lppe: *mut u8) -> i32 {
-    warn_once("Process32NextW");
-    0 // FALSE
+pub unsafe extern "win64" fn process32_next_w(h_snapshot: usize, lppe: *mut u8) -> i32 {
+    if lppe.is_null() {
+        set_last_error(87);
+        return 0;
+    }
+    let provided = unsafe { std::ptr::read_unaligned(lppe as *const u32) };
+    if (provided as usize) < 568 {
+        set_last_error(24);
+        return 0;
+    }
+    let entry = {
+        let mut table = snap_table().lock().unwrap();
+        let Some(snap) = table.get_mut(&h_snapshot) else {
+            set_last_error(6);
+            return 0;
+        };
+        snap.proc_pos += 1;
+        snap.processes.get(snap.proc_pos).cloned()
+    };
+    match entry {
+        None => {
+            set_last_error(18);
+            0
+        }
+        Some(e) => {
+            unsafe { write_process_entry_w(lppe, &e) };
+            set_last_error(0);
+            1
+        }
+    }
 }
 
 /// Process32First — retrieve first process from a toolhelp snapshot (ANSI).
 ///
-/// Returns FALSE — no processes in stub snapshot.
+/// Wine: PROCESSENTRY32 == PROCESSENTRY32W; delegates to the W variant.
 ///
 /// # Safety
-/// `lppe` is accepted but not dereferenced.
-// Wine ref: dlls/kernel32/toolhelp.c — checks TH32CS_SNAPPROCESS flag; fills PROCESSENTRY32
-// (ANSI variant) from the snapshot buffer; otherwise identical logic to Process32FirstW.
-pub unsafe extern "win64" fn process32_first(_h_snapshot: usize, _lppe: *mut u8) -> i32 {
-    warn_once("Process32First");
-    0 // FALSE
+/// `lppe` must point to a valid PROCESSENTRY32W buffer with dwSize pre-set.
+// Wine ref: dlls/kernel32/toolhelp.c — PROCESSENTRY32 is typedef'd to PROCESSENTRY32W;
+// Process32First and Process32FirstW share the same struct and logic.
+pub unsafe extern "win64" fn process32_first(h_snapshot: usize, lppe: *mut u8) -> i32 {
+    unsafe { process32_first_w(h_snapshot, lppe) }
 }
 
 /// Process32Next — retrieve next process from a toolhelp snapshot (ANSI).
 ///
-/// Returns FALSE — no more processes.
+/// Wine: PROCESSENTRY32 == PROCESSENTRY32W; delegates to the W variant.
 ///
 /// # Safety
-/// `lppe` is accepted but not dereferenced.
-// Wine ref: dlls/kernel32/toolhelp.c — advances internal snapshot offset; returns
-// ERROR_NO_MORE_FILES when exhausted (ANSI variant of Process32NextW).
-pub unsafe extern "win64" fn process32_next(_h_snapshot: usize, _lppe: *mut u8) -> i32 {
-    warn_once("Process32Next");
-    0 // FALSE
+/// `lppe` must point to a valid PROCESSENTRY32W buffer with dwSize pre-set.
+// Wine ref: dlls/kernel32/toolhelp.c — PROCESSENTRY32 is typedef'd to PROCESSENTRY32W;
+// Process32Next and Process32NextW share the same struct and logic.
+pub unsafe extern "win64" fn process32_next(h_snapshot: usize, lppe: *mut u8) -> i32 {
+    unsafe { process32_next_w(h_snapshot, lppe) }
 }
 
 // ── Power management ─────────────────────────────────────────────────────────
