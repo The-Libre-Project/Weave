@@ -1318,7 +1318,35 @@ cmd_thunk!(void vk_cmd_write_timestamp, "vkCmdWriteTimestamp", (command_buffer, 
 cmd_thunk!(void vk_cmd_write_timestamp2, "vkCmdWriteTimestamp2", (command_buffer, stage: u64, query_pool: VkQueryPool, query: u32));
 cmd_thunk!(void vk_cmd_copy_query_pool_results, "vkCmdCopyQueryPoolResults", (command_buffer, query_pool: VkQueryPool, first_query: u32, query_count: u32, dst_buffer: VkBuffer, dst_offset: VkDeviceSize, stride: VkDeviceSize, flags: VkQueryResultFlags));
 cmd_thunk!(void vk_cmd_push_constants, "vkCmdPushConstants", (command_buffer, layout: VkPipelineLayout, stage_flags: VkShaderStageFlags, offset: u32, size: u32, p_values: *const c_void));
-cmd_thunk!(void vk_cmd_begin_render_pass, "vkCmdBeginRenderPass", (command_buffer, p_render_pass_begin: *const c_void, contents: VkSubpassContents));
+pub unsafe extern "win64" fn vk_cmd_begin_render_pass(
+    command_buffer: VkCommandBuffer,
+    p_render_pass_begin: *const c_void,
+    contents: VkSubpassContents,
+) {
+    // VkRenderPassBeginInfo offsets (spec, 64-bit):
+    //   0: sType(u32), 8: pNext(*), 16: renderPass(u64), 24: framebuffer(u64),
+    //   32: renderArea(VkRect2D=16B), 48: clearValueCount(u32), 56: pClearValues(*)
+    // VkClearValue = 16 bytes (union); first attachment color at pClearValues[0].
+    if d3d9_trace_enabled() && !p_render_pass_begin.is_null() {
+        let base = p_render_pass_begin as *const u8;
+        let clear_count = unsafe { (base.add(48) as *const u32).read() };
+        let p_clear_values = unsafe { (base.add(56) as *const *const u8).read() };
+        let color_str = if clear_count > 0 && !p_clear_values.is_null() {
+            let c = unsafe { std::ptr::read(p_clear_values as *const [f32; 4]) };
+            format!("[{:.3},{:.3},{:.3},{:.3}]", c[0], c[1], c[2], c[3])
+        } else {
+            "none".to_string()
+        };
+        d3d9_trace!("vkCmdBeginRenderPass clear_count={clear_count} clear[0]={color_str}");
+    }
+    let f = real_fn(stored_instance(), "vkCmdBeginRenderPass");
+    if f.is_null() {
+        return;
+    }
+    let f: unsafe extern "C" fn(VkCommandBuffer, *const c_void, VkSubpassContents) =
+        unsafe { std::mem::transmute(f) };
+    unsafe { f(command_buffer, p_render_pass_begin, contents) }
+}
 cmd_thunk!(void vk_cmd_begin_render_pass2, "vkCmdBeginRenderPass2", (command_buffer, p_render_pass_begin: *const c_void, p_subpass_begin_info: *const c_void));
 cmd_thunk!(void vk_cmd_next_subpass, "vkCmdNextSubpass", (command_buffer, contents: VkSubpassContents));
 cmd_thunk!(void vk_cmd_next_subpass2, "vkCmdNextSubpass2", (command_buffer, p_subpass_begin_info: *const c_void, p_subpass_end_info: *const c_void));
