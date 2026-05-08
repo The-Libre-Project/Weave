@@ -3366,13 +3366,16 @@ pub unsafe extern "win64" fn get_volume_information_w(
 /// CreateProcessW: create a new process and its primary thread.
 ///
 /// # Safety
-/// Pointer arguments are accepted but not dereferenced.
-// Wine ref: dlls/kernelbase/process.c — calls NtCreateUserProcess; fills
-// PROCESS_INFORMATION with hProcess/hThread/ProcessId/ThreadId; CREATE_SUSPENDED
-// leaves thread suspended until ResumeThread. Weave stub: returns FALSE (not supported).
+/// Pointer arguments (app_name, cmd_line, pi) are read/written with null checks.
+// Wine ref: dlls/kernelbase/process.c::CreateProcessInternalW — parses app_name or first
+// token of cmd_line for the exe path; translates to native path; forks via NtCreateUserProcess;
+// fills PROCESS_INFORMATION with hProcess/hThread/ProcessId/ThreadId. Weave: translate
+// Win32 exe path → Linux path, spawn child `weave <exe> [args]`, fill pi with child PID.
+// Fragile: child inherits parent Landlock rules — DLL paths must be within prefix; env
+// block (_lp_environment) and working dir (_lp_current_directory) ignored for now.
 pub unsafe extern "win64" fn create_process_w(
-    _lp_application_name: *const u16,
-    _lp_command_line: *mut u16,
+    lp_application_name: *const u16,
+    lp_command_line: *mut u16,
     _lp_process_attributes: usize,
     _lp_thread_attributes: usize,
     _b_inherit_handles: i32,
@@ -3380,32 +3383,172 @@ pub unsafe extern "win64" fn create_process_w(
     _lp_environment: usize,
     _lp_current_directory: *const u16,
     _lp_startup_info: usize,
-    _lp_process_information: usize,
+    lp_process_information: usize,
 ) -> i32 {
-    warn_once("CreateProcessW");
-    0 // FALSE
+    fn read_wide(p: *const u16) -> Option<String> {
+        if p.is_null() {
+            return None;
+        }
+        let mut len = 0usize;
+        while len < 32_768 && unsafe { *p.add(len) } != 0 {
+            len += 1;
+        }
+        Some(String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(p, len) }).to_owned())
+    }
+
+    fn split_cmdline(s: &str) -> Vec<String> {
+        let mut args: Vec<String> = Vec::new();
+        let mut cur = String::new();
+        let mut in_quotes = false;
+        for c in s.chars() {
+            match c {
+                '"' => in_quotes = !in_quotes,
+                ' ' | '\t' if !in_quotes => {
+                    if !cur.is_empty() {
+                        args.push(std::mem::take(&mut cur));
+                    }
+                }
+                other => cur.push(other),
+            }
+        }
+        if !cur.is_empty() {
+            args.push(cur);
+        }
+        args
+    }
+
+    let app = read_wide(lp_application_name);
+    let cmd = read_wide(lp_command_line as *const u16);
+
+    let (exe_win32, extra_args): (String, Vec<String>) = match (&app, &cmd) {
+        (Some(name), cmd_opt) => {
+            let args = cmd_opt
+                .as_deref()
+                .map(|c| split_cmdline(c).into_iter().skip(1).collect())
+                .unwrap_or_default();
+            (name.clone(), args)
+        }
+        (None, Some(cmdline)) => {
+            let mut tokens = split_cmdline(cmdline);
+            if tokens.is_empty() {
+                set_last_error(87); // ERROR_INVALID_PARAMETER
+                return 0;
+            }
+            let exe = tokens.remove(0);
+            (exe, tokens)
+        }
+        (None, None) => {
+            set_last_error(87);
+            return 0;
+        }
+    };
+
+    let linux_exe = match weave_core::prefix::translator().to_linux_str(&exe_win32) {
+        Ok(p) => p,
+        Err(_) => {
+            set_last_error(file_io::ERROR_FILE_NOT_FOUND);
+            return 0;
+        }
+    };
+
+    let weave_bin = match std::fs::read_link("/proc/self/exe") {
+        Ok(p) => p,
+        Err(_) => {
+            set_last_error(2); // ERROR_FILE_NOT_FOUND
+            return 0;
+        }
+    };
+
+    let child = match std::process::Command::new(&weave_bin)
+        .arg(&linux_exe)
+        .args(&extra_args)
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("weave/kernel32: CreateProcessW: spawn failed: {e}");
+            set_last_error(2);
+            return 0;
+        }
+    };
+
+    let pid = child.id();
+    std::mem::forget(child); // detach — guest manages lifetime via WaitForSingleObject/CloseHandle
+
+    if lp_process_information != 0 {
+        let pi = lp_process_information as *mut u8;
+        // PROCESS_INFORMATION layout (64-bit): hProcess(8) hThread(8) dwProcessId(4) dwThreadId(4)
+        unsafe {
+            *(pi.add(0) as *mut usize) = pid as usize; // hProcess = PID (per OpenProcess convention)
+            *(pi.add(8) as *mut usize) = pid as usize; // hThread = PID (fake — no thread handle table)
+            *(pi.add(16) as *mut u32) = pid;
+            *(pi.add(20) as *mut u32) = pid; // dwThreadId = PID (fake)
+        }
+    }
+
+    eprintln!("weave/kernel32: CreateProcessW: spawned pid={pid} exe={linux_exe:?}");
+    set_last_error(0);
+    1 // TRUE
 }
 
 /// CreateProcessA: create a new process (ANSI wrapper).
 ///
 /// # Safety
-/// Pointer arguments are accepted but not dereferenced.
-// Wine ref: dlls/kernelbase/process.c — converts name/cmdline via
-// RtlMultiByteToUnicodeN then delegates to CreateProcessW.
+/// Pointer arguments are converted to wide and forwarded to CreateProcessW.
+// Wine ref: dlls/kernelbase/process.c — RtlMultiByteToUnicodeN converts name/cmdline,
+// then calls CreateProcessInternalW. Weave: convert to UTF-8 via from_raw_parts then
+// delegate to create_process_w via re-encoded UTF-16 on the stack.
 pub unsafe extern "win64" fn create_process_a(
-    _lp_application_name: *const u8,
-    _lp_command_line: *mut u8,
-    _lp_process_attributes: usize,
-    _lp_thread_attributes: usize,
-    _b_inherit_handles: i32,
-    _dw_creation_flags: u32,
-    _lp_environment: usize,
-    _lp_current_directory: *const u8,
-    _lp_startup_info: usize,
-    _lp_process_information: usize,
+    lp_application_name: *const u8,
+    lp_command_line: *mut u8,
+    lp_process_attributes: usize,
+    lp_thread_attributes: usize,
+    b_inherit_handles: i32,
+    dw_creation_flags: u32,
+    lp_environment: usize,
+    lp_current_directory: *const u8,
+    lp_startup_info: usize,
+    lp_process_information: usize,
 ) -> i32 {
-    warn_once("CreateProcessA");
-    0 // FALSE
+    fn ansi_to_wide(p: *const u8) -> Option<Vec<u16>> {
+        if p.is_null() {
+            return None;
+        }
+        let mut len = 0usize;
+        while len < 32_768 && unsafe { *p.add(len) } != 0 {
+            len += 1;
+        }
+        let s = unsafe { std::slice::from_raw_parts(p, len) };
+        let utf8 = String::from_utf8_lossy(s);
+        let mut wide: Vec<u16> = utf8.encode_utf16().collect();
+        wide.push(0);
+        Some(wide)
+    }
+
+    let app_wide = ansi_to_wide(lp_application_name);
+    let mut cmd_wide = ansi_to_wide(lp_command_line);
+    let dir_wide = ansi_to_wide(lp_current_directory);
+
+    let app_ptr = app_wide.as_deref().map_or(std::ptr::null(), |v| v.as_ptr());
+    let cmd_ptr = cmd_wide
+        .as_deref_mut()
+        .map_or(std::ptr::null_mut(), |v| v.as_mut_ptr());
+    let dir_ptr = dir_wide.as_deref().map_or(std::ptr::null(), |v| v.as_ptr());
+
+    unsafe {
+        create_process_w(
+            app_ptr,
+            cmd_ptr,
+            lp_process_attributes,
+            lp_thread_attributes,
+            b_inherit_handles,
+            dw_creation_flags,
+            lp_environment,
+            dir_ptr,
+            lp_startup_info,
+            lp_process_information,
+        )
+    }
 }
 
 /// WaitForInputIdle: wait until a process is idle or timeout expires.
