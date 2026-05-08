@@ -124,6 +124,7 @@ pub const SRCINVERT: u32 = 0x0066_0046; // dest ^= src
 pub const NOTSRCCOPY: u32 = 0x0033_0008; // dest = ~src
 pub const DSTINVERT: u32 = 0x0055_0009; // dest = ~dest
 pub const PATCOPY: u32 = 0x00F0_0021; // dest = pattern
+pub const PATINVERT: u32 = 0x005A_0049; // dest ^= pattern
 pub const BLACKNESS: u32 = 0x0000_0042; // dest = black
 pub const WHITENESS: u32 = 0x00FF_0062; // dest = white
 pub const RASTER_CAPS_DISPLAY: i32 = RC_BITBLT

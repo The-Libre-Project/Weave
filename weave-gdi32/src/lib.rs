@@ -832,22 +832,36 @@ pub extern "win64" fn polygon(_hdc: usize, _apt: *const Point, _cpt: i32) -> i32
     1
 }
 
-/// PatBlt: fill with a pattern brush using a raster operation (stub).
-// Wine ref: dlls/winex11.drv/bitblt.c::X11DRV_PatBlt — checks usePat=(rop uses pattern
-// bits); BLACKNESS/WHITENESS handled specially to set XForeground directly; DSTINVERT
-// uses GXxor with white^black pixel; falls through to XFillRectangle for all cases.
-pub extern "win64" fn pat_blt(hdc: usize, x: i32, y: i32, w: i32, h: i32, _rop: u32) -> i32 {
-    // Use the selected brush to fill the rectangle.
-    let brush_h = dc::with(hdc, |dc| dc.h_brush);
-    let color = objects::brush_color(brush_h);
+/// PatBlt: fill with a pattern brush using a raster operation.
+// Wine ref: dlls/winex11.drv/bitblt.c::X11DRV_PatBlt — BITBLT_Opcodes[(rop>>16)&0xff]
+// gives the GX function. BLACKNESS/WHITENESS use GXcopy with palette black/white pixel.
+// DSTINVERT uses GXinvert on TrueColor (GXxor with white^black only on shared palette).
+// PATCOPY/PATINVERT set up brush foreground then XFillRectangle with GXcopy/GXxor.
+pub extern "win64" fn pat_blt(hdc: usize, x: i32, y: i32, w: i32, h: i32, rop: u32) -> i32 {
+    if w <= 0 || h <= 0 {
+        return 1;
+    }
     let xcb = dc::with(hdc, |dc| dc.drawable());
-    weave_user32::backend::draw_filled_rect(
-        xcb,
-        x as i16,
-        y as i16,
-        w.max(0) as u16,
-        h.max(0) as u16,
-        to_pixel(color),
+    let brush_pixel = || {
+        let bh = dc::with(hdc, |dc| dc.h_brush);
+        weave_user32::backend::colorref_to_pixel(objects::brush_color(bh))
+    };
+    let (gx_func, pixel) = match rop {
+        defs::BLACKNESS => (weave_user32::backend::GX_CLEAR, 0u32),
+        defs::WHITENESS => (weave_user32::backend::GX_SET, 0xFFFF_FFFFu32),
+        defs::DSTINVERT => (weave_user32::backend::GX_INVERT, 0u32),
+        defs::PATCOPY => (weave_user32::backend::GX_COPY, brush_pixel()),
+        defs::PATINVERT => (weave_user32::backend::GX_XOR, brush_pixel()),
+        _ => {
+            static UNK: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+            if UNK.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 8 {
+                eprintln!("weave/gdi32: PatBlt unrecognised ROP {rop:#010x} → brush fill");
+            }
+            (weave_user32::backend::GX_COPY, brush_pixel())
+        }
+    };
+    weave_user32::backend::fill_rect_with_rop(
+        xcb, x as i16, y as i16, w as u16, h as u16, gx_func, pixel,
     );
     1
 }
