@@ -1667,32 +1667,87 @@ pub unsafe extern "win64" fn end_paint(_hwnd: usize, _lp_paint: *const PaintStru
 /// primary monitor rect; SM_CXBORDER/SM_CYBORDER always 1 ("regardless of BorderWidth in
 /// registry"); SM_CXEDGE/SM_CYEDGE = SM_CXBORDER+1 = 2; SM_CXFRAME/SM_CYFRAME =
 /// SM_CXDLGFRAME(3) + max(border,1) = 4; SM_CXICON/SM_CYICON = map_to_dpi(32,...).
+/// Scrollbar dims from entry_SCROLLWIDTH/SCROLLHEIGHT (max(val,8)); Wine default 17.
+/// Small icons map_to_dpi(16,96) & ~1 = 16. Min window: CYMIN = CYCAPTION+2×CYFRAME.
 pub extern "win64" fn get_system_metrics(n_index: i32) -> i32 {
     let (sw, sh) = backend::screen_size();
-    let result = match n_index {
+    match n_index {
+        // ── screen / virtual screen ───────────────────────────────────────────
         SM_CXSCREEN => sw as i32,
         SM_CYSCREEN => sh as i32,
         SM_CXFULLSCREEN => sw as i32,
-        SM_CYFULLSCREEN => sh as i32 - 40, // subtract taskbar
-        SM_CXICON => 32,
-        SM_CYICON => 32,
-        SM_CXCURSOR => 32,
-        SM_CYCURSOR => 32,
-        SM_CYCAPTION => 23,
-        SM_CXFRAME => 4,
-        SM_CYFRAME => 4,
-        SM_CXBORDER => 1, // Wine: always 1 regardless of registry BorderWidth
-        SM_CYBORDER => 1,
-        SM_CXEDGE => 2, // Wine: SM_CXBORDER + 1
-        SM_CYEDGE => 2,
-        // SM_CMONITORS: report 1 only when a real display is available.
-        // Without DISPLAY (headless tests), returning 1 causes apps like IrfanView
-        // to attempt display hardware initialization that corrupts the heap.
+        SM_CYFULLSCREEN => sh as i32 - 40,
+        SM_XVIRTUALSCREEN => 0,
+        SM_YVIRTUALSCREEN => 0,
+        SM_CXVIRTUALSCREEN => sw as i32,
+        SM_CYVIRTUALSCREEN => sh as i32,
+        // SM_CMONITORS: 1 only when a real display is available — IrfanView triggers
+        // display hardware init on 1, corrupting the heap in headless Docker.
         80 => i32::from(backend::is_available()),
-        _ => 0,
-    };
-    eprintln!("weave/user32: GetSystemMetrics({n_index}) → {result}");
-    result
+        SM_SAMEDISPLAYFORMAT => 1,
+
+        // ── window border / frame ─────────────────────────────────────────────
+        SM_CXBORDER | SM_CYBORDER => 1, // Wine: always 1 regardless of registry
+        SM_CXEDGE | SM_CYEDGE => 2,     // SM_CXBORDER + 1
+        SM_CXDLGFRAME | SM_CYDLGFRAME => 3,
+        SM_CXFRAME | SM_CYFRAME => 4, // SM_CXDLGFRAME + max(border,1)
+        SM_CXFOCUSBORDER | SM_CYFOCUSBORDER => 1,
+
+        // ── caption / menu bars ───────────────────────────────────────────────
+        SM_CYCAPTION => 23,   // iCaptionHeight(22) + 1
+        SM_CYMENU => 20,      // iMenuHeight(19) + 1
+        SM_CYSMCAPTION => 16, // iSmCaptionHeight(15) + 1
+
+        // ── scrollbar dimensions ──────────────────────────────────────────────
+        // Wine: max(entry_SCROLLWIDTH, 8); SCROLLWIDTH/HEIGHT default 17.
+        SM_CXVSCROLL | SM_CYHSCROLL | SM_CYVSCROLL | SM_CXHSCROLL | SM_CYVTHUMB | SM_CXHTHUMB => 17,
+
+        // ── icons / cursors ───────────────────────────────────────────────────
+        SM_CXICON | SM_CYICON => 32, // map_to_dpi(32, 96dpi)
+        SM_CXCURSOR | SM_CYCURSOR => 32,
+        SM_CXSMICON | SM_CYSMICON => 16, // map_to_dpi(16, 96dpi) & ~1
+
+        // ── caption / menu buttons ────────────────────────────────────────────
+        SM_CXSIZE | SM_CYSIZE => 19,     // iCaptionWidth/Height from NCM
+        SM_CXSMSIZE | SM_CYSMSIZE => 15, // iSmCaptionWidth/Height from NCM
+        SM_CXMENUSIZE | SM_CYMENUSIZE => 19, // iMenuWidth/Height from NCM
+
+        // ── minimum / maximized window sizes ─────────────────────────────────
+        SM_CXMIN => 132, // typical: 3×cxCaption + cyCaption + 4×textW + 2×frame + 4
+        SM_CYMIN => 31,  // SM_CYCAPTION(23) + 2×SM_CYFRAME(4) = 31
+        SM_CXMINTRACK => 132,
+        SM_CYMINTRACK => 31,
+        SM_CXMINIMIZED => 160,           // mm.iWidth(154) + 6
+        SM_CYMINIMIZED => 25,            // iCaptionHeight(19) + 6
+        SM_CXMAXTRACK => sw as i32 + 12, // virtualW + 4 + 2×frame(4)
+        SM_CYMAXTRACK => sh as i32 + 12,
+        SM_CXMAXIMIZED => sw as i32 + 8,  // screen + 2×frame(4)
+        SM_CYMAXIMIZED => sh as i32 + 46, // screen + 2×caption(23)
+
+        // ── icon spacing ──────────────────────────────────────────────────────
+        SM_CXICONSPACING | SM_CYICONSPACING => 75, // Wine default from ICONMETRICS
+
+        // ── mouse / input ─────────────────────────────────────────────────────
+        SM_MOUSEPRESENT => 1,
+        SM_MOUSEWHEELPRESENT => 1,
+        SM_CMOUSEBUTTONS => 3,
+        SM_CXDOUBLECLK | SM_CYDOUBLECLK => 4, // entry_DOUBLECLKWIDTH/HEIGHT default 4
+        SM_CXDRAG | SM_CYDRAG => 4,           // entry_DRAGWIDTH/HEIGHT default 4
+
+        // ── menu check mark ───────────────────────────────────────────────────
+        // Wine: ((tmHeight + tmExternalLeading + 1) / 2) * 2 - 1, or 13 when
+        // tmHeight ≤ 0. At 96dpi with Segoe UI 11pt, 13 is the typical result.
+        SM_CXMENUCHECK | SM_CYMENUCHECK => 13,
+
+        // ── misc capability flags ─────────────────────────────────────────────
+        SM_NETWORK => 3, // network present (Wine: FIXME, returns 3)
+
+        // everything else defined to 0 by Wine (debug, swap, reserved, tablet, etc.)
+        _ => {
+            eprintln!("weave/user32: GetSystemMetrics({n_index}) → 0 (unhandled)");
+            0
+        }
+    }
 }
 
 /// GetSystemMetricsForDpi: DPI-aware variant of GetSystemMetrics.

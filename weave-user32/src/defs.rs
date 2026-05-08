@@ -101,22 +101,70 @@ pub const SW_SHOW: i32 = 5;
 pub const SW_SHOWDEFAULT: i32 = 10;
 
 // ── GetSystemMetrics indices ──────────────────────────────────────────────────
+// Wine ref: dlls/win32u/sysparams.c::get_system_metrics — full index list
 
 pub const SM_CXSCREEN: i32 = 0;
 pub const SM_CYSCREEN: i32 = 1;
-pub const SM_CXFULLSCREEN: i32 = 16;
-pub const SM_CYFULLSCREEN: i32 = 17;
+pub const SM_CXVSCROLL: i32 = 2; // vertical scrollbar width
+pub const SM_CYHSCROLL: i32 = 3; // horizontal scrollbar height
+pub const SM_CYCAPTION: i32 = 4;
+pub const SM_CXBORDER: i32 = 5;
+pub const SM_CYBORDER: i32 = 6;
+pub const SM_CXDLGFRAME: i32 = 7;
+pub const SM_CYDLGFRAME: i32 = 8;
+pub const SM_CYVTHUMB: i32 = 9; // vertical scrollbar thumb height
+pub const SM_CXHTHUMB: i32 = 10; // horizontal scrollbar thumb width
 pub const SM_CXICON: i32 = 11;
 pub const SM_CYICON: i32 = 12;
 pub const SM_CXCURSOR: i32 = 13;
 pub const SM_CYCURSOR: i32 = 14;
-pub const SM_CYCAPTION: i32 = 4;
+pub const SM_CYMENU: i32 = 15; // menu bar height
+pub const SM_CXFULLSCREEN: i32 = 16;
+pub const SM_CYFULLSCREEN: i32 = 17;
+pub const SM_MOUSEPRESENT: i32 = 19;
+pub const SM_CYVSCROLL: i32 = 20; // vertical scrollbar width (alias direction)
+pub const SM_CXHSCROLL: i32 = 21; // horizontal scrollbar height (alias direction)
+pub const SM_CXMIN: i32 = 28; // minimum window width
+pub const SM_CYMIN: i32 = 29; // minimum window height
+pub const SM_CXSIZE: i32 = 30; // caption button width
+pub const SM_CYSIZE: i32 = 31; // caption button height
 pub const SM_CXFRAME: i32 = 32;
 pub const SM_CYFRAME: i32 = 33;
-pub const SM_CXBORDER: i32 = 5;
-pub const SM_CYBORDER: i32 = 6;
+pub const SM_CXMINTRACK: i32 = 34; // minimum tracking width
+pub const SM_CYMINTRACK: i32 = 35; // minimum tracking height
+pub const SM_CXDOUBLECLK: i32 = 36; // double-click rectangle width
+pub const SM_CYDOUBLECLK: i32 = 37; // double-click rectangle height
+pub const SM_CXICONSPACING: i32 = 38; // icon horizontal spacing
+pub const SM_CYICONSPACING: i32 = 39; // icon vertical spacing
+pub const SM_CMOUSEBUTTONS: i32 = 43; // number of mouse buttons
 pub const SM_CXEDGE: i32 = 45;
 pub const SM_CYEDGE: i32 = 46;
+pub const SM_CXSMICON: i32 = 49; // small icon width
+pub const SM_CYSMICON: i32 = 50; // small icon height
+pub const SM_CYSMCAPTION: i32 = 51; // small caption bar height
+pub const SM_CXSMSIZE: i32 = 52; // small caption button width
+pub const SM_CYSMSIZE: i32 = 53; // small caption button height
+pub const SM_CXMENUSIZE: i32 = 54; // menu bar button width
+pub const SM_CYMENUSIZE: i32 = 55; // menu bar button height
+pub const SM_CXMINIMIZED: i32 = 57; // minimized window width
+pub const SM_CYMINIMIZED: i32 = 58; // minimized window height
+pub const SM_CXMAXTRACK: i32 = 59; // maximum tracking width
+pub const SM_CYMAXTRACK: i32 = 60; // maximum tracking height
+pub const SM_CXMAXIMIZED: i32 = 61; // maximized window width
+pub const SM_CYMAXIMIZED: i32 = 62; // maximized window height
+pub const SM_NETWORK: i32 = 63; // network present flag
+pub const SM_CXDRAG: i32 = 68; // drag start threshold x
+pub const SM_CYDRAG: i32 = 69; // drag start threshold y
+pub const SM_CXMENUCHECK: i32 = 71; // menu check mark width
+pub const SM_CYMENUCHECK: i32 = 72; // menu check mark height
+pub const SM_MOUSEWHEELPRESENT: i32 = 75; // mouse wheel present
+pub const SM_XVIRTUALSCREEN: i32 = 76; // virtual screen left
+pub const SM_YVIRTUALSCREEN: i32 = 77; // virtual screen top
+pub const SM_CXVIRTUALSCREEN: i32 = 78; // virtual screen width
+pub const SM_CYVIRTUALSCREEN: i32 = 79; // virtual screen height
+pub const SM_SAMEDISPLAYFORMAT: i32 = 81; // monitors same pixel format
+pub const SM_CXFOCUSBORDER: i32 = 83; // focus rectangle border width
+pub const SM_CYFOCUSBORDER: i32 = 84; // focus rectangle border height
 
 // ── MessageBox flags ──────────────────────────────────────────────────────────
 
