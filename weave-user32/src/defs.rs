@@ -27,6 +27,7 @@ pub type WndProc = unsafe extern "win64" fn(HWND, UINT, WPARAM, LPARAM) -> LRESU
 
 // ── WM_* message codes ────────────────────────────────────────────────────────
 
+pub const WM_ENABLE: u32 = 0x000A;
 pub const WM_NULL: u32 = 0x0000;
 pub const WM_CREATE: u32 = 0x0001;
 pub const WM_DESTROY: u32 = 0x0002;
@@ -81,8 +82,17 @@ pub const WS_SYSMENU: u32 = 0x00080000;
 pub const WS_THICKFRAME: u32 = 0x00040000;
 pub const WS_MINIMIZEBOX: u32 = 0x00020000;
 pub const WS_MAXIMIZEBOX: u32 = 0x00010000;
+pub const WS_BORDER: u32 = 0x00800000;
+pub const WS_DLGFRAME: u32 = 0x00400000;
 pub const WS_OVERLAPPEDWINDOW: u32 =
     WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX;
+
+// ── Extended window styles ────────────────────────────────────────────────────
+
+pub const WS_EX_DLGMODALFRAME: u32 = 0x00000001;
+pub const WS_EX_TOOLWINDOW: u32 = 0x00000080;
+pub const WS_EX_CLIENTEDGE: u32 = 0x00000200;
+pub const WS_EX_STATICEDGE: u32 = 0x00020000;
 
 // ── ShowWindow commands ───────────────────────────────────────────────────────
 

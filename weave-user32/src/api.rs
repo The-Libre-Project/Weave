@@ -2266,43 +2266,86 @@ pub extern "win64" fn get_desktop_window() -> usize {
 
 // ── AdjustWindowRect ──────────────────────────────────────────────────────────
 
-/// AdjustWindowRect: compute window size from desired client area size.
-///
-/// Phase 2: returns the rect unchanged (no frame adjustments without a real WM).
-///
-/// # Safety
-/// `lp_rect` must point to a valid `RECT`.
-// Wine ref: dlls/win32u/defwnd.c::adjust_window_rect — inflates rect based on style flags;
-// WS_THICKFRAME adds ncm.iBorderWidth+iPaddedBorderWidth; WS_CAPTION subtracts caption height.
-pub unsafe extern "win64" fn adjust_window_rect(
-    lp_rect: *mut Rect,
-    _dw_style: u32,
-    _b_menu: i32,
+// Wine ref: dlls/win32u/defwnd.c:254 — outer-frame adjust comes from style bits;
+// WS_THICKFRAME adds iBorderWidth(1)+iPaddedBorderWidth(4)=5; WS_CAPTION top-inflates
+// by SM_CYCAPTION(23); WS_EX_CLIENTEDGE inflates all sides by SM_CXEDGE/SM_CYEDGE(2).
+unsafe fn adjust_window_rect_impl(
+    rect: *mut Rect,
+    style: u32,
+    menu: i32,
+    ex_style: u32,
 ) -> i32 {
-    if lp_rect.is_null() {
-        0
-    } else {
-        1
+    if rect.is_null() {
+        return 0;
     }
+    let r = unsafe { &mut *rect };
+
+    // Outer frame: how many border pixels to add on each side.
+    let mut adj: i32 = 0;
+    if (ex_style & (WS_EX_STATICEDGE | WS_EX_DLGMODALFRAME)) == WS_EX_STATICEDGE {
+        adj = 1;
+    } else if ex_style & WS_EX_DLGMODALFRAME != 0
+        || style & (WS_THICKFRAME | WS_DLGFRAME) != 0
+    {
+        adj = 2;
+    }
+    if style & WS_THICKFRAME != 0 {
+        adj += 5; // iBorderWidth(1) + iPaddedBorderWidth(4)
+    }
+    if style & (WS_BORDER | WS_DLGFRAME) != 0 || ex_style & WS_EX_DLGMODALFRAME != 0 {
+        adj += 1;
+    }
+    r.left -= adj;
+    r.top -= adj;
+    r.right += adj;
+    r.bottom += adj;
+
+    // Caption bar.
+    if style & WS_CAPTION == WS_CAPTION {
+        if ex_style & WS_EX_TOOLWINDOW != 0 {
+            r.top -= 16; // iSmCaptionHeight(15) + 1
+        } else {
+            r.top -= 23; // SM_CYCAPTION = iCaptionHeight(22) + 1
+        }
+    }
+    // Menu bar.
+    if menu != 0 {
+        r.top -= 16; // iMenuHeight(15) + 1
+    }
+    // Client edge (WS_EX_CLIENTEDGE).
+    if ex_style & WS_EX_CLIENTEDGE != 0 {
+        r.left -= 2; // SM_CXEDGE
+        r.top -= 2; // SM_CYEDGE
+        r.right += 2;
+        r.bottom += 2;
+    }
+
+    1 // TRUE
 }
 
-/// AdjustWindowRectEx: extended version with ex style parameter.
-///
 /// # Safety
 /// `lp_rect` must point to a valid `RECT`.
-// Wine ref: dlls/win32u/defwnd.c::adjust_window_rect — same as AdjustWindowRect but also
+// Wine ref: dlls/win32u/defwnd.c::adjust_window_rect — delegates to AdjustWindowRectEx
+// with dwExStyle=0; no ex-style adjustments (no client edge, no static edge).
+pub unsafe extern "win64" fn adjust_window_rect(
+    lp_rect: *mut Rect,
+    dw_style: u32,
+    b_menu: i32,
+) -> i32 {
+    unsafe { adjust_window_rect_impl(lp_rect, dw_style, b_menu, 0) }
+}
+
+/// # Safety
+/// `lp_rect` must point to a valid `RECT`.
+// Wine ref: dlls/win32u/defwnd.c::adjust_window_rect — full version with ex_style;
 // handles WS_EX_CLIENTEDGE (inflates by SM_CXEDGE/SM_CYEDGE) and WS_EX_STATICEDGE.
 pub unsafe extern "win64" fn adjust_window_rect_ex(
     lp_rect: *mut Rect,
-    _dw_style: u32,
-    _b_menu: i32,
-    _dw_ex_style: u32,
+    dw_style: u32,
+    b_menu: i32,
+    dw_ex_style: u32,
 ) -> i32 {
-    if lp_rect.is_null() {
-        0
-    } else {
-        1
-    }
+    unsafe { adjust_window_rect_impl(lp_rect, dw_style, b_menu, dw_ex_style) }
 }
 
 /// SetCursor: set the cursor shape.
@@ -2957,25 +3000,54 @@ pub extern "win64" fn end_defer_window_pos(_h_win_pos_info: usize) -> i32 {
 }
 
 /// # Safety
-/// Pointer arguments are accepted but not dereferenced.
+/// Pointer arguments, if non-null, must be valid null-terminated wide strings.
 // Wine ref: dlls/win32u/window.c — FindWindowW calls NtUserFindWindowEx with hwndParent=0,
-// hwndChildAfter=0; searches top-level windows matching class and/or title.
+// hwndChildAfter=0; searches top-level windows matching class and/or title (both optional;
+// NULL means "match any").
 pub unsafe extern "win64" fn find_window_w(
-    _lp_class_name: *const u16,
-    _lp_window_name: *const u16,
+    lp_class_name: *const u16,
+    lp_window_name: *const u16,
 ) -> usize {
-    0
+    let want_class = if lp_class_name.is_null() {
+        None
+    } else {
+        Some(unsafe { decode_wide(lp_class_name) })
+    };
+    let want_title = if lp_window_name.is_null() {
+        None
+    } else {
+        Some(unsafe { decode_wide(lp_window_name) })
+    };
+    window::find_with(|_, e| {
+        e.style & WS_CHILD == 0
+            && want_class.as_deref().is_none_or(|c| e.class_name == c)
+            && want_title.as_deref().is_none_or(|t| e.title == t)
+    })
 }
 
 /// # Safety
-/// Pointer arguments are accepted but not dereferenced.
+/// Pointer arguments, if non-null, must be valid null-terminated ANSI strings.
 // Wine ref: dlls/user32/win.c — FindWindowA converts ANSI class/title to wide and calls
 // FindWindowExW; same search semantics as FindWindowW.
 pub unsafe extern "win64" fn find_window_a(
-    _lp_class_name: *const u8,
-    _lp_window_name: *const u8,
+    lp_class_name: *const u8,
+    lp_window_name: *const u8,
 ) -> usize {
-    0
+    let want_class = if lp_class_name.is_null() {
+        None
+    } else {
+        Some(unsafe { decode_ansi(lp_class_name) })
+    };
+    let want_title = if lp_window_name.is_null() {
+        None
+    } else {
+        Some(unsafe { decode_ansi(lp_window_name) })
+    };
+    window::find_with(|_, e| {
+        e.style & WS_CHILD == 0
+            && want_class.as_deref().is_none_or(|c| e.class_name == c)
+            && want_title.as_deref().is_none_or(|t| e.title == t)
+    })
 }
 
 // Wine ref: include/ntuser.h::NtUserIsWindow — calls NtUserGetWindowLongW(hwnd, GWL_STYLE);
@@ -3108,15 +3180,32 @@ pub extern "win64" fn clip_cursor(_lp_rect: *const crate::defs::Rect) -> i32 {
 }
 
 // Wine ref: dlls/win32u/window.c — NtUserEnableWindow sets/clears WS_DISABLED style;
-// sends WM_ENABLE(FALSE/TRUE) before changing state; returns previous disabled state.
-pub extern "win64" fn enable_window(_hwnd: usize, _b_enable: i32) -> i32 {
-    0
+// sends WM_ENABLE(wParam=TRUE/FALSE) before changing state; returns previous disabled state
+// (TRUE=1 if the window was previously disabled).
+pub extern "win64" fn enable_window(hwnd: usize, b_enable: i32) -> i32 {
+    let was_disabled = window::with(hwnd, |w| (w.style & WS_DISABLED) != 0).unwrap_or(false);
+    let became_enabled = b_enable != 0 && was_disabled;
+    let became_disabled = b_enable == 0 && !was_disabled;
+    if became_enabled || became_disabled {
+        window::with_mut(hwnd, |w| {
+            if b_enable != 0 {
+                w.style &= !WS_DISABLED;
+            } else {
+                w.style |= WS_DISABLED;
+            }
+        });
+        if let Some(proc_addr) = window::with(hwnd, |w| w.wnd_proc) {
+            call_wnd_proc(proc_addr, hwnd, WM_ENABLE, b_enable as usize, 0);
+        }
+    }
+    i32::from(was_disabled)
 }
 
 // Wine ref: dlls/win32u/window.c — IsWindowEnabled checks !(style & WS_DISABLED);
 // also returns FALSE if any ancestor in the chain has WS_DISABLED set.
-pub extern "win64" fn is_window_enabled(_hwnd: usize) -> i32 {
-    1
+// Weave: checks the window itself; ancestor check deferred (no multi-level disabled chains in practice).
+pub extern "win64" fn is_window_enabled(hwnd: usize) -> i32 {
+    window::with(hwnd, |w| i32::from(w.style & WS_DISABLED == 0)).unwrap_or(0)
 }
 
 // Wine ref: dlls/win32u/window.c — NtUserGetParent returns owner for top-level windows
@@ -3211,17 +3300,17 @@ pub extern "win64" fn get_dpi_for_system() -> u32 {
 }
 
 /// # Safety
-/// Pointer arguments are accepted but not dereferenced.
-// Wine ref: dlls/win32u/defwnd.c::adjust_window_rect — AdjustWindowRectExForDpi is the
-// DPI-aware version; uses dpi parameter instead of thread DPI for ncm metric lookups.
+/// `lp_rect` must point to a valid `RECT`.
+// Wine ref: dlls/win32u/defwnd.c::adjust_window_rect — DPI-aware version; Weave ignores
+// dpi (no per-monitor scaling) and delegates to the shared impl.
 pub unsafe extern "win64" fn adjust_window_rect_ex_for_dpi(
-    _lp_rect: usize,
-    _dw_style: u32,
-    _b_menu: i32,
-    _dw_ex_style: u32,
+    lp_rect: *mut Rect,
+    dw_style: u32,
+    b_menu: i32,
+    dw_ex_style: u32,
     _dpi: u32,
 ) -> i32 {
-    1
+    unsafe { adjust_window_rect_impl(lp_rect, dw_style, b_menu, dw_ex_style) }
 }
 
 /// SetProcessDpiAwarenessContext: set the DPI awareness context.
