@@ -2269,12 +2269,7 @@ pub extern "win64" fn get_desktop_window() -> usize {
 // Wine ref: dlls/win32u/defwnd.c:254 — outer-frame adjust comes from style bits;
 // WS_THICKFRAME adds iBorderWidth(1)+iPaddedBorderWidth(4)=5; WS_CAPTION top-inflates
 // by SM_CYCAPTION(23); WS_EX_CLIENTEDGE inflates all sides by SM_CXEDGE/SM_CYEDGE(2).
-unsafe fn adjust_window_rect_impl(
-    rect: *mut Rect,
-    style: u32,
-    menu: i32,
-    ex_style: u32,
-) -> i32 {
+unsafe fn adjust_window_rect_impl(rect: *mut Rect, style: u32, menu: i32, ex_style: u32) -> i32 {
     if rect.is_null() {
         return 0;
     }
@@ -2284,9 +2279,7 @@ unsafe fn adjust_window_rect_impl(
     let mut adj: i32 = 0;
     if (ex_style & (WS_EX_STATICEDGE | WS_EX_DLGMODALFRAME)) == WS_EX_STATICEDGE {
         adj = 1;
-    } else if ex_style & WS_EX_DLGMODALFRAME != 0
-        || style & (WS_THICKFRAME | WS_DLGFRAME) != 0
-    {
+    } else if ex_style & WS_EX_DLGMODALFRAME != 0 || style & (WS_THICKFRAME | WS_DLGFRAME) != 0 {
         adj = 2;
     }
     if style & WS_THICKFRAME != 0 {
