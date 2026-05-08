@@ -68,7 +68,29 @@ pub const WM_RBUTTONUP: u32 = 0x0205;
 pub const WM_MOUSEWHEEL: u32 = 0x020A;
 pub const WM_HSCROLL: u32 = 0x0114;
 pub const WM_VSCROLL: u32 = 0x0115;
+pub const WM_MOUSEHOVER: u32 = 0x02A1;
+pub const WM_MOUSELEAVE: u32 = 0x02A3;
 pub const WM_DPICHANGED: u32 = 0x02E0;
+
+// ── TrackMouseEvent flags ─────────────────────────────────────────────────────
+
+pub const TME_HOVER: u32 = 0x0000_0001;
+pub const TME_LEAVE: u32 = 0x0000_0002;
+pub const TME_CANCEL: u32 = 0x8000_0000;
+pub const TME_QUERY: u32 = 0x4000_0000;
+
+/// Win64 layout of TRACKMOUSEEVENT (cbSize = 24).
+///
+/// cbSize(u32) @ 0 · dwFlags(u32) @ 4 · hwndTrack(usize) @ 8 · dwHoverTime(u32) @ 16 · _pad @ 20
+#[repr(C)]
+pub struct TrackMouseEventStruct {
+    pub cb_size: u32,
+    pub dw_flags: u32,
+    pub hwnd_track: usize,
+    pub dw_hover_time: u32,
+    pub _pad: u32,
+}
+const _: () = assert!(std::mem::size_of::<TrackMouseEventStruct>() == 24);
 
 // ── Window styles ─────────────────────────────────────────────────────────────
 

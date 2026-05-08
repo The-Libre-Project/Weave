@@ -1463,6 +1463,24 @@ mod inner {
                 }
             }
 
+            Event::LeaveNotify(ev) => {
+                // XCB fires LeaveNotify when the pointer leaves a window's client area.
+                // If the guest registered TME_LEAVE for this hwnd, post WM_MOUSELEAVE
+                // and cancel the subscription (one-shot per Wine contract).
+                let hwnd = window::hwnd_for_xcb(ev.event);
+                if hwnd != 0 && crate::api::take_tme_leave(hwnd) {
+                    queue::post(MsgEntry {
+                        hwnd,
+                        message: WM_MOUSELEAVE,
+                        w_param: 0,
+                        l_param: 0,
+                        time: ev.time,
+                        pt_x: 0,
+                        pt_y: 0,
+                    });
+                }
+            }
+
             _ => {} // Ignore all other events for now.
         }
     }

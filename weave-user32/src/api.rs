@@ -121,6 +121,43 @@ pub fn current_paint_hwnd() -> usize {
     CURRENT_PAINT_HWND.load(Ordering::Relaxed)
 }
 
+// ── TrackMouseEvent leave-tracking table ─────────────────────────────────────
+// Per-hwnd set of windows that have an active TME_LEAVE subscription.
+// When the XCB LeaveNotify fires for a window in this set, WM_MOUSELEAVE is
+// posted and the entry is removed (one-shot per Wine contract).
+
+use std::collections::HashSet;
+
+static TME_LEAVE_TABLE: OnceLock<Mutex<HashSet<usize>>> = OnceLock::new();
+
+fn tme_leave_table() -> &'static Mutex<HashSet<usize>> {
+    TME_LEAVE_TABLE.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+/// Register TME_LEAVE for `hwnd`. Called by `track_mouse_event`.
+pub fn register_tme_leave(hwnd: usize) {
+    if let Ok(mut t) = tme_leave_table().lock() {
+        t.insert(hwnd);
+    }
+}
+
+/// Cancel TME_LEAVE for `hwnd`. Called by `track_mouse_event` with TME_CANCEL.
+pub fn cancel_tme_leave(hwnd: usize) {
+    if let Ok(mut t) = tme_leave_table().lock() {
+        t.remove(&hwnd);
+    }
+}
+
+/// Check and atomically remove TME_LEAVE for `hwnd`. Returns true if it was registered.
+/// Called from the backend XCB LeaveNotify handler.
+pub fn take_tme_leave(hwnd: usize) -> bool {
+    if let Ok(mut t) = tme_leave_table().lock() {
+        t.remove(&hwnd)
+    } else {
+        false
+    }
+}
+
 // ── RegisterClassW / RegisterClassExW ─────────────────────────────────────────
 
 /// RegisterClassW: register a window class.
@@ -6981,8 +7018,50 @@ pub unsafe extern "win64" fn pt_in_rect(lp_rc: *const i32, pt_packed: u64) -> i3
 /// `lp_event_track` is accepted but not dereferenced.
 // Wine ref: dlls/user32/input.c — sets a timer to fire WM_MOUSEHOVER/WM_MOUSELEAVE
 // when the mouse enters/leaves the client area; HOVER_DEFAULT maps to the system
-// hover time (400ms by default).  Weave: no-op TRUE.
-pub unsafe extern "win64" fn track_mouse_event(_lp_event_track: *mut u8) -> i32 {
+// hover time (400ms by default).
+// Wine ref: dlls/win32u/input.c::NtUserTrackMouseEvent — validates cbSize >= 24,
+// hwndTrack must be valid; TME_LEAVE subscribes a one-shot WM_MOUSELEAVE;
+// TME_CANCEL|TME_LEAVE unsubscribes; TME_QUERY fills the struct with active flags;
+// TME_HOVER sets a timer (Weave: accepted but not fired — no timer infrastructure).
+pub unsafe extern "win64" fn track_mouse_event(lp_event_track: *mut u8) -> i32 {
+    if lp_event_track.is_null() {
+        return 0; // FALSE
+    }
+    let tme = unsafe { &*(lp_event_track as *const TrackMouseEventStruct) };
+    // Wine: cbSize must be >= sizeof(TRACKMOUSEEVENT) = 24 on x64.
+    if (tme.cb_size as usize) < std::mem::size_of::<TrackMouseEventStruct>() {
+        return 0; // FALSE — malformed struct
+    }
+    let hwnd = tme.hwnd_track;
+    let flags = tme.dw_flags;
+
+    if flags & TME_QUERY != 0 {
+        // Fill dwFlags with currently active tracking flags for hwndTrack.
+        let tme_mut = unsafe { &mut *(lp_event_track as *mut TrackMouseEventStruct) };
+        let active = if tme_leave_table()
+            .lock()
+            .map(|t| t.contains(&hwnd))
+            .unwrap_or(false)
+        {
+            TME_LEAVE
+        } else {
+            0
+        };
+        tme_mut.dw_flags = active;
+        return 1; // TRUE
+    }
+
+    if flags & TME_CANCEL != 0 {
+        if flags & TME_LEAVE != 0 {
+            cancel_tme_leave(hwnd);
+        }
+        return 1; // TRUE
+    }
+
+    if flags & TME_LEAVE != 0 {
+        register_tme_leave(hwnd);
+    }
+    // TME_HOVER: accepted but timer not fired — no timer infrastructure yet.
     1 // TRUE
 }
 
