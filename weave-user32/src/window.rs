@@ -24,8 +24,10 @@ pub struct WindowEntry {
     pub visible: bool,
     /// X11 window ID — only meaningful on Linux.
     pub xcb_id: u32,
-    /// Attached menu bar (0 = none).
+    /// Attached menu bar (0 = none). Also serves as control ID for WS_CHILD windows.
     pub h_menu: usize,
+    /// Parent HWND (WS_CHILD) or owner HWND (WS_POPUP). 0 for top-level windows.
+    pub hwnd_parent: usize,
 }
 
 // ── Global table ──────────────────────────────────────────────────────────────
@@ -136,6 +138,20 @@ pub fn first_hwnd_with_xcb() -> usize {
         .entries
         .iter()
         .find(|(_, e)| e.xcb_id != 0)
+        .map(|(&h, _)| h)
+        .unwrap_or(0)
+}
+
+/// Return the first HWND for which `f(hwnd, entry)` returns `true`.
+pub fn find_with<F: Fn(usize, &WindowEntry) -> bool>(f: F) -> usize {
+    let guard = match lock_table(table()) {
+        Some(g) => g,
+        None => return 0,
+    };
+    guard
+        .entries
+        .iter()
+        .find(|(&h, e)| f(h, e))
         .map(|(&h, _)| h)
         .unwrap_or(0)
 }

@@ -305,6 +305,7 @@ pub unsafe extern "win64" fn create_window_ex_w(
         visible,
         xcb_id,
         h_menu: h_menu_param,
+        hwnd_parent: h_wnd_parent,
     });
     set_extra(hwnd, |e| {
         e.ex_style = dw_ex_style;
@@ -3117,14 +3118,27 @@ pub extern "win64" fn is_window_enabled(_hwnd: usize) -> i32 {
 
 // Wine ref: dlls/win32u/window.c — NtUserGetParent returns owner for top-level windows
 // with WS_POPUP, or parent for child windows (WS_CHILD); NULL for top-level non-popup.
-pub extern "win64" fn get_parent(_hwnd: usize) -> usize {
-    0
+// Wine ref: dlls/win32u/window.c::get_parent — WS_POPUP returns owner, WS_CHILD
+// returns parent; both map to hwnd_parent in Weave's model. Returns 0 for top-level.
+pub extern "win64" fn get_parent(hwnd: usize) -> usize {
+    window::with(hwnd, |w| {
+        if w.style & (WS_POPUP | WS_CHILD) != 0 {
+            w.hwnd_parent
+        } else {
+            0
+        }
+    })
+    .unwrap_or(0)
 }
 
-// Wine ref: dlls/win32u/window.c — NtUserSetParent re-parents a window; sends
-// WM_STYLECHANGING/WM_STYLECHANGED to add/remove WS_CHILD; returns old parent.
-pub extern "win64" fn set_parent(_hwnd_child: usize, _hwnd_new_parent: usize) -> usize {
-    0
+// Wine ref: dlls/win32u/window.c — NtUserSetParent re-parents a window; returns old parent.
+pub extern "win64" fn set_parent(hwnd_child: usize, hwnd_new_parent: usize) -> usize {
+    window::with_mut(hwnd_child, |w| {
+        let old = w.hwnd_parent;
+        w.hwnd_parent = hwnd_new_parent;
+        old
+    })
+    .unwrap_or(0)
 }
 
 // Wine ref: dlls/win32u/window.c — BringWindowToTop calls NtUserSetWindowPos with
@@ -3569,6 +3583,7 @@ pub unsafe extern "win64" fn create_window_ex_a(
         visible,
         xcb_id,
         h_menu: h_menu_param,
+        hwnd_parent: h_wnd_parent,
     });
     set_extra(hwnd, |e| {
         e.ex_style = dw_ex_style;
@@ -4012,6 +4027,7 @@ pub unsafe extern "win64" fn create_dialog_param_w(
         visible: false,
         xcb_id: 0,
         h_menu: 0,
+        hwnd_parent,
     });
     // Call WM_INITDIALOG (0x0110) with hwnd_parent as wParam, dw_init_param as lParam.
     // Wine ref: dlls/user32/dialog.c — WM_INITDIALOG return value is ignored for
@@ -4079,6 +4095,7 @@ pub unsafe extern "win64" fn create_dialog_indirect_param_w(
         visible: false,
         xcb_id: 0,
         h_menu: 0,
+        hwnd_parent,
     });
     // Call WM_INITDIALOG (0x0110) with hwnd_parent as wParam, dw_init_param as lParam.
     let fn_ptr: unsafe extern "win64" fn(usize, u32, usize, isize) -> i32 =
@@ -4117,8 +4134,13 @@ pub extern "win64" fn end_dialog(_h_dlg: usize, _n_result: isize) -> i32 {
 /// GetDlgItem: find a control in a dialog by ID. Returns 0 (not found).
 // Wine ref: dlls/win32u/dialog.c — NtUserGetDlgItem searches child windows for matching
 // nIDDlgItem (from GWLP_ID); returns first match or NULL if not found.
-pub extern "win64" fn get_dlg_item(_h_dlg: usize, _n_id_dlg_item: i32) -> usize {
-    0
+// Wine ref: dlls/win32u/dialog.c — iterates child windows; ctrl ID is stored in
+// wIDmenu (Weave: h_menu) for WS_CHILD windows created via CreateWindow(hMenu=id).
+pub extern "win64" fn get_dlg_item(h_dlg: usize, n_id_dlg_item: i32) -> usize {
+    let ctrl_id = n_id_dlg_item as usize;
+    window::find_with(|_, w| {
+        w.hwnd_parent == h_dlg && w.style & WS_CHILD != 0 && w.h_menu == ctrl_id
+    })
 }
 
 /// GetDlgCtrlID: return the child-window identifier for `hwnd`.
@@ -5398,8 +5420,8 @@ pub unsafe extern "win64" fn register_clipboard_format_w(_lpsz: *const u16) -> u
 // Wine ref: include/ntuser.h::NtUserGetWindowTextLength — calls NtUserGetWindowText with
 // NULL buffer; WM_GETTEXTLENGTH is sent to the window; result may differ from actual
 // text length due to ANSI/Unicode conversion expansion.
-pub unsafe extern "win64" fn get_window_text_length_w(_hwnd: usize) -> i32 {
-    0
+pub unsafe extern "win64" fn get_window_text_length_w(hwnd: usize) -> i32 {
+    window::with(hwnd, |w| w.title.encode_utf16().count() as i32).unwrap_or(0)
 }
 
 /// SystemParametersInfoW — query or set system-wide parameters (Wide).
@@ -6345,8 +6367,21 @@ pub unsafe extern "win64" fn create_icon_indirect(piconinfo: *const u8) -> usize
 /// Wine ref: dlls/user32/win.c — IsChild walks the parent chain looking for
 /// hWndParent. Weave: stub returning FALSE — parent relationships are not
 /// tracked in the window table (Phase 2 gap). No callers crash on FALSE.
-pub extern "win64" fn is_child(_hwnd_parent: usize, _hwnd: usize) -> i32 {
-    0 // FALSE
+// Wine ref: dlls/win32u/window.c::is_child — child must have WS_CHILD; walks
+// parent chain stopping when a non-WS_CHILD window is encountered.
+pub extern "win64" fn is_child(hwnd_parent: usize, hwnd: usize) -> i32 {
+    let mut current = hwnd;
+    loop {
+        match window::with(current, |w| (w.style & WS_CHILD != 0, w.hwnd_parent)) {
+            Some((true, parent)) => {
+                if parent == hwnd_parent {
+                    return 1;
+                }
+                current = parent;
+            }
+            _ => return 0,
+        }
+    }
 }
 
 /// GetWindow — retrieve a window with the specified relationship to the given window.
