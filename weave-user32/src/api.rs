@@ -3152,7 +3152,31 @@ pub extern "win64" fn bring_window_to_top(_hwnd: usize) -> i32 {
 
 // Wine ref: dlls/win32u/window.c — WindowFromPoint calls NtUserWindowFromPoint which
 // hit-tests all windows at the point; returns child before parent (WS_CHILD first).
-pub extern "win64" fn window_from_point(_pt_x: i32, _pt_y: i32) -> usize {
+// Wine ref: dlls/win32u/window.c::window_from_point — walks Z-ordered child list;
+// returns deepest child containing the point, then top-level if no child matches.
+// Weave: two-pass — WS_CHILD windows first, then non-child visible windows.
+pub extern "win64" fn window_from_point(pt_x: i32, pt_y: i32) -> usize {
+    let hwnds = window::all_hwnds();
+    let hit = |style: u32, visible: bool, x: i32, y: i32, w: u32, h: u32| -> bool {
+        visible && pt_x >= x && pt_x < x + w as i32 && pt_y >= y && pt_y < y + h as i32
+            && style & WS_DISABLED == 0
+    };
+    // Pass 1: visible child windows (higher Z-order than parents in Weave's flat model)
+    for &hwnd in &hwnds {
+        if let Some(true) = window::with(hwnd, |e| {
+            e.style & WS_CHILD != 0 && hit(e.style, e.visible, e.x, e.y, e.width, e.height)
+        }) {
+            return hwnd;
+        }
+    }
+    // Pass 2: visible top-level windows
+    for &hwnd in &hwnds {
+        if let Some(true) = window::with(hwnd, |e| {
+            e.style & WS_CHILD == 0 && hit(e.style, e.visible, e.x, e.y, e.width, e.height)
+        }) {
+            return hwnd;
+        }
+    }
     0
 }
 
