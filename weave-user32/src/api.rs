@@ -3158,7 +3158,11 @@ pub extern "win64" fn bring_window_to_top(_hwnd: usize) -> i32 {
 pub extern "win64" fn window_from_point(pt_x: i32, pt_y: i32) -> usize {
     let hwnds = window::all_hwnds();
     let hit = |style: u32, visible: bool, x: i32, y: i32, w: u32, h: u32| -> bool {
-        visible && pt_x >= x && pt_x < x + w as i32 && pt_y >= y && pt_y < y + h as i32
+        visible
+            && pt_x >= x
+            && pt_x < x + w as i32
+            && pt_y >= y
+            && pt_y < y + h as i32
             && style & WS_DISABLED == 0
     };
     // Pass 1: visible child windows (higher Z-order than parents in Weave's flat model)
