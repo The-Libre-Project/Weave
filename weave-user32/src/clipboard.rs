@@ -19,7 +19,45 @@
 //! (correct behaviour would free them, but we don't track sizes).
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Mutex, OnceLock};
+
+// ── Named format registry (RegisterClipboardFormat / RegisterWindowMessage) ───
+//
+// Wine ref: dlls/win32u/clipboard.c — NtUserRegisterClipboardFormat allocates IDs
+// in the 0xC000–0xFFFF atom range; same name → same ID; comparison is case-insensitive.
+// RegisterWindowMessage shares the same ID space (same kernel implementation).
+
+static NEXT_FORMAT_ID: AtomicU32 = AtomicU32::new(0xC000);
+
+fn format_registry() -> &'static Mutex<HashMap<String, u32>> {
+    static R: OnceLock<Mutex<HashMap<String, u32>>> = OnceLock::new();
+    R.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Register a named clipboard format / window message; returns a stable ID in
+/// 0xC000–0xFFFF. Same name (case-insensitive) always returns the same ID.
+/// Returns 0 if the ID space is exhausted (> 16383 distinct names).
+pub fn register_format(name: &str) -> u32 {
+    let key = name.to_ascii_lowercase();
+    let mut guard = match format_registry()
+        .lock()
+        .map_err(|e| eprintln!("weave: user32: format registry poisoned: {e}"))
+        .ok()
+    {
+        Some(g) => g,
+        None => return 0,
+    };
+    if let Some(&id) = guard.get(&key) {
+        return id;
+    }
+    let id = NEXT_FORMAT_ID.fetch_add(1, Ordering::Relaxed);
+    if id > 0xFFFF {
+        return 0; // exhausted — should never happen in practice
+    }
+    guard.insert(key, id);
+    id
+}
 
 // ── Clipboard state ───────────────────────────────────────────────────────────
 

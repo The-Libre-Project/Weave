@@ -5088,24 +5088,15 @@ pub unsafe extern "win64" fn draw_icon_ex(
     1
 }
 
-/// RegisterClipboardFormatA: register a named clipboard format. Returns a fake ID.
-///
 /// # Safety
 /// `lp_sz_format` must be a valid null-terminated ANSI string.
 // Wine ref: dlls/win32u/clipboard.c — NtUserRegisterClipboardFormat allocates IDs in
 // 0xC000–0xFFFF range; same name → same ID (idempotent); case-insensitive comparison.
 pub unsafe extern "win64" fn register_clipboard_format_a(lp_sz_format: *const u8) -> u32 {
     let name = unsafe { decode_ansi(lp_sz_format) };
-    // Return a deterministic ID in the custom format range (0xC000–0xFFFF).
-    let mut h: u32 = 0xC000;
-    for b in name.bytes() {
-        h = h.wrapping_mul(31).wrapping_add(b as u32);
-    }
-    0xC000 | (h & 0x3FFF)
+    crate::clipboard::register_format(&name)
 }
 
-/// RegisterWindowMessageA: register a unique window message. Returns a fake ID.
-///
 /// # Safety
 /// `lp_string` must be a valid null-terminated ANSI string.
 // Wine ref: dlls/win32u/message.c — RegisterWindowMessageA converts to wide then calls
@@ -5114,8 +5105,6 @@ pub unsafe extern "win64" fn register_window_message_a(lp_string: *const u8) -> 
     unsafe { register_clipboard_format_a(lp_string) }
 }
 
-/// RegisterWindowMessageW: register a unique window message. Returns a deterministic ID.
-///
 /// # Safety
 /// `lp_string` must be a valid null-terminated UTF-16 string.
 // Wine ref: dlls/user32/message.c — RegisterWindowMessageW calls NtUserRegisterClipboardFormat;
@@ -5124,21 +5113,8 @@ pub unsafe extern "win64" fn register_window_message_w(lp_string: *const u16) ->
     if lp_string.is_null() {
         return 0;
     }
-    // Hash the UTF-16 code units into the 0xC000–0xFFFF range (same logic as the A variant
-    // but operating on u16 units so the same wide string always produces the same ID).
-    let mut h: u32 = 0xC000;
-    let mut p = lp_string;
-    loop {
-        let ch = unsafe { *p };
-        if ch == 0 {
-            break;
-        }
-        h = h.wrapping_mul(31).wrapping_add(ch as u32);
-        p = unsafe { p.add(1) };
-    }
-    let result = 0xC000 | (h & 0x3FFF);
-    eprintln!("weave/user32: RegisterWindowMessageW → 0x{result:x}");
-    result
+    let name = unsafe { decode_wide(lp_string) };
+    crate::clipboard::register_format(&name)
 }
 
 /// SystemParametersInfoA: stub — returns FALSE (operation not supported).
@@ -5521,16 +5497,16 @@ pub unsafe extern "win64" fn load_string_a(
     copied
 }
 
-/// RegisterClipboardFormatW — register a new clipboard format (Wide).
-///
-/// Returns a fake non-zero format ID.
-///
 /// # Safety
-/// `lpsz` is accepted but not dereferenced.
+/// `lpsz`, if non-null, must be a valid null-terminated UTF-16 string.
 // Wine ref: dlls/win32u/clipboard.c — NtUserRegisterClipboardFormat allocates IDs in
 // 0xC000–0xFFFF range; same name → same ID (idempotent); name comparison is case-insensitive.
-pub unsafe extern "win64" fn register_clipboard_format_w(_lpsz: *const u16) -> u32 {
-    0xC000 // fake private clipboard format base
+pub unsafe extern "win64" fn register_clipboard_format_w(lpsz: *const u16) -> u32 {
+    if lpsz.is_null() {
+        return 0;
+    }
+    let name = unsafe { decode_wide(lpsz) };
+    crate::clipboard::register_format(&name)
 }
 
 /// GetWindowTextLengthW — return the length of a window's title bar text.
