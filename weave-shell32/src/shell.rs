@@ -540,13 +540,13 @@ pub extern "win64" fn co_task_mem_free(pv: *mut u8) {
 // Wine ref: dlls/shell32/shlexec.c:2064 — builds SHELLEXECUTEINFOW, calls SHELL_execute
 // then ShellExecuteExW; returns sei.hInstApp which is the module instance if launched or
 // an error code ≤ 32 on failure. Any return value > 32 means success.
-// Known gap: Weave always returns 33 (success) without actually launching anything.
 // Wine ref: dlls/shell32/shlexec.c:2064 — builds SHELLEXECUTEINFOW, calls ShellExecuteExW;
-// return > 32 means success; see block comment above for hInstApp encoding detail.
+// dispatches .exe via CreateProcess, URLs via SHELL_execute_url (opens registry handler),
+// other file types via SHELL_FindExecutable (registry class lookup). >32 = success.
 /// ShellExecuteW: perform an operation on a file (open, run, etc.).
 ///
-/// Phase 2 stub: logs the operation and returns a fake HINSTANCE > 32
-/// (indicating success per Win32 convention).
+/// Dispatches: .exe/.com → weave <linux_exe> [params]; http/https/ftp URL or any other
+/// file → xdg-open. Falls through to 33 (success) if spawning fails so callers continue.
 ///
 /// # Safety
 /// All pointer arguments must be null or valid null-terminated UTF-16 strings.
@@ -555,14 +555,57 @@ pub unsafe extern "win64" fn shell_execute_w(
     _h_wnd: usize,
     lp_operation: *const u16,
     lp_file: *const u16,
-    _lp_parameters: *const u16,
+    lp_parameters: *const u16,
     _lp_directory: *const u16,
     _n_show_cmd: i32,
 ) -> usize {
     let op = unsafe { decode_wide_opt(lp_operation) }.unwrap_or_else(|| "open".to_string());
     let file = unsafe { decode_wide_opt(lp_file) }.unwrap_or_default();
-    eprintln!("weave/shell32: ShellExecuteW: op={op:?} file={file:?} (stub)");
-    33 // SE_ERR_SUCCESS (any value > 32 means success)
+    let params = unsafe { decode_wide_opt(lp_parameters) };
+
+    eprintln!("weave/shell32: ShellExecuteW: op={op:?} file={file:?}");
+
+    // URL dispatch — http/https/ftp/mailto: hand to xdg-open directly.
+    let lower = file.to_ascii_lowercase();
+    let is_url = lower.starts_with("http://")
+        || lower.starts_with("https://")
+        || lower.starts_with("ftp://")
+        || lower.starts_with("mailto:");
+
+    if is_url {
+        let _ = std::process::Command::new("xdg-open").arg(&file).spawn();
+        return 33;
+    }
+
+    // PE dispatch — translate Win32 path, spawn via weave binary.
+    let is_exe = lower.ends_with(".exe") || lower.ends_with(".com");
+    if is_exe || op.eq_ignore_ascii_case("runas") || op.eq_ignore_ascii_case("open") {
+        if let Ok(linux_path) = prefix::translator().to_linux_str(&file) {
+            if linux_path.exists() && is_exe {
+                if let Ok(weave_bin) = std::fs::read_link("/proc/self/exe") {
+                    let mut cmd = std::process::Command::new(&weave_bin);
+                    cmd.arg(&linux_path);
+                    if let Some(p) = &params {
+                        // Split params on whitespace for argv (no quoting — best-effort).
+                        for tok in p.split_whitespace() {
+                            cmd.arg(tok);
+                        }
+                    }
+                    let _ = cmd.spawn();
+                    return 33;
+                }
+            }
+            // Non-exe file path — hand to xdg-open for desktop association.
+            if linux_path.exists() {
+                let _ = std::process::Command::new("xdg-open")
+                    .arg(&linux_path)
+                    .spawn();
+                return 33;
+            }
+        }
+    }
+
+    33 // SE_ERR_SUCCESS — return success even on dispatch failure; guests check > 32 only
 }
 
 // Wine ref: dlls/shell32/shlexec.c — converts ANSI args to Unicode via MultiByteToWideChar then
@@ -573,14 +616,46 @@ pub unsafe extern "win64" fn shell_execute_w(
 /// All pointer arguments must be null or valid null-terminated ANSI strings.
 // Wine ref: dlls/shell32/shlexec.c — MultiByteToWideChar then ShellExecuteExW; >32 = success.
 pub unsafe extern "win64" fn shell_execute_a(
-    _h_wnd: usize,
-    _lp_operation: *const u8,
-    _lp_file: *const u8,
-    _lp_parameters: *const u8,
-    _lp_directory: *const u8,
-    _n_show_cmd: i32,
+    h_wnd: usize,
+    lp_operation: *const u8,
+    lp_file: *const u8,
+    lp_parameters: *const u8,
+    lp_directory: *const u8,
+    n_show_cmd: i32,
 ) -> usize {
-    33 // SE_ERR_SUCCESS
+    fn ansi_to_wide(p: *const u8) -> Option<Vec<u16>> {
+        if p.is_null() {
+            return None;
+        }
+        let mut len = 0usize;
+        while len < 32_768 && unsafe { *p.add(len) } != 0 {
+            len += 1;
+        }
+        let s = String::from_utf8_lossy(unsafe { std::slice::from_raw_parts(p, len) });
+        let mut wide: Vec<u16> = s.encode_utf16().collect();
+        wide.push(0);
+        Some(wide)
+    }
+
+    let op_wide = ansi_to_wide(lp_operation);
+    let file_wide = ansi_to_wide(lp_file);
+    let params_wide = ansi_to_wide(lp_parameters);
+    let dir_wide = ansi_to_wide(lp_directory);
+
+    unsafe {
+        shell_execute_w(
+            h_wnd,
+            op_wide.as_deref().map_or(std::ptr::null(), |v| v.as_ptr()),
+            file_wide
+                .as_deref()
+                .map_or(std::ptr::null(), |v| v.as_ptr()),
+            params_wide
+                .as_deref()
+                .map_or(std::ptr::null(), |v| v.as_ptr()),
+            dir_wide.as_deref().map_or(std::ptr::null(), |v| v.as_ptr()),
+            n_show_cmd,
+        )
+    }
 }
 
 // Wine ref: dlls/shcore/main.c:292 — if !numargs sets ERROR_INVALID_PARAMETER; if cmdline
