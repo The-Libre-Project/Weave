@@ -108,6 +108,9 @@ static LAST_MSG_TIME: AtomicU32 = AtomicU32::new(0);
 static LAST_MSG_POS_X: AtomicI32 = AtomicI32::new(0);
 static LAST_MSG_POS_Y: AtomicI32 = AtomicI32::new(0);
 
+/// HWND currently holding keyboard focus (0 = none).
+static FOCUSED_HWND: AtomicUsize = AtomicUsize::new(0);
+
 /// The HWND most recently passed to BeginPaint. Used by gdi32's CreateCompatibleDC(NULL)
 /// as a fallback when no explicit DC is provided.
 static CURRENT_PAINT_HWND: AtomicUsize = AtomicUsize::new(0);
@@ -5062,14 +5065,23 @@ pub unsafe extern "win64" fn to_ascii_ex(
 
 /// SetFocus: set keyboard focus to a window. Returns the previous focus window.
 ///
-/// Stub: returns the supplied HWND (pretend it already had focus).
-///
-/// # Safety
-/// No pointer dereferences.
 // Wine ref: dlls/win32u/input.c::set_focus_window — sends WM_KILLFOCUS to old focus window,
 // then WM_SETFOCUS to new one; returns old focus HWND (NULL if none had focus).
+/// # Safety
+/// No pointer dereferences; `hwnd` is an opaque handle value.
 pub unsafe extern "win64" fn set_focus(hwnd: usize) -> usize {
-    hwnd
+    let old = FOCUSED_HWND.swap(hwnd, Ordering::SeqCst);
+    if old != 0 && old != hwnd {
+        if let Some(proc_addr) = window::with(old, |w| w.wnd_proc) {
+            call_wnd_proc(proc_addr, old, 0x0008, hwnd, 0); // WM_KILLFOCUS, wParam=new focus
+        }
+    }
+    if hwnd != 0 && hwnd != old {
+        if let Some(proc_addr) = window::with(hwnd, |w| w.wnd_proc) {
+            call_wnd_proc(proc_addr, hwnd, 0x0007, old, 0); // WM_SETFOCUS, wParam=old focus
+        }
+    }
+    old
 }
 
 /// SetKeyboardState: set the keyboard state for the calling thread. Returns TRUE.
@@ -6130,8 +6142,9 @@ pub unsafe extern "win64" fn translate_accelerator_w(
 /// GetFocus — return the HWND that currently has keyboard focus. Returns NULL.
 // Wine ref: dlls/win32u/input.c::get_focus — queries GUITHREADINFO for calling thread;
 // returns info.hwndFocus; returns NULL if thread has no focus window or no message queue.
+// Wine ref: dlls/win32u/input.c — returns the focus HWND for the calling thread's queue.
 pub extern "win64" fn get_focus() -> usize {
-    0 // NULL
+    FOCUSED_HWND.load(Ordering::SeqCst)
 }
 
 /// LoadBitmapW — load a bitmap resource (Wide). Returns NULL.
