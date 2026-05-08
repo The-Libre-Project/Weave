@@ -309,6 +309,7 @@ pub unsafe extern "win64" fn create_window_ex_w(
         xcb_id,
         h_menu: h_menu_param,
         hwnd_parent: h_wnd_parent,
+        tid: unsafe { libc::syscall(libc::SYS_gettid) as u32 },
     });
     set_extra(hwnd, |e| {
         e.ex_style = dw_ex_style;
@@ -3064,15 +3065,14 @@ pub extern "win64" fn is_window_visible(hwnd: usize) -> i32 {
 // Wine ref: dlls/win32u/window.c::get_window_thread — returns entry.tid and optionally
 // entry.pid; sets ERROR_INVALID_WINDOW_HANDLE and returns 0 for invalid HWND.
 pub unsafe extern "win64" fn get_window_thread_process_id(
-    _hwnd: usize,
+    hwnd: usize,
     lpdw_process_id: *mut u32,
 ) -> u32 {
-    unsafe {
-        if !lpdw_process_id.is_null() {
-            *lpdw_process_id = libc::getpid() as u32;
-        }
+    let tid = window::with(hwnd, |w| w.tid).unwrap_or(0);
+    if !lpdw_process_id.is_null() {
+        unsafe { *lpdw_process_id = libc::getpid() as u32 };
     }
-    1 // fake thread ID
+    tid
 }
 
 /// ScreenToClient: convert screen coordinates to client coordinates.
@@ -3697,6 +3697,7 @@ pub unsafe extern "win64" fn create_window_ex_a(
         xcb_id,
         h_menu: h_menu_param,
         hwnd_parent: h_wnd_parent,
+        tid: unsafe { libc::syscall(libc::SYS_gettid) as u32 },
     });
     set_extra(hwnd, |e| {
         e.ex_style = dw_ex_style;
@@ -4141,6 +4142,7 @@ pub unsafe extern "win64" fn create_dialog_param_w(
         xcb_id: 0,
         h_menu: 0,
         hwnd_parent,
+        tid: unsafe { libc::syscall(libc::SYS_gettid) as u32 },
     });
     // Call WM_INITDIALOG (0x0110) with hwnd_parent as wParam, dw_init_param as lParam.
     // Wine ref: dlls/user32/dialog.c — WM_INITDIALOG return value is ignored for
@@ -4209,6 +4211,7 @@ pub unsafe extern "win64" fn create_dialog_indirect_param_w(
         xcb_id: 0,
         h_menu: 0,
         hwnd_parent,
+        tid: unsafe { libc::syscall(libc::SYS_gettid) as u32 },
     });
     // Call WM_INITDIALOG (0x0110) with hwnd_parent as wParam, dw_init_param as lParam.
     let fn_ptr: unsafe extern "win64" fn(usize, u32, usize, isize) -> i32 =

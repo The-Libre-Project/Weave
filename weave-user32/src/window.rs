@@ -28,6 +28,8 @@ pub struct WindowEntry {
     pub h_menu: usize,
     /// Parent HWND (WS_CHILD) or owner HWND (WS_POPUP). 0 for top-level windows.
     pub hwnd_parent: usize,
+    /// Linux TID of the thread that called CreateWindow. Used by GetWindowThreadProcessId.
+    pub tid: u32,
 }
 
 // ── Global table ──────────────────────────────────────────────────────────────
