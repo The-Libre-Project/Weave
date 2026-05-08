@@ -5120,19 +5120,20 @@ pub unsafe extern "win64" fn register_window_message_w(lp_string: *const u16) ->
     crate::clipboard::register_format(&name)
 }
 
-/// SystemParametersInfoA: stub — returns FALSE (operation not supported).
+/// SystemParametersInfoA: delegates to W for all bool/uint/struct actions.
 ///
 /// # Safety
-/// Pointer arguments are accepted but not dereferenced.
+/// pv_param must be a valid writable pointer for GET actions.
 // Wine ref: dlls/win32u/sysparams.c — SystemParametersInfoA converts string params to
-// wide then calls SystemParametersInfoW; handles ~120 SPI_* actions; updates registry if fWinIni set.
+// wide then calls SystemParametersInfoW; for bool/uint/struct actions the pointer passes
+// through unchanged.
 pub unsafe extern "win64" fn system_parameters_info_a(
-    _u_action: u32,
-    _u_param: u32,
-    _pv_param: usize,
-    _f_win_ini: u32,
+    u_action: u32,
+    u_param: u32,
+    pv_param: usize,
+    f_win_ini: u32,
 ) -> i32 {
-    0
+    system_parameters_info_w(u_action, u_param, pv_param as *mut u8, f_win_ini)
 }
 
 /// ToAsciiEx: translate a virtual key to a character. Returns 0.
@@ -5530,6 +5531,8 @@ pub unsafe extern "win64" fn get_window_text_length_w(hwnd: usize) -> i32 {
 /// # Safety
 /// pv_param is written for GET actions; caller must provide a valid buffer.
 // Wine ref: dlls/win32u/sysparams.c::NtUserSystemParametersInfo —
+// GET actions read from the system-parameter entry table; SET actions update registry.
+// Weave covers the most-called GET subset; SET actions return TRUE (accepted, not persisted).
 // SPI_GETICONTITLELOGFONT: calls get_font_entry(&entry_ICONTITLELOGFONT,...) which
 // falls back to DEFAULT_GUI_FONT with lfCharSet=DEFAULT_CHARSET, lfHeight mapped from
 // system DPI (typically -11 at 96dpi), lfWeight from entry default (FW_NORMAL=400),
@@ -5541,144 +5544,152 @@ pub unsafe extern "win64" fn system_parameters_info_w(
     pv_param: *mut u8,
     _f_win_ini: u32,
 ) -> i32 {
-    // SPI_GETICONTITLELOGFONT = 0x1f (31)
-    // Fill a LOGFONTW with the system icon-title font. SciTE exits(0) if this
-    // returns FALSE. LOGFONTW layout (92 bytes, all little-endian):
-    eprintln!(
-        "weave/user32: SystemParametersInfoW ENTRY u_action={u_action:#x} pv_param={:?}",
-        pv_param
-    );
-    //   +0x00 i32 lfHeight        (4)
-    //   +0x04 i32 lfWidth         (4)
-    //   +0x08 i32 lfEscapement    (4)
-    //   +0x0c i32 lfOrientation   (4)
-    //   +0x10 i32 lfWeight        (4)
-    //   +0x14 u8  lfItalic        (1)
-    //   +0x15 u8  lfUnderline     (1)
-    //   +0x16 u8  lfStrikeOut     (1)
-    //   +0x17 u8  lfCharSet       (1)
-    //   +0x18 u8  lfOutPrecision  (1)
-    //   +0x19 u8  lfClipPrecision (1)
-    //   +0x1a u8  lfQuality       (1)
-    //   +0x1b u8  lfPitchAndFamily(1)
-    //   +0x1c u16 lfFaceName[32]  (64)  total = 92 = 0x5c
-    if u_action == 0x1f {
-        if pv_param.is_null() {
-            return 0;
-        }
-        std::ptr::write_bytes(pv_param, 0, 92);
-        let p32 = pv_param as *mut i32;
-        *p32.add(0) = -11; // lfHeight: 11pt at 96dpi (Wine default)
-        *p32.add(1) = 0; // lfWidth
-        *p32.add(2) = 0; // lfEscapement
-        *p32.add(3) = 0; // lfOrientation
-        *p32.add(4) = 400; // lfWeight: FW_NORMAL
-        *pv_param.add(0x17) = 1; // lfCharSet: DEFAULT_CHARSET
-                                 // lfFaceName = L"Segoe UI" at offset 0x1c
-        let face: &[u16] = &[0x53, 0x65, 0x67, 0x6f, 0x65, 0x20, 0x55, 0x49, 0]; // "Segoe UI\0"
-        std::ptr::copy_nonoverlapping(face.as_ptr(), pv_param.add(0x1c) as *mut u16, face.len());
-        eprintln!("weave/user32: SystemParametersInfoW(SPI_GETICONTITLELOGFONT) → TRUE");
-        return 1; // TRUE
+    // Helper: write u32 to pv_param, guard null.
+    macro_rules! write_u32 {
+        ($val:expr) => {{
+            if pv_param.is_null() {
+                return 0;
+            }
+            *(pv_param as *mut u32) = $val;
+            1
+        }};
     }
-    // SPI_GETNONCLIENTMETRICS = 0x29 (41)
-    // Fills NONCLIENTMETRICSW. Vista+ layout = 340 bytes (XP = 336, no iPaddedBorderWidth).
-    // Wine ref: dlls/win32u/sysparams.c — validates ptr non-null, fills 5 LOGFONTWs from
-    // registry entries (CAPTIONLOGFONT, SMCAPTIONLOGFONT, MENULOGFONT, STATUSLOGFONT,
-    // MESSAGELOGFONT); sets iPaddedBorderWidth only when cbSize == sizeof(NONCLIENTMETRICSW)
-    // (340); returns FALSE on null ptr.
-    if u_action == 0x29 {
-        if pv_param.is_null() {
-            return 0;
-        }
-        // Read cbSize (u32 at offset 0) — caller sets this before calling
-        let cb_size = *(pv_param as *const u32);
-        if cb_size == 0 {
-            return 0;
-        }
-        // Zero the entire struct to cbSize bytes, then restore cbSize and fill fields
-        std::ptr::write_bytes(pv_param, 0, cb_size as usize);
-        *(pv_param as *mut u32) = cb_size; // restore cbSize zeroed by write_bytes above
-        let p32 = pv_param as *mut i32;
-        // Integer metric fields
-        *p32.add(1) = 1; // iBorderWidth  (+0x04)
-        *p32.add(2) = 17; // iScrollWidth  (+0x08)
-        *p32.add(3) = 17; // iScrollHeight (+0x0c)
-        *p32.add(4) = 19; // iCaptionWidth (+0x10)
-        *p32.add(5) = 19; // iCaptionHeight(+0x14)
-                          // lfCaptionFont at +0x18 (92 bytes)
-        {
-            let lf = pv_param.add(0x18);
-            *(lf as *mut i32) = -11; // lfHeight
+
+    // Helper: write LOGFONTW (92 bytes) at `base` with Segoe UI / FW_NORMAL / -11pt.
+    // Wine ref: dlls/win32u/sysparams.c — default logfont fields for all five NCM fonts.
+    macro_rules! write_logfont {
+        ($base:expr) => {{
+            let lf: *mut u8 = $base;
+            std::ptr::write_bytes(lf, 0, 92);
+            *(lf as *mut i32) = -11; // lfHeight: 11pt at 96dpi
             *(lf.add(0x10) as *mut i32) = 400; // lfWeight: FW_NORMAL
             *lf.add(0x17) = 1; // lfCharSet: DEFAULT_CHARSET
             let face: &[u16] = &[0x53, 0x65, 0x67, 0x6f, 0x65, 0x20, 0x55, 0x49, 0]; // "Segoe UI\0"
             std::ptr::copy_nonoverlapping(face.as_ptr(), lf.add(0x1c) as *mut u16, face.len());
-        }
-        *p32.add(0x74 / 4) = 15; // iSmCaptionWidth  (+0x74)
-        *p32.add(0x78 / 4) = 15; // iSmCaptionHeight (+0x78)
-                                 // lfSmCaptionFont at +0x7c (92 bytes)
-        {
-            let lf = pv_param.add(0x7c);
-            *(lf as *mut i32) = -11;
-            *(lf.add(0x10) as *mut i32) = 400;
-            *lf.add(0x17) = 1;
-            let face: &[u16] = &[0x53, 0x65, 0x67, 0x6f, 0x65, 0x20, 0x55, 0x49, 0];
-            std::ptr::copy_nonoverlapping(face.as_ptr(), lf.add(0x1c) as *mut u16, face.len());
-        }
-        *p32.add(0xd8 / 4) = 19; // iMenuWidth  (+0xd8)
-        *p32.add(0xdc / 4) = 19; // iMenuHeight (+0xdc)
-                                 // lfMenuFont at +0xe0 (92 bytes)
-        {
-            let lf = pv_param.add(0xe0);
-            *(lf as *mut i32) = -11;
-            *(lf.add(0x10) as *mut i32) = 400;
-            *lf.add(0x17) = 1;
-            let face: &[u16] = &[0x53, 0x65, 0x67, 0x6f, 0x65, 0x20, 0x55, 0x49, 0];
-            std::ptr::copy_nonoverlapping(face.as_ptr(), lf.add(0x1c) as *mut u16, face.len());
-        }
-        // lfStatusFont at +0x13c (92 bytes)
-        {
-            let lf = pv_param.add(0x13c);
-            *(lf as *mut i32) = -11;
-            *(lf.add(0x10) as *mut i32) = 400;
-            *lf.add(0x17) = 1;
-            let face: &[u16] = &[0x53, 0x65, 0x67, 0x6f, 0x65, 0x20, 0x55, 0x49, 0];
-            std::ptr::copy_nonoverlapping(face.as_ptr(), lf.add(0x1c) as *mut u16, face.len());
-        }
-        // lfMessageFont at +0x198 (92 bytes)
-        {
-            let lf = pv_param.add(0x198);
-            *(lf as *mut i32) = -11;
-            *(lf.add(0x10) as *mut i32) = 400;
-            *lf.add(0x17) = 1;
-            let face: &[u16] = &[0x53, 0x65, 0x67, 0x6f, 0x65, 0x20, 0x55, 0x49, 0];
-            std::ptr::copy_nonoverlapping(face.as_ptr(), lf.add(0x1c) as *mut u16, face.len());
-        }
-        // iPaddedBorderWidth at +0x1f4 — only present in Vista+ layout (cbSize == 340)
-        // Wine: sets to 0 when cbSize == sizeof(NONCLIENTMETRICSW) (already zeroed above)
-        eprintln!("weave/user32: SystemParametersInfoW(SPI_GETNONCLIENTMETRICS) → TRUE");
-        return 1; // TRUE
+        }};
     }
-    // SPI_GETWORKAREA = 0x30 (48)
-    // Fills a RECT (4 × i32) with the usable desktop area. No taskbar in Weave, so the
-    // work area equals the full primary screen resolution.
-    // Wine ref: dlls/win32u/sysparams.c — validates ptr non-null; fills RECT from the primary
-    // monitor's work area (rcWork); returns FALSE on null ptr.
-    if u_action == 0x30 {
-        if pv_param.is_null() {
-            return 0;
+
+    match u_action {
+        // ── simple bool/uint GET actions ─────────────────────────────────────
+
+        // SPI_GETBORDER (5) — border width; Wine default 1
+        0x05 => write_u32!(1),
+
+        // SPI_GETSCREENSAVEACTIVE (16) — no screen saver in Weave
+        0x10 => write_u32!(0),
+
+        // SPI_GETICONTITLELOGFONT (31) — icon-title LOGFONTW
+        // LOGFONTW layout (92 bytes): lfHeight(i32)+lfWidth(i32)+…+lfFaceName[32](u16×32)
+        0x1f => {
+            if pv_param.is_null() {
+                return 0;
+            }
+            write_logfont!(pv_param);
+            1
         }
-        // RECT: left, top, right, bottom
-        let r = pv_param as *mut i32;
-        *r.add(0) = 0; // left
-        *r.add(1) = 0; // top
-        *r.add(2) = 1024; // right
-        *r.add(3) = 768; // bottom
-        eprintln!("weave/user32: SystemParametersInfoW(SPI_GETWORKAREA) → TRUE");
-        return 1; // TRUE
+
+        // SPI_GETDRAGFULLWINDOWS (38) — drag full windows: TRUE per Wine default
+        0x26 => write_u32!(1),
+
+        // SPI_GETNONCLIENTMETRICS (41) — NONCLIENTMETRICSW; Vista+ cbSize = 340
+        // Wine ref: dlls/win32u/sysparams.c — fills 5 LOGFONTWs from registry entries;
+        // sets iPaddedBorderWidth only when cbSize == 340; returns FALSE on null ptr.
+        0x29 => {
+            if pv_param.is_null() {
+                return 0;
+            }
+            let cb_size = *(pv_param as *const u32);
+            if cb_size == 0 {
+                return 0;
+            }
+            std::ptr::write_bytes(pv_param, 0, cb_size as usize);
+            *(pv_param as *mut u32) = cb_size;
+            let p32 = pv_param as *mut i32;
+            *p32.add(1) = 1; // iBorderWidth  (+0x04)
+            *p32.add(2) = 17; // iScrollWidth  (+0x08)
+            *p32.add(3) = 17; // iScrollHeight (+0x0c)
+            *p32.add(4) = 19; // iCaptionWidth (+0x10)
+            *p32.add(5) = 19; // iCaptionHeight(+0x14)
+            write_logfont!(pv_param.add(0x18)); // lfCaptionFont
+            *p32.add(0x74 / 4) = 15; // iSmCaptionWidth  (+0x74)
+            *p32.add(0x78 / 4) = 15; // iSmCaptionHeight (+0x78)
+            write_logfont!(pv_param.add(0x7c)); // lfSmCaptionFont
+            *p32.add(0xd8 / 4) = 19; // iMenuWidth  (+0xd8)
+            *p32.add(0xdc / 4) = 19; // iMenuHeight (+0xdc)
+            write_logfont!(pv_param.add(0xe0)); // lfMenuFont
+            write_logfont!(pv_param.add(0x13c)); // lfStatusFont
+            write_logfont!(pv_param.add(0x198)); // lfMessageFont
+            // iPaddedBorderWidth (+0x1f4) — already zeroed by write_bytes above
+            1
+        }
+
+        // SPI_GETWORKAREA (48) — usable desktop RECT
+        // Wine ref: dlls/win32u/sysparams.c — fills RECT from primary monitor's rcWork.
+        0x30 => {
+            if pv_param.is_null() {
+                return 0;
+            }
+            let r = pv_param as *mut i32;
+            *r.add(0) = 0;
+            *r.add(1) = 0;
+            *r.add(2) = 1024;
+            *r.add(3) = 768;
+            1
+        }
+
+        // SPI_GETFONTSMOOTHING (74) — font smoothing enabled; TRUE per Wine/Win10 default
+        0x4a => write_u32!(1),
+
+        // SPI_GETWHEELSCROLLLINES (104) — lines per wheel notch; 3 = Windows default
+        0x68 => write_u32!(3),
+
+        // SPI_GETMENUSHOWDELAY (106) — ms before submenu opens; 400 = Windows default
+        0x6a => write_u32!(400),
+
+        // SPI_GETSCREENSAVERRUNNING (114) — no screen saver running in Weave
+        0x72 => write_u32!(0),
+
+        // SPI_GETHOTTRACKING (0x1002) — TRUE: highlight controls on mouse-over
+        0x1002 => write_u32!(1),
+
+        // SPI_GETGRADIENTCAPTIONS (0x1008) — TRUE: gradient title bars
+        0x1008 => write_u32!(1),
+
+        // SPI_GETKEYBOARDCUES (0x100a) — TRUE: always show keyboard underlines
+        0x100a => write_u32!(1),
+
+        // SPI_GETMOUSECLICKLOCK (0x101e) — FALSE: no click-lock
+        0x101e => write_u32!(0),
+
+        // SPI_GETFLATMENU (0x1022) — TRUE: flat menus (Vista+ default)
+        0x1022 => write_u32!(1),
+
+        // SPI_GETFONTSMOOTHINGTYPE (0x200a) — 2 = FE_FONTSMOOTHINGCLEARTYPE
+        0x200a => write_u32!(2),
+
+        // SPI_GETFONTSMOOTHINGCONTRAST (0x200c) — 1400 = Wine/Win default
+        0x200c => write_u32!(1400),
+
+        // ── SET actions accepted silently ────────────────────────────────────
+        // Wine ref: dlls/win32u/sysparams.c — SET actions update registry + broadcast
+        // WM_SETTINGCHANGE when SPIF_SENDCHANGE set. Weave accepts without persisting.
+        0x06 | // SPI_SETBORDER
+        0x11 | // SPI_SETSCREENSAVEACTIVE
+        0x27 | // SPI_SETDRAGFULLWINDOWS
+        0x4b | // SPI_SETFONTSMOOTHING
+        0x69 | // SPI_SETMENUSHOWDELAY
+        0x1003 | // SPI_SETHOTTRACKING
+        0x1009 | // SPI_SETGRADIENTCAPTIONS
+        0x100b | // SPI_SETKEYBOARDCUES
+        0x1023 | // SPI_SETFLATMENU
+        0x200b | // SPI_SETFONTSMOOTHINGTYPE
+        0x200d => 1, // SPI_SETFONTSMOOTHINGCONTRAST
+
+        _ => {
+            eprintln!("weave/user32: SystemParametersInfoW({u_action:#x}) → FALSE (unhandled)");
+            0
+        }
     }
-    eprintln!("weave/user32: SystemParametersInfoW(u_action={u_action:#x}) → FALSE (stub)");
-    0 // FALSE
 }
 
 /// GetMonitorInfoA — fill a MONITORINFO or MONITORINFOEX structure (ANSI).
