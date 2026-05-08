@@ -6809,12 +6809,17 @@ pub unsafe extern "win64" fn enum_display_devices_a(
     1 // TRUE
 }
 
-/// GetDCEx — extended GetDC with clip region and flags; return NULL (stub).
+/// GetDCEx — extended GetDC with clip region and flags.
+///
+/// Delegates to GetDC; clip region and DCX_* flags are ignored.
 ///
 /// # Safety
 /// All arguments are accepted but not dereferenced.
-pub unsafe extern "win64" fn get_dc_ex(_hwnd: usize, _clip: usize, _flags: u32) -> usize {
-    0 // NULL
+// Wine ref: dlls/win32u/dc.c — GetDCEx calls NtUserGetDCEx; DCX_CACHE/DCX_WINDOW/
+// DCX_CLIPCHILDREN etc. control DC sourcing and clipping. Weave: single DC per
+// window, no clip-region support — delegate to GetDC ignoring clip and flags.
+pub unsafe extern "win64" fn get_dc_ex(hwnd: usize, _clip: usize, _flags: u32) -> usize {
+    get_dc(hwnd)
 }
 
 /// GetDisplayConfigBufferSizes — return ERROR_NOT_SUPPORTED.

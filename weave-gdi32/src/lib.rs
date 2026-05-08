@@ -3743,14 +3743,28 @@ pub extern "win64" fn set_map_mode(_hdc: usize, _i_mode: i32) -> i32 {
     1 // MM_TEXT
 }
 
-/// Polyline: draw a polyline through a series of points. Returns TRUE.
+/// Polyline: draw a polyline through a series of points.
 ///
 /// # Safety
-/// `lpt` must point to `c_pt` valid POINT structs.
+/// `lpt` must point to `c_pt` valid POINT structs, or be NULL when `c_pt` < 2.
 // Wine ref: dlls/win32u/painting.c — NtGdiPolyPolyDraw with type POLYLINE; draws line
 // segments between consecutive points using current pen; does NOT close the figure;
-// cPt must be >= 2 or returns FALSE.
-pub unsafe extern "win64" fn polyline(_hdc: usize, _lpt: *const i32, _c_pt: i32) -> i32 {
+// does NOT update the current pen position; cPt must be >= 2 or returns FALSE.
+pub unsafe extern "win64" fn polyline(hdc: usize, lpt: *const i32, c_pt: i32) -> i32 {
+    if lpt.is_null() || c_pt < 2 {
+        return 0;
+    }
+    let pts = unsafe { std::slice::from_raw_parts(lpt as *const Point, c_pt as usize) };
+    let (drawable, h_pen) = dc::with(hdc, |dc| (dc.drawable(), dc.h_pen));
+    if drawable == 0 {
+        return 1;
+    }
+    let pixel = weave_user32::backend::colorref_to_pixel(objects::pen_color(h_pen));
+    for seg in pts.windows(2) {
+        let (x1, y1) = dc::with(hdc, |dc| dc.lp_to_device(seg[0].x, seg[0].y));
+        let (x2, y2) = dc::with(hdc, |dc| dc.lp_to_device(seg[1].x, seg[1].y));
+        weave_user32::backend::draw_line(drawable, x1, y1, x2, y2, pixel);
+    }
     1
 }
 
