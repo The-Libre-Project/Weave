@@ -285,6 +285,27 @@ pub struct WndClassExW {
     pub h_icon_sm: HICON,
 }
 
+// ── ICONINFO struct ───────────────────────────────────────────────────────────
+//
+// Win64 layout (32 bytes):
+//   offset  0: fIcon      (BOOL = i32, 4 bytes) — TRUE=icon, FALSE=cursor
+//   offset  4: xHotspot   (DWORD = u32, 4 bytes)
+//   offset  8: yHotspot   (DWORD = u32, 4 bytes)
+//   offset 12: _pad       (4 bytes — HBITMAP requires 8-byte alignment)
+//   offset 16: hbmMask    (HBITMAP = usize, 8 bytes) — monochrome AND mask
+//   offset 24: hbmColor   (HBITMAP = usize, 8 bytes) — color XOR bitmap (NULL = mono)
+
+#[repr(C)]
+pub struct IconInfo {
+    pub f_icon: i32,
+    pub x_hotspot: u32,
+    pub y_hotspot: u32,
+    pub _pad: u32,
+    pub hbm_mask: usize,
+    pub hbm_color: usize,
+}
+const _: () = assert!(std::mem::size_of::<IconInfo>() == 32);
+
 // ── RECT struct ───────────────────────────────────────────────────────────────
 
 #[repr(C)]

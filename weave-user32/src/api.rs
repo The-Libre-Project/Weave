@@ -6551,13 +6551,34 @@ pub unsafe extern "win64" fn get_menu_bar_info(
 
 /// GetIconInfo — retrieve information about an icon or cursor.
 ///
-/// Wine ref: dlls/user32/cursoricon.c — GetIconInfo fills an ICONINFO struct
-/// with mask/color bitmaps. Weave: returns FALSE (no real icon infrastructure).
+/// GetIconInfo: fill an ICONINFO struct for the given icon/cursor handle.
 ///
 /// # Safety
-/// `piconinfo` is ignored.
-pub unsafe extern "win64" fn get_icon_info(_hicon: usize, _piconinfo: *mut u8) -> i32 {
-    0 // FALSE
+/// `piconinfo` must be a valid pointer to an ICONINFO-sized buffer, or NULL.
+// Wine ref: dlls/user32/cursoricon.c + dlls/win32u/window.c::get_icon_info —
+// calls NtUserGetIconInfo; fills ICONINFO: fIcon TRUE for icons, FALSE for cursors;
+// hotspots 0,0 for icons; hbmMask = monochrome AND-mask copy; hbmColor = color copy
+// (NULL for monochrome icons). Both bitmaps are caller-owned (must DeleteObject).
+pub unsafe extern "win64" fn get_icon_info(hicon: usize, piconinfo: *mut u8) -> i32 {
+    if hicon == 0 || piconinfo.is_null() {
+        return 0; // FALSE
+    }
+    let ii = unsafe { &mut *(piconinfo as *mut IconInfo) };
+    let entry = crate::image_handles::get(hicon);
+    let is_cursor = entry
+        .as_ref()
+        .map(|e| matches!(e.kind, crate::image_handles::ImageKind::Cursor))
+        .unwrap_or(false);
+    ii.f_icon = if is_cursor { 0 } else { 1 };
+    ii.x_hotspot = 0;
+    ii.y_hotspot = 0;
+    // Synthetic bitmap handles: unique per icon, non-zero so callers don't treat
+    // NULL as a failure. Not in any GDI table; DeleteObject on them is a no-op.
+    // Offset into a range (0x5F00_xxxx) that does not overlap real handle ranges:
+    // image_handles (0x6FFF_xxxx), module_handles (0x7FFF_xxxx), semaphore (0x8FFF_xxxx).
+    ii.hbm_mask = 0x5F00_0000 | (hicon & 0xFFFF);
+    ii.hbm_color = 0x5F10_0000 | (hicon & 0xFFFF);
+    1 // TRUE
 }
 
 /// CreateIconIndirect — create an icon from an ICONINFO structure.
