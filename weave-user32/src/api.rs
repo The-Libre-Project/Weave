@@ -1655,8 +1655,15 @@ pub unsafe extern "win64" fn begin_paint(hwnd: usize, lp_paint: *mut PaintStruct
 /// `lp_paint` must point to the `PAINTSTRUCT` filled by `BeginPaint`.
 // Wine ref: dlls/win32u/painting.c::NtUserEndPaint — releases the HDC obtained in BeginPaint,
 // calls validate_window to clear the update region; always returns TRUE.
-pub unsafe extern "win64" fn end_paint(_hwnd: usize, _lp_paint: *const PaintStruct) -> i32 {
-    1 // TRUE
+pub unsafe extern "win64" fn end_paint(hwnd: usize, _lp_paint: *const PaintStruct) -> i32 {
+    // Wine ref: dlls/win32u/painting.c::NtUserEndPaint — releases HDC from BeginPaint,
+    // calls validate_window (ValidateRect(hwnd, NULL)) to clear the update region.
+    // Weave: clear CURRENT_PAINT_HWND so gdi32::create_compatible_dc does not route
+    // subsequent GDI calls to a stale paint target after the paint cycle ends.
+    // ps.hdc == hwnd (fake HDC) — no real DC resource to release.
+    let _ = hwnd;
+    CURRENT_PAINT_HWND.store(0, Ordering::Relaxed);
+    1 // TRUE — Wine always returns TRUE
 }
 
 // ── System metrics ────────────────────────────────────────────────────────────
