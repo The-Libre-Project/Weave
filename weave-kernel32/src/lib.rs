@@ -3438,20 +3438,39 @@ pub unsafe extern "win64" fn get_process_id(process: usize) -> u32 {
 /// Pointer arguments are accepted but not dereferenced.
 // Wine ref: dlls/kernelbase/thread.c:400 — NtOpenThread with CLIENT_ID{UniqueProcess=0,
 // UniqueThread=id}; sets OBJ_INHERIT when inherit!=0; returns 0 (not INVALID_HANDLE_VALUE) on failure.
+// Weave: store TID directly as handle value (mirrors OpenProcess pid-as-handle pattern).
 pub unsafe extern "win64" fn open_thread(
     _dw_desired_access: u32,
     _b_inherit_handle: i32,
-    _dw_thread_id: u32,
+    dw_thread_id: u32,
 ) -> usize {
-    0x100 // fake non-null thread handle
+    if dw_thread_id == 0 {
+        set_last_error(87); // ERROR_INVALID_PARAMETER
+        return 0;
+    }
+    // Validate the thread exists under the current process's task group.
+    if !std::path::Path::new(&format!("/proc/self/task/{dw_thread_id}")).exists() {
+        set_last_error(87);
+        return 0;
+    }
+    set_last_error(0);
+    dw_thread_id as usize
 }
 
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
 // Wine ref: dlls/kernelbase/thread.c:296 — NtQueryInformationThread(ThreadBasicInformation);
 // returns tbi.ClientId.UniqueThread cast to DWORD; returns 0 on error.
-pub unsafe extern "win64" fn get_thread_id(_thread: usize) -> u32 {
-    42 // fake thread ID — handle→TID map not yet implemented
+// Weave: pseudo-handle (usize::MAX-1) → gettid(); real handles store TID as value.
+pub unsafe extern "win64" fn get_thread_id(thread: usize) -> u32 {
+    if thread == usize::MAX - 1 {
+        // GetCurrentThread() pseudo-handle
+        unsafe { libc::syscall(libc::SYS_gettid) as u32 }
+    } else if thread == 0 {
+        0
+    } else {
+        thread as u32
+    }
 }
 
 // ── File time operations ─────────────────────────────────────────────────────
