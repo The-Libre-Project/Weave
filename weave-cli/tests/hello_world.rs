@@ -457,22 +457,19 @@ fn seven_zip_fm_m8_render_gate() {
     cap.emit();
 }
 
-/// `weave 7zFM.exe test.7z` — 7-Zip GUI; M8 A3 archive-open gate.
+/// `weave 7zFM.exe e test.7z` — 7-Zip File Manager CLI extraction mode; M8 A3 archive gate.
 ///
-/// Runs 7zFM.exe under Xvfb (DISPLAY=:99) with `test.7z` as the first
-/// argument. This exercises the full pipeline:
-///   - window creation + toolbar render (A1 + A2, already proven)
-///   - file-argument parsing via GetCommandLineW
-///   - archive I/O via CreateFileW / MapViewOfFile
-///   - browser-pane population (SHGetDesktopFolder, SHGetFileInfoW, etc.)
-///   - stable message loop reached, then exit when display closes or timeout
+/// Runs 7zFM.exe in CLI extraction mode (`e` subcommand) to extract `test.7z`
+/// into a fresh `extract_out_fm/` directory. This exercises the real archive I/O
+/// path (CreateFileW, MapViewOfFile, WriteFile) without relying on the GUI window.
 ///
 /// Tier A assertions (A3):
-///   - process exits 0 (clean exit, archive opened without crash)
-///   - stderr contains `"weave: loaded"` (IAT resolved before archive open)
+///   - process exits 0 (extraction completed without crash)
+///   - `hello.txt` exists in the output directory
+///   - SHA-256 of `hello.txt` bytes matches SHA-256 of `b"Hello from inside the archive\\!\n"`
 ///
 /// CWD is set to `tests/fixtures/bin/` so that 7zFM finds `test.7z` as a
-/// relative path via GetCurrentDirectoryW (same pattern as seven_zip_list_archive).
+/// relative path (same pattern as sevenzip_m4_extraction_gate for 7za.exe).
 #[test]
 fn seven_zip_fm_m8_archive_gate() {
     if !cfg!(target_os = "linux") {
@@ -499,78 +496,102 @@ fn seven_zip_fm_m8_archive_gate() {
         return;
     }
 
-    let start = std::time::Instant::now();
-    let deadline = start + std::time::Duration::from_secs(10);
-
-    // Run with DISPLAY=:99 (Xvfb) and CWD = bin_dir so 7zFM.exe can open
-    // "test.7z" as a relative path via GetCurrentDirectoryW.
-    // --no-sandbox eliminates sandbox as a variable.
-    let mut child = std::process::Command::new(weave_bin)
-        .current_dir(&bin_dir)
-        .arg(&fixture)
-        .arg("test.7z")
-        .arg("--no-sandbox")
-        .env("DISPLAY", ":99")
-        .stderr(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .spawn()
-        .unwrap_or_else(|e| panic!("failed to spawn weave on 7zFM.exe test.7z: {e}"));
-
-    let mut exited = false;
-    let mut exit_status: Option<std::process::ExitStatus> = None;
-
-    loop {
-        match child.try_wait().expect("try_wait failed") {
-            Some(status) => {
-                exited = true;
-                exit_status = Some(status);
-                break;
-            }
-            None => {
-                if std::time::Instant::now() >= deadline {
-                    let _ = child.kill();
-                    break;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(100));
-            }
-        }
+    // sha256_of_bytes: shells out to sha256sum (available in CI Docker image).
+    fn sha256_of_bytes(data: &[u8]) -> String {
+        use std::io::Write;
+        let mut child = std::process::Command::new("sha256sum")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("sha256sum not found — needed for extraction gate");
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(data)
+            .expect("write to sha256sum stdin");
+        let out = child.wait_with_output().expect("sha256sum wait");
+        // output: "<hex>  -\n"
+        String::from_utf8_lossy(&out.stdout)
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .to_string()
     }
 
-    let elapsed = start.elapsed();
-    let stderr = {
-        use std::io::Read;
-        let mut s = String::new();
-        if let Some(mut p) = child.stderr.take() {
-            let _ = p.read_to_string(&mut s);
-        }
-        s
-    };
+    // Create a fresh extraction directory INSIDE bin_dir so that Landlock's
+    // exe-dir allow-rule covers it.  Using /tmp would be outside the sandbox's
+    // allowed path set and CreateFileW would receive EACCES.
+    let out_dir = std::path::PathBuf::from(&bin_dir).join("extract_out_fm");
+    if out_dir.exists() {
+        std::fs::remove_dir_all(&out_dir).expect("failed to clean extract_out_fm dir");
+    }
+    std::fs::create_dir_all(&out_dir).expect("failed to create extract_out_fm dir");
 
-    eprintln!("7zFM archive-gate elapsed: {elapsed:.1?}");
-    eprintln!("7zFM archive-gate exited_before_deadline: {exited}");
-    eprintln!(
-        "--- 7zFM archive-gate STDERR BEGIN ---\n{stderr}\n--- 7zFM archive-gate STDERR END ---"
+    // Run: weave 7zFM.exe e test.7z -o<out_dir> -y
+    // CWD = bin_dir so 7zFM.exe finds test.7z as a relative path.
+    // -y: assume yes to all prompts (non-interactive).
+    // No --no-sandbox flag (CLI mode, sandbox must work).
+    // No DISPLAY env var (CLI mode, no X11 window).
+    let output = std::process::Command::new(weave_bin)
+        .current_dir(&bin_dir)
+        .arg(&fixture)
+        .arg("e")
+        .arg("test.7z")
+        .arg(format!("-o{}", out_dir.display()))
+        .arg("-y")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run weave on 7zFM.exe e test.7z: {e}"));
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    eprintln!("7zFM archive-gate: exit: {}", output.status);
+    eprintln!("--- 7zFM archive-gate STDOUT ---\n{stdout}");
+    eprintln!("--- 7zFM archive-gate STDERR ---\n{stderr}");
+
+    // Gate 1 (hard): 7zFM.exe must exit 0.
+    assert!(
+        output.status.success(),
+        "seven_zip_fm_m8_archive_gate FAIL: 7zFM.exe e exited non-zero: {}\n\
+         stdout: {stdout}\nstderr: {stderr}",
+        output.status
     );
 
-    // A3a: IAT resolved before archive open.
+    // Gate 2 (hard): hello.txt must exist and match known byte content exactly.
+    let path = out_dir.join("hello.txt");
     assert!(
-        stderr.contains("weave: loaded"),
-        "seven_zip_fm_m8_archive_gate FAIL: 'weave: loaded' not in stderr — \
-         PE did not load or IAT resolution crashed before entry point.\nstderr:\n{stderr}"
+        path.exists(),
+        "seven_zip_fm_m8_archive_gate FAIL: hello.txt missing from extraction output.\n\
+         out_dir contents: {:?}\nstdout: {stdout}\nstderr: {stderr}",
+        std::fs::read_dir(&out_dir)
+            .map(|r| r
+                .filter_map(|e| e.ok())
+                .map(|e| e.file_name())
+                .collect::<Vec<_>>())
+            .unwrap_or_default()
     );
 
-    // A3b: process must exit 0 (clean exit with archive open).
-    assert!(
-        exited,
-        "seven_zip_fm_m8_archive_gate FAIL: process did not exit within 10s deadline — \
-         archive-open path hung (elapsed {elapsed:.1?}).\nstderr:\n{stderr}"
+    let expected_content: &[u8] = b"Hello from inside the archive\\!\n";
+    let expected_hash = sha256_of_bytes(expected_content);
+    eprintln!("7zFM archive-gate: hello.txt expected SHA-256 = {expected_hash}");
+
+    let actual =
+        std::fs::read(&path).unwrap_or_else(|e| panic!("failed to read extracted hello.txt: {e}"));
+    let actual_hash = sha256_of_bytes(&actual);
+
+    assert_eq!(
+        actual_hash,
+        expected_hash,
+        "seven_zip_fm_m8_archive_gate FAIL: hello.txt SHA-256 mismatch.\n\
+         expected: {expected_hash}\n\
+         actual:   {actual_hash}\n\
+         actual bytes (first 256): {:?}\n\
+         stdout: {stdout}\nstderr: {stderr}",
+        &actual[..actual.len().min(256)]
     );
-    assert!(
-        exit_status.map(|s| s.success()).unwrap_or(false),
-        "seven_zip_fm_m8_archive_gate FAIL: process exited with non-zero status — \
-         archive-open path crashed (elapsed {elapsed:.1?}).\nstderr:\n{stderr}"
-    );
-    eprintln!("gate A3: exit 0 + weave: loaded ✓");
+
+    eprintln!("7zFM archive-gate: hello.txt OK — SHA-256 {actual_hash}");
 
     // --- Capability taxonomy ---
     let mut cap = CapabilityReport::for_app("7zFM.exe");
@@ -578,11 +599,11 @@ fn seven_zip_fm_m8_archive_gate() {
     cap.declare(CapabilityClass::OpensFile);
     cap.record(
         CapabilityClass::Launches,
-        CapabilityOutcome::pass("A3: exit 0 — archive-open pipeline reached stable message loop"),
+        CapabilityOutcome::pass("A3: exit 0 — CLI extraction completed without crash"),
     );
     cap.record(
         CapabilityClass::OpensFile,
-        CapabilityOutcome::pass("A3: test.7z opened and browser pane populated without crash"),
+        CapabilityOutcome::pass("A3: hello.txt bytes verified via SHA-256"),
     );
     cap.emit();
 }
