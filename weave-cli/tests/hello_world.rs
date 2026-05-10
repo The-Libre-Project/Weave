@@ -3599,7 +3599,6 @@ fn wget_exe_probe_gate() {
 /// Landlock allow-set considerations do not apply.
 /// `--no-sandbox` required for /etc/hosts / DNS. Skipped on non-Linux.
 #[test]
-#[ignore = "full wget CRT surface pending — closure via wget_probe_ws2_gate per Task 01 precedent (in-tree minimal probe pattern). Re-enable as part of a future 'full CRT coverage for MinGW binaries' task, not in Task 01b."]
 fn wget_ws2_gate() {
     if !cfg!(target_os = "linux") {
         eprintln!("skipping wget_ws2_gate — requires Linux");
