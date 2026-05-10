@@ -1250,6 +1250,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "weave-bcrypt"
+version = "0.0.1"
+
+[[package]]
 name = "weave-cli"
 version = "0.0.1"
 dependencies = [
@@ -1317,6 +1321,10 @@ dependencies = [
  "tempfile",
  "weave-common",
 ]
+
+[[package]]
+name = "weave-crypt32"
+version = "0.0.1"
 
 [[package]]
 name = "weave-d3d12"
@@ -1389,6 +1397,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "weave-normaliz"
+version = "0.0.1"
+
+[[package]]
 name = "weave-notify"
 version = "0.0.1"
 
@@ -1431,6 +1443,10 @@ version = "0.0.1"
 dependencies = [
  "landlock",
 ]
+
+[[package]]
+name = "weave-secur32"
+version = "0.0.1"
 
 [[package]]
 name = "weave-setupapi"
@@ -1499,6 +1515,10 @@ dependencies = [
  "libc",
  "pipewire",
 ]
+
+[[package]]
+name = "weave-wldap32"
+version = "0.0.1"
 
 [[package]]
 name = "weave-ws2"

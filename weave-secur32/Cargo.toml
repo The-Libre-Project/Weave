@@ -1,0 +1,7 @@
+[package]
+name = "weave-secur32"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "secur32.dll stubs for Weave — security support provider stubs for curl.exe M11 IAT resolution"

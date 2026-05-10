@@ -25,6 +25,11 @@ members = [
     "weave-ddraw",
     "weave-msvcp140",
     "weave-setupapi",
+    "weave-bcrypt",
+    "weave-crypt32",
+    "weave-normaliz",
+    "weave-secur32",
+    "weave-wldap32",
 ]
 resolver = "2"
 
