@@ -3448,6 +3448,127 @@ fn curl_ws2_gate() {
     eprintln!("curl_ws2_gate: all gates passed — curl.exe HTTP GET to example.com succeeded");
 }
 
+/// `weave wget.exe -q -O - http://example.com` — M10 IAT-only probe gate.
+///
+/// Minimal probe: checks only that Weave resolves wget.exe's IAT and the
+/// process exits before hitting a 10s deadline. No HTTP assertion, no exit
+/// code assertion. The CI abort trace captured here is the input to TASK-10b.
+///
+/// Assertions:
+///   1. !killed_by_deadline — process exited within 10s
+///   2. stderr.contains("weave: imports resolved") — IAT patching completed
+///
+/// Skipped gracefully if wget.exe is absent from fixtures. Linux-only.
+#[test]
+fn wget_exe_probe_gate() {
+    if !cfg!(target_os = "linux") {
+        eprintln!("skipping wget_exe_probe_gate — requires Linux");
+        return;
+    }
+
+    let manifest = env!("CARGO_MANIFEST_DIR");
+    let fixture = format!("{manifest}/../tests/fixtures/bin/wget.exe");
+
+    if !std::path::Path::new(&fixture).exists() {
+        eprintln!(
+            "skipping: wget.exe not present in tests/fixtures/bin/ — wget_exe_probe_gate skipped"
+        );
+        return;
+    }
+
+    let weave_bin = env!("CARGO_BIN_EXE_weave");
+
+    let start = std::time::Instant::now();
+    let mut child = std::process::Command::new(weave_bin)
+        .arg(&fixture)
+        .arg("-q")
+        .arg("-O")
+        .arg("-")
+        .arg("http://example.com")
+        .stderr(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|e| panic!("failed to spawn weave on wget.exe: {e}"));
+
+    let mut stderr_pipe = child.stderr.take().expect("stderr was piped");
+    let stderr_shared = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let stderr_writer = std::sync::Arc::clone(&stderr_shared);
+    let drain_thread = std::thread::spawn(move || {
+        use std::io::Read;
+        let mut buf = Vec::new();
+        let _ = stderr_pipe.read_to_end(&mut buf);
+        *stderr_writer.lock().unwrap() = buf;
+    });
+
+    let mut stdout_pipe = child.stdout.take().expect("stdout was piped");
+    let stdout_shared = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let stdout_writer = std::sync::Arc::clone(&stdout_shared);
+    let stdout_drain_thread = std::thread::spawn(move || {
+        use std::io::Read;
+        let mut buf = Vec::new();
+        let _ = stdout_pipe.read_to_end(&mut buf);
+        *stdout_writer.lock().unwrap() = buf;
+    });
+
+    let deadline = start + std::time::Duration::from_secs(10);
+    let mut killed_by_deadline = false;
+
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                break;
+            }
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    eprintln!("wget_exe_probe_gate: deadline exceeded — killing wget.exe");
+                    let _ = child.kill();
+                    killed_by_deadline = true;
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err(e) => {
+                eprintln!("wget_exe_probe_gate: try_wait error: {e}");
+                break;
+            }
+        }
+    }
+
+    let elapsed = start.elapsed();
+    drain_thread.join().ok();
+    stdout_drain_thread.join().ok();
+
+    let stderr = String::from_utf8_lossy(&stderr_shared.lock().unwrap()).into_owned();
+    let stdout = String::from_utf8_lossy(&stdout_shared.lock().unwrap()).into_owned();
+
+    eprintln!("wget_exe_probe_gate: elapsed={elapsed:.1?} killed={killed_by_deadline}");
+    eprintln!("--- wget_exe_probe_gate FULL STDOUT BEGIN ---");
+    eprintln!("{stdout}");
+    eprintln!("--- wget_exe_probe_gate FULL STDOUT END ---");
+    eprintln!("--- wget_exe_probe_gate FULL STDERR BEGIN ---");
+    eprintln!("{stderr}");
+    eprintln!("--- wget_exe_probe_gate FULL STDERR END ---");
+
+    eprintln!("--- wget_exe_probe_gate unresolved imports ---");
+    for line in stderr.lines().filter(|l| l.contains("unresolved import")) {
+        eprintln!("{line}");
+    }
+
+    // A1: process exited within 10s deadline
+    assert!(
+        !killed_by_deadline,
+        "wget_exe_probe_gate A1 FAIL: wget.exe did not exit within 10s deadline\nstderr:\n{stderr}\nstdout:\n{stdout}"
+    );
+
+    // A2: IAT patching completed
+    assert!(
+        stderr.contains("weave: imports resolved"),
+        "wget_exe_probe_gate A2 FAIL: IAT patch did not complete\nelapsed: {elapsed:.1?}\nstderr:\n{stderr}\nstdout:\n{stdout}"
+    );
+
+    eprintln!("wget_exe_probe_gate: all gates passed");
+}
+
 // Task 01 pivot #2 (2026-04-18): wget.exe aborts in glibc during its MinGW+OpenSSL
 // CRT startup — 6 dispatches deep into CRT-stub gaps (perror, raise,
 // GetEnvironmentVariableW) with no convergence on the abort trigger, which lives
