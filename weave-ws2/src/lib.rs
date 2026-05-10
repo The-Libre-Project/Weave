@@ -478,33 +478,43 @@ pub unsafe extern "win64" fn ws_send(s: usize, buf: *const u8, len: i32, flags: 
 /// `buf` must point to at least `len` writable bytes.
 pub unsafe extern "win64" fn ws_recv(s: usize, buf: *mut u8, len: i32, flags: i32) -> i32 {
     eprintln!("weave/ws_recv: ENTRY s={s} len={len}");
-    // Use raw syscall to bypass glibc's cancellation-point wrapper — glibc's recv()
-    // accesses pthread TLS at offset +8 via THREAD_SELF, which crashes when the PE
-    // thread's stack is in a state glibc doesn't expect (fault=0x8, null+8 dereref).
+
     #[cfg(target_os = "linux")]
-    let ret = libc::syscall(
-        libc::SYS_recvfrom,
-        s as libc::c_int,
-        buf as *mut libc::c_void,
-        len as libc::size_t,
-        flags as libc::c_int,
-        std::ptr::null_mut::<libc::sockaddr>(),
-        std::ptr::null_mut::<libc::socklen_t>(),
-    ) as libc::ssize_t;
-    #[cfg(not(target_os = "linux"))]
-    let ret = libc::recv(s as i32, buf as *mut libc::c_void, len as usize, flags);
-    if weave_core::ws2_trace::enabled() {
-        let errno = if ret < 0 {
-            *libc::__errno_location()
-        } else {
-            0
-        };
-        eprintln!("weave/ws_recv: s={s} len={len} flags={flags:#x} ret={ret} errno={errno}");
+    {
+        // Zero-glibc path: direct kernel syscall via inline asm.
+        // libc::recv() and libc::syscall() both route through glibc's
+        // __errno_location() on error (reads [%fs+offset]). wget's CRT corrupts
+        // %fs during startup; subsequent glibc TLS reads fault at null+8.
+        // Linux recvfrom(2) returns -errno on error — no TLS needed.
+        let raw: i64;
+        core::arch::asm!(
+            "syscall",
+            in("rax") libc::SYS_recvfrom as i64,
+            in("rdi") s,
+            in("rsi") buf as usize,
+            in("rdx") len as usize,
+            in("r10") flags as usize,
+            in("r8")  0usize,
+            in("r9")  0usize,
+            lateout("rax") raw,
+            out("rcx") _,
+            out("r11") _,
+            options(nostack),
+        );
+        if raw < 0 {
+            set_last_error(errno_to_wsa((-raw) as i32));
+            return SOCKET_ERROR;
+        }
+        return raw as i32;
     }
-    if ret < 0 {
-        save_errno();
-        SOCKET_ERROR
-    } else {
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        let ret = libc::recv(s as i32, buf as *mut libc::c_void, len as usize, flags);
+        if ret < 0 {
+            save_errno();
+            return SOCKET_ERROR;
+        }
         ret as i32
     }
 }
