@@ -74,7 +74,7 @@ static WSA_INITIALIZED: AtomicBool = AtomicBool::new(false);
 static SOCKET_EVENT_MAP: Mutex<Option<HashMap<usize, (usize, u32)>>> = Mutex::new(None);
 
 fn socket_event_map() -> std::sync::MutexGuard<'static, Option<HashMap<usize, (usize, u32)>>> {
-    let mut g = SOCKET_EVENT_MAP.lock().unwrap();
+    let mut g = SOCKET_EVENT_MAP.lock().unwrap_or_else(|p| p.into_inner());
     if g.is_none() {
         *g = Some(HashMap::new());
     }
@@ -1523,22 +1523,61 @@ pub extern "win64" fn wsa_close_event_object(event: usize) -> i32 {
 pub unsafe extern "win64" fn wsa_event_select(s: usize, event: usize, mask: i32) -> i32 {
     eprintln!("weave/WSAEventSelect: socket={s} event={event:#x} mask={mask:#010x}");
     // Set socket non-blocking (Wine does this implicitly via AFD_EVENT_SELECT).
+    // Wine ref: dlls/ws2_32/socket.c:3885 — WSAEventSelect transitions the socket to
+    // non-blocking mode and clears all previous events regardless of arm/disarm.
     let flags = libc::fcntl(s as i32, libc::F_GETFL);
     if flags >= 0 {
         libc::fcntl(s as i32, libc::F_SETFL, flags | libc::O_NONBLOCK);
     }
-    // Store the association.
+    // Store or remove the socket→(event, mask) association.
+    //
+    // Disarm case (mask == 0 OR event == 0): Windows callers use
+    // WSAEventSelect(s, NULL, 0) to clear all event associations from a socket.
+    // The map entry must be REMOVED — not overwritten with (0, 0) — so that the
+    // WFMO event-resolution path never sees a stale (socket → null-handle) entry.
+    // We also capture the previous event handle so we can deregister it from the
+    // weave-common reverse map (EVENT_SOCKET_MAP).  Passing event=0 to
+    // deregister_socket_event would remove key 0 which was never inserted, leaving
+    // the actual reverse-map entry (old_event → socket_fd) permanently stale.
     let mut g = socket_event_map();
-    if let Some(ref mut map) = *g {
-        map.insert(s, (event, mask as u32));
-    }
+    let prev_event = if let Some(ref mut map) = *g {
+        if mask == 0 || event == 0 {
+            // Disarm: remove the entry, capture the previous event handle.
+            map.remove(&s).map(|(prev_ev, _)| prev_ev)
+        } else {
+            // Arm: insert/update.  Capture the previous handle so we can clean
+            // up any stale reverse-map entry if the event handle changed.
+            map.insert(s, (event, mask as u32))
+                .map(|(prev_ev, _)| prev_ev)
+        }
+    } else {
+        None
+    };
     drop(g);
-    // Update the reverse map in weave-common so WFMO can poll the socket fd directly.
-    if mask != 0 {
+
+    // Update the weave-common reverse map (event_handle → socket_fd).
+    if mask != 0 && event != 0 {
+        // Arm: register the new event handle.  If the event handle changed,
+        // remove the old reverse-map entry first to avoid phantom socket mappings.
+        if let Some(prev) = prev_event {
+            if prev != event && prev != 0 {
+                weave_common::socket_event::deregister_socket_event(prev as u64);
+            }
+        }
         weave_common::socket_event::register_socket_event(event as u64, s as i32);
     } else {
-        weave_common::socket_event::deregister_socket_event(event as u64);
+        // Disarm: deregister using the PREVIOUS event handle.  Passing the new
+        // (null) event handle to deregister would miss the actual map entry.
+        if let Some(prev) = prev_event {
+            if prev != 0 {
+                weave_common::socket_event::deregister_socket_event(prev as u64);
+            }
+        }
+        // Also clear edge-triggered write state so a recycled fd doesn't fire
+        // a phantom FD_WRITE after being dissociated from its event object.
+        weave_common::socket_event::disarm_socket_write(s as i32);
     }
+
     // Arm FD_WRITE edge-trigger if the caller requested FD_WRITE (0x2) events.
     // Wine ref: dlls/ws2_32/socket.c — WSAEventSelect arms the socket's write-pending
     // state (hmask |= POLLEVENT_WRITE) so FD_WRITE fires once on the initial connect

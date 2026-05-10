@@ -8518,6 +8518,15 @@ pub unsafe extern "win64" fn wait_for_multiple_objects(
         let handle = *lp_handles.add(i);
         eprintln!("weave/WFMO: handle[{i}]={handle:#x}");
 
+        // Guard against NULL handle (0) or INVALID_HANDLE_VALUE.  These are
+        // never valid synchronisation objects and must not be dereferenced.
+        // Windows returns WAIT_FAILED for these; our safety-net is to skip
+        // the handle entirely so an invalid entry cannot propagate into poll().
+        if handle == 0 || handle == usize::MAX {
+            eprintln!("weave/WFMO: handle[{i}]={handle:#x} → skip (null/invalid)");
+            continue;
+        }
+
         // Real thread handle — delegate to WFSO immediately (blocking wait).
         if handles::get_thread_completion(handle).is_some() {
             let result = wait_for_single_object(handle, dw_milliseconds);

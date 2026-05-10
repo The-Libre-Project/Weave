@@ -4791,6 +4791,12 @@ pub unsafe extern "win64" fn msg_wait_for_multiple_objects(
         for i in 0..n_count as usize {
             let handle = *lp_handles.add(i);
 
+            // Guard: NULL (0) or INVALID_HANDLE_VALUE are never valid objects.
+            // Skip them so they cannot be passed to get_event_fd, fstat, or poll.
+            if handle == 0 || handle == usize::MAX {
+                continue;
+            }
+
             // Event handle backed by eventfd.  WSAEventSelect-registered event
             // handles have a reverse map to the socket fd — poll the socket
             // directly since the eventfd is never written for socket events.
