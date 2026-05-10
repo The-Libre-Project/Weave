@@ -558,6 +558,40 @@ pub unsafe extern "win64" fn cert_get_enhanced_key_usage(
     0 // FALSE
 }
 
+/// CertDuplicateCertificateContext — increment the reference count on a cert context.
+///
+/// # Safety
+/// `p_cert_context` is accepted but not dereferenced; our fake context is a static.
+// Wine ref: dlls/crypt32/cert.c — CertDuplicateCertificateContext increments the
+// reference count on the CERT_CONTEXT and returns the same pointer. Weave returns
+// a pointer to our static fake context (which has no real ref count).
+pub unsafe extern "win64" fn cert_duplicate_certificate_context(
+    p_cert_context: *const u8,
+) -> *const u8 {
+    if p_cert_context.is_null() {
+        return std::ptr::null();
+    }
+    &FAKE_CERT_CTX as *const FakeCertContext as *const u8
+}
+
+/// CertOpenStore — open a certificate store. Returns the fake store handle.
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+// Wine ref: dlls/crypt32/store.c — CertOpenStore dispatches on lpszStoreProvider;
+// CERT_STORE_PROV_SYSTEM opens a registry-backed system store; CERT_STORE_PROV_MEMORY
+// opens an in-memory store. Weave returns a fake non-null store handle so callers
+// can call CertEnumCertificatesInStore / CertCloseStore without null-deref.
+pub unsafe extern "win64" fn cert_open_store(
+    _lpsz_store_provider: usize,
+    _dw_msg_and_cert_encoding_type: u32,
+    _h_crypt_prov: usize,
+    _dw_flags: u32,
+    _pv_para: *const u8,
+) -> usize {
+    FAKE_STORE_HANDLE
+}
+
 pub fn resolve_crypt32(func: &str) -> Option<usize> {
     Some(match func {
         "CryptQueryObject" => crypt_query_object as *const () as usize,
@@ -576,6 +610,14 @@ pub fn resolve_crypt32(func: &str) -> Option<usize> {
         "CertEnumCertificatesInStore" => cert_enum_certificates_in_store as *const () as usize,
         "CertGetIntendedKeyUsage" => cert_get_intended_key_usage as *const () as usize,
         "CertGetEnhancedKeyUsage" => cert_get_enhanced_key_usage as *const () as usize,
+        // wget gap-fill — cleanup-path stubs
+        "CertDuplicateCertificateContext" => {
+            cert_duplicate_certificate_context as unsafe extern "win64" fn(_) -> _ as *const ()
+                as usize
+        }
+        "CertOpenStore" => {
+            cert_open_store as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const () as usize
+        }
         _ => return None,
     })
 }

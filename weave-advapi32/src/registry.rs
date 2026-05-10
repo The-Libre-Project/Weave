@@ -1741,6 +1741,34 @@ pub fn resolve(func: &str) -> Option<usize> {
             crypt_enum_providers_w as unsafe extern "win64" fn(_, _, _, _, _, _) -> _ as *const ()
                 as usize,
         ),
+        "CryptExportKey" => Some(
+            crypt_export_key as unsafe extern "win64" fn(_, _, _, _, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "CryptGetProvParam" => Some(
+            crypt_get_prov_param as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "CryptGetUserKey" => Some(
+            crypt_get_user_key as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
+        ),
+        "CryptSetHashParam" => Some(
+            crypt_set_hash_param as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
+        ),
+        "CryptSignHashW" => Some(
+            crypt_sign_hash_w as unsafe extern "win64" fn(_, _, _, _, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "RegisterEventSourceW" => Some(
+            register_event_source_w as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
+        ),
+        "DeregisterEventSource" => {
+            Some(deregister_event_source as unsafe extern "win64" fn(_) -> _ as *const () as usize)
+        }
+        "ReportEventW" => Some(
+            report_event_w as unsafe extern "win64" fn(_, _, _, _, _, _, _, _, _) -> _ as *const ()
+                as usize,
+        ),
         _ => None,
     }
 }
@@ -2098,7 +2126,7 @@ pub unsafe extern "win64" fn reg_notify_change_key_value(
     50 // ERROR_NOT_SUPPORTED
 }
 
-// ── wget Crypt* stubs (CAPI gap-fill) ────────────────────────────────────────
+// ── wget Crypt* / event-log stubs (CAPI + cleanup gap-fill) ─────────────────
 
 /// CryptCreateHash — create a hash object. Returns FALSE + NTE_FAIL.
 ///
@@ -2166,6 +2194,113 @@ pub unsafe extern "win64" fn crypt_enum_providers_w(
 ) -> i32 {
     weave_common::set_last_error(259_u32); // ERROR_NO_MORE_ITEMS
     0 // FALSE
+}
+
+/// CryptExportKey — export a key from a provider. Returns FALSE + NTE_FAIL.
+// Wine ref: dlls/advapi32/crypt.c — CryptExportKey calls provider CPExportKey;
+// FALSE + NTE_FAIL if provider/key invalid.
+pub unsafe extern "win64" fn crypt_export_key(
+    _h_key: usize,
+    _h_exp_key: usize,
+    _dw_blob_type: u32,
+    _dw_flags: u32,
+    _pb_data: *mut u8,
+    _pdw_data_len: *mut u32,
+) -> i32 {
+    weave_common::set_last_error(0x8009_0020_u32); // NTE_FAIL
+    0 // FALSE
+}
+
+/// CryptGetProvParam — query a provider parameter. Returns FALSE + NTE_FAIL.
+// Wine ref: dlls/advapi32/crypt.c — CryptGetProvParam calls provider CPGetProvParam;
+// FALSE + NTE_FAIL if provider invalid.
+pub unsafe extern "win64" fn crypt_get_prov_param(
+    _h_prov: usize,
+    _dw_param: u32,
+    _pb_data: *mut u8,
+    _pdw_data_len: *mut u32,
+    _dw_flags: u32,
+) -> i32 {
+    weave_common::set_last_error(0x8009_0020_u32); // NTE_FAIL
+    0 // FALSE
+}
+
+/// CryptGetUserKey — retrieve the user's key pair handle. Returns FALSE + NTE_FAIL.
+// Wine ref: dlls/advapi32/crypt.c — CryptGetUserKey calls provider CPGetUserKey;
+// FALSE + NTE_NO_KEY if no key pair exists.
+pub unsafe extern "win64" fn crypt_get_user_key(
+    _h_prov: usize,
+    _dw_key_spec: u32,
+    ph_user_key: *mut usize,
+) -> i32 {
+    if !ph_user_key.is_null() {
+        unsafe { *ph_user_key = 0 };
+    }
+    weave_common::set_last_error(0x8009_0020_u32); // NTE_FAIL
+    0 // FALSE
+}
+
+/// CryptSetHashParam — set a hash object parameter. Returns FALSE + NTE_FAIL.
+// Wine ref: dlls/advapi32/crypt.c — CryptSetHashParam calls provider CPSetHashParam;
+// FALSE + NTE_FAIL if hash invalid.
+pub unsafe extern "win64" fn crypt_set_hash_param(
+    _h_hash: usize,
+    _dw_param: u32,
+    _pb_data: *const u8,
+    _dw_flags: u32,
+) -> i32 {
+    weave_common::set_last_error(0x8009_0020_u32); // NTE_FAIL
+    0 // FALSE
+}
+
+/// CryptSignHashW — sign a hash. Returns FALSE + NTE_FAIL.
+// Wine ref: dlls/advapi32/crypt.c — CryptSignHashW calls provider CPSignHash;
+// FALSE + NTE_FAIL if hash/key invalid.
+pub unsafe extern "win64" fn crypt_sign_hash_w(
+    _h_hash: usize,
+    _dw_key_spec: u32,
+    _sz_description: *const u16,
+    _dw_flags: u32,
+    _pb_signature: *mut u8,
+    _pdw_sig_len: *mut u32,
+) -> i32 {
+    weave_common::set_last_error(0x8009_0020_u32); // NTE_FAIL
+    0 // FALSE
+}
+
+/// RegisterEventSourceW — open a handle to the event log. Returns NULL + ERROR_CALL_NOT_IMPLEMENTED.
+// Wine ref: dlls/advapi32/eventlog.c — RegisterEventSourceW opens a handle to the
+// Application event log; Weave has no event log subsystem.
+pub unsafe extern "win64" fn register_event_source_w(
+    _lp_uncserver_name: *const u16,
+    _lp_source_name: *const u16,
+) -> usize {
+    weave_common::set_last_error(120_u32); // ERROR_CALL_NOT_IMPLEMENTED
+    0 // NULL handle
+}
+
+/// DeregisterEventSource — close an event source handle. Returns TRUE (no-op).
+// Wine ref: dlls/advapi32/eventlog.c — DeregisterEventSource closes the event log
+// handle; TRUE on success.
+pub unsafe extern "win64" fn deregister_event_source(_h_event_log: usize) -> i32 {
+    1 // TRUE
+}
+
+/// ReportEventW — write an event log entry. Returns TRUE (no-op).
+// Wine ref: dlls/advapi32/eventlog.c — ReportEventW writes to the event log;
+// TRUE on success. Weave silently discards event log entries.
+pub unsafe extern "win64" fn report_event_w(
+    _h_event_log: usize,
+    _w_type: u16,
+    _w_category: u16,
+    _dw_event_id: u32,
+    _lp_user_sid: *const u8,
+    _w_num_strings: u16,
+    _dw_data_size: u32,
+    _lp_strings: *const *const u16,
+    _lp_raw_data: *const u8,
+) -> i32 {
+    1 // TRUE
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
