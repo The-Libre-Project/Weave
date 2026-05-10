@@ -1054,10 +1054,95 @@ pub unsafe extern "win64" fn win_if_nametoindex(if_name: *const u8) -> u32 {
     unsafe { libc::if_nametoindex(if_name as *const libc::c_char) }
 }
 
+/// GetAdaptersAddresses — enumerate network adapter addresses.
+/// Returns ERROR_NO_DATA (232) with *SizePointer = 0 — no adapters reported.
+///
+/// # Safety
+/// `size_pointer`, if non-null, receives the required buffer size (0).
+// Wine ref: dlls/iphlpapi/iphlpapi_main.c — GetAdaptersAddresses walks adapter
+// list from getifaddrs(3); returns ERROR_NO_DATA when no adapters present.
+pub unsafe extern "win64" fn get_adapters_addresses(
+    _family: u32,
+    _flags: u32,
+    _reserved: *const u8,
+    _adapter_addresses: *mut u8,
+    size_pointer: *mut u32,
+) -> u32 {
+    if !size_pointer.is_null() {
+        unsafe { *size_pointer = 0 };
+    }
+    232 // ERROR_NO_DATA — no adapters; wget falls back to getaddrinfo path
+}
+
+/// GetBestRoute2 — find the best route to a destination. Returns ERROR_NOT_FOUND.
+// Wine ref: dlls/iphlpapi/iphlpapi_main.c — GetBestRoute2 queries kernel routing
+// table; ERROR_NOT_FOUND if no route exists.
+pub unsafe extern "win64" fn get_best_route2(
+    _interface_luid: *const u8,
+    _interface_index: u32,
+    _source_address: *const u8,
+    _destination_address: *const u8,
+    _address_sort_options: u32,
+    _best_route: *mut u8,
+    _best_source_address: *mut u8,
+) -> u32 {
+    1168 // ERROR_NOT_FOUND
+}
+
+/// GetUnicastIpAddressTable — get the unicast IP address table.
+/// Returns ERROR_NO_DATA (232) — no entries.
+///
+/// # Safety
+/// `table`, if non-null, receives NULL (no table allocated).
+// Wine ref: dlls/iphlpapi/iphlpapi_main.c — GetUnicastIpAddressTable allocates
+// a MIB_UNICASTIPADDRESS_TABLE; ERROR_NO_DATA when address list is empty.
+pub unsafe extern "win64" fn get_unicast_ip_address_table(
+    _family: u32,
+    table: *mut *mut u8,
+) -> u32 {
+    if !table.is_null() {
+        unsafe { *table = std::ptr::null_mut() };
+    }
+    232 // ERROR_NO_DATA
+}
+
+/// FreeMibTable — free a MIB table allocated by GetUnicastIpAddressTable etc.
+/// No-op: Weave never allocates MIB tables.
+// Wine ref: dlls/iphlpapi/iphlpapi_main.c — FreeMibTable calls HeapFree on the
+// table pointer; Weave returns immediately (nothing was allocated).
+pub unsafe extern "win64" fn free_mib_table(_memory: *mut u8) {}
+
+/// if_indextoname — convert an interface index to its name. Returns NULL (not found).
+///
+/// # Safety
+/// `if_name`, if non-null, must be a buffer of at least IF_NAMESIZE bytes.
+// Wine ref: dlls/iphlpapi/iphlpapi_main.c — if_indextoname delegates to POSIX;
+// returns NULL if index has no corresponding interface name.
+pub unsafe extern "win64" fn win_if_indextoname(
+    _if_index: u32,
+    _if_name: *mut u8,
+) -> *const u8 {
+    std::ptr::null()
+}
+
 pub fn resolve_iphlpapi(func: &str) -> Option<usize> {
     Some(match func {
         "if_nametoindex" => {
             win_if_nametoindex as unsafe extern "win64" fn(_) -> _ as *const () as usize
+        }
+        "GetAdaptersAddresses" => get_adapters_addresses
+            as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const ()
+            as usize,
+        "GetBestRoute2" => get_best_route2
+            as unsafe extern "win64" fn(_, _, _, _, _, _, _) -> _ as *const ()
+            as usize,
+        "GetUnicastIpAddressTable" => {
+            get_unicast_ip_address_table as unsafe extern "win64" fn(_, _) -> _ as *const ()
+                as usize
+        }
+        "FreeMibTable" => free_mib_table as unsafe extern "win64" fn(_) as *const () as usize,
+        "if_indextoname" => {
+            win_if_indextoname as unsafe extern "win64" fn(_, _) -> _ as *const () as usize
         }
         _ => return None,
     })
