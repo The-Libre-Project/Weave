@@ -478,6 +478,20 @@ pub unsafe extern "win64" fn ws_send(s: usize, buf: *const u8, len: i32, flags: 
 /// `buf` must point to at least `len` writable bytes.
 pub unsafe extern "win64" fn ws_recv(s: usize, buf: *mut u8, len: i32, flags: i32) -> i32 {
     eprintln!("weave/ws_recv: ENTRY s={s} len={len}");
+    // Use raw syscall to bypass glibc's cancellation-point wrapper — glibc's recv()
+    // accesses pthread TLS at offset +8 via THREAD_SELF, which crashes when the PE
+    // thread's stack is in a state glibc doesn't expect (fault=0x8, null+8 dereref).
+    #[cfg(target_os = "linux")]
+    let ret = libc::syscall(
+        libc::SYS_recvfrom,
+        s as libc::c_int,
+        buf as *mut libc::c_void,
+        len as libc::size_t,
+        flags as libc::c_int,
+        std::ptr::null_mut::<libc::sockaddr>(),
+        std::ptr::null_mut::<libc::socklen_t>(),
+    ) as libc::ssize_t;
+    #[cfg(not(target_os = "linux"))]
     let ret = libc::recv(s as i32, buf as *mut libc::c_void, len as usize, flags);
     if weave_core::ws2_trace::enabled() {
         let errno = if ret < 0 {
