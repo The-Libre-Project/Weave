@@ -1118,10 +1118,7 @@ pub unsafe extern "win64" fn free_mib_table(_memory: *mut u8) {}
 /// `if_name`, if non-null, must be a buffer of at least IF_NAMESIZE bytes.
 // Wine ref: dlls/iphlpapi/iphlpapi_main.c — if_indextoname delegates to POSIX;
 // returns NULL if index has no corresponding interface name.
-pub unsafe extern "win64" fn win_if_indextoname(
-    _if_index: u32,
-    _if_name: *mut u8,
-) -> *const u8 {
+pub unsafe extern "win64" fn win_if_indextoname(_if_index: u32, _if_name: *mut u8) -> *const u8 {
     std::ptr::null()
 }
 
@@ -1130,12 +1127,14 @@ pub fn resolve_iphlpapi(func: &str) -> Option<usize> {
         "if_nametoindex" => {
             win_if_nametoindex as unsafe extern "win64" fn(_) -> _ as *const () as usize
         }
-        "GetAdaptersAddresses" => get_adapters_addresses
-            as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const ()
-            as usize,
-        "GetBestRoute2" => get_best_route2
-            as unsafe extern "win64" fn(_, _, _, _, _, _, _) -> _ as *const ()
-            as usize,
+        "GetAdaptersAddresses" => {
+            get_adapters_addresses as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const ()
+                as usize
+        }
+        "GetBestRoute2" => {
+            get_best_route2 as unsafe extern "win64" fn(_, _, _, _, _, _, _) -> _ as *const ()
+                as usize
+        }
         "GetUnicastIpAddressTable" => {
             get_unicast_ip_address_table as unsafe extern "win64" fn(_, _) -> _ as *const ()
                 as usize

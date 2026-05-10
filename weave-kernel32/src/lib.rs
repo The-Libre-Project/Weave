@@ -2812,6 +2812,7 @@ pub unsafe extern "win64" fn write_file(
 /// are detached (not joined) on close, consistent with Win32 semantics where
 /// CloseHandle on a thread does not wait for it to terminate.
 pub extern "win64" fn close_handle(h_object: usize) -> i32 {
+    eprintln!("weave/CloseHandle: entry h={h_object:#x}");
     // Thread handles are not file descriptors; handle them before delegating
     // to file_io::close_handle which would fail on non-fd handles.
     if handles::free_if_thread(h_object) {
@@ -12411,6 +12412,282 @@ pub unsafe extern "win64" fn peek_named_pipe(
     1 // TRUE — no data available, not an error
 }
 
+// ── wget gap stubs — KERNEL32 null-IAT cleanup ────────────────────────────────
+
+/// InitializeSRWLock: set the SRW lock to the unlocked state (all-zeros).
+///
+/// # Safety
+/// `srw_lock` must be a valid pointer to an SRWLOCK-sized slot.
+// Wine ref: dlls/ntdll/sync.c — RtlInitializeSRWLock zeros the lock word.
+pub unsafe extern "win64" fn initialize_srw_lock(srw_lock: *mut usize) {
+    if !srw_lock.is_null() {
+        unsafe { *srw_lock = 0 };
+    }
+}
+
+/// ConvertFiberToThread: convert current fiber back to a thread. No-op on Linux.
+// Wine ref: dlls/kernel32/fiber.c — ConvertFiberToThread: frees current fiber
+// state; Weave has no fiber scheduler so this is a no-op that returns TRUE.
+pub extern "win64" fn convert_fiber_to_thread() -> i32 {
+    1 // TRUE
+}
+
+/// ConvertThreadToFiberEx: convert current thread to a fiber. Returns NULL
+/// so MSVC CRT skips fiber-based TLS cleanup (checks for non-NULL before use).
+///
+/// # Safety
+/// No pointer dereference — `_lp_parameter` is unused.
+// Wine ref: dlls/kernel32/fiber.c — allocates a fiber context; NULL on failure.
+pub unsafe extern "win64" fn convert_thread_to_fiber_ex(
+    _lp_parameter: *const u8,
+    _dw_flags: u32,
+) -> *const u8 {
+    set_last_error(120); // ERROR_CALL_NOT_IMPLEMENTED
+    std::ptr::null()
+}
+
+/// CreateFiberEx: create a new fiber. Returns NULL (not supported).
+///
+/// # Safety
+/// `_lp_parameter` and `_lp_start_address` are unused; no pointer dereference.
+// Wine ref: dlls/kernel32/fiber.c — CreateFiberEx: allocates stack and context;
+// returns NULL on allocation failure. Callers guard on non-NULL before SwitchToFiber.
+pub unsafe extern "win64" fn create_fiber_ex(
+    _dw_stack_commit_size: usize,
+    _dw_stack_reserve_size: usize,
+    _dw_flags: u32,
+    _lp_start_address: usize,
+    _lp_parameter: *const u8,
+) -> *const u8 {
+    set_last_error(120); // ERROR_CALL_NOT_IMPLEMENTED
+    std::ptr::null()
+}
+
+/// DeleteFiber: free a fiber object. No-op (we never create real fibers).
+///
+/// # Safety
+/// `_lp_fiber` is unused; no pointer dereference.
+// Wine ref: dlls/kernel32/fiber.c — DeleteFiber: frees the fiber's stack and context.
+pub unsafe extern "win64" fn delete_fiber(_lp_fiber: *const u8) {}
+
+/// SwitchToFiber: switch execution to a fiber. No-op (no fiber scheduler).
+///
+/// # Safety
+/// `_lp_fiber` is unused; no pointer dereference.
+// Wine ref: dlls/kernel32/fiber.c — SwitchToFiber: context-switches to the target
+// fiber. With no real fiber infrastructure, returning immediately is the safe default.
+pub unsafe extern "win64" fn switch_to_fiber(_lp_fiber: *const u8) {}
+
+/// FindFirstVolumeW: begin volume enumeration. No volumes to enumerate.
+///
+/// # Safety
+/// `_lpsz_volume_name` is unused; no pointer dereference.
+// Wine ref: dlls/kernel32/volume.c — FindFirstVolumeW: opens volume list handle;
+// returns INVALID_HANDLE_VALUE on error.
+pub unsafe extern "win64" fn find_first_volume_w(
+    _lpsz_volume_name: *mut u16,
+    _cch_buffer_length: u32,
+) -> usize {
+    set_last_error(18); // ERROR_NO_MORE_FILES
+    usize::MAX // INVALID_HANDLE_VALUE
+}
+
+/// FindNextVolumeW: advance volume enumeration. Always fails (no volumes).
+///
+/// # Safety
+/// `_lpsz_volume_name` is unused; no pointer dereference.
+// Wine ref: dlls/kernel32/volume.c — FindNextVolumeW: returns FALSE at end.
+pub unsafe extern "win64" fn find_next_volume_w(
+    _h_find_volume: usize,
+    _lpsz_volume_name: *mut u16,
+    _cch_buffer_length: u32,
+) -> i32 {
+    set_last_error(18); // ERROR_NO_MORE_FILES
+    0 // FALSE
+}
+
+/// FindVolumeClose: close a volume-enumeration handle.
+// Wine ref: dlls/kernel32/volume.c — FindVolumeClose: closes the handle; TRUE on success.
+pub extern "win64" fn find_volume_close(_h_find_volume: usize) -> i32 {
+    1 // TRUE
+}
+
+/// GetFinalPathNameByHandleA (ANSI): return final path for an open file handle.
+/// Returns 0 (failure) — wget uses this for informational purposes only.
+///
+/// # Safety
+/// `_lpsz_file_path` is unused; no pointer dereference.
+// Wine ref: dlls/kernelbase/file.c — GetFinalPathNameByHandleW; A variant wraps it.
+pub unsafe extern "win64" fn get_final_path_name_by_handle_a(
+    _h_file: usize,
+    _lpsz_file_path: *mut u8,
+    _cch_file_path: u32,
+    _dw_flags: u32,
+) -> u32 {
+    set_last_error(1); // ERROR_INVALID_FUNCTION
+    0
+}
+
+/// GetNamedPipeInfo: query named pipe parameters. Returns FALSE (not supported).
+///
+/// # Safety
+/// Output pointer arguments are written only after null check.
+// Wine ref: dlls/kernel32/named_pipe.c — GetNamedPipeInfo: ioctl on pipe handle.
+pub unsafe extern "win64" fn get_named_pipe_info(
+    _h_named_pipe: usize,
+    lp_flags: *mut u32,
+    lp_out_buffer_size: *mut u32,
+    lp_in_buffer_size: *mut u32,
+    lp_max_instances: *mut u32,
+) -> i32 {
+    if !lp_flags.is_null() {
+        unsafe { *lp_flags = 0 };
+    }
+    if !lp_out_buffer_size.is_null() {
+        unsafe { *lp_out_buffer_size = 0 };
+    }
+    if !lp_in_buffer_size.is_null() {
+        unsafe { *lp_in_buffer_size = 0 };
+    }
+    if !lp_max_instances.is_null() {
+        unsafe { *lp_max_instances = 0 };
+    }
+    set_last_error(6); // ERROR_INVALID_HANDLE
+    0 // FALSE
+}
+
+/// GetPriorityClass: return process priority class.
+/// Returns NORMAL_PRIORITY_CLASS (32).
+// Wine ref: dlls/kernel32/process.c — GetPriorityClass: queries NtQueryInformationProcess.
+pub extern "win64" fn get_priority_class(_h_process: usize) -> u32 {
+    32 // NORMAL_PRIORITY_CLASS
+}
+
+/// GetSystemTimeAdjustment: query clock adjustment. Returns TRUE with zeros.
+///
+/// # Safety
+/// Output pointer arguments are written only after null check.
+// Wine ref: dlls/kernel32/time.c — GetSystemTimeAdjustment: NtQuerySystemInformation.
+pub unsafe extern "win64" fn get_system_time_adjustment(
+    lp_time_adjustment: *mut u32,
+    lp_time_increment: *mut u32,
+    lp_time_adjustment_disabled: *mut i32,
+) -> i32 {
+    if !lp_time_adjustment.is_null() {
+        unsafe { *lp_time_adjustment = 0 };
+    }
+    if !lp_time_increment.is_null() {
+        unsafe { *lp_time_increment = 0 };
+    }
+    if !lp_time_adjustment_disabled.is_null() {
+        unsafe { *lp_time_adjustment_disabled = 1 };
+    }
+    1 // TRUE
+}
+
+/// LockFileEx: lock a region of a file. No-op on Linux (advisory locks ignored).
+///
+/// # Safety
+/// `_lp_overlapped` is unused; no pointer dereference.
+// Wine ref: dlls/kernel32/file.c — LockFileEx: NtLockFile; no-op acceptable for wget.
+pub unsafe extern "win64" fn lock_file_ex(
+    _h_file: usize,
+    _dw_flags: u32,
+    _dw_reserved: u32,
+    _n_number_of_bytes_to_lock_low: u32,
+    _n_number_of_bytes_to_lock_high: u32,
+    _lp_overlapped: *const u8,
+) -> i32 {
+    1 // TRUE
+}
+
+/// UnlockFile: unlock a region of a file. No-op.
+// Wine ref: dlls/kernel32/file.c — UnlockFile: NtUnlockFile.
+pub extern "win64" fn unlock_file(
+    _h_file: usize,
+    _dw_file_offset_low: u32,
+    _dw_file_offset_high: u32,
+    _n_number_of_bytes_to_unlock_low: u32,
+    _n_number_of_bytes_to_unlock_high: u32,
+) -> i32 {
+    1 // TRUE
+}
+
+/// OpenFileMappingA (ANSI): open a named file-mapping object. Returns NULL.
+///
+/// # Safety
+/// `_lp_name` is unused; no pointer dereference.
+// Wine ref: dlls/kernel32/sync.c — OpenFileMappingA: wraps OpenFileMappingW.
+pub unsafe extern "win64" fn open_file_mapping_a(
+    _dw_desired_access: u32,
+    _b_inherit_handle: i32,
+    _lp_name: *const u8,
+) -> usize {
+    set_last_error(2); // ERROR_FILE_NOT_FOUND
+    0 // NULL
+}
+
+/// CreateHardLinkA (ANSI): create a hard link. Returns FALSE (not supported).
+///
+/// # Safety
+/// `_lp_file_name` and `_lp_existing_file_name` are unused; no pointer dereference.
+// Wine ref: dlls/kernel32/file.c — CreateHardLinkA: wraps CreateHardLinkW.
+pub unsafe extern "win64" fn create_hard_link_a(
+    _lp_file_name: *const u8,
+    _lp_existing_file_name: *const u8,
+    _lp_security_attributes: usize,
+) -> i32 {
+    set_last_error(1); // ERROR_INVALID_FUNCTION
+    0 // FALSE
+}
+
+/// PeekConsoleInputA: check for console input events. Returns FALSE.
+///
+/// # Safety
+/// `lp_number_of_events_read` is written only after null check.
+// Wine ref: dlls/kernel32/console.c — PeekConsoleInputA: wraps PeekConsoleInputW.
+pub unsafe extern "win64" fn peek_console_input_a(
+    _h_console_input: usize,
+    _lp_buffer: *mut u8,
+    _n_length: u32,
+    lp_number_of_events_read: *mut u32,
+) -> i32 {
+    if !lp_number_of_events_read.is_null() {
+        unsafe { *lp_number_of_events_read = 0 };
+    }
+    set_last_error(6); // ERROR_INVALID_HANDLE
+    0 // FALSE
+}
+
+/// ReadConsoleA (ANSI): read characters from console. Returns FALSE.
+///
+/// # Safety
+/// `lp_number_of_chars_read` is written only after null check.
+// Wine ref: dlls/kernel32/console.c — ReadConsoleA: wraps ReadConsoleW.
+pub unsafe extern "win64" fn read_console_a(
+    _h_console_input: usize,
+    _lp_buffer: *mut u8,
+    _n_number_of_chars_to_read: u32,
+    lp_number_of_chars_read: *mut u32,
+    _p_input_control: usize,
+) -> i32 {
+    if !lp_number_of_chars_read.is_null() {
+        unsafe { *lp_number_of_chars_read = 0 };
+    }
+    set_last_error(6); // ERROR_INVALID_HANDLE
+    0 // FALSE
+}
+
+/// SetSystemTime: set the system time. No-op (returns TRUE).
+///
+/// # Safety
+/// `_lp_system_time` is unused; no pointer dereference.
+// Wine ref: dlls/kernel32/time.c — SetSystemTime: requires SeSystemtimePrivilege.
+// Stub always succeeds silently — wget likely calls this only in error paths.
+pub unsafe extern "win64" fn set_system_time(_lp_system_time: *const u8) -> i32 {
+    1 // TRUE
+}
+
 // ── Resolver ──────────────────────────────────────────────────────────────────
 
 /// Resolve a kernel32.dll import to a stub address.
@@ -12712,6 +12989,9 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
                 as usize,
         ),
         // SRW locks
+        "InitializeSRWLock" => {
+            Some(initialize_srw_lock as unsafe extern "win64" fn(_) as *const () as usize)
+        }
         "AcquireSRWLockExclusive" => {
             Some(acquire_srw_lock_exclusive as unsafe extern "win64" fn(_) as *const () as usize)
         }
@@ -12723,6 +13003,65 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         }
         "ReleaseSRWLockShared" => {
             Some(release_srw_lock_shared as unsafe extern "win64" fn(_) as *const () as usize)
+        }
+        // ── wget gap stubs — fiber / volume / misc ──────────────────────────
+        "ConvertFiberToThread" => {
+            Some(convert_fiber_to_thread as extern "win64" fn() -> _ as *const () as usize)
+        }
+        "ConvertThreadToFiberEx" => Some(
+            convert_thread_to_fiber_ex as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
+        ),
+        "CreateFiberEx" => Some(
+            create_fiber_ex as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const () as usize,
+        ),
+        "DeleteFiber" => Some(delete_fiber as unsafe extern "win64" fn(_) as *const () as usize),
+        "SwitchToFiber" => {
+            Some(switch_to_fiber as unsafe extern "win64" fn(_) as *const () as usize)
+        }
+        "FindFirstVolumeW" => {
+            Some(find_first_volume_w as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "FindNextVolumeW" => {
+            Some(find_next_volume_w as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize)
+        }
+        "FindVolumeClose" => {
+            Some(find_volume_close as extern "win64" fn(_) -> _ as *const () as usize)
+        }
+        "GetFinalPathNameByHandleA" => Some(
+            get_final_path_name_by_handle_a as unsafe extern "win64" fn(_, _, _, _) -> _
+                as *const () as usize,
+        ),
+        "GetNamedPipeInfo" => Some(
+            get_named_pipe_info as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "GetPriorityClass" => {
+            Some(get_priority_class as extern "win64" fn(_) -> _ as *const () as usize)
+        }
+        "GetSystemTimeAdjustment" => Some(
+            get_system_time_adjustment as unsafe extern "win64" fn(_, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "LockFileEx" => Some(
+            lock_file_ex as unsafe extern "win64" fn(_, _, _, _, _, _) -> _ as *const () as usize,
+        ),
+        "UnlockFile" => {
+            Some(unlock_file as extern "win64" fn(_, _, _, _, _) -> _ as *const () as usize)
+        }
+        "OpenFileMappingA" => Some(
+            open_file_mapping_a as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
+        ),
+        "CreateHardLinkA" => {
+            Some(create_hard_link_a as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize)
+        }
+        "PeekConsoleInputA" => Some(
+            peek_console_input_a as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
+        ),
+        "ReadConsoleA" => Some(
+            read_console_a as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const () as usize,
+        ),
+        "SetSystemTime" => {
+            Some(set_system_time as unsafe extern "win64" fn(_) -> _ as *const () as usize)
         }
         // Condition variables
         "InitializeConditionVariable" => {

@@ -1749,9 +1749,9 @@ pub fn resolve(func: &str) -> Option<usize> {
             crypt_get_prov_param as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const ()
                 as usize,
         ),
-        "CryptGetUserKey" => Some(
-            crypt_get_user_key as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
-        ),
+        "CryptGetUserKey" => {
+            Some(crypt_get_user_key as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize)
+        }
         "CryptSetHashParam" => Some(
             crypt_set_hash_param as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
         ),

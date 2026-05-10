@@ -381,6 +381,7 @@ pub unsafe extern "win64" fn ws_wsa_socket_a(
 /// # Safety
 /// `s` must be a valid socket handle.
 pub unsafe extern "win64" fn ws_closesocket(s: usize) -> i32 {
+    eprintln!("weave/ws_closesocket: entry s={s}");
     // Clear all per-fd state before close so a recycled fd cannot inherit
     // stale listening/connecting/write-armed tracking from its previous owner.
     // Wine ref: dlls/ws2_32/socket.c — sock_reselect_notify on socket close
