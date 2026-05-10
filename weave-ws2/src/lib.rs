@@ -450,6 +450,7 @@ pub unsafe extern "win64" fn ws_connect(s: usize, name: *const u8, namelen: i32)
 /// # Safety
 /// `buf` must point to at least `len` readable bytes.
 pub unsafe extern "win64" fn ws_send(s: usize, buf: *const u8, len: i32, flags: i32) -> i32 {
+    eprintln!("weave/ws_send: ENTRY s={s} len={len}");
     if weave_core::ws2_trace::enabled() {
         eprintln!("weave/ws_send: s={s} len={len} flags={flags:#x}");
     }
@@ -476,6 +477,7 @@ pub unsafe extern "win64" fn ws_send(s: usize, buf: *const u8, len: i32, flags: 
 /// # Safety
 /// `buf` must point to at least `len` writable bytes.
 pub unsafe extern "win64" fn ws_recv(s: usize, buf: *mut u8, len: i32, flags: i32) -> i32 {
+    eprintln!("weave/ws_recv: ENTRY s={s} len={len}");
     let ret = libc::recv(s as i32, buf as *mut libc::c_void, len as usize, flags);
     if weave_core::ws2_trace::enabled() {
         let errno = if ret < 0 {
@@ -642,6 +644,10 @@ pub unsafe extern "win64" fn ws_select(
     exceptfds: *mut u8,
     timeout: *const u8,
 ) -> i32 {
+    eprintln!(
+        "weave/ws_select: ENTRY r={:p} w={:p} e={:p} t={:p}",
+        readfds, writefds, exceptfds, timeout
+    );
     if weave_core::ws2_trace::enabled() {
         eprintln!(
             "weave/ws_select: r={:p} w={:p} e={:p} t={:p}",
