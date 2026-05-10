@@ -1557,7 +1557,10 @@ pub unsafe extern "win64" fn create_waitable_timer_w(
     {
         let fd = unsafe { libc::timerfd_create(libc::CLOCK_REALTIME, libc::TFD_CLOEXEC) };
         if fd < 0 {
-            eprintln!("weave/CreateWaitableTimerW: timerfd_create failed errno={}", unsafe { *libc::__errno_location() });
+            eprintln!(
+                "weave/CreateWaitableTimerW: timerfd_create failed errno={}",
+                unsafe { *libc::__errno_location() }
+            );
             return 0;
         }
         let handle = TIMER_NEXT_HANDLE.fetch_add(1, Ordering::Relaxed);
@@ -1606,7 +1609,11 @@ pub unsafe extern "win64" fn set_waitable_timer(
     #[cfg(target_os = "linux")]
     {
         // Look up fd from timer table.
-        let fd = match timer_table().lock().ok().and_then(|t| t.get(&h_timer).copied()) {
+        let fd = match timer_table()
+            .lock()
+            .ok()
+            .and_then(|t| t.get(&h_timer).copied())
+        {
             Some(fd) => fd,
             None => {
                 eprintln!("weave/SetWaitableTimer: unknown handle {h_timer:#x}");
@@ -1624,8 +1631,14 @@ pub unsafe extern "win64" fn set_waitable_timer(
 
         // Build itimerspec from the due-time value.
         let mut new_value = libc::itimerspec {
-            it_interval: libc::timespec { tv_sec: 0, tv_nsec: 0 },
-            it_value: libc::timespec { tv_sec: 0, tv_nsec: 0 },
+            it_interval: libc::timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            },
+            it_value: libc::timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            },
         };
 
         let flags: libc::c_int;
@@ -1657,7 +1670,10 @@ pub unsafe extern "win64" fn set_waitable_timer(
 
         let rc = unsafe { libc::timerfd_settime(fd, flags, &new_value, std::ptr::null_mut()) };
         if rc != 0 {
-            eprintln!("weave/SetWaitableTimer: timerfd_settime failed errno={}", unsafe { *libc::__errno_location() });
+            eprintln!(
+                "weave/SetWaitableTimer: timerfd_settime failed errno={}",
+                unsafe { *libc::__errno_location() }
+            );
             return 0;
         }
         eprintln!("weave/SetWaitableTimer: handle={h_timer:#x} fd={fd} armed");
@@ -8357,9 +8373,21 @@ pub unsafe extern "win64" fn wait_for_single_object(h_handle: usize, dw_millisec
 
     // Waitable timer handle — poll the timerfd with timeout.
     #[cfg(target_os = "linux")]
-    if let Some(fd) = TIMER_TABLE.get().and_then(|t| t.lock().ok()).and_then(|t| t.get(&h_handle).copied()) {
-        let timeout_ms: i32 = if dw_milliseconds == INFINITE { -1i32 } else { dw_milliseconds as i32 };
-        let mut pfd = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
+    if let Some(fd) = TIMER_TABLE
+        .get()
+        .and_then(|t| t.lock().ok())
+        .and_then(|t| t.get(&h_handle).copied())
+    {
+        let timeout_ms: i32 = if dw_milliseconds == INFINITE {
+            -1i32
+        } else {
+            dw_milliseconds as i32
+        };
+        let mut pfd = libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
         let ret = unsafe { libc::poll(&mut pfd, 1, timeout_ms) };
         if ret > 0 && (pfd.revents & libc::POLLIN) != 0 {
             let mut buf = [0u8; 8];
