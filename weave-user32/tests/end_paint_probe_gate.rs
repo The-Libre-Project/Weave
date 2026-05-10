@@ -9,13 +9,18 @@
 //! subsequent GDI calls to a stale paint target.
 
 use std::mem::MaybeUninit;
+use std::sync::Mutex;
 use weave_user32::api::{begin_paint, current_paint_hwnd, end_paint};
 use weave_user32::defs::PaintStruct;
 
 const FAKE_HWND: usize = 0x1234_5678;
 
+// Tests share global CURRENT_PAINT_HWND state; serialize them to prevent races.
+static PAINT_TEST_LOCK: Mutex<()> = Mutex::new(());
+
 #[test]
 fn begin_sets_current_paint_hwnd() {
+    let _guard = PAINT_TEST_LOCK.lock().unwrap();
     let mut ps: MaybeUninit<PaintStruct> = MaybeUninit::zeroed();
     unsafe {
         begin_paint(FAKE_HWND, ps.as_mut_ptr());
@@ -33,6 +38,7 @@ fn begin_sets_current_paint_hwnd() {
 
 #[test]
 fn begin_fills_hdc_with_hwnd() {
+    let _guard = PAINT_TEST_LOCK.lock().unwrap();
     let mut ps: MaybeUninit<PaintStruct> = MaybeUninit::zeroed();
     let hdc = unsafe { begin_paint(FAKE_HWND, ps.as_mut_ptr()) };
     let ps = unsafe { ps.assume_init() };
@@ -49,6 +55,7 @@ fn begin_fills_hdc_with_hwnd() {
 
 #[test]
 fn end_paint_clears_current_paint_hwnd() {
+    let _guard = PAINT_TEST_LOCK.lock().unwrap();
     let mut ps: MaybeUninit<PaintStruct> = MaybeUninit::zeroed();
     unsafe {
         begin_paint(FAKE_HWND, ps.as_mut_ptr());
