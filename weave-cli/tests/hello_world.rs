@@ -1449,10 +1449,6 @@ fn sample_display_pixels_99() -> Option<bool> {
 ///
 /// Skipped gracefully if testsprite2.exe is absent from fixtures.
 #[test]
-#[ignore = "Xvfb timing race — flaky in CI; see KNOWN-BUG-CLASSES.md. Re-enable when Xvfb startup is deterministic."]
-// Quarantined 2026-04-23: produced 3 retry commits in 2 days (43ef54e, 3cbfa40, 4b40dea).
-// Root cause: Xvfb is not fully ready when the test starts, causing a timing-sensitive failure.
-// Fix required: deterministic Xvfb startup (readiness probe) or test isolation before re-enabling.
 fn testsprite2_sdl2_gate1_smoke() {
     if !cfg!(target_os = "linux") {
         eprintln!("skipping execution test — requires Linux");
@@ -1467,6 +1463,19 @@ fn testsprite2_sdl2_gate1_smoke() {
         eprintln!("skipping: testsprite2.exe not present in tests/fixtures/bin/");
         return;
     }
+
+    // Poll /tmp/.X11-unix/X99 socket existence — Xvfb is ready when the socket appears.
+    // This eliminates the timing race where Xvfb :99 is still initialising when SDL2
+    // tries to open the display, which caused 3 consecutive flaky CI failures (2026-04-23).
+    let display_socket = "/tmp/.X11-unix/X99";
+    let xvfb_deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !std::path::Path::new(display_socket).exists() {
+        if std::time::Instant::now() >= xvfb_deadline {
+            panic!("Xvfb :99 did not become ready within 10 s (socket {display_socket} absent)");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    eprintln!("xvfb readiness probe: {display_socket} exists — Xvfb ready");
 
     let weave_bin = env!("CARGO_BIN_EXE_weave");
 
