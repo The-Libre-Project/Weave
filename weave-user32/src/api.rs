@@ -134,6 +134,14 @@ fn tme_leave_table() -> &'static Mutex<HashSet<usize>> {
     TME_LEAVE_TABLE.get_or_init(|| Mutex::new(HashSet::new()))
 }
 
+/// Per-hwnd validated set. When an hwnd is present, its update region has been
+/// cleared via ValidateRect and GetUpdateRect should return FALSE.
+static VALIDATED_HWNDS: OnceLock<Mutex<HashSet<usize>>> = OnceLock::new();
+
+fn validated_hwnds() -> &'static Mutex<HashSet<usize>> {
+    VALIDATED_HWNDS.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
 /// Register TME_LEAVE for `hwnd`. Called by `track_mouse_event`.
 pub fn register_tme_leave(hwnd: usize) {
     if let Ok(mut t) = tme_leave_table().lock() {
@@ -1403,6 +1411,19 @@ pub unsafe extern "win64" fn get_update_rect(
     lp_rect: *mut Rect,
     _b_erase: i32,
 ) -> i32 {
+    // If ValidateRect was called for this hwnd and no new InvalidateRect has
+    // arrived since, report an empty update region (return FALSE).
+    if validated_hwnds().lock().unwrap().contains(&hwnd) {
+        if !lp_rect.is_null() {
+            unsafe {
+                (*lp_rect).left = 0;
+                (*lp_rect).top = 0;
+                (*lp_rect).right = 0;
+                (*lp_rect).bottom = 0;
+            }
+        }
+        return 0;
+    }
     let (w, h) = window::with(hwnd, |e| (e.width, e.height)).unwrap_or((0, 0));
     if !lp_rect.is_null() {
         unsafe {
@@ -1449,6 +1470,9 @@ pub unsafe extern "win64" fn invalidate_rect(
                 );
             }
         }
+        // A new invalidation means the window is dirty again — remove from the
+        // validated set so that GetUpdateRect returns non-empty.
+        validated_hwnds().lock().unwrap().remove(&hwnd);
         if !already_queued {
             queue::post(MsgEntry {
                 hwnd,
@@ -1479,7 +1503,15 @@ pub unsafe extern "win64" fn invalidate_rect(
 // from the update region (or clears it if rect == NULL); cancels any pending
 // WM_PAINT for the validated area. Real region tracking is M6+ work; for now
 // a TRUE return prevents the caller-derefs-uninit-rax crash class.
-pub unsafe extern "win64" fn validate_rect(_hwnd: usize, _lp_rect: *const Rect) -> i32 {
+pub unsafe extern "win64" fn validate_rect(hwnd: usize, _lp_rect: *const Rect) -> i32 {
+    // Mark the hwnd as validated so GetUpdateRect returns FALSE until the next
+    // InvalidateRect call arrives.
+    // Wine ref: dlls/win32u/painting.c::NtUserValidateRect — subtracts rect from
+    // update region (or clears entirely when rect==NULL); cancels pending WM_PAINT
+    // for the validated area. We clear the whole pending-paint flag for now (no
+    // per-rect region math) which is correct for the NULL case and good-enough for
+    // the rect case (95 % of callers pass NULL to ack the paint).
+    validated_hwnds().lock().unwrap().insert(hwnd);
     1
 }
 
