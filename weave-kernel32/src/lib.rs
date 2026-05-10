@@ -1563,7 +1563,7 @@ pub unsafe extern "win64" fn create_waitable_timer_w(
         let handle = TIMER_NEXT_HANDLE.fetch_add(1, Ordering::Relaxed);
         timer_table().lock().unwrap().insert(handle, fd);
         eprintln!("weave/CreateWaitableTimerW: handle={handle:#x} fd={fd}");
-        return handle;
+        handle
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -1661,7 +1661,7 @@ pub unsafe extern "win64" fn set_waitable_timer(
             return 0;
         }
         eprintln!("weave/SetWaitableTimer: handle={h_timer:#x} fd={fd} armed");
-        return 1;
+        1
     }
     #[cfg(not(target_os = "linux"))]
     {
