@@ -107,6 +107,14 @@ const SEMAPHORE_HANDLE_BASE: usize = 0x8FFF_0001;
 static SEMAPHORE_NEXT: AtomicUsize = AtomicUsize::new(SEMAPHORE_HANDLE_BASE);
 static SEMAPHORE_TABLE: OnceLock<Mutex<HashMap<usize, SemEntry>>> = OnceLock::new();
 
+// ── Waitable timer table (timerfd-backed) ───────────────────────────────────
+static TIMER_TABLE: OnceLock<Mutex<HashMap<usize, i32>>> = OnceLock::new();
+static TIMER_NEXT_HANDLE: AtomicUsize = AtomicUsize::new(0xB000_0001);
+
+fn timer_table() -> &'static Mutex<HashMap<usize, i32>> {
+    TIMER_TABLE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
 fn sem_table() -> &'static Mutex<HashMap<usize, SemEntry>> {
     SEMAPHORE_TABLE.get_or_init(|| Mutex::new(HashMap::new()))
 }
@@ -1534,7 +1542,7 @@ pub unsafe extern "win64" fn init_once_complete(
 
 /// CreateWaitableTimerW: create a waitable timer (wide version).
 ///
-/// Returns a fake handle (1usize).
+/// Returns a real timerfd-backed handle on Linux, 0 on failure.
 ///
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
@@ -1545,42 +1553,137 @@ pub unsafe extern "win64" fn create_waitable_timer_w(
     _b_manual_reset: i32,
     _lp_timer_name: *const u16,
 ) -> usize {
-    1 // fake handle — timerfd not wired up
+    #[cfg(target_os = "linux")]
+    {
+        let fd = unsafe { libc::timerfd_create(libc::CLOCK_REALTIME, libc::TFD_CLOEXEC) };
+        if fd < 0 {
+            eprintln!("weave/CreateWaitableTimerW: timerfd_create failed errno={}", unsafe { *libc::__errno_location() });
+            return 0;
+        }
+        let handle = TIMER_NEXT_HANDLE.fetch_add(1, Ordering::Relaxed);
+        timer_table().lock().unwrap().insert(handle, fd);
+        eprintln!("weave/CreateWaitableTimerW: handle={handle:#x} fd={fd}");
+        return handle;
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        1 // non-Linux fallback (macOS build/test only)
+    }
 }
 
 /// CreateWaitableTimerA: create a waitable timer (ANSI version).
 ///
-/// Returns a fake handle (1usize).
+/// Delegates to create_waitable_timer_w (name ignored).
 ///
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
 // Wine ref: dlls/kernelbase/sync.c — ANSI wrapper that converts name via
 // RtlCreateUnicodeStringFromAsciiz then calls CreateWaitableTimerW.
 pub unsafe extern "win64" fn create_waitable_timer_a(
-    _lp_timer_attributes: usize,
-    _b_manual_reset: i32,
+    lp_timer_attributes: usize,
+    b_manual_reset: i32,
     _lp_timer_name: usize,
 ) -> usize {
-    1 // fake handle — timerfd not wired up
+    create_waitable_timer_w(lp_timer_attributes, b_manual_reset, std::ptr::null())
 }
 
 /// SetWaitableTimer: set a waitable timer.
 ///
-/// No-op. Returns TRUE.
+/// Arms the timerfd backing the handle. Returns TRUE on success, FALSE on error.
 ///
 /// # Safety
-/// Pointer arguments are accepted but not dereferenced.
+/// `lp_due_time` must be a valid pointer to an i64 or NULL.
 // Wine ref: dlls/kernelbase/sync.c — calls NtSetTimer; negative due_time is
 // relative (100ns units), positive is absolute. lPeriod=0 is one-shot.
 pub unsafe extern "win64" fn set_waitable_timer(
-    _h_timer: usize,
-    _lp_due_time: usize,
-    _l_period: i32,
+    h_timer: usize,
+    lp_due_time: usize,
+    l_period: i32,
     _pfn_completion_routine: usize,
     _lp_arg_to_completion_routine: usize,
     _f_resume: i32,
 ) -> i32 {
-    1 // no real timer to set; callers typically use WFSO on the handle which returns immediately
+    #[cfg(target_os = "linux")]
+    {
+        // Look up fd from timer table.
+        let fd = match timer_table().lock().ok().and_then(|t| t.get(&h_timer).copied()) {
+            Some(fd) => fd,
+            None => {
+                eprintln!("weave/SetWaitableTimer: unknown handle {h_timer:#x}");
+                return 0;
+            }
+        };
+
+        // lp_due_time must be non-null.
+        if lp_due_time == 0 {
+            eprintln!("weave/SetWaitableTimer: null due_time");
+            return 0;
+        }
+
+        let val: i64 = unsafe { *(lp_due_time as *const i64) };
+
+        // Build itimerspec from the due-time value.
+        let mut new_value = libc::itimerspec {
+            it_interval: libc::timespec { tv_sec: 0, tv_nsec: 0 },
+            it_value: libc::timespec { tv_sec: 0, tv_nsec: 0 },
+        };
+
+        let flags: libc::c_int;
+        if val < 0 {
+            // Negative: relative time in 100ns units.
+            let abs_val = val.unsigned_abs();
+            new_value.it_value.tv_sec = (abs_val / 10_000_000) as libc::time_t;
+            new_value.it_value.tv_nsec = ((abs_val % 10_000_000) * 100) as libc::c_long;
+            flags = 0;
+        } else if val > 0 {
+            // Positive: absolute FILETIME (100ns units since 1601-01-01).
+            // Subtract Windows epoch offset to get Unix epoch 100ns units.
+            const EPOCH_DIFF: i64 = 116_444_736_000_000_000i64;
+            let unix_100ns = val.saturating_sub(EPOCH_DIFF).max(0) as u64;
+            new_value.it_value.tv_sec = (unix_100ns / 10_000_000) as libc::time_t;
+            new_value.it_value.tv_nsec = ((unix_100ns % 10_000_000) * 100) as libc::c_long;
+            flags = libc::TFD_TIMER_ABSTIME;
+        } else {
+            // Zero: fire immediately (tv_nsec=1 avoids disarm semantics).
+            new_value.it_value.tv_nsec = 1;
+            flags = 0;
+        }
+
+        // Set interval from l_period (milliseconds).
+        if l_period > 0 {
+            new_value.it_interval.tv_sec = (l_period as i64) / 1000;
+            new_value.it_interval.tv_nsec = ((l_period as i64) % 1000) * 1_000_000;
+        }
+
+        let rc = unsafe { libc::timerfd_settime(fd, flags, &new_value, std::ptr::null_mut()) };
+        if rc != 0 {
+            eprintln!("weave/SetWaitableTimer: timerfd_settime failed errno={}", unsafe { *libc::__errno_location() });
+            return 0;
+        }
+        eprintln!("weave/SetWaitableTimer: handle={h_timer:#x} fd={fd} armed");
+        return 1;
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        1 // non-Linux fallback
+    }
+}
+
+/// CreateWaitableTimerExW: extended waitable timer creation (wide version).
+///
+/// dwFlags bit 1 = CREATE_WAITABLE_TIMER_MANUAL_RESET. Delegates to create_waitable_timer_w.
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn create_waitable_timer_ex_w(
+    lp_timer_attributes: usize,
+    _lp_timer_name: *const u16,
+    dw_flags: u32,
+    _dw_desired_access: u32,
+) -> usize {
+    // bit 0 = CREATE_WAITABLE_TIMER_MANUAL_RESET (0x1)
+    let b_manual_reset = if (dw_flags & 0x1) != 0 { 1i32 } else { 0i32 };
+    create_waitable_timer_w(lp_timer_attributes, b_manual_reset, std::ptr::null())
 }
 
 /// CancelWaitableTimer: cancel a waitable timer.
@@ -8252,6 +8355,22 @@ pub unsafe extern "win64" fn wait_for_single_object(h_handle: usize, dw_millisec
         }
     }
 
+    // Waitable timer handle — poll the timerfd with timeout.
+    #[cfg(target_os = "linux")]
+    if let Some(fd) = TIMER_TABLE.get().and_then(|t| t.lock().ok()).and_then(|t| t.get(&h_handle).copied()) {
+        let timeout_ms: i32 = if dw_milliseconds == INFINITE { -1i32 } else { dw_milliseconds as i32 };
+        let mut pfd = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
+        let ret = unsafe { libc::poll(&mut pfd, 1, timeout_ms) };
+        if ret > 0 && (pfd.revents & libc::POLLIN) != 0 {
+            let mut buf = [0u8; 8];
+            unsafe { libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, 8) };
+            eprintln!("weave/WFSO: handle={h_handle:#x} → WAIT_OBJECT_0 (timerfd)");
+            return WAIT_OBJECT_0;
+        }
+        eprintln!("weave/WFSO: handle={h_handle:#x} → WAIT_TIMEOUT (timerfd poll)");
+        return WAIT_TIMEOUT;
+    }
+
     // Legacy stub handles (1 = mutex, 2 = event) — return success immediately.
     if h_handle == 1 || h_handle == 2 {
         eprintln!("weave/WFSO: handle={h_handle:#x} → WAIT_OBJECT_0 (legacy stub)");
@@ -12934,6 +13053,10 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         ),
         "CreateWaitableTimerA" => Some(
             create_waitable_timer_a as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
+        ),
+        "CreateWaitableTimerExW" => Some(
+            create_waitable_timer_ex_w as unsafe extern "win64" fn(_, _, _, _) -> _ as *const ()
+                as usize,
         ),
         "SetWaitableTimer" => Some(
             set_waitable_timer as unsafe extern "win64" fn(_, _, _, _, _, _) -> _ as *const ()
