@@ -450,7 +450,6 @@ pub unsafe extern "win64" fn ws_connect(s: usize, name: *const u8, namelen: i32)
 /// # Safety
 /// `buf` must point to at least `len` readable bytes.
 pub unsafe extern "win64" fn ws_send(s: usize, buf: *const u8, len: i32, flags: i32) -> i32 {
-    eprintln!("weave/ws_send: ENTRY s={s} len={len}");
     if weave_core::ws2_trace::enabled() {
         eprintln!("weave/ws_send: s={s} len={len} flags={flags:#x}");
     }
@@ -477,46 +476,15 @@ pub unsafe extern "win64" fn ws_send(s: usize, buf: *const u8, len: i32, flags: 
 /// # Safety
 /// `buf` must point to at least `len` writable bytes.
 pub unsafe extern "win64" fn ws_recv(s: usize, buf: *mut u8, len: i32, flags: i32) -> i32 {
-    eprintln!("weave/ws_recv: ENTRY s={s} len={len}");
-
-    #[cfg(target_os = "linux")]
-    {
-        // Zero-glibc path: direct kernel syscall via inline asm.
-        // libc::recv() and libc::syscall() both route through glibc's
-        // __errno_location() on error (reads [%fs+offset]). wget's CRT corrupts
-        // %fs during startup; subsequent glibc TLS reads fault at null+8.
-        // Linux recvfrom(2) returns -errno on error — no TLS needed.
-        let raw: i64;
-        core::arch::asm!(
-            "syscall",
-            in("rax") libc::SYS_recvfrom as i64,
-            in("rdi") s,
-            in("rsi") buf as usize,
-            in("rdx") len as usize,
-            in("r10") flags as usize,
-            in("r8")  0usize,
-            in("r9")  0usize,
-            lateout("rax") raw,
-            out("rcx") _,
-            out("r11") _,
-            options(nostack),
-        );
-        if raw < 0 {
-            set_last_error(errno_to_wsa((-raw) as i32));
-            return SOCKET_ERROR;
-        }
-        return raw as i32;
+    if weave_core::ws2_trace::enabled() {
+        eprintln!("weave/ws_recv: s={s} len={len} flags={flags:#x}");
     }
-
-    #[cfg(not(target_os = "linux"))]
-    {
-        let ret = libc::recv(s as i32, buf as *mut libc::c_void, len as usize, flags);
-        if ret < 0 {
-            save_errno();
-            return SOCKET_ERROR;
-        }
-        ret as i32
+    let ret = libc::recv(s as i32, buf as *mut libc::c_void, len as usize, flags);
+    if ret < 0 {
+        save_errno();
+        return SOCKET_ERROR;
     }
+    ret as i32
 }
 
 /// bind — bind a socket to a local address.
@@ -668,10 +636,6 @@ pub unsafe extern "win64" fn ws_select(
     exceptfds: *mut u8,
     timeout: *const u8,
 ) -> i32 {
-    eprintln!(
-        "weave/ws_select: ENTRY r={:p} w={:p} e={:p} t={:p}",
-        readfds, writefds, exceptfds, timeout
-    );
     if weave_core::ws2_trace::enabled() {
         eprintln!(
             "weave/ws_select: r={:p} w={:p} e={:p} t={:p}",

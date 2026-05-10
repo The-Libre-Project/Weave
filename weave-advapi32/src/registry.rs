@@ -1724,6 +1724,23 @@ pub fn resolve(func: &str) -> Option<usize> {
             reg_notify_change_key_value as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const ()
                 as usize,
         ),
+        // ── wget Crypt* gap stubs ──────────────────────────────────────────────
+        "CryptCreateHash" => Some(
+            crypt_create_hash as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const () as usize,
+        ),
+        "CryptDecrypt" => Some(
+            crypt_decrypt as unsafe extern "win64" fn(_, _, _, _, _, _) -> _ as *const () as usize,
+        ),
+        "CryptDestroyHash" => {
+            Some(crypt_destroy_hash as unsafe extern "win64" fn(_) -> _ as *const () as usize)
+        }
+        "CryptDestroyKey" => {
+            Some(crypt_destroy_key as unsafe extern "win64" fn(_) -> _ as *const () as usize)
+        }
+        "CryptEnumProvidersW" => Some(
+            crypt_enum_providers_w as unsafe extern "win64" fn(_, _, _, _, _, _) -> _ as *const ()
+                as usize,
+        ),
         _ => None,
     }
 }
@@ -2079,6 +2096,76 @@ pub unsafe extern "win64" fn reg_notify_change_key_value(
     _async: i32,
 ) -> i32 {
     50 // ERROR_NOT_SUPPORTED
+}
+
+// ── wget Crypt* stubs (CAPI gap-fill) ────────────────────────────────────────
+
+/// CryptCreateHash — create a hash object. Returns FALSE + NTE_FAIL.
+///
+/// # Safety
+/// `ph_hash`, if non-null, receives 0 (no hash created).
+// Wine ref: dlls/advapi32/crypt.c — CryptCreateHash calls provider CPCreateHash;
+// FALSE + NTE_FAIL if provider invalid or ALG_ID unsupported.
+pub unsafe extern "win64" fn crypt_create_hash(
+    _h_prov: usize,
+    _alg_id: u32,
+    _h_key: usize,
+    _dw_flags: u32,
+    ph_hash: *mut usize,
+) -> i32 {
+    if !ph_hash.is_null() {
+        unsafe { *ph_hash = 0 };
+    }
+    weave_common::set_last_error(0x8009_0020_u32); // NTE_FAIL
+    0 // FALSE
+}
+
+/// CryptDecrypt — decrypt data with a key. Returns FALSE + NTE_FAIL.
+// Wine ref: dlls/advapi32/crypt.c — CryptDecrypt calls provider CPDecrypt;
+// FALSE + NTE_FAIL if key invalid.
+pub unsafe extern "win64" fn crypt_decrypt(
+    _h_key: usize,
+    _h_hash: usize,
+    _final_: i32,
+    _dw_flags: u32,
+    _pb_data: *mut u8,
+    _pdw_data_len: *mut u32,
+) -> i32 {
+    weave_common::set_last_error(0x8009_0020_u32); // NTE_FAIL
+    0 // FALSE
+}
+
+/// CryptDestroyHash — release a hash object. Returns TRUE (no-op; no state to free).
+// Wine ref: dlls/advapi32/crypt.c — CryptDestroyHash calls provider CPDestroyHash
+// then frees internal hash object; TRUE on success.
+pub unsafe extern "win64" fn crypt_destroy_hash(_h_hash: usize) -> i32 {
+    1 // TRUE
+}
+
+/// CryptDestroyKey — release a key object. Returns TRUE (no-op; no state to free).
+// Wine ref: dlls/advapi32/crypt.c — CryptDestroyKey calls provider CPDestroyKey
+// then frees internal key object; TRUE on success.
+pub unsafe extern "win64" fn crypt_destroy_key(_h_key: usize) -> i32 {
+    1 // TRUE
+}
+
+/// CryptEnumProvidersW — enumerate installed CSPs. Returns FALSE + ERROR_NO_MORE_ITEMS.
+///
+/// # Safety
+/// Pointer arguments are ignored.
+// Wine ref: dlls/advapi32/crypt.c — CryptEnumProvidersW reads
+// HKLM\SOFTWARE\Microsoft\Cryptography\Defaults\Provider registry; FALSE +
+// ERROR_NO_MORE_ITEMS when dwIndex exceeds provider count. Weave has no CAPI providers.
+pub unsafe extern "win64" fn crypt_enum_providers_w(
+    _dw_index: u32,
+    _pdw_reserved: *mut u32,
+    _dw_flags: u32,
+    _pdw_prov_type: *mut u32,
+    _sz_prov_name: *mut u16,
+    _pcb_prov_name: *mut u32,
+) -> i32 {
+    weave_common::set_last_error(259_u32); // ERROR_NO_MORE_ITEMS
+    0 // FALSE
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
