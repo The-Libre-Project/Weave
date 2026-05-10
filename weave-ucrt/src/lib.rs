@@ -909,18 +909,34 @@ pub fn iob_data_addr() -> usize {
 /// Assumes 64-byte stride between _iob entries. Falls back to fd 1 (stdout)
 /// for any unrecognised pointer — sufficient for archive listing output.
 fn stream_to_fd(stream: *const c_void) -> i32 {
+    iob_stream_fd(stream).unwrap_or(1)
+}
+
+/// Return true when `stream` points anywhere inside the fake CRT `_iob` array.
+///
+/// Some MinGW CRT paths pass an interior pointer into a standard stream slot
+/// rather than the slot's base address.  Treat the whole fake allocation as CRT
+/// stdio-owned so those Windows CRT pointers never reach glibc stdio.
+fn is_iob_stream(stream: *const c_void) -> bool {
     let base = iob_data_addr();
     let s = stream as usize;
-    if s == base {
-        return 0; // stdin
+    matches!(s.checked_sub(base), Some(delta) if delta < 64 * 3)
+}
+
+/// Return the fd for known pointers into the fake CRT `_iob` array.
+///
+/// Weave's canonical slots are 64 bytes apart (`base`, `base+64`,
+/// `base+128`).  Some legacy msvcrt users index `_iob` with a 48-byte FILE
+/// size, producing `base+48` for stdout and `base+96` for stderr.  wget's
+/// MinGW cleanup path can pass `base+112`, an interior stdout pointer.
+fn iob_stream_fd(stream: *const c_void) -> Option<i32> {
+    let base = iob_data_addr();
+    match (stream as usize).checked_sub(base)? {
+        0 => Some(0),
+        48 | 64 | 112 => Some(1),
+        96 | 128 => Some(2),
+        _ => None,
     }
-    if s == base + 64 {
-        return 1; // stdout
-    }
-    if s == base + 128 {
-        return 2; // stderr
-    }
-    1 // default: stdout
 }
 
 // ── stdio ─────────────────────────────────────────────────────────────────────
@@ -2352,6 +2368,9 @@ pub unsafe extern "win64" fn ucrt_fclose(stream: *mut c_void) -> i32 {
     if stream.is_null() {
         return -1;
     }
+    if is_iob_stream(stream) {
+        return 0;
+    }
     unsafe { libc::fclose(stream as *mut libc::FILE) }
 }
 
@@ -2363,6 +2382,9 @@ pub unsafe extern "win64" fn ucrt_feof(stream: *mut c_void) -> i32 {
     if stream.is_null() {
         return 1;
     }
+    if is_iob_stream(stream) {
+        return 0;
+    }
     unsafe { libc::feof(stream as *mut libc::FILE) }
 }
 
@@ -2373,6 +2395,9 @@ pub unsafe extern "win64" fn ucrt_feof(stream: *mut c_void) -> i32 {
 pub unsafe extern "win64" fn ucrt_ferror(stream: *mut c_void) -> i32 {
     if stream.is_null() {
         return 1;
+    }
+    if is_iob_stream(stream) {
+        return 0;
     }
     unsafe { libc::ferror(stream as *mut libc::FILE) }
 }
@@ -4082,6 +4107,12 @@ pub unsafe extern "win64" fn ucrt_fileno(stream: *mut c_void) -> i32 {
     if stream.is_null() {
         return -1;
     }
+    if let Some(fd) = iob_stream_fd(stream) {
+        return fd;
+    }
+    if is_iob_stream(stream) {
+        return 1;
+    }
     libc::fileno(stream as *mut libc::FILE)
 }
 
@@ -4987,6 +5018,37 @@ mod tests {
         assert!(resolve("ucrtbase.dll", "__acrt_iob_func").is_some());
         // __iob_func is the legacy msvcrt alias; same implementation.
         assert!(resolve("msvcrt.dll", "__iob_func").is_some());
+    }
+
+    #[test]
+    fn standard_iob_streams_are_not_passed_to_libc_stdio() {
+        // The fake CRT _iob entries are Windows FILE structs, not glibc FILE
+        // objects.  wget's cleanup path calls fclose on one of these entries;
+        // delegating to libc::fclose makes glibc read _IO_FILE lock fields from
+        // our 64-byte fake struct and SIGSEGV inside _IO_fclose.
+        for fd in [0u32, 1, 2] {
+            let stream = ucrt_acrt_iob_func(fd);
+            assert_eq!(iob_stream_fd(stream), Some(fd as i32));
+            assert!(is_iob_stream((stream as usize + 48) as *const c_void));
+            unsafe {
+                assert_eq!(ucrt_fileno(stream), fd as i32);
+                assert_eq!(ucrt_feof(stream), 0);
+                assert_eq!(ucrt_ferror(stream), 0);
+                assert_eq!(ucrt_fclose(stream), 0);
+            }
+        }
+        assert_eq!(
+            iob_stream_fd((iob_data_addr() + 48) as *const c_void),
+            Some(1)
+        );
+        assert_eq!(
+            iob_stream_fd((iob_data_addr() + 96) as *const c_void),
+            Some(2)
+        );
+        assert_eq!(
+            iob_stream_fd((iob_data_addr() + 112) as *const c_void),
+            Some(1)
+        );
     }
 
     // ── Task 01b 3c-I: __stdio_common_v*scanf family ─────────────────────────

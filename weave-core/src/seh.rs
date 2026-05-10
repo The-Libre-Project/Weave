@@ -463,10 +463,9 @@ fn print_weave_crash(
     let stack_prev = read_u64_at(rsp.saturating_sub(8)); // [RSP-8] — ret addr if ret crashed
 
     // Build message using only stack buffers (no heap) for signal safety.
-    // Sized to fit the full register block + the "RIP maps = ..." line which
-    // identifies the library RIP belongs to — without that line, diagnosing
-    // a "CRASH in Weave stub" requires manual mmap arithmetic.
-    let mut msg = [0u8; 1536];
+    // Keep enough room for the full register block and the "RIP maps" line;
+    // the latter is the fastest way to distinguish libc faults from Weave code.
+    let mut msg = [0u8; 4096];
     let mut pos = 0usize;
 
     macro_rules! push {
@@ -605,15 +604,19 @@ fn print_weave_crash(
                 }
             }
             unsafe { libc::close(fd) };
+            push!(b"\nweave:   RIP maps  = ");
             if found {
-                push!(b"\nweave:   RIP maps  = ");
                 for &b in &found_line[..found_line.iter().position(|&x| x == 0).unwrap_or(256)] {
                     if pos < msg.len() - 1 {
                         msg[pos] = b;
                         pos += 1;
                     }
                 }
+            } else {
+                push!(b"<not found>");
             }
+        } else {
+            push!(b"\nweave:   RIP maps  = <open /proc/self/maps failed>");
         }
     }
 
