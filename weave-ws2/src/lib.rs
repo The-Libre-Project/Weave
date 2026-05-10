@@ -1529,6 +1529,7 @@ pub unsafe extern "win64" fn wsa_event_select(s: usize, event: usize, mask: i32)
     if flags >= 0 {
         libc::fcntl(s as i32, libc::F_SETFL, flags | libc::O_NONBLOCK);
     }
+    eprintln!("weave/WSAEventSelect: fcntl done");
     // Store or remove the socket→(event, mask) association.
     //
     // Disarm case (mask == 0 OR event == 0): Windows callers use
@@ -1540,6 +1541,7 @@ pub unsafe extern "win64" fn wsa_event_select(s: usize, event: usize, mask: i32)
     // deregister_socket_event would remove key 0 which was never inserted, leaving
     // the actual reverse-map entry (old_event → socket_fd) permanently stale.
     let mut g = socket_event_map();
+    eprintln!("weave/WSAEventSelect: map locked");
     let prev_event = if let Some(ref mut map) = *g {
         if mask == 0 || event == 0 {
             // Disarm: remove the entry, capture the previous event handle.
@@ -1553,7 +1555,9 @@ pub unsafe extern "win64" fn wsa_event_select(s: usize, event: usize, mask: i32)
     } else {
         None
     };
+    eprintln!("weave/WSAEventSelect: map op done prev={:?}", prev_event);
     drop(g);
+    eprintln!("weave/WSAEventSelect: map dropped");
 
     // Update the weave-common reverse map (event_handle → socket_fd).
     if mask != 0 && event != 0 {
@@ -1577,6 +1581,7 @@ pub unsafe extern "win64" fn wsa_event_select(s: usize, event: usize, mask: i32)
         // a phantom FD_WRITE after being dissociated from its event object.
         weave_common::socket_event::disarm_socket_write(s as i32);
     }
+    eprintln!("weave/WSAEventSelect: common cleanup done");
 
     // Arm FD_WRITE edge-trigger if the caller requested FD_WRITE (0x2) events.
     // Wine ref: dlls/ws2_32/socket.c — WSAEventSelect arms the socket's write-pending
@@ -1585,6 +1590,7 @@ pub unsafe extern "win64" fn wsa_event_select(s: usize, event: usize, mask: i32)
     if (mask & 0x2) != 0 {
         weave_common::socket_event::arm_socket_write(s as i32);
     }
+    eprintln!("weave/WSAEventSelect: returning 0");
     0 // success
 }
 
