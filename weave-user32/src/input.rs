@@ -510,6 +510,56 @@ static CHAR_TO_VK: [Option<(u8, u8)>; 128] = {
     t
 };
 
+/// VK + shift state → UTF-16 character for ToUnicodeEx.
+///
+/// Returns the Unicode code point (as u16) for the given virtual key and shift
+/// state on a US QWERTY layout. Returns `None` for keys with no printable
+/// character mapping (function keys, modifiers, etc.).
+///
+/// Wine ref: dlls/win32u/input.c — ToUnicodeEx calls the keyboard driver's
+///   ToUnicodeEx entry; for US QWERTY layout, letters yield lowercase/uppercase
+///   based on shift (and CapsLock, which is out of scope here), digits yield
+///   digit or symbol based on shift.
+pub fn vk_to_char_shifted(vk: u8, shift: bool) -> Option<u16> {
+    let ch: u8 = match (vk, shift) {
+        // Letters A-Z: unshifted = lowercase, shifted = uppercase
+        (0x41..=0x5A, false) => vk + 0x20, // 'A'(0x41)+0x20 = 'a'(0x61)
+        (0x41..=0x5A, true)  => vk,         // already uppercase
+
+        // Digits: unshifted = digit, shifted = symbol
+        (0x30, false) => b'0', (0x30, true) => b')',
+        (0x31, false) => b'1', (0x31, true) => b'!',
+        (0x32, false) => b'2', (0x32, true) => b'@',
+        (0x33, false) => b'3', (0x33, true) => b'#',
+        (0x34, false) => b'4', (0x34, true) => b'$',
+        (0x35, false) => b'5', (0x35, true) => b'%',
+        (0x36, false) => b'6', (0x36, true) => b'^',
+        (0x37, false) => b'7', (0x37, true) => b'&',
+        (0x38, false) => b'8', (0x38, true) => b'*',
+        (0x39, false) => b'9', (0x39, true) => b'(',
+
+        // Space and Return (shift does not change them)
+        (0x20, _) => b' ',
+        (0x0D, _) => b'\r',
+
+        // OEM keys: unshifted / shifted
+        (0xBA, false) => b';',  (0xBA, true) => b':',
+        (0xBB, false) => b'=',  (0xBB, true) => b'+',
+        (0xBC, false) => b',',  (0xBC, true) => b'<',
+        (0xBD, false) => b'-',  (0xBD, true) => b'_',
+        (0xBE, false) => b'.',  (0xBE, true) => b'>',
+        (0xBF, false) => b'/',  (0xBF, true) => b'?',
+        (0xC0, false) => b'`',  (0xC0, true) => b'~',
+        (0xDB, false) => b'[',  (0xDB, true) => b'{',
+        (0xDC, false) => b'\\', (0xDC, true) => b'|',
+        (0xDD, false) => b']',  (0xDD, true) => b'}',
+        (0xDE, false) => b'\'', (0xDE, true) => b'"',
+
+        _ => return None,
+    };
+    Some(ch as u16)
+}
+
 /// Char → (VK, modifier_flags) for VkKeyScanW.
 ///
 /// `ch` must be an ASCII character (0x00..=0x7F). Returns None for non-ASCII or

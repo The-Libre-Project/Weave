@@ -3627,19 +3627,43 @@ pub unsafe extern "win64" fn get_keyboard_state(lp_key_state: *mut u8) -> i32 {
 }
 
 /// # Safety
-/// Pointer arguments are accepted but not dereferenced.
+/// `lp_key_state` must be a valid pointer to a 256-byte key state array when
+/// non-zero. `pwsz_buff` must point to a buffer of at least `cch_buff` UTF-16
+/// code units when non-zero and `cch_buff > 0`.
 // Wine ref: dlls/win32u/input.c — ToUnicodeEx translates VK+scan+keystate to Unicode via
 // keyboard driver; returns char count (1+), 0 (no translation), or -1 (dead key).
+// Shift state: keystate[VK_SHIFT=0x10] bit 0x80 set → uppercase/shifted character.
+// dwhkl (keyboard layout handle) is ignored — US QWERTY is the only supported layout.
 pub unsafe extern "win64" fn to_unicode_ex(
-    _w_virt_key: u32,
+    w_virt_key: u32,
     _w_scan_code: u32,
-    _lp_key_state: usize,
-    _pwsz_buff: usize,
-    _cch_buff: i32,
+    lp_key_state: usize,
+    pwsz_buff: usize,
+    cch_buff: i32,
     _w_flags: u32,
     _dwhkl: usize,
 ) -> i32 {
-    0
+    // Guard: null output buffer or zero capacity → no translation.
+    if pwsz_buff == 0 || cch_buff <= 0 {
+        return 0;
+    }
+
+    // Extract shift state from keystate[VK_SHIFT = 0x10].
+    // If lp_key_state is null we treat shift as not held.
+    let shift = if lp_key_state != 0 {
+        let byte = unsafe { *(lp_key_state as *const u8).add(0x10) };
+        byte & 0x80 != 0
+    } else {
+        false
+    };
+
+    match crate::input::vk_to_char_shifted(w_virt_key as u8, shift) {
+        Some(ch) => {
+            unsafe { *(pwsz_buff as *mut u16) = ch };
+            1
+        }
+        None => 0,
+    }
 }
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
