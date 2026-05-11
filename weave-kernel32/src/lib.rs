@@ -2613,13 +2613,13 @@ pub unsafe extern "win64" fn create_file_w(
         eprintln!("DIAG: file_opens_n={fot} path={win_path:?}");
     }
 
-    // Log write-opens always; log .bmp read-opens for diagnostics.
+    // Log every open (write OR read) for diagnostic coverage. Previously only
+    // write-opens and .bmp read-opens were logged; broadened so 7za-style read
+    // probes are visible in CI when chasing stale-LastError bugs.
     const GENERIC_WRITE: u32 = 0x40000000;
-    let path_lower = win_path.to_ascii_lowercase();
-    let is_bmp = path_lower.ends_with(".bmp");
     if dw_desired_access & GENERIC_WRITE != 0 {
-        eprintln!("weave/CreateFileW: write-open path={win_path:?} access={dw_desired_access:#x}");
-    } else if is_bmp {
+        eprintln!("weave/CreateFileW: write-open path={win_path:?} access={dw_desired_access:#x} disp={dw_creation_disposition:#x}");
+    } else {
         eprintln!("weave/CreateFileW: read-open path={win_path:?} access={dw_desired_access:#x} disp={dw_creation_disposition:#x}");
     }
 
@@ -2635,6 +2635,9 @@ pub unsafe extern "win64" fn create_file_w(
     match file_io::open_file(&win_path, dw_desired_access, nt_disposition) {
         Ok(handle) => {
             set_last_error(0);
+            eprintln!(
+                "weave/CreateFileW: exit path={win_path:?} → handle={handle:#x} last_error=0"
+            );
             handle
         }
         Err(status) => {
@@ -2645,6 +2648,9 @@ pub unsafe extern "win64" fn create_file_w(
                 _ => file_io::ERROR_FILE_NOT_FOUND,
             };
             set_last_error(win_err);
+            eprintln!(
+                "weave/CreateFileW: exit path={win_path:?} → INVALID_HANDLE_VALUE status={status:#x} last_error={win_err}"
+            );
             usize::MAX // INVALID_HANDLE_VALUE
         }
     }
@@ -2966,6 +2972,9 @@ pub unsafe extern "win64" fn get_file_size(h_file: usize, lp_file_size_high: *mu
         Some(fd) => fd,
         None => {
             set_last_error(file_io::ERROR_INVALID_HANDLE);
+            eprintln!(
+                "weave/GetFileSize: exit handle={h_file:#x} fd=? → INVALID_FILE_SIZE (bad_handle)"
+            );
             return 0xFFFF_FFFF;
         }
     };
@@ -2974,15 +2983,23 @@ pub unsafe extern "win64" fn get_file_size(h_file: usize, lp_file_size_high: *mu
     let ret = unsafe { libc::fstat(fd, &mut stat) };
     if ret != 0 {
         set_last_error(file_io::ERROR_INVALID_HANDLE);
+        eprintln!(
+            "weave/GetFileSize: exit handle={h_file:#x} fd={fd} → INVALID_FILE_SIZE (fstat_err)"
+        );
         return 0xFFFF_FFFF;
     }
 
     let size = stat.st_size as u64;
+    let high = (size >> 32) as u32;
+    let low = (size & 0xFFFF_FFFF) as u32;
     if !lp_file_size_high.is_null() {
-        unsafe { *lp_file_size_high = (size >> 32) as u32 };
+        unsafe { *lp_file_size_high = high };
     }
     set_last_error(0);
-    (size & 0xFFFF_FFFF) as u32
+    eprintln!(
+        "weave/GetFileSize: exit handle={h_file:#x} fd={fd} low={low:#x} high={high:#x} → OK"
+    );
+    low
 }
 
 // ── File information functions ───────────────────────────────────────────────
@@ -4176,6 +4193,18 @@ pub unsafe extern "win64" fn multi_byte_to_wide_char(
         || (lp_wide_char_str.is_null() && cch_wide_char != 0)
         || cch_wide_char < 0
     {
+        let reason = if lp_multi_byte_str.is_null() {
+            "null_src"
+        } else if cb_multi_byte == 0 {
+            "cb_multi_byte_zero"
+        } else if lp_wide_char_str.is_null() && cch_wide_char != 0 {
+            "null_dst_with_nonzero_cch"
+        } else {
+            "negative_cch"
+        };
+        eprintln!(
+            "weave/MultiByteToWideChar: ERROR_INVALID_PARAMETER reason={reason} cb={cb_multi_byte} cch={cch_wide_char}"
+        );
         set_last_error(87); // ERROR_INVALID_PARAMETER
         return 0;
     }
@@ -4189,6 +4218,9 @@ pub unsafe extern "win64" fn multi_byte_to_wide_char(
             len += 1;
         }
         if len == MAX_UTF8_LEN {
+            eprintln!(
+                "weave/MultiByteToWideChar: ERROR_INVALID_PARAMETER reason=overlong_source cb={cb_multi_byte} cch={cch_wide_char}"
+            );
             set_last_error(87); // ERROR_INVALID_PARAMETER
             return 0;
         }
@@ -9440,6 +9472,8 @@ pub unsafe extern "win64" fn get_file_attributes_w(lp_file_name: *const u16) -> 
     const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
 
     if lp_file_name.is_null() {
+        set_last_error(file_io::ERROR_FILE_NOT_FOUND);
+        eprintln!("weave/GetFileAttributesW: entry null_name → INVALID");
         return INVALID_FILE_ATTRIBUTES;
     }
 
@@ -9449,36 +9483,54 @@ pub unsafe extern "win64" fn get_file_attributes_w(lp_file_name: *const u16) -> 
         len += 1;
     }
     if len == MAX_UTF16_LEN {
+        set_last_error(file_io::ERROR_FILE_NOT_FOUND);
+        eprintln!("weave/GetFileAttributesW: entry overlong_name → INVALID");
         return INVALID_FILE_ATTRIBUTES;
     }
     let win_path =
         unsafe { String::from_utf16_lossy(std::slice::from_raw_parts(lp_file_name, len)) };
 
+    eprintln!("weave/GetFileAttributesW: entry path={win_path:?}");
+
     // Translate to Linux path (with fallback for Linux absolute paths passed
     // as CLI arguments to a Windows app running under Weave).
+    // Wine ref: dlls/kernelbase/file.c:1755 — SetLastError(RtlNtStatusToDosError(status))
+    // on NtQueryAttributesFile failure; ENOENT maps to ERROR_FILE_NOT_FOUND.
     let linux_path = match weave_core::file_io::translate_win_path(&win_path) {
         Ok(p) => p,
-        Err(_) => return INVALID_FILE_ATTRIBUTES,
+        Err(_) => {
+            set_last_error(file_io::ERROR_FILE_NOT_FOUND);
+            eprintln!("weave/GetFileAttributesW: exit path={win_path:?} translate_err → INVALID");
+            return INVALID_FILE_ATTRIBUTES;
+        }
     };
 
     // Check if path exists and get type
     let c_path = match std::ffi::CString::new(linux_path.as_os_str().as_encoded_bytes()) {
         Ok(s) => s,
-        Err(_) => return INVALID_FILE_ATTRIBUTES,
+        Err(_) => {
+            set_last_error(file_io::ERROR_FILE_NOT_FOUND);
+            eprintln!("weave/GetFileAttributesW: exit path={win_path:?} cstring_err → INVALID");
+            return INVALID_FILE_ATTRIBUTES;
+        }
     };
 
     let mut stat = unsafe { std::mem::zeroed::<libc::stat>() };
     let ret = unsafe { libc::stat(c_path.as_ptr(), &mut stat) };
     if ret != 0 {
+        set_last_error(file_io::ERROR_FILE_NOT_FOUND);
+        eprintln!("weave/GetFileAttributesW: exit path={win_path:?} stat_err → INVALID");
         return INVALID_FILE_ATTRIBUTES;
     }
 
     // Check if it's a directory
-    if (stat.st_mode & libc::S_IFMT) == libc::S_IFDIR {
+    let attrs = if (stat.st_mode & libc::S_IFMT) == libc::S_IFDIR {
         FILE_ATTRIBUTE_DIRECTORY
     } else {
         FILE_ATTRIBUTE_NORMAL
-    }
+    };
+    eprintln!("weave/GetFileAttributesW: exit path={win_path:?} attrs={attrs:#x}");
+    attrs
 }
 
 /// GetFileAttributesA — check if file/directory exists and return attributes.
@@ -9494,6 +9546,8 @@ pub unsafe extern "win64" fn get_file_attributes_a(lp_file_name: *const u8) -> u
     const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
 
     if lp_file_name.is_null() {
+        set_last_error(file_io::ERROR_FILE_NOT_FOUND);
+        eprintln!("weave/GetFileAttributesA: entry null_name → INVALID");
         return INVALID_FILE_ATTRIBUTES;
     }
 
@@ -9503,36 +9557,55 @@ pub unsafe extern "win64" fn get_file_attributes_a(lp_file_name: *const u8) -> u
         len += 1;
     }
     if len == MAX_UTF8_LEN {
+        set_last_error(file_io::ERROR_FILE_NOT_FOUND);
+        eprintln!("weave/GetFileAttributesA: entry overlong_name → INVALID");
         return INVALID_FILE_ATTRIBUTES;
     }
     let win_path =
         unsafe { String::from_utf8_lossy(std::slice::from_raw_parts(lp_file_name, len)) };
 
+    eprintln!("weave/GetFileAttributesA: entry path={win_path:?}");
+
     // Translate to Linux path (with fallback for Linux absolute paths passed
     // as CLI arguments to a Windows app running under Weave).
+    // Wine ref: dlls/kernelbase/file.c:1743 — file_name_AtoW then delegates to
+    // GetFileAttributesW; the W variant SetLastError(RtlNtStatusToDosError(status))
+    // on NtQueryAttributesFile failure (ENOENT → ERROR_FILE_NOT_FOUND).
     let linux_path = match weave_core::file_io::translate_win_path(&win_path) {
         Ok(p) => p,
-        Err(_) => return INVALID_FILE_ATTRIBUTES,
+        Err(_) => {
+            set_last_error(file_io::ERROR_FILE_NOT_FOUND);
+            eprintln!("weave/GetFileAttributesA: exit path={win_path:?} translate_err → INVALID");
+            return INVALID_FILE_ATTRIBUTES;
+        }
     };
 
     // Check if path exists and get type
     let c_path = match std::ffi::CString::new(linux_path.as_os_str().as_encoded_bytes()) {
         Ok(s) => s,
-        Err(_) => return INVALID_FILE_ATTRIBUTES,
+        Err(_) => {
+            set_last_error(file_io::ERROR_FILE_NOT_FOUND);
+            eprintln!("weave/GetFileAttributesA: exit path={win_path:?} cstring_err → INVALID");
+            return INVALID_FILE_ATTRIBUTES;
+        }
     };
 
     let mut stat = unsafe { std::mem::zeroed::<libc::stat>() };
     let ret = unsafe { libc::stat(c_path.as_ptr(), &mut stat) };
     if ret != 0 {
+        set_last_error(file_io::ERROR_FILE_NOT_FOUND);
+        eprintln!("weave/GetFileAttributesA: exit path={win_path:?} stat_err → INVALID");
         return INVALID_FILE_ATTRIBUTES;
     }
 
     // Check if it's a directory
-    if (stat.st_mode & libc::S_IFMT) == libc::S_IFDIR {
+    let attrs = if (stat.st_mode & libc::S_IFMT) == libc::S_IFDIR {
         FILE_ATTRIBUTE_DIRECTORY
     } else {
         FILE_ATTRIBUTE_NORMAL
-    }
+    };
+    eprintln!("weave/GetFileAttributesA: exit path={win_path:?} attrs={attrs:#x}");
+    attrs
 }
 
 /// GetFullPathNameW: resolve relative paths to absolute paths.
@@ -11606,6 +11679,7 @@ pub unsafe extern "win64" fn get_file_time(
         Some(fd) => fd,
         None => {
             set_last_error(file_io::ERROR_INVALID_HANDLE);
+            eprintln!("weave/GetFileTime: exit handle={h_file:#x} fd=? → FALSE (bad_handle)");
             return 0; // FALSE
         }
     };
@@ -11613,6 +11687,7 @@ pub unsafe extern "win64" fn get_file_time(
     let mut stat = unsafe { std::mem::zeroed::<libc::stat>() };
     if unsafe { libc::fstat(fd, &mut stat) } != 0 {
         set_last_error(file_io::ERROR_INVALID_HANDLE);
+        eprintln!("weave/GetFileTime: exit handle={h_file:#x} fd={fd} → FALSE (fstat_err)");
         return 0; // FALSE
     }
 
@@ -11624,17 +11699,23 @@ pub unsafe extern "win64" fn get_file_time(
     };
 
     // Linux st_ctime is change-time, not birth/creation time; used as best-effort proxy.
+    let ft_creation = to_filetime(stat.st_ctime, stat.st_ctime_nsec);
+    let ft_access = to_filetime(stat.st_atime, stat.st_atime_nsec);
+    let ft_write = to_filetime(stat.st_mtime, stat.st_mtime_nsec);
     if !lp_creation_time.is_null() {
-        unsafe { *lp_creation_time = to_filetime(stat.st_ctime, stat.st_ctime_nsec) };
+        unsafe { *lp_creation_time = ft_creation };
     }
     if !lp_last_access_time.is_null() {
-        unsafe { *lp_last_access_time = to_filetime(stat.st_atime, stat.st_atime_nsec) };
+        unsafe { *lp_last_access_time = ft_access };
     }
     if !lp_last_write_time.is_null() {
-        unsafe { *lp_last_write_time = to_filetime(stat.st_mtime, stat.st_mtime_nsec) };
+        unsafe { *lp_last_write_time = ft_write };
     }
 
     set_last_error(0);
+    eprintln!(
+        "weave/GetFileTime: exit handle={h_file:#x} fd={fd} creation={ft_creation:#x} access={ft_access:#x} write={ft_write:#x} → TRUE"
+    );
     1 // TRUE
 }
 
