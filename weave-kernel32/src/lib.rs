@@ -3016,7 +3016,19 @@ pub unsafe extern "win64" fn get_file_information_by_handle(
 
     let ino = stat.st_ino;
     let size = stat.st_size;
-    eprintln!("weave/GetFileInformationByHandle: h={h_file:#x} fd={fd} ino={ino:#x} size={size}");
+
+    let to_filetime = |secs: i64, nsecs: i64| -> u64 {
+        let secs_since_1601 = secs.saturating_add(11_644_473_600) as u64;
+        secs_since_1601 * 10_000_000 + (nsecs as u64) / 100
+    };
+    let ft_creation = to_filetime(stat.st_ctime, stat.st_ctime_nsec);
+    let ft_access = to_filetime(stat.st_atime, stat.st_atime_nsec);
+    let ft_write = to_filetime(stat.st_mtime, stat.st_mtime_nsec);
+
+    eprintln!(
+        "weave/GetFileInformationByHandle: h={h_file:#x} fd={fd} ino={ino:#x} size={size} \
+         ft_cre={ft_creation:#x} ft_acc={ft_access:#x} ft_wri={ft_write:#x}"
+    );
 
     unsafe {
         (*lp_file_information).dw_file_attributes =
@@ -3025,12 +3037,12 @@ pub unsafe extern "win64" fn get_file_information_by_handle(
             } else {
                 0x80 // FILE_ATTRIBUTE_NORMAL
             };
-        (*lp_file_information).ft_creation_time_low = 0;
-        (*lp_file_information).ft_creation_time_high = 0;
-        (*lp_file_information).ft_last_access_time_low = 0;
-        (*lp_file_information).ft_last_access_time_high = 0;
-        (*lp_file_information).ft_last_write_time_low = 0;
-        (*lp_file_information).ft_last_write_time_high = 0;
+        (*lp_file_information).ft_creation_time_low = ft_creation as u32;
+        (*lp_file_information).ft_creation_time_high = (ft_creation >> 32) as u32;
+        (*lp_file_information).ft_last_access_time_low = ft_access as u32;
+        (*lp_file_information).ft_last_access_time_high = (ft_access >> 32) as u32;
+        (*lp_file_information).ft_last_write_time_low = ft_write as u32;
+        (*lp_file_information).ft_last_write_time_high = (ft_write >> 32) as u32;
         (*lp_file_information).dw_volume_serial_number = 0xDEADBEEF;
         (*lp_file_information).n_file_size_high = (stat.st_size >> 32) as u32;
         (*lp_file_information).n_file_size_low = (stat.st_size & 0xFFFFFFFF) as u32;
