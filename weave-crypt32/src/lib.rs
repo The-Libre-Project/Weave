@@ -50,6 +50,9 @@ pub unsafe extern "win64" fn CertGetIntendedKeyUsage(
 }
 
 /// CertOpenSystemStoreA — open the system certificate store by name (ANSI).
-pub unsafe extern "win64" fn CertOpenSystemStoreA(_hprov: usize, _szSubsystemProtocol: usize) -> usize {
+pub unsafe extern "win64" fn CertOpenSystemStoreA(
+    _hprov: usize,
+    _szSubsystemProtocol: usize,
+) -> usize {
     0 // NULL — store unavailable
 }

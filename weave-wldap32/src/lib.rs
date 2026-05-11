@@ -10,7 +10,12 @@
 pub unsafe extern "win64" fn ber_free(_pBerElement: usize, _fbuf: i32) {}
 
 /// ldap_bind_s — synchronous bind to an LDAP directory.
-pub unsafe extern "win64" fn ldap_bind_s(_ld: usize, _dn: usize, _cred: usize, _method: u32) -> u32 {
+pub unsafe extern "win64" fn ldap_bind_s(
+    _ld: usize,
+    _dn: usize,
+    _cred: usize,
+    _method: u32,
+) -> u32 {
     0x51 // LDAP_NOT_SUPPORTED
 }
 
@@ -20,7 +25,11 @@ pub unsafe extern "win64" fn ldap_err2string(_err: u32) -> usize {
 }
 
 /// ldap_first_attribute — get first attribute of an LDAP entry.
-pub unsafe extern "win64" fn ldap_first_attribute(_ld: usize, _entry: usize, _ppBer: usize) -> usize {
+pub unsafe extern "win64" fn ldap_first_attribute(
+    _ld: usize,
+    _entry: usize,
+    _ppBer: usize,
+) -> usize {
     0
 }
 
@@ -53,7 +62,11 @@ pub unsafe extern "win64" fn ldap_msgfree(_res: usize) -> i32 {
 }
 
 /// ldap_next_attribute — get next attribute of an LDAP entry.
-pub unsafe extern "win64" fn ldap_next_attribute(_ld: usize, _entry: usize, _BerElement: usize) -> usize {
+pub unsafe extern "win64" fn ldap_next_attribute(
+    _ld: usize,
+    _entry: usize,
+    _BerElement: usize,
+) -> usize {
     0
 }
 
@@ -86,7 +99,11 @@ pub unsafe extern "win64" fn ldap_simple_bind_s(_ld: usize, _dn: usize, _passwd:
 }
 
 /// ldap_sslinit — initialize SSL-enabled LDAP handle.
-pub unsafe extern "win64" fn ldap_sslinit(_HostName: usize, _PortNumber: u32, _secure: i32) -> usize {
+pub unsafe extern "win64" fn ldap_sslinit(
+    _HostName: usize,
+    _PortNumber: u32,
+    _secure: i32,
+) -> usize {
     0
 }
 
