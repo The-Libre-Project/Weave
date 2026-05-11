@@ -2821,6 +2821,9 @@ pub unsafe extern "win64" fn write_file(
             }
         }
         set_last_error(0);
+        eprintln!(
+            "weave/WriteFile: exit handle={h_file:#x} fd={fd} requested={n_bytes_to_write} written={n} → TRUE"
+        );
         1 // TRUE
     }
 }
