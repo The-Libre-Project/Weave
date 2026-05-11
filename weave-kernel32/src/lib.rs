@@ -6506,35 +6506,55 @@ pub unsafe extern "win64" fn find_close_change_notification(_h_change_handle: us
 
 /// FindFirstStreamW — enumerate alternate data streams of a file.
 ///
-/// Returns INVALID_HANDLE_VALUE — NTFS streams not supported.
+/// Linux filesystems do not have NTFS alternate data streams, so the correct
+/// behavior for every path is "no streams." Returns INVALID_HANDLE_VALUE with
+/// LastError=ERROR_HANDLE_EOF (38), matching Wine's stub in dlls/kernelbase/file.c.
+///
+/// Callers like 7za interpret ERROR_HANDLE_EOF as "no streams to enumerate,
+/// proceed normally" — whereas ERROR_INVALID_PARAMETER (the previous return)
+/// is wrapped as HRESULT 0x80070057 and thrown as a fatal exception.
 ///
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
-// Wine ref: dlls/kernelbase/file.c — calls NtQueryInformationFile(FileStreamInformation)
-// to enumerate named NTFS alternate data streams; allocates a FIND_STREAM_DATA struct;
-// info_level must be FindStreamInfoStandard (0) or ERROR_INVALID_PARAMETER is returned.
+// Wine ref: dlls/kernelbase/file.c:1475 —
+//   HANDLE WINAPI FindFirstStreamW(...) {
+//       FIXME("(%s, %d, %p, %lx): stub!\n", debugstr_w(filename), level, data, flags);
+//       SetLastError( ERROR_HANDLE_EOF );
+//       return INVALID_HANDLE_VALUE;
+//   }
 pub unsafe extern "win64" fn find_first_stream_w(
-    _lp_file_name: *const u16,
-    _info_level: u32,
+    lp_file_name: *const u16,
+    info_level: u32,
     _lp_find_stream_data: *mut u8,
-    _dw_flags: u32,
+    dw_flags: u32,
 ) -> usize {
-    set_last_error(87); // ERROR_INVALID_PARAMETER — NTFS streams not supported
+    eprintln!(
+        "weave/kernel32: FindFirstStreamW(filename={lp_file_name:?}, info_level={info_level}, flags={dw_flags:#x})"
+    );
+    set_last_error(38); // ERROR_HANDLE_EOF — no streams (Linux has no NTFS ADS)
+    eprintln!(
+        "weave/kernel32: FindFirstStreamW → INVALID_HANDLE_VALUE, LastError=ERROR_HANDLE_EOF (38)"
+    );
     usize::MAX
 }
 
 /// FindNextStreamW — enumerate alternate data streams (next entry).
 ///
-/// Returns FALSE — no streams.
+/// Returns FALSE with LastError=ERROR_HANDLE_EOF. Since `find_first_stream_w`
+/// always reports "no streams", any handle reaching this function is invalid
+/// or already exhausted — either way EOF semantics are correct.
 ///
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
 // Wine ref: dlls/kernelbase/file.c — advances internal pointer in the FIND_STREAM_DATA
 // buffer; returns ERROR_HANDLE_EOF (equivalent to no-more-files) when streams exhausted.
 pub unsafe extern "win64" fn find_next_stream_w(
-    _h_find_stream: usize,
+    h_find_stream: usize,
     _lp_find_stream_data: *mut u8,
 ) -> i32 {
+    eprintln!("weave/kernel32: FindNextStreamW(handle={h_find_stream:#x})");
+    set_last_error(38); // ERROR_HANDLE_EOF — no more streams
+    eprintln!("weave/kernel32: FindNextStreamW → FALSE, LastError=ERROR_HANDLE_EOF (38)");
     0 // FALSE
 }
 
