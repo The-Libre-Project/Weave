@@ -716,7 +716,9 @@ pub unsafe extern "win64" fn virtual_alloc(
         );
         std::ptr::null_mut()
     } else {
-        result as *mut u8
+        let result_ptr = result as *mut u8;
+        eprintln!("weave/VirtualAlloc: size={dw_size:#x} → addr={result_ptr:p}");
+        result_ptr
     }
 }
 
@@ -759,26 +761,31 @@ pub unsafe extern "win64" fn virtual_free(
     const MEM_RELEASE: u32 = 0x8000;
     const MEM_DECOMMIT: u32 = 0x4000;
 
+    eprintln!("weave/VirtualFree: addr={lp_address:p} size={dw_size:#x} type={dw_free_type:#x}");
     if lp_address.is_null() {
         return 0; // FALSE — NULL address is invalid
     }
     match dw_free_type {
         MEM_RELEASE if dw_size != 0 => {
             // Wine ref: MEM_RELEASE with non-zero dwSize → ERROR_INVALID_PARAMETER
+            eprintln!("weave/VirtualFree: addr={lp_address:p} size={dw_size:#x} type=MEM_RELEASE → FALSE (ERROR_INVALID_PARAMETER: size must be 0 for MEM_RELEASE)");
             set_last_error(0x57); // ERROR_INVALID_PARAMETER
             0
         }
         MEM_RELEASE => {
             // Known gap: we don't track VirtualAlloc sizes, so we can't munmap the region.
             // Accept it as a no-op (leak) rather than crashing.
+            eprintln!("weave/VirtualFree: addr={lp_address:p} size={dw_size:#x} type=MEM_RELEASE → TRUE (no-op, size not tracked)");
             1 // TRUE
         }
         MEM_DECOMMIT => {
             // Decommit a range: munmap the specific range.
             if dw_size == 0 {
+                eprintln!("weave/VirtualFree: addr={lp_address:p} size=0 type=MEM_DECOMMIT → FALSE (ERROR_INVALID_PARAMETER)");
                 set_last_error(0x57);
                 return 0;
             }
+            eprintln!("weave/VirtualFree: addr={lp_address:p} size={dw_size:#x} type=MEM_DECOMMIT → munmap");
             // SAFETY: lp_address is non-null (checked above) and was obtained from
             // VirtualAlloc (mmap); dw_size > 0 (checked above).  munmap requires
             // that the address is page-aligned — Windows semantics say lp_address
@@ -2726,6 +2733,9 @@ pub unsafe extern "win64" fn read_file(
             }
         }
         set_last_error(0);
+        eprintln!(
+            "weave/ReadFile: handle={h_file:#x} fd={fd} bytes_requested={n_bytes_to_read} → TRUE bytes_read={n}"
+        );
         1 // TRUE
     }
 }
@@ -3785,11 +3795,13 @@ pub unsafe extern "win64" fn compare_file_time(
     // 4-byte alignment and a valid 8-byte object at each address.
     let ft1 = unsafe { std::ptr::read_unaligned(lp_file_time1) };
     let ft2 = unsafe { std::ptr::read_unaligned(lp_file_time2) };
-    match ft1.cmp(&ft2) {
+    let result = match ft1.cmp(&ft2) {
         std::cmp::Ordering::Less => -1,
         std::cmp::Ordering::Equal => 0,
         std::cmp::Ordering::Greater => 1,
-    }
+    };
+    eprintln!("weave/CompareFileTime: ft1={ft1} ft2={ft2} → {result}");
+    result
 }
 
 /// # Safety
@@ -3807,6 +3819,7 @@ pub unsafe extern "win64" fn file_time_to_local_file_time(
     // required to avoid potential misaligned-access UB.  Both pointers are non-null
     // (checked above) and valid per the caller's # Safety contract.
     let val = unsafe { std::ptr::read_unaligned(lp_file_time) };
+    eprintln!("weave/FileTimeToLocalFileTime: val={val:#x} (pass-through stub)");
     unsafe { std::ptr::write_unaligned(lp_local_file_time, val) };
     1 // TRUE
 }
@@ -3823,6 +3836,7 @@ pub unsafe extern "win64" fn local_file_time_to_file_time(
         return 0;
     }
     let val = unsafe { std::ptr::read_unaligned(lp_local_file_time) };
+    eprintln!("weave/LocalFileTimeToFileTime: val={val:#x} (pass-through stub)");
     unsafe { std::ptr::write_unaligned(lp_file_time, val) };
     1 // TRUE
 }
@@ -3840,6 +3854,7 @@ pub unsafe extern "win64" fn system_time_to_file_time(
     }
     let unix_now = unsafe { libc::time(std::ptr::null_mut()) } as u64;
     let ft = unix_now * 10_000_000u64 + 116_444_736_000_000_000u64;
+    eprintln!("weave/SystemTimeToFileTime: → ft={ft:#x}");
     // FILETIME is only 4-byte aligned.
     unsafe { std::ptr::write_unaligned(lp_file_time, ft) };
     1 // TRUE
@@ -3853,6 +3868,7 @@ pub unsafe extern "win64" fn file_time_to_system_time(
     _lp_file_time: *const u64,
     lp_system_time: *mut SystemTime,
 ) -> i32 {
+    eprintln!("weave/FileTimeToSystemTime: → current-time stub");
     if lp_system_time.is_null() {
         return 0;
     }
@@ -3984,6 +4000,8 @@ pub unsafe extern "win64" fn move_file_ex_w(
     }
     let new_path =
         unsafe { String::from_utf16_lossy(std::slice::from_raw_parts(lp_new_file_name, len2)) };
+
+    eprintln!("weave/MoveFileExW: old={old_path} new={new_path} flags={dw_flags:#x}");
 
     // Translate both paths
     let linux_old = match weave_core::prefix::translator().to_linux_str(&old_path) {
@@ -6262,6 +6280,7 @@ pub unsafe extern "win64" fn get_disk_free_space_w(
 
     // Resolve the query path: translate Win32 wide string, or fall back to "/".
     let query_path: std::ffi::CString = if lp_root_path_name.is_null() {
+        eprintln!("weave/GetDiskFreeSpaceW: path=(null→\"/\")");
         std::ffi::CString::new("/").unwrap()
     } else {
         // Decode the wide string.
@@ -6271,6 +6290,7 @@ pub unsafe extern "win64" fn get_disk_free_space_w(
         }
         let win_path =
             unsafe { String::from_utf16_lossy(std::slice::from_raw_parts(lp_root_path_name, len)) };
+        eprintln!("weave/GetDiskFreeSpaceW: path={win_path:?}");
         match weave_core::file_io::translate_win_path(&win_path) {
             Ok(p) => match std::ffi::CString::new(p.as_os_str().as_encoded_bytes()) {
                 Ok(s) => s,
@@ -6283,6 +6303,7 @@ pub unsafe extern "win64" fn get_disk_free_space_w(
     let mut sv: libc::statvfs = unsafe { std::mem::zeroed() };
     let ret = unsafe { libc::statvfs(query_path.as_ptr(), &mut sv) };
     if ret != 0 {
+        eprintln!("weave/GetDiskFreeSpaceW: → FALSE (statvfs failed)");
         set_last_error(ERROR_INVALID_PARAMETER);
         return 0; // FALSE
     }
@@ -6314,6 +6335,7 @@ pub unsafe extern "win64" fn get_disk_free_space_w(
     if !lp_total_number_of_clusters.is_null() {
         unsafe { *lp_total_number_of_clusters = total_clusters };
     }
+    eprintln!("weave/GetDiskFreeSpaceW: → TRUE (free={free_clusters} total={total_clusters})");
     1 // TRUE
 }
 
@@ -6331,6 +6353,7 @@ pub unsafe extern "win64" fn file_time_to_dos_date_time(
     lp_fat_date: *mut u16,
     lp_fat_time: *mut u16,
 ) -> i32 {
+    eprintln!("weave/FileTimeToDosDateTime: → fixed 2026-01-01 00:00:00 (stub)");
     // MS-DOS date: year since 1980 in bits 9-15, month in 5-8, day in 0-4.
     // 2026-01-01: year=46 (2026-1980), month=1, day=1 → 0x5C21
     if !lp_fat_date.is_null() {
@@ -6426,6 +6449,7 @@ pub unsafe extern "win64" fn global_memory_status_ex(lp_buffer: *mut u8) -> i32 
         *(lp_buffer.add(48) as *mut u64) = 0x0000_7FFE_0000_0000u64; // approx avail VA
         *(lp_buffer.add(56) as *mut u64) = 0;
     }
+    eprintln!("weave/GlobalMemoryStatusEx: total_phys={total_phys} avail_phys={avail_phys}");
     1 // TRUE
 }
 
@@ -6871,7 +6895,9 @@ pub unsafe extern "win64" fn get_system_time_as_file_time(lp_system_time_as_file
         libc::clock_gettime(libc::CLOCK_REALTIME, &mut ts);
         if !lp_system_time_as_file_time.is_null() {
             let ns = ts.tv_sec as u64 * 10_000_000 + ts.tv_nsec as u64 / 100;
-            *lp_system_time_as_file_time = ns + 116_444_736_000_000_000u64;
+            let ft = ns + 116_444_736_000_000_000u64;
+            *lp_system_time_as_file_time = ft;
+            eprintln!("weave/GetSystemTimeAsFileTime: → {ft}");
         }
     }
 }
@@ -6933,6 +6959,9 @@ pub unsafe extern "win64" fn get_system_info(lp_system_info: *mut SystemInfo) {
             processor_level: 6,
             processor_revision: 0,
         };
+        eprintln!(
+            "weave/GetSystemInfo: nprocs={nprocs} page_size={page_size} alloc_granularity=65536"
+        );
     }
 }
 
@@ -7254,7 +7283,10 @@ pub unsafe extern "win64" fn create_semaphore_w(
     l_maximum_count: i32,
     _lp_name: *const u16,
 ) -> usize {
-    create_semaphore_impl(l_initial_count, l_maximum_count)
+    eprintln!("weave/CreateSemaphoreW: initial={l_initial_count} max={l_maximum_count}");
+    let handle = create_semaphore_impl(l_initial_count, l_maximum_count);
+    eprintln!("weave/CreateSemaphoreW: → handle={handle:#x}");
+    handle
 }
 
 /// SetFileApisToOEM — switch file APIs to OEM character set. No-op.
@@ -7295,6 +7327,7 @@ pub unsafe extern "win64" fn dos_date_time_to_file_time(
     w_fat_time: u16,
     lp_file_time: *mut u64,
 ) -> i32 {
+    eprintln!("weave/DosDateTimeToFileTime: date={w_fat_date:#x} time={w_fat_time:#x}");
     if !lp_file_time.is_null() {
         // Convert DOS date/time to FILETIME (100-ns intervals since 1601-01-01).
         // DOS date: bits 15-9=year-1980, 8-5=month, 4-0=day
@@ -9849,6 +9882,8 @@ pub unsafe extern "win64" fn move_file_w(
     let new_path =
         unsafe { String::from_utf16_lossy(std::slice::from_raw_parts(lp_new_file_name, len2)) };
 
+    eprintln!("weave/MoveFileW: {old_path} → {new_path}");
+
     // Translate both paths
     let linux_old = match weave_core::prefix::translator().to_linux_str(&old_path) {
         Ok(p) => p,
@@ -9871,7 +9906,9 @@ pub unsafe extern "win64" fn move_file_w(
 
     // Call rename
     let ret = unsafe { libc::rename(c_old.as_ptr(), c_new.as_ptr()) };
-    (ret == 0) as i32
+    let result = (ret == 0) as i32;
+    eprintln!("weave/MoveFileW: → {result} (rename result)");
+    result
 }
 
 /// MoveFileA: move/rename a file (ANSI version).
@@ -9909,6 +9946,8 @@ pub unsafe extern "win64" fn move_file_a(
     let new_path =
         unsafe { String::from_utf8_lossy(std::slice::from_raw_parts(lp_new_file_name, len2)) };
 
+    eprintln!("weave/MoveFileA: {old_path} → {new_path}");
+
     // Translate both paths
     let linux_old = match weave_core::prefix::translator().to_linux_str(&old_path) {
         Ok(p) => p,
@@ -9931,7 +9970,9 @@ pub unsafe extern "win64" fn move_file_a(
 
     // Call rename
     let ret = unsafe { libc::rename(c_old.as_ptr(), c_new.as_ptr()) };
-    (ret == 0) as i32
+    let result = (ret == 0) as i32;
+    eprintln!("weave/MoveFileA: → {result} (rename result)");
+    result
 }
 
 /// RemoveDirectoryW: remove a directory (wide string version).
@@ -10131,6 +10172,7 @@ pub unsafe extern "win64" fn get_disk_free_space_ex_w(
 
     // Resolve the query path: translate Win32 wide string, or fall back to "/".
     let query_path: std::ffi::CString = if lp_directory_name.is_null() {
+        eprintln!("weave/GetDiskFreeSpaceExW: path=(null→\"/\")");
         std::ffi::CString::new("/").unwrap()
     } else {
         // Decode the wide string.
@@ -10140,6 +10182,7 @@ pub unsafe extern "win64" fn get_disk_free_space_ex_w(
         }
         let win_path =
             unsafe { String::from_utf16_lossy(std::slice::from_raw_parts(lp_directory_name, len)) };
+        eprintln!("weave/GetDiskFreeSpaceExW: path={win_path:?}");
         match weave_core::file_io::translate_win_path(&win_path) {
             Ok(p) => match std::ffi::CString::new(p.as_os_str().as_encoded_bytes()) {
                 Ok(s) => s,
@@ -10152,6 +10195,7 @@ pub unsafe extern "win64" fn get_disk_free_space_ex_w(
     let mut sv: libc::statvfs = unsafe { std::mem::zeroed() };
     let ret = unsafe { libc::statvfs(query_path.as_ptr(), &mut sv) };
     if ret != 0 {
+        eprintln!("weave/GetDiskFreeSpaceExW: → FALSE (statvfs failed, ERROR_INVALID_PARAMETER)");
         set_last_error(ERROR_INVALID_PARAMETER);
         return 0; // FALSE
     }
@@ -10175,6 +10219,7 @@ pub unsafe extern "win64" fn get_disk_free_space_ex_w(
     if !lp_total_number_of_free_bytes.is_null() {
         unsafe { *lp_total_number_of_free_bytes = total_free_bytes };
     }
+    eprintln!("weave/GetDiskFreeSpaceExW: → TRUE total={total_bytes} free={free_bytes_available}");
     1 // TRUE
 }
 
