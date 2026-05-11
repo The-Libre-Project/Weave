@@ -1,0 +1,2 @@
+Hello, M13!
+This is a small ASCII fixture for the M13 round-trip gate.
