@@ -558,6 +558,9 @@ pub extern "win64" fn get_last_error() -> u32 {
 // Wine ref: include/winbase.h — inline that writes TEB->LastErrorValue;
 // SetLastError(0) is a common pattern to clear error before a call.
 pub extern "win64" fn set_last_error(dw_err_code: u32) {
+    if dw_err_code != 0 {
+        eprintln!("weave/SetLastError: code={dw_err_code} (0x{dw_err_code:x})");
+    }
     weave_common::set_last_error(dw_err_code);
 }
 
@@ -2758,6 +2761,9 @@ pub unsafe extern "win64" fn write_file(
     lp_bytes_written: *mut u32,
     lp_overlapped: usize,
 ) -> i32 {
+    eprintln!(
+        "weave/WriteFile: entry handle={h_file:#x} buf={lp_buffer:p} n_bytes={n_bytes_to_write} overlapped={lp_overlapped:#x}"
+    );
     // Pointer validation: null buffer with non-zero write size is an error.
     if lp_buffer.is_null() && n_bytes_to_write > 0 {
         set_last_error(87); // ERROR_INVALID_PARAMETER
@@ -8053,6 +8059,9 @@ pub unsafe extern "win64" fn format_message_w(
     n_size: u32,
     _arguments: usize,
 ) -> u32 {
+    eprintln!(
+        "weave/FormatMessageW: flags={dw_flags:#x} msg_id={dw_message_id} (0x{dw_message_id:x}) buf_size={n_size}"
+    );
     const FORMAT_MESSAGE_FROM_SYSTEM: u32 = 0x00001000;
     const FORMAT_MESSAGE_IGNORE_INSERTS: u32 = 0x00000200;
 
