@@ -5,7 +5,7 @@
 //! (getrandom/urandom) at the TLS library layer; this stub exists for IAT
 //! resolution only.
 
-#![allow(unused_variables, non_snake_case)]
+#![allow(unused_variables, non_snake_case, clippy::missing_safety_doc)]
 
 /// BCryptGenRandom — generate random bytes using CNG.
 ///

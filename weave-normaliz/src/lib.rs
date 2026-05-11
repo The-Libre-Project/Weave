@@ -4,7 +4,7 @@
 //! name (IDNA) support. These stubs return 0 (failure). ASCII-only hostnames
 //! work via the TLS library directly; IDNA is not supported.
 
-#![allow(unused_variables, non_snake_case)]
+#![allow(unused_variables, non_snake_case, clippy::missing_safety_doc)]
 
 /// IdnToAscii — convert an IDN label to ASCII (Punycode).
 ///

@@ -4,7 +4,7 @@
 //! for NTLM/Kerberos authentication. This stub returns NULL (no SSPI table).
 //! SSPI-based authentication is not supported; stubs exist for IAT resolution.
 
-#![allow(unused_variables, non_snake_case)]
+#![allow(unused_variables, non_snake_case, clippy::missing_safety_doc)]
 
 /// InitSecurityInterfaceA — retrieve the SSPI function dispatch table (ANSI).
 ///

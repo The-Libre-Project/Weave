@@ -4,7 +4,7 @@
 //! These are all no-op stubs returning 0/null. LDAP functionality
 //! is not supported; stubs exist solely to satisfy IAT resolution.
 
-#![allow(unused_variables, non_snake_case)]
+#![allow(unused_variables, non_snake_case, clippy::missing_safety_doc)]
 
 /// ber_free — free a BER element.
 pub unsafe extern "win64" fn ber_free(_pBerElement: usize, _fbuf: i32) {}

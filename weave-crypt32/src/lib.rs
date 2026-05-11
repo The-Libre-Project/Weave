@@ -9,7 +9,7 @@
 //! functions: CryptAcquireContextA, CryptGenRandom, CryptReleaseContext). This
 //! crate covers the certificate-store API surface that advapi32 does not handle.
 
-#![allow(unused_variables, non_snake_case)]
+#![allow(unused_variables, non_snake_case, clippy::missing_safety_doc)]
 
 /// CertCloseStore — close a certificate store handle.
 pub unsafe extern "win64" fn CertCloseStore(_hCertStore: usize, _dwFlags: u32) -> i32 {
