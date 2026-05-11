@@ -34,6 +34,11 @@ weave-shlwapi = { path = "../weave-shlwapi" }
 weave-gdiplus = { path = "../weave-gdiplus" }
 weave-ddraw = { path = "../weave-ddraw" }
 weave-setupapi = { path = "../weave-setupapi" }
+weave-wldap32 = { path = "../weave-wldap32" }
+weave-crypt32 = { path = "../weave-crypt32" }
+weave-normaliz = { path = "../weave-normaliz" }
+weave-secur32 = { path = "../weave-secur32" }
+weave-bcrypt = { path = "../weave-bcrypt" }
 weave-sandbox = { path = "../weave-sandbox" }
 weave-installer = { path = "../weave-installer" }
 weave-common = { path = "../weave-common" }

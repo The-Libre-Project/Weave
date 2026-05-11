@@ -31,3 +31,15 @@ pub unsafe extern "win64" fn IdnToUnicode(
 ) -> i32 {
     0
 }
+
+/// Resolve a normaliz.dll import to a function pointer.
+pub fn resolve(dll: &str, func: &str) -> Option<usize> {
+    if !dll.eq_ignore_ascii_case("normaliz.dll") {
+        return None;
+    }
+    match func {
+        "IdnToAscii" => Some(IdnToAscii as *const () as usize),
+        "IdnToUnicode" => Some(IdnToUnicode as *const () as usize),
+        _ => None,
+    }
+}

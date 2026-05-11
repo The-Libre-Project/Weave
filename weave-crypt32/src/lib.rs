@@ -56,3 +56,24 @@ pub unsafe extern "win64" fn CertOpenSystemStoreA(
 ) -> usize {
     0 // NULL — store unavailable
 }
+
+/// Resolve a crypt32.dll import to a function pointer.
+///
+/// NOTE: weave-advapi32 also resolves crypt32.dll (CryptAcquireContextA,
+/// CryptGenRandom, CryptReleaseContext, and several Cert* APIs for NPP).
+/// Place this resolver AFTER weave_advapi32::resolve in the chain so
+/// advapi32's real impls win for overlapping symbols.
+pub fn resolve(dll: &str, func: &str) -> Option<usize> {
+    if !dll.eq_ignore_ascii_case("crypt32.dll") {
+        return None;
+    }
+    match func {
+        "CertCloseStore" => Some(CertCloseStore as *const () as usize),
+        "CertEnumCertificatesInStore" => Some(CertEnumCertificatesInStore as *const () as usize),
+        "CertFreeCertificateContext" => Some(CertFreeCertificateContext as *const () as usize),
+        "CertGetEnhancedKeyUsage" => Some(CertGetEnhancedKeyUsage as *const () as usize),
+        "CertGetIntendedKeyUsage" => Some(CertGetIntendedKeyUsage as *const () as usize),
+        "CertOpenSystemStoreA" => Some(CertOpenSystemStoreA as *const () as usize),
+        _ => None,
+    }
+}

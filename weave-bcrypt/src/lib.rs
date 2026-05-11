@@ -19,3 +19,14 @@ pub unsafe extern "win64" fn BCryptGenRandom(
 ) -> u32 {
     0xC0000002u32 // STATUS_NOT_IMPLEMENTED
 }
+
+/// Resolve a bcrypt.dll import to a function pointer.
+pub fn resolve(dll: &str, func: &str) -> Option<usize> {
+    if !dll.eq_ignore_ascii_case("bcrypt.dll") {
+        return None;
+    }
+    match func {
+        "BCryptGenRandom" => Some(BCryptGenRandom as *const () as usize),
+        _ => None,
+    }
+}

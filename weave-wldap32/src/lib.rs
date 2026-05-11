@@ -114,3 +114,31 @@ pub unsafe extern "win64" fn ldap_unbind_s(_ld: usize) -> u32 {
 
 /// ldap_value_free_len — free array of berval values.
 pub unsafe extern "win64" fn ldap_value_free_len(_vals: usize) {}
+
+/// Resolve a wldap32.dll import to a function pointer.
+pub fn resolve(dll: &str, func: &str) -> Option<usize> {
+    if !dll.eq_ignore_ascii_case("wldap32.dll") {
+        return None;
+    }
+    match func {
+        "ber_free" => Some(ber_free as *const () as usize),
+        "ldap_bind_s" => Some(ldap_bind_s as *const () as usize),
+        "ldap_err2string" => Some(ldap_err2string as *const () as usize),
+        "ldap_first_attribute" => Some(ldap_first_attribute as *const () as usize),
+        "ldap_first_entry" => Some(ldap_first_entry as *const () as usize),
+        "ldap_get_dn" => Some(ldap_get_dn as *const () as usize),
+        "ldap_get_values_len" => Some(ldap_get_values_len as *const () as usize),
+        "ldap_init" => Some(ldap_init as *const () as usize),
+        "ldap_memfree" => Some(ldap_memfree as *const () as usize),
+        "ldap_msgfree" => Some(ldap_msgfree as *const () as usize),
+        "ldap_next_attribute" => Some(ldap_next_attribute as *const () as usize),
+        "ldap_next_entry" => Some(ldap_next_entry as *const () as usize),
+        "ldap_search_s" => Some(ldap_search_s as *const () as usize),
+        "ldap_set_option" => Some(ldap_set_option as *const () as usize),
+        "ldap_simple_bind_s" => Some(ldap_simple_bind_s as *const () as usize),
+        "ldap_sslinit" => Some(ldap_sslinit as *const () as usize),
+        "ldap_unbind_s" => Some(ldap_unbind_s as *const () as usize),
+        "ldap_value_free_len" => Some(ldap_value_free_len as *const () as usize),
+        _ => None,
+    }
+}

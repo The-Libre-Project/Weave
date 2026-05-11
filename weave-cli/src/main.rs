@@ -68,6 +68,19 @@ fn resolve(dll: &str, func: &str) -> Option<usize> {
         .or_else(|| weave_kernel32::resolve_psapi(dll, func))
         // ddraw.dll — DirectDraw 5 COM stubs (Cave Story and DirectDraw games)
         .or_else(|| weave_ddraw::resolve(dll, func))
+        // crypt32.dll — certificate store stubs (curl.exe TLS surface).
+        // Placed AFTER weave_advapi32::resolve so advapi32's real Crypt*
+        // (NPP entropy + overlapping Cert*) impls win for shared symbols;
+        // this only fires for symbols advapi32 doesn't claim.
+        .or_else(|| weave_crypt32::resolve(dll, func))
+        // wldap32.dll — LDAP no-op stubs (curl.exe optional LDAP support)
+        .or_else(|| weave_wldap32::resolve(dll, func))
+        // normaliz.dll — IDN/Punycode no-op stubs (curl.exe IDNA surface)
+        .or_else(|| weave_normaliz::resolve(dll, func))
+        // secur32.dll — SSPI dispatch table stub (curl.exe NTLM/Kerberos surface)
+        .or_else(|| weave_secur32::resolve(dll, func))
+        // bcrypt.dll — CNG random stub (curl.exe entropy fallback)
+        .or_else(|| weave_bcrypt::resolve(dll, func))
         .or_else(|| dll_registry::lookup(dll, func))
 }
 

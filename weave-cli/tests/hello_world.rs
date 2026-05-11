@@ -3297,6 +3297,120 @@ fn m5_prefix_cli_gate() {
     eprintln!("m5_prefix_cli_gate: all 5 steps passed");
 }
 
+/// `weave curl.exe --no-progress-meter http://example.com` — M11 IAT-only probe gate.
+///
+/// Minimal probe: checks only that Weave resolves curl.exe's IAT and the
+/// process exits before hitting a 10s deadline. No HTTP assertion, no exit
+/// code assertion. Mirrors `wget_exe_probe_gate` (the M10 analog) but targets
+/// curl.exe's full crypt32/wldap32/normaliz/secur32/bcrypt surface so the
+/// 5 new M11 stub crates are exercised by the resolver.
+///
+/// Tier A assertion:
+///   stderr.contains("weave: imports resolved") within 10s
+///
+/// Skipped gracefully if curl.exe is absent from fixtures. Linux-only.
+#[test]
+fn curl_probe_ws2_gate() {
+    if !cfg!(target_os = "linux") {
+        eprintln!("skipping curl_probe_ws2_gate — requires Linux");
+        return;
+    }
+
+    let manifest = env!("CARGO_MANIFEST_DIR");
+    let fixture = format!("{manifest}/../tests/fixtures/bin/curl.exe");
+
+    if !std::path::Path::new(&fixture).exists() {
+        eprintln!(
+            "skipping: curl.exe not present in tests/fixtures/bin/ — curl_probe_ws2_gate skipped"
+        );
+        return;
+    }
+
+    let weave_bin = env!("CARGO_BIN_EXE_weave");
+
+    let start = std::time::Instant::now();
+    let mut child = std::process::Command::new(weave_bin)
+        .arg(&fixture)
+        .arg("--no-progress-meter")
+        .arg("http://example.com")
+        .stderr(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|e| panic!("failed to spawn weave on curl.exe: {e}"));
+
+    let mut stderr_pipe = child.stderr.take().expect("stderr was piped");
+    let stderr_shared = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let stderr_writer = std::sync::Arc::clone(&stderr_shared);
+    let drain_thread = std::thread::spawn(move || {
+        use std::io::Read;
+        let mut buf = Vec::new();
+        let _ = stderr_pipe.read_to_end(&mut buf);
+        *stderr_writer.lock().unwrap() = buf;
+    });
+
+    let mut stdout_pipe = child.stdout.take().expect("stdout was piped");
+    let stdout_shared = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let stdout_writer = std::sync::Arc::clone(&stdout_shared);
+    let stdout_drain_thread = std::thread::spawn(move || {
+        use std::io::Read;
+        let mut buf = Vec::new();
+        let _ = stdout_pipe.read_to_end(&mut buf);
+        *stdout_writer.lock().unwrap() = buf;
+    });
+
+    let deadline = start + std::time::Duration::from_secs(10);
+    let mut killed_by_deadline = false;
+
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                break;
+            }
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    eprintln!("curl_probe_ws2_gate: deadline exceeded — killing curl.exe");
+                    let _ = child.kill();
+                    killed_by_deadline = true;
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err(e) => {
+                eprintln!("curl_probe_ws2_gate: try_wait error: {e}");
+                break;
+            }
+        }
+    }
+
+    let elapsed = start.elapsed();
+    drain_thread.join().ok();
+    stdout_drain_thread.join().ok();
+
+    let stderr = String::from_utf8_lossy(&stderr_shared.lock().unwrap()).into_owned();
+    let stdout = String::from_utf8_lossy(&stdout_shared.lock().unwrap()).into_owned();
+
+    eprintln!("curl_probe_ws2_gate: elapsed={elapsed:.1?} killed={killed_by_deadline}");
+    eprintln!("--- curl_probe_ws2_gate FULL STDOUT BEGIN ---");
+    eprintln!("{stdout}");
+    eprintln!("--- curl_probe_ws2_gate FULL STDOUT END ---");
+    eprintln!("--- curl_probe_ws2_gate FULL STDERR BEGIN ---");
+    eprintln!("{stderr}");
+    eprintln!("--- curl_probe_ws2_gate FULL STDERR END ---");
+
+    eprintln!("--- curl_probe_ws2_gate unresolved imports ---");
+    for line in stderr.lines().filter(|l| l.contains("unresolved import")) {
+        eprintln!("{line}");
+    }
+
+    // Tier A: IAT patching completed within 10s deadline.
+    assert!(
+        stderr.contains("weave: imports resolved"),
+        "curl_probe_ws2_gate FAIL: IAT patch did not complete\nelapsed: {elapsed:.1?}\nkilled_by_deadline: {killed_by_deadline}\nstderr:\n{stderr}\nstdout:\n{stdout}"
+    );
+
+    eprintln!("curl_probe_ws2_gate: Tier A passed");
+}
+
 /// `weave --no-sandbox curl.exe http://example.com` — ws2 second-app network validation gate.
 ///
 /// Verifies that curl.exe (static MinGW Windows build, 64-bit) can make a real
