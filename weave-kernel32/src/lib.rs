@@ -9542,6 +9542,7 @@ pub unsafe extern "win64" fn get_file_attributes_w(lp_file_name: *const u16) -> 
     const INVALID_FILE_ATTRIBUTES: u32 = 0xFFFFFFFF;
     const FILE_ATTRIBUTE_NORMAL: u32 = 0x80;
     const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
+    const FILE_ATTRIBUTE_ARCHIVE: u32 = 0x20;
 
     if lp_file_name.is_null() {
         set_last_error(file_io::ERROR_FILE_NOT_FOUND);
@@ -9596,11 +9597,21 @@ pub unsafe extern "win64" fn get_file_attributes_w(lp_file_name: *const u16) -> 
     }
 
     // Check if it's a directory
-    let attrs = if (stat.st_mode & libc::S_IFMT) == libc::S_IFDIR {
+    let mut attrs = if (stat.st_mode & libc::S_IFMT) == libc::S_IFDIR {
         FILE_ATTRIBUTE_DIRECTORY
     } else {
         FILE_ATTRIBUTE_NORMAL
     };
+
+    // Windows sets FILE_ATTRIBUTE_ARCHIVE (0x20) on all regular files by default.
+    // Many apps (including 7-zip) validate that newly-written files carry this bit.
+    // FILE_ATTRIBUTE_NORMAL (0x80) is only valid when it is the sole attribute, so
+    // clear it once ARCHIVE is added.
+    if attrs & FILE_ATTRIBUTE_DIRECTORY == 0 {
+        attrs |= FILE_ATTRIBUTE_ARCHIVE; // 0x20 — set ARCHIVE for regular files
+        attrs &= !FILE_ATTRIBUTE_NORMAL; // 0x80 — NORMAL only valid as sole attribute
+    }
+
     eprintln!("weave/GetFileAttributesW: exit path={win_path:?} attrs={attrs:#x}");
     attrs
 }
@@ -10314,6 +10325,7 @@ pub unsafe extern "win64" fn set_file_attributes_w(
     const ERROR_PATH_NOT_FOUND: u32 = 3;
 
     if lp_file_name.is_null() {
+        eprintln!("weave/SetFileAttributesW: entry null_name attrs=0x{dw_file_attributes:x} → FALSE");
         set_last_error(ERROR_PATH_NOT_FOUND);
         return 0; // FALSE
     }
@@ -10324,16 +10336,20 @@ pub unsafe extern "win64" fn set_file_attributes_w(
         len += 1;
     }
     if len == MAX_UTF16_LEN {
+        eprintln!("weave/SetFileAttributesW: entry overlong_name attrs=0x{dw_file_attributes:x} → FALSE");
         set_last_error(ERROR_PATH_NOT_FOUND);
         return 0; // FALSE
     }
     let win_path =
         unsafe { String::from_utf16_lossy(std::slice::from_raw_parts(lp_file_name, len)) };
 
+    eprintln!("weave/SetFileAttributesW: entry path={win_path:?} attrs=0x{dw_file_attributes:x}");
+
     // Translate Win32 path to Linux path
     let linux_path = match weave_core::file_io::translate_win_path(&win_path) {
         Ok(p) => p,
         Err(_) => {
+            eprintln!("weave/SetFileAttributesW: exit path={win_path:?} translate_err → FALSE");
             set_last_error(ERROR_PATH_NOT_FOUND);
             return 0; // FALSE
         }
@@ -10342,6 +10358,7 @@ pub unsafe extern "win64" fn set_file_attributes_w(
     let c_path = match std::ffi::CString::new(linux_path.as_os_str().as_encoded_bytes()) {
         Ok(s) => s,
         Err(_) => {
+            eprintln!("weave/SetFileAttributesW: exit path={win_path:?} cstring_err → FALSE");
             set_last_error(ERROR_PATH_NOT_FOUND);
             return 0; // FALSE
         }
@@ -10353,8 +10370,10 @@ pub unsafe extern "win64" fn set_file_attributes_w(
     if ret != 0 {
         let errno = unsafe { *libc::__errno_location() };
         if errno == libc::ENOENT {
+            eprintln!("weave/SetFileAttributesW: exit path={win_path:?} stat_enoent → FALSE");
             set_last_error(ERROR_FILE_NOT_FOUND);
         } else {
+            eprintln!("weave/SetFileAttributesW: exit path={win_path:?} stat_err → FALSE");
             set_last_error(ERROR_ACCESS_DENIED);
         }
         return 0; // FALSE
@@ -10362,6 +10381,7 @@ pub unsafe extern "win64" fn set_file_attributes_w(
 
     // FILE_ATTRIBUTE_DIRECTORY cannot be set
     if dw_file_attributes & FILE_ATTRIBUTE_DIRECTORY != 0 {
+        eprintln!("weave/SetFileAttributesW: exit path={win_path:?} dir_attr_denied → FALSE");
         set_last_error(ERROR_ACCESS_DENIED);
         return 0; // FALSE
     }
@@ -10372,6 +10392,7 @@ pub unsafe extern "win64" fn set_file_attributes_w(
         let new_mode = stat.st_mode & !(libc::S_IWUSR | libc::S_IWGRP | libc::S_IWOTH);
         let chmod_ret = unsafe { libc::chmod(c_path.as_ptr(), new_mode) };
         if chmod_ret != 0 {
+            eprintln!("weave/SetFileAttributesW: exit path={win_path:?} chmod_readonly_err → FALSE");
             set_last_error(ERROR_ACCESS_DENIED);
             return 0; // FALSE
         }
@@ -10380,12 +10401,14 @@ pub unsafe extern "win64" fn set_file_attributes_w(
         let new_mode = stat.st_mode | libc::S_IRUSR | libc::S_IWUSR | libc::S_IRGRP | libc::S_IROTH;
         let chmod_ret = unsafe { libc::chmod(c_path.as_ptr(), new_mode) };
         if chmod_ret != 0 {
+            eprintln!("weave/SetFileAttributesW: exit path={win_path:?} chmod_normal_err → FALSE");
             set_last_error(ERROR_ACCESS_DENIED);
             return 0; // FALSE
         }
     }
     // Any other flags: no-op on Linux — silently return TRUE
 
+    eprintln!("weave/SetFileAttributesW: exit path={win_path:?} attrs=0x{dw_file_attributes:x} → TRUE");
     1 // TRUE
 }
 
