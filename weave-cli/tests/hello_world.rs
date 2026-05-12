@@ -12,7 +12,7 @@ fn m13_lock() -> std::sync::MutexGuard<'static, ()> {
     M13_LOCK
         .get_or_init(|| std::sync::Mutex::new(()))
         .lock()
-        .expect("M13 7za test lock poisoned")
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 fn run_weave(fixture_name: &str) -> std::process::Output {
