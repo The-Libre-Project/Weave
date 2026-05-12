@@ -10,7 +10,7 @@
 #   make test       — run full test suite in a Linux Docker container
 #   make ci         — build + lint + full test suite (mirrors CI pipeline)
 
-.PHONY: build lint test test-unit ci fixture-wget-probe
+.PHONY: build lint test test-unit ci fixture-wget-probe coverage-gauge
 
 # ── Build ──────────────────────────────────────────────────────────────────────
 
@@ -51,6 +51,12 @@ test:
 
 fixture-wget-probe:
 	x86_64-w64-mingw32-gcc -O2 -o tests/fixtures/bin/wget_probe.exe tests/fixtures/src/wget_probe.c -lws2_32
+
+# ── Coverage gauge (resolver-registered exports vs. §8 implemented) ──────────
+# Runs in <5s on macOS. Requires python3. Strategy B (milestone-weighted).
+
+coverage-gauge:
+	@bash scripts/coverage-gauge.sh
 
 # ── Full CI mirror ─────────────────────────────────────────────────────────────
 
