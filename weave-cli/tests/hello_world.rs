@@ -4788,19 +4788,10 @@ fn sevenzip_m13_roundtrip_gate() {
     // ===== Phase 1: create =====
     // CWD = work_dir so the input filenames stored in the archive are bare
     // (no path prefix), which keeps the extract path simple.
-    //
-    // EXPERIMENT (M13 diagnostic): pass `-mhc=off` to disable encoded main
-    // header. 7-Zip default is `-mhc=on` which routes the central directory
-    // through CEncoder::Encode1 (LZMA). Hypothesis: that encoder path is
-    // failing in Weave with E_INVALIDARG → CSystemException(0x80070057) →
-    // exit(2). If this gate passes with -mhc=off, the encoded-header path
-    // is confirmed as the failure surface; remove this flag and fix the
-    // underlying encoder issue in a follow-up.
     let create_out = std::process::Command::new(weave_bin)
         .current_dir(&work_dir)
         .arg(&seven_zip)
         .arg("a")
-        .arg("-mhc=off")
         .arg("roundtrip.7z")
         .arg("hello.txt")
         .arg("lorem.txt")
