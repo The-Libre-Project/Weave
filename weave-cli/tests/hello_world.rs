@@ -4789,15 +4789,15 @@ fn sevenzip_m13_roundtrip_gate() {
     // CWD = work_dir so the input filenames stored in the archive are bare
     // (no path prefix), which keeps the extract path simple.
     //
-    // DIAGNOSTIC (M13 flag bisect round 5): -mt[cma]-, -ms=off all red. Try
-    // `-mmt=1` to force single-threaded encoder. If green, the failure is in
-    // 7-Zip's multi-thread coordination (CreateThread/_beginthreadex, event
-    // signaling, or the MT mixer's bond pipeline) hitting a Weave gap.
+    // Flag bisect (M13 investigation 2026-05-12): all five tested switches
+    // RED (-mtc- / -mtm- / -mta- / -ms=off / -mmt=1). The failure surface is
+    // NOT in file-time fields, solid-mode topology, or multi-threading. Next
+    // step per operator: build a debug 7-Zip with verbose RINOK to localize
+    // the specific `return E_INVALIDARG` callsite.
     let create_out = std::process::Command::new(weave_bin)
         .current_dir(&work_dir)
         .arg(&seven_zip)
         .arg("a")
-        .arg("-mmt=1")
         .arg("roundtrip.7z")
         .arg("hello.txt")
         .arg("lorem.txt")
