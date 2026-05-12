@@ -4789,15 +4789,14 @@ fn sevenzip_m13_roundtrip_gate() {
     // CWD = work_dir so the input filenames stored in the archive are bare
     // (no path prefix), which keeps the extract path simple.
     //
-    // DIAGNOSTIC (M13 flag bisect round 2): `-mtc-` was still red. Now try
-    // `-mtm-` to disable modified-time archive field. If this gate passes,
-    // the failure is in modify-time validation/conversion (write-time range,
-    // ordering, or 7-Zip's per-file MTime accumulation).
+    // DIAGNOSTIC (M13 flag bisect round 3): -mtc- and -mtm- both red. Try
+    // `-mta-` to disable access-time archive field. Linux atime semantics
+    // differ from Windows (relatime, noatime mounts). If green, atime is it.
     let create_out = std::process::Command::new(weave_bin)
         .current_dir(&work_dir)
         .arg(&seven_zip)
         .arg("a")
-        .arg("-mtm-")
+        .arg("-mta-")
         .arg("roundtrip.7z")
         .arg("hello.txt")
         .arg("lorem.txt")
