@@ -3494,6 +3494,9 @@ pub unsafe extern "win64" fn get_volume_information_w(
     lp_file_system_name_buffer: *mut u16,
     n_file_system_name_size: u32,
 ) -> i32 {
+    eprintln!(
+        "weave/GetVolumeInformationW: entry root_path_ptr={_lp_root_path_name:?} vol_name_buf={lp_volume_name_buffer:?} vol_name_sz={n_volume_name_size} serial={lp_volume_serial_number:?} maxlen={lp_maximum_component_length:?} flags={lp_file_system_flags:?} fs_name_buf={lp_file_system_name_buffer:?} fs_name_sz={n_file_system_name_size}"
+    );
     if !lp_volume_serial_number.is_null() {
         unsafe { *lp_volume_serial_number = 0xDEAD_BEEFu32 };
     }
@@ -3533,6 +3536,9 @@ pub unsafe extern "win64" fn get_volume_information_w(
         }
     }
 
+    eprintln!(
+        "weave/GetVolumeInformationW: exit serial=0xDEADBEEF maxlen=255 flags=0x2 vol=\"Weave\" fs=\"NTFS\" → TRUE"
+    );
     1 // TRUE
 }
 
@@ -4681,6 +4687,7 @@ pub unsafe extern "win64" fn find_first_file_w(
     lp_find_file_data: *mut Win32FindDataW,
 ) -> usize {
     if lp_file_name.is_null() || lp_find_file_data.is_null() {
+        eprintln!("weave/FindFirstFileW: entry → INVALID_HANDLE_VALUE (null arg)");
         return usize::MAX; // INVALID_HANDLE_VALUE
     }
 
@@ -4690,15 +4697,22 @@ pub unsafe extern "win64" fn find_first_file_w(
         len += 1;
     }
     if len == MAX_UTF16_LEN {
+        eprintln!("weave/FindFirstFileW: exit → INVALID_HANDLE_VALUE (path too long)");
         return usize::MAX;
     }
     let win_path =
         unsafe { String::from_utf16_lossy(std::slice::from_raw_parts(lp_file_name, len)) };
+    eprintln!("weave/FindFirstFileW: entry path={win_path:?}");
 
     // Translate to Linux path
     let linux_path = match weave_core::file_io::translate_win_path(&win_path) {
         Ok(p) => p,
-        Err(_) => return usize::MAX,
+        Err(_) => {
+            eprintln!(
+                "weave/FindFirstFileW: exit path={win_path:?} → INVALID_HANDLE_VALUE (xlate_err)"
+            );
+            return usize::MAX;
+        }
     };
     // Check if path contains wildcards (* or ?)
     let path_str = linux_path.to_string_lossy();
@@ -4710,11 +4724,19 @@ pub unsafe extern "win64" fn find_first_file_w(
         // to check whether a file exists and get its attributes.
         let c_path = match std::ffi::CString::new(linux_path.as_os_str().as_encoded_bytes()) {
             Ok(s) => s,
-            Err(_) => return usize::MAX,
+            Err(_) => {
+                eprintln!(
+                    "weave/FindFirstFileW: exit path={win_path:?} → INVALID_HANDLE_VALUE (cstr_err)"
+                );
+                return usize::MAX;
+            }
         };
         let mut stat_buf = unsafe { std::mem::zeroed::<libc::stat>() };
         let ret = unsafe { libc::stat(c_path.as_ptr(), &mut stat_buf) };
         if ret != 0 {
+            eprintln!(
+                "weave/FindFirstFileW: exit path={win_path:?} linux={linux_path:?} → INVALID_HANDLE_VALUE (stat_err)"
+            );
             return usize::MAX; // INVALID_HANDLE_VALUE — file not found
         }
 
@@ -4749,6 +4771,12 @@ pub unsafe extern "win64" fn find_first_file_w(
             (*lp_find_file_data).c_alternate_file_name[0] = 0;
         }
 
+        let attrs = unsafe { (*lp_find_file_data).dw_file_attributes };
+        let size_lo = unsafe { (*lp_find_file_data).n_file_size_low };
+        let size_hi = unsafe { (*lp_find_file_data).n_file_size_high };
+        eprintln!(
+            "weave/FindFirstFileW: exit path={win_path:?} attrs={attrs:#x} size_hi={size_hi:#x} size_lo={size_lo:#x} → handle=1 (single-file sentinel)"
+        );
         // Return sentinel 1: a single-file handle (FindNextFileW returns FALSE for it).
         return 1;
     }
@@ -4763,11 +4791,19 @@ pub unsafe extern "win64" fn find_first_file_w(
     // Open directory
     let c_path = match std::ffi::CString::new(dir_path.as_os_str().as_encoded_bytes()) {
         Ok(s) => s,
-        Err(_) => return usize::MAX,
+        Err(_) => {
+            eprintln!(
+                "weave/FindFirstFileW: exit path={win_path:?} → INVALID_HANDLE_VALUE (cstr_err wildcard)"
+            );
+            return usize::MAX;
+        }
     };
 
     let dir = unsafe { libc::opendir(c_path.as_ptr()) };
     if dir.is_null() {
+        eprintln!(
+            "weave/FindFirstFileW: exit path={win_path:?} dir={dir_path:?} → INVALID_HANDLE_VALUE (opendir_err)"
+        );
         return usize::MAX;
     }
 
@@ -4775,6 +4811,9 @@ pub unsafe extern "win64" fn find_first_file_w(
     let entry = unsafe { libc::readdir(dir) };
     if entry.is_null() {
         unsafe { libc::closedir(dir) };
+        eprintln!(
+            "weave/FindFirstFileW: exit path={win_path:?} → INVALID_HANDLE_VALUE (empty_dir)"
+        );
         return usize::MAX;
     }
 
@@ -4811,10 +4850,14 @@ pub unsafe extern "win64" fn find_first_file_w(
         (*lp_find_file_data).c_alternate_file_name[0] = 0;
     }
 
+    let handle = dir as usize;
+    eprintln!(
+        "weave/FindFirstFileW: exit path={win_path:?} first_entry={entry_name_str:?} attrs=0x80 → handle={handle:#x} (DIR*)"
+    );
     // Store the DIR* as a usize handle.  find_next_file_w and find_close will cast
     // it back to *mut libc::DIR.  This is safe because usize is pointer-sized on
     // all supported targets (x86-64) and the DIR allocation outlives the handle.
-    dir as usize // Return directory handle
+    handle // Return directory handle
 }
 
 /// FindFirstFileA: start directory enumeration (ANSI version).
@@ -4921,11 +4964,14 @@ pub unsafe extern "win64" fn find_next_file_w(
     h_find_file: usize,
     lp_find_file_data: *mut Win32FindDataW,
 ) -> i32 {
+    eprintln!("weave/FindNextFileW: entry handle={h_find_file:#x}");
     if h_find_file == 0 || h_find_file == usize::MAX || lp_find_file_data.is_null() {
+        eprintln!("weave/FindNextFileW: exit handle={h_find_file:#x} → FALSE (bad arg)");
         return 0; // FALSE
     }
     // Sentinel 1 = single-file handle from FindFirstFileW (no more entries).
     if h_find_file == 1 {
+        eprintln!("weave/FindNextFileW: exit handle=1 → FALSE (single-file sentinel)");
         return 0; // FALSE — no more entries
     }
 
@@ -4939,6 +4985,7 @@ pub unsafe extern "win64" fn find_next_file_w(
     // Read next entry
     let entry = unsafe { libc::readdir(dir) };
     if entry.is_null() {
+        eprintln!("weave/FindNextFileW: exit handle={h_find_file:#x} → FALSE (no_more_entries)");
         return 0; // FALSE - no more entries
     }
 
@@ -4975,6 +5022,9 @@ pub unsafe extern "win64" fn find_next_file_w(
         (*lp_find_file_data).c_alternate_file_name[0] = 0;
     }
 
+    eprintln!(
+        "weave/FindNextFileW: exit handle={h_find_file:#x} entry={entry_name_str:?} attrs=0x80 → TRUE"
+    );
     1 // TRUE
 }
 
@@ -5044,11 +5094,14 @@ pub unsafe extern "win64" fn find_next_file_a(
 // directory handle stored in FIND_FIRST_INFO; frees the FIND_FIRST_INFO heap allocation.
 // Weave uses a raw DIR* instead of the NT directory-handle approach.
 pub extern "win64" fn find_close(h_find_file: usize) -> i32 {
+    eprintln!("weave/FindClose: entry handle={h_find_file:#x}");
     if h_find_file == 0 || h_find_file == usize::MAX {
+        eprintln!("weave/FindClose: exit handle={h_find_file:#x} → FALSE (bad arg)");
         return 0; // FALSE
     }
     // Sentinel 1 = single-file handle (no DIR* to close).
     if h_find_file == 1 {
+        eprintln!("weave/FindClose: exit handle=1 → TRUE (single-file sentinel, no DIR* to close)");
         return 1; // TRUE — success, nothing to close
     }
 
@@ -5058,7 +5111,12 @@ pub extern "win64" fn find_close(h_find_file: usize) -> i32 {
     // checks above), so there is no double-free risk.
     let dir = h_find_file as *mut libc::DIR;
     let ret = unsafe { libc::closedir(dir) };
-    (ret == 0) as i32
+    let ok = ret == 0;
+    eprintln!(
+        "weave/FindClose: exit handle={h_find_file:#x} ret={ret} → {}",
+        if ok { "TRUE" } else { "FALSE" }
+    );
+    ok as i32
 }
 
 /// VerSetConditionMask: pack a condition into the corresponding 3-bit slot of the mask.
@@ -9706,6 +9764,7 @@ pub unsafe extern "win64" fn get_full_path_name_w(
     lp_file_part: *mut *mut u16,
 ) -> u32 {
     if lp_file_name.is_null() {
+        eprintln!("weave/GetFullPathNameW: entry → 0 (null lp_file_name)");
         return 0;
     }
 
@@ -9715,10 +9774,12 @@ pub unsafe extern "win64" fn get_full_path_name_w(
         len += 1;
     }
     if len == MAX_UTF16_LEN {
+        eprintln!("weave/GetFullPathNameW: entry → 0 (path too long)");
         return 0;
     }
     let slice = unsafe { std::slice::from_raw_parts(lp_file_name, len) };
     let win_path = String::from_utf16_lossy(slice);
+    eprintln!("weave/GetFullPathNameW: entry path={win_path:?} n_buffer_length={n_buffer_length}");
 
     // Resolve relative paths against the real CWD (returned as Z:\... by
     // GetCurrentDirectoryW).  Previously this hardcoded "C:\" which caused
@@ -9752,7 +9813,9 @@ pub unsafe extern "win64" fn get_full_path_name_w(
 
     // Size query
     if n_buffer_length == 0 {
-        return (required_chars - 1) as u32; // exclude null terminator
+        let r = (required_chars - 1) as u32;
+        eprintln!("weave/GetFullPathNameW: exit resolved={resolved_path:?} → {r} (size query)");
+        return r;
     }
 
     // Copy to buffer if it fits
@@ -9776,8 +9839,13 @@ pub unsafe extern "win64" fn get_full_path_name_w(
             }
         }
 
-        (required_chars - 1) as u32 // return chars written (excluding null)
+        let r = (required_chars - 1) as u32;
+        eprintln!("weave/GetFullPathNameW: exit resolved={resolved_path:?} → {r} (chars written)");
+        r // return chars written (excluding null)
     } else {
+        eprintln!(
+            "weave/GetFullPathNameW: exit resolved={resolved_path:?} required={required_chars} buf={n_buffer_length} → 0 (buf too small)"
+        );
         0 // error: buffer too small
     }
 }
@@ -10325,7 +10393,9 @@ pub unsafe extern "win64" fn set_file_attributes_w(
     const ERROR_PATH_NOT_FOUND: u32 = 3;
 
     if lp_file_name.is_null() {
-        eprintln!("weave/SetFileAttributesW: entry null_name attrs=0x{dw_file_attributes:x} → FALSE");
+        eprintln!(
+            "weave/SetFileAttributesW: entry null_name attrs=0x{dw_file_attributes:x} → FALSE"
+        );
         set_last_error(ERROR_PATH_NOT_FOUND);
         return 0; // FALSE
     }
@@ -10336,7 +10406,9 @@ pub unsafe extern "win64" fn set_file_attributes_w(
         len += 1;
     }
     if len == MAX_UTF16_LEN {
-        eprintln!("weave/SetFileAttributesW: entry overlong_name attrs=0x{dw_file_attributes:x} → FALSE");
+        eprintln!(
+            "weave/SetFileAttributesW: entry overlong_name attrs=0x{dw_file_attributes:x} → FALSE"
+        );
         set_last_error(ERROR_PATH_NOT_FOUND);
         return 0; // FALSE
     }
@@ -10392,7 +10464,9 @@ pub unsafe extern "win64" fn set_file_attributes_w(
         let new_mode = stat.st_mode & !(libc::S_IWUSR | libc::S_IWGRP | libc::S_IWOTH);
         let chmod_ret = unsafe { libc::chmod(c_path.as_ptr(), new_mode) };
         if chmod_ret != 0 {
-            eprintln!("weave/SetFileAttributesW: exit path={win_path:?} chmod_readonly_err → FALSE");
+            eprintln!(
+                "weave/SetFileAttributesW: exit path={win_path:?} chmod_readonly_err → FALSE"
+            );
             set_last_error(ERROR_ACCESS_DENIED);
             return 0; // FALSE
         }
@@ -10408,7 +10482,9 @@ pub unsafe extern "win64" fn set_file_attributes_w(
     }
     // Any other flags: no-op on Linux — silently return TRUE
 
-    eprintln!("weave/SetFileAttributesW: exit path={win_path:?} attrs=0x{dw_file_attributes:x} → TRUE");
+    eprintln!(
+        "weave/SetFileAttributesW: exit path={win_path:?} attrs=0x{dw_file_attributes:x} → TRUE"
+    );
     1 // TRUE
 }
 
@@ -11782,6 +11858,9 @@ pub unsafe extern "win64" fn get_file_time(
     lp_last_access_time: *mut u64,
     lp_last_write_time: *mut u64,
 ) -> i32 {
+    eprintln!(
+        "weave/GetFileTime: entry handle={h_file:#x} lp_creation={lp_creation_time:?} lp_access={lp_last_access_time:?} lp_write={lp_last_write_time:?}"
+    );
     let fd = match handles::get_fd(h_file) {
         Some(fd) => fd,
         None => {
@@ -11848,9 +11927,7 @@ pub unsafe extern "win64" fn set_file_time(
         Some(fd) => fd,
         None => {
             set_last_error(file_io::ERROR_INVALID_HANDLE);
-            eprintln!(
-                "weave/SetFileTime: exit handle={h_file:#x} fd=? → FALSE (bad_handle)"
-            );
+            eprintln!("weave/SetFileTime: exit handle={h_file:#x} fd=? → FALSE (bad_handle)");
             return 0; // FALSE
         }
     };
@@ -15587,9 +15664,7 @@ pub unsafe extern "win64" fn get_process_times(
             }
         }
     }
-    eprintln!(
-        "weave/GetProcessTimes: creation={ft_now:#x} exit=0 kernel=0 user=0 → TRUE"
-    );
+    eprintln!("weave/GetProcessTimes: creation={ft_now:#x} exit=0 kernel=0 user=0 → TRUE");
     1
 }
 
