@@ -551,7 +551,14 @@ pub unsafe extern "win64" fn terminate_process(_h_process: usize, u_exit_code: u
 // Wine ref: include/winbase.h:2679 — inline that reads TEB->LastErrorValue;
 // kernelbase implements via NtCurrentTeb()->LastErrorValue directly.
 pub extern "win64" fn get_last_error() -> u32 {
-    weave_common::get_last_error()
+    let v = weave_common::get_last_error();
+    // Trace every GetLastError to pinpoint stale-errno bleeds that turn into
+    // spurious HRESULT_FROM_WIN32(GetLastError()) wrappers in apps like 7-Zip.
+    // Zero is common (success); skip to keep noise down.
+    if v != 0 {
+        eprintln!("weave/GetLastError: → {v} (0x{v:x})");
+    }
+    v
 }
 
 /// SetLastError: set the calling thread's last error code.
