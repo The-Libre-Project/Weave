@@ -4788,10 +4788,17 @@ fn sevenzip_m13_roundtrip_gate() {
     // ===== Phase 1: create =====
     // CWD = work_dir so the input filenames stored in the archive are bare
     // (no path prefix), which keeps the extract path simple.
+    //
+    // DIAGNOSTIC (M13 flag bisect round 1): pass `-mtc-` to disable creation-time
+    // archive field. On Linux, stat.st_ctime is "inode change time" (updated on
+    // any inode metadata write), NOT "creation time" as on Windows. Weave maps
+    // st_ctime → ftCreationTime; 7-Zip may reject with E_INVALIDARG. If this
+    // gate passes with -mtc-, the fix surface is the timestamp mapping.
     let create_out = std::process::Command::new(weave_bin)
         .current_dir(&work_dir)
         .arg(&seven_zip)
         .arg("a")
+        .arg("-mtc-")
         .arg("roundtrip.7z")
         .arg("hello.txt")
         .arg("lorem.txt")
