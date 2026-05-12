@@ -11825,6 +11825,9 @@ pub unsafe extern "win64" fn set_file_time(
         Some(fd) => fd,
         None => {
             set_last_error(file_io::ERROR_INVALID_HANDLE);
+            eprintln!(
+                "weave/SetFileTime: exit handle={h_file:#x} fd=? → FALSE (bad_handle)"
+            );
             return 0; // FALSE
         }
     };
@@ -11842,8 +11845,28 @@ pub unsafe extern "win64" fn set_file_time(
     // If only creation time is given, Linux cannot set ctime — silently succeed.
     if lp_last_access_time.is_null() && lp_last_write_time.is_null() {
         set_last_error(0);
+        eprintln!(
+            "weave/SetFileTime: exit handle={h_file:#x} fd={fd} → TRUE (creation-time-only, no-op on Linux)"
+        );
         return 1; // TRUE — creation-time-only set is a no-op on Linux
     }
+
+    let ft_access = if lp_last_access_time.is_null() {
+        0u64
+    } else {
+        // SAFETY: lp_last_access_time is non-null (checked above) and points to a valid
+        // u64 FILETIME per the caller's # Safety contract.  FILETIME is only 4-byte
+        // aligned, so read_unaligned avoids potential misalignment UB.
+        unsafe { std::ptr::read_unaligned(lp_last_access_time) }
+    };
+    let ft_write = if lp_last_write_time.is_null() {
+        0u64
+    } else {
+        // SAFETY: lp_last_write_time is non-null (checked above) and points to a valid
+        // u64 FILETIME per the caller's # Safety contract.  FILETIME is only 4-byte
+        // aligned, so read_unaligned avoids potential misalignment UB.
+        unsafe { std::ptr::read_unaligned(lp_last_write_time) }
+    };
 
     // Build [atime, mtime] pair; use UTIME_OMIT for NULL args.
     let omit = libc::timespec {
@@ -11854,22 +11877,28 @@ pub unsafe extern "win64" fn set_file_time(
         if lp_last_access_time.is_null() {
             omit
         } else {
-            to_timespec(unsafe { *lp_last_access_time })
+            to_timespec(ft_access)
         },
         if lp_last_write_time.is_null() {
             omit
         } else {
-            to_timespec(unsafe { *lp_last_write_time })
+            to_timespec(ft_write)
         },
     ];
 
     let ret = unsafe { libc::futimens(fd, times.as_ptr()) };
     if ret != 0 {
         set_last_error(file_io::ERROR_INVALID_HANDLE);
+        eprintln!(
+            "weave/SetFileTime: exit handle={h_file:#x} fd={fd} access={ft_access:#x} write={ft_write:#x} → FALSE (futimens_err)"
+        );
         return 0; // FALSE
     }
 
     set_last_error(0);
+    eprintln!(
+        "weave/SetFileTime: exit handle={h_file:#x} fd={fd} access={ft_access:#x} write={ft_write:#x} → TRUE"
+    );
     1 // TRUE
 }
 
@@ -15478,7 +15507,14 @@ pub struct FileTime {
     dw_high_date_time: u32,
 }
 
-/// GetProcessTimes: return zero CPU times. Returns TRUE.
+/// GetProcessTimes: return CPU times for an open process handle.
+///
+/// Creation time is approximated as the current wall-clock FILETIME (process
+/// just started from 7za's perspective).  Exit, kernel, and user times are
+/// zero (not yet exited; CPU accounting not tracked).  Returning a non-zero
+/// creation time is load-bearing: callers such as 7za use CompareFileTime on
+/// the creation-time FILETIME and throw E_INVALIDARG (0x80070057) if it is
+/// zero, treating zero as an invalid/uninitialized timestamp.
 ///
 /// # Safety
 /// Output pointers must be valid `FILETIME` structs or null.
@@ -15492,14 +15528,45 @@ pub unsafe extern "win64" fn get_process_times(
     lp_kernel_time: *mut FileTime,
     lp_user_time: *mut FileTime,
 ) -> i32 {
-    for p in [lp_creation_time, lp_exit_time, lp_kernel_time, lp_user_time] {
+    // Approximate creation time as current wall-clock time.
+    // A zero FILETIME is an invalid sentinel on Windows (pre-dates 1601) and
+    // triggers validity failures in callers that call CompareFileTime on it.
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: clock_gettime is async-signal-safe and always succeeds for
+    // CLOCK_REALTIME on Linux.  ts is stack-allocated and valid for the duration
+    // of the call.  Failure (ret != 0) is ignored: the only consequence is
+    // a zero ts, which still produces a non-zero FILETIME after the epoch offset.
+    unsafe { libc::clock_gettime(libc::CLOCK_REALTIME, &mut ts) };
+    let ns = ts.tv_sec as u64 * 10_000_000 + ts.tv_nsec as u64 / 100;
+    let ft_now = ns + 116_444_736_000_000_000u64;
+    let ft_low = ft_now as u32;
+    let ft_high = (ft_now >> 32) as u32;
+
+    if !lp_creation_time.is_null() {
+        // SAFETY: lp_creation_time is non-null (checked above) and points to a
+        // valid writable FileTime (8 bytes) per the caller's # Safety contract.
+        unsafe {
+            (*lp_creation_time).dw_low_date_time = ft_low;
+            (*lp_creation_time).dw_high_date_time = ft_high;
+        }
+    }
+    // Exit time = 0 (process still running); kernel/user CPU time = 0 (not tracked).
+    for p in [lp_exit_time, lp_kernel_time, lp_user_time] {
         if !p.is_null() {
+            // SAFETY: p is non-null (checked above) and points to a valid
+            // writable FileTime (8 bytes) per the caller's # Safety contract.
             unsafe {
                 (*p).dw_low_date_time = 0;
                 (*p).dw_high_date_time = 0;
             }
         }
     }
+    eprintln!(
+        "weave/GetProcessTimes: creation={ft_now:#x} exit=0 kernel=0 user=0 → TRUE"
+    );
     1
 }
 
