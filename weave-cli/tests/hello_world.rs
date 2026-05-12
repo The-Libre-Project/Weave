@@ -6,6 +6,15 @@ mod common;
 
 use common::capability::{CapabilityClass, CapabilityOutcome, CapabilityReport};
 
+static M13_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+
+fn m13_lock() -> std::sync::MutexGuard<'static, ()> {
+    M13_LOCK
+        .get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .expect("M13 7za test lock poisoned")
+}
+
 fn run_weave(fixture_name: &str) -> std::process::Output {
     let weave_bin = env!("CARGO_BIN_EXE_weave");
     let fixture = format!(
@@ -4729,6 +4738,7 @@ fn sevenzip_m13_roundtrip_gate() {
         eprintln!("skipping sevenzip_m13_roundtrip_gate — requires Linux");
         return;
     }
+    let _m13_guard = m13_lock();
 
     let manifest = env!("CARGO_MANIFEST_DIR");
     let bin_dir = format!("{manifest}/../tests/fixtures/bin");
@@ -5004,6 +5014,7 @@ fn sevenzip_m13_store_roundtrip_gate() {
         eprintln!("skipping sevenzip_m13_store_roundtrip_gate — requires Linux");
         return;
     }
+    let _m13_guard = m13_lock();
 
     let manifest = env!("CARGO_MANIFEST_DIR");
     let bin_dir = format!("{manifest}/../tests/fixtures/bin");
@@ -5102,7 +5113,10 @@ fn sevenzip_m13_store_roundtrip_gate() {
     // ===== Phase 2: extract =====
     let extract_dir = work_dir.join("extracted");
     std::fs::create_dir_all(&extract_dir).unwrap_or_else(|e| {
-        panic!("failed to create extract_dir {}: {e}", extract_dir.display())
+        panic!(
+            "failed to create extract_dir {}: {e}",
+            extract_dir.display()
+        )
     });
 
     let extract_out = std::process::Command::new(weave_bin)
@@ -5149,10 +5163,11 @@ fn sevenzip_m13_store_roundtrip_gate() {
                  extract_dir contents: {listing:?}\nstdout: {x_stdout}\nstderr: {x_stderr}",
             );
         }
-        let actual = std::fs::read(&path)
-            .unwrap_or_else(|e| panic!("failed to read extracted {name}: {e}"));
+        let actual =
+            std::fs::read(&path).unwrap_or_else(|e| panic!("failed to read extracted {name}: {e}"));
         assert_eq!(
-            actual, *expected,
+            actual,
+            *expected,
             "sevenzip_m13_store_roundtrip_gate A3 FAIL: {name} bytes mismatch\n\
              actual len: {}  expected len: {}\nstdout: {x_stdout}\nstderr: {x_stderr}",
             actual.len(),
