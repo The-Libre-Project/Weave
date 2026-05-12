@@ -4789,14 +4789,15 @@ fn sevenzip_m13_roundtrip_gate() {
     // CWD = work_dir so the input filenames stored in the archive are bare
     // (no path prefix), which keeps the extract path simple.
     //
-    // DIAGNOSTIC (M13 flag bisect round 3): -mtc- and -mtm- both red. Try
-    // `-mta-` to disable access-time archive field. Linux atime semantics
-    // differ from Windows (relatime, noatime mounts). If green, atime is it.
+    // DIAGNOSTIC (M13 flag bisect round 4): all three time flags red. Try
+    // `-ms=off` to disable solid archive mode. Solid forces multiple files
+    // through a single shared encoder stream; if Weave's encoder topology
+    // fails when multi-file solid is involved, this would isolate it.
     let create_out = std::process::Command::new(weave_bin)
         .current_dir(&work_dir)
         .arg(&seven_zip)
         .arg("a")
-        .arg("-mta-")
+        .arg("-ms=off")
         .arg("roundtrip.7z")
         .arg("hello.txt")
         .arg("lorem.txt")
