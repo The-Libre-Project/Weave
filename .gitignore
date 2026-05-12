@@ -60,3 +60,4 @@ docs/
 docs/*
 !docs/ERA3-ROADMAP.md
 !docs/UNSAFE-AUDIT.md
+!docs/SHIM-CONTRACT.md
