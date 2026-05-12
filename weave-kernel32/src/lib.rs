@@ -4734,11 +4734,17 @@ pub unsafe extern "win64" fn find_first_file_w(
         let mut stat_buf = unsafe { std::mem::zeroed::<libc::stat>() };
         let ret = unsafe { libc::stat(c_path.as_ptr(), &mut stat_buf) };
         if ret != 0 {
+            // 7-Zip and similar apps depend on a deterministic last-error on miss;
+            // otherwise they inherit whatever errno was set by a prior call and
+            // wrap that into a spurious HRESULT (e.g. 0x80070057 from ERROR_INVALID_PARAMETER).
+            set_last_error(file_io::ERROR_FILE_NOT_FOUND);
             eprintln!(
                 "weave/FindFirstFileW: exit path={win_path:?} linux={linux_path:?} → INVALID_HANDLE_VALUE (stat_err)"
             );
             return usize::MAX; // INVALID_HANDLE_VALUE — file not found
         }
+        // On success, clear last error per Windows semantics.
+        set_last_error(0);
 
         let is_dir = (stat_buf.st_mode & libc::S_IFMT) == libc::S_IFDIR;
         let filename = linux_path
@@ -4747,15 +4753,27 @@ pub unsafe extern "win64" fn find_first_file_w(
             .unwrap_or_default();
         let wide_name: Vec<u16> = filename.encode_utf16().collect();
 
+        // Convert Linux stat times to Windows FILETIME (100ns ticks since 1601-01-01).
+        // Same formula as get_file_information_by_handle; zero FILETIMEs cause apps like
+        // 7-Zip to reject the archive's central directory with E_INVALIDARG.
+        let to_filetime = |secs: i64, nsecs: i64| -> u64 {
+            let secs_since_1601 = secs.saturating_add(11_644_473_600) as u64;
+            secs_since_1601 * 10_000_000 + (nsecs as u64) / 100
+        };
+        let ft_creation = to_filetime(stat_buf.st_ctime, stat_buf.st_ctime_nsec);
+        let ft_access = to_filetime(stat_buf.st_atime, stat_buf.st_atime_nsec);
+        let ft_write = to_filetime(stat_buf.st_mtime, stat_buf.st_mtime_nsec);
+
         unsafe {
             (*lp_find_file_data).dw_file_attributes = if is_dir {
                 0x10 // FILE_ATTRIBUTE_DIRECTORY
             } else {
                 0x20 // FILE_ATTRIBUTE_ARCHIVE — matches what real FindFirstFileW returns
             };
-            (*lp_find_file_data).ft_creation_time = [0, 0];
-            (*lp_find_file_data).ft_last_access_time = [0, 0];
-            (*lp_find_file_data).ft_last_write_time = [0, 0];
+            (*lp_find_file_data).ft_creation_time =
+                [ft_creation as u32, (ft_creation >> 32) as u32];
+            (*lp_find_file_data).ft_last_access_time = [ft_access as u32, (ft_access >> 32) as u32];
+            (*lp_find_file_data).ft_last_write_time = [ft_write as u32, (ft_write >> 32) as u32];
             (*lp_find_file_data).n_file_size_high = ((stat_buf.st_size as u64) >> 32) as u32;
             (*lp_find_file_data).n_file_size_low = (stat_buf.st_size as u64 & 0xFFFF_FFFF) as u32;
             (*lp_find_file_data).dw_reserved0 = 0;
@@ -4775,7 +4793,8 @@ pub unsafe extern "win64" fn find_first_file_w(
         let size_lo = unsafe { (*lp_find_file_data).n_file_size_low };
         let size_hi = unsafe { (*lp_find_file_data).n_file_size_high };
         eprintln!(
-            "weave/FindFirstFileW: exit path={win_path:?} attrs={attrs:#x} size_hi={size_hi:#x} size_lo={size_lo:#x} → handle=1 (single-file sentinel)"
+            "weave/FindFirstFileW: exit path={win_path:?} attrs={attrs:#x} size_hi={size_hi:#x} size_lo={size_lo:#x} \
+             ft_cre={ft_creation:#x} ft_acc={ft_access:#x} ft_wri={ft_write:#x} → handle=1 (single-file sentinel)"
         );
         // Return sentinel 1: a single-file handle (FindNextFileW returns FALSE for it).
         return 1;
