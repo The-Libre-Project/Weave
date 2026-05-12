@@ -5186,3 +5186,193 @@ fn sevenzip_m13_store_roundtrip_gate() {
 
     let _ = std::fs::remove_dir_all(&work_dir);
 }
+
+/// sevenzip_m13_v23_roundtrip_gate — M13 round-trip gate using 7za 23.01.
+///
+/// Same fixture and assertions as `sevenzip_m13_roundtrip_gate` (default LZMA2
+/// compression), but runs against `7za-23.exe` (23.01 x64) instead of 26.00.
+///
+/// Purpose: determine whether the `Error #80070057` finish-header failure is
+/// specific to 7za 26.00 or also present in 23.01.
+///
+/// - If this gate passes and the 26.00 gate stays red → 26.00-specific
+///   regression; pin M13 required gate to 23.01, defer 26.00 as M13c.
+/// - If this gate also fails with the same error → Weave metadata/header
+///   bug, not 26.00-specific; root cause investigation required.
+///
+/// Skipped gracefully on macOS and if `7za-23.exe` is absent from fixtures.
+#[test]
+fn sevenzip_m13_v23_roundtrip_gate() {
+    if !cfg!(target_os = "linux") {
+        eprintln!("skipping sevenzip_m13_v23_roundtrip_gate — requires Linux");
+        return;
+    }
+    let _m13_guard = m13_lock();
+
+    let manifest = env!("CARGO_MANIFEST_DIR");
+    let bin_dir = format!("{manifest}/../tests/fixtures/bin");
+    let seven_zip = format!("{bin_dir}/7za-23.exe");
+    let fixture_dir = format!("{manifest}/../tests/fixtures/sevenzip/m13");
+
+    if !std::path::Path::new(&seven_zip).exists() {
+        eprintln!("skipping: 7za-23.exe not present in tests/fixtures/bin/");
+        return;
+    }
+    if !std::path::Path::new(&fixture_dir).exists() {
+        eprintln!("skipping: M13 fixture dir missing at {fixture_dir}");
+        return;
+    }
+
+    let hello_expected: &[u8] = include_bytes!("../../tests/fixtures/sevenzip/m13/hello.txt");
+    let lorem_expected: &[u8] = include_bytes!("../../tests/fixtures/sevenzip/m13/lorem.txt");
+    let bytes_expected: &[u8] = include_bytes!("../../tests/fixtures/sevenzip/m13/bytes.bin");
+
+    let work_dir = std::path::PathBuf::from(&bin_dir).join("m13_v23_work");
+
+    let _ = std::fs::remove_dir_all(&work_dir);
+    std::fs::create_dir_all(&work_dir)
+        .unwrap_or_else(|e| panic!("failed to create work_dir {}: {e}", work_dir.display()));
+
+    for name in &["hello.txt", "lorem.txt", "bytes.bin"] {
+        let src = std::path::PathBuf::from(&fixture_dir).join(name);
+        let dst = work_dir.join(name);
+        std::fs::copy(&src, &dst).unwrap_or_else(|e| {
+            panic!(
+                "failed to copy fixture {} -> {}: {e}",
+                src.display(),
+                dst.display()
+            )
+        });
+    }
+
+    let weave_bin = env!("CARGO_BIN_EXE_weave");
+
+    // ===== Phase 1: create =====
+    let create_out = std::process::Command::new(weave_bin)
+        .current_dir(&work_dir)
+        .arg(&seven_zip)
+        .arg("a")
+        .arg("roundtrip23.7z")
+        .arg("hello.txt")
+        .arg("lorem.txt")
+        .arg("bytes.bin")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run weave on 7za-23.exe a: {e}"));
+
+    let c_stdout = String::from_utf8_lossy(&create_out.stdout);
+    let c_stderr = String::from_utf8_lossy(&create_out.stderr);
+
+    eprintln!(
+        "sevenzip_m13_v23_roundtrip_gate: create exit: {}",
+        create_out.status
+    );
+    eprintln!("--- 7za-23 a stdout ---\n{c_stdout}");
+    eprintln!("--- 7za-23 a stderr ---\n{c_stderr}");
+
+    // A1: create exit 0.
+    assert!(
+        create_out.status.success(),
+        "sevenzip_m13_v23_roundtrip_gate A1 FAIL: weave 7za-23.exe a exited non-zero: {}\n\
+         stdout: {c_stdout}\nstderr: {c_stderr}",
+        create_out.status
+    );
+
+    // A2: archive exists and is non-empty.
+    let archive_path = work_dir.join("roundtrip23.7z");
+    let archive_meta = std::fs::metadata(&archive_path).unwrap_or_else(|e| {
+        panic!(
+            "sevenzip_m13_v23_roundtrip_gate A2 FAIL: stat({}) failed: {e}\n\
+             work_dir: {:?}\nstdout: {c_stdout}\nstderr: {c_stderr}",
+            archive_path.display(),
+            std::fs::read_dir(&work_dir)
+                .map(|r| r
+                    .filter_map(|e| e.ok())
+                    .map(|e| e.file_name())
+                    .collect::<Vec<_>>())
+                .unwrap_or_default(),
+        )
+    });
+    let archive_len = archive_meta.len();
+    assert!(
+        archive_len > 0,
+        "sevenzip_m13_v23_roundtrip_gate A2 FAIL: archive is 0 bytes\n\
+         stdout: {c_stdout}\nstderr: {c_stderr}",
+    );
+    eprintln!("sevenzip_m13_v23_roundtrip_gate: archive size {archive_len} bytes");
+
+    // ===== Phase 2: extract =====
+    let extract_dir = work_dir.join("extracted");
+    std::fs::create_dir_all(&extract_dir).unwrap_or_else(|e| {
+        panic!(
+            "failed to create extract_dir {}: {e}",
+            extract_dir.display()
+        )
+    });
+
+    let extract_out = std::process::Command::new(weave_bin)
+        .current_dir(&work_dir)
+        .arg(&seven_zip)
+        .arg("x")
+        .arg("roundtrip23.7z")
+        .arg(format!("-o{}", extract_dir.display()))
+        .arg("-y")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run weave on 7za-23.exe x: {e}"));
+
+    let x_stdout = String::from_utf8_lossy(&extract_out.stdout);
+    let x_stderr = String::from_utf8_lossy(&extract_out.stderr);
+
+    eprintln!(
+        "sevenzip_m13_v23_roundtrip_gate: extract exit: {}",
+        extract_out.status
+    );
+    eprintln!("--- 7za-23 x stdout ---\n{x_stdout}");
+    eprintln!("--- 7za-23 x stderr ---\n{x_stderr}");
+
+    assert!(
+        extract_out.status.success(),
+        "sevenzip_m13_v23_roundtrip_gate extract FAIL: weave 7za-23.exe x exited non-zero: {}\n\
+         stdout: {x_stdout}\nstderr: {x_stderr}",
+        extract_out.status
+    );
+
+    // A3: extracted bytes match fixture.
+    let checks: &[(&str, &[u8])] = &[
+        ("hello.txt", hello_expected),
+        ("lorem.txt", lorem_expected),
+        ("bytes.bin", bytes_expected),
+    ];
+    for (name, expected) in checks {
+        let path = extract_dir.join(name);
+        if !path.exists() {
+            let listing: Vec<_> = std::fs::read_dir(&extract_dir)
+                .map(|r| r.filter_map(|e| e.ok()).map(|e| e.file_name()).collect())
+                .unwrap_or_default();
+            panic!(
+                "sevenzip_m13_v23_roundtrip_gate A3 FAIL: {name} missing after extract\n\
+                 extract_dir: {listing:?}\nstdout: {x_stdout}\nstderr: {x_stderr}",
+            );
+        }
+        let actual =
+            std::fs::read(&path).unwrap_or_else(|e| panic!("failed to read extracted {name}: {e}"));
+        assert_eq!(
+            actual,
+            *expected,
+            "sevenzip_m13_v23_roundtrip_gate A3 FAIL: {name} bytes mismatch\n\
+             actual len: {}  expected len: {}\nstdout: {x_stdout}\nstderr: {x_stderr}",
+            actual.len(),
+            expected.len()
+        );
+        eprintln!(
+            "sevenzip_m13_v23_roundtrip_gate: {name} round-trip OK ({} bytes)",
+            actual.len()
+        );
+    }
+
+    eprintln!(
+        "sevenzip_m13_v23_roundtrip_gate: all Tier A gates passed — 3 files round-tripped \
+         (7za 23.01, archive {archive_len} bytes)"
+    );
+
+    let _ = std::fs::remove_dir_all(&work_dir);
+}
