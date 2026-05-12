@@ -2987,6 +2987,7 @@ pub unsafe extern "win64" fn set_file_pointer(
 // INVALID_FILE_SIZE (0xFFFFFFFF) and no error, clears LastError to 0
 // to distinguish valid 4GB-1 size from failure (same trick as SetFilePointer).
 pub unsafe extern "win64" fn get_file_size(h_file: usize, lp_file_size_high: *mut u32) -> u32 {
+    eprintln!("weave/GetFileSize: entry handle={h_file:#x} lp_high={lp_file_size_high:?}");
     let fd = match handles::get_fd(h_file) {
         Some(fd) => fd,
         None => {
@@ -3061,18 +3062,24 @@ pub unsafe extern "win64" fn get_file_information_by_handle(
     let ft_access = to_filetime(stat.st_atime, stat.st_atime_nsec);
     let ft_write = to_filetime(stat.st_mtime, stat.st_mtime_nsec);
 
+    let dw_file_attributes = if (stat.st_mode & libc::S_IFMT) == libc::S_IFDIR {
+        0x10u32 // FILE_ATTRIBUTE_DIRECTORY
+    } else {
+        0x80u32 // FILE_ATTRIBUTE_NORMAL
+    };
+    let n_links = stat.st_nlink as u32;
+    let idx_hi = (stat.st_ino >> 32) as u32;
+    let idx_lo = (stat.st_ino & 0xFFFFFFFF) as u32;
     eprintln!(
-        "weave/GetFileInformationByHandle: h={h_file:#x} fd={fd} ino={ino:#x} size={size} \
+        "weave/GetFileInformationByHandle: h={h_file:#x} fd={fd} \
+         attrs={dw_file_attributes:#x} serial=0xDEADBEEF \
+         ino={ino:#x} idx_hi={idx_hi:#x} idx_lo={idx_lo:#x} \
+         links={n_links} size={size} \
          ft_cre={ft_creation:#x} ft_acc={ft_access:#x} ft_wri={ft_write:#x}"
     );
 
     unsafe {
-        (*lp_file_information).dw_file_attributes =
-            if (stat.st_mode & libc::S_IFMT) == libc::S_IFDIR {
-                0x10 // FILE_ATTRIBUTE_DIRECTORY
-            } else {
-                0x80 // FILE_ATTRIBUTE_NORMAL
-            };
+        (*lp_file_information).dw_file_attributes = dw_file_attributes;
         (*lp_file_information).ft_creation_time_low = ft_creation as u32;
         (*lp_file_information).ft_creation_time_high = (ft_creation >> 32) as u32;
         (*lp_file_information).ft_last_access_time_low = ft_access as u32;
@@ -3082,9 +3089,9 @@ pub unsafe extern "win64" fn get_file_information_by_handle(
         (*lp_file_information).dw_volume_serial_number = 0xDEADBEEF;
         (*lp_file_information).n_file_size_high = (stat.st_size >> 32) as u32;
         (*lp_file_information).n_file_size_low = (stat.st_size & 0xFFFFFFFF) as u32;
-        (*lp_file_information).n_number_of_links = stat.st_nlink as u32;
-        (*lp_file_information).n_file_index_high = (stat.st_ino >> 32) as u32;
-        (*lp_file_information).n_file_index_low = (stat.st_ino & 0xFFFFFFFF) as u32;
+        (*lp_file_information).n_number_of_links = n_links;
+        (*lp_file_information).n_file_index_high = idx_hi;
+        (*lp_file_information).n_file_index_low = idx_lo;
     }
 
     1 // TRUE
@@ -11989,10 +11996,12 @@ pub extern "win64" fn get_file_type(h_file: usize) -> u32 {
 // Wine ref: dlls/kernelbase/file.c:3242 — calls NtQueryInformationFile(FileStandardInformation);
 // writes info.EndOfFile (LARGE_INTEGER) directly to *size; returns FALSE on NT error
 pub unsafe extern "win64" fn get_file_size_ex(h_file: usize, lp_file_size: *mut i64) -> i32 {
+    eprintln!("weave/GetFileSizeEx: entry handle={h_file:#x}");
     let fd = match handles::get_fd(h_file) {
         Some(fd) => fd,
         None => {
             set_last_error(file_io::ERROR_INVALID_HANDLE);
+            eprintln!("weave/GetFileSizeEx: exit handle={h_file:#x} → FALSE (bad_handle)");
             return 0; // FALSE
         }
     };
@@ -12001,6 +12010,7 @@ pub unsafe extern "win64" fn get_file_size_ex(h_file: usize, lp_file_size: *mut 
     let ret = unsafe { libc::fstat(fd, &mut stat) };
     if ret != 0 {
         set_last_error(file_io::ERROR_INVALID_HANDLE);
+        eprintln!("weave/GetFileSizeEx: exit handle={h_file:#x} fd={fd} → FALSE (fstat_err)");
         return 0; // FALSE
     }
 
@@ -12008,6 +12018,10 @@ pub unsafe extern "win64" fn get_file_size_ex(h_file: usize, lp_file_size: *mut 
         unsafe { *lp_file_size = stat.st_size };
     }
     set_last_error(0);
+    eprintln!(
+        "weave/GetFileSizeEx: exit handle={h_file:#x} fd={fd} size={} → TRUE",
+        stat.st_size
+    );
     1 // TRUE
 }
 
