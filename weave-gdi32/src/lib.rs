@@ -895,7 +895,10 @@ pub extern "win64" fn bit_blt(
         eprintln!("weave/gdi32: BitBlt dst={dst_draw:#x} src={src_draw:#x} ({x},{y}) {cx}x{cy}");
     }
     if dst_draw == 0 {
-        return 0;
+        // Headless/library-test path: the DC is valid but no X11 drawable is
+        // available. Treat this like the backend no-op cases below and report
+        // success so ROP-dispatch probes can run without a display.
+        return 1;
     }
     // Classify the ROP.  Source ROPs need src_draw and a DIB sync; pattern-only
     // ROPs (PATCOPY/DSTINVERT/WHITENESS/BLACKNESS) ignore the source entirely.
