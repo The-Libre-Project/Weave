@@ -3065,7 +3065,7 @@ pub unsafe extern "win64" fn get_file_information_by_handle(
     let dw_file_attributes = if (stat.st_mode & libc::S_IFMT) == libc::S_IFDIR {
         0x10u32 // FILE_ATTRIBUTE_DIRECTORY
     } else {
-        0x80u32 // FILE_ATTRIBUTE_NORMAL
+        0x20u32 // FILE_ATTRIBUTE_ARCHIVE — real Windows sets this on all regular files
     };
     let n_links = stat.st_nlink as u32;
     let idx_hi = (stat.st_ino >> 32) as u32;
