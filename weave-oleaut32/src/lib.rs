@@ -106,8 +106,11 @@ pub unsafe extern "win64" fn sys_alloc_string_len(psz: *const u16, len: u32) -> 
 /// `bstr` must be a BSTR allocated by `sys_alloc_string*`, or null.
 pub unsafe extern "win64" fn sys_free_string(bstr: *mut u16) {
     if bstr.is_null() {
+        eprintln!("weave/SysFreeString: bstr=NULL");
         return;
     }
+    let byte_len = unsafe { *((bstr as *const u8).sub(4) as *const u32) };
+    eprintln!("weave/SysFreeString: bstr={bstr:p} byte_len={byte_len}");
     let alloc = unsafe { (bstr as *mut u8).sub(4) };
     unsafe { libc::free(alloc as *mut libc::c_void) };
 }
@@ -170,7 +173,21 @@ pub unsafe extern "win64" fn variant_clear(pvar: *mut u8) -> i32 {
         return 0;
     }
     let prior_vt = unsafe { *(pvar as *const u16) };
-    eprintln!("weave/VariantClear: pvar={pvar:p} prior_vt={prior_vt}");
+    let res1 = unsafe { *(pvar.add(2) as *const u16) };
+    let res2 = unsafe { *(pvar.add(4) as *const u16) };
+    let res3 = unsafe { *(pvar.add(6) as *const u16) };
+    let val_lo = unsafe { *(pvar.add(8) as *const u64) };
+    eprintln!(
+        "weave/VariantClear: pvar={pvar:p} vt={prior_vt} res=[{res1:#x},{res2:#x},{res3:#x}] val={val_lo:#018x}"
+    );
+    // For VT_BSTR (vt=8), free the BSTR; for VT_DISPATCH/UNKNOWN (9,13) we'd
+    // need to call Release, but those aren't expected on the M13 path.
+    const VT_BSTR: u16 = 8;
+    if prior_vt == VT_BSTR && val_lo != 0 {
+        let bstr = val_lo as *mut u16;
+        let alloc = unsafe { (bstr as *mut u8).sub(4) };
+        unsafe { libc::free(alloc as *mut libc::c_void) };
+    }
     unsafe { std::ptr::write_bytes(pvar, 0, 16) };
     0 // S_OK
 }
