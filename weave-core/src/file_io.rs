@@ -109,15 +109,36 @@ pub fn translate_win_path(win_path: &str) -> Result<std::path::PathBuf, i32> {
     }
 
     // Fallback 2: relative path (no drive letter, no leading backslash) →
-    // try resolving against the real Linux CWD.  This lets apps like testsprite2
-    // open "moose.bmp" / "icon.bmp" from the directory they were launched from
-    // without needing a full Windows path.
+    // resolve against the real Linux CWD.  This matches Windows semantics: a
+    // relative path is taken to be relative to the process current directory.
+    //
+    // Critically, this applies BOTH for reads (existing files like
+    // "moose.bmp" / "icon.bmp" / "test.7z" that the launching shell expects
+    // the app to find in its CWD) AND for creates (e.g. 7-Zip writing
+    // "roundtrip.7z" — the file does not exist yet but the user expects it
+    // to land in the current working directory, not in
+    // {prefix}/drive_c/roundtrip.7z which is invisible to the caller).
+    //
+    // Algorithm:
+    //   • If the CWD-resolved candidate exists → use it (read path).
+    //   • Else if the CWD-resolved candidate's *parent* exists → use it
+    //     anyway (create path: parent dir is the real on-disk target).
+    //   • Else fall through to the prefix-translated path (existing
+    //     behavior for paths that genuinely belong inside drive_c).
     if !win_path.contains(':') && !win_path.starts_with('\\') && !win_path.starts_with('/') {
         let rel = win_path.replace('\\', "/");
         if let Ok(cwd) = std::env::current_dir() {
             let cwd_candidate = cwd.join(&rel);
             if cwd_candidate.exists() {
                 return Ok(cwd_candidate);
+            }
+            // Create-time path: target doesn't exist but its parent does.
+            // Prefer landing the new file next to the caller (Linux CWD)
+            // rather than burying it inside the emulated drive_c.
+            if let Some(parent) = cwd_candidate.parent() {
+                if parent.exists() {
+                    return Ok(cwd_candidate);
+                }
             }
         }
     }

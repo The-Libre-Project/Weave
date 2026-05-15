@@ -4742,12 +4742,7 @@ fn sevenzip_m13_roundtrip_gate() {
 
     let manifest = env!("CARGO_MANIFEST_DIR");
     let bin_dir = format!("{manifest}/../tests/fixtures/bin");
-    // DIAGNOSTIC: point at 7za-debug.exe — our cross-compiled 7-Zip with
-    // RINOK / ThrowException_if_Error / COM_TRY_END instrumented to print
-    // `WEAVEDBG: ...` lines on every error propagation. Goal: localize the
-    // specific `return E_INVALIDARG` callsite producing M13's 0x80070057.
-    // Revert this path to "7za.exe" once root cause is identified and fixed.
-    let seven_zip = format!("{bin_dir}/7za-debug.exe");
+    let seven_zip = format!("{bin_dir}/7za.exe");
     let fixture_dir = format!("{manifest}/../tests/fixtures/sevenzip/m13");
 
     if !std::path::Path::new(&seven_zip).exists() {
@@ -5029,11 +5024,7 @@ fn sevenzip_m13_store_roundtrip_gate() {
 
     let manifest = env!("CARGO_MANIFEST_DIR");
     let bin_dir = format!("{manifest}/../tests/fixtures/bin");
-    // DIAGNOSTIC: also point at 7za-debug.exe to test whether -mx0 store mode
-    // works against the 26.01 build (which has VariantCopy import that Weave
-    // now resolves). If A1 passes here too, the failure of the original 7za.exe
-    // (26.00) is purely a 26.00-binary-specific code path, not a Weave gap.
-    let seven_zip = format!("{bin_dir}/7za-debug.exe");
+    let seven_zip = format!("{bin_dir}/7za.exe");
     let fixture_dir = format!("{manifest}/../tests/fixtures/sevenzip/m13");
 
     if !std::path::Path::new(&seven_zip).exists() {
