@@ -5474,27 +5474,46 @@ fn sevenzip_m13_debug_e_gate() {
     }
     eprintln!("=== end breadcrumbs ===");
 
-    // If the binary succeeded, that's also diagnostic — means 23.01 MinGW does NOT
-    // reproduce the MSVC failure, pointing to ABI/compiler difference.
-    if create_out.status.success() {
-        eprintln!("sevenzip_m13_debug_e_gate: DIAGNOSTIC — 7za-debug-E.exe create SUCCEEDED (exit 0)");
-        eprintln!("  This means 23.01 MinGW build does NOT reproduce the MSVC failure.");
-        eprintln!("  Implication: failure is MSVC-specific, not source-version-specific.");
+    // Build a full diagnostic summary.
+    let outcome_msg = if create_out.status.success() {
+        format!(
+            "7za-debug-E.exe create SUCCEEDED (exit 0) — \
+             23.01 MinGW build does NOT reproduce the MSVC E_INVALIDARG. \
+             Implication: failure is MSVC-specific or ABI-specific. \
+             WEAVEDBG breadcrumbs: {} lines",
+            breadcrumbs.len()
+        )
     } else {
-        eprintln!(
-            "sevenzip_m13_debug_e_gate: DIAGNOSTIC — 7za-debug-E.exe create FAILED (exit {})",
-            create_out.status
-        );
-        if breadcrumbs.is_empty() {
-            eprintln!("  WARNING: no WEAVEDBG breadcrumbs found — failure may be before WriteDatabase");
-            eprintln!("  Check if a Win32 call failed early (look for 'error' in stdout above)");
+        let bc_summary = if breadcrumbs.is_empty() {
+            "no WEAVEDBG breadcrumbs — failure is before WriteDatabase or Win32 call failed early".to_string()
         } else {
-            eprintln!("  First WEAVEDBG breadcrumb: {}", breadcrumbs[0]);
-            eprintln!("  Last  WEAVEDBG breadcrumb: {}", breadcrumbs[breadcrumbs.len() - 1]);
-        }
-    }
+            format!(
+                "{} breadcrumbs — first: [{}]  last: [{}]",
+                breadcrumbs.len(),
+                breadcrumbs[0],
+                breadcrumbs[breadcrumbs.len() - 1]
+            )
+        };
+        format!(
+            "7za-debug-E.exe create FAILED (exit {}) — breadcrumbs: {}",
+            create_out.status,
+            bc_summary
+        )
+    };
 
-    // Always succeed — this is a diagnostic gate, not a pass/fail gate.
-    // The operator reads the breadcrumb output from CI/Docker logs.
     let _ = std::fs::remove_dir_all(&work_dir);
+
+    // Fail with full diagnostic output so CI shows breadcrumbs in the failure log.
+    // This is intentional — the operator reads the output to find the source line.
+    // Remove this panic once the source line is pinned (follow-up F).
+    panic!(
+        "sevenzip_m13_debug_e_gate DIAGNOSTIC DUMP (intentional fail for log visibility):\n\
+         outcome: {outcome_msg}\n\
+         --- 7za-debug-E a stdout ---\n{c_stdout}\n\
+         --- 7za-debug-E a stderr (WEAVEDBG breadcrumbs below) ---\n{c_stderr}\n\
+         === WEAVEDBG breadcrumb chain ({bc_count} lines) ===\n{bc_joined}\n\
+         === end breadcrumbs ===",
+        bc_count = breadcrumbs.len(),
+        bc_joined = breadcrumbs.join("\n"),
+    );
 }
