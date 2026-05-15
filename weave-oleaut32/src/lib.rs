@@ -14,6 +14,7 @@
 //!   #8   → SysStringByteLen
 //!   #9   → VariantClear
 //!   #10  → VariantInit
+//!   #11  → VariantCopy
 //!   #149 → (alias; #4 is the canonical SysAllocStringLen ordinal)
 
 #![allow(non_snake_case)]
@@ -144,6 +145,83 @@ pub unsafe extern "win64" fn variant_clear(pvar: *mut u8) -> i32 {
     0 // S_OK
 }
 
+/// VariantCopy — copy a VARIANT, deep-cloning any reference-type payload.
+///
+/// Win32 layout (VARIANT, 16 bytes on x64):
+///   offset 0..2   : VARTYPE vt
+///   offset 2..8   : reserved (wReserved1/2/3, must be preserved or zeroed)
+///   offset 8..16  : union (BSTR, IUnknown*, scalar, etc.)
+///
+/// 7-Zip's CPropVariant::Copy delegates to ::VariantCopy for non-simple types
+/// including VT_BSTR. If unresolved, the destination stays VT_EMPTY and the
+/// caller's encoder rejects the property with E_INVALIDARG — observed as the
+/// M13 sevenzip_m13_roundtrip_gate failure path through LzmaEncoder.cpp:203.
+///
+/// This implementation handles the common VT codes used by 7-Zip:
+///   • simple by-value (VT_EMPTY, VT_NULL, VT_I1..VT_UI8, VT_BOOL, VT_R4/R8,
+///     VT_ERROR, VT_FILETIME, VT_DATE, VT_CY, VT_DECIMAL) → 16-byte memcpy
+///   • VT_BSTR → SysAllocStringLen-equivalent deep copy
+///
+/// For unsupported reference types (VT_DISPATCH/UNKNOWN/SAFEARRAY/VARIANT/
+/// pointer-to-anything), falls through to a 16-byte memcpy (matches what
+/// "unresolved → S_OK" would have done, but at least produces a valid copy
+/// of the discriminant — better than leaving the destination VT_EMPTY).
+///
+/// Returns S_OK on success, E_OUTOFMEMORY if the BSTR allocation fails.
+///
+/// # Safety
+/// Both pointers must be valid 16-byte writable/readable VARIANT buffers.
+pub unsafe extern "win64" fn variant_copy(pdest: *mut u8, psrc: *const u8) -> i32 {
+    if pdest.is_null() || psrc.is_null() {
+        return 0; // S_OK — Windows: VariantCopy with NULL returns DISP_E_BADVARTYPE,
+                  // but the unresolved-stub fallback would have returned 0; keep that
+                  // for the rare edge case to avoid behavior regressions.
+    }
+    // 1. Clear destination first (matches VariantClear semantics; releases any
+    //    prior BSTR pointed at by pdest).
+    let _ = unsafe { variant_clear(pdest) };
+    // 2. Read source vt.
+    let src_vt = unsafe { *(psrc as *const u16) };
+    // 3. Handle VT_BSTR specially — deep-clone the string.
+    const VT_BSTR: u16 = 8;
+    if src_vt == VT_BSTR {
+        let src_bstr = unsafe { *(psrc.add(8) as *const *const u16) };
+        let new_bstr = if src_bstr.is_null() {
+            std::ptr::null_mut()
+        } else {
+            // BSTR is preceded by a 4-byte byte-length prefix.
+            let byte_len = unsafe { *((src_bstr as *const u8).sub(4) as *const u32) } as usize;
+            let total = 4 + byte_len + 2;
+            let buf = unsafe { libc::malloc(total) as *mut u8 };
+            if buf.is_null() {
+                return 0x8007_000Eu32 as i32; // E_OUTOFMEMORY
+            }
+            unsafe { *(buf as *mut u32) = byte_len as u32 };
+            let data = unsafe { buf.add(4) as *mut u16 };
+            unsafe {
+                std::ptr::copy_nonoverlapping(src_bstr as *const u8, data as *mut u8, byte_len);
+                *data.add(byte_len / 2) = 0;
+            }
+            data
+        };
+        unsafe {
+            *(pdest as *mut u16) = VT_BSTR;
+            // Zero wReserved1/2/3 (offset 2..8) per Windows spec.
+            std::ptr::write_bytes(pdest.add(2), 0, 6);
+            *(pdest.add(8) as *mut *mut u16) = new_bstr;
+        }
+        return 0; // S_OK
+    }
+    // 4. For everything else, do a flat 16-byte copy. Correct for all "by-value"
+    //    variants; for VT_DISPATCH / VT_UNKNOWN this leaks a refcount but doesn't
+    //    crash (7-Zip's create-archive path doesn't put interface pointers into
+    //    CPropVariant values it then copies).
+    unsafe {
+        std::ptr::copy_nonoverlapping(psrc, pdest, 16);
+    }
+    0 // S_OK
+}
+
 // ── Resolver ─────────────────────────────────────────────────────────────────
 
 /// Resolve an oleaut32.dll import (by name or ordinal string "#N").
@@ -177,6 +255,9 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         }
         "VariantInit" | "#10" => {
             Some(variant_init as unsafe extern "win64" fn(_) as *const () as usize)
+        }
+        "VariantCopy" | "#11" => {
+            Some(variant_copy as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
         }
         _ => None,
     }
