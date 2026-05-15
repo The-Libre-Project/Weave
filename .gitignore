@@ -42,6 +42,11 @@ tests/fixtures/bin/7zFM.exe
 /tmp-trace/
 /OBSERVER-STATE.md
 tests/fixtures/bin/extract_out/
+tests/fixtures/bin/m13_roundtrip_work/
+tests/fixtures/bin/m13_store_work/
+tests/fixtures/bin/m13_v23_work/
+tests/fixtures/bin/m13_debug_e_work/
+tests/fixtures/bin/m8a_extract_out/
 
 # NXEngine fixture — binary game files, not tracked
 tests/fixtures/nxengine/

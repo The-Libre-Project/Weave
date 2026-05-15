@@ -5382,3 +5382,119 @@ fn sevenzip_m13_v23_roundtrip_gate() {
 
     let _ = std::fs::remove_dir_all(&work_dir);
 }
+
+/// sevenzip_m13_debug_e_gate — TEMPORARY diagnostic gate for M13 follow-up E.
+///
+/// Runs the source-matched MinGW 23.01 build with WEAVEDBG RINOK breadcrumbs
+/// against the M13 create path. The sole purpose is to capture stderr breadcrumbs
+/// that pin the first failing source line in the WriteDatabase chain.
+///
+/// The gate is #[ignore]'d — invoke explicitly with:
+///   make test TESTFILTER=sevenzip_m13_debug_e_gate
+///
+/// Look for "WEAVEDBG:" lines in the stderr output to find the first failing
+/// source location. The binary always exits non-zero when the failure fires;
+/// the gate records stdout+stderr unconditionally to help the operator read the
+/// breadcrumb chain.
+///
+/// Binary: tests/fixtures/bin/7za-debug-E.exe (MinGW x64 7-Zip 23.01 + WEAVEDBG)
+/// Fixture dir: tests/fixtures/sevenzip/m13/
+/// DO NOT replace production fixtures. DO NOT mark M13 CLOSED from this gate.
+#[test]
+fn sevenzip_m13_debug_e_gate() {
+    if !cfg!(target_os = "linux") {
+        eprintln!("skipping sevenzip_m13_debug_e_gate — requires Linux");
+        return;
+    }
+
+    let manifest = env!("CARGO_MANIFEST_DIR");
+    let bin_dir = format!("{manifest}/../tests/fixtures/bin");
+    let debug_bin = format!("{bin_dir}/7za-debug-E.exe");
+    let fixture_dir = format!("{manifest}/../tests/fixtures/sevenzip/m13");
+
+    if !std::path::Path::new(&debug_bin).exists() {
+        eprintln!("skipping: 7za-debug-E.exe not present in tests/fixtures/bin/");
+        return;
+    }
+    if !std::path::Path::new(&fixture_dir).exists() {
+        eprintln!("skipping: M13 fixture dir missing at {fixture_dir}");
+        return;
+    }
+
+    let work_dir = std::path::PathBuf::from(&bin_dir).join("m13_debug_e_work");
+    let _ = std::fs::remove_dir_all(&work_dir);
+    std::fs::create_dir_all(&work_dir)
+        .unwrap_or_else(|e| panic!("failed to create work_dir {}: {e}", work_dir.display()));
+
+    for name in &["hello.txt", "lorem.txt", "bytes.bin"] {
+        let src = std::path::PathBuf::from(&fixture_dir).join(name);
+        let dst = work_dir.join(name);
+        std::fs::copy(&src, &dst).unwrap_or_else(|e| {
+            panic!(
+                "failed to copy fixture {} -> {}: {e}",
+                src.display(),
+                dst.display()
+            )
+        });
+    }
+
+    let weave_bin = env!("CARGO_BIN_EXE_weave");
+
+    // Run create phase — capture all output including WEAVEDBG breadcrumbs.
+    // We do NOT assert exit 0 — the purpose is to READ the breadcrumbs.
+    let create_out = std::process::Command::new(weave_bin)
+        .current_dir(&work_dir)
+        .arg(&debug_bin)
+        .arg("a")
+        .arg("debug_e.7z")
+        .arg("hello.txt")
+        .arg("lorem.txt")
+        .arg("bytes.bin")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run weave on 7za-debug-E.exe a: {e}"));
+
+    let c_stdout = String::from_utf8_lossy(&create_out.stdout);
+    let c_stderr = String::from_utf8_lossy(&create_out.stderr);
+
+    eprintln!(
+        "sevenzip_m13_debug_e_gate: create exit: {}",
+        create_out.status
+    );
+    eprintln!("--- 7za-debug-E a stdout ---\n{c_stdout}");
+    eprintln!("--- 7za-debug-E a stderr (WEAVEDBG breadcrumbs below) ---\n{c_stderr}");
+
+    // Extract all WEAVEDBG lines for easy reading.
+    let breadcrumbs: Vec<&str> = c_stderr
+        .lines()
+        .filter(|l| l.contains("WEAVEDBG:"))
+        .collect();
+    eprintln!("=== WEAVEDBG breadcrumb chain ({} lines) ===", breadcrumbs.len());
+    for line in &breadcrumbs {
+        eprintln!("{line}");
+    }
+    eprintln!("=== end breadcrumbs ===");
+
+    // If the binary succeeded, that's also diagnostic — means 23.01 MinGW does NOT
+    // reproduce the MSVC failure, pointing to ABI/compiler difference.
+    if create_out.status.success() {
+        eprintln!("sevenzip_m13_debug_e_gate: DIAGNOSTIC — 7za-debug-E.exe create SUCCEEDED (exit 0)");
+        eprintln!("  This means 23.01 MinGW build does NOT reproduce the MSVC failure.");
+        eprintln!("  Implication: failure is MSVC-specific, not source-version-specific.");
+    } else {
+        eprintln!(
+            "sevenzip_m13_debug_e_gate: DIAGNOSTIC — 7za-debug-E.exe create FAILED (exit {})",
+            create_out.status
+        );
+        if breadcrumbs.is_empty() {
+            eprintln!("  WARNING: no WEAVEDBG breadcrumbs found — failure may be before WriteDatabase");
+            eprintln!("  Check if a Win32 call failed early (look for 'error' in stdout above)");
+        } else {
+            eprintln!("  First WEAVEDBG breadcrumb: {}", breadcrumbs[0]);
+            eprintln!("  Last  WEAVEDBG breadcrumb: {}", breadcrumbs[breadcrumbs.len() - 1]);
+        }
+    }
+
+    // Always succeed — this is a diagnostic gate, not a pass/fail gate.
+    // The operator reads the breadcrumb output from CI/Docker logs.
+    let _ = std::fs::remove_dir_all(&work_dir);
+}
