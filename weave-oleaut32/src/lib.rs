@@ -32,6 +32,7 @@
 /// `psz` must be a valid null-terminated UTF-16 string or null.
 pub unsafe extern "win64" fn sys_alloc_string(psz: *const u16) -> *mut u16 {
     if psz.is_null() {
+        eprintln!("weave/SysAllocString: psz=NULL → NULL");
         return std::ptr::null_mut();
     }
     let mut len = 0usize;
@@ -44,11 +45,23 @@ pub unsafe extern "win64" fn sys_alloc_string(psz: *const u16) -> *mut u16 {
     let total_bytes = 4 + byte_len + 2; // prefix + chars + null
     let buf = unsafe { libc::malloc(total_bytes) as *mut u8 };
     if buf.is_null() {
+        eprintln!("weave/SysAllocString: malloc({total_bytes}) failed → NULL");
         return std::ptr::null_mut();
     }
     unsafe { *(buf as *mut u32) = byte_len as u32 };
     let data = unsafe { buf.add(4) as *mut u16 };
     unsafe { std::ptr::copy_nonoverlapping(psz, data, len + 1) };
+    // Show up to 16 ASCII-ish chars for diagnostic.
+    let mut ascii = String::new();
+    for i in 0..len.min(16) {
+        let c = unsafe { *psz.add(i) };
+        if (0x20..0x7f).contains(&c) {
+            ascii.push(c as u8 as char);
+        } else {
+            ascii.push_str(&format!("\\u{c:04x}"));
+        }
+    }
+    eprintln!("weave/SysAllocString: len={len} bstr={data:p} chars=\"{ascii}\"");
     data
 }
 
@@ -61,6 +74,7 @@ pub unsafe extern "win64" fn sys_alloc_string_len(psz: *const u16, len: u32) -> 
     let total_bytes = 4 + byte_len + 2;
     let buf = unsafe { libc::malloc(total_bytes) as *mut u8 };
     if buf.is_null() {
+        eprintln!("weave/SysAllocStringLen: malloc({total_bytes}) failed → NULL");
         return std::ptr::null_mut();
     }
     unsafe { *(buf as *mut u32) = byte_len as u32 };
@@ -71,6 +85,18 @@ pub unsafe extern "win64" fn sys_alloc_string_len(psz: *const u16, len: u32) -> 
         unsafe { std::ptr::write_bytes(data as *mut u8, 0, byte_len) };
     }
     unsafe { *data.add(len as usize) = 0 };
+    let mut ascii = String::new();
+    if !psz.is_null() {
+        for i in 0..(len as usize).min(16) {
+            let c = unsafe { *psz.add(i) };
+            if (0x20..0x7f).contains(&c) {
+                ascii.push(c as u8 as char);
+            } else {
+                ascii.push_str(&format!("\\u{c:04x}"));
+            }
+        }
+    }
+    eprintln!("weave/SysAllocStringLen: psz={psz:p} len={len} bstr={data:p} chars=\"{ascii}\"");
     data
 }
 
@@ -139,9 +165,13 @@ pub unsafe extern "win64" fn variant_init(pvar: *mut u8) {
 /// # Safety
 /// `pvar` must be a writable 16-byte buffer.
 pub unsafe extern "win64" fn variant_clear(pvar: *mut u8) -> i32 {
-    if !pvar.is_null() {
-        unsafe { std::ptr::write_bytes(pvar, 0, 16) };
+    if pvar.is_null() {
+        eprintln!("weave/VariantClear: pvar=NULL");
+        return 0;
     }
+    let prior_vt = unsafe { *(pvar as *const u16) };
+    eprintln!("weave/VariantClear: pvar={pvar:p} prior_vt={prior_vt}");
+    unsafe { std::ptr::write_bytes(pvar, 0, 16) };
     0 // S_OK
 }
 
