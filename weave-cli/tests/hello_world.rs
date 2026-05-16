@@ -5254,8 +5254,11 @@ fn sevenzip_m13_v23_roundtrip_gate() {
     let weave_bin = env!("CARGO_BIN_EXE_weave");
 
     // ===== Phase 1: create =====
+    // follow-up F: WEAVE_IAT_TRACE=1 to capture the Win32 call sequence for
+    // differential comparison against 7za-debug-E.exe (MinGW).
     let create_out = std::process::Command::new(weave_bin)
         .current_dir(&work_dir)
+        .env("WEAVE_IAT_TRACE", "1")
         .arg(&seven_zip)
         .arg("a")
         .arg("roundtrip23.7z")
@@ -5442,8 +5445,11 @@ fn sevenzip_m13_debug_e_gate() {
 
     // Run create phase — capture all output including WEAVEDBG breadcrumbs.
     // We do NOT assert exit 0 — the purpose is to READ the breadcrumbs.
+    // follow-up F: WEAVE_IAT_TRACE=1 to capture the Win32 call sequence for
+    // differential comparison against 7za-23.exe (MSVC).
     let create_out = std::process::Command::new(weave_bin)
         .current_dir(&work_dir)
+        .env("WEAVE_IAT_TRACE", "1")
         .arg(&debug_bin)
         .arg("a")
         .arg("debug_e.7z")
