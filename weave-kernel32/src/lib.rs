@@ -3491,16 +3491,22 @@ pub unsafe extern "win64" fn get_logical_drive_strings_a(
 
 /// GetVolumeInformationW: return volume name, serial, flags, and filesystem name.
 ///
-/// Weave returns a fake "Weave" volume name, fixed serial 0xDEADBEEF,
-/// max component 255, FILE_CASE_PRESERVED_NAMES, and filesystem "NTFS".
+/// Weave derives the volume serial from `stat(path).st_dev as u32` so that it
+/// matches the value returned by `GetFileInformationByHandle` (which also uses
+/// `fstat().st_dev as u32`). This consistency is required by MSVC's 7-Zip
+/// archive builder, which compares the GFIBH serial of input files against the
+/// GVI serial of the output volume and aborts `WriteDatabase` with E_INVALIDARG
+/// when they differ.
 ///
 /// # Safety
-/// Pointer arguments are accepted but not dereferenced.
-// Wine ref: dlls/kernelbase/volume.c — queries NtQueryVolumeInformationFile with
-// FileFsVolumeInformation (serial + name) and FileFsAttributeInformation (fs name + flags);
-// returns TRUE via set_ntstatus; NULL root path uses current directory's volume.
+/// Pointer arguments are null-checked before dereferencing.
+// Wine ref: dlls/kernelbase/volume.c::GetVolumeInformationW (lines 143-197) —
+// opens a handle to the root path via NtOpenFile, then delegates entirely to
+// GetVolumeInformationByHandleW(handle, label, label_len, serial, filename_len,
+// flags, fsname, fsname_len) which queries FileFsVolumeInformation for the
+// serial and FileFsAttributeInformation for fs name + flags. NULL root uses L"\\".
 pub unsafe extern "win64" fn get_volume_information_w(
-    _lp_root_path_name: *const u16,
+    lp_root_path_name: *const u16,
     lp_volume_name_buffer: *mut u16,
     n_volume_name_size: u32,
     lp_volume_serial_number: *mut u32,
@@ -3510,16 +3516,60 @@ pub unsafe extern "win64" fn get_volume_information_w(
     n_file_system_name_size: u32,
 ) -> i32 {
     eprintln!(
-        "weave/GetVolumeInformationW: entry root_path_ptr={_lp_root_path_name:?} vol_name_buf={lp_volume_name_buffer:?} vol_name_sz={n_volume_name_size} serial={lp_volume_serial_number:?} maxlen={lp_maximum_component_length:?} flags={lp_file_system_flags:?} fs_name_buf={lp_file_system_name_buffer:?} fs_name_sz={n_file_system_name_size}"
+        "weave/GetVolumeInformationW: entry root_path_ptr={lp_root_path_name:?} vol_name_buf={lp_volume_name_buffer:?} vol_name_sz={n_volume_name_size} serial={lp_volume_serial_number:?} maxlen={lp_maximum_component_length:?} flags={lp_file_system_flags:?} fs_name_buf={lp_file_system_name_buffer:?} fs_name_sz={n_file_system_name_size}"
     );
+
+    // Derive serial from st_dev so it matches GetFileInformationByHandle.
+    // When lpRootPathName is NULL Wine uses the current directory; we do the same.
+    let serial: u32 = {
+        // Decode the LPCWSTR root path (e.g. "C:\\" or NULL).
+        let win_path: String = if lp_root_path_name.is_null() {
+            String::from("C:\\")
+        } else {
+            let mut len = 0usize;
+            while len < MAX_UTF16_LEN && unsafe { *lp_root_path_name.add(len) } != 0 {
+                len += 1;
+            }
+            unsafe { String::from_utf16_lossy(std::slice::from_raw_parts(lp_root_path_name, len)) }
+        };
+
+        // Translate Windows path to Linux path; fall back to "/" on error.
+        let linux_path = weave_core::file_io::translate_win_path(&win_path)
+            .unwrap_or_else(|_| std::path::PathBuf::from("/"));
+
+        // stat the path to get st_dev — same field used by GetFileInformationByHandle.
+        match std::ffi::CString::new(linux_path.as_os_str().as_encoded_bytes()) {
+            Ok(c_path) => {
+                let mut stat_buf = unsafe { std::mem::zeroed::<libc::stat>() };
+                if unsafe { libc::stat(c_path.as_ptr(), &mut stat_buf) } == 0 {
+                    stat_buf.st_dev as u32
+                } else {
+                    // stat failed (e.g. path does not exist) — fall back to "/" device.
+                    let root_c = std::ffi::CString::new("/").unwrap();
+                    let mut root_stat = unsafe { std::mem::zeroed::<libc::stat>() };
+                    if unsafe { libc::stat(root_c.as_ptr(), &mut root_stat) } == 0 {
+                        root_stat.st_dev as u32
+                    } else {
+                        0x0000_1234u32 // last-resort non-zero placeholder
+                    }
+                }
+            }
+            Err(_) => 0x0000_1234u32,
+        }
+    };
+
     if !lp_volume_serial_number.is_null() {
-        unsafe { *lp_volume_serial_number = 0xDEAD_BEEFu32 };
+        unsafe { *lp_volume_serial_number = serial };
     }
     if !lp_maximum_component_length.is_null() {
         unsafe { *lp_maximum_component_length = 255u32 };
     }
     if !lp_file_system_flags.is_null() {
-        unsafe { *lp_file_system_flags = 0x0002u32 }; // FILE_CASE_PRESERVED_NAMES
+        // FILE_CASE_SENSITIVE_SEARCH  0x0001
+        // FILE_CASE_PRESERVED_NAMES   0x0002
+        // FILE_UNICODE_ON_DISK        0x0004
+        // FILE_SUPPORTS_HARD_LINKS    0x0400
+        unsafe { *lp_file_system_flags = 0x0407u32 };
     }
 
     if !lp_volume_name_buffer.is_null() && n_volume_name_size >= 6 {
@@ -3552,7 +3602,7 @@ pub unsafe extern "win64" fn get_volume_information_w(
     }
 
     eprintln!(
-        "weave/GetVolumeInformationW: exit serial=0xDEADBEEF maxlen=255 flags=0x2 vol=\"Weave\" fs=\"NTFS\" → TRUE"
+        "weave/GetVolumeInformationW: exit serial={serial:#010x} maxlen=255 flags=0x0407 vol=\"Weave\" fs=\"NTFS\" → TRUE"
     );
     1 // TRUE
 }
