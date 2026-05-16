@@ -163,7 +163,19 @@ pub unsafe extern "win64" fn variant_init(pvar: *mut u8) {
 
 /// VariantClear — clear a VARIANT and release any resources. Returns S_OK.
 ///
-/// Stub: sets the VARIANT to VT_EMPTY (zeroes the buffer).
+/// Sets vt = VT_EMPTY (offset 0..2) and zeroes the data union (offset 8..16).
+/// The reserved fields wReserved1/2/3 (offset 2..8) are intentionally NOT
+/// modified — real Windows VariantClear leaves them untouched.
+///
+/// Wine ref: dlls/oleaut32/variant.c — VariantClear calls VARIANT_ValidateType,
+/// frees the inner type (BSTR/SafeArray/IUnknown/IRecordInfo), then sets
+/// V_VT(pVarg) = VT_EMPTY and returns. Reserved fields are never written.
+/// (Wine source line 627–666: `V_VT(pVarg) = VT_EMPTY;` is the only field
+/// assignment after freeing the payload.)
+///
+/// MSVC's CPropVariant stores 0xff00 in wReserved2 as a validity sentinel.
+/// Zeroing that field caused WriteHeader to return E_INVALIDARG on the M13
+/// MSVC gate. Class: MSVC_ABI_MISMATCH — follow-up G (2026-05-15).
 ///
 /// # Safety
 /// `pvar` must be a writable 16-byte buffer.
@@ -188,7 +200,13 @@ pub unsafe extern "win64" fn variant_clear(pvar: *mut u8) -> i32 {
         let alloc = unsafe { (bstr as *mut u8).sub(4) };
         unsafe { libc::free(alloc as *mut libc::c_void) };
     }
-    unsafe { std::ptr::write_bytes(pvar, 0, 16) };
+    // Zero only vt (offset 0..2) and data union (offset 8..16).
+    // wReserved1/2/3 (offset 2..8) are NOT touched — Windows does not write
+    // them and MSVC CPropVariant relies on wReserved2=0xff00 surviving this call.
+    unsafe {
+        std::ptr::write_bytes(pvar, 0, 2); // vt = VT_EMPTY
+        std::ptr::write_bytes(pvar.add(8), 0, 8); // data union cleared
+    }
     0 // S_OK
 }
 
