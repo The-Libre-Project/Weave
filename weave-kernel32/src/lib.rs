@@ -3077,9 +3077,14 @@ pub unsafe extern "win64" fn get_file_information_by_handle(
     let n_links = stat.st_nlink as u32;
     let idx_hi = (stat.st_ino >> 32) as u32;
     let idx_lo = (stat.st_ino & 0xFFFFFFFF) as u32;
+    // Wine ref: dlls/kernelbase/file.c:3106 — dwVolumeSerialNumber comes from
+    // NtQueryVolumeInformationFile → FileFsVolumeInformation.VolumeSerialNumber.
+    // Wine's ntdll maps st_dev to VolumeSerialNumber (low 32 bits). Using 0xDEADBEEF
+    // caused MSVC archive builders to fail identity/hardlink checks (E_INVALIDARG path).
+    let dw_serial = stat.st_dev as u32;
     eprintln!(
         "weave/GetFileInformationByHandle: h={h_file:#x} fd={fd} \
-         attrs={dw_file_attributes:#x} serial=0xDEADBEEF \
+         attrs={dw_file_attributes:#x} serial={dw_serial:#x} \
          ino={ino:#x} idx_hi={idx_hi:#x} idx_lo={idx_lo:#x} \
          links={n_links} size={size} \
          ft_cre={ft_creation:#x} ft_acc={ft_access:#x} ft_wri={ft_write:#x}"
@@ -3093,7 +3098,7 @@ pub unsafe extern "win64" fn get_file_information_by_handle(
         (*lp_file_information).ft_last_access_time_high = (ft_access >> 32) as u32;
         (*lp_file_information).ft_last_write_time_low = ft_write as u32;
         (*lp_file_information).ft_last_write_time_high = (ft_write >> 32) as u32;
-        (*lp_file_information).dw_volume_serial_number = 0xDEADBEEF;
+        (*lp_file_information).dw_volume_serial_number = dw_serial;
         (*lp_file_information).n_file_size_high = (stat.st_size >> 32) as u32;
         (*lp_file_information).n_file_size_low = (stat.st_size & 0xFFFFFFFF) as u32;
         (*lp_file_information).n_number_of_links = n_links;
@@ -3220,13 +3225,16 @@ pub unsafe extern "win64" fn get_file_information_by_handle_ex(
         }
         FileIdInfo => {
             // FILE_ID_INFO: VolumeSerialNumber (8 bytes) + FileId (16 bytes) = 24 bytes.
+            // Wine ref: dlls/kernelbase/file.c — FileIdInfo fills VolumeSerialNumber from
+            // NtQueryVolumeInformationFile; FileId is the 128-bit file identifier.
+            // Map st_dev → VolumeSerialNumber (low 32 bits, zero-extended to u64).
             if dw_buffer_size < 24 {
                 set_last_error(122); // ERROR_INSUFFICIENT_BUFFER
                 return 0;
             }
             unsafe {
                 let p = lp_file_information as *mut u64;
-                p.add(0).write_unaligned(0xDEAD_BEEF_u64); // VolumeSerialNumber
+                p.add(0).write_unaligned(stat.st_dev as u64); // VolumeSerialNumber
                 p.add(1).write_unaligned(stat.st_ino); // FileId low 64 bits
                 p.add(2).write_unaligned(0u64); // FileId high 64 bits
             }
