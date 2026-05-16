@@ -5474,7 +5474,10 @@ fn sevenzip_m13_debug_e_gate() {
         .lines()
         .filter(|l| l.contains("WEAVEDBG:"))
         .collect();
-    eprintln!("=== WEAVEDBG breadcrumb chain ({} lines) ===", breadcrumbs.len());
+    eprintln!(
+        "=== WEAVEDBG breadcrumb chain ({} lines) ===",
+        breadcrumbs.len()
+    );
     for line in &breadcrumbs {
         eprintln!("{line}");
     }
@@ -5491,7 +5494,8 @@ fn sevenzip_m13_debug_e_gate() {
         )
     } else {
         let bc_summary = if breadcrumbs.is_empty() {
-            "no WEAVEDBG breadcrumbs — failure is before WriteDatabase or Win32 call failed early".to_string()
+            "no WEAVEDBG breadcrumbs — failure is before WriteDatabase or Win32 call failed early"
+                .to_string()
         } else {
             format!(
                 "{} breadcrumbs — first: [{}]  last: [{}]",
@@ -5502,8 +5506,7 @@ fn sevenzip_m13_debug_e_gate() {
         };
         format!(
             "7za-debug-E.exe create FAILED (exit {}) — breadcrumbs: {}",
-            create_out.status,
-            bc_summary
+            create_out.status, bc_summary
         )
     };
 
