@@ -5503,17 +5503,14 @@ fn sevenzip_m13_debug_e_gate() {
 
     let _ = std::fs::remove_dir_all(&work_dir);
 
-    // Fail with full diagnostic output so CI shows breadcrumbs in the failure log.
-    // This is intentional — the operator reads the output to find the source line.
-    // Remove this panic once the source line is pinned (follow-up F).
-    panic!(
-        "sevenzip_m13_debug_e_gate DIAGNOSTIC DUMP (intentional fail for log visibility):\n\
-         outcome: {outcome_msg}\n\
-         --- 7za-debug-E a stdout ---\n{c_stdout}\n\
-         --- 7za-debug-E a stderr (WEAVEDBG breadcrumbs below) ---\n{c_stderr}\n\
-         === WEAVEDBG breadcrumb chain ({bc_count} lines) ===\n{bc_joined}\n\
-         === end breadcrumbs ===",
-        bc_count = breadcrumbs.len(),
-        bc_joined = breadcrumbs.join("\n"),
+    // Follow-up E result (CI run 25946937080, 2026-05-15):
+    // MinGW 23.01 build SUCCEEDED — exit 0, "Everything is Ok".
+    // No E_INVALIDARG in 7-Zip source. Gap is MSVC_ABI_MISMATCH.
+    // Gate now asserts success as a regression check.
+    assert!(
+        create_out.status.success(),
+        "sevenzip_m13_debug_e_gate: MinGW 23.01 create should succeed — \
+         Weave regression if this fails.\n\
+         outcome: {outcome_msg}\nstdout: {c_stdout}\nstderr: {c_stderr}"
     );
 }
