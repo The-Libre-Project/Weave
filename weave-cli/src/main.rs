@@ -400,7 +400,7 @@ fn main() {
                 // Patch the DLL's own IAT using our resolver (which by now
                 // includes any DLLs registered in earlier iterations).
                 unsafe {
-                    iat::patch_best_effort(&dll_bytes, image.base, resolve, |d, f, va| {
+                    iat::patch_best_effort(&dll_bytes, image.base, dll_name, resolve, |d, f, va| {
                         eprintln!(
                             "weave: {dll_name}: unresolved import {d}!{f} at iat={va:#x} (skipped)"
                         );
@@ -500,7 +500,7 @@ fn main() {
 
         for (dll_name, dll_bytes, base) in &side_dlls {
             unsafe {
-                iat::patch_best_effort(dll_bytes, *base, resolve, |d, f, va| {
+                iat::patch_best_effort(dll_bytes, *base, dll_name.as_str(), resolve, |d, f, va| {
                     eprintln!(
                         "weave: {dll_name}: unresolved import {d}!{f} at iat={va:#x} (skipped)"
                     );
@@ -518,7 +518,7 @@ fn main() {
     // Safety: image.base points to a fully mapped PE loaded by loader::load().
     let mut missing: Vec<String> = Vec::new();
     unsafe {
-        iat::patch_best_effort(&bytes, image.base, resolve, |dll, func, iat_va| {
+        iat::patch_best_effort(&bytes, image.base, &exe_name, resolve, |dll, func, iat_va| {
             let sym = format!("{dll}!{func}");
             eprintln!("weave: unresolved import: {sym} at iat={iat_va:#x} (stubbed to null)");
             missing.push(sym);

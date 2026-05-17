@@ -828,7 +828,7 @@ pub unsafe fn patch(
     base: *mut u8,
     resolve: impl Fn(&str, &str) -> Option<usize>,
 ) -> Result<(), String> {
-    patch_inner(bytes, base, resolve, false, |_, _, _| {})
+    patch_inner(bytes, base, "", resolve, false, |_, _, _| {})
 }
 
 /// Safe no-op stub written into IAT slots that we cannot resolve.
@@ -950,19 +950,28 @@ extern "win64" fn unresolved_import_stub_log(ret_addr: usize, rax_at_call: usize
 pub unsafe fn patch_best_effort(
     bytes: &[u8],
     base: *mut u8,
+    binary_name: &str,
     resolve: impl Fn(&str, &str) -> Option<usize>,
     on_miss: impl FnMut(&str, &str, usize),
 ) {
-    let _ = patch_inner(bytes, base, resolve, true, on_miss);
+    let _ = patch_inner(bytes, base, binary_name, resolve, true, on_miss);
 }
 
 unsafe fn patch_inner(
     bytes: &[u8],
     base: *mut u8,
+    binary_name: &str,
     resolve: impl Fn(&str, &str) -> Option<usize>,
     lenient: bool,
     mut on_miss: impl FnMut(&str, &str, usize),
 ) -> Result<(), String> {
+    // Deep ret2 probe is only safe for 7-Zip (deep malloc call stacks).
+    // Any other binary that imports malloc may call it from shallow frames.
+    let is_sevenzip = {
+        let n = binary_name.to_ascii_lowercase();
+        n.starts_with("7za") || n.starts_with("7z.exe")
+    };
+
     let pe = PE::parse(bytes).map_err(|e| format!("IAT patch: parse error: {e}"))?;
 
     let opt = pe
@@ -1060,7 +1069,7 @@ unsafe fn patch_inner(
                         // MSVC-compiled binaries).  Falls back to addr directly
                         // if the slab is unavailable (tracer silently disabled
                         // for that slot).
-                        let stub_fn: usize = if func_name == "malloc" {
+                        let stub_fn: usize = if is_sevenzip && func_name == "malloc" {
                             alloc_per_slot_stub_deep(slot_va, addr)
                         } else {
                             alloc_per_slot_stub(slot_va, addr)

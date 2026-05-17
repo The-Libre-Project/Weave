@@ -5650,7 +5650,7 @@ fn load_library_impl(name: &str) -> usize {
                 // PROT_READ|PROT_WRITE.  `resolve::resolve` is a plain function pointer
                 // with no thread-safety requirements (single-threaded Phase 1/2).
                 unsafe {
-                    iat::patch_best_effort(&bytes, image.base, resolve::resolve, |d, f, va| {
+                    iat::patch_best_effort(&bytes, image.base, &key, resolve::resolve, |d, f, va| {
                         eprintln!("weave/kernel32: LoadLibrary({key}): unresolved import {d}!{f} at iat={va:#x}");
                     });
                 }
