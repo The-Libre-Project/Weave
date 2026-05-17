@@ -10,6 +10,12 @@
 #![allow(clippy::missing_safety_doc)]
 
 use libc::c_void;
+use std::sync::OnceLock;
+
+fn m13_crt_trace_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("WEAVE_M13_CRT_TRACE").is_some())
+}
 
 // ── Linux x86-64 ABI helpers ──────────────────────────────────────────────────
 //
@@ -42,6 +48,9 @@ extern "C" {
 /// No pointer requirements; wraps libc malloc. Caller must free the returned pointer with `ucrt_free`.
 pub unsafe extern "win64" fn ucrt_malloc(size: usize) -> *mut c_void {
     let result = unsafe { libc::malloc(size) };
+    if m13_crt_trace_enabled() {
+        eprintln!("weave/m13-crt: malloc size={size} -> {result:p}");
+    }
     if result.is_null() && size > 0 {
         eprintln!("weave: malloc({size}) returned NULL!");
     }
@@ -51,6 +60,9 @@ pub unsafe extern "win64" fn ucrt_malloc(size: usize) -> *mut c_void {
 /// # Safety
 /// `ptr` must have been allocated by `ucrt_malloc`, `ucrt_calloc`, or `ucrt_realloc`, or be null.
 pub unsafe extern "win64" fn ucrt_free(ptr: *mut c_void) {
+    if m13_crt_trace_enabled() {
+        eprintln!("weave/m13-crt: free ptr={ptr:p}");
+    }
     unsafe { libc::free(ptr) }
 }
 
@@ -63,7 +75,11 @@ pub unsafe extern "win64" fn ucrt_calloc(count: usize, size: usize) -> *mut c_vo
 /// # Safety
 /// `ptr` must have been allocated by `ucrt_malloc`, `ucrt_calloc`, or be null. Returned pointer must be freed with `ucrt_free`.
 pub unsafe extern "win64" fn ucrt_realloc(ptr: *mut c_void, size: usize) -> *mut c_void {
-    unsafe { libc::realloc(ptr, size) }
+    let result = unsafe { libc::realloc(ptr, size) };
+    if m13_crt_trace_enabled() {
+        eprintln!("weave/m13-crt: realloc ptr={ptr:p} size={size} -> {result:p}");
+    }
+    result
 }
 
 /// # Safety
@@ -120,6 +136,9 @@ pub unsafe extern "win64" fn ucrt_memcpy(
     if n >= 0x10000000 {
         return dst;
     }
+    if m13_crt_trace_enabled() {
+        eprintln!("weave/m13-crt: memcpy dst={dst:p} src={src:p} n={n}");
+    }
     unsafe { libc::memcpy(dst, src, n) }
 }
 
@@ -136,6 +155,9 @@ pub unsafe extern "win64" fn ucrt_memmove(
     if n >= 0x10000000 {
         return dst;
     }
+    if m13_crt_trace_enabled() {
+        eprintln!("weave/m13-crt: memmove dst={dst:p} src={src:p} n={n}");
+    }
     unsafe { libc::memmove(dst, src, n) }
 }
 
@@ -148,7 +170,11 @@ pub unsafe extern "win64" fn ucrt_memset(dst: *mut c_void, c: i32, n: usize) -> 
 /// # Safety
 /// `s1` and `s2` must each be valid for `n` bytes.
 pub unsafe extern "win64" fn ucrt_memcmp(s1: *const c_void, s2: *const c_void, n: usize) -> i32 {
-    unsafe { libc::memcmp(s1, s2, n) }
+    let result = unsafe { libc::memcmp(s1, s2, n) };
+    if m13_crt_trace_enabled() {
+        eprintln!("weave/m13-crt: memcmp s1={s1:p} s2={s2:p} n={n} -> {result}");
+    }
+    result
 }
 
 /// # Safety
@@ -644,8 +670,6 @@ pub extern "win64" fn ucrt_signal(signum: i32, handler: *const c_void) -> *const
 // read-only after RELRO is applied, causing SIGSEGV.  We heap-allocate the
 // storage via Box::into_raw (leaked intentionally — process-lifetime) which
 // guarantees the memory is always in a R+W page.
-
-use std::sync::OnceLock;
 
 static HEAP_COMMODE: OnceLock<usize> = OnceLock::new();
 static HEAP_FMODE: OnceLock<usize> = OnceLock::new();
