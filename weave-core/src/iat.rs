@@ -50,27 +50,6 @@ extern "win64" fn trace_slot_log_by_va(
     trace_lookup_miss_stub as *const () as usize
 }
 
-/// 4-arg variant used by the malloc deep-probe stub.  Receives ret2 in r9
-/// (one frame above the caller's caller) so the full allocation call chain is
-/// visible in a single log line.
-#[cfg(target_arch = "x86_64")]
-extern "win64" fn trace_slot_log_deep(
-    slot_va: usize,
-    ret_addr: usize,
-    caller_ret_addr: usize,
-    caller2_ret_addr: usize,
-) -> usize {
-    if let Ok(map) = resolved_slot_map().lock() {
-        if let Some((name, real_fn)) = map.get(&slot_va) {
-            eprintln!(
-                "weave/iat-trace: {name} ret={ret_addr:#x} ret1={caller_ret_addr:#x} ret2={caller2_ret_addr:#x}"
-            );
-            return *real_fn;
-        }
-    }
-    trace_lookup_miss_stub as *const () as usize
-}
-
 /// Slab allocator backed by a single `mmap(MAP_ANONYMOUS|MAP_PRIVATE,
 /// PROT_EXEC|PROT_WRITE)` region.  Each stub occupies exactly `STUB_STRIDE`
 /// bytes.  Allocation is append-only — no free.
@@ -133,18 +112,6 @@ impl SlabAlloc {
         }
         let stub = unsafe { self.base.add(self.used) };
         Self::write_stub(stub, slot_va, log_fn_addr);
-        self.used += Self::STUB_STRIDE;
-        Some(stub as usize)
-    }
-
-    /// Like `alloc_stub` but uses the 171-byte deep template that captures ret2.
-    /// Only safe for slots with deep enough call stacks (e.g. malloc in 7-Zip).
-    fn alloc_stub_deep(&mut self, slot_va: usize, log_fn_addr: usize) -> Option<usize> {
-        if self.used + Self::STUB_STRIDE > self.capacity {
-            return None;
-        }
-        let stub = unsafe { self.base.add(self.used) };
-        Self::write_stub_deep(stub, slot_va, log_fn_addr);
         self.used += Self::STUB_STRIDE;
         Some(stub as usize)
     }
@@ -279,94 +246,6 @@ impl SlabAlloc {
         // Patch log_fn_addr immediate at offset 82.
         b[82..90].copy_from_slice(&(log_fn_addr as u64).to_le_bytes());
     }
-
-    /// 171-byte variant of `write_stub` that adds `mov r9, [rsp+0x118]` at +80,
-    /// capturing ret2 (two frames above the traced call) as the 4th argument to
-    /// `trace_slot_log_deep`.  Only safe for deep call stacks; do not apply to
-    /// slots that may be reached from shallow stacks (e.g. NPP/Scintilla paths).
-    ///
-    /// Layout changes vs `write_stub`:
-    ///   +80  mov r9, [rsp+0x118]   4C 8B 8C 24 18 01 00 00  (8 bytes; NEW)
-    ///   +88  mov r11, imm64        49 BB <log_fn_addr>       (10 bytes; was +80)
-    ///   +98  call r11              41 FF D3                  (3 bytes; was +90)
-    ///   +101 … rest identical to write_stub +93 …
-    ///   Total: 171 bytes.  Fits in STUB_STRIDE=176 with 5 NOP bytes of padding.
-    fn write_stub_deep(buf: *mut u8, slot_va: usize, log_fn_addr: usize) {
-        // SAFETY: buf points into a live mmap region of at least STUB_STRIDE bytes.
-        let b = unsafe { std::slice::from_raw_parts_mut(buf, Self::STUB_STRIDE) };
-
-        b.fill(0x90);
-
-        #[rustfmt::skip]
-        let template: [u8; 171] = [
-            // +0  mov r10, rax
-            0x4D, 0x89, 0xC2,
-            // +3  sub rsp, 0xA8
-            0x48, 0x81, 0xEC, 0xA8, 0x00, 0x00, 0x00,
-            // +10 mov [rsp+0x20], rcx
-            0x48, 0x89, 0x4C, 0x24, 0x20,
-            // +15 mov [rsp+0x28], rdx
-            0x48, 0x89, 0x54, 0x24, 0x28,
-            // +20 mov [rsp+0x30], r8
-            0x4C, 0x89, 0x44, 0x24, 0x30,
-            // +25 mov [rsp+0x38], r9
-            0x4C, 0x89, 0x4C, 0x24, 0x38,
-            // +30 movdqu [rsp+0x40], xmm0
-            0xF3, 0x0F, 0x7F, 0x44, 0x24, 0x40,
-            // +36 movdqu [rsp+0x50], xmm1
-            0xF3, 0x0F, 0x7F, 0x4C, 0x24, 0x50,
-            // +42 movdqu [rsp+0x60], xmm2
-            0xF3, 0x0F, 0x7F, 0x54, 0x24, 0x60,
-            // +48 movdqu [rsp+0x70], xmm3
-            0xF3, 0x0F, 0x7F, 0x5C, 0x24, 0x70,
-            // +54 mov rcx, imm64  (slot_va; imm64 at offset +56)
-            0x48, 0xB9,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            // +64 mov rdx, [rsp+0xA8]  (caller return address)
-            0x48, 0x8B, 0x94, 0x24, 0xA8, 0x00, 0x00, 0x00,
-            // +72 mov r8, [rsp+0xD8]  (caller's caller return address)
-            0x4C, 0x8B, 0x84, 0x24, 0xD8, 0x00, 0x00, 0x00,
-            // +80 mov r9, [rsp+0x118]  (ret2 — one frame higher; NEW)
-            0x4C, 0x8B, 0x8C, 0x24, 0x18, 0x01, 0x00, 0x00,
-            // +88 mov r11, imm64  (log_fn_addr; imm64 at offset +90)
-            0x49, 0xBB,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            // +98 call r11
-            0x41, 0xFF, 0xD3,
-            // +101 mov [rsp+0x80], rax
-            0x48, 0x89, 0x84, 0x24, 0x80, 0x00, 0x00, 0x00,
-            // +109 mov rcx, [rsp+0x20]
-            0x48, 0x8B, 0x4C, 0x24, 0x20,
-            // +114 mov rdx, [rsp+0x28]
-            0x48, 0x8B, 0x54, 0x24, 0x28,
-            // +119 mov r8, [rsp+0x30]
-            0x4C, 0x8B, 0x44, 0x24, 0x30,
-            // +124 mov r9, [rsp+0x38]
-            0x4C, 0x8B, 0x4C, 0x24, 0x38,
-            // +129 movdqu xmm0, [rsp+0x40]
-            0xF3, 0x0F, 0x6F, 0x44, 0x24, 0x40,
-            // +135 movdqu xmm1, [rsp+0x50]
-            0xF3, 0x0F, 0x6F, 0x4C, 0x24, 0x50,
-            // +141 movdqu xmm2, [rsp+0x60]
-            0xF3, 0x0F, 0x6F, 0x54, 0x24, 0x60,
-            // +147 movdqu xmm3, [rsp+0x70]
-            0xF3, 0x0F, 0x6F, 0x5C, 0x24, 0x70,
-            // +153 mov r10, [rsp+0x80]
-            0x4C, 0x8B, 0x94, 0x24, 0x80, 0x00, 0x00, 0x00,
-            // +161 add rsp, 0xA8
-            0x48, 0x81, 0xC4, 0xA8, 0x00, 0x00, 0x00,
-            // +168 jmp r10
-            0x41, 0xFF, 0xE2,
-        ];
-
-        b[..171].copy_from_slice(&template);
-
-        // Patch slot_va immediate at offset 56 (unchanged from write_stub).
-        b[56..64].copy_from_slice(&(slot_va as u64).to_le_bytes());
-
-        // Patch log_fn_addr immediate at offset 90 (shifted +8 vs write_stub's +82).
-        b[90..98].copy_from_slice(&(log_fn_addr as u64).to_le_bytes());
-    }
 }
 
 /// Global exec-slab for per-slot tracer stubs.
@@ -393,21 +272,6 @@ fn alloc_per_slot_stub(slot_va: usize, real_fn_addr: usize) -> usize {
         }
     }
     // Fallback: tracer disabled for this slot; write real fn directly.
-    real_fn_addr
-}
-
-/// Deep-probe variant: uses the 171-byte template + `trace_slot_log_deep`.
-/// Only routed for `malloc` where the stack is known to be deep enough.
-#[cfg(target_arch = "x86_64")]
-fn alloc_per_slot_stub_deep(slot_va: usize, real_fn_addr: usize) -> usize {
-    let log_fn = trace_slot_log_deep as *const () as usize;
-    if let Ok(mut guard) = stub_slab().lock() {
-        if let Some(ref mut slab) = *guard {
-            if let Some(stub_addr) = slab.alloc_stub_deep(slot_va, log_fn) {
-                return stub_addr;
-            }
-        }
-    }
     real_fn_addr
 }
 
@@ -1060,12 +924,7 @@ unsafe fn patch_inner(
                         // MSVC-compiled binaries).  Falls back to addr directly
                         // if the slab is unavailable (tracer silently disabled
                         // for that slot).
-                        let stub_fn: usize = if func_name == "malloc" {
-                            alloc_per_slot_stub_deep(slot_va, addr)
-                        } else {
-                            alloc_per_slot_stub(slot_va, addr)
-                        };
-                        stub_fn as u64
+                        alloc_per_slot_stub(slot_va, addr) as u64
                     } else {
                         addr as u64
                     };
