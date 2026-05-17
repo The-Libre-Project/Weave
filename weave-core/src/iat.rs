@@ -33,12 +33,12 @@ use std::sync::{Mutex, OnceLock};
 /// (→ 0) if the slot is not found.
 ///
 /// Called from per-slot exec stubs with win64 ABI: `slot_va` arrives in rcx,
-/// return value goes into rax.
+/// `ret_addr` in rdx, and the real function address is returned in rax.
 #[cfg(target_arch = "x86_64")]
-extern "win64" fn trace_slot_log_by_va(slot_va: usize) -> usize {
+extern "win64" fn trace_slot_log_by_va(slot_va: usize, ret_addr: usize) -> usize {
     if let Ok(map) = resolved_slot_map().lock() {
         if let Some((name, real_fn)) = map.get(&slot_va) {
-            eprintln!("weave/iat-trace: {name}");
+            eprintln!("weave/iat-trace: {name} ret={ret_addr:#x}");
             return *real_fn;
         }
     }
@@ -149,21 +149,22 @@ impl SlabAlloc {
     ///   +42  movdqu [rsp+0x60], xmm2   F3 0F 7F 54 24 60     (6 bytes)
     ///   +48  movdqu [rsp+0x70], xmm3   F3 0F 7F 5C 24 70     (6 bytes)
     ///   +54  mov rcx, imm64            48 B9 <slot_va>       (10 bytes; imm at +56)
-    ///   +64  mov r11, imm64            49 BB <log_fn_addr>   (10 bytes; imm at +66)
-    ///   +74  call r11                  41 FF D3              (3 bytes)
-    ///   +77  mov [rsp+0x80], rax       48 89 84 24 80 00 00 00 (8 bytes)
-    ///   +85  mov rcx, [rsp+0x20]       48 8B 4C 24 20        (5 bytes)
-    ///   +90  mov rdx, [rsp+0x28]       48 8B 54 24 28        (5 bytes)
-    ///   +95  mov r8, [rsp+0x30]        4C 8B 44 24 30        (5 bytes)
-    ///   +100 mov r9, [rsp+0x38]        4C 8B 4C 24 38        (5 bytes)
-    ///   +105 movdqu xmm0, [rsp+0x40]   F3 0F 6F 44 24 40     (6 bytes)
-    ///   +111 movdqu xmm1, [rsp+0x50]   F3 0F 6F 4C 24 50     (6 bytes)
-    ///   +117 movdqu xmm2, [rsp+0x60]   F3 0F 6F 54 24 60     (6 bytes)
-    ///   +123 movdqu xmm3, [rsp+0x70]   F3 0F 6F 5C 24 70     (6 bytes)
-    ///   +129 mov r10, [rsp+0x80]       4C 8B 94 24 80 00 00 00 (8 bytes)
-    ///   +137 add rsp, 0xA8             48 81 C4 A8 00 00 00  (7 bytes)
-    ///   +144 jmp r10                   41 FF E2              (3 bytes)
-    ///   Total used: 147 bytes.  Remaining 13 bytes (144..160) are 0x90 NOPs.
+    ///   +64  mov rdx, [rsp+0xA8]       48 8B 94 24 A8 00 00 00 (8 bytes; caller ret)
+    ///   +72  mov r11, imm64            49 BB <log_fn_addr>   (10 bytes; imm at +74)
+    ///   +82  call r11                  41 FF D3              (3 bytes)
+    ///   +85  mov [rsp+0x80], rax       48 89 84 24 80 00 00 00 (8 bytes)
+    ///   +93  mov rcx, [rsp+0x20]       48 8B 4C 24 20        (5 bytes)
+    ///   +98  mov rdx, [rsp+0x28]       48 8B 54 24 28        (5 bytes)
+    ///   +103 mov r8, [rsp+0x30]        4C 8B 44 24 30        (5 bytes)
+    ///   +108 mov r9, [rsp+0x38]        4C 8B 4C 24 38        (5 bytes)
+    ///   +113 movdqu xmm0, [rsp+0x40]   F3 0F 6F 44 24 40     (6 bytes)
+    ///   +119 movdqu xmm1, [rsp+0x50]   F3 0F 6F 4C 24 50     (6 bytes)
+    ///   +125 movdqu xmm2, [rsp+0x60]   F3 0F 6F 54 24 60     (6 bytes)
+    ///   +131 movdqu xmm3, [rsp+0x70]   F3 0F 6F 5C 24 70     (6 bytes)
+    ///   +137 mov r10, [rsp+0x80]       4C 8B 94 24 80 00 00 00 (8 bytes)
+    ///   +145 add rsp, 0xA8             48 81 C4 A8 00 00 00  (7 bytes)
+    ///   +152 jmp r10                   41 FF E2              (3 bytes)
+    ///   Total used: 155 bytes.  Remaining 5 bytes (155..160) are 0x90 NOPs.
     fn write_stub(buf: *mut u8, slot_va: usize, log_fn_addr: usize) {
         // SAFETY: buf points into a live mmap region of at least STUB_STRIDE bytes.
         let b = unsafe { std::slice::from_raw_parts_mut(buf, Self::STUB_STRIDE) };
@@ -172,7 +173,7 @@ impl SlabAlloc {
         b.fill(0x90);
 
         #[rustfmt::skip]
-        let template: [u8; 147] = [
+        let template: [u8; 155] = [
             // +0  mov r10, rax
             0x4D, 0x89, 0xC2,
             // +3  sub rsp, 0xA8
@@ -196,44 +197,46 @@ impl SlabAlloc {
             // +54 mov rcx, imm64  (slot_va; imm64 at offset +56)
             0x48, 0xB9,
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            // +64 mov r11, imm64  (log_fn_addr; imm64 at offset +66)
+            // +64 mov rdx, [rsp+0xA8]  (caller return address)
+            0x48, 0x8B, 0x94, 0x24, 0xA8, 0x00, 0x00, 0x00,
+            // +72 mov r11, imm64  (log_fn_addr; imm64 at offset +74)
             0x49, 0xBB,
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            // +74 call r11
+            // +82 call r11
             0x41, 0xFF, 0xD3,
-            // +77 mov [rsp+0x80], rax
+            // +85 mov [rsp+0x80], rax
             0x48, 0x89, 0x84, 0x24, 0x80, 0x00, 0x00, 0x00,
-            // +85 mov rcx, [rsp+0x20]
+            // +93 mov rcx, [rsp+0x20]
             0x48, 0x8B, 0x4C, 0x24, 0x20,
-            // +90 mov rdx, [rsp+0x28]
+            // +98 mov rdx, [rsp+0x28]
             0x48, 0x8B, 0x54, 0x24, 0x28,
-            // +95 mov r8, [rsp+0x30]
+            // +103 mov r8, [rsp+0x30]
             0x4C, 0x8B, 0x44, 0x24, 0x30,
-            // +100 mov r9, [rsp+0x38]
+            // +108 mov r9, [rsp+0x38]
             0x4C, 0x8B, 0x4C, 0x24, 0x38,
-            // +105 movdqu xmm0, [rsp+0x40]
+            // +113 movdqu xmm0, [rsp+0x40]
             0xF3, 0x0F, 0x6F, 0x44, 0x24, 0x40,
-            // +111 movdqu xmm1, [rsp+0x50]
+            // +119 movdqu xmm1, [rsp+0x50]
             0xF3, 0x0F, 0x6F, 0x4C, 0x24, 0x50,
-            // +117 movdqu xmm2, [rsp+0x60]
+            // +125 movdqu xmm2, [rsp+0x60]
             0xF3, 0x0F, 0x6F, 0x54, 0x24, 0x60,
-            // +123 movdqu xmm3, [rsp+0x70]
+            // +131 movdqu xmm3, [rsp+0x70]
             0xF3, 0x0F, 0x6F, 0x5C, 0x24, 0x70,
-            // +129 mov r10, [rsp+0x80]
+            // +137 mov r10, [rsp+0x80]
             0x4C, 0x8B, 0x94, 0x24, 0x80, 0x00, 0x00, 0x00,
-            // +137 add rsp, 0xA8
+            // +145 add rsp, 0xA8
             0x48, 0x81, 0xC4, 0xA8, 0x00, 0x00, 0x00,
-            // +144 jmp r10
+            // +152 jmp r10
             0x41, 0xFF, 0xE2,
         ];
 
-        b[..147].copy_from_slice(&template);
+        b[..155].copy_from_slice(&template);
 
         // Patch slot_va immediate at offset 56.
         b[56..64].copy_from_slice(&(slot_va as u64).to_le_bytes());
 
-        // Patch log_fn_addr immediate at offset 66.
-        b[66..74].copy_from_slice(&(log_fn_addr as u64).to_le_bytes());
+        // Patch log_fn_addr immediate at offset 74.
+        b[74..82].copy_from_slice(&(log_fn_addr as u64).to_le_bytes());
     }
 }
 
