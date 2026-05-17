@@ -33,12 +33,17 @@ use std::sync::{Mutex, OnceLock};
 /// (→ 0) if the slot is not found.
 ///
 /// Called from per-slot exec stubs with win64 ABI: `slot_va` arrives in rcx,
-/// `ret_addr` in rdx, and the real function address is returned in rax.
+/// `ret_addr` in rdx, `caller_ret_addr` in r8, and the real function address is
+/// returned in rax.
 #[cfg(target_arch = "x86_64")]
-extern "win64" fn trace_slot_log_by_va(slot_va: usize, ret_addr: usize) -> usize {
+extern "win64" fn trace_slot_log_by_va(
+    slot_va: usize,
+    ret_addr: usize,
+    caller_ret_addr: usize,
+) -> usize {
     if let Ok(map) = resolved_slot_map().lock() {
         if let Some((name, real_fn)) = map.get(&slot_va) {
-            eprintln!("weave/iat-trace: {name} ret={ret_addr:#x}");
+            eprintln!("weave/iat-trace: {name} ret={ret_addr:#x} ret1={caller_ret_addr:#x}");
             return *real_fn;
         }
     }
@@ -63,9 +68,9 @@ unsafe impl Send for SlabAlloc {}
 #[cfg(target_arch = "x86_64")]
 impl SlabAlloc {
     /// Size of each per-slot stub, padded to a 16-byte boundary.
-    /// Template is 147 bytes; rounded up to 160 so each stub starts on a
+    /// Template is 163 bytes; rounded up to 176 so each stub starts on a
     /// 16-byte boundary (cleaner disassembly, no functional requirement).
-    const STUB_STRIDE: usize = 160;
+    const STUB_STRIDE: usize = 176;
 
     /// Number of pages to allocate for the exec slab.  4 pages × 4 KiB =
     /// 16 KiB, which holds 102 stubs — more than enough for NPP's ~83 imports.
@@ -150,21 +155,22 @@ impl SlabAlloc {
     ///   +48  movdqu [rsp+0x70], xmm3   F3 0F 7F 5C 24 70     (6 bytes)
     ///   +54  mov rcx, imm64            48 B9 <slot_va>       (10 bytes; imm at +56)
     ///   +64  mov rdx, [rsp+0xA8]       48 8B 94 24 A8 00 00 00 (8 bytes; caller ret)
-    ///   +72  mov r11, imm64            49 BB <log_fn_addr>   (10 bytes; imm at +74)
-    ///   +82  call r11                  41 FF D3              (3 bytes)
-    ///   +85  mov [rsp+0x80], rax       48 89 84 24 80 00 00 00 (8 bytes)
-    ///   +93  mov rcx, [rsp+0x20]       48 8B 4C 24 20        (5 bytes)
-    ///   +98  mov rdx, [rsp+0x28]       48 8B 54 24 28        (5 bytes)
-    ///   +103 mov r8, [rsp+0x30]        4C 8B 44 24 30        (5 bytes)
-    ///   +108 mov r9, [rsp+0x38]        4C 8B 4C 24 38        (5 bytes)
-    ///   +113 movdqu xmm0, [rsp+0x40]   F3 0F 6F 44 24 40     (6 bytes)
-    ///   +119 movdqu xmm1, [rsp+0x50]   F3 0F 6F 4C 24 50     (6 bytes)
-    ///   +125 movdqu xmm2, [rsp+0x60]   F3 0F 6F 54 24 60     (6 bytes)
-    ///   +131 movdqu xmm3, [rsp+0x70]   F3 0F 6F 5C 24 70     (6 bytes)
-    ///   +137 mov r10, [rsp+0x80]       4C 8B 94 24 80 00 00 00 (8 bytes)
-    ///   +145 add rsp, 0xA8             48 81 C4 A8 00 00 00  (7 bytes)
-    ///   +152 jmp r10                   41 FF E2              (3 bytes)
-    ///   Total used: 155 bytes.  Remaining 5 bytes (155..160) are 0x90 NOPs.
+    ///   +72  mov r8, [rsp+0xD8]        4C 8B 84 24 D8 00 00 00 (8 bytes; caller's caller ret)
+    ///   +80  mov r11, imm64            49 BB <log_fn_addr>   (10 bytes; imm at +82)
+    ///   +90  call r11                  41 FF D3              (3 bytes)
+    ///   +93  mov [rsp+0x80], rax       48 89 84 24 80 00 00 00 (8 bytes)
+    ///   +101 mov rcx, [rsp+0x20]       48 8B 4C 24 20        (5 bytes)
+    ///   +106 mov rdx, [rsp+0x28]       48 8B 54 24 28        (5 bytes)
+    ///   +111 mov r8, [rsp+0x30]        4C 8B 44 24 30        (5 bytes)
+    ///   +116 mov r9, [rsp+0x38]        4C 8B 4C 24 38        (5 bytes)
+    ///   +121 movdqu xmm0, [rsp+0x40]   F3 0F 6F 44 24 40     (6 bytes)
+    ///   +127 movdqu xmm1, [rsp+0x50]   F3 0F 6F 4C 24 50     (6 bytes)
+    ///   +133 movdqu xmm2, [rsp+0x60]   F3 0F 6F 54 24 60     (6 bytes)
+    ///   +139 movdqu xmm3, [rsp+0x70]   F3 0F 6F 5C 24 70     (6 bytes)
+    ///   +145 mov r10, [rsp+0x80]       4C 8B 94 24 80 00 00 00 (8 bytes)
+    ///   +153 add rsp, 0xA8             48 81 C4 A8 00 00 00  (7 bytes)
+    ///   +160 jmp r10                   41 FF E2              (3 bytes)
+    ///   Total used: 163 bytes.  Remaining 13 bytes (163..176) are 0x90 NOPs.
     fn write_stub(buf: *mut u8, slot_va: usize, log_fn_addr: usize) {
         // SAFETY: buf points into a live mmap region of at least STUB_STRIDE bytes.
         let b = unsafe { std::slice::from_raw_parts_mut(buf, Self::STUB_STRIDE) };
@@ -173,7 +179,7 @@ impl SlabAlloc {
         b.fill(0x90);
 
         #[rustfmt::skip]
-        let template: [u8; 155] = [
+        let template: [u8; 163] = [
             // +0  mov r10, rax
             0x4D, 0x89, 0xC2,
             // +3  sub rsp, 0xA8
@@ -199,44 +205,46 @@ impl SlabAlloc {
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
             // +64 mov rdx, [rsp+0xA8]  (caller return address)
             0x48, 0x8B, 0x94, 0x24, 0xA8, 0x00, 0x00, 0x00,
-            // +72 mov r11, imm64  (log_fn_addr; imm64 at offset +74)
+            // +72 mov r8, [rsp+0xD8]  (caller's caller return address)
+            0x4C, 0x8B, 0x84, 0x24, 0xD8, 0x00, 0x00, 0x00,
+            // +80 mov r11, imm64  (log_fn_addr; imm64 at offset +82)
             0x49, 0xBB,
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            // +82 call r11
+            // +90 call r11
             0x41, 0xFF, 0xD3,
-            // +85 mov [rsp+0x80], rax
+            // +93 mov [rsp+0x80], rax
             0x48, 0x89, 0x84, 0x24, 0x80, 0x00, 0x00, 0x00,
-            // +93 mov rcx, [rsp+0x20]
+            // +101 mov rcx, [rsp+0x20]
             0x48, 0x8B, 0x4C, 0x24, 0x20,
-            // +98 mov rdx, [rsp+0x28]
+            // +106 mov rdx, [rsp+0x28]
             0x48, 0x8B, 0x54, 0x24, 0x28,
-            // +103 mov r8, [rsp+0x30]
+            // +111 mov r8, [rsp+0x30]
             0x4C, 0x8B, 0x44, 0x24, 0x30,
-            // +108 mov r9, [rsp+0x38]
+            // +116 mov r9, [rsp+0x38]
             0x4C, 0x8B, 0x4C, 0x24, 0x38,
-            // +113 movdqu xmm0, [rsp+0x40]
+            // +121 movdqu xmm0, [rsp+0x40]
             0xF3, 0x0F, 0x6F, 0x44, 0x24, 0x40,
-            // +119 movdqu xmm1, [rsp+0x50]
+            // +127 movdqu xmm1, [rsp+0x50]
             0xF3, 0x0F, 0x6F, 0x4C, 0x24, 0x50,
-            // +125 movdqu xmm2, [rsp+0x60]
+            // +133 movdqu xmm2, [rsp+0x60]
             0xF3, 0x0F, 0x6F, 0x54, 0x24, 0x60,
-            // +131 movdqu xmm3, [rsp+0x70]
+            // +139 movdqu xmm3, [rsp+0x70]
             0xF3, 0x0F, 0x6F, 0x5C, 0x24, 0x70,
-            // +137 mov r10, [rsp+0x80]
+            // +145 mov r10, [rsp+0x80]
             0x4C, 0x8B, 0x94, 0x24, 0x80, 0x00, 0x00, 0x00,
-            // +145 add rsp, 0xA8
+            // +153 add rsp, 0xA8
             0x48, 0x81, 0xC4, 0xA8, 0x00, 0x00, 0x00,
-            // +152 jmp r10
+            // +160 jmp r10
             0x41, 0xFF, 0xE2,
         ];
 
-        b[..155].copy_from_slice(&template);
+        b[..163].copy_from_slice(&template);
 
         // Patch slot_va immediate at offset 56.
         b[56..64].copy_from_slice(&(slot_va as u64).to_le_bytes());
 
-        // Patch log_fn_addr immediate at offset 74.
-        b[74..82].copy_from_slice(&(log_fn_addr as u64).to_le_bytes());
+        // Patch log_fn_addr immediate at offset 82.
+        b[82..90].copy_from_slice(&(log_fn_addr as u64).to_le_bytes());
     }
 }
 
