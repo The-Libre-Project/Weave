@@ -394,7 +394,7 @@ fn trace_import_stub_log_impl(ret_addr: usize, rax_at_call: usize) -> usize {
     });
     match entry {
         Some((name, real_fn)) => {
-            eprintln!("weave/iat-trace: {name}");
+            eprintln!("weave/iat-trace: {name} ret={ret_addr:#x}");
             real_fn
         }
         None => {
