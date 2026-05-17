@@ -4772,7 +4772,15 @@ pub unsafe extern "win64" fn find_first_file_w(
     // Translate to Linux path
     let linux_path = match weave_core::file_io::translate_win_path(&win_path) {
         Ok(p) => p,
-        Err(_) => {
+        Err(e) => {
+            // M13-S: log the exact path and error so CI reveals what MSVC 7za presents.
+            // set_last_error here so the unset LastError does not leak a stale 87 from
+            // an earlier call and produce a spurious 0x80070057 in the caller.
+            set_last_error(87); // ERROR_INVALID_PARAMETER — matches what a real translate failure maps to
+            eprintln!(
+                "[m13-S] find_first_file_w rejected (err={}): {:?}",
+                e, win_path
+            );
             eprintln!(
                 "weave/FindFirstFileW: exit path={win_path:?} → INVALID_HANDLE_VALUE (xlate_err)"
             );
