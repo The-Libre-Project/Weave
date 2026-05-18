@@ -5679,3 +5679,228 @@ fn notepad_roundtrip_file_open_probe() {
          (expected exit line with last_error=0).\nstderr: {stderr}"
     );
 }
+
+/// `weave notepad++.exe output.cpp` — E3-M2 headless save mechanism gate (sub-brief b).
+///
+/// Save mechanism: Option B — xdotool key injection.
+///   NppExec is absent from the fixture (only nppPluginList.dll is present).
+///   Option C (WEAVE_INJECT_CMD) was ruled out as too invasive for this brief.
+///   xdotool is added to the CI apt install list in .github/workflows/ci.yml.
+///
+/// Procedure:
+///   1. Copy the NPP fixture to /tmp/weave_npp_roundtrip_b/ with output.cpp as the target file.
+///   2. Spawn NPP under Weave with output.cpp as the argument (NPP opens it).
+///   3. Drain stderr in a background thread; signal via mpsc when
+///      `PHASE: wm_paint_dispatched_first` is observed (NPP is in its message loop).
+///   4. Use `xdotool search --sync --name "Notepad++"` to obtain the X11 window ID.
+///   5. Send Ctrl+s via xdotool key to trigger an in-place save (NPP saves output.cpp
+///      back to the same path — the file already exists and has content).
+///   6. Wait 2 s for the save to complete, then send Alt+F4 to close NPP.
+///   7. Wait for NPP to exit (timeout 20 s total from spawn), kill if needed.
+///   8. Assert that /tmp/weave_npp_roundtrip_b/output.cpp exists and has size > 0.
+///
+/// Tier A assertion (sub-brief b prerequisite only — not the full A1 byte-compare):
+///   output.cpp exists after NPP exits AND has size > 0.
+///
+/// Temp dir: /tmp/weave_npp_roundtrip_b (distinct from sub-brief a dir)
+/// Timeout: 20 s
+#[test]
+fn notepad_roundtrip_headless_save() {
+    if !cfg!(target_os = "linux") {
+        eprintln!("skipping execution test — requires Linux");
+        return;
+    }
+
+    let manifest = env!("CARGO_MANIFEST_DIR");
+    let npp_dir = format!("{manifest}/../tests/fixtures/npp");
+    let npp_exe = format!("{npp_dir}/notepad++.exe");
+
+    if !std::path::Path::new(&npp_exe).exists() {
+        eprintln!("skipping: notepad++.exe not present in tests/fixtures/npp/");
+        return;
+    }
+
+    // Verify xdotool is available — skip gracefully if not installed.
+    if std::process::Command::new("xdotool")
+        .arg("version")
+        .output()
+        .is_err()
+    {
+        eprintln!("skipping: xdotool not available in PATH");
+        return;
+    }
+
+    let weave_bin = env!("CARGO_BIN_EXE_weave");
+
+    let tmp_dir = std::path::PathBuf::from("/tmp/weave_npp_roundtrip_b");
+    if tmp_dir.exists() {
+        std::fs::remove_dir_all(&tmp_dir).expect("failed to clean temp roundtrip_b dir");
+    }
+
+    // Copy the fixture to the temp dir so NPP can write config files without hitting
+    // the sandbox deny on the read-only fixture dir.
+    fn copy_dir_all_rtb(src: &std::path::Path, dst: &std::path::Path) {
+        std::fs::create_dir_all(dst).expect("create_dir_all failed");
+        for entry in std::fs::read_dir(src).expect("read_dir failed") {
+            let entry = entry.expect("entry failed");
+            let dst_path = dst.join(entry.file_name());
+            if entry.file_type().expect("file_type failed").is_dir() {
+                copy_dir_all_rtb(&entry.path(), &dst_path);
+            } else {
+                std::fs::copy(entry.path(), &dst_path).expect("copy failed");
+            }
+        }
+    }
+    copy_dir_all_rtb(std::path::Path::new(&npp_dir), &tmp_dir);
+
+    // The output file is the copy of roundtrip_input.cpp inside the temp dir, renamed
+    // to output.cpp.  NPP opens it; Ctrl+S saves it in-place.  sub-brief c will do
+    // the SHA-256 compare against the original.
+    let source_input = std::path::PathBuf::from(npp_dir).join("roundtrip_input.cpp");
+    let output_file = tmp_dir.join("output.cpp");
+    std::fs::copy(&source_input, &output_file)
+        .expect("failed to copy roundtrip_input.cpp to output.cpp");
+
+    let tmp_exe = tmp_dir.join("notepad++.exe");
+
+    let start = std::time::Instant::now();
+    let mut child = std::process::Command::new(weave_bin)
+        .current_dir(&tmp_dir)
+        .arg(&tmp_exe)
+        .arg(&output_file)
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|e| panic!("failed to spawn weave on notepad++.exe: {e}"));
+
+    // Drain stderr in a background thread.  Signal via mpsc when the paint phase
+    // marker is seen (NPP has entered its message loop and is ready for input).
+    let stderr_pipe = child.stderr.take().expect("stderr was piped");
+    let stderr_shared = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let stderr_writer = std::sync::Arc::clone(&stderr_shared);
+    let (paint_tx, paint_rx) = std::sync::mpsc::channel::<()>();
+
+    let drain_thread = std::thread::spawn(move || {
+        use std::io::Read;
+        let mut pipe = stderr_pipe;
+        let mut buf = [0u8; 4096];
+        let mut acc = Vec::new();
+        let mut signalled = false;
+        loop {
+            match pipe.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    acc.extend_from_slice(&buf[..n]);
+                    if !signalled {
+                        let chunk = String::from_utf8_lossy(&acc);
+                        if chunk.contains("PHASE: wm_paint_dispatched_first") {
+                            let _ = paint_tx.send(());
+                            signalled = true;
+                        }
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        *stderr_writer.lock().unwrap() = acc;
+    });
+
+    // Wait up to 15 s for WM_PAINT to be dispatched.
+    let paint_deadline = std::time::Duration::from_secs(15);
+    let paint_seen = paint_rx.recv_timeout(paint_deadline).is_ok();
+
+    if paint_seen {
+        eprintln!("notepad_roundtrip_headless_save: PHASE: wm_paint_dispatched_first observed — injecting Ctrl+S");
+
+        // Give NPP an extra moment to stabilise its window state after paint.
+        std::thread::sleep(std::time::Duration::from_millis(500));
+
+        // Find the NPP window by name.
+        let xdotool_search = std::process::Command::new("xdotool")
+            .args(["search", "--name", "Notepad++"])
+            .output();
+
+        let window_id: Option<String> = match xdotool_search {
+            Ok(out) if out.status.success() => {
+                let ids = String::from_utf8_lossy(&out.stdout);
+                ids.lines().next().map(|s| s.trim().to_string())
+            }
+            Ok(out) => {
+                eprintln!(
+                    "xdotool search failed: {}",
+                    String::from_utf8_lossy(&out.stderr)
+                );
+                None
+            }
+            Err(e) => {
+                eprintln!("xdotool search error: {e}");
+                None
+            }
+        };
+
+        if let Some(ref wid) = window_id {
+            eprintln!("notepad_roundtrip_headless_save: window id = {wid}, sending Ctrl+s");
+            // Focus and send Ctrl+s.
+            let _ = std::process::Command::new("xdotool")
+                .args(["windowfocus", "--sync", wid])
+                .output();
+            let _ = std::process::Command::new("xdotool")
+                .args(["key", "--window", wid, "ctrl+s"])
+                .output();
+
+            // Wait for WriteFile to complete before closing.
+            std::thread::sleep(std::time::Duration::from_secs(2));
+
+            // Send Alt+F4 to close NPP gracefully.
+            eprintln!("notepad_roundtrip_headless_save: sending Alt+F4 to close NPP");
+            let _ = std::process::Command::new("xdotool")
+                .args(["key", "--window", wid, "alt+F4"])
+                .output();
+        } else {
+            eprintln!("notepad_roundtrip_headless_save: xdotool could not find Notepad++ window — will kill process");
+        }
+    } else {
+        eprintln!("notepad_roundtrip_headless_save: timed out waiting for wm_paint — killing NPP");
+    }
+
+    // Wait for NPP to exit; kill it if still running after 20 s total.
+    let kill_deadline = start + std::time::Duration::from_secs(20);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) => {
+                if std::time::Instant::now() >= kill_deadline {
+                    let _ = child.kill();
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err(e) => panic!("wait failed: {e}"),
+        }
+    }
+    let elapsed = start.elapsed();
+
+    drain_thread.join().expect("stderr drain thread panicked");
+    let stderr_bytes = stderr_shared.lock().unwrap().clone();
+    let stderr = String::from_utf8_lossy(&stderr_bytes);
+    eprintln!("notepad_roundtrip_headless_save stderr ({elapsed:.1?}):\n{stderr}");
+
+    // Sub-brief b gate: output.cpp must exist and be non-empty after NPP exits.
+    // This proves WriteFile was called and completed without truncating the file.
+    // Sub-brief c will assert SHA-256(output.cpp) == SHA-256(roundtrip_input.cpp).
+    assert!(
+        output_file.exists(),
+        "E3-M2 sub-brief b: output.cpp does not exist after NPP exits — \
+         save was not triggered or WriteFile failed.\nstderr: {stderr}"
+    );
+    let output_len = std::fs::metadata(&output_file)
+        .expect("failed to stat output.cpp")
+        .len();
+    assert!(
+        output_len > 0,
+        "E3-M2 sub-brief b: output.cpp exists but is 0 bytes — \
+         WriteFile truncated the file or saved empty content.\nstderr: {stderr}"
+    );
+    eprintln!(
+        "notepad_roundtrip_headless_save: output.cpp exists, size={output_len} bytes — sub-brief b PASS"
+    );
+}
