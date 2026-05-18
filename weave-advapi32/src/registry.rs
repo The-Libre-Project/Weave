@@ -1769,6 +1769,13 @@ pub fn resolve(func: &str) -> Option<usize> {
             report_event_w as unsafe extern "win64" fn(_, _, _, _, _, _, _, _, _) -> _ as *const ()
                 as usize,
         ),
+        // Non-Ex registry wrappers — Phase A stubs for IrfanView (E3-M3)
+        "RegCreateKeyW" => Some(
+            reg_create_key_w as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
+        ),
+        "RegSetValueW" => Some(
+            reg_set_value_w as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const () as usize,
+        ),
         _ => None,
     }
 }
@@ -2301,6 +2308,67 @@ pub unsafe extern "win64" fn report_event_w(
     _lp_raw_data: *const u8,
 ) -> i32 {
     1 // TRUE
+}
+
+// ── Non-Ex registry wrappers (Phase A stubs) ──────────────────────────────────
+
+/// RegCreateKeyW — open or create a registry key (legacy non-Ex variant).
+///
+/// Delegates to `RegCreateKeyExW` with `dwOptions=REG_OPTION_NON_VOLATILE` and
+/// `samDesired=MAXIMUM_ALLOWED`, matching Wine's behaviour.
+///
+/// # Safety
+/// `lp_sub_key` must be null or a valid null-terminated UTF-16 string.
+/// `phk_result` must be a writable pointer to a HKEY.
+// Wine ref: dlls/advapi32/registry.c — RegCreateKeyW: validates phkResult != NULL,
+// then calls RegCreateKeyExW(hkey, lpSubKey, 0, NULL, REG_OPTION_NON_VOLATILE,
+// MAXIMUM_ALLOWED, NULL, phkResult, NULL).
+// TODO(shim): Phase A — delegates to reg_create_key_ex_w; disposition and options ignored.
+pub unsafe extern "win64" fn reg_create_key_w(
+    h_key: usize,
+    lp_sub_key: *const u16,
+    phk_result: *mut usize,
+) -> u32 {
+    if phk_result.is_null() {
+        return 87; // ERROR_INVALID_PARAMETER
+    }
+    // SAFETY: (a) phk_result non-null (checked above), caller-guaranteed writable HKEY*.
+    // (b) lp_sub_key forwarded to reg_create_key_ex_w which handles null.
+    // (c) Pointers valid for this call.  (d) Phase A — no Tier A gate yet.
+    let ret = unsafe {
+        reg_create_key_ex_w(
+            h_key,
+            lp_sub_key,
+            0,             // reserved
+            std::ptr::null(), // lpClass
+            0,             // REG_OPTION_NON_VOLATILE
+            0x02000000,    // MAXIMUM_ALLOWED
+            0,             // lpSecurityAttributes
+            phk_result,
+            std::ptr::null_mut(), // lpdwDisposition
+        )
+    };
+    ret as u32
+}
+
+/// RegSetValueW — set the default value of a key (legacy non-Ex variant).
+///
+/// Phase A stub: returns `ERROR_SUCCESS` without writing anything. IrfanView
+/// settings are read-only in Phase A; persistence is out of scope.
+///
+/// # Safety
+/// All pointer parameters are accepted but not dereferenced.
+// Wine ref: dlls/advapi32/registry.c — RegSetValueW: validates type==REG_SZ && data;
+// calls RegSetKeyValueW(hkey, subkey, NULL, type, data, (lstrlenW(data)+1)*sizeof(WCHAR)).
+// TODO(shim): Phase A — returns ERROR_SUCCESS, no write.
+pub unsafe extern "win64" fn reg_set_value_w(
+    _h_key: usize,
+    _lp_sub_key: *const u16,
+    _dw_type: u32,
+    _lp_data: *const u16,
+    _cb_data: u32,
+) -> u32 {
+    0 // ERROR_SUCCESS
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

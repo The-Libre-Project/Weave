@@ -14350,6 +14350,43 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "SetCommTimeouts" => {
             Some(set_comm_timeouts as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
         }
+        // INI cluster — Phase A stubs for IrfanView (E3-M3)
+        "GetPrivateProfileStringW" => Some(
+            get_private_profile_string_w
+                as unsafe extern "win64" fn(_, _, _, _, _, _) -> _ as *const () as usize,
+        ),
+        "GetPrivateProfileStringA" => Some(
+            get_private_profile_string_a
+                as unsafe extern "win64" fn(_, _, _, _, _, _) -> _ as *const () as usize,
+        ),
+        "GetPrivateProfileIntW" => Some(
+            get_private_profile_int_w
+                as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
+        ),
+        "GetPrivateProfileIntA" => Some(
+            get_private_profile_int_a
+                as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
+        ),
+        "GetPrivateProfileSectionW" => Some(
+            get_private_profile_section_w
+                as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
+        ),
+        "WritePrivateProfileStringW" => Some(
+            write_private_profile_string_w
+                as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
+        ),
+        "WritePrivateProfileStringA" => Some(
+            write_private_profile_string_a
+                as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
+        ),
+        "WritePrivateProfileSectionW" => Some(
+            write_private_profile_section_w
+                as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
+        ),
+        "GetProfileStringW" => Some(
+            get_profile_string_w
+                as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const () as usize,
+        ),
         // Task-01 additions — curl
         "CancelIo" => Some(cancel_io as unsafe extern "win64" fn(_) -> _ as *const () as usize),
         "SleepEx" => Some(sleep_ex as unsafe extern "win64" fn(_, _) -> _ as *const () as usize),
@@ -16130,6 +16167,209 @@ pub unsafe extern "win64" fn set_comm_state(_h_file: usize, _lp_dcb: usize) -> i
 // COMMTIMEOUTS struct; ReadIntervalTimeout/ReadTotalTimeoutMultiplier/Constant/Write fields mapped directly
 pub unsafe extern "win64" fn set_comm_timeouts(_h_file: usize, _lp_comm_timeouts: usize) -> i32 {
     warn_once("SetCommTimeouts");
+    0
+}
+
+// ── INI cluster (Phase A stubs) ───────────────────────────────────────────────
+
+/// GetPrivateProfileStringW — read a string from a .ini file.
+///
+/// Returns 0 (empty-string default) on every call. IrfanView uses this to read
+/// its configuration on startup; returning 0 causes it to fall back to built-in
+/// defaults, which is correct Phase-A behaviour.
+///
+/// # Safety
+/// All pointer parameters are accepted but not dereferenced.
+// Wine ref: dlls/kernel32/profile.c — GetPrivateProfileStringW: opens/parses the
+// named .ini file, finds [section]\entry, copies value to buffer, returns char count
+// without NUL; returns def_val if key absent; returns 0 if buf/len=0.
+// TODO(shim): Phase A — returns empty string; real INI parsing not yet implemented.
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "win64" fn get_private_profile_string_w(
+    _lp_app_name: *const u16,
+    _lp_key_name: *const u16,
+    _lp_default: *const u16,
+    lp_returned_string: *mut u16,
+    n_size: u32,
+    _lp_file_name: *const u16,
+) -> u32 {
+    warn_once("GetPrivateProfileStringW");
+    // SAFETY: (a) lp_returned_string is accepted from guest; if n_size > 0 the
+    // caller guarantees at least n_size wide chars of writable buffer.  (b) Guest
+    // heap, caller-owned.  (c) Buffer valid for the duration of this call only.
+    // (d) No Tier A gate yet — Phase A stub.
+    if n_size > 0 && !lp_returned_string.is_null() {
+        unsafe { lp_returned_string.write(0) };
+    }
+    0
+}
+
+/// GetPrivateProfileStringA — ANSI variant; returns 0 (empty default).
+///
+/// # Safety
+/// All pointer parameters are accepted but not dereferenced.
+// Wine ref: dlls/kernel32/profile.c — GetPrivateProfileStringA: converts args to
+// Unicode via RtlCreateUnicodeStringFromAsciiz then calls GetPrivateProfileStringW.
+// TODO(shim): Phase A — ANSI stub mirrors W behaviour.
+pub unsafe extern "win64" fn get_private_profile_string_a(
+    _lp_app_name: *const u8,
+    _lp_key_name: *const u8,
+    _lp_default: *const u8,
+    lp_returned_string: *mut u8,
+    n_size: u32,
+    _lp_file_name: *const u8,
+) -> u32 {
+    warn_once("GetPrivateProfileStringA");
+    // SAFETY: same rationale as get_private_profile_string_w.
+    if n_size > 0 && !lp_returned_string.is_null() {
+        unsafe { lp_returned_string.write(0) };
+    }
+    0
+}
+
+/// GetPrivateProfileIntW — read an integer from a .ini file.
+///
+/// Returns `n_default` on every call (the documented fallback value when the key
+/// is absent), which is the correct Phase-A behaviour.
+///
+/// # Safety
+/// Pointer parameters are not dereferenced.
+// Wine ref: dlls/kernel32/profile.c — GetPrivateProfileIntW: calls
+// GetPrivateProfileStringW, then parses the result as decimal/hex; returns
+// def_val if the key is absent or not a valid integer.
+// TODO(shim): Phase A — returns n_default unconditionally.
+pub unsafe extern "win64" fn get_private_profile_int_w(
+    _lp_app_name: *const u16,
+    _lp_key_name: *const u16,
+    n_default: i32,
+    _lp_file_name: *const u16,
+) -> i32 {
+    warn_once("GetPrivateProfileIntW");
+    n_default
+}
+
+/// GetPrivateProfileIntA — ANSI variant; returns `n_default`.
+///
+/// # Safety
+/// Pointer parameters are not dereferenced.
+// Wine ref: dlls/kernel32/profile.c — GetPrivateProfileIntA: converts args to
+// Unicode via RtlCreateUnicodeStringFromAsciiz then calls GetPrivateProfileIntW.
+// TODO(shim): Phase A — returns n_default unconditionally.
+pub unsafe extern "win64" fn get_private_profile_int_a(
+    _lp_app_name: *const u8,
+    _lp_key_name: *const u8,
+    n_default: i32,
+    _lp_file_name: *const u8,
+) -> i32 {
+    warn_once("GetPrivateProfileIntA");
+    n_default
+}
+
+/// GetPrivateProfileSectionW — enumerate all key=value pairs in a section.
+///
+/// Writes a double-NUL terminator to indicate an empty section.
+///
+/// # Safety
+/// `lp_returned_string` must be a writable buffer of at least `n_size` u16s if non-null.
+// Wine ref: dlls/kernel32/profile.c — GetPrivateProfileSectionW: finds the named
+// section, copies all "key=value\0" entries into buffer as a multi-string; final
+// extra NUL terminates the list; returns total chars written excluding final NUL.
+// TODO(shim): Phase A — returns empty multi-string (double-NUL).
+pub unsafe extern "win64" fn get_private_profile_section_w(
+    _lp_app_name: *const u16,
+    lp_returned_string: *mut u16,
+    n_size: u32,
+    _lp_file_name: *const u16,
+) -> u32 {
+    warn_once("GetPrivateProfileSectionW");
+    // SAFETY: (a) lp_returned_string caller-supplied; n_size units writable if non-null.
+    // (b) Guest heap, caller-owned.  (c) Valid for this call.  (d) Phase A — no gate.
+    if n_size >= 2 && !lp_returned_string.is_null() {
+        unsafe {
+            lp_returned_string.write(0);
+            lp_returned_string.add(1).write(0);
+        }
+    }
+    0
+}
+
+/// WritePrivateProfileStringW — write a key to a .ini file.
+///
+/// Returns TRUE without writing anything (no persistent INI on Linux).
+///
+/// # Safety
+/// All pointer parameters are accepted but not dereferenced.
+// Wine ref: dlls/kernel32/profile.c — WritePrivateProfileStringW: opens/creates
+// the .ini file, finds or creates the section, sets the key value; flush to disk.
+// Returns TRUE on success, FALSE on I/O error.
+// TODO(shim): Phase A — returns TRUE, no disk write.
+pub unsafe extern "win64" fn write_private_profile_string_w(
+    _lp_app_name: *const u16,
+    _lp_key_name: *const u16,
+    _lp_string: *const u16,
+    _lp_file_name: *const u16,
+) -> i32 {
+    warn_once("WritePrivateProfileStringW");
+    1 // TRUE
+}
+
+/// WritePrivateProfileStringA — ANSI variant; returns TRUE.
+///
+/// # Safety
+/// All pointer parameters are accepted but not dereferenced.
+// Wine ref: dlls/kernel32/profile.c — WritePrivateProfileStringA: converts args
+// via RtlCreateUnicodeStringFromAsciiz then calls WritePrivateProfileStringW.
+// TODO(shim): Phase A — returns TRUE, no disk write.
+pub unsafe extern "win64" fn write_private_profile_string_a(
+    _lp_app_name: *const u8,
+    _lp_key_name: *const u8,
+    _lp_string: *const u8,
+    _lp_file_name: *const u8,
+) -> i32 {
+    warn_once("WritePrivateProfileStringA");
+    1 // TRUE
+}
+
+/// WritePrivateProfileSectionW — bulk-write a section to a .ini file.
+///
+/// Returns TRUE without writing anything.
+///
+/// # Safety
+/// All pointer parameters are accepted but not dereferenced.
+// Wine ref: dlls/kernel32/profile.c — WritePrivateProfileSectionW: replaces the
+// entire section with the supplied multi-string of "key=value\0" entries.
+// TODO(shim): Phase A — returns TRUE, no disk write.
+pub unsafe extern "win64" fn write_private_profile_section_w(
+    _lp_app_name: *const u16,
+    _lp_string: *const u16,
+    _lp_file_name: *const u16,
+) -> i32 {
+    warn_once("WritePrivateProfileSectionW");
+    1 // TRUE
+}
+
+/// GetProfileStringW — read from win.ini; delegates to GetPrivateProfileStringW("win.ini").
+///
+/// Phase A: returns 0 (empty default).
+///
+/// # Safety
+/// All pointer parameters are accepted but not dereferenced.
+// Wine ref: dlls/kernel32/profile.c — GetProfileStringW: calls
+// GetPrivateProfileStringW(section, entry, def_val, buffer, len, L"win.ini").
+// TODO(shim): Phase A — returns 0.
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "win64" fn get_profile_string_w(
+    _lp_app_name: *const u16,
+    _lp_key_name: *const u16,
+    _lp_default: *const u16,
+    lp_returned_string: *mut u16,
+    n_size: u32,
+) -> u32 {
+    warn_once("GetProfileStringW");
+    // SAFETY: same rationale as get_private_profile_string_w.
+    if n_size > 0 && !lp_returned_string.is_null() {
+        unsafe { lp_returned_string.write(0) };
+    }
     0
 }
 
