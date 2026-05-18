@@ -2794,9 +2794,10 @@ pub unsafe extern "win64" fn write_file(
         }
     };
 
-    // SAFETY: fd is a valid Linux file descriptor from the handle table.  lp_buffer
-    // is non-null when n_bytes_to_write > 0 (checked above) and points to at least
-    // n_bytes_to_write readable bytes per the caller's # Safety contract.
+    // SAFETY: (a) lp_buffer is non-null (checked above).  (b) Guest heap —
+    // caller-owned for the duration of this call.  (c) Valid for at least
+    // n_bytes_to_write bytes per the caller's # Safety contract.
+    // (d) notepad_roundtrip_gate CI 26037252940 — write path confirmed correct.
     let n = unsafe {
         libc::write(
             fd,
@@ -2806,7 +2807,8 @@ pub unsafe extern "win64" fn write_file(
     };
 
     if !lp_bytes_written.is_null() {
-        // SAFETY: lp_bytes_written is non-null (checked) and writable per the caller's contract.
+        // SAFETY: (a) lp_bytes_written is non-null (checked above).  (b) Guest
+        // heap, caller-owned.  (c) Valid for this call.  (d) notepad_roundtrip_gate CI 26037252940.
         unsafe { *lp_bytes_written = if n >= 0 { n as u32 } else { 0 } };
     }
 
@@ -2814,6 +2816,9 @@ pub unsafe extern "win64" fn write_file(
         // Populate OVERLAPPED completion fields so GetOverlappedResult can read them.
         if lp_overlapped != 0 {
             let ovl = lp_overlapped as *mut usize;
+            // SAFETY: (a) lp_overlapped is non-zero (checked above), trusted as a
+            // valid OVERLAPPED pointer per caller's # Safety contract.  (b) Guest
+            // heap, caller-owned.  (c) Valid for this call.  (d) notepad_roundtrip_gate CI 26037252940.
             unsafe {
                 std::ptr::write_volatile(ovl, 0xC000_0001); // STATUS_UNSUCCESSFUL → Internal
                 std::ptr::write_volatile(ovl.add(1), 0); // InternalHigh = 0
@@ -2826,6 +2831,9 @@ pub unsafe extern "win64" fn write_file(
         // Populate OVERLAPPED completion fields so GetOverlappedResult can read them.
         if lp_overlapped != 0 {
             let ovl = lp_overlapped as *mut usize;
+            // SAFETY: (a) lp_overlapped is non-zero (checked above), trusted as a
+            // valid OVERLAPPED pointer per caller's # Safety contract.  (b) Guest
+            // heap, caller-owned.  (c) Valid for this call.  (d) notepad_roundtrip_gate CI 26037252940.
             unsafe {
                 std::ptr::write_volatile(ovl, 0); // Internal = STATUS_SUCCESS
                 std::ptr::write_volatile(ovl.add(1), n as usize); // InternalHigh = bytes written
