@@ -3072,13 +3072,9 @@ pub unsafe extern "win64" fn get_file_information_by_handle(
     let ino = stat.st_ino;
     let size = stat.st_size;
 
-    let to_filetime = |secs: i64, nsecs: i64| -> u64 {
-        let secs_since_1601 = secs.saturating_add(11_644_473_600) as u64;
-        secs_since_1601 * 10_000_000 + (nsecs as u64) / 100
-    };
-    let ft_creation = to_filetime(stat.st_ctime, stat.st_ctime_nsec);
-    let ft_access = to_filetime(stat.st_atime, stat.st_atime_nsec);
-    let ft_write = to_filetime(stat.st_mtime, stat.st_mtime_nsec);
+    let ft_creation = weave_common::unix_to_filetime(stat.st_ctime, stat.st_ctime_nsec);
+    let ft_access = weave_common::unix_to_filetime(stat.st_atime, stat.st_atime_nsec);
+    let ft_write = weave_common::unix_to_filetime(stat.st_mtime, stat.st_mtime_nsec);
 
     let dw_file_attributes = if (stat.st_mode & libc::S_IFMT) == libc::S_IFDIR {
         0x10u32 // FILE_ATTRIBUTE_DIRECTORY
@@ -4858,13 +4854,9 @@ pub unsafe extern "win64" fn find_first_file_w(
         // Convert Linux stat times to Windows FILETIME (100ns ticks since 1601-01-01).
         // Same formula as get_file_information_by_handle; zero FILETIMEs cause apps like
         // 7-Zip to reject the archive's central directory with E_INVALIDARG.
-        let to_filetime = |secs: i64, nsecs: i64| -> u64 {
-            let secs_since_1601 = secs.saturating_add(11_644_473_600) as u64;
-            secs_since_1601 * 10_000_000 + (nsecs as u64) / 100
-        };
-        let ft_creation = to_filetime(stat_buf.st_ctime, stat_buf.st_ctime_nsec);
-        let ft_access = to_filetime(stat_buf.st_atime, stat_buf.st_atime_nsec);
-        let ft_write = to_filetime(stat_buf.st_mtime, stat_buf.st_mtime_nsec);
+        let ft_creation = weave_common::unix_to_filetime(stat_buf.st_ctime, stat_buf.st_ctime_nsec);
+        let ft_access = weave_common::unix_to_filetime(stat_buf.st_atime, stat_buf.st_atime_nsec);
+        let ft_write = weave_common::unix_to_filetime(stat_buf.st_mtime, stat_buf.st_mtime_nsec);
 
         // SAFETY: (a) lp_find_file_data is non-null (checked at entry) and points to a
         // writable Win32FindDataW struct; (b) guest heap — caller owns the buffer;
@@ -12040,16 +12032,10 @@ pub unsafe extern "win64" fn get_file_time(
     }
 
     // Convert Unix timespec fields to Windows FILETIME (100-ns intervals since 1601-01-01).
-    // Offset between 1601-01-01 and 1970-01-01 = 11,644,473,600 seconds.
-    let to_filetime = |secs: i64, nsecs: i64| -> u64 {
-        let secs_since_1601 = secs.saturating_add(11_644_473_600) as u64;
-        secs_since_1601 * 10_000_000 + (nsecs as u64) / 100
-    };
-
     // Linux st_ctime is change-time, not birth/creation time; used as best-effort proxy.
-    let ft_creation = to_filetime(stat.st_ctime, stat.st_ctime_nsec);
-    let ft_access = to_filetime(stat.st_atime, stat.st_atime_nsec);
-    let ft_write = to_filetime(stat.st_mtime, stat.st_mtime_nsec);
+    let ft_creation = weave_common::unix_to_filetime(stat.st_ctime, stat.st_ctime_nsec);
+    let ft_access = weave_common::unix_to_filetime(stat.st_atime, stat.st_atime_nsec);
+    let ft_write = weave_common::unix_to_filetime(stat.st_mtime, stat.st_mtime_nsec);
     if !lp_creation_time.is_null() {
         // SAFETY: (a) lp_creation_time is non-null (checked above); Win32 LPFILETIME is
         // always 8-byte aligned per Win64 ABI; (b) guest heap — caller owns the buffer;
