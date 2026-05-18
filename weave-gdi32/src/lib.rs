@@ -1528,6 +1528,8 @@ pub unsafe extern "win64" fn stretch_di_bits(
     }
 
     weave_user32::backend::free_pixmap(tmp_pixmap);
+    // First successful StretchDIBits with real pixel data confirms image rendering reached.
+    weave_core::progress::mark_phase("stretch_dibits_first");
     abs_h_dest as i32
 }
 
