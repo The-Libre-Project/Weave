@@ -3044,11 +3044,15 @@ pub unsafe extern "win64" fn get_file_information_by_handle(
     lp_file_information: *mut ByHandleFileInformation,
 ) -> i32 {
     if lp_file_information.is_null() {
+        set_last_error(87); // ERROR_INVALID_PARAMETER
         return 0; // FALSE — invalid parameter
     }
     let fd = match handles::get_fd(h_file) {
         Some(fd) => fd,
-        None => return 0, // FALSE
+        None => {
+            set_last_error(file_io::ERROR_INVALID_HANDLE);
+            return 0; // FALSE
+        }
     };
 
     let mut stat = unsafe { std::mem::zeroed::<libc::stat>() };
