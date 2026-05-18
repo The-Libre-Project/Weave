@@ -3055,7 +3055,14 @@ pub unsafe extern "win64" fn get_file_information_by_handle(
         }
     };
 
+    // SAFETY: (a) zeroed() produces a value with all bytes set to 0, which is valid
+    // for libc::stat (a C struct with no invariants on zero bytes); (b) Rust stack;
+    // (c) duration of this call; (d) gate: sevenzip_m13_debug_e_gate (CI 26007699626).
     let mut stat = unsafe { std::mem::zeroed::<libc::stat>() };
+    // SAFETY: (a) fd is a valid Linux file descriptor from the handle table (validated
+    // by get_fd above); &mut stat points to a properly aligned libc::stat on the stack;
+    // (b) fd from kernel handle table, stat on Rust stack; (c) duration of fstat syscall;
+    // (d) gate: sevenzip_m13_debug_e_gate (CI 26007699626).
     let ret = unsafe { libc::fstat(fd, &mut stat) };
     if ret != 0 {
         eprintln!("weave/GetFileInformationByHandle: h={h_file:#x} fd={fd} fstat failed");
@@ -3094,6 +3101,10 @@ pub unsafe extern "win64" fn get_file_information_by_handle(
          ft_cre={ft_creation:#x} ft_acc={ft_access:#x} ft_wri={ft_write:#x}"
     );
 
+    // SAFETY: (a) lp_file_information is non-null (checked at entry) and points to a
+    // writable ByHandleFileInformation struct supplied by the caller; (b) guest heap —
+    // caller owns the struct; (c) duration of this call; (d) gate:
+    // sevenzip_m13_debug_e_gate (CI 26007699626).
     unsafe {
         (*lp_file_information).dw_file_attributes = dw_file_attributes;
         (*lp_file_information).ft_creation_time_low = ft_creation as u32;
@@ -4762,6 +4773,12 @@ pub unsafe extern "win64" fn find_first_file_w(
 
     // Read the null-terminated UTF-16 filename
     let mut len = 0usize;
+    // SAFETY: (a) lp_file_name is non-null (checked above); (b) guest heap;
+    // (c) duration of scan; (d) MAX_UTF16_LEN cap prevents OOB if the guest passes a
+    // non-terminated pointer — reads at most MAX_UTF16_LEN u16s before stopping.
+    // Caveat: a non-null, non-terminated pointer of length ≥ MAX_UTF16_LEN would be
+    // scanned for exactly MAX_UTF16_LEN code units without finding a null — treated as
+    // an overlong path and rejected with INVALID_HANDLE_VALUE below.
     while len < MAX_UTF16_LEN && unsafe { *lp_file_name.add(len) } != 0 {
         len += 1;
     }
@@ -4769,6 +4786,9 @@ pub unsafe extern "win64" fn find_first_file_w(
         eprintln!("weave/FindFirstFileW: exit → INVALID_HANDLE_VALUE (path too long)");
         return usize::MAX;
     }
+    // SAFETY: (a) lp_file_name is non-null (checked above) and the scan above confirmed
+    // `len` code units before the null terminator; (b) guest heap; (c) duration of call;
+    // (d) gate: sevenzip_m13_debug_e_gate (CI 26007699626).
     let win_path =
         unsafe { String::from_utf16_lossy(std::slice::from_raw_parts(lp_file_name, len)) };
     eprintln!("weave/FindFirstFileW: entry path={win_path:?}");
@@ -4808,7 +4828,12 @@ pub unsafe extern "win64" fn find_first_file_w(
                 return usize::MAX;
             }
         };
+        // SAFETY: (a) zeroed() produces a valid zero-initialized libc::stat; (b) Rust stack;
+        // (c) duration of this call; (d) gate: sevenzip_m13_debug_e_gate (CI 26007699626).
         let mut stat_buf = unsafe { std::mem::zeroed::<libc::stat>() };
+        // SAFETY: (a) c_path.as_ptr() is a valid null-terminated C string (CString invariant);
+        // &mut stat_buf points to a properly-sized libc::stat on the stack; (b) c_path on Rust
+        // stack, stat_buf on Rust stack; (c) duration of stat syscall; (d) same gate.
         let ret = unsafe { libc::stat(c_path.as_ptr(), &mut stat_buf) };
         if ret != 0 {
             // 7-Zip and similar apps depend on a deterministic last-error on miss;
@@ -4841,6 +4866,9 @@ pub unsafe extern "win64" fn find_first_file_w(
         let ft_access = to_filetime(stat_buf.st_atime, stat_buf.st_atime_nsec);
         let ft_write = to_filetime(stat_buf.st_mtime, stat_buf.st_mtime_nsec);
 
+        // SAFETY: (a) lp_find_file_data is non-null (checked at entry) and points to a
+        // writable Win32FindDataW struct; (b) guest heap — caller owns the buffer;
+        // (c) duration of this call; (d) gate: sevenzip_m13_debug_e_gate (CI 26007699626).
         unsafe {
             (*lp_find_file_data).dw_file_attributes = if is_dir {
                 0x10 // FILE_ATTRIBUTE_DIRECTORY
@@ -4866,6 +4894,9 @@ pub unsafe extern "win64" fn find_first_file_w(
             (*lp_find_file_data).c_alternate_file_name[0] = 0;
         }
 
+        // SAFETY: (a) lp_find_file_data is non-null (checked at entry) and was just
+        // written by the block above; (b) guest heap; (c) duration of this call;
+        // (d) gate: sevenzip_m13_debug_e_gate (CI 26007699626).
         let attrs = unsafe { (*lp_find_file_data).dw_file_attributes };
         let size_lo = unsafe { (*lp_find_file_data).n_file_size_low };
         let size_hi = unsafe { (*lp_find_file_data).n_file_size_high };
@@ -4895,6 +4926,9 @@ pub unsafe extern "win64" fn find_first_file_w(
         }
     };
 
+    // SAFETY: (a) c_path.as_ptr() is a valid null-terminated C string (CString invariant);
+    // (b) OS-managed DIR allocation; (c) until closedir is called; (d) gate:
+    // sevenzip_m13_debug_e_gate (CI 26007699626).
     let dir = unsafe { libc::opendir(c_path.as_ptr()) };
     if dir.is_null() {
         eprintln!(
@@ -4904,8 +4938,13 @@ pub unsafe extern "win64" fn find_first_file_w(
     }
 
     // Read first entry
+    // SAFETY: (a) dir is non-null (checked above) and is a valid DIR* from opendir;
+    // (b) OS-managed DIR allocation; (c) until the next readdir or closedir call;
+    // (d) gate: sevenzip_m13_debug_e_gate (CI 26007699626).
     let entry = unsafe { libc::readdir(dir) };
     if entry.is_null() {
+        // SAFETY: (a) dir is non-null (checked above); (b) OS-managed; (c) this call
+        // releases the DIR allocation; (d) same gate.
         unsafe { libc::closedir(dir) };
         eprintln!(
             "weave/FindFirstFileW: exit path={win_path:?} → INVALID_HANDLE_VALUE (empty_dir)"
@@ -4914,6 +4953,10 @@ pub unsafe extern "win64" fn find_first_file_w(
     }
 
     // Convert entry name to UTF-16
+    // SAFETY: (a) entry is non-null (checked above) and points to a valid dirent struct
+    // returned by readdir; d_name is a null-terminated C string within that struct;
+    // strlen returns the exact byte count before the null; (b) OS-managed DIR allocation;
+    // (c) until the next readdir call; (d) gate: sevenzip_m13_debug_e_gate (CI 26007699626).
     let entry_name = unsafe {
         let name_ptr = (*entry).d_name.as_ptr();
         let name_len = libc::strlen(name_ptr);
@@ -4923,6 +4966,9 @@ pub unsafe extern "win64" fn find_first_file_w(
     let wide_name: Vec<u16> = entry_name_str.encode_utf16().collect();
 
     // Fill WIN32_FIND_DATAW
+    // SAFETY: (a) lp_find_file_data is non-null (checked at entry) and points to a
+    // writable Win32FindDataW struct; (b) guest heap — caller owns the buffer;
+    // (c) duration of this call; (d) gate: sevenzip_m13_debug_e_gate (CI 26007699626).
     unsafe {
         (*lp_find_file_data).dw_file_attributes = 0x80; // FILE_ATTRIBUTE_NORMAL
         (*lp_find_file_data).ft_creation_time = [0, 0];
@@ -9706,6 +9752,12 @@ pub unsafe extern "win64" fn get_file_attributes_w(lp_file_name: *const u16) -> 
 
     // Decode UTF-16 filename
     let mut len = 0usize;
+    // SAFETY: (a) lp_file_name is non-null (checked above); (b) guest heap;
+    // (c) duration of scan; (d) MAX_UTF16_LEN cap prevents OOB if the guest passes a
+    // non-terminated pointer — reads at most MAX_UTF16_LEN u16s before stopping.
+    // Caveat: a non-null, non-terminated pointer of length ≥ MAX_UTF16_LEN would be
+    // scanned for exactly MAX_UTF16_LEN code units without finding a null — treated as
+    // an overlong path and rejected with INVALID_FILE_ATTRIBUTES below.
     while len < MAX_UTF16_LEN && unsafe { *lp_file_name.add(len) } != 0 {
         len += 1;
     }
@@ -9714,6 +9766,9 @@ pub unsafe extern "win64" fn get_file_attributes_w(lp_file_name: *const u16) -> 
         eprintln!("weave/GetFileAttributesW: entry overlong_name → INVALID");
         return INVALID_FILE_ATTRIBUTES;
     }
+    // SAFETY: (a) lp_file_name is non-null (checked above) and the scan above confirmed
+    // `len` code units before the null terminator; (b) guest heap; (c) duration of call;
+    // (d) gate: sevenzip_m13_debug_e_gate (CI 26007699626).
     let win_path =
         unsafe { String::from_utf16_lossy(std::slice::from_raw_parts(lp_file_name, len)) };
 
@@ -9742,7 +9797,12 @@ pub unsafe extern "win64" fn get_file_attributes_w(lp_file_name: *const u16) -> 
         }
     };
 
+    // SAFETY: (a) zeroed() produces a valid zero-initialized libc::stat; (b) Rust stack;
+    // (c) duration of this call; (d) gate: sevenzip_m13_debug_e_gate (CI 26007699626).
     let mut stat = unsafe { std::mem::zeroed::<libc::stat>() };
+    // SAFETY: (a) c_path.as_ptr() is a valid null-terminated C string (CString invariant);
+    // &mut stat points to a properly-aligned libc::stat on the stack; (b) c_path on Rust
+    // stack, stat on Rust stack; (c) duration of stat syscall; (d) same gate.
     let ret = unsafe { libc::stat(c_path.as_ptr(), &mut stat) };
     if ret != 0 {
         set_last_error(file_io::ERROR_FILE_NOT_FOUND);
@@ -11966,7 +12026,13 @@ pub unsafe extern "win64" fn get_file_time(
         }
     };
 
+    // SAFETY: (a) zeroed() produces a valid zero-initialized libc::stat; (b) Rust stack;
+    // (c) duration of this call; (d) gate: sevenzip_m13_debug_e_gate (CI 26007699626).
     let mut stat = unsafe { std::mem::zeroed::<libc::stat>() };
+    // SAFETY: (a) fd is a valid Linux file descriptor from the handle table (validated
+    // by get_fd above); &mut stat points to a properly aligned libc::stat on the stack;
+    // (b) fd from kernel handle table, stat on Rust stack; (c) duration of fstat syscall;
+    // (d) gate: sevenzip_m13_debug_e_gate (CI 26007699626).
     if unsafe { libc::fstat(fd, &mut stat) } != 0 {
         set_last_error(file_io::ERROR_INVALID_HANDLE);
         eprintln!("weave/GetFileTime: exit handle={h_file:#x} fd={fd} → FALSE (fstat_err)");
@@ -11985,12 +12051,19 @@ pub unsafe extern "win64" fn get_file_time(
     let ft_access = to_filetime(stat.st_atime, stat.st_atime_nsec);
     let ft_write = to_filetime(stat.st_mtime, stat.st_mtime_nsec);
     if !lp_creation_time.is_null() {
+        // SAFETY: (a) lp_creation_time is non-null (checked above); Win32 LPFILETIME is
+        // always 8-byte aligned per Win64 ABI; (b) guest heap — caller owns the buffer;
+        // (c) duration of this call; (d) gate: sevenzip_m13_debug_e_gate (CI 26007699626).
         unsafe { *lp_creation_time = ft_creation };
     }
     if !lp_last_access_time.is_null() {
+        // SAFETY: (a) lp_last_access_time is non-null (checked above); same alignment
+        // guarantee as above; (b) guest heap; (c) duration of call; (d) same gate.
         unsafe { *lp_last_access_time = ft_access };
     }
     if !lp_last_write_time.is_null() {
+        // SAFETY: (a) lp_last_write_time is non-null (checked above); same alignment
+        // guarantee as above; (b) guest heap; (c) duration of call; (d) same gate.
         unsafe { *lp_last_write_time = ft_write };
     }
 

@@ -184,6 +184,10 @@ pub unsafe extern "win64" fn variant_clear(pvar: *mut u8) -> i32 {
         eprintln!("weave/VariantClear: pvar=NULL");
         return 0;
     }
+    // SAFETY: (a) pvar is non-null (checked above); the VARIANT struct is 16 bytes and
+    // the offsets 0, 2, 4, 6, 8 all lie within that 16-byte layout; (b) guest heap —
+    // caller owns the VARIANT buffer; (c) duration of this call; (d) gate:
+    // sevenzip_m13_debug_e_gate (CI 26007699626).
     let prior_vt = unsafe { *(pvar as *const u16) };
     let res1 = unsafe { *(pvar.add(2) as *const u16) };
     let res2 = unsafe { *(pvar.add(4) as *const u16) };
@@ -197,12 +201,23 @@ pub unsafe extern "win64" fn variant_clear(pvar: *mut u8) -> i32 {
     const VT_BSTR: u16 = 8;
     if prior_vt == VT_BSTR && val_lo != 0 {
         let bstr = val_lo as *mut u16;
+        // SAFETY: (a) bstr is non-null (val_lo != 0 checked above) and was allocated by
+        // Weave's SysAllocStringLen via libc::malloc, which stores a 4-byte byte-length
+        // prefix at offset -4 (Windows BSTR layout); (b) guest heap — BSTR was malloc'd
+        // by this process's SysAllocStringLen; (c) duration of this call; (d) gate:
+        // sevenzip_m13_debug_e_gate (CI 26007699626). LIMITATION: if the BSTR was
+        // allocated by a non-Weave SysAllocString, the -4 byte offset assumption is
+        // incorrect; no cross-allocator BSTR currently observed in Weave.
         let alloc = unsafe { (bstr as *mut u8).sub(4) };
         unsafe { libc::free(alloc as *mut libc::c_void) };
     }
     // Zero only vt (offset 0..2) and data union (offset 8..16).
     // wReserved1/2/3 (offset 2..8) are NOT touched — Windows does not write
     // them and MSVC CPropVariant relies on wReserved2=0xff00 surviving this call.
+    // SAFETY: (a) pvar is non-null (checked at entry) and points to a 16-byte VARIANT
+    // buffer; offsets 0 and 8 both lie within the 16-byte layout; (b) guest heap —
+    // caller owns the VARIANT; (c) duration of this call; (d) gate:
+    // sevenzip_m13_debug_e_gate (CI 26007699626).
     unsafe {
         std::ptr::write_bytes(pvar, 0, 2); // vt = VT_EMPTY
         std::ptr::write_bytes(pvar.add(8), 0, 8); // data union cleared
@@ -236,6 +251,9 @@ pub unsafe extern "win64" fn variant_clear(pvar: *mut u8) -> i32 {
 ///
 /// # Safety
 /// Both pointers must be valid 16-byte writable/readable VARIANT buffers.
+// Wine ref: dlls/oleaut32/variant.c:696 — pvargDest cleared via VariantClear before copy;
+// VT_BSTR deep-cloned via SysAllocStringByteLen; pvargSrc==pvargDest is a no-op (S_OK);
+// shallow 16-byte copy for all other by-value types; DISP_E_BADVARTYPE on VT_CLSID or invalid vt.
 pub unsafe extern "win64" fn variant_copy(pdest: *mut u8, psrc: *const u8) -> i32 {
     if pdest.is_null() || psrc.is_null() {
         return 0; // S_OK — Windows: VariantCopy with NULL returns DISP_E_BADVARTYPE,
@@ -244,31 +262,68 @@ pub unsafe extern "win64" fn variant_copy(pdest: *mut u8, psrc: *const u8) -> i3
     }
     // 1. Clear destination first (matches VariantClear semantics; releases any
     //    prior BSTR pointed at by pdest).
+    // SAFETY: (a) pdest is non-null (checked above); (b) guest heap — caller owns the
+    // VARIANT buffer; (c) duration of this call; (d) gate: sevenzip_m13_debug_e_gate
+    // (CI 26007699626).
     let _ = unsafe { variant_clear(pdest) };
     // 2. Read source vt.
+    // SAFETY: (a) psrc is non-null (checked above) and points to a 16-byte VARIANT buffer;
+    // offset 0 (vt field) lies within that layout; (b) guest heap; (c) duration of call;
+    // (d) gate: sevenzip_m13_debug_e_gate (CI 26007699626).
     let src_vt = unsafe { *(psrc as *const u16) };
     // 3. Handle VT_BSTR specially — deep-clone the string.
     const VT_BSTR: u16 = 8;
     if src_vt == VT_BSTR {
+        // SAFETY: (a) psrc is non-null (checked above) and points to a 16-byte VARIANT;
+        // offset 8 is the data union which holds the BSTR pointer for VT_BSTR;
+        // (b) guest heap; (c) duration of call; (d) gate: sevenzip_m13_debug_e_gate
+        // (CI 26007699626).
         let src_bstr = unsafe { *(psrc.add(8) as *const *const u16) };
         let new_bstr = if src_bstr.is_null() {
             std::ptr::null_mut()
         } else {
             // BSTR is preceded by a 4-byte byte-length prefix.
+            // SAFETY: (a) src_bstr is non-null (checked above); the BSTR was allocated by
+            // Weave's SysAllocStringLen via libc::malloc, which stores a 4-byte byte-length
+            // prefix at offset -4 (Windows BSTR layout); (b) guest heap — BSTR was
+            // malloc'd by this process's SysAllocStringLen; (c) duration of this call;
+            // (d) gate: sevenzip_m13_debug_e_gate (CI 26007699626). LIMITATION: if
+            // src_bstr was allocated by a non-Weave SysAllocString, this -4 byte offset
+            // assumption is incorrect; no cross-allocator BSTR currently observed in Weave.
             let byte_len = unsafe { *((src_bstr as *const u8).sub(4) as *const u32) } as usize;
             let total = 4 + byte_len + 2;
+            // SAFETY: (a) malloc returns a valid heap allocation or null; null is checked
+            // below; (b) Weave process heap (libc::malloc); (c) duration of this call
+            // and beyond — the allocation is handed off to the destination VARIANT;
+            // (d) gate: sevenzip_m13_debug_e_gate (CI 26007699626).
             let buf = unsafe { libc::malloc(total) as *mut u8 };
             if buf.is_null() {
                 return 0x8007_000Eu32 as i32; // E_OUTOFMEMORY
             }
+            // SAFETY: (a) buf is non-null (checked above) and points to `total` bytes
+            // allocated by libc::malloc; offset 0 (4-byte length prefix) is within the
+            // allocation; (b) Weave process heap; (c) duration of this scope;
+            // (d) gate: sevenzip_m13_debug_e_gate (CI 26007699626).
             unsafe { *(buf as *mut u32) = byte_len as u32 };
+            // SAFETY: (a) buf is non-null and `total = 4 + byte_len + 2`; offset 4 is
+            // within the allocation, aligned to 2 bytes (u16); (b) Weave process heap;
+            // (c) duration of this scope; (d) same gate as above.
             let data = unsafe { buf.add(4) as *mut u16 };
+            // SAFETY: (a) data points to `byte_len + 2` bytes within the malloc'd buf;
+            // src_bstr points to `byte_len` valid bytes (its length was read from the
+            // BSTR length prefix above); the +2 null-terminator lies within the allocation;
+            // (b) src=guest heap, dst=Weave process heap; (c) duration of copy;
+            // (d) gate: sevenzip_m13_debug_e_gate (CI 26007699626).
             unsafe {
                 std::ptr::copy_nonoverlapping(src_bstr as *const u8, data as *mut u8, byte_len);
                 *data.add(byte_len / 2) = 0;
             }
             data
         };
+        // SAFETY: (a) pdest is non-null (checked at entry) and points to a 16-byte
+        // VARIANT buffer; offsets 0 (vt), 2 (reserved), and 8 (data pointer) all lie
+        // within that layout; (b) guest heap — caller owns pdest; (c) duration of call;
+        // (d) gate: sevenzip_m13_debug_e_gate (CI 26007699626).
         unsafe {
             *(pdest as *mut u16) = VT_BSTR;
             // Zero wReserved1/2/3 (offset 2..8) per Windows spec.
@@ -281,6 +336,10 @@ pub unsafe extern "win64" fn variant_copy(pdest: *mut u8, psrc: *const u8) -> i3
     //    variants; for VT_DISPATCH / VT_UNKNOWN this leaks a refcount but doesn't
     //    crash (7-Zip's create-archive path doesn't put interface pointers into
     //    CPropVariant values it then copies).
+    // SAFETY: (a) both psrc and pdest are non-null (checked at entry) and each points
+    // to a 16-byte VARIANT buffer; src and dst do not overlap because they are distinct
+    // VARIANT allocations owned by the caller; (b) guest heap; (c) duration of call;
+    // (d) gate: sevenzip_m13_debug_e_gate (CI 26007699626).
     unsafe {
         std::ptr::copy_nonoverlapping(psrc, pdest, 16);
     }
