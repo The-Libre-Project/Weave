@@ -5904,3 +5904,263 @@ fn notepad_roundtrip_headless_save() {
         "notepad_roundtrip_headless_save: output.cpp exists, size={output_len} bytes — sub-brief b PASS"
     );
 }
+
+/// E3-M2 — Sub-brief c: byte-compare gate (A1 close)
+///
+/// Tier A1 assertion: SHA-256(output.cpp) == SHA-256(roundtrip_input.cpp)
+///
+/// Steps:
+///   1. Compute SHA-256 of roundtrip_input.cpp (fixture, never modified).
+///   2. Copy fixture tree to /tmp/weave_npp_roundtrip_c/; copy input as output.cpp.
+///   3. Launch NPP under Weave with output.cpp as the opened file.
+///   4. Wait for wm_paint_dispatched_first, inject Ctrl+S, wait 2 s, send Alt+F4.
+///   5. Wait for NPP to exit (kill after 25 s total).
+///   6. Assert output.cpp exists and is non-empty.
+///   7. Compute SHA-256 of output.cpp.
+///   8. Assert input_sha256 == output_sha256 (A1 gate).
+///
+/// SHA-256 is computed via `sha256sum` (available on Linux CI).
+/// The assert is marked #[allow(unused_variables)] compatible — if NPP adds a BOM
+/// or re-encodes the file, the assertion fails with a human-readable message.
+///
+/// Temp dir: /tmp/weave_npp_roundtrip_c (distinct from sub-brief a and b dirs)
+/// Timeout: 25 s
+#[test]
+fn notepad_roundtrip_gate() {
+    if !cfg!(target_os = "linux") {
+        eprintln!("skipping execution test — requires Linux");
+        return;
+    }
+
+    let manifest = env!("CARGO_MANIFEST_DIR");
+    let npp_dir = format!("{manifest}/../tests/fixtures/npp");
+    let npp_exe = format!("{npp_dir}/notepad++.exe");
+
+    if !std::path::Path::new(&npp_exe).exists() {
+        eprintln!("skipping: notepad++.exe not present in tests/fixtures/npp/");
+        return;
+    }
+
+    let source_input = std::path::PathBuf::from(&npp_dir).join("roundtrip_input.cpp");
+    if !source_input.exists() {
+        eprintln!("skipping: roundtrip_input.cpp not present in tests/fixtures/npp/");
+        return;
+    }
+
+    // Verify xdotool is available — skip gracefully if not installed.
+    if std::process::Command::new("xdotool")
+        .arg("version")
+        .output()
+        .is_err()
+    {
+        eprintln!("skipping: xdotool not available in PATH");
+        return;
+    }
+
+    // Step 1: compute SHA-256 of the input fixture before any NPP run.
+    let input_sha256 = {
+        let out = std::process::Command::new("sha256sum")
+            .arg(&source_input)
+            .output()
+            .expect("sha256sum not available — required on Linux CI");
+        assert!(
+            out.status.success(),
+            "sha256sum failed on roundtrip_input.cpp: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        // sha256sum output format: "<hash>  <path>"
+        String::from_utf8_lossy(&out.stdout)
+            .split_whitespace()
+            .next()
+            .expect("sha256sum produced no output")
+            .to_string()
+    };
+    eprintln!("notepad_roundtrip_gate: input SHA-256 = {input_sha256}");
+
+    let weave_bin = env!("CARGO_BIN_EXE_weave");
+
+    // Step 2: prepare temp dir.
+    let tmp_dir = std::path::PathBuf::from("/tmp/weave_npp_roundtrip_c");
+    if tmp_dir.exists() {
+        std::fs::remove_dir_all(&tmp_dir).expect("failed to clean temp roundtrip_c dir");
+    }
+
+    fn copy_dir_all_rtc(src: &std::path::Path, dst: &std::path::Path) {
+        std::fs::create_dir_all(dst).expect("create_dir_all failed");
+        for entry in std::fs::read_dir(src).expect("read_dir failed") {
+            let entry = entry.expect("entry failed");
+            let dst_path = dst.join(entry.file_name());
+            if entry.file_type().expect("file_type failed").is_dir() {
+                copy_dir_all_rtc(&entry.path(), &dst_path);
+            } else {
+                std::fs::copy(entry.path(), &dst_path).expect("copy failed");
+            }
+        }
+    }
+    copy_dir_all_rtc(std::path::Path::new(&npp_dir), &tmp_dir);
+
+    let output_file = tmp_dir.join("output.cpp");
+    std::fs::copy(&source_input, &output_file)
+        .expect("failed to copy roundtrip_input.cpp to output.cpp");
+
+    let tmp_exe = tmp_dir.join("notepad++.exe");
+
+    // Step 3: launch NPP under Weave.
+    let start = std::time::Instant::now();
+    let mut child = std::process::Command::new(weave_bin)
+        .current_dir(&tmp_dir)
+        .arg(&tmp_exe)
+        .arg(&output_file)
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|e| panic!("failed to spawn weave on notepad++.exe: {e}"));
+
+    // Drain stderr; signal when paint phase marker is seen.
+    let stderr_pipe = child.stderr.take().expect("stderr was piped");
+    let stderr_shared = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let stderr_writer = std::sync::Arc::clone(&stderr_shared);
+    let (paint_tx, paint_rx) = std::sync::mpsc::channel::<()>();
+
+    let drain_thread = std::thread::spawn(move || {
+        use std::io::Read;
+        let mut pipe = stderr_pipe;
+        let mut buf = [0u8; 4096];
+        let mut acc = Vec::new();
+        let mut signalled = false;
+        loop {
+            match pipe.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    acc.extend_from_slice(&buf[..n]);
+                    if !signalled {
+                        let chunk = String::from_utf8_lossy(&acc);
+                        if chunk.contains("PHASE: wm_paint_dispatched_first") {
+                            let _ = paint_tx.send(());
+                            signalled = true;
+                        }
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        *stderr_writer.lock().unwrap() = acc;
+    });
+
+    // Step 4: wait for paint, inject Ctrl+S, then Alt+F4.
+    let paint_deadline = std::time::Duration::from_secs(15);
+    let paint_seen = paint_rx.recv_timeout(paint_deadline).is_ok();
+
+    if paint_seen {
+        eprintln!("notepad_roundtrip_gate: wm_paint_dispatched_first observed — injecting Ctrl+S");
+        std::thread::sleep(std::time::Duration::from_millis(500));
+
+        let xdotool_search = std::process::Command::new("xdotool")
+            .args(["search", "--name", "Notepad++"])
+            .output();
+
+        let window_id: Option<String> = match xdotool_search {
+            Ok(out) if out.status.success() => {
+                let ids = String::from_utf8_lossy(&out.stdout);
+                ids.lines().next().map(|s| s.trim().to_string())
+            }
+            Ok(out) => {
+                eprintln!(
+                    "xdotool search failed: {}",
+                    String::from_utf8_lossy(&out.stderr)
+                );
+                None
+            }
+            Err(e) => {
+                eprintln!("xdotool search error: {e}");
+                None
+            }
+        };
+
+        if let Some(ref wid) = window_id {
+            eprintln!("notepad_roundtrip_gate: window id = {wid}, sending Ctrl+s");
+            let _ = std::process::Command::new("xdotool")
+                .args(["windowfocus", "--sync", wid])
+                .output();
+            let _ = std::process::Command::new("xdotool")
+                .args(["key", "--window", wid, "ctrl+s"])
+                .output();
+
+            // Wait for WriteFile to complete.
+            std::thread::sleep(std::time::Duration::from_secs(2));
+
+            eprintln!("notepad_roundtrip_gate: sending Alt+F4 to close NPP");
+            let _ = std::process::Command::new("xdotool")
+                .args(["key", "--window", wid, "alt+F4"])
+                .output();
+        } else {
+            eprintln!("notepad_roundtrip_gate: xdotool could not find Notepad++ window — will kill process");
+        }
+    } else {
+        eprintln!("notepad_roundtrip_gate: timed out waiting for wm_paint — killing NPP");
+    }
+
+    // Step 5: wait for NPP to exit; kill after 25 s total.
+    let kill_deadline = start + std::time::Duration::from_secs(25);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) => {
+                if std::time::Instant::now() >= kill_deadline {
+                    let _ = child.kill();
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err(e) => panic!("wait failed: {e}"),
+        }
+    }
+    let elapsed = start.elapsed();
+
+    drain_thread.join().expect("stderr drain thread panicked");
+    let stderr_bytes = stderr_shared.lock().unwrap().clone();
+    let stderr = String::from_utf8_lossy(&stderr_bytes);
+    eprintln!("notepad_roundtrip_gate stderr ({elapsed:.1?}):\n{stderr}");
+
+    // Step 6: assert output file exists and is non-empty.
+    assert!(
+        output_file.exists(),
+        "E3-M2 A1: output.cpp does not exist after NPP exits — \
+         save was not triggered or WriteFile failed.\nstderr: {stderr}"
+    );
+    let output_len = std::fs::metadata(&output_file)
+        .expect("failed to stat output.cpp")
+        .len();
+    assert!(
+        output_len > 0,
+        "E3-M2 A1: output.cpp is 0 bytes — WriteFile truncated the file.\nstderr: {stderr}"
+    );
+
+    // Step 7: compute SHA-256 of output file.
+    let output_sha256 = {
+        let out = std::process::Command::new("sha256sum")
+            .arg(&output_file)
+            .output()
+            .expect("sha256sum not available");
+        assert!(
+            out.status.success(),
+            "sha256sum failed on output.cpp: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout)
+            .split_whitespace()
+            .next()
+            .expect("sha256sum produced no output")
+            .to_string()
+    };
+    eprintln!("notepad_roundtrip_gate: output SHA-256 = {output_sha256}");
+
+    // Step 8: A1 gate — byte equality assertion.
+    assert_eq!(
+        input_sha256, output_sha256,
+        "E3-M2 A1 FAIL: SHA-256 mismatch after {elapsed:.1?} — \
+         input={input_sha256} output={output_sha256} output_size={output_len} bytes\n\
+         NPP modified the file during a no-edit save (BOM injection, encoding change, \
+         or line-ending conversion). stderr:\n{stderr}"
+    );
+    eprintln!("notepad_roundtrip_gate: SHA-256 match confirmed ({input_sha256}) — E3-M2 A1 PASS");
+}
