@@ -9067,24 +9067,76 @@ pub extern "win64" fn release_mutex(_h_mutex: usize) -> i32 {
     1 // fake mutex handle; real POSIX mutex is in SEMAPHORE_TABLE when created via CreateMutexW
 }
 
-/// RtlUnwind — no-op stub (unwinding not implemented).
+/// RtlUnwind — legacy x86_64 unwind entry point (wrapper around RtlUnwindEx).
 ///
 /// # Safety
-/// Pointer arguments are accepted but not dereferenced.
-// Wine ref: libs/winecrt0/exception.c::__wine_rtl_unwind:72 — calls RtlUnwind(frame, target,
-// record, 0) then loops calling target; sets EXCEPTION_UNWINDING flag on record.ExceptionFlags.
+/// Called only via Win64 IAT from PE code. All pointer arguments must be valid or NULL.
+// Wine ref: dlls/ntdll/unwind.c:2352 — CONTEXT context; RtlUnwindEx(frame, target_ip, rec, retval, &context, NULL)
+// RtlUnwind on x86_64 is a thin wrapper that allocates a local CONTEXT and delegates to
+// RtlUnwindEx; the context is populated (here from naked trampoline register capture).
+#[unsafe(naked)]
 pub unsafe extern "win64" fn rtl_unwind(
-    target_frame: *mut u8,
-    target_ip: *mut u8,
-    exception_record: *mut u8,
+    _target_frame: *mut u8,
+    _target_ip: *mut u8,
+    _exception_record: *mut u8,
     _return_value: usize,
 ) {
-    eprintln!(
-        "[weave] FATAL: RtlUnwind is not implemented — aborting to prevent silent corruption. \
-        target_frame={:p} target_ip={:p} exception_record={:p}",
-        target_frame, target_ip, exception_record
+    core::arch::naked_asm!(
+        "mov r10, [rsp]",
+        "lea r11, [rsp+8]",
+        "mov rdi, rcx",
+        "mov rsi, rdx",
+        "mov rdx, r8",
+        "mov rcx, r9",
+        "mov r8,  r10",
+        "mov r9,  r11",
+        "jmp {impl_fn}",
+        impl_fn = sym rtl_unwind_impl,
     );
-    std::process::abort();
+}
+
+unsafe extern "C" fn rtl_unwind_impl(
+    target_frame: u64,
+    target_ip: u64,
+    exception_record: *mut weave_core::unwind::ExceptionRecord,
+    return_value: u64,
+    caller_rip: u64,
+    caller_rsp: u64,
+) -> ! {
+    // Build a Context anchored to the RtlUnwind call site from the naked trampoline capture.
+    // Wine ref: dlls/ntdll/unwind.c:2352 — RtlUnwindEx is called with a local CONTEXT that
+    // RtlUnwindEx fills; Weave seeds it from the naked trampoline's RSP/RIP capture.
+    let mut ctx = weave_core::unwind::Context {
+        context_flags: 0x10001f, // CONTEXT_ALL
+        rip: caller_rip,
+        rsp: caller_rsp,
+        ..Default::default()
+    };
+
+    // Synthesise STATUS_UNWIND record if caller passed NULL.
+    // Wine ref: dlls/ntdll/unwind.c — RtlUnwindEx accepts NULL record; ntdll synthesises
+    // STATUS_UNWIND (0x80000027) in that case.
+    #[allow(clippy::field_reassign_with_default)]
+    let mut synthetic = weave_core::unwind::ExceptionRecord::default();
+    synthetic.exception_code = 0x8000_0027; // STATUS_UNWIND — private _pad prevents struct literal
+    let rec_ptr = if exception_record.is_null() {
+        &mut synthetic as *mut _
+    } else {
+        exception_record
+    };
+
+    // SAFETY: target_frame and target_ip come from the PE's exception dispatch machinery.
+    // ctx has valid RSP/RIP captured by the naked trampoline above. rec_ptr is non-null
+    // (either caller-supplied or our synthetic record above).
+    unsafe {
+        weave_core::unwind::unwind_ex(
+            target_frame,
+            target_ip,
+            rec_ptr,
+            return_value,
+            &mut ctx as *mut weave_core::unwind::Context,
+        );
+    }
 }
 
 /// UnhandledExceptionFilter — calls the stored handler if one is installed,
