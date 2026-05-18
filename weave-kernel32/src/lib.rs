@@ -14352,40 +14352,40 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         }
         // INI cluster — Phase A stubs for IrfanView (E3-M3)
         "GetPrivateProfileStringW" => Some(
-            get_private_profile_string_w
-                as unsafe extern "win64" fn(_, _, _, _, _, _) -> _ as *const () as usize,
+            get_private_profile_string_w as unsafe extern "win64" fn(_, _, _, _, _, _) -> _
+                as *const () as usize,
         ),
         "GetPrivateProfileStringA" => Some(
-            get_private_profile_string_a
-                as unsafe extern "win64" fn(_, _, _, _, _, _) -> _ as *const () as usize,
+            get_private_profile_string_a as unsafe extern "win64" fn(_, _, _, _, _, _) -> _
+                as *const () as usize,
         ),
         "GetPrivateProfileIntW" => Some(
-            get_private_profile_int_w
-                as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
+            get_private_profile_int_w as unsafe extern "win64" fn(_, _, _, _) -> _ as *const ()
+                as usize,
         ),
         "GetPrivateProfileIntA" => Some(
-            get_private_profile_int_a
-                as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
+            get_private_profile_int_a as unsafe extern "win64" fn(_, _, _, _) -> _ as *const ()
+                as usize,
         ),
         "GetPrivateProfileSectionW" => Some(
-            get_private_profile_section_w
-                as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
+            get_private_profile_section_w as unsafe extern "win64" fn(_, _, _, _) -> _ as *const ()
+                as usize,
         ),
         "WritePrivateProfileStringW" => Some(
-            write_private_profile_string_w
-                as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
+            write_private_profile_string_w as unsafe extern "win64" fn(_, _, _, _) -> _ as *const ()
+                as usize,
         ),
         "WritePrivateProfileStringA" => Some(
-            write_private_profile_string_a
-                as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
+            write_private_profile_string_a as unsafe extern "win64" fn(_, _, _, _) -> _ as *const ()
+                as usize,
         ),
         "WritePrivateProfileSectionW" => Some(
-            write_private_profile_section_w
-                as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
+            write_private_profile_section_w as unsafe extern "win64" fn(_, _, _) -> _ as *const ()
+                as usize,
         ),
         "GetProfileStringW" => Some(
-            get_profile_string_w
-                as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const () as usize,
+            get_profile_string_w as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const ()
+                as usize,
         ),
         // Task-01 additions — curl
         "CancelIo" => Some(cancel_io as unsafe extern "win64" fn(_) -> _ as *const () as usize),

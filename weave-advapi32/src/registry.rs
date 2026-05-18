@@ -1770,9 +1770,9 @@ pub fn resolve(func: &str) -> Option<usize> {
                 as usize,
         ),
         // Non-Ex registry wrappers — Phase A stubs for IrfanView (E3-M3)
-        "RegCreateKeyW" => Some(
-            reg_create_key_w as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
-        ),
+        "RegCreateKeyW" => {
+            Some(reg_create_key_w as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize)
+        }
         "RegSetValueW" => Some(
             reg_set_value_w as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const () as usize,
         ),
@@ -2339,11 +2339,11 @@ pub unsafe extern "win64" fn reg_create_key_w(
         reg_create_key_ex_w(
             h_key,
             lp_sub_key,
-            0,             // reserved
+            0,                // reserved
             std::ptr::null(), // lpClass
-            0,             // REG_OPTION_NON_VOLATILE
-            0x02000000,    // MAXIMUM_ALLOWED
-            0,             // lpSecurityAttributes
+            0,                // REG_OPTION_NON_VOLATILE
+            0x02000000,       // MAXIMUM_ALLOWED
+            0,                // lpSecurityAttributes
             phk_result,
             std::ptr::null_mut(), // lpdwDisposition
         )
