@@ -5547,3 +5547,135 @@ fn sevenzip_m13_debug_e_gate() {
          outcome: {outcome_msg}\nstdout: {c_stdout}\nstderr: {c_stderr}"
     );
 }
+
+/// `weave notepad++.exe roundtrip_input.cpp` — E3-M2 file-open probe gate (sub-brief a).
+///
+/// Tier A: verifies that `CreateFileW` is called for `roundtrip_input.cpp` and returns
+///   a non-INVALID_HANDLE_VALUE handle, evidenced by the unconditional `weave/CreateFileW:`
+///   log lines emitted by `create_file_w` in weave-kernel32.
+///
+/// No special env var is required — `create_file_w` always emits these lines to stderr.
+///
+/// Temp dir: /tmp/weave_npp_roundtrip_a (distinct from other NPP test dirs)
+/// Timeout: 15 s
+#[test]
+fn notepad_roundtrip_file_open_probe() {
+    if !cfg!(target_os = "linux") {
+        eprintln!("skipping execution test — requires Linux");
+        return;
+    }
+
+    let manifest = env!("CARGO_MANIFEST_DIR");
+    let npp_dir = format!("{manifest}/../tests/fixtures/npp");
+    let npp_exe = format!("{npp_dir}/notepad++.exe");
+
+    if !std::path::Path::new(&npp_exe).exists() {
+        eprintln!("skipping: notepad++.exe not present in tests/fixtures/npp/");
+        return;
+    }
+
+    let weave_bin = env!("CARGO_BIN_EXE_weave");
+
+    let tmp_dir = std::path::PathBuf::from("/tmp/weave_npp_roundtrip_a");
+    if tmp_dir.exists() {
+        std::fs::remove_dir_all(&tmp_dir).expect("failed to clean temp roundtrip_a dir");
+    }
+
+    fn copy_dir_all_rt(src: &std::path::Path, dst: &std::path::Path) {
+        std::fs::create_dir_all(dst).expect("create_dir_all failed");
+        for entry in std::fs::read_dir(src).expect("read_dir failed") {
+            let entry = entry.expect("entry failed");
+            let dst_path = dst.join(entry.file_name());
+            if entry.file_type().expect("file_type failed").is_dir() {
+                copy_dir_all_rt(&entry.path(), &dst_path);
+            } else {
+                std::fs::copy(entry.path(), &dst_path).expect("copy failed");
+            }
+        }
+    }
+    copy_dir_all_rt(std::path::Path::new(&npp_dir), &tmp_dir);
+
+    let tmp_exe = tmp_dir.join("notepad++.exe");
+    let input_file = tmp_dir.join("roundtrip_input.cpp");
+
+    // Fixture must have been copied.
+    assert!(
+        input_file.exists(),
+        "roundtrip_input.cpp was not copied to temp dir: {}",
+        input_file.display()
+    );
+
+    let start = std::time::Instant::now();
+    let mut child = std::process::Command::new(weave_bin)
+        .current_dir(&tmp_dir)
+        .arg(&tmp_exe)
+        .arg(&input_file)
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|e| panic!("failed to spawn weave on notepad++.exe: {e}"));
+
+    let stderr_pipe = child.stderr.take().expect("stderr was piped");
+    let stderr_shared = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let stderr_writer = std::sync::Arc::clone(&stderr_shared);
+    let drain_thread = std::thread::spawn(move || {
+        use std::io::Read;
+        let mut buf = Vec::new();
+        let mut pipe = stderr_pipe;
+        let _ = pipe.read_to_end(&mut buf);
+        *stderr_writer.lock().unwrap() = buf;
+    });
+
+    let deadline = start + std::time::Duration::from_secs(15);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err(e) => panic!("wait failed: {e}"),
+        }
+    }
+    let elapsed = start.elapsed();
+
+    drain_thread.join().expect("stderr drain thread panicked");
+    let stderr_bytes = stderr_shared.lock().unwrap().clone();
+    let stderr = String::from_utf8_lossy(&stderr_bytes);
+    eprintln!("notepad++ roundtrip file-open probe stderr ({elapsed:.1?}):\n{stderr}");
+
+    // Tier C regression guard: imports must be resolved.
+    assert!(
+        stderr.contains("weave: imports resolved"),
+        "E3-M2 A1 prerequisite: imports not resolved.\nstderr: {stderr}"
+    );
+
+    // Tier A: CreateFileW must have been called for roundtrip_input.cpp and returned a
+    // valid handle (last_error=0 in the exit line).
+    //
+    // The exit-success line format from create_file_w:
+    //   "weave/CreateFileW: exit path=\"...roundtrip_input.cpp\" → handle=0x<N> last_error=0"
+    //
+    // We check for both the read-open announcement and the successful exit line.
+    let file_open_observed = stderr.lines().any(|l| {
+        (l.contains("weave/CreateFileW: read-open") || l.contains("weave/CreateFileW: write-open"))
+            && l.contains("roundtrip_input.cpp")
+    });
+    let file_open_success = stderr.lines().any(|l| {
+        l.contains("weave/CreateFileW: exit")
+            && l.contains("roundtrip_input.cpp")
+            && l.contains("last_error=0")
+    });
+
+    assert!(
+        file_open_observed,
+        "E3-M2 A1: CreateFileW was never called for roundtrip_input.cpp.\nstderr: {stderr}"
+    );
+    assert!(
+        file_open_success,
+        "E3-M2 A1: CreateFileW did not return a valid handle for roundtrip_input.cpp \
+         (expected exit line with last_error=0).\nstderr: {stderr}"
+    );
+}
