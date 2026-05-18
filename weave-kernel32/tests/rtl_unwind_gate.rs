@@ -18,15 +18,18 @@ fn rtl_unwind_resolver_non_null() {
         "RtlUnwind must be present in the resolver (was missing before this fix)"
     );
     let addr = addr.unwrap();
-    assert_ne!(addr, 0, "RtlUnwind resolver must return a non-zero function pointer");
+    assert_ne!(
+        addr, 0,
+        "RtlUnwind resolver must return a non-zero function pointer"
+    );
 }
 
 #[test]
 fn rtl_unwind_and_rtl_unwind_ex_are_distinct() {
-    let unwind = weave_kernel32::resolve("kernel32.dll", "RtlUnwind")
-        .expect("RtlUnwind must resolve");
-    let unwind_ex = weave_kernel32::resolve("kernel32.dll", "RtlUnwindEx")
-        .expect("RtlUnwindEx must resolve");
+    let unwind =
+        weave_kernel32::resolve("kernel32.dll", "RtlUnwind").expect("RtlUnwind must resolve");
+    let unwind_ex =
+        weave_kernel32::resolve("kernel32.dll", "RtlUnwindEx").expect("RtlUnwindEx must resolve");
     assert_ne!(
         unwind, unwind_ex,
         "RtlUnwind and RtlUnwindEx must be distinct trampolines"
