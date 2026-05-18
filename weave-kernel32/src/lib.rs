@@ -2597,6 +2597,10 @@ pub unsafe extern "win64" fn create_file_w(
     }
 
     // Decode the null-terminated UTF-16 filename.
+    // SAFETY: (a) lp_file_name is non-null (checked above).  (b) Guest heap —
+    // caller-owned for the duration of this call.  (c) Pointer stays valid
+    // through the bounded scan and from_raw_parts slice; MAX_UTF16_LEN caps the
+    // read length.  (d) notepad_roundtrip_gate CI 26037252940 — file-open path confirmed.
     let win_path = unsafe {
         let mut len = 0usize;
         while len < MAX_UTF16_LEN && *lp_file_name.add(len) != 0 {
