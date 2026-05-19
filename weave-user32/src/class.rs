@@ -316,6 +316,14 @@ extern "win64" fn builtin_control_wnd_proc(
         // TB_ADDBUTTONSW (WM_USER+68) — Wine ref: dlls/comctl32/toolbar.c::TOOLBAR_InternalInsertButtonsT
         // returns TRUE on success; SciTE checks this and bails if FALSE.
         0x0444 => 1,
+        // TB_GETBUTTONINFOW (WM_USER+63 = 0x043F) — Wine ref: dlls/comctl32/toolbar.c::TOOLBAR_GetButtonInfoT
+        // returns the zero-based index of the button if found, -1 if not found.
+        // Returning 0 (the default arm) falsely signals "button at index 0 found" and requires the
+        // caller-supplied TBBUTTONINFOW struct to be filled — which we never do. SumatraPDF then reads
+        // lParam (offset +24 / 0x18 in TBBUTTONINFOW) expecting a valid pointer, dereferences null →
+        // crash at VA 0x18. Return usize::MAX (== -1 as isize on x86-64) so SumatraPDF sees
+        // "button not found" and skips the struct dereference entirely.
+        0x043F => usize::MAX,
         _ => 0,
     }
 }
