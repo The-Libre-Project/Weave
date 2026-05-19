@@ -1253,6 +1253,98 @@ fn irfanview_image_open_gate() {
     );
 }
 
+/// `weave SumatraPDF.exe test.pdf` — SumatraPDF PDF viewer; E3-M4 Tier A render gate.
+///
+/// Runs SumatraPDF.exe with a minimal single-page PDF via CLI, on Xvfb (DISPLAY=:99).
+/// Asserts that:
+/// - A1a: `PHASE: wm_paint_dispatched_first` appears in stderr within 10s (message loop ran)
+/// - A1b: `PHASE: stretch_dibits_first` appears in stderr within 10s (PDF page reached GDI)
+///
+/// The fixture `tests/fixtures/sumatrapdf/SumatraPDF.exe` is NOT committed to the repo.
+/// This test auto-skips when the binary is absent so CI stays green.
+/// Place the SumatraPDF 3.4.x portable 64-bit exe there to activate the gate.
+///
+/// Generate the PDF fixture: `python3 tests/fixtures/src/make_sumatra_pdf.py`
+#[test]
+fn sumatrapdf_pdf_render_gate() {
+    if !cfg!(target_os = "linux") {
+        eprintln!("skipping execution test — requires Linux");
+        return;
+    }
+
+    let manifest = env!("CARGO_MANIFEST_DIR");
+    let sumatra_dir = format!("{manifest}/../tests/fixtures/sumatrapdf");
+    let sumatra_exe = format!("{sumatra_dir}/SumatraPDF.exe");
+    let pdf_path = format!("{sumatra_dir}/test.pdf");
+
+    if !std::path::Path::new(&sumatra_exe).exists() {
+        eprintln!("skipping: SumatraPDF.exe not present in tests/fixtures/sumatrapdf/");
+        eprintln!("  → copy SumatraPDF 3.4.x 64-bit portable exe there to enable this test");
+        eprintln!("  → generate test.pdf: python3 tests/fixtures/src/make_sumatra_pdf.py");
+        return;
+    }
+    if !std::path::Path::new(&pdf_path).exists() {
+        eprintln!("skipping: test.pdf not present in tests/fixtures/sumatrapdf/");
+        eprintln!("  → generate: python3 tests/fixtures/src/make_sumatra_pdf.py");
+        return;
+    }
+
+    let weave_bin = env!("CARGO_BIN_EXE_weave");
+
+    let mut child = std::process::Command::new(weave_bin)
+        .current_dir(&sumatra_dir)
+        .arg(&sumatra_exe)
+        .arg(&pdf_path)
+        .env("DISPLAY", ":99")
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|e| panic!("failed to spawn weave on SumatraPDF.exe: {e}"));
+
+    // Drain stderr concurrently — SumatraPDF output can exceed the pipe buffer.
+    let stderr_pipe = child.stderr.take().expect("stderr was piped");
+    let stderr_shared = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let stderr_writer = std::sync::Arc::clone(&stderr_shared);
+    let drain_thread = std::thread::spawn(move || {
+        use std::io::Read;
+        let mut buf = Vec::new();
+        let mut pipe = stderr_pipe;
+        let _ = pipe.read_to_end(&mut buf);
+        *stderr_writer.lock().unwrap() = buf;
+    });
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err(e) => panic!("wait failed: {e}"),
+        }
+    }
+
+    drain_thread.join().expect("stderr drain thread panicked");
+    let stderr_bytes = stderr_shared.lock().unwrap().clone();
+    let stderr = String::from_utf8_lossy(&stderr_bytes);
+    eprintln!("sumatrapdf_pdf_render_gate stderr:\n{stderr}");
+
+    // E3-M4 Tier A A1a: message loop must have run and dispatched WM_PAINT.
+    assert!(
+        stderr.contains("PHASE: wm_paint_dispatched_first"),
+        "wm_paint_dispatched_first missing — message loop did not reach WM_PAINT.\nstderr: {stderr}"
+    );
+
+    // E3-M4 Tier A A1b: PDF page data must have reached StretchDIBits.
+    assert!(
+        stderr.contains("PHASE: stretch_dibits_first"),
+        "stretch_dibits_first missing — StretchDIBits was not called with PDF page data.\nstderr: {stderr}"
+    );
+}
+
 /// `weave SciTE.exe test.txt` — SciTE 5.6.1 source code editor; Gate 5 semantic gate.
 ///
 /// SciTE (SCIntilla based Text Editor) is a Win32 GUI editor that embeds
