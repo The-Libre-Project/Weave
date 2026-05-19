@@ -40,6 +40,8 @@ pub struct DcState {
     pub pen_pos: Point,      // current pen position (MoveToEx/LineTo)
     pub viewport_org: Point, // viewport origin (SetViewportOrgEx)
     pub window_org: Point,   // window origin (SetWindowOrgEx)
+    pub graphics_mode: i32,  // GM_COMPATIBLE or GM_ADVANCED
+    pub world_transform: XForm,
     /// StretchBlt filter mode (SetStretchBltMode).
     ///
     /// Wine ref: dlls/win32u/dc.c — default stretch_blt_mode is BLACKONWHITE(1)
@@ -65,6 +67,8 @@ impl DcState {
             pen_pos: Point { x: 0, y: 0 },
             viewport_org: Point { x: 0, y: 0 },
             window_org: Point { x: 0, y: 0 },
+            graphics_mode: GM_COMPATIBLE,
+            world_transform: XForm::identity(),
             stretch_blt_mode: COLORONCOLOR,
         }
     }
@@ -230,8 +234,16 @@ impl DcState {
 
     pub fn lp_to_device(&self, x: i32, y: i32) -> (i16, i16) {
         // MM_TEXT mapping: device = logical - window_org + viewport_org
-        let dx = x - self.window_org.x + self.viewport_org.x;
-        let dy = y - self.window_org.y + self.viewport_org.y;
+        let (mut dx, mut dy) = (x as f32, y as f32);
+        if self.graphics_mode == GM_ADVANCED {
+            let xf = self.world_transform;
+            let tx = dx * xf.e_m11 + dy * xf.e_m21 + xf.e_dx;
+            let ty = dx * xf.e_m12 + dy * xf.e_m22 + xf.e_dy;
+            dx = tx;
+            dy = ty;
+        }
+        let dx = dx.round() as i32 - self.window_org.x + self.viewport_org.x;
+        let dy = dy.round() as i32 - self.window_org.y + self.viewport_org.y;
         (dx as i16, dy as i16)
     }
 }
@@ -374,6 +386,34 @@ mod tests {
         save(hdc); // level 1
         assert_eq!(restore(hdc, 5), 0, "level 5 > depth 1 should fail");
         assert_eq!(restore(hdc, -5), 0, "level -5 beyond depth should fail");
+        remove(hdc);
+    }
+
+    #[test]
+    fn default_graphics_mode_and_world_transform_are_identity() {
+        let hdc = TEST_HDC_BASE + 15;
+        with(hdc, |dc| {
+            assert_eq!(dc.graphics_mode, GM_COMPATIBLE);
+            assert_eq!(dc.world_transform, XForm::identity());
+        });
+        remove(hdc);
+    }
+
+    #[test]
+    fn lp_to_device_applies_advanced_world_transform() {
+        let hdc = TEST_HDC_BASE + 16;
+        with_mut(hdc, |dc| {
+            dc.graphics_mode = GM_ADVANCED;
+            dc.world_transform = XForm {
+                e_m11: 2.0,
+                e_m12: 0.0,
+                e_m21: 0.0,
+                e_m22: 3.0,
+                e_dx: 5.0,
+                e_dy: 7.0,
+            };
+        });
+        assert_eq!(with(hdc, |dc| dc.lp_to_device(4, 6)), (13, 25));
         remove(hdc);
     }
 }

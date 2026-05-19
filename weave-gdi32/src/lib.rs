@@ -360,6 +360,56 @@ pub extern "win64" fn get_bk_mode(hdc: usize) -> i32 {
     dc::with(hdc, |dc| dc.bk_mode)
 }
 
+/// SetGraphicsMode: select compatible or advanced graphics mode for an HDC.
+///
+/// Wine ref: dlls/win32u/dc.c::NtGdiSetGraphicsMode — accepts GM_COMPATIBLE(1)
+/// or GM_ADVANCED(2), returns the previous mode, and rejects invalid values.
+pub extern "win64" fn set_graphics_mode(hdc: usize, i_mode: i32) -> i32 {
+    if i_mode != GM_COMPATIBLE && i_mode != GM_ADVANCED {
+        return 0;
+    }
+    let mut prev = GM_COMPATIBLE;
+    dc::with_mut(hdc, |dc| {
+        prev = dc.graphics_mode;
+        dc.graphics_mode = i_mode;
+    });
+    prev
+}
+
+/// SetWorldTransform: replace the DC world transform.
+///
+/// # Safety
+/// `lp_xform` must point to a valid XFORM. Windows requires GM_ADVANCED; Weave
+/// follows that contract so callers that check return values get a real signal.
+pub unsafe extern "win64" fn set_world_transform(hdc: usize, lp_xform: *const XForm) -> i32 {
+    if lp_xform.is_null() {
+        return 0;
+    }
+    let xf = unsafe { *lp_xform };
+    let mut ok = 0;
+    dc::with_mut(hdc, |dc| {
+        if dc.graphics_mode == GM_ADVANCED {
+            dc.world_transform = xf;
+            ok = 1;
+        }
+    });
+    ok
+}
+
+/// GetWorldTransform: copy the current DC world transform.
+///
+/// # Safety
+/// `lp_xform` must point to writable XFORM storage.
+pub unsafe extern "win64" fn get_world_transform(hdc: usize, lp_xform: *mut XForm) -> i32 {
+    if lp_xform.is_null() {
+        return 0;
+    }
+    dc::with(hdc, |dc| unsafe {
+        *lp_xform = dc.world_transform;
+    });
+    1
+}
+
 // ── Drawing primitives ────────────────────────────────────────────────────────
 
 /// FillRect: fill a rectangle with a brush.
@@ -1447,8 +1497,15 @@ pub unsafe extern "win64" fn stretch_di_bits(
         return 0;
     }
 
-    let abs_w_dest = n_dest_width.unsigned_abs() as usize;
-    let abs_h_dest = n_dest_height.unsigned_abs() as usize;
+    let (dev_x_dest, dev_y_dest, abs_w_dest, abs_h_dest) = dc::with(hdc, |dc| {
+        let (x0, y0) = dc.lp_to_device(x_dest, y_dest);
+        let (x1, y1) = dc.lp_to_device(x_dest + n_dest_width, y_dest + n_dest_height);
+        let left = x0.min(x1);
+        let top = y0.min(y1);
+        let width = i32::from(x1).abs_diff(i32::from(x0)).max(1) as usize;
+        let height = i32::from(y1).abs_diff(i32::from(y0)).max(1) as usize;
+        (left, top, width, height)
+    });
     let scratch_bytes = match abs_w_dest
         .checked_mul(abs_h_dest)
         .and_then(|p| p.checked_mul(4))
@@ -1535,8 +1592,8 @@ pub unsafe extern "win64" fn stretch_di_bits(
                 dst_draw,
                 0,
                 0,
-                x_dest as i16,
-                y_dest as i16,
+                dev_x_dest,
+                dev_y_dest,
                 abs_w_dest as u16,
                 abs_h_dest as u16,
             );
@@ -1547,8 +1604,8 @@ pub unsafe extern "win64" fn stretch_di_bits(
                 dst_draw,
                 0,
                 0,
-                x_dest as i16,
-                y_dest as i16,
+                dev_x_dest,
+                dev_y_dest,
                 abs_w_dest as u16,
                 abs_h_dest as u16,
                 gx,
@@ -2342,6 +2399,13 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "GetBkColor" => Some(get_bk_color as *const () as usize),
         "SetBkMode" => Some(set_bk_mode as *const () as usize),
         "GetBkMode" => Some(get_bk_mode as *const () as usize),
+        "SetGraphicsMode" => Some(set_graphics_mode as *const () as usize),
+        "SetWorldTransform" => {
+            Some(set_world_transform as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "GetWorldTransform" => {
+            Some(get_world_transform as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
         // Drawing
         "FillRect" => {
             Some(fill_rect as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize)

@@ -84,6 +84,10 @@ pub const STRETCH_HALFTONE: i32 = HALFTONE;
 // ── R2 mix mode (ROP2) ────────────────────────────────────────────────────────
 pub const R2_COPYPEN: i32 = 13;
 
+// ── Graphics modes / world transform ─────────────────────────────────────────
+pub const GM_COMPATIBLE: i32 = 1;
+pub const GM_ADVANCED: i32 = 2;
+
 // ── Pen styles ────────────────────────────────────────────────────────────────
 pub const PS_SOLID: i32 = 0;
 pub const PS_DASH: i32 = 1;
@@ -168,6 +172,31 @@ pub struct Point {
 pub struct Size {
     pub cx: i32,
     pub cy: i32,
+}
+
+// ── XFORM ────────────────────────────────────────────────────────────────────
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct XForm {
+    pub e_m11: f32,
+    pub e_m12: f32,
+    pub e_m21: f32,
+    pub e_m22: f32,
+    pub e_dx: f32,
+    pub e_dy: f32,
+}
+
+impl XForm {
+    pub const fn identity() -> Self {
+        Self {
+            e_m11: 1.0,
+            e_m12: 0.0,
+            e_m21: 0.0,
+            e_m22: 1.0,
+            e_dx: 0.0,
+            e_dy: 0.0,
+        }
+    }
 }
 
 // ── LOGFONTW (92 bytes on Win64) ──────────────────────────────────────────────
