@@ -781,12 +781,49 @@ pub extern "win64" fn set_pixel(hdc: usize, x: i32, y: i32, color: u32) -> u32 {
     color
 }
 
-/// GetPixel: return the colour of a pixel (stub — always returns black).
+/// GetPixel: return the colour of a pixel from a memory DC's CPU buffer.
 // Wine ref: dlls/win32u/bitblt.c — NtGdiGetPixel clips x,y to DC clip region; returns
 // CLR_INVALID (0xFFFFFFFF) if point is outside; otherwise reads back the pixel color
-// from the device surface via GetImage.
-pub extern "win64" fn get_pixel(_hdc: usize, _x: i32, _y: i32) -> u32 {
-    0 // CLR_INVALID would be 0xFFFFFFFF; return black for now
+// from the device surface via GetImage. Weave reads from bits_ptr for memory DCs only
+// (screen DCs have no CPU buffer — return CLR_INVALID).
+pub extern "win64" fn get_pixel(hdc: usize, x: i32, y: i32) -> u32 {
+    const CLR_INVALID: u32 = 0xFFFF_FFFF;
+    let bitmap_h = dc::with(hdc, |dc| dc.selected_bitmap);
+    if bitmap_h == 0 {
+        return CLR_INVALID;
+    }
+    objects::get(bitmap_h, |kind| {
+        let (width, height, bits_ptr) = match kind {
+            GdiKind::Bitmap {
+                width,
+                height,
+                bits_ptr,
+                ..
+            } => (*width, *height, *bits_ptr),
+            GdiKind::DibSection {
+                width,
+                height,
+                bits_ptr,
+                ..
+            } => (*width, *height, *bits_ptr),
+            _ => return CLR_INVALID,
+        };
+        if x < 0 || y < 0 || x as u32 >= width || y as u32 >= height || bits_ptr == 0 {
+            return CLR_INVALID;
+        }
+        // DIB pixels: BGRA bytes (B=byte0, G=byte1, R=byte2, A=byte3). As u32 LE:
+        // pixel_u32 = B|(G<<8)|(R<<16)|(A<<24). COLORREF = R|(G<<8)|(B<<16).
+        let pixel = unsafe {
+            (bits_ptr as *const u32)
+                .add(y as usize * width as usize + x as usize)
+                .read_unaligned()
+        };
+        let r = (pixel >> 16) & 0xFF;
+        let g = (pixel >> 8) & 0xFF;
+        let b = pixel & 0xFF;
+        r | (g << 8) | (b << 16)
+    })
+    .unwrap_or(CLR_INVALID)
 }
 
 /// MoveToEx: set the current pen position.
