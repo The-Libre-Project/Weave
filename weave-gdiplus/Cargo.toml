@@ -7,4 +7,5 @@ repository.workspace = true
 description = "gdiplus.dll stubs for Weave — Sprint 5 IrfanView compatibility."
 
 [dependencies]
+libc = "0.2"
 weave-core = { path = "../weave-core" }

@@ -22,6 +22,8 @@
 
 #![allow(non_snake_case)]
 
+extern crate libc;
+
 // ── GpStatus values ───────────────────────────────────────────────────────────
 //
 // Wine ref: include/gdiplus/gdiplustypes.h — GpStatus enum; values confirmed
@@ -108,6 +110,32 @@ pub unsafe extern "win64" fn GdiplusStartup(
 pub unsafe extern "win64" fn GdiplusShutdown(_token: usize) -> u32 {
     eprintln!("weave/gdiplus: GdiplusShutdown");
     0
+}
+
+// ── Memory allocation ─────────────────────────────────────────────────────────
+
+/// GdipAlloc — allocate zeroed memory for GDI+ internal use.
+///
+/// Wine ref: dlls/gdiplus/gdiplus.c — thin wrapper around `heap_alloc_zero`
+/// (calloc). Used by callers that retrieve it via `GetProcAddress` as a custom
+/// allocator.
+///
+/// # Safety
+/// Caller is responsible for freeing the returned pointer with `GdipFree`.
+#[no_mangle]
+pub unsafe extern "win64" fn GdipAlloc(size: usize) -> *mut u8 {
+    unsafe { libc::calloc(1, size) as *mut u8 }
+}
+
+/// GdipFree — free memory allocated by `GdipAlloc`.
+///
+/// Wine ref: dlls/gdiplus/gdiplus.c — thin wrapper around `heap_free`.
+///
+/// # Safety
+/// `ptr` must have been returned by `GdipAlloc` and must not be freed twice.
+#[no_mangle]
+pub unsafe extern "win64" fn GdipFree(ptr: *mut u8) {
+    unsafe { libc::free(ptr as *mut libc::c_void) }
 }
 
 // ── Codec enumeration ─────────────────────────────────────────────────────────
@@ -1810,6 +1838,9 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         // Startup
         "GdiplusStartup" => GdiplusStartup as *const () as usize,
         "GdiplusShutdown" => GdiplusShutdown as *const () as usize,
+        // Memory
+        "GdipAlloc" => GdipAlloc as *const () as usize,
+        "GdipFree" => GdipFree as *const () as usize,
         // Codec enumeration
         "GdipGetImageEncodersSize" => GdipGetImageEncodersSize as *const () as usize,
         "GdipGetImageEncoders" => GdipGetImageEncoders as *const () as usize,
