@@ -359,6 +359,45 @@ pub unsafe extern "win64" fn property_sheet_a(_lp_psh: *const u8) -> isize {
     -1
 }
 
+// Wine ref: dlls/comctl32/propsheet.c — CreatePropertySheetPageW allocates a copy of the
+// PROPSHEETPAGEW struct via Alloc(); returns an opaque HPROPSHEETPAGE handle (pointer to
+// the allocated struct), or NULL on allocation failure. The returned handle is passed to
+// PropertySheetW or AddPropertySheetPage. Since Weave has no property-sheet dialog loop,
+// returning NULL is the safe failure sentinel — callers that check for NULL skip the page.
+/// CreatePropertySheetPageW — create a property sheet page handle (Wide).
+///
+/// Returns NULL (stub — no property sheet dialog subsystem in Weave).
+/// Callers must check for NULL before passing the handle to PropertySheetW.
+///
+/// # Safety
+/// `lp_psp` is ignored.
+// TODO(shim): Phase A — no dialog subsystem; always returns NULL.
+pub unsafe extern "win64" fn create_property_sheet_page_w(_lp_psp: *const u8) -> usize {
+    0 // NULL HPROPSHEETPAGE
+}
+
+/// CreatePropertySheetPageA — create a property sheet page handle (ANSI).
+///
+/// Returns NULL — stub, mirrors CreatePropertySheetPageW.
+///
+/// # Safety
+/// `lp_psp` is ignored.
+// TODO(shim): Phase A — no dialog subsystem; always returns NULL.
+pub unsafe extern "win64" fn create_property_sheet_page_a(_lp_psp: *const u8) -> usize {
+    0 // NULL HPROPSHEETPAGE
+}
+
+/// DestroyPropertySheetPage — destroy a property sheet page handle.
+///
+/// Returns TRUE — stub; nothing to free since CreatePropertySheetPage* always returns NULL.
+///
+/// # Safety
+/// `hpsp` is ignored.
+// TODO(shim): Phase A — no handle table; returns TRUE (no-op destroy).
+pub unsafe extern "win64" fn destroy_property_sheet_page(_hpsp: usize) -> i32 {
+    1 // TRUE
+}
+
 // ── Flat scrollbars ───────────────────────────────────────────────────────────
 
 /// InitializeFlatSB — initialise flat scroll bars for a window.
@@ -523,6 +562,10 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "#411" => Some(image_list_drag_leave as *const () as usize),
         "#412" => Some(image_list_drag_move as *const () as usize),
         "#413" => Some(image_list_drag_show_nolock as *const () as usize),
+        // Property sheet page creation — SumatraPDF and printer dialogs use these.
+        "CreatePropertySheetPageW" => Some(create_property_sheet_page_w as *const () as usize),
+        "CreatePropertySheetPageA" => Some(create_property_sheet_page_a as *const () as usize),
+        "DestroyPropertySheetPage" => Some(destroy_property_sheet_page as *const () as usize),
         _ => None,
     }
 }
@@ -586,6 +629,9 @@ mod tests {
             "#411",
             "#412",
             "#413",
+            "CreatePropertySheetPageW",
+            "CreatePropertySheetPageA",
+            "DestroyPropertySheetPage",
         ];
         for f in &funcs {
             assert!(resolve("comctl32.dll", f).is_some(), "missing: {f}");

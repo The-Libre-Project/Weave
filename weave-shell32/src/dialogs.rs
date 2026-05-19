@@ -274,6 +274,25 @@ pub extern "win64" fn comm_dlg_extended_error() -> u32 {
     0
 }
 
+// Wine ref: dlls/comdlg32/printdlg.c — PrintDlgExW returns HRESULT; returns E_FAIL (0x80004005)
+// when no printer is configured (observed in Wine test_PrintDlgExW: "res == E_FAIL → skip").
+// Returns E_INVALIDARG for a malformed lStructSize; returns S_OK with filled hDevMode/hDevNames
+// when a default printer is available. Since Weave has no printer spooler, E_FAIL is the
+// correct "no printer available" sentinel — callers treat it as a skip/skip-print condition.
+/// PrintDlgExW — display an extended print dialog (Wide).
+///
+/// Returns E_FAIL (no printers configured). Callers that use PD_RETURNDEFAULT
+/// skip the dialog and fall back to a "no printer" code path.
+///
+/// # Safety
+/// `lp_pdex` is ignored.
+// TODO(shim): Phase A — no spooler; always returns E_FAIL (no-printer sentinel).
+pub unsafe extern "win64" fn print_dlg_ex_w(_lp_pdex: *const u8) -> i32 {
+    // E_FAIL = 0x80004005 — "no printer available" sentinel per Wine test_PrintDlgExW.
+    // Callers that pass PD_RETURNDEFAULT detect E_FAIL and skip printing gracefully.
+    0x80004005u32 as i32
+}
+
 // Wine ref: dlls/comdlg32/filedlg.c — same structure as GetOpenFileNameW; automatically
 // appends lpstrDefExt if typed filename has no extension and OFN_EXTENSIONDIFFERENT is set.
 // Weave handles lpstrDefExt extension appending — behaviorally correct for that case.

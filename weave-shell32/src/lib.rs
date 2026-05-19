@@ -1,4 +1,4 @@
-//! shell32.dll and comdlg32.dll stubs for Weave.
+//! shell32.dll, comdlg32.dll, and winspool.drv stubs for Weave.
 //!
 //! # Phase 2 scope
 //!
@@ -8,6 +8,8 @@
 //! - `shell32.dll`: `SHGetFolderPathW`, `SHGetSpecialFolderPathW`,
 //!   `SHGetKnownFolderPath`, `ShellExecuteW`, `CommandLineToArgvW`,
 //!   `CoTaskMemFree`.
+//! - `WINSPOOL.DRV`: printer enumeration stubs — return "no printers
+//!   available" without touching the spooler.
 //!
 //! # Crate boundary note
 //! This crate depends on `weave-notify` (a thin `notify-send` subprocess bridge).
@@ -17,8 +19,9 @@
 
 mod dialogs;
 mod shell;
+mod winspool;
 
-/// Resolve a `shell32.dll` or `comdlg32.dll` import to a stub address.
+/// Resolve a `shell32.dll`, `comdlg32.dll`, or `WINSPOOL.DRV` import to a stub address.
 pub fn resolve(dll: &str, func: &str) -> Option<usize> {
     if dll.eq_ignore_ascii_case("comdlg32.dll") {
         return resolve_comdlg32(func);
@@ -32,6 +35,10 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
             "CoTaskMemFree" => Some(shell::co_task_mem_free as *const () as usize),
             _ => None,
         };
+    }
+    // WINSPOOL.DRV — printer spooler stubs (no-printer-available sentinels).
+    if dll.eq_ignore_ascii_case("winspool.drv") {
+        return winspool::resolve(func);
     }
     None
 }
@@ -58,6 +65,9 @@ fn resolve_comdlg32(func: &str) -> Option<usize> {
         }
         "CommDlgExtendedError" => {
             Some(dialogs::comm_dlg_extended_error as extern "win64" fn() -> _ as *const () as usize)
+        }
+        "PrintDlgExW" => {
+            Some(dialogs::print_dlg_ex_w as unsafe extern "win64" fn(_) -> _ as *const () as usize)
         }
         _ => None,
     }
