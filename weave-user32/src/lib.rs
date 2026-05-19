@@ -731,6 +731,7 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         // DC (user32 owns GetDC/ReleaseDC, not gdi32)
         "GetDC" => Some(get_dc as *const () as usize),
         "ReleaseDC" => Some(release_dc as *const () as usize),
+        "WindowFromDC" => Some(window_from_dc as *const () as usize),
         // Paint
         "BeginPaint" => {
             Some(begin_paint as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)

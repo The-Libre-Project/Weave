@@ -8952,6 +8952,24 @@ pub unsafe extern "win64" fn wait_for_multiple_objects(
     WAIT_FAILED
 }
 
+/// WaitForMultipleObjectsEx — wait on multiple handles, optionally alertable.
+///
+/// Wine ref: dlls/kernelbase/sync.c — `WaitForMultipleObjects` is a thin
+/// wrapper around this API with alertable=FALSE. Weave does not deliver APCs
+/// yet, so alertable mode reuses the existing multi-object wait path.
+///
+/// # Safety
+/// `lp_handles` must point to `n_count` handles, or be NULL when `n_count` is 0.
+pub unsafe extern "win64" fn wait_for_multiple_objects_ex(
+    n_count: u32,
+    lp_handles: *const usize,
+    b_wait_all: i32,
+    dw_milliseconds: u32,
+    _b_alertable: i32,
+) -> u32 {
+    unsafe { wait_for_multiple_objects(n_count, lp_handles, b_wait_all, dw_milliseconds) }
+}
+
 /// CreateMutexA — returns a fake handle (1).
 ///
 /// # Safety
@@ -10161,6 +10179,68 @@ pub unsafe extern "win64" fn get_full_path_name_a(
     } else {
         0 // error: buffer too small
     }
+}
+
+/// GetVolumePathNameW: return the volume root for a file or directory path.
+///
+/// Wine ref: dlls/kernelbase/volume.c — resolves a file path to its mounted
+/// volume root and copies that root into the caller buffer. Weave exposes a
+/// single host-backed drive namespace, so the root is the input drive when one
+/// is present and `Z:\` for relative or null paths.
+///
+/// # Safety
+/// `lpsz_file_name` must be a valid null-terminated UTF-16 string when non-null.
+/// `lpsz_volume_path_name` must be writable for `cch_buffer_length` UTF-16 code units.
+pub unsafe extern "win64" fn get_volume_path_name_w(
+    lpsz_file_name: *const u16,
+    lpsz_volume_path_name: *mut u16,
+    cch_buffer_length: u32,
+) -> i32 {
+    const ERROR_INVALID_PARAMETER: u32 = 87;
+    const ERROR_MORE_DATA: u32 = 234;
+
+    if lpsz_volume_path_name.is_null() {
+        set_last_error(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+
+    let input = if lpsz_file_name.is_null() {
+        String::new()
+    } else {
+        let mut len = 0usize;
+        while len < MAX_UTF16_LEN && unsafe { *lpsz_file_name.add(len) } != 0 {
+            len += 1;
+        }
+        if len == MAX_UTF16_LEN {
+            set_last_error(ERROR_INVALID_PARAMETER);
+            return 0;
+        }
+        let slice = unsafe { std::slice::from_raw_parts(lpsz_file_name, len) };
+        String::from_utf16_lossy(slice)
+    };
+
+    let drive = if input.len() >= 2
+        && input.as_bytes()[0].is_ascii_alphabetic()
+        && input.as_bytes()[1] == b':'
+    {
+        input.as_bytes()[0].to_ascii_uppercase() as char
+    } else {
+        'Z'
+    };
+    let volume = format!("{drive}:\\");
+    let wide: Vec<u16> = volume.encode_utf16().chain(std::iter::once(0)).collect();
+
+    if (cch_buffer_length as usize) < wide.len() {
+        set_last_error(ERROR_MORE_DATA);
+        return 0;
+    }
+
+    unsafe {
+        std::ptr::copy_nonoverlapping(wide.as_ptr(), lpsz_volume_path_name, wide.len());
+    }
+    set_last_error(0);
+    eprintln!("weave/GetVolumePathNameW: input={input:?} → {volume:?}");
+    1
 }
 
 /// MoveFileW: move/rename a file (wide string version).
@@ -13756,6 +13836,10 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
             wait_for_multiple_objects as unsafe extern "win64" fn(_, _, _, _) -> _ as *const ()
                 as usize,
         ),
+        "WaitForMultipleObjectsEx" => Some(
+            wait_for_multiple_objects_ex as unsafe extern "win64" fn(_, _, _, _, _) -> _
+                as *const () as usize,
+        ),
         "CreateMutexA" => {
             Some(create_mutex_a as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize)
         }
@@ -13893,6 +13977,9 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         ),
         "GetFullPathNameA" => Some(
             get_full_path_name_a as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
+        ),
+        "GetVolumePathNameW" => Some(
+            get_volume_path_name_w as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
         ),
         "MoveFileW" => {
             Some(move_file_w as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)

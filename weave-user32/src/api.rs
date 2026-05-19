@@ -2311,6 +2311,25 @@ pub extern "win64" fn release_dc(_hwnd: usize, _hdc: usize) -> i32 {
     1
 }
 
+/// WindowFromDC: return the HWND associated with a DC.
+///
+/// Wine ref: dlls/win32u/dce.c — maps a cached/window DC back to the owning
+/// window. Weave's HDC contract is intentionally simple: BeginPaint/GetDC return
+/// the HWND itself for window DCs, and SCREEN_HDC for GetDC(NULL).
+pub extern "win64" fn window_from_dc(hdc: usize) -> usize {
+    if hdc == 0 || hdc == SCREEN_HDC {
+        return 0;
+    }
+    if window::with(hdc, |_| ()).is_some() {
+        return hdc;
+    }
+    let paint_hwnd = current_paint_hwnd();
+    if paint_hwnd != 0 {
+        return paint_hwnd;
+    }
+    window::first_hwnd_with_xcb()
+}
+
 // ── SetWindowPos / MoveWindow ─────────────────────────────────────────────────
 
 /// MoveWindow: change the position and size of a window.
