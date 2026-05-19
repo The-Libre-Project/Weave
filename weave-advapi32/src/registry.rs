@@ -2351,24 +2351,65 @@ pub unsafe extern "win64" fn reg_create_key_w(
     ret as u32
 }
 
-/// RegSetValueW — set the default value of a key (legacy non-Ex variant).
-///
-/// Phase A stub: returns `ERROR_SUCCESS` without writing anything. IrfanView
-/// settings are read-only in Phase A; persistence is out of scope.
+/// RegSetValueW — set the default (unnamed) value of a key (legacy non-Ex variant).
 ///
 /// # Safety
-/// All pointer parameters are accepted but not dereferenced.
+/// `lp_sub_key` must be null or a valid null-terminated UTF-16 string.
+/// `lp_data` must be null or a valid null-terminated UTF-16 string.
 // Wine ref: dlls/advapi32/registry.c — RegSetValueW: validates type==REG_SZ && data;
 // calls RegSetKeyValueW(hkey, subkey, NULL, type, data, (lstrlenW(data)+1)*sizeof(WCHAR)).
-// TODO(shim): Phase A — returns ERROR_SUCCESS, no write.
+// The NULL value-name writes the default value ('@' in Weave's key-dir layout).
 pub unsafe extern "win64" fn reg_set_value_w(
-    _h_key: usize,
-    _lp_sub_key: *const u16,
-    _dw_type: u32,
-    _lp_data: *const u16,
+    h_key: usize,
+    lp_sub_key: *const u16,
+    dw_type: u32,
+    lp_data: *const u16,
     _cb_data: u32,
 ) -> u32 {
-    0 // ERROR_SUCCESS
+    if dw_type != REG_SZ || lp_data.is_null() {
+        return 87; // ERROR_INVALID_PARAMETER
+    }
+    // Wine always recomputes byte count from string length (lstrlenW+1)*sizeof(WCHAR).
+    let data_chars = {
+        let mut n = 0usize;
+        while unsafe { *lp_data.add(n) } != 0 {
+            n += 1;
+        }
+        n + 1 // include NUL
+    };
+    let byte_count = (data_chars * 2) as u32;
+
+    if lp_sub_key.is_null() {
+        // Write default value directly on h_key (null value name → '@' internally).
+        return unsafe {
+            reg_set_value_ex_w(
+                h_key,
+                std::ptr::null(),
+                0,
+                REG_SZ,
+                lp_data as *const u8,
+                byte_count,
+            ) as u32
+        };
+    }
+    // Open (or create) the subkey, write, close.
+    let mut sub_hkey: usize = 0;
+    let ret = unsafe { reg_create_key_w(h_key, lp_sub_key, &mut sub_hkey) };
+    if ret != 0 {
+        return ret;
+    }
+    let write_ret = unsafe {
+        reg_set_value_ex_w(
+            sub_hkey,
+            std::ptr::null(),
+            0,
+            REG_SZ,
+            lp_data as *const u8,
+            byte_count,
+        ) as u32
+    };
+    reg_close_key(sub_hkey);
+    write_ret
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

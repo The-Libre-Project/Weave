@@ -3623,73 +3623,114 @@ pub unsafe extern "win64" fn get_outline_text_metrics_a(
     0
 }
 
-/// GetCharABCWidthsFloatA: return FALSE (not implemented).
+/// GetCharABCWidthsFloatA — return per-character ABC float advance metrics.
+///
+/// Fills `lp_abc_f` with `ABCFLOAT {abcfA=0, abcfB=ave_char_width, abcfC=0}` for each
+/// character in [`i_first_char`, `i_last_char`]. Per-glyph shaping is a Phase 7
+/// enhancement; uniform advance is accurate for monospace and close for proportional.
 ///
 /// # Safety
-/// Pointer arguments are accepted but not dereferenced.
-// Wine ref: dlls/win32u/font.c — GetCharABCWidthsFloatA converts char range to wide,
+/// `lp_abc_f` must be a writable pointer to at least `(i_last_char - i_first_char + 1)`
+/// `ABCFLOAT` structs (12 bytes each: abcfA f32, abcfB f32, abcfC f32).
+// Wine ref: dlls/win32u/font.c — GetCharABCWidthsFloatA: converts char range to wide,
 // calls GetCharABCWidthsFloatW; only valid for TrueType fonts (returns FALSE for raster).
+// Weave approximation: fills abcfB = ave_char_width, abcfA = abcfC = 0.
 pub unsafe extern "win64" fn get_char_abc_widths_float_a(
-    _hdc: usize,
-    _i_first_char: u32,
-    _i_last_char: u32,
-    _lp_abc_f: usize,
+    hdc: usize,
+    i_first_char: u32,
+    i_last_char: u32,
+    lp_abc_f: *mut f32,
 ) -> i32 {
-    0
+    if lp_abc_f.is_null() || i_last_char < i_first_char {
+        return 0;
+    }
+    let count = (i_last_char - i_first_char + 1) as usize;
+    let px = font_px_size(hdc);
+    let fm = weave_user32::font::metrics(px);
+    let advance = fm.ave_char_width.min(9) as f32;
+    // ABCFLOAT layout: [abcfA f32, abcfB f32, abcfC f32] — 3 floats per entry.
+    // SAFETY: caller guarantees lp_abc_f points to count * 3 writable f32 values.
+    for i in 0..count {
+        unsafe {
+            lp_abc_f.add(i * 3).write(0.0f32); // abcfA
+            lp_abc_f.add(i * 3 + 1).write(advance); // abcfB
+            lp_abc_f.add(i * 3 + 2).write(0.0f32); // abcfC
+        }
+    }
+    1
 }
 
-/// GetCharWidth32A / W / GetCharWidthA / W: return FALSE.
+/// GetCharWidth32W — return per-character INT advance widths.
+///
+/// Fills `lp_buffer` with `ave_char_width` for each character in [`i_first`, `i_last`].
 ///
 /// # Safety
-/// Pointer arguments are accepted but not dereferenced.
-// Wine ref: dlls/win32u/font.c — GetCharWidth32A/W queries advance widths for a char
-// range; fills lpBuffer with INT advance widths; GetCharWidthA/W are identical (old alias).
-pub unsafe extern "win64" fn get_char_width32_a(
-    _hdc: usize,
-    _i_first: u32,
-    _i_last: u32,
-    _lp_buffer: usize,
-) -> i32 {
-    0
-}
-
-/// # Safety
-/// `lp_buffer` must point to writable storage for `(i_last - i_first + 1)` INT values.
-// Wine ref: dlls/win32u/font.c — GetCharWidth32W queries ABC widths via get_glyph_outline
-// and returns abcA+abcB+abcC as a single INT per character.
+/// `lp_buffer` must point to writable storage for `(i_last - i_first + 1)` i32 values.
+// Wine ref: dlls/win32u/font.c — GetCharWidth32W: queries glyph advance widths and
+// returns abcA+abcB+abcC as a single INT per character.
 pub unsafe extern "win64" fn get_char_width32_w(
-    _hdc: usize,
-    _i_first: u32,
-    _i_last: u32,
-    _lp_buffer: usize,
+    hdc: usize,
+    i_first: u32,
+    i_last: u32,
+    lp_buffer: *mut i32,
 ) -> i32 {
-    0
+    if lp_buffer.is_null() || i_last < i_first {
+        return 0;
+    }
+    let count = (i_last - i_first + 1) as usize;
+    let px = font_px_size(hdc);
+    let fm = weave_user32::font::metrics(px);
+    let advance = fm.ave_char_width.min(9);
+    // SAFETY: caller guarantees lp_buffer points to count writable i32 values.
+    for i in 0..count {
+        unsafe { lp_buffer.add(i).write(advance) };
+    }
+    1
 }
 
+/// GetCharWidth32A — ANSI variant of GetCharWidth32W.
+///
+/// # Safety
+/// `lp_buffer` must point to writable storage for `(i_last - i_first + 1)` i32 values.
+// Wine ref: dlls/win32u/font.c — GetCharWidth32A: converts ANSI range to wide,
+// calls GetCharWidth32W; INT advance widths identical.
+pub unsafe extern "win64" fn get_char_width32_a(
+    hdc: usize,
+    i_first: u32,
+    i_last: u32,
+    lp_buffer: *mut i32,
+) -> i32 {
+    unsafe { get_char_width32_w(hdc, i_first, i_last, lp_buffer) }
+}
+
+/// GetCharWidthW — alias for GetCharWidth32W.
+///
 /// # Safety
 /// `lp_buffer` must point to writable storage for the requested char range.
-// Wine ref: dlls/gdi32/font.c — GetCharWidthA is an alias for GetCharWidth32A; both
+// Wine ref: dlls/gdi32/font.c — GetCharWidthW is an alias for GetCharWidth32W;
+// same INT advance width semantics; superseded by GetCharABCWidthsW for TrueType detail.
+pub unsafe extern "win64" fn get_char_width_w(
+    hdc: usize,
+    i_first: u32,
+    i_last: u32,
+    lp_buffer: *mut i32,
+) -> i32 {
+    unsafe { get_char_width32_w(hdc, i_first, i_last, lp_buffer) }
+}
+
+/// GetCharWidthA — alias for GetCharWidth32A.
+///
+/// # Safety
+/// `lp_buffer` must point to writable storage for the requested char range.
+// Wine ref: dlls/gdi32/font.c — GetCharWidthA is an alias for GetCharWidth32A;
 // call NtGdiGetCharWidthW with the same semantics.
 pub unsafe extern "win64" fn get_char_width_a(
-    _hdc: usize,
-    _i_first: u32,
-    _i_last: u32,
-    _lp_buffer: usize,
+    hdc: usize,
+    i_first: u32,
+    i_last: u32,
+    lp_buffer: *mut i32,
 ) -> i32 {
-    0
-}
-
-/// # Safety
-/// `lp_buffer` must point to writable storage for the requested char range.
-// Wine ref: dlls/gdi32/font.c — GetCharWidthW is an alias for GetCharWidth32W; same
-// INT advance width semantics; both superseded by GetCharABCWidthsW for TrueType detail.
-pub unsafe extern "win64" fn get_char_width_w(
-    _hdc: usize,
-    _i_first: u32,
-    _i_last: u32,
-    _lp_buffer: usize,
-) -> i32 {
-    0
+    unsafe { get_char_width32_a(hdc, i_first, i_last, lp_buffer) }
 }
 
 /// GetCharacterPlacementW: return 0 (not implemented).
