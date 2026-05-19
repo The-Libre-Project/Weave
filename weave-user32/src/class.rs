@@ -324,6 +324,13 @@ extern "win64" fn builtin_control_wnd_proc(
         // crash at VA 0x18. Return usize::MAX (== -1 as isize on x86-64) so SumatraPDF sees
         // "button not found" and skips the struct dereference entirely.
         0x043F => usize::MAX,
+        // TCM_GETCURSEL (TCM_FIRST+11 = 0x130B) — Wine ref: dlls/comctl32/tab.c::TAB_GetCurSel
+        // returns infoPtr->iSelected, which is -1 when no tab is selected (no items inserted).
+        // Returning 0 (the default arm) falsely signals "tab 0 is selected"; SumatraPDF then
+        // dereferences the tab page data pointer at offset +24 (null+24 = VA 0x18) → crash.
+        // Return usize::MAX (== -1 as isize) so SumatraPDF sees "no tab selected" and skips
+        // the page data dereference entirely.
+        0x130b => usize::MAX,
         _ => 0,
     }
 }
