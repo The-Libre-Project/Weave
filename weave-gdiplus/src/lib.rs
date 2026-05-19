@@ -34,6 +34,13 @@ const GP_NOT_IMPLEMENTED: i32 = 6;
 
 // ── Startup / Shutdown ────────────────────────────────────────────────────────
 
+// Wine ref: dlls/gdiplus/gdiplus.c — NotificationHook/Unhook stubs for
+// callers that set SuppressBackgroundThread=TRUE and then call these themselves.
+pub extern "win64" fn gdip_notification_hook(_token: *mut usize) -> i32 {
+    GP_OK
+}
+pub extern "win64" fn gdip_notification_unhook(_token: usize) {}
+
 /// GdiplusStartup — initialise the GDI+ subsystem for this process.
 ///
 /// Wine ref: dlls/gdiplus/gdiplus.c:83 — returns InvalidParameter if `token`
@@ -52,19 +59,36 @@ const GP_NOT_IMPLEMENTED: i32 = 6;
 pub unsafe extern "win64" fn GdiplusStartup(
     token: *mut usize,
     input: *const u8,
-    _output: *mut u8,
+    output: *mut u8,
 ) -> i32 {
     eprintln!("weave/gdiplus: GdiplusStartup");
     // Wine ref: dlls/gdiplus/gdiplus.c:87 — both token and input are required.
     if token.is_null() || input.is_null() {
         return GP_INVALID_PARAMETER;
     }
+    // GdiplusStartupInput x64 layout (MSVC, no pack):
+    //   +0  GdiplusVersion: u32
+    //   +4  (padding)
+    //   +8  DebugEventCallback: *fn (ignored)
+    //   +16 SuppressBackgroundThread: BOOL (u32)
+    //   +20 SuppressExternalCodecs: BOOL (u32)
     // Wine ref: dlls/gdiplus/gdiplus.c:94 — version must be 1 or 2.
-    // GdiplusStartupInput layout: [GdiplusVersion: u32, DebugEventCallback: ptr,
-    //   SuppressBackgroundThread: BOOL, SuppressExternalCodecs: BOOL]
     let version = unsafe { *(input as *const u32) };
     if !(1..=2).contains(&version) {
         return 18; // UnsupportedGdiplusVersion
+    }
+    // Wine ref: dlls/gdiplus/gdiplus.c:104 — when SuppressBackgroundThread is
+    // set, output must be non-null and receives NotificationHook/Unhook pointers.
+    let suppress_bg = unsafe { *(input.add(16) as *const u32) };
+    if suppress_bg != 0 {
+        if output.is_null() {
+            return GP_INVALID_PARAMETER;
+        }
+        // GdiplusStartupOutput layout: +0 NotificationHook ptr, +8 NotificationUnhook ptr
+        unsafe {
+            *(output as *mut usize) = gdip_notification_hook as *const () as usize;
+            *(output.add(8) as *mut usize) = gdip_notification_unhook as *const () as usize;
+        }
     }
     // Wine ref: dlls/gdiplus/gdiplus.c:104 — token set to 0xdeadbeef.
     unsafe { *token = 0xdeadbeef };
