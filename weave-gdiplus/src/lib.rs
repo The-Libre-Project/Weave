@@ -1825,6 +1825,536 @@ pub extern "win64" fn GdipDeleteMatrix(_matrix: usize) -> i32 {
     GP_OK
 }
 
+// ── SumatraPDF E3-M4 additions — batch stub block ────────────────────────────
+// All functions below are in SumatraPDF's dynamic GetProcAddress init table.
+// A NULL return from any of them triggers a crash in a downstream Weave stub,
+// so all must be present in the resolver (CI-FAIL-LADDER Fail #4, 2026-05-19).
+// Implementations follow SHIM-CONTRACT Phase A: safe return values, no abort.
+
+// Wine ref: dlls/gdiplus/graphics.c — GdipGetImageGraphicsContext creates a
+// Graphics object from an Image (e.g. a Bitmap). Returns NotImplemented here
+// since we have no real GDI+ backend; writes 0 to output.
+/// # Safety
+/// Raw pointer parameters must be valid or null.
+#[no_mangle]
+pub unsafe extern "win64" fn GdipGetImageGraphicsContext(
+    _image: usize,
+    graphics: *mut usize,
+) -> i32 {
+    if !graphics.is_null() {
+        unsafe { *graphics = 0 };
+    }
+    GP_NOT_IMPLEMENTED
+}
+
+// Wine ref: dlls/gdiplus/image.c — creates Bitmap from a GDI DIB section.
+/// # Safety
+/// Raw pointer parameters must be valid or null.
+#[no_mangle]
+pub unsafe extern "win64" fn GdipCreateBitmapFromGdiDib(
+    _dib_info: *const u8,
+    _scan0: *mut u8,
+    bitmap: *mut usize,
+) -> i32 {
+    if !bitmap.is_null() {
+        unsafe { *bitmap = 0 };
+    }
+    GP_NOT_IMPLEMENTED
+}
+
+// Wine ref: dlls/gdiplus/image.c — creates Bitmap backed by a Graphics context.
+/// # Safety
+/// Raw pointer parameters must be valid or null.
+#[no_mangle]
+pub unsafe extern "win64" fn GdipCreateBitmapFromGraphics(
+    _width: i32,
+    _height: i32,
+    _graphics: usize,
+    bitmap: *mut usize,
+) -> i32 {
+    if !bitmap.is_null() {
+        unsafe { *bitmap = 0 };
+    }
+    GP_NOT_IMPLEMENTED
+}
+
+// Wine ref: dlls/gdiplus/image.c — clones a sub-rectangle of a bitmap (integer coords).
+/// # Safety
+/// Raw pointer parameters must be valid or null.
+#[no_mangle]
+pub unsafe extern "win64" fn GdipCloneBitmapAreaI(
+    _x: i32,
+    _y: i32,
+    _width: i32,
+    _height: i32,
+    _format: i32,
+    _src_bitmap: usize,
+    bitmap: *mut usize,
+) -> i32 {
+    if !bitmap.is_null() {
+        unsafe { *bitmap = 0 };
+    }
+    GP_NOT_IMPLEMENTED
+}
+
+// Wine ref: dlls/gdiplus/image.c — sets DPI resolution on a bitmap.
+#[no_mangle]
+pub extern "win64" fn GdipBitmapSetResolution(_bitmap: usize, _xdpi: f32, _ydpi: f32) -> i32 {
+    GP_OK
+}
+
+// Wine ref: dlls/gdiplus/brush.c — clones a GpBrush.
+/// # Safety
+/// Raw pointer parameters must be valid or null.
+#[no_mangle]
+pub unsafe extern "win64" fn GdipCloneBrush(_brush: usize, clone_brush: *mut usize) -> i32 {
+    if !clone_brush.is_null() {
+        unsafe { *clone_brush = 0 };
+    }
+    GP_NOT_IMPLEMENTED
+}
+
+// Wine ref: dlls/gdiplus/brush.c — sets solid fill colour on a GpSolidFill brush.
+#[no_mangle]
+pub extern "win64" fn GdipSetSolidFillColor(_brush: usize, _argb: u32) -> i32 {
+    GP_OK
+}
+
+// Wine ref: dlls/gdiplus/pen.c — sets pen ARGB colour.
+#[no_mangle]
+pub extern "win64" fn GdipSetPenColor(_pen: usize, _argb: u32) -> i32 {
+    GP_OK
+}
+
+// Wine ref: dlls/gdiplus/stringformat.c — clones a GpStringFormat.
+/// # Safety
+/// Raw pointer parameters must be valid or null.
+#[no_mangle]
+pub unsafe extern "win64" fn GdipCloneStringFormat(
+    _format: usize,
+    clone_format: *mut usize,
+) -> i32 {
+    if !clone_format.is_null() {
+        unsafe { *clone_format = 0 };
+    }
+    GP_NOT_IMPLEMENTED
+}
+
+// Wine ref: dlls/gdiplus/stringformat.c — reads format flags field.
+/// # Safety
+/// Raw pointer parameters must be valid or null.
+#[no_mangle]
+pub unsafe extern "win64" fn GdipGetStringFormatFlags(_format: usize, flags: *mut i32) -> i32 {
+    if !flags.is_null() {
+        unsafe { *flags = 0 };
+    }
+    GP_OK
+}
+
+// Wine ref: dlls/gdiplus/stringformat.c — sets measurable character ranges.
+/// # Safety
+/// Raw pointer parameters must be valid or null.
+#[no_mangle]
+pub unsafe extern "win64" fn GdipSetStringFormatMeasurableCharacterRanges(
+    _format: usize,
+    _count: i32,
+    _ranges: *const u8,
+) -> i32 {
+    GP_NOT_IMPLEMENTED
+}
+
+// Wine ref: dlls/gdiplus/font.c — creates GpFont from ANSI LOGFONTA.
+/// # Safety
+/// Raw pointer parameters must be valid or null.
+#[no_mangle]
+pub unsafe extern "win64" fn GdipCreateFontFromLogfontA(
+    _hdc: usize,
+    _logfont: *const u8,
+    font: *mut usize,
+) -> i32 {
+    if !font.is_null() {
+        unsafe { *font = 0 };
+    }
+    GP_NOT_IMPLEMENTED
+}
+
+// Wine ref: dlls/gdiplus/font.c — returns the GpFontFamily of a GpFont.
+/// # Safety
+/// Raw pointer parameters must be valid or null.
+#[no_mangle]
+pub unsafe extern "win64" fn GdipGetFamily(_font: usize, family: *mut usize) -> i32 {
+    if !family.is_null() {
+        unsafe { *family = 0 };
+    }
+    GP_NOT_IMPLEMENTED
+}
+
+// Wine ref: dlls/gdiplus/font.c — returns the family name string.
+/// # Safety
+/// Raw pointer parameters must be valid or null.
+#[no_mangle]
+pub unsafe extern "win64" fn GdipGetFamilyName(
+    _family: usize,
+    _name: *mut u16,
+    _language: u16,
+) -> i32 {
+    GP_NOT_IMPLEMENTED
+}
+
+// Wine ref: dlls/gdiplus/font.c — returns the generic sans-serif font family.
+/// # Safety
+/// Raw pointer parameters must be valid or null.
+#[no_mangle]
+pub unsafe extern "win64" fn GdipGetGenericFontFamilySansSerif(family: *mut usize) -> i32 {
+    if !family.is_null() {
+        unsafe { *family = 0 };
+    }
+    GP_NOT_IMPLEMENTED
+}
+
+// Wine ref: dlls/gdiplus/font.c — fills a LOGFONTW from a GpFont.
+/// # Safety
+/// Raw pointer parameters must be valid or null.
+#[no_mangle]
+pub unsafe extern "win64" fn GdipGetLogFontW(
+    _font: usize,
+    _graphics: usize,
+    _logfont: *mut u8,
+) -> i32 {
+    GP_NOT_IMPLEMENTED
+}
+
+// Wine ref: dlls/gdiplus/graphicspath.c — creates GpPath from point/type arrays.
+/// # Safety
+/// Raw pointer parameters must be valid or null.
+#[no_mangle]
+pub unsafe extern "win64" fn GdipCreatePath2(
+    _points: *const f32,
+    _types: *const u8,
+    _count: i32,
+    _fill_mode: i32,
+    path: *mut usize,
+) -> i32 {
+    if !path.is_null() {
+        unsafe { *path = 0 };
+    }
+    GP_NOT_IMPLEMENTED
+}
+
+// Wine ref: dlls/gdiplus/graphicspath.c — creates path iterator.
+/// # Safety
+/// Raw pointer parameters must be valid or null.
+#[no_mangle]
+pub unsafe extern "win64" fn GdipCreatePathIter(iter: *mut usize, _path: usize) -> i32 {
+    if !iter.is_null() {
+        unsafe { *iter = 0 };
+    }
+    GP_NOT_IMPLEMENTED
+}
+
+#[no_mangle]
+pub extern "win64" fn GdipDeletePathIter(_iter: usize) -> i32 {
+    GP_OK
+}
+
+#[no_mangle]
+pub extern "win64" fn GdipSetPathMarker(_path: usize) -> i32 {
+    GP_OK
+}
+
+#[no_mangle]
+pub extern "win64" fn GdipStartPathFigure(_path: usize) -> i32 {
+    GP_OK
+}
+
+// Wine ref: dlls/gdiplus/graphicspath.c — returns count of points in path.
+/// # Safety
+/// Raw pointer parameters must be valid or null.
+#[no_mangle]
+pub unsafe extern "win64" fn GdipGetPointCount(_path: usize, count: *mut i32) -> i32 {
+    if !count.is_null() {
+        unsafe { *count = 0 };
+    }
+    GP_NOT_IMPLEMENTED
+}
+
+// Wine ref: dlls/gdiplus/graphicspath.c — copies path points as integers.
+/// # Safety
+/// Raw pointer parameters must be valid or null.
+#[no_mangle]
+pub unsafe extern "win64" fn GdipGetPathPointsI(
+    _path: usize,
+    _points: *mut i32,
+    _count: i32,
+) -> i32 {
+    GP_NOT_IMPLEMENTED
+}
+
+// Wine ref: dlls/gdiplus/graphicspath.c — returns GpPathData struct.
+/// # Safety
+/// Raw pointer parameters must be valid or null.
+#[no_mangle]
+pub unsafe extern "win64" fn GdipGetPathData(_path: usize, _path_data: *mut u8) -> i32 {
+    GP_NOT_IMPLEMENTED
+}
+
+// Wine ref: dlls/gdiplus/graphicspath.c — iterator: next marker sub-path.
+/// # Safety
+/// Raw pointer parameters must be valid or null.
+#[no_mangle]
+pub unsafe extern "win64" fn GdipPathIterNextMarkerPath(
+    _iter: usize,
+    result_count: *mut i32,
+    _path: usize,
+) -> i32 {
+    if !result_count.is_null() {
+        unsafe { *result_count = 0 };
+    }
+    GP_NOT_IMPLEMENTED
+}
+
+// Wine ref: dlls/gdiplus/graphicspath.c — rewinds path iterator.
+/// # Safety
+/// Raw pointer parameters must be valid or null.
+#[no_mangle]
+pub unsafe extern "win64" fn GdipPathIterRewind(_iter: usize, result_count: *mut i32) -> i32 {
+    if !result_count.is_null() {
+        unsafe { *result_count = 0 };
+    }
+    GP_NOT_IMPLEMENTED
+}
+
+// Wine ref: dlls/gdiplus/graphicspath.c — adds integer-coord line segment.
+#[no_mangle]
+pub extern "win64" fn GdipAddPathLineI(
+    _path: usize,
+    _x1: i32,
+    _y1: i32,
+    _x2: i32,
+    _y2: i32,
+) -> i32 {
+    GP_NOT_IMPLEMENTED
+}
+
+// Wine ref: dlls/gdiplus/graphicspath.c — adds integer-coord rectangle.
+#[no_mangle]
+pub extern "win64" fn GdipAddPathRectangleI(
+    _path: usize,
+    _x: i32,
+    _y: i32,
+    _w: i32,
+    _h: i32,
+) -> i32 {
+    GP_NOT_IMPLEMENTED
+}
+
+// Wine ref: dlls/gdiplus/graphicspath.c — adds integer-coord ellipse.
+#[no_mangle]
+pub extern "win64" fn GdipAddPathEllipseI(_path: usize, _x: i32, _y: i32, _w: i32, _h: i32) -> i32 {
+    GP_NOT_IMPLEMENTED
+}
+
+// Wine ref: dlls/gdiplus/graphicspath.c — converts path to winding outline.
+#[no_mangle]
+pub extern "win64" fn GdipWindingModeOutline(_path: usize, _matrix: usize, _flatness: f32) -> i32 {
+    GP_NOT_IMPLEMENTED
+}
+
+// Wine ref: dlls/gdiplus/region.c — creates infinite GpRegion.
+/// # Safety
+/// Raw pointer parameters must be valid or null.
+#[no_mangle]
+pub unsafe extern "win64" fn GdipCreateRegion(region: *mut usize) -> i32 {
+    if !region.is_null() {
+        unsafe { *region = 0 };
+    }
+    GP_NOT_IMPLEMENTED
+}
+
+// Wine ref: dlls/gdiplus/region.c — creates GpRegion from a path.
+/// # Safety
+/// Raw pointer parameters must be valid or null.
+#[no_mangle]
+pub unsafe extern "win64" fn GdipCreateRegionPath(_path: usize, region: *mut usize) -> i32 {
+    if !region.is_null() {
+        unsafe { *region = 0 };
+    }
+    GP_NOT_IMPLEMENTED
+}
+
+#[no_mangle]
+pub extern "win64" fn GdipDeleteRegion(_region: usize) -> i32 {
+    GP_OK
+}
+
+// Wine ref: dlls/gdiplus/region.c — returns bounding rect of region.
+/// # Safety
+/// Raw pointer parameters must be valid or null.
+#[no_mangle]
+pub unsafe extern "win64" fn GdipGetRegionBounds(
+    _region: usize,
+    _graphics: usize,
+    _rect: *mut f32,
+) -> i32 {
+    GP_NOT_IMPLEMENTED
+}
+
+// Wine ref: dlls/gdiplus/region.c — converts region to GDI HRGN.
+/// # Safety
+/// Raw pointer parameters must be valid or null.
+#[no_mangle]
+pub unsafe extern "win64" fn GdipGetRegionHRgn(
+    _region: usize,
+    _graphics: usize,
+    hrgn: *mut usize,
+) -> i32 {
+    if !hrgn.is_null() {
+        unsafe { *hrgn = 0 };
+    }
+    GP_NOT_IMPLEMENTED
+}
+
+// Wine ref: dlls/gdiplus/graphics.c — gets current clip region.
+/// # Safety
+/// Raw pointer parameters must be valid or null.
+#[no_mangle]
+pub unsafe extern "win64" fn GdipGetClip(_graphics: usize, _region: usize) -> i32 {
+    GP_NOT_IMPLEMENTED
+}
+
+// Wine ref: dlls/gdiplus/matrix.c — applies rotation to matrix.
+#[no_mangle]
+pub extern "win64" fn GdipRotateMatrix(_matrix: usize, _angle: f32, _order: i32) -> i32 {
+    GP_NOT_IMPLEMENTED
+}
+
+// Wine ref: dlls/gdiplus/matrix.c — applies scale to matrix.
+#[no_mangle]
+pub extern "win64" fn GdipScaleMatrix(
+    _matrix: usize,
+    _scale_x: f32,
+    _scale_y: f32,
+    _order: i32,
+) -> i32 {
+    GP_NOT_IMPLEMENTED
+}
+
+// Wine ref: dlls/gdiplus/matrix.c — applies translation to matrix.
+#[no_mangle]
+pub extern "win64" fn GdipTranslateMatrix(
+    _matrix: usize,
+    _offset_x: f32,
+    _offset_y: f32,
+    _order: i32,
+) -> i32 {
+    GP_NOT_IMPLEMENTED
+}
+
+// Wine ref: dlls/gdiplus/matrix.c — inverts matrix.
+#[no_mangle]
+pub extern "win64" fn GdipInvertMatrix(_matrix: usize) -> i32 {
+    GP_NOT_IMPLEMENTED
+}
+
+// Wine ref: dlls/gdiplus/matrix.c — transforms array of float points.
+/// # Safety
+/// Raw pointer parameters must be valid or null.
+#[no_mangle]
+pub unsafe extern "win64" fn GdipTransformMatrixPoints(
+    _matrix: usize,
+    _pts: *mut f32,
+    _count: i32,
+) -> i32 {
+    GP_NOT_IMPLEMENTED
+}
+
+// Wine ref: dlls/gdiplus/graphics.c — transforms integer points between coordinate spaces.
+/// # Safety
+/// Raw pointer parameters must be valid or null.
+#[no_mangle]
+pub unsafe extern "win64" fn GdipTransformPointsI(
+    _graphics: usize,
+    _dst_space: i32,
+    _src_space: i32,
+    _pts: *mut i32,
+    _count: i32,
+) -> i32 {
+    GP_NOT_IMPLEMENTED
+}
+
+// Wine ref: dlls/gdiplus/graphics.c — draws ellipse with integer bounds.
+#[no_mangle]
+pub extern "win64" fn GdipFillEllipseI(
+    _graphics: usize,
+    _brush: usize,
+    _x: i32,
+    _y: i32,
+    _w: i32,
+    _h: i32,
+) -> i32 {
+    GP_NOT_IMPLEMENTED
+}
+
+// Wine ref: dlls/gdiplus/graphics.c — hit-test: is point inside path.
+/// # Safety
+/// Raw pointer parameters must be valid or null.
+#[no_mangle]
+pub unsafe extern "win64" fn GdipIsVisiblePathPointI(
+    _path: usize,
+    _x: i32,
+    _y: i32,
+    _graphics: usize,
+    result: *mut i32,
+) -> i32 {
+    if !result.is_null() {
+        unsafe { *result = 0 };
+    }
+    GP_NOT_IMPLEMENTED
+}
+
+// Wine ref: dlls/gdiplus/graphics.c — hit-test: is rect visible in clip.
+/// # Safety
+/// Raw pointer parameters must be valid or null.
+#[no_mangle]
+pub unsafe extern "win64" fn GdipIsVisibleRectI(
+    _graphics: usize,
+    _x: i32,
+    _y: i32,
+    _w: i32,
+    _h: i32,
+    result: *mut i32,
+) -> i32 {
+    if !result.is_null() {
+        unsafe { *result = 0 };
+    }
+    GP_NOT_IMPLEMENTED
+}
+
+// Wine ref: dlls/gdiplus/graphics.c — measures string character ranges.
+/// # Safety
+/// Raw pointer parameters must be valid or null.
+#[no_mangle]
+pub unsafe extern "win64" fn GdipMeasureCharacterRanges(
+    _graphics: usize,
+    _string: *const u16,
+    _length: i32,
+    _font: usize,
+    _layout_rect: *const f32,
+    _format: usize,
+    _region_count: i32,
+    _regions: *mut usize,
+) -> i32 {
+    GP_NOT_IMPLEMENTED
+}
+
+// Wine ref: dlls/gdiplus/image.c — sets an image property item.
+/// # Safety
+/// Raw pointer parameters must be valid or null.
+#[no_mangle]
+pub unsafe extern "win64" fn GdipSetPropertyItem(_image: usize, _item: *const u8) -> i32 {
+    GP_NOT_IMPLEMENTED
+}
+
 // ── Resolver ─────────────────────────────────────────────────────────────────
 
 /// Resolve a gdiplus.dll import to a function pointer.
@@ -1994,6 +2524,58 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "GdipRotateWorldTransform" => GdipRotateWorldTransform as *const () as usize,
         "GdipCreateMatrix" => GdipCreateMatrix as *const () as usize,
         "GdipDeleteMatrix" => GdipDeleteMatrix as *const () as usize,
+        // SumatraPDF E3-M4 batch additions (Fail #4 2026-05-19)
+        "GdipGetImageGraphicsContext" => GdipGetImageGraphicsContext as *const () as usize,
+        "GdipCreateBitmapFromGdiDib" => GdipCreateBitmapFromGdiDib as *const () as usize,
+        "GdipCreateBitmapFromGraphics" => GdipCreateBitmapFromGraphics as *const () as usize,
+        "GdipCloneBitmapAreaI" => GdipCloneBitmapAreaI as *const () as usize,
+        "GdipBitmapSetResolution" => GdipBitmapSetResolution as *const () as usize,
+        "GdipCloneBrush" => GdipCloneBrush as *const () as usize,
+        "GdipSetSolidFillColor" => GdipSetSolidFillColor as *const () as usize,
+        "GdipSetPenColor" => GdipSetPenColor as *const () as usize,
+        "GdipCloneStringFormat" => GdipCloneStringFormat as *const () as usize,
+        "GdipGetStringFormatFlags" => GdipGetStringFormatFlags as *const () as usize,
+        "GdipSetStringFormatMeasurableCharacterRanges" => {
+            GdipSetStringFormatMeasurableCharacterRanges as *const () as usize
+        }
+        "GdipCreateFontFromLogfontA" => GdipCreateFontFromLogfontA as *const () as usize,
+        "GdipGetFamily" => GdipGetFamily as *const () as usize,
+        "GdipGetFamilyName" => GdipGetFamilyName as *const () as usize,
+        "GdipGetGenericFontFamilySansSerif" => {
+            GdipGetGenericFontFamilySansSerif as *const () as usize
+        }
+        "GdipGetLogFontW" => GdipGetLogFontW as *const () as usize,
+        "GdipCreatePath2" => GdipCreatePath2 as *const () as usize,
+        "GdipCreatePathIter" => GdipCreatePathIter as *const () as usize,
+        "GdipDeletePathIter" => GdipDeletePathIter as *const () as usize,
+        "GdipSetPathMarker" => GdipSetPathMarker as *const () as usize,
+        "GdipStartPathFigure" => GdipStartPathFigure as *const () as usize,
+        "GdipGetPointCount" => GdipGetPointCount as *const () as usize,
+        "GdipGetPathPointsI" => GdipGetPathPointsI as *const () as usize,
+        "GdipGetPathData" => GdipGetPathData as *const () as usize,
+        "GdipPathIterNextMarkerPath" => GdipPathIterNextMarkerPath as *const () as usize,
+        "GdipPathIterRewind" => GdipPathIterRewind as *const () as usize,
+        "GdipAddPathLineI" => GdipAddPathLineI as *const () as usize,
+        "GdipAddPathRectangleI" => GdipAddPathRectangleI as *const () as usize,
+        "GdipAddPathEllipseI" => GdipAddPathEllipseI as *const () as usize,
+        "GdipWindingModeOutline" => GdipWindingModeOutline as *const () as usize,
+        "GdipCreateRegion" => GdipCreateRegion as *const () as usize,
+        "GdipCreateRegionPath" => GdipCreateRegionPath as *const () as usize,
+        "GdipDeleteRegion" => GdipDeleteRegion as *const () as usize,
+        "GdipGetRegionBounds" => GdipGetRegionBounds as *const () as usize,
+        "GdipGetRegionHRgn" => GdipGetRegionHRgn as *const () as usize,
+        "GdipGetClip" => GdipGetClip as *const () as usize,
+        "GdipRotateMatrix" => GdipRotateMatrix as *const () as usize,
+        "GdipScaleMatrix" => GdipScaleMatrix as *const () as usize,
+        "GdipTranslateMatrix" => GdipTranslateMatrix as *const () as usize,
+        "GdipInvertMatrix" => GdipInvertMatrix as *const () as usize,
+        "GdipTransformMatrixPoints" => GdipTransformMatrixPoints as *const () as usize,
+        "GdipTransformPointsI" => GdipTransformPointsI as *const () as usize,
+        "GdipFillEllipseI" => GdipFillEllipseI as *const () as usize,
+        "GdipIsVisiblePathPointI" => GdipIsVisiblePathPointI as *const () as usize,
+        "GdipIsVisibleRectI" => GdipIsVisibleRectI as *const () as usize,
+        "GdipMeasureCharacterRanges" => GdipMeasureCharacterRanges as *const () as usize,
+        "GdipSetPropertyItem" => GdipSetPropertyItem as *const () as usize,
         _ => return None,
     })
 }
