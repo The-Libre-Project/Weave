@@ -10051,7 +10051,7 @@ pub unsafe extern "win64" fn get_full_path_name_w(
 
     // Size query
     if n_buffer_length == 0 {
-        let r = (required_chars - 1) as u32;
+        let r = required_chars as u32;
         eprintln!("weave/GetFullPathNameW: exit resolved={resolved_path:?} → {r} (size query)");
         return r;
     }
@@ -10081,10 +10081,11 @@ pub unsafe extern "win64" fn get_full_path_name_w(
         eprintln!("weave/GetFullPathNameW: exit resolved={resolved_path:?} → {r} (chars written)");
         r // return chars written (excluding null)
     } else {
+        let r = required_chars as u32;
         eprintln!(
-            "weave/GetFullPathNameW: exit resolved={resolved_path:?} required={required_chars} buf={n_buffer_length} → 0 (buf too small)"
+            "weave/GetFullPathNameW: exit resolved={resolved_path:?} required={required_chars} buf={n_buffer_length} → {r} (buf too small)"
         );
-        0 // error: buffer too small
+        r
     }
 }
 
@@ -10150,7 +10151,7 @@ pub unsafe extern "win64" fn get_full_path_name_a(
 
     // Size query
     if n_buffer_length == 0 {
-        return (required_bytes - 1) as u32; // exclude null terminator
+        return required_bytes as u32;
     }
 
     // Copy to buffer if it fits
@@ -10177,7 +10178,7 @@ pub unsafe extern "win64" fn get_full_path_name_a(
 
         (required_bytes - 1) as u32 // return bytes written (excluding null)
     } else {
-        0 // error: buffer too small
+        required_bytes as u32
     }
 }
 
