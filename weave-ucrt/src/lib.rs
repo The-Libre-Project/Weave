@@ -4394,6 +4394,13 @@ pub unsafe extern "win64" fn ucrt_ultoa(val: u32, buf: *mut u8, radix: i32) -> *
     buf
 }
 
+/// _ismbblead — test whether a byte is a MBCS lead byte.
+// Wine ref: dlls/msvcrt/mbcs.c — checks byte against current MBCS code-page lead-byte table.
+// Weave uses UTF-16/UTF-8 only; no MBCS code pages are active. Always return 0 (not lead).
+pub extern "win64" fn ucrt_ismbblead(_c: u32) -> i32 {
+    0
+}
+
 /// Resolve a UCRT import to a stub address.
 pub fn resolve(dll: &str, func: &str) -> Option<usize> {
     if !is_ucrt_dll(dll) {
@@ -4837,6 +4844,8 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         // ── DXVK d3d9.dll gap stubs ────────────────────────────────────────
         "_filelengthi64" => stub!(ucrt_filelengthi64 as extern "win64" fn(_) -> _),
         "_ultoa" => stub!(ucrt_ultoa as unsafe extern "win64" fn(_, _, _) -> _),
+        // MBCS — Weave uses UTF-8/UTF-16 only; no lead-byte code pages active.
+        "_ismbblead" => Some(ucrt_ismbblead as extern "win64" fn(_) -> _ as *const () as usize),
         _ => None,
     }
 }

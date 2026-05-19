@@ -1776,6 +1776,10 @@ pub fn resolve(func: &str) -> Option<usize> {
         "RegSetValueW" => Some(
             reg_set_value_w as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const () as usize,
         ),
+        "RegGetValueW" => Some(
+            reg_get_value_w as unsafe extern "win64" fn(_, _, _, _, _, _, _) -> _ as *const ()
+                as usize,
+        ),
         _ => None,
     }
 }
@@ -2349,6 +2353,26 @@ pub unsafe extern "win64" fn reg_create_key_w(
         )
     };
     ret as u32
+}
+
+/// RegGetValueW — retrieve data and type of a named registry value.
+///
+/// # Safety
+/// `lp_sub_key`, `lp_value`, `p_type`, `pv_data`, and `pcb_data` must be valid or null.
+// Wine ref: dlls/advapi32/registry.c — RegGetValueW opens the sub-key, queries the value
+// via NtQueryValueKey, applies type filtering, then closes the sub-key. Weave has no real
+// registry for non-standard keys; return ERROR_FILE_NOT_FOUND so callers use defaults.
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "win64" fn reg_get_value_w(
+    _h_key: usize,
+    _lp_sub_key: *const u16,
+    _lp_value: *const u16,
+    _dw_flags: u32,
+    _p_type: *mut u32,
+    _pv_data: *mut u8,
+    _pcb_data: *mut u32,
+) -> u32 {
+    2 // ERROR_FILE_NOT_FOUND
 }
 
 /// RegSetValueW — set the default (unnamed) value of a key (legacy non-Ex variant).

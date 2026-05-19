@@ -7295,6 +7295,54 @@ pub unsafe extern "win64" fn get_class_info_ex_w(
     get_class_info_w(h_instance, lp_class_name, lp_wnd_class_ex)
 }
 
+// ── SumatraPDF E3-M4 additions ────────────────────────────────────────────────
+
+/// GetWindowDC — retrieve DC for the entire window (including non-client area).
+// Wine ref: dlls/win32u/dce.c — GetWindowDC calls GetDCEx(hwnd, NULL, DCX_WINDOW).
+pub extern "win64" fn get_window_dc(hwnd: usize) -> usize {
+    get_dc(hwnd)
+}
+
+/// DrawTextExW — draw formatted text in a rectangle.
+///
+/// # Safety
+/// `lp_string`, `lp_rc`, and `lp_dtp` must be valid or null.
+// Wine ref: dlls/user32/text.c — DrawTextExW measures and draws text into rect via ExtTextOut.
+pub unsafe extern "win64" fn draw_text_ex_w(
+    _hdc: usize,
+    _lp_string: *const u16,
+    _cch: i32,
+    _lp_rc: *mut i32,
+    _format: u32,
+    _lp_dtp: *const u8,
+) -> i32 {
+    0 // stub: return zero height
+}
+
+/// ShowScrollBar — show or hide a scroll bar control.
+// Wine ref: dlls/user32/scroll.c — calls NtUserShowScrollBar.
+pub extern "win64" fn show_scroll_bar(_hwnd: usize, _bar: i32, _show: i32) -> i32 {
+    1 // TRUE
+}
+
+/// CreateAcceleratorTableW — create an accelerator table from an array of ACCEL structs.
+///
+/// # Safety
+/// `lp_accel` must be a valid array of `count` ACCEL structs, or null.
+// Wine ref: dlls/win32u/ntuser.c — allocates kernel accelerator object, returns HACCEL.
+pub unsafe extern "win64" fn create_accelerator_table_w(
+    _lp_accel: *const u8,
+    _count: i32,
+) -> usize {
+    crate::accel_handles::ACCEL_HANDLE_BASE // non-zero fake HACCEL
+}
+
+/// DestroyAcceleratorTable — destroy an accelerator table created by CreateAcceleratorTableW.
+// Wine ref: dlls/win32u/ntuser.c — frees kernel accelerator object.
+pub extern "win64" fn destroy_accelerator_table(_h_accel: usize) -> i32 {
+    1 // TRUE
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]

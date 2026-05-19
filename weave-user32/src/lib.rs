@@ -1281,6 +1281,16 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
             api::get_class_info_ex_w as unsafe extern "win64" fn(_, _, _) -> _ as *const ()
                 as usize,
         ),
+        // SumatraPDF E3-M4 additions
+        "GetWindowDC" => Some(get_window_dc as *const () as usize),
+        "DrawTextExW" => Some(
+            draw_text_ex_w as unsafe extern "win64" fn(_, _, _, _, _, _) -> _ as *const () as usize,
+        ),
+        "ShowScrollBar" => Some(show_scroll_bar as *const () as usize),
+        "CreateAcceleratorTableW" => Some(
+            create_accelerator_table_w as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
+        ),
+        "DestroyAcceleratorTable" => Some(destroy_accelerator_table as *const () as usize),
         _ => None,
     }
 }

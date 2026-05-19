@@ -12910,6 +12910,50 @@ pub unsafe extern "win64" fn module32_next(_h_snapshot: usize, _lp_me: *mut u8) 
     0 // FALSE
 }
 
+/// GetLongPathNameW — convert short (8.3) path to long path name.
+///
+/// # Safety
+/// `lp_sz_short_path` must be a valid null-terminated UTF-16 string.
+/// `lp_sz_long_path` must be a valid buffer of `cch_buffer` UTF-16 chars, or null.
+// Wine ref: dlls/kernelbase/path.c — GetLongPathNameW walks path components via
+// FindFirstFileW; on Linux there's no 8.3 distinction so we copy the input as-is.
+pub unsafe extern "win64" fn get_long_path_name_w(
+    lp_sz_short_path: *const u16,
+    lp_sz_long_path: *mut u16,
+    cch_buffer: u32,
+) -> u32 {
+    if lp_sz_short_path.is_null() {
+        return 0;
+    }
+    let mut len = 0usize;
+    while unsafe { *lp_sz_short_path.add(len) } != 0 {
+        len += 1;
+    }
+    let needed = (len + 1) as u32;
+    if lp_sz_long_path.is_null() || cch_buffer < needed {
+        return needed; // return required size
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(lp_sz_short_path, lp_sz_long_path, needed as usize);
+    }
+    len as u32
+}
+
+/// GetShortPathNameW — convert long path to short (8.3) path name.
+///
+/// # Safety
+/// `lp_sz_long_path` must be a valid null-terminated UTF-16 string.
+/// `lp_sz_short_path` must be a valid buffer of `cch_buffer` UTF-16 chars, or null.
+// Wine ref: dlls/kernelbase/path.c — GetShortPathNameW generates 8.3 form via NtQueryInformationFile;
+// Linux has no 8.3 distinction so we return the input path unchanged.
+pub unsafe extern "win64" fn get_short_path_name_w(
+    lp_sz_long_path: *const u16,
+    lp_sz_short_path: *mut u16,
+    cch_buffer: u32,
+) -> u32 {
+    get_long_path_name_w(lp_sz_long_path, lp_sz_short_path, cch_buffer)
+}
+
 /// PeekNamedPipe — check for data in a named pipe without reading. Returns TRUE with zero bytes.
 ///
 /// Wine ref: dlls/kernelbase/file.c — PeekNamedPipe uses NtQueryInformationFile
@@ -14434,6 +14478,18 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "Module32Next" => {
             Some(module32_next as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
         }
+        "Module32FirstW" => {
+            Some(module32_first as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "Module32NextW" => {
+            Some(module32_next as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "GetLongPathNameW" => Some(
+            get_long_path_name_w as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
+        ),
+        "GetShortPathNameW" => Some(
+            get_short_path_name_w as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
+        ),
         "PeekNamedPipe" => Some(
             peek_named_pipe as unsafe extern "win64" fn(_, _, _, _, _, _) -> _ as *const ()
                 as usize,

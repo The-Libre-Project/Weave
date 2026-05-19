@@ -57,6 +57,23 @@ pub unsafe extern "win64" fn CertOpenSystemStoreA(
     0 // NULL — store unavailable
 }
 
+/// CertGetNameStringA — retrieve the subject or issuer name from a certificate context (ANSI).
+///
+/// # Safety
+/// `p_cert_context` is accepted but not used; `psz_name_string` may be null (size query).
+// Wine ref: dlls/crypt32/cert.c — CertGetNameStringA calls CertGetNameStringW and converts.
+// Weave: no certificate store — return 0 (failure).
+pub unsafe extern "win64" fn CertGetNameStringA(
+    _p_cert_context: usize,
+    _dw_type: u32,
+    _dw_flags: u32,
+    _pv_type_para: usize,
+    _psz_name_string: *mut u8,
+    _cch_name_string: u32,
+) -> u32 {
+    0 // failure: no certificate context
+}
+
 /// Resolve a crypt32.dll import to a function pointer.
 ///
 /// NOTE: weave-advapi32 also resolves crypt32.dll (CryptAcquireContextA,
@@ -74,6 +91,10 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "CertGetEnhancedKeyUsage" => Some(CertGetEnhancedKeyUsage as *const () as usize),
         "CertGetIntendedKeyUsage" => Some(CertGetIntendedKeyUsage as *const () as usize),
         "CertOpenSystemStoreA" => Some(CertOpenSystemStoreA as *const () as usize),
+        "CertGetNameStringA" => Some(
+            CertGetNameStringA as unsafe extern "win64" fn(_, _, _, _, _, _) -> _ as *const ()
+                as usize,
+        ),
         _ => None,
     }
 }
