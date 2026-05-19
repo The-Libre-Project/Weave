@@ -14,6 +14,10 @@ struct CmdLine {
     ansi: Vec<u8>,
     /// Null-terminated wide command line (full string, all args).
     wide: Vec<u16>,
+    /// Null-terminated ANSI WinMain lpCmdLine (args only, no argv[0]).
+    winmain_ansi: Vec<u8>,
+    /// Null-terminated wide WinMain lpCmdLine (args only, no argv[0]).
+    winmain_wide: Vec<u16>,
     /// Number of arguments (argc), including argv[0] (exe name).
     argc: i32,
     /// Individual argv strings, each null-terminated. Stored on the heap
@@ -70,6 +74,24 @@ pub fn set(exe_name: &str, args: &[String]) {
         let mut wide: Vec<u16> = s.encode_utf16().collect();
         wide.push(0);
 
+        let mut winmain = String::new();
+        for (idx, arg) in args.iter().enumerate() {
+            if idx > 0 {
+                winmain.push(' ');
+            }
+            if arg.contains(' ') {
+                winmain.push('"');
+                winmain.push_str(arg);
+                winmain.push('"');
+            } else {
+                winmain.push_str(arg);
+            }
+        }
+        let mut winmain_ansi: Vec<u8> = winmain.bytes().collect();
+        winmain_ansi.push(0);
+        let mut winmain_wide: Vec<u16> = winmain.encode_utf16().collect();
+        winmain_wide.push(0);
+
         // Build argv_strings: argv[0] = exe_name, argv[1..] = args.
         // Each string is null-terminated ANSI bytes.
         let mut argv_strings: Vec<Vec<u8>> = std::iter::once(exe_name)
@@ -93,6 +115,8 @@ pub fn set(exe_name: &str, args: &[String]) {
         CmdLine {
             ansi,
             wide,
+            winmain_ansi,
+            winmain_wide,
             argc,
             argv_strings,
             argv_ptrs,
@@ -149,5 +173,26 @@ pub fn get_w() -> *const u16 {
     CMD_LINE
         .get()
         .map(|c| c.wide.as_ptr())
+        .unwrap_or(FALLBACK.as_ptr())
+}
+
+/// Return the null-terminated ANSI WinMain command-line tail.
+///
+/// This is the argument string passed to WinMain as lpCmdLine: it excludes
+/// argv[0] but preserves the same quoting used for the full command line.
+pub fn get_winmain_a() -> *const u8 {
+    static FALLBACK: &[u8] = b"\0";
+    CMD_LINE
+        .get()
+        .map(|c| c.winmain_ansi.as_ptr())
+        .unwrap_or(FALLBACK.as_ptr())
+}
+
+/// Return the null-terminated wide WinMain command-line tail.
+pub fn get_winmain_w() -> *const u16 {
+    static FALLBACK: &[u16] = &[0u16];
+    CMD_LINE
+        .get()
+        .map(|c| c.winmain_wide.as_ptr())
         .unwrap_or(FALLBACK.as_ptr())
 }

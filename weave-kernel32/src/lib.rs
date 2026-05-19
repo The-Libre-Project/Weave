@@ -12950,6 +12950,23 @@ pub unsafe extern "win64" fn sleep_ex(dw_milliseconds: u32, _b_alertable: i32) -
     0 // WAIT_OBJECT_0
 }
 
+/// QueueUserAPC — queue a user APC to a thread.
+///
+/// Wine ref: dlls/kernelbase/thread.c — forwards to NtQueueApcThread and
+/// returns TRUE on STATUS_SUCCESS. Weave does not yet deliver APC callbacks,
+/// but many apps use this API as a wakeup/scheduling hint and only need the
+/// call to succeed so the surrounding wait path can continue.
+///
+/// # Safety
+/// `pfn_apc` is accepted but not called; `h_thread` and `dw_data` are ignored.
+pub unsafe extern "win64" fn queue_user_apc(
+    _pfn_apc: usize,
+    _h_thread: usize,
+    _dw_data: usize,
+) -> u32 {
+    1 // TRUE
+}
+
 // MODULEENTRY32W layout (Windows x64, tlhelp32.h):
 //   dwSize         u32   = 4
 //   th32ModuleID   u32
@@ -14559,6 +14576,9 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         // Task-01 additions — curl
         "CancelIo" => Some(cancel_io as unsafe extern "win64" fn(_) -> _ as *const () as usize),
         "SleepEx" => Some(sleep_ex as unsafe extern "win64" fn(_, _) -> _ as *const () as usize),
+        "QueueUserAPC" => {
+            Some(queue_user_apc as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize)
+        }
         "Module32First" => {
             Some(module32_first as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
         }

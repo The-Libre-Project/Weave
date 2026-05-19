@@ -495,10 +495,14 @@ pub extern "win64" fn ucrt_setusermatherr(_fn: *const c_void) {
 /// string used by the narrow WinMain entry point.  A NULL return causes the
 /// MSVC CRT startup to crash (it calls GetCommandLineA and parses it; the
 /// exe_common.inl path unconditionally passes the result to main()).
-/// Safe stub: return a pointer to a static null-terminated empty string.
-static NARROW_CMDLINE: [u8; 1] = [0u8];
+/// Safe stub: return the WinMain lpCmdLine tail built by the Weave CLI.
 pub unsafe extern "win64" fn ucrt_get_narrow_winmain_command_line() -> *const u8 {
-    NARROW_CMDLINE.as_ptr()
+    weave_core::cmdline::get_winmain_a()
+}
+
+/// _get_wide_winmain_command_line — returns the wide WinMain lpCmdLine tail.
+pub unsafe extern "win64" fn ucrt_get_wide_winmain_command_line() -> *const u16 {
+    weave_core::cmdline::get_winmain_w()
 }
 
 /// _invalid_parameter_noinfo — called by MSVC CRT on invalid parameters (no info).
@@ -4465,6 +4469,9 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         }
         "_get_narrow_winmain_command_line" => {
             stub!(ucrt_get_narrow_winmain_command_line as unsafe extern "win64" fn() -> _)
+        }
+        "_get_wide_winmain_command_line" => {
+            stub!(ucrt_get_wide_winmain_command_line as unsafe extern "win64" fn() -> _)
         }
         "_invalid_parameter_noinfo" => {
             stub!(ucrt_invalid_parameter_noinfo as unsafe extern "win64" fn())
