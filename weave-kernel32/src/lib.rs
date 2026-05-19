@@ -12235,48 +12235,34 @@ pub unsafe extern "win64" fn set_file_time(
 // Wine ref: dlls/ntdll/exception.c:371 — delegates to add_vectored_handler(&vectored_exception_handlers, first, func);
 // inserts at head (first!=0) or tail; returns allocated VECTORED_HANDLER* as opaque handle
 pub extern "win64" fn add_vectored_exception_handler(_first: u32, handler: usize) -> usize {
-    eprintln!(
-        "[weave] FATAL: AddVectoredExceptionHandler is not implemented — aborting to prevent silent SEH corruption. \
-        handler={:#x}",
-        handler
-    );
-    std::process::abort();
+    // Weave does not dispatch vectored exceptions; return a fake non-zero handle so callers
+    // that register for telemetry/error-recovery (e.g. SumatraPDF) can continue running.
+    let _ = handler;
+    1
 }
 
 /// RemoveVectoredExceptionHandler: no-op stub returning success.
 // Wine ref: dlls/ntdll/exception.c — delegates to remove_vectored_handler(&vectored_exception_handlers, handler);
 // walks the list, removes and frees the entry; returns count of remaining handlers
 pub extern "win64" fn remove_vectored_exception_handler(handle: usize) -> u32 {
-    eprintln!(
-        "[weave] FATAL: RemoveVectoredExceptionHandler is not implemented — aborting to prevent silent SEH corruption. \
-        handle={:#x}",
-        handle
-    );
-    std::process::abort();
+    let _ = handle;
+    1
 }
 
 /// AddVectoredContinueHandler: no-op stub returning the handler as a fake handle.
 // Wine ref: dlls/ntdll/exception.c — delegates to add_vectored_handler(&vectored_continue_handlers, first, func);
 // same linked-list mechanism as AddVectoredExceptionHandler but separate list
 pub extern "win64" fn add_vectored_continue_handler(_first: u32, handler: usize) -> usize {
-    eprintln!(
-        "[weave] FATAL: AddVectoredContinueHandler is not implemented — aborting to prevent silent SEH corruption. \
-        handler={:#x}",
-        handler
-    );
-    std::process::abort();
+    let _ = handler;
+    1
 }
 
 /// RemoveVectoredContinueHandler: no-op stub returning success.
 // Wine ref: dlls/ntdll/exception.c — delegates to remove_vectored_handler(&vectored_continue_handlers, handler);
 // same mechanism as RemoveVectoredExceptionHandler but uses the continue handler list
 pub extern "win64" fn remove_vectored_continue_handler(handle: usize) -> u32 {
-    eprintln!(
-        "[weave] FATAL: RemoveVectoredContinueHandler is not implemented — aborting to prevent silent SEH corruption. \
-        handle={:#x}",
-        handle
-    );
-    std::process::abort();
+    let _ = handle;
+    1
 }
 
 /// File type constant for unknown files.
