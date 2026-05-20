@@ -4099,6 +4099,78 @@ pub extern "win64" fn get_class_long_ptr_a(hwnd: usize, n_index: i32) -> usize {
     get_class_long_ptr_w(hwnd, n_index)
 }
 
+/// GetClassNameW: retrieve the registered class name for the window identified by hwnd.
+///
+/// Copies the class name string (stored in WindowEntry::class_name) into the caller-supplied
+/// UTF-16 buffer. Returns the number of UTF-16 code units copied (excluding the null
+/// terminator), or 0 on failure (invalid hwnd, null buffer, or zero capacity).
+///
+/// # Safety
+/// `lp_class_name` must point to a writable buffer of at least `n_max_count` UTF-16 code
+/// units. `n_max_count` must be positive.
+// Wine ref: dlls/win32u/class.c::NtUserGetClassName — copies class->name into caller buffer
+// with WideCharToMultiByte conversion for A variant; W variant copies UTF-16 directly;
+// returns char count excluding NUL, 0 on failure (invalid hwnd or zero-length buffer).
+pub unsafe extern "win64" fn get_class_name_w(
+    hwnd: usize,
+    lp_class_name: *mut u16,
+    n_max_count: i32,
+) -> i32 {
+    if lp_class_name.is_null() || n_max_count <= 0 {
+        return 0;
+    }
+    let class_name = match window::with(hwnd, |e| e.class_name.clone()) {
+        Some(n) => n,
+        None => return 0,
+    };
+    let wide: Vec<u16> = class_name.encode_utf16().collect();
+    // Copy up to n_max_count-1 code units so there is always room for the NUL terminator.
+    let copy_len = wide.len().min((n_max_count as usize).saturating_sub(1));
+    // SAFETY: caller guarantees buffer is valid for n_max_count u16 units.
+    unsafe {
+        for (i, &cu) in wide[..copy_len].iter().enumerate() {
+            *lp_class_name.add(i) = cu;
+        }
+        *lp_class_name.add(copy_len) = 0;
+    }
+    copy_len as i32
+}
+
+/// GetClassNameA: ANSI variant — decodes the stored UTF-16 class name to ANSI bytes.
+///
+/// # Safety
+/// `lp_class_name` must point to a writable buffer of at least `n_max_count` bytes.
+// Wine ref: dlls/win32u/class.c::NtUserGetClassName — A path converts UTF-16 class name
+// to multibyte via WideCharToMultiByte; Weave uses a direct ASCII downcast (class names
+// are always ASCII in practice) with the same length-excluding-NUL return convention.
+pub unsafe extern "win64" fn get_class_name_a(
+    hwnd: usize,
+    lp_class_name: *mut u8,
+    n_max_count: i32,
+) -> i32 {
+    if lp_class_name.is_null() || n_max_count <= 0 {
+        return 0;
+    }
+    let class_name = match window::with(hwnd, |e| e.class_name.clone()) {
+        Some(n) => n,
+        None => return 0,
+    };
+    // Class names are always ASCII; safe to cast each UTF-16 code unit to u8.
+    let bytes: Vec<u8> = class_name
+        .encode_utf16()
+        .map(|cu| if cu < 0x80 { cu as u8 } else { b'?' })
+        .collect();
+    let copy_len = bytes.len().min((n_max_count as usize).saturating_sub(1));
+    // SAFETY: caller guarantees buffer is valid for n_max_count bytes.
+    unsafe {
+        for (i, &b) in bytes[..copy_len].iter().enumerate() {
+            *lp_class_name.add(i) = b;
+        }
+        *lp_class_name.add(copy_len) = 0;
+    }
+    copy_len as i32
+}
+
 /// EnumChildWindows: invoke lpEnumFunc for each direct child of hwndParent.
 ///
 /// # Safety
