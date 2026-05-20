@@ -4935,6 +4935,7 @@ pub unsafe extern "win64" fn msg_wait_for_multiple_objects(
     const INFINITE: u32 = 0xFFFF_FFFF;
 
     let trace = weave_core::ws2_trace::enabled();
+    eprintln!("weave/MsgWait: entry n={n_count} ms={dw_milliseconds} mask={_dw_wake_mask:#x}");
     if trace {
         eprintln!("weave/MsgWait: n={n_count} ms={dw_milliseconds} mask={_dw_wake_mask:#x}");
     }
@@ -5065,11 +5066,16 @@ pub unsafe extern "win64" fn msg_wait_for_multiple_objects(
             dw_milliseconds.min(i32::MAX as u32) as i32
         };
 
+        eprintln!(
+            "weave/MsgWait: polling nfds={} timeout_ms={timeout_ms}",
+            pollfds.len()
+        );
         let ret = libc::poll(
             pollfds.as_mut_ptr(),
             pollfds.len() as libc::nfds_t,
             timeout_ms,
         );
+        eprintln!("weave/MsgWait: poll returned ret={ret}");
 
         if trace {
             eprintln!("weave/MsgWait: poll returned {} ret={}", pollfds.len(), ret);
