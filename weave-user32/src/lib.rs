@@ -931,15 +931,15 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         ),
         "GetClassLongPtrW" => Some(get_class_long_ptr_w as *const () as usize),
         "GetClassLongPtrA" => Some(get_class_long_ptr_a as *const () as usize),
-        "GetClassNameW" => Some(
-            get_class_name_w as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
-        ),
-        "GetClassNameA" => Some(
-            get_class_name_a as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
-        ),
-        "EnumChildWindows" => Some(
-            enum_child_windows as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
-        ),
+        "GetClassNameW" => {
+            Some(get_class_name_w as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize)
+        }
+        "GetClassNameA" => {
+            Some(get_class_name_a as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize)
+        }
+        "EnumChildWindows" => {
+            Some(enum_child_windows as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize)
+        }
         // ── ANSI resource loading ─────────────────────────────────────────
         "LoadIconA" => {
             Some(load_icon_a as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)

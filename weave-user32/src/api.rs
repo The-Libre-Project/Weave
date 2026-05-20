@@ -4193,8 +4193,7 @@ pub unsafe extern "win64" fn enum_child_windows(
     if children.is_empty() {
         return 0;
     }
-    let callback: unsafe extern "win64" fn(usize, isize) -> i32 =
-        std::mem::transmute(lp_enum_func);
+    let callback: unsafe extern "win64" fn(usize, isize) -> i32 = std::mem::transmute(lp_enum_func);
     for child in children {
         let ret = unsafe { callback(child, l_param) };
         if ret == 0 {

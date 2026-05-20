@@ -343,6 +343,14 @@ extern "win64" fn builtin_control_wnd_proc(
         // Return usize::MAX (== -1 as isize) so SumatraPDF sees "no tab selected" and skips
         // the page data dereference entirely.
         0x130b => usize::MAX,
+        // LVM_SETCOLUMNW (LVM_FIRST+96 = 0x133C) — Wine ref: dlls/comctl32/listview.c::LISTVIEW_SetColumnT
+        // RETURN: SUCCESS: TRUE / FAILURE: FALSE (returns FALSE only if lpColumn is null,
+        // nColumn < 0, or nColumn >= column count). NPP passes column index 0 and a valid
+        // LVCOLUMNW pointer; Weave has no listview state so we return TRUE unconditionally.
+        // Returning 0 (default arm) caused NPP to take the error path and dereference a
+        // null-derived pointer at offset +0x9f → crash at rva=0x000e3caf.
+        // TODO(shim): Phase A — no listview column storage; returns TRUE only.
+        0x133c => 1,
         _ => 0,
     }
 }
