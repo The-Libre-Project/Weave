@@ -343,31 +343,13 @@ extern "win64" fn builtin_control_wnd_proc(
         // Return usize::MAX (== -1 as isize) so SumatraPDF sees "no tab selected" and skips
         // the page data dereference entirely.
         0x130b => usize::MAX,
-        // 0x133c is TCM_GETITEMW (TCM_FIRST+60) for SysTabControl32, and is also sent to
-        // SysListView32 windows by NPP during column initialisation.
-        //
-        // Wine ref: dlls/comctl32/tab.c::TAB_GetItemT — returns FALSE (0) when no items are
-        // inserted (iItem >= uNumItem). The correct Tab Control behavior is to return FALSE.
-        // Returning TRUE here caused SumatraPDF's tab control to enter a blocking init path
-        // that prevented WM_PAINT dispatch (sumatrapdf_pdf_render_gate regression CI 26176023971).
-        //
-        // Wine ref: dlls/comctl32/listview.c::LISTVIEW_SetColumnT — called as LVM_SETCOLUMNW
-        // (LVM_FIRST+96 = 0x1060, a DIFFERENT message) for ListView. However, NPP also sends
-        // message 0x133c to a SysListView32 window and expects TRUE on success; returning FALSE
-        // caused NPP to dereference a null-derived pointer at offset +0x9f → crash rva=0x000e3caf.
-        //
-        // Resolution: gate by window class. SysListView32 windows get TRUE (success); all other
-        // windows (SysTabControl32 and unknown) get FALSE — the correct Wine Tab Control behavior.
-        // TODO(shim): Phase A — no listview/tabcontrol item storage; SysListView32 returns TRUE only.
-        0x133c => {
-            let class =
-                window::with(hwnd, |e| e.class_name.to_ascii_lowercase()).unwrap_or_default();
-            if class == "syslistview32" {
-                1
-            } else {
-                0
-            }
-        }
+        // 0x133c is TCM_GETITEMW (TCM_FIRST+60). Wine ref: dlls/comctl32/tab.c::TAB_GetItemT
+        // returns FALSE (0) when iItem >= uNumItem (empty control or out-of-range index).
+        // Returning TRUE for SysListView32 (class-gated attempt) caused sumatrapdf regression:
+        // SumatraPDF has a SysListView32 that receives 0x133c and enters a blocking init path
+        // on TRUE return (CI 26179659169). NPP's 0x133c window already received 0 in the
+        // class-gated build and NPP still passed — returning TRUE was not the NPP fix.
+        0x133c => 0,
         _ => 0,
     }
 }
