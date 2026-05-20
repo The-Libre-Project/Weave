@@ -196,6 +196,8 @@ pub unsafe extern "win64" fn register_class_w(lp_wnd_class: *const WndClassW) ->
             h_cursor: wc.h_cursor,
             hbr_background: wc.hbr_background,
             cb_wnd_extra: wc.cb_wnd_extra.max(0) as u32,
+            h_icon: 0,
+            h_icon_sm: 0,
         },
     );
     // Return a non-zero ATOM — use a hash of the name for uniqueness.
@@ -225,6 +227,8 @@ pub unsafe extern "win64" fn register_class_ex_w(lp_wnd_class_ex: *const WndClas
             h_cursor: wc.h_cursor,
             hbr_background: wc.hbr_background,
             cb_wnd_extra: wc.cb_wnd_extra.max(0) as u32,
+            h_icon: 0,
+            h_icon_sm: 0,
         },
     );
     let atom = name_to_atom(&name);
@@ -3754,6 +3758,8 @@ pub unsafe extern "win64" fn register_class_a(lp_wnd_class: *const WndClassA) ->
             h_cursor: wc.h_cursor,
             hbr_background: wc.hbr_background,
             cb_wnd_extra: wc.cb_wnd_extra.max(0) as u32,
+            h_icon: 0,
+            h_icon_sm: 0,
         },
     );
     name_to_atom(&name)
@@ -3782,6 +3788,8 @@ pub unsafe extern "win64" fn register_class_ex_a(lp_wnd_class_ex: *const WndClas
             h_cursor: wc.h_cursor,
             hbr_background: wc.hbr_background,
             cb_wnd_extra: wc.cb_wnd_extra.max(0) as u32,
+            h_icon: 0,
+            h_icon_sm: 0,
         },
     );
     name_to_atom(&name)
@@ -4042,18 +4050,86 @@ pub extern "win64" fn set_window_long_ptr_a(
     set_window_long_ptr_w(hwnd, n_index, dw_new_long)
 }
 
-/// SetClassLongPtrA: change a class attribute. Stub — returns 0.
+/// SetClassLongPtrW: modify a class attribute for the class associated with hwnd.
 ///
 /// # Safety
-/// Pointer arguments are accepted but not dereferenced.
-// Wine ref: dlls/win32u/class.c — NtUserSetClassLongPtr modifies shared class data; returns
-// old value; nIndex=GCLP_WNDPROC replaces the class WNDPROC for all future windows.
-pub unsafe extern "win64" fn set_class_long_ptr_a(
-    _hwnd: usize,
-    _n_index: i32,
-    _dw_new_long: isize,
+/// hwnd must be a valid HWND created by this process.
+// Wine ref: dlls/win32u/class.c::set_class_long_size — returns old value; GCLP_WNDPROC
+// replaces class wndproc for all future windows; GCLP_HCURSOR/HBRBACKGROUND/HICON set
+// their respective class fields. A/W are identical for integer nIndex values.
+pub unsafe extern "win64" fn set_class_long_ptr_w(
+    hwnd: usize,
+    n_index: i32,
+    dw_new_long: isize,
 ) -> isize {
-    0
+    let class_name = match window::with(hwnd, |e| e.class_name.clone()) {
+        Some(n) => n,
+        None => return 0,
+    };
+    class::set_long(&class_name, n_index, dw_new_long as usize) as isize
+}
+
+/// SetClassLongPtrA: ANSI variant — delegates to W.
+///
+/// # Safety
+/// hwnd must be a valid HWND created by this process.
+// Wine ref: dlls/win32u/class.c — A and W are identical for integer nIndex values.
+pub unsafe extern "win64" fn set_class_long_ptr_a(
+    hwnd: usize,
+    n_index: i32,
+    dw_new_long: isize,
+) -> isize {
+    unsafe { set_class_long_ptr_w(hwnd, n_index, dw_new_long) }
+}
+
+/// GetClassLongPtrW: read a class attribute.
+// Wine ref: dlls/win32u/class.c::get_class_long_size — reads per-class data by nIndex;
+// returns 0 for unknown nIndex.
+pub extern "win64" fn get_class_long_ptr_w(hwnd: usize, n_index: i32) -> usize {
+    let class_name = match window::with(hwnd, |e| e.class_name.clone()) {
+        Some(n) => n,
+        None => return 0,
+    };
+    class::get_long(&class_name, n_index)
+}
+
+/// GetClassLongPtrA: ANSI variant — delegates to W.
+// Wine ref: dlls/win32u/class.c — A and W are identical for integer nIndex values.
+pub extern "win64" fn get_class_long_ptr_a(hwnd: usize, n_index: i32) -> usize {
+    get_class_long_ptr_w(hwnd, n_index)
+}
+
+/// EnumChildWindows: invoke lpEnumFunc for each direct child of hwndParent.
+///
+/// # Safety
+/// `lp_enum_func` must be a valid guest WNDENUMPROC callable with win64 ABI.
+// Wine ref: dlls/user32/win.c::enum_windows — children=TRUE path; returns FALSE (0) on
+// empty list; stops enumeration when callback returns FALSE (0); callback signature is
+// BOOL CALLBACK EnumChildProc(HWND hwnd, LPARAM lParam).
+pub unsafe extern "win64" fn enum_child_windows(
+    hwnd_parent: usize,
+    lp_enum_func: usize,
+    l_param: isize,
+) -> i32 {
+    if lp_enum_func == 0 {
+        return 0;
+    }
+    let children: Vec<usize> = window::all_hwnds()
+        .into_iter()
+        .filter(|&h| window::with(h, |e| e.hwnd_parent == hwnd_parent).unwrap_or(false))
+        .collect();
+    if children.is_empty() {
+        return 0;
+    }
+    let callback: unsafe extern "win64" fn(usize, isize) -> i32 =
+        std::mem::transmute(lp_enum_func);
+    for child in children {
+        let ret = unsafe { callback(child, l_param) };
+        if ret == 0 {
+            return 0;
+        }
+    }
+    1
 }
 
 // ── ANSI resource loading ─────────────────────────────────────────────────────

@@ -22,7 +22,19 @@ pub struct ClassEntry {
     pub hbr_background: usize,
     /// Number of extra bytes to allocate per window (cbWndExtra).
     pub cb_wnd_extra: u32,
+    pub h_icon: usize,
+    pub h_icon_sm: usize,
 }
+
+// ── GCLP/GCL nIndex constants (Wine ref: include/winuser.h) ─────────────────
+
+const GCLP_WNDPROC: i32 = -24;
+const GCL_STYLE: i32 = -26;
+const GCL_CBWNDEXTRA: i32 = -18;
+const GCLP_HBRBACKGROUND: i32 = -10;
+const GCLP_HCURSOR: i32 = -12;
+const GCLP_HICON: i32 = -14;
+const GCLP_HICONSM: i32 = -34;
 
 // ── Global class table ────────────────────────────────────────────────────────
 
@@ -374,6 +386,85 @@ fn is_builtin_class(name: &str) -> bool {
     )
 }
 
+/// Set a class attribute by class name. Returns the previous value (0 if not found/unknown).
+///
+/// Wine ref: dlls/win32u/class.c::set_class_long_size — modifies class data for all future
+/// windows of the class; returns old value.
+pub fn set_long(class_name: &str, n_index: i32, new_val: usize) -> usize {
+    let key = class_name.to_ascii_lowercase();
+    let mut guard = match lock_table(table()) {
+        Some(g) => g,
+        None => return 0,
+    };
+    let entry = match guard.get_mut(&key) {
+        Some(e) => e,
+        None => return 0,
+    };
+    match n_index {
+        GCLP_WNDPROC => {
+            let old = entry.wnd_proc;
+            entry.wnd_proc = new_val;
+            old
+        }
+        GCL_STYLE => {
+            let old = entry.style as usize;
+            entry.style = new_val as u32;
+            old
+        }
+        GCL_CBWNDEXTRA => {
+            let old = entry.cb_wnd_extra as usize;
+            entry.cb_wnd_extra = new_val as u32;
+            old
+        }
+        GCLP_HBRBACKGROUND => {
+            let old = entry.hbr_background;
+            entry.hbr_background = new_val;
+            old
+        }
+        GCLP_HCURSOR => {
+            let old = entry.h_cursor;
+            entry.h_cursor = new_val;
+            old
+        }
+        GCLP_HICON => {
+            let old = entry.h_icon;
+            entry.h_icon = new_val;
+            old
+        }
+        GCLP_HICONSM => {
+            let old = entry.h_icon_sm;
+            entry.h_icon_sm = new_val;
+            old
+        }
+        _ => 0,
+    }
+}
+
+/// Read a class attribute by class name. Returns 0 if not found or unknown nIndex.
+///
+/// Wine ref: dlls/win32u/class.c::get_class_long_size — reads per-class data by nIndex.
+pub fn get_long(class_name: &str, n_index: i32) -> usize {
+    let key = class_name.to_ascii_lowercase();
+    let guard = match lock_table(table()) {
+        Some(g) => g,
+        None => return 0,
+    };
+    let entry = match guard.get(&key) {
+        Some(e) => e,
+        None => return 0,
+    };
+    match n_index {
+        GCLP_WNDPROC => entry.wnd_proc,
+        GCL_STYLE => entry.style as usize,
+        GCL_CBWNDEXTRA => entry.cb_wnd_extra as usize,
+        GCLP_HBRBACKGROUND => entry.hbr_background,
+        GCLP_HCURSOR => entry.h_cursor,
+        GCLP_HICON => entry.h_icon,
+        GCLP_HICONSM => entry.h_icon_sm,
+        _ => 0,
+    }
+}
+
 /// Look up a registered window class by name (case-insensitive).
 ///
 /// If not found in the registered table, returns a stub entry for built-in
@@ -408,6 +499,8 @@ pub fn find(name: &str) -> Option<ClassEntry> {
             h_cursor: 0,
             hbr_background: 0,
             cb_wnd_extra: 0,
+            h_icon: 0,
+            h_icon_sm: 0,
         });
     }
     None
@@ -424,6 +517,8 @@ mod tests {
             h_cursor: 0,
             hbr_background: 0,
             cb_wnd_extra: 0,
+            h_icon: 0,
+            h_icon_sm: 0,
         }
     }
 
