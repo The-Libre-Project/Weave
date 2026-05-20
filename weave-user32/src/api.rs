@@ -4938,7 +4938,11 @@ pub unsafe extern "win64" fn msg_wait_for_multiple_objects(
     if trace {
         eprintln!("weave/MsgWait: n={n_count} ms={dw_milliseconds} mask={_dw_wake_mask:#x}");
     }
-    if n_count == 0 || lp_handles.is_null() {
+    // n_count == 0 is valid: "wait for message only, no object handles."
+    // The poll loop below will add the wake-pipe and block until a message
+    // arrives — correct per MSDN. Only guard against null dereference when
+    // the caller actually supplies handles.
+    if lp_handles.is_null() && n_count > 0 {
         return WAIT_FAILED;
     }
     if trace {

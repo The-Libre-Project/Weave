@@ -1335,22 +1335,25 @@ fn sumatrapdf_pdf_render_gate() {
     eprintln!("sumatrapdf_pdf_render_gate stderr:\n{stderr}");
 
     let got_message_loop = stderr.contains("PHASE: get_message_first");
+    let got_wm_paint = stderr.contains("PHASE: wm_paint_dispatched_first");
+    let got_render = stderr.contains("PHASE: stretchblt_first");
     eprintln!(
-        "sumatrapdf diagnostic: get_message_first={got_message_loop} wm_paint={}",
-        stderr.contains("PHASE: wm_paint_dispatched_first")
+        "sumatrapdf diagnostic: get_message_first={got_message_loop} \
+         wm_paint={got_wm_paint} stretchblt={got_render}"
     );
 
     // E3-M4 Tier A A1a: message loop must have run and dispatched WM_PAINT.
     assert!(
-        stderr.contains("PHASE: wm_paint_dispatched_first"),
+        got_wm_paint,
         "wm_paint_dispatched_first missing — message loop did not reach WM_PAINT \
          (get_message_first={got_message_loop}).\nstderr: {stderr}"
     );
 
-    // E3-M4 Tier A A1b: PDF page data must have reached StretchDIBits.
+    // E3-M4 Tier A A1b: PDF page data must have reached StretchBlt.
+    // SumatraPDF 3.6.1 uses StretchBlt (not StretchDIBits) for PDF page rendering.
     assert!(
-        stderr.contains("PHASE: stretch_dibits_first"),
-        "stretch_dibits_first missing — StretchDIBits was not called with PDF page data.\nstderr: {stderr}"
+        got_render,
+        "stretchblt_first missing — StretchBlt was not called with PDF page data.\nstderr: {stderr}"
     );
 }
 

@@ -312,7 +312,7 @@ unsafe extern "win64" fn edit_wnd_proc(
 /// Handles the minimum messages needed to allow window creation and destruction.
 /// Returns TRUE for WM_NCCREATE (allows creation), 0 for everything else.
 extern "win64" fn builtin_control_wnd_proc(
-    hwnd: usize,
+    _hwnd: usize,
     msg: u32,
     _wparam: usize,
     _lparam: usize,

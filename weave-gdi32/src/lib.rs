@@ -1368,6 +1368,7 @@ pub extern "win64" fn stretch_blt(
     }
 
     weave_user32::backend::free_pixmap(tmp_pixmap);
+    weave_core::progress::mark_phase("stretchblt_first");
     1
 }
 
