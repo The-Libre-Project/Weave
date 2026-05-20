@@ -312,7 +312,7 @@ unsafe extern "win64" fn edit_wnd_proc(
 /// Handles the minimum messages needed to allow window creation and destruction.
 /// Returns TRUE for WM_NCCREATE (allows creation), 0 for everything else.
 extern "win64" fn builtin_control_wnd_proc(
-    _hwnd: usize,
+    hwnd: usize,
     msg: u32,
     _wparam: usize,
     _lparam: usize,
@@ -343,14 +343,31 @@ extern "win64" fn builtin_control_wnd_proc(
         // Return usize::MAX (== -1 as isize) so SumatraPDF sees "no tab selected" and skips
         // the page data dereference entirely.
         0x130b => usize::MAX,
-        // LVM_SETCOLUMNW (LVM_FIRST+96 = 0x133C) — Wine ref: dlls/comctl32/listview.c::LISTVIEW_SetColumnT
-        // RETURN: SUCCESS: TRUE / FAILURE: FALSE (returns FALSE only if lpColumn is null,
-        // nColumn < 0, or nColumn >= column count). NPP passes column index 0 and a valid
-        // LVCOLUMNW pointer; Weave has no listview state so we return TRUE unconditionally.
-        // Returning 0 (default arm) caused NPP to take the error path and dereference a
-        // null-derived pointer at offset +0x9f → crash at rva=0x000e3caf.
-        // TODO(shim): Phase A — no listview column storage; returns TRUE only.
-        0x133c => 1,
+        // 0x133c is TCM_GETITEMW (TCM_FIRST+60) for SysTabControl32, and is also sent to
+        // SysListView32 windows by NPP during column initialisation.
+        //
+        // Wine ref: dlls/comctl32/tab.c::TAB_GetItemT — returns FALSE (0) when no items are
+        // inserted (iItem >= uNumItem). The correct Tab Control behavior is to return FALSE.
+        // Returning TRUE here caused SumatraPDF's tab control to enter a blocking init path
+        // that prevented WM_PAINT dispatch (sumatrapdf_pdf_render_gate regression CI 26176023971).
+        //
+        // Wine ref: dlls/comctl32/listview.c::LISTVIEW_SetColumnT — called as LVM_SETCOLUMNW
+        // (LVM_FIRST+96 = 0x1060, a DIFFERENT message) for ListView. However, NPP also sends
+        // message 0x133c to a SysListView32 window and expects TRUE on success; returning FALSE
+        // caused NPP to dereference a null-derived pointer at offset +0x9f → crash rva=0x000e3caf.
+        //
+        // Resolution: gate by window class. SysListView32 windows get TRUE (success); all other
+        // windows (SysTabControl32 and unknown) get FALSE — the correct Wine Tab Control behavior.
+        // TODO(shim): Phase A — no listview/tabcontrol item storage; SysListView32 returns TRUE only.
+        0x133c => {
+            let class =
+                window::with(hwnd, |e| e.class_name.to_ascii_lowercase()).unwrap_or_default();
+            if class == "syslistview32" {
+                1
+            } else {
+                0
+            }
+        }
         _ => 0,
     }
 }
