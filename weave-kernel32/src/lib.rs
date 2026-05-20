@@ -8520,9 +8520,7 @@ pub extern "win64" fn tls_free(dw_tls_index: u32) -> i32 {
 // Wine ref: dlls/kernel32/sync.c — WaitForSingleObject wraps NtWaitForSingleObject;
 // WAIT_OBJECT_0=0, WAIT_TIMEOUT=0x102, WAIT_FAILED=0xFFFFFFFF; invalid handle → WAIT_FAILED.
 pub unsafe extern "win64" fn wait_for_single_object(h_handle: usize, dw_milliseconds: u32) -> u32 {
-    if weave_core::ws2_trace::enabled() {
-        eprintln!("weave/WaitForSingleObject: h={h_handle:#x} ms={dw_milliseconds}");
-    }
+    eprintln!("weave/WaitForSingleObject: entry h={h_handle:#x} ms={dw_milliseconds}");
     const INVALID_HANDLE_VALUE: usize = usize::MAX;
     const WAIT_OBJECT_0: u32 = 0;
     const WAIT_TIMEOUT: u32 = 0x00000102;
@@ -8546,6 +8544,7 @@ pub unsafe extern "win64" fn wait_for_single_object(h_handle: usize, dw_millisec
             return WAIT_OBJECT_0;
         }
         if dw_milliseconds == INFINITE {
+            eprintln!("weave/WFSO: blocking on thread condvar h={h_handle:#x} INFINITE");
             let _g = completion
                 .condvar
                 .wait_while(guard, |r| r.is_none())
