@@ -1312,7 +1312,9 @@ fn sumatrapdf_pdf_render_gate() {
         *stderr_writer.lock().unwrap() = buf;
     });
 
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    // 60s: SumatraPDF's OLE/DDE init can stall the main thread well past 10s.
+    // Diagnostic run — we need to know whether the message loop *ever* starts.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
     loop {
         match child.try_wait() {
             Ok(Some(_)) => break,
@@ -1332,10 +1334,17 @@ fn sumatrapdf_pdf_render_gate() {
     let stderr = String::from_utf8_lossy(&stderr_bytes);
     eprintln!("sumatrapdf_pdf_render_gate stderr:\n{stderr}");
 
+    let got_message_loop = stderr.contains("PHASE: get_message_first");
+    eprintln!(
+        "sumatrapdf diagnostic: get_message_first={got_message_loop} wm_paint={}",
+        stderr.contains("PHASE: wm_paint_dispatched_first")
+    );
+
     // E3-M4 Tier A A1a: message loop must have run and dispatched WM_PAINT.
     assert!(
         stderr.contains("PHASE: wm_paint_dispatched_first"),
-        "wm_paint_dispatched_first missing — message loop did not reach WM_PAINT.\nstderr: {stderr}"
+        "wm_paint_dispatched_first missing — message loop did not reach WM_PAINT \
+         (get_message_first={got_message_loop}).\nstderr: {stderr}"
     );
 
     // E3-M4 Tier A A1b: PDF page data must have reached StretchDIBits.
