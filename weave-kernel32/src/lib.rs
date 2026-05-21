@@ -7960,6 +7960,7 @@ pub unsafe extern "win64" fn create_thread(
         let fn_ptr: unsafe extern "win64" fn(*mut u8) -> u32 =
             unsafe { std::mem::transmute(fn_addr as *const u8) };
         let ret = unsafe { fn_ptr(param_addr as *mut u8) };
+        eprintln!("weave/CreateThread: exit fn={fn_addr:#x} exit_code={ret}");
         let mut guard = completion_clone.result.lock().unwrap();
         *guard = Some(ret);
         completion_clone.condvar.notify_all();
