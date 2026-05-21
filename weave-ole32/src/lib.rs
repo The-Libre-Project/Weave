@@ -158,8 +158,9 @@ pub unsafe extern "win64" fn co_create_instance(
         return unsafe { create_shell_link(rclsid, _riid, ppv_ptr) };
     }
 
+    let tid = unsafe { libc::syscall(libc::SYS_gettid) as u32 };
     eprintln!(
-        "weave/ole32: CoCreateInstance: CLSID {:02x?} (unknown — REGDB_E_CLASSNOTREG)",
+        "weave/ole32: CoCreateInstance: tid={tid} CLSID {:02x?} (unknown — REGDB_E_CLASSNOTREG)",
         clsid
     );
 

@@ -7622,7 +7622,10 @@ pub unsafe extern "win64" fn acquire_srw_lock_exclusive(srw_lock: *mut usize) {
             }
         } else {
             if !logged {
-                eprintln!("weave/AcquireSRWLockExclusive: srw={srw_lock:p} blocked (owners={})", old.owners);
+                eprintln!(
+                    "weave/AcquireSRWLockExclusive: srw={srw_lock:p} blocked (owners={})",
+                    old.owners
+                );
                 logged = true;
             }
             // Lock is held — wait on the owners field (upper 2 bytes of the u32).
@@ -7703,7 +7706,10 @@ pub unsafe extern "win64" fn acquire_srw_lock_shared(srw_lock: *mut usize) {
             }
         } else {
             if !logged {
-                eprintln!("weave/AcquireSRWLockShared: srw={srw_lock:p} blocked (exclusive_waiters={})", old.exclusive_waiters);
+                eprintln!(
+                    "weave/AcquireSRWLockShared: srw={srw_lock:p} blocked (exclusive_waiters={})",
+                    old.exclusive_waiters
+                );
                 logged = true;
             }
             // Exclusive waiters present — wait on the full word.
@@ -7938,7 +7944,10 @@ pub unsafe extern "win64" fn create_thread(
 
     let fn_addr = lp_start_address as usize;
     let param_addr = lp_parameter as usize;
-    eprintln!("weave/CreateThread: entry fn={fn_addr:#x} param={param_addr:#x}");
+    let caller_tid = unsafe { libc::syscall(libc::SYS_gettid) as u32 };
+    eprintln!(
+        "weave/CreateThread: entry caller_tid={caller_tid} fn={fn_addr:#x} param={param_addr:#x}"
+    );
 
     let completion = Arc::new(handles::ThreadCompletion {
         result: std::sync::Mutex::new(None),
@@ -7957,10 +7966,12 @@ pub unsafe extern "win64" fn create_thread(
         // garbage, causing the thread to crash immediately when the PE function
         // dereferences the result.  Keep _teb alive until thread exit.
         let _teb = weave_core::teb::setup_thread();
+        let my_tid = unsafe { libc::syscall(libc::SYS_gettid) as u32 };
+        eprintln!("weave/CreateThread: thread-start tid={my_tid} fn={fn_addr:#x}");
         let fn_ptr: unsafe extern "win64" fn(*mut u8) -> u32 =
             unsafe { std::mem::transmute(fn_addr as *const u8) };
         let ret = unsafe { fn_ptr(param_addr as *mut u8) };
-        eprintln!("weave/CreateThread: exit fn={fn_addr:#x} exit_code={ret}");
+        eprintln!("weave/CreateThread: thread-exit tid={my_tid} fn={fn_addr:#x} exit_code={ret}");
         let mut guard = completion_clone.result.lock().unwrap();
         *guard = Some(ret);
         completion_clone.condvar.notify_all();
@@ -8544,7 +8555,10 @@ pub extern "win64" fn tls_free(dw_tls_index: u32) -> i32 {
 // Wine ref: dlls/kernel32/sync.c — WaitForSingleObject wraps NtWaitForSingleObject;
 // WAIT_OBJECT_0=0, WAIT_TIMEOUT=0x102, WAIT_FAILED=0xFFFFFFFF; invalid handle → WAIT_FAILED.
 pub unsafe extern "win64" fn wait_for_single_object(h_handle: usize, dw_milliseconds: u32) -> u32 {
-    eprintln!("weave/WaitForSingleObject: entry h={h_handle:#x} ms={dw_milliseconds}");
+    let caller_tid = unsafe { libc::syscall(libc::SYS_gettid) as u32 };
+    eprintln!(
+        "weave/WaitForSingleObject: entry tid={caller_tid} h={h_handle:#x} ms={dw_milliseconds}"
+    );
     const INVALID_HANDLE_VALUE: usize = usize::MAX;
     const WAIT_OBJECT_0: u32 = 0;
     const WAIT_TIMEOUT: u32 = 0x00000102;
