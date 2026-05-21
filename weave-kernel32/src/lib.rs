@@ -1221,6 +1221,9 @@ pub unsafe extern "win64" fn wait_on_address(
     address_size: usize,
     dw_milliseconds: u32,
 ) -> i32 {
+    eprintln!(
+        "weave/WaitOnAddress: entry addr={address:?} size={address_size} ms={dw_milliseconds}"
+    );
     if address_size != 1 && address_size != 2 && address_size != 4 && address_size != 8 {
         set_last_error(0x57); // ERROR_INVALID_PARAMETER
         return 0;
@@ -1277,6 +1280,7 @@ pub unsafe extern "win64" fn wait_on_address(
 // Wine ref: dlls/ntdll/sync.c:961 — RtlWakeAddressSingle walks the hash-bucket queue and
 // alerts one matching thread via NtAlertThreadByThreadId. On Linux we use FUTEX_WAKE(1).
 pub extern "win64" fn wake_by_address_single(address: usize) {
+    eprintln!("weave/WakeByAddressSingle: addr={address:#x}");
     if address == 0 {
         return;
     }
@@ -7355,9 +7359,7 @@ pub unsafe extern "win64" fn open_event_w(
 /// poll/WaitForSingleObject/WaitForMultipleObjects.
 // Wine ref: dlls/kernelbase/sync.c:700 — calls NtSetEvent(handle, NULL); NULL for previous_state is valid
 pub extern "win64" fn set_event(h_event: usize) -> i32 {
-    if weave_core::ws2_trace::enabled() {
-        eprintln!("weave/SetEvent: h={h_event:#x}");
-    }
+    eprintln!("weave/SetEvent: h={h_event:#x}");
     #[cfg(target_os = "linux")]
     if let Some(efd) = handles::get_event_fd(h_event) {
         let val: u64 = 1;
