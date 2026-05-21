@@ -7084,6 +7084,12 @@ pub extern "win64" fn get_tick_count_64() -> u64 {
 // Wine's QpcFrequency is 10_000_000 (10 MHz, 100-ns ticks) from SharedUserData.
 // Weave uses CLOCK_MONOTONIC at 1 GHz (nanosecond ticks) for higher resolution.
 pub unsafe extern "win64" fn query_performance_counter(lp_performance_count: *mut u64) -> i32 {
+    static QPC_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = QPC_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    // Log at call #0 and every 1,000,000 calls — detects QPC-based spin-wait loops.
+    if n == 0 || n % 1_000_000 == 0 {
+        eprintln!("weave/QueryPerformanceCounter: call #{n}");
+    }
     let mut ts = libc::timespec {
         tv_sec: 0,
         tv_nsec: 0,
