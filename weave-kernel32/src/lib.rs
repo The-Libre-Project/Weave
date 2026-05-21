@@ -7775,6 +7775,9 @@ pub unsafe extern "win64" fn sleep_condition_variable_srw(
     dw_milliseconds: u32,
     flags: u32,
 ) -> i32 {
+    eprintln!(
+        "weave/SleepConditionVariableSRW: entry cv={condition_variable:?} ms={dw_milliseconds} flags={flags:#x}"
+    );
     if condition_variable.is_null() || srw_lock.is_null() {
         return 0;
     }
@@ -7825,6 +7828,9 @@ pub unsafe extern "win64" fn sleep_condition_variable_cs(
     critical_section: *mut u8,
     dw_milliseconds: u32,
 ) -> i32 {
+    eprintln!(
+        "weave/SleepConditionVariableCS: entry cv={condition_variable:?} ms={dw_milliseconds}"
+    );
     if condition_variable.is_null() || critical_section.is_null() {
         return 0;
     }
@@ -7917,6 +7923,7 @@ pub unsafe extern "win64" fn create_thread(
 
     let fn_addr = lp_start_address as usize;
     let param_addr = lp_parameter as usize;
+    eprintln!("weave/CreateThread: entry fn={fn_addr:#x} param={param_addr:#x}");
 
     let completion = Arc::new(handles::ThreadCompletion {
         result: std::sync::Mutex::new(None),
@@ -7944,6 +7951,7 @@ pub unsafe extern "win64" fn create_thread(
     });
 
     let handle = handles::alloc_thread(completion, join_handle);
+    eprintln!("weave/CreateThread: → handle={handle:#x} fn={fn_addr:#x}");
 
     if !lp_thread_id.is_null() {
         *lp_thread_id = 1;
