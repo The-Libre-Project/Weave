@@ -31,6 +31,8 @@ static PHASE_SCI_GETLENGTH: AtomicBool = AtomicBool::new(false);
 // Fires once on first ShowWindow(SW_HIDE) — marks the boundary between startup/render
 // and teardown. Used to order unresolved-stub firings relative to shutdown start.
 static PHASE_SW_HIDE_FIRST: AtomicBool = AtomicBool::new(false);
+/// Monotonically increasing sequence number for SendMessageW enter/exit pairing.
+static SEND_MSG_SEQ: AtomicU32 = AtomicU32::new(0);
 
 // ── Scroll bar per-(hwnd,bar) state ──────────────────────────────────────────
 
@@ -1062,6 +1064,14 @@ pub extern "win64" fn send_message_w(
         }
     }
 
+    let seq = SEND_MSG_SEQ.fetch_add(1, Ordering::Relaxed);
+    let cur_tid = unsafe { libc::syscall(libc::SYS_gettid) as u32 };
+    let (owner_tid, class_name) =
+        window::with(hwnd, |e| (e.tid, e.class_name.clone())).unwrap_or((0, String::new()));
+    let cross_thread = owner_tid != 0 && cur_tid != owner_tid;
+    eprintln!(
+        "weave/user32: SendMessageW enter seq={seq} tid={cur_tid} hwnd={hwnd:#x} owner_tid={owner_tid} cross_thread={cross_thread} class={class_name:?} msg={msg:#06x} wp={w_param:#x} lp={l_param:#x} wndproc={proc_addr:#x}"
+    );
     let ret = call_wnd_proc(proc_addr, hwnd, msg, w_param, l_param);
     // Intercept SCI_GETDIRECTSTATUSFUNCTION (2184): return our proxy instead of the real fn ptr.
     // SCI_GETDIRECTSTATUSFUNCTION returns a 5-param fn: (sci, msg, wp, lp, *status) -> iptr.
@@ -1082,9 +1092,8 @@ pub extern "win64" fn send_message_w(
     if msg == 2185 && ret != 0 {
         SCI_DIRECT_PTR.store(ret as usize, std::sync::atomic::Ordering::Relaxed);
     }
-    // Log all SendMessageW calls to expose gaps in call sequence (e.g. toolbar/status-bar init).
     eprintln!(
-        "weave/user32: SendMessageW hwnd={hwnd:#x} msg={msg:#06x} wparam={w_param:#x} lparam={l_param:#x} → {ret:#x}"
+        "weave/user32: SendMessageW exit seq={seq} tid={cur_tid} hwnd={hwnd:#x} msg={msg:#06x} → {ret:#x}"
     );
     ret
 }
