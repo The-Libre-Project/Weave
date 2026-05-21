@@ -831,7 +831,7 @@ pub unsafe extern "win64" fn virtual_free_ex(
 // where timeout is a negative 100ns LARGE_INTEGER. INFINITE (0xFFFFFFFF) passes
 // NULL timeout to NtDelayExecution, sleeping indefinitely.
 pub extern "win64" fn sleep(dw_milliseconds: u32) {
-    // Diagnostic counter — log at powers of 10 so a runaway Sleep loop is
+    eprintln!("weave/Sleep: ms={dw_milliseconds}");
     let ts = libc::timespec {
         tv_sec: (dw_milliseconds / 1000) as i64,
         tv_nsec: ((dw_milliseconds % 1000) * 1_000_000) as i64,
@@ -12954,6 +12954,7 @@ pub unsafe extern "win64" fn cancel_io(_h_file: usize) -> i32 {
 /// No pointer arguments.
 // Wine ref: dlls/kernel32/sync.c — SleepEx calls NtDelayExecution(Alertable, &timeout); returns 0 normally, WAIT_IO_COMPLETION(0xC0) when an APC fires
 pub unsafe extern "win64" fn sleep_ex(dw_milliseconds: u32, _b_alertable: i32) -> u32 {
+    eprintln!("weave/SleepEx: ms={dw_milliseconds} alertable={_b_alertable}");
     if dw_milliseconds > 0 {
         libc::usleep((dw_milliseconds as u64 * 1000) as libc::c_uint);
     }
