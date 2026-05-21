@@ -7057,6 +7057,12 @@ pub extern "win64" fn get_tick_count() -> u32 {
 // Wine ref: dlls/kernelbase/time.c — reads SharedUserData->TickCount64 (64-bit monotonic);
 // never wraps; introduced Vista+; Weave uses CLOCK_MONOTONIC directly.
 pub extern "win64" fn get_tick_count_64() -> u64 {
+    static GTC_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = GTC_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    // Log at call #0 and every 10,000 calls — detects GetTickCount spin-wait loops.
+    if n == 0 || n % 10_000 == 0 {
+        eprintln!("weave/GetTickCount64: call #{n}");
+    }
     let mut ts = libc::timespec {
         tv_sec: 0,
         tv_nsec: 0,
