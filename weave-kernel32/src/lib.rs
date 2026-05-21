@@ -931,6 +931,9 @@ pub unsafe extern "win64" fn enter_critical_section(lp_critical_section: *mut u8
             }
             Err(_) => {
                 spins += 1;
+                if spins == 1 {
+                    eprintln!("weave/EnterCriticalSection: cs={lp_critical_section:p} contended (will spin)");
+                }
                 if spins < SPIN_LIMIT {
                     unsafe { libc::sched_yield() };
                 } else {
@@ -7600,6 +7603,7 @@ pub unsafe extern "win64" fn acquire_srw_lock_exclusive(srw_lock: *mut usize) {
     // Announce ourselves as an exclusive waiter (increment by 2 — bit 0 is the held flag).
     atomic.fetch_add(2, Ordering::AcqRel);
 
+    let mut logged = false;
     loop {
         let old_i32 = atomic.load(Ordering::Acquire);
         let old: SrwLock = unsafe { std::mem::transmute(old_i32 as u32) };
@@ -7617,6 +7621,10 @@ pub unsafe extern "win64" fn acquire_srw_lock_exclusive(srw_lock: *mut usize) {
                 return;
             }
         } else {
+            if !logged {
+                eprintln!("weave/AcquireSRWLockExclusive: srw={srw_lock:p} blocked (owners={})", old.owners);
+                logged = true;
+            }
             // Lock is held — wait on the owners field (upper 2 bytes of the u32).
             // We wait on the full 32-bit word; any change will wake us.
             let owners_ptr = unsafe { (p as *const u8).add(2) as *const u32 };
@@ -7678,6 +7686,7 @@ pub unsafe extern "win64" fn acquire_srw_lock_shared(srw_lock: *mut usize) {
     let p = unsafe { srw_state_ptr(srw_lock) };
     let atomic = unsafe { &*(p as *const AtomicI32) };
 
+    let mut logged = false;
     loop {
         let old_i32 = atomic.load(Ordering::Acquire);
         let old: SrwLock = unsafe { std::mem::transmute(old_i32 as u32) };
@@ -7693,6 +7702,10 @@ pub unsafe extern "win64" fn acquire_srw_lock_shared(srw_lock: *mut usize) {
                 return;
             }
         } else {
+            if !logged {
+                eprintln!("weave/AcquireSRWLockShared: srw={srw_lock:p} blocked (exclusive_waiters={})", old.exclusive_waiters);
+                logged = true;
+            }
             // Exclusive waiters present — wait on the full word.
             unsafe { futex_wait(p, old_i32 as u32, std::ptr::null()) };
         }
