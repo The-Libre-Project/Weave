@@ -1306,6 +1306,15 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
             create_accelerator_table_w as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
         ),
         "DestroyAcceleratorTable" => Some(destroy_accelerator_table as *const () as usize),
+        // SumatraPDF DDE single-instance stubs
+        "DdeInitializeW" => Some(
+            api::dde_initialize_w as unsafe extern "win64" fn(_, _, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "FindWindowExW" => Some(
+            api::find_window_ex_w as unsafe extern "win64" fn(_, _, _, _) -> _ as *const ()
+                as usize,
+        ),
         _ => None,
     }
 }

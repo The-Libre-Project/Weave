@@ -7528,6 +7528,61 @@ pub extern "win64" fn destroy_accelerator_table(_h_accel: usize) -> i32 {
     1 // TRUE
 }
 
+// ── SumatraPDF DDE single-instance stubs ─────────────────────────────────────
+
+// Wine ref: dlls/user32/dde/ddeclient.c — DdeInitialize sets up per-instance
+// state in a global table keyed by pidInst; DMLERR_NO_ERROR (0) = success.
+// SumatraPDF calls this to register as a DDE client after CoCreateInstance
+// fails (no existing instance). We return success so it proceeds past init.
+pub unsafe extern "win64" fn dde_initialize_w(
+    pid_inst: *mut u32,
+    _pfn_callback: usize,
+    _af_cmd: u32,
+    _ul_res: u32,
+) -> u32 {
+    let tid = unsafe { libc::syscall(libc::SYS_gettid) as u32 };
+    eprintln!("weave/user32: DdeInitializeW tid={tid}");
+    if !pid_inst.is_null() {
+        unsafe { *pid_inst = 1 };
+    }
+    0 // DMLERR_NO_ERROR
+}
+
+// Wine ref: dlls/user32/winpos.c FindWindowExW — iterates the window list
+// checking class name and title. Returns NULL when no match. SumatraPDF calls
+// this looking for an existing SumatraPDF DDE server window; NULL means "I am
+// the only instance" and it should proceed to enter the message loop.
+pub unsafe extern "win64" fn find_window_ex_w(
+    _h_wnd_parent: usize,
+    _h_wnd_child_after: usize,
+    lp_sz_class: *const u16,
+    lp_sz_window: *const u16,
+) -> usize {
+    let tid = unsafe { libc::syscall(libc::SYS_gettid) as u32 };
+    let class_str = if lp_sz_class.is_null() {
+        String::from("<null>")
+    } else {
+        let len = (0usize..)
+            .find(|&i| unsafe { *lp_sz_class.add(i) } == 0)
+            .unwrap_or(0);
+        String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(lp_sz_class, len) })
+            .to_string()
+    };
+    let window_str = if lp_sz_window.is_null() {
+        String::from("<null>")
+    } else {
+        let len = (0usize..)
+            .find(|&i| unsafe { *lp_sz_window.add(i) } == 0)
+            .unwrap_or(0);
+        String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(lp_sz_window, len) })
+            .to_string()
+    };
+    eprintln!(
+        "weave/user32: FindWindowExW tid={tid} class={class_str:?} window={window_str:?} → NULL"
+    );
+    0 // NULL — no matching window
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
