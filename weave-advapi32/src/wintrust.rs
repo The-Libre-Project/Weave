@@ -678,9 +678,220 @@ pub unsafe extern "win64" fn internet_crack_url_w(
     0 // FALSE — URL parsing not supported in headless mode
 }
 
+/// InternetOpenW — create a root WinINet session handle.
+///
+/// Wine ref: dlls/wininet/internet.c — InternetOpenW allocates an appinfo_t
+/// object, stores the agent string, access type, and proxy settings, and
+/// returns an HINTERNET session handle. All network I/O flows through this
+/// root handle.
+/// Weave: stub returning NULL. SumatraPDF's update-check path opens a
+/// session with this function; NULL causes the caller to abort the check
+/// gracefully.
+///
+/// # Safety
+/// All pointer arguments are ignored.
+// Wine ref: dlls/wininet/internet.c — InternetOpenW allocates appinfo_t; stores agent, access type, proxy; returns HINTERNET root session handle or NULL on failure
+pub unsafe extern "win64" fn internet_open_w(
+    _lpsz_agent: *const u16,
+    _dw_access_type: u32,
+    _lpsz_proxy: *const u16,
+    _lpsz_proxy_bypass: *const u16,
+    _dw_flags: u32,
+) -> *const () {
+    std::ptr::null() // NULL — no network session in headless mode
+}
+
+/// InternetConnectW — open a connection handle to a named server.
+///
+/// Wine ref: dlls/wininet/internet.c — InternetConnectW allocates an
+/// http_session_t (or ftp_session_t) child of the root appinfo_t, stores
+/// hostname, port, credentials, and service type, then returns an HINTERNET
+/// connection handle.
+/// Weave: stub returning NULL. A NULL connection handle causes HttpOpenRequestW
+/// to fail, aborting the update-check path cleanly.
+///
+/// # Safety
+/// All pointer arguments are ignored.
+// Wine ref: dlls/wininet/internet.c — InternetConnectW allocates http_session_t child under root appinfo_t; stores hostname/port/credentials; returns HINTERNET or NULL
+pub unsafe extern "win64" fn internet_connect_w(
+    _h_internet: usize,
+    _lpsz_server_name: *const u16,
+    _n_server_port: u16,
+    _lpsz_user_name: *const u16,
+    _lpsz_password: *const u16,
+    _dw_service: u32,
+    _dw_flags: u32,
+    _dw_context: usize,
+) -> *const () {
+    std::ptr::null() // NULL — no server connection in headless mode
+}
+
+/// InternetCloseHandle — close a WinINet handle (session, connection, or request).
+///
+/// Wine ref: dlls/wininet/internet.c — WININET_Release decrements the refcount
+/// on the object_header_t, fires INTERNET_STATUS_HANDLE_CLOSING callback, then
+/// calls the vtbl Destroy method. Returns TRUE even when the handle is already
+/// closed or invalid (the real API is tolerant of double-close).
+/// Weave: stub returning TRUE. SumatraPDF calls this speculatively in cleanup
+/// paths even when the handle may be NULL; returning TRUE prevents error propagation.
+///
+/// # Safety
+/// Handle argument is ignored.
+// Wine ref: dlls/wininet/internet.c — WININET_Release ref-counts object_header_t, fires HANDLE_CLOSING callback, calls vtbl->Destroy; returns TRUE even on NULL/invalid handles
+pub unsafe extern "win64" fn internet_close_handle(
+    _h_internet: usize,
+) -> i32 {
+    1 // TRUE — handle "closed" (or was already invalid; callers don't check)
+}
+
+/// HttpOpenRequestW — create an HTTP request handle on a connection.
+///
+/// Wine ref: dlls/wininet/http.c — HTTP_HttpOpenRequestW allocates an
+/// http_request_t, copies verb/path/version/referrer/accept-types, canonicalises
+/// the URL path with UrlCanonicalizeW, and returns an HINTERNET request handle.
+/// Weave: stub returning NULL. NULL request handle causes HttpSendRequestA to
+/// fail immediately, terminating the update-check request chain.
+///
+/// # Safety
+/// All pointer arguments are ignored.
+// Wine ref: dlls/wininet/http.c — HTTP_HttpOpenRequestW allocates http_request_t; copies verb/path/version; canonicalises path via UrlCanonicalizeW; returns HINTERNET or NULL
+pub unsafe extern "win64" fn http_open_request_w(
+    _h_connect: usize,
+    _lpsz_verb: *const u16,
+    _lpsz_object_name: *const u16,
+    _lpsz_version: *const u16,
+    _lpsz_referrer: *const u16,
+    _lplpsz_accept_types: *const *const u16,
+    _dw_flags: u32,
+    _dw_context: usize,
+) -> *const () {
+    std::ptr::null() // NULL — no HTTP request handle in headless mode
+}
+
+/// HttpSendRequestA — send an HTTP request (ANSI headers variant).
+///
+/// Wine ref: dlls/wininet/http.c — HTTP_HttpSendRequestW builds and sends the
+/// HTTP request line plus headers over the connection; HttpSendRequestA is a
+/// thin ANSI-to-Unicode thunk that converts headers then delegates. Returns
+/// FALSE on failure, TRUE on success.
+/// Weave: stub returning FALSE (0). The NULL request handle from HttpOpenRequestW
+/// would cause this to fail anyway; returning FALSE directly is equivalent.
+///
+/// # Safety
+/// All pointer arguments are ignored.
+// Wine ref: dlls/wininet/http.c — HTTP_HttpSendRequestW builds HTTP request line + headers, sends over TCP; HttpSendRequestA is ANSI→Unicode thunk; returns FALSE on failure
+pub unsafe extern "win64" fn http_send_request_a(
+    _h_request: usize,
+    _lpsz_headers: *const u8,
+    _dw_headers_length: u32,
+    _lp_optional: *const u8,
+    _dw_optional_length: u32,
+) -> i32 {
+    0 // FALSE — request send not supported in headless mode
+}
+
+/// HttpQueryInfoW — query HTTP response headers or status information.
+///
+/// Wine ref: dlls/wininet/http.c — HTTP_HttpQueryInfoW looks up a header by
+/// dwInfoLevel in the request's custHeaders array (or special-cases STATUS_CODE,
+/// RAW_HEADERS_CRLF, etc.); copies the value into lpBuffer; returns FALSE with
+/// ERROR_HTTP_HEADER_NOT_FOUND when the header is absent.
+/// Weave: stub returning FALSE (0). No response exists to query; this aborts
+/// any status-code inspection in the update-check path cleanly.
+///
+/// # Safety
+/// All pointer arguments are ignored.
+// Wine ref: dlls/wininet/http.c — HTTP_HttpQueryInfoW looks up header by dwInfoLevel in custHeaders array; copies value to lpBuffer; returns FALSE/ERROR_HTTP_HEADER_NOT_FOUND if absent
+pub unsafe extern "win64" fn http_query_info_w(
+    _h_request: usize,
+    _dw_info_level: u32,
+    _lp_buffer: *mut (),
+    _lpdw_buffer_length: *mut u32,
+    _lpdw_index: *mut u32,
+) -> i32 {
+    0 // FALSE — no response headers available in headless mode
+}
+
+/// InternetSetOptionW — set a WinINet option on a handle.
+///
+/// Wine ref: dlls/wininet/internet.c — INET_SetOption dispatches on option
+/// code to set connect/send/receive timeouts, proxy refresh, etc. on the
+/// object_header_t. Returns ERROR_SUCCESS or an INTERNET_ERROR code.
+/// Weave: stub returning FALSE (0). SumatraPDF may call this to configure
+/// timeouts or security flags; ignoring it is safe since the session is a stub.
+///
+/// # Safety
+/// All pointer arguments are ignored.
+// Wine ref: dlls/wininet/internet.c — INET_SetOption dispatches on option code to set connect/send/receive timeouts and proxy settings on object_header_t; returns ERROR_SUCCESS or INTERNET_ERROR
+pub unsafe extern "win64" fn internet_set_option_w(
+    _h_internet: usize,
+    _dw_option: u32,
+    _lp_buffer: *const (),
+    _dw_buffer_length: u32,
+) -> i32 {
+    0 // FALSE — option setting ignored in headless mode
+}
+
+/// InternetReadFile — read data from a WinINet handle into a buffer.
+///
+/// Wine ref: dlls/wininet/internet.c — InternetReadFile delegates to the
+/// object_header_t vtbl ReadFile method; for HTTP it decompresses gzip if
+/// needed and copies bytes into lpBuffer, writing the byte count to
+/// lpdwNumberOfBytesRead. Returns FALSE on error, TRUE on success (including
+/// EOF where *lpdwNumberOfBytesRead == 0).
+/// Weave: stub returning FALSE (0) and writing 0 to lpdwNumberOfBytesRead
+/// so the caller sees EOF-equivalent and terminates the read loop.
+///
+/// # Safety
+/// lpdwNumberOfBytesRead is written if non-null. All other pointers are ignored.
+// Wine ref: dlls/wininet/internet.c — InternetReadFile calls vtbl->ReadFile; decompresses gzip for HTTP; writes byte count to lpdwNumberOfBytesRead; returns FALSE on error, TRUE+0 on EOF
+pub unsafe extern "win64" fn internet_read_file(
+    _h_file: usize,
+    _lp_buffer: *mut u8,
+    _dw_number_of_bytes_to_read: u32,
+    lpdw_number_of_bytes_read: *mut u32,
+) -> i32 {
+    if !lpdw_number_of_bytes_read.is_null() {
+        unsafe { *lpdw_number_of_bytes_read = 0 };
+    }
+    0 // FALSE — no data available in headless mode; 0 bytes signals EOF to caller
+}
+
+/// InternetOpenUrlW — open a URL directly, combining session/connect/request steps.
+///
+/// Wine ref: dlls/wininet/internet.c — INTERNET_InternetOpenUrlW cracks the URL
+/// with InternetCrackUrlW, selects FTP_Connect or HTTP_Connect based on scheme,
+/// then calls HttpOpenRequestW + HttpSendRequestW internally. Returns an
+/// HINTERNET file handle or NULL on failure.
+/// Weave: stub returning NULL. SumatraPDF may use this as a shortcut for
+/// opening an update URL; NULL aborts the check cleanly.
+///
+/// # Safety
+/// All pointer arguments are ignored.
+// Wine ref: dlls/wininet/internet.c — INTERNET_InternetOpenUrlW cracks URL, dispatches to FTP_Connect or HTTP_Connect+HttpOpenRequestW+HttpSendRequestW; returns HINTERNET file handle or NULL
+pub unsafe extern "win64" fn internet_open_url_w(
+    _h_internet: usize,
+    _lpsz_url: *const u16,
+    _lpsz_headers: *const u16,
+    _dw_headers_length: u32,
+    _dw_flags: u32,
+    _dw_context: usize,
+) -> *const () {
+    std::ptr::null() // NULL — URL open not supported in headless mode
+}
+
 pub fn resolve_wininet(func: &str) -> Option<usize> {
     Some(match func {
         "InternetCrackUrlW" => internet_crack_url_w as *const () as usize,
+        "InternetOpenW" => internet_open_w as *const () as usize,
+        "InternetConnectW" => internet_connect_w as *const () as usize,
+        "InternetCloseHandle" => internet_close_handle as *const () as usize,
+        "HttpOpenRequestW" => http_open_request_w as *const () as usize,
+        "HttpSendRequestA" => http_send_request_a as *const () as usize,
+        "HttpQueryInfoW" => http_query_info_w as *const () as usize,
+        "InternetSetOptionW" => internet_set_option_w as *const () as usize,
+        "InternetReadFile" => internet_read_file as *const () as usize,
+        "InternetOpenUrlW" => internet_open_url_w as *const () as usize,
         _ => return None,
     })
 }
