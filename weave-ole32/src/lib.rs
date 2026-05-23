@@ -698,10 +698,48 @@ pub unsafe extern "win64" fn create_stream_on_hglobal(
     0x8000_4001u32 as i32 // E_NOTIMPL
 }
 
+// ── urlmon.dll stubs ──────────────────────────────────────────────────────────
+//
+// SumatraPDF delay-loads urlmon.dll for CoInternetGetSession, which retrieves
+// a COM IInternetSession object used for URL moniker binding. When the
+// delay-load thunk fires and Weave returns None, __delayLoadHelper2 crashes.
+// This stub returns E_NOTIMPL so the thunk resolves and the caller falls back
+// to not using URL moniker sessions (acceptable for a PDF viewer).
+//
+// Wine ref: dlls/urlmon/session.c — CoInternetGetSession checks dwSessionMode
+// (must be 0), validates ppIInternetSession; allocates IInternetSession COM
+// object backed by a process-global session. Stub returns E_NOTIMPL.
+
+/// CoInternetGetSession — retrieve the process-global IInternetSession.
+///
+/// Wine ref: dlls/urlmon/session.c — CoInternetGetSession allocates a
+/// COM IInternetSession singleton on first call; returns E_INVALIDARG if
+/// dwSessionMode != 0 or ppIInternetSession is NULL. Stub returns E_NOTIMPL —
+/// no URL moniker / WinInet session infrastructure in Weave.
+// Wine ref: dlls/urlmon/session.c — CoInternetGetSession returns COM Internet session; stub returns E_NOTIMPL
+unsafe extern "win64" fn co_internet_get_session(
+    _dw_session_mode: u32,
+    pp_iinternet_session: *mut *mut (),
+    _dw_reserved: u32,
+) -> i32 {
+    if !pp_iinternet_session.is_null() {
+        unsafe { *pp_iinternet_session = std::ptr::null_mut() };
+    }
+    0x80004001u32 as i32 // E_NOTIMPL
+}
+
 // ── Resolver ──────────────────────────────────────────────────────────────────
 
-/// Resolve a `ole32.dll` or `combase.dll` import to a stub address.
+/// Resolve a `ole32.dll`, `combase.dll`, or `urlmon.dll` import to a stub address.
 pub fn resolve(dll: &str, func: &str) -> Option<usize> {
+    // urlmon.dll — URL moniker / internet session stubs (SumatraPDF delay-load)
+    if dll.eq_ignore_ascii_case("urlmon.dll") {
+        return match func {
+            "CoInternetGetSession" => Some(co_internet_get_session as *const () as usize),
+            _ => None,
+        };
+    }
+
     if !dll.eq_ignore_ascii_case("ole32.dll") && !dll.eq_ignore_ascii_case("combase.dll") {
         return None;
     }

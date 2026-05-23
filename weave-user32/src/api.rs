@@ -8026,3 +8026,111 @@ mod tests {
         assert_eq!(get_key_state(256), 0, "nVirtKey=256 must return 0");
     }
 }
+
+// ── UIAutomationCore.dll stubs ────────────────────────────────────────────────
+//
+// SumatraPDF delay-loads UIAutomationCore.DLL for accessibility support.
+// When the delay-load thunk fires and Weave returns None, __delayLoadHelper2
+// propagates a crash. These stubs cover the five symbols SumatraPDF imports
+// so the thunks resolve cleanly without building a real UIA provider.
+//
+// Wine ref: dlls/uiautomationcore/uia_main.c, uia_event.c, uia_provider.c
+
+/// UiaHostProviderFromHwnd — wraps an HWND as an IRawElementProviderSimple.
+///
+/// Wine ref: dlls/uiautomationcore/uia_main.c — allocates hwnd_host_provider
+/// struct (IRawElementProviderSimple_iface + HWND); returns E_INVALIDARG for
+/// NULL hwnd. Stub returns E_NOTIMPL — no UIA provider infrastructure.
+// Wine ref: dlls/uiautomationcore/uia_main.c — UiaHostProviderFromHwnd wraps HWND as UIA provider; stub returns E_NOTIMPL
+unsafe extern "win64" fn uia_host_provider_from_hwnd(
+    _hwnd: usize,
+    p_provider: *mut *mut (),
+) -> i32 {
+    if !p_provider.is_null() {
+        unsafe { *p_provider = std::ptr::null_mut() };
+    }
+    0x80004001u32 as i32 // E_NOTIMPL
+}
+
+/// UiaGetReservedNotSupportedValue — returns a sentinel COM object meaning
+/// "this UIA property is not supported".
+///
+/// Wine ref: dlls/uiautomationcore/uia_main.c — create_uia_object_wrapper
+/// allocates a singleton IUnknown that QI rejects everything except IUnknown;
+/// ppVal receives a non-NULL pointer. Stub writes NULL and returns S_OK;
+/// callers check the pointer, not the HRESULT.
+// Wine ref: dlls/uiautomationcore/uia_main.c — UiaGetReservedNotSupportedValue returns sentinel COM object; stub writes NULL, returns S_OK
+unsafe extern "win64" fn uia_get_reserved_not_supported_value(pp_val: *mut *mut ()) -> i32 {
+    if !pp_val.is_null() {
+        unsafe { *pp_val = std::ptr::null_mut() };
+    }
+    0 // S_OK
+}
+
+/// UiaRaiseStructureChangedEvent — fires an accessibility structure-change
+/// event (child added, removed, etc.) on an element provider.
+///
+/// Wine ref: dlls/uiautomationcore/uia_event.c — queues a
+/// UiaStructureChangedEventArgs and dispatches it to registered event listeners;
+/// no-op when no listeners are registered. Stub returns S_OK (no listeners).
+// Wine ref: dlls/uiautomationcore/uia_event.c — UiaRaiseStructureChangedEvent fires accessibility event; stub no-op returns S_OK
+unsafe extern "win64" fn uia_raise_structure_changed_event(
+    _provider: *mut (),
+    _structure_change_type: i32,
+    _p_runtime_id: *const i32,
+    _c_runtime_id_elm_count: i32,
+) -> i32 {
+    0 // S_OK
+}
+
+/// UiaRaiseAutomationEvent — fires a named automation event on an element.
+///
+/// Wine ref: dlls/uiautomationcore/uia_event.c — uia_raise_elprov_event builds
+/// a UiaEventArgs, walks registered event advisers, and calls AdviseEventAdded;
+/// no-op when no advisers. Stub returns S_OK (no advisers registered).
+// Wine ref: dlls/uiautomationcore/uia_event.c — UiaRaiseAutomationEvent fires automation event; stub no-op returns S_OK
+unsafe extern "win64" fn uia_raise_automation_event(
+    _provider: *mut (),
+    _id: i32,
+) -> i32 {
+    0 // S_OK
+}
+
+/// UiaReturnRawElementProvider — responds to WM_GETOBJECT by returning a UIA
+/// element provider handle to the UIA client (LRESULT encoding).
+///
+/// Wine ref: dlls/uiautomationcore/uia_provider.c — builds a LRESULT via
+/// UiaProviderCallback and encodes the provider handle for the client; returns
+/// 0 when the provider is NULL (window not UIA-aware). Stub returns 0 so the
+/// window appears non-UIA-aware, which is correct for Weave.
+// Wine ref: dlls/uiautomationcore/uia_provider.c — UiaReturnRawElementProvider returns WM_GETOBJECT result; return 0 (not UIA-aware)
+unsafe extern "win64" fn uia_return_raw_element_provider(
+    _hwnd: usize,
+    _w_param: usize,
+    _l_param: isize,
+    _el: *mut (),
+) -> isize {
+    0
+}
+
+/// Resolve a UIAutomationCore.dll import to a stub address.
+///
+/// Called by weave-cli's resolve chain. Uses eq_ignore_ascii_case because
+/// delay-load helpers may pass mixed-case DLL names.
+pub fn resolve_uiauto(dll: &str, func: &str) -> Option<usize> {
+    if !dll.eq_ignore_ascii_case("uiautomationcore.dll") {
+        return None;
+    }
+    match func {
+        "UiaHostProviderFromHwnd" => Some(uia_host_provider_from_hwnd as *const () as usize),
+        "UiaGetReservedNotSupportedValue" => {
+            Some(uia_get_reserved_not_supported_value as *const () as usize)
+        }
+        "UiaRaiseStructureChangedEvent" => {
+            Some(uia_raise_structure_changed_event as *const () as usize)
+        }
+        "UiaRaiseAutomationEvent" => Some(uia_raise_automation_event as *const () as usize),
+        "UiaReturnRawElementProvider" => Some(uia_return_raw_element_provider as *const () as usize),
+        _ => None,
+    }
+}

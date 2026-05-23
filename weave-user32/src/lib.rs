@@ -1319,6 +1319,9 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
     }
 }
 
+// Re-export UIAutomationCore resolver so weave-cli can wire it into the chain.
+pub use api::resolve_uiauto;
+
 /// Resolve shcore.dll exports.  SDL2 imports these as static IAT entries;
 /// we stub them with DPI defaults so SDL2 can skip its DPI dynamic-load path.
 pub fn resolve_shcore(dll: &str, func: &str) -> Option<usize> {
