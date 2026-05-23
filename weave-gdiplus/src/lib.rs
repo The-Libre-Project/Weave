@@ -2136,6 +2136,26 @@ pub extern "win64" fn GdipAddPathLineI(
     GP_NOT_IMPLEMENTED
 }
 
+// Wine ref: dlls/gdiplus/graphicspath.c — appends an arc (integer coords) to a GpPath.
+#[no_mangle]
+pub extern "win64" fn GdipAddPathArcI(
+    _path: usize,
+    _x: i32,
+    _y: i32,
+    _width: i32,
+    _height: i32,
+    _start_angle: f32,
+    _sweep_angle: f32,
+) -> i32 {
+    GP_OK
+}
+
+// Wine ref: dlls/gdiplus/graphicspath.c — closes the current figure in a GpPath.
+#[no_mangle]
+pub extern "win64" fn GdipClosePathFigure(_path: usize) -> i32 {
+    GP_OK
+}
+
 // Wine ref: dlls/gdiplus/graphicspath.c — adds integer-coord rectangle.
 #[no_mangle]
 pub extern "win64" fn GdipAddPathRectangleI(
@@ -2353,6 +2373,51 @@ pub unsafe extern "win64" fn GdipMeasureCharacterRanges(
 #[no_mangle]
 pub unsafe extern "win64" fn GdipSetPropertyItem(_image: usize, _item: *const u8) -> i32 {
     GP_NOT_IMPLEMENTED
+}
+
+// Wine ref: dlls/gdiplus/bitmap.c — creates a GpBitmap from a COM IStream with ICM
+// colour management. Behaves identically to GdipCreateBitmapFromStream for our stub.
+/// # Safety
+/// `stream` is a COM IStream pointer. `bitmap` must be a writable pointer slot or null.
+#[no_mangle]
+pub unsafe extern "win64" fn GdipCreateBitmapFromStreamICM(
+    _stream: *mut u8,
+    bitmap: *mut usize,
+) -> i32 {
+    // SAFETY: caller guarantees bitmap points to a writable usize; non-null checked below.
+    if !bitmap.is_null() {
+        unsafe { *bitmap = 1 };
+    }
+    GP_OK
+}
+
+// Wine ref: dlls/gdiplus/image.c — creates a thumbnail GpImage scaled to the
+// requested dimensions. Returns a new GpImage handle; callback is optional.
+/// # Safety
+/// `ret_image` must be a writable pointer slot or null. `callback` and
+/// `callback_data` may be zero (no callback).
+#[no_mangle]
+pub unsafe extern "win64" fn GdipGetImageThumbnail(
+    _image: usize,
+    _thumb_width: u32,
+    _thumb_height: u32,
+    ret_image: *mut usize,
+    _callback: usize,
+    _callback_data: usize,
+) -> i32 {
+    // SAFETY: caller guarantees ret_image points to a writable usize; non-null checked below.
+    if !ret_image.is_null() {
+        unsafe { *ret_image = 1 };
+    }
+    GP_OK
+}
+
+// Wine ref: dlls/gdiplus/image.c — rotates/flips a GpImage in-place. The
+// rotate_flip_type is a RotateFlipType enum value (0–7). We accept any value
+// and return Ok since we have no real image backend.
+#[no_mangle]
+pub extern "win64" fn GdipImageRotateFlip(_image: usize, _rotate_flip_type: i32) -> i32 {
+    GP_OK
 }
 
 // ── Resolver ─────────────────────────────────────────────────────────────────
@@ -2576,6 +2641,12 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "GdipIsVisibleRectI" => GdipIsVisibleRectI as *const () as usize,
         "GdipMeasureCharacterRanges" => GdipMeasureCharacterRanges as *const () as usize,
         "GdipSetPropertyItem" => GdipSetPropertyItem as *const () as usize,
+        // Q-Dir E3-M5 additions
+        "GdipAddPathArcI" => GdipAddPathArcI as *const () as usize,
+        "GdipClosePathFigure" => GdipClosePathFigure as *const () as usize,
+        "GdipCreateBitmapFromStreamICM" => GdipCreateBitmapFromStreamICM as *const () as usize,
+        "GdipGetImageThumbnail" => GdipGetImageThumbnail as *const () as usize,
+        "GdipImageRotateFlip" => GdipImageRotateFlip as *const () as usize,
         _ => return None,
     })
 }
