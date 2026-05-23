@@ -293,6 +293,49 @@ pub unsafe extern "win64" fn print_dlg_ex_w(_lp_pdex: *const u8) -> i32 {
     0x80004005u32 as i32
 }
 
+// Wine ref: dlls/comdlg32/printdlg.c — PrintDlgW returns BOOL (not HRESULT); returns FALSE
+// with CommDlgExtendedError() == PDERR_NODEFAULTPRN when no default printer is configured.
+// Weave has no spooler: return FALSE (cancelled/no-printer) with CommDlgExtendedError == 0.
+/// PrintDlgW — display the standard print dialog (Wide).
+///
+/// Returns 0 (FALSE — no printers available / cancelled stub).
+///
+/// # Safety
+/// `lp_pd` is a guest-supplied pointer; not read (stub).
+pub unsafe extern "win64" fn print_dlg_w(_lp_pd: *mut u8) -> i32 {
+    // §3 BOOL shape: FALSE = cancelled/no-printer.
+    // CommDlgExtendedError() == 0 already (comm_dlg_extended_error returns 0).
+    0
+}
+
+// Wine ref: dlls/comdlg32/colordlg.c — ChooseColorW returns FALSE when user cancels;
+// CommDlgExtendedError() == 0 on cancel. lStructSize validated first.
+// Stub: return FALSE (cancelled), error == 0.
+/// ChooseColorW — display the color chooser dialog (Wide).
+///
+/// Returns 0 (FALSE — cancelled stub).
+///
+/// # Safety
+/// `lp_cc` is a guest-supplied pointer; not read (stub).
+pub unsafe extern "win64" fn choose_color_w(_lp_cc: *mut u8) -> i32 {
+    // §3 BOOL shape: FALSE = cancelled.
+    0
+}
+
+// Wine ref: dlls/comdlg32/printdlg.c — PageSetupDlgW returns FALSE when cancelled;
+// CommDlgExtendedError() == 0 on cancel; PDERR_NODEFAULTPRN when no printer.
+// Stub: return FALSE.
+/// PageSetupDlgW — display the page setup dialog (Wide).
+///
+/// Returns 0 (FALSE — cancelled stub).
+///
+/// # Safety
+/// `lp_psd` is a guest-supplied pointer; not read (stub).
+pub unsafe extern "win64" fn page_setup_dlg_w(_lp_psd: *mut u8) -> i32 {
+    // §3 BOOL shape: FALSE = cancelled/no-printer.
+    0
+}
+
 // Wine ref: dlls/comdlg32/filedlg.c — same structure as GetOpenFileNameW; automatically
 // appends lpstrDefExt if typed filename has no extension and OFN_EXTENSIONDIFFERENT is set.
 // Weave handles lpstrDefExt extension appending — behaviorally correct for that case.

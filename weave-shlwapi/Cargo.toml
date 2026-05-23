@@ -8,3 +8,4 @@ description = "shlwapi.dll path and color functions for Weave — Sprint 4 Notep
 
 [dependencies]
 weave-core = { path = "../weave-core" }
+weave-common = { path = "../weave-common" }

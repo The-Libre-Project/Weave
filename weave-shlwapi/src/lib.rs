@@ -553,6 +553,64 @@ pub extern "win64" fn color_adjust_luma(clr_rgb: u32, n: i32, _use_hl: i32) -> u
     color_hls_to_rgb(h, l_new, s)
 }
 
+// ── PathRelativePathToW ───────────────────────────────────────────────────────
+
+// Wine ref: dlls/shlwapi/path.c — PathRelativePathToW builds a relative path from
+// psz_from to psz_to by stripping common prefix components; returns FALSE if both
+// are not on the same drive/root. Sets last error to ERROR_INVALID_PARAMETER (87)
+// when it cannot build a relative path. Stub: always return FALSE + error 87.
+/// PathRelativePathToW — build a relative path between two absolute paths.
+///
+/// Stub: returns 0 (FALSE) and sets last error to 87 (ERROR_INVALID_PARAMETER).
+///
+/// # Safety
+/// `psz_path` is a guest-supplied writable buffer; not written (stub returns FALSE immediately).
+/// All other pointer arguments are guest-supplied; not read (stub).
+pub unsafe extern "win64" fn path_relative_path_to_w(
+    _psz_path: *mut u16,
+    _psz_from: *const u16,
+    _dw_attr_from: u32,
+    _psz_to: *const u16,
+    _dw_attr_to: u32,
+) -> i32 {
+    // §3 BOOL shape: FALSE + SetLastError(ERROR_INVALID_PARAMETER).
+    weave_common::set_last_error(87);
+    0
+}
+
+// ── StrCpyW ───────────────────────────────────────────────────────────────────
+
+// Wine ref: dlls/shlwapi/string.c — StrCpyW is a thin wrapper around lstrcpyW /
+// wcscpy; copies the null-terminated wide string at psz_src into psz_dest and
+// returns psz_dest. No bounds checking (caller's responsibility per Win32 contract).
+/// StrCpyW — copy a null-terminated wide string (like wcscpy).
+///
+/// Returns `psz_dest`.
+///
+/// # Safety
+/// `psz_dest` must be a writable buffer large enough to hold all characters of
+/// `psz_src` plus a null terminator. `psz_src` must be a valid null-terminated
+/// wide string. Both must be valid for their respective operations.
+pub unsafe extern "win64" fn str_cpy_w(psz_dest: *mut u16, psz_src: *const u16) -> *mut u16 {
+    if psz_dest.is_null() || psz_src.is_null() {
+        return psz_dest;
+    }
+    // SAFETY: caller guarantees psz_src is null-terminated and psz_dest has
+    // sufficient capacity. We walk src until null, writing each char to dest.
+    let mut src = psz_src;
+    let mut dst = psz_dest;
+    loop {
+        let ch = unsafe { *src };
+        unsafe { *dst = ch };
+        if ch == 0 {
+            break;
+        }
+        src = unsafe { src.add(1) };
+        dst = unsafe { dst.add(1) };
+    }
+    psz_dest
+}
+
 // ── Resolver ─────────────────────────────────────────────────────────────────
 
 /// Resolve a shlwapi.dll import to a function pointer.
@@ -578,6 +636,8 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "ColorRGBToHLS" => color_rgb_to_hls as *const () as usize,
         "ColorHLSToRGB" => color_hls_to_rgb as *const () as usize,
         "ColorAdjustLuma" => color_adjust_luma as *const () as usize,
+        "PathRelativePathToW" => path_relative_path_to_w as *const () as usize,
+        "StrCpyW" => str_cpy_w as *const () as usize,
         _ => return None,
     })
 }
@@ -608,10 +668,52 @@ mod tests {
             "ColorRGBToHLS",
             "ColorHLSToRGB",
             "ColorAdjustLuma",
+            "PathRelativePathToW",
+            "StrCpyW",
         ];
         for f in &funcs {
             assert!(resolve("shlwapi.dll", f).is_some(), "missing: {f}");
         }
+    }
+
+    #[test]
+    fn resolve_shlwapi_q_dir_imports() {
+        // Q-Dir requires these two shlwapi symbols to resolve.
+        assert!(
+            resolve("shlwapi.dll", "PathRelativePathToW").is_some(),
+            "PathRelativePathToW must resolve"
+        );
+        assert!(
+            resolve("shlwapi.dll", "StrCpyW").is_some(),
+            "StrCpyW must resolve"
+        );
+    }
+
+    #[test]
+    fn str_cpy_w_basic() {
+        let src: Vec<u16> = "hello".encode_utf16().chain([0]).collect();
+        let mut dest = [0u16; 16];
+        let ret = unsafe { str_cpy_w(dest.as_mut_ptr(), src.as_ptr()) };
+        assert_eq!(ret, dest.as_mut_ptr());
+        let s = String::from_utf16_lossy(
+            &dest[..dest.iter().position(|&c| c == 0).unwrap_or(dest.len())],
+        );
+        assert_eq!(s, "hello");
+    }
+
+    #[test]
+    fn path_relative_path_to_w_returns_false() {
+        // Stub always returns FALSE (0).
+        let result = unsafe {
+            path_relative_path_to_w(
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+            )
+        };
+        assert_eq!(result, 0);
     }
 
     #[test]

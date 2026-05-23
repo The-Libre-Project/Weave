@@ -69,6 +69,15 @@ fn resolve_comdlg32(func: &str) -> Option<usize> {
         "PrintDlgExW" => {
             Some(dialogs::print_dlg_ex_w as unsafe extern "win64" fn(_) -> _ as *const () as usize)
         }
+        "PrintDlgW" => {
+            Some(dialogs::print_dlg_w as unsafe extern "win64" fn(_) -> _ as *const () as usize)
+        }
+        "ChooseColorW" => {
+            Some(dialogs::choose_color_w as unsafe extern "win64" fn(_) -> _ as *const () as usize)
+        }
+        "PageSetupDlgW" => {
+            Some(dialogs::page_setup_dlg_w as unsafe extern "win64" fn(_) -> _ as *const () as usize)
+        }
         _ => None,
     }
 }
@@ -147,5 +156,40 @@ fn resolve_shell32(func: &str) -> Option<usize> {
             shell::shell_execute_ex_w as unsafe extern "win64" fn(_) -> _ as *const () as usize,
         ),
         _ => None,
+    }
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_comdlg32_q_dir_imports() {
+        // Q-Dir requires these five comdlg32 symbols to resolve.
+        let required = [
+            "GetOpenFileNameW",
+            "GetSaveFileNameW",
+            "ChooseColorW",
+            "PageSetupDlgW",
+            "PrintDlgW",
+        ];
+        for sym in &required {
+            assert!(
+                resolve("comdlg32.dll", sym).is_some(),
+                "comdlg32.dll!{sym} must resolve"
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_comdlg32_case_insensitive() {
+        assert!(resolve("COMDLG32.DLL", "GetOpenFileNameW").is_some());
+    }
+
+    #[test]
+    fn resolve_comdlg32_unknown_returns_none() {
+        assert!(resolve("comdlg32.dll", "NonExistent").is_none());
     }
 }
