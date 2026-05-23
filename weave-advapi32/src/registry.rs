@@ -1759,6 +1759,20 @@ pub fn resolve(func: &str) -> Option<usize> {
             crypt_sign_hash_w as unsafe extern "win64" fn(_, _, _, _, _, _) -> _ as *const ()
                 as usize,
         ),
+        // ── SumatraPDF Crypt/security gap stubs ───────────────────────────────
+        "CryptHashData" => Some(
+            crypt_hash_data as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
+        ),
+        "CryptGetHashParam" => Some(
+            crypt_get_hash_param as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "RegSetKeySecurity" => Some(
+            reg_set_key_security as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
+        ),
+        "CheckTokenMembership" => Some(
+            check_token_membership as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
+        ),
         "RegisterEventSourceW" => Some(
             register_event_source_w as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
         ),
@@ -2179,6 +2193,67 @@ pub unsafe extern "win64" fn crypt_decrypt(
 // then frees internal hash object; TRUE on success.
 pub unsafe extern "win64" fn crypt_destroy_hash(_h_hash: usize) -> i32 {
     1 // TRUE
+}
+
+/// CryptHashData — hash a block of data into an existing hash object. Returns FALSE + NTE_FAIL.
+///
+/// # Safety
+/// All pointer arguments are ignored.
+// Wine ref: dlls/advapi32/crypt.h PROVFUNCS::pCPHashData — CryptHashData dispatches to
+// provider CPHashData(hProv, hHash, pbData, dwDataLen, dwFlags); FALSE + NTE_FAIL with no CSP.
+pub unsafe extern "win64" fn crypt_hash_data(
+    _h_hash: usize,
+    _pb_data: *const u8,
+    _dw_data_len: u32,
+    _dw_flags: u32,
+) -> i32 {
+    weave_common::set_last_error(0x8009_0020_u32); // NTE_FAIL
+    0 // FALSE
+}
+
+/// CryptGetHashParam — retrieve a hash object parameter. Returns FALSE + NTE_FAIL.
+///
+/// # Safety
+/// All pointer arguments are ignored.
+// Wine ref: dlls/advapi32/crypt.h PROVFUNCS::pCPGetHashParam — CryptGetHashParam dispatches to
+// provider CPGetHashParam(hProv, hHash, dwParam, pbData, pdwDataLen, dwFlags); FALSE + NTE_FAIL with no CSP.
+pub unsafe extern "win64" fn crypt_get_hash_param(
+    _h_hash: usize,
+    _dw_param: u32,
+    _pb_data: *mut u8,
+    _pdw_data_len: *mut u32,
+    _dw_flags: u32,
+) -> i32 {
+    weave_common::set_last_error(0x8009_0020_u32); // NTE_FAIL
+    0 // FALSE
+}
+
+/// RegSetKeySecurity — set security descriptor on a registry key. Returns ERROR_SUCCESS (no-op).
+// Wine ref: dlls/kernelbase/registry.c — RegSetKeySecurity calls NtSetSecurityObject;
+// stub returns ERROR_SUCCESS; no security enforcement in Weave.
+pub unsafe extern "win64" fn reg_set_key_security(
+    _h_key: usize,
+    _security_info: u32,
+    _p_security_descriptor: *const u8,
+) -> u32 {
+    0 // ERROR_SUCCESS
+}
+
+/// CheckTokenMembership — check whether a SID is enabled in a token. Returns TRUE; writes FALSE to *is_member.
+///
+/// # Safety
+/// `is_member` must be a valid pointer to an i32 (Windows BOOL = 32-bit) if non-null.
+// Wine ref: dlls/advapi32/tests/security.c::test_CheckTokenMembership — is_member is BOOL*
+// (i32*); function returns TRUE on success and writes membership result; stub returns non-admin.
+pub unsafe extern "win64" fn check_token_membership(
+    _token_handle: usize,
+    _sid_to_check: *const u8,
+    is_member: *mut i32,
+) -> i32 {
+    if !is_member.is_null() {
+        unsafe { *is_member = 0 }; // not a member
+    }
+    1 // TRUE (call succeeded; membership is FALSE)
 }
 
 /// CryptDestroyKey — release a key object. Returns TRUE (no-op; no state to free).
