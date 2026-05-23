@@ -14529,6 +14529,32 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "EnumSystemLocalesW" => {
             Some(enum_system_locales_w as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
         }
+        "AppPolicyGetProcessTerminationMethod" => Some(
+            app_policy_get_process_termination_method
+                as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
+        ),
+        "AppPolicyGetThreadInitializationType" => Some(
+            app_policy_get_thread_initialization_type
+                as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
+        ),
+        "LCIDToLocaleName" => Some(
+            lcid_to_locale_name as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
+        ),
+        "LocaleNameToLCID" => Some(
+            locale_name_to_lcid as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
+        ),
+        "GetDateFormatEx" => Some(
+            get_date_format_ex
+                as unsafe extern "win64" fn(_, _, _, _, _, _, _) -> _ as *const () as usize,
+        ),
+        "GetTimeFormatEx" => Some(
+            get_time_format_ex
+                as unsafe extern "win64" fn(_, _, _, _, _, _) -> _ as *const () as usize,
+        ),
+        "EnumSystemLocalesEx" => Some(
+            enum_system_locales_ex
+                as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
+        ),
         "FindResourceA" => {
             Some(find_resource_a as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize)
         }
@@ -15826,6 +15852,182 @@ pub unsafe extern "win64" fn enum_system_locales_w(
         unsafe { std::mem::transmute(lp_locale_enum_proc) };
     cb(locale.as_ptr());
     1
+}
+
+/// AppPolicyGetProcessTerminationMethod: query the process termination policy.
+///
+/// # Safety
+/// `policy` must be a valid writable pointer to a u32.
+// Wine ref: include/appmodel.h — AppPolicyProcessTerminationMethod enum;
+// Wine does not implement this API (no MSVC CRT AppPolicy* stubs); MSVC CRT
+// probes this at startup and uses ExitProcess=0 as the non-packaged-app path.
+pub unsafe extern "win64" fn app_policy_get_process_termination_method(
+    _process_token: usize,
+    policy: *mut u32,
+) -> i32 {
+    if !policy.is_null() {
+        // SAFETY: caller guarantees `policy` is a valid writable u32 pointer.
+        unsafe { policy.write(0) }; // AppPolicyProcessTerminationMethod_ExitProcess = 0
+    }
+    0 // S_OK
+}
+
+/// AppPolicyGetThreadInitializationType: query the thread initialization policy.
+///
+/// # Safety
+/// `policy` must be a valid writable pointer to a u32.
+// Wine ref: include/appmodel.h — AppPolicyThreadInitializationType enum;
+// Wine does not implement this API; MSVC CRT probes this at startup and uses
+// None=0 as the non-UWP (classic desktop) thread init path.
+pub unsafe extern "win64" fn app_policy_get_thread_initialization_type(
+    _process_token: usize,
+    policy: *mut u32,
+) -> i32 {
+    if !policy.is_null() {
+        // SAFETY: caller guarantees `policy` is a valid writable u32 pointer.
+        unsafe { policy.write(0) }; // AppPolicyThreadInitializationType_None = 0
+    }
+    0 // S_OK
+}
+
+/// LCIDToLocaleName: convert an LCID to a locale name string.
+///
+/// # Safety
+/// `lp_name` must be a valid writable buffer of at least `cch_name` UTF-16 code units,
+/// or NULL (in which case returns required buffer length).
+// Wine ref: dlls/kernelbase/locale.c:6818 — validates lcid via NlsValidateLocale,
+// calls SetLastError(ERROR_INVALID_PARAMETER) on unknown LCID and returns 0;
+// returns buffer length including NUL on success.
+pub unsafe extern "win64" fn lcid_to_locale_name(
+    lcid: u32,
+    lp_name: *mut u16,
+    cch_name: i32,
+    _dw_flags: u32,
+) -> i32 {
+    // We recognise LCID 0 (LOCALE_USER_DEFAULT) and 0x0409 (en-US) only.
+    match lcid {
+        0 | 0x0409 => {
+            let name: Vec<u16> = "en-US\0".encode_utf16().collect(); // 6 code units incl. NUL
+            if lp_name.is_null() || cch_name == 0 {
+                return 6; // return required length
+            }
+            if cch_name < 6 {
+                weave_common::set_last_error(122); // ERROR_INSUFFICIENT_BUFFER
+                return 0;
+            }
+            // SAFETY: caller guarantees `lp_name` points to a buffer of ≥ cch_name u16 words.
+            unsafe {
+                std::ptr::copy_nonoverlapping(name.as_ptr(), lp_name, 6);
+            }
+            6
+        }
+        _ => {
+            weave_common::set_last_error(87); // ERROR_INVALID_PARAMETER
+            0
+        }
+    }
+}
+
+/// LocaleNameToLCID: convert a locale name string to an LCID.
+///
+/// # Safety
+/// `lp_name` must be a valid pointer to a NUL-terminated UTF-16 string, or NULL.
+// Wine ref: dlls/kernelbase/locale.c:6992 — calls get_locale_by_name; returns 0
+// with SetLastError(ERROR_INVALID_PARAMETER) for unrecognised names; handles
+// LOCALE_ALLOW_NEUTRAL_NAMES flag via inotneutral/idefaultlanguage fields.
+pub unsafe extern "win64" fn locale_name_to_lcid(lp_name: *const u16, _dw_flags: u32) -> u32 {
+    if lp_name.is_null() {
+        return 0x0409; // LOCALE_USER_DEFAULT → en-US
+    }
+    // Read up to 10 UTF-16 code units to identify the name.
+    // SAFETY: caller guarantees `lp_name` is a NUL-terminated UTF-16 string.
+    let name: String = unsafe {
+        let mut len = 0usize;
+        while len < 16 && *lp_name.add(len) != 0 {
+            len += 1;
+        }
+        let slice = std::slice::from_raw_parts(lp_name, len);
+        String::from_utf16_lossy(slice).to_owned()
+    };
+    match name.as_str() {
+        "en-US" | "en" => 0x0409,
+        _ => 0x1000, // LOCALE_CUSTOM_UNSPECIFIED — caller takes its fallback
+    }
+}
+
+/// GetDateFormatEx: format a date using a locale name.
+///
+/// # Safety
+/// All pointer arguments follow Windows API semantics for this function.
+// Wine ref: dlls/kernelbase/locale.c get_date_format — validates locale name,
+// applies flags/format string, writes result to buffer; returns 0 on failure.
+// CRT probes this at startup to test Ex-variant availability; returning 0
+// causes CRT to fall back to GetDateFormatW, which is already implemented.
+pub unsafe extern "win64" fn get_date_format_ex(
+    _locale_name: *const u16,
+    _dw_flags: u32,
+    _lp_date: *const (),
+    _lp_format: *const u16,
+    _lp_date_str: *mut u16,
+    _cch_date: i32,
+    _lp_calendar: *const (),
+) -> i32 {
+    // Minimal probe stub — CRT falls back to GetDateFormatW on 0 return.
+    0
+}
+
+/// GetTimeFormatEx: format a time using a locale name.
+///
+/// # Safety
+/// All pointer arguments follow Windows API semantics for this function.
+// Wine ref: dlls/kernelbase/locale.c get_time_format — validates locale name,
+// applies flags/format string, writes result to buffer; returns 0 on failure.
+// CRT probes this at startup to test Ex-variant availability; returning 0
+// causes CRT to fall back to GetTimeFormatW, which is already implemented.
+pub unsafe extern "win64" fn get_time_format_ex(
+    _locale_name: *const u16,
+    _dw_flags: u32,
+    _lp_time: *const (),
+    _lp_format: *const u16,
+    _lp_time_str: *mut u16,
+    _cch_time: i32,
+) -> i32 {
+    // Minimal probe stub — CRT falls back to GetTimeFormatW on 0 return.
+    0
+}
+
+/// EnumSystemLocalesEx: enumerate system locales, calling back for each one.
+///
+/// # Safety
+/// `lp_locale_enum_proc_ex` must be a valid `extern "win64" fn(*mut u16, u32, isize) -> i32`
+/// callback or 0 (treated as no-op).
+// Wine ref: dlls/kernelbase/locale.c:5134 — iterates lcnames_index[], passes
+// locale name string + flags + param to LOCALE_ENUMPROCEX; returns FALSE if
+// reserved != NULL; returns TRUE after enumeration completes.
+pub unsafe extern "win64" fn enum_system_locales_ex(
+    lp_locale_enum_proc_ex: usize,
+    _dw_flags: u32,
+    l_param: isize,
+    lp_reserved: *const (),
+) -> i32 {
+    if !lp_reserved.is_null() {
+        weave_common::set_last_error(87); // ERROR_INVALID_PARAMETER
+        return 0; // FALSE
+    }
+    if lp_locale_enum_proc_ex == 0 {
+        return 1; // TRUE — nothing to enumerate
+    }
+    // Call callback once with "en-US\0", LOCALE_WINDOWS|LOCALE_SPECIFICDATA, l_param.
+    let locale: Vec<u16> = "en-US\0".encode_utf16().collect();
+    // SAFETY: `lp_locale_enum_proc_ex` is a usize holding the numeric address of a
+    // Win64-ABI callback supplied by the caller, validated non-zero above.
+    // LOCALE_ENUMPROCEX signature: fn(LPWSTR, DWORD, LPARAM) -> BOOL, which maps to
+    // extern "win64" fn(*mut u16, u32, isize) -> i32.
+    let cb: extern "win64" fn(*mut u16, u32, isize) -> i32 =
+        unsafe { std::mem::transmute(lp_locale_enum_proc_ex) };
+    // LOCALE_WINDOWS(0x00000001) | LOCALE_SPECIFICDATA(0x00000020)
+    cb(locale.as_ptr() as *mut u16, 0x00000021, l_param);
+    1 // TRUE
 }
 
 /// Translate a Win32 resource-name/type pointer (either `MAKEINTRESOURCE(n)`
