@@ -1296,6 +1296,9 @@ fn sumatrapdf_pdf_render_gate() {
         .arg(&sumatra_exe)
         .arg(&pdf_path)
         .env("DISPLAY", ":99")
+        // DIAGNOSTIC: every-call IAT tracer to name the unlogged blocker after
+        // GetFileAttributesExW×10 (Fail #20–#23). Revert after one CI run.
+        .env("WEAVE_IAT_TRACE", "1")
         .stderr(std::process::Stdio::piped())
         .spawn()
         .unwrap_or_else(|e| panic!("failed to spawn weave on SumatraPDF.exe: {e}"));
