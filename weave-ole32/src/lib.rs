@@ -563,6 +563,141 @@ pub unsafe extern "win64" fn prop_variant_clear(pvar: *mut u8) -> u32 {
     S_OK
 }
 
+// ── RoInitialize / RoUninitialize (combase.dll / WinRT) ──────────────────────
+
+// Wine ref: dlls/combase/roapi.c — RoInitialize(RO_INIT_TYPE init_type): calls
+// ensure_mta() for MTA (0) or apartment_create_thread_state() for STA (1);
+// returns S_OK on first init, S_FALSE if already initialised, E_INVALIDARG for
+// unknown init_type. Weave: always return S_OK (no WinRT runtime needed).
+/// RoInitialize: initialise the Windows Runtime on the calling thread.
+///
+/// Weave stub — returns S_OK unconditionally. No WinRT runtime is started.
+pub extern "win64" fn ro_initialize(init_type: u32) -> i32 {
+    eprintln!("weave/ole32: RoInitialize(init_type={init_type}) → S_OK");
+    0 // S_OK
+}
+
+// Wine ref: dlls/combase/roapi.c — RoUninitialize(): decrements per-thread WinRT
+// init count; at zero uninitialises the WinRT apartment (mirrors CoUninitialize
+// but for the WinRT apartment model). Weave: no-op.
+/// RoUninitialize: uninitialise the Windows Runtime on the calling thread.
+///
+/// Weave stub — no-op. Mirrors the S_OK-only RoInitialize.
+pub extern "win64" fn ro_uninitialize() {
+    eprintln!("weave/ole32: RoUninitialize");
+}
+
+// ── CoGetMalloc (ole32.dll) ───────────────────────────────────────────────────
+
+// Wine ref: dlls/ole32/ifs.c — CoGetMalloc(dwMemContext, *ppMalloc): only
+// dwMemContext==1 (MEMCTX_TASK) is valid; returns pointer to a process-global
+// static IMalloc singleton backed by HeapAlloc(GetProcessHeap()). Returns
+// E_INVALIDARG for other contexts. Weave: delegate Alloc/Realloc/Free to
+// co_task_mem_alloc / co_task_mem_realloc / co_task_mem_free (libc malloc).
+
+/// Minimal IMalloc vtable — 9 entries, Windows x64 COM layout.
+///
+/// The pointer written into *pp_malloc IS the vtable pointer (this == vtable ptr
+/// for a static singleton, identical to how Wine's static malloc object works).
+#[repr(C)]
+pub struct IMallocVtbl {
+    pub query_interface: unsafe extern "win64" fn(*mut IMallocVtbl, *const u8, *mut usize) -> i32,
+    pub add_ref:         unsafe extern "win64" fn(*mut IMallocVtbl) -> u32,
+    pub release:         unsafe extern "win64" fn(*mut IMallocVtbl) -> u32,
+    pub alloc:           unsafe extern "win64" fn(*mut IMallocVtbl, usize) -> *mut (),
+    pub realloc:         unsafe extern "win64" fn(*mut IMallocVtbl, *mut (), usize) -> *mut (),
+    pub free:            unsafe extern "win64" fn(*mut IMallocVtbl, *mut ()),
+    pub get_size:        unsafe extern "win64" fn(*mut IMallocVtbl, *mut ()) -> usize,
+    pub did_alloc:       unsafe extern "win64" fn(*mut IMallocVtbl, *mut ()) -> i32,
+    pub heap_minimize:   unsafe extern "win64" fn(*mut IMallocVtbl),
+}
+
+unsafe extern "win64" fn imalloc_query_interface(
+    _this: *mut IMallocVtbl,
+    _riid: *const u8,
+    _ppv: *mut usize,
+) -> i32 {
+    0x8000_4002u32 as i32 // E_NOINTERFACE
+}
+unsafe extern "win64" fn imalloc_add_ref(_this: *mut IMallocVtbl) -> u32 { 1 }
+unsafe extern "win64" fn imalloc_release(_this: *mut IMallocVtbl) -> u32 { 1 }
+unsafe extern "win64" fn imalloc_alloc(_this: *mut IMallocVtbl, cb: usize) -> *mut () {
+    co_task_mem_alloc(cb) as *mut ()
+}
+unsafe extern "win64" fn imalloc_realloc(
+    _this: *mut IMallocVtbl,
+    pv: *mut (),
+    cb: usize,
+) -> *mut () {
+    co_task_mem_realloc(pv as usize, cb) as *mut ()
+}
+unsafe extern "win64" fn imalloc_free(_this: *mut IMallocVtbl, pv: *mut ()) {
+    co_task_mem_free(pv as usize);
+}
+unsafe extern "win64" fn imalloc_get_size(_this: *mut IMallocVtbl, _pv: *mut ()) -> usize { 0 }
+unsafe extern "win64" fn imalloc_did_alloc(_this: *mut IMallocVtbl, _pv: *mut ()) -> i32 {
+    -1 // unknown
+}
+unsafe extern "win64" fn imalloc_heap_minimize(_this: *mut IMallocVtbl) {}
+
+static IMALLOC_VTBL: IMallocVtbl = IMallocVtbl {
+    query_interface: imalloc_query_interface,
+    add_ref:         imalloc_add_ref,
+    release:         imalloc_release,
+    alloc:           imalloc_alloc,
+    realloc:         imalloc_realloc,
+    free:            imalloc_free,
+    get_size:        imalloc_get_size,
+    did_alloc:       imalloc_did_alloc,
+    heap_minimize:   imalloc_heap_minimize,
+};
+
+/// CoGetMalloc: return a pointer to the process task allocator (IMalloc).
+///
+/// Only `dw_mem_context == 1` (MEMCTX_TASK) is supported; other values return
+/// `E_INVALIDARG`. The returned singleton delegates to libc malloc.
+///
+/// # Safety
+/// `pp_malloc` must be a valid writable pointer to a `*mut IMallocVtbl` slot,
+/// or null (in which case E_INVALIDARG is returned).
+pub unsafe extern "win64" fn co_get_malloc(
+    dw_mem_context: u32,
+    pp_malloc: *mut *mut IMallocVtbl,
+) -> i32 {
+    if pp_malloc.is_null() || dw_mem_context != 1 {
+        return 0x8007_0057u32 as i32; // E_INVALIDARG
+    }
+    // SAFETY: IMALLOC_VTBL is 'static; caller receives a non-owning pointer.
+    unsafe { *pp_malloc = &raw const IMALLOC_VTBL as *mut IMallocVtbl };
+    0 // S_OK
+}
+
+// ── CreateStreamOnHGlobal (ole32.dll) ─────────────────────────────────────────
+
+// Wine ref: dlls/combase/hglobalstream.c — CreateStreamOnHGlobal(hGlobal,
+// fDeleteOnRelease, ppstm): allocates a handle_wrapper around hGlobal (or a
+// fresh GlobalAlloc if hGlobal==NULL), constructs an hglobal_stream COM object
+// implementing the full IStream vtable, writes IStream* into *ppstm; returns
+// S_OK. Weave: full IStream is Phase 3+; return E_NOTIMPL so callers can
+// detect the absence and fall back.
+/// CreateStreamOnHGlobal: create an IStream backed by an HGLOBAL (stub).
+///
+/// Returns `E_NOTIMPL` — full IStream implementation is Phase 3+.
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn create_stream_on_hglobal(
+    _h_global: usize,
+    _f_delete_on_release: i32,
+    pp_stm: *mut usize,
+) -> i32 {
+    if !pp_stm.is_null() {
+        unsafe { *pp_stm = 0 };
+    }
+    eprintln!("weave/ole32: CreateStreamOnHGlobal → E_NOTIMPL (Phase 3+)");
+    0x8000_4001u32 as i32 // E_NOTIMPL
+}
+
 // ── Resolver ──────────────────────────────────────────────────────────────────
 
 /// Resolve a `ole32.dll` or `combase.dll` import to a stub address.
@@ -635,6 +770,18 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "PropVariantClear" => {
             Some(prop_variant_clear as unsafe extern "win64" fn(_) -> _ as *const () as usize)
         }
+        // WinRT init (combase.dll)
+        "RoInitialize" => Some(ro_initialize as *const () as usize),
+        "RoUninitialize" => Some(ro_uninitialize as *const () as usize),
+        // COM task allocator
+        "CoGetMalloc" => Some(
+            co_get_malloc as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
+        ),
+        // Structured storage (E_NOTIMPL stub)
+        "CreateStreamOnHGlobal" => Some(
+            create_stream_on_hglobal as unsafe extern "win64" fn(_, _, _) -> _ as *const ()
+                as usize,
+        ),
         _ => None,
     }
 }
