@@ -770,6 +770,155 @@ fn tokenise_cmd_line(s: &str) -> Vec<String> {
     args
 }
 
+// ── PIDL stubs ───────────────────────────────────────────────────────────────
+//
+// Q-Dir enumerates file panes after the message loop starts — these ordinals are
+// called post-startup. Returning NULL / 0 is correct for a launch milestone:
+// the app reaches the message loop before any PIDL operation fires.
+
+// Wine ref: dlls/shell32/pidl.c — ILFindChild walks parent->child PIDL comparison;
+// returns pointer to child portion of pidl relative to parent, or NULL if not found.
+/// ILFindChild (shell32 #2) — find child PIDL relative to parent.
+///
+/// Returns NULL (stub — not needed for Q-Dir startup).
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn il_find_child(
+    _pidl_parent: *const u8,
+    _pidl_child: *const u8,
+) -> *mut u8 {
+    std::ptr::null_mut()
+}
+
+// Wine ref: dlls/shell32/pidl.c — ILGetSize walks the PIDL item list, accumulating
+// each cb field; adds 2 for the terminating empty item; returns 0 for NULL input.
+/// ILGetSize (shell32 #4) — return byte size of a PIDL.
+///
+/// Returns 0 (stub).
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn il_get_size(_pidl: *const u8) -> u32 {
+    0
+}
+
+// Wine ref: dlls/shell32/pidl.c — ILClone allocates a copy of the PIDL via SHAlloc;
+// caller must ILFree() the returned pointer; returns NULL on allocation failure.
+/// ILClone (shell32 #16) — clone a PIDL.
+///
+/// Returns NULL (stub).
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn il_clone(_pidl: *const u8) -> *mut u8 {
+    std::ptr::null_mut()
+}
+
+// Wine ref: dlls/shell32/pidl.c — ILFree calls SHFree (wraps CoTaskMemFree/HeapFree);
+// NULL input is a documented no-op.
+/// ILFree (shell32 #17) — free a PIDL allocated by shell functions.
+///
+/// No-op (stub — no real PIDLs allocated).
+///
+/// # Safety
+/// Pointer argument is accepted but not dereferenced.
+pub unsafe extern "win64" fn il_free(_pidl: *mut u8) {}
+
+// Wine ref: dlls/shell32/pidl.c — ILGetNext skips current PIDL item (advances by cb bytes);
+// returns pointer to next item, or NULL if at terminator (cb == 0).
+/// ILGetNext (shell32 #18) — advance to next item in a PIDL.
+///
+/// Returns NULL (stub).
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn il_get_next(_pidl: *const u8) -> *mut u8 {
+    std::ptr::null_mut()
+}
+
+// Wine ref: dlls/shell32/pidl.c — ILIsEqual compares two PIDLs byte-for-byte
+// after ILGetSize check; returns TRUE(1) if equal, FALSE(0) if not or either null.
+/// ILIsEqual (shell32 #21) — compare two PIDLs for equality.
+///
+/// Returns 0 (FALSE — stub).
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn il_is_equal(_pidl1: *const u8, _pidl2: *const u8) -> i32 {
+    0 // FALSE
+}
+
+// Wine ref: dlls/shell32/pidl.c — ILCombine concatenates two PIDLs; allocates via SHAlloc;
+// either argument may be NULL (treated as empty PIDL); caller must ILFree() result.
+/// ILCombine (shell32 #25) — concatenate two PIDLs.
+///
+/// Returns NULL (stub).
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn il_combine(_pidl1: *const u8, _pidl2: *const u8) -> *mut u8 {
+    std::ptr::null_mut()
+}
+
+// Wine ref: dlls/shell32/iconcache.c — SHMapPIDLToSystemImageListIndex looks up the
+// file type icon index; optional puFlags receives shell image list flags; returns -1 on failure.
+/// SHMapPIDLToSystemImageListIndex (shell32 #68) — map PIDL to system image list index.
+///
+/// Returns -1 (no icon — stub).
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn sh_map_pidl_to_image_index(
+    _himl: usize,
+    _pidl: *const u8,
+    _u_flags: *mut u32,
+    _u_extra_flags: u32,
+) -> i32 {
+    -1
+}
+
+// Wine ref: dlls/shell32/changenotify.c — NTSHChangeNotifyRegister registers a window
+// for shell change notifications; returns a registration ID (handle) on success; 0 on failure.
+/// NTSHChangeNotifyRegister (shell32 #88) — register for shell change notifications.
+///
+/// Returns 0 (stub — no change notification infrastructure).
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn nt_sh_change_notify_register(
+    _hwnd: usize,
+    _flags: u32,
+    _events: u32,
+    _msg: u32,
+    _n_entries: u32,
+    _p_shcne: *const u8,
+) -> u32 {
+    0
+}
+
+// Wine ref: none — ordinal #155 is undocumented in this Windows version.
+/// shell32 ordinal #155 — unknown undocumented ordinal.
+///
+/// Returns 0 (stub).
+///
+/// # Safety
+/// Pointer arguments are not dereferenced.
+pub unsafe extern "win64" fn shell32_ord155() -> usize {
+    0
+}
+
+// Wine ref: none — ordinal #190 is undocumented in this Windows version.
+/// shell32 ordinal #190 — unknown undocumented ordinal.
+///
+/// Returns 0 (stub).
+///
+/// # Safety
+/// Pointer arguments are not dereferenced.
+pub unsafe extern "win64" fn shell32_ord190() -> usize {
+    0
+}
+
 // ── Shell icon / info stubs ───────────────────────────────────────────────────
 
 // Wine ref: dlls/user32/exticon.c:249 — ICO_ExtractIconExW loads icon from PE resource; nIconIndex

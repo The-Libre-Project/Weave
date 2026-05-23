@@ -1472,6 +1472,7 @@ dependencies = [
 name = "weave-shlwapi"
 version = "0.0.1"
 dependencies = [
+ "weave-common",
  "weave-core",
 ]
 

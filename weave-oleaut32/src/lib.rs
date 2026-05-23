@@ -346,6 +346,159 @@ pub unsafe extern "win64" fn variant_copy(pdest: *mut u8, psrc: *const u8) -> i3
     0 // S_OK
 }
 
+// ── Error info / SAFEARRAY / new stubs ────────────────────────────────────────
+
+// Wine ref: dlls/oleaut32/errorinfo.c — GetErrorInfo retrieves the per-thread error
+// object set by SetErrorInfo; clears the thread-local on success; returns S_OK(0) if
+// an error object is set, S_FALSE(1) if no error object is set; pperrinfo zeroed on S_FALSE.
+/// GetErrorInfo (oleaut32 #8) — retrieve the per-thread error object.
+///
+/// Returns S_FALSE (1) — no error object set (stub). Writes NULL to *pperrinfo if non-null.
+///
+/// # Safety
+/// `pperrinfo` must be null or a valid writable pointer-to-pointer.
+pub unsafe extern "win64" fn get_error_info(
+    _dw_reserved: u32,
+    pperrinfo: *mut *mut u8,
+) -> i32 {
+    // SAFETY: caller guarantees pperrinfo is null or a valid writable slot.
+    if !pperrinfo.is_null() {
+        unsafe { *pperrinfo = std::ptr::null_mut() };
+    }
+    1 // S_FALSE — no error object
+}
+
+// Wine ref: dlls/oleaut32/variant.c — VariantChangeType converts source variant to vt
+// via VARIANT_Coerce; updates pdest in-place if pdest==psrc; returns DISP_E_TYPEMISMATCH
+// if conversion not supported; calls VariantClear on pdest before writing new value.
+/// VariantChangeType (oleaut32 #12) — convert a VARIANT to a new type.
+///
+/// Returns DISP_E_TYPEMISMATCH (0x80020005) — stub.
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn variant_change_type(
+    _pvarg_dest: *mut u8,
+    _pvarg_src: *const u8,
+    _w_flags: u16,
+    _vt: u16,
+) -> i32 {
+    0x80020005u32 as i32 // DISP_E_TYPEMISMATCH
+}
+
+// Wine ref: dlls/oleaut32/oleaut.c — SysAllocStringByteLen allocates a BSTR from raw bytes;
+// length prefix stores the byte count (not char count); appends 2-byte null terminator;
+// returns NULL if psz is NULL or allocation fails.
+/// SysAllocStringByteLen (oleaut32 #16) — allocate a BSTR from a byte string.
+///
+/// Returns NULL (stub — Q-Dir startup path does not require a valid BSTR here).
+///
+/// # Safety
+/// `psz` must be null or valid for `len` bytes.
+pub unsafe extern "win64" fn sys_alloc_string_byte_len(psz: *const u8, len: u32) -> *mut u16 {
+    if psz.is_null() {
+        return std::ptr::null_mut();
+    }
+    // Allocate: 4-byte length prefix + len bytes + 2-byte null terminator.
+    let total = 4 + (len as usize) + 2;
+    // SAFETY: malloc returns a valid allocation or null; checked below.
+    let buf = unsafe { libc::malloc(total) as *mut u8 };
+    if buf.is_null() {
+        return std::ptr::null_mut();
+    }
+    // SAFETY: buf is non-null, total bytes allocated; offset 0 is within allocation.
+    unsafe { *(buf as *mut u32) = len };
+    // SAFETY: buf is non-null; offset 4 is within allocation.
+    let data = unsafe { buf.add(4) };
+    // SAFETY: psz valid for len bytes (caller contract); data has len+2 bytes available.
+    unsafe {
+        std::ptr::copy_nonoverlapping(psz, data, len as usize);
+        *data.add(len as usize) = 0;
+        *data.add(len as usize + 1) = 0;
+    }
+    data as *mut u16
+}
+
+// Wine ref: dlls/oleaut32/safearray.c — SafeArrayGetElement locks the array, computes
+// element offset from indices, copies the element to pv; returns E_INVALIDARG if psa/pv
+// null or indices out-of-bounds.
+/// SafeArrayGetElement (oleaut32 #23) — retrieve one element from a safe array.
+///
+/// Returns E_INVALIDARG (0x80070057) — stub.
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn safe_array_get_element(
+    _psa: *const u8,
+    _rg_indices: *const i32,
+    _pv: *mut u8,
+) -> i32 {
+    0x80070057u32 as i32 // E_INVALIDARG
+}
+
+// Wine ref: dlls/oleaut32/safearray.c — SafeArrayPutElement locks the array, computes
+// element offset from indices, copies pv into the element slot; returns E_INVALIDARG if
+// psa/pv null or indices out of bounds.
+/// SafeArrayPutElement (oleaut32 #24) — store one element into a safe array.
+///
+/// Returns E_INVALIDARG (0x80070057) — stub.
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn safe_array_put_element(
+    _psa: *mut u8,
+    _rg_indices: *const i32,
+    _pv: *const u8,
+) -> i32 {
+    0x80070057u32 as i32 // E_INVALIDARG
+}
+
+// Wine ref: dlls/oleaut32/errorinfo.c — SetErrorInfo stores the IErrorInfo pointer on the
+// per-thread slot (via TlsGetValue/TlsSetValue); AddRef's on the new pointer; Release's
+// the old one; dwReserved must be 0. Returns S_OK (0).
+/// SetErrorInfo (oleaut32 #146) — set the per-thread error info object.
+///
+/// No-op, returns S_OK (0) — stub.
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn set_error_info(_dw_reserved: u32, _perrinfo: *const u8) -> i32 {
+    0 // S_OK
+}
+
+// Wine ref: dlls/oleaut32/errorinfo.c — CreateErrorInfo creates a default ICreateErrorInfo
+// implementation (IErrorInfoImpl); stores in *pperrinfo; AddRef'd on creation; caller must
+// Release. Returns E_OUTOFMEMORY if allocation fails; E_POINTER if pperrinfo null.
+/// CreateErrorInfo (oleaut32 #162) — create a new error info object.
+///
+/// Returns E_NOTIMPL (0x80004001), writes NULL to *pperrinfo if non-null — stub.
+///
+/// # Safety
+/// `pperrinfo` must be null or a valid writable pointer-to-pointer.
+pub unsafe extern "win64" fn create_error_info(pperrinfo: *mut *mut u8) -> i32 {
+    // SAFETY: caller guarantees pperrinfo is null or a valid writable slot.
+    if !pperrinfo.is_null() {
+        unsafe { *pperrinfo = std::ptr::null_mut() };
+    }
+    0x80004001u32 as i32 // E_NOTIMPL
+}
+
+// Wine ref: none — ordinal #411 is undocumented / version-specific.
+/// oleaut32 ordinal #411 — unknown undocumented ordinal.
+///
+/// Returns E_NOTIMPL (0x80004001) — stub.
+pub extern "win64" fn oleaut32_ord411() -> i32 {
+    0x80004001u32 as i32 // E_NOTIMPL
+}
+
+// Wine ref: none — ordinal #419 is undocumented / version-specific.
+/// oleaut32 ordinal #419 — unknown undocumented ordinal.
+///
+/// Returns E_NOTIMPL (0x80004001) — stub.
+pub extern "win64" fn oleaut32_ord419() -> i32 {
+    0x80004001u32 as i32 // E_NOTIMPL
+}
+
 // ── Resolver ─────────────────────────────────────────────────────────────────
 
 /// Resolve an oleaut32.dll import (by name or ordinal string "#N").
@@ -383,6 +536,30 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "VariantCopy" | "#11" => {
             Some(variant_copy as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
         }
+        // Q-Dir oleaut32 ordinals (#8, #12, #16, #23, #24, #146, #162, #411, #419)
+        "GetErrorInfo" | "#8" => Some(
+            get_error_info as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
+        ),
+        "VariantChangeType" | "#12" => Some(
+            variant_change_type as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
+        ),
+        "SysAllocStringByteLen" | "#16" => Some(
+            sys_alloc_string_byte_len as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
+        ),
+        "SafeArrayGetElement" | "#23" => Some(
+            safe_array_get_element as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
+        ),
+        "SafeArrayPutElement" | "#24" => Some(
+            safe_array_put_element as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
+        ),
+        "SetErrorInfo" | "#146" => Some(
+            set_error_info as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
+        ),
+        "CreateErrorInfo" | "#162" => Some(
+            create_error_info as unsafe extern "win64" fn(_) -> _ as *const () as usize,
+        ),
+        "#411" => Some(oleaut32_ord411 as extern "win64" fn() -> _ as *const () as usize),
+        "#419" => Some(oleaut32_ord419 as extern "win64" fn() -> _ as *const () as usize),
         _ => None,
     }
 }
@@ -418,6 +595,37 @@ mod tests {
         assert!(resolve("oleaut32.dll", "#9").is_some());
         assert!(resolve("oleaut32.dll", "#10").is_some());
         assert!(resolve("oleaut32.dll", "#149").is_some());
+    }
+
+    #[test]
+    fn resolve_q_dir_oleaut32_ordinals() {
+        // Q-Dir oleaut32 ordinals: #8, #12, #16, #23, #24, #146, #162, #411, #419
+        let ordinals = ["#8", "#12", "#16", "#23", "#24", "#146", "#162", "#411", "#419"];
+        for ord in &ordinals {
+            assert!(
+                resolve("oleaut32.dll", ord).is_some(),
+                "oleaut32.dll!{ord} must resolve"
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_q_dir_oleaut32_by_name() {
+        let named = [
+            "GetErrorInfo",
+            "VariantChangeType",
+            "SysAllocStringByteLen",
+            "SafeArrayGetElement",
+            "SafeArrayPutElement",
+            "SetErrorInfo",
+            "CreateErrorInfo",
+        ];
+        for name in &named {
+            assert!(
+                resolve("oleaut32.dll", name).is_some(),
+                "oleaut32.dll!{name} must resolve"
+            );
+        }
     }
 
     #[test]
