@@ -1362,6 +1362,7 @@ dependencies = [
 name = "weave-gdiplus"
 version = "0.0.1"
 dependencies = [
+ "libc",
  "weave-core",
 ]
 
