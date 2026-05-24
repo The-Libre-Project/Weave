@@ -7060,7 +7060,7 @@ pub extern "win64" fn get_tick_count_64() -> u64 {
     static GTC_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = GTC_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     // Log at call #0 and every 10,000 calls — detects GetTickCount spin-wait loops.
-    if n == 0 || n % 10_000 == 0 {
+    if n == 0 || n.is_multiple_of(10_000) {
         eprintln!("weave/GetTickCount64: call #{n}");
     }
     let mut ts = libc::timespec {
@@ -7087,7 +7087,7 @@ pub unsafe extern "win64" fn query_performance_counter(lp_performance_count: *mu
     static QPC_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = QPC_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     // Log at call #0 and every 1,000,000 calls — detects QPC-based spin-wait loops.
-    if n == 0 || n % 1_000_000 == 0 {
+    if n == 0 || n.is_multiple_of(1_000_000) {
         eprintln!("weave/QueryPerformanceCounter: call #{n}");
     }
     let mut ts = libc::timespec {
@@ -12014,6 +12014,22 @@ pub unsafe extern "win64" fn get_string_type_ex_a(
     1 // TRUE
 }
 
+/// GetStringTypeA: classify ANSI characters by Unicode type.
+///
+/// # Safety
+/// `lp_src_str` must be valid for `cch_src` bytes.
+/// `lp_char_type` must be writable for `cch_src` u16 elements.
+// Wine ref: dlls/kernelbase/locale.c — GetStringTypeA(type, src, len, out) delegates directly
+// to GetStringTypeExA(locale=0, type, src, len, out); locale parameter is ignored for ASCII
+pub unsafe extern "win64" fn get_string_type_a(
+    dw_info_type: u32,
+    lp_src_str: *const u8,
+    cch_src: i32,
+    lp_char_type: *mut u16,
+) -> i32 {
+    unsafe { get_string_type_ex_a(0, dw_info_type, lp_src_str, cch_src, lp_char_type) }
+}
+
 /// AreFileApisANSI: return whether file I/O APIs use the ANSI codepage.
 // Wine ref: dlls/kernelbase/file.c:498 — returns `!oem_file_apis`; oem_file_apis is a
 // module-level bool toggled by SetFileApisToOEM/SetFileApisToANSI; default FALSE → returns TRUE
@@ -14335,6 +14351,9 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
             get_string_type_ex_a as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const ()
                 as usize,
         ),
+        "GetStringTypeA" => Some(
+            get_string_type_a as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
+        ),
         "AreFileApisANSI" => {
             Some(are_file_apis_ansi as extern "win64" fn() -> _ as *const () as usize)
         }
@@ -14525,6 +14544,12 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "InitializeSListHead" => {
             Some(initialize_slist_head as unsafe extern "win64" fn(_) as *const () as usize)
         }
+        "InterlockedPopEntrySList" => Some(
+            interlockedpopentryslsit as unsafe extern "win64" fn(_) -> _ as *const () as usize,
+        ),
+        "InterlockedPushEntrySList" => Some(
+            interlockedpushentryslsit as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
+        ),
         "IsValidLocale" => Some(is_valid_locale as *const () as usize),
         "EnumSystemLocalesW" => {
             Some(enum_system_locales_w as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
@@ -15816,6 +15841,73 @@ pub unsafe extern "win64" fn initialize_slist_head(list_head: *mut u128) {
     if !list_head.is_null() {
         unsafe { *list_head = 0 };
     }
+}
+
+// SLIST_HEADER internal layout (Weave, 16-byte aligned u128, little-endian):
+//   bits  [15:0]  = Depth    (u16 — entry count)
+//   bits  [63:16] = Sequence (u48 — ABA counter)
+//   bits [127:64] = Next     (u64 — raw *mut u8 pointer to first SLIST_ENTRY; null = empty)
+//
+// This is Weave's own encoding (not identical to the Windows Header8/Header16 bit-fields).
+// All three Interlocked/Initialize SList stubs agree on this layout, so the MSVC CRT's
+// calls through our IAT are fully self-consistent.
+//
+// Wine ref: dlls/ntoskrnl.exe/sync.c — InterlockedPop/PushEntrySList delegates to
+// RtlInterlockedPop/PushEntrySList (ntdll); the real Windows path uses lock cmpxchg16b.
+// Weave serialises via a global Mutex — correct for all call patterns, including the
+// single-threaded MSVC CRT heap init path that triggers the Q-Dir SIGSEGV (Fail #25).
+
+static SLIST_LOCK: Mutex<()> = Mutex::new(());
+
+/// InterlockedPopEntrySList: atomically remove the first entry from the SLIST.
+/// Returns a pointer to the removed SLIST_ENTRY, or null if the list was empty.
+///
+/// # Safety
+/// `list_head` must be a valid 16-byte-aligned SLIST_HEADER initialised by InitializeSListHead.
+pub unsafe extern "win64" fn interlockedpopentryslsit(list_head: *mut u128) -> *mut u8 {
+    if list_head.is_null() {
+        return core::ptr::null_mut();
+    }
+    let _guard = SLIST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let val = unsafe { core::ptr::read_volatile(list_head) };
+    let old_next = (val >> 64) as u64 as *mut u8; // high qword = Next ptr
+    if old_next.is_null() {
+        return core::ptr::null_mut(); // list empty
+    }
+    // Read entry->Next (first 8 bytes of the SLIST_ENTRY = its Next pointer field).
+    let new_next = unsafe { *(old_next as *const *mut u8) };
+    let old_depth = (val & 0xFFFF) as u16;
+    let old_seq = ((val >> 16) & 0x0000_FFFF_FFFF_FFFF_u128) as u64;
+    let new_low = (old_depth.wrapping_sub(1) as u128) | ((old_seq.wrapping_add(1) as u128) << 16);
+    let new_val = new_low | ((new_next as u64 as u128) << 64);
+    unsafe { core::ptr::write_volatile(list_head, new_val) };
+    old_next
+}
+
+/// InterlockedPushEntrySList: atomically insert an entry at the head of the SLIST.
+/// Returns a pointer to the previous first entry, or null if the list was empty.
+///
+/// # Safety
+/// `list_head` must be a valid 16-byte-aligned SLIST_HEADER initialised by InitializeSListHead.
+/// `list_entry` must point to a valid SLIST_ENTRY (first 8 bytes are the Next pointer field).
+pub unsafe extern "win64" fn interlockedpushentryslsit(
+    list_head: *mut u128,
+    list_entry: *mut u8,
+) -> *mut u8 {
+    if list_head.is_null() || list_entry.is_null() {
+        return core::ptr::null_mut();
+    }
+    let _guard = SLIST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let val = unsafe { core::ptr::read_volatile(list_head) };
+    let old_next = (val >> 64) as u64 as *mut u8; // current head
+    // Link entry into list: entry->Next = old_next.
+    unsafe { *(list_entry as *mut *mut u8) = old_next };
+    let old_depth = (val & 0xFFFF) as u16;
+    let old_seq = ((val >> 16) & 0x0000_FFFF_FFFF_FFFF_u128) as u64;
+    let new_low = (old_depth.wrapping_add(1) as u128) | ((old_seq.wrapping_add(1) as u128) << 16);
+    let new_val = new_low | ((list_entry as u64 as u128) << 64);
+    unsafe { core::ptr::write_volatile(list_head, new_val) };
+    old_next // previous head (null if list was empty)
 }
 
 /// IsValidLocale: return TRUE for any locale (we accept all).
