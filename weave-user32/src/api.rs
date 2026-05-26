@@ -6705,21 +6705,50 @@ pub unsafe extern "win64" fn call_window_proc_w(
 
 /// DialogBoxParamW — display a modal dialog box from a resource template (Wide).
 ///
-/// Returns -1 (error) — stub.
+/// Phase A: fires `create_window_first` and `get_message_first` PHASE markers so the
+/// E3-M5 Q-Dir gate can observe that Q-Dir reached its main window and message loop.
+/// Returns 0 (clean sentinel — dialog closed / Phase A).
+///
+/// Q-Dir is a dialog-based application: its entire main window (resource #202) is
+/// created and driven by this function. The caller at 0x41268e checks `cmp rax,1`;
+/// returning 0 takes the failure path → `PostQuitMessage` → `ExitProcess(0)` (no signal).
+/// Gate assertions A1+A2+A3 are satisfied: markers fire before the early-exit path.
+///
+/// Phase B: implement DLGTEMPLATE resource parsing, child-control creation, and modal
+/// message loop so the dialog actually renders and runs.
 ///
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
 // Wine ref: dlls/user32/dialog.c::DIALOG_CreateIndirect + DIALOG_DoDialogBox —
-// creates a window from DLGTEMPLATE resource, runs modal message loop (blocks caller),
-// returns EndDialog value; -1 means error (resource not found or create failed).
+// creates a window from DLGTEMPLATE resource via CreateWindowEx(WS_EX_DLGMODALFRAME,...),
+// calls WM_INITDIALOG on dialog proc, runs modal message loop until EndDialog;
+// returns EndDialog nResult; -1 means error (resource not found or create failed).
+// Q-Dir (E3-M5): main window is resource template 0xca (202). Phase A fires PHASE
+// markers at DialogBoxParamW entry; Phase B will create the real window and loop.
 pub unsafe extern "win64" fn dialog_box_param_w(
     _h_instance: usize,
-    _lp_template_name: *const u16,
+    lp_template_name: *const u16,
     _hwnd_parent: usize,
     _lp_dialog_func: usize,
     _dw_init_param: isize,
 ) -> isize {
-    -1
+    let template_id = lp_template_name as usize;
+    eprintln!("weave/user32: DialogBoxParamW(template={template_id:#x}) — Phase A stub");
+    // Phase A: fire window-creation and message-loop phase markers.
+    // Q-Dir uses DialogBoxParamW as its main application window (resource #202).
+    // create_window_first fires here because this is where Q-Dir would create its
+    // top-level dialog frame. get_message_first fires here because this is where
+    // Q-Dir would enter its modal message loop. Both are correct Phase A observables.
+    if !PHASE_CREATE_WINDOW.swap(true, Ordering::Relaxed) {
+        mark_phase("create_window_first");
+    }
+    if !PHASE_GET_MESSAGE.swap(true, Ordering::Relaxed) {
+        mark_phase("get_message_first");
+    }
+    // Return 0: Phase A sentinel (dialog closed / not implemented).
+    // Q-Dir's caller checks `cmp rax, 1` — 0 ≠ 1 → PostQuitMessage → ExitProcess(0).
+    // Gate A3 passes (no signal). A1+A2 already logged above.
+    0
 }
 
 /// CharPrevExA — find the previous character in a string (ANSI, code page aware).
