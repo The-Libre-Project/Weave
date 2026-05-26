@@ -1032,6 +1032,205 @@ pub unsafe extern "win64" fn shell_execute_ex_w(_lp_exec_info: *mut u8) -> i32 {
     0 // FALSE
 }
 
+// ── SHGetMalloc / IMalloc COM object ──────────────────────────────────────────
+//
+// Wine ref: dlls/combase/malloc.c — SHGetMalloc (deprecated since Vista) is equivalent
+// to CoGetMalloc(MEMCTX_TASK=1, ppMalloc); it returns the process task allocator which
+// wraps HeapAlloc/HeapFree/HeapReAlloc on the process default heap.  The returned IMalloc*
+// is a process-lifetime singleton; callers are expected to call Release() but the object
+// is never actually freed.  Returns S_OK(0) on success, E_INVALIDARG if ppMalloc is null.
+//
+// IMalloc vtable layout (IUnknown-derived, Windows x64, 9 methods):
+//   [0] QueryInterface(this, riid, ppv) -> HRESULT
+//   [1] AddRef(this)                    -> ULONG
+//   [2] Release(this)                   -> ULONG
+//   [3] Alloc(this, cb)                 -> LPVOID
+//   [4] Realloc(this, pv, cb)           -> LPVOID
+//   [5] Free(this, pv)                  -> void
+//   [6] GetSize(this, pv)               -> SIZE_T
+//   [7] DidAlloc(this, pv)              -> int
+//   [8] HeapMinimize(this)              -> void
+//
+// COM object layout: offset 0 holds a *const vtable (pointer-to-vtable).
+// `this` == address of that first field; vtable[n] is called as vtable[n](this, ...).
+
+use std::sync::OnceLock;
+
+static IMALLOC: OnceLock<usize> = OnceLock::new();
+
+/// Return the address of the process-lifetime IMalloc COM object.
+/// The object is a heap word whose value is the vtable pointer.
+/// Idempotent — safe to call from multiple threads.
+fn get_imalloc_ptr() -> usize {
+    *IMALLOC.get_or_init(|| {
+        // Build a heap-allocated vtable (9 × usize function pointers).
+        // Casts happen at runtime so no const-eval restrictions apply.
+        // SAFETY: All fn items here have matching "extern win64" ABI; casting to
+        // usize via typed fn-pointer is well-defined (function address is a usize).
+        // (a) fn-item casts produce valid code addresses; (b) Box-heap; (c) process
+        // lifetime; (d) none — TODO(shim): Phase A, gated on E3-M5 launch gate.
+        let vtable: Box<[usize; 9]> = Box::new([
+            imalloc_query_interface
+                as unsafe extern "win64" fn(usize, *const u8, *mut usize) -> i32
+                as usize,
+            imalloc_add_ref as unsafe extern "win64" fn(usize) -> u32 as usize,
+            imalloc_release as unsafe extern "win64" fn(usize) -> u32 as usize,
+            imalloc_alloc as unsafe extern "win64" fn(usize, usize) -> usize as usize,
+            imalloc_realloc
+                as unsafe extern "win64" fn(usize, usize, usize) -> usize
+                as usize,
+            imalloc_free as unsafe extern "win64" fn(usize, usize) as usize,
+            imalloc_get_size as unsafe extern "win64" fn(usize, usize) -> usize as usize,
+            imalloc_did_alloc as unsafe extern "win64" fn(usize, usize) -> i32 as usize,
+            imalloc_heap_minimize as unsafe extern "win64" fn(usize) as usize,
+        ]);
+        let vtable_ptr: usize = Box::into_raw(vtable) as usize;
+
+        // Build the COM object: a heap word whose value is the vtable address.
+        // SAFETY: Box::into_raw leaks intentionally — process-lifetime singleton.
+        let obj: Box<usize> = Box::new(vtable_ptr);
+        Box::into_raw(obj) as usize
+    })
+}
+
+// ── IMalloc vtable methods (extern "win64" — called by Q-Dir through vtable) ──
+
+// Wine ref: dlls/combase/malloc.c — QueryInterface supports IID_IUnknown and IID_IMalloc;
+// AddRefs on success; E_NOINTERFACE (0x80004002) otherwise.  Weave simplifies:
+// always returns self (Q-Dir only calls this to obtain the same interface).
+unsafe extern "win64" fn imalloc_query_interface(
+    _this: usize,
+    _riid: *const u8,
+    pp_obj: *mut usize,
+) -> i32 {
+    if !pp_obj.is_null() {
+        // SAFETY: pp_obj non-null (checked above); aligned *mut usize output.
+        // (a) null-checked; (b) caller stack; (c) call duration; (d) none — TODO(shim): Phase A.
+        unsafe { *pp_obj = _this };
+    }
+    0 // S_OK
+}
+
+// Wine ref: dlls/combase/malloc.c — AddRef increments ref count; returns new count.
+// Weave: process-lifetime singleton; ref count is always 1.
+unsafe extern "win64" fn imalloc_add_ref(_this: usize) -> u32 {
+    1
+}
+
+// Wine ref: dlls/combase/malloc.c — Release decrements ref count; object freed at 0.
+// Weave: singleton never freed; always returns 1.
+unsafe extern "win64" fn imalloc_release(_this: usize) -> u32 {
+    1
+}
+
+// Wine ref: dlls/combase/malloc.c — Alloc calls HeapAlloc(GetProcessHeap(), 0, cb).
+// Zero-byte alloc returns a unique non-null pointer per COM spec.
+unsafe extern "win64" fn imalloc_alloc(_this: usize, cb: usize) -> usize {
+    // SAFETY: libc::malloc accepts any size; returns null on OOM (caller checks).
+    // (a) n/a — no deref; (b) heap; (c) caller owns result; (d) none — TODO(shim): Phase A.
+    let sz = if cb == 0 { 1 } else { cb };
+    unsafe { libc::malloc(sz) as usize }
+}
+
+// Wine ref: dlls/combase/malloc.c — Realloc calls HeapReAlloc; NULL pv acts like Alloc;
+// cb=0 acts like Free and returns NULL.
+unsafe extern "win64" fn imalloc_realloc(_this: usize, pv: usize, cb: usize) -> usize {
+    if pv == 0 {
+        let sz = if cb == 0 { 1 } else { cb };
+        // SAFETY: malloc with non-zero size; caller checks result.
+        return unsafe { libc::malloc(sz) as usize };
+    }
+    if cb == 0 {
+        // SAFETY: pv non-zero (checked); assumed valid heap pointer from this allocator.
+        unsafe { libc::free(pv as *mut libc::c_void) };
+        return 0;
+    }
+    // SAFETY: pv non-zero; cb non-zero; caller contract: pv was allocated by this allocator.
+    // (a) null-checked; (b) heap; (c) caller owns result; (d) none — TODO(shim): Phase A.
+    unsafe { libc::realloc(pv as *mut libc::c_void, cb) as usize }
+}
+
+// Wine ref: dlls/combase/malloc.c — Free calls HeapFree(GetProcessHeap(), 0, pv); NULL is no-op.
+unsafe extern "win64" fn imalloc_free(_this: usize, pv: usize) {
+    if pv != 0 {
+        // SAFETY: pv non-zero (checked); assumed valid heap pointer from this allocator.
+        // (a) null-checked; (b) heap; (c) call duration; (d) none — TODO(shim): Phase A.
+        unsafe { libc::free(pv as *mut libc::c_void) };
+    }
+}
+
+// Wine ref: dlls/combase/malloc.c — GetSize calls HeapSize(GetProcessHeap(), 0, pv);
+// returns (SIZE_T)-1 for NULL pv.
+unsafe extern "win64" fn imalloc_get_size(_this: usize, pv: usize) -> usize {
+    if pv == 0 {
+        return usize::MAX; // (SIZE_T)-1 per COM spec for null pointer
+    }
+    // SAFETY: pv non-zero; malloc_usable_size accepts any valid heap pointer on Linux.
+    // (a) null-checked; (b) heap; (c) call duration; (d) none — TODO(shim): Phase A.
+    unsafe { libc::malloc_usable_size(pv as *mut libc::c_void) }
+}
+
+// Wine ref: dlls/combase/malloc.c — DidAlloc calls HeapValidate; returns 1 if allocated
+// by this heap, 0 if not, -1 if unknown.  Weave always returns -1 (don't know).
+unsafe extern "win64" fn imalloc_did_alloc(_this: usize, _pv: usize) -> i32 {
+    -1
+}
+
+// Wine ref: dlls/combase/malloc.c — HeapMinimize calls HeapCompact to release free blocks
+// back to the OS.  Weave: no-op.
+unsafe extern "win64" fn imalloc_heap_minimize(_this: usize) {}
+
+// Wine ref: dlls/combase/malloc.c — SHGetMalloc equivalent to CoGetMalloc(MEMCTX_TASK=1,
+// ppMalloc); returns the process task allocator; E_INVALIDARG if ppMalloc null.
+/// SHGetMalloc: return the shell task allocator (IMalloc*).
+///
+/// Deprecated since Windows Vista; equivalent to `CoGetMalloc(MEMCTX_TASK, ppMalloc)`.
+/// Returns `S_OK` (0) on success; `E_INVALIDARG` (0x80070057) if `pp_malloc` is null.
+///
+/// # Safety
+/// `pp_malloc` must be null or a valid writable pointer to a `usize`-sized output slot.
+pub unsafe extern "win64" fn sh_get_malloc(pp_malloc: *mut usize) -> i32 {
+    const E_INVALIDARG: i32 = 0x80070057u32 as i32;
+    if pp_malloc.is_null() {
+        return E_INVALIDARG;
+    }
+    // SAFETY: pp_malloc non-null (checked above); caller contract: valid *mut usize output,
+    // pointer-size aligned.  (a) null-checked; (b) caller stack/heap; (c) call duration;
+    // (d) none — TODO(shim): Phase A, gated on E3-M5 q_dir_launch_gate.
+    unsafe { *pp_malloc = get_imalloc_ptr() };
+    0 // S_OK
+}
+
+// Wine ref: dlls/shell32/appbar.c — SHAppBarMessage dispatches on dwMessage (ABM_NEW=0,
+// ABM_REMOVE=1, ABM_QUERYPOS=2, ABM_SETPOS=3, ABM_GETSTATE=4, ABM_GETTASKBARPOS=5,
+// ABM_ACTIVATE=6, ABM_GETAUTOHIDEBAR=7, ABM_SETAUTOHIDEBAR=8, ABM_WINDOWPOSCHANGED=9,
+// ABM_SETSTATE=10); returns UINT (0 on error, non-zero on success).
+/// SHAppBarMessage: send a message to the appbar / taskbar system.
+///
+/// Stub — returns 0 (failure).
+///
+/// # Safety
+/// `p_data` is accepted but not dereferenced.
+// Wine ref: dlls/shell32/appbar.c — ABM_* dispatch; returns 0 on error.
+pub unsafe extern "win64" fn sh_app_bar_message(_dw_message: u32, _p_data: *mut u8) -> usize {
+    // TODO(shim): Phase A — SHAppBarMessage taskbar integration not implemented.
+    0
+}
+
+// Wine ref: dlls/shell32/shellord.c — SHGetSettings fills SHELLFLAGSTATE fields (fShowAllObjects,
+// fShowExtensions, fNoConfirmRecycle, etc.) from registry key
+// HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced; dwMask selects fields.
+/// SHGetSettings: retrieve shell configuration flags into a SHELLFLAGSTATE struct.
+///
+/// Stub — writes nothing; all flags default to 0 (system defaults).
+///
+/// # Safety
+/// `p_sfs` is accepted but not dereferenced.
+// Wine ref: dlls/shell32/shellord.c — fills SHELLFLAGSTATE from registry; dwMask selects fields.
+pub unsafe extern "win64" fn sh_get_settings(_p_sfs: *mut u8, _dw_mask: u32) {
+    // TODO(shim): Phase A — SHGetSettings shell configuration not implemented.
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

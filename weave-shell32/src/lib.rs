@@ -187,6 +187,19 @@ fn resolve_shell32(func: &str) -> Option<usize> {
         ),
         "#155" => Some(shell::shell32_ord155 as unsafe extern "win64" fn() -> _ as *const () as usize),
         "#190" => Some(shell::shell32_ord190 as unsafe extern "win64" fn() -> _ as *const () as usize),
+        // Q-Dir startup — process task allocator
+        "SHGetMalloc" => Some(
+            shell::sh_get_malloc as unsafe extern "win64" fn(*mut usize) -> i32 as *const ()
+                as usize,
+        ),
+        // Q-Dir startup — taskbar + shell settings (Phase A stubs)
+        "SHAppBarMessage" => Some(
+            shell::sh_app_bar_message as unsafe extern "win64" fn(u32, *mut u8) -> usize
+                as *const () as usize,
+        ),
+        "SHGetSettings" => Some(
+            shell::sh_get_settings as unsafe extern "win64" fn(*mut u8, u32) as *const () as usize,
+        ),
         _ => None,
     }
 }
