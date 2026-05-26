@@ -7559,6 +7559,8 @@ pub extern "win64" fn destroy_accelerator_table(_h_accel: usize) -> i32 {
 
 // ── SumatraPDF DDE single-instance stubs ─────────────────────────────────────
 
+/// # Safety
+/// `pid_inst` must be null or point to a valid `u32` write target.
 // Wine ref: dlls/user32/dde/ddeclient.c — DdeInitialize sets up per-instance
 // state in a global table keyed by pidInst; DMLERR_NO_ERROR (0) = success.
 // SumatraPDF calls this to register as a DDE client after CoCreateInstance
@@ -7577,6 +7579,8 @@ pub unsafe extern "win64" fn dde_initialize_w(
     0 // DMLERR_NO_ERROR
 }
 
+/// # Safety
+/// `lp_sz_class` and `lp_sz_window` must be null or valid null-terminated UTF-16 strings.
 // Wine ref: dlls/user32/winpos.c FindWindowExW — iterates the window list
 // checking class name and title. Returns NULL when no match. SumatraPDF calls
 // this looking for an existing SumatraPDF DDE server window; NULL means "I am
