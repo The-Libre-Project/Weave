@@ -157,3 +157,32 @@ pub fn find_with<F: Fn(usize, &WindowEntry) -> bool>(f: F) -> usize {
         .map(|(&h, _)| h)
         .unwrap_or(0)
 }
+
+/// True if `hwnd` exists in the window table.
+pub fn contains(hwnd: usize) -> bool {
+    with(hwnd, |_| ()).is_some()
+}
+
+/// Direct children of `parent`, sorted by HWND ascending (creation / Z-order proxy).
+pub fn children_of(parent: usize) -> Vec<usize> {
+    let mut children: Vec<usize> = all_hwnds()
+        .into_iter()
+        .filter(|&h| with(h, |e| e.hwnd_parent == parent).unwrap_or(false))
+        .collect();
+    children.sort_unstable();
+    children
+}
+
+/// Siblings sharing the same parent as `hwnd`, sorted by HWND ascending.
+pub fn siblings_of(hwnd: usize) -> Vec<usize> {
+    let parent = match with(hwnd, |e| e.hwnd_parent) {
+        Some(p) => p,
+        None => return Vec::new(),
+    };
+    let mut siblings: Vec<usize> = all_hwnds()
+        .into_iter()
+        .filter(|&h| with(h, |e| e.hwnd_parent == parent).unwrap_or(false))
+        .collect();
+    siblings.sort_unstable();
+    siblings
+}

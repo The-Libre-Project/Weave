@@ -17,7 +17,7 @@ use libc;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
-use weave_common::stub::warn_once;
+use weave_common::set_last_error;
 use weave_core::progress::mark_phase;
 use weave_core::restrace;
 
@@ -4553,28 +4553,42 @@ pub unsafe extern "win64" fn create_dialog_indirect_param_w(
 
 /// DialogBoxIndirectParamW: display a modal dialog box from a DLGTEMPLATE pointer (Wide).
 ///
-/// Returns -1 (error) — stub. Modal message loop deferred.
-///
 /// # Safety
-/// Pointer arguments are accepted but not dereferenced beyond the null check.
-// Wine ref: dlls/user32/dialog.c::DIALOG_CreateIndirect — null template → return 0;
-// DialogBoxIndirect passes non-NULL modal_owner to DIALOG_CreateIndirect, then calls
-// DIALOG_DoDialogBox which runs the modal message loop; returns EndDialog value or -1 on error.
+/// `lp_template` must point at a valid DLGTEMPLATE when non-null.
+// Wine ref: dlls/user32/dialog.c::DialogBoxIndirectParamW — DIALOG_CreateIndirect then
+// DIALOG_DoDialogBox; returns EndDialog nResult or -1 on error.
 pub unsafe extern "win64" fn dialog_box_indirect_param_w(
-    _h_instance: usize,
-    _lp_template: *const u8,
-    _hwnd_parent: usize,
-    _lp_dialog_func: usize,
-    _dw_init_param: isize,
+    h_instance: usize,
+    lp_template: *const u8,
+    hwnd_parent: usize,
+    lp_dialog_func: usize,
+    dw_init_param: isize,
 ) -> isize {
-    -1
+    if lp_template.is_null() || lp_dialog_func == 0 {
+        return -1;
+    }
+    let Some(hwnd) = crate::dialog::create_from_template_bytes(
+        lp_template,
+        4096,
+        hwnd_parent,
+        lp_dialog_func,
+        dw_init_param,
+        h_instance,
+    ) else {
+        return -1;
+    };
+    unsafe { run_modal_dialog_loop(hwnd) }
 }
 
 /// EndDialog: close a dialog box.
 // Wine ref: dlls/user32/dialog.c — EndDialog sets dialog's nResult field and posts
 // WM_NULL to unblock the modal message loop in DialogBox; DestroyWindow called after loop.
-pub extern "win64" fn end_dialog(_h_dlg: usize, _n_result: isize) -> i32 {
-    1
+pub extern "win64" fn end_dialog(h_dlg: usize, n_result: isize) -> i32 {
+    if crate::dialog::signal_end_dialog(h_dlg, n_result) {
+        1
+    } else {
+        0
+    }
 }
 
 /// GetDlgItem: find a control in a dialog by ID. Returns 0 (not found).
@@ -6703,52 +6717,91 @@ pub unsafe extern "win64" fn call_window_proc_w(
     call_wnd_proc(lp_prev_wnd_func, h_wnd, msg, w_param, l_param)
 }
 
-/// DialogBoxParamW — display a modal dialog box from a resource template (Wide).
-///
-/// Phase A: fires `create_window_first` and `get_message_first` PHASE markers so the
-/// E3-M5 Q-Dir gate can observe that Q-Dir reached its main window and message loop.
-/// Returns 0 (clean sentinel — dialog closed / Phase A).
-///
-/// Q-Dir is a dialog-based application: its entire main window (resource #202) is
-/// created and driven by this function. The caller at 0x41268e checks `cmp rax,1`;
-/// returning 0 takes the failure path → `PostQuitMessage` → `ExitProcess(0)` (no signal).
-/// Gate assertions A1+A2+A3 are satisfied: markers fire before the early-exit path.
-///
-/// Phase B: implement DLGTEMPLATE resource parsing, child-control creation, and modal
-/// message loop so the dialog actually renders and runs.
+/// Run the modal message loop for a dialog until EndDialog or WM_QUIT.
 ///
 /// # Safety
-/// Pointer arguments are accepted but not dereferenced.
-// Wine ref: dlls/user32/dialog.c::DIALOG_CreateIndirect + DIALOG_DoDialogBox —
-// creates a window from DLGTEMPLATE resource via CreateWindowEx(WS_EX_DLGMODALFRAME,...),
-// calls WM_INITDIALOG on dialog proc, runs modal message loop until EndDialog;
-// returns EndDialog nResult; -1 means error (resource not found or create failed).
-// Q-Dir (E3-M5): main window is resource template 0xca (202). Phase A fires PHASE
-// markers at DialogBoxParamW entry; Phase B will create the real window and loop.
+/// `hwnd` must be a valid dialog HWND created by `crate::dialog`.
+unsafe fn run_modal_dialog_loop(hwnd: usize) -> isize {
+    crate::dialog::begin_modal(hwnd);
+    let mut msg = Msg {
+        hwnd: 0,
+        message: 0,
+        w_param: 0,
+        l_param: 0,
+        time: 0,
+        pt_x: 0,
+        pt_y: 0,
+    };
+    loop {
+        if crate::dialog::modal_ended() {
+            break;
+        }
+        let ret = unsafe { get_message_w(&mut msg, 0, 0, 0) };
+        if ret < 0 {
+            break;
+        }
+        if ret == 0 {
+            break;
+        }
+        if crate::dialog::modal_ended() {
+            break;
+        }
+        if !window::contains(msg.hwnd) && msg.message != WM_NULL {
+            continue;
+        }
+        let _ = unsafe { translate_message(&msg) };
+        let _ = unsafe { dispatch_message_w(&msg) };
+    }
+    let result = crate::dialog::take_modal_result(hwnd).unwrap_or(0);
+    window::remove(hwnd);
+    result
+}
+
+/// DialogBoxParamW — display a modal dialog box from a resource template (Wide).
+///
+/// Loads RT_DIALOG from the PE, creates the dialog frame and child controls from the
+/// DLGTEMPLATE, runs WM_INITDIALOG, then enters a modal message loop until EndDialog.
+///
+/// # Safety
+/// Caller must ensure all pointer arguments are valid for the duration of the call.
+// Wine ref: dlls/user32/dialog.c::DialogBoxParamW — FindResourceW(RT_DIALOG), LoadResource,
+// DIALOG_CreateIndirect (modal=TRUE), DIALOG_DoDialogBox; returns EndDialog nResult or -1.
 pub unsafe extern "win64" fn dialog_box_param_w(
-    _h_instance: usize,
+    h_instance: usize,
     lp_template_name: *const u16,
-    _hwnd_parent: usize,
-    _lp_dialog_func: usize,
-    _dw_init_param: isize,
+    hwnd_parent: usize,
+    lp_dialog_func: usize,
+    dw_init_param: isize,
 ) -> isize {
+    if lp_dialog_func == 0 {
+        return -1;
+    }
+    let image_base = weave_core::module_handles::base_of(h_instance).unwrap_or_else(|| {
+        if h_instance == 0 {
+            weave_core::seh::pe_base()
+        } else {
+            0
+        }
+    });
+    if image_base == 0 {
+        return -1;
+    }
     let template_id = lp_template_name as usize;
-    eprintln!("weave/user32: DialogBoxParamW(template={template_id:#x}) — Phase A stub");
-    // Phase A: fire window-creation and message-loop phase markers.
-    // Q-Dir uses DialogBoxParamW as its main application window (resource #202).
-    // create_window_first fires here because this is where Q-Dir would create its
-    // top-level dialog frame. get_message_first fires here because this is where
-    // Q-Dir would enter its modal message loop. Both are correct Phase A observables.
+    eprintln!("weave/user32: DialogBoxParamW(template={template_id:#x}) — Phase B");
+    let Some(hwnd) = crate::dialog::create_from_resource(
+        image_base,
+        lp_template_name,
+        hwnd_parent,
+        lp_dialog_func,
+        dw_init_param,
+        h_instance,
+    ) else {
+        return -1;
+    };
     if !PHASE_CREATE_WINDOW.swap(true, Ordering::Relaxed) {
         mark_phase("create_window_first");
     }
-    if !PHASE_GET_MESSAGE.swap(true, Ordering::Relaxed) {
-        mark_phase("get_message_first");
-    }
-    // Return 0: Phase A sentinel (dialog closed / not implemented).
-    // Q-Dir's caller checks `cmp rax, 1` — 0 ≠ 1 → PostQuitMessage → ExitProcess(0).
-    // Gate A3 passes (no signal). A1+A2 already logged above.
-    0
+    unsafe { run_modal_dialog_loop(hwnd) }
 }
 
 /// CharPrevExA — find the previous character in a string (ANSI, code page aware).
@@ -6893,20 +6946,108 @@ pub extern "win64" fn is_child(hwnd_parent: usize, hwnd: usize) -> i32 {
     }
 }
 
+const GW_HWNDFIRST: u32 = 0;
+const GW_HWNDLAST: u32 = 1;
+const GW_HWNDNEXT: u32 = 2;
+const GW_HWNDPREV: u32 = 3;
+const GW_OWNER: u32 = 4;
+const GW_CHILD: u32 = 5;
+const GW_ENABLEDPOPUP: u32 = 6;
+
+const ERROR_INVALID_HANDLE: u32 = 6;
+
+fn get_window_owner(hwnd: usize) -> Option<usize> {
+    if !window::contains(hwnd) {
+        return None;
+    }
+    let style = window::with(hwnd, |w| w.style).unwrap_or(0);
+    if (style & WS_POPUP) != 0 && (style & WS_CHILD) == 0 {
+        return window::with(hwnd, |w| w.hwnd_parent);
+    }
+    if (style & WS_CHILD) == 0 {
+        return Some(0);
+    }
+    let mut current = hwnd;
+    loop {
+        let parent = window::with(current, |w| w.hwnd_parent).unwrap_or(0);
+        if parent == 0 {
+            return Some(0);
+        }
+        let parent_is_child =
+            window::with(parent, |p| (p.style & WS_CHILD) != 0).unwrap_or(false);
+        if !parent_is_child {
+            return Some(parent);
+        }
+        current = parent;
+    }
+}
+
+fn get_window_root(hwnd: usize) -> usize {
+    let mut current = hwnd;
+    loop {
+        let parent = window::with(current, |w| w.hwnd_parent).unwrap_or(0);
+        if parent == 0 {
+            return current;
+        }
+        let parent_is_child =
+            window::with(parent, |p| (p.style & WS_CHILD) != 0).unwrap_or(false);
+        if !parent_is_child {
+            return current;
+        }
+        current = parent;
+    }
+}
+
 /// GetWindow — retrieve a window with the specified relationship to the given window.
-///
-/// Returns NULL — Weave's window table does not track parent/child/sibling
-/// relationships (Phase 2 gap). Logs a warning once per unique `uCmd` value.
 ///
 /// # Safety
 /// No pointer dereferences.
-// Wine ref: dlls/user32/win.c — GetWindow delegates to NtUserGetWindowRelative;
-// supports GW_HWNDFIRST(0), GW_HWNDLAST(1), GW_HWNDNEXT(2), GW_HWNDPREV(3),
-// GW_OWNER(4), GW_CHILD(5), GW_ENABLEDPOPUP(6); all walk the server-side window
-// tree. Weave has no hierarchy — stub returns NULL.
-pub extern "win64" fn get_window(_hwnd: usize, _u_cmd: u32) -> usize {
-    warn_once("weave/user32: GetWindow — window hierarchy not tracked, returning NULL");
-    0 // NULL
+// Wine ref: dlls/win32u/window.c::get_window_relative — GW_CHILD returns first_child;
+// GW_HWND* walk sibling list; GW_OWNER reads win->owner (invalid hwnd → ERROR_INVALID_HANDLE);
+// GW_ENABLEDPOPUP scans owned visible popups when hwnd is the root ancestor.
+pub extern "win64" fn get_window(hwnd: usize, u_cmd: u32) -> usize {
+    if hwnd != 0 && !window::contains(hwnd) {
+        if u_cmd == GW_OWNER {
+            set_last_error(ERROR_INVALID_HANDLE);
+        }
+        return 0;
+    }
+
+    match u_cmd {
+        GW_CHILD => window::children_of(hwnd).into_iter().next().unwrap_or(0),
+        GW_HWNDFIRST => window::siblings_of(hwnd).into_iter().next().unwrap_or(0),
+        GW_HWNDLAST => window::siblings_of(hwnd).into_iter().last().unwrap_or(0),
+        GW_HWNDNEXT => {
+            let siblings = window::siblings_of(hwnd);
+            match siblings.iter().position(|&h| h == hwnd) {
+                Some(i) if i + 1 < siblings.len() => siblings[i + 1],
+                _ => 0,
+            }
+        }
+        GW_HWNDPREV => {
+            let siblings = window::siblings_of(hwnd);
+            match siblings.iter().position(|&h| h == hwnd) {
+                Some(i) if i > 0 => siblings[i - 1],
+                _ => 0,
+            }
+        }
+        GW_OWNER => get_window_owner(hwnd).unwrap_or(0),
+        GW_ENABLEDPOPUP => {
+            if get_window_root(hwnd) != hwnd {
+                return 0;
+            }
+            window::find_with(|candidate, entry| {
+                if candidate == hwnd {
+                    return false;
+                }
+                if (entry.style & WS_POPUP) == 0 || !entry.visible {
+                    return false;
+                }
+                get_window_owner(candidate).unwrap_or(0) == hwnd
+            })
+        }
+        _ => 0,
+    }
 }
 
 /// IsRectEmpty — test whether a rectangle has zero or negative area.

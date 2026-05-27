@@ -17,6 +17,7 @@ pub mod api;
 pub mod backend;
 pub mod class;
 pub mod clipboard;
+pub mod dialog;
 pub mod defs;
 pub mod font;
 pub mod image_handles;

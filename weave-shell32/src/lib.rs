@@ -18,6 +18,7 @@
 //! See `weave-gdi32/src/lib.rs` for the convention on documenting crate exceptions.
 
 mod dialogs;
+mod pidl;
 mod shell;
 mod winspool;
 
@@ -120,7 +121,7 @@ fn resolve_shell32(func: &str) -> Option<usize> {
             shell::sh_browse_for_folder_w as unsafe extern "win64" fn(_) -> _ as *const () as usize,
         ),
         "SHGetPathFromIDListW" => Some(
-            shell::sh_get_path_from_id_list_w as unsafe extern "win64" fn(_, _) -> _ as *const ()
+            pidl::sh_get_path_from_id_list_w as unsafe extern "win64" fn(_, _) -> _ as *const ()
                 as usize,
         ),
         "DragAcceptFiles" => {
@@ -157,26 +158,29 @@ fn resolve_shell32(func: &str) -> Option<usize> {
         ),
         // Q-Dir PIDL ordinals (#2, #4, #16, #17, #18, #21, #25, #68, #88, #155, #190)
         "ILFindChild" | "#2" => {
-            Some(shell::il_find_child as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+            Some(pidl::il_find_child as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
         }
         "ILGetSize" | "#4" => {
-            Some(shell::il_get_size as unsafe extern "win64" fn(_) -> _ as *const () as usize)
+            Some(pidl::il_get_size as unsafe extern "win64" fn(_) -> _ as *const () as usize)
         }
         "ILClone" | "#16" => {
-            Some(shell::il_clone as unsafe extern "win64" fn(_) -> _ as *const () as usize)
+            Some(pidl::il_clone as unsafe extern "win64" fn(_) -> _ as *const () as usize)
         }
         "ILFree" | "#17" => {
-            Some(shell::il_free as unsafe extern "win64" fn(_) as *const () as usize)
+            Some(pidl::il_free as unsafe extern "win64" fn(_) as *const () as usize)
         }
         "ILGetNext" | "#18" => {
-            Some(shell::il_get_next as unsafe extern "win64" fn(_) -> _ as *const () as usize)
+            Some(pidl::il_get_next as unsafe extern "win64" fn(_) -> _ as *const () as usize)
         }
         "ILIsEqual" | "#21" => {
-            Some(shell::il_is_equal as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+            Some(pidl::il_is_equal as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
         }
         "ILCombine" | "#25" => {
-            Some(shell::il_combine as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+            Some(pidl::il_combine as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
         }
+        "ILCreateFromPathW" | "#190" => Some(
+            pidl::il_create_from_path_w as unsafe extern "win64" fn(_) -> _ as *const () as usize,
+        ),
         "SHMapPIDLToSystemImageListIndex" | "#68" => Some(
             shell::sh_map_pidl_to_image_index as unsafe extern "win64" fn(_, _, _, _) -> _
                 as *const () as usize,
@@ -187,9 +191,6 @@ fn resolve_shell32(func: &str) -> Option<usize> {
         ),
         "#155" => {
             Some(shell::shell32_ord155 as unsafe extern "win64" fn() -> _ as *const () as usize)
-        }
-        "#190" => {
-            Some(shell::shell32_ord190 as unsafe extern "win64" fn() -> _ as *const () as usize)
         }
         // Q-Dir startup — process task allocator
         "SHGetMalloc" => Some(
@@ -266,6 +267,8 @@ mod tests {
             "ILGetNext",
             "ILIsEqual",
             "ILCombine",
+            "ILCreateFromPathW",
+            "SHGetPathFromIDListW",
             "SHMapPIDLToSystemImageListIndex",
             "NTSHChangeNotifyRegister",
         ];
