@@ -6894,7 +6894,10 @@ pub unsafe extern "win64" fn dialog_box_param_w(
         return -1;
     };
     let result = unsafe { run_modal_dialog_loop(hwnd) };
-    crate::dialog::teardown_modal_dialog(hwnd);
+    // Q-Dir: guest may bump heap counters during modal; reset again before 0x124f3 init (0x7880d).
+    crate::dialog::q_dir_reset_heap_counters_if_needed(image_base);
+    // Do not `window::remove` here — CI 26545216770 SIGSEGV at 0x7880d immediately after destroy.
+    crate::dialog::wake_post_modal_queue();
     result
 }
 
