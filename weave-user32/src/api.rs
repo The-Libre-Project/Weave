@@ -6769,6 +6769,11 @@ unsafe fn run_modal_dialog_loop(hwnd: usize) -> isize {
         if !window::contains(msg.hwnd) && msg.message != WM_NULL {
             continue;
         }
+        // Q-Dir dlgproc SIGSEGV at RVA 0x8281 on WM_PAINT — BeginPaint/DC path not ready
+        // for dialog child HWNDs yet (Fail #4). Dequeue but do not dispatch to guest.
+        if msg.message == WM_PAINT {
+            continue;
+        }
         let _ = unsafe { translate_message(&msg) };
         let _ = unsafe { dispatch_message_w(&msg) };
     }
