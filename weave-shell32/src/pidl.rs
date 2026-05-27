@@ -381,7 +381,7 @@ mod tests {
         let pidl = pidl_from_path_w(r"C:\Users\test");
         assert!(!pidl.is_null());
         unsafe {
-            assert_eq!(il_get_size(pidl), 38);
+            assert_eq!(il_get_size(pidl), 36);
             let mut buf = [0u16; MAX_PATH];
             assert_eq!(sh_get_path_from_id_list_w(pidl, buf.as_mut_ptr()), 1);
             let back = String::from_utf16_lossy(
