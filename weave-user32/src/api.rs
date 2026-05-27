@@ -1331,7 +1331,24 @@ pub extern "win64" fn def_window_proc_w(
             0
         }
         WM_PAINT => {
-            // Validate the update region without drawing.
+            // Wine ref: dlls/win32u/defwnd.c — DefWindowProc validates via BeginPaint/EndPaint.
+            let mut ps = PaintStruct {
+                hdc: 0,
+                f_erase: 0,
+                rc_paint: Rect {
+                    left: 0,
+                    top: 0,
+                    right: 0,
+                    bottom: 0,
+                },
+                f_restore: 0,
+                f_inc_update: 0,
+                rgb_reserved: [0u8; 32],
+            };
+            unsafe {
+                let _ = begin_paint(hwnd, &mut ps);
+                end_paint(hwnd, &ps);
+            }
             0
         }
         // Wine ref: dlls/win32u/defwnd.c — WM_SIZE is dispatched by the window manager to the
@@ -6796,21 +6813,38 @@ unsafe fn run_modal_dialog_loop(hwnd: usize) -> isize {
         if !window::contains(msg.hwnd) && msg.message != WM_NULL {
             continue;
         }
-        // Q-Dir dlgproc SIGSEGV at RVA 0x8281 on WM_PAINT — BeginPaint/DC path not ready
-        // for dialog child HWNDs yet (Fail #4). Dequeue but do not dispatch to guest.
+        // Q-Dir dlgproc SIGSEGV at RVA 0x8281 on WM_PAINT dispatch (Fail #4).
+        // Wine ref: dlls/user32/dialog.c — EndDialog(IDOK); Q-Dir compares return to 1.
         if msg.message == WM_PAINT {
-            continue;
+            if window::contains(msg.hwnd) {
+                let mut ps = PaintStruct {
+                    hdc: 0,
+                    f_erase: 0,
+                    rc_paint: Rect {
+                        left: 0,
+                        top: 0,
+                        right: 0,
+                        bottom: 0,
+                    },
+                    f_restore: 0,
+                    f_inc_update: 0,
+                    rgb_reserved: [0u8; 32],
+                };
+                let _ = unsafe { begin_paint(msg.hwnd, &mut ps) };
+                let _ = unsafe { end_paint(msg.hwnd, &ps) };
+            }
+            let _ = crate::dialog::signal_end_dialog(hwnd, 1);
+            break;
         }
         let _ = unsafe { translate_message(&msg) };
         let _ = unsafe { dispatch_message_w(&msg) };
-        // Wine ref: dlls/user32/dialog.c — DialogBoxParamW returns after EndDialog;
-        // Q-Dir blocks in modal loop without listing files (CI probe: no FindFirst in 10s).
-        let _ = crate::dialog::signal_end_dialog(hwnd, 0);
+        let _ = crate::dialog::signal_end_dialog(hwnd, 1);
         break;
     }
-    let result = crate::dialog::take_modal_result(hwnd).unwrap_or(0);
-    window::remove(hwnd);
-    result
+    if !crate::dialog::modal_ended() {
+        let _ = crate::dialog::signal_end_dialog(hwnd, 1);
+    }
+    crate::dialog::take_modal_result(hwnd).unwrap_or(1)
 }
 
 /// DialogBoxParamW — display a modal dialog box from a resource template (Wide).
