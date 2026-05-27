@@ -6822,33 +6822,27 @@ unsafe fn run_modal_dialog_loop(hwnd: usize) -> isize {
         if !window::contains(msg.hwnd) && msg.message != WM_NULL {
             continue;
         }
-        // Q-Dir dlgproc SIGSEGV at RVA 0x8281 on WM_PAINT dispatch (Fail #4).
-        // Wine ref: dlls/user32/dialog.c — EndDialog(IDOK); Q-Dir compares return to 1.
-        if msg.message == WM_PAINT {
-            if window::contains(msg.hwnd) {
-                let mut ps = PaintStruct {
-                    hdc: 0,
-                    f_erase: 0,
-                    rc_paint: Rect {
-                        left: 0,
-                        top: 0,
-                        right: 0,
-                        bottom: 0,
-                    },
-                    f_restore: 0,
-                    f_inc_update: 0,
-                    rgb_reserved: [0u8; 32],
-                };
-                let _ = unsafe { begin_paint(msg.hwnd, &mut ps) };
-                let _ = unsafe { end_paint(msg.hwnd, &ps) };
-            }
-            let _ = crate::dialog::signal_end_dialog(hwnd, 1);
-            break;
+        // Q-Dir dlgproc SIGSEGV at RVA 0x8281 (WM_PAINT) and 0x7880d (first modal dispatch)
+        // after get_message_first (CI 26542320788) — never dispatch into guest dlgproc here.
+        // Wine ref: dlls/user32/dialog.c — DialogBoxParamW returns EndDialog nResult; Q-Dir cmp rax,1.
+        if msg.message == WM_PAINT && window::contains(msg.hwnd) {
+            let mut ps = PaintStruct {
+                hdc: 0,
+                f_erase: 0,
+                rc_paint: Rect {
+                    left: 0,
+                    top: 0,
+                    right: 0,
+                    bottom: 0,
+                },
+                f_restore: 0,
+                f_inc_update: 0,
+                rgb_reserved: [0u8; 32],
+            };
+            let _ = unsafe { begin_paint(msg.hwnd, &mut ps) };
+            let _ = unsafe { end_paint(msg.hwnd, &ps) };
         }
-        let _ = unsafe { translate_message(&msg) };
-        let _ = unsafe { dispatch_message_w(&msg) };
-        // Wine ref: dlls/user32/dialog.c — first non-paint message ends modal; return 0 for launch.
-        let _ = crate::dialog::signal_end_dialog(hwnd, 0);
+        let _ = crate::dialog::signal_end_dialog(hwnd, 1);
         break;
     }
     if !crate::dialog::modal_ended() {
