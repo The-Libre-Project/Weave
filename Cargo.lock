@@ -1252,6 +1252,9 @@ dependencies = [
 [[package]]
 name = "weave-bcrypt"
 version = "0.0.1"
+dependencies = [
+ "libc",
+]
 
 [[package]]
 name = "weave-cli"
