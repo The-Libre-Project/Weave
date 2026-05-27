@@ -20,6 +20,8 @@ const WS_EX_NOPARENTNOTIFY: u32 = 0x0000_0004;
 const WM_INITDIALOG: u32 = 0x0110;
 const DIALOG_BASE_X: u32 = 6;
 const DIALOG_BASE_Y: u32 = 13;
+// Wine ref: include/winuser.h — bytes reserved for dialog manager state in #32770 HWNDs.
+const DLG_WINDOW_EXTRA: u32 = 30;
 
 struct ParsedTemplate {
     style: u32,
@@ -104,7 +106,7 @@ fn builtin_control_class(id: u16) -> Option<&'static str> {
     }
 }
 
-fn resolve_template_string(data: &[u8], mut off: usize) -> Option<(String, usize)> {
+fn resolve_template_string(data: &[u8], off: usize) -> Option<(String, usize)> {
     let word = read_u16(data, off)?;
     match word {
         0 => Some(("#32770".to_string(), off + 2)),
@@ -307,7 +309,7 @@ fn create_frame_window(
             style: 0,
             h_cursor: 0,
             hbr_background: 0,
-            cb_wnd_extra: 0,
+            cb_wnd_extra: DLG_WINDOW_EXTRA,
             h_icon: 0,
             h_icon_sm: 0,
         },
@@ -344,7 +346,7 @@ fn create_frame_window(
             0
         },
     );
-    window::create(WindowEntry {
+    let hwnd = window::create(WindowEntry {
         class_name: template.class_name.clone(),
         wnd_proc: dlg_proc,
         title: template.caption.clone(),
@@ -358,7 +360,12 @@ fn create_frame_window(
         h_menu: 0,
         hwnd_parent,
         tid: unsafe { libc::syscall(libc::SYS_gettid) as u32 },
-    })
+    });
+    if hwnd != 0 {
+        crate::api::init_window_extra(hwnd, ex_style, DLG_WINDOW_EXTRA);
+        crate::api::mark_create_window_phase();
+    }
+    hwnd
 }
 
 fn create_control_window(
@@ -402,7 +409,7 @@ fn create_control_window(
         false,
         window::xcb_id(dialog_hwnd),
     );
-    window::create(WindowEntry {
+    let hwnd = window::create(WindowEntry {
         class_name: info.class_name.clone(),
         wnd_proc: cls.wnd_proc,
         title,
@@ -416,7 +423,11 @@ fn create_control_window(
         h_menu: info.id as usize,
         hwnd_parent: dialog_hwnd,
         tid: unsafe { libc::syscall(libc::SYS_gettid) as u32 },
-    })
+    });
+    if hwnd != 0 && cls.cb_wnd_extra != 0 {
+        crate::api::init_window_extra(hwnd, info.ex_style, cls.cb_wnd_extra);
+    }
+    hwnd
 }
 
 /// Load a DLGTEMPLATE from the PE, create the dialog + child controls, run WM_INITDIALOG.

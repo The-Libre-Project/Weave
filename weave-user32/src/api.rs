@@ -89,6 +89,24 @@ fn set_extra<F: FnOnce(&mut WindowExtra)>(hwnd: usize, f: F) {
     f(entry);
 }
 
+/// Seed per-window extra storage for HWNDs created outside CreateWindowExW (e.g. dialogs).
+pub(crate) fn init_window_extra(hwnd: usize, ex_style: u32, cb_wnd_extra: u32) {
+    if hwnd == 0 {
+        return;
+    }
+    set_extra(hwnd, |e| {
+        e.ex_style = ex_style;
+        e.extra_bytes = vec![0u8; cb_wnd_extra as usize];
+    });
+}
+
+/// Fire the create-window phase marker once (dialogs bypass CreateWindowExW).
+pub(crate) fn mark_create_window_phase() {
+    if !PHASE_CREATE_WINDOW.swap(true, Ordering::Relaxed) {
+        mark_phase("create_window_first");
+    }
+}
+
 // ── Caret position ───────────────────────────────────────────────────────────
 
 static CARET_X: AtomicI32 = AtomicI32::new(0);
@@ -6800,9 +6818,6 @@ pub unsafe extern "win64" fn dialog_box_param_w(
     ) else {
         return -1;
     };
-    if !PHASE_CREATE_WINDOW.swap(true, Ordering::Relaxed) {
-        mark_phase("create_window_first");
-    }
     unsafe { run_modal_dialog_loop(hwnd) }
 }
 
