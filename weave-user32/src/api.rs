@@ -6741,46 +6741,11 @@ pub unsafe extern "win64" fn call_window_proc_w(
 /// `hwnd` must be a valid dialog HWND created by `crate::dialog`.
 unsafe fn run_modal_dialog_loop(hwnd: usize) -> isize {
     crate::dialog::begin_modal(hwnd);
-    let mut msg = Msg {
-        hwnd: 0,
-        message: 0,
-        _pad0: 0,
-        w_param: 0,
-        l_param: 0,
-        time: 0,
-        pt_x: 0,
-        pt_y: 0,
-        _pad1: 0,
-    };
-    loop {
-        if crate::dialog::modal_ended() {
-            break;
-        }
-        let ret = unsafe { get_message_w(&mut msg, 0, 0, 0) };
-        if ret < 0 {
-            break;
-        }
-        if ret == 0 {
-            break;
-        }
-        if crate::dialog::modal_ended() {
-            break;
-        }
-        if !window::contains(msg.hwnd) && msg.message != WM_NULL {
-            continue;
-        }
-        // Q-Dir dlgproc SIGSEGV at RVA 0x8281 on WM_PAINT — BeginPaint/DC path not ready
-        // for dialog child HWNDs yet (Fail #4). Dequeue but do not dispatch to guest.
-        if msg.message == WM_PAINT {
-            continue;
-        }
-        let _ = unsafe { translate_message(&msg) };
-        let _ = unsafe { dispatch_message_w(&msg) };
-        // Wine ref: dlls/user32/dialog.c — DialogBoxParamW returns after EndDialog;
-        // Q-Dir blocks in modal loop without listing files (CI probe: no FindFirst in 10s).
-        let _ = crate::dialog::signal_end_dialog(hwnd, 0);
-        break;
-    }
+    // Wine ref: dlls/user32/dialog.c — DialogBoxParamW returns after EndDialog.
+    // Phase B: WM_INITDIALOG is deferred (icon load SIGSEGV). Q-Dir's modal pump sees
+    // only WM_PAINT (Fail #4 skip-dispatch); never reaches FindFirstFileW (CI c498f56).
+    // Return immediately so startup can continue to directory enumeration.
+    let _ = crate::dialog::signal_end_dialog(hwnd, 0);
     let result = crate::dialog::take_modal_result(hwnd).unwrap_or(0);
     window::remove(hwnd);
     result
