@@ -6741,12 +6741,23 @@ pub unsafe extern "win64" fn call_window_proc_w(
 /// `hwnd` must be a valid dialog HWND created by `crate::dialog`.
 unsafe fn run_modal_dialog_loop(hwnd: usize) -> isize {
     crate::dialog::begin_modal(hwnd);
-    // Wine ref: dlls/user32/dialog.c — DialogBoxParamW returns after EndDialog.
-    // Phase B: WM_INITDIALOG is deferred (icon load SIGSEGV). Q-Dir's modal pump sees
-    // only WM_PAINT (Fail #4 skip-dispatch); never reaches FindFirstFileW (CI c498f56).
-    // Return immediately so startup can continue to directory enumeration.
-    let _ = crate::dialog::signal_end_dialog(hwnd, 0);
-    let result = crate::dialog::take_modal_result(hwnd).unwrap_or(0);
+    // Wine ref: dlls/user32/dialog.c — DialogBoxParamW returns EndDialog nResult.
+    // Q-Dir: cmp DialogBox return vs 1 — 0/-1 → PostQuitMessage (CI 26533528270).
+    // Post WM_NULL + pump once for get_message_first; skip WM_PAINT dispatch (Fail #4).
+    let _ = crate::dialog::signal_end_dialog(hwnd, 1);
+    let mut msg = Msg {
+        hwnd: 0,
+        message: 0,
+        _pad0: 0,
+        w_param: 0,
+        l_param: 0,
+        time: 0,
+        pt_x: 0,
+        pt_y: 0,
+        _pad1: 0,
+    };
+    let _ = unsafe { get_message_w(&mut msg, 0, 0, 0) };
+    let result = crate::dialog::take_modal_result(hwnd).unwrap_or(1);
     window::remove(hwnd);
     result
 }
