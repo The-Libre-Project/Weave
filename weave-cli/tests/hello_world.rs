@@ -6472,3 +6472,100 @@ fn q_dir_launch_gate() {
 
     eprintln!("q_dir_launch_gate: A1+A2+A3 passed");
 }
+
+/// E3-M5b Tier A gate: Q-Dir file-pane population (shell enum + ListView insert).
+///
+/// Fixture: tests/fixtures/q-dir/Q-Dir_x64.exe
+/// Skipped gracefully if the binary is absent.
+#[test]
+fn q_dir_file_pane_gate() {
+    if !cfg!(target_os = "linux") {
+        eprintln!("skipping q_dir_file_pane_gate — requires Linux");
+        return;
+    }
+
+    let manifest = env!("CARGO_MANIFEST_DIR");
+    let q_dir_dir = format!("{manifest}/../tests/fixtures/q-dir");
+    let q_dir_exe = format!("{q_dir_dir}/Q-Dir_x64.exe");
+
+    if !std::path::Path::new(&q_dir_exe).exists() {
+        eprintln!("skipping: Q-Dir_x64.exe not present in tests/fixtures/q-dir/");
+        return;
+    }
+
+    let weave_bin = env!("CARGO_BIN_EXE_weave");
+
+    let mut child = std::process::Command::new(weave_bin)
+        .current_dir(&q_dir_dir)
+        .arg(&q_dir_exe)
+        .env("DISPLAY", ":99")
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|e| panic!("failed to spawn weave on Q-Dir_x64.exe: {e}"));
+
+    let stderr_pipe = child.stderr.take().expect("stderr was piped");
+    let stderr_shared = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let stderr_writer = std::sync::Arc::clone(&stderr_shared);
+    let drain_thread = std::thread::spawn(move || {
+        use std::io::Read;
+        let mut buf = Vec::new();
+        let mut pipe = stderr_pipe;
+        let _ = pipe.read_to_end(&mut buf);
+        *stderr_writer.lock().unwrap() = buf;
+    });
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let mut exit_status: Option<std::process::ExitStatus> = None;
+    let mut killed_by_deadline = false;
+
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                exit_status = Some(status);
+                break;
+            }
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    killed_by_deadline = true;
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err(e) => panic!("wait failed: {e}"),
+        }
+    }
+
+    drain_thread.join().expect("stderr drain thread panicked");
+    let stderr_bytes = stderr_shared.lock().unwrap().clone();
+    let stderr = String::from_utf8_lossy(&stderr_bytes);
+    eprintln!("q_dir_file_pane_gate stderr:\n{stderr}");
+    eprintln!(
+        "q_dir_file_pane_gate: killed_by_deadline={killed_by_deadline} exit={:?}",
+        exit_status
+    );
+
+    if let Some(status) = exit_status {
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::ExitStatusExt;
+            if let Some(sig) = status.signal() {
+                panic!(
+                    "Q-Dir file-pane Gate A3 FAIL: process exited with signal {sig}\nstderr: {stderr}"
+                );
+            }
+        }
+    }
+
+    assert!(
+        stderr.contains("PHASE: shell_enum_first"),
+        "Q-Dir file-pane Gate A1 FAIL: shell_enum_first not seen within 10s\nstderr: {stderr}"
+    );
+
+    assert!(
+        stderr.contains("PHASE: listview_insert_first"),
+        "Q-Dir file-pane Gate A2 FAIL: listview_insert_first not seen within 10s\nstderr: {stderr}"
+    );
+
+    eprintln!("q_dir_file_pane_gate: A1+A2+A3 passed");
+}

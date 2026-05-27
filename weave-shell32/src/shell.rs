@@ -832,8 +832,16 @@ pub unsafe extern "win64" fn extract_icon_ex_w(
 /// # Safety
 /// `ppshf` is accepted but not dereferenced.
 // Wine ref: dlls/shell32/shfldr_desktop.c — singleton IShellFolder; created on first call; AddRef'd.
-pub unsafe extern "win64" fn sh_get_desktop_folder(_ppshf: *mut *mut u8) -> i32 {
-    0x8000_4001u32 as i32 // E_NOTIMPL
+pub unsafe extern "win64" fn sh_get_desktop_folder(ppshf: *mut *mut u8) -> i32 {
+    const E_POINTER: i32 = 0x8000_4003u32 as i32;
+    if ppshf.is_null() {
+        return E_POINTER;
+    }
+    let ptr = crate::desktop_folder::desktop_folder_ptr();
+    unsafe {
+        *ppshf = ptr as *mut u8;
+    }
+    0
 }
 
 // Wine ref: dlls/shell32/shellpath.c — wraps SHGetFolderLocation(nFolder, 0); allocates PIDL

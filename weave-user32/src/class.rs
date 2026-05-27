@@ -350,6 +350,12 @@ extern "win64" fn builtin_control_wnd_proc(
         // on TRUE return (CI 26179659169). NPP's 0x133c window already received 0 in the
         // class-gated build and NPP still passed — returning TRUE was not the NPP fix.
         0x133c => 0,
+        // LVM_INSERTITEMA/W — Wine ref: dlls/comctl32/listview.c::LISTVIEW_InsertItemT returns
+        // zero-based index on success, -1 on failure.
+        0x104d | 0x104f => {
+            weave_core::progress::mark_listview_insert_first();
+            0
+        }
         _ => 0,
     }
 }

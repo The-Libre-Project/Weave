@@ -17,6 +17,7 @@
 //! it has no Win32 API surface. This is NOT a DLL-to-DLL import violation.
 //! See `weave-gdi32/src/lib.rs` for the convention on documenting crate exceptions.
 
+mod desktop_folder;
 mod dialogs;
 mod pidl;
 mod shell;
