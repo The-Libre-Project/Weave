@@ -16,8 +16,6 @@ const DS_SETFONT: u32 = 0x0000_0040;
 const DS_NOFAILCREATE: u32 = 0x0000_8000;
 const WS_EX_DLGMODALFRAME: u32 = 0x0000_0001;
 const WS_EX_CONTROLPARENT: u32 = 0x0002_0000;
-const WS_EX_NOPARENTNOTIFY: u32 = 0x0000_0004;
-const WM_INITDIALOG: u32 = 0x0110;
 const DIALOG_BASE_X: u32 = 6;
 const DIALOG_BASE_Y: u32 = 13;
 // Wine ref: include/winuser.h — bytes reserved for dialog manager state in #32770 HWNDs.
@@ -528,6 +526,9 @@ pub fn modal_ended() -> bool {
 }
 
 /// Load RT_DIALOG from `image_base`, create dialog window + controls.
+///
+/// # Safety
+/// Caller must ensure `image_base`, `template_name`, and `h_instance` are valid guest pointers.
 pub unsafe fn create_from_resource(
     image_base: usize,
     template_name: *const u16,
