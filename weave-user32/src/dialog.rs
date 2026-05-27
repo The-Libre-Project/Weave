@@ -566,18 +566,18 @@ mod tests {
         // style, exStyle
         data[0..4].copy_from_slice(&0x90CF0000u32.to_le_bytes());
         data[4..8].copy_from_slice(&0u32.to_le_bytes());
-        // nbItems=0, x,y,cx,cy
+        // nbItems=0, x,y,cx,cy, menu, class
         data[8..10].copy_from_slice(&0u16.to_le_bytes());
         data[10..12].copy_from_slice(&0u16.to_le_bytes());
-        data[12..14].copy_from_slice(&100u16.to_le_bytes());
-        data[14..16].copy_from_slice(&80u16.to_le_bytes());
-        // menu=0, class=0 → #32770
-        data[16..18].copy_from_slice(&0u16.to_le_bytes());
+        data[12..14].copy_from_slice(&0u16.to_le_bytes());
+        data[14..16].copy_from_slice(&100u16.to_le_bytes());
+        data[16..18].copy_from_slice(&80u16.to_le_bytes());
         data[18..20].copy_from_slice(&0u16.to_le_bytes());
+        data[20..22].copy_from_slice(&0u16.to_le_bytes());
         // caption "Hi\0" (UTF-16 LE)
-        data[20..22].copy_from_slice(&(b'H' as u16).to_le_bytes());
-        data[22..24].copy_from_slice(&(b'i' as u16).to_le_bytes());
-        data[24..26].copy_from_slice(&0u16.to_le_bytes());
+        data[22..24].copy_from_slice(&(b'H' as u16).to_le_bytes());
+        data[24..26].copy_from_slice(&(b'i' as u16).to_le_bytes());
+        data[26..28].copy_from_slice(&0u16.to_le_bytes());
         let parsed = parse_template(&data).expect("template should parse");
         assert_eq!(parsed.caption, "Hi");
         assert_eq!(parsed.class_name, "#32770");
