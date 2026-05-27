@@ -8188,7 +8188,9 @@ pub unsafe extern "win64" fn device_io_control(
 // Wine ref: dlls/kernelbase/process.c:1660 — calls RtlQueryEnvironmentVariable_U(NULL, ...);
 // STATUS_BUFFER_TOO_SMALL → returns len+1 (required size); on success writes null terminator
 /// # Safety
-/// Pointer arguments are accepted but not dereferenced.
+/// `lp_name` must be null or a valid null-terminated UTF-16 string of length
+/// less than `MAX_UTF16_LEN` code units. `lp_buffer` must be null or writable
+/// for `n_size` u16 elements.
 pub unsafe extern "win64" fn get_environment_variable_w(
     lp_name: *const u16,
     lp_buffer: *mut u16,
@@ -8198,9 +8200,16 @@ pub unsafe extern "win64" fn get_environment_variable_w(
         set_last_error(203); // ERROR_ENVVAR_NOT_FOUND
         return 0;
     }
+    // Bound the null-terminator scan: a guest-controlled pointer without a NUL
+    // would otherwise read past mapped memory (SIGSEGV) or act as a length
+    // oracle into Weave's address space.
     let mut len = 0usize;
-    while *lp_name.add(len) != 0 {
+    while len < MAX_UTF16_LEN && *lp_name.add(len) != 0 {
         len += 1;
+    }
+    if len == MAX_UTF16_LEN {
+        set_last_error(203); // ERROR_ENVVAR_NOT_FOUND
+        return 0;
     }
     let slice = std::slice::from_raw_parts(lp_name, len);
     let name = String::from_utf16_lossy(slice);
@@ -11313,7 +11322,21 @@ pub unsafe extern "win64" fn get_environment_variable_a(
         set_last_error(203); // ERROR_ENVVAR_NOT_FOUND
         return 0;
     }
-    let c_name = std::ffi::CStr::from_ptr(lp_name as *const i8);
+    // Bound the null-terminator scan via strnlen so a guest-controlled pointer
+    // without a NUL cannot read past mapped memory or act as a length oracle.
+    let name_len = libc::strnlen(lp_name as *const i8, MAX_UTF8_LEN);
+    if name_len == MAX_UTF8_LEN {
+        set_last_error(203); // ERROR_ENVVAR_NOT_FOUND
+        return 0;
+    }
+    let name_bytes = std::slice::from_raw_parts(lp_name, name_len);
+    let c_name = match std::ffi::CString::new(name_bytes) {
+        Ok(s) => s,
+        Err(_) => {
+            set_last_error(203);
+            return 0;
+        }
+    };
     let value_ptr = libc::getenv(c_name.as_ptr());
     if value_ptr.is_null() {
         // Narrow SDL/AUDIO trace — helps confirm dummy-audio env is visible to SDL2.
