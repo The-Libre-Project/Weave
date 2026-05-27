@@ -574,9 +574,9 @@ mod tests {
         // menu=0, class=0 → #32770
         data[16..18].copy_from_slice(&0u16.to_le_bytes());
         data[18..20].copy_from_slice(&0u16.to_le_bytes());
-        // caption "Hi\0"
-        data[20..22].copy_from_slice(&b'H'[0..2]);
-        data[22..24].copy_from_slice(&b'i'[0..2]);
+        // caption "Hi\0" (UTF-16 LE)
+        data[20..22].copy_from_slice(&(b'H' as u16).to_le_bytes());
+        data[22..24].copy_from_slice(&(b'i' as u16).to_le_bytes());
         data[24..26].copy_from_slice(&0u16.to_le_bytes());
         let parsed = parse_template(&data).expect("template should parse");
         assert_eq!(parsed.caption, "Hi");
