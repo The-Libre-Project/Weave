@@ -14544,9 +14544,9 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "InitializeSListHead" => {
             Some(initialize_slist_head as unsafe extern "win64" fn(_) as *const () as usize)
         }
-        "InterlockedPopEntrySList" => Some(
-            interlockedpopentryslsit as unsafe extern "win64" fn(_) -> _ as *const () as usize,
-        ),
+        "InterlockedPopEntrySList" => {
+            Some(interlockedpopentryslsit as unsafe extern "win64" fn(_) -> _ as *const () as usize)
+        }
         "InterlockedPushEntrySList" => Some(
             interlockedpushentryslsit as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
         ),
@@ -14555,30 +14555,30 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
             Some(enum_system_locales_w as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
         }
         "AppPolicyGetProcessTerminationMethod" => Some(
-            app_policy_get_process_termination_method
-                as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
+            app_policy_get_process_termination_method as unsafe extern "win64" fn(_, _) -> _
+                as *const () as usize,
         ),
         "AppPolicyGetThreadInitializationType" => Some(
-            app_policy_get_thread_initialization_type
-                as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
+            app_policy_get_thread_initialization_type as unsafe extern "win64" fn(_, _) -> _
+                as *const () as usize,
         ),
         "LCIDToLocaleName" => Some(
             lcid_to_locale_name as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
         ),
-        "LocaleNameToLCID" => Some(
-            locale_name_to_lcid as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
-        ),
+        "LocaleNameToLCID" => {
+            Some(locale_name_to_lcid as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
         "GetDateFormatEx" => Some(
-            get_date_format_ex
-                as unsafe extern "win64" fn(_, _, _, _, _, _, _) -> _ as *const () as usize,
+            get_date_format_ex as unsafe extern "win64" fn(_, _, _, _, _, _, _) -> _ as *const ()
+                as usize,
         ),
         "GetTimeFormatEx" => Some(
-            get_time_format_ex
-                as unsafe extern "win64" fn(_, _, _, _, _, _) -> _ as *const () as usize,
+            get_time_format_ex as unsafe extern "win64" fn(_, _, _, _, _, _) -> _ as *const ()
+                as usize,
         ),
         "EnumSystemLocalesEx" => Some(
-            enum_system_locales_ex
-                as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
+            enum_system_locales_ex as unsafe extern "win64" fn(_, _, _, _) -> _ as *const ()
+                as usize,
         ),
         "FindResourceA" => {
             Some(find_resource_a as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize)
@@ -15900,7 +15900,7 @@ pub unsafe extern "win64" fn interlockedpushentryslsit(
     let _guard = SLIST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let val = unsafe { core::ptr::read_volatile(list_head) };
     let old_next = (val >> 64) as u64 as *mut u8; // current head
-    // Link entry into list: entry->Next = old_next.
+                                                  // Link entry into list: entry->Next = old_next.
     unsafe { *(list_entry as *mut *mut u8) = old_next };
     let old_depth = (val & 0xFFFF) as u16;
     let old_seq = ((val >> 16) & 0x0000_FFFF_FFFF_FFFF_u128) as u64;

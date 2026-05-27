@@ -75,9 +75,9 @@ fn resolve_comdlg32(func: &str) -> Option<usize> {
         "ChooseColorW" => {
             Some(dialogs::choose_color_w as unsafe extern "win64" fn(_) -> _ as *const () as usize)
         }
-        "PageSetupDlgW" => {
-            Some(dialogs::page_setup_dlg_w as unsafe extern "win64" fn(_) -> _ as *const () as usize)
-        }
+        "PageSetupDlgW" => Some(
+            dialogs::page_setup_dlg_w as unsafe extern "win64" fn(_) -> _ as *const () as usize,
+        ),
         _ => None,
     }
 }
@@ -156,37 +156,41 @@ fn resolve_shell32(func: &str) -> Option<usize> {
             shell::shell_execute_ex_w as unsafe extern "win64" fn(_) -> _ as *const () as usize,
         ),
         // Q-Dir PIDL ordinals (#2, #4, #16, #17, #18, #21, #25, #68, #88, #155, #190)
-        "ILFindChild" | "#2" => Some(
-            shell::il_find_child as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
-        ),
-        "ILGetSize" | "#4" => Some(
-            shell::il_get_size as unsafe extern "win64" fn(_) -> _ as *const () as usize,
-        ),
-        "ILClone" | "#16" => Some(
-            shell::il_clone as unsafe extern "win64" fn(_) -> _ as *const () as usize,
-        ),
-        "ILFree" | "#17" => Some(
-            shell::il_free as unsafe extern "win64" fn(_) as *const () as usize,
-        ),
-        "ILGetNext" | "#18" => Some(
-            shell::il_get_next as unsafe extern "win64" fn(_) -> _ as *const () as usize,
-        ),
-        "ILIsEqual" | "#21" => Some(
-            shell::il_is_equal as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
-        ),
-        "ILCombine" | "#25" => Some(
-            shell::il_combine as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
-        ),
+        "ILFindChild" | "#2" => {
+            Some(shell::il_find_child as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "ILGetSize" | "#4" => {
+            Some(shell::il_get_size as unsafe extern "win64" fn(_) -> _ as *const () as usize)
+        }
+        "ILClone" | "#16" => {
+            Some(shell::il_clone as unsafe extern "win64" fn(_) -> _ as *const () as usize)
+        }
+        "ILFree" | "#17" => {
+            Some(shell::il_free as unsafe extern "win64" fn(_) as *const () as usize)
+        }
+        "ILGetNext" | "#18" => {
+            Some(shell::il_get_next as unsafe extern "win64" fn(_) -> _ as *const () as usize)
+        }
+        "ILIsEqual" | "#21" => {
+            Some(shell::il_is_equal as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "ILCombine" | "#25" => {
+            Some(shell::il_combine as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
         "SHMapPIDLToSystemImageListIndex" | "#68" => Some(
             shell::sh_map_pidl_to_image_index as unsafe extern "win64" fn(_, _, _, _) -> _
                 as *const () as usize,
         ),
         "NTSHChangeNotifyRegister" | "#88" => Some(
-            shell::nt_sh_change_notify_register
-                as unsafe extern "win64" fn(_, _, _, _, _, _) -> _ as *const () as usize,
+            shell::nt_sh_change_notify_register as unsafe extern "win64" fn(_, _, _, _, _, _) -> _
+                as *const () as usize,
         ),
-        "#155" => Some(shell::shell32_ord155 as unsafe extern "win64" fn() -> _ as *const () as usize),
-        "#190" => Some(shell::shell32_ord190 as unsafe extern "win64" fn() -> _ as *const () as usize),
+        "#155" => {
+            Some(shell::shell32_ord155 as unsafe extern "win64" fn() -> _ as *const () as usize)
+        }
+        "#190" => {
+            Some(shell::shell32_ord190 as unsafe extern "win64" fn() -> _ as *const () as usize)
+        }
         // Q-Dir startup — process task allocator
         "SHGetMalloc" => Some(
             shell::sh_get_malloc as unsafe extern "win64" fn(*mut usize) -> i32 as *const ()
@@ -241,7 +245,9 @@ mod tests {
     #[test]
     fn resolve_shell32_pidl_ordinals() {
         // Q-Dir PIDL ordinals: #2, #4, #16, #17, #18, #21, #25, #68, #88, #155, #190
-        let ordinals = ["#2", "#4", "#16", "#17", "#18", "#21", "#25", "#68", "#88", "#155", "#190"];
+        let ordinals = [
+            "#2", "#4", "#16", "#17", "#18", "#21", "#25", "#68", "#88", "#155", "#190",
+        ];
         for ord in &ordinals {
             assert!(
                 resolve("shell32.dll", ord).is_some(),

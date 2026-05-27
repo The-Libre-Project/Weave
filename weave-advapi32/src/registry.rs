@@ -1760,9 +1760,9 @@ pub fn resolve(func: &str) -> Option<usize> {
                 as usize,
         ),
         // ── SumatraPDF Crypt/security gap stubs ───────────────────────────────
-        "CryptHashData" => Some(
-            crypt_hash_data as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
-        ),
+        "CryptHashData" => {
+            Some(crypt_hash_data as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize)
+        }
         "CryptGetHashParam" => Some(
             crypt_get_hash_param as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const ()
                 as usize,

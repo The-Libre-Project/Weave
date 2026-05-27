@@ -602,14 +602,14 @@ pub extern "win64" fn ro_uninitialize() {
 #[repr(C)]
 pub struct IMallocVtbl {
     pub query_interface: unsafe extern "win64" fn(*mut IMallocVtbl, *const u8, *mut usize) -> i32,
-    pub add_ref:         unsafe extern "win64" fn(*mut IMallocVtbl) -> u32,
-    pub release:         unsafe extern "win64" fn(*mut IMallocVtbl) -> u32,
-    pub alloc:           unsafe extern "win64" fn(*mut IMallocVtbl, usize) -> *mut (),
-    pub realloc:         unsafe extern "win64" fn(*mut IMallocVtbl, *mut (), usize) -> *mut (),
-    pub free:            unsafe extern "win64" fn(*mut IMallocVtbl, *mut ()),
-    pub get_size:        unsafe extern "win64" fn(*mut IMallocVtbl, *mut ()) -> usize,
-    pub did_alloc:       unsafe extern "win64" fn(*mut IMallocVtbl, *mut ()) -> i32,
-    pub heap_minimize:   unsafe extern "win64" fn(*mut IMallocVtbl),
+    pub add_ref: unsafe extern "win64" fn(*mut IMallocVtbl) -> u32,
+    pub release: unsafe extern "win64" fn(*mut IMallocVtbl) -> u32,
+    pub alloc: unsafe extern "win64" fn(*mut IMallocVtbl, usize) -> *mut (),
+    pub realloc: unsafe extern "win64" fn(*mut IMallocVtbl, *mut (), usize) -> *mut (),
+    pub free: unsafe extern "win64" fn(*mut IMallocVtbl, *mut ()),
+    pub get_size: unsafe extern "win64" fn(*mut IMallocVtbl, *mut ()) -> usize,
+    pub did_alloc: unsafe extern "win64" fn(*mut IMallocVtbl, *mut ()) -> i32,
+    pub heap_minimize: unsafe extern "win64" fn(*mut IMallocVtbl),
 }
 
 unsafe extern "win64" fn imalloc_query_interface(
@@ -619,8 +619,12 @@ unsafe extern "win64" fn imalloc_query_interface(
 ) -> i32 {
     0x8000_4002u32 as i32 // E_NOINTERFACE
 }
-unsafe extern "win64" fn imalloc_add_ref(_this: *mut IMallocVtbl) -> u32 { 1 }
-unsafe extern "win64" fn imalloc_release(_this: *mut IMallocVtbl) -> u32 { 1 }
+unsafe extern "win64" fn imalloc_add_ref(_this: *mut IMallocVtbl) -> u32 {
+    1
+}
+unsafe extern "win64" fn imalloc_release(_this: *mut IMallocVtbl) -> u32 {
+    1
+}
 unsafe extern "win64" fn imalloc_alloc(_this: *mut IMallocVtbl, cb: usize) -> *mut () {
     co_task_mem_alloc(cb) as *mut ()
 }
@@ -634,7 +638,9 @@ unsafe extern "win64" fn imalloc_realloc(
 unsafe extern "win64" fn imalloc_free(_this: *mut IMallocVtbl, pv: *mut ()) {
     co_task_mem_free(pv as usize);
 }
-unsafe extern "win64" fn imalloc_get_size(_this: *mut IMallocVtbl, _pv: *mut ()) -> usize { 0 }
+unsafe extern "win64" fn imalloc_get_size(_this: *mut IMallocVtbl, _pv: *mut ()) -> usize {
+    0
+}
 unsafe extern "win64" fn imalloc_did_alloc(_this: *mut IMallocVtbl, _pv: *mut ()) -> i32 {
     -1 // unknown
 }
@@ -642,14 +648,14 @@ unsafe extern "win64" fn imalloc_heap_minimize(_this: *mut IMallocVtbl) {}
 
 static IMALLOC_VTBL: IMallocVtbl = IMallocVtbl {
     query_interface: imalloc_query_interface,
-    add_ref:         imalloc_add_ref,
-    release:         imalloc_release,
-    alloc:           imalloc_alloc,
-    realloc:         imalloc_realloc,
-    free:            imalloc_free,
-    get_size:        imalloc_get_size,
-    did_alloc:       imalloc_did_alloc,
-    heap_minimize:   imalloc_heap_minimize,
+    add_ref: imalloc_add_ref,
+    release: imalloc_release,
+    alloc: imalloc_alloc,
+    realloc: imalloc_realloc,
+    free: imalloc_free,
+    get_size: imalloc_get_size,
+    did_alloc: imalloc_did_alloc,
+    heap_minimize: imalloc_heap_minimize,
 };
 
 /// CoGetMalloc: return a pointer to the process task allocator (IMalloc).
@@ -812,9 +818,9 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "RoInitialize" => Some(ro_initialize as *const () as usize),
         "RoUninitialize" => Some(ro_uninitialize as *const () as usize),
         // COM task allocator
-        "CoGetMalloc" => Some(
-            co_get_malloc as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
-        ),
+        "CoGetMalloc" => {
+            Some(co_get_malloc as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
         // Structured storage (E_NOTIMPL stub)
         "CreateStreamOnHGlobal" => Some(
             create_stream_on_hglobal as unsafe extern "win64" fn(_, _, _) -> _ as *const ()

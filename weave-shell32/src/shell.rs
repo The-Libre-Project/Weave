@@ -1070,15 +1070,12 @@ fn get_imalloc_ptr() -> usize {
         // (a) fn-item casts produce valid code addresses; (b) Box-heap; (c) process
         // lifetime; (d) none — TODO(shim): Phase A, gated on E3-M5 launch gate.
         let vtable: Box<[usize; 9]> = Box::new([
-            imalloc_query_interface
-                as unsafe extern "win64" fn(usize, *const u8, *mut usize) -> i32
+            imalloc_query_interface as unsafe extern "win64" fn(usize, *const u8, *mut usize) -> i32
                 as usize,
             imalloc_add_ref as unsafe extern "win64" fn(usize) -> u32 as usize,
             imalloc_release as unsafe extern "win64" fn(usize) -> u32 as usize,
             imalloc_alloc as unsafe extern "win64" fn(usize, usize) -> usize as usize,
-            imalloc_realloc
-                as unsafe extern "win64" fn(usize, usize, usize) -> usize
-                as usize,
+            imalloc_realloc as unsafe extern "win64" fn(usize, usize, usize) -> usize as usize,
             imalloc_free as unsafe extern "win64" fn(usize, usize) as usize,
             imalloc_get_size as unsafe extern "win64" fn(usize, usize) -> usize as usize,
             imalloc_did_alloc as unsafe extern "win64" fn(usize, usize) -> i32 as usize,

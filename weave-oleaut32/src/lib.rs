@@ -357,10 +357,7 @@ pub unsafe extern "win64" fn variant_copy(pdest: *mut u8, psrc: *const u8) -> i3
 ///
 /// # Safety
 /// `pperrinfo` must be null or a valid writable pointer-to-pointer.
-pub unsafe extern "win64" fn get_error_info(
-    _dw_reserved: u32,
-    pperrinfo: *mut *mut u8,
-) -> i32 {
+pub unsafe extern "win64" fn get_error_info(_dw_reserved: u32, pperrinfo: *mut *mut u8) -> i32 {
     // SAFETY: caller guarantees pperrinfo is null or a valid writable slot.
     if !pperrinfo.is_null() {
         unsafe { *pperrinfo = std::ptr::null_mut() };
@@ -537,9 +534,9 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
             Some(variant_copy as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
         }
         // Q-Dir oleaut32 ordinals (#8, #12, #16, #23, #24, #146, #162, #411, #419)
-        "GetErrorInfo" | "#8" => Some(
-            get_error_info as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
-        ),
+        "GetErrorInfo" | "#8" => {
+            Some(get_error_info as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
         "VariantChangeType" | "#12" => Some(
             variant_change_type as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
         ),
@@ -552,12 +549,12 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "SafeArrayPutElement" | "#24" => Some(
             safe_array_put_element as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
         ),
-        "SetErrorInfo" | "#146" => Some(
-            set_error_info as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
-        ),
-        "CreateErrorInfo" | "#162" => Some(
-            create_error_info as unsafe extern "win64" fn(_) -> _ as *const () as usize,
-        ),
+        "SetErrorInfo" | "#146" => {
+            Some(set_error_info as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "CreateErrorInfo" | "#162" => {
+            Some(create_error_info as unsafe extern "win64" fn(_) -> _ as *const () as usize)
+        }
         "#411" => Some(oleaut32_ord411 as extern "win64" fn() -> _ as *const () as usize),
         "#419" => Some(oleaut32_ord419 as extern "win64" fn() -> _ as *const () as usize),
         _ => None,
@@ -600,7 +597,9 @@ mod tests {
     #[test]
     fn resolve_q_dir_oleaut32_ordinals() {
         // Q-Dir oleaut32 ordinals: #8, #12, #16, #23, #24, #146, #162, #411, #419
-        let ordinals = ["#8", "#12", "#16", "#23", "#24", "#146", "#162", "#411", "#419"];
+        let ordinals = [
+            "#8", "#12", "#16", "#23", "#24", "#146", "#162", "#411", "#419",
+        ];
         for ord in &ordinals {
             assert!(
                 resolve("oleaut32.dll", ord).is_some(),

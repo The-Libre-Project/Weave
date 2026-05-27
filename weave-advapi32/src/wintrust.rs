@@ -738,9 +738,7 @@ pub unsafe extern "win64" fn internet_connect_w(
 /// # Safety
 /// Handle argument is ignored.
 // Wine ref: dlls/wininet/internet.c — WININET_Release ref-counts object_header_t, fires HANDLE_CLOSING callback, calls vtbl->Destroy; returns TRUE even on NULL/invalid handles
-pub unsafe extern "win64" fn internet_close_handle(
-    _h_internet: usize,
-) -> i32 {
+pub unsafe extern "win64" fn internet_close_handle(_h_internet: usize) -> i32 {
     1 // TRUE — handle "closed" (or was already invalid; callers don't check)
 }
 

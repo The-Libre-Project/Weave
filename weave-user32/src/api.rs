@@ -8122,10 +8122,7 @@ unsafe extern "win64" fn uia_raise_structure_changed_event(
 /// a UiaEventArgs, walks registered event advisers, and calls AdviseEventAdded;
 /// no-op when no advisers. Stub returns S_OK (no advisers registered).
 // Wine ref: dlls/uiautomationcore/uia_event.c — UiaRaiseAutomationEvent fires automation event; stub no-op returns S_OK
-unsafe extern "win64" fn uia_raise_automation_event(
-    _provider: *mut (),
-    _id: i32,
-) -> i32 {
+unsafe extern "win64" fn uia_raise_automation_event(_provider: *mut (), _id: i32) -> i32 {
     0 // S_OK
 }
 
@@ -8163,7 +8160,9 @@ pub fn resolve_uiauto(dll: &str, func: &str) -> Option<usize> {
             Some(uia_raise_structure_changed_event as *const () as usize)
         }
         "UiaRaiseAutomationEvent" => Some(uia_raise_automation_event as *const () as usize),
-        "UiaReturnRawElementProvider" => Some(uia_return_raw_element_provider as *const () as usize),
+        "UiaReturnRawElementProvider" => {
+            Some(uia_return_raw_element_provider as *const () as usize)
+        }
         _ => None,
     }
 }
