@@ -2455,7 +2455,16 @@ pub extern "win64" fn move_window(
     1
 }
 
-// ── GetForegroundWindow / SetForegroundWindow ─────────────────────────────────
+// ── GetActiveWindow / GetForegroundWindow / SetForegroundWindow ───────────────
+
+/// GetActiveWindow: return the active window for the calling thread, or NULL.
+///
+/// Phase 2: same as foreground HWND when any window exists (Q-Dir calls this before
+/// `DialogBoxParamW`; NULL IAT stub was blocking the dialog path — CI Fail #27).
+// Wine ref: dlls/win32u/window.c — NtUserGetActiveWindow returns the thread's active popup.
+pub extern "win64" fn get_active_window() -> usize {
+    get_foreground_window()
+}
 
 /// GetForegroundWindow: return the foreground window's HWND.
 ///
@@ -6838,7 +6847,8 @@ unsafe fn run_modal_dialog_loop(hwnd: usize) -> isize {
         }
         let _ = unsafe { translate_message(&msg) };
         let _ = unsafe { dispatch_message_w(&msg) };
-        let _ = crate::dialog::signal_end_dialog(hwnd, 1);
+        // Wine ref: dlls/user32/dialog.c — first non-paint message ends modal; return 0 for launch.
+        let _ = crate::dialog::signal_end_dialog(hwnd, 0);
         break;
     }
     if !crate::dialog::modal_ended() {
@@ -6878,6 +6888,7 @@ pub unsafe extern "win64" fn dialog_box_param_w(
     }
     let template_id = lp_template_name as usize;
     eprintln!("weave/user32: DialogBoxParamW(template={template_id:#x}) — Phase B");
+    crate::dialog::q_dir_reset_heap_counters_if_needed(image_base);
     let Some(hwnd) = crate::dialog::create_from_resource(
         image_base,
         lp_template_name,

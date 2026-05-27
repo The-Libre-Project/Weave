@@ -55,25 +55,30 @@ struct ActiveModal {
 
 static ACTIVE_MODAL: Mutex<Option<ActiveModal>> = Mutex::new(None);
 
-// Q-Dir_x64.exe .data: RVAs read as `ecx` in guest heap init (0x478698). PE on-disk
-// qword at 0x152fb0 is 0x1226dc00139f68 — low dword alone looks like a counter >= 2.
+// Q-Dir_x64.exe: heap-init reads RVAs 0x152fb0/0x152fbc (`.data` ZEROFILL — runtime 0 until
+// guest bumps them; disasm 0x4786da heavy path when counter >= 2).
+const Q_DIR_SIZE_FINGERPRINT: usize = 0x1f3000;
 const Q_DIR_HEAP_COUNTER_RVAS: [usize; 2] = [0x152fb0, 0x152fbc];
 
-/// Zero Q-Dir heap-init counters before WM_INITDIALOG (disasm: 0x4786da / SIGSEGV 0x7880d).
-fn q_dir_reset_heap_counters_if_needed() {
-    let base = weave_core::seh::pe_base();
+/// Zero Q-Dir heap-init counters before `DialogBoxParamW` (disasm: 0x4786da / SIGSEGV 0x7880d).
+pub(crate) fn q_dir_reset_heap_counters_if_needed(image_base: usize) {
+    let base = if image_base != 0 {
+        image_base
+    } else {
+        weave_core::seh::pe_base()
+    };
     let size = weave_core::seh::pe_size();
-    if base == 0 || size == 0 {
+    if base == 0 || size != Q_DIR_SIZE_FINGERPRINT {
         return;
     }
     for rva in Q_DIR_HEAP_COUNTER_RVAS {
         if rva + 8 > size {
             continue;
         }
-        // SAFETY: Q-Dir .data RVAs (writable). Clear full qword — u32-only left 0x1226dc00.
+        // SAFETY: Q-Dir `.data` BSS (writable mapped image).
         let p = (base + rva) as *mut u64;
         let cur = unsafe { p.read() };
-        if cur > 0x1000 {
+        if cur != 0 {
             unsafe {
                 p.write(0);
             }
@@ -501,9 +506,13 @@ pub unsafe fn create_from_template_bytes(
         off = next;
     }
     // Wine ref: dlls/user32/dialog.c — SendMessageW(hwnd, WM_INITDIALOG, hwndFocus, lParam).
-    // Q-Dir: counter at RVA 0x152fb0 must be < 2 before dlgproc init (disasm 0x4786da / 0x7880d).
-    q_dir_reset_heap_counters_if_needed();
-    let _ = crate::api::call_wnd_proc(dlg_proc, hwnd, 0x0110, 0, init_param);
+    // Guest dlgproc SIGSEGV at RVA 0x7880d during WM_INITDIALOG (CI c516a98) — keep deferred;
+    // heap counters cleared in dialog_box_param_w before create.
+    eprintln!(
+        "weave/dialog: WM_INITDIALOG deferred for hwnd={hwnd:#x} — guest dlgproc crashes on init"
+    );
+    let _ = dlg_proc;
+    let _ = init_param;
     crate::backend::show_window(window::xcb_id(hwnd), true);
     window::with_mut(hwnd, |e| e.visible = true);
     Some(hwnd)

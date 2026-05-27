@@ -739,6 +739,7 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         }
         "EndPaint" => Some(end_paint as unsafe extern "win64" fn(_, _) -> _ as *const () as usize),
         // Foreground / desktop
+        "GetActiveWindow" => Some(get_active_window as *const () as usize),
         "GetForegroundWindow" => Some(get_foreground_window as *const () as usize),
         "SetForegroundWindow" => Some(set_foreground_window as *const () as usize),
         "GetDesktopWindow" => Some(get_desktop_window as *const () as usize),
