@@ -37,13 +37,8 @@ pub unsafe extern "win64" fn BCryptGenRandom(
     let mut written = 0usize;
     let want = cbBuffer as usize;
     while written < want {
-        let n = unsafe {
-            libc::getrandom(
-                buf.add(written) as *mut libc::c_void,
-                want - written,
-                0,
-            )
-        };
+        let n =
+            unsafe { libc::getrandom(buf.add(written) as *mut libc::c_void, want - written, 0) };
         if n < 0 {
             let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
             // EINTR is the only retryable case; anything else is fatal here.
