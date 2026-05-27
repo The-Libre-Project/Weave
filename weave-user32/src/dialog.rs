@@ -464,9 +464,14 @@ pub unsafe fn create_from_template_bytes(
         }
         off = next;
     }
-    let dlg_fn: unsafe extern "win64" fn(usize, u32, usize, isize) -> i32 =
-        unsafe { std::mem::transmute(dlg_proc) };
-    let _ = unsafe { dlg_fn(hwnd, WM_INITDIALOG, hwnd_parent, init_param) };
+    // Wine ref: dlls/user32/dialog.c — SendMessageW(hwnd, WM_INITDIALOG, hwndFocus, lParam).
+    // Q-Dir dlgproc crashes at RVA 0x7880d (LoadImage ERROR_RESOURCE_NAME_NOT_FOUND 1814)
+    // during init — defer guest WM_INITDIALOG until dialog icon/resource loading is implemented.
+    eprintln!(
+        "weave/dialog: WM_INITDIALOG deferred for hwnd={hwnd:#x} — guest dlgproc crashes on icon load"
+    );
+    let _ = dlg_proc;
+    let _ = init_param;
     crate::backend::show_window(window::xcb_id(hwnd), true);
     window::with_mut(hwnd, |e| e.visible = true);
     Some(hwnd)

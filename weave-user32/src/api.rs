@@ -7310,6 +7310,47 @@ pub unsafe extern "win64" fn set_rect(lp_rc: *mut i32, x1: i32, y1: i32, x2: i32
     1 // TRUE
 }
 
+/// SetRectEmpty: set a rectangle to (0,0,0,0).
+///
+/// # Safety
+/// `lprc` must be null or point to a writable `RECT`.
+// Wine ref: dlls/user32/winrect.c — SetRectEmpty zeroes all four RECT fields; returns TRUE.
+pub unsafe extern "win64" fn set_rect_empty(lprc: *mut Rect) -> i32 {
+    if lprc.is_null() {
+        return 0;
+    }
+    unsafe {
+        (*lprc).left = 0;
+        (*lprc).top = 0;
+        (*lprc).right = 0;
+        (*lprc).bottom = 0;
+    }
+    1
+}
+
+/// CharLowerW: convert a null-terminated wide string to lowercase in place.
+///
+/// # Safety
+/// `lpsz` must be null or a valid null-terminated UTF-16 string.
+// Wine ref: dlls/user32/lstring.c — CharLowerW calls CharLowerBuffW for the string length.
+pub unsafe extern "win64" fn char_lower_w(lpsz: *mut u16) -> *mut u16 {
+    if lpsz.is_null() {
+        return std::ptr::null_mut();
+    }
+    let mut p = lpsz;
+    loop {
+        let ch = unsafe { *p };
+        if ch == 0 {
+            break;
+        }
+        if ch <= 0x7f {
+            unsafe { *p = (ch as u8).to_ascii_lowercase() as u16 };
+        }
+        p = unsafe { p.add(1) };
+    }
+    lpsz
+}
+
 // ── SDL2 gap-fill: raw input, device notification, thread messages, misc ──────
 //
 // SDL2 imports these via its static IAT. Without them Weave patches every slot
