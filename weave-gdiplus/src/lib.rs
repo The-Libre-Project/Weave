@@ -2710,11 +2710,17 @@ mod tests {
         assert!(resolve("GdiPlus.Dll", "GdiplusShutdown").is_some());
     }
 
+    fn startup_input(version: u32) -> [u8; 24] {
+        // GdiplusStartupInput x64: version @0, pad @4, callback @8, flags @16/@20.
+        let mut input = [0u8; 24];
+        input[0..4].copy_from_slice(&version.to_le_bytes());
+        input
+    }
+
     #[test]
     fn startup_null_token_is_invalid_parameter() {
         // Wine ref: dlls/gdiplus/gdiplus.c:87 — token NULL → InvalidParameter
-        // Build a minimal valid GdiplusStartupInput (version=1, rest zeroed).
-        let input = [1u32, 0, 0, 0];
+        let input = startup_input(1);
         let status = unsafe {
             GdiplusStartup(
                 std::ptr::null_mut(),
@@ -2743,7 +2749,7 @@ mod tests {
     fn startup_sets_deadbeef_token() {
         // Wine ref: dlls/gdiplus/gdiplus.c:104 — token is set to 0xdeadbeef
         let mut token: usize = 0;
-        let input = [1u32, 0, 0, 0]; // GdiplusStartupInput { Version=1, ... }
+        let input = startup_input(1);
         let status = unsafe {
             GdiplusStartup(
                 &mut token,
@@ -2762,7 +2768,7 @@ mod tests {
     fn startup_bad_version_returns_unsupported() {
         // Wine ref: dlls/gdiplus/gdiplus.c:94 — version 0 or >2 → UnsupportedGdiplusVersion=18
         let mut token: usize = 0;
-        let input_v0 = [0u32, 0, 0, 0];
+        let input_v0 = startup_input(0);
         let s = unsafe {
             GdiplusStartup(
                 &mut token,
@@ -2771,7 +2777,7 @@ mod tests {
             )
         };
         assert_eq!(s, 18, "version=0 must return UnsupportedGdiplusVersion");
-        let input_v3 = [3u32, 0, 0, 0];
+        let input_v3 = startup_input(3);
         let s = unsafe {
             GdiplusStartup(
                 &mut token,
