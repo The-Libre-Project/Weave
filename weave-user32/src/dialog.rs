@@ -55,27 +55,30 @@ struct ActiveModal {
 
 static ACTIVE_MODAL: Mutex<Option<ActiveModal>> = Mutex::new(None);
 
-// Q-Dir_x64.exe .data: RVA 0x152fb0 holds a counter read as `ecx` in guest heap init
-// (0x478698). PE on-disk initial 0x139f68 forces `esi >= 2` → heavy path → SIGSEGV at 0x7880d.
-const Q_DIR_HEAP_COUNTER_RVA: usize = 0x152fb0;
+// Q-Dir_x64.exe .data: RVAs read as `ecx` in guest heap init (0x478698). PE on-disk
+// qword at 0x152fb0 is 0x1226dc00139f68 — low dword alone looks like a counter >= 2.
+const Q_DIR_HEAP_COUNTER_RVAS: [usize; 2] = [0x152fb0, 0x152fbc];
 
-/// Reset Q-Dir heap-init counter when PE .data still has the large factory initial value.
-fn q_dir_reset_heap_counter_if_needed() {
+/// Zero Q-Dir heap-init counters before WM_INITDIALOG (disasm: 0x4786da / SIGSEGV 0x7880d).
+fn q_dir_reset_heap_counters_if_needed() {
     let base = weave_core::seh::pe_base();
     let size = weave_core::seh::pe_size();
-    if base == 0 || size == 0 || Q_DIR_HEAP_COUNTER_RVA + 4 > size {
+    if base == 0 || size == 0 {
         return;
     }
-    // SAFETY: RVA lies in Q-Dir .data (writable); only clears if value is implausibly large.
-    let p = (base + Q_DIR_HEAP_COUNTER_RVA) as *mut u32;
-    let cur = unsafe { p.read() };
-    if cur > 0x1000 {
-        unsafe {
-            p.write(0);
+    for rva in Q_DIR_HEAP_COUNTER_RVAS {
+        if rva + 8 > size {
+            continue;
         }
-        eprintln!(
-            "weave/dialog: Q-Dir heap counter at {Q_DIR_HEAP_COUNTER_RVA:#x} reset ({cur:#x} → 0)"
-        );
+        // SAFETY: Q-Dir .data RVAs (writable). Clear full qword — u32-only left 0x1226dc00.
+        let p = (base + rva) as *mut u64;
+        let cur = unsafe { p.read() };
+        if cur > 0x1000 {
+            unsafe {
+                p.write(0);
+            }
+            eprintln!("weave/dialog: Q-Dir counter rva={rva:#x} reset ({cur:#x} → 0)");
+        }
     }
 }
 
@@ -499,7 +502,7 @@ pub unsafe fn create_from_template_bytes(
     }
     // Wine ref: dlls/user32/dialog.c — SendMessageW(hwnd, WM_INITDIALOG, hwndFocus, lParam).
     // Q-Dir: counter at RVA 0x152fb0 must be < 2 before dlgproc init (disasm 0x4786da / 0x7880d).
-    q_dir_reset_heap_counter_if_needed();
+    q_dir_reset_heap_counters_if_needed();
     let _ = crate::api::call_wnd_proc(dlg_proc, hwnd, 0x0110, 0, init_param);
     crate::backend::show_window(window::xcb_id(hwnd), true);
     window::with_mut(hwnd, |e| e.visible = true);
