@@ -474,13 +474,8 @@ pub unsafe fn create_from_template_bytes(
         off = next;
     }
     // Wine ref: dlls/user32/dialog.c — SendMessageW(hwnd, WM_INITDIALOG, hwndFocus, lParam).
-    // Q-Dir dlgproc crashes at RVA 0x7880d (LoadImage ERROR_RESOURCE_NAME_NOT_FOUND 1814)
-    // during init — defer guest WM_INITDIALOG until dialog icon/resource loading is implemented.
-    eprintln!(
-        "weave/dialog: WM_INITDIALOG deferred for hwnd={hwnd:#x} — guest dlgproc crashes on icon load"
-    );
-    let _ = dlg_proc;
-    let _ = init_param;
+    // LoadImageW placeholder handles prevent null-deref at guest RVA 0x7880d (err 1814).
+    let _ = crate::api::call_wnd_proc(dlg_proc, hwnd, 0x0110, 0, init_param);
     crate::backend::show_window(window::xcb_id(hwnd), true);
     window::with_mut(hwnd, |e| e.visible = true);
     Some(hwnd)

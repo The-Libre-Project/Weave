@@ -2000,6 +2000,24 @@ fn pick_group_entry(blob: &[u8], want_cx: i32, want_cy: i32) -> Option<(u16, u16
     best.map(|(_, _, n_id, w, h, bc)| (n_id, w, h, bc))
 }
 
+/// Non-zero placeholder when RT_GROUP_ICON / RT_ICON is missing (Q-Dir 0x7880d).
+fn load_image_placeholder(kind: crate::image_handles::ImageKind, cx: i32, cy: i32) -> usize {
+    use crate::image_handles::{self as ih, ImageEntry};
+    eprintln!("weave/user32: LoadImageW: resource miss — placeholder handle");
+    ih::insert(
+        ImageEntry {
+            kind,
+            data_ptr: 0,
+            data_size: 0,
+            width: cx,
+            height: cy,
+            bpp: 0,
+            shared: false,
+        },
+        None,
+    )
+}
+
 /// Core dispatcher for `LoadImageW`.
 ///
 /// Wine ref: `dlls/user32/cursoricon.c::CURSORICON_Load` — `FindResourceW` on
@@ -2094,7 +2112,10 @@ unsafe fn load_image_impl(
 
             let (grp_ptr, grp_size) = match locate_resource_bytes(image_base, group_type, name_id) {
                 Some(v) => v,
-                None => return 0,
+                None => {
+                    // Q-Dir dlgproc null-derefs when LoadImageW returns 0 (RVA 0x7880d, err 1814).
+                    return load_image_placeholder(kind, want_cx, want_cy);
+                }
             };
             // SAFETY: grp_ptr came from find_resource — it lies within the
             // mapped image, and grp_size is the exact resource size.
@@ -2102,7 +2123,7 @@ unsafe fn load_image_impl(
                 unsafe { std::slice::from_raw_parts(grp_ptr as *const u8, grp_size as usize) };
             let (n_id, width, height, bit_count) = match pick_group_entry(blob, want_cx, want_cy) {
                 Some(t) => t,
-                None => return 0,
+                None => return load_image_placeholder(kind, want_cx, want_cy),
             };
 
             let (data_ptr, data_size) = match locate_resource_bytes(
@@ -2111,7 +2132,7 @@ unsafe fn load_image_impl(
                 weave_core::resource::ResourceId::Id(n_id),
             ) {
                 Some(v) => v,
-                None => return 0,
+                None => return load_image_placeholder(kind, want_cx, want_cy),
             };
 
             let entry = ImageEntry {
@@ -3719,7 +3740,13 @@ pub unsafe extern "win64" fn to_unicode_ex(
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
 /// Call a window procedure (stored as `usize`) with `extern "win64"` ABI.
-fn call_wnd_proc(proc_addr: usize, hwnd: usize, msg: u32, w_param: usize, l_param: isize) -> isize {
+pub(crate) fn call_wnd_proc(
+    proc_addr: usize,
+    hwnd: usize,
+    msg: u32,
+    w_param: usize,
+    l_param: isize,
+) -> isize {
     if proc_addr == 0 {
         return 0;
     }
