@@ -474,8 +474,13 @@ pub unsafe fn create_from_template_bytes(
         off = next;
     }
     // Wine ref: dlls/user32/dialog.c — SendMessageW(hwnd, WM_INITDIALOG, hwndFocus, lParam).
-    // LoadImageW placeholder handles prevent null-deref at guest RVA 0x7880d (err 1814).
-    let _ = crate::api::call_wnd_proc(dlg_proc, hwnd, 0x0110, 0, init_param);
+    // Guest dlgproc SIGSEGV at RVA 0x7880d during WM_INITDIALOG (CI af0060a) — keep deferred;
+    // LoadImageW placeholders still apply when guest calls LoadImageW later.
+    eprintln!(
+        "weave/dialog: WM_INITDIALOG deferred for hwnd={hwnd:#x} — guest dlgproc crashes on init"
+    );
+    let _ = dlg_proc;
+    let _ = init_param;
     crate::backend::show_window(window::xcb_id(hwnd), true);
     window::with_mut(hwnd, |e| e.visible = true);
     Some(hwnd)

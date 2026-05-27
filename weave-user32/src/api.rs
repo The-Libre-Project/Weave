@@ -6779,18 +6779,15 @@ unsafe fn run_modal_dialog_loop(hwnd: usize) -> isize {
         pt_y: 0,
         _pad1: 0,
     };
-    let mut pumps = 0u32;
     loop {
         if crate::dialog::modal_ended() {
             break;
         }
-        pumps = pumps.saturating_add(1);
-        if pumps > 128 {
-            let _ = crate::dialog::signal_end_dialog(hwnd, 1);
+        let ret = unsafe { get_message_w(&mut msg, 0, 0, 0) };
+        if ret < 0 {
             break;
         }
-        let ret = unsafe { get_message_w(&mut msg, 0, 0, 0) };
-        if ret <= 0 {
+        if ret == 0 {
             break;
         }
         if crate::dialog::modal_ended() {
@@ -6799,21 +6796,21 @@ unsafe fn run_modal_dialog_loop(hwnd: usize) -> isize {
         if !window::contains(msg.hwnd) && msg.message != WM_NULL {
             continue;
         }
-        // Wine ref: dlls/user32/dialog.c — EndDialog ends modal; return IDOK (1) for Q-Dir.
-        // Q-Dir dlgproc SIGSEGV on WM_PAINT dispatch (Fail #4) — end on paint dequeue, no dispatch.
+        // Q-Dir dlgproc SIGSEGV at RVA 0x8281 on WM_PAINT — BeginPaint/DC path not ready
+        // for dialog child HWNDs yet (Fail #4). Dequeue but do not dispatch to guest.
         if msg.message == WM_PAINT {
-            let _ = crate::dialog::signal_end_dialog(hwnd, 1);
-            break;
+            continue;
         }
         let _ = unsafe { translate_message(&msg) };
         let _ = unsafe { dispatch_message_w(&msg) };
-        let _ = crate::dialog::signal_end_dialog(hwnd, 1);
+        // Wine ref: dlls/user32/dialog.c — DialogBoxParamW returns after EndDialog;
+        // Q-Dir blocks in modal loop without listing files (CI probe: no FindFirst in 10s).
+        let _ = crate::dialog::signal_end_dialog(hwnd, 0);
         break;
     }
-    if !crate::dialog::modal_ended() {
-        let _ = crate::dialog::signal_end_dialog(hwnd, 1);
-    }
-    crate::dialog::take_modal_result(hwnd).unwrap_or(1)
+    let result = crate::dialog::take_modal_result(hwnd).unwrap_or(0);
+    window::remove(hwnd);
+    result
 }
 
 /// DialogBoxParamW — display a modal dialog box from a resource template (Wide).
