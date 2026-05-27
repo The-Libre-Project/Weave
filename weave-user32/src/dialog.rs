@@ -9,7 +9,7 @@ use crate::queue::{self, MsgEntry};
 use crate::window::{self, WindowEntry};
 use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 use std::sync::Mutex;
-use weave_core::resource::{ResourceId, resource_entry_ptr_and_size};
+use weave_core::resource::{resource_entry_ptr_and_size, ResourceId};
 
 const RT_DIALOG: u16 = 5;
 const DS_SETFONT: u32 = 0x0000_0040;
@@ -55,7 +55,9 @@ struct ActiveModal {
 
 static ACTIVE_MODAL: Mutex<Option<ActiveModal>> = Mutex::new(None);
 
-fn lock_modal(m: &Mutex<Option<ActiveModal>>) -> Option<std::sync::MutexGuard<'_, Option<ActiveModal>>> {
+fn lock_modal(
+    m: &Mutex<Option<ActiveModal>>,
+) -> Option<std::sync::MutexGuard<'_, Option<ActiveModal>>> {
     m.lock()
         .map_err(|e| eprintln!("weave/user32: dialog modal mutex poisoned: {e}"))
         .ok()
@@ -98,8 +100,26 @@ fn wide_string_at(data: &[u8], mut off: usize) -> Option<(String, usize)> {
 
 fn builtin_control_class(id: u16) -> Option<&'static str> {
     match id {
-        0x80..=0x85 => Some(["Button", "Edit", "Static", "ListBox", "ScrollBar", "ComboBox"][id as usize - 0x80]),
-        0..=5 => Some(["Button", "Edit", "Static", "ListBox", "ScrollBar", "ComboBox"][id as usize]),
+        0x80..=0x85 => Some(
+            [
+                "Button",
+                "Edit",
+                "Static",
+                "ListBox",
+                "ScrollBar",
+                "ComboBox",
+            ][id as usize - 0x80],
+        ),
+        0..=5 => Some(
+            [
+                "Button",
+                "Edit",
+                "Static",
+                "ListBox",
+                "ScrollBar",
+                "ComboBox",
+            ][id as usize],
+        ),
         _ => None,
     }
 }
@@ -129,12 +149,7 @@ fn parse_template(data: &[u8]) -> Option<ParsedTemplate> {
         if data.len() < 26 {
             return None;
         }
-        (
-            16usize,
-            true,
-            read_u32(data, 12)?,
-            read_u32(data, 8)?,
-        )
+        (16usize, true, read_u32(data, 12)?, read_u32(data, 8)?)
     } else {
         (8usize, false, read_u32(data, 0)?, read_u32(data, 4)?)
     };
@@ -366,11 +381,7 @@ fn create_frame_window(
     hwnd
 }
 
-fn create_control_window(
-    dialog_hwnd: usize,
-    info: &ControlInfo,
-    _h_instance: usize,
-) -> usize {
+fn create_control_window(dialog_hwnd: usize, info: &ControlInfo, _h_instance: usize) -> usize {
     let cls = match class::find(&info.class_name) {
         Some(c) => c,
         None => {
@@ -538,23 +549,10 @@ pub unsafe fn create_from_resource(
     h_instance: usize,
 ) -> Option<usize> {
     let name = resource_id_from_name_ptr(template_name);
-    let entry = weave_core::resource::find_resource_entry(
-        image_base,
-        ResourceId::Id(RT_DIALOG),
-        name,
-        0,
-    )?;
+    let entry =
+        weave_core::resource::find_resource_entry(image_base, ResourceId::Id(RT_DIALOG), name, 0)?;
     let (ptr, size) = unsafe { resource_entry_ptr_and_size(image_base, entry)? };
-    unsafe {
-        create_from_template_bytes(
-            ptr,
-            size,
-            hwnd_parent,
-            dlg_proc,
-            init_param,
-            h_instance,
-        )
-    }
+    unsafe { create_from_template_bytes(ptr, size, hwnd_parent, dlg_proc, init_param, h_instance) }
 }
 
 #[cfg(test)]

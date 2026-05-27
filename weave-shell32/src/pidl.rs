@@ -19,14 +19,7 @@ fn write_u16(ptr: *mut u8, value: u16) {
 }
 
 fn read_u32(ptr: *const u8) -> u32 {
-    unsafe {
-        u32::from_le_bytes([
-            *ptr,
-            *ptr.add(1),
-            *ptr.add(2),
-            *ptr.add(3),
-        ])
-    }
+    unsafe { u32::from_le_bytes([*ptr, *ptr.add(1), *ptr.add(2), *ptr.add(3)]) }
 }
 
 fn write_u32(ptr: *mut u8, value: u32) {
@@ -384,9 +377,8 @@ mod tests {
             assert_eq!(il_get_size(pidl), 36);
             let mut buf = [0u16; MAX_PATH];
             assert_eq!(sh_get_path_from_id_list_w(pidl, buf.as_mut_ptr()), 1);
-            let back = String::from_utf16_lossy(
-                &buf[..buf.iter().position(|&c| c == 0).unwrap_or(0)],
-            );
+            let back =
+                String::from_utf16_lossy(&buf[..buf.iter().position(|&c| c == 0).unwrap_or(0)]);
             assert_eq!(back, r"C:\Users\test");
             il_free(pidl);
         }
@@ -401,9 +393,8 @@ mod tests {
             assert!(!combined.is_null());
             let mut buf = [0u16; MAX_PATH];
             assert_eq!(sh_get_path_from_id_list_w(combined, buf.as_mut_ptr()), 1);
-            let path = String::from_utf16_lossy(
-                &buf[..buf.iter().position(|&c| c == 0).unwrap_or(0)],
-            );
+            let path =
+                String::from_utf16_lossy(&buf[..buf.iter().position(|&c| c == 0).unwrap_or(0)]);
             assert_eq!(path, r"C:\Dir\file.txt");
             il_free(parent);
             il_free(child);

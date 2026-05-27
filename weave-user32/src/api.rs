@@ -6995,8 +6995,7 @@ fn get_window_owner(hwnd: usize) -> Option<usize> {
         if parent == 0 {
             return Some(0);
         }
-        let parent_is_child =
-            window::with(parent, |p| (p.style & WS_CHILD) != 0).unwrap_or(false);
+        let parent_is_child = window::with(parent, |p| (p.style & WS_CHILD) != 0).unwrap_or(false);
         if !parent_is_child {
             return Some(parent);
         }
@@ -7011,8 +7010,7 @@ fn get_window_root(hwnd: usize) -> usize {
         if parent == 0 {
             return current;
         }
-        let parent_is_child =
-            window::with(parent, |p| (p.style & WS_CHILD) != 0).unwrap_or(false);
+        let parent_is_child = window::with(parent, |p| (p.style & WS_CHILD) != 0).unwrap_or(false);
         if !parent_is_child {
             return current;
         }

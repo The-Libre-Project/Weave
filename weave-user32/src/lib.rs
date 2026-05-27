@@ -17,8 +17,8 @@ pub mod api;
 pub mod backend;
 pub mod class;
 pub mod clipboard;
-pub mod dialog;
 pub mod defs;
+pub mod dialog;
 pub mod font;
 pub mod image_handles;
 pub mod input;
@@ -1240,12 +1240,12 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "SetRect" => Some(
             api::set_rect as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const () as usize,
         ),
-        "SetRectEmpty" => Some(
-            api::set_rect_empty as unsafe extern "win64" fn(_) -> _ as *const () as usize,
-        ),
-        "CharLowerW" => Some(
-            api::char_lower_w as unsafe extern "win64" fn(_) -> _ as *const () as usize,
-        ),
+        "SetRectEmpty" => {
+            Some(api::set_rect_empty as unsafe extern "win64" fn(_) -> _ as *const () as usize)
+        }
+        "CharLowerW" => {
+            Some(api::char_lower_w as unsafe extern "win64" fn(_) -> _ as *const () as usize)
+        }
         // ── SDL2 gap-fill: raw input, device notifications, misc ──────────────
         "PostThreadMessageW" => Some(api::post_thread_message_w as *const () as usize),
         "GetRawInputData" => Some(
