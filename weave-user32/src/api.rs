@@ -6726,11 +6726,13 @@ unsafe fn run_modal_dialog_loop(hwnd: usize) -> isize {
     let mut msg = Msg {
         hwnd: 0,
         message: 0,
+        _pad0: 0,
         w_param: 0,
         l_param: 0,
         time: 0,
         pt_x: 0,
         pt_y: 0,
+        _pad1: 0,
     };
     loop {
         if crate::dialog::modal_ended() {
