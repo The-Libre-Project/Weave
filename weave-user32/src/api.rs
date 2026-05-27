@@ -6776,6 +6776,10 @@ unsafe fn run_modal_dialog_loop(hwnd: usize) -> isize {
         }
         let _ = unsafe { translate_message(&msg) };
         let _ = unsafe { dispatch_message_w(&msg) };
+        // Wine ref: dlls/user32/dialog.c — DialogBoxParamW returns after EndDialog;
+        // Q-Dir blocks in modal loop without listing files (CI probe: no FindFirst in 10s).
+        let _ = crate::dialog::signal_end_dialog(hwnd, 0);
+        break;
     }
     let result = crate::dialog::take_modal_result(hwnd).unwrap_or(0);
     window::remove(hwnd);

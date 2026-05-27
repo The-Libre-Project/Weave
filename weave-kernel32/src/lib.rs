@@ -4923,6 +4923,7 @@ pub unsafe extern "win64" fn find_first_file_w(
             "weave/FindFirstFileW: exit path={win_path:?} attrs={attrs:#x} size_hi={size_hi:#x} size_lo={size_lo:#x} \
              ft_cre={ft_creation:#x} ft_acc={ft_access:#x} ft_wri={ft_write:#x} → handle=1 (single-file sentinel)"
         );
+        weave_core::progress::mark_find_first_file_first();
         // Return sentinel 1: a single-file handle (FindNextFileW returns FALSE for it).
         return 1;
     }
@@ -5015,6 +5016,7 @@ pub unsafe extern "win64" fn find_first_file_w(
     eprintln!(
         "weave/FindFirstFileW: exit path={win_path:?} first_entry={entry_name_str:?} attrs=0x80 → handle={handle:#x} (DIR*)"
     );
+    weave_core::progress::mark_find_first_file_first();
     // Store the DIR* as a usize handle.  find_next_file_w and find_close will cast
     // it back to *mut libc::DIR.  This is safe because usize is pointer-sized on
     // all supported targets (x86-64) and the DIR allocation outlives the handle.
@@ -5186,6 +5188,9 @@ pub unsafe extern "win64" fn find_next_file_w(
     eprintln!(
         "weave/FindNextFileW: exit handle={h_find_file:#x} entry={entry_name_str:?} attrs=0x80 → TRUE"
     );
+    if entry_name_str != "." && entry_name_str != ".." {
+        weave_core::progress::mark_find_next_file_first();
+    }
     1 // TRUE
 }
 
@@ -5821,6 +5826,17 @@ fn load_library_impl(name: &str) -> usize {
 /// after an explicit Load — if GetModuleHandleA returns non-NULL for those
 /// before they are loaded, callers skip LoadLibraryA and bypass Weave's win64
 /// thunk registration (the root cause of the DXVK Vulkan dispatch bug).
+/// Normalize `kernel32` / `SHELL32.DLL` style names to lowercase `*.dll` keys.
+fn dll_lookup_key(name: &str) -> String {
+    let base = name.rsplit(['\\', '/']).next().unwrap_or(name);
+    let lower = base.to_ascii_lowercase();
+    if lower.ends_with(".dll") || lower.ends_with(".drv") {
+        lower
+    } else {
+        format!("{lower}.dll")
+    }
+}
+
 fn is_always_present_dll(key: &str) -> bool {
     if key.starts_with("api-ms-win-") {
         return true;
@@ -6833,14 +6849,11 @@ pub unsafe extern "win64" fn get_module_handle_a(lp_module_name: *const u8) -> u
         return weave_core::seh::pe_base();
     }
     let name = unsafe { read_cstr_a(lp_module_name) };
-    let key = {
-        let base = name.rsplit(['\\', '/']).next().unwrap_or(&name);
-        base.to_ascii_lowercase()
-    };
+    let key = dll_lookup_key(&name);
     let h = if is_always_present_dll(&key) {
-        weave_core::module_handles::register(&name)
+        weave_core::module_handles::register(&key)
     } else {
-        weave_core::module_handles::find(&name).unwrap_or(0)
+        weave_core::module_handles::find(&key).unwrap_or(0)
     };
     eprintln!("weave/kernel32: GetModuleHandleA({name:?}) → {h:#x}");
     h
@@ -6856,14 +6869,11 @@ pub unsafe extern "win64" fn get_module_handle_w(lp_module_name: *const u16) -> 
         return weave_core::seh::pe_base();
     }
     let name = unsafe { read_cstr_w(lp_module_name) };
-    let key = {
-        let base = name.rsplit(['\\', '/']).next().unwrap_or(&name);
-        base.to_ascii_lowercase()
-    };
+    let key = dll_lookup_key(&name);
     let h = if is_always_present_dll(&key) {
-        weave_core::module_handles::register(&name)
+        weave_core::module_handles::register(&key)
     } else {
-        weave_core::module_handles::find(&name).unwrap_or(0)
+        weave_core::module_handles::find(&key).unwrap_or(0)
     };
     eprintln!("weave/kernel32: GetModuleHandleW({name:?}) → {h:#x}");
     h

@@ -6558,13 +6558,13 @@ fn q_dir_file_pane_gate() {
     }
 
     assert!(
-        stderr.contains("PHASE: shell_enum_first"),
-        "Q-Dir file-pane Gate A1 FAIL: shell_enum_first not seen within 10s\nstderr: {stderr}"
+        stderr.contains("PHASE: find_first_file_first"),
+        "Q-Dir file-pane Gate A1 FAIL: find_first_file_first not seen within 10s\nstderr: {stderr}"
     );
 
     assert!(
-        stderr.contains("PHASE: listview_insert_first"),
-        "Q-Dir file-pane Gate A2 FAIL: listview_insert_first not seen within 10s\nstderr: {stderr}"
+        stderr.contains("PHASE: find_next_file_first"),
+        "Q-Dir file-pane Gate A2 FAIL: find_next_file_first not seen within 10s\nstderr: {stderr}"
     );
 
     eprintln!("q_dir_file_pane_gate: A1+A2+A3 passed");

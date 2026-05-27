@@ -13,6 +13,8 @@ pub fn mark_phase(name: &str) {
 
 static PHASE_SHELL_ENUM: AtomicBool = AtomicBool::new(false);
 static PHASE_LISTVIEW_INSERT: AtomicBool = AtomicBool::new(false);
+static PHASE_FIND_FIRST_FILE: AtomicBool = AtomicBool::new(false);
+static PHASE_FIND_NEXT_FILE: AtomicBool = AtomicBool::new(false);
 
 /// E3-M5b: first `IShellFolder::EnumObjects` / `IEnumIDList::Next` delivered an item.
 #[inline]
@@ -27,5 +29,21 @@ pub fn mark_shell_enum_first() {
 pub fn mark_listview_insert_first() {
     if !PHASE_LISTVIEW_INSERT.swap(true, Ordering::Relaxed) {
         mark_phase("listview_insert_first");
+    }
+}
+
+/// E3-M5b: first `FindFirstFileW` returned a valid enumeration handle (CI probe path).
+#[inline]
+pub fn mark_find_first_file_first() {
+    if !PHASE_FIND_FIRST_FILE.swap(true, Ordering::Relaxed) {
+        mark_phase("find_first_file_first");
+    }
+}
+
+/// E3-M5b: first `FindNextFileW` returned TRUE with a real directory entry.
+#[inline]
+pub fn mark_find_next_file_first() {
+    if !PHASE_FIND_NEXT_FILE.swap(true, Ordering::Relaxed) {
+        mark_phase("find_next_file_first");
     }
 }
