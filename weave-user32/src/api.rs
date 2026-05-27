@@ -6893,7 +6893,9 @@ pub unsafe extern "win64" fn dialog_box_param_w(
     ) else {
         return -1;
     };
-    unsafe { run_modal_dialog_loop(hwnd) }
+    let result = unsafe { run_modal_dialog_loop(hwnd) };
+    crate::dialog::teardown_modal_dialog(hwnd);
+    result
 }
 
 /// CharPrevExA — find the previous character in a string (ANSI, code page aware).

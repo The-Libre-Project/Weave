@@ -53,6 +53,7 @@ pub const WM_NCDESTROY: u32 = 0x0082;
 pub const WM_NCCALCSIZE: u32 = 0x0083;
 pub const WM_NCHITTEST: u32 = 0x0084;
 pub const WM_COMMAND: u32 = 0x0111;
+pub const WM_TIMER: u32 = 0x0113;
 pub const WM_KEYDOWN: u32 = 0x0100;
 pub const WM_KEYUP: u32 = 0x0101;
 pub const WM_CHAR: u32 = 0x0102;

@@ -568,6 +568,27 @@ pub fn modal_ended() -> bool {
         .unwrap_or(false)
 }
 
+/// Tear down a modal dialog after `DialogBoxParamW` returns (Wine: destroy HWND + wake queue).
+///
+/// Wine ref: dlls/user32/dialog.c::DIALOG_DoDialogBox — `NtUserDestroyWindow(hwnd)` after the
+/// modal loop ends. Q-Dir post-dialog init calls `GetMessageW` on an empty queue and blocks until
+/// the 10s gate deadline (CI 26543785305); posting `WM_TIMER` wakes `wait_event` via the queue pipe.
+pub fn teardown_modal_dialog(hwnd: usize) {
+    if hwnd != 0 {
+        let _ = window::remove(hwnd);
+        eprintln!("weave/dialog: destroyed modal hwnd={hwnd:#x}");
+    }
+    queue::post(MsgEntry {
+        hwnd: 0,
+        message: crate::defs::WM_TIMER,
+        w_param: 1,
+        l_param: 0,
+        time: 0,
+        pt_x: 0,
+        pt_y: 0,
+    });
+}
+
 /// Load RT_DIALOG from `image_base`, create dialog window + controls.
 ///
 /// # Safety
