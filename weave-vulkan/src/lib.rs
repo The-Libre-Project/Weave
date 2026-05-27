@@ -10,6 +10,25 @@
 //!   1. Looking up the XCB window ID for the HWND via `weave_user32::window::xcb_id`.
 //!   2. Obtaining a raw XCB connection via `dlopen("libxcb.so.1")` + `xcb_connect`.
 //!
+//! # Crate boundary note
+//!
+//! `weave-vulkan` depends on `weave-user32` — a sibling DLL crate. This is a
+//! documented exception to the "DLL crates must not import sibling DLL crates"
+//! rule, mirroring the gdi32 → user32 and comctl32 → user32 exceptions.
+//!
+//! Rationale: Vulkan surface creation requires translating an HWND to an
+//! `xcb_window_t`. The HWND → XCB window mapping is owned by `weave_user32::window`
+//! (the registry built when `CreateWindowExW` allocates the XCB window). There is
+//! no clean way to extract this mapping into `weave-common` — `weave-user32::window`
+//! owns the full XCB connection lifecycle, the X11 atom cache, the window-procedure
+//! table, and the event-loop dispatch. Pulling out only the HWND → xcb_window_t
+//! lookup would either hollow `weave-user32` (move the table to common, break
+//! encapsulation) or create a circular dependency (common needs window types that
+//! reference user32's WindowEntry).
+//!
+//! Surface evaluated 2026-05-27. Single import: `weave_user32::window::xcb_id`.
+//! Do not add further DLL → DLL imports without a similar written justification.
+//!
 //! # Calling conventions
 //!
 //! The Windows PE guest calls our stubs using the Windows x64 (MS ABI) calling
