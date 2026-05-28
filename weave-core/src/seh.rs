@@ -1075,6 +1075,7 @@ fn log_q_dir_78698_entry(pe_base: usize, pe_size: usize, ctx: *const libc::ucont
 fn log_q_dir_7880d_diag(pe_base: usize, pe_size: usize, ctx: *const libc::ucontext_t) {
     const COUNTER_RVAS: [(usize, &[u8]); 2] = [
         (0x152fb0, b"0x152fb0"),
+        (0x146e70, b"0x146e70"),
         (0x152fbc, b"0x152fbc"),
     ];
     let gregs = unsafe { (*ctx).uc_mcontext.gregs };

@@ -57,8 +57,11 @@ static ACTIVE_MODAL: Mutex<Option<ActiveModal>> = Mutex::new(None);
 
 // Q-Dir_x64.exe: heap-init reads RVAs 0x152fb0/0x152fbc (`.data` ZEROFILL — runtime 0 until
 // guest bumps them; disasm 0x786c9 `cmp esi,2` / 0x786da heavy path when counter >= 2).
+// `0x146e70` PE initial dword `0xa` → `mov r8d,[0x146e70]` at `0x7c8f0` → `0x79424` `esi=10`
+// (CI 26560894580); not the `0x152fb0` counter path.
 const Q_DIR_SIZE_FINGERPRINT: usize = 0x1f3000;
 const Q_DIR_HEAP_COUNTER_RVAS: [usize; 2] = [0x152fb0, 0x152fbc];
+const Q_DIR_HEAP_COUNT_ARG_RVA: usize = 0x146e70;
 
 /// Evidence-only: log both heap-init qwords (E3-M5b option B — no writes).
 pub(crate) fn q_dir_log_heap_counters(label: &str, image_base: usize) {
@@ -78,8 +81,14 @@ pub(crate) fn q_dir_log_heap_counters(label: &str, image_base: usize) {
             vals[i] = unsafe { ((base + rva) as *const u64).read() };
         }
     }
+    let count_arg = if Q_DIR_HEAP_COUNT_ARG_RVA + 4 <= size {
+        // SAFETY: Q-Dir `.data` in the mapped image.
+        unsafe { ((base + Q_DIR_HEAP_COUNT_ARG_RVA) as *const u32).read() }
+    } else {
+        0
+    };
     eprintln!(
-        "weave/dialog: Q-Dir counters [{label}] 0x152fb0={:#018x} 0x152fbc={:#018x}",
+        "weave/dialog: Q-Dir counters [{label}] 0x152fb0={:#018x} 0x152fbc={:#018x} 0x146e70={count_arg:#x}",
         vals[0], vals[1]
     );
 }
@@ -107,6 +116,17 @@ pub(crate) fn q_dir_reset_heap_counters_if_needed(image_base: usize) {
                 p.write(0);
             }
             eprintln!("weave/dialog: Q-Dir counter rva={rva:#x} reset ({cur:#x} → 0)");
+        }
+    }
+    if Q_DIR_HEAP_COUNT_ARG_RVA + 4 <= size {
+        // SAFETY: Q-Dir `.data` (writable mapped image).
+        let p = (base + Q_DIR_HEAP_COUNT_ARG_RVA) as *mut u32;
+        let cur = unsafe { p.read() };
+        if cur != 0 {
+            unsafe {
+                p.write(0);
+            }
+            eprintln!("weave/dialog: Q-Dir heap count arg 0x146e70 reset ({cur:#x} → 0)");
         }
     }
 }
