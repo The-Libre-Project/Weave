@@ -265,8 +265,9 @@ unsafe extern "C" fn on_fatal_signal(
             pos += 1;
             libc::write(2, buf.as_ptr() as *const _, pos);
         }
-        if size == 0x1f3000 && rva == 0x7880d {
-            log_q_dir_7880d_diag(base, uctx);
+        if rva == 0x7880d {
+            log_q_dir_7880d_enter(base, size, rva);
+            log_q_dir_7880d_diag(base, size, uctx);
         }
         let win_code = signal_to_exception_code(sig);
 
@@ -890,7 +891,10 @@ fn print_crash_report(
 
 /// Q-Dir E3-M5b evidence (option B): counters + registers at SIGSEGV `0x7880d`.
 #[cfg(all(target_os = "linux", not(target_arch = "x86_64")))]
-fn log_q_dir_7880d_diag(_pe_base: usize, _ctx: *const libc::ucontext_t) {}
+fn log_q_dir_7880d_enter(_pe_base: usize, _pe_size: usize, _rva: u32) {}
+
+#[cfg(all(target_os = "linux", not(target_arch = "x86_64")))]
+fn log_q_dir_7880d_diag(_pe_base: usize, _pe_size: usize, _ctx: *const libc::ucontext_t) {}
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 fn q_dir_diag_pread_u32(addr: usize) -> Option<u32> {
@@ -917,7 +921,46 @@ fn q_dir_diag_pread_u32(addr: usize) -> Option<u32> {
 }
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-fn log_q_dir_7880d_diag(pe_base: usize, ctx: *const libc::ucontext_t) {
+fn q_dir_diag_pread_u64(addr: usize) -> Option<u64> {
+    let mem_path = b"/proc/self/mem\0";
+    let fd = unsafe { libc::open(mem_path.as_ptr() as *const libc::c_char, libc::O_RDONLY) };
+    if fd < 0 {
+        return None;
+    }
+    let mut buf = [0u8; 8];
+    let n = unsafe {
+        libc::pread(
+            fd,
+            buf.as_mut_ptr() as *mut libc::c_void,
+            8,
+            addr as i64,
+        )
+    };
+    unsafe { libc::close(fd) };
+    if n == 8 {
+        Some(u64::from_le_bytes(buf))
+    } else {
+        None
+    }
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn log_q_dir_7880d_enter(pe_base: usize, pe_size: usize, rva: u32) {
+    let mut buf = [0u8; 128];
+    let mut pos = 0usize;
+    q_dir_diag_write_bytes(&mut buf, &mut pos, b"weave: q-dir 7880d enter pe_base=");
+    q_dir_diag_write_hex(&mut buf, &mut pos, pe_base as u64, 16);
+    q_dir_diag_write_bytes(&mut buf, &mut pos, b" pe_size=");
+    q_dir_diag_write_hex(&mut buf, &mut pos, pe_size as u64, 16);
+    q_dir_diag_write_bytes(&mut buf, &mut pos, b" rva=");
+    q_dir_diag_write_hex(&mut buf, &mut pos, rva as u64, 8);
+    q_dir_diag_write_byte(&mut buf, &mut pos, b'\n');
+    unsafe { libc::write(2, buf.as_ptr() as *const _, pos) };
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn log_q_dir_7880d_diag(pe_base: usize, pe_size: usize, ctx: *const libc::ucontext_t) {
+    let _ = pe_size;
     const COUNTER_RVAS: [(usize, &[u8]); 2] = [
         (0x152fb0, b"0x152fb0"),
         (0x152fbc, b"0x152fbc"),
@@ -938,7 +981,7 @@ fn log_q_dir_7880d_diag(pe_base: usize, ctx: *const libc::ucontext_t) {
         q_dir_diag_write_bytes(&mut buf, &mut pos, b" ");
         q_dir_diag_write_bytes(&mut buf, &mut pos, label);
         q_dir_diag_write_bytes(&mut buf, &mut pos, b"=");
-        let cur = unsafe { *((pe_base + rva) as *const u64) };
+        let cur = q_dir_diag_pread_u64(pe_base + rva).unwrap_or(0xffff_ffff_ffff_ffff);
         q_dir_diag_write_hex(&mut buf, &mut pos, cur, 16);
     }
     q_dir_diag_write_byte(&mut buf, &mut pos, b'\n');
