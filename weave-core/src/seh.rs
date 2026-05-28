@@ -265,6 +265,9 @@ unsafe extern "C" fn on_fatal_signal(
             pos += 1;
             libc::write(2, buf.as_ptr() as *const _, pos);
         }
+        if size == 0x1f3000 && rva == 0x7880d {
+            log_q_dir_7880d_diag(base, ctx);
+        }
         let win_code = signal_to_exception_code(sig);
 
         // Try to dispatch through SEH. If a handler catches it, the ucontext
@@ -884,6 +887,89 @@ fn print_crash_report(
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
+
+/// Q-Dir E3-M5b evidence (option B): counters + registers at SIGSEGV `0x7880d`.
+#[cfg(all(target_os = "linux", not(target_arch = "x86_64")))]
+fn log_q_dir_7880d_diag(_pe_base: usize, _ctx: *const libc::ucontext_t) {}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn log_q_dir_7880d_diag(pe_base: usize, ctx: *const libc::ucontext_t) {
+    const COUNTER_RVAS: [(usize, &[u8]); 2] = [
+        (0x152fb0, b"0x152fb0"),
+        (0x152fbc, b"0x152fbc"),
+    ];
+    let gregs = unsafe { (*ctx).uc_mcontext.gregs };
+    let rax = gregs[libc::REG_RAX as usize] as u64;
+    let rbx = gregs[libc::REG_RBX as usize] as u64;
+    let rcx = gregs[libc::REG_RCX as usize] as u64;
+    let rdx = gregs[libc::REG_RDX as usize] as u64;
+    let rsi = gregs[libc::REG_RSI as usize] as u64;
+    let rdi = gregs[libc::REG_RDI as usize] as u64;
+    let rbp = gregs[libc::REG_RBP as usize] as u64;
+    let mut buf = [0u8; 512];
+    let mut pos = 0usize;
+    let nibble = |n: u64| {
+        if n < 10 {
+            b'0' + n as u8
+        } else {
+            b'a' + n as u8 - 10
+        }
+    };
+    let mut push_byte = |b: u8| {
+        if pos < buf.len() {
+            buf[pos] = b;
+            pos += 1;
+        }
+    };
+    let mut push_bytes = |s: &[u8]| {
+        for &b in s {
+            push_byte(b);
+        }
+    };
+    let mut push_hex = |v: u64, width: u32| {
+        push_bytes(b"0x");
+        for sh in (0..width).rev() {
+            let n = (v >> (sh * 4)) & 0xf;
+            push_byte(nibble(n));
+        }
+    };
+    push_bytes(b"weave: q-dir 7880d counters");
+    for (rva, label) in COUNTER_RVAS {
+        push_bytes(b" ");
+        push_bytes(label);
+        push_bytes(b"=");
+        let cur = unsafe { *((pe_base + rva) as *const u64) };
+        push_hex(cur, 16);
+    }
+    push_byte(b'\n');
+    unsafe { libc::write(2, buf.as_ptr() as *const _, pos) };
+
+    let chunk_ptr = if rdi != 0 {
+        unsafe { *((rdi as usize + 4) as *const u32) } as u64
+    } else {
+        0
+    };
+    pos = 0;
+    push_bytes(b"weave: q-dir 7880d regs ");
+    push_bytes(b"rax=");
+    push_hex(rax, 16);
+    push_bytes(b" rbx=");
+    push_hex(rbx, 16);
+    push_bytes(b" rcx=");
+    push_hex(rcx, 16);
+    push_bytes(b" rdx=");
+    push_hex(rdx, 16);
+    push_bytes(b" rsi=");
+    push_hex(rsi, 16);
+    push_bytes(b" rdi=");
+    push_hex(rdi, 16);
+    push_bytes(b" rbp=");
+    push_hex(rbp, 16);
+    push_bytes(b" [rdi+4]=");
+    push_hex(chunk_ptr, 16);
+    push_byte(b'\n');
+    unsafe { libc::write(2, buf.as_ptr() as *const _, pos) };
+}
 
 #[cfg(target_os = "linux")]
 fn signal_to_exception_code(sig: libc::c_int) -> u32 {

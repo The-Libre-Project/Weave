@@ -56,11 +56,35 @@ struct ActiveModal {
 static ACTIVE_MODAL: Mutex<Option<ActiveModal>> = Mutex::new(None);
 
 // Q-Dir_x64.exe: heap-init reads RVAs 0x152fb0/0x152fbc (`.data` ZEROFILL — runtime 0 until
-// guest bumps them; disasm 0x4786da heavy path when counter >= 2).
+// guest bumps them; disasm 0x786c9 `cmp esi,2` / 0x786da heavy path when counter >= 2).
 const Q_DIR_SIZE_FINGERPRINT: usize = 0x1f3000;
 const Q_DIR_HEAP_COUNTER_RVAS: [usize; 2] = [0x152fb0, 0x152fbc];
 
-/// Zero Q-Dir heap-init counters before `DialogBoxParamW` (disasm: 0x4786da / SIGSEGV 0x7880d).
+/// Evidence-only: log both heap-init qwords (E3-M5b option B — no writes).
+pub(crate) fn q_dir_log_heap_counters(label: &str, image_base: usize) {
+    let base = if image_base != 0 {
+        image_base
+    } else {
+        weave_core::seh::pe_base()
+    };
+    let size = weave_core::seh::pe_size();
+    if base == 0 || size != Q_DIR_SIZE_FINGERPRINT {
+        return;
+    }
+    let mut vals = [0u64; 2];
+    for (i, rva) in Q_DIR_HEAP_COUNTER_RVAS.iter().enumerate() {
+        if *rva + 8 <= size {
+            // SAFETY: Q-Dir `.data` BSS in the mapped image.
+            vals[i] = unsafe { ((base + rva) as *const u64).read() };
+        }
+    }
+    eprintln!(
+        "weave/dialog: Q-Dir counters [{label}] 0x152fb0={:#018x} 0x152fbc={:#018x}",
+        vals[0], vals[1]
+    );
+}
+
+/// Zero Q-Dir heap-init counters before `DialogBoxParamW` (disasm: 0x786da / SIGSEGV 0x7880d).
 pub(crate) fn q_dir_reset_heap_counters_if_needed(image_base: usize) {
     let base = if image_base != 0 {
         image_base
