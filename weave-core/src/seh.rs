@@ -906,69 +906,76 @@ fn log_q_dir_7880d_diag(pe_base: usize, ctx: *const libc::ucontext_t) {
     let rsi = gregs[libc::REG_RSI as usize] as u64;
     let rdi = gregs[libc::REG_RDI as usize] as u64;
     let rbp = gregs[libc::REG_RBP as usize] as u64;
-    let mut buf = [0u8; 512];
-    let mut pos = 0usize;
-    let nibble = |n: u64| {
-        if n < 10 {
-            b'0' + n as u8
-        } else {
-            b'a' + n as u8 - 10
-        }
-    };
-    let mut push_byte = |b: u8| {
-        if pos < buf.len() {
-            buf[pos] = b;
-            pos += 1;
-        }
-    };
-    let mut push_bytes = |s: &[u8]| {
-        for &b in s {
-            push_byte(b);
-        }
-    };
-    let mut push_hex = |v: u64, width: u32| {
-        push_bytes(b"0x");
-        for sh in (0..width).rev() {
-            let n = (v >> (sh * 4)) & 0xf;
-            push_byte(nibble(n));
-        }
-    };
-    push_bytes(b"weave: q-dir 7880d counters");
-    for (rva, label) in COUNTER_RVAS {
-        push_bytes(b" ");
-        push_bytes(label);
-        push_bytes(b"=");
-        let cur = unsafe { *((pe_base + rva) as *const u64) };
-        push_hex(cur, 16);
-    }
-    push_byte(b'\n');
-    unsafe { libc::write(2, buf.as_ptr() as *const _, pos) };
-
     let chunk_ptr = if rdi != 0 {
-        unsafe { *((rdi as usize + 4) as *const u32) } as u64
+        unsafe { *(((rdi as usize) + 4) as *const u32) as u64 }
     } else {
         0
     };
-    pos = 0;
-    push_bytes(b"weave: q-dir 7880d regs ");
-    push_bytes(b"rax=");
-    push_hex(rax, 16);
-    push_bytes(b" rbx=");
-    push_hex(rbx, 16);
-    push_bytes(b" rcx=");
-    push_hex(rcx, 16);
-    push_bytes(b" rdx=");
-    push_hex(rdx, 16);
-    push_bytes(b" rsi=");
-    push_hex(rsi, 16);
-    push_bytes(b" rdi=");
-    push_hex(rdi, 16);
-    push_bytes(b" rbp=");
-    push_hex(rbp, 16);
-    push_bytes(b" [rdi+4]=");
-    push_hex(chunk_ptr, 16);
-    push_byte(b'\n');
+    let mut buf = [0u8; 512];
+    let mut pos = 0usize;
+    q_dir_diag_write_bytes(&mut buf, &mut pos, b"weave: q-dir 7880d counters");
+    for (rva, label) in COUNTER_RVAS {
+        q_dir_diag_write_bytes(&mut buf, &mut pos, b" ");
+        q_dir_diag_write_bytes(&mut buf, &mut pos, label);
+        q_dir_diag_write_bytes(&mut buf, &mut pos, b"=");
+        let cur = unsafe { *((pe_base + rva) as *const u64) };
+        q_dir_diag_write_hex(&mut buf, &mut pos, cur, 16);
+    }
+    q_dir_diag_write_byte(&mut buf, &mut pos, b'\n');
     unsafe { libc::write(2, buf.as_ptr() as *const _, pos) };
+
+    pos = 0;
+    q_dir_diag_write_bytes(&mut buf, &mut pos, b"weave: q-dir 7880d regs rax=");
+    q_dir_diag_write_hex(&mut buf, &mut pos, rax, 16);
+    q_dir_diag_write_bytes(&mut buf, &mut pos, b" rbx=");
+    q_dir_diag_write_hex(&mut buf, &mut pos, rbx, 16);
+    q_dir_diag_write_bytes(&mut buf, &mut pos, b" rcx=");
+    q_dir_diag_write_hex(&mut buf, &mut pos, rcx, 16);
+    q_dir_diag_write_bytes(&mut buf, &mut pos, b" rdx=");
+    q_dir_diag_write_hex(&mut buf, &mut pos, rdx, 16);
+    q_dir_diag_write_bytes(&mut buf, &mut pos, b" rsi=");
+    q_dir_diag_write_hex(&mut buf, &mut pos, rsi, 16);
+    q_dir_diag_write_bytes(&mut buf, &mut pos, b" rdi=");
+    q_dir_diag_write_hex(&mut buf, &mut pos, rdi, 16);
+    q_dir_diag_write_bytes(&mut buf, &mut pos, b" rbp=");
+    q_dir_diag_write_hex(&mut buf, &mut pos, rbp, 16);
+    q_dir_diag_write_bytes(&mut buf, &mut pos, b" [rdi+4]=");
+    q_dir_diag_write_hex(&mut buf, &mut pos, chunk_ptr, 16);
+    q_dir_diag_write_byte(&mut buf, &mut pos, b'\n');
+    unsafe { libc::write(2, buf.as_ptr() as *const _, pos) };
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn q_dir_diag_nibble(n: u64) -> u8 {
+    if n < 10 {
+        b'0' + n as u8
+    } else {
+        b'a' + n as u8 - 10
+    }
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn q_dir_diag_write_byte(buf: &mut [u8], pos: &mut usize, b: u8) {
+    if *pos < buf.len() {
+        buf[*pos] = b;
+        *pos += 1;
+    }
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn q_dir_diag_write_bytes(buf: &mut [u8], pos: &mut usize, s: &[u8]) {
+    for &b in s {
+        q_dir_diag_write_byte(buf, pos, b);
+    }
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn q_dir_diag_write_hex(buf: &mut [u8], pos: &mut usize, v: u64, width: u32) {
+    q_dir_diag_write_bytes(buf, pos, b"0x");
+    for sh in (0..width).rev() {
+        let n = (v >> (sh * 4)) & 0xf;
+        q_dir_diag_write_byte(buf, pos, q_dir_diag_nibble(n));
+    }
 }
 
 #[cfg(target_os = "linux")]
