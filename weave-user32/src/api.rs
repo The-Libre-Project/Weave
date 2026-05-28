@@ -6883,7 +6883,6 @@ pub unsafe extern "win64" fn dialog_box_param_w(
     let template_id = lp_template_name as usize;
     eprintln!("weave/user32: DialogBoxParamW(template={template_id:#x}) — Phase B");
     crate::dialog::q_dir_reset_heap_counters_if_needed(image_base);
-    crate::dialog::q_dir_seed_freelist_head_if_needed(image_base);
     crate::dialog::q_dir_log_heap_counters("pre-modal", image_base);
     let Some(hwnd) = crate::dialog::create_from_resource(
         image_base,

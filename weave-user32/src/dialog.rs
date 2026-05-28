@@ -104,6 +104,9 @@ pub(crate) fn q_dir_log_heap_counters(label: &str, image_base: usize) {
 }
 
 /// Restore Q-Dir light-path freelist head when zero (TRACE-B CI `26604833872`: `rax=0` at `0x786eb`).
+///
+/// Call only **after** `DialogBoxParamW` returns — pre-modal seed (CI `26605707359`) hung in
+/// `get_message_first` with no `post-modal-return`.
 pub(crate) fn q_dir_seed_freelist_head_if_needed(image_base: usize) {
     let base = if image_base != 0 {
         image_base
