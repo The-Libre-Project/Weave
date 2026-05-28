@@ -893,6 +893,30 @@ fn print_crash_report(
 fn log_q_dir_7880d_diag(_pe_base: usize, _ctx: *const libc::ucontext_t) {}
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn q_dir_diag_pread_u32(addr: usize) -> Option<u32> {
+    let mem_path = b"/proc/self/mem\0";
+    let fd = unsafe { libc::open(mem_path.as_ptr() as *const libc::c_char, libc::O_RDONLY) };
+    if fd < 0 {
+        return None;
+    }
+    let mut buf = [0u8; 4];
+    let n = unsafe {
+        libc::pread(
+            fd,
+            buf.as_mut_ptr() as *mut libc::c_void,
+            4,
+            addr as i64,
+        )
+    };
+    unsafe { libc::close(fd) };
+    if n == 4 {
+        Some(u32::from_le_bytes(buf))
+    } else {
+        None
+    }
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 fn log_q_dir_7880d_diag(pe_base: usize, ctx: *const libc::ucontext_t) {
     const COUNTER_RVAS: [(usize, &[u8]); 2] = [
         (0x152fb0, b"0x152fb0"),
@@ -906,13 +930,9 @@ fn log_q_dir_7880d_diag(pe_base: usize, ctx: *const libc::ucontext_t) {
     let rsi = gregs[libc::REG_RSI as usize] as u64;
     let rdi = gregs[libc::REG_RDI as usize] as u64;
     let rbp = gregs[libc::REG_RBP as usize] as u64;
-    let chunk_ptr = if rdi != 0 {
-        unsafe { *(((rdi as usize) + 4) as *const u32) as u64 }
-    } else {
-        0
-    };
     let mut buf = [0u8; 512];
     let mut pos = 0usize;
+    // Counters + regs first — never deref guest pointers in the handler (re-fault risk).
     q_dir_diag_write_bytes(&mut buf, &mut pos, b"weave: q-dir 7880d counters");
     for (rva, label) in COUNTER_RVAS {
         q_dir_diag_write_bytes(&mut buf, &mut pos, b" ");
@@ -940,6 +960,13 @@ fn log_q_dir_7880d_diag(pe_base: usize, ctx: *const libc::ucontext_t) {
     q_dir_diag_write_bytes(&mut buf, &mut pos, b" rbp=");
     q_dir_diag_write_hex(&mut buf, &mut pos, rbp, 16);
     q_dir_diag_write_bytes(&mut buf, &mut pos, b" [rdi+4]=");
+    let chunk_ptr = if rdi != 0 {
+        q_dir_diag_pread_u32((rdi as usize).wrapping_add(4))
+            .map(u64::from)
+            .unwrap_or(0xffff_ffff)
+    } else {
+        0
+    };
     q_dir_diag_write_hex(&mut buf, &mut pos, chunk_ptr, 16);
     q_dir_diag_write_byte(&mut buf, &mut pos, b'\n');
     unsafe { libc::write(2, buf.as_ptr() as *const _, pos) };
