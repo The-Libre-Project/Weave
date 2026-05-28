@@ -6883,6 +6883,7 @@ pub unsafe extern "win64" fn dialog_box_param_w(
     let template_id = lp_template_name as usize;
     eprintln!("weave/user32: DialogBoxParamW(template={template_id:#x}) — Phase B");
     crate::dialog::q_dir_reset_heap_counters_if_needed(image_base);
+    crate::dialog::q_dir_seed_freelist_head_if_needed(image_base);
     crate::dialog::q_dir_log_heap_counters("pre-modal", image_base);
     let Some(hwnd) = crate::dialog::create_from_resource(
         image_base,
@@ -6897,6 +6898,7 @@ pub unsafe extern "win64" fn dialog_box_param_w(
     let result = unsafe { run_modal_dialog_loop(hwnd) };
     // Q-Dir: guest may bump heap counters during modal; reset again before 0x124f3 init (0x7880d).
     crate::dialog::q_dir_reset_heap_counters_if_needed(image_base);
+    crate::dialog::q_dir_seed_freelist_head_if_needed(image_base);
     crate::dialog::q_dir_log_heap_counters("post-modal-return", image_base);
     // Do not `window::remove` here — CI 26545216770 SIGSEGV at 0x7880d immediately after destroy.
     crate::dialog::wake_post_modal_queue();

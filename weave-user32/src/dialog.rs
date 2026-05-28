@@ -62,6 +62,10 @@ static ACTIVE_MODAL: Mutex<Option<ActiveModal>> = Mutex::new(None);
 const Q_DIR_SIZE_FINGERPRINT: usize = 0x1f3000;
 const Q_DIR_HEAP_COUNTER_RVAS: [usize; 2] = [0x152fb0, 0x152fbc];
 const Q_DIR_HEAP_COUNT_ARG_RVA: usize = 0x146e70;
+/// Light-path freelist head (`mov rax, [0x1531e0]` at `0x786dc`). CI `26604833872`: runtime 0 → `0x786eb`.
+const Q_DIR_FREELIST_HEAD_RVA: usize = 0x1531e0;
+/// Pool header RVA; `[base+0x13e4d0+8]` is non-zero in the PE (unlike `0x1231aa` in `.text`).
+const Q_DIR_FREELIST_POOL_HDR_RVA: usize = 0x13e4d0;
 
 /// Evidence-only: log both heap-init qwords (E3-M5b option B — no writes).
 pub(crate) fn q_dir_log_heap_counters(label: &str, image_base: usize) {
@@ -87,10 +91,42 @@ pub(crate) fn q_dir_log_heap_counters(label: &str, image_base: usize) {
     } else {
         0
     };
+    let freelist = if Q_DIR_FREELIST_HEAD_RVA + 8 <= size {
+        // SAFETY: Q-Dir `.data` in the mapped image.
+        unsafe { ((base + Q_DIR_FREELIST_HEAD_RVA) as *const u64).read() }
+    } else {
+        0
+    };
     eprintln!(
-        "weave/dialog: Q-Dir counters [{label}] 0x152fb0={:#018x} 0x152fbc={:#018x} 0x146e70={count_arg:#x}",
+        "weave/dialog: Q-Dir counters [{label}] 0x152fb0={:#018x} 0x152fbc={:#018x} 0x146e70={count_arg:#x} 0x1531e0={freelist:#018x}",
         vals[0], vals[1]
     );
+}
+
+/// Restore Q-Dir light-path freelist head when zero (TRACE-B CI `26604833872`: `rax=0` at `0x786eb`).
+pub(crate) fn q_dir_seed_freelist_head_if_needed(image_base: usize) {
+    let base = if image_base != 0 {
+        image_base
+    } else {
+        weave_core::seh::pe_base()
+    };
+    let size = weave_core::seh::pe_size();
+    if base == 0 || size != Q_DIR_SIZE_FINGERPRINT {
+        return;
+    }
+    if Q_DIR_FREELIST_HEAD_RVA + 8 > size {
+        return;
+    }
+    // SAFETY: Q-Dir `.data` (writable mapped image).
+    let p = (base + Q_DIR_FREELIST_HEAD_RVA) as *mut u64;
+    let cur = unsafe { p.read() };
+    if cur == 0 {
+        let seed = (base + Q_DIR_FREELIST_POOL_HDR_RVA) as u64;
+        unsafe {
+            p.write(seed);
+        }
+        eprintln!("weave/dialog: Q-Dir freelist 0x1531e0 seed (0 → {seed:#018x})");
+    }
 }
 
 /// Zero Q-Dir heap-init counters before `DialogBoxParamW` (disasm: 0x786da / SIGSEGV 0x7880d).
