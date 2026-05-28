@@ -266,7 +266,7 @@ unsafe extern "C" fn on_fatal_signal(
             libc::write(2, buf.as_ptr() as *const _, pos);
         }
         if size == 0x1f3000 && rva == 0x7880d {
-            log_q_dir_7880d_diag(base, ctx);
+            log_q_dir_7880d_diag(base, uctx);
         }
         let win_code = signal_to_exception_code(sig);
 
