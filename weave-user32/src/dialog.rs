@@ -598,7 +598,33 @@ pub unsafe fn create_from_template_bytes(
     let _ = init_param;
     crate::backend::show_window(window::xcb_id(hwnd), true);
     window::with_mut(hwnd, |e| e.visible = true);
+    q_dir_post_synthetic_wm_paint_after_show(hwnd);
     Some(hwnd)
+}
+
+/// Q-Dir modal loop ends on first `WM_PAINT` in `run_modal_dialog_loop`; bypasses `ShowWindow`.
+///
+/// Wine ref: dlls/user32/dialog.c — `ShowWindow(SW_SHOW)` marks the update region dirty;
+/// `weave-user32` `show_window` posts `WM_PAINT` on first show (CI `26606312910`: X11 `Other`
+/// only, no `Expose`, modal hung 10s).
+fn q_dir_post_synthetic_wm_paint_after_show(hwnd: usize) {
+    if hwnd == 0 || weave_core::seh::pe_size() != Q_DIR_SIZE_FINGERPRINT {
+        return;
+    }
+    let visible = window::with(hwnd, |e| e.visible).unwrap_or(false);
+    if !visible {
+        return;
+    }
+    eprintln!("weave/dialog: Q-Dir synthetic WM_PAINT queued hwnd={hwnd:#x} (post-show_window)");
+    queue::post(MsgEntry {
+        hwnd,
+        message: WM_PAINT,
+        w_param: 0,
+        l_param: 0,
+        time: 0,
+        pt_x: 0,
+        pt_y: 0,
+    });
 }
 
 pub fn begin_modal(hwnd: usize) {
