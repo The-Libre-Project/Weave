@@ -1073,10 +1073,10 @@ fn log_q_dir_78698_entry(pe_base: usize, pe_size: usize, ctx: *const libc::ucont
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 fn log_q_dir_7880d_diag(pe_base: usize, pe_size: usize, ctx: *const libc::ucontext_t) {
-    const COUNTER_RVAS: [(usize, &[u8]); 2] = [
+    const COUNTER_RVAS: [(usize, &[u8]); 3] = [
         (0x152fb0, b"0x152fb0"),
-        (0x146e70, b"0x146e70"),
         (0x152fbc, b"0x152fbc"),
+        (0x146e70, b"0x146e70"),
     ];
     let gregs = unsafe { (*ctx).uc_mcontext.gregs };
     let rax = gregs[libc::REG_RAX as usize] as u64;
