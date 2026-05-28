@@ -268,7 +268,7 @@ unsafe extern "C" fn on_fatal_signal(
         if rva == 0x78698 {
             log_q_dir_78698_entry(base, size, uctx);
         }
-        if rva == 0x786eb {
+        if rva == 0x786eb || rva == 0x78700 {
             log_q_dir_786eb_enter(base, size, rva);
             log_q_dir_786eb_diag(base, size, uctx);
         }
@@ -1097,7 +1097,7 @@ fn log_q_dir_786eb_enter(pe_base: usize, pe_size: usize, rva: u32) {
     unsafe { libc::write(2, buf.as_ptr() as *const _, pos) };
 }
 
-/// Light-path fault at `0x786eb`: `mov edx, [rax+8]` after `mov rax, [0x1531e0]`.
+/// Light-path fault at `0x786eb` / `0x78700`: `mov edx, [rax+8]` freelist walk in `0x78698`.
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 fn log_q_dir_786eb_diag(pe_base: usize, pe_size: usize, ctx: *const libc::ucontext_t) {
     let gregs = unsafe { (*ctx).uc_mcontext.gregs };
