@@ -55,130 +55,16 @@ struct ActiveModal {
 
 static ACTIVE_MODAL: Mutex<Option<ActiveModal>> = Mutex::new(None);
 
-// Q-Dir_x64.exe: heap-init reads RVAs 0x152fb0/0x152fbc (`.data` ZEROFILL — runtime 0 until
-// guest bumps them; disasm 0x786c9 `cmp esi,2` / 0x786da heavy path when counter >= 2).
-// `0x146e70` PE initial dword `0xa` → `mov r8d,[0x146e70]` at `0x7c8f0` → `0x79424` `esi=10`
-// (CI 26560894580); not the `0x152fb0` counter path.
-const Q_DIR_SIZE_FINGERPRINT: usize = 0x1f3000;
-const Q_DIR_HEAP_COUNTER_RVAS: [usize; 2] = [0x152fb0, 0x152fbc];
-const Q_DIR_HEAP_COUNT_ARG_RVA: usize = 0x146e70;
-/// Light-path freelist head (`mov rax, [0x1531e0]` at `0x786dc`). CI `26604833872`: runtime 0 → `0x786eb`.
-const Q_DIR_FREELIST_HEAD_RVA: usize = 0x1531e0;
-/// Pool header RVA used as single-node freelist; light path at `0x786eb`/`0x78700` walks
-/// `[node+8]` until zero (CI `26607416893`: non-zero `0x10401` → fault `0x10409`).
-const Q_DIR_FREELIST_POOL_HDR_RVA: usize = 0x13e4d0;
-const Q_DIR_FREELIST_CHAIN_OFF: usize = 8;
-
-/// Evidence-only: log both heap-init qwords (E3-M5b option B — no writes).
-pub(crate) fn q_dir_log_heap_counters(label: &str, image_base: usize) {
-    let base = if image_base != 0 {
-        image_base
-    } else {
-        weave_core::seh::pe_base()
-    };
-    let size = weave_core::seh::pe_size();
-    if base == 0 || size != Q_DIR_SIZE_FINGERPRINT {
-        return;
-    }
-    let mut vals = [0u64; 2];
-    for (i, rva) in Q_DIR_HEAP_COUNTER_RVAS.iter().enumerate() {
-        if *rva + 8 <= size {
-            // SAFETY: Q-Dir `.data` BSS in the mapped image.
-            vals[i] = unsafe { ((base + rva) as *const u64).read() };
-        }
-    }
-    let count_arg = if Q_DIR_HEAP_COUNT_ARG_RVA + 4 <= size {
-        // SAFETY: Q-Dir `.data` in the mapped image.
-        unsafe { ((base + Q_DIR_HEAP_COUNT_ARG_RVA) as *const u32).read() }
-    } else {
-        0
-    };
-    let freelist = if Q_DIR_FREELIST_HEAD_RVA + 8 <= size {
-        // SAFETY: Q-Dir `.data` in the mapped image.
-        unsafe { ((base + Q_DIR_FREELIST_HEAD_RVA) as *const u64).read() }
-    } else {
-        0
-    };
-    eprintln!(
-        "weave/dialog: Q-Dir counters [{label}] 0x152fb0={:#018x} 0x152fbc={:#018x} 0x146e70={count_arg:#x} 0x1531e0={freelist:#018x}",
-        vals[0], vals[1]
-    );
-}
-
-/// Restore Q-Dir light-path freelist head when zero (TRACE-B CI `26604833872`: `rax=0` at `0x786eb`).
+/// Minimal WM_PAINT handler for dialog HWNDs — BeginPaint/ValidateRect/EndPaint without guest dlgproc.
 ///
-/// Call only **after** `DialogBoxParamW` returns — pre-modal seed (CI `26605707359`) hung in
-/// `get_message_first` with no `post-modal-return`.
-pub(crate) fn q_dir_seed_freelist_head_if_needed(image_base: usize) {
-    let base = if image_base != 0 {
-        image_base
-    } else {
-        weave_core::seh::pe_base()
-    };
-    let size = weave_core::seh::pe_size();
-    if base == 0 || size != Q_DIR_SIZE_FINGERPRINT {
-        return;
+/// Wine ref: dlls/win32u/defwnd.c — DefWindowProc WM_PAINT calls BeginPaint then EndPaint
+/// (which validates the update region). Q-Dir dlgproc SIGSEGV on WM_PAINT (RVA 0x8281) and
+/// WM_INITDIALOG (0x7880d); route paint through DefWindowProc instead of guest dispatch.
+pub(crate) fn paint_and_validate_hwnd(hwnd: usize) -> isize {
+    if hwnd == 0 || window::with(hwnd, |_| ()).is_none() {
+        return 0;
     }
-    if Q_DIR_FREELIST_HEAD_RVA + 8 > size {
-        return;
-    }
-    // SAFETY: Q-Dir `.data` (writable mapped image).
-    let p = (base + Q_DIR_FREELIST_HEAD_RVA) as *mut u64;
-    let cur = unsafe { p.read() };
-    if cur == 0 {
-        let node = base + Q_DIR_FREELIST_POOL_HDR_RVA;
-        if node + Q_DIR_FREELIST_CHAIN_OFF + 4 <= base + size {
-            // SAFETY: Q-Dir `.data` (writable mapped image).
-            unsafe {
-                ((node + Q_DIR_FREELIST_CHAIN_OFF) as *mut u32).write(0);
-            }
-        }
-        let seed = node as u64;
-        unsafe {
-            p.write(seed);
-        }
-        eprintln!(
-            "weave/dialog: Q-Dir freelist 0x1531e0 seed (0 → {seed:#018x}, [node+8]=0 light-path exit)"
-        );
-    }
-}
-
-/// Zero Q-Dir heap-init counters before `DialogBoxParamW` (disasm: 0x786da / SIGSEGV 0x7880d).
-pub(crate) fn q_dir_reset_heap_counters_if_needed(image_base: usize) {
-    let base = if image_base != 0 {
-        image_base
-    } else {
-        weave_core::seh::pe_base()
-    };
-    let size = weave_core::seh::pe_size();
-    if base == 0 || size != Q_DIR_SIZE_FINGERPRINT {
-        return;
-    }
-    for rva in Q_DIR_HEAP_COUNTER_RVAS {
-        if rva + 8 > size {
-            continue;
-        }
-        // SAFETY: Q-Dir `.data` BSS (writable mapped image).
-        let p = (base + rva) as *mut u64;
-        let cur = unsafe { p.read() };
-        if cur != 0 {
-            unsafe {
-                p.write(0);
-            }
-            eprintln!("weave/dialog: Q-Dir counter rva={rva:#x} reset ({cur:#x} → 0)");
-        }
-    }
-    if Q_DIR_HEAP_COUNT_ARG_RVA + 4 <= size {
-        // SAFETY: Q-Dir `.data` (writable mapped image).
-        let p = (base + Q_DIR_HEAP_COUNT_ARG_RVA) as *mut u32;
-        let cur = unsafe { p.read() };
-        if cur != 0 {
-            unsafe {
-                p.write(0);
-            }
-            eprintln!("weave/dialog: Q-Dir heap count arg 0x146e70 reset ({cur:#x} → 0)");
-        }
-    }
+    crate::api::def_window_proc_w(hwnd, WM_PAINT, 0, 0)
 }
 
 fn lock_modal(
@@ -607,35 +493,9 @@ pub unsafe fn create_from_template_bytes(
     );
     let _ = dlg_proc;
     let _ = init_param;
-    crate::backend::show_window(window::xcb_id(hwnd), true);
-    window::with_mut(hwnd, |e| e.visible = true);
-    q_dir_post_synthetic_wm_paint_after_show(hwnd);
+    // Wine ref: dlls/user32/dialog.c — ShowWindow(SW_SHOW) marks update region dirty and posts WM_PAINT.
+    crate::api::show_window(hwnd, SW_SHOW);
     Some(hwnd)
-}
-
-/// Q-Dir modal loop ends on first `WM_PAINT` in `run_modal_dialog_loop`; bypasses `ShowWindow`.
-///
-/// Wine ref: dlls/user32/dialog.c — `ShowWindow(SW_SHOW)` marks the update region dirty;
-/// `weave-user32` `show_window` posts `WM_PAINT` on first show (CI `26606312910`: X11 `Other`
-/// only, no `Expose`, modal hung 10s).
-fn q_dir_post_synthetic_wm_paint_after_show(hwnd: usize) {
-    if hwnd == 0 || weave_core::seh::pe_size() != Q_DIR_SIZE_FINGERPRINT {
-        return;
-    }
-    let visible = window::with(hwnd, |e| e.visible).unwrap_or(false);
-    if !visible {
-        return;
-    }
-    eprintln!("weave/dialog: Q-Dir synthetic WM_PAINT queued hwnd={hwnd:#x} (post-show_window)");
-    queue::post(MsgEntry {
-        hwnd,
-        message: WM_PAINT,
-        w_param: 0,
-        l_param: 0,
-        time: 0,
-        pt_x: 0,
-        pt_y: 0,
-    });
 }
 
 pub fn begin_modal(hwnd: usize) {

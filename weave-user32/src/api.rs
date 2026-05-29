@@ -1775,11 +1775,8 @@ pub unsafe extern "win64" fn begin_paint(hwnd: usize, lp_paint: *mut PaintStruct
 pub unsafe extern "win64" fn end_paint(hwnd: usize, _lp_paint: *const PaintStruct) -> i32 {
     // Wine ref: dlls/win32u/painting.c::NtUserEndPaint — releases HDC from BeginPaint,
     // calls validate_window (ValidateRect(hwnd, NULL)) to clear the update region.
-    // Weave: clear CURRENT_PAINT_HWND so gdi32::create_compatible_dc does not route
-    // subsequent GDI calls to a stale paint target after the paint cycle ends.
-    // ps.hdc == hwnd (fake HDC) — no real DC resource to release.
-    let _ = hwnd;
     CURRENT_PAINT_HWND.store(0, Ordering::Relaxed);
+    validate_rect(hwnd, std::ptr::null());
     1 // TRUE — Wine always returns TRUE
 }
 
@@ -6822,28 +6819,22 @@ unsafe fn run_modal_dialog_loop(hwnd: usize) -> isize {
         if !window::contains(msg.hwnd) && msg.message != WM_NULL {
             continue;
         }
-        // Q-Dir dlgproc SIGSEGV at RVA 0x8281 (WM_PAINT) and 0x7880d (first modal dispatch)
-        // after get_message_first (CI 26542320788) — never dispatch into guest dlgproc here.
-        // Wine ref: dlls/user32/dialog.c — DialogBoxParamW returns EndDialog nResult; Q-Dir cmp rax,1.
-        if msg.message == WM_PAINT && window::contains(msg.hwnd) {
-            let mut ps = PaintStruct {
-                hdc: 0,
-                f_erase: 0,
-                rc_paint: Rect {
-                    left: 0,
-                    top: 0,
-                    right: 0,
-                    bottom: 0,
-                },
-                f_restore: 0,
-                f_inc_update: 0,
-                rgb_reserved: [0u8; 32],
-            };
-            let _ = unsafe { begin_paint(msg.hwnd, &mut ps) };
-            let _ = unsafe { end_paint(msg.hwnd, &ps) };
+        // Dialog WM_PAINT: DefWindowProc BeginPaint/ValidateRect/EndPaint — never guest dlgproc
+        // (Q-Dir SIGSEGV at dlgproc WM_PAINT RVA 0x8281 and WM_INITDIALOG 0x7880d).
+        // Wine ref: dlls/user32/dialog.c — modal loop dispatches until EndDialog; Q-Dir cmp rax,1.
+        if msg.message == WM_PAINT {
+            if window::contains(msg.hwnd) {
+                let _ = crate::dialog::paint_and_validate_hwnd(msg.hwnd);
+            }
+            if msg.hwnd == hwnd {
+                let _ = crate::dialog::signal_end_dialog(hwnd, 1);
+                break;
+            }
+            continue;
         }
-        let _ = crate::dialog::signal_end_dialog(hwnd, 1);
-        break;
+        if msg.message == WM_NULL {
+            continue;
+        }
     }
     if !crate::dialog::modal_ended() {
         let _ = crate::dialog::signal_end_dialog(hwnd, 1);
@@ -6882,8 +6873,6 @@ pub unsafe extern "win64" fn dialog_box_param_w(
     }
     let template_id = lp_template_name as usize;
     eprintln!("weave/user32: DialogBoxParamW(template={template_id:#x}) — Phase B");
-    crate::dialog::q_dir_reset_heap_counters_if_needed(image_base);
-    crate::dialog::q_dir_log_heap_counters("pre-modal", image_base);
     let Some(hwnd) = crate::dialog::create_from_resource(
         image_base,
         lp_template_name,
@@ -6895,11 +6884,6 @@ pub unsafe extern "win64" fn dialog_box_param_w(
         return -1;
     };
     let result = unsafe { run_modal_dialog_loop(hwnd) };
-    // Q-Dir: guest may bump heap counters during modal; reset again before 0x124f3 init (0x7880d).
-    crate::dialog::q_dir_reset_heap_counters_if_needed(image_base);
-    crate::dialog::q_dir_seed_freelist_head_if_needed(image_base);
-    crate::dialog::q_dir_log_heap_counters("post-modal-return", image_base);
-    // Do not `window::remove` here — CI 26545216770 SIGSEGV at 0x7880d immediately after destroy.
     crate::dialog::wake_post_modal_queue();
     result
 }
