@@ -55,6 +55,50 @@ struct ActiveModal {
 
 static ACTIVE_MODAL: Mutex<Option<ActiveModal>> = Mutex::new(None);
 
+// Q-Dir_x64.exe post-modal heap init: `0x146e70` PE initial `0xa` → heavy path `esi>=2` → `0x7880d`.
+// CI `26611571069`: paint+validate clears modal crash but guest faults post-return without reset.
+const Q_DIR_SIZE_FINGERPRINT: usize = 0x1f3000;
+const Q_DIR_HEAP_COUNTER_RVAS: [usize; 2] = [0x152fb0, 0x152fbc];
+const Q_DIR_HEAP_COUNT_ARG_RVA: usize = 0x146e70;
+
+/// Zero Q-Dir heap-init counters after modal return (post-modal only — pre-modal reset hung CI `26605707359`).
+pub(crate) fn q_dir_reset_heap_counters_if_needed(image_base: usize) {
+    let base = if image_base != 0 {
+        image_base
+    } else {
+        weave_core::seh::pe_base()
+    };
+    let size = weave_core::seh::pe_size();
+    if base == 0 || size != Q_DIR_SIZE_FINGERPRINT {
+        return;
+    }
+    for rva in Q_DIR_HEAP_COUNTER_RVAS {
+        if rva + 8 > size {
+            continue;
+        }
+        // SAFETY: Q-Dir `.data` BSS (writable mapped image).
+        let p = (base + rva) as *mut u64;
+        let cur = unsafe { p.read() };
+        if cur != 0 {
+            unsafe {
+                p.write(0);
+            }
+            eprintln!("weave/dialog: Q-Dir counter rva={rva:#x} reset ({cur:#x} → 0)");
+        }
+    }
+    if Q_DIR_HEAP_COUNT_ARG_RVA + 4 <= size {
+        // SAFETY: Q-Dir `.data` (writable mapped image).
+        let p = (base + Q_DIR_HEAP_COUNT_ARG_RVA) as *mut u32;
+        let cur = unsafe { p.read() };
+        if cur != 0 {
+            unsafe {
+                p.write(0);
+            }
+            eprintln!("weave/dialog: Q-Dir heap count arg 0x146e70 reset ({cur:#x} → 0)");
+        }
+    }
+}
+
 /// Minimal WM_PAINT handler for dialog HWNDs — BeginPaint/ValidateRect/EndPaint without guest dlgproc.
 ///
 /// Wine ref: dlls/win32u/defwnd.c — DefWindowProc WM_PAINT calls BeginPaint then EndPaint
