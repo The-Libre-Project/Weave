@@ -68,8 +68,9 @@ const Q_DIR_FREELIST_BSS_NODE_RVA: usize = 0x1531f0;
 
 /// Restore Q-Dir light-path freelist head when zero (TRACE-B CI `26604833872`: `rax=0` at `0x786eb`).
 ///
-/// Call only **after** `DialogBoxParamW` returns — pre-modal seed (CI `26605707359`) hung in
-/// `get_message_first` with no `post-modal-return`.
+/// Post-modal: after `DialogBoxParamW` returns. Q-Dir pre-modal: before `WM_INITDIALOG` when
+/// dlgproc hits `sub_78698` during init (Fail #29). Standalone pre-modal seed without WM_INIT
+/// hung CI `26605707359`.
 pub(crate) fn q_dir_seed_freelist_head_if_needed(image_base: usize) {
     let base = if image_base != 0 {
         image_base
@@ -97,7 +98,7 @@ pub(crate) fn q_dir_seed_freelist_head_if_needed(image_base: usize) {
     }
 }
 
-/// Zero Q-Dir heap-init counters after modal return (post-modal only — pre-modal reset hung CI `26605707359`).
+/// Zero Q-Dir heap-init counters (post-modal after `DialogBoxParamW`; Q-Dir pre-modal before WM_INIT).
 pub(crate) fn q_dir_reset_heap_counters_if_needed(image_base: usize) {
     let base = if image_base != 0 {
         image_base
@@ -575,8 +576,9 @@ pub unsafe fn create_from_template_bytes(
     });
     let pe_size = weave_core::seh::pe_size();
     if image_base != 0 && pe_size == Q_DIR_SIZE_FINGERPRINT {
-        // Q-Dir (0x1f3000): pre-modal counter reset + WM_INITDIALOG before show (E3-M5b).
+        // Q-Dir (0x1f3000): pre-modal counter reset + BSS freelist seed + WM_INITDIALOG (E3-M5b).
         q_dir_reset_heap_counters_if_needed(image_base);
+        q_dir_seed_freelist_head_if_needed(image_base);
         let _ = crate::api::call_wnd_proc(dlg_proc, hwnd, 0x0110, hwnd, init_param);
         eprintln!("weave/dialog: WM_INITDIALOG dispatched for Q-Dir hwnd={hwnd:#x}");
     } else {
