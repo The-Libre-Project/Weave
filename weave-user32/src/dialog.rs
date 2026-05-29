@@ -92,8 +92,15 @@ pub(crate) fn q_dir_seed_freelist_head_if_needed(image_base: usize) {
         unsafe {
             p.write(seed);
         }
+        // Route byte: `0x79431` checks byte0 of returned freelist node; 0 → `0x784a8`
+        // (needs `[node+8]` non-null). Set byte0=1 so guest skips `784a8` (Fail #28/#30).
+        // SAFETY: BSS node at 0x1531f0 in `.data` (writable).
+        let node_byte0 = (base + Q_DIR_FREELIST_BSS_NODE_RVA) as *mut u8;
+        unsafe {
+            node_byte0.write(1u8);
+        }
         eprintln!(
-            "weave/dialog: Q-Dir freelist 0x1531e0 seed (0 → {seed:#018x}, BSS node rva=0x1531f0, [node+8]=0)"
+            "weave/dialog: Q-Dir freelist 0x1531e0 seed (0 → {seed:#018x}, BSS node rva=0x1531f0, [node+8]=0 byte0=1)"
         );
     }
 }
