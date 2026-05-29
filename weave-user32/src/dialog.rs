@@ -62,10 +62,9 @@ const Q_DIR_HEAP_COUNTER_RVAS: [usize; 2] = [0x152fb0, 0x152fbc];
 const Q_DIR_HEAP_COUNT_ARG_RVA: usize = 0x146e70;
 /// Light-path freelist head (`mov rax, [0x1531e0]` at `0x786dc`). CI `26604833872`: runtime 0 → `0x786eb`.
 const Q_DIR_FREELIST_HEAD_RVA: usize = 0x1531e0;
-/// Pool header RVA used as single-node freelist; light path at `0x786eb`/`0x78700` walks
-/// `[node+8]` until zero (CI `26607416893`: non-zero `0x10401` → fault `0x10409`).
-const Q_DIR_FREELIST_POOL_HDR_RVA: usize = 0x13e4d0;
-const Q_DIR_FREELIST_CHAIN_OFF: usize = 8;
+/// BSS fake node in `.data` (writable); light path at `0x786eb` needs `[rax+8]==0` (TRACE-B).
+/// Do not use pool hdr `0x13e4d0` — PE `.rdata` read-only (CI `26642132082` host SIGSEGV).
+const Q_DIR_FREELIST_BSS_NODE_RVA: usize = 0x1531f0;
 
 /// Restore Q-Dir light-path freelist head when zero (TRACE-B CI `26604833872`: `rax=0` at `0x786eb`).
 ///
@@ -81,26 +80,19 @@ pub(crate) fn q_dir_seed_freelist_head_if_needed(image_base: usize) {
     if base == 0 || size != Q_DIR_SIZE_FINGERPRINT {
         return;
     }
-    if Q_DIR_FREELIST_HEAD_RVA + 8 > size {
+    if Q_DIR_FREELIST_HEAD_RVA + 8 > size || Q_DIR_FREELIST_BSS_NODE_RVA + 16 > size {
         return;
     }
     // SAFETY: Q-Dir `.data` (writable mapped image).
     let p = (base + Q_DIR_FREELIST_HEAD_RVA) as *mut u64;
     let cur = unsafe { p.read() };
     if cur == 0 {
-        let node = base + Q_DIR_FREELIST_POOL_HDR_RVA;
-        if node + Q_DIR_FREELIST_CHAIN_OFF + 4 <= base + size {
-            // SAFETY: Q-Dir `.data` (writable mapped image).
-            unsafe {
-                ((node + Q_DIR_FREELIST_CHAIN_OFF) as *mut u32).write(0);
-            }
-        }
-        let seed = node as u64;
+        let seed = (base + Q_DIR_FREELIST_BSS_NODE_RVA) as u64;
         unsafe {
             p.write(seed);
         }
         eprintln!(
-            "weave/dialog: Q-Dir freelist 0x1531e0 seed (0 → {seed:#018x}, [node+8]=0 light-path exit)"
+            "weave/dialog: Q-Dir freelist 0x1531e0 seed (0 → {seed:#018x}, BSS node rva=0x1531f0, [node+8]=0)"
         );
     }
 }
