@@ -92,18 +92,20 @@ pub(crate) fn q_dir_seed_freelist_head_if_needed(image_base: usize) {
         unsafe {
             p.write(seed);
         }
-        // Route byte: `0x79431` checks byte0 of returned freelist node; 0 → `0x784a8`
-        // (needs `[node+8]` non-null). Set byte0=1 so guest skips `784a8` (Fail #28/#30).
+        // The check at 0x79431 tests byte0 of the freelist node. Set byte0=0 so
+        // `je 0x79447` is taken, entering the skip path via `call 0x784a8(rcx=node)`.
+        // Inside 0x784a8: `mov eax, [rcx+8]` loads node+8 as a pointer. Set
+        // [node+8] = image_base so the deref `movzx edx, byte ptr [rax]` reads
+        // a valid byte (DOS 'M' = 0x4D at image_base). The byte is used as a table
+        // index into BSS (all zeros), so the function returns harmlessly.
         // SAFETY: BSS node at 0x1531f0 in `.data` (writable).
         let node = base + Q_DIR_FREELIST_BSS_NODE_RVA;
         unsafe {
-            *(node as *mut u8) = 1u8;           // [0]: route byte (79431 check)
-            *(node.wrapping_add(1) as *mut u8) = 1u8;  // [1]: non-null for self-deref [r9+1]
-            *(node.wrapping_add(2) as *mut u16) = 4u16; // [2..3]: divisor (sub_7910c div ecx)
-            *(node.wrapping_add(4) as *mut u32) = base as u32; // [4..7]: ptr → PE headers (r9 for [r9+1])
+            *(node as *mut u32) = base as u32; // [0..3]: byte0=0 → skip; [1..3] unused
+            *(node.wrapping_add(8) as *mut u32) = base as u32; // [8..11]: pointer for 784a8 deref
         }
         eprintln!(
-            "weave/dialog: Q-Dir freelist 0x1531e0 seed (0 → {seed:#018x}, BSS node rva=0x1531f0, [node+8]=0 byte0=1)"
+            "weave/dialog: Q-Dir freelist 0x1531e0 seed (0 → {seed:#018x}, BSS node rva=0x1531f0, byte0=0 [node+8]=base)"
         );
     }
 }
