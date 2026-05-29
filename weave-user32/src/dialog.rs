@@ -588,11 +588,11 @@ pub unsafe fn create_from_template_bytes(
     });
     let pe_size = weave_core::seh::pe_size();
     if image_base != 0 && pe_size == Q_DIR_SIZE_FINGERPRINT {
-        // Q-Dir (0x1f3000): pre-modal counter reset + BSS freelist seed + WM_INITDIALOG (E3-M5b).
+        // Q-Dir (0x1f3000): pre-modal counter reset + BSS freelist seed; WM_INIT deferred
+        // because guest heap init chain (sub_78698 → back-write to 0x1531e0) cannot be
+        // satisfied by host seed alone. Post-modal path handles init. (E3-M5b)
         q_dir_reset_heap_counters_if_needed(image_base);
         q_dir_seed_freelist_head_if_needed(image_base);
-        let _ = crate::api::call_wnd_proc(dlg_proc, hwnd, 0x0110, hwnd, init_param);
-        eprintln!("weave/dialog: WM_INITDIALOG dispatched for Q-Dir hwnd={hwnd:#x}");
     } else {
         // Guest dlgproc SIGSEGV at RVA 0x7880d during WM_INITDIALOG (CI c516a98) — keep deferred.
         eprintln!(
