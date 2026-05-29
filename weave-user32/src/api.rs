@@ -6886,6 +6886,7 @@ pub unsafe extern "win64" fn dialog_box_param_w(
     let result = unsafe { run_modal_dialog_loop(hwnd) };
     // Post-modal only: PE initial `0x146e70=0xa` forces heavy heap path at `0x7880d` (CI 26611571069).
     crate::dialog::q_dir_reset_heap_counters_if_needed(image_base);
+    crate::dialog::q_dir_seed_freelist_head_if_needed(image_base);
     crate::dialog::wake_post_modal_queue();
     result
 }
