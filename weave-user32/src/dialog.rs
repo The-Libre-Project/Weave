@@ -63,8 +63,14 @@ const Q_DIR_HEAP_COUNT_ARG_RVA: usize = 0x146e70;
 /// Light-path freelist head (`mov rax, [0x1531e0]` at `0x786dc`). CI `26604833872`: runtime 0 → `0x786eb`.
 const Q_DIR_FREELIST_HEAD_RVA: usize = 0x1531e0;
 /// BSS fake node in `.data` (writable); light path at `0x786eb` needs `[rax+8]==0` (TRACE-B).
+/// Post-`0x78698` at `0x79431`: byte0==0 → `0x784a8` loads `[node+8]` as ptr (CI `26643578776` `0x784ba`);
+/// byte0!=0 → `0x47910c` (needs `[+2]`≠0, `[+4]`→writable sub-node at `node+0x20`).
 /// Do not use pool hdr `0x13e4d0` — PE `.rdata` read-only (CI `26642132082` host SIGSEGV).
 const Q_DIR_FREELIST_BSS_NODE_RVA: usize = 0x1531f0;
+const Q_DIR_FREELIST_BSS_NODE_BYTES: usize = 0x30;
+const Q_DIR_FREELIST_SUBNODE_OFF: usize = 0x20;
+const Q_DIR_FREELIST_ROUTE_ALT: u8 = 1;
+const Q_DIR_FREELIST_DIVISOR: u16 = 1;
 
 /// Restore Q-Dir light-path freelist head when zero (TRACE-B CI `26604833872`: `rax=0` at `0x786eb`).
 ///
@@ -80,19 +86,28 @@ pub(crate) fn q_dir_seed_freelist_head_if_needed(image_base: usize) {
     if base == 0 || size != Q_DIR_SIZE_FINGERPRINT {
         return;
     }
-    if Q_DIR_FREELIST_HEAD_RVA + 8 > size || Q_DIR_FREELIST_BSS_NODE_RVA + 16 > size {
+    if Q_DIR_FREELIST_HEAD_RVA + 8 > size
+        || Q_DIR_FREELIST_BSS_NODE_RVA + Q_DIR_FREELIST_BSS_NODE_BYTES > size
+    {
         return;
     }
     // SAFETY: Q-Dir `.data` (writable mapped image).
     let p = (base + Q_DIR_FREELIST_HEAD_RVA) as *mut u64;
     let cur = unsafe { p.read() };
     if cur == 0 {
-        let seed = (base + Q_DIR_FREELIST_BSS_NODE_RVA) as u64;
+        let node = base + Q_DIR_FREELIST_BSS_NODE_RVA;
+        let seed = node as u64;
+        let sub = node + Q_DIR_FREELIST_SUBNODE_OFF;
         unsafe {
             p.write(seed);
+            *(node as *mut u8) = Q_DIR_FREELIST_ROUTE_ALT;
+            *((node + 2) as *mut u16) = Q_DIR_FREELIST_DIVISOR;
+            *((node + 4) as *mut u64) = sub as u64;
+            *((node + 8) as *mut u64) = 0;
+            *((sub + 1) as *mut u8) = 0;
         }
         eprintln!(
-            "weave/dialog: Q-Dir freelist 0x1531e0 seed (0 → {seed:#018x}, BSS node rva=0x1531f0, [node+8]=0)"
+            "weave/dialog: Q-Dir freelist 0x1531e0 seed (0 → {seed:#018x}, BSS rva=0x1531f0, byte0=1, [+8]=0, sub=0x153210)"
         );
     }
 }
