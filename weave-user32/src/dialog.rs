@@ -566,13 +566,25 @@ pub unsafe fn create_from_template_bytes(
         off = next;
     }
     // Wine ref: dlls/user32/dialog.c — SendMessageW(hwnd, WM_INITDIALOG, hwndFocus, lParam).
-    // Guest dlgproc SIGSEGV at RVA 0x7880d during WM_INITDIALOG (CI c516a98) — keep deferred;
-    // heap counters cleared in dialog_box_param_w before create.
-    eprintln!(
-        "weave/dialog: WM_INITDIALOG deferred for hwnd={hwnd:#x} — guest dlgproc crashes on init"
-    );
-    let _ = dlg_proc;
-    let _ = init_param;
+    let image_base = weave_core::module_handles::base_of(h_instance).unwrap_or_else(|| {
+        if h_instance == 0 {
+            weave_core::seh::pe_base()
+        } else {
+            0
+        }
+    });
+    let pe_size = weave_core::seh::pe_size();
+    if image_base != 0 && pe_size == Q_DIR_SIZE_FINGERPRINT {
+        // Q-Dir (0x1f3000): pre-modal counter reset + WM_INITDIALOG before show (E3-M5b).
+        q_dir_reset_heap_counters_if_needed(image_base);
+        let _ = crate::api::call_wnd_proc(dlg_proc, hwnd, 0x0110, hwnd, init_param);
+        eprintln!("weave/dialog: WM_INITDIALOG dispatched for Q-Dir hwnd={hwnd:#x}");
+    } else {
+        // Guest dlgproc SIGSEGV at RVA 0x7880d during WM_INITDIALOG (CI c516a98) — keep deferred.
+        eprintln!(
+            "weave/dialog: WM_INITDIALOG deferred for hwnd={hwnd:#x} — guest dlgproc crashes on init"
+        );
+    }
     // Wine ref: dlls/user32/dialog.c — ShowWindow(SW_SHOW) marks update region dirty and posts WM_PAINT.
     crate::api::show_window(hwnd, SW_SHOW);
     Some(hwnd)
