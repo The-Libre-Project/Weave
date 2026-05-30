@@ -1248,6 +1248,43 @@ fn log_q_dir_7880d_diag(pe_base: usize, pe_size: usize, ctx: *const libc::uconte
     q_dir_diag_write_byte(&mut buf, &mut pos, b'\n');
     unsafe { libc::write(2, buf.as_ptr() as *const _, pos) };
 
+    // Q1: the chunk header words [rdi] and [rdi+8] — guarded by rdi!=0 like [rdi+4] above.
+    pos = 0;
+    q_dir_diag_write_bytes(&mut buf, &mut pos, b"weave: q-dir 7880d chunk [rdi]=");
+    let chunk0 = if rdi != 0 {
+        q_dir_diag_pread_u64(rdi as usize).unwrap_or(0xffff_ffff_ffff_ffff)
+    } else {
+        0
+    };
+    q_dir_diag_write_hex(&mut buf, &mut pos, chunk0, 16);
+    q_dir_diag_write_bytes(&mut buf, &mut pos, b" [rdi+8]=");
+    let chunk8 = if rdi != 0 {
+        q_dir_diag_pread_u64((rdi as usize).wrapping_add(8)).unwrap_or(0xffff_ffff_ffff_ffff)
+    } else {
+        0
+    };
+    q_dir_diag_write_hex(&mut buf, &mut pos, chunk8, 16);
+    q_dir_diag_write_byte(&mut buf, &mut pos, b'\n');
+    unsafe { libc::write(2, buf.as_ptr() as *const _, pos) };
+
+    // Q4: freelist/pool-slot tables — pe_base + rva via pread, fall back to 0xffff.. on unmapped.
+    pos = 0;
+    q_dir_diag_write_bytes(&mut buf, &mut pos, b"weave: q-dir 7880d freelist 0x1531e0=");
+    let fl_1531e0 = q_dir_diag_pread_u64(pe_base + 0x1531e0).unwrap_or(0xffff_ffff_ffff_ffff);
+    q_dir_diag_write_hex(&mut buf, &mut pos, fl_1531e0, 16);
+    q_dir_diag_write_bytes(&mut buf, &mut pos, b" 0x153d70=");
+    let fl_153d70 = q_dir_diag_pread_u32(pe_base + 0x153d70)
+        .map(u64::from)
+        .unwrap_or(0xffff_ffff);
+    q_dir_diag_write_hex(&mut buf, &mut pos, fl_153d70, 16);
+    q_dir_diag_write_bytes(&mut buf, &mut pos, b" 0x153d74=");
+    let fl_153d74 = q_dir_diag_pread_u32(pe_base + 0x153d74)
+        .map(u64::from)
+        .unwrap_or(0xffff_ffff);
+    q_dir_diag_write_hex(&mut buf, &mut pos, fl_153d74, 16);
+    q_dir_diag_write_byte(&mut buf, &mut pos, b'\n');
+    unsafe { libc::write(2, buf.as_ptr() as *const _, pos) };
+
     let rsp = gregs[libc::REG_RSP as usize] as u64;
     let mut buf2 = [0u8; 128];
     let mut pos2 = 0usize;
