@@ -2453,6 +2453,37 @@ pub extern "win64" fn heap_alloc(
     // Use at least 1 byte so malloc/calloc never return NULL for size 0.
     let alloc_size = if dw_bytes == 0 { 1 } else { dw_bytes };
     let zero_memory = (dw_flags & 0x08) != 0; // HEAP_ZERO_MEMORY
+
+    // Q-Dir (pe_size 0x1f3000): pool descriptor objects allocated via HeapAlloc end
+    // up at 64-bit addresses that Q-Dir truncates to DWORD fields → crash at 0x7880d.
+    // Same constraint as VirtualAlloc: MAP_32BIT keeps the address below 2 GB.
+    // Store map_size in an 8-byte header so HeapFree can munmap instead of free().
+    // TRACE-D verdict CI 26721495118; Fail #45.
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    if weave_core::seh::pe_size() == 0x1f3_000 {
+        const MAP_32BIT: i32 = 0x40;
+        let map_size = alloc_size.saturating_add(8);
+        let raw = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                map_size,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | MAP_32BIT,
+                -1,
+                0,
+            )
+        };
+        if raw.is_null() || raw == libc::MAP_FAILED {
+            return std::ptr::null_mut();
+        }
+        // Always zero (MAP_ANONYMOUS is already zero'd by kernel; also covers HEAP_ZERO_MEMORY).
+        unsafe { *(raw as *mut usize) = map_size }; // header: store map_size for munmap
+        let result = unsafe { (raw as *mut u8).add(8) as *mut std::ffi::c_void };
+        eprintln!("weave/HeapAlloc: Q-Dir low size={alloc_size:#x} → addr={result:p} map32=true");
+        LAST_HEAP_FREE.store(0, Ordering::Relaxed);
+        return result;
+    }
+
     let result = if zero_memory {
         unsafe { libc::calloc(1, alloc_size) }
     } else {
@@ -2514,6 +2545,17 @@ pub unsafe extern "win64" fn heap_free(
     // locale category pointers freed once per category in free_locinfo).
     if LAST_HEAP_FREE.swap(addr, Ordering::Relaxed) == addr {
         return 0; // FALSE — duplicate free, silently ignored per Windows semantics
+    }
+    // Q-Dir low allocations (from HeapAlloc MAP_32BIT path) have a size header at ptr-8
+    // and must be munmap'd rather than free()'d.
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    if addr < 0x8000_0000 && weave_core::seh::pe_size() == 0x1f3_000 {
+        let raw = unsafe { (lp_mem as *mut u8).sub(8) as *mut libc::c_void };
+        let map_size = unsafe { *(raw as *const usize) };
+        if map_size > 0 {
+            unsafe { libc::munmap(raw, map_size) };
+            return 1;
+        }
     }
     // SAFETY: lp_mem is non-null (early return above), has a canonical x86-64 address
     // (addr >> 47 == 0 check above), and was not freed in the immediately preceding
