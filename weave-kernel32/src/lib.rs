@@ -2304,6 +2304,15 @@ pub extern "win64" fn global_alloc(u_flags: u32, dw_bytes: usize) -> usize {
     if dw_bytes == 0 {
         return 0;
     }
+    // Q-Dir: pool-constrain GlobalAlloc/LocalAlloc so pool descriptor objects
+    // (allocated via GlobalAlloc and stored in DWORD fields) stay below 2 GB.
+    // Instrument: log to confirm rdi's allocation source. Fail #48.
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    if weave_core::seh::pe_size() == 0x1f3_000 {
+        let result = heap_alloc(0, if (u_flags & 0x40) != 0 { 0x08 } else { 0 }, dw_bytes);
+        eprintln!("weave/GlobalAlloc: Q-Dir low size={dw_bytes:#x} → addr={result:p}");
+        return result as usize;
+    }
     let zeroinit = (u_flags & 0x40) != 0; // GMEM_ZEROINIT
     let ptr = if zeroinit {
         unsafe { libc::calloc(1, dw_bytes) }
