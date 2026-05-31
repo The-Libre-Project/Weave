@@ -23,7 +23,7 @@
 //! .pdata exception handler chain) is Phase 2 work.
 
 use crate::loader::LoadedImage;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
 // ── Global PE metadata for async-signal-safe access ──────────────────────────
 //

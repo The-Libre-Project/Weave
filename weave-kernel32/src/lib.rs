@@ -2497,13 +2497,18 @@ pub extern "win64" fn heap_alloc(
             base
         };
 
-        // Bump-allocate with 16-byte alignment.
-        let alloc_aligned = (alloc_size + ALIGN - 1) & !(ALIGN - 1);
+        // Bump-allocate with 16-byte alignment.  Prepend a 16-byte header storing the
+        // allocation size so HeapReAlloc can determine how much to copy without glibc
+        // realloc (which aborts on non-malloc pointers).
+        let header = ALIGN; // 16 bytes: [0..8] = alloc_size, [8..16] = unused
+        let alloc_aligned = (alloc_size + header + ALIGN - 1) & !(ALIGN - 1);
         let offset = Q_DIR_POOL_OFFSET.fetch_add(alloc_aligned, Ordering::Relaxed);
         if offset + alloc_aligned > POOL_SIZE {
             // Pool exhausted — fall through to malloc (address may be high).
         } else {
-            let result = (base + offset) as *mut std::ffi::c_void;
+            let slot = base + offset;
+            unsafe { *(slot as *mut usize) = alloc_size }; // store size in header
+            let result = (slot + header) as *mut std::ffi::c_void;
             LAST_HEAP_FREE.store(0, Ordering::Relaxed);
             return result;
         }
@@ -2533,11 +2538,27 @@ pub extern "win64" fn heap_alloc(
 // zeroes only newly added bytes; HEAP_REALLOC_IN_PLACE_ONLY fails rather than
 // moving the block; returns NULL on failure (does NOT free original block).
 pub unsafe extern "win64" fn heap_re_alloc(
-    _h_heap: usize,
-    _dw_flags: u32,
+    h_heap: usize,
+    dw_flags: u32,
     lp_mem: *mut std::ffi::c_void,
     dw_bytes: usize,
 ) -> *mut std::ffi::c_void {
+    // Pool pointers (Q-Dir bump pool, addr < 2 GB) cannot be passed to libc::realloc —
+    // glibc aborts on non-malloc pointers.  Allocate a new pool block and copy instead.
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    if !lp_mem.is_null()
+        && (lp_mem as usize) < 0x8000_0000
+        && weave_core::seh::pe_size() == 0x1f3_000
+    {
+        let new_ptr = heap_alloc(h_heap, dw_flags, dw_bytes);
+        if !new_ptr.is_null() {
+            // Read old size from header (16 bytes before the user pointer).
+            let old_size = unsafe { *((lp_mem as *const u8).sub(16) as *const usize) };
+            let copy_bytes = old_size.min(dw_bytes);
+            unsafe { libc::memcpy(new_ptr, lp_mem, copy_bytes) };
+        }
+        return new_ptr;
+    }
     unsafe { libc::realloc(lp_mem, dw_bytes) }
 }
 
