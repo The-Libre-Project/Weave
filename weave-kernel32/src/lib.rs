@@ -669,13 +669,6 @@ pub unsafe extern "win64" fn virtual_query(
 /// Wine ref: dlls/kernelbase/memory.c — VirtualAlloc delegates to VirtualAllocEx which
 /// calls NtAllocateVirtualMemory. MEM_COMMIT | MEM_RESERVE is the normal pattern.
 /// Weave maps via mmap; MAP_FIXED_NOREPLACE prevents overwriting existing Weave mappings.
-/// For 32-bit PE guests (Machine == IMAGE_FILE_MACHINE_I386 = 0x014c), NtAllocateVirtualMemory
-/// constrains addresses to the 4 GB user address space; on 64-bit Linux the equivalent is
-/// MAP_32BIT which restricts mmap to the first 2 GB (0x0000_0000–0x7FFF_FFFF).
-/// Without this constraint, Weave returns 64-bit host addresses that 32-bit guests truncate
-/// to the lower 32 bits, producing a garbage pointer that faults on first access.
-/// (TRACE-D verdict, CI 26721495118: Q-Dir sub_7795c returned 0x7f4428f63048; stored in
-/// DWORD field → truncated to 0x28f63048 → SIGSEGV at RVA 0x7880d.)
 ///
 /// # Safety
 /// `lp_address` must be null or a page-aligned address.
@@ -691,14 +684,6 @@ pub unsafe extern "win64" fn virtual_alloc(
 ) -> *mut u8 {
     let prot = win_prot_to_linux(fl_protect);
     const MAP_FIXED_NOREPLACE: i32 = 0x10_0000;
-    // Q-Dir_x64.exe is a 64-bit PE (machine=0x8664) whose custom pool allocator at
-    // RVA 0x78698 stores VirtualAlloc return values in DWORD fields — truncating
-    // 64-bit host addresses to garbage. Key on the size fingerprint (0x1f3000) rather
-    // than the machine word; this is a Q-Dir allocator quirk, not a guest arch property.
-    // MAP_32BIT (Linux x86-64-only, 0x40) constrains anonymous mmap to the first 2 GB.
-    // TRACE-D verdict CI 26721495118; Fail #43.
-    const MAP_32BIT: i32 = 0x40;
-    let is_32bit_guest = weave_core::seh::pe_size() == 0x1f3_000;
     // Guard against mmap(NULL, 0, ...) which returns MAP_FAILED on Linux.
     if dw_size == 0 {
         eprintln!("weave: VirtualAlloc(size=0) → NULL");
@@ -710,19 +695,17 @@ pub unsafe extern "win64" fn virtual_alloc(
     // silently remapping an existing allocation — the caller must handle the failure.
     // dw_size > 0 is enforced by the early-return above.
     // Sandbox: fd=-1 + MAP_ANONYMOUS only — no fd-backed mapping; no Landlock escape path.
-    // (a) no pointer dereference — mmap only reads the hint, not the memory at hint;
-    // (b) memory is newly OS-allocated, owned by this process;
-    // (c) lifetime = until VirtualFree/munmap;
-    // (d) none — TODO(shim): Phase A, no Tier A gate yet for 32-bit address constraint.
     let result = if lp_address.is_null() {
-        // No caller hint: let the kernel choose.  For 32-bit guests, add MAP_32BIT
-        // so the returned address fits in a DWORD without truncation.
-        let flags = if is_32bit_guest {
-            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | MAP_32BIT
-        } else {
-            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS
-        };
-        unsafe { libc::mmap(std::ptr::null_mut(), dw_size, prot, flags, -1, 0) }
+        unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                dw_size,
+                prot,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                -1,
+                0,
+            )
+        }
     } else {
         unsafe {
             libc::mmap(
@@ -744,23 +727,7 @@ pub unsafe extern "win64" fn virtual_alloc(
         std::ptr::null_mut()
     } else {
         let result_ptr = result as *mut u8;
-        // Log caller RIP to detect if sub_7795c reaches this stub or bypasses via GetProcAddress.
-        let caller_rip: usize;
-        #[cfg(target_arch = "x86_64")]
-        unsafe {
-            std::arch::asm!("lea {r}, [rip]", r = out(reg) caller_rip)
-        };
-        #[cfg(not(target_arch = "x86_64"))]
-        {
-            caller_rip = 0;
-        }
-        let pe_b = weave_core::seh::pe_base();
-        let caller_rva = if pe_b != 0 && caller_rip >= pe_b {
-            caller_rip - pe_b
-        } else {
-            0
-        };
-        eprintln!("weave/VirtualAlloc: size={dw_size:#x} → addr={result_ptr:p} caller_rva={caller_rva:#x} map32={is_32bit_guest}");
+        eprintln!("weave/VirtualAlloc: size={dw_size:#x} → addr={result_ptr:p}");
         result_ptr
     }
 }
@@ -2304,15 +2271,6 @@ pub extern "win64" fn global_alloc(u_flags: u32, dw_bytes: usize) -> usize {
     if dw_bytes == 0 {
         return 0;
     }
-    // Q-Dir: pool-constrain GlobalAlloc/LocalAlloc so pool descriptor objects
-    // (allocated via GlobalAlloc and stored in DWORD fields) stay below 2 GB.
-    // Instrument: log to confirm rdi's allocation source. Fail #48.
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-    if weave_core::seh::pe_size() == 0x1f3_000 {
-        let result = heap_alloc(0, if (u_flags & 0x40) != 0 { 0x08 } else { 0 }, dw_bytes);
-        eprintln!("weave/GlobalAlloc: Q-Dir low size={dw_bytes:#x} → addr={result:p}");
-        return result as usize;
-    }
     let zeroinit = (u_flags & 0x40) != 0; // GMEM_ZEROINIT
     let ptr = if zeroinit {
         unsafe { libc::calloc(1, dw_bytes) }
@@ -2463,66 +2421,6 @@ pub extern "win64" fn heap_alloc(
     let alloc_size = if dw_bytes == 0 { 1 } else { dw_bytes };
     let zero_memory = (dw_flags & 0x08) != 0; // HEAP_ZERO_MEMORY
 
-    // Q-Dir (pe_size 0x1f3000): pool descriptor objects allocated via HeapAlloc end
-    // up at 64-bit addresses that Q-Dir truncates to DWORD fields → crash at 0x7880d.
-    // Use a single 16 MB MAP_32BIT pool with a bump allocator so all HeapAlloc calls
-    // return addresses below 2 GB without per-call mmap overhead or fragmentation.
-    // HeapFree is a no-op for pool pointers; the pool is released on process exit.
-    // TRACE-D verdict CI 26721495118; Fail #45.
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-    if weave_core::seh::pe_size() == 0x1f3_000 {
-        static Q_DIR_POOL_BASE: AtomicUsize = AtomicUsize::new(0);
-        static Q_DIR_POOL_OFFSET: AtomicUsize = AtomicUsize::new(0);
-        const POOL_SIZE: usize = 16 * 1024 * 1024; // 16 MB
-        const MAP_32BIT: i32 = 0x40;
-        const ALIGN: usize = 16;
-
-        // Lazy-init: one MAP_32BIT mmap for the whole Q-Dir process lifetime.
-        let base = Q_DIR_POOL_BASE.load(Ordering::Acquire);
-        let base = if base == 0 {
-            let raw = unsafe {
-                libc::mmap(
-                    std::ptr::null_mut(),
-                    POOL_SIZE,
-                    libc::PROT_READ | libc::PROT_WRITE,
-                    libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | MAP_32BIT,
-                    -1,
-                    0,
-                )
-            };
-            if raw.is_null() || raw == libc::MAP_FAILED {
-                return std::ptr::null_mut();
-            }
-            let addr = raw as usize;
-            // CAS: another thread might have beaten us; prefer theirs if so.
-            match Q_DIR_POOL_BASE.compare_exchange(0, addr, Ordering::AcqRel, Ordering::Acquire) {
-                Ok(_) => addr,
-                Err(existing) => {
-                    unsafe { libc::munmap(raw, POOL_SIZE) };
-                    existing
-                }
-            }
-        } else {
-            base
-        };
-
-        // Bump-allocate with 16-byte alignment.  Prepend a 16-byte header storing the
-        // allocation size so HeapReAlloc can determine how much to copy without glibc
-        // realloc (which aborts on non-malloc pointers).
-        let header = ALIGN; // 16 bytes: [0..8] = alloc_size, [8..16] = unused
-        let alloc_aligned = (alloc_size + header + ALIGN - 1) & !(ALIGN - 1);
-        let offset = Q_DIR_POOL_OFFSET.fetch_add(alloc_aligned, Ordering::Relaxed);
-        if offset + alloc_aligned > POOL_SIZE {
-            // Pool exhausted — fall through to malloc (address may be high).
-        } else {
-            let slot = base + offset;
-            unsafe { *(slot as *mut usize) = alloc_size }; // store size in header
-            let result = (slot + header) as *mut std::ffi::c_void;
-            LAST_HEAP_FREE.store(0, Ordering::Relaxed);
-            return result;
-        }
-    }
-
     let result = if zero_memory {
         unsafe { libc::calloc(1, alloc_size) }
     } else {
@@ -2547,27 +2445,11 @@ pub extern "win64" fn heap_alloc(
 // zeroes only newly added bytes; HEAP_REALLOC_IN_PLACE_ONLY fails rather than
 // moving the block; returns NULL on failure (does NOT free original block).
 pub unsafe extern "win64" fn heap_re_alloc(
-    h_heap: usize,
-    dw_flags: u32,
+    _h_heap: usize,
+    _dw_flags: u32,
     lp_mem: *mut std::ffi::c_void,
     dw_bytes: usize,
 ) -> *mut std::ffi::c_void {
-    // Pool pointers (Q-Dir bump pool, addr < 2 GB) cannot be passed to libc::realloc —
-    // glibc aborts on non-malloc pointers.  Allocate a new pool block and copy instead.
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-    if !lp_mem.is_null()
-        && (lp_mem as usize) < 0x8000_0000
-        && weave_core::seh::pe_size() == 0x1f3_000
-    {
-        let new_ptr = heap_alloc(h_heap, dw_flags, dw_bytes);
-        if !new_ptr.is_null() {
-            // Read old size from header (16 bytes before the user pointer).
-            let old_size = unsafe { *((lp_mem as *const u8).sub(16) as *const usize) };
-            let copy_bytes = old_size.min(dw_bytes);
-            unsafe { libc::memcpy(new_ptr, lp_mem, copy_bytes) };
-        }
-        return new_ptr;
-    }
     unsafe { libc::realloc(lp_mem, dw_bytes) }
 }
 
@@ -2600,12 +2482,6 @@ pub unsafe extern "win64" fn heap_free(
     // locale category pointers freed once per category in free_locinfo).
     if LAST_HEAP_FREE.swap(addr, Ordering::Relaxed) == addr {
         return 0; // FALSE — duplicate free, silently ignored per Windows semantics
-    }
-    // Q-Dir pool allocations (addr within 16 MB MAP_32BIT bump pool) are no-ops:
-    // the pool is process-lifetime and doesn't support individual free.
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-    if addr < 0x8000_0000 && weave_core::seh::pe_size() == 0x1f3_000 {
-        return 1; // pool pointer — nothing to free
     }
     // SAFETY: lp_mem is non-null (early return above), has a canonical x86-64 address
     // (addr >> 47 == 0 check above), and was not freed in the immediately preceding
