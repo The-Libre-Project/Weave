@@ -11,7 +11,9 @@
 # Usage: scripts/weave-ci-watch.sh [SHA]   (SHA defaults to HEAD)
 set -uo pipefail
 
-SHA="${1:-$(git rev-parse HEAD 2>/dev/null)}"
+# Always resolve to full 40-char SHA so the exact-match jq filter works whether
+# the caller passes a short ref, branch name, or full SHA.
+SHA=$(git rev-parse "${1:-HEAD}" 2>/dev/null)
 WORKFLOW="CI"
 
 if [ -z "$SHA" ]; then
