@@ -1426,6 +1426,16 @@ fn q_dir_fixup_7880d_pool_ptr(pe_base: usize, pe_size: usize, uctx: *mut libc::u
         return false;
     }
 
+    // Seed [fault_addr + 8] = pe_base so that pool code reading [slot+8] as a
+    // table-base pointer gets a valid non-null address (image_base) rather than 0.
+    // TRACE-B analysis: the byte at image_base = 'M' (0x4D) is used as a BSS table
+    // index; BSS is zero, so the function returns 0 harmlessly.  Without this seed,
+    // [slot+8] = 0 and the deref of [0] causes a null fault at 0x784ba.  Fail #56.
+    let in_page_off = fault_addr & (PAGE - 1);
+    if in_page_off + 8 + 4 <= PAGE {
+        unsafe { *((fault_page + in_page_off + 8) as *mut u32) = pe_base as u32 };
+    }
+
     // Also attempt to map the rdi descriptor page if rdi is high, so that
     // code reading [truncated_rdi + offset] sees valid data.
     let rdi = regs[libc::REG_RDI as usize] as usize;
