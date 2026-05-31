@@ -1372,62 +1372,92 @@ fn exception_name(code: u32) -> &'static str {
 
 /// Q-Dir E3-M5b pool-backing-store fault fixup.
 ///
-/// At RVA 0x7880d (`mov byte ptr [rax+rcx], dl`), rax holds the lower 32 bits
-/// of a 64-bit pool buffer pointer (truncated because Q-Dir stores it in a DWORD
-/// field at [rdi+4]).  We cannot intercept every allocation path that produces
-/// this high address.  Instead, intercept the fault, allocate a fresh MAP_32BIT
-/// buffer, patch [rdi+4] to the low address, fix rax in the ucontext, and resume.
+/// Q-Dir E3-M5b pool-descriptor fixup at RVA 0x7880d and related sites.
 ///
-/// Returns true if the fixup was applied and the signal handler should return
-/// (resuming PE execution), false if the fault should be handled normally.
+/// At `0x7880d` (`mov byte ptr [rax+rcx], dl`), rax = lower 32 bits of a 64-bit
+/// pool-backing-store pointer (from [rdi+4] truncated).  We also copy the pool
+/// descriptor struct from rdi to a MAP_32BIT buffer so that the CALLER at
+/// RVA 0x79431 (which does `mov eax, edi` → truncates rdi) also gets a low
+/// address.  Both fixups are applied in a single fault interception at 0x7880d.
+///
+/// Returns true if the signal handler should return (resuming PE execution).
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 fn q_dir_fixup_7880d_pool_ptr(pe_base: usize, pe_size: usize, uctx: *mut libc::ucontext_t) -> bool {
     if pe_size != 0x1f3_000 {
         return false;
     }
-    // Read rdi and rbp from the saved context (rbp = loop count = buffer size).
     let regs = unsafe { &mut (*uctx).uc_mcontext.gregs };
     let rdi = regs[libc::REG_RDI as usize] as usize;
     let rbp = regs[libc::REG_RBP as usize] as usize;
     if rdi == 0 {
         return false;
     }
-    // Validate rdi is outside the PE (if it were inside the PE we'd have a different problem).
+    // Only fix up when rdi is a high (>= 2 GB) address — the truncation problem.
+    if rdi < 0x8000_0000 {
+        return false;
+    }
     if rdi >= pe_base && rdi < pe_base + pe_size {
         return false;
     }
-    // Allocate a MAP_32BIT buffer large enough for the pool slot (rbp bytes).
-    let buf_size = if rbp > 0 && rbp <= 0x10_0000 {
-        rbp
-    } else {
-        0x1000
-    };
+
     const MAP_32BIT: i32 = 0x40;
-    let buf = unsafe {
+
+    // --- Part 1: copy the pool descriptor struct (rdi) to a low address ---
+    // Use 0x200 bytes — a safe upper bound for the pool descriptor.
+    let desc_size = 0x200_usize;
+    let desc_buf = unsafe {
         libc::mmap(
             std::ptr::null_mut(),
-            buf_size,
+            desc_size,
             libc::PROT_READ | libc::PROT_WRITE,
             libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | MAP_32BIT,
             -1,
             0,
         )
     };
-    if buf.is_null() || buf == libc::MAP_FAILED || (buf as usize) >= 0x8000_0000 {
-        // MAP_32BIT failed or returned high address — can't fix up.
-        if !buf.is_null() && buf != libc::MAP_FAILED {
-            unsafe { libc::munmap(buf, buf_size) };
+    if desc_buf.is_null() || desc_buf == libc::MAP_FAILED || (desc_buf as usize) >= 0x8000_0000 {
+        if !desc_buf.is_null() && desc_buf != libc::MAP_FAILED {
+            unsafe { libc::munmap(desc_buf, desc_size) };
         }
         return false;
     }
-    let buf_addr = buf as usize;
-    // Patch [rdi+4]: overwrite the DWORD with the low address of our new buffer.
-    // SAFETY: rdi is a live PE pointer, and rdi+4 is the slot checked before this call.
-    unsafe { *((rdi + 4) as *mut u32) = buf_addr as u32 };
-    // Fix rax in the saved ucontext so the memset loop writes into buf.
-    regs[libc::REG_RAX as usize] = buf_addr as i64;
-    // Log via async-signal-safe write.
-    let msg = b"weave: q-dir 7880d pool-fixup: patched [rdi+4] + rax with MAP_32BIT buffer\n";
+    // Copy the pool descriptor to the low buffer.
+    unsafe { libc::memcpy(desc_buf, rdi as *const libc::c_void, desc_size) };
+    let new_rdi = desc_buf as usize;
+
+    // --- Part 2: allocate a MAP_32BIT pool backing store for the memset ---
+    let slot_size = if rbp > 0 && rbp <= 0x10_0000 {
+        rbp
+    } else {
+        0x1000
+    };
+    let slot_buf = unsafe {
+        libc::mmap(
+            std::ptr::null_mut(),
+            slot_size,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | MAP_32BIT,
+            -1,
+            0,
+        )
+    };
+    if slot_buf.is_null() || slot_buf == libc::MAP_FAILED || (slot_buf as usize) >= 0x8000_0000 {
+        unsafe { libc::munmap(desc_buf, desc_size) };
+        if !slot_buf.is_null() && slot_buf != libc::MAP_FAILED {
+            unsafe { libc::munmap(slot_buf, slot_size) };
+        }
+        return false;
+    }
+    let slot_addr = slot_buf as usize;
+
+    // Patch [new_rdi+4] with the low slot address (DWORD field).
+    unsafe { *((new_rdi + 4) as *mut u32) = slot_addr as u32 };
+
+    // Fix ucontext registers: rdi → low descriptor copy, rax → low slot buffer.
+    regs[libc::REG_RDI as usize] = new_rdi as i64;
+    regs[libc::REG_RAX as usize] = slot_addr as i64;
+
+    let msg = b"weave: q-dir 7880d pool-fixup: relocated rdi + pool slot to MAP_32BIT\n";
     unsafe { libc::write(2, msg.as_ptr() as *const _, msg.len()) };
     true
 }
