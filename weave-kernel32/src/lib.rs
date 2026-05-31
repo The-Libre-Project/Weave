@@ -691,14 +691,14 @@ pub unsafe extern "win64" fn virtual_alloc(
 ) -> *mut u8 {
     let prot = win_prot_to_linux(fl_protect);
     const MAP_FIXED_NOREPLACE: i32 = 0x10_0000;
-    // IMAGE_FILE_MACHINE_I386: 32-bit x86 PE guest.  On these guests all pointer
-    // fields are DWORD (u32); VirtualAlloc must return an address < 0x8000_0000
-    // or the guest will truncate the upper 32 bits and fault.
-    // MAP_32BIT (Linux x86-64-only, 0x40) constrains anonymous mmap to the first
-    // 2 GB — exactly the needed range and already within Weave's Linux-only target.
-    const IMAGE_FILE_MACHINE_I386: u16 = 0x014c;
+    // Q-Dir_x64.exe is a 64-bit PE (machine=0x8664) whose custom pool allocator at
+    // RVA 0x78698 stores VirtualAlloc return values in DWORD fields — truncating
+    // 64-bit host addresses to garbage. Key on the size fingerprint (0x1f3000) rather
+    // than the machine word; this is a Q-Dir allocator quirk, not a guest arch property.
+    // MAP_32BIT (Linux x86-64-only, 0x40) constrains anonymous mmap to the first 2 GB.
+    // TRACE-D verdict CI 26721495118; Fail #43.
     const MAP_32BIT: i32 = 0x40;
-    let is_32bit_guest = weave_core::seh::pe_machine() == IMAGE_FILE_MACHINE_I386;
+    let is_32bit_guest = weave_core::seh::pe_size() == 0x1f3_000;
     // Guard against mmap(NULL, 0, ...) which returns MAP_FAILED on Linux.
     if dw_size == 0 {
         eprintln!("weave: VirtualAlloc(size=0) → NULL");
