@@ -929,14 +929,7 @@ fn q_dir_diag_pread_u32(addr: usize) -> Option<u32> {
         return None;
     }
     let mut buf = [0u8; 4];
-    let n = unsafe {
-        libc::pread(
-            fd,
-            buf.as_mut_ptr() as *mut libc::c_void,
-            4,
-            addr as i64,
-        )
-    };
+    let n = unsafe { libc::pread(fd, buf.as_mut_ptr() as *mut libc::c_void, 4, addr as i64) };
     unsafe { libc::close(fd) };
     if n == 4 {
         Some(u32::from_le_bytes(buf))
@@ -953,14 +946,7 @@ fn q_dir_diag_pread_u64(addr: usize) -> Option<u64> {
         return None;
     }
     let mut buf = [0u8; 8];
-    let n = unsafe {
-        libc::pread(
-            fd,
-            buf.as_mut_ptr() as *mut libc::c_void,
-            8,
-            addr as i64,
-        )
-    };
+    let n = unsafe { libc::pread(fd, buf.as_mut_ptr() as *mut libc::c_void, 8, addr as i64) };
     unsafe { libc::close(fd) };
     if n == 8 {
         Some(u64::from_le_bytes(buf))
@@ -1110,10 +1096,15 @@ fn log_q_dir_786eb_diag(pe_base: usize, pe_size: usize, ctx: *const libc::uconte
     let rbp = gregs[libc::REG_RBP as usize] as u64;
     let rsp = gregs[libc::REG_RSP as usize] as u64;
 
-    let freelist = q_dir_diag_pread_u64(pe_base + Q_DIR_FREELIST_HEAD_RVA).unwrap_or(0xffff_ffff_ffff_ffff);
+    let freelist =
+        q_dir_diag_pread_u64(pe_base + Q_DIR_FREELIST_HEAD_RVA).unwrap_or(0xffff_ffff_ffff_ffff);
     let mut buf = [0u8; 640];
     let mut pos = 0usize;
-    q_dir_diag_write_bytes(&mut buf, &mut pos, b"weave: q-dir 786eb light-path insn=mov edx,[rax+8] fault_addr=rax+8\n");
+    q_dir_diag_write_bytes(
+        &mut buf,
+        &mut pos,
+        b"weave: q-dir 786eb light-path insn=mov edx,[rax+8] fault_addr=rax+8\n",
+    );
     q_dir_diag_write_bytes(&mut buf, &mut pos, b"weave: q-dir 786eb globals 0x1531e0=");
     q_dir_diag_write_hex(&mut buf, &mut pos, freelist, 16);
     q_dir_diag_write_bytes(&mut buf, &mut pos, b" 0x152fb0=");
@@ -1290,11 +1281,7 @@ fn log_q_dir_7880d_diag(pe_base: usize, pe_size: usize, ctx: *const libc::uconte
     let mut pos2 = 0usize;
     q_dir_diag_write_bytes(&mut buf2, &mut pos2, b"weave: q-dir 78698 at-crash esi=");
     q_dir_diag_write_hex(&mut buf2, &mut pos2, rsi, 16);
-    q_dir_diag_write_bytes(
-        &mut buf2,
-        &mut pos2,
-        b" (78698 1st-arg; heavy if >=2)\n",
-    );
+    q_dir_diag_write_bytes(&mut buf2, &mut pos2, b" (78698 1st-arg; heavy if >=2)\n");
     unsafe { libc::write(2, buf2.as_ptr() as *const _, pos2) };
 
     log_q_dir_78698_caller_id(pe_base, pe_size, rbp, rsp);

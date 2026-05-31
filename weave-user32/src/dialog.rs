@@ -55,98 +55,10 @@ struct ActiveModal {
 
 static ACTIVE_MODAL: Mutex<Option<ActiveModal>> = Mutex::new(None);
 
-// Q-Dir_x64.exe post-modal heap init: `0x146e70` PE initial `0xa` → heavy path `esi>=2` → `0x7880d`.
-// CI `26611571069`: paint+validate clears modal crash but guest faults post-return without reset.
+// Q-Dir_x64.exe fingerprint: SizeOfImage 0x1f3000. Used to gate Q-Dir-specific behaviour.
+// GUEST_NATIVE_INIT: PE initial 0x146e70 = 10 → sub_78698 takes heavy path (count >= 2),
+// which runs internal pool init. Do NOT reset counters or seed BSS freelist from host.
 const Q_DIR_SIZE_FINGERPRINT: usize = 0x1f3000;
-const Q_DIR_HEAP_COUNTER_RVAS: [usize; 2] = [0x152fb0, 0x152fbc];
-const Q_DIR_HEAP_COUNT_ARG_RVA: usize = 0x146e70;
-/// Light-path freelist head (`mov rax, [0x1531e0]` at `0x786dc`). CI `26604833872`: runtime 0 → `0x786eb`.
-const Q_DIR_FREELIST_HEAD_RVA: usize = 0x1531e0;
-/// BSS fake node in `.data` (writable); light path at `0x786eb` needs `[rax+8]==0` (TRACE-B).
-/// Do not use pool hdr `0x13e4d0` — PE `.rdata` read-only (CI `26642132082` host SIGSEGV).
-const Q_DIR_FREELIST_BSS_NODE_RVA: usize = 0x1531f0;
-
-/// Restore Q-Dir light-path freelist head when zero (TRACE-B CI `26604833872`: `rax=0` at `0x786eb`).
-///
-/// Post-modal: after `DialogBoxParamW` returns. Q-Dir pre-modal: before `WM_INITDIALOG` when
-/// dlgproc hits `sub_78698` during init (Fail #29). Standalone pre-modal seed without WM_INIT
-/// hung CI `26605707359`.
-pub(crate) fn q_dir_seed_freelist_head_if_needed(image_base: usize) {
-    let base = if image_base != 0 {
-        image_base
-    } else {
-        weave_core::seh::pe_base()
-    };
-    let size = weave_core::seh::pe_size();
-    if base == 0 || size != Q_DIR_SIZE_FINGERPRINT {
-        return;
-    }
-    if Q_DIR_FREELIST_HEAD_RVA + 8 > size || Q_DIR_FREELIST_BSS_NODE_RVA + 16 > size {
-        return;
-    }
-    // SAFETY: Q-Dir `.data` (writable mapped image).
-    let p = (base + Q_DIR_FREELIST_HEAD_RVA) as *mut u64;
-    let cur = unsafe { p.read() };
-    if cur == 0 {
-        let seed = (base + Q_DIR_FREELIST_BSS_NODE_RVA) as u64;
-        unsafe {
-            p.write(seed);
-        }
-        // The check at 0x79431 tests byte0 of the freelist node. Set byte0=0 so
-        // `je 0x79447` is taken, entering the skip path via `call 0x784a8(rcx=node)`.
-        // Inside 0x784a8: `mov eax, [rcx+8]` loads node+8 as a pointer. Set
-        // [node+8] = image_base so the deref `movzx edx, byte ptr [rax]` reads
-        // a valid byte (DOS 'M' = 0x4D at image_base). The byte is used as a table
-        // index into BSS (all zeros), so the function returns harmlessly.
-        // SAFETY: BSS node at 0x1531f0 in `.data` (writable).
-        let node = base + Q_DIR_FREELIST_BSS_NODE_RVA;
-        unsafe {
-            *(node as *mut u32) = base as u32; // [0..3]: byte0=0 → skip; [1..3] unused
-            *(node.wrapping_add(8) as *mut u32) = base as u32; // [8..11]: pointer for 784a8 deref
-        }
-        eprintln!(
-            "weave/dialog: Q-Dir freelist 0x1531e0 seed (0 → {seed:#018x}, BSS node rva=0x1531f0, byte0=0 [node+8]=base)"
-        );
-    }
-}
-
-/// Zero Q-Dir heap-init counters (post-modal after `DialogBoxParamW`; Q-Dir pre-modal before WM_INIT).
-pub(crate) fn q_dir_reset_heap_counters_if_needed(image_base: usize) {
-    let base = if image_base != 0 {
-        image_base
-    } else {
-        weave_core::seh::pe_base()
-    };
-    let size = weave_core::seh::pe_size();
-    if base == 0 || size != Q_DIR_SIZE_FINGERPRINT {
-        return;
-    }
-    for rva in Q_DIR_HEAP_COUNTER_RVAS {
-        if rva + 8 > size {
-            continue;
-        }
-        // SAFETY: Q-Dir `.data` BSS (writable mapped image).
-        let p = (base + rva) as *mut u64;
-        let cur = unsafe { p.read() };
-        if cur != 0 {
-            unsafe {
-                p.write(0);
-            }
-            eprintln!("weave/dialog: Q-Dir counter rva={rva:#x} reset ({cur:#x} → 0)");
-        }
-    }
-    if Q_DIR_HEAP_COUNT_ARG_RVA + 4 <= size {
-        // SAFETY: Q-Dir `.data` (writable mapped image).
-        let p = (base + Q_DIR_HEAP_COUNT_ARG_RVA) as *mut u32;
-        let cur = unsafe { p.read() };
-        if cur != 0 {
-            unsafe {
-                p.write(0);
-            }
-            eprintln!("weave/dialog: Q-Dir heap count arg 0x146e70 reset ({cur:#x} → 0)");
-        }
-    }
-}
 
 /// Minimal WM_PAINT handler for dialog HWNDs — BeginPaint/ValidateRect/EndPaint without guest dlgproc.
 ///
