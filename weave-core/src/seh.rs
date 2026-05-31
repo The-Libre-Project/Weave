@@ -1398,8 +1398,10 @@ fn q_dir_fixup_7880d_pool_ptr(pe_base: usize, pe_size: usize, uctx: *mut libc::u
     #[allow(clippy::cast_sign_loss)]
     let fault_addr = regs[18] as usize; // REG_CR2 = index 18
 
-    // Only handle faults in the suspicious truncated-pointer range.
-    if fault_addr < 0x1_0000 || fault_addr >= 0x8000_0000 {
+    // Only handle faults in the suspicious truncated-pointer range (any 32-bit
+    // address above null: [0x10000, 0x1_0000_0000)).  Truncated 64-bit pointers
+    // can land anywhere in the 32-bit address space, not just the bottom 2 GB.
+    if fault_addr < 0x1_0000 || fault_addr >= 0x1_0000_0000 {
         return false;
     }
 
