@@ -2456,32 +2456,57 @@ pub extern "win64" fn heap_alloc(
 
     // Q-Dir (pe_size 0x1f3000): pool descriptor objects allocated via HeapAlloc end
     // up at 64-bit addresses that Q-Dir truncates to DWORD fields → crash at 0x7880d.
-    // Same constraint as VirtualAlloc: MAP_32BIT keeps the address below 2 GB.
-    // Store map_size in an 8-byte header so HeapFree can munmap instead of free().
+    // Use a single 16 MB MAP_32BIT pool with a bump allocator so all HeapAlloc calls
+    // return addresses below 2 GB without per-call mmap overhead or fragmentation.
+    // HeapFree is a no-op for pool pointers; the pool is released on process exit.
     // TRACE-D verdict CI 26721495118; Fail #45.
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     if weave_core::seh::pe_size() == 0x1f3_000 {
+        static Q_DIR_POOL_BASE: AtomicUsize = AtomicUsize::new(0);
+        static Q_DIR_POOL_OFFSET: AtomicUsize = AtomicUsize::new(0);
+        const POOL_SIZE: usize = 16 * 1024 * 1024; // 16 MB
         const MAP_32BIT: i32 = 0x40;
-        let map_size = alloc_size.saturating_add(8);
-        let raw = unsafe {
-            libc::mmap(
-                std::ptr::null_mut(),
-                map_size,
-                libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | MAP_32BIT,
-                -1,
-                0,
-            )
+        const ALIGN: usize = 16;
+
+        // Lazy-init: one MAP_32BIT mmap for the whole Q-Dir process lifetime.
+        let base = Q_DIR_POOL_BASE.load(Ordering::Acquire);
+        let base = if base == 0 {
+            let raw = unsafe {
+                libc::mmap(
+                    std::ptr::null_mut(),
+                    POOL_SIZE,
+                    libc::PROT_READ | libc::PROT_WRITE,
+                    libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | MAP_32BIT,
+                    -1,
+                    0,
+                )
+            };
+            if raw.is_null() || raw == libc::MAP_FAILED {
+                return std::ptr::null_mut();
+            }
+            let addr = raw as usize;
+            // CAS: another thread might have beaten us; prefer theirs if so.
+            match Q_DIR_POOL_BASE.compare_exchange(0, addr, Ordering::AcqRel, Ordering::Acquire) {
+                Ok(_) => addr,
+                Err(existing) => {
+                    unsafe { libc::munmap(raw, POOL_SIZE) };
+                    existing
+                }
+            }
+        } else {
+            base
         };
-        if raw.is_null() || raw == libc::MAP_FAILED {
-            return std::ptr::null_mut();
+
+        // Bump-allocate with 16-byte alignment.
+        let alloc_aligned = (alloc_size + ALIGN - 1) & !(ALIGN - 1);
+        let offset = Q_DIR_POOL_OFFSET.fetch_add(alloc_aligned, Ordering::Relaxed);
+        if offset + alloc_aligned > POOL_SIZE {
+            // Pool exhausted — fall through to malloc (address may be high).
+        } else {
+            let result = (base + offset) as *mut std::ffi::c_void;
+            LAST_HEAP_FREE.store(0, Ordering::Relaxed);
+            return result;
         }
-        // Always zero (MAP_ANONYMOUS is already zero'd by kernel; also covers HEAP_ZERO_MEMORY).
-        unsafe { *(raw as *mut usize) = map_size }; // header: store map_size for munmap
-        let result = unsafe { (raw as *mut u8).add(8) as *mut std::ffi::c_void };
-        eprintln!("weave/HeapAlloc: Q-Dir low size={alloc_size:#x} → addr={result:p} map32=true");
-        LAST_HEAP_FREE.store(0, Ordering::Relaxed);
-        return result;
     }
 
     let result = if zero_memory {
@@ -2546,16 +2571,11 @@ pub unsafe extern "win64" fn heap_free(
     if LAST_HEAP_FREE.swap(addr, Ordering::Relaxed) == addr {
         return 0; // FALSE — duplicate free, silently ignored per Windows semantics
     }
-    // Q-Dir low allocations (from HeapAlloc MAP_32BIT path) have a size header at ptr-8
-    // and must be munmap'd rather than free()'d.
+    // Q-Dir pool allocations (addr within 16 MB MAP_32BIT bump pool) are no-ops:
+    // the pool is process-lifetime and doesn't support individual free.
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     if addr < 0x8000_0000 && weave_core::seh::pe_size() == 0x1f3_000 {
-        let raw = unsafe { (lp_mem as *mut u8).sub(8) as *mut libc::c_void };
-        let map_size = unsafe { *(raw as *const usize) };
-        if map_size > 0 {
-            unsafe { libc::munmap(raw, map_size) };
-            return 1;
-        }
+        return 1; // pool pointer — nothing to free
     }
     // SAFETY: lp_mem is non-null (early return above), has a canonical x86-64 address
     // (addr >> 47 == 0 check above), and was not freed in the immediately preceding
