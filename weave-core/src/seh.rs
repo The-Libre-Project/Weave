@@ -1394,9 +1394,10 @@ fn q_dir_fixup_7880d_pool_ptr(pe_base: usize, pe_size: usize, uctx: *mut libc::u
     // variable).  To access it here we re-derive from the saved gregs or just
     // use the page of rax.
     let regs = unsafe { &(*uctx).uc_mcontext.gregs };
-    // Use REG_CR2 (index 18 on x86-64 Linux) for the fault linear address.
+    // Use REG_CR2 (index 22 on x86-64 Linux) for the fault linear address.
+    // Index 18 is CSGSFS (segment registers), NOT CR2 — that was a bug.
     #[allow(clippy::cast_sign_loss)]
-    let fault_addr = regs[18] as usize; // REG_CR2 = index 18
+    let fault_addr = regs[libc::REG_CR2 as usize] as usize;
 
     // Only handle faults in the suspicious truncated-pointer range (any 32-bit
     // address above null: [0x10000, 0x1_0000_0000)).  Truncated 64-bit pointers

@@ -55,11 +55,6 @@ struct ActiveModal {
 
 static ACTIVE_MODAL: Mutex<Option<ActiveModal>> = Mutex::new(None);
 
-// Q-Dir_x64.exe fingerprint: SizeOfImage 0x1f3000. Used to gate Q-Dir-specific behaviour.
-// GUEST_NATIVE_INIT: PE initial 0x146e70 = 10 → sub_78698 takes heavy path (count >= 2),
-// which runs internal pool init. Do NOT reset counters or seed BSS freelist from host.
-const Q_DIR_SIZE_FINGERPRINT: usize = 0x1f3000;
-
 /// Minimal WM_PAINT handler for dialog HWNDs — BeginPaint/ValidateRect/EndPaint without guest dlgproc.
 ///
 /// Wine ref: dlls/win32u/defwnd.c — DefWindowProc WM_PAINT calls BeginPaint then EndPaint
@@ -491,25 +486,15 @@ pub unsafe fn create_from_template_bytes(
         off = next;
     }
     // Wine ref: dlls/user32/dialog.c — SendMessageW(hwnd, WM_INITDIALOG, hwndFocus, lParam).
-    let image_base = weave_core::module_handles::base_of(h_instance).unwrap_or_else(|| {
-        if h_instance == 0 {
-            weave_core::seh::pe_base()
-        } else {
-            0
-        }
-    });
-    let pe_size = weave_core::seh::pe_size();
-    if image_base != 0 && pe_size == Q_DIR_SIZE_FINGERPRINT {
-        // Q-Dir (0x1f3000): GUEST_NATIVE_INIT — do NOT reset heap counters or seed
-        // BSS freelist. PE initial `0x146e70` = 10, letting sub_78698 take the heavy
-        // path (count >= 2) which calls internal memset+pool init and creates valid
-        // freelist. No host `.data` seeding needed. (E3-M5b)
-    } else {
-        // Guest dlgproc SIGSEGV at RVA 0x7880d during WM_INITDIALOG (CI c516a98) — keep deferred.
-        eprintln!(
-            "weave/dialog: WM_INITDIALOG deferred for hwnd={hwnd:#x} — guest dlgproc crashes on init"
-        );
-    }
+    // NOTE: WM_INITDIALOG dispatch to the guest dlgproc is currently deferred (not sent) for
+    // ALL guests — see TASK-CLEANUP-QDIR-ARC.md "masked regression". Restoring it is a tracked,
+    // separately-verified change, not part of this path.
+    eprintln!(
+        "weave/dialog: WM_INITDIALOG deferred for hwnd={hwnd:#x} — guest dlgproc crashes on init"
+    );
+    // init_param is the WM_INITDIALOG lParam; held unused while dispatch is deferred
+    // (consumed again when WM_INITDIALOG is restored — see TASK-CLEANUP-QDIR-ARC.md).
+    let _ = init_param;
     // Wine ref: dlls/user32/dialog.c — ShowWindow(SW_SHOW) marks update region dirty and posts WM_PAINT.
     crate::api::show_window(hwnd, SW_SHOW);
     Some(hwnd)
