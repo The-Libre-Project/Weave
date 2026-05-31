@@ -23,7 +23,7 @@
 //! .pdata exception handler chain) is Phase 2 work.
 
 use crate::loader::LoadedImage;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 
 // ── Global PE metadata for async-signal-safe access ──────────────────────────
 //
@@ -34,6 +34,49 @@ pub(crate) static PE_BASE: AtomicUsize = AtomicUsize::new(0);
 pub(crate) static PE_SIZE: AtomicUsize = AtomicUsize::new(0);
 pub(crate) static PDATA_RVA: AtomicUsize = AtomicUsize::new(0);
 pub(crate) static PDATA_SIZE: AtomicUsize = AtomicUsize::new(0);
+
+// ── TRACE-D: INT3-based entry hooks for Q-Dir pool analysis ──────────────────
+//
+// Two breakpoints:
+//   (a) 0x78698 — `sub_78698` entry (heavy-path allocator).  Fires during
+//       normal execution when the PE calls the pool-init helper.  Reads
+//       rdi/rsi and [rdi+0..32] via direct ptr::read (not pread).
+//   (b) 0x47795c — pool-init helper called from the heavy path.  Logs
+//       rcx/rdx/r8 at entry and captures the return address so a second
+//       INT3 (planted dynamically) catches rax at return.
+//
+// The INT3 bytes are written only when PE size matches the Q-Dir fingerprint
+// (0x1f3000).  Each hook fires at most once (AtomicBool one-shot guard) to
+// avoid log spam.
+
+/// Original code byte saved before writing 0xCC at 0x78698.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+static Q_DIR_TRACE_D_ORIG_78698: AtomicU8 = AtomicU8::new(0);
+
+/// Original code byte saved before writing 0xCC at 0x47795c.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+static Q_DIR_TRACE_D_ORIG_47795C: AtomicU8 = AtomicU8::new(0);
+
+/// Return address of the 0x47795c call, captured at entry breakpoint.
+/// Used to plant the exit (return-value) INT3.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+static Q_DIR_TRACE_D_HELPER_RET_VA: AtomicU64 = AtomicU64::new(0);
+
+/// Original byte at the dynamically-planted helper-return INT3.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+static Q_DIR_TRACE_D_ORIG_RET: AtomicU8 = AtomicU8::new(0);
+
+/// One-shot guard: heavy-path entry hook already fired.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+static Q_DIR_TRACE_D_ENTRY_FIRED: AtomicBool = AtomicBool::new(false);
+
+/// One-shot guard: helper-entry hook already fired.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+static Q_DIR_TRACE_D_HELPER_FIRED: AtomicBool = AtomicBool::new(false);
+
+/// One-shot guard: helper-return hook already fired.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+static Q_DIR_TRACE_D_RETURN_FIRED: AtomicBool = AtomicBool::new(false);
 
 // ── SEH runaway cap ──────────────────────────────────────────────────────────
 //
@@ -82,8 +125,14 @@ pub fn install(image: &LoadedImage) {
         install_one(libc::SIGILL);
         install_one(libc::SIGBUS);
         install_one(libc::SIGABRT);
+        install_one(libc::SIGTRAP);
         eprintln!("weave: exception handlers installed");
     }
+
+    // TRACE-D: plant INT3 breakpoints for the Q-Dir pool analysis.
+    // Only runs when PE size matches the Q-Dir fingerprint.
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    q_dir_trace_d_install_hooks(image.base as usize, image.size);
 }
 
 /// Return the base address at which the guest PE is mapped.
@@ -152,6 +201,20 @@ unsafe extern "C" fn on_fatal_signal(
 
     let base = PE_BASE.load(Ordering::Relaxed);
     let size = PE_SIZE.load(Ordering::Relaxed);
+
+    // ── TRACE-D: SIGTRAP dispatch (INT3 breakpoint hooks) ─────────────────
+    // Must come BEFORE the SIGSEGV/crash path so INT3 breakpoints don't fall
+    // through to the fatal-fault reporter.  RIP on x86 points one byte PAST
+    // the INT3 when the SIGTRAP is delivered; the original instruction address
+    // is (rip - 1).
+    #[cfg(target_arch = "x86_64")]
+    if sig == libc::SIGTRAP && base != 0 {
+        let bp_rip = rip.wrapping_sub(1); // address of the INT3 byte
+        let uctx_mut = ctx as *mut libc::ucontext_t;
+        if q_dir_trace_d_on_sigtrap(base, size, bp_rip, uctx_mut) {
+            return; // hook handled — resume normal execution
+        }
+    }
 
     if base != 0 && rip >= base && rip < base + size {
         // ── SEH runaway cap ────────────────────────────────────────────────
@@ -1340,4 +1403,287 @@ fn exception_name(code: u32) -> &'static str {
         0xC000_0006 => "STATUS_IN_PAGE_ERROR",
         _ => "STATUS_UNSUCCESSFUL",
     }
+}
+
+// ── TRACE-D: entry-hook implementation ───────────────────────────────────────
+//
+// INT3-based hooks that fire during normal PE execution (not at fault time).
+// Strategy: write 0xCC over the first byte of each target RVA; the SIGTRAP
+// handler reads register state and pool-object fields via direct ptr::read,
+// restores the original byte, and rewinds RIP by 1 so the original instruction
+// re-executes on handler return.
+//
+// Two hook points:
+//   RVA 0x78698 — `sub_78698` entry; fires when heavy path (esi ≥ 2) is taken.
+//   RVA 0x47795c — pool-init helper entry; logs rcx/rdx/r8 and plants a
+//                  dynamic INT3 at the return site to capture rax.
+
+/// RVA of the pool-init helper `sub_47795c`.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+const Q_DIR_POOL_HELPER_RVA: u32 = 0x47795c;
+
+/// Write a single byte to an executable page, briefly making it writable.
+/// Returns the original byte, or 0xFF on failure.
+///
+/// # Safety
+/// `addr` must point to a mapped page.  Caller is responsible for only
+/// patching pages that belong to the guest PE.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+unsafe fn trace_d_write_byte(addr: usize, byte: u8) -> u8 {
+    const PAGE_SIZE: usize = 4096;
+    let page = addr & !(PAGE_SIZE - 1);
+    // Make page writable.
+    let rc = unsafe {
+        libc::mprotect(
+            page as *mut libc::c_void,
+            PAGE_SIZE,
+            libc::PROT_READ | libc::PROT_WRITE | libc::PROT_EXEC,
+        )
+    };
+    if rc != 0 {
+        return 0xFF;
+    }
+    let ptr = addr as *mut u8;
+    let orig = unsafe { ptr.read_volatile() };
+    unsafe { ptr.write_volatile(byte) };
+    // Restore read+exec.
+    unsafe {
+        libc::mprotect(
+            page as *mut libc::c_void,
+            PAGE_SIZE,
+            libc::PROT_READ | libc::PROT_EXEC,
+        )
+    };
+    orig
+}
+
+/// Install INT3 breakpoints at 0x78698 and 0x47795c (Q-Dir only).
+/// Called from `seh::install` after PE metadata is stored.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn q_dir_trace_d_install_hooks(pe_base: usize, pe_size: usize) {
+    const Q_DIR_SIZE_FINGERPRINT: usize = 0x1f3000;
+    if pe_size != Q_DIR_SIZE_FINGERPRINT {
+        return;
+    }
+    unsafe {
+        let orig_a = trace_d_write_byte(pe_base + Q_DIR_HEAP_INIT_LO as usize, 0xCC);
+        Q_DIR_TRACE_D_ORIG_78698.store(orig_a, Ordering::Relaxed);
+
+        let orig_b = trace_d_write_byte(pe_base + Q_DIR_POOL_HELPER_RVA as usize, 0xCC);
+        Q_DIR_TRACE_D_ORIG_47795C.store(orig_b, Ordering::Relaxed);
+    }
+    let mut buf = [0u8; 128];
+    let mut pos = 0usize;
+    q_dir_diag_write_bytes(
+        &mut buf,
+        &mut pos,
+        b"weave: trace-d hooks installed pe_base=",
+    );
+    q_dir_diag_write_hex(&mut buf, &mut pos, pe_base as u64, 16);
+    q_dir_diag_write_bytes(&mut buf, &mut pos, b" orig_78698=");
+    q_dir_diag_write_hex(
+        &mut buf,
+        &mut pos,
+        Q_DIR_TRACE_D_ORIG_78698.load(Ordering::Relaxed) as u64,
+        2,
+    );
+    q_dir_diag_write_bytes(&mut buf, &mut pos, b" orig_47795c=");
+    q_dir_diag_write_hex(
+        &mut buf,
+        &mut pos,
+        Q_DIR_TRACE_D_ORIG_47795C.load(Ordering::Relaxed) as u64,
+        2,
+    );
+    q_dir_diag_write_byte(&mut buf, &mut pos, b'\n');
+    unsafe { libc::write(2, buf.as_ptr() as *const _, pos) };
+}
+
+/// SIGTRAP dispatch for TRACE-D breakpoints.  Returns `true` if the trap was
+/// one of our INT3 hooks and execution should resume; `false` otherwise (let
+/// the normal fatal-fault path handle it).
+///
+/// `bp_rip` = address of the INT3 byte = (hardware RIP - 1).
+/// `uctx`   = mutable ucontext; we rewind REG_RIP to `bp_rip` so the restored
+///            instruction re-executes after the signal handler returns.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn q_dir_trace_d_on_sigtrap(
+    pe_base: usize,
+    pe_size: usize,
+    bp_rip: usize,
+    uctx: *mut libc::ucontext_t,
+) -> bool {
+    if pe_base == 0 || bp_rip < pe_base || bp_rip >= pe_base + pe_size {
+        return false;
+    }
+    let rva = (bp_rip - pe_base) as u32;
+
+    // ── (a) 0x78698 — sub_78698 entry (heavy-path pool allocator) ─────────
+    if rva == Q_DIR_HEAP_INIT_LO {
+        // One-shot: restore the INT3 immediately so subsequent calls run
+        // unpatched.  We deliberately do NOT re-plant it — we only need one
+        // sample to answer Q1/Q2/Q3.
+        let orig = Q_DIR_TRACE_D_ORIG_78698.load(Ordering::Relaxed);
+        unsafe { trace_d_write_byte(bp_rip, orig) };
+
+        // Rewind RIP so the restored instruction executes on return.
+        unsafe { (*uctx).uc_mcontext.gregs[libc::REG_RIP as usize] = bp_rip as i64 };
+
+        // Only log the first time (guard against re-entry during restoration).
+        if Q_DIR_TRACE_D_ENTRY_FIRED
+            .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
+            let gregs = unsafe { (*uctx).uc_mcontext.gregs };
+            let rdi = gregs[libc::REG_RDI as usize] as u64;
+            let rsi = gregs[libc::REG_RSI as usize] as u64;
+            let rcx = gregs[libc::REG_RCX as usize] as u64;
+
+            // Log rdi / esi / rcx — the pool object pointer, path-count, and
+            // first argument.
+            let mut buf = [0u8; 256];
+            let mut pos = 0usize;
+            q_dir_diag_write_bytes(&mut buf, &mut pos, b"weave: trace-d 78698 entry rdi=");
+            q_dir_diag_write_hex(&mut buf, &mut pos, rdi, 16);
+            q_dir_diag_write_bytes(&mut buf, &mut pos, b" esi(path-count)=");
+            q_dir_diag_write_hex(&mut buf, &mut pos, rsi & 0xffff_ffff, 8);
+            q_dir_diag_write_bytes(&mut buf, &mut pos, b" rcx=");
+            q_dir_diag_write_hex(&mut buf, &mut pos, rcx, 16);
+            q_dir_diag_write_byte(&mut buf, &mut pos, b'\n');
+            unsafe { libc::write(2, buf.as_ptr() as *const _, pos) };
+
+            // Read [rdi+0..32] via direct in-process ptr::read_volatile.
+            // Safe if rdi is non-null and points to allocated memory (TRACE-C
+            // confirmed rdi is inside Weave's VirtualAlloc host range).
+            if rdi != 0 {
+                // Read 4 × u64 (32 bytes) from the pool object.
+                let p = rdi as *const u64;
+                // SAFETY: rdi is inside the guest's VirtualAlloc range
+                // (confirmed by TRACE-C: address 0x7f5f75…).  We are in a
+                // SIGTRAP handler, not a SIGSEGV handler — the memory is
+                // accessible during normal execution at this point.  If rdi
+                // happens to be garbage on the very first call, the worst
+                // outcome is a secondary SIGSEGV which will be caught by the
+                // existing crash reporter.
+                let f0 = unsafe { p.read_volatile() };
+                let f1 = unsafe { p.add(1).read_volatile() };
+                let f2 = unsafe { p.add(2).read_volatile() };
+                let f3 = unsafe { p.add(3).read_volatile() };
+
+                let mut buf2 = [0u8; 256];
+                let mut pos2 = 0usize;
+                q_dir_diag_write_bytes(&mut buf2, &mut pos2, b"weave: trace-d 78698 pool [rdi+0]=");
+                q_dir_diag_write_hex(&mut buf2, &mut pos2, f0, 16);
+                q_dir_diag_write_bytes(&mut buf2, &mut pos2, b" [rdi+8]=");
+                q_dir_diag_write_hex(&mut buf2, &mut pos2, f1, 16);
+                q_dir_diag_write_bytes(&mut buf2, &mut pos2, b" [rdi+16]=");
+                q_dir_diag_write_hex(&mut buf2, &mut pos2, f2, 16);
+                q_dir_diag_write_bytes(&mut buf2, &mut pos2, b" [rdi+24]=");
+                q_dir_diag_write_hex(&mut buf2, &mut pos2, f3, 16);
+                q_dir_diag_write_byte(&mut buf2, &mut pos2, b'\n');
+                unsafe { libc::write(2, buf2.as_ptr() as *const _, pos2) };
+
+                // Also log [rdi+4] as u32 (the field TRACE-C observed as
+                // garbage rax source).
+                let p32 = rdi as *const u32;
+                let f4_hi = unsafe { p32.add(1).read_volatile() }; // [rdi+4]
+                let mut buf3 = [0u8; 128];
+                let mut pos3 = 0usize;
+                q_dir_diag_write_bytes(&mut buf3, &mut pos3, b"weave: trace-d 78698 [rdi+4](u32)=");
+                q_dir_diag_write_hex(&mut buf3, &mut pos3, f4_hi as u64, 8);
+                q_dir_diag_write_byte(&mut buf3, &mut pos3, b'\n');
+                unsafe { libc::write(2, buf3.as_ptr() as *const _, pos3) };
+            } else {
+                unsafe {
+                    libc::write(
+                        2,
+                        b"weave: trace-d 78698 rdi=0 (null pool ptr)\n".as_ptr() as *const _,
+                        43,
+                    )
+                };
+            }
+        }
+        return true;
+    }
+
+    // ── (b) 0x47795c — pool-init helper entry ─────────────────────────────
+    if rva == Q_DIR_POOL_HELPER_RVA {
+        let orig = Q_DIR_TRACE_D_ORIG_47795C.load(Ordering::Relaxed);
+        unsafe { trace_d_write_byte(bp_rip, orig) };
+        unsafe { (*uctx).uc_mcontext.gregs[libc::REG_RIP as usize] = bp_rip as i64 };
+
+        if Q_DIR_TRACE_D_HELPER_FIRED
+            .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
+            let gregs = unsafe { (*uctx).uc_mcontext.gregs };
+            let rcx = gregs[libc::REG_RCX as usize] as u64;
+            let rdx = gregs[libc::REG_RDX as usize] as u64;
+            let r8 = gregs[libc::REG_R8 as usize] as u64;
+            let rsp = gregs[libc::REG_RSP as usize] as u64;
+
+            let mut buf = [0u8; 256];
+            let mut pos = 0usize;
+            q_dir_diag_write_bytes(&mut buf, &mut pos, b"weave: trace-d 47795c entry rcx=");
+            q_dir_diag_write_hex(&mut buf, &mut pos, rcx, 16);
+            q_dir_diag_write_bytes(&mut buf, &mut pos, b" rdx=");
+            q_dir_diag_write_hex(&mut buf, &mut pos, rdx, 16);
+            q_dir_diag_write_bytes(&mut buf, &mut pos, b" r8=");
+            q_dir_diag_write_hex(&mut buf, &mut pos, r8, 16);
+            q_dir_diag_write_byte(&mut buf, &mut pos, b'\n');
+            unsafe { libc::write(2, buf.as_ptr() as *const _, pos) };
+
+            // Plant a return INT3 at [rsp] (the return address from the caller).
+            // SAFETY: rsp is the guest stack pointer; [rsp] is the return addr
+            // placed there by the `call` instruction at the callsite.
+            if rsp != 0 {
+                let ret_va = unsafe { (rsp as *const u64).read_volatile() };
+                if ret_va >= pe_base as u64 && ret_va < (pe_base as u64) + (pe_size as u64) {
+                    let ret_orig = unsafe { trace_d_write_byte(ret_va as usize, 0xCC) };
+                    Q_DIR_TRACE_D_HELPER_RET_VA.store(ret_va, Ordering::Relaxed);
+                    Q_DIR_TRACE_D_ORIG_RET.store(ret_orig, Ordering::Relaxed);
+
+                    let mut buf2 = [0u8; 128];
+                    let mut pos2 = 0usize;
+                    q_dir_diag_write_bytes(
+                        &mut buf2,
+                        &mut pos2,
+                        b"weave: trace-d 47795c return-bp planted at=",
+                    );
+                    q_dir_diag_write_hex(&mut buf2, &mut pos2, ret_va, 16);
+                    q_dir_diag_write_byte(&mut buf2, &mut pos2, b'\n');
+                    unsafe { libc::write(2, buf2.as_ptr() as *const _, pos2) };
+                }
+            }
+        }
+        return true;
+    }
+
+    // ── (c) dynamic return-site INT3 (planted by helper-entry hook) ───────
+    let ret_va = Q_DIR_TRACE_D_HELPER_RET_VA.load(Ordering::Relaxed);
+    if ret_va != 0 && bp_rip == ret_va as usize {
+        let orig = Q_DIR_TRACE_D_ORIG_RET.load(Ordering::Relaxed);
+        unsafe { trace_d_write_byte(bp_rip, orig) };
+        unsafe { (*uctx).uc_mcontext.gregs[libc::REG_RIP as usize] = bp_rip as i64 };
+        // Clear so subsequent calls don't hit a stale ret_va.
+        Q_DIR_TRACE_D_HELPER_RET_VA.store(0, Ordering::Relaxed);
+
+        if Q_DIR_TRACE_D_RETURN_FIRED
+            .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
+            let rax = unsafe { (*uctx).uc_mcontext.gregs[libc::REG_RAX as usize] as u64 };
+            let ret_rva = (bp_rip - pe_base) as u32;
+            let mut buf = [0u8; 128];
+            let mut pos = 0usize;
+            q_dir_diag_write_bytes(&mut buf, &mut pos, b"weave: trace-d 47795c return rax=");
+            q_dir_diag_write_hex(&mut buf, &mut pos, rax, 16);
+            q_dir_diag_write_bytes(&mut buf, &mut pos, b" ret_rva=");
+            q_dir_diag_write_hex(&mut buf, &mut pos, ret_rva as u64, 8);
+            q_dir_diag_write_byte(&mut buf, &mut pos, b'\n');
+            unsafe { libc::write(2, buf.as_ptr() as *const _, pos) };
+        }
+        return true;
+    }
+
+    false
 }
