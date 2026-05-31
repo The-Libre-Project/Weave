@@ -23,7 +23,7 @@
 //! .pdata exception handler chain) is Phase 2 work.
 
 use crate::loader::LoadedImage;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 
 // ── Global PE metadata for async-signal-safe access ──────────────────────────
 //
@@ -34,6 +34,10 @@ pub(crate) static PE_BASE: AtomicUsize = AtomicUsize::new(0);
 pub(crate) static PE_SIZE: AtomicUsize = AtomicUsize::new(0);
 pub(crate) static PDATA_RVA: AtomicUsize = AtomicUsize::new(0);
 pub(crate) static PDATA_SIZE: AtomicUsize = AtomicUsize::new(0);
+/// IMAGE_FILE_HEADER.Machine value of the loaded guest PE.
+/// 0x014c = IMAGE_FILE_MACHINE_I386 (32-bit); 0x8664 = AMD64 (64-bit).
+/// Stored as u32 so it fits in an AtomicU32; only the low 16 bits are used.
+pub(crate) static PE_MACHINE: AtomicU32 = AtomicU32::new(0);
 
 // ── SEH runaway cap ──────────────────────────────────────────────────────────
 //
@@ -74,6 +78,7 @@ pub fn install(image: &LoadedImage) {
     PE_SIZE.store(image.size, Ordering::Relaxed);
     PDATA_RVA.store(image.pdata_rva, Ordering::Relaxed);
     PDATA_SIZE.store(image.pdata_size, Ordering::Relaxed);
+    PE_MACHINE.store(u32::from(image.machine), Ordering::Relaxed);
 
     #[cfg(target_os = "linux")]
     {
@@ -98,6 +103,15 @@ pub fn pe_base() -> usize {
 /// Returns 0 if called before [`install`].
 pub fn pe_size() -> usize {
     PE_SIZE.load(Ordering::Relaxed)
+}
+
+/// Return the IMAGE_FILE_HEADER.Machine value of the guest PE.
+///
+/// Common values: 0x014c (IMAGE_FILE_MACHINE_I386 — 32-bit x86),
+/// 0x8664 (IMAGE_FILE_MACHINE_AMD64 — 64-bit x86-64).
+/// Returns 0 if called before [`install`].
+pub fn pe_machine() -> u16 {
+    PE_MACHINE.load(Ordering::Relaxed) as u16
 }
 
 // ── Signal handler installation ───────────────────────────────────────────────

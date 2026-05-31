@@ -23,6 +23,10 @@ pub struct LoadedImage {
     /// Used by the SEH signal handler to identify which function faulted.
     pub pdata_rva: usize,
     pub pdata_size: usize,
+    /// IMAGE_FILE_HEADER.Machine value from the COFF header.
+    /// 0x014c = IMAGE_FILE_MACHINE_I386 (32-bit x86 PE).
+    /// 0x8664 = IMAGE_FILE_MACHINE_AMD64 (64-bit x86-64 PE).
+    pub machine: u16,
 }
 
 // Safety: the mapped region is owned exclusively by this struct.
@@ -138,6 +142,7 @@ fn load_impl(bytes: &[u8]) -> Result<LoadedImage, String> {
         tls_data_size,
         pdata_rva,
         pdata_size,
+        machine: pe.header.coff_header.machine,
     })
 }
 
@@ -211,6 +216,7 @@ pub fn load_dll(bytes: &[u8]) -> Result<(LoadedImage, HashMap<String, usize>), S
         tls_data_size: 0,
         pdata_rva: 0,
         pdata_size: 0,
+        machine: pe.header.coff_header.machine,
     };
 
     Ok((image, exports))

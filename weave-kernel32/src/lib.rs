@@ -669,6 +669,13 @@ pub unsafe extern "win64" fn virtual_query(
 /// Wine ref: dlls/kernelbase/memory.c — VirtualAlloc delegates to VirtualAllocEx which
 /// calls NtAllocateVirtualMemory. MEM_COMMIT | MEM_RESERVE is the normal pattern.
 /// Weave maps via mmap; MAP_FIXED_NOREPLACE prevents overwriting existing Weave mappings.
+/// For 32-bit PE guests (Machine == IMAGE_FILE_MACHINE_I386 = 0x014c), NtAllocateVirtualMemory
+/// constrains addresses to the 4 GB user address space; on 64-bit Linux the equivalent is
+/// MAP_32BIT which restricts mmap to the first 2 GB (0x0000_0000–0x7FFF_FFFF).
+/// Without this constraint, Weave returns 64-bit host addresses that 32-bit guests truncate
+/// to the lower 32 bits, producing a garbage pointer that faults on first access.
+/// (TRACE-D verdict, CI 26721495118: Q-Dir sub_7795c returned 0x7f4428f63048; stored in
+/// DWORD field → truncated to 0x28f63048 → SIGSEGV at RVA 0x7880d.)
 ///
 /// # Safety
 /// `lp_address` must be null or a page-aligned address.
@@ -684,6 +691,14 @@ pub unsafe extern "win64" fn virtual_alloc(
 ) -> *mut u8 {
     let prot = win_prot_to_linux(fl_protect);
     const MAP_FIXED_NOREPLACE: i32 = 0x10_0000;
+    // IMAGE_FILE_MACHINE_I386: 32-bit x86 PE guest.  On these guests all pointer
+    // fields are DWORD (u32); VirtualAlloc must return an address < 0x8000_0000
+    // or the guest will truncate the upper 32 bits and fault.
+    // MAP_32BIT (Linux x86-64-only, 0x40) constrains anonymous mmap to the first
+    // 2 GB — exactly the needed range and already within Weave's Linux-only target.
+    const IMAGE_FILE_MACHINE_I386: u16 = 0x014c;
+    const MAP_32BIT: i32 = 0x40;
+    let is_32bit_guest = weave_core::seh::pe_machine() == IMAGE_FILE_MACHINE_I386;
     // Guard against mmap(NULL, 0, ...) which returns MAP_FAILED on Linux.
     if dw_size == 0 {
         eprintln!("weave: VirtualAlloc(size=0) → NULL");
@@ -695,17 +710,19 @@ pub unsafe extern "win64" fn virtual_alloc(
     // silently remapping an existing allocation — the caller must handle the failure.
     // dw_size > 0 is enforced by the early-return above.
     // Sandbox: fd=-1 + MAP_ANONYMOUS only — no fd-backed mapping; no Landlock escape path.
+    // (a) no pointer dereference — mmap only reads the hint, not the memory at hint;
+    // (b) memory is newly OS-allocated, owned by this process;
+    // (c) lifetime = until VirtualFree/munmap;
+    // (d) none — TODO(shim): Phase A, no Tier A gate yet for 32-bit address constraint.
     let result = if lp_address.is_null() {
-        unsafe {
-            libc::mmap(
-                std::ptr::null_mut(),
-                dw_size,
-                prot,
-                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
-                -1,
-                0,
-            )
-        }
+        // No caller hint: let the kernel choose.  For 32-bit guests, add MAP_32BIT
+        // so the returned address fits in a DWORD without truncation.
+        let flags = if is_32bit_guest {
+            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | MAP_32BIT
+        } else {
+            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS
+        };
+        unsafe { libc::mmap(std::ptr::null_mut(), dw_size, prot, flags, -1, 0) }
     } else {
         unsafe {
             libc::mmap(
