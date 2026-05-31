@@ -744,7 +744,23 @@ pub unsafe extern "win64" fn virtual_alloc(
         std::ptr::null_mut()
     } else {
         let result_ptr = result as *mut u8;
-        eprintln!("weave/VirtualAlloc: size={dw_size:#x} → addr={result_ptr:p}");
+        // Log caller RIP to detect if sub_7795c reaches this stub or bypasses via GetProcAddress.
+        let caller_rip: usize;
+        #[cfg(target_arch = "x86_64")]
+        unsafe {
+            std::arch::asm!("lea {r}, [rip]", r = out(reg) caller_rip)
+        };
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            caller_rip = 0;
+        }
+        let pe_b = weave_core::seh::pe_base();
+        let caller_rva = if pe_b != 0 && caller_rip >= pe_b {
+            caller_rip - pe_b
+        } else {
+            0
+        };
+        eprintln!("weave/VirtualAlloc: size={dw_size:#x} → addr={result_ptr:p} caller_rva={caller_rva:#x} map32={is_32bit_guest}");
         result_ptr
     }
 }
