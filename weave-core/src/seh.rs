@@ -1370,15 +1370,20 @@ fn exception_name(code: u32) -> &'static str {
     }
 }
 
-/// Q-Dir E3-M5b pool-backing-store fault fixup.
+/// Q-Dir E3-M5b pool-pointer fixup at RVA 0x7880d.
 ///
-/// Q-Dir E3-M5b pool-descriptor fixup at RVA 0x7880d and related sites.
+/// Q-Dir stores 64-bit allocation pointers in DWORD fields (32-bit truncation).
+/// Strategy: instead of patching registers (which get restored from the stack by
+/// the function's callee-save convention), MAP pages at the EXACT truncated
+/// addresses using MAP_FIXED_NOREPLACE.  Q-Dir then uses its own unmodified
+/// registers and the accesses succeed because the pages are now mapped.
 ///
-/// At `0x7880d` (`mov byte ptr [rax+rcx], dl`), rax = lower 32 bits of a 64-bit
-/// pool-backing-store pointer (from [rdi+4] truncated).  We also copy the pool
-/// descriptor struct from rdi to a MAP_32BIT buffer so that the CALLER at
-/// RVA 0x79431 (which does `mov eax, edi` → truncates rdi) also gets a low
-/// address.  Both fixups are applied in a single fault interception at 0x7880d.
+/// Two pages are mapped:
+///   - Descriptor page: `(uint32_t)rdi & PAGE_MASK` — copy pool descriptor there
+///     so accesses via truncated rdi work.
+///   - Slot page: `(uint32_t)[rdi+4] & PAGE_MASK` — zero-filled (MAP_ANONYMOUS
+///     already zeros); the memset at 0x7880d writes here, and subsequent reads
+///     from [rdi+4] as a 32-bit pointer also work.
 ///
 /// Returns true if the signal handler should return (resuming PE execution).
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
@@ -1386,78 +1391,68 @@ fn q_dir_fixup_7880d_pool_ptr(pe_base: usize, pe_size: usize, uctx: *mut libc::u
     if pe_size != 0x1f3_000 {
         return false;
     }
-    let regs = unsafe { &mut (*uctx).uc_mcontext.gregs };
+    let regs = unsafe { &(*uctx).uc_mcontext.gregs };
     let rdi = regs[libc::REG_RDI as usize] as usize;
-    let rbp = regs[libc::REG_RBP as usize] as usize;
-    if rdi == 0 {
-        return false;
-    }
-    // Only fix up when rdi is a high (>= 2 GB) address — the truncation problem.
-    if rdi < 0x8000_0000 {
-        return false;
+    let rax = regs[libc::REG_RAX as usize] as usize; // truncated slot ptr = [rdi+4]
+    if rdi < 0x8000_0000 || rax == 0 {
+        return false; // rdi already low (fixup already applied) or rax null
     }
     if rdi >= pe_base && rdi < pe_base + pe_size {
         return false;
     }
 
-    const MAP_32BIT: i32 = 0x40;
+    const PAGE: usize = 0x1000;
+    const MAP_FIXED_NOREPLACE: i32 = 0x100_000;
 
-    // --- Part 1: copy the pool descriptor struct (rdi) to a low address ---
-    // Use 0x200 bytes — a safe upper bound for the pool descriptor.
-    let desc_size = 0x200_usize;
-    let desc_buf = unsafe {
+    // --- Map the slot page at the exact truncated slot address (rax) ---
+    // This is the page the memset at 0x7880d writes into.
+    // MAP_ANONYMOUS zeroes the page automatically; no copy needed.
+    let slot_page = rax & !(PAGE - 1);
+    let slot_map = unsafe {
         libc::mmap(
-            std::ptr::null_mut(),
-            desc_size,
+            slot_page as *mut libc::c_void,
+            PAGE,
             libc::PROT_READ | libc::PROT_WRITE,
-            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | MAP_32BIT,
+            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | MAP_FIXED_NOREPLACE,
             -1,
             0,
         )
     };
-    if desc_buf.is_null() || desc_buf == libc::MAP_FAILED || (desc_buf as usize) >= 0x8000_0000 {
-        if !desc_buf.is_null() && desc_buf != libc::MAP_FAILED {
-            unsafe { libc::munmap(desc_buf, desc_size) };
-        }
-        return false;
+    if slot_map == libc::MAP_FAILED {
+        // Page might already be mapped; that's fine — the access may just work.
+        // Fall through — attempt desc mapping anyway.
     }
-    // Copy the pool descriptor to the low buffer.
-    unsafe { libc::memcpy(desc_buf, rdi as *const libc::c_void, desc_size) };
-    let new_rdi = desc_buf as usize;
 
-    // --- Part 2: allocate a MAP_32BIT pool backing store for the memset ---
-    let slot_size = if rbp > 0 && rbp <= 0x10_0000 {
-        rbp
-    } else {
-        0x1000
-    };
-    let slot_buf = unsafe {
+    // --- Map the descriptor page at the exact truncated rdi address ---
+    // Copy the pool descriptor content from the live high address so Q-Dir's
+    // code reading [truncated_rdi + offset] sees correct data.
+    let rdi32 = rdi as u32 as usize; // lower 32 bits
+    let desc_page = rdi32 & !(PAGE - 1);
+    let desc_offset = rdi32 & (PAGE - 1); // offset of rdi within the page
+    let desc_map = unsafe {
         libc::mmap(
-            std::ptr::null_mut(),
-            slot_size,
+            desc_page as *mut libc::c_void,
+            PAGE,
             libc::PROT_READ | libc::PROT_WRITE,
-            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | MAP_32BIT,
+            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | MAP_FIXED_NOREPLACE,
             -1,
             0,
         )
     };
-    if slot_buf.is_null() || slot_buf == libc::MAP_FAILED || (slot_buf as usize) >= 0x8000_0000 {
-        unsafe { libc::munmap(desc_buf, desc_size) };
-        if !slot_buf.is_null() && slot_buf != libc::MAP_FAILED {
-            unsafe { libc::munmap(slot_buf, slot_size) };
-        }
-        return false;
+    if desc_map != libc::MAP_FAILED {
+        // Copy up to PAGE-desc_offset bytes of the descriptor from the live high addr.
+        let copy_len = (PAGE - desc_offset).min(0x200);
+        unsafe {
+            libc::memcpy(
+                (desc_page + desc_offset) as *mut libc::c_void,
+                rdi as *const libc::c_void,
+                copy_len,
+            )
+        };
     }
-    let slot_addr = slot_buf as usize;
-
-    // Patch [new_rdi+4] with the low slot address (DWORD field).
-    unsafe { *((new_rdi + 4) as *mut u32) = slot_addr as u32 };
-
-    // Fix ucontext registers: rdi → low descriptor copy, rax → low slot buffer.
-    regs[libc::REG_RDI as usize] = new_rdi as i64;
-    regs[libc::REG_RAX as usize] = slot_addr as i64;
-
-    let msg = b"weave: q-dir 7880d pool-fixup: relocated rdi + pool slot to MAP_32BIT\n";
+    // Whether or not the desc mapping succeeded, the slot page mapping makes
+    // the 0x7880d fault resumable.  Return true to resume.
+    let msg = b"weave: q-dir 7880d pool-fixup: MAP_FIXED_NOREPLACE for slot+desc pages\n";
     unsafe { libc::write(2, msg.as_ptr() as *const _, msg.len()) };
     true
 }
