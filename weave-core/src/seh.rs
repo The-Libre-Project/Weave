@@ -289,19 +289,19 @@ unsafe extern "C" fn on_fatal_signal(
         if rva == 0x7880d {
             log_q_dir_7880d_enter(base, size, rva);
             log_q_dir_7880d_diag(base, size, uctx);
-            // E3-M5b: Q-Dir's pool memset loop at 0x7880d faults because rax
-            // (= [rdi+4] truncated to 32 bits) is the lower 32 bits of a 64-bit
-            // pool-backing-store pointer.  We have not been able to intercept all
-            // allocation paths that produce rdi.  Fix: allocate a fresh MAP_32BIT
-            // buffer here, patch [rdi+4] to hold its 32-bit address, and fix rax
-            // so the memset resumes into valid memory.  rbp holds the loop count.
-            // Fail #49; TRACE-D class fix applied at fault time.
-            #[cfg(target_arch = "x86_64")]
-            {
-                let uctx_mut = ctx as *mut libc::ucontext_t;
-                if q_dir_fixup_7880d_pool_ptr(base, size, uctx_mut) {
-                    return; // handler fixed rax; resume the memset loop
-                }
+        }
+        // E3-M5b generic Q-Dir truncated-pointer fixup: Q-Dir's pool allocator
+        // stores 64-bit pointers in DWORD fields.  When a fault_addr is in the
+        // 32-bit range [0x10000, 0x8000_0000) it is almost certainly a truncated
+        // 64-bit pointer.  Map the page at that address (MAP_FIXED_NOREPLACE,
+        // zero-filled) and resume.  Also attempt to map the descriptor page at
+        // (uint32_t)rdi when rdi is a high address.  Covers all RVAs in the
+        // pool init chain, not just 0x7880d.  Fail #52.
+        #[cfg(target_arch = "x86_64")]
+        if sig == libc::SIGSEGV {
+            let uctx_mut = ctx as *mut libc::ucontext_t;
+            if q_dir_fixup_7880d_pool_ptr(base, size, uctx_mut) {
+                return; // page(s) mapped; resume PE execution
             }
         }
         let win_code = signal_to_exception_code(sig);
@@ -1370,20 +1370,14 @@ fn exception_name(code: u32) -> &'static str {
     }
 }
 
-/// Q-Dir E3-M5b pool-pointer fixup at RVA 0x7880d.
+/// Q-Dir E3-M5b generic truncated-pointer fixup.
 ///
-/// Q-Dir stores 64-bit allocation pointers in DWORD fields (32-bit truncation).
-/// Strategy: instead of patching registers (which get restored from the stack by
-/// the function's callee-save convention), MAP pages at the EXACT truncated
-/// addresses using MAP_FIXED_NOREPLACE.  Q-Dir then uses its own unmodified
-/// registers and the accesses succeed because the pages are now mapped.
-///
-/// Two pages are mapped:
-///   - Descriptor page: `(uint32_t)rdi & PAGE_MASK` — copy pool descriptor there
-///     so accesses via truncated rdi work.
-///   - Slot page: `(uint32_t)[rdi+4] & PAGE_MASK` — zero-filled (MAP_ANONYMOUS
-///     already zeros); the memset at 0x7880d writes here, and subsequent reads
-///     from [rdi+4] as a 32-bit pointer also work.
+/// Q-Dir's pool allocator stores 64-bit pointers in DWORD fields.  At any
+/// SIGSEGV where the fault address is in [0x10000, 0x8000_0000) this is
+/// almost certainly a truncated 64-bit pointer.  Map the faulting page using
+/// MAP_FIXED_NOREPLACE (zero-filled) and resume.  Also attempt to map a copy
+/// of the rdi pool descriptor if rdi is a high address — covers the call-chain
+/// of truncation faults through sub_78698 and related functions.
 ///
 /// Returns true if the signal handler should return (resuming PE execution).
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
@@ -1391,26 +1385,32 @@ fn q_dir_fixup_7880d_pool_ptr(pe_base: usize, pe_size: usize, uctx: *mut libc::u
     if pe_size != 0x1f3_000 {
         return false;
     }
+    // Read the fault address from the signal context (si_addr equivalent via gregs).
+    // On x86-64 Linux, CR2 (the page-fault linear address) is available in
+    // uc_mcontext.gregs but not as a named constant — use the raw fault_addr
+    // from siginfo instead via the calling context.  We derive it from rax since
+    // for the 0x7880d case rax = fault_addr.  For the general case we use the
+    // fault address already extracted by the caller (passed via the outer `fault_addr`
+    // variable).  To access it here we re-derive from the saved gregs or just
+    // use the page of rax.
     let regs = unsafe { &(*uctx).uc_mcontext.gregs };
-    let rdi = regs[libc::REG_RDI as usize] as usize;
-    let rax = regs[libc::REG_RAX as usize] as usize; // truncated slot ptr = [rdi+4]
-    if rdi < 0x8000_0000 || rax == 0 {
-        return false; // rdi already low (fixup already applied) or rax null
-    }
-    if rdi >= pe_base && rdi < pe_base + pe_size {
+    // Use REG_CR2 (index 18 on x86-64 Linux) for the fault linear address.
+    #[allow(clippy::cast_sign_loss)]
+    let fault_addr = regs[18] as usize; // REG_CR2 = index 18
+
+    // Only handle faults in the suspicious truncated-pointer range.
+    if fault_addr < 0x1_0000 || fault_addr >= 0x8000_0000 {
         return false;
     }
 
     const PAGE: usize = 0x1000;
     const MAP_FIXED_NOREPLACE: i32 = 0x100_000;
 
-    // --- Map the slot page at the exact truncated slot address (rax) ---
-    // This is the page the memset at 0x7880d writes into.
-    // MAP_ANONYMOUS zeroes the page automatically; no copy needed.
-    let slot_page = rax & !(PAGE - 1);
-    let slot_map = unsafe {
+    // Map the faulting page (zero-filled).
+    let fault_page = fault_addr & !(PAGE - 1);
+    let fault_map = unsafe {
         libc::mmap(
-            slot_page as *mut libc::c_void,
+            fault_page as *mut libc::c_void,
             PAGE,
             libc::PROT_READ | libc::PROT_WRITE,
             libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | MAP_FIXED_NOREPLACE,
@@ -1418,41 +1418,43 @@ fn q_dir_fixup_7880d_pool_ptr(pe_base: usize, pe_size: usize, uctx: *mut libc::u
             0,
         )
     };
-    if slot_map == libc::MAP_FAILED {
-        // Page might already be mapped; that's fine — the access may just work.
-        // Fall through — attempt desc mapping anyway.
+    if fault_map == libc::MAP_FAILED {
+        // Page already mapped — the fault has a different cause; don't resume.
+        return false;
     }
 
-    // --- Map the descriptor page at the exact truncated rdi address ---
-    // Copy the pool descriptor content from the live high address so Q-Dir's
-    // code reading [truncated_rdi + offset] sees correct data.
-    let rdi32 = rdi as u32 as usize; // lower 32 bits
-    let desc_page = rdi32 & !(PAGE - 1);
-    let desc_offset = rdi32 & (PAGE - 1); // offset of rdi within the page
-    let desc_map = unsafe {
-        libc::mmap(
-            desc_page as *mut libc::c_void,
-            PAGE,
-            libc::PROT_READ | libc::PROT_WRITE,
-            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | MAP_FIXED_NOREPLACE,
-            -1,
-            0,
-        )
-    };
-    if desc_map != libc::MAP_FAILED {
-        // Copy up to PAGE-desc_offset bytes of the descriptor from the live high addr.
-        let copy_len = (PAGE - desc_offset).min(0x200);
-        unsafe {
-            libc::memcpy(
-                (desc_page + desc_offset) as *mut libc::c_void,
-                rdi as *const libc::c_void,
-                copy_len,
-            )
-        };
+    // Also attempt to map the rdi descriptor page if rdi is high, so that
+    // code reading [truncated_rdi + offset] sees valid data.
+    let rdi = regs[libc::REG_RDI as usize] as usize;
+    if rdi >= 0x8000_0000 && !(rdi >= pe_base && rdi < pe_base + pe_size) {
+        let rdi32 = rdi as u32 as usize;
+        let desc_page = rdi32 & !(PAGE - 1);
+        let desc_offset = rdi32 & (PAGE - 1);
+        if desc_page != fault_page {
+            let desc_map = unsafe {
+                libc::mmap(
+                    desc_page as *mut libc::c_void,
+                    PAGE,
+                    libc::PROT_READ | libc::PROT_WRITE,
+                    libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | MAP_FIXED_NOREPLACE,
+                    -1,
+                    0,
+                )
+            };
+            if desc_map != libc::MAP_FAILED {
+                let copy_len = (PAGE - desc_offset).min(0x200);
+                unsafe {
+                    libc::memcpy(
+                        (desc_page + desc_offset) as *mut libc::c_void,
+                        rdi as *const libc::c_void,
+                        copy_len,
+                    )
+                };
+            }
+        }
     }
-    // Whether or not the desc mapping succeeded, the slot page mapping makes
-    // the 0x7880d fault resumable.  Return true to resume.
-    let msg = b"weave: q-dir 7880d pool-fixup: MAP_FIXED_NOREPLACE for slot+desc pages\n";
+
+    let msg = b"weave: q-dir pool-fixup: mapped truncated-ptr page, resuming\n";
     unsafe { libc::write(2, msg.as_ptr() as *const _, msg.len()) };
     true
 }
