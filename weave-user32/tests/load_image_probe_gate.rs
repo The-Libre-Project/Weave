@@ -269,11 +269,7 @@ fn load_image_missing_resource_returns_placeholder() {
     // null-deref (RVA 0x7880d). See api.rs load_image_placeholder.
     // SAFETY: ordinal path.
     let h = unsafe { load_icon_w(hmodule, 9999usize) };
-    assert_ne!(
-        h,
-        0,
-        "missing RT_GROUP_ICON must return non-zero placeholder, not 0"
-    );
+    assert_ne!(h, 0, "missing RT_GROUP_ICON must return non-zero placeholder, not 0");
     let entry = image_handles::get(h).expect("placeholder must be backed by image_handles");
     assert_eq!(entry.kind, ImageKind::Icon);
 }
