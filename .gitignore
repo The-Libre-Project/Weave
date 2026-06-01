@@ -69,3 +69,9 @@ docs/*
 !docs/POINTERS.tsv
 !docs/POINTERS.md
 !docs/SHIM-CONTRACT-CASEBOOK.md
+!docs/LOOP-BACKSTOP-CONTRACT.md
+# loop-arcs: track the contract scaffolding; keep per-gate arc logs + .ratify private
+!docs/loop-arcs/
+docs/loop-arcs/*
+!docs/loop-arcs/README.md
+!docs/loop-arcs/TEMPLATE.md
