@@ -260,12 +260,20 @@ fn load_image_family_end_to_end() {
 }
 
 #[test]
-fn load_image_missing_resource_returns_zero() {
+fn load_image_missing_resource_returns_placeholder() {
     let buf = build_image();
     let base = buf.as_ptr() as usize;
     let hmodule = register_with_base("load_image_probe_missing.dll", base);
     // Ordinal 9999 is not present in the fixture.
+    // Wine returns 0; Weave returns a backed placeholder so Q-Dir dlgproc does not
+    // null-deref (RVA 0x7880d). See api.rs load_image_placeholder.
     // SAFETY: ordinal path.
     let h = unsafe { load_icon_w(hmodule, 9999usize) };
-    assert_eq!(h, 0, "expected 0 for missing RT_GROUP_ICON/9999");
+    assert_ne!(
+        h,
+        0,
+        "missing RT_GROUP_ICON must return non-zero placeholder, not 0"
+    );
+    let entry = image_handles::get(h).expect("placeholder must be backed by image_handles");
+    assert_eq!(entry.kind, ImageKind::Icon);
 }
