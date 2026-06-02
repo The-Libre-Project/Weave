@@ -1337,6 +1337,90 @@ fn irfanview_jpeg_open_gate() {
     );
 }
 
+/// `weave i_view64.exe test_image.png` — E3-M7 Tier A PNG image-open gate.
+///
+/// Runs IrfanView 4.73 under Xvfb (DISPLAY=:99) with a baseline 100×100 PNG fixture.
+/// Asserts that both `PHASE: wm_paint_dispatched_first` and `PHASE: stretch_dibits_first`
+/// appear in Weave stderr within 10 seconds — same contract as E3-M6 JPEG gate but
+/// exercises IrfanView's PNG decode plugin before the GDI render path.
+///
+/// Fixture: tests/fixtures/irfanview/i_view64.exe + tests/fixtures/irfanview/test_image.png
+/// Skip condition: either fixture file is absent (CI still passes).
+#[test]
+fn irfanview_png_open_gate() {
+    if !cfg!(target_os = "linux") {
+        eprintln!("skipping execution test — requires Linux");
+        return;
+    }
+
+    let manifest = env!("CARGO_MANIFEST_DIR");
+    let irfan_dir = format!("{manifest}/../tests/fixtures/irfanview");
+    let irfan_exe = format!("{irfan_dir}/i_view64.exe");
+    let png_path = format!("{irfan_dir}/test_image.png");
+
+    if !std::path::Path::new(&irfan_exe).exists() {
+        eprintln!("skipping: i_view64.exe not present in tests/fixtures/irfanview/");
+        eprintln!("  → copy the IrfanView 4.73 64-bit portable exe there to enable this test");
+        return;
+    }
+    if !std::path::Path::new(&png_path).exists() {
+        eprintln!("skipping: test_image.png not present in tests/fixtures/irfanview/");
+        return;
+    }
+
+    let weave_bin = env!("CARGO_BIN_EXE_weave");
+
+    let mut child = std::process::Command::new(weave_bin)
+        .current_dir(&irfan_dir)
+        .arg(&irfan_exe)
+        .arg(&png_path)
+        .env("DISPLAY", ":99")
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|e| panic!("failed to spawn weave on i_view64.exe: {e}"));
+
+    let stderr_pipe = child.stderr.take().expect("stderr was piped");
+    let stderr_shared = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let stderr_writer = std::sync::Arc::clone(&stderr_shared);
+    let drain_thread = std::thread::spawn(move || {
+        use std::io::Read;
+        let mut buf = Vec::new();
+        let mut pipe = stderr_pipe;
+        let _ = pipe.read_to_end(&mut buf);
+        *stderr_writer.lock().unwrap() = buf;
+    });
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err(e) => panic!("wait failed: {e}"),
+        }
+    }
+
+    drain_thread.join().expect("stderr drain thread panicked");
+    let stderr_bytes = stderr_shared.lock().unwrap().clone();
+    let stderr = String::from_utf8_lossy(&stderr_bytes);
+    eprintln!("irfanview_png_open_gate stderr:\n{stderr}");
+
+    assert!(
+        stderr.contains("PHASE: wm_paint_dispatched_first"),
+        "wm_paint_dispatched_first missing — message loop did not run.\nstderr: {stderr}"
+    );
+
+    assert!(
+        stderr.contains("PHASE: stretch_dibits_first"),
+        "stretch_dibits_first missing — StretchDIBits was not called with PNG image data.\nstderr: {stderr}"
+    );
+}
+
 /// `weave SumatraPDF.exe test.pdf` — SumatraPDF PDF viewer; E3-M4 Tier A render gate.
 ///
 /// Runs SumatraPDF.exe with a minimal single-page PDF via CLI, on Xvfb (DISPLAY=:99).
