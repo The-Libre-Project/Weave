@@ -7097,10 +7097,6 @@ pub extern "win64" fn get_tick_count_64() -> u64 {
 pub unsafe extern "win64" fn query_performance_counter(lp_performance_count: *mut u64) -> i32 {
     static QPC_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = QPC_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    // Log at call #0 and every 1,000,000 calls — detects QPC-based spin-wait loops.
-    if n == 0 || n.is_multiple_of(1_000_000) {
-        eprintln!("weave/QueryPerformanceCounter: call #{n}");
-    }
     let mut ts = libc::timespec {
         tv_sec: 0,
         tv_nsec: 0,
@@ -7110,6 +7106,19 @@ pub unsafe extern "win64" fn query_performance_counter(lp_performance_count: *mu
         if !lp_performance_count.is_null() {
             *lp_performance_count = ts.tv_sec as u64 * 1_000_000_000 + ts.tv_nsec as u64;
         }
+    }
+    // First 4 calls: always log value (E3-M4b diagnostic). Thereafter: every 1M calls.
+    if n < 4 {
+        eprintln!(
+            "weave/QueryPerformanceCounter: call #{n} counter={}",
+            if lp_performance_count.is_null() {
+                0u64
+            } else {
+                unsafe { *lp_performance_count }
+            }
+        );
+    } else if n.is_multiple_of(1_000_000) {
+        eprintln!("weave/QueryPerformanceCounter: call #{n}");
     }
     1 // TRUE
 }
@@ -7122,10 +7131,16 @@ pub unsafe extern "win64" fn query_performance_counter(lp_performance_count: *mu
 // SharedUserData->QpcFrequency which Wine sets to 10_000_000 (10 MHz, 100-ns ticks);
 // Weave uses 1_000_000_000 (1 GHz) to match CLOCK_MONOTONIC nanosecond resolution.
 pub unsafe extern "win64" fn query_performance_frequency(lp_frequency: *mut u64) -> i32 {
+    static QPF_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = QPF_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    const FREQ: u64 = 1_000_000_000;
     unsafe {
         if !lp_frequency.is_null() {
-            *lp_frequency = 1_000_000_000; // nanosecond resolution
+            *lp_frequency = FREQ;
         }
+    }
+    if n < 4 {
+        eprintln!("weave/QueryPerformanceFrequency: call #{n} freq={FREQ}");
     }
     1 // TRUE
 }
