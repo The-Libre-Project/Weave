@@ -1395,8 +1395,8 @@ pub extern "win64" fn set_stretch_blt_mode(hdc: usize, mode: i32) -> i32 {
 
 /// StretchDIBits: copy a source rectangle from a DIB to a destination DC with scaling.
 ///
-/// First-pass scope: 32-bit BI_RGB, DIB_RGB_COLORS (iUsage=0), SRCCOPY + simple ROPs.
-/// 8/16/24-bit depths, BI_BITFIELDS, and DIB_PAL_COLORS deferred — return 0 with a
+/// Scope: 8/24/32-bit BI_RGB, DIB_RGB_COLORS (iUsage=0), SRCCOPY + simple ROPs.
+/// 16-bit depths, BI_BITFIELDS, and DIB_PAL_COLORS deferred — return 0 with a
 /// one-time diagnostic. Non-source ROPs lie TRUE (same policy as StretchBlt/BitBlt).
 ///
 /// Returns: nDestHeight (number of destination scan lines written) on success, 0 on error.
@@ -1465,13 +1465,19 @@ pub unsafe extern "win64" fn stretch_di_bits(
         return 0;
     }
 
-    if bi_bit_count != 32 && bi_bit_count != 24 {
-        static UNSUPPORTED_BPP: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-        if UNSUPPORTED_BPP.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 4 {
-            eprintln!("weave/gdi32: StretchDIBits bpp={bi_bit_count} unsupported (24/32-bit only)");
+    let src_px = match bi_bit_count {
+        32 | 24 | 8 => bi_bit_count as usize / 8,
+        _ => {
+            static UNSUPPORTED_BPP: std::sync::atomic::AtomicU32 =
+                std::sync::atomic::AtomicU32::new(0);
+            if UNSUPPORTED_BPP.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 4 {
+                eprintln!(
+                    "weave/gdi32: StretchDIBits bpp={bi_bit_count} unsupported (8/24/32-bit only)"
+                );
+            }
+            return 0;
         }
-        return 0;
-    }
+    };
 
     let dib_w = bi_width.unsigned_abs() as usize;
     let dib_h = bi_height.unsigned_abs() as usize;
@@ -1480,10 +1486,26 @@ pub unsafe extern "win64" fn stretch_di_bits(
         return 0;
     }
 
+    // 8-bit BI_RGB: palette RGBQUADs follow the 40-byte BITMAPINFOHEADER (biClrUsed entries).
+    // Wine ref: dlls/win32u/dib.c — color table immediately after header for DIB_RGB_COLORS.
+    let palette: Option<&[u8]> = if bi_bit_count == 8 {
+        let bi_clr_used = unsafe { *((lpbmi + 32) as *const u32) };
+        let num_colors = if bi_clr_used == 0 {
+            256usize
+        } else {
+            bi_clr_used as usize
+        }
+        .min(256);
+        Some(unsafe {
+            std::slice::from_raw_parts((lpbmi + 40) as *const u8, num_colors.saturating_mul(4))
+        })
+    } else {
+        None
+    };
+
     // Stride: ((|biWidth| × biBitCount + 31) / 32) × 4
     // Wine ref: dlls/win32u/dib.c::get_dib_stride
     let stride = ((dib_w as u64 * bi_bit_count as u64).div_ceil(32) * 4) as usize;
-    let src_px = bi_bit_count as usize / 8; // bytes per source pixel (3 or 4)
     let total_bytes = stride.saturating_mul(dib_h);
     let dib_data = unsafe { std::slice::from_raw_parts(lp_bits, total_bytes) };
 
@@ -1544,12 +1566,24 @@ pub unsafe extern "win64" fn stretch_di_bits(
             if src_off + src_px <= dib_data.len() && dst_off + 4 <= scratch.len() {
                 if src_px == 4 {
                     scratch[dst_off..dst_off + 4].copy_from_slice(&dib_data[src_off..src_off + 4]);
-                } else {
+                } else if src_px == 3 {
                     // 24-bit BGR → BGRA (alpha=0xFF)
                     scratch[dst_off] = dib_data[src_off];
                     scratch[dst_off + 1] = dib_data[src_off + 1];
                     scratch[dst_off + 2] = dib_data[src_off + 2];
                     scratch[dst_off + 3] = 0xFF;
+                } else {
+                    // 8-bit indexed → palette RGBQUAD → BGRA
+                    let idx = dib_data[src_off] as usize;
+                    if let Some(pal) = palette {
+                        let pal_off = idx.saturating_mul(4);
+                        if pal_off + 2 < pal.len() {
+                            scratch[dst_off] = pal[pal_off];
+                            scratch[dst_off + 1] = pal[pal_off + 1];
+                            scratch[dst_off + 2] = pal[pal_off + 2];
+                            scratch[dst_off + 3] = 0xFF;
+                        }
+                    }
                 }
             }
         }
