@@ -50,7 +50,7 @@
 
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::sync::{
-    atomic::{AtomicBool, AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
     OnceLock,
 };
 
@@ -120,6 +120,143 @@ static D3D9_DRAW_COUNT: AtomicU64 = AtomicU64::new(0);
 static D3D9_CLEAR_COUNT: AtomicU64 = AtomicU64::new(0);
 static D3D9_UPLOAD_COUNT: AtomicU64 = AtomicU64::new(0);
 static D3D9_BEGIN_RENDERING_LOGGED: AtomicBool = AtomicBool::new(false);
+static D3D9_SURFACE_XCB: AtomicU32 = AtomicU32::new(0);
+static D3D9_BACKBUFFER_DUMP: OnceLock<bool> = OnceLock::new();
+
+fn d3d9_backbuffer_dump_enabled() -> bool {
+    *D3D9_BACKBUFFER_DUMP.get_or_init(|| {
+        std::env::var("WEAVE_D3D9_BACKBUFFER_DUMP")
+            .map(|v| v == "1")
+            .unwrap_or(false)
+    })
+}
+
+/// Sample pixels from the presentation XCB window (same threshold/grid as gate sampler).
+fn d3d9_xcb_sample_surface(label: &str, present_seq: u64) {
+    let window = D3D9_SURFACE_XCB.load(Ordering::Relaxed);
+    if window == 0 {
+        eprintln!(
+            "weave/d3d9-falsif {label} present=#{present_seq} t={}ms SKIP no-surface-xcb",
+            d3d9_trace_ms()
+        );
+        return;
+    }
+    let conn = match xcb_connection() {
+        Some(c) => c,
+        None => {
+            eprintln!(
+                "weave/d3d9-falsif {label} present=#{present_seq} t={}ms SKIP no-xcb-conn",
+                d3d9_trace_ms()
+            );
+            return;
+        }
+    };
+    let lib = unsafe {
+        let h = libc::dlopen(b"libxcb.so.1\0".as_ptr() as _, libc::RTLD_LAZY);
+        if h.is_null() {
+            libc::dlopen(b"libxcb.so\0".as_ptr() as _, libc::RTLD_LAZY)
+        } else {
+            h
+        }
+    };
+    if lib.is_null() {
+        eprintln!(
+            "weave/d3d9-falsif {label} present=#{present_seq} t={}ms SKIP dlopen-xcb",
+            d3d9_trace_ms()
+        );
+        return;
+    }
+    type XcbGetImageCookie = u32;
+    type XcbGetImage =
+        unsafe extern "C" fn(*mut c_void, u8, u32, i16, i16, u16, u16, u32) -> XcbGetImageCookie;
+    type XcbGetImageReply =
+        unsafe extern "C" fn(*mut c_void, XcbGetImageCookie, *mut *mut c_void) -> *mut c_void;
+    type XcbGetImageData = unsafe extern "C" fn(*const c_void) -> *const u8;
+    type XcbFree = unsafe extern "C" fn(*mut c_void);
+    let get_image: XcbGetImage = unsafe {
+        std::mem::transmute(libc::dlsym(lib, b"xcb_get_image\0".as_ptr() as _))
+    };
+    let get_reply: XcbGetImageReply = unsafe {
+        std::mem::transmute(libc::dlsym(lib, b"xcb_get_image_reply\0".as_ptr() as _))
+    };
+    let get_data: XcbGetImageData = unsafe {
+        std::mem::transmute(libc::dlsym(lib, b"xcb_get_image_data\0".as_ptr() as _))
+    };
+    let xcb_free: XcbFree =
+        unsafe { std::mem::transmute(libc::dlsym(lib, b"free\0".as_ptr() as _)) };
+    if get_image as usize == 0
+        || get_reply as usize == 0
+        || get_data as usize == 0
+        || xcb_free as usize == 0
+    {
+        eprintln!(
+            "weave/d3d9-falsif {label} present=#{present_seq} t={}ms SKIP xcb-syms",
+            d3d9_trace_ms()
+        );
+        return;
+    }
+    const XCB_IMAGE_FORMAT_Z_PIXMAP: u8 = 2;
+    const PLANE_MASK: u32 = 0x00FF_FFFF;
+    const THRESHOLD: u32 = 0x0014_1414;
+    let width: u16 = 1280;
+    let height: u16 = 720;
+    let cookie = unsafe {
+        get_image(
+            conn,
+            XCB_IMAGE_FORMAT_Z_PIXMAP,
+            window,
+            0,
+            0,
+            width,
+            height,
+            PLANE_MASK,
+        )
+    };
+    let reply = unsafe { get_reply(conn, cookie, std::ptr::null_mut()) };
+    if reply.is_null() {
+        eprintln!(
+            "weave/d3d9-falsif {label} present=#{present_seq} t={}ms xcb_win={window:#x} FAIL get_image_reply=null",
+            d3d9_trace_ms()
+        );
+        return;
+    }
+    let data = unsafe { get_data(reply) };
+    let stride = width as usize * 4;
+    let mut sampled = 0u32;
+    let mut bright = 0u32;
+    let mut min_px = u32::MAX;
+    let mut max_px = 0u32;
+    let mut yi = 0u16;
+    while yi < height {
+        let mut xi = 0u16;
+        while xi < width {
+            let idx = yi as usize * stride + xi as usize * 4;
+            let b = unsafe { *data.add(idx) } as u32;
+            let g = unsafe { *data.add(idx + 1) } as u32;
+            let r = unsafe { *data.add(idx + 2) } as u32;
+            let px = (r << 16) | (g << 8) | b;
+            sampled += 1;
+            if px < min_px {
+                min_px = px;
+            }
+            if px > max_px {
+                max_px = px;
+            }
+            if px > THRESHOLD {
+                bright += 1;
+            }
+            xi = xi.saturating_add(16);
+        }
+        yi = yi.saturating_add(16);
+    }
+    unsafe { xcb_free(reply) };
+    let (_, _, draws, _, _) = d3d9_trace_counts();
+    eprintln!(
+        "weave/d3d9-falsif {label} present=#{present_seq} t={}ms xcb_win={window:#x} \
+         sampled={sampled} bright={bright} min_px={min_px:#010x} max_px={max_px:#010x} draws={draws}",
+        d3d9_trace_ms()
+    );
+}
 
 fn d3d9_trace_enabled() -> bool {
     *D3D9_TRACE_ENABLED.get_or_init(|| {
@@ -812,7 +949,7 @@ pub unsafe extern "win64" fn vk_queue_present_khr(
     queue: VkQueue,
     p_present_info: *const c_void,
 ) -> VkResult {
-    let seq = if d3d9_trace_enabled() {
+    let seq = if d3d9_trace_enabled() || d3d9_backbuffer_dump_enabled() {
         Some(D3D9_PRESENT_COUNT.fetch_add(1, Ordering::Relaxed) + 1)
     } else {
         None
@@ -827,6 +964,15 @@ pub unsafe extern "win64" fn vk_queue_present_khr(
         "weave-vulkan: vk_queue_present_khr ENTER queue={:p} info={p_present_info:p}",
         queue as *const ()
     );
+    let dump = d3d9_backbuffer_dump_enabled();
+    let t_ms = d3d9_trace_ms();
+    let dump_this = dump
+        && seq.is_some_and(|s| s <= 8 || (15_000..=25_000).contains(&t_ms));
+    if dump_this {
+        if let Some(s) = seq {
+            d3d9_xcb_sample_surface("PRE-PRESENT", s);
+        }
+    }
     let f = real_fn(stored_instance(), "vkQueuePresentKHR");
     if f.is_null() {
         return unsafe { std::mem::zeroed() };
@@ -834,6 +980,11 @@ pub unsafe extern "win64" fn vk_queue_present_khr(
     let f: unsafe extern "C" fn(VkQueue, *const c_void) -> VkResult =
         unsafe { std::mem::transmute(f) };
     let r = unsafe { f(queue, p_present_info) };
+    if dump_this {
+        if let Some(s) = seq {
+            d3d9_xcb_sample_surface("POST-PRESENT", s);
+        }
+    }
     if let Some(seq) = seq {
         let (submits, presents, draws, clears, uploads) = d3d9_trace_counts();
         d3d9_trace!(
@@ -2151,6 +2302,9 @@ pub unsafe extern "win64" fn vk_create_win32_surface_khr(
 
     let xcb_win = weave_user32::window::xcb_id(info.hwnd);
     eprintln!("weave-vulkan: vk_create_win32_surface_khr: xcb_id={xcb_win}");
+    if xcb_win != 0 {
+        D3D9_SURFACE_XCB.store(xcb_win as u32, Ordering::Relaxed);
+    }
     if xcb_win == 0 {
         eprintln!("weave-vulkan: vk_create_win32_surface_khr: hwnd not registered, returning FEATURE_NOT_PRESENT");
         return VK_ERROR_FEATURE_NOT_PRESENT;
