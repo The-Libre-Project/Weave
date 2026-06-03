@@ -1773,8 +1773,149 @@ struct PixelSample {
     bright: u32,
     min: u64,
     max: u64,
-    /// X11 root window XID used for XGetImage (display :99).
+    /// X11 window XID sampled (root or SDL_app).
     root_xid: u64,
+}
+
+/// Parse the latest `CreateWindow class="SDL_app"` line from weave stderr.
+#[cfg(target_os = "linux")]
+fn parse_sdl_app_window_from_stderr(stderr: &str) -> Option<(u64, u32, u32)> {
+    let mut last = None;
+    for line in stderr.lines() {
+        if !line.contains("CreateWindow") || !line.contains("SDL_app") || !line.contains("xcb=") {
+            continue;
+        }
+        let Some(xcb_hex) = line.split("xcb=").nth(1).and_then(|s| s.split_whitespace().next())
+        else {
+            continue;
+        };
+        let Some(xcb_id) = u64::from_str_radix(xcb_hex.trim_start_matches("0x"), 16).ok() else {
+            continue;
+        };
+        let Some(size) = line.split("size=").nth(1).and_then(|s| s.split_whitespace().next())
+        else {
+            continue;
+        };
+        let Some((w, h)) = size.split_once('x') else {
+            continue;
+        };
+        let (Ok(w), Ok(h)) = (w.parse::<u32>(), h.parse::<u32>()) else {
+            continue;
+        };
+        last = Some((xcb_id, w, h));
+    }
+    last
+}
+
+/// Sample a specific X11 window on display `:99` (SDL_app drawable).
+#[cfg(target_os = "linux")]
+fn sample_x11_window_pixels_detailed(window_xid: u64, width: u32, height: u32) -> Option<PixelSample> {
+    let script = r#"
+import ctypes, sys
+try:
+    window = int(sys.argv[1])
+    w = int(sys.argv[2])
+    h = int(sys.argv[3])
+    step = 16
+    x = ctypes.cdll.LoadLibrary("libX11.so.6")
+    x.XOpenDisplay.restype  = ctypes.c_void_p
+    x.XGetImage.restype     = ctypes.c_void_p
+    x.XGetPixel.restype     = ctypes.c_ulong
+    dpy = x.XOpenDisplay(b":99")
+    if not dpy: sys.exit(42)
+    img = x.XGetImage(dpy, window, 0, 0, w, h, 0xFFFFFF, 2)
+    if not img:
+        x.XCloseDisplay(dpy)
+        sys.exit(43)
+    threshold = 0x141414
+    sampled = bright = 0
+    min_px = None
+    max_px = 0
+    for xi in range(0, w, step):
+        for yi in range(0, h, step):
+            px = int(x.XGetPixel(img, xi, yi))
+            sampled += 1
+            if min_px is None or px < min_px: min_px = px
+            if px > max_px: max_px = px
+            if px > threshold: bright += 1
+    x.XDestroyImage(img)
+    x.XCloseDisplay(dpy)
+    print(f"found={1 if bright else 0} sampled={sampled} bright={bright} min={min_px or 0} max={max_px} root_xid={window}")
+except Exception:
+    import traceback; traceback.print_exc()
+    sys.exit(44)
+"#;
+    let out = std::process::Command::new("python3")
+        .arg("-c")
+        .arg(script)
+        .arg(window_xid.to_string())
+        .arg(width.to_string())
+        .arg(height.to_string())
+        .output()
+        .ok()?;
+    parse_pixel_sample_python_output(&out, window_xid)
+}
+
+#[cfg(target_os = "linux")]
+fn parse_pixel_sample_python_output(
+    out: &std::process::Output,
+    sampled_xid: u64,
+) -> Option<PixelSample> {
+    match out.status.code() {
+        Some(42) | Some(43) | Some(44) => {
+            eprintln!(
+                "gate2/pixel-sampler: python3 exit {:?} stderr={}",
+                out.status.code(),
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+            None
+        }
+        _ if !out.status.success() => None,
+        _ => {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let mut sample = PixelSample {
+                found: false,
+                sampled: 0,
+                bright: 0,
+                min: 0,
+                max: 0,
+                root_xid: sampled_xid,
+            };
+            for field in stdout.split_whitespace() {
+                if let Some((key, value)) = field.split_once('=') {
+                    match key {
+                        "found" => sample.found = value == "1",
+                        "sampled" => sample.sampled = value.parse().ok()?,
+                        "bright" => sample.bright = value.parse().ok()?,
+                        "min" => sample.min = value.parse().ok()?,
+                        "max" => sample.max = value.parse().ok()?,
+                        "root_xid" => sample.root_xid = value.parse().ok()?,
+                        _ => {}
+                    }
+                }
+            }
+            eprintln!(
+                "pixel-sampler [diag]: sampling window XID={:#x} on display :99",
+                sample.root_xid
+            );
+            Some(sample)
+        }
+    }
+}
+
+/// Prefer SDL_app window pixels; fall back to full-screen root sample.
+#[cfg(target_os = "linux")]
+fn sample_nxengine_d3d9_pixels(stderr: &str) -> Option<PixelSample> {
+    if let Some((xid, w, h)) = parse_sdl_app_window_from_stderr(stderr) {
+        eprintln!("nxengine_d3d9_gate [diag]: sampling SDL_app xcb={xid:#x} size={w}x{h}");
+        if let Some(sample) = sample_x11_window_pixels_detailed(xid, w, h) {
+            return Some(sample);
+        }
+        eprintln!("nxengine_d3d9_gate [diag]: SDL_app XGetImage failed — falling back to root");
+    } else {
+        eprintln!("nxengine_d3d9_gate [diag]: SDL_app xcb not found in stderr — falling back to root");
+    }
+    sample_display_pixels_99_detailed()
 }
 
 /// Sample the X11 display `:99` for non-trivial (non-black) pixels.
@@ -1838,35 +1979,7 @@ except Exception:
             None
         }
         _ if !out.status.success() => None,
-        _ => {
-            let stdout = String::from_utf8_lossy(&out.stdout);
-            let mut sample = PixelSample {
-                found: false,
-                sampled: 0,
-                bright: 0,
-                min: 0,
-                max: 0,
-                root_xid: 0,
-            };
-            for field in stdout.split_whitespace() {
-                if let Some((key, value)) = field.split_once('=') {
-                    match key {
-                        "found" => sample.found = value == "1",
-                        "sampled" => sample.sampled = value.parse().ok()?,
-                        "bright" => sample.bright = value.parse().ok()?,
-                        "min" => sample.min = value.parse().ok()?,
-                        "max" => sample.max = value.parse().ok()?,
-                        "root_xid" => sample.root_xid = value.parse().ok()?,
-                        _ => {}
-                    }
-                }
-            }
-            eprintln!(
-                "pixel-sampler [diag]: sampling root XID={:#x} on display :99",
-                sample.root_xid
-            );
-            Some(sample)
-        }
+        _ => parse_pixel_sample_python_output(&out, 0),
     }
 }
 
@@ -5111,7 +5224,9 @@ fn nxengine_d3d9_gate() {
                     && next_pixel_poll.is_some_and(|t| now >= t)
                 {
                     let sample_elapsed = start.elapsed();
-                    pixel_sample = sample_display_pixels_99_detailed();
+                    let stderr_buf = stderr_shared.lock().unwrap();
+                    let stderr_so_far = String::from_utf8_lossy(&stderr_buf);
+                    pixel_sample = sample_nxengine_d3d9_pixels(&stderr_so_far);
                     pixel_result = pixel_sample.as_ref().map(|sample| sample.found);
                     eprintln!(
                         "nxengine_d3d9_gate: pixel_check post-first-present → {:?} detail={:?} t={sample_elapsed:.1?}",
@@ -5127,9 +5242,9 @@ fn nxengine_d3d9_gate() {
                             }
                             Some(s) => {
                                 eprintln!(
-                                    "nxengine_d3d9_gate [diag]: XGetImage succeeded, window=1280x720 \
+                                    "nxengine_d3d9_gate [diag]: XGetImage succeeded, xid={:#x} \
                                      sampled={} above_threshold={} min_px={:#010x} max_px={:#010x} t={sample_elapsed:.1?}",
-                                    s.sampled, s.bright, s.min, s.max
+                                    s.root_xid, s.sampled, s.bright, s.min, s.max
                                 );
                                 eprintln!(
                                     "nxengine_d3d9_gate [diag]: {} — all {} pixels are at or below black threshold",
