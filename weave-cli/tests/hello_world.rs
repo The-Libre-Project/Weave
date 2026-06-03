@@ -2593,10 +2593,7 @@ fn nxengine_gate1_smoke() {
                         first_blit_seen = true;
                         first_blit_at = Some(now);
                         next_pixel_poll = Some(now);
-                        eprintln!(
-                            "nxengine_gate1_smoke: first_blit at {:?}",
-                            start.elapsed()
-                        );
+                        eprintln!("nxengine_gate1_smoke: first_blit at {:?}", start.elapsed());
                     }
                 }
                 if pixel_result != Some(true)
