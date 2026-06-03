@@ -179,8 +179,8 @@ fn d3d9_dump_vulkan_present_target(device: VkDevice, p_present_info: *const c_vo
             );
             return;
         }
-        let p_swapchains = (base.add(40) as *const VkSwapchainKHR).read();
-        let p_indices = (base.add(48) as *const u32).read();
+        let p_swapchains = (base.add(40) as *const *const VkSwapchainKHR).read();
+        let p_indices = (base.add(48) as *const *const u32).read();
         if p_swapchains.is_null() || p_indices.is_null() {
             eprintln!(
                 "weave/d3d9-falsif PRE-VULKAN present=#{present_seq} t={}ms SKIP null swapchains/indices",
