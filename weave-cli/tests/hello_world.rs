@@ -4970,7 +4970,7 @@ fn testsprite2_d3d9_gate() {
 /// workaround. Proves the SDL2→DXVK→Vulkan path works for a real game binary.
 ///
 /// Tier A assertions:
-///   A1: sample_display_pixels_99() returns Some(true) at 20s (non-black pixels via D3D9)
+///   A1: sample_display_pixels_99() returns Some(true) after first vkQueuePresentKHR (non-black pixels via D3D9)
 ///
 /// Skipped gracefully if nx.exe is absent from fixtures.
 #[test]
@@ -5046,14 +5046,21 @@ fn nxengine_d3d9_gate() {
         .spawn()
         .unwrap_or_else(|e| panic!("failed to spawn weave on nx.exe: {e}"));
 
-    // Drain stderr concurrently — DXVK/lavapipe output is voluminous.
+    // Drain stderr concurrently — poll for first Present before pixel sample (re-aim verdict 1).
     let stderr_pipe = child.stderr.take().expect("stderr was piped");
+    let stderr_shared = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let stderr_writer = std::sync::Arc::clone(&stderr_shared);
     let stderr_handle = std::thread::spawn(move || {
         use std::io::Read;
-        let mut buf = String::new();
         let mut r = stderr_pipe;
-        let _ = r.read_to_string(&mut buf);
-        buf
+        let mut chunk = [0u8; 4096];
+        loop {
+            match r.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => stderr_writer.lock().unwrap().extend_from_slice(&chunk[..n]),
+                Err(_) => break,
+            }
+        }
     });
 
     // Drain stdout concurrently — NXEngine logs Pixtone and engine errors to stdout.
@@ -5067,13 +5074,14 @@ fn nxengine_d3d9_gate() {
         buf
     });
 
-    // Mesa/lavapipe Vulkan device creation takes ~15-20s on CI; sample after 20s.
+    // Re-aim (frame-reset verdict 1): sample only after first Present — fixed 20s wall-clock
+    // sampled pre-render Xvfb (max_px=33 flake). Wait for vkQueuePresentKHR#1 RETURN in stderr.
     // deadline at 60s — nx.exe runs indefinitely once in game loop, kill at deadline.
-    let pixel_check_at = start + std::time::Duration::from_secs(20);
     let deadline = start + std::time::Duration::from_secs(60);
     let mut pixel_result: Option<bool> = None;
     let mut pixel_sample: Option<PixelSample> = None;
     let mut killed_by_deadline = false;
+    let mut first_present_seen = false;
 
     loop {
         let now = std::time::Instant::now();
@@ -5082,16 +5090,25 @@ fn nxengine_d3d9_gate() {
                 break;
             }
             None => {
-                if pixel_result.is_none() && now >= pixel_check_at {
+                if !first_present_seen {
+                    let partial = String::from_utf8_lossy(stderr_shared.lock().unwrap().as_slice());
+                    if partial.contains("vkQueuePresentKHR#1 RETURN") {
+                        first_present_seen = true;
+                        eprintln!(
+                            "nxengine_d3d9_gate: first_present at {:?}",
+                            start.elapsed()
+                        );
+                    }
+                }
+                if pixel_result.is_none() && first_present_seen {
                     let sample_elapsed = start.elapsed();
                     pixel_sample = sample_display_pixels_99_detailed();
                     pixel_result = pixel_sample.as_ref().map(|sample| sample.found);
                     eprintln!(
-                        "nxengine_d3d9_gate: pixel_check at 20s → {:?} detail={:?}",
+                        "nxengine_d3d9_gate: pixel_check post-first-present → {:?} detail={:?} t={sample_elapsed:.1?}",
                         pixel_result, pixel_sample
                     );
                     if pixel_result == Some(false) {
-                        // Diagnostics: distinguish truly-black framebuffer from sampler failure.
                         match &pixel_sample {
                             None => {
                                 eprintln!(
@@ -5125,7 +5142,8 @@ fn nxengine_d3d9_gate() {
     }
 
     let elapsed = start.elapsed();
-    let stderr = stderr_handle.join().unwrap_or_default();
+    stderr_handle.join().expect("stderr drain thread panicked");
+    let stderr = String::from_utf8_lossy(&stderr_shared.lock().unwrap()).into_owned();
     let stdout = stdout_handle.join().unwrap_or_default();
 
     eprintln!("nxengine_d3d9_gate elapsed: {elapsed:.1?}");
@@ -5134,13 +5152,18 @@ fn nxengine_d3d9_gate() {
     eprintln!("--- nxengine STDOUT BEGIN ---\n{stdout}\n--- nxengine STDOUT END ---");
     eprintln!("--- nxengine STDERR BEGIN ---\n{stderr}\n--- nxengine STDERR END ---");
 
-    // A1: non-black pixels at 20s — SDL2 D3D9 renderer reached and DXVK rendered.
+    // A1: non-black pixels after first Present — SDL2 D3D9 renderer reached and DXVK rendered.
+    assert!(
+        first_present_seen,
+        "nxengine_d3d9_gate A1 FAIL: vkQueuePresentKHR#1 never seen within {elapsed:.1?} \
+— D3D9 present path not reached.\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
     assert!(
         matches!(pixel_result, Some(true)),
-        "nxengine_d3d9_gate A1 FAIL: screen black at 20s — D3D9 render loop not reached \
+        "nxengine_d3d9_gate A1 FAIL: screen black post-first-present — D3D9 render loop not reached \
 (pixel_result={pixel_result:?}, pixel_sample={pixel_sample:?}, elapsed {elapsed:.1?}).\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
-    eprintln!("nxengine_d3d9_gate A1: non-black pixels at 20s ✓");
+    eprintln!("nxengine_d3d9_gate A1: non-black pixels post-first-present ✓");
 
     eprintln!("nxengine_d3d9_gate: all gates passed");
 
@@ -5151,7 +5174,7 @@ fn nxengine_d3d9_gate() {
     cap.record(
         CapabilityClass::Launches,
         CapabilityOutcome::pass(
-            "A1: PE loaded, SDL2 D3D9 renderer reached, non-black pixels at 20s",
+            "A1: PE loaded, SDL2 D3D9 renderer reached, non-black pixels post-first-present",
         ),
     );
     cap.record(
