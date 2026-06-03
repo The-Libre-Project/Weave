@@ -2510,10 +2510,10 @@ fn sdl2_audio_gate1_smoke() {
 /// Downloads handled in CI (Download NXEngine-evo step). Skipped gracefully
 /// when binary is absent (local dev / non-CI).
 ///
-/// This is a diagnostic / exploratory gate — it logs everything and only asserts
-/// the absolute minimum: PE loads without IAT crash. All other results are logged
-/// for analysis. The pixel check is warn-only. This gate intentionally does NOT
-/// fail CI — it is the base for iterative M2 game work.
+/// Tier A assertions:
+///   A1: PE loads (PHASE: loaded_pe / weave: loaded)
+///   A2: SDL2 CreateWindow (weave/user32: CreateWindow in stderr)
+///   A3: sample_display_pixels_99() returns Some(true) after first GDI BitBlt (software renderer)
 ///
 /// CWD is set to tests/fixtures/nxengine/ so nx.exe finds its data directory.
 #[test]
@@ -2552,10 +2552,31 @@ fn nxengine_gate1_smoke() {
         .spawn()
         .unwrap_or_else(|e| panic!("failed to spawn weave on nx.exe: {e}"));
 
-    let pixel_check_at = start + std::time::Duration::from_secs(5);
+    // Drain stderr concurrently — poll for first GDI BitBlt before pixel sample (re-aim:
+    // fixed 5s wall-clock sampled pre-render Xvfb and flaked on CI load).
+    const FIRST_BLIT_MARKER: &str = "weave/gdi32: BitBlt";
+    let stderr_pipe = child.stderr.take().expect("stderr was piped");
+    let stderr_shared = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let stderr_writer = std::sync::Arc::clone(&stderr_shared);
+    let stderr_handle = std::thread::spawn(move || {
+        use std::io::Read;
+        let mut r = stderr_pipe;
+        let mut chunk = [0u8; 4096];
+        loop {
+            match r.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => stderr_writer.lock().unwrap().extend_from_slice(&chunk[..n]),
+                Err(_) => break,
+            }
+        }
+    });
+
     let deadline = start + std::time::Duration::from_secs(20);
     let mut pixel_result: Option<bool> = None;
     let mut exited = false;
+    let mut first_blit_seen = false;
+    let mut first_blit_at: Option<std::time::Instant> = None;
+    let mut next_pixel_poll = None::<std::time::Instant>;
 
     loop {
         let now = std::time::Instant::now();
@@ -2565,9 +2586,32 @@ fn nxengine_gate1_smoke() {
                 break;
             }
             None => {
-                if pixel_result.is_none() && now >= pixel_check_at {
+                if !first_blit_seen {
+                    let stderr_buf = stderr_shared.lock().unwrap();
+                    let partial = String::from_utf8_lossy(&stderr_buf);
+                    if partial.contains(FIRST_BLIT_MARKER) {
+                        first_blit_seen = true;
+                        first_blit_at = Some(now);
+                        next_pixel_poll = Some(now);
+                        eprintln!(
+                            "nxengine_gate1_smoke: first_blit at {:?}",
+                            start.elapsed()
+                        );
+                    }
+                }
+                if pixel_result != Some(true)
+                    && first_blit_seen
+                    && next_pixel_poll.is_some_and(|t| now >= t)
+                {
                     pixel_result = sample_display_pixels_99();
-                    println!("gate2: nxengine_pixel_check → {:?}", pixel_result);
+                    eprintln!(
+                        "nxengine_gate1_smoke: pixel_check post-first-blit → {:?} t={:?}",
+                        pixel_result,
+                        start.elapsed()
+                    );
+                    if pixel_result != Some(true) {
+                        next_pixel_poll = Some(now + std::time::Duration::from_secs(2));
+                    }
                 }
                 if now >= deadline {
                     let _ = child.kill();
@@ -2579,17 +2623,17 @@ fn nxengine_gate1_smoke() {
     }
 
     let elapsed = start.elapsed();
-    let stderr = {
-        use std::io::Read;
-        let mut s = String::new();
-        if let Some(mut p) = child.stderr.take() {
-            let _ = p.read_to_string(&mut s);
-        }
-        s
-    };
+    stderr_handle.join().expect("stderr drain thread panicked");
+    let stderr = String::from_utf8_lossy(&stderr_shared.lock().unwrap()).into_owned();
 
     eprintln!("nxengine elapsed: {elapsed:.1?}");
     eprintln!("nxengine exited_before_deadline: {exited}");
+    if let Some(t) = first_blit_at {
+        eprintln!(
+            "nxengine_gate1_smoke first_blit_elapsed: {:?}",
+            t.duration_since(start)
+        );
+    }
     eprintln!("--- nxengine STDERR BEGIN ---\n{stderr}\n--- nxengine STDERR END ---");
 
     // Only hard gate: PE must load (Weave must not crash on IAT resolution).
@@ -2607,15 +2651,18 @@ fn nxengine_gate1_smoke() {
     );
     eprintln!("gate A2: CreateWindow seen ✓");
 
-    // A3 (hard): non-black pixels at 5s — render loop reached and drawing.
-    // Unblocked by: _Thrd_create (bd498cf), msvcrt._setjmp (990263f), and
-    // transitive DLL load for zlib1.dll (666c8a5). SDL_RENDER_DRIVER=software
-    // bypasses D3D9/OpenGL probing.
+    // A3 (hard): non-black pixels after first GDI BitBlt — software renderer flushed to X11.
+    assert!(
+        first_blit_seen,
+        "nxengine Gate A3 FAIL: {FIRST_BLIT_MARKER} never seen within {elapsed:.1?} \
+         — GDI blit path not reached.\nstderr:\n{stderr}"
+    );
     assert!(
         matches!(pixel_result, Some(true)),
-        "nxengine Gate A3 FAIL: screen black at 5s — render loop not reached (pixel_result={pixel_result:?}, elapsed {elapsed:.1?}).\nstderr:\n{stderr}"
+        "nxengine Gate A3 FAIL: screen black post-first-blit — render loop not reached \
+         (pixel_result={pixel_result:?}, elapsed {elapsed:.1?}).\nstderr:\n{stderr}"
     );
-    eprintln!("gate A3: non-black pixels at 5s ✓");
+    eprintln!("gate A3: non-black pixels post-first-blit ✓");
 
     // --- Capability taxonomy (TASK-META-06) ---
     // NXEngine Gate 1 exercises: launches (PE load + CreateWindow + first
@@ -2629,7 +2676,9 @@ fn nxengine_gate1_smoke() {
     cap.declare(CapabilityClass::Audio);
     cap.record(
         CapabilityClass::Launches,
-        CapabilityOutcome::pass("A1+A2+A3: PE loaded, CreateWindow seen, non-black pixels at 5s"),
+        CapabilityOutcome::pass(
+            "A1+A2+A3: PE loaded, CreateWindow seen, non-black pixels post-first-blit",
+        ),
     );
     cap.record(
         CapabilityClass::Audio,
@@ -6301,7 +6350,7 @@ fn notepad_roundtrip_file_open_probe() {
 ///   2. Spawn NPP under Weave with output.cpp as the argument (NPP opens it).
 ///   3. Drain stderr in a background thread; signal via mpsc when
 ///      `PHASE: wm_paint_dispatched_first` is observed (NPP is in its message loop).
-///   4. Use `xdotool search --sync --name "Notepad++"` to obtain the X11 window ID.
+///   4. Poll `xdotool search --name "Notepad++"` every 200ms up to 5s after paint.
 ///   5. Send Ctrl+s via xdotool key to trigger an in-place save (NPP saves output.cpp
 ///      back to the same path — the file already exists and has content).
 ///   6. Wait 2 s for the save to complete, then send Alt+F4 to close NPP.
@@ -6420,53 +6469,58 @@ fn notepad_roundtrip_headless_save() {
     if paint_seen {
         eprintln!("notepad_roundtrip_headless_save: PHASE: wm_paint_dispatched_first observed — injecting Ctrl+S");
 
-        // Give NPP an extra moment to stabilise its window state after paint.
-        std::thread::sleep(std::time::Duration::from_millis(500));
+        // Poll until the Notepad++ window title is registered (replaces paint+500ms guess).
+        let search_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut window_id: Option<String> = None;
+        while std::time::Instant::now() < search_deadline {
+            match std::process::Command::new("xdotool")
+                .args(["search", "--name", "Notepad++"])
+                .output()
+            {
+                Ok(out) if out.status.success() => {
+                    let ids = String::from_utf8_lossy(&out.stdout);
+                    if let Some(id) = ids.lines().next().map(|s| s.trim().to_string()) {
+                        if !id.is_empty() {
+                            window_id = Some(id);
+                            break;
+                        }
+                    }
+                }
+                Ok(out) => {
+                    eprintln!(
+                        "xdotool search retry: {}",
+                        String::from_utf8_lossy(&out.stderr)
+                    );
+                }
+                Err(e) => {
+                    eprintln!("xdotool search error: {e}");
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
 
-        // Find the NPP window by name.
-        let xdotool_search = std::process::Command::new("xdotool")
-            .args(["search", "--name", "Notepad++"])
+        let window_id = window_id.expect(
+            "notepad_roundtrip_headless_save: xdotool never found Notepad++ window within 5s \
+             after wm_paint — window title not ready or DISPLAY mismatch",
+        );
+
+        eprintln!("notepad_roundtrip_headless_save: window id = {window_id}, sending Ctrl+s");
+        // Focus and send Ctrl+s.
+        let _ = std::process::Command::new("xdotool")
+            .args(["windowfocus", "--sync", &window_id])
+            .output();
+        let _ = std::process::Command::new("xdotool")
+            .args(["key", "--window", &window_id, "ctrl+s"])
             .output();
 
-        let window_id: Option<String> = match xdotool_search {
-            Ok(out) if out.status.success() => {
-                let ids = String::from_utf8_lossy(&out.stdout);
-                ids.lines().next().map(|s| s.trim().to_string())
-            }
-            Ok(out) => {
-                eprintln!(
-                    "xdotool search failed: {}",
-                    String::from_utf8_lossy(&out.stderr)
-                );
-                None
-            }
-            Err(e) => {
-                eprintln!("xdotool search error: {e}");
-                None
-            }
-        };
+        // Wait for WriteFile to complete before closing.
+        std::thread::sleep(std::time::Duration::from_secs(2));
 
-        if let Some(ref wid) = window_id {
-            eprintln!("notepad_roundtrip_headless_save: window id = {wid}, sending Ctrl+s");
-            // Focus and send Ctrl+s.
-            let _ = std::process::Command::new("xdotool")
-                .args(["windowfocus", "--sync", wid])
-                .output();
-            let _ = std::process::Command::new("xdotool")
-                .args(["key", "--window", wid, "ctrl+s"])
-                .output();
-
-            // Wait for WriteFile to complete before closing.
-            std::thread::sleep(std::time::Duration::from_secs(2));
-
-            // Send Alt+F4 to close NPP gracefully.
-            eprintln!("notepad_roundtrip_headless_save: sending Alt+F4 to close NPP");
-            let _ = std::process::Command::new("xdotool")
-                .args(["key", "--window", wid, "alt+F4"])
-                .output();
-        } else {
-            eprintln!("notepad_roundtrip_headless_save: xdotool could not find Notepad++ window — will kill process");
-        }
+        // Send Alt+F4 to close NPP gracefully.
+        eprintln!("notepad_roundtrip_headless_save: sending Alt+F4 to close NPP");
+        let _ = std::process::Command::new("xdotool")
+            .args(["key", "--window", &window_id, "alt+F4"])
+            .output();
     } else {
         eprintln!("notepad_roundtrip_headless_save: timed out waiting for wm_paint — killing NPP");
     }
