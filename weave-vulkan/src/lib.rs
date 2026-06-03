@@ -121,6 +121,9 @@ static D3D9_CLEAR_COUNT: AtomicU64 = AtomicU64::new(0);
 static D3D9_UPLOAD_COUNT: AtomicU64 = AtomicU64::new(0);
 static D3D9_BEGIN_RENDERING_LOGGED: AtomicBool = AtomicBool::new(false);
 static D3D9_SURFACE_XCB: AtomicU32 = AtomicU32::new(0);
+static D3D9_LAST_DEVICE: AtomicU64 = AtomicU64::new(0);
+static D3D9_SWAP_W: AtomicU32 = AtomicU32::new(0);
+static D3D9_SWAP_H: AtomicU32 = AtomicU32::new(0);
 static D3D9_BACKBUFFER_DUMP: OnceLock<bool> = OnceLock::new();
 
 fn d3d9_backbuffer_dump_enabled() -> bool {
@@ -129,6 +132,167 @@ fn d3d9_backbuffer_dump_enabled() -> bool {
             .map(|v| v == "1")
             .unwrap_or(false)
     })
+}
+
+/// Log 16 BGRA bytes at the window center (falsification receipt).
+fn d3d9_log_bytes16(label: &str, present_seq: u64, data: *const u8, width: u16, height: u16) {
+    if data.is_null() || width == 0 || height == 0 {
+        eprintln!(
+            "weave/d3d9-falsif {label} present=#{present_seq} t={}ms bytes16=SKIP null-data",
+            d3d9_trace_ms()
+        );
+        return;
+    }
+    let cx = (width as usize / 2) & !3;
+    let cy = height as usize / 2;
+    let stride = width as usize * 4;
+    let idx = cy * stride + cx;
+    let mut hex = String::with_capacity(48);
+    for i in 0..16 {
+        if i > 0 {
+            hex.push(' ');
+        }
+        hex.push_str(&format!("{:02x}", unsafe { *data.add(idx + i) }));
+    }
+    eprintln!(
+        "weave/d3d9-falsif {label} present=#{present_seq} t={}ms center=({cx},{cy}) bytes16=[{hex}]",
+        d3d9_trace_ms()
+    );
+}
+
+/// Parse `VkPresentInfoKHR` and log swapchain + image index (pre-present Vulkan target).
+fn d3d9_dump_vulkan_present_target(device: VkDevice, p_present_info: *const c_void, present_seq: u64) {
+    if p_present_info.is_null() {
+        eprintln!(
+            "weave/d3d9-falsif PRE-VULKAN present=#{present_seq} t={}ms SKIP null-present-info",
+            d3d9_trace_ms()
+        );
+        return;
+    }
+    let base = p_present_info as *const u8;
+    let (swapchain, image_index) = unsafe {
+        let count = (base.add(32) as *const u32).read();
+        if count == 0 {
+            eprintln!(
+                "weave/d3d9-falsif PRE-VULKAN present=#{present_seq} t={}ms SKIP swapchain_count=0",
+                d3d9_trace_ms()
+            );
+            return;
+        }
+        let p_swapchains = (base.add(40) as *const VkSwapchainKHR).read();
+        let p_indices = (base.add(48) as *const u32).read();
+        if p_swapchains.is_null() || p_indices.is_null() {
+            eprintln!(
+                "weave/d3d9-falsif PRE-VULKAN present=#{present_seq} t={}ms SKIP null swapchains/indices",
+                d3d9_trace_ms()
+            );
+            return;
+        }
+        (*p_swapchains, *p_indices)
+    };
+    let img_w = D3D9_SWAP_W.load(Ordering::Relaxed);
+    let img_h = D3D9_SWAP_H.load(Ordering::Relaxed);
+    eprintln!(
+        "weave/d3d9-falsif PRE-VULKAN present=#{present_seq} t={}ms swapchain=0x{swapchain:x} \
+         imageIndex={image_index} extent={img_w}x{img_h}",
+        d3d9_trace_ms()
+    );
+    if device.is_null() {
+        eprintln!(
+            "weave/d3d9-falsif PRE-VULKAN present=#{present_seq} t={}ms SKIP no-stored-device",
+            d3d9_trace_ms()
+        );
+        return;
+    }
+    let get_images = real_device_fn(device, "vkGetSwapchainImagesKHR");
+    if get_images.is_null() {
+        eprintln!(
+            "weave/d3d9-falsif PRE-VULKAN present=#{present_seq} t={}ms SKIP vkGetSwapchainImagesKHR",
+            d3d9_trace_ms()
+        );
+        return;
+    }
+    let get_images: unsafe extern "C" fn(
+        VkDevice,
+        VkSwapchainKHR,
+        *mut u32,
+        *mut VkImage,
+    ) -> VkResult = unsafe { std::mem::transmute(get_images) };
+    let mut count = 0u32;
+    let r0 = unsafe { get_images(device, swapchain, &mut count, std::ptr::null_mut()) };
+    if count == 0 {
+        eprintln!(
+            "weave/d3d9-falsif PRE-VULKAN present=#{present_seq} t={}ms image_count_query r={r0} count=0",
+            d3d9_trace_ms()
+        );
+        return;
+    }
+    if image_index >= count {
+        eprintln!(
+            "weave/d3d9-falsif PRE-VULKAN present=#{present_seq} t={}ms SKIP imageIndex={image_index} >= count={count}",
+            d3d9_trace_ms()
+        );
+        return;
+    }
+    let mut images = vec![0u64; count as usize];
+    let r1 = unsafe {
+        get_images(
+            device,
+            swapchain,
+            &mut count,
+            images.as_mut_ptr() as *mut VkImage,
+        )
+    };
+    let image = images[image_index as usize];
+    eprintln!(
+        "weave/d3d9-falsif PRE-VULKAN present=#{present_seq} t={}ms VkImage=0x{image:x} getImages r={r1}",
+        d3d9_trace_ms()
+    );
+    let get_layout = real_device_fn(device, "vkGetImageSubresourceLayout");
+    if get_layout.is_null() {
+        return;
+    }
+    #[repr(C)]
+    struct VkImageSubresource {
+        aspect_mask: u32,
+        mip_level: u32,
+        array_layer: u32,
+    }
+    #[repr(C)]
+    struct VkSubresourceLayout {
+        offset: u64,
+        size: u64,
+        row_pitch: u64,
+        array_pitch: u64,
+        depth_pitch: u64,
+    }
+    let sub = VkImageSubresource {
+        aspect_mask: 1, // VK_IMAGE_ASPECT_COLOR_BIT
+        mip_level: 0,
+        array_layer: 0,
+    };
+    let mut layout = VkSubresourceLayout {
+        offset: 0,
+        size: 0,
+        row_pitch: 0,
+        array_pitch: 0,
+        depth_pitch: 0,
+    };
+    let get_layout: unsafe extern "C" fn(
+        VkDevice,
+        VkImage,
+        *const VkImageSubresource,
+        *mut VkSubresourceLayout,
+    ) -> () = unsafe { std::mem::transmute(get_layout) };
+    unsafe { get_layout(device, image, &sub, &mut layout) };
+    eprintln!(
+        "weave/d3d9-falsif PRE-VULKAN present=#{present_seq} t={}ms subresourceLayout \
+         offset={} size={} rowPitch={} (GPU mmap not attempted — use XCB bytes16 for color)",
+        d3d9_trace_ms(),
+        layout.offset,
+        layout.size,
+        layout.row_pitch
+    );
 }
 
 /// Sample pixels from the presentation XCB window (same threshold/grid as gate sampler).
@@ -198,8 +362,12 @@ fn d3d9_xcb_sample_surface(label: &str, present_seq: u64) {
     const XCB_IMAGE_FORMAT_Z_PIXMAP: u8 = 2;
     const PLANE_MASK: u32 = 0x00FF_FFFF;
     const THRESHOLD: u32 = 0x0014_1414;
-    let width: u16 = 1280;
-    let height: u16 = 720;
+    let mut width = D3D9_SWAP_W.load(Ordering::Relaxed) as u16;
+    let mut height = D3D9_SWAP_H.load(Ordering::Relaxed) as u16;
+    if width == 0 || height == 0 {
+        width = 646;
+        height = 509;
+    }
     let cookie = unsafe {
         get_image(
             conn,
@@ -221,6 +389,9 @@ fn d3d9_xcb_sample_surface(label: &str, present_seq: u64) {
         return;
     }
     let data = unsafe { get_data(reply) };
+    if present_seq <= 4 {
+        d3d9_log_bytes16(label, present_seq, data, width, height);
+    }
     let stride = width as usize * 4;
     let mut sampled = 0u32;
     let mut bright = 0u32;
@@ -965,11 +1136,11 @@ pub unsafe extern "win64" fn vk_queue_present_khr(
         queue as *const ()
     );
     let dump = d3d9_backbuffer_dump_enabled();
-    let t_ms = d3d9_trace_ms();
-    let dump_this = dump
-        && seq.is_some_and(|s| s <= 8 || (15_000..=25_000).contains(&t_ms));
+    let dump_this = dump && seq.is_some_and(|s| s <= 4);
     if dump_this {
         if let Some(s) = seq {
+            let device = D3D9_LAST_DEVICE.load(Ordering::Relaxed) as *mut c_void;
+            d3d9_dump_vulkan_present_target(device, p_present_info, s);
             d3d9_xcb_sample_surface("PRE-PRESENT", s);
         }
     }
@@ -1113,15 +1284,20 @@ pub unsafe extern "win64" fn vk_create_swapchain_khr(
     // VkSwapchainCreateInfoKHR field offsets (Vulkan spec, 64-bit):
     //   36: imageFormat (u32), 44: imageExtent.width (u32), 48: imageExtent.height (u32),
     //   88: presentMode (u32)
-    if d3d9_trace_enabled() && !p_info.is_null() {
+    if !p_info.is_null() {
         let base = p_info as *const u8;
         let img_fmt = unsafe { (base.add(36) as *const u32).read() };
         let img_w = unsafe { (base.add(44) as *const u32).read() };
         let img_h = unsafe { (base.add(48) as *const u32).read() };
-        let present_mode = unsafe { (base.add(88) as *const u32).read() };
-        d3d9_trace!(
-            "vkCreateSwapchainKHR fmt={img_fmt} extent={img_w}x{img_h} present_mode={present_mode}"
-        );
+        D3D9_LAST_DEVICE.store(device as u64, Ordering::Relaxed);
+        D3D9_SWAP_W.store(img_w, Ordering::Relaxed);
+        D3D9_SWAP_H.store(img_h, Ordering::Relaxed);
+        if d3d9_trace_enabled() {
+            let present_mode = unsafe { (base.add(88) as *const u32).read() };
+            d3d9_trace!(
+                "vkCreateSwapchainKHR fmt={img_fmt} extent={img_w}x{img_h} present_mode={present_mode}"
+            );
+        }
     }
     let f = real_device_fn(device, "vkCreateSwapchainKHR");
     if f.is_null() {
