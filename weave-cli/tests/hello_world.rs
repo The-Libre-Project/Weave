@@ -5091,7 +5091,8 @@ fn nxengine_d3d9_gate() {
             }
             None => {
                 if !first_present_seen {
-                    let partial = String::from_utf8_lossy(stderr_shared.lock().unwrap().as_slice());
+                    let stderr_buf = stderr_shared.lock().unwrap();
+                    let partial = String::from_utf8_lossy(&stderr_buf);
                     if partial.contains("vkQueuePresentKHR#1 RETURN") {
                         first_present_seen = true;
                         eprintln!(
