@@ -5154,6 +5154,7 @@ fn nxengine_d3d9_gate() {
         .env("SDL_FRAMEBUFFER_ACCELERATION", "0")
         .env("WEAVE_D3D9_TRACE", "1")
         .env("WEAVE_D3D9_BACKBUFFER_DUMP", "1")
+        .env("WEAVE_D3D9_CLEAR_TRACE", "1")
         .stderr(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .spawn()

@@ -120,11 +120,30 @@ static D3D9_DRAW_COUNT: AtomicU64 = AtomicU64::new(0);
 static D3D9_CLEAR_COUNT: AtomicU64 = AtomicU64::new(0);
 static D3D9_UPLOAD_COUNT: AtomicU64 = AtomicU64::new(0);
 static D3D9_BEGIN_RENDERING_LOGGED: AtomicBool = AtomicBool::new(false);
+static D3D9_BEGIN_RENDERING_COUNT: AtomicU64 = AtomicU64::new(0);
+static D3D9_CLEAR_TRACE: OnceLock<bool> = OnceLock::new();
 static D3D9_SURFACE_XCB: AtomicU32 = AtomicU32::new(0);
 static D3D9_LAST_DEVICE: AtomicU64 = AtomicU64::new(0);
 static D3D9_SWAP_W: AtomicU32 = AtomicU32::new(0);
 static D3D9_SWAP_H: AtomicU32 = AtomicU32::new(0);
 static D3D9_BACKBUFFER_DUMP: OnceLock<bool> = OnceLock::new();
+
+fn d3d9_clear_trace_enabled() -> bool {
+    *D3D9_CLEAR_TRACE.get_or_init(|| {
+        std::env::var("WEAVE_D3D9_CLEAR_TRACE")
+            .map(|v| v == "1")
+            .unwrap_or(false)
+    })
+}
+
+fn d3d9_clear_log(msg: impl std::fmt::Display) {
+    eprintln!(
+        "weave/d3d9-clear t={}ms presents={} {}",
+        d3d9_trace_ms(),
+        D3D9_PRESENT_COUNT.load(Ordering::Relaxed),
+        msg
+    );
+}
 
 fn d3d9_backbuffer_dump_enabled() -> bool {
     *D3D9_BACKBUFFER_DUMP.get_or_init(|| {
@@ -1554,12 +1573,13 @@ pub unsafe extern "win64" fn vk_cmd_clear_color_image(
     range_count: u32,
     p_ranges: *const c_void,
 ) {
-    let seq = if d3d9_trace_enabled() {
-        Some(D3D9_CLEAR_COUNT.fetch_add(1, Ordering::Relaxed) + 1)
+    let log_clear = d3d9_trace_enabled() || d3d9_clear_trace_enabled();
+    let seq = if log_clear {
+        D3D9_CLEAR_COUNT.fetch_add(1, Ordering::Relaxed) + 1
     } else {
-        None
+        0
     };
-    if let Some(seq) = seq {
+    if d3d9_trace_enabled() && log_clear {
         // VkClearColorValue is a [f32; 4] / [i32; 4] / [u32; 4] union — read as f32.
         let color_str = if !p_color.is_null() {
             let c = unsafe { std::ptr::read(p_color as *const [f32; 4]) };
@@ -1570,6 +1590,20 @@ pub unsafe extern "win64" fn vk_cmd_clear_color_image(
         d3d9_trace!(
             "vkCmdClearColorImage#{seq} image=0x{image:x} layout={image_layout} ranges={range_count} color={color_str}"
         );
+    }
+    if d3d9_clear_trace_enabled() {
+        let color_str = if !p_color.is_null() {
+            let c = unsafe { std::ptr::read(p_color as *const [f32; 4]) };
+            format!(
+                "color=[{:.3},{:.3},{:.3},{:.3}]",
+                c[0], c[1], c[2], c[3]
+            )
+        } else {
+            "color=null".to_string()
+        };
+        d3d9_clear_log(format!(
+            "ClearColorImage#{seq} image=0x{image:x} layout={image_layout} ranges={range_count} {color_str}"
+        ));
     }
     let f = real_fn(stored_instance(), "vkCmdClearColorImage");
     if f.is_null() {
@@ -1632,12 +1666,13 @@ pub unsafe extern "win64" fn vk_cmd_clear_attachments(
     rect_count: u32,
     p_rects: *const c_void,
 ) {
-    let seq = if d3d9_trace_enabled() {
-        Some(D3D9_CLEAR_COUNT.fetch_add(1, Ordering::Relaxed) + 1)
+    let log_clear = d3d9_trace_enabled() || d3d9_clear_trace_enabled();
+    let seq = if log_clear {
+        D3D9_CLEAR_COUNT.fetch_add(1, Ordering::Relaxed) + 1
     } else {
-        None
+        0
     };
-    if let Some(seq) = seq {
+    if d3d9_trace_enabled() && log_clear {
         // VkClearAttachment layout: aspectMask(u32) + colorAttachment(u32) + clearValue([f32;4])
         // Total: 24 bytes per entry. clearValue starts at offset 8.
         let color_str = if !p_attachments.is_null() && attachment_count > 0 {
@@ -1654,6 +1689,32 @@ pub unsafe extern "win64" fn vk_cmd_clear_attachments(
         d3d9_trace!(
             "vkCmdClearAttachments#{seq} attachments={attachment_count} rects={rect_count} {color_str}"
         );
+    }
+    if d3d9_clear_trace_enabled() {
+        let color_str = if !p_attachments.is_null() && attachment_count > 0 {
+            let base = p_attachments as *const u8;
+            let aspect = unsafe { (base as *const u32).read() };
+            let color = unsafe { std::ptr::read(base.add(8) as *const [f32; 4]) };
+            format!(
+                "aspect=0x{aspect:x} color=[{:.3},{:.3},{:.3},{:.3}]",
+                color[0], color[1], color[2], color[3]
+            )
+        } else {
+            "color=null".to_string()
+        };
+        let rect_str = if !p_rects.is_null() && rect_count > 0 {
+            let r = p_rects as *const u8;
+            let x = unsafe { (r as *const i32).read() };
+            let y = unsafe { (r.add(4) as *const i32).read() };
+            let w = unsafe { (r.add(8) as *const u32).read() };
+            let h = unsafe { (r.add(12) as *const u32).read() };
+            format!(" rect[0]={x},{y},{w}x{h}")
+        } else {
+            String::new()
+        };
+        d3d9_clear_log(format!(
+            "ClearAttachments#{seq} attachments={attachment_count} rects={rect_count} {color_str}{rect_str}"
+        ));
     }
     let f = real_fn(stored_instance(), "vkCmdClearAttachments");
     if f.is_null() {
@@ -1751,6 +1812,26 @@ pub unsafe extern "win64" fn vk_cmd_begin_rendering(
             "no-color".to_string()
         };
         d3d9_trace!("vkCmdBeginRendering[first] color_att={color_count} {color_str}");
+    }
+    if d3d9_clear_trace_enabled() && !p_rendering_info.is_null() {
+        let seq = D3D9_BEGIN_RENDERING_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+        let base = p_rendering_info as *const u8;
+        let area_w = unsafe { (base.add(28) as *const u32).read() };
+        let area_h = unsafe { (base.add(32) as *const u32).read() };
+        let color_count = unsafe { (base.add(44) as *const u32).read() };
+        let p_color = unsafe { (base.add(48) as *const *const u8).read() };
+        let detail = if color_count > 0 && !p_color.is_null() {
+            let load_op = unsafe { (p_color.add(44) as *const u32).read() };
+            let store_op = unsafe { (p_color.add(48) as *const u32).read() };
+            let clear = unsafe { std::ptr::read(p_color.add(52) as *const [f32; 4]) };
+            format!(
+                "loadOp={load_op} storeOp={store_op} clear=[{:.3},{:.3},{:.3},{:.3}] area={area_w}x{area_h}",
+                clear[0], clear[1], clear[2], clear[3]
+            )
+        } else {
+            format!("no-color-att area={area_w}x{area_h}")
+        };
+        d3d9_clear_log(format!("BeginRendering#{seq} {detail}"));
     }
     let f = real_fn(stored_instance(), "vkCmdBeginRendering");
     if f.is_null() {
