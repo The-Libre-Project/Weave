@@ -1785,14 +1785,20 @@ fn parse_sdl_app_window_from_stderr(stderr: &str) -> Option<(u64, u32, u32)> {
         if !line.contains("CreateWindow") || !line.contains("SDL_app") || !line.contains("xcb=") {
             continue;
         }
-        let Some(xcb_hex) = line.split("xcb=").nth(1).and_then(|s| s.split_whitespace().next())
+        let Some(xcb_hex) = line
+            .split("xcb=")
+            .nth(1)
+            .and_then(|s| s.split_whitespace().next())
         else {
             continue;
         };
         let Some(xcb_id) = u64::from_str_radix(xcb_hex.trim_start_matches("0x"), 16).ok() else {
             continue;
         };
-        let Some(size) = line.split("size=").nth(1).and_then(|s| s.split_whitespace().next())
+        let Some(size) = line
+            .split("size=")
+            .nth(1)
+            .and_then(|s| s.split_whitespace().next())
         else {
             continue;
         };
@@ -1809,7 +1815,11 @@ fn parse_sdl_app_window_from_stderr(stderr: &str) -> Option<(u64, u32, u32)> {
 
 /// Sample a specific X11 window on display `:99` (SDL_app drawable).
 #[cfg(target_os = "linux")]
-fn sample_x11_window_pixels_detailed(window_xid: u64, width: u32, height: u32) -> Option<PixelSample> {
+fn sample_x11_window_pixels_detailed(
+    window_xid: u64,
+    width: u32,
+    height: u32,
+) -> Option<PixelSample> {
     let script = r#"
 import ctypes, sys
 try:
@@ -1913,7 +1923,9 @@ fn sample_nxengine_d3d9_pixels(stderr: &str) -> Option<PixelSample> {
         }
         eprintln!("nxengine_d3d9_gate [diag]: SDL_app XGetImage failed — falling back to root");
     } else {
-        eprintln!("nxengine_d3d9_gate [diag]: SDL_app xcb not found in stderr — falling back to root");
+        eprintln!(
+            "nxengine_d3d9_gate [diag]: SDL_app xcb not found in stderr — falling back to root"
+        );
     }
     sample_display_pixels_99_detailed()
 }
@@ -5214,10 +5226,7 @@ fn nxengine_d3d9_gate() {
                         first_present_at = Some(now);
                         // First present frame is often a clear/black; poll every 2s until deadline.
                         next_pixel_poll = Some(now + std::time::Duration::from_secs(2));
-                        eprintln!(
-                            "nxengine_d3d9_gate: first_present at {:?}",
-                            start.elapsed()
-                        );
+                        eprintln!("nxengine_d3d9_gate: first_present at {:?}", start.elapsed());
                     }
                 }
                 if pixel_result != Some(true)

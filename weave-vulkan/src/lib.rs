@@ -180,7 +180,11 @@ fn d3d9_log_bytes16(label: &str, present_seq: u64, data: *const u8, width: u16, 
 }
 
 /// Parse `VkPresentInfoKHR` and log swapchain + image index (pre-present Vulkan target).
-fn d3d9_dump_vulkan_present_target(device: VkDevice, p_present_info: *const c_void, present_seq: u64) {
+fn d3d9_dump_vulkan_present_target(
+    device: VkDevice,
+    p_present_info: *const c_void,
+    present_seq: u64,
+) {
     if p_present_info.is_null() {
         eprintln!(
             "weave/d3d9-falsif PRE-VULKAN present=#{present_seq} t={}ms SKIP null-present-info",
@@ -356,15 +360,12 @@ fn d3d9_xcb_sample_surface(label: &str, present_seq: u64) {
         unsafe extern "C" fn(*mut c_void, XcbGetImageCookie, *mut *mut c_void) -> *mut c_void;
     type XcbGetImageData = unsafe extern "C" fn(*const c_void) -> *const u8;
     type XcbFree = unsafe extern "C" fn(*mut c_void);
-    let get_image: XcbGetImage = unsafe {
-        std::mem::transmute(libc::dlsym(lib, b"xcb_get_image\0".as_ptr() as _))
-    };
-    let get_reply: XcbGetImageReply = unsafe {
-        std::mem::transmute(libc::dlsym(lib, b"xcb_get_image_reply\0".as_ptr() as _))
-    };
-    let get_data: XcbGetImageData = unsafe {
-        std::mem::transmute(libc::dlsym(lib, b"xcb_get_image_data\0".as_ptr() as _))
-    };
+    let get_image: XcbGetImage =
+        unsafe { std::mem::transmute(libc::dlsym(lib, b"xcb_get_image\0".as_ptr() as _)) };
+    let get_reply: XcbGetImageReply =
+        unsafe { std::mem::transmute(libc::dlsym(lib, b"xcb_get_image_reply\0".as_ptr() as _)) };
+    let get_data: XcbGetImageData =
+        unsafe { std::mem::transmute(libc::dlsym(lib, b"xcb_get_image_data\0".as_ptr() as _)) };
     let xcb_free: XcbFree =
         unsafe { std::mem::transmute(libc::dlsym(lib, b"free\0".as_ptr() as _)) };
     if get_image as usize == 0
@@ -1594,10 +1595,7 @@ pub unsafe extern "win64" fn vk_cmd_clear_color_image(
     if d3d9_clear_trace_enabled() {
         let color_str = if !p_color.is_null() {
             let c = unsafe { std::ptr::read(p_color as *const [f32; 4]) };
-            format!(
-                "color=[{:.3},{:.3},{:.3},{:.3}]",
-                c[0], c[1], c[2], c[3]
-            )
+            format!("color=[{:.3},{:.3},{:.3},{:.3}]", c[0], c[1], c[2], c[3])
         } else {
             "color=null".to_string()
         };
