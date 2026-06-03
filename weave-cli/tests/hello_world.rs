@@ -5082,6 +5082,8 @@ fn nxengine_d3d9_gate() {
     let mut pixel_sample: Option<PixelSample> = None;
     let mut killed_by_deadline = false;
     let mut first_present_seen = false;
+    let mut first_present_at: Option<std::time::Instant> = None;
+    let mut next_pixel_poll = None::<std::time::Instant>;
 
     loop {
         let now = std::time::Instant::now();
@@ -5095,13 +5097,19 @@ fn nxengine_d3d9_gate() {
                     let partial = String::from_utf8_lossy(&stderr_buf);
                     if partial.contains("vkQueuePresentKHR#1 RETURN") {
                         first_present_seen = true;
+                        first_present_at = Some(now);
+                        // First present frame is often a clear/black; poll every 2s until deadline.
+                        next_pixel_poll = Some(now + std::time::Duration::from_secs(2));
                         eprintln!(
                             "nxengine_d3d9_gate: first_present at {:?}",
                             start.elapsed()
                         );
                     }
                 }
-                if pixel_result.is_none() && first_present_seen {
+                if pixel_result != Some(true)
+                    && first_present_seen
+                    && next_pixel_poll.is_some_and(|t| now >= t)
+                {
                     let sample_elapsed = start.elapsed();
                     pixel_sample = sample_display_pixels_99_detailed();
                     pixel_result = pixel_sample.as_ref().map(|sample| sample.found);
@@ -5109,7 +5117,7 @@ fn nxengine_d3d9_gate() {
                         "nxengine_d3d9_gate: pixel_check post-first-present → {:?} detail={:?} t={sample_elapsed:.1?}",
                         pixel_result, pixel_sample
                     );
-                    if pixel_result == Some(false) {
+                    if pixel_result != Some(true) {
                         match &pixel_sample {
                             None => {
                                 eprintln!(
@@ -5130,6 +5138,7 @@ fn nxengine_d3d9_gate() {
                                 );
                             }
                         }
+                        next_pixel_poll = Some(now + std::time::Duration::from_secs(2));
                     }
                 }
                 if now >= deadline {
@@ -5149,6 +5158,12 @@ fn nxengine_d3d9_gate() {
 
     eprintln!("nxengine_d3d9_gate elapsed: {elapsed:.1?}");
     eprintln!("nxengine_d3d9_gate killed_by_deadline: {killed_by_deadline}");
+    if let Some(t) = first_present_at {
+        eprintln!(
+            "nxengine_d3d9_gate first_present_elapsed: {:?}",
+            t.duration_since(start)
+        );
+    }
     eprintln!("nxengine_d3d9_gate pixel_sample: {pixel_sample:?}");
     eprintln!("--- nxengine STDOUT BEGIN ---\n{stdout}\n--- nxengine STDOUT END ---");
     eprintln!("--- nxengine STDERR BEGIN ---\n{stderr}\n--- nxengine STDERR END ---");
