@@ -363,13 +363,12 @@ fn seven_zip_fm_m8_window_gate() {
 
 /// `weave 7zFM.exe` — 7-Zip GUI; M8 A2 pixel-render gate.
 ///
-/// Runs 7zFM.exe under Xvfb (DISPLAY=:99) and asserts that the Xvfb screen
-/// contains non-black pixels at the 3-second mark, proving that the Win32 GDI
-/// paint path reaches the X11 back-end and draws at least one window frame.
+/// Runs 7zFM.exe under Xvfb (DISPLAY=:99) and asserts non-black pixels after the
+/// first paint-path marker in stderr (`weave/gdi32: BitBlt` or `weave/user32: WM_PAINT`),
+/// proving the Win32 GDI paint path reaches the X11 back-end.
 ///
 /// Tier A assertions:
-/// - `sample_display_pixels_99()` returns `Some(true)` at 3 s (A2: non-black
-///   pixels observed on Xvfb display :99)
+/// - `sample_display_pixels_99()` returns `Some(true)` after first paint marker (A2)
 ///
 /// Capability taxonomy: Launches (render path confirmed)
 #[test]
@@ -405,10 +404,32 @@ fn seven_zip_fm_m8_render_gate() {
         .spawn()
         .unwrap_or_else(|e| panic!("failed to spawn weave on 7zFM.exe: {e}"));
 
-    let pixel_check_at = start + std::time::Duration::from_secs(3);
+    // Drain stderr concurrently — sample Xvfb only after first paint marker (re-aim:
+    // fixed 3s wall-clock sampled pre-render on slow CI).
+    const FIRST_BLIT_MARKER: &str = "weave/gdi32: BitBlt";
+    const FIRST_WM_PAINT_MARKER: &str = "weave/user32: WM_PAINT";
+    let stderr_pipe = child.stderr.take().expect("stderr was piped");
+    let stderr_shared = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let stderr_writer = std::sync::Arc::clone(&stderr_shared);
+    let stderr_handle = std::thread::spawn(move || {
+        use std::io::Read;
+        let mut r = stderr_pipe;
+        let mut chunk = [0u8; 4096];
+        loop {
+            match r.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => stderr_writer.lock().unwrap().extend_from_slice(&chunk[..n]),
+                Err(_) => break,
+            }
+        }
+    });
+
     let deadline = start + std::time::Duration::from_secs(15);
     let mut pixel_result: Option<bool> = None;
     let mut exited = false;
+    let mut first_paint_seen = false;
+    let mut first_paint_at: Option<std::time::Instant> = None;
+    let mut next_pixel_poll = None::<std::time::Instant>;
 
     loop {
         let now = std::time::Instant::now();
@@ -418,9 +439,34 @@ fn seven_zip_fm_m8_render_gate() {
                 break;
             }
             None => {
-                if pixel_result.is_none() && now >= pixel_check_at {
+                if !first_paint_seen {
+                    let stderr_buf = stderr_shared.lock().unwrap();
+                    let partial = String::from_utf8_lossy(&stderr_buf);
+                    if partial.contains(FIRST_BLIT_MARKER)
+                        || partial.contains(FIRST_WM_PAINT_MARKER)
+                    {
+                        first_paint_seen = true;
+                        first_paint_at = Some(now);
+                        next_pixel_poll = Some(now);
+                        eprintln!(
+                            "seven_zip_fm_m8_render_gate: first_paint at {:?}",
+                            start.elapsed()
+                        );
+                    }
+                }
+                if pixel_result != Some(true)
+                    && first_paint_seen
+                    && next_pixel_poll.is_some_and(|t| now >= t)
+                {
                     pixel_result = sample_display_pixels_99();
-                    println!("gate A2: 7zFM pixel_check → {:?}", pixel_result);
+                    eprintln!(
+                        "seven_zip_fm_m8_render_gate: pixel_check post-first-paint → {:?} t={:?}",
+                        pixel_result,
+                        start.elapsed()
+                    );
+                    if pixel_result != Some(true) {
+                        next_pixel_poll = Some(now + std::time::Duration::from_secs(2));
+                    }
                 }
                 if now >= deadline {
                     let _ = child.kill();
@@ -432,36 +478,43 @@ fn seven_zip_fm_m8_render_gate() {
     }
 
     let elapsed = start.elapsed();
-    let stderr = {
-        use std::io::Read;
-        let mut s = String::new();
-        if let Some(mut p) = child.stderr.take() {
-            let _ = p.read_to_string(&mut s);
-        }
-        s
-    };
+    stderr_handle.join().expect("stderr drain thread panicked");
+    let stderr = String::from_utf8_lossy(&stderr_shared.lock().unwrap()).into_owned();
 
     eprintln!("7zFM render-gate elapsed: {elapsed:.1?}");
     eprintln!("7zFM render-gate exited_before_deadline: {exited}");
+    if let Some(t) = first_paint_at {
+        eprintln!(
+            "seven_zip_fm_m8_render_gate first_paint_elapsed: {:?}",
+            t.duration_since(start)
+        );
+    }
     eprintln!(
         "--- 7zFM render-gate STDERR BEGIN ---\n{stderr}\n--- 7zFM render-gate STDERR END ---"
     );
 
-    // A2: non-black pixels at 3 s — render path confirmed.
+    // A2: non-black pixels after first paint marker — render path confirmed.
+    assert!(
+        first_paint_seen,
+        "seven_zip_fm_m8_render_gate FAIL: neither {FIRST_BLIT_MARKER} nor \
+         {FIRST_WM_PAINT_MARKER} seen within {elapsed:.1?} — paint path not reached.\nstderr:\n{stderr}"
+    );
     assert!(
         matches!(pixel_result, Some(true)),
-        "seven_zip_fm_m8_render_gate FAIL: screen black at 3s — \
+        "seven_zip_fm_m8_render_gate FAIL: screen black post-first-paint — \
          Win32 paint path did not reach X11 back-end \
          (pixel_result={pixel_result:?}, elapsed {elapsed:.1?}).\nstderr:\n{stderr}"
     );
-    eprintln!("gate A2: non-black pixels at 3s ✓");
+    eprintln!("gate A2: non-black pixels post-first-paint ✓");
 
     // --- Capability taxonomy ---
     let mut cap = CapabilityReport::for_app("7zFM.exe");
     cap.declare(CapabilityClass::Launches);
     cap.record(
         CapabilityClass::Launches,
-        CapabilityOutcome::pass("A2: non-black pixels at 3s — Win32 paint path reached X11"),
+        CapabilityOutcome::pass(
+            "A2: non-black pixels post-first-paint — Win32 paint path reached X11",
+        ),
     );
     cap.emit();
 }
