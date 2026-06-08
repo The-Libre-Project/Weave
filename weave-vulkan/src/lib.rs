@@ -127,6 +127,15 @@ static D3D9_LAST_DEVICE: AtomicU64 = AtomicU64::new(0);
 static D3D9_SWAP_W: AtomicU32 = AtomicU32::new(0);
 static D3D9_SWAP_H: AtomicU32 = AtomicU32::new(0);
 static D3D9_BACKBUFFER_DUMP: OnceLock<bool> = OnceLock::new();
+static D3D9_BLIT_TRACE: OnceLock<bool> = OnceLock::new();
+
+fn d3d9_blit_trace_enabled() -> bool {
+    *D3D9_BLIT_TRACE.get_or_init(|| {
+        std::env::var("WEAVE_D3D9_BLIT_TRACE")
+            .map(|v| v == "1")
+            .unwrap_or(false)
+    })
+}
 
 fn d3d9_clear_trace_enabled() -> bool {
     *D3D9_CLEAR_TRACE.get_or_init(|| {
@@ -1506,8 +1515,139 @@ cmd_thunk!(void vk_cmd_copy_buffer, "vkCmdCopyBuffer", (command_buffer, src_buff
 cmd_thunk!(void vk_cmd_copy_buffer2, "vkCmdCopyBuffer2", (command_buffer, p_copy_buffer_info: *const c_void));
 cmd_thunk!(void vk_cmd_copy_image, "vkCmdCopyImage", (command_buffer, src_image: VkImage, src_layout: u32, dst_image: VkImage, dst_layout: u32, region_count: u32, p_regions: *const c_void));
 cmd_thunk!(void vk_cmd_copy_image2, "vkCmdCopyImage2", (command_buffer, p_copy_image_info: *const c_void));
-cmd_thunk!(void vk_cmd_blit_image, "vkCmdBlitImage", (command_buffer, src_image: VkImage, src_layout: u32, dst_image: VkImage, dst_layout: u32, region_count: u32, p_regions: *const c_void, filter: u32));
-cmd_thunk!(void vk_cmd_blit_image2, "vkCmdBlitImage2", (command_buffer, p_blit_image_info: *const c_void));
+pub unsafe extern "win64" fn vk_cmd_blit_image(
+    command_buffer: VkCommandBuffer,
+    src_image: VkImage,
+    src_layout: u32,
+    dst_image: VkImage,
+    dst_layout: u32,
+    region_count: u32,
+    p_regions: *const c_void,
+    filter: u32,
+) {
+    if d3d9_blit_trace_enabled() {
+        let seq = D3D9_PRESENT_COUNT.load(Ordering::Relaxed);
+        // VkImageBlit layout (spec, 64-bit):
+        //   srcSubresource: VkImageSubresourceLayers (4×u32 = 16 bytes)
+        //   srcOffsets[2]:  2×VkOffset3D (2×12 bytes = 24 bytes)
+        //   dstSubresource: VkImageSubresourceLayers (16 bytes)
+        //   dstOffsets[2]:  2×VkOffset3D (24 bytes)
+        // Total stride = 16+24+16+24 = 80 bytes per region.
+        // src extent = srcOffsets[1] - srcOffsets[0]; offsets at byte 16.
+        // dst extent = dstOffsets[1] - dstOffsets[0]; offsets at byte 16+24+16 = 56.
+        if !p_regions.is_null() && region_count > 0 {
+            let base = p_regions as *const u8;
+            let src_x1 = unsafe { (base.add(16) as *const i32).read() };
+            let src_y1 = unsafe { (base.add(20) as *const i32).read() };
+            let src_x2 = unsafe { (base.add(28) as *const i32).read() };
+            let src_y2 = unsafe { (base.add(32) as *const i32).read() };
+            let dst_x1 = unsafe { (base.add(56) as *const i32).read() };
+            let dst_y1 = unsafe { (base.add(60) as *const i32).read() };
+            let dst_x2 = unsafe { (base.add(68) as *const i32).read() };
+            let dst_y2 = unsafe { (base.add(72) as *const i32).read() };
+            let src_w = src_x2 - src_x1;
+            let src_h = src_y2 - src_y1;
+            let dst_w = dst_x2 - dst_x1;
+            let dst_h = dst_y2 - dst_y1;
+            eprintln!(
+                "weave/d3d9-blit vkCmdBlitImage presents={seq} t={}ms \
+                 src=0x{src_image:x} src_layout={src_layout} src_extent={src_w}x{src_h} \
+                 dst=0x{dst_image:x} dst_layout={dst_layout} dst_extent={dst_w}x{dst_h} \
+                 regions={region_count} filter={filter}",
+                d3d9_trace_ms()
+            );
+        } else {
+            eprintln!(
+                "weave/d3d9-blit vkCmdBlitImage presents={seq} t={}ms \
+                 src=0x{src_image:x} dst=0x{dst_image:x} regions={region_count} p_regions=null-or-zero",
+                d3d9_trace_ms()
+            );
+        }
+    }
+    let f = real_fn(stored_instance(), "vkCmdBlitImage");
+    if f.is_null() {
+        return;
+    }
+    let f: unsafe extern "C" fn(
+        VkCommandBuffer,
+        VkImage,
+        u32,
+        VkImage,
+        u32,
+        u32,
+        *const c_void,
+        u32,
+    ) = unsafe { std::mem::transmute(f) };
+    unsafe {
+        f(
+            command_buffer,
+            src_image,
+            src_layout,
+            dst_image,
+            dst_layout,
+            region_count,
+            p_regions,
+            filter,
+        )
+    }
+}
+pub unsafe extern "win64" fn vk_cmd_blit_image2(
+    command_buffer: VkCommandBuffer,
+    p_blit_image_info: *const c_void,
+) {
+    if d3d9_blit_trace_enabled() {
+        let seq = D3D9_PRESENT_COUNT.load(Ordering::Relaxed);
+        // VkBlitImageInfo2 layout (spec, 64-bit):
+        //   0:  sType(u32), 4: pad, 8: pNext(*), 16: srcImage(u64), 24: srcImageLayout(u32),
+        //   28: pad, 32: dstImage(u64), 40: dstImageLayout(u32), 44: regionCount(u32),
+        //   48: pRegions(*)
+        // VkImageBlit2 has the same geometry as VkImageBlit plus a sType+pNext header (16 bytes).
+        // src offsets at byte 16+16=32; dst offsets at byte 16+16+24+16=72.
+        if !p_blit_image_info.is_null() {
+            let base = p_blit_image_info as *const u8;
+            let src_image = unsafe { (base.add(16) as *const u64).read() };
+            let src_layout = unsafe { (base.add(24) as *const u32).read() };
+            let dst_image = unsafe { (base.add(32) as *const u64).read() };
+            let dst_layout = unsafe { (base.add(40) as *const u32).read() };
+            let region_count = unsafe { (base.add(44) as *const u32).read() };
+            let p_regions_ptr = unsafe { (base.add(48) as *const *const u8).read() };
+            let (src_w, src_h, dst_w, dst_h) = if !p_regions_ptr.is_null() && region_count > 0 {
+                // VkImageBlit2: sType(u32)+pad(4)+pNext(*ptr) = 16 bytes header,
+                // then same layout as VkImageBlit: srcSubresource(16)+srcOffsets(24)+dstSubresource(16)+dstOffsets(24)
+                let r = p_regions_ptr;
+                let sx1 = unsafe { (r.add(32) as *const i32).read() };
+                let sy1 = unsafe { (r.add(36) as *const i32).read() };
+                let sx2 = unsafe { (r.add(44) as *const i32).read() };
+                let sy2 = unsafe { (r.add(48) as *const i32).read() };
+                let dx1 = unsafe { (r.add(72) as *const i32).read() };
+                let dy1 = unsafe { (r.add(76) as *const i32).read() };
+                let dx2 = unsafe { (r.add(84) as *const i32).read() };
+                let dy2 = unsafe { (r.add(88) as *const i32).read() };
+                (sx2 - sx1, sy2 - sy1, dx2 - dx1, dy2 - dy1)
+            } else {
+                (0, 0, 0, 0)
+            };
+            eprintln!(
+                "weave/d3d9-blit vkCmdBlitImage2 presents={seq} t={}ms \
+                 src=0x{src_image:x} src_layout={src_layout} src_extent={src_w}x{src_h} \
+                 dst=0x{dst_image:x} dst_layout={dst_layout} dst_extent={dst_w}x{dst_h} \
+                 regions={region_count}",
+                d3d9_trace_ms()
+            );
+        } else {
+            eprintln!(
+                "weave/d3d9-blit vkCmdBlitImage2 presents={seq} t={}ms p_blit_image_info=null",
+                d3d9_trace_ms()
+            );
+        }
+    }
+    let f = real_fn(stored_instance(), "vkCmdBlitImage2");
+    if f.is_null() {
+        return;
+    }
+    let f: unsafe extern "C" fn(VkCommandBuffer, *const c_void) = unsafe { std::mem::transmute(f) };
+    unsafe { f(command_buffer, p_blit_image_info) }
+}
 pub unsafe extern "win64" fn vk_cmd_copy_buffer_to_image(
     command_buffer: VkCommandBuffer,
     src_buffer: VkBuffer,
@@ -1730,8 +1870,111 @@ pub unsafe extern "win64" fn vk_cmd_clear_attachments(
         )
     }
 }
-cmd_thunk!(void vk_cmd_resolve_image, "vkCmdResolveImage", (command_buffer, src_image: VkImage, src_layout: u32, dst_image: VkImage, dst_layout: u32, region_count: u32, p_regions: *const c_void));
-cmd_thunk!(void vk_cmd_resolve_image2, "vkCmdResolveImage2", (command_buffer, p_resolve_image_info: *const c_void));
+pub unsafe extern "win64" fn vk_cmd_resolve_image(
+    command_buffer: VkCommandBuffer,
+    src_image: VkImage,
+    src_layout: u32,
+    dst_image: VkImage,
+    dst_layout: u32,
+    region_count: u32,
+    p_regions: *const c_void,
+) {
+    if d3d9_blit_trace_enabled() {
+        let seq = D3D9_PRESENT_COUNT.load(Ordering::Relaxed);
+        // VkImageResolve layout (spec, 64-bit):
+        //   srcSubresource: VkImageSubresourceLayers (4×u32 = 16 bytes)
+        //   srcOffset:      VkOffset3D (12 bytes)
+        //   dstSubresource: VkImageSubresourceLayers (16 bytes)
+        //   dstOffset:      VkOffset3D (12 bytes)
+        //   extent:         VkExtent3D (12 bytes)
+        // Total stride = 16+12+16+12+12 = 68 bytes.
+        // extent.width at byte 16+12+16+12 = 56; extent.height at 60.
+        if !p_regions.is_null() && region_count > 0 {
+            let base = p_regions as *const u8;
+            let ext_w = unsafe { (base.add(56) as *const u32).read() };
+            let ext_h = unsafe { (base.add(60) as *const u32).read() };
+            eprintln!(
+                "weave/d3d9-blit vkCmdResolveImage presents={seq} t={}ms \
+                 src=0x{src_image:x} src_layout={src_layout} \
+                 dst=0x{dst_image:x} dst_layout={dst_layout} \
+                 resolve_extent={ext_w}x{ext_h} regions={region_count}",
+                d3d9_trace_ms()
+            );
+        } else {
+            eprintln!(
+                "weave/d3d9-blit vkCmdResolveImage presents={seq} t={}ms \
+                 src=0x{src_image:x} dst=0x{dst_image:x} regions={region_count} p_regions=null-or-zero",
+                d3d9_trace_ms()
+            );
+        }
+    }
+    let f = real_fn(stored_instance(), "vkCmdResolveImage");
+    if f.is_null() {
+        return;
+    }
+    let f: unsafe extern "C" fn(VkCommandBuffer, VkImage, u32, VkImage, u32, u32, *const c_void) =
+        unsafe { std::mem::transmute(f) };
+    unsafe {
+        f(
+            command_buffer,
+            src_image,
+            src_layout,
+            dst_image,
+            dst_layout,
+            region_count,
+            p_regions,
+        )
+    }
+}
+pub unsafe extern "win64" fn vk_cmd_resolve_image2(
+    command_buffer: VkCommandBuffer,
+    p_resolve_image_info: *const c_void,
+) {
+    if d3d9_blit_trace_enabled() {
+        let seq = D3D9_PRESENT_COUNT.load(Ordering::Relaxed);
+        // VkResolveImageInfo2 layout (spec, 64-bit):
+        //   0:  sType(u32), 4: pad, 8: pNext(*), 16: srcImage(u64), 24: srcImageLayout(u32),
+        //   28: pad, 32: dstImage(u64), 40: dstImageLayout(u32), 44: regionCount(u32),
+        //   48: pRegions(*)
+        // VkImageResolve2: sType(u32)+pad(4)+pNext(*) = 16-byte header, then same as VkImageResolve.
+        // extent.width at byte 16+56=72; extent.height at 76.
+        if !p_resolve_image_info.is_null() {
+            let base = p_resolve_image_info as *const u8;
+            let src_image = unsafe { (base.add(16) as *const u64).read() };
+            let src_layout = unsafe { (base.add(24) as *const u32).read() };
+            let dst_image = unsafe { (base.add(32) as *const u64).read() };
+            let dst_layout = unsafe { (base.add(40) as *const u32).read() };
+            let region_count = unsafe { (base.add(44) as *const u32).read() };
+            let p_regions_ptr = unsafe { (base.add(48) as *const *const u8).read() };
+            let (ext_w, ext_h) = if !p_regions_ptr.is_null() && region_count > 0 {
+                let r = p_regions_ptr;
+                let w = unsafe { (r.add(72) as *const u32).read() };
+                let h = unsafe { (r.add(76) as *const u32).read() };
+                (w, h)
+            } else {
+                (0, 0)
+            };
+            eprintln!(
+                "weave/d3d9-blit vkCmdResolveImage2 presents={seq} t={}ms \
+                 src=0x{src_image:x} src_layout={src_layout} \
+                 dst=0x{dst_image:x} dst_layout={dst_layout} \
+                 resolve_extent={ext_w}x{ext_h} regions={region_count}",
+                d3d9_trace_ms()
+            );
+        } else {
+            eprintln!(
+                "weave/d3d9-blit vkCmdResolveImage2 presents={seq} t={}ms p_resolve_image_info=null",
+                d3d9_trace_ms()
+            );
+        }
+    }
+    let f = real_fn(stored_instance(), "vkCmdResolveImage2");
+    if f.is_null() {
+        return;
+    }
+    let f: unsafe extern "C" fn(VkCommandBuffer, *const c_void) = unsafe { std::mem::transmute(f) };
+    unsafe { f(command_buffer, p_resolve_image_info) }
+}
 cmd_thunk!(void vk_cmd_set_event, "vkCmdSetEvent", (command_buffer, event: VkEvent, stage_mask: VkPipelineStageFlags));
 cmd_thunk!(void vk_cmd_set_event2, "vkCmdSetEvent2", (command_buffer, event: VkEvent, p_dependency_info: *const c_void));
 cmd_thunk!(void vk_cmd_reset_event, "vkCmdResetEvent", (command_buffer, event: VkEvent, stage_mask: VkPipelineStageFlags));
