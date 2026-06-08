@@ -1514,7 +1514,7 @@ pub unsafe extern "win64" fn vk_cmd_bind_descriptor_sets(
         let t = d3d9_trace_ms();
         D3D9_DESC_LAST_BIND_LAYOUT.store(layout, Ordering::Relaxed);
         for i in 0..descriptor_set_count.min(4) {
-            let set = unsafe { (p_descriptor_sets.add(i as usize) as *const u64).read() };
+            let set = unsafe { p_descriptor_sets.add(i as usize).read() };
             if i == 0 {
                 D3D9_DESC_LAST_BIND_SET.store(set, Ordering::Relaxed);
             }
