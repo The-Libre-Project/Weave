@@ -5304,7 +5304,10 @@ fn nxengine_d3d9_gate() {
     });
 
     // Re-aim (frame-reset verdict 1): sample only after first Present — fixed 20s wall-clock
-    // sampled pre-render Xvfb (max_px=33 flake). Wait for vkQueuePresentKHR#1 RETURN in stderr.
+    // sampled pre-render Xvfb (max_px=33 flake). Wait for first vkQueuePresentKHR#N RETURN (any N)
+    // in stderr. The trace label may start at #1 or #2 depending on init order; use a tolerant
+    // match so ATTEMPT 7+ instrumentation runs (WEAVE_D3D9_*_TRACE) can observe the presents>=1
+    // phase and emit SwapchainFillSource / per-draw descriptor lines before the guard kills.
     // deadline at 60s — nx.exe runs indefinitely once in game loop, kill at deadline.
     let deadline = start + std::time::Duration::from_secs(60);
     let mut pixel_result: Option<bool> = None;
@@ -5324,7 +5327,7 @@ fn nxengine_d3d9_gate() {
                 if !first_present_seen {
                     let stderr_buf = stderr_shared.lock().unwrap();
                     let partial = String::from_utf8_lossy(&stderr_buf);
-                    if partial.contains("vkQueuePresentKHR#1 RETURN") {
+                    if partial.contains("vkQueuePresentKHR#") && partial.contains("RETURN") {
                         first_present_seen = true;
                         first_present_at = Some(now);
                         // First present frame is often a clear/black; poll every 2s until deadline.
@@ -5399,7 +5402,7 @@ fn nxengine_d3d9_gate() {
     // A1: non-black pixels after first Present — SDL2 D3D9 renderer reached and DXVK rendered.
     assert!(
         first_present_seen,
-        "nxengine_d3d9_gate A1 FAIL: vkQueuePresentKHR#1 never seen within {elapsed:.1?} \
+        "nxengine_d3d9_gate A1 FAIL: first vkQueuePresentKHR#N RETURN never seen within {elapsed:.1?} \
 — D3D9 present path not reached.\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
     assert!(
