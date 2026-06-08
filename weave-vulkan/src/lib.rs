@@ -130,6 +130,7 @@ static D3D9_BACKBUFFER_DUMP: OnceLock<bool> = OnceLock::new();
 static D3D9_BLIT_TRACE: OnceLock<bool> = OnceLock::new();
 static D3D9_BARRIER_TRACE: OnceLock<bool> = OnceLock::new();
 static D3D9_DESC_TRACE: OnceLock<bool> = OnceLock::new();
+static D3D9_PRESENT_SOURCE_TRACE: OnceLock<bool> = OnceLock::new();
 static D3D9_DESC_LAST_BIND_SET: AtomicU64 = AtomicU64::new(0);
 static D3D9_DESC_LAST_BIND_LAYOUT: AtomicU64 = AtomicU64::new(0);
 static D3D9_DESC_LAST_UPDATE_IMAGEVIEW: AtomicU64 = AtomicU64::new(0);
@@ -155,6 +156,14 @@ fn d3d9_barrier_trace_enabled() -> bool {
 fn d3d9_desc_trace_enabled() -> bool {
     *D3D9_DESC_TRACE.get_or_init(|| {
         std::env::var("WEAVE_D3D9_DESC_TRACE")
+            .map(|v| v == "1")
+            .unwrap_or(false)
+    })
+}
+
+fn d3d9_present_source_trace_enabled() -> bool {
+    *D3D9_PRESENT_SOURCE_TRACE.get_or_init(|| {
+        std::env::var("WEAVE_D3D9_PRESENT_SOURCE_TRACE")
             .map(|v| v == "1")
             .unwrap_or(false)
     })
@@ -2288,6 +2297,24 @@ pub unsafe extern "win64" fn vk_cmd_begin_rendering(
                 d3d9_trace_ms(),
                 D3D9_PRESENT_COUNT.load(Ordering::Relaxed),
             );
+
+            // Higher-signal correlation for the failing present: when this BeginRendering
+            // is for the swapchain extent (the surface that will be handed to vkQueuePresentKHR),
+            // log it explicitly so we can compare its imageView directly against the RT's.
+            if (d3d9_present_source_trace_enabled() || d3d9_barrier_trace_enabled())
+                && area_w == D3D9_SWAP_W.load(Ordering::Relaxed)
+                && area_h == D3D9_SWAP_H.load(Ordering::Relaxed)
+                && D3D9_PRESENT_COUNT.load(Ordering::Relaxed) >= 1
+            {
+                eprintln!(
+                    "weave/d3d9-present-source t={}ms presents={} SwapchainFillSource imageView=0x{:x} layout={} loadOp={} (attachment for the imageIndex presented next — compare to RT imageView)",
+                    d3d9_trace_ms(),
+                    D3D9_PRESENT_COUNT.load(Ordering::Relaxed),
+                    image_view,
+                    image_layout,
+                    load_op
+                );
+            }
         }
     }
     let f = real_fn(stored_instance(), "vkCmdBeginRendering");
