@@ -10,7 +10,7 @@
 #   make test       — run full test suite in a Linux Docker container
 #   make ci         — build + lint + full test suite (mirrors CI pipeline)
 
-.PHONY: build lint test test-unit ci fixture-wget-probe coverage-gauge
+.PHONY: build lint test test-unit ci fixture-wget-probe coverage-gauge hooks backfill-notes
 
 # ── Build ──────────────────────────────────────────────────────────────────────
 
@@ -57,6 +57,14 @@ fixture-wget-probe:
 
 coverage-gauge:
 	@bash scripts/coverage-gauge.sh
+
+# ── Git hooks (auto git-notes on commit + sync on push) ─────────────────────
+
+hooks:
+	@bash scripts/install-git-hooks.sh
+
+backfill-notes:
+	@bash scripts/backfill-git-notes.sh 30
 
 # ── Full CI mirror ─────────────────────────────────────────────────────────────
 
