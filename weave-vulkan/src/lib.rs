@@ -1587,13 +1587,16 @@ pub unsafe extern "win64" fn vk_cmd_draw(
             "vkCmdDraw#{seq} vertices={vertex_count} instances={instance_count} first_vertex={first_vertex} first_instance={first_instance}"
         );
     }
-    if d3d9_desc_trace_enabled() && vertex_count == 3 {
+    if d3d9_desc_trace_enabled()
+        && (vertex_count == 3 || D3D9_PRESENT_COUNT.load(Ordering::Relaxed) >= 1)
+    {
         eprintln!(
-            "weave/d3d9-desc t={}ms presents={} vkCmdDraw vertices=3 \
+            "weave/d3d9-desc t={}ms presents={} vkCmdDraw vertices={} \
              lastBindSet=0x{:x} lastBindLayout=0x{:x} \
              lastUpdateImageView=0x{:x} lastUpdateSampler=0x{:x} lastUpdateBinding={}",
             d3d9_trace_ms(),
             D3D9_PRESENT_COUNT.load(Ordering::Relaxed),
+            vertex_count,
             D3D9_DESC_LAST_BIND_SET.load(Ordering::Relaxed),
             D3D9_DESC_LAST_BIND_LAYOUT.load(Ordering::Relaxed),
             D3D9_DESC_LAST_UPDATE_IMAGEVIEW.load(Ordering::Relaxed),
