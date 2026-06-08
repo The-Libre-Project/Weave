@@ -128,10 +128,19 @@ static D3D9_SWAP_W: AtomicU32 = AtomicU32::new(0);
 static D3D9_SWAP_H: AtomicU32 = AtomicU32::new(0);
 static D3D9_BACKBUFFER_DUMP: OnceLock<bool> = OnceLock::new();
 static D3D9_BLIT_TRACE: OnceLock<bool> = OnceLock::new();
+static D3D9_BARRIER_TRACE: OnceLock<bool> = OnceLock::new();
 
 fn d3d9_blit_trace_enabled() -> bool {
     *D3D9_BLIT_TRACE.get_or_init(|| {
         std::env::var("WEAVE_D3D9_BLIT_TRACE")
+            .map(|v| v == "1")
+            .unwrap_or(false)
+    })
+}
+
+fn d3d9_barrier_trace_enabled() -> bool {
+    *D3D9_BARRIER_TRACE.get_or_init(|| {
+        std::env::var("WEAVE_D3D9_BARRIER_TRACE")
             .map(|v| v == "1")
             .unwrap_or(false)
     })
@@ -1982,7 +1991,49 @@ cmd_thunk!(void vk_cmd_reset_event2, "vkCmdResetEvent2", (command_buffer, event:
 cmd_thunk!(void vk_cmd_wait_events, "vkCmdWaitEvents", (command_buffer, event_count: u32, p_events: *const VkEvent, src_stage_mask: VkPipelineStageFlags, dst_stage_mask: VkPipelineStageFlags, memory_barrier_count: u32, p_memory_barriers: *const c_void, buffer_barrier_count: u32, p_buffer_barriers: *const c_void, image_barrier_count: u32, p_image_barriers: *const c_void));
 cmd_thunk!(void vk_cmd_wait_events2, "vkCmdWaitEvents2", (command_buffer, event_count: u32, p_events: *const VkEvent, p_dependency_infos: *const c_void));
 cmd_thunk!(void vk_cmd_pipeline_barrier, "vkCmdPipelineBarrier", (command_buffer, src_stage_mask: VkPipelineStageFlags, dst_stage_mask: VkPipelineStageFlags, dependency_flags: u32, memory_barrier_count: u32, p_memory_barriers: *const c_void, buffer_memory_barrier_count: u32, p_buffer_memory_barriers: *const c_void, image_memory_barrier_count: u32, p_image_memory_barriers: *const c_void));
-cmd_thunk!(void vk_cmd_pipeline_barrier2, "vkCmdPipelineBarrier2", (command_buffer, p_dependency_info: *const c_void));
+pub unsafe extern "win64" fn vk_cmd_pipeline_barrier2(
+    command_buffer: VkCommandBuffer,
+    p_dependency_info: *const c_void,
+) {
+    // VkDependencyInfo offsets (spec, 64-bit):
+    //   0: sType(u32), 8: pNext(*), 16: dependencyFlags(u32)
+    //   20: memoryBarrierCount(u32), 24: pMemoryBarriers(*)
+    //   32: bufferMemoryBarrierCount(u32), 40: pBufferMemoryBarriers(*)
+    //   48: imageMemoryBarrierCount(u32), 56: pImageMemoryBarriers(*)
+    // VkImageMemoryBarrier2 offsets (spec, 64-bit):
+    //   0: sType(u32), 8: pNext(*), 16: srcStageMask(u64), 24: srcAccessMask(u64)
+    //   32: dstStageMask(u64), 40: dstAccessMask(u64)
+    //   48: oldLayout(u32), 52: newLayout(u32)
+    //   56: srcQueueFamilyIndex(u32), 60: dstQueueFamilyIndex(u32)
+    //   64: image(u64), 72: subresourceRange(VkImageSubresourceRange=20B)
+    //   total: 96 bytes
+    if d3d9_barrier_trace_enabled() && !p_dependency_info.is_null() {
+        let base = p_dependency_info as *const u8;
+        let img_count = unsafe { (base.add(48) as *const u32).read() };
+        let p_img_barriers = unsafe { (base.add(56) as *const *const u8).read() };
+        if img_count > 0 && !p_img_barriers.is_null() {
+            let presents = D3D9_PRESENT_COUNT.load(Ordering::Relaxed);
+            let t = d3d9_trace_ms();
+            for i in 0..img_count.min(8) {
+                let b = unsafe { p_img_barriers.add(i as usize * 96) };
+                let old_layout = unsafe { (b.add(48) as *const u32).read() };
+                let new_layout = unsafe { (b.add(52) as *const u32).read() };
+                let image = unsafe { (b.add(64) as *const u64).read() };
+                eprintln!(
+                    "weave/d3d9-barrier t={t}ms presents={presents} \
+                     imageBarrier#{i} image=0x{image:x} \
+                     oldLayout={old_layout} newLayout={new_layout}"
+                );
+            }
+        }
+    }
+    let f = real_fn(stored_instance(), "vkCmdPipelineBarrier2");
+    if f.is_null() {
+        return;
+    }
+    let f: unsafe extern "C" fn(VkCommandBuffer, *const c_void) = unsafe { std::mem::transmute(f) };
+    unsafe { f(command_buffer, p_dependency_info) }
+}
 cmd_thunk!(void vk_cmd_begin_query, "vkCmdBeginQuery", (command_buffer, query_pool: VkQueryPool, query: u32, flags: u32));
 cmd_thunk!(void vk_cmd_end_query, "vkCmdEndQuery", (command_buffer, query_pool: VkQueryPool, query: u32));
 cmd_thunk!(void vk_cmd_reset_query_pool, "vkCmdResetQueryPool", (command_buffer, query_pool: VkQueryPool, first_query: u32, query_count: u32));
@@ -2073,6 +2124,29 @@ pub unsafe extern "win64" fn vk_cmd_begin_rendering(
             format!("no-color-att area={area_w}x{area_h}")
         };
         d3d9_clear_log(format!("BeginRendering#{seq} {detail}"));
+    }
+    // VkRenderingAttachmentInfo offsets (spec, 64-bit):
+    //   0: sType(u32), 8: pNext(*), 16: imageView(u64), 24: imageLayout(u32)
+    //   28: resolveMode(u32), 32: resolveImageView(u64), 40: resolveImageLayout(u32)
+    //   44: loadOp(u32), 48: storeOp(u32), 52: clearValue([f32;4])
+    if d3d9_barrier_trace_enabled() && !p_rendering_info.is_null() {
+        let base = p_rendering_info as *const u8;
+        let area_w = unsafe { (base.add(28) as *const u32).read() };
+        let area_h = unsafe { (base.add(32) as *const u32).read() };
+        let color_count = unsafe { (base.add(44) as *const u32).read() };
+        let p_color = unsafe { (base.add(48) as *const *const u8).read() };
+        if color_count > 0 && !p_color.is_null() {
+            let image_view = unsafe { (p_color.add(16) as *const u64).read() };
+            let image_layout = unsafe { (p_color.add(24) as *const u32).read() };
+            let load_op = unsafe { (p_color.add(44) as *const u32).read() };
+            eprintln!(
+                "weave/d3d9-barrier t={}ms presents={} BeginRendering \
+                 area={area_w}x{area_h} colorAtt[0] imageView=0x{image_view:x} \
+                 imageLayout={image_layout} loadOp={load_op}",
+                d3d9_trace_ms(),
+                D3D9_PRESENT_COUNT.load(Ordering::Relaxed),
+            );
+        }
     }
     let f = real_fn(stored_instance(), "vkCmdBeginRendering");
     if f.is_null() {
