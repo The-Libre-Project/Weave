@@ -129,6 +129,12 @@ static D3D9_SWAP_H: AtomicU32 = AtomicU32::new(0);
 static D3D9_BACKBUFFER_DUMP: OnceLock<bool> = OnceLock::new();
 static D3D9_BLIT_TRACE: OnceLock<bool> = OnceLock::new();
 static D3D9_BARRIER_TRACE: OnceLock<bool> = OnceLock::new();
+static D3D9_DESC_TRACE: OnceLock<bool> = OnceLock::new();
+static D3D9_DESC_LAST_BIND_SET: AtomicU64 = AtomicU64::new(0);
+static D3D9_DESC_LAST_BIND_LAYOUT: AtomicU64 = AtomicU64::new(0);
+static D3D9_DESC_LAST_UPDATE_IMAGEVIEW: AtomicU64 = AtomicU64::new(0);
+static D3D9_DESC_LAST_UPDATE_SAMPLER: AtomicU64 = AtomicU64::new(0);
+static D3D9_DESC_LAST_UPDATE_BINDING: AtomicU32 = AtomicU32::new(0);
 
 fn d3d9_blit_trace_enabled() -> bool {
     *D3D9_BLIT_TRACE.get_or_init(|| {
@@ -144,6 +150,49 @@ fn d3d9_barrier_trace_enabled() -> bool {
             .map(|v| v == "1")
             .unwrap_or(false)
     })
+}
+
+fn d3d9_desc_trace_enabled() -> bool {
+    *D3D9_DESC_TRACE.get_or_init(|| {
+        std::env::var("WEAVE_D3D9_DESC_TRACE")
+            .map(|v| v == "1")
+            .unwrap_or(false)
+    })
+}
+
+/// Parse one VkWriteDescriptorSet (64 B, 64-bit) and log image/sampler bindings.
+///
+/// # Safety
+/// `p_write` must point at a valid `VkWriteDescriptorSet` when image info is present.
+unsafe fn d3d9_desc_log_write(p_write: *const u8, write_idx: u32) {
+    if p_write.is_null() {
+        return;
+    }
+    let dst_binding = unsafe { (p_write.add(24) as *const u32).read() };
+    let dst_array = unsafe { (p_write.add(28) as *const u32).read() };
+    let desc_count = unsafe { (p_write.add(32) as *const u32).read() };
+    let desc_type = unsafe { (p_write.add(36) as *const u32).read() };
+    let p_image_info = unsafe { (p_write.add(40) as *const *const u8).read() };
+    if p_image_info.is_null() {
+        return;
+    }
+    let presents = D3D9_PRESENT_COUNT.load(Ordering::Relaxed);
+    let t = d3d9_trace_ms();
+    for j in 0..desc_count.min(4) {
+        let info = unsafe { p_image_info.add(j as usize * 24) };
+        let sampler = unsafe { (info.add(0) as *const u64).read() };
+        let image_view = unsafe { (info.add(8) as *const u64).read() };
+        let layout = unsafe { (info.add(16) as *const u32).read() };
+        D3D9_DESC_LAST_UPDATE_SAMPLER.store(sampler, Ordering::Relaxed);
+        D3D9_DESC_LAST_UPDATE_IMAGEVIEW.store(image_view, Ordering::Relaxed);
+        D3D9_DESC_LAST_UPDATE_BINDING.store(dst_binding, Ordering::Relaxed);
+        eprintln!(
+            "weave/d3d9-desc t={t}ms presents={presents} UpdateDescriptorSets \
+             write#{write_idx} binding={dst_binding} array={} type={desc_type} \
+             sampler=0x{sampler:x} imageView=0x{image_view:x} layout={layout}",
+            dst_array + j,
+        );
+    }
 }
 
 fn d3d9_clear_trace_enabled() -> bool {
@@ -1275,7 +1324,29 @@ dev_thunk!(void vk_destroy_descriptor_pool, "vkDestroyDescriptorPool", (device, 
 dev_thunk!(vk_reset_descriptor_pool, "vkResetDescriptorPool", VkResult, (device, descriptor_pool: VkDescriptorPool, flags: VkDescriptorPoolResetFlags));
 dev_thunk!(vk_allocate_descriptor_sets, "vkAllocateDescriptorSets", VkResult, (device, p_info: *const c_void, p_descriptor_sets: *mut VkDescriptorSet));
 dev_thunk!(vk_free_descriptor_sets, "vkFreeDescriptorSets", VkResult, (device, descriptor_pool: VkDescriptorPool, descriptor_set_count: u32, p_descriptor_sets: *const VkDescriptorSet));
-dev_thunk!(void vk_update_descriptor_sets, "vkUpdateDescriptorSets", (device, write_count: u32, p_writes: *const c_void, copy_count: u32, p_copies: *const c_void));
+/// # Safety
+/// Caller must ensure all pointer arguments are valid.
+pub unsafe extern "win64" fn vk_update_descriptor_sets(
+    device: VkDevice,
+    write_count: u32,
+    p_writes: *const c_void,
+    copy_count: u32,
+    p_copies: *const c_void,
+) {
+    if d3d9_desc_trace_enabled() && write_count > 0 && !p_writes.is_null() {
+        for i in 0..write_count.min(16) {
+            let p_write = unsafe { (p_writes as *const u8).add(i as usize * 64) };
+            unsafe { d3d9_desc_log_write(p_write, i) };
+        }
+    }
+    let f = real_device_fn(device, "vkUpdateDescriptorSets");
+    if f.is_null() {
+        return;
+    }
+    let f: unsafe extern "C" fn(VkDevice, u32, *const c_void, u32, *const c_void) =
+        unsafe { std::mem::transmute(f) };
+    unsafe { f(device, write_count, p_writes, copy_count, p_copies) }
+}
 dev_thunk!(vk_create_descriptor_update_template, "vkCreateDescriptorUpdateTemplate", VkResult, (device, p_info: *const c_void, p_allocator: *const c_void, p_descriptor_update_template: *mut VkDescriptorUpdateTemplate));
 dev_thunk!(void vk_destroy_descriptor_update_template, "vkDestroyDescriptorUpdateTemplate", (device, descriptor_update_template: VkDescriptorUpdateTemplate, p_allocator: *const c_void));
 dev_thunk!(void vk_update_descriptor_set_with_template, "vkUpdateDescriptorSetWithTemplate", (device, descriptor_set: VkDescriptorSet, descriptor_update_template: VkDescriptorUpdateTemplate, p_data: *const c_void));
@@ -1426,7 +1497,61 @@ cmd_thunk!(void vk_cmd_set_depth_bounds, "vkCmdSetDepthBounds", (command_buffer,
 cmd_thunk!(void vk_cmd_set_stencil_compare_mask, "vkCmdSetStencilCompareMask", (command_buffer, face_mask: VkStencilFaceFlags, compare_mask: u32));
 cmd_thunk!(void vk_cmd_set_stencil_write_mask, "vkCmdSetStencilWriteMask", (command_buffer, face_mask: VkStencilFaceFlags, write_mask: u32));
 cmd_thunk!(void vk_cmd_set_stencil_reference, "vkCmdSetStencilReference", (command_buffer, face_mask: VkStencilFaceFlags, reference: u32));
-cmd_thunk!(void vk_cmd_bind_descriptor_sets, "vkCmdBindDescriptorSets", (command_buffer, pipeline_bind_point: VkPipelineBindPoint, layout: VkPipelineLayout, first_set: u32, descriptor_set_count: u32, p_descriptor_sets: *const VkDescriptorSet, dynamic_offset_count: u32, p_dynamic_offsets: *const u32));
+/// # Safety
+/// Caller must ensure all pointer arguments are valid.
+pub unsafe extern "win64" fn vk_cmd_bind_descriptor_sets(
+    command_buffer: VkCommandBuffer,
+    pipeline_bind_point: VkPipelineBindPoint,
+    layout: VkPipelineLayout,
+    first_set: u32,
+    descriptor_set_count: u32,
+    p_descriptor_sets: *const VkDescriptorSet,
+    dynamic_offset_count: u32,
+    p_dynamic_offsets: *const u32,
+) {
+    if d3d9_desc_trace_enabled() && descriptor_set_count > 0 && !p_descriptor_sets.is_null() {
+        let presents = D3D9_PRESENT_COUNT.load(Ordering::Relaxed);
+        let t = d3d9_trace_ms();
+        D3D9_DESC_LAST_BIND_LAYOUT.store(layout, Ordering::Relaxed);
+        for i in 0..descriptor_set_count.min(4) {
+            let set = unsafe { (p_descriptor_sets.add(i as usize) as *const u64).read() };
+            if i == 0 {
+                D3D9_DESC_LAST_BIND_SET.store(set, Ordering::Relaxed);
+            }
+            eprintln!(
+                "weave/d3d9-desc t={t}ms presents={presents} BindDescriptorSets \
+                 bindPoint={pipeline_bind_point} layout=0x{layout:x} firstSet={first_set} \
+                 set[{i}]=0x{set:x} dynamicOffsets={dynamic_offset_count}"
+            );
+        }
+    }
+    let f = real_fn(stored_instance(), "vkCmdBindDescriptorSets");
+    if f.is_null() {
+        return;
+    }
+    let f: unsafe extern "C" fn(
+        VkCommandBuffer,
+        VkPipelineBindPoint,
+        VkPipelineLayout,
+        u32,
+        u32,
+        *const VkDescriptorSet,
+        u32,
+        *const u32,
+    ) = unsafe { std::mem::transmute(f) };
+    unsafe {
+        f(
+            command_buffer,
+            pipeline_bind_point,
+            layout,
+            first_set,
+            descriptor_set_count,
+            p_descriptor_sets,
+            dynamic_offset_count,
+            p_dynamic_offsets,
+        )
+    }
+}
 cmd_thunk!(void vk_cmd_bind_index_buffer, "vkCmdBindIndexBuffer", (command_buffer, buffer: VkBuffer, offset: VkDeviceSize, index_type: VkIndexType));
 cmd_thunk!(void vk_cmd_bind_index_buffer2_khr, "vkCmdBindIndexBuffer2KHR", (command_buffer, buffer: VkBuffer, offset: VkDeviceSize, size: VkDeviceSize, index_type: VkIndexType));
 cmd_thunk!(void vk_cmd_bind_vertex_buffers, "vkCmdBindVertexBuffers", (command_buffer, first_binding: u32, binding_count: u32, p_buffers: *const VkBuffer, p_offsets: *const VkDeviceSize));
@@ -1460,6 +1585,20 @@ pub unsafe extern "win64" fn vk_cmd_draw(
     if let Some(seq) = seq {
         d3d9_trace!(
             "vkCmdDraw#{seq} vertices={vertex_count} instances={instance_count} first_vertex={first_vertex} first_instance={first_instance}"
+        );
+    }
+    if d3d9_desc_trace_enabled() && vertex_count == 3 {
+        eprintln!(
+            "weave/d3d9-desc t={}ms presents={} vkCmdDraw vertices=3 \
+             lastBindSet=0x{:x} lastBindLayout=0x{:x} \
+             lastUpdateImageView=0x{:x} lastUpdateSampler=0x{:x} lastUpdateBinding={}",
+            d3d9_trace_ms(),
+            D3D9_PRESENT_COUNT.load(Ordering::Relaxed),
+            D3D9_DESC_LAST_BIND_SET.load(Ordering::Relaxed),
+            D3D9_DESC_LAST_BIND_LAYOUT.load(Ordering::Relaxed),
+            D3D9_DESC_LAST_UPDATE_IMAGEVIEW.load(Ordering::Relaxed),
+            D3D9_DESC_LAST_UPDATE_SAMPLER.load(Ordering::Relaxed),
+            D3D9_DESC_LAST_UPDATE_BINDING.load(Ordering::Relaxed),
         );
     }
     let f = real_fn(stored_instance(), "vkCmdDraw");

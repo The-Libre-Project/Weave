@@ -5268,6 +5268,7 @@ fn nxengine_d3d9_gate() {
         .env("WEAVE_D3D9_CLEAR_TRACE", "1")
         .env("WEAVE_D3D9_BLIT_TRACE", "1")
         .env("WEAVE_D3D9_BARRIER_TRACE", "1")
+        .env("WEAVE_D3D9_DESC_TRACE", "1")
         .stderr(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .spawn()
