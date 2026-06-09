@@ -466,9 +466,15 @@ mod tests {
             "GetSaveFileNameW must return TRUE when WEAVE_TEST_SAVE_RESULT is set"
         );
 
-        let end = file_buf.iter().position(|&c| c == 0).unwrap_or(file_buf.len());
+        let end = file_buf
+            .iter()
+            .position(|&c| c == 0)
+            .unwrap_or(file_buf.len());
         let path = String::from_utf16_lossy(&file_buf[..end]);
-        assert!(!path.is_empty(), "lpstrFile must be non-empty after TRUE return");
+        assert!(
+            !path.is_empty(),
+            "lpstrFile must be non-empty after TRUE return"
+        );
         assert_eq!(path, r"C:\Save\Out\image.png");
 
         drop(ext_storage);
