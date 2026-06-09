@@ -982,11 +982,7 @@ mod inner {
     }
 
     fn key_l_param(x11_state: u16, is_press: bool, is_sys: bool) -> isize {
-        let mut low = if is_press {
-            1
-        } else {
-            (1 << 30) | (1 << 31)
-        };
+        let mut low = if is_press { 1 } else { (1 << 30) | (1 << 31) };
         if is_sys {
             low |= 1 << 29; // context code: Alt active (KF_ALTDOWN >> 8 in lParam bit 29)
         }
