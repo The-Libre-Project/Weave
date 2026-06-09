@@ -27,6 +27,9 @@ static PHASE_REGISTER_CLASS: AtomicBool = AtomicBool::new(false);
 static PHASE_CREATE_WINDOW: AtomicBool = AtomicBool::new(false);
 static PHASE_GET_MESSAGE: AtomicBool = AtomicBool::new(false);
 static PHASE_WM_PAINT_DISPATCHED: AtomicBool = AtomicBool::new(false);
+/// WM_PAINT count on the IrfanView main frame (class `IrfanView`) for gate inject timing.
+static IRFANVIEW_MAIN_PAINTS: AtomicU32 = AtomicU32::new(0);
+static TEST_WM_COMMAND_DONE: AtomicBool = AtomicBool::new(false);
 static PHASE_SCI_GETLENGTH: AtomicBool = AtomicBool::new(false);
 // Fires once on first ShowWindow(SW_HIDE) — marks the boundary between startup/render
 // and teardown. Used to order unresolved-stub firings relative to shutdown start.
@@ -947,6 +950,40 @@ pub unsafe extern "win64" fn translate_message(lp_msg: *const Msg) -> i32 {
 ///
 /// Returns the value returned by the window procedure.
 ///
+/// Gate hook: when `WEAVE_TEST_WM_COMMAND` is set, post `WM_COMMAND` to the IrfanView
+/// main frame after the second `WM_PAINT` (image load settled). Command id from the
+/// fixture ACCEL table (Shift+S → 0x481 Save As on i_view64.exe 4.73).
+// Wine ref: dlls/win32u/menu.c::translate_accelerator — on accel match sends
+// SendMessage(hwnd, WM_COMMAND, 0x10000|cmd, 0); same wparam layout used here.
+fn try_test_wm_command_inject(hwnd: usize) {
+    if TEST_WM_COMMAND_DONE.load(Ordering::Relaxed) {
+        return;
+    }
+    let Ok(cmd_str) = std::env::var("WEAVE_TEST_WM_COMMAND") else {
+        return;
+    };
+    let Ok(cmd) = cmd_str.parse::<u32>() else {
+        eprintln!("weave/user32: WEAVE_TEST_WM_COMMAND invalid: {cmd_str}");
+        return;
+    };
+    let is_irfanview = window::with(hwnd, |w| w.class_name == "IrfanView").unwrap_or(false);
+    if !is_irfanview {
+        return;
+    }
+    let paints = IRFANVIEW_MAIN_PAINTS.fetch_add(1, Ordering::Relaxed) + 1;
+    if paints < 2 {
+        return;
+    }
+    if TEST_WM_COMMAND_DONE.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    let w_param = 0x10000_usize | cmd as usize;
+    eprintln!(
+        "weave/user32: WEAVE_TEST_WM_COMMAND inject WM_COMMAND cmd=0x{cmd:x} hwnd={hwnd:#x} (paint #{paints})"
+    );
+    send_message_w(hwnd, WM_COMMAND, w_param, 0);
+}
+
 /// # Safety
 /// `lp_msg` must point to a valid `MSG`.
 // Wine ref: dlls/user32/message.c::dispatch_message — calls NtUserMessageCall to get dispatch
@@ -970,6 +1007,9 @@ pub unsafe extern "win64" fn dispatch_message_w(lp_msg: *const Msg) -> isize {
     // WM_PAINT that reaches DispatchMessageW regardless of HWND validity.
     if m.message == WM_PAINT && !PHASE_WM_PAINT_DISPATCHED.swap(true, Ordering::Relaxed) {
         mark_phase("wm_paint_dispatched_first");
+    }
+    if m.message == WM_PAINT {
+        try_test_wm_command_inject(m.hwnd);
     }
 
     let proc_addr = match window::with(m.hwnd, |e| e.wnd_proc) {

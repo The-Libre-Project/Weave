@@ -1879,13 +1879,14 @@ fn irfanview_gif_open_gate() {
 
 /// `weave i_view64.exe test_image.bmp` — E3-M9 Tier A Save-As-PNG gate.
 ///
-/// Opens the baseline BMP under Xvfb (DISPLAY=:99), drives File → Save As via xdotool
-/// once WM_PAINT is observed, and relies on `WEAVE_TEST_SAVE_RESULT` (E3-M9a) to satisfy
-/// `GetSaveFileNameW` without a blocking zenity dialog.
+/// Opens the baseline BMP under Xvfb (DISPLAY=:99), triggers Save As via
+/// `WEAVE_TEST_WM_COMMAND` (E3-M9d) once the IrfanView main frame has painted twice,
+/// and relies on `WEAVE_TEST_SAVE_RESULT` (E3-M9a) to satisfy `GetSaveFileNameW`
+/// without a blocking zenity dialog.
 ///
-/// UI drive IDs (xdotool):
-///   - Primary: `alt+f` `a` (File → Save As)
-///   - Fallback: `ctrl+shift+s` (IrfanView Save-As accel when present)
+/// Save As command id `0x481` (1153): from i_view64.exe RT_ACCELERATOR table
+/// (IRFANVIEW/1033) — Shift+S entry; injected as `WM_COMMAND` wparam `0x10000|cmd`
+/// (same layout as `TranslateAcceleratorW`). xdotool is used only for Alt+F4 teardown.
 ///
 /// Tier A A1: stderr contains `weave/GetSaveFileNameW: test hook → TRUE path=` with a
 /// non-empty path (dialog returned TRUE via env hook).
@@ -1941,6 +1942,8 @@ fn irfanview_save_png_gate() {
         .arg(&bmp_path)
         .env("DISPLAY", ":99")
         .env("WEAVE_TEST_SAVE_RESULT", out_base.display().to_string())
+        // E3-M9d: Shift+S accel → cmd 0x481 (Save As) per fixture ACCEL resource probe.
+        .env("WEAVE_TEST_WM_COMMAND", "1153")
         .stderr(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .spawn()
@@ -2006,7 +2009,12 @@ fn irfanview_save_png_gate() {
                     }
                 }
                 if first_paint_seen && !drive_done {
-                    std::thread::sleep(std::time::Duration::from_millis(600));
+                    // WEAVE_TEST_WM_COMMAND inject fires inside weave after 2nd IrfanView WM_PAINT.
+                    eprintln!(
+                        "irfanview_save_png_gate: first_paint seen — waiting for WEAVE_TEST_WM_COMMAND inject (cmd=0x481)"
+                    );
+                    drive_done = true;
+                    std::thread::sleep(std::time::Duration::from_secs(6));
 
                     let search = std::process::Command::new("xdotool")
                         .args(["search", "--name", "IrfanView"])
@@ -2019,28 +2027,7 @@ fn irfanview_save_png_gate() {
                                 .map(|s| s.trim().to_string())
                             {
                                 if !id.is_empty() {
-                                    let _ = std::process::Command::new("xdotool")
-                                        .args(["windowfocus", "--sync", &id])
-                                        .output();
-
-                                    eprintln!(
-                                        "irfanview_save_png_gate: sending alt+f a (File → Save As), wid={id}"
-                                    );
-                                    let _ = std::process::Command::new("xdotool")
-                                        .args(["key", "--window", &id, "alt+f", "a"])
-                                        .output();
-
-                                    std::thread::sleep(std::time::Duration::from_millis(250));
-                                    eprintln!(
-                                        "irfanview_save_png_gate: sending ctrl+shift+s accel fallback"
-                                    );
-                                    let _ = std::process::Command::new("xdotool")
-                                        .args(["key", "--window", &id, "ctrl+shift+s"])
-                                        .output();
-
-                                    drive_done = true;
-                                    std::thread::sleep(std::time::Duration::from_secs(6));
-
+                                    eprintln!("irfanview_save_png_gate: sending alt+F4 teardown, wid={id}");
                                     let _ = std::process::Command::new("xdotool")
                                         .args(["key", "--window", &id, "alt+F4"])
                                         .output();
