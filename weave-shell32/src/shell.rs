@@ -1183,6 +1183,7 @@ pub unsafe extern "win64" fn sh_get_settings(_p_sfs: *mut u8, _dw_mask: u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pidl;
 
     #[test]
     fn tokenise_simple() {
@@ -1241,13 +1242,13 @@ mod tests {
         // Round-trip the path via the PIDL helper (exercises the documented return contract for M14 A1).
         let mut out: [u16; 260] = [0; 260];
         unsafe {
-            let ok = super::pidl::sh_get_path_from_id_list_w(pidl, out.as_mut_ptr());
+            let ok = pidl::sh_get_path_from_id_list_w(pidl, out.as_mut_ptr());
             assert_eq!(ok, 1);
             let path = String::from_utf16_lossy(
                 &out[..out.iter().position(|&c| c == 0).unwrap_or(0)],
             );
             assert_eq!(path, r"C:\Extract\Target\Dir");
-            super::pidl::il_free(pidl);
+            pidl::il_free(pidl);
         }
 
         // restore env for other tests
