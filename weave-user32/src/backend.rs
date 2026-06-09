@@ -963,6 +963,36 @@ mod inner {
         }
     }
 
+    /// X11 Mod1Mask (Alt) in `KeyPress`/`KeyRelease` `event.state`.
+    const X11_MOD1_MASK: u16 = 0x0008;
+    const VK_MENU: u32 = 0x12;
+
+    /// Choose WM_KEY* vs WM_SYSKEY* for an X11 key event.
+    ///
+    /// Wine ref: dlls/win32u/message.c::NtUserTranslateMessage — Alt-held keys and the Alt
+    /// key itself use WM_SYSKEYDOWN/UP; menu mnemonics (Alt+F, …) never arrive as WM_KEYDOWN.
+    fn win32_key_message(vk: u32, is_press: bool, x11_state: u16) -> u32 {
+        let alt_context = (x11_state & X11_MOD1_MASK) != 0 || vk == VK_MENU;
+        match (alt_context, is_press) {
+            (true, true) => WM_SYSKEYDOWN,
+            (true, false) => WM_SYSKEYUP,
+            (false, true) => WM_KEYDOWN,
+            (false, false) => WM_KEYUP,
+        }
+    }
+
+    fn key_l_param(x11_state: u16, is_press: bool, is_sys: bool) -> isize {
+        let mut low = if is_press {
+            1
+        } else {
+            (1 << 30) | (1 << 31)
+        };
+        if is_sys {
+            low |= 1 << 29; // context code: Alt active (KF_ALTDOWN >> 8 in lParam bit 29)
+        }
+        ((x11_state as isize) << 16) | low
+    }
+
     /// Convert an X11 keycode (ev.detail, hardware scan code + 8) to a Win32 VK virtual key.
     ///
     /// Wine ref: dlls/winex11.drv/keyboard.c::EVENT_event_to_vkey — builds a per-process
@@ -1344,12 +1374,15 @@ mod inner {
                 let hwnd = window::hwnd_for_xcb(ev.event);
                 if hwnd != 0 {
                     let vk = x11_keycode_to_vk(ev.detail);
+                    let x11_state = u16::from(ev.state);
+                    let is_sys = (x11_state & X11_MOD1_MASK) != 0 || vk == VK_MENU;
+                    let message = win32_key_message(vk, true, x11_state);
                     // Store X11 modifier state in l_param high word so TranslateMessage
                     // can extract the shift flag for WM_CHAR generation.
-                    let l_param = ((u16::from(ev.state) as isize) << 16) | 1;
+                    let l_param = key_l_param(x11_state, true, is_sys);
                     queue::post(MsgEntry {
                         hwnd,
-                        message: WM_KEYDOWN,
+                        message,
                         w_param: vk as usize,
                         l_param,
                         time: ev.time,
@@ -1368,10 +1401,13 @@ mod inner {
                 let hwnd = window::hwnd_for_xcb(ev.event);
                 if hwnd != 0 {
                     let vk = x11_keycode_to_vk(ev.detail);
-                    let l_param = ((u16::from(ev.state) as isize) << 16) | (1 << 30) | (1 << 31);
+                    let x11_state = u16::from(ev.state);
+                    let is_sys = (x11_state & X11_MOD1_MASK) != 0 || vk == VK_MENU;
+                    let message = win32_key_message(vk, false, x11_state);
+                    let l_param = key_l_param(x11_state, false, is_sys);
                     queue::post(MsgEntry {
                         hwnd,
-                        message: WM_KEYUP,
+                        message,
                         w_param: vk as usize,
                         l_param,
                         time: ev.time,

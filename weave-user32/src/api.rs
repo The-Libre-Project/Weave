@@ -920,7 +920,10 @@ pub unsafe extern "win64" fn translate_message(lp_msg: *const Msg) -> i32 {
     }
     let msg = unsafe { &*lp_msg };
     if msg.message != WM_KEYDOWN {
-        return (msg.message == WM_KEYUP || msg.message == WM_CHAR) as i32;
+        return matches!(
+            msg.message,
+            WM_KEYUP | WM_CHAR | WM_SYSKEYDOWN | WM_SYSKEYUP | WM_SYSCHAR
+        ) as i32;
     }
     // msg.w_param holds the Win32 VK code (set by backend::x11_keycode_to_vk).
     // X11 modifier state is stored in msg.l_param bits 16–31; ShiftMask = bit 16.
