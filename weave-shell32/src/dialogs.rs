@@ -336,10 +336,19 @@ pub unsafe extern "win64" fn page_setup_dlg_w(_lp_psd: *mut u8) -> i32 {
     0
 }
 
-// Wine ref: dlls/comdlg32/filedlg.c — same structure as GetOpenFileNameW; automatically
-// appends lpstrDefExt if typed filename has no extension and OFN_EXTENSIONDIFFERENT is set.
-// Weave handles lpstrDefExt extension appending — behaviorally correct for that case.
+// SHIM NOTE (E3-M9): Test harness / gate support via WEAVE_TEST_SAVE_RESULT env var.
+// When set to a host or Win32 path, skip zenity and write the translated path into
+// lpstrFile (appending lpstrDefExt when the basename has no extension). This lets
+// IrfanView Save-As-PNG gates complete under Xvfb/CI without a blocking save dialog.
+
+// Wine ref: dlls/comdlg32/filedlg.c:4232 — GetSaveFileNameW returns BOOL (TRUE=1/FALSE=0);
+// on success writes the selected path into ofn->lpstrFile (null-terminated, capped by nMaxFile);
+// user cancel returns FALSE with CommDlgExtendedError()==0; lpstrDefExt is appended when the
+// typed filename has no extension (see filedlg.c tests/filedlg.c test_extension_helper).
 /// GetSaveFileNameW: display the system Save dialog box.
+///
+/// If `WEAVE_TEST_SAVE_RESULT` is set, returns TRUE and writes that path into `lpstrFile`
+/// without opening zenity/kdialog. Otherwise opens the native save dialog.
 ///
 /// Returns TRUE if the user selects a filename; FALSE if cancelled or on error.
 ///
@@ -349,7 +358,14 @@ pub unsafe extern "win64" fn get_save_file_name_w(lp_ofn: *mut u8) -> i32 {
     if lp_ofn.is_null() {
         return 0;
     }
+    // SAFETY: lp_ofn is non-null (checked above); caller supplies a valid OPENFILENAMEW buffer.
     let ofn = unsafe { read_ofn(lp_ofn) };
+
+    if let Ok(test_path) = std::env::var("WEAVE_TEST_SAVE_RESULT") {
+        if !test_path.is_empty() {
+            return get_save_file_name_w_test_hook(ofn, &test_path);
+        }
+    }
 
     let title = unsafe { decode_wide_ptr(ofn.lp_str_title) };
     let initial_dir_win = unsafe { decode_wide_ptr(ofn.lp_str_initial_dir) };
@@ -381,6 +397,84 @@ pub unsafe extern "win64" fn get_save_file_name_w(lp_ofn: *mut u8) -> i32 {
             };
             encode_wide_into(&win_path, ofn.lp_str_file, ofn.n_max_file);
             1
+        }
+    }
+}
+
+/// Env-gated test hook: translate `test_path` to Win32, optionally append `lpstrDefExt`,
+/// write into `lpstrFile`, log, and return TRUE.
+fn get_save_file_name_w_test_hook(ofn: Ofn, test_path: &str) -> i32 {
+    let mut win_path = if test_path.len() >= 2 && test_path.as_bytes()[1] == b':' {
+        test_path.replace('/', "\\")
+    } else {
+        match linux_to_win_path(test_path) {
+            Some(p) => p,
+            None => return 0,
+        }
+    };
+
+    // SAFETY: lp_str_def_ext is a guest-owned LPCWSTR; decode_wide_ptr scans until NUL within
+    // caller-allocated storage (standard OPENFILENAMEW contract).
+    if let Some(ext_wide) = unsafe { decode_wide_ptr(ofn.lp_str_def_ext) } {
+        let basename = win_path.rsplit(['\\', '/']).next().unwrap_or("");
+        if !ext_wide.is_empty() && !basename.contains('.') {
+            win_path = format!("{}.{}", win_path, ext_wide);
+        }
+    }
+
+    // SAFETY: lp_str_file/n_max_file are guest-owned output buffer fields from OPENFILENAMEW.
+    encode_wide_into(&win_path, ofn.lp_str_file, ofn.n_max_file);
+    eprintln!("weave/GetSaveFileNameW: test hook → TRUE path={win_path}");
+    1
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build a minimal OPENFILENAMEW byte blob with lpstrFile, nMaxFile, and optional lpstrDefExt.
+    fn make_minimal_ofn(
+        file_buf: &mut [u16],
+        def_ext: Option<&str>,
+    ) -> (Vec<u8>, Option<Vec<u16>>) {
+        let mut ofn_bytes = vec![0u8; 152];
+        let file_ptr = file_buf.as_mut_ptr() as usize;
+        ofn_bytes[48..56].copy_from_slice(&file_ptr.to_le_bytes());
+        let n_max_file: u32 = file_buf.len() as u32;
+        ofn_bytes[56..60].copy_from_slice(&n_max_file.to_le_bytes());
+
+        let ext_storage: Option<Vec<u16>> =
+            def_ext.map(|e| e.encode_utf16().chain(std::iter::once(0)).collect());
+        if let Some(ref ext) = ext_storage {
+            let ext_ptr = ext.as_ptr() as usize;
+            ofn_bytes[104..112].copy_from_slice(&ext_ptr.to_le_bytes());
+        }
+        (ofn_bytes, ext_storage)
+    }
+
+    #[test]
+    fn get_save_file_name_w_returns_true_for_test_result_env() {
+        let old = std::env::var("WEAVE_TEST_SAVE_RESULT").ok();
+        std::env::set_var("WEAVE_TEST_SAVE_RESULT", r"C:\Save\Out\image");
+
+        let mut file_buf: [u16; 260] = [0; 260];
+        let (ofn_bytes, ext_storage) = make_minimal_ofn(&mut file_buf, Some("png"));
+
+        let ret = unsafe { get_save_file_name_w(ofn_bytes.as_ptr() as *mut u8) };
+        assert_eq!(
+            ret, 1,
+            "GetSaveFileNameW must return TRUE when WEAVE_TEST_SAVE_RESULT is set"
+        );
+
+        let end = file_buf.iter().position(|&c| c == 0).unwrap_or(file_buf.len());
+        let path = String::from_utf16_lossy(&file_buf[..end]);
+        assert!(!path.is_empty(), "lpstrFile must be non-empty after TRUE return");
+        assert_eq!(path, r"C:\Save\Out\image.png");
+
+        drop(ext_storage);
+        match old {
+            Some(v) => std::env::set_var("WEAVE_TEST_SAVE_RESULT", v),
+            None => std::env::remove_var("WEAVE_TEST_SAVE_RESULT"),
         }
     }
 }
