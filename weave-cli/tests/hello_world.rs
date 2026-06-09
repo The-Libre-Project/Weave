@@ -1877,6 +1877,245 @@ fn irfanview_gif_open_gate() {
     );
 }
 
+/// `weave i_view64.exe test_image.bmp` — E3-M9 Tier A Save-As-PNG gate.
+///
+/// Opens the baseline BMP under Xvfb (DISPLAY=:99), drives File → Save As via xdotool
+/// once WM_PAINT is observed, and relies on `WEAVE_TEST_SAVE_RESULT` (E3-M9a) to satisfy
+/// `GetSaveFileNameW` without a blocking zenity dialog.
+///
+/// UI drive IDs (xdotool):
+///   - Primary: `alt+f` `a` (File → Save As)
+///   - Fallback: `ctrl+shift+s` (IrfanView Save-As accel when present)
+///
+/// Tier A A1: stderr contains `weave/GetSaveFileNameW: test hook → TRUE path=` with a
+/// non-empty path (dialog returned TRUE via env hook).
+/// Tier A A2: output file exists on disk; first 8 bytes match the PNG signature.
+///
+/// Fixture: tests/fixtures/irfanview/i_view64.exe + tests/fixtures/irfanview/test_image.bmp
+/// Skip condition: fixture absent, or xdotool not in PATH (CI still passes).
+#[test]
+fn irfanview_save_png_gate() {
+    if !cfg!(target_os = "linux") {
+        eprintln!("skipping execution test — requires Linux");
+        return;
+    }
+
+    let manifest = env!("CARGO_MANIFEST_DIR");
+    let irfan_dir = format!("{manifest}/../tests/fixtures/irfanview");
+    let irfan_exe = format!("{irfan_dir}/i_view64.exe");
+    let bmp_path = format!("{irfan_dir}/test_image.bmp");
+
+    if !std::path::Path::new(&irfan_exe).exists() {
+        eprintln!("skipping: i_view64.exe not present in tests/fixtures/irfanview/");
+        eprintln!("  → copy the IrfanView 4.73 64-bit portable exe there to enable this test");
+        return;
+    }
+    if !std::path::Path::new(&bmp_path).exists() {
+        eprintln!("skipping: test_image.bmp not present in tests/fixtures/irfanview/");
+        return;
+    }
+
+    if std::process::Command::new("xdotool")
+        .arg("version")
+        .output()
+        .is_err()
+    {
+        eprintln!("skipping: xdotool not available in PATH");
+        return;
+    }
+
+    // Unique dest inside irfan_dir (Landlock exe-dir allowlist). No extension — hook appends .png.
+    let out_stem = format!("save_png_gate_{}", std::process::id());
+    let out_base = std::path::PathBuf::from(&irfan_dir).join(&out_stem);
+    let out_png = out_base.with_extension("png");
+    if out_png.exists() {
+        let _ = std::fs::remove_file(&out_png);
+    }
+
+    let weave_bin = env!("CARGO_BIN_EXE_weave");
+    let start = std::time::Instant::now();
+
+    let mut child = std::process::Command::new(weave_bin)
+        .current_dir(&irfan_dir)
+        .arg(&irfan_exe)
+        .arg(&bmp_path)
+        .env("DISPLAY", ":99")
+        .env("WEAVE_TEST_SAVE_RESULT", out_base.display().to_string())
+        .stderr(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|e| panic!("failed to spawn weave on i_view64.exe for save-png gate: {e}"));
+
+    const FIRST_BLIT_MARKER: &str = "weave/gdi32: BitBlt";
+    const FIRST_WM_PAINT_MARKER: &str = "weave/user32: WM_PAINT";
+    const WM_PAINT_PHASE_MARKER: &str = "PHASE: wm_paint_dispatched_first";
+
+    let stderr_pipe = child.stderr.take().expect("stderr was piped");
+    let stderr_shared = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let stderr_writer = std::sync::Arc::clone(&stderr_shared);
+    let stderr_handle = std::thread::spawn(move || {
+        use std::io::Read;
+        let mut r = stderr_pipe;
+        let mut chunk = [0u8; 4096];
+        loop {
+            match r.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => stderr_writer.lock().unwrap().extend_from_slice(&chunk[..n]),
+                Err(_) => break,
+            }
+        }
+    });
+
+    let stdout_pipe = child.stdout.take().expect("stdout was piped");
+    let stdout_shared = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let stdout_writer = std::sync::Arc::clone(&stdout_shared);
+    let stdout_handle = std::thread::spawn(move || {
+        use std::io::Read;
+        let mut r = stdout_pipe;
+        let mut chunk = [0u8; 4096];
+        loop {
+            match r.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => stdout_writer.lock().unwrap().extend_from_slice(&chunk[..n]),
+                Err(_) => break,
+            }
+        }
+    });
+
+    let deadline = start + std::time::Duration::from_secs(90);
+    let mut first_paint_seen = false;
+    let mut drive_done = false;
+
+    loop {
+        let now = std::time::Instant::now();
+        match child.try_wait().expect("try_wait failed") {
+            Some(_) => break,
+            None => {
+                if !first_paint_seen {
+                    let stderr_buf = stderr_shared.lock().unwrap();
+                    let partial = String::from_utf8_lossy(&stderr_buf);
+                    if partial.contains(FIRST_BLIT_MARKER)
+                        || partial.contains(FIRST_WM_PAINT_MARKER)
+                        || partial.contains(WM_PAINT_PHASE_MARKER)
+                    {
+                        first_paint_seen = true;
+                        eprintln!(
+                            "irfanview_save_png_gate: first_paint at {:?}",
+                            start.elapsed()
+                        );
+                    }
+                }
+                if first_paint_seen && !drive_done {
+                    std::thread::sleep(std::time::Duration::from_millis(600));
+
+                    let search = std::process::Command::new("xdotool")
+                        .args(["search", "--name", "IrfanView"])
+                        .output();
+                    if let Ok(out) = search {
+                        if out.status.success() {
+                            if let Some(id) = String::from_utf8_lossy(&out.stdout)
+                                .lines()
+                                .next()
+                                .map(|s| s.trim().to_string())
+                            {
+                                if !id.is_empty() {
+                                    let _ = std::process::Command::new("xdotool")
+                                        .args(["windowfocus", "--sync", &id])
+                                        .output();
+
+                                    eprintln!(
+                                        "irfanview_save_png_gate: sending alt+f a (File → Save As), wid={id}"
+                                    );
+                                    let _ = std::process::Command::new("xdotool")
+                                        .args(["key", "--window", &id, "alt+f", "a"])
+                                        .output();
+
+                                    std::thread::sleep(std::time::Duration::from_millis(250));
+                                    eprintln!(
+                                        "irfanview_save_png_gate: sending ctrl+shift+s accel fallback"
+                                    );
+                                    let _ = std::process::Command::new("xdotool")
+                                        .args(["key", "--window", &id, "ctrl+shift+s"])
+                                        .output();
+
+                                    drive_done = true;
+                                    std::thread::sleep(std::time::Duration::from_secs(6));
+
+                                    let _ = std::process::Command::new("xdotool")
+                                        .args(["key", "--window", &id, "alt+F4"])
+                                        .output();
+                                }
+                            }
+                        }
+                    }
+                }
+                if now >= deadline {
+                    let _ = child.kill();
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        }
+    }
+
+    let elapsed = start.elapsed();
+    stderr_handle.join().expect("stderr drain thread panicked");
+    stdout_handle.join().expect("stdout drain thread panicked");
+    let stderr = String::from_utf8_lossy(&stderr_shared.lock().unwrap()).into_owned();
+    let stdout = String::from_utf8_lossy(&stdout_shared.lock().unwrap()).into_owned();
+
+    eprintln!("irfanview_save_png_gate elapsed: {elapsed:.1?}");
+    eprintln!("irfanview_save_png_gate drive_done: {drive_done}");
+    eprintln!(
+        "--- irfanview_save_png_gate STDERR BEGIN ---\n{stderr}\n--- irfanview_save_png_gate STDERR END ---"
+    );
+
+    assert!(
+        first_paint_seen,
+        "irfanview_save_png_gate FAIL: no first paint — UI not ready before Save As drive.\nstderr:\n{stderr}"
+    );
+
+    const SAVE_HOOK_MARKER: &str = "weave/GetSaveFileNameW: test hook → TRUE path=";
+    let save_hook_idx = stderr.find(SAVE_HOOK_MARKER);
+    assert!(
+        save_hook_idx.is_some(),
+        "irfanview_save_png_gate FAIL A1: stderr missing exact log substring `{SAVE_HOOK_MARKER}` — GetSaveFileNameW hook not taken or dialog returned FALSE.\nstderr:\n{stderr}"
+    );
+    let hook_path = stderr[save_hook_idx.unwrap() + SAVE_HOOK_MARKER.len()..]
+        .lines()
+        .next()
+        .unwrap_or("")
+        .trim();
+    assert!(
+        !hook_path.is_empty(),
+        "irfanview_save_png_gate FAIL A1: `{SAVE_HOOK_MARKER}` present but path is empty — TRUE return contract violated.\nstderr:\n{stderr}"
+    );
+    eprintln!("A1 satisfied: GetSaveFileNameW TRUE path={hook_path}");
+
+    assert!(
+        out_png.exists(),
+        "irfanview_save_png_gate FAIL A2: output PNG missing at {:?} (save may not have completed or path mismatch).\nstdout: {stdout}\nstderr: {stderr}",
+        out_png
+    );
+
+    let png_bytes = std::fs::read(&out_png)
+        .unwrap_or_else(|e| panic!("failed to read saved PNG at {:?}: {e}", out_png));
+    let expected_sig: [u8; 8] = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+    let actual_sig: [u8; 8] = png_bytes
+        .get(..8)
+        .and_then(|s| s.try_into().ok())
+        .unwrap_or([0u8; 8]);
+    assert_eq!(
+        actual_sig,
+        expected_sig,
+        "irfanview_save_png_gate FAIL A2: PNG magic bytes mismatch at {:?} — expected PNG signature, got first 8 bytes {:02X?}.\nstdout: {stdout}\nstderr: {stderr}",
+        out_png
+    );
+    eprintln!(
+        "irfanview_save_png_gate: OK — A1 (`{SAVE_HOOK_MARKER}`) + A2 (PNG signature on disk)"
+    );
+}
+
 /// `weave SumatraPDF.exe test.pdf` — SumatraPDF PDF viewer; E3-M4 Tier A render gate.
 ///
 /// Runs SumatraPDF.exe with a minimal single-page PDF via CLI, on Xvfb (DISPLAY=:99).
