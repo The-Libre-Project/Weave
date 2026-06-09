@@ -2109,7 +2109,8 @@ fn irfanview_save_png_gate() {
         actual_sig,
         expected_sig,
         "irfanview_save_png_gate FAIL A2: PNG magic bytes mismatch at {:?} — expected PNG signature, got first 8 bytes {:02X?}.\nstdout: {stdout}\nstderr: {stderr}",
-        out_png
+        out_png,
+        actual_sig
     );
     eprintln!(
         "irfanview_save_png_gate: OK — A1 (`{SAVE_HOOK_MARKER}`) + A2 (PNG signature on disk)"
