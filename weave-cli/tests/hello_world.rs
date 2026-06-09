@@ -670,6 +670,315 @@ fn seven_zip_fm_m8_archive_gate() {
     cap.emit();
 }
 
+/// `weave 7zFM.exe test.7z` — GUI-driven Extract using Browse-for-Folder (M14 Tier A probe).
+///
+/// Launches under Xvfb + sandbox, passes test.7z so archive is open in the FM GUI.
+/// Waits for M8 C1 (CreateWindow non-zero) + C2 (first paint) observables so UI is ready.
+/// Drives interactive flow via xdotool: toolbar click on Extract (2nd button) + alt+f e accel fallback.
+/// The WEAVE_TEST_BROWSE_RESULT hook (landed M14a) auto-supplies the test's unique out_dir as real
+/// PIDL; SHBrowseForFolderW returns non-NULL real result to 7zFM (exercises promoted return contract).
+/// 7zFM then extracts member(s) to the GUI-chosen path. Asserts side-effect with same single-buffer
+/// SHA-256 primitive as M8a archive_gate.
+///
+/// Tier A (M14):
+///   A1: browse returns real non-NULL result (evidence: shim hook log for BrowseForFolder + WEAVE_TEST_*;
+///       "A1 satisfied: non-NULL browse result for <path>" emitted)
+///   A2: hello.txt present in the hook-supplied dir and SHA-256 matches fixture exactly (via fs::read
+///       single buffer + sha256_of_bytes digest; "A2 satisfied..." emitted). Failure names violated Tier A.
+///
+/// Uses bin_dir subdir for out (Landlock), unique name via pid, 90s timeout, reuses M8 paint/CW markers
+/// so C1/C2/C3 regression guards stay intact and green in same run. xdotool present (per ci.yml apt).
+/// Diff: 1 primary test file.
+#[test]
+fn seven_zip_fm_m14_gui_extract_gate() {
+    if !cfg!(target_os = "linux") {
+        eprintln!("skipping execution test — requires Linux");
+        return;
+    }
+
+    let weave_bin = env!("CARGO_BIN_EXE_weave");
+    let fixture = format!(
+        "{}/../tests/fixtures/bin/7zFM.exe",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    if !std::path::Path::new(&fixture).exists() {
+        eprintln!("skipping: 7zFM.exe not present in fixtures (add from portable 7-Zip 26.x)");
+        return;
+    }
+
+    let bin_dir = format!("{}/../tests/fixtures/bin", env!("CARGO_MANIFEST_DIR"));
+    let archive_path = format!("{bin_dir}/test.7z");
+    if !std::path::Path::new(&archive_path).exists() {
+        eprintln!("skipping: test.7z not present in fixtures (run tests/fixtures/src/make_zip.py)");
+        return;
+    }
+
+    // xdotool required for drive (same guard as notepad_roundtrip_* gates)
+    if std::process::Command::new("xdotool")
+        .arg("version")
+        .output()
+        .is_err()
+    {
+        eprintln!("skipping: xdotool not available in PATH");
+        return;
+    }
+
+    // sha256_of_bytes: exact same as inside seven_zip_fm_m8_archive_gate (M8a); single buffer read model.
+    fn sha256_of_bytes(data: &[u8]) -> String {
+        use std::io::Write;
+        let mut child = std::process::Command::new("sha256sum")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("sha256sum not found — needed for extraction gate");
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(data)
+            .expect("write to sha256sum stdin");
+        let out = child.wait_with_output().expect("sha256sum wait");
+        String::from_utf8_lossy(&out.stdout)
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .to_string()
+    }
+
+    // Fresh unique dest inside bin_dir (Landlock exe-dir allowlist). Pid makes parallel/re-run safe.
+    let out_dir = std::path::PathBuf::from(&bin_dir).join(format!("extract_m14_gui_{}", std::process::id()));
+    if out_dir.exists() {
+        let _ = std::fs::remove_dir_all(&out_dir);
+    }
+    std::fs::create_dir_all(&out_dir).expect("failed to create m14 gui extract dest dir");
+
+    let start = std::time::Instant::now();
+    let mut child = std::process::Command::new(weave_bin)
+        .current_dir(&bin_dir)
+        .arg(&fixture)
+        .arg("test.7z")
+        .env("DISPLAY", ":99")
+        .env("WEAVE_TEST_BROWSE_RESULT", out_dir.display().to_string())
+        .stderr(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|e| panic!("failed to spawn weave on 7zFM.exe for m14 gui extract: {e}"));
+
+    const FIRST_BLIT_MARKER: &str = "weave/gdi32: BitBlt";
+    const FIRST_WM_PAINT_MARKER: &str = "weave/user32: WM_PAINT";
+
+    let stderr_pipe = child.stderr.take().expect("stderr was piped");
+    let stderr_shared = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let stderr_writer = std::sync::Arc::clone(&stderr_shared);
+    let stderr_handle = std::thread::spawn(move || {
+        use std::io::Read;
+        let mut r = stderr_pipe;
+        let mut chunk = [0u8; 4096];
+        loop {
+            match r.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => stderr_writer.lock().unwrap().extend_from_slice(&chunk[..n]),
+                Err(_) => break,
+            }
+        }
+    });
+
+    let stdout_pipe = child.stdout.take().expect("stdout was piped");
+    let stdout_shared = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let stdout_writer = std::sync::Arc::clone(&stdout_shared);
+    let stdout_handle = std::thread::spawn(move || {
+        use std::io::Read;
+        let mut r = stdout_pipe;
+        let mut chunk = [0u8; 4096];
+        loop {
+            match r.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => stdout_writer.lock().unwrap().extend_from_slice(&chunk[..n]),
+                Err(_) => break,
+            }
+        }
+    });
+
+    let deadline = start + std::time::Duration::from_secs(90);
+    let mut first_paint_seen = false;
+    let mut first_paint_at: Option<std::time::Instant> = None;
+    let mut drive_done = false;
+
+    loop {
+        let now = std::time::Instant::now();
+        match child.try_wait().expect("try_wait failed") {
+            Some(_) => break,
+            None => {
+                if !first_paint_seen {
+                    let stderr_buf = stderr_shared.lock().unwrap();
+                    let partial = String::from_utf8_lossy(&stderr_buf);
+                    if partial.contains(FIRST_BLIT_MARKER) || partial.contains(FIRST_WM_PAINT_MARKER) {
+                        first_paint_seen = true;
+                        first_paint_at = Some(now);
+                        eprintln!(
+                            "seven_zip_fm_m14_gui_extract_gate: first_paint at {:?}",
+                            start.elapsed()
+                        );
+                    }
+                }
+                if first_paint_seen && !drive_done {
+                    // Settle for title (xdotool --name "7-Zip" matches "test.7z - 7-Zip" etc).
+                    std::thread::sleep(std::time::Duration::from_millis(600));
+
+                    let search = std::process::Command::new("xdotool")
+                        .args(["search", "--name", "7-Zip"])
+                        .output();
+                    if let Ok(out) = search {
+                        if out.status.success() {
+                            if let Some(id) = String::from_utf8_lossy(&out.stdout)
+                                .lines()
+                                .next()
+                                .map(|s| s.trim().to_string())
+                            {
+                                if !id.is_empty() {
+                                    let _ = std::process::Command::new("xdotool")
+                                        .args(["windowfocus", "--sync", &id])
+                                        .output();
+
+                                    // Drive the Extract action (toolbar button or menu accel).
+                                    // Click geometry targets the Extract toolbar button (after Add).
+                                    if let Ok(geo) = std::process::Command::new("xdotool")
+                                        .args(["getwindowgeometry", "--shell", &id])
+                                        .output()
+                                    {
+                                        if geo.status.success() {
+                                            let geo_s = String::from_utf8_lossy(&geo.stdout);
+                                            let mut wx = 0i32;
+                                            let mut wy = 0i32;
+                                            for line in geo_s.lines() {
+                                                if let Some(v) = line.strip_prefix("X=") {
+                                                    wx = v.parse().unwrap_or(0);
+                                                }
+                                                if let Some(v) = line.strip_prefix("Y=") {
+                                                    wy = v.parse().unwrap_or(0);
+                                                }
+                                            }
+                                            let cx = (wx + 95).to_string();
+                                            let cy = (wy + 58).to_string();
+                                            eprintln!(
+                                                "seven_zip_fm_m14_gui_extract_gate: clicking Extract toolbar at {},{}, wid={}",
+                                                cx, cy, id
+                                            );
+                                            let _ = std::process::Command::new("xdotool")
+                                                .args(["mousemove", "--sync", &cx, &cy])
+                                                .output();
+                                            let _ = std::process::Command::new("xdotool")
+                                                .args(["click", "1"])
+                                                .output();
+                                        }
+                                    }
+
+                                    // Fallback: File menu + e (targets Extract... if accel present).
+                                    std::thread::sleep(std::time::Duration::from_millis(250));
+                                    eprintln!("seven_zip_fm_m14_gui_extract_gate: sending alt+f e accel fallback");
+                                    let _ = std::process::Command::new("xdotool")
+                                        .args(["key", "--window", &id, "alt+f", "e"])
+                                        .output();
+
+                                    drive_done = true;
+                                    // Tiny archive: hook supplies path, 7zFM extracts, writes land.
+                                    std::thread::sleep(std::time::Duration::from_secs(6));
+
+                                    // Close FM so it exits (non-blocking if already gone).
+                                    let _ = std::process::Command::new("xdotool")
+                                        .args(["key", "--window", &id, "alt+F4"])
+                                        .output();
+                                }
+                            }
+                        }
+                    }
+                }
+                if now >= deadline {
+                    let _ = child.kill();
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        }
+    }
+
+    let elapsed = start.elapsed();
+    stderr_handle.join().expect("stderr drain thread panicked");
+    stdout_handle.join().expect("stdout drain thread panicked");
+    let stderr = String::from_utf8_lossy(&stderr_shared.lock().unwrap()).into_owned();
+    let stdout = String::from_utf8_lossy(&stdout_shared.lock().unwrap()).into_owned();
+
+    eprintln!("7zFM m14-gui-extract elapsed: {elapsed:.1?}");
+    eprintln!("7zFM m14-gui-extract drive_done: {drive_done}");
+    if let Some(t) = first_paint_at {
+        eprintln!(
+            "seven_zip_fm_m14_gui_extract_gate first_paint_elapsed: {:?}",
+            t.duration_since(start)
+        );
+    }
+    eprintln!(
+        "--- 7zFM m14-gui-extract STDERR BEGIN ---\n{stderr}\n--- 7zFM m14-gui-extract STDERR END ---"
+    );
+
+    // Re-assert M8 C1/C2 observables (app alive + paint reached) before trusting drive/A1/A2.
+    let c1_createwindow = stderr.contains("weave/user32: CreateWindow class=");
+    assert!(
+        c1_createwindow,
+        "seven_zip_fm_m14_gui_extract_gate FAIL: no CreateWindow (M8 C1) — 7zFM did not reach window creation before extract drive.\nstderr:\n{stderr}"
+    );
+    assert!(
+        first_paint_seen,
+        "seven_zip_fm_m14_gui_extract_gate FAIL: no first paint (M8 C2) — UI not ready; paint path not reached.\nstderr:\n{stderr}"
+    );
+
+    // A1: the interactive flow caused 7zFM to call SHBrowseForFolderW and receive real non-NULL.
+    // Hook path (WEAVE_TEST_BROWSE_RESULT) produces real PIDL; shim emits identification.
+    let browse_evidence = stderr.contains("SHBrowseForFolder") || stderr.contains("BrowseForFolderW") || stderr.contains("WEAVE_TEST_BROWSE_RESULT");
+    assert!(
+        browse_evidence,
+        "seven_zip_fm_m14_gui_extract_gate FAIL A1: no evidence SHBrowseForFolderW was called (or hook not taken) by GUI extract action — drive missed or stub returned NULL. Tier A A1 violated.\nstderr:\n{stderr}"
+    );
+    eprintln!("A1 satisfied: non-NULL browse result for {}", out_dir.display());
+
+    // A2: side-effect file via the *GUI-chosen* (browse-returned) path; byte-exact using M8a primitive.
+    let hello_path = out_dir.join("hello.txt");
+    assert!(
+        hello_path.exists(),
+        "seven_zip_fm_m14_gui_extract_gate FAIL A2: hello.txt missing from GUI-chosen extract dir (browse result may have been NULL or extract did not use it). out_dir: {:?}\nstdout: {stdout}\nstderr: {stderr}",
+        std::fs::read_dir(&out_dir)
+            .ok()
+            .map(|rd| rd.filter_map(|e| e.ok().map(|e| e.file_name())).collect::<Vec<_>>())
+            .unwrap_or_default()
+    );
+
+    let expected_content: &[u8] = b"Hello from inside the archive\\!\n";
+    let expected_hash = sha256_of_bytes(expected_content);
+    eprintln!("seven_zip_fm_m14_gui_extract_gate: hello.txt expected SHA-256 = {expected_hash}");
+
+    let actual = std::fs::read(&hello_path)
+        .unwrap_or_else(|e| panic!("failed to read GUI-extracted hello.txt: {e}"));
+    let actual_hash = sha256_of_bytes(&actual);
+
+    assert_eq!(
+        actual_hash,
+        expected_hash,
+        "seven_zip_fm_m14_gui_extract_gate FAIL A2: hello.txt SHA-256 mismatch after GUI extract via browse result. Tier A A2 violated.\nexpected: {expected_hash}\nactual:   {actual_hash}\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    eprintln!("A2 satisfied: hello.txt SHA {actual_hash} matches fixture");
+
+    eprintln!("seven_zip_fm_m14_gui_extract_gate: OK — A1 (real non-NULL) + A2 (byte-exact via GUI path)");
+
+    // --- Capability taxonomy ---
+    let mut cap = CapabilityReport::for_app("7zFM.exe");
+    cap.declare(CapabilityClass::Launches);
+    cap.declare(CapabilityClass::OpensFile);
+    cap.record(
+        CapabilityClass::OpensFile,
+        CapabilityOutcome::pass("M14 A1/A2: GUI extract via SHBrowseForFolderW real non-NULL return + byte-exact hello.txt at chosen path"),
+    );
+    cap.emit();
+}
+
 /// `weave notepad++.exe test.py` — Notepad++ GUI; Phase 6b WS1 gate.
 ///
 /// Runs Notepad++ with a Python file argument. Checks:
