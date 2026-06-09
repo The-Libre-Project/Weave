@@ -760,6 +760,10 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "AppendMenuW" => Some(
             menu::append_menu_w as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
         ),
+        "InsertMenuW" => Some(
+            menu::insert_menu_w as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const ()
+                as usize,
+        ),
         "InsertMenuItemW" => Some(
             menu::insert_menu_item_w as unsafe extern "win64" fn(_, _, _, _) -> _ as *const ()
                 as usize,

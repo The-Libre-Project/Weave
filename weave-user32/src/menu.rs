@@ -115,6 +115,34 @@ pub unsafe extern "win64" fn append_menu_w(
     1 // TRUE
 }
 
+/// InsertMenuW: insert a menu item at a position or before a command id.
+///
+/// # Safety
+/// `lp_new_item`, when flags include MF_STRING, must be a valid
+/// null-terminated UTF-16 string pointer.
+// Wine ref: dlls/user32/menu.c::InsertMenuW — MENU_mnu2mnuii builds MENUITEMINFOW from
+// flags/id/str, then NtUserThunkedMenuItemInfo inserts at `pos` (MF_BYPOSITION) or before
+// the matching command id; returns FALSE on invalid HMENU.
+pub unsafe extern "win64" fn insert_menu_w(
+    h_menu: usize,
+    u_position: u32,
+    u_flags: u32,
+    u_id_new_item: usize,
+    lp_new_item: *const u16,
+) -> i32 {
+    let text = if u_flags & MF_SEPARATOR == 0 && !lp_new_item.is_null() {
+        let mut len = 0usize;
+        while len < crate::defs::MAX_GUEST_STR_LEN && unsafe { *lp_new_item.add(len) } != 0 {
+            len += 1;
+        }
+        let slice = unsafe { std::slice::from_raw_parts(lp_new_item, len) };
+        String::from_utf16_lossy(slice)
+    } else {
+        String::new()
+    };
+    insert_item_raw(h_menu, u_position, u_flags, u_id_new_item, text)
+}
+
 /// InsertMenuItemW: insert a menu item by position or command id.
 ///
 /// Phase 2: delegates to AppendMenuW (ignores position, always appends).
@@ -205,6 +233,47 @@ pub extern "win64" fn track_popup_menu_ex(
     _lptpm: usize,
 ) -> i32 {
     0
+}
+
+/// insert_item_raw: insert a menu item at/by position (internal helper).
+///
+/// Wine ref: dlls/win32u/menu.c::insert_menu_item — find_menu_item resolves `pos`;
+/// on failure appends at nItems; MF_BYPOSITION uses `pos` directly (~0 appends at end).
+pub fn insert_item_raw(
+    h_menu: usize,
+    u_position: u32,
+    u_flags: u32,
+    u_id_new_item: usize,
+    text: String,
+) -> i32 {
+    let mut m = menus().lock().unwrap_or_else(|p| p.into_inner());
+    let items = match m.menus.get_mut(&h_menu) {
+        Some(v) => v,
+        None => return 0,
+    };
+    let by_pos = u_flags & MF_BYPOSITION != 0;
+    let insert_pos = if by_pos {
+        if u_position == u32::MAX {
+            items.len()
+        } else {
+            (u_position as usize).min(items.len())
+        }
+    } else {
+        items
+            .iter()
+            .position(|item| item.id_or_submenu as u32 == u_position)
+            .unwrap_or(items.len())
+    };
+    let store_flags = u_flags & !MF_BYPOSITION;
+    items.insert(
+        insert_pos,
+        MenuItem {
+            flags: store_flags,
+            text,
+            id_or_submenu: u_id_new_item,
+        },
+    );
+    1
 }
 
 /// append_menu_raw: internal helper used by AppendMenuA.
@@ -571,6 +640,20 @@ mod tests {
             append_menu_w(h, MF_STRING, 1001, text.as_ptr());
         }
         assert_eq!(get_menu_item_count(h), 1);
+        destroy_menu(h);
+    }
+
+    #[test]
+    fn insert_menu_w_at_position() {
+        let h = create_menu();
+        let open: Vec<u16> = "Open\0".encode_utf16().collect();
+        let save: Vec<u16> = "Save As\0".encode_utf16().collect();
+        unsafe {
+            append_menu_w(h, MF_STRING | MF_BYPOSITION, 1001, open.as_ptr());
+            insert_menu_w(h, 0, MF_STRING | MF_BYPOSITION, 1002, save.as_ptr());
+        }
+        assert_eq!(get_menu_item_count(h), 2);
+        assert_eq!(get_menu_item_id(h, 0), 1002);
         destroy_menu(h);
     }
 
