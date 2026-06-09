@@ -447,22 +447,83 @@ pub unsafe extern "win64" fn sh_get_known_folder_path(
     }
 }
 
+// SHIM NOTE (M14): Test harness / gate support via WEAVE_TEST_BROWSE_RESULT env var.
+// When set to a host directory path, we return a real WEV1 PIDL for that path (allocated
+// via pidl_from_path_w, CoTaskMemAlloc-compatible). This lets the 7zFM GUI extract flow
+// complete under Xvfb/CI without a blocking folder picker dialog. Production interactive
+// picker (via existing DialogBoxParamW + comctl32 tree) is stretch.
+//
+// jcodemunch MCP server is registered in .mcp.json but not exposed in the current agent
+// harness (CallMcpTool and sub-agents only see cursor-app-control + cursor-ide-browser).
+// Pre-existing audited Wine refs (brsfolder.c) from M8 are accepted per operator choice #1
+// (2026-06-08) rather than reconstructing from memory.
+
+// Minimal BROWSEINFOW layout (only fields we inspect are materialized).
+// Layout per Win32 + Wine dlls/shell32/brsfolder.c: hwndOwner, pidlRoot, pszDisplayName,
+// lpszTitle, ulFlags, lpfn, lParam, iImage.
+#[repr(C)]
+struct BrowseInfoW {
+    hwnd_owner: usize,
+    pidl_root: *const u8,
+    psz_display_name: *mut u16,
+    lpsz_title: *const u16,
+    ul_flags: u32,
+    lpfn: usize,
+    l_param: usize,
+    i_image: i32,
+}
+
 // Wine ref: dlls/shell32/brsfolder.c — SHBrowseForFolderW creates a dialog via DialogBoxParamW;
 // returns a PIDL (Shell Item ID List) allocated by CoTaskMemAlloc, or NULL if user cancelled.
-// Callers always check return value before calling SHGetPathFromIDListW. Weave returns NULL
-// (cancel) which apps handle as "user cancelled" — functionally correct as a stub.
-// Wine ref: dlls/shell32/brsfolder.c — creates dialog via DialogBoxParamW; returns CoTaskMemAlloc'd
-// PIDL or NULL if cancelled; caller must ILFree() the PIDL; see full ref above.
+// Callers always check return value before calling SHGetPathFromIDListW. Caller must ILFree().
+// (Pre-existing audited ref accepted for this session; see SHIM NOTE above.)
 /// SHBrowseForFolderW: display a folder browser dialog.
 ///
-/// Returns NULL (no folder selected / not implemented). Callers must handle
-/// NULL gracefully — they check return value before calling SHGetPathFromIDListW.
+/// If WEAVE_TEST_BROWSE_RESULT is set, returns a non-NULL PIDL for that path
+/// (populating pszDisplayName if the caller provided a buffer). Otherwise returns NULL
+/// (treated as "user cancelled"). The returned PIDL must be freed by the caller via ILFree.
 ///
 /// # Safety
-/// `lp_bi` may be null or a pointer to a BROWSEINFOW struct. Ignored.
-// Wine ref: dlls/shell32/brsfolder.c — DialogBoxParamW; returns CoTaskMemAlloc'd PIDL or NULL on cancel.
-pub unsafe extern "win64" fn sh_browse_for_folder_w(_lp_bi: *const u8) -> *mut u8 {
-    std::ptr::null_mut() // NULL PIDL — user "cancelled"
+/// `lp_bi` must be null or point to a valid BROWSEINFOW (we read hwndOwner and pszDisplayName
+/// when present; other fields are accepted but currently ignored for the test path).
+pub unsafe extern "win64" fn sh_browse_for_folder_w(lp_bi: *const u8) -> *mut u8 {
+    if lp_bi.is_null() {
+        return std::ptr::null_mut();
+    }
+
+    // SAFETY: lp_bi is non-null (checked above). Caller contract (BROWSEINFO passed by
+    // 7zFM or probe) guarantees the buffer is at least sizeof(BrowseInfoW) and aligned.
+    // We only read the two fields we declare we will use.
+    let bi = &*(lp_bi as *const BrowseInfoW);
+
+    let dest = match std::env::var("WEAVE_TEST_BROWSE_RESULT") {
+        Ok(p) if !p.is_empty() => p,
+        _ => return std::ptr::null_mut(),
+    };
+
+    let pidl = super::pidl::pidl_from_path_w(&dest);
+    if pidl.is_null() {
+        return std::ptr::null_mut();
+    }
+
+    // If caller supplied a display-name buffer, write a friendly leaf name (or the path).
+    if !bi.psz_display_name.is_null() {
+        let display = dest.rsplit(['\\', '/']).next().unwrap_or(&dest);
+        write_display_name(bi.psz_display_name, display);
+    }
+
+    pidl
+}
+
+fn write_display_name(dest: *mut u16, name: &str) {
+    let wide: Vec<u16> = name.encode_utf16().collect();
+    let copy = wide.len().min(259);
+    unsafe {
+        for (i, &w) in wide.iter().take(copy).enumerate() {
+            *dest.add(i) = w;
+        }
+        *dest.add(copy) = 0;
+    }
 }
 
 // Wine ref: dlls/shell32/pidl.c — SHGetDesktopFolder + BindToObject; FALSE if PIDL null or non-filesystem.
@@ -1161,5 +1222,38 @@ mod tests {
         // Slice with no null terminator — should decode all chars.
         let wide: Vec<u16> = "Hi".encode_utf16().collect();
         assert_eq!(decode_wide_slice(&wide), "Hi");
+    }
+
+    #[test]
+    fn sh_browse_for_folder_w_returns_non_null_pidl_for_test_result_env() {
+        let old = std::env::var("WEAVE_TEST_BROWSE_RESULT").ok();
+        std::env::set_var("WEAVE_TEST_BROWSE_RESULT", r"C:\Extract\Target\Dir");
+
+        // Construct a minimal BROWSEINFOW layout on the stack (only pszDisplayName at offset 16 is used).
+        let mut display: [u16; 64] = [0; 64];
+        let mut bi_bytes: [u8; 64] = [0; 64];
+        let disp_ptr = display.as_mut_ptr() as usize;
+        bi_bytes[16..24].copy_from_slice(&disp_ptr.to_le_bytes());
+
+        let pidl = unsafe { sh_browse_for_folder_w(bi_bytes.as_ptr() as *const u8) };
+        assert!(!pidl.is_null(), "SHBrowseForFolderW must return non-NULL when WEAVE_TEST_BROWSE_RESULT is set");
+
+        // Round-trip the path via the PIDL helper (exercises the documented return contract for M14 A1).
+        let mut out: [u16; 260] = [0; 260];
+        unsafe {
+            let ok = super::pidl::sh_get_path_from_id_list_w(pidl, out.as_mut_ptr());
+            assert_eq!(ok, 1);
+            let path = String::from_utf16_lossy(
+                &out[..out.iter().position(|&c| c == 0).unwrap_or(0)],
+            );
+            assert_eq!(path, r"C:\Extract\Target\Dir");
+            super::pidl::il_free(pidl);
+        }
+
+        // restore env for other tests
+        match old {
+            Some(v) => std::env::set_var("WEAVE_TEST_BROWSE_RESULT", v),
+            None => std::env::remove_var("WEAVE_TEST_BROWSE_RESULT"),
+        }
     }
 }
