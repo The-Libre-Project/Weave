@@ -1237,16 +1237,18 @@ mod tests {
         bi_bytes[16..24].copy_from_slice(&disp_ptr.to_le_bytes());
 
         let pidl = unsafe { sh_browse_for_folder_w(bi_bytes.as_ptr() as *const u8) };
-        assert!(!pidl.is_null(), "SHBrowseForFolderW must return non-NULL when WEAVE_TEST_BROWSE_RESULT is set");
+        assert!(
+            !pidl.is_null(),
+            "SHBrowseForFolderW must return non-NULL when WEAVE_TEST_BROWSE_RESULT is set"
+        );
 
         // Round-trip the path via the PIDL helper (exercises the documented return contract for M14 A1).
         let mut out: [u16; 260] = [0; 260];
         unsafe {
             let ok = pidl::sh_get_path_from_id_list_w(pidl, out.as_mut_ptr());
             assert_eq!(ok, 1);
-            let path = String::from_utf16_lossy(
-                &out[..out.iter().position(|&c| c == 0).unwrap_or(0)],
-            );
+            let path =
+                String::from_utf16_lossy(&out[..out.iter().position(|&c| c == 0).unwrap_or(0)]);
             assert_eq!(path, r"C:\Extract\Target\Dir");
             pidl::il_free(pidl);
         }

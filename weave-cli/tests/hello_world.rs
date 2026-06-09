@@ -746,7 +746,8 @@ fn seven_zip_fm_m14_gui_extract_gate() {
     }
 
     // Fresh unique dest inside bin_dir (Landlock exe-dir allowlist). Pid makes parallel/re-run safe.
-    let out_dir = std::path::PathBuf::from(&bin_dir).join(format!("extract_m14_gui_{}", std::process::id()));
+    let out_dir =
+        std::path::PathBuf::from(&bin_dir).join(format!("extract_m14_gui_{}", std::process::id()));
     if out_dir.exists() {
         let _ = std::fs::remove_dir_all(&out_dir);
     }
@@ -812,7 +813,9 @@ fn seven_zip_fm_m14_gui_extract_gate() {
                 if !first_paint_seen {
                     let stderr_buf = stderr_shared.lock().unwrap();
                     let partial = String::from_utf8_lossy(&stderr_buf);
-                    if partial.contains(FIRST_BLIT_MARKER) || partial.contains(FIRST_WM_PAINT_MARKER) {
+                    if partial.contains(FIRST_BLIT_MARKER)
+                        || partial.contains(FIRST_WM_PAINT_MARKER)
+                    {
                         first_paint_seen = true;
                         first_paint_at = Some(now);
                         eprintln!(
@@ -933,12 +936,17 @@ fn seven_zip_fm_m14_gui_extract_gate() {
 
     // A1: the interactive flow caused 7zFM to call SHBrowseForFolderW and receive real non-NULL.
     // Hook path (WEAVE_TEST_BROWSE_RESULT) produces real PIDL; shim emits identification.
-    let browse_evidence = stderr.contains("SHBrowseForFolder") || stderr.contains("BrowseForFolderW") || stderr.contains("WEAVE_TEST_BROWSE_RESULT");
+    let browse_evidence = stderr.contains("SHBrowseForFolder")
+        || stderr.contains("BrowseForFolderW")
+        || stderr.contains("WEAVE_TEST_BROWSE_RESULT");
     assert!(
         browse_evidence,
         "seven_zip_fm_m14_gui_extract_gate FAIL A1: no evidence SHBrowseForFolderW was called (or hook not taken) by GUI extract action — drive missed or stub returned NULL. Tier A A1 violated.\nstderr:\n{stderr}"
     );
-    eprintln!("A1 satisfied: non-NULL browse result for {}", out_dir.display());
+    eprintln!(
+        "A1 satisfied: non-NULL browse result for {}",
+        out_dir.display()
+    );
 
     // A2: side-effect file via the *GUI-chosen* (browse-returned) path; byte-exact using M8a primitive.
     let hello_path = out_dir.join("hello.txt");
@@ -966,7 +974,9 @@ fn seven_zip_fm_m14_gui_extract_gate() {
     );
     eprintln!("A2 satisfied: hello.txt SHA {actual_hash} matches fixture");
 
-    eprintln!("seven_zip_fm_m14_gui_extract_gate: OK — A1 (real non-NULL) + A2 (byte-exact via GUI path)");
+    eprintln!(
+        "seven_zip_fm_m14_gui_extract_gate: OK — A1 (real non-NULL) + A2 (byte-exact via GUI path)"
+    );
 
     // --- Capability taxonomy ---
     let mut cap = CapabilityReport::for_app("7zFM.exe");
