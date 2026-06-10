@@ -429,6 +429,12 @@ pub unsafe extern "win64" fn path_file_exists_w(psz_path: *const u16) -> i32 {
         .map(|p| p.exists())
         .unwrap_or(false);
     eprintln!("weave/shlwapi: PathFileExistsW({path_str:?}) → {exists}");
+    if std::env::var("WEAVE_TEST_SAVE_RESULT").is_ok() {
+        let lower = path_str.to_ascii_lowercase();
+        if lower.contains("plugins") || lower.contains("optipng") {
+            eprintln!("weave/E3-M9-trace: PathFileExistsW({path_str:?}) → {exists}");
+        }
+    }
     exists as i32
 }
 

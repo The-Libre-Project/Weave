@@ -17005,6 +17005,12 @@ pub unsafe extern "win64" fn get_private_profile_string_w(
         unsafe { read_cstr_w(lp_default) }
     };
     let value = ini::get_string(path.as_deref(), &section, &key, &default_val);
+    if std::env::var("WEAVE_TEST_SAVE_RESULT").is_ok() {
+        let file = path.as_deref().unwrap_or("(null)");
+        eprintln!(
+            "weave/E3-M9-trace: GetPrivateProfileStringW section={section:?} key={key:?} file={file:?} → {value:?}"
+        );
+    }
     // Copy into guest buffer (truncated to n_size - 1 chars + NUL)
     if n_size == 0 || lp_returned_string.is_null() {
         return 0;

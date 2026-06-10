@@ -1958,6 +1958,8 @@ fn irfanview_save_png_gate() {
         .env("WEAVE_TEST_SAVE_RESULT", out_png.display().to_string())
         // E3-M9e: RT_MENU/IRFANVIEW Save as... → cmd 0x47d (not Shift+S accel 0x481=Sharpen).
         .env("WEAVE_TEST_WM_COMMAND", "1149")
+        // E3-M9 ATTEMPT 12: defer Save As until plugin init may have run (default min=2).
+        .env("WEAVE_TEST_WM_COMMAND_MIN_PAINTS", "12")
         .stderr(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .spawn()

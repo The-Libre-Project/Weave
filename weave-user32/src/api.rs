@@ -971,7 +971,12 @@ fn try_test_wm_command_inject(hwnd: usize) {
         return;
     }
     let paints = IRFANVIEW_MAIN_PAINTS.fetch_add(1, Ordering::Relaxed) + 1;
-    if paints < 2 {
+    let min_paints = std::env::var("WEAVE_TEST_WM_COMMAND_MIN_PAINTS")
+        .ok()
+        .and_then(|s| s.parse::<u32>().ok())
+        .filter(|&n| n >= 1)
+        .unwrap_or(2);
+    if paints < min_paints {
         return;
     }
     if TEST_WM_COMMAND_DONE.swap(true, Ordering::Relaxed) {
