@@ -2642,6 +2642,12 @@ pub unsafe extern "win64" fn create_file_w(
         eprintln!("DIAG: file_opens_n={fot} path={win_path:?}");
     }
 
+    if std::env::var("WEAVE_TEST_SAVE_RESULT").is_ok() && win_path.contains("save_png_gate") {
+        eprintln!(
+            "weave/E3-M9-trace: CreateFileW save-path path={win_path:?} disp={dw_creation_disposition:#x}"
+        );
+    }
+
     // Log every open (write OR read) for diagnostic coverage. Previously only
     // write-opens and .bmp read-opens were logged; broadened so 7za-style read
     // probes are visible in CI when chasing stale-LastError bugs.
@@ -2809,6 +2815,43 @@ pub unsafe extern "win64" fn write_file(
             return 0; // FALSE
         }
     };
+
+    if std::env::var("WEAVE_TEST_SAVE_RESULT").is_ok() {
+        let proc_link = format!("/proc/self/fd/{fd}");
+        if let Ok(linux_path) = std::fs::read_link(&proc_link) {
+            let path_str = linux_path.to_string_lossy();
+            if path_str.contains("save_png_gate") && !lp_buffer.is_null() && n_bytes_to_write > 0 {
+                let n_sample = (n_bytes_to_write as usize).min(8);
+                // SAFETY: lp_buffer is non-null and n_sample ≤ n_bytes_to_write per caller contract.
+                let sample = unsafe { std::slice::from_raw_parts(lp_buffer, n_sample) };
+                let hex: String = sample
+                    .iter()
+                    .map(|b| format!("{b:02X}"))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let magic = if sample.len() >= 3
+                    && sample[0] == 0xFF
+                    && sample[1] == 0xD8
+                    && sample[2] == 0xFF
+                {
+                    "JPEG"
+                } else if sample.len() >= 4
+                    && sample[0] == 0x89
+                    && sample[1] == 0x50
+                    && sample[2] == 0x4E
+                    && sample[3] == 0x47
+                {
+                    "PNG"
+                } else {
+                    "unknown"
+                };
+                eprintln!(
+                    "weave/E3-M9-trace: WriteFile magic path={path_str:?} n_bytes={n_bytes_to_write} \
+                     first_bytes=[{hex}] format={magic}"
+                );
+            }
+        }
+    }
 
     // SAFETY: (a) lp_buffer is non-null (checked above).  (b) Guest heap —
     // caller-owned for the duration of this call.  (c) Valid for at least

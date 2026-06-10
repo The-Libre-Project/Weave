@@ -669,6 +669,32 @@ fn get_save_file_name_w_test_hook(lp_ofn: *mut u8, ofn: Ofn, test_path: &str) ->
 
     // SAFETY: lp_str_file/n_max_file are guest-owned output buffer fields from OPENFILENAMEW.
     encode_wide_into(&win_path, ofn.lp_str_file, ofn.n_max_file);
+
+    // E3-M9 instrumentation: read back guest OFN state after hook writes (observation only).
+    // SAFETY: lp_ofn is a valid guest OPENFILENAMEW buffer for the duration of this call.
+    let (rb_n_filter_index, rb_flags, rb_n_file_offset, rb_n_file_extension, rb_lpstr_file) = unsafe {
+        let rb_n_filter_index = *(lp_ofn.add(44) as *const u32);
+        let rb_flags = *(lp_ofn.add(96) as *const u32);
+        let rb_n_file_offset = *(lp_ofn.add(100) as *const u16);
+        let rb_n_file_extension = *(lp_ofn.add(102) as *const u16);
+        let rb_lpstr_file_ptr = *(lp_ofn.add(48) as *const *const u16);
+        let rb_lpstr_file = decode_wide_ptr(rb_lpstr_file_ptr).unwrap_or_default();
+        (
+            rb_n_filter_index,
+            rb_flags,
+            rb_n_file_offset,
+            rb_n_file_extension,
+            rb_lpstr_file,
+        )
+    };
+    let rb_lpstr_filter = ofn.lp_str_filter as usize;
+    let rb_lpstr_def_ext = ofn.lp_str_def_ext as usize;
+    eprintln!(
+        "weave/E3-M9-trace: post-hook readback nFilterIndex={rb_n_filter_index} Flags={rb_flags:#x} \
+         nFileOffset={rb_n_file_offset} nFileExtension={rb_n_file_extension} \
+         lpstrFile={rb_lpstr_file:?} lpstrFilter={rb_lpstr_filter:#x} lpstrDefExt={rb_lpstr_def_ext:#x}"
+    );
+
     1
 }
 
