@@ -182,28 +182,36 @@ fn va_arg_u64(ap: *const u8, slot: &mut usize) -> u64 {
     v
 }
 
-fn try_read_u16_at(addr: usize) -> Option<u16> {
-    if addr == 0 {
+fn guest_ptr_readable(addr: usize) -> bool {
+    if addr < 0x10000 {
+        return false;
+    }
+    let pe_base = weave_core::seh::pe_base();
+    let pe_size = weave_core::seh::pe_size();
+    if pe_base != 0 && addr >= pe_base && addr < pe_base + pe_size {
+        return true;
+    }
+    if addr >= 0x0000_7f00_0000_0000 {
+        return true;
+    }
+    let top_byte = addr >> 40;
+    top_byte == 0x55 || top_byte == 0x56 || top_byte == 0x5a
+}
+
+fn read_wide_at_guest(addr: usize) -> Option<u16> {
+    if !guest_ptr_readable(addr) {
         return None;
     }
-    let path = b"/proc/self/mem\0";
-    let fd = unsafe { libc::open(path.as_ptr().cast(), libc::O_RDONLY) };
-    if fd < 0 {
-        return None;
-    }
-    let mut buf = [0u8; 2];
-    let n = unsafe { libc::pread(fd, buf.as_mut_ptr().cast(), 2, addr as libc::off_t) };
-    unsafe { libc::close(fd) };
-    if n != 2 {
-        return None;
-    }
-    Some(u16::from_le_bytes(buf))
+    Some(unsafe { (addr as *const u16).read_unaligned() })
 }
 
 fn wide_strlen_guest(addr: usize) -> usize {
+    if !guest_ptr_readable(addr) {
+        return 0;
+    }
     let mut len = 0usize;
     while len < MAX_GUEST_STR_LEN {
-        match try_read_u16_at(addr + len * 2) {
+        match read_wide_at_guest(addr + len * 2) {
             Some(0) => break,
             Some(_) => len += 1,
             None => return 0,
@@ -376,7 +384,7 @@ fn wvsprintf_w_inner(buffer: *mut u16, format: *const u16, ap: *const u8) -> i32
                     let _ = push_pad(&mut out, buffer, maxlen, pad, ' ' as u16);
                 }
                 for i in 0..len {
-                    let Some(ch) = try_read_u16_at(ptr_addr + i * 2) else {
+                    let Some(ch) = read_wide_at_guest(ptr_addr + i * 2) else {
                         break;
                     };
                     if !push_wide(&mut out, buffer, maxlen, ch) {
