@@ -141,15 +141,22 @@ pub fn encode_dword(v: u32) -> Vec<u8> {
 
 /// Write a value file to disk. Creates parent directories as needed.
 /// The file format: 4-byte LE type header, then `data`.
+///
+/// If the value already exists, this is a no-op — preserves any value the
+/// guest app wrote on a previous run. Defaults are seeds, not overrides.
 fn write_value(key_dir: &Path, name: &str, reg_type: u32, data: &[u8]) {
     let filename = if name.is_empty() {
         DEFAULT_VALUE_FILENAME
     } else {
         name
     };
+    let path = key_dir.join(filename);
+    // Don't overwrite existing values — the guest may have modified them.
+    if path.exists() {
+        return;
+    }
     // Create the directory (and all parents) if it doesn't exist.
     let _ = std::fs::create_dir_all(key_dir);
-    let path = key_dir.join(filename);
     let mut content = reg_type.to_le_bytes().to_vec();
     content.extend_from_slice(data);
     let _ = std::fs::write(path, content);
@@ -174,8 +181,8 @@ fn dword(key_dir: &Path, name: &str, value: u32) {
 /// applications commonly read at startup.
 ///
 /// Called once by `weave-cli` before jumping to the PE entry point.
-/// Safe to call multiple times — existing files are overwritten with the
-/// same values, which is harmless.
+/// Safe to call multiple times — existing values are preserved (written
+/// only on first run), so guest modifications persist across sessions.
 pub fn populate() {
     let reg = prefix::get().join("registry");
 
