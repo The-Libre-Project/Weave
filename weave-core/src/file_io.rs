@@ -77,6 +77,43 @@ pub fn win32_disposition_to_nt(win32: u32) -> u32 {
     }
 }
 
+/// True when `win_path` is drive-relative (`C:foo`, `Z:.\bar`) — has a drive
+/// letter and colon but is not drive-absolute (`C:\foo`).
+fn is_drive_relative(win_path: &str) -> bool {
+    let bytes = win_path.as_bytes();
+    bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && bytes[2] != b'\\'
+        && bytes[2] != b'/'
+}
+
+/// Resolve `Z:` drive-relative paths against the real Linux process CWD.
+///
+/// Wine ref: dlls/ntdll/path.c — RtlPathTypeDriveRelative prepends the PEB
+/// current directory when the path's drive matches; Weave exposes CWD as
+/// `Z:\<linux-cwd>` via GetCurrentDirectoryW.
+fn resolve_z_drive_relative(win_path: &str) -> Option<std::path::PathBuf> {
+    let bytes = win_path.as_bytes();
+    if bytes.len() < 2 || bytes[1] != b':' {
+        return None;
+    }
+    let drive = bytes[0] as char;
+    if !drive.eq_ignore_ascii_case(&'Z') || !is_drive_relative(win_path) {
+        return None;
+    }
+
+    let mut rest = &win_path[2..];
+    if rest.starts_with(".\\") || rest.starts_with("./") {
+        rest = &rest[2..];
+    } else if rest == "." {
+        rest = "";
+    }
+
+    let rel = rest.replace('\\', "/");
+    std::env::current_dir().ok().map(|cwd| cwd.join(&rel))
+}
+
 /// Translate a Windows path to a Linux path, with a fallback for native Linux
 /// absolute paths that have been passed through a Windows application.
 ///
@@ -90,6 +127,19 @@ pub fn win32_disposition_to_nt(win32: u32) -> u32 {
 /// backslashes replaced by forward slashes — is a valid Linux absolute path
 /// that does exist, and returns that instead.
 pub fn translate_win_path(win_path: &str) -> Result<std::path::PathBuf, i32> {
+    // Z: drive-relative paths (e.g. IrfanView plugin scan `Z:.\*.*`) must
+    // resolve against the Linux CWD, not the Z: drive root `/`.
+    if let Some(cwd_candidate) = resolve_z_drive_relative(win_path) {
+        if cwd_candidate.exists() {
+            return Ok(cwd_candidate);
+        }
+        if let Some(parent) = cwd_candidate.parent() {
+            if parent.exists() {
+                return Ok(cwd_candidate);
+            }
+        }
+    }
+
     let translated = prefix::translator()
         .to_linux_str(win_path)
         .map_err(|_| STATUS_UNSUCCESSFUL)?;
@@ -314,4 +364,54 @@ pub fn case_fold_lookup(path: &std::path::Path) -> Option<std::ffi::CString> {
         .into_iter()
         .next()
         .and_then(|name| path_to_cstring(&parent.join(name)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::env;
+    use std::fs;
+    use std::path::PathBuf;
+
+    #[test]
+    fn z_drive_relative_wildcard_resolves_to_cwd() {
+        let tmp = env::temp_dir().join(format!("weave_z_rel_{}", std::process::id()));
+        fs::create_dir_all(&tmp).unwrap();
+        env::set_current_dir(&tmp).unwrap();
+        let cwd = env::current_dir().unwrap();
+
+        let resolved = translate_win_path(r"Z:.\*.*").unwrap();
+        assert_eq!(resolved.parent().unwrap(), cwd);
+        assert_eq!(resolved.file_name().unwrap().to_string_lossy(), "*.*");
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn z_drive_relative_plugins_path_resolves_to_cwd() {
+        let tmp = env::temp_dir().join(format!("weave_z_plugins_{}", std::process::id()));
+        let plugins = tmp.join("Plugins");
+        fs::create_dir_all(&plugins).unwrap();
+        env::set_current_dir(&tmp).unwrap();
+        let cwd = env::current_dir().unwrap();
+
+        let resolved = translate_win_path(r"Z:Plugins\OptiPNG.dll").unwrap();
+        assert_eq!(resolved, cwd.join("Plugins/OptiPNG.dll"));
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn z_drive_absolute_still_maps_to_linux_root() {
+        let resolved = translate_win_path(r"Z:\tmp\test.txt").unwrap();
+        assert_eq!(resolved, PathBuf::from("/tmp/test.txt"));
+    }
+
+    #[test]
+    fn is_drive_relative_detects_colon_without_separator() {
+        assert!(is_drive_relative(r"Z:.\*.*"));
+        assert!(is_drive_relative(r"Z:Plugins\foo.dll"));
+        assert!(!is_drive_relative(r"Z:\tmp\foo"));
+        assert!(!is_drive_relative(r"C:\Users\foo"));
+    }
 }
