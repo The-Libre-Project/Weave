@@ -26,6 +26,7 @@ pub mod menu;
 pub mod menu_handles;
 pub mod queue;
 pub mod window;
+pub mod wsprintf;
 
 // ── uxtheme.dll stubs ─────────────────────────────────────────────────────────
 //
@@ -1318,6 +1319,12 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
             create_accelerator_table_w as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
         ),
         "DestroyAcceleratorTable" => Some(destroy_accelerator_table as *const () as usize),
+        "wsprintfW" => {
+            Some(wsprintf::wsprintf_w as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "wvsprintfW" => Some(
+            wsprintf::wvsprintf_w as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
+        ),
         // SumatraPDF DDE single-instance stubs
         "DdeInitializeW" => Some(
             api::dde_initialize_w as unsafe extern "win64" fn(_, _, _, _) -> _ as *const ()

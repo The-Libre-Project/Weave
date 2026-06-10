@@ -5888,6 +5888,7 @@ fn is_emulated_dll(key: &str) -> bool {
             | "gdi32.dll"
             | "msimg32.dll"
             | "shell32.dll"
+            | "comdlg32.dll"
             | "ole32.dll"
             | "mmdevapi.dll"
             | "xinput1_3.dll"

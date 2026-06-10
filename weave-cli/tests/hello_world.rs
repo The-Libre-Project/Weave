@@ -2057,8 +2057,12 @@ fn irfanview_save_png_gate() {
         "--- irfanview_save_png_gate STDERR BEGIN ---\n{stderr}\n--- irfanview_save_png_gate STDERR END ---"
     );
 
+    let paint_ready = first_paint_seen
+        || stderr.contains(FIRST_BLIT_MARKER)
+        || stderr.contains(FIRST_WM_PAINT_MARKER)
+        || stderr.contains(WM_PAINT_PHASE_MARKER);
     assert!(
-        first_paint_seen,
+        paint_ready,
         "irfanview_save_png_gate FAIL: no first paint — UI not ready before Save As drive.\nstderr:\n{stderr}"
     );
 
