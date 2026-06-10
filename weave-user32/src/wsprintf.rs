@@ -59,7 +59,7 @@ fn wide_format_to_utf8(format: *const u16) -> Option<Vec<u8>> {
 // Wine ref: dlls/user32/wsprintf.c — wvsprintfW calls wvsnprintfW(buf, 1024, spec, args);
 // overflow returns 1024; wsprintfW is a thin va_start wrapper around wvsnprintfW.
 fn wvsprintf_w_inner(buffer: *mut u16, format: *const u16, args: *mut c_void) -> i32 {
-    if buffer.is_null() || format.is_null() {
+    if buffer.is_null() || format.is_null() || args.is_null() {
         return -1;
     }
     let Some(fmt_bytes) = wide_format_to_utf8(format) else {
@@ -120,7 +120,17 @@ pub unsafe extern "win64" fn wvsprintf_w(
 /// arguments must match `format` and are read via the Windows-x64 va_list spill layout.
 // Wine ref: dlls/user32/wsprintf.c — wsprintfW va_start(valist, spec); wvsnprintfW(buf, 1024, spec, valist).
 pub unsafe extern "win64" fn wsprintf_w(buffer: *mut u16, format: *const u16) -> i32 {
-    let args =
-        (std::ptr::addr_of!(format) as usize + std::mem::size_of::<*const u16>()) as *mut c_void;
+    if buffer.is_null() || format.is_null() {
+        return -1;
+    }
+    // Windows x64 va_start(ap, format): ap points at the homed R8 slot = RSP+24 on entry
+    // (after return addr + RCX/RDX home space). Must not use addr_of!(format) — Rust spills
+    // parameters to its own frame, not the caller's home area.
+    let args: *mut c_void;
+    core::arch::asm!(
+        "mov {args}, rsp",
+        "add {args}, 24",
+        args = out(reg) args,
+    );
     wvsprintf_w_inner(buffer, format, args)
 }
