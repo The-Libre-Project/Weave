@@ -952,7 +952,7 @@ pub unsafe extern "win64" fn translate_message(lp_msg: *const Msg) -> i32 {
 ///
 /// Gate hook: when `WEAVE_TEST_WM_COMMAND` is set, post `WM_COMMAND` to the IrfanView
 /// main frame after the second `WM_PAINT` (image load settled). Command id from the
-/// fixture ACCEL table (Shift+S → 0x481 Save As on i_view64.exe 4.73).
+/// RT_MENU/IRFANVIEW Save as... item (cmd 0x47d; Shift+S accel 0x481 is Sharpen, not Save As).
 // Wine ref: dlls/win32u/menu.c::translate_accelerator — on accel match sends
 // SendMessage(hwnd, WM_COMMAND, 0x10000|cmd, 0); same wparam layout used here.
 fn try_test_wm_command_inject(hwnd: usize) {

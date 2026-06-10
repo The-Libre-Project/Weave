@@ -1884,9 +1884,9 @@ fn irfanview_gif_open_gate() {
 /// and relies on `WEAVE_TEST_SAVE_RESULT` (E3-M9a) to satisfy `GetSaveFileNameW`
 /// without a blocking zenity dialog.
 ///
-/// Save As command id `0x481` (1153): from i_view64.exe RT_ACCELERATOR table
-/// (IRFANVIEW/1033) — Shift+S entry; injected as `WM_COMMAND` wparam `0x10000|cmd`
-/// (same layout as `TranslateAcceleratorW`). xdotool is used only for Alt+F4 teardown.
+/// Save As command id `0x47d` (1149): from i_view64.exe RT_MENU/IRFANVIEW — `&Save as...`
+/// menuitem (E3-M9e RE: Shift+S accel `0x481` is *Sharpen*, not Save As). Injected as
+/// `WM_COMMAND` wparam `0x10000|cmd` (accel layout). xdotool is used only for Alt+F4 teardown.
 ///
 /// Tier A A1: stderr contains `weave/GetSaveFileNameW: test hook → TRUE path=` with a
 /// non-empty path (dialog returned TRUE via env hook).
@@ -1942,8 +1942,8 @@ fn irfanview_save_png_gate() {
         .arg(&bmp_path)
         .env("DISPLAY", ":99")
         .env("WEAVE_TEST_SAVE_RESULT", out_base.display().to_string())
-        // E3-M9d: Shift+S accel → cmd 0x481 (Save As) per fixture ACCEL resource probe.
-        .env("WEAVE_TEST_WM_COMMAND", "1153")
+        // E3-M9e: RT_MENU/IRFANVIEW Save as... → cmd 0x47d (not Shift+S accel 0x481=Sharpen).
+        .env("WEAVE_TEST_WM_COMMAND", "1149")
         .stderr(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .spawn()
@@ -2011,7 +2011,7 @@ fn irfanview_save_png_gate() {
                 if first_paint_seen && !drive_done {
                     // WEAVE_TEST_WM_COMMAND inject fires inside weave after 2nd IrfanView WM_PAINT.
                     eprintln!(
-                        "irfanview_save_png_gate: first_paint seen — waiting for WEAVE_TEST_WM_COMMAND inject (cmd=0x481)"
+                        "irfanview_save_png_gate: first_paint seen — waiting for WEAVE_TEST_WM_COMMAND inject (cmd=0x47d)"
                     );
                     drive_done = true;
                     std::thread::sleep(std::time::Duration::from_secs(6));
