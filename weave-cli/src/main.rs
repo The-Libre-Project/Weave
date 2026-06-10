@@ -1,7 +1,9 @@
 use clap::Parser;
 use std::path::PathBuf;
 use weave_common::com::shell_link::ShellLinkSaveData;
-use weave_core::{cfg, cmdline, dll_registry, exec, iat, loader, pe, prefix, registry, seh, teb};
+use weave_core::{
+    cfg, cmdline, dll_registry, exec, iat, loader, module_handles, pe, prefix, registry, seh, teb,
+};
 use weave_installer::PrefixManager;
 
 mod arch;
@@ -514,6 +516,62 @@ fn main() {
                         "weave: {dll_name}: unresolved import {d}!{f} at iat={va:#x} (skipped)"
                     );
                 });
+            }
+        }
+    }
+
+    // ── 2.6. E3-M9: pre-load IrfanView Plugins/OptiPNG.dll for save gate ───
+    // Guest never calls FindFirstFileW on Plugins\*.dll under Weave; preload
+    // so OptiPNG_W is registered before Save As runs.
+    if std::env::var("WEAVE_TEST_SAVE_RESULT").is_ok() {
+        let exe_dir_canon = args.exe.canonicalize().unwrap_or_else(|_| args.exe.clone());
+        if let Some(exe_parent) = exe_dir_canon.parent() {
+            let optipng_path = exe_parent.join("Plugins/OptiPNG.dll");
+            if let Ok(dll_bytes) = std::fs::read(&optipng_path) {
+                let key = "optipng.dll".to_string();
+                let name = "OptiPNG.dll";
+                match loader::load_dll(&dll_bytes) {
+                    Ok((image, exports)) => {
+                        let image_base = image.base as usize;
+                        let dll_entry = image.entry_point;
+                        unsafe {
+                            iat::patch_best_effort(&dll_bytes, image.base, resolve, |d, f, va| {
+                                eprintln!(
+                                    "weave/E3-M9-trace: OptiPNG.dll unresolved import {d}!{f} at iat={va:#x}"
+                                );
+                            });
+                        }
+                        cfg::disable_report_gsfailure(&dll_bytes, image.base);
+                        cfg::disable_fastfail_gs(&dll_bytes, image.base);
+                        dll_registry::register(key, image, exports);
+                        module_handles::register_with_handle(name, image_base);
+                        module_handles::register_image_path(name, image_base);
+                        if !dll_entry.is_null() {
+                            const DLL_PROCESS_ATTACH: u32 = 1;
+                            type DllMain = unsafe extern "win64" fn(
+                                hinst: usize,
+                                reason: u32,
+                                reserved: usize,
+                            )
+                                -> i32;
+                            let dll_main: DllMain = unsafe { std::mem::transmute(dll_entry) };
+                            let ok = unsafe { dll_main(image_base, DLL_PROCESS_ATTACH, 0) };
+                            eprintln!(
+                                "weave/E3-M9-trace: preloaded OptiPNG.dll DllMain({image_base:#x}) → {ok}"
+                            );
+                        }
+                        eprintln!(
+                            "weave/E3-M9-trace: preloaded OptiPNG.dll from {} at {image_base:#x}",
+                            optipng_path.display()
+                        );
+                    }
+                    Err(e) => eprintln!("weave/E3-M9-trace: OptiPNG preload failed: {e}"),
+                }
+            } else {
+                eprintln!(
+                    "weave/E3-M9-trace: OptiPNG.dll not found at {}",
+                    optipng_path.display()
+                );
             }
         }
     }
