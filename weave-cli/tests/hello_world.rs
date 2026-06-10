@@ -1916,6 +1916,13 @@ fn irfanview_save_png_gate() {
         return;
     }
 
+    let optipng_plugin = format!("{irfan_dir}/Plugins/OptiPNG.dll");
+    if !std::path::Path::new(&optipng_plugin).exists() {
+        eprintln!("skipping: {optipng_plugin} not present — PNG Save-As needs IrfanView OptiPNG plugin");
+        eprintln!("  → run: bash scripts/fetch-irfanview-optipng-plugin.sh");
+        return;
+    }
+
     if std::process::Command::new("xdotool")
         .arg("version")
         .output()

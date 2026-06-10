@@ -5721,6 +5721,18 @@ fn load_library_impl(name: &str) -> usize {
         if let Ok(p) = file_io::translate_win_path(&candidate_win) {
             candidates.push(p);
         }
+        // IrfanView loads format plugins from {exe_dir}\Plugins\<name>.dll (OptiPNG etc.).
+        let plugins_win = format!("{}\\Plugins\\{}", exe_dir_win, key);
+        if let Ok(p) = file_io::translate_win_path(&plugins_win) {
+            candidates.push(p);
+        }
+    }
+
+    if std::env::var("WEAVE_TEST_SAVE_RESULT").is_ok() {
+        let probe = key.to_ascii_lowercase();
+        if probe.contains("optipng") || probe.contains("plugin") {
+            eprintln!("weave/E3-M9-trace: LoadLibrary({name:?}) key={key}");
+        }
     }
 
     // 3. Prefix System32 / basename
@@ -6131,6 +6143,13 @@ pub unsafe extern "win64" fn get_proc_address(h_module: usize, lp_proc_name: *co
     let func_name = unsafe { read_cstr_a(lp_proc_name) };
     if func_name.is_empty() {
         return 0;
+    }
+
+    if std::env::var("WEAVE_TEST_SAVE_RESULT").is_ok() {
+        let upper = func_name.to_ascii_uppercase();
+        if upper.contains("PLUGIN") || upper.contains("OPTIPNG") {
+            eprintln!("weave/E3-M9-trace: GetProcAddress probe {func_name}");
+        }
     }
 
     let dll_name = match weave_core::module_handles::lookup(h_module) {
