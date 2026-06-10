@@ -10169,25 +10169,49 @@ pub unsafe extern "win64" fn get_full_path_name_w(
     // Resolve relative paths against the real CWD (returned as Z:\... by
     // GetCurrentDirectoryW).  Previously this hardcoded "C:\" which caused
     // CreateFileW to look in the wrong drive for any relative-path argument.
-    let resolved_path =
-        if len >= 2 && (slice[0] as u8).is_ascii_alphabetic() && slice[1] == b':' as u16 {
-            // Already absolute with drive letter — use as-is.
-            win_path
-        } else if win_path.starts_with('\\') {
-            // Root-relative (no drive): prepend drive letter from CWD.
-            let cwd = std::env::current_dir()
-                .map(|p| format!("Z:{}", p.to_string_lossy().replace('/', "\\")))
-                .unwrap_or_else(|_| "Z:\\".to_string());
-            let drive = cwd.split(':').next().unwrap_or("Z");
-            format!("{}:{}", drive, win_path)
+    let cwd_win = std::env::current_dir()
+        .map(|p| format!("Z:{}", p.to_string_lossy().replace('/', "\\")))
+        .unwrap_or_else(|_| "Z:\\".to_string());
+    let is_drive_absolute = len >= 3 && slice[1] == b':' as u16 && slice[2] == b'\\' as u16;
+    let is_drive_relative = len >= 2
+        && (slice[0] as u8).is_ascii_alphabetic()
+        && slice[1] == b':' as u16
+        && !is_drive_absolute;
+
+    let resolved_path = if is_drive_relative {
+        // Wine ref: dlls/ntdll/path.c — RtlPathTypeDriveRelative prepends the PEB
+        // current directory when the path's drive matches the process CWD drive.
+        let path_drive = (slice[0] as u8 as char).to_ascii_uppercase();
+        let cwd_drive = cwd_win.chars().next().unwrap_or('Z').to_ascii_uppercase();
+        let mut rest = &win_path[2..];
+        if let Some(stripped) = rest.strip_prefix(".\\").or_else(|| rest.strip_prefix("./")) {
+            rest = stripped;
+        } else if rest == "." {
+            rest = "";
+        }
+        if path_drive == cwd_drive {
+            let cwd_trimmed = cwd_win.trim_end_matches('\\');
+            if rest.is_empty() {
+                cwd_win.clone()
+            } else {
+                format!("{cwd_trimmed}\\{rest}")
+            }
         } else {
-            // Relative path: prepend full CWD.
-            let cwd = std::env::current_dir()
-                .map(|p| format!("Z:{}", p.to_string_lossy().replace('/', "\\")))
-                .unwrap_or_else(|_| "Z:\\".to_string());
-            let cwd_trimmed = cwd.trim_end_matches('\\');
-            format!("{}\\{}", cwd_trimmed, win_path)
-        };
+            // Different drive — anchor at that drive's root.
+            format!("{}:\\{}", path_drive, rest)
+        }
+    } else if len >= 2 && (slice[0] as u8).is_ascii_alphabetic() && slice[1] == b':' as u16 {
+        // Drive-absolute (Z:\...) — use as-is.
+        win_path
+    } else if win_path.starts_with('\\') {
+        // Root-relative (no drive): prepend drive letter from CWD.
+        let drive = cwd_win.split(':').next().unwrap_or("Z");
+        format!("{}:{}", drive, win_path)
+    } else {
+        // Relative path: prepend full CWD.
+        let cwd_trimmed = cwd_win.trim_end_matches('\\');
+        format!("{}\\{}", cwd_trimmed, win_path)
+    };
 
     // Convert back to UTF-16 with null terminator
     let wide_path: Vec<u16> = resolved_path
@@ -10270,25 +10294,44 @@ pub unsafe extern "win64" fn get_full_path_name_a(
     // Resolve relative paths against the real CWD (returned as Z:\... by
     // GetCurrentDirectoryW).  Previously this hardcoded "C:\" which caused
     // CreateFileW to look in the wrong drive for any relative-path argument.
-    let resolved_path = if win_path.len() >= 2
-        && win_path.as_bytes()[0].is_ascii_alphabetic()
-        && win_path.as_bytes()[1] == b':'
-    {
-        // Already absolute with drive letter — use as-is.
+    let cwd_win = std::env::current_dir()
+        .map(|p| format!("Z:{}", p.to_string_lossy().replace('/', "\\")))
+        .unwrap_or_else(|_| "Z:\\".to_string());
+    let bytes = win_path.as_bytes();
+    let is_drive_absolute = bytes.len() >= 3 && bytes[1] == b':' && bytes[2] == b'\\';
+    let is_drive_relative = bytes.len() >= 2
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && !is_drive_absolute;
+
+    let resolved_path = if is_drive_relative {
+        let path_drive = (bytes[0] as char).to_ascii_uppercase();
+        let cwd_drive = cwd_win.chars().next().unwrap_or('Z').to_ascii_uppercase();
+        let mut rest = &win_path[2..];
+        if let Some(stripped) = rest.strip_prefix(".\\").or_else(|| rest.strip_prefix("./")) {
+            rest = stripped;
+        } else if rest == "." {
+            rest = "";
+        }
+        if path_drive == cwd_drive {
+            let cwd_trimmed = cwd_win.trim_end_matches('\\');
+            if rest.is_empty() {
+                cwd_win.clone()
+            } else {
+                format!("{cwd_trimmed}\\{rest}")
+            }
+        } else {
+            format!("{}:\\{}", path_drive, rest)
+        }
+    } else if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
         win_path
     } else if win_path.starts_with('\\') {
         // Root-relative (no drive): prepend drive letter from CWD.
-        let cwd = std::env::current_dir()
-            .map(|p| format!("Z:{}", p.to_string_lossy().replace('/', "\\")))
-            .unwrap_or_else(|_| "Z:\\".to_string());
-        let drive = cwd.split(':').next().unwrap_or("Z");
+        let drive = cwd_win.split(':').next().unwrap_or("Z");
         format!("{}:{}", drive, win_path)
     } else {
         // Relative path: prepend full CWD.
-        let cwd = std::env::current_dir()
-            .map(|p| format!("Z:{}", p.to_string_lossy().replace('/', "\\")))
-            .unwrap_or_else(|_| "Z:\\".to_string());
-        let cwd_trimmed = cwd.trim_end_matches('\\');
+        let cwd_trimmed = cwd_win.trim_end_matches('\\');
         format!("{}\\{}", cwd_trimmed, win_path)
     };
 
