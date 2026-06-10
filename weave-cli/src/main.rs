@@ -1,5 +1,5 @@
 use clap::Parser;
-use std::path::PathBuf;
+use std::path::{Component, PathBuf};
 use weave_common::com::shell_link::ShellLinkSaveData;
 use weave_core::{
     cfg, cmdline, dll_registry, exec, iat, loader, module_handles, pe, prefix, registry, seh, teb,
@@ -7,6 +7,24 @@ use weave_core::{
 use weave_installer::PrefixManager;
 
 mod arch;
+
+/// Collapse `.` / `..` without following symlinks (`canonicalize` would break
+/// NXEngine short-path symlinks). `std::path::absolute` does not normalize `..`
+/// on paths that are already absolute.
+fn normalize_lexical(path: PathBuf) -> PathBuf {
+    let mut out = PathBuf::new();
+    for comp in path.components() {
+        match comp {
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::CurDir => {}
+            Component::RootDir | Component::Prefix(_) => out.push(comp),
+            Component::Normal(s) => out.push(s),
+        }
+    }
+    out
+}
 
 /// Weave — run Windows executables on Linux.
 #[derive(Parser)]
@@ -359,18 +377,18 @@ fn main() {
     //
     // Do NOT call canonicalize() here — that resolves symlinks and would defeat
     // short-path symlinks used to work around NXEngine's fixed-size path buffers
-    // (e.g. /tmp/nx → tests/fixtures/nxengine). Use std::path::absolute to make
-    // the path absolute and collapse `.` / `..` without following symlinks.
+    // (e.g. /tmp/nx → tests/fixtures/nxengine). Make absolute, then lexical-clean.
     {
         let joined = if args.exe.is_absolute() {
             args.exe.clone()
         } else {
             std::env::current_dir()
-                .unwrap_or_else(|_| std::path::PathBuf::from("."))
+                .unwrap_or_else(|_| PathBuf::from("."))
                 .join(&args.exe)
         };
         let abs = std::path::absolute(&joined).unwrap_or(joined);
-        let win_path = format!("Z:{}", abs.to_string_lossy().replace('/', "\\"));
+        let clean = normalize_lexical(abs);
+        let win_path = format!("Z:{}", clean.to_string_lossy().replace('/', "\\"));
         weave_core::exe_path::set(&win_path);
     }
 
