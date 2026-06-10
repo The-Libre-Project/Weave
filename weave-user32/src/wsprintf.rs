@@ -182,16 +182,19 @@ fn va_arg_u64(ap: *const u8, slot: &mut usize) -> u64 {
     v
 }
 
+fn read_wide_at(ptr: *const u16, index: usize) -> u16 {
+    // Guest buffers may be misaligned; use unaligned reads (x86-64 allows this).
+    unsafe { ptr.add(index).read_unaligned() }
+}
+
 fn wide_strlen(ptr: *const u16) -> usize {
     if ptr.is_null() {
         return 0;
     }
     let mut len = 0usize;
     while len < MAX_GUEST_STR_LEN {
-        unsafe {
-            if *ptr.add(len) == 0 {
-                break;
-            }
+        if read_wide_at(ptr, len) == 0 {
+            break;
         }
         len += 1;
     }
@@ -362,7 +365,7 @@ fn wvsprintf_w_inner(buffer: *mut u16, format: *const u16, ap: *const u8) -> i32
                     let _ = push_pad(&mut out, buffer, maxlen, pad, ' ' as u16);
                 }
                 for i in 0..len {
-                    let ch = unsafe { *ptr.add(i) };
+                    let ch = read_wide_at(ptr, i);
                     if !push_wide(&mut out, buffer, maxlen, ch) {
                         break;
                     }
@@ -453,9 +456,10 @@ pub unsafe extern "win64" fn wsprintf_w(buffer: *mut u16, format: *const u16) ->
         ap = out(reg) ap,
     );
 
-    let fmt_preview = decode_wide(format);
+    let fmt_preview = unsafe { decode_wide(format) };
+    eprintln!("weave/user32: wsprintfW enter fmt={fmt_preview:?}");
     let ret = wvsprintf_w_inner(buffer, format, ap);
-    eprintln!("weave/user32: wsprintfW fmt={fmt_preview:?} ret={ret}");
+    eprintln!("weave/user32: wsprintfW ret={ret}");
     if ret < 0 {
         0
     } else {
