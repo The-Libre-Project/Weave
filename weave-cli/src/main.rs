@@ -29,10 +29,6 @@ struct Args {
     #[arg(long)]
     no_sandbox: bool,
 
-    /// Force ReactOS VM fallback mode, bypassing native API translation
-    #[arg(long)]
-    force_vm: bool,
-
     /// Arguments to pass to the Windows executable (e.g. `weave app.exe arg1 arg2`)
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     exe_args: Vec<String>,
@@ -435,17 +431,6 @@ fn main() {
             }
             Err(e) => eprintln!("weave: warning: could not load {dll_name}: {e}"),
         }
-    }
-
-    // ── 1.5. VM fallback dispatch ─────────────────────────────────────────
-    // Check before loading the PE — if we're going into the VM, we don't
-    // need to map the binary into this process at all.
-    if weave_vm_fallback::should_use_vm_fallback(&args.exe, args.force_vm) {
-        let exit_code = weave_vm_fallback::execute_in_vm(&args.exe, &[]).unwrap_or_else(|e| {
-            eprintln!("weave: VM fallback failed: {e}");
-            std::process::exit(1);
-        });
-        std::process::exit(exit_code);
     }
 
     let bytes = std::fs::read(&args.exe).unwrap_or_else(|e| {

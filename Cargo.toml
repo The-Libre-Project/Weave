@@ -15,7 +15,7 @@ members = [
     "weave-core",
     "weave-ucrt",
     "weave-vulkan",
-    "weave-cli", "weave-mmdevapi", "weave-d3d12", "weave-plugin-system", "weave-vm-fallback", "weave-xinput", "weave-compat-db", "weave-winmm",
+    "weave-cli", "weave-mmdevapi", "weave-d3d12", "weave-plugin-system", "weave-xinput", "weave-compat-db", "weave-winmm",
     "weave-ws2",
     "weave-comctl32",
     "weave-oleaut32",

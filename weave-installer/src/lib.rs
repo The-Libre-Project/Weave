@@ -219,8 +219,6 @@ pub struct AppConfig {
     pub exe_path: Option<PathBuf>,
     /// Extra environment variables to set when launching this app.
     pub env_vars: Vec<(String, String)>,
-    /// Whether to force VM mode (via `weave-vm-fallback`) for this app.
-    pub force_vm: bool,
 }
 
 impl AppConfig {
@@ -231,7 +229,6 @@ impl AppConfig {
             display_name: display_name.into(),
             exe_path: None,
             env_vars: Vec::new(),
-            force_vm: false,
         }
     }
 }
@@ -326,7 +323,6 @@ mod tests {
         let cfg = AppConfig::new("notepad-plus-plus", "Notepad++");
         assert_eq!(cfg.app_id, "notepad-plus-plus");
         assert_eq!(cfg.display_name, "Notepad++");
-        assert!(!cfg.force_vm);
         assert!(cfg.env_vars.is_empty());
         assert!(cfg.exe_path.is_none());
     }
