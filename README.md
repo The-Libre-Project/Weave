@@ -134,6 +134,10 @@ All graphics paths target Vulkan as the common backend. Today, the only validate
 
 ---
 
+## Releases
+
+Tagged releases (`v*`) publish a Linux x86-64 binary as `weave-x86_64` plus `weave-x86_64.sha256` on GitHub Releases. Weave runs x86-64 Windows PE code natively and does not ship an aarch64 Linux build. To cut a release: tag `vX.Y.Z` on `main` after CI is green; the release workflow builds with `--release` and attaches both files. Dry-run without creating a release: `gh workflow run release.yml`.
+
 ## Roadmap
 
 For honest per-phase status (what's complete vs. code-exists vs. scaffolded vs. not started), see [`ROADMAP.md`](ROADMAP.md). The summary is: PE loader and minimal kernel32 / user32 / gdi32 plus sandboxing work end-to-end on a small corpus; DXVK/VKD3D, ARM64, GUI manager, install flow, real network clients, and hardware-accelerated games are open work.
