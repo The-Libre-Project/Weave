@@ -63,19 +63,69 @@ unsafe fn write_n_filter_index(p: *mut u8, index: u32) {
     }
 }
 
-/// Decode one null-terminated UTF-16 slice starting at `start` (in `u16` units).
-unsafe fn decode_wide_at(base: *const u16, start: usize) -> Option<String> {
-    let mut len = 0usize;
-    unsafe {
-        while *base.add(start + len) != 0 {
-            len += 1;
-        }
-        if len == 0 {
-            return None;
-        }
-        let slice = std::slice::from_raw_parts(base.add(start), len);
-        Some(String::from_utf16_lossy(slice))
+/// Maximum wide-string length when scanning guest-owned buffers.
+const MAX_GUEST_STR_LEN: usize = 65_536;
+
+/// Return true when `addr` is a plausible guest pointer (PE image, guest heap, or
+/// high canonical user-space). Mirrors `weave-user32/src/wsprintf.rs` so filter reads
+/// work for IrfanView `lpstrFilter` pointers in the `0x1400…` PE range.
+fn guest_ptr_readable(addr: usize) -> bool {
+    if addr < 0x10000 {
+        return false;
     }
+    let pe_base = weave_core::seh::pe_base();
+    let pe_size = weave_core::seh::pe_size();
+    if pe_base != 0 && addr >= pe_base && addr < pe_base + pe_size {
+        return true;
+    }
+    if addr >= 0x0000_7f00_0000_0000 {
+        return true;
+    }
+    let top_byte = addr >> 40;
+    top_byte == 0x55 || top_byte == 0x56 || top_byte == 0x5a
+}
+
+/// Read one UTF-16 code unit from guest memory using an unaligned load.
+fn read_wide_at_guest(addr: usize) -> Option<u16> {
+    if !guest_ptr_readable(addr) {
+        return None;
+    }
+    Some(unsafe { (addr as *const u16).read_unaligned() })
+}
+
+/// Length in `u16` code units of a guest null-terminated wide string at `addr`.
+fn wide_strlen_guest(addr: usize) -> Option<usize> {
+    if !guest_ptr_readable(addr) {
+        return None;
+    }
+    let mut len = 0usize;
+    while len < MAX_GUEST_STR_LEN {
+        match read_wide_at_guest(addr + len * 2)? {
+            0 => return Some(len),
+            _ => len += 1,
+        }
+    }
+    Some(len)
+}
+
+/// Decode one null-terminated UTF-16 slice starting at `start` (in `u16` units).
+///
+/// Uses per-code-unit `read_unaligned` loads so guest `lpstrFilter` buffers mapped
+/// in the PE image (`0x1400…`) decode correctly under the Weave host.
+unsafe fn decode_wide_at(base: *const u16, start: usize) -> Option<String> {
+    if base.is_null() {
+        return None;
+    }
+    let base_addr = base.cast::<u8>() as usize + start * 2;
+    let len = wide_strlen_guest(base_addr)?;
+    if len == 0 {
+        return None;
+    }
+    let mut chars = Vec::with_capacity(len);
+    for i in 0..len {
+        chars.push(read_wide_at_guest(base_addr + i * 2)?);
+    }
+    Some(String::from_utf16_lossy(&chars))
 }
 
 /// Parse `lpstrFilter` double-NUL display/pattern pairs into `(display, pattern)` strings.
@@ -117,12 +167,6 @@ fn png_filter_index_from_pairs(pairs: &[(String, String)]) -> Option<u32> {
         .map(|i| (i + 1) as u32)
 }
 
-/// Find PNG `nFilterIndex` from a guest `lpstrFilter` pointer.
-unsafe fn find_png_filter_index(filter_ptr: *const u16) -> Option<u32> {
-    let pairs = unsafe { decode_filter_pairs(filter_ptr) };
-    png_filter_index_from_pairs(&pairs)
-}
-
 // ── Wide string helpers ───────────────────────────────────────────────────────
 
 /// Decode a null-terminated UTF-16 pointer to a Rust String.
@@ -130,14 +174,7 @@ unsafe fn decode_wide_ptr(p: *const u16) -> Option<String> {
     if p.is_null() {
         return None;
     }
-    let mut len = 0usize;
-    unsafe {
-        while *p.add(len) != 0 {
-            len += 1;
-        }
-        let slice = std::slice::from_raw_parts(p, len);
-        Some(String::from_utf16_lossy(slice).to_owned())
-    }
+    unsafe { decode_wide_at(p, 0) }
 }
 
 /// Encode a Rust string into a UTF-16 buffer (null-terminated, truncated to `cap`).
@@ -547,10 +584,36 @@ fn get_save_file_name_w_test_hook(lp_ofn: *mut u8, ofn: Ofn, test_path: &str) ->
         def_ext_decoded.as_deref().unwrap_or("(null)")
     );
 
+    // Decode filter pairs once for diagnostics and PNG index selection.
+    // SAFETY: lp_str_filter is guest-owned; decode_filter_pairs scans until double-NUL.
+    let filter_pairs = unsafe { decode_filter_pairs(ofn.lp_str_filter) };
+    for (i, (display, pattern)) in filter_pairs.iter().enumerate() {
+        eprintln!(
+            "weave/GetSaveFileNameW: test hook filter pair {}: display={display:?} pattern={pattern:?}",
+            i + 1
+        );
+    }
+    if filter_pairs.is_empty() && !filter_null {
+        let base = ofn.lp_str_filter as usize;
+        let fmt_u16 = |addr: usize| {
+            read_wide_at_guest(addr)
+                .map(|v| format!("{v:#06x}"))
+                .unwrap_or_else(|| "?".to_string())
+        };
+        eprintln!(
+            "weave/GetSaveFileNameW: test hook filter decode empty; first u16 at {base:#x}: [{}, {}, {}, {}]",
+            fmt_u16(base),
+            fmt_u16(base + 2),
+            fmt_u16(base + 4),
+            fmt_u16(base + 6),
+        );
+    }
+
     // Force PNG encoder selection: IrfanView Save As defaults to JPEG (nFilterIndex=1)
     // and appends `.jpg` even when lpstrFile already ends in `.png`.
-    // SAFETY: lp_str_filter is guest-owned; find_png_filter_index only reads until double-NUL.
-    if let Some(png_idx) = unsafe { find_png_filter_index(ofn.lp_str_filter) } {
+    if let Some(png_idx) = png_filter_index_from_pairs(&filter_pairs) {
+        // SAFETY: lp_ofn is the same guest OPENFILENAMEW buffer read by read_ofn.
+        unsafe { write_n_filter_index(lp_ofn, png_idx) };
         // SAFETY: lp_str_def_ext is a guest-owned LPCWSTR; decode_wide_ptr scans until NUL within
         // caller-allocated storage (standard OPENFILENAMEW contract).
         if let Some(ext_wide) = unsafe { decode_wide_ptr(ofn.lp_str_def_ext) } {
@@ -559,8 +622,6 @@ fn get_save_file_name_w_test_hook(lp_ofn: *mut u8, ofn: Ofn, test_path: &str) ->
                 win_path = format!("{}.{}", win_path, ext_wide);
             }
         }
-        // SAFETY: lp_ofn is the same guest OPENFILENAMEW buffer read by read_ofn.
-        unsafe { write_n_filter_index(lp_ofn, png_idx) };
         eprintln!(
             "weave/GetSaveFileNameW: test hook → TRUE path={win_path} nFilterIndex={png_idx} (was {})",
             ofn.n_filter_index
@@ -656,10 +717,7 @@ mod tests {
         ]);
         let decoded = unsafe { decode_filter_pairs(filter_wide.as_ptr()) };
         assert_eq!(decoded, pairs);
-        assert_eq!(
-            unsafe { find_png_filter_index(filter_wide.as_ptr()) },
-            Some(3)
-        );
+        assert_eq!(png_filter_index_from_pairs(&decoded), Some(3));
     }
 
     #[test]
@@ -761,6 +819,95 @@ mod tests {
             Some(v) => std::env::set_var("WEAVE_TEST_SAVE_RESULT", v),
             None => std::env::remove_var("WEAVE_TEST_SAVE_RESULT"),
         }
+    }
+
+    #[test]
+    fn guest_wide_read_decodes_heap_filter_pointer() {
+        let filter_wide = encode_filter_pairs(&[
+            ("JPEG - JPG/JFIF", "*.JPG;*.JPEG"),
+            ("PNG - Portable Network Graphics", "*.PNG"),
+        ]);
+        let ptr = filter_wide.as_ptr();
+        assert!(
+            guest_ptr_readable(ptr as usize),
+            "heap-allocated filter buffer should pass guest_ptr_readable"
+        );
+        let decoded = unsafe { decode_filter_pairs(ptr) };
+        assert_eq!(decoded.len(), 2);
+        assert_eq!(
+            png_filter_index_from_pairs(&decoded),
+            Some(2),
+            "PNG pair must be index 2"
+        );
+    }
+
+    #[test]
+    fn read_wide_at_guest_handles_unaligned_address() {
+        let mut bytes = vec![0u8; 8];
+        let ch = 'P' as u16;
+        bytes[1..3].copy_from_slice(&ch.to_le_bytes());
+        let addr = bytes.as_ptr() as usize + 1;
+        assert!(
+            guest_ptr_readable(addr),
+            "odd-address heap buffer should still be guest-readable"
+        );
+        assert_eq!(
+            read_wide_at_guest(addr),
+            Some(ch),
+            "read_unaligned must load u16 at non-2-byte-aligned address"
+        );
+    }
+
+    #[test]
+    fn decode_filter_pairs_guest_pe_range_pointer_when_mapped() {
+        let wide = encode_filter_pairs(&[
+            ("JPEG - JPG/JFIF", "*.JPG"),
+            ("PNG - Portable Network Graphics", "*.PNG"),
+        ]);
+        const GUEST_FILTER_BASE: usize = 0x1400_0001_0000;
+        let byte_len = wide.len() * 2 + 2;
+        const MAP_FIXED_NOREPLACE: i32 = 0x10_0000;
+        let mapped = unsafe {
+            libc::mmap(
+                GUEST_FILTER_BASE as *mut libc::c_void,
+                byte_len,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | MAP_FIXED_NOREPLACE,
+                -1,
+                0,
+            )
+        };
+        if mapped == libc::MAP_FAILED {
+            eprintln!(
+                "skip decode_filter_pairs_guest_pe_range_pointer_when_mapped: \
+                 mmap at {GUEST_FILTER_BASE:#x} unavailable"
+            );
+            return;
+        }
+        unsafe {
+            std::ptr::copy_nonoverlapping(wide.as_ptr(), mapped as *mut u16, wide.len());
+            *((mapped as *mut u8).add(wide.len() * 2) as *mut u16) = 0;
+        }
+
+        let pe_base = weave_core::seh::pe_base();
+        if pe_base == 0 || GUEST_FILTER_BASE < pe_base || GUEST_FILTER_BASE >= pe_base + weave_core::seh::pe_size()
+        {
+            eprintln!(
+                "skip decode_filter_pairs_guest_pe_range_pointer_when_mapped: \
+                 pe_base={pe_base:#x} does not cover mapped filter at {GUEST_FILTER_BASE:#x}"
+            );
+            unsafe {
+                libc::munmap(mapped, byte_len);
+            }
+            return;
+        }
+
+        let decoded = unsafe { decode_filter_pairs(mapped as *const u16) };
+        unsafe {
+            libc::munmap(mapped, byte_len);
+        }
+        assert_eq!(decoded.len(), 2);
+        assert_eq!(png_filter_index_from_pairs(&decoded), Some(2));
     }
 
     #[test]
