@@ -1902,22 +1902,25 @@ fn irfanview_save_png_gate() {
     }
 
     let manifest = env!("CARGO_MANIFEST_DIR");
-    let irfan_dir = format!("{manifest}/../tests/fixtures/irfanview");
-    let irfan_exe = format!("{irfan_dir}/i_view64.exe");
-    let bmp_path = format!("{irfan_dir}/test_image.bmp");
+    let irfan_dir = std::path::absolute(format!("{manifest}/../tests/fixtures/irfanview"))
+        .unwrap_or_else(|_| {
+            std::path::PathBuf::from(format!("{manifest}/../tests/fixtures/irfanview"))
+        });
+    let irfan_exe = irfan_dir.join("i_view64.exe");
+    let bmp_path = irfan_dir.join("test_image.bmp");
 
-    if !std::path::Path::new(&irfan_exe).exists() {
+    if !irfan_exe.exists() {
         eprintln!("skipping: i_view64.exe not present in tests/fixtures/irfanview/");
         eprintln!("  → copy the IrfanView 4.73 64-bit portable exe there to enable this test");
         return;
     }
-    if !std::path::Path::new(&bmp_path).exists() {
+    if !bmp_path.exists() {
         eprintln!("skipping: test_image.bmp not present in tests/fixtures/irfanview/");
         return;
     }
 
-    let optipng_plugin = format!("{irfan_dir}/Plugins/OptiPNG.dll");
-    if !std::path::Path::new(&optipng_plugin).exists() {
+    let optipng_plugin = irfan_dir.join("Plugins/OptiPNG.dll");
+    if !optipng_plugin.exists() {
         eprintln!(
             "skipping: {optipng_plugin} not present — PNG Save-As needs IrfanView OptiPNG plugin"
         );
@@ -1937,7 +1940,7 @@ fn irfanview_save_png_gate() {
     // Unique dest inside irfan_dir (Landlock exe-dir allowlist). Must include .png extension:
     // IrfanView Save As defaults to JPEG when WEAVE_TEST_SAVE_RESULT path has no extension.
     let out_stem = format!("save_png_gate_{}", std::process::id());
-    let out_base = std::path::PathBuf::from(&irfan_dir).join(&out_stem);
+    let out_base = irfan_dir.join(&out_stem);
     let out_png = out_base.with_extension("png");
     if out_png.exists() {
         let _ = std::fs::remove_file(&out_png);

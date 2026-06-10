@@ -359,17 +359,17 @@ fn main() {
     //
     // Do NOT call canonicalize() here — that resolves symlinks and would defeat
     // short-path symlinks used to work around NXEngine's fixed-size path buffers
-    // (e.g. /tmp/nx → tests/fixtures/nxengine). Make absolute without following
-    // symlinks: if the path is already absolute, use it as-is; if relative,
-    // join with CWD (which also does not resolve symlinks).
+    // (e.g. /tmp/nx → tests/fixtures/nxengine). Use std::path::absolute to make
+    // the path absolute and collapse `.` / `..` without following symlinks.
     {
-        let abs = if args.exe.is_absolute() {
+        let joined = if args.exe.is_absolute() {
             args.exe.clone()
         } else {
             std::env::current_dir()
                 .unwrap_or_else(|_| std::path::PathBuf::from("."))
                 .join(&args.exe)
         };
+        let abs = std::path::absolute(&joined).unwrap_or(joined);
         let win_path = format!("Z:{}", abs.to_string_lossy().replace('/', "\\"));
         weave_core::exe_path::set(&win_path);
     }
