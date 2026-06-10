@@ -4812,6 +4812,41 @@ pub struct Win32FindDataA {
     c_alternate_file_name: [u8; 14],
 }
 
+/// Stat a single directory entry via `dirfd` + `fstatat` (no parent path needed).
+///
+/// Wine ref: dlls/kernelbase/file.c — FindFirstFileExW fills WIN32_FIND_DATA from
+/// NtQueryDirectoryFile including FILE_ATTRIBUTE_DIRECTORY for subdirectories.
+fn stat_dirent_entry(dir: *mut libc::DIR, entry_name: &str) -> Option<libc::stat> {
+    let dir_fd = unsafe { libc::dirfd(dir) };
+    if dir_fd < 0 {
+        return None;
+    }
+    let c_name = std::ffi::CString::new(entry_name).ok()?;
+    let mut st = unsafe { std::mem::zeroed::<libc::stat>() };
+    if unsafe { libc::fstatat(dir_fd, c_name.as_ptr(), &mut st, 0) } == 0 {
+        Some(st)
+    } else {
+        None
+    }
+}
+
+fn find_entry_attrs_and_size(entry_name: &str, stat_buf: Option<&libc::stat>) -> (u32, u32, u32) {
+    match stat_buf {
+        Some(st) => {
+            let is_dir = (st.st_mode & libc::S_IFMT) == libc::S_IFDIR;
+            let attrs = if is_dir {
+                0x10 // FILE_ATTRIBUTE_DIRECTORY
+            } else {
+                0x20 // FILE_ATTRIBUTE_ARCHIVE
+            };
+            let size = if is_dir { 0 } else { st.st_size as u64 };
+            (attrs, (size >> 32) as u32, (size & 0xFFFF_FFFF) as u32)
+        }
+        None if entry_name == "." || entry_name == ".." => (0x10, 0, 0),
+        None => (0x80, 0, 0), // FILE_ATTRIBUTE_NORMAL fallback
+    }
+}
+
 /// FindFirstFileW: start directory enumeration (wide string version).
 ///
 /// # Safety
@@ -5028,18 +5063,20 @@ pub unsafe extern "win64" fn find_first_file_w(
     };
     let entry_name_str = String::from_utf8_lossy(entry_name);
     let wide_name: Vec<u16> = entry_name_str.encode_utf16().collect();
+    let st = stat_dirent_entry(dir, &entry_name_str);
+    let (attrs, size_hi, size_lo) = find_entry_attrs_and_size(&entry_name_str, st.as_ref());
 
     // Fill WIN32_FIND_DATAW
     // SAFETY: (a) lp_find_file_data is non-null (checked at entry) and points to a
     // writable Win32FindDataW struct; (b) guest heap — caller owns the buffer;
     // (c) duration of this call; (d) gate: sevenzip_m13_debug_e_gate (CI 26007699626).
     unsafe {
-        (*lp_find_file_data).dw_file_attributes = 0x80; // FILE_ATTRIBUTE_NORMAL
+        (*lp_find_file_data).dw_file_attributes = attrs;
         (*lp_find_file_data).ft_creation_time = [0, 0];
         (*lp_find_file_data).ft_last_access_time = [0, 0];
         (*lp_find_file_data).ft_last_write_time = [0, 0];
-        (*lp_find_file_data).n_file_size_high = 0;
-        (*lp_find_file_data).n_file_size_low = 0;
+        (*lp_find_file_data).n_file_size_high = size_hi;
+        (*lp_find_file_data).n_file_size_low = size_lo;
         (*lp_find_file_data).dw_reserved0 = 0;
         (*lp_find_file_data).dw_reserved1 = 0;
 
@@ -5058,7 +5095,7 @@ pub unsafe extern "win64" fn find_first_file_w(
 
     let handle = dir as usize;
     eprintln!(
-        "weave/FindFirstFileW: exit path={win_path:?} first_entry={entry_name_str:?} attrs=0x80 → handle={handle:#x} (DIR*)"
+        "weave/FindFirstFileW: exit path={win_path:?} first_entry={entry_name_str:?} attrs={attrs:#x} → handle={handle:#x} (DIR*)"
     );
     weave_core::progress::mark_find_first_file_first();
     // Store the DIR* as a usize handle.  find_next_file_w and find_close will cast
@@ -5124,15 +5161,17 @@ pub unsafe extern "win64" fn find_first_file_a(
         std::slice::from_raw_parts(name_ptr as *const u8, name_len)
     };
     let entry_name_str = String::from_utf8_lossy(entry_name);
+    let st = stat_dirent_entry(dir, &entry_name_str);
+    let (attrs, size_hi, size_lo) = find_entry_attrs_and_size(&entry_name_str, st.as_ref());
 
     // Fill WIN32_FIND_DATAA
     unsafe {
-        (*lp_find_file_data).dw_file_attributes = 0x80; // FILE_ATTRIBUTE_NORMAL
+        (*lp_find_file_data).dw_file_attributes = attrs;
         (*lp_find_file_data).ft_creation_time = [0, 0];
         (*lp_find_file_data).ft_last_access_time = [0, 0];
         (*lp_find_file_data).ft_last_write_time = [0, 0];
-        (*lp_find_file_data).n_file_size_high = 0;
-        (*lp_find_file_data).n_file_size_low = 0;
+        (*lp_find_file_data).n_file_size_high = size_hi;
+        (*lp_find_file_data).n_file_size_low = size_lo;
         (*lp_find_file_data).dw_reserved0 = 0;
         (*lp_find_file_data).dw_reserved1 = 0;
 
@@ -5204,15 +5243,17 @@ pub unsafe extern "win64" fn find_next_file_w(
     };
     let entry_name_str = String::from_utf8_lossy(entry_name);
     let wide_name: Vec<u16> = entry_name_str.encode_utf16().collect();
+    let st = stat_dirent_entry(dir, &entry_name_str);
+    let (attrs, size_hi, size_lo) = find_entry_attrs_and_size(&entry_name_str, st.as_ref());
 
     // Fill WIN32_FIND_DATAW
     unsafe {
-        (*lp_find_file_data).dw_file_attributes = 0x80; // FILE_ATTRIBUTE_NORMAL
+        (*lp_find_file_data).dw_file_attributes = attrs;
         (*lp_find_file_data).ft_creation_time = [0, 0];
         (*lp_find_file_data).ft_last_access_time = [0, 0];
         (*lp_find_file_data).ft_last_write_time = [0, 0];
-        (*lp_find_file_data).n_file_size_high = 0;
-        (*lp_find_file_data).n_file_size_low = 0;
+        (*lp_find_file_data).n_file_size_high = size_hi;
+        (*lp_find_file_data).n_file_size_low = size_lo;
         (*lp_find_file_data).dw_reserved0 = 0;
         (*lp_find_file_data).dw_reserved1 = 0;
 
@@ -5230,7 +5271,7 @@ pub unsafe extern "win64" fn find_next_file_w(
     }
 
     eprintln!(
-        "weave/FindNextFileW: exit handle={h_find_file:#x} entry={entry_name_str:?} attrs=0x80 → TRUE"
+        "weave/FindNextFileW: exit handle={h_find_file:#x} entry={entry_name_str:?} attrs={attrs:#x} → TRUE"
     );
     if entry_name_str != "." && entry_name_str != ".." {
         weave_core::progress::mark_find_next_file_first();
@@ -5270,15 +5311,17 @@ pub unsafe extern "win64" fn find_next_file_a(
         std::slice::from_raw_parts(name_ptr as *const u8, name_len)
     };
     let entry_name_str = String::from_utf8_lossy(entry_name);
+    let st = stat_dirent_entry(dir, &entry_name_str);
+    let (attrs, size_hi, size_lo) = find_entry_attrs_and_size(&entry_name_str, st.as_ref());
 
     // Fill WIN32_FIND_DATAA
     unsafe {
-        (*lp_find_file_data).dw_file_attributes = 0x80; // FILE_ATTRIBUTE_NORMAL
+        (*lp_find_file_data).dw_file_attributes = attrs;
         (*lp_find_file_data).ft_creation_time = [0, 0];
         (*lp_find_file_data).ft_last_access_time = [0, 0];
         (*lp_find_file_data).ft_last_write_time = [0, 0];
-        (*lp_find_file_data).n_file_size_high = 0;
-        (*lp_find_file_data).n_file_size_low = 0;
+        (*lp_find_file_data).n_file_size_high = size_hi;
+        (*lp_find_file_data).n_file_size_low = size_lo;
         (*lp_find_file_data).dw_reserved0 = 0;
         (*lp_find_file_data).dw_reserved1 = 0;
 
