@@ -1922,7 +1922,8 @@ fn irfanview_save_png_gate() {
     let optipng_plugin = irfan_dir.join("Plugins/OptiPNG.dll");
     if !optipng_plugin.exists() {
         eprintln!(
-            "skipping: {optipng_plugin} not present — PNG Save-As needs IrfanView OptiPNG plugin"
+            "skipping: {} not present — PNG Save-As needs IrfanView OptiPNG plugin",
+            optipng_plugin.display()
         );
         eprintln!("  → run: bash scripts/fetch-irfanview-optipng-plugin.sh");
         return;
