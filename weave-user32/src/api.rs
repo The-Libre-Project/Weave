@@ -7267,11 +7267,15 @@ pub unsafe extern "win64" fn char_lower_buff_w(lpsz: *mut u16, cch_length: u32) 
     if lpsz.is_null() {
         return 0;
     }
-    let slice = unsafe { std::slice::from_raw_parts_mut(lpsz, cch_length as usize) };
-    for cu in slice.iter_mut() {
-        *cu = char::from_u32(*cu as u32)
+    let cap = (cch_length as usize).min(crate::defs::MAX_GUEST_STR_LEN);
+    for i in 0..cap {
+        let cu = unsafe { *lpsz.add(i) };
+        let lower = char::from_u32(cu as u32)
             .map(|ch| ch.to_lowercase().next().unwrap_or(ch) as u16)
-            .unwrap_or(*cu);
+            .unwrap_or(cu);
+        unsafe {
+            *lpsz.add(i) = lower;
+        }
     }
     cch_length
 }

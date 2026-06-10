@@ -1,101 +1,418 @@
 //! user32.dll wsprintfW / wvsprintfW — limited wide printf for legacy apps.
 //!
 //! IrfanView's Save As path calls `wsprintfW` before `LoadLibrary("COMDLG32.dll")`.
-//! Full Wine `wvsnprintfW` is deferred; this delegates ASCII-ish wide formats to
-//! `vsnprintf` via the Windows-x64 va_list spill layout (same bridge as weave-ucrt).
+//! Wine-compatible subset: `%s` in `wsprintfW` is a **wide** string (not ANSI).
 
-use crate::defs::decode_wide;
-use libc::c_void;
+use crate::defs::{decode_ansi, decode_wide, MAX_GUEST_STR_LEN};
 
 const WSPRINTF_MAX: usize = 1024;
 
-// Linux x86-64 va_list layout — see weave-ucrt `VaListTag` (Windows spill bridge).
-#[repr(C)]
-struct VaListTag {
-    gp_offset: u32,
-    fp_offset: u32,
-    overflow_arg_area: *mut c_void,
-    reg_save_area: *mut c_void,
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum SpecType {
+    WideChar,
+    AnsiChar,
+    WideStr,
+    AnsiStr,
+    Signed,
+    Unsigned,
+    Hex,
+    Unknown,
 }
 
-extern "C" {
-    fn vsnprintf(s: *mut u8, n: usize, format: *const u8, ap: *mut VaListTag) -> i32;
+#[derive(Clone, Copy)]
+struct ParsedSpec {
+    left_align: bool,
+    prefix_hex: bool,
+    zero_pad: bool,
+    upper_hex: bool,
+    width: u32,
+    precision: u32,
+    ty: SpecType,
 }
 
-fn encode_utf8_into_wide(s: &str, buf: *mut u16, max_chars: usize) -> i32 {
-    if buf.is_null() || max_chars == 0 {
+// Wine ref: dlls/user32/wsprintf.c — WPRINTF_ParseFormatW: in wsprintfW, bare `%s`
+// is WPR_WSTRING; `%h s` (short, not wide) is WPR_STRING; `%S` swaps with long/wide.
+fn parse_format_spec(fmt: &[u16], start: usize) -> Option<(ParsedSpec, usize)> {
+    if start >= fmt.len() || fmt[start] != '%' as u16 {
+        return None;
+    }
+    let mut i = start + 1;
+    if i >= fmt.len() {
+        return None;
+    }
+    if fmt[i] == '%' as u16 {
+        return None;
+    }
+
+    let mut spec = ParsedSpec {
+        left_align: false,
+        prefix_hex: false,
+        zero_pad: false,
+        upper_hex: false,
+        width: 0,
+        precision: 0,
+        ty: SpecType::Unknown,
+    };
+
+    while i < fmt.len() {
+        match fmt[i] as u8 as char {
+            '-' => {
+                spec.left_align = true;
+                i += 1;
+            }
+            '#' => {
+                spec.prefix_hex = true;
+                i += 1;
+            }
+            '0' if spec.width == 0 && spec.precision == 0 => {
+                spec.zero_pad = true;
+                i += 1;
+            }
+            '0'..='9' => {
+                let mut w = 0u32;
+                while i < fmt.len() && (fmt[i] as u8 as char).is_ascii_digit() {
+                    w = w * 10 + (fmt[i] as u8 - b'0') as u32;
+                    i += 1;
+                }
+                spec.width = w;
+            }
+            '.' => {
+                i += 1;
+                let mut p = 0u32;
+                while i < fmt.len() && (fmt[i] as u8 as char).is_ascii_digit() {
+                    p = p * 10 + (fmt[i] as u8 - b'0') as u32;
+                    i += 1;
+                }
+                spec.precision = p;
+            }
+            _ => break,
+        }
+    }
+
+    let mut flags_short = false;
+    let mut flags_long = false;
+    let mut flags_wide = false;
+    let mut _flags_i64 = false;
+
+    while i < fmt.len() {
+        match fmt[i] as u8 as char {
+            'h' => {
+                flags_short = true;
+                i += 1;
+            }
+            'l' => {
+                flags_long = true;
+                i += 1;
+            }
+            'w' => {
+                flags_wide = true;
+                i += 1;
+            }
+            'I' if i + 2 < fmt.len() && fmt[i + 1] == '6' as u16 && fmt[i + 2] == '4' as u16 => {
+                _flags_i64 = true;
+                i += 3;
+            }
+            'I' => {
+                i += 1;
+            }
+            _ => break,
+        }
+    }
+
+    if i >= fmt.len() {
+        return None;
+    }
+
+    let ch = fmt[i] as u8 as char;
+    spec.ty = match ch {
+        'c' => {
+            if flags_short && !flags_wide {
+                SpecType::AnsiChar
+            } else {
+                SpecType::WideChar
+            }
+        }
+        'C' => {
+            if flags_long || flags_wide {
+                SpecType::WideChar
+            } else {
+                SpecType::AnsiChar
+            }
+        }
+        'd' | 'i' => SpecType::Signed,
+        's' => {
+            if flags_short && !flags_wide {
+                SpecType::AnsiStr
+            } else {
+                SpecType::WideStr
+            }
+        }
+        'S' => {
+            if flags_long || flags_wide {
+                SpecType::WideStr
+            } else {
+                SpecType::AnsiStr
+            }
+        }
+        'u' => SpecType::Unsigned,
+        'p' => {
+            spec.width = (std::mem::size_of::<usize>() * 2) as u32;
+            spec.zero_pad = true;
+            SpecType::Hex
+        }
+        'X' => {
+            spec.upper_hex = true;
+            SpecType::Hex
+        }
+        'x' => SpecType::Hex,
+        _ => SpecType::Unknown,
+    };
+
+    let consumed = if spec.ty == SpecType::Unknown {
+        i - start
+    } else {
+        i - start + 1
+    };
+    Some((spec, consumed))
+}
+
+fn va_arg_u64(ap: *const u8, slot: &mut usize) -> u64 {
+    let v = unsafe { *ap.add(*slot).cast::<u64>() };
+    *slot += 8;
+    v
+}
+
+fn wide_strlen(ptr: *const u16) -> usize {
+    if ptr.is_null() {
         return 0;
     }
-    let mut i = 0usize;
-    for ch in s.chars() {
-        if i + 1 >= max_chars {
-            break;
-        }
-        let code = ch as u32;
-        if code > 0xFFFF {
-            continue;
-        }
+    let mut len = 0usize;
+    while len < MAX_GUEST_STR_LEN {
         unsafe {
-            *buf.add(i) = code as u16;
+            if *ptr.add(len) == 0 {
+                break;
+            }
         }
-        i += 1;
+        len += 1;
+    }
+    len
+}
+
+fn push_wide(out: &mut usize, buf: *mut u16, maxlen: usize, ch: u16) -> bool {
+    if *out + 1 >= maxlen {
+        return false;
     }
     unsafe {
-        *buf.add(i) = 0;
+        *buf.add(*out) = ch;
     }
-    i as i32
+    *out += 1;
+    true
 }
 
-fn wide_format_to_utf8(format: *const u16) -> Option<Vec<u8>> {
-    let wide = unsafe { decode_wide(format) };
-    if wide.is_empty() && !format.is_null() {
-        return Some(Vec::new());
+fn push_wide_run(out: &mut usize, buf: *mut u16, maxlen: usize, src: &[u16]) -> bool {
+    for &ch in src {
+        if !push_wide(out, buf, maxlen, ch) {
+            return false;
+        }
     }
-    let mut bytes = wide.into_bytes();
-    bytes.push(0);
-    Some(bytes)
+    true
 }
 
-// Wine ref: dlls/user32/wsprintf.c — wvsprintfW calls wvsnprintfW(buf, 1024, spec, args);
-// overflow returns 1024; wsprintfW is a thin va_start wrapper around wvsnprintfW.
-fn wvsprintf_w_inner(buffer: *mut u16, format: *const u16, args: *mut c_void) -> i32 {
-    if buffer.is_null() || format.is_null() || args.is_null() {
-        return -1;
+fn push_pad(out: &mut usize, buf: *mut u16, maxlen: usize, count: u32, ch: u16) -> bool {
+    for _ in 0..count {
+        if !push_wide(out, buf, maxlen, ch) {
+            return false;
+        }
     }
-    let Some(fmt_bytes) = wide_format_to_utf8(format) else {
-        return -1;
-    };
-    let mut out = vec![0u8; WSPRINTF_MAX];
-    let mut va_tag = VaListTag {
-        gp_offset: 48,
-        fp_offset: 176,
-        overflow_arg_area: args,
-        reg_save_area: std::ptr::null_mut(),
-    };
-    let n = unsafe {
-        vsnprintf(
-            out.as_mut_ptr(),
-            WSPRINTF_MAX,
-            fmt_bytes.as_ptr(),
-            &mut va_tag,
-        )
-    };
-    if n < 0 {
-        return -1;
+    true
+}
+
+fn format_u64(mut value: u64, hex: bool, upper: bool) -> Vec<u16> {
+    if value == 0 {
+        return vec!['0' as u16];
     }
-    let utf8 = if n as usize >= WSPRINTF_MAX {
-        String::from_utf8_lossy(&out[..WSPRINTF_MAX.saturating_sub(1)]).into_owned()
+    let mut digits = Vec::new();
+    while value > 0 {
+        let d = (value % if hex { 16 } else { 10 }) as u8;
+        let ch = if hex {
+            if d < 10 {
+                b'0' + d
+            } else if upper {
+                b'A' + (d - 10)
+            } else {
+                b'a' + (d - 10)
+            }
+        } else {
+            b'0' + d
+        };
+        digits.push(ch as u16);
+        value /= if hex { 16 } else { 10 };
+    }
+    digits.reverse();
+    digits
+}
+
+fn emit_number(
+    out: &mut usize,
+    buf: *mut u16,
+    maxlen: usize,
+    spec: &ParsedSpec,
+    negative: bool,
+    value: u64,
+    hex: bool,
+) -> bool {
+    let mut digits = format_u64(value, hex, spec.upper_hex);
+    if negative {
+        digits.insert(0, '-' as u16);
+    }
+    if spec.prefix_hex && hex {
+        let prefix = if spec.upper_hex {
+            ['0' as u16, 'X' as u16]
+        } else {
+            ['0' as u16, 'x' as u16]
+        };
+        if !push_wide_run(out, buf, maxlen, &prefix) {
+            return false;
+        }
+    }
+    let pad_ch = if spec.zero_pad && !spec.left_align {
+        '0' as u16
     } else {
-        String::from_utf8_lossy(&out[..n as usize]).into_owned()
+        ' ' as u16
     };
-    let written = encode_utf8_into_wide(&utf8, buffer, WSPRINTF_MAX);
-    if written < 0 {
+    let pad = spec.width.saturating_sub(digits.len() as u32);
+    if !spec.left_align && !push_pad(out, buf, maxlen, pad, pad_ch) {
+        return false;
+    }
+    if !push_wide_run(out, buf, maxlen, &digits) {
+        return false;
+    }
+    if spec.left_align && !push_pad(out, buf, maxlen, pad, ' ' as u16) {
+        return false;
+    }
+    true
+}
+
+// Wine ref: dlls/user32/wsprintf.c — wvsnprintfW(buf, maxlen, spec, args); maxlen=1024.
+fn wvsprintf_w_inner(buffer: *mut u16, format: *const u16, ap: *const u8) -> i32 {
+    if buffer.is_null() || format.is_null() || ap.is_null() {
         return -1;
     }
-    if n as usize >= WSPRINTF_MAX {
+
+    let fmt = unsafe { decode_wide(format) };
+    let fmt_u16: Vec<u16> = fmt.encode_utf16().collect();
+    let mut out = 0usize;
+    let maxlen = WSPRINTF_MAX;
+    let mut va_slot = 0usize;
+    let mut pos = 0usize;
+
+    while pos < fmt_u16.len() && out + 1 < maxlen {
+        if fmt_u16[pos] != '%' as u16 {
+            if !push_wide(&mut out, buffer, maxlen, fmt_u16[pos]) {
+                break;
+            }
+            pos += 1;
+            continue;
+        }
+        if pos + 1 < fmt_u16.len() && fmt_u16[pos + 1] == '%' as u16 {
+            if !push_wide(&mut out, buffer, maxlen, '%' as u16) {
+                break;
+            }
+            pos += 2;
+            continue;
+        }
+
+        let Some((spec, consumed)) = parse_format_spec(&fmt_u16, pos) else {
+            if !push_wide(&mut out, buffer, maxlen, fmt_u16[pos]) {
+                break;
+            }
+            pos += 1;
+            continue;
+        };
+
+        if spec.ty == SpecType::Unknown {
+            for j in 0..consumed {
+                if pos + j >= fmt_u16.len() || !push_wide(&mut out, buffer, maxlen, fmt_u16[pos + j]) {
+                    break;
+                }
+            }
+            pos += consumed;
+            continue;
+        }
+
+        match spec.ty {
+            SpecType::WideChar => {
+                let ch = va_arg_u64(ap, &mut va_slot) as u16;
+                let _ = push_wide(&mut out, buffer, maxlen, ch);
+            }
+            SpecType::AnsiChar => {
+                let ch = va_arg_u64(ap, &mut va_slot) as u8 as u16;
+                let _ = push_wide(&mut out, buffer, maxlen, ch);
+            }
+            SpecType::WideStr => {
+                let ptr = va_arg_u64(ap, &mut va_slot) as usize as *const u16;
+                let mut len = wide_strlen(ptr);
+                if spec.precision > 0 {
+                    len = len.min(spec.precision as usize);
+                }
+                let pad = spec.width.saturating_sub(len as u32);
+                if !spec.left_align {
+                    let _ = push_pad(&mut out, buffer, maxlen, pad, ' ' as u16);
+                }
+                for i in 0..len {
+                    let ch = unsafe { *ptr.add(i) };
+                    if !push_wide(&mut out, buffer, maxlen, ch) {
+                        break;
+                    }
+                }
+                if spec.left_align {
+                    let _ = push_pad(&mut out, buffer, maxlen, pad, ' ' as u16);
+                }
+            }
+            SpecType::AnsiStr => {
+                let ptr = va_arg_u64(ap, &mut va_slot) as usize as *const u8;
+                let s = unsafe { decode_ansi(ptr) };
+                let mut wide: Vec<u16> = s.encode_utf16().collect();
+                if spec.precision > 0 {
+                    wide.truncate(spec.precision as usize);
+                }
+                let pad = spec.width.saturating_sub(wide.len() as u32);
+                if !spec.left_align {
+                    let _ = push_pad(&mut out, buffer, maxlen, pad, ' ' as u16);
+                }
+                let _ = push_wide_run(&mut out, buffer, maxlen, &wide);
+                if spec.left_align {
+                    let _ = push_pad(&mut out, buffer, maxlen, pad, ' ' as u16);
+                }
+            }
+            SpecType::Signed => {
+                let raw = va_arg_u64(ap, &mut va_slot) as i64;
+                let negative = raw < 0;
+                let mag = if negative { (-raw) as u64 } else { raw as u64 };
+                let _ = emit_number(&mut out, buffer, maxlen, &spec, negative, mag, false);
+            }
+            SpecType::Unsigned => {
+                let raw = va_arg_u64(ap, &mut va_slot);
+                let _ = emit_number(&mut out, buffer, maxlen, &spec, false, raw, false);
+            }
+            SpecType::Hex => {
+                let raw = va_arg_u64(ap, &mut va_slot);
+                let _ = emit_number(&mut out, buffer, maxlen, &spec, false, raw, true);
+            }
+            SpecType::Unknown => {}
+        }
+
+        pos += consumed;
+    }
+
+    unsafe {
+        *buffer.add(out.min(maxlen - 1)) = 0;
+    }
+
+    if out + 1 >= maxlen {
         WSPRINTF_MAX as i32
     } else {
-        written
+        out as i32
     }
 }
 
@@ -108,9 +425,12 @@ fn wvsprintf_w_inner(buffer: *mut u16, format: *const u16, args: *mut c_void) ->
 pub unsafe extern "win64" fn wvsprintf_w(
     buffer: *mut u16,
     format: *const u16,
-    args: *mut c_void,
+    args: *mut core::ffi::c_void,
 ) -> i32 {
-    wvsprintf_w_inner(buffer, format, args)
+    if args.is_null() {
+        return -1;
+    }
+    wvsprintf_w_inner(buffer, format, args as *const u8)
 }
 
 /// wsprintfW — variadic wide sprintf (max 1024 WCHAR output).
@@ -123,22 +443,33 @@ pub unsafe extern "win64" fn wsprintf_w(buffer: *mut u16, format: *const u16) ->
     if buffer.is_null() || format.is_null() {
         return 0;
     }
-    let wide = unsafe { decode_wide(format) };
-    if !wide.contains('%') {
-        return encode_utf8_into_wide(&wide, buffer, WSPRINTF_MAX);
-    }
-    // Windows x64 va_start(ap, format): homed R8 = RSP+24 on entry.
-    let args: *mut c_void;
+
+    let ap: *const u8;
     core::arch::asm!(
-        "mov {args}, rsp",
-        "add {args}, 24",
-        args = out(reg) args,
+        "mov {ap}, rsp",
+        "add {ap}, 24",
+        ap = out(reg) ap,
     );
-    let ret = wvsprintf_w_inner(buffer, format, args);
+
+    let fmt_preview = decode_wide(format);
+    let ret = wvsprintf_w_inner(buffer, format, ap);
+    eprintln!("weave/user32: wsprintfW fmt={fmt_preview:?} ret={ret}");
     if ret < 0 {
-        // E3-M9f: vsnprintf bridge failed — copy format literal so Save As path can continue.
-        encode_utf8_into_wide(&wide, buffer, WSPRINTF_MAX)
+        0
     } else {
         ret
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_ws_is_wide_string() {
+        let fmt: Vec<u16> = "%s".encode_utf16().collect();
+        let (spec, n) = parse_format_spec(&fmt, 0).unwrap();
+        assert_eq!(spec.ty, SpecType::WideStr);
+        assert_eq!(n, 2);
     }
 }
