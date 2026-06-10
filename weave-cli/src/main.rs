@@ -13,7 +13,15 @@ struct Args {
     /// Path to the Windows .exe file to run
     exe: PathBuf,
 
-    /// Weave prefix directory (virtual Windows root). Defaults to ~/.weave/default
+    /// Weave prefix directory (virtual Windows root).
+    ///
+    /// Precedence (highest to lowest):
+    ///   1. This flag (`--prefix /path/to/prefix`)
+    ///   2. The `WEAVE_PREFIX` environment variable
+    ///   3. Default: `~/.weave/default`
+    ///
+    /// Setting `WEAVE_PREFIX` is the recommended approach for launchers that
+    /// invoke Weave via `binfmt_misc`, where CLI flags cannot be passed.
     #[arg(long)]
     prefix: Option<PathBuf>,
 
@@ -368,8 +376,22 @@ fn main() {
         weave_core::exe_path::set(&win_path);
     }
 
+    // Prefix resolution order (highest to lowest priority):
+    //   1. --prefix CLI flag   — explicit user/caller override
+    //   2. WEAVE_PREFIX env    — set by launchers (e.g. LibreWin binfmt_misc handler)
+    //                            that cannot pass CLI flags
+    //   3. $HOME/.weave/default — lazy default inside prefix::get()
+    //
+    // Design note: we resolve here in main.rs (next to the flag) rather than
+    // inside prefix::get()'s lazy default, because prefix::set() is OnceLock-
+    // backed and must be called before any file I/O stub runs.  Keeping it
+    // explicit here makes the precedence obvious and testable.
     if let Some(p) = args.prefix {
         prefix::set(p);
+    } else if let Ok(env_prefix) = std::env::var("WEAVE_PREFIX") {
+        if !env_prefix.is_empty() {
+            prefix::set(PathBuf::from(env_prefix));
+        }
     }
     prefix::ensure_dirs();
     // Plugin loader removed — see weave-plugin-system/src/lib.rs (no shipped consumers; security: prefix-local .so loading pre-sandbox).
