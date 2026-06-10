@@ -45,6 +45,13 @@ STATUS=$?
 # 3. Emit the result. On non-zero, fire the /check-in directive.
 if [ "$STATUS" -eq 0 ]; then
   echo "=== CI GREEN — run $RUN_ID ($SHA) passed. ==="
+  # Auto-update ci: field in git notes so the observer sees CI health without
+  # manual backfill. Silently skipped if the commit has no note or sed fails.
+  if git notes show "$SHA" >/dev/null 2>&1; then
+    EXISTING=$(git notes show "$SHA")
+    UPDATED=$(printf '%s' "$EXISTING" | sed "s/^ci:.*/ci: green (run $RUN_ID)/")
+    git notes add -f -m "$UPDATED" "$SHA" 2>/dev/null || true
+  fi
 else
   echo "=== CI RED — run $RUN_ID ($SHA) FAILED."
   echo "    MANDATORY: run /check-in BEFORE writing any fix code. Do not diagnose, do not edit first."
