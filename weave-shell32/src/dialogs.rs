@@ -14,6 +14,12 @@
 use weave_core::prefix;
 
 // ── OPENFILENAMEW layout (152 bytes on Win64) ─────────────────────────────────
+//
+// Win64 field offsets (MSDN OPENFILENAMEW member order + 8-byte pointer alignment):
+//   lpstrFilter @24, nFilterIndex @44, lpstrFile @48, nMaxFile @56,
+//   lpstrInitialDir @80, lpstrTitle @88, lpstrDefExt @104.
+// Ref: https://learn.microsoft.com/en-us/windows/win32/api/commdlg/ns-commdlg-openfilenamew
+// Wine: dlls/comdlg32/filedlg.c uses ofn->nFilterIndex on return (1-based pair index).
 
 /// The subset of OPENFILENAMEW fields we actually read.
 ///
@@ -24,6 +30,8 @@ struct Ofn {
     lp_str_file: *mut u16,
     /// `nMaxFile`: capacity of `lpstrFile` in `u16` code units.
     n_max_file: u32,
+    /// `nFilterIndex`: 1-based index of the selected filter pair (MSDN: first pair = 1).
+    n_filter_index: u32,
     /// `lpstrInitialDir`: optional starting directory (Win32 path).
     lp_str_initial_dir: *const u16,
     /// `lpstrTitle`: optional dialog title.
@@ -39,12 +47,80 @@ unsafe fn read_ofn(p: *const u8) -> Ofn {
         Ofn {
             lp_str_file: *(p.add(48) as *const *mut u16),
             n_max_file: *(p.add(56) as *const u32),
+            n_filter_index: *(p.add(44) as *const u32),
             lp_str_initial_dir: *(p.add(80) as *const *const u16),
             lp_str_title: *(p.add(88) as *const *const u16),
             lp_str_filter: *(p.add(24) as *const *const u16),
             lp_str_def_ext: *(p.add(104) as *const *const u16),
         }
     }
+}
+
+/// Write `nFilterIndex` back into the guest OPENFILENAMEW blob (offset 44).
+unsafe fn write_n_filter_index(p: *mut u8, index: u32) {
+    unsafe {
+        *(p.add(44) as *mut u32) = index;
+    }
+}
+
+/// Decode one null-terminated UTF-16 slice starting at `start` (in `u16` units).
+unsafe fn decode_wide_at(base: *const u16, start: usize) -> Option<String> {
+    let mut len = 0usize;
+    unsafe {
+        while *base.add(start + len) != 0 {
+            len += 1;
+        }
+        if len == 0 {
+            return None;
+        }
+        let slice = std::slice::from_raw_parts(base.add(start), len);
+        Some(String::from_utf16_lossy(slice))
+    }
+}
+
+/// Parse `lpstrFilter` double-NUL display/pattern pairs into `(display, pattern)` strings.
+unsafe fn decode_filter_pairs(filter_ptr: *const u16) -> Vec<(String, String)> {
+    if filter_ptr.is_null() {
+        return Vec::new();
+    }
+    let mut pairs = Vec::new();
+    let mut i = 0usize;
+    // SAFETY: caller-owned OPENFILENAMEW filter buffer; scan until NUL / double-NUL.
+    while let Some(display) = unsafe { decode_wide_at(filter_ptr, i) } {
+        i += display.encode_utf16().count() + 1;
+
+        let pattern = match unsafe { decode_wide_at(filter_ptr, i) } {
+            Some(s) => s,
+            None => break,
+        };
+        i += pattern.encode_utf16().count() + 1;
+
+        pairs.push((display, pattern));
+    }
+    pairs
+}
+
+/// Return true when a filter pair targets PNG output (display name or pattern).
+fn filter_pair_is_png(display: &str, pattern: &str) -> bool {
+    let display_lc = display.to_ascii_lowercase();
+    let pattern_lc = pattern.to_ascii_lowercase();
+    display_lc.contains("png") || pattern_lc.contains(".png")
+}
+
+/// Find the 1-based `nFilterIndex` for the PNG entry in an `lpstrFilter` pair list.
+///
+/// MSDN: the first display/pattern pair has index 1; returns `None` when no PNG pair exists.
+fn png_filter_index_from_pairs(pairs: &[(String, String)]) -> Option<u32> {
+    pairs
+        .iter()
+        .position(|(display, pattern)| filter_pair_is_png(display, pattern))
+        .map(|i| (i + 1) as u32)
+}
+
+/// Find PNG `nFilterIndex` from a guest `lpstrFilter` pointer.
+unsafe fn find_png_filter_index(filter_ptr: *const u16) -> Option<u32> {
+    let pairs = unsafe { decode_filter_pairs(filter_ptr) };
+    png_filter_index_from_pairs(&pairs)
 }
 
 // ── Wide string helpers ───────────────────────────────────────────────────────
@@ -363,7 +439,7 @@ pub unsafe extern "win64" fn get_save_file_name_w(lp_ofn: *mut u8) -> i32 {
 
     if let Ok(test_path) = std::env::var("WEAVE_TEST_SAVE_RESULT") {
         if !test_path.is_empty() {
-            return get_save_file_name_w_test_hook(ofn, &test_path);
+            return get_save_file_name_w_test_hook(lp_ofn, ofn, &test_path);
         }
     }
 
@@ -402,8 +478,9 @@ pub unsafe extern "win64" fn get_save_file_name_w(lp_ofn: *mut u8) -> i32 {
 }
 
 /// Env-gated test hook: translate `test_path` to Win32, optionally append `lpstrDefExt`,
-/// write into `lpstrFile`, log, and return TRUE.
-fn get_save_file_name_w_test_hook(ofn: Ofn, test_path: &str) -> i32 {
+/// force PNG `nFilterIndex` when `lpstrFilter` contains a PNG pair, write into `lpstrFile`,
+/// log, and return TRUE.
+fn get_save_file_name_w_test_hook(lp_ofn: *mut u8, ofn: Ofn, test_path: &str) -> i32 {
     let mut win_path = if test_path.len() >= 2 && test_path.as_bytes()[1] == b':' {
         test_path.replace('/', "\\")
     } else {
@@ -422,9 +499,22 @@ fn get_save_file_name_w_test_hook(ofn: Ofn, test_path: &str) -> i32 {
         }
     }
 
+    // Force PNG encoder selection: IrfanView Save As defaults to JPEG (nFilterIndex=1)
+    // and appends `.jpg` even when lpstrFile already ends in `.png`.
+    // SAFETY: lp_str_filter is guest-owned; find_png_filter_index only reads until double-NUL.
+    if let Some(png_idx) = unsafe { find_png_filter_index(ofn.lp_str_filter) } {
+        // SAFETY: lp_ofn is the same guest OPENFILENAMEW buffer read by read_ofn.
+        unsafe { write_n_filter_index(lp_ofn, png_idx) };
+        eprintln!(
+            "weave/GetSaveFileNameW: test hook → TRUE path={win_path} nFilterIndex={png_idx} (was {})",
+            ofn.n_filter_index
+        );
+    } else {
+        eprintln!("weave/GetSaveFileNameW: test hook → TRUE path={win_path}");
+    }
+
     // SAFETY: lp_str_file/n_max_file are guest-owned output buffer fields from OPENFILENAMEW.
     encode_wide_into(&win_path, ofn.lp_str_file, ofn.n_max_file);
-    eprintln!("weave/GetSaveFileNameW: test hook → TRUE path={win_path}");
     1
 }
 
@@ -432,16 +522,35 @@ fn get_save_file_name_w_test_hook(ofn: Ofn, test_path: &str) -> i32 {
 mod tests {
     use super::*;
 
-    /// Build a minimal OPENFILENAMEW byte blob with lpstrFile, nMaxFile, and optional lpstrDefExt.
+    /// Encode an IrfanView-style `lpstrFilter` double-NUL pair list.
+    fn encode_filter_pairs(pairs: &[(&str, &str)]) -> Vec<u16> {
+        let mut wide = Vec::new();
+        for (display, pattern) in pairs {
+            wide.extend(display.encode_utf16());
+            wide.push(0);
+            wide.extend(pattern.encode_utf16());
+            wide.push(0);
+        }
+        wide.push(0);
+        wide
+    }
+
+    /// Build a minimal OPENFILENAMEW byte blob with lpstrFile, nMaxFile, and optional fields.
     fn make_minimal_ofn(
         file_buf: &mut [u16],
         def_ext: Option<&str>,
-    ) -> (Vec<u8>, Option<Vec<u16>>) {
+        filter: Option<&[(&str, &str)]>,
+        n_filter_index: Option<u32>,
+    ) -> (Vec<u8>, Option<Vec<u16>>, Option<Vec<u16>>) {
         let mut ofn_bytes = vec![0u8; 152];
         let file_ptr = file_buf.as_mut_ptr() as usize;
         ofn_bytes[48..56].copy_from_slice(&file_ptr.to_le_bytes());
         let n_max_file: u32 = file_buf.len() as u32;
         ofn_bytes[56..60].copy_from_slice(&n_max_file.to_le_bytes());
+
+        if let Some(idx) = n_filter_index {
+            ofn_bytes[44..48].copy_from_slice(&idx.to_le_bytes());
+        }
 
         let ext_storage: Option<Vec<u16>> =
             def_ext.map(|e| e.encode_utf16().chain(std::iter::once(0)).collect());
@@ -449,7 +558,44 @@ mod tests {
             let ext_ptr = ext.as_ptr() as usize;
             ofn_bytes[104..112].copy_from_slice(&ext_ptr.to_le_bytes());
         }
-        (ofn_bytes, ext_storage)
+
+        let filter_storage: Option<Vec<u16>> = filter.map(|pairs| encode_filter_pairs(pairs));
+        if let Some(ref filt) = filter_storage {
+            let filt_ptr = filt.as_ptr() as usize;
+            ofn_bytes[24..32].copy_from_slice(&filt_ptr.to_le_bytes());
+        }
+
+        (ofn_bytes, ext_storage, filter_storage)
+    }
+
+    #[test]
+    fn png_filter_index_selects_png_pair_from_irfanview_style_filter() {
+        let pairs = vec![
+            ("All Files (*.*)".to_string(), "*.*".to_string()),
+            (
+                "JPEG - JPG/JFIF".to_string(),
+                "*.JPG;*.JPEG;*.JPE;*.JFIF".to_string(),
+            ),
+            (
+                "PNG - Portable Network Graphics".to_string(),
+                "*.PNG".to_string(),
+            ),
+            ("GIF - CompuServe".to_string(), "*.GIF".to_string()),
+        ];
+        assert_eq!(png_filter_index_from_pairs(&pairs), Some(3));
+
+        let filter_wide = encode_filter_pairs(&[
+            ("All Files (*.*)", "*.*"),
+            ("JPEG - JPG/JFIF", "*.JPG;*.JPEG;*.JPE;*.JFIF"),
+            ("PNG - Portable Network Graphics", "*.PNG"),
+            ("GIF - CompuServe", "*.GIF"),
+        ]);
+        let decoded = unsafe { decode_filter_pairs(filter_wide.as_ptr()) };
+        assert_eq!(decoded, pairs);
+        assert_eq!(
+            unsafe { find_png_filter_index(filter_wide.as_ptr()) },
+            Some(3)
+        );
     }
 
     #[test]
@@ -458,7 +604,8 @@ mod tests {
         std::env::set_var("WEAVE_TEST_SAVE_RESULT", r"C:\Save\Out\image");
 
         let mut file_buf: [u16; 260] = [0; 260];
-        let (ofn_bytes, ext_storage) = make_minimal_ofn(&mut file_buf, Some("png"));
+        let (ofn_bytes, ext_storage, filter_storage) =
+            make_minimal_ofn(&mut file_buf, Some("png"), None, None);
 
         let ret = unsafe { get_save_file_name_w(ofn_bytes.as_ptr() as *mut u8) };
         assert_eq!(
@@ -478,6 +625,38 @@ mod tests {
         assert_eq!(path, r"C:\Save\Out\image.png");
 
         drop(ext_storage);
+        drop(filter_storage);
+        match old {
+            Some(v) => std::env::set_var("WEAVE_TEST_SAVE_RESULT", v),
+            None => std::env::remove_var("WEAVE_TEST_SAVE_RESULT"),
+        }
+    }
+
+    #[test]
+    fn get_save_file_name_w_test_hook_writes_png_n_filter_index() {
+        let old = std::env::var("WEAVE_TEST_SAVE_RESULT").ok();
+        std::env::set_var("WEAVE_TEST_SAVE_RESULT", r"C:\Save\Out\image.png");
+
+        let mut file_buf: [u16; 260] = [0; 260];
+        let filter_pairs = [
+            ("JPEG - JPG/JFIF", "*.JPG;*.JPEG"),
+            ("PNG - Portable Network Graphics", "*.PNG"),
+        ];
+        let (ofn_bytes, ext_storage, filter_storage) =
+            make_minimal_ofn(&mut file_buf, None, Some(&filter_pairs), Some(1));
+
+        let ret = unsafe { get_save_file_name_w(ofn_bytes.as_ptr() as *mut u8) };
+        assert_eq!(ret, 1, "test hook must return TRUE");
+
+        let n_filter_index =
+            u32::from_le_bytes(ofn_bytes[44..48].try_into().expect("nFilterIndex bytes"));
+        assert_eq!(
+            n_filter_index, 2,
+            "test hook must force PNG nFilterIndex (pair 2) over incoming JPEG index 1"
+        );
+
+        drop(ext_storage);
+        drop(filter_storage);
         match old {
             Some(v) => std::env::set_var("WEAVE_TEST_SAVE_RESULT", v),
             None => std::env::remove_var("WEAVE_TEST_SAVE_RESULT"),
