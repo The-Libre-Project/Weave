@@ -332,7 +332,9 @@ fn wvsprintf_w_inner(buffer: *mut u16, format: *const u16, ap: *const u8) -> i32
 
         if spec.ty == SpecType::Unknown {
             for j in 0..consumed {
-                if pos + j >= fmt_u16.len() || !push_wide(&mut out, buffer, maxlen, fmt_u16[pos + j]) {
+                if pos + j >= fmt_u16.len()
+                    || !push_wide(&mut out, buffer, maxlen, fmt_u16[pos + j])
+                {
                     break;
                 }
             }
