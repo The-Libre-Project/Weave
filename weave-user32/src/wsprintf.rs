@@ -182,21 +182,32 @@ fn va_arg_u64(ap: *const u8, slot: &mut usize) -> u64 {
     v
 }
 
-fn read_wide_at(ptr: *const u16, index: usize) -> u16 {
-    // Guest buffers may be misaligned; use unaligned reads (x86-64 allows this).
-    unsafe { ptr.add(index).read_unaligned() }
+fn try_read_u16_at(addr: usize) -> Option<u16> {
+    if addr == 0 {
+        return None;
+    }
+    let path = b"/proc/self/mem\0";
+    let fd = unsafe { libc::open(path.as_ptr().cast(), libc::O_RDONLY) };
+    if fd < 0 {
+        return None;
+    }
+    let mut buf = [0u8; 2];
+    let n = unsafe { libc::pread(fd, buf.as_mut_ptr().cast(), 2, addr as libc::off_t) };
+    unsafe { libc::close(fd) };
+    if n != 2 {
+        return None;
+    }
+    Some(u16::from_le_bytes(buf))
 }
 
-fn wide_strlen(ptr: *const u16) -> usize {
-    if ptr.is_null() {
-        return 0;
-    }
+fn wide_strlen_guest(addr: usize) -> usize {
     let mut len = 0usize;
     while len < MAX_GUEST_STR_LEN {
-        if read_wide_at(ptr, len) == 0 {
-            break;
+        match try_read_u16_at(addr + len * 2) {
+            Some(0) => break,
+            Some(_) => len += 1,
+            None => return 0,
         }
-        len += 1;
     }
     len
 }
@@ -355,8 +366,8 @@ fn wvsprintf_w_inner(buffer: *mut u16, format: *const u16, ap: *const u8) -> i32
                 let _ = push_wide(&mut out, buffer, maxlen, ch);
             }
             SpecType::WideStr => {
-                let ptr = va_arg_u64(ap, &mut va_slot) as usize as *const u16;
-                let mut len = wide_strlen(ptr);
+                let ptr_addr = va_arg_u64(ap, &mut va_slot) as usize;
+                let mut len = wide_strlen_guest(ptr_addr);
                 if spec.precision > 0 {
                     len = len.min(spec.precision as usize);
                 }
@@ -365,7 +376,9 @@ fn wvsprintf_w_inner(buffer: *mut u16, format: *const u16, ap: *const u8) -> i32
                     let _ = push_pad(&mut out, buffer, maxlen, pad, ' ' as u16);
                 }
                 for i in 0..len {
-                    let ch = read_wide_at(ptr, i);
+                    let Some(ch) = try_read_u16_at(ptr_addr + i * 2) else {
+                        break;
+                    };
                     if !push_wide(&mut out, buffer, maxlen, ch) {
                         break;
                     }
