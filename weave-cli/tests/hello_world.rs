@@ -1958,8 +1958,9 @@ fn irfanview_save_png_gate() {
         .env("WEAVE_TEST_SAVE_RESULT", out_png.display().to_string())
         // E3-M9e: RT_MENU/IRFANVIEW Save as... → cmd 0x47d (not Shift+S accel 0x481=Sharpen).
         .env("WEAVE_TEST_WM_COMMAND", "1149")
-        // E3-M9 ATTEMPT 12: defer Save As until plugin init may have run (default min=2).
-        .env("WEAVE_TEST_WM_COMMAND_MIN_PAINTS", "12")
+        // Keep this below the 6s post-first-paint teardown window: CI may not deliver
+        // enough IrfanView main-frame paints for a high threshold before A1 times out.
+        .env("WEAVE_TEST_WM_COMMAND_MIN_PAINTS", "2")
         .stderr(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .spawn()
@@ -2025,7 +2026,8 @@ fn irfanview_save_png_gate() {
                     }
                 }
                 if first_paint_seen && !drive_done {
-                    // WEAVE_TEST_WM_COMMAND inject fires inside weave after 2nd IrfanView WM_PAINT.
+                    // WEAVE_TEST_WM_COMMAND inject fires inside weave after the 2nd
+                    // IrfanView main-frame WM_PAINT.
                     eprintln!(
                         "irfanview_save_png_gate: first_paint seen — waiting for WEAVE_TEST_WM_COMMAND inject (cmd=0x47d)"
                     );
