@@ -121,16 +121,24 @@ pub unsafe extern "win64" fn wvsprintf_w(
 // Wine ref: dlls/user32/wsprintf.c — wsprintfW va_start(valist, spec); wvsnprintfW(buf, 1024, spec, valist).
 pub unsafe extern "win64" fn wsprintf_w(buffer: *mut u16, format: *const u16) -> i32 {
     if buffer.is_null() || format.is_null() {
-        return -1;
+        return 0;
     }
-    // Windows x64 va_start(ap, format): ap points at the homed R8 slot = RSP+24 on entry
-    // (after return addr + RCX/RDX home space). Must not use addr_of!(format) — Rust spills
-    // parameters to its own frame, not the caller's home area.
+    let wide = unsafe { decode_wide(format) };
+    if !wide.contains('%') {
+        return encode_utf8_into_wide(&wide, buffer, WSPRINTF_MAX);
+    }
+    // Windows x64 va_start(ap, format): homed R8 = RSP+24 on entry.
     let args: *mut c_void;
     core::arch::asm!(
         "mov {args}, rsp",
         "add {args}, 24",
         args = out(reg) args,
     );
-    wvsprintf_w_inner(buffer, format, args)
+    let ret = wvsprintf_w_inner(buffer, format, args);
+    if ret < 0 {
+        // E3-M9f: vsnprintf bridge failed — copy format literal so Save As path can continue.
+        encode_utf8_into_wide(&wide, buffer, WSPRINTF_MAX)
+    } else {
+        ret
+    }
 }
