@@ -145,7 +145,14 @@ fn encode_wide_into(s: &str, buf: *mut u16, cap: u32) {
     if buf.is_null() || cap == 0 {
         return;
     }
-    let cap = cap as usize;
+    encode_wide_into_cap(s, buf, cap as usize);
+}
+
+/// Encode a null-terminated UTF-16 string into a guest buffer with a `u16` capacity.
+fn encode_wide_into_cap(s: &str, buf: *mut u16, cap: usize) {
+    if buf.is_null() || cap == 0 {
+        return;
+    }
     let mut i = 0usize;
     for ch in s.encode_utf16() {
         if i + 1 >= cap {
@@ -155,6 +162,48 @@ fn encode_wide_into(s: &str, buf: *mut u16, cap: u32) {
         i += 1;
     }
     unsafe { *buf.add(i) = 0 };
+}
+
+/// Image extensions IrfanView may place in `lpstrFile` before Save As appends `lpstrDefExt`.
+const KNOWN_IMAGE_EXTENSIONS: &[&str] = &[
+    "png", "jpg", "jpeg", "jpe", "jfif", "gif", "bmp", "tiff", "tif", "webp",
+];
+
+/// Strip a trailing known image extension from the basename of a Win32 path.
+///
+/// Wine `dlls/comdlg32/filedlg.c` appends `lpstrDefExt` only when the typed filename
+/// has no extension; returning an extensionless `lpstrFile` plus `lpstrDefExt="png"`
+/// avoids `.png.jpg` double-suffix when the guest defaults to JPEG.
+fn strip_known_image_extension(path: &str) -> String {
+    let (dir, sep, basename) = match path.rsplit_once(['\\', '/']) {
+        Some((d, b)) => {
+            let sep = if path.contains('\\') { '\\' } else { '/' };
+            (d, sep, b)
+        }
+        None => return path.to_string(),
+    };
+    let Some(dot) = basename.rfind('.') else {
+        return path.to_string();
+    };
+    let ext = basename[dot + 1..].to_ascii_lowercase();
+    if KNOWN_IMAGE_EXTENSIONS.contains(&ext.as_str()) {
+        format!("{dir}{sep}{}", &basename[..dot])
+    } else {
+        path.to_string()
+    }
+}
+
+/// Overwrite guest `lpstrDefExt` with a new extension (no leading dot).
+///
+/// SAFETY: `def_ext_ptr` must point at a caller-owned writable wide buffer (OPENFILENAMEW contract).
+unsafe fn overwrite_lpstr_def_ext(def_ext_ptr: *const u16, new_ext: &str) -> bool {
+    if def_ext_ptr.is_null() {
+        return false;
+    }
+    // IrfanView allocates a small wchar buffer for lpstrDefExt; 16 code units is ample for "png".
+    const MAX_DEFEXT_CHARS: usize = 16;
+    encode_wide_into_cap(new_ext, def_ext_ptr as *mut u16, MAX_DEFEXT_CHARS);
+    true
 }
 
 // ── Reverse path translation (Linux → Windows) ───────────────────────────────
@@ -490,19 +539,26 @@ fn get_save_file_name_w_test_hook(lp_ofn: *mut u8, ofn: Ofn, test_path: &str) ->
         }
     };
 
-    // SAFETY: lp_str_def_ext is a guest-owned LPCWSTR; decode_wide_ptr scans until NUL within
-    // caller-allocated storage (standard OPENFILENAMEW contract).
-    if let Some(ext_wide) = unsafe { decode_wide_ptr(ofn.lp_str_def_ext) } {
-        let basename = win_path.rsplit(['\\', '/']).next().unwrap_or("");
-        if !ext_wide.is_empty() && !basename.contains('.') {
-            win_path = format!("{}.{}", win_path, ext_wide);
-        }
-    }
+    let filter_null = ofn.lp_str_filter.is_null();
+    let def_ext_decoded = unsafe { decode_wide_ptr(ofn.lp_str_def_ext) };
+    eprintln!(
+        "weave/GetSaveFileNameW: test hook diagnostics lpstrFilter_null={filter_null} nFilterIndex={} lpstrDefExt={}",
+        ofn.n_filter_index,
+        def_ext_decoded.as_deref().unwrap_or("(null)")
+    );
 
     // Force PNG encoder selection: IrfanView Save As defaults to JPEG (nFilterIndex=1)
     // and appends `.jpg` even when lpstrFile already ends in `.png`.
     // SAFETY: lp_str_filter is guest-owned; find_png_filter_index only reads until double-NUL.
     if let Some(png_idx) = unsafe { find_png_filter_index(ofn.lp_str_filter) } {
+        // SAFETY: lp_str_def_ext is a guest-owned LPCWSTR; decode_wide_ptr scans until NUL within
+        // caller-allocated storage (standard OPENFILENAMEW contract).
+        if let Some(ext_wide) = unsafe { decode_wide_ptr(ofn.lp_str_def_ext) } {
+            let basename = win_path.rsplit(['\\', '/']).next().unwrap_or("");
+            if !ext_wide.is_empty() && !basename.contains('.') {
+                win_path = format!("{}.{}", win_path, ext_wide);
+            }
+        }
         // SAFETY: lp_ofn is the same guest OPENFILENAMEW buffer read by read_ofn.
         unsafe { write_n_filter_index(lp_ofn, png_idx) };
         eprintln!(
@@ -510,7 +566,15 @@ fn get_save_file_name_w_test_hook(lp_ofn: *mut u8, ofn: Ofn, test_path: &str) ->
             ofn.n_filter_index
         );
     } else {
-        eprintln!("weave/GetSaveFileNameW: test hook → TRUE path={win_path}");
+        // lpstrFilter null or unparseable: cannot set nFilterIndex. Per Wine filedlg.c defext
+        // behavior, return an extensionless lpstrFile and overwrite lpstrDefExt to "png" so the
+        // guest appends `.png` once instead of `.png.jpg` from the JPEG default format.
+        // SAFETY: lp_str_def_ext points at caller-owned writable storage (OPENFILENAMEW contract).
+        unsafe { overwrite_lpstr_def_ext(ofn.lp_str_def_ext, "png") };
+        win_path = strip_known_image_extension(&win_path);
+        eprintln!(
+            "weave/GetSaveFileNameW: test hook → TRUE path={win_path} (extensionless, lpstrDefExt→png)"
+        );
     }
 
     // SAFETY: lp_str_file/n_max_file are guest-owned output buffer fields from OPENFILENAMEW.
@@ -622,7 +686,74 @@ mod tests {
             !path.is_empty(),
             "lpstrFile must be non-empty after TRUE return"
         );
-        assert_eq!(path, r"C:\Save\Out\image.png");
+        assert_eq!(
+            path, r"C:\Save\Out\image",
+            "null lpstrFilter: hook writes extensionless lpstrFile; guest appends lpstrDefExt"
+        );
+
+        drop(ext_storage);
+        drop(filter_storage);
+        match old {
+            Some(v) => std::env::set_var("WEAVE_TEST_SAVE_RESULT", v),
+            None => std::env::remove_var("WEAVE_TEST_SAVE_RESULT"),
+        }
+    }
+
+    #[test]
+    fn strip_known_image_extension_removes_trailing_png() {
+        assert_eq!(
+            strip_known_image_extension(r"C:\Save\Out\image.png"),
+            r"C:\Save\Out\image"
+        );
+        assert_eq!(
+            strip_known_image_extension(r"Z:/gate/save_png_gate_7864.png"),
+            r"Z:/gate/save_png_gate_7864"
+        );
+        assert_eq!(
+            strip_known_image_extension(r"C:\Save\Out\image"),
+            r"C:\Save\Out\image"
+        );
+    }
+
+    #[test]
+    fn get_save_file_name_w_test_hook_overwrites_defext_when_filter_null() {
+        let old = std::env::var("WEAVE_TEST_SAVE_RESULT").ok();
+        std::env::set_var("WEAVE_TEST_SAVE_RESULT", r"C:\Save\Out\image.png");
+
+        let mut file_buf: [u16; 260] = [0; 260];
+        let (ofn_bytes, ext_storage, filter_storage) =
+            make_minimal_ofn(&mut file_buf, Some("jpg"), None, Some(1));
+
+        let ret = unsafe { get_save_file_name_w(ofn_bytes.as_ptr() as *mut u8) };
+        assert_eq!(ret, 1, "test hook must return TRUE");
+
+        let end = file_buf
+            .iter()
+            .position(|&c| c == 0)
+            .unwrap_or(file_buf.len());
+        let path = String::from_utf16_lossy(&file_buf[..end]);
+        assert_eq!(
+            path, r"C:\Save\Out\image",
+            "lpstrFile must be extensionless when lpstrFilter is null"
+        );
+
+        let def_ext = ext_storage.as_ref().expect("lpstrDefExt storage");
+        let def_end = def_ext
+            .iter()
+            .position(|&c| c == 0)
+            .unwrap_or(def_ext.len());
+        let def_ext_str = String::from_utf16_lossy(&def_ext[..def_end]);
+        assert_eq!(
+            def_ext_str, "png",
+            "hook must overwrite guest lpstrDefExt from jpg to png"
+        );
+
+        let n_filter_index =
+            u32::from_le_bytes(ofn_bytes[44..48].try_into().expect("nFilterIndex bytes"));
+        assert_eq!(
+            n_filter_index, 1,
+            "nFilterIndex unchanged when lpstrFilter is null"
+        );
 
         drop(ext_storage);
         drop(filter_storage);
