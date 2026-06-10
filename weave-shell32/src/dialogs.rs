@@ -167,6 +167,38 @@ fn png_filter_index_from_pairs(pairs: &[(String, String)]) -> Option<u32> {
         .map(|i| (i + 1) as u32)
 }
 
+/// Return true when at least one decoded filter pair mentions PNG (display or pattern).
+fn filter_pairs_contain_png(pairs: &[(String, String)]) -> bool {
+    pairs
+        .iter()
+        .any(|(display, pattern)| filter_pair_is_png(display, pattern))
+}
+
+/// IrfanView Save As: PNG is the 3rd filter pair when `lpstrFilter` cannot be decoded.
+const IRFANVIEW_PNG_FILTER_INDEX: u32 = 3;
+
+/// Ensure a Win32 path ends with a `.png` extension (replace other extensions; keep `.png`).
+fn ensure_win_path_ends_with_png(path: &str) -> String {
+    let basename = path.rsplit(['\\', '/']).next().unwrap_or(path);
+    if basename.to_ascii_lowercase().ends_with(".png") {
+        return path.to_string();
+    }
+    match path.rsplit_once(['\\', '/']) {
+        Some((dir, base)) => {
+            let sep = if path.contains('\\') { '\\' } else { '/' };
+            let stem = base.rfind('.').map(|dot| &base[..dot]).unwrap_or(base);
+            format!("{dir}{sep}{stem}.png")
+        }
+        None => {
+            let stem = basename
+                .rfind('.')
+                .map(|dot| &basename[..dot])
+                .unwrap_or(basename);
+            format!("{stem}.png")
+        }
+    }
+}
+
 // ── Wide string helpers ───────────────────────────────────────────────────────
 
 /// Decode a null-terminated UTF-16 pointer to a Rust String.
@@ -202,6 +234,7 @@ fn encode_wide_into_cap(s: &str, buf: *mut u16, cap: usize) {
 }
 
 /// Image extensions IrfanView may place in `lpstrFile` before Save As appends `lpstrDefExt`.
+#[cfg(test)]
 const KNOWN_IMAGE_EXTENSIONS: &[&str] = &[
     "png", "jpg", "jpeg", "jpe", "jfif", "gif", "bmp", "tiff", "tif", "webp",
 ];
@@ -211,6 +244,7 @@ const KNOWN_IMAGE_EXTENSIONS: &[&str] = &[
 /// Wine `dlls/comdlg32/filedlg.c` appends `lpstrDefExt` only when the typed filename
 /// has no extension; returning an extensionless `lpstrFile` plus `lpstrDefExt="png"`
 /// avoids `.png.jpg` double-suffix when the guest defaults to JPEG.
+#[cfg(test)]
 fn strip_known_image_extension(path: &str) -> String {
     let (dir, sep, basename) = match path.rsplit_once(['\\', '/']) {
         Some((d, b)) => {
@@ -228,19 +262,6 @@ fn strip_known_image_extension(path: &str) -> String {
     } else {
         path.to_string()
     }
-}
-
-/// Overwrite guest `lpstrDefExt` with a new extension (no leading dot).
-///
-/// SAFETY: `def_ext_ptr` must point at a caller-owned writable wide buffer (OPENFILENAMEW contract).
-unsafe fn overwrite_lpstr_def_ext(def_ext_ptr: *const u16, new_ext: &str) -> bool {
-    if def_ext_ptr.is_null() {
-        return false;
-    }
-    // IrfanView allocates a small wchar buffer for lpstrDefExt; 16 code units is ample for "png".
-    const MAX_DEFEXT_CHARS: usize = 16;
-    encode_wide_into_cap(new_ext, def_ext_ptr as *mut u16, MAX_DEFEXT_CHARS);
-    true
 }
 
 // ── Reverse path translation (Linux → Windows) ───────────────────────────────
@@ -567,6 +588,10 @@ pub unsafe extern "win64" fn get_save_file_name_w(lp_ofn: *mut u8) -> i32 {
 /// force PNG `nFilterIndex` when `lpstrFilter` contains a PNG pair, write into `lpstrFile`,
 /// log, and return TRUE.
 fn get_save_file_name_w_test_hook(lp_ofn: *mut u8, ofn: Ofn, test_path: &str) -> i32 {
+    // SAFETY: lp_ofn is a valid guest OPENFILENAMEW buffer (caller-checked).
+    let l_struct_size = unsafe { *(lp_ofn as *const u32) };
+    eprintln!("weave/GetSaveFileNameW: test hook lStructSize={l_struct_size}");
+
     let mut win_path = if test_path.len() >= 2 && test_path.as_bytes()[1] == b':' {
         test_path.replace('/', "\\")
     } else {
@@ -611,7 +636,11 @@ fn get_save_file_name_w_test_hook(lp_ofn: *mut u8, ofn: Ofn, test_path: &str) ->
 
     // Force PNG encoder selection: IrfanView Save As defaults to JPEG (nFilterIndex=1)
     // and appends `.jpg` even when lpstrFile already ends in `.png`.
-    if let Some(png_idx) = png_filter_index_from_pairs(&filter_pairs) {
+    let png_idx = png_filter_index_from_pairs(&filter_pairs);
+    let filter_parse_ok = png_idx.is_some() && filter_pairs_contain_png(&filter_pairs);
+
+    if filter_parse_ok {
+        let png_idx = png_idx.expect("filter_parse_ok implies Some(png_idx)");
         // SAFETY: lp_ofn is the same guest OPENFILENAMEW buffer read by read_ofn.
         unsafe { write_n_filter_index(lp_ofn, png_idx) };
         // SAFETY: lp_str_def_ext is a guest-owned LPCWSTR; decode_wide_ptr scans until NUL within
@@ -627,14 +656,14 @@ fn get_save_file_name_w_test_hook(lp_ofn: *mut u8, ofn: Ofn, test_path: &str) ->
             ofn.n_filter_index
         );
     } else {
-        // lpstrFilter null or unparseable: cannot set nFilterIndex. Per Wine filedlg.c defext
-        // behavior, return an extensionless lpstrFile and overwrite lpstrDefExt to "png" so the
-        // guest appends `.png` once instead of `.png.jpg` from the JPEG default format.
-        // SAFETY: lp_str_def_ext points at caller-owned writable storage (OPENFILENAMEW contract).
-        unsafe { overwrite_lpstr_def_ext(ofn.lp_str_def_ext, "png") };
-        win_path = strip_known_image_extension(&win_path);
+        // lpstrFilter unreadable or no PNG pair: IrfanView RE uses PNG as the 3rd filter pair.
+        win_path = ensure_win_path_ends_with_png(&win_path);
+        // SAFETY: lp_ofn is the same guest OPENFILENAMEW buffer read by read_ofn.
+        unsafe { write_n_filter_index(lp_ofn, IRFANVIEW_PNG_FILTER_INDEX) };
+        eprintln!("weave/GetSaveFileNameW: forced nFilterIndex=3 (filter parse fallback)");
         eprintln!(
-            "weave/GetSaveFileNameW: test hook → TRUE path={win_path} (extensionless, lpstrDefExt→png)"
+            "weave/GetSaveFileNameW: test hook → TRUE path={win_path} nFilterIndex={} (was {})",
+            IRFANVIEW_PNG_FILTER_INDEX, ofn.n_filter_index
         );
     }
 
@@ -745,8 +774,15 @@ mod tests {
             "lpstrFile must be non-empty after TRUE return"
         );
         assert_eq!(
-            path, r"C:\Save\Out\image",
-            "null lpstrFilter: hook writes extensionless lpstrFile; guest appends lpstrDefExt"
+            path, r"C:\Save\Out\image.png",
+            "null lpstrFilter: hook forces nFilterIndex=3 and writes .png lpstrFile"
+        );
+
+        let n_filter_index =
+            u32::from_le_bytes(ofn_bytes[44..48].try_into().expect("nFilterIndex bytes"));
+        assert_eq!(
+            n_filter_index, IRFANVIEW_PNG_FILTER_INDEX,
+            "null lpstrFilter must force IrfanView PNG filter index 3"
         );
 
         drop(ext_storage);
@@ -774,7 +810,7 @@ mod tests {
     }
 
     #[test]
-    fn get_save_file_name_w_test_hook_overwrites_defext_when_filter_null() {
+    fn get_save_file_name_w_test_hook_forces_png_index_when_filter_null() {
         let old = std::env::var("WEAVE_TEST_SAVE_RESULT").ok();
         std::env::set_var("WEAVE_TEST_SAVE_RESULT", r"C:\Save\Out\image.png");
 
@@ -791,26 +827,15 @@ mod tests {
             .unwrap_or(file_buf.len());
         let path = String::from_utf16_lossy(&file_buf[..end]);
         assert_eq!(
-            path, r"C:\Save\Out\image",
-            "lpstrFile must be extensionless when lpstrFilter is null"
-        );
-
-        let def_ext = ext_storage.as_ref().expect("lpstrDefExt storage");
-        let def_end = def_ext
-            .iter()
-            .position(|&c| c == 0)
-            .unwrap_or(def_ext.len());
-        let def_ext_str = String::from_utf16_lossy(&def_ext[..def_end]);
-        assert_eq!(
-            def_ext_str, "png",
-            "hook must overwrite guest lpstrDefExt from jpg to png"
+            path, r"C:\Save\Out\image.png",
+            "lpstrFile must retain .png when lpstrFilter is null (filter parse fallback)"
         );
 
         let n_filter_index =
             u32::from_le_bytes(ofn_bytes[44..48].try_into().expect("nFilterIndex bytes"));
         assert_eq!(
-            n_filter_index, 1,
-            "nFilterIndex unchanged when lpstrFilter is null"
+            n_filter_index, IRFANVIEW_PNG_FILTER_INDEX,
+            "null lpstrFilter must force nFilterIndex=3 (IrfanView PNG pair index)"
         );
 
         drop(ext_storage);
@@ -890,7 +915,9 @@ mod tests {
         }
 
         let pe_base = weave_core::seh::pe_base();
-        if pe_base == 0 || GUEST_FILTER_BASE < pe_base || GUEST_FILTER_BASE >= pe_base + weave_core::seh::pe_size()
+        if pe_base == 0
+            || GUEST_FILTER_BASE < pe_base
+            || GUEST_FILTER_BASE >= pe_base + weave_core::seh::pe_size()
         {
             eprintln!(
                 "skip decode_filter_pairs_guest_pe_range_pointer_when_mapped: \
@@ -908,6 +935,38 @@ mod tests {
         }
         assert_eq!(decoded.len(), 2);
         assert_eq!(png_filter_index_from_pairs(&decoded), Some(2));
+    }
+
+    #[test]
+    fn get_save_file_name_w_test_hook_forces_n_filter_index_3_when_filter_null() {
+        let mut file_buf: [u16; 260] = [0; 260];
+        let (mut ofn_bytes, ext_storage, filter_storage) =
+            make_minimal_ofn(&mut file_buf, Some("jpg"), None, Some(8));
+
+        let ofn = unsafe { read_ofn(ofn_bytes.as_ptr()) };
+        let ret =
+            get_save_file_name_w_test_hook(ofn_bytes.as_mut_ptr(), ofn, r"C:\Save\Out\gate.png");
+        assert_eq!(ret, 1, "test hook must return TRUE");
+
+        let n_filter_index =
+            u32::from_le_bytes(ofn_bytes[44..48].try_into().expect("nFilterIndex bytes"));
+        assert_eq!(
+            n_filter_index, IRFANVIEW_PNG_FILTER_INDEX,
+            "incoming nFilterIndex=8 with null lpstrFilter must be forced to 3"
+        );
+
+        let end = file_buf
+            .iter()
+            .position(|&c| c == 0)
+            .unwrap_or(file_buf.len());
+        let path = String::from_utf16_lossy(&file_buf[..end]);
+        assert_eq!(
+            path, r"C:\Save\Out\gate.png",
+            "fallback must write full .png path to lpstrFile"
+        );
+
+        drop(ext_storage);
+        drop(filter_storage);
     }
 
     #[test]
