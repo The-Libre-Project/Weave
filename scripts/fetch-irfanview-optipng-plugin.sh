@@ -17,41 +17,46 @@ mkdir -p "${DEST}"
 TMP="$(mktemp -d)"
 trap 'rm -rf "${TMP}"' EXIT
 
-UA="Mozilla/5.0 (compatible; Weave-CI/1.0)"
-REF="https://www.irfanview.com/"
+UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 
-try_zip() {
+# irfanview.info serves an HTML interstitial on the first GET; the second GET
+# (same URL, session cookie + Referer) returns the real zip. See FAQ "second click".
+fetch_zip() {
   local url="$1"
   local zip="${TMP}/plugins.zip"
-  echo "fetch-irfanview-optipng-plugin: trying ${url}"
-  if ! curl -fsSL -A "${UA}" -H "Referer: ${REF}" --retry 3 --retry-delay 2 \
-    -o "${zip}" "${url}"; then
-    return 1
-  fi
+  local cj="${TMP}/cookies.txt"
+  curl -fsSL -c "${cj}" -A "${UA}" -o /dev/null "${url}"
+  curl -fsSL -b "${cj}" -A "${UA}" -H "Referer: ${url}" -o "${zip}" "${url}"
   if ! file "${zip}" | grep -qi 'zip archive'; then
     echo "fetch-irfanview-optipng-plugin: not a zip (${url})" >&2
     return 1
   fi
-  unzip -q -o "${zip}" -d "${TMP}/extract" '*/OptiPNG.dll' '*/optipng.dll' 2>/dev/null || true
+  echo "${zip}"
+}
+
+extract_optipng() {
+  local zip="$1"
+  if unzip -p "${zip}" OptiPNG.dll > "${MARKER}" 2>/dev/null; then
+    return 0
+  fi
+  unzip -q -o "${zip}" -d "${TMP}/extract" '*/OptiPNG.dll' 'OptiPNG.dll' 2>/dev/null || true
   local found
   found="$(find "${TMP}/extract" -iname 'OptiPNG.dll' -print -quit 2>/dev/null || true)"
   if [[ -z "${found}" ]]; then
-    echo "fetch-irfanview-optipng-plugin: OptiPNG.dll not in archive (${url})" >&2
     return 1
   fi
   cp "${found}" "${MARKER}"
-  echo "fetch-irfanview-optipng-plugin: installed ${MARKER}"
-  return 0
 }
 
 URLS=(
   "https://www.irfanview.info/files/iview475_plugins_x64.zip"
-  "https://dappcdn.com/download/graphic-apps/irfanview?get=iview475_plugins_x64.zip"
   "https://www.irfanview.info/files/iv_formats.zip"
 )
 
 for url in "${URLS[@]}"; do
-  if try_zip "${url}"; then
+  echo "fetch-irfanview-optipng-plugin: trying ${url}"
+  if zip="$(fetch_zip "${url}" 2>/dev/null)" && extract_optipng "${zip}"; then
+    echo "fetch-irfanview-optipng-plugin: installed ${MARKER}"
     exit 0
   fi
 done

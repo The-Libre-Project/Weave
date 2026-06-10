@@ -48,8 +48,7 @@ tests/fixtures/bin/m13_v23_work/
 tests/fixtures/bin/m13_debug_e_work/
 tests/fixtures/bin/m8a_extract_out/
 
-# IrfanView OptiPNG plugin — fetched by scripts/fetch-irfanview-optipng-plugin.sh
-tests/fixtures/irfanview/Plugins/
+
 
 # NXEngine fixture — binary game files, not tracked
 tests/fixtures/nxengine/
