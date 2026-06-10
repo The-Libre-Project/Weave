@@ -3044,7 +3044,7 @@ pub unsafe extern "win64" fn vk_create_win32_surface_khr(
     let xcb_win = weave_user32::window::xcb_id(info.hwnd);
     eprintln!("weave-vulkan: vk_create_win32_surface_khr: xcb_id={xcb_win}");
     if xcb_win != 0 {
-        D3D9_SURFACE_XCB.store(xcb_win as u32, Ordering::Relaxed);
+        D3D9_SURFACE_XCB.store(xcb_win, Ordering::Relaxed);
     }
     if xcb_win == 0 {
         eprintln!("weave-vulkan: vk_create_win32_surface_khr: hwnd not registered, returning FEATURE_NOT_PRESENT");
