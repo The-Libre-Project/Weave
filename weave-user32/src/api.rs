@@ -6779,6 +6779,17 @@ pub unsafe extern "win64" fn translate_accelerator_w(
         // Only the low byte carries the flags; high byte is padding in PE_ACCEL.
         let f_virt = f_virt_w as u8;
 
+        // CI diagnostic (E3M10b / TASK-E3M10b): log every accelerator table entry examined
+        // during IrfanView runs. This surfaces the concrete (key,cmd) bindings (e.g. VK_RIGHT
+        // -> its nav cmd) when the HACCEL for the main frame is walked, answering what
+        // WEAVE_TEST_WM_COMMAND value (or real WM_KEY) will trigger "next image".
+        // Wine ref receipt (re-confirmed this session): dlls/win32u/menu.c::translate_accelerator#function
+        // (search_symbols + get_symbol_source on local/wine-reference-182107cc) — on match after
+        // GetKeyState mask test: send_message(hwnd, WM_COMMAND, 0x10000 | cmd, 0); return TRUE.
+        eprintln!(
+            "weave/user32: accel entry[{i}] fVirt=0x{f_virt:x} key=0x{key:x} cmd=0x{cmd:x} (h_wnd={h_wnd:#x})"
+        );
+
         // wparam holds the virtual-key code (FVIRTKEY path) or the character code.
         let wp = msg.w_param as u16;
         if wp != key {
