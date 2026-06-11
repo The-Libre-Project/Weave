@@ -2275,6 +2275,9 @@ fn irfanview_folder_nav_gate() {
                     drive_done = true;
                     std::thread::sleep(std::time::Duration::from_secs(6));
 
+                    // E3-M10 diag: find IrfanView window, inject keyboard Right-arrow,
+                    // then wait for a second image render before teardown.
+                    let mut irfan_wid: Option<String> = None;
                     let search = std::process::Command::new("xdotool")
                         .args(["search", "--name", "IrfanView"])
                         .output();
@@ -2286,13 +2289,24 @@ fn irfanview_folder_nav_gate() {
                                 .map(|s| s.trim().to_string())
                             {
                                 if !id.is_empty() {
-                                    eprintln!("irfanview_folder_nav_gate: sending alt+F4 teardown, wid={id}");
+                                    irfan_wid = Some(id.clone());
+                                    eprintln!("irfanview_folder_nav_gate: injecting xdotool key Right (E3-M10 diag: keyboard path), wid={id}");
                                     let _ = std::process::Command::new("xdotool")
-                                        .args(["key", "--window", &id, "alt+F4"])
+                                        .args(["key", "--window", &id, "Right"])
                                         .output();
+                                    eprintln!("irfanview_folder_nav_gate: waiting 10s for second render after key Right");
+                                    std::thread::sleep(std::time::Duration::from_secs(10));
                                 }
                             }
                         }
+                    }
+
+                    // Alt+F4 teardown (reuse window ID if found, else search again).
+                    if let Some(id) = irfan_wid {
+                        eprintln!("irfanview_folder_nav_gate: sending alt+F4 teardown, wid={id}");
+                        let _ = std::process::Command::new("xdotool")
+                            .args(["key", "--window", &id, "alt+F4"])
+                            .output();
                     }
                 }
                 if now >= deadline {
@@ -2342,6 +2356,14 @@ fn irfanview_folder_nav_gate() {
         || stderr.contains("test_image.gif")
         || stderr.contains("test_image.jpg")
         || stderr.contains("test_image.png");
+    // E3-M10 diag: log whether translate_accelerator_w fired (accel table walked on keyboard msg).
+    // If xdotool key Right reached IrfanView's message loop and it calls TranslateAccelerator,
+    // we'll see "weave/user32: accel entry[" lines from the E3M10b diag eprintln in api.rs.
+    let accel_hit = stderr.contains("weave/user32: accel entry[");
+    eprintln!(
+        "irfanview_folder_nav_gate: diag — has_inject={has_inject} bitblt={bitblt_count} wm_paint={wm_paint_count} accel={accel_hit} sibling_file={}",
+        stderr.contains("test_image.gif") || stderr.contains("test_image.jpg") || stderr.contains("test_image.png")
+    );
     assert!(
         has_inject && second_render,
         "irfanview_folder_nav_gate FAIL A1: missing dispatch success or second distinct image render.\n\
