@@ -281,6 +281,24 @@ fn map_sections(
         }
     }
 
+    // Defensive .data initializer guard (TASK-E3M5b-b step 2).
+    // The preceding loop is the exact site that copies raw payload for
+    // IMAGE_SCN_CNT_INITIALIZED_DATA sections (.data static tables) at their
+    // RVA-adjusted VA, and zeros only the tail beyond raw_size (BSS within section).
+    // SizeOfImage handling: image_size = 0x1f3000 for Q-Dir (from opt).
+    // On-disk values per TRACE-B: RVA 0x1531e0 = 0x13e4d0001231aa, 0x146e70=0x0a.
+    // If these read as PE-expected non-zero here (post-map, pre-guest), .data
+    // materialization is confirmed. (Guest also observed 0xa at 0x146e70 in TRACE-D.)
+    if image_size == 0x001f_3000 {
+        // Q-Dir only — safe, no 0x78xxx code RVAs touched.
+        let counter = unsafe { ptr::read_volatile(base.add(0x146e70) as *const u32) };
+        let freelist_head = unsafe { ptr::read_volatile(base.add(0x1531e0) as *const u64) };
+        eprintln!(
+            "weave: .data init guard (post-map pre-guest): RVA0x146e70={:#x} (PE 0xa) RVA0x1531e0={:#x} (PE 0x13e4d0...)",
+            counter, freelist_head
+        );
+    }
+
     if delta != 0 {
         apply_relocations(base, pe, delta)?;
     }
