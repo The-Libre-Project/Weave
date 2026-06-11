@@ -1160,6 +1160,14 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
             api::translate_accelerator_w as unsafe extern "win64" fn(_, _, _) -> _ as *const ()
                 as usize,
         ),
+        "CopyAcceleratorTableW" => Some(
+            api::copy_accelerator_table_w as unsafe extern "win64" fn(_, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "CopyAcceleratorTableA" => Some(
+            api::copy_accelerator_table_a as unsafe extern "win64" fn(_, _, _) -> _ as *const ()
+                as usize,
+        ),
         "GetFocus" => Some(api::get_focus as *const () as usize),
         "LoadBitmapW" => {
             Some(api::load_bitmap_w as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)

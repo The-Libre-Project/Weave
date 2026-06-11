@@ -7986,20 +7986,268 @@ pub extern "win64" fn show_scroll_bar(_hwnd: usize, _bar: i32, _show: i32) -> i3
     1 // TRUE
 }
 
-/// CreateAcceleratorTableW — create an accelerator table from an array of ACCEL structs.
+/// Internal: materialize up to `c_accel_entries` user ACCEL entries from a
+/// PE_ACCEL blob (8 bytes: u16 fVirt-with-pad, u16 key, u16 cmd, u16 pad).
+/// If `lp_accel` is null, returns the total entry count in the blob (ignores c).
+/// Strips the LAST_ENTRY (0x80) sentinel via &0x7f when writing fVirt.
+/// Uses read_unaligned for the source blob (same as translate_accelerator_w).
 ///
 /// # Safety
-/// `lp_accel` must be a valid array of `count` ACCEL structs, or null.
-// Wine ref: dlls/win32u/ntuser.c — allocates kernel accelerator object, returns HACCEL.
+/// `blob` must reference a valid PE_ACCEL buffer whose ptr+size is live for
+/// the duration of the call (resource image or leaked Create buffer).
+/// If `lp_accel` non-null it must point to space for at least min(c, count) ACCELs.
+unsafe fn copy_accel_entries_from_pe_blob(
+    blob: crate::accel_handles::AccelBlob,
+    lp_accel: *mut ACCEL,
+    c_accel_entries: i32,
+) -> i32 {
+    if blob.ptr == 0 || blob.size == 0 {
+        return 0;
+    }
+    const ENTRY_SIZE: usize = 8;
+    let total = (blob.size as usize) / ENTRY_SIZE;
+    if total == 0 {
+        return 0;
+    }
+    if lp_accel.is_null() {
+        // Query mode: return the total number of entries available.
+        // (Wine NtUserCopy ignores the count arg when dst==NULL.)
+        return total as i32;
+    }
+    let to_copy = if c_accel_entries <= 0 {
+        0
+    } else {
+        std::cmp::min(c_accel_entries as usize, total)
+    };
+    let base = blob.ptr as *const u8;
+    for i in 0..to_copy {
+        let off = i * ENTRY_SIZE;
+        // SAFETY: blob from validated resource or leaked Create data; offsets
+        // in-bounds by the total computation. read_unaligned for PE packing.
+        let (fv_w, key, cmd): (u16, u16, u16) = unsafe {
+            let p = base.add(off);
+            let fv = (p as *const u16).read_unaligned();
+            let k = (p.add(2) as *const u16).read_unaligned();
+            let c = (p.add(4) as *const u16).read_unaligned();
+            (fv, k, c)
+        };
+        let fvirt = (fv_w as u8) & 0x7f; // strip LAST_ENTRY sentinel
+        let entry = ACCEL {
+            fVirt: fvirt,
+            key,
+            cmd,
+        };
+        // SAFETY: caller guarantees lp_accel + to_copy slots are writable.
+        unsafe {
+            std::ptr::write(lp_accel.add(i), entry);
+        }
+    }
+    to_copy as i32
+}
+
+/// CopyAcceleratorTableW — copy accelerator table entries into a caller buffer (Wide).
+///
+/// If `hAccel` is non-zero: looks up the HACCEL (from LoadAcceleratorsW or
+/// CreateAcceleratorTableW) in the accel_handles slab and copies its PE_ACCEL
+/// entries (converted to user ACCEL form) into `lpAccel`.
+///
+/// If `hAccel` is zero: reads the first RT_ACCELERATOR (type 9) resource from
+/// the main guest module image (pe_base(), "most recent / calling HINSTANCE"
+/// per the described contract) and copies directly without registering an
+/// HACCEL. This supports apps that build their accelerator tables via
+/// Copy(0, NULL, 0) / Copy(0, buf, n) flows rather than Load by name.
+///
+/// If `lpAccel` is NULL: returns the total number of entries (query mode).
+/// Otherwise copies min(cAccelEntries, available) entries and returns that count.
+/// Returns 0 on failure (bad handle, no resource, empty table, etc).
+///
+/// The output ACCELs have fVirt with the LAST_ENTRY (0x80) bit stripped
+/// (fVirt & 0x7f), matching Wine NtUserCopyAcceleratorTable.
+///
+/// # Safety
+/// `lpAccel` must be null or point to sufficient writable memory for the
+/// ACCEL structs requested (caller typically does a query first).
+// Wine ref: dlls/user32/resource.c::CopyAcceleratorTableA — thin wrapper that
+//   calls NtUserCopyAcceleratorTable then (for A) narrows non-FVIRTKEY .key via
+//   WideCharToMultiByte(CP_ACP); dlls/win32u/menu.c::NtUserCopyAcceleratorTable —
+//   if (!get_user_handle_ptr(src, NTUSER_OBJ_ACCEL)) return 0;
+//   if (dst) { count=min(count,accel->count); copy fVirt&=0x7f, key, cmd; }
+//   else count=accel->count; return count;
+//   (hAccel==0 "load from module resource" path is a Weave accommodation for
+//   IrfanView-style "build HACCEL from main exe RT_ACCEL without explicit name"
+//   — the indexed Wine sources always require a valid src HACCEL.)
+pub unsafe extern "win64" fn copy_accelerator_table_w(
+    h_accel: usize,
+    lp_accel: *mut ACCEL,
+    c_accel_entries: i32,
+) -> i32 {
+    if h_accel == 0 {
+        // hAccel==0: load directly from the guest's main module RT_ACCEL
+        // resource (no HACCEL allocation/registration — just the entries).
+        let image_base = weave_core::seh::pe_base();
+        if image_base == 0 {
+            return 0;
+        }
+        // Discover the first (any) name/id under RT_ACCELERATOR using the
+        // existing enumerator (avoids needing a name up front).
+        // Use Cell because enumerate_resource_names callback is Fn (not FnMut).
+        let chosen: std::cell::Cell<Option<weave_core::resource::ResourceId>> =
+            std::cell::Cell::new(None);
+        let type_ptr = 9u16 as *const u16; // MAKEINTRESOURCE(9) == RT_ACCELERATOR
+        // Define callback outside the unsafe call expr so inner unsafe (ptr walk)
+        // is not considered nested by unused_unsafe lint.
+        let cb = |name_ptr: *const u16| -> bool {
+            let np = name_ptr as usize;
+            let rid = if np >> 16 == 0 {
+                weave_core::resource::ResourceId::Id(np as u16)
+            } else {
+                let mut v: Vec<u16> = Vec::new();
+                // SAFETY: enumerate guarantees a NUL-terminated UTF-16 string.
+                unsafe {
+                    let mut p = name_ptr;
+                    loop {
+                        let ch = *p;
+                        if ch == 0 {
+                            break;
+                        }
+                        v.push(ch);
+                        p = p.add(1);
+                    }
+                }
+                weave_core::resource::ResourceId::Name(v)
+            };
+            chosen.set(Some(rid));
+            false // first one only
+        };
+        // SAFETY: enumerate_resource_names requires valid image_base + lp_type
+        // (ordinal form here); we stop at first name.
+        let _ = unsafe {
+            weave_core::resource::enumerate_resource_names(image_base, type_ptr, cb)
+        };
+        let name_id = match chosen.take() {
+            Some(id) => id,
+            None => return 0,
+        };
+        const RT_ACCELERATOR: u16 = 9;
+        let entry_ptr = match weave_core::resource::find_resource_entry(
+            image_base,
+            weave_core::resource::ResourceId::Id(RT_ACCELERATOR),
+            name_id,
+            0,
+        ) {
+            Some(p) => p,
+            None => return 0,
+        };
+        let (blob_ptr, size) = match unsafe {
+            weave_core::resource::resource_entry_ptr_and_size(image_base, entry_ptr)
+        } {
+            Some((p, s)) => (p as usize, s as u32),
+            None => return 0,
+        };
+        let temp = crate::accel_handles::AccelBlob {
+            ptr: blob_ptr,
+            size,
+        };
+        // SAFETY: temp blob points into the live main image; lp_accel contract
+        // per pub fn doc.
+        return unsafe { copy_accel_entries_from_pe_blob(temp, lp_accel, c_accel_entries) };
+    }
+
+    // Normal path: HACCEL came from Load (registered blob) or Create (inserted blob).
+    let blob = match crate::accel_handles::lookup(h_accel) {
+        Some((_, _, b)) => b,
+        None => return 0,
+    };
+    // SAFETY: blob from slab (either resource image or leaked Create allocation);
+    // lp_accel per caller contract above.
+    unsafe { copy_accel_entries_from_pe_blob(blob, lp_accel, c_accel_entries) }
+}
+
+/// CopyAcceleratorTableA — ANSI form of CopyAcceleratorTableW.
+///
+/// After delegating to the W implementation (which always yields "wide" key
+/// values for non-FVIRTKEY entries), narrow any char keys with a CP_ACP
+/// pass-through (identity for the 7-bit ASCII values typical in accelerator
+/// resources).
+///
+/// # Safety
+/// Same pointer contract as the W form.
+pub unsafe extern "win64" fn copy_accelerator_table_a(
+    h_accel: usize,
+    lp_accel: *mut ACCEL,
+    c_accel_entries: i32,
+) -> i32 {
+    let ret = unsafe { copy_accelerator_table_w(h_accel, lp_accel, c_accel_entries) };
+    if ret > 0 && !lp_accel.is_null() {
+        const FVIRTKEY: u8 = 0x01;
+        for i in 0..(ret as usize) {
+            // SAFETY: ret guarantees we wrote at least this many; lp non-null.
+            let e = unsafe { &mut *lp_accel.add(i) };
+            if (e.fVirt & FVIRTKEY) == 0 {
+                // Narrow: non-virt keys are character codes.
+                e.key = (e.key as u8) as u16;
+            }
+        }
+    }
+    ret
+}
+
+/// CreateAcceleratorTableW — create an accelerator table from an array of ACCEL structs.
+///
+/// Builds an internal PE_ACCEL blob (adding pad words + LAST_ENTRY sentinel on
+/// the final entry), leaks the bytes for lifetime, inserts into accel_handles,
+/// and returns a fresh synthetic HACCEL. The resulting handle is usable with
+/// TranslateAcceleratorW and CopyAcceleratorTableW.
+///
+/// On count < 1 or null input: returns 0 (caller may have set ERROR_INVALID_PARAMETER
+/// in full impl; we keep it simple and let the 0 propagate).
+///
+/// # Safety
+/// `lp_accel` must point to `count` valid ACCEL entries, or be null (when count<1).
+// Wine ref: dlls/win32u/menu.c::NtUserCreateAcceleratorTable — allocs a
+//   'struct accelerator { int count; ACCEL table[1]; }', memcpy's the caller's
+//   ACCELs, then alloc_user_handle(..., NTUSER_OBJ_ACCEL). Weave stores the
+//   equivalent data as a leaked PE_ACCEL blob in the accel_handles slab so the
+//   rest of the (Translate/Copy) machinery stays uniform with the Load path.
 pub unsafe extern "win64" fn create_accelerator_table_w(
-    _lp_accel: *const u8,
-    _count: i32,
+    lp_accel: *const ACCEL,
+    count: i32,
 ) -> usize {
-    crate::accel_handles::ACCEL_HANDLE_BASE // non-zero fake HACCEL
+    if count < 1 || lp_accel.is_null() {
+        return 0;
+    }
+    // Convert caller's ACCEL[] (BYTE fVirt + WORD key + WORD cmd) into a
+    // PE_ACCEL blob (WORD fVirt/pad + ... + pad) with sentinel on last.
+    let n = count as usize;
+    let mut data: Vec<u8> = Vec::with_capacity(n * 8);
+    for i in 0..n {
+        // SAFETY: caller contract — exactly `count` entries.
+        let a = unsafe { *lp_accel.add(i) };
+        let mut fv = a.fVirt as u16;
+        if i + 1 == n {
+            fv |= 0x80; // LAST_ENTRY sentinel (low byte)
+        }
+        data.extend_from_slice(&fv.to_le_bytes());
+        data.extend_from_slice(&a.key.to_le_bytes());
+        data.extend_from_slice(&a.cmd.to_le_bytes());
+        data.extend_from_slice(&0u16.to_le_bytes());
+    }
+    let blob_ptr = data.as_ptr() as usize;
+    let blob_size = data.len() as u32;
+    // Leak: the allocation lives as long as the HACCEL (Destroy not yet
+    // implemented to release it; matches resource-blob lifetime model).
+    std::mem::forget(data);
+    crate::accel_handles::insert(crate::accel_handles::AccelBlob {
+        ptr: blob_ptr,
+        size: blob_size,
+    })
 }
 
 /// DestroyAcceleratorTable — destroy an accelerator table created by CreateAcceleratorTableW.
-// Wine ref: dlls/win32u/ntuser.c — frees kernel accelerator object.
+// Wine ref: dlls/win32u/menu.c::NtUserDestroyAcceleratorTable — free_user_handle
+//   + free( the struct accelerator ). Weave's destroy is a no-op (always TRUE)
+//   because our leaked blobs and slab entries are not yet reference-counted;
+//   real destruction would require removing from accel_handles::alive.
 pub extern "win64" fn destroy_accelerator_table(_h_accel: usize) -> i32 {
     1 // TRUE
 }

@@ -1,10 +1,12 @@
 //! Handle table for HACCEL values produced by `LoadAcceleratorsW` /
-//! `LoadAcceleratorsA`.
+//! `LoadAcceleratorsA` (via `register`) and `CreateAcceleratorTableW` (via
+//! `insert`).
 //!
-//! Slab-backed with dedup keyed on `(hinst, name_key)`. Unlike
-//! `image_handles`, there is no per-kind discriminator — HACCEL is a single
-//! resource type (RT_ACCELERATOR ordinal 9) and there is no cross-kind
-//! collision to avoid.
+//! Slab-backed with dedup keyed on `(hinst, name_key)` for resource-loaded
+//! tables. CreateAcceleratorTable tables are stored anonymously (always-fresh
+//! handles, no dedup). Unlike `image_handles`, there is no per-kind
+//! discriminator — HACCEL is a single resource type (RT_ACCELERATOR ordinal 9)
+//! and there is no cross-kind collision to avoid.
 //!
 //! Wine ref: `dlls/user32/resource.c::LoadAcceleratorsW` —
 //!   `if (!(rsrc = FindResourceW( instance, name, (LPWSTR)RT_ACCELERATOR ))) return 0;`
@@ -135,6 +137,34 @@ pub fn register(hinst: usize, name_key: u64, blob: AccelBlob) -> usize {
         let handle = t.next;
         t.next += 1;
         t.shared.insert(key, handle);
+        t.alive.insert(handle, (key, blob));
+        handle
+    })
+}
+
+/// Allocate a fresh HACCEL and store the provided PE_ACCEL `blob`.
+///
+/// Unlike `register` (which deduplicates by `(hinst, name_key)` for tables
+/// loaded from resources), `insert` always produces a distinct handle. Used
+/// by `CreateAcceleratorTableW` for anonymously-created tables whose
+/// lifetime/content is owned by the caller (the bytes are leaked to keep the
+/// `AccelBlob` ptr valid for the life of the handle, mirroring how resource
+/// blobs live as long as their module image).
+///
+/// The stored blob must be in PE_ACCEL format (8 bytes/entry with LAST_ENTRY
+/// sentinel on the final fVirt word) so that `TranslateAcceleratorW` and
+/// `CopyAcceleratorTableW` can consume it uniformly.
+pub fn insert(blob: AccelBlob) -> usize {
+    with_table(0, |t| {
+        let handle = t.next;
+        t.next += 1;
+        // Dummy ShareKey (hinst=0, name_key derived from handle) — never
+        // collides with real LoadAccelerators registrations (hinst != 0) and
+        // is not entered into `shared` so every insert is unique.
+        let key = ShareKey {
+            hinst: 0,
+            name_key: handle as u64,
+        };
         t.alive.insert(handle, (key, blob));
         handle
     })

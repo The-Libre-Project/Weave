@@ -222,6 +222,31 @@ pub struct Msg {
     pub _pad1: u32,
 }
 
+/// ACCEL — accelerator table entry (user/kernel form).
+///
+/// Layout per include/winuser.h (Wine/Win32):
+///   BYTE fVirt;   // FVIRTKEY=0x01, FSHIFT=0x04, FCONTROL=0x08, FALT=0x10, FNOINVERT=0x02
+///   WORD key;
+///   WORD cmd;
+///
+/// The PE resource form (PE_ACCEL) is 8 bytes per entry with an extra pad WORD
+/// after fVirt (stored as u16) and a trailing pad WORD; the LAST_ENTRY (0x80)
+/// sentinel lives in the low byte of the fVirt WORD in the PE blob and is
+/// stripped ( & 0x7f ) when materializing user ACCEL entries via Copy.
+///
+/// # Safety
+/// Used for FFI with guest code and for ptr::write into caller-supplied
+/// buffers from CopyAcceleratorTable. Must match Windows x64 C layout (6 bytes,
+/// naturally aligned as 2-byte struct on x86-64 with the BYTE+pad implicit).
+#[repr(C)]
+#[derive(Clone, Copy)]
+#[allow(non_snake_case)]
+pub struct ACCEL {
+    pub fVirt: u8,
+    pub key: u16,
+    pub cmd: u16,
+}
+
 // ── WNDCLASSW struct ──────────────────────────────────────────────────────────
 //
 // Windows x64 layout:
