@@ -8094,8 +8094,8 @@ pub unsafe extern "win64" fn copy_accelerator_table_w(
         let chosen: std::cell::Cell<Option<weave_core::resource::ResourceId>> =
             std::cell::Cell::new(None);
         let type_ptr = 9u16 as *const u16; // MAKEINTRESOURCE(9) == RT_ACCELERATOR
-        // Define callback outside the unsafe call expr so inner unsafe (ptr walk)
-        // is not considered nested by unused_unsafe lint.
+                                           // Define callback outside the unsafe call expr so inner unsafe (ptr walk)
+                                           // is not considered nested by unused_unsafe lint.
         let cb = |name_ptr: *const u16| -> bool {
             let np = name_ptr as usize;
             let rid = if np >> 16 == 0 {
@@ -8121,9 +8121,7 @@ pub unsafe extern "win64" fn copy_accelerator_table_w(
         };
         // SAFETY: enumerate_resource_names requires valid image_base + lp_type
         // (ordinal form here); we stop at first name.
-        let _ = unsafe {
-            weave_core::resource::enumerate_resource_names(image_base, type_ptr, cb)
-        };
+        let _ = unsafe { weave_core::resource::enumerate_resource_names(image_base, type_ptr, cb) };
         let name_id = match chosen.take() {
             Some(id) => id,
             None => return 0,
