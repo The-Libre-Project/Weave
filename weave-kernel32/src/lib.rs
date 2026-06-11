@@ -6215,10 +6215,10 @@ pub unsafe extern "win64" fn get_proc_address(h_module: usize, lp_proc_name: *co
         }
     };
 
-    if std::env::var("WEAVE_TEST_SAVE_RESULT").is_ok() {
-        if dll_name.contains("i_view64") || dll_name.contains("irfanview") {
-            eprintln!("weave/E3-M9-trace: GetProcAddress(i_view64!{func_name})");
-        }
+    if std::env::var("WEAVE_TEST_SAVE_RESULT").is_ok()
+        && (dll_name.contains("i_view64") || dll_name.contains("irfanview"))
+    {
+        eprintln!("weave/E3-M9-trace: GetProcAddress(i_view64!{func_name})");
     }
 
     // Check dll_registry first: covers real DLLs loaded from disk via LoadLibrary
