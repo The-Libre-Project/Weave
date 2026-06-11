@@ -1938,8 +1938,9 @@ fn irfanview_save_png_gate() {
         return;
     }
 
-    // Unique dest inside irfan_dir (Landlock exe-dir allowlist). Must include .png extension:
-    // IrfanView Save As defaults to JPEG when WEAVE_TEST_SAVE_RESULT path has no extension.
+    // Unique dest inside irfan_dir (Landlock exe-dir allowlist). No extension:
+    // GetSaveFileNameW hook sets lpstrFile to this stem; the selected encoder
+    // (PNG, via SaveExtension override) appends its own .png suffix.
     let out_stem = format!("save_png_gate_{}", std::process::id());
     let out_base = irfan_dir.join(&out_stem);
     let out_png = out_base.with_extension("png");
@@ -1955,7 +1956,7 @@ fn irfanview_save_png_gate() {
         .arg(&irfan_exe)
         .arg(&bmp_path)
         .env("DISPLAY", ":99")
-        .env("WEAVE_TEST_SAVE_RESULT", out_png.display().to_string())
+        .env("WEAVE_TEST_SAVE_RESULT", out_base.display().to_string())
         // E3-M9e: RT_MENU/IRFANVIEW Save as... → cmd 0x47d (not Shift+S accel 0x481=Sharpen).
         .env("WEAVE_TEST_WM_COMMAND", "1149")
         // Keep this below the 6s post-first-paint teardown window: CI may not deliver
