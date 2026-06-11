@@ -119,6 +119,17 @@ unsafe fn read_guid(p: *const u8) -> Option<[u8; 16]> {
     Some(buf)
 }
 
+// Test hook (priority 1 from E3-M4 escalation packet / docs/loop-arcs/sumatrapdf_pdf_render_gate.md).
+// When WEAVE_TEST_SUMATRA_CLSID=1 (or any value), CoCreateInstance/Ex for the Sumatra DDE
+// single-instance CLSID returns a caller-chosen HRESULT (WEAVE_TEST_SUMATRA_CLSID_HRESULT
+// or default S_OK) with *ppv already zeroed. Purpose: observe in one CI run whether a
+// non-REGDB_E response causes SumatraPDF to exit its GetFileAttributesExW×10 retry loop
+// (visible in gate stderr) and reach GetMessage / WM_PAINT path. Zero effect when env unset.
+// This is instrumentation-only data collection for human-directed guest RE; no gate claim.
+const SUMATRA_DDE_CLSID: [u8; 16] = [
+    0x60, 0xBE, 0x56, 0x9E, 0xF0, 0xC5, 0xCF, 0x11, 0x9A, 0x2C, 0x00, 0xA0, 0xC9, 0x0A, 0x90, 0xCE,
+];
+
 // Wine ref: dlls/combase/combase.c:1725 — wraps CoCreateInstanceEx with single MULTI_QI entry;
 // returns E_POINTER if obj is NULL before any registry lookup; sets *obj = multi_qi.pItf.
 /// CoCreateInstance: create a single uninitialized object of a given class.
@@ -158,6 +169,22 @@ pub unsafe extern "win64" fn co_create_instance(
         return unsafe { create_shell_link(rclsid, _riid, ppv_ptr) };
     }
 
+    // Priority 1 (E3-M4 escalation packet): scoped CLSID intercept for data collection only.
+    // Returns default S_OK (0) or WEAVE_TEST_SUMATRA_CLSID_HRESULT with ppv already zeroed.
+    // When unset: exact prior behavior (tid log + REGDB_E_CLASSNOTREG). See gate activation
+    // in weave-cli/tests/hello_world.rs and ATTEMPT 27 in the arc log.
+    if std::env::var("WEAVE_TEST_SUMATRA_CLSID").is_ok() && clsid == SUMATRA_DDE_CLSID {
+        let hresult: u32 = std::env::var("WEAVE_TEST_SUMATRA_CLSID_HRESULT")
+            .ok()
+            .and_then(|s| s.parse::<u32>().ok())
+            .unwrap_or(S_OK);
+        eprintln!(
+            "weave/ole32: TEST_SUMATRA_CLSID intercept: CLSID={:02x?} riid={:p} dwClsContext=0x{:x} → HRESULT=0x{:08x} (ppv already zeroed)",
+            clsid, _riid, _dw_cls_context, hresult
+        );
+        return hresult;
+    }
+
     let tid = unsafe { libc::syscall(libc::SYS_gettid) as u32 };
     eprintln!(
         "weave/ole32: CoCreateInstance: tid={tid} CLSID {:02x?} (unknown — REGDB_E_CLASSNOTREG)",
@@ -186,6 +213,20 @@ pub unsafe extern "win64" fn co_create_instance_ex(
         Some(g) => g,
         None => return E_INVALIDARG,
     };
+
+    // Mirror of the priority-1 test hook (for completeness; Sumatra call site is the non-Ex path).
+    if std::env::var("WEAVE_TEST_SUMATRA_CLSID").is_ok() && clsid == SUMATRA_DDE_CLSID {
+        let hresult: u32 = std::env::var("WEAVE_TEST_SUMATRA_CLSID_HRESULT")
+            .ok()
+            .and_then(|s| s.parse::<u32>().ok())
+            .unwrap_or(S_OK);
+        eprintln!(
+            "weave/ole32: TEST_SUMATRA_CLSID intercept (Ex): CLSID={:02x?} → HRESULT=0x{:08x}",
+            clsid, hresult
+        );
+        return hresult;
+    }
+
     eprintln!(
         "weave/ole32: CoCreateInstanceEx: CLSID {:02x?} (stub — REGDB_E_CLASSNOTREG)",
         clsid

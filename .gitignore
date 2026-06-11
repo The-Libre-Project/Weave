@@ -48,6 +48,10 @@ tests/fixtures/bin/m13_v23_work/
 tests/fixtures/bin/m13_debug_e_work/
 tests/fixtures/bin/m8a_extract_out/
 
+# Session / secret artifacts (never commit keys or local env)
+.env
+.env.*
+
 
 
 # NXEngine fixture — binary game files, not tracked
