@@ -684,6 +684,14 @@ pub unsafe extern "win64" fn virtual_alloc(
 ) -> *mut u8 {
     let prot = win_prot_to_linux(fl_protect);
     const MAP_FIXED_NOREPLACE: i32 = 0x10_0000;
+    // Low 32-bit policy (null-base case only): pass a low hint so the kernel
+    // prefers an address < 2 GiB. Combined with MAP_32BIT (Linux x86-64 0x40)
+    // for best compatibility. Required for guests storing VirtualAlloc results
+    // in DWORDs (Q-Dir 0x7795c / 0x7880d truncation; TRACE-D CI 26721495118).
+    // The returned value must be both a valid host pointer and truncatable to
+    // 32 bits for guests that store VA results in DWORD fields.
+    const MAP_32BIT: i32 = 0x40;
+    const LOW_32BIT_HINT: *mut libc::c_void = 0x0000_0000_0040_0000 as *mut libc::c_void;
     // Guard against mmap(NULL, 0, ...) which returns MAP_FAILED on Linux.
     if dw_size == 0 {
         eprintln!("weave: VirtualAlloc(size=0) → NULL");
@@ -698,10 +706,10 @@ pub unsafe extern "win64" fn virtual_alloc(
     let result = if lp_address.is_null() {
         unsafe {
             libc::mmap(
-                std::ptr::null_mut(),
+                LOW_32BIT_HINT,
                 dw_size,
                 prot,
-                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | MAP_32BIT,
                 -1,
                 0,
             )
@@ -18708,5 +18716,33 @@ mod tests {
             n, 28,
             "fx96.pxt path: query must return 28 (27 chars + NUL)"
         );
+    }
+
+    // ── 32-bit-clean VirtualAlloc (E3-M5b-a) ──────────────────────────────────
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn virtual_alloc_null_base_returns_32bit_clean_address() {
+        // Null-base VirtualAlloc must return a non-null pointer whose address
+        // as usize is < 0x8000_0000 (high 32 bits zero). This ensures 32-bit
+        // guest code (or 64-bit guests storing results in DWORDs) does not
+        // truncate; enables Q-Dir pool init at 0x7880d without SIGSEGV.
+        // Policy is MAP_32BIT for the lp_address.is_null() case only.
+        let addr = unsafe { virtual_alloc(std::ptr::null_mut(), 4096, 0, 0x04) }; // PAGE_READWRITE
+        assert!(
+            !addr.is_null(),
+            "VirtualAlloc must succeed for non-zero size"
+        );
+        let addr_usize = addr as usize;
+        assert!(
+            addr_usize < (1usize << 31),
+            "null-base VirtualAlloc must return 32-bit-clean address (< 2 GiB); got {:#x}",
+            addr_usize
+        );
+        // Release (size=0 + MEM_RELEASE); VirtualFree is no-op in Weave but
+        // exercises the call path and keeps the test self-contained.
+        const MEM_RELEASE: u32 = 0x8000;
+        unsafe {
+            let _ = virtual_free(addr, 0, MEM_RELEASE);
+        };
     }
 }
