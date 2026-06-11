@@ -2203,7 +2203,9 @@ fn irfanview_folder_nav_gate() {
         .stderr(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .spawn()
-        .unwrap_or_else(|e| panic!("failed to spawn weave on i_view64.exe for folder-nav gate: {e}"));
+        .unwrap_or_else(|e| {
+            panic!("failed to spawn weave on i_view64.exe for folder-nav gate: {e}")
+        });
 
     const FIRST_BLIT_MARKER: &str = "weave/gdi32: BitBlt";
     const FIRST_WM_PAINT_MARKER: &str = "weave/user32: WM_PAINT";
