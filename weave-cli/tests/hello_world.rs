@@ -2170,12 +2170,6 @@ fn sumatrapdf_pdf_render_gate() {
         .arg(&sumatra_exe)
         .arg(&pdf_path)
         .env("DISPLAY", ":99")
-        // Priority 1 (E3-M4 escalation packet): activate the CLSID intercept experiment.
-        // Shim in weave-ole32 returns S_OK (0) for the DDE service CLSID unless
-        // WEAVE_TEST_SUMATRA_CLSID_HRESULT is also set. The full captured stderr below
-        // will show the hook log + whether GetFileAttributesExW polling stops and
-        // get_message_first / wm_paint path is reached. Data only; gate remains FROZEN.
-        .env("WEAVE_TEST_SUMATRA_CLSID", "1")
         .stderr(std::process::Stdio::piped())
         .spawn()
         .unwrap_or_else(|e| panic!("failed to spawn weave on SumatraPDF.exe: {e}"));
@@ -2217,11 +2211,9 @@ fn sumatrapdf_pdf_render_gate() {
     let got_message_loop = stderr.contains("PHASE: get_message_first");
     let got_wm_paint = stderr.contains("PHASE: wm_paint_dispatched_first");
     let got_render = stderr.contains("PHASE: stretchblt_first");
-    let clsid_hook_hit = stderr.contains("TEST_SUMATRA_CLSID intercept");
     eprintln!(
         "sumatrapdf diagnostic: get_message_first={got_message_loop} \
-         wm_paint={got_wm_paint} stretchblt={got_render} \
-         TEST_SUMATRA_CLSID_hook={clsid_hook_hit}"
+         wm_paint={got_wm_paint} stretchblt={got_render}"
     );
 
     // E3-M4 Tier A A1a: message loop must have run and dispatched WM_PAINT.
