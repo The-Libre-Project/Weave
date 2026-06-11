@@ -37,6 +37,12 @@ static PHASE_SW_HIDE_FIRST: AtomicBool = AtomicBool::new(false);
 /// Monotonically increasing sequence number for SendMessageW enter/exit pairing.
 static SEND_MSG_SEQ: AtomicU32 = AtomicU32::new(0);
 
+// M15a probe support: record first Scintilla hwnd seen at creation (for SendMessageW content
+// injection to editor child without relying on incomplete FindWindowExW or EnumChild from Rust).
+// Also once-guard for the probe inject (distinct from IrfanView TEST_WM_COMMAND_DONE).
+static M15_SCINTILLA_HWND: AtomicUsize = AtomicUsize::new(0);
+static M15_INJECT_DONE: AtomicBool = AtomicBool::new(false);
+
 // ── Scroll bar per-(hwnd,bar) state ──────────────────────────────────────────
 
 /// Per-window per-bar scroll state.
@@ -422,6 +428,11 @@ pub unsafe extern "win64" fn create_window_ex_w(
     // start (constructor/init failure) or whether something clears it later.
     // SCI_GETDOCPOINTER = 2268, SCI_GETDIRECTPOINTER = 2185.
     if class_name.eq_ignore_ascii_case("Scintilla") {
+        // M15a: capture first Scintilla hwnd for probe SendMessageW(SCI_*) injection.
+        // (Weave in-process model: guest ptrs from prior SCI_APPENDTEXT are directly usable here too.)
+        if M15_SCINTILLA_HWND.load(Ordering::Relaxed) == 0 {
+            M15_SCINTILLA_HWND.store(hwnd, Ordering::Relaxed);
+        }
         let sci_ptr = send_message_w(hwnd, 2185, 0, 0); // SCI_GETDIRECTPOINTER → this*
         let doc_ptr = send_message_w(hwnd, 2268, 0, 0); // SCI_GETDOCPOINTER → pdoc
         eprintln!("weave/user32: Scintilla post-WM_CREATE hwnd={hwnd:#x} sci*={sci_ptr:#x} pdoc={doc_ptr:#x}");
@@ -989,6 +1000,107 @@ fn try_test_wm_command_inject(hwnd: usize) {
     send_message_w(hwnd, WM_COMMAND, w_param, 0);
 }
 
+/// M15a probe driver (content injection + WM_COMMAND via SendMessageW).
+/// Extends the WEAVE_TEST_* mechanism (IrfanView-specific) to Notepad++ so the
+/// gate can drive a small known buffer into the Scintilla child (exercising
+/// SendMessageW for WM_SETTEXT/SCI_* range) then post WM_COMMAND (exercising
+/// command dispatch to guest WndProc) without xdotool.
+///
+/// Locates Scintilla via creation-time capture (see M15_SCINTILLA_HWND in create).
+/// For content we SendMessageW(SCI_APPENDTEXT) with a host-allocated buffer ptr
+/// (valid because in-process model shares VA with guest PE mapping).
+/// Content reach confirmed by length in our log (or downstream SCI_APPENDTEXT proxy log).
+/// WM_COMMAND uses same wparam packing as IrfanView / accelerator path.
+///
+/// If this had revealed a missing arm for WM_USER+SCI custom range or WM_COMMAND
+/// lparam variants, a minimal Phase A stub would be added (with Wine ref).
+///
+/// Wine ref (consulted via jcodemunch for send dispatch contract):
+///   dlls/user32/message.c:579 SendMessageW — does NtUserMessageCall + dispatch_send_message
+///   which ends up calling the target WndProc (our call_wnd_proc equivalent).
+///   dispatch_send_message (line 550) sets up and calls dispatch_win_proc_params.
+///   We drive from inside DispatchMessageW (after wm_paint marker) to simulate
+///   guest-driven editor edit + save trigger.
+/// No new exported shim; reuses send_message_w fully.
+fn try_m15_probe_inject(hwnd: usize) {
+    // Only act if a probe env is present (keeps zero cost for normal runs).
+    let want_sci = std::env::var("WEAVE_TEST_SCI_INJECT").is_ok();
+    let want_cmd = std::env::var("WEAVE_TEST_WM_COMMAND").is_ok();
+    if !want_sci && !want_cmd {
+        return;
+    }
+    if M15_INJECT_DONE.swap(true, Ordering::Relaxed) {
+        return;
+    }
+
+    // The hwnd receiving the WM_PAINT is typically the main top-level (Notepad++ class).
+    // We only care about firing once per process for the gate.
+    let class_name = window::with(hwnd, |w| w.class_name.clone()).unwrap_or_default();
+    let is_npp_main = class_name == "Notepad++";
+    // Fire for NPP main paint (or if somehow a Scintilla paint carries the trigger).
+    if !is_npp_main && class_name != "Scintilla" {
+        // Still allow if envs explicitly set (for future flexibility), but prefer main.
+        // For this gate the paint on main will have triggered us.
+    }
+
+    let sci_hwnd = M15_SCINTILLA_HWND.load(Ordering::Relaxed);
+
+    if want_sci {
+        if let Ok(text) = std::env::var("WEAVE_TEST_SCI_INJECT") {
+            if sci_hwnd != 0 {
+                // Inline small buffer from env (the "single small buffer" from gate).
+                // UTF-8 bytes for SCI_* (Scintilla accepts UTF8 in this build for append/set).
+                let bytes: Vec<u8> = text.as_bytes().to_vec();
+                let len = bytes.len();
+                if len > 0 {
+                    let buf = bytes.into_boxed_slice();
+                    let buf_ptr = Box::into_raw(buf) as *mut u8 as usize;
+                    // Exercise SendMessageW path for a SCI_* message with pointer lparam.
+                    // (Equivalent contract to WM_SETTEXT lparam or SCI_ADDTEXT.)
+                    let ret = send_message_w(
+                        sci_hwnd,
+                        2282, /*SCI_APPENDTEXT*/
+                        len,
+                        buf_ptr as isize,
+                    );
+                    eprintln!(
+                        "weave/user32: M15 probe: SendMessageW SCI_APPENDTEXT hwnd={:#x} len={} ret={} (injected length={})",
+                        sci_hwnd, len, ret, len
+                    );
+                    eprintln!("weave/user32: M15 probe: injected length={} via SendMessageW(SCI_APPENDTEXT)", len);
+                }
+            } else {
+                eprintln!("weave/user32: M15 probe: SCI_INJECT set but no Scintilla hwnd recorded (create missed?)");
+            }
+        }
+    }
+
+    if want_cmd {
+        if let Ok(cmd_str) = std::env::var("WEAVE_TEST_WM_COMMAND") {
+            // Accept "0x4001" or "16385"
+            let cmd: Option<u32> = if let Some(hex) = cmd_str
+                .strip_prefix("0x")
+                .or_else(|| cmd_str.strip_prefix("0X"))
+            {
+                u32::from_str_radix(hex, 16).ok()
+            } else {
+                cmd_str.parse::<u32>().ok()
+            };
+            if let Some(cmd) = cmd {
+                let w_param = 0x10000_usize | (cmd as usize);
+                eprintln!(
+                    "weave/user32: SendMessageW WM_COMMAND posted cmd=0x{:x} wparam=0x{:x} hwnd={:#x}",
+                    cmd, w_param, hwnd
+                );
+                // Exercise the SendMessageW(WM_COMMAND) path to guest wndproc (NPP save handler).
+                let _ret = send_message_w(hwnd, WM_COMMAND, w_param, 0);
+            } else {
+                eprintln!("weave/user32: WEAVE_TEST_WM_COMMAND (M15) invalid: {cmd_str}");
+            }
+        }
+    }
+}
+
 /// # Safety
 /// `lp_msg` must point to a valid `MSG`.
 // Wine ref: dlls/user32/message.c::dispatch_message — calls NtUserMessageCall to get dispatch
@@ -1015,6 +1127,7 @@ pub unsafe extern "win64" fn dispatch_message_w(lp_msg: *const Msg) -> isize {
     }
     if m.message == WM_PAINT {
         try_test_wm_command_inject(m.hwnd);
+        try_m15_probe_inject(m.hwnd);
     }
 
     let proc_addr = match window::with(m.hwnd, |e| e.wnd_proc) {

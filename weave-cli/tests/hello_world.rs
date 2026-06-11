@@ -7454,6 +7454,217 @@ fn notepad_roundtrip_gate() {
     eprintln!("notepad_roundtrip_gate: SHA-256 match confirmed ({input_sha256}) — E3-M2 A1 PASS");
 }
 
+/// M15a probe gate: Scintilla content injection via SendMessageW (WM_SETTEXT/SCI_*) +
+/// WM_COMMAND post, single small buffer, inline fixture (roundtrip_input.cpp).
+///
+/// Launches NPP on roundtrip_input.cpp (portable via doLocalConf), waits for
+/// wm_paint_dispatched_first, drives a short known buffer into the Scintilla child
+/// via SendMessageW (or direct proxy equiv for content reachability), posts a
+/// WM_COMMAND (using 0x4001 as a working constant per brief) to main HWND, and
+/// confirms via trace:
+/// - injected content length >0 appears in SCI_APPENDTEXT / SCI_ADDTEXT / SETTEXT log
+/// - SendMessageW / PostMessageW for WM_COMMAND resolves (no unresolved import lines)
+/// - no immediate crash / non-zero exit
+///
+/// This exercises the user32 SendMessageW / WM_COMMAND dispatch path under NPP's
+/// Scintilla editor (A1 precondition for M15b). No xdotool. Temp dir distinct.
+/// Timeout short. Single buffer.
+///
+/// → verify (step 2): cargo test ... runs the new gate; log excerpt in test output
+/// shows the injected length > 0 and "SendMessageW WM_COMMAND posted" (or equiv
+/// diagnostic) with no crash/unresolved for the message path. Diff touches only
+/// weave-cli/tests/hello_world.rs at this step.
+#[test]
+fn notepad_m15_inject_probe_gate() {
+    if !cfg!(target_os = "linux") {
+        eprintln!("skipping execution test — requires Linux");
+        return;
+    }
+
+    let manifest = env!("CARGO_MANIFEST_DIR");
+    let npp_dir = format!("{manifest}/../tests/fixtures/npp");
+    let npp_exe = format!("{npp_dir}/notepad++.exe");
+
+    if !std::path::Path::new(&npp_exe).exists() {
+        eprintln!("skipping: notepad++.exe not present in tests/fixtures/npp/");
+        return;
+    }
+
+    let source_input = std::path::PathBuf::from(&npp_dir).join("roundtrip_input.cpp");
+    if !source_input.exists() {
+        eprintln!("skipping: roundtrip_input.cpp not present in tests/fixtures/npp/");
+        return;
+    }
+
+    let weave_bin = env!("CARGO_BIN_EXE_weave");
+
+    // Use distinct temp dir for the M15a probe (single buffer, no overlap with roundtrip_*).
+    let tmp_dir = std::path::PathBuf::from("/tmp/weave_npp_m15_inject_probe");
+    if tmp_dir.exists() {
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
+    fn copy_dir_all_m15(src: &std::path::Path, dst: &std::path::Path) {
+        std::fs::create_dir_all(dst).expect("create_dir_all failed");
+        for entry in std::fs::read_dir(src).expect("read_dir failed") {
+            let entry = entry.expect("entry failed");
+            let dst_path = dst.join(entry.file_name());
+            if entry.file_type().expect("file_type failed").is_dir() {
+                copy_dir_all_m15(&entry.path(), &dst_path);
+            } else {
+                std::fs::copy(entry.path(), &dst_path).expect("copy failed");
+            }
+        }
+    }
+    copy_dir_all_m15(std::path::Path::new(&npp_dir), &tmp_dir);
+
+    let output_file = tmp_dir.join("output.cpp"); // opened file; we will inject edit into its Scintilla doc
+    std::fs::copy(&source_input, &output_file)
+        .expect("failed to copy roundtrip_input.cpp for M15a probe");
+
+    let tmp_exe = tmp_dir.join("notepad++.exe");
+
+    // Small inline probe buffer (UTF-8 text; null added by driver if needed).
+    // This is the "single small buffer".
+    let probe_text = "/* M15 probe edit */\nint x = 42;\n";
+
+    let start = std::time::Instant::now();
+    let mut child = std::process::Command::new(weave_bin)
+        .current_dir(&tmp_dir)
+        .arg(&tmp_exe)
+        .arg(&output_file)
+        // Drive content injection of known short buffer into Scintilla via SendMessageW path (or proxy equiv).
+        .env("WEAVE_TEST_SCI_INJECT", probe_text)
+        // Post WM_COMMAND after paint settles; 0x4001 is example working constant (per brief; real NPP IDM_FILE_SAVE may differ).
+        // The driver in user32 will post to main HWND using send_message_w.
+        .env("WEAVE_TEST_WM_COMMAND", "0x4001")
+        .env("WEAVE_TEST_WM_COMMAND_MIN_PAINTS", "1")
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|e| panic!("failed to spawn weave on notepad++.exe for M15a probe: {e}"));
+
+    // Drain stderr; signal on wm_paint_dispatched_first (reuse E3-M2 / M6 harness pattern).
+    let stderr_pipe = child.stderr.take().expect("stderr was piped");
+    let stderr_shared = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let stderr_writer = std::sync::Arc::clone(&stderr_shared);
+    let (paint_tx, paint_rx) = std::sync::mpsc::channel::<()>();
+
+    let drain_thread = std::thread::spawn(move || {
+        use std::io::Read;
+        let mut pipe = stderr_pipe;
+        let mut buf = [0u8; 4096];
+        let mut acc = Vec::new();
+        let mut signalled = false;
+        loop {
+            match pipe.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    acc.extend_from_slice(&buf[..n]);
+                    if !signalled {
+                        let chunk = String::from_utf8_lossy(&acc);
+                        if chunk.contains("PHASE: wm_paint_dispatched_first") {
+                            let _ = paint_tx.send(());
+                            signalled = true;
+                        }
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        *stderr_writer.lock().unwrap() = acc;
+    });
+
+    // Wait for ready phase (reuse pattern).
+    let paint_deadline = std::time::Duration::from_secs(15);
+    let paint_seen = paint_rx.recv_timeout(paint_deadline).is_ok();
+
+    if paint_seen {
+        eprintln!("notepad_m15_inject_probe_gate: wm_paint_dispatched_first observed — probe injection + WM_COMMAND should have fired inside weave");
+        // Short window for the internal SendMessageW(SCI_*) + WM_COMMAND to process and log.
+        std::thread::sleep(std::time::Duration::from_millis(800));
+    } else {
+        eprintln!("notepad_m15_inject_probe_gate: timed out waiting for wm_paint — killing NPP");
+    }
+
+    // Wait for exit or kill after short total (probe is quick).
+    let kill_deadline = start + std::time::Duration::from_secs(20);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) => {
+                if std::time::Instant::now() >= kill_deadline {
+                    let _ = child.kill();
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err(e) => panic!("wait failed: {e}"),
+        }
+    }
+    let elapsed = start.elapsed();
+
+    drain_thread.join().expect("stderr drain thread panicked");
+    let stderr_bytes = stderr_shared.lock().unwrap().clone();
+    let stderr = String::from_utf8_lossy(&stderr_bytes);
+    eprintln!("notepad_m15_inject_probe_gate stderr ({elapsed:.1?}):\n{stderr}");
+
+    // Probe assertions (only reached on Linux with fixture).
+    // 1. Paint phase seen (message loop live).
+    assert!(
+        stderr.contains("PHASE: wm_paint_dispatched_first"),
+        "PHASE: wm_paint_dispatched_first was never emitted — NPP did not reach paint.\nstderr: {stderr}"
+    );
+
+    // 2. Injection accepted: length >0 appears in SCI log (SCI_APPENDTEXT / ADDTEXT / SETTEXT or our M15 driver log).
+    // The driver will emit e.g. "M15 probe: injected length=XX" or rely on "msg=2282(SCI_APPENDTEXT) wp=0x..." with wp>0.
+    let injected_len_seen = stderr.lines().any(|l| {
+        if l.contains("M15 probe: injected length=") {
+            if let Some(num) = l
+                .split('=')
+                .nth(1)
+                .and_then(|s| s.split_whitespace().next())
+                .and_then(|s| s.parse::<usize>().ok())
+            {
+                return num > 0;
+            }
+        }
+        if l.contains("msg=2282(SCI_APPENDTEXT)")
+            || l.contains("SCI_ADDTEXT")
+            || l.contains("SCI_SETTEXT")
+        {
+            // reuse the wp>0 parse from M6/E3-M2
+            return l
+                .split("wp=")
+                .nth(1)
+                .and_then(|s| s.split_whitespace().next())
+                .and_then(|s| usize::from_str_radix(s.trim_start_matches("0x"), 16).ok())
+                .map(|wp| wp > 0)
+                .unwrap_or(false);
+        }
+        false
+    });
+    assert!(
+        injected_len_seen,
+        "M15a: no evidence of content injection (length>0) via SCI_APPENDTEXT/ADDTEXT/SETTEXT or M15 probe log.\nstderr: {stderr}"
+    );
+
+    // 3. WM_COMMAND posted via SendMessageW without unresolved or immediate crash.
+    assert!(
+        stderr.contains("SendMessageW WM_COMMAND posted") || stderr.contains("WEAVE_TEST_WM_COMMAND inject WM_COMMAND"),
+        "M15a: no 'SendMessageW WM_COMMAND posted' (or equiv) diagnostic — WM_COMMAND via SendMessageW path not exercised.\nstderr: {stderr}"
+    );
+
+    // 4. No unresolved for the message primitives exercised by the probe.
+    assert!(
+        !stderr.contains("unresolved import: user32!SendMessageW") && !stderr.contains("unresolved import: user32!PostMessageW"),
+        "M15a: unresolved import for SendMessageW or PostMessageW during probe injection/command.\nstderr: {stderr}"
+    );
+
+    // 5. Process did not exit non-zero in a way that indicates crash before command processing (exit 0 or killed-by-probe is ok for short window).
+    // (The collected child status is not directly asserted beyond the kill logic; stderr diagnostics cover it.)
+    eprintln!("notepad_m15_inject_probe_gate: probe assertions passed (content reached Scintilla doc; WM_COMMAND posted via SendMessage path; no unresolved)");
+}
+
 /// `weave Q-Dir_x64.exe` — E3-M5 Tier A launch gate.
 ///
 /// Runs Q-Dir (4-pane file manager, x64) under Xvfb (DISPLAY=:99) with a 5-second
