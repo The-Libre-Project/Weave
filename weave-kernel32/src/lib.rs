@@ -4894,6 +4894,11 @@ pub unsafe extern "win64" fn find_first_file_w(
     let win_path =
         unsafe { String::from_utf16_lossy(std::slice::from_raw_parts(lp_file_name, len)) };
     eprintln!("weave/FindFirstFileW: entry path={win_path:?}");
+    if std::env::var("WEAVE_TEST_SAVE_RESULT").is_ok()
+        && win_path.to_ascii_lowercase().contains("plugin")
+    {
+        eprintln!("weave/E3-M9-trace: FindFirstFileW for Plugins path={win_path:?}");
+    }
 
     // Translate to Linux path
     let linux_path = match weave_core::file_io::translate_win_path(&win_path) {
@@ -5772,10 +5777,7 @@ fn load_library_impl(name: &str) -> usize {
     }
 
     if std::env::var("WEAVE_TEST_SAVE_RESULT").is_ok() {
-        let probe = key.to_ascii_lowercase();
-        if probe.contains("optipng") || probe.contains("plugin") {
-            eprintln!("weave/E3-M9-trace: LoadLibrary({name:?}) key={key}");
-        }
+        eprintln!("weave/E3-M9-trace: LoadLibrary({name:?}) key={key}");
     }
 
     // 3. Prefix System32 / basename
@@ -6190,7 +6192,17 @@ pub unsafe extern "win64" fn get_proc_address(h_module: usize, lp_proc_name: *co
 
     if std::env::var("WEAVE_TEST_SAVE_RESULT").is_ok() {
         let upper = func_name.to_ascii_uppercase();
-        if upper.contains("PLUGIN") || upper.contains("OPTIPNG") {
+        // Known IrfanView plugin API function names
+        if upper == "GETPLUGININFO"
+            || upper == "OPTIPNG_W"
+            || upper == "SHOWPLUGINOPTIONS"
+            || upper == "SHOWPLUGINOPTIONS_W"
+            || upper == "SHOWPLUGINSAVEOPTIONS"
+            || upper == "SHOWPLUGINSAVEOPTIONS_W"
+            || upper == "CLOSEPLUGIN"
+            || upper.contains("PLUGIN")
+            || upper.contains("OPTIPNG")
+        {
             eprintln!("weave/E3-M9-trace: GetProcAddress probe {func_name}");
         }
     }
@@ -6202,6 +6214,12 @@ pub unsafe extern "win64" fn get_proc_address(h_module: usize, lp_proc_name: *co
             return 0;
         }
     };
+
+    if std::env::var("WEAVE_TEST_SAVE_RESULT").is_ok() {
+        if dll_name.contains("i_view64") || dll_name.contains("irfanview") {
+            eprintln!("weave/E3-M9-trace: GetProcAddress(i_view64!{func_name})");
+        }
+    }
 
     // Check dll_registry first: covers real DLLs loaded from disk via LoadLibrary
     // (e.g. Scintilla.DLL).  resolve::resolve only knows Weave's synthetic stubs.

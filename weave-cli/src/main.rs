@@ -561,6 +561,13 @@ fn main() {
                         }
                         cfg::disable_report_gsfailure(&dll_bytes, image.base);
                         cfg::disable_fastfail_gs(&dll_bytes, image.base);
+                        // Log all exports
+                        eprintln!(
+                            "weave/E3-M9-trace: OptiPNG.dll exports registered:"
+                        );
+                        for (name, addr) in &exports {
+                            eprintln!("weave/E3-M9-trace:   {name} -> {addr:#x}");
+                        }
                         dll_registry::register(key, image, exports);
                         module_handles::register_with_handle(name, image_base);
                         module_handles::register_image_path(name, image_base);
