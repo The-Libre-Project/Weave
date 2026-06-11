@@ -2127,6 +2127,85 @@ fn irfanview_save_png_gate() {
     );
 }
 
+/// E3-M10 / TASK-E3M10a — IrfanView folder nav harness (quarantined; logs first_paint + nav inject for E3M10b).
+#[test]
+fn irfanview_folder_nav_gate() {
+    if !cfg!(target_os = "linux") { eprintln!("skipping execution test — requires Linux"); return; }
+    let manifest = env!("CARGO_MANIFEST_DIR");
+    let irfan_dir = std::path::absolute(format!("{manifest}/../tests/fixtures/irfanview")).unwrap_or_else(|_| std::path::PathBuf::from(format!("{manifest}/../tests/fixtures/irfanview")));
+    let irfan_exe = irfan_dir.join("i_view64.exe");
+    let bmp_path = irfan_dir.join("test_image.bmp");
+    if !irfan_exe.exists() { eprintln!("skipping: i_view64.exe not present in tests/fixtures/irfanview/"); return; }
+    if !bmp_path.exists() { eprintln!("skipping: test_image.bmp not present in tests/fixtures/irfanview/"); return; }
+    if std::process::Command::new("xdotool").arg("version").output().is_err() { eprintln!("skipping: xdotool not available in PATH"); return; }
+    let weave_bin = env!("CARGO_BIN_EXE_weave");
+    let start = std::time::Instant::now();
+    let mut child = std::process::Command::new(weave_bin)
+        .current_dir(&irfan_dir).arg(&irfan_exe).arg(&bmp_path)
+        .env("DISPLAY", ":99")
+        .env("WEAVE_TEST_WM_COMMAND", "0")
+        .env("WEAVE_TEST_WM_COMMAND_MIN_PAINTS", "2")
+        .stderr(std::process::Stdio::piped()).stdout(std::process::Stdio::piped())
+        .spawn().unwrap_or_else(|e| panic!("failed to spawn weave on i_view64.exe for folder-nav gate: {e}"));
+    const FIRST_BLIT_MARKER: &str = "weave/gdi32: BitBlt";
+    const FIRST_WM_PAINT_MARKER: &str = "weave/user32: WM_PAINT";
+    const WM_PAINT_PHASE_MARKER: &str = "PHASE: wm_paint_dispatched_first";
+    let stderr_pipe = child.stderr.take().expect("stderr was piped");
+    let stderr_shared = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let stderr_writer = std::sync::Arc::clone(&stderr_shared);
+    let stderr_handle = std::thread::spawn(move || { use std::io::Read; let mut r = stderr_pipe; let mut chunk = [0u8; 4096]; loop { match r.read(&mut chunk) { Ok(0) => break, Ok(n) => stderr_writer.lock().unwrap().extend_from_slice(&chunk[..n]), Err(_) => break, } } });
+    let stdout_pipe = child.stdout.take().expect("stdout was piped");
+    let stdout_shared = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let stdout_writer = std::sync::Arc::clone(&stdout_shared);
+    let stdout_handle = std::thread::spawn(move || { use std::io::Read; let mut r = stdout_pipe; let mut chunk = [0u8; 4096]; loop { match r.read(&mut chunk) { Ok(0) => break, Ok(n) => stdout_writer.lock().unwrap().extend_from_slice(&chunk[..n]), Err(_) => break, } } });
+    let deadline = start + std::time::Duration::from_secs(90);
+    let mut first_paint_seen = false;
+    let mut drive_done = false;
+    loop {
+        let now = std::time::Instant::now();
+        match child.try_wait().expect("try_wait failed") {
+            Some(_) => break,
+            None => {
+                if !first_paint_seen {
+                    let stderr_buf = stderr_shared.lock().unwrap();
+                    let partial = String::from_utf8_lossy(&stderr_buf);
+                    if partial.contains(FIRST_BLIT_MARKER) || partial.contains(FIRST_WM_PAINT_MARKER) || partial.contains(WM_PAINT_PHASE_MARKER) {
+                        first_paint_seen = true;
+                        eprintln!("irfanview_folder_nav_gate: first_paint at {:?}", start.elapsed());
+                    }
+                }
+                if first_paint_seen && !drive_done {
+                    eprintln!("irfanview_folder_nav_gate: first_paint seen — waiting for WEAVE_TEST_WM_COMMAND inject (cmd=0)");
+                    drive_done = true;
+                    std::thread::sleep(std::time::Duration::from_secs(6));
+                    let search = std::process::Command::new("xdotool").args(["search", "--name", "IrfanView"]).output();
+                    if let Ok(out) = search { if out.status.success() { if let Some(id) = String::from_utf8_lossy(&out.stdout).lines().next().map(|s| s.trim().to_string()) { if !id.is_empty() { eprintln!("irfanview_folder_nav_gate: sending alt+F4 teardown, wid={id}"); let _ = std::process::Command::new("xdotool").args(["key", "--window", &id, "alt+F4"]).output(); } } } }
+                }
+                if now >= deadline { let _ = child.kill(); break; }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        }
+    }
+    let elapsed = start.elapsed();
+    stderr_handle.join().expect("stderr drain thread panicked");
+    stdout_handle.join().expect("stdout drain thread panicked");
+    let stderr = String::from_utf8_lossy(&stderr_shared.lock().unwrap()).into_owned();
+    let _stdout = String::from_utf8_lossy(&stdout_shared.lock().unwrap()).into_owned();
+    eprintln!("irfanview_folder_nav_gate elapsed: {elapsed:.1?}");
+    eprintln!("irfanview_folder_nav_gate drive_done: {drive_done}");
+    eprintln!("--- irfanview_folder_nav_gate STDERR BEGIN ---\n{stderr}\n--- irfanview_folder_nav_gate STDERR END ---");
+    // Quarantined for E3M10a (E3-M10 / TASK-E3M10a): log only; no assert! reachable. Return normally (never fails CI).
+    eprintln!("irfanview_folder_nav_gate: (quarantined) first_paint_seen={first_paint_seen} drive_done={drive_done}");
+    let paint_ready = first_paint_seen || stderr.contains(FIRST_BLIT_MARKER) || stderr.contains(FIRST_WM_PAINT_MARKER) || stderr.contains(WM_PAINT_PHASE_MARKER);
+    eprintln!("irfanview_folder_nav_gate: (quarantined) paint_ready={paint_ready}");
+    if stderr.contains("WEAVE_TEST_WM_COMMAND inject") {
+        eprintln!("irfanview_folder_nav_gate: (quarantined) nav inject fired");
+    } else {
+        eprintln!("irfanview_folder_nav_gate: (quarantined) nav inject NOT seen");
+    }
+    eprintln!("irfanview_folder_nav_gate: harness complete (E3-M10 / TASK-E3M10a)");
+}
+
 /// `weave SumatraPDF.exe test.pdf` — SumatraPDF PDF viewer; E3-M4 Tier A render gate.
 ///
 /// Runs SumatraPDF.exe with a minimal single-page PDF via CLI, on Xvfb (DISPLAY=:99).
