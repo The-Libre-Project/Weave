@@ -1057,6 +1057,11 @@ fn try_m15_probe_inject(hwnd: usize) {
                     let buf_ptr = Box::into_raw(buf) as *mut u8 as usize;
                     // Exercise SendMessageW path for a SCI_* message with pointer lparam.
                     // (Equivalent contract to WM_SETTEXT lparam or SCI_ADDTEXT.)
+                    // For M15b exact byte-compare gate: clear then append so the Scintilla
+                    // document contains *exactly* the injected buffer (no original fixture
+                    // bytes mixed in). CLEARALL+APPEND matches the pattern already used in
+                    // the pending doc transfer path.
+                    let _ = send_message_w(sci_hwnd, 2004, 0, 0); /*SCI_CLEARALL*/
                     let ret = send_message_w(
                         sci_hwnd,
                         2282, /*SCI_APPENDTEXT*/
