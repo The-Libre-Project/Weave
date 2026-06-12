@@ -28,6 +28,25 @@ use std::cell::Cell;
 
 use weave_common::com::shell_link::{create_shell_link, CLSID_SHELL_LINK};
 
+/// SumatraPDF DDE single-instance-server CLSID.
+/// Intercepted by co_create_instance when WEAVE_TEST_SUMATRA_CLSID=1 is set.
+/// Returning S_OK (instead of REGDB_E_CLASSNOTREG) causes SumatraPDF to exit its
+/// DDE retry loop and fall through to "I am the primary instance" → GetMessage → render.
+///
+/// Binary RE (2026-06-02, CI-FAIL-LADDER Fail #62): SumatraPDF 3.4.x calls
+/// CoCreateInstance({9E56BE60-C50F-11CF-9A2C-00A0C90A90CE}, ...) and when it
+/// gets REGDB_E_CLASSNOTREG, enters a tight retry loop (CoCreateInstance →
+/// GetFileAttributesExW×10, repeat). Breaking out of this loop unblocks the
+/// message pump and WM_PAINT/StretchBlt render path.
+///
+/// This is escalation-packet priority 1 from docs/loop-arcs/sumatrapdf_pdf_render_gate.md.
+const CLSID_SUMATRA_DDE_SERVER: [u8; 16] = [
+    0x60, 0xBE, 0x56, 0x9E, // Data1 = 0x9E56BE60
+    0x0F, 0xC5,             // Data2 = 0xC50F
+    0xCF, 0x11,             // Data3 = 0x11CF
+    0x9A, 0x2C, 0x00, 0xA0, 0xC9, 0x0A, 0x90, 0xCE, // Data4
+];
+
 // ── COM HRESULT constants ─────────────────────────────────────────────────────
 
 const S_OK: u32 = 0x0000_0000;
@@ -156,6 +175,19 @@ pub unsafe extern "win64" fn co_create_instance(
         // ppv internally.
         let ppv_ptr = ppv as *mut *mut ();
         return unsafe { create_shell_link(rclsid, _riid, ppv_ptr) };
+    }
+
+    // E3-M4 test hook: intercept SumatraPDF DDE single-instance-server CLSID.
+    // Gated by WEAVE_TEST_SUMATRA_CLSID=1 env var (CI-only; zero cost in production).
+    // Returns S_OK with *ppv=NULL, causing SumatraPDF to exit its DDE retry loop
+    // and proceed as the primary instance (reaches GetMessage → WM_PAINT → render).
+    if clsid == CLSID_SUMATRA_DDE_SERVER
+        && std::env::var("WEAVE_TEST_SUMATRA_CLSID").as_deref() == Ok("1")
+    {
+        eprintln!(
+            "weave/ole32: CoCreateInstance: CLSID_Sumatra_DDE → TEST HOOK: returning S_OK (E3-M4 P1 intercept)"
+        );
+        return S_OK;
     }
 
     let tid = unsafe { libc::syscall(libc::SYS_gettid) as u32 };
