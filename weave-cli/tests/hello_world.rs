@@ -2339,24 +2339,33 @@ fn irfanview_folder_nav_gate() {
          (c) WEAVE_TEST_IRFANVIEW_NAV env not propagated.\nstderr:\n{stderr}"
     );
 
-    // Tier A1c: second image render evidence (BitBlt/WM_PAINT/StretchDIBits after inject,
-    // or sibling filename in logs indicating the second image was opened).
-    let bitblt_count = stderr.matches("weave/gdi32: BitBlt").count();
-    let stretchdibits_count = stderr.matches("weave/gdi32: StretchDIBits").count();
-    let wm_paint_count = stderr.matches("weave/user32: WM_PAINT").count();
-    let second_render = bitblt_count >= 2
-        || wm_paint_count >= 2
-        || stretchdibits_count >= 2
-        || stderr.contains("test_image.gif")
-        || stderr.contains("test_image.jpg")
-        || stderr.contains("test_image.png");
+    // Tier A1c: second image render evidence — BitBlt/WM_PAINT/StretchDIBits after
+    // the nav inject marker. Filename matches (test_image.gif etc.) are NOT evidence;
+    // they appear during directory enumeration at launch, not from rendering.
+    let nav_pos = stderr.find(NAV_INJECT_MARKER).unwrap_or(0);
+    let post_inject = &stderr[nav_pos..];
+    let pre_bitblt = (&stderr[..nav_pos]).matches("weave/gdi32: BitBlt").count();
+    let pre_stretchdibits = (&stderr[..nav_pos]).matches("weave/gdi32: StretchDIBits").count();
+    let pre_wm_paint = (&stderr[..nav_pos]).matches("weave/user32: WM_PAINT").count();
+    let post_bitblt = post_inject.matches("weave/gdi32: BitBlt").count();
+    let post_stretchdibits = post_inject.matches("weave/gdi32: StretchDIBits").count();
+    let post_wm_paint = post_inject.matches("weave/user32: WM_PAINT").count();
+    let second_render = post_bitblt >= 1 || post_wm_paint >= 1 || post_stretchdibits >= 1;
+    let total_bitblt = pre_bitblt + post_bitblt;
+    let total_stretchdibits = pre_stretchdibits + post_stretchdibits;
+    let total_wm_paint = pre_wm_paint + post_wm_paint;
     eprintln!(
-        "irfanview_folder_nav_gate: A1c — bitblt={bitblt_count} stretchdibits={stretchdibits_count} wm_paint={wm_paint_count} second_render={second_render}",
+        "irfanview_folder_nav_gate: A1c — total_bitblt={total_bitblt} (pre={pre_bitblt} post={post_bitblt}) \
+         total_stretchdibits={total_stretchdibits} (pre={pre_stretchdibits} post={post_stretchdibits}) \
+         total_wm_paint={total_wm_paint} (pre={pre_wm_paint} post={post_wm_paint}) \
+         second_render={second_render}",
     );
     assert!(
         second_render,
         "irfanview_folder_nav_gate FAIL A1c: no second image render after nav injection. \
-         bitblt={bitblt_count} stretchdibits={stretchdibits_count} wm_paint={wm_paint_count}\nstderr:\n{stderr}"
+         total_bitblt={total_bitblt} (pre={pre_bitblt} post={post_bitblt}) \
+         total_stretchdibits={total_stretchdibits} (pre={pre_stretchdibits} post={post_stretchdibits}) \
+         total_wm_paint={total_wm_paint} (pre={pre_wm_paint} post={post_wm_paint})\nstderr:\n{stderr}"
     );
 
     // A2 regression guard: prior IrfanView open/save gates co-run in same CI invocation.
