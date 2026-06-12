@@ -11,7 +11,7 @@ Weave is an experimental Rust reimplementation of the Win32 API. It is early-sta
 Concretely, today:
 
 - A Rust PE loader and ntdll syscall gateway exist and work end-to-end on the supported corpus.
-- A small set of Win32 DLLs is implemented as separate Rust crates (kernel32, user32, gdi32, ntdll, ws2_32, comctl32, oleaut32, shlwapi, gdiplus, ucrt, etc.). Coverage within each is partial; many functions are stubs.
+- The Win32 surface is split across more than two dozen DLL crates (kernel32, user32, gdi32, ntdll, ws2_32, comctl32, oleaut32, shlwapi, gdiplus, ucrt, …) inside a ~38-crate Cargo workspace that also holds the loader, sandbox, and tooling. A handful of the DLL crates are implemented far enough to pass end-to-end CI gates; the rest range from partial to scaffolded, and many functions within any given crate are still stubs.
 - Every app runs inside a Landlock filesystem sandbox by default. Bubblewrap process containment, seccomp syscall filtering, and per-app network isolation are roadmap, not shipped. Relaxing the Landlock allowlist is opt-in.
 - The supported-app list is short and per-release-tier. The current end-to-end gates that are green in CI (not `#[ignore]`'d) are: **NXEngine-evo** (SDL2 game, software renderer, dummy audio), **SDL2 testsprite2** (rendering smoke), and a **Notepad++ resource walk**. Apps not on the list are not supported. See [`PROJECT-TRUTH.md`](PROJECT-TRUTH.md) for the live list and known gaps.
 - DXVK / VKD3D, ARM64, GUI manager, plugin system, compat DB, hardware-accelerated games, real network clients, and the install flow are scaffolded or in progress — not shipped. See [`ROADMAP.md`](ROADMAP.md) for honest per-phase status.
