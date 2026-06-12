@@ -2194,18 +2194,26 @@ fn irfanview_folder_nav_gate() {
     let weave_bin = env!("CARGO_BIN_EXE_weave");
     let start = std::time::Instant::now();
 
-    // Launch with a specific image so IrfanView renders the first image immediately
-    // (BitBlt/WM_PAINT), then the nav injection triggers a second render for the next
-    // sibling. Using the fixture directory as cwd ensures FindFirstFileW discovers
-    // siblings for the internal file list.
+    // Use a temp file for stderr instead of a pipe. Pipes have a ~64KB kernel buffer;
+    // if the Weave process fills the buffer before the test reads it, the process hangs
+    // on its next eprintln! before reaching GDI rendering calls (causing BitBlt=0).
+    // A regular file has no such limit — the process writes freely, and we read the file
+    // contents after it exits.
+    let stderr_path = std::env::temp_dir().join(format!(
+        "irfanview_folder_nav_{}.stderr",
+        std::process::id()
+    ));
+    let stderr_file_out = std::fs::File::create(&stderr_path)
+        .unwrap_or_else(|e| panic!("failed to create temp stderr file {stderr_path:?}: {e}"));
+
     let mut child = std::process::Command::new(weave_bin)
         .current_dir(&irfan_dir)
         .arg(&irfan_exe)
         .arg(&irfan_dir.join("test_image.bmp"))
         .env("DISPLAY", ":99")
         .env("WEAVE_TEST_IRFANVIEW_NAV", "next")
-        .stderr(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(stderr_file_out)
         .spawn()
         .unwrap_or_else(|e| {
             panic!("failed to spawn weave on i_view64.exe for folder-nav gate: {e}")
@@ -2216,16 +2224,7 @@ fn irfanview_folder_nav_gate() {
     const WM_PAINT_PHASE_MARKER: &str = "PHASE: wm_paint_dispatched_first";
     const NAV_INJECT_MARKER: &str = "IrfanView nav INJECT SendMessageW";
 
-    // Sync stderr read — no threaded drain. The threaded drain races with process exit
-    // (data visible in shared buffer during polling loop but empty at join time). Instead,
-    // read_to_end after the process exits, when the pipe's write end is closed.
-    let _child_stdout = child.stdout.take();
-    let mut child_stderr = child.stderr.take().expect("stderr was piped");
-    let mut stderr_buf: Vec<u8> = Vec::new();
-
     let deadline = start + std::time::Duration::from_secs(90);
-    let mut first_paint_seen = false;
-    let mut nav_injected = false;
     let mut teardown_done = false;
 
     loop {
@@ -2233,7 +2232,6 @@ fn irfanview_folder_nav_gate() {
         match child.try_wait().expect("try_wait failed") {
             Some(_) => break,
             None => {
-                // No live stderr reads — sync read_to_end after process exit.
                 // Teardown: wait 45s for second image to render, then Alt+F4.
                 if !teardown_done && start.elapsed().as_secs() > 45 && xdotool_ok {
                     teardown_done = true;
@@ -2259,12 +2257,11 @@ fn irfanview_folder_nav_gate() {
     }
 
     let elapsed = start.elapsed();
-    // Ensure child is fully terminated before reading from the pipe (prevents blocking
-    // on read_to_end if child was killed but kernel hasn't closed the write end yet).
+    // Ensure child is fully terminated before reading the temp stderr file.
     child.wait().ok();
-    use std::io::Read;
-    let _ = child_stderr.read_to_end(&mut stderr_buf);
-    let stderr = String::from_utf8_lossy(&stderr_buf).into_owned();
+    let stderr = std::fs::read_to_string(&stderr_path)
+        .unwrap_or_else(|e| panic!("failed to read temp stderr file {stderr_path:?}: {e}"));
+    std::fs::remove_file(&stderr_path).ok();
 
     eprintln!("irfanview_folder_nav_gate elapsed: {elapsed:.1?}");
     eprintln!(
@@ -2272,8 +2269,7 @@ fn irfanview_folder_nav_gate() {
     );
 
     // Tier A1a: first paint must fire (message loop reached).
-    let paint_ready = first_paint_seen
-        || stderr.contains(FIRST_BLIT_MARKER)
+    let paint_ready = stderr.contains(FIRST_BLIT_MARKER)
         || stderr.contains(FIRST_WM_PAINT_MARKER)
         || stderr.contains(WM_PAINT_PHASE_MARKER);
     assert!(
@@ -2282,7 +2278,7 @@ fn irfanview_folder_nav_gate() {
     );
 
     // Tier A1b: nav injection must fire (Weave hook found IrfanViewerClass child).
-    let injection_fired = nav_injected || stderr.contains(NAV_INJECT_MARKER);
+    let injection_fired = stderr.contains(NAV_INJECT_MARKER);
     assert!(
         injection_fired,
         "irfanview_folder_nav_gate FAIL A1b: nav injection did NOT fire. \
