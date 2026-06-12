@@ -3,6 +3,7 @@
 //! Wine ref: dlls/user32/dialog.c — DIALOG_ParseTemplate32, DIALOG_CreateControls32,
 //! DIALOG_CreateIndirect, DIALOG_DoDialogBox.
 
+use crate::api::call_wnd_proc;
 use crate::class::{self, ClassEntry};
 use crate::defs::*;
 use crate::queue::{self, MsgEntry};
@@ -486,15 +487,11 @@ pub unsafe fn create_from_template_bytes(
         off = next;
     }
     // Wine ref: dlls/user32/dialog.c — SendMessageW(hwnd, WM_INITDIALOG, hwndFocus, lParam).
-    // NOTE: WM_INITDIALOG dispatch to the guest dlgproc is currently deferred (not sent) for
-    // ALL guests — see TASK-CLEANUP-QDIR-ARC.md "masked regression". Restoring it is a tracked,
-    // separately-verified change, not part of this path.
-    eprintln!(
-        "weave/dialog: WM_INITDIALOG deferred for hwnd={hwnd:#x} — guest dlgproc crashes on init"
+    // Returns non-zero to set focus to hwndFocus; zero means app set focus itself.
+    call_wnd_proc(
+        dlg_proc, hwnd, 0x0110, /* WM_INITDIALOG */
+        0, init_param,
     );
-    // init_param is the WM_INITDIALOG lParam; held unused while dispatch is deferred
-    // (consumed again when WM_INITDIALOG is restored — see TASK-CLEANUP-QDIR-ARC.md).
-    let _ = init_param;
     // Wine ref: dlls/user32/dialog.c — ShowWindow(SW_SHOW) marks update region dirty and posts WM_PAINT.
     crate::api::show_window(hwnd, SW_SHOW);
     Some(hwnd)
