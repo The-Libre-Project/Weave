@@ -2194,17 +2194,16 @@ fn irfanview_folder_nav_gate() {
     let weave_bin = env!("CARGO_BIN_EXE_weave");
     let start = std::time::Instant::now();
 
-    // Use a temp file for stderr instead of a pipe. Pipes have a ~64KB kernel buffer;
-    // if the Weave process fills the buffer before the test reads it, the process hangs
-    // on its next eprintln! before reaching GDI rendering calls (causing BitBlt=0).
-    // A regular file has no such limit — the process writes freely, and we read the file
-    // contents after it exits.
+    // Pipe stderr to a drain thread that writes to a real file. This avoids two failure
+    // modes:
+    //   (a) Pipe buffer full (~64KB): the drain thread reads the pipe continuously, so
+    //       the child's eprintln! never blocks.
+    //   (b) Mutex-buffer race: writing to a real file eliminates the shared-Vec race.
+    //       The test reads the file by path after the drain thread has joined.
     let stderr_path = std::env::temp_dir().join(format!(
         "irfanview_folder_nav_{}.stderr",
         std::process::id()
     ));
-    let stderr_file_out = std::fs::File::create(&stderr_path)
-        .unwrap_or_else(|e| panic!("failed to create temp stderr file {stderr_path:?}: {e}"));
 
     let mut child = std::process::Command::new(weave_bin)
         .current_dir(&irfan_dir)
@@ -2213,11 +2212,32 @@ fn irfanview_folder_nav_gate() {
         .env("DISPLAY", ":99")
         .env("WEAVE_TEST_IRFANVIEW_NAV", "next")
         .stdout(std::process::Stdio::null())
-        .stderr(stderr_file_out)
+        .stderr(std::process::Stdio::piped())
         .spawn()
         .unwrap_or_else(|e| {
             panic!("failed to spawn weave on i_view64.exe for folder-nav gate: {e}")
         });
+
+    // Take stderr pipe AFTER spawn (pipe is created during spawn).
+    let stderr_pipe = child.stderr.take().expect("stderr was piped");
+    let stderr_path_clone = stderr_path.clone();
+    let stderr_handle = std::thread::spawn(move || {
+        use std::io::{Read, Write};
+        let mut f = std::fs::File::create(&stderr_path_clone)
+            .expect("failed to create temp stderr drain file");
+        let mut r = stderr_pipe;
+        let mut buf = [0u8; 65536];
+        loop {
+            match r.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    f.write_all(&buf[..n]).ok();
+                }
+                Err(_) => break,
+            }
+        }
+        let _ = f.flush();
+    });
 
     const FIRST_BLIT_MARKER: &str = "weave/gdi32: BitBlt";
     const FIRST_WM_PAINT_MARKER: &str = "weave/user32: WM_PAINT";
@@ -2257,10 +2277,12 @@ fn irfanview_folder_nav_gate() {
     }
 
     let elapsed = start.elapsed();
-    // Ensure child is fully terminated before reading the temp stderr file.
+    // Wait for child to fully exit so the pipe write-end closes (drain thread sees EOF).
     child.wait().ok();
+    // Wait for drain thread to finish writing the temp file.
+    stderr_handle.join().expect("stderr drain thread panicked");
     let stderr = std::fs::read_to_string(&stderr_path)
-        .unwrap_or_else(|e| panic!("failed to read temp stderr file {stderr_path:?}: {e}"));
+        .unwrap_or_else(|e| panic!("failed to read stderr drain file {stderr_path:?}: {e}"));
     std::fs::remove_file(&stderr_path).ok();
 
     eprintln!("irfanview_folder_nav_gate elapsed: {elapsed:.1?}");
