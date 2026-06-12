@@ -2194,14 +2194,14 @@ fn irfanview_folder_nav_gate() {
     let weave_bin = env!("CARGO_BIN_EXE_weave");
     let start = std::time::Instant::now();
 
-    // Directory-open launch: populates IrfanView's internal file list via FindFirstFileW
-    // (confirmed in CI 27395935666 — all 4 siblings enumerated). Combined with
-    // WEAVE_TEST_IRFANVIEW_NAV=next, the Weave hook injects SendMessageW(viewer, 0x410, 0, 1)
-    // after the second WM_PAINT on the IrfanView main frame, triggering in-app navigation.
+    // Launch with a specific image so IrfanView renders the first image immediately
+    // (BitBlt/WM_PAINT), then the nav injection triggers a second render for the next
+    // sibling. Using the fixture directory as cwd ensures FindFirstFileW discovers
+    // siblings for the internal file list.
     let mut child = std::process::Command::new(weave_bin)
         .current_dir(&irfan_dir)
         .arg(&irfan_exe)
-        .arg(&irfan_dir)
+        .arg(&irfan_dir.join("test_image.bmp"))
         .env("DISPLAY", ":99")
         .env("WEAVE_TEST_IRFANVIEW_NAV", "next")
         .stderr(std::process::Stdio::piped())
