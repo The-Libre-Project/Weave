@@ -2216,37 +2216,12 @@ fn irfanview_folder_nav_gate() {
     const WM_PAINT_PHASE_MARKER: &str = "PHASE: wm_paint_dispatched_first";
     const NAV_INJECT_MARKER: &str = "IrfanView nav INJECT SendMessageW";
 
-    let stderr_pipe = child.stderr.take().expect("stderr was piped");
-    let stderr_shared = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
-    let stderr_writer = std::sync::Arc::clone(&stderr_shared);
-    let stderr_handle = std::thread::spawn(move || {
-        use std::io::Read;
-        let mut r = stderr_pipe;
-        let mut chunk = [0u8; 4096];
-        loop {
-            match r.read(&mut chunk) {
-                Ok(0) => break,
-                Ok(n) => stderr_writer.lock().unwrap().extend_from_slice(&chunk[..n]),
-                Err(_) => break,
-            }
-        }
-    });
-
-    let stdout_pipe = child.stdout.take().expect("stdout was piped");
-    let stdout_shared = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
-    let stdout_writer = std::sync::Arc::clone(&stdout_shared);
-    let stdout_handle = std::thread::spawn(move || {
-        use std::io::Read;
-        let mut r = stdout_pipe;
-        let mut chunk = [0u8; 4096];
-        loop {
-            match r.read(&mut chunk) {
-                Ok(0) => break,
-                Ok(n) => stdout_writer.lock().unwrap().extend_from_slice(&chunk[..n]),
-                Err(_) => break,
-            }
-        }
-    });
+    // Sync stderr read — no threaded drain. The threaded drain races with process exit
+    // (data visible in shared buffer during polling loop but empty at join time). Instead,
+    // read_to_end after the process exits, when the pipe's write end is closed.
+    let _child_stdout = child.stdout.take();
+    let mut child_stderr = child.stderr.take().expect("stderr was piped");
+    let mut stderr_buf: Vec<u8> = Vec::new();
 
     let deadline = start + std::time::Duration::from_secs(90);
     let mut first_paint_seen = false;
@@ -2258,46 +2233,21 @@ fn irfanview_folder_nav_gate() {
         match child.try_wait().expect("try_wait failed") {
             Some(_) => break,
             None => {
-                {
-                    let stderr_buf = stderr_shared.lock().unwrap();
-                    let partial = String::from_utf8_lossy(&stderr_buf);
-                    if !first_paint_seen
-                        && (partial.contains(FIRST_BLIT_MARKER)
-                            || partial.contains(FIRST_WM_PAINT_MARKER)
-                            || partial.contains(WM_PAINT_PHASE_MARKER))
-                    {
-                        first_paint_seen = true;
-                        eprintln!(
-                            "irfanview_folder_nav_gate: first_paint at {:?}",
-                            start.elapsed()
-                        );
-                    }
-                    if !nav_injected && partial.contains(NAV_INJECT_MARKER) {
-                        nav_injected = true;
-                        eprintln!(
-                            "irfanview_folder_nav_gate: nav inject detected at {:?}",
-                            start.elapsed()
-                        );
-                    }
-                }
-                // Teardown: wait 15s after nav inject for second image to render, then Alt+F4.
-                if nav_injected && !teardown_done && start.elapsed().as_secs() > 30 {
-                    if start.elapsed().as_secs() > 45 && xdotool_ok {
-                        teardown_done = true;
-                        eprintln!("irfanview_folder_nav_gate: sending alt+F4 teardown");
-                        let _ = std::process::Command::new("xdotool")
-                            .args(["search", "--name", "IrfanView"])
-                            .output()
-                            .map(|out| {
-                                if let Some(id) =
-                                    String::from_utf8_lossy(&out.stdout).lines().next()
-                                {
-                                    let _ = std::process::Command::new("xdotool")
-                                        .args(["key", "--window", id.trim(), "alt+F4"])
-                                        .output();
-                                }
-                            });
-                    }
+                // No live stderr reads — sync read_to_end after process exit.
+                // Teardown: wait 45s for second image to render, then Alt+F4.
+                if !teardown_done && start.elapsed().as_secs() > 45 && xdotool_ok {
+                    teardown_done = true;
+                    eprintln!("irfanview_folder_nav_gate: sending alt+F4 teardown");
+                    let _ = std::process::Command::new("xdotool")
+                        .args(["search", "--name", "IrfanView"])
+                        .output()
+                        .map(|out| {
+                            if let Some(id) = String::from_utf8_lossy(&out.stdout).lines().next() {
+                                let _ = std::process::Command::new("xdotool")
+                                    .args(["key", "--window", id.trim(), "alt+F4"])
+                                    .output();
+                            }
+                        });
                 }
                 if now >= deadline {
                     let _ = child.kill();
@@ -2309,10 +2259,12 @@ fn irfanview_folder_nav_gate() {
     }
 
     let elapsed = start.elapsed();
-    stderr_handle.join().expect("stderr drain thread panicked");
-    stdout_handle.join().expect("stdout drain thread panicked");
-    let stderr = String::from_utf8_lossy(&stderr_shared.lock().unwrap()).into_owned();
-    let _stdout = String::from_utf8_lossy(&stdout_shared.lock().unwrap()).into_owned();
+    // Ensure child is fully terminated before reading from the pipe (prevents blocking
+    // on read_to_end if child was killed but kernel hasn't closed the write end yet).
+    child.wait().ok();
+    use std::io::Read;
+    let _ = child_stderr.read_to_end(&mut stderr_buf);
+    let stderr = String::from_utf8_lossy(&stderr_buf).into_owned();
 
     eprintln!("irfanview_folder_nav_gate elapsed: {elapsed:.1?}");
     eprintln!(
@@ -2345,8 +2297,12 @@ fn irfanview_folder_nav_gate() {
     let nav_pos = stderr.find(NAV_INJECT_MARKER).unwrap_or(0);
     let post_inject = &stderr[nav_pos..];
     let pre_bitblt = (&stderr[..nav_pos]).matches("weave/gdi32: BitBlt").count();
-    let pre_stretchdibits = (&stderr[..nav_pos]).matches("weave/gdi32: StretchDIBits").count();
-    let pre_wm_paint = (&stderr[..nav_pos]).matches("weave/user32: WM_PAINT").count();
+    let pre_stretchdibits = (&stderr[..nav_pos])
+        .matches("weave/gdi32: StretchDIBits")
+        .count();
+    let pre_wm_paint = (&stderr[..nav_pos])
+        .matches("weave/user32: WM_PAINT")
+        .count();
     let post_bitblt = post_inject.matches("weave/gdi32: BitBlt").count();
     let post_stretchdibits = post_inject.matches("weave/gdi32: StretchDIBits").count();
     let post_wm_paint = post_inject.matches("weave/user32: WM_PAINT").count();
