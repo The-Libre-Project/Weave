@@ -2358,12 +2358,16 @@ fn irfanview_folder_nav_gate() {
     );
     eprintln!(
         "irfanview_folder_nav_gate: diag — sibling filename in logs: {}",
-        stderr.contains("test_image.gif") || stderr.contains("test_image.jpg") || stderr.contains("test_image.png")
+        stderr.contains("test_image.gif")
+            || stderr.contains("test_image.jpg")
+            || stderr.contains("test_image.png")
     );
     if !second_render {
         eprintln!("irfanview_folder_nav_gate: DIAGNOSTIC — second image render NOT detected (dir-open variant).");
         eprintln!("irfanview_folder_nav_gate: diag — this means IrfanView either:");
-        eprintln!("  (a) did not populate its file list from directory-open (file-list still empty),");
+        eprintln!(
+            "  (a) did not populate its file list from directory-open (file-list still empty),"
+        );
         eprintln!("  (b) the xdotool key Right did not reach the correct window or was ignored,");
         eprintln!("  (c) VK_RIGHT reaches IrfanView but it needs a different mechanism for nav,");
         eprintln!("  (d) there is only 1 image in the fixture dir (check: test_image.bmp + siblings present).");
