@@ -42,8 +42,8 @@ use weave_common::com::shell_link::{create_shell_link, CLSID_SHELL_LINK};
 /// This is escalation-packet priority 1 from docs/loop-arcs/sumatrapdf_pdf_render_gate.md.
 const CLSID_SUMATRA_DDE_SERVER: [u8; 16] = [
     0x60, 0xBE, 0x56, 0x9E, // Data1 = 0x9E56BE60
-    0x0F, 0xC5,             // Data2 = 0xC50F
-    0xCF, 0x11,             // Data3 = 0x11CF
+    0x0F, 0xC5, // Data2 = 0xC50F
+    0xCF, 0x11, // Data3 = 0x11CF
     0x9A, 0x2C, 0x00, 0xA0, 0xC9, 0x0A, 0x90, 0xCE, // Data4
 ];
 

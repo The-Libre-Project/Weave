@@ -1082,9 +1082,7 @@ fn try_test_irfanview_nav_inject(hwnd: usize) {
         "weave/user32: IrfanView nav INJECT SendMessageW(viewer=0x{viewer_hwnd:x}, 0x410, w={w_param}, l={l_param}) direction={direction} paint=#{paints}"
     );
     let ret = send_message_w(viewer_hwnd, WM_IRFANVIEW_NEXT, w_param as usize, l_param);
-    eprintln!(
-        "weave/user32: IrfanView nav INJECT → ret={ret:#x}"
-    );
+    eprintln!("weave/user32: IrfanView nav INJECT → ret={ret:#x}");
 }
 
 /// M15a probe driver (content injection + WM_COMMAND via SendMessageW).
