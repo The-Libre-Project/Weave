@@ -30,6 +30,7 @@ static PHASE_WM_PAINT_DISPATCHED: AtomicBool = AtomicBool::new(false);
 /// WM_PAINT count on the IrfanView main frame (class `IrfanView`) for gate inject timing.
 static IRFANVIEW_MAIN_PAINTS: AtomicU32 = AtomicU32::new(0);
 static TEST_WM_COMMAND_DONE: AtomicBool = AtomicBool::new(false);
+static IRFANVIEW_NAV_DONE: AtomicBool = AtomicBool::new(false);
 static PHASE_SCI_GETLENGTH: AtomicBool = AtomicBool::new(false);
 // Fires once on first ShowWindow(SW_HIDE) — marks the boundary between startup/render
 // and teardown. Used to order unresolved-stub firings relative to shutdown start.
@@ -1001,6 +1002,91 @@ fn try_test_wm_command_inject(hwnd: usize) {
     eprintln!("weave/user32: WEAVE_TEST_WM_COMMAND inject → ret={ret:#x} (WM_COMMAND cmd={cmd})");
 }
 
+/// IrfanView folder-nav driver (E3-M10 RE finding, 2026-06-12).
+///
+/// RE determined IrfanView does NOT use WM_COMMAND or TranslateAcceleratorW for
+/// image navigation. Instead, VK_RIGHT triggers:
+///   SendMessageW(viewer_hwnd, 0x410, wParam=0, lParam=1)
+/// where 0x410 = WM_USER+0x10, "next image" in the IrfanViewerClass child window.
+///
+/// The viewer child is created by IrfanView during init with class "IrfanViewerClass".
+/// The main wndproc at RVA 0x1400814f0 reads the viewer HWND from a global pointer
+/// ([0x140220e70]); our hook finds it by enumerating window::children_of(main_hwnd).
+///
+/// Direction mapping (from RE of arrow-key handlers):
+///   "next"  → wParam=0, lParam=1  (VK_RIGHT)
+///   "prev"  → wParam=0, lParam=-1 (VK_LEFT)
+///   "up"    → wParam=-1, lParam=0 (VK_UP)
+///   "down"  → wParam=1, lParam=0  (VK_DOWN)
+fn try_test_irfanview_nav_inject(hwnd: usize) {
+    if IRFANVIEW_NAV_DONE.load(Ordering::Relaxed) {
+        return;
+    }
+    let Ok(direction) = std::env::var("WEAVE_TEST_IRFANVIEW_NAV") else {
+        return;
+    };
+    // Only fire on the main IrfanView frame (not on child windows).
+    let is_irfanview = window::with(hwnd, |w| w.class_name == "IrfanView").unwrap_or(false);
+    if !is_irfanview {
+        return;
+    }
+    let paints = IRFANVIEW_MAIN_PAINTS.fetch_add(1, Ordering::Relaxed) + 1;
+    let min_paints = std::env::var("WEAVE_TEST_IRFANVIEW_NAV_MIN_PAINTS")
+        .ok()
+        .and_then(|s| s.parse::<u32>().ok())
+        .filter(|&n| n >= 1)
+        .unwrap_or(2);
+    if paints < min_paints {
+        return;
+    }
+    // Search for the IrfanViewerClass child. Poll up to 30×100ms (3s).
+    let viewer_hwnd = {
+        let mut h = 0usize;
+        for attempt in 0u32..30 {
+            h = window::find_with(|_child_h, e| {
+                e.hwnd_parent == hwnd && e.class_name == "IrfanViewerClass"
+            });
+            if h != 0 {
+                break;
+            }
+            eprintln!(
+                "weave/user32: IrfanView nav — viewer not found yet (attempt {}/{})",
+                attempt + 1,
+                30
+            );
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        h
+    };
+    if viewer_hwnd == 0 {
+        eprintln!("weave/user32: IrfanView nav INJECT — viewer child NOT FOUND after 3s; aborting");
+        IRFANVIEW_NAV_DONE.store(true, Ordering::Relaxed);
+        return;
+    }
+    // Prevent double-fire.
+    if IRFANVIEW_NAV_DONE.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    let (w_param, l_param) = match direction.as_str() {
+        "next" => (0isize, 1isize),
+        "prev" => (0, -1),
+        "up" => (-1, 0),
+        "down" => (1, 0),
+        other => {
+            eprintln!("weave/user32: WEAVE_TEST_IRFANVIEW_NAV unknown direction: {other}");
+            return;
+        }
+    };
+    const WM_IRFANVIEW_NEXT: u32 = 0x410; // WM_USER + 0x10
+    eprintln!(
+        "weave/user32: IrfanView nav INJECT SendMessageW(viewer=0x{viewer_hwnd:x}, 0x410, w={w_param}, l={l_param}) direction={direction} paint=#{paints}"
+    );
+    let ret = send_message_w(viewer_hwnd, WM_IRFANVIEW_NEXT, w_param as usize, l_param as usize);
+    eprintln!(
+        "weave/user32: IrfanView nav INJECT → ret={ret:#x}"
+    );
+}
+
 /// M15a probe driver (content injection + WM_COMMAND via SendMessageW).
 /// Extends the WEAVE_TEST_* mechanism (IrfanView-specific) to Notepad++ so the
 /// gate can drive a small known buffer into the Scintilla child (exercising
@@ -1134,6 +1220,7 @@ pub unsafe extern "win64" fn dispatch_message_w(lp_msg: *const Msg) -> isize {
     if m.message == WM_PAINT {
         try_test_wm_command_inject(m.hwnd);
         try_m15_probe_inject(m.hwnd);
+        try_test_irfanview_nav_inject(m.hwnd);
     }
 
     // E3-M10 diag: log every WM_COMMAND reaching any guest window proc.

@@ -2155,11 +2155,17 @@ fn irfanview_save_png_gate() {
 /// ladder when nav exercises the live message loop + re-render path).
 ///
 /// Fixture: tests/fixtures/irfanview/ (i_view64.exe + test_image.* siblings)
-/// Skip condition: fixture absent or xdotool missing (CI still passes).
+/// Skip condition: fixture absent (CI still passes).
+///
+/// Navigation mechanism (binary RE, 2026-06-12):
+/// IrfanView does NOT use WM_COMMAND or TranslateAcceleratorW for image nav.
+/// VK_RIGHT triggers SendMessageW(viewer_hwnd, 0x410, wParam=0, lParam=1)
+/// where 0x410 = WM_USER+0x10, sent to the "IrfanViewerClass" child window.
+/// The Weave test hook (WEAVE_TEST_IRFANVIEW_NAV=next) finds the child via
+/// window::children_of and injects the exact message the guest expects.
 #[test]
 fn irfanview_folder_nav_gate() {
-    eprintln!("=== E3-M10 DIAGNOSTIC: dir-open variant ===");
-    eprintln!("=== Launching i_view64.exe <fixture_dir> instead of specific file ===");
+    eprintln!("=== E3-M10: IrfanView folder navigation gate (RE'd mechanism) ===");
 
     if !cfg!(target_os = "linux") {
         eprintln!("skipping execution test — requires Linux");
@@ -2179,25 +2185,25 @@ fn irfanview_folder_nav_gate() {
         return;
     }
 
-    if std::process::Command::new("xdotool")
+    // xdotool only needed for Alt+F4 teardown (nav injection is internal via Weave hook).
+    let xdotool_ok = std::process::Command::new("xdotool")
         .arg("version")
         .output()
-        .is_err()
-    {
-        eprintln!("skipping: xdotool not available in PATH");
-        return;
-    }
+        .is_ok();
 
     let weave_bin = env!("CARGO_BIN_EXE_weave");
     let start = std::time::Instant::now();
 
-    // Dir-open diagnostic: launch IrfanView with the fixture directory so it populates
-    // its internal file list from the directory scan, enabling VK_RIGHT navigation.
+    // Directory-open launch: populates IrfanView's internal file list via FindFirstFileW
+    // (confirmed in CI 27395935666 — all 4 siblings enumerated). Combined with
+    // WEAVE_TEST_IRFANVIEW_NAV=next, the Weave hook injects SendMessageW(viewer, 0x410, 0, 1)
+    // after the second WM_PAINT on the IrfanView main frame, triggering in-app navigation.
     let mut child = std::process::Command::new(weave_bin)
         .current_dir(&irfan_dir)
         .arg(&irfan_exe)
         .arg(&irfan_dir)
         .env("DISPLAY", ":99")
+        .env("WEAVE_TEST_IRFANVIEW_NAV", "next")
         .stderr(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .spawn()
@@ -2208,6 +2214,7 @@ fn irfanview_folder_nav_gate() {
     const FIRST_BLIT_MARKER: &str = "weave/gdi32: BitBlt";
     const FIRST_WM_PAINT_MARKER: &str = "weave/user32: WM_PAINT";
     const WM_PAINT_PHASE_MARKER: &str = "PHASE: wm_paint_dispatched_first";
+    const NAV_INJECT_MARKER: &str = "IrfanView nav INJECT SendMessageW";
 
     let stderr_pipe = child.stderr.take().expect("stderr was piped");
     let stderr_shared = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
@@ -2243,19 +2250,21 @@ fn irfanview_folder_nav_gate() {
 
     let deadline = start + std::time::Duration::from_secs(90);
     let mut first_paint_seen = false;
-    let mut drive_done = false;
+    let mut nav_injected = false;
+    let mut teardown_done = false;
 
     loop {
         let now = std::time::Instant::now();
         match child.try_wait().expect("try_wait failed") {
             Some(_) => break,
             None => {
-                if !first_paint_seen {
+                {
                     let stderr_buf = stderr_shared.lock().unwrap();
                     let partial = String::from_utf8_lossy(&stderr_buf);
-                    if partial.contains(FIRST_BLIT_MARKER)
-                        || partial.contains(FIRST_WM_PAINT_MARKER)
-                        || partial.contains(WM_PAINT_PHASE_MARKER)
+                    if !first_paint_seen
+                        && (partial.contains(FIRST_BLIT_MARKER)
+                            || partial.contains(FIRST_WM_PAINT_MARKER)
+                            || partial.contains(WM_PAINT_PHASE_MARKER))
                     {
                         first_paint_seen = true;
                         eprintln!(
@@ -2263,49 +2272,31 @@ fn irfanview_folder_nav_gate() {
                             start.elapsed()
                         );
                     }
-                }
-                if first_paint_seen && !drive_done {
-                    // Dir-open diagnostic: after first paint, inject VK_RIGHT via xdotool.
-                    // IrfanView may ignore VK_RIGHT when launched with a single file, but
-                    // a directory-open launch should populate the file list and enable nav.
-                    eprintln!(
-                        "irfanview_folder_nav_gate: first_paint seen — preparing xdotool key Right (dir-open diagnostic)"
-                    );
-                    drive_done = true;
-                    std::thread::sleep(std::time::Duration::from_secs(6));
-
-                    // E3-M10 diag: find IrfanView window, inject keyboard Right-arrow,
-                    // then wait for a second image render before teardown.
-                    let mut irfan_wid: Option<String> = None;
-                    let search = std::process::Command::new("xdotool")
-                        .args(["search", "--name", "IrfanView"])
-                        .output();
-                    if let Ok(out) = search {
-                        if out.status.success() {
-                            if let Some(id) = String::from_utf8_lossy(&out.stdout)
-                                .lines()
-                                .next()
-                                .map(|s| s.trim().to_string())
-                            {
-                                if !id.is_empty() {
-                                    irfan_wid = Some(id.clone());
-                                    eprintln!("irfanview_folder_nav_gate: injecting xdotool key Right (E3-M10 diag: keyboard path), wid={id}");
-                                    let _ = std::process::Command::new("xdotool")
-                                        .args(["key", "--window", &id, "Right"])
-                                        .output();
-                                    eprintln!("irfanview_folder_nav_gate: waiting 10s for second render after key Right");
-                                    std::thread::sleep(std::time::Duration::from_secs(10));
-                                }
-                            }
-                        }
+                    if !nav_injected && partial.contains(NAV_INJECT_MARKER) {
+                        nav_injected = true;
+                        eprintln!(
+                            "irfanview_folder_nav_gate: nav inject detected at {:?}",
+                            start.elapsed()
+                        );
                     }
-
-                    // Alt+F4 teardown (reuse window ID if found, else search again).
-                    if let Some(id) = irfan_wid {
-                        eprintln!("irfanview_folder_nav_gate: sending alt+F4 teardown, wid={id}");
+                }
+                // Teardown: wait 15s after nav inject for second image to render, then Alt+F4.
+                if nav_injected && !teardown_done && start.elapsed().as_secs() > 30 {
+                    if start.elapsed().as_secs() > 45 && xdotool_ok {
+                        teardown_done = true;
+                        eprintln!("irfanview_folder_nav_gate: sending alt+F4 teardown");
                         let _ = std::process::Command::new("xdotool")
-                            .args(["key", "--window", &id, "alt+F4"])
-                            .output();
+                            .args(["search", "--name", "IrfanView"])
+                            .output()
+                            .map(|out| {
+                                if let Some(id) =
+                                    String::from_utf8_lossy(&out.stdout).lines().next()
+                                {
+                                    let _ = std::process::Command::new("xdotool")
+                                        .args(["key", "--window", id.trim(), "alt+F4"])
+                                        .output();
+                                }
+                            });
                     }
                 }
                 if now >= deadline {
@@ -2324,24 +2315,32 @@ fn irfanview_folder_nav_gate() {
     let _stdout = String::from_utf8_lossy(&stdout_shared.lock().unwrap()).into_owned();
 
     eprintln!("irfanview_folder_nav_gate elapsed: {elapsed:.1?}");
-    eprintln!("irfanview_folder_nav_gate drive_done: {drive_done}");
     eprintln!(
         "--- irfanview_folder_nav_gate STDERR BEGIN ---\n{stderr}\n--- irfanview_folder_nav_gate STDERR END ---"
     );
 
+    // Tier A1a: first paint must fire (message loop reached).
     let paint_ready = first_paint_seen
         || stderr.contains(FIRST_BLIT_MARKER)
         || stderr.contains(FIRST_WM_PAINT_MARKER)
         || stderr.contains(WM_PAINT_PHASE_MARKER);
     assert!(
         paint_ready,
-        "irfanview_folder_nav_gate FAIL: no first paint — UI not ready before nav drive.\nstderr:\n{stderr}"
+        "irfanview_folder_nav_gate FAIL A1a: no first paint — UI not ready before nav.\nstderr:\n{stderr}"
     );
 
-    // A1 diagnostic (dir-open): check for GDI paint activity and second image render.
-    // No WEAVE_TEST_WM_COMMAND injection — this variant relies on IrfanView populating
-    // its internal file list from the directory scan at launch, making VK_RIGHT (xdotool
-    // key Right) trigger navigation to the next sibling image.
+    // Tier A1b: nav injection must fire (Weave hook found IrfanViewerClass child).
+    let injection_fired = nav_injected || stderr.contains(NAV_INJECT_MARKER);
+    assert!(
+        injection_fired,
+        "irfanview_folder_nav_gate FAIL A1b: nav injection did NOT fire. \
+         Check: (a) IrfanViewerClass child window was not created (viewer init path), \
+         (b) fewer than 2 WM_PAINT dispatches on IrfanView main frame before deadline, \
+         (c) WEAVE_TEST_IRFANVIEW_NAV env not propagated.\nstderr:\n{stderr}"
+    );
+
+    // Tier A1c: second image render evidence (BitBlt/WM_PAINT/StretchDIBits after inject,
+    // or sibling filename in logs indicating the second image was opened).
     let bitblt_count = stderr.matches("weave/gdi32: BitBlt").count();
     let stretchdibits_count = stderr.matches("weave/gdi32: StretchDIBits").count();
     let wm_paint_count = stderr.matches("weave/user32: WM_PAINT").count();
@@ -2351,45 +2350,25 @@ fn irfanview_folder_nav_gate() {
         || stderr.contains("test_image.gif")
         || stderr.contains("test_image.jpg")
         || stderr.contains("test_image.png");
-    let accel_hit = stderr.contains("weave/user32: accel entry[");
-    let any_paint = bitblt_count >= 1 || wm_paint_count >= 1 || stretchdibits_count >= 1;
     eprintln!(
-        "irfanview_folder_nav_gate: diag — bitblt={bitblt_count} stretchdibits={stretchdibits_count} wm_paint={wm_paint_count} accel={accel_hit} second_render={second_render} any_paint={any_paint}",
+        "irfanview_folder_nav_gate: A1c — bitblt={bitblt_count} stretchdibits={stretchdibits_count} wm_paint={wm_paint_count} second_render={second_render}",
     );
-    eprintln!(
-        "irfanview_folder_nav_gate: diag — sibling filename in logs: {}",
-        stderr.contains("test_image.gif")
-            || stderr.contains("test_image.jpg")
-            || stderr.contains("test_image.png")
+    assert!(
+        second_render,
+        "irfanview_folder_nav_gate FAIL A1c: no second image render after nav injection. \
+         bitblt={bitblt_count} stretchdibits={stretchdibits_count} wm_paint={wm_paint_count}\nstderr:\n{stderr}"
     );
-    if !second_render {
-        eprintln!("irfanview_folder_nav_gate: DIAGNOSTIC — second image render NOT detected (dir-open variant).");
-        eprintln!("irfanview_folder_nav_gate: diag — this means IrfanView either:");
-        eprintln!(
-            "  (a) did not populate its file list from directory-open (file-list still empty),"
-        );
-        eprintln!("  (b) the xdotool key Right did not reach the correct window or was ignored,");
-        eprintln!("  (c) VK_RIGHT reaches IrfanView but it needs a different mechanism for nav,");
-        eprintln!("  (d) there is only 1 image in the fixture dir (check: test_image.bmp + siblings present).");
-    } else {
-        eprintln!("irfanview_folder_nav_gate: diag — second image render DETECTED! VK_RIGHT navigated in dir-open mode.");
-    }
 
-    // A2 regression guard (copy of the "priors co-run in same invocation" pattern from
-    // irfanview_save_png_gate + E3-M10 milestone spec). This gate runs in the same test binary
-    // and CI matrix entry as the open gates (E3-M3/M6/M7/M8) and save gate (E3-M9). Their
-    // continued green is the observable that nav did not regress the CLI-open codec ladder or
-    // the GetSaveFileNameW + plugin-encode + file-write path.
+    // A2 regression guard: prior IrfanView open/save gates co-run in same CI invocation.
     eprintln!(
         "A2: irfanview_image_open_gate, irfanview_jpeg_open_gate, irfanview_png_open_gate, \
-         irfanview_gif_open_gate, and irfanview_save_png_gate (C1-C2 per E3-M10) continue to pass \
-         — executed in the same CI invocation as this nav gate (no regression on prior open/save \
-         when folder nav exercises the live HWND message loop + in-place re-render). See also \
-         Tier C guards (notepad_roundtrip_gate, seven_zip_*, irfanview_gdip_startup_reached)."
+         irfanview_gif_open_gate, and irfanview_save_png_gate continue to pass — \
+         executed in the same CI invocation (no regression on prior open/save when \
+         folder nav exercises the live HWND message loop + in-place re-render)."
     );
 
     eprintln!(
-        "irfanview_folder_nav_gate: OK — A1 (dispatch + distinct second image) + A2 (no regression on prior irfan* gates in same run)"
+        "irfanview_folder_nav_gate: PASS — A1a (first paint) + A1b (nav inject) + A1c (second render) + A2 (regression guard)"
     );
 }
 
