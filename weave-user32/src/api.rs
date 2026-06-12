@@ -997,7 +997,8 @@ fn try_test_wm_command_inject(hwnd: usize) {
     eprintln!(
         "weave/user32: WEAVE_TEST_WM_COMMAND inject WM_COMMAND cmd=0x{cmd:x} hwnd={hwnd:#x} (paint #{paints})"
     );
-    send_message_w(hwnd, WM_COMMAND, w_param, 0);
+    let ret = send_message_w(hwnd, WM_COMMAND, w_param, 0);
+    eprintln!("weave/user32: WEAVE_TEST_WM_COMMAND inject → ret={ret:#x} (WM_COMMAND cmd={cmd})");
 }
 
 /// M15a probe driver (content injection + WM_COMMAND via SendMessageW).
@@ -1135,6 +1136,24 @@ pub unsafe extern "win64" fn dispatch_message_w(lp_msg: *const Msg) -> isize {
         try_m15_probe_inject(m.hwnd);
     }
 
+    // E3-M10 diag: log every WM_COMMAND reaching any guest window proc.
+    const WM_COMMAND_MSG: u32 = 0x0111;
+    const WM_KEYDOWN_MSG: u32 = 0x0100;
+    const VK_RIGHT: usize = 0x27;
+    if m.message == WM_COMMAND_MSG {
+        let cmd_id = m.w_param & 0xFFFF;
+        let notification = (m.w_param >> 16) & 0xFFFF;
+        eprintln!(
+            "weave/user32/DispatchMessageW: WM_COMMAND hwnd={:#x} cmd={} notification={} lp={:#x}",
+            m.hwnd, cmd_id, notification, m.l_param
+        );
+    } else if m.message == WM_KEYDOWN_MSG && (m.w_param & 0xFFFF) == VK_RIGHT {
+        eprintln!(
+            "weave/user32/DispatchMessageW: WM_KEYDOWN VK_RIGHT hwnd={:#x} wp={:#x} lp={:#x}",
+            m.hwnd, m.w_param, m.l_param
+        );
+    }
+
     let proc_addr = match window::with(m.hwnd, |e| e.wnd_proc) {
         Some(p) => p,
         None => {
@@ -1148,7 +1167,15 @@ pub unsafe extern "win64" fn dispatch_message_w(lp_msg: *const Msg) -> isize {
         }
     };
 
-    call_wnd_proc(proc_addr, m.hwnd, m.message, m.w_param, m.l_param)
+    let ret = call_wnd_proc(proc_addr, m.hwnd, m.message, m.w_param, m.l_param);
+    if m.message == WM_COMMAND_MSG {
+        let cmd_id = m.w_param & 0xFFFF;
+        eprintln!(
+            "weave/user32/DispatchMessageW: WM_COMMAND cmd={} → ret={:#x}",
+            cmd_id, ret
+        );
+    }
+    ret
 }
 
 // ── PostQuitMessage ───────────────────────────────────────────────────────────
