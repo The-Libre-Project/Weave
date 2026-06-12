@@ -2127,42 +2127,21 @@ fn irfanview_save_png_gate() {
     );
 }
 
-/// `weave i_view64.exe <fixture_dir>` — E3-M10 Tier A folder nav gate (dir-open diagnostic variant).
+/// `weave i_view64.exe <fixture_dir>` — E3-M10 Tier A folder nav gate.
 ///
-/// DIAGNOSTIC: Launches with a directory path instead of a specific file. The hypothesis is
-/// that IrfanView only populates its internal file list (for arrow-key navigation) when the
-/// CLI argument is a directory. When launched with a single file path (test_image.bmp), the
-/// file list stays empty and VK_RIGHT is silently ignored.
+/// Opens the fixture dir under Xvfb (DISPLAY=:99). After the first image renders
+/// (≥2 WM_PAINT dispatches), injects WM_COMMAND(0x111) with wParam=0x43e ("next")
+/// or 0x458 ("prev") into the main IrfanView frame HWND, matching the wndproc
+/// handler at RVA 0x1400814f0 (binary RE, 2026-06-12 refined).
 ///
-/// Opens the fixture dir under Xvfb (DISPLAY=:99), waits for first paint, then uses xdotool
-/// to inject VK_RIGHT WM_KEYDOWN into the IrfanView main frame (hwnd found via xdotool
-/// search --name IrfanView). After a 10s render wait, checks stderr for evidence of a second
-/// distinct image render (BitBlt/WM_PAINT/StretchDIBits count >= 2, or sibling filename in
-/// CreateFileW logs).
+/// Fixture directory contains multiple sibling images (test_image.bmp, .gif, .jpg,
+/// .png) so IrfanView populates an internal file list and can navigate between them.
 ///
-/// No WEAVE_TEST_WM_COMMAND injection in this variant — the directory-open path relies on
-/// IrfanView's native navigation, not synthetic messages.
+/// Tier A A1: stderr contains evidence of a second distinct image render after
+/// navigation injection — StretchDIBits with distinct pixel data on the same HWND.
+/// Tier A A2: all prior IrfanView gates (irfanview_*_open_gate + save_png_gate)
+/// remain green in the same CI run (no regression).
 ///
-/// The two-image+ fixture (test_image.bmp + test_image.gif/jpg/png siblings) exercises:
-/// - directory sibling discovery (Find*FileW or cached list) for the "next" lexical file
-/// - in-place re-render on the existing HWND (second CreateFileW + decode + StretchDIBits/BitBlt
-///   with distinct source on the same DC, no new top-level window)
-///
-/// Tier A A1: stderr contains evidence of a second distinct image render (BitBlt/WM_PAINT/
-/// StretchDIBits count >= 2 after xdotool key Right, or explicit second filename in logs).
-/// Tier A A2: irfanview_image_open_gate / jpeg / png / gif + irfanview_save_png_gate (and C
-/// regression guards) continue to pass in the same CI invocation (no regression on the open/save
-/// ladder when nav exercises the live message loop + re-render path).
-///
-/// Fixture: tests/fixtures/irfanview/ (i_view64.exe + test_image.* siblings)
-/// Skip condition: fixture absent (CI still passes).
-///
-/// Navigation mechanism (binary RE, 2026-06-12):
-/// IrfanView does NOT use WM_COMMAND or TranslateAcceleratorW for image nav.
-/// VK_RIGHT triggers SendMessageW(viewer_hwnd, 0x410, wParam=0, lParam=1)
-/// where 0x410 = WM_USER+0x10, sent to the "IrfanViewerClass" child window.
-/// The Weave test hook (WEAVE_TEST_IRFANVIEW_NAV=next) finds the child via
-/// window::children_of and injects the exact message the guest expects.
 #[test]
 fn irfanview_folder_nav_gate() {
     eprintln!("=== E3-M10: IrfanView folder navigation gate (RE'd mechanism) ===");
