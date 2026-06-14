@@ -644,3 +644,97 @@ mod tests {
         assert!(resolve("COMCTL32.DLL", "ImageList_Create").is_some());
     }
 }
+
+// ── uxtheme.dll stubs ─────────────────────────────────────────────────────────
+//
+// Wine ref: dlls/uxtheme/uxtheme.c — theme API functions.
+// All stubs return safe sentinel values (NULL handle, S_OK, FALSE).
+
+const S_OK: i32 = 0;
+
+/// Resolve a uxtheme.dll import to a stub address.
+pub fn resolve_uxtheme(dll: &str, func: &str) -> Option<usize> {
+    if !dll.eq_ignore_ascii_case("uxtheme.dll") {
+        return None;
+    }
+    match func {
+        "OpenThemeData" => Some(open_theme_data as *const () as usize),
+        "CloseThemeData" => Some(close_theme_data as *const () as usize),
+        "DrawThemeBackground" => Some(draw_theme_background as *const () as usize),
+        "DrawThemeText" => Some(draw_theme_text as *const () as usize),
+        "SetWindowTheme" => Some(set_window_theme as *const () as usize),
+        "IsThemeActive" => Some(is_theme_active as *const () as usize),
+        "IsAppThemed" => Some(is_app_themed as *const () as usize),
+        "GetWindowTheme" => Some(get_window_theme as *const () as usize),
+        "EnableThemeDialogTexture" => Some(enable_theme_dialog_texture as *const () as usize),
+        "EnableTheming" => Some(enable_theming as *const () as usize),
+        _ => None,
+    }
+}
+
+// Wine ref: dlls/uxtheme/theme.c — OpenThemeData returns HTHEME handle or NULL.
+extern "win64" fn open_theme_data(_hwnd: usize, _class: *const u16) -> usize {
+    0 // NULL — no theme available
+}
+
+// Wine ref: dlls/uxtheme/theme.c — CloseThemeData frees theme handle resources.
+extern "win64" fn close_theme_data(_h_theme: usize) -> i32 {
+    S_OK
+}
+
+// Wine ref: dlls/uxtheme/theme.c — DrawThemeBackground draws themed background.
+extern "win64" fn draw_theme_background(
+    _h_theme: usize,
+    _hdc: usize,
+    _part: i32,
+    _state: i32,
+    _rect: *const u8,
+    _clip: *const u8,
+) -> i32 {
+    S_OK
+}
+
+// Wine ref: dlls/uxtheme/theme.c — DrawThemeText draws themed text.
+extern "win64" fn draw_theme_text(
+    _h_theme: usize,
+    _hdc: usize,
+    _part: i32,
+    _state: i32,
+    _str: *const u16,
+    _len: i32,
+    _flags: u32,
+    _flags2: u32,
+    _rect: *const u8,
+) -> i32 {
+    S_OK
+}
+
+// Wine ref: dlls/uxtheme/theme.c — SetWindowTheme sets/clears theme per window.
+extern "win64" fn set_window_theme(_hwnd: usize, _app: *const u16, _sub: *const u16) -> i32 {
+    S_OK
+}
+
+// Wine ref: dlls/uxtheme/theme.c — IsThemeActive returns TRUE if themes active.
+extern "win64" fn is_theme_active() -> i32 {
+    0 // FALSE — no themes active
+}
+
+// Wine ref: dlls/uxtheme/theme.c — IsAppThemed returns TRUE if app is themed.
+extern "win64" fn is_app_themed() -> i32 {
+    0 // FALSE — not themed
+}
+
+// Wine ref: dlls/uxtheme/theme.c — GetWindowTheme returns theme handle for window.
+extern "win64" fn get_window_theme(_hwnd: usize) -> usize {
+    0 // NULL — no theme assigned
+}
+
+// Wine ref: dlls/uxtheme/theme.c — EnableThemeDialogTexture enables background texture.
+extern "win64" fn enable_theme_dialog_texture(_hwnd: usize, _flags: u32) -> i32 {
+    S_OK
+}
+
+// Wine ref: dlls/uxtheme/theme.c — EnableTheming enables/disables visual styles.
+extern "win64" fn enable_theming(_enable: i32) -> i32 {
+    S_OK
+}
