@@ -236,6 +236,28 @@ fn handle_prefix_cmd(args: &[String]) -> ! {
                 eprintln!("weave prefix launch: could not find current exe: {e}");
                 std::process::exit(1);
             });
+            // Create .desktop entry on first launch (idempotent — skips if already installed).
+            if let Ok(dir) = weave_desktop::applications_dir() {
+                let desktop_path = dir.join(format!("weave-{name}.desktop"));
+                if !desktop_path.exists() {
+                    let app_name = exe_path
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or(name);
+                    let exec_cmd = format!("{} prefix launch {name}", current_exe.display());
+                    let icon_path =
+                        weave_desktop::extract_and_install_icon(name, &exe_path).unwrap_or(None);
+                    let content = weave_desktop::generate_desktop_file(
+                        app_name,
+                        &exec_cmd,
+                        icon_path.as_deref(),
+                        "Application;",
+                    );
+                    if let Err(e) = weave_desktop::install_desktop_file(name, &content) {
+                        eprintln!("weave prefix launch: could not write .desktop: {e}");
+                    }
+                }
+            }
             let status = std::process::Command::new(&current_exe)
                 .arg(&exe_path)
                 .status()

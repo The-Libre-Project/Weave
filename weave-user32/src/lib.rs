@@ -587,6 +587,37 @@ pub unsafe extern "win64" fn dwm_get_colorization_color(
     0 // S_OK
 }
 
+/// DwmIsCompositionEnabled — query whether DWM composition is active.
+///
+/// Wine ref: dlls/dwmapi/dwmapi_main.c — FIXME stub; sets *pfEnabled=FALSE, returns S_OK.
+///
+/// # Safety
+/// `pf_enabled` may be NULL; guarded before write.
+pub unsafe extern "win64" fn dwm_is_composition_enabled(pf_enabled: *mut i32) -> i32 {
+    if !pf_enabled.is_null() {
+        unsafe { *pf_enabled = 0 }; // FALSE — composition disabled
+    }
+    0 // S_OK
+}
+
+/// DwmExtendFrameIntoClientArea — extend the DWM glass frame into the client area.
+///
+/// Wine ref: dlls/dwmapi/dwmapi_main.c — FIXME stub returning S_OK; no frame extension.
+///
+/// # Safety
+/// `_margins` is ignored; no pointer is dereferenced.
+pub unsafe extern "win64" fn dwm_extend_frame_into_client_area(
+    _hwnd: usize,
+    _margins: *const u8,
+) -> i32 {
+    0 // S_OK
+}
+
+// Wine ref: dlls/dwmapi/dwmapi_main.c — FIXME stub returning S_OK; no flush performed.
+pub extern "win64" fn dwm_flush() -> i32 {
+    0 // S_OK
+}
+
 /// Resolve a dwmapi.dll import to a stub address.
 pub fn resolve_dwmapi(dll: &str, func: &str) -> Option<usize> {
     if !dll.eq_ignore_ascii_case("dwmapi.dll") {
@@ -595,6 +626,9 @@ pub fn resolve_dwmapi(dll: &str, func: &str) -> Option<usize> {
     Some(match func {
         "DwmSetWindowAttribute" => dwm_set_window_attribute as *const () as usize,
         "DwmGetColorizationColor" => dwm_get_colorization_color as *const () as usize,
+        "DwmIsCompositionEnabled" => dwm_is_composition_enabled as *const () as usize,
+        "DwmExtendFrameIntoClientArea" => dwm_extend_frame_into_client_area as *const () as usize,
+        "DwmFlush" => dwm_flush as *const () as usize,
         _ => return None,
     })
 }

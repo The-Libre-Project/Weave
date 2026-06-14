@@ -103,6 +103,7 @@ pub fn generate_desktop_file(
          Name={app_name}\n\
          Exec={exec_cmd}\n\
          {icon_line}\n\
+         Terminal=false\n\
          Categories={categories}\n\
          StartupNotify=true\n\
          Comment=Windows application running via Weave\n"
