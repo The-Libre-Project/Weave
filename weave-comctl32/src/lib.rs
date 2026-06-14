@@ -509,6 +509,43 @@ pub unsafe extern "win64" fn image_list_get_icon_size(
     0 // FALSE — stub
 }
 
+// ── TaskDialog ─────────────────────────────────────────────────────────────────
+
+/// TaskDialogIndirect: create and show a task dialog (stub).
+///
+/// Stubbed to S_OK so callers proceed as if the dialog was dismissed.
+/// The #345 ordinal is how SumatraPDF imports TaskDialogIndirect.
+///
+/// # Safety
+/// All pointer arguments are ignored.
+// Wine ref: dlls/comctl32/taskdialog.c — TaskDialogIndirect creates a modal
+// task dialog with custom buttons, icon, and content.
+pub unsafe extern "win64" fn task_dialog_indirect(
+    _p_task_config: *const u8,
+    _pn_button: *mut i32,
+    _pn_radio: *mut i32,
+    _pf_verification: *mut i32,
+) -> i32 {
+    0 // S_OK
+}
+
+/// TaskDialog: simplified task dialog with a fixed button set (stub).
+///
+/// # Safety
+/// All pointer arguments are ignored.
+// Wine ref: dlls/comctl32/taskdialog.c — wraps TaskDialogIndirect.
+pub unsafe extern "win64" fn task_dialog(
+    _hwnd_parent: usize,
+    _h_instance: usize,
+    _window_title: *const u16,
+    _main_instruction: *const u16,
+    _buttons: u32,
+    _icon: *const u16,
+    _pn_button: *mut i32,
+) -> i32 {
+    0 // S_OK
+}
+
 // ── DLL Resolver ─────────────────────────────────────────────────────────────
 
 /// Resolve a comctl32.dll import to a function pointer.
@@ -566,6 +603,9 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "CreatePropertySheetPageW" => Some(create_property_sheet_page_w as *const () as usize),
         "CreatePropertySheetPageA" => Some(create_property_sheet_page_a as *const () as usize),
         "DestroyPropertySheetPage" => Some(destroy_property_sheet_page as *const () as usize),
+        "#345" => Some(task_dialog_indirect as *const () as usize),
+        "TaskDialogIndirect" => Some(task_dialog_indirect as *const () as usize),
+        "TaskDialog" => Some(task_dialog as *const () as usize),
         _ => None,
     }
 }
