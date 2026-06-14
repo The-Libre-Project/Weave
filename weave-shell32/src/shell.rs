@@ -565,6 +565,17 @@ pub unsafe extern "win64" fn drag_query_file_w(
 /// No-op.
 pub extern "win64" fn drag_finish(_h_drop: usize) {}
 
+// Wine ref: dlls/shell32/shelllink.c — reads HDROP DROPFILES struct; returns FALSE if no valid drop point.
+/// DragQueryPoint: retrieve the drop point for a drag-and-drop operation.
+///
+/// Returns FALSE (no valid drop point). No drag-and-drop pipeline is active.
+///
+/// # Safety
+/// `lppt` is accepted but not dereferenced.
+pub unsafe extern "win64" fn drag_query_point(_h_drop: usize, _lppt: *mut u8) -> i32 {
+    0 // FALSE — no valid drop point
+}
+
 // Wine ref: dlls/ole32/ifs.c — CoTaskMemFree calls IMalloc::Free on the task allocator;
 // the task allocator wraps HeapFree(GetProcessHeap(), ...). NULL pointer is a no-op.
 // Weave uses libc::free since SHGetKnownFolderPath allocates with libc::malloc — correct.

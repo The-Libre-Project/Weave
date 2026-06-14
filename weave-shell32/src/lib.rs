@@ -133,6 +133,9 @@ fn resolve_shell32(func: &str) -> Option<usize> {
                 as usize,
         ),
         "DragFinish" => Some(shell::drag_finish as extern "win64" fn(_) as *const () as usize),
+        "DragQueryPoint" => Some(
+            shell::drag_query_point as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
+        ),
         "ExtractIconExW" => Some(
             shell::extract_icon_ex_w as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const ()
                 as usize,
