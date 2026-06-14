@@ -145,8 +145,8 @@ fn resolve_shell32(func: &str) -> Option<usize> {
                 as *const () as usize,
         ),
         "SHGetFolderLocation" => Some(
-            shell::sh_get_folder_location as unsafe extern "win64" fn(_, _, _) -> _
-                as *const () as usize,
+            shell::sh_get_folder_location as unsafe extern "win64" fn(_, _, _) -> _ as *const ()
+                as usize,
         ),
         "SHGetFileInfoW" => Some(
             shell::sh_get_file_info_w as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const ()
