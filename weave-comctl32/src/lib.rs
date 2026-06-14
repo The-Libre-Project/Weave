@@ -29,20 +29,330 @@
 
 // ── Initialisation ────────────────────────────────────────────────────────────
 
+use std::collections::HashMap;
+use std::sync::Mutex;
+use std::sync::OnceLock;
+
+use weave_user32::api::def_window_proc_w;
+use weave_user32::class::{self, ClassEntry};
+
+// ── Common control window class registration ────────────────────────────────
+
+const TB_ADDBUTTONS: u32 = 0x0401;
+const TB_DELETEBUTTON: u32 = 0x0404;
+const TB_GETBUTTONINFOW: u32 = 0x041e;
+const TB_SETBUTTONINFOW: u32 = 0x0420;
+const TB_GETBUTTONTEXT: u32 = 0x0433;
+const TB_GETRECT: u32 = 0x043f;
+const TB_BUTTONCOUNT: u32 = 0x0412;
+const TB_AUTOSIZE: u32 = 0x0411;
+const TB_SETIMAGELIST: u32 = 0x0430;
+const TB_SETEXTENDEDSTYLE: u32 = 0x0444;
+const TB_SETBUTTONSIZE: u32 = 0x0440;
+const TB_GETMAXSIZE: u32 = 0x041d;
+const TB_GETDRAWTEXTFLAGS: u32 = 0x0454;
+const TB_SETDRAWTEXTFLAGS: u32 = 0x0455;
+const TB_GETSTRING: u32 = 0x0466;
+const TB_SETSTRING: u32 = 0x0465;
+const TB_ADDBUTTONSW: u32 = 0x0468;
+
+const TCM_GETROWCOUNT: u32 = 0x130b;
+const TCM_GETIMAGELIST: u32 = 0x130c;
+const TCM_ADJUSTRECT: u32 = 0x1304;
+const TCM_SETCURSEL: u32 = 0x1329;
+const TCM_GETITEMRECT: u32 = 0x132d;
+const TCM_GETITEM: u32 = 0x133d;
+const TCM_SETITEMW: u32 = 0x133e;
+
+#[expect(dead_code)]
+struct ToolbarButton {
+    id_command: i32,
+    i_bitmap: i32,
+    fs_state: u8,
+    fs_style: u8,
+    i_string: isize,
+}
+
+struct ToolbarState {
+    buttons: Vec<ToolbarButton>,
+    button_size: (i32, i32),
+    himl: usize,
+    extended_style: u32,
+}
+
+#[expect(dead_code)]
+struct TabItem {
+    text_ptr: usize,
+    i_image: i32,
+    l_param: isize,
+}
+
+#[expect(dead_code)]
+struct TabState {
+    items: Vec<TabItem>,
+    cur_sel: i32,
+    himl: usize,
+}
+
+#[expect(dead_code)]
+enum ComctlState {
+    Toolbar(ToolbarState),
+    Tab(TabState),
+}
+
+static COMCTL_STATE: OnceLock<Mutex<HashMap<usize, ComctlState>>> = OnceLock::new();
+
+fn get_state() -> &'static Mutex<HashMap<usize, ComctlState>> {
+    COMCTL_STATE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+extern "win64" fn toolbar_wnd_proc(hwnd: usize, msg: u32, w_param: usize, l_param: isize) -> isize {
+    match msg {
+        WM_NCDESTROY => {
+            if let Ok(mut map) = get_state().lock() {
+                map.remove(&hwnd);
+            }
+            def_window_proc_w(hwnd, msg, w_param, l_param)
+        }
+        WM_GETFONT => 0,
+        WM_GETTEXT => 0,
+        TB_ADDBUTTONS | TB_ADDBUTTONSW => {
+            if l_param == 0 || w_param == 0 {
+                return 0;
+            }
+            let count = w_param;
+            let mut map = get_state().lock().unwrap();
+            let btn = map
+                .entry(hwnd)
+                .or_insert(ComctlState::Toolbar(ToolbarState {
+                    buttons: Vec::new(),
+                    button_size: (23, 22),
+                    himl: 0,
+                    extended_style: 0,
+                }));
+            if let ComctlState::Toolbar(ref mut tb) = btn {
+                for i in 0..count {
+                    let off = i * 24;
+                    let base = l_param as usize;
+                    let id_cmd =
+                        unsafe { std::ptr::read_unaligned((base + off + 4) as *const i32) };
+                    let fs_state =
+                        unsafe { std::ptr::read_unaligned((base + off + 8) as *const u8) };
+                    let fs_style =
+                        unsafe { std::ptr::read_unaligned((base + off + 9) as *const u8) };
+                    let i_str =
+                        unsafe { std::ptr::read_unaligned((base + off + 16) as *const isize) };
+                    let i_bmp = unsafe { std::ptr::read_unaligned((base + off) as *const i32) };
+                    tb.buttons.push(ToolbarButton {
+                        id_command: id_cmd,
+                        i_bitmap: i_bmp,
+                        fs_state,
+                        fs_style,
+                        i_string: i_str,
+                    });
+                }
+            }
+            1
+        }
+        TB_DELETEBUTTON => {
+            let idx = w_param as i32;
+            if let Ok(mut map) = get_state().lock() {
+                if let Some(ComctlState::Toolbar(ref mut tb)) = map.get_mut(&hwnd) {
+                    if idx >= 0 && (idx as usize) < tb.buttons.len() {
+                        tb.buttons.remove(idx as usize);
+                        return 1;
+                    }
+                }
+            }
+            0
+        }
+        TB_BUTTONCOUNT => {
+            if let Ok(map) = get_state().lock() {
+                if let Some(ComctlState::Toolbar(ref tb)) = map.get(&hwnd) {
+                    return tb.buttons.len() as isize;
+                }
+            }
+            0
+        }
+        TB_GETBUTTONINFOW => {
+            // Returns button info at lParam (TBBUTTONINFOW). Stub: clear and return FALSE.
+            // lParam points to a TBBUTTONINFOW that we fill with zeroes.
+            if l_param != 0 {
+                unsafe { std::ptr::write_bytes(l_param as *mut u8, 0, 64) };
+            }
+            -1 // FALSE
+        }
+        TB_SETBUTTONINFOW => {
+            -1 // FALSE
+        }
+        TB_GETBUTTONTEXT => {
+            -1 // FALSE — no text available
+        }
+        TB_GETRECT => {
+            // Return a default button rect. lParam points to RECT.
+            if l_param != 0 {
+                unsafe {
+                    std::ptr::write_unaligned(l_param as *mut i32, 0);
+                    std::ptr::write_unaligned((l_param + 4) as *mut i32, 0);
+                    std::ptr::write_unaligned((l_param + 8) as *mut i32, 23);
+                    std::ptr::write_unaligned((l_param + 12) as *mut i32, 22);
+                }
+            }
+            1 // TRUE
+        }
+        TB_AUTOSIZE => 0,
+        TB_SETIMAGELIST => {
+            if let Ok(mut map) = get_state().lock() {
+                if let Some(ComctlState::Toolbar(ref mut tb)) = map.get_mut(&hwnd) {
+                    tb.himl = w_param;
+                }
+            }
+            0
+        }
+        TB_SETEXTENDEDSTYLE => {
+            if let Ok(mut map) = get_state().lock() {
+                if let Some(ComctlState::Toolbar(ref mut tb)) = map.get_mut(&hwnd) {
+                    tb.extended_style = w_param as u32;
+                }
+            }
+            0
+        }
+        TB_SETBUTTONSIZE => {
+            if let Ok(mut map) = get_state().lock() {
+                if let Some(ComctlState::Toolbar(ref mut tb)) = map.get_mut(&hwnd) {
+                    tb.button_size = (w_param as i32, l_param as i32);
+                }
+            }
+            0
+        }
+        TB_GETMAXSIZE => {
+            if l_param != 0 {
+                let cnt = {
+                    if let Ok(map) = get_state().lock() {
+                        if let Some(ComctlState::Toolbar(ref tb)) = map.get(&hwnd) {
+                            tb.buttons.len().max(1)
+                        } else {
+                            1
+                        }
+                    } else {
+                        1
+                    }
+                };
+                unsafe {
+                    std::ptr::write_unaligned(l_param as *mut i32, 23 * cnt as i32);
+                    std::ptr::write_unaligned((l_param + 4) as *mut i32, 22);
+                }
+            }
+            0
+        }
+        TB_GETDRAWTEXTFLAGS => 0,
+        TB_SETDRAWTEXTFLAGS => 0,
+        TB_GETSTRING => 0,
+        TB_SETSTRING => 0,
+        _ => def_window_proc_w(hwnd, msg, w_param, l_param),
+    }
+}
+
+extern "win64" fn tab_wnd_proc(hwnd: usize, msg: u32, w_param: usize, l_param: isize) -> isize {
+    match msg {
+        WM_NCDESTROY => {
+            if let Ok(mut map) = get_state().lock() {
+                map.remove(&hwnd);
+            }
+            def_window_proc_w(hwnd, msg, w_param, l_param)
+        }
+        WM_GETFONT => 0,
+        WM_GETTEXT => 0,
+        TCM_GETROWCOUNT => 1,
+        TCM_GETIMAGELIST => {
+            if let Ok(map) = get_state().lock() {
+                if let Some(ComctlState::Tab(ref tab)) = map.get(&hwnd) {
+                    return tab.himl as isize;
+                }
+            }
+            0
+        }
+        TCM_ADJUSTRECT => {
+            // Adjust the display rectangle for tab presence. No-op stub.
+            1 // TRUE
+        }
+        TCM_SETCURSEL => {
+            if let Ok(mut map) = get_state().lock() {
+                if let Some(ComctlState::Tab(ref mut tab)) = map.get_mut(&hwnd) {
+                    tab.cur_sel = w_param as i32;
+                }
+            }
+            0
+        }
+        TCM_GETITEMRECT => {
+            // Return a default tab item rect at lParam (RECT*). Stub: zero rect.
+            if l_param != 0 {
+                unsafe { std::ptr::write_bytes(l_param as *mut u8, 0, 16) };
+            }
+            1 // TRUE
+        }
+        TCM_GETITEM => {
+            // Fill TCITEMW struct at lParam. Stub: zero it out.
+            if l_param != 0 {
+                unsafe { std::ptr::write_bytes(l_param as *mut u8, 0, 48) };
+            }
+            1 // TRUE
+        }
+        TCM_SETITEMW => {
+            1 // TRUE — accept quietly
+        }
+        _ => def_window_proc_w(hwnd, msg, w_param, l_param),
+    }
+}
+
 /// InitCommonControls — register common control window classes.
 ///
-/// On Windows this registers classes like SysListView32, SysTreeView32, etc.
-/// As a stub we do nothing — class creation will fail gracefully when the app
-/// tries to CreateWindow a control class.
-pub extern "win64" fn init_common_controls() {}
+/// Registers ToolbarWindow32 and SysTabControl32 classes so the guest can
+/// create them and receive message replies without crashing.
+pub extern "win64" fn init_common_controls() {
+    register_comctl32_classes();
+}
 
 /// InitCommonControlsEx — register a specific set of common control classes.
 ///
 /// # Safety
 /// `p_icc` may be null (some callers pass null). Ignored.
 pub unsafe extern "win64" fn init_common_controls_ex(_p_icc: *const u8) -> i32 {
-    1 // TRUE — pretend all requested classes were registered
+    register_comctl32_classes();
+    1 // TRUE
 }
+
+fn register_comctl32_classes() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static REGISTERED: AtomicBool = AtomicBool::new(false);
+    if REGISTERED.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    let toolbar_entry = ClassEntry {
+        wnd_proc: toolbar_wnd_proc as *const () as usize,
+        style: 0,
+        h_cursor: 0,
+        hbr_background: 0,
+        cb_wnd_extra: 0,
+        h_icon: 0,
+        h_icon_sm: 0,
+    };
+    class::register("ToolbarWindow32", toolbar_entry);
+    let tab_entry = ClassEntry {
+        wnd_proc: tab_wnd_proc as *const () as usize,
+        style: 0,
+        h_cursor: 0,
+        hbr_background: 0,
+        cb_wnd_extra: 0,
+        h_icon: 0,
+        h_icon_sm: 0,
+    };
+    class::register("SysTabControl32", tab_entry);
+}
+
+const WM_NCDESTROY: u32 = 0x0082;
+const WM_GETFONT: u32 = 0x0030;
+const WM_GETTEXT: u32 = 0x000c;
 
 // ── ImageList ─────────────────────────────────────────────────────────────────
 
