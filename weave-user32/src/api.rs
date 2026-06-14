@@ -7125,6 +7125,11 @@ pub unsafe extern "win64" fn dialog_box_param_w(
     }
     let template_id = lp_template_name as usize;
     eprintln!("weave/user32: DialogBoxParamW(template={template_id:#x}) — Phase B");
+    // Q-Dir heap-init workaround (E3-M5b / RVA 0x7880d): zero stale .data qword
+    // at base+0x152fb0 if it was written by a prior init (value > 0x1000 signals
+    // heavy init path). Restores the light init path so sub_78698 uses the PE
+    // freelist at 0x1531e0 instead of Weave VirtualAlloc → DWORD truncation.
+    crate::dialog::fix_qdir_heap_init(image_base);
     let Some(hwnd) = crate::dialog::create_from_resource(
         image_base,
         lp_template_name,
@@ -7136,8 +7141,6 @@ pub unsafe extern "win64" fn dialog_box_param_w(
         return -1;
     };
     let result = unsafe { run_modal_dialog_loop(hwnd) };
-    // GUEST_NATIVE_INIT: do NOT reset heap counters or seed BSS freelist post-modal.
-    // PE initial `0x146e70` = 10, letting sub_78698 take heavy path (E3-M5b).
     crate::dialog::wake_post_modal_queue();
     result
 }

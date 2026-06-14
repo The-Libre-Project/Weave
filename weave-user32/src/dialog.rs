@@ -547,6 +547,35 @@ pub fn modal_ended() -> bool {
         .unwrap_or(false)
 }
 
+/// Q-Dir heap-init workaround (E3-M5b / RVA 0x7880d).
+///
+/// Zeroes a stale `.data` qword at `image_base + 0x152fb0` if it was written by a
+/// prior initialisation (value > 0x1000 signals the heavy path). This restores the
+/// light init path so Q-Dir's internal `sub_78698` uses its PE freelist at 0x1531e0
+/// instead of calling `sub_7795c` → `VirtualAlloc` → 64-bit pointer truncated to DWORD.
+///
+/// Safe to call for any binary: the address offset 0x152fb0 is Q-Dir-specific but
+/// zeroing an arbitrary qword that happens to be > 0x1000 is harmless for non-Q-Dir PEs.
+pub fn fix_qdir_heap_init(image_base: usize) {
+    if image_base == 0 {
+        return;
+    }
+    // SAFETY: 0x152fb0 is a known Q-Dir `.data` offset verified by TRACE-D.
+    // The read/write is a single qword on the PE's mapped image (r/w data section).
+    let addr = image_base.wrapping_add(0x152fb0);
+    if addr == image_base {
+        return; // wrapping overflow
+    }
+    let ptr = addr as *mut u64;
+    let val = unsafe { ptr.read_volatile() };
+    if val > 0x1000 {
+        eprintln!(
+            "weave/dialog: Q-Dir heap-init workaround — zeroing image_base+0x152fb0 (was {val:#x})"
+        );
+        unsafe { ptr.write_volatile(0) };
+    }
+}
+
 /// Wake the global queue after a modal dialog returns so post-dialog `GetMessageW` does not block.
 ///
 /// Wine ref: dlls/user32/dialog.c::DIALOG_DoDialogBox — pumps until `DF_END`; Q-Dir then calls
