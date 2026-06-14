@@ -952,6 +952,47 @@ pub unsafe extern "win64" fn sh_get_special_folder_location(
     0x8000_4001u32 as i32 // E_NOTIMPL
 }
 
+// Wine ref: dlls/shell32/shlfolder.c — SHParseDisplayName converts a display name (path) into a PIDL.
+/// SHParseDisplayName — parse a display name into a shell PIDL.
+///
+/// Returns S_FALSE with NULL ppidl — stub.
+///
+/// # Safety
+/// `ppidl` must be writable when non-null.
+pub unsafe extern "win64" fn sh_parse_display_name(
+    _name: *const u16,
+    _pbc: usize,
+    ppidl: *mut *mut u8,
+    _sfgao_in: u32,
+    _psfgao_out: *mut u32,
+) -> i32 {
+    const S_FALSE: i32 = 1;
+    const E_POINTER: i32 = 0x8000_4003u32 as i32;
+    if ppidl.is_null() {
+        return E_POINTER;
+    }
+    unsafe { *ppidl = std::ptr::null_mut() };
+    S_FALSE
+}
+
+// Wine ref: dlls/shell32/shellpath.c — SHGetFolderPathAndSubFolderW combines CSIDL + sub-path.
+/// SHGetFolderPathAndSubFolderW — return the full path for a special folder + subdirectory.
+///
+/// Returns E_NOTIMPL — stub.
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn sh_get_folder_path_and_sub_folder_w(
+    _hwnd: usize,
+    _csidl: i32,
+    _sub_path: *const u16,
+    _dw_flags: u32,
+    _path: *mut u16,
+    _cch: u32,
+) -> i32 {
+    0x8000_4001u32 as i32 // E_NOTIMPL
+}
+
 // Wine ref: dlls/shell32/shell32_main.c — queries icon index, display name, type name per uFlags;
 // SHGFI_USEFILEATTRIBUTES skips disk access; returns HIMAGELIST handle or 0 on failure.
 /// SHGetFileInfoW — retrieve information about an object in the shell namespace (Wide).

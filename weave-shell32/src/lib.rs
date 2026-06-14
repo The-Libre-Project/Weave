@@ -147,6 +147,15 @@ fn resolve_shell32(func: &str) -> Option<usize> {
             shell::sh_get_special_folder_location as unsafe extern "win64" fn(_, _, _) -> _
                 as *const () as usize,
         ),
+        "SHParseDisplayName" => Some(
+            shell::sh_parse_display_name as unsafe extern "win64" fn(_, _, _, _, _) -> _
+                as *const () as usize,
+        ),
+        "SHGetFolderPathAndSubFolderW" => Some(
+            shell::sh_get_folder_path_and_sub_folder_w
+                as unsafe extern "win64" fn(_, _, _, _, _, _) -> _ as *const ()
+                as usize,
+        ),
         "SHGetFolderLocation" => Some(
             shell::sh_get_folder_location as unsafe extern "win64" fn(_, _, _) -> _ as *const ()
                 as usize,
