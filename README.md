@@ -182,39 +182,31 @@ For honest per-phase status (what's complete vs. code-exists vs. scaffolded vs. 
 
 Weave is an independent reimplementation, but Wine's 30 years of reverse engineering is an invaluable reference for *what* the Windows API actually does — especially undocumented behaviors that real applications depend on. The challenge is that Wine's codebase is roughly 10 million lines of C across thousands of files. Reading it traditionally burns context windows and tokens at an unsustainable rate.
 
-### jcodemunch MCP — symbolic indexing
+### Symbolic indexing
 
-[jcodemunch-mcp](https://github.com/jgravelle/jcodemunch-mcp) is an MCP server that parses a codebase using AST (abstract syntax tree) analysis, indexes every function, struct, and symbol, and stores them in a local SQLite database with byte-level precision. Instead of reading entire files, AI agents query by symbol name and get just that function's source code.
-
-**Setup (one-time):**
-
-```bash
-git clone https://gitlab.winehq.org/wine/wine.git ~/wine-reference
-claude mcp add jcodemunch uvx jcodemunch-mcp
-# index the Wine source — runs once, persists in SQLite
-```
+MCP-based symbolic indexing parses Wine's source tree using AST analysis, indexes every function, struct, and symbol, and stores them locally. Instead of reading entire files, agents query by symbol name and retrieve just that function's source code.
 
 **Impact:**
 
-| Operation | Without indexing | With jcodemunch |
-|-----------|-----------------|-----------------|
+| Operation | Without indexing | With symbolic indexing |
+|-----------|-----------------|----------------------|
 | "Show me Wine's `CreateFileW`" | Read entire `kernel32/file.c` (~2000 lines, ~8000 tokens) | Return just the function (~80 lines, ~400 tokens) |
 | Token reduction | — | ~95% per lookup |
 | Full API surface scan | Read hundreds of files | Query the index |
 
 Over the lifetime of Weave development — tens of thousands of Wine reference lookups — this turns Wine from "a codebase you have to read" into "a database you can query."
 
-### The AI-assisted reimplementation loop
+### The reference-based reimplementation loop
 
 This is the core development cycle for every DLL function in Weave:
 
-1. **Reference** — Query jcodemunch: "Show me Wine's `NtCreateFile`" → get the C implementation in ~400 tokens
-2. **Understand** — AI reads the C implementation, identifies the behavioral contract including undocumented side effects
-3. **Rewrite** — AI generates a Rust reimplementation using Weave's architecture, sandbox constraints, and modern Linux primitives
+1. **Reference** — Query the symbolic index: "Show me Wine's `NtCreateFile`" → get the C implementation in ~400 tokens
+2. **Understand** — Read the C implementation, identify the behavioral contract including undocumented side effects
+3. **Rewrite** — Generate a Rust reimplementation using Weave's architecture, sandbox constraints, and modern Linux primitives
 4. **Test** — Run against real Windows behavior (captured in test suites) to verify correctness
 5. **Iterate** — If behavior diverges, query Wine's implementation for edge cases, adjust, retest
 
-Steps 1–3 are heavily AI-assisted. Step 4 requires real Windows reference output (automated CI against a Windows VM). Step 5 is where human contributors add the most value — understanding *why* an edge case exists.
+Steps 1–3 are heavily tool-assisted. Step 4 requires real Windows reference output (automated CI against a Windows VM). Step 5 is where human contributors add the most value — understanding *why* an edge case exists.
 
 ### Coverage mapping
 
@@ -234,7 +226,7 @@ Weave's modular DLL crate system is designed for distributed contribution. Pick 
 
 - [Validation tiers](docs/VALIDATION-TIERS.md) — binary-contract gate model for milestones
 
-The AI-assisted stub generation pipeline produces initial function signatures and basic implementations from Microsoft's public documentation. Contributors review, correct, and extend these stubs with real-world testing.
+The symbolic index also provides initial function signatures derived from Microsoft's public documentation. Contributors review, extend, and validate these stubs with real-world testing.
 
 Priority areas:
 - Kernel engineers — syscall translation, PE loader, process management
@@ -255,14 +247,5 @@ Priority areas:
 - **Cross-arch (planned):** FEX-Emu / Box64 for ARM64 → x86_64 translation
 - **GUI (planned):** Tauri 2 (Rust + Svelte)
 - **License:** MIT
-
----
-
-## Related projects
-
-- **[Warden](https://github.com/eldo9000/Warden)** — Open-source, cross-platform anti-cheat for game developers. Native Linux + Windows support. Designed to work with Weave for gaming use cases.
-- **[LibreWin OS](https://github.com/eldo9000/LibreWin-OS)** — A polished Linux desktop aimed at Windows/macOS switchers. Weave is designed to be the Windows compatibility layer for LibreWin.
-
----
 
 *Weave is free, open-source software under the MIT license.*
