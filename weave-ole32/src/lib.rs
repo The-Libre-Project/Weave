@@ -47,6 +47,65 @@ const CLSID_SUMATRA_DDE_SERVER: [u8; 16] = [
     0x9A, 0x2C, 0x00, 0xA0, 0xC9, 0x0A, 0x90, 0xCE, // Data4
 ];
 
+/// Minimal IUnknown singleton for the SumatraPDF DDE server sentinel.
+/// CoCreateInstance returns S_OK with *ppv pointing to this singleton.
+/// Any subsequent QueryInterface call returns E_NOINTERFACE (including for
+/// IID_IDdeServer), which SumatraPDF interprets as "DDE server not available
+/// but CoCreateInstance succeeded" — it then proceeds as the primary instance,
+/// reaching GetMessage → WM_PAINT → render.
+///
+/// Without this sentinel, SumatraPDF receives *ppv=NULL with S_OK and calls
+/// a method on the NULL pointer, triggering a clean exit (not a crash — it
+/// checks the pointer before use and exits its DDE init path).
+static SUMATRA_DDE_SENTINEL: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+
+fn get_dde_sentinel_ptr() -> usize {
+    *SUMATRA_DDE_SENTINEL.get_or_init(|| {
+        let vtable: Box<[usize; 3]> = Box::new([
+            dde_iunknown_query_interface as *const () as usize,
+            dde_iunknown_add_ref as *const () as usize,
+            dde_iunknown_release as *const () as usize,
+        ]);
+        let vtable_ptr = Box::into_raw(vtable) as usize;
+        // The COM object points to its vtable pointer.
+        let obj: Box<usize> = Box::new(vtable_ptr);
+        Box::into_raw(obj) as usize
+    })
+}
+
+// Wine ref: dlls/ole32/compobj.c — IUnknown::QueryInterface for a minimal object.
+// Returns S_OK only when riid is IID_IUnknown; all other IIDs return E_NOINTERFACE.
+unsafe extern "win64" fn dde_iunknown_query_interface(
+    _this: usize,
+    riid: *const u8,
+    ppv: *mut usize,
+) -> u32 {
+    if !riid.is_null() && !ppv.is_null() {
+        let guid = unsafe { std::slice::from_raw_parts(riid, 16) };
+        // IID_IUnknown = {00000000-0000-0000-C000-000000000046}
+        const IID_IUNKNOWN: [u8; 16] = [
+            0x00u8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xC0u8, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x46,
+        ];
+        if guid == IID_IUNKNOWN {
+            unsafe { *ppv = get_dde_sentinel_ptr() };
+            return S_OK;
+        }
+    }
+    // E_NOINTERFACE for all non-IUnknown IIDs (IDdeServer, IMarshal, etc.)
+    if !ppv.is_null() {
+        unsafe { *ppv = 0 };
+    }
+    0x8000_4002u32 // E_NOINTERFACE
+}
+
+unsafe extern "win64" fn dde_iunknown_add_ref(_this: usize) -> u32 {
+    1
+}
+unsafe extern "win64" fn dde_iunknown_release(_this: usize) -> u32 {
+    1
+}
+
 // ── COM HRESULT constants ─────────────────────────────────────────────────────
 
 const S_OK: u32 = 0x0000_0000;
@@ -181,12 +240,17 @@ pub unsafe extern "win64" fn co_create_instance(
     // Gated by WEAVE_TEST_SUMATRA_CLSID=1 env var (CI-only; zero cost in production).
     // Returns S_OK with *ppv=NULL, causing SumatraPDF to exit its DDE retry loop
     // and proceed as the primary instance (reaches GetMessage → WM_PAINT → render).
+    // *ppv is set to a minimal IUnknown sentinel — the caller can QI from it but all
+    // non-IUnknown IIDs (including IDdeServer) return E_NOINTERFACE.
     if clsid == CLSID_SUMATRA_DDE_SERVER
         && std::env::var("WEAVE_TEST_SUMATRA_CLSID").as_deref() == Ok("1")
     {
         eprintln!(
             "weave/ole32: CoCreateInstance: CLSID_Sumatra_DDE → TEST HOOK: returning S_OK (E3-M4 P1 intercept)"
         );
+        if !ppv.is_null() {
+            unsafe { *ppv = get_dde_sentinel_ptr() };
+        }
         return S_OK;
     }
 
