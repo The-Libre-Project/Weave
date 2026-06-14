@@ -248,4 +248,163 @@ Priority areas:
 - **GUI (planned):** Tauri 2 (Rust + Svelte)
 - **License:** MIT
 
+---
+
+## White paper — deep technical addendum
+
+*The sections below expand on topics introduced above. They assume familiarity with the Win32 API surface and Linux systems programming. They are here for the reader who wants to understand not just what Weave does, but how and why.*
+
+---
+
+### Stability and debuggability — the short debug chain
+
+A core claim of the architectural comparison above is that Weave's translation-shim model produces a fundamentally shorter debug chain than a boundary-OS model like Wine's. This section makes that concrete.
+
+Consider a bug: a file-open call fails when it should succeed. In each system, the path from bug to root cause has a different length:
+
+**Wine's debug chain** (illustrative):
+
+```
+Guest EXE → kernel32.CreateFileW → ntdll.NtCreateFile → wineserver RPC →
+    wineserver fd management → Unix VFS path translation → 
+    security descriptor evaluation → actual openat(2) syscall
+```
+
+The bug could live in any of six layers: the wineserver protocol, the file descriptor caching logic, the path translation, the security descriptor mapping, the Unix file permission handling, or the syscall itself. The developer must understand the full stack to rule each one out.
+
+**Weave's debug chain**:
+
+```
+Guest EXE → kernel32.CreateFileW → openat(2) syscall
+```
+
+The function lives in a single file (`weave-kernel32/src/api.rs`), is typically 30–60 lines, and does exactly one thing: translate Win32 semantics to a Linux syscall. If it fails, either:
+
+- The translation is subtly wrong (Win32 error code mapping, flag conversion, edge case in path handling), or
+- The Linux call genuinely failed, in which case the OS error message is directly interpretable
+
+This has practical consequences for the project:
+
+- **Bisection is trivial.** A regression means one function changed its behavior, not an RPC handshake or a shared-memory protocol version mismatch.
+- **No cascading state corruption.** Because every DLL runs in the same Rust process with Rust's ownership model, a bug in gdi32 cannot corrupt kernel32's handle table — they share no mutable state without explicit, typed interfaces.
+- **No silent failures.** A Wine bugsquash often finds that a function "mostly works" but silently drops an error code or uses a wrong default, accumulating bad state over hours of runtime. Weave's functions are so narrow that a wrong parameter shows up immediately: the wrong `flags` argument to `openat` either works or doesn't, with no intermediate degraded state.
+
+**The simpler surface is structural, not aspirational.** It falls out of the architecture: narrow functions calling stable host infrastructure through typed Rust interfaces, with no intermediate daemon, no shared-memory protocol, and no reimplemented subsystem to have bugs in.
+
+---
+
+### Shim lifecycle — how a function graduates from stub to implementation
+
+Every Win32 export in Weave begins as a **Phase A stub** and progresses through defined stages. The [SHIM-CONTRACT](docs/SHIM-CONTRACT.md) codifies this. The lifecycle is worth understanding because it governs what "coverage" actually means.
+
+**Phase A — stub (present in the resolver):**
+
+The function is registered in the crate's `resolve()` match block and returns a sentinel value (typically 0, `FALSE`, `ERROR_CALL_NOT_IMPLEMENTED`, or a zero-initialized struct). It exists so the PE loader can resolve the IAT entry and the process can continue past calls to unimplemented APIs. If a target app never calls it, it stays here forever.
+
+**Phase B — implemented (Wine-referenced, non-panic, milestone-gated):**
+
+The function has:
+
+1. A `// Wine ref:` comment citing a real jcodemunch lookup of Wine's implementation
+2. A real function body — no `panic!()`, `unimplemented!()`, or `todo!()` as the sole logic
+3. A named assertion in a milestone doc that exercises this function through a real application
+
+At this point it counts as "implemented" in the coverage gauge. But it may still be incomplete in edge cases not triggered by the current milestone corpus.
+
+**Phase C — hardened (multi-app, multi-platform):**
+
+The function has been exercised by multiple target applications, across at least two Tier 1 milestone gates, and on real hardware (not just CI under Docker). Edge cases discovered in one app's use are fixed before the next app is added.
+
+**Why the staging matters:**
+
+The 1,661 registered exports with 75 fully implemented is not a sign of incompleteness — it is a deliberate strategy. Writing a correct Win32 implementation requires knowing what real apps actually do. Phase A stubs exist to unblock the PE loader and let the rest of the system work. They get promoted to Phase B only when a target app needs them, and to Phase C only when multiple apps have stressed the edges.
+
+This is the opposite of "implement everything speculatively." The wedge model means: implement only what the target list needs, implement it well, and let the long tail stay stubbed until it matters.
+
+---
+
+### Sandbox threat model — what is and isn't contained
+
+The sandbox section above summarizes the status table. This section explains the reasoning behind each layer and what the gaps mean in practice.
+
+**Landlock filesystem isolation (shipped):**
+
+Landlock is a Linux security module (LSM) that allows a process to restrict its own filesystem access after initialization, without elevated privileges. Weave applies a Landlock ruleset after the PE is loaded and the IAT is patched but before guest code executes. The ruleset allows access only to:
+
+- The Weave prefix directory (where the app and its dependencies live)
+- Explicitly bridged user-data directories (`~/Documents`, `~/Desktop`, etc.)
+- System libraries and devices needed for runtime operation
+
+Everything else — `.ssh`, `.config`, `.gnupg`, browser profiles, the entire home directory outside the bridged paths — is blocked at the kernel level. The guest process simply cannot open those paths. This is not advisory; it is enforced by the kernel on every `openat()`, `stat()`, and `execve()` syscall.
+
+**Why Landlock and not something more expressive:**
+
+Landlock is intentionally simple. It supports path-based allowlisting, not deny-listing, not network rules, not syscall filtering. This simplicity is a feature for Weave's use case: the ruleset is small enough to audit by hand (roughly 15–20 rules), and the kernel guarantees cannot be bypassed by guest code because they are applied before guest execution and cannot be dropped without privilege escalation.
+
+**The seccomp gap (roadmap):**
+
+Seccomp-BPF filters can restrict which syscalls a process may use and with what arguments. This would be valuable for containing the guest — for example, blocking `reboot()`, `kexec_load()`, or `bpf()` itself. But seccomp interacts poorly with Weave's current in-process model.
+
+The problem: because the guest PE shares Weave's address space, any seccomp filter must allowlist every syscall that Weave's own runtime uses — `mmap()`, `write()`, `openat()`, `read()`, `close()`, `exit_group()`, `futex()`, `clock_gettime()`, and dozens more. The guest gets the same allowlist, which means the filter is effectively useless: every syscall the guest might abuse is also a syscall the host needs.
+
+Real seccomp isolation requires an out-of-process model where the guest lives in a separate process with its own filter, and Weave communicates with it through a controlled RPC interface. That architecture is Phase 4+ on the roadmap. Until then, the trade-off is explicit: Landlock covers filesystem containment (the highest-value isolation), and everything else runs at Weave's privilege level.
+
+**The network gap (roadmap):**
+
+Per-app network isolation — binding the guest to a specific network namespace or restricting it to specific ports/protocols — is not implemented. Today, the guest has the same network access as the host process. This is acceptable for the current target apps (file managers, text editors, image viewers, archive tools) which do not make arbitrary network connections. It will need to be addressed before networked apps like PuTTY, Signal, or Obsidian are marked supported.
+
+**Where the sandbox stands relative to Wine:**
+
+Wine has no sandbox. A Windows application running under Wine has full access to the user's home directory, all open network sockets, and every syscall the Linux kernel allows the user's process to make. Any exploit in the Windows app is an exploit at the user's privilege level. Weave's Landlock layer eliminates the highest-value attack surface (filesystem access to user data) today, before any of the roadmap isolation layers are built. The sandbox is not complete, but it is already strictly stronger than Wine's default posture.
+
+---
+
+### Line-count projection methodology
+
+The asymptotic projection (105K current → ~500K completionist) merits explanation. The numbers are not guesses — they come from a bottom-up model with explicit assumptions.
+
+**Current state (measured):** 105,244 lines of Rust across 35 workspace crates. Measured by `find . -path ./target -prune -o -name '*.rs' -print | xargs wc -l`. No auto-generated code is present. The 105K number is raw implementation.
+
+**Stub→impl conversion (45K–80K):** 1,661 registered exports across 26 DLL crates. Of those, 75 are fully implemented (Phase B+). The remaining ~1,500 stubs each need an average of 30–50 lines of real implementation (function body, error handling, Wine-referenced behavior). Some will be shorter (simple flag translations), some longer (complex window creation paths). At 30 lines average: 45K. At 50 lines: 75K.
+
+**New DLL coverage (10K–20K):** The current 26 DLL crates cover the Tier-1 target apps. Adding D2D1, DWrite, DXGI beyond current scaffolding, deeper OLE32 paths, and audio infrastructure might require 5–10 new crates at roughly 2K lines each. Zero if the current crate set proves sufficient for the full Tier-1 list.
+
+**Application depth (20K–40K):** Real desktop use exposes edge cases that CI gates don't. File dialogs need correct filter patterns. Print dialogs need CUPS integration. Drag-and-drop needs XDnD protocol handling. Clipboard needs the X11/Wayland selection protocol. These are not speculative features — they are required for real desktop use of the existing target apps. Each adds complexity to existing functions rather than new functions.
+
+**Infrastructure (10K–15K):** Bubblewrap integration, seccomp profiles, the `weave` CLI, `.desktop` file generation, installer tooling. These support the application compatibility layer but are not themselves API shims.
+
+**Summing the midpoints:**
+
+| Component | Low | Mid | High |
+|---|---|---|---|
+| Current | 105K | 105K | 105K |
+| Stub→impl | 45K | 60K | 80K |
+| New DLLs | 0K | 10K | 20K |
+| App depth | 20K | 30K | 40K |
+| Infrastructure | 10K | 12K | 15K |
+| **Total Rust** | **180K** | **~220K** | **260K** |
+| With docs/tooling | ~280K | ~330K | ~380K |
+
+The v1 ship estimate of 200–250K Rust (300K total) is the midpoint of stub→impl conversion plus app depth, with new DLLs and infrastructure partially realized. The stable asymptote of 350–450K assumes the full conversion plus all new DLLs and infrastructure. The completionist asymptote of ~500K assumes a long tail of rarely-called APIs that get written only because a target app somewhere needs them.
+
+The projection holds as long as the wedge model holds — that is, as long as Weave does not attempt to become a general-purpose Windows compatibility layer. If the ambition widens to "run anything Wine runs," the curve changes entirely and the asymptote approaches Wine's magnitude. That is not the current design.
+
+---
+
+### Open problems
+
+Honest engineering requires acknowledging what doesn't work yet. These are the known gaps that will require architectural work, not just additional stub implementations.
+
+**The in-process model limits isolation.** As discussed in the sandbox section, seccomp is structurally incompatible with shared-address-space execution. The out-of-process redesign (Phase 4+) is the single largest open architectural problem. It affects not just seccomp but also crash isolation: today, a guest crash takes down the Weave process. An out-of-process model would let the host survive guest failures.
+
+**Audio is scaffolded but untested against real output.** PipeWire bindings exist in `weave-mmdevapi` (~1.2K LoC). No target app has been validated producing audio output on real hardware. The decode pipeline (codec → PCM → PipeWire stream) may have buffer-latency or format-conversion issues that only real audio output will reveal.
+
+**D3D10/11/12 are unevaluated.** D3D9 via DXVK is proven in CI. The same DXVK codebase supports D3D10 and D3D11, but no test or target app has exercised those paths in Weave. D3D12 via VKD3D-Proton is scaffolded but completely untested. The gap between "compiles and loads" and "renders a frame correctly" could be substantial.
+
+**TLS and certificate validation are unproven.** Plain HTTP and SSH work. HTTPS connects at the TLS layer but certificate validation (chain building, revocation checking, root store mapping from Windows to Linux) has not been exercised end-to-end. This blocks Let's Encrypt–signed sites and any service that validates client certificates.
+
+**The ARM64 story is deferred.** Weave targets x86-64 today. ARM64 support requires integrating FEX-Emu or Box64 for CPU translation, which is an integration project of its own. The architecture would support it — the translation-shim model is ISA-agnostic above the CPU boundary — but no work has been done.
+
+---
+
 *Weave is free, open-source software under the MIT license.*
