@@ -905,15 +905,34 @@ pub unsafe extern "win64" fn sh_get_desktop_folder(ppshf: *mut *mut u8) -> i32 {
     0
 }
 
-// Wine ref: dlls/shell32/shellpath.c — wraps SHGetFolderLocation(nFolder, 0); allocates PIDL
-// with CoTaskMemAlloc; caller must ILFree(); E_INVALIDARG if ppidl is NULL.
+// Wine ref: dlls/shell32/shellpath.c — SHGetFolderLocation(nFolder, 0); CoTaskMemAlloc PIDL; caller ILFree.
+/// SHGetFolderLocation — return the PIDL for a special folder.
+///
+/// Returns S_FALSE with NULL ppidl — stub.
+///
+/// # Safety
+/// `ppidl` must be a valid writable pointer when non-null.
+pub unsafe extern "win64" fn sh_get_folder_location(
+    _hwnd_owner: usize,
+    _n_folder: i32,
+    ppidl: *mut *mut u8,
+) -> i32 {
+    const S_FALSE: i32 = 1;
+    const E_POINTER: i32 = 0x8000_4003u32 as i32;
+    if ppidl.is_null() {
+        return E_POINTER;
+    }
+    unsafe { *ppidl = std::ptr::null_mut() };
+    S_FALSE
+}
+
+// Wine ref: dlls/shell32/shellpath.c — SHGetFolderLocation(nFolder, 0); CoTaskMemAlloc PIDL; caller ILFree.
 /// SHGetSpecialFolderLocation — return the PIDL for a special folder.
 ///
 /// Returns E_NOTIMPL — stub.
 ///
 /// # Safety
 /// `ppidl` is accepted but not dereferenced.
-// Wine ref: dlls/shell32/shellpath.c — SHGetFolderLocation(nFolder, 0); CoTaskMemAlloc PIDL; caller ILFree.
 pub unsafe extern "win64" fn sh_get_special_folder_location(
     _hwnd_owner: usize,
     _n_folder: i32,

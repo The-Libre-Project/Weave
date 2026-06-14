@@ -107,16 +107,21 @@ unsafe extern "win64" fn sf_release(_this: usize) -> u32 {
     1
 }
 
+// Wine ref: dlls/shell32/shfldr.c — ParseDisplayName returns S_FALSE with NULL ppidl for unknown names.
 unsafe extern "win64" fn sf_parse_display_name(
     _this: usize,
     _hwnd: usize,
     _pbc: usize,
     _display: *const u16,
     _pch: *mut u32,
-    _ppidl: *mut *mut u8,
+    ppidl: *mut *mut u8,
     _attrs: *mut u32,
 ) -> i32 {
-    E_NOINTERFACE
+    if ppidl.is_null() {
+        return E_POINTER;
+    }
+    unsafe { *ppidl = std::ptr::null_mut() };
+    S_FALSE
 }
 
 /// IShellFolder::EnumObjects — enumerate children of the process CWD as WEV1 PIDLs.
@@ -164,13 +169,18 @@ unsafe extern "win64" fn sf_compare_ids(_this: usize, _pidl1: *const u8, _pidl2:
     0
 }
 
+// Wine ref: dlls/shell32/shfldr.c — CreateViewObject returns S_FALSE with NULL ppv when no view available.
 unsafe extern "win64" fn sf_create_view_object(
     _this: usize,
     _hwnd: usize,
     _riid: *const u8,
-    _ppv: *mut usize,
+    ppv: *mut usize,
 ) -> i32 {
-    E_NOINTERFACE
+    if ppv.is_null() {
+        return E_POINTER;
+    }
+    unsafe { *ppv = 0 };
+    S_FALSE
 }
 
 unsafe extern "win64" fn sf_get_attributes_of(
@@ -183,6 +193,7 @@ unsafe extern "win64" fn sf_get_attributes_of(
     E_NOINTERFACE
 }
 
+// Wine ref: dlls/shell32/shfldr.c — GetUIObjectOf returns S_FALSE with NULL ppv when no object matches.
 unsafe extern "win64" fn sf_get_ui_object_of(
     _this: usize,
     _hwnd: usize,
@@ -190,9 +201,13 @@ unsafe extern "win64" fn sf_get_ui_object_of(
     _pidls: *const *const u8,
     _riid: *const u8,
     _reserved: *mut u32,
-    _ppv: *mut usize,
+    ppv: *mut usize,
 ) -> i32 {
-    E_NOINTERFACE
+    if ppv.is_null() {
+        return E_POINTER;
+    }
+    unsafe { *ppv = 0 };
+    S_FALSE
 }
 
 unsafe extern "win64" fn sf_get_display_name_of(
