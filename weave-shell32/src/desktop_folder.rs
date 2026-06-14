@@ -13,8 +13,14 @@ const S_OK: i32 = 0;
 const S_FALSE: i32 = 1;
 const E_POINTER: i32 = 0x8000_4003u32 as i32;
 const E_NOINTERFACE: i32 = 0x8000_4002u32 as i32;
+/// IID_IShellView = {000214E3-0000-0000-C000-000000000046}
+/// Wire format: Data1(LE) Data2(LE) Data3(LE) Data4
+const IID_ISHELL_VIEW: [u8; 16] = [
+    0xE3, 0x14, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46,
+];
 
 static DESKTOP_FOLDER: OnceLock<usize> = OnceLock::new();
+static SHELL_VIEW: OnceLock<usize> = OnceLock::new();
 
 struct EnumState {
     items: Vec<usize>,
@@ -169,16 +175,26 @@ unsafe extern "win64" fn sf_compare_ids(_this: usize, _pidl1: *const u8, _pidl2:
     0
 }
 
-// Wine ref: dlls/shell32/shfldr.c — CreateViewObject returns S_FALSE with NULL ppv when no view available.
+// Wine ref: dlls/shell32/shfldr.c — CreateViewObject creates a view for the folder.
+// For desktop folder, return our minimal IShellView singleton when riid matches.
 unsafe extern "win64" fn sf_create_view_object(
     _this: usize,
     _hwnd: usize,
-    _riid: *const u8,
+    riid: *const u8,
     ppv: *mut usize,
 ) -> i32 {
     if ppv.is_null() {
         return E_POINTER;
     }
+    if !riid.is_null() {
+        let guid = unsafe { std::slice::from_raw_parts(riid, 16) };
+        if guid == IID_ISHELL_VIEW {
+            unsafe { *ppv = get_shell_view_ptr() };
+            return S_OK;
+        }
+    }
+    // Unknown IID — return S_FALSE with NULL so caller knows no view is available
+    // but does not treat it as a hard error.
     unsafe { *ppv = 0 };
     S_FALSE
 }
@@ -329,4 +345,117 @@ unsafe extern "win64" fn enum_clone(_this: usize, _ppenum: *mut usize) -> i32 {
 /// Return the desktop `IShellFolder*` singleton (process lifetime).
 pub fn desktop_folder_ptr() -> usize {
     get_desktop_folder_ptr()
+}
+
+// ── IShellView minimal stub ──────────────────────────────────────────────────
+// Wine ref: dlls/shell32/shview.c — IShellView vtable: 13 slots (3 IUnknown + 10 shell).
+// All shell methods return S_OK as no-op stubs.
+
+fn get_shell_view_ptr() -> usize {
+    *SHELL_VIEW.get_or_init(|| {
+        let vtable: Box<[usize; 13]> = Box::new([
+            sv_query_interface as *const () as usize,
+            sv_add_ref as *const () as usize,
+            sv_release as *const () as usize,
+            sv_get_window as *const () as usize,
+            sv_create_view_window2 as *const () as usize,
+            sv_translate_accelerator_a as *const () as usize,
+            sv_translate_accelerator_w as *const () as usize,
+            sv_get_current_info as *const () as usize,
+            sv_add_property_sheet_page as *const () as usize,
+            sv_save_view_state as *const () as usize,
+            sv_refresh as *const () as usize,
+            sv_select_item as *const () as usize,
+            sv_destroy_view_window as *const () as usize,
+        ]);
+        let vtable_ptr = Box::into_raw(vtable) as usize;
+        let obj: Box<usize> = Box::new(vtable_ptr);
+        Box::into_raw(obj) as usize
+    })
+}
+
+unsafe extern "win64" fn sv_query_interface(
+    _this: usize,
+    _riid: *const u8,
+    ppv: *mut usize,
+) -> i32 {
+    if ppv.is_null() {
+        return E_POINTER;
+    }
+    unsafe { *ppv = _this };
+    S_OK
+}
+
+unsafe extern "win64" fn sv_add_ref(_this: usize) -> u32 {
+    let _ = _this;
+    1
+}
+
+unsafe extern "win64" fn sv_release(_this: usize) -> u32 {
+    let _ = _this;
+    1
+}
+
+// Wine ref: dlls/shell32/shview.c — GetWindow returns the view's parent HWND.
+// Stub: returns S_OK with NULL hwnd (safe sentinel, caller may use NULL as "no window").
+unsafe extern "win64" fn sv_get_window(_this: usize, hwnd: *mut usize) -> i32 {
+    let _ = _this;
+    if hwnd.is_null() {
+        return E_POINTER;
+    }
+    unsafe { *hwnd = 0 };
+    S_OK
+}
+
+// Wine ref: dlls/shell32/shview.c — Store view settings from the CREATEVIEWSTRUCT2.
+unsafe extern "win64" fn sv_create_view_window2(_this: usize, _lpcs: usize) -> i32 {
+    let _ = _this;
+    S_OK
+}
+
+// Wine ref: dlls/shell32/shview.c — TranslateAcceleratorA dispatches keyboard shortcuts.
+unsafe extern "win64" fn sv_translate_accelerator_a(_this: usize, _lpmsg: *const u8) -> i32 {
+    let _ = _this;
+    S_FALSE
+}
+
+// Wine ref: dlls/shell32/shview.c — TranslateAcceleratorW (wide variant).
+unsafe extern "win64" fn sv_translate_accelerator_w(_this: usize, _lpmsg: *const u8) -> i32 {
+    let _ = _this;
+    S_FALSE
+}
+
+// Wine ref: dlls/shell32/shview.c — GetCurrentInfo copies FOLDERSETTINGS to caller.
+unsafe extern "win64" fn sv_get_current_info(_this: usize, _lpfs: *mut u8) -> i32 {
+    let _ = _this;
+    S_OK
+}
+
+unsafe extern "win64" fn sv_add_property_sheet_page(
+    _this: usize,
+    _pfn: usize,
+    _lparam: usize,
+) -> i32 {
+    let _ = _this;
+    S_OK
+}
+
+unsafe extern "win64" fn sv_save_view_state(_this: usize) -> i32 {
+    let _ = _this;
+    S_OK
+}
+
+unsafe extern "win64" fn sv_refresh(_this: usize) -> i32 {
+    let _ = _this;
+    S_OK
+}
+
+unsafe extern "win64" fn sv_select_item(_this: usize, _pidl: *const u8, _uflags: u32) -> i32 {
+    let _ = _this;
+    S_OK
+}
+
+unsafe extern "win64" fn sv_destroy_view_window(_this: usize) -> i32 {
+    let _ = _this;
+    S_OK
 }
