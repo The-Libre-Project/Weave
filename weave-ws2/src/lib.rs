@@ -8,6 +8,7 @@
 #![allow(non_snake_case)]
 
 use std::collections::HashMap;
+use std::ffi::CString;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use weave_core::handles;
@@ -2078,11 +2079,14 @@ pub unsafe extern "win64" fn free_addr_info_ex_w(_addr_info: *mut u8) {}
 
 /// FreeAddrInfoW: free address info (wide variant of freeaddrinfo).
 ///
-/// Phase A stub — no-op.
+/// Delegates to the real `ws_freeaddrinfo` implementation.
 ///
 /// # Safety
-/// `addr_info` is accepted but not dereferenced.
-pub unsafe extern "win64" fn free_addr_info_w(_addr_info: *mut u8) {}
+/// `p_addr_info` must be a pointer previously returned by `GetAddrInfoW`,
+/// or null.
+pub unsafe extern "win64" fn free_addr_info_w(p_addr_info: *mut WinAddrInfo) {
+    ws_freeaddrinfo(p_addr_info);
+}
 
 /// GetAddrInfoExCancel: cancel an async GetAddrInfoExW request.
 ///
@@ -2116,17 +2120,49 @@ pub unsafe extern "win64" fn get_addr_info_ex_w(
 
 /// GetAddrInfoW: wide-char getaddrinfo.
 ///
-/// Phase A stub — returns WSAHOST_NOT_FOUND.
+/// Converts UTF-16 node/service names to UTF-8 byte strings and delegates
+/// to the real `ws_getaddrinfo` implementation.
 ///
 /// # Safety
-/// Caller must ensure `node_name` and `service_name` are valid.
+/// `p_node_name` and `p_service_name` must be valid null-terminated UTF-16
+/// strings or null. `p_hints` may be null. `pp_result` must be a valid
+/// non-null pointer.
 pub unsafe extern "win64" fn get_addr_info_w(
-    _node_name: *const u16,
-    _service_name: *const u16,
-    _hints: *const u8,
-    _results: *mut u8,
+    p_node_name: *const u16,
+    p_service_name: *const u16,
+    p_hints: *const WinAddrInfo,
+    pp_result: *mut *mut WinAddrInfo,
 ) -> i32 {
-    SOCKET_ERROR
+    if pp_result.is_null() {
+        return 10014; // WSAEFAULT
+    }
+
+    let node_cstr = if p_node_name.is_null() {
+        None
+    } else {
+        let len = (0..).take_while(|&i| *p_node_name.add(i) != 0).count();
+        let slice = std::slice::from_raw_parts(p_node_name, len);
+        let utf8 = String::from_utf16_lossy(slice);
+        Some(CString::new(utf8).unwrap_or_else(|_| CString::new("").unwrap()))
+    };
+
+    let service_cstr = if p_service_name.is_null() {
+        None
+    } else {
+        let len = (0..).take_while(|&i| *p_service_name.add(i) != 0).count();
+        let slice = std::slice::from_raw_parts(p_service_name, len);
+        let utf8 = String::from_utf16_lossy(slice);
+        Some(CString::new(utf8).unwrap_or_else(|_| CString::new("").unwrap()))
+    };
+
+    let node_ptr = node_cstr.as_ref().map_or(std::ptr::null(), |c| {
+        c.as_ptr() as *const u8
+    });
+    let service_ptr = service_cstr.as_ref().map_or(std::ptr::null(), |c| {
+        c.as_ptr() as *const u8
+    });
+
+    ws_getaddrinfo(node_ptr, service_ptr, p_hints, pp_result)
 }
 
 /// GetNameInfoW: wide-char getnameinfo.
@@ -2788,6 +2824,43 @@ mod tests {
 
             libc::close(client);
             libc::close(listener);
+        }
+    }
+
+    // ── GetAddrInfoW / FreeAddrInfoW ───────────────────────────────────────
+
+    #[test]
+    fn get_addr_info_w_null_pp_result() {
+        unsafe {
+            let ret = get_addr_info_w(
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null_mut(),
+            );
+            assert_eq!(ret, 10014); // WSAEFAULT
+        }
+    }
+
+    #[test]
+    fn get_addr_info_w_both_null_returns_nonzero() {
+        unsafe {
+            let mut result: *mut WinAddrInfo = std::ptr::null_mut();
+            let ret = get_addr_info_w(
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                &mut result,
+            );
+            // Both null → should fail (EAI_NONAME → non-zero).
+            assert_ne!(ret, 0, "GetAddrInfoW(null, null) should fail");
+        }
+    }
+
+    #[test]
+    fn free_addr_info_w_null_does_not_crash() {
+        unsafe {
+            free_addr_info_w(std::ptr::null_mut());
         }
     }
 }
