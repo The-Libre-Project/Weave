@@ -15099,6 +15099,264 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
             query_process_cycle_time as unsafe extern "win64" fn(_, _) -> _
                 as *const () as usize,
         ),
+        // ── Signal gap-fill 2: 73 remaining kernel32 stubs ──
+        "AssignProcessToJobObject" => Some(
+            assign_process_to_job_object as unsafe extern "win64" fn(_, _) -> _
+                as *const () as usize,
+        ),
+        "CancelIoEx" => Some(
+            cancel_io_ex as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
+        ),
+        "CancelSynchronousIo" => Some(
+            cancel_synchronous_io as unsafe extern "win64" fn(_) -> _ as *const () as usize,
+        ),
+        "CheckRemoteDebuggerPresent" => Some(
+            check_remote_debugger_present as unsafe extern "win64" fn(_, _) -> _
+                as *const () as usize,
+        ),
+        "ClearCommError" => Some(
+            clear_comm_error as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
+        ),
+        "CreateJobObjectW" => Some(
+            create_job_object_w as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
+        ),
+        "CreateSymbolicLinkW" => Some(
+            create_symbolic_link_w as unsafe extern "win64" fn(_, _, _) -> _
+                as *const () as usize,
+        ),
+        "DeleteProcThreadAttributeList" => Some(
+            delete_proc_thread_attribute_list as unsafe extern "win64" fn(_) as *const ()
+                as usize,
+        ),
+        "EscapeCommFunction" => Some(
+            escape_comm_function as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
+        ),
+        "FindFirstFileExA" => Some(
+            find_first_file_ex_a as unsafe extern "win64" fn(_, _, _, _, _, _) -> _
+                as *const () as usize,
+        ),
+        "GetCommModemStatus" => Some(
+            get_comm_modem_status as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
+        ),
+        "GetComputerNameExW" => Some(
+            get_computer_name_ex_w as unsafe extern "win64" fn(_, _, _) -> _
+                as *const () as usize,
+        ),
+        "GetCurrencyFormatEx" => Some(
+            get_currency_format_ex as unsafe extern "win64" fn(_, _, _, _, _, _) -> _
+                as *const () as usize,
+        ),
+        "GetCurrentPackageFullName" => Some(
+            get_current_package_full_name as unsafe extern "win64" fn(_, _) -> _
+                as *const () as usize,
+        ),
+        "GetDiskFreeSpaceA" => Some(
+            get_disk_free_space_a as unsafe extern "win64" fn(_, _, _, _, _) -> _
+                as *const () as usize,
+        ),
+        "GetErrorMode" => Some(get_error_mode as extern "win64" fn() -> _ as *const () as usize),
+        "GetGeoInfoW" => Some(
+            get_geo_info_w as unsafe extern "win64" fn(_, _, _, _, _) -> _
+                as *const () as usize,
+        ),
+        "GetLogicalProcessorInformation" => Some(
+            get_logical_processor_information as unsafe extern "win64" fn(_, _) -> _
+                as *const () as usize,
+        ),
+        "GetLogicalProcessorInformationEx" => Some(
+            get_logical_processor_information_ex as unsafe extern "win64" fn(_, _, _) -> _
+                as *const () as usize,
+        ),
+        "GetMaximumProcessorCount" => Some(
+            get_maximum_processor_count as extern "win64" fn(_) -> _ as *const () as usize,
+        ),
+        "GetMaximumProcessorGroupCount" => Some(
+            get_maximum_processor_group_count as *const () as usize,
+        ),
+        "GetNumberFormatEx" => Some(
+            get_number_format_ex as unsafe extern "win64" fn(_, _, _, _, _, _) -> _
+                as *const () as usize,
+        ),
+        "GetPackageFamilyName" => Some(
+            get_package_family_name as unsafe extern "win64" fn(_, _, _) -> _
+                as *const () as usize,
+        ),
+        "GetPackagePathByFullName" => Some(
+            get_package_path_by_full_name as unsafe extern "win64" fn(_, _, _) -> _
+                as *const () as usize,
+        ),
+        "GetPackagesByPackageFamily" => Some(
+            get_packages_by_package_family as unsafe extern "win64" fn(_, _, _, _) -> _
+                as *const () as usize,
+        ),
+        "GetProcessHeaps" => Some(
+            get_process_heaps as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
+        ),
+        "GetProcessMitigationPolicy" => Some(
+            get_process_mitigation_policy as unsafe extern "win64" fn(_, _, _, _) -> _
+                as *const () as usize,
+        ),
+        "GetThreadGroupAffinity" => Some(
+            get_thread_group_affinity as unsafe extern "win64" fn(_, _) -> _
+                as *const () as usize,
+        ),
+        "GetThreadPreferredUILanguages" => Some(
+            get_thread_preferred_ui_languages as unsafe extern "win64" fn(_, _, _, _) -> _
+                as *const () as usize,
+        ),
+        "GetThreadPriorityBoost" => Some(
+            get_thread_priority_boost as unsafe extern "win64" fn(_, _) -> _
+                as *const () as usize,
+        ),
+        "GetUserGeoID" => Some(get_user_geo_id as extern "win64" fn() -> _ as *const () as usize),
+        "HeapCompact" => Some(
+            heap_compact as extern "win64" fn(_, _) -> _ as *const () as usize,
+        ),
+        "HeapLock" => Some(heap_lock as extern "win64" fn(_) -> _ as *const () as usize),
+        "HeapUnlock" => Some(heap_unlock as extern "win64" fn(_) -> _ as *const () as usize),
+        "HeapValidate" => Some(
+            heap_validate as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
+        ),
+        "HeapWalk" => Some(
+            heap_walk as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
+        ),
+        "InitializeProcThreadAttributeList" => Some(
+            initialize_proc_thread_attribute_list as unsafe extern "win64" fn(_, _, _, _) -> _
+                as *const () as usize,
+        ),
+        "K32EnumProcessModules" => Some(
+            k32_enum_process_modules as unsafe extern "win64" fn(_, _, _, _) -> _
+                as *const () as usize,
+        ),
+        "K32GetModuleBaseNameW" => Some(
+            k32_get_module_base_name_w as unsafe extern "win64" fn(_, _, _, _) -> _
+                as *const () as usize,
+        ),
+        "K32GetModuleInformation" => Some(
+            k32_get_module_information as unsafe extern "win64" fn(_, _, _, _) -> _
+                as *const () as usize,
+        ),
+        "K32GetPerformanceInfo" => Some(
+            k32_get_performance_info as unsafe extern "win64" fn(_, _) -> _
+                as *const () as usize,
+        ),
+        "K32GetProcessMemoryInfo" => Some(
+            k32_get_process_memory_info as unsafe extern "win64" fn(_, _, _) -> _
+                as *const () as usize,
+        ),
+        "K32QueryWorkingSetEx" => Some(
+            k32_query_working_set_ex as unsafe extern "win64" fn(_, _, _) -> _
+                as *const () as usize,
+        ),
+        "LockFile" => Some(
+            lock_file as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const () as usize,
+        ),
+        "NeedCurrentDirectoryForExePathW" => Some(
+            need_current_directory_for_exe_path_w as unsafe extern "win64" fn(_) -> _
+                as *const () as usize,
+        ),
+        "PowerClearRequest" => Some(
+            power_clear_request as extern "win64" fn(_) -> _ as *const () as usize,
+        ),
+        "PowerCreateRequest" => Some(
+            power_create_request as unsafe extern "win64" fn(_) -> _ as *const () as usize,
+        ),
+        "PowerSetRequest" => Some(
+            power_set_request as extern "win64" fn(_) -> _ as *const () as usize,
+        ),
+        "PrefetchVirtualMemory" => Some(
+            prefetch_virtual_memory as unsafe extern "win64" fn(_, _, _, _) -> _
+                as *const () as usize,
+        ),
+        "PurgeComm" => Some(
+            purge_comm as extern "win64" fn(_, _) -> _ as *const () as usize,
+        ),
+        "QueryFullProcessImageNameW" => Some(
+            query_full_process_image_name_w as unsafe extern "win64" fn(_, _, _, _) -> _
+                as *const () as usize,
+        ),
+        "QueryInformationJobObject" => Some(
+            query_information_job_object as unsafe extern "win64" fn(_, _, _, _, _) -> _
+                as *const () as usize,
+        ),
+        "QueryThreadCycleTime" => Some(
+            query_thread_cycle_time as unsafe extern "win64" fn(_, _) -> _
+                as *const () as usize,
+        ),
+        "ReOpenFile" => Some(
+            re_open_file as extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
+        ),
+        "ReadProcessMemory" => Some(
+            read_process_memory as unsafe extern "win64" fn(_, _, _, _, _) -> _
+                as *const () as usize,
+        ),
+        "ReplaceFileW" => Some(
+            replace_file_w as unsafe extern "win64" fn(_, _, _, _, _, _) -> _
+                as *const () as usize,
+        ),
+        "ResolveLocaleName" => Some(
+            resolve_locale_name as unsafe extern "win64" fn(_, _, _) -> _
+                as *const () as usize,
+        ),
+        "RtlCaptureStackBackTrace" => Some(
+            rtl_capture_stack_back_trace as unsafe extern "win64" fn(_, _, _, _) -> _
+                as *const () as usize,
+        ),
+        "RtlDeleteFunctionTable" => Some(
+            rtl_delete_function_table as extern "win64" fn(_) -> _ as *const () as usize,
+        ),
+        "SetFileCompletionNotificationModes" => Some(
+            set_file_completion_notification_modes as extern "win64" fn(_, _) -> _
+                as *const () as usize,
+        ),
+        "SetFileInformationByHandle" => Some(
+            set_file_information_by_handle as unsafe extern "win64" fn(_, _, _, _) -> _
+                as *const () as usize,
+        ),
+        "SetInformationJobObject" => Some(
+            set_information_job_object as unsafe extern "win64" fn(_, _, _, _) -> _
+                as *const () as usize,
+        ),
+        "SetProcessMitigationPolicy" => Some(
+            set_process_mitigation_policy as unsafe extern "win64" fn(_, _, _) -> _
+                as *const () as usize,
+        ),
+        "SetThreadInformation" => Some(
+            set_thread_information as unsafe extern "win64" fn(_, _, _, _) -> _
+                as *const () as usize,
+        ),
+        "SetThreadPriorityBoost" => Some(
+            set_thread_priority_boost as extern "win64" fn(_, _) -> _ as *const () as usize,
+        ),
+        "TerminateJobObject" => Some(
+            terminate_job_object as extern "win64" fn(_, _) -> _ as *const () as usize,
+        ),
+        "TzSpecificLocalTimeToSystemTime" => Some(
+            tz_specific_local_time_to_system_time as unsafe extern "win64" fn(_, _, _) -> _
+                as *const () as usize,
+        ),
+        "UnlockFileEx" => Some(
+            unlock_file_ex as unsafe extern "win64" fn(_, _, _, _, _) -> _
+                as *const () as usize,
+        ),
+        "UpdateProcThreadAttribute" => Some(
+            update_proc_thread_attribute as unsafe extern "win64" fn(_, _, _, _, _, _, _) -> _
+                as *const () as usize,
+        ),
+        "WTSGetActiveConsoleSessionId" => {
+            Some(wts_get_active_console_session_id as *const () as usize)
+        }
+        "WaitNamedPipeW" => Some(
+            wait_named_pipe_w as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
+        ),
+        "WerRegisterRuntimeExceptionModule" => Some(
+            wer_register_runtime_exception_module as unsafe extern "win64" fn(_, _) -> _
+                as *const () as usize,
+        ),
+        "Wow64GetThreadContext" => Some(
+            wow64_get_thread_context as unsafe extern "win64" fn(_, _) -> _
+                as *const () as usize,
+        ),
         _ => {
             // version.dll functions are forwarded through kernel32 in some apps;
             // also handle them when the DLL name is version.dll directly.
@@ -17694,6 +17952,824 @@ pub unsafe extern "win64" fn query_process_cycle_time(
     0
 }
 
+// ── Signal gap-fill 2: remaining 73 kernel32 stubs ──────────────────────────
+//
+// jcodemunch unavailable — Phase A stubs only, safe sentinel returns.
+// Wine ref comments deferred to jcodemunch-available session.
+
+// ── Process/Job stubs ─────────────────────────────────────────────────────────
+
+/// AssignProcessToJobObject: assign a process to a job object.
+///
+/// Phase A stub — returns FALSE.
+pub extern "win64" fn assign_process_to_job_object(
+    _h_job: usize, _h_process: usize,
+) -> i32 { 0 }
+
+/// CreateJobObjectW: create a job object.
+///
+/// Phase A stub — returns NULL.
+pub unsafe extern "win64" fn create_job_object_w(
+    _lp_job_attributes: usize, _lp_name: *const u16,
+) -> usize {
+    warn_once("CreateJobObjectW");
+    0
+}
+
+/// DeleteProcThreadAttributeList: delete a proc/thread attribute list.
+///
+/// Phase A stub — no-op.
+pub unsafe extern "win64" fn delete_proc_thread_attribute_list(
+    _lp_attribute_list: *mut u8,
+) {}
+
+/// InitializeProcThreadAttributeList: initialize a proc/thread attribute list.
+///
+/// Phase A stub — returns FALSE.
+pub unsafe extern "win64" fn initialize_proc_thread_attribute_list(
+    _lp_attribute_list: *mut u8,
+    _dw_attribute_count: u32,
+    _dw_flags: u32,
+    _lp_size: *mut usize,
+) -> i32 {
+    warn_once("InitializeProcThreadAttributeList");
+    0
+}
+
+/// UpdateProcThreadAttribute: update a proc/thread attribute.
+///
+/// Phase A stub — returns FALSE.
+pub unsafe extern "win64" fn update_proc_thread_attribute(
+    _lp_attribute_list: *mut u8,
+    _dw_flags: u32,
+    _attribute: usize,
+    _lp_value: usize,
+    _cb_size: usize,
+    _lp_previous_value: usize,
+    _lp_return_size: *mut usize,
+) -> i32 {
+    warn_once("UpdateProcThreadAttribute");
+    0
+}
+
+/// TerminateJobObject: terminate all processes in a job.
+///
+/// Phase A stub — returns FALSE.
+pub extern "win64" fn terminate_job_object(_h_job: usize, _exit_code: u32) -> i32 {
+    warn_once("TerminateJobObject");
+    0
+}
+
+/// SetInformationJobObject: set job object information.
+///
+/// Phase A stub — returns FALSE.
+pub unsafe extern "win64" fn set_information_job_object(
+    _h_job: usize,
+    _job_object_info_class: u32,
+    _lp_job_object_info: *const u8,
+    _cb_job_object_info_len: u32,
+) -> i32 {
+    warn_once("SetInformationJobObject");
+    0
+}
+
+/// QueryInformationJobObject: query job object information.
+///
+/// Phase A stub — returns FALSE.
+pub unsafe extern "win64" fn query_information_job_object(
+    _h_job: usize,
+    _job_object_info_class: u32,
+    _lp_job_object_info: *mut u8,
+    _cb_job_object_info_len: u32,
+    _lp_return_length: *mut u32,
+) -> i32 {
+    warn_once("QueryInformationJobObject");
+    0
+}
+
+/// GetProcessMitigationPolicy: get process mitigation policy.
+///
+/// Phase A stub — returns FALSE.
+pub unsafe extern "win64" fn get_process_mitigation_policy(
+    _h_process: usize,
+    _mitigation_policy: u32,
+    _lp_buffer: *mut u8,
+    _dw_length: usize,
+) -> i32 {
+    warn_once("GetProcessMitigationPolicy");
+    0
+}
+
+/// SetProcessMitigationPolicy: set process mitigation policy.
+///
+/// Phase A stub — returns FALSE.
+pub unsafe extern "win64" fn set_process_mitigation_policy(
+    _mitigation_policy: u32,
+    _lp_buffer: *const u8,
+    _dw_length: usize,
+) -> i32 {
+    warn_once("SetProcessMitigationPolicy");
+    0
+}
+
+/// ReadProcessMemory: read from another process's memory.
+///
+/// Phase A stub — returns FALSE.
+pub unsafe extern "win64" fn read_process_memory(
+    _h_process: usize,
+    _lp_base_address: *const u8,
+    _lp_buffer: *mut u8,
+    _n_size: usize,
+    _lp_number_of_bytes_read: *mut usize,
+) -> i32 {
+    warn_once("ReadProcessMemory");
+    0
+}
+
+/// WTSGetActiveConsoleSessionId: get active terminal session ID.
+///
+/// Phase A stub — returns 0 (session 0 = services session).
+pub extern "win64" fn wts_get_active_console_session_id() -> u32 {
+    0
+}
+
+/// Wow64GetThreadContext: get thread context of WOW64 thread.
+///
+/// Phase A stub — returns FALSE.
+pub unsafe extern "win64" fn wow64_get_thread_context(
+    _h_thread: usize, _lp_context: *mut u8,
+) -> i32 {
+    warn_once("Wow64GetThreadContext");
+    0
+}
+
+/// NeedCurrentDirectoryForExePathW: check if current dir is in search path.
+///
+/// Phase A stub — returns TRUE (conservative: assume needed).
+pub unsafe extern "win64" fn need_current_directory_for_exe_path_w(
+    _lp_exe_name: *const u16,
+) -> i32 {
+    1
+}
+
+/// CreateSymbolicLinkW: create a symbolic link.
+///
+/// Phase A stub — returns FALSE.
+pub unsafe extern "win64" fn create_symbolic_link_w(
+    _lp_symlink_file_name: *const u16,
+    _lp_target_file_name: *const u16,
+    _dw_flags: u32,
+) -> i32 {
+    warn_once("CreateSymbolicLinkW");
+    0
+}
+
+// ── File/IO stubs ──────────────────────────────────────────────────────────────
+
+/// CancelIoEx: cancel outstanding I/O on a handle.
+///
+/// Phase A stub — returns FALSE.
+pub unsafe extern "win64" fn cancel_io_ex(
+    _h_file: usize, _lp_overlapped: usize,
+) -> i32 {
+    warn_once("CancelIoEx");
+    0
+}
+
+/// CancelSynchronousIo: cancel a synchronous I/O operation.
+///
+/// Phase A stub — returns FALSE.
+pub extern "win64" fn cancel_synchronous_io(_h_thread: usize) -> i32 {
+    warn_once("CancelSynchronousIo");
+    0
+}
+
+/// ClearCommError: clear serial port error and get status.
+///
+/// Phase A stub — returns FALSE.
+pub unsafe extern "win64" fn clear_comm_error(
+    _h_file: usize, _lp_errors: *mut u32, _lp_stat: *mut u8,
+) -> i32 {
+    warn_once("ClearCommError");
+    0
+}
+
+/// EscapeCommFunction: perform an extended serial function.
+///
+/// Phase A stub — returns FALSE.
+pub extern "win64" fn escape_comm_function(_h_file: usize, _n_func: u32) -> i32 {
+    warn_once("EscapeCommFunction");
+    0
+}
+
+/// FindFirstFileExA: find first matching file (ANSI extended).
+///
+/// Phase A stub — returns INVALID_HANDLE_VALUE.
+pub unsafe extern "win64" fn find_first_file_ex_a(
+    _lp_file_name: *const u8,
+    _f_info_level_id: u32,
+    _lp_find_file_data: *mut u8,
+    _f_search_op: u32,
+    _lp_search_filter: usize,
+    _dw_additional_flags: u32,
+) -> usize {
+    warn_once("FindFirstFileExA");
+    usize::MAX
+}
+
+/// GetCommModemStatus: get modem status register bits.
+///
+/// Phase A stub — returns FALSE.
+pub unsafe extern "win64" fn get_comm_modem_status(
+    _h_file: usize, _lp_modem_stat: *mut u32,
+) -> i32 {
+    warn_once("GetCommModemStatus");
+    0
+}
+
+/// LockFile: lock a region in an open file.
+///
+/// Phase A stub — returns TRUE (no-op lock).
+pub extern "win64" fn lock_file(
+    _h_file: usize,
+    _dw_file_offset_low: u32,
+    _dw_file_offset_high: u32,
+    _n_number_of_bytes_to_lock_low: u32,
+    _n_number_of_bytes_to_lock_high: u32,
+) -> i32 {
+    1
+}
+
+/// PurgeComm: purge serial port buffers.
+///
+/// Phase A stub — returns FALSE.
+pub extern "win64" fn purge_comm(_h_file: usize, _dw_flags: u32) -> i32 {
+    warn_once("PurgeComm");
+    0
+}
+
+/// ReOpenFile: re-open a handle with different access/share.
+///
+/// Phase A stub — returns INVALID_HANDLE_VALUE.
+pub extern "win64" fn re_open_file(
+    _h_original_file: usize,
+    _dw_desired_access: u32,
+    _dw_share_mode: u32,
+    _dw_flags: u32,
+) -> usize {
+    warn_once("ReOpenFile");
+    usize::MAX
+}
+
+/// ReplaceFileW: replace one file with another with backup.
+///
+/// Phase A stub — returns FALSE.
+pub unsafe extern "win64" fn replace_file_w(
+    _lp_replaced: *const u16,
+    _lp_replacement: *const u16,
+    _lp_backup: *const u16,
+    _dw_replace_flags: u32,
+    _lp_exclude: usize,
+    _lp_reserved: usize,
+) -> i32 {
+    warn_once("ReplaceFileW");
+    0
+}
+
+/// SetFileCompletionNotificationModes: set completion notification modes.
+///
+/// Phase A stub — returns FALSE.
+pub extern "win64" fn set_file_completion_notification_modes(
+    _file_handle: usize, _flags: u8,
+) -> i32 {
+    warn_once("SetFileCompletionNotificationModes");
+    0
+}
+
+/// SetFileInformationByHandle: set file information by handle.
+///
+/// Phase A stub — returns FALSE.
+pub unsafe extern "win64" fn set_file_information_by_handle(
+    _h_file: usize,
+    _file_information_class: u32,
+    _lp_file_information: *const u8,
+    _dw_buffer_size: u32,
+) -> i32 {
+    warn_once("SetFileInformationByHandle");
+    0
+}
+
+/// UnlockFileEx: unlock a byte-range in a file.
+///
+/// Phase A stub — returns TRUE (no-op).
+pub unsafe extern "win64" fn unlock_file_ex(
+    _h_file: usize,
+    _dw_reserved: u32,
+    _n_number_of_bytes_to_unlock_low: u32,
+    _n_number_of_bytes_to_unlock_high: u32,
+    _lp_overlapped: usize,
+) -> i32 {
+    1
+}
+
+/// WaitNamedPipeW: wait for a named pipe to become available.
+///
+/// Phase A stub — returns FALSE.
+pub unsafe extern "win64" fn wait_named_pipe_w(
+    _lp_named_pipe_name: *const u16, _n_timeout: u32,
+) -> i32 {
+    warn_once("WaitNamedPipeW");
+    0
+}
+
+// ── System Info stubs ──────────────────────────────────────────────────────────
+
+/// GetComputerNameExW: get computer name in extended format.
+///
+/// Phase A stub — returns FALSE.
+pub unsafe extern "win64" fn get_computer_name_ex_w(
+    _name_type: u32,
+    _lp_buffer: *mut u16,
+    _n_size: *mut u32,
+) -> i32 {
+    warn_once("GetComputerNameExW");
+    0
+}
+
+/// GetCurrentPackageFullName: get current app package full name.
+///
+/// Phase A stub — returns APPMODEL_ERROR_NO_PACKAGE.
+pub unsafe extern "win64" fn get_current_package_full_name(
+    _package_full_name_length: *mut u32,
+    _package_full_name: *mut u16,
+) -> i32 {
+    // APPMODEL_ERROR_NO_PACKAGE = 15700
+    15700i32
+}
+
+/// GetDiskFreeSpaceA: get disk free space (ANSI).
+///
+/// Phase A stub — returns FALSE.
+pub unsafe extern "win64" fn get_disk_free_space_a(
+    _lp_root_path_name: *const u8,
+    _lp_sectors_per_cluster: *mut u32,
+    _lp_bytes_per_sector: *mut u32,
+    _lp_number_of_free_clusters: *mut u32,
+    _lp_total_number_of_clusters: *mut u32,
+) -> i32 {
+    warn_once("GetDiskFreeSpaceA");
+    0
+}
+
+/// GetErrorMode: get error mode.
+///
+/// Phase A stub — returns SEM_FAILCRITICALERRORS (1).
+pub extern "win64" fn get_error_mode() -> u32 {
+    1 // SEM_FAILCRITICALERRORS
+}
+
+/// GetGeoInfoW: get geographic location information.
+///
+/// Phase A stub — returns 0.
+pub unsafe extern "win64" fn get_geo_info_w(
+    _location: u32,
+    _geo_type: u32,
+    _lp_geo_data: *mut u16,
+    _cch_geo_data: u32,
+    _lang_id: u32,
+) -> i32 {
+    warn_once("GetGeoInfoW");
+    0
+}
+
+/// GetLogicalProcessorInformation: get logical processor info.
+///
+/// Phase A stub — returns FALSE.
+pub unsafe extern "win64" fn get_logical_processor_information(
+    _buffer: *mut u8, _returned_length: *mut u32,
+) -> i32 {
+    warn_once("GetLogicalProcessorInformation");
+    0
+}
+
+/// GetLogicalProcessorInformationEx: get extended logical processor info.
+///
+/// Phase A stub — returns FALSE.
+pub unsafe extern "win64" fn get_logical_processor_information_ex(
+    _relationship_type: u32,
+    _buffer: *mut u8,
+    _returned_length: *mut u32,
+) -> i32 {
+    warn_once("GetLogicalProcessorInformationEx");
+    0
+}
+
+/// GetPackageFamilyName: get package family name.
+///
+/// Phase A stub — returns APPMODEL_ERROR_NO_PACKAGE.
+pub unsafe extern "win64" fn get_package_family_name(
+    _h_process: usize,
+    _package_family_name_length: *mut u32,
+    _package_family_name: *mut u16,
+) -> i32 {
+    15700i32
+}
+
+/// GetPackagePathByFullName: get package path by full name.
+///
+/// Phase A stub — returns APPMODEL_ERROR_NO_PACKAGE.
+pub unsafe extern "win64" fn get_package_path_by_full_name(
+    _package_full_name: *const u16,
+    _path_length: *mut u32,
+    _path: *mut u16,
+) -> i32 {
+    warn_once("GetPackagePathByFullName");
+    15700i32
+}
+
+/// GetPackagesByPackageFamily: get packages by family name.
+///
+/// Phase A stub — returns APPMODEL_ERROR_NO_PACKAGE.
+pub unsafe extern "win64" fn get_packages_by_package_family(
+    _package_family_name: *const u16,
+    _package_name_length: *mut u32,
+    _package_names: *mut u16,
+    _count: *mut u32,
+) -> i32 {
+    warn_once("GetPackagesByPackageFamily");
+    15700i32
+}
+
+/// GetUserGeoID: get user's geographic location ID.
+///
+/// Phase A stub — returns GEOID_NOT_AVAILABLE (0xFFFFFFFF).
+pub extern "win64" fn get_user_geo_id() -> u32 {
+    0xFFFF_FFFFu32 // GEOID_NOT_AVAILABLE
+}
+
+/// GetMaximumProcessorCount: get maximum number of processors.
+///
+/// Phase A stub — returns 1.
+pub extern "win64" fn get_maximum_processor_count(_group_number: u16) -> u32 {
+    1
+}
+
+/// GetMaximumProcessorGroupCount: get maximum processor group count.
+///
+/// Phase A stub — returns 1.
+pub extern "win64" fn get_maximum_processor_group_count() -> u16 {
+    1
+}
+
+// ── Heap stubs ─────────────────────────────────────────────────────────────────
+
+/// GetProcessHeaps: get handles of all process heaps.
+///
+/// Phase A stub — returns 0.
+pub unsafe extern "win64" fn get_process_heaps(
+    _number_of_heaps: u32, _process_heaps: *mut usize,
+) -> u32 {
+    warn_once("GetProcessHeaps");
+    0
+}
+
+/// HeapCompact: compact a heap.
+///
+/// Phase A stub — returns 0 (error).
+pub extern "win64" fn heap_compact(_h_heap: usize, _dw_flags: u32) -> usize {
+    warn_once("HeapCompact");
+    0
+}
+
+/// HeapLock: lock a heap (serialize access).
+///
+/// Phase A stub — returns TRUE (no-op).
+pub extern "win64" fn heap_lock(_h_heap: usize) -> i32 {
+    1
+}
+
+/// HeapUnlock: unlock a heap.
+///
+/// Phase A stub — returns TRUE (no-op).
+pub extern "win64" fn heap_unlock(_h_heap: usize) -> i32 {
+    1
+}
+
+/// HeapValidate: validate a heap.
+///
+/// Phase A stub — returns TRUE (no-op).
+pub unsafe extern "win64" fn heap_validate(
+    _h_heap: usize,
+    _dw_flags: u32,
+    _lp_mem: *const u8,
+) -> i32 {
+    1
+}
+
+/// HeapWalk: enumerate heap blocks.
+///
+/// Phase A stub — returns FALSE.
+pub unsafe extern "win64" fn heap_walk(
+    _h_heap: usize, _lp_entry: *mut u8,
+) -> i32 {
+    warn_once("HeapWalk");
+    0
+}
+
+// ── Thread/Locale stubs ────────────────────────────────────────────────────────
+
+/// GetThreadGroupAffinity: get thread group affinity.
+///
+/// Phase A stub — returns FALSE.
+pub unsafe extern "win64" fn get_thread_group_affinity(
+    _h_thread: usize,
+    _group_affinity: *mut u8,
+) -> i32 {
+    warn_once("GetThreadGroupAffinity");
+    0
+}
+
+/// GetThreadPreferredUILanguages: get thread's preferred UI languages.
+///
+/// Phase A stub — returns FALSE.
+pub unsafe extern "win64" fn get_thread_preferred_ui_languages(
+    _dw_flags: u32,
+    _pul_num_languages: *mut u32,
+    _pwsz_languages_buffer: *mut u16,
+    _pcch_languages_buffer: *mut u32,
+) -> i32 {
+    warn_once("GetThreadPreferredUILanguages");
+    0
+}
+
+/// GetThreadPriorityBoost: get thread priority boost disabled state.
+///
+/// Phase A stub — returns FALSE.
+pub unsafe extern "win64" fn get_thread_priority_boost(
+    _h_thread: usize, _p_disable_priority_boost: *mut i32,
+) -> i32 {
+    warn_once("GetThreadPriorityBoost");
+    0
+}
+
+/// SetThreadPriorityBoost: set thread priority boost state.
+///
+/// Phase A stub — returns FALSE.
+pub extern "win64" fn set_thread_priority_boost(
+    _h_thread: usize, _b_disable_priority_boost: i32,
+) -> i32 {
+    warn_once("SetThreadPriorityBoost");
+    0
+}
+
+/// SetThreadInformation: set thread information.
+///
+/// Phase A stub — returns FALSE.
+pub unsafe extern "win64" fn set_thread_information(
+    _h_thread: usize,
+    _thread_information_class: u32,
+    _thread_information: *const u8,
+    _thread_information_size: u32,
+) -> i32 {
+    warn_once("SetThreadInformation");
+    0
+}
+
+/// GetCurrencyFormatEx: format currency string (extended locale).
+///
+/// Phase A stub — returns 0.
+pub unsafe extern "win64" fn get_currency_format_ex(
+    _lp_locale_name: *const u16,
+    _dw_flags: u32,
+    _lp_value: *const u16,
+    _lp_format: *const u8,
+    _lp_currency_str: *mut u16,
+    _cch_currency: i32,
+) -> i32 {
+    warn_once("GetCurrencyFormatEx");
+    0
+}
+
+/// GetNumberFormatEx: format number string (extended locale).
+///
+/// Phase A stub — returns 0.
+pub unsafe extern "win64" fn get_number_format_ex(
+    _lp_locale_name: *const u16,
+    _dw_flags: u32,
+    _lp_value: *const u16,
+    _lp_format: *const u8,
+    _lp_number_str: *mut u16,
+    _cch_number: i32,
+) -> i32 {
+    warn_once("GetNumberFormatEx");
+    0
+}
+
+/// ResolveLocaleName: resolve a locale name to canonical name.
+///
+/// Phase A stub — returns 0 (error).
+pub unsafe extern "win64" fn resolve_locale_name(
+    _lp_name_to_resolve: *const u16,
+    _lp_locale_name: *mut u16,
+    _cch_locale_name: u32,
+) -> i32 {
+    warn_once("ResolveLocaleName");
+    0
+}
+
+/// TzSpecificLocalTimeToSystemTime: convert local to UTC time.
+///
+/// Phase A stub — returns FALSE.
+pub unsafe extern "win64" fn tz_specific_local_time_to_system_time(
+    _lp_time_zone: *const u8,
+    _lp_local_time: *const u8,
+    _lp_universal_time: *mut u8,
+) -> i32 {
+    warn_once("TzSpecificLocalTimeToSystemTime");
+    0
+}
+
+/// QueryThreadCycleTime: get cycle time for a thread.
+///
+/// Phase A stub — returns FALSE.
+pub unsafe extern "win64" fn query_thread_cycle_time(
+    _thread_handle: usize, _cycle_time: *mut u64,
+) -> i32 {
+    warn_once("QueryThreadCycleTime");
+    0
+}
+
+/// QueryFullProcessImageNameW: get full process image path.
+///
+/// Phase A stub — returns FALSE.
+pub unsafe extern "win64" fn query_full_process_image_name_w(
+    _h_process: usize,
+    _dw_flags: u32,
+    _lp_exe_name: *mut u16,
+    _lpdw_size: *mut u32,
+) -> i32 {
+    warn_once("QueryFullProcessImageNameW");
+    0
+}
+
+// ── Power stubs ────────────────────────────────────────────────────────────────
+
+/// PowerClearRequest: clear a power request.
+///
+/// Phase A stub — returns FALSE.
+pub extern "win64" fn power_clear_request(_power_request: usize) -> i32 {
+    warn_once("PowerClearRequest");
+    0
+}
+
+/// PowerCreateRequest: create a power request.
+///
+/// Phase A stub — returns NULL.
+pub unsafe extern "win64" fn power_create_request(
+    _context: *const u8,
+) -> usize {
+    warn_once("PowerCreateRequest");
+    0
+}
+
+/// PowerSetRequest: set a power request.
+///
+/// Phase A stub — returns FALSE.
+pub extern "win64" fn power_set_request(_power_request: usize) -> i32 {
+    warn_once("PowerSetRequest");
+    0
+}
+
+/// PrefetchVirtualMemory: prefetch virtual memory pages.
+///
+/// Phase A stub — returns TRUE (no-op).
+pub unsafe extern "win64" fn prefetch_virtual_memory(
+    _h_process: usize,
+    _num_entries: usize,
+    _virtual_entries: *const u8,
+    _flags: u32,
+) -> i32 {
+    1
+}
+
+// ── PSAPI stubs (forwarded through kernel32) ───────────────────────────────────
+
+/// K32EnumProcessModules: enumerate process modules.
+///
+/// Phase A stub — returns FALSE.
+pub unsafe extern "win64" fn k32_enum_process_modules(
+    _h_process: usize,
+    _lph_module: *mut usize,
+    _cb: u32,
+    _lpcb_needed: *mut u32,
+) -> i32 {
+    warn_once("K32EnumProcessModules");
+    0
+}
+
+/// K32GetModuleBaseNameW: get module base name.
+///
+/// Phase A stub — returns 0.
+pub unsafe extern "win64" fn k32_get_module_base_name_w(
+    _h_process: usize,
+    _h_module: usize,
+    _lp_base_name: *mut u16,
+    _n_size: u32,
+) -> u32 {
+    warn_once("K32GetModuleBaseNameW");
+    0
+}
+
+/// K32GetModuleInformation: get module information.
+///
+/// Phase A stub — returns FALSE.
+pub unsafe extern "win64" fn k32_get_module_information(
+    _h_process: usize,
+    _h_module: usize,
+    _lp_mod_info: *mut u8,
+    _cb: u32,
+) -> i32 {
+    warn_once("K32GetModuleInformation");
+    0
+}
+
+/// K32GetPerformanceInfo: get system performance info.
+///
+/// Phase A stub — returns FALSE.
+pub unsafe extern "win64" fn k32_get_performance_info(
+    _lp_performance_info: *mut u8, _cb: u32,
+) -> i32 {
+    warn_once("K32GetPerformanceInfo");
+    0
+}
+
+/// K32GetProcessMemoryInfo: get process memory info.
+///
+/// Phase A stub — returns FALSE.
+pub unsafe extern "win64" fn k32_get_process_memory_info(
+    _h_process: usize,
+    _ppsmem_counters: *mut u8,
+    _cb: u32,
+) -> i32 {
+    warn_once("K32GetProcessMemoryInfo");
+    0
+}
+
+/// K32QueryWorkingSetEx: query process working set.
+///
+/// Phase A stub — returns FALSE.
+pub unsafe extern "win64" fn k32_query_working_set_ex(
+    _h_process: usize,
+    _pv: *mut u8,
+    _cb: u32,
+) -> i32 {
+    warn_once("K32QueryWorkingSetEx");
+    0
+}
+
+// ── Runtime stubs ──────────────────────────────────────────────────────────────
+
+/// RtlCaptureStackBackTrace: capture a stack backtrace.
+///
+/// Phase A stub — returns 0.
+pub unsafe extern "win64" fn rtl_capture_stack_back_trace(
+    _frames_to_skip: u32,
+    _frames_to_capture: u32,
+    _back_trace: *mut usize,
+    _back_trace_hash: *mut u32,
+) -> u16 {
+    0
+}
+
+/// RtlDeleteFunctionTable: delete a dynamic function table entry.
+///
+/// Phase A stub — returns FALSE.
+pub extern "win64" fn rtl_delete_function_table(
+    _function_table: usize,
+) -> i32 {
+    0
+}
+
+/// CheckRemoteDebuggerPresent: check if debugger is attached.
+///
+/// Phase A stub — returns FALSE (no debugger).
+pub unsafe extern "win64" fn check_remote_debugger_present(
+    _h_process: usize,
+    _pb_debugger_present: *mut i32,
+) -> i32 {
+    1 // TRUE
+}
+
+/// WerRegisterRuntimeExceptionModule: register a WER exception module.
+///
+/// Phase A stub — returns S_OK.
+pub unsafe extern "win64" fn wer_register_runtime_exception_module(
+    _callback: *const u16,
+    _context: *const u8,
+) -> i32 {
+    0 // S_OK
+}
+
 // ── INI cluster ───────────────────────────────────────────────────────────────
 
 // Resolve a guest wide-string filename to a canonical Linux path for the INI cache.
@@ -18243,6 +19319,87 @@ mod tests {
             "SetProcessInformation",
             "SetProcessShutdownParameters",
             "QueryProcessCycleTime",
+            // Process/Job
+            "AssignProcessToJobObject",
+            "CreateJobObjectW",
+            "CreateSymbolicLinkW",
+            "DeleteProcThreadAttributeList",
+            "InitializeProcThreadAttributeList",
+            "UpdateProcThreadAttribute",
+            "TerminateJobObject",
+            "SetInformationJobObject",
+            "QueryInformationJobObject",
+            "GetProcessMitigationPolicy",
+            "SetProcessMitigationPolicy",
+            "ReadProcessMemory",
+            "WTSGetActiveConsoleSessionId",
+            "Wow64GetThreadContext",
+            "NeedCurrentDirectoryForExePathW",
+            // File/IO
+            "CancelIoEx",
+            "CancelSynchronousIo",
+            "ClearCommError",
+            "EscapeCommFunction",
+            "FindFirstFileExA",
+            "GetCommModemStatus",
+            "LockFile",
+            "PurgeComm",
+            "ReOpenFile",
+            "ReplaceFileW",
+            "SetFileCompletionNotificationModes",
+            "SetFileInformationByHandle",
+            "UnlockFileEx",
+            "WaitNamedPipeW",
+            // System Info
+            "GetComputerNameExW",
+            "GetCurrentPackageFullName",
+            "GetDiskFreeSpaceA",
+            "GetErrorMode",
+            "GetGeoInfoW",
+            "GetLogicalProcessorInformation",
+            "GetLogicalProcessorInformationEx",
+            "GetPackageFamilyName",
+            "GetPackagePathByFullName",
+            "GetPackagesByPackageFamily",
+            "GetUserGeoID",
+            "GetMaximumProcessorCount",
+            "GetMaximumProcessorGroupCount",
+            // Heap
+            "GetProcessHeaps",
+            "HeapCompact",
+            "HeapLock",
+            "HeapUnlock",
+            "HeapValidate",
+            "HeapWalk",
+            // Thread/Locale
+            "GetThreadGroupAffinity",
+            "GetThreadPreferredUILanguages",
+            "GetThreadPriorityBoost",
+            "SetThreadPriorityBoost",
+            "SetThreadInformation",
+            "GetCurrencyFormatEx",
+            "GetNumberFormatEx",
+            "ResolveLocaleName",
+            "TzSpecificLocalTimeToSystemTime",
+            "QueryThreadCycleTime",
+            "QueryFullProcessImageNameW",
+            // Power
+            "PowerClearRequest",
+            "PowerCreateRequest",
+            "PowerSetRequest",
+            "PrefetchVirtualMemory",
+            // PSAPI (forwarded through kernel32)
+            "K32EnumProcessModules",
+            "K32GetModuleBaseNameW",
+            "K32GetModuleInformation",
+            "K32GetPerformanceInfo",
+            "K32GetProcessMemoryInfo",
+            "K32QueryWorkingSetEx",
+            // Runtime
+            "RtlCaptureStackBackTrace",
+            "RtlDeleteFunctionTable",
+            "CheckRemoteDebuggerPresent",
+            "WerRegisterRuntimeExceptionModule",
         ];
         for &name in stubs {
             assert!(
