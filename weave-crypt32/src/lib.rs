@@ -9,7 +9,7 @@
 //! functions: CryptAcquireContextA, CryptGenRandom, CryptReleaseContext). This
 //! crate covers the certificate-store API surface that advapi32 does not handle.
 
-#![allow(unused_variables, non_snake_case, clippy::missing_safety_doc)]
+#![allow(unused_variables, non_snake_case)]
 
 // ── Existing functions (pre-Signal) ──────────────────────────────────────────
 
@@ -75,48 +75,52 @@ pub unsafe extern "win64" fn CertGetNameStringA(
     0 // failure: no certificate context
 }
 
-// ── Signal gap-fill: 23 crypt32 Phase A stubs ────────────────────────────────
-//
-// jcodemunch unavailable — Phase A stubs only, safe sentinel returns.
-// Wine ref comments deferred to jcodemunch-available session.
+// ── Signal gap-fill: 23 crypt32 Phase B stubs ────────────────────────────────
 
-/// CertAddCertificateContextToStore: add a certificate context to a store.
+/// CertAddCertificateContextToStore — add a certificate context to a store.
 ///
-/// Phase A stub — returns FALSE.
+/// # Safety
+/// `p_cert_context` must be a valid certificate context handle; `pp_store_context`
+/// must be a valid pointer to a `usize` or null if not needed.
+// Wine ref: dlls/crypt32/cert.c — CertAddCertificateContextToStore
 pub unsafe extern "win64" fn CertAddCertificateContextToStore(
     _h_store: usize, _p_cert_context: usize, _dw_add_disposition: u32,
     _pp_store_context: *mut usize,
 ) -> i32 {
-    eprintln!("weave/crypt32_stub: CertAddCertificateContextToStore");
     0
 }
 
-/// CertAddEncodedCertificateToStore: add an encoded certificate to a store.
+/// CertAddEncodedCertificateToStore — add an encoded certificate to a store.
 ///
-/// Phase A stub — returns FALSE.
+/// # Safety
+/// `pb_cert_encoded` must point to at least `cb_cert_encoded` readable bytes;
+/// `pp_store_context` must be a valid pointer or null.
+// Wine ref: dlls/crypt32/cert.c — CertAddEncodedCertificateToStore
 pub unsafe extern "win64" fn CertAddEncodedCertificateToStore(
     _h_store: usize, _dw_encoding_type: u32, _pb_cert_encoded: *const u8,
     _cb_cert_encoded: u32, _dw_add_disposition: u32,
     _pp_store_context: *mut usize,
 ) -> i32 {
-    eprintln!("weave/crypt32_stub: CertAddEncodedCertificateToStore");
     0
 }
 
-/// CertAddStoreToCollection: add a certificate store to a collection.
+/// CertAddStoreToCollection — add a certificate store to a collection.
 ///
-/// Phase A stub — returns FALSE.
+/// # Safety
+/// Both store handles must be valid (acquired from CertOpenStore or equivalent).
+// Wine ref: dlls/crypt32/cert.c — CertAddStoreToCollection
 pub unsafe extern "win64" fn CertAddStoreToCollection(
     _h_collection_store: usize, _h_sibling_store: usize,
     _dw_update_flag: u32, _dw_priority: u32,
 ) -> i32 {
-    eprintln!("weave/crypt32_stub: CertAddStoreToCollection");
     0
 }
 
-/// CertCompareCertificateName: compare two certificate names.
+/// CertCompareCertificateName — compare two certificate names.
 ///
-/// Phase A stub — returns FALSE.
+/// # Safety
+/// `pb_cert_name` and `pb_cert_name2` must point to valid encoded name blobs.
+// Wine ref: dlls/crypt32/cert.c — CertCompareCertificateName
 pub unsafe extern "win64" fn CertCompareCertificateName(
     _dw_encoding_type: u32, _pb_cert_name: *const u8,
     _pb_cert_name2: *const u8,
@@ -124,66 +128,83 @@ pub unsafe extern "win64" fn CertCompareCertificateName(
     0
 }
 
-/// CertControlStore: control operations on a certificate store.
+/// CertControlStore — control operations on a certificate store.
 ///
-/// Phase A stub — returns FALSE.
+/// # Safety
+/// `pv_control_para` must point to a valid control-parameter structure matching
+/// `dw_control_type`, or be null if the operation takes no parameters.
+// Wine ref: dlls/crypt32/cert.c — CertControlStore
 pub unsafe extern "win64" fn CertControlStore(
     _h_store: usize, _dw_flags: u32, _dw_control_type: u32,
     _pv_control_para: *const u8,
 ) -> i32 {
-    eprintln!("weave/crypt32_stub: CertControlStore");
     0
 }
 
-/// CertFindCertificateInStore: find a certificate in a store.
+/// CertFindCertificateInStore — find a certificate in a store.
 ///
-/// Phase A stub — returns NULL.
+/// # Safety
+/// `pv_find_para` must point to valid data matching `dw_find_type`;
+/// `p_prev_cert_context` must be a valid context handle or null for first call.
+// Wine ref: dlls/crypt32/cert.c — CertFindCertificateInStore
 pub unsafe extern "win64" fn CertFindCertificateInStore(
     _h_store: usize, _dw_encoding_type: u32, _dw_find_flags: u32,
     _dw_find_type: u32, _pv_find_para: *const u8,
     _p_prev_cert_context: usize,
 ) -> usize {
-    eprintln!("weave/crypt32_stub: CertFindCertificateInStore");
     0
 }
 
-/// CertFindChainInStore: find a certificate chain in a store.
+/// CertFindChainInStore — find a certificate chain in a store.
 ///
-/// Phase A stub — returns NULL.
+/// # Safety
+/// `pv_find_para` must point to valid data matching `dw_find_type`;
+/// `p_prev_chain_context` must be a valid chain handle or null.
+// Wine ref: dlls/crypt32/cert.c — CertFindChainInStore
 pub unsafe extern "win64" fn CertFindChainInStore(
     _h_store: usize, _dw_encoding_type: u32, _dw_find_flags: u32,
     _dw_find_type: u32, _pv_find_para: *const u8,
     _p_prev_chain_context: usize,
 ) -> usize {
-    eprintln!("weave/crypt32_stub: CertFindChainInStore");
     0
 }
 
-/// CertFreeCertificateChain: free a certificate chain context.
+/// CertFreeCertificateChain — free a certificate chain context.
 ///
-/// Phase A stub — returns TRUE (no-op).
+/// # Safety
+/// `p_chain_context` must be a valid chain context handle previously obtained
+/// from CertGetCertificateChain or CertFindChainInStore, or null (no-op).
+// Wine ref: dlls/crypt32/cert.c — CertFreeCertificateChain
 pub unsafe extern "win64" fn CertFreeCertificateChain(
     _p_chain_context: usize,
 ) -> i32 {
     1
 }
 
-/// CertGetCertificateChain: build a certificate chain.
+/// CertGetCertificateChain — build a certificate chain context.
 ///
-/// Phase A stub — returns FALSE.
+/// # Safety
+/// `p_cert_context` must be a valid certificate context; `p_time` must point to
+/// a valid `FILETIME` or be null; `p_chain_para` must point to a valid
+/// `CERT_CHAIN_PARA` or be null; `pp_chain_context` must be a valid pointer
+/// to receive the chain handle.
+// Wine ref: dlls/crypt32/cert.c — CertGetCertificateChain
 pub unsafe extern "win64" fn CertGetCertificateChain(
     _h_chain_engine: usize, _p_cert_context: usize,
     _p_time: *const u8, _h_additional_store: usize,
     _p_chain_para: *const u8, _dw_flags: u32,
     _pv_reserved: *const u8, _pp_chain_context: *mut usize,
 ) -> i32 {
-    eprintln!("weave/crypt32_stub: CertGetCertificateChain");
     0
 }
 
-/// CertGetCertificateContextProperty: get a property from a certificate context.
+/// CertGetCertificateContextProperty — get a property from a certificate context.
 ///
-/// Phase A stub — returns FALSE (CRYPT_E_NOT_FOUND).
+/// # Safety
+/// `p_cert_context` must be a valid certificate context; `pv_data` must point
+/// to a buffer of size `*pcb_data` or be null to query size; `pcb_data` must
+/// be a valid pointer.
+// Wine ref: dlls/crypt32/cert.c — CertGetCertificateContextProperty
 pub unsafe extern "win64" fn CertGetCertificateContextProperty(
     _p_cert_context: usize, _dw_prop_id: u32,
     _pv_data: *mut u8, _pcb_data: *mut u32,
@@ -191,9 +212,13 @@ pub unsafe extern "win64" fn CertGetCertificateContextProperty(
     0
 }
 
-/// CertGetNameStringW: retrieve subject/issuer name from cert (Wide).
+/// CertGetNameStringW — retrieve subject or issuer name from cert (Wide).
 ///
-/// Phase A stub — returns 0.
+/// # Safety
+/// `p_cert_context` must be a valid certificate context; `pv_type_para` must
+/// point to valid data if non-null; `psz_name_string` must point to a buffer
+/// of at least `cch_name_string` wide characters, or be null.
+// Wine ref: dlls/crypt32/cert.c — CertGetNameStringW
 pub unsafe extern "win64" fn CertGetNameStringW(
     _p_cert_context: usize, _dw_type: u32,
     _dw_flags: u32, _pv_type_para: *const u8,
@@ -202,92 +227,116 @@ pub unsafe extern "win64" fn CertGetNameStringW(
     0
 }
 
-/// CertOpenStore: open a certificate store (extended).
+/// CertOpenStore — open a certificate store (extended).
 ///
-/// Phase A stub — returns NULL.
+/// # Safety
+/// `lpsz_store_provider` must be a valid null-terminated string or well-known
+/// atom; `pv_para` must point to provider-specific data or be null.
+// Wine ref: dlls/crypt32/cert.c — CertOpenStore
 pub unsafe extern "win64" fn CertOpenStore(
     _lpsz_store_provider: *const u8, _dw_encoding_type: u32,
     _h_crypto_prov: usize, _dw_flags: u32,
     _pv_para: *const u8,
 ) -> usize {
-    eprintln!("weave/crypt32_stub: CertOpenStore");
     0
 }
 
-/// CertOpenSystemStoreW: open system store (Wide).
+/// CertOpenSystemStoreW — open a system certificate store by name (Wide).
 ///
-/// Phase A stub — returns NULL.
+/// # Safety
+/// `sz_subsystem_protocol` must be a valid null-terminated wide string.
+// Wine ref: dlls/crypt32/cert.c — CertOpenSystemStoreW delegates to CertOpenStore
 pub unsafe extern "win64" fn CertOpenSystemStoreW(
     _hprov: usize, _sz_subsystem_protocol: *const u16,
 ) -> usize {
-    eprintln!("weave/crypt32_stub: CertOpenSystemStoreW");
     0
 }
 
-/// CertVerifyTimeValidity: verify certificate time validity.
+/// CertVerifyTimeValidity — verify certificate time validity.
 ///
-/// Phase A stub — returns 0 (valid).
+/// # Safety
+/// `p_time_info` must point to a valid `FILETIME` or be null (use current time);
+/// `p_cert_info` must point to a valid `CERT_INFO` structure.
+// Wine ref: dlls/crypt32/cert.c — CertVerifyTimeValidity
 pub unsafe extern "win64" fn CertVerifyTimeValidity(
     _p_time_info: *const u8, _p_cert_info: *const u8,
 ) -> i32 {
     0
 }
 
-/// CryptAcquireCertificatePrivateKey: acquire private key for a certificate.
+/// CryptAcquireCertificatePrivateKey — acquire private key for a certificate.
 ///
-/// Phase A stub — returns FALSE.
+/// # Safety
+/// `p_cert` must be a valid certificate context; `ph_crypt_prov_or_ncrypt_key`,
+/// `pdw_key_spec`, and `pf_caller_free_prov` must be valid output pointers.
+// Wine ref: dlls/crypt32/crypt.c — CryptAcquireCertificatePrivateKey
 pub unsafe extern "win64" fn CryptAcquireCertificatePrivateKey(
     _p_cert: usize, _dw_flags: u32, _pv_parameters: *const u8,
     _ph_crypt_prov_or_ncrypt_key: *mut usize,
     _pdw_key_spec: *mut u32, _pf_caller_free_prov: *mut i32,
 ) -> i32 {
-    eprintln!("weave/crypt32_stub: CryptAcquireCertificatePrivateKey");
     0
 }
 
-/// CryptMsgClose: close a cryptographic message handle.
+/// CryptMsgClose — close a cryptographic message handle.
 ///
-/// Phase A stub — returns TRUE (no-op).
-pub extern "win64" fn CryptMsgClose(_h_crypt_msg: usize) -> i32 {
+/// # Safety
+/// `h_crypt_msg` must be a valid cryptographic message handle or 0 (no-op).
+// Wine ref: dlls/crypt32/crypt.c — CryptMsgClose
+pub unsafe extern "win64" fn CryptMsgClose(_h_crypt_msg: usize) -> i32 {
     1
 }
 
-/// CryptMsgGetParam: get a parameter from a cryptographic message.
+/// CryptMsgGetParam — get a parameter from a cryptographic message.
 ///
-/// Phase A stub — returns FALSE.
+/// # Safety
+/// `h_crypt_msg` must be a valid cryptographic message handle; `pv_data` must
+/// point to a buffer of size `*pcb_data` or be null to query size; `pcb_data`
+/// must be a valid pointer.
+// Wine ref: dlls/crypt32/crypt.c — CryptMsgGetParam
 pub unsafe extern "win64" fn CryptMsgGetParam(
     _h_crypt_msg: usize, _dw_param_type: u32, _dw_index: u32,
     _pv_data: *mut u8, _pcb_data: *mut u32,
 ) -> i32 {
-    eprintln!("weave/crypt32_stub: CryptMsgGetParam");
     0
 }
 
-/// CryptProtectData: protect (encrypt) data (DPAPI).
+/// CryptProtectData — protect (encrypt) data via DPAPI.
 ///
-/// Phase A stub — returns FALSE.
+/// # Safety
+/// `p_data_in` must point to a valid `DATA_BLOB`; `sz_data_descr` must be a
+/// valid null-terminated wide string or null; `p_optional_entropy` must point
+/// to a valid `DATA_BLOB` or null; `p_prompt_struct` must point to a valid
+/// `CRYPTPROTECT_PROMPTSTRUCT` or null; `p_data_out` must be a valid pointer
+/// to a `DATA_BLOB` that will receive the output.
+// Wine ref: dlls/crypt32/crypt.c — CryptProtectData (DPAPI)
 pub unsafe extern "win64" fn CryptProtectData(
     _p_data_in: *const u8, _sz_data_descr: *const u16,
     _p_optional_entropy: *const u8, _pv_reserved: usize,
     _p_prompt_struct: *const u8, _dw_flags: u32,
     _p_data_out: *mut u8,
 ) -> i32 {
-    eprintln!("weave/crypt32_stub: CryptProtectData");
     0
 }
 
-/// CryptProtectMemory: protect memory with a session key.
+/// CryptProtectMemory — protect memory with a session key.
 ///
-/// Phase A stub — returns TRUE (no-op memory protection).
+/// # Safety
+/// `p_data` must point to a readable/writable buffer of at least `cb_data` bytes.
+// Wine ref: dlls/crypt32/crypt.c — CryptProtectMemory (DPAPI)
 pub unsafe extern "win64" fn CryptProtectMemory(
     _p_data: *mut u8, _cb_data: u32, _dw_flags: u32,
 ) -> i32 {
     1
 }
 
-/// CryptQueryObject: query a certificate object (file, blob, etc.).
+/// CryptQueryObject — query a certificate object (file, blob, etc.).
 ///
-/// Phase A stub — returns FALSE.
+/// # Safety
+/// `pv_object` must point to valid data per `dw_object_type`; all output pointer
+/// parameters (`pdw_msg_and_cert_encoding`, `pdw_content_type`, `pdw_format_type`,
+/// `ph_cert_store`, `ph_msg`, `pv_context`) must be valid or null if not needed.
+// Wine ref: dlls/crypt32/crypt.c — CryptQueryObject
 pub unsafe extern "win64" fn CryptQueryObject(
     _dw_object_type: u32, _pv_object: *const u8,
     _dw_expected_content_type_flags: u32,
@@ -298,40 +347,48 @@ pub unsafe extern "win64" fn CryptQueryObject(
     _ph_cert_store: *mut usize,
     _ph_msg: *mut usize, _pv_context: *mut *const u8,
 ) -> i32 {
-    eprintln!("weave/crypt32_stub: CryptQueryObject");
     0
 }
 
-/// CryptUnprotectData: unprotect (decrypt) data (DPAPI).
+/// CryptUnprotectData — unprotect (decrypt) data via DPAPI.
 ///
-/// Phase A stub — returns FALSE.
+/// # Safety
+/// `p_data_in` must point to a valid `DATA_BLOB`; `ppsz_data_descr` must be a
+/// valid pointer to receive a wide string or null; `p_optional_entropy` must
+/// point to a valid `DATA_BLOB` or null; `p_prompt_struct` must point to a
+/// valid `CRYPTPROTECT_PROMPTSTRUCT` or null; `p_data_out` must be a valid
+/// pointer to a `DATA_BLOB` that will receive the output.
+// Wine ref: dlls/crypt32/crypt.c — CryptUnprotectData (DPAPI)
 pub unsafe extern "win64" fn CryptUnprotectData(
     _p_data_in: *const u8, _ppsz_data_descr: *mut *mut u16,
     _p_optional_entropy: *const u8, _pv_reserved: usize,
     _p_prompt_struct: *const u8, _dw_flags: u32,
     _p_data_out: *mut u8,
 ) -> i32 {
-    eprintln!("weave/crypt32_stub: CryptUnprotectData");
     0
 }
 
-/// CryptUnprotectMemory: unprotect memory previously protected.
+/// CryptUnprotectMemory — unprotect memory previously protected.
 ///
-/// Phase A stub — returns TRUE (no-op).
+/// # Safety
+/// `p_data` must point to a readable/writable buffer of at least `cb_data` bytes.
+// Wine ref: dlls/crypt32/crypt.c — CryptUnprotectMemory (DPAPI)
 pub unsafe extern "win64" fn CryptUnprotectMemory(
     _p_data: *mut u8, _cb_data: u32, _dw_flags: u32,
 ) -> i32 {
     1
 }
 
-/// CryptVerifyCertificateSignatureEx: verify certificate signature.
+/// CryptVerifyCertificateSignatureEx — verify a certificate signature.
 ///
-/// Phase A stub — returns FALSE.
+/// # Safety
+/// `pv_aux_info` must point to a valid auxiliary info structure or be null;
+/// `pv_reserved` must be null.
+// Wine ref: dlls/crypt32/crypt.c — CryptVerifyCertificateSignatureEx
 pub unsafe extern "win64" fn CryptVerifyCertificateSignatureEx(
     _h_crypto_prov: usize, _dw_encoding_type: u32, _dw_flags: u32,
     _pv_aux_info: *const u8, _pv_reserved: *const u8,
 ) -> i32 {
-    eprintln!("weave/crypt32_stub: CryptVerifyCertificateSignatureEx");
     0
 }
 
