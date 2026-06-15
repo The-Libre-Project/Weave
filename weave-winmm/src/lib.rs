@@ -846,6 +846,169 @@ pub unsafe extern "win64" fn wave_out_get_error_text_w(
     0 // MMSYSERR_NOERROR
 }
 
+// ── Signal gap-fill: MIDI stubs ───────────────────────────────────────────────
+//
+// jcodemunch unavailable — Phase A stubs only, safe sentinel returns.
+// Wine ref comments deferred to jcodemunch-available session.
+
+const MMSYSERR_NODRIVER: u32 = 6;
+
+// ── MIDI Input stubs ──────────────────────────────────────────────────────────
+
+/// midiInGetNumDevs: get number of MIDI input devices.
+pub extern "win64" fn midi_in_get_num_devs() -> u32 { 0 }
+
+/// midiInGetDevCapsW: get MIDI input device capabilities (Wide).
+///
+/// # Safety
+/// Caller must ensure `pmic` points to a buffer of at least `cb_mic` bytes.
+pub unsafe extern "win64" fn midi_in_get_dev_caps_w(
+    _u_device_id: u32, _pmic: *mut u8, _cb_mic: u32,
+) -> u32 {
+    MMSYSERR_NODRIVER
+}
+
+/// midiInOpen: open a MIDI input device.
+///
+/// # Safety
+/// Caller must ensure `phmi` is a valid output pointer.
+pub unsafe extern "win64" fn midi_in_open(
+    _phmi: *mut usize, _u_device_id: u32, _dw_callback: usize,
+    _dw_instance: usize, _fdw_open: u32,
+) -> u32 {
+    eprintln!("weave/winmm_stub: midiInOpen");
+    MMSYSERR_NODRIVER
+}
+
+/// midiInClose: close a MIDI input device.
+pub extern "win64" fn midi_in_close(_hmi: usize) -> u32 {
+    eprintln!("weave/winmm_stub: midiInClose");
+    MMSYSERR_NODRIVER
+}
+
+/// midiInPrepareHeader: prepare a MIDI input buffer.
+///
+/// # Safety
+/// Caller must ensure `pmh` is a valid pointer.
+pub unsafe extern "win64" fn midi_in_prepare_header(
+    _hmi: usize, _pmh: *mut u8, _cb_mh: u32,
+) -> u32 {
+    eprintln!("weave/winmm_stub: midiInPrepareHeader");
+    MMSYSERR_NODRIVER
+}
+
+/// midiInUnprepareHeader: unprepare a MIDI input buffer.
+///
+/// # Safety
+/// Caller must ensure `pmh` is a valid pointer.
+pub unsafe extern "win64" fn midi_in_unprepare_header(
+    _hmi: usize, _pmh: *mut u8, _cb_mh: u32,
+) -> u32 {
+    eprintln!("weave/winmm_stub: midiInUnprepareHeader");
+    MMSYSERR_NODRIVER
+}
+
+/// midiInAddBuffer: add a buffer to MIDI input device.
+///
+/// # Safety
+/// Caller must ensure `pmh` is a valid pointer.
+pub unsafe extern "win64" fn midi_in_add_buffer(
+    _hmi: usize, _pmh: *mut u8, _cb_mh: u32,
+) -> u32 {
+    eprintln!("weave/winmm_stub: midiInAddBuffer");
+    MMSYSERR_NODRIVER
+}
+
+/// midiInStart: start MIDI input.
+pub extern "win64" fn midi_in_start(_hmi: usize) -> u32 {
+    eprintln!("weave/winmm_stub: midiInStart");
+    MMSYSERR_NODRIVER
+}
+
+/// midiInReset: reset MIDI input.
+pub extern "win64" fn midi_in_reset(_hmi: usize) -> u32 {
+    eprintln!("weave/winmm_stub: midiInReset");
+    MMSYSERR_NODRIVER
+}
+
+// ── MIDI Output stubs ─────────────────────────────────────────────────────────
+
+/// midiOutGetNumDevs: get number of MIDI output devices.
+pub extern "win64" fn midi_out_get_num_devs() -> u32 { 0 }
+
+/// midiOutGetDevCapsW: get MIDI output device capabilities (Wide).
+///
+/// # Safety
+/// Caller must ensure `pmoc` points to a buffer of at least `cb_moc` bytes.
+pub unsafe extern "win64" fn midi_out_get_dev_caps_w(
+    _u_device_id: u32, _pmoc: *mut u8, _cb_moc: u32,
+) -> u32 {
+    MMSYSERR_NODRIVER
+}
+
+/// midiOutOpen: open a MIDI output device.
+///
+/// # Safety
+/// Caller must ensure `phmo` is a valid output pointer.
+pub unsafe extern "win64" fn midi_out_open(
+    _phmo: *mut usize, _u_device_id: u32, _dw_callback: usize,
+    _dw_instance: usize, _fdw_open: u32,
+) -> u32 {
+    eprintln!("weave/winmm_stub: midiOutOpen");
+    MMSYSERR_NODRIVER
+}
+
+/// midiOutClose: close a MIDI output device.
+pub extern "win64" fn midi_out_close(_hmo: usize) -> u32 {
+    eprintln!("weave/winmm_stub: midiOutClose");
+    MMSYSERR_NODRIVER
+}
+
+/// midiOutPrepareHeader: prepare a MIDI output buffer.
+///
+/// # Safety
+/// Caller must ensure `pmh` is a valid pointer.
+pub unsafe extern "win64" fn midi_out_prepare_header(
+    _hmo: usize, _pmh: *mut u8, _cb_mh: u32,
+) -> u32 {
+    eprintln!("weave/winmm_stub: midiOutPrepareHeader");
+    MMSYSERR_NODRIVER
+}
+
+/// midiOutUnprepareHeader: unprepare a MIDI output buffer.
+///
+/// # Safety
+/// Caller must ensure `pmh` is a valid pointer.
+pub unsafe extern "win64" fn midi_out_unprepare_header(
+    _hmo: usize, _pmh: *mut u8, _cb_mh: u32,
+) -> u32 {
+    eprintln!("weave/winmm_stub: midiOutUnprepareHeader");
+    MMSYSERR_NODRIVER
+}
+
+/// midiOutShortMsg: send a short MIDI message.
+pub extern "win64" fn midi_out_short_msg(_hmo: usize, _dw_msg: u32) -> u32 {
+    eprintln!("weave/winmm_stub: midiOutShortMsg");
+    MMSYSERR_NODRIVER
+}
+
+/// midiOutLongMsg: send a long (system exclusive) MIDI message.
+///
+/// # Safety
+/// Caller must ensure `pmh` is a valid pointer.
+pub unsafe extern "win64" fn midi_out_long_msg(
+    _hmo: usize, _pmh: *mut u8, _cb_mh: u32,
+) -> u32 {
+    eprintln!("weave/winmm_stub: midiOutLongMsg");
+    MMSYSERR_NODRIVER
+}
+
+/// midiOutReset: reset MIDI output.
+pub extern "win64" fn midi_out_reset(_hmo: usize) -> u32 {
+    eprintln!("weave/winmm_stub: midiOutReset");
+    MMSYSERR_NODRIVER
+}
+
 /// Returns true for any DLL name this crate handles.
 fn is_winmm_dll(dll: &str) -> bool {
     dll.eq_ignore_ascii_case("winmm.dll")
@@ -985,6 +1148,92 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
             wave_out_get_error_text_w as unsafe extern "win64" fn(u32, *mut u16, u32) -> u32
                 as *const () as usize,
         ),
+        // ── Signal gap-fill: 18 MIDI Phase A stubs ──
+        "midiInGetNumDevs" => Some(midi_in_get_num_devs as *const () as usize),
+        "midiInGetDevCapsW" => Some(
+            midi_in_get_dev_caps_w as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
+        ),
+        "midiInOpen" => Some(
+            midi_in_open as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const () as usize,
+        ),
+        "midiInClose" => Some(midi_in_close as extern "win64" fn(_) -> _ as *const () as usize),
+        "midiInPrepareHeader" => Some(
+            midi_in_prepare_header as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
+        ),
+        "midiInUnprepareHeader" => Some(
+            midi_in_unprepare_header as unsafe extern "win64" fn(_, _, _) -> _
+                as *const () as usize,
+        ),
+        "midiInAddBuffer" => Some(
+            midi_in_add_buffer as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
+        ),
+        "midiInStart" => Some(midi_in_start as extern "win64" fn(_) -> _ as *const () as usize),
+        "midiInReset" => Some(midi_in_reset as extern "win64" fn(_) -> _ as *const () as usize),
+        "midiOutGetNumDevs" => Some(midi_out_get_num_devs as *const () as usize),
+        "midiOutGetDevCapsW" => Some(
+            midi_out_get_dev_caps_w as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
+        ),
+        "midiOutOpen" => Some(
+            midi_out_open as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const () as usize,
+        ),
+        "midiOutClose" => Some(midi_out_close as extern "win64" fn(_) -> _ as *const () as usize),
+        "midiOutPrepareHeader" => Some(
+            midi_out_prepare_header as unsafe extern "win64" fn(_, _, _) -> _
+                as *const () as usize,
+        ),
+        "midiOutUnprepareHeader" => Some(
+            midi_out_unprepare_header as unsafe extern "win64" fn(_, _, _) -> _
+                as *const () as usize,
+        ),
+        "midiOutShortMsg" => Some(
+            midi_out_short_msg as extern "win64" fn(_, _) -> _ as *const () as usize,
+        ),
+        "midiOutLongMsg" => Some(
+            midi_out_long_msg as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
+        ),
+        "midiOutReset" => Some(midi_out_reset as extern "win64" fn(_) -> _ as *const () as usize),
         _ => None,
+    }
+}
+
+// ── Tests ────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::resolve;
+
+    #[test]
+    fn resolve_known_functions() {
+        let funcs = [
+            "timeGetTime", "timeBeginPeriod", "timeEndPeriod",
+            "waveOutGetNumDevs", "waveOutOpen", "waveOutClose",
+            "waveOutPrepareHeader", "waveOutUnprepareHeader", "waveOutWrite",
+            "waveOutReset", "waveOutPause", "waveOutRestart",
+            "waveInGetNumDevs",
+        ];
+        for f in &funcs {
+            assert!(resolve("winmm.dll", f).is_some(), "missing {f}");
+        }
+    }
+
+    #[test]
+    fn resolve_midi_stubs() {
+        let midi = [
+            "midiInGetNumDevs", "midiInGetDevCapsW", "midiInOpen", "midiInClose",
+            "midiInPrepareHeader", "midiInUnprepareHeader", "midiInAddBuffer",
+            "midiInStart", "midiInReset",
+            "midiOutGetNumDevs", "midiOutGetDevCapsW", "midiOutOpen", "midiOutClose",
+            "midiOutPrepareHeader", "midiOutUnprepareHeader", "midiOutShortMsg",
+            "midiOutLongMsg", "midiOutReset",
+        ];
+        for f in &midi {
+            assert!(resolve("winmm.dll", f).is_some(), "missing {f}");
+        }
+    }
+
+    #[test]
+    fn resolve_wrong_dll_returns_none() {
+        assert!(resolve("kernel32.dll", "timeGetTime").is_none());
+        assert!(resolve("winmm.dll", "__nonexistent__").is_none());
     }
 }
