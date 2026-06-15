@@ -8390,3 +8390,158 @@ fn q_dir_file_pane_gate() {
 
     eprintln!("q_dir_file_pane_gate: A1+A2+A3 passed");
 }
+
+// ── Signal Desktop Phase A probe ─────────────────────────────────────────────
+//
+// Signal Desktop (~539 IAT imports across 7 DLLs — all resolved as of
+// 2026-06-15). This probe verifies PE load + IAT resolution + first-crash
+// point in the Electron startup pipeline.
+
+/// Signal Desktop Phase A probe: load Signal.exe with IAT tracing, capture
+/// the crash/hang frontier.
+#[test]
+fn signal_desktop_phase_a_probe() {
+    if !cfg!(target_os = "linux") {
+        eprintln!("skipping Signal probe — requires Linux");
+        return;
+    }
+
+    let weave_bin = env!("CARGO_BIN_EXE_weave");
+    let fixture = format!(
+        "{}/../tests/fixtures/bin/signal.exe",
+        env!("CARGO_MANIFEST_DIR")
+    );
+
+    if !std::path::Path::new(&fixture).exists() {
+        eprintln!("skipping Signal probe — signal.exe not at {fixture}");
+        return;
+    }
+
+    let mut child = std::process::Command::new(weave_bin)
+        .arg(&fixture)
+        .env("WEAVE_IAT_TRACE", "1")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|e| panic!("failed to spawn weave on signal.exe: {e}"));
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    let killed_by_deadline: std::sync::Arc<std::sync::atomic::AtomicBool> =
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let killed = killed_by_deadline.clone();
+
+    let stderr_shared: std::sync::Arc<std::sync::Mutex<Vec<u8>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let stderr_dest = stderr_shared.clone();
+    let mut child_stderr = child.stderr.take().unwrap();
+
+    let drain_thread = std::thread::spawn(move || {
+        use std::io::Read;
+        let mut buf = Vec::new();
+        child_stderr.read_to_end(&mut buf).ok();
+        *stderr_dest.lock().unwrap() = buf;
+    });
+
+    let mut exited = false;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                eprintln!("Signal probe: exited with {status}");
+                exited = true;
+                break;
+            }
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    killed.store(true, std::sync::atomic::Ordering::SeqCst);
+                    eprintln!("Signal probe: killed after 60s timeout");
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err(e) => {
+                eprintln!("Signal probe: wait error {e}");
+                break;
+            }
+        }
+    }
+
+    drop(child);
+    let _ = drain_thread.join();
+
+    let stderr_bytes = stderr_shared.lock().unwrap().clone();
+    let stderr = String::from_utf8_lossy(&stderr_bytes);
+    let killed_flag = killed.load(std::sync::atomic::Ordering::SeqCst);
+
+    // ── Analysis ───────────────────────────────────────────────────────────
+    eprintln!("====== Signal Desktop Phase A Probe Report ======");
+
+    if killed_flag {
+        let elapsed = 60u64;
+        eprintln!("Result: KILLED after {elapsed}s (timeout)");
+    } else if exited {
+        eprintln!("Result: PROCESS EXITED (not killed)");
+    } else {
+        eprintln!("Result: UNKNOWN (neither killed nor exited)");
+    }
+
+    // PHASE markers
+    let phases: Vec<&str> = stderr
+        .lines()
+        .filter(|l| l.contains("PHASE:"))
+        .collect();
+    eprintln!("\nPHASE markers ({}):", phases.len());
+    for p in &phases {
+        eprintln!("  {p}");
+    }
+
+    // Unresolved imports
+    let unresolved: Vec<&str> = stderr
+        .lines()
+        .filter(|l| l.contains("unresolved") || l.contains("lookup-miss"))
+        .collect();
+    eprintln!("\nUnresolved imports ({}):", unresolved.len());
+    for u in unresolved.iter().take(30) {
+        eprintln!("  {u}");
+    }
+    if unresolved.len() > 30 {
+        eprintln!("  ... and {} more", unresolved.len() - 30);
+    }
+
+    // IAT trace lines (resolve/patched)
+    let iat_resolve: Vec<&str> = stderr
+        .lines()
+        .filter(|l| l.contains("iat_resolve") || l.contains("IAT") || l.contains("patched"))
+        .collect();
+    eprintln!("\nIAT resolution summary: {} lines", iat_resolve.len());
+
+    // First 20 interesting lines (exclude "weave/ntdll:" boilerplate)
+    let interesting: Vec<&str> = stderr
+        .lines()
+        .filter(|l| {
+            !l.is_empty()
+                && !l.starts_with("weave/ntdll: Ldr")
+                && !l.contains("sched_yield")
+        })
+        .take(50)
+        .collect();
+    eprintln!("\nFirst 50 interesting stderr lines:");
+    for l in &interesting {
+        eprintln!("  {l}");
+    }
+
+    // ── Summary ────────────────────────────────────────────────────────────
+    let total_iat = stderr.lines().filter(|l| l.contains("iat_resolve")).count();
+    let total_unresolved = unresolved.len();
+    eprintln!("\n====== Signal Probe Summary ======");
+    eprintln!("  IAT resolves:     {total_iat}");
+    eprintln!("  Unresolved:       {total_unresolved}");
+    eprintln!("  PHASE markers:    {}", phases.len());
+    eprintln!("  Killed by timeout: {killed_flag}");
+    eprintln!("  Process exited:    {exited}");
+    eprintln!("==================================");
+
+    // Phase A probe: no assertions — purely diagnostic.
+    // Assert only that we got stderr output.
+    assert!(!stderr.is_empty(), "Signal probe: no stderr output");
+}
