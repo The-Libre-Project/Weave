@@ -993,23 +993,224 @@ pub unsafe extern "win64" fn sh_get_folder_path_and_sub_folder_w(
     0x8000_4001u32 as i32 // E_NOTIMPL
 }
 
+// ── SHGetFileInfoW constants ──────────────────────────────────────────────
+
+const SHGFI_ICON: u32 = 0x00000100;
+const SHGFI_DISPLAYNAME: u32 = 0x00000200;
+const SHGFI_TYPENAME: u32 = 0x00000400;
+const SHGFI_ATTRIBUTES: u32 = 0x00000800;
+const SHGFI_ICONLOCATION: u32 = 0x00001000;
+const SHGFI_EXETYPE: u32 = 0x00002000;
+const SHGFI_SYSICONINDEX: u32 = 0x00004000;
+const SHGFI_LINKOVERLAY: u32 = 0x00008000;
+const SHGFI_SELECTED: u32 = 0x00010000;
+const SHGFI_LARGEICON: u32 = 0x00000000;
+const SHGFI_SMALLICON: u32 = 0x00000001;
+const SHGFI_OPENICON: u32 = 0x00000002;
+const SHGFI_SHELLICONSIZE: u32 = 0x00000004;
+const SHGFI_PIDL: u32 = 0x00000008;
+const SHGFI_USEFILEATTRIBUTES: u32 = 0x00000010;
+
+const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x00000010;
+
+fn decode_wide_path(ptr: *const u16) -> String {
+    if ptr.is_null() {
+        return String::new();
+    }
+    let mut chars = Vec::new();
+    let mut p = ptr;
+    loop {
+        let c = unsafe { *p };
+        if c == 0 {
+            break;
+        }
+        chars.push(c);
+        p = unsafe { p.add(1) };
+    }
+    String::from_utf16_lossy(&chars)
+}
+
+fn write_wide_to_buf(dest: *mut u16, s: &str, max: usize) {
+    if dest.is_null() || max == 0 {
+        return;
+    }
+    let mut i = 0;
+    for ch in s.encode_utf16() {
+        if i >= max - 1 {
+            break;
+        }
+        unsafe {
+            *dest.add(i) = ch;
+        }
+        i += 1;
+    }
+    unsafe {
+        *dest.add(i) = 0;
+    }
+}
+
+fn extension_to_type_name(ext: &str) -> &'static str {
+    match ext.to_lowercase().as_str() {
+        "" | "." => "File",
+        ".txt" | ".log" | ".md" | ".rst" => "Text Document",
+        ".exe" | ".com" | ".bat" | ".cmd" => "Application",
+        ".dll" | ".ocx" | ".sys" => "System File",
+        ".png" | ".jpg" | ".jpeg" | ".gif" | ".bmp" | ".tiff" | ".webp" => "Image",
+        ".mp3" | ".wav" | ".flac" | ".ogg" | ".wma" | ".aac" | ".m4a" => "Audio",
+        ".mp4" | ".avi" | ".mkv" | ".mov" | ".wmv" | ".flv" => "Video",
+        ".zip" | ".rar" | ".7z" | ".tar" | ".gz" | ".bz2" | ".xz" => "Compressed Archive",
+        ".pdf" => "PDF Document",
+        ".doc" | ".docx" => "Word Document",
+        ".xls" | ".xlsx" => "Excel Spreadsheet",
+        ".htm" | ".html" => "HTML Document",
+        ".c" | ".cpp" | ".h" | ".rs" | ".py" | ".js" | ".ts" => "Source Code",
+        _ => "File",
+    }
+}
+
 // Wine ref: dlls/shell32/shell32_main.c — queries icon index, display name, type name per uFlags;
 // SHGFI_USEFILEATTRIBUTES skips disk access; returns HIMAGELIST handle or 0 on failure.
 /// SHGetFileInfoW — retrieve information about an object in the shell namespace (Wide).
 ///
-/// Returns 0 — stub.
+/// May write szDisplayName at offset 16, szTypeName at offset 536, iIcon at offset 8,
+/// dwAttributes at offset 12, and hIcon at offset 0, depending on `u_flags`.
 ///
 /// # Safety
-/// Pointer arguments are accepted but not dereferenced.
+/// `psfi` must point to a valid SHFILEINFOW buffer (696 bytes) when non-null.
 // Wine ref: dlls/shell32/shell32_main.c — icon index/display name/type by uFlags; SHGFI_USEFILEATTRIBUTES skips disk.
 pub unsafe extern "win64" fn sh_get_file_info_w(
-    _psz_path: *const u16,
-    _dw_file_attributes: u32,
-    _psfi: *mut u8,
+    psz_path: *const u16,
+    dw_file_attributes: u32,
+    psfi: *mut u8,
     _cb_file_info: u32,
-    _u_flags: u32,
+    u_flags: u32,
 ) -> usize {
-    0
+    // Null checks
+    if psfi.is_null() {
+        return 0;
+    }
+    if psz_path.is_null() && (u_flags & SHGFI_USEFILEATTRIBUTES) == 0 {
+        return 0;
+    }
+
+    // Resolve path
+    let path_str = if (u_flags & SHGFI_PIDL) != 0 {
+        // psz_path is a PIDL pointer (ITEMIDLIST*)
+        match crate::pidl::pidl_path_from_list(psz_path as *const u8) {
+            Some(p) => p,
+            None => return 0,
+        }
+    } else {
+        decode_wide_path(psz_path)
+    };
+
+    // Extract filename (last component after \ or /)
+    let filename = path_str
+        .rsplit(|c| c == '\\' || c == '/')
+        .next()
+        .unwrap_or(&path_str)
+        .to_string();
+
+    // Extract extension (with the dot)
+    let ext = if let Some(dot_pos) = filename.rfind('.') {
+        &filename[dot_pos..]
+    } else {
+        ""
+    };
+
+    // Determine if this is a directory
+    let is_directory = if (u_flags & SHGFI_USEFILEATTRIBUTES) != 0 {
+        (dw_file_attributes & FILE_ATTRIBUTE_DIRECTORY) != 0
+    } else if !path_str.is_empty() {
+        std::fs::metadata(&path_str)
+            .map(|m| m.is_dir())
+            .unwrap_or(false)
+    } else {
+        false
+    };
+
+    // SHGFI_DISPLAYNAME: write filename at offset 16
+    if (u_flags & SHGFI_DISPLAYNAME) != 0 {
+        write_wide_to_buf((psfi as *mut u16).add(16 / 2), &filename, 260);
+    }
+
+    // SHGFI_TYPENAME: write type name at offset 536
+    if (u_flags & SHGFI_TYPENAME) != 0 {
+        let type_name = if is_directory {
+            "File Folder"
+        } else {
+            extension_to_type_name(ext)
+        };
+        write_wide_to_buf((psfi as *mut u16).add(536 / 2), type_name, 80);
+    }
+
+    // SHGFI_SYSICONINDEX: write icon index at offset 8
+    if (u_flags & SHGFI_SYSICONINDEX) != 0 {
+        let icon_index: i32 = if is_directory {
+            0 // folder icon
+        } else {
+            match ext.to_lowercase().as_str() {
+                ".exe" => 2,
+                ".txt" | ".log" => 3,
+                ".zip" | ".rar" | ".7z" => 5,
+                ".png" | ".jpg" | ".jpeg" | ".gif" | ".bmp" => 6,
+                _ => 1, // generic document
+            }
+        };
+        unsafe {
+            *(psfi.add(8) as *mut i32) = icon_index;
+        }
+    }
+
+    // SHGFI_ATTRIBUTES: write attributes at offset 12
+    if (u_flags & SHGFI_ATTRIBUTES) != 0 {
+        let attrs = if (u_flags & SHGFI_USEFILEATTRIBUTES) != 0 {
+            dw_file_attributes
+        } else if !path_str.is_empty() {
+            std::fs::metadata(&path_str)
+                .map(|m| {
+                    let mut a: u32 = 0;
+                    if m.is_dir() {
+                        a |= FILE_ATTRIBUTE_DIRECTORY;
+                    }
+                    if m.is_file() {
+                        a |= 0x80; // FILE_ATTRIBUTE_NORMAL
+                    }
+                    a
+                })
+                .unwrap_or(0x80)
+        } else {
+            0x80
+        };
+        unsafe {
+            *(psfi.add(12) as *mut u32) = attrs;
+        }
+    }
+
+    // SHGFI_ICON: write fake HICON handle at offset 0 (only if SYSICONINDEX not set)
+    if (u_flags & SHGFI_ICON) != 0 && (u_flags & SHGFI_SYSICONINDEX) == 0 {
+        unsafe {
+            *(psfi as *mut usize) = 0x1usize;
+        }
+    }
+
+    // SHGFI_EXETYPE: return executable type
+    if (u_flags & SHGFI_EXETYPE) != 0 {
+        let ext_lower = ext.to_lowercase();
+        if ext_lower == ".exe" || ext_lower == ".com" {
+            return 0x0000_014C; // IMAGE_FILE_MACHINE_I386
+        }
+        return 0x0000_0000;
+    }
+
+    // SHGFI_ICONLOCATION: copy full path to display name field, return path length
+    if (u_flags & SHGFI_ICONLOCATION) != 0 {
+        write_wide_to_buf((psfi as *mut u16).add(16 / 2), &path_str, 260);
+        return path_str.len();
+    }
+
+    // Success: return fake HIMAGELIST handle (non-zero, looks like a real system image list)
+    0x0001_0001usize
 }
 
 // Wine ref: dlls/shell32/shlfileop.c — parses SHFILEOPSTRUCTW; dispatches to copy/delete/rename/move
@@ -1328,6 +1529,37 @@ mod tests {
         match old {
             Some(v) => std::env::set_var("WEAVE_TEST_BROWSE_RESULT", v),
             None => std::env::remove_var("WEAVE_TEST_BROWSE_RESULT"),
+        }
+    }
+
+    fn encode_utf16_null(s: &str) -> Vec<u16> {
+        s.encode_utf16().chain(std::iter::once(0)).collect()
+    }
+
+    #[test]
+    fn test_sh_get_file_info_display_name() {
+        unsafe {
+            let path = encode_utf16_null("C:\\test\\document.txt");
+            let mut sfi = [0u8; 696];
+            let result = sh_get_file_info_w(
+                path.as_ptr(),
+                0,
+                sfi.as_mut_ptr(),
+                696,
+                SHGFI_DISPLAYNAME | SHGFI_TYPENAME | SHGFI_SYSICONINDEX,
+            );
+            assert!(result != 0, "SHGetFileInfoW should succeed");
+            // Read display name (offset 16)
+            let name_bytes = &sfi[16..16 + 520];
+            let name_wide: Vec<u16> = name_bytes
+                .chunks(2)
+                .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                .collect();
+            let name = String::from_utf16_lossy(&name_wide);
+            assert!(
+                name.contains("document"),
+                "Display name should contain 'document', got: {name}"
+            );
         }
     }
 }

@@ -92,7 +92,7 @@ fn join_win_paths(base: &str, child: &str) -> String {
     }
 }
 
-fn pidl_path_from_list(pidl: *const u8) -> Option<String> {
+pub(crate) fn pidl_path_from_list(pidl: *const u8) -> Option<String> {
     if pidl.is_null() {
         return None;
     }
