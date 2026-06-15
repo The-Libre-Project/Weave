@@ -2778,12 +2778,30 @@ pub unsafe extern "win64" fn wsa_enum_protocols_w(
     SOCKET_ERROR
 }
 
-/// WSASetEvent: set a WSAEVENT object to signaled state.
+/// WSASetEvent — set a WSAEVENT object to the signaled state.
 ///
-/// Phase A stub — returns FALSE.
-pub extern "win64" fn wsa_set_event(_event: usize) -> i32 {
-    eprintln!("weave/ws2_stub: WSASetEvent");
-    0
+/// Wine ref: dlls/ws2_32/socket.c:4024 — WSASetEvent calls SetEvent(hEvent).
+/// Weave: writes a 1 to the eventfd counter, signaling the event object.
+/// Returns BOOL (1 = success, 0 = failure).
+pub extern "win64" fn wsa_set_event(event: usize) -> i32 {
+    if event == WSA_INVALID_EVENT {
+        set_last_error(WSAEINVAL);
+        return 0; // FALSE
+    }
+    #[cfg(target_os = "linux")]
+    {
+        if let Some(efd) = handles::get_event_fd(event) {
+            let val: u64 = 1;
+            unsafe {
+                libc::write(
+                    efd,
+                    &val as *const u64 as *const libc::c_void,
+                    8,
+                );
+            }
+        }
+    }
+    1 // TRUE
 }
 
 // ── Service Discovery ──────────────────────────────────────────────────────────
