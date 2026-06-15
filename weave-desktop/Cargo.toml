@@ -7,3 +7,4 @@ description = "Desktop integration for Weave — .desktop file generation, xdg-m
 
 [dependencies]
 goblin = { version = "0.9", default-features = false, features = ["pe32", "pe64"] }
+image = { version = "0.25", default-features = false, features = ["png"] }

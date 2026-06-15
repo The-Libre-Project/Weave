@@ -245,8 +245,9 @@ fn handle_prefix_cmd(args: &[String]) -> ! {
                         .and_then(|s| s.to_str())
                         .unwrap_or(name);
                     let exec_cmd = format!("{} prefix launch {name}", current_exe.display());
-                    let icon_path =
-                        weave_desktop::extract_and_install_icon(name, &exe_path).unwrap_or(None);
+                    let icon_path = weave_desktop::extract_and_install_png_icon(name, &exe_path)
+                        .or_else(|_| weave_desktop::extract_and_install_icon(name, &exe_path))
+                        .unwrap_or(None);
                     let content = weave_desktop::generate_desktop_file(
                         app_name,
                         &exec_cmd,
