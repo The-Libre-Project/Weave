@@ -277,6 +277,26 @@ pub struct WinAddrInfo {
     pub ai_next: *mut WinAddrInfo,
 }
 
+/// Windows-layout `ADDRINFOEXW` structure (extended addrinfo).
+///
+/// Used by `GetAddrInfoExW`. Extends `WinAddrInfo` with:
+/// - `ai_canonname` as `PWSTR` (wide string instead of `char*`)
+/// - Extra fields: `ai_blob` and `ai_addrlength`
+/// - Total size: 72 bytes on x64
+#[repr(C)]
+pub struct AddrInfoExW {
+    ai_flags: i32,
+    ai_family: i32,
+    ai_socktype: i32,
+    ai_protocol: i32,
+    ai_addrlen: usize,
+    ai_canonname: *mut u16,
+    ai_addr: *mut u8,
+    ai_next: *mut AddrInfoExW,
+    ai_blob: *mut u8,
+    ai_addrlength: usize,
+}
+
 // ── Winsock API: startup / shutdown / errors ─────────────────────────────────
 
 /// WSAStartup — initialise Winsock. On Linux this fills WSADATA and returns 0.
@@ -2069,13 +2089,31 @@ pub unsafe extern "win64" fn ws_fd_is_set(s: usize, set: *const u8) -> i32 {
 
 // ── AddrInfo family ────────────────────────────────────────────────────────────
 
-/// FreeAddrInfoExW: free extended address info (getaddrinfo family).
+/// FreeAddrInfoExW — free extended address info chain.
 ///
-/// Phase A stub — no-op.
+/// Frees each `AddrInfoExW` node, its `ai_canonname` wide string, and
+/// its `ai_addr` sockaddr buffer.
 ///
 /// # Safety
-/// `addr_info` is accepted but not dereferenced.
-pub unsafe extern "win64" fn free_addr_info_ex_w(_addr_info: *mut u8) {}
+/// `addr_info` must be a pointer previously returned by `GetAddrInfoExW`,
+/// or null. Passing null is safe and is a no-op.
+pub unsafe extern "win64" fn free_addr_info_ex_w(addr_info: *mut AddrInfoExW) {
+    if addr_info.is_null() {
+        return;
+    }
+    let mut cur = addr_info;
+    while !cur.is_null() {
+        let node = Box::from_raw(cur);
+        if !node.ai_canonname.is_null() {
+            libc::free(node.ai_canonname as *mut libc::c_void);
+        }
+        if !node.ai_addr.is_null() && node.ai_addrlen > 0 {
+            let slice = std::ptr::slice_from_raw_parts_mut(node.ai_addr, node.ai_addrlen);
+            drop(Box::from_raw(slice));
+        }
+        cur = node.ai_next;
+    }
+}
 
 /// FreeAddrInfoW: free address info (wide variant of freeaddrinfo).
 ///
@@ -2097,25 +2135,155 @@ pub unsafe extern "win64" fn get_addr_info_ex_cancel(
     SOCKET_ERROR
 }
 
-/// GetAddrInfoExW: extended async getaddrinfo (wide).
+/// GetAddrInfoExW — extended async getaddrinfo (wide).
 ///
-/// Phase A stub — returns WSASYSNOTREADY.
+/// Synchronous-only implementation. If `_overlapped` is non-null, returns
+/// WSAEOPNOTSUPP. Otherwise, converts wide strings, resolves via
+/// `ws_getaddrinfo`, and converts the result chain to `AddrInfoExW`.
+///
+/// Returns 0 on success, or a Winsock error code.
 ///
 /// # Safety
 /// Caller must ensure all pointer arguments are valid.
+/// `node_name` and `service_name` must be valid null-terminated UTF-16
+/// strings or null. `hints` may be null. `results` must be non-null.
 pub unsafe extern "win64" fn get_addr_info_ex_w(
-    _node_name: *const u16,
-    _service_name: *const u16,
+    node_name: *const u16,
+    service_name: *const u16,
     _dw_namespace: u32,
     _lp_nsp_id: usize,
-    _hints: *const u8,
-    _results: *mut u8,
+    hints: *const AddrInfoExW,
+    results: *mut *mut AddrInfoExW,
     _timeout: usize,
-    _overlapped: usize,
+    overlapped: usize,
     _completion_routine: usize,
     _handle: *mut usize,
 ) -> i32 {
-    SOCKET_ERROR
+    if results.is_null() {
+        return 10014; // WSAEFAULT
+    }
+    *results = std::ptr::null_mut();
+
+    // Async not supported — synchronous path only.
+    if overlapped != 0 {
+        eprintln!("weave/GetAddrInfoExW: async mode not supported, overlapped provided");
+        return 10045; // WSAEOPNOTSUPP
+    }
+
+    // Convert wide node_name to CString.
+    let node_cstr = if node_name.is_null() {
+        None
+    } else {
+        let len = (0..).take_while(|&i| *node_name.add(i) != 0).count();
+        let slice = std::slice::from_raw_parts(node_name, len);
+        let utf8 = String::from_utf16_lossy(slice);
+        Some(CString::new(utf8).unwrap_or_else(|_| CString::new("").unwrap()))
+    };
+
+    // Convert wide service_name to CString.
+    let service_cstr = if service_name.is_null() {
+        None
+    } else {
+        let len = (0..).take_while(|&i| *service_name.add(i) != 0).count();
+        let slice = std::slice::from_raw_parts(service_name, len);
+        let utf8 = String::from_utf16_lossy(slice);
+        Some(CString::new(utf8).unwrap_or_else(|_| CString::new("").unwrap()))
+    };
+
+    let node_ptr = node_cstr
+        .as_ref()
+        .map_or(std::ptr::null(), |c| c.as_ptr() as *const u8);
+    let service_ptr = service_cstr
+        .as_ref()
+        .map_or(std::ptr::null(), |c| c.as_ptr() as *const u8);
+
+    // Build a WinAddrInfo hints struct from the AddrInfoExW hints
+    // (first 4 fields are layout-compatible).
+    let hints_win = if hints.is_null() {
+        None
+    } else {
+        Some(WinAddrInfo {
+            ai_flags: (*hints).ai_flags,
+            ai_family: (*hints).ai_family,
+            ai_socktype: (*hints).ai_socktype,
+            ai_protocol: (*hints).ai_protocol,
+            ai_addrlen: 0,
+            ai_canonname: std::ptr::null_mut(),
+            ai_addr: std::ptr::null_mut(),
+            ai_next: std::ptr::null_mut(),
+        })
+    };
+    let hints_ptr = hints_win
+        .as_ref()
+        .map_or(std::ptr::null(), |h| h as *const WinAddrInfo);
+
+    let mut win_result: *mut WinAddrInfo = std::ptr::null_mut();
+    let ret = ws_getaddrinfo(node_ptr, service_ptr, hints_ptr, &mut win_result);
+    if ret != 0 {
+        return ret;
+    }
+
+    // Convert WinAddrInfo chain → AddrInfoExW chain.
+    let mut head: *mut AddrInfoExW = std::ptr::null_mut();
+    let mut tail: *mut AddrInfoExW = std::ptr::null_mut();
+    let mut cur = win_result;
+
+    while !cur.is_null() {
+        let win_node = &*cur;
+
+        // Convert ai_canonname (char*) → wide (u16*).
+        let canon_wide = if win_node.ai_canonname.is_null() {
+            std::ptr::null_mut()
+        } else {
+            let cstr = std::ffi::CStr::from_ptr(win_node.ai_canonname as *const libc::c_char);
+            let bytes = cstr.to_bytes();
+            let encoded: Vec<u16> = bytes.iter().map(|&b| b as u16).collect();
+            let size = (encoded.len() + 1) * 2;
+            let ptr = libc::malloc(size) as *mut u16;
+            if !ptr.is_null() {
+                std::ptr::copy_nonoverlapping(encoded.as_ptr(), ptr, encoded.len());
+                *ptr.add(encoded.len()) = 0;
+            }
+            ptr
+        };
+
+        // Copy sockaddr data (new heap allocation).
+        let (addr_ptr, addr_len) = if !win_node.ai_addr.is_null() && win_node.ai_addrlen > 0 {
+            let len = win_node.ai_addrlen;
+            let buf = std::slice::from_raw_parts(win_node.ai_addr, len);
+            let boxed = buf.to_vec().into_boxed_slice();
+            (Box::into_raw(boxed) as *mut u8, len)
+        } else {
+            (std::ptr::null_mut(), 0)
+        };
+
+        let node = Box::into_raw(Box::new(AddrInfoExW {
+            ai_flags: win_node.ai_flags,
+            ai_family: win_node.ai_family,
+            ai_socktype: win_node.ai_socktype,
+            ai_protocol: win_node.ai_protocol,
+            ai_addrlen: addr_len,
+            ai_canonname: canon_wide,
+            ai_addr: addr_ptr,
+            ai_next: std::ptr::null_mut(),
+            ai_blob: std::ptr::null_mut(),
+            ai_addrlength: addr_len,
+        }));
+
+        if head.is_null() {
+            head = node;
+        } else {
+            (*tail).ai_next = node;
+        }
+        tail = node;
+        cur = win_node.ai_next;
+    }
+
+    // Free the intermediate WinAddrInfo chain (all data has been copied).
+    ws_freeaddrinfo(win_result);
+
+    *results = head;
+    0
 }
 
 /// GetAddrInfoW: wide-char getaddrinfo.
