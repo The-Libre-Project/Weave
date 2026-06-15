@@ -127,6 +127,21 @@ pub unsafe extern "win64" fn sys_string_len(bstr: *const u16) -> u32 {
     prefix / 2 // bytes → char count
 }
 
+/// SysStringByteLen — return the byte length of a BSTR (excluding the null terminator).
+///
+/// Returns 0 if `bstr` is null.
+///
+/// # Safety
+/// `bstr` must be a valid BSTR or null.
+// Wine ref: dlls/oleaut32/oleaut.c — SysStringByteLen reads the 4-byte prefix
+// stored by SysAllocStringByteLen/SysAllocString; returns 0 on NULL.
+pub unsafe extern "win64" fn sys_string_byte_len(bstr: *const u16) -> u32 {
+    if bstr.is_null() {
+        return 0;
+    }
+    unsafe { *((bstr as *const u8).sub(4) as *const u32) } // raw byte count from prefix
+}
+
 // ── SafeArray ────────────────────────────────────────────────────────────────
 
 /// SafeArrayCreate — create a safe array. Returns NULL (stub).
@@ -524,6 +539,11 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "SysStringLen" | "#7" => {
             Some(sys_string_len as unsafe extern "win64" fn(_) -> _ as *const () as usize)
         }
+        // SysStringByteLen (ordinal 8 in Windows export table; "#8" is mapped to
+        // GetErrorInfo in this resolver for Q-Dir compatibility)
+        "SysStringByteLen" => {
+            Some(sys_string_byte_len as unsafe extern "win64" fn(_) -> _ as *const () as usize)
+        }
         "VariantClear" | "#9" => {
             Some(variant_clear as unsafe extern "win64" fn(_) -> _ as *const () as usize)
         }
@@ -637,5 +657,54 @@ mod tests {
     #[test]
     fn sys_string_len_null() {
         assert_eq!(unsafe { sys_string_len(std::ptr::null()) }, 0);
+    }
+
+    #[test]
+    fn sys_string_byte_len_null() {
+        assert_eq!(unsafe { sys_string_byte_len(std::ptr::null()) }, 0);
+    }
+
+    #[test]
+    fn resolve_all_exports() {
+        // Every named export in the resolver must resolve.
+        let exports = [
+            "SysAllocString",
+            "SysAllocStringLen",
+            "SysFreeString",
+            "SafeArrayDestroy",
+            "SafeArrayCreate",
+            "SysStringLen",
+            "SysStringByteLen",
+            "VariantClear",
+            "VariantInit",
+            "VariantCopy",
+            "GetErrorInfo",
+            "VariantChangeType",
+            "SysAllocStringByteLen",
+            "SafeArrayGetElement",
+            "SafeArrayPutElement",
+            "SetErrorInfo",
+            "CreateErrorInfo",
+        ];
+        for name in &exports {
+            assert!(
+                resolve("oleaut32.dll", name).is_some(),
+                "oleaut32.dll!{name} must resolve"
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_all_ordinals() {
+        // Every ordinal in the resolver must resolve.
+        let ordinals = ["#2", "#4", "#6", "#7", "#8", "#9", "#10", "#11",
+                         "#12", "#15", "#16", "#23", "#24", "#146", "#149",
+                         "#162", "#411", "#419"];
+        for ord in &ordinals {
+            assert!(
+                resolve("oleaut32.dll", ord).is_some(),
+                "oleaut32.dll!{ord} must resolve"
+            );
+        }
     }
 }
