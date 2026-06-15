@@ -2337,23 +2337,189 @@ pub unsafe extern "win64" fn wsa_recv(
 
 /// WSARecvFrom: overlapped receive from, with source address.
 ///
-/// Phase A stub — returns SOCKET_ERROR.
+/// Phase B — synchronous gather-read from a datagram (or connected) socket,
+/// optionally capturing the source address.
+///
+/// Wine ref: dlls/ws2_32/socket.c — WSARecvFrom
 ///
 /// # Safety
 /// Caller must ensure all pointer arguments are valid.
 pub unsafe extern "win64" fn wsa_recv_from(
-    _s: usize,
-    _buffers: *mut u8,
-    _dw_buffer_count: u32,
-    _lp_number_of_bytes_recvd: *mut u32,
-    _lp_flags: *mut u32,
-    _lp_from: *mut u8,
-    _lp_from_len: *mut i32,
-    _lp_overlapped: usize,
+    s: usize,
+    lp_buffers: *mut u8,
+    dw_buffer_count: u32,
+    lp_number_of_bytes_recvd: *mut u32,
+    lp_flags: *mut u32,
+    lp_from: *mut u8,
+    lp_from_len: *mut i32,
+    lp_overlapped: usize,
     _lp_completion_routine: usize,
 ) -> i32 {
-    eprintln!("weave/ws2_stub: WSARecvFrom");
-    SOCKET_ERROR
+    if weave_core::ws2_trace::enabled() {
+        eprintln!(
+            "weave/ws2: WSARecvFrom s={s} count={dw_buffer_count} overlapped={lp_overlapped}"
+        );
+    }
+
+    // Both lp_number_of_bytes_recvd and lp_flags must be non-null.
+    // Wine ref: dlls/ws2_32/socket.c — WSARecvFrom validates both pointers.
+    if lp_number_of_bytes_recvd.is_null() || lp_flags.is_null() {
+        set_last_error(10014); // WSAEFAULT
+        return SOCKET_ERROR;
+    }
+
+    // Overlapped mode is async; not supported in Phase B.
+    if lp_overlapped != 0 {
+        eprintln!("weave/ws2_stub: WSARecvFrom overlapped mode not supported");
+        set_last_error(10045); // WSAEOPNOTSUPP
+        return SOCKET_ERROR;
+    }
+
+    // Determine whether we have a source address buffer.
+    let want_addr = !lp_from.is_null() && !lp_from_len.is_null() && *lp_from_len > 0;
+
+    // Synchronous gather-read.
+    let buffers = lp_buffers as *const WSABUF;
+    let mut total_recvd: u32 = 0;
+    let flags = *lp_flags as i32;
+    let mut addr_captured = false;
+
+    if dw_buffer_count == 0 {
+        // Wine ref: dlls/ws2_32/socket.c — zero buffers receives an empty datagram.
+        let mut linux_storage: libc::sockaddr_storage = std::mem::zeroed();
+        let mut linux_len: libc::socklen_t = std::mem::size_of::<libc::sockaddr_storage>() as _;
+
+        let ret = if want_addr {
+            libc::recvfrom(
+                s as i32,
+                std::ptr::null_mut(),
+                0,
+                flags,
+                &mut linux_storage as *mut _ as *mut libc::sockaddr,
+                &mut linux_len,
+            )
+        } else {
+            libc::recvfrom(
+                s as i32,
+                std::ptr::null_mut(),
+                0,
+                flags,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+
+        if ret < 0 {
+            let e = *libc::__errno_location();
+            if e == libc::EWOULDBLOCK || e == libc::EAGAIN {
+                *lp_number_of_bytes_recvd = 0;
+                save_errno();
+                return SOCKET_ERROR;
+            }
+            *lp_number_of_bytes_recvd = 0;
+            save_errno();
+            return SOCKET_ERROR;
+        }
+
+        // If we got a source address, patch it back to Windows format.
+        if want_addr && linux_len > 0 && ret >= 0 {
+            patch_sockaddr_linux_to_win(
+                &mut linux_storage as *mut _ as *mut u8,
+                linux_len as usize,
+            );
+            let copy_len = (linux_len as usize).min(*lp_from_len as usize);
+            std::ptr::copy_nonoverlapping(
+                &linux_storage as *const _ as *const u8,
+                lp_from,
+                copy_len,
+            );
+            *lp_from_len = linux_len as i32;
+        } else if want_addr {
+            *lp_from_len = 0;
+        }
+
+        *lp_number_of_bytes_recvd = 0;
+        *lp_flags = 0;
+        return 0;
+    }
+
+    for i in 0..dw_buffer_count as usize {
+        let buf = buffers.add(i).read();
+
+        let ret = if want_addr && !addr_captured {
+            // First buffer: capture source address.
+            let mut linux_storage: libc::sockaddr_storage = std::mem::zeroed();
+            let mut linux_len: libc::socklen_t = std::mem::size_of::<libc::sockaddr_storage>() as _;
+
+            let r = libc::recvfrom(
+                s as i32,
+                buf.buf as *mut libc::c_void,
+                buf.len as usize,
+                flags,
+                &mut linux_storage as *mut _ as *mut libc::sockaddr,
+                &mut linux_len,
+            );
+
+            if r >= 0 && linux_len > 0 {
+                // Convert source address to Windows format and write to caller's buffer.
+                patch_sockaddr_linux_to_win(
+                    &mut linux_storage as *mut _ as *mut u8,
+                    linux_len as usize,
+                );
+                let copy_len = (linux_len as usize).min(*lp_from_len as usize);
+                std::ptr::copy_nonoverlapping(
+                    &linux_storage as *const _ as *const u8,
+                    lp_from,
+                    copy_len,
+                );
+                *lp_from_len = linux_len as i32;
+                addr_captured = true;
+            } else if r >= 0 {
+                // recvfrom succeeded but no address — still update fromLen.
+                *lp_from_len = 0;
+            }
+
+            r
+        } else {
+            // Subsequent buffer (address already captured) or no address needed.
+            libc::recv(
+                s as i32,
+                buf.buf as *mut libc::c_void,
+                buf.len as usize,
+                flags,
+            )
+        };
+
+        if ret < 0 {
+            let e = *libc::__errno_location();
+            // EWOULDBLOCK/EAGAIN: no data available, not an error.
+            // Wine ref: dlls/ws2_32/socket.c — WSARecvFrom does not re-arm
+            // FD_READ (edge-triggered across all PeekMessage-based polling).
+            if e == libc::EWOULDBLOCK || e == libc::EAGAIN {
+                *lp_number_of_bytes_recvd = total_recvd;
+                save_errno();
+                return SOCKET_ERROR;
+            }
+            // Other error: report partial progress and return SOCKET_ERROR.
+            *lp_number_of_bytes_recvd = total_recvd;
+            save_errno();
+            return SOCKET_ERROR;
+        }
+
+        if ret == 0 {
+            // Clean close from peer — stop iterating, report partial total.
+            break;
+        }
+
+        total_recvd += ret as u32;
+    }
+
+    *lp_number_of_bytes_recvd = total_recvd;
+    // Wine ref: dlls/ws2_32/socket.c — WSARecvFrom clears MSG_PEEK residual
+    // from the flags output on success (caller can pass MSG_PEEK in,
+    // but the output flags reflect any side-effects).
+    *lp_flags = 0;
+    0
 }
 
 /// WSASend: overlapped send on a socket.
