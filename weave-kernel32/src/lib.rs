@@ -14953,6 +14953,152 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
             peek_named_pipe as unsafe extern "win64" fn(_, _, _, _, _, _) -> _ as *const ()
                 as usize,
         ),
+        // ── Signal gap-fill: 41 kernel32 Phase A stubs ──
+        "CreateRemoteThread" => Some(
+            create_remote_thread as unsafe extern "win64" fn(_, _, _, _, _, _, _) -> _
+                as *const () as usize,
+        ),
+        "ExitThread" => Some(exit_thread as extern "win64" fn(_) as *const () as usize),
+        "DebugBreak" => Some(debug_break as *const () as usize),
+        "FreeLibraryAndExitThread" => {
+            Some(free_library_and_exit_thread as extern "win64" fn(_, _) as *const () as usize)
+        }
+        "GetCurrentProcessorNumber" => {
+            Some(get_current_processor_number as *const () as usize)
+        }
+        "QueueUserWorkItem" => Some(
+            queue_user_work_item as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
+        ),
+        "RegisterWaitForSingleObject" => Some(
+            register_wait_for_single_object as unsafe extern "win64" fn(_, _, _, _, _, _) -> _
+                as *const () as usize,
+        ),
+        "UnregisterWait" => Some(
+            unregister_wait as unsafe extern "win64" fn(_) -> _ as *const () as usize,
+        ),
+        "UnregisterWaitEx" => Some(
+            unregister_wait_ex as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
+        ),
+        "VirtualProtectEx" => Some(
+            virtual_protect_ex as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "VirtualQueryEx" => Some(
+            virtual_query_ex as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
+        ),
+        "VirtualLock" => Some(
+            virtual_lock as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
+        ),
+        "VirtualUnlock" => Some(
+            virtual_unlock as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
+        ),
+        "DiscardVirtualMemory" => Some(
+            discard_virtual_memory as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
+        ),
+        "FlushViewOfFile" => Some(
+            flush_view_of_file as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
+        ),
+        "MapViewOfFileEx" => Some(
+            map_view_of_file_ex as unsafe extern "win64" fn(_, _, _, _, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "WriteProcessMemory" => Some(
+            write_process_memory as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "CreateIoCompletionPort" => Some(
+            create_io_completion_port as unsafe extern "win64" fn(_, _, _, _) -> _
+                as *const () as usize,
+        ),
+        "GetQueuedCompletionStatus" => Some(
+            get_queued_completion_status as unsafe extern "win64" fn(_, _, _, _, _) -> _
+                as *const () as usize,
+        ),
+        "GetQueuedCompletionStatusEx" => Some(
+            get_queued_completion_status_ex as unsafe extern "win64" fn(_, _, _, _, _, _) -> _
+                as *const () as usize,
+        ),
+        "PostQueuedCompletionStatus" => Some(
+            post_queued_completion_status as unsafe extern "win64" fn(_, _, _, _) -> _
+                as *const () as usize,
+        ),
+        "CreateNamedPipeW" => Some(
+            create_named_pipe_w as unsafe extern "win64" fn(_, _, _, _, _, _, _, _) -> _
+                as *const () as usize,
+        ),
+        "DisconnectNamedPipe" => Some(
+            disconnect_named_pipe as unsafe extern "win64" fn(_) -> _ as *const () as usize,
+        ),
+        "GetNamedPipeClientProcessId" => Some(
+            get_named_pipe_client_process_id as unsafe extern "win64" fn(_, _) -> _
+                as *const () as usize,
+        ),
+        "GetNamedPipeHandleStateW" => Some(
+            get_named_pipe_handle_state_w as unsafe extern "win64" fn(_, _, _, _, _, _, _) -> _
+                as *const () as usize,
+        ),
+        "GetNamedPipeServerProcessId" => Some(
+            get_named_pipe_server_process_id as unsafe extern "win64" fn(_, _) -> _
+                as *const () as usize,
+        ),
+        "SetNamedPipeHandleState" => Some(
+            set_named_pipe_handle_state as unsafe extern "win64" fn(_, _, _, _) -> _
+                as *const () as usize,
+        ),
+        "TransactNamedPipe" => Some(
+            transact_named_pipe as unsafe extern "win64" fn(_, _, _, _, _, _, _) -> _
+                as *const () as usize,
+        ),
+        "GetConsoleCursorInfo" => Some(
+            get_console_cursor_info as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
+        ),
+        "SetConsoleCursorInfo" => Some(
+            set_console_cursor_info as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
+        ),
+        "SetConsoleCursorPosition" => Some(
+            set_console_cursor_position as unsafe extern "win64" fn(_, _) -> _ as *const ()
+                as usize,
+        ),
+        "WriteConsoleInputW" => Some(
+            write_console_input_w as unsafe extern "win64" fn(_, _, _, _) -> _
+                as *const () as usize,
+        ),
+        "ReadConsoleInputW" => Some(
+            read_console_input_w as unsafe extern "win64" fn(_, _, _, _) -> _
+                as *const () as usize,
+        ),
+        "FillConsoleOutputCharacterW" => Some(
+            fill_console_output_character_w as unsafe extern "win64" fn(_, _, _, _, _) -> _
+                as *const () as usize,
+        ),
+        "FillConsoleOutputAttribute" => Some(
+            fill_console_output_attribute as unsafe extern "win64" fn(_, _, _, _, _) -> _
+                as *const () as usize,
+        ),
+        "GetProcessHandleCount" => Some(
+            get_process_handle_count as unsafe extern "win64" fn(_, _) -> _
+                as *const () as usize,
+        ),
+        "GetProcessIoCounters" => Some(
+            get_process_io_counters as unsafe extern "win64" fn(_, _) -> _
+                as *const () as usize,
+        ),
+        "GetProcessInformation" => Some(
+            get_process_information as unsafe extern "win64" fn(_, _, _, _) -> _
+                as *const () as usize,
+        ),
+        "SetProcessInformation" => Some(
+            set_process_information as unsafe extern "win64" fn(_, _, _, _) -> _
+                as *const () as usize,
+        ),
+        "SetProcessShutdownParameters" => Some(
+            set_process_shutdown_parameters as unsafe extern "win64" fn(_, _) -> _
+                as *const () as usize,
+        ),
+        "QueryProcessCycleTime" => Some(
+            query_process_cycle_time as unsafe extern "win64" fn(_, _) -> _
+                as *const () as usize,
+        ),
         _ => {
             // version.dll functions are forwarded through kernel32 in some apps;
             // also handle them when the DLL name is version.dll directly.
@@ -16966,6 +17112,588 @@ pub unsafe extern "win64" fn set_comm_timeouts(_h_file: usize, _lp_comm_timeouts
     0
 }
 
+// ── Signal gap-fill: missing kernel32 stubs ───────────────────────────────────
+//
+// jcodemunch unavailable — Phase A stubs only, safe sentinel returns.
+// Wine ref comments deferred to jcodemunch-available session.
+
+// ── Thread / Process stubs ─────────────────────────────────────────────────────
+
+/// CreateRemoteThread: create a thread in another process.
+///
+/// Phase A stub — returns NULL.
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn create_remote_thread(
+    _h_process: usize,
+    _lp_thread_attributes: usize,
+    _dw_stack_size: usize,
+    _lp_start_address: usize,
+    _lp_parameter: usize,
+    _dw_creation_flags: u32,
+    _lp_thread_id: *mut u32,
+) -> usize {
+    warn_once("CreateRemoteThread");
+    0
+}
+
+/// ExitThread: end the calling thread.
+///
+/// Phase A stub — no-op (thread exit unimplemented).
+pub extern "win64" fn exit_thread(_dw_exit_code: u32) {
+    warn_once("ExitThread");
+}
+
+/// DebugBreak: signal a debug break to the debugger.
+///
+/// Phase A stub — no-op on Weave.
+pub extern "win64" fn debug_break() {
+    warn_once("DebugBreak");
+}
+
+/// FreeLibraryAndExitThread: free a DLL and exit the thread.
+///
+/// Phase A stub — no-op.
+pub extern "win64" fn free_library_and_exit_thread(_h_module: usize, _dw_exit_code: u32) {
+    warn_once("FreeLibraryAndExitThread");
+}
+
+/// GetCurrentProcessorNumber: get the number of the current processor.
+///
+/// Phase A stub — returns 0.
+pub extern "win64" fn get_current_processor_number() -> u32 {
+    0
+}
+
+/// QueueUserWorkItem: queue a user-mode work item to the thread pool.
+///
+/// Phase A stub — returns FALSE.
+///
+/// # Safety
+/// Caller must ensure function pointer is valid if not NULL.
+pub unsafe extern "win64" fn queue_user_work_item(
+    _lp_fn: usize,
+    _lp_context: usize,
+    _dw_flags: u32,
+) -> i32 {
+    warn_once("QueueUserWorkItem");
+    0
+}
+
+/// RegisterWaitForSingleObject: register a wait on a thread pool.
+///
+/// Phase A stub — returns FALSE.
+///
+/// # Safety
+/// Caller must ensure `ph_new_wait_object` is a valid pointer.
+pub unsafe extern "win64" fn register_wait_for_single_object(
+    _ph_new_wait_object: *mut usize,
+    _h_object: usize,
+    _call_back: usize,
+    _context: usize,
+    _dw_milliseconds: u32,
+    _dw_flags: u32,
+) -> i32 {
+    warn_once("RegisterWaitForSingleObject");
+    0
+}
+
+/// UnregisterWait: cancel a registered wait operation.
+///
+/// Phase A stub — returns FALSE.
+pub extern "win64" fn unregister_wait(_handle: usize) -> i32 {
+    0
+}
+
+/// UnregisterWaitEx: cancel a registered wait operation and block until callbacks complete.
+///
+/// Phase A stub — returns FALSE.
+pub extern "win64" fn unregister_wait_ex(_handle: usize, _completion_event: usize) -> i32 {
+    0
+}
+
+// ── Memory Management stubs ────────────────────────────────────────────────────
+
+/// VirtualProtectEx: change memory protection in another process.
+///
+/// Phase A stub — returns FALSE.
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn virtual_protect_ex(
+    _h_process: usize,
+    _lp_address: *mut u8,
+    _dw_size: usize,
+    _fl_new_protect: u32,
+    _lp_fl_old_protect: *mut u32,
+) -> i32 {
+    warn_once("VirtualProtectEx");
+    0
+}
+
+/// VirtualQueryEx: query memory region information in another process.
+///
+/// Phase A stub — returns 0 (no bytes written).
+///
+/// # Safety
+/// Caller must ensure `lp_buffer` is a valid pointer.
+pub unsafe extern "win64" fn virtual_query_ex(
+    _h_process: usize,
+    _lp_address: *const u8,
+    lp_buffer: *mut u8,
+    _dw_length: usize,
+) -> usize {
+    warn_once("VirtualQueryEx");
+    // Zero out the returned struct to indicate failure
+    // MEMORY_BASIC_INFORMATION is 48 bytes
+    if !lp_buffer.is_null() {
+        std::ptr::write_bytes(lp_buffer, 0, 48);
+    }
+    0
+}
+
+/// VirtualLock: lock memory pages into physical RAM.
+///
+/// Phase A stub — returns TRUE (silently succeed; locking has no meaning in Weave).
+///
+/// # Safety
+/// `lp_address` is accepted but not dereferenced.
+pub unsafe extern "win64" fn virtual_lock(_lp_address: *mut u8, _dw_size: usize) -> i32 {
+    1
+}
+
+/// VirtualUnlock: unlock previously locked memory pages.
+///
+/// Phase A stub — returns TRUE.
+///
+/// # Safety
+/// `lp_address` is accepted but not dereferenced.
+pub unsafe extern "win64" fn virtual_unlock(_lp_address: *mut u8, _dw_size: usize) -> i32 {
+    1
+}
+
+/// DiscardVirtualMemory: discard memory contents of a range.
+///
+/// Phase A stub — returns STATUS_NOT_IMPLEMENTED.
+///
+/// # Safety
+/// `virtual_address` is accepted but not dereferenced.
+pub unsafe extern "win64" fn discard_virtual_memory(
+    _virtual_address: *mut u8,
+    _size: usize,
+) -> i32 {
+    warn_once("DiscardVirtualMemory");
+    0xC000_0002u32 as i32 // STATUS_NOT_IMPLEMENTED
+}
+
+/// FlushViewOfFile: flush a mapped view of a file.
+///
+/// Phase A stub — returns TRUE (flush is no-op).
+///
+/// # Safety
+/// `lp_base_address` is accepted but not dereferenced.
+pub unsafe extern "win64" fn flush_view_of_file(
+    _lp_base_address: *mut u8,
+    _dw_number_of_bytes_to_flush: usize,
+) -> i32 {
+    1
+}
+
+/// MapViewOfFileEx: map a view of a file mapping at a specific address.
+///
+/// Phase A stub — returns NULL.
+pub unsafe extern "win64" fn map_view_of_file_ex(
+    _h_file_mapping_object: usize,
+    _dw_desired_access: u32,
+    _dw_file_offset_high: u32,
+    _dw_file_offset_low: u32,
+    _dw_number_of_bytes_to_map: usize,
+    _lp_base_address: *mut u8,
+) -> usize {
+    warn_once("MapViewOfFileEx");
+    0
+}
+
+/// WriteProcessMemory: write data to another process's memory.
+///
+/// Phase A stub — returns FALSE (cross-process writes unsupported).
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn write_process_memory(
+    _h_process: usize,
+    _lp_base_address: *mut u8,
+    _lp_buffer: *const u8,
+    _n_size: usize,
+    _lp_number_of_bytes_written: *mut usize,
+) -> i32 {
+    warn_once("WriteProcessMemory");
+    0
+}
+
+// ── I/O Completion stubs ───────────────────────────────────────────────────────
+
+/// CreateIoCompletionPort: create or associate an I/O completion port.
+///
+/// Phase A stub — returns NULL.
+pub unsafe extern "win64" fn create_io_completion_port(
+    _file_handle: usize,
+    _existing_completion_port: usize,
+    _completion_key: usize,
+    _dw_number_of_concurrent_threads: u32,
+) -> usize {
+    warn_once("CreateIoCompletionPort");
+    0
+}
+
+/// GetQueuedCompletionStatus: de-queue a completion packet.
+///
+/// Phase A stub — returns FALSE (no IO yet).
+///
+/// # Safety
+/// Caller must ensure output pointers are valid.
+pub unsafe extern "win64" fn get_queued_completion_status(
+    _completion_port: usize,
+    _lp_number_of_bytes: *mut u32,
+    _lp_completion_key: *mut usize,
+    _lp_overlapped: *mut *mut u8,
+    _dw_milliseconds: u32,
+) -> i32 {
+    0
+}
+
+/// GetQueuedCompletionStatusEx: de-queue multiple completion packets.
+///
+/// Phase A stub — returns FALSE.
+///
+/// # Safety
+/// Caller must ensure `lp_completion_port_entries` is a valid buffer.
+pub unsafe extern "win64" fn get_queued_completion_status_ex(
+    _completion_port: usize,
+    _lp_completion_port_entries: *mut u8,
+    _ul_count: u32,
+    _ul_num_entries_removed: *mut u32,
+    _dw_milliseconds: u32,
+    _f_alertable: i32,
+) -> i32 {
+    0
+}
+
+/// PostQueuedCompletionStatus: post a completion packet to an IOCP.
+///
+/// Phase A stub — returns FALSE.
+pub unsafe extern "win64" fn post_queued_completion_status(
+    _completion_port: usize,
+    _dw_number_of_bytes_transferred: u32,
+    _dw_completion_key: usize,
+    _lp_overlapped: usize,
+) -> i32 {
+    warn_once("PostQueuedCompletionStatus");
+    0
+}
+
+// ── Named Pipe stubs ───────────────────────────────────────────────────────────
+
+/// CreateNamedPipeW: create a named pipe.
+///
+/// Phase A stub — returns INVALID_HANDLE_VALUE.
+///
+/// # Safety
+/// `lp_name` is accepted but not dereferenced.
+pub unsafe extern "win64" fn create_named_pipe_w(
+    _lp_name: *const u16,
+    _dw_open_mode: u32,
+    _dw_pipe_mode: u32,
+    _n_max_instances: u32,
+    _n_out_buffer_size: u32,
+    _n_in_buffer_size: u32,
+    _n_default_time_out: u32,
+    _lp_security_attributes: usize,
+) -> usize {
+    warn_once("CreateNamedPipeW");
+    usize::MAX
+}
+
+/// DisconnectNamedPipe: disconnect a named pipe.
+///
+/// Phase A stub — returns FALSE.
+pub extern "win64" fn disconnect_named_pipe(_h_named_pipe: usize) -> i32 {
+    warn_once("DisconnectNamedPipe");
+    0
+}
+
+/// GetNamedPipeClientProcessId: get the client process ID of a named pipe.
+///
+/// Phase A stub — returns FALSE.
+///
+/// # Safety
+/// `client_process_id` is accepted but not dereferenced.
+pub unsafe extern "win64" fn get_named_pipe_client_process_id(
+    _pipe: usize,
+    _client_process_id: *mut u32,
+) -> i32 {
+    0
+}
+
+/// GetNamedPipeHandleStateW: get state of a named pipe handle.
+///
+/// Phase A stub — returns FALSE.
+///
+/// # Safety
+/// All pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn get_named_pipe_handle_state_w(
+    _h_named_pipe: usize,
+    _lp_state: *mut u32,
+    _lp_cur_instances: *mut u32,
+    _lp_max_collection_count: *mut u32,
+    _lp_collect_data_timeout: *mut u32,
+    _lp_user_name: *mut u16,
+    _n_max_user_name_size: u32,
+) -> i32 {
+    warn_once("GetNamedPipeHandleStateW");
+    0
+}
+
+/// GetNamedPipeServerProcessId: get the server process ID of a named pipe.
+///
+/// Phase A stub — returns FALSE.
+///
+/// # Safety
+/// `server_process_id` is accepted but not dereferenced.
+pub unsafe extern "win64" fn get_named_pipe_server_process_id(
+    _pipe: usize,
+    _server_process_id: *mut u32,
+) -> i32 {
+    0
+}
+
+/// SetNamedPipeHandleState: set state of a named pipe handle.
+///
+/// Phase A stub — returns FALSE.
+pub unsafe extern "win64" fn set_named_pipe_handle_state(
+    _h_named_pipe: usize,
+    _lp_mode: *mut u32,
+    _lp_max_collection_count: *mut u32,
+    _lp_collect_data_timeout: *mut u32,
+) -> i32 {
+    warn_once("SetNamedPipeHandleState");
+    0
+}
+
+/// TransactNamedPipe: combined write-read on a named pipe.
+///
+/// Phase A stub — returns FALSE.
+///
+/// # Safety
+/// All pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn transact_named_pipe(
+    _h_named_pipe: usize,
+    _lp_in_buffer: *const u8,
+    _n_in_buffer_size: u32,
+    _lp_out_buffer: *mut u8,
+    _n_out_buffer_size: u32,
+    _lp_bytes_read: *mut u32,
+    _lp_overlapped: usize,
+) -> i32 {
+    warn_once("TransactNamedPipe");
+    0
+}
+
+// ── Console I/O stubs ──────────────────────────────────────────────────────────
+
+/// GetConsoleCursorInfo: get cursor size and visibility.
+///
+/// Phase A stub — returns FALSE.
+///
+/// # Safety
+/// `lp_console_cursor_info` is accepted but not dereferenced.
+pub unsafe extern "win64" fn get_console_cursor_info(
+    _h_console_output: usize,
+    _lp_console_cursor_info: *mut u8,
+) -> i32 {
+    warn_once("GetConsoleCursorInfo");
+    0
+}
+
+/// SetConsoleCursorInfo: set cursor size and visibility.
+///
+/// Phase A stub — returns FALSE.
+///
+/// # Safety
+/// `lp_console_cursor_info` is accepted but not dereferenced.
+pub unsafe extern "win64" fn set_console_cursor_info(
+    _h_console_output: usize,
+    _lp_console_cursor_info: *const u8,
+) -> i32 {
+    warn_once("SetConsoleCursorInfo");
+    0
+}
+
+/// SetConsoleCursorPosition: set cursor position in console.
+///
+/// Phase A stub — returns FALSE.
+pub unsafe extern "win64" fn set_console_cursor_position(
+    _h_console_output: usize,
+    _dw_cursor_position: u32, // COORD packed as u32
+) -> i32 {
+    warn_once("SetConsoleCursorPosition");
+    0
+}
+
+/// WriteConsoleInputW: write input records to the console input buffer.
+///
+/// Phase A stub — returns FALSE.
+///
+/// # Safety
+/// `lp_buffer` is accepted but not dereferenced.
+pub unsafe extern "win64" fn write_console_input_w(
+    _h_console_input: usize,
+    _lp_buffer: *const u8,
+    _n_length: u32,
+    _lp_number_of_events_written: *mut u32,
+) -> i32 {
+    warn_once("WriteConsoleInputW");
+    0
+}
+
+/// ReadConsoleInputW: read input records from the console.
+///
+/// Phase A stub — returns FALSE.
+///
+/// # Safety
+/// `lp_buffer` is accepted but not dereferenced.
+pub unsafe extern "win64" fn read_console_input_w(
+    _h_console_input: usize,
+    _lp_buffer: *mut u8,
+    _n_length: u32,
+    _lp_number_of_events_read: *mut u32,
+) -> i32 {
+    warn_once("ReadConsoleInputW");
+    0
+}
+
+/// FillConsoleOutputCharacterW: fill console with a character.
+///
+/// Phase A stub — returns FALSE.
+///
+/// # Safety
+/// `lp_number_of_chars_written` is accepted but not dereferenced.
+pub unsafe extern "win64" fn fill_console_output_character_w(
+    _h_console_output: usize,
+    _c_character: u16,
+    _n_length: u32,
+    _dw_write_coord: u32,
+    _lp_number_of_chars_written: *mut u32,
+) -> i32 {
+    warn_once("FillConsoleOutputCharacterW");
+    0
+}
+
+/// FillConsoleOutputAttribute: fill console attribute cells.
+///
+/// Phase A stub — returns FALSE.
+///
+/// # Safety
+/// `lp_number_of_attrs_written` is accepted but not dereferenced.
+pub unsafe extern "win64" fn fill_console_output_attribute(
+    _h_console_output: usize,
+    _w_attribute: u16,
+    _n_length: u32,
+    _dw_write_coord: u32,
+    _lp_number_of_attrs_written: *mut u32,
+) -> i32 {
+    warn_once("FillConsoleOutputAttribute");
+    0
+}
+
+// ── Process Info stubs ─────────────────────────────────────────────────────────
+
+/// GetProcessHandleCount: get the number of handles in a process.
+///
+/// Phase A stub — returns FALSE.
+///
+/// # Safety
+/// `pdw_handle_count` is accepted but not dereferenced.
+pub unsafe extern "win64" fn get_process_handle_count(
+    _h_process: usize,
+    _pdw_handle_count: *mut u32,
+) -> i32 {
+    warn_once("GetProcessHandleCount");
+    0
+}
+
+/// GetProcessIoCounters: get I/O statistics for a process.
+///
+/// Phase A stub — returns FALSE.
+///
+/// # Safety
+/// `lp_io_counters` is accepted but not dereferenced.
+pub unsafe extern "win64" fn get_process_io_counters(
+    _h_process: usize,
+    _lp_io_counters: *mut u8,
+) -> i32 {
+    warn_once("GetProcessIoCounters");
+    0
+}
+
+/// GetProcessInformation: get process information of a specific class.
+///
+/// Phase A stub — returns FALSE.
+///
+/// # Safety
+/// All pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn get_process_information(
+    _h_process: usize,
+    _process_information_class: u32,
+    _process_information: *mut u8,
+    _process_information_size: u32,
+) -> i32 {
+    warn_once("GetProcessInformation");
+    0
+}
+
+/// SetProcessInformation: set process information of a specific class.
+///
+/// Phase A stub — returns FALSE.
+///
+/// # Safety
+/// `process_information` is accepted but not dereferenced.
+pub unsafe extern "win64" fn set_process_information(
+    _h_process: usize,
+    _process_information_class: u32,
+    _process_information: *const u8,
+    _process_information_size: u32,
+) -> i32 {
+    warn_once("SetProcessInformation");
+    0
+}
+
+/// SetProcessShutdownParameters: set shutdown priority and flags.
+///
+/// Phase A stub — returns FALSE.
+pub extern "win64" fn set_process_shutdown_parameters(
+    _dw_level: u32,
+    _dw_flags: u32,
+) -> i32 {
+    warn_once("SetProcessShutdownParameters");
+    0
+}
+
+/// QueryProcessCycleTime: get cycle time for a process.
+///
+/// Phase A stub — returns FALSE.
+///
+/// # Safety
+/// `cycle_time` is accepted but not dereferenced.
+pub unsafe extern "win64" fn query_process_cycle_time(
+    _process_handle: usize,
+    _cycle_time: *mut u64,
+) -> i32 {
+    warn_once("QueryProcessCycleTime");
+    0
+}
+
 // ── INI cluster ───────────────────────────────────────────────────────────────
 
 // Resolve a guest wide-string filename to a canonical Linux path for the INI cache.
@@ -17461,6 +18189,65 @@ mod tests {
             assert!(
                 resolve("kernel32.dll", name).is_some(),
                 "missing resolver entry for {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_signal_gap_fill_stubs() {
+        let stubs: &[&str] = &[
+            // Thread / Process
+            "CreateRemoteThread",
+            "ExitThread",
+            "DebugBreak",
+            "FreeLibraryAndExitThread",
+            "GetCurrentProcessorNumber",
+            "QueueUserWorkItem",
+            "RegisterWaitForSingleObject",
+            "UnregisterWait",
+            "UnregisterWaitEx",
+            // Memory Management
+            "VirtualProtectEx",
+            "VirtualQueryEx",
+            "VirtualLock",
+            "VirtualUnlock",
+            "DiscardVirtualMemory",
+            "FlushViewOfFile",
+            "MapViewOfFileEx",
+            "WriteProcessMemory",
+            // I/O Completion
+            "CreateIoCompletionPort",
+            "GetQueuedCompletionStatus",
+            "GetQueuedCompletionStatusEx",
+            "PostQueuedCompletionStatus",
+            // Named Pipes
+            "CreateNamedPipeW",
+            "DisconnectNamedPipe",
+            "GetNamedPipeClientProcessId",
+            "GetNamedPipeHandleStateW",
+            "GetNamedPipeServerProcessId",
+            "SetNamedPipeHandleState",
+            "TransactNamedPipe",
+            // Console I/O
+            "GetConsoleCursorInfo",
+            "SetConsoleCursorInfo",
+            "SetConsoleCursorPosition",
+            "WriteConsoleInputW",
+            "ReadConsoleInputW",
+            "FillConsoleOutputCharacterW",
+            "FillConsoleOutputAttribute",
+            // Process Info
+            "GetProcessHandleCount",
+            "GetProcessIoCounters",
+            "GetProcessInformation",
+            "SetProcessInformation",
+            "SetProcessShutdownParameters",
+            "QueryProcessCycleTime",
+        ];
+        for &name in stubs {
+            assert!(
+                resolve("kernel32.dll", name).is_some(),
+                "kernel32.dll!{name} must resolve"
             );
         }
     }
