@@ -1272,6 +1272,7 @@ dependencies = [
  "weave-crypt32",
  "weave-ddraw",
  "weave-desktop",
+ "weave-dwrite",
  "weave-gdi32",
  "weave-gdiplus",
  "weave-imm32",
@@ -1352,6 +1353,10 @@ dependencies = [
  "goblin",
  "image",
 ]
+
+[[package]]
+name = "weave-dwrite"
+version = "0.0.1"
 
 [[package]]
 name = "weave-gdi32"
