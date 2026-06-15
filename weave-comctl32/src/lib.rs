@@ -114,6 +114,57 @@ const LVSIL_STATE: u32 = 2;
 const LVSCW_AUTOSIZE: i32 = -1;
 const LVSCW_AUTOSIZE_USE_HEADER: i32 = -2;
 
+// ── SysTreeView32 constants ──────────────────────────────────────────────
+const TV_FIRST: u32 = 0x1100;
+const TVM_GETIMAGELIST: u32 = TV_FIRST + 8; // 0x1108
+const TVM_SETIMAGELIST: u32 = TV_FIRST + 9; // 0x1109
+const TVM_INSERTITEMW: u32 = TV_FIRST + 50; // 0x1132
+const TVM_DELETEITEM: u32 = TV_FIRST + 1; // 0x1101
+const TVM_EXPAND: u32 = TV_FIRST + 2; // 0x1102
+const TVM_GETITEM: u32 = TV_FIRST + 12; // 0x110C
+const TVM_SETITEM: u32 = TV_FIRST + 63; // 0x113F
+const TVM_GETNEXTITEM: u32 = TV_FIRST + 10; // 0x110A
+const TVM_SELECTITEM: u32 = TV_FIRST + 11; // 0x110B
+const TVM_GETITEMCOUNT: u32 = TV_FIRST + 3; // 0x1103
+const TVM_GETVISIBLECOUNT: u32 = TV_FIRST + 16; // 0x1110
+const TVM_ENSUREVISIBLE: u32 = TV_FIRST + 20; // 0x1114
+const TVM_GETCOUNT: u32 = TV_FIRST + 5; // 0x1105
+const TVM_DELETEALLITEMS: u32 = TV_FIRST + 1; // same as DELETEITEM — by convention w_param=0 means all
+
+const TVGN_ROOT: usize = 0x0000;
+const TVGN_NEXT: usize = 0x0001;
+const TVGN_PREVIOUS: usize = 0x0002;
+const TVGN_PARENT: usize = 0x0003;
+const TVGN_CHILD: usize = 0x0004;
+const TVGN_FIRSTVISIBLE: usize = 0x0005;
+const TVGN_NEXTVISIBLE: usize = 0x0006;
+const TVGN_PREVIOUSVISIBLE: usize = 0x0007;
+const TVGN_DROPHILITE: usize = 0x0008;
+const TVGN_CARET: usize = 0x0009;
+const TVGN_LASTVISIBLE: usize = 0x000A;
+
+const TVIS_SELECTED: u32 = 0x0002;
+const TVIS_EXPANDED: u32 = 0x0020;
+const TVIS_EXPANDEDONCE: u32 = 0x0040;
+
+const TVE_EXPAND: u32 = 0x0001;
+const TVE_COLLAPSE: u32 = 0x0002;
+const TVE_TOGGLE: u32 = 0x0003;
+
+const TVIF_TEXT: u32 = 0x0001;
+const TVIF_IMAGE: u32 = 0x0002;
+const TVIF_PARAM: u32 = 0x0004;
+const TVIF_STATE: u32 = 0x0008;
+const TVIF_HANDLE: u32 = 0x0010;
+const TVIF_SELECTEDIMAGE: u32 = 0x0020;
+const TVIF_CHILDREN: u32 = 0x0040;
+
+const I_CHILDRENCALLBACK: i32 = -1;
+
+const TLS_IMAGELIST: u32 = 0;
+const TVSIL_NORMAL: u32 = 0;
+const TVSIL_STATE: u32 = 2;
+
 const WM_ERASEBKGND: u32 = 0x0014;
 const WM_GETTEXTLENGTH: u32 = 0x000E;
 
@@ -175,10 +226,30 @@ struct ListViewState {
 }
 
 #[expect(dead_code)]
+struct TreeViewState {
+    items: Vec<TreeViewItem>,
+}
+
+#[expect(dead_code)]
+struct TreeViewItem {
+    mask: u32,
+    h_item: usize,
+    state: u32,
+    state_mask: u32,
+    psz_text: Option<String>,
+    i_image: i32,
+    i_selected_image: i32,
+    c_children: i32,
+    l_param: isize,
+    h_parent: usize,
+}
+
+#[expect(dead_code)]
 enum ComctlState {
     Toolbar(ToolbarState),
     Tab(TabState),
     ListView(ListViewState),
+    TreeView(TreeViewState),
 }
 
 static COMCTL_STATE: OnceLock<Mutex<HashMap<usize, ComctlState>>> = OnceLock::new();
@@ -977,6 +1048,315 @@ extern "win64" fn listview_wnd_proc(
     }
 }
 
+// ── SysTreeView32 WndProc ─────────────────────────────────────────────────
+
+/// WndProc for the SysTreeView32 common control.
+///
+/// Maintains a per-HWND TreeViewState with items.
+/// Handles standard TVM_* messages and falls through to def_window_proc_w.
+extern "win64" fn treeview_wnd_proc(
+    hwnd: usize,
+    msg: u32,
+    w_param: usize,
+    l_param: isize,
+) -> isize {
+    match msg {
+        WM_NCDESTROY => {
+            if let Ok(mut map) = get_state().lock() {
+                map.remove(&hwnd);
+            }
+            def_window_proc_w(hwnd, msg, w_param, l_param)
+        }
+        WM_ERASEBKGND => 1,
+        WM_GETFONT => 0,
+        WM_GETTEXT => 0,
+        WM_GETTEXTLENGTH => 0,
+        TVM_GETIMAGELIST => 0, // No image list
+        TVM_SETIMAGELIST => 0,
+        TVM_GETCOUNT | TVM_GETITEMCOUNT => {
+            let map = get_state().lock().unwrap();
+            if let Some(ComctlState::TreeView(ref state)) = map.get(&hwnd) {
+                state.items.len() as isize
+            } else {
+                0
+            }
+        }
+        TVM_GETVISIBLECOUNT => 10,
+        TVM_INSERTITEMW => {
+            // l_param points to TVINSERTSTRUCTW
+            // TVINSERTSTRUCTW layout (x64):
+            //   hParent(usize)=0, hInsertAfter(usize)=8, item(TVITEMW)=16
+            // TVITEMW layout (x64):
+            //   mask(u32)=0, hItem(usize)=8, state(u32)=16, stateMask(u32)=20,
+            //   pszText(*mut u16)=24, cchTextMax(i32)=32,
+            //   iImage(i32)=36, iSelectedImage(i32)=40,
+            //   cChildren(i32)=44, lParam(isize)=48
+            let base = l_param as usize;
+            if base == 0 {
+                return -1;
+            }
+            let h_parent: usize = unsafe { std::ptr::read_unaligned(base as *const usize) };
+            // Read text from the inserted item
+            let item_base = base + 16;
+            let mask: u32 = unsafe { std::ptr::read_unaligned(item_base as *const u32) };
+            let text = if mask & TVIF_TEXT != 0 {
+                let psz: usize =
+                    unsafe { std::ptr::read_unaligned((item_base + 24) as *const usize) };
+                if psz != 0 {
+                    read_treeview_text(psz, item_base + 32)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            let i_image: i32 = unsafe { std::ptr::read_unaligned((item_base + 36) as *const i32) };
+            let i_sel: i32 = unsafe { std::ptr::read_unaligned((item_base + 40) as *const i32) };
+            let c_children: i32 =
+                unsafe { std::ptr::read_unaligned((item_base + 44) as *const i32) };
+            let l_param_val: isize =
+                unsafe { std::ptr::read_unaligned((item_base + 48) as *const isize) };
+            let state: u32 = unsafe { std::ptr::read_unaligned((item_base + 16) as *const u32) };
+
+            let item = TreeViewItem {
+                mask,
+                h_item: 0,
+                state,
+                state_mask: 0,
+                psz_text: text,
+                i_image,
+                i_selected_image: i_sel,
+                c_children,
+                l_param: l_param_val,
+                h_parent,
+            };
+            let mut map = get_state().lock().unwrap();
+            let tv = map
+                .entry(hwnd)
+                .or_insert(ComctlState::TreeView(TreeViewState { items: Vec::new() }));
+            if let ComctlState::TreeView(ref mut state) = tv {
+                let new_id = state.items.len();
+                let item = TreeViewItem {
+                    h_item: new_id + 1,
+                    ..item
+                };
+                state.items.push(item);
+                (new_id + 1) as isize // HTREEITEM is 1-based non-zero handle
+            } else {
+                -1
+            }
+        }
+        TVM_DELETEITEM => {
+            // TVM_DELETEITEM (0x1101) shares its value with TVM_DELETEALLITEMS.
+            // w_param=0 → delete all items (TVI_ROOT). Otherwise delete specific item.
+            let mut map = get_state().lock().unwrap();
+            if let Some(ComctlState::TreeView(ref mut state)) = map.get_mut(&hwnd) {
+                if w_param == 0 {
+                    state.items.clear();
+                } else {
+                    state.items.retain(|item| item.h_item != w_param);
+                }
+                1
+            } else {
+                0
+            }
+        }
+        TVM_EXPAND => {
+            // TVE_EXPAND, TVE_COLLAPSE, TVE_TOGGLE — no-op, return TRUE
+            1
+        }
+        TVM_GETITEM => {
+            // Fill TVITEMW at l_param from stored state
+            let base = l_param as usize;
+            if base == 0 {
+                return 0;
+            }
+            let h_item: usize = unsafe { std::ptr::read_unaligned((base + 8) as *const usize) };
+            let mask: u32 = unsafe { std::ptr::read_unaligned(base as *const u32) };
+            let map = get_state().lock().unwrap();
+            if let Some(ComctlState::TreeView(ref state)) = map.get(&hwnd) {
+                if let Some(item) = state.items.iter().find(|it| it.h_item == h_item) {
+                    if mask & TVIF_TEXT != 0 {
+                        let psz: usize =
+                            unsafe { std::ptr::read_unaligned((base + 24) as *const usize) };
+                        let cch: i32 =
+                            unsafe { std::ptr::read_unaligned((base + 32) as *const i32) };
+                        if let Some(ref t) = item.psz_text {
+                            write_treeview_text(psz, cch, t);
+                        }
+                    }
+                    if mask & TVIF_IMAGE != 0 {
+                        unsafe {
+                            std::ptr::write_unaligned((base + 36) as *mut i32, item.i_image);
+                        }
+                    }
+                    if mask & TVIF_SELECTEDIMAGE != 0 {
+                        unsafe {
+                            std::ptr::write_unaligned(
+                                (base + 40) as *mut i32,
+                                item.i_selected_image,
+                            );
+                        }
+                    }
+                    if mask & TVIF_PARAM != 0 {
+                        unsafe {
+                            std::ptr::write_unaligned((base + 48) as *mut isize, item.l_param);
+                        }
+                    }
+                    if mask & TVIF_STATE != 0 {
+                        unsafe {
+                            std::ptr::write_unaligned((base + 16) as *mut u32, item.state);
+                        }
+                    }
+                    if mask & TVIF_CHILDREN != 0 {
+                        unsafe {
+                            std::ptr::write_unaligned((base + 44) as *mut i32, item.c_children);
+                        }
+                    }
+                    return 1;
+                }
+            }
+            0
+        }
+        TVM_SETITEM => {
+            let base = l_param as usize;
+            if base == 0 {
+                return 0;
+            }
+            let h_item: usize = unsafe { std::ptr::read_unaligned((base + 8) as *const usize) };
+            let mut map = get_state().lock().unwrap();
+            if let Some(ComctlState::TreeView(ref mut state)) = map.get_mut(&hwnd) {
+                if let Some(item) = state.items.iter_mut().find(|it| it.h_item == h_item) {
+                    let mask: u32 = unsafe { std::ptr::read_unaligned(base as *const u32) };
+                    if mask & TVIF_TEXT != 0 {
+                        let psz: usize =
+                            unsafe { std::ptr::read_unaligned((base + 24) as *const usize) };
+                        if psz != 0 {
+                            item.psz_text = read_treeview_text(psz, base + 32);
+                        }
+                    }
+                    if mask & TVIF_IMAGE != 0 {
+                        item.i_image =
+                            unsafe { std::ptr::read_unaligned((base + 36) as *const i32) };
+                    }
+                    if mask & TVIF_PARAM != 0 {
+                        item.l_param =
+                            unsafe { std::ptr::read_unaligned((base + 48) as *const isize) };
+                    }
+                    return 1;
+                }
+            }
+            0
+        }
+        TVM_GETNEXTITEM => {
+            // w_param = relationship (TVGN_*), l_param = hItem
+            let h_item = l_param as usize;
+            let relation = w_param;
+            let map = get_state().lock().unwrap();
+            if let Some(ComctlState::TreeView(ref state)) = map.get(&hwnd) {
+                if state.items.is_empty() {
+                    return 0;
+                }
+                match relation {
+                    TVGN_ROOT => {
+                        // Return first root item (h_parent == 0)
+                        state
+                            .items
+                            .iter()
+                            .find(|it| it.h_parent == 0)
+                            .map(|it| it.h_item)
+                            .unwrap_or(0) as isize
+                    }
+                    TVGN_NEXT => {
+                        if let Some(pos) = state.items.iter().position(|it| it.h_item == h_item) {
+                            state.items.get(pos + 1).map(|it| it.h_item).unwrap_or(0) as isize
+                        } else {
+                            0
+                        }
+                    }
+                    TVGN_PREVIOUS => {
+                        if let Some(pos) = state.items.iter().position(|it| it.h_item == h_item) {
+                            if pos > 0 {
+                                state.items[pos - 1].h_item as isize
+                            } else {
+                                0
+                            }
+                        } else {
+                            0
+                        }
+                    }
+                    TVGN_PARENT => state
+                        .items
+                        .iter()
+                        .find(|it| it.h_item == h_item)
+                        .and_then(|item| {
+                            if item.h_parent == 0 {
+                                None
+                            } else {
+                                state.items.iter().find(|it| it.h_item == item.h_parent)
+                            }
+                        })
+                        .map(|it| it.h_item)
+                        .unwrap_or(0) as isize,
+                    TVGN_CHILD => state
+                        .items
+                        .iter()
+                        .find(|it| it.h_parent == h_item)
+                        .map(|it| it.h_item)
+                        .unwrap_or(0) as isize,
+                    TVGN_CARET | TVGN_FIRSTVISIBLE => {
+                        state.items.first().map(|it| it.h_item).unwrap_or(0) as isize
+                    }
+                    _ => state.items.first().map(|it| it.h_item).unwrap_or(0) as isize,
+                }
+            } else {
+                0
+            }
+        }
+        TVM_SELECTITEM => {
+            // Select an item — no-op visual, return TRUE
+            1
+        }
+        TVM_ENSUREVISIBLE => 1,
+        _ => def_window_proc_w(hwnd, msg, w_param, l_param),
+    }
+}
+
+fn read_treeview_text(psz_text: usize, cch_max_addr: usize) -> Option<String> {
+    let cch_max: i32 = unsafe { std::ptr::read_unaligned(cch_max_addr as *const i32) };
+    if psz_text == 0 || cch_max <= 0 {
+        return None;
+    }
+    let mut chars = Vec::new();
+    for i in 0..cch_max as usize {
+        let c = unsafe { std::ptr::read_unaligned((psz_text + i * 2) as *const u16) };
+        if c == 0 {
+            break;
+        }
+        chars.push(c);
+    }
+    Some(String::from_utf16_lossy(&chars))
+}
+
+fn write_treeview_text(psz_text: usize, cch_max: i32, text: &str) {
+    if psz_text == 0 || cch_max <= 0 {
+        return;
+    }
+    let mut i = 0;
+    for ch in text.encode_utf16() {
+        if i >= cch_max as usize - 1 {
+            break;
+        }
+        unsafe {
+            std::ptr::write_unaligned((psz_text + i * 2) as *mut u16, ch);
+        }
+        i += 1;
+    }
+    unsafe {
+        std::ptr::write_unaligned((psz_text + i * 2) as *mut u16, 0);
+    }
+}
+
 /// InitCommonControls — register common control window classes.
 ///
 /// Registers ToolbarWindow32 and SysTabControl32 classes so the guest can
@@ -1030,6 +1410,16 @@ fn register_comctl32_classes() {
         h_icon_sm: 0,
     };
     class::register("SysListView32", listview_entry);
+    let treeview_entry = ClassEntry {
+        wnd_proc: treeview_wnd_proc as *const () as usize,
+        style: 0,
+        h_cursor: 0,
+        hbr_background: 0,
+        cb_wnd_extra: 0,
+        h_icon: 0,
+        h_icon_sm: 0,
+    };
+    class::register("SysTreeView32", treeview_entry);
 }
 
 const WM_NCDESTROY: u32 = 0x0082;

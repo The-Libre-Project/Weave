@@ -57,6 +57,26 @@ pub const MF_CHECKED: u32 = 0x0008;
 pub const MF_BYCOMMAND: u32 = 0x0000;
 pub const MF_BYPOSITION: u32 = 0x0400;
 
+pub const TPM_LEFTBUTTON: u32 = 0x0000;
+pub const TPM_RIGHTBUTTON: u32 = 0x0002;
+pub const TPM_LEFTALIGN: u32 = 0x0000;
+pub const TPM_CENTERALIGN: u32 = 0x0004;
+pub const TPM_RIGHTALIGN: u32 = 0x0008;
+pub const TPM_TOPALIGN: u32 = 0x0000;
+pub const TPM_VCENTERALIGN: u32 = 0x0010;
+pub const TPM_BOTTOMALIGN: u32 = 0x0020;
+pub const TPM_NONOTIFY: u32 = 0x0080;
+pub const TPM_RETURNCMD: u32 = 0x0100;
+pub const TPM_RECURSE: u32 = 0x0001;
+pub const TPM_HORPOSANIMATION: u32 = 0x0400;
+pub const TPM_HORNEGANIMATION: u32 = 0x0800;
+pub const TPM_VERPOSANIMATION: u32 = 0x1000;
+pub const TPM_VERNEGANIMATION: u32 = 0x2000;
+pub const TPM_NOANIMATION: u32 = 0x4000;
+pub const TPM_LAYOUTRTL: u32 = 0x8000;
+
+pub const WM_COMMAND: u32 = 0x0111;
+
 // ── Public API ────────────────────────────────────────────────────────────────
 
 /// CreateMenu: create an empty menu bar.
@@ -203,36 +223,74 @@ pub extern "win64" fn destroy_menu(h_menu: usize) -> i32 {
     m.menus.remove(&h_menu).map(|_| 1).unwrap_or(0)
 }
 
+/// Find the first enabled command item in a menu.
+///
+/// Iterates menu items and returns the command id of the first item that is
+/// not a separator, not grayed, not disabled, and not a popup submenu.
+fn find_first_enabled_item(h_menu: usize) -> Option<u32> {
+    let m = menus().lock().ok()?;
+    let items = m.menus.get(&h_menu)?;
+    for item in items.iter() {
+        let f = item.flags;
+        if f & (MF_GRAYED | MF_DISABLED) != 0 {
+            continue;
+        }
+        if f & MF_POPUP != 0 {
+            continue;
+        }
+        if f & MF_SEPARATOR != 0 {
+            continue;
+        }
+        // MF_STRING (default, flags=0) or other command-type items
+        return Some(item.id_or_submenu as u32);
+    }
+    None
+}
+
 /// TrackPopupMenu: display a popup menu at a screen position.
 ///
-/// Phase 2 stub: does nothing visually, returns 0 (no item selected).
+/// Delegates to TrackPopupMenuEx with no extended params.
 // Wine ref: dlls/win32u/menu.c — TrackPopupMenu calls TrackPopupMenuEx with
 // TPMPARAMS=NULL; the real impl creates a popup window and runs a modal message loop.
 // Returns the selected command id, or 0 if cancelled/no selection.
 pub extern "win64" fn track_popup_menu(
-    _h_menu: usize,
-    _u_flags: u32,
+    h_menu: usize,
+    u_flags: u32,
     _x: i32,
     _y: i32,
     _n_reserved: i32,
-    _h_wnd: usize,
+    h_wnd: usize,
     _p_rc_rect: usize,
 ) -> i32 {
-    0
+    track_popup_menu_ex(h_menu, u_flags, _x, _y, h_wnd, 0)
 }
 
-/// TrackPopupMenuEx: extended popup tracking (Phase 2 stub).
+/// TrackPopupMenuEx: extended popup tracking.
+///
+/// Finds the first enabled command item and either returns its command ID
+/// (when TPM_RETURNCMD is set) or posts WM_COMMAND to the owner window.
 // Wine ref: dlls/win32u/menu.c — creates a popup_menu_window_proc window, calc_popup_menu_size,
 // then enters exec_menu modal loop; posts WM_MENURBUTTONUP/WM_MENUCOMMAND to owner on selection.
 pub extern "win64" fn track_popup_menu_ex(
-    _h_menu: usize,
-    _u_flags: u32,
+    h_menu: usize,
+    u_flags: u32,
     _x: i32,
     _y: i32,
-    _hwnd: usize,
+    hwnd: usize,
     _lptpm: usize,
 ) -> i32 {
-    0
+    if let Some(cmd) = find_first_enabled_item(h_menu) {
+        if u_flags & TPM_RETURNCMD != 0 {
+            cmd as i32
+        } else if u_flags & TPM_NONOTIFY == 0 && hwnd != 0 {
+            crate::api::post_message_w(hwnd, WM_COMMAND, cmd as usize, 0);
+            0
+        } else {
+            cmd as i32
+        }
+    } else {
+        0
+    }
 }
 
 /// insert_item_raw: insert a menu item at/by position (internal helper).

@@ -92,7 +92,7 @@ fn join_win_paths(base: &str, child: &str) -> String {
     }
 }
 
-fn pidl_path_from_list(pidl: *const u8) -> Option<String> {
+pub(crate) fn pidl_path_from_list(pidl: *const u8) -> Option<String> {
     if pidl.is_null() {
         return None;
     }
@@ -362,6 +362,193 @@ pub unsafe extern "win64" fn sh_get_path_from_id_list_w(
     }
     pidl_path_from_list(pidl)
         .map(|path| write_wide_to_buffer(psz_path, &path, MAX_PATH))
+        .unwrap_or(0)
+}
+
+/// ILFindLastID — find the last (non-terminator) item in a PIDL chain.
+///
+/// # Safety
+/// `pidl` must be null or point at a valid PIDL chain.
+// Wine ref: dlls/shell32/pidl.c::ILFindLastID
+pub unsafe extern "win64" fn il_find_last_id(pidl: *const u8) -> *mut u8 {
+    if pidl.is_null() {
+        return std::ptr::null_mut();
+    }
+    let mut last: *const u8 = std::ptr::null();
+    let mut item = pidl;
+    loop {
+        let cb = read_u16(item);
+        if cb == 0 {
+            break;
+        }
+        last = item;
+        item = unsafe { item.add(cb as usize) };
+    }
+    last as *mut u8
+}
+
+/// ILRemoveLastID — remove the last item from a PIDL by overwriting its cb with a terminator.
+///
+/// # Safety
+/// `pidl` must be null or point at a valid PIDL chain.
+// Wine ref: dlls/shell32/pidl.c::ILRemoveLastID
+pub unsafe extern "win64" fn il_remove_last_id(pidl: *mut u8) -> i32 {
+    if pidl.is_null() {
+        return 0;
+    }
+    let mut last: *mut u8 = std::ptr::null_mut();
+    let mut item = pidl;
+    loop {
+        let cb = read_u16(item);
+        if cb == 0 {
+            break;
+        }
+        last = item;
+        item = unsafe { item.add(cb as usize) };
+    }
+    if last.is_null() {
+        return 0;
+    }
+    write_u16(last, 0);
+    write_u16(unsafe { last.add(2) }, 0);
+    1
+}
+
+/// ILIsParent — check if `pidl_parent` is a parent of `pidl_child`.
+///
+/// # Safety
+/// Pointer arguments must be null or valid PIDL chains.
+// Wine ref: dlls/shell32/pidl.c::ILIsParent
+pub unsafe extern "win64" fn il_is_parent(
+    pidl_parent: *const u8,
+    pidl_child: *const u8,
+    immediate: i32,
+) -> i32 {
+    if pidl_parent.is_null() || pidl_child.is_null() {
+        return 0;
+    }
+    // Count items in parent
+    let mut parent_count = 0u32;
+    let mut item = pidl_parent;
+    loop {
+        let cb = read_u16(item);
+        if cb == 0 {
+            break;
+        }
+        parent_count += 1;
+        item = unsafe { item.add(cb as usize) };
+    }
+    if parent_count == 0 {
+        return 0;
+    }
+    // Count items in child
+    let mut child_count = 0u32;
+    item = pidl_child;
+    loop {
+        let cb = read_u16(item);
+        if cb == 0 {
+            break;
+        }
+        child_count += 1;
+        item = unsafe { item.add(cb as usize) };
+    }
+    if child_count < parent_count {
+        return 0;
+    }
+    if immediate != 0 && child_count != parent_count + 1 {
+        return 0;
+    }
+    // Prefix match: compare parent bytes (minus terminator) against child's start
+    let parent_bytes = il_get_size(pidl_parent) as usize - 2;
+    let eq = unsafe {
+        libc::memcmp(
+            pidl_parent as *const libc::c_void,
+            pidl_child as *const libc::c_void,
+            parent_bytes,
+        ) == 0
+    };
+    eq as i32
+}
+
+/// ILAppendID — append an ID to a PIDL.
+///
+/// # Safety
+/// `ppidl` must be a valid pointer to a PIDL pointer (may be null).
+/// `pidl_add` must be a valid non-terminator PIDL item.
+// Wine ref: dlls/shell32/pidl.c::ILAppendID
+pub unsafe extern "win64" fn il_append_id(
+    ppidl: *mut *mut u8,
+    pidl_add: *const u8,
+    _flags: u32,
+) -> i32 {
+    if ppidl.is_null() || pidl_add.is_null() {
+        return 0;
+    }
+    let old_pidl = *ppidl;
+    let add_cb = read_u16(pidl_add);
+    if add_cb == 0 {
+        return 0;
+    }
+    let add_size = add_cb as usize;
+    // Size of existing PIDL minus its terminator
+    let old_size = if old_pidl.is_null() {
+        0
+    } else {
+        il_get_size(old_pidl) as usize - 2
+    };
+    // Allocate: old content + new item + terminator
+    let new_size = old_size + add_size + 2;
+    let new_pidl = unsafe { libc::malloc(new_size) as *mut u8 };
+    if new_pidl.is_null() {
+        return 0;
+    }
+    if old_size > 0 {
+        unsafe {
+            std::ptr::copy_nonoverlapping(old_pidl, new_pidl, old_size);
+        }
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(pidl_add, new_pidl.add(old_size), add_size);
+    }
+    // Write terminator
+    write_u16(unsafe { new_pidl.add(old_size + add_size) }, 0);
+    // Free old PIDL and update pointer
+    if !old_pidl.is_null() {
+        unsafe { il_free(old_pidl) };
+    }
+    *ppidl = new_pidl;
+    1
+}
+
+/// ILCloneFull — full clone (delegates to ILClone).
+///
+/// # Safety
+/// `pidl` must be null or a valid PIDL chain.
+// Wine ref: dlls/shell32/pidl.c::ILCloneFull — returns ILClone
+pub unsafe extern "win64" fn il_clone_full(pidl: *const u8) -> *mut u8 {
+    unsafe { il_clone(pidl) }
+}
+
+/// SHGetPathFromIDListEx — write the filesystem path for a PIDL with caller-supplied buffer size.
+///
+/// # Safety
+/// `pidl` and `psz_path` may be null; `psz_path` must have room for `max_path` wide chars.
+// Wine ref: dlls/shell32/pidl.c::SHGetPathFromIDListEx
+pub unsafe extern "win64" fn sh_get_path_from_id_list_ex(
+    pidl: *const u8,
+    psz_path: *mut u16,
+    max_path: u32,
+) -> i32 {
+    if !psz_path.is_null() {
+        unsafe {
+            *psz_path = 0;
+        }
+    }
+    if pidl.is_null() || psz_path.is_null() {
+        return 0;
+    }
+    pidl_path_from_list(pidl)
+        .map(|path| write_wide_to_buffer(psz_path, &path, max_path as usize))
         .unwrap_or(0)
 }
 

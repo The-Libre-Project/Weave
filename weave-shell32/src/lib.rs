@@ -198,6 +198,25 @@ fn resolve_shell32(func: &str) -> Option<usize> {
         "ILCreateFromPathW" | "#190" => Some(
             pidl::il_create_from_path_w as unsafe extern "win64" fn(_) -> _ as *const () as usize,
         ),
+        "ILFindLastID" => {
+            Some(pidl::il_find_last_id as unsafe extern "win64" fn(_) -> _ as *const () as usize)
+        }
+        "ILRemoveLastID" => {
+            Some(pidl::il_remove_last_id as unsafe extern "win64" fn(_) -> _ as *const () as usize)
+        }
+        "ILIsParent" => {
+            Some(pidl::il_is_parent as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize)
+        }
+        "ILAppendID" => {
+            Some(pidl::il_append_id as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize)
+        }
+        "ILCloneFull" => {
+            Some(pidl::il_clone_full as unsafe extern "win64" fn(_) -> _ as *const () as usize)
+        }
+        "SHGetPathFromIDListEx" => Some(
+            pidl::sh_get_path_from_id_list_ex as unsafe extern "win64" fn(_, _, _) -> _ as *const ()
+                as usize,
+        ),
         "SHMapPIDLToSystemImageListIndex" | "#68" => Some(
             shell::sh_map_pidl_to_image_index as unsafe extern "win64" fn(_, _, _, _) -> _
                 as *const () as usize,
@@ -285,7 +304,13 @@ mod tests {
             "ILIsEqual",
             "ILCombine",
             "ILCreateFromPathW",
+            "ILFindLastID",
+            "ILRemoveLastID",
+            "ILIsParent",
+            "ILAppendID",
+            "ILCloneFull",
             "SHGetPathFromIDListW",
+            "SHGetPathFromIDListEx",
             "SHMapPIDLToSystemImageListIndex",
             "NTSHChangeNotifyRegister",
         ];
