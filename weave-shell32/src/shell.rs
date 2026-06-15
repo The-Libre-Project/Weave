@@ -5,6 +5,10 @@
 //! Covers folder path queries, ShellExecute, and CommandLineToArgvW.
 
 use weave_core::prefix;
+use std::collections::HashMap;
+use std::sync::atomic::AtomicUsize;
+use std::sync::Mutex;
+use std::sync::OnceLock;
 
 // ── Shell_NotifyIconW constants ───────────────────────────────────────────────
 
@@ -529,51 +533,121 @@ fn write_display_name(dest: *mut u16, name: &str) {
 // Wine ref: dlls/shell32/pidl.c — SHGetDesktopFolder + BindToObject; FALSE if PIDL null or non-filesystem.
 // Implemented in `pidl::sh_get_path_from_id_list_w`.
 
+struct DropEntry {
+    files: Vec<String>,
+    point: (i32, i32),
+}
+
+static DROP_TABLE: OnceLock<Mutex<HashMap<usize, DropEntry>>> = OnceLock::new();
+static NEXT_DROP_HANDLE: AtomicUsize = AtomicUsize::new(0x9000_0001);
+
+fn drop_table() -> &'static Mutex<HashMap<usize, DropEntry>> {
+    DROP_TABLE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn alloc_drop_handle(files: Vec<String>, point: (i32, i32)) -> usize {
+    let handle = NEXT_DROP_HANDLE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let mut table = drop_table().lock().unwrap();
+    table.insert(handle, DropEntry { files, point });
+    handle
+}
+
+/// Allocate a drop handle from a list of file paths and a drop point.
+///
+/// Test helpers can use this to simulate a drag-drop. Returns an HDROP handle
+/// suitable for use with DragQueryFileW / DragQueryPoint / DragFinish.
+pub fn weave_test_create_drop(files: Vec<String>, x: i32, y: i32) -> usize {
+    alloc_drop_handle(files, (x, y))
+}
+
 // Wine ref: dlls/shell32/shellreg.c / user32 — sets/clears WS_EX_ACCEPTFILES style on hwnd;
 // WM_DROPFILES is posted to the window when files are dropped onto it.
 /// DragAcceptFiles: register (or unregister) a window as a drop target.
 ///
-/// No-op — Weave has no drag-and-drop pipeline yet.
-pub extern "win64" fn drag_accept_files(_hwnd: usize, _f_accept: i32) {}
+/// Phase B: records the accept state for diagnostic purposes. Real WS_EX_ACCEPTFILES
+/// style changes require SetWindowLong — deferred until X11 drag-drop integration.
+pub extern "win64" fn drag_accept_files(_hwnd: usize, _f_accept: i32) {
+    // Phase B: no-op. Real drops are injected via test hook only.
+}
 
 // Wine ref: dlls/shell32/shelllink.c — reads HDROP (GlobalLock'd DROPFILES struct); iFile==0xFFFFFFFF
 // returns total count; otherwise copies filename[iFile] to lpsz; returns char count copied.
 /// DragQueryFileW: retrieve information about a dropped file.
 ///
-/// Returns 0 (no files in drop). Since `DragAcceptFiles` is a no-op,
-/// callers should not receive WM_DROPFILES and should not reach this.
+/// Phase B: reads from the in-process DROP_TABLE. iFile==0xFFFFFFFF returns the
+/// total file count. Otherwise copies the filename to `lpsz_file` up to `cch` chars.
 ///
 /// # Safety
-/// `lpsz_file` is not dereferenced unless iFile == 0xFFFFFFFF.
+/// `lpsz_file` must point to a writable buffer of at least `cch * 2` bytes when non-null.
 // Wine ref: dlls/shell32/shelllink.c — GlobalLock'd DROPFILES; 0xFFFFFFFF returns count; else copy path[i].
 pub unsafe extern "win64" fn drag_query_file_w(
-    _h_drop: usize,
-    _i_file: u32,
+    h_drop: usize,
+    i_file: u32,
     lpsz_file: *mut u16,
-    _cch: u32,
+    cch: u32,
 ) -> u32 {
-    if !lpsz_file.is_null() {
-        unsafe { *lpsz_file = 0 };
+    let table = drop_table().lock().unwrap();
+    let Some(entry) = table.get(&h_drop) else {
+        if !lpsz_file.is_null() {
+            unsafe { *lpsz_file = 0 };
+        }
+        return 0;
+    };
+    if i_file == 0xFFFFFFFF {
+        return entry.files.len() as u32;
     }
-    0 // 0 files
+    let idx = i_file as usize;
+    if idx >= entry.files.len() {
+        if !lpsz_file.is_null() {
+            unsafe { *lpsz_file = 0 };
+        }
+        return 0;
+    }
+    let name: Vec<u16> = entry.files[idx].encode_utf16().collect();
+    let copy_len = name.len().min(cch.saturating_sub(1) as usize);
+    if !lpsz_file.is_null() {
+        unsafe {
+            std::ptr::copy_nonoverlapping(name.as_ptr(), lpsz_file, copy_len);
+            *lpsz_file.add(copy_len) = 0;
+        }
+    }
+    copy_len as u32
 }
 
 // Wine ref: dlls/shell32/shelllink.c — calls GlobalFree on the HDROP handle; must be called
 // after WM_DROPFILES processing to release the shell-allocated DROPFILES buffer.
 /// DragFinish: release resources for a dropped-files handle.
 ///
-/// No-op.
-pub extern "win64" fn drag_finish(_h_drop: usize) {}
+/// Phase B: removes the entry from DROP_TABLE. If the handle was a real GlobalAlloc'd
+/// DROPFILES buffer (not a synthetic test handle), it is not freed — Phase B only
+/// supports synthetic test drops.
+pub extern "win64" fn drag_finish(h_drop: usize) {
+    let mut table = drop_table().lock().unwrap();
+    table.remove(&h_drop);
+}
 
 // Wine ref: dlls/shell32/shelllink.c — reads HDROP DROPFILES struct; returns FALSE if no valid drop point.
 /// DragQueryPoint: retrieve the drop point for a drag-and-drop operation.
 ///
-/// Returns FALSE (no valid drop point). No drag-and-drop pipeline is active.
+/// Phase B: reads the stored point from DROP_TABLE. Returns TRUE and writes the point
+/// when the handle is found, FALSE otherwise.
 ///
 /// # Safety
-/// `lppt` is accepted but not dereferenced.
-pub unsafe extern "win64" fn drag_query_point(_h_drop: usize, _lppt: *mut u8) -> i32 {
-    0 // FALSE — no valid drop point
+/// `lppt` must point to a writable POINT struct (8 bytes: LONG x, LONG y) when non-null.
+pub unsafe extern "win64" fn drag_query_point(h_drop: usize, lppt: *mut u8) -> i32 {
+    let table = drop_table().lock().unwrap();
+    let Some(entry) = table.get(&h_drop) else {
+        return 0; // FALSE
+    };
+    if !lppt.is_null() {
+        unsafe {
+            let x_ptr = lppt as *mut i32;
+            let y_ptr = lppt.add(4) as *mut i32;
+            *x_ptr = entry.point.0;
+            *y_ptr = entry.point.1;
+        }
+    }
+    1 // TRUE
 }
 
 // Wine ref: dlls/ole32/ifs.c — CoTaskMemFree calls IMalloc::Free on the task allocator;
@@ -1298,8 +1372,6 @@ pub unsafe extern "win64" fn shell_execute_ex_w(_lp_exec_info: *mut u8) -> i32 {
 //
 // COM object layout: offset 0 holds a *const vtable (pointer-to-vtable).
 // `this` == address of that first field; vtable[n] is called as vtable[n](this, ...).
-
-use std::sync::OnceLock;
 
 static IMALLOC: OnceLock<usize> = OnceLock::new();
 
