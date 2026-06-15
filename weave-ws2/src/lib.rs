@@ -2410,6 +2410,85 @@ pub unsafe extern "win64" fn wsc_enum_protocols(
     SOCKET_ERROR
 }
 
+// ── WSAPoll ────────────────────────────────────────────────────────────────────
+
+/// Layout-compatible with Windows `WSAPOLLFD` (Win64).
+///
+/// SOCKET is pointer-sized (8 bytes on x64), followed by i16 events/revents.
+/// Total size: 12 bytes. NOT layout-compatible with `libc::pollfd` (8 bytes on x86-64).
+#[repr(C)]
+pub struct WSAPOLLFD {
+    fd: i64,
+    events: i16,
+    revents: i16,
+}
+
+/// WSAPoll: Winsock equivalent of POSIX poll(2).
+///
+/// Iterates the `WSAPOLLFD` array, skips entries whose fd is `INVALID_SOCKET`,
+/// builds a temporary `libc::pollfd` array, calls `libc::poll()`, and writes
+/// the resulting revents back to the original `WSAPOLLFD` entries.
+///
+/// Returns the number of ready fds (same as libc::poll), or `SOCKET_ERROR` on
+/// failure with the last error set via `save_errno()`.
+///
+/// # Safety
+/// Caller must ensure `fd_array` points to at least `nfds` valid `WSAPOLLFD`
+/// entries when `nfds > 0`.
+pub unsafe extern "win64" fn ws_wsa_poll(
+    fd_array: *mut WSAPOLLFD,
+    nfds: u32,
+    timeout: i32,
+) -> i32 {
+    if nfds == 0 {
+        return 0;
+    }
+
+    if fd_array.is_null() {
+        set_last_error(10014); // WSAEFAULT
+        return SOCKET_ERROR;
+    }
+
+    // Build a compact libc::pollfd array, skipping INVALID_SOCKET entries.
+    let count = nfds as usize;
+    let slice = unsafe { std::slice::from_raw_parts_mut(fd_array, count) };
+
+    let mut pfds: Vec<libc::pollfd> = Vec::with_capacity(count);
+    for entry in slice.iter() {
+        if entry.fd == INVALID_SOCKET as i64 {
+            continue;
+        }
+        pfds.push(libc::pollfd {
+            fd: entry.fd as libc::c_int,
+            events: entry.events as i16,
+            revents: 0,
+        });
+    }
+
+    if pfds.is_empty() {
+        return 0;
+    }
+
+    let ret = libc::poll(pfds.as_mut_ptr(), pfds.len() as libc::nfds_t, timeout);
+    if ret < 0 {
+        save_errno();
+        return SOCKET_ERROR;
+    }
+
+    // Write revents back to the matching WSAPOLLFD entries.
+    let mut pfd_idx = 0;
+    for entry in slice.iter_mut() {
+        if entry.fd == INVALID_SOCKET as i64 {
+            entry.revents = 0;
+            continue;
+        }
+        entry.revents = pfds[pfd_idx].revents as i16;
+        pfd_idx += 1;
+    }
+
+    ret
+}
+
 // ── DLL Resolver ─────────────────────────────────────────────────────────────
 
 /// Resolve a ws2_32.dll or wsock32.dll import to a function pointer.
@@ -2490,6 +2569,11 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "WSADuplicateSocketW" => Some(wsa_duplicate_socket_w as *const () as usize),
         "WSAEnumProtocolsW" => Some(wsa_enum_protocols_w as *const () as usize),
         "WSASetEvent" => Some(wsa_set_event as *const () as usize),
+        // Socket polling (Electron/Chromium — async I/O multiplexing).
+        "WSAPoll" => Some(
+            ws_wsa_poll as unsafe extern "win64" fn(*mut WSAPOLLFD, u32, i32) -> i32
+                as *const () as usize,
+        ),
         // Service discovery
         "WSALookupServiceBeginW" => Some(wsa_lookup_service_begin_w as *const () as usize),
         "WSALookupServiceEnd" => Some(wsa_lookup_service_end as *const () as usize),
@@ -2861,6 +2945,42 @@ mod tests {
     fn free_addr_info_w_null_does_not_crash() {
         unsafe {
             free_addr_info_w(std::ptr::null_mut());
+        }
+    }
+
+    // ── WSAPoll ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn wsa_poll_empty_set_returns_zero() {
+        unsafe {
+            // nfds=0 should return 0 immediately (no error).
+            let ret = ws_wsa_poll(std::ptr::null_mut(), 0, 0);
+            assert_eq!(ret, 0);
+        }
+    }
+
+    #[test]
+    fn wsa_poll_null_ptr_with_fds_returns_error() {
+        unsafe {
+            // Null fd_array with nfds>0 → WSAEFAULT.
+            let ret = ws_wsa_poll(std::ptr::null_mut(), 1, 0);
+            assert_eq!(ret, SOCKET_ERROR);
+            assert_eq!(wsa_get_last_error(), 10014); // WSAEFAULT
+        }
+    }
+
+    #[test]
+    fn wsa_poll_invalid_socket_is_skipped() {
+        unsafe {
+            let mut fds = [WSAPOLLFD {
+                fd: -1i64, // INVALID_SOCKET
+                events: 1, // POLLIN
+                revents: 0,
+            }];
+            let ret = ws_wsa_poll(fds.as_mut_ptr(), 1, 0);
+            // INVALID_SOCKET is skipped, so no fds are polled → return 0.
+            assert_eq!(ret, 0);
+            assert_eq!(fds[0].revents, 0);
         }
     }
 }
