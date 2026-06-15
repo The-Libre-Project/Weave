@@ -4,11 +4,11 @@
 //!
 //! Covers folder path queries, ShellExecute, and CommandLineToArgvW.
 
-use weave_core::prefix;
 use std::collections::HashMap;
 use std::sync::atomic::AtomicUsize;
 use std::sync::Mutex;
 use std::sync::OnceLock;
+use weave_core::prefix;
 
 // ── Shell_NotifyIconW constants ───────────────────────────────────────────────
 
@@ -993,37 +993,74 @@ pub unsafe extern "win64" fn sh_get_desktop_folder(ppshf: *mut *mut u8) -> i32 {
 // Wine ref: dlls/shell32/shellpath.c — SHGetFolderLocation(nFolder, 0); CoTaskMemAlloc PIDL; caller ILFree.
 /// SHGetFolderLocation — return the PIDL for a special folder.
 ///
-/// Returns S_FALSE with NULL ppidl — stub.
+/// Phase B: converts the CSIDL to a path via `csidl_to_win_path`, then creates
+/// a WEV1 PIDL via `pidl_from_path_w`. Returns S_OK + pidl on success,
+/// S_FALSE + NULL pidl for unknown CSIDLs.
 ///
 /// # Safety
 /// `ppidl` must be a valid writable pointer when non-null.
+// Wine ref: dlls/shell32/shellpath.c — SHGetFolderLocation allocates PIDL via CoTaskMemAlloc; caller ILFree.
 pub unsafe extern "win64" fn sh_get_folder_location(
     _hwnd_owner: usize,
-    _n_folder: i32,
+    n_folder: i32,
     ppidl: *mut *mut u8,
 ) -> i32 {
+    const S_OK: i32 = 0;
     const S_FALSE: i32 = 1;
     const E_POINTER: i32 = 0x8000_4003u32 as i32;
+
     if ppidl.is_null() {
         return E_POINTER;
     }
     unsafe { *ppidl = std::ptr::null_mut() };
-    S_FALSE
+
+    let Some(path) = csidl_to_win_path(n_folder) else {
+        return S_FALSE;
+    };
+
+    let pidl = crate::pidl::pidl_from_path_w(&path);
+    if pidl.is_null() {
+        return S_FALSE;
+    }
+
+    unsafe { *ppidl = pidl };
+    S_OK
 }
 
 // Wine ref: dlls/shell32/shellpath.c — SHGetFolderLocation(nFolder, 0); CoTaskMemAlloc PIDL; caller ILFree.
 /// SHGetSpecialFolderLocation — return the PIDL for a special folder.
 ///
-/// Returns E_NOTIMPL — stub.
+/// Phase B: same as SHGetFolderLocation — converts CSIDL to path, creates WEV1 PIDL.
+/// This is the older (pre-SHGetFolderLocation) API.
 ///
 /// # Safety
-/// `ppidl` is accepted but not dereferenced.
+/// `ppidl` must be a valid writable pointer when non-null.
+// Wine ref: dlls/shell32/shellpath.c — SHGetFolderLocation; SHGetSpecialFolderLocation is same logic.
 pub unsafe extern "win64" fn sh_get_special_folder_location(
     _hwnd_owner: usize,
-    _n_folder: i32,
-    _ppidl: *mut *mut u8,
+    n_folder: i32,
+    ppidl: *mut *mut u8,
 ) -> i32 {
-    0x8000_4001u32 as i32 // E_NOTIMPL
+    const S_OK: i32 = 0;
+    const S_FALSE: i32 = 1;
+    const E_POINTER: i32 = 0x8000_4003u32 as i32;
+
+    if ppidl.is_null() {
+        return E_POINTER;
+    }
+    unsafe { *ppidl = std::ptr::null_mut() };
+
+    let Some(path) = csidl_to_win_path(n_folder) else {
+        return S_FALSE;
+    };
+
+    let pidl = crate::pidl::pidl_from_path_w(&path);
+    if pidl.is_null() {
+        return S_FALSE;
+    }
+
+    unsafe { *ppidl = pidl };
+    S_OK
 }
 
 // Wine ref: dlls/shell32/shlfolder.c — SHParseDisplayName delegates to ILCreateFromPathW for

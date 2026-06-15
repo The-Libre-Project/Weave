@@ -51,26 +51,38 @@ fn cwd_child_pidls() -> Vec<usize> {
 }
 
 fn get_desktop_folder_ptr() -> usize {
-    *DESKTOP_FOLDER.get_or_init(|| {
-        let vtable: Box<[usize; 13]> = Box::new([
-            sf_query_interface as *const () as usize,
-            sf_add_ref as *const () as usize,
-            sf_release as *const () as usize,
-            sf_parse_display_name as *const () as usize,
-            sf_enum_objects as *const () as usize,
-            sf_bind_to_object as *const () as usize,
-            sf_bind_to_storage as *const () as usize,
-            sf_compare_ids as *const () as usize,
-            sf_create_view_object as *const () as usize,
-            sf_get_attributes_of as *const () as usize,
-            sf_get_ui_object_of as *const () as usize,
-            sf_get_display_name_of as *const () as usize,
-            sf_set_name_of as *const () as usize,
-        ]);
-        let vtable_ptr = Box::into_raw(vtable) as usize;
-        let obj: Box<usize> = Box::new(vtable_ptr);
-        Box::into_raw(obj) as usize
-    })
+    *DESKTOP_FOLDER.get_or_init(|| new_shell_folder_instance(None))
+}
+
+/// Create a new IShellFolder COM object.
+///
+/// Object layout: `[vtable_ptr, data_ptr]` — a 2-element usize array.
+/// `data_ptr == 0`: desktop folder, enumerates CWD children.
+/// `data_ptr != 0`: bound subfolder, `data_ptr` is `Box::into_raw(Box::new(String))`
+/// containing the filesystem path to enumerate children from.
+fn new_shell_folder_instance(bound_path: Option<String>) -> usize {
+    let vtable: Box<[usize; 13]> = Box::new([
+        sf_query_interface as *const () as usize,
+        sf_add_ref as *const () as usize,
+        sf_release as *const () as usize,
+        sf_parse_display_name as *const () as usize,
+        sf_enum_objects as *const () as usize,
+        sf_bind_to_object as *const () as usize,
+        sf_bind_to_storage as *const () as usize,
+        sf_compare_ids as *const () as usize,
+        sf_create_view_object as *const () as usize,
+        sf_get_attributes_of as *const () as usize,
+        sf_get_ui_object_of as *const () as usize,
+        sf_get_display_name_of as *const () as usize,
+        sf_set_name_of as *const () as usize,
+    ]);
+    let vtable_ptr = Box::into_raw(vtable) as usize;
+    let data_ptr = match bound_path {
+        Some(p) => Box::into_raw(Box::new(p)) as usize,
+        None => 0,
+    };
+    let obj: Box<[usize; 2]> = Box::new([vtable_ptr, data_ptr]);
+    Box::into_raw(obj) as usize
 }
 
 fn get_enum_ptr(items: Vec<usize>) -> usize {
@@ -103,13 +115,23 @@ unsafe extern "win64" fn sf_query_interface(
     S_OK
 }
 
-unsafe extern "win64" fn sf_add_ref(_this: usize) -> u32 {
-    let _ = _this;
-    1
+unsafe extern "win64" fn sf_add_ref(this: usize) -> u32 {
+    let data_ptr = unsafe { *(this as *const usize).add(1) };
+    if data_ptr == 0 {
+        // Desktop folder singleton — returns 1 (no real refcount).
+        1
+    } else {
+        2
+    }
 }
 
-unsafe extern "win64" fn sf_release(_this: usize) -> u32 {
-    let _ = _this;
+unsafe extern "win64" fn sf_release(this: usize) -> u32 {
+    let data_ptr = unsafe { *(this as *const usize).add(1) };
+    if data_ptr != 0 {
+        // Bound subfolder — free the per-instance path String and the 2-element array.
+        let _ = unsafe { Box::from_raw(data_ptr as *mut String) };
+        let _ = unsafe { Box::from_raw(this as *mut [usize; 2]) };
+    }
     1
 }
 
@@ -130,13 +152,17 @@ unsafe extern "win64" fn sf_parse_display_name(
     S_FALSE
 }
 
-/// IShellFolder::EnumObjects — enumerate children of the process CWD as WEV1 PIDLs.
+/// IShellFolder::EnumObjects — enumerate children as WEV1 PIDLs.
+///
+/// Reads the per-instance bound path from `this + 8`. If the path is `None`
+/// (desktop folder), enumerates the process CWD. If bound to a subdirectory,
+/// enumerates that directory's children.
 ///
 /// # Safety
 /// `ppenum` must be a valid writable pointer when non-null.
 // Wine ref: dlls/shell32/shfldr.c — EnumObjects allocates IEnumIDList; desktop uses child PIDLs.
 unsafe extern "win64" fn sf_enum_objects(
-    _this: usize,
+    this: usize,
     _hwnd: usize,
     _grf_flags: u32,
     ppenum: *mut usize,
@@ -144,20 +170,85 @@ unsafe extern "win64" fn sf_enum_objects(
     if ppenum.is_null() {
         return E_POINTER;
     }
-    let items = cwd_child_pidls();
+    let data_ptr = unsafe { *(this as *const usize).add(1) };
+    let items = if data_ptr == 0 {
+        cwd_child_pidls()
+    } else {
+        let path = unsafe { &*(data_ptr as *const String) };
+        dir_child_pidls(path)
+    };
     let enum_ptr = get_enum_ptr(items);
     unsafe { *ppenum = enum_ptr };
     S_OK
 }
 
+/// Enumerate children of a specific directory path.
+fn dir_child_pidls(dir_win_path: &str) -> Vec<usize> {
+    let linux_path = dir_win_path.replace('\\', "/");
+    let Ok(read) = std::fs::read_dir(&linux_path) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for ent in read.flatten() {
+        let name = ent.file_name().to_string_lossy().into_owned();
+        let child_path = format!("{}\\{}", dir_win_path.trim_end_matches('\\'), name);
+        let pidl = pidl::pidl_from_path_w(&child_path);
+        if !pidl.is_null() {
+            out.push(pidl as usize);
+        }
+        if out.len() >= 64 {
+            break;
+        }
+    }
+    out
+}
+
+// Wine ref: dlls/shell32/shfldr.c — BindToObject creates a child IShellFolder for a sub-PIDL.
+// Phase B: for filesystem directories, creates a new IShellFolder bound to the directory.
 unsafe extern "win64" fn sf_bind_to_object(
     _this: usize,
-    _pidl: *const u8,
+    pidl: *const u8,
     _pbc: usize,
-    _riid: *const u8,
-    _ppv: *mut usize,
+    riid: *const u8,
+    ppv: *mut usize,
 ) -> i32 {
-    E_NOINTERFACE
+    if ppv.is_null() {
+        return E_POINTER;
+    }
+    unsafe { *ppv = 0 };
+
+    // Resolve the PIDL to a filesystem path.
+    // Try Weave-native path extraction first, then fall back to PIDL-list resolution.
+    let path_str = pidl::weave_item_path(pidl).or_else(|| pidl::pidl_path_from_list(pidl));
+
+    let Some(ref path) = path_str else {
+        return E_NOINTERFACE;
+    };
+
+    // Check the resolved path is a filesystem directory.
+    let linux_path = path.replace('\\', "/");
+    if !std::path::Path::new(&linux_path).is_dir() {
+        return E_NOINTERFACE;
+    }
+
+    // Check riid == IID_IShellFolder if non-null.
+    // IID_IShellFolder = {000214E6-0000-0000-C000-000000000046}
+    if !riid.is_null() {
+        let guid = unsafe { std::slice::from_raw_parts(riid, 16) };
+        let iid_shell_folder: [u8; 16] = [
+            0xE6, 0x14, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0xC0, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x46,
+        ];
+        if guid != iid_shell_folder {
+            return E_NOINTERFACE;
+        }
+    }
+
+    let bound = new_shell_folder_instance(Some(path.clone()));
+    // The caller's `this` is the parent folder. We need its ref count to be
+    // independent — the bound folder is a new instance.
+    unsafe { *ppv = bound };
+    S_OK
 }
 
 unsafe extern "win64" fn sf_bind_to_storage(
