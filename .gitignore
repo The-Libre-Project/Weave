@@ -77,9 +77,11 @@ docs/*
 !docs/SHIM-CONTRACT-CASEBOOK.md
 !docs/LOOP-BACKSTOP-CONTRACT.md
 # loop-arcs: track README/TEMPLATE + per-gate arc logs; keep .ratify private
-!docs/loop-arcs/
-docs/loop-arcs/*
-!docs/loop-arcs/*.md
-!docs/loop-arcs/README.md
-!docs/loop-arcs/TEMPLATE.md
+!docs/milestones/
+docs/milestones/*
+!docs/milestones/*.md
+!docs/reference/
+docs/reference/*
+!docs/reference/*.md
+!docs/RELEASE-CLAIMS.md
 .deepseek/
