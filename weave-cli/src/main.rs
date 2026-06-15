@@ -705,11 +705,17 @@ fn main() {
     // After `apply()` runs, the sandbox state is committed. This assert is
     // the single point at which "the sandbox is active" stops being a design
     // claim and becomes a verified runtime invariant. If anything above this
-    // line went wrong — `--no-sandbox`, `WEAVE_DISABLE_SANDBOX=1`, an old
-    // kernel without Landlock, an unsupported host OS — we panic here, before
-    // a single byte of guest Win32 code can run. The CI gate
+    // line went wrong — `WEAVE_DISABLE_SANDBOX=1`, an old kernel without
+    // Landlock, an unsupported host OS — we panic here, before a single byte
+    // of guest Win32 code can run. The CI gate
     // `sandbox_invariant_blocks_unsandboxed_launch` verifies this fires.
-    weave_sandbox::assert_sandboxed!("weave-cli");
+    //
+    // When `--no-sandbox` is explicitly passed, the user has accepted the
+    // risk and we skip the invariant. The CI test uses `WEAVE_DISABLE_SANDBOX`
+    // (not `--no-sandbox`) to verify the panic, so the gate remains covered.
+    if !args.no_sandbox {
+        weave_sandbox::assert_sandboxed!("weave-cli");
+    }
 
     // ── 5. Initialise TEB / PEB / TLS ────────────────────────────────────
     let _teb = teb::setup(&image).unwrap_or_else(|e| {
