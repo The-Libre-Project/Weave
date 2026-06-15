@@ -1345,6 +1345,140 @@ pub unsafe extern "win64" fn sh_get_file_info_w(
     0x0001_0001usize
 }
 
+// ── Additional shell32 stubs ──────────────────────────────────────────────
+
+// Wine ref: dlls/shell32/shell32_main.c — SHAddToRecentDocs adds a file to the recent
+// documents MRU list; uFlags = SHARD_PATHW means lpsz is a path string.
+/// SHAddToRecentDocs: add a file to the recent documents list.
+///
+/// Stub — no-op.
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn sh_add_to_recent_docs(_flags: u32, _docs: *const u16) {}
+
+// Wine ref: dlls/shell32/shlfolder.c — SHBindToParent resolves the parent PIDL of a given
+// PIDL and optionally returns the last component; E_INVALIDARG if ppidl null.
+/// SHBindToParent: bind to a PIDL's parent folder and retrieve the last component.
+///
+/// Returns E_NOTIMPL — stub.
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn sh_bind_to_parent(
+    _pidl: *const u8,
+    _riid: *const u8,
+    ppv: *mut usize,
+    _ppidl_last: *mut *mut u8,
+) -> i32 {
+    if !ppv.is_null() {
+        unsafe { *ppv = 0 };
+    }
+    0x8000_4001u32 as i32 // E_NOTIMPL
+}
+
+// Wine ref: dlls/shell32/shlfileop.c — SHCreateDirectoryExW creates a directory tree;
+// calls SHCreateDirectory (SHFileOperation-based) with a progress callback.
+/// SHCreateDirectoryExW: create a directory (including parents).
+///
+/// Returns E_NOTIMPL — stub.
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn sh_create_directory_ex_w(
+    _hwnd: usize,
+    _path: *const u16,
+    _pmt: usize,
+) -> i32 {
+    0x8000_4001u32 as i32 // E_NOTIMPL
+}
+
+// Wine ref: dlls/shell32/shlfolder.c — SHCreateItemFromParsingName parses a display name
+// into an IShellItem; delegates to SHCreateItemFromIDList after SHParseDisplayName.
+/// SHCreateItemFromParsingName: create a shell item from a parsing name.
+///
+/// Returns E_NOTIMPL — stub.
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn sh_create_item_from_parsing_name(
+    _name: *const u16,
+    _pbc: usize,
+    _riid: *const u8,
+    ppv: *mut usize,
+) -> i32 {
+    if !ppv.is_null() {
+        unsafe { *ppv = 0 };
+    }
+    0x8000_4001u32 as i32 // E_NOTIMPL
+}
+
+// Wine ref: dlls/shell32/shlfolder.c — SHCreateItemFromIDList creates an IShellItem
+// from a PIDL.
+/// SHCreateItemFromIDList: create a shell item from a PIDL.
+///
+/// Returns E_NOTIMPL — stub.
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn sh_create_item_from_id_list(
+    _pidl: *const u8,
+    _riid: *const u8,
+    ppv: *mut usize,
+) -> i32 {
+    if !ppv.is_null() {
+        unsafe { *ppv = 0 };
+    }
+    0x8000_4001u32 as i32 // E_NOTIMPL
+}
+
+// Wine ref: dlls/shell32/shlview.c — SHOpenFolderAndSelectItems opens an Explorer window
+// with specified items selected; uses shell namespace browsing.
+/// SHOpenFolderAndSelectItems: open a folder window with items selected.
+///
+/// Returns E_NOTIMPL — stub.
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn sh_open_folder_and_select_items(
+    _pidl_folder: *const u8,
+    _count: u32,
+    _pidls: *const *const u8,
+    _flags: u32,
+) -> i32 {
+    0x8000_4001u32 as i32 // E_NOTIMPL
+}
+
+// Wine ref: dlls/shell32/shell32_main.c — SHGetFileInfoA is the ANSI variant; converts
+// via MultiByteToWideChar then calls SHGetFileInfoW, then writes results back as ANSI.
+/// SHGetFileInfoA: ANSI variant of SHGetFileInfoW.
+///
+/// Returns 0 — stub.
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn sh_get_file_info_a(
+    _psz_path: *const u8,
+    _dw_file_attributes: u32,
+    _psfi: *mut u8,
+    _cb_file_info: u32,
+    _u_flags: u32,
+) -> usize {
+    0
+}
+
+// Wine ref: dlls/shell32/shlview.c — SHLimitInputEdit limits text input in an edit control
+// by setting an input scope or character filter.
+/// SHLimitInputEdit: limit text input for an edit control.
+///
+/// Returns S_OK — stub.
+///
+/// # Safety
+/// `_hwnd` is the edit control HWND.
+pub unsafe extern "win64" fn sh_limit_input_edit(_hwnd: usize, _f_unicode: i32) -> i32 {
+    0 // S_OK
+}
+
 // Wine ref: dlls/shell32/shlfileop.c — parses SHFILEOPSTRUCTW; dispatches to copy/delete/rename/move
 // helpers; FOF_* flags control confirmation dialogs; returns 0 on success, non-zero on cancel/error.
 /// SHFileOperationW — perform a file operation (copy/move/delete/rename) (Wide).

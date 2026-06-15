@@ -241,6 +241,38 @@ fn resolve_shell32(func: &str) -> Option<usize> {
         "SHGetSettings" => Some(
             shell::sh_get_settings as unsafe extern "win64" fn(*mut u8, u32) as *const () as usize,
         ),
+        // ── Additional shell32 stubs ──
+        "SHAddToRecentDocs" => Some(
+            shell::sh_add_to_recent_docs as unsafe extern "win64" fn(u32, *const u16) as *const ()
+                as usize,
+        ),
+        "SHBindToParent" => Some(
+            shell::sh_bind_to_parent as unsafe extern "win64" fn(_, _, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "SHCreateDirectoryExW" => Some(
+            shell::sh_create_directory_ex_w as unsafe extern "win64" fn(_, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "SHCreateItemFromParsingName" => Some(
+            shell::sh_create_item_from_parsing_name as unsafe extern "win64" fn(_, _, _, _) -> _
+                as *const () as usize,
+        ),
+        "SHCreateItemFromIDList" => Some(
+            shell::sh_create_item_from_id_list as unsafe extern "win64" fn(_, _, _) -> _
+                as *const () as usize,
+        ),
+        "SHOpenFolderAndSelectItems" => Some(
+            shell::sh_open_folder_and_select_items as unsafe extern "win64" fn(_, _, _, _) -> _
+                as *const () as usize,
+        ),
+        "SHGetFileInfoA" => Some(
+            shell::sh_get_file_info_a as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "SHLimitInputEdit" => Some(
+            shell::sh_limit_input_edit as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
+        ),
         _ => None,
     }
 }
@@ -289,6 +321,26 @@ mod tests {
             assert!(
                 resolve("shell32.dll", ord).is_some(),
                 "shell32.dll!{ord} must resolve"
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_shell32_additional_stubs() {
+        let stubs = [
+            "SHAddToRecentDocs",
+            "SHBindToParent",
+            "SHCreateDirectoryExW",
+            "SHCreateItemFromParsingName",
+            "SHCreateItemFromIDList",
+            "SHOpenFolderAndSelectItems",
+            "SHGetFileInfoA",
+            "SHLimitInputEdit",
+        ];
+        for s in &stubs {
+            assert!(
+                resolve("shell32.dll", s).is_some(),
+                "shell32.dll!{s} must resolve"
             );
         }
     }

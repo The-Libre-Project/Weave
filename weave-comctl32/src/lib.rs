@@ -2065,6 +2065,55 @@ mod tests {
         assert!(resolve("ComCtl32.DLL", "InitCommonControls").is_some());
         assert!(resolve("COMCTL32.DLL", "ImageList_Create").is_some());
     }
+
+    #[test]
+    fn resolve_uxtheme_all_stubs() {
+        let stubs = [
+            "OpenThemeData",
+            "CloseThemeData",
+            "DrawThemeBackground",
+            "DrawThemeText",
+            "SetWindowTheme",
+            "IsThemeActive",
+            "IsAppThemed",
+            "GetWindowTheme",
+            "EnableThemeDialogTexture",
+            "EnableTheming",
+            "GetThemePartSize",
+            "GetThemeTextExtent",
+            "GetThemeBackgroundContentRect",
+            "GetThemeBackgroundExtent",
+            "GetThemeColor",
+            "GetThemeMetric",
+            "GetThemeBool",
+            "GetThemeSysColor",
+            "GetThemeSysFont",
+            "GetThemeSysSize",
+            "GetThemeSysBool",
+            "DrawThemeParentBackground",
+            "GetThemeTransitionDuration",
+            "GetThemeInt",
+            "DrawThemeEdge",
+        ];
+        for s in &stubs {
+            assert!(
+                resolve_uxtheme("uxtheme.dll", s).is_some(),
+                "uxtheme.dll!{s} must resolve"
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_uxtheme_case_insensitive() {
+        assert!(resolve_uxtheme("UXTHEME.DLL", "OpenThemeData").is_some());
+        assert!(resolve_uxtheme("UxTheme.DLL", "IsThemeActive").is_some());
+    }
+
+    #[test]
+    fn resolve_uxtheme_wrong_dll_returns_none() {
+        assert!(resolve_uxtheme("kernel32.dll", "OpenThemeData").is_none());
+        assert!(resolve_uxtheme("uxtheme.dll", "__nonexistent__").is_none());
+    }
 }
 
 // ── uxtheme.dll stubs ─────────────────────────────────────────────────────────
@@ -2090,6 +2139,22 @@ pub fn resolve_uxtheme(dll: &str, func: &str) -> Option<usize> {
         "GetWindowTheme" => Some(get_window_theme as *const () as usize),
         "EnableThemeDialogTexture" => Some(enable_theme_dialog_texture as *const () as usize),
         "EnableTheming" => Some(enable_theming as *const () as usize),
+        // ── Additional uxtheme stubs ──
+        "GetThemePartSize" => Some(get_theme_part_size as *const () as usize),
+        "GetThemeTextExtent" => Some(get_theme_text_extent as *const () as usize),
+        "GetThemeBackgroundContentRect" => Some(get_theme_background_content_rect as *const () as usize),
+        "GetThemeBackgroundExtent" => Some(get_theme_background_extent as *const () as usize),
+        "GetThemeColor" => Some(get_theme_color as *const () as usize),
+        "GetThemeMetric" => Some(get_theme_metric as *const () as usize),
+        "GetThemeBool" => Some(get_theme_bool as *const () as usize),
+        "GetThemeSysColor" => Some(get_theme_sys_color as *const () as usize),
+        "GetThemeSysFont" => Some(get_theme_sys_font as *const () as usize),
+        "GetThemeSysSize" => Some(get_theme_sys_size as *const () as usize),
+        "GetThemeSysBool" => Some(get_theme_sys_bool as *const () as usize),
+        "DrawThemeParentBackground" => Some(draw_theme_parent_background as *const () as usize),
+        "GetThemeTransitionDuration" => Some(get_theme_transition_duration as *const () as usize),
+        "GetThemeInt" => Some(get_theme_int as *const () as usize),
+        "DrawThemeEdge" => Some(draw_theme_edge as *const () as usize),
         _ => None,
     }
 }
@@ -2160,3 +2225,75 @@ extern "win64" fn enable_theme_dialog_texture(_hwnd: usize, _flags: u32) -> i32 
 extern "win64" fn enable_theming(_enable: i32) -> i32 {
     S_OK
 }
+
+// ── Additional uxtheme stubs ──────────────────────────────────────────────
+// Wine ref: dlls/uxtheme/theme.c — GetThemePartSize returns the size of a theme part.
+extern "win64" fn get_theme_part_size(
+    _h_theme: usize, _hdc: usize, _part: i32, _state: i32, _rect: *const u8, _size: *mut u8,
+) -> i32 { S_OK }
+
+// Wine ref: dlls/uxtheme/theme.c — GetThemeTextExtent calculates text bounding rect.
+extern "win64" fn get_theme_text_extent(
+    _h_theme: usize, _hdc: usize, _part: i32, _state: i32, _text: *const u16, _len: i32,
+    _flags: u32, _rect: *const u8, _extent: *mut u8,
+) -> i32 { S_OK }
+
+// Wine ref: dlls/uxtheme/theme.c — GetThemeBackgroundContentRect returns content area.
+extern "win64" fn get_theme_background_content_rect(
+    _h_theme: usize, _hdc: usize, _part: i32, _state: i32, _rect: *const u8, _content: *mut u8,
+) -> i32 { S_OK }
+
+// Wine ref: dlls/uxtheme/theme.c — GetThemeBackgroundExtent returns background area.
+extern "win64" fn get_theme_background_extent(
+    _h_theme: usize, _hdc: usize, _part: i32, _state: i32, _rect: *const u8, _extent: *mut u8,
+) -> i32 { S_OK }
+
+// Wine ref: dlls/uxtheme/theme.c — GetThemeColor returns a COLORREF for a theme color.
+extern "win64" fn get_theme_color(
+    _h_theme: usize, _part: i32, _state: i32, _prop: i32, _color: *mut u32,
+) -> i32 { S_OK }
+
+// Wine ref: dlls/uxtheme/theme.c — GetThemeMetric returns an int metric value.
+extern "win64" fn get_theme_metric(
+    _h_theme: usize, _hdc: usize, _part: i32, _state: i32, _prop: i32, _val: *mut i32,
+) -> i32 { S_OK }
+
+// Wine ref: dlls/uxtheme/theme.c — GetThemeBool returns a boolean theme property.
+extern "win64" fn get_theme_bool(
+    _h_theme: usize, _part: i32, _state: i32, _prop: i32, _val: *mut i32,
+) -> i32 { S_OK }
+
+// Wine ref: dlls/uxtheme/theme.c — GetThemeSysColor returns a system color index.
+extern "win64" fn get_theme_sys_color(_h_theme: usize, _color: i32) -> u32 {
+    0 // COLORREF 0 = black
+}
+
+// Wine ref: dlls/uxtheme/theme.c — GetThemeSysFont fills a LOGFONTW with system font info.
+extern "win64" fn get_theme_sys_font(_h_theme: usize, _font: i32, _lf: *mut u8) -> i32 { S_OK }
+
+// Wine ref: dlls/uxtheme/theme.c — GetThemeSysSize returns a system size in pixels.
+extern "win64" fn get_theme_sys_size(_h_theme: usize, _size: i32) -> i32 { 0 }
+
+// Wine ref: dlls/uxtheme/theme.c — GetThemeSysBool returns a boolean system property.
+extern "win64" fn get_theme_sys_bool(_h_theme: usize, _prop: i32) -> i32 { 0 } // FALSE
+
+// Wine ref: dlls/uxtheme/theme.c — DrawThemeParentBackground draws parent background pixels.
+extern "win64" fn draw_theme_parent_background(
+    _hwnd: usize, _hdc: usize, _rect: *const u8,
+) -> i32 { S_OK }
+
+// Wine ref: dlls/uxtheme/theme.c — GetThemeTransitionDuration returns transition timing.
+extern "win64" fn get_theme_transition_duration(
+    _h_theme: usize, _part: i32, _state_from: i32, _state_to: i32, _prop: i32, _dur: *mut u32,
+) -> i32 { S_OK }
+
+// Wine ref: dlls/uxtheme/theme.c — GetThemeInt returns an int property.
+extern "win64" fn get_theme_int(
+    _h_theme: usize, _part: i32, _state: i32, _prop: i32, _val: *mut i32,
+) -> i32 { S_OK }
+
+// Wine ref: dlls/uxtheme/theme.c — DrawThemeEdge draws themed edge styling.
+extern "win64" fn draw_theme_edge(
+    _h_theme: usize, _hdc: usize, _part: i32, _state: i32, _dest: *const u8, _clip: *const u8,
+    _edge: u32, _flags: u32, _rect: *mut u8,
+) -> i32 { S_OK }
