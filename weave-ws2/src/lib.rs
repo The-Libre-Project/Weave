@@ -2167,20 +2167,79 @@ pub unsafe extern "win64" fn get_addr_info_w(
 
 /// GetNameInfoW: wide-char getnameinfo.
 ///
-/// Phase A stub — returns WSAEFAULT.
+/// Translates sockaddr from Windows to Linux format, calls libc::getnameinfo(),
+/// then converts the result to UTF-16 wide strings.
+///
+/// Returns 0 on success, SOCKET_ERROR on failure.
 ///
 /// # Safety
-/// Caller must ensure all pointer arguments are valid.
+/// `sa` must point to a valid sockaddr of `sa_len` bytes.
+/// `host` must point to a writable buffer of `host_len` wide chars (or be null).
+/// `serv` must point to a writable buffer of `serv_len` wide chars (or be null).
 pub unsafe extern "win64" fn get_name_info_w(
-    _sa: *const u8,
-    _sa_len: u32,
-    _host: *mut u16,
-    _host_len: u32,
-    _serv: *mut u16,
-    _serv_len: u32,
-    _flags: i32,
+    sa: *const u8,
+    sa_len: u32,
+    host: *mut u16,
+    host_len: u32,
+    serv: *mut u16,
+    serv_len: u32,
+    flags: i32,
 ) -> i32 {
-    SOCKET_ERROR
+    const NI_MAXHOST: usize = 1025;
+    const NI_MAXSERV: usize = 32;
+
+    if sa.is_null() {
+        set_last_error(10014); // WSAEFAULT
+        return SOCKET_ERROR;
+    }
+
+    let addr = copy_sockaddr_win_to_linux(sa, sa_len as usize);
+
+    let mut host_bytes = vec![0u8; NI_MAXHOST];
+    let mut serv_bytes = vec![0u8; NI_MAXSERV];
+
+    let ret = libc::getnameinfo(
+        addr.as_ptr() as *const libc::sockaddr,
+        sa_len as libc::socklen_t,
+        host_bytes.as_mut_ptr() as *mut libc::c_char,
+        NI_MAXHOST as u32,
+        serv_bytes.as_mut_ptr() as *mut libc::c_char,
+        NI_MAXSERV as u32,
+        flags,
+    );
+
+    if ret != 0 {
+        save_errno();
+        set_last_error(ret);
+        return SOCKET_ERROR;
+    }
+
+    // Convert UTF-8 result to UTF-16 and copy into caller's buffers.
+    if !host.is_null() && host_len > 0 {
+        let end = host_bytes
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(NI_MAXHOST);
+        let utf8 = std::str::from_utf8(&host_bytes[..end]).unwrap_or("");
+        let wide: Vec<u16> = utf8.encode_utf16().collect();
+        let to_copy = wide.len().min((host_len - 1) as usize);
+        std::ptr::copy_nonoverlapping(wide.as_ptr(), host, to_copy);
+        *host.add(to_copy) = 0;
+    }
+
+    if !serv.is_null() && serv_len > 0 {
+        let end = serv_bytes
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(NI_MAXSERV);
+        let utf8 = std::str::from_utf8(&serv_bytes[..end]).unwrap_or("");
+        let wide: Vec<u16> = utf8.encode_utf16().collect();
+        let to_copy = wide.len().min((serv_len - 1) as usize);
+        std::ptr::copy_nonoverlapping(wide.as_ptr(), serv, to_copy);
+        *serv.add(to_copy) = 0;
+    }
+
+    0
 }
 
 // ── Overlapped I/O ─────────────────────────────────────────────────────────────
