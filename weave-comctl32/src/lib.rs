@@ -1426,88 +1426,167 @@ const WM_NCDESTROY: u32 = 0x0082;
 const WM_GETFONT: u32 = 0x0030;
 const WM_GETTEXT: u32 = 0x000c;
 
+const CLR_DEFAULT: u32 = 0xFF00_0000;
+const CLR_NONE: u32 = 0xFFFF_0000;
+
+// ── ImageList state backend ───────────────────────────────────────────────────
+
+struct ImageListState {
+    cx: i32,
+    cy: i32,
+    flags: u32,
+    count: i32,
+    bk_color: u32,
+}
+
+static IMAGE_LISTS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<usize, ImageListState>>> =
+    std::sync::OnceLock::new();
+
+fn image_lists() -> &'static std::sync::Mutex<std::collections::HashMap<usize, ImageListState>> {
+    IMAGE_LISTS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+static NEXT_IMAGELIST_HANDLE: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0x1000_0001);
+
+fn alloc_imagelist_handle() -> usize {
+    NEXT_IMAGELIST_HANDLE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 // ── ImageList ─────────────────────────────────────────────────────────────────
 
 /// ImageList_Create — create a new image list.
 ///
-/// Returns a fake non-zero handle. Apps check for NULL to detect failure.
+/// Returns a non-zero HIMAGELIST handle tracking the size and flags.
 ///
 /// # Safety
 /// No pointer arguments.
 pub unsafe extern "win64" fn image_list_create(
-    _cx: i32,
-    _cy: i32,
-    _flags: u32,
+    cx: i32,
+    cy: i32,
+    flags: u32,
     _c_initial: i32,
     _c_grow: i32,
 ) -> usize {
-    1 // fake HIMAGELIST handle
+    let handle = alloc_imagelist_handle();
+    let mut map = image_lists().lock().unwrap();
+    map.insert(
+        handle,
+        ImageListState {
+            cx,
+            cy,
+            flags,
+            count: 0,
+            bk_color: CLR_DEFAULT,
+        },
+    );
+    handle
 }
 
 /// ImageList_Destroy — destroy an image list.
 ///
 /// # Safety
-/// `himl` is a fake handle from `image_list_create`. No real memory to free.
-pub unsafe extern "win64" fn image_list_destroy(_himl: usize) -> i32 {
-    1 // TRUE
+/// `himl` must be a handle from image_list_create.
+pub unsafe extern "win64" fn image_list_destroy(himl: usize) -> i32 {
+    let mut map = image_lists().lock().unwrap();
+    if map.remove(&himl).is_some() { 1 } else { 0 }
 }
 
 /// ImageList_Add — add a bitmap to an image list. Returns image index.
 ///
 /// # Safety
-/// Arguments are ignored.
+/// `himl` must be a handle from image_list_create.
 pub unsafe extern "win64" fn image_list_add(
-    _himl: usize,
+    himl: usize,
     _hbm_image: usize,
     _hbm_mask: usize,
 ) -> i32 {
-    0 // index 0
+    let mut map = image_lists().lock().unwrap();
+    if let Some(il) = map.get_mut(&himl) {
+        let idx = il.count;
+        il.count += 1;
+        idx
+    } else {
+        -1
+    }
 }
 
 /// ImageList_AddIcon — add an icon to an image list. Returns image index.
 ///
 /// # Safety
-/// Arguments are ignored.
-pub unsafe extern "win64" fn image_list_add_icon(_himl: usize, _hicon: usize) -> i32 {
-    0 // index 0
+/// `himl` must be a handle from image_list_create.
+pub unsafe extern "win64" fn image_list_add_icon(himl: usize, _hicon: usize) -> i32 {
+    let mut map = image_lists().lock().unwrap();
+    if let Some(il) = map.get_mut(&himl) {
+        let idx = il.count;
+        il.count += 1;
+        idx
+    } else {
+        -1
+    }
 }
 
 /// ImageList_AddMasked — add a bitmap using a mask colour. Returns image index.
 ///
 /// # Safety
-/// Arguments are ignored.
+/// `himl` must be a handle from image_list_create.
 pub unsafe extern "win64" fn image_list_add_masked(
-    _himl: usize,
+    himl: usize,
     _hbm_image: usize,
     _cr_mask: u32,
 ) -> i32 {
-    0
+    let mut map = image_lists().lock().unwrap();
+    if let Some(il) = map.get_mut(&himl) {
+        let idx = il.count;
+        il.count += 1;
+        idx
+    } else {
+        -1
+    }
 }
 
 /// ImageList_ReplaceIcon — replace or add an icon in an image list.
 ///
-/// Returns the image index (0).
+/// Returns the image index, or -1 on invalid handle.
 ///
 /// # Safety
-/// Arguments are ignored.
-pub unsafe extern "win64" fn image_list_replace_icon(_himl: usize, _i: i32, _hicon: usize) -> i32 {
-    0
+/// `himl` must be a handle from image_list_create.
+pub unsafe extern "win64" fn image_list_replace_icon(himl: usize, i: i32, _hicon: usize) -> i32 {
+    let mut map = image_lists().lock().unwrap();
+    if let Some(il) = map.get_mut(&himl) {
+        let count = il.count;
+        if i >= 0 && i < count {
+            i // replace existing
+        } else {
+            il.count += 1;
+            count // append, return new index
+        }
+    } else {
+        -1
+    }
 }
 
 /// ImageList_GetImageCount — return the number of images in a list.
 ///
 /// # Safety
-/// Arguments are ignored.
-pub unsafe extern "win64" fn image_list_get_image_count(_himl: usize) -> i32 {
-    0
+/// `himl` must be a handle from image_list_create.
+pub unsafe extern "win64" fn image_list_get_image_count(himl: usize) -> i32 {
+    let map = image_lists().lock().unwrap();
+    map.get(&himl).map_or(0, |il| il.count)
 }
 
 /// ImageList_SetImageCount — resize an image list.
 ///
 /// # Safety
-/// Arguments are ignored.
-pub unsafe extern "win64" fn image_list_set_image_count(_himl: usize, _u_new_count: u32) -> i32 {
-    1 // TRUE
+/// `himl` must be a handle from image_list_create.
+pub unsafe extern "win64" fn image_list_set_image_count(himl: usize, u_new_count: u32) -> i32 {
+    let mut map = image_lists().lock().unwrap();
+    if let Some(il) = map.get_mut(&himl) {
+        il.count = u_new_count as i32;
+        1
+    } else {
+        0
+    }
 }
 
 /// ImageList_Draw — draw an image from a list onto a DC.
@@ -1877,18 +1956,78 @@ pub unsafe extern "win64" fn image_list_set_icon_size(_himl: usize, _cx: i32, _c
     1 // TRUE
 }
 
-/// ImageList_GetIconSize — gets the icon dimensions for an image list (stub).
-///
-/// Returns FALSE — no real image list backing. Apps should tolerate this.
+/// ImageList_GetIconSize — get the image dimensions for an image list.
 ///
 /// # Safety
-/// `pcx`/`pcy` are ignored; we do not write through them.
+/// `himl` must be a handle from image_list_create. `pcx` and `pcy` must be
+/// valid writable pointers if non-null.
 pub unsafe extern "win64" fn image_list_get_icon_size(
-    _himl: usize,
-    _pcx: *mut i32,
-    _pcy: *mut i32,
+    himl: usize,
+    pcx: *mut i32,
+    pcy: *mut i32,
 ) -> i32 {
-    0 // FALSE — stub
+    let map = image_lists().lock().unwrap();
+    if let Some(il) = map.get(&himl) {
+        if !pcx.is_null() {
+            pcx.write(il.cx);
+        }
+        if !pcy.is_null() {
+            pcy.write(il.cy);
+        }
+        1
+    } else {
+        0
+    }
+}
+
+/// ImageList_GetBkColor — get the background colour of an image list.
+///
+/// # Safety
+/// `himl` must be a handle from image_list_create.
+pub unsafe extern "win64" fn image_list_get_bk_color(himl: usize) -> u32 {
+    let map = image_lists().lock().unwrap();
+    map.get(&himl).map_or(CLR_NONE, |il| il.bk_color)
+}
+
+/// ImageList_SetBkColor — set the background colour of an image list.
+///
+/// Returns the previous background colour, or CLR_NONE on invalid handle.
+///
+/// # Safety
+/// `himl` must be a handle from image_list_create.
+pub unsafe extern "win64" fn image_list_set_bk_color(himl: usize, clr_bk: u32) -> u32 {
+    let mut map = image_lists().lock().unwrap();
+    if let Some(il) = map.get_mut(&himl) {
+        let prev = il.bk_color;
+        il.bk_color = clr_bk;
+        prev
+    } else {
+        CLR_NONE
+    }
+}
+
+/// ImageList_GetFlags — get the flags of an image list.
+///
+/// # Safety
+/// `himl` must be a handle from image_list_create.
+pub unsafe extern "win64" fn image_list_get_flags(himl: usize) -> u32 {
+    let map = image_lists().lock().unwrap();
+    map.get(&himl).map_or(0, |il| il.flags)
+}
+
+/// ImageList_SetFlags — set the flags of an image list.
+///
+/// # Safety
+/// `himl` must be a handle from image_list_create.
+pub unsafe extern "win64" fn image_list_set_flags(himl: usize, flags: u32) -> u32 {
+    let mut map = image_lists().lock().unwrap();
+    if let Some(il) = map.get_mut(&himl) {
+        let prev = il.flags;
+        il.flags = flags;
+        prev
+    } else {
+        0
+    }
 }
 
 // ── TaskDialog ─────────────────────────────────────────────────────────────────
@@ -1974,6 +2113,10 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "ImageList_Remove" => Some(image_list_remove as *const () as usize),
         "ImageList_SetIconSize" => Some(image_list_set_icon_size as *const () as usize),
         "ImageList_GetIconSize" => Some(image_list_get_icon_size as *const () as usize),
+        "ImageList_GetBkColor" => Some(image_list_get_bk_color as *const () as usize),
+        "ImageList_SetBkColor" => Some(image_list_set_bk_color as *const () as usize),
+        "ImageList_GetFlags" => Some(image_list_get_flags as *const () as usize),
+        "ImageList_SetFlags" => Some(image_list_set_flags as *const () as usize),
         // Ordinals seen in Notepad++ imports — map to their named equivalents.
         // #381 = ImageList_BeginDrag, #410/#411/#412/#413 = drag show/move/enter/leave variants.
         "#381" => Some(image_list_begin_drag as *const () as usize),
@@ -2046,6 +2189,10 @@ mod tests {
             "ImageList_Remove",
             "ImageList_SetIconSize",
             "ImageList_GetIconSize",
+            "ImageList_GetBkColor",
+            "ImageList_SetBkColor",
+            "ImageList_GetFlags",
+            "ImageList_SetFlags",
             "#381",
             "#410",
             "#411",
@@ -2058,6 +2205,70 @@ mod tests {
         for f in &funcs {
             assert!(resolve("comctl32.dll", f).is_some(), "missing: {f}");
         }
+    }
+
+    #[test]
+    fn image_list_state_tracking() {
+        // Create an image list with known parameters.
+        let himl = unsafe { image_list_create(16, 16, 0x0001, 4, 4) };
+        assert_ne!(himl, 0, "image list handle must be non-zero");
+
+        // GetIconSize should return the dimensions.
+        let mut cx: i32 = 0;
+        let mut cy: i32 = 0;
+        let ret = unsafe { image_list_get_icon_size(himl, &mut cx, &mut cy) };
+        assert_eq!(ret, 1, "GetIconSize should succeed");
+        assert_eq!(cx, 16);
+        assert_eq!(cy, 16);
+
+        // Initially empty.
+        assert_eq!(unsafe { image_list_get_image_count(himl) }, 0);
+
+        // Add an image, count increments.
+        let idx = unsafe { image_list_add(himl, 0x1234, 0) };
+        assert_eq!(idx, 0);
+        assert_eq!(unsafe { image_list_get_image_count(himl) }, 1);
+
+        // Add another image.
+        let idx = unsafe { image_list_add_icon(himl, 0x5678) };
+        assert_eq!(idx, 1);
+        assert_eq!(unsafe { image_list_get_image_count(himl) }, 2);
+
+        // ReplaceIcon with valid index.
+        let idx = unsafe { image_list_replace_icon(himl, 0, 0x9999) };
+        assert_eq!(idx, 0, "replace existing should return same index");
+        assert_eq!(unsafe { image_list_get_image_count(himl) }, 2);
+
+        // ReplaceIcon with -1 appends.
+        let idx = unsafe { image_list_replace_icon(himl, -1, 0xAAAA) };
+        assert_eq!(idx, 2);
+        assert_eq!(unsafe { image_list_get_image_count(himl) }, 3);
+
+        // Get/SetBkColor.
+        let prev = unsafe { image_list_set_bk_color(himl, 0x00FF0000) };
+        assert_eq!(prev, CLR_DEFAULT);
+        let bk = unsafe { image_list_get_bk_color(himl) };
+        assert_eq!(bk, 0x00FF0000);
+
+        // Get/SetFlags.
+        let prev_flags = unsafe { image_list_set_flags(himl, 0x0002) };
+        assert_eq!(prev_flags, 0x0001);
+        let flags = unsafe { image_list_get_flags(himl) };
+        assert_eq!(flags, 0x0002);
+
+        // SetImageCount.
+        let ret = unsafe { image_list_set_image_count(himl, 10) };
+        assert_eq!(ret, 1);
+        assert_eq!(unsafe { image_list_get_image_count(himl) }, 10);
+
+        // Destroy.
+        let ret = unsafe { image_list_destroy(himl) };
+        assert_eq!(ret, 1, "destroy should succeed");
+
+        // Operations on destroyed handle return safe defaults.
+        assert_eq!(unsafe { image_list_get_image_count(himl) }, 0);
+        assert_eq!(unsafe { image_list_get_icon_size(himl, &mut cx, &mut cy) }, 0);
+        assert_eq!(unsafe { image_list_destroy(himl) }, 0);
     }
 
     #[test]

@@ -8418,6 +8418,7 @@ fn signal_desktop_phase_a_probe() {
     }
 
     let mut child = std::process::Command::new(weave_bin)
+        .arg("--no-sandbox")
         .arg(&fixture)
         .env("WEAVE_IAT_TRACE", "1")
         .stdout(std::process::Stdio::piped())
