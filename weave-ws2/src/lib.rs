@@ -2255,23 +2255,84 @@ struct WSABUF {
     buf: *mut u8,
 }
 
-/// WSARecv: overlapped receive from a socket.
+/// WSARecv — overlapped receive from a socket.
 ///
-/// Phase A stub — returns SOCKET_ERROR.
+/// Phase B: synchronous multi-buffer recv. Overlapped I/O returns
+/// WSAEOPNOTSUPP.
 ///
 /// # Safety
 /// Caller must ensure all pointer arguments are valid.
 pub unsafe extern "win64" fn wsa_recv(
-    _s: usize,
-    _buffers: *mut u8,
-    _dw_buffer_count: u32,
-    _lp_number_of_bytes_recvd: *mut u32,
-    _lp_flags: *mut u32,
-    _lp_overlapped: usize,
+    s: usize,
+    lp_buffers: *mut u8,
+    dw_buffer_count: u32,
+    lp_number_of_bytes_recvd: *mut u32,
+    lp_flags: *mut u32,
+    lp_overlapped: usize,
     _lp_completion_routine: usize,
 ) -> i32 {
-    eprintln!("weave/ws2_stub: WSARecv");
-    SOCKET_ERROR
+    if weave_core::ws2_trace::enabled() {
+        eprintln!(
+            "weave/ws2: WSARecv s={s} count={dw_buffer_count} overlapped={lp_overlapped}"
+        );
+    }
+
+    // Both lp_number_of_bytes_recvd and lp_flags must be non-null.
+    // Wine ref: dlls/ws2_32/socket.c — WSARecv validates both pointers.
+    if lp_number_of_bytes_recvd.is_null() || lp_flags.is_null() {
+        set_last_error(10014); // WSAEFAULT
+        return SOCKET_ERROR;
+    }
+
+    // Overlapped mode is async; not supported in Phase B.
+    if lp_overlapped != 0 {
+        eprintln!("weave/ws2_stub: WSARecv overlapped mode not supported");
+        set_last_error(10045); // WSAEOPNOTSUPP
+        return SOCKET_ERROR;
+    }
+
+    // Synchronous gather-read.
+    let buffers = lp_buffers as *const WSABUF;
+    let mut total_recvd: u32 = 0;
+    let flags = *lp_flags as i32;
+
+    for i in 0..dw_buffer_count as usize {
+        let buf = buffers.add(i).read();
+        let ret = libc::recv(
+            s as i32,
+            buf.buf as *mut libc::c_void,
+            buf.len as usize,
+            flags,
+        );
+        if ret < 0 {
+            let e = *libc::__errno_location();
+            // EWOULDBLOCK/EAGAIN: no data available, not an error.
+            // Report partial progress if any, then return SOCKET_ERROR.
+            // Wine ref: dlls/ws2_32/socket.c — WSARecv does not re-arm
+            // FD_READ (edge-triggered across all PeekMessage-based polling).
+            if e == libc::EWOULDBLOCK || e == libc::EAGAIN {
+                *lp_number_of_bytes_recvd = total_recvd;
+                save_errno();
+                return SOCKET_ERROR;
+            }
+            // Other error: report partial progress and return SOCKET_ERROR.
+            *lp_number_of_bytes_recvd = total_recvd;
+            save_errno();
+            return SOCKET_ERROR;
+        }
+        if ret == 0 {
+            // Clean close from peer — stop iterating, report partial total.
+            break;
+        }
+        total_recvd += ret as u32;
+    }
+
+    *lp_number_of_bytes_recvd = total_recvd;
+    // Wine ref: dlls/ws2_32/socket.c — WSARecv clears MSG_PEEK residual
+    // from the flags output on success (caller can pass MSG_PEEK in,
+    // but the output flags reflect any side-effects).
+    *lp_flags = 0;
+    0
 }
 
 /// WSARecvFrom: overlapped receive from, with source address.
