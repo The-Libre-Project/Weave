@@ -54,7 +54,7 @@ fn is_weave_item(item: *const u8) -> bool {
     read_u32(unsafe { item.add(2) }) == WEAVE_PIDL_MAGIC
 }
 
-fn weave_item_path(item: *const u8) -> Option<String> {
+pub(crate) fn weave_item_path(item: *const u8) -> Option<String> {
     if !is_weave_item(item) {
         return None;
     }

@@ -228,11 +228,65 @@ unsafe extern "win64" fn sf_get_ui_object_of(
 
 unsafe extern "win64" fn sf_get_display_name_of(
     _this: usize,
-    _pidl: *const u8,
+    pidl: *const u8,
     _flags: u32,
-    _name: *mut u8,
+    name: *mut u8,
 ) -> i32 {
-    E_NOINTERFACE
+    const STRRET_CSTR: u32 = 2;
+    const STRRET_WSTR: u32 = 0;
+    if name.is_null() || pidl.is_null() {
+        return E_POINTER;
+    }
+    // Try Weave-native path extraction first.
+    if let Some(path) = pidl::weave_item_path(pidl) {
+        // Use STRRET_WSTR — allocate a CoTaskMemAlloc copy for maximum compatibility.
+        let wide: Vec<u16> = path.encode_utf16().collect();
+        let byte_len = (wide.len() + 1) * 2;
+        let alloc = unsafe { libc::malloc(byte_len) as *mut u16 };
+        if alloc.is_null() {
+            return 0x8007_000Eu32 as i32; // E_OUTOFMEMORY
+        }
+        unsafe {
+            std::ptr::copy_nonoverlapping(wide.as_ptr(), alloc, wide.len());
+            *alloc.add(wide.len()) = 0;
+        }
+        unsafe {
+            let utype_ptr = name as *mut u32;
+            *utype_ptr = STRRET_WSTR;
+            let p_ole_str_ptr = name.add(8) as *mut usize;
+            *p_ole_str_ptr = alloc as usize;
+        }
+        return S_OK;
+    }
+    // Fallback: try SHGetPathFromIDListW, write as STRRET_CSTR.
+    let mut wide_buf = [0u16; 260];
+    let ret = unsafe { crate::pidl::sh_get_path_from_id_list_w(pidl, wide_buf.as_mut_ptr()) };
+    if ret == 0 {
+        unsafe {
+            let utype_ptr = name as *mut u32;
+            *utype_ptr = STRRET_CSTR;
+            let cstr_ptr = name.add(8) as *mut u8;
+            *cstr_ptr = 0;
+        }
+        return S_OK;
+    }
+    // Convert wide path to ANSI and write as STRRET_CSTR.
+    let utf8 = String::from_utf16_lossy(
+        unsafe { std::slice::from_raw_parts(wide_buf.as_ptr(), 260) }
+            .split(|&c| c == 0)
+            .next()
+            .unwrap_or(&[]),
+    );
+    let ansi_bytes = utf8.as_bytes();
+    let copy_len = ansi_bytes.len().min(259);
+    unsafe {
+        let utype_ptr = name as *mut u32;
+        *utype_ptr = STRRET_CSTR;
+        let cstr_ptr = name.add(8) as *mut u8;
+        std::ptr::copy_nonoverlapping(ansi_bytes.as_ptr(), cstr_ptr, copy_len);
+        *cstr_ptr.add(copy_len) = 0;
+    }
+    S_OK
 }
 
 unsafe extern "win64" fn sf_set_name_of(
