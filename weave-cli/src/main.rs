@@ -244,7 +244,9 @@ fn handle_prefix_cmd(args: &[String]) -> ! {
                         .file_stem()
                         .and_then(|s| s.to_str())
                         .unwrap_or(name);
-                    let exec_cmd = format!("{} prefix launch {name}", current_exe.display());
+                    // Use PATH-resolved "weave" not current_exe path — the .desktop must survive
+                    // binary relocation after installation.
+                    let exec_cmd = format!("weave prefix launch {name}");
                     let icon_path = weave_desktop::extract_and_install_png_icon(name, &exe_path)
                         .or_else(|_| weave_desktop::extract_and_install_icon(name, &exe_path))
                         .unwrap_or(None);
