@@ -64,6 +64,59 @@ const TCM_GETITEMRECT: u32 = 0x132d;
 const TCM_GETITEM: u32 = 0x133d;
 const TCM_SETITEMW: u32 = 0x133e;
 
+// ── SysListView32 constants ──────────────────────────────────────────────────
+
+const LVM_FIRST: u32 = 0x1000;
+const LVM_GETIMAGELIST: u32 = LVM_FIRST + 2;
+const LVM_SETIMAGELIST: u32 = LVM_FIRST + 3;
+const LVM_GETITEMCOUNT: u32 = LVM_FIRST + 4;
+const LVM_GETITEMW: u32 = LVM_FIRST + 5;
+const LVM_SETITEMW: u32 = LVM_FIRST + 6;
+const LVM_INSERTITEMW: u32 = LVM_FIRST + 7;
+const LVM_DELETEITEM: u32 = LVM_FIRST + 8;
+const LVM_DELETEALLITEMS: u32 = LVM_FIRST + 9;
+const LVM_GETCALLBACKMASK: u32 = LVM_FIRST + 10;
+const LVM_GETNEXTITEM: u32 = LVM_FIRST + 12;
+const LVM_ENSUREVISIBLE: u32 = LVM_FIRST + 19;
+const LVM_GETCOLUMNW: u32 = LVM_FIRST + 31; // 0x101F
+const LVM_SETCOLUMNW: u32 = LVM_FIRST + 32; // 0x1020
+const LVM_GETVIEW: u32 = LVM_FIRST + 31; // same value as GETCOLUMNW — disambiguated by usage
+const LVM_GETHEADER: u32 = LVM_FIRST + 31; // same value — disambiguated by param
+const LVM_GETCOLUMNWIDTH: u32 = LVM_FIRST + 29; // 0x101D
+const LVM_SETCOLUMNWIDTH: u32 = LVM_FIRST + 30; // 0x101E
+const LVM_INSERTCOLUMNW: u32 = LVM_FIRST + 29; // same value as GETCOLUMNWIDTH
+const LVM_GETITEMSTATE: u32 = LVM_FIRST + 44; // 0x102C
+const LVM_SETITEMSTATE: u32 = LVM_FIRST + 43; // 0x102B
+const LVM_GETITEMTEXTW: u32 = LVM_FIRST + 45; // 0x102D
+const LVM_SETITEMTEXTW: u32 = LVM_FIRST + 46; // 0x102E
+const LVM_GETTOPINDEX: u32 = LVM_FIRST + 39; // 0x1027
+const LVM_GETCOUNTPERPAGE: u32 = LVM_FIRST + 40; // 0x1028
+const LVM_GETSELECTEDCOUNT: u32 = LVM_FIRST + 50; // 0x1032
+const LVM_REDRAWITEMS: u32 = LVM_FIRST + 21; // 0x1015
+const LVM_GETESTIMATEDLISTVIEWSIZE: u32 = 0x1664;
+
+const LVIF_TEXT: u32 = 0x0001;
+const LVIF_IMAGE: u32 = 0x0002;
+const LVIF_PARAM: u32 = 0x0004;
+const LVIF_STATE: u32 = 0x0008;
+
+const LVIS_SELECTED: u32 = 0x0002;
+const LVIS_FOCUSED: u32 = 0x0001;
+
+const LVNI_ALL: u32 = 0x0000;
+const LVNI_FOCUSED: u32 = 0x0001;
+const LVNI_SELECTED: u32 = 0x0002;
+
+const LVSIL_NORMAL: u32 = 0;
+const LVSIL_SMALL: u32 = 1;
+const LVSIL_STATE: u32 = 2;
+
+const LVSCW_AUTOSIZE: i32 = -1;
+const LVSCW_AUTOSIZE_USE_HEADER: i32 = -2;
+
+const WM_ERASEBKGND: u32 = 0x0014;
+const WM_GETTEXTLENGTH: u32 = 0x000E;
+
 #[expect(dead_code)]
 struct ToolbarButton {
     id_command: i32,
@@ -95,9 +148,37 @@ struct TabState {
 }
 
 #[expect(dead_code)]
+struct ListViewColumn {
+    fmt: i32,
+    cx: i32,
+    text: Option<String>,
+    i_sub_item: i32,
+}
+
+#[expect(dead_code)]
+struct ListViewItem {
+    i_item: i32,
+    i_sub_item: i32,
+    state: u32,
+    text: Option<String>,
+    i_image: i32,
+    l_param: isize,
+}
+
+#[expect(dead_code)]
+struct ListViewState {
+    columns: Vec<ListViewColumn>,
+    items: Vec<ListViewItem>,
+    image_list_small: usize,
+    image_list_large: usize,
+    image_list_state: usize,
+}
+
+#[expect(dead_code)]
 enum ComctlState {
     Toolbar(ToolbarState),
     Tab(TabState),
+    ListView(ListViewState),
 }
 
 static COMCTL_STATE: OnceLock<Mutex<HashMap<usize, ComctlState>>> = OnceLock::new();
@@ -305,6 +386,597 @@ extern "win64" fn tab_wnd_proc(hwnd: usize, msg: u32, w_param: usize, l_param: i
     }
 }
 
+// ── SysListView32 helpers ─────────────────────────────────────────────────────
+
+/// Read the text field from an LVITEMW or LVCOLUMNW at the given guest pointer.
+/// Returns the copied string if LVIF_TEXT is set and pszText is non-null.
+unsafe fn read_item_text(l_param: isize, text_offset: usize, mask_offset: usize) -> Option<String> {
+    let base = l_param as usize;
+    if base == 0 {
+        return None;
+    }
+    let mask = std::ptr::read_unaligned((base + mask_offset) as *const u32);
+    if mask & LVIF_TEXT == 0 {
+        return None;
+    }
+    let psz_text = std::ptr::read_unaligned((base + text_offset) as *const usize);
+    if psz_text == 0 {
+        return None;
+    }
+    let cch_max = std::ptr::read_unaligned((base + text_offset + 8) as *const i32);
+    if cch_max <= 0 {
+        return None;
+    }
+    let mut chars = Vec::with_capacity(cch_max as usize);
+    for i in 0..cch_max as usize {
+        let c = std::ptr::read_unaligned((psz_text + i * 2) as *const u16);
+        if c == 0 {
+            break;
+        }
+        chars.push(c);
+    }
+    Some(String::from_utf16_lossy(&chars))
+}
+
+/// Write text from a stored string into the guest's LVITEMW buffer.
+unsafe fn write_item_text(psz_text: usize, cch_max: i32, text: &str) -> i32 {
+    if psz_text == 0 || cch_max <= 0 {
+        return 0;
+    }
+    let mut written = 0;
+    for (i, ch) in text.encode_utf16().enumerate() {
+        if i + 1 >= cch_max as usize {
+            break;
+        }
+        std::ptr::write_unaligned((psz_text + i * 2) as *mut u16, ch);
+        written = i + 1;
+    }
+    std::ptr::write_unaligned((psz_text + written * 2) as *mut u16, 0u16);
+    written as i32
+}
+
+// ── SysListView32 WndProc ────────────────────────────────────────────────────
+
+/// WndProc for the SysListView32 common control.
+///
+/// Maintains a per-HWND ListViewState with columns, items, and image lists.
+/// Handles all standard LVM_* messages and falls through to def_window_proc_w.
+extern "win64" fn listview_wnd_proc(
+    hwnd: usize,
+    msg: u32,
+    w_param: usize,
+    l_param: isize,
+) -> isize {
+    match msg {
+        WM_NCDESTROY => {
+            if let Ok(mut map) = get_state().lock() {
+                map.remove(&hwnd);
+            }
+            def_window_proc_w(hwnd, msg, w_param, l_param)
+        }
+        WM_ERASEBKGND => 1,
+        WM_GETFONT => 0,
+        WM_GETTEXT => 0,
+        WM_GETTEXTLENGTH => 0,
+        LVM_GETIMAGELIST => {
+            let mut map = get_state().lock().unwrap();
+            let lv = map
+                .entry(hwnd)
+                .or_insert(ComctlState::ListView(ListViewState {
+                    columns: Vec::new(),
+                    items: Vec::new(),
+                    image_list_small: 0,
+                    image_list_large: 0,
+                    image_list_state: 0,
+                }));
+            if let ComctlState::ListView(ref state) = lv {
+                match w_param as u32 {
+                    LVSIL_NORMAL => state.image_list_large as isize,
+                    LVSIL_SMALL => state.image_list_small as isize,
+                    LVSIL_STATE => state.image_list_state as isize,
+                    _ => 0,
+                }
+            } else {
+                0
+            }
+        }
+        LVM_SETIMAGELIST => {
+            let mut map = get_state().lock().unwrap();
+            let lv = map
+                .entry(hwnd)
+                .or_insert(ComctlState::ListView(ListViewState {
+                    columns: Vec::new(),
+                    items: Vec::new(),
+                    image_list_small: 0,
+                    image_list_large: 0,
+                    image_list_state: 0,
+                }));
+            if let ComctlState::ListView(ref mut state) = lv {
+                let prev = match w_param as u32 {
+                    LVSIL_NORMAL => state.image_list_large,
+                    LVSIL_SMALL => state.image_list_small,
+                    LVSIL_STATE => state.image_list_state,
+                    _ => 0,
+                };
+                match w_param as u32 {
+                    LVSIL_NORMAL => state.image_list_large = l_param as usize,
+                    LVSIL_SMALL => state.image_list_small = l_param as usize,
+                    LVSIL_STATE => state.image_list_state = l_param as usize,
+                    _ => {}
+                }
+                prev as isize
+            } else {
+                0
+            }
+        }
+        LVM_GETITEMCOUNT => {
+            let map = get_state().lock().unwrap();
+            if let Some(ComctlState::ListView(ref state)) = map.get(&hwnd) {
+                state.items.len() as isize
+            } else {
+                0
+            }
+        }
+        LVM_GETITEMW => {
+            let base = l_param as usize;
+            if base == 0 {
+                return 0;
+            }
+            let i_item: i32 = unsafe { std::ptr::read_unaligned((base + 4) as *const i32) };
+            let map = get_state().lock().unwrap();
+            if let Some(ComctlState::ListView(ref state)) = map.get(&hwnd) {
+                if i_item < 0 || i_item as usize >= state.items.len() {
+                    return 0;
+                }
+                let item = &state.items[i_item as usize];
+                let mask: u32 = unsafe { std::ptr::read_unaligned(base as *const u32) };
+                if mask & LVIF_TEXT != 0 {
+                    let psz_text: usize =
+                        unsafe { std::ptr::read_unaligned((base + 24) as *const usize) };
+                    let cch_max: i32 =
+                        unsafe { std::ptr::read_unaligned((base + 32) as *const i32) };
+                    if let Some(ref text) = item.text {
+                        unsafe {
+                            write_item_text(psz_text, cch_max, text);
+                        }
+                    }
+                }
+                if mask & LVIF_IMAGE != 0 {
+                    unsafe {
+                        std::ptr::write_unaligned((base + 36) as *mut i32, item.i_image);
+                    }
+                }
+                if mask & LVIF_PARAM != 0 {
+                    unsafe {
+                        std::ptr::write_unaligned((base + 40) as *mut isize, item.l_param);
+                    }
+                }
+                if mask & LVIF_STATE != 0 {
+                    unsafe {
+                        std::ptr::write_unaligned((base + 12) as *mut u32, item.state);
+                    }
+                }
+                1
+            } else {
+                0
+            }
+        }
+        LVM_SETITEMW => {
+            let base = l_param as usize;
+            if base == 0 {
+                return 0;
+            }
+            let i_item: i32 = unsafe { std::ptr::read_unaligned((base + 4) as *const i32) };
+            let mut map = get_state().lock().unwrap();
+            let lv = map
+                .entry(hwnd)
+                .or_insert(ComctlState::ListView(ListViewState {
+                    columns: Vec::new(),
+                    items: Vec::new(),
+                    image_list_small: 0,
+                    image_list_large: 0,
+                    image_list_state: 0,
+                }));
+            if let ComctlState::ListView(ref mut state) = lv {
+                if i_item >= 0 && (i_item as usize) < state.items.len() {
+                    let idx = i_item as usize;
+                    let text = unsafe { read_item_text(l_param, 24, 0) };
+                    if let Some(t) = text {
+                        state.items[idx].text = Some(t);
+                    }
+                }
+                1
+            } else {
+                0
+            }
+        }
+        LVM_INSERTITEMW => {
+            let base = l_param as usize;
+            if base == 0 {
+                return -1;
+            }
+            let i_item: i32 = unsafe { std::ptr::read_unaligned((base + 4) as *const i32) };
+            let text = unsafe { read_item_text(l_param, 24, 0) };
+            let i_image: i32 = unsafe { std::ptr::read_unaligned((base + 36) as *const i32) };
+            let l_param_val: isize =
+                unsafe { std::ptr::read_unaligned((base + 40) as *const isize) };
+            let state_val: u32 = unsafe { std::ptr::read_unaligned((base + 12) as *const u32) };
+            let item = ListViewItem {
+                i_item,
+                i_sub_item: 0,
+                state: state_val,
+                text,
+                i_image,
+                l_param: l_param_val,
+            };
+            let mut map = get_state().lock().unwrap();
+            let lv = map
+                .entry(hwnd)
+                .or_insert(ComctlState::ListView(ListViewState {
+                    columns: Vec::new(),
+                    items: Vec::new(),
+                    image_list_small: 0,
+                    image_list_large: 0,
+                    image_list_state: 0,
+                }));
+            if let ComctlState::ListView(ref mut state) = lv {
+                let idx = if i_item < 0 || i_item as usize >= state.items.len() {
+                    state.items.push(item);
+                    state.items.len() - 1
+                } else {
+                    state.items.insert(i_item as usize, item);
+                    i_item as usize
+                };
+                idx as isize
+            } else {
+                -1
+            }
+        }
+        LVM_DELETEITEM => {
+            let mut map = get_state().lock().unwrap();
+            if let Some(ComctlState::ListView(ref mut state)) = map.get_mut(&hwnd) {
+                if (w_param as usize) < state.items.len() {
+                    state.items.remove(w_param as usize);
+                    1
+                } else {
+                    0
+                }
+            } else {
+                0
+            }
+        }
+        LVM_DELETEALLITEMS => {
+            let mut map = get_state().lock().unwrap();
+            if let Some(ComctlState::ListView(ref mut state)) = map.get_mut(&hwnd) {
+                state.items.clear();
+                1
+            } else {
+                0
+            }
+        }
+        LVM_GETCALLBACKMASK => 0,
+        LVM_GETNEXTITEM => {
+            let start = w_param as i32;
+            let flags = l_param as u32;
+            let map = get_state().lock().unwrap();
+            if let Some(ComctlState::ListView(ref state)) = map.get(&hwnd) {
+                if state.items.is_empty() {
+                    return -1;
+                }
+                let begin = if start < 0 { 0 } else { (start + 1) as usize };
+                if flags & LVNI_SELECTED != 0 {
+                    for i in begin..state.items.len() {
+                        if state.items[i].state & LVIS_SELECTED != 0 {
+                            return i as isize;
+                        }
+                    }
+                } else if flags & LVNI_FOCUSED != 0 {
+                    for i in begin..state.items.len() {
+                        if state.items[i].state & LVIS_FOCUSED != 0 {
+                            return i as isize;
+                        }
+                    }
+                } else {
+                    if begin < state.items.len() {
+                        return begin as isize;
+                    }
+                }
+                -1
+            } else {
+                -1
+            }
+        }
+        LVM_GETITEMTEXTW => {
+            let base = l_param as usize;
+            if base == 0 {
+                return 0;
+            }
+            let i_item: i32 = unsafe { std::ptr::read_unaligned((base + 4) as *const i32) };
+            let map = get_state().lock().unwrap();
+            if let Some(ComctlState::ListView(ref state)) = map.get(&hwnd) {
+                if i_item >= 0 && (i_item as usize) < state.items.len() {
+                    let psz_text: usize =
+                        unsafe { std::ptr::read_unaligned((base + 24) as *const usize) };
+                    let cch_max: i32 =
+                        unsafe { std::ptr::read_unaligned((base + 32) as *const i32) };
+                    if let Some(ref text) = state.items[i_item as usize].text {
+                        unsafe { write_item_text(psz_text, cch_max, text) as isize }
+                    } else {
+                        0
+                    }
+                } else {
+                    0
+                }
+            } else {
+                0
+            }
+        }
+        LVM_SETITEMTEXTW => {
+            let base = l_param as usize;
+            if base == 0 {
+                return 0;
+            }
+            let i_item: i32 = unsafe { std::ptr::read_unaligned((base + 4) as *const i32) };
+            let mut map = get_state().lock().unwrap();
+            if let Some(ComctlState::ListView(ref mut state)) = map.get_mut(&hwnd) {
+                if i_item >= 0 && (i_item as usize) < state.items.len() {
+                    let text = unsafe { read_item_text(l_param, 24, 0) };
+                    state.items[i_item as usize].text = text;
+                }
+                1
+            } else {
+                0
+            }
+        }
+        LVM_GETITEMSTATE => {
+            let i_item = w_param as i32;
+            let mask = l_param as u32;
+            let map = get_state().lock().unwrap();
+            if let Some(ComctlState::ListView(ref state)) = map.get(&hwnd) {
+                if i_item >= 0 && (i_item as usize) < state.items.len() {
+                    (state.items[i_item as usize].state & mask) as isize
+                } else {
+                    0
+                }
+            } else {
+                0
+            }
+        }
+        LVM_SETITEMSTATE => {
+            let i_item = w_param as i32;
+            let base = l_param as usize;
+            if base == 0 {
+                return 0;
+            }
+            let mut map = get_state().lock().unwrap();
+            if let Some(ComctlState::ListView(ref mut state)) = map.get_mut(&hwnd) {
+                if i_item >= 0 && (i_item as usize) < state.items.len() {
+                    let new_state: u32 =
+                        unsafe { std::ptr::read_unaligned((base + 12) as *const u32) };
+                    let state_mask: u32 =
+                        unsafe { std::ptr::read_unaligned((base + 16) as *const u32) };
+                    let current = state.items[i_item as usize].state;
+                    state.items[i_item as usize].state =
+                        (current & !state_mask) | (new_state & state_mask);
+                }
+                1
+            } else {
+                0
+            }
+        }
+        LVM_GETSELECTEDCOUNT => {
+            let map = get_state().lock().unwrap();
+            if let Some(ComctlState::ListView(ref state)) = map.get(&hwnd) {
+                let count = state
+                    .items
+                    .iter()
+                    .filter(|item| item.state & LVIS_SELECTED != 0)
+                    .count();
+                count as isize
+            } else {
+                0
+            }
+        }
+        LVM_GETCOLUMNW => {
+            // LVM_GETCOLUMNW (0x101F) shares its message value with LVM_GETVIEW and LVM_GETHEADER.
+            // Heuristic: if w_param is small (< 20), it's a column operation; otherwise view/header.
+            if w_param >= 20 {
+                // LVM_GETVIEW or LVM_GETHEADER
+                return if w_param < 100 {
+                    0 /* LVM_GETHEADER */
+                } else {
+                    3 /* LVM_GETVIEW */
+                };
+            }
+            let col_idx = w_param as usize;
+            let base = l_param as usize;
+            if base == 0 {
+                return 0;
+            }
+            let map = get_state().lock().unwrap();
+            if let Some(ComctlState::ListView(ref state)) = map.get(&hwnd) {
+                if col_idx < state.columns.len() {
+                    let col = &state.columns[col_idx];
+                    let mask: u32 = unsafe { std::ptr::read_unaligned(base as *const u32) };
+                    if mask & 0x0001 != 0 {
+                        // LVCF_FMT
+                        unsafe {
+                            std::ptr::write_unaligned((base + 4) as *mut i32, col.fmt);
+                        }
+                    }
+                    if mask & 0x0002 != 0 {
+                        // LVCF_WIDTH
+                        unsafe {
+                            std::ptr::write_unaligned((base + 8) as *mut i32, col.cx);
+                        }
+                    }
+                    if mask & 0x0004 != 0 {
+                        // LVCF_TEXT
+                        let psz_text: usize =
+                            unsafe { std::ptr::read_unaligned((base + 16) as *const usize) };
+                        let cch_max: i32 =
+                            unsafe { std::ptr::read_unaligned((base + 24) as *const i32) };
+                        if let Some(ref text) = col.text {
+                            unsafe {
+                                write_item_text(psz_text, cch_max, text);
+                            }
+                        }
+                    }
+                    if mask & 0x0008 != 0 {
+                        // LVCF_SUBITEM
+                        unsafe {
+                            std::ptr::write_unaligned((base + 28) as *mut i32, col.i_sub_item);
+                        }
+                    }
+                    1
+                } else {
+                    0
+                }
+            } else {
+                0
+            }
+        }
+        LVM_SETCOLUMNW => {
+            let col_idx = w_param as usize;
+            let base = l_param as usize;
+            if base == 0 {
+                return 0;
+            }
+            let mut map = get_state().lock().unwrap();
+            let lv = map
+                .entry(hwnd)
+                .or_insert(ComctlState::ListView(ListViewState {
+                    columns: Vec::new(),
+                    items: Vec::new(),
+                    image_list_small: 0,
+                    image_list_large: 0,
+                    image_list_state: 0,
+                }));
+            if let ComctlState::ListView(ref mut state) = lv {
+                let mask: u32 = unsafe { std::ptr::read_unaligned(base as *const u32) };
+                while state.columns.len() <= col_idx {
+                    state.columns.push(ListViewColumn {
+                        fmt: 0,
+                        cx: 100,
+                        text: None,
+                        i_sub_item: col_idx as i32,
+                    });
+                }
+                let col = &mut state.columns[col_idx];
+                if mask & 0x0001 != 0 {
+                    col.fmt = unsafe { std::ptr::read_unaligned((base + 4) as *const i32) };
+                }
+                if mask & 0x0002 != 0 {
+                    col.cx = unsafe { std::ptr::read_unaligned((base + 8) as *const i32) };
+                }
+                if mask & 0x0004 != 0 {
+                    let text = unsafe { read_item_text(l_param, 16, 0) };
+                    col.text = text;
+                }
+                if mask & 0x0008 != 0 {
+                    col.i_sub_item = unsafe { std::ptr::read_unaligned((base + 28) as *const i32) };
+                }
+                1
+            } else {
+                0
+            }
+        }
+        LVM_INSERTCOLUMNW => {
+            // LVM_INSERTCOLUMNW (0x101D) shares its value with LVM_GETCOLUMNWIDTH.
+            // Heuristic: if l_param > 1024, treat as struct ptr (INSERTCOLUMNW).
+            // Otherwise treat as width result (GETCOLUMNWIDTH).
+            if (l_param as usize) > 1024 {
+                // LVM_INSERTCOLUMNW
+                let col_idx = w_param as usize;
+                let base = l_param as usize;
+                if base == 0 {
+                    return -1;
+                }
+                let mut map = get_state().lock().unwrap();
+                let lv = map
+                    .entry(hwnd)
+                    .or_insert(ComctlState::ListView(ListViewState {
+                        columns: Vec::new(),
+                        items: Vec::new(),
+                        image_list_small: 0,
+                        image_list_large: 0,
+                        image_list_state: 0,
+                    }));
+                if let ComctlState::ListView(ref mut state) = lv {
+                    while state.columns.len() <= col_idx {
+                        state.columns.push(ListViewColumn {
+                            fmt: 0,
+                            cx: 100,
+                            text: None,
+                            i_sub_item: state.columns.len() as i32,
+                        });
+                    }
+                    let mask: u32 = unsafe { std::ptr::read_unaligned(base as *const u32) };
+                    if mask != 0 {
+                        let col = &mut state.columns[col_idx];
+                        if mask & 0x0001 != 0 {
+                            col.fmt = unsafe { std::ptr::read_unaligned((base + 4) as *const i32) };
+                        }
+                        if mask & 0x0002 != 0 {
+                            col.cx = unsafe { std::ptr::read_unaligned((base + 8) as *const i32) };
+                        }
+                        if mask & 0x0004 != 0 {
+                            let text = unsafe { read_item_text(l_param, 16, 0) };
+                            col.text = text;
+                        }
+                    }
+                    col_idx as isize
+                } else {
+                    -1
+                }
+            } else {
+                // LVM_GETCOLUMNWIDTH
+                let col_idx = w_param as usize;
+                let map = get_state().lock().unwrap();
+                if let Some(ComctlState::ListView(ref state)) = map.get(&hwnd) {
+                    if col_idx < state.columns.len() {
+                        state.columns[col_idx].cx as isize
+                    } else {
+                        100
+                    }
+                } else {
+                    100
+                }
+            }
+        }
+        LVM_SETCOLUMNWIDTH => {
+            let col_idx = w_param as usize;
+            let mut map = get_state().lock().unwrap();
+            if let Some(ComctlState::ListView(ref mut state)) = map.get_mut(&hwnd) {
+                let new_width = if l_param as i32 == LVSCW_AUTOSIZE
+                    || l_param as i32 == LVSCW_AUTOSIZE_USE_HEADER
+                {
+                    120
+                } else {
+                    l_param as i32
+                };
+                while state.columns.len() <= col_idx {
+                    state.columns.push(ListViewColumn {
+                        fmt: 0,
+                        cx: 120,
+                        text: None,
+                        i_sub_item: state.columns.len() as i32,
+                    });
+                }
+                state.columns[col_idx].cx = new_width;
+                1
+            } else {
+                0
+            }
+        }
+        LVM_ENSUREVISIBLE => 1,
+        LVM_REDRAWITEMS => 1,
+        LVM_GETTOPINDEX => 0,
+        LVM_GETCOUNTPERPAGE => 30,
+        _ => def_window_proc_w(hwnd, msg, w_param, l_param),
+    }
+}
+
 /// InitCommonControls — register common control window classes.
 ///
 /// Registers ToolbarWindow32 and SysTabControl32 classes so the guest can
@@ -348,6 +1020,16 @@ fn register_comctl32_classes() {
         h_icon_sm: 0,
     };
     class::register("SysTabControl32", tab_entry);
+    let listview_entry = ClassEntry {
+        wnd_proc: listview_wnd_proc as *const () as usize,
+        style: 0,
+        h_cursor: 0,
+        hbr_background: 0,
+        cb_wnd_extra: 0,
+        h_icon: 0,
+        h_icon_sm: 0,
+    };
+    class::register("SysListView32", listview_entry);
 }
 
 const WM_NCDESTROY: u32 = 0x0082;
