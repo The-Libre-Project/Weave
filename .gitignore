@@ -82,3 +82,4 @@ docs/loop-arcs/*
 !docs/loop-arcs/*.md
 !docs/loop-arcs/README.md
 !docs/loop-arcs/TEMPLATE.md
+.deepseek/

@@ -8,6 +8,8 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use image::ImageEncoder;
+
 /// Errors returned by weave-desktop operations.
 #[derive(Debug)]
 pub enum DesktopError {
@@ -66,6 +68,168 @@ pub fn extract_and_install_icon(
     let path = dir.join(format!("weave-{app_id}.ico"));
     fs::write(&path, &ico_bytes)?;
     Ok(Some(path))
+}
+
+/// Extract the icon from a Windows `.exe` file and install it as a PNG
+/// in the user's icons directory at `~/.local/share/icons/weave-{app_id}.png`.
+///
+/// Uses the `image` crate to convert the first 32bpp (or best-available)
+/// icon entry from BGRA pixel data to a PNG file.
+pub fn extract_and_install_png_icon(
+    app_id: &str,
+    exe_path: &Path,
+) -> Result<Option<PathBuf>, DesktopError> {
+    let exe_bytes = fs::read(exe_path)?;
+    let Some(ico_bytes) = icon::extract_icon(&exe_bytes) else {
+        return Ok(None);
+    };
+    let Some(png_bytes) = ico_to_png_bytes(&ico_bytes) else {
+        return Ok(None);
+    };
+    let dir = icons_dir()?;
+    fs::create_dir_all(&dir)?;
+    let path = dir.join(format!("weave-{app_id}.png"));
+    fs::write(&path, &png_bytes)?;
+    Ok(Some(path))
+}
+
+/// Parse a self-contained `.ico` byte buffer and convert the best entry
+/// (highest bit-depth, largest dimensions) to a standalone PNG.
+///
+/// Returns `None` if the buffer is not a valid `.ico` or if none of the
+/// entries can be decoded.  Handles 32bpp (BGRA → RGBA) and 24bpp
+/// (BGR → RGB) DIB data as well as embedded PNG entries.
+fn ico_to_png_bytes(ico_data: &[u8]) -> Option<Vec<u8>> {
+    if ico_data.len() < 6 {
+        return None;
+    }
+    let count = u16::from_le_bytes([ico_data[4], ico_data[5]]) as usize;
+    if count == 0 || ico_data.len() < 6 + count * 16 {
+        return None;
+    }
+
+    // Gather ICONDIRENTRY records.
+    let mut entries: Vec<(u8, u8, u16, u32, u32)> = Vec::with_capacity(count);
+    for i in 0..count {
+        let base = 6 + i * 16;
+        let w = ico_data[base]; // 0 means 256
+        let h = ico_data[base + 1];
+        let bit_count = u16::from_le_bytes([ico_data[base + 6], ico_data[base + 7]]);
+        let data_size = u32::from_le_bytes([
+            ico_data[base + 8],
+            ico_data[base + 9],
+            ico_data[base + 10],
+            ico_data[base + 11],
+        ]);
+        let offset = u32::from_le_bytes([
+            ico_data[base + 12],
+            ico_data[base + 13],
+            ico_data[base + 14],
+            ico_data[base + 15],
+        ]);
+        entries.push((w, h, bit_count, data_size, offset));
+    }
+
+    // Prefer highest bit_count, then largest area.
+    entries.sort_by(|a, b| {
+        b.2.cmp(&a.2).then_with(|| {
+            let area_a = (if a.0 == 0 { 256u32 } else { a.0 as u32 })
+                * (if a.1 == 0 { 256u32 } else { a.1 as u32 });
+            let area_b = (if b.0 == 0 { 256u32 } else { b.0 as u32 })
+                * (if b.1 == 0 { 256u32 } else { b.1 as u32 });
+            area_b.cmp(&area_a)
+        })
+    });
+
+    let best = &entries[0];
+    let data_start = best.3 as usize;
+    let data_end = data_start + best.4 as usize;
+    let raw = ico_data.get(data_start..data_end)?;
+
+    // Embedded PNG — write directly.
+    if raw.starts_with(b"\x89PNG\r\n\x1a\n") {
+        return Some(raw.to_vec());
+    }
+
+    // DIB / BMP pixel data — must parse BITMAPINFOHEADER.
+    if raw.len() < 40 {
+        return None;
+    }
+    let dib_size = u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]);
+    if dib_size < 40 {
+        return None;
+    }
+    let width = u32::from_le_bytes([raw[4], raw[5], raw[6], raw[7]]);
+    let full_height = u32::from_le_bytes([raw[8], raw[9], raw[10], raw[11]]);
+    let bpp = u16::from_le_bytes([raw[14], raw[15]]);
+
+    // In ICO files, full_height = XOR height + AND mask height.
+    let actual_height = full_height / 2;
+
+    match bpp {
+        32 => {
+            let row_size = width as usize * 4;
+            let pixel_off = dib_size as usize;
+            let mut rgba = Vec::with_capacity((width * actual_height * 4) as usize);
+            for y in 0..actual_height {
+                let row_start = pixel_off + y as usize * row_size;
+                for x in 0..width as usize {
+                    let pos = row_start + x * 4;
+                    let b = raw.get(pos).copied().unwrap_or(0);
+                    let g = raw.get(pos + 1).copied().unwrap_or(0);
+                    let r = raw.get(pos + 2).copied().unwrap_or(0);
+                    let a = raw.get(pos + 3).copied().unwrap_or(0);
+                    rgba.extend_from_slice(&[r, g, b, a]);
+                }
+            }
+            encode_rgba_to_png(&rgba, width, actual_height)
+        }
+        24 => {
+            let stride = ((width as usize * 3) + 3) & !3;
+            let pixel_off = dib_size as usize;
+            let mut rgb = Vec::with_capacity((width * actual_height * 3) as usize);
+            for y in 0..actual_height {
+                let row_start = pixel_off + y as usize * stride;
+                for x in 0..width as usize {
+                    let pos = row_start + x * 3;
+                    let b = raw.get(pos).copied().unwrap_or(0);
+                    let g = raw.get(pos + 1).copied().unwrap_or(0);
+                    let r = raw.get(pos + 2).copied().unwrap_or(0);
+                    rgb.extend_from_slice(&[r, g, b]);
+                }
+            }
+            encode_rgb_to_png(&rgb, width, actual_height)
+        }
+        _ => None,
+    }
+}
+
+/// Encode 8-bit RGBA pixel data as a PNG in memory.
+fn encode_rgba_to_png(data: &[u8], width: u32, height: u32) -> Option<Vec<u8>> {
+    let mut buf = Vec::new();
+    {
+        use image::codecs::png::PngEncoder;
+        use image::ExtendedColorType;
+        let encoder = PngEncoder::new(&mut buf);
+        encoder
+            .write_image(data, width, height, ExtendedColorType::Rgba8)
+            .ok()?;
+    }
+    Some(buf)
+}
+
+/// Encode 8-bit RGB pixel data as a PNG in memory.
+fn encode_rgb_to_png(data: &[u8], width: u32, height: u32) -> Option<Vec<u8>> {
+    let mut buf = Vec::new();
+    {
+        use image::codecs::png::PngEncoder;
+        use image::ExtendedColorType;
+        let encoder = PngEncoder::new(&mut buf);
+        encoder
+            .write_image(data, width, height, ExtendedColorType::Rgb8)
+            .ok()?;
+    }
+    Some(buf)
 }
 
 /// Returns the directory where `.desktop` files are installed for this user.
