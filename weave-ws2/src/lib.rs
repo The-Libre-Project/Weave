@@ -2061,6 +2061,319 @@ pub unsafe extern "win64" fn ws_fd_is_set(s: usize, set: *const u8) -> i32 {
     0
 }
 
+// ── Signal gap-fill: WS2_32 Phase A stubs ────────────────────────────────────
+//
+// jcodemunch unavailable — Phase A stubs only, safe sentinel returns.
+// Wine ref comments deferred to jcodemunch-available session.
+
+// ── AddrInfo family ────────────────────────────────────────────────────────────
+
+/// FreeAddrInfoExW: free extended address info (getaddrinfo family).
+///
+/// Phase A stub — no-op.
+///
+/// # Safety
+/// `addr_info` is accepted but not dereferenced.
+pub unsafe extern "win64" fn free_addr_info_ex_w(_addr_info: *mut u8) {}
+
+/// FreeAddrInfoW: free address info (wide variant of freeaddrinfo).
+///
+/// Phase A stub — no-op.
+///
+/// # Safety
+/// `addr_info` is accepted but not dereferenced.
+pub unsafe extern "win64" fn free_addr_info_w(_addr_info: *mut u8) {}
+
+/// GetAddrInfoExCancel: cancel an async GetAddrInfoExW request.
+///
+/// Phase A stub — returns WSASYSNOTREADY.
+pub unsafe extern "win64" fn get_addr_info_ex_cancel(
+    _cancel_handle: usize,
+) -> i32 {
+    SOCKET_ERROR
+}
+
+/// GetAddrInfoExW: extended async getaddrinfo (wide).
+///
+/// Phase A stub — returns WSASYSNOTREADY.
+///
+/// # Safety
+/// Caller must ensure all pointer arguments are valid.
+pub unsafe extern "win64" fn get_addr_info_ex_w(
+    _node_name: *const u16,
+    _service_name: *const u16,
+    _dw_namespace: u32,
+    _lp_nsp_id: usize,
+    _hints: *const u8,
+    _results: *mut u8,
+    _timeout: usize,
+    _overlapped: usize,
+    _completion_routine: usize,
+    _handle: *mut usize,
+) -> i32 {
+    SOCKET_ERROR
+}
+
+/// GetAddrInfoW: wide-char getaddrinfo.
+///
+/// Phase A stub — returns WSAHOST_NOT_FOUND.
+///
+/// # Safety
+/// Caller must ensure `node_name` and `service_name` are valid.
+pub unsafe extern "win64" fn get_addr_info_w(
+    _node_name: *const u16,
+    _service_name: *const u16,
+    _hints: *const u8,
+    _results: *mut u8,
+) -> i32 {
+    SOCKET_ERROR
+}
+
+/// GetNameInfoW: wide-char getnameinfo.
+///
+/// Phase A stub — returns WSAEFAULT.
+///
+/// # Safety
+/// Caller must ensure all pointer arguments are valid.
+pub unsafe extern "win64" fn get_name_info_w(
+    _sa: *const u8,
+    _sa_len: u32,
+    _host: *mut u16,
+    _host_len: u32,
+    _serv: *mut u16,
+    _serv_len: u32,
+    _flags: i32,
+) -> i32 {
+    SOCKET_ERROR
+}
+
+// ── Overlapped I/O ─────────────────────────────────────────────────────────────
+
+/// WSARecv: overlapped receive from a socket.
+///
+/// Phase A stub — returns SOCKET_ERROR.
+///
+/// # Safety
+/// Caller must ensure all pointer arguments are valid.
+pub unsafe extern "win64" fn wsa_recv(
+    _s: usize,
+    _buffers: *mut u8,
+    _dw_buffer_count: u32,
+    _lp_number_of_bytes_recvd: *mut u32,
+    _lp_flags: *mut u32,
+    _lp_overlapped: usize,
+    _lp_completion_routine: usize,
+) -> i32 {
+    eprintln!("weave/ws2_stub: WSARecv");
+    SOCKET_ERROR
+}
+
+/// WSARecvFrom: overlapped receive from, with source address.
+///
+/// Phase A stub — returns SOCKET_ERROR.
+///
+/// # Safety
+/// Caller must ensure all pointer arguments are valid.
+pub unsafe extern "win64" fn wsa_recv_from(
+    _s: usize,
+    _buffers: *mut u8,
+    _dw_buffer_count: u32,
+    _lp_number_of_bytes_recvd: *mut u32,
+    _lp_flags: *mut u32,
+    _lp_from: *mut u8,
+    _lp_from_len: *mut i32,
+    _lp_overlapped: usize,
+    _lp_completion_routine: usize,
+) -> i32 {
+    eprintln!("weave/ws2_stub: WSARecvFrom");
+    SOCKET_ERROR
+}
+
+/// WSASend: overlapped send on a socket.
+///
+/// Phase A stub — returns SOCKET_ERROR.
+///
+/// # Safety
+/// Caller must ensure all pointer arguments are valid.
+pub unsafe extern "win64" fn wsa_send(
+    _s: usize,
+    _buffers: *mut u8,
+    _dw_buffer_count: u32,
+    _lp_number_of_bytes_sent: *mut u32,
+    _dw_flags: u32,
+    _lp_overlapped: usize,
+    _lp_completion_routine: usize,
+) -> i32 {
+    eprintln!("weave/ws2_stub: WSASend");
+    SOCKET_ERROR
+}
+
+/// WSASendTo: overlapped sendto, with destination address.
+///
+/// Phase A stub — returns SOCKET_ERROR.
+///
+/// # Safety
+/// Caller must ensure all pointer arguments are valid.
+pub unsafe extern "win64" fn wsa_send_to(
+    _s: usize,
+    _buffers: *mut u8,
+    _dw_buffer_count: u32,
+    _lp_number_of_bytes_sent: *mut u32,
+    _dw_flags: u32,
+    _lp_to: *const u8,
+    _i_to_len: i32,
+    _lp_overlapped: usize,
+    _lp_completion_routine: usize,
+) -> i32 {
+    eprintln!("weave/ws2_stub: WSASendTo");
+    SOCKET_ERROR
+}
+
+/// WSAGetOverlappedResult: get result of an overlapped operation.
+///
+/// Phase A stub — returns FALSE (not completed).
+///
+/// # Safety
+/// Caller must ensure `lp_overlapped` and `lpcb_transfer` are valid.
+pub unsafe extern "win64" fn wsa_get_overlapped_result(
+    _s: usize,
+    _lp_overlapped: usize,
+    _lpcb_transfer: *mut u32,
+    _f_wait: i32,
+    _lpdw_flags: *mut u32,
+) -> i32 {
+    0
+}
+
+// ── Socket Management ──────────────────────────────────────────────────────────
+
+/// WSADuplicateSocketW: create a socket descriptor for a target process.
+///
+/// Phase A stub — returns SOCKET_ERROR.
+///
+/// # Safety
+/// `lp_protocol_info` is accepted but not dereferenced.
+pub unsafe extern "win64" fn wsa_duplicate_socket_w(
+    _s: usize,
+    _dw_process_id: u32,
+    _lp_protocol_info: *mut u8,
+) -> i32 {
+    eprintln!("weave/ws2_stub: WSADuplicateSocketW");
+    SOCKET_ERROR
+}
+
+/// WSAEnumProtocolsW: enumerate available network protocols.
+///
+/// Phase A stub — returns SOCKET_ERROR.
+///
+/// # Safety
+/// `lp_protocol_buffer` and `lpdw_buffer_length` are accepted but not dereferenced.
+pub unsafe extern "win64" fn wsa_enum_protocols_w(
+    _lpi_protocols: *mut i32,
+    _lp_protocol_buffer: *mut u8,
+    _lpdw_buffer_length: *mut u32,
+) -> i32 {
+    eprintln!("weave/ws2_stub: WSAEnumProtocolsW");
+    SOCKET_ERROR
+}
+
+/// WSASetEvent: set a WSAEVENT object to signaled state.
+///
+/// Phase A stub — returns FALSE.
+pub extern "win64" fn wsa_set_event(_event: usize) -> i32 {
+    eprintln!("weave/ws2_stub: WSASetEvent");
+    0
+}
+
+// ── Service Discovery ──────────────────────────────────────────────────────────
+
+/// WSALookupServiceBeginW: begin a service discovery query.
+///
+/// Phase A stub — returns SOCKET_ERROR.
+///
+/// # Safety
+/// `lpqs_restrictions`, `lpsz_service_instance`, and `lp_lookup_handle` are
+/// accepted but not dereferenced.
+pub unsafe extern "win64" fn wsa_lookup_service_begin_w(
+    _lpqs_restrictions: *const u8,
+    _dw_control_flags: u32,
+    _lp_lookup_handle: *mut usize,
+) -> i32 {
+    eprintln!("weave/ws2_stub: WSALookupServiceBeginW");
+    SOCKET_ERROR
+}
+
+/// WSALookupServiceNextW: retrieve next service discovery result.
+///
+/// Phase A stub — returns SOCKET_ERROR.
+///
+/// # Safety
+/// `lpqs_results` and `lpdw_buffer_length` are accepted but not dereferenced.
+pub unsafe extern "win64" fn wsa_lookup_service_next_w(
+    _lookup_handle: usize,
+    _dw_control_flags: u32,
+    _lpqs_results: *mut u8,
+    _lpdw_buffer_length: *mut u32,
+) -> i32 {
+    eprintln!("weave/ws2_stub: WSALookupServiceNextW");
+    SOCKET_ERROR
+}
+
+/// WSALookupServiceEnd: end a service discovery query.
+///
+/// Phase A stub — returns SOCKET_ERROR.
+pub extern "win64" fn wsa_lookup_service_end(_lookup_handle: usize) -> i32 {
+    eprintln!("weave/ws2_stub: WSALookupServiceEnd");
+    SOCKET_ERROR
+}
+
+/// WSASetServiceW: register or unregister a service instance.
+///
+/// Phase A stub — returns SOCKET_ERROR.
+///
+/// # Safety
+/// `lpqs_reg_info` is accepted but not dereferenced.
+pub unsafe extern "win64" fn wsa_set_service_w(
+    _lpqs_reg_info: *const u8,
+    _ess_operation: u32,
+    _dw_control_flags: u32,
+) -> i32 {
+    eprintln!("weave/ws2_stub: WSASetServiceW");
+    SOCKET_ERROR
+}
+
+// ── Ordinal stubs (WS2 extension ordinals imported by Signal) ──────────────
+
+/// #112 (WSAEnumProtocolsA): enumerate protocols (ANSI).
+///
+/// Phase A stub — returns SOCKET_ERROR.
+///
+/// # Safety
+/// `lp_protocol_buffer` and `lpdw_buffer_length` are accepted but not dereferenced.
+pub unsafe extern "win64" fn wsa_enum_protocols_a(
+    _lpi_protocols: *mut i32,
+    _lp_protocol_buffer: *mut u8,
+    _lpdw_buffer_length: *mut u32,
+) -> i32 {
+    eprintln!("weave/ws2_stub: WSAEnumProtocolsA (#112)");
+    SOCKET_ERROR
+}
+
+/// #115 (WSCEnumProtocols): enumerate catalog protocols.
+///
+/// Phase A stub — returns SOCKET_ERROR.
+///
+/// # Safety
+/// `lp_protocols` and `lp_protocol_buffer` and `lpdw_buffer_length` are accepted but not dereferenced.
+pub unsafe extern "win64" fn wsc_enum_protocols(
+    _lpi_protocols: *mut i32,
+    _lp_protocol_buffer: *mut u8,
+    _lpdw_buffer_length: *mut u32,
+) -> i32 {
+    eprintln!("weave/ws2_stub: WSCEnumProtocols (#115)");
+    SOCKET_ERROR
+}
+
 // ── DLL Resolver ─────────────────────────────────────────────────────────────
 
 /// Resolve a ws2_32.dll or wsock32.dll import to a function pointer.
@@ -2123,6 +2436,58 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         // WSASocket variants (curl — loopback socket-pair setup).
         "WSASocketW" => Some(ws_wsa_socket_w as *const () as usize),
         "WSASocketA" => Some(ws_wsa_socket_a as *const () as usize),
+        // ── Signal gap-fill: 18 named + 28 ordinal WS2_32 stubs ──
+        // AddrInfo family
+        "FreeAddrInfoExW" => Some(free_addr_info_ex_w as *const () as usize),
+        "FreeAddrInfoW" => Some(free_addr_info_w as *const () as usize),
+        "GetAddrInfoExCancel" => Some(get_addr_info_ex_cancel as *const () as usize),
+        "GetAddrInfoExW" => Some(get_addr_info_ex_w as *const () as usize),
+        "GetAddrInfoW" => Some(get_addr_info_w as *const () as usize),
+        "GetNameInfoW" => Some(get_name_info_w as *const () as usize),
+        // Overlapped I/O
+        "WSARecv" => Some(wsa_recv as *const () as usize),
+        "WSARecvFrom" => Some(wsa_recv_from as *const () as usize),
+        "WSASend" => Some(wsa_send as *const () as usize),
+        "WSASendTo" => Some(wsa_send_to as *const () as usize),
+        "WSAGetOverlappedResult" => Some(wsa_get_overlapped_result as *const () as usize),
+        // Socket management
+        "WSADuplicateSocketW" => Some(wsa_duplicate_socket_w as *const () as usize),
+        "WSAEnumProtocolsW" => Some(wsa_enum_protocols_w as *const () as usize),
+        "WSASetEvent" => Some(wsa_set_event as *const () as usize),
+        // Service discovery
+        "WSALookupServiceBeginW" => Some(wsa_lookup_service_begin_w as *const () as usize),
+        "WSALookupServiceEnd" => Some(wsa_lookup_service_end as *const () as usize),
+        "WSALookupServiceNextW" => Some(wsa_lookup_service_next_w as *const () as usize),
+        "WSASetServiceW" => Some(wsa_set_service_w as *const () as usize),
+        // Ordinal aliases (classic Winsock 1.1 — map to existing implementations)
+        "#1" => Some(ws_socket as *const () as usize),
+        "#2" => Some(ws_connect as *const () as usize),
+        "#3" => Some(ws_closesocket as *const () as usize),
+        "#4" => Some(ws_accept as *const () as usize),
+        "#5" => Some(ws_listen as *const () as usize),
+        "#6" => Some(ws_bind as *const () as usize),
+        "#7" => Some(ws_select as *const () as usize),
+        "#8" => Some(ws_getpeername as *const () as usize),
+        "#9" => Some(ws_getsockname as *const () as usize),
+        "#10" => Some(ws_getsockopt as *const () as usize),
+        "#11" => Some(ws_htonl as *const () as usize),
+        "#12" => Some(ws_htons as *const () as usize),
+        "#13" => Some(ws_ioctlsocket as *const () as usize),
+        "#14" => Some(ws_inet_addr as *const () as usize),
+        "#15" => Some(ws_inet_ntoa as *const () as usize),
+        "#16" => Some(ws_ntohl as *const () as usize),
+        "#17" => Some(ws_ntohs as *const () as usize),
+        "#18" => Some(ws_recv as *const () as usize),
+        "#19" => Some(ws_recvfrom as *const () as usize),
+        "#20" => Some(ws_send as *const () as usize),
+        "#21" => Some(ws_sendto as *const () as usize),
+        "#22" => Some(ws_setsockopt as *const () as usize),
+        "#23" => Some(ws_shutdown as *const () as usize),
+        "#57" => Some(ws_gethostname as *const () as usize),
+        // Ordinal stubs (WS2 extension — not yet implemented by name).
+        "#111" => Some(wsa_enum_protocols_w as *const () as usize),
+        "#112" => Some(wsa_enum_protocols_a as *const () as usize),
+        "#115" => Some(wsc_enum_protocols as *const () as usize),
         _ => None,
     }
 }
@@ -2238,6 +2603,47 @@ mod tests {
     #[test]
     fn resolve_unknown_function() {
         assert!(resolve("ws2_32.dll", "__nonexistent__").is_none());
+    }
+
+    #[test]
+    fn resolve_signal_gap_fill_stubs() {
+        let named = [
+            "FreeAddrInfoExW",
+            "FreeAddrInfoW",
+            "GetAddrInfoExCancel",
+            "GetAddrInfoExW",
+            "GetAddrInfoW",
+            "GetNameInfoW",
+            "WSARecv",
+            "WSARecvFrom",
+            "WSASend",
+            "WSASendTo",
+            "WSAGetOverlappedResult",
+            "WSADuplicateSocketW",
+            "WSAEnumProtocolsW",
+            "WSASetEvent",
+            "WSALookupServiceBeginW",
+            "WSALookupServiceEnd",
+            "WSALookupServiceNextW",
+            "WSASetServiceW",
+        ];
+        let ordinals = [
+            "#1", "#2", "#3", "#4", "#5", "#6", "#7", "#8", "#9", "#10",
+            "#11", "#12", "#13", "#14", "#15", "#16", "#17", "#18", "#19",
+            "#20", "#21", "#22", "#23", "#57", "#111", "#112", "#115",
+        ];
+        for &name in &named {
+            assert!(
+                resolve("ws2_32.dll", name).is_some(),
+                "ws2_32.dll!{name} must resolve"
+            );
+        }
+        for &ord in &ordinals {
+            assert!(
+                resolve("ws2_32.dll", ord).is_some(),
+                "ws2_32.dll!{ord} must resolve"
+            );
+        }
     }
 
     // ── FD_WRITE / sync-connect arming regression tests ────────────────────
