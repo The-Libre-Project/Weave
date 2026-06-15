@@ -2446,25 +2446,122 @@ pub unsafe extern "win64" fn wsa_send(
     0
 }
 
-/// WSASendTo: overlapped sendto, with destination address.
+/// WSASendTo: send data to a specific destination using WSABUF gather buffers.
 ///
-/// Phase A stub — returns SOCKET_ERROR.
+/// Synchronous gather-write with optional destination address (UDP datagrams).
+/// Overlapped mode returns WSAEOPNOTSUPP with a warning.
+///
+/// Wine ref: dlls/ws2_32/socket.c — WSASendTo translates sockaddr Windows→Linux,
+/// then iterates WSABUF entries with POSIX sendto(). EWOULDBLOCK/EAGAIN re-arms
+/// FD_WRITE for edge-triggered readiness.
 ///
 /// # Safety
-/// Caller must ensure all pointer arguments are valid.
+/// Caller must ensure lp_buffers is valid for dw_buffer_count WSABUF entries,
+/// lp_number_of_bytes_sent points to a valid u32, and lp_to (if non-null) points
+/// to a valid sockaddr of i_to_len bytes.
 pub unsafe extern "win64" fn wsa_send_to(
-    _s: usize,
-    _buffers: *mut u8,
-    _dw_buffer_count: u32,
-    _lp_number_of_bytes_sent: *mut u32,
-    _dw_flags: u32,
-    _lp_to: *const u8,
-    _i_to_len: i32,
-    _lp_overlapped: usize,
+    s: usize,
+    lp_buffers: *mut u8,
+    dw_buffer_count: u32,
+    lp_number_of_bytes_sent: *mut u32,
+    dw_flags: u32,
+    lp_to: *const u8,
+    i_to_len: i32,
+    lp_overlapped: usize,
     _lp_completion_routine: usize,
 ) -> i32 {
-    eprintln!("weave/ws2_stub: WSASendTo");
-    SOCKET_ERROR
+    if weave_core::ws2_trace::enabled() {
+        eprintln!(
+            "weave/ws2: WSASendTo s={s} count={dw_buffer_count} flags={dw_flags:#x} overlapped={lp_overlapped}"
+        );
+    }
+
+    // lp_number_of_bytes_sent must be non-null.
+    if lp_number_of_bytes_sent.is_null() {
+        set_last_error(10014); // WSAEFAULT
+        return SOCKET_ERROR;
+    }
+
+    // Overlapped mode is async; not supported in Phase B.
+    if lp_overlapped != 0 {
+        eprintln!("weave/ws2_stub: WSASendTo overlapped mode not supported");
+        set_last_error(10045); // WSAEOPNOTSUPP
+        return SOCKET_ERROR;
+    }
+
+    // Translate destination address, if provided.
+    let has_addr = !lp_to.is_null() && i_to_len > 0;
+    let translated_addr = if has_addr {
+        Some(copy_sockaddr_win_to_linux(lp_to, i_to_len as usize))
+    } else {
+        None
+    };
+
+    // Synchronous gather-write.
+    let buffers = lp_buffers as *const WSABUF;
+    let mut total_sent: u32 = 0;
+
+    if dw_buffer_count == 0 {
+        // Wine ref: dlls/ws2_32/socket.c — zero buffers sends an empty datagram.
+        let ret = if let Some(ref addr) = translated_addr {
+            libc::sendto(
+                s as i32,
+                std::ptr::null(),
+                0,
+                dw_flags as i32,
+                addr.as_ptr() as *const libc::sockaddr,
+                i_to_len as libc::socklen_t,
+            )
+        } else {
+            libc::send(s as i32, std::ptr::null(), 0, dw_flags as i32)
+        };
+        if ret < 0 {
+            let e = *libc::__errno_location();
+            if e == libc::EWOULDBLOCK || e == libc::EAGAIN {
+                weave_common::socket_event::arm_socket_write(s as i32);
+            }
+            save_errno();
+            return SOCKET_ERROR;
+        }
+        *lp_number_of_bytes_sent = 0;
+        return 0;
+    }
+
+    for i in 0..dw_buffer_count as usize {
+        let buf = buffers.add(i).read();
+        let ret = if let Some(ref addr) = translated_addr {
+            libc::sendto(
+                s as i32,
+                buf.buf as *const libc::c_void,
+                buf.len as usize,
+                dw_flags as i32,
+                addr.as_ptr() as *const libc::sockaddr,
+                i_to_len as libc::socklen_t,
+            )
+        } else {
+            libc::send(
+                s as i32,
+                buf.buf as *const libc::c_void,
+                buf.len as usize,
+                dw_flags as i32,
+            )
+        };
+        if ret < 0 {
+            let e = *libc::__errno_location();
+            // Re-arm FD_WRITE edge trigger when send buffer is full.
+            if e == libc::EWOULDBLOCK || e == libc::EAGAIN {
+                weave_common::socket_event::arm_socket_write(s as i32);
+            }
+            // Report partial progress on intermediate failure.
+            *lp_number_of_bytes_sent = total_sent;
+            save_errno();
+            return SOCKET_ERROR;
+        }
+        total_sent += ret as u32;
+    }
+
+    *lp_number_of_bytes_sent = total_sent;
+    0
 }
 
 /// WSAGetOverlappedResult: get result of an overlapped operation.
