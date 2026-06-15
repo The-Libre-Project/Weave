@@ -30,6 +30,7 @@ members = [
     "weave-normaliz",
     "weave-secur32",
     "weave-wldap32",
+    "weave-dwrite",
 ]
 resolver = "2"
 

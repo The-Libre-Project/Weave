@@ -1,0 +1,9 @@
+[package]
+name = "weave-dwrite"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "dwrite.dll stubs for Weave — DirectWrite font/text factory."
+
+[dependencies]
