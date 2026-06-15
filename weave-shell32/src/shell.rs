@@ -952,27 +952,48 @@ pub unsafe extern "win64" fn sh_get_special_folder_location(
     0x8000_4001u32 as i32 // E_NOTIMPL
 }
 
-// Wine ref: dlls/shell32/shlfolder.c — SHParseDisplayName converts a display name (path) into a PIDL.
+// Wine ref: dlls/shell32/shlfolder.c — SHParseDisplayName delegates to ILCreateFromPathW for
+// filesystem paths; returns S_OK + pidl on success, S_FALSE for non-filesystem names.
 /// SHParseDisplayName — parse a display name into a shell PIDL.
 ///
-/// Returns S_FALSE with NULL ppidl — stub.
+/// Phase B: converts filesystem paths to PIDLs via ILCreateFromPathW.
+/// Non-filesystem names (GUID, shell:, etc.) return S_FALSE with NULL pidl.
 ///
 /// # Safety
-/// `ppidl` must be writable when non-null.
+/// `ppidl` must be writable when non-null. `name` must be null or a valid
+/// null-terminated UTF-16 string.
 pub unsafe extern "win64" fn sh_parse_display_name(
-    _name: *const u16,
+    name: *const u16,
     _pbc: usize,
     ppidl: *mut *mut u8,
     _sfgao_in: u32,
-    _psfgao_out: *mut u32,
+    psfgao_out: *mut u32,
 ) -> i32 {
+    const S_OK: i32 = 0;
     const S_FALSE: i32 = 1;
     const E_POINTER: i32 = 0x8000_4003u32 as i32;
+
     if ppidl.is_null() {
         return E_POINTER;
     }
-    unsafe { *ppidl = std::ptr::null_mut() };
-    S_FALSE
+    *ppidl = std::ptr::null_mut();
+
+    if name.is_null() || *name == 0 {
+        return S_FALSE;
+    }
+
+    let pidl = super::pidl::il_create_from_path_w(name);
+    if pidl.is_null() {
+        return S_FALSE;
+    }
+
+    *ppidl = pidl;
+    if !psfgao_out.is_null() {
+        const SFGAO_FILESYSTEM: u32 = 0x4000_0000;
+        const SFGAO_FOLDER: u32 = 0x2000_0000;
+        *psfgao_out = SFGAO_FILESYSTEM | SFGAO_FOLDER;
+    }
+    S_OK
 }
 
 // Wine ref: dlls/shell32/shellpath.c — SHGetFolderPathAndSubFolderW combines CSIDL + sub-path.
