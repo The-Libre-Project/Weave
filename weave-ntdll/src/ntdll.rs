@@ -1582,6 +1582,68 @@ unsafe extern "C" fn rtl_raise_exception_impl(
     unsafe { libc::abort() };
 }
 
+// ── Signal gap-fill: ntdll stubs ──────────────────────────────────────────────
+//
+// jcodemunch unavailable — Phase A stubs only, safe sentinel returns.
+
+/// LdrLockLoaderLock: acquire the loader lock.
+///
+/// Phase A stub — returns STATUS_SUCCESS (no-op lock).
+///
+/// # Safety
+/// `flags` and `cookie` must be valid pointers or NULL.
+pub unsafe extern "win64" fn ldr_lock_loader_lock(
+    _flags: u32,
+    _cookie: *mut usize,
+) -> u32 {
+    0 // STATUS_SUCCESS
+}
+
+/// LdrUnlockLoaderLock: release the loader lock.
+///
+/// Phase A stub — returns STATUS_SUCCESS (no-op unlock).
+///
+/// # Safety
+/// `cookie` must be non-zero if previously acquired.
+pub unsafe extern "win64" fn ldr_unlock_loader_lock(_cookie: usize) -> u32 {
+    0 // STATUS_SUCCESS
+}
+
+/// NtDeleteKey: delete a registry key.
+///
+/// Phase A stub — returns STATUS_SUCCESS (no-op).
+///
+/// # Safety
+/// `key_handle` is accepted but not dereferenced.
+pub unsafe extern "win64" fn nt_delete_key(_key_handle: usize) -> u32 {
+    eprintln!("weave/ntdll_stub: NtDeleteKey");
+    0 // STATUS_SUCCESS
+}
+
+/// NtQueryObject: query object information.
+///
+/// Phase A stub — returns STATUS_NOT_IMPLEMENTED.
+///
+/// # Safety
+/// All pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn nt_query_object(
+    _handle: usize,
+    _object_information_class: u32,
+    _object_information: *mut u8,
+    _object_information_length: u32,
+    _return_length: *mut u32,
+) -> u32 {
+    eprintln!("weave/ntdll_stub: NtQueryObject");
+    STATUS_NOT_IMPLEMENTED
+}
+
+/// RtlGetLastNtStatus: get the last NT status code from the TEB.
+///
+/// Phase A stub — returns 0 (STATUS_SUCCESS).
+pub extern "win64" fn rtl_get_last_nt_status() -> u32 {
+    0 // STATUS_SUCCESS
+}
+
 // ── Resolver ──────────────────────────────────────────────────────────────────
 
 pub fn resolve(func: &str) -> Option<usize> {
@@ -1783,6 +1845,20 @@ pub fn resolve(func: &str) -> Option<usize> {
         "__wine_dbg_output" => {
             Some(wine_dbg_output as unsafe extern "win64" fn(_) -> _ as *const () as usize)
         }
+        // ── Signal gap-fill: 5 ntdll stubs ──
+        "LdrLockLoaderLock" => Some(
+            ldr_lock_loader_lock as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
+        ),
+        "LdrUnlockLoaderLock" => Some(
+            ldr_unlock_loader_lock as unsafe extern "win64" fn(_) -> _ as *const () as usize,
+        ),
+        "NtDeleteKey" => Some(
+            nt_delete_key as unsafe extern "win64" fn(_) -> _ as *const () as usize,
+        ),
+        "NtQueryObject" => Some(
+            nt_query_object as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const () as usize,
+        ),
+        "RtlGetLastNtStatus" => Some(rtl_get_last_nt_status as *const () as usize),
         _ => None,
     }
 }
@@ -1957,5 +2033,47 @@ mod tests {
             12,
             "SYSTEM_CPU_INFORMATION must be 12 bytes"
         );
+    }
+
+    /// All 11 Signal Desktop ntdll imports resolve successfully.
+    #[test]
+    fn resolve_all_signal_ntdll_imports() {
+        let all = [
+            "LdrLockLoaderLock",
+            "LdrUnlockLoaderLock",
+            "NtDeleteKey",
+            "NtQueryInformationProcess",
+            "NtQueryInformationThread",
+            "NtQueryObject",
+            "NtQuerySystemInformation",
+            "NtWriteFile",
+            "RtlGetLastNtStatus",
+            "RtlInitUnicodeString",
+            "RtlNtStatusToDosError",
+        ];
+        for f in &all {
+            assert!(resolve(f).is_some(), "missing {f}");
+        }
+    }
+
+    /// 5 new Signal gap-fill stubs resolve.
+    #[test]
+    fn resolve_signal_gap_fill_stubs() {
+        let new_funcs = [
+            "LdrLockLoaderLock",
+            "LdrUnlockLoaderLock",
+            "NtDeleteKey",
+            "NtQueryObject",
+            "RtlGetLastNtStatus",
+        ];
+        for f in &new_funcs {
+            assert!(resolve(f).is_some(), "missing {f}");
+        }
+    }
+
+    /// Unknown function returns None.
+    #[test]
+    fn resolve_nonexistent_returns_none() {
+        assert!(resolve("__nonexistent__ntdll_func__").is_none());
     }
 }
