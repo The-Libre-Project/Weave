@@ -203,13 +203,13 @@ unsafe fn patch_sockaddr_linux_to_win(buf: *mut u8, len: usize) {
 unsafe fn win_fdset_to_linux(win: *const u8) -> (libc::fd_set, i32) {
     let mut lfs: libc::fd_set = std::mem::zeroed();
     let mut max_fd: i32 = -1;
-    if win.is_null() {
+    if win.is_null() || (win as usize) < 0x10000 {
         return (lfs, max_fd);
     }
-    let count = *(win as *const u32) as usize;
+    let count = unsafe { std::ptr::read_unaligned(win as *const u32) } as usize;
     let arr = win.add(8); // skip count(4) + padding(4)
     for i in 0..count.min(WIN_FD_SETSIZE) {
-        let sock = *(arr.add(i * 8) as *const usize);
+        let sock = unsafe { std::ptr::read_unaligned(arr.add(i * 8) as *const usize) };
         let fd = sock as i32;
         if fd >= 0 && (fd as usize) < libc::FD_SETSIZE {
             libc::FD_SET(fd, &mut lfs);
@@ -223,21 +223,21 @@ unsafe fn win_fdset_to_linux(win: *const u8) -> (libc::fd_set, i32) {
 
 /// After select(), filter the Windows fd_set to contain only ready fds.
 unsafe fn filter_win_fdset(win: *mut u8, lfs: &libc::fd_set) {
-    if win.is_null() {
+    if win.is_null() || (win as usize) < 0x10000 {
         return;
     }
-    let count = *(win as *const u32) as usize;
+    let count = unsafe { std::ptr::read_unaligned(win as *const u32) } as usize;
     let arr = win.add(8);
     let mut new_count: u32 = 0;
     for i in 0..count.min(WIN_FD_SETSIZE) {
-        let sock = *(arr.add(i * 8) as *const usize);
+        let sock = unsafe { std::ptr::read_unaligned(arr.add(i * 8) as *const usize) };
         let fd = sock as i32;
         if fd >= 0 && (fd as usize) < libc::FD_SETSIZE && libc::FD_ISSET(fd, lfs) {
-            *(arr.add(new_count as usize * 8) as *mut usize) = sock;
+            unsafe { std::ptr::write_unaligned(arr.add(new_count as usize * 8) as *mut usize, sock) };
             new_count += 1;
         }
     }
-    *(win as *mut u32) = new_count;
+    unsafe { std::ptr::write_unaligned(win as *mut u32, new_count) };
 }
 
 // ── Structures ───────────────────────────────────────────────────────────────
@@ -3046,19 +3046,30 @@ pub unsafe extern "win64" fn wsa_enum_protocols_a(
     SOCKET_ERROR
 }
 
-/// #115 (WSCEnumProtocols): enumerate catalog protocols.
+/// WSCEnumProtocols: enumerate catalog protocols.
 ///
-/// Phase A stub — returns SOCKET_ERROR.
+/// Phase B — returns 0 entries (empty protocol list) so callers can proceed.
+/// Setting *lpdw_buffer_length to 0 signals "no protocols available" without
+/// error. Callers such as Chromium's sandbox init check the return value and
+/// call WSAStartup — returning SOCKET_ERROR resulted in a DebugBreak.
 ///
 /// # Safety
-/// `lp_protocols` and `lp_protocol_buffer` and `lpdw_buffer_length` are accepted but not dereferenced.
+/// `lpdw_buffer_length` and `lpdw_errno` must be non-null and writable if
+/// the caller passes non-null pointers.
+// Wine ref: dlls/ws2_32/protocol.c:2866 — WS2_WSCEnumProtocols collects the
+// WS2 protocol list; returns number of installed protocols or SOCKET_ERROR
+// if buffer is too small.  Returns 0 entries (success) to let callers proceed.
 pub unsafe extern "win64" fn wsc_enum_protocols(
     _lpi_protocols: *mut i32,
     _lp_protocol_buffer: *mut u8,
-    _lpdw_buffer_length: *mut u32,
+    lpdw_buffer_length: *mut u32,
+    _lpdw_errno: *mut i32,
 ) -> i32 {
-    eprintln!("weave/ws2_stub: WSCEnumProtocols (#115)");
-    SOCKET_ERROR
+    if !lpdw_buffer_length.is_null() {
+        // SAFETY: caller guarantees lpdw_buffer_length points to valid u32.
+        unsafe { *lpdw_buffer_length = 0 };
+    }
+    0 // 0 entries (empty protocol list, no error)
 }
 
 // ── WSAPoll ────────────────────────────────────────────────────────────────────
@@ -3219,6 +3230,7 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         // Socket management
         "WSADuplicateSocketW" => Some(wsa_duplicate_socket_w as *const () as usize),
         "WSAEnumProtocolsW" => Some(wsa_enum_protocols_w as *const () as usize),
+        "WSCEnumProtocols" => Some(wsc_enum_protocols as *const () as usize),
         "WSASetEvent" => Some(wsa_set_event as *const () as usize),
         // Socket polling (Electron/Chromium — async I/O multiplexing).
         "WSAPoll" => Some(
@@ -3256,9 +3268,10 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "#23" => Some(ws_shutdown as *const () as usize),
         "#57" => Some(ws_gethostname as *const () as usize),
         // Ordinal stubs (WS2 extension — not yet implemented by name).
+        // NOTE: #115 is WSAStartup, NOT WSCEnumProtocols.
         "#111" => Some(wsa_enum_protocols_w as *const () as usize),
         "#112" => Some(wsa_enum_protocols_a as *const () as usize),
-        "#115" => Some(wsc_enum_protocols as *const () as usize),
+        "#115" => Some(wsa_startup as *const () as usize),
         _ => None,
     }
 }
@@ -3392,6 +3405,7 @@ mod tests {
             "WSAGetOverlappedResult",
             "WSADuplicateSocketW",
             "WSAEnumProtocolsW",
+            "WSCEnumProtocols",
             "WSASetEvent",
             "WSALookupServiceBeginW",
             "WSALookupServiceEnd",
