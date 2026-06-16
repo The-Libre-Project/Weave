@@ -1,6 +1,8 @@
 //! shell32.dll, comdlg32.dll, and winspool.drv stubs for Weave.
 //!
 //! # Phase 2 scope
+
+#![allow(clippy::missing_safety_doc)]
 //!
 //! - `comdlg32.dll`: `GetOpenFileNameW`, `GetSaveFileNameW` — native file
 //!   picker via `zenity` / `kdialog` subprocess; falls back to "cancelled"

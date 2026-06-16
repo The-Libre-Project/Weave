@@ -6,6 +6,7 @@
 //! level/name remapping.
 
 #![allow(non_snake_case)]
+#![allow(clippy::missing_safety_doc, clippy::upper_case_acronyms)]
 
 use std::collections::HashMap;
 use std::ffi::CString;
@@ -3112,7 +3113,7 @@ pub unsafe extern "win64" fn ws_wsa_poll(fd_array: *mut WSAPOLLFD, nfds: u32, ti
         }
         pfds.push(libc::pollfd {
             fd: entry.fd as libc::c_int,
-            events: entry.events as i16,
+            events: entry.events,
             revents: 0,
         });
     }
@@ -3134,7 +3135,7 @@ pub unsafe extern "win64" fn ws_wsa_poll(fd_array: *mut WSAPOLLFD, nfds: u32, ti
             entry.revents = 0;
             continue;
         }
-        entry.revents = pfds[pfd_idx].revents as i16;
+        entry.revents = pfds[pfd_idx].revents;
         pfd_idx += 1;
     }
 

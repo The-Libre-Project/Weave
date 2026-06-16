@@ -8,6 +8,7 @@
 //! CreateFileW/ReadFile/WriteFile/CloseHandle delegate to weave-core file_io.
 
 #![allow(non_snake_case)]
+#![allow(clippy::missing_safety_doc)]
 
 use std::cell::RefCell;
 use std::collections::HashMap;
