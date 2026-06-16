@@ -356,7 +356,7 @@ unsafe extern "win64" fn sf_get_display_name_of(
         unsafe {
             let utype_ptr = name as *mut u32;
             *utype_ptr = STRRET_CSTR;
-            let cstr_ptr = name.add(8) as *mut u8;
+            let cstr_ptr = name.add(8);
             *cstr_ptr = 0;
         }
         return S_OK;
@@ -373,7 +373,7 @@ unsafe extern "win64" fn sf_get_display_name_of(
     unsafe {
         let utype_ptr = name as *mut u32;
         *utype_ptr = STRRET_CSTR;
-        let cstr_ptr = name.add(8) as *mut u8;
+        let cstr_ptr = name.add(8);
         std::ptr::copy_nonoverlapping(ansi_bytes.as_ptr(), cstr_ptr, copy_len);
         *cstr_ptr.add(copy_len) = 0;
     }

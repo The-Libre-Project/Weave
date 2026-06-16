@@ -533,18 +533,22 @@ fn write_display_name(dest: *mut u16, name: &str) {
 // Wine ref: dlls/shell32/pidl.c — SHGetDesktopFolder + BindToObject; FALSE if PIDL null or non-filesystem.
 // Implemented in `pidl::sh_get_path_from_id_list_w`.
 
-struct DropEntry {
+// Referenced by test crate through pub API.
+#[allow(dead_code)]
+pub struct DropEntry {
     files: Vec<String>,
     point: (i32, i32),
 }
 
 static DROP_TABLE: OnceLock<Mutex<HashMap<usize, DropEntry>>> = OnceLock::new();
+#[allow(dead_code)]
 static NEXT_DROP_HANDLE: AtomicUsize = AtomicUsize::new(0x9000_0001);
 
 fn drop_table() -> &'static Mutex<HashMap<usize, DropEntry>> {
     DROP_TABLE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+#[allow(dead_code)]
 fn alloc_drop_handle(files: Vec<String>, point: (i32, i32)) -> usize {
     let handle = NEXT_DROP_HANDLE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let mut table = drop_table().lock().unwrap();
@@ -556,6 +560,7 @@ fn alloc_drop_handle(files: Vec<String>, point: (i32, i32)) -> usize {
 ///
 /// Test helpers can use this to simulate a drag-drop. Returns an HDROP handle
 /// suitable for use with DragQueryFileW / DragQueryPoint / DragFinish.
+#[allow(dead_code)]
 pub fn weave_test_create_drop(files: Vec<String>, x: i32, y: i32) -> usize {
     alloc_drop_handle(files, (x, y))
 }
@@ -1134,11 +1139,17 @@ const SHGFI_ATTRIBUTES: u32 = 0x00000800;
 const SHGFI_ICONLOCATION: u32 = 0x00001000;
 const SHGFI_EXETYPE: u32 = 0x00002000;
 const SHGFI_SYSICONINDEX: u32 = 0x00004000;
+#[allow(dead_code)]
 const SHGFI_LINKOVERLAY: u32 = 0x00008000;
+#[allow(dead_code)]
 const SHGFI_SELECTED: u32 = 0x00010000;
+#[allow(dead_code)]
 const SHGFI_LARGEICON: u32 = 0x00000000;
+#[allow(dead_code)]
 const SHGFI_SMALLICON: u32 = 0x00000001;
+#[allow(dead_code)]
 const SHGFI_OPENICON: u32 = 0x00000002;
+#[allow(dead_code)]
 const SHGFI_SHELLICONSIZE: u32 = 0x00000004;
 const SHGFI_PIDL: u32 = 0x00000008;
 const SHGFI_USEFILEATTRIBUTES: u32 = 0x00000010;
@@ -1238,7 +1249,7 @@ pub unsafe extern "win64" fn sh_get_file_info_w(
 
     // Extract filename (last component after \ or /)
     let filename = path_str
-        .rsplit(|c| c == '\\' || c == '/')
+        .rsplit(['\\', '/'])
         .next()
         .unwrap_or(&path_str)
         .to_string();
