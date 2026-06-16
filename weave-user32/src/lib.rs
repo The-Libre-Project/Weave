@@ -1417,6 +1417,46 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "RedrawWindow" => Some(
             api::redraw_window as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
         ),
+        // ── Q-Dir Phase A stubs: hooks, input synthesis, drawing ─────────
+        "SetWindowsHookExW" => Some(
+            api::set_windows_hook_ex_w as unsafe extern "win64" fn(_, _, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "UnhookWindowsHookEx" => Some(api::unhook_windows_hook_ex as *const () as usize),
+        "CallNextHookEx" => Some(
+            api::call_next_hook_ex as unsafe extern "win64" fn(_, _, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "EnumWindows" => {
+            Some(api::enum_windows as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "mouse_event" => {
+            Some(api::mouse_event as extern "win64" fn(_, _, _, _, _) as *const () as usize)
+        }
+        "MenuItemFromPoint" => Some(
+            api::menu_item_from_point as unsafe extern "win64" fn(_, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "DrawIcon" => Some(api::draw_icon as extern "win64" fn(_, _, _, _) as *const () as usize),
+        "keybd_event" => {
+            Some(api::keybd_event as extern "win64" fn(_, _, _, _) as *const () as usize)
+        }
+        "FrameRect" => {
+            Some(api::frame_rect as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize)
+        }
+        "InvalidateRgn" => Some(
+            api::invalidate_rgn as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
+        ),
+        "DrawAnimatedRects" => Some(
+            api::draw_animated_rects as unsafe extern "win64" fn(_, _, _, _) as *const () as usize,
+        ),
+        "DrawFocusRect" => {
+            Some(api::draw_focus_rect as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "CreateCursor" => Some(
+            api::create_cursor as unsafe extern "win64" fn(_, _, _, _, _, _, _) -> _ as *const ()
+                as usize,
+        ),
         _ => None,
     }
 }

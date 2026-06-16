@@ -1794,6 +1794,14 @@ pub fn resolve(func: &str) -> Option<usize> {
             reg_get_value_w as unsafe extern "win64" fn(_, _, _, _, _, _, _) -> _ as *const ()
                 as usize,
         ),
+        // ── Q-Dir Phase A stubs ───────────────────────────────────────────
+        "RegOpenKeyW" => {
+            Some(reg_open_key_w as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize)
+        }
+        "GetTokenInformation" => Some(
+            get_token_information as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const ()
+                as usize,
+        ),
         _ => None,
     }
 }
@@ -2509,6 +2517,51 @@ pub unsafe extern "win64" fn reg_set_value_w(
     };
     reg_close_key(sub_hkey);
     write_ret
+}
+
+/// RegOpenKeyW — open a registry key (legacy non-Ex variant).
+///
+/// Phase A stub: returns ERROR_SUCCESS (0) but writes 0 into `phk_result` so
+/// callers do not attempt to use a real handle. Callers that validate the handle
+/// will observe a null HKEY; those that accept any non-ERROR_SUCCESS code will
+/// see success and silently get null.
+///
+/// # Safety
+/// `lp_sub_key` must be null or a valid null-terminated UTF-16 string.
+/// `phk_result` must be a valid writable pointer.
+// Wine ref: dlls/advapi32/registry.c — RegOpenKeyW is a thin wrapper calling
+// RegOpenKeyExW(hKey, lpSubKey, 0, KEY_READ, phkResult); Weave does the same.
+pub unsafe extern "win64" fn reg_open_key_w(
+    h_key: usize,
+    lp_sub_key: *const u16,
+    phk_result: *mut usize,
+) -> u32 {
+    if phk_result.is_null() {
+        return 87; // ERROR_INVALID_PARAMETER
+    }
+    // SAFETY: phk_result non-null (checked above), caller provides writable HKEY*.
+    // lp_sub_key forwarded to reg_open_key_ex_w which handles null.
+    unsafe { reg_open_key_ex_w(h_key, lp_sub_key, 0, 0x02000000, phk_result) as u32 }
+}
+
+/// GetTokenInformation — retrieve information about an access token.
+///
+/// Returns FALSE (0). Token queries are not supported; callers should check
+/// `GetLastError` (not set) to detect the stub.
+///
+/// # Safety
+/// `token_information` and `return_length` are accepted but not written.
+// Wine ref: dlls/advapi32/security.c — GetTokenInformation calls
+// NtQueryInformationToken; returns FALSE with ERROR_INSUFFICIENT_BUFFER when
+// the caller's buffer is too small. Weave returns FALSE unconditionally.
+pub unsafe extern "win64" fn get_token_information(
+    _token_handle: usize,
+    _token_info_class: u32,
+    _token_information: *mut u8,
+    _token_information_length: u32,
+    _return_length: *mut u32,
+) -> i32 {
+    0 // FALSE
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

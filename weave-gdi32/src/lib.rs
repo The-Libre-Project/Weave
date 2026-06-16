@@ -2710,6 +2710,32 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "SetDeviceGammaRamp" => {
             Some(set_device_gamma_ramp as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
         }
+        // ── Enhanced metafile stubs ────────────────────────────────────────
+        "CreateEnhMetaFileW" => Some(
+            create_enh_meta_file_w as unsafe extern "win64" fn(_, _, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "CloseEnhMetaFile" => {
+            Some(close_enh_meta_file as unsafe extern "win64" fn(_) -> _ as *const () as usize)
+        }
+        "DeleteEnhMetaFile" => Some(delete_enh_meta_file as *const () as usize),
+        "GetEnhMetaFileHeader" => Some(
+            get_enh_meta_file_header as unsafe extern "win64" fn(_, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "ResetDCW" => Some(reset_dc_w as unsafe extern "win64" fn(_, _) -> _ as *const () as usize),
+        "GetViewportExtEx" => {
+            Some(get_viewport_ext_ex as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "GetWindowExtEx" => {
+            Some(get_window_ext_ex as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "SetViewportExtEx" => Some(
+            set_viewport_ext_ex as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
+        ),
+        "SetWindowExtEx" => Some(
+            set_window_ext_ex as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
+        ),
         _ => None,
     }
 }
@@ -5067,4 +5093,146 @@ pub unsafe extern "win64" fn get_device_gamma_ramp(_hdc: usize, _ramp: *mut u8) 
 // support gamma (dibdrv_SetDeviceGammaRamp always returns FALSE).
 pub unsafe extern "win64" fn set_device_gamma_ramp(_hdc: usize, _ramp: *mut u8) -> i32 {
     0
+}
+
+// ── Enhanced metafile stubs ──────────────────────────────────────────────────
+//
+// Enhanced metafiles (EMF) record GDI commands for playback. Headless stubs:
+// creation returns NULL, queries return 0, deletion is a no-op returning FALSE.
+//
+// Wine ref: dlls/gdi32/enhmfdrv/enhmetafiledrv.c — CreateEnhMetaFileW allocates
+// a DC and a metafile-recording stream; CloseEnhMetaFile closes the record and
+// returns an HENHMETAFILE; DeleteEnhMetaFile frees the EMF handle.
+
+/// CreateEnhMetaFileW — create an enhanced metafile DC.
+///
+/// Returns NULL — metafile recording not supported.
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+// Wine ref: dlls/gdi32/enhmfdrv/enhmetafiledrv.c — returns NULL when the DC
+// cannot be created (no display, no file path).
+pub unsafe extern "win64" fn create_enh_meta_file_w(
+    _hdc: usize,
+    _lp_filename: *const u16,
+    _lprc: *const [i32; 4],
+    _lp_desc: *const u16,
+) -> usize {
+    0 // NULL
+}
+
+/// CloseEnhMetaFile — close an enhanced metafile DC and return its handle.
+///
+/// Returns NULL — no metafile was created.
+///
+/// # Safety
+/// `hdc` is accepted but not dereferenced.
+// Wine ref: dlls/gdi32/enhmfdrv/enhmetafiledrv.c — closes the recording DC and
+// returns an HENHMETAFILE handle; Weave never allocates one, so NULL.
+pub unsafe extern "win64" fn close_enh_meta_file(_hdc: usize) -> usize {
+    0 // NULL
+}
+
+/// DeleteEnhMetaFile — delete an enhanced metafile handle.
+///
+/// Returns FALSE — no metafile handle was ever allocated.
+// Wine ref: dlls/gdi32/enhmfdrv/enhmetafiledrv.c — calls HeapFree on the
+// EMF handle and returns TRUE on success; Weave has nothing to free.
+pub extern "win64" fn delete_enh_meta_file(_hemf: usize) -> i32 {
+    0 // FALSE
+}
+
+/// GetEnhMetaFileHeader — retrieve the header of an enhanced metafile.
+///
+/// Returns 0 — no metafile header available.
+///
+/// # Safety
+/// `lpemh` is accepted but not written.
+// Wine ref: dlls/gdi32/enhmfdrv/enhmetafiledrv.c — copies the header struct;
+// returns 0 when the buffer is too small or the handle is invalid.
+pub unsafe extern "win64" fn get_enh_meta_file_header(
+    _hemf: usize,
+    _cb_header: u32,
+    _lpemh: *mut u8,
+) -> u32 {
+    0
+}
+
+// ── Printer DC stubs ─────────────────────────────────────────────────────────
+//
+// Printer DC functions are no-ops in headless mode. Writes a one-shot diagnostic
+// so callers know the printer path is untested.
+//
+// Wine ref: dlls/wineps.drv/init.c — ResetDCW reinitialises the DEVMODE;
+// GetViewportExtEx / GetWindowExtEx / SetViewportExtEx / SetWindowExtEx are
+// the X11 driver mapping-origin functions in dlls/win32u/dibdrv/dc.c.
+
+/// ResetDCW — reset a printer DC with new DEVMODE settings.
+///
+/// Returns NULL — printer DC reset is not supported.
+///
+/// # Safety
+/// `lp_dev_mode` is accepted but not dereferenced.
+// Wine ref: dlls/wineps.drv/init.c — reads the new DEVMODE, reinitialises the
+// device driver, returns the updated HDC; Weave returns NULL.
+pub unsafe extern "win64" fn reset_dc_w(_hdc: usize, _lp_dev_mode: *const u8) -> usize {
+    0 // NULL
+}
+
+/// GetViewportExtEx — retrieve the viewport extent in device units.
+///
+/// Returns FALSE — viewport extent query not supported.
+///
+/// # Safety
+/// `lp_size` is accepted but not written.
+// Wine ref: dlls/win32u/dibdrv/dc.c — reads the DC's viewport extent pair;
+// Weave has no viewport state, returns FALSE.
+pub unsafe extern "win64" fn get_viewport_ext_ex(_hdc: usize, _lp_size: *mut [i32; 2]) -> i32 {
+    0 // FALSE
+}
+
+/// GetWindowExtEx — retrieve the window extent in logical units.
+///
+/// Returns FALSE — window extent query not supported.
+///
+/// # Safety
+/// `lp_size` is accepted but not written.
+// Wine ref: dlls/win32u/dibdrv/dc.c — reads the DC's window extent pair;
+// Weave has no window-extent state, returns FALSE.
+pub unsafe extern "win64" fn get_window_ext_ex(_hdc: usize, _lp_size: *mut [i32; 2]) -> i32 {
+    0 // FALSE
+}
+
+/// SetViewportExtEx — set the viewport extent in device units.
+///
+/// Returns FALSE — viewport extent not changeable.
+///
+/// # Safety
+/// `lp_size` is accepted but not read or written.
+// Wine ref: dlls/win32u/dibdrv/dc.c — stores the new viewport extent in the DC;
+// Weave does not track viewport extents, returns FALSE.
+pub unsafe extern "win64" fn set_viewport_ext_ex(
+    _hdc: usize,
+    _x_ext: i32,
+    _y_ext: i32,
+    _lp_size: *mut [i32; 2],
+) -> i32 {
+    0 // FALSE
+}
+
+/// SetWindowExtEx — set the window extent in logical units.
+///
+/// Returns FALSE — window extent not changeable.
+///
+/// # Safety
+/// `lp_size` is accepted but not read or written.
+// Wine ref: dlls/win32u/dibdrv/dc.c — stores the new window extent in the DC;
+// Weave does not track window extents, returns FALSE.
+pub unsafe extern "win64" fn set_window_ext_ex(
+    _hdc: usize,
+    _x_ext: i32,
+    _y_ext: i32,
+    _lp_size: *mut [i32; 2],
+) -> i32 {
+    0 // FALSE
 }

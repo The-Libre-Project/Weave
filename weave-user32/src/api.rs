@@ -9148,6 +9148,187 @@ unsafe extern "win64" fn uia_return_raw_element_provider(
     0
 }
 
+// ── Q-Dir Phase A hooks, input synthesis, and misc stubs ──────────────────────
+//
+// Q-Dir creates a global CBT hook to manage its folder-tree windows, fires
+// mouse/keyboard input events, and draws various UI elements. All are no-ops.
+//
+// Wine ref: dlls/user32/hook.c — SetWindowsHookExW installs a hook into the
+// hook chain; UnhookWindowsHookEx removes it; CallNextHookEx passes to the next
+// hook. Weave returns NULL/FALSE — no hook support.
+// Wine ref: dlls/user32/input.c — mouse_event / keybd_event synthesise input;
+// not supported headless.
+
+/// SetWindowsHookExW — install a hook procedure into the hook chain.
+///
+/// Returns NULL — hook installation is not supported.
+///
+/// # Safety
+/// `lpfn` is accepted but not dereferenced.
+// Wine ref: dlls/user32/hook.c — allocates a HOOK struct, links it into the
+// per-thread hook chain, and returns an HHK handle; Weave returns NULL.
+pub unsafe extern "win64" fn set_windows_hook_ex_w(
+    _id_hook: i32,
+    _lpfn: usize,
+    _hmod: usize,
+    _dw_thread_id: u32,
+) -> usize {
+    0 // NULL
+}
+
+/// UnhookWindowsHookEx — remove a hook from the hook chain.
+///
+/// Returns FALSE — no hook was ever installed.
+// Wine ref: dlls/user32/hook.c — unlinks the HOOK struct, frees it, returns TRUE.
+// Weave returns FALSE since no hooks exist.
+pub extern "win64" fn unhook_windows_hook_ex(_hhk: usize) -> i32 {
+    0 // FALSE
+}
+
+/// CallNextHookEx — pass the hook notification to the next hook in the chain.
+///
+/// Returns 0 — there is no next hook.
+///
+/// # Safety
+/// `w_param` and `l_param` are forwarded but unused.
+// Wine ref: dlls/user32/hook.c — walks the hook chain and calls the next procedure;
+// returns whatever the next hook returns. Weave has no chain, returns 0.
+pub unsafe extern "win64" fn call_next_hook_ex(
+    _hhk: usize,
+    _n_code: i32,
+    _w_param: usize,
+    _l_param: isize,
+) -> isize {
+    0
+}
+
+/// EnumWindows — enumerate all top-level windows.
+///
+/// Returns 0 (end of enumeration) — no windows to enumerate.
+///
+/// # Safety
+/// `lp_enum_func` and `l_param` are accepted but not used.
+// Wine ref: dlls/user32/misc.c — iterates the global window list and calls
+// lpEnumFunc for each; returns 0 when enumeration completes or is aborted.
+pub unsafe extern "win64" fn enum_windows(_lp_enum_func: usize, _l_param: isize) -> i32 {
+    0
+}
+
+/// mouse_event — synthesise mouse movement and button events.
+///
+/// No-op. Mouse input is not synthesised in headless mode.
+// Wine ref: dlls/user32/input.c — posts mouse input into the input queue;
+// headless Weave has no input queue for synthesis.
+pub extern "win64" fn mouse_event(
+    _dw_flags: u32,
+    _dx: i32,
+    _dy: i32,
+    _dw_data: usize,
+    _dw_extra_info: usize,
+) {
+}
+
+/// MenuItemFromPoint — determine which menu item is at a given point.
+///
+/// Returns 0xFFFFFFFF (no hit) — coordinates are not mapped.
+///
+/// # Safety
+/// `h_wnd` and `h_menu` are accepted but unused.
+// Wine ref: dlls/user32/menu.c — walks submenus to find the item under the point;
+// returns -1 (0xFFFFFFFF) when no item is at that position.
+pub unsafe extern "win64" fn menu_item_from_point(
+    _h_wnd: usize,
+    _h_menu: usize,
+    _pt_screen: *const [i32; 2],
+) -> u32 {
+    0xFFFF_FFFF // -1 as u32
+}
+
+/// DrawIcon — draw an icon at the specified coordinates.
+///
+/// Wine ref: dlls/user32/cursoricon.c — DrawIcon calls DrawIconEx with
+/// DI_NORMAL | DI_COMPAT | DI_DEFAULTSIZE.
+pub extern "win64" fn draw_icon(_hdc: usize, _x: i32, _y: i32, _h_icon: usize) {}
+
+/// keybd_event — synthesise a keyboard input event.
+///
+/// No-op. Keyboard input is not synthesised in headless mode.
+// Wine ref: dlls/user32/input.c — synthesises a WM_KEYDOWN/WM_KEYUP pair;
+// Weave has no input queue for synthesis.
+pub extern "win64" fn keybd_event(_b_vk: u8, _b_scan: u8, _dw_flags: u32, _dw_extra_info: usize) {}
+
+/// FrameRect — draw a border around a rectangle using a brush.
+///
+/// Returns 0 — no border drawn.
+///
+/// # Safety
+/// `lprc` and `hbr` are accepted but not used.
+// Wine ref: dlls/user32/painting.c — FrameRect calls FillRect on an expanded
+// region; Weave returns 0 (not drawn).
+pub unsafe extern "win64" fn frame_rect(_hdc: usize, _lprc: *const [i32; 4], _hbr: usize) -> i32 {
+    0
+}
+
+/// InvalidateRgn — add a region to a window's update region.
+///
+/// Returns FALSE — region not invalidated.
+///
+/// # Safety
+/// `hrgn` is accepted but not used.
+// Wine ref: dlls/user32/painting.c — adds the region to the window's visible
+// region and posts WM_PAINT; Weave skips the operation, returns FALSE.
+pub unsafe extern "win64" fn invalidate_rgn(_hwnd: usize, _hrgn: usize, _b_erase: i32) -> i32 {
+    0 // FALSE
+}
+
+/// DrawAnimatedRects — draw animated window-frame rects (e.g. minimise animation).
+///
+/// No-op. Window animations are not supported in headless mode.
+///
+/// # Safety
+/// `lprc_from` and `lprc_to` are accepted but not used.
+// Wine ref: dlls/user32/painting.c — draws a series of frame rects to simulate
+// minimise/maximise animation; Weave skips the animation entirely.
+pub unsafe extern "win64" fn draw_animated_rects(
+    _hwnd: usize,
+    _id_ani: i32,
+    _lprc_from: *const [i32; 4],
+    _lprc_to: *const [i32; 4],
+) {
+}
+
+/// DrawFocusRect — draw a focus indicator rectangle.
+///
+/// No-op. Focus indicators are not drawn in headless mode.
+///
+/// # Safety
+/// `lprc` is accepted but not used.
+// Wine ref: dlls/user32/painting.c — draws an XORed dotted rectangle;
+// Weave skips the focus indicator.
+pub unsafe extern "win64" fn draw_focus_rect(_hdc: usize, _lprc: *const [i32; 4]) -> i32 {
+    0 // FALSE — not drawn
+}
+
+/// CreateCursor — create a cursor from AND/XOR masks.
+///
+/// Returns NULL — cursor creation is not supported.
+///
+/// # Safety
+/// `pv_and_plane` and `pv_xor_plane` are accepted but not used.
+// Wine ref: dlls/user32/cursoricon.c — allocates an ICONINFO from the two mask
+// bitmaps and creates a cursor handle; Weave returns NULL.
+pub unsafe extern "win64" fn create_cursor(
+    _h_inst: usize,
+    _x_hot_spot: i32,
+    _y_hot_spot: i32,
+    _n_width: i32,
+    _n_height: i32,
+    _pv_and_plane: *const u8,
+    _pv_xor_plane: *const u8,
+) -> usize {
+    0 // NULL
+}
+
 /// Resolve a UIAutomationCore.dll import to a stub address.
 ///
 /// Called by weave-cli's resolve chain. Uses eq_ignore_ascii_case because
