@@ -168,7 +168,7 @@ const TVSIL_STATE: u32 = 2;
 const WM_ERASEBKGND: u32 = 0x0014;
 const WM_GETTEXTLENGTH: u32 = 0x000E;
 
-#[expect(dead_code)]
+#[allow(dead_code)]
 struct ToolbarButton {
     id_command: i32,
     i_bitmap: i32,
@@ -184,21 +184,21 @@ struct ToolbarState {
     extended_style: u32,
 }
 
-#[expect(dead_code)]
+#[allow(dead_code)]
 struct TabItem {
     text_ptr: usize,
     i_image: i32,
     l_param: isize,
 }
 
-#[expect(dead_code)]
+#[allow(dead_code)]
 struct TabState {
     items: Vec<TabItem>,
     cur_sel: i32,
     himl: usize,
 }
 
-#[expect(dead_code)]
+#[allow(dead_code)]
 struct ListViewColumn {
     fmt: i32,
     cx: i32,
@@ -206,7 +206,7 @@ struct ListViewColumn {
     i_sub_item: i32,
 }
 
-#[expect(dead_code)]
+#[allow(dead_code)]
 struct ListViewItem {
     i_item: i32,
     i_sub_item: i32,
@@ -216,7 +216,7 @@ struct ListViewItem {
     l_param: isize,
 }
 
-#[expect(dead_code)]
+#[allow(dead_code)]
 struct ListViewState {
     columns: Vec<ListViewColumn>,
     items: Vec<ListViewItem>,
@@ -225,12 +225,12 @@ struct ListViewState {
     image_list_state: usize,
 }
 
-#[expect(dead_code)]
+#[allow(dead_code)]
 struct TreeViewState {
     items: Vec<TreeViewItem>,
 }
 
-#[expect(dead_code)]
+#[allow(dead_code)]
 struct TreeViewItem {
     mask: u32,
     h_item: usize,
@@ -244,7 +244,7 @@ struct TreeViewItem {
     h_parent: usize,
 }
 
-#[expect(dead_code)]
+#[allow(dead_code)]
 enum ComctlState {
     Toolbar(ToolbarState),
     Tab(TabState),
