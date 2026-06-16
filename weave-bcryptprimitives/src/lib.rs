@@ -22,6 +22,7 @@
 const STATUS_SUCCESS: u32 = 0x0000_0000;
 const STATUS_NOT_IMPLEMENTED: u32 = 0xC000_0002;
 const STATUS_INVALID_PARAMETER: u32 = 0xC000_000D;
+#[allow(dead_code)]
 const STATUS_BUFFER_TOO_SMALL: u32 = 0xC000_0023;
 
 // ── Algorithm Provider ───────────────────────────────────────────────────
