@@ -8487,10 +8487,7 @@ fn signal_desktop_phase_a_probe() {
     }
 
     // PHASE markers
-    let phases: Vec<&str> = stderr
-        .lines()
-        .filter(|l| l.contains("PHASE:"))
-        .collect();
+    let phases: Vec<&str> = stderr.lines().filter(|l| l.contains("PHASE:")).collect();
     eprintln!("\nPHASE markers ({}):", phases.len());
     for p in &phases {
         eprintln!("  {p}");
@@ -8520,9 +8517,7 @@ fn signal_desktop_phase_a_probe() {
     let interesting: Vec<&str> = stderr
         .lines()
         .filter(|l| {
-            !l.is_empty()
-                && !l.starts_with("weave/ntdll: Ldr")
-                && !l.contains("sched_yield")
+            !l.is_empty() && !l.starts_with("weave/ntdll: Ldr") && !l.contains("sched_yield")
         })
         .take(50)
         .collect();

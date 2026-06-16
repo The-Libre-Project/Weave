@@ -856,14 +856,18 @@ const MMSYSERR_NODRIVER: u32 = 6;
 // ── MIDI Input stubs ──────────────────────────────────────────────────────────
 
 /// midiInGetNumDevs: get number of MIDI input devices.
-pub extern "win64" fn midi_in_get_num_devs() -> u32 { 0 }
+pub extern "win64" fn midi_in_get_num_devs() -> u32 {
+    0
+}
 
 /// midiInGetDevCapsW: get MIDI input device capabilities (Wide).
 ///
 /// # Safety
 /// Caller must ensure `pmic` points to a buffer of at least `cb_mic` bytes.
 pub unsafe extern "win64" fn midi_in_get_dev_caps_w(
-    _u_device_id: u32, _pmic: *mut u8, _cb_mic: u32,
+    _u_device_id: u32,
+    _pmic: *mut u8,
+    _cb_mic: u32,
 ) -> u32 {
     MMSYSERR_NODRIVER
 }
@@ -873,8 +877,11 @@ pub unsafe extern "win64" fn midi_in_get_dev_caps_w(
 /// # Safety
 /// Caller must ensure `phmi` is a valid output pointer.
 pub unsafe extern "win64" fn midi_in_open(
-    _phmi: *mut usize, _u_device_id: u32, _dw_callback: usize,
-    _dw_instance: usize, _fdw_open: u32,
+    _phmi: *mut usize,
+    _u_device_id: u32,
+    _dw_callback: usize,
+    _dw_instance: usize,
+    _fdw_open: u32,
 ) -> u32 {
     eprintln!("weave/winmm_stub: midiInOpen");
     MMSYSERR_NODRIVER
@@ -891,7 +898,9 @@ pub extern "win64" fn midi_in_close(_hmi: usize) -> u32 {
 /// # Safety
 /// Caller must ensure `pmh` is a valid pointer.
 pub unsafe extern "win64" fn midi_in_prepare_header(
-    _hmi: usize, _pmh: *mut u8, _cb_mh: u32,
+    _hmi: usize,
+    _pmh: *mut u8,
+    _cb_mh: u32,
 ) -> u32 {
     eprintln!("weave/winmm_stub: midiInPrepareHeader");
     MMSYSERR_NODRIVER
@@ -902,7 +911,9 @@ pub unsafe extern "win64" fn midi_in_prepare_header(
 /// # Safety
 /// Caller must ensure `pmh` is a valid pointer.
 pub unsafe extern "win64" fn midi_in_unprepare_header(
-    _hmi: usize, _pmh: *mut u8, _cb_mh: u32,
+    _hmi: usize,
+    _pmh: *mut u8,
+    _cb_mh: u32,
 ) -> u32 {
     eprintln!("weave/winmm_stub: midiInUnprepareHeader");
     MMSYSERR_NODRIVER
@@ -912,9 +923,7 @@ pub unsafe extern "win64" fn midi_in_unprepare_header(
 ///
 /// # Safety
 /// Caller must ensure `pmh` is a valid pointer.
-pub unsafe extern "win64" fn midi_in_add_buffer(
-    _hmi: usize, _pmh: *mut u8, _cb_mh: u32,
-) -> u32 {
+pub unsafe extern "win64" fn midi_in_add_buffer(_hmi: usize, _pmh: *mut u8, _cb_mh: u32) -> u32 {
     eprintln!("weave/winmm_stub: midiInAddBuffer");
     MMSYSERR_NODRIVER
 }
@@ -934,14 +943,18 @@ pub extern "win64" fn midi_in_reset(_hmi: usize) -> u32 {
 // ── MIDI Output stubs ─────────────────────────────────────────────────────────
 
 /// midiOutGetNumDevs: get number of MIDI output devices.
-pub extern "win64" fn midi_out_get_num_devs() -> u32 { 0 }
+pub extern "win64" fn midi_out_get_num_devs() -> u32 {
+    0
+}
 
 /// midiOutGetDevCapsW: get MIDI output device capabilities (Wide).
 ///
 /// # Safety
 /// Caller must ensure `pmoc` points to a buffer of at least `cb_moc` bytes.
 pub unsafe extern "win64" fn midi_out_get_dev_caps_w(
-    _u_device_id: u32, _pmoc: *mut u8, _cb_moc: u32,
+    _u_device_id: u32,
+    _pmoc: *mut u8,
+    _cb_moc: u32,
 ) -> u32 {
     MMSYSERR_NODRIVER
 }
@@ -951,8 +964,11 @@ pub unsafe extern "win64" fn midi_out_get_dev_caps_w(
 /// # Safety
 /// Caller must ensure `phmo` is a valid output pointer.
 pub unsafe extern "win64" fn midi_out_open(
-    _phmo: *mut usize, _u_device_id: u32, _dw_callback: usize,
-    _dw_instance: usize, _fdw_open: u32,
+    _phmo: *mut usize,
+    _u_device_id: u32,
+    _dw_callback: usize,
+    _dw_instance: usize,
+    _fdw_open: u32,
 ) -> u32 {
     eprintln!("weave/winmm_stub: midiOutOpen");
     MMSYSERR_NODRIVER
@@ -969,7 +985,9 @@ pub extern "win64" fn midi_out_close(_hmo: usize) -> u32 {
 /// # Safety
 /// Caller must ensure `pmh` is a valid pointer.
 pub unsafe extern "win64" fn midi_out_prepare_header(
-    _hmo: usize, _pmh: *mut u8, _cb_mh: u32,
+    _hmo: usize,
+    _pmh: *mut u8,
+    _cb_mh: u32,
 ) -> u32 {
     eprintln!("weave/winmm_stub: midiOutPrepareHeader");
     MMSYSERR_NODRIVER
@@ -980,7 +998,9 @@ pub unsafe extern "win64" fn midi_out_prepare_header(
 /// # Safety
 /// Caller must ensure `pmh` is a valid pointer.
 pub unsafe extern "win64" fn midi_out_unprepare_header(
-    _hmo: usize, _pmh: *mut u8, _cb_mh: u32,
+    _hmo: usize,
+    _pmh: *mut u8,
+    _cb_mh: u32,
 ) -> u32 {
     eprintln!("weave/winmm_stub: midiOutUnprepareHeader");
     MMSYSERR_NODRIVER
@@ -996,9 +1016,7 @@ pub extern "win64" fn midi_out_short_msg(_hmo: usize, _dw_msg: u32) -> u32 {
 ///
 /// # Safety
 /// Caller must ensure `pmh` is a valid pointer.
-pub unsafe extern "win64" fn midi_out_long_msg(
-    _hmo: usize, _pmh: *mut u8, _cb_mh: u32,
-) -> u32 {
+pub unsafe extern "win64" fn midi_out_long_msg(_hmo: usize, _pmh: *mut u8, _cb_mh: u32) -> u32 {
     eprintln!("weave/winmm_stub: midiOutLongMsg");
     MMSYSERR_NODRIVER
 }
@@ -1153,20 +1171,20 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "midiInGetDevCapsW" => Some(
             midi_in_get_dev_caps_w as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
         ),
-        "midiInOpen" => Some(
-            midi_in_open as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const () as usize,
-        ),
+        "midiInOpen" => {
+            Some(midi_in_open as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const () as usize)
+        }
         "midiInClose" => Some(midi_in_close as extern "win64" fn(_) -> _ as *const () as usize),
         "midiInPrepareHeader" => Some(
             midi_in_prepare_header as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
         ),
         "midiInUnprepareHeader" => Some(
-            midi_in_unprepare_header as unsafe extern "win64" fn(_, _, _) -> _
-                as *const () as usize,
+            midi_in_unprepare_header as unsafe extern "win64" fn(_, _, _) -> _ as *const ()
+                as usize,
         ),
-        "midiInAddBuffer" => Some(
-            midi_in_add_buffer as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
-        ),
+        "midiInAddBuffer" => {
+            Some(midi_in_add_buffer as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize)
+        }
         "midiInStart" => Some(midi_in_start as extern "win64" fn(_) -> _ as *const () as usize),
         "midiInReset" => Some(midi_in_reset as extern "win64" fn(_) -> _ as *const () as usize),
         "midiOutGetNumDevs" => Some(midi_out_get_num_devs as *const () as usize),
@@ -1178,19 +1196,18 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         ),
         "midiOutClose" => Some(midi_out_close as extern "win64" fn(_) -> _ as *const () as usize),
         "midiOutPrepareHeader" => Some(
-            midi_out_prepare_header as unsafe extern "win64" fn(_, _, _) -> _
-                as *const () as usize,
+            midi_out_prepare_header as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
         ),
         "midiOutUnprepareHeader" => Some(
-            midi_out_unprepare_header as unsafe extern "win64" fn(_, _, _) -> _
-                as *const () as usize,
+            midi_out_unprepare_header as unsafe extern "win64" fn(_, _, _) -> _ as *const ()
+                as usize,
         ),
-        "midiOutShortMsg" => Some(
-            midi_out_short_msg as extern "win64" fn(_, _) -> _ as *const () as usize,
-        ),
-        "midiOutLongMsg" => Some(
-            midi_out_long_msg as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
-        ),
+        "midiOutShortMsg" => {
+            Some(midi_out_short_msg as extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "midiOutLongMsg" => {
+            Some(midi_out_long_msg as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize)
+        }
         "midiOutReset" => Some(midi_out_reset as extern "win64" fn(_) -> _ as *const () as usize),
         _ => None,
     }
@@ -1205,10 +1222,18 @@ mod tests {
     #[test]
     fn resolve_known_functions() {
         let funcs = [
-            "timeGetTime", "timeBeginPeriod", "timeEndPeriod",
-            "waveOutGetNumDevs", "waveOutOpen", "waveOutClose",
-            "waveOutPrepareHeader", "waveOutUnprepareHeader", "waveOutWrite",
-            "waveOutReset", "waveOutPause", "waveOutRestart",
+            "timeGetTime",
+            "timeBeginPeriod",
+            "timeEndPeriod",
+            "waveOutGetNumDevs",
+            "waveOutOpen",
+            "waveOutClose",
+            "waveOutPrepareHeader",
+            "waveOutUnprepareHeader",
+            "waveOutWrite",
+            "waveOutReset",
+            "waveOutPause",
+            "waveOutRestart",
             "waveInGetNumDevs",
         ];
         for f in &funcs {
@@ -1219,12 +1244,24 @@ mod tests {
     #[test]
     fn resolve_midi_stubs() {
         let midi = [
-            "midiInGetNumDevs", "midiInGetDevCapsW", "midiInOpen", "midiInClose",
-            "midiInPrepareHeader", "midiInUnprepareHeader", "midiInAddBuffer",
-            "midiInStart", "midiInReset",
-            "midiOutGetNumDevs", "midiOutGetDevCapsW", "midiOutOpen", "midiOutClose",
-            "midiOutPrepareHeader", "midiOutUnprepareHeader", "midiOutShortMsg",
-            "midiOutLongMsg", "midiOutReset",
+            "midiInGetNumDevs",
+            "midiInGetDevCapsW",
+            "midiInOpen",
+            "midiInClose",
+            "midiInPrepareHeader",
+            "midiInUnprepareHeader",
+            "midiInAddBuffer",
+            "midiInStart",
+            "midiInReset",
+            "midiOutGetNumDevs",
+            "midiOutGetDevCapsW",
+            "midiOutOpen",
+            "midiOutClose",
+            "midiOutPrepareHeader",
+            "midiOutUnprepareHeader",
+            "midiOutShortMsg",
+            "midiOutLongMsg",
+            "midiOutReset",
         ];
         for f in &midi {
             assert!(resolve("winmm.dll", f).is_some(), "missing {f}");

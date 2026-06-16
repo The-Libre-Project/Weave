@@ -1439,8 +1439,9 @@ struct ImageListState {
     bk_color: u32,
 }
 
-static IMAGE_LISTS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<usize, ImageListState>>> =
-    std::sync::OnceLock::new();
+static IMAGE_LISTS: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<usize, ImageListState>>,
+> = std::sync::OnceLock::new();
 
 fn image_lists() -> &'static std::sync::Mutex<std::collections::HashMap<usize, ImageListState>> {
     IMAGE_LISTS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
@@ -1489,7 +1490,11 @@ pub unsafe extern "win64" fn image_list_create(
 /// `himl` must be a handle from image_list_create.
 pub unsafe extern "win64" fn image_list_destroy(himl: usize) -> i32 {
     let mut map = image_lists().lock().unwrap();
-    if map.remove(&himl).is_some() { 1 } else { 0 }
+    if map.remove(&himl).is_some() {
+        1
+    } else {
+        0
+    }
 }
 
 /// ImageList_Add — add a bitmap to an image list. Returns image index.
@@ -2267,7 +2272,10 @@ mod tests {
 
         // Operations on destroyed handle return safe defaults.
         assert_eq!(unsafe { image_list_get_image_count(himl) }, 0);
-        assert_eq!(unsafe { image_list_get_icon_size(himl, &mut cx, &mut cy) }, 0);
+        assert_eq!(
+            unsafe { image_list_get_icon_size(himl, &mut cx, &mut cy) },
+            0
+        );
         assert_eq!(unsafe { image_list_destroy(himl) }, 0);
     }
 
@@ -2353,7 +2361,9 @@ pub fn resolve_uxtheme(dll: &str, func: &str) -> Option<usize> {
         // ── Additional uxtheme stubs ──
         "GetThemePartSize" => Some(get_theme_part_size as *const () as usize),
         "GetThemeTextExtent" => Some(get_theme_text_extent as *const () as usize),
-        "GetThemeBackgroundContentRect" => Some(get_theme_background_content_rect as *const () as usize),
+        "GetThemeBackgroundContentRect" => {
+            Some(get_theme_background_content_rect as *const () as usize)
+        }
         "GetThemeBackgroundExtent" => Some(get_theme_background_extent as *const () as usize),
         "GetThemeColor" => Some(get_theme_color as *const () as usize),
         "GetThemeMetric" => Some(get_theme_metric as *const () as usize),
@@ -2440,39 +2450,88 @@ extern "win64" fn enable_theming(_enable: i32) -> i32 {
 // ── Additional uxtheme stubs ──────────────────────────────────────────────
 // Wine ref: dlls/uxtheme/theme.c — GetThemePartSize returns the size of a theme part.
 extern "win64" fn get_theme_part_size(
-    _h_theme: usize, _hdc: usize, _part: i32, _state: i32, _rect: *const u8, _size: *mut u8,
-) -> i32 { S_OK }
+    _h_theme: usize,
+    _hdc: usize,
+    _part: i32,
+    _state: i32,
+    _rect: *const u8,
+    _size: *mut u8,
+) -> i32 {
+    S_OK
+}
 
 // Wine ref: dlls/uxtheme/theme.c — GetThemeTextExtent calculates text bounding rect.
 extern "win64" fn get_theme_text_extent(
-    _h_theme: usize, _hdc: usize, _part: i32, _state: i32, _text: *const u16, _len: i32,
-    _flags: u32, _rect: *const u8, _extent: *mut u8,
-) -> i32 { S_OK }
+    _h_theme: usize,
+    _hdc: usize,
+    _part: i32,
+    _state: i32,
+    _text: *const u16,
+    _len: i32,
+    _flags: u32,
+    _rect: *const u8,
+    _extent: *mut u8,
+) -> i32 {
+    S_OK
+}
 
 // Wine ref: dlls/uxtheme/theme.c — GetThemeBackgroundContentRect returns content area.
 extern "win64" fn get_theme_background_content_rect(
-    _h_theme: usize, _hdc: usize, _part: i32, _state: i32, _rect: *const u8, _content: *mut u8,
-) -> i32 { S_OK }
+    _h_theme: usize,
+    _hdc: usize,
+    _part: i32,
+    _state: i32,
+    _rect: *const u8,
+    _content: *mut u8,
+) -> i32 {
+    S_OK
+}
 
 // Wine ref: dlls/uxtheme/theme.c — GetThemeBackgroundExtent returns background area.
 extern "win64" fn get_theme_background_extent(
-    _h_theme: usize, _hdc: usize, _part: i32, _state: i32, _rect: *const u8, _extent: *mut u8,
-) -> i32 { S_OK }
+    _h_theme: usize,
+    _hdc: usize,
+    _part: i32,
+    _state: i32,
+    _rect: *const u8,
+    _extent: *mut u8,
+) -> i32 {
+    S_OK
+}
 
 // Wine ref: dlls/uxtheme/theme.c — GetThemeColor returns a COLORREF for a theme color.
 extern "win64" fn get_theme_color(
-    _h_theme: usize, _part: i32, _state: i32, _prop: i32, _color: *mut u32,
-) -> i32 { S_OK }
+    _h_theme: usize,
+    _part: i32,
+    _state: i32,
+    _prop: i32,
+    _color: *mut u32,
+) -> i32 {
+    S_OK
+}
 
 // Wine ref: dlls/uxtheme/theme.c — GetThemeMetric returns an int metric value.
 extern "win64" fn get_theme_metric(
-    _h_theme: usize, _hdc: usize, _part: i32, _state: i32, _prop: i32, _val: *mut i32,
-) -> i32 { S_OK }
+    _h_theme: usize,
+    _hdc: usize,
+    _part: i32,
+    _state: i32,
+    _prop: i32,
+    _val: *mut i32,
+) -> i32 {
+    S_OK
+}
 
 // Wine ref: dlls/uxtheme/theme.c — GetThemeBool returns a boolean theme property.
 extern "win64" fn get_theme_bool(
-    _h_theme: usize, _part: i32, _state: i32, _prop: i32, _val: *mut i32,
-) -> i32 { S_OK }
+    _h_theme: usize,
+    _part: i32,
+    _state: i32,
+    _prop: i32,
+    _val: *mut i32,
+) -> i32 {
+    S_OK
+}
 
 // Wine ref: dlls/uxtheme/theme.c — GetThemeSysColor returns a system color index.
 extern "win64" fn get_theme_sys_color(_h_theme: usize, _color: i32) -> u32 {
@@ -2480,31 +2539,59 @@ extern "win64" fn get_theme_sys_color(_h_theme: usize, _color: i32) -> u32 {
 }
 
 // Wine ref: dlls/uxtheme/theme.c — GetThemeSysFont fills a LOGFONTW with system font info.
-extern "win64" fn get_theme_sys_font(_h_theme: usize, _font: i32, _lf: *mut u8) -> i32 { S_OK }
+extern "win64" fn get_theme_sys_font(_h_theme: usize, _font: i32, _lf: *mut u8) -> i32 {
+    S_OK
+}
 
 // Wine ref: dlls/uxtheme/theme.c — GetThemeSysSize returns a system size in pixels.
-extern "win64" fn get_theme_sys_size(_h_theme: usize, _size: i32) -> i32 { 0 }
+extern "win64" fn get_theme_sys_size(_h_theme: usize, _size: i32) -> i32 {
+    0
+}
 
 // Wine ref: dlls/uxtheme/theme.c — GetThemeSysBool returns a boolean system property.
-extern "win64" fn get_theme_sys_bool(_h_theme: usize, _prop: i32) -> i32 { 0 } // FALSE
+extern "win64" fn get_theme_sys_bool(_h_theme: usize, _prop: i32) -> i32 {
+    0
+} // FALSE
 
 // Wine ref: dlls/uxtheme/theme.c — DrawThemeParentBackground draws parent background pixels.
-extern "win64" fn draw_theme_parent_background(
-    _hwnd: usize, _hdc: usize, _rect: *const u8,
-) -> i32 { S_OK }
+extern "win64" fn draw_theme_parent_background(_hwnd: usize, _hdc: usize, _rect: *const u8) -> i32 {
+    S_OK
+}
 
 // Wine ref: dlls/uxtheme/theme.c — GetThemeTransitionDuration returns transition timing.
 extern "win64" fn get_theme_transition_duration(
-    _h_theme: usize, _part: i32, _state_from: i32, _state_to: i32, _prop: i32, _dur: *mut u32,
-) -> i32 { S_OK }
+    _h_theme: usize,
+    _part: i32,
+    _state_from: i32,
+    _state_to: i32,
+    _prop: i32,
+    _dur: *mut u32,
+) -> i32 {
+    S_OK
+}
 
 // Wine ref: dlls/uxtheme/theme.c — GetThemeInt returns an int property.
 extern "win64" fn get_theme_int(
-    _h_theme: usize, _part: i32, _state: i32, _prop: i32, _val: *mut i32,
-) -> i32 { S_OK }
+    _h_theme: usize,
+    _part: i32,
+    _state: i32,
+    _prop: i32,
+    _val: *mut i32,
+) -> i32 {
+    S_OK
+}
 
 // Wine ref: dlls/uxtheme/theme.c — DrawThemeEdge draws themed edge styling.
 extern "win64" fn draw_theme_edge(
-    _h_theme: usize, _hdc: usize, _part: i32, _state: i32, _dest: *const u8, _clip: *const u8,
-    _edge: u32, _flags: u32, _rect: *mut u8,
-) -> i32 { S_OK }
+    _h_theme: usize,
+    _hdc: usize,
+    _part: i32,
+    _state: i32,
+    _dest: *const u8,
+    _clip: *const u8,
+    _edge: u32,
+    _flags: u32,
+    _rect: *mut u8,
+) -> i32 {
+    S_OK
+}

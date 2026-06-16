@@ -88,9 +88,7 @@ pub unsafe extern "win64" fn BCryptCreateHash(
 // Wine ref: dlls/bcrypt/bcrypt_main.c — destroys a hash object. Phase A no-op.
 /// # Safety
 /// No safety concerns for a Phase A stub.
-pub unsafe extern "win64" fn BCryptDestroyHash(
-    _hHash: usize,
-) -> u32 {
+pub unsafe extern "win64" fn BCryptDestroyHash(_hHash: usize) -> u32 {
     // TODO(shim): Phase A — no-op
     STATUS_SUCCESS
 }
@@ -161,10 +159,7 @@ pub unsafe extern "win64" fn BCryptGenerateKeyPair(
 // Wine ref: dlls/bcrypt/bcrypt_main.c — finalizes a key pair generation.
 /// # Safety
 /// No safety concerns for a Phase A stub.
-pub unsafe extern "win64" fn BCryptFinalizeKeyPair(
-    _hKey: usize,
-    _dwFlags: u32,
-) -> u32 {
+pub unsafe extern "win64" fn BCryptFinalizeKeyPair(_hKey: usize, _dwFlags: u32) -> u32 {
     // TODO(shim): Phase A — no-op
     STATUS_NOT_IMPLEMENTED
 }
@@ -193,9 +188,7 @@ pub unsafe extern "win64" fn BCryptImportKey(
 // Wine ref: dlls/bcrypt/bcrypt_main.c — destroys a key handle. Phase A no-op.
 /// # Safety
 /// No safety concerns for a Phase A stub.
-pub unsafe extern "win64" fn BCryptDestroyKey(
-    _hKey: usize,
-) -> u32 {
+pub unsafe extern "win64" fn BCryptDestroyKey(_hKey: usize) -> u32 {
     // TODO(shim): Phase A — no-op
     STATUS_SUCCESS
 }
@@ -283,9 +276,8 @@ pub unsafe extern "win64" fn BCryptGenRandom(
         // range. getrandom(2) writes at most `want - written` bytes starting
         // at `buf.add(written)`. (a) null-checked above; (b) caller-owned
         // buffer; (c) duration of this call; (d) Phase A — no gate.
-        let n = unsafe {
-            libc::getrandom(buf.add(written) as *mut libc::c_void, want - written, 0)
-        };
+        let n =
+            unsafe { libc::getrandom(buf.add(written) as *mut libc::c_void, want - written, 0) };
         if n < 0 {
             let e = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
             if e == libc::EINTR {
@@ -383,9 +375,7 @@ pub unsafe extern "win64" fn BCryptSecretAgreement(
 // Wine ref: dlls/bcrypt/bcrypt_main.c — destroys a secret agreement handle.
 /// # Safety
 /// No safety concerns for a Phase A stub.
-pub unsafe extern "win64" fn BCryptDestroySecret(
-    _hSecret: usize,
-) -> u32 {
+pub unsafe extern "win64" fn BCryptDestroySecret(_hSecret: usize) -> u32 {
     // TODO(shim): Phase A — no-op
     STATUS_SUCCESS
 }
@@ -464,9 +454,7 @@ pub unsafe extern "win64" fn BCryptSetProperty(
 // Phase A returns 0 items.
 /// # Safety
 /// No safety concerns for a Phase A stub.
-pub unsafe extern "win64" fn BCryptBufferCount(
-    _pBufferDesc: *mut u8,
-) -> u32 {
+pub unsafe extern "win64" fn BCryptBufferCount(_pBufferDesc: *mut u8) -> u32 {
     // TODO(shim): Phase A — no-op
     0
 }
@@ -475,10 +463,7 @@ pub unsafe extern "win64" fn BCryptBufferCount(
 // BCryptBufferDesc. Phase A returns NULL.
 /// # Safety
 /// No safety concerns for a Phase A stub.
-pub unsafe extern "win64" fn BCryptBufferType(
-    _pBufferDesc: *mut u8,
-    _dwIndex: u32,
-) -> u32 {
+pub unsafe extern "win64" fn BCryptBufferType(_pBufferDesc: *mut u8, _dwIndex: u32) -> u32 {
     // TODO(shim): Phase A — no-op
     0
 }
@@ -487,10 +472,7 @@ pub unsafe extern "win64" fn BCryptBufferType(
 // BCryptBufferDesc. Phase A returns NULL.
 /// # Safety
 /// No safety concerns for a Phase A stub.
-pub unsafe extern "win64" fn BCryptBuffer(
-    _pBufferDesc: *mut u8,
-    _dwBufferType: u32,
-) -> *mut u8 {
+pub unsafe extern "win64" fn BCryptBuffer(_pBufferDesc: *mut u8, _dwBufferType: u32) -> *mut u8 {
     // TODO(shim): Phase A — no-op
     std::ptr::null_mut()
 }
@@ -554,10 +536,7 @@ pub unsafe extern "win64" fn BCryptHash(
 // used by the system's SecureZeroMemory / crypto erase paths.
 /// # Safety
 /// No safety concerns for a Phase A stub.
-pub unsafe extern "win64" fn SystemFunction036(
-    pbBuffer: *mut u8,
-    cbBuffer: u32,
-) -> u32 {
+pub unsafe extern "win64" fn SystemFunction036(pbBuffer: *mut u8, cbBuffer: u32) -> u32 {
     // Delegate to BCryptGenRandom which has a real implementation
     BCryptGenRandom(0, pbBuffer, cbBuffer, 0)
 }
@@ -568,10 +547,7 @@ pub unsafe extern "win64" fn SystemFunction036(
 // SystemFunction036. Real Windows maps this to BCryptGenRandom.
 /// # Safety
 /// Same as BCryptGenRandom — pbBuffer must be non-null or cbBuffer 0.
-pub unsafe extern "win64" fn RtlGenRandom(
-    pbBuffer: *mut u8,
-    cbBuffer: u32,
-) -> u32 {
+pub unsafe extern "win64" fn RtlGenRandom(pbBuffer: *mut u8, cbBuffer: u32) -> u32 {
     BCryptGenRandom(0, pbBuffer, cbBuffer, 0)
 }
 
@@ -619,10 +595,7 @@ pub unsafe extern "win64" fn BCryptExportKeyString(
 // Same contract as BCryptGenRandom but without a handle parameter.
 /// # Safety
 /// Caller must ensure `pbData` is non-null or cbData is 0.
-pub unsafe extern "win64" fn ProcessPrng(
-    pbData: *mut u8,
-    cbData: usize,
-) -> i32 {
+pub unsafe extern "win64" fn ProcessPrng(pbData: *mut u8, cbData: usize) -> i32 {
     if pbData.is_null() && cbData > 0 {
         return 0; // FALSE
     }
@@ -760,7 +733,9 @@ mod tests {
 
     #[test]
     fn open_algorithm_provider_null_handle() {
-        let r = unsafe { BCryptOpenAlgorithmProvider(std::ptr::null_mut(), std::ptr::null(), std::ptr::null(), 0) };
+        let r = unsafe {
+            BCryptOpenAlgorithmProvider(std::ptr::null_mut(), std::ptr::null(), std::ptr::null(), 0)
+        };
         assert_eq!(r, STATUS_INVALID_PARAMETER);
     }
 

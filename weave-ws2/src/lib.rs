@@ -233,7 +233,9 @@ unsafe fn filter_win_fdset(win: *mut u8, lfs: &libc::fd_set) {
         let sock = unsafe { std::ptr::read_unaligned(arr.add(i * 8) as *const usize) };
         let fd = sock as i32;
         if fd >= 0 && (fd as usize) < libc::FD_SETSIZE && libc::FD_ISSET(fd, lfs) {
-            unsafe { std::ptr::write_unaligned(arr.add(new_count as usize * 8) as *mut usize, sock) };
+            unsafe {
+                std::ptr::write_unaligned(arr.add(new_count as usize * 8) as *mut usize, sock)
+            };
             new_count += 1;
         }
     }
@@ -2129,9 +2131,7 @@ pub unsafe extern "win64" fn free_addr_info_w(p_addr_info: *mut WinAddrInfo) {
 /// GetAddrInfoExCancel: cancel an async GetAddrInfoExW request.
 ///
 /// Phase A stub — returns WSASYSNOTREADY.
-pub unsafe extern "win64" fn get_addr_info_ex_cancel(
-    _cancel_handle: usize,
-) -> i32 {
+pub unsafe extern "win64" fn get_addr_info_ex_cancel(_cancel_handle: usize) -> i32 {
     SOCKET_ERROR
 }
 
@@ -2323,12 +2323,12 @@ pub unsafe extern "win64" fn get_addr_info_w(
         Some(CString::new(utf8).unwrap_or_else(|_| CString::new("").unwrap()))
     };
 
-    let node_ptr = node_cstr.as_ref().map_or(std::ptr::null(), |c| {
-        c.as_ptr() as *const u8
-    });
-    let service_ptr = service_cstr.as_ref().map_or(std::ptr::null(), |c| {
-        c.as_ptr() as *const u8
-    });
+    let node_ptr = node_cstr
+        .as_ref()
+        .map_or(std::ptr::null(), |c| c.as_ptr() as *const u8);
+    let service_ptr = service_cstr
+        .as_ref()
+        .map_or(std::ptr::null(), |c| c.as_ptr() as *const u8);
 
     ws_getaddrinfo(node_ptr, service_ptr, p_hints, pp_result)
 }
@@ -2440,9 +2440,7 @@ pub unsafe extern "win64" fn wsa_recv(
     _lp_completion_routine: usize,
 ) -> i32 {
     if weave_core::ws2_trace::enabled() {
-        eprintln!(
-            "weave/ws2: WSARecv s={s} count={dw_buffer_count} overlapped={lp_overlapped}"
-        );
+        eprintln!("weave/ws2: WSARecv s={s} count={dw_buffer_count} overlapped={lp_overlapped}");
     }
 
     // Both lp_number_of_bytes_recvd and lp_flags must be non-null.
@@ -2961,11 +2959,7 @@ pub extern "win64" fn wsa_set_event(event: usize) -> i32 {
         if let Some(efd) = handles::get_event_fd(event) {
             let val: u64 = 1;
             unsafe {
-                libc::write(
-                    efd,
-                    &val as *const u64 as *const libc::c_void,
-                    8,
-                );
+                libc::write(efd, &val as *const u64 as *const libc::c_void, 8);
             }
         }
     }
@@ -3097,11 +3091,7 @@ pub struct WSAPOLLFD {
 /// # Safety
 /// Caller must ensure `fd_array` points to at least `nfds` valid `WSAPOLLFD`
 /// entries when `nfds > 0`.
-pub unsafe extern "win64" fn ws_wsa_poll(
-    fd_array: *mut WSAPOLLFD,
-    nfds: u32,
-    timeout: i32,
-) -> i32 {
+pub unsafe extern "win64" fn ws_wsa_poll(fd_array: *mut WSAPOLLFD, nfds: u32, timeout: i32) -> i32 {
     if nfds == 0 {
         return 0;
     }
@@ -3234,8 +3224,8 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "WSASetEvent" => Some(wsa_set_event as *const () as usize),
         // Socket polling (Electron/Chromium — async I/O multiplexing).
         "WSAPoll" => Some(
-            ws_wsa_poll as unsafe extern "win64" fn(*mut WSAPOLLFD, u32, i32) -> i32
-                as *const () as usize,
+            ws_wsa_poll as unsafe extern "win64" fn(*mut WSAPOLLFD, u32, i32) -> i32 as *const ()
+                as usize,
         ),
         // Service discovery
         "WSALookupServiceBeginW" => Some(wsa_lookup_service_begin_w as *const () as usize),
@@ -3413,9 +3403,9 @@ mod tests {
             "WSASetServiceW",
         ];
         let ordinals = [
-            "#1", "#2", "#3", "#4", "#5", "#6", "#7", "#8", "#9", "#10",
-            "#11", "#12", "#13", "#14", "#15", "#16", "#17", "#18", "#19",
-            "#20", "#21", "#22", "#23", "#57", "#111", "#112", "#115",
+            "#1", "#2", "#3", "#4", "#5", "#6", "#7", "#8", "#9", "#10", "#11", "#12", "#13",
+            "#14", "#15", "#16", "#17", "#18", "#19", "#20", "#21", "#22", "#23", "#57", "#111",
+            "#112", "#115",
         ];
         for &name in &named {
             assert!(

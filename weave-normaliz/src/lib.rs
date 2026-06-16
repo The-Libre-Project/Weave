@@ -115,12 +115,12 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         return None;
     }
     match func {
-        "IdnToAscii" => Some(
-            IdnToAscii as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const () as usize,
-        ),
-        "IdnToUnicode" => Some(
-            IdnToUnicode as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const () as usize,
-        ),
+        "IdnToAscii" => {
+            Some(IdnToAscii as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const () as usize)
+        }
+        "IdnToUnicode" => {
+            Some(IdnToUnicode as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const () as usize)
+        }
         _ => None,
     }
 }
@@ -153,13 +153,19 @@ mod tests {
 
     #[test]
     fn idn_to_ascii_null_input() {
-        assert_eq!(unsafe { IdnToAscii(0, std::ptr::null(), 5, std::ptr::null_mut(), 0) }, 0);
+        assert_eq!(
+            unsafe { IdnToAscii(0, std::ptr::null(), 5, std::ptr::null_mut(), 0) },
+            0
+        );
     }
 
     #[test]
     fn idn_to_ascii_zero_length() {
         let input = [0x61u16]; // "a"
-        assert_eq!(unsafe { IdnToAscii(0, input.as_ptr(), 0, std::ptr::null_mut(), 0) }, 0);
+        assert_eq!(
+            unsafe { IdnToAscii(0, input.as_ptr(), 0, std::ptr::null_mut(), 0) },
+            0
+        );
     }
 
     #[test]
@@ -167,14 +173,18 @@ mod tests {
         // Non-ASCII char (U+00E9 = é) — needs Punycode, not implemented.
         let input = [0x00E9u16, 0];
         let mut out = [0u8; 16];
-        assert_eq!(unsafe { IdnToAscii(0, input.as_ptr(), 1, out.as_mut_ptr(), 16) }, 0);
+        assert_eq!(
+            unsafe { IdnToAscii(0, input.as_ptr(), 1, out.as_mut_ptr(), 16) },
+            0
+        );
     }
 
     #[test]
     fn idn_to_ascii_ascii_passthrough() {
         let input: Vec<u16> = "hello".encode_utf16().collect();
         let mut out = [0u8; 16];
-        let ret = unsafe { IdnToAscii(0, input.as_ptr(), input.len() as i32, out.as_mut_ptr(), 16) };
+        let ret =
+            unsafe { IdnToAscii(0, input.as_ptr(), input.len() as i32, out.as_mut_ptr(), 16) };
         assert_eq!(ret, 5);
         assert_eq!(&out[..5], b"hello");
     }
@@ -184,19 +194,28 @@ mod tests {
         let input: Vec<u16> = "hello".encode_utf16().collect();
         let mut out = [0u8; 3];
         // Buffer too small (3 < 5) → 0.
-        assert_eq!(unsafe { IdnToAscii(0, input.as_ptr(), 5, out.as_mut_ptr(), 3) }, 0);
+        assert_eq!(
+            unsafe { IdnToAscii(0, input.as_ptr(), 5, out.as_mut_ptr(), 3) },
+            0
+        );
     }
 
     #[test]
     fn idn_to_ascii_null_output_no_query() {
         // NULL output with non-zero cchASCIIChar is not a length query → 0.
         let input: Vec<u16> = "abc".encode_utf16().collect();
-        assert_eq!(unsafe { IdnToAscii(0, input.as_ptr(), 3, std::ptr::null_mut(), 1) }, 0);
+        assert_eq!(
+            unsafe { IdnToAscii(0, input.as_ptr(), 3, std::ptr::null_mut(), 1) },
+            0
+        );
     }
 
     #[test]
     fn idn_to_unicode_null_input() {
-        assert_eq!(unsafe { IdnToUnicode(0, std::ptr::null(), 5, std::ptr::null_mut(), 0) }, 0);
+        assert_eq!(
+            unsafe { IdnToUnicode(0, std::ptr::null(), 5, std::ptr::null_mut(), 0) },
+            0
+        );
     }
 
     #[test]
@@ -221,6 +240,9 @@ mod tests {
         let input = [0xC3u8, 0xA9]; // UTF-8 bytes for é
         let mut out = [0u16; 16];
         // Bytes >= 0x80 needs Punycode → 0.
-        assert_eq!(unsafe { IdnToUnicode(0, input.as_ptr(), 2, out.as_mut_ptr(), 16) }, 0);
+        assert_eq!(
+            unsafe { IdnToUnicode(0, input.as_ptr(), 2, out.as_mut_ptr(), 16) },
+            0
+        );
     }
 }

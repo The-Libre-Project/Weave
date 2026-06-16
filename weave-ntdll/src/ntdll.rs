@@ -1933,10 +1933,7 @@ unsafe extern "C" fn rtl_raise_exception_impl(
 ///
 /// # Safety
 /// `flags` and `cookie` must be valid pointers or NULL.
-pub unsafe extern "win64" fn ldr_lock_loader_lock(
-    _flags: u32,
-    _cookie: *mut usize,
-) -> u32 {
+pub unsafe extern "win64" fn ldr_lock_loader_lock(_flags: u32, _cookie: *mut usize) -> u32 {
     0 // STATUS_SUCCESS
 }
 
@@ -2187,49 +2184,43 @@ pub fn resolve(func: &str) -> Option<usize> {
             Some(wine_dbg_output as unsafe extern "win64" fn(_) -> _ as *const () as usize)
         }
         // ── Signal gap-fill: 5 ntdll stubs ──
-        "LdrLockLoaderLock" => Some(
-            ldr_lock_loader_lock as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
-        ),
-        "LdrUnlockLoaderLock" => Some(
-            ldr_unlock_loader_lock as unsafe extern "win64" fn(_) -> _ as *const () as usize,
-        ),
-        "NtDeleteKey" => Some(
-            nt_delete_key as unsafe extern "win64" fn(_) -> _ as *const () as usize,
-        ),
+        "LdrLockLoaderLock" => {
+            Some(ldr_lock_loader_lock as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "LdrUnlockLoaderLock" => {
+            Some(ldr_unlock_loader_lock as unsafe extern "win64" fn(_) -> _ as *const () as usize)
+        }
+        "NtDeleteKey" => {
+            Some(nt_delete_key as unsafe extern "win64" fn(_) -> _ as *const () as usize)
+        }
         "NtQueryObject" => Some(
             nt_query_object as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const () as usize,
         ),
         "RtlGetLastNtStatus" => Some(rtl_get_last_nt_status as *const () as usize),
         // NtDeviceIoControlFile — device I/O control (Signal/Chromium capability check)
         "NtDeviceIoControlFile" => Some(
-            nt_device_io_control_file
-                as unsafe extern "win64" fn(_, _, _, _, _, _, _, _, _, _) -> _
+            nt_device_io_control_file as unsafe extern "win64" fn(_, _, _, _, _, _, _, _, _, _) -> _
                 as *const () as usize,
         ),
         "NtQueryInformationFile" => Some(
-            nt_query_information_file
-                as unsafe extern "win64" fn(_, _, _, _, _) -> _
-                as *const () as usize,
+            nt_query_information_file as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const ()
+                as usize,
         ),
         "NtSetInformationFile" => Some(
-            nt_set_information_file
-                as unsafe extern "win64" fn(_, _, _, _, _) -> _
-                as *const () as usize,
+            nt_set_information_file as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const ()
+                as usize,
         ),
         // Chromium sandbox/capability probe — need to exist with a real pointer
         "NtQueryInformationToken" => Some(
-            nt_query_information_token
-                as unsafe extern "win64" fn(_, _, _, _, _) -> _
-                as *const () as usize,
+            nt_query_information_token as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const ()
+                as usize,
         ),
         "NtDuplicateObject" => Some(
-            nt_duplicate_object
-                as unsafe extern "win64" fn(_, _, _, _, _, _, _) -> _
-                as *const () as usize,
+            nt_duplicate_object as unsafe extern "win64" fn(_, _, _, _, _, _, _) -> _ as *const ()
+                as usize,
         ),
         "NtQueryVolumeInformationFile" => Some(
-            nt_query_volume_information_file
-                as unsafe extern "win64" fn(_, _, _, _, _) -> _
+            nt_query_volume_information_file as unsafe extern "win64" fn(_, _, _, _, _) -> _
                 as *const () as usize,
         ),
         "NtQueryDirectoryFile" => Some(
@@ -2238,45 +2229,32 @@ pub fn resolve(func: &str) -> Option<usize> {
                 as *const () as usize,
         ),
         "NtCreateSection" => Some(
-            nt_create_section
-                as unsafe extern "win64" fn(_, _, _, _, _, _, _) -> _
-                as *const () as usize,
+            nt_create_section as unsafe extern "win64" fn(_, _, _, _, _, _, _) -> _ as *const ()
+                as usize,
         ),
         "NtMapViewOfSection" => Some(
-            nt_map_view_of_section
-                as unsafe extern "win64" fn(_, _, _, _, _, _, _, _, _, _) -> _
+            nt_map_view_of_section as unsafe extern "win64" fn(_, _, _, _, _, _, _, _, _, _) -> _
                 as *const () as usize,
         ),
         "NtUnmapViewOfSection" => Some(
-            nt_unmap_view_of_section
-                as unsafe extern "win64" fn(_, _) -> _
-                as *const () as usize,
+            nt_unmap_view_of_section as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
         ),
         "NtOpenProcessToken" => Some(
-            nt_open_process_token
-                as unsafe extern "win64" fn(_, _, _) -> _
-                as *const () as usize,
+            nt_open_process_token as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
         ),
         "NtOpenThreadToken" => Some(
-            nt_open_thread_token
-                as unsafe extern "win64" fn(_, _, _, _) -> _
-                as *const () as usize,
+            nt_open_thread_token as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
         ),
-        "NtOpenProcess" => Some(
-            nt_open_process
-                as unsafe extern "win64" fn(_, _, _) -> _
-                as *const () as usize,
-        ),
+        "NtOpenProcess" => {
+            Some(nt_open_process as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize)
+        }
         "NtCreateThreadEx" => Some(
-            nt_create_thread_ex
-                as unsafe extern "win64" fn(_, _, _, _, _, _, _, _, _, _) -> _
+            nt_create_thread_ex as unsafe extern "win64" fn(_, _, _, _, _, _, _, _, _, _) -> _
                 as *const () as usize,
         ),
-        "NtResumeThread" => Some(
-            nt_resume_thread
-                as unsafe extern "win64" fn(_, _) -> _
-                as *const () as usize,
-        ),
+        "NtResumeThread" => {
+            Some(nt_resume_thread as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
         _ => None,
     }
 }

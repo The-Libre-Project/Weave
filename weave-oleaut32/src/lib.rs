@@ -697,9 +697,10 @@ mod tests {
     #[test]
     fn resolve_all_ordinals() {
         // Every ordinal in the resolver must resolve.
-        let ordinals = ["#2", "#4", "#6", "#7", "#8", "#9", "#10", "#11",
-                         "#12", "#15", "#16", "#23", "#24", "#146", "#149",
-                         "#162", "#411", "#419"];
+        let ordinals = [
+            "#2", "#4", "#6", "#7", "#8", "#9", "#10", "#11", "#12", "#15", "#16", "#23", "#24",
+            "#146", "#149", "#162", "#411", "#419",
+        ];
         for ord in &ordinals {
             assert!(
                 resolve("oleaut32.dll", ord).is_some(),

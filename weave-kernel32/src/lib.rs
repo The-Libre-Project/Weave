@@ -14737,8 +14737,8 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
                 as *const () as usize,
         ),
         "GetFileInformationByName" => Some(
-            get_file_information_by_name as unsafe extern "win64" fn(_, _, _, _) -> _
-                as *const () as usize,
+            get_file_information_by_name as unsafe extern "win64" fn(_, _, _, _) -> _ as *const ()
+                as usize,
         ),
         "GetFinalPathNameByHandleW" => Some(
             get_final_path_name_by_handle_w as unsafe extern "win64" fn(_, _, _, _) -> _
@@ -14864,7 +14864,9 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
             interlockedpushentryslsit as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
         ),
         "IsValidLocale" => Some(is_valid_locale as *const () as usize),
-        "IsValidLocaleName" => Some(is_valid_locale_name as unsafe extern "win64" fn(_) -> _ as *const () as usize),
+        "IsValidLocaleName" => {
+            Some(is_valid_locale_name as unsafe extern "win64" fn(_) -> _ as *const () as usize)
+        }
         "EnumSystemLocalesW" => {
             Some(enum_system_locales_w as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
         }
@@ -15019,17 +15021,15 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         ),
         // ── Signal gap-fill: 41 kernel32 Phase A stubs ──
         "CreateRemoteThread" => Some(
-            create_remote_thread as unsafe extern "win64" fn(_, _, _, _, _, _, _) -> _
-                as *const () as usize,
+            create_remote_thread as unsafe extern "win64" fn(_, _, _, _, _, _, _) -> _ as *const ()
+                as usize,
         ),
         "ExitThread" => Some(exit_thread as extern "win64" fn(_) as *const () as usize),
         "DebugBreak" => Some(debug_break as *const () as usize),
         "FreeLibraryAndExitThread" => {
             Some(free_library_and_exit_thread as extern "win64" fn(_, _) as *const () as usize)
         }
-        "GetCurrentProcessorNumber" => {
-            Some(get_current_processor_number as *const () as usize)
-        }
+        "GetCurrentProcessorNumber" => Some(get_current_processor_number as *const () as usize),
         "QueueUserWorkItem" => Some(
             queue_user_work_item as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
         ),
@@ -15037,12 +15037,12 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
             register_wait_for_single_object as unsafe extern "win64" fn(_, _, _, _, _, _) -> _
                 as *const () as usize,
         ),
-        "UnregisterWait" => Some(
-            unregister_wait as unsafe extern "win64" fn(_) -> _ as *const () as usize,
-        ),
-        "UnregisterWaitEx" => Some(
-            unregister_wait_ex as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
-        ),
+        "UnregisterWait" => {
+            Some(unregister_wait as unsafe extern "win64" fn(_) -> _ as *const () as usize)
+        }
+        "UnregisterWaitEx" => {
+            Some(unregister_wait_ex as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
         "VirtualProtectEx" => Some(
             virtual_protect_ex as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const ()
                 as usize,
@@ -15050,18 +15050,18 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "VirtualQueryEx" => Some(
             virtual_query_ex as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
         ),
-        "VirtualLock" => Some(
-            virtual_lock as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
-        ),
-        "VirtualUnlock" => Some(
-            virtual_unlock as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
-        ),
+        "VirtualLock" => {
+            Some(virtual_lock as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "VirtualUnlock" => {
+            Some(virtual_unlock as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
         "DiscardVirtualMemory" => Some(
             discard_virtual_memory as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
         ),
-        "FlushViewOfFile" => Some(
-            flush_view_of_file as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
-        ),
+        "FlushViewOfFile" => {
+            Some(flush_view_of_file as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
         "MapViewOfFileEx" => Some(
             map_view_of_file_ex as unsafe extern "win64" fn(_, _, _, _, _, _) -> _ as *const ()
                 as usize,
@@ -15071,8 +15071,8 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
                 as usize,
         ),
         "CreateIoCompletionPort" => Some(
-            create_io_completion_port as unsafe extern "win64" fn(_, _, _, _) -> _
-                as *const () as usize,
+            create_io_completion_port as unsafe extern "win64" fn(_, _, _, _) -> _ as *const ()
+                as usize,
         ),
         "GetQueuedCompletionStatus" => Some(
             get_queued_completion_status as unsafe extern "win64" fn(_, _, _, _, _) -> _
@@ -15083,35 +15083,35 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
                 as *const () as usize,
         ),
         "PostQueuedCompletionStatus" => Some(
-            post_queued_completion_status as unsafe extern "win64" fn(_, _, _, _) -> _
-                as *const () as usize,
+            post_queued_completion_status as unsafe extern "win64" fn(_, _, _, _) -> _ as *const ()
+                as usize,
         ),
         "CreateNamedPipeW" => Some(
             create_named_pipe_w as unsafe extern "win64" fn(_, _, _, _, _, _, _, _) -> _
                 as *const () as usize,
         ),
-        "DisconnectNamedPipe" => Some(
-            disconnect_named_pipe as unsafe extern "win64" fn(_) -> _ as *const () as usize,
-        ),
+        "DisconnectNamedPipe" => {
+            Some(disconnect_named_pipe as unsafe extern "win64" fn(_) -> _ as *const () as usize)
+        }
         "GetNamedPipeClientProcessId" => Some(
-            get_named_pipe_client_process_id as unsafe extern "win64" fn(_, _) -> _
-                as *const () as usize,
+            get_named_pipe_client_process_id as unsafe extern "win64" fn(_, _) -> _ as *const ()
+                as usize,
         ),
         "GetNamedPipeHandleStateW" => Some(
             get_named_pipe_handle_state_w as unsafe extern "win64" fn(_, _, _, _, _, _, _) -> _
                 as *const () as usize,
         ),
         "GetNamedPipeServerProcessId" => Some(
-            get_named_pipe_server_process_id as unsafe extern "win64" fn(_, _) -> _
-                as *const () as usize,
+            get_named_pipe_server_process_id as unsafe extern "win64" fn(_, _) -> _ as *const ()
+                as usize,
         ),
         "SetNamedPipeHandleState" => Some(
-            set_named_pipe_handle_state as unsafe extern "win64" fn(_, _, _, _) -> _
-                as *const () as usize,
+            set_named_pipe_handle_state as unsafe extern "win64" fn(_, _, _, _) -> _ as *const ()
+                as usize,
         ),
         "TransactNamedPipe" => Some(
-            transact_named_pipe as unsafe extern "win64" fn(_, _, _, _, _, _, _) -> _
-                as *const () as usize,
+            transact_named_pipe as unsafe extern "win64" fn(_, _, _, _, _, _, _) -> _ as *const ()
+                as usize,
         ),
         "GetConsoleCursorInfo" => Some(
             get_console_cursor_info as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
@@ -15124,12 +15124,11 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
                 as usize,
         ),
         "WriteConsoleInputW" => Some(
-            write_console_input_w as unsafe extern "win64" fn(_, _, _, _) -> _
-                as *const () as usize,
+            write_console_input_w as unsafe extern "win64" fn(_, _, _, _) -> _ as *const ()
+                as usize,
         ),
         "ReadConsoleInputW" => Some(
-            read_console_input_w as unsafe extern "win64" fn(_, _, _, _) -> _
-                as *const () as usize,
+            read_console_input_w as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
         ),
         "FillConsoleOutputCharacterW" => Some(
             fill_console_output_character_w as unsafe extern "win64" fn(_, _, _, _, _) -> _
@@ -15140,201 +15139,184 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
                 as *const () as usize,
         ),
         "GetProcessHandleCount" => Some(
-            get_process_handle_count as unsafe extern "win64" fn(_, _) -> _
-                as *const () as usize,
+            get_process_handle_count as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
         ),
         "GetProcessIoCounters" => Some(
-            get_process_io_counters as unsafe extern "win64" fn(_, _) -> _
-                as *const () as usize,
+            get_process_io_counters as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
         ),
         "GetProcessInformation" => Some(
-            get_process_information as unsafe extern "win64" fn(_, _, _, _) -> _
-                as *const () as usize,
+            get_process_information as unsafe extern "win64" fn(_, _, _, _) -> _ as *const ()
+                as usize,
         ),
         "SetProcessInformation" => Some(
-            set_process_information as unsafe extern "win64" fn(_, _, _, _) -> _
-                as *const () as usize,
+            set_process_information as unsafe extern "win64" fn(_, _, _, _) -> _ as *const ()
+                as usize,
         ),
         "SetProcessShutdownParameters" => Some(
-            set_process_shutdown_parameters as unsafe extern "win64" fn(_, _) -> _
-                as *const () as usize,
+            set_process_shutdown_parameters as unsafe extern "win64" fn(_, _) -> _ as *const ()
+                as usize,
         ),
         "QueryProcessCycleTime" => Some(
-            query_process_cycle_time as unsafe extern "win64" fn(_, _) -> _
-                as *const () as usize,
+            query_process_cycle_time as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
         ),
         // ── Signal gap-fill 2: 73 remaining kernel32 stubs ──
         "AssignProcessToJobObject" => Some(
-            assign_process_to_job_object as unsafe extern "win64" fn(_, _) -> _
-                as *const () as usize,
-        ),
-        "CancelIoEx" => Some(
-            cancel_io_ex as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
-        ),
-        "CancelSynchronousIo" => Some(
-            cancel_synchronous_io as unsafe extern "win64" fn(_) -> _ as *const () as usize,
-        ),
-        "CheckRemoteDebuggerPresent" => Some(
-            check_remote_debugger_present as unsafe extern "win64" fn(_, _) -> _
-                as *const () as usize,
-        ),
-        "ClearCommError" => Some(
-            clear_comm_error as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
-        ),
-        "CreateJobObjectW" => Some(
-            create_job_object_w as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
-        ),
-        "CreateSymbolicLinkW" => Some(
-            create_symbolic_link_w as unsafe extern "win64" fn(_, _, _) -> _
-                as *const () as usize,
-        ),
-        "DeleteProcThreadAttributeList" => Some(
-            delete_proc_thread_attribute_list as unsafe extern "win64" fn(_) as *const ()
+            assign_process_to_job_object as unsafe extern "win64" fn(_, _) -> _ as *const ()
                 as usize,
         ),
-        "EscapeCommFunction" => Some(
-            escape_comm_function as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
+        "CancelIoEx" => {
+            Some(cancel_io_ex as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "CancelSynchronousIo" => {
+            Some(cancel_synchronous_io as unsafe extern "win64" fn(_) -> _ as *const () as usize)
+        }
+        "CheckRemoteDebuggerPresent" => Some(
+            check_remote_debugger_present as unsafe extern "win64" fn(_, _) -> _ as *const ()
+                as usize,
         ),
+        "ClearCommError" => {
+            Some(clear_comm_error as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize)
+        }
+        "CreateJobObjectW" => {
+            Some(create_job_object_w as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "CreateSymbolicLinkW" => Some(
+            create_symbolic_link_w as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
+        ),
+        "DeleteProcThreadAttributeList" => Some(
+            delete_proc_thread_attribute_list as unsafe extern "win64" fn(_) as *const () as usize,
+        ),
+        "EscapeCommFunction" => {
+            Some(escape_comm_function as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
         "FindFirstFileExA" => Some(
-            find_first_file_ex_a as unsafe extern "win64" fn(_, _, _, _, _, _) -> _
-                as *const () as usize,
+            find_first_file_ex_a as unsafe extern "win64" fn(_, _, _, _, _, _) -> _ as *const ()
+                as usize,
         ),
-        "GetCommModemStatus" => Some(
-            get_comm_modem_status as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
-        ),
+        "GetCommModemStatus" => {
+            Some(get_comm_modem_status as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
         "GetComputerNameExW" => Some(
-            get_computer_name_ex_w as unsafe extern "win64" fn(_, _, _) -> _
-                as *const () as usize,
+            get_computer_name_ex_w as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
         ),
         "GetCurrencyFormatEx" => Some(
-            get_currency_format_ex as unsafe extern "win64" fn(_, _, _, _, _, _) -> _
-                as *const () as usize,
+            get_currency_format_ex as unsafe extern "win64" fn(_, _, _, _, _, _) -> _ as *const ()
+                as usize,
         ),
         "GetCurrentPackageFullName" => Some(
-            get_current_package_full_name as unsafe extern "win64" fn(_, _) -> _
-                as *const () as usize,
+            get_current_package_full_name as unsafe extern "win64" fn(_, _) -> _ as *const ()
+                as usize,
         ),
         "GetDiskFreeSpaceA" => Some(
-            get_disk_free_space_a as unsafe extern "win64" fn(_, _, _, _, _) -> _
-                as *const () as usize,
+            get_disk_free_space_a as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const ()
+                as usize,
         ),
         "GetErrorMode" => Some(get_error_mode as extern "win64" fn() -> _ as *const () as usize),
         "GetGeoInfoW" => Some(
-            get_geo_info_w as unsafe extern "win64" fn(_, _, _, _, _) -> _
-                as *const () as usize,
+            get_geo_info_w as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const () as usize,
         ),
         "GetLogicalProcessorInformation" => Some(
-            get_logical_processor_information as unsafe extern "win64" fn(_, _) -> _
-                as *const () as usize,
+            get_logical_processor_information as unsafe extern "win64" fn(_, _) -> _ as *const ()
+                as usize,
         ),
         "GetLogicalProcessorInformationEx" => Some(
             get_logical_processor_information_ex as unsafe extern "win64" fn(_, _, _) -> _
                 as *const () as usize,
         ),
-        "GetMaximumProcessorCount" => Some(
-            get_maximum_processor_count as extern "win64" fn(_) -> _ as *const () as usize,
-        ),
-        "GetMaximumProcessorGroupCount" => Some(
-            get_maximum_processor_group_count as *const () as usize,
-        ),
+        "GetMaximumProcessorCount" => {
+            Some(get_maximum_processor_count as extern "win64" fn(_) -> _ as *const () as usize)
+        }
+        "GetMaximumProcessorGroupCount" => {
+            Some(get_maximum_processor_group_count as *const () as usize)
+        }
         "GetNumberFormatEx" => Some(
-            get_number_format_ex as unsafe extern "win64" fn(_, _, _, _, _, _) -> _
-                as *const () as usize,
+            get_number_format_ex as unsafe extern "win64" fn(_, _, _, _, _, _) -> _ as *const ()
+                as usize,
         ),
         "GetPackageFamilyName" => Some(
-            get_package_family_name as unsafe extern "win64" fn(_, _, _) -> _
-                as *const () as usize,
+            get_package_family_name as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
         ),
         "GetPackagePathByFullName" => Some(
-            get_package_path_by_full_name as unsafe extern "win64" fn(_, _, _) -> _
-                as *const () as usize,
+            get_package_path_by_full_name as unsafe extern "win64" fn(_, _, _) -> _ as *const ()
+                as usize,
         ),
         "GetPackagesByPackageFamily" => Some(
-            get_packages_by_package_family as unsafe extern "win64" fn(_, _, _, _) -> _
-                as *const () as usize,
+            get_packages_by_package_family as unsafe extern "win64" fn(_, _, _, _) -> _ as *const ()
+                as usize,
         ),
-        "GetProcessHeaps" => Some(
-            get_process_heaps as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
-        ),
+        "GetProcessHeaps" => {
+            Some(get_process_heaps as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
         "GetProcessMitigationPolicy" => Some(
-            get_process_mitigation_policy as unsafe extern "win64" fn(_, _, _, _) -> _
-                as *const () as usize,
+            get_process_mitigation_policy as unsafe extern "win64" fn(_, _, _, _) -> _ as *const ()
+                as usize,
         ),
         "GetThreadGroupAffinity" => Some(
-            get_thread_group_affinity as unsafe extern "win64" fn(_, _) -> _
-                as *const () as usize,
+            get_thread_group_affinity as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
         ),
         "GetThreadPreferredUILanguages" => Some(
             get_thread_preferred_ui_languages as unsafe extern "win64" fn(_, _, _, _) -> _
                 as *const () as usize,
         ),
         "GetThreadPriorityBoost" => Some(
-            get_thread_priority_boost as unsafe extern "win64" fn(_, _) -> _
-                as *const () as usize,
+            get_thread_priority_boost as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
         ),
         "GetUserGeoID" => Some(get_user_geo_id as extern "win64" fn() -> _ as *const () as usize),
-        "HeapCompact" => Some(
-            heap_compact as extern "win64" fn(_, _) -> _ as *const () as usize,
-        ),
+        "HeapCompact" => Some(heap_compact as extern "win64" fn(_, _) -> _ as *const () as usize),
         "HeapLock" => Some(heap_lock as extern "win64" fn(_) -> _ as *const () as usize),
         "HeapUnlock" => Some(heap_unlock as extern "win64" fn(_) -> _ as *const () as usize),
-        "HeapValidate" => Some(
-            heap_validate as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
-        ),
-        "HeapWalk" => Some(
-            heap_walk as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
-        ),
+        "HeapValidate" => {
+            Some(heap_validate as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize)
+        }
+        "HeapWalk" => Some(heap_walk as unsafe extern "win64" fn(_, _) -> _ as *const () as usize),
         "InitializeProcThreadAttributeList" => Some(
             initialize_proc_thread_attribute_list as unsafe extern "win64" fn(_, _, _, _) -> _
                 as *const () as usize,
         ),
         "K32EnumProcessModules" => Some(
-            k32_enum_process_modules as unsafe extern "win64" fn(_, _, _, _) -> _
-                as *const () as usize,
+            k32_enum_process_modules as unsafe extern "win64" fn(_, _, _, _) -> _ as *const ()
+                as usize,
         ),
         "K32GetModuleBaseNameW" => Some(
-            k32_get_module_base_name_w as unsafe extern "win64" fn(_, _, _, _) -> _
-                as *const () as usize,
+            k32_get_module_base_name_w as unsafe extern "win64" fn(_, _, _, _) -> _ as *const ()
+                as usize,
         ),
         "K32GetModuleInformation" => Some(
-            k32_get_module_information as unsafe extern "win64" fn(_, _, _, _) -> _
-                as *const () as usize,
+            k32_get_module_information as unsafe extern "win64" fn(_, _, _, _) -> _ as *const ()
+                as usize,
         ),
         "K32GetPerformanceInfo" => Some(
-            k32_get_performance_info as unsafe extern "win64" fn(_, _) -> _
-                as *const () as usize,
+            k32_get_performance_info as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
         ),
         "K32GetProcessMemoryInfo" => Some(
-            k32_get_process_memory_info as unsafe extern "win64" fn(_, _, _) -> _
-                as *const () as usize,
+            k32_get_process_memory_info as unsafe extern "win64" fn(_, _, _) -> _ as *const ()
+                as usize,
         ),
         "K32QueryWorkingSetEx" => Some(
-            k32_query_working_set_ex as unsafe extern "win64" fn(_, _, _) -> _
-                as *const () as usize,
+            k32_query_working_set_ex as unsafe extern "win64" fn(_, _, _) -> _ as *const ()
+                as usize,
         ),
-        "LockFile" => Some(
-            lock_file as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const () as usize,
-        ),
+        "LockFile" => {
+            Some(lock_file as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const () as usize)
+        }
         "NeedCurrentDirectoryForExePathW" => Some(
-            need_current_directory_for_exe_path_w as unsafe extern "win64" fn(_) -> _
-                as *const () as usize,
+            need_current_directory_for_exe_path_w as unsafe extern "win64" fn(_) -> _ as *const ()
+                as usize,
         ),
-        "PowerClearRequest" => Some(
-            power_clear_request as extern "win64" fn(_) -> _ as *const () as usize,
-        ),
-        "PowerCreateRequest" => Some(
-            power_create_request as unsafe extern "win64" fn(_) -> _ as *const () as usize,
-        ),
-        "PowerSetRequest" => Some(
-            power_set_request as extern "win64" fn(_) -> _ as *const () as usize,
-        ),
+        "PowerClearRequest" => {
+            Some(power_clear_request as extern "win64" fn(_) -> _ as *const () as usize)
+        }
+        "PowerCreateRequest" => {
+            Some(power_create_request as unsafe extern "win64" fn(_) -> _ as *const () as usize)
+        }
+        "PowerSetRequest" => {
+            Some(power_set_request as extern "win64" fn(_) -> _ as *const () as usize)
+        }
         "PrefetchVirtualMemory" => Some(
-            prefetch_virtual_memory as unsafe extern "win64" fn(_, _, _, _) -> _
-                as *const () as usize,
+            prefetch_virtual_memory as unsafe extern "win64" fn(_, _, _, _) -> _ as *const ()
+                as usize,
         ),
-        "PurgeComm" => Some(
-            purge_comm as extern "win64" fn(_, _) -> _ as *const () as usize,
-        ),
+        "PurgeComm" => Some(purge_comm as extern "win64" fn(_, _) -> _ as *const () as usize),
         "QueryFullProcessImageNameW" => Some(
             query_full_process_image_name_w as unsafe extern "win64" fn(_, _, _, _) -> _
                 as *const () as usize,
@@ -15344,64 +15326,60 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
                 as *const () as usize,
         ),
         "QueryThreadCycleTime" => Some(
-            query_thread_cycle_time as unsafe extern "win64" fn(_, _) -> _
-                as *const () as usize,
+            query_thread_cycle_time as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
         ),
-        "ReOpenFile" => Some(
-            re_open_file as extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
-        ),
+        "ReOpenFile" => {
+            Some(re_open_file as extern "win64" fn(_, _, _, _) -> _ as *const () as usize)
+        }
         "ReadProcessMemory" => Some(
-            read_process_memory as unsafe extern "win64" fn(_, _, _, _, _) -> _
-                as *const () as usize,
+            read_process_memory as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const ()
+                as usize,
         ),
         "ReplaceFileW" => Some(
-            replace_file_w as unsafe extern "win64" fn(_, _, _, _, _, _) -> _
-                as *const () as usize,
+            replace_file_w as unsafe extern "win64" fn(_, _, _, _, _, _) -> _ as *const () as usize,
         ),
         "ResolveLocaleName" => Some(
-            resolve_locale_name as unsafe extern "win64" fn(_, _, _) -> _
-                as *const () as usize,
+            resolve_locale_name as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
         ),
         "RtlCaptureStackBackTrace" => Some(
-            rtl_capture_stack_back_trace as unsafe extern "win64" fn(_, _, _, _) -> _
-                as *const () as usize,
+            rtl_capture_stack_back_trace as unsafe extern "win64" fn(_, _, _, _) -> _ as *const ()
+                as usize,
         ),
-        "RtlDeleteFunctionTable" => Some(
-            rtl_delete_function_table as extern "win64" fn(_) -> _ as *const () as usize,
-        ),
+        "RtlDeleteFunctionTable" => {
+            Some(rtl_delete_function_table as extern "win64" fn(_) -> _ as *const () as usize)
+        }
         "SetFileCompletionNotificationModes" => Some(
-            set_file_completion_notification_modes as extern "win64" fn(_, _) -> _
-                as *const () as usize,
+            set_file_completion_notification_modes as extern "win64" fn(_, _) -> _ as *const ()
+                as usize,
         ),
         "SetFileInformationByHandle" => Some(
-            set_file_information_by_handle as unsafe extern "win64" fn(_, _, _, _) -> _
-                as *const () as usize,
+            set_file_information_by_handle as unsafe extern "win64" fn(_, _, _, _) -> _ as *const ()
+                as usize,
         ),
         "SetInformationJobObject" => Some(
-            set_information_job_object as unsafe extern "win64" fn(_, _, _, _) -> _
-                as *const () as usize,
+            set_information_job_object as unsafe extern "win64" fn(_, _, _, _) -> _ as *const ()
+                as usize,
         ),
         "SetProcessMitigationPolicy" => Some(
-            set_process_mitigation_policy as unsafe extern "win64" fn(_, _, _) -> _
-                as *const () as usize,
+            set_process_mitigation_policy as unsafe extern "win64" fn(_, _, _) -> _ as *const ()
+                as usize,
         ),
         "SetThreadInformation" => Some(
-            set_thread_information as unsafe extern "win64" fn(_, _, _, _) -> _
-                as *const () as usize,
+            set_thread_information as unsafe extern "win64" fn(_, _, _, _) -> _ as *const ()
+                as usize,
         ),
-        "SetThreadPriorityBoost" => Some(
-            set_thread_priority_boost as extern "win64" fn(_, _) -> _ as *const () as usize,
-        ),
-        "TerminateJobObject" => Some(
-            terminate_job_object as extern "win64" fn(_, _) -> _ as *const () as usize,
-        ),
+        "SetThreadPriorityBoost" => {
+            Some(set_thread_priority_boost as extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "TerminateJobObject" => {
+            Some(terminate_job_object as extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
         "TzSpecificLocalTimeToSystemTime" => Some(
             tz_specific_local_time_to_system_time as unsafe extern "win64" fn(_, _, _) -> _
                 as *const () as usize,
         ),
         "UnlockFileEx" => Some(
-            unlock_file_ex as unsafe extern "win64" fn(_, _, _, _, _) -> _
-                as *const () as usize,
+            unlock_file_ex as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const () as usize,
         ),
         "UpdateProcThreadAttribute" => Some(
             update_proc_thread_attribute as unsafe extern "win64" fn(_, _, _, _, _, _, _) -> _
@@ -15410,16 +15388,15 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "WTSGetActiveConsoleSessionId" => {
             Some(wts_get_active_console_session_id as *const () as usize)
         }
-        "WaitNamedPipeW" => Some(
-            wait_named_pipe_w as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
-        ),
+        "WaitNamedPipeW" => {
+            Some(wait_named_pipe_w as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
         "WerRegisterRuntimeExceptionModule" => Some(
             wer_register_runtime_exception_module as unsafe extern "win64" fn(_, _) -> _
                 as *const () as usize,
         ),
         "Wow64GetThreadContext" => Some(
-            wow64_get_thread_context as unsafe extern "win64" fn(_, _) -> _
-                as *const () as usize,
+            wow64_get_thread_context as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
         ),
         _ => {
             // version.dll functions are forwarded through kernel32 in some apps;
@@ -18007,10 +17984,7 @@ pub unsafe extern "win64" fn set_process_information(
 /// SetProcessShutdownParameters: set shutdown priority and flags.
 ///
 /// Phase A stub — returns FALSE.
-pub extern "win64" fn set_process_shutdown_parameters(
-    _dw_level: u32,
-    _dw_flags: u32,
-) -> i32 {
+pub extern "win64" fn set_process_shutdown_parameters(_dw_level: u32, _dw_flags: u32) -> i32 {
     warn_once("SetProcessShutdownParameters");
     0
 }
@@ -18039,15 +18013,16 @@ pub unsafe extern "win64" fn query_process_cycle_time(
 /// AssignProcessToJobObject: assign a process to a job object.
 ///
 /// Phase A stub — returns FALSE.
-pub extern "win64" fn assign_process_to_job_object(
-    _h_job: usize, _h_process: usize,
-) -> i32 { 0 }
+pub extern "win64" fn assign_process_to_job_object(_h_job: usize, _h_process: usize) -> i32 {
+    0
+}
 
 /// CreateJobObjectW: create a job object.
 ///
 /// Phase A stub — returns NULL.
 pub unsafe extern "win64" fn create_job_object_w(
-    _lp_job_attributes: usize, _lp_name: *const u16,
+    _lp_job_attributes: usize,
+    _lp_name: *const u16,
 ) -> usize {
     warn_once("CreateJobObjectW");
     0
@@ -18056,9 +18031,7 @@ pub unsafe extern "win64" fn create_job_object_w(
 /// DeleteProcThreadAttributeList: delete a proc/thread attribute list.
 ///
 /// Phase A stub — no-op.
-pub unsafe extern "win64" fn delete_proc_thread_attribute_list(
-    _lp_attribute_list: *mut u8,
-) {}
+pub unsafe extern "win64" fn delete_proc_thread_attribute_list(_lp_attribute_list: *mut u8) {}
 
 /// InitializeProcThreadAttributeList: initialize a proc/thread attribute list.
 ///
@@ -18174,7 +18147,8 @@ pub extern "win64" fn wts_get_active_console_session_id() -> u32 {
 ///
 /// Phase A stub — returns FALSE.
 pub unsafe extern "win64" fn wow64_get_thread_context(
-    _h_thread: usize, _lp_context: *mut u8,
+    _h_thread: usize,
+    _lp_context: *mut u8,
 ) -> i32 {
     warn_once("Wow64GetThreadContext");
     0
@@ -18206,9 +18180,7 @@ pub unsafe extern "win64" fn create_symbolic_link_w(
 /// CancelIoEx: cancel outstanding I/O on a handle.
 ///
 /// Phase A stub — returns FALSE.
-pub unsafe extern "win64" fn cancel_io_ex(
-    _h_file: usize, _lp_overlapped: usize,
-) -> i32 {
+pub unsafe extern "win64" fn cancel_io_ex(_h_file: usize, _lp_overlapped: usize) -> i32 {
     warn_once("CancelIoEx");
     0
 }
@@ -18225,7 +18197,9 @@ pub extern "win64" fn cancel_synchronous_io(_h_thread: usize) -> i32 {
 ///
 /// Phase A stub — returns FALSE.
 pub unsafe extern "win64" fn clear_comm_error(
-    _h_file: usize, _lp_errors: *mut u32, _lp_stat: *mut u8,
+    _h_file: usize,
+    _lp_errors: *mut u32,
+    _lp_stat: *mut u8,
 ) -> i32 {
     warn_once("ClearCommError");
     0
@@ -18258,7 +18232,8 @@ pub unsafe extern "win64" fn find_first_file_ex_a(
 ///
 /// Phase A stub — returns FALSE.
 pub unsafe extern "win64" fn get_comm_modem_status(
-    _h_file: usize, _lp_modem_stat: *mut u32,
+    _h_file: usize,
+    _lp_modem_stat: *mut u32,
 ) -> i32 {
     warn_once("GetCommModemStatus");
     0
@@ -18317,7 +18292,8 @@ pub unsafe extern "win64" fn replace_file_w(
 ///
 /// Phase A stub — returns FALSE.
 pub extern "win64" fn set_file_completion_notification_modes(
-    _file_handle: usize, _flags: u8,
+    _file_handle: usize,
+    _flags: u8,
 ) -> i32 {
     warn_once("SetFileCompletionNotificationModes");
     0
@@ -18353,7 +18329,8 @@ pub unsafe extern "win64" fn unlock_file_ex(
 ///
 /// Phase A stub — returns FALSE.
 pub unsafe extern "win64" fn wait_named_pipe_w(
-    _lp_named_pipe_name: *const u16, _n_timeout: u32,
+    _lp_named_pipe_name: *const u16,
+    _n_timeout: u32,
 ) -> i32 {
     warn_once("WaitNamedPipeW");
     0
@@ -18423,7 +18400,8 @@ pub unsafe extern "win64" fn get_geo_info_w(
 ///
 /// Phase A stub — returns FALSE.
 pub unsafe extern "win64" fn get_logical_processor_information(
-    _buffer: *mut u8, _returned_length: *mut u32,
+    _buffer: *mut u8,
+    _returned_length: *mut u32,
 ) -> i32 {
     warn_once("GetLogicalProcessorInformation");
     0
@@ -18504,7 +18482,8 @@ pub extern "win64" fn get_maximum_processor_group_count() -> u16 {
 ///
 /// Phase A stub — returns 0.
 pub unsafe extern "win64" fn get_process_heaps(
-    _number_of_heaps: u32, _process_heaps: *mut usize,
+    _number_of_heaps: u32,
+    _process_heaps: *mut usize,
 ) -> u32 {
     warn_once("GetProcessHeaps");
     0
@@ -18546,9 +18525,7 @@ pub unsafe extern "win64" fn heap_validate(
 /// HeapWalk: enumerate heap blocks.
 ///
 /// Phase A stub — returns FALSE.
-pub unsafe extern "win64" fn heap_walk(
-    _h_heap: usize, _lp_entry: *mut u8,
-) -> i32 {
+pub unsafe extern "win64" fn heap_walk(_h_heap: usize, _lp_entry: *mut u8) -> i32 {
     warn_once("HeapWalk");
     0
 }
@@ -18583,7 +18560,8 @@ pub unsafe extern "win64" fn get_thread_preferred_ui_languages(
 ///
 /// Phase A stub — returns FALSE.
 pub unsafe extern "win64" fn get_thread_priority_boost(
-    _h_thread: usize, _p_disable_priority_boost: *mut i32,
+    _h_thread: usize,
+    _p_disable_priority_boost: *mut i32,
 ) -> i32 {
     warn_once("GetThreadPriorityBoost");
     0
@@ -18593,7 +18571,8 @@ pub unsafe extern "win64" fn get_thread_priority_boost(
 ///
 /// Phase A stub — returns FALSE.
 pub extern "win64" fn set_thread_priority_boost(
-    _h_thread: usize, _b_disable_priority_boost: i32,
+    _h_thread: usize,
+    _b_disable_priority_boost: i32,
 ) -> i32 {
     warn_once("SetThreadPriorityBoost");
     0
@@ -18670,7 +18649,8 @@ pub unsafe extern "win64" fn tz_specific_local_time_to_system_time(
 ///
 /// Phase A stub — returns FALSE.
 pub unsafe extern "win64" fn query_thread_cycle_time(
-    _thread_handle: usize, _cycle_time: *mut u64,
+    _thread_handle: usize,
+    _cycle_time: *mut u64,
 ) -> i32 {
     warn_once("QueryThreadCycleTime");
     0
@@ -18702,9 +18682,7 @@ pub extern "win64" fn power_clear_request(_power_request: usize) -> i32 {
 /// PowerCreateRequest: create a power request.
 ///
 /// Phase A stub — returns NULL.
-pub unsafe extern "win64" fn power_create_request(
-    _context: *const u8,
-) -> usize {
+pub unsafe extern "win64" fn power_create_request(_context: *const u8) -> usize {
     warn_once("PowerCreateRequest");
     0
 }
@@ -18774,7 +18752,8 @@ pub unsafe extern "win64" fn k32_get_module_information(
 ///
 /// Phase A stub — returns FALSE.
 pub unsafe extern "win64" fn k32_get_performance_info(
-    _lp_performance_info: *mut u8, _cb: u32,
+    _lp_performance_info: *mut u8,
+    _cb: u32,
 ) -> i32 {
     warn_once("K32GetPerformanceInfo");
     0
@@ -18821,9 +18800,7 @@ pub unsafe extern "win64" fn rtl_capture_stack_back_trace(
 /// RtlDeleteFunctionTable: delete a dynamic function table entry.
 ///
 /// Phase A stub — returns FALSE.
-pub extern "win64" fn rtl_delete_function_table(
-    _function_table: usize,
-) -> i32 {
+pub extern "win64" fn rtl_delete_function_table(_function_table: usize) -> i32 {
     0
 }
 

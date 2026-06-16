@@ -84,7 +84,9 @@ pub unsafe extern "win64" fn CertGetNameStringA(
 /// must be a valid pointer to a `usize` or null if not needed.
 // Wine ref: dlls/crypt32/cert.c — CertAddCertificateContextToStore
 pub unsafe extern "win64" fn CertAddCertificateContextToStore(
-    _h_store: usize, _p_cert_context: usize, _dw_add_disposition: u32,
+    _h_store: usize,
+    _p_cert_context: usize,
+    _dw_add_disposition: u32,
     _pp_store_context: *mut usize,
 ) -> i32 {
     0
@@ -97,8 +99,11 @@ pub unsafe extern "win64" fn CertAddCertificateContextToStore(
 /// `pp_store_context` must be a valid pointer or null.
 // Wine ref: dlls/crypt32/cert.c — CertAddEncodedCertificateToStore
 pub unsafe extern "win64" fn CertAddEncodedCertificateToStore(
-    _h_store: usize, _dw_encoding_type: u32, _pb_cert_encoded: *const u8,
-    _cb_cert_encoded: u32, _dw_add_disposition: u32,
+    _h_store: usize,
+    _dw_encoding_type: u32,
+    _pb_cert_encoded: *const u8,
+    _cb_cert_encoded: u32,
+    _dw_add_disposition: u32,
     _pp_store_context: *mut usize,
 ) -> i32 {
     0
@@ -110,8 +115,10 @@ pub unsafe extern "win64" fn CertAddEncodedCertificateToStore(
 /// Both store handles must be valid (acquired from CertOpenStore or equivalent).
 // Wine ref: dlls/crypt32/cert.c — CertAddStoreToCollection
 pub unsafe extern "win64" fn CertAddStoreToCollection(
-    _h_collection_store: usize, _h_sibling_store: usize,
-    _dw_update_flag: u32, _dw_priority: u32,
+    _h_collection_store: usize,
+    _h_sibling_store: usize,
+    _dw_update_flag: u32,
+    _dw_priority: u32,
 ) -> i32 {
     0
 }
@@ -122,7 +129,8 @@ pub unsafe extern "win64" fn CertAddStoreToCollection(
 /// `pb_cert_name` and `pb_cert_name2` must point to valid encoded name blobs.
 // Wine ref: dlls/crypt32/cert.c — CertCompareCertificateName
 pub unsafe extern "win64" fn CertCompareCertificateName(
-    _dw_encoding_type: u32, _pb_cert_name: *const u8,
+    _dw_encoding_type: u32,
+    _pb_cert_name: *const u8,
     _pb_cert_name2: *const u8,
 ) -> i32 {
     0
@@ -135,7 +143,9 @@ pub unsafe extern "win64" fn CertCompareCertificateName(
 /// `dw_control_type`, or be null if the operation takes no parameters.
 // Wine ref: dlls/crypt32/cert.c — CertControlStore
 pub unsafe extern "win64" fn CertControlStore(
-    _h_store: usize, _dw_flags: u32, _dw_control_type: u32,
+    _h_store: usize,
+    _dw_flags: u32,
+    _dw_control_type: u32,
     _pv_control_para: *const u8,
 ) -> i32 {
     0
@@ -148,8 +158,11 @@ pub unsafe extern "win64" fn CertControlStore(
 /// `p_prev_cert_context` must be a valid context handle or null for first call.
 // Wine ref: dlls/crypt32/cert.c — CertFindCertificateInStore
 pub unsafe extern "win64" fn CertFindCertificateInStore(
-    _h_store: usize, _dw_encoding_type: u32, _dw_find_flags: u32,
-    _dw_find_type: u32, _pv_find_para: *const u8,
+    _h_store: usize,
+    _dw_encoding_type: u32,
+    _dw_find_flags: u32,
+    _dw_find_type: u32,
+    _pv_find_para: *const u8,
     _p_prev_cert_context: usize,
 ) -> usize {
     0
@@ -162,8 +175,11 @@ pub unsafe extern "win64" fn CertFindCertificateInStore(
 /// `p_prev_chain_context` must be a valid chain handle or null.
 // Wine ref: dlls/crypt32/cert.c — CertFindChainInStore
 pub unsafe extern "win64" fn CertFindChainInStore(
-    _h_store: usize, _dw_encoding_type: u32, _dw_find_flags: u32,
-    _dw_find_type: u32, _pv_find_para: *const u8,
+    _h_store: usize,
+    _dw_encoding_type: u32,
+    _dw_find_flags: u32,
+    _dw_find_type: u32,
+    _pv_find_para: *const u8,
     _p_prev_chain_context: usize,
 ) -> usize {
     0
@@ -175,9 +191,7 @@ pub unsafe extern "win64" fn CertFindChainInStore(
 /// `p_chain_context` must be a valid chain context handle previously obtained
 /// from CertGetCertificateChain or CertFindChainInStore, or null (no-op).
 // Wine ref: dlls/crypt32/cert.c — CertFreeCertificateChain
-pub unsafe extern "win64" fn CertFreeCertificateChain(
-    _p_chain_context: usize,
-) -> i32 {
+pub unsafe extern "win64" fn CertFreeCertificateChain(_p_chain_context: usize) -> i32 {
     1
 }
 
@@ -190,10 +204,14 @@ pub unsafe extern "win64" fn CertFreeCertificateChain(
 /// to receive the chain handle.
 // Wine ref: dlls/crypt32/cert.c — CertGetCertificateChain
 pub unsafe extern "win64" fn CertGetCertificateChain(
-    _h_chain_engine: usize, _p_cert_context: usize,
-    _p_time: *const u8, _h_additional_store: usize,
-    _p_chain_para: *const u8, _dw_flags: u32,
-    _pv_reserved: *const u8, _pp_chain_context: *mut usize,
+    _h_chain_engine: usize,
+    _p_cert_context: usize,
+    _p_time: *const u8,
+    _h_additional_store: usize,
+    _p_chain_para: *const u8,
+    _dw_flags: u32,
+    _pv_reserved: *const u8,
+    _pp_chain_context: *mut usize,
 ) -> i32 {
     0
 }
@@ -206,8 +224,10 @@ pub unsafe extern "win64" fn CertGetCertificateChain(
 /// be a valid pointer.
 // Wine ref: dlls/crypt32/cert.c — CertGetCertificateContextProperty
 pub unsafe extern "win64" fn CertGetCertificateContextProperty(
-    _p_cert_context: usize, _dw_prop_id: u32,
-    _pv_data: *mut u8, _pcb_data: *mut u32,
+    _p_cert_context: usize,
+    _dw_prop_id: u32,
+    _pv_data: *mut u8,
+    _pcb_data: *mut u32,
 ) -> i32 {
     0
 }
@@ -220,9 +240,12 @@ pub unsafe extern "win64" fn CertGetCertificateContextProperty(
 /// of at least `cch_name_string` wide characters, or be null.
 // Wine ref: dlls/crypt32/cert.c — CertGetNameStringW
 pub unsafe extern "win64" fn CertGetNameStringW(
-    _p_cert_context: usize, _dw_type: u32,
-    _dw_flags: u32, _pv_type_para: *const u8,
-    _psz_name_string: *mut u16, _cch_name_string: u32,
+    _p_cert_context: usize,
+    _dw_type: u32,
+    _dw_flags: u32,
+    _pv_type_para: *const u8,
+    _psz_name_string: *mut u16,
+    _cch_name_string: u32,
 ) -> u32 {
     0
 }
@@ -234,8 +257,10 @@ pub unsafe extern "win64" fn CertGetNameStringW(
 /// atom; `pv_para` must point to provider-specific data or be null.
 // Wine ref: dlls/crypt32/cert.c — CertOpenStore
 pub unsafe extern "win64" fn CertOpenStore(
-    _lpsz_store_provider: *const u8, _dw_encoding_type: u32,
-    _h_crypto_prov: usize, _dw_flags: u32,
+    _lpsz_store_provider: *const u8,
+    _dw_encoding_type: u32,
+    _h_crypto_prov: usize,
+    _dw_flags: u32,
     _pv_para: *const u8,
 ) -> usize {
     0
@@ -247,7 +272,8 @@ pub unsafe extern "win64" fn CertOpenStore(
 /// `sz_subsystem_protocol` must be a valid null-terminated wide string.
 // Wine ref: dlls/crypt32/cert.c — CertOpenSystemStoreW delegates to CertOpenStore
 pub unsafe extern "win64" fn CertOpenSystemStoreW(
-    _hprov: usize, _sz_subsystem_protocol: *const u16,
+    _hprov: usize,
+    _sz_subsystem_protocol: *const u16,
 ) -> usize {
     0
 }
@@ -259,7 +285,8 @@ pub unsafe extern "win64" fn CertOpenSystemStoreW(
 /// `p_cert_info` must point to a valid `CERT_INFO` structure.
 // Wine ref: dlls/crypt32/cert.c — CertVerifyTimeValidity
 pub unsafe extern "win64" fn CertVerifyTimeValidity(
-    _p_time_info: *const u8, _p_cert_info: *const u8,
+    _p_time_info: *const u8,
+    _p_cert_info: *const u8,
 ) -> i32 {
     0
 }
@@ -271,9 +298,12 @@ pub unsafe extern "win64" fn CertVerifyTimeValidity(
 /// `pdw_key_spec`, and `pf_caller_free_prov` must be valid output pointers.
 // Wine ref: dlls/crypt32/crypt.c — CryptAcquireCertificatePrivateKey
 pub unsafe extern "win64" fn CryptAcquireCertificatePrivateKey(
-    _p_cert: usize, _dw_flags: u32, _pv_parameters: *const u8,
+    _p_cert: usize,
+    _dw_flags: u32,
+    _pv_parameters: *const u8,
     _ph_crypt_prov_or_ncrypt_key: *mut usize,
-    _pdw_key_spec: *mut u32, _pf_caller_free_prov: *mut i32,
+    _pdw_key_spec: *mut u32,
+    _pf_caller_free_prov: *mut i32,
 ) -> i32 {
     0
 }
@@ -295,8 +325,11 @@ pub unsafe extern "win64" fn CryptMsgClose(_h_crypt_msg: usize) -> i32 {
 /// must be a valid pointer.
 // Wine ref: dlls/crypt32/crypt.c — CryptMsgGetParam
 pub unsafe extern "win64" fn CryptMsgGetParam(
-    _h_crypt_msg: usize, _dw_param_type: u32, _dw_index: u32,
-    _pv_data: *mut u8, _pcb_data: *mut u32,
+    _h_crypt_msg: usize,
+    _dw_param_type: u32,
+    _dw_index: u32,
+    _pv_data: *mut u8,
+    _pcb_data: *mut u32,
 ) -> i32 {
     0
 }
@@ -311,9 +344,12 @@ pub unsafe extern "win64" fn CryptMsgGetParam(
 /// to a `DATA_BLOB` that will receive the output.
 // Wine ref: dlls/crypt32/crypt.c — CryptProtectData (DPAPI)
 pub unsafe extern "win64" fn CryptProtectData(
-    _p_data_in: *const u8, _sz_data_descr: *const u16,
-    _p_optional_entropy: *const u8, _pv_reserved: usize,
-    _p_prompt_struct: *const u8, _dw_flags: u32,
+    _p_data_in: *const u8,
+    _sz_data_descr: *const u16,
+    _p_optional_entropy: *const u8,
+    _pv_reserved: usize,
+    _p_prompt_struct: *const u8,
+    _dw_flags: u32,
     _p_data_out: *mut u8,
 ) -> i32 {
     0
@@ -325,7 +361,9 @@ pub unsafe extern "win64" fn CryptProtectData(
 /// `p_data` must point to a readable/writable buffer of at least `cb_data` bytes.
 // Wine ref: dlls/crypt32/crypt.c — CryptProtectMemory (DPAPI)
 pub unsafe extern "win64" fn CryptProtectMemory(
-    _p_data: *mut u8, _cb_data: u32, _dw_flags: u32,
+    _p_data: *mut u8,
+    _cb_data: u32,
+    _dw_flags: u32,
 ) -> i32 {
     1
 }
@@ -338,14 +376,17 @@ pub unsafe extern "win64" fn CryptProtectMemory(
 /// `ph_cert_store`, `ph_msg`, `pv_context`) must be valid or null if not needed.
 // Wine ref: dlls/crypt32/crypt.c — CryptQueryObject
 pub unsafe extern "win64" fn CryptQueryObject(
-    _dw_object_type: u32, _pv_object: *const u8,
+    _dw_object_type: u32,
+    _pv_object: *const u8,
     _dw_expected_content_type_flags: u32,
     _dw_expected_format_type_flags: u32,
-    _dw_flags: u32, _pdw_msg_and_cert_encoding: *mut u32,
+    _dw_flags: u32,
+    _pdw_msg_and_cert_encoding: *mut u32,
     _pdw_content_type: *mut u32,
     _pdw_format_type: *mut u32,
     _ph_cert_store: *mut usize,
-    _ph_msg: *mut usize, _pv_context: *mut *const u8,
+    _ph_msg: *mut usize,
+    _pv_context: *mut *const u8,
 ) -> i32 {
     0
 }
@@ -360,9 +401,12 @@ pub unsafe extern "win64" fn CryptQueryObject(
 /// pointer to a `DATA_BLOB` that will receive the output.
 // Wine ref: dlls/crypt32/crypt.c — CryptUnprotectData (DPAPI)
 pub unsafe extern "win64" fn CryptUnprotectData(
-    _p_data_in: *const u8, _ppsz_data_descr: *mut *mut u16,
-    _p_optional_entropy: *const u8, _pv_reserved: usize,
-    _p_prompt_struct: *const u8, _dw_flags: u32,
+    _p_data_in: *const u8,
+    _ppsz_data_descr: *mut *mut u16,
+    _p_optional_entropy: *const u8,
+    _pv_reserved: usize,
+    _p_prompt_struct: *const u8,
+    _dw_flags: u32,
     _p_data_out: *mut u8,
 ) -> i32 {
     0
@@ -374,7 +418,9 @@ pub unsafe extern "win64" fn CryptUnprotectData(
 /// `p_data` must point to a readable/writable buffer of at least `cb_data` bytes.
 // Wine ref: dlls/crypt32/crypt.c — CryptUnprotectMemory (DPAPI)
 pub unsafe extern "win64" fn CryptUnprotectMemory(
-    _p_data: *mut u8, _cb_data: u32, _dw_flags: u32,
+    _p_data: *mut u8,
+    _cb_data: u32,
+    _dw_flags: u32,
 ) -> i32 {
     1
 }
@@ -386,8 +432,11 @@ pub unsafe extern "win64" fn CryptUnprotectMemory(
 /// `pv_reserved` must be null.
 // Wine ref: dlls/crypt32/crypt.c — CryptVerifyCertificateSignatureEx
 pub unsafe extern "win64" fn CryptVerifyCertificateSignatureEx(
-    _h_crypto_prov: usize, _dw_encoding_type: u32, _dw_flags: u32,
-    _pv_aux_info: *const u8, _pv_reserved: *const u8,
+    _h_crypto_prov: usize,
+    _dw_encoding_type: u32,
+    _dw_flags: u32,
+    _pv_aux_info: *const u8,
+    _pv_reserved: *const u8,
 ) -> i32 {
     0
 }
@@ -421,28 +470,27 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
                 as *const () as usize,
         ),
         "CertAddStoreToCollection" => Some(
-            CertAddStoreToCollection as unsafe extern "win64" fn(_, _, _, _) -> _
-                as *const () as usize,
+            CertAddStoreToCollection as unsafe extern "win64" fn(_, _, _, _) -> _ as *const ()
+                as usize,
         ),
         "CertCompareCertificateName" => Some(
-            CertCompareCertificateName as unsafe extern "win64" fn(_, _, _) -> _
-                as *const () as usize,
+            CertCompareCertificateName as unsafe extern "win64" fn(_, _, _) -> _ as *const ()
+                as usize,
         ),
         "CertControlStore" => Some(
-            CertControlStore as unsafe extern "win64" fn(_, _, _, _) -> _
-                as *const () as usize,
+            CertControlStore as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
         ),
         "CertFindCertificateInStore" => Some(
             CertFindCertificateInStore as unsafe extern "win64" fn(_, _, _, _, _, _) -> _
                 as *const () as usize,
         ),
         "CertFindChainInStore" => Some(
-            CertFindChainInStore as unsafe extern "win64" fn(_, _, _, _, _, _) -> _
-                as *const () as usize,
+            CertFindChainInStore as unsafe extern "win64" fn(_, _, _, _, _, _) -> _ as *const ()
+                as usize,
         ),
-        "CertFreeCertificateChain" => Some(
-            CertFreeCertificateChain as unsafe extern "win64" fn(_) -> _ as *const () as usize,
-        ),
+        "CertFreeCertificateChain" => {
+            Some(CertFreeCertificateChain as unsafe extern "win64" fn(_) -> _ as *const () as usize)
+        }
         "CertGetCertificateChain" => Some(
             CertGetCertificateChain as unsafe extern "win64" fn(_, _, _, _, _, _, _, _) -> _
                 as *const () as usize,
@@ -452,18 +500,17 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
                 as *const () as usize,
         ),
         "CertGetNameStringW" => Some(
-            CertGetNameStringW as unsafe extern "win64" fn(_, _, _, _, _, _) -> _
-                as *const () as usize,
+            CertGetNameStringW as unsafe extern "win64" fn(_, _, _, _, _, _) -> _ as *const ()
+                as usize,
         ),
         "CertOpenStore" => Some(
             CertOpenStore as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const () as usize,
         ),
-        "CertOpenSystemStoreW" => Some(
-            CertOpenSystemStoreW as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
-        ),
+        "CertOpenSystemStoreW" => {
+            Some(CertOpenSystemStoreW as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
         "CertVerifyTimeValidity" => Some(
-            CertVerifyTimeValidity as unsafe extern "win64" fn(_, _) -> _
-                as *const () as usize,
+            CertVerifyTimeValidity as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
         ),
         "CryptAcquireCertificatePrivateKey" => Some(
             CryptAcquireCertificatePrivateKey as unsafe extern "win64" fn(_, _, _, _, _, _) -> _
@@ -471,28 +518,25 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         ),
         "CryptMsgClose" => Some(CryptMsgClose as *const () as usize),
         "CryptMsgGetParam" => Some(
-            CryptMsgGetParam as unsafe extern "win64" fn(_, _, _, _, _) -> _
-                as *const () as usize,
+            CryptMsgGetParam as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const () as usize,
         ),
         "CryptProtectData" => Some(
-            CryptProtectData as unsafe extern "win64" fn(_, _, _, _, _, _, _) -> _
-                as *const () as usize,
+            CryptProtectData as unsafe extern "win64" fn(_, _, _, _, _, _, _) -> _ as *const ()
+                as usize,
         ),
-        "CryptProtectMemory" => Some(
-            CryptProtectMemory as unsafe extern "win64" fn(_, _, _) -> _
-                as *const () as usize,
-        ),
+        "CryptProtectMemory" => {
+            Some(CryptProtectMemory as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize)
+        }
         "CryptQueryObject" => Some(
             CryptQueryObject as unsafe extern "win64" fn(_, _, _, _, _, _, _, _, _, _, _) -> _
                 as *const () as usize,
         ),
         "CryptUnprotectData" => Some(
-            CryptUnprotectData as unsafe extern "win64" fn(_, _, _, _, _, _, _) -> _
-                as *const () as usize,
+            CryptUnprotectData as unsafe extern "win64" fn(_, _, _, _, _, _, _) -> _ as *const ()
+                as usize,
         ),
         "CryptUnprotectMemory" => Some(
-            CryptUnprotectMemory as unsafe extern "win64" fn(_, _, _) -> _
-                as *const () as usize,
+            CryptUnprotectMemory as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
         ),
         "CryptVerifyCertificateSignatureEx" => Some(
             CryptVerifyCertificateSignatureEx as unsafe extern "win64" fn(_, _, _, _, _) -> _
@@ -511,9 +555,12 @@ mod tests {
     #[test]
     fn resolve_original_stubs() {
         let funcs = [
-            "CertCloseStore", "CertEnumCertificatesInStore",
-            "CertFreeCertificateContext", "CertGetEnhancedKeyUsage",
-            "CertGetIntendedKeyUsage", "CertOpenSystemStoreA",
+            "CertCloseStore",
+            "CertEnumCertificatesInStore",
+            "CertFreeCertificateContext",
+            "CertGetEnhancedKeyUsage",
+            "CertGetIntendedKeyUsage",
+            "CertOpenSystemStoreA",
             "CertGetNameStringA",
         ];
         for f in &funcs {

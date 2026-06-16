@@ -78,27 +78,19 @@ pub unsafe extern "win64" fn power_read_dc_value(
 pub fn resolve(_dll: &str, func: &str) -> Option<usize> {
     match func {
         "PowerRegisterSuspendResumeNotification" => Some(
-            power_register_suspend_resume_notification
-                as unsafe extern "win64" fn(_, _, _) -> _
-                as *const ()
-                as usize,
+            power_register_suspend_resume_notification as unsafe extern "win64" fn(_, _, _) -> _
+                as *const () as usize,
         ),
         "PowerUnregisterSuspendResumeNotification" => Some(
-            power_unregister_suspend_resume_notification
-                as unsafe extern "win64" fn(_) -> _
-                as *const ()
-                as usize,
+            power_unregister_suspend_resume_notification as unsafe extern "win64" fn(_) -> _
+                as *const () as usize,
         ),
         "PowerReadACValue" => Some(
-            power_read_ac_value
-                as unsafe extern "win64" fn(_, _, _, _, _, _) -> _
-                as *const ()
+            power_read_ac_value as unsafe extern "win64" fn(_, _, _, _, _, _) -> _ as *const ()
                 as usize,
         ),
         "PowerReadDCValue" => Some(
-            power_read_dc_value
-                as unsafe extern "win64" fn(_, _, _, _, _, _) -> _
-                as *const ()
+            power_read_dc_value as unsafe extern "win64" fn(_, _, _, _, _, _) -> _ as *const ()
                 as usize,
         ),
         _ => None,
@@ -126,14 +118,22 @@ mod tests {
 
     #[test]
     fn register_null_handle() {
-        let r = unsafe { power_register_suspend_resume_notification(0, std::ptr::null_mut(), std::ptr::null_mut()) };
+        let r = unsafe {
+            power_register_suspend_resume_notification(
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
         assert_eq!(r, ERROR_SUCCESS);
     }
 
     #[test]
     fn register_writes_zero_handle() {
         let mut handle: usize = 0xDEAD;
-        let r = unsafe { power_register_suspend_resume_notification(0, std::ptr::null_mut(), &mut handle) };
+        let r = unsafe {
+            power_register_suspend_resume_notification(0, std::ptr::null_mut(), &mut handle)
+        };
         assert_eq!(r, ERROR_SUCCESS);
         assert_eq!(handle, 0);
     }
@@ -146,13 +146,31 @@ mod tests {
 
     #[test]
     fn read_ac_value_not_supported() {
-        let r = unsafe { power_read_ac_value(0, std::ptr::null(), std::ptr::null(), std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut()) };
+        let r = unsafe {
+            power_read_ac_value(
+                0,
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
         assert_eq!(r, ERROR_NOT_SUPPORTED);
     }
 
     #[test]
     fn read_dc_value_not_supported() {
-        let r = unsafe { power_read_dc_value(0, std::ptr::null(), std::ptr::null(), std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut()) };
+        let r = unsafe {
+            power_read_dc_value(
+                0,
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
         assert_eq!(r, ERROR_NOT_SUPPORTED);
     }
 }
