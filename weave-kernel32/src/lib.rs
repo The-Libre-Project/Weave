@@ -679,7 +679,7 @@ pub unsafe extern "win64" fn virtual_query(
 pub unsafe extern "win64" fn virtual_alloc(
     lp_address: *mut u8,
     dw_size: usize,
-    _fl_allocation_type: u32,
+    fl_allocation_type: u32,
     fl_protect: u32,
 ) -> *mut u8 {
     let prot = win_prot_to_linux(fl_protect);
@@ -697,6 +697,31 @@ pub unsafe extern "win64" fn virtual_alloc(
         eprintln!("weave: VirtualAlloc(size=0) → NULL");
         return std::ptr::null_mut();
     }
+
+    // ── MEM_COMMIT without MEM_RESERVE ──────────────────────────────────
+    // Windows semantics: the caller already reserved (or system-reserved) the
+    // VA range; now they want physical pages committed at a specific address.
+    // Since Weave's mmap already maps physical pages on every call, change the
+    // protection of the existing mapping with mprotect instead of MAP_FIXED_NOREPLACE
+    // (which fails with EEXIST if pages are already mapped).
+    const MEM_COMMIT: u32 = 0x1000;
+    const MEM_RESERVE: u32 = 0x20000;
+    let is_commit_only =
+        (fl_allocation_type & MEM_COMMIT) != 0 && (fl_allocation_type & MEM_RESERVE) == 0;
+    if !lp_address.is_null() && is_commit_only {
+        // SAFETY: lp_address and dw_size come from the caller who reserved
+        // this region; mprotect only changes protection of already-mapped pages.
+        // dw_size > 0 is enforced by the early-return above.
+        let rc = unsafe { libc::mprotect(lp_address as *mut libc::c_void, dw_size, prot) };
+        if rc == 0 {
+            eprintln!("weave/VirtualAlloc: COMMIT addr={lp_address:p} size={dw_size:#x}");
+            return lp_address;
+        }
+        // mprotect failed — fall through to MAP_FIXED_NOREPLACE.
+        let err = std::io::Error::last_os_error();
+        eprintln!("weave: VirtualAlloc COMMIT mprotect FAILED addr={lp_address:p} size={dw_size:#x} err={err}");
+    }
+
     // SAFETY: mmap with MAP_ANONYMOUS and fd=-1 does not dereference any pointer;
     // passing null (or lp_address) as the hint is always valid.  When lp_address is
     // non-null, MAP_FIXED_NOREPLACE ensures mmap returns MAP_FAILED instead of
@@ -3214,6 +3239,26 @@ pub unsafe extern "win64" fn get_file_information_by_handle(
 // ERROR_CALL_NOT_IMPLEMENTED for FileRemoteProtocolInfo/FileNormalizedNameInfo;
 // ERROR_INVALID_PARAMETER for FileRenameInfo/FileDispositionInfo/FileEndOfFileInfo.
 #[allow(non_upper_case_globals)]
+/// GetFileInformationByName — retrieve file information by path.
+///
+/// Phase A stub — returns FALSE (0). Signal Desktop calls this in its crash
+/// reporter to query file metadata before upload.
+///
+/// Wine ref: dlls/kernelbase/fileinfo.c — GetFileInformationByNameW wraps
+/// NtQueryInformationFile by name; not widely used outside modern UWP apps.
+///
+/// # Safety
+/// `file_name` must be a valid NUL-terminated UTF-16 string; `file_info_buffer`
+/// must point to a buffer of at least `dw_buffer_size` bytes.
+pub unsafe extern "win64" fn get_file_information_by_name(
+    _file_name: *const u16,
+    _file_information_class: u32,
+    _file_info_buffer: *mut u8,
+    _dw_buffer_size: u32,
+) -> i32 {
+    0 // FALSE
+}
+
 pub unsafe extern "win64" fn get_file_information_by_handle_ex(
     h_file: usize,
     file_information_class: u32,
@@ -6017,6 +6062,9 @@ fn is_emulated_dll(key: &str) -> bool {
             | "msvcrt.dll"
             | "psapi.dll"
             | "shcore.dll"
+            | "bcryptprimitives.dll"
+            | "bcrypt.dll"
+            | "powrprof.dll"
     )
 }
 
@@ -11275,6 +11323,16 @@ pub extern "win64" fn fls_get_value(dw_fls_index: u32) -> usize {
     FLS_DATA.with(|d| d.borrow()[dw_fls_index as usize])
 }
 
+/// FlsGetValue2: retrieve value from fiber local storage (Windows 10+ variant).
+///
+/// Same contract as FlsGetValue but exposed via api-ms-win-core-fibers-l1-1-2.
+/// Phase A — delegates to fls_get_value.
+// Wine ref: dlls/kernelbase/thread.c — FlsGetValue2 has identical signature and
+// behavior to FlsGetValue; added in Windows 10 TH2 for the fibers API set.
+pub extern "win64" fn fls_get_value2(dw_fls_index: u32) -> usize {
+    fls_get_value(dw_fls_index)
+}
+
 /// FlsSetValue: store value in fiber local storage slot.
 ///
 /// Values are per-thread — writing from one thread does not affect others.
@@ -14547,6 +14605,7 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "FlsGetValue" => Some(fls_get_value as *const () as usize),
         "FlsSetValue" => Some(fls_set_value as *const () as usize),
         "FlsFree" => Some(fls_free as *const () as usize),
+        "FlsGetValue2" => Some(fls_get_value2 as *const () as usize),
         "InitializeCriticalSectionAndSpinCount" => Some(
             initialize_critical_section_and_spin_count as unsafe extern "win64" fn(_, _) -> _
                 as *const () as usize,
@@ -14677,6 +14736,10 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
             get_file_information_by_handle_ex as unsafe extern "win64" fn(_, _, _, _) -> _
                 as *const () as usize,
         ),
+        "GetFileInformationByName" => Some(
+            get_file_information_by_name as unsafe extern "win64" fn(_, _, _, _) -> _
+                as *const () as usize,
+        ),
         "GetFinalPathNameByHandleW" => Some(
             get_final_path_name_by_handle_w as unsafe extern "win64" fn(_, _, _, _) -> _
                 as *const () as usize,
@@ -14801,6 +14864,7 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
             interlockedpushentryslsit as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
         ),
         "IsValidLocale" => Some(is_valid_locale as *const () as usize),
+        "IsValidLocaleName" => Some(is_valid_locale_name as unsafe extern "win64" fn(_) -> _ as *const () as usize),
         "EnumSystemLocalesW" => {
             Some(enum_system_locales_w as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
         }
@@ -16569,6 +16633,19 @@ pub unsafe extern "win64" fn interlockedpushentryslsit(
 // others call NlsValidateLocale(&lcid, LOCALE_ALLOW_NEUTRAL_NAMES); returns !!result
 pub extern "win64" fn is_valid_locale(_locale: u32, _dw_flags: u32) -> i32 {
     1
+}
+
+/// IsValidLocaleName: return TRUE for any non-null locale name.
+///
+/// # Safety
+/// `lp_locale_name` must be null or point to a valid null-terminated UTF-16 string.
+// Wine ref: dlls/kernelbase/locale.c:6763 — calls NlsValidateLocaleName;
+// returns TRUE for any well-formed locale name string.
+pub unsafe extern "win64" fn is_valid_locale_name(lp_locale_name: *const u16) -> i32 {
+    if lp_locale_name.is_null() {
+        return 0; // FALSE
+    }
+    1 // TRUE
 }
 
 /// EnumSystemLocalesW: call the callback for one fake locale. Returns TRUE.
