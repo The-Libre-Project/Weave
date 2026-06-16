@@ -1,0 +1,9 @@
+[package]
+name = "weave-powrprof"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "powrprof.dll stubs for Weave — power management stubs for Signal Desktop"
+
+[dependencies]

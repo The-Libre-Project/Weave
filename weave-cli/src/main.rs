@@ -111,6 +111,9 @@ fn resolve(dll: &str, func: &str) -> Option<usize> {
         .or_else(|| weave_secur32::resolve(dll, func))
         // bcrypt.dll — CNG random stub (curl.exe entropy fallback)
         .or_else(|| weave_bcrypt::resolve(dll, func))
+        // bcryptprimitives.dll — CNG low-level crypto primitives (Signal/SChannel TLS)
+        .or_else(|| weave_bcryptprimitives::resolve(dll, func))
+        .or_else(|| weave_powrprof::resolve(dll, func))
         .or_else(|| dll_registry::lookup(dll, func))
 }
 

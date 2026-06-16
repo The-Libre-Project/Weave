@@ -1,0 +1,10 @@
+[package]
+name = "weave-bcryptprimitives"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "bcryptprimitives.dll stubs for Weave — CNG cryptographic primitive stubs for Signal Desktop"
+
+[dependencies]
+libc = "0.2"
