@@ -561,6 +561,347 @@ pub extern "win64" fn nt_terminate_process(_process_handle: usize, exit_status: 
     unsafe { libc::exit(exit_status) }
 }
 
+// ── NtDeviceIoControlFile ──────────────────────────────────────────────────────
+
+/// NtDeviceIoControlFile: send a control code to a device driver.
+///
+/// Phase A stub — returns STATUS_NOT_IMPLEMENTED. Callers (Chromium/Signal) check
+/// existence of this function via GetProcAddress to detect a real Windows ntdll
+/// (which always has it). We return a real function pointer that returns
+/// STATUS_NOT_IMPLEMENTED so the existence check passes but any actual I/O
+/// control request will fail cleanly.
+///
+/// # Safety
+/// Caller must ensure all pointer arguments are valid for their declared
+/// buffer sizes (IoStatusBlock, InputBuffer, OutputBuffer, etc.).
+// Wine ref: dlls/ntdll/unix/device.c — NtDeviceIoControlFile delegates to
+// the wine server's IOCTL dispatch; STATUS_NOT_SUPPORTED for unknown codes.
+pub unsafe extern "win64" fn nt_device_io_control_file(
+    _file_handle: usize,
+    _event: usize,
+    _apc_routine: usize,
+    _apc_context: usize,
+    io_status_block: *mut i8,
+    _io_control_code: u32,
+    _input_buffer: *const u8,
+    _input_buffer_len: u32,
+    _output_buffer: *mut u8,
+    _output_buffer_len: u32,
+) -> i32 {
+    if !io_status_block.is_null() {
+        // SAFETY: io_status_block is non-null, caller guarantees alignment.
+        unsafe { *(io_status_block as *mut usize) = STATUS_NOT_IMPLEMENTED as usize };
+    }
+    STATUS_NOT_IMPLEMENTED as i32
+}
+
+// ── NtQueryInformationFile ─────────────────────────────────────────────────────
+
+/// NtQueryInformationFile: query file information by handle.
+///
+/// Phase A stub — returns STATUS_NOT_IMPLEMENTED. Required by Chromium/Signal
+/// during its ntdll capability probe — it checks existence via GetProcAddress
+/// and the check fails (returns NULL) without this function.
+///
+/// # Safety
+/// Caller must ensure `io_status_block` and `file_information` point to buffers
+/// of at least their declared sizes.
+// Wine ref: dlls/ntdll/unix/file.c — NtQueryInformationFile calls
+// server_get_file_info; returns STATUS_NOT_SUPPORTED for unknown info classes.
+pub unsafe extern "win64" fn nt_query_information_file(
+    _file_handle: usize,
+    io_status_block: *mut i8,
+    _file_information: *mut u8,
+    _length: u32,
+    _file_information_class: u32,
+) -> i32 {
+    if !io_status_block.is_null() {
+        // SAFETY: io_status_block is non-null, caller guarantees alignment.
+        unsafe { *(io_status_block as *mut usize) = STATUS_NOT_IMPLEMENTED as usize };
+    }
+    STATUS_NOT_IMPLEMENTED as i32
+}
+
+// ── NtSetInformationFile ──────────────────────────────────────────────────────
+
+/// NtSetInformationFile: set file information by handle.
+///
+/// Phase A stub — returns STATUS_NOT_IMPLEMENTED.
+///
+/// # Safety
+/// Caller must ensure `io_status_block` and `file_information` point to valid
+/// buffers of at least their declared sizes.
+// Wine ref: dlls/ntdll/unix/file.c — NtSetInformationFile calls
+// server_set_file_info; returns STATUS_NOT_SUPPORTED for unknown info classes.
+pub unsafe extern "win64" fn nt_set_information_file(
+    _file_handle: usize,
+    io_status_block: *mut i8,
+    _file_information: *mut u8,
+    _length: u32,
+    _file_information_class: u32,
+) -> i32 {
+    if !io_status_block.is_null() {
+        // SAFETY: io_status_block is non-null, caller guarantees alignment.
+        unsafe { *(io_status_block as *mut usize) = STATUS_NOT_IMPLEMENTED as usize };
+    }
+    STATUS_NOT_IMPLEMENTED as i32
+}
+
+// ── NtQueryInformationToken ────────────────────────────────────────────────────
+
+/// NtQueryInformationToken: query token information.
+///
+/// Phase A stub — returns STATUS_NOT_IMPLEMENTED.
+///
+/// # Safety
+/// Caller must ensure `token_information` points to a valid buffer.
+// Wine ref: dlls/ntdll/unix/token.c — NtQueryInformationToken calls
+// server_get_token_info; STATUS_NOT_SUPPORTED for unknown info classes.
+pub unsafe extern "win64" fn nt_query_information_token(
+    _token_handle: usize,
+    _token_information_class: u32,
+    _token_information: *mut u8,
+    _token_information_length: u32,
+    _return_length: *mut u32,
+) -> i32 {
+    STATUS_NOT_IMPLEMENTED as i32
+}
+
+// ── NtDuplicateObject ──────────────────────────────────────────────────────────
+
+/// NtDuplicateObject: duplicate an object handle.
+///
+/// Phase A stub — returns STATUS_NOT_IMPLEMENTED.
+///
+/// # Safety
+/// Caller must ensure all pointer arguments are valid.
+// Wine ref: dlls/ntdll/unix/server.c — NtDuplicateObject calls
+// server_duplicate_handle; returns proper error for invalid source handle.
+pub unsafe extern "win64" fn nt_duplicate_object(
+    _source_process_handle: usize,
+    _source_handle: usize,
+    _target_process_handle: usize,
+    _target_handle: *mut usize,
+    _desired_access: u32,
+    _handle_attributes: u32,
+    _options: u32,
+) -> i32 {
+    STATUS_NOT_IMPLEMENTED as i32
+}
+
+// ── NtQueryVolumeInformationFile ──────────────────────────────────────────────
+
+/// NtQueryVolumeInformationFile: query volume information by file handle.
+///
+/// Phase A stub — returns STATUS_NOT_IMPLEMENTED.
+///
+/// # Safety
+/// Caller must ensure `io_status_block` and `volume_information` point to
+/// valid buffers.
+// Wine ref: dlls/ntdll/unix/file.c — NtQueryVolumeInformationFile returns
+// STATUS_NOT_SUPPORTED for unknown info classes.
+pub unsafe extern "win64" fn nt_query_volume_information_file(
+    _file_handle: usize,
+    io_status_block: *mut i8,
+    _volume_information: *mut u8,
+    _length: u32,
+    _fs_information_class: u32,
+) -> i32 {
+    if !io_status_block.is_null() {
+        // SAFETY: io_status_block is non-null, caller guarantees alignment.
+        unsafe { *(io_status_block as *mut usize) = STATUS_NOT_IMPLEMENTED as usize };
+    }
+    STATUS_NOT_IMPLEMENTED as i32
+}
+
+// ── NtQueryDirectoryFile ──────────────────────────────────────────────────────
+
+/// NtQueryDirectoryFile: query directory file information.
+///
+/// Phase A stub — returns STATUS_NOT_IMPLEMENTED.
+///
+/// # Safety
+/// Caller must ensure all pointer arguments are valid.
+// Wine ref: dlls/ntdll/unix/file.c — NtQueryDirectoryFile returns
+// STATUS_NO_MORE_FILES when no more entries exist.
+pub unsafe extern "win64" fn nt_query_directory_file(
+    _file_handle: usize,
+    _event: usize,
+    _apc_routine: usize,
+    _apc_context: usize,
+    io_status_block: *mut i8,
+    _file_information: *mut u8,
+    _length: u32,
+    _file_information_class: u32,
+    _return_single_entry: u8,
+    _file_name: *const u16,
+    _restart_scan: u8,
+) -> i32 {
+    if !io_status_block.is_null() {
+        // SAFETY: io_status_block is non-null, caller guarantees alignment.
+        unsafe { *(io_status_block as *mut usize) = STATUS_NOT_IMPLEMENTED as usize };
+    }
+    STATUS_NOT_IMPLEMENTED as i32
+}
+
+// ── NtCreateSection ──────────────────────────────────────────────────────────
+
+/// NtCreateSection: create a section object.
+///
+/// Phase A stub — returns STATUS_NOT_IMPLEMENTED.
+///
+/// # Safety
+/// Caller must ensure all pointer arguments are valid.
+// Wine ref: dlls/ntdll/unix/file.c — NtCreateSection creates a file mapping.
+pub unsafe extern "win64" fn nt_create_section(
+    _section_handle: *mut usize,
+    _desired_access: u32,
+    _object_attributes: *mut u8,
+    _maximum_size: *mut i64,
+    _section_page_protection: u32,
+    _allocation_attributes: u32,
+    _file_handle: usize,
+) -> i32 {
+    STATUS_NOT_IMPLEMENTED as i32
+}
+
+// ── NtMapViewOfSection ───────────────────────────────────────────────────────
+
+/// NtMapViewOfSection: map a view of a section object into virtual address space.
+///
+/// Phase A stub — returns STATUS_NOT_IMPLEMENTED.
+///
+/// # Safety
+/// Caller must ensure all pointer arguments are valid.
+// Wine ref: dlls/ntdll/unix/virtual.c — NtMapViewOfSection calls mmap.
+pub unsafe extern "win64" fn nt_map_view_of_section(
+    _section_handle: usize,
+    _process_handle: usize,
+    _base_address: *mut *mut u8,
+    _zero_bits: usize,
+    _commit_size: usize,
+    _section_offset: *mut i64,
+    _view_size: *mut usize,
+    _inherit_disposition: u32,
+    _allocation_type: u32,
+    _win32_protect: u32,
+) -> i32 {
+    STATUS_NOT_IMPLEMENTED as i32
+}
+
+// ── NtUnmapViewOfSection ─────────────────────────────────────────────────────
+
+/// NtUnmapViewOfSection: unmap a view of a section.
+///
+/// Phase A stub — returns STATUS_NOT_IMPLEMENTED.
+///
+/// # Safety
+/// Caller must ensure `base_address` is a valid mapped address.
+// Wine ref: dlls/ntdll/unix/virtual.c — NtUnmapViewOfSection calls munmap.
+pub unsafe extern "win64" fn nt_unmap_view_of_section(
+    _process_handle: usize,
+    _base_address: *mut u8,
+) -> i32 {
+    STATUS_NOT_IMPLEMENTED as i32
+}
+
+// ── NtOpenProcessToken ───────────────────────────────────────────────────────
+
+/// NtOpenProcessToken: open the access token of a process.
+///
+/// Phase A stub — returns STATUS_NOT_IMPLEMENTED.
+///
+/// # Safety
+/// Caller must ensure `token_handle` is non-null and writable.
+// Wine ref: dlls/ntdll/unix/token.c — NtOpenProcessToken calls
+// server_open_token; returns STATUS_ACCESS_DENIED for system PID 4.
+pub unsafe extern "win64" fn nt_open_process_token(
+    _process_handle: usize,
+    _desired_access: u32,
+    _token_handle: *mut usize,
+) -> i32 {
+    STATUS_NOT_IMPLEMENTED as i32
+}
+
+// ── NtOpenThreadToken ────────────────────────────────────────────────────────
+
+/// NtOpenThreadToken: open the access token of a thread.
+///
+/// Phase A stub — returns STATUS_NOT_IMPLEMENTED.
+///
+/// # Safety
+/// Caller must ensure `token_handle` is non-null and writable.
+// Wine ref: dlls/ntdll/unix/token.c — NtOpenThreadToken returns
+// STATUS_NO_TOKEN if the thread has no impersonation token.
+pub unsafe extern "win64" fn nt_open_thread_token(
+    _thread_handle: usize,
+    _desired_access: u32,
+    _open_as_self: u8,
+    _token_handle: *mut usize,
+) -> i32 {
+    STATUS_NOT_IMPLEMENTED as i32
+}
+
+// ── NtOpenProcess ────────────────────────────────────────────────────────────
+
+/// NtOpenProcess: open a handle to a process.
+///
+/// Phase A stub — returns STATUS_NOT_IMPLEMENTED.
+///
+/// # Safety
+/// Caller must ensure `process_handle` is non-null and writable.
+// Wine ref: dlls/ntdll/unix/process.c — NtOpenProcess returns
+// STATUS_INVALID_PARAMETER for invalid client ID.
+pub unsafe extern "win64" fn nt_open_process(
+    _process_handle: *mut usize,
+    _desired_access: u32,
+    _object_attributes: *mut u8,
+) -> i32 {
+    STATUS_NOT_IMPLEMENTED as i32
+}
+
+// ── NtCreateThreadEx ─────────────────────────────────────────────────────────
+
+/// NtCreateThreadEx: create a new thread.
+///
+/// Phase A stub — returns STATUS_NOT_IMPLEMENTED.
+///
+/// # Safety
+/// Caller must ensure all pointer arguments are valid.
+// Wine ref: dlls/ntdll/unix/thread.c — NtCreateThreadEx creates a
+// new thread with a specified start address.
+pub unsafe extern "win64" fn nt_create_thread_ex(
+    _thread_handle: *mut usize,
+    _desired_access: u32,
+    _object_attributes: *mut u8,
+    _process_handle: usize,
+    _start_routine: usize,
+    _argument: *mut u8,
+    _create_flags: u32,
+    _zero_bits: usize,
+    _stack_size: usize,
+    _maximum_stack_size: usize,
+) -> i32 {
+    STATUS_NOT_IMPLEMENTED as i32
+}
+
+// ── NtResumeThread ──────────────────────────────────────────────────────────
+
+/// NtResumeThread: resume a suspended thread.
+///
+/// Phase A stub — returns STATUS_NOT_IMPLEMENTED.
+///
+/// # Safety
+/// Caller must ensure `suspend_count` is non-null or valid to skip.
+// Wine ref: dlls/ntdll/unix/thread.c — NtResumeThread decrements the
+// suspend count and returns the previous count.
+pub unsafe extern "win64" fn nt_resume_thread(
+    _thread_handle: usize,
+    _suspend_count: *mut u32,
+) -> i32 {
+    STATUS_NOT_IMPLEMENTED as i32
+}
+
 // ── RTL heap functions ────────────────────────────────────────────────────────
 
 // Wine ref: dlls/ntdll/heap.c:2038 — uses heap_get_block_size which returns ~0U for size==0
@@ -1859,6 +2200,83 @@ pub fn resolve(func: &str) -> Option<usize> {
             nt_query_object as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const () as usize,
         ),
         "RtlGetLastNtStatus" => Some(rtl_get_last_nt_status as *const () as usize),
+        // NtDeviceIoControlFile — device I/O control (Signal/Chromium capability check)
+        "NtDeviceIoControlFile" => Some(
+            nt_device_io_control_file
+                as unsafe extern "win64" fn(_, _, _, _, _, _, _, _, _, _) -> _
+                as *const () as usize,
+        ),
+        "NtQueryInformationFile" => Some(
+            nt_query_information_file
+                as unsafe extern "win64" fn(_, _, _, _, _) -> _
+                as *const () as usize,
+        ),
+        "NtSetInformationFile" => Some(
+            nt_set_information_file
+                as unsafe extern "win64" fn(_, _, _, _, _) -> _
+                as *const () as usize,
+        ),
+        // Chromium sandbox/capability probe — need to exist with a real pointer
+        "NtQueryInformationToken" => Some(
+            nt_query_information_token
+                as unsafe extern "win64" fn(_, _, _, _, _) -> _
+                as *const () as usize,
+        ),
+        "NtDuplicateObject" => Some(
+            nt_duplicate_object
+                as unsafe extern "win64" fn(_, _, _, _, _, _, _) -> _
+                as *const () as usize,
+        ),
+        "NtQueryVolumeInformationFile" => Some(
+            nt_query_volume_information_file
+                as unsafe extern "win64" fn(_, _, _, _, _) -> _
+                as *const () as usize,
+        ),
+        "NtQueryDirectoryFile" => Some(
+            nt_query_directory_file
+                as unsafe extern "win64" fn(_, _, _, _, _, _, _, _, _, _, _) -> _
+                as *const () as usize,
+        ),
+        "NtCreateSection" => Some(
+            nt_create_section
+                as unsafe extern "win64" fn(_, _, _, _, _, _, _) -> _
+                as *const () as usize,
+        ),
+        "NtMapViewOfSection" => Some(
+            nt_map_view_of_section
+                as unsafe extern "win64" fn(_, _, _, _, _, _, _, _, _, _) -> _
+                as *const () as usize,
+        ),
+        "NtUnmapViewOfSection" => Some(
+            nt_unmap_view_of_section
+                as unsafe extern "win64" fn(_, _) -> _
+                as *const () as usize,
+        ),
+        "NtOpenProcessToken" => Some(
+            nt_open_process_token
+                as unsafe extern "win64" fn(_, _, _) -> _
+                as *const () as usize,
+        ),
+        "NtOpenThreadToken" => Some(
+            nt_open_thread_token
+                as unsafe extern "win64" fn(_, _, _, _) -> _
+                as *const () as usize,
+        ),
+        "NtOpenProcess" => Some(
+            nt_open_process
+                as unsafe extern "win64" fn(_, _, _) -> _
+                as *const () as usize,
+        ),
+        "NtCreateThreadEx" => Some(
+            nt_create_thread_ex
+                as unsafe extern "win64" fn(_, _, _, _, _, _, _, _, _, _) -> _
+                as *const () as usize,
+        ),
+        "NtResumeThread" => Some(
+            nt_resume_thread
+                as unsafe extern "win64" fn(_, _) -> _
+                as *const () as usize,
+        ),
         _ => None,
     }
 }
