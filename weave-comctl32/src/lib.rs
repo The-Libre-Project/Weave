@@ -707,8 +707,8 @@ extern "win64" fn listview_wnd_proc(
         LVM_DELETEITEM => {
             let mut map = get_state().lock().unwrap();
             if let Some(ComctlState::ListView(ref mut state)) = map.get_mut(&hwnd) {
-                if (w_param as usize) < state.items.len() {
-                    state.items.remove(w_param as usize);
+                if w_param < state.items.len() {
+                    state.items.remove(w_param);
                     1
                 } else {
                     0
@@ -860,7 +860,7 @@ extern "win64" fn listview_wnd_proc(
                     3 /* LVM_GETVIEW */
                 };
             }
-            let col_idx = w_param as usize;
+            let col_idx = w_param;
             let base = l_param as usize;
             if base == 0 {
                 return 0;
@@ -909,7 +909,7 @@ extern "win64" fn listview_wnd_proc(
             }
         }
         LVM_SETCOLUMNW => {
-            let col_idx = w_param as usize;
+            let col_idx = w_param;
             let base = l_param as usize;
             if base == 0 {
                 return 0;
@@ -959,7 +959,7 @@ extern "win64" fn listview_wnd_proc(
             // Otherwise treat as width result (GETCOLUMNWIDTH).
             if (l_param as usize) > 1024 {
                 // LVM_INSERTCOLUMNW
-                let col_idx = w_param as usize;
+                let col_idx = w_param;
                 let base = l_param as usize;
                 if base == 0 {
                     return -1;
@@ -1003,7 +1003,7 @@ extern "win64" fn listview_wnd_proc(
                 }
             } else {
                 // LVM_GETCOLUMNWIDTH
-                let col_idx = w_param as usize;
+                let col_idx = w_param;
                 let map = get_state().lock().unwrap();
                 if let Some(ComctlState::ListView(ref state)) = map.get(&hwnd) {
                     if col_idx < state.columns.len() {
@@ -1017,7 +1017,7 @@ extern "win64" fn listview_wnd_proc(
             }
         }
         LVM_SETCOLUMNWIDTH => {
-            let col_idx = w_param as usize;
+            let col_idx = w_param;
             let mut map = get_state().lock().unwrap();
             if let Some(ComctlState::ListView(ref mut state)) = map.get_mut(&hwnd) {
                 let new_width = if l_param as i32 == LVSCW_AUTOSIZE
