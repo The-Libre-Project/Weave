@@ -1804,6 +1804,216 @@ pub unsafe extern "win64" fn validate_rect(hwnd: usize, _lp_rect: *const Rect) -
     1
 }
 
+// ── Q-Dir stubs ───────────────────────────────────────────────────────────────
+
+/// SetMenuDefaultItem: set the default menu item.
+///
+/// Stub: no-op for menu customization. Returns TRUE (1).
+///
+/// # Safety
+/// `hmenu` is not dereferenced.
+// Wine ref: dlls/user32/menu.c — sets the default menu item by index or ID
+pub unsafe extern "win64" fn set_menu_default_item(
+    _hmenu: usize,
+    _u_item: u32,
+    _f_by_pos: i32,
+) -> i32 {
+    1 // TRUE
+}
+
+/// SetScrollPos: set the scroll position of a scroll bar.
+///
+/// Stub: returns 0 (previous position).
+///
+/// # Safety
+/// `hwnd` is not dereferenced.
+// Wine ref: dlls/user32/scroll.c — SetScrollPos sets nPos and sends WM_NCHITTEST
+pub unsafe extern "win64" fn set_scroll_pos(
+    _hwnd: usize,
+    _n_bar: i32,
+    _n_pos: i32,
+    _b_redraw: i32,
+) -> i32 {
+    0
+}
+
+/// GetScrollPos: get the current scroll position.
+///
+/// Stub: returns 0 (at top/left).
+///
+/// # Safety
+/// `hwnd` is not dereferenced.
+// Wine ref: dlls/user32/scroll.c — returns the current nPos from the scroll info
+pub unsafe extern "win64" fn get_scroll_pos(_hwnd: usize, _n_bar: i32) -> i32 {
+    0
+}
+
+/// GetMenuDefaultItem: retrieve the default menu item.
+///
+/// Stub: returns -1 (no default item).
+///
+/// # Safety
+/// `hmenu` is not dereferenced.
+// Wine ref: dlls/user32/menu.c — returns uItem from menu state or -1
+pub unsafe extern "win64" fn get_menu_default_item(
+    _hmenu: usize,
+    _f_by_pos: i32,
+    _flags: u32,
+) -> u32 {
+    !0u32 // -1 as u32 (no default item)
+}
+
+/// IsMenu: check whether a handle is a menu handle.
+///
+/// Stub: returns FALSE (0).
+///
+/// # Safety
+/// `hmenu` is not dereferenced.
+// Wine ref: dlls/user32/menu.c — checks handle table for MENU-type
+pub unsafe extern "win64" fn is_menu(_hmenu: usize) -> i32 {
+    0
+}
+
+/// IntersectRect: compute the intersection of two rectangles.
+///
+/// Computes lprcSrc1 ∩ lprcSrc2 into lprcDst. Returns TRUE (1) if the
+/// intersection is non-empty, FALSE (0) if empty (in which case lprcDst
+/// is zeroed).
+///
+/// # Safety
+/// All three pointers must be valid: lprcDst writable, lprcSrc1 and
+/// lprcSrc2 readable.
+// Wine ref: dlls/user32/rect.c — IntersectRect uses min/max of coordinates
+pub unsafe extern "win64" fn intersect_rect(
+    lprc_dst: *mut Rect,
+    lprc_src1: *const Rect,
+    lprc_src2: *const Rect,
+) -> i32 {
+    if lprc_dst.is_null() || lprc_src1.is_null() || lprc_src2.is_null() {
+        return 0;
+    }
+    let src1_left = unsafe { (*lprc_src1).left };
+    let src1_top = unsafe { (*lprc_src1).top };
+    let src1_right = unsafe { (*lprc_src1).right };
+    let src1_bottom = unsafe { (*lprc_src1).bottom };
+    let src2_left = unsafe { (*lprc_src2).left };
+    let src2_top = unsafe { (*lprc_src2).top };
+    let src2_right = unsafe { (*lprc_src2).right };
+    let src2_bottom = unsafe { (*lprc_src2).bottom };
+    let left = src1_left.max(src2_left);
+    let top = src1_top.max(src2_top);
+    let right = src1_right.min(src2_right);
+    let bottom = src1_bottom.min(src2_bottom);
+    if left >= right || top >= bottom {
+        unsafe {
+            (*lprc_dst).left = 0;
+            (*lprc_dst).top = 0;
+            (*lprc_dst).right = 0;
+            (*lprc_dst).bottom = 0;
+        }
+        return 0;
+    }
+    unsafe {
+        (*lprc_dst).left = left;
+        (*lprc_dst).top = top;
+        (*lprc_dst).right = right;
+        (*lprc_dst).bottom = bottom;
+    }
+    1
+}
+
+/// EqualRect: test whether two rectangles are equal.
+///
+/// Stub: returns FALSE (0) — "not equal". Safe default for Q-Dir initial layout.
+///
+/// # Safety
+/// `lprc1` and `lprc2` must be valid readable pointers.
+// Wine ref: dlls/user32/rect.c — EqualRect compares all four fields
+pub unsafe extern "win64" fn equal_rect(lprc1: *const Rect, lprc2: *const Rect) -> i32 {
+    if lprc1.is_null() || lprc2.is_null() {
+        return 0;
+    }
+    let ok = unsafe {
+        (*lprc1).left == (*lprc2).left
+            && (*lprc1).top == (*lprc2).top
+            && (*lprc1).right == (*lprc2).right
+            && (*lprc1).bottom == (*lprc2).bottom
+    };
+    if ok {
+        1
+    } else {
+        0
+    }
+}
+
+/// MapWindowPoints: translate (map) a set of points from one window's coordinate
+/// space to another.
+///
+/// Stub: returns 0 (identity transform). Safe for Q-Dir initial layout.
+///
+/// # Safety
+/// `hwnd_from` and `hwnd_to` are not dereferenced. `pts` is not dereferenced.
+// Wine ref: dlls/user32/winpos.c — MapWindowPoints calls NtUserMapWindowPoints
+pub unsafe extern "win64" fn map_window_points(
+    _hwnd_from: usize,
+    _hwnd_to: usize,
+    _pts: *mut u8,
+    _c_pts: u32,
+) -> i32 {
+    0
+}
+
+/// SetClassLongW: set a window class long value.
+///
+/// Stub: returns 0 (unchanged).
+///
+/// # Safety
+/// `hwnd` is not dereferenced.
+// Wine ref: dlls/user32/class.c — SetClassLongW modifies the class extra bytes
+pub unsafe extern "win64" fn set_class_long_w(
+    _hwnd: usize,
+    _index: i32,
+    _new_long: isize,
+) -> isize {
+    0
+}
+
+/// ScrollWindowEx: scroll the content of a window.
+///
+/// Stub: returns 0 (no scrolling done).
+///
+/// # Safety
+/// All pointer arguments are not dereferenced.
+// Wine ref: dlls/user32/painting.c — ScrollWindowEx scrolls client area
+pub unsafe extern "win64" fn scroll_window_ex(
+    _hwnd: usize,
+    _dx: i32,
+    _dy: i32,
+    _prc_scroll: *mut u8,
+    _prc_clip: *mut u8,
+    _hrgn_update: usize,
+    _prc_update: *mut u8,
+    _flags: u32,
+) -> isize {
+    0
+}
+
+/// RedrawWindow: refresh a window or a region.
+///
+/// Stub: fire-and-forget invalidation — returns TRUE (1).
+///
+/// # Safety
+/// `_hwnd` and `_region` are not dereferenced. `_rect` is not dereferenced.
+// Wine ref: dlls/user32/painting.c — RedrawWindow invalidates the window
+pub unsafe extern "win64" fn redraw_window(
+    _hwnd: usize,
+    _rect: *const Rect,
+    _region: usize,
+    _flags: u32,
+) -> i32 {
+    1 // TRUE
+}
+
 /// CopyImage: duplicate an HICON / HCURSOR / HBITMAP. Returns a new handle
 /// referencing the same underlying resource bytes (which live for the
 /// originating module's lifetime — same invariant `LoadImageW` relies on).

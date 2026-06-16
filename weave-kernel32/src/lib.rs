@@ -15399,6 +15399,28 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "Wow64GetThreadContext" => Some(
             wow64_get_thread_context as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
         ),
+        // ── Q-Dir stubs ──
+        "IsBadReadPtr" => {
+            Some(is_bad_read_ptr as extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "IsBadWritePtr" => {
+            Some(is_bad_write_ptr as extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "IsBadCodePtr" => Some(is_bad_code_ptr as extern "win64" fn(_) -> _ as *const () as usize),
+        "EnumDateFormatsW" => Some(
+            enum_date_formats_w as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
+        ),
+        "EnumTimeFormatsW" => Some(
+            enum_time_formats_w as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
+        ),
+        "GlobalHandle" => Some(global_handle as extern "win64" fn(_) -> _ as *const () as usize),
+        "SetVolumeLabelW" => {
+            Some(set_volume_label_w as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "GetNumberFormatW" => Some(
+            get_number_format_w as unsafe extern "win64" fn(_, _, _, _, _, _) -> _ as *const ()
+                as usize,
+        ),
         _ => {
             // version.dll functions are forwarded through kernel32 in some apps;
             // also handle them when the DLL name is version.dll directly.
@@ -16107,6 +16129,102 @@ pub extern "win64" fn set_std_handle(n_std_handle: u32, h_handle: usize) -> i32 
     };
     STD_HANDLE_OVERRIDES[slot].store(h_handle, Ordering::Relaxed);
     1
+}
+
+// ── Q-Dir stubs ───────────────────────────────────────────────────────────────
+
+/// IsBadReadPtr: check whether a pointer is readable.
+///
+/// Weave manages the guest address space, so all pointers within it are readable.
+/// Returns FALSE (0).
+// Wine ref: dlls/kernelbase/heap.c — IsBadReadPtr probes the first byte; returns 0 if accessible
+pub extern "win64" fn is_bad_read_ptr(_lp: *const u8, _cb: usize) -> i32 {
+    0
+}
+
+/// IsBadWritePtr: check whether a pointer is writable.
+///
+/// Weave manages the guest address space, so all pointers within it are writable.
+/// Returns FALSE (0).
+// Wine ref: dlls/kernelbase/heap.c — IsBadWritePtr probes write access; returns 0 if writable
+pub extern "win64" fn is_bad_write_ptr(_lp: *mut u8, _cb: usize) -> i32 {
+    0
+}
+
+/// IsBadCodePtr: check whether a function pointer is valid code.
+///
+/// Weave manages the guest address space, so all function pointers within it are valid.
+/// Returns FALSE (0).
+// Wine ref: dlls/kernelbase/heap.c — IsBadCodePtr probes the code entry point
+pub extern "win64" fn is_bad_code_ptr(_proc: usize) -> i32 {
+    0
+}
+
+/// EnumDateFormatsW: enumerate locale date formats.
+///
+/// Stub: returns 0 (end of enumeration) without calling the callback.
+///
+/// # Safety
+/// `_lp_date_fmt_enum` is not called.
+// Wine ref: dlls/kernelbase/nls.c — calls the callback for each available date format
+pub unsafe extern "win64" fn enum_date_formats_w(
+    _lp_date_fmt_enum: unsafe extern "win64" fn(*const u16, u32, usize) -> i32,
+    _locale: u32,
+    _flags: u32,
+) -> i32 {
+    0
+}
+
+/// EnumTimeFormatsW: enumerate locale time formats.
+///
+/// Stub: returns 0 (end of enumeration) without calling the callback.
+///
+/// # Safety
+/// `_lp_time_fmt_enum` is not called.
+// Wine ref: dlls/kernelbase/nls.c — calls the callback for each available time format
+pub unsafe extern "win64" fn enum_time_formats_w(
+    _lp_time_fmt_enum: unsafe extern "win64" fn(*const u16, usize) -> i32,
+    _locale: u32,
+    _flags: u32,
+) -> i32 {
+    0
+}
+
+/// GlobalHandle: retrieve the handle associated with a global memory object.
+///
+/// Stub: returns 0 (invalid handle).
+// Wine ref: dlls/kernelbase/heap.c — GlobalHandle walks the heap entry to find the GMEM handle
+pub extern "win64" fn global_handle(_mem: usize) -> usize {
+    0
+}
+
+/// SetVolumeLabelW: set the label of a volume.
+///
+/// Stub: volume label changes are not supported. Returns FALSE (0).
+///
+/// # Safety
+/// `_lp_root` and `_lp_name` are not dereferenced.
+// Wine ref: dlls/kernelbase/volume.c — calls SetVolumeLabelW via NtSetVolumeMountPoint
+pub unsafe extern "win64" fn set_volume_label_w(_lp_root: *const u16, _lp_name: *const u16) -> i32 {
+    0
+}
+
+/// GetNumberFormatW: format a number string according to locale.
+///
+/// Stub: returns 0 (number of formatted characters; 0 = not formatted).
+///
+/// # Safety
+/// `_lp_value`, `_lp_format`, and `_lp_number_str` are not dereferenced.
+// Wine ref: dlls/kernelbase/nls.c — GetNumberFormatW builds a NUMBERFMTW from thread locale
+pub unsafe extern "win64" fn get_number_format_w(
+    _locale: u32,
+    _flags: u32,
+    _lp_value: *const u16,
+    _lp_format: *const u8,
+    _lp_number_str: *mut u16,
+    _cch_number: i32,
+) -> i32 {
+    0
 }
 
 /// DeleteFileA: ANSI variant of DeleteFileW.

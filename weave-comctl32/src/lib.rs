@@ -2035,6 +2035,21 @@ pub unsafe extern "win64" fn image_list_set_flags(himl: usize, flags: u32) -> u3
     }
 }
 
+/// ImageList_GetImageInfo — retrieve information about an image in an image list.
+///
+/// Stub: returns FALSE (0). No image info is provided.
+///
+/// # Safety
+/// `himl` must be a valid handle. `pii` is ignored.
+/// Wine ref: dlls/comctl32/imagelist.c — fills IMAGEINFO struct from the image list entry
+pub unsafe extern "win64" fn image_list_get_image_info(
+    _himl: usize,
+    _i: i32,
+    _pii: *mut u8,
+) -> i32 {
+    0
+}
+
 // ── TaskDialog ─────────────────────────────────────────────────────────────────
 
 /// TaskDialogIndirect: create and show a task dialog (stub).
@@ -2136,6 +2151,10 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "#345" => Some(task_dialog_indirect as *const () as usize),
         "TaskDialogIndirect" => Some(task_dialog_indirect as *const () as usize),
         "TaskDialog" => Some(task_dialog as *const () as usize),
+        "ImageList_GetImageInfo" => Some(
+            image_list_get_image_info as unsafe extern "win64" fn(_, _, _) -> _ as *const ()
+                as usize,
+        ),
         _ => None,
     }
 }
@@ -2206,6 +2225,7 @@ mod tests {
             "CreatePropertySheetPageW",
             "CreatePropertySheetPageA",
             "DestroyPropertySheetPage",
+            "ImageList_GetImageInfo",
         ];
         for f in &funcs {
             assert!(resolve("comctl32.dll", f).is_some(), "missing: {f}");

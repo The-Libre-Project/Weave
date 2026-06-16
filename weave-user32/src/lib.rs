@@ -1381,6 +1381,42 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
             api::find_window_ex_w as unsafe extern "win64" fn(_, _, _, _) -> _ as *const ()
                 as usize,
         ),
+        // ── Q-Dir stubs ──
+        "SetMenuDefaultItem" => Some(
+            api::set_menu_default_item as unsafe extern "win64" fn(_, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "SetScrollPos" => Some(
+            api::set_scroll_pos as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
+        ),
+        "GetScrollPos" => {
+            Some(api::get_scroll_pos as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "GetMenuDefaultItem" => Some(
+            api::get_menu_default_item as unsafe extern "win64" fn(_, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "IsMenu" => Some(api::is_menu as unsafe extern "win64" fn(_) -> _ as *const () as usize),
+        "IntersectRect" => Some(
+            api::intersect_rect as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
+        ),
+        "EqualRect" => {
+            Some(api::equal_rect as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "MapWindowPoints" => Some(
+            api::map_window_points as unsafe extern "win64" fn(_, _, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "SetClassLongW" => Some(
+            api::set_class_long_w as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
+        ),
+        "ScrollWindowEx" => Some(
+            api::scroll_window_ex as unsafe extern "win64" fn(_, _, _, _, _, _, _, _) -> _
+                as *const () as usize,
+        ),
+        "RedrawWindow" => Some(
+            api::redraw_window as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
+        ),
         _ => None,
     }
 }
