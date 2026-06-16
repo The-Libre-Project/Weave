@@ -2505,10 +2505,7 @@ pub extern "win64" fn heap_alloc(
 }
 
 /// Direct mmap path for large allocations (>= 32 MB).
-fn heap_alloc_direct(
-    alloc_size: usize,
-    total_size: usize,
-) -> *mut std::ffi::c_void {
+fn heap_alloc_direct(alloc_size: usize, total_size: usize) -> *mut std::ffi::c_void {
     let mapped_size = (total_size + 4095) & !4095;
     let ptr = unsafe {
         libc::mmap(
@@ -2531,10 +2528,7 @@ fn heap_alloc_direct(
 }
 
 /// Slab sub-allocation path for normal-size allocations.
-fn heap_alloc_slab(
-    alloc_size: usize,
-    total_size: usize,
-) -> *mut std::ffi::c_void {
+fn heap_alloc_slab(alloc_size: usize, total_size: usize) -> *mut std::ffi::c_void {
     let mut slabs = heap_slabs().lock().unwrap();
 
     // Try to bump-allocate from an existing slab with space.
