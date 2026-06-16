@@ -22,6 +22,47 @@ use std::sync::{Arc, Mutex, OnceLock};
 /// same address can be legally freed again after a re-allocation.
 static LAST_HEAP_FREE: AtomicUsize = AtomicUsize::new(0);
 
+// ── MAP_32BIT Slab Allocator ────────────────────────────────────────────────
+// Q-Dir_x64.exe uses a custom heap manager that stores pool offsets as DWORDs,
+// truncating 64-bit pointers. We need MAP_32BIT addresses (<4 GiB) for all heap
+// allocations.  But doing one mmap per HeapAlloc call wastes a full 4K page per
+// small allocation, rapidly exhausting the 4 GiB address space (IrfanView CRT
+// startup regression, 2026-06-16 CI run 27629906338).
+//
+// Solution: bump-pointer slab allocator.  Large MAP_32BIT regions are mapped
+// once, and small allocations are sub-allocated within them.  Free is a no-op
+// for slab blocks (acceptable: process lifetime ≈ guest lifetime).
+//
+// Header (8 bytes at ptr-8):
+//   bits [0..62]: alloc_size (63 bits, max ~9 EB)
+//   bit  63:      DIRECT flag (1 = per-allocation mmap, 0 = slab sub-alloc)
+
+const HEAP_SLAB_SIZE: usize = 64 * 1024 * 1024; // 64 MB per slab
+const MAP_32BIT: i32 = 0x40;
+
+struct HeapSlab {
+    base: *mut u8,
+    bump: usize,
+    capacity: usize,
+}
+
+// SAFETY: HeapSlab is only accessed behind the Mutex in heap_slabs().
+unsafe impl Send for HeapSlab {}
+unsafe impl Sync for HeapSlab {}
+
+fn heap_slabs() -> &'static Mutex<Vec<HeapSlab>> {
+    static SLABS: OnceLock<Mutex<Vec<HeapSlab>>> = OnceLock::new();
+    SLABS.get_or_init(|| Mutex::new(Vec::with_capacity(4)))
+}
+
+fn is_direct(header: usize) -> bool {
+    header & (1 << 63) != 0
+}
+
+fn alloc_size_from_header(header: usize) -> usize {
+    header & !(1 << 63)
+}
+
 /// Process-global top-level exception filter installed via SetUnhandledExceptionFilter.
 /// 0 means no handler installed (default: no filter).
 static UEF_HANDLER: AtomicUsize = AtomicUsize::new(0);
@@ -2438,31 +2479,37 @@ pub extern "win64" fn heap_destroy(_h_heap: usize) -> i32 {
 ///
 /// Wine ref: dlls/kernelbase/memory.c — HeapAlloc delegates to RtlAllocateHeap;
 /// HEAP_ZERO_MEMORY (0x08) zeroes the block; size=0 returns a valid non-NULL pointer.
-/// Weave uses mmap(MAP_32BIT) so returned addresses fit in 32-bit DWORDs
-/// (required by guests like Q-Dir_x64.exe that truncate heap pointers).
+/// Weave uses a MAP_32BIT bump-pointer slab allocator so returned addresses
+/// fit in 32-bit DWORDs (required by Q-Dir_x64.exe which truncates heap pointers).
 /// hHeap is ignored (single global allocator).
 ///
 /// # Safety
 /// The returned pointer must be freed with HeapFree or it will leak.
 // Wine ref: dlls/ntdll/heap.c — RtlAllocateHeap: size=0 still returns non-NULL (minimum
 // block allocated). HEAP_ZERO_MEMORY zeroes allocation. Large blocks (≥HEAP_MIN_LARGE_BLOCK_SIZE)
-// take a separate path via heap_allocate_large. Weave uses MAP_32BIT mmap; hHeap ignored.
+// take a separate path via heap_allocate_large. Weave uses MAP_32BIT slab; hHeap ignored.
 pub extern "win64" fn heap_alloc(
     _h_heap: usize,
     _dw_flags: u32,
     dw_bytes: usize,
 ) -> *mut std::ffi::c_void {
-    const MAP_32BIT: i32 = 0x40;
-
     // Windows HeapAlloc(heap, 0, 0) returns a valid non-NULL pointer.
     let alloc_size = if dw_bytes == 0 { 1 } else { dw_bytes };
-    // 8-byte header stores the requested size for HeapFree munmap.
     let total_size = alloc_size + 8;
-    let mapped_size = (total_size + 4095) & !4095;
 
-    // SAFETY: mmap with MAP_ANONYMOUS and fd=-1 does not dereference any pointer.
-    // MAP_32BIT ensures address < 2 GiB so 32-bit DWORD truncation by guests
-    // (e.g. Q-Dir_x64.exe internal pool manager at RVA 0x7880d) stays valid.
+    // Large allocations get their own mmap (direct). Small allocs use slab sub-allocation.
+    if total_size > HEAP_SLAB_SIZE / 2 {
+        return heap_alloc_direct(alloc_size, total_size);
+    }
+    heap_alloc_slab(alloc_size, total_size)
+}
+
+/// Direct mmap path for large allocations (>= 32 MB).
+fn heap_alloc_direct(
+    alloc_size: usize,
+    total_size: usize,
+) -> *mut std::ffi::c_void {
+    let mapped_size = (total_size + 4095) & !4095;
     let ptr = unsafe {
         libc::mmap(
             0x0000_0000_0040_0000 as *mut libc::c_void,
@@ -2473,29 +2520,69 @@ pub extern "win64" fn heap_alloc(
             0,
         )
     };
-
     if ptr == libc::MAP_FAILED {
-        eprintln!("weave/HeapAlloc: mmap(MAP_32BIT) failed size={total_size:#x}");
+        eprintln!("weave/HeapAlloc: mmap(MAP_32BIT) failed size={mapped_size:#x}");
+        return std::ptr::null_mut();
+    }
+    // Header: size with DIRECT flag set.
+    unsafe { *(ptr as *mut usize) = alloc_size | (1 << 63) };
+    LAST_HEAP_FREE.store(0, Ordering::Relaxed);
+    unsafe { (ptr as *mut u8).add(8) as *mut std::ffi::c_void }
+}
+
+/// Slab sub-allocation path for normal-size allocations.
+fn heap_alloc_slab(
+    alloc_size: usize,
+    total_size: usize,
+) -> *mut std::ffi::c_void {
+    let mut slabs = heap_slabs().lock().unwrap();
+
+    // Try to bump-allocate from an existing slab with space.
+    for slab in slabs.iter_mut() {
+        let start = slab.bump;
+        let new_bump = start + total_size;
+        if new_bump <= slab.capacity {
+            slab.bump = new_bump;
+            let ptr = unsafe { slab.base.add(start) };
+            // Header: size without DIRECT flag (zeroed by mmap).
+            unsafe { *(ptr as *mut usize) = alloc_size };
+            LAST_HEAP_FREE.store(0, Ordering::Relaxed);
+            return unsafe { ptr.add(8) as *mut std::ffi::c_void };
+        }
+    }
+
+    // No slab has space — allocate a new slab.
+    let slab_base = unsafe {
+        libc::mmap(
+            0x0000_0000_0040_0000 as *mut libc::c_void,
+            HEAP_SLAB_SIZE,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | MAP_32BIT,
+            -1,
+            0,
+        )
+    };
+    if slab_base == libc::MAP_FAILED {
+        eprintln!("weave/HeapAlloc: slab mmap(MAP_32BIT) failed size=64MB");
         return std::ptr::null_mut();
     }
 
-    // Store requested size in header. Anonymous pages are zeroed, so HEAP_ZERO_MEMORY
-    // (dw_flags & 0x08) is automatically satisfied by mmap zero-initialization.
-    unsafe { *(ptr as *mut usize) = alloc_size };
+    let start = 0usize;
+    let new_bump = start + total_size;
+    unsafe { *(slab_base as *mut usize) = alloc_size };
+    slabs.push(HeapSlab {
+        base: slab_base as *mut u8,
+        bump: new_bump,
+        capacity: HEAP_SLAB_SIZE,
+    });
 
-    let result = unsafe { (ptr as *mut u8).add(8) as *mut std::ffi::c_void };
-
-    // A fresh allocation means any previously seen double-free at this address
-    // is now gone from the fastbin.
     LAST_HEAP_FREE.store(0, Ordering::Relaxed);
-
-    result
+    unsafe { (slab_base as *mut u8).add(8) as *mut std::ffi::c_void }
 }
 
 /// HeapReAlloc: reallocate memory in the heap.
 ///
-/// Allocates a new block via mmap(MAP_32BIT), copies contents, frees old.
-/// Ignores hHeap and dwFlags parameters.
+/// Delegates to heap_alloc + memcpy + heap_free. Ignores hHeap and dwFlags.
 ///
 /// # Safety
 /// `lp_mem` must be a valid pointer returned from HeapAlloc or NULL.
@@ -2509,52 +2596,27 @@ pub unsafe extern "win64" fn heap_re_alloc(
     lp_mem: *mut std::ffi::c_void,
     dw_bytes: usize,
 ) -> *mut std::ffi::c_void {
-    const MAP_32BIT: i32 = 0x40;
-
-    let alloc_size = if dw_bytes == 0 { 1 } else { dw_bytes };
-    let total_size = alloc_size + 8;
-    let mapped_size = (total_size + 4095) & !4095;
-
-    let nptr = unsafe {
-        libc::mmap(
-            0x0000_0000_0040_0000 as *mut libc::c_void,
-            mapped_size,
-            libc::PROT_READ | libc::PROT_WRITE,
-            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | MAP_32BIT,
-            -1,
-            0,
-        )
-    };
-
-    if nptr == libc::MAP_FAILED {
+    let new_block = heap_alloc(0, 0, dw_bytes);
+    if new_block.is_null() {
         return std::ptr::null_mut();
     }
-
     // Copy old content if there was an old block.
     if !lp_mem.is_null() {
         let old_header = (lp_mem as *mut u8).sub(8) as *mut usize;
-        let old_size = unsafe { *old_header };
-        let copy_size = alloc_size.min(old_size);
-        unsafe {
-            std::ptr::copy_nonoverlapping(lp_mem as *const u8, nptr.add(8) as *mut u8, copy_size);
-        }
-        // Munmap old block.
-        let old_total = (old_size + 8 + 4095) & !4095;
-        unsafe { libc::munmap(old_header as *mut libc::c_void, old_total) };
+        let old_size = alloc_size_from_header(*old_header);
+        let copy_size = dw_bytes.min(old_size);
+        std::ptr::copy_nonoverlapping(lp_mem as *const u8, new_block as *mut u8, copy_size);
     }
-
-    // Store new size in header.
-    unsafe { *(nptr as *mut usize) = alloc_size };
-    let result = unsafe { nptr.add(8) };
-
-    LAST_HEAP_FREE.store(0, Ordering::Relaxed);
-
-    result
+    if !lp_mem.is_null() {
+        heap_free(0, 0, lp_mem);
+    }
+    new_block
 }
 
 /// HeapFree: free memory allocated from the heap.
 ///
-/// Uses munmap with size from the 8-byte header before the pointer.
+/// Slab-allocated blocks: no-op (bump allocator cannot free individual blocks).
+/// Direct-allocated blocks (large allocations): munmap.
 ///
 /// # Safety
 /// `lp_mem` must be a valid pointer returned from HeapAlloc/HeapReAlloc or NULL.
@@ -2582,20 +2644,23 @@ pub unsafe extern "win64" fn heap_free(
     if LAST_HEAP_FREE.swap(addr, Ordering::Relaxed) == addr {
         return 0; // FALSE — duplicate free, silently ignored per Windows semantics
     }
-    // SAFETY: lp_mem is non-null (early return above), has a canonical x86-64 address
-    // (addr >> 47 == 0 check above), and was not freed in the immediately preceding
-    // call (swap check above). It was allocated by HeapAlloc mmap with an 8-byte
-    // size header at header_ptr = lp_mem - 8.
-    let header_ptr = unsafe { (lp_mem as *mut u8).sub(8) as *mut usize };
-    let stored_size = unsafe { *header_ptr };
-    let mapped_size = (stored_size + 8 + 4095) & !4095;
-    unsafe { libc::munmap(header_ptr as *mut libc::c_void, mapped_size) };
+    // SAFETY: lp_mem is non-null (early return above) and has a canonical address
+    // (addr >> 47 == 0). Header at ptr-8 stores size + DIRECT flag.
+    let header_ptr = (lp_mem as *mut u8).sub(8) as *mut usize;
+    let header = *header_ptr;
+    if is_direct(header) {
+        // Direct mmap allocation — munmap the whole page(s).
+        let stored_size = alloc_size_from_header(header);
+        let mapped_size = (stored_size + 8 + 4095) & !4095;
+        libc::munmap(header_ptr as *mut libc::c_void, mapped_size);
+    }
+    // Slab allocation: no-op. The backing MAP_32BIT slab is freed on process exit.
     1 // TRUE
 }
 
 /// HeapSize: return the size of a heap block.
 ///
-/// Returns the requested allocation size from the mmap header (8 bytes before ptr).
+/// Returns the requested allocation size from the header (8 bytes before ptr).
 // Wine ref: dlls/ntdll/heap.c::heap_size — calls heap_size() internal helper;
 // returns (SIZE_T)-1 on error (invalid handle or ptr), actual usable size on success.
 pub extern "win64" fn heap_size(
@@ -2610,7 +2675,8 @@ pub extern "win64" fn heap_size(
         return usize::MAX;
     }
     let header_ptr = unsafe { (lp_mem as *const u8).sub(8) as *const usize };
-    unsafe { *header_ptr }
+    let header = unsafe { *header_ptr };
+    alloc_size_from_header(header)
 }
 
 /// GetProcessHeap: return the process heap handle.
