@@ -75,7 +75,10 @@ pub unsafe extern "win64" fn power_read_dc_value(
 
 // ── Resolver ─────────────────────────────────────────────────────────────────
 
-pub fn resolve(_dll: &str, func: &str) -> Option<usize> {
+pub fn resolve(dll: &str, func: &str) -> Option<usize> {
+    if !dll.eq_ignore_ascii_case("powrprof.dll") {
+        return None;
+    }
     match func {
         "PowerRegisterSuspendResumeNotification" => Some(
             power_register_suspend_resume_notification as unsafe extern "win64" fn(_, _, _) -> _
