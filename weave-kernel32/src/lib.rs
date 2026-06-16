@@ -2545,7 +2545,7 @@ pub unsafe extern "win64" fn heap_re_alloc(
 
     // Store new size in header.
     unsafe { *(nptr as *mut usize) = alloc_size };
-    let result = unsafe { nptr.add(8) as *mut std::ffi::c_void };
+    let result = unsafe { nptr.add(8) };
 
     LAST_HEAP_FREE.store(0, Ordering::Relaxed);
 
