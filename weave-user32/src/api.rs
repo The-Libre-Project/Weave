@@ -7178,6 +7178,30 @@ pub extern "win64" fn notify_win_event(_event: u32, _hwnd: usize, _id_object: i3
     // no-op
 }
 
+/// SetWinEventHook — register a WinEvent hook (accessibility).
+///
+/// Phase A stub — returns NULL (handle 0), meaning the hook was not installed.
+/// Callers must handle a NULL hook handle gracefully.
+///
+/// Wine ref: dlls/user32/event.c — SetWinEventHook installs a hook into the
+/// WinEvent hook chain and returns an HWINEVENTHOOK handle; the hook thread
+/// dispatches events to the callback.
+///
+/// # Safety
+/// `lpfn_win_event_proc` must be null or a valid callback pointer; `hmod_win_event_proc`
+/// must be null or a valid HMODULE handle.
+pub unsafe extern "win64" fn set_win_event_hook(
+    _event_min: u32,
+    _event_max: u32,
+    _hmod_win_event_proc: usize,
+    _lpfn_win_event_proc: usize,
+    _id_process: u32,
+    _id_thread: u32,
+    _dw_flags: u32,
+) -> usize {
+    0 // NULL handle — hook not installed
+}
+
 /// FlashWindowEx — flash the taskbar button and/or caption.
 ///
 /// Wine ref: dlls/user32/message.c — updates the window caption highlight

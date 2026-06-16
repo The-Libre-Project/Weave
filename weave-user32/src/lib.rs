@@ -1223,6 +1223,10 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         ),
         // Accessibility / event hooks
         "NotifyWinEvent" => Some(api::notify_win_event as *const () as usize),
+        "SetWinEventHook" => Some(
+            api::set_win_event_hook as unsafe extern "win64" fn(_, _, _, _, _, _, _) -> _
+                as *const () as usize,
+        ),
         "FlashWindowEx" => {
             Some(api::flash_window_ex as unsafe extern "win64" fn(_) -> _ as *const () as usize)
         }
