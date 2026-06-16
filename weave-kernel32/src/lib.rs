@@ -3228,14 +3228,14 @@ pub unsafe extern "win64" fn get_file_information_by_handle(
 ///
 /// Wine ref: dlls/kernelbase/file.c::GetFileInformationByHandleEx — dispatches on
 /// FILE_INFO_BY_HANDLE_CLASS; calls NtQueryInformationFile for most classes.
-/// Weave: implements FileBasicInfo (0) and FileStandardInfo (1) via Linux fstat;
+/// Weave: implements FILE_BASIC_INFO (0) and FILE_STANDARD_INFO (1) via Linux fstat;
 /// returns FALSE/ERROR_INVALID_PARAMETER for unsupported classes.
 ///
 /// # Safety
 /// `h_file` must be a valid Weave handle. `lp_file_information` must point to a
 /// buffer of at least `dw_buffer_size` bytes matching the requested class layout.
 // Wine ref: dlls/kernelbase/file.c:3141 — switch on FILE_INFO_BY_HANDLE_CLASS; calls
-// NtQueryInformationFile for FileBasicInfo/FileStandardInfo/FileNameInfo/FileIdInfo/etc.;
+// NtQueryInformationFile for FILE_BASIC_INFO/FILE_STANDARD_INFO/FILE_NAME_INFO/FILE_ID_INFO/etc.;
 // ERROR_CALL_NOT_IMPLEMENTED for FileRemoteProtocolInfo/FileNormalizedNameInfo;
 // ERROR_INVALID_PARAMETER for FileRenameInfo/FileDispositionInfo/FileEndOfFileInfo.
 #[allow(non_upper_case_globals)]
@@ -3266,10 +3266,10 @@ pub unsafe extern "win64" fn get_file_information_by_handle_ex(
     dw_buffer_size: u32,
 ) -> i32 {
     // FILE_INFO_BY_HANDLE_CLASS constants
-    const FileBasicInfo: u32 = 0;
-    const FileStandardInfo: u32 = 1;
-    const FileNameInfo: u32 = 2;
-    const FileIdInfo: u32 = 18;
+    const FILE_BASIC_INFO: u32 = 0;
+    const FILE_STANDARD_INFO: u32 = 1;
+    const FILE_NAME_INFO: u32 = 2;
+    const FILE_ID_INFO: u32 = 18;
 
     if lp_file_information.is_null() {
         set_last_error(87); // ERROR_INVALID_PARAMETER
@@ -3295,7 +3295,7 @@ pub unsafe extern "win64" fn get_file_information_by_handle_ex(
     let to_ft = |secs: i64| -> u64 { ((secs + 11_644_473_600) as u64) * 10_000_000 };
 
     match file_information_class {
-        FileBasicInfo => {
+        FILE_BASIC_INFO => {
             // FILE_BASIC_INFO: CreationTime, LastAccessTime, LastWriteTime,
             // ChangeTime (each 8 bytes), FileAttributes (4 bytes) = 36 bytes minimum.
             if dw_buffer_size < 36 {
@@ -3319,11 +3319,11 @@ pub unsafe extern "win64" fn get_file_information_by_handle_ex(
                 attr_p.write_unaligned(attr);
             }
             eprintln!(
-                "weave/GetFileInformationByHandleEx: h={h_file:#x} fd={fd} FileBasicInfo mtime={mtime_ft:#x}"
+                "weave/GetFileInformationByHandleEx: h={h_file:#x} fd={fd} FILE_BASIC_INFO mtime={mtime_ft:#x}"
             );
             1 // TRUE
         }
-        FileStandardInfo => {
+        FILE_STANDARD_INFO => {
             // FILE_STANDARD_INFO: AllocationSize, EndOfFile (8 bytes each),
             // NumberOfLinks, DeletePending, Directory (4 bytes each) = 24 bytes.
             if dw_buffer_size < 24 {
@@ -3343,11 +3343,11 @@ pub unsafe extern "win64" fn get_file_information_by_handle_ex(
                 p32.add(2).write_unaligned(is_dir as u32); // Directory
             }
             eprintln!(
-                "weave/GetFileInformationByHandleEx: h={h_file:#x} fd={fd} FileStandardInfo size={size}"
+                "weave/GetFileInformationByHandleEx: h={h_file:#x} fd={fd} FILE_STANDARD_INFO size={size}"
             );
             1 // TRUE
         }
-        FileNameInfo => {
+        FILE_NAME_INFO => {
             // FILE_NAME_INFO: FileNameLength (DWORD) + FileName (WCHAR[]).
             // Stub: return an empty name (length=0). Callers checking the name
             // will see an empty string — acceptable for headless operation.
@@ -3358,9 +3358,9 @@ pub unsafe extern "win64" fn get_file_information_by_handle_ex(
             unsafe { (lp_file_information as *mut u32).write_unaligned(0) }; // FileNameLength=0
             1 // TRUE
         }
-        FileIdInfo => {
+        FILE_ID_INFO => {
             // FILE_ID_INFO: VolumeSerialNumber (8 bytes) + FileId (16 bytes) = 24 bytes.
-            // Wine ref: dlls/kernelbase/file.c — FileIdInfo fills VolumeSerialNumber from
+            // Wine ref: dlls/kernelbase/file.c — FILE_ID_INFO fills VolumeSerialNumber from
             // NtQueryVolumeInformationFile; FileId is the 128-bit file identifier.
             // Map st_dev → VolumeSerialNumber (low 32 bits, zero-extended to u64).
             if dw_buffer_size < 24 {
@@ -11013,7 +11013,7 @@ pub unsafe extern "win64" fn terminate_thread(_h_thread: usize, _dw_exit_code: u
 /// # Safety
 /// `lp_file_name` must be a valid null-terminated UTF-16 string or NULL.
 // Wine ref: dlls/kernelbase/file.c:2991 — opens with SYNCHRONIZE|FILE_OPEN_REPARSE_POINT;
-// calls NtSetInformationFile(FileBasicInformation) with attributes|FILE_ATTRIBUTE_NORMAL to
+// calls NtSetInformationFile(FILE_BASIC_INFOrmation) with attributes|FILE_ATTRIBUTE_NORMAL to
 // prevent zero attrs; returns ERROR_PATH_NOT_FOUND when path translation fails.
 pub unsafe extern "win64" fn set_file_attributes_w(
     lp_file_name: *const u16,
@@ -12470,7 +12470,7 @@ pub unsafe extern "win64" fn lc_map_string_a(
 /// # Safety
 /// If `lp_new_file_pointer` is non-null, it must be writable.
 // Wine ref: dlls/kernelbase/file.c:3870 — FILE_CURRENT uses NtQueryInformationFile(FilePositionInformation)
-// to read current offset; FILE_END uses FileStandardInformation.EndOfFile; negative final pos →
+// to read current offset; FILE_END uses FILE_STANDARD_INFOrmation.EndOfFile; negative final pos →
 // ERROR_NEGATIVE_SEEK; writes newpos via NtSetInformationFile(FilePositionInformation)
 pub unsafe extern "win64" fn set_file_pointer_ex(
     h_file: usize,
@@ -12523,7 +12523,7 @@ pub unsafe extern "win64" fn set_file_pointer_ex(
 ///
 /// # Safety
 /// Each non-null pointer arg must point to a valid writable u64 (FILETIME).
-// Wine ref: dlls/kernelbase/file.c:3258 — calls NtQueryInformationFile(FileBasicInformation);
+// Wine ref: dlls/kernelbase/file.c:3258 — calls NtQueryInformationFile(FILE_BASIC_INFOrmation);
 // unpacks LARGE_INTEGER fields into creation/access/write FILETIME structs; NULL pointers skipped.
 // Weave maps directly to fstat(2): st_ctime (change-time) serves as creation-time proxy on Linux.
 pub unsafe extern "win64" fn get_file_time(
@@ -12789,7 +12789,7 @@ pub extern "win64" fn get_file_type(h_file: usize) -> u32 {
 ///
 /// # Safety
 /// `lp_file_size` must be a valid writable pointer to an i64.
-// Wine ref: dlls/kernelbase/file.c:3242 — calls NtQueryInformationFile(FileStandardInformation);
+// Wine ref: dlls/kernelbase/file.c:3242 — calls NtQueryInformationFile(FILE_STANDARD_INFOrmation);
 // writes info.EndOfFile (LARGE_INTEGER) directly to *size; returns FALSE on NT error
 pub unsafe extern "win64" fn get_file_size_ex(h_file: usize, lp_file_size: *mut i64) -> i32 {
     eprintln!("weave/GetFileSizeEx: entry handle={h_file:#x}");
