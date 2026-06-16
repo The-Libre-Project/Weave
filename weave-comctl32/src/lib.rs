@@ -25,8 +25,8 @@
 //! (common needing user32 internals). The coupling is accepted as-is. Do not
 //! add further DLL→DLL imports without a similar written justification.
 
-#![allow(non_snake_case)]
-#![allow(dead_code)]
+#![allow(non_snake_case, clippy::missing_safety_doc)]
+#![allow(dead_code, clippy::missing_safety_doc)]
 
 // ── Initialisation ────────────────────────────────────────────────────────────
 

@@ -4,7 +4,7 @@
 //! name (IDNA) support. Pure ASCII hostnames are handled by copy-through.
 //! Punycode encoding/decoding is not implemented.
 
-#![allow(non_snake_case)]
+#![allow(non_snake_case, clippy::missing_safety_doc)]
 
 /// IdnToAscii — convert an IDN label to ASCII (Punycode).
 ///

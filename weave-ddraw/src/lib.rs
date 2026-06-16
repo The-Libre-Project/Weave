@@ -8,7 +8,7 @@
 //!   IDirectDrawSurface4 vtable order (45 entries).
 //! Wine ref: dlls/ddraw/main.c::DirectDrawCreate — signature and initialization order.
 
-#![allow(non_snake_case)]
+#![allow(non_snake_case, clippy::missing_safety_doc)]
 
 // ── Constants ────────────────────────────────────────────────────────────────
 

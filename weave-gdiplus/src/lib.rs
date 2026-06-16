@@ -20,7 +20,7 @@
 //! dlls/gdiplus/*.c — GDI+ flat API naming convention, GpStatus codes,
 //! GdiplusStartupInput/Output layout, codec enumeration semantics.
 
-#![allow(non_snake_case)]
+#![allow(non_snake_case, clippy::missing_safety_doc)]
 
 extern crate libc;
 

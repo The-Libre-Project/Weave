@@ -1,4 +1,5 @@
 //! user32.dll stubs for Weave.
+#![allow(clippy::missing_safety_doc)]
 //!
 //! Phase 2 scope: window creation, message loop, basic input, paint stubs.
 //! Graphics (GDI) are in weave-gdi32 (Phase 2 Step 4).

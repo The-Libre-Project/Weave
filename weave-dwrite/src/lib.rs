@@ -4,7 +4,7 @@
 //! Phase A stub returns CLASS_E_CLASSNOTAVAILABLE; DirectWrite rendering is
 //! a Phase B+ target (requires D2D/D3D interop).
 
-#![allow(non_snake_case)]
+#![allow(non_snake_case, clippy::missing_safety_doc)]
 
 /// DWriteCreateFactory: create a DirectWrite factory object.
 ///

@@ -4,7 +4,7 @@
 //! `timeBeginPeriod`, `timeEndPeriod`), wave audio device queries, and
 //! joystick stubs. All functions use `extern "win64"`.
 
-#![allow(non_snake_case)]
+#![allow(non_snake_case, clippy::missing_safety_doc)]
 
 use std::time::{SystemTime, UNIX_EPOCH};
 

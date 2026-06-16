@@ -4,7 +4,7 @@
 //! these are no-ops: we have no IME pipeline. Apps call these during init
 //! and on keyboard events; returning null/failure values is safe.
 
-#![allow(non_snake_case)]
+#![allow(non_snake_case, clippy::missing_safety_doc)]
 
 /// ImmGetContext — retrieve the input context for a window.
 ///

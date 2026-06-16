@@ -17,7 +17,7 @@
 //!   #11  → VariantCopy
 //!   #149 → (alias; #4 is the canonical SysAllocStringLen ordinal)
 
-#![allow(non_snake_case)]
+#![allow(non_snake_case, clippy::missing_safety_doc)]
 
 // ── BSTR functions ───────────────────────────────────────────────────────────
 

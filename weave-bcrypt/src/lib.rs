@@ -5,7 +5,7 @@
 //! the Linux `getrandom(2)` syscall so TLS sessions are seeded with kernel
 //! CSPRNG output rather than the prior STATUS_NOT_IMPLEMENTED stub.
 
-#![allow(non_snake_case)]
+#![allow(non_snake_case, clippy::missing_safety_doc)]
 
 const STATUS_SUCCESS: u32 = 0x0000_0000;
 const STATUS_INVALID_PARAMETER: u32 = 0xC000_000D;

@@ -1,4 +1,5 @@
 //! gdi32.dll stubs for Weave.
+#![allow(clippy::missing_safety_doc)]
 //!
 //! GDI object management, DC attributes, basic 2D drawing, and text rendering.
 //! Actual rendering delegates to `weave_user32::backend` which holds the X11

@@ -5,7 +5,7 @@
 //! functions operate entirely on wide strings in-place; they do not touch the
 //! filesystem, so they work correctly without any prefix translation.
 
-#![allow(non_snake_case)]
+#![allow(non_snake_case, clippy::missing_safety_doc)]
 
 // ── Wide-string helpers ───────────────────────────────────────────────────────
 

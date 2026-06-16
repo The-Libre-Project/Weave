@@ -9,7 +9,7 @@
 //! functions: CryptAcquireContextA, CryptGenRandom, CryptReleaseContext). This
 //! crate covers the certificate-store API surface that advapi32 does not handle.
 
-#![allow(unused_variables, non_snake_case)]
+#![allow(unused_variables, non_snake_case, clippy::missing_safety_doc)]
 
 // ── Existing functions (pre-Signal) ──────────────────────────────────────────
 

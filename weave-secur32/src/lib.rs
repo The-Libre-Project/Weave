@@ -1,6 +1,6 @@
 //! secur32.dll stubs for Weave — Security Support Provider Interface (SSPI).
 
-#![allow(non_snake_case)]
+#![allow(non_snake_case, clippy::missing_safety_doc)]
 //!
 //! curl.exe imports InitSecurityInterfaceA to obtain the SSPI dispatch table
 //! for NTLM/Kerberos authentication. This stub returns NULL (no SSPI table).

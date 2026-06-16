@@ -1,4 +1,5 @@
 // ── powrprof.dll stubs for Weave ──────────────────────────────────────────────
+#![allow(clippy::missing_safety_doc)]
 //
 // Power management function stubs. All Phase A — return NOT_SUPPORTED or
 // equivalent sentinels so callers can continue without crashing.

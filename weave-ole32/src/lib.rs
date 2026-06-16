@@ -1,4 +1,5 @@
 //! ole32.dll / combase.dll stubs for Weave.
+#![allow(clippy::missing_safety_doc)]
 //!
 //! # Phase 2 scope
 //!

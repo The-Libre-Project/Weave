@@ -3,7 +3,7 @@
 //! Implements XInput (Xbox controller API) backed by Linux evdev/joystick.
 //! Maps /dev/input/js0..js3 to XInput player slots 0-3.
 
-#![allow(non_snake_case)]
+#![allow(non_snake_case, clippy::missing_safety_doc)]
 
 use std::collections::HashMap;
 use std::sync::Mutex;

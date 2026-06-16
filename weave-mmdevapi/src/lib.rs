@@ -13,7 +13,7 @@
 //! - `IAudioClient::Stop` (Linux only) stops the PipeWire ThreadLoop.
 //! - `IAudioClient::Reset` flushes the ring buffer.
 
-#![allow(non_snake_case)]
+#![allow(non_snake_case, clippy::missing_safety_doc)]
 
 use std::cell::RefCell;
 use std::sync::{Arc, Mutex};

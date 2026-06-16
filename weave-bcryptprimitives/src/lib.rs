@@ -17,7 +17,7 @@
 //! same export surface — see jcodemunch / Wine reference for individual
 //! implementation details.
 
-#![allow(non_snake_case)]
+#![allow(non_snake_case, clippy::missing_safety_doc)]
 
 const STATUS_SUCCESS: u32 = 0x0000_0000;
 const STATUS_NOT_IMPLEMENTED: u32 = 0xC000_0002;
