@@ -2438,39 +2438,64 @@ pub extern "win64" fn heap_destroy(_h_heap: usize) -> i32 {
 ///
 /// Wine ref: dlls/kernelbase/memory.c — HeapAlloc delegates to RtlAllocateHeap;
 /// HEAP_ZERO_MEMORY (0x08) zeroes the block; size=0 returns a valid non-NULL pointer.
-/// Weave uses malloc/calloc directly; ignores hHeap (single global allocator).
+/// Weave uses mmap(MAP_32BIT) so returned addresses fit in 32-bit DWORDs
+/// (required by guests like Q-Dir_x64.exe that truncate heap pointers).
+/// hHeap is ignored (single global allocator).
 ///
 /// # Safety
 /// The returned pointer must be freed with HeapFree or it will leak.
 // Wine ref: dlls/ntdll/heap.c — RtlAllocateHeap: size=0 still returns non-NULL (minimum
 // block allocated). HEAP_ZERO_MEMORY zeroes allocation. Large blocks (≥HEAP_MIN_LARGE_BLOCK_SIZE)
-// take a separate path via heap_allocate_large. Weave uses malloc/calloc; hHeap ignored.
+// take a separate path via heap_allocate_large. Weave uses MAP_32BIT mmap; hHeap ignored.
 pub extern "win64" fn heap_alloc(
     _h_heap: usize,
-    dw_flags: u32,
+    _dw_flags: u32,
     dw_bytes: usize,
 ) -> *mut std::ffi::c_void {
-    // Windows HeapAlloc(heap, 0, 0) returns a valid non-NULL pointer.
-    // Use at least 1 byte so malloc/calloc never return NULL for size 0.
-    let alloc_size = if dw_bytes == 0 { 1 } else { dw_bytes };
-    let zero_memory = (dw_flags & 0x08) != 0; // HEAP_ZERO_MEMORY
+    const MAP_32BIT: i32 = 0x40;
 
-    let result = if zero_memory {
-        unsafe { libc::calloc(1, alloc_size) }
-    } else {
-        unsafe { libc::malloc(alloc_size) }
+    // Windows HeapAlloc(heap, 0, 0) returns a valid non-NULL pointer.
+    let alloc_size = if dw_bytes == 0 { 1 } else { dw_bytes };
+    // 8-byte header stores the requested size for HeapFree munmap.
+    let total_size = alloc_size + 8;
+    let mapped_size = (total_size + 4095) & !4095;
+
+    // SAFETY: mmap with MAP_ANONYMOUS and fd=-1 does not dereference any pointer.
+    // MAP_32BIT ensures address < 2 GiB so 32-bit DWORD truncation by guests
+    // (e.g. Q-Dir_x64.exe internal pool manager at RVA 0x7880d) stays valid.
+    let ptr = unsafe {
+        libc::mmap(
+            0x0000_0000_0040_0000 as *mut libc::c_void,
+            mapped_size,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | MAP_32BIT,
+            -1,
+            0,
+        )
     };
-    // A fresh allocation means any previously seen double-free at this address
-    // is now gone from the fastbin.  Reset the tracker so the address is freeable again.
-    if !result.is_null() {
-        LAST_HEAP_FREE.store(0, Ordering::Relaxed);
+
+    if ptr == libc::MAP_FAILED {
+        eprintln!("weave/HeapAlloc: mmap(MAP_32BIT) failed size={total_size:#x}");
+        return std::ptr::null_mut();
     }
+
+    // Store requested size in header. Anonymous pages are zeroed, so HEAP_ZERO_MEMORY
+    // (dw_flags & 0x08) is automatically satisfied by mmap zero-initialization.
+    unsafe { *(ptr as *mut usize) = alloc_size };
+
+    let result = unsafe { (ptr as *mut u8).add(8) as *mut std::ffi::c_void };
+
+    // A fresh allocation means any previously seen double-free at this address
+    // is now gone from the fastbin.
+    LAST_HEAP_FREE.store(0, Ordering::Relaxed);
+
     result
 }
 
 /// HeapReAlloc: reallocate memory in the heap.
 ///
-/// Wraps `realloc`. Ignores hHeap and dwFlags parameters.
+/// Allocates a new block via mmap(MAP_32BIT), copies contents, frees old.
+/// Ignores hHeap and dwFlags parameters.
 ///
 /// # Safety
 /// `lp_mem` must be a valid pointer returned from HeapAlloc or NULL.
@@ -2484,12 +2509,52 @@ pub unsafe extern "win64" fn heap_re_alloc(
     lp_mem: *mut std::ffi::c_void,
     dw_bytes: usize,
 ) -> *mut std::ffi::c_void {
-    unsafe { libc::realloc(lp_mem, dw_bytes) }
+    const MAP_32BIT: i32 = 0x40;
+
+    let alloc_size = if dw_bytes == 0 { 1 } else { dw_bytes };
+    let total_size = alloc_size + 8;
+    let mapped_size = (total_size + 4095) & !4095;
+
+    let nptr = unsafe {
+        libc::mmap(
+            0x0000_0000_0040_0000 as *mut libc::c_void,
+            mapped_size,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | MAP_32BIT,
+            -1,
+            0,
+        )
+    };
+
+    if nptr == libc::MAP_FAILED {
+        return std::ptr::null_mut();
+    }
+
+    // Copy old content if there was an old block.
+    if !lp_mem.is_null() {
+        let old_header = (lp_mem as *mut u8).sub(8) as *mut usize;
+        let old_size = unsafe { *old_header };
+        let copy_size = alloc_size.min(old_size);
+        unsafe {
+            std::ptr::copy_nonoverlapping(lp_mem as *const u8, nptr.add(8) as *mut u8, copy_size);
+        }
+        // Munmap old block.
+        let old_total = (old_size + 8 + 4095) & !4095;
+        unsafe { libc::munmap(old_header as *mut libc::c_void, old_total) };
+    }
+
+    // Store new size in header.
+    unsafe { *(nptr as *mut usize) = alloc_size };
+    let result = unsafe { nptr.add(8) as *mut std::ffi::c_void };
+
+    LAST_HEAP_FREE.store(0, Ordering::Relaxed);
+
+    result
 }
 
 /// HeapFree: free memory allocated from the heap.
 ///
-/// Wraps `free`. Ignores hHeap and dwFlags parameters.
+/// Uses munmap with size from the 8-byte header before the pointer.
 ///
 /// # Safety
 /// `lp_mem` must be a valid pointer returned from HeapAlloc/HeapReAlloc or NULL.
@@ -2519,15 +2584,18 @@ pub unsafe extern "win64" fn heap_free(
     }
     // SAFETY: lp_mem is non-null (early return above), has a canonical x86-64 address
     // (addr >> 47 == 0 check above), and was not freed in the immediately preceding
-    // call (swap check above).  It was originally returned by libc::malloc/realloc
-    // (via HeapAlloc/HeapReAlloc), so libc::free is the correct deallocator.
-    unsafe { libc::free(lp_mem) };
+    // call (swap check above). It was allocated by HeapAlloc mmap with an 8-byte
+    // size header at header_ptr = lp_mem - 8.
+    let header_ptr = unsafe { (lp_mem as *mut u8).sub(8) as *mut usize };
+    let stored_size = unsafe { *header_ptr };
+    let mapped_size = (stored_size + 8 + 4095) & !4095;
+    unsafe { libc::munmap(header_ptr as *mut libc::c_void, mapped_size) };
     1 // TRUE
 }
 
 /// HeapSize: return the size of a heap block.
 ///
-/// We don't track allocation sizes; returns 0 (acceptable for defensive callers).
+/// Returns the requested allocation size from the mmap header (8 bytes before ptr).
 // Wine ref: dlls/ntdll/heap.c::heap_size — calls heap_size() internal helper;
 // returns (SIZE_T)-1 on error (invalid handle or ptr), actual usable size on success.
 pub extern "win64" fn heap_size(
@@ -2536,12 +2604,13 @@ pub extern "win64" fn heap_size(
     lp_mem: *const std::ffi::c_void,
 ) -> usize {
     // Wine ref: dlls/ntdll/heap.c — RtlSizeHeap returns (SIZE_T)-1 on NULL/invalid block;
-    // on success returns the usable allocation size. Weave heap uses libc malloc so
-    // malloc_usable_size gives the real answer.
+    // on success returns the usable allocation size. Weave heap stores the requested size
+    // in an 8-byte header before the returned pointer (set by HeapAlloc/HeapReAlloc).
     if lp_mem.is_null() {
         return usize::MAX;
     }
-    unsafe { libc::malloc_usable_size(lp_mem as *mut _) }
+    let header_ptr = unsafe { (lp_mem as *const u8).sub(8) as *const usize };
+    unsafe { *header_ptr }
 }
 
 /// GetProcessHeap: return the process heap handle.
