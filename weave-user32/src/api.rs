@@ -1454,6 +1454,15 @@ pub extern "win64" fn send_message_w(
     eprintln!(
         "weave/user32: SendMessageW enter seq={seq} tid={cur_tid} hwnd={hwnd:#x} owner_tid={owner_tid} cross_thread={cross_thread} class={class_name:?} msg={msg:#06x} wp={w_param:#x} lp={l_param:#x} wndproc={proc_addr:#x}"
     );
+    // WM_SETCURSOR for #32770 dialog windows: DefDlgProc handles this without forwarding
+    // to the DLGPROC. Return TRUE (cursor set) to prevent DLGPROC crash on empty registration
+    // list (Q-Dir RVA 0x8281 — dequeue returns NULL, handler dereferences without check).
+    // Wine ref: dlls/user32/defdlg.c — DefDlgProc WM_SETCURSOR returns TRUE.
+    const WM_SETCURSOR: u32 = 0x0020;
+    if msg == WM_SETCURSOR && class_name == "#32770" {
+        eprintln!("weave/user32: SendMessageW WM_SETCURSOR → DefDlgProc TRUE");
+        return 1;
+    }
     let ret = call_wnd_proc(proc_addr, hwnd, msg, w_param, l_param);
     // Intercept SCI_GETDIRECTSTATUSFUNCTION (2184): return our proxy instead of the real fn ptr.
     // SCI_GETDIRECTSTATUSFUNCTION returns a 5-param fn: (sci, msg, wp, lp, *status) -> iptr.
