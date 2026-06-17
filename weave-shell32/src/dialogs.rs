@@ -174,9 +174,6 @@ fn filter_pairs_contain_png(pairs: &[(String, String)]) -> bool {
         .any(|(display, pattern)| filter_pair_is_png(display, pattern))
 }
 
-/// IrfanView Save As: PNG is the 3rd filter pair when `lpstrFilter` cannot be decoded.
-const IRFANVIEW_PNG_FILTER_INDEX: u32 = 3;
-
 /// Ensure a Win32 path ends with a `.png` extension (replace other extensions; keep `.png`).
 fn ensure_win_path_ends_with_png(path: &str) -> String {
     let basename = path.rsplit(['\\', '/']).next().unwrap_or(path);
@@ -656,14 +653,15 @@ fn get_save_file_name_w_test_hook(lp_ofn: *mut u8, ofn: Ofn, test_path: &str) ->
             ofn.n_filter_index
         );
     } else {
-        // lpstrFilter unreadable or no PNG pair: IrfanView RE uses PNG as the 3rd filter pair.
+        // lpstrFilter empty/unreadable: write nFilterIndex=1 (only "All Files" entry)
+        // so IrfanView determines encoder from the .png extension, not a garbage filter slot.
         win_path = ensure_win_path_ends_with_png(&win_path);
         // SAFETY: lp_ofn is the same guest OPENFILENAMEW buffer read by read_ofn.
-        unsafe { write_n_filter_index(lp_ofn, IRFANVIEW_PNG_FILTER_INDEX) };
-        eprintln!("weave/GetSaveFileNameW: forced nFilterIndex=3 (filter parse fallback)");
+        unsafe { write_n_filter_index(lp_ofn, 1) };
+        eprintln!("weave/GetSaveFileNameW: filter empty -> nFilterIndex=1 (extension-based encoder selection)");
         eprintln!(
-            "weave/GetSaveFileNameW: test hook → TRUE path={win_path} nFilterIndex={} (was {})",
-            IRFANVIEW_PNG_FILTER_INDEX, ofn.n_filter_index
+            "weave/GetSaveFileNameW: test hook → TRUE path={win_path} nFilterIndex=1 (was {})",
+            ofn.n_filter_index
         );
     }
 
@@ -801,14 +799,14 @@ mod tests {
         );
         assert_eq!(
             path, r"C:\Save\Out\image.png",
-            "null lpstrFilter: hook forces nFilterIndex=3 and writes .png lpstrFile"
+            "null lpstrFilter: hook forces nFilterIndex=1 and writes .png lpstrFile"
         );
 
         let n_filter_index =
             u32::from_le_bytes(ofn_bytes[44..48].try_into().expect("nFilterIndex bytes"));
         assert_eq!(
-            n_filter_index, IRFANVIEW_PNG_FILTER_INDEX,
-            "null lpstrFilter must force IrfanView PNG filter index 3"
+            n_filter_index, 1,
+            "null/empty lpstrFilter must force nFilterIndex=1 (only All Files entry)"
         );
 
         drop(ext_storage);
@@ -836,7 +834,7 @@ mod tests {
     }
 
     #[test]
-    fn get_save_file_name_w_test_hook_forces_png_index_when_filter_null() {
+    fn get_save_file_name_w_forces_n_filter_index_1_when_filter_null() {
         let old = std::env::var("WEAVE_TEST_SAVE_RESULT").ok();
         std::env::set_var("WEAVE_TEST_SAVE_RESULT", r"C:\Save\Out\image.png");
 
@@ -854,14 +852,14 @@ mod tests {
         let path = String::from_utf16_lossy(&file_buf[..end]);
         assert_eq!(
             path, r"C:\Save\Out\image.png",
-            "lpstrFile must retain .png when lpstrFilter is null (filter parse fallback)"
+            "lpstrFile must retain .png when lpstrFilter is null (nFilterIndex=1 fallback)"
         );
 
         let n_filter_index =
             u32::from_le_bytes(ofn_bytes[44..48].try_into().expect("nFilterIndex bytes"));
         assert_eq!(
-            n_filter_index, IRFANVIEW_PNG_FILTER_INDEX,
-            "null lpstrFilter must force nFilterIndex=3 (IrfanView PNG pair index)"
+            n_filter_index, 1,
+            "null lpstrFilter must force nFilterIndex=1 (All Files entry)"
         );
 
         drop(ext_storage);
@@ -964,7 +962,7 @@ mod tests {
     }
 
     #[test]
-    fn get_save_file_name_w_test_hook_forces_n_filter_index_3_when_filter_null() {
+    fn get_save_file_name_w_test_hook_forces_n_filter_index_1_when_filter_null() {
         let mut file_buf: [u16; 260] = [0; 260];
         let (mut ofn_bytes, ext_storage, filter_storage) =
             make_minimal_ofn(&mut file_buf, Some("jpg"), None, Some(8));
@@ -977,8 +975,8 @@ mod tests {
         let n_filter_index =
             u32::from_le_bytes(ofn_bytes[44..48].try_into().expect("nFilterIndex bytes"));
         assert_eq!(
-            n_filter_index, IRFANVIEW_PNG_FILTER_INDEX,
-            "incoming nFilterIndex=8 with null lpstrFilter must be forced to 3"
+            n_filter_index, 1,
+            "incoming nFilterIndex=8 with null/empty lpstrFilter must be forced to 1 (only All Files entry)"
         );
 
         let end = file_buf
