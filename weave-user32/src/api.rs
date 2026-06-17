@@ -1338,6 +1338,26 @@ pub unsafe extern "win64" fn dispatch_message_w(lp_msg: *const Msg) -> isize {
         }
     };
 
+    // #32770 dialog DefDlgProc message filtering: only forward messages that
+    // DefDlgProc forwards to the DLGPROC. Redirect all other messages to
+    // DefWindowProcW (same as send_message_w logic above).
+    if let Some(cls) = window::with(m.hwnd, |e| e.class_name.clone()) {
+        if cls == "#32770" && m.message != 0x0110 /* WM_INITDIALOG */
+            && m.message != 0x0111 /* WM_COMMAND */
+            && m.message != 0x0115 /* WM_VSCROLL */
+            && m.message != 0x0114 /* WM_HSCROLL */
+            && m.message != 0x002B /* WM_DRAWITEM */
+            && m.message != 0x002C /* WM_MEASUREITEM */
+            && m.message != 0x0037 /* WM_QUERYDRAGICON */
+            && m.message != 0x0121 /* WM_ENTERIDLE */
+            && !(0x0019..=0x0020).contains(&m.message)
+        /* WM_CTLCOLOR* */
+        {
+            let def_ret = def_window_proc_w(m.hwnd, m.message, m.w_param, m.l_param);
+            return def_ret;
+        }
+    }
+
     let ret = call_wnd_proc(proc_addr, m.hwnd, m.message, m.w_param, m.l_param);
     if m.message == WM_COMMAND_MSG {
         let cmd_id = m.w_param & 0xFFFF;
@@ -1455,6 +1475,31 @@ pub extern "win64" fn send_message_w(
         "weave/user32: SendMessageW enter seq={seq} tid={cur_tid} hwnd={hwnd:#x} owner_tid={owner_tid} cross_thread={cross_thread} class={class_name:?} msg={msg:#06x} wp={w_param:#x} lp={l_param:#x} wndproc={proc_addr:#x}"
     );
     let ret = call_wnd_proc(proc_addr, hwnd, msg, w_param, l_param);
+    // For #32770 dialog windows: DefDlgProc is the real class wndproc and only
+    // forwards specific messages to the DLGPROC. Since we store the DLGPROC
+    // directly as the wndproc, messages that DefDlgProc handles internally
+    // (like WM_NCMOUSEMOVE, WM_SETCURSOR, WM_NCHITTEST) reach the DLGPROC
+    // incorrectly and crash VCL-based apps (Q-Dir RVA 0x8281 — class-static
+    // freelist at 0x1556c0 is zero-filled BSS, never populated by DefDlgProc).
+    // Redirect them to DefWindowProcW instead.
+    // Wine ref: dlls/user32/defdlg.c — DefDlgProc forwards: WM_INITDIALOG,
+    // WM_COMMAND, WM_VSCROLL, WM_HSCROLL, WM_DRAWITEM, WM_MEASUREITEM,
+    // WM_CTLCOLOR*, WM_ENTERIDLE, WM_QUERYDRAGICON.
+    if class_name == "#32770" && msg != 0x0110 /* WM_INITDIALOG */
+        && msg != 0x0111 /* WM_COMMAND */
+        && msg != 0x0115 /* WM_VSCROLL */
+        && msg != 0x0114 /* WM_HSCROLL */
+        && msg != 0x002B /* WM_DRAWITEM */
+        && msg != 0x002C /* WM_MEASUREITEM */
+        && msg != 0x0037 /* WM_QUERYDRAGICON */
+        && msg != 0x0121 /* WM_ENTERIDLE */
+        && !(0x0019..=0x0020).contains(&msg)
+    /* WM_CTLCOLOR* */
+    {
+        let def_ret = def_window_proc_w(hwnd, msg, w_param, l_param);
+        eprintln!("weave/user32: SendMessageW #32770 dialog msg={msg:#06x} → DefWindowProcW → {def_ret:#x}");
+        return def_ret;
+    }
     // Intercept SCI_GETDIRECTSTATUSFUNCTION (2184): return our proxy instead of the real fn ptr.
     // SCI_GETDIRECTSTATUSFUNCTION returns a 5-param fn: (sci, msg, wp, lp, *status) -> iptr.
     // The proxy logs all SCI calls and fixes SCI_GETDOCPOINTER to read pdoc from sci+0x128.
