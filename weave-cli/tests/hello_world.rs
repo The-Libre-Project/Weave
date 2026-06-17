@@ -8399,6 +8399,13 @@ fn q_dir_file_pane_gate() {
 //   A2: PHASE: listview_insert_first — LVM_INSERTITEM dispatched to ListView
 //   A3: no SIGSEGV/abort before 10s deadline
 //
+// NOTE (2026-06-17): Investigation (CI 27686477403) confirmed Q-Dir does
+// NOT use IShellFolder for initial file-pane display — it uses
+// FindFirstFile/FindNextFile (E3-M5b path). The shell_enum_first and
+// listview_insert_first markers are only reachable via interactive folder
+// navigation (double-click), which requires xdotool. This gate serves as a
+// non-blocking diagnostic: A3 regression guard only.
+//
 // E3-M5b regression guards (create_window_first, get_message_first,
 // find_first_file_first, find_next_file_first) are covered separately.
 /// E3-M5c Tier A gate: Q-Dir shell namespace integration — IShellFolder enum +
