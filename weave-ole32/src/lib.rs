@@ -455,6 +455,44 @@ pub extern "win64" fn ole_uninitialize() {
     co_uninitialize();
 }
 
+// Wine ref: dlls/ole32/ole2.c — OleLockRunning calls IUnknown::LockRunning (container
+// keeps object alive); stub returns S_OK.
+/// OleLockRunning — lock a running object so it stays in the running state.
+pub extern "win64" fn ole_lock_running(
+    _p_unknown: usize,
+    _f_lock: i32,
+    _f_last_unlock_closes: i32,
+) -> u32 {
+    S_OK
+}
+
+// Wine ref: dlls/ole32/ole2.c — OleDuplicateData duplicates a data handle using
+// global memory (HGLOBAL); stub returns 0 (failure).
+/// OleDuplicateData — duplicate OLE data (stub). Returns NULL.
+pub extern "win64" fn ole_duplicate_data(_h_src: usize, _cf_format: u16, _ui_flags: u32) -> usize {
+    0 // NULL — duplication not supported
+}
+
+// Wine ref: dlls/ole32/ole2.c — OleSetClipboard calls DataObject::SetClipboard;
+// returns CLIPBRD_E_CANT_OPEN (0x800401D4) if clipboard not open.
+/// OleSetClipboard — place data on the OLE clipboard (stub). Returns S_OK.
+pub extern "win64" fn ole_set_clipboard(_p_data_obj: usize) -> u32 {
+    S_OK
+}
+
+// Wine ref: dlls/ole32/ole2.c — OleGetClipboard returns the data object from
+// the OLE clipboard; stub returns NULL with S_OK.
+/// OleGetClipboard — retrieve the OLE clipboard data object (stub). Returns S_OK, obj=NULL.
+///
+/// # Safety
+/// `pp_data_obj` must be a valid writable pointer if non-null.
+pub unsafe extern "win64" fn ole_get_clipboard(pp_data_obj: *mut usize) -> u32 {
+    if !pp_data_obj.is_null() {
+        unsafe { *pp_data_obj = 0 };
+    }
+    S_OK
+}
+
 // ── Security / proxy stubs ────────────────────────────────────────────────────
 
 // Wine ref: dlls/combase/marshal.c — QIs proxy for IClientSecurity; calls SetBlanket with
@@ -882,6 +920,12 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         // OLE
         "OleInitialize" => Some(ole_initialize as *const () as usize),
         "OleUninitialize" => Some(ole_uninitialize as *const () as usize),
+        "OleLockRunning" => Some(ole_lock_running as *const () as usize),
+        "OleDuplicateData" => Some(ole_duplicate_data as *const () as usize),
+        "OleSetClipboard" => Some(ole_set_clipboard as *const () as usize),
+        "OleGetClipboard" => {
+            Some(ole_get_clipboard as unsafe extern "win64" fn(_) -> _ as *const () as usize)
+        }
         // Security / proxy
         "CoSetProxyBlanket" => Some(co_set_proxy_blanket as *const () as usize),
         "CoInitializeSecurity" => Some(co_initialize_security as *const () as usize),

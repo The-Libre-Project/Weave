@@ -1727,6 +1727,40 @@ pub unsafe extern "win64" fn sh_get_settings(_p_sfs: *mut u8, _dw_mask: u32) {
     // TODO(shim): Phase A — SHGetSettings shell configuration not implemented.
 }
 
+// Wine ref: dlls/shell32/shlfolder.c — SHCreateShellItemArrayFromDataObject creates an
+// IShellItemArray from an IDataObject (drag-and-drop, clipboard); stub returns E_NOTIMPL.
+/// SHCreateShellItemArrayFromDataObject — create an IShellItemArray from an IDataObject (stub).
+///
+/// # Safety
+/// `pdtobj`, `riid`, and `ppv` are accepted but not used.
+pub unsafe extern "win64" fn sh_create_shell_item_array_from_data_object(
+    _pdtobj: *mut u8,
+    _riid: *const u8,
+    ppv: *mut *mut u8,
+) -> u32 {
+    if !ppv.is_null() {
+        unsafe { *ppv = std::ptr::null_mut() };
+    }
+    0x8000_4001u32 // E_NOTIMPL
+}
+
+// Wine ref: dlls/shell32/shell32_main.c — SHGetImageList returns an IImageList
+// pointer for system image lists (shell icon cache); stub returns E_NOTIMPL.
+/// SHGetImageList — retrieve an image list for shell icons (stub).
+///
+/// # Safety
+/// `ppv` must be a valid writable pointer if non-null.
+pub unsafe extern "win64" fn sh_get_image_list(
+    _i_image_list: i32,
+    _riid: *const u8,
+    ppv: *mut *mut u8,
+) -> u32 {
+    if !ppv.is_null() {
+        unsafe { *ppv = std::ptr::null_mut() };
+    }
+    0x8000_4001u32 // E_NOTIMPL
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

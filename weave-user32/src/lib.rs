@@ -1046,6 +1046,9 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "IsDialogMessageA" => {
             Some(is_dialog_message_a as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
         }
+        "IsDialogMessageW" => {
+            Some(is_dialog_message_w as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
         "MapDialogRect" => {
             Some(map_dialog_rect as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
         }
@@ -1361,6 +1364,9 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "DrawTextExW" => Some(
             draw_text_ex_w as unsafe extern "win64" fn(_, _, _, _, _, _) -> _ as *const () as usize,
         ),
+        "DrawTextW" => {
+            Some(draw_text_w as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const () as usize)
+        }
         "ShowScrollBar" => Some(show_scroll_bar as *const () as usize),
         "CreateAcceleratorTableW" => Some(
             create_accelerator_table_w as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
@@ -1443,6 +1449,9 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         }
         "FrameRect" => {
             Some(api::frame_rect as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize)
+        }
+        "FillRect" => {
+            Some(api::fill_rect as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize)
         }
         "InvalidateRgn" => Some(
             api::invalidate_rgn as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,

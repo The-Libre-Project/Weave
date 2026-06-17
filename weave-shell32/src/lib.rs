@@ -275,6 +275,15 @@ fn resolve_shell32(func: &str) -> Option<usize> {
         "SHLimitInputEdit" => Some(
             shell::sh_limit_input_edit as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
         ),
+        // ── Q-Dir Phase A stubs (E3-M5d) ──
+        "SHCreateShellItemArrayFromDataObject" => Some(
+            shell::sh_create_shell_item_array_from_data_object
+                as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
+        ),
+        "SHGetImageList" => Some(
+            shell::sh_get_image_list as unsafe extern "win64" fn(_, _, _) -> _ as *const ()
+                as usize,
+        ),
         _ => None,
     }
 }

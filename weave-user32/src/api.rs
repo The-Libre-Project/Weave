@@ -5418,6 +5418,16 @@ pub unsafe extern "win64" fn is_dialog_message_a(_h_dlg: usize, _lp_msg: *const 
     0
 }
 
+/// IsDialogMessageW: determine whether a message is for a dialog. Returns FALSE.
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+// Wine ref: dlls/user32/dialog.c — IsDialogMessage handles WM_KEYDOWN Tab/Escape/Return
+// for dialog navigation; translates and dispatches if consumed; returns TRUE if eaten.
+pub unsafe extern "win64" fn is_dialog_message_w(_h_dlg: usize, _lp_msg: *const Msg) -> i32 {
+    0
+}
+
 /// MapDialogRect: map dialog box units to pixels. Returns TRUE (rect unchanged).
 ///
 /// # Safety
@@ -8455,6 +8465,21 @@ pub unsafe extern "win64" fn draw_text_ex_w(
     0 // stub: return zero height
 }
 
+/// DrawTextW — draw formatted text in a rectangle.
+///
+/// # Safety
+/// `lp_string` and `lp_rc` must be valid or null.
+// Wine ref: dlls/user32/text.c — DrawTextW draws text via ExtTextOut; returns text height.
+pub unsafe extern "win64" fn draw_text_w(
+    _hdc: usize,
+    _lp_string: *const u16,
+    _cch: i32,
+    _lp_rc: *mut i32,
+    _format: u32,
+) -> i32 {
+    0 // stub: return zero height
+}
+
 /// ShowScrollBar — show or hide a scroll bar control.
 // Wine ref: dlls/user32/scroll.c — calls NtUserShowScrollBar.
 pub extern "win64" fn show_scroll_bar(_hwnd: usize, _bar: i32, _show: i32) -> i32 {
@@ -9430,6 +9455,18 @@ pub extern "win64" fn keybd_event(_b_vk: u8, _b_scan: u8, _dw_flags: u32, _dw_ex
 // region; Weave returns 0 (not drawn).
 pub unsafe extern "win64" fn frame_rect(_hdc: usize, _lprc: *const [i32; 4], _hbr: usize) -> i32 {
     0
+}
+
+/// FillRect — fill a rectangle with a brush.
+///
+/// Returns 1 (TRUE) — no actual fill is performed.
+///
+/// # Safety
+/// `lprc` and `hbr` are accepted but not used.
+// Wine ref: dlls/user32/painting.c — FillRect fills the rect via FillRect helper;
+// Weave returns TRUE without drawing.
+pub unsafe extern "win64" fn fill_rect(_hdc: usize, _lprc: *const [i32; 4], _hbr: usize) -> i32 {
+    1 // TRUE
 }
 
 /// InvalidateRgn — add a region to a window's update region.
