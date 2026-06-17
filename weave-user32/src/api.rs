@@ -1721,7 +1721,14 @@ pub extern "win64" fn def_window_proc_w(
         // Wine ref: dlls/win32u/defwnd.c — WM_SIZE is dispatched by the window manager to the
         // app WNDPROC; DefWindowProc itself takes no action and returns 0.
         WM_SIZE => 0,
-        WM_NCCREATE => 1,  // non-zero = proceed with window creation
+        WM_NCCREATE => 1, // non-zero = proceed with window creation
+        // WM_SETCURSOR: DefWindowProc sets the cursor to the registered class cursor
+        // and returns TRUE. We return TRUE (no-op) since Weave has no cursor management
+        // under Xvfb — the key contract is returning non-zero so the guest WndProc does
+        // not continue processing this message (which might crash on empty registration).
+        // Wine ref: dlls/win32u/defwnd.c — DefWindowProc WM_SETCURSOR calls
+        // NtUserGetClassLong(GC_ATOMIC_CURSOR) then SetCursor; returns TRUE.
+        WM_SETCURSOR => 1,
         WM_NCHITTEST => 1, // HTCLIENT (1) — all hits are in client area
         WM_SETTEXT => {
             // Wine ref: dlls/win32u/defwnd.c — DefWndSetText stores text in window object
@@ -5119,6 +5126,36 @@ pub unsafe extern "win64" fn create_dialog_param_w(
         hwnd_parent,
         tid: unsafe { libc::syscall(libc::SYS_gettid) as u32 },
     });
+    // Send WM_NCCREATE and WM_CREATE to the dialog procedure before WM_INITDIALOG.
+    // Wine ref: dlls/user32/dialog.c — CreateDialogParamW internally calls
+    // CreateWindowExW which sends both messages; Q-Dir's dialog procedure expects
+    // them to populate a per-window registration linked list.
+    let title_wide: Vec<u16> = std::iter::once(0).collect(); // empty title
+    let class_wide: Vec<u16> = "#32770\0".encode_utf16().collect();
+    let cs = CreateStructW {
+        lp_create_params: _lp_template_name as *mut u8,
+        h_instance: _h_instance,
+        h_menu: 0,
+        hwnd_parent,
+        cy: 1,
+        cx: 1,
+        y: 0,
+        x: 0,
+        style: 0x4000_0000i32,
+        _pad: 0,
+        lp_sz_name: title_wide.as_ptr(),
+        lp_sz_class: class_wide.as_ptr(),
+        dw_ex_style: 0,
+        _pad2: 0,
+    };
+    call_wnd_proc(
+        lp_dialog_func,
+        hwnd,
+        WM_NCCREATE,
+        0,
+        &cs as *const _ as isize,
+    );
+    call_wnd_proc(lp_dialog_func, hwnd, WM_CREATE, 0, &cs as *const _ as isize);
     // Call WM_INITDIALOG (0x0110) with hwnd_parent as wParam, dw_init_param as lParam.
     // Wine ref: dlls/user32/dialog.c — WM_INITDIALOG return value is ignored for
     // CreateDialogParam (only used by DialogBox modal variant).

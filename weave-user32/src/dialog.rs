@@ -390,6 +390,41 @@ fn create_frame_window(
     if hwnd != 0 {
         crate::api::init_window_extra(hwnd, ex_style, DLG_WINDOW_EXTRA);
         crate::api::mark_create_window_phase();
+        // Send WM_NCCREATE then WM_CREATE to the dialog procedure, matching what
+        // CreateWindowExW does for regular windows. Dialog procedures created via
+        // DialogBoxParamW / CreateDialogParamW also receive these on Windows.
+        // Wine ref: dlls/user32/dialog.c — DIALOG_CreateIndirect creates the dialog
+        // window via CreateWindowExW, which sends WM_NCCREATE + WM_CREATE before
+        // WM_INITDIALOG. Q-Dir's dialog procedure populates a per-window registration
+        // linked list from one of these messages.
+        let caption_wide: Vec<u16> = template
+            .caption
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        let class_wide: Vec<u16> = template
+            .class_name
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        let cs = CreateStructW {
+            lp_create_params: std::ptr::null_mut(),
+            h_instance: _h_instance,
+            h_menu: 0,
+            hwnd_parent,
+            cy: height as i32,
+            cx: width as i32,
+            y: pos_y,
+            x: pos_x,
+            style: style as i32,
+            _pad: 0,
+            lp_sz_name: caption_wide.as_ptr(),
+            lp_sz_class: class_wide.as_ptr(),
+            dw_ex_style: ex_style,
+            _pad2: 0,
+        };
+        call_wnd_proc(dlg_proc, hwnd, WM_NCCREATE, 0, &cs as *const _ as isize);
+        call_wnd_proc(dlg_proc, hwnd, WM_CREATE, 0, &cs as *const _ as isize);
     }
     hwnd
 }
