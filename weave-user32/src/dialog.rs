@@ -390,13 +390,13 @@ fn create_frame_window(
     if hwnd != 0 {
         crate::api::init_window_extra(hwnd, ex_style, DLG_WINDOW_EXTRA);
         crate::api::mark_create_window_phase();
-        // Send WM_NCCREATE then WM_CREATE to the dialog procedure, matching what
-        // CreateWindowExW does for regular windows. Dialog procedures created via
-        // DialogBoxParamW / CreateDialogParamW also receive these on Windows.
+        // Send WM_NCCREATE to the dialog procedure, matching what CreateWindowExW does.
+        // Dialog procedures are NOT sent WM_CREATE — DefDlgProc handles it internally.
+        // Sending WM_CREATE to the DLGPROC causes Q-Dir to crash (RVA 0x8281) because
+        // the per-window registration linked list is not yet populated by DefDlgProc.
         // Wine ref: dlls/user32/dialog.c — DIALOG_CreateIndirect creates the dialog
-        // window via CreateWindowExW, which sends WM_NCCREATE + WM_CREATE before
-        // WM_INITDIALOG. Q-Dir's dialog procedure populates a per-window registration
-        // linked list from one of these messages.
+        // window via CreateWindowExW; DefDlgProc receives WM_NCCREATE+WM_CREATE, the
+        // DLGPROC only gets WM_INITDIALOG.
         let caption_wide: Vec<u16> = template
             .caption
             .encode_utf16()
@@ -424,7 +424,7 @@ fn create_frame_window(
             _pad2: 0,
         };
         call_wnd_proc(dlg_proc, hwnd, WM_NCCREATE, 0, &cs as *const _ as isize);
-        call_wnd_proc(dlg_proc, hwnd, WM_CREATE, 0, &cs as *const _ as isize);
+        // WM_CREATE NOT sent to DLGPROC — DefDlgProc handles it internally.
     }
     hwnd
 }
