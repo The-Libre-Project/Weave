@@ -5137,37 +5137,10 @@ pub unsafe extern "win64" fn create_dialog_param_w(
         hwnd_parent,
         tid: unsafe { libc::syscall(libc::SYS_gettid) as u32 },
     });
-    // Send WM_NCCREATE to the dialog procedure before WM_INITDIALOG.
-    // Dialog procedures are NOT sent WM_CREATE — DefDlgProc handles it internally.
-    // Wine ref: dlls/user32/dialog.c — CreateDialogParamW internally calls
-    // CreateWindowExW; DefDlgProc receives WM_NCCREATE+WM_CREATE, the DLGPROC only
-    // gets WM_INITDIALOG.
-    let title_wide: Vec<u16> = std::iter::once(0).collect(); // empty title
-    let class_wide: Vec<u16> = "#32770\0".encode_utf16().collect();
-    let cs = CreateStructW {
-        lp_create_params: _lp_template_name as *mut u8,
-        h_instance: _h_instance,
-        h_menu: 0,
-        hwnd_parent,
-        cy: 1,
-        cx: 1,
-        y: 0,
-        x: 0,
-        style: 0x4000_0000i32,
-        _pad: 0,
-        lp_sz_name: title_wide.as_ptr(),
-        lp_sz_class: class_wide.as_ptr(),
-        dw_ex_style: 0,
-        _pad2: 0,
-    };
-    call_wnd_proc(
-        lp_dialog_func,
-        hwnd,
-        WM_NCCREATE,
-        0,
-        &cs as *const _ as isize,
-    );
-    // WM_CREATE NOT sent to DLGPROC — DefDlgProc handles it internally.
+    // WM_NCCREATE + WM_CREATE are NOT sent to the DLGPROC — DefDlgProc handles
+    // them internally on real Windows for #32770 dialogs and does not forward
+    // to the DLGPROC. The DLGPROC only receives WM_INITDIALOG and user-defined
+    // messages.
     // Call WM_INITDIALOG (0x0110) with hwnd_parent as wParam, dw_init_param as lParam.
     // Wine ref: dlls/user32/dialog.c — WM_INITDIALOG return value is ignored for
     // CreateDialogParam (only used by DialogBox modal variant).

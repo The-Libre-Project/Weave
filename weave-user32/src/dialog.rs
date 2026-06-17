@@ -390,41 +390,14 @@ fn create_frame_window(
     if hwnd != 0 {
         crate::api::init_window_extra(hwnd, ex_style, DLG_WINDOW_EXTRA);
         crate::api::mark_create_window_phase();
-        // Send WM_NCCREATE to the dialog procedure, matching what CreateWindowExW does.
-        // Dialog procedures are NOT sent WM_CREATE — DefDlgProc handles it internally.
-        // Sending WM_CREATE to the DLGPROC causes Q-Dir to crash (RVA 0x8281) because
-        // the per-window registration linked list is not yet populated by DefDlgProc.
-        // Wine ref: dlls/user32/dialog.c — DIALOG_CreateIndirect creates the dialog
-        // window via CreateWindowExW; DefDlgProc receives WM_NCCREATE+WM_CREATE, the
-        // DLGPROC only gets WM_INITDIALOG.
-        let caption_wide: Vec<u16> = template
-            .caption
-            .encode_utf16()
-            .chain(std::iter::once(0))
-            .collect();
-        let class_wide: Vec<u16> = template
-            .class_name
-            .encode_utf16()
-            .chain(std::iter::once(0))
-            .collect();
-        let cs = CreateStructW {
-            lp_create_params: std::ptr::null_mut(),
-            h_instance: _h_instance,
-            h_menu: 0,
-            hwnd_parent,
-            cy: height as i32,
-            cx: width as i32,
-            y: pos_y,
-            x: pos_x,
-            style: style as i32,
-            _pad: 0,
-            lp_sz_name: caption_wide.as_ptr(),
-            lp_sz_class: class_wide.as_ptr(),
-            dw_ex_style: ex_style,
-            _pad2: 0,
-        };
-        call_wnd_proc(dlg_proc, hwnd, WM_NCCREATE, 0, &cs as *const _ as isize);
-        // WM_CREATE NOT sent to DLGPROC — DefDlgProc handles it internally.
+        // WM_NCCREATE + WM_CREATE are NOT sent to the DLGPROC — DefDlgProc handles
+        // them internally on real Windows for #32770 dialogs and does not forward
+        // to the DLGPROC. The DLGPROC only receives WM_INITDIALOG and user-defined
+        // messages. Sending WM_NCCREATE to Q-Dir's DLGPROC triggers a VCL virtual
+        // method dispatch that accesses an uninitialized class-static freelist in
+        // BSS (RVA 0x1556c0) and crashes at RVA 0x8281.
+        // Wine ref: dlls/user32/dialog.c — DefDlgProc is the #32770 class proc;
+        // DLGPROC is called via CallWindowProc from DefDlgProc for selected messages.
     }
     hwnd
 }
