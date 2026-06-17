@@ -1474,7 +1474,6 @@ pub extern "win64" fn send_message_w(
     eprintln!(
         "weave/user32: SendMessageW enter seq={seq} tid={cur_tid} hwnd={hwnd:#x} owner_tid={owner_tid} cross_thread={cross_thread} class={class_name:?} msg={msg:#06x} wp={w_param:#x} lp={l_param:#x} wndproc={proc_addr:#x}"
     );
-    let ret = call_wnd_proc(proc_addr, hwnd, msg, w_param, l_param);
     // For #32770 dialog windows: DefDlgProc is the real class wndproc and only
     // forwards specific messages to the DLGPROC. Since we store the DLGPROC
     // directly as the wndproc, messages that DefDlgProc handles internally
@@ -1500,6 +1499,7 @@ pub extern "win64" fn send_message_w(
         eprintln!("weave/user32: SendMessageW #32770 dialog msg={msg:#06x} → DefWindowProcW → {def_ret:#x}");
         return def_ret;
     }
+    let ret = call_wnd_proc(proc_addr, hwnd, msg, w_param, l_param);
     // Intercept SCI_GETDIRECTSTATUSFUNCTION (2184): return our proxy instead of the real fn ptr.
     // SCI_GETDIRECTSTATUSFUNCTION returns a 5-param fn: (sci, msg, wp, lp, *status) -> iptr.
     // The proxy logs all SCI calls and fixes SCI_GETDOCPOINTER to read pdoc from sci+0x128.
