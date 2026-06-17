@@ -1182,6 +1182,99 @@ fn try_sci_getlexer_probe() {
     }
 }
 
+/// Probe: after WM_PAINT fires, send SCI_GETSTYLEAT (2503) at multiple positions
+/// in the Scintilla document to verify the lexer assigned differentiated styles.
+/// If at least two distinct style bytes are observed, emit PHASE: sci_style_variance.
+/// As a fallback, if all positions return 0, try SCI_COLOURISE (4003) and re-query.
+/// Triggered by env var WEAVE_TEST_SCI_GETSTYLEAT=1.
+fn try_sci_getstyleat_probe() {
+    if std::env::var("WEAVE_TEST_SCI_GETSTYLEAT").is_err() {
+        return;
+    }
+    static DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if DONE.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    let sci_hwnd = M15_SCINTILLA_HWND.load(Ordering::Relaxed);
+    if sci_hwnd == 0 {
+        eprintln!("weave/user32: SCI_GETSTYLEAT probe: no Scintilla hwnd captured (M15_SCINTILLA_HWND = 0)");
+        return;
+    }
+
+    // Probe positions matching known token types in test.py:
+    //   0 = shebang comment '#', 50 = inside docstring, 93 = 'def' keyword,
+    //   126 = docstring triple-quote on line 4, 162 = 'return' keyword,
+    //   205 = 'message' identifier, 221 = '"Weave"' string, 251 = 'if' keyword
+    const PROBE_POSITIONS: &[usize] = &[0, 50, 93, 126, 162, 205, 221, 251];
+    let mut styles: Vec<(usize, isize)> = Vec::new();
+
+    for &pos in PROBE_POSITIONS {
+        let style = send_message_w(sci_hwnd, 2503, pos, 0);
+        styles.push((pos, style));
+    }
+
+    let distinct: Vec<isize> = {
+        let mut s: Vec<isize> = styles.iter().map(|&(_, v)| v).collect();
+        s.sort();
+        s.dedup();
+        s
+    };
+
+    let non_zero_count = styles.iter().filter(|&&(_, v)| v != 0).count();
+
+    if distinct.len() >= 2 {
+        eprintln!("weave/user32: SCI_GETSTYLEAT probe: hwnd={sci_hwnd:#x} — {distinct_len} distinct styles across {positions_len} positions ({non_zero_count} non-zero), styles={styles_vec:?}",
+            distinct_len = distinct.len(),
+            positions_len = styles.len(),
+            non_zero_count = non_zero_count,
+            styles_vec = styles,
+        );
+        mark_phase("sci_style_variance");
+    } else if non_zero_count == 0 && distinct.len() == 1 && distinct[0] == 0 {
+        // All zero — try SCI_COLOURISE to force re-lex
+        eprintln!("weave/user32: SCI_GETSTYLEAT probe: all positions returned style=0 — trying SCI_COLOURISE fallback");
+        let _colourise_ret = send_message_w(sci_hwnd, 4003, 0, -1);
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        let mut styles2: Vec<(usize, isize)> = Vec::new();
+        for &pos in PROBE_POSITIONS {
+            let style = send_message_w(sci_hwnd, 2503, pos, 0);
+            styles2.push((pos, style));
+        }
+
+        let distinct2: Vec<isize> = {
+            let mut s: Vec<isize> = styles2.iter().map(|&(_, v)| v).collect();
+            s.sort();
+            s.dedup();
+            s
+        };
+
+        let non_zero2 = styles2.iter().filter(|&&(_, v)| v != 0).count();
+
+        if distinct2.len() >= 2 {
+            eprintln!("weave/user32: SCI_GETSTYLEAT probe (after colourise): hwnd={sci_hwnd:#x} — {distinct_len} distinct styles ({non_zero2} non-zero), styles={styles_vec:?}",
+                distinct_len = distinct2.len(),
+                non_zero2 = non_zero2,
+                styles_vec = styles2,
+            );
+            mark_phase("sci_style_variance");
+        } else {
+            eprintln!("weave/user32: SCI_GETSTYLEAT probe FAILED: all positions returned uniform style even after SCI_COLOURISE — positions={styles2:?}");
+        }
+    } else {
+        let style_label = if distinct.len() == 1 {
+            "style"
+        } else {
+            "styles"
+        };
+        eprintln!("weave/user32: SCI_GETSTYLEAT probe: hwnd={sci_hwnd:#x} — only {distinct_len} distinct {style_label} ({non_zero_count} non-zero), styles={styles_vec:?}",
+            distinct_len = distinct.len(),
+            non_zero_count = non_zero_count,
+            styles_vec = styles,
+        );
+    }
+}
+
 /// # Safety
 /// `lp_msg` must point to a valid `MSG`.
 // Wine ref: dlls/user32/message.c::dispatch_message — calls NtUserMessageCall to get dispatch
@@ -1211,6 +1304,7 @@ pub unsafe extern "win64" fn dispatch_message_w(lp_msg: *const Msg) -> isize {
         try_m15_probe_inject(m.hwnd);
         try_test_irfanview_nav_inject(m.hwnd);
         try_sci_getlexer_probe();
+        try_sci_getstyleat_probe();
     }
 
     // E3-M10 diag: log every WM_COMMAND reaching any guest window proc.
@@ -1438,7 +1532,9 @@ pub unsafe extern "win64" fn sci_direct_fn_proxy(
         2276 => "SCI_CREATEDOCUMENT",
         2282 => "SCI_APPENDTEXT",
         2007 => "SCI_GETCHARACTERPOINTER",
+        2503 => "SCI_GETSTYLEAT",
         4001 => "SCI_GETLEXER",
+        4003 => "SCI_COLOURISE",
         _ => "",
     };
     if !msg_name.is_empty() || (2000..=3000).contains(&msg) {

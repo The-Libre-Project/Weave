@@ -8604,10 +8604,11 @@ fn npp_syntax_highlight_gate() {
         .arg(&tmp_exe)
         .arg(&tmp_py)
         .env("WEAVE_TEST_SCI_GETLEXER", "1")
+        .env("WEAVE_TEST_SCI_GETSTYLEAT", "1")
         .stderr(std::process::Stdio::piped())
         .spawn()
         .unwrap_or_else(|e| {
-            panic!("failed to spawn weave on notepad++.exe for SCI_GETLEXER probe: {e}")
+            panic!("failed to spawn weave on notepad++.exe for SCI_GETLEXER/GETSTYLEAT probe: {e}")
         });
 
     // Drain stderr; signal on wm_paint_dispatched_first.
@@ -8646,8 +8647,8 @@ fn npp_syntax_highlight_gate() {
     let paint_seen = paint_rx.recv_timeout(paint_deadline).is_ok();
 
     if paint_seen {
-        eprintln!("npp_syntax_highlight_gate: wm_paint_dispatched_first observed — SCI_GETLEXER probe should have fired inside weave");
-        // Short window for the internal SendMessageW(SCI_GETLEXER) to process.
+        eprintln!("npp_syntax_highlight_gate: wm_paint_dispatched_first observed — SCI_GETLEXER/SCI_GETSTYLEAT probes should have fired inside weave");
+        // Short window for the internal SendMessageW calls to process.
         std::thread::sleep(std::time::Duration::from_millis(800));
     } else {
         eprintln!("npp_syntax_highlight_gate: timed out waiting for wm_paint — killing NPP");
@@ -8687,6 +8688,12 @@ fn npp_syntax_highlight_gate() {
         "A2 FAIL: PHASE: sci_lexer_active was never emitted — SCI_GETLEXER did not return ≥ 1.\nstderr: {stderr}"
     );
 
+    // A3: SCI_GETSTYLEAT probe found style variance (at least 2 distinct style bytes).
+    assert!(
+        stderr.contains("PHASE: sci_style_variance"),
+        "A3 FAIL: PHASE: sci_style_variance was never emitted — SCI_GETSTYLEAT did not find differentiated styles.\nstderr: {stderr}"
+    );
+
     // Tier C: no new unresolved imports for the message primitives exercised by the probe.
     assert!(
         !stderr.contains("unresolved import: user32!SendMessageW"),
@@ -8716,6 +8723,6 @@ fn npp_syntax_highlight_gate() {
     }
 
     eprintln!(
-        "npp_syntax_highlight_gate: A1+A2 passed, Tier C guards passed (no new unresolved imports)"
+        "npp_syntax_highlight_gate: A1+A2+A3 passed, Tier C guards passed (no new unresolved imports)"
     );
 }
