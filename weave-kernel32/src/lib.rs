@@ -2530,11 +2530,16 @@ fn heap_alloc_direct(alloc_size: usize, total_size: usize) -> *mut std::ffi::c_v
 /// Slab sub-allocation path for normal-size allocations.
 fn heap_alloc_slab(alloc_size: usize, total_size: usize) -> *mut std::ffi::c_void {
     let mut slabs = heap_slabs().lock().unwrap();
+    // Round total_size up to 8-byte alignment so the slab bump pointer stays
+    // aligned for *(ptr as *mut usize) writes. Non-8-aligned alloc sizes (e.g. 5
+    // bytes → total_size=13) would misalign the next bump and trap on x86_64
+    // aligned load/store emitted by Rust's LLVM backend.
+    let aligned_total = (total_size + 7) & !7;
 
     // Try to bump-allocate from an existing slab with space.
     for slab in slabs.iter_mut() {
         let start = slab.bump;
-        let new_bump = start + total_size;
+        let new_bump = start + aligned_total;
         if new_bump <= slab.capacity {
             slab.bump = new_bump;
             let ptr = unsafe { slab.base.add(start) };
@@ -2562,7 +2567,7 @@ fn heap_alloc_slab(alloc_size: usize, total_size: usize) -> *mut std::ffi::c_voi
     }
 
     let start = 0usize;
-    let new_bump = start + total_size;
+    let new_bump = start + aligned_total;
     unsafe { *(slab_base as *mut usize) = alloc_size };
     slabs.push(HeapSlab {
         base: slab_base as *mut u8,
