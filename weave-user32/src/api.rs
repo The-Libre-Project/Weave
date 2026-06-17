@@ -1454,15 +1454,6 @@ pub extern "win64" fn send_message_w(
     eprintln!(
         "weave/user32: SendMessageW enter seq={seq} tid={cur_tid} hwnd={hwnd:#x} owner_tid={owner_tid} cross_thread={cross_thread} class={class_name:?} msg={msg:#06x} wp={w_param:#x} lp={l_param:#x} wndproc={proc_addr:#x}"
     );
-    // WM_SETCURSOR for #32770 dialog windows: DefDlgProc handles this without forwarding
-    // to the DLGPROC. Return TRUE (cursor set) to prevent DLGPROC crash on empty registration
-    // list (Q-Dir RVA 0x8281 — dequeue returns NULL, handler dereferences without check).
-    // Wine ref: dlls/user32/defdlg.c — DefDlgProc WM_SETCURSOR returns TRUE.
-    const WM_SETCURSOR: u32 = 0x0020;
-    if msg == WM_SETCURSOR && class_name == "#32770" {
-        eprintln!("weave/user32: SendMessageW WM_SETCURSOR → DefDlgProc TRUE");
-        return 1;
-    }
     let ret = call_wnd_proc(proc_addr, hwnd, msg, w_param, l_param);
     // Intercept SCI_GETDIRECTSTATUSFUNCTION (2184): return our proxy instead of the real fn ptr.
     // SCI_GETDIRECTSTATUSFUNCTION returns a 5-param fn: (sci, msg, wp, lp, *status) -> iptr.
@@ -4366,6 +4357,17 @@ pub(crate) fn call_wnd_proc(
     if proc_addr == 0 {
         return 0;
     }
+    // WM_SETCURSOR for #32770 dialog windows: DefDlgProc handles this internally
+    // without forwarding to the DLGPROC. Q-Dir's DLGPROC at RVA 0x8281 crashes on
+    // an empty registration list. Intercept here (catches all dispatch paths).
+    // Wine ref: dlls/user32/defdlg.c — DefDlgProc WM_SETCURSOR returns TRUE.
+    if msg == 0x0020 {
+        if let Some(cls) = crate::window::with(hwnd, |e| e.class_name.clone()) {
+            if cls == "#32770" {
+                return 1;
+            }
+        }
+    }
     // SAFETY: `proc_addr` is a window-procedure address registered by the PE guest
     // via `RegisterClassExW` or `CreateWindowExW`, both of which store the raw
     // `WNDPROC` value the guest supplied.  The Win32 API contract requires a WNDPROC
@@ -5135,10 +5137,11 @@ pub unsafe extern "win64" fn create_dialog_param_w(
         hwnd_parent,
         tid: unsafe { libc::syscall(libc::SYS_gettid) as u32 },
     });
-    // Send WM_NCCREATE and WM_CREATE to the dialog procedure before WM_INITDIALOG.
+    // Send WM_NCCREATE to the dialog procedure before WM_INITDIALOG.
+    // Dialog procedures are NOT sent WM_CREATE — DefDlgProc handles it internally.
     // Wine ref: dlls/user32/dialog.c — CreateDialogParamW internally calls
-    // CreateWindowExW which sends both messages; Q-Dir's dialog procedure expects
-    // them to populate a per-window registration linked list.
+    // CreateWindowExW; DefDlgProc receives WM_NCCREATE+WM_CREATE, the DLGPROC only
+    // gets WM_INITDIALOG.
     let title_wide: Vec<u16> = std::iter::once(0).collect(); // empty title
     let class_wide: Vec<u16> = "#32770\0".encode_utf16().collect();
     let cs = CreateStructW {
@@ -5164,7 +5167,7 @@ pub unsafe extern "win64" fn create_dialog_param_w(
         0,
         &cs as *const _ as isize,
     );
-    call_wnd_proc(lp_dialog_func, hwnd, WM_CREATE, 0, &cs as *const _ as isize);
+    // WM_CREATE NOT sent to DLGPROC — DefDlgProc handles it internally.
     // Call WM_INITDIALOG (0x0110) with hwnd_parent as wParam, dw_init_param as lParam.
     // Wine ref: dlls/user32/dialog.c — WM_INITDIALOG return value is ignored for
     // CreateDialogParam (only used by DialogBox modal variant).
