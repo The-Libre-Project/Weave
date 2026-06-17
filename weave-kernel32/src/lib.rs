@@ -33,7 +33,7 @@ static LAST_HEAP_FREE: AtomicUsize = AtomicUsize::new(0);
 // once, and small allocations are sub-allocated within them.  Free is a no-op
 // for slab blocks (acceptable: process lifetime ≈ guest lifetime).
 //
-// Header (8 bytes at ptr-8):
+// Header (8 bytes at ptr-16):
 //   bits [0..62]: alloc_size (63 bits, max ~9 EB)
 //   bit  63:      DIRECT flag (1 = per-allocation mmap, 0 = slab sub-alloc)
 
@@ -2495,7 +2495,7 @@ pub extern "win64" fn heap_alloc(
 ) -> *mut std::ffi::c_void {
     // Windows HeapAlloc(heap, 0, 0) returns a valid non-NULL pointer.
     let alloc_size = if dw_bytes == 0 { 1 } else { dw_bytes };
-    let total_size = alloc_size + 8;
+    let total_size = alloc_size + 16;
 
     // Large allocations get their own mmap (direct). Small allocs use slab sub-allocation.
     if total_size > HEAP_SLAB_SIZE / 2 {
@@ -2524,17 +2524,18 @@ fn heap_alloc_direct(alloc_size: usize, total_size: usize) -> *mut std::ffi::c_v
     // Header: size with DIRECT flag set.
     unsafe { *(ptr as *mut usize) = alloc_size | (1 << 63) };
     LAST_HEAP_FREE.store(0, Ordering::Relaxed);
-    unsafe { (ptr as *mut u8).add(8) as *mut std::ffi::c_void }
+    unsafe { (ptr as *mut u8).add(16) as *mut std::ffi::c_void }
 }
 
 /// Slab sub-allocation path for normal-size allocations.
 fn heap_alloc_slab(alloc_size: usize, total_size: usize) -> *mut std::ffi::c_void {
     let mut slabs = heap_slabs().lock().unwrap();
-    // Round total_size up to 8-byte alignment so the slab bump pointer stays
-    // aligned for *(ptr as *mut usize) writes. Non-8-aligned alloc sizes (e.g. 5
-    // bytes → total_size=13) would misalign the next bump and trap on x86_64
-    // aligned load/store emitted by Rust's LLVM backend.
-    let aligned_total = (total_size + 7) & !7;
+    // Round total_size up to 16-byte alignment so the slab bump pointer stays
+    // 16-byte aligned for context-save functions (e.g. __try/__except SEH) that use
+    // movdqa [reg+0x60], xmm6 (requires 16-byte alignment; #GP on misaligned heap).
+    // 8-byte alignment was insufficient — heap returns at offset +16 from mmap base,
+    // and XMM save at CONTEXT+0x60 needs the full 16-byte guarantee.
+    let aligned_total = (total_size + 15) & !15;
 
     // Try to bump-allocate from an existing slab with space.
     for slab in slabs.iter_mut() {
@@ -2546,7 +2547,7 @@ fn heap_alloc_slab(alloc_size: usize, total_size: usize) -> *mut std::ffi::c_voi
             // Header: size without DIRECT flag (zeroed by mmap).
             unsafe { *(ptr as *mut usize) = alloc_size };
             LAST_HEAP_FREE.store(0, Ordering::Relaxed);
-            return unsafe { ptr.add(8) as *mut std::ffi::c_void };
+            return unsafe { ptr.add(16) as *mut std::ffi::c_void };
         }
     }
 
@@ -2576,7 +2577,7 @@ fn heap_alloc_slab(alloc_size: usize, total_size: usize) -> *mut std::ffi::c_voi
     });
 
     LAST_HEAP_FREE.store(0, Ordering::Relaxed);
-    unsafe { (slab_base as *mut u8).add(8) as *mut std::ffi::c_void }
+    unsafe { (slab_base as *mut u8).add(16) as *mut std::ffi::c_void }
 }
 
 /// HeapReAlloc: reallocate memory in the heap.
@@ -2601,7 +2602,7 @@ pub unsafe extern "win64" fn heap_re_alloc(
     }
     // Copy old content if there was an old block.
     if !lp_mem.is_null() {
-        let old_header = (lp_mem as *mut u8).sub(8) as *mut usize;
+        let old_header = (lp_mem as *mut u8).sub(16) as *mut usize;
         let old_size = alloc_size_from_header(*old_header);
         let copy_size = dw_bytes.min(old_size);
         std::ptr::copy_nonoverlapping(lp_mem as *const u8, new_block as *mut u8, copy_size);
@@ -2644,13 +2645,13 @@ pub unsafe extern "win64" fn heap_free(
         return 0; // FALSE — duplicate free, silently ignored per Windows semantics
     }
     // SAFETY: lp_mem is non-null (early return above) and has a canonical address
-    // (addr >> 47 == 0). Header at ptr-8 stores size + DIRECT flag.
-    let header_ptr = (lp_mem as *mut u8).sub(8) as *mut usize;
+    // (addr >> 47 == 0). Header at ptr-16 stores size + DIRECT flag.
+    let header_ptr = (lp_mem as *mut u8).sub(16) as *mut usize;
     let header = *header_ptr;
     if is_direct(header) {
         // Direct mmap allocation — munmap the whole page(s).
         let stored_size = alloc_size_from_header(header);
-        let mapped_size = (stored_size + 8 + 4095) & !4095;
+        let mapped_size = (stored_size + 16 + 4095) & !4095;
         libc::munmap(header_ptr as *mut libc::c_void, mapped_size);
     }
     // Slab allocation: no-op. The backing MAP_32BIT slab is freed on process exit.
@@ -2659,7 +2660,7 @@ pub unsafe extern "win64" fn heap_free(
 
 /// HeapSize: return the size of a heap block.
 ///
-/// Returns the requested allocation size from the header (8 bytes before ptr).
+/// Returns the requested allocation size from the header (16 bytes before ptr).
 // Wine ref: dlls/ntdll/heap.c::heap_size — calls heap_size() internal helper;
 // returns (SIZE_T)-1 on error (invalid handle or ptr), actual usable size on success.
 pub extern "win64" fn heap_size(
@@ -2673,7 +2674,7 @@ pub extern "win64" fn heap_size(
     if lp_mem.is_null() {
         return usize::MAX;
     }
-    let header_ptr = unsafe { (lp_mem as *const u8).sub(8) as *const usize };
+    let header_ptr = unsafe { (lp_mem as *const u8).sub(16) as *const usize };
     let header = unsafe { *header_ptr };
     alloc_size_from_header(header)
 }
