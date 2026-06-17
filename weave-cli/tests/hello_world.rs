@@ -8541,3 +8541,181 @@ fn signal_desktop_phase_a_probe() {
     // Assert only that we got stderr output.
     assert!(!stderr.is_empty(), "Signal probe: no stderr output");
 }
+
+/// E3-M11a — SCI_GETLEXER Probe Gate.
+///
+/// Launches Notepad++ (portable) on test.py under Xvfb, waits for WM_PAINT,
+/// then sends SCI_GETLEXER (msg 4001) to the primary Scintilla HWND via the
+/// M15_SCINTILLA_HWND static.  Asserts the return value is ≥ 1, proving a
+/// Scintilla lexer is active for the Python file.
+///
+/// Temp dir: /tmp/weave_npp_syntax_highlight (distinct from other NPP gates)
+/// Timeout: 20 s
+#[test]
+fn npp_syntax_highlight_gate() {
+    if !cfg!(target_os = "linux") {
+        eprintln!("skipping execution test — requires Linux");
+        return;
+    }
+
+    let manifest = env!("CARGO_MANIFEST_DIR");
+    let npp_dir = format!("{manifest}/../tests/fixtures/npp");
+    let npp_exe = format!("{npp_dir}/notepad++.exe");
+
+    if !std::path::Path::new(&npp_exe).exists() {
+        eprintln!("skipping: notepad++.exe not present in tests/fixtures/npp/");
+        return;
+    }
+
+    let test_py = format!("{npp_dir}/test.py");
+    if !std::path::Path::new(&test_py).exists() {
+        eprintln!("skipping: test.py not present in tests/fixtures/npp/");
+        return;
+    }
+
+    let weave_bin = env!("CARGO_BIN_EXE_weave");
+
+    // Use distinct temp dir.
+    let tmp_dir = std::path::PathBuf::from("/tmp/weave_npp_syntax_highlight");
+    if tmp_dir.exists() {
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
+    fn copy_dir_all_npp(src: &std::path::Path, dst: &std::path::Path) {
+        std::fs::create_dir_all(dst).expect("create_dir_all failed");
+        for entry in std::fs::read_dir(src).expect("read_dir failed") {
+            let entry = entry.expect("entry failed");
+            let dst_path = dst.join(entry.file_name());
+            if entry.file_type().expect("file_type failed").is_dir() {
+                copy_dir_all_npp(&entry.path(), &dst_path);
+            } else {
+                std::fs::copy(entry.path(), &dst_path).expect("copy failed");
+            }
+        }
+    }
+    copy_dir_all_npp(std::path::Path::new(&npp_dir), &tmp_dir);
+
+    let tmp_exe = tmp_dir.join("notepad++.exe");
+    let tmp_py = tmp_dir.join("test.py");
+
+    let start = std::time::Instant::now();
+    let mut child = std::process::Command::new(weave_bin)
+        .current_dir(&tmp_dir)
+        .arg(&tmp_exe)
+        .arg(&tmp_py)
+        .env("WEAVE_TEST_SCI_GETLEXER", "1")
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|e| {
+            panic!("failed to spawn weave on notepad++.exe for SCI_GETLEXER probe: {e}")
+        });
+
+    // Drain stderr; signal on wm_paint_dispatched_first.
+    let stderr_pipe = child.stderr.take().expect("stderr was piped");
+    let stderr_shared = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let stderr_writer = std::sync::Arc::clone(&stderr_shared);
+    let (paint_tx, paint_rx) = std::sync::mpsc::channel::<()>();
+
+    let drain_thread = std::thread::spawn(move || {
+        use std::io::Read;
+        let mut pipe = stderr_pipe;
+        let mut buf = [0u8; 4096];
+        let mut acc = Vec::new();
+        let mut signalled = false;
+        loop {
+            match pipe.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    acc.extend_from_slice(&buf[..n]);
+                    if !signalled {
+                        let chunk = String::from_utf8_lossy(&acc);
+                        if chunk.contains("PHASE: wm_paint_dispatched_first") {
+                            let _ = paint_tx.send(());
+                            signalled = true;
+                        }
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        *stderr_writer.lock().unwrap() = acc;
+    });
+
+    // Wait for paint phase (proves message loop is live).
+    let paint_deadline = std::time::Duration::from_secs(15);
+    let paint_seen = paint_rx.recv_timeout(paint_deadline).is_ok();
+
+    if paint_seen {
+        eprintln!("npp_syntax_highlight_gate: wm_paint_dispatched_first observed — SCI_GETLEXER probe should have fired inside weave");
+        // Short window for the internal SendMessageW(SCI_GETLEXER) to process.
+        std::thread::sleep(std::time::Duration::from_millis(800));
+    } else {
+        eprintln!("npp_syntax_highlight_gate: timed out waiting for wm_paint — killing NPP");
+    }
+
+    // Wait for exit or kill.
+    let kill_deadline = start + std::time::Duration::from_secs(20);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) => {
+                if std::time::Instant::now() >= kill_deadline {
+                    let _ = child.kill();
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err(e) => panic!("wait failed: {e}"),
+        }
+    }
+    let elapsed = start.elapsed();
+
+    drain_thread.join().expect("stderr drain thread panicked");
+    let stderr_bytes = stderr_shared.lock().unwrap().clone();
+    let stderr = String::from_utf8_lossy(&stderr_bytes);
+    eprintln!("npp_syntax_highlight_gate stderr ({elapsed:.1?}):\n{stderr}");
+
+    // A1: Paint phase seen (message loop live).
+    assert!(
+        stderr.contains("PHASE: wm_paint_dispatched_first"),
+        "A1 FAIL: PHASE: wm_paint_dispatched_first was never emitted — NPP did not reach paint.\nstderr: {stderr}"
+    );
+
+    // A2: SCI_GETLEXER probe returned ≥ 1 (lexer active).
+    assert!(
+        stderr.contains("PHASE: sci_lexer_active"),
+        "A2 FAIL: PHASE: sci_lexer_active was never emitted — SCI_GETLEXER did not return ≥ 1.\nstderr: {stderr}"
+    );
+
+    // Tier C: no new unresolved imports for the message primitives exercised by the probe.
+    assert!(
+        !stderr.contains("unresolved import: user32!SendMessageW"),
+        "C1: unresolved import for user32!SendMessageW during SCI_GETLEXER probe.\nstderr: {stderr}"
+    );
+
+    // C2: no unresolved imports on the GDI32 surface.
+    for func in &[
+        "GetTextExtentExPointW",
+        "EnumFontFamiliesExW",
+        "SetTextAlign",
+        "CreateRectRgn",
+        "GetObjectW",
+    ] {
+        assert!(
+            !stderr.contains(&format!("weave: unresolved: gdi32.dll::{func}")),
+            "C2: GDI32 function {func} is still unresolved during SCI_GETLEXER probe.\nstderr: {stderr}"
+        );
+    }
+
+    // C3: no unresolved imports on the USER32 surface during the probe window.
+    for func in &["BeginPaint", "EndPaint", "GetDC", "ReleaseDC"] {
+        assert!(
+            !stderr.contains(&format!("weave: unresolved: user32.dll::{func}")),
+            "C3: USER32 function {func} is still unresolved during SCI_GETLEXER probe.\nstderr: {stderr}"
+        );
+    }
+
+    eprintln!(
+        "npp_syntax_highlight_gate: A1+A2 passed, Tier C guards passed (no new unresolved imports)"
+    );
+}

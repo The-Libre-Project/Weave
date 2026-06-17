@@ -1154,6 +1154,34 @@ fn try_m15_probe_inject(hwnd: usize) {
     }
 }
 
+/// Probe: after WM_PAINT fires, send SCI_GETLEXER (4001) to the primary
+/// Scintilla HWND captured by M15_SCINTILLA_HWND.  If the return value is ≥ 1
+/// a lexer is active; emit PHASE: sci_lexer_active.  Triggered by env var
+/// WEAVE_TEST_SCI_GETLEXER=1.
+fn try_sci_getlexer_probe() {
+    if std::env::var("WEAVE_TEST_SCI_GETLEXER").is_err() {
+        return;
+    }
+    static DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if DONE.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    let sci_hwnd = M15_SCINTILLA_HWND.load(Ordering::Relaxed);
+    if sci_hwnd == 0 {
+        eprintln!(
+            "weave/user32: SCI_GETLEXER probe: no Scintilla hwnd captured (M15_SCINTILLA_HWND = 0)"
+        );
+        return;
+    }
+    let ret = send_message_w(sci_hwnd, 4001, 0, 0);
+    if ret >= 1 {
+        eprintln!("weave/user32: SCI_GETLEXER probe: hwnd={sci_hwnd:#x} ret={ret} — lexer active");
+        mark_phase("sci_lexer_active");
+    } else {
+        eprintln!("weave/user32: SCI_GETLEXER probe: hwnd={sci_hwnd:#x} ret={ret} — no lexer set or wrong hwnd");
+    }
+}
+
 /// # Safety
 /// `lp_msg` must point to a valid `MSG`.
 // Wine ref: dlls/user32/message.c::dispatch_message — calls NtUserMessageCall to get dispatch
@@ -1182,6 +1210,7 @@ pub unsafe extern "win64" fn dispatch_message_w(lp_msg: *const Msg) -> isize {
         try_test_wm_command_inject(m.hwnd);
         try_m15_probe_inject(m.hwnd);
         try_test_irfanview_nav_inject(m.hwnd);
+        try_sci_getlexer_probe();
     }
 
     // E3-M10 diag: log every WM_COMMAND reaching any guest window proc.
@@ -1409,6 +1438,7 @@ pub unsafe extern "win64" fn sci_direct_fn_proxy(
         2276 => "SCI_CREATEDOCUMENT",
         2282 => "SCI_APPENDTEXT",
         2007 => "SCI_GETCHARACTERPOINTER",
+        4001 => "SCI_GETLEXER",
         _ => "",
     };
     if !msg_name.is_empty() || (2000..=3000).contains(&msg) {
