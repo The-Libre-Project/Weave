@@ -8319,6 +8319,7 @@ fn q_dir_file_pane_gate() {
     let mut child = std::process::Command::new(weave_bin)
         .current_dir(&q_dir_dir)
         .arg(&q_dir_exe)
+        .arg(".")
         .env("DISPLAY", ":99")
         .stderr(std::process::Stdio::piped())
         .spawn()
