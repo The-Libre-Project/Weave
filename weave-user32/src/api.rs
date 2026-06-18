@@ -7481,24 +7481,15 @@ unsafe fn run_modal_dialog_loop(hwnd: usize) -> isize {
         if crate::dialog::modal_ended() {
             break;
         }
-        if !window::contains(msg.hwnd) && msg.message != WM_NULL {
-            continue;
-        }
-        // Dialog WM_PAINT: DefWindowProc BeginPaint/ValidateRect/EndPaint — never guest dlgproc
-        // (Q-Dir SIGSEGV at dlgproc WM_PAINT RVA 0x8281 and WM_INITDIALOG 0x7880d).
-        // Wine ref: dlls/user32/dialog.c — modal loop dispatches until EndDialog; Q-Dir cmp rax,1.
-        if msg.message == WM_PAINT {
-            if window::contains(msg.hwnd) {
-                let _ = crate::dialog::paint_and_validate_hwnd(msg.hwnd);
-            }
-            if msg.hwnd == hwnd {
-                let _ = crate::dialog::signal_end_dialog(hwnd, 1);
-                break;
-            }
-            continue;
-        }
-        if msg.message == WM_NULL {
-            continue;
+        // Dispatch ALL messages through DispatchMessageW. The DefDlgProc filter
+        // in send_message_w/dispatch_message_w redirects non-forwarded messages
+        // (WM_PAINT, WM_NCMOUSEMOVE, WM_SETCURSOR, etc.) for #32770 dialogs to
+        // DefWindowProcW, preventing crashes in guest DLGPROCs that aren't
+        // expecting those messages (Q-Dir RVA 0x8281).
+        // Wine ref: dlls/user32/dialog.c — modal loop dispatches via
+        // DispatchMessageW/IsDialogMessageW until EndDialog.
+        unsafe {
+            dispatch_message_w(&msg);
         }
     }
     if !crate::dialog::modal_ended() {

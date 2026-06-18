@@ -58,16 +58,6 @@ static ACTIVE_MODAL: Mutex<Option<ActiveModal>> = Mutex::new(None);
 
 /// Minimal WM_PAINT handler for dialog HWNDs — BeginPaint/ValidateRect/EndPaint without guest dlgproc.
 ///
-/// Wine ref: dlls/win32u/defwnd.c — DefWindowProc WM_PAINT calls BeginPaint then EndPaint
-/// (which validates the update region). Q-Dir dlgproc SIGSEGV on WM_PAINT (RVA 0x8281) and
-/// WM_INITDIALOG (0x7880d); route paint through DefWindowProc instead of guest dispatch.
-pub(crate) fn paint_and_validate_hwnd(hwnd: usize) -> isize {
-    if hwnd == 0 || window::with(hwnd, |_| ()).is_none() {
-        return 0;
-    }
-    crate::api::def_window_proc_w(hwnd, WM_PAINT, 0, 0)
-}
-
 fn lock_modal(
     m: &Mutex<Option<ActiveModal>>,
 ) -> Option<std::sync::MutexGuard<'_, Option<ActiveModal>>> {
