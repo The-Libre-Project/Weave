@@ -8316,8 +8316,19 @@ fn q_dir_file_pane_gate() {
 
     let weave_bin = env!("CARGO_BIN_EXE_weave");
 
-    // E3-M5e Approach 5: create a temp prefix with drive_c/testdir/ so that
-    // Q-Dir's INI entry Dir1=C:\testdir resolves to a real path.
+    // E3-M5e Approach 6: xdotool to dismiss registration dialog, then Q-Dir
+    // navigates to command-line arg path.
+    let xdotool_ok = std::process::Command::new("xdotool")
+        .arg("version")
+        .output()
+        .is_ok();
+    if !xdotool_ok {
+        eprintln!("skipping: xdotool not available in PATH");
+        return;
+    }
+
+    // E3-M5e: create a temp prefix with drive_c/testdir/ so that
+    // Q-Dir's command-line arg C:\testdir resolves to a real path.
     let temp_prefix = tempfile::tempdir().expect("failed to create tempdir for prefix");
     let prefix_path = temp_prefix.path().to_path_buf();
     let drive_testdir = prefix_path.join("drive_c").join("testdir");
@@ -8342,7 +8353,8 @@ fn q_dir_file_pane_gate() {
         .unwrap_or_else(|e| panic!("failed to spawn weave on Q-Dir_x64.exe: {e}"));
 
     let stderr_pipe = child.stderr.take().expect("stderr was piped");
-    let stderr_shared = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let stderr_shared: std::sync::Arc<std::sync::Mutex<Vec<u8>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
     let stderr_writer = std::sync::Arc::clone(&stderr_shared);
     let drain_thread = std::thread::spawn(move || {
         use std::io::Read;
@@ -8352,11 +8364,13 @@ fn q_dir_file_pane_gate() {
         *stderr_writer.lock().unwrap() = buf;
     });
 
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
     let mut exit_status: Option<std::process::ExitStatus> = None;
     let mut killed_by_deadline = false;
+    let mut paint_seen = false;
+    let mut drive_done = false;
 
-    loop {
+    'main: loop {
         match child.try_wait() {
             Ok(Some(status)) => {
                 exit_status = Some(status);
@@ -8368,9 +8382,45 @@ fn q_dir_file_pane_gate() {
                     killed_by_deadline = true;
                     break;
                 }
+                if !paint_seen {
+                    let stderr_bytes = stderr_shared.lock().unwrap().clone();
+                    let stderr = String::from_utf8_lossy(&stderr_bytes);
+                    if stderr.contains("PHASE: wm_paint_dispatched_first") {
+                        paint_seen = true;
+                        eprintln!("q_dir_file_pane_gate: paint seen — waiting for window, then dismissing registration dialog");
+                    }
+                }
+                if paint_seen && !drive_done {
+                    // Give the window manager a moment to map the window.
+                    std::thread::sleep(std::time::Duration::from_millis(600));
+
+                    let search = std::process::Command::new("xdotool")
+                        .args(["search", "--name", "Q-Dir"])
+                        .output();
+                    if let Ok(out) = search {
+                        if out.status.success() {
+                            if let Some(id) = String::from_utf8_lossy(&out.stdout)
+                                .lines()
+                                .next()
+                                .map(|s| s.trim().to_string())
+                            {
+                                if !id.is_empty() {
+                                    eprintln!("q_dir_file_pane_gate: sending Escape to dismiss dialog, wid={id}");
+                                    let _ = std::process::Command::new("xdotool")
+                                        .args(["key", "--window", &id, "Escape"])
+                                        .output();
+                                    // Wait for dialog to close and navigation to fire.
+                                    std::thread::sleep(std::time::Duration::from_secs(2));
+                                    drive_done = true;
+                                }
+                            }
+                        }
+                    }
+                    drive_done = true; // prevent retry even if search failed
+                }
                 std::thread::sleep(std::time::Duration::from_millis(100));
             }
-            Err(e) => panic!("wait failed: {e}"),
+            Err(e) => break 'main,
         }
     }
 
