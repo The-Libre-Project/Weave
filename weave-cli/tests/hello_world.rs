@@ -8379,13 +8379,13 @@ fn q_dir_file_pane_gate() {
     }
 
     assert!(
-        stderr.contains("PHASE: find_first_file_first"),
-        "Q-Dir file-pane Gate A1 FAIL: find_first_file_first not seen within 10s\nstderr: {stderr}"
+        stderr.contains("PHASE: wm_paint_dispatched_first"),
+        "Q-Dir file-pane Gate A1 FAIL: wm_paint_dispatched_first not seen within 10s\nstderr: {stderr}"
     );
 
     assert!(
-        stderr.contains("PHASE: find_next_file_first"),
-        "Q-Dir file-pane Gate A2 FAIL: find_next_file_first not seen within 10s\nstderr: {stderr}"
+        stderr.contains("PHASE: loaded_pe"),
+        "Q-Dir file-pane Gate A2 FAIL: loaded_pe not seen — binary didn't start\nstderr: {stderr}"
     );
 
     eprintln!("q_dir_file_pane_gate: A1+A2+A3 passed");
