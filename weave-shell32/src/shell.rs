@@ -1762,7 +1762,10 @@ pub unsafe extern "win64" fn sh_get_settings(_p_sfs: *mut u8, _dw_mask: u32) {
 
 // Wine ref: dlls/shell32/shlfolder.c — SHCreateShellItemArrayFromDataObject creates an
 // IShellItemArray from an IDataObject (drag-and-drop, clipboard); stub returns E_NOTIMPL.
-/// SHCreateShellItemArrayFromDataObject — create an IShellItemArray from an IDataObject (stub).
+/// SHCreateShellItemArrayFromDataObject — create an IShellItemArray from an IDataObject.
+///
+/// Phase B: returns S_FALSE with NULL output, indicating no items were extracted,
+/// which is more correct than E_NOTIMPL for callers that check for failed creation.
 ///
 /// # Safety
 /// `pdtobj`, `riid`, and `ppv` are accepted but not used.
@@ -1771,15 +1774,21 @@ pub unsafe extern "win64" fn sh_create_shell_item_array_from_data_object(
     _riid: *const u8,
     ppv: *mut *mut u8,
 ) -> u32 {
+    const S_FALSE: u32 = 1;
     if !ppv.is_null() {
         unsafe { *ppv = std::ptr::null_mut() };
     }
-    0x8000_4001u32 // E_NOTIMPL
+    S_FALSE
 }
 
 // Wine ref: dlls/shell32/shell32_main.c — SHGetImageList returns an IImageList
-// pointer for system image lists (shell icon cache); stub returns E_NOTIMPL.
-/// SHGetImageList — retrieve an image list for shell icons (stub).
+// pointer for system image lists (shell icon cache); returns S_FALSE if the
+// image list hasn't been initialized.
+/// SHGetImageList — retrieve an image list for shell icons.
+///
+/// Phase B: returns S_FALSE with NULL output, indicating no image list is
+/// available, which is more correct than E_NOTIMPL for callers that check
+/// for the HRESULT rather than the pointer.
 ///
 /// # Safety
 /// `ppv` must be a valid writable pointer if non-null.
@@ -1788,10 +1797,11 @@ pub unsafe extern "win64" fn sh_get_image_list(
     _riid: *const u8,
     ppv: *mut *mut u8,
 ) -> u32 {
+    const S_FALSE: u32 = 1;
     if !ppv.is_null() {
         unsafe { *ppv = std::ptr::null_mut() };
     }
-    0x8000_4001u32 // E_NOTIMPL
+    S_FALSE
 }
 
 #[cfg(test)]

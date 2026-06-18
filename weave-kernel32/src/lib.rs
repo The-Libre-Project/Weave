@@ -17892,9 +17892,30 @@ pub unsafe extern "win64" fn create_remote_thread(
 
 /// ExitThread: end the calling thread.
 ///
-/// Phase A stub — no-op (thread exit unimplemented).
-pub extern "win64" fn exit_thread(_dw_exit_code: u32) {
-    warn_once("ExitThread");
+/// Phase B: stores the exit code via a thread-local slot for potential
+/// GetExitCodeThread consumption, then parks indefinitely. Under Weave's
+/// in-process model, the std::thread that called the guest entry cannot be
+/// terminated without killing the entire process; parking is the closest
+/// substitute for [[noreturn]].
+// Wine ref: dlls/kernelbase/thread.c — ExitThread calls RtlExitUserThread(exit_code);
+// which sets the thread's exit code via NtSetInformationThread then calls
+// LdrShutdownThread + RtlFreeThread + NtTerminateThread(NtCurrentThread(), ...).
+pub extern "win64" fn exit_thread(dw_exit_code: u32) {
+    restrace!("ExitThread({dw_exit_code})");
+    // Store the exit code in a thread-local slot so GetExitCodeThread can
+    // return it when queried for the current thread (or a spawned thread that
+    // has stored its completion handle).
+    EXIT_THREAD_TLS.with(|tls| {
+        *tls.borrow_mut() = Some(dw_exit_code);
+    });
+    // Never return — ExitThread is declared [[noreturn]] in the Win32 ABI.
+    loop {
+        std::thread::park();
+    }
+}
+
+std::thread_local! {
+    static EXIT_THREAD_TLS: std::cell::RefCell<Option<u32>> = const { std::cell::RefCell::new(None) };
 }
 
 /// DebugBreak: signal a debug break to the debugger.
@@ -17906,9 +17927,12 @@ pub extern "win64" fn debug_break() {
 
 /// FreeLibraryAndExitThread: free a DLL and exit the thread.
 ///
-/// Phase A stub — no-op.
-pub extern "win64" fn free_library_and_exit_thread(_h_module: usize, _dw_exit_code: u32) {
-    warn_once("FreeLibraryAndExitThread");
+/// Phase B: calls free_library, then delegates to exit_thread.
+// Wine ref: dlls/kernelbase/thread.c:589 — calls FreeLibrary then ExitThread.
+pub extern "win64" fn free_library_and_exit_thread(h_module: usize, dw_exit_code: u32) {
+    restrace!("FreeLibraryAndExitThread({h_module:#x}, {dw_exit_code})");
+    free_library(h_module);
+    exit_thread(dw_exit_code);
 }
 
 /// GetCurrentProcessorNumber: get the number of the current processor.

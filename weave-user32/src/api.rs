@@ -5438,24 +5438,63 @@ pub extern "win64" fn check_radio_button(
     1
 }
 
-/// IsDialogMessageA: determine whether a message is for a dialog. Returns FALSE.
+/// IsDialogMessageA: determine whether a message is for a dialog.
+///
+/// Phase B: handles WM_KEYDOWN for VK_TAB, VK_ESCAPE, and VK_RETURN
+/// to provide basic dialog navigation.
 ///
 /// # Safety
-/// Pointer arguments are accepted but not dereferenced.
+/// Pointer arguments are dereferenced.
 // Wine ref: dlls/user32/dialog.c — IsDialogMessage handles WM_KEYDOWN Tab/Escape/Return
 // for dialog navigation; translates and dispatches if consumed; returns TRUE if eaten.
-pub unsafe extern "win64" fn is_dialog_message_a(_h_dlg: usize, _lp_msg: *const Msg) -> i32 {
-    0
+pub unsafe extern "win64" fn is_dialog_message_a(h_dlg: usize, lp_msg: *const Msg) -> i32 {
+    unsafe { is_dialog_message_w(h_dlg, lp_msg) }
 }
 
-/// IsDialogMessageW: determine whether a message is for a dialog. Returns FALSE.
+/// IsDialogMessageW: determine whether a message is for a dialog.
+///
+/// Phase B: handles WM_KEYDOWN for Tab (focus navigation), Escape (close),
+/// and Return (default button activation). Returns TRUE if the message was
+/// consumed by dialog navigation.
 ///
 /// # Safety
-/// Pointer arguments are accepted but not dereferenced.
-// Wine ref: dlls/user32/dialog.c — IsDialogMessage handles WM_KEYDOWN Tab/Escape/Return
+/// `lp_msg` must point to a valid `Msg` struct if non-null.
+// Wine ref: dlls/user32/dialog.c — handles WM_KEYDOWN Tab/Escape/Return
 // for dialog navigation; translates and dispatches if consumed; returns TRUE if eaten.
-pub unsafe extern "win64" fn is_dialog_message_w(_h_dlg: usize, _lp_msg: *const Msg) -> i32 {
-    0
+pub unsafe extern "win64" fn is_dialog_message_w(h_dlg: usize, lp_msg: *const Msg) -> i32 {
+    const VK_TAB: i32 = 0x09;
+    const VK_RETURN: i32 = 0x0D;
+    const VK_ESCAPE: i32 = 0x1B;
+    const VK_SHIFT: i32 = 0x10;
+    const WM_NEXTDLGCTL: u32 = 0x0028;
+
+    if lp_msg.is_null() {
+        return 0;
+    }
+    let msg = unsafe { &*lp_msg };
+    if msg.message != WM_KEYDOWN {
+        return 0;
+    }
+    let vk = msg.w_param as i32;
+    match vk {
+        VK_TAB => {
+            // Move focus forward (wParam=0) or backward (wParam=1, Shift held)
+            let shift_down = get_key_state(VK_SHIFT) < 0;
+            send_message_w(h_dlg, WM_NEXTDLGCTL, if shift_down { 1 } else { 0 }, 0);
+            1 // TRUE — consumed
+        }
+        VK_ESCAPE => {
+            // Send WM_CLOSE to the dialog
+            send_message_w(h_dlg, WM_CLOSE, 0, 0);
+            1 // TRUE — consumed
+        }
+        VK_RETURN => {
+            // Activate the default button (IDOK) or send WM_COMMAND(IDOK)
+            send_message_w(h_dlg, WM_COMMAND, 1, 0); // IDOK = 1
+            1 // TRUE — consumed
+        }
+        _ => 0, // FALSE — not handled
+    }
 }
 
 /// MapDialogRect: map dialog box units to pixels. Returns TRUE (rect unchanged).
@@ -9570,7 +9609,9 @@ pub unsafe extern "win64" fn frame_rect(_hdc: usize, _lprc: *const [i32; 4], _hb
 
 /// FillRect — fill a rectangle with a brush.
 ///
-/// Returns 1 (TRUE) — no actual fill is performed.
+/// Phase B: returns TRUE (success) without actually drawing. A real
+/// implementation would extract the LOGBRUSH colour and call PatBlt
+/// with PATCOPY through gdi32.
 ///
 /// # Safety
 /// `lprc` and `hbr` are accepted but not used.
