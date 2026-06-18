@@ -540,9 +540,7 @@ pub unsafe extern "win64" fn sh_get_path_from_id_list_ex(
     max_path: u32,
 ) -> i32 {
     if !psz_path.is_null() {
-        unsafe {
-            *psz_path = 0;
-        }
+        unsafe { *psz_path = 0 };
     }
     if pidl.is_null() || psz_path.is_null() {
         return 0;
@@ -550,6 +548,149 @@ pub unsafe extern "win64" fn sh_get_path_from_id_list_ex(
     pidl_path_from_list(pidl)
         .map(|path| write_wide_to_buffer(psz_path, &path, max_path as usize))
         .unwrap_or(0)
+}
+
+/// SHGetDataFromIDListW — retrieve data from a PIDL.
+///
+/// Supports `SHGDFIL_FINDDATA` (1): fills a `WIN32_FIND_DATAW` from the
+/// filesystem metadata of the path stored in the PIDL.
+///
+/// # Safety
+/// `psf` is unused. `pidl` must be null or a valid PIDL. `pv` must point to
+/// a buffer of at least `cb` bytes.
+// Wine ref: dlls/shell32/shlfolder.c — SHGetDataFromIDListW dispatches by format (ref hand-written, jcodemunch unavailable).
+pub unsafe extern "win64" fn sh_get_data_from_id_list_w(
+    _psf: *mut u8,
+    pidl: *const u8,
+    n_format: i32,
+    pv: *mut u8,
+    cb: i32,
+) -> i32 {
+    const S_OK: i32 = 0;
+    const E_INVALIDARG: i32 = 0x8007_0057u32 as i32;
+    const E_NOTIMPL: i32 = 0x8000_4001u32 as i32;
+    const SHGDFIL_FINDDATA: i32 = 1;
+
+    if pidl.is_null() || pv.is_null() || cb <= 0 {
+        return E_INVALIDARG;
+    }
+
+    match n_format {
+        SHGDFIL_FINDDATA => {
+            // WIN32_FIND_DATAW minimum size: 592 bytes (x64)
+            if (cb as usize) < 592 {
+                return E_INVALIDARG;
+            }
+            let Some(path) = crate::pidl::pidl_path_from_list(pidl) else {
+                return E_INVALIDARG;
+            };
+            // Convert Weave path (Z:\path) to a Linux path for stat
+            let linux_path = win_path_to_linux(&path);
+            let c_path = match std::ffi::CString::new(linux_path.as_bytes()) {
+                Ok(s) if !s.as_bytes().is_empty() => s,
+                _ => return E_INVALIDARG,
+            };
+
+            let mut st: libc::stat = unsafe { std::mem::zeroed() };
+            let ret = unsafe { libc::stat(c_path.as_ptr(), &mut st) };
+            if ret != 0 {
+                // Path doesn't exist — zero the buffer and fill name only.
+                unsafe { std::ptr::write_bytes(pv, 0, 592) };
+                let file_name = path.rsplit('\\').next().unwrap_or(&path);
+                let wide: Vec<u16> = file_name.encode_utf16().collect();
+                let max_chars = 259usize.min(wide.len());
+                let name_ptr = pv.add(44) as *mut u16;
+                for (i, ch) in wide.iter().take(max_chars).enumerate() {
+                    unsafe { *name_ptr.add(i) = *ch };
+                }
+                unsafe { *name_ptr.add(max_chars) = 0 };
+                // FILE_ATTRIBUTE_NORMAL (0x80)
+                unsafe { *(pv as *mut u32) = 0x80u32 };
+                return S_OK;
+            }
+
+            // dwFileAttributes (offset 0)
+            let attr = mode_to_file_attributes(st.st_mode);
+            unsafe { *(pv as *mut u32) = attr };
+
+            // Times — convert Unix times to FILETIME (100-ns intervals since 1601-01-01)
+            fn unix_to_filetime(secs: i64) -> i64 {
+                const UNIX_EPOCH_DIFF: i64 = 11644473600;
+                (secs + UNIX_EPOCH_DIFF) * 10_000_000
+            }
+            // CreationTime (offset 4)
+            unsafe { *(pv.add(4) as *mut i64) = unix_to_filetime(st.st_ctime as i64) };
+            // LastAccessTime (offset 12)
+            unsafe { *(pv.add(12) as *mut i64) = unix_to_filetime(st.st_atime as i64) };
+            // LastWriteTime (offset 20)
+            unsafe { *(pv.add(20) as *mut i64) = unix_to_filetime(st.st_mtime as i64) };
+
+            // nFileSizeHigh (offset 28), nFileSizeLow (offset 32)
+            let size = st.st_size as u64;
+            unsafe { *(pv.add(28) as *mut u32) = (size >> 32) as u32 };
+            unsafe { *(pv.add(32) as *mut u32) = (size & 0xFFFF_FFFF) as u32 };
+
+            // cFileName (offset 44) — extract file name from path
+            let file_name = path.rsplit('\\').next().unwrap_or(&path);
+            let wide: Vec<u16> = file_name.encode_utf16().collect();
+            let max_chars = 259usize.min(wide.len());
+            let name_ptr = pv.add(44) as *mut u16;
+            for (i, ch) in wide.iter().take(max_chars).enumerate() {
+                unsafe { *name_ptr.add(i) = *ch };
+            }
+            unsafe { *name_ptr.add(max_chars) = 0 };
+
+            S_OK
+        }
+        _ => E_NOTIMPL,
+    }
+}
+
+/// Convert a Weave Windows-style path (e.g. `Z:\home\user\file.txt`) to a
+/// Linux absolute path (`/home/user/file.txt`).
+fn win_path_to_linux(win_path: &str) -> String {
+    let trimmed = win_path.trim_start_matches("\\??\\");
+    if trimmed.len() >= 2
+        && (trimmed.as_bytes()[0] == b'Z' || trimmed.as_bytes()[0] == b'z')
+        && trimmed.as_bytes()[1] == b':'
+    {
+        // Z:\path → /path  (also handle Z:/path with forward slashes)
+        let rest = trimmed[2..]
+            .trim_start_matches('\\')
+            .trim_start_matches('/');
+        if rest.is_empty() {
+            return "/".to_string();
+        }
+        format!("/{}", rest.replace('\\', "/"))
+    } else if trimmed.len() >= 2 && trimmed.as_bytes()[1] == b':' {
+        // C:\path etc. — just convert backslashes, keep drive letter as dir
+        let rest = trimmed[2..]
+            .trim_start_matches('\\')
+            .trim_start_matches('/');
+        format!(
+            "/drive_{}/{}",
+            &trimmed[..1].to_lowercase(),
+            rest.replace('\\', "/")
+        )
+    } else {
+        // No drive letter — treat as relative or absolute Unix path
+        trimmed.replace('\\', "/")
+    }
+}
+
+fn mode_to_file_attributes(mode: libc::mode_t) -> u32 {
+    const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
+    const FILE_ATTRIBUTE_READONLY: u32 = 0x01;
+    const FILE_ATTRIBUTE_NORMAL: u32 = 0x80;
+
+    let mut attr = FILE_ATTRIBUTE_NORMAL;
+    if mode & libc::S_IFDIR != 0 {
+        attr |= FILE_ATTRIBUTE_DIRECTORY;
+    }
+    if mode & libc::S_IWUSR == 0 {
+        attr |= FILE_ATTRIBUTE_READONLY;
+    }
+    attr
 }
 
 #[cfg(test)]

@@ -974,6 +974,39 @@ pub unsafe extern "win64" fn extract_icon_ex_w(
     0
 }
 
+/// ExtractIconW — extract an icon from an executable, DLL, or icon file.
+///
+/// Delegates to ExtractIconExW with nIcons=1 and extracts the large icon.
+/// Returns the extracted HICON on success, 0 on failure.
+///
+/// # Safety
+/// `lpsz_exe_file_name` must be a valid null-terminated wide string pointer.
+// Wine ref: dlls/shell32/shicon.c — ExtractIconW delegates to ExtractIconExW internally (ref hand-written, jcodemunch unavailable).
+pub unsafe extern "win64" fn extract_icon_w(
+    _h_inst: usize,
+    lpsz_exe_file_name: *const u16,
+    n_icon_index: i32,
+) -> usize {
+    if lpsz_exe_file_name.is_null() {
+        return 0;
+    }
+    let mut hicon_large: usize = 0;
+    let count = unsafe {
+        extract_icon_ex_w(
+            lpsz_exe_file_name,
+            n_icon_index,
+            &mut hicon_large,
+            std::ptr::null_mut(),
+            1,
+        )
+    };
+    if count > 0 {
+        hicon_large
+    } else {
+        0
+    }
+}
+
 // Wine ref: dlls/shell32/shfldr_desktop.c — returns singleton IShellFolder for the desktop
 // namespace; creates on first call; AddRef'd before returning; E_POINTER if ppshf is NULL.
 /// SHGetDesktopFolder — return the shell's desktop IShellFolder.

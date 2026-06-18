@@ -15166,6 +15166,12 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "FindResourceW" => {
             Some(find_resource_w as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize)
         }
+        "FindResourceExA" => Some(
+            find_resource_ex_a as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
+        ),
+        "FindResourceExW" => Some(
+            find_resource_ex_w as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
+        ),
         "EnumResourceNamesW" => Some(
             enum_resource_names_w as unsafe extern "win64" fn(_, _, _, _) -> _ as *const ()
                 as usize,
@@ -17267,6 +17273,48 @@ pub unsafe extern "win64" fn find_resource_a(
     find_resource_common(h_module, name, type_)
 }
 
+/// FindResourceExA: ANSI resource lookup with explicit language.
+///
+/// Converts ANSI name/type to Wide, then delegates to FindResourceExW.
+///
+/// # Safety
+/// Pointer arguments must be either small ordinals (`MAKEINTRESOURCEA`) or
+/// NUL-terminated ANSI strings.
+// Wine ref: dlls/kernelbase/loader.c — Win32's FindResourceExA converts ANSI args
+// then delegates to FindResourceExW with the provided wLanguage.
+pub unsafe extern "win64" fn find_resource_ex_a(
+    h_module: usize,
+    lp_name: *const u8,
+    lp_type: *const u8,
+    w_language: u16,
+) -> usize {
+    let name = unsafe { resource_id_from_ptr_a(lp_name as usize) };
+    let type_ = unsafe { resource_id_from_ptr_a(lp_type as usize) };
+    find_resource_ex_common(h_module, name, type_, w_language)
+}
+
+/// FindResourceExW: Wide resource lookup with explicit language.
+///
+/// Locates a resource by module, type, name, and language. Returns HRSRC
+/// (pointer to IMAGE_RESOURCE_DATA_ENTRY within the PE image) or 0.
+///
+/// # Safety
+/// Pointer arguments must be either small ordinals (`MAKEINTRESOURCEW`) or
+/// NUL-terminated UTF-16 strings.
+// Wine ref: dlls/kernelbase/loader.c — FindResourceExW calls LdrFindResource_U
+// with the explicit language parameter; LdrFindResource_U walks the PE resource
+// directory and returns (HRSRC)&entry.
+pub unsafe extern "win64" fn find_resource_ex_w(
+    h_module: usize,
+    lp_name: *const u16,
+    lp_type: *const u16,
+    w_language: u16,
+) -> usize {
+    let name = unsafe { resource_id_from_ptr_w(lp_name as usize) };
+    let type_ = unsafe { resource_id_from_ptr_w(lp_type as usize) };
+    find_resource_ex_common(h_module, name, type_, w_language)
+}
+
 /// FindResourceW: locate a named resource in a module via Wine's identity
 /// HRSRC scheme — returns a pointer to the `IMAGE_RESOURCE_DATA_ENTRY`
 /// inside the mapped PE image.
@@ -17309,6 +17357,17 @@ fn find_resource_common(
     name: weave_core::resource::ResourceId,
     type_: weave_core::resource::ResourceId,
 ) -> usize {
+    find_resource_ex_common(h_module, name, type_, 0)
+}
+
+/// Shared body for FindResourceExA/W: like find_resource_common but with
+/// an explicit language parameter (w_language = MAKELANGID(primary, sub)).
+fn find_resource_ex_common(
+    h_module: usize,
+    name: weave_core::resource::ResourceId,
+    type_: weave_core::resource::ResourceId,
+    w_language: u16,
+) -> usize {
     let base = match weave_core::module_handles::base_of(h_module) {
         Some(b) => b,
         None => {
@@ -17316,8 +17375,7 @@ fn find_resource_common(
             return 0;
         }
     };
-    // Wine's FindResourceW default lang = MAKELANGID(LANG_NEUTRAL, SUBLANG_NEUTRAL) = 0.
-    match weave_core::resource::find_resource_entry(base, type_, name, 0) {
+    match weave_core::resource::find_resource_entry(base, type_, name, w_language) {
         Some(hrsrc) => hrsrc,
         None => {
             set_last_error(1814);

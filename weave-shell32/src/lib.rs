@@ -142,6 +142,9 @@ fn resolve_shell32(func: &str) -> Option<usize> {
             shell::extract_icon_ex_w as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const ()
                 as usize,
         ),
+        "ExtractIconW" => Some(
+            shell::extract_icon_w as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
+        ),
         "SHGetDesktopFolder" => Some(
             shell::sh_get_desktop_folder as unsafe extern "win64" fn(_) -> _ as *const () as usize,
         ),
@@ -218,6 +221,10 @@ fn resolve_shell32(func: &str) -> Option<usize> {
         "SHGetPathFromIDListEx" => Some(
             pidl::sh_get_path_from_id_list_ex as unsafe extern "win64" fn(_, _, _) -> _ as *const ()
                 as usize,
+        ),
+        "SHGetDataFromIDListW" => Some(
+            pidl::sh_get_data_from_id_list_w as unsafe extern "win64" fn(_, _, _, _, _) -> _
+                as *const () as usize,
         ),
         "SHMapPIDLToSystemImageListIndex" | "#68" => Some(
             shell::sh_map_pidl_to_image_index as unsafe extern "win64" fn(_, _, _, _) -> _

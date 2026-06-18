@@ -1802,6 +1802,10 @@ pub fn resolve(func: &str) -> Option<usize> {
             get_token_information as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const ()
                 as usize,
         ),
+        // ── IrfanView IsTextUnicode ─────────────────────────────────────────
+        "IsTextUnicode" => {
+            Some(is_text_unicode as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize)
+        }
         _ => None,
     }
 }
@@ -2562,6 +2566,129 @@ pub unsafe extern "win64" fn get_token_information(
     _return_length: *mut u32,
 ) -> i32 {
     0 // FALSE
+}
+
+// ── IsTextUnicode ────────────────────────────────────────────────────────────
+
+const IS_TEXT_UNICODE_ASCII16: u32 = 0x0001;
+const IS_TEXT_UNICODE_STATISTICS: u32 = 0x0002;
+const IS_TEXT_UNICODE_CONTROLS: u32 = 0x0004;
+const IS_TEXT_UNICODE_SIGNATURE: u32 = 0x0008;
+const IS_TEXT_UNICODE_ILLEGAL_CHARS: u32 = 0x0100;
+const IS_TEXT_UNICODE_ODD_LENGTH: u32 = 0x0200;
+const IS_TEXT_UNICODE_NULL_BYTES: u32 = 0x1000;
+
+/// Determine whether a buffer is likely Unicode text.
+///
+/// Applies heuristic checks: BOM detection, null-bytes pattern
+/// (strong UTF-16 indicator), ASCII16 pattern, odd-length rejection,
+/// and illegal-character detection.
+///
+/// Returns TRUE (1) if the buffer appears to be Unicode text, FALSE (0) otherwise.
+/// When `lpi_result` is non-null, the specific flags that matched are written.
+///
+/// # Safety
+/// `lp_buffer` must be valid for at least `cb` bytes. `lpi_result` may be null.
+// Wine ref: dlls/advapi32/misc.c IsTextUnicode — applies heuristic byte-pattern
+// analysis: BOM check, null-bytes (UTF-16 strong signal), ASCII-range pairs,
+// odd-length rejection, and illegal-char detection.
+pub unsafe extern "win64" fn is_text_unicode(
+    lp_buffer: *const u8,
+    cb: i32,
+    lpi_result: *mut u32,
+) -> i32 {
+    if lp_buffer.is_null() || cb < 2 {
+        if !lpi_result.is_null() {
+            unsafe { *lpi_result = 0 };
+        }
+        return 0; // FALSE
+    }
+    let cb = cb as usize;
+    let buf = lp_buffer;
+    let mut flags: u32 = 0;
+
+    // 1 — BOM check (0xFEFF = UTF-16 LE BOM, 0xFFFE = UTF-16 BE BOM)
+    let first_word = unsafe { u16::from_le_bytes([*buf, *buf.add(1)]) };
+    if cb >= 2 && first_word == 0xFEFF {
+        flags |= IS_TEXT_UNICODE_SIGNATURE;
+    }
+
+    // 2 — Odd-length rejection
+    if cb & 1 != 0 {
+        flags |= IS_TEXT_UNICODE_ODD_LENGTH;
+    }
+
+    // 3 — Scan for patterns
+    let word_count = cb / 2;
+    let mut null_byte_pairs = 0u32;
+    let mut ascii16_pairs = 0u32;
+    let mut illegal_chars = 0u32;
+
+    for i in 0..word_count {
+        let lo = unsafe { *buf.add(i * 2) };
+        let hi = unsafe { *buf.add(i * 2 + 1) };
+        let w = lo as u16 | ((hi as u16) << 8);
+
+        if lo == 0 || hi == 0 {
+            null_byte_pairs += 1;
+        }
+        // ASCII16: hi byte is 0x00, lo byte is printable ASCII
+        if hi == 0 && (0x20..=0x7E).contains(&lo) {
+            ascii16_pairs += 1;
+        }
+        // Illegal Unicode chars
+        if w == 0xFFFE || w == 0xFFFF || (0xFDD0..=0xFDEF).contains(&w) {
+            illegal_chars += 1;
+        }
+    }
+
+    if null_byte_pairs > 0 {
+        flags |= IS_TEXT_UNICODE_NULL_BYTES;
+    }
+    if ascii16_pairs > 0 {
+        flags |= IS_TEXT_UNICODE_ASCII16;
+    }
+    if illegal_chars > 0 {
+        flags |= IS_TEXT_UNICODE_ILLEGAL_CHARS;
+    }
+
+    // 4 — Weak statistical check: if >30% of WORDs have a null byte, likely UTF-16
+    if word_count > 0 && null_byte_pairs > word_count as u32 / 3 {
+        flags |= IS_TEXT_UNICODE_STATISTICS;
+    }
+
+    // 5 — Control character check (0x01..0x1F, not tab/newline)
+    let mut controls = 0u32;
+    for i in 0..word_count {
+        let lo = unsafe { *buf.add(i * 2) };
+        let hi = unsafe { *buf.add(i * 2 + 1) };
+        if hi == 0 && (0x01..=0x1F).contains(&lo) && lo != b'\t' && lo != b'\n' && lo != b'\r' {
+            controls += 1;
+        }
+    }
+    if controls > 0 {
+        flags |= IS_TEXT_UNICODE_CONTROLS;
+    }
+
+    // Write result flags
+    if !lpi_result.is_null() {
+        unsafe { *lpi_result = flags };
+    }
+
+    // Decision: TRUE if any strong indicator is present
+    // Strong indicators: BOM, null bytes, statistics, controls, ASCII16
+    // (odd-length alone with BOM is still TRUE)
+    let strong_indicators = flags
+        & (IS_TEXT_UNICODE_SIGNATURE
+            | IS_TEXT_UNICODE_NULL_BYTES
+            | IS_TEXT_UNICODE_STATISTICS
+            | IS_TEXT_UNICODE_CONTROLS
+            | IS_TEXT_UNICODE_ASCII16);
+    if strong_indicators != 0 {
+        1 // TRUE
+    } else {
+        0 // FALSE
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
