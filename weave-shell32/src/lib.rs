@@ -165,7 +165,7 @@ fn resolve_shell32(func: &str) -> Option<usize> {
             shell::sh_get_folder_location as unsafe extern "win64" fn(_, _, _) -> _ as *const ()
                 as usize,
         ),
-        "SHGetFileInfoW" => Some(
+        "SHGetFileInfoW" | "#165" => Some(
             shell::sh_get_file_info_w as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const ()
                 as usize,
         ),
@@ -179,6 +179,7 @@ fn resolve_shell32(func: &str) -> Option<usize> {
             shell::shell_execute_ex_w as unsafe extern "win64" fn(_) -> _ as *const () as usize,
         ),
         // Q-Dir PIDL ordinals (#2, #4, #16, #17, #18, #21, #25, #68, #88, #155, #190)
+        // plus #165 = SHGetFileInfoW (NPP syntax-highlight gate imports by ordinal)
         "ILFindChild" | "#2" => {
             Some(pidl::il_find_child as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
         }
@@ -332,8 +333,9 @@ mod tests {
     #[test]
     fn resolve_shell32_pidl_ordinals() {
         // Q-Dir PIDL ordinals: #2, #4, #16, #17, #18, #21, #25, #68, #88, #155, #190
+        // plus #165 = SHGetFileInfoW (NPP syntax-highlight gate)
         let ordinals = [
-            "#2", "#4", "#16", "#17", "#18", "#21", "#25", "#68", "#88", "#155", "#190",
+            "#2", "#4", "#16", "#17", "#18", "#21", "#25", "#68", "#88", "#155", "#165", "#190",
         ];
         for ord in &ordinals {
             assert!(
