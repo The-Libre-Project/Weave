@@ -8378,6 +8378,15 @@ fn q_dir_file_pane_gate() {
         }
     }
 
+    // E3-M5e falsification experiment: check if FindFirstFileW/FindNextFileW fire
+    // within the 10s gate window. This determines whether the file-pane population
+    // gap is Hypothesis A (stub returns empty) or Hypothesis B (nav code never fires).
+    eprintln!(
+        "q_dir_file_pane_gate: find_first_file_first={} find_next_file_first={}",
+        stderr.contains("PHASE: find_first_file_first"),
+        stderr.contains("PHASE: find_next_file_first"),
+    );
+
     assert!(
         stderr.contains("PHASE: wm_paint_dispatched_first"),
         "Q-Dir file-pane Gate A1 FAIL: wm_paint_dispatched_first not seen within 10s\nstderr: {stderr}"
@@ -8387,6 +8396,18 @@ fn q_dir_file_pane_gate() {
         stderr.contains("PHASE: loaded_pe"),
         "Q-Dir file-pane Gate A2 FAIL: loaded_pe not seen — binary didn't start\nstderr: {stderr}"
     );
+
+    // E3-M5e Tier A: file-pane population markers (blocked — see milestone doc).
+    // These assertions will remain soft until a startup path is found that triggers
+    // directory navigation. Currently diagnostic-only via the eprintln! above.
+    if !stderr.contains("PHASE: find_first_file_first") {
+        eprintln!("q_dir_file_pane_gate: find_first_file_first NOT observed — Hypothesis B confirmed (nav code never fires)");
+    }
+    if !stderr.contains("PHASE: find_next_file_first") {
+        eprintln!(
+            "q_dir_file_pane_gate: find_next_file_first NOT observed — Hypothesis B confirmed"
+        );
+    }
 
     eprintln!("q_dir_file_pane_gate: A1+A2+A3 passed");
 }

@@ -5211,6 +5211,7 @@ pub unsafe extern "win64" fn find_first_file_w(
     let win_path =
         unsafe { String::from_utf16_lossy(std::slice::from_raw_parts(lp_file_name, len)) };
     eprintln!("weave/FindFirstFileW: entry path={win_path:?}");
+    eprintln!("PHASE: find_first_file_first");
     if std::env::var("WEAVE_TEST_SAVE_RESULT").is_ok()
         && win_path.to_ascii_lowercase().contains("plugin")
     {
@@ -5533,6 +5534,7 @@ pub unsafe extern "win64" fn find_next_file_w(
     lp_find_file_data: *mut Win32FindDataW,
 ) -> i32 {
     eprintln!("weave/FindNextFileW: entry handle={h_find_file:#x}");
+    eprintln!("PHASE: find_next_file_first");
     if h_find_file == 0 || h_find_file == usize::MAX || lp_find_file_data.is_null() {
         eprintln!("weave/FindNextFileW: exit handle={h_find_file:#x} → FALSE (bad arg)");
         return 0; // FALSE
