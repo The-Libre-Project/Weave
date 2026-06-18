@@ -195,6 +195,39 @@ pub unsafe extern "win64" fn imm_unlock_imcc(_himcc: usize) -> i32 {
     1 // TRUE
 }
 
+// Wine ref: dlls/imm32/imm.c — ImmSetCandidateWindow sets candidate window
+// position/style; no-op under Weave (no IME pipeline).
+/// ImmSetCandidateWindow — set the candidate window info (stub). Returns TRUE.
+///
+/// # Safety
+/// Arguments are ignored.
+pub unsafe extern "win64" fn imm_set_candidate_window(
+    _himc: usize,
+    _lp_candidate: *const u8,
+) -> i32 {
+    1 // TRUE
+}
+
+// Wine ref: dlls/imm32/imm.c — ImmEscapeW dispatches IME escape codes;
+// no-op under Weave (no IME pipeline).
+/// ImmEscapeW — send an escape code to an IME (stub). Returns 0.
+///
+/// # Safety
+/// Arguments are ignored.
+pub unsafe extern "win64" fn imm_escape_w(_hkl: usize, _himc: usize, _index: u32) -> usize {
+    0
+}
+
+// Wine ref: dlls/imm32/imm.c — ImmSetCompositionFontW sets the font for
+// the composition window; stub returns TRUE.
+/// ImmSetCompositionFontW — set the composition window font (stub). Returns TRUE.
+///
+/// # Safety
+/// Arguments are ignored.
+pub unsafe extern "win64" fn imm_set_composition_font_w(_himc: usize, _lp_lf: *const u8) -> i32 {
+    1 // TRUE
+}
+
 /// Resolve an imm32.dll import to a function pointer.
 pub fn resolve(dll: &str, func: &str) -> Option<usize> {
     if !dll.eq_ignore_ascii_case("imm32.dll") {
@@ -235,6 +268,16 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "ImmUnlockIMCC" => {
             Some(imm_unlock_imcc as unsafe extern "win64" fn(_) -> _ as *const () as usize)
         }
+        // NPP startup imports
+        "ImmSetCandidateWindow" => Some(
+            imm_set_candidate_window as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
+        ),
+        "ImmEscapeW" => {
+            Some(imm_escape_w as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize)
+        }
+        "ImmSetCompositionFontW" => Some(
+            imm_set_composition_font_w as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
+        ),
         _ => None,
     }
 }
@@ -260,6 +303,9 @@ mod tests {
             "ImmUnlockIMC",
             "ImmLockIMCC",
             "ImmUnlockIMCC",
+            "ImmSetCandidateWindow",
+            "ImmEscapeW",
+            "ImmSetCompositionFontW",
         ];
         for f in &funcs {
             assert!(resolve("imm32.dll", f).is_some(), "missing: {f}");

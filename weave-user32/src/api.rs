@@ -9883,6 +9883,13 @@ pub unsafe extern "win64" fn get_combo_box_info(_hwnd: usize, _info: *mut u8) ->
     0 // FALSE
 }
 
+// Wine ref: dlls/user32/win.c — GetAncestor returns the parent/root/rootowner
+// of a window; stub returns the input hwnd for all flags.
+/// GetAncestor — get the ancestor window (stub). Returns hwnd itself.
+pub extern "win64" fn get_ancestor(hwnd: usize, _ga_flags: u32) -> usize {
+    hwnd
+}
+
 /// Resolve a UIAutomationCore.dll import to a stub address.
 ///
 /// Called by weave-cli's resolve chain. Uses eq_ignore_ascii_case because

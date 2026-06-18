@@ -1522,6 +1522,11 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "GetComboBoxInfo" => Some(
             api::get_combo_box_info as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
         ),
+        // Wine ref: dlls/user32/win.c — GetAncestor returns parent/root/rootowner
+        // based on GA_PARENT/GA_ROOT/GA_ROOTOWNER flags.
+        "GetAncestor" => {
+            Some(api::get_ancestor as extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
         _ => None,
     }
 }
