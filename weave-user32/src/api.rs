@@ -9681,6 +9681,208 @@ pub unsafe extern "win64" fn create_cursor(
     0 // NULL
 }
 
+// ── NPP Phase A stubs (startup imports) ────────────────────────────────────
+//
+// Notepad++ imports these during startup.  All are Phase-A no-ops or minimal
+// stubs that return safe sentinel values.
+
+// Wine ref: dlls/user32/scroll.c — ScrollWindow calls ScrollWindowEx with clip/paint flags;
+// stub returns TRUE (no real scroll).
+/// ScrollWindow — scroll the client area of a window (stub). Returns TRUE.
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn scroll_window(
+    _hwnd: usize,
+    _x_amount: i32,
+    _y_amount: i32,
+    _lp_rect: *const u8,
+    _lp_clip_rect: *const u8,
+) -> i32 {
+    1 // TRUE
+}
+
+// Wine ref: dlls/user32/painting.c — GetUpdateRgn returns the update region;
+// stub returns SIMPLEREGION (1) with a NULL region handle.
+/// GetUpdateRgn — get the update region of a window (stub). Returns SIMPLEREGION.
+///
+/// # Safety
+/// `hrgn` is accepted but not dereferenced.
+pub unsafe extern "win64" fn get_update_rgn(_hwnd: usize, _hrgn: usize, _b_erase: i32) -> i32 {
+    1 // SIMPLEREGION
+}
+
+// Wine ref: dlls/user32/dialog.c — GetDlgItemInt reads text from a dialog item
+// and converts to integer; stub returns 0.
+/// GetDlgItemInt — get the integer value of a dialog item text (stub). Returns 0.
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn get_dlg_item_int(
+    _h_dlg: usize,
+    _n_id: i32,
+    _lp_translated: *mut i32,
+    _f_signed: i32,
+) -> u32 {
+    0
+}
+
+// Wine ref: dlls/user32/dialog.c — SetDlgItemInt converts integer to text and
+// sets it on a dialog item; stub is no-op.
+/// SetDlgItemInt — set the text of a dialog item from an integer (stub). No-op.
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+pub unsafe extern "win64" fn set_dlg_item_int(
+    _h_dlg: usize,
+    _n_id: i32,
+    _value: u32,
+    _f_signed: i32,
+) {
+}
+
+// Wine ref: dlls/user32/clipboard.c — SetClipboardViewer adds a window to the
+// clipboard viewer chain; stub returns 0 (no next viewer).
+/// SetClipboardViewer — add a window to the clipboard viewer chain (stub).
+pub extern "win64" fn set_clipboard_viewer(_hwnd: usize) -> usize {
+    0
+}
+
+// Wine ref: dlls/user32/clipboard.c — ChangeClipboardChain removes a window
+// from the viewer chain; stub returns FALSE.
+/// ChangeClipboardChain — remove a window from the clipboard viewer chain (stub).
+pub extern "win64" fn change_clipboard_chain(_hwnd: usize, _hwnd_next: usize) -> i32 {
+    0 // FALSE
+}
+
+// Wine ref: dlls/user32/scroll.c — GetScrollRange returns min/max positions;
+// stub returns FALSE with both min/max set to 0.
+/// GetScrollRange — get the scroll bar range (stub). Returns FALSE.
+///
+/// # Safety
+/// `lp_min` and `lp_max` must be valid mutable pointers if non-null.
+pub unsafe extern "win64" fn get_scroll_range(
+    _hwnd: usize,
+    _bar: i32,
+    lp_min: *mut i32,
+    lp_max: *mut i32,
+) -> i32 {
+    if !lp_min.is_null() {
+        unsafe { *lp_min = 0 };
+    }
+    if !lp_max.is_null() {
+        unsafe { *lp_max = 0 };
+    }
+    0 // FALSE
+}
+
+// Wine ref: dlls/user32/scroll.c — SetScrollRange sets min/max positions;
+// stub returns FALSE.
+/// SetScrollRange — set the scroll bar range (stub). Returns FALSE.
+pub extern "win64" fn set_scroll_range(
+    _hwnd: usize,
+    _bar: i32,
+    _min: i32,
+    _max: i32,
+    _redraw: i32,
+) -> i32 {
+    0 // FALSE
+}
+
+// Wine ref: dlls/user32/painting.c — DrawFrameControl draws a frame control;
+// stub returns FALSE.
+/// DrawFrameControl — draw a frame control (stub). Returns FALSE.
+///
+/// # Safety
+/// `lprc` is accepted but not dereferenced.
+pub unsafe extern "win64" fn draw_frame_control(
+    _hdc: usize,
+    _lprc: *const u8,
+    _type: u32,
+    _state: u32,
+) -> i32 {
+    0 // FALSE
+}
+
+// Wine ref: dlls/user32/input.c — ToAscii translates a virtual key to ASCII;
+// stub delegates to ToAsciiEx.
+/// ToAscii — translate virtual-key code to ANSI character (stub).
+///
+/// # Safety
+/// All pointer arguments must be valid.
+pub unsafe extern "win64" fn to_ascii(
+    vk: u32,
+    scan: u32,
+    lp_key_state: *const u8,
+    lp_char: *mut u16,
+    flags: u32,
+) -> i32 {
+    // Delegate to ToAsciiEx with the default keyboard layout (0).
+    unsafe { to_ascii_ex(vk, scan, lp_key_state, lp_char, flags, 0) }
+}
+
+// Wine ref: dlls/user32/text.c — IsCharLowerW returns TRUE if char is lower case.
+/// IsCharLowerW — determine if a character is lower case (stub).
+pub extern "win64" fn is_char_lower_w(ch: u16) -> i32 {
+    if ch as u8 as u16 == ch && (ch as u8).is_ascii_lowercase() {
+        1
+    } else {
+        0
+    }
+}
+
+// Wine ref: dlls/user32/text.c — IsCharAlphaNumericW returns TRUE if char is
+// alphanumeric.
+/// IsCharAlphaNumericW — determine if a character is alphanumeric (stub).
+pub extern "win64" fn is_char_alpha_numeric_w(ch: u16) -> i32 {
+    if ch as u8 as u16 == ch && ((ch as u8).is_ascii_alphabetic() || (ch as u8).is_ascii_digit()) {
+        1
+    } else {
+        0
+    }
+}
+
+// Wine ref: dlls/user32/text.c — IsCharAlphaW returns TRUE if char is alphabetic.
+/// IsCharAlphaW — determine if a character is alphabetic (stub).
+pub extern "win64" fn is_char_alpha_w(ch: u16) -> i32 {
+    if ch as u8 as u16 == ch && (ch as u8).is_ascii_alphabetic() {
+        1
+    } else {
+        0
+    }
+}
+
+// Wine ref: dlls/user32/win.c — GetLastActivePopup returns the hwnd of the
+// last active popup; stub returns hwnd itself (owner is the active popup).
+/// GetLastActivePopup — get the last active popup window (stub). Returns hwnd.
+pub extern "win64" fn get_last_active_popup(hwnd: usize) -> usize {
+    hwnd
+}
+
+// Wine ref: dlls/user32/message.c — EnumThreadWindows enumerates windows
+// belonging to a thread; stub returns FALSE (no windows enumerated).
+/// EnumThreadWindows — enumerate thread windows (stub). Returns FALSE.
+///
+/// # Safety
+/// `lp_enum_func` and `l_param` are accepted but not dereferenced.
+pub unsafe extern "win64" fn enum_thread_windows(
+    _tid: u32,
+    _lp_enum_func: usize,
+    _l_param: isize,
+) -> i32 {
+    0 // FALSE
+}
+
+// Wine ref: dlls/user32/win.c — GetComboBoxInfo gets combo box information;
+// stub returns FALSE.
+/// GetComboBoxInfo — get combo box information (stub). Returns FALSE.
+///
+/// # Safety
+/// `info` is accepted but not dereferenced.
+pub unsafe extern "win64" fn get_combo_box_info(_hwnd: usize, _info: *mut u8) -> i32 {
+    0 // FALSE
+}
+
 /// Resolve a UIAutomationCore.dll import to a stub address.
 ///
 /// Called by weave-cli's resolve chain. Uses eq_ignore_ascii_case because

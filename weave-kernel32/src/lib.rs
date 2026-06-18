@@ -15690,6 +15690,19 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
             get_number_format_w as unsafe extern "win64" fn(_, _, _, _, _, _) -> _ as *const ()
                 as usize,
         ),
+        "CloseThreadpoolWork" => {
+            Some(close_threadpool_work as unsafe extern "win64" fn(_) as *const () as usize)
+        }
+        "SubmitThreadpoolWork" => {
+            Some(submit_threadpool_work as unsafe extern "win64" fn(_) as *const () as usize)
+        }
+        "CreateThreadpoolWork" => Some(
+            create_threadpool_work as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
+        ),
+        "FreeLibraryWhenCallbackReturns" => Some(
+            free_library_when_callback_returns as unsafe extern "win64" fn(_, _) as *const ()
+                as usize,
+        ),
         _ => {
             // version.dll functions are forwarded through kernel32 in some apps;
             // also handle them when the DLL name is version.dll directly.
@@ -18606,6 +18619,42 @@ pub unsafe extern "win64" fn read_process_memory(
 pub extern "win64" fn wts_get_active_console_session_id() -> u32 {
     0
 }
+
+// Wine ref: dlls/kernel32/threadpool.c — threadpool work item stubs; close/submit/free
+// are no-ops under Weave (threadpool not implemented).
+/// CloseThreadpoolWork — close a threadpool work object (stub).
+///
+/// # Safety
+/// `pwk` is accepted but not dereferenced.
+pub unsafe extern "win64" fn close_threadpool_work(_pwk: usize) {}
+
+/// SubmitThreadpoolWork — submit a threadpool work item (stub).
+///
+/// # Safety
+/// `pwk` is accepted but not dereferenced.
+pub unsafe extern "win64" fn submit_threadpool_work(_pwk: usize) {}
+
+/// CreateThreadpoolWork — create a threadpool work item (stub).
+///
+/// Returns NULL — threadpool not implemented.
+///
+/// # Safety
+/// `pcallback` and `pv` are accepted but not dereferenced.
+pub unsafe extern "win64" fn create_threadpool_work(
+    _pcallback: usize,
+    _pv: usize,
+    _pcbe: usize,
+) -> usize {
+    0
+}
+
+// Wine ref: dlls/kernel32/threadpool.c — FreeLibraryWhenCallbackReturns schedules
+// a FreeLibrary call; no-op under Weave (threadpool not implemented).
+/// FreeLibraryWhenCallbackReturns — schedule a FreeLibrary call (stub).
+///
+/// # Safety
+/// `pwk` and `h_module` are accepted but not dereferenced.
+pub unsafe extern "win64" fn free_library_when_callback_returns(_pwk: usize, _h_module: usize) {}
 
 /// Wow64GetThreadContext: get thread context of WOW64 thread.
 ///

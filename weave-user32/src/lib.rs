@@ -1466,6 +1466,62 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
             api::create_cursor as unsafe extern "win64" fn(_, _, _, _, _, _, _) -> _ as *const ()
                 as usize,
         ),
+        // ── NPP Phase A stubs (startup imports) ──────────────────────────────
+        "ScrollWindow" => Some(
+            api::scroll_window as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "GetUpdateRgn" => Some(
+            api::get_update_rgn as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
+        ),
+        "GetDlgItemInt" => Some(
+            api::get_dlg_item_int as unsafe extern "win64" fn(_, _, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "SetDlgItemInt" => Some(
+            api::set_dlg_item_int as unsafe extern "win64" fn(_, _, _, _) as *const () as usize,
+        ),
+        "SetClipboardViewer" => Some(
+            api::set_clipboard_viewer as unsafe extern "win64" fn(_) -> _ as *const () as usize,
+        ),
+        "ChangeClipboardChain" => Some(
+            api::change_clipboard_chain as unsafe extern "win64" fn(_, _) -> _ as *const ()
+                as usize,
+        ),
+        "GetScrollRange" => Some(
+            api::get_scroll_range as unsafe extern "win64" fn(_, _, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "SetScrollRange" => Some(
+            api::set_scroll_range as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "DrawFrameControl" => Some(
+            api::draw_frame_control as unsafe extern "win64" fn(_, _, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "ToAscii" => Some(
+            api::to_ascii as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const () as usize,
+        ),
+        "IsCharLowerW" => {
+            Some(api::is_char_lower_w as unsafe extern "win64" fn(_) -> _ as *const () as usize)
+        }
+        "IsCharAlphaNumericW" => Some(
+            api::is_char_alpha_numeric_w as unsafe extern "win64" fn(_) -> _ as *const () as usize,
+        ),
+        "IsCharAlphaW" => {
+            Some(api::is_char_alpha_w as unsafe extern "win64" fn(_) -> _ as *const () as usize)
+        }
+        "GetLastActivePopup" => {
+            Some(api::get_last_active_popup as extern "win64" fn(_) -> _ as *const () as usize)
+        }
+        "EnumThreadWindows" => Some(
+            api::enum_thread_windows as unsafe extern "win64" fn(_, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "GetComboBoxInfo" => Some(
+            api::get_combo_box_info as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
+        ),
         _ => None,
     }
 }
