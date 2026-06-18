@@ -1032,7 +1032,7 @@ pub unsafe extern "win64" fn nt_open_process(
 
     if target_pid != 0 && target_pid != libc::getpid() as u32 {
         // Cannot open other processes in the in-process model.
-        STATUS_INVALID_PARAMETER
+        STATUS_INVALID_PARAMETER as i32
     } else {
         // Return the pseudo-handle (-1 = 0xFFFFFFFFFFFFFFFF) for the current process.
         unsafe { *process_handle = usize::MAX };
