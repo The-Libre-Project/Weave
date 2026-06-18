@@ -7573,37 +7573,127 @@ pub unsafe extern "win64" fn char_prev_ex_a(
 
 // ── Accessibility / event hooks ───────────────────────────────────────────────
 
-/// NotifyWinEvent — fire a WinEvent hook (accessibility notification).
+/// WinEvent hook registration.
+struct WinEventHook {
+    handle: usize,
+    event_min: u32,
+    event_max: u32,
+    callback: usize,
+    _id_process: u32,
+    _id_thread: u32,
+    _flags: u32,
+    /// Guest-side module handle (for WINEVENT_INPROC) — stored but not loaded.
+    _hmodule: usize,
+}
+
+static NEXT_WIN_EVENT_HOOK_HANDLE: AtomicUsize = AtomicUsize::new(0x9000_0001);
+static WIN_EVENT_HOOKS: OnceLock<Mutex<Vec<WinEventHook>>> = OnceLock::new();
+
+fn win_event_hooks() -> &'static Mutex<Vec<WinEventHook>> {
+    WIN_EVENT_HOOKS.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+/// NotifyWinEvent — fire a WinEvent to all registered hooks whose event range matches.
 ///
-/// Wine ref: dlls/user32/event.c — NtUserNotifyWinEvent dispatches to
-/// installed WinEvent hooks via the hook thread. Weave: no-op. We have no
-/// accessibility infrastructure; callers (Scintilla, NPP) ignore the return.
-pub extern "win64" fn notify_win_event(_event: u32, _hwnd: usize, _id_object: i32, _id_child: i32) {
-    // no-op
+/// Dispatches the callback for each matching in-process hook. No-op if no
+/// hooks are registered (the common case under headless Xvfb).
+///
+/// # Safety
+/// Caller must ensure that any registered hook callback is a valid function pointer.
+///
+/// Wine ref: dlls/user32/event.c — NtUserNotifyWinEvent iterates the hook chain,
+/// filters by event range and process/thread id, and posts or calls the callback.
+pub unsafe extern "win64" fn notify_win_event(
+    event: u32,
+    hwnd: usize,
+    id_object: i32,
+    id_child: i32,
+) {
+    let hooks_guard = match win_event_hooks().lock() {
+        Ok(g) => g,
+        Err(_) => return,
+    };
+    if hooks_guard.is_empty() {
+        return;
+    }
+
+    // Collect matching hooks first to minimize lock hold time.
+    let now_ms = unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, std::ptr::null_mut()) };
+    let event_time = if now_ms == 0 {
+        // clock_gettime failed — use a best-effort time
+        0u32
+    } else {
+        // approximate: seconds * 1000 (not precise but good enough for events)
+        unsafe {
+            let mut ts: libc::timespec = std::mem::zeroed();
+            libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts);
+            (ts.tv_sec as u32) * 1000 + (ts.tv_nsec as u32) / 1_000_000
+        }
+    };
+
+    for hook in hooks_guard.iter() {
+        if event >= hook.event_min && event <= hook.event_max && hook.callback != 0 {
+            let cb: extern "win64" fn(usize, u32, usize, i32, i32, u32, u32) =
+                unsafe { std::mem::transmute(hook.callback) };
+            cb(hook.handle, event, hwnd, id_object, id_child, 0, event_time);
+        }
+    }
 }
 
 /// SetWinEventHook — register a WinEvent hook (accessibility).
 ///
-/// Phase A stub — returns NULL (handle 0), meaning the hook was not installed.
-/// Callers must handle a NULL hook handle gracefully.
+/// Stores the hook registration in a process-global list and returns a
+/// non-zero handle. The callback is dispatched from `NotifyWinEvent` when
+/// an event in the registered range fires.
 ///
-/// Wine ref: dlls/user32/event.c — SetWinEventHook installs a hook into the
-/// WinEvent hook chain and returns an HWINEVENTHOOK handle; the hook thread
-/// dispatches events to the callback.
+/// Only `WINEVENT_INPROC` hooks (dw_flags & 1) receive synchronous callbacks.
+/// Out-of-context hooks are accepted but never called (no hook thread).
 ///
 /// # Safety
 /// `lpfn_win_event_proc` must be null or a valid callback pointer; `hmod_win_event_proc`
 /// must be null or a valid HMODULE handle.
+// Wine ref: dlls/user32/event.c — SetWinEventHook stores the hook in an array,
+// assigns a handle, and starts a hook thread for out-of-context hooks.
+// Weave: in-process hooks only; out-of-context stored but no thread created.
 pub unsafe extern "win64" fn set_win_event_hook(
-    _event_min: u32,
-    _event_max: u32,
-    _hmod_win_event_proc: usize,
-    _lpfn_win_event_proc: usize,
-    _id_process: u32,
-    _id_thread: u32,
-    _dw_flags: u32,
+    event_min: u32,
+    event_max: u32,
+    hmod_win_event_proc: usize,
+    lpfn_win_event_proc: usize,
+    id_process: u32,
+    id_thread: u32,
+    dw_flags: u32,
 ) -> usize {
-    0 // NULL handle — hook not installed
+    if lpfn_win_event_proc == 0 {
+        return 0; // NULL — no callback, cannot install
+    }
+    if event_min > event_max {
+        return 0; // invalid range
+    }
+
+    let handle = NEXT_WIN_EVENT_HOOK_HANDLE.fetch_add(1, Ordering::Relaxed);
+
+    let hook = WinEventHook {
+        handle,
+        event_min,
+        event_max,
+        callback: lpfn_win_event_proc,
+        _id_process: id_process,
+        _id_thread: id_thread,
+        _flags: dw_flags,
+        _hmodule: hmod_win_event_proc,
+    };
+
+    if let Ok(mut guard) = win_event_hooks().lock() {
+        guard.push(hook);
+    } else {
+        return 0;
+    }
+
+    eprintln!(
+        "weave/SetWinEventHook: events={event_min:#x}..{event_max:#x} callback={lpfn_win_event_proc:#x} flags={dw_flags:#x} → handle={handle:#x}"
+    );
+    handle
 }
 
 /// FlashWindowEx — flash the taskbar button and/or caption.

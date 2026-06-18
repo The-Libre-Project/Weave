@@ -3390,25 +3390,137 @@ pub unsafe extern "win64" fn get_file_information_by_handle(
 // NtQueryInformationFile for FILE_BASIC_INFO/FILE_STANDARD_INFO/FILE_NAME_INFO/FILE_ID_INFO/etc.;
 // ERROR_CALL_NOT_IMPLEMENTED for FileRemoteProtocolInfo/FileNormalizedNameInfo;
 // ERROR_INVALID_PARAMETER for FileRenameInfo/FileDispositionInfo/FileEndOfFileInfo.
-#[allow(non_upper_case_globals)]
 /// GetFileInformationByName — retrieve file information by path.
 ///
-/// Phase A stub — returns FALSE (0). Signal Desktop calls this in its crash
-/// reporter to query file metadata before upload.
+/// Translates the Win32 path to a Linux path, calls `stat(2)` to get file
+/// metadata, and writes the appropriate FILE_*_INFO structure based on
+/// `file_information_class`. Supports FILE_BASIC_INFO (0), FILE_STANDARD_INFO (1),
+/// and FILE_NAME_INFO (2). Returns FALSE + ERROR_INVALID_PARAMETER for other classes.
 ///
-/// Wine ref: dlls/kernelbase/fileinfo.c — GetFileInformationByNameW wraps
-/// NtQueryInformationFile by name; not widely used outside modern UWP apps.
+/// Wine ref: dlls/kernelbase/fileinfo.c — GetFileInformationByNameW opens the file
+/// by name, calls NtQueryInformationFile, then closes the handle; Weave uses stat(2)
+/// directly to avoid handle creation overhead.
 ///
 /// # Safety
 /// `file_name` must be a valid NUL-terminated UTF-16 string; `file_info_buffer`
 /// must point to a buffer of at least `dw_buffer_size` bytes.
 pub unsafe extern "win64" fn get_file_information_by_name(
-    _file_name: *const u16,
-    _file_information_class: u32,
-    _file_info_buffer: *mut u8,
-    _dw_buffer_size: u32,
+    file_name: *const u16,
+    file_information_class: u32,
+    file_info_buffer: *mut u8,
+    dw_buffer_size: u32,
 ) -> i32 {
-    0 // FALSE
+    const FILE_BASIC_INFO: u32 = 0;
+    const FILE_STANDARD_INFO: u32 = 1;
+    const FILE_NAME_INFO: u32 = 2;
+    const ERROR_INVALID_PARAMETER: u32 = 87;
+    const ERROR_FILE_NOT_FOUND: u32 = 2;
+
+    if file_name.is_null() || file_info_buffer.is_null() {
+        set_last_error(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+
+    // Decode the UTF-16 path
+    let mut len = 0usize;
+    while len < 32768 && unsafe { *file_name.add(len) } != 0 {
+        len += 1;
+    }
+    let win_path = unsafe { String::from_utf16_lossy(std::slice::from_raw_parts(file_name, len)) };
+
+    // Translate to Linux path
+    let linux_path = match weave_core::file_io::translate_win_path(&win_path) {
+        Ok(p) => p,
+        Err(_) => {
+            set_last_error(ERROR_FILE_NOT_FOUND);
+            return 0;
+        }
+    };
+
+    // stat the path
+    let c_path = match std::ffi::CString::new(linux_path.as_os_str().as_encoded_bytes()) {
+        Ok(s) => s,
+        Err(_) => {
+            set_last_error(ERROR_INVALID_PARAMETER);
+            return 0;
+        }
+    };
+
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::stat(c_path.as_ptr(), &mut st) } != 0 {
+        set_last_error(ERROR_FILE_NOT_FOUND);
+        return 0;
+    }
+
+    let to_ft = |secs: i64| -> u64 { ((secs + 11_644_473_600) as u64) * 10_000_000 };
+
+    match file_information_class {
+        FILE_BASIC_INFO => {
+            if dw_buffer_size < 36 {
+                set_last_error(122); // ERROR_INSUFFICIENT_BUFFER
+                return 0;
+            }
+            let mtime_ft = to_ft(st.st_mtime);
+            let atime_ft = to_ft(st.st_atime);
+            let p = file_info_buffer as *mut u64;
+            p.add(0).write_unaligned(mtime_ft); // CreationTime
+            p.add(1).write_unaligned(atime_ft); // LastAccessTime
+            p.add(2).write_unaligned(mtime_ft); // LastWriteTime
+            p.add(3).write_unaligned(mtime_ft); // ChangeTime
+            let attr = if (st.st_mode & libc::S_IFMT) == libc::S_IFDIR {
+                0x10u32 // FILE_ATTRIBUTE_DIRECTORY
+            } else {
+                0x20u32 // FILE_ATTRIBUTE_ARCHIVE
+            };
+            (p.add(4) as *mut u32).write_unaligned(attr);
+            eprintln!(
+                "weave/GetFileInformationByName: {win_path:?} FILE_BASIC_INFO mtime={mtime_ft:#x}"
+            );
+            1 // TRUE
+        }
+        FILE_STANDARD_INFO => {
+            if dw_buffer_size < 24 {
+                set_last_error(122); // ERROR_INSUFFICIENT_BUFFER
+                return 0;
+            }
+            let size = st.st_size as u64;
+            let alloc = (size + 4095) & !4095;
+            let is_dir = (st.st_mode & libc::S_IFMT) == libc::S_IFDIR;
+            let p = file_info_buffer as *mut u64;
+            p.add(0).write_unaligned(alloc); // AllocationSize
+            p.add(1).write_unaligned(size); // EndOfFile
+            let p32 = p.add(2) as *mut u32;
+            p32.add(0).write_unaligned(st.st_nlink as u32); // NumberOfLinks
+            p32.add(1).write_unaligned(0u32); // DeletePending = FALSE
+            p32.add(2).write_unaligned(is_dir as u32); // Directory
+            eprintln!(
+                "weave/GetFileInformationByName: {win_path:?} FILE_STANDARD_INFO size={size}"
+            );
+            1 // TRUE
+        }
+        FILE_NAME_INFO => {
+            // FILE_NAME_INFO: FileNameLength (DWORD) + FileName (WCHAR[]).
+            let name_wide: Vec<u16> = win_path.encode_utf16().collect();
+            let name_bytes = name_wide.len() * 2;
+            let needed = 4 + name_bytes;
+            if (dw_buffer_size as usize) < needed {
+                set_last_error(122); // ERROR_INSUFFICIENT_BUFFER
+                return 0;
+            }
+            let p = file_info_buffer as *mut u32;
+            p.write_unaligned(name_bytes as u32); // FileNameLength (bytes)
+            let name_dst = p.add(1) as *mut u16;
+            std::ptr::copy_nonoverlapping(name_wide.as_ptr(), name_dst, name_wide.len());
+            eprintln!(
+                "weave/GetFileInformationByName: {win_path:?} FILE_NAME_INFO name_len={name_bytes}"
+            );
+            1 // TRUE
+        }
+        _ => {
+            set_last_error(ERROR_INVALID_PARAMETER);
+            0 // FALSE
+        }
+    }
 }
 
 pub unsafe extern "win64" fn get_file_information_by_handle_ex(
@@ -18485,17 +18597,94 @@ pub extern "win64" fn escape_comm_function(_h_file: usize, _n_func: u32) -> i32 
 
 /// FindFirstFileExA: find first matching file (ANSI extended).
 ///
-/// Phase A stub — returns INVALID_HANDLE_VALUE.
+/// Converts the ANSI path to wide and delegates to FindFirstFileExW,
+/// then converts the result data back to ANSI.
+///
+/// # Safety
+/// `lp_file_name` must be a valid null-terminated UTF-8 string.
+/// `lp_find_file_data` must be a valid writable pointer to a WIN32_FIND_DATAA
+/// when `f_info_level_id` is FindExInfoStandard (0) or FindExInfoBasic (1).
+// Wine ref: dlls/kernelbase/file.c:1448 — FindFirstFileExA converts filename via
+// RtlMultiByteToUnicodeN, passes through the info level and search op, allocates a
+// temp WIN32_FIND_DATAW, calls FindFirstFileExW, then converts the result back
+// via file_name_WtoA; returns INVALID_HANDLE_VALUE on failure.
 pub unsafe extern "win64" fn find_first_file_ex_a(
-    _lp_file_name: *const u8,
-    _f_info_level_id: u32,
-    _lp_find_file_data: *mut u8,
-    _f_search_op: u32,
-    _lp_search_filter: usize,
-    _dw_additional_flags: u32,
+    lp_file_name: *const u8,
+    f_info_level_id: u32,
+    lp_find_file_data: *mut u8,
+    f_search_op: u32,
+    lp_search_filter: usize,
+    dw_additional_flags: u32,
 ) -> usize {
-    warn_once("FindFirstFileExA");
-    usize::MAX
+    if lp_file_name.is_null() || lp_find_file_data.is_null() {
+        return usize::MAX;
+    }
+
+    // Read the null-terminated ANSI filename
+    let mut len = 0usize;
+    while len < 32768 && unsafe { *lp_file_name.add(len) } != 0 {
+        len += 1;
+    }
+    let bytes = unsafe { std::slice::from_raw_parts(lp_file_name, len) };
+    let path = String::from_utf8_lossy(bytes);
+
+    // Convert to wide (null-terminated)
+    let wide_path: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
+
+    // Allocate temp WIN32_FIND_DATAW on the stack using MaybeUninit
+    // This lets FindFirstFileExW write into it safely.
+    let mut temp_data: std::mem::MaybeUninit<Win32FindDataW> = std::mem::MaybeUninit::uninit();
+    let temp_ptr = temp_data.as_mut_ptr() as usize;
+
+    let handle = find_first_file_ex_w(
+        wide_path.as_ptr(),
+        f_info_level_id as i32,
+        temp_ptr,
+        f_search_op as i32,
+        lp_search_filter,
+        dw_additional_flags,
+    );
+
+    if handle == usize::MAX {
+        return usize::MAX;
+    }
+
+    // Convert WIN32_FIND_DATAW → WIN32_FIND_DATAA in the caller's buffer.
+    // SAFETY: temp_data is now initialized by find_first_file_ex_w (which succeeded).
+    // Numeric fields (first 8 × u32 = 32 bytes) are identical between W and A.
+    // Filename fields differ in element size (u16 vs u8).
+    let temp_data = unsafe { temp_data.assume_init() };
+
+    unsafe {
+        // Copy numeric fields: dwFileAttributes through dwReserved1
+        std::ptr::copy_nonoverlapping(
+            &temp_data as *const Win32FindDataW as *const u8,
+            lp_find_file_data,
+            32,
+        );
+
+        // Convert c_file_name[260] from u16 to u8
+        let wide_name = &temp_data.c_file_name;
+        let name_end = wide_name.iter().position(|&c| c == 0).unwrap_or(260);
+        let name_str = String::from_utf16_lossy(&wide_name[..name_end]);
+        let name_bytes = name_str.as_bytes();
+        let copy_len = name_bytes.len().min(259);
+        let dest_name = &mut *(lp_find_file_data.add(32) as *mut [u8; 260]);
+        std::ptr::copy_nonoverlapping(name_bytes.as_ptr(), dest_name.as_mut_ptr(), copy_len);
+        (*dest_name)[copy_len] = 0;
+
+        // Convert c_alternate_file_name[14] from u16 to u8
+        let wide_alt = &temp_data.c_alternate_file_name;
+        let alt_end = wide_alt.iter().position(|&c| c == 0).unwrap_or(14);
+        let alt_str = String::from_utf16_lossy(&wide_alt[..alt_end]);
+        let alt_bytes = alt_str.as_bytes();
+        let alt_copy_len = alt_bytes.len().min(13);
+        let dest_alt = &mut *(lp_find_file_data.add(32 + 260) as *mut [u8; 14]);
+        std::ptr::copy_nonoverlapping(alt_bytes.as_ptr(), dest_alt.as_mut_ptr(), alt_copy_len);
+        (*dest_alt)[alt_copy_len] = 0;
+    }
+
+    handle
 }
 
 /// GetCommModemStatus: get modem status register bits.
@@ -18631,18 +18820,50 @@ pub unsafe extern "win64" fn get_current_package_full_name(
     15700i32
 }
 
-/// GetDiskFreeSpaceA: get disk free space (ANSI).
+/// GetDiskFreeSpaceA: get disk free space (ANSI version).
 ///
-/// Phase A stub — returns FALSE.
+/// Converts the ANSI path to wide and delegates to GetDiskFreeSpaceW.
+/// Null `lp_root_path_name` is passed through to the W version, which defaults to `"/"`.
+///
+/// # Safety
+/// All output pointer arguments must be valid writable pointers or null.
+// Wine ref: dlls/kernelbase/volume.c:660 — GetDiskFreeSpaceA converts via
+// RtlMultiByteToUnicodeN and delegates to GetDiskFreeSpaceW; null root is passed through.
 pub unsafe extern "win64" fn get_disk_free_space_a(
-    _lp_root_path_name: *const u8,
-    _lp_sectors_per_cluster: *mut u32,
-    _lp_bytes_per_sector: *mut u32,
-    _lp_number_of_free_clusters: *mut u32,
-    _lp_total_number_of_clusters: *mut u32,
+    lp_root_path_name: *const u8,
+    lp_sectors_per_cluster: *mut u32,
+    lp_bytes_per_sector: *mut u32,
+    lp_number_of_free_clusters: *mut u32,
+    lp_total_number_of_clusters: *mut u32,
 ) -> i32 {
-    warn_once("GetDiskFreeSpaceA");
-    0
+    if lp_root_path_name.is_null() {
+        eprintln!("weave/GetDiskFreeSpaceA: path=(null) → delegate to GetDiskFreeSpaceW(null)");
+        return get_disk_free_space_w(
+            std::ptr::null(),
+            lp_sectors_per_cluster,
+            lp_bytes_per_sector,
+            lp_number_of_free_clusters,
+            lp_total_number_of_clusters,
+        );
+    }
+
+    // Read the null-terminated ANSI path.
+    let mut len = 0usize;
+    while len < 32768 && unsafe { *lp_root_path_name.add(len) } != 0 {
+        len += 1;
+    }
+    let bytes = unsafe { std::slice::from_raw_parts(lp_root_path_name, len) };
+    let path = String::from_utf8_lossy(bytes);
+    eprintln!("weave/GetDiskFreeSpaceA: path={path:?} → delegate to GetDiskFreeSpaceW");
+
+    let wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
+    get_disk_free_space_w(
+        wide.as_ptr(),
+        lp_sectors_per_cluster,
+        lp_bytes_per_sector,
+        lp_number_of_free_clusters,
+        lp_total_number_of_clusters,
+    )
 }
 
 /// GetErrorMode: get error mode.
@@ -19664,7 +19885,6 @@ mod tests {
             "CancelSynchronousIo",
             "ClearCommError",
             "EscapeCommFunction",
-            "FindFirstFileExA",
             "GetCommModemStatus",
             "LockFile",
             "PurgeComm",
@@ -19677,7 +19897,6 @@ mod tests {
             // System Info
             "GetComputerNameExW",
             "GetCurrentPackageFullName",
-            "GetDiskFreeSpaceA",
             "GetErrorMode",
             "GetGeoInfoW",
             "GetLogicalProcessorInformation",

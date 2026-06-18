@@ -6,7 +6,10 @@
 //! silently corrupts arguments, so every stub here must carry this attribute.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
-use weave_common::{STATUS_SUCCESS, STATUS_UNSUCCESSFUL};
+use std::sync::Arc;
+use weave_common::{
+    STATUS_INVALID_HANDLE, STATUS_INVALID_PARAMETER, STATUS_SUCCESS, STATUS_UNSUCCESSFUL,
+};
 use weave_core::{file_io, handles};
 
 // ── Task 3 — NT timing + shutdown flag ───────────────────────────────────────
@@ -325,6 +328,8 @@ fn nt_prot_to_linux(protect: u32) -> i32 {
 
 const STATUS_NO_MEMORY: u32 = 0xC0000017;
 const STATUS_NOT_IMPLEMENTED: u32 = 0xC0000002;
+const STATUS_BUFFER_OVERFLOW: u32 = 0x80000005;
+const STATUS_INVALID_INFO_CLASS: u32 = 0xC0000003;
 
 // ── RtlInitUnicodeString ──────────────────────────────────────────────────────
 
@@ -693,25 +698,169 @@ pub unsafe extern "win64" fn nt_duplicate_object(
 
 /// NtQueryVolumeInformationFile: query volume information by file handle.
 ///
-/// Phase A stub — returns STATUS_NOT_IMPLEMENTED.
+/// Phase B — uses `fstatvfs(2)` on the fd backing the handle. Supports
+/// FileFsVolumeInformation (class 1), FileFsSizeInformation (class 3),
+/// FileFsDeviceInformation (class 4), and FileFsAttributeInformation (class 5).
+/// Returns `STATUS_INVALID_INFO_CLASS` for unknown classes.
 ///
 /// # Safety
 /// Caller must ensure `io_status_block` and `volume_information` point to
-/// valid buffers.
-// Wine ref: dlls/ntdll/unix/file.c — NtQueryVolumeInformationFile returns
-// STATUS_NOT_SUPPORTED for unknown info classes.
+/// valid buffers of at least `length` bytes.
+// Wine ref: dlls/ntdll/unix/file.c — NtQueryVolumeInformationFile dispatches on
+// fs_information_class; fills the appropriate structure from filesystem stat data
+// obtained via server_get_file_info. Weave: uses fstatvfs(2) directly.
 pub unsafe extern "win64" fn nt_query_volume_information_file(
-    _file_handle: usize,
+    file_handle: usize,
     io_status_block: *mut i8,
-    _volume_information: *mut u8,
-    _length: u32,
-    _fs_information_class: u32,
+    volume_information: *mut u8,
+    length: u32,
+    fs_information_class: u32,
 ) -> i32 {
-    if !io_status_block.is_null() {
-        // SAFETY: io_status_block is non-null, caller guarantees alignment.
-        unsafe { *(io_status_block as *mut usize) = STATUS_NOT_IMPLEMENTED as usize };
+    const FILE_FS_VOLUME_INFORMATION: u32 = 1;
+    const FILE_FS_SIZE_INFORMATION: u32 = 3;
+    const FILE_FS_DEVICE_INFORMATION: u32 = 4;
+    const FILE_FS_ATTRIBUTE_INFORMATION: u32 = 5;
+    const FILE_DEVICE_DISK: u32 = 0x00000007;
+
+    if io_status_block.is_null() || volume_information.is_null() {
+        return STATUS_INVALID_PARAMETER;
     }
-    STATUS_NOT_IMPLEMENTED as i32
+
+    let fd = match handles::get_fd(file_handle) {
+        Some(fd) => fd,
+        None => return STATUS_INVALID_HANDLE,
+    };
+
+    let mut sv: libc::statvfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstatvfs(fd, &mut sv) } != 0 {
+        // fstatvfs failed — fill io with STATUS_UNSUCCESSFUL
+        unsafe { *(io_status_block as *mut usize) = STATUS_UNSUCCESSFUL as usize };
+        return STATUS_UNSUCCESSFUL;
+    }
+
+    match fs_information_class {
+        FILE_FS_VOLUME_INFORMATION => {
+            // VolumeCreationTime(8) + VolumeSerialNumber(4) + VolumeLabelLength(4)
+            // + SupportsObjects(1) = 17 bytes header; VolumeLabel starts at +17.
+            const HEADER_SIZE: u32 = 17;
+            if length < HEADER_SIZE {
+                unsafe { *(io_status_block as *mut usize) = STATUS_BUFFER_OVERFLOW as usize };
+                return STATUS_BUFFER_OVERFLOW as i32;
+            }
+
+            // Use fstat to get st_dev (volume serial number proxy).
+            let mut st: libc::stat = unsafe { std::mem::zeroed() };
+            let vol_serial = if unsafe { libc::fstat(fd, &mut st) } == 0 {
+                st.st_dev as u32
+            } else {
+                sv.f_fsid as u32
+            };
+
+            let p = volume_information;
+            // VolumeCreationTime = 0
+            unsafe {
+                (p as *mut u64).write_unaligned(0u64);
+                (p.add(8) as *mut u32).write_unaligned(vol_serial);
+                (p.add(12) as *mut u32).write_unaligned(0u32); // VolumeLabelLength
+                p.add(16).write_unaligned(0u8); // SupportsObjects = FALSE
+            }
+
+            unsafe {
+                *(io_status_block as *mut usize) = HEADER_SIZE as usize;
+            }
+            STATUS_SUCCESS
+        }
+
+        FILE_FS_SIZE_INFORMATION => {
+            if length < 24 {
+                unsafe { *(io_status_block as *mut usize) = STATUS_BUFFER_OVERFLOW as usize };
+                return STATUS_BUFFER_OVERFLOW as i32;
+            }
+
+            // Map statvfs fields to FILE_FS_SIZE_INFORMATION layout.
+            let total = sv.f_blocks as u64;
+            let avail = sv.f_bavail as u64;
+            let sectors_per_unit = (sv.f_frsize / 512).max(1) as u32;
+            let bytes_per_sector = 512u32;
+
+            let p = volume_information as *mut u64;
+            unsafe {
+                p.add(0).write_unaligned(total); // TotalAllocationUnits
+                p.add(1).write_unaligned(avail); // AvailableAllocationUnits
+                (p.add(2) as *mut u32).write_unaligned(sectors_per_unit); // SectorsPerAllocationUnit
+                (p.add(2) as *mut u32)
+                    .add(1)
+                    .write_unaligned(bytes_per_sector); // BytesPerSector
+            }
+
+            unsafe {
+                *(io_status_block as *mut usize) = 24usize;
+            }
+            STATUS_SUCCESS
+        }
+
+        FILE_FS_DEVICE_INFORMATION => {
+            if length < 8 {
+                unsafe { *(io_status_block as *mut usize) = STATUS_BUFFER_OVERFLOW as usize };
+                return STATUS_BUFFER_OVERFLOW as i32;
+            }
+
+            let p = volume_information as *mut u32;
+            unsafe {
+                p.add(0).write_unaligned(FILE_DEVICE_DISK); // DeviceType
+                p.add(1).write_unaligned(0u32); // Characteristics
+            }
+
+            unsafe {
+                *(io_status_block as *mut usize) = 8usize;
+            }
+            STATUS_SUCCESS
+        }
+
+        FILE_FS_ATTRIBUTE_INFORMATION => {
+            // FileSystemAttributes(4) + MaximumComponentNameLength(4) + FileSystemNameLength(4)
+            // = 12 bytes header; FileSystemName starts at +12.
+            const HEADER_SIZE: u32 = 12;
+            const FS_NAME: &[u16] = &[0x0065, 0x0078, 0x0074, 0x0034]; // "ext4"
+            let name_bytes = FS_NAME.len() as u32 * 2;
+            let needed = HEADER_SIZE + name_bytes;
+
+            if (length as usize) < needed as usize {
+                // Write partial — just the header with the name length so caller
+                // can determine the required buffer size.
+                if length >= HEADER_SIZE {
+                    let p = volume_information as *mut u32;
+                    unsafe {
+                        p.add(0).write_unaligned(0x0184_04CFu32); // FileSystemAttributes
+                        p.add(1).write_unaligned(255u32); // MaximumComponentNameLength (ext4 limit)
+                        p.add(2).write_unaligned(name_bytes); // FileSystemNameLength
+                    }
+                }
+                unsafe { *(io_status_block as *mut usize) = STATUS_BUFFER_OVERFLOW as usize };
+                return STATUS_BUFFER_OVERFLOW as i32;
+            }
+
+            let p = volume_information as *mut u32;
+            unsafe {
+                p.add(0).write_unaligned(0x0184_04CFu32); // FileSystemAttributes
+                p.add(1).write_unaligned(255u32); // MaximumComponentNameLength
+                p.add(2).write_unaligned(name_bytes); // FileSystemNameLength
+                let name_dst = p.add(3) as *mut u16;
+                std::ptr::copy_nonoverlapping(FS_NAME.as_ptr(), name_dst, FS_NAME.len());
+            }
+
+            unsafe {
+                *(io_status_block as *mut usize) = needed as usize;
+            }
+            STATUS_SUCCESS
+        }
+
+        _ => {
+            // Unknown info class.
+            unsafe { *(io_status_block as *mut usize) = STATUS_INVALID_INFO_CLASS as usize };
+            STATUS_INVALID_INFO_CLASS as i32
+        }
+    }
 }
 
 // ── NtQueryDirectoryFile ──────────────────────────────────────────────────────
@@ -846,60 +995,141 @@ pub unsafe extern "win64" fn nt_open_thread_token(
 
 /// NtOpenProcess: open a handle to a process.
 ///
-/// Phase A stub — returns STATUS_NOT_IMPLEMENTED.
+/// Returns a pseudo-handle (`usize::MAX = -1`) for the current process.
+/// In the in-process model we cannot open other processes.
+/// NULL `client_id` or `unique_process == 0` means the current process.
 ///
 /// # Safety
 /// Caller must ensure `process_handle` is non-null and writable.
-// Wine ref: dlls/ntdll/unix/process.c — NtOpenProcess returns
-// STATUS_INVALID_PARAMETER for invalid client ID.
+/// `client_id` may be null; if non-null it must point to a valid CLIENT_ID.
+// Wine ref: dlls/ntdll/unix/process.c — opens process via server_open_process;
+// NULL ClientId or ClientId->UniqueProcess==0 means current process;
+// returns STATUS_INVALID_PARAMETER for invalid client ID.
 pub unsafe extern "win64" fn nt_open_process(
-    _process_handle: *mut usize,
+    process_handle: *mut usize,
     _desired_access: u32,
-    _object_attributes: *mut u8,
+    _object_attributes: *const u8,
+    client_id: *const u8,
 ) -> i32 {
-    STATUS_NOT_IMPLEMENTED as i32
+    const STATUS_INVALID_PARAMETER: u32 = 0xC000_000D;
+
+    #[repr(C)]
+    struct ClientId {
+        unique_process: usize,
+        unique_thread: usize,
+    }
+
+    let target_pid: u32 = if client_id.is_null() {
+        0
+    } else {
+        let cid = &*(client_id as *const ClientId);
+        if cid.unique_process == 0 {
+            0
+        } else {
+            cid.unique_process as u32
+        }
+    };
+
+    if target_pid != 0 && target_pid != libc::getpid() as u32 {
+        // Cannot open other processes in the in-process model.
+        STATUS_INVALID_PARAMETER
+    } else {
+        // Return the pseudo-handle (-1 = 0xFFFFFFFFFFFFFFFF) for the current process.
+        unsafe { *process_handle = usize::MAX };
+        STATUS_SUCCESS
+    }
 }
 
 // ── NtCreateThreadEx ─────────────────────────────────────────────────────────
 
 /// NtCreateThreadEx: create a new thread.
 ///
-/// Phase A stub — returns STATUS_NOT_IMPLEMENTED.
+/// Phase B — spawns a std::thread with TEB setup, forwarding the start
+/// routine and argument. Returns the thread handle via `thread_handle`.
+/// The undocumented 11th parameter (`attribute_list`) is accepted but ignored.
 ///
 /// # Safety
-/// Caller must ensure all pointer arguments are valid.
-// Wine ref: dlls/ntdll/unix/thread.c — NtCreateThreadEx creates a
-// new thread with a specified start address.
+/// Caller must ensure `thread_handle` is a valid writable pointer,
+/// `start_routine` is a valid function pointer in the guest image,
+/// and `object_attributes` (if non-null) is valid for read.
+// Wine ref: dlls/ntdll/unix/thread.c — NtCreateThreadEx creates a new thread
+// with the given start address; Weave spawns std::thread directly.
 pub unsafe extern "win64" fn nt_create_thread_ex(
-    _thread_handle: *mut usize,
+    thread_handle: *mut usize,
     _desired_access: u32,
     _object_attributes: *mut u8,
     _process_handle: usize,
-    _start_routine: usize,
-    _argument: *mut u8,
+    start_routine: usize,
+    argument: *mut u8,
     _create_flags: u32,
     _zero_bits: usize,
     _stack_size: usize,
     _maximum_stack_size: usize,
+    _attribute_list: *mut u8,
 ) -> i32 {
-    STATUS_NOT_IMPLEMENTED as i32
+    if thread_handle.is_null() || start_routine == 0 {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    let fn_addr = start_routine;
+    let param_addr = argument as usize;
+    let caller_tid = unsafe { libc::syscall(libc::SYS_gettid) as u32 };
+    eprintln!(
+        "weave/NtCreateThreadEx: caller_tid={caller_tid} fn={fn_addr:#x} param={param_addr:#x}"
+    );
+
+    let completion = Arc::new(handles::ThreadCompletion {
+        result: std::sync::Mutex::new(None),
+        condvar: std::sync::Condvar::new(),
+    });
+    let completion_clone = Arc::clone(&completion);
+
+    let join_handle = std::thread::spawn(move || {
+        let _teb = weave_core::teb::setup_thread();
+        let my_tid = unsafe { libc::syscall(libc::SYS_gettid) as u32 };
+        eprintln!("weave/NtCreateThreadEx: thread-start tid={my_tid} fn={fn_addr:#x}");
+        let fn_ptr: unsafe extern "win64" fn(*mut u8) -> u32 =
+            unsafe { std::mem::transmute(fn_addr as *const u8) };
+        let ret = unsafe { fn_ptr(param_addr as *mut u8) };
+        eprintln!(
+            "weave/NtCreateThreadEx: thread-exit tid={my_tid} fn={fn_addr:#x} exit_code={ret}"
+        );
+        let mut guard = completion_clone.result.lock().unwrap();
+        *guard = Some(ret);
+        completion_clone.condvar.notify_all();
+    });
+
+    let handle = handles::alloc_thread(completion, join_handle);
+    eprintln!("weave/NtCreateThreadEx: handle={handle:#x}");
+    unsafe {
+        *thread_handle = handle;
+    }
+    STATUS_SUCCESS
 }
 
 // ── NtResumeThread ──────────────────────────────────────────────────────────
 
-/// NtResumeThread: resume a suspended thread.
+/// NtResumeThread: resume a previously-suspended thread.
 ///
-/// Phase A stub — returns STATUS_NOT_IMPLEMENTED.
+/// Phase B — returns STATUS_SUCCESS with previous suspend count = 1.
+/// Threads are created running, so "previous suspend count" is always 1.
 ///
 /// # Safety
-/// Caller must ensure `suspend_count` is non-null or valid to skip.
+/// Caller must ensure `suspend_count` is null or a valid writable pointer.
 // Wine ref: dlls/ntdll/unix/thread.c — NtResumeThread decrements the
 // suspend count and returns the previous count.
 pub unsafe extern "win64" fn nt_resume_thread(
-    _thread_handle: usize,
-    _suspend_count: *mut u32,
+    thread_handle: usize,
+    suspend_count: *mut u32,
 ) -> i32 {
-    STATUS_NOT_IMPLEMENTED as i32
+    if handles::get_thread_completion(thread_handle).is_none() {
+        return STATUS_INVALID_HANDLE;
+    }
+    if !suspend_count.is_null() {
+        unsafe { *suspend_count = 1 };
+    }
+    eprintln!("weave/NtResumeThread: handle={thread_handle:#x} prev_count=1");
+    STATUS_SUCCESS
 }
 
 // ── RTL heap functions ────────────────────────────────────────────────────────
@@ -2246,10 +2476,10 @@ pub fn resolve(func: &str) -> Option<usize> {
             nt_open_thread_token as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
         ),
         "NtOpenProcess" => {
-            Some(nt_open_process as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize)
+            Some(nt_open_process as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize)
         }
         "NtCreateThreadEx" => Some(
-            nt_create_thread_ex as unsafe extern "win64" fn(_, _, _, _, _, _, _, _, _, _) -> _
+            nt_create_thread_ex as unsafe extern "win64" fn(_, _, _, _, _, _, _, _, _, _, _) -> _
                 as *const () as usize,
         ),
         "NtResumeThread" => {
