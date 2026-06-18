@@ -8316,8 +8316,24 @@ fn q_dir_file_pane_gate() {
 
     let weave_bin = env!("CARGO_BIN_EXE_weave");
 
+    // E3-M5e Approach 5: create a temp prefix with drive_c/testdir/ so that
+    // Q-Dir's INI entry Dir1=C:\testdir resolves to a real path.
+    let temp_prefix = tempfile::tempdir().expect("failed to create tempdir for prefix");
+    let prefix_path = temp_prefix.path().to_path_buf();
+    let drive_testdir = prefix_path.join("drive_c").join("testdir");
+    std::fs::create_dir_all(&drive_testdir).expect("failed to create drive_c/testdir");
+    std::fs::write(drive_testdir.join("hello.txt"), b"Q-Dir file-pane test")
+        .expect("failed to write test file");
+    eprintln!(
+        "q_dir_file_pane_gate: created temp prefix at {:?}",
+        prefix_path
+    );
+
     let mut child = std::process::Command::new(weave_bin)
         .current_dir(&q_dir_dir)
+        .arg("--prefix")
+        .arg(&prefix_path)
+        .arg("--no-sandbox")
         .arg(&q_dir_exe)
         .env("DISPLAY", ":99")
         .stderr(std::process::Stdio::piped())
