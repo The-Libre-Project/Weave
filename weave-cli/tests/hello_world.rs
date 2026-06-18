@@ -8335,6 +8335,7 @@ fn q_dir_file_pane_gate() {
         .arg(&prefix_path)
         .arg("--no-sandbox")
         .arg(&q_dir_exe)
+        .arg("C:\\testdir")
         .env("DISPLAY", ":99")
         .stderr(std::process::Stdio::piped())
         .spawn()
