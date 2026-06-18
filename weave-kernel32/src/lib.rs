@@ -37,7 +37,7 @@ static LAST_HEAP_FREE: AtomicUsize = AtomicUsize::new(0);
 //   bits [0..62]: alloc_size (63 bits, max ~9 EB)
 //   bit  63:      DIRECT flag (1 = per-allocation mmap, 0 = slab sub-alloc)
 
-const HEAP_SLAB_SIZE: usize = 64 * 1024 * 1024; // 64 MB per slab
+const HEAP_SLAB_SIZE: usize = 1024 * 1024; // 1 MB per slab (reduced from 64MB to fit more slabs in MAP_32BIT space)
 const MAP_32BIT: i32 = 0x40;
 
 struct HeapSlab {
@@ -2523,7 +2523,7 @@ pub extern "win64" fn heap_alloc(
 /// Direct mmap path for large allocations (>= 32 MB).
 fn heap_alloc_direct(alloc_size: usize, total_size: usize) -> *mut std::ffi::c_void {
     let mapped_size = (total_size + 4095) & !4095;
-    let mut ptr = unsafe {
+    let ptr = unsafe {
         libc::mmap(
             0x0000_0000_0040_0000 as *mut libc::c_void,
             mapped_size,
@@ -2534,21 +2534,8 @@ fn heap_alloc_direct(alloc_size: usize, total_size: usize) -> *mut std::ffi::c_v
         )
     };
     if ptr == libc::MAP_FAILED {
-        eprintln!("weave/HeapAlloc: mmap(MAP_32BIT) failed size={mapped_size:#x}, retrying without MAP_32BIT");
-        ptr = unsafe {
-            libc::mmap(
-                std::ptr::null_mut(),
-                mapped_size,
-                libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
-                -1,
-                0,
-            )
-        };
-        if ptr == libc::MAP_FAILED {
-            eprintln!("weave/HeapAlloc: mmap (no MAP_32BIT) also failed size={mapped_size:#x}");
-            return std::ptr::null_mut();
-        }
+        eprintln!("weave/HeapAlloc: mmap(MAP_32BIT) failed size={mapped_size:#x}");
+        return std::ptr::null_mut();
     }
     // Header: size with DIRECT flag set.
     unsafe { *(ptr as *mut usize) = alloc_size | (1 << 63) };
@@ -2581,7 +2568,7 @@ fn heap_alloc_slab(alloc_size: usize, total_size: usize) -> *mut std::ffi::c_voi
     }
 
     // No slab has space — allocate a new slab.
-    let mut slab_base = unsafe {
+    let slab_base = unsafe {
         libc::mmap(
             0x0000_0000_0040_0000 as *mut libc::c_void,
             HEAP_SLAB_SIZE,
@@ -2592,23 +2579,8 @@ fn heap_alloc_slab(alloc_size: usize, total_size: usize) -> *mut std::ffi::c_voi
         )
     };
     if slab_base == libc::MAP_FAILED {
-        eprintln!(
-            "weave/HeapAlloc: slab mmap(MAP_32BIT) failed size=64MB, retrying without MAP_32BIT"
-        );
-        slab_base = unsafe {
-            libc::mmap(
-                std::ptr::null_mut(),
-                HEAP_SLAB_SIZE,
-                libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
-                -1,
-                0,
-            )
-        };
-        if slab_base == libc::MAP_FAILED {
-            eprintln!("weave/HeapAlloc: slab mmap (no MAP_32BIT) also failed size=64MB");
-            return std::ptr::null_mut();
-        }
+        eprintln!("weave/HeapAlloc: slab mmap(MAP_32BIT) failed size=64MB");
+        return std::ptr::null_mut();
     }
 
     let start = 0usize;
