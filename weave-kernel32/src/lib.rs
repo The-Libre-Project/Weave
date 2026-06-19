@@ -9081,18 +9081,32 @@ pub extern "win64" fn tls_free(dw_tls_index: u32) -> i32 {
 // WAIT_OBJECT_0=0, WAIT_TIMEOUT=0x102, WAIT_FAILED=0xFFFFFFFF; invalid handle → WAIT_FAILED.
 pub unsafe extern "win64" fn wait_for_single_object(h_handle: usize, dw_milliseconds: u32) -> u32 {
     let caller_tid = unsafe { libc::syscall(libc::SYS_gettid) as u32 };
+    let npp_diag = std::env::var("WEAVE_TEST_SCI_GETLEXER").is_ok()
+        || std::env::var("WEAVE_TEST_SCI_GETSTYLEAT").is_ok();
     eprintln!(
-        "weave/WaitForSingleObject: entry tid={caller_tid} h={h_handle:#x} ms={dw_milliseconds}"
+        "weave/WaitForSingleObject: entry tid={caller_tid} h={h_handle:#x} ms={dw_milliseconds}",
     );
+    // When the NPP probe env vars are active, log the handle kind at entry.
+    if npp_diag {
+        let kind = if h_handle == 0 || h_handle == usize::MAX {
+            "invalid"
+        } else if weave_core::handles::get_thread_completion(h_handle).is_some() {
+            "thread"
+        } else if weave_core::handles::get_event_fd(h_handle).is_some() {
+            "event"
+        } else if sem_table().lock().ok().map_or(false, |t| t.contains_key(&h_handle)) {
+            "semaphore"
+        } else {
+            "unknown"
+        };
+        eprintln!("weave/WFSO:   kind={kind} h={h_handle:#x}");
+    }
+
     const INVALID_HANDLE_VALUE: usize = usize::MAX;
     const WAIT_OBJECT_0: u32 = 0;
     const WAIT_TIMEOUT: u32 = 0x00000102;
     const WAIT_FAILED: u32 = 0xFFFFFFFF;
     const INFINITE: u32 = 0xFFFF_FFFF;
-
-    if weave_core::ws2_trace::enabled() {
-        eprintln!("weave/WFSO: handle={h_handle:#x} timeout={dw_milliseconds}ms");
-    }
 
     if h_handle == 0 || h_handle == INVALID_HANDLE_VALUE {
         eprintln!("weave/WFSO: handle={h_handle:#x} → WAIT_FAILED (invalid)");
