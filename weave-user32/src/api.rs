@@ -1430,11 +1430,14 @@ pub extern "win64" fn post_quit_message(n_exit_code: i32) {
 ///
 /// Returns TRUE on success.
 pub extern "win64" fn post_message_w(hwnd: usize, msg: u32, w_param: usize, l_param: isize) -> i32 {
-    // Log WM_USER+ messages (>= 0x0400 = 1024) — these are app-defined messages, often
-    // used by NPP to schedule operations like file loading.
-    if msg >= 0x0400 {
+    // Log all posted messages during NPP gate (identify file-loading dispatch).
+    // WM_COMMAND (0x111) used by NPP to trigger file open from command-line arg.
+    // WM_TIMER (0x113) used by NPP to open startup files after initialization.
+    let is_npp = std::env::var("WEAVE_TEST_SCI_GETLEXER").is_ok()
+        || std::env::var("WEAVE_TEST_SCI_GETSTYLEAT").is_ok();
+    if is_npp || msg >= 0x0400 {
         eprintln!(
-            "weave/user32: PostMessageW hwnd={hwnd:#x} msg={msg} wp={w_param:#x} lp={l_param:#x}"
+            "weave/user32: PostMessageW hwnd={hwnd:#x} msg={msg:#06x} wp={w_param:#x} lp={l_param:#x}"
         );
     }
     queue::post(MsgEntry {
