@@ -564,82 +564,6 @@ pub unsafe extern "win64" fn get_message_w(
         return -1;
     }
 
-    // Apply any pending deferred doc transfer after NPP is fully initialized.
-    // The transfer crashes if applied too early (NPP not ready for SCN_DOCUMENTCHANGE at
-    // RVA 0x2521b3). Wait until PHASE_WM_PAINT has fired (first WM_PAINT = NPP fully up).
-    if PENDING_DOC_SCI.load(std::sync::atomic::Ordering::Relaxed) != 0 {
-        let pending_sci = PENDING_DOC_SCI.load(std::sync::atomic::Ordering::Relaxed);
-        let text_buf = PENDING_TEXT_BUF.load(std::sync::atomic::Ordering::Relaxed);
-        let paint_done = PHASE_WM_PAINT_DISPATCHED.load(std::sync::atomic::Ordering::Relaxed);
-        eprintln!(
-            "weave/GetMessageW: diag deferred transfer pending_sci={pending_sci:#x} \
-             text_buf={text_buf:#x} paint_done={paint_done}"
-        );
-        if pending_sci != 0 && text_buf != 0 && paint_done {
-            // Clear all pending state before calling to prevent re-triggering.
-            PENDING_DOC_SCI.store(0, std::sync::atomic::Ordering::Relaxed);
-            PENDING_DOC_PTR.store(0, std::sync::atomic::Ordering::Relaxed);
-            PENDING_TEXT_BUF.store(0, std::sync::atomic::Ordering::Relaxed);
-            let real_fn = SCI_REAL_DIRECT_FN.load(std::sync::atomic::Ordering::Relaxed);
-            if real_fn != 0 {
-                type DirectFn =
-                    unsafe extern "win64" fn(usize, u32, usize, isize, *mut u8) -> isize;
-                let f: DirectFn = unsafe { std::mem::transmute(real_fn) };
-                // SCI_CREATEDOCUMENT (2276) returns a new Document*. This is a
-                // properly reference-counted document that Scintilla manages.
-                // SCI_SETDOCPOINTER (2037, standard Scintilla number for direct
-                // function) assigns it to the editor and updates sci+0x128.
-                // Then copy text into the new document.
-                let new_doc = unsafe { f(pending_sci, 2276, 0, 0, std::ptr::null_mut()) };
-                let set_ret = unsafe {
-                    f(
-                        pending_sci,
-                        2037, /*SCI_SETDOCPOINTER*/
-                        0,
-                        new_doc as isize,
-                        std::ptr::null_mut(),
-                    )
-                };
-                let pdoc_from_proxy = unsafe { *(pending_sci as *const usize).add(37) }; // sci+0x128
-                let scratch_pdoc = PENDING_SCRATCH_PDOC.load(std::sync::atomic::Ordering::Relaxed);
-                PENDING_SCRATCH_PDOC.store(0, std::sync::atomic::Ordering::Relaxed);
-                // If SCI_SETDOCPOINTER didn't update sci+0x128 (NPP fork's direct
-                // function may use a different field offset), write it manually.
-                if new_doc != 0 && (pdoc_from_proxy == 0 || pdoc_from_proxy != new_doc as usize) {
-                    unsafe { *(pending_sci as *mut usize).add(37) = new_doc as usize };
-                    eprintln!("weave/GetMessageW: wrote new_doc to sci+0x128 = {new_doc:#x}");
-                }
-                eprintln!(
-                    "weave/GetMessageW: create+set doc new_doc={new_doc:#x} set_ret={set_ret:#x} \
-                     sci+0x128={pdoc_from_proxy:#x} scratch_pdoc={scratch_pdoc:#x}"
-                );
-                // Clear the empty new doc and append our saved text.
-                unsafe { f(pending_sci, 2004, 0, 0, std::ptr::null_mut()) };
-                let text_len = unsafe {
-                    std::ffi::CStr::from_ptr(text_buf as *const i8)
-                        .to_bytes()
-                        .len()
-                };
-                unsafe {
-                    f(
-                        pending_sci,
-                        2282, /*SCI_APPENDTEXT*/
-                        text_len,
-                        text_buf as isize,
-                        std::ptr::null_mut(),
-                    )
-                };
-                let _ = unsafe { Box::from_raw(text_buf as *mut u8) };
-                let main_len = unsafe { f(pending_sci, 2006, 0, 0, std::ptr::null_mut()) };
-                let main_lexer = unsafe { f(pending_sci, 4001, 0, 0, std::ptr::null_mut()) };
-                eprintln!(
-                    "weave/GetMessageW: text transfer complete sci={pending_sci:#x} \
-                     len={main_len} lexer={main_lexer}"
-                );
-            }
-        }
-    }
-
     // Wait for a message: keep pumping X11 events until the queue has one.
     static GM_COUNT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
     static GM_ENTRY: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
@@ -1341,6 +1265,83 @@ fn try_sci_getlength_probe() {
     }
 }
 
+/// Perform deferred Scintilla doc transfer: create a new Document via
+/// SCI_CREATEDOCUMENT, assign it via SCI_SETDOCPOINTER (or fallback write to
+/// sci+0x128), and copy the saved text buffer into it.
+///
+/// Called from DispatchMessageW on the first WM_PAINT (NPP fully initialized).
+/// Safe from the message-loop context — not inside Scintilla's direct function.
+fn try_deferred_doc_transfer() {
+    let pending_sci = PENDING_DOC_SCI.load(std::sync::atomic::Ordering::Relaxed);
+    if pending_sci == 0 {
+        return;
+    }
+    let text_buf = PENDING_TEXT_BUF.load(std::sync::atomic::Ordering::Relaxed);
+    if text_buf == 0 {
+        return;
+    }
+    // Clear all pending state before calling to prevent re-triggering.
+    PENDING_DOC_SCI.store(0, std::sync::atomic::Ordering::Relaxed);
+    PENDING_DOC_PTR.store(0, std::sync::atomic::Ordering::Relaxed);
+    PENDING_TEXT_BUF.store(0, std::sync::atomic::Ordering::Relaxed);
+    let real_fn = SCI_REAL_DIRECT_FN.load(std::sync::atomic::Ordering::Relaxed);
+    if real_fn == 0 {
+        return;
+    }
+    type DirectFn = unsafe extern "win64" fn(usize, u32, usize, isize, *mut u8) -> isize;
+    let f: DirectFn = unsafe { std::mem::transmute(real_fn) };
+    // SCI_CREATEDOCUMENT (2276) returns a new Document*. This is a
+    // properly reference-counted document that Scintilla manages.
+    // SCI_SETDOCPOINTER (2037, standard Scintilla number for direct
+    // function) assigns it to the editor and updates sci+0x128.
+    let new_doc = unsafe { f(pending_sci, 2276, 0, 0, std::ptr::null_mut()) };
+    let set_ret = unsafe {
+        f(
+            pending_sci,
+            2037, /*SCI_SETDOCPOINTER*/
+            0,
+            new_doc as isize,
+            std::ptr::null_mut(),
+        )
+    };
+    let pdoc_from_proxy = unsafe { *(pending_sci as *const usize).add(37) }; // sci+0x128
+    let scratch_pdoc = PENDING_SCRATCH_PDOC.load(std::sync::atomic::Ordering::Relaxed);
+    PENDING_SCRATCH_PDOC.store(0, std::sync::atomic::Ordering::Relaxed);
+    // If SCI_SETDOCPOINTER didn't update sci+0x128 (NPP fork's direct
+    // function may use a different field offset), write it manually.
+    if new_doc != 0 && (pdoc_from_proxy == 0 || pdoc_from_proxy != new_doc as usize) {
+        unsafe { *(pending_sci as *mut usize).add(37) = new_doc as usize };
+        eprintln!("weave/DispatchMessageW: wrote new_doc to sci+0x128 = {new_doc:#x}");
+    }
+    eprintln!(
+        "weave/DispatchMessageW: create+set doc new_doc={new_doc:#x} set_ret={set_ret:#x} \
+         sci+0x128={pdoc_from_proxy:#x} scratch_pdoc={scratch_pdoc:#x}"
+    );
+    // Clear the empty new doc and append our saved text.
+    unsafe { f(pending_sci, 2004, 0, 0, std::ptr::null_mut()) };
+    let text_len = unsafe {
+        std::ffi::CStr::from_ptr(text_buf as *const i8)
+            .to_bytes()
+            .len()
+    };
+    unsafe {
+        f(
+            pending_sci,
+            2282, /*SCI_APPENDTEXT*/
+            text_len,
+            text_buf as isize,
+            std::ptr::null_mut(),
+        )
+    };
+    let _ = unsafe { Box::from_raw(text_buf as *mut u8) };
+    let main_len = unsafe { f(pending_sci, 2006, 0, 0, std::ptr::null_mut()) };
+    let main_lexer = unsafe { f(pending_sci, 4001, 0, 0, std::ptr::null_mut()) };
+    eprintln!(
+        "weave/DispatchMessageW: text transfer complete sci={pending_sci:#x} \
+         len={main_len} lexer={main_lexer}"
+    );
+}
+
 /// # Safety
 /// `lp_msg` must point to a valid `MSG`.
 // Wine ref: dlls/user32/message.c::dispatch_message — calls NtUserMessageCall to get dispatch
@@ -1364,6 +1365,12 @@ pub unsafe extern "win64" fn dispatch_message_w(lp_msg: *const Msg) -> isize {
     // WM_PAINT that reaches DispatchMessageW regardless of HWND validity.
     if m.message == WM_PAINT && !PHASE_WM_PAINT_DISPATCHED.swap(true, Ordering::Relaxed) {
         mark_phase("wm_paint_dispatched_first");
+    }
+    // Deferred doc transfer: fires on the first WM_PAINT dispatch (NPP fully
+    // initialized). Safe from the message-loop context — not inside Scintilla's
+    // direct function, so no re-entrancy crash.
+    if m.message == WM_PAINT {
+        try_deferred_doc_transfer();
     }
     if m.message == WM_PAINT {
         try_test_wm_command_inject(m.hwnd);
