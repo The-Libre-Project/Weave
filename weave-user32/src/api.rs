@@ -569,41 +569,64 @@ pub unsafe extern "win64" fn get_message_w(
     // RVA 0x2521b3). Wait until PHASE_WM_PAINT has fired (first WM_PAINT = NPP fully up).
     {
         let pending_sci = PENDING_DOC_SCI.load(std::sync::atomic::Ordering::Relaxed);
-        let scratch_pdoc = PENDING_SCRATCH_PDOC.load(std::sync::atomic::Ordering::Relaxed);
+        let text_buf = PENDING_TEXT_BUF.load(std::sync::atomic::Ordering::Relaxed);
         if pending_sci != 0
-            && scratch_pdoc != 0
+            && text_buf != 0
             && PHASE_WM_PAINT_DISPATCHED.load(std::sync::atomic::Ordering::Relaxed)
         {
             // Clear all pending state before calling to prevent re-triggering.
             PENDING_DOC_SCI.store(0, std::sync::atomic::Ordering::Relaxed);
             PENDING_DOC_PTR.store(0, std::sync::atomic::Ordering::Relaxed);
-            PENDING_SCRATCH_PDOC.store(0, std::sync::atomic::Ordering::Relaxed);
+            PENDING_TEXT_BUF.store(0, std::sync::atomic::Ordering::Relaxed);
             let real_fn = SCI_REAL_DIRECT_FN.load(std::sync::atomic::Ordering::Relaxed);
             if real_fn != 0 {
                 type DirectFn =
                     unsafe extern "win64" fn(usize, u32, usize, isize, *mut u8) -> isize;
                 let f: DirectFn = unsafe { std::mem::transmute(real_fn) };
-                // Use SCI_SETDOCPOINTER to transfer the scratch's entire document
-                // (content + eventual lexer) to the main editor. Safe from the
-                // message-loop context (the crash at RVA 0x2521b3 only occurs when
-                // called re-entrantly inside the proxy during NPP init).
-                // NPP's Scintilla fork uses msg=2037 for SCI_SETDOCPOINTER in the
-                // direct function (the forked WNDPROC uses 2358). The real direct
-                // function is NPP's patched version.
-                unsafe {
+                // SCI_CREATEDOCUMENT (2276) returns a new Document*. This is a
+                // properly reference-counted document that Scintilla manages.
+                // SCI_SETDOCPOINTER (2037, standard Scintilla number for direct
+                // function) assigns it to the editor and updates sci+0x128.
+                // Then copy text into the new document.
+                let new_doc = unsafe { f(pending_sci, 2276, 0, 0, std::ptr::null_mut()) };
+                let set_ret = unsafe {
                     f(
                         pending_sci,
-                        2037, /*SCI_SETDOCPOINTER in NPP's direct function*/
+                        2037, /*SCI_SETDOCPOINTER*/
                         0,
-                        scratch_pdoc as isize,
+                        new_doc as isize,
                         std::ptr::null_mut(),
                     )
                 };
+                let pdoc_from_proxy = unsafe { *(pending_sci as *const usize).add(37) }; // sci+0x128
+                let scratch_pdoc = PENDING_SCRATCH_PDOC.load(std::sync::atomic::Ordering::Relaxed);
+                PENDING_SCRATCH_PDOC.store(0, std::sync::atomic::Ordering::Relaxed);
+                eprintln!(
+                    "weave/GetMessageW: create+set doc new_doc={new_doc:#x} set_ret={set_ret:#x} \
+                     sci+0x128={pdoc_from_proxy:#x} scratch_pdoc={scratch_pdoc:#x}"
+                );
+                // Clear the empty new doc and append our saved text.
+                unsafe { f(pending_sci, 2004, 0, 0, std::ptr::null_mut()) };
+                let text_len = unsafe {
+                    std::ffi::CStr::from_ptr(text_buf as *const i8)
+                        .to_bytes()
+                        .len()
+                };
+                unsafe {
+                    f(
+                        pending_sci,
+                        2282, /*SCI_APPENDTEXT*/
+                        text_len,
+                        text_buf as isize,
+                        std::ptr::null_mut(),
+                    )
+                };
+                let _ = unsafe { Box::from_raw(text_buf as *mut u8) };
                 let main_len = unsafe { f(pending_sci, 2006, 0, 0, std::ptr::null_mut()) };
                 let main_lexer = unsafe { f(pending_sci, 4001, 0, 0, std::ptr::null_mut()) };
                 eprintln!(
-                    "weave/GetMessageW: SCI_SETDOCPOINTER on main sci={pending_sci:#x} \
-                     pdoc={scratch_pdoc:#x} → len={main_len} lexer={main_lexer}"
+                    "weave/GetMessageW: text transfer complete sci={pending_sci:#x} \
+                     len={main_len} lexer={main_lexer}"
                 );
             }
         }
@@ -1727,18 +1750,24 @@ pub unsafe extern "win64" fn sci_direct_fn_proxy(
             && PENDING_DOC_SCI.load(std::sync::atomic::Ordering::Relaxed) == 0
             && lparam as usize != 0
         {
-            // Capture scratch's pdoc at sci+0x128 — this is the actual Document* that the
-            // lexer reads from. The scratch has a valid pdoc here because NPP calls
-            // SCI_SETDOCPOINTER on it. We'll use SCI_SETDOCPOINTER from the deferred
-            // transfer to share this document with the main editor.
+            // Capture scratch's pdoc at sci+0x128 for diagnostics.
+            // Also copy the text buffer for deferred transfer — we'll create a new
+            // document via SCI_CREATEDOCUMENT + SCI_SETDOCPOINTER (which properly
+            // updates sci+0x128) and then copy the text into it from GetMessageW.
             let scratch_pdoc = unsafe { *(sci as *const usize).add(37) };
             if scratch_pdoc != 0 {
                 PENDING_SCRATCH_PDOC.store(scratch_pdoc, std::sync::atomic::Ordering::Relaxed);
                 PENDING_DOC_SCI.store(main_sci, std::sync::atomic::Ordering::Relaxed);
                 PENDING_DOC_PTR.store(0, std::sync::atomic::Ordering::Relaxed);
+                let text_slice = unsafe { std::slice::from_raw_parts(lparam as *const u8, wparam) };
+                let mut buf = text_slice.to_vec();
+                buf.push(0); // null-terminate for SCI_SETTEXT
+                let buf_ptr = Box::into_raw(buf.into_boxed_slice()) as *mut u8 as usize;
+                PENDING_TEXT_BUF.store(buf_ptr, std::sync::atomic::Ordering::Relaxed);
                 eprintln!(
-                    "weave/sci_proxy: captured scratch pdoc={scratch_pdoc:#x} from sci={sci:#x} \
-                     → main={main_sci:#x}"
+                    "weave/sci_proxy: captured scratch pdoc={scratch_pdoc:#x} text_len={} \
+                     from sci={sci:#x} → main={main_sci:#x}",
+                    wparam,
                 );
             }
         }
