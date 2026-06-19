@@ -8399,29 +8399,17 @@ fn q_dir_file_pane_gate() {
                     // Give the window manager a moment to map the window.
                     std::thread::sleep(std::time::Duration::from_millis(600));
 
-                    let search = std::process::Command::new("xdotool")
-                        .args(["search", "--name", "Q-Dir"])
+                    // Send Escape directly to the focused window (Q-Dir's dialog)
+                    // rather than searching by name (which might not match the X11 title).
+                    eprintln!(
+                        "q_dir_file_pane_gate: sending Escape to dismiss registration dialog"
+                    );
+                    let _ = std::process::Command::new("xdotool")
+                        .args(["key", "Escape"])
                         .output();
-                    if let Ok(out) = search {
-                        if out.status.success() {
-                            if let Some(id) = String::from_utf8_lossy(&out.stdout)
-                                .lines()
-                                .next()
-                                .map(|s| s.trim().to_string())
-                            {
-                                if !id.is_empty() {
-                                    eprintln!("q_dir_file_pane_gate: sending Escape to dismiss dialog, wid={id}");
-                                    let _ = std::process::Command::new("xdotool")
-                                        .args(["key", "--window", &id, "Escape"])
-                                        .output();
-                                    // Wait for dialog to close and navigation to fire.
-                                    std::thread::sleep(std::time::Duration::from_secs(2));
-                                    drive_done = true;
-                                }
-                            }
-                        }
-                    }
-                    drive_done = true; // prevent retry even if search failed
+                    // Wait for dialog to close and navigation to fire.
+                    std::thread::sleep(std::time::Duration::from_secs(2));
+                    drive_done = true;
                 }
                 std::thread::sleep(std::time::Duration::from_millis(100));
             }
