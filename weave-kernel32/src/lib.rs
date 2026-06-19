@@ -8478,6 +8478,12 @@ pub unsafe extern "win64" fn create_thread(
         let _teb = weave_core::teb::setup_thread();
         let my_tid = unsafe { libc::syscall(libc::SYS_gettid) as u32 };
         eprintln!("weave/CreateThread: thread-start tid={my_tid} fn={fn_addr:#x}");
+        // Store a clone of the completion Arc so ExitThread can signal the
+        // condvar before parking instead of blocking WaitForSingleObject
+        // callers indefinitely (npp_syntax_highlight_gate A2 regression).
+        EXIT_THREAD_COMPLETION.with(|c| {
+            *c.borrow_mut() = Some(Arc::clone(&completion_clone));
+        });
         let fn_ptr: unsafe extern "win64" fn(*mut u8) -> u32 =
             unsafe { std::mem::transmute(fn_addr as *const u8) };
         let ret = unsafe { fn_ptr(param_addr as *mut u8) };
@@ -17923,6 +17929,18 @@ pub extern "win64" fn exit_thread(dw_exit_code: u32) {
     EXIT_THREAD_TLS.with(|tls| {
         *tls.borrow_mut() = Some(dw_exit_code);
     });
+    // Signal the thread completion so WaitForSingleObject on this thread
+    // handle returns WAIT_OBJECT_0 instead of hanging indefinitely.
+    // Required by npp_syntax_highlight_gate A2: NPP's main thread waits
+    // for worker threads to complete before loading file content into
+    // Scintilla.
+    EXIT_THREAD_COMPLETION.with(|c| {
+        if let Some(completion) = c.borrow_mut().as_ref() {
+            let mut guard = completion.result.lock().unwrap();
+            *guard = Some(dw_exit_code);
+            completion.condvar.notify_all();
+        }
+    });
     // Never return — ExitThread is declared [[noreturn]] in the Win32 ABI.
     loop {
         std::thread::park();
@@ -17931,6 +17949,14 @@ pub extern "win64" fn exit_thread(dw_exit_code: u32) {
 
 std::thread_local! {
     static EXIT_THREAD_TLS: std::cell::RefCell<Option<u32>> = const { std::cell::RefCell::new(None) };
+}
+
+// Thread-local storage for a clone of the ThreadCompletion Arc so ExitThread
+// can signal the condvar before parking.  Set in CreateThread's spawned
+// closure; consumed by exit_thread.
+thread_local! {
+    static EXIT_THREAD_COMPLETION: std::cell::RefCell<Option<Arc<handles::ThreadCompletion>>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 /// DebugBreak: signal a debug break to the debugger.
