@@ -1158,27 +1158,30 @@ fn try_m15_probe_inject(hwnd: usize) {
 /// Scintilla HWND captured by M15_SCINTILLA_HWND.  If the return value is ≥ 1
 /// a lexer is active; emit PHASE: sci_lexer_active.  Triggered by env var
 /// WEAVE_TEST_SCI_GETLEXER=1.
+///
+/// Retries on each WM_PAINT until the probe succeeds: the first paint can fire
+/// before Scintilla has loaded the document and set the lexer, so we cannot
+/// permanently mark the probe as done on failure (tracked as SCILEXER_PROBE_TIMING).
 fn try_sci_getlexer_probe() {
     if std::env::var("WEAVE_TEST_SCI_GETLEXER").is_err() {
         return;
     }
     static DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-    if DONE.swap(true, Ordering::Relaxed) {
+    if DONE.load(Ordering::Relaxed) {
         return;
     }
     let sci_hwnd = M15_SCINTILLA_HWND.load(Ordering::Relaxed);
     if sci_hwnd == 0 {
-        eprintln!(
-            "weave/user32: SCI_GETLEXER probe: no Scintilla hwnd captured (M15_SCINTILLA_HWND = 0)"
-        );
+        // No Scintilla hwnd yet — try again on next paint.
         return;
     }
     let ret = send_message_w(sci_hwnd, 4001, 0, 0);
     if ret >= 1 {
         eprintln!("weave/user32: SCI_GETLEXER probe: hwnd={sci_hwnd:#x} ret={ret} — lexer active");
         mark_phase("sci_lexer_active");
+        DONE.store(true, Ordering::Relaxed);
     } else {
-        eprintln!("weave/user32: SCI_GETLEXER probe: hwnd={sci_hwnd:#x} ret={ret} — no lexer set or wrong hwnd");
+        eprintln!("weave/user32: SCI_GETLEXER probe: hwnd={sci_hwnd:#x} ret={ret} — no lexer yet, will retry on next paint");
     }
 }
 
@@ -1187,17 +1190,19 @@ fn try_sci_getlexer_probe() {
 /// If at least two distinct style bytes are observed, emit PHASE: sci_style_variance.
 /// As a fallback, if all positions return 0, try SCI_COLOURISE (4003) and re-query.
 /// Triggered by env var WEAVE_TEST_SCI_GETSTYLEAT=1.
+///
+/// Retries on each WM_PAINT until the probe succeeds (see SCILEXER_PROBE_TIMING).
 fn try_sci_getstyleat_probe() {
     if std::env::var("WEAVE_TEST_SCI_GETSTYLEAT").is_err() {
         return;
     }
     static DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-    if DONE.swap(true, Ordering::Relaxed) {
+    if DONE.load(Ordering::Relaxed) {
         return;
     }
     let sci_hwnd = M15_SCINTILLA_HWND.load(Ordering::Relaxed);
     if sci_hwnd == 0 {
-        eprintln!("weave/user32: SCI_GETSTYLEAT probe: no Scintilla hwnd captured (M15_SCINTILLA_HWND = 0)");
+        // No Scintilla hwnd yet — try again on next paint.
         return;
     }
 
@@ -1230,6 +1235,7 @@ fn try_sci_getstyleat_probe() {
             styles_vec = styles,
         );
         mark_phase("sci_style_variance");
+        DONE.store(true, Ordering::Relaxed);
     } else if non_zero_count == 0 && distinct.len() == 1 && distinct[0] == 0 {
         // All zero — try SCI_COLOURISE to force re-lex
         eprintln!("weave/user32: SCI_GETSTYLEAT probe: all positions returned style=0 — trying SCI_COLOURISE fallback");
@@ -1258,8 +1264,9 @@ fn try_sci_getstyleat_probe() {
                 styles_vec = styles2,
             );
             mark_phase("sci_style_variance");
+            DONE.store(true, Ordering::Relaxed);
         } else {
-            eprintln!("weave/user32: SCI_GETSTYLEAT probe FAILED: all positions returned uniform style even after SCI_COLOURISE — positions={styles2:?}");
+            eprintln!("weave/user32: SCI_GETSTYLEAT probe: all positions returned uniform style even after SCI_COLOURISE — will retry on next paint. positions={styles2:?}");
         }
     } else {
         let style_label = if distinct.len() == 1 {
@@ -1267,7 +1274,7 @@ fn try_sci_getstyleat_probe() {
         } else {
             "styles"
         };
-        eprintln!("weave/user32: SCI_GETSTYLEAT probe: hwnd={sci_hwnd:#x} — only {distinct_len} distinct {style_label} ({non_zero_count} non-zero), styles={styles_vec:?}",
+        eprintln!("weave/user32: SCI_GETSTYLEAT probe: hwnd={sci_hwnd:#x} — only {distinct_len} distinct {style_label} ({non_zero_count} non-zero), styles={styles_vec:?} — will retry on next paint",
             distinct_len = distinct.len(),
             non_zero_count = non_zero_count,
             styles_vec = styles,
