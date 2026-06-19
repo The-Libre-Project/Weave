@@ -614,6 +614,22 @@ pub unsafe extern "win64" fn get_message_w(
                 // Free the buffer we allocated in sci_direct_fn_proxy.
                 let _ = unsafe { Box::from_raw(text_buf as *mut u8) };
                 let main_len = unsafe { f(pending_sci, 2006, 0, 0, std::ptr::null_mut()) };
+                // Also set sci+0x128 (where NPP's Scintilla fork stores the document
+                // pointer). The text was appended to Scintilla's internal default
+                // document, but the lexer reads pdoc from sci+0x128 — and it's still
+                // 0 because NPP never called SCI_SETDOCPOINTER on the main editor in
+                // this code path. Read the real document pointer via the original
+                // direct function (bypasses our SCI_GETDOCPOINTER proxy) and write it
+                // to sci+0x128 so the lexer can find it.
+                // Wine ref: dlls/user32/message.c (binary analysis: RVA 0x2626bb,
+                // 0x2634f1 — NPP's Scintilla reads pdoc from sci+0x128).
+                let real_pdoc = unsafe { f(pending_sci, 2268, 0, 0, std::ptr::null_mut()) };
+                if real_pdoc != 0 {
+                    unsafe {
+                        *(pending_sci as *mut usize).add(37) = real_pdoc as usize;
+                    }
+                    eprintln!("weave/GetMessageW: set main sci+0x128 = {real_pdoc:#x}");
+                }
                 eprintln!(
                     "weave/GetMessageW: applied SCI_SETTEXT to main \
                      sci={pending_sci:#x} main_SCI_GETLENGTH={main_len}"
