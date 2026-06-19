@@ -1283,6 +1283,30 @@ fn try_sci_getstyleat_probe() {
     }
 }
 
+/// Probe: after WM_PAINT fires, send SCI_GETLENGTH (2006) to the primary
+/// Scintilla HWND to track when document content arrives. Logs length on
+/// every paint so we can tell "never loaded" (stays 0) from "loaded" (>0).
+/// Also sends SCI_GETDOCPOINTER (2268) for doc_ptr diagnostics.
+/// Always runs when M15_SCINTILLA_HWND is set (lightweight — 2 SendMessageW).
+fn try_sci_getlength_probe() {
+    let sci_hwnd = M15_SCINTILLA_HWND.load(Ordering::Relaxed);
+    if sci_hwnd == 0 {
+        return;
+    }
+    static PREV_LEN: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(-1);
+    let len = send_message_w(sci_hwnd, 2006, 0, 0);
+    let prev = PREV_LEN.swap(len, Ordering::Relaxed);
+    if prev == -1 || prev != len {
+        let doc_ptr = send_message_w(sci_hwnd, 2268, 0, 0);
+        eprintln!(
+            "weave/user32: content probe: hwnd={sci_hwnd:#x} SCI_GETLENGTH={len} doc_ptr={doc_ptr:#x} (prev={prev})",
+        );
+        if len > 0 {
+            mark_phase("sci_content_loaded");
+        }
+    }
+}
+
 /// # Safety
 /// `lp_msg` must point to a valid `MSG`.
 // Wine ref: dlls/user32/message.c::dispatch_message — calls NtUserMessageCall to get dispatch
@@ -1313,6 +1337,7 @@ pub unsafe extern "win64" fn dispatch_message_w(lp_msg: *const Msg) -> isize {
         try_test_irfanview_nav_inject(m.hwnd);
         try_sci_getlexer_probe();
         try_sci_getstyleat_probe();
+        try_sci_getlength_probe();
     }
 
     // E3-M10 diag: log every WM_COMMAND reaching any guest window proc.
