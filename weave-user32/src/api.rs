@@ -569,50 +569,41 @@ pub unsafe extern "win64" fn get_message_w(
     // RVA 0x2521b3). Wait until PHASE_WM_PAINT has fired (first WM_PAINT = NPP fully up).
     {
         let pending_sci = PENDING_DOC_SCI.load(std::sync::atomic::Ordering::Relaxed);
-        let text_buf = PENDING_TEXT_BUF.load(std::sync::atomic::Ordering::Relaxed);
+        let scratch_pdoc = PENDING_SCRATCH_PDOC.load(std::sync::atomic::Ordering::Relaxed);
         if pending_sci != 0
-            && text_buf != 0
+            && scratch_pdoc != 0
             && PHASE_WM_PAINT_DISPATCHED.load(std::sync::atomic::Ordering::Relaxed)
         {
             // Clear all pending state before calling to prevent re-triggering.
             PENDING_DOC_SCI.store(0, std::sync::atomic::Ordering::Relaxed);
             PENDING_DOC_PTR.store(0, std::sync::atomic::Ordering::Relaxed);
-            PENDING_TEXT_BUF.store(0, std::sync::atomic::Ordering::Relaxed);
+            PENDING_SCRATCH_PDOC.store(0, std::sync::atomic::Ordering::Relaxed);
             let real_fn = SCI_REAL_DIRECT_FN.load(std::sync::atomic::Ordering::Relaxed);
             if real_fn != 0 {
                 type DirectFn =
                     unsafe extern "win64" fn(usize, u32, usize, isize, *mut u8) -> isize;
                 let f: DirectFn = unsafe { std::mem::transmute(real_fn) };
-                // Instead of text-copy + pdoc write, use SCI_SETDOCPOINTER to transfer
-                // the scratch's entire document (content + eventual lexer) to the main
-                // editor. This is safe from the message-loop context (not re-entrant).
-                // The crash at RVA 0x2521b3 only occurs when called inside the proxy.
-                // The scratch's pdoc is reference-counted in Scintilla, so both the
-                // scratch and main editor hold references until one is destroyed.
-                let scratch_pdoc = PENDING_SCRATCH_PDOC.load(std::sync::atomic::Ordering::Relaxed);
-                PENDING_SCRATCH_PDOC.store(0, std::sync::atomic::Ordering::Relaxed);
-                if scratch_pdoc != 0 {
-                    // NPP's Scintilla fork uses msg=2269 for SCI_SETDOCPOINTER in the
-                    // direct function (standard Scintilla numbering, not the forked
-                    // WNDPROC numbering which uses 2358).
-                    unsafe {
-                        f(
-                            pending_sci,
-                            2269, /*SCI_SETDOCPOINTER*/
-                            0,
-                            scratch_pdoc as isize,
-                            std::ptr::null_mut(),
-                        )
-                    };
-                    let main_len = unsafe { f(pending_sci, 2006, 0, 0, std::ptr::null_mut()) };
-                    let main_lexer = unsafe { f(pending_sci, 4001, 0, 0, std::ptr::null_mut()) };
-                    eprintln!(
-                        "weave/GetMessageW: SCI_SETDOCPOINTER on main sci={pending_sci:#x} \
-                         pdoc={scratch_pdoc:#x} → len={main_len} lexer={main_lexer}"
-                    );
-                } else {
-                    eprintln!("weave/GetMessageW: WARNING — scratch_pdoc was 0, cannot transfer");
-                }
+                // Use SCI_SETDOCPOINTER to transfer the scratch's entire document
+                // (content + eventual lexer) to the main editor. Safe from the
+                // message-loop context (the crash at RVA 0x2521b3 only occurs when
+                // called re-entrantly inside the proxy during NPP init).
+                // NPP's Scintilla fork uses msg=2269 for SCI_SETDOCPOINTER in the
+                // direct function (standard Scintilla numbering).
+                unsafe {
+                    f(
+                        pending_sci,
+                        2269, /*SCI_SETDOCPOINTER*/
+                        0,
+                        scratch_pdoc as isize,
+                        std::ptr::null_mut(),
+                    )
+                };
+                let main_len = unsafe { f(pending_sci, 2006, 0, 0, std::ptr::null_mut()) };
+                let main_lexer = unsafe { f(pending_sci, 4001, 0, 0, std::ptr::null_mut()) };
+                eprintln!(
+                    "weave/GetMessageW: SCI_SETDOCPOINTER on main sci={pending_sci:#x} \
+                     pdoc={scratch_pdoc:#x} → len={main_len} lexer={main_lexer}"
+                );
             }
         }
     }
