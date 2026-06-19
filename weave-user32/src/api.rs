@@ -567,13 +567,15 @@ pub unsafe extern "win64" fn get_message_w(
     // Apply any pending deferred doc transfer after NPP is fully initialized.
     // The transfer crashes if applied too early (NPP not ready for SCN_DOCUMENTCHANGE at
     // RVA 0x2521b3). Wait until PHASE_WM_PAINT has fired (first WM_PAINT = NPP fully up).
-    {
+    if PENDING_DOC_SCI.load(std::sync::atomic::Ordering::Relaxed) != 0 {
         let pending_sci = PENDING_DOC_SCI.load(std::sync::atomic::Ordering::Relaxed);
         let text_buf = PENDING_TEXT_BUF.load(std::sync::atomic::Ordering::Relaxed);
-        if pending_sci != 0
-            && text_buf != 0
-            && PHASE_WM_PAINT_DISPATCHED.load(std::sync::atomic::Ordering::Relaxed)
-        {
+        let paint_done = PHASE_WM_PAINT_DISPATCHED.load(std::sync::atomic::Ordering::Relaxed);
+        eprintln!(
+            "weave/GetMessageW: diag deferred transfer pending_sci={pending_sci:#x} \
+             text_buf={text_buf:#x} paint_done={paint_done}"
+        );
+        if pending_sci != 0 && text_buf != 0 && paint_done {
             // Clear all pending state before calling to prevent re-triggering.
             PENDING_DOC_SCI.store(0, std::sync::atomic::Ordering::Relaxed);
             PENDING_DOC_PTR.store(0, std::sync::atomic::Ordering::Relaxed);
