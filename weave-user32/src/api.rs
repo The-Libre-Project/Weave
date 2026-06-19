@@ -1658,6 +1658,7 @@ pub unsafe extern "win64" fn sci_direct_fn_proxy(
         2007 => "SCI_GETCHARACTERPOINTER",
         2503 => "SCI_GETSTYLEAT",
         4001 => "SCI_GETLEXER",
+        4002 => "SCI_SETLEXER",
         4003 => "SCI_COLOURISE",
         _ => "",
     };
@@ -1787,6 +1788,22 @@ pub unsafe extern "win64" fn sci_direct_fn_proxy(
                 "weave/sci_proxy: text captured for deferred SCI_SETTEXT (from SCI_APPENDTEXT): \
                  scratch={sci:#x} len={} → main={main_sci:#x}",
                 wparam,
+            );
+        }
+    }
+
+    // SCI_SETLEXER (4002): NPP sets a lexer on the scratch AFTER loading content and
+    // detecting the language. At this point, the scratch's pdoc has a lexer assigned.
+    // Re-capture the pdoc so the deferred transfer writes the lexer-equipped pdoc to
+    // main_sci+0x128.
+    if msg == 4002 /*SCI_SETLEXER*/ && PENDING_DOC_SCI.load(std::sync::atomic::Ordering::Relaxed) != 0
+    {
+        let main_sci = MAIN_EDITOR_SCI.load(std::sync::atomic::Ordering::Relaxed);
+        let cur_pdoc = unsafe { *(sci as *const usize).add(37) };
+        if cur_pdoc != 0 && main_sci != 0 && sci != main_sci && sci >= 0x0000_1000_0000_0000 {
+            PENDING_SCRATCH_PDOC.store(cur_pdoc, std::sync::atomic::Ordering::Relaxed);
+            eprintln!(
+                "weave/sci_proxy: re-captured scratch pdoc={cur_pdoc:#x} from sci={sci:#x} (SCI_SETLEXER)"
             );
         }
     }
