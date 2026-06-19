@@ -8358,10 +8358,15 @@ fn q_dir_file_pane_gate() {
     let stderr_writer = std::sync::Arc::clone(&stderr_shared);
     let drain_thread = std::thread::spawn(move || {
         use std::io::Read;
-        let mut buf = Vec::new();
         let mut pipe = stderr_pipe;
-        let _ = pipe.read_to_end(&mut buf);
-        *stderr_writer.lock().unwrap() = buf;
+        let mut chunk = [0u8; 4096];
+        loop {
+            match pipe.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => stderr_writer.lock().unwrap().extend_from_slice(&chunk[..n]),
+                Err(_) => break,
+            }
+        }
     });
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
@@ -8370,7 +8375,7 @@ fn q_dir_file_pane_gate() {
     let mut paint_seen = false;
     let mut drive_done = false;
 
-    'main: loop {
+    loop {
         match child.try_wait() {
             Ok(Some(status)) => {
                 exit_status = Some(status);
@@ -8420,7 +8425,7 @@ fn q_dir_file_pane_gate() {
                 }
                 std::thread::sleep(std::time::Duration::from_millis(100));
             }
-            Err(e) => break 'main,
+            Err(e) => panic!("wait failed: {e}"),
         }
     }
 
