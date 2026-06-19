@@ -583,67 +583,36 @@ pub unsafe extern "win64" fn get_message_w(
                 type DirectFn =
                     unsafe extern "win64" fn(usize, u32, usize, isize, *mut u8) -> isize;
                 let f: DirectFn = unsafe { std::mem::transmute(real_fn) };
-                // Use SCI_APPENDTEXT (2282) — confirmed working in this Scintilla build.
-                // SCI_SETTEXT (2009) returned len=0 (wrong msg# or notification resets it).
-                // SCI_APPENDTEXT fires SCN_MODIFIED (safe from message-loop context).
-                // First clear any content, then append the file bytes.
-                unsafe {
-                    f(
-                        pending_sci,
-                        2004, /*SCI_CLEARALL*/
-                        0,
-                        0,
-                        std::ptr::null_mut(),
-                    )
-                };
-                // text_buf is null-terminated; pass wparam=length (not including null).
-                let text_len = unsafe {
-                    std::ffi::CStr::from_ptr(text_buf as *const i8)
-                        .to_bytes()
-                        .len()
-                };
-                unsafe {
-                    f(
-                        pending_sci,
-                        2282, /*SCI_APPENDTEXT*/
-                        text_len,
-                        text_buf as isize,
-                        std::ptr::null_mut(),
-                    )
-                };
-                // Free the buffer we allocated in sci_direct_fn_proxy.
-                let _ = unsafe { Box::from_raw(text_buf as *mut u8) };
-                let main_len = unsafe { f(pending_sci, 2006, 0, 0, std::ptr::null_mut()) };
-                // Also set sci+0x128 (where NPP's Scintilla fork stores the document
-                // pointer). The text was appended to Scintilla's internal default
-                // document, but the lexer reads pdoc from sci+0x128 — and it's still
-                // 0 because NPP never called SCI_SETDOCPOINTER on the main editor in
-                // this code path. Read the real document pointer via the original
-                // direct function (bypasses our SCI_GETDOCPOINTER proxy) and write it
-                // to sci+0x128 so the lexer can find it.
-                // Wine ref: dlls/user32/message.c (binary analysis: RVA 0x2626bb,
-                // 0x2634f1 — NPP's Scintilla reads pdoc from sci+0x128).
-                // Use the scratch's pdoc captured during SCI_APPENDTEXT instead of
-                // calling f(2268) — in NPP's Scintilla fork the real direct function
-                // also reads from sci+0x128 (same field), which is still 0 here.
-                // The scratch's pdoc was read directly from memory in the proxy,
-                // bypassing all message dispatch, so it's the real Document*.
+                // Instead of text-copy + pdoc write, use SCI_SETDOCPOINTER to transfer
+                // the scratch's entire document (content + eventual lexer) to the main
+                // editor. This is safe from the message-loop context (not re-entrant).
+                // The crash at RVA 0x2521b3 only occurs when called inside the proxy.
+                // The scratch's pdoc is reference-counted in Scintilla, so both the
+                // scratch and main editor hold references until one is destroyed.
                 let scratch_pdoc = PENDING_SCRATCH_PDOC.load(std::sync::atomic::Ordering::Relaxed);
                 PENDING_SCRATCH_PDOC.store(0, std::sync::atomic::Ordering::Relaxed);
                 if scratch_pdoc != 0 {
+                    // NPP's Scintilla fork uses msg=2269 for SCI_SETDOCPOINTER in the
+                    // direct function (standard Scintilla numbering, not the forked
+                    // WNDPROC numbering which uses 2358).
                     unsafe {
-                        *(pending_sci as *mut usize).add(37) = scratch_pdoc;
-                    }
-                    eprintln!("weave/GetMessageW: set main sci+0x128 = {scratch_pdoc:#x}");
-                } else {
+                        f(
+                            pending_sci,
+                            2269, /*SCI_SETDOCPOINTER*/
+                            0,
+                            scratch_pdoc as isize,
+                            std::ptr::null_mut(),
+                        )
+                    };
+                    let main_len = unsafe { f(pending_sci, 2006, 0, 0, std::ptr::null_mut()) };
+                    let main_lexer = unsafe { f(pending_sci, 4001, 0, 0, std::ptr::null_mut()) };
                     eprintln!(
-                        "weave/GetMessageW: WARNING — scratch_pdoc was 0, cannot set sci+0x128"
+                        "weave/GetMessageW: SCI_SETDOCPOINTER on main sci={pending_sci:#x} \
+                         pdoc={scratch_pdoc:#x} → len={main_len} lexer={main_lexer}"
                     );
+                } else {
+                    eprintln!("weave/GetMessageW: WARNING — scratch_pdoc was 0, cannot transfer");
                 }
-                eprintln!(
-                    "weave/GetMessageW: applied SCI_SETTEXT to main \
-                     sci={pending_sci:#x} main_SCI_GETLENGTH={main_len}"
-                );
             }
         }
     }
@@ -1768,27 +1737,18 @@ pub unsafe extern "win64" fn sci_direct_fn_proxy(
         {
             // Capture scratch's pdoc at sci+0x128 — this is the actual Document* that the
             // lexer reads from. The scratch has a valid pdoc here because NPP calls
-            // SCI_SETDOCPOINTER on it. We'll write this to main_sci+0x128 during deferred
-            // transfer so the lexer can find the document.
+            // SCI_SETDOCPOINTER on it. We'll use SCI_SETDOCPOINTER from the deferred
+            // transfer to share this document with the main editor.
             let scratch_pdoc = unsafe { *(sci as *const usize).add(37) };
             if scratch_pdoc != 0 {
                 PENDING_SCRATCH_PDOC.store(scratch_pdoc, std::sync::atomic::Ordering::Relaxed);
+                PENDING_DOC_SCI.store(main_sci, std::sync::atomic::Ordering::Relaxed);
+                PENDING_DOC_PTR.store(0, std::sync::atomic::Ordering::Relaxed);
                 eprintln!(
-                    "weave/sci_proxy: captured scratch pdoc={scratch_pdoc:#x} from sci={sci:#x}"
+                    "weave/sci_proxy: captured scratch pdoc={scratch_pdoc:#x} from sci={sci:#x} \
+                     → main={main_sci:#x}"
                 );
             }
-            let text_slice = unsafe { std::slice::from_raw_parts(lparam as *const u8, wparam) };
-            let mut buf = text_slice.to_vec();
-            buf.push(0); // null-terminate for SCI_SETTEXT
-            let buf_ptr = Box::into_raw(buf.into_boxed_slice()) as *mut u8 as usize;
-            PENDING_TEXT_BUF.store(buf_ptr, std::sync::atomic::Ordering::Relaxed);
-            PENDING_DOC_SCI.store(main_sci, std::sync::atomic::Ordering::Relaxed);
-            PENDING_DOC_PTR.store(0, std::sync::atomic::Ordering::Relaxed);
-            eprintln!(
-                "weave/sci_proxy: text captured for deferred SCI_SETTEXT (from SCI_APPENDTEXT): \
-                 scratch={sci:#x} len={} → main={main_sci:#x}",
-                wparam,
-            );
         }
     }
 
