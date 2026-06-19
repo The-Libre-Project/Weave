@@ -601,6 +601,12 @@ pub unsafe extern "win64" fn get_message_w(
                 let pdoc_from_proxy = unsafe { *(pending_sci as *const usize).add(37) }; // sci+0x128
                 let scratch_pdoc = PENDING_SCRATCH_PDOC.load(std::sync::atomic::Ordering::Relaxed);
                 PENDING_SCRATCH_PDOC.store(0, std::sync::atomic::Ordering::Relaxed);
+                // If SCI_SETDOCPOINTER didn't update sci+0x128 (NPP fork's direct
+                // function may use a different field offset), write it manually.
+                if new_doc != 0 && (pdoc_from_proxy == 0 || pdoc_from_proxy != new_doc as usize) {
+                    unsafe { *(pending_sci as *mut usize).add(37) = new_doc as usize };
+                    eprintln!("weave/GetMessageW: wrote new_doc to sci+0x128 = {new_doc:#x}");
+                }
                 eprintln!(
                     "weave/GetMessageW: create+set doc new_doc={new_doc:#x} set_ret={set_ret:#x} \
                      sci+0x128={pdoc_from_proxy:#x} scratch_pdoc={scratch_pdoc:#x}"
