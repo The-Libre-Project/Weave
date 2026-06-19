@@ -1625,11 +1625,18 @@ pub unsafe extern "win64" fn sci_direct_fn_proxy(
         );
     }
 
-    // Track main editor sci (first sci to receive SCI_SETDOCPOINTER=NULL, msg=2269, lp=0).
-    // Required for the forced doc transfer below.
-    if msg == 2269 && lparam == 0 && MAIN_EDITOR_SCI.load(std::sync::atomic::Ordering::Relaxed) == 0
+    // Track main editor sci (first sci to receive SCI_SETDOCPOINTER(NULL), lparam=0).
+    // NPP 8.9.3's Scintilla build uses msg=2358 for SCI_SETDOCPOINTER, not msg=2269.
+    // Without tracking both, MAIN_EDITOR_SCI stays 0 and the forced doc transfer below
+    // (msg=2358 handler) never fires because `main_sci != 0` fails.
+    if lparam == 0
+        && (msg == 2269 || msg == 2358)
+        && MAIN_EDITOR_SCI.load(std::sync::atomic::Ordering::Relaxed) == 0
     {
         MAIN_EDITOR_SCI.store(sci, std::sync::atomic::Ordering::Relaxed);
+        eprintln!(
+            "weave/sci_proxy: tracked main editor sci={sci:#x} via msg={msg} (SCI_SETDOCPOINTER(NULL))"
+        );
     }
 
     // SCI_GETDOCPOINTER (2268): Scintilla's WndProc in this NPP 8.9.3 build reads a different
