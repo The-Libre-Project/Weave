@@ -623,12 +623,22 @@ pub unsafe extern "win64" fn get_message_w(
                 // to sci+0x128 so the lexer can find it.
                 // Wine ref: dlls/user32/message.c (binary analysis: RVA 0x2626bb,
                 // 0x2634f1 — NPP's Scintilla reads pdoc from sci+0x128).
-                let real_pdoc = unsafe { f(pending_sci, 2268, 0, 0, std::ptr::null_mut()) };
-                if real_pdoc != 0 {
+                // Use the scratch's pdoc captured during SCI_APPENDTEXT instead of
+                // calling f(2268) — in NPP's Scintilla fork the real direct function
+                // also reads from sci+0x128 (same field), which is still 0 here.
+                // The scratch's pdoc was read directly from memory in the proxy,
+                // bypassing all message dispatch, so it's the real Document*.
+                let scratch_pdoc = PENDING_SCRATCH_PDOC.load(std::sync::atomic::Ordering::Relaxed);
+                PENDING_SCRATCH_PDOC.store(0, std::sync::atomic::Ordering::Relaxed);
+                if scratch_pdoc != 0 {
                     unsafe {
-                        *(pending_sci as *mut usize).add(37) = real_pdoc as usize;
+                        *(pending_sci as *mut usize).add(37) = scratch_pdoc;
                     }
-                    eprintln!("weave/GetMessageW: set main sci+0x128 = {real_pdoc:#x}");
+                    eprintln!("weave/GetMessageW: set main sci+0x128 = {scratch_pdoc:#x}");
+                } else {
+                    eprintln!(
+                        "weave/GetMessageW: WARNING — scratch_pdoc was 0, cannot set sci+0x128"
+                    );
                 }
                 eprintln!(
                     "weave/GetMessageW: applied SCI_SETTEXT to main \
@@ -1607,6 +1617,10 @@ static PENDING_DOC_PTR: std::sync::atomic::AtomicUsize = std::sync::atomic::Atom
 /// Heap-allocated copy of file content to apply via SCI_SETTEXT from get_message_w.
 /// Raw pointer to a null-terminated Vec<u8> owned by Weave. Set once, freed after use.
 static PENDING_TEXT_BUF: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// Scratch's pdoc at sci+0x128, captured during SCI_APPENDTEXT on the scratch Scintilla.
+/// Written to main_sci+0x128 during deferred transfer so the lexer can find the document.
+static PENDING_SCRATCH_PDOC: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
 
 /// Proxy for SciFnDirectStatus — logs all SCI messages and intercepts SCI_GETDOCPOINTER.
 /// NPP calls this instead of SciFnDirectStatus after we intercept SCI_GETDIRECTSTATUSFUNCTION.
@@ -1751,6 +1765,17 @@ pub unsafe extern "win64" fn sci_direct_fn_proxy(
             && PENDING_DOC_SCI.load(std::sync::atomic::Ordering::Relaxed) == 0
             && lparam as usize != 0
         {
+            // Capture scratch's pdoc at sci+0x128 — this is the actual Document* that the
+            // lexer reads from. The scratch has a valid pdoc here because NPP calls
+            // SCI_SETDOCPOINTER on it. We'll write this to main_sci+0x128 during deferred
+            // transfer so the lexer can find the document.
+            let scratch_pdoc = unsafe { *(sci as *const usize).add(37) };
+            if scratch_pdoc != 0 {
+                PENDING_SCRATCH_PDOC.store(scratch_pdoc, std::sync::atomic::Ordering::Relaxed);
+                eprintln!(
+                    "weave/sci_proxy: captured scratch pdoc={scratch_pdoc:#x} from sci={sci:#x}"
+                );
+            }
             let text_slice = unsafe { std::slice::from_raw_parts(lparam as *const u8, wparam) };
             let mut buf = text_slice.to_vec();
             buf.push(0); // null-terminate for SCI_SETTEXT
