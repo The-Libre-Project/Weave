@@ -1176,14 +1176,30 @@ fn try_sci_getlexer_probe() {
         // No Scintilla hwnd yet — try again on next paint.
         return;
     }
-    let ret = send_message_w(sci_hwnd, 4001, 0, 0);
-    if ret >= 1 {
-        eprintln!("weave/user32: SCI_GETLEXER probe: hwnd={sci_hwnd:#x} ret={ret} — lexer active");
-        mark_phase("sci_lexer_active");
-        DONE.store(true, Ordering::Relaxed);
-    } else {
-        eprintln!("weave/user32: SCI_GETLEXER probe: hwnd={sci_hwnd:#x} ret={ret} — no lexer yet, will retry on next paint");
+    // Diagnostic: check window table state for Scintilla HWND.
+    window::with(sci_hwnd, |e| {
+        eprintln!(
+            "weave/user32: SCI_GETLEXER probe diag: hwnd={sci_hwnd:#x} class={} proc={:#x}",
+            e.class_name, e.wnd_proc
+        );
+    });
+    // Try direct WNDPROC call, bypassing send_message_w routing.
+    let gwlp_ret = window::with(sci_hwnd, |e| e.wnd_proc);
+    if let Some(proc_addr) = gwlp_ret {
+        let ret = call_wnd_proc(proc_addr, sci_hwnd, 4001, 0, 0);
+        eprintln!(
+            "weave/user32: SCI_GETLEXER direct call: hwnd={sci_hwnd:#x} proc={proc_addr:#x} ret={ret}"
+        );
+        if ret >= 1 {
+            mark_phase("sci_lexer_active");
+            DONE.store(true, Ordering::Relaxed);
+            return;
+        }
     }
+    let ret = send_message_w(sci_hwnd, 4001, 0, 0);
+    eprintln!(
+        "weave/user32: SCI_GETLEXER probe: hwnd={sci_hwnd:#x} ret={ret} — no lexer yet, will retry on next paint"
+    );
 }
 
 /// Probe: after WM_PAINT fires, send SCI_GETSTYLEAT (2503) at multiple positions
@@ -1430,14 +1446,11 @@ pub extern "win64" fn post_quit_message(n_exit_code: i32) {
 ///
 /// Returns TRUE on success.
 pub extern "win64" fn post_message_w(hwnd: usize, msg: u32, w_param: usize, l_param: isize) -> i32 {
-    // Log all posted messages during NPP gate (identify file-loading dispatch).
-    // WM_COMMAND (0x111) used by NPP to trigger file open from command-line arg.
-    // WM_TIMER (0x113) used by NPP to open startup files after initialization.
-    let is_npp = std::env::var("WEAVE_TEST_SCI_GETLEXER").is_ok()
-        || std::env::var("WEAVE_TEST_SCI_GETSTYLEAT").is_ok();
-    if is_npp || msg >= 0x0400 {
+    // Log WM_USER+ messages (>= 0x0400 = 1024) — these are app-defined messages, often
+    // used by NPP to schedule operations like file loading.
+    if msg >= 0x0400 {
         eprintln!(
-            "weave/user32: PostMessageW hwnd={hwnd:#x} msg={msg:#06x} wp={w_param:#x} lp={l_param:#x}"
+            "weave/user32: PostMessageW hwnd={hwnd:#x} msg={msg} wp={w_param:#x} lp={l_param:#x}"
         );
     }
     queue::post(MsgEntry {
