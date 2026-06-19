@@ -587,12 +587,13 @@ pub unsafe extern "win64" fn get_message_w(
                 // (content + eventual lexer) to the main editor. Safe from the
                 // message-loop context (the crash at RVA 0x2521b3 only occurs when
                 // called re-entrantly inside the proxy during NPP init).
-                // NPP's Scintilla fork uses msg=2269 for SCI_SETDOCPOINTER in the
-                // direct function (standard Scintilla numbering).
+                // NPP's Scintilla fork uses msg=2037 for SCI_SETDOCPOINTER in the
+                // direct function (the forked WNDPROC uses 2358). The real direct
+                // function is NPP's patched version.
                 unsafe {
                     f(
                         pending_sci,
-                        2269, /*SCI_SETDOCPOINTER*/
+                        2037, /*SCI_SETDOCPOINTER in NPP's direct function*/
                         0,
                         scratch_pdoc as isize,
                         std::ptr::null_mut(),
