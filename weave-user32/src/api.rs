@@ -5721,8 +5721,10 @@ pub unsafe extern "win64" fn msg_wait_for_multiple_objects(
     const INFINITE: u32 = 0xFFFF_FFFF;
 
     let trace = weave_core::ws2_trace::enabled();
+    let npp_diag = std::env::var("WEAVE_TEST_SCI_GETLEXER").is_ok()
+        || std::env::var("WEAVE_TEST_SCI_GETSTYLEAT").is_ok();
     eprintln!("weave/MsgWait: entry n={n_count} ms={dw_milliseconds} mask={_dw_wake_mask:#x}");
-    if trace {
+    if trace || npp_diag {
         eprintln!("weave/MsgWait: n={n_count} ms={dw_milliseconds} mask={_dw_wake_mask:#x}");
     }
     // n_count == 0 is valid: "wait for message only, no object handles."
@@ -5732,10 +5734,10 @@ pub unsafe extern "win64" fn msg_wait_for_multiple_objects(
     if lp_handles.is_null() && n_count > 0 {
         return WAIT_FAILED;
     }
-    if trace {
-        for _i in 0..n_count as usize {
-            let _h = *lp_handles.add(_i);
-            eprintln!("weave/MsgWait:   handle[{_i}]={_h:#x}");
+    if trace || npp_diag {
+        for i in 0..n_count as usize {
+            let h = *lp_handles.add(i);
+            eprintln!("weave/MsgWait:   handle[{i}]={h:#x}");
         }
     }
 

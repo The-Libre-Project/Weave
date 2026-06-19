@@ -9094,7 +9094,11 @@ pub unsafe extern "win64" fn wait_for_single_object(h_handle: usize, dw_millisec
             "thread"
         } else if weave_core::handles::get_event_fd(h_handle).is_some() {
             "event"
-        } else if sem_table().lock().ok().map_or(false, |t| t.contains_key(&h_handle)) {
+        } else if sem_table()
+            .lock()
+            .ok()
+            .is_some_and(|t| t.contains_key(&h_handle))
+        {
             "semaphore"
         } else {
             "unknown"
