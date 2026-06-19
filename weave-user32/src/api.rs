@@ -1727,8 +1727,27 @@ pub unsafe extern "win64" fn sci_direct_fn_proxy(
     }
 
     // Save lparam from SCI_APPENDTEXT for the msg=2358 handler's text copy.
+    // Also immediately capture if main editor is tracked (msg=2358 may never fire).
     if msg == 2282 /*SCI_APPENDTEXT*/ && lparam != 0 && wparam > 0 {
         PENDING_DOC_PTR.store(lparam as usize, std::sync::atomic::Ordering::Relaxed);
+        let main_sci = MAIN_EDITOR_SCI.load(std::sync::atomic::Ordering::Relaxed);
+        if main_sci != 0
+            && PENDING_DOC_SCI.load(std::sync::atomic::Ordering::Relaxed) == 0
+            && lparam as usize != 0
+        {
+            let text_slice = unsafe { std::slice::from_raw_parts(lparam as *const u8, wparam) };
+            let mut buf = text_slice.to_vec();
+            buf.push(0); // null-terminate for SCI_SETTEXT
+            let buf_ptr = Box::into_raw(buf.into_boxed_slice()) as *mut u8 as usize;
+            PENDING_TEXT_BUF.store(buf_ptr, std::sync::atomic::Ordering::Relaxed);
+            PENDING_DOC_SCI.store(main_sci, std::sync::atomic::Ordering::Relaxed);
+            PENDING_DOC_PTR.store(0, std::sync::atomic::Ordering::Relaxed);
+            eprintln!(
+                "weave/sci_proxy: text captured for deferred SCI_SETTEXT (from SCI_APPENDTEXT): \
+                 scratch={sci:#x} len={} → main={main_sci:#x}",
+                wparam,
+            );
+        }
     }
 
     ret
