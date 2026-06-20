@@ -1624,6 +1624,7 @@ pub unsafe extern "win64" fn sci_direct_fn_proxy(
         4001 => "SCI_GETLEXER",
         4002 => "SCI_SETLEXER",
         4003 => "SCI_COLOURISE",
+        4007 => "SCI_SETLEXERLANGUAGE",
         _ => "",
     };
     if !msg_name.is_empty() || (2000..=3000).contains(&msg) {
