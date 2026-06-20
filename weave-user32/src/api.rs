@@ -1539,6 +1539,28 @@ pub extern "win64" fn send_message_w(
         return def_ret;
     }
     let ret = call_wnd_proc(proc_addr, hwnd, msg, w_param, l_param);
+    // SCI_SETLEXER (4002): propagate lexer from scratch Scintilla to main editor.
+    // NPP sets the lexer on the scratch via SendMessageW before installing the
+    // direct-function proxy. Without propagation, the main editor's lexLanguage
+    // stays 0 and SCI_GETLEXER returns 0.
+    if msg == 4002 {
+        let main_hwnd = M15_SCINTILLA_HWND.load(std::sync::atomic::Ordering::Relaxed);
+        if main_hwnd != 0 && main_hwnd != hwnd {
+            crate::window::with(hwnd, |e| {
+                if e.class_name == "Scintilla" {
+                    let main_proc = crate::window::with(main_hwnd, |e2| e2.wnd_proc).unwrap_or(0);
+                    if main_proc != 0 {
+                        let _ = crate::api::call_wnd_proc(main_proc, main_hwnd, 4002, w_param, 0);
+                        eprintln!(
+                            "weave/user32: SendMessageW SCI_SETLEXER propagated lexer={} \
+                             scratch_hwnd={hwnd:#x} → main_hwnd={main_hwnd:#x}",
+                            w_param,
+                        );
+                    }
+                }
+            });
+        }
+    }
     // Intercept SCI_GETDIRECTSTATUSFUNCTION (2184): return our proxy instead of the real fn ptr.
     // SCI_GETDIRECTSTATUSFUNCTION returns a 5-param fn: (sci, msg, wp, lp, *status) -> iptr.
     // The proxy logs all SCI calls and fixes SCI_GETDOCPOINTER to read pdoc from sci+0x128.
@@ -1585,6 +1607,10 @@ static PENDING_TEXT_BUF: std::sync::atomic::AtomicUsize = std::sync::atomic::Ato
 /// Written to main_sci+0x128 during deferred transfer so the lexer can find the document.
 static PENDING_SCRATCH_PDOC: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
+/// Scratch Scintilla sci pointer, captured during SCI_APPENDTEXT. Used to
+/// redirect SCI_GETLEXER on the main editor to probe the scratch (which NPP
+/// set up via SendMessageW before the proxy was installed).
+static SCRATCH_SCI: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 /// Proxy for SciFnDirectStatus — logs all SCI messages and intercepts SCI_GETDOCPOINTER.
 /// NPP calls this instead of SciFnDirectStatus after we intercept SCI_GETDIRECTSTATUSFUNCTION.
@@ -1654,6 +1680,33 @@ pub unsafe extern "win64" fn sci_direct_fn_proxy(
     if msg == 2268 && sci >= 0x0000_1000_0000_0000 {
         let pdoc = unsafe { *(sci as *const usize).add(37) }; // sci+0x128
         return pdoc as isize;
+    }
+
+    // SCI_GETLEXER (4001): NPP sets the lexer on the scratch via SendMessageW
+    // before the proxy is installed (no SCI_SETLEXER through our handler).
+    // The scratch has lexLanguage set but the main editor doesn't. Redirect:
+    // if this is the main editor and the real fn returns 0, probe the scratch.
+    let main_sci = MAIN_EDITOR_SCI.load(std::sync::atomic::Ordering::Relaxed);
+    if msg == 4001 && sci != 0 && sci == main_sci {
+        let ret = unsafe { f(sci, 4001, 0, 0, std::ptr::null_mut()) };
+        if ret == 0 {
+            let scratch_sci = SCRATCH_SCI.load(std::sync::atomic::Ordering::Relaxed);
+            if scratch_sci != 0 {
+                let scratch_lexer = unsafe { f(scratch_sci, 4001, 0, 0, std::ptr::null_mut()) };
+                if scratch_lexer > 0 {
+                    // Also set it on main so future calls don't need the redirect
+                    unsafe { f(sci, 4002, scratch_lexer as usize, 0, std::ptr::null_mut()) };
+                    eprintln!(
+                        "weave/sci_proxy: SCI_GETLEXER redirected main hwnd: main={} scratch={} → {scratch_lexer}",
+                        ret, scratch_lexer,
+                    );
+                    return scratch_lexer;
+                }
+            }
+        }
+        if ret >= 1 {
+            return ret;
+        }
     }
 
     // msg=2358 = SCI_SETDOCPOINTER in NPP 8.9.3's Scintilla (writes to sci+0x128).
@@ -1729,6 +1782,7 @@ pub unsafe extern "win64" fn sci_direct_fn_proxy(
     // fires from DispatchMessageW BEFORE the WNDPROC call, so the transfer must
     // be complete before the NEXT WM_PAINT arrives for the probe to see it.
     if msg == 2282 /*SCI_APPENDTEXT*/ && lparam != 0 && wparam > 0 {
+        SCRATCH_SCI.store(sci, std::sync::atomic::Ordering::Relaxed);
         PENDING_DOC_PTR.store(lparam as usize, std::sync::atomic::Ordering::Relaxed);
         let main_sci = MAIN_EDITOR_SCI.load(std::sync::atomic::Ordering::Relaxed);
         if main_sci != 0
