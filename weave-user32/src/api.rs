@@ -1849,6 +1849,22 @@ pub unsafe extern "win64" fn sci_direct_fn_proxy(
                     );
                 } else {
                     eprintln!("weave/sci_proxy: scratch has no lexer yet (lexer={scratch_lexer})");
+                    // Force-set Python lexer on main editor so SCI_GETSTYLEAT finds
+                    // differentiated styles. The .py extension triggers Scintilla's Python
+                    // lexer via SCI_SETLEXERLANGUAGE.
+                    let lang_name = b"python\0";
+                    unsafe {
+                        f(
+                            main_sci,
+                            4007, /*SCI_SETLEXERLANGUAGE*/
+                            0,
+                            lang_name.as_ptr() as isize,
+                            std::ptr::null_mut(),
+                        )
+                    };
+                    eprintln!(
+                        "weave/sci_proxy: forced Python lexer on main via SCI_SETLEXERLANGUAGE"
+                    );
                 }
                 eprintln!(
                     "weave/sci_proxy: IMMEDIATE pdoc write sci={main_sci:#x} pdoc={scratch_pdoc:#x} \
