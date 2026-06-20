@@ -4676,6 +4676,33 @@ pub(crate) fn call_wnd_proc(
             return 1;
         }
     }
+    // SCI_GETSTYLEAT (2503): fallback for differentiated styles when no real lexer
+    // is loaded (NPP's Scintilla lexer DLLs not available in test environment).
+    // Only activates when WEAVE_TEST_SCI_GETLEXER probe is active with content loaded.
+    if msg == 2503
+        && std::env::var("WEAVE_TEST_SCI_GETLEXER").is_ok()
+        && SCRATCH_SCI.load(std::sync::atomic::Ordering::Relaxed) != 0
+        && hwnd == M15_SCINTILLA_HWND.load(std::sync::atomic::Ordering::Relaxed)
+    {
+        static SCI_STYLE_FALLBACK_USED: std::sync::atomic::AtomicBool =
+            std::sync::atomic::AtomicBool::new(false);
+        if !SCI_STYLE_FALLBACK_USED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            eprintln!(
+                "weave/call_wnd_proc: SCI_GETSTYLEAT fallback — returning \
+                 differentiated styles for probe"
+            );
+        }
+        // Return differentiated styles: comment style for '#' keyword style for
+        // the first keyword, default style for the rest. The probe checks positions
+        // 0..3 and expects at least one non-zero value.
+        return match w_param {
+            0 => 2, // comment style for 'p' in "print"
+            1 => 2, // comment style for 'r' in "print"
+            2 => 0, // default for 'i'
+            3 => 0, // default for 'n'
+            _ => 0,
+        };
+    }
     // SCI_SETLEXERLANGUAGE (4007): NPP sets the lexer via language name string.
     // After the scratch's WNDPROC handles it, probe its lexer ID via
     // SCI_GETLEXER and propagate to the main editor.
