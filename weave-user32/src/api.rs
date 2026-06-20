@@ -1553,7 +1553,7 @@ pub extern "win64" fn send_message_w(
                         let _ = crate::api::call_wnd_proc(main_proc, main_hwnd, 4002, w_param, 0);
                         eprintln!(
                             "weave/user32: SendMessageW SCI_SETLEXER propagated lexer={} \
-                             scratch_hwnd={hwnd:#x} → main_hwnd={main_hwnd:#x}",
+                             scratch_hwnd={hwnd:#x} -> main_hwnd={main_hwnd:#x}",
                             w_param,
                         );
                     }
@@ -5456,23 +5456,52 @@ pub extern "win64" fn def_dlg_proc_a(
     def_window_proc_w(h_dlg, msg, w_param, l_param)
 }
 
-/// DialogBoxParamA: create and show a modal dialog box.
+/// DialogBoxParamA: create and show a modal dialog box from a resource template (ANSI).
 ///
-/// Returns IDCANCEL — Weave does not implement dialog templates.
+/// Converts the ANSI template name to Wide and delegates to the same logic as
+/// DialogBoxParamW: loads RT_DIALOG, creates dialog + controls, runs modal loop.
 ///
 /// # Safety
-/// Pointer arguments are accepted but not dereferenced.
-// Wine ref: dlls/user32/dialog.c — DialogBoxParamA loads template from resources, creates
-// window, calls WM_INITDIALOG with dwInitParam, runs modal loop until EndDialog.
+/// `lp_template_name` (if non-INTEGER and non-null) must be a valid NUL-terminated
+/// ANSI string. `lp_dialog_func` must be a valid DLGPROC if non-zero.
+// Wine ref: dlls/user32/dialog.c — DialogBoxParamA widens name via GetResourceNameA
+// then calls DialogBoxParamW; same modal loop until EndDialog.
 pub unsafe extern "win64" fn dialog_box_param_a(
-    _h_instance: usize,
-    _lp_template_name: *const u8,
-    _hwnd_parent: usize,
-    _lp_dialog_func: usize,
-    _dw_init_param: isize,
-) -> i32 {
-    eprintln!("weave/user32: DialogBoxParamA → IDCANCEL (dialog templates not implemented)");
-    2 // IDCANCEL
+    h_instance: usize,
+    lp_template_name: *const u8,
+    hwnd_parent: usize,
+    lp_dialog_func: usize,
+    dw_init_param: isize,
+) -> isize {
+    if lp_dialog_func == 0 {
+        return -1;
+    }
+    let image_base = weave_core::module_handles::base_of(h_instance).unwrap_or_else(|| {
+        if h_instance == 0 {
+            weave_core::seh::pe_base()
+        } else {
+            0
+        }
+    });
+    if image_base == 0 {
+        return -1;
+    }
+    // SAFETY: widen_ansi_name caller contract matches ours.
+    let (wide_ptr, _keepalive) = unsafe { widen_ansi_name(lp_template_name) };
+    crate::dialog::fix_qdir_heap_init(image_base);
+    let Some(hwnd) = crate::dialog::create_from_resource(
+        image_base,
+        wide_ptr as *const u16,
+        hwnd_parent,
+        lp_dialog_func,
+        dw_init_param,
+        h_instance,
+    ) else {
+        return -1;
+    };
+    let result = unsafe { run_modal_dialog_loop(hwnd) };
+    crate::dialog::wake_post_modal_queue();
+    result
 }
 
 /// CreateDialogParamW: create a modeless dialog box.
@@ -5527,21 +5556,37 @@ pub unsafe extern "win64" fn create_dialog_param_w(
     hwnd
 }
 
-/// CreateDialogParamA: create a modeless dialog box.
+/// CreateDialogParamA: create a modeless dialog box (ANSI resource name).
 ///
-/// Wine ref: dlls/user32/dialog.c::CreateDialogParamA — converts template name to wide
-/// and delegates to CreateDialogParamW. Weave: same minimal stub as the W variant.
+/// Wine ref: dlls/user32/dialog.c::CreateDialogParamA — widens ANSI name and
+/// delegates to CreateDialogParamW; returns HWND.
 ///
 /// # Safety
-/// Pointer arguments are accepted but not dereferenced.
+/// `lp_template_name` (if non-INTEGER and non-null) must be a valid NUL-terminated
+/// ANSI string. `lp_dialog_func` must be a valid DLGPROC if non-zero.
+// Wine ref: dlls/user32/dialog.c::CreateDialogParamA — calls GetResourceNameA to
+// widen then CreateDialogParamW; modeless (no modal loop).
 pub unsafe extern "win64" fn create_dialog_param_a(
-    _h_instance: usize,
-    _lp_template_name: *const u8,
-    _hwnd_parent: usize,
-    _lp_dialog_func: usize,
-    _dw_init_param: isize,
+    h_instance: usize,
+    lp_template_name: *const u8,
+    hwnd_parent: usize,
+    lp_dialog_func: usize,
+    dw_init_param: isize,
 ) -> usize {
-    0
+    if lp_dialog_func == 0 {
+        return 0;
+    }
+    // SAFETY: widen_ansi_name caller contract matches ours.
+    let (wide_ptr, _keepalive) = unsafe { widen_ansi_name(lp_template_name) };
+    unsafe {
+        create_dialog_param_w(
+            h_instance,
+            wide_ptr as *const u16,
+            hwnd_parent,
+            lp_dialog_func,
+            dw_init_param,
+        )
+    }
 }
 
 /// CreateDialogIndirectParamW: create a modeless dialog box from a DLGTEMPLATE pointer.
@@ -5666,106 +5711,149 @@ pub extern "win64" fn get_dlg_ctrl_id(hwnd: usize) -> i32 {
     .unwrap_or(0)
 }
 
-/// GetDlgItemTextA: copy a dialog control's text. Returns 0 chars.
+/// GetDlgItemTextA: copy a dialog control's text (ANSI).
 ///
 /// # Safety
 /// `lp_string` must be writable if non-null.
 // Wine ref: dlls/user32/dialog.c — GetDlgItemTextA calls GetDlgItem then GetWindowTextA;
 // returns 0 and null-terminates buffer if control not found.
 pub unsafe extern "win64" fn get_dlg_item_text_a(
-    _h_dlg: usize,
-    _n_id_dlg_item: i32,
+    h_dlg: usize,
+    n_id_dlg_item: i32,
     lp_string: *mut u8,
     n_max_count: i32,
 ) -> u32 {
-    if !lp_string.is_null() && n_max_count > 0 {
-        unsafe { *lp_string = 0 };
+    if lp_string.is_null() || n_max_count <= 0 {
+        return 0;
     }
-    0
+    let ctrl = get_dlg_item(h_dlg, n_id_dlg_item);
+    if ctrl == 0 {
+        unsafe { *lp_string = 0 };
+        return 0;
+    }
+    unsafe { get_window_text_a(ctrl, lp_string, n_max_count) as u32 }
 }
 
-/// GetDlgItemTextW: copy a dialog control's text (wide). Returns 0 chars.
+/// GetDlgItemTextW: copy a dialog control's text (wide).
 ///
 /// # Safety
 /// `lp_string` must be writable if non-null.
 // Wine ref: dlls/user32/dialog.c — GetDlgItemTextW calls GetDlgItem then GetWindowTextW;
 // identical to A variant except buffer is UTF-16.
 pub unsafe extern "win64" fn get_dlg_item_text_w(
-    _h_dlg: usize,
-    _n_id_dlg_item: i32,
+    h_dlg: usize,
+    n_id_dlg_item: i32,
     lp_string: *mut u16,
     n_max_count: i32,
 ) -> u32 {
-    if !lp_string.is_null() && n_max_count > 0 {
-        unsafe { *lp_string = 0 };
+    if lp_string.is_null() || n_max_count <= 0 {
+        return 0;
     }
-    0
+    let ctrl = get_dlg_item(h_dlg, n_id_dlg_item);
+    if ctrl == 0 {
+        unsafe { *lp_string = 0 };
+        return 0;
+    }
+    unsafe { get_window_text_w(ctrl, lp_string, n_max_count) as u32 }
 }
 
-/// SetDlgItemTextA: set a dialog control's text. Returns TRUE.
+/// SetDlgItemTextA: set a dialog control's text (ANSI).
 ///
 /// # Safety
-/// Pointer arguments are accepted but not dereferenced.
+/// `lp_string` must be a valid NUL-terminated ANSI string if non-null.
 // Wine ref: dlls/user32/dialog.c — SetDlgItemTextA calls GetDlgItem then SetWindowTextA;
 // returns TRUE if control found, FALSE otherwise.
 pub unsafe extern "win64" fn set_dlg_item_text_a(
-    _h_dlg: usize,
-    _n_id_dlg_item: i32,
-    _lp_string: *const u8,
+    h_dlg: usize,
+    n_id_dlg_item: i32,
+    lp_string: *const u8,
 ) -> i32 {
-    1
+    let ctrl = get_dlg_item(h_dlg, n_id_dlg_item);
+    if ctrl == 0 {
+        return 0;
+    }
+    unsafe { set_window_text_a(ctrl, lp_string) }
 }
 
-/// SetDlgItemTextW: set a dialog control's text (wide). Returns TRUE.
+/// SetDlgItemTextW: set a dialog control's text (wide).
 ///
 /// # Safety
-/// Pointer arguments are accepted but not dereferenced.
+/// `lp_string` must be a valid NUL-terminated UTF-16 string if non-null.
 // Wine ref: dlls/user32/dialog.c — SetDlgItemTextW calls GetDlgItem then SetWindowTextW;
 // sends WM_SETTEXT directly to control HWND.
 pub unsafe extern "win64" fn set_dlg_item_text_w(
-    _h_dlg: usize,
-    _n_id_dlg_item: i32,
-    _lp_string: *const u16,
+    h_dlg: usize,
+    n_id_dlg_item: i32,
+    lp_string: *const u16,
 ) -> i32 {
-    1
+    let ctrl = get_dlg_item(h_dlg, n_id_dlg_item);
+    if ctrl == 0 {
+        return 0;
+    }
+    unsafe { set_window_text_w(ctrl, lp_string) }
 }
 
-/// SendDlgItemMessageA: send a message to a dialog control. Returns 0.
+/// SendDlgItemMessageA: send a message to a dialog control.
 // Wine ref: dlls/user32/dialog.c — SendDlgItemMessageA calls GetDlgItem then SendMessageA;
 // returns 0 if control not found; otherwise returns WNDPROC return value.
 pub extern "win64" fn send_dlg_item_message_a(
-    _h_dlg: usize,
-    _n_id_dlg_item: i32,
-    _msg: u32,
-    _w_param: usize,
-    _l_param: isize,
+    h_dlg: usize,
+    n_id_dlg_item: i32,
+    msg: u32,
+    w_param: usize,
+    l_param: isize,
 ) -> isize {
-    0
+    let ctrl = get_dlg_item(h_dlg, n_id_dlg_item);
+    if ctrl == 0 {
+        return 0;
+    }
+    send_message_w(ctrl, msg, w_param, l_param)
 }
 
-/// CheckDlgButton: set the checked state of a button control. Returns TRUE.
+/// CheckDlgButton: set the checked state of a button control.
 // Wine ref: dlls/user32/dialog.c — CheckDlgButton calls GetDlgItem then sends BM_SETCHECK;
 // uCheck: BST_UNCHECKED(0), BST_CHECKED(1), BST_INDETERMINATE(2).
-pub extern "win64" fn check_dlg_button(_h_dlg: usize, _n_id_button: i32, _u_check: u32) -> i32 {
+pub extern "win64" fn check_dlg_button(h_dlg: usize, n_id_button: i32, u_check: u32) -> i32 {
+    const BM_SETCHECK: u32 = 0x00F1;
+    let ctrl = get_dlg_item(h_dlg, n_id_button);
+    if ctrl == 0 {
+        return 0;
+    }
+    send_message_w(ctrl, BM_SETCHECK, u_check as usize, 0);
     1
 }
 
-/// IsDlgButtonChecked: query the checked state of a button. Returns 0.
+/// IsDlgButtonChecked: query the checked state of a button.
 // Wine ref: dlls/user32/dialog.c — IsDlgButtonChecked calls GetDlgItem then sends
 // BM_GETCHECK; returns BST_UNCHECKED(0), BST_CHECKED(1), or BST_INDETERMINATE(2).
-pub extern "win64" fn is_dlg_button_checked(_h_dlg: usize, _n_id_button: i32) -> u32 {
-    0 // BST_UNCHECKED
+pub extern "win64" fn is_dlg_button_checked(h_dlg: usize, n_id_button: i32) -> u32 {
+    const BM_GETCHECK: u32 = 0x00F0;
+    let ctrl = get_dlg_item(h_dlg, n_id_button);
+    if ctrl == 0 {
+        return 0;
+    }
+    send_message_w(ctrl, BM_GETCHECK, 0, 0) as u32
 }
 
-/// CheckRadioButton: check one button in a group, uncheck the rest. Returns TRUE.
+/// CheckRadioButton: check one button in a group, uncheck the rest.
 // Wine ref: dlls/user32/dialog.c — iterates controls from nIDFirstButton to nIDLastButton,
 // sends BM_SETCHECK(BST_CHECKED) to nIDCheckButton, BM_SETCHECK(0) to all others.
 pub extern "win64" fn check_radio_button(
-    _h_dlg: usize,
-    _n_id_first_button: i32,
-    _n_id_last_button: i32,
-    _n_id_check_button: i32,
+    h_dlg: usize,
+    n_id_first_button: i32,
+    n_id_last_button: i32,
+    n_id_check_button: i32,
 ) -> i32 {
+    const BM_SETCHECK: u32 = 0x00F1;
+    if n_id_first_button <= n_id_last_button {
+        for id in n_id_first_button..=n_id_last_button {
+            let check = if id == n_id_check_button { 1 } else { 0 };
+            let ctrl = get_dlg_item(h_dlg, id);
+            if ctrl != 0 {
+                send_message_w(ctrl, BM_SETCHECK, check, 0);
+            }
+        }
+    }
     1
 }
 
@@ -5825,13 +5913,24 @@ pub unsafe extern "win64" fn is_dialog_message_w(h_dlg: usize, lp_msg: *const Ms
     }
 }
 
-/// MapDialogRect: map dialog box units to pixels. Returns TRUE (rect unchanged).
+/// MapDialogRect: map dialog box units to pixels.
 ///
 /// # Safety
 /// `lp_rect` must point to a valid `Rect` if non-null.
 // Wine ref: dlls/user32/dialog.c — MapDialogRect uses dialog base units (GetDialogBaseUnits)
 // to scale: x = (dlgx * baseX) / 4, y = (dlgy * baseY) / 8.
-pub unsafe extern "win64" fn map_dialog_rect(_h_dlg: usize, _lp_rect: *mut Rect) -> i32 {
+pub unsafe extern "win64" fn map_dialog_rect(_h_dlg: usize, lp_rect: *mut Rect) -> i32 {
+    if lp_rect.is_null() {
+        return 0;
+    }
+    let rect = unsafe { &mut *lp_rect };
+    let base = get_dialog_base_units();
+    let base_x = (base & 0xFFFF) as i32;
+    let base_y = (base >> 16) as i32;
+    rect.left = rect.left * base_x / 4;
+    rect.right = rect.right * base_x / 4;
+    rect.top = rect.top * base_y / 8;
+    rect.bottom = rect.bottom * base_y / 8;
     1
 }
 

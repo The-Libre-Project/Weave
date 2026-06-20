@@ -356,6 +356,13 @@ extern "win64" fn builtin_control_wnd_proc(
             weave_core::progress::mark_listview_insert_first();
             0
         }
+        // WM_SETTEXT/WM_GETTEXT/WM_GETTEXTLENGTH: delegate to DefWindowProcW which
+        // reads/writes the window title field. Makes SetDlgItemText/GetDlgItemText
+        // work for Button, Static, and other built-in controls whose wnd_proc is this stub.
+        // Wine ref: dlls/win32u/defwnd.c — DefWindowProcW handles these three messages.
+        WM_SETTEXT | WM_GETTEXT | WM_GETTEXTLENGTH => {
+            crate::api::def_window_proc_w(_hwnd, msg, _wparam, _lparam as isize) as usize
+        }
         _ => 0,
     }
 }
