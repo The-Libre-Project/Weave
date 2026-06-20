@@ -4273,6 +4273,127 @@ fn putty_m3_plink_gate() {
     }
 }
 
+/// PuTTY M16 config window gate — verifies the config dialog renders
+/// and reads session config from the registry.
+///
+/// PuTTY is invoked without arguments so it enters its config-dialog path
+/// (DialogBoxParamA). Gates:
+///   1. (hard) Config window created — stderr contains
+///      "CreateDialogParamW → hwnd=0x" with a non-zero HWND within 15s.
+///   2. (hard) Registry session config read — stderr contains
+///      "RegOpenKeyExW key=...SimonTatham... → SUCCESS" within 15s.
+///   3. (hard) IAT resolution completes — "weave: imports resolved".
+///
+/// 15-second timeout. Skipped gracefully if putty.exe is absent.
+#[test]
+fn putty_m16_config_window_gate() {
+    if !cfg!(target_os = "linux") {
+        eprintln!("skipping putty_m16_config_window_gate — requires Linux");
+        return;
+    }
+
+    let manifest = env!("CARGO_MANIFEST_DIR");
+    let fixture = format!("{manifest}/../tests/fixtures/bin/putty.exe");
+
+    if !std::path::Path::new(&fixture).exists() {
+        eprintln!("skipping: putty.exe not present in tests/fixtures/bin/");
+        return;
+    }
+
+    let weave_bin = env!("CARGO_BIN_EXE_weave");
+
+    let start = std::time::Instant::now();
+    let mut child = std::process::Command::new(weave_bin)
+        .arg(&fixture)
+        // No args — PuTTY shows the config dialog on launch.
+        .env("DISPLAY", ":99")
+        .stderr(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|e| panic!("failed to spawn weave on putty.exe: {e}"));
+
+    let stderr_pipe = child.stderr.take().expect("stderr was piped");
+    let stderr_shared = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let stderr_writer = std::sync::Arc::clone(&stderr_shared);
+    let drain_thread = std::thread::spawn(move || {
+        use std::io::Read;
+        let mut buf = Vec::new();
+        let mut pipe = stderr_pipe;
+        let _ = pipe.read_to_end(&mut buf);
+        *stderr_writer.lock().unwrap() = buf;
+    });
+
+    let deadline = start + std::time::Duration::from_secs(15);
+    let mut exit_status: Option<std::process::ExitStatus> = None;
+    let mut killed_by_deadline = false;
+
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                exit_status = Some(status);
+                break;
+            }
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    killed_by_deadline = true;
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err(e) => panic!("wait failed: {e}"),
+        }
+    }
+    let elapsed = start.elapsed();
+
+    drain_thread.join().expect("stderr drain thread panicked");
+    let stderr_bytes = stderr_shared.lock().unwrap().clone();
+    let stderr = String::from_utf8_lossy(&stderr_bytes);
+
+    eprintln!("putty_m16 elapsed: {elapsed:.1?}");
+    eprintln!(
+        "putty_m16 exit: {}",
+        if killed_by_deadline {
+            "killed by deadline".to_string()
+        } else {
+            exit_status
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "unknown".to_string())
+        }
+    );
+    eprintln!("--- putty_m16 FULL STDERR BEGIN ---");
+    eprintln!("{stderr}");
+    eprintln!("--- putty_m16 FULL STDERR END ---");
+
+    // Gate A0: IAT resolution must complete.
+    assert!(
+        stderr.contains("weave: imports resolved"),
+        "putty_m16 A0 FAIL: IAT patch did not complete.\nelapsed: {elapsed:.1?}\nstderr:\n{stderr}"
+    );
+
+    // Gate A1: config dialog HWND is non-zero.
+    let has_dialog_hwnd = stderr
+        .lines()
+        .any(|l| l.contains("CreateDialogParamW → hwnd=0x") && !l.contains("hwnd=0x0"));
+    assert!(
+        has_dialog_hwnd,
+        "putty_m16 A1 FAIL: no config dialog HWND (CreateDialogParamW → hwnd non-zero) \
+         within 15s.\nelapsed: {elapsed:.1?}\nstderr:\n{stderr}"
+    );
+    eprintln!("putty_m16 A1: config dialog HWND non-zero ✓");
+
+    // Gate A2: registry session config read (SimonTatham/PuTTY key).
+    let has_registry_read = stderr.contains("RegOpenKeyExW key=")
+        && (stderr.contains("SimonTatham") || stderr.contains("PuTTY"))
+        && stderr.contains("SUCCESS");
+    assert!(
+        has_registry_read,
+        "putty_m16 A2 FAIL: no PuTTY registry session read (RegOpenKeyExW \
+         SimonTatham/PuTTY → SUCCESS) within 15s.\nelapsed: {elapsed:.1?}\nstderr:\n{stderr}"
+    );
+    eprintln!("putty_m16 A2: registry session config read ✓");
+}
+
 /// `weave 7za.exe x test.7z` — M4 extraction gate.
 ///
 /// Verifies that 7-Zip can extract a known archive under Weave and that the

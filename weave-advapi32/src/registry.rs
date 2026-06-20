@@ -136,6 +136,13 @@ pub unsafe extern "win64" fn reg_open_key_ex_w(
         return ERROR_FILE_NOT_FOUND;
     }
 
+    // M16 diagnostic: log registry key opens containing "PuTTY" or "SimonTatham"
+    // so the gate test can verify session config is being read.
+    let path_str = key_path.to_string_lossy();
+    if path_str.contains("PuTTY") || path_str.contains("SimonTatham") {
+        eprintln!("weave/advapi32: RegOpenKeyExW key={path_str} → SUCCESS");
+    }
+
     let handle = handles::alloc(HandleKind::RegistryKey(key_path));
     // SAFETY: phk_result non-null checked at function entry (returns ERROR_INVALID_PARAMETER
     // if null).  The Win32 API contract requires callers to provide a valid, writable HKEY*.
