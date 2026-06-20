@@ -564,6 +564,14 @@ pub unsafe extern "win64" fn get_message_w(
         return -1;
     }
 
+    // Deferred doc transfer: fire after WM_PAINT has been dispatched (NPP
+    // fully initialized) and the SCI_APPENDTEXT capture has set PENDING_DOC_SCI
+    // and PENDING_TEXT_BUF. Uses SendMessageW — safe from the message-loop
+    // context (not inside Scintilla's direct function).
+    if PHASE_WM_PAINT_DISPATCHED.load(std::sync::atomic::Ordering::Relaxed) {
+        try_deferred_doc_transfer();
+    }
+
     // Wait for a message: keep pumping X11 events until the queue has one.
     static GM_COUNT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
     static GM_ENTRY: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
@@ -1269,8 +1277,11 @@ fn try_sci_getlength_probe() {
 /// SCI_CREATEDOCUMENT, assign it via SCI_SETDOCPOINTER (or fallback write to
 /// sci+0x128), and copy the saved text buffer into it.
 ///
-/// Called from DispatchMessageW on the first WM_PAINT (NPP fully initialized).
-/// Safe from the message-loop context — not inside Scintilla's direct function.
+/// Called from GetMessageW after WM_PAINT has fired (NPP fully initialized).
+/// Uses SendMessageW (not the direct function) because from the message-loop
+/// context we are NOT inside Scintilla's direct function, so no re-entrancy
+/// crash at RVA 0x2521b3. The SCI_REAL_DIRECT_FN may not be set yet at this
+/// point (NPP may not have called SCI_GETDIRECTSTATUSFUNCTION).
 fn try_deferred_doc_transfer() {
     let pending_sci = PENDING_DOC_SCI.load(std::sync::atomic::Ordering::Relaxed);
     if pending_sci == 0 {
@@ -1284,26 +1295,12 @@ fn try_deferred_doc_transfer() {
     PENDING_DOC_SCI.store(0, std::sync::atomic::Ordering::Relaxed);
     PENDING_DOC_PTR.store(0, std::sync::atomic::Ordering::Relaxed);
     PENDING_TEXT_BUF.store(0, std::sync::atomic::Ordering::Relaxed);
-    let real_fn = SCI_REAL_DIRECT_FN.load(std::sync::atomic::Ordering::Relaxed);
-    if real_fn == 0 {
-        return;
-    }
-    type DirectFn = unsafe extern "win64" fn(usize, u32, usize, isize, *mut u8) -> isize;
-    let f: DirectFn = unsafe { std::mem::transmute(real_fn) };
-    // SCI_CREATEDOCUMENT (2276) returns a new Document*. This is a
-    // properly reference-counted document that Scintilla manages.
-    // SCI_SETDOCPOINTER (2037, standard Scintilla number for direct
-    // function) assigns it to the editor and updates sci+0x128.
-    let new_doc = unsafe { f(pending_sci, 2276, 0, 0, std::ptr::null_mut()) };
-    let set_ret = unsafe {
-        f(
-            pending_sci,
-            2037, /*SCI_SETDOCPOINTER*/
-            0,
-            new_doc as isize,
-            std::ptr::null_mut(),
-        )
-    };
+    // Use SendMessageW (not the direct function) — safe from message-loop
+    // context, no re-entrancy crash, no SCI_REAL_DIRECT_FN dependency.
+    // SCI_CREATEDOCUMENT (2276) returns a new Document* managed by Scintilla.
+    // SCI_SETDOCPOINTER (2037) assigns it and updates sci+0x128.
+    let new_doc = send_message_w(pending_sci, 2276, 0, 0);
+    let set_ret = send_message_w(pending_sci, 2037, 0, new_doc);
     let pdoc_from_proxy = unsafe { *(pending_sci as *const usize).add(37) }; // sci+0x128
     let scratch_pdoc = PENDING_SCRATCH_PDOC.load(std::sync::atomic::Ordering::Relaxed);
     PENDING_SCRATCH_PDOC.store(0, std::sync::atomic::Ordering::Relaxed);
@@ -1311,33 +1308,25 @@ fn try_deferred_doc_transfer() {
     // function may use a different field offset), write it manually.
     if new_doc != 0 && (pdoc_from_proxy == 0 || pdoc_from_proxy != new_doc as usize) {
         unsafe { *(pending_sci as *mut usize).add(37) = new_doc as usize };
-        eprintln!("weave/DispatchMessageW: wrote new_doc to sci+0x128 = {new_doc:#x}");
+        eprintln!("weave/GetMessageW: wrote new_doc to sci+0x128 = {new_doc:#x}");
     }
     eprintln!(
-        "weave/DispatchMessageW: create+set doc new_doc={new_doc:#x} set_ret={set_ret:#x} \
+        "weave/GetMessageW: create+set doc new_doc={new_doc:#x} set_ret={set_ret:#x} \
          sci+0x128={pdoc_from_proxy:#x} scratch_pdoc={scratch_pdoc:#x}"
     );
     // Clear the empty new doc and append our saved text.
-    unsafe { f(pending_sci, 2004, 0, 0, std::ptr::null_mut()) };
+    send_message_w(pending_sci, 2004, 0, 0);
     let text_len = unsafe {
         std::ffi::CStr::from_ptr(text_buf as *const i8)
             .to_bytes()
             .len()
     };
-    unsafe {
-        f(
-            pending_sci,
-            2282, /*SCI_APPENDTEXT*/
-            text_len,
-            text_buf as isize,
-            std::ptr::null_mut(),
-        )
-    };
+    send_message_w(pending_sci, 2282, text_len, text_buf as isize);
     let _ = unsafe { Box::from_raw(text_buf as *mut u8) };
-    let main_len = unsafe { f(pending_sci, 2006, 0, 0, std::ptr::null_mut()) };
-    let main_lexer = unsafe { f(pending_sci, 4001, 0, 0, std::ptr::null_mut()) };
+    let main_len = send_message_w(pending_sci, 2006, 0, 0);
+    let main_lexer = send_message_w(pending_sci, 4001, 0, 0);
     eprintln!(
-        "weave/DispatchMessageW: text transfer complete sci={pending_sci:#x} \
+        "weave/GetMessageW: text transfer complete sci={pending_sci:#x} \
          len={main_len} lexer={main_lexer}"
     );
 }
@@ -1365,12 +1354,6 @@ pub unsafe extern "win64" fn dispatch_message_w(lp_msg: *const Msg) -> isize {
     // WM_PAINT that reaches DispatchMessageW regardless of HWND validity.
     if m.message == WM_PAINT && !PHASE_WM_PAINT_DISPATCHED.swap(true, Ordering::Relaxed) {
         mark_phase("wm_paint_dispatched_first");
-    }
-    // Deferred doc transfer: fires on the first WM_PAINT dispatch (NPP fully
-    // initialized). Safe from the message-loop context — not inside Scintilla's
-    // direct function, so no re-entrancy crash.
-    if m.message == WM_PAINT {
-        try_deferred_doc_transfer();
     }
     if m.message == WM_PAINT {
         try_test_wm_command_inject(m.hwnd);
