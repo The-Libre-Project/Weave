@@ -5961,11 +5961,11 @@ pub extern "win64" fn is_zoomed(_h_wnd: usize) -> i32 {
     0
 }
 
-/// FlashWindow: flash a window in the taskbar. Returns FALSE.
+/// FlashWindow: flash the window's title bar. Returns TRUE (was active).
 // Wine ref: dlls/user32/message.c — FlashWindow calls FlashWindowEx with FLASHW_CAPTION|
 // FLASHW_TRAY for bInvert=TRUE; returns previous active state of caption.
 pub extern "win64" fn flash_window(_h_wnd: usize, _b_invert: i32) -> i32 {
-    0
+    1
 }
 
 /// GetWindowPlacement: retrieve window size and position.
