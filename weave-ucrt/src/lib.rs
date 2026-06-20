@@ -203,6 +203,14 @@ pub unsafe extern "win64" fn ucrt_strcmp(s1: *const u8, s2: *const u8) -> i32 {
     unsafe { libc::strcmp(s1 as _, s2 as _) }
 }
 
+/// _stricmp / _strcmpi — case-insensitive string compare. Delegates to strcasecmp.
+///
+/// # Safety
+/// `s1` and `s2` must each be valid null-terminated byte strings.
+pub unsafe extern "win64" fn ucrt_stricmp(s1: *const u8, s2: *const u8) -> i32 {
+    unsafe { libc::strcasecmp(s1 as _, s2 as _) }
+}
+
 /// `strxfrm(dst, src, n)` — transform `src` according to the current locale's
 /// collation rules, writing at most `n` bytes to `dst`.  Returns the number of
 /// bytes that *would* be required to store the transformed string (excluding the
@@ -4284,16 +4292,102 @@ pub unsafe extern "win64" fn ucrt_findclose(_handle: i64) -> i32 {
 /// _fullpath — return the absolute path of a relative path. Returns NULL on failure.
 ///
 /// Wine ref: dlls/msvcrt/dir.c — _fullpath calls GetFullPathNameA.
-/// Stub: returns NULL (not supported).
+/// On Linux, delegates to realpath(3) which requires the target path to exist.
 ///
 /// # Safety
-/// Pointer arguments are not dereferenced.
+/// `rel_path` must be a valid null-terminated C string. `abs_path` must be writable for
+/// `max_length` bytes if non-null.
 pub unsafe extern "win64" fn ucrt_fullpath(
-    _abs_path: *mut u8,
-    _rel_path: *const u8,
-    _max_length: usize,
+    abs_path: *mut u8,
+    rel_path: *const u8,
+    max_length: usize,
 ) -> *mut u8 {
-    std::ptr::null_mut()
+    if rel_path.is_null() {
+        unsafe { *libc::__errno_location() = libc::EINVAL };
+        return std::ptr::null_mut();
+    }
+    let resolved = unsafe { libc::realpath(rel_path as *const i8, std::ptr::null_mut()) };
+    if resolved.is_null() {
+        return std::ptr::null_mut();
+    }
+    let len = unsafe { libc::strlen(resolved) };
+    if abs_path.is_null() {
+        // Allocate mode: return the resolved path (caller must ucrt_free).
+        return resolved as *mut u8;
+    }
+    let copy_len = if max_length > 0 {
+        len.min(max_length - 1)
+    } else {
+        0
+    };
+    unsafe {
+        std::ptr::copy_nonoverlapping(resolved as *const u8, abs_path, copy_len);
+        *abs_path.add(copy_len) = 0;
+        libc::free(resolved as *mut c_void);
+    }
+    abs_path
+}
+
+/// _splitpath — split a path into drive, directory, filename, and extension components.
+///
+/// Wine ref: dlls/msvcrt/dir.c — splits using string searching from the end of the path.
+/// On Linux the drive component is always empty. Output pointers may be null to skip.
+///
+/// # Safety
+/// `path` must be a valid null-terminated C string. Remaining pointers must be writable for
+/// their respective buffer sizes if non-null.
+pub unsafe extern "win64" fn ucrt_splitpath(
+    path: *const u8,
+    drive: *mut u8,
+    dir: *mut u8,
+    fname: *mut u8,
+    ext: *mut u8,
+) {
+    if path.is_null() {
+        return;
+    }
+    let s = unsafe { std::ffi::CStr::from_ptr(path as *const i8) };
+    let s = s.to_bytes();
+    // Drive: always empty on Linux.
+    if !drive.is_null() {
+        unsafe { *drive = 0 };
+    }
+    // Find last separator ('/' or '\') in the path.
+    let sep_pos = s.iter().rposition(|&b| b == b'/' || b == b'\\');
+    let (dir_bytes, name_part) = match sep_pos {
+        Some(pos) => (&s[..=pos], &s[pos + 1..]),
+        None => (&[][..], s),
+    };
+    // Write directory (including trailing separator), max 256 bytes.
+    if !dir.is_null() {
+        let count = dir_bytes.len().min(255);
+        if count > 0 {
+            unsafe { std::ptr::copy_nonoverlapping(dir_bytes.as_ptr(), dir, count) };
+        }
+        unsafe { *dir.add(count) = 0 };
+    }
+    // Find last dot in the name part.
+    let dot_pos = name_part.iter().rposition(|&b| b == b'.');
+    let (fname_bytes, ext_bytes) = match dot_pos {
+        Some(pos) => (&name_part[..pos], &name_part[pos..]),
+        None => (name_part, &[][..]),
+    };
+    // Write filename (without extension), max 256 bytes.
+    if !fname.is_null() {
+        let count = fname_bytes.len().min(255);
+        if count > 0 {
+            unsafe { std::ptr::copy_nonoverlapping(fname_bytes.as_ptr(), fname, count) };
+        }
+        unsafe { *fname.add(count) = 0 };
+    }
+    // Write extension (including leading dot), max 256 bytes.
+    if !ext.is_null() {
+        let count = ext_bytes.len().min(255);
+        if count > 0 {
+            unsafe { std::ptr::copy_nonoverlapping(ext_bytes.as_ptr(), ext, count) };
+        }
+        unsafe { *ext.add(count) = 0 };
+    }
 }
 
 /// _mkdir — create a directory. Returns 0 on success, -1 on failure.
@@ -4690,7 +4784,7 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "_set_fmode" => stub!(ucrt_set_fmode as extern "win64" fn(_) -> _),
         "_commode" => Some(commode_data_addr()),
         "__mb_cur_max" => Some(mb_cur_max_data_addr()),
-        "_stricmp" | "_strcmpi" => stub!(ucrt_strcmp as unsafe extern "win64" fn(_, _) -> _),
+        "_stricmp" | "_strcmpi" => stub!(ucrt_stricmp as unsafe extern "win64" fn(_, _) -> _),
         "_wcsdup" => stub!(ucrt_wcsdup as unsafe extern "win64" fn(_) -> _),
         "_flushall" => stub!(ucrt_flushall_stub as extern "win64" fn()),
         "_filbuf" | "_flsbuf" => stub!(ucrt_cexit as extern "win64" fn()),
@@ -4801,6 +4895,7 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "_findnext64i32" => stub!(ucrt_findnext64i32 as unsafe extern "win64" fn(_, _) -> _),
         "_findclose" => stub!(ucrt_findclose as unsafe extern "win64" fn(_) -> _),
         "_fullpath" => stub!(ucrt_fullpath as unsafe extern "win64" fn(_, _, _) -> _),
+        "_splitpath" => stub!(ucrt_splitpath as unsafe extern "win64" fn(_, _, _, _, _)),
         "_mkdir" => stub!(ucrt_mkdir as unsafe extern "win64" fn(_) -> _),
         "_stat64" => stub!(ucrt_stat64 as unsafe extern "win64" fn(_, _) -> _),
         "_unlink" => stub!(ucrt_unlink as unsafe extern "win64" fn(_) -> _),
