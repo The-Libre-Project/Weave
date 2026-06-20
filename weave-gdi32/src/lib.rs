@@ -3745,30 +3745,40 @@ pub unsafe extern "win64" fn get_object_a(h: usize, c: i32, pv: *mut u8) -> i32 
     get_object(h, c, pv as usize)
 }
 
-/// GetTextExtentExPointA: ANSI variant. Returns FALSE (stub).
+/// GetTextExtentExPointA: ANSI variant — convert string via UTF-8 lossy and
+/// delegate to GetTextExtentExPointW.
 ///
 /// # Safety
-/// Pointer arguments are accepted but not fully used.
+/// `lp_sz` must point to `cch_string` valid ANSI bytes; output pointers writable.
 // Wine ref: dlls/gdi32/font.c — GetTextExtentExPointA converts string via
 // MultiByteToWideChar then calls GetTextExtentExPointW; lpnFit counts MBCS chars, not bytes.
 pub unsafe extern "win64" fn get_text_extent_ex_point_a(
-    _hdc: usize,
-    _lp_sz: *const u8,
-    _cch_string: i32,
-    _n_max_extent: i32,
-    _lp_n_fit: *mut i32,
-    _lp_dx: usize,
+    hdc: usize,
+    lp_sz: *const u8,
+    cch_string: i32,
+    n_max_extent: i32,
+    lp_n_fit: *mut i32,
+    lp_dx: usize,
     lp_size: usize,
 ) -> i32 {
-    // Fill size with zeros to avoid garbage reads.
-    if lp_size != 0 {
-        unsafe {
-            let p = lp_size as *mut i32;
-            *p = 0;
-            *p.add(1) = 0;
-        }
+    let wide: Vec<u16> = if lp_sz.is_null() || cch_string <= 0 {
+        Vec::new()
+    } else {
+        let c = cch_string.min(65_536i32) as usize;
+        let s = unsafe { std::slice::from_raw_parts(lp_sz, c) };
+        String::from_utf8_lossy(s).encode_utf16().collect()
+    };
+    unsafe {
+        get_text_extent_ex_point_w(
+            hdc,
+            wide.as_ptr(),
+            wide.len() as i32,
+            n_max_extent,
+            lp_n_fit,
+            lp_dx as *mut i32,
+            lp_size as *mut Size,
+        )
     }
-    0
 }
 
 /// GetOutlineTextMetricsA: return 0 (TrueType metrics not available).
@@ -3896,22 +3906,62 @@ pub unsafe extern "win64" fn get_char_width_a(
     unsafe { get_char_width32_a(hdc, i_first, i_last, lp_buffer) }
 }
 
-/// GetCharacterPlacementW: return 0 (not implemented).
+/// GetCharacterPlacementW: return per-character placement info.
+///
+/// When `lpgcp_results` is non-null and `lStructSize` ≥ 4, fills `nGlyphs` with
+/// the input string length and `nMaxFit` with how many fit within `n_max_extent`.
+/// Return value packs `nGlyphs` in low 16 bits and `nMaxFit` in high 16 bits.
+/// Per-glyph advances and BiDi reordering are Phase 7 enhancements.
 ///
 /// # Safety
-/// Pointer arguments are accepted but not dereferenced.
+/// `lpsz` points to `c_string` UTF-16 code units; `lpgcp_results` writable.
 // Wine ref: dlls/win32u/font.c — GetCharacterPlacementW fills GCP_RESULTS with glyph
 // indices, dx advances, caret positions, and reordering info; GCP_REORDER flag triggers
 // BiDi analysis; return value packs nGlyphs in low word and nMaxFit in high word.
 pub unsafe extern "win64" fn get_character_placement_w(
-    _hdc: usize,
+    hdc: usize,
     _lpsz: *const u16,
-    _c_string: i32,
-    _n_max_extent: i32,
-    _lpgcp_results: usize,
+    c_string: i32,
+    n_max_extent: i32,
+    lpgcp_results: usize,
     _dw_flags: u32,
 ) -> u32 {
-    0
+    if c_string <= 0 {
+        return 0;
+    }
+    let n_glyphs = c_string as u32;
+    // Approximate nMaxFit: each char averages at least ave_char_width pixels.
+    let px_size = font_px_size(hdc);
+    let fm = weave_user32::font::metrics(px_size);
+    let char_w = fm.ave_char_width.max(1) as i32;
+    let n_max_fit = if n_max_extent > 0 && char_w > 0 {
+        (n_max_extent / char_w).min(c_string) as u32
+    } else {
+        n_glyphs
+    };
+    // Fill GCP_RESULTSW fields if struct is passed.
+    if lpgcp_results != 0 {
+        // GCP_RESULTSW layout: lStructSize(DWORD) at +0, lpOutString(LPWSTR) at +8
+        // (Win64), lpOrder(UINT*) at +16, lpDx(int*) at +24, lpCaretPos(int*) at +32,
+        // lpClass(char*) at +40, lpGlyphs(LPWSTR) at +48, nGlyphs(UINT) at +56,
+        // nMaxFit(int) at +60.
+        // SAFETY: caller guarantees lpgcp_results is valid.
+        let struct_size = unsafe { *(lpgcp_results as *const u32) };
+        if struct_size >= 64 {
+            unsafe {
+                let p = lpgcp_results as *mut u32;
+                *p.add(14) = n_glyphs; // nGlyphs at offset 56 (14×4)
+                *p.add(15) = n_max_fit as u32; // nMaxFit at offset 60 (15×4)
+            }
+        } else if struct_size >= 4 {
+            // Minimal layout: only lStructSize is guaranteed — write nGlyphs.
+            unsafe {
+                let p = lpgcp_results as *mut u32;
+                *p.add(14) = n_glyphs;
+            }
+        }
+    }
+    (n_max_fit << 16) | n_glyphs
 }
 
 /// SetTextAlign: set the text-drawing alignment flags for an HDC.
@@ -3937,11 +3987,23 @@ pub extern "win64" fn get_text_align(hdc: usize) -> u32 {
     dc::with(hdc, |dc| dc.text_align)
 }
 
-/// GetCurrentObject: return a selected GDI object from a DC. Returns 0.
+/// GetCurrentObject: return a selected GDI object from a DC.
 // Wine ref: dlls/win32u/gdiobj.c — NtGdiGetDCObject maps uObjectType (OBJ_PEN=1,
 // OBJ_BRUSH=2, OBJ_FONT=6, OBJ_BITMAP=7) to the corresponding handle in the DC struct.
-pub extern "win64" fn get_current_object(_hdc: usize, _u_object_type: u32) -> usize {
-    0
+pub extern "win64" fn get_current_object(hdc: usize, u_object_type: u32) -> usize {
+    const OBJ_PEN: u32 = 1;
+    const OBJ_BRUSH: u32 = 2;
+    const OBJ_PAL: u32 = 5;
+    const OBJ_FONT: u32 = 6;
+    const OBJ_BITMAP: u32 = 7;
+    dc::with(hdc, |dc| match u_object_type {
+        OBJ_PEN => dc.h_pen,
+        OBJ_BRUSH => dc.h_brush,
+        OBJ_FONT => dc.h_font,
+        OBJ_BITMAP => dc.selected_bitmap,
+        OBJ_PAL => 0, // Palette not tracked in DC state.
+        _ => 0,
+    })
 }
 
 /// SetMapMode: set the DC mapping mode. Returns MM_TEXT (1) as the previous mode.
@@ -4146,19 +4208,65 @@ pub extern "win64" fn intersect_clip_rect(
     2 // SIMPLEREGION
 }
 
-/// TranslateCharsetInfo: translate character set info. Returns FALSE.
+/// TranslateCharsetInfo: translate character set info.
+///
+/// Handles TCI_SRCCHARSET(1): maps the source charset ID to the corresponding
+/// Windows ANSI codepage in lpCs->ci_acp. TCI_SRCCODEPAGE(2) and TCI_SRCFONTSIG(3)
+/// are stubs returning FALSE.
 ///
 /// # Safety
-/// Pointer arguments are accepted but not fully used.
+/// `lp_src` must be readable as a u32; `lp_cs` writable as a `CHARSETINFO` (32 bytes).
 // Wine ref: dlls/win32u/font.c — TranslateCharsetInfo maps between charset id, codepage,
 // and font signature; TCI_SRCCHARSET(1), TCI_SRCCODEPAGE(2), TCI_SRCFONTSIG(3) are the
 // three valid dwFlags values; returns FALSE for unknown charset/codepage combos.
 pub unsafe extern "win64" fn translate_charset_info(
-    _lp_src: usize,
-    _lp_cs: usize,
-    _dw_flags: u32,
+    lp_src: usize,
+    lp_cs: usize,
+    dw_flags: u32,
 ) -> i32 {
-    0
+    if lp_src == 0 || lp_cs == 0 {
+        return 0;
+    }
+    const TCI_SRCCHARSET: u32 = 1;
+    const TCI_SRCCODEPAGE: u32 = 2;
+    const TCI_SRCFONTSIG: u32 = 3;
+    let cs = lp_cs as *mut CharsetInfo;
+    match dw_flags {
+        TCI_SRCCHARSET => {
+            let src_val = unsafe { *(lp_src as *const u32) };
+            let charset = (src_val & 0xFF) as u8;
+            // Map common charset IDs to their Windows codepages.
+            let cp = match charset {
+                0 => 1252,   // ANSI_CHARSET → Latin I
+                1 => 1252,   // DEFAULT_CHARSET → CP_ACP
+                77 => 10000, // MAC_CHARSET
+                128 => 932,  // SHIFTJIS_CHARSET
+                129 => 949,  // HANGUL_CHARSET
+                130 => 1361, // JOHAB_CHARSET
+                134 => 936,  // GB2312_CHARSET
+                136 => 950,  // CHINESEBIG5_CHARSET
+                161 => 1253, // GREEK_CHARSET
+                162 => 1254, // TURKISH_CHARSET
+                163 => 1258, // VIETNAMESE_CHARSET
+                177 => 1255, // HEBREW_CHARSET
+                178 => 1256, // ARABIC_CHARSET
+                186 => 1257, // BALTIC_CHARSET
+                204 => 1251, // RUSSIAN_CHARSET
+                222 => 874,  // THAI_CHARSET
+                238 => 1250, // EASTEUROPE_CHARSET
+                _ => 1252,   // fallback to CP_ACP
+            };
+            unsafe {
+                (*cs).ci_charset = charset as u32;
+                (*cs).ci_acp = cp;
+                // fs (FONTSIGNATURE) left zeroed — Unicode-subrange/codepage bitmap
+                // is a Phase 7 enhancement.
+            }
+            1
+        }
+        TCI_SRCCODEPAGE | TCI_SRCFONTSIG => 0,
+        _ => 0,
+    }
 }
 
 // ── Palette stubs ─────────────────────────────────────────────────────────────
@@ -4194,19 +4302,19 @@ pub extern "win64" fn realize_palette(_hdc: usize) -> u32 {
     0
 }
 
-/// SetPaletteEntries: set palette colour entries. Returns 0.
+/// SetPaletteEntries: set palette colour entries. Returns the number of entries set.
 ///
 /// # Safety
-/// Pointer arguments are accepted but not dereferenced.
+/// Pointer arguments are accepted but not dereferenced (palette is no-op).
 // Wine ref: dlls/win32u/palette.c — NtGdiSetPaletteEntries modifies cEntries palette
 // slots starting at iStart; returns 0 if hpal is invalid or iStart+cEntries > palNumEntries.
 pub unsafe extern "win64" fn set_palette_entries(
     _h_pal: usize,
     _i_start: u32,
-    _c_entries: u32,
+    c_entries: u32,
     _lppe: usize,
 ) -> u32 {
-    0
+    c_entries
 }
 
 /// UnrealizeObject: reset a brush origin or restore a palette. Returns TRUE.

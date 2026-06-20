@@ -142,6 +142,16 @@ pub const RASTER_CAPS_DISPLAY: i32 = RC_BITBLT
     | RC_STRETCHDIB
     | RC_DEVBITS;
 
+// ── CHARSETINFO (for TranslateCharsetInfo) ─────────────────────────────────────
+// Wine ref: include/wingdi.h — CHARSETINFO packs ciCharset (UINT), ciACP (UINT),
+// and fs (FONTSIGNATURE = 4+2 DWORDs = 24 bytes) into one 32-byte struct.
+#[repr(C)]
+pub struct CharsetInfo {
+    pub ci_charset: u32,
+    pub ci_acp: u32,
+    pub fs: [u32; 6], // FONTSIGNATURE: fsUsb[4] + fsCsb[2]
+}
+
 // ── GDI handle offsets ────────────────────────────────────────────────────────
 /// Allocated GDI object handles start at this offset.
 pub const GDI_HANDLE_OFFSET: usize = 0x0020_0000;
