@@ -1829,6 +1829,15 @@ pub unsafe extern "win64" fn wsa_enum_network_events(
         // Do NOT set FD_WRITE on this call — connect completion != write-ready.
         // plink will receive FD_WRITE on the next WSAEnumNetworkEvents call once
         // the socket is in the connected (not connecting) state.
+        } else if weave_common::socket_event::is_socket_listening(s as i32) {
+            // Listening socket with POLLOUT — do not report FD_WRITE.
+            // Listening sockets cannot send data; FD_WRITE on a listener is
+            // spurious and confuses callers like curl's async-DNS loopback
+            // pair which only register FD_ACCEPT|FD_READ|FD_CLOSE.
+            // Wine ref: server/sock.c:1125 get_poll_flags — the `if (event &
+            // POLLOUT) flags |= AFD_POLL_WRITE` guard only fires for non-
+            // SS_LISTENING sockets. SS_LISTENING sockets never surface
+            // AFD_POLL_WRITE regardless of POLLOUT state.
         } else {
             // Connected socket with POLLOUT.
             // Wine ref: server/sock.c:1125 get_poll_flags —
