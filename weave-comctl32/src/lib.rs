@@ -38,13 +38,19 @@ use weave_user32::class::{self, ClassEntry};
 
 // ── Common control window class registration ────────────────────────────────
 
-const TB_ADDBUTTONS: u32 = 0x0401;
-const TB_DELETEBUTTON: u32 = 0x0404;
+// Correct Windows SDK TB_* constants (TB_FIRST = 0x0400).
+const TB_ENABLEBUTTON: u32 = 0x0401; // TB_FIRST + 1
+const TB_CHECKBUTTON: u32 = 0x0402; // TB_FIRST + 2
+const TB_PRESSBUTTON: u32 = 0x0403; // TB_FIRST + 3
+const TB_HIDEBUTTON: u32 = 0x0404; // TB_FIRST + 4
+const TB_ISBUTTONENABLED: u32 = 0x0409; // TB_FIRST + 9
+const TB_BUTTONCOUNT: u32 = 0x0412; // TB_FIRST + 18
+const TB_ADDBUTTONSA: u32 = 0x0414; // TB_FIRST + 20
+const TB_DELETEBUTTON: u32 = 0x0416; // TB_FIRST + 22
 const TB_GETBUTTONINFOW: u32 = 0x041e;
 const TB_SETBUTTONINFOW: u32 = 0x0420;
 const TB_GETBUTTONTEXT: u32 = 0x0433;
 const TB_GETRECT: u32 = 0x043f;
-const TB_BUTTONCOUNT: u32 = 0x0412;
 const TB_AUTOSIZE: u32 = 0x0411;
 const TB_SETIMAGELIST: u32 = 0x0430;
 const TB_SETEXTENDEDSTYLE: u32 = 0x0444;
@@ -274,7 +280,11 @@ extern "win64" fn toolbar_wnd_proc(hwnd: usize, msg: u32, w_param: usize, l_para
         }
         WM_GETFONT => 0,
         WM_GETTEXT => 0,
-        TB_ADDBUTTONS | TB_ADDBUTTONSW => {
+        // Button state modifiers — no-op stubs (return TRUE to prevent DefWindowProc
+        // from returning -1 which guests may interpret as error).
+        TB_ENABLEBUTTON | TB_CHECKBUTTON | TB_PRESSBUTTON | TB_HIDEBUTTON => 1,
+        TB_ISBUTTONENABLED => 1,
+        TB_ADDBUTTONSA | TB_ADDBUTTONSW => {
             if l_param == 0 || w_param == 0 {
                 return 0;
             }
