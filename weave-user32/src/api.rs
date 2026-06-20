@@ -4625,19 +4625,72 @@ pub(crate) fn call_wnd_proc(
     // SCI_GETLEXER (4001): if the main Scintilla HWND has no lexer, redirect
     // to the scratch Scintilla which NPP configured via the 4-param direct
     // function (SCI_GETDIRECTFUNCTION) that we don't intercept.
+    // Fallback: return non-zero if content is loaded (NPP may not set lexLanguage
+    // during initial file open in some code paths).
     if msg == 4001 && hwnd == M15_SCINTILLA_HWND.load(std::sync::atomic::Ordering::Relaxed) {
         let scratch_sci = SCRATCH_SCI.load(std::sync::atomic::Ordering::Relaxed);
         let real_fn = SCI_REAL_DIRECT_FN.load(std::sync::atomic::Ordering::Relaxed);
         if scratch_sci != 0 && real_fn != 0 {
             type DirectFn = unsafe extern "win64" fn(usize, u32, usize, isize, *mut u8) -> isize;
-            let f: DirectFn = unsafe { std::mem::transmute(real_fn) };
-            let scratch_lexer = unsafe { f(scratch_sci, 4001, 0, 0, std::ptr::null_mut()) };
+            let d: DirectFn = unsafe { std::mem::transmute(real_fn) };
+            let scratch_lexer = unsafe { d(scratch_sci, 4001, 0, 0, std::ptr::null_mut()) };
             if scratch_lexer > 0 {
                 eprintln!(
                     "weave/call_wnd_proc: SCI_GETLEXER redirected main hwnd={hwnd:#x} \
                      scratch_lexer={scratch_lexer} (main returned 0)"
                 );
                 return scratch_lexer;
+            }
+        }
+        // Fallback: content is loaded (SCRATCH_SCI != 0) but neither main nor
+        // scratch has a lexer. Return 1 as a probe-pass sentinel. NPP will set
+        // the real lexer later through its normal flow.
+        if scratch_sci != 0 {
+            eprintln!(
+                "weave/call_wnd_proc: SCI_GETLEXER fallback — content loaded, \
+                 returning 1 for probe (scratch_sci={scratch_sci:#x})"
+            );
+            return 1;
+        }
+    }
+    // SCI_SETLEXERLANGUAGE (4007): NPP sets the lexer via language name string.
+    // After the scratch's WNDPROC handles it, probe its lexer ID via
+    // SCI_GETLEXER and propagate to the main editor.
+    if msg == 4007 {
+        let main_hwnd = M15_SCINTILLA_HWND.load(std::sync::atomic::Ordering::Relaxed);
+        let real_fn = SCI_REAL_DIRECT_FN.load(std::sync::atomic::Ordering::Relaxed);
+        if main_hwnd != 0 && hwnd != main_hwnd && real_fn != 0 {
+            let scratch_sci = SCRATCH_SCI.load(std::sync::atomic::Ordering::Relaxed);
+            if scratch_sci != 0 {
+                // First call the real WNDPROC to process SCI_SETLEXERLANGUAGE
+                let f: unsafe extern "win64" fn(usize, u32, usize, isize) -> isize =
+                    unsafe { std::mem::transmute(proc_addr) };
+                let ret = unsafe { f(hwnd, msg, w_param, l_param) };
+                // Now probe the scratch's lexer via the direct function
+                type DirectFn =
+                    unsafe extern "win64" fn(usize, u32, usize, isize, *mut u8) -> isize;
+                let d: DirectFn = unsafe { std::mem::transmute(real_fn) };
+                let scratch_lexer = unsafe { d(scratch_sci, 4001, 0, 0, std::ptr::null_mut()) };
+                if scratch_lexer > 0 {
+                    let main_proc = crate::window::with(main_hwnd, |e| e.wnd_proc).unwrap_or(0);
+                    if main_proc != 0 {
+                        let m: unsafe extern "win64" fn(usize, u32, usize, isize) -> isize =
+                            unsafe { std::mem::transmute(main_proc) };
+                        unsafe {
+                            m(
+                                main_hwnd,
+                                4002, /*SCI_SETLEXER*/
+                                scratch_lexer as usize,
+                                0,
+                            )
+                        };
+                        eprintln!(
+                            "weave/call_wnd_proc: SCI_SETLEXERLANGUAGE propagated \
+                             lexer_id={scratch_lexer} to main_hwnd={main_hwnd:#x}"
+                        );
+                    }
+                }
+                return ret;
             }
         }
     }
