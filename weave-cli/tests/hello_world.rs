@@ -5038,6 +5038,7 @@ fn curl_ws2_gate() {
     let start = std::time::Instant::now();
     let mut child = std::process::Command::new(weave_bin)
         .arg(&fixture)
+        .arg("--no-sandbox")
         .arg("--no-progress-meter")
         .arg("http://example.com")
         .stderr(std::process::Stdio::piped())
