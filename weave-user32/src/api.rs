@@ -1561,6 +1561,18 @@ pub extern "win64" fn send_message_w(
             });
         }
     }
+    // Intercept SCI_GETDIRECTFUNCTION (2182): also return our proxy for
+    // the 4-param path. NPP may use the 4-param direct function for SCI_SETLEXER
+    // and other calls that bypass the 5-param proxy.
+    if msg == 2182 && ret != 0 {
+        SCI_REAL_DIRECT_FN.store(ret as usize, std::sync::atomic::Ordering::Relaxed);
+        let proxy_addr = sci_direct_fn_4param_proxy as *const () as usize as isize;
+        eprintln!(
+            "weave/user32: SendMessageW hwnd={hwnd:#x} msg={msg:#06x}(SCI_GETDIRECTFUNCTION) \
+             real_fn={ret:#x} proxy={proxy_addr:#x} 4param"
+        );
+        return proxy_addr;
+    }
     // Intercept SCI_GETDIRECTSTATUSFUNCTION (2184): return our proxy instead of the real fn ptr.
     // SCI_GETDIRECTSTATUSFUNCTION returns a 5-param fn: (sci, msg, wp, lp, *status) -> iptr.
     // The proxy logs all SCI calls and fixes SCI_GETDOCPOINTER to read pdoc from sci+0x128.
@@ -1613,6 +1625,19 @@ static PENDING_SCRATCH_PDOC: std::sync::atomic::AtomicUsize =
 static SCRATCH_SCI: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 /// Proxy for SciFnDirectStatus — logs all SCI messages and intercepts SCI_GETDOCPOINTER.
+/// 4-param SciFnDirect wrapper: passes null p_status to the 5-param proxy.
+/// NPP may use SCI_GETDIRECTFUNCTION (2182) instead of SCI_GETDIRECTSTATUSFUNCTION (2184),
+/// which bypasses our 5-param proxy. This wrapper is ABI-compatible: on Win64, the 4-param
+/// call passes args in rcx, rdx, r8, r9 — we just forward to the 5-param proxy with p_status=null.
+pub unsafe extern "win64" fn sci_direct_fn_4param_proxy(
+    sci: usize,
+    msg: u32,
+    wparam: usize,
+    lparam: isize,
+) -> isize {
+    sci_direct_fn_proxy(sci, msg, wparam, lparam, std::ptr::null_mut())
+}
+
 /// NPP calls this instead of SciFnDirectStatus after we intercept SCI_GETDIRECTSTATUSFUNCTION.
 /// Matches the 5-param SciFnDirectStatus signature: (sci, msg, wp, lp, *status) -> iptr.
 ///
@@ -4594,6 +4619,25 @@ pub(crate) fn call_wnd_proc(
         if let Some(cls) = crate::window::with(hwnd, |e| e.class_name.clone()) {
             if cls == "#32770" {
                 return 1;
+            }
+        }
+    }
+    // SCI_GETLEXER (4001): if the main Scintilla HWND has no lexer, redirect
+    // to the scratch Scintilla which NPP configured via the 4-param direct
+    // function (SCI_GETDIRECTFUNCTION) that we don't intercept.
+    if msg == 4001 && hwnd == M15_SCINTILLA_HWND.load(std::sync::atomic::Ordering::Relaxed) {
+        let scratch_sci = SCRATCH_SCI.load(std::sync::atomic::Ordering::Relaxed);
+        let real_fn = SCI_REAL_DIRECT_FN.load(std::sync::atomic::Ordering::Relaxed);
+        if scratch_sci != 0 && real_fn != 0 {
+            type DirectFn = unsafe extern "win64" fn(usize, u32, usize, isize, *mut u8) -> isize;
+            let f: DirectFn = unsafe { std::mem::transmute(real_fn) };
+            let scratch_lexer = unsafe { f(scratch_sci, 4001, 0, 0, std::ptr::null_mut()) };
+            if scratch_lexer > 0 {
+                eprintln!(
+                    "weave/call_wnd_proc: SCI_GETLEXER redirected main hwnd={hwnd:#x} \
+                     scratch_lexer={scratch_lexer} (main returned 0)"
+                );
+                return scratch_lexer;
             }
         }
     }
