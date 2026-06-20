@@ -56,13 +56,19 @@ const TB_GETSTRING: u32 = 0x0466;
 const TB_SETSTRING: u32 = 0x0465;
 const TB_ADDBUTTONSW: u32 = 0x0468;
 
-const TCM_GETROWCOUNT: u32 = 0x130b;
-const TCM_GETIMAGELIST: u32 = 0x130c;
-const TCM_ADJUSTRECT: u32 = 0x1304;
-const TCM_SETCURSEL: u32 = 0x1329;
-const TCM_GETITEMRECT: u32 = 0x132d;
-const TCM_GETITEM: u32 = 0x133d;
-const TCM_SETITEMW: u32 = 0x133e;
+// Correct Windows SDK TCM_* constants (TCM_FIRST = 0x1300).
+const TCM_GETIMAGELIST: u32 = 0x1302; // TCM_FIRST + 2
+const TCM_SETIMAGELIST: u32 = 0x1303; // TCM_FIRST + 3
+const TCM_GETITEMCOUNT: u32 = 0x1304; // TCM_FIRST + 4
+const TCM_GETITEMA: u32 = 0x1305; // TCM_FIRST + 5
+const TCM_GETITEMRECT: u32 = 0x130a; // TCM_FIRST + 10
+const TCM_GETCURSEL: u32 = 0x130b; // TCM_FIRST + 11
+const TCM_SETCURSEL: u32 = 0x130c; // TCM_FIRST + 12
+const TCM_ADJUSTRECT: u32 = 0x1328; // TCM_FIRST + 40
+const TCM_SETITEMSIZE: u32 = 0x1329; // TCM_FIRST + 41
+const TCM_GETROWCOUNT: u32 = 0x132c; // TCM_FIRST + 44
+const TCM_GETITEMW: u32 = 0x133e; // TCM_FIRST + 62
+const TCM_SETITEMW: u32 = 0x133f; // TCM_FIRST + 63
 
 // ── SysListView32 constants ──────────────────────────────────────────────────
 
@@ -415,7 +421,22 @@ extern "win64" fn tab_wnd_proc(hwnd: usize, msg: u32, w_param: usize, l_param: i
         }
         WM_GETFONT => 0,
         WM_GETTEXT => 0,
-        TCM_GETROWCOUNT => 1,
+        TCM_GETITEMCOUNT => {
+            // No tabs inserted yet → return 0.
+            0
+        }
+        TCM_GETCURSEL => {
+            // No tab is selected when no tabs exist. MSDN: returns -1.
+            -1
+        }
+        TCM_SETCURSEL => {
+            if let Ok(mut map) = get_state().lock() {
+                if let Some(ComctlState::Tab(ref mut tab)) = map.get_mut(&hwnd) {
+                    tab.cur_sel = w_param as i32;
+                }
+            }
+            0
+        }
         TCM_GETIMAGELIST => {
             if let Ok(map) = get_state().lock() {
                 if let Some(ComctlState::Tab(ref tab)) = map.get(&hwnd) {
@@ -428,14 +449,7 @@ extern "win64" fn tab_wnd_proc(hwnd: usize, msg: u32, w_param: usize, l_param: i
             // Adjust the display rectangle for tab presence. No-op stub.
             1 // TRUE
         }
-        TCM_SETCURSEL => {
-            if let Ok(mut map) = get_state().lock() {
-                if let Some(ComctlState::Tab(ref mut tab)) = map.get_mut(&hwnd) {
-                    tab.cur_sel = w_param as i32;
-                }
-            }
-            0
-        }
+        TCM_GETROWCOUNT => 1,
         TCM_GETITEMRECT => {
             // Return a default tab item rect at lParam (RECT*). Stub: zero rect.
             if l_param != 0 {
@@ -443,7 +457,7 @@ extern "win64" fn tab_wnd_proc(hwnd: usize, msg: u32, w_param: usize, l_param: i
             }
             1 // TRUE
         }
-        TCM_GETITEM => {
+        TCM_GETITEMW => {
             // Fill TCITEMW struct at lParam. Stub: zero it out.
             if l_param != 0 {
                 unsafe { std::ptr::write_bytes(l_param as *mut u8, 0, 48) };
