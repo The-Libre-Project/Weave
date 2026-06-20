@@ -8231,22 +8231,59 @@ pub extern "win64" fn lock_window_update(_hwnd_lock: usize) -> i32 {
 /// GetMenuBarInfo — retrieve menu bar information.
 ///
 /// Wine ref: dlls/user32/menu.c — fills MENUBARINFO with the menu rect and
-/// HMENU. Weave: fills with zeros and returns FALSE (no menu bar info).
+/// HMENU; validates cbSize against sizeof(MENUBARINFO) and fails if HWND unknown.
+///
+/// Phase B: reads window position/size and menu handle from the window table;
+/// writes rcBar (20px strip at window top), hMenu, and zeroes focus flags.
 ///
 /// # Safety
 /// `pmbi` must be a valid MENUBARINFO pointer.
 pub unsafe extern "win64" fn get_menu_bar_info(
-    _hwnd: usize,
+    hwnd: usize,
     _id_object: i32,
     _id_item: i32,
     pmbi: *mut u8,
 ) -> i32 {
-    // MENUBARINFO starts with cbSize (DWORD). If the pointer is valid and
-    // cbSize matches, fill with zeros and return TRUE; otherwise FALSE.
     if pmbi.is_null() {
         return 0;
     }
-    0 // FALSE — simplest safe stub
+
+    // MENUBARINFO layout (Win64, 48 bytes):
+    //   offset  0: cbSize      (DWORD, 4 bytes)
+    //   offset  4: rcBar       (RECT, 16 bytes) — 4-byte aligned
+    //   offset 20: <pad>       (4 bytes — hmENU needs 8-byte alignment)
+    //   offset 24: hMenu       (HMENU, 8 bytes)
+    //   offset 32: hwndMenu    (HWND,  8 bytes)
+    //   offset 40: fBarFocused (BOOL,  4 bytes)
+    //   offset 44: fFocused    (BOOL,  4 bytes)
+    const MENUBARINFO_SIZE: u32 = 48;
+
+    let cb_size = unsafe { *(pmbi as *const u32) };
+    if cb_size != MENUBARINFO_SIZE {
+        return 0;
+    }
+
+    let (x, y, w, h_menu) = match window::with(hwnd, |e| (e.x, e.y, e.width, e.h_menu)) {
+        Some(v) => v,
+        None => return 0,
+    };
+
+    const MENU_BAR_HEIGHT: i32 = 20;
+
+    unsafe {
+        let rc = pmbi.add(4);
+        *(rc as *mut i32) = x;
+        *(rc.add(4) as *mut i32) = y;
+        *(rc.add(8) as *mut i32) = x + w as i32;
+        *(rc.add(12) as *mut i32) = y + MENU_BAR_HEIGHT;
+
+        *(pmbi.add(24) as *mut usize) = h_menu;
+        *(pmbi.add(32) as *mut usize) = 0; // hwndMenu — no submenu window
+        *(pmbi.add(40) as *mut i32) = 0; // fBarFocused
+        *(pmbi.add(44) as *mut i32) = 0; // fFocused
+    }
+
+    1 // TRUE
 }
 
 /// GetIconInfo — retrieve information about an icon or cursor.
