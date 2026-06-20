@@ -2,6 +2,10 @@
 
 **A Rust-native Windows compatibility layer for Linux. Built from scratch, not from Wine — and deliberately an order of magnitude smaller.**
 
+Weave is open infrastructure. The Windows API is the dominant application binary interface on the planet — billions of devices, decades of software, no open implementation that is memory-safe, sandboxed by default, or auditable at a fraction of the legacy codebase's complexity. Weave is that implementation: a clean-room Rust reimplementation of the Win32 surface, built to give Linux-based operating systems a secure, maintainable, freedom-respecting path to Windows application compatibility.
+
+It is licensed under GPL-3.0. It is open for security auditing, research, and fork-under-GPL. It is not accepting code contributions at this time — see [Contributing](#contributing).
+
 ---
 
 ## The architectural insight
@@ -222,17 +226,9 @@ This produces a prioritized implementation roadmap: start with the most-called f
 
 ## Contributing
 
-Weave's modular DLL crate system is designed for distributed contribution. Pick a DLL, pick a function, implement it, test it, submit a PR. You don't need to understand the entire system to make a meaningful contribution.
+Weave is open source for transparency and security auditability. The codebase, commit history, and architecture are fully public under GPL-3.0 so that researchers, auditors, and downstream projects can inspect and build on the work.
 
-- [Validation tiers](docs/VALIDATION-TIERS.md) — binary-contract gate model for milestones
-
-The symbolic index also provides initial function signatures derived from Microsoft's public documentation. Contributors review, extend, and validate these stubs with real-world testing.
-
-Priority areas:
-- Kernel engineers — syscall translation, PE loader, process management
-- Graphics engineers — DirectX translation, Vulkan integration
-- Application developers — DLL implementations, compatibility testing
-- Security researchers — sandbox hardening, malware containment testing
+**We are not accepting external code contributions at this time.** Issues are welcome for bug reports and security disclosures. See [SECURITY.md](SECURITY.md) for the security contact.
 
 ---
 
@@ -246,7 +242,7 @@ Priority areas:
 - **Sandbox:** Landlock (bubblewrap and seccomp are roadmap)
 - **Cross-arch (planned):** FEX-Emu / Box64 for ARM64 → x86_64 translation
 - **GUI (planned):** Tauri 2 (Rust + Svelte)
-- **License:** MIT
+- **License:** GPL-3.0
 
 ---
 
@@ -407,4 +403,12 @@ Honest engineering requires acknowledging what doesn't work yet. These are the k
 
 ---
 
-*Weave is free, open-source software under the MIT license.*
+---
+
+## Maintainer
+
+Weave is built and maintained by [IronTree Software](https://github.com/The-Libre-Project). For security disclosures, see [SECURITY.md](SECURITY.md).
+
+---
+
+*Weave is free, open-source software licensed under the GNU General Public License v3 (GPL-3.0).*
