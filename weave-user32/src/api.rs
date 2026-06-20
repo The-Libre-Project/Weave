@@ -5402,11 +5402,12 @@ pub unsafe extern "win64" fn append_menu_a(
     1
 }
 
-/// InsertMenuA: ANSI variant of InsertMenu.
+/// InsertMenuA: ANSI variant — converts text to wide and calls insert_menu_w.
 ///
 /// # Safety
 /// `lp_new_item` may be a string pointer.
-// Wine ref: dlls/win32u/menu.c — InsertMenuA calls NtUserThunkedMenuItemInfo with
+// Wine ref: dlls/win32u/menu.c — InsertMenuA widens string via
+// RtlCreateUnicodeStringFromAsciiz then calls NtUserThunkedMenuItemInfo with
 // uPosition as insertion point; MF_BYCOMMAND or MF_BYPOSITION controls lookup mode.
 pub unsafe extern "win64" fn insert_menu_a(
     h_menu: usize,
@@ -5415,9 +5416,19 @@ pub unsafe extern "win64" fn insert_menu_a(
     u_id_new_item: usize,
     lp_new_item: *const u8,
 ) -> i32 {
-    // Simplified: forward to AppendMenuA — position ignored for now.
-    let _ = u_position;
-    unsafe { append_menu_a(h_menu, u_flags, u_id_new_item, lp_new_item) }
+    const MF_POPUP: u32 = 0x0010;
+    const MF_SEPARATOR: u32 = 0x0800;
+    const MF_BITMAP: u32 = 0x0004;
+    let is_string = (u_flags & (MF_SEPARATOR | MF_POPUP | MF_BITMAP)) == 0;
+    let wide = if is_string && !lp_new_item.is_null() {
+        let s = decode_ansi(lp_new_item);
+        let mut w: Vec<u16> = s.encode_utf16().collect();
+        w.push(0);
+        w
+    } else {
+        vec![0]
+    };
+    menu::insert_menu_w(h_menu, u_position, u_flags, u_id_new_item, wide.as_ptr())
 }
 
 /// GetSystemMenu: return the system (window) menu handle.
