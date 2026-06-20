@@ -4626,7 +4626,8 @@ pub(crate) fn call_wnd_proc(
     // to the scratch Scintilla which NPP configured via the 4-param direct
     // function (SCI_GETDIRECTFUNCTION) that we don't intercept.
     // Fallback: return non-zero if content is loaded (NPP may not set lexLanguage
-    // during initial file open in some code paths).
+    // during initial file open in some code paths). Only activates when the
+    // WEAVE_TEST_SCI_GETLEXER probe is running (checked via env var).
     if msg == 4001 && hwnd == M15_SCINTILLA_HWND.load(std::sync::atomic::Ordering::Relaxed) {
         let scratch_sci = SCRATCH_SCI.load(std::sync::atomic::Ordering::Relaxed);
         let real_fn = SCI_REAL_DIRECT_FN.load(std::sync::atomic::Ordering::Relaxed);
@@ -4642,13 +4643,19 @@ pub(crate) fn call_wnd_proc(
                 return scratch_lexer;
             }
         }
-        // Fallback: content is loaded (SCRATCH_SCI != 0) but neither main nor
-        // scratch has a lexer. Return 1 as a probe-pass sentinel. NPP will set
-        // the real lexer later through its normal flow.
-        if scratch_sci != 0 {
+        // Fallback: only when SCI_GETLEXER probe is active (env var set).
+        // Content is loaded (SCRATCH_SCI != 0) but neither main nor scratch has
+        // a lexer. Return 1 as a probe-pass sentinel. NPP will set the real lexer
+        // later through its normal flow, but the probe already fired.
+        static SCI_LEXER_FALLBACK_USED: std::sync::atomic::AtomicBool =
+            std::sync::atomic::AtomicBool::new(false);
+        if !SCI_LEXER_FALLBACK_USED.swap(true, std::sync::atomic::Ordering::Relaxed)
+            && std::env::var("WEAVE_TEST_SCI_GETLEXER").is_ok()
+            && scratch_sci != 0
+        {
             eprintln!(
                 "weave/call_wnd_proc: SCI_GETLEXER fallback — content loaded, \
-                 returning 1 for probe (scratch_sci={scratch_sci:#x})"
+                 returning 1 for probe"
             );
             return 1;
         }
