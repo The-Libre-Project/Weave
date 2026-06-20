@@ -10124,14 +10124,46 @@ pub unsafe extern "win64" fn draw_animated_rects(
 
 /// DrawFocusRect — draw a focus indicator rectangle.
 ///
-/// No-op. Focus indicators are not drawn in headless mode.
+/// Phase B: draws an XOR-filled rectangle using the GXxor raster operation.
+/// Has the self-inverting property (draw twice = undo) matching Windows
+/// behavior. The dotted pen style is deferred to Phase C (requires pen
+/// pattern support in the backend).
+///
+/// Returns TRUE on success, FALSE if lprc is NULL.
 ///
 /// # Safety
-/// `lprc` is accepted but not used.
-// Wine ref: dlls/user32/painting.c — draws an XORed dotted rectangle;
-// Weave skips the focus indicator.
-pub unsafe extern "win64" fn draw_focus_rect(_hdc: usize, _lprc: *const [i32; 4]) -> i32 {
-    0 // FALSE — not drawn
+/// `lprc` must be a valid pointer to a [i32; 4] RECT (left, top, right, bottom).
+// Wine ref: dlls/user32/painting.c — DrawFocusRect(…) sets R2_XORPEN,
+// creates a PS_DOT pen, and calls Rectangle(…); Weave approximates with
+// a filled XOR rectangle using GXxor (dotted style deferred to Phase C).
+pub unsafe extern "win64" fn draw_focus_rect(hdc: usize, lprc: *const [i32; 4]) -> i32 {
+    if lprc.is_null() {
+        return 0;
+    }
+    let xcb = window::xcb_id(hdc);
+    if xcb == 0 {
+        return 1; // no drawable (headless or bad HDC) — not a failure
+    }
+    let p = lprc as *const i32;
+    let left = unsafe { *p };
+    let top = unsafe { *p.add(1) };
+    let right = unsafe { *p.add(2) };
+    let bottom = unsafe { *p.add(3) };
+    let w = (right - left).max(0) as u16;
+    let h = (bottom - top).max(0) as u16;
+    if w == 0 || h == 0 {
+        return 1;
+    }
+    backend::fill_rect_with_rop(
+        xcb,
+        left as i16,
+        top as i16,
+        w,
+        h,
+        backend::GX_XOR,
+        0x00808080, // mid-gray pixel for visibility across backgrounds
+    );
+    1
 }
 
 /// CreateCursor — create a cursor from AND/XOR masks.
