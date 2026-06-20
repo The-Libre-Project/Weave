@@ -22,6 +22,39 @@ use weave_common::set_last_error;
 use weave_core::progress::mark_phase;
 use weave_core::restrace;
 
+// ── Scintilla internal document-pointer offset (FRAGILE) ─────────────────────
+// FRAGILE: pdoc (Document*) is read from Scintilla's internal struct at slot
+// 37 (offset 0x128 on x86-64, 37 * 8 bytes). Binary analysis of NPP 8.9.3's
+// Scintilla.EXE confirmed this via [sci+0x128] dereferences at RVAs 0x2626bb
+// and 0x2634f1. This is NOT a stable API — it WILL break across Scintilla
+// versions, build configs, or architectures (32-bit has 4-byte slots).
+// Tracked across 6 commits in the NPP arc.
+//
+// Before bumping Scintilla, verify the offset by disassembling the
+// SCI_GETDOCPOINTER (msg=2268) handler in Scintilla's WndProc and checking
+// which [sci+offset] it dereferences.
+// TODO: Replace with a runtime struct-layout query when available.
+const SCI_PDOC_SLOT: usize = 37;
+
+/// Read pdoc from Scintilla's internal struct at the fragile known offset.
+/// Debug-build: validates the value is a plausible pointer and fires a
+/// diagnostic on mismatch. Release-build: returns the raw value unconditionally.
+fn sci_read_pdoc(sci: usize) -> usize {
+    let pdoc = unsafe { *(sci as *const usize).add(SCI_PDOC_SLOT) };
+    let valid = pdoc != 0 && pdoc >= 0x10000 && pdoc & 0x7 == 0;
+    if !valid {
+        eprintln!(
+            "weave/fragile: sci_read_pdoc at {sci:#x} → {pdoc:#x} — \
+             possible Scintilla layout mismatch (expected plausible non-null pointer)"
+        );
+    }
+    debug_assert!(
+        valid,
+        "sci_read_pdoc at {sci:#x}: pdoc={pdoc:#x} not a plausible Document* — Scintilla layout mismatch"
+    );
+    pdoc
+}
+
 // ── Progress phase guards (fire exactly once) ────────────────────────────────
 
 static PHASE_REGISTER_CLASS: AtomicBool = AtomicBool::new(false);
@@ -1298,9 +1331,9 @@ fn try_deferred_doc_transfer() {
     let text_buf = PENDING_TEXT_BUF.load(std::sync::atomic::Ordering::Relaxed);
     PENDING_TEXT_BUF.store(0, std::sync::atomic::Ordering::Relaxed);
     if scratch_pdoc != 0 {
-        let before = unsafe { *(pending_sci as *const usize).add(37) };
-        unsafe { *(pending_sci as *mut usize).add(37) = scratch_pdoc };
-        let after = unsafe { *(pending_sci as *const usize).add(37) };
+        let before = sci_read_pdoc(pending_sci);
+        unsafe { *(pending_sci as *mut usize).add(SCI_PDOC_SLOT) = scratch_pdoc };
+        let after = sci_read_pdoc(pending_sci);
         eprintln!(
             "weave/GetMessageW: direct pdoc write sci={pending_sci:#x} pdoc={scratch_pdoc:#x} \
              before={before:#x} after={after:#x}"
@@ -1497,7 +1530,7 @@ pub extern "win64" fn send_message_w(
             0_usize,
         );
         if sci >= 0x0000_1000_0000_0000 {
-            let pdoc = unsafe { *(sci as *const usize).add(37) }; // sci+0x128
+            let pdoc = sci_read_pdoc(sci);
             eprintln!(
                 "weave/user32: SendMessageW SCI_GETDOCPOINTER hwnd={hwnd:#x} sci={sci:#x} → pdoc={pdoc:#x}"
             );
@@ -1703,7 +1736,7 @@ pub unsafe extern "win64" fn sci_direct_fn_proxy(
     // field than pdoc. Binary analysis confirmed pdoc is at sci+0x128 (offset 37 * 8).
     // RVAs 0x2626bb and 0x2634f1 both dereference [sci+0x128] for the document pointer.
     if msg == 2268 && sci >= 0x0000_1000_0000_0000 {
-        let pdoc = unsafe { *(sci as *const usize).add(37) }; // sci+0x128
+        let pdoc = sci_read_pdoc(sci);
         return pdoc as isize;
     }
 
@@ -1744,7 +1777,7 @@ pub unsafe extern "win64" fn sci_direct_fn_proxy(
         let main_sci = MAIN_EDITOR_SCI.load(std::sync::atomic::Ordering::Relaxed);
         if main_sci != 0 && sci != main_sci && sci >= 0x0000_1000_0000_0000 {
             // Read scratch's CURRENT pdoc (before this msg=2358 replaces it).
-            let scratch_pdoc = unsafe { *(sci as *const usize).add(37) }; // sci+0x128
+            let scratch_pdoc = sci_read_pdoc(sci);
             let scratch_len_dbg = if scratch_pdoc != 0 {
                 unsafe { f(sci, 2006, 0, 0, std::ptr::null_mut()) }
             } else {
@@ -1814,11 +1847,11 @@ pub unsafe extern "win64" fn sci_direct_fn_proxy(
             && PENDING_DOC_SCI.load(std::sync::atomic::Ordering::Relaxed) == 0
             && lparam as usize != 0
         {
-            let scratch_pdoc = unsafe { *(sci as *const usize).add(37) };
+            let scratch_pdoc = sci_read_pdoc(sci);
             if scratch_pdoc != 0 {
-                let before = unsafe { *(main_sci as *const usize).add(37) };
-                unsafe { *(main_sci as *mut usize).add(37) = scratch_pdoc };
-                let after = unsafe { *(main_sci as *const usize).add(37) };
+                let before = sci_read_pdoc(main_sci);
+                unsafe { *(main_sci as *mut usize).add(SCI_PDOC_SLOT) = scratch_pdoc };
+                let after = sci_read_pdoc(main_sci);
                 PENDING_DOC_SCI.store(main_sci, std::sync::atomic::Ordering::Relaxed);
                 PENDING_DOC_PTR.store(0, std::sync::atomic::Ordering::Relaxed);
                 PENDING_SCRATCH_PDOC.store(scratch_pdoc, std::sync::atomic::Ordering::Relaxed);
