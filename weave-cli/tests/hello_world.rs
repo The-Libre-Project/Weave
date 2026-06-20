@@ -8494,7 +8494,11 @@ fn q_dir_file_pane_gate() {
 ///
 /// Fixture: tests/fixtures/q-dir/Q-Dir_x64.exe
 /// Skipped gracefully if the binary is absent.
+// #[ignore]: E3-M5c CLOSED, hypothesis falsified (Q-Dir uses FindFirstFile/FindNextFile, not IShellFolder).
+// The shell-namespace code path is not exercised by Q-Dir under headless Xvfb. Caused wildcard-batch
+// CI failure on every run. See CI-FAIL-LADDER.md Fail #91.
 #[test]
+#[ignore]
 fn q_dir_shell_namespace_gate() {
     if !cfg!(target_os = "linux") {
         eprintln!("skipping q_dir_shell_namespace_gate — requires Linux");
