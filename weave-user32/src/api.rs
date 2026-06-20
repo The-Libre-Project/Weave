@@ -1287,48 +1287,30 @@ fn try_deferred_doc_transfer() {
     if pending_sci == 0 {
         return;
     }
-    let text_buf = PENDING_TEXT_BUF.load(std::sync::atomic::Ordering::Relaxed);
-    if text_buf == 0 {
-        return;
-    }
-    // Clear all pending state before calling to prevent re-triggering.
-    PENDING_DOC_SCI.store(0, std::sync::atomic::Ordering::Relaxed);
-    PENDING_DOC_PTR.store(0, std::sync::atomic::Ordering::Relaxed);
-    PENDING_TEXT_BUF.store(0, std::sync::atomic::Ordering::Relaxed);
-    // Use SendMessageW (not the direct function) — safe from message-loop
-    // context, no re-entrancy crash, no SCI_REAL_DIRECT_FN dependency.
-    // SCI_CREATEDOCUMENT (2276) returns a new Document* managed by Scintilla.
-    // SCI_SETDOCPOINTER (2037) assigns it and updates sci+0x128.
-    let new_doc = send_message_w(pending_sci, 2276, 0, 0);
-    let set_ret = send_message_w(pending_sci, 2037, 0, new_doc);
-    let pdoc_from_proxy = unsafe { *(pending_sci as *const usize).add(37) }; // sci+0x128
+    // Direct memory write of captured scratch pdoc into main editor's sci+0x128.
+    // This avoids Scintilla function calls entirely — no SCI_SETDOCPOINTER, no
+    // re-entrancy crash at RVA 0x2521b3. The scratch's Document* has both content
+    // and the lexer (NPP sets lexer on scratch after language detection).
     let scratch_pdoc = PENDING_SCRATCH_PDOC.load(std::sync::atomic::Ordering::Relaxed);
     PENDING_SCRATCH_PDOC.store(0, std::sync::atomic::Ordering::Relaxed);
-    // If SCI_SETDOCPOINTER didn't update sci+0x128 (NPP fork's direct
-    // function may use a different field offset), write it manually.
-    if new_doc != 0 && (pdoc_from_proxy == 0 || pdoc_from_proxy != new_doc as usize) {
-        unsafe { *(pending_sci as *mut usize).add(37) = new_doc as usize };
-        eprintln!("weave/GetMessageW: wrote new_doc to sci+0x128 = {new_doc:#x}");
+    PENDING_DOC_SCI.store(0, std::sync::atomic::Ordering::Relaxed);
+    PENDING_DOC_PTR.store(0, std::sync::atomic::Ordering::Relaxed);
+    let text_buf = PENDING_TEXT_BUF.load(std::sync::atomic::Ordering::Relaxed);
+    PENDING_TEXT_BUF.store(0, std::sync::atomic::Ordering::Relaxed);
+    if scratch_pdoc != 0 {
+        let before = unsafe { *(pending_sci as *const usize).add(37) };
+        unsafe { *(pending_sci as *mut usize).add(37) = scratch_pdoc };
+        let after = unsafe { *(pending_sci as *const usize).add(37) };
+        eprintln!(
+            "weave/GetMessageW: direct pdoc write sci={pending_sci:#x} pdoc={scratch_pdoc:#x} \
+             before={before:#x} after={after:#x}"
+        );
+    } else {
+        eprintln!("weave/GetMessageW: no scratch_pdoc captured — transfer skipped");
     }
-    eprintln!(
-        "weave/GetMessageW: create+set doc new_doc={new_doc:#x} set_ret={set_ret:#x} \
-         sci+0x128={pdoc_from_proxy:#x} scratch_pdoc={scratch_pdoc:#x}"
-    );
-    // Clear the empty new doc and append our saved text.
-    send_message_w(pending_sci, 2004, 0, 0);
-    let text_len = unsafe {
-        std::ffi::CStr::from_ptr(text_buf as *const i8)
-            .to_bytes()
-            .len()
-    };
-    send_message_w(pending_sci, 2282, text_len, text_buf as isize);
-    let _ = unsafe { Box::from_raw(text_buf as *mut u8) };
-    let main_len = send_message_w(pending_sci, 2006, 0, 0);
-    let main_lexer = send_message_w(pending_sci, 4001, 0, 0);
-    eprintln!(
-        "weave/GetMessageW: text transfer complete sci={pending_sci:#x} \
-         len={main_len} lexer={main_lexer}"
-    );
+    if let Some(buf_ptr) = (text_buf != 0).then_some(text_buf) {
+        let _ = unsafe { Box::from_raw(buf_ptr as *mut u8) };
+    }
 }
 
 /// # Safety
@@ -1740,7 +1722,11 @@ pub unsafe extern "win64" fn sci_direct_fn_proxy(
     }
 
     // Save lparam from SCI_APPENDTEXT for the msg=2358 handler's text copy.
-    // Also immediately capture if main editor is tracked (msg=2358 may never fire).
+    // Also immediately transfer scratch's pdoc to main editor's sci+0x128.
+    // This is a raw memory write — no Scintilla function calls, no re-entrancy risk.
+    // Must happen here (inside WM_PAINT/WNDPROC) because the SCI_GETLEXER probe
+    // fires from DispatchMessageW BEFORE the WNDPROC call, so the transfer must
+    // be complete before the NEXT WM_PAINT arrives for the probe to see it.
     if msg == 2282 /*SCI_APPENDTEXT*/ && lparam != 0 && wparam > 0 {
         PENDING_DOC_PTR.store(lparam as usize, std::sync::atomic::Ordering::Relaxed);
         let main_sci = MAIN_EDITOR_SCI.load(std::sync::atomic::Ordering::Relaxed);
@@ -1748,25 +1734,35 @@ pub unsafe extern "win64" fn sci_direct_fn_proxy(
             && PENDING_DOC_SCI.load(std::sync::atomic::Ordering::Relaxed) == 0
             && lparam as usize != 0
         {
-            // Capture scratch's pdoc at sci+0x128 for diagnostics.
-            // Also copy the text buffer for deferred transfer — we'll create a new
-            // document via SCI_CREATEDOCUMENT + SCI_SETDOCPOINTER (which properly
-            // updates sci+0x128) and then copy the text into it from GetMessageW.
             let scratch_pdoc = unsafe { *(sci as *const usize).add(37) };
             if scratch_pdoc != 0 {
-                PENDING_SCRATCH_PDOC.store(scratch_pdoc, std::sync::atomic::Ordering::Relaxed);
+                let before = unsafe { *(main_sci as *const usize).add(37) };
+                unsafe { *(main_sci as *mut usize).add(37) = scratch_pdoc };
+                let after = unsafe { *(main_sci as *const usize).add(37) };
                 PENDING_DOC_SCI.store(main_sci, std::sync::atomic::Ordering::Relaxed);
                 PENDING_DOC_PTR.store(0, std::sync::atomic::Ordering::Relaxed);
+                PENDING_SCRATCH_PDOC.store(scratch_pdoc, std::sync::atomic::Ordering::Relaxed);
                 let text_slice = unsafe { std::slice::from_raw_parts(lparam as *const u8, wparam) };
                 let mut buf = text_slice.to_vec();
                 buf.push(0); // null-terminate for SCI_SETTEXT
                 let buf_ptr = Box::into_raw(buf.into_boxed_slice()) as *mut u8 as usize;
                 PENDING_TEXT_BUF.store(buf_ptr, std::sync::atomic::Ordering::Relaxed);
                 eprintln!(
-                    "weave/sci_proxy: captured scratch pdoc={scratch_pdoc:#x} text_len={} \
-                     from sci={sci:#x} → main={main_sci:#x}",
+                    "weave/sci_proxy: IMMEDIATE pdoc write sci={main_sci:#x} pdoc={scratch_pdoc:#x} \
+                     before={before:#x} after={after:#x} len={}",
                     wparam,
                 );
+                // Invalidate the main editor to trigger another WM_PAINT so the
+                // SCI_GETLEXER probe retries and finds the new document+lexer.
+                // From inside the proxy (SendMessageW context) this is safe — it
+                // just adds a WM_PAINT to the message queue for later dispatch.
+                let main_hwnd = M15_SCINTILLA_HWND.load(std::sync::atomic::Ordering::Relaxed);
+                if main_hwnd != 0 {
+                    invalidate_rect(main_hwnd, std::ptr::null_mut(), 1);
+                    eprintln!(
+                        "weave/sci_proxy: invalidated main hwnd={main_hwnd:#x} for probe retry"
+                    );
+                }
             }
         }
     }
