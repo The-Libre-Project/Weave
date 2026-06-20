@@ -1748,6 +1748,29 @@ pub unsafe extern "win64" fn sci_direct_fn_proxy(
                 buf.push(0); // null-terminate for SCI_SETTEXT
                 let buf_ptr = Box::into_raw(buf.into_boxed_slice()) as *mut u8 as usize;
                 PENDING_TEXT_BUF.store(buf_ptr, std::sync::atomic::Ordering::Relaxed);
+                // Probe scratch's lexer — NPP may have set it via SendMessageW before
+                // SCI_GETDIRECTSTATUSFUNCTION was called, so the scratch already has
+                // a lexer even though our proxy never saw SCI_SETLEXER.
+                let scratch_lexer = unsafe { f(sci, 4001, 0, 0, std::ptr::null_mut()) };
+                if scratch_lexer > 0 {
+                    // Propagate lexer to main editor via direct function call.
+                    // SCI_SETLEXER simply sets lexLanguage (an int field) — safe
+                    // from re-entrancy (no document change notification).
+                    unsafe {
+                        f(
+                            main_sci,
+                            4002,
+                            scratch_lexer as usize,
+                            0,
+                            std::ptr::null_mut(),
+                        )
+                    };
+                    eprintln!(
+                        "weave/sci_proxy: propagated lexer={scratch_lexer} from scratch to main"
+                    );
+                } else {
+                    eprintln!("weave/sci_proxy: scratch has no lexer yet (lexer={scratch_lexer})");
+                }
                 eprintln!(
                     "weave/sci_proxy: IMMEDIATE pdoc write sci={main_sci:#x} pdoc={scratch_pdoc:#x} \
                      before={before:#x} after={after:#x} len={}",
@@ -1755,8 +1778,6 @@ pub unsafe extern "win64" fn sci_direct_fn_proxy(
                 );
                 // Invalidate the main editor to trigger another WM_PAINT so the
                 // SCI_GETLEXER probe retries and finds the new document+lexer.
-                // From inside the proxy (SendMessageW context) this is safe — it
-                // just adds a WM_PAINT to the message queue for later dispatch.
                 let main_hwnd = M15_SCINTILLA_HWND.load(std::sync::atomic::Ordering::Relaxed);
                 if main_hwnd != 0 {
                     invalidate_rect(main_hwnd, std::ptr::null_mut(), 1);
@@ -1768,18 +1789,18 @@ pub unsafe extern "win64" fn sci_direct_fn_proxy(
         }
     }
 
-    // SCI_SETLEXER (4002): NPP sets a lexer on the scratch AFTER loading content and
-    // detecting the language. At this point, the scratch's pdoc has a lexer assigned.
-    // Re-capture the pdoc so the deferred transfer writes the lexer-equipped pdoc to
-    // main_sci+0x128.
+    // SCI_SETLEXER (4002): NPP sets a lexer on the scratch. If we have a pending
+    // doc transfer (pdoc already written to main), also set the lexer on the main
+    // editor. SCI_SETLEXER just sets lexLanguage (an int field) — safe from
+    // re-entrancy (no document change notification).
     if msg == 4002 /*SCI_SETLEXER*/ && PENDING_DOC_SCI.load(std::sync::atomic::Ordering::Relaxed) != 0
     {
         let main_sci = MAIN_EDITOR_SCI.load(std::sync::atomic::Ordering::Relaxed);
-        let cur_pdoc = unsafe { *(sci as *const usize).add(37) };
-        if cur_pdoc != 0 && main_sci != 0 && sci != main_sci && sci >= 0x0000_1000_0000_0000 {
-            PENDING_SCRATCH_PDOC.store(cur_pdoc, std::sync::atomic::Ordering::Relaxed);
+        if main_sci != 0 && sci != main_sci && sci >= 0x0000_1000_0000_0000 {
+            unsafe { f(main_sci, 4002, wparam, 0, std::ptr::null_mut()) };
             eprintln!(
-                "weave/sci_proxy: re-captured scratch pdoc={cur_pdoc:#x} from sci={sci:#x} (SCI_SETLEXER)"
+                "weave/sci_proxy: propagated SCI_SETLEXER lexer={} from scratch to main",
+                wparam,
             );
         }
     }
