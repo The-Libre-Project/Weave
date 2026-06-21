@@ -8600,7 +8600,13 @@ fn q_dir_file_pane_gate() {
         );
     }
 
-    eprintln!("q_dir_file_pane_gate: A1+A2+A3 passed");
+    // M18 A2: IShellFolder::EnumObjects dispatched — proves Q-Dir navigates shell namespace.
+    assert!(
+        stderr.contains("PHASE: shell_folder_enum_objects_first"),
+        "Q-Dir file-pane Gate M18 A2 FAIL: shell_folder_enum_objects_first not seen within 10s — IShellFolder::EnumObjects never dispatched\nstderr: {stderr}"
+    );
+
+    eprintln!("q_dir_file_pane_gate: A1+A2+A3+M18A2 passed");
 }
 
 // ── E3-M5c Q-Dir Shell Namespace Gate ───────────────────────────────────────

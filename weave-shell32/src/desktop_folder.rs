@@ -7,7 +7,7 @@
 use crate::pidl;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::OnceLock;
-use weave_core::progress::mark_shell_enum_first;
+use weave_core::progress::{mark_shell_enum_first, mark_shell_folder_enum_objects_first};
 
 const S_OK: i32 = 0;
 const S_FALSE: i32 = 1;
@@ -170,6 +170,7 @@ unsafe extern "win64" fn sf_enum_objects(
     if ppenum.is_null() {
         return E_POINTER;
     }
+    mark_shell_folder_enum_objects_first();
     let data_ptr = unsafe { *(this as *const usize).add(1) };
     let items = if data_ptr == 0 {
         cwd_child_pidls()

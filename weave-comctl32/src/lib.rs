@@ -542,41 +542,6 @@ extern "win64" fn listview_wnd_proc(
     w_param: usize,
     l_param: isize,
 ) -> isize {
-    // M18-trace: log all LVM_* messages reaching SysListView32
-    if (LVM_FIRST..=0x10FF).contains(&msg) {
-        static LVM_NAMES: std::sync::OnceLock<std::collections::HashMap<u32, &'static str>> =
-            std::sync::OnceLock::new();
-        let names = LVM_NAMES.get_or_init(|| {
-            let mut m = std::collections::HashMap::new();
-            m.insert(LVM_INSERTITEMW, "LVM_INSERTITEMW");
-            m.insert(LVM_DELETEITEM, "LVM_DELETEITEM");
-            m.insert(LVM_DELETEALLITEMS, "LVM_DELETEALLITEMS");
-            m.insert(LVM_SETITEMW, "LVM_SETITEMW");
-            m.insert(LVM_GETITEMCOUNT, "LVM_GETITEMCOUNT");
-            m.insert(LVM_GETITEMW, "LVM_GETITEMW");
-            m.insert(LVM_SETITEMTEXTW, "LVM_SETITEMTEXTW");
-            m.insert(LVM_GETITEMTEXTW, "LVM_GETITEMTEXTW");
-            m.insert(LVM_GETITEMSTATE, "LVM_GETITEMSTATE");
-            m.insert(LVM_SETITEMSTATE, "LVM_SETITEMSTATE");
-            m.insert(LVM_GETNEXTITEM, "LVM_GETNEXTITEM");
-            m.insert(LVM_GETSELECTEDCOUNT, "LVM_GETSELECTEDCOUNT");
-            m.insert(LVM_GETIMAGELIST, "LVM_GETIMAGELIST");
-            m.insert(LVM_SETIMAGELIST, "LVM_SETIMAGELIST");
-            m.insert(LVM_GETCALLBACKMASK, "LVM_GETCALLBACKMASK");
-            m.insert(LVM_GETCOLUMNW, "LVM_GETCOLUMNW/GETVIEW/GETHEADER");
-            m.insert(LVM_GETCOLUMNWIDTH, "LVM_GETCOLUMNWIDTH/INSERTCOLUMNW");
-            m.insert(LVM_SETCOLUMNWIDTH, "LVM_SETCOLUMNWIDTH");
-            m.insert(LVM_ENSUREVISIBLE, "LVM_ENSUREVISIBLE");
-            m.insert(LVM_REDRAWITEMS, "LVM_REDRAWITEMS");
-            m
-        });
-        if let Some(name) = names.get(&msg) {
-            eprintln!("weave/M18-trace: SysListView32 hwnd={hwnd:#x} msg={name} (0x{msg:04x}) w_param={w_param:#x} l_param={l_param:#x}");
-        } else {
-            eprintln!("weave/M18-trace: SysListView32 hwnd={hwnd:#x} msg=0x{msg:04x} (unknown LVM) w_param={w_param:#x} l_param={l_param:#x}");
-        }
-    }
-
     match msg {
         WM_NCDESTROY => {
             if let Ok(mut map) = get_state().lock() {

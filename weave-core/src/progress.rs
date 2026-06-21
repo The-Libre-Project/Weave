@@ -12,6 +12,7 @@ pub fn mark_phase(name: &str) {
 }
 
 static PHASE_SHELL_ENUM: AtomicBool = AtomicBool::new(false);
+static PHASE_SHELL_FOLDER_ENUM_OBJECTS: AtomicBool = AtomicBool::new(false);
 static PHASE_LISTVIEW_INSERT: AtomicBool = AtomicBool::new(false);
 static PHASE_FIND_FIRST_FILE: AtomicBool = AtomicBool::new(false);
 static PHASE_FIND_NEXT_FILE: AtomicBool = AtomicBool::new(false);
@@ -21,6 +22,15 @@ static PHASE_FIND_NEXT_FILE: AtomicBool = AtomicBool::new(false);
 pub fn mark_shell_enum_first() {
     if !PHASE_SHELL_ENUM.swap(true, Ordering::Relaxed) {
         mark_phase("shell_enum_first");
+    }
+}
+
+/// M18: first `IShellFolder::EnumObjects` dispatch — proves Q-Dir is navigating
+/// the shell namespace for file-pane population.
+#[inline]
+pub fn mark_shell_folder_enum_objects_first() {
+    if !PHASE_SHELL_FOLDER_ENUM_OBJECTS.swap(true, Ordering::Relaxed) {
+        mark_phase("shell_folder_enum_objects_first");
     }
 }
 
