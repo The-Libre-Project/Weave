@@ -8950,8 +8950,9 @@ fn signal_desktop_phase_a_probe() {
     let drain_thread = std::thread::spawn(move || {
         use std::io::Read;
         let mut buf = Vec::new();
-        child_stderr.read_to_end(&mut buf).ok();
-        *stderr_dest.lock().unwrap() = buf;
+        let mut pipe = stderr_pipe;
+        let _ = pipe.read_to_end(&mut buf);
+        *stderr_writer.lock().unwrap() = buf;
     });
 
     let mut exited = false;
