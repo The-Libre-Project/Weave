@@ -5537,11 +5537,13 @@ pub unsafe extern "win64" fn find_next_file_w(
     eprintln!("PHASE: find_next_file_first");
     if h_find_file == 0 || h_find_file == usize::MAX || lp_find_file_data.is_null() {
         eprintln!("weave/FindNextFileW: exit handle={h_find_file:#x} → FALSE (bad arg)");
+        eprintln!("weave/M18-trace: FindNextFileW handle={h_find_file:#x} → FALSE (bad arg)");
         return 0; // FALSE
     }
     // Sentinel 1 = single-file handle from FindFirstFileW (no more entries).
     if h_find_file == 1 {
         eprintln!("weave/FindNextFileW: exit handle=1 → FALSE (single-file sentinel)");
+        eprintln!("weave/M18-trace: FindNextFileW handle=1 → FALSE (single-file sentinel)");
         return 0; // FALSE — no more entries
     }
 
@@ -5556,6 +5558,9 @@ pub unsafe extern "win64" fn find_next_file_w(
     let entry = unsafe { libc::readdir(dir) };
     if entry.is_null() {
         eprintln!("weave/FindNextFileW: exit handle={h_find_file:#x} → FALSE (no_more_entries)");
+        eprintln!(
+            "weave/M18-trace: FindNextFileW handle={h_find_file:#x} → FALSE (no_more_entries)"
+        );
         return 0; // FALSE - no more entries
     }
 
@@ -5596,6 +5601,10 @@ pub unsafe extern "win64" fn find_next_file_w(
 
     eprintln!(
         "weave/FindNextFileW: exit handle={h_find_file:#x} entry={entry_name_str:?} attrs={attrs:#x} → TRUE"
+    );
+    eprintln!(
+        "weave/M18-trace: FindNextFileW handle={h_find_file:#x} entry=\"{}\" attrs={attrs:#x} → TRUE",
+        entry_name_str.replace('"', "'")
     );
     if entry_name_str != "." && entry_name_str != ".." {
         weave_core::progress::mark_find_next_file_first();
@@ -5785,6 +5794,10 @@ pub unsafe extern "win64" fn get_file_attributes_ex_w(
         Ok(p) => p,
         Err(_) => {
             eprintln!("weave/GetFileAttributesExW: {win_path:?} → translate FAILED");
+            eprintln!(
+                "weave/M18-trace: GetFileAttributesExW path=\"{}\" → FALSE (translate_failed)",
+                win_path.replace('"', "'")
+            );
             return 0;
         }
     };
@@ -5796,23 +5809,34 @@ pub unsafe extern "win64" fn get_file_attributes_ex_w(
     // Check if path exists and get type
     let c_path = match std::ffi::CString::new(linux_path.as_os_str().as_encoded_bytes()) {
         Ok(s) => s,
-        Err(_) => return 0,
+        Err(_) => {
+            eprintln!(
+                "weave/M18-trace: GetFileAttributesExW path=\"{}\" → FALSE (cstr_err)",
+                win_path.replace('"', "'")
+            );
+            return 0;
+        }
     };
 
     let mut stat = unsafe { std::mem::zeroed::<libc::stat>() };
     let ret = unsafe { libc::stat(c_path.as_ptr(), &mut stat) };
     if ret != 0 {
+        eprintln!(
+            "weave/M18-trace: GetFileAttributesExW path=\"{}\" → FALSE (stat_err)",
+            win_path.replace('"', "'")
+        );
         return 0; // FALSE
     }
 
+    let attrs = if (stat.st_mode & libc::S_IFMT) == libc::S_IFDIR {
+        FILE_ATTRIBUTE_DIRECTORY
+    } else {
+        FILE_ATTRIBUTE_NORMAL // 0x80 — real Windows returns 0x20 (ARCHIVE) for files
+    };
+
     // Fill WIN32_FILE_ATTRIBUTE_DATA
     unsafe {
-        (*lp_file_information).dw_file_attributes =
-            if (stat.st_mode & libc::S_IFMT) == libc::S_IFDIR {
-                FILE_ATTRIBUTE_DIRECTORY
-            } else {
-                FILE_ATTRIBUTE_NORMAL
-            };
+        (*lp_file_information).dw_file_attributes = attrs;
         (*lp_file_information).ft_creation_time = [0, 0];
         (*lp_file_information).ft_last_access_time = [0, 0];
         (*lp_file_information).ft_last_write_time = [0, 0];
@@ -5820,6 +5844,12 @@ pub unsafe extern "win64" fn get_file_attributes_ex_w(
         (*lp_file_information).n_file_size_low = (stat.st_size & 0xFFFFFFFF) as u32;
     }
 
+    eprintln!(
+        "weave/M18-trace: GetFileAttributesExW path=\"{}\" attrs={:#x} size={} → TRUE",
+        win_path.replace('"', "'"),
+        attrs,
+        stat.st_size
+    );
     1 // TRUE
 }
 
@@ -11136,17 +11166,41 @@ pub unsafe extern "win64" fn get_drive_type_w(lp_root_path_name: *const u16) -> 
     const DRIVE_FIXED: u32 = 3;
 
     if lp_root_path_name.is_null() {
+        eprintln!("weave/M18-trace: GetDriveTypeW path=(null) → 0 (DRIVE_UNKNOWN)");
         return DRIVE_UNKNOWN;
     }
 
-    // Read the path and check if it starts with 'C' (u16 value 67)
+    // Read the path prefix to determine the drive letter (A-Z followed by :).
     let first_char = unsafe { *lp_root_path_name };
-    if first_char == 67 {
-        // 'C' as u16
+    let second_char = unsafe { *lp_root_path_name.add(1) };
+    // Check for drive-letter pattern: [A-Za-z]:
+    let is_drive_letter = (65u16..=90).contains(&first_char)     // A-Z
+        || (97u16..=122).contains(&first_char); // a-z
+    let result = if is_drive_letter && second_char == b':' as u16 {
         DRIVE_FIXED
     } else {
         DRIVE_UNKNOWN
+    };
+
+    // Decode first few chars for tracing.
+    let mut trace_buf = [0u16; 8];
+    let mut trace_len = 0usize;
+    while trace_len < trace_buf.len() {
+        let c = unsafe { *lp_root_path_name.add(trace_len) };
+        if c == 0 {
+            break;
+        }
+        trace_buf[trace_len] = c;
+        trace_len += 1;
     }
+    let trace_path = String::from_utf16_lossy(&trace_buf[..trace_len]);
+    eprintln!(
+        "weave/M18-trace: GetDriveTypeW path=\"{}\" → {} (DRIVE_FIXED={})",
+        trace_path.replace('"', "'"),
+        result,
+        result == DRIVE_FIXED
+    );
+    result
 }
 
 /// GetDriveTypeA: determine the type of drive (ANSI version).
