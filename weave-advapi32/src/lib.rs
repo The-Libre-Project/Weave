@@ -8,6 +8,7 @@
 //! separate crate of their own.
 
 mod registry;
+mod sspi;
 mod wintrust;
 
 /// Resolve an advapi32.dll import to a stub address.

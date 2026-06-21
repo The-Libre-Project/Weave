@@ -1140,8 +1140,49 @@ fn init_sspi_table() -> *const u8 {
             for slot in SSPI_TABLE.iter_mut().take(33).skip(1) {
                 *slot = stub;
             }
-            // Override specific slots that callers actually invoke.
+            // Real SSPI implementations via rustls (crate::sspi module).
             // Indices = (struct_offset / 8): slot 0 = dwVersion, slot 1 = first fn ptr at offset 8.
+            // offset 24 → index 3: AcquireCredentialsHandleA
+            SSPI_TABLE[3] = crate::sspi::acquire_credentials_handle_a
+                as unsafe extern "win64" fn(
+                    *const u8,
+                    *const u8,
+                    u32,
+                    *const u8,
+                    *const u8,
+                    usize,
+                    *const u8,
+                    *mut crate::sspi::SecHandle,
+                    *mut crate::sspi::TimeStamp,
+                ) -> i32 as *const () as u64;
+            // offset 32 → index 4: FreeCredentialsHandle
+            SSPI_TABLE[4] = crate::sspi::free_credentials_handle
+                as unsafe extern "win64" fn(*const crate::sspi::SecHandle) -> i32
+                as *const () as u64;
+            // offset 48 → index 6: InitializeSecurityContextA
+            SSPI_TABLE[6] = crate::sspi::initialize_security_context_a
+                as unsafe extern "win64" fn(
+                    *const crate::sspi::SecHandle,
+                    *const crate::sspi::SecHandle,
+                    *const u8,
+                    u32,
+                    u32,
+                    u32,
+                    *const crate::sspi::SecBufferDesc,
+                    u32,
+                    *mut crate::sspi::SecHandle,
+                    *mut crate::sspi::SecBufferDesc,
+                    *mut u32,
+                    *mut crate::sspi::TimeStamp,
+                ) -> i32 as *const () as u64;
+            // offset 72 → index 9: DeleteSecurityContext
+            SSPI_TABLE[9] = crate::sspi::delete_security_context
+                as unsafe extern "win64" fn(*const crate::sspi::SecHandle) -> i32
+                as *const () as u64;
+            // offset 88 → index 11: QueryContextAttributesA
+            SSPI_TABLE[11] = crate::sspi::query_context_attributes_a
+                as unsafe extern "win64" fn(*const crate::sspi::SecHandle, u32, *mut u8) -> i32
+                as *const () as u64;
             // offset 128 → index 16: FreeContextBuffer
             SSPI_TABLE[16] =
                 free_context_buffer as unsafe extern "win64" fn(*mut u8) -> i32 as *const () as u64;
@@ -1149,20 +1190,43 @@ fn init_sspi_table() -> *const u8 {
             SSPI_TABLE[17] = query_security_package_info_a
                 as unsafe extern "win64" fn(*const u8, *mut *const u8) -> i32
                 as *const () as u64;
+            // offset 200 → index 25: EncryptMessage
+            SSPI_TABLE[25] = crate::sspi::encrypt_message
+                as unsafe extern "win64" fn(
+                    *const crate::sspi::SecHandle,
+                    u32,
+                    *mut crate::sspi::SecBufferDesc,
+                    u32,
+                ) -> i32 as *const () as u64;
+            // offset 208 → index 26: DecryptMessage
+            SSPI_TABLE[26] = crate::sspi::decrypt_message
+                as unsafe extern "win64" fn(
+                    *const crate::sspi::SecHandle,
+                    *mut crate::sspi::SecBufferDesc,
+                    u32,
+                    *mut u32,
+                ) -> i32 as *const () as u64;
         }
     });
-    // SAFETY: After call_once, SSPI_TABLE is not mutated again. The returned
-    // pointer is valid for the lifetime of the process.
+    // SAFETY: After call_once, SSPI_TABLE is not mutated again.
     #[allow(static_mut_refs)]
     let ptr = unsafe { SSPI_TABLE.as_ptr() };
-    // Diagnostic: confirm slot 17 holds the real QuerySecurityPackageInfoA address.
-    // TODO: remove after curl_ws2_gate passes.
-    let expected = query_security_package_info_a
-        as unsafe extern "win64" fn(*const u8, *mut *const u8) -> i32
-        as *const () as u64;
-    let actual = unsafe { *ptr.add(17) };
+    #[allow(static_mut_refs)]
+    let actual = unsafe { *ptr.add(3) };
+    let expected = crate::sspi::acquire_credentials_handle_a
+        as unsafe extern "win64" fn(
+            *const u8,
+            *const u8,
+            u32,
+            *const u8,
+            *const u8,
+            usize,
+            *const u8,
+            *mut crate::sspi::SecHandle,
+            *mut crate::sspi::TimeStamp,
+        ) -> i32 as *const () as u64;
     eprintln!(
-        "weave/SSPI: table={ptr:p} slot17={actual:#x} expected={expected:#x} match={}",
+        "weave/SSPI: table={ptr:p} slot3={actual:#x} expected={expected:#x} match={}",
         actual == expected
     );
     ptr as *const u8
