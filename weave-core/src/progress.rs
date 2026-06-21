@@ -13,6 +13,7 @@ pub fn mark_phase(name: &str) {
 
 static PHASE_SHELL_ENUM: AtomicBool = AtomicBool::new(false);
 static PHASE_SHELL_FOLDER_ENUM_OBJECTS: AtomicBool = AtomicBool::new(false);
+static PHASE_SHELL_FOLDER_PARSE_DISPLAY_NAME: AtomicBool = AtomicBool::new(false);
 static PHASE_LISTVIEW_INSERT: AtomicBool = AtomicBool::new(false);
 static PHASE_FIND_FIRST_FILE: AtomicBool = AtomicBool::new(false);
 static PHASE_FIND_NEXT_FILE: AtomicBool = AtomicBool::new(false);
@@ -31,6 +32,15 @@ pub fn mark_shell_enum_first() {
 pub fn mark_shell_folder_enum_objects_first() {
     if !PHASE_SHELL_FOLDER_ENUM_OBJECTS.swap(true, Ordering::Relaxed) {
         mark_phase("shell_folder_enum_objects_first");
+    }
+}
+
+/// M18c: first `IShellFolder::ParseDisplayName` dispatch — proves Q-Dir resolves
+/// paths via the shell namespace before enumerating.
+#[inline]
+pub fn mark_shell_folder_parse_display_name_first() {
+    if !PHASE_SHELL_FOLDER_PARSE_DISPLAY_NAME.swap(true, Ordering::Relaxed) {
+        mark_phase("shell_folder_parse_display_name_first");
     }
 }
 

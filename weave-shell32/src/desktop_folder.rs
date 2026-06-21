@@ -7,7 +7,10 @@
 use crate::pidl;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::OnceLock;
-use weave_core::progress::{mark_shell_enum_first, mark_shell_folder_enum_objects_first};
+use weave_core::progress::{
+    mark_shell_enum_first, mark_shell_folder_enum_objects_first,
+    mark_shell_folder_parse_display_name_first,
+};
 
 const S_OK: i32 = 0;
 const S_FALSE: i32 = 1;
@@ -155,6 +158,8 @@ unsafe extern "win64" fn sf_parse_display_name(
     if display.is_null() || *display == 0 {
         return S_FALSE;
     }
+
+    mark_shell_folder_parse_display_name_first();
 
     // Read the display name
     let name = {
