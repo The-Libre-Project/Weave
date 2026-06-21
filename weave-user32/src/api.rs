@@ -19,7 +19,7 @@ use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicUsize, Ordering}
 use std::sync::{Mutex, OnceLock};
 use weave_common::set_last_error;
 
-use weave_core::progress::mark_phase;
+use weave_core::progress::{mark_phase, mark_terminal_window_first};
 use weave_core::restrace;
 
 // ── Scintilla internal document-pointer offset (FRAGILE) ─────────────────────
@@ -377,6 +377,11 @@ pub unsafe extern "win64" fn create_window_ex_w(
     }
     let class_name = unsafe { decode_wide(lp_class_name) };
     let title = unsafe { decode_wide(lp_window_name) };
+
+    // M19: detect PuTTY terminal window creation.
+    if class_name == "PuTTY" {
+        mark_terminal_window_first();
+    }
 
     // Look up the class.
     let cls = match class::find(&class_name) {

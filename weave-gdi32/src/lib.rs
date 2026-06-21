@@ -762,6 +762,8 @@ pub unsafe extern "win64" fn ext_text_out_w(
     if lp_string.is_null() || c == 0 {
         return 1;
     }
+    // M19: first GDI text rendering with non-zero character count.
+    weave_core::progress::mark_terminal_exttextout_first();
     const MAX_TEXT_CHARS: u32 = 65_536;
     let c = c.min(MAX_TEXT_CHARS);
     {

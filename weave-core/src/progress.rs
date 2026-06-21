@@ -17,6 +17,8 @@ static PHASE_SHELL_FOLDER_PARSE_DISPLAY_NAME: AtomicBool = AtomicBool::new(false
 static PHASE_LISTVIEW_INSERT: AtomicBool = AtomicBool::new(false);
 static PHASE_FIND_FIRST_FILE: AtomicBool = AtomicBool::new(false);
 static PHASE_FIND_NEXT_FILE: AtomicBool = AtomicBool::new(false);
+static PHASE_TERMINAL_WINDOW: AtomicBool = AtomicBool::new(false);
+static PHASE_TERMINAL_EXTEXTOUT: AtomicBool = AtomicBool::new(false);
 
 /// E3-M5b: first `IShellFolder::EnumObjects` / `IEnumIDList::Next` delivered an item.
 #[inline]
@@ -65,5 +67,21 @@ pub fn mark_find_first_file_first() {
 pub fn mark_find_next_file_first() {
     if !PHASE_FIND_NEXT_FILE.swap(true, Ordering::Relaxed) {
         mark_phase("find_next_file_first");
+    }
+}
+
+/// M19: PuTTY terminal window created (CreateWindowExW with class "PuTTY").
+#[inline]
+pub fn mark_terminal_window_first() {
+    if !PHASE_TERMINAL_WINDOW.swap(true, Ordering::Relaxed) {
+        mark_phase("terminal_window_first");
+    }
+}
+
+/// M19: first GDI text rendering via ExtTextOutW with non-zero character count.
+#[inline]
+pub fn mark_terminal_exttextout_first() {
+    if !PHASE_TERMINAL_EXTEXTOUT.swap(true, Ordering::Relaxed) {
+        mark_phase("terminal_exttextout_first");
     }
 }

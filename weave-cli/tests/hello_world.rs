@@ -4395,6 +4395,180 @@ fn putty_m16_config_window_gate() {
     eprintln!("putty_m16 A2: registry session config path queried ✓");
 }
 
+// ── M19 PuTTY SSH Terminal Window Gate ────────────────────────────────────────
+
+/// `weave putty.exe -ssh -P 2222 runner@localhost echo hello` — M19 terminal window gate.
+///
+/// Proves that PuTTY creates a terminal window and renders SSH output via GDI
+/// text APIs after establishing an SSH connection. Runs putty.exe (GUI version)
+/// with full CLI args so the config dialog is bypassed and the terminal window
+/// is created directly.
+///
+/// Tier A assertions:
+///   A1: `PHASE: terminal_window_first` in stderr (terminal HWND created)
+///   A2: `PHASE: terminal_exttextout_first` in stderr (GDI text rendering)
+///   A3 (regression): skipped here — enforced by CI running the existing gates
+///   A4 (regression): skipped here — enforced by CI running the existing gates
+///
+/// 15-second timeout. Skipped gracefully if putty.exe or ssh host key is absent.
+#[test]
+fn putty_m19_terminal_gate() {
+    if !cfg!(target_os = "linux") {
+        eprintln!("skipping putty_m19_terminal_gate — requires Linux");
+        return;
+    }
+
+    let manifest = env!("CARGO_MANIFEST_DIR");
+    let fixture = format!("{manifest}/../tests/fixtures/bin/putty.exe");
+
+    if !std::path::Path::new(&fixture).exists() {
+        eprintln!("skipping: putty.exe not present — putty_m19_terminal_gate skipped");
+        return;
+    }
+
+    // Extract sshd ed25519 host key fingerprint for -hostkey acceptance.
+    let hostkey_output = std::process::Command::new("ssh-keygen")
+        .args([
+            "-l",
+            "-E",
+            "sha256",
+            "-f",
+            "/etc/ssh/ssh_host_ed25519_key.pub",
+        ])
+        .output();
+    let hostkey_fingerprint = match hostkey_output {
+        Err(e) => {
+            eprintln!("skipping: ssh-keygen failed ({e}) — putty_m19_terminal_gate skipped");
+            return;
+        }
+        Ok(out) if !out.status.success() => {
+            eprintln!("skipping: ssh-keygen exited {:?} — host key absent; putty_m19_terminal_gate skipped", out.status);
+            return;
+        }
+        Ok(out) => {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            match stdout.split_whitespace().nth(1) {
+                Some(fp) => fp.to_string(),
+                None => {
+                    eprintln!("skipping: could not parse ssh-keygen output: {stdout:?}; putty_m19_terminal_gate skipped");
+                    return;
+                }
+            }
+        }
+    };
+    eprintln!("putty_m19_terminal: using hostkey fingerprint: {hostkey_fingerprint}");
+
+    let weave_bin = env!("CARGO_BIN_EXE_weave");
+
+    let start = std::time::Instant::now();
+    let mut child = std::process::Command::new(weave_bin)
+        .arg(&fixture)
+        .arg("-ssh")
+        .arg("-P")
+        .arg("2222")
+        .arg("-l")
+        .arg("runner")
+        .arg("-pw")
+        .arg("")
+        .arg("-hostkey")
+        .arg(&hostkey_fingerprint)
+        .arg("localhost")
+        .arg("echo")
+        .arg("hello")
+        .env("DISPLAY", ":99")
+        .stderr(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|e| panic!("failed to spawn weave on putty.exe (m19 terminal gate): {e}"));
+
+    // Drain stderr concurrently to avoid 64 KB pipe blocking.
+    let stderr_pipe = child.stderr.take().expect("stderr was piped");
+    let stderr_shared = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let stderr_writer = std::sync::Arc::clone(&stderr_shared);
+    let drain_thread = std::thread::spawn(move || {
+        use std::io::Read;
+        let mut buf = Vec::new();
+        let _ = stderr_pipe.read_to_end(&mut buf);
+        *stderr_writer.lock().unwrap() = buf;
+    });
+
+    let deadline = start + std::time::Duration::from_secs(15);
+    let mut exit_status: Option<std::process::ExitStatus> = None;
+    let mut killed_by_deadline = false;
+
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                exit_status = Some(status);
+                break;
+            }
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    killed_by_deadline = true;
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err(e) => panic!("wait failed: {e}"),
+        }
+    }
+    let elapsed = start.elapsed();
+
+    drain_thread.join().expect("stderr drain thread panicked");
+    let stderr_bytes = stderr_shared.lock().unwrap().clone();
+    let stderr = String::from_utf8_lossy(&stderr_bytes);
+
+    eprintln!("putty_m19_terminal elapsed: {elapsed:.1?}");
+    eprintln!(
+        "putty_m19_terminal exit: {}",
+        if killed_by_deadline {
+            "killed by deadline".to_string()
+        } else {
+            exit_status
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "unknown".to_string())
+        }
+    );
+    eprintln!("--- putty_m19_terminal FULL STDERR BEGIN ---");
+    eprintln!("{stderr}");
+    eprintln!("--- putty_m19_terminal FULL STDERR END ---");
+
+    // Report unresolved imports for diagnosis.
+    eprintln!("--- putty_m19_terminal unresolved imports ---");
+    for line in stderr.lines().filter(|l| l.contains("unresolved import")) {
+        eprintln!("{line}");
+    }
+
+    // Gate A1: terminal window HWND created (CreateWindowExW with class "PuTTY").
+    assert!(
+        stderr.contains("PHASE: terminal_window_first"),
+        "putty_m19_terminal A1 FAIL: no terminal window created (PHASE: terminal_window_first \
+         not found). PuTTY may have crashed before creating the terminal window.\n\
+         elapsed: {elapsed:.1?}\nstderr:\n{stderr}"
+    );
+    eprintln!("putty_m19_terminal A1: terminal window created ✓");
+
+    // Gate A2: GDI text rendering observed (ExtTextOutW with non-zero char count).
+    assert!(
+        stderr.contains("PHASE: terminal_exttextout_first"),
+        "putty_m19_terminal A2 FAIL: no GDI text rendering (PHASE: terminal_exttextout_first \
+         not found). PuTTY connected but may not have rendered SSH output.\n\
+         elapsed: {elapsed:.1?}\nstderr:\n{stderr}"
+    );
+    eprintln!("putty_m19_terminal A2: GDI text rendering ✓");
+
+    // Soft diagnostic: report signal vs exit.
+    if let Some(signal) =
+        exit_status.and_then(|s| if s.signal() != None { s.signal() } else { None })
+    {
+        panic!(
+            "putty_m19_terminal FAIL: process terminated by signal {signal} (SIGSEGV or similar).\
+             \nelapsed: {elapsed:.1?}\nstderr:\n{stderr}"
+        );
+    }
+}
+
 /// `weave 7za.exe x test.7z` — M4 extraction gate.
 ///
 /// Verifies that 7-Zip can extract a known archive under Weave and that the
