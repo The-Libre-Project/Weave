@@ -8305,6 +8305,8 @@ pub unsafe extern "win64" fn get_menu_bar_info(
         None => return 0,
     };
 
+    // TODO(Phase-C): MENU_BAR_HEIGHT hardcoded to 20px — requires actual window
+    // manager menu bar height measurement (no backend support yet)
     const MENU_BAR_HEIGHT: i32 = 20;
 
     unsafe {
@@ -8315,9 +8317,12 @@ pub unsafe extern "win64" fn get_menu_bar_info(
         *(rc.add(12) as *mut i32) = y + MENU_BAR_HEIGHT;
 
         *(pmbi.add(24) as *mut usize) = h_menu;
-        *(pmbi.add(32) as *mut usize) = 0; // hwndMenu — no submenu window
-        *(pmbi.add(40) as *mut i32) = 0; // fBarFocused
-        *(pmbi.add(44) as *mut i32) = 0; // fFocused
+        // TODO(Phase-C): hwndMenu — requires submenu window tracking in window registry
+        *(pmbi.add(32) as *mut usize) = 0;
+        // TODO(Phase-C): fBarFocused — requires input focus state tracking across menus
+        *(pmbi.add(40) as *mut i32) = 0;
+        // TODO(Phase-C): fFocused — requires input focus state tracking across menus
+        *(pmbi.add(44) as *mut i32) = 0;
     }
 
     1 // TRUE
@@ -10241,6 +10246,9 @@ pub unsafe extern "win64" fn draw_focus_rect(hdc: usize, lprc: *const [i32; 4]) 
     if w == 0 || h == 0 {
         return 1;
     }
+    // TODO(Phase-C): use dotted pen (PS_DOT) via set_line_style backend instead
+    // of XOR fill — Windows draws focus rects with a dashed border, not a filled
+    // XOR region. Requires pen pattern support in the X11/Vulkan backend.
     backend::fill_rect_with_rop(
         xcb,
         left as i16,
