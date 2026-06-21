@@ -12,5 +12,4 @@ weave-common = { path = "../weave-common" }
 weave-core = { path = "../weave-core" }
 rustls = "0.23"
 rustls-pki-types = "1"
-# webpki-roots dependency removed — root cert loading deferred.
-# Re-add when implementing proper cert validation.
+rustls-native-certs = "0.8"

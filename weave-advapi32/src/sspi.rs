@@ -32,6 +32,8 @@ const SECBUFFER_DATA: u32 = 1;
 const SECBUFFER_STREAM_HEADER: u32 = 7;
 const SECBUFFER_STREAM_TRAILER: u32 = 8;
 const SECPKG_ATTR_STREAM_SIZES: u32 = 0x06;
+const SECPKG_CRED_OUTBOUND: u32 = 0x0000_0002;
+const SCH_CRED_MANUAL_CRED_VALIDATION: u32 = 0x0000_0008;
 
 const TLS_HEADER_SIZE: u32 = 5; // TLS record header: type(1) + version(2) + length(2)
 const TLS_MAX_FRAGMENT: u32 = 16384; // TLS max fragment size
@@ -115,6 +117,42 @@ fn write_sec_buffer(buf: &mut SecBuffer, data: &[u8]) {
     buf.cb_buffer = len as u32;
 }
 
+// ── SCHANNEL_CRED parsing ────────────────────────────────────────────────────
+
+/// Parse the `dwFlags` field from a SCHANNEL_CRED structure.
+fn parse_schannel_cred_flags(auth_data: *const u8) -> u32 {
+    if auth_data.is_null() {
+        return 0;
+    }
+    // SCHANNEL_CRED layout (x64):
+    //   0: dwVersion      u32
+    //   4: cCreds         u32
+    //   8: paCred         *const *const u8
+    //  16: hRootStore     *const u8
+    //  24: cMappers       u32
+    //  28: paMappers      *const *const u8
+    //  32: cSupportedAlgs u32
+    //  36: paSupportedAlgs *const *const u32
+    //  40: dwFlags        u32
+    unsafe {
+        let ptr = auth_data as *const u32;
+        let _dw_version = *ptr;
+        let _c_creds = *ptr.add(1);
+        let _pa_cred = *(ptr.add(2) as *const usize);
+        let _h_root_store = *(ptr.add(4) as *const usize);
+        let _c_mappers = *ptr.add(6);
+        let _pa_mappers = *(ptr.add(7) as *const usize);
+        let _c_supported_algs = *ptr.add(8);
+        let _pa_supported_algs = *(ptr.add(9) as *const usize);
+        let dw_flags = *ptr.add(10);
+        dw_flags
+    }
+}
+
+fn is_manual_cred_validation(flags: u32) -> bool {
+    flags & SCH_CRED_MANUAL_CRED_VALIDATION != 0
+}
+
 // ── AcquireCredentialsHandleA ─────────────────────────────────────────────────
 
 /// AcquireCredentialsHandleA — obtain Schannel credential handle.
@@ -146,17 +184,44 @@ pub unsafe extern "win64" fn acquire_credentials_handle_a(
             return SEC_E_SECPKG_NOT_FOUND;
         }
     }
-    if f_credential_use != 0x0000_0002 {
+    if f_credential_use != SECPKG_CRED_OUTBOUND {
         // We don't do inbound (server-side) TLS.
         return SEC_E_NO_CREDENTIALS;
     }
 
-    // Build rustls ClientConfig with custom verifier (skips cert validation for now).
-    // TODO: load system root certs for proper cert validation.
-    let config = rustls::ClientConfig::builder()
-        .dangerous()
-        .with_custom_certificate_verifier(Arc::new(NoCertVerifier))
-        .with_no_client_auth();
+    // Parse SCHANNEL_CRED flags from auth data.
+    let is_manual_verify = if !_pv_auth_data.is_null() {
+        let auth_flags = parse_schannel_cred_flags(_pv_auth_data);
+        is_manual_cred_validation(auth_flags)
+    } else {
+        false
+    };
+
+    // Build rustls ClientConfig.
+    let config = if is_manual_verify {
+        // -k mode: skip cert validation.
+        rustls::ClientConfig::builder()
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(NoCertVerifier))
+            .with_no_client_auth()
+    } else {
+        // Normal mode: load system root certs for validation.
+        let mut root_store = rustls::RootCertStore::empty();
+        let native_certs = rustls_native_certs::load_native_certs();
+        for cert in native_certs.certs {
+            root_store.add(cert).ok();
+        }
+        let count = root_store.len();
+        eprintln!("weave/SSPI: loaded {count} root certs from system store ({} errors)",
+            native_certs.errors.len());
+        if root_store.is_empty() {
+            eprintln!("weave/SSPI: no root certs loaded — cannot verify TLS");
+            return SEC_E_INTERNAL_ERROR;
+        }
+        rustls::ClientConfig::builder()
+            .with_root_certificates(root_store)
+            .with_no_client_auth()
+    };
 
     let handle = NEXT_CRED_HANDLE.fetch_add(1, Ordering::Relaxed);
     cred_table().lock().unwrap().insert(
