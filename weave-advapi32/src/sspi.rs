@@ -23,7 +23,7 @@ pub const SEC_E_INVALID_HANDLE: i32 = -2146893055; // 0x80090301
 pub const SEC_E_UNSUPPORTED_FUNCTION: i32 = -2146893054; // 0x80090302
 pub const SEC_E_INTERNAL_ERROR: i32 = -2146893052; // 0x80090304
 pub const SEC_E_NO_CREDENTIALS: i32 = -2146893042; // 0x8009030E
-pub const SEC_E_SECPKG_NOT_FOUND: i32 = -2146893045;  // 0x8009030B
+pub const SEC_E_SECPKG_NOT_FOUND: i32 = -2146893045; // 0x8009030B
 pub const SEC_I_CONTINUE_NEEDED: i32 = 0x00090312;
 
 const SECBUFFER_TOKEN: u32 = 2;
@@ -205,8 +205,10 @@ pub unsafe extern "win64" fn acquire_credentials_handle_a(
             root_store.add(cert).ok();
         }
         let count = root_store.len();
-        eprintln!("weave/SSPI: loaded {count} root certs from system store ({} errors)",
-            native_certs.errors.len());
+        eprintln!(
+            "weave/SSPI: loaded {count} root certs from system store ({} errors)",
+            native_certs.errors.len()
+        );
         if root_store.is_empty() {
             eprintln!("weave/SSPI: no root certs loaded — cannot verify TLS");
             return SEC_E_INTERNAL_ERROR;
