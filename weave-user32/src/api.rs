@@ -55,6 +55,36 @@ fn sci_read_pdoc(sci: usize) -> usize {
     pdoc
 }
 
+/// Write pdoc to Scintilla's internal struct at the fragile known offset.
+/// Validates the target `sci` pointer is in a plausible heap range before
+/// writing. Fires a diagnostic in debug if the base address looks wrong.
+fn sci_write_pdoc(sci: usize, pdoc: usize) {
+    let sci_valid = sci >= 0x0000_1000_0000_0000 && sci & 0x7 == 0;
+    let pdoc_valid = pdoc != 0 && pdoc >= 0x10000 && pdoc & 0x7 == 0;
+    if !sci_valid {
+        eprintln!(
+            "weave/fragile: sci_write_pdoc target {sci:#x} is not a plausible Scintilla pointer — \
+             write of pdoc={pdoc:#x} skipped"
+        );
+        return;
+    }
+    unsafe { *(sci as *mut usize).add(SCI_PDOC_SLOT) = pdoc };
+    if !pdoc_valid {
+        eprintln!(
+            "weave/fragile: sci_write_pdoc at {sci:#x} wrote pdoc={pdoc:#x} which is not a \
+             plausible Document* pointer"
+        );
+    }
+    debug_assert!(
+        pdoc_valid,
+        "sci_write_pdoc at {sci:#x}: wrote pdoc={pdoc:#x} which is not a plausible Document*"
+    );
+    debug_assert!(
+        sci_valid,
+        "sci_write_pdoc: target {sci:#x} is not a plausible Scintilla pointer"
+    );
+}
+
 // ── Progress phase guards (fire exactly once) ────────────────────────────────
 
 static PHASE_REGISTER_CLASS: AtomicBool = AtomicBool::new(false);
@@ -1332,7 +1362,7 @@ fn try_deferred_doc_transfer() {
     PENDING_TEXT_BUF.store(0, std::sync::atomic::Ordering::Relaxed);
     if scratch_pdoc != 0 {
         let before = sci_read_pdoc(pending_sci);
-        unsafe { *(pending_sci as *mut usize).add(SCI_PDOC_SLOT) = scratch_pdoc };
+        sci_write_pdoc(pending_sci, scratch_pdoc);
         let after = sci_read_pdoc(pending_sci);
         eprintln!(
             "weave/GetMessageW: direct pdoc write sci={pending_sci:#x} pdoc={scratch_pdoc:#x} \
@@ -1850,7 +1880,7 @@ pub unsafe extern "win64" fn sci_direct_fn_proxy(
             let scratch_pdoc = sci_read_pdoc(sci);
             if scratch_pdoc != 0 {
                 let before = sci_read_pdoc(main_sci);
-                unsafe { *(main_sci as *mut usize).add(SCI_PDOC_SLOT) = scratch_pdoc };
+                sci_write_pdoc(main_sci, scratch_pdoc);
                 let after = sci_read_pdoc(main_sci);
                 PENDING_DOC_SCI.store(main_sci, std::sync::atomic::Ordering::Relaxed);
                 PENDING_DOC_PTR.store(0, std::sync::atomic::Ordering::Relaxed);
