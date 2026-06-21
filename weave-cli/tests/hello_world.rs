@@ -4402,8 +4402,8 @@ fn putty_m16_config_window_gate() {
 /// Proves that PuTTY creates a terminal window and renders SSH output via GDI
 /// text APIs after establishing an SSH connection. Runs putty.exe (GUI version)
 /// with full CLI args so the config dialog is bypassed and the terminal window
-/// is created directly. Note: putty.exe does not accept trailing remote commands
-/// like plink.exe does — `-batch` is used instead to suppress dialogs.
+/// is created directly. Note: putty.exe does not accept `-batch` like plink.exe
+/// does — password and hostkey are provided via `-pw` and `-hostkey` instead.
 ///
 /// Tier A assertions:
 ///   A1: `PHASE: terminal_window_first` in stderr (terminal HWND created)
@@ -4470,10 +4470,9 @@ fn putty_m19_terminal_gate() {
         .arg("-l")
         .arg("runner")
         .arg("-pw")
-        .arg("")
+        .arg("weave-test-pw")
         .arg("-hostkey")
         .arg(&hostkey_fingerprint)
-        .arg("-batch")
         .arg("localhost")
         .env("DISPLAY", ":99")
         .stderr(std::process::Stdio::piped())
