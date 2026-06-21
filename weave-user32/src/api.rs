@@ -2436,17 +2436,54 @@ pub unsafe extern "win64" fn scroll_window_ex(
 
 /// RedrawWindow: refresh a window or a region.
 ///
-/// Stub: fire-and-forget invalidation — returns TRUE (1).
+/// Phase B: delegates to InvalidateRect/ValidateRect/UpdateWindow
+/// depending on RDW_* flags.
 ///
 /// # Safety
-/// `_hwnd` and `_region` are not dereferenced. `_rect` is not dereferenced.
-// Wine ref: dlls/user32/painting.c — RedrawWindow invalidates the window
+/// `rect` must be null-valid (null is safe, non-null must point to a valid `Rect`).
+/// `region` must be a compatible region handle or 0.
+// Wine ref: dlls/user32/painting.c — RedrawWindow dispatches to NtUserInvalidateRect,
+// NtUserValidateRect, or NtUserRedrawWindow depending on RDW_* flags. Phase B handles
+// the common flags; RDW_ERASE, RDW_NOERASE, RDW_FRAME, RDW_ERASENOW, RDW_ALLCHILDREN,
+// and RDW_EXCLUSIVE are deferred to Phase C.
 pub unsafe extern "win64" fn redraw_window(
-    _hwnd: usize,
-    _rect: *const Rect,
-    _region: usize,
-    _flags: u32,
+    hwnd: usize,
+    rect: *const Rect,
+    region: usize,
+    flags: u32,
 ) -> i32 {
+    if flags & 0x0001 != 0 {
+        // RDW_INVALIDATE
+        if region != 0 {
+            invalidate_rgn(hwnd, region, 1);
+        } else {
+            invalidate_rect(hwnd, rect, 1);
+        }
+    }
+
+    if flags & 0x0008 != 0 {
+        // RDW_VALIDATE
+        validate_rect(hwnd, rect);
+    }
+
+    if flags & 0x0002 != 0 {
+        // RDW_INTERNALPAINT
+        queue::post(MsgEntry {
+            hwnd,
+            message: WM_PAINT,
+            w_param: 0,
+            l_param: 0,
+            time: 0,
+            pt_x: 0,
+            pt_y: 0,
+        });
+    }
+
+    if flags & 0x0100 != 0 {
+        // RDW_UPDATENOW
+        update_window(hwnd);
+    }
+
     1 // TRUE
 }
 
