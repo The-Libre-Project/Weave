@@ -10133,14 +10133,22 @@ pub unsafe extern "win64" fn fill_rect(_hdc: usize, _lprc: *const [i32; 4], _hbr
 
 /// InvalidateRgn — add a region to a window's update region.
 ///
-/// Returns FALSE — region not invalidated.
+/// Phase B: delegates to InvalidateRect for full client area invalidation.
+/// Phase C: use GetRgnBox for region-aware invalidation.
+///
+/// Returns TRUE on success, FALSE if window not found.
 ///
 /// # Safety
-/// `hrgn` is accepted but not used.
+/// `hrgn` must be a valid region handle or NULL.
 // Wine ref: dlls/user32/painting.c — adds the region to the window's visible
-// region and posts WM_PAINT; Weave skips the operation, returns FALSE.
-pub unsafe extern "win64" fn invalidate_rgn(_hwnd: usize, _hrgn: usize, _b_erase: i32) -> i32 {
-    0 // FALSE
+// region and posts WM_PAINT; Weave delegates to InvalidateRect (full client area).
+pub unsafe extern "win64" fn invalidate_rgn(hwnd: usize, hrgn: usize, b_erase: i32) -> i32 {
+    if hrgn == 0 {
+        invalidate_rect(hwnd, std::ptr::null(), b_erase)
+    } else {
+        // Phase C: use GetRgnBox for region-aware invalidation
+        invalidate_rect(hwnd, std::ptr::null(), b_erase)
+    }
 }
 
 /// DrawAnimatedRects — draw animated window-frame rects (e.g. minimise animation).
