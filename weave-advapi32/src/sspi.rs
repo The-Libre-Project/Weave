@@ -23,11 +23,8 @@ pub const SEC_E_INVALID_HANDLE: i32 = -2146893055; // 0x80090301
 pub const SEC_E_UNSUPPORTED_FUNCTION: i32 = -2146893054; // 0x80090302
 pub const SEC_E_INTERNAL_ERROR: i32 = -2146893052; // 0x80090304
 pub const SEC_E_NO_CREDENTIALS: i32 = -2146893042; // 0x8009030E
-pub const SEC_E_OUTOFMEM: i32 = -2146893042; // 0x8009030E
-pub const SEC_E_SECPKG_NOT_FOUND: i32 = -2146893045; // 0x8009030B
+pub const SEC_E_SECPKG_NOT_FOUND: i32 = -2146893045;  // 0x8009030B
 pub const SEC_I_CONTINUE_NEEDED: i32 = 0x00090312;
-pub const SEC_I_COMPLETE_NEEDED: i32 = 0x00090313;
-pub const SEC_I_COMPLETE_AND_CONTINUE: i32 = 0x00090314;
 
 const SECBUFFER_TOKEN: u32 = 2;
 const SECBUFFER_EMPTY: u32 = 0;
@@ -133,7 +130,7 @@ pub unsafe extern "win64" fn acquire_credentials_handle_a(
     psz_package: *const u8,
     f_credential_use: u32,
     _pv_logon_id: *const u8,
-    pv_auth_data: *const u8,
+    _pv_auth_data: *const u8,
     _p_get_key_fn: usize,
     _pv_get_key_argument: *const u8,
     ph_credential: *mut SecHandle,
@@ -318,7 +315,7 @@ pub unsafe extern "win64" fn initialize_security_context_a(
             }
         }
 
-        let mut state = CtxState {
+        let state = CtxState {
             conn,
             pending_input: Vec::new(),
             pending_output,
@@ -668,7 +665,7 @@ pub unsafe extern "win64" fn query_context_attributes_a(
     ul_attribute: u32,
     p_buffer: *mut u8,
 ) -> i32 {
-    let ctx_handle = unsafe { (*ph_context).dw_lower };
+    let _ctx_handle = unsafe { (*ph_context).dw_lower };
     let _ctx_guard = ctx_table().lock().unwrap();
     if p_buffer.is_null() {
         return SEC_E_INVALID_HANDLE;
