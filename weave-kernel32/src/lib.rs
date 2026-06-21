@@ -704,6 +704,71 @@ pub unsafe extern "win64" fn virtual_query(
 
 /// VirtualAlloc: allocate virtual memory.
 ///
+/// # 32-bit address safety audit (observer-12-map32bit)
+/// All mmap/VirtualAlloc paths in this crate and weave-core, classified:
+///
+/// ## weave-kernel32 paths:
+///
+/// Path A: `virtual_alloc` null-base primary (lib.rs:776-785)
+///   → mmap(LOW_32BIT_HINT=0x40_0000, MAP_32BIT)
+///   → Status: (a) SAFE — MAP_32BIT + low hint guarantees <2 GiB
+///
+/// Path B: `virtual_alloc` null-base fallback (lib.rs:788-798)
+///   → mmap(NULL, no MAP_32BIT) — when MAP_32BIT fails (address space exhaustion)
+///   → Status: (d) UNCLASSIFIED — RISK: fallback can return >4 GiB.
+///   Affects any 32-bit caller or DWORD-storing 64-bit caller.
+///   Mitigation: document; future work could retry MAP_32BIT with smaller size
+///   or warn when this path is taken.
+///
+/// Path C: `virtual_alloc` non-null base (lib.rs:801-810)
+///   → mmap(lp_address, MAP_FIXED_NOREPLACE)
+///   → Status: (b) SAFE — caller chose the address; not a null-base allocation
+///
+/// Path D: `virtual_alloc_ex` (lib.rs:832-840)
+///   → delegates to virtual_alloc
+///   → Status: same as caller's virtual_alloc path
+///
+/// Path E: `heap_alloc_direct` (lib.rs:2527-2534)
+///   → mmap(LOW_32BIT_HINT, MAP_32BIT)
+///   → Status: (a) SAFE — MAP_32BIT + low hint
+///
+/// Path F: `heap_alloc_slab` new-slab (lib.rs:2572-2579)
+///   → mmap(LOW_32BIT_HINT, MAP_32BIT)
+///   → Status: (a) SAFE — MAP_32BIT + low hint
+///
+/// Path G: `create_file_mapping_w` file-backed (lib.rs:4907-4914)
+///   → mmap(NULL, MAP_PRIVATE, fd)
+///   → Status: (d) UNCLASSIFIED — no MAP_32BIT, no hint.
+///   File-backed mappings; risk if called from 32-bit guest via MapViewOfFile.
+///   Low practical risk: mapping handles go through alloc_mapping and views
+///   return the mmap address directly; 32-bit callers may truncate.
+///
+/// Path H: `create_file_mapping_w` anonymous (lib.rs:4929-4938)
+///   → mmap(NULL, MAP_ANONYMOUS | MAP_SHARED)
+///   → Status: (d) UNCLASSIFIED — no MAP_32BIT, no hint.
+///   Same risk as Path G.
+///
+/// ## weave-core paths (not directly reachable from VirtualAlloc guest API):
+///
+/// Path I: `reserve_memory` preferred base (loader.rs:335-345)
+///   → mmap(preferred_base, MAP_FIXED_NOREPLACE)
+///   → Status: (b) SAFE — PE loader internal, caller-chosen address
+///
+/// Path J: `reserve_memory` fallback (loader.rs:348-355)
+///   → mmap(NULL, PROT_NONE)
+///   → Status: (c) DOCUMENTED — PE loader internal; addresses used internally,
+///   not returned to guest as VirtualAlloc results
+///
+/// Path K: `SlabAlloc::try_new` (iat.rs:83-90)
+///   → mmap(NULL, PROT_EXEC|PROT_WRITE)
+///   → Status: (c) DOCUMENTED — IAT stub slab, internal only, 16 KiB size,
+///   addresses not returned to guest
+///
+/// Summary: Path B (MAP_32BIT fallback) is the primary risk. Paths G and H
+/// (file mappings) are secondary risks. Paths I-K are internal and safe.
+/// The existing test `virtual_alloc_null_base_returns_32bit_clean_address`
+/// covers Path A's primary happy path.
+///
 /// # Safety
 /// `lp_address` must be null or a valid address for allocation.
 /// VirtualAlloc: reserve or commit virtual memory pages.
@@ -784,10 +849,10 @@ pub unsafe extern "win64" fn virtual_alloc(
             )
         };
         if r == libc::MAP_FAILED {
-            eprintln!("weave: VirtualAlloc MAP_32BIT failed size={dw_size:#x}, retrying without MAP_32BIT");
+            eprintln!("weave: VirtualAlloc MAP_32BIT failed size={dw_size:#x}, retrying with low hint (no MAP_32BIT)");
             r = unsafe {
                 libc::mmap(
-                    std::ptr::null_mut(),
+                    LOW_32BIT_HINT,
                     dw_size,
                     prot,
                     libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
