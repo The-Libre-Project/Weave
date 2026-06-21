@@ -10144,14 +10144,19 @@ pub extern "win64" fn keybd_event(_b_vk: u8, _b_scan: u8, _dw_flags: u32, _dw_ex
 
 /// FrameRect — draw a border around a rectangle using a brush.
 ///
-/// Returns 0 — no border drawn.
+/// Phase B: validates parameters and returns TRUE (success) without actually
+/// drawing. A real implementation would call FillRect on an expanded region.
 ///
 /// # Safety
-/// `lprc` and `hbr` are accepted but not used.
+/// `lprc` must be non-null and point to a valid `RECT` structure if non-null.
+/// `hbr` must be a valid brush handle if non-zero.
 // Wine ref: dlls/user32/painting.c — FrameRect calls FillRect on an expanded
-// region; Weave returns 0 (not drawn).
-pub unsafe extern "win64" fn frame_rect(_hdc: usize, _lprc: *const [i32; 4], _hbr: usize) -> i32 {
-    0
+// region; Weave validates params and returns TRUE without drawing.
+pub unsafe extern "win64" fn frame_rect(_hdc: usize, lprc: *const [i32; 4], hbr: usize) -> i32 {
+    if lprc.is_null() || hbr == 0 {
+        return 0;
+    }
+    1 // TRUE
 }
 
 /// FillRect — fill a rectangle with a brush.
