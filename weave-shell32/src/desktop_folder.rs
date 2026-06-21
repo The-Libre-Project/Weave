@@ -135,12 +135,14 @@ unsafe extern "win64" fn sf_release(this: usize) -> u32 {
     1
 }
 
-// Wine ref: dlls/shell32/shfldr.c — ParseDisplayName returns S_FALSE with NULL ppidl for unknown names.
+// Wine ref: dlls/shell32/shfldr.c — ParseDisplayName resolves relative or absolute
+// display names into PIDLs. Weave delegates to the existing il_create_from_path_w
+// for filesystem paths, resolving relative names against the bound folder path.
 unsafe extern "win64" fn sf_parse_display_name(
-    _this: usize,
+    this: usize,
     _hwnd: usize,
     _pbc: usize,
-    _display: *const u16,
+    display: *const u16,
     _pch: *mut u32,
     ppidl: *mut *mut u8,
     _attrs: *mut u32,
@@ -148,8 +150,58 @@ unsafe extern "win64" fn sf_parse_display_name(
     if ppidl.is_null() {
         return E_POINTER;
     }
-    unsafe { *ppidl = std::ptr::null_mut() };
-    S_FALSE
+    *ppidl = std::ptr::null_mut();
+
+    if display.is_null() || *display == 0 {
+        return S_FALSE;
+    }
+
+    // Read the display name
+    let name = {
+        let mut len = 0usize;
+        while len < 260 && *display.add(len) != 0 {
+            len += 1;
+        }
+        if len == 0 || len >= 260 {
+            return S_FALSE;
+        }
+        core::slice::from_raw_parts(display, len)
+    };
+
+    // Check if the display name looks like an absolute filesystem path.
+    // Absolute Windows paths: "C:\...", "\...", or "\\...".
+    let is_absolute = name.len() >= 2
+        && ((name[0] as u8 as char).is_ascii_alphabetic() && name[1] == b':' as u16)
+        || name[0] == b'\\' as u16;
+
+    let full_path: Vec<u16> = if is_absolute {
+        name.to_vec()
+    } else {
+        // Relative name — resolve against the bound folder path.
+        let data_ptr = *(this as *const usize).add(1);
+        if data_ptr == 0 {
+            // Desktop folder, no bound path — use CWD or return S_FALSE.
+            return S_FALSE;
+        }
+        let bound_path = &*(data_ptr as *const String);
+        let mut p: Vec<u16> = bound_path.encode_utf16().collect();
+        if !p.is_empty() && p.last() != Some(&(b'\\' as u16)) {
+            p.push(b'\\' as u16);
+        }
+        p.extend_from_slice(name);
+        p
+    };
+
+    // Null-terminate and create PIDL
+    let mut null_term: Vec<u16> = full_path;
+    null_term.push(0);
+    let pidl = super::pidl::il_create_from_path_w(null_term.as_ptr());
+    if pidl.is_null() {
+        return S_FALSE;
+    }
+
+    *ppidl = pidl;
+    S_OK
 }
 
 /// IShellFolder::EnumObjects — enumerate children as WEV1 PIDLs.
