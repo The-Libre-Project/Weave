@@ -4559,9 +4559,8 @@ fn putty_m19_terminal_gate() {
     eprintln!("putty_m19_terminal A2: GDI text rendering ✓");
 
     // Soft diagnostic: report signal vs exit.
-    if let Some(signal) =
-        exit_status.and_then(|s| if s.signal() != None { s.signal() } else { None })
-    {
+    use std::os::unix::process::ExitStatusExt;
+    if let Some(signal) = exit_status.and_then(|s| s.signal()) {
         panic!(
             "putty_m19_terminal FAIL: process terminated by signal {signal} (SIGSEGV or similar).\
              \nelapsed: {elapsed:.1?}\nstderr:\n{stderr}"
