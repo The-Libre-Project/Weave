@@ -136,16 +136,9 @@ fn parse_schannel_cred_flags(auth_data: *const u8) -> u32 {
     //  40: dwFlags        u32
     unsafe {
         let ptr = auth_data as *const u32;
-        let _dw_version = *ptr;
-        let _c_creds = *ptr.add(1);
-        let _pa_cred = *(ptr.add(2) as *const usize);
-        let _h_root_store = *(ptr.add(4) as *const usize);
-        let _c_mappers = *ptr.add(6);
-        let _pa_mappers = *(ptr.add(7) as *const usize);
-        let _c_supported_algs = *ptr.add(8);
-        let _pa_supported_algs = *(ptr.add(9) as *const usize);
-        let dw_flags = *ptr.add(10);
-        dw_flags
+        // Skip dwVersion(0), cCreds(1), paCred(2), hRootStore(4),
+        // cMappers(6), paMappers(7), cSupportedAlgs(8), paSupportedAlgs(9).
+        *ptr.add(10)
     }
 }
 
