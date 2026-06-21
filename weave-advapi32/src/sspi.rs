@@ -610,11 +610,9 @@ pub unsafe extern "win64" fn decrypt_message(
         let mut reader = SliceReader(&data, 0);
         match state.conn.read_tls(&mut reader) {
             Ok(n) => {
-                if n > 0 {
-                    if state.conn.process_new_packets().is_err() {
-                        eprintln!("weave/SSPI: DecryptMessage — process_new_packets failed");
-                        return SEC_E_INTERNAL_ERROR;
-                    }
+                if n > 0 && state.conn.process_new_packets().is_err() {
+                    eprintln!("weave/SSPI: DecryptMessage — process_new_packets failed");
+                    return SEC_E_INTERNAL_ERROR;
                 }
             }
             Err(e) => {
