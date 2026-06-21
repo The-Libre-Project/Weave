@@ -5334,6 +5334,159 @@ fn curl_ws2_gate() {
     eprintln!("curl_ws2_gate: all gates passed — ws2/async-DNS path verified");
 }
 
+// ── curl HTTPS Gate (M17 extension) ──────────────────────────────────────────
+
+/// `weave --no-sandbox curl.exe -k https://localhost:4443` — HTTPS probe.
+///
+/// Tests curl's Schannel TLS path against a local openssl s_server on port 4443
+/// (set up in CI workflow). Uses -k (--insecure) to skip cert validation since
+/// the server uses a self-signed cert. This lets us test the SSPI/Schannel TLS
+/// handshake path without CI outbound-TCP restrictions.
+///
+/// Gates:
+///   1. curl exits within 30s (not killed by deadline)
+///   2. IAT resolution completes
+///   3. curl exits 0 (full HTTPS success — stdout contains response body)
+///
+/// Skipped gracefully if curl.exe is absent. Linux-only.
+#[test]
+fn curl_https_gate() {
+    if !cfg!(target_os = "linux") {
+        eprintln!("skipping curl_https_gate — requires Linux");
+        return;
+    }
+
+    let manifest = env!("CARGO_MANIFEST_DIR");
+    let fixture = format!("{manifest}/../tests/fixtures/bin/curl.exe");
+
+    if !std::path::Path::new(&fixture).exists() {
+        eprintln!("skipping: curl.exe not present — curl_https_gate skipped");
+        return;
+    }
+
+    let weave_bin = env!("CARGO_BIN_EXE_weave");
+
+    let start = std::time::Instant::now();
+    let mut child = std::process::Command::new(weave_bin)
+        .arg(&fixture)
+        .arg("--no-sandbox")
+        .arg("-k")
+        .arg("--no-progress-meter")
+        .arg("https://localhost:4443")
+        .stderr(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|e| panic!("failed to spawn weave on curl.exe (https gate): {e}"));
+
+    // Drain stderr concurrently.
+    let mut stderr_pipe = child.stderr.take().expect("stderr was piped");
+    let stderr_shared = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let stderr_writer = std::sync::Arc::clone(&stderr_shared);
+    let drain_thread = std::thread::spawn(move || {
+        use std::io::Read;
+        let mut buf = Vec::new();
+        let _ = stderr_pipe.read_to_end(&mut buf);
+        *stderr_writer.lock().unwrap() = buf;
+    });
+
+    // Drain stdout concurrently.
+    let mut stdout_pipe = child.stdout.take().expect("stdout was piped");
+    let stdout_shared = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let stdout_writer = std::sync::Arc::clone(&stdout_shared);
+    let stdout_drain_thread = std::thread::spawn(move || {
+        use std::io::Read;
+        let mut buf = Vec::new();
+        let _ = stdout_pipe.read_to_end(&mut buf);
+        *stdout_writer.lock().unwrap() = buf;
+    });
+
+    let deadline = start + std::time::Duration::from_secs(30);
+    let mut exit_status: Option<std::process::ExitStatus> = None;
+    let mut killed_by_deadline = false;
+
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                exit_status = Some(status);
+                break;
+            }
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    killed_by_deadline = true;
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err(e) => panic!("wait failed: {e}"),
+        }
+    }
+    let elapsed = start.elapsed();
+
+    drain_thread.join().expect("stderr drain thread panicked");
+    stdout_drain_thread
+        .join()
+        .expect("stdout drain thread panicked");
+    let stderr_bytes = stderr_shared.lock().unwrap().clone();
+    let stderr = String::from_utf8_lossy(&stderr_bytes);
+    let stdout_bytes = stdout_shared.lock().unwrap().clone();
+    let stdout = String::from_utf8_lossy(&stdout_bytes);
+
+    eprintln!("curl_https elapsed: {elapsed:.1?}");
+    eprintln!(
+        "curl_https exit: {}",
+        if killed_by_deadline {
+            "killed by deadline".to_string()
+        } else {
+            exit_status
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "unknown".to_string())
+        }
+    );
+    eprintln!("--- curl_https FULL STDOUT BEGIN ---");
+    eprintln!("{stdout}");
+    eprintln!("--- curl_https FULL STDOUT END ---");
+    eprintln!("--- curl_https FULL STDERR BEGIN ---");
+    eprintln!("{stderr}");
+    eprintln!("--- curl_https FULL STDERR END ---");
+
+    // Report unresolved imports for diagnosis.
+    eprintln!("--- curl_https unresolved imports ---");
+    for line in stderr.lines().filter(|l| l.contains("unresolved import")) {
+        eprintln!("{line}");
+    }
+
+    // Gate 1: deadline — must not hang.
+    assert!(
+        !killed_by_deadline,
+        "curl_https Gate 1 FAIL: killed by 30s deadline\nstderr:\n{stderr}"
+    );
+
+    // Gate 2: IAT resolution must complete.
+    assert!(
+        stderr.contains("weave: imports resolved"),
+        "curl_https Gate 2 FAIL: IAT patch did not complete\nelapsed: {elapsed:.1?}\nstderr:\n{stderr}"
+    );
+
+    // Gate 3: exit 0 (full HTTPS success).
+    let exit_ok = exit_status.map_or(false, |s| s.success());
+    assert!(
+        exit_ok,
+        "curl_https Gate 3 FAIL: curl exited {:?} (expected 0 — Schannel TLS handshake failed)\nstdout:\n{stdout}\nstderr:\n{stderr}",
+        exit_status
+    );
+    eprintln!("curl_https Gate 3: exit 0 ✓");
+
+    // Gate 4 (diagnostic): response body contains our test page.
+    if stdout.contains("Hello HTTPS") {
+        eprintln!("curl_https Gate 4: HTTPS response received ✓");
+    } else {
+        eprintln!("curl_https Gate 4: unexpected response content (diagnostic)");
+    }
+
+    eprintln!("curl_https: all gates passed — Schannel TLS path verified");
+}
+
 /// `weave wget.exe -q -O - http://example.com` — M10 IAT-only probe gate.
 ///
 /// Minimal probe: checks only that Weave resolves wget.exe's IAT and the

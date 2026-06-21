@@ -441,6 +441,50 @@ pub unsafe extern "win64" fn CryptVerifyCertificateSignatureEx(
     0
 }
 
+/// CertGetSubjectCertificateFromStore — locate a subject certificate in a store.
+///
+/// # Safety
+/// `p_cert_id` must be a valid pointer to a CERT_ID struct.
+// Wine ref: dlls/crypt32/cert.c — CertGetSubjectCertificateFromStore
+pub unsafe extern "win64" fn CertGetSubjectCertificateFromStore(
+    _h_cert_store: usize,
+    _dw_cert_encoding_type: u32,
+    _p_cert_id: usize,
+) -> usize {
+    0 // NULL — no matching certificate
+}
+
+/// CryptStringToBinaryW — decode a string (base64, hex, etc.) to binary.
+///
+/// # Safety
+/// `psz_string` must be a valid wide string pointer; `pb_binary` must be a valid
+/// buffer or null for size query; `pcb_binary` must be valid if non-null.
+// Wine ref: dlls/crypt32/crypt.c — CryptStringToBinaryW
+pub unsafe extern "win64" fn CryptStringToBinaryW(
+    _psz_string: *const u16,
+    _cch_string: u32,
+    _dw_flags: u32,
+    _pb_binary: *mut u8,
+    _pcb_binary: *mut u32,
+    _pdw_skip: *mut u32,
+    _pdw_flags: *mut u32,
+) -> i32 {
+    0 // FALSE — decode failed
+}
+
+/// CertCreateCertificateContext — create a certificate context from encoded bytes.
+///
+/// # Safety
+/// `pb_cert_encoded` must point to at least `cb_cert_encoded` valid bytes.
+// Wine ref: dlls/crypt32/cert.c — CertCreateCertificateContext
+pub unsafe extern "win64" fn CertCreateCertificateContext(
+    _dw_cert_encoding_type: u32,
+    _pb_cert_encoded: *const u8,
+    _cb_cert_encoded: u32,
+) -> usize {
+    0 // NULL — failed to create context
+}
+
 // ── Resolver ──────────────────────────────────────────────────────────────────
 
 /// Resolve a crypt32.dll import to a function pointer.
@@ -542,6 +586,18 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
             CryptVerifyCertificateSignatureEx as unsafe extern "win64" fn(_, _, _, _, _) -> _
                 as *const () as usize,
         ),
+        "CertGetSubjectCertificateFromStore" => Some(
+            CertGetSubjectCertificateFromStore as unsafe extern "win64" fn(_, _, _) -> _
+                as *const () as usize,
+        ),
+        "CryptStringToBinaryW" => Some(
+            CryptStringToBinaryW as unsafe extern "win64" fn(_, _, _, _, _, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "CertCreateCertificateContext" => Some(
+            CertCreateCertificateContext as unsafe extern "win64" fn(_, _, _) -> _ as *const ()
+                as usize,
+        ),
         _ => None,
     }
 }
@@ -594,6 +650,9 @@ mod tests {
             "CryptUnprotectData",
             "CryptUnprotectMemory",
             "CryptVerifyCertificateSignatureEx",
+            "CertGetSubjectCertificateFromStore",
+            "CryptStringToBinaryW",
+            "CertCreateCertificateContext",
         ];
         for f in &funcs {
             assert!(resolve("crypt32.dll", f).is_some(), "missing {f}");
