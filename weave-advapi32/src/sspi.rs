@@ -587,29 +587,24 @@ pub unsafe extern "win64" fn encrypt_message(
         }
     }
 
-    // Distribute the TLS records across the output buffers:
-    // SECBUFFER_STREAM_HEADER, SECBUFFER_DATA, SECBUFFER_STREAM_TRAILER.
-    // For simplicity, pack everything into the DATA buffer and leave
-    // HEADER/TRAILER as actual Schannel does — but Schannel expects
-    // the caller to reassemble from these three pieces.
-    // A simpler approach: write the full TLS record to DATA and mark
-    // HEADER size.
-    let _header_size = TLS_HEADER_SIZE;
+    // Distribute the TLS records per Schannel's SECBUFFER_STREAM_HEADER/
+    // DATA/TRAILER contract. The TLS record from rustls has a 5-byte header
+    // (type + version + length) followed by the encrypted payload. Split at
+    // the header boundary: HEADER gets the 5-byte record header, DATA gets
+    // the encrypted content (which includes ciphertext + MAC + padding for
+    // TLS 1.3). Per Schannel's contract, the caller reassembles by
+    // concatenating HEADER + DATA + TRAILER.
     if tls_output.len() > TLS_HEADER_SIZE as usize {
-        // Determine the actual TLS record header: first 5 bytes.
-        // Write the full record to the buffers.
         let mut offset = 0usize;
         for buf in buffers.iter_mut() {
-            if buf.buffer_type == SECBUFFER_STREAM_HEADER {
-                let end = (TLS_HEADER_SIZE as usize).min(tls_output.len() - offset);
-                write_sec_buffer(buf, &tls_output[offset..offset + end]);
-                offset += end;
-            } else if buf.buffer_type == SECBUFFER_DATA {
-                let end = tls_output.len() - offset;
-                write_sec_buffer(buf, &tls_output[offset..offset + end]);
-                offset += end;
+            if buf.buffer_type == SECBUFFER_STREAM_HEADER && offset < TLS_HEADER_SIZE as usize {
+                let end = (TLS_HEADER_SIZE as usize).min(tls_output.len());
+                write_sec_buffer(buf, &tls_output[offset..end]);
+                offset = end;
+            } else if buf.buffer_type == SECBUFFER_DATA && offset < tls_output.len() {
+                write_sec_buffer(buf, &tls_output[offset..]);
+                offset = tls_output.len();
             } else if buf.buffer_type == SECBUFFER_STREAM_TRAILER {
-                // Trailer is empty in our simplified model.
                 buf.cb_buffer = 0;
             }
         }
