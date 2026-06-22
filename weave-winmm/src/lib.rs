@@ -1093,7 +1093,7 @@ pub unsafe extern "win64" fn wave_in_open(
 
         let ring_capacity = (sample_rate as usize) * (frame_size) * 2;
         let ring_buf = Arc::new(Mutex::new(RingBuf::new(ring_capacity, frame_size)));
-        let buffer_queue: Arc<Mutex<VecDeque<*mut WAVEHDR>>> =
+        let buffer_queue: Arc<Mutex<VecDeque<SendWaveHdr>>> =
             Arc::new(Mutex::new(VecDeque::new()));
 
         pw::init();
@@ -1142,8 +1142,8 @@ pub unsafe extern "win64" fn wave_in_open(
                         None => return,
                     };
                     let chunk = d.chunk();
-                    let chunk_offset = *chunk.offset() as usize;
-                    let chunk_size = *chunk.size() as usize;
+                    let chunk_offset = chunk.offset() as usize;
+                    let chunk_size = chunk.size() as usize;
                     let data_start = chunk_offset.min(total);
                     let data_end = (chunk_offset + chunk_size).min(total);
                     if data_end <= data_start {
@@ -1383,9 +1383,9 @@ pub extern "win64" fn wave_in_reset(_hwi: usize) -> u32 {
                         .buffer_queue
                         .lock()
                         .unwrap_or_else(|p| p.into_inner());
-                    while let Some(hdr_ptr) = queue.pop_front() {
+                    while let Some(hdr_wrapper) = queue.pop_front() {
                         unsafe {
-                            let hdr = &mut *hdr_ptr;
+                            let hdr = &mut *hdr_wrapper.0;
                             hdr.dwBytesRecorded = 0;
                             hdr.dwFlags |= WHDR_DONE;
                             hdr.dwFlags &= !WHDR_INQUEUE;
