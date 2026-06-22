@@ -9447,9 +9447,9 @@ fn audacity_phase_a_probe() {
     );
 
     // Print status of key milestones (diagnostic, not hard assertions).
-    let has_wWinMain = stderr.contains("PHASE: wWinMain_entered");
+    let has_w_win_main = stderr.contains("PHASE: wWinMain_entered");
     let has_sigsegv = stderr.contains("SIGSEGV") || stderr.contains("signal: 11");
-    eprintln!("  PHASE: wWinMain={has_wWinMain} SIGSEGV={has_sigsegv}");
+    eprintln!("  PHASE: wWinMain={has_w_win_main} SIGSEGV={has_sigsegv}");
     eprintln!("  Unresolved imports: {}", unresolved.len());
     eprintln!(
         "  Companion DLL IAT resolution: {} lib-* DLLs need stub exports",
