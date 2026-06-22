@@ -9077,51 +9077,50 @@ fn q_dir_shell_namespace_gate() {
                     drive_done = true;
                 }
                 if drive_done && !nav_clicked {
-                    std::thread::sleep(std::time::Duration::from_secs(2));
+                    // Add a more generous wait for the Q-Dir window to appear and get focus.
+                    std::thread::sleep(std::time::Duration::from_secs(3));
                     eprintln!(
                         "q_dir_shell_namespace_gate: searching for Q-Dir window to double-click"
                     );
-                    // Try multiple xdotool search strategies: name, class, then fall back to active window.
-                    let win_id = std::process::Command::new("xdotool")
-                        .args(["search", "--name", "Q-Dir"])
-                        .output()
-                        .ok()
-                        .and_then(|o| {
-                            let id = String::from_utf8_lossy(&o.stdout).trim().to_string();
-                            if !id.is_empty() {
-                                Some(id)
-                            } else {
-                                None
-                            }
-                        })
-                        .or_else(|| {
-                            std::process::Command::new("xdotool")
-                                .args(["search", "--class", "Q-Dir"])
-                                .output()
-                                .ok()
-                                .and_then(|o| {
-                                    let id = String::from_utf8_lossy(&o.stdout).trim().to_string();
-                                    if !id.is_empty() {
-                                        Some(id)
-                                    } else {
-                                        None
-                                    }
-                                })
-                        })
-                        .or_else(|| {
-                            std::process::Command::new("xdotool")
-                                .args(["getactivewindow"])
-                                .output()
-                                .ok()
-                                .and_then(|o| {
-                                    let id = String::from_utf8_lossy(&o.stdout).trim().to_string();
-                                    if !id.is_empty() {
-                                        Some(id)
-                                    } else {
-                                        None
-                                    }
-                                })
-                        });
+                    // Retry window search up to 3 times with 1s gaps.
+                    let mut win_id = None;
+                    for attempt in 1..=3 {
+                        // Try multiple xdotool search strategies: name, class, then fall back to active window.
+                        win_id = std::process::Command::new("xdotool")
+                            .args(["search", "--name", "Q-Dir"])
+                            .output()
+                            .ok()
+                            .and_then(|o| {
+                                let id = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                                if !id.is_empty() { Some(id) } else { None }
+                            })
+                            .or_else(|| {
+                                std::process::Command::new("xdotool")
+                                    .args(["search", "--class", "Q-Dir"])
+                                    .output()
+                                    .ok()
+                                    .and_then(|o| {
+                                        let id = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                                        if !id.is_empty() { Some(id) } else { None }
+                                    })
+                            })
+                            .or_else(|| {
+                                std::process::Command::new("xdotool")
+                                    .args(["getactivewindow"])
+                                    .output()
+                                    .ok()
+                                    .and_then(|o| {
+                                        let id = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                                        if !id.is_empty() { Some(id) } else { None }
+                                    })
+                            });
+                        if win_id.is_some() {
+                            eprintln!("q_dir_shell_namespace_gate: found window on attempt {attempt}");
+                            break;
+                        }
+                        eprintln!("q_dir_shell_namespace_gate: window not found on attempt {attempt}, retrying...");
+                        std::thread::sleep(std::time::Duration::from_secs(1));
+                    }
                     if let Some(ref wid) = win_id {
                         let _ = std::process::Command::new("xdotool")
                             .args(["windowfocus", wid])
