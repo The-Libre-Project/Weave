@@ -165,6 +165,7 @@ fn wave_out_session_mutex() -> &'static Mutex<Option<WaveOutSession>> {
 struct WaveInSession {
     ring_buf: Arc<Mutex<RingBuf>>,
     buffer_queue: Arc<Mutex<VecDeque<SendWaveHdr>>>,
+    #[allow(dead_code)]
     pw_state: Option<PwState>,
     callback: usize,
     instance: usize,
@@ -224,7 +225,8 @@ const WOM_DONE: u32 = 0x3BD;
 #[cfg(feature = "pipewire-audio")]
 const WIM_OPEN: u32 = 0x3BE;
 #[cfg(feature = "pipewire-audio")]
-const WIM_CLOSE: u32 = 0x3BF;
+    #[allow(dead_code)]
+    const WIM_CLOSE: u32 = 0x3BF;
 #[cfg(feature = "pipewire-audio")]
 const WIM_DATA: u32 = 0x3C0;
 
