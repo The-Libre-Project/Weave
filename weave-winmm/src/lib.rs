@@ -1093,8 +1093,7 @@ pub unsafe extern "win64" fn wave_in_open(
 
         let ring_capacity = (sample_rate as usize) * (frame_size) * 2;
         let ring_buf = Arc::new(Mutex::new(RingBuf::new(ring_capacity, frame_size)));
-        let buffer_queue: Arc<Mutex<VecDeque<SendWaveHdr>>> =
-            Arc::new(Mutex::new(VecDeque::new()));
+        let buffer_queue: Arc<Mutex<VecDeque<SendWaveHdr>>> = Arc::new(Mutex::new(VecDeque::new()));
 
         pw::init();
 
@@ -1507,9 +1506,12 @@ pub unsafe extern "win64" fn wave_out_get_error_text_w(
 // jcodemunch unavailable — Phase A stubs only, safe sentinel returns.
 // Wine ref comments deferred to jcodemunch-available session.
 
+const MMSYSERR_NOERROR: u32 = 0;
 const MMSYSERR_NODRIVER: u32 = 6;
 
-// ── MIDI Input stubs ──────────────────────────────────────────────────────────
+// ── MIDI Input — Phase B (no devices available) ───────────────────────────────
+// Reports 0 input devices and returns MMSYSERR_NOERROR for no-op operations.
+// No real MIDI hardware emulation — stubs return clean "no device" codes.
 
 /// midiInGetNumDevs: get number of MIDI input devices.
 pub extern "win64" fn midi_in_get_num_devs() -> u32 {
@@ -1517,6 +1519,7 @@ pub extern "win64" fn midi_in_get_num_devs() -> u32 {
 }
 
 /// midiInGetDevCapsW: get MIDI input device capabilities (Wide).
+/// No devices — returns NODRIVER.
 ///
 /// # Safety
 /// Caller must ensure `pmic` points to a buffer of at least `cb_mic` bytes.
@@ -1528,7 +1531,7 @@ pub unsafe extern "win64" fn midi_in_get_dev_caps_w(
     MMSYSERR_NODRIVER
 }
 
-/// midiInOpen: open a MIDI input device.
+/// midiInOpen: open a MIDI input device — no devices available.
 ///
 /// # Safety
 /// Caller must ensure `phmi` is a valid output pointer.
@@ -1539,17 +1542,15 @@ pub unsafe extern "win64" fn midi_in_open(
     _dw_instance: usize,
     _fdw_open: u32,
 ) -> u32 {
-    eprintln!("weave/winmm_stub: midiInOpen");
     MMSYSERR_NODRIVER
 }
 
-/// midiInClose: close a MIDI input device.
+/// midiInClose: close a MIDI input device — no-op (no devices).
 pub extern "win64" fn midi_in_close(_hmi: usize) -> u32 {
-    eprintln!("weave/winmm_stub: midiInClose");
-    MMSYSERR_NODRIVER
+    MMSYSERR_NOERROR
 }
 
-/// midiInPrepareHeader: prepare a MIDI input buffer.
+/// midiInPrepareHeader: prepare a MIDI input buffer — no-op.
 ///
 /// # Safety
 /// Caller must ensure `pmh` is a valid pointer.
@@ -1558,11 +1559,10 @@ pub unsafe extern "win64" fn midi_in_prepare_header(
     _pmh: *mut u8,
     _cb_mh: u32,
 ) -> u32 {
-    eprintln!("weave/winmm_stub: midiInPrepareHeader");
-    MMSYSERR_NODRIVER
+    MMSYSERR_NOERROR
 }
 
-/// midiInUnprepareHeader: unprepare a MIDI input buffer.
+/// midiInUnprepareHeader: unprepare a MIDI input buffer — no-op.
 ///
 /// # Safety
 /// Caller must ensure `pmh` is a valid pointer.
@@ -1571,32 +1571,29 @@ pub unsafe extern "win64" fn midi_in_unprepare_header(
     _pmh: *mut u8,
     _cb_mh: u32,
 ) -> u32 {
-    eprintln!("weave/winmm_stub: midiInUnprepareHeader");
-    MMSYSERR_NODRIVER
+    MMSYSERR_NOERROR
 }
 
-/// midiInAddBuffer: add a buffer to MIDI input device.
+/// midiInAddBuffer: add buffer to MIDI input — no-op (no capture).
 ///
 /// # Safety
 /// Caller must ensure `pmh` is a valid pointer.
 pub unsafe extern "win64" fn midi_in_add_buffer(_hmi: usize, _pmh: *mut u8, _cb_mh: u32) -> u32 {
-    eprintln!("weave/winmm_stub: midiInAddBuffer");
-    MMSYSERR_NODRIVER
+    MMSYSERR_NOERROR
 }
 
-/// midiInStart: start MIDI input.
+/// midiInStart: start MIDI input — no-op (no devices).
 pub extern "win64" fn midi_in_start(_hmi: usize) -> u32 {
-    eprintln!("weave/winmm_stub: midiInStart");
-    MMSYSERR_NODRIVER
+    MMSYSERR_NOERROR
 }
 
-/// midiInReset: reset MIDI input.
+/// midiInReset: reset MIDI input — no-op.
 pub extern "win64" fn midi_in_reset(_hmi: usize) -> u32 {
-    eprintln!("weave/winmm_stub: midiInReset");
-    MMSYSERR_NODRIVER
+    MMSYSERR_NOERROR
 }
 
-// ── MIDI Output stubs ─────────────────────────────────────────────────────────
+// ── MIDI Output — Phase B (no devices available) ──────────────────────────────
+// Reports 0 output devices. Open returns NODRIVER; no-ops return NOERROR.
 
 /// midiOutGetNumDevs: get number of MIDI output devices.
 pub extern "win64" fn midi_out_get_num_devs() -> u32 {
@@ -1604,6 +1601,7 @@ pub extern "win64" fn midi_out_get_num_devs() -> u32 {
 }
 
 /// midiOutGetDevCapsW: get MIDI output device capabilities (Wide).
+/// No devices — returns NODRIVER.
 ///
 /// # Safety
 /// Caller must ensure `pmoc` points to a buffer of at least `cb_moc` bytes.
@@ -1615,7 +1613,7 @@ pub unsafe extern "win64" fn midi_out_get_dev_caps_w(
     MMSYSERR_NODRIVER
 }
 
-/// midiOutOpen: open a MIDI output device.
+/// midiOutOpen: open a MIDI output device — no devices available.
 ///
 /// # Safety
 /// Caller must ensure `phmo` is a valid output pointer.
@@ -1626,17 +1624,15 @@ pub unsafe extern "win64" fn midi_out_open(
     _dw_instance: usize,
     _fdw_open: u32,
 ) -> u32 {
-    eprintln!("weave/winmm_stub: midiOutOpen");
     MMSYSERR_NODRIVER
 }
 
-/// midiOutClose: close a MIDI output device.
+/// midiOutClose: close a MIDI output device — no-op.
 pub extern "win64" fn midi_out_close(_hmo: usize) -> u32 {
-    eprintln!("weave/winmm_stub: midiOutClose");
-    MMSYSERR_NODRIVER
+    MMSYSERR_NOERROR
 }
 
-/// midiOutPrepareHeader: prepare a MIDI output buffer.
+/// midiOutPrepareHeader: prepare a MIDI output buffer — no-op.
 ///
 /// # Safety
 /// Caller must ensure `pmh` is a valid pointer.
@@ -1645,11 +1641,10 @@ pub unsafe extern "win64" fn midi_out_prepare_header(
     _pmh: *mut u8,
     _cb_mh: u32,
 ) -> u32 {
-    eprintln!("weave/winmm_stub: midiOutPrepareHeader");
-    MMSYSERR_NODRIVER
+    MMSYSERR_NOERROR
 }
 
-/// midiOutUnprepareHeader: unprepare a MIDI output buffer.
+/// midiOutUnprepareHeader: unprepare a MIDI output buffer — no-op.
 ///
 /// # Safety
 /// Caller must ensure `pmh` is a valid pointer.
@@ -1658,29 +1653,25 @@ pub unsafe extern "win64" fn midi_out_unprepare_header(
     _pmh: *mut u8,
     _cb_mh: u32,
 ) -> u32 {
-    eprintln!("weave/winmm_stub: midiOutUnprepareHeader");
-    MMSYSERR_NODRIVER
+    MMSYSERR_NOERROR
 }
 
-/// midiOutShortMsg: send a short MIDI message.
+/// midiOutShortMsg: send a short MIDI message — discarded (no devices).
 pub extern "win64" fn midi_out_short_msg(_hmo: usize, _dw_msg: u32) -> u32 {
-    eprintln!("weave/winmm_stub: midiOutShortMsg");
-    MMSYSERR_NODRIVER
+    MMSYSERR_NOERROR
 }
 
-/// midiOutLongMsg: send a long (system exclusive) MIDI message.
+/// midiOutLongMsg: send a long (system exclusive) MIDI message — discarded.
 ///
 /// # Safety
 /// Caller must ensure `pmh` is a valid pointer.
 pub unsafe extern "win64" fn midi_out_long_msg(_hmo: usize, _pmh: *mut u8, _cb_mh: u32) -> u32 {
-    eprintln!("weave/winmm_stub: midiOutLongMsg");
-    MMSYSERR_NODRIVER
+    MMSYSERR_NOERROR
 }
 
-/// midiOutReset: reset MIDI output.
+/// midiOutReset: reset MIDI output — no-op.
 pub extern "win64" fn midi_out_reset(_hmo: usize) -> u32 {
-    eprintln!("weave/winmm_stub: midiOutReset");
-    MMSYSERR_NODRIVER
+    MMSYSERR_NOERROR
 }
 
 /// Returns true for any DLL name this crate handles.
