@@ -9430,42 +9430,38 @@ fn audacity_phase_a_probe() {
     eprintln!("  Process exited:    {exited}");
     eprintln!("====================================");
 
-    // Phase B assertions: loaded_pe must fire (proves PE loads into memory
-    // and IAT patching begins). wWinMain_entered is a stretch goal — may fail
-    // if companion DLLs have unresolved imports causing SIGSEGV in CRT init.
+    // Phase C assertions: full GUI init and message loop.
     let has_loaded_pe = stderr.contains("PHASE: loaded_pe");
-    eprintln!("  PHASE: loaded_pe={has_loaded_pe}");
+    let has_w_win_main = stderr.contains("PHASE: wWinMain_entered");
+    let has_create_window = stderr.contains("PHASE: create_window_first");
+    let has_get_message = stderr.contains("PHASE: get_message_first");
 
-    if killed_flag {
-        eprintln!("Audacity Phase B: killed by deadline — diagnostic only");
-    }
+    eprintln!(
+        "  PHASE: loaded_pe={has_loaded_pe} wWinMain={has_w_win_main} \
+               create_window={has_create_window} get_message={has_get_message}"
+    );
 
+    assert!(has_loaded_pe, "Audacity FAIL: loaded_pe not found");
     assert!(
-        has_loaded_pe,
-        "Audacity Phase B FAIL: loaded_pe not found — PE loading failed.\nstderr preview:\n{}",
+        has_w_win_main,
+        "Audacity FAIL: wWinMain_entered not found \
+        — SIGSEGV in CRT init. stderr preview:\n{}",
+        &stderr[..stderr.len().min(2000)]
+    );
+    assert!(
+        has_create_window,
+        "Audacity FAIL: create_window_first not found \
+        — wxWidgets failed to create main window.\nstderr:\n{}",
+        &stderr[..stderr.len().min(2000)]
+    );
+    assert!(
+        has_get_message,
+        "Audacity FAIL: get_message_first not found \
+        — message loop never entered.\nstderr:\n{}",
         &stderr[..stderr.len().min(2000)]
     );
 
-    // Print status of key milestones (diagnostic, not hard assertions).
-    let has_w_win_main = stderr.contains("PHASE: wWinMain_entered");
-    let has_sigsegv = stderr.contains("SIGSEGV") || stderr.contains("signal: 11");
-    eprintln!("  PHASE: wWinMain={has_w_win_main} SIGSEGV={has_sigsegv}");
-    eprintln!("  Unresolved imports: {}", unresolved.len());
-    eprintln!(
-        "  Companion DLL IAT resolution: {} lib-* DLLs need stub exports",
-        unresolved.iter().filter(|l| l.contains("lib-")).count()
-    );
-
-    if has_sigsegv {
-        eprintln!(
-            "Audacity Phase B: SIGSEGV — companion DLLs have unresolved imports (stubbed to null)."
-        );
-        eprintln!(
-            "  Next step: register lib-*.dll DLLs in resolver + dump exports for stub generation."
-        );
-    }
-
-    eprintln!("====== Audacity Phase B Report Complete ======");
+    eprintln!("====== Audacity Phase C — ALL ASSERTIONS PASSED ======");
 }
 
 /// E3-M11a — SCI_GETLEXER Probe Gate.
