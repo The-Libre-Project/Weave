@@ -9307,10 +9307,7 @@ fn audacity_phase_a_probe() {
     }
 
     let weave_bin = env!("CARGO_BIN_EXE_weave");
-    let fixture_dir = format!(
-        "{}/../tests/fixtures/audacity",
-        env!("CARGO_MANIFEST_DIR")
-    );
+    let fixture_dir = format!("{}/../tests/fixtures/audacity", env!("CARGO_MANIFEST_DIR"));
     let fixture = format!("{fixture_dir}/audacity.exe");
 
     if !std::path::Path::new(&fixture).exists() {
