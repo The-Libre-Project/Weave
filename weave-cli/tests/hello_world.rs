@@ -5370,7 +5370,6 @@ fn curl_https_gate() {
     let mut child = std::process::Command::new(weave_bin)
         .arg(&fixture)
         .arg("--no-sandbox")
-        .arg("-k")
         .arg("--no-progress-meter")
         .arg("https://localhost:4443")
         .stderr(std::process::Stdio::piped())
