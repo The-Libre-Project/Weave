@@ -369,7 +369,7 @@ pub unsafe extern "win64" fn play_sound_w(
         }
         fmt_offset += 8 + chunk_size;
         // Round to even boundary per RIFF spec.
-        if chunk_size % 2 != 0 {
+        if !chunk_size.is_multiple_of(2) {
             fmt_offset += 1;
         }
     }
@@ -393,7 +393,7 @@ pub unsafe extern "win64" fn play_sound_w(
         wav_data[fmt_offset + 7],
     ]) as usize;
     let mut scan_off = fmt_offset + 8 + fmt_chunk_size;
-    if fmt_chunk_size % 2 != 0 {
+    if !fmt_chunk_size.is_multiple_of(2) {
         scan_off += 1;
     }
     loop {
@@ -413,7 +413,7 @@ pub unsafe extern "win64" fn play_sound_w(
             break;
         }
         scan_off += 8 + chunk_size;
-        if chunk_size % 2 != 0 {
+        if !chunk_size.is_multiple_of(2) {
             scan_off += 1;
         }
     }
