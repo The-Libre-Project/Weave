@@ -288,10 +288,10 @@ pub extern "win64" fn wave_out_set_volume(_hwo: usize, _dw_volume: u32) -> u32 {
 // SND_ALIAS, SND_MEMORY, SND_LOOP, SND_NODEFAULT, SND_NOSTOP, SND_PURGE deferred.
 const SND_FILENAME: u32 = 0x00020000;
 const SND_ASYNC: u32 = 0x0001;
-const SND_SYNC: u32 = 0x0000;
+const _SND_SYNC: u32 = 0x0000; // deferred: sync-flag comparison
 const SND_NODEFAULT: u32 = 0x0002;
-const SND_NOSTOP: u32 = 0x0010;
-const SND_LOOP: u32 = 0x0008;
+const _SND_NOSTOP: u32 = 0x0010; // deferred: SND_NOSTOP
+const _SND_LOOP: u32 = 0x0008; // deferred: looping playback
 
 /// Parse a WAV file and play it via waveOut.
 ///
@@ -320,7 +320,7 @@ pub unsafe extern "win64" fn play_sound_w(
         path_len += 1;
     }
     let path_wide = unsafe { std::slice::from_raw_parts(psz_sound, path_len) };
-    let path_str = String::from_utf16_lossy(&path_wide);
+    let path_str = String::from_utf16_lossy(path_wide);
     let linux_path = path_str.replace('\\', "/");
     // Strip Z: drive prefix if present.
     let linux_path = linux_path
@@ -331,7 +331,7 @@ pub unsafe extern "win64" fn play_sound_w(
     eprintln!("weave/PlaySoundW: playing '{linux_path}' flags={fdw_sound:#x}");
 
     // Read the WAV file.
-    let wav_data = match std::fs::read(&linux_path) {
+    let wav_data = match std::fs::read(linux_path) {
         Ok(d) => d,
         Err(e) => {
             eprintln!("weave/PlaySoundW: failed to read '{linux_path}': {e}");
@@ -529,7 +529,7 @@ pub unsafe extern "win64" fn play_sound_a(
     let wide: Vec<u16> = path_str.encode_utf16().collect();
     let mut null_terminated: Vec<u16> = wide.clone();
     null_terminated.push(0);
-    unsafe { play_sound_w(null_terminated.as_ptr() as *const u16, _hmod, fdw_sound) }
+    unsafe { play_sound_w(null_terminated.as_ptr(), _hmod, fdw_sound) }
 }
 
 /// # Safety
