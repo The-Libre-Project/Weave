@@ -11,6 +11,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 // ── PipeWire ring buffer (pipewire-audio feature) ────────────────────────────
 
 #[cfg(feature = "pipewire-audio")]
+use std::collections::VecDeque;
+#[cfg(feature = "pipewire-audio")]
 use std::sync::{Arc, Mutex};
 
 /// Lock-free-ish ring buffer for PCM audio data.
@@ -145,6 +147,27 @@ fn wave_out_session_mutex() -> &'static Mutex<Option<WaveOutSession>> {
     WAVE_OUT_SESSION.get_or_init(|| Mutex::new(None))
 }
 
+// ── waveIn global session ────────────────────────────────────────────────────
+
+#[cfg(feature = "pipewire-audio")]
+struct WaveInSession {
+    ring_buf: Arc<Mutex<RingBuf>>,
+    buffer_queue: Arc<Mutex<VecDeque<*mut WAVEHDR>>>,
+    pw_state: Option<PwState>,
+    callback: usize,
+    instance: usize,
+    flags: u32,
+}
+
+#[cfg(feature = "pipewire-audio")]
+static WAVE_IN_SESSION: std::sync::OnceLock<Mutex<Option<WaveInSession>>> =
+    std::sync::OnceLock::new();
+
+#[cfg(feature = "pipewire-audio")]
+fn wave_in_session_mutex() -> &'static Mutex<Option<WaveInSession>> {
+    WAVE_IN_SESSION.get_or_init(|| Mutex::new(None))
+}
+
 // ── waveOut structs ──────────────────────────────────────────────────────────
 // Wine ref: include/mmsystem.h — WAVEFORMATEX struct layout (line 500)
 #[repr(C)]
@@ -185,6 +208,14 @@ const WOM_OPEN: u32 = 0x3BB;
 #[cfg(feature = "pipewire-audio")]
 const WOM_DONE: u32 = 0x3BD;
 
+// WIM messages — Wine ref: include/mmsystem.h
+#[cfg(feature = "pipewire-audio")]
+const WIM_OPEN: u32 = 0x3BE;
+#[cfg(feature = "pipewire-audio")]
+const WIM_CLOSE: u32 = 0x3BF;
+#[cfg(feature = "pipewire-audio")]
+const WIM_DATA: u32 = 0x3C0;
+
 // Wine ref: include/mmsystem.h — WAVEOUTCAPSA struct layout (line 347)
 // MAXPNAMELEN = 32
 #[repr(C)]
@@ -212,8 +243,24 @@ pub struct WAVEOUTCAPSW {
     pub dwSupport: u32,
 }
 
+// Wine ref: include/mmsystem.h — WAVEINCAPSW struct layout (line 430)
+#[repr(C)]
+pub struct WAVEINCAPSW {
+    pub wMid: u16,
+    pub wPid: u16,
+    pub vDriverVersion: u32,
+    pub szPname: [u16; 32],
+    pub dwFormats: u32,
+    pub wChannels: u16,
+    pub wReserved1: u16,
+}
+
 // Pseudo-handle value written to *phwo on success.
 const WAVE_OUT_HANDLE: usize = 0x0001_0001;
+
+// Pseudo-handle value written to *phwi on success.
+#[cfg(feature = "pipewire-audio")]
+const WAVE_IN_HANDLE: usize = 0x0002_0001;
 
 /// Invoke a CALLBACK_FUNCTION-style waveOut callback if flags indicate it.
 /// Wine ref: dlls/winmm/waveform.c WINMM_NotifyClient — callback invoked with
@@ -264,11 +311,6 @@ pub unsafe extern "win64" fn time_get_dev_caps(ptc: *mut u32, cbtc: u32) -> u32 
 
 /// waveOutGetNumDevs: return the number of wave output devices.
 pub extern "win64" fn wave_out_get_num_devs() -> u32 {
-    0
-}
-
-/// waveInGetNumDevs: return the number of wave input devices.
-pub extern "win64" fn wave_in_get_num_devs() -> u32 {
     0
 }
 
@@ -959,93 +1001,466 @@ pub unsafe extern "win64" fn wave_out_get_id(_hwo: usize, pud_device_id: *mut u3
     0 // MMSYSERR_NOERROR
 }
 
-// ── waveIn stubs ─────────────────────────────────────────────────────────────
+// ── waveIn PipeWire helper ───────────────────────────────────────────────────
+
+#[cfg(feature = "pipewire-audio")]
+unsafe fn drain_capture_buffers(
+    ring: &mut RingBuf,
+    queue: &mut VecDeque<*mut WAVEHDR>,
+    callback: usize,
+    instance: usize,
+    flags: u32,
+) {
+    while ring.available > 0 {
+        let hdr_ptr = match queue.pop_front() {
+            Some(p) => p,
+            None => break,
+        };
+        let hdr = &mut *hdr_ptr;
+        let cap = hdr.dwBufferLength as usize;
+        if cap == 0 || hdr.lpData.is_null() {
+            continue;
+        }
+        let dst = std::slice::from_raw_parts_mut(hdr.lpData, cap);
+        let copied = ring.read_into(dst);
+        hdr.dwBytesRecorded = copied as u32;
+        hdr.dwFlags |= WHDR_DONE;
+        hdr.dwFlags &= !WHDR_INQUEUE;
+        maybe_notify(WAVE_IN_HANDLE, WIM_DATA, callback, instance, flags);
+    }
+}
+
+// ── waveIn implementations ───────────────────────────────────────────────────
+
+/// waveInGetNumDevs: return the number of wave input devices.
+/// Wine ref: dlls/winmm/waveform.c — returns 1 when a capture device is present.
+pub extern "win64" fn wave_in_get_num_devs() -> u32 {
+    #[cfg(feature = "pipewire-audio")]
+    {
+        1
+    }
+    #[cfg(not(feature = "pipewire-audio"))]
+    {
+        0
+    }
+}
 
 /// waveInOpen: open a waveform-audio input device.
-/// Wine ref: dlls/winmm/waveform.c::waveInOpen — writes handle to *phwi.
-/// Since waveInGetNumDevs returns 0, no device is available; return MMSYSERR_NODRIVER.
+/// Wine ref: dlls/winmm/waveform.c::waveInOpen — writes handle to *phwi,
+///   invokes callback with WIM_OPEN on success.
 ///
 /// # Safety
-/// `phwi` must be null or a valid pointer to a usize. Other pointer args are
-/// accepted but not dereferenced.
+/// `phwi` must be null or a valid pointer to a usize. `pwfx` is read to
+/// determine capture format. `callback` is invoked when flags indicate
+/// CALLBACK_FUNCTION.
+#[allow(unused_variables)]
 pub unsafe extern "win64" fn wave_in_open(
-    _phwi: *mut usize,
+    phwi: *mut usize,
     _dev_id: u32,
-    _pwfx: *const u8,
-    _callback: usize,
-    _instance: usize,
-    _flags: u32,
+    pwfx: *const WAVEFORMATEX,
+    callback: usize,
+    instance: usize,
+    flags: u32,
 ) -> u32 {
-    6 // MMSYSERR_NODRIVER
+    #[cfg(feature = "pipewire-audio")]
+    {
+        use pipewire as pw;
+        use pw::spa;
+
+        let (channels, sample_rate, bits_per_sample, frame_size) = if !pwfx.is_null() {
+            let f = &*pwfx;
+            (
+                f.nChannels as u32,
+                f.nSamplesPerSec,
+                f.wBitsPerSample,
+                f.nBlockAlign as usize,
+            )
+        } else {
+            (2u32, 44100u32, 16u16, 4usize)
+        };
+
+        let ring_capacity = (sample_rate as usize) * (frame_size) * 2;
+        let ring_buf = Arc::new(Mutex::new(RingBuf::new(ring_capacity, frame_size)));
+        let buffer_queue: Arc<Mutex<VecDeque<*mut WAVEHDR>>> =
+            Arc::new(Mutex::new(VecDeque::new()));
+
+        pw::init();
+
+        let pw_state: Option<PwState> = (|| -> Option<PwState> {
+            let thread_loop =
+                unsafe { pw::thread_loop::ThreadLoop::new(Some("weave-wavein"), None) }.ok()?;
+            let _lock = thread_loop.lock();
+            let context = pw::context::Context::new(&thread_loop).ok()?;
+            let core = context.connect(None).ok()?;
+
+            let stream = pw::stream::Stream::new(
+                &core,
+                "weave-wavein",
+                pw::properties::properties! {
+                    *pw::keys::MEDIA_TYPE     => "Audio",
+                    *pw::keys::MEDIA_ROLE     => "Music",
+                    *pw::keys::MEDIA_CATEGORY => "Capture",
+                },
+            )
+            .ok()?;
+
+            let rb_clone = Arc::clone(&ring_buf);
+            let bq_clone = Arc::clone(&buffer_queue);
+            let cb_callback = callback;
+            let cb_instance = instance;
+            let cb_flags = flags;
+
+            let listener = stream
+                .add_local_listener_with_user_data(())
+                .process(move |_stream, _| {
+                    // In capture mode, PW delivers audio data. Copy it into the
+                    // ring buffer, then drain into any queued WAVEHDR buffers.
+                    let mut buf = match _stream.dequeue_buffer() {
+                        Some(b) => b,
+                        None => return,
+                    };
+                    let datas = buf.datas_mut();
+                    let d = &mut datas[0];
+                    let raw_ptr = d.as_raw().data as *mut u8;
+                    if raw_ptr.is_null() {
+                        return;
+                    }
+                    let total = match d.data() {
+                        Some(slice) => slice.len(),
+                        None => return,
+                    };
+                    let chunk = d.chunk();
+                    let chunk_offset = *chunk.offset() as usize;
+                    let chunk_size = *chunk.size() as usize;
+                    let data_start = chunk_offset.min(total);
+                    let data_end = (chunk_offset + chunk_size).min(total);
+                    if data_end <= data_start {
+                        return;
+                    }
+                    let src = unsafe { std::slice::from_raw_parts(raw_ptr, total) };
+                    let actual_data = &src[data_start..data_end];
+
+                    if let Ok(mut ring) = rb_clone.lock() {
+                        ring.write_from(actual_data);
+                        if let Ok(mut queue) = bq_clone.lock() {
+                            unsafe {
+                                drain_capture_buffers(
+                                    &mut ring,
+                                    &mut queue,
+                                    cb_callback,
+                                    cb_instance,
+                                    cb_flags,
+                                );
+                            }
+                        }
+                    }
+                })
+                .register()
+                .ok()?;
+
+            let spa_fmt = match bits_per_sample {
+                16 => spa::param::audio::AudioFormat::S16LE,
+                24 => spa::param::audio::AudioFormat::S24LE,
+                32 => spa::param::audio::AudioFormat::S32LE,
+                _ => spa::param::audio::AudioFormat::S16LE,
+            };
+
+            let mut audio_info = spa::param::audio::AudioInfoRaw::new();
+            audio_info.set_format(spa_fmt);
+            audio_info.set_rate(sample_rate);
+            audio_info.set_channels(channels);
+
+            let values: Vec<u8> = pw::spa::pod::serialize::PodSerializer::serialize(
+                std::io::Cursor::new(Vec::new()),
+                &pw::spa::pod::Value::Object(pw::spa::pod::Object {
+                    type_: pw::spa::sys::SPA_TYPE_OBJECT_Format,
+                    id: pw::spa::sys::SPA_PARAM_EnumFormat,
+                    properties: audio_info.into(),
+                }),
+            )
+            .ok()?
+            .0
+            .into_inner();
+
+            let pod = spa::pod::Pod::from_bytes(&values)?;
+            let mut params = [pod];
+
+            stream
+                .connect(
+                    spa::utils::Direction::Input,
+                    None,
+                    pw::stream::StreamFlags::AUTOCONNECT
+                        | pw::stream::StreamFlags::MAP_BUFFERS
+                        | pw::stream::StreamFlags::RT_PROCESS,
+                    &mut params,
+                )
+                .ok()?;
+
+            let stream_raw = stream.into_raw();
+            let listener_any: Box<dyn std::any::Any> = Box::new(listener);
+
+            thread_loop.start();
+            drop(_lock);
+
+            Some(PwState {
+                thread_loop,
+                stream: Some(stream_raw),
+                _listener: Some(listener_any),
+            })
+        })();
+
+        if pw_state.is_some() {
+            eprintln!("weave/waveIn: PipeWire stream connected");
+        } else {
+            eprintln!("weave/waveIn: PipeWire unavailable — no capture");
+        }
+
+        let session = WaveInSession {
+            ring_buf,
+            buffer_queue,
+            pw_state,
+            callback,
+            instance,
+            flags,
+        };
+        wave_in_session_mutex()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .replace(session);
+
+        if !phwi.is_null() {
+            unsafe {
+                *phwi = WAVE_IN_HANDLE;
+            }
+        }
+        unsafe {
+            maybe_notify(WAVE_IN_HANDLE, WIM_OPEN, callback, instance, flags);
+        }
+        0
+    }
+
+    #[cfg(not(feature = "pipewire-audio"))]
+    {
+        6 // MMSYSERR_NODRIVER
+    }
 }
 
 /// waveInClose: close a waveform-audio input device.
-/// Wine ref: dlls/winmm/waveform.c::waveInClose.
+/// Wine ref: dlls/winmm/waveform.c::waveInClose — invokes WIM_CLOSE callback.
 pub extern "win64" fn wave_in_close(_hwi: usize) -> u32 {
-    0 // MMSYSERR_NOERROR
+    #[cfg(feature = "pipewire-audio")]
+    {
+        if let Some(m) = WAVE_IN_SESSION.get() {
+            if let Ok(mut guard) = m.lock() {
+                guard.take();
+            }
+        }
+        0
+    }
+    #[cfg(not(feature = "pipewire-audio"))]
+    {
+        0
+    }
 }
 
 /// waveInPrepareHeader: prepare a buffer for audio capture.
-/// Wine ref: dlls/winmm/waveform.c.
+/// Wine ref: dlls/winmm/waveform.c — sets WHDR_PREPARED in dwFlags.
 ///
 /// # Safety
-/// `pwh` is accepted but not dereferenced.
+/// `pwh` must be a valid pointer to a WAVEHDR if non-null.
 pub unsafe extern "win64" fn wave_in_prepare_header(
     _hwi: usize,
-    _pwh: *const u8,
+    pwh: *mut WAVEHDR,
     _cbwh: u32,
 ) -> u32 {
+    if !pwh.is_null() {
+        unsafe {
+            (*pwh).dwFlags |= WHDR_PREPARED;
+        }
+    }
     0 // MMSYSERR_NOERROR
 }
 
 /// waveInUnprepareHeader: unprepare a capture buffer.
-/// Wine ref: dlls/winmm/waveform.c.
+/// Wine ref: dlls/winmm/waveform.c — clears WHDR_PREPARED from dwFlags.
 ///
 /// # Safety
-/// `pwh` is accepted but not dereferenced.
+/// `pwh` must be a valid pointer to a WAVEHDR if non-null.
 pub unsafe extern "win64" fn wave_in_unprepare_header(
     _hwi: usize,
-    _pwh: *const u8,
+    pwh: *mut WAVEHDR,
     _cbwh: u32,
 ) -> u32 {
+    if !pwh.is_null() {
+        unsafe {
+            (*pwh).dwFlags &= !WHDR_PREPARED;
+        }
+    }
     0 // MMSYSERR_NOERROR
 }
 
 /// waveInAddBuffer: queue a buffer for capture.
-/// Wine ref: dlls/winmm/waveform.c.
+/// Wine ref: dlls/winmm/waveform.c — marks WHDR_INQUEUE, fires WIM_DATA when
+///   filled with captured audio data.
 ///
 /// # Safety
-/// `pwh` is accepted but not dereferenced.
-pub unsafe extern "win64" fn wave_in_add_buffer(_hwi: usize, _pwh: *const u8, _cbwh: u32) -> u32 {
-    0 // MMSYSERR_NOERROR
+/// `pwh` must be a valid pointer to a WAVEHDR if non-null.
+pub unsafe extern "win64" fn wave_in_add_buffer(_hwi: usize, pwh: *mut WAVEHDR, _cbwh: u32) -> u32 {
+    #[cfg(feature = "pipewire-audio")]
+    {
+        if let Ok(guard) = wave_in_session_mutex().lock() {
+            if let Some(ref session) = *guard {
+                if !pwh.is_null() {
+                    let hdr = &mut *pwh;
+                    hdr.dwFlags |= WHDR_INQUEUE;
+                    let mut queue = session
+                        .buffer_queue
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner());
+                    queue.push_back(pwh);
+                    // Attempt to drain any accumulated audio into the queued buffer.
+                    if let Ok(mut ring) = session.ring_buf.lock() {
+                        unsafe {
+                            drain_capture_buffers(
+                                &mut ring,
+                                &mut queue,
+                                session.callback,
+                                session.instance,
+                                session.flags,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        0
+    }
+
+    #[cfg(not(feature = "pipewire-audio"))]
+    {
+        if !pwh.is_null() {
+            unsafe {
+                (*pwh).dwFlags |= WHDR_INQUEUE;
+            }
+        }
+        0
+    }
 }
 
 /// waveInStart: start audio capture.
-/// Wine ref: dlls/winmm/waveform.c.
+/// Wine ref: dlls/winmm/waveform.c — stream already started in open.
 pub extern "win64" fn wave_in_start(_hwi: usize) -> u32 {
     0 // MMSYSERR_NOERROR
 }
 
-/// waveInReset: stop capture and reset the device.
+/// waveInStop: stop audio capture.
 /// Wine ref: dlls/winmm/waveform.c.
-pub extern "win64" fn wave_in_reset(_hwi: usize) -> u32 {
+pub extern "win64" fn wave_in_stop(_hwi: usize) -> u32 {
     0 // MMSYSERR_NOERROR
 }
 
+/// waveInReset: stop capture and reset the device.
+/// Wine ref: dlls/winmm/waveform.c — stops capture, clears queued buffers.
+pub extern "win64" fn wave_in_reset(_hwi: usize) -> u32 {
+    #[cfg(feature = "pipewire-audio")]
+    {
+        if let Some(m) = WAVE_IN_SESSION.get() {
+            if let Ok(mut guard) = m.lock() {
+                if let Some(ref mut session) = *guard {
+                    let mut queue = session
+                        .buffer_queue
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner());
+                    while let Some(hdr_ptr) = queue.pop_front() {
+                        unsafe {
+                            let hdr = &mut *hdr_ptr;
+                            hdr.dwBytesRecorded = 0;
+                            hdr.dwFlags |= WHDR_DONE;
+                            hdr.dwFlags &= !WHDR_INQUEUE;
+                            maybe_notify(
+                                WAVE_IN_HANDLE,
+                                WIM_DATA,
+                                session.callback,
+                                session.instance,
+                                session.flags,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        0
+    }
+
+    #[cfg(not(feature = "pipewire-audio"))]
+    {
+        0
+    }
+}
+
 /// waveInGetDevCapsW: get capabilities of a wave input device (Wide).
-/// Wine ref: dlls/winmm/waveform.c — fills a WAVEINCAPSW struct (64 bytes).
-/// Since no device is present, write an all-zero struct.
+/// Wine ref: dlls/winmm/waveform.c — fills a WAVEINCAPSW struct.
 ///
 /// # Safety
 /// `pwic` must be null or a valid pointer to at least `cbwic` bytes.
 pub unsafe extern "win64" fn wave_in_get_dev_caps_w(
     _dev_id: u32,
-    pwic: *mut u8,
+    pwic: *mut WAVEINCAPSW,
     cbwic: u32,
 ) -> u32 {
-    if !pwic.is_null() && cbwic >= 64 {
+    if !pwic.is_null() && cbwic as usize >= std::mem::size_of::<WAVEINCAPSW>() {
         unsafe {
-            std::ptr::write_bytes(pwic, 0, 64);
+            let caps = &mut *pwic;
+            caps.wMid = 0;
+            caps.wPid = 0;
+            caps.vDriverVersion = 0x0100;
+            // "Weave Audio Input" as UTF-16LE, null-padded
+            let name: &[u16] = &[
+                b'W' as u16,
+                b'e' as u16,
+                b'a' as u16,
+                b'v' as u16,
+                b'e' as u16,
+                b' ' as u16,
+                b'A' as u16,
+                b'u' as u16,
+                b'd' as u16,
+                b'i' as u16,
+                b'o' as u16,
+                b' ' as u16,
+                b'I' as u16,
+                b'n' as u16,
+                b'p' as u16,
+                b'u' as u16,
+                b't' as u16,
+                0u16,
+            ];
+            caps.szPname[..name.len()].copy_from_slice(name);
+            caps.dwFormats = 0x000FFFFF;
+            caps.wChannels = 2;
+            caps.wReserved1 = 0;
+        }
+    }
+    0 // MMSYSERR_NOERROR
+}
+
+/// waveInGetErrorTextW: get a text description of a waveIn error.
+/// Wine ref: dlls/winmm/winmm.c — writes "Unknown error\0" for any error code.
+///
+/// # Safety
+/// `psz_text` must be null or a valid pointer to at least `cch_text` u16 values.
+pub unsafe extern "win64" fn wave_in_get_error_text_w(
+    _err: u32,
+    psz_text: *mut u16,
+    cch_text: u32,
+) -> u32 {
+    const UNKNOWN: [u16; 14] = [
+        85, 110, 107, 110, 111, 119, 110, 32, 101, 114, 114, 111, 114, 0,
+    ];
+    if !psz_text.is_null() && cch_text > 0 {
+        let to_copy = (cch_text as usize).min(UNKNOWN.len());
+        unsafe {
+            std::ptr::copy_nonoverlapping(UNKNOWN.as_ptr(), psz_text, to_copy);
         }
     }
     0 // MMSYSERR_NOERROR
@@ -1363,32 +1778,43 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         ),
         "waveInOpen" => Some(
             wave_in_open
-                as unsafe extern "win64" fn(*mut usize, u32, *const u8, usize, usize, u32) -> u32
-                as *const () as usize,
+                as unsafe extern "win64" fn(
+                    *mut usize,
+                    u32,
+                    *const WAVEFORMATEX,
+                    usize,
+                    usize,
+                    u32,
+                ) -> u32 as *const () as usize,
         ),
         "waveInClose" => {
             Some(wave_in_close as extern "win64" fn(usize) -> u32 as *const () as usize)
         }
         "waveInPrepareHeader" => Some(
-            wave_in_prepare_header as unsafe extern "win64" fn(usize, *const u8, u32) -> u32
+            wave_in_prepare_header as unsafe extern "win64" fn(usize, *mut WAVEHDR, u32) -> u32
                 as *const () as usize,
         ),
         "waveInUnprepareHeader" => Some(
-            wave_in_unprepare_header as unsafe extern "win64" fn(usize, *const u8, u32) -> u32
+            wave_in_unprepare_header as unsafe extern "win64" fn(usize, *mut WAVEHDR, u32) -> u32
                 as *const () as usize,
         ),
         "waveInAddBuffer" => Some(
-            wave_in_add_buffer as unsafe extern "win64" fn(usize, *const u8, u32) -> u32
+            wave_in_add_buffer as unsafe extern "win64" fn(usize, *mut WAVEHDR, u32) -> u32
                 as *const () as usize,
         ),
         "waveInStart" => {
             Some(wave_in_start as extern "win64" fn(usize) -> u32 as *const () as usize)
         }
+        "waveInStop" => Some(wave_in_stop as extern "win64" fn(usize) -> u32 as *const () as usize),
         "waveInReset" => {
             Some(wave_in_reset as extern "win64" fn(usize) -> u32 as *const () as usize)
         }
         "waveInGetDevCapsW" => Some(
-            wave_in_get_dev_caps_w as unsafe extern "win64" fn(u32, *mut u8, u32) -> u32
+            wave_in_get_dev_caps_w as unsafe extern "win64" fn(u32, *mut WAVEINCAPSW, u32) -> u32
+                as *const () as usize,
+        ),
+        "waveInGetErrorTextW" => Some(
+            wave_in_get_error_text_w as unsafe extern "win64" fn(u32, *mut u16, u32) -> u32
                 as *const () as usize,
         ),
         "waveOutGetErrorTextW" => Some(
@@ -1464,6 +1890,16 @@ mod tests {
             "waveOutPause",
             "waveOutRestart",
             "waveInGetNumDevs",
+            "waveInOpen",
+            "waveInClose",
+            "waveInPrepareHeader",
+            "waveInUnprepareHeader",
+            "waveInAddBuffer",
+            "waveInStart",
+            "waveInStop",
+            "waveInReset",
+            "waveInGetDevCapsW",
+            "waveInGetErrorTextW",
         ];
         for f in &funcs {
             assert!(resolve("winmm.dll", f).is_some(), "missing {f}");
