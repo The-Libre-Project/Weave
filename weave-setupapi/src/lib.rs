@@ -89,6 +89,36 @@ pub unsafe extern "win64" fn SetupDiDestroyDeviceInfoList(_devinfo: usize) -> i3
     1 // TRUE
 }
 
+// ── Phase A stubs ─────────────────────────────────────────────────
+
+#[allow(unused_variables)]
+pub unsafe extern "win64" fn cm_get_device_id_a(
+    psz_device_id: *mut u8,
+    buffer_len: u32,
+    ul_flags: u32,
+    p_veto: *mut u8,
+) -> i32 {
+    0
+}
+
+#[allow(unused_variables)]
+pub unsafe extern "win64" fn cm_get_parent(
+    p_parent: *mut u32,
+    dev_inst: u32,
+    ul_flags: u32,
+) -> i32 {
+    0
+}
+
+#[allow(unused_variables)]
+pub unsafe extern "win64" fn cm_locate_dev_node_a(
+    p_dev_node: *mut u32,
+    p_device_id: *const u8,
+    ul_flags: u32,
+) -> i32 {
+    0
+}
+
 // ── DLL Resolver ─────────────────────────────────────────────────────────────
 
 /// Resolve a setupapi.dll import to a function pointer.
@@ -108,6 +138,16 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
             Some(SetupDiGetDeviceRegistryPropertyA as *const () as usize)
         }
         "SetupDiDestroyDeviceInfoList" => Some(SetupDiDestroyDeviceInfoList as *const () as usize),
+        // ── Phase A stubs ─────────────────────────────────────────────────
+        "CM_Get_Device_ID_A" => Some(
+            cm_get_device_id_a as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
+        ),
+        "CM_Get_Parent" => {
+            Some(cm_get_parent as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize)
+        }
+        "CM_Locate_DevNode_A" => Some(
+            cm_locate_dev_node_a as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
+        ),
         _ => None,
     }
 }

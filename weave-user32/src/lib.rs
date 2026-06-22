@@ -1527,6 +1527,42 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "GetAncestor" => {
             Some(api::get_ancestor as extern "win64" fn(_, _) -> _ as *const () as usize)
         }
+        // ── Phase A stubs ─────────────────────────────────────────────────
+        "AttachThreadInput" => Some(
+            api::attach_thread_input as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
+        ),
+        "CloseWindow" => {
+            Some(api::close_window as unsafe extern "win64" fn(_) -> _ as *const () as usize)
+        }
+        "GetCursor" => {
+            Some(api::get_cursor as unsafe extern "win64" fn() -> _ as *const () as usize)
+        }
+        "GetKeyNameTextW" => Some(
+            api::get_key_name_text_w as unsafe extern "win64" fn(_, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "GetMenuItemRect" => Some(
+            api::get_menu_item_rect as unsafe extern "win64" fn(_, _, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "HiliteMenuItem" => Some(
+            api::hilite_menu_item as unsafe extern "win64" fn(_, _, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "RegisterHotKey" => Some(
+            api::register_hot_key as unsafe extern "win64" fn(_, _, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "SendNotifyMessageW" => Some(
+            api::send_notify_message_w as unsafe extern "win64" fn(_, _, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "UnregisterHotKey" => Some(
+            api::unregister_hot_key as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
+        ),
+        "WinHelpW" => {
+            Some(api::win_help_w as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize)
+        }
         _ => None,
     }
 }

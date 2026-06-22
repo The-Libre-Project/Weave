@@ -1821,6 +1821,11 @@ pub fn resolve(func: &str) -> Option<usize> {
         "IsTextUnicode" => {
             Some(is_text_unicode as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize)
         }
+        // ── Phase A stubs ─────────────────────────────────────────────────
+        "RegEnumKeyW" => Some(
+            reg_enum_key_w as unsafe extern "win64" fn(_, _, _, _, _, _, _, _) -> _ as *const ()
+                as usize,
+        ),
         _ => None,
     }
 }
@@ -2704,6 +2709,22 @@ pub unsafe extern "win64" fn is_text_unicode(
     } else {
         0 // FALSE
     }
+}
+
+// ── Phase A stubs ─────────────────────────────────────────────────
+
+#[allow(unused_variables)]
+pub unsafe extern "win64" fn reg_enum_key_w(
+    hkey: usize,
+    dw_index: u32,
+    lp_name: *mut u16,
+    lpcch_name: *mut u32,
+    lp_reserved: *mut u32,
+    lp_class: *mut u16,
+    lpcch_class: *mut u32,
+    lpft_last_write_time: *mut u8,
+) -> i32 {
+    1 // ERROR_NO_MORE_ITEMS
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

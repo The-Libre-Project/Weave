@@ -2738,6 +2738,23 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "SetWindowExtEx" => Some(
             set_window_ext_ex as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
         ),
+        // ── Phase A stubs ─────────────────────────────────────────────────
+        "GetMetaFileW" => {
+            Some(get_meta_file_w as unsafe extern "win64" fn(_) -> _ as *const () as usize)
+        }
+        "GetNearestPaletteIndex" => Some(
+            get_nearest_palette_index as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
+        ),
+        "GetSystemPaletteEntries" => Some(
+            get_system_palette_entries as unsafe extern "win64" fn(_, _, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "PlayEnhMetaFile" => {
+            Some(play_enh_meta_file as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize)
+        }
+        "SetWinMetaFileBits" => Some(
+            set_win_meta_file_bits as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
+        ),
         _ => None,
     }
 }
@@ -5345,4 +5362,40 @@ pub unsafe extern "win64" fn set_window_ext_ex(
     _lp_size: *mut [i32; 2],
 ) -> i32 {
     0 // FALSE
+}
+
+// ── Phase A stubs ─────────────────────────────────────────────────
+
+#[allow(unused_variables)]
+pub unsafe extern "win64" fn get_meta_file_w(lp_filename: *const u16) -> usize {
+    0
+}
+
+#[allow(unused_variables)]
+pub unsafe extern "win64" fn get_nearest_palette_index(hdc: usize, cr_color: u32) -> u32 {
+    0
+}
+
+#[allow(unused_variables)]
+pub unsafe extern "win64" fn get_system_palette_entries(
+    hdc: usize,
+    u_start_index: u32,
+    u_num_entries: u32,
+    p_palette_entries: *mut u8,
+) -> u32 {
+    0
+}
+
+#[allow(unused_variables)]
+pub unsafe extern "win64" fn play_enh_meta_file(
+    hdc: usize,
+    h_enh_meta: usize,
+    lp_rect: *const u8,
+) -> i32 {
+    0
+}
+
+#[allow(unused_variables)]
+pub unsafe extern "win64" fn set_win_meta_file_bits(hdc: usize, hmf: usize) -> i32 {
+    0
 }

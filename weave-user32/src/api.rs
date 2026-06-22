@@ -10525,6 +10525,87 @@ pub extern "win64" fn get_ancestor(hwnd: usize, _ga_flags: u32) -> usize {
     hwnd
 }
 
+// ── Phase A stubs ─────────────────────────────────────────────────
+
+#[allow(unused_variables)]
+pub unsafe extern "win64" fn attach_thread_input(id_attach: u32, id_attach_to: u32) -> i32 {
+    0
+}
+
+#[allow(unused_variables)]
+pub unsafe extern "win64" fn close_window(hwnd: usize) -> i32 {
+    0
+}
+
+#[allow(unused_variables)]
+pub unsafe extern "win64" fn get_cursor() -> usize {
+    0
+}
+
+#[allow(unused_variables)]
+pub unsafe extern "win64" fn get_key_name_text_w(
+    v_key: i32,
+    lp_string: *mut u16,
+    cch_size: i32,
+) -> i32 {
+    0
+}
+
+#[allow(unused_variables)]
+pub unsafe extern "win64" fn get_menu_item_rect(
+    hwnd: usize,
+    hmenu: usize,
+    u_item: u32,
+    lprc: *mut u8,
+) -> i32 {
+    0
+}
+
+#[allow(unused_variables)]
+pub unsafe extern "win64" fn hilite_menu_item(
+    hwnd: usize,
+    hmenu: usize,
+    u_item_hilite: u32,
+    u_hilite: u32,
+) -> i32 {
+    0
+}
+
+#[allow(unused_variables)]
+pub unsafe extern "win64" fn register_hot_key(
+    hwnd: usize,
+    id: i32,
+    fs_modifiers: u32,
+    vk: u32,
+) -> i32 {
+    0
+}
+
+#[allow(unused_variables)]
+pub unsafe extern "win64" fn send_notify_message_w(
+    hwnd: usize,
+    msg: u32,
+    wparam: usize,
+    lparam: isize,
+) -> usize {
+    0
+}
+
+#[allow(unused_variables)]
+pub unsafe extern "win64" fn unregister_hot_key(hwnd: usize, id: i32) -> i32 {
+    0
+}
+
+#[allow(unused_variables)]
+pub unsafe extern "win64" fn win_help_w(
+    hwnd_main: usize,
+    lpsz_help: *const u16,
+    u_command: u32,
+    dw_data: usize,
+) -> i32 {
+    0
+}
+
 /// Resolve a UIAutomationCore.dll import to a stub address.
 ///
 /// Called by weave-cli's resolve chain. Uses eq_ignore_ascii_case because
