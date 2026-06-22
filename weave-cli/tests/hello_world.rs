@@ -9451,12 +9451,18 @@ fn audacity_phase_a_probe() {
     let has_sigsegv = stderr.contains("SIGSEGV") || stderr.contains("signal: 11");
     eprintln!("  PHASE: wWinMain={has_wWinMain} SIGSEGV={has_sigsegv}");
     eprintln!("  Unresolved imports: {}", unresolved.len());
-    eprintln!("  Companion DLL IAT resolution: {} lib-* DLLs need stub exports",
-        unresolved.iter().filter(|l| l.contains("lib-")).count());
+    eprintln!(
+        "  Companion DLL IAT resolution: {} lib-* DLLs need stub exports",
+        unresolved.iter().filter(|l| l.contains("lib-")).count()
+    );
 
     if has_sigsegv {
-        eprintln!("Audacity Phase B: SIGSEGV — companion DLLs have unresolved imports (stubbed to null).");
-        eprintln!("  Next step: register lib-*.dll DLLs in resolver + dump exports for stub generation.");
+        eprintln!(
+            "Audacity Phase B: SIGSEGV — companion DLLs have unresolved imports (stubbed to null)."
+        );
+        eprintln!(
+            "  Next step: register lib-*.dll DLLs in resolver + dump exports for stub generation."
+        );
     }
 
     eprintln!("====== Audacity Phase B Report Complete ======");

@@ -538,20 +538,43 @@ fn main() {
         // exports are already registered (regardless of HashMap iteration order).
         let mut side_dlls: Vec<(String, Vec<u8>, *mut u8)> = Vec::new();
 
-        for (dll_name, orig_name) in &import_dlls {
-            // Try original import-table case first, then lowercase fallback.
-            let dll_bytes = std::fs::read(exe_dir.join(orig_name))
-                .or_else(|_| std::fs::read(exe_dir.join(dll_name)));
-            let dll_bytes = match dll_bytes {
+        // First pass: load DLLs from the main exe's import table.
+        // Use a queue-based approach to handle transitive dependencies:
+        // when we load a DLL, its imports may reference other companion DLLs
+        // that weren't in the main exe's import table. Load those too.
+        let mut pending: Vec<String> = import_dlls.values().cloned().collect();
+        let mut loaded: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+        while let Some(dll_name) = pending.pop() {
+            let dll_key = dll_name.to_lowercase();
+            if loaded.contains(&dll_key) || dll_registry::is_registered(&dll_key) {
+                continue;
+            }
+            let dll_bytes = match std::fs::read(exe_dir.join(&dll_name))
+                .or_else(|_| std::fs::read(exe_dir.join(&dll_key)))
+            {
                 Ok(b) => b,
-                Err(_) => continue, // not present beside the exe — skip
+                Err(_) => continue,
             };
             match loader::load_dll(&dll_bytes) {
                 Ok((image, exports)) => {
                     let base = image.base;
-                    dll_registry::register(dll_name.clone(), image, exports);
+                    dll_registry::register(dll_key.clone(), image, exports);
                     eprintln!("weave: pre-loaded {dll_name} from exe dir");
-                    side_dlls.push((dll_name.clone(), dll_bytes, base));
+                    loaded.insert(dll_key.clone());
+                    side_dlls.push((dll_name, dll_bytes.clone(), base));
+                    // Discover transitive dependencies and add them to the queue.
+                    if let Ok(parsed) = weave_core::pe::parse(&dll_bytes) {
+                        for dep in &parsed.imports {
+                            let dep_key = dep.dll.to_lowercase();
+                            if dep_key != dll_key
+                                && !dll_registry::is_registered(&dep_key)
+                                && !loaded.contains(&dep_key)
+                            {
+                                pending.push(dep.dll.clone());
+                            }
+                        }
+                    }
                 }
                 Err(e) => {
                     eprintln!("weave: warning: could not load {dll_name} from exe dir: {e}");
