@@ -8948,27 +8948,28 @@ fn q_dir_file_pane_gate() {
 // SysListView32 via LVM_INSERTITEM. Phase markers:
 //   A1: PHASE: shell_enum_first — IEnumIDList::Next returned first PIDL
 //   A2: PHASE: listview_insert_first — LVM_INSERTITEM dispatched to ListView
-//   A3: no SIGSEGV/abort before 10s deadline
+//   A3: no SIGSEGV/abort before deadline
 //
 // NOTE (2026-06-17): Investigation (CI 27686477403) confirmed Q-Dir does
 // NOT use IShellFolder for initial file-pane display — it uses
 // FindFirstFile/FindNextFile (E3-M5b path). The shell_enum_first and
 // listview_insert_first markers are only reachable via interactive folder
-// navigation (double-click), which requires xdotool. This gate serves as a
-// non-blocking diagnostic: A3 regression guard only.
+// navigation (double-click).
+//
+// Approach: Create a temp prefix with a nested subdirectory
+// (drive_c/testdir/subdir/inner.txt) and use xdotool to double-click the
+// subdirectory entry in the file pane after dismissing the registration
+// dialog. This triggers the IShellFolder navigation path that produces
+// the shell_enum_first and listview_insert_first markers.
 //
 // E3-M5b regression guards (create_window_first, get_message_first,
 // find_first_file_first, find_next_file_first) are covered separately.
 /// E3-M5c Tier A gate: Q-Dir shell namespace integration — IShellFolder enum +
-/// ListView insert markers.
+/// ListView insert markers, triggered via xdotool double-click navigation.
 ///
 /// Fixture: tests/fixtures/q-dir/Q-Dir_x64.exe
-/// Skipped gracefully if the binary is absent.
-// #[ignore]: E3-M5c CLOSED, hypothesis falsified (Q-Dir uses FindFirstFile/FindNextFile, not IShellFolder).
-// The shell-namespace code path is not exercised by Q-Dir under headless Xvfb. Caused wildcard-batch
-// CI failure on every run. See CI-FAIL-LADDER.md Fail #91.
+/// Skipped gracefully if the binary or xdotool is absent.
 #[test]
-#[ignore]
 fn q_dir_shell_namespace_gate() {
     if !cfg!(target_os = "linux") {
         eprintln!("skipping q_dir_shell_namespace_gate — requires Linux");
@@ -8984,11 +8985,38 @@ fn q_dir_shell_namespace_gate() {
         return;
     }
 
+    let xdotool_ok = std::process::Command::new("xdotool")
+        .arg("version")
+        .output()
+        .is_ok();
+    if !xdotool_ok {
+        eprintln!("skipping: xdotool not available in PATH");
+        return;
+    }
+
     let weave_bin = env!("CARGO_BIN_EXE_weave");
+
+    // Create a temp prefix with a nested subdirectory so there's
+    // something to double-click and navigate into.
+    let temp_prefix = tempfile::tempdir().expect("failed to create tempdir for prefix");
+    let prefix_path = temp_prefix.path().to_path_buf();
+    let drive_testdir = prefix_path.join("drive_c").join("testdir");
+    let drive_subdir = drive_testdir.join("subdir");
+    std::fs::create_dir_all(&drive_subdir).expect("failed to create drive_c/testdir/subdir");
+    std::fs::write(drive_subdir.join("inner.txt"), b"shell namespace test")
+        .expect("failed to write test file");
+    eprintln!(
+        "q_dir_shell_namespace_gate: created temp prefix at {:?}",
+        prefix_path
+    );
 
     let mut child = std::process::Command::new(weave_bin)
         .current_dir(&q_dir_dir)
+        .arg("--prefix")
+        .arg(&prefix_path)
+        .arg("--no-sandbox")
         .arg(&q_dir_exe)
+        .arg("C:\\testdir")
         .env("DISPLAY", ":99")
         .stderr(std::process::Stdio::piped())
         .spawn()
@@ -8999,15 +9027,23 @@ fn q_dir_shell_namespace_gate() {
     let stderr_writer = std::sync::Arc::clone(&stderr_shared);
     let drain_thread = std::thread::spawn(move || {
         use std::io::Read;
-        let mut buf = Vec::new();
         let mut pipe = stderr_pipe;
-        let _ = pipe.read_to_end(&mut buf);
-        *stderr_writer.lock().unwrap() = buf;
+        let mut chunk = [0u8; 4096];
+        loop {
+            match pipe.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => stderr_writer.lock().unwrap().extend_from_slice(&chunk[..n]),
+                Err(_) => break,
+            }
+        }
     });
 
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
     let mut exit_status: Option<std::process::ExitStatus> = None;
     let mut killed_by_deadline = false;
+    let mut paint_seen = false;
+    let mut drive_done = false;
+    let mut nav_clicked = false;
 
     loop {
         match child.try_wait() {
@@ -9020,6 +9056,57 @@ fn q_dir_shell_namespace_gate() {
                     let _ = child.kill();
                     killed_by_deadline = true;
                     break;
+                }
+                if !paint_seen {
+                    let stderr_bytes = stderr_shared.lock().unwrap().clone();
+                    let stderr = String::from_utf8_lossy(&stderr_bytes);
+                    if stderr.contains("PHASE: wm_paint_dispatched_first") {
+                        paint_seen = true;
+                        eprintln!("q_dir_shell_namespace_gate: paint seen — dismissing registration dialog");
+                    }
+                }
+                if paint_seen && !drive_done {
+                    std::thread::sleep(std::time::Duration::from_millis(600));
+                    eprintln!(
+                        "q_dir_shell_namespace_gate: sending Escape to dismiss registration dialog"
+                    );
+                    let _ = std::process::Command::new("xdotool")
+                        .args(["key", "Escape"])
+                        .output();
+                    std::thread::sleep(std::time::Duration::from_secs(2));
+                    drive_done = true;
+                }
+                if drive_done && !nav_clicked {
+                    std::thread::sleep(std::time::Duration::from_secs(2));
+                    eprintln!("q_dir_shell_namespace_gate: double-clicking first entry to trigger IShellFolder navigation");
+                    let search_out = std::process::Command::new("xdotool")
+                        .args(["search", "--name", "Q-Dir"])
+                        .output();
+                    if let Ok(out) = search_out {
+                        let stdout = String::from_utf8_lossy(&out.stdout);
+                        let win_id = stdout.trim().to_string();
+                        if !win_id.is_empty() {
+                            let _ = std::process::Command::new("xdotool")
+                                .args(["windowfocus", &win_id])
+                                .output();
+                            std::thread::sleep(std::time::Duration::from_millis(200));
+                            let _ = std::process::Command::new("xdotool")
+                                .args(["mousemove", "--window", &win_id, "70", "70"])
+                                .output();
+                            std::thread::sleep(std::time::Duration::from_millis(100));
+                            let _ = std::process::Command::new("xdotool")
+                                .args(["click", "1"])
+                                .output();
+                            std::thread::sleep(std::time::Duration::from_millis(100));
+                            let _ = std::process::Command::new("xdotool")
+                                .args(["click", "1"])
+                                .output();
+                        } else {
+                            eprintln!("q_dir_shell_namespace_gate: no Q-Dir window found");
+                        }
+                    }
+                    std::thread::sleep(std::time::Duration::from_secs(3));
+                    nav_clicked = true;
                 }
                 std::thread::sleep(std::time::Duration::from_millis(100));
             }
@@ -9050,12 +9137,12 @@ fn q_dir_shell_namespace_gate() {
 
     assert!(
         stderr.contains("PHASE: shell_enum_first"),
-        "Q-Dir shell namespace Gate A1 FAIL: shell_enum_first not seen within 10s\nstderr: {stderr}"
+        "Q-Dir shell namespace Gate A1 FAIL: shell_enum_first not seen within 15s\nstderr: {stderr}"
     );
 
     assert!(
         stderr.contains("PHASE: listview_insert_first"),
-        "Q-Dir shell namespace Gate A2 FAIL: listview_insert_first not seen within 10s\nstderr: {stderr}"
+        "Q-Dir shell namespace Gate A2 FAIL: listview_insert_first not seen within 15s\nstderr: {stderr}"
     );
 
     eprintln!("q_dir_shell_namespace_gate: A1+A2+A3 passed");
