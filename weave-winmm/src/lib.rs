@@ -163,7 +163,7 @@ fn wave_out_session_mutex() -> &'static Mutex<Option<WaveOutSession>> {
 
 #[cfg(feature = "pipewire-audio")]
 struct WaveInSession {
-    ring_buf: Arc<Mutex<RingBuf<409600>>>,
+    ring_buf: Arc<Mutex<RingBuf>>,
     buffer_queue: Arc<Mutex<VecDeque<SendWaveHdr>>>,
     pw_state: Option<PwState>,
     callback: usize,
