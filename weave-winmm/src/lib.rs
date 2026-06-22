@@ -225,8 +225,8 @@ const WOM_DONE: u32 = 0x3BD;
 #[cfg(feature = "pipewire-audio")]
 const WIM_OPEN: u32 = 0x3BE;
 #[cfg(feature = "pipewire-audio")]
-    #[allow(dead_code)]
-    const WIM_CLOSE: u32 = 0x3BF;
+#[allow(dead_code)]
+const WIM_CLOSE: u32 = 0x3BF;
 #[cfg(feature = "pipewire-audio")]
 const WIM_DATA: u32 = 0x3C0;
 
