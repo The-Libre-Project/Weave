@@ -26,13 +26,25 @@ for asset in release['assets']:
         urllib.request.urlretrieve(asset['browser_download_url'], '/tmp/audacity.zip')
         with zipfile.ZipFile('/tmp/audacity.zip', 'r') as zf:
             zf.extractall('/tmp/audacity_extracted')
-        for root, dirs, files in os.walk('/tmp/audacity_extracted'):
-            for f in files:
-                if f.lower() == 'audacity.exe':
-                    src = os.path.join(root, f)
-                    shutil.copy2(src, 'tests/fixtures/audacity/audacity.exe')
-                    print(f'Copied {src}')
-                    break
+        extract_dir = '/tmp/audacity_extracted'
+        with zipfile.ZipFile('/tmp/audacity.zip', 'r') as zf:
+            zf.extractall(extract_dir)
+        # Find the extracted directory (contains a versioned subfolder).
+        items = os.listdir(extract_dir)
+        # Copy all DLLs and the exe into the fixture dir.
+        for item in items:
+            item_path = os.path.join(extract_dir, item)
+            if os.path.isdir(item_path):
+                # Versioned subfolder — copy contents.
+                for root, dirs, files in os.walk(item_path):
+                    for f in files:
+                        if f.lower().endswith('.exe') or f.lower().endswith('.dll'):
+                            src = os.path.join(root, f)
+                            shutil.copy2(src, os.path.join('tests/fixtures/audacity/', f))
+                        if f.lower().endswith('.xml') or f.lower() == 'license.txt':
+                            src = os.path.join(root, f)
+                            shutil.copy2(src, os.path.join('tests/fixtures/audacity/', f))
+        print(f'Copied Audacity bundle to tests/fixtures/audacity/')
         break
 else:
     print('ERROR: no portable zip found for', tag)
