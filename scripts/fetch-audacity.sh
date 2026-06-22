@@ -21,7 +21,7 @@ print(f'Audacity latest: {tag}')
 
 for asset in release['assets']:
     name = asset['name']
-    if name.endswith('-x64.zip') and 'portable' in name.lower():
+    if name.endswith('-64bit.zip') and 'win-' in name.lower():
         print(f'Downloading {name}...')
         urllib.request.urlretrieve(asset['browser_download_url'], '/tmp/audacity.zip')
         with zipfile.ZipFile('/tmp/audacity.zip', 'r') as zf:
