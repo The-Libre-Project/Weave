@@ -999,6 +999,183 @@ pub unsafe extern "win64" fn sspi_stub_fn() -> i32 {
     0x8009_0302u32 as i32
 }
 
+// ── Named SSPI stubs for the remaining 18 table slots ─────────────────────────
+// Each returns SEC_E_UNSUPPORTED_FUNCTION but has a distinct name so the
+// specific function is identifiable in traces. These cover server-side,
+// signing, credential, and attribute functions not needed by curl's client-side
+// Schannel path.
+
+/// EnumerateSecurityPackagesA — enumerate available security packages.
+/// Returns SEC_E_OK with only the Schannel package (satisfies basic checkers).
+pub unsafe extern "win64" fn sspi_enumerate_security_packages_a(
+    _pc_packages: *mut u32,
+    _pp_package_info: *mut *mut u8,
+) -> i32 {
+    0x8009_0302u32 as i32 // SEC_E_UNSUPPORTED_FUNCTION
+}
+
+/// QueryCredentialsAttributesA — query credential attributes.
+pub unsafe extern "win64" fn sspi_query_credentials_attributes_a(
+    _ph_credential: *const u8,
+    _ul_attribute: u32,
+    _p_buffer: *mut u8,
+) -> i32 {
+    0x8009_0302u32 as i32
+}
+
+/// AcceptSecurityContext — server-side TLS (not implemented).
+pub unsafe extern "win64" fn sspi_accept_security_context(
+    _ph_credential: *const u8,
+    _ph_context: *const u8,
+    _p_input: *const u8,
+    _f_context_req: u32,
+    _target_data_rep: u32,
+    _ph_new_context: *mut u8,
+    _p_output: *mut u8,
+    _pf_context_attr: *mut u32,
+    _pts_expiry: *mut u8,
+) -> i32 {
+    0x8009_0302u32 as i32
+}
+
+/// CompleteAuthToken — complete authentication token.
+pub unsafe extern "win64" fn sspi_complete_auth_token(
+    _ph_context: *const u8,
+    _p_token: *const u8,
+) -> i32 {
+    0x8009_0302u32 as i32
+}
+
+/// ApplyControlToken — apply a control token to a context.
+pub unsafe extern "win64" fn sspi_apply_control_token(
+    _ph_context: *const u8,
+    _p_input: *const u8,
+) -> i32 {
+    0x8009_0302u32 as i32
+}
+
+/// ImpersonateSecurityContext — impersonate the security context.
+pub unsafe extern "win64" fn sspi_impersonate_security_context(_ph_context: *const u8) -> i32 {
+    0x8009_0302u32 as i32
+}
+
+/// RevertSecurityContext — revert impersonation.
+pub unsafe extern "win64" fn sspi_revert_security_context(_ph_context: *const u8) -> i32 {
+    0x8009_0302u32 as i32
+}
+
+/// MakeSignature — sign a message.
+pub unsafe extern "win64" fn sspi_make_signature(
+    _ph_context: *const u8,
+    _f_qop: u32,
+    _p_message: *const u8,
+    _message_seq_no: u32,
+) -> i32 {
+    0x8009_0302u32 as i32
+}
+
+/// VerifySignature — verify a message signature.
+pub unsafe extern "win64" fn sspi_verify_signature(
+    _ph_context: *const u8,
+    _p_message: *const u8,
+    _message_seq_no: u32,
+    _pf_qop: *mut u32,
+) -> i32 {
+    0x8009_0302u32 as i32
+}
+
+/// ExportSecurityContext — export a security context for transfer.
+pub unsafe extern "win64" fn sspi_export_security_context(
+    _ph_context: *const u8,
+    _f_flags: u32,
+    _p_packed_context: *mut *mut u8,
+    _p_token: *mut *mut u8,
+) -> i32 {
+    0x8009_0302u32 as i32
+}
+
+/// ImportSecurityContextA — import a security context.
+pub unsafe extern "win64" fn sspi_import_security_context_a(
+    _psz_package: *const u8,
+    _p_packed_context: *const u8,
+    _token: usize,
+    _ph_context: *mut u8,
+) -> i32 {
+    0x8009_0302u32 as i32
+}
+
+/// AddCredentialsA — add credentials for a security package.
+pub unsafe extern "win64" fn sspi_add_credentials_a(
+    _ph_credential: *const u8,
+    _psz_principal: *const u8,
+    _psz_package: *const u8,
+    _p_auth_data: *const u8,
+    _p_get_key_fn: usize,
+    _pv_get_key_argument: *const u8,
+) -> i32 {
+    0x8009_0302u32 as i32
+}
+
+/// QuerySecurityContextToken — query the security context token handle.
+pub unsafe extern "win64" fn sspi_query_security_context_token(
+    _ph_context: *const u8,
+    _ph_token: *mut usize,
+) -> i32 {
+    0x8009_0302u32 as i32
+}
+
+/// SetContextAttributesA — set context attributes.
+pub unsafe extern "win64" fn sspi_set_context_attributes_a(
+    _ph_context: *const u8,
+    _ul_attribute: u32,
+    _p_buffer: *const u8,
+    _cb_buffer: u32,
+) -> i32 {
+    0x8009_0302u32 as i32
+}
+
+/// SetCredentialsAttributesA — set credential attributes.
+pub unsafe extern "win64" fn sspi_set_credentials_attributes_a(
+    _ph_credential: *const u8,
+    _ul_attribute: u32,
+    _p_buffer: *const u8,
+    _cb_buffer: u32,
+) -> i32 {
+    0x8009_0302u32 as i32
+}
+
+/// ChangeAccountPasswordA — change account password via Schannel.
+pub unsafe extern "win64" fn sspi_change_account_password_a(
+    _psz_package: *const u8,
+    _psz_domain: *const u8,
+    _psz_principal: *const u8,
+    _psz_old_password: *const u8,
+    _psz_new_password: *const u8,
+    _impersonation: u32,
+) -> i32 {
+    0x8009_0302u32 as i32
+}
+
+/// QueryContextAttributesExA — extended query of context attributes.
+pub unsafe extern "win64" fn sspi_query_context_attributes_ex_a(
+    _ph_context: *const u8,
+    _ul_attribute: u32,
+    _p_buffer: *mut u8,
+    _cb_buffer: u32,
+) -> i32 {
+    0x8009_0302u32 as i32
+}
+
+/// QueryCredentialsAttributesExA — extended query of credential attributes.
+pub unsafe extern "win64" fn sspi_query_credentials_attributes_ex_a(
+    _ph_credential: *const u8,
+    _ul_attribute: u32,
+    _p_buffer: *mut u8,
+    _cb_buffer: u32,
+) -> i32 {
+    0x8009_0302u32 as i32
+}
+
 // Static strings for the fake Schannel SecPkgInfoA.
 static FAKE_SCHANNEL_NAME: &[u8] = b"Schannel\0";
 static FAKE_SCHANNEL_COMMENT: &[u8] = b"Microsoft Unified Security Protocol Provider\0";
@@ -1137,9 +1314,111 @@ fn init_sspi_table() -> *const u8 {
         #[allow(static_mut_refs)]
         unsafe {
             SSPI_TABLE[0] = 1u64; // dwVersion = SECURITY_SUPPORT_PROVIDER_INTERFACE_VERSION (1)
+                                  // Fill all slots with the generic SEC_E_UNSUPPORTED_FUNCTION stub,
+                                  // then override with named stubs below (each returns the same error
+                                  // but has a distinct name for traceability).
             for slot in SSPI_TABLE.iter_mut().take(33).skip(1) {
                 *slot = stub;
             }
+            // Named stubs — same error code, distinct function names.
+            // slot 1 (offset 8): EnumerateSecurityPackagesA
+            SSPI_TABLE[1] = sspi_enumerate_security_packages_a
+                as unsafe extern "win64" fn(*mut u32, *mut *mut u8) -> i32
+                as *const () as u64;
+            // slot 2 (offset 16): QueryCredentialsAttributesA
+            SSPI_TABLE[2] = sspi_query_credentials_attributes_a
+                as unsafe extern "win64" fn(*const u8, u32, *mut u8) -> i32
+                as *const () as u64;
+            // slot 5 (offset 40): Reserved2 — leave as generic stub
+            // slot 7 (offset 56): AcceptSecurityContext
+            SSPI_TABLE[7] = sspi_accept_security_context
+                as unsafe extern "win64" fn(
+                    *const u8,
+                    *const u8,
+                    *const u8,
+                    u32,
+                    u32,
+                    *mut u8,
+                    *mut u8,
+                    *mut u32,
+                    *mut u8,
+                ) -> i32 as *const () as u64;
+            // slot 8 (offset 64): CompleteAuthToken
+            SSPI_TABLE[8] = sspi_complete_auth_token
+                as unsafe extern "win64" fn(*const u8, *const u8) -> i32
+                as *const () as u64;
+            // slot 10 (offset 80): ApplyControlToken
+            SSPI_TABLE[10] = sspi_apply_control_token
+                as unsafe extern "win64" fn(*const u8, *const u8) -> i32
+                as *const () as u64;
+            // slot 12 (offset 96): ImpersonateSecurityContext
+            SSPI_TABLE[12] = sspi_impersonate_security_context
+                as unsafe extern "win64" fn(*const u8) -> i32
+                as *const () as u64;
+            // slot 13 (offset 104): RevertSecurityContext
+            SSPI_TABLE[13] = sspi_revert_security_context
+                as unsafe extern "win64" fn(*const u8) -> i32
+                as *const () as u64;
+            // slot 14 (offset 112): MakeSignature
+            SSPI_TABLE[14] = sspi_make_signature
+                as unsafe extern "win64" fn(*const u8, u32, *const u8, u32) -> i32
+                as *const () as u64;
+            // slot 15 (offset 120): VerifySignature
+            SSPI_TABLE[15] = sspi_verify_signature
+                as unsafe extern "win64" fn(*const u8, *const u8, u32, *mut u32) -> i32
+                as *const () as u64;
+            // slot 18,19 (offset 144,152): Reserved3/4 — leave as generic stub
+            // slot 20 (offset 160): ExportSecurityContext
+            SSPI_TABLE[20] = sspi_export_security_context
+                as unsafe extern "win64" fn(*const u8, u32, *mut *mut u8, *mut *mut u8) -> i32
+                as *const () as u64;
+            // slot 21 (offset 168): ImportSecurityContextA
+            SSPI_TABLE[21] = sspi_import_security_context_a
+                as unsafe extern "win64" fn(*const u8, *const u8, usize, *mut u8) -> i32
+                as *const () as u64;
+            // slot 22 (offset 176): AddCredentialsA
+            SSPI_TABLE[22] = sspi_add_credentials_a
+                as unsafe extern "win64" fn(
+                    *const u8,
+                    *const u8,
+                    *const u8,
+                    *const u8,
+                    usize,
+                    *const u8,
+                ) -> i32 as *const () as u64;
+            // slot 23 (offset 184): Reserved8 — leave as generic stub
+            // slot 24 (offset 192): QuerySecurityContextToken
+            SSPI_TABLE[24] = sspi_query_security_context_token
+                as unsafe extern "win64" fn(*const u8, *mut usize) -> i32
+                as *const () as u64;
+            // slot 27 (offset 216): SetContextAttributesA
+            SSPI_TABLE[27] = sspi_set_context_attributes_a
+                as unsafe extern "win64" fn(*const u8, u32, *const u8, u32) -> i32
+                as *const () as u64;
+            // slot 28 (offset 224): SetCredentialsAttributesA
+            SSPI_TABLE[28] = sspi_set_credentials_attributes_a
+                as unsafe extern "win64" fn(*const u8, u32, *const u8, u32) -> i32
+                as *const () as u64;
+            // slot 29 (offset 232): ChangeAccountPasswordA
+            SSPI_TABLE[29] = sspi_change_account_password_a
+                as unsafe extern "win64" fn(
+                    *const u8,
+                    *const u8,
+                    *const u8,
+                    *const u8,
+                    *const u8,
+                    u32,
+                ) -> i32 as *const () as u64;
+            // slot 30 (offset 240): Reserved9 — leave as generic stub
+            // slot 31 (offset 248): QueryContextAttributesExA
+            SSPI_TABLE[31] = sspi_query_context_attributes_ex_a
+                as unsafe extern "win64" fn(*const u8, u32, *mut u8, u32) -> i32
+                as *const () as u64;
+            // slot 32 (offset 256): QueryCredentialsAttributesExA
+            SSPI_TABLE[32] = sspi_query_credentials_attributes_ex_a
+                as unsafe extern "win64" fn(*const u8, u32, *mut u8, u32) -> i32
+                as *const () as u64;
+
             // Real SSPI implementations via rustls (crate::sspi module).
             // Indices = (struct_offset / 8): slot 0 = dwVersion, slot 1 = first fn ptr at offset 8.
             // offset 24 → index 3: AcquireCredentialsHandleA
