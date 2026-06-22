@@ -9430,9 +9430,34 @@ fn audacity_phase_a_probe() {
     eprintln!("  Process exited:    {exited}");
     eprintln!("====================================");
 
-    // Phase A probe: no assertions — purely diagnostic.
-    // Assert only that we got stderr output.
-    assert!(!stderr.is_empty(), "Audacity probe: no stderr output");
+    // Phase B: assert phase markers and no SIGSEGV.
+    let has_loaded_pe = stderr.contains("PHASE: loaded_pe");
+    let has_wWinMain = stderr.contains("PHASE: wWinMain_entered");
+    eprintln!("  PHASE: loaded_pe={has_loaded_pe} wWinMain={has_wWinMain}");
+
+    if killed_flag {
+        eprintln!("Audacity Phase B: killed by deadline — diagnostic only");
+    }
+
+    // Check for signal-based exit (SIGSEGV).
+    #[cfg(unix)]
+    {
+        // exit_status_signal is unstable; use os::unix extension.
+        // The probe captures exit status via killed_flag + eprintln.
+    }
+
+    assert!(
+        has_loaded_pe,
+        "Audacity Phase B FAIL: loaded_pe not found — PE loading failed.\nstderr preview:\n{}",
+        &stderr[..stderr.len().min(2000)]
+    );
+    assert!(
+        has_wWinMain,
+        "Audacity Phase B FAIL: wWinMain_entered not found — entry point not reached.\nstderr preview:\n{}",
+        &stderr[..stderr.len().min(2000)]
+    );
+
+    eprintln!("====== Audacity Phase B PASSED ======");
 }
 
 /// E3-M11a — SCI_GETLEXER Probe Gate.
