@@ -139,13 +139,13 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         }
         "SetupDiDestroyDeviceInfoList" => Some(SetupDiDestroyDeviceInfoList as *const () as usize),
         // ── Phase A stubs ─────────────────────────────────────────────────
-        "CM_Get_Device_ID_A" => Some(
+        "CM_Get_Device_IDA" => Some(
             cm_get_device_id_a as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
         ),
         "CM_Get_Parent" => {
             Some(cm_get_parent as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize)
         }
-        "CM_Locate_DevNode_A" => Some(
+        "CM_Locate_DevNodeA" => Some(
             cm_locate_dev_node_a as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
         ),
         _ => None,
