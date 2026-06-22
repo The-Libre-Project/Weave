@@ -9077,73 +9077,26 @@ fn q_dir_shell_namespace_gate() {
                     drive_done = true;
                 }
                 if drive_done && !nav_clicked {
-                    // Add a more generous wait for the Q-Dir window to appear and get focus.
+                    // Use keyboard navigation instead of mouse position, which is
+                    // more reliable under Xvfb. Tab through to the file pane,
+                    // arrow down to the first folder, then Enter to open it.
                     std::thread::sleep(std::time::Duration::from_secs(3));
-                    eprintln!(
-                        "q_dir_shell_namespace_gate: searching for Q-Dir window to double-click"
-                    );
-                    // Retry window search up to 3 times with 1s gaps.
-                    let mut win_id = None;
-                    for attempt in 1..=3 {
-                        // Try multiple xdotool search strategies: name, class, then fall back to active window.
-                        win_id = std::process::Command::new("xdotool")
-                            .args(["search", "--name", "Q-Dir"])
-                            .output()
-                            .ok()
-                            .and_then(|o| {
-                                let id = String::from_utf8_lossy(&o.stdout).trim().to_string();
-                                if !id.is_empty() { Some(id) } else { None }
-                            })
-                            .or_else(|| {
-                                std::process::Command::new("xdotool")
-                                    .args(["search", "--class", "Q-Dir"])
-                                    .output()
-                                    .ok()
-                                    .and_then(|o| {
-                                        let id = String::from_utf8_lossy(&o.stdout).trim().to_string();
-                                        if !id.is_empty() { Some(id) } else { None }
-                                    })
-                            })
-                            .or_else(|| {
-                                std::process::Command::new("xdotool")
-                                    .args(["getactivewindow"])
-                                    .output()
-                                    .ok()
-                                    .and_then(|o| {
-                                        let id = String::from_utf8_lossy(&o.stdout).trim().to_string();
-                                        if !id.is_empty() { Some(id) } else { None }
-                                    })
-                            });
-                        if win_id.is_some() {
-                            eprintln!("q_dir_shell_namespace_gate: found window on attempt {attempt}");
-                            break;
-                        }
-                        eprintln!("q_dir_shell_namespace_gate: window not found on attempt {attempt}, retrying...");
-                        std::thread::sleep(std::time::Duration::from_secs(1));
+                    eprintln!("q_dir_shell_namespace_gate: sending keyboard navigation (Tab, Down, Enter)");
+                    for _ in 0..3 {
+                        let _ = std::process::Command::new("xdotool")
+                            .args(["key", "Tab"])
+                            .output();
+                        std::thread::sleep(std::time::Duration::from_millis(300));
                     }
-                    if let Some(ref wid) = win_id {
-                        let _ = std::process::Command::new("xdotool")
-                            .args(["windowfocus", wid])
-                            .output();
-                        std::thread::sleep(std::time::Duration::from_millis(200));
-                        let _ = std::process::Command::new("xdotool")
-                            .args(["mousemove", "--window", wid, "70", "70"])
-                            .output();
-                        std::thread::sleep(std::time::Duration::from_millis(100));
-                        let _ = std::process::Command::new("xdotool")
-                            .args(["click", "1"])
-                            .output();
-                        std::thread::sleep(std::time::Duration::from_millis(100));
-                        let _ = std::process::Command::new("xdotool")
-                            .args(["click", "1"])
-                            .output();
-                        eprintln!(
-                            "q_dir_shell_namespace_gate: double-click on window {wid} at 70,70"
-                        );
-                    } else {
-                        eprintln!("q_dir_shell_namespace_gate: no Q-Dir window found via name/class/active");
-                    }
+                    let _ = std::process::Command::new("xdotool")
+                        .args(["key", "Down"])
+                        .output();
+                    std::thread::sleep(std::time::Duration::from_millis(300));
+                    let _ = std::process::Command::new("xdotool")
+                        .args(["key", "Return"])
+                        .output();
                     std::thread::sleep(std::time::Duration::from_secs(3));
+                    eprintln!("q_dir_shell_namespace_gate: keyboard navigation sent");
                     nav_clicked = true;
                 }
                 std::thread::sleep(std::time::Duration::from_millis(100));
