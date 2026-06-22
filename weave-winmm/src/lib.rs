@@ -12,6 +12,18 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 #[cfg(feature = "pipewire-audio")]
 use std::collections::VecDeque;
+
+// WAVEHDR contains raw pointers but is only accessed under the session mutex.
+// The PipeWire capture callback runs on a different thread; the WAVEHDR pointer
+// is valid until the guest calls waveInUnprepareHeader. Safe because the Mutex
+// serializes all access.
+#[cfg(feature = "pipewire-audio")]
+#[repr(transparent)]
+struct SendWaveHdr(*mut crate::WAVEHDR);
+#[cfg(feature = "pipewire-audio")]
+unsafe impl Send for SendWaveHdr {}
+#[cfg(feature = "pipewire-audio")]
+unsafe impl Sync for SendWaveHdr {}
 #[cfg(feature = "pipewire-audio")]
 use std::sync::{Arc, Mutex};
 
@@ -151,8 +163,8 @@ fn wave_out_session_mutex() -> &'static Mutex<Option<WaveOutSession>> {
 
 #[cfg(feature = "pipewire-audio")]
 struct WaveInSession {
-    ring_buf: Arc<Mutex<RingBuf>>,
-    buffer_queue: Arc<Mutex<VecDeque<*mut WAVEHDR>>>,
+    ring_buf: Arc<Mutex<RingBuf<409600>>>,
+    buffer_queue: Arc<Mutex<VecDeque<SendWaveHdr>>>,
     pw_state: Option<PwState>,
     callback: usize,
     instance: usize,
@@ -1006,7 +1018,7 @@ pub unsafe extern "win64" fn wave_out_get_id(_hwo: usize, pud_device_id: *mut u3
 #[cfg(feature = "pipewire-audio")]
 unsafe fn drain_capture_buffers(
     ring: &mut RingBuf,
-    queue: &mut VecDeque<*mut WAVEHDR>,
+    queue: &mut VecDeque<SendWaveHdr>,
     callback: usize,
     instance: usize,
     flags: u32,
@@ -1016,7 +1028,7 @@ unsafe fn drain_capture_buffers(
             Some(p) => p,
             None => break,
         };
-        let hdr = &mut *hdr_ptr;
+        let hdr = &mut *hdr_ptr.0;
         let cap = hdr.dwBufferLength as usize;
         if cap == 0 || hdr.lpData.is_null() {
             continue;
@@ -1317,7 +1329,7 @@ pub unsafe extern "win64" fn wave_in_add_buffer(_hwi: usize, pwh: *mut WAVEHDR, 
                         .buffer_queue
                         .lock()
                         .unwrap_or_else(|p| p.into_inner());
-                    queue.push_back(pwh);
+                    queue.push_back(SendWaveHdr(pwh));
                     // Attempt to drain any accumulated audio into the queued buffer.
                     if let Ok(mut ring) = session.ring_buf.lock() {
                         unsafe {
