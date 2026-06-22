@@ -283,24 +283,253 @@ pub extern "win64" fn wave_out_set_volume(_hwo: usize, _dw_volume: u32) -> u32 {
     6 // MMSYSERR_NODRIVER
 }
 
+// Wine ref: dlls/winmm/waveform.c — PlaySoundA/W delegates to waveOut for file playback.
+// Supports SND_FILENAME (path to .wav file) + SND_SYNC/SND_ASYNC.
+// SND_ALIAS, SND_MEMORY, SND_LOOP, SND_NODEFAULT, SND_NOSTOP, SND_PURGE deferred.
+const SND_FILENAME: u32 = 0x00020000;
+const SND_ASYNC: u32 = 0x0001;
+const SND_SYNC: u32 = 0x0000;
+const SND_NODEFAULT: u32 = 0x0002;
+const SND_NOSTOP: u32 = 0x0010;
+const SND_LOOP: u32 = 0x0008;
+
+/// Parse a WAV file and play it via waveOut.
+///
 /// # Safety
-/// Pointer arguments are accepted but not dereferenced.
+/// `psz_sound` must be a null-terminated wide string pointing to a .wav file path.
 pub unsafe extern "win64" fn play_sound_w(
-    _psz_sound: *const u16,
+    psz_sound: *const u16,
     _hmod: usize,
-    _fdw_sound: u32,
+    fdw_sound: u32,
 ) -> i32 {
-    0 // FALSE
+    // Only SND_FILENAME is implemented.
+    if psz_sound.is_null() || (fdw_sound & SND_FILENAME) == 0 {
+        // SND_ALIAS, SND_MEMORY, and default sound events are not implemented.
+        // Return TRUE for SND_NODEFAULT? No — SND_NODEFAULT means don't fall back to default sound.
+        // Without SND_FILENAME, we have nothing to play.
+        return if (fdw_sound & SND_NODEFAULT) != 0 {
+            1
+        } else {
+            0
+        };
+    }
+
+    // Walk the null-terminated wide string to find its length.
+    let mut path_len = 0usize;
+    while unsafe { *psz_sound.add(path_len) } != 0 {
+        path_len += 1;
+    }
+    let path_wide = unsafe { std::slice::from_raw_parts(psz_sound, path_len) };
+    let path_str = String::from_utf16_lossy(&path_wide);
+    let linux_path = path_str.replace('\\', "/");
+    // Strip Z: drive prefix if present.
+    let linux_path = linux_path
+        .strip_prefix("Z:/")
+        .or(linux_path.strip_prefix("Z:\\"))
+        .unwrap_or(&linux_path);
+
+    eprintln!("weave/PlaySoundW: playing '{linux_path}' flags={fdw_sound:#x}");
+
+    // Read the WAV file.
+    let wav_data = match std::fs::read(&linux_path) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("weave/PlaySoundW: failed to read '{linux_path}': {e}");
+            return 0; // FALSE
+        }
+    };
+    if wav_data.len() < 44 {
+        eprintln!("weave/PlaySoundW: file too small for WAV header");
+        return 0;
+    }
+
+    // Parse RIFF/WAV header.
+    // Offset 0: "RIFF", offset 8: "WAVE", offset 12: "fmt ", offset 16: fmt chunk size
+    if &wav_data[..4] != b"RIFF" || &wav_data[8..12] != b"WAVE" {
+        eprintln!("weave/PlaySoundW: not a WAV file");
+        return 0;
+    }
+
+    // Find the fmt chunk.
+    let mut fmt_offset = 12;
+    loop {
+        if fmt_offset + 8 > wav_data.len() {
+            eprintln!("weave/PlaySoundW: no fmt chunk found");
+            return 0;
+        }
+        let chunk_id = &wav_data[fmt_offset..fmt_offset + 4];
+        let chunk_size = u32::from_le_bytes([
+            wav_data[fmt_offset + 4],
+            wav_data[fmt_offset + 5],
+            wav_data[fmt_offset + 6],
+            wav_data[fmt_offset + 7],
+        ]) as usize;
+        if chunk_id == b"fmt " {
+            break;
+        }
+        fmt_offset += 8 + chunk_size;
+        // Round to even boundary per RIFF spec.
+        if chunk_size % 2 != 0 {
+            fmt_offset += 1;
+        }
+    }
+
+    let fmt_data = &wav_data[fmt_offset + 8..];
+    let format_tag = u16::from_le_bytes([fmt_data[0], fmt_data[1]]);
+    if format_tag != 1 {
+        // Only PCM (format 1) is supported.
+        eprintln!("weave/PlaySoundW: unsupported format {format_tag} (only PCM/1 supported)");
+        return 0;
+    }
+    let channels = u16::from_le_bytes([fmt_data[2], fmt_data[3]]) as u32;
+    let sample_rate = u32::from_le_bytes([fmt_data[4], fmt_data[5], fmt_data[6], fmt_data[7]]);
+    let bits_per_sample = u16::from_le_bytes([fmt_data[14], fmt_data[15]]);
+
+    // Find the data chunk by scanning after the fmt chunk.
+    let fmt_chunk_size = u32::from_le_bytes([
+        wav_data[fmt_offset + 4],
+        wav_data[fmt_offset + 5],
+        wav_data[fmt_offset + 6],
+        wav_data[fmt_offset + 7],
+    ]) as usize;
+    let mut scan_off = fmt_offset + 8 + fmt_chunk_size;
+    if fmt_chunk_size % 2 != 0 {
+        scan_off += 1;
+    }
+    loop {
+        if scan_off + 8 > wav_data.len() {
+            eprintln!("weave/PlaySoundW: no data chunk found");
+            return 0;
+        }
+        let chunk_id = &wav_data[scan_off..scan_off + 4];
+        let chunk_size = u32::from_le_bytes([
+            wav_data[scan_off + 4],
+            wav_data[scan_off + 5],
+            wav_data[scan_off + 6],
+            wav_data[scan_off + 7],
+        ]) as usize;
+        if chunk_id == b"data" {
+            scan_off += 8; // skip past the chunk header to the data
+            break;
+        }
+        scan_off += 8 + chunk_size;
+        if chunk_size % 2 != 0 {
+            scan_off += 1;
+        }
+    }
+    let data_offset = scan_off;
+
+    let pcm_data = &wav_data[data_offset..];
+    let data_len = pcm_data.len();
+
+    if data_len == 0 || channels == 0 || sample_rate == 0 || bits_per_sample == 0 {
+        eprintln!("weave/PlaySoundW: invalid WAV parameters");
+        return 0;
+    }
+
+    eprintln!("weave/PlaySoundW: {sample_rate} Hz {bits_per_sample}-bit {channels}ch {data_len} bytes PCM");
+
+    // Build WAVEFORMATEX.
+    let block_align = (channels as u16) * (bits_per_sample / 8);
+    let avg_bytes_per_sec = sample_rate * block_align as u32;
+    let fmt_ex = crate::WAVEFORMATEX {
+        wFormatTag: 1, // WAVE_FORMAT_PCM
+        nChannels: channels as u16,
+        nSamplesPerSec: sample_rate,
+        nAvgBytesPerSec: avg_bytes_per_sec,
+        nBlockAlign: block_align,
+        wBitsPerSample: bits_per_sample,
+        cbSize: 0,
+    };
+
+    // Open waveOut with the parsed format.
+    let mut hwo: usize = 0;
+    let result = crate::wave_out_open(
+        &mut hwo as *mut usize,
+        0xFFFF_FFFF, // WAVE_MAPPER
+        &fmt_ex as *const crate::WAVEFORMATEX,
+        0, // dwCallback (CALLBACK_NULL)
+        0, // dwInstance
+        0, // fdwOpen
+    );
+    if result != 0 {
+        eprintln!("weave/PlaySoundW: waveOutOpen failed {result}");
+        return 0;
+    }
+
+    // Prepare WAVEHDR pointing to the PCM data.
+    let mut header = crate::WAVEHDR {
+        lpData: pcm_data.as_ptr() as *mut u8,
+        dwBufferLength: data_len as u32,
+        dwBytesRecorded: 0,
+        dwUser: 0,
+        dwFlags: 0,
+        dwLoops: 0,
+        lpNext: std::ptr::null_mut(),
+        reserved: 0,
+    };
+
+    let prep = crate::wave_out_prepare_header(
+        hwo,
+        &mut header as *mut crate::WAVEHDR,
+        std::mem::size_of::<crate::WAVEHDR>() as u32,
+    );
+    if prep != 0 {
+        eprintln!("weave/PlaySoundW: waveOutPrepareHeader failed {prep}");
+        crate::wave_out_close(hwo);
+        return 0;
+    }
+
+    let write = crate::wave_out_write(
+        hwo,
+        &mut header as *mut crate::WAVEHDR,
+        std::mem::size_of::<crate::WAVEHDR>() as u32,
+    );
+    if write != 0 {
+        eprintln!("weave/PlaySoundW: waveOutWrite failed {write}");
+    }
+
+    if (fdw_sound & SND_ASYNC) != 0 {
+        std::mem::forget(wav_data);
+        eprintln!("weave/PlaySoundW: async playback started");
+    } else {
+        let duration_ms = (data_len as u64 * 1000) / avg_bytes_per_sec as u64;
+        eprintln!("weave/PlaySoundW: sync playback ~{duration_ms}ms");
+        std::thread::sleep(std::time::Duration::from_millis(duration_ms.min(30_000)));
+
+        crate::wave_out_unprepare_header(
+            hwo,
+            &mut header as *mut crate::WAVEHDR,
+            std::mem::size_of::<crate::WAVEHDR>() as u32,
+        );
+        crate::wave_out_close(hwo);
+    }
+
+    eprintln!("weave/PlaySoundW: done");
+    1 // TRUE
 }
 
 /// # Safety
-/// Pointer arguments are accepted but not dereferenced.
+/// `psz_sound` must be a null-terminated ANSI string pointing to a .wav file path.
 pub unsafe extern "win64" fn play_sound_a(
-    _psz_sound: *const u8,
+    psz_sound: *const u8,
     _hmod: usize,
-    _fdw_sound: u32,
+    fdw_sound: u32,
 ) -> i32 {
-    0 // FALSE
+    // Convert ANSI path to wide before delegating to the W variant.
+    if psz_sound.is_null() || (fdw_sound & SND_FILENAME) == 0 {
+        return if (fdw_sound & SND_NODEFAULT) != 0 {
+            1
+        } else {
+            0
+        };
+    }
+    let path_bytes = unsafe { std::ffi::CStr::from_ptr(psz_sound as *const i8) }.to_bytes();
+    let path_str = String::from_utf8_lossy(path_bytes);
+    let wide: Vec<u16> = path_str.encode_utf16().collect();
+    let mut null_terminated: Vec<u16> = wide.clone();
+    null_terminated.push(0);
+    unsafe { play_sound_w(null_terminated.as_ptr() as *const u16, _hmod, fdw_sound) }
 }
 
 /// # Safety
