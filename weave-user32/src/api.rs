@@ -1877,7 +1877,31 @@ pub unsafe extern "win64" fn sci_direct_fn_proxy(
     if msg == 2282 /*SCI_APPENDTEXT*/ && lparam != 0 && wparam > 0 {
         SCRATCH_SCI.store(sci, std::sync::atomic::Ordering::Relaxed);
         PENDING_DOC_PTR.store(lparam as usize, std::sync::atomic::Ordering::Relaxed);
-        let main_sci = MAIN_EDITOR_SCI.load(std::sync::atomic::Ordering::Relaxed);
+        let main_sci = {
+            let s = MAIN_EDITOR_SCI.load(std::sync::atomic::Ordering::Relaxed);
+            if s != 0 {
+                s
+            } else {
+                // Fallback: SCI_SETDOCPOINTER may have gone through SendMessageW
+                // (not the direct function proxy), so MAIN_EDITOR_SCI was never set.
+                // Query the sci pointer from the first Scintilla HWND instead.
+                let hwnd = M15_SCINTILLA_HWND.load(std::sync::atomic::Ordering::Relaxed);
+                if hwnd != 0 {
+                    let sci = send_message_w(hwnd, 2185, 0, 0) as usize;
+                    if sci >= 0x0000_1000_0000_0000 {
+                        eprintln!(
+                            "weave/sci_proxy: MAIN_EDITOR_SCI fallback from M15 hwnd={hwnd:#x} → sci={sci:#x}"
+                        );
+                        MAIN_EDITOR_SCI.store(sci, std::sync::atomic::Ordering::Relaxed);
+                        sci
+                    } else {
+                        0
+                    }
+                } else {
+                    0
+                }
+            }
+        };
         if main_sci != 0
             && PENDING_DOC_SCI.load(std::sync::atomic::Ordering::Relaxed) == 0
             && lparam as usize != 0
