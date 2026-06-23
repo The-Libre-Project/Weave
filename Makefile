@@ -10,7 +10,7 @@
 #   make test       — run full test suite in a Linux Docker container
 #   make ci         — build + lint + full test suite (mirrors CI pipeline)
 
-.PHONY: build lint test test-unit ci fixture-wget-probe coverage-gauge hooks backfill-notes
+.PHONY: build lint test test-gate test-unit ci fixture-wget-probe coverage-gauge hooks backfill-notes
 
 # ── Build ──────────────────────────────────────────────────────────────────────
 
@@ -45,6 +45,23 @@ test:
 		-e CARGO_TARGET_DIR=/weave/docker-target \
 		rust:latest \
 		sh -c "apt-get update -qq && apt-get install -y -qq fonts-dejavu-core libpipewire-0.3-0 libpipewire-0.3-dev libclang-dev xvfb >/dev/null 2>&1; Xvfb :99 -screen 0 1280x720x24 & sleep 1; DISPLAY=:99 cargo test --features weave-winmm/pipewire-audio,weave-mmdevapi/pipewire-audio"
+
+# ── Single gate test (Docker — same env as `make test` but one gate) ────────────
+# Usage: make test-gate GATE=irfanview_image_open_gate
+
+test-gate:
+	@if [ -z "$(GATE)" ]; then \
+		echo "Usage: make test-gate GATE=<test_name>" >&2; \
+		exit 1; \
+	fi
+	docker run --rm --platform linux/amd64 \
+		-v "$$(pwd)":/weave \
+		-w /weave \
+		-v weave-cargo-cache:/usr/local/cargo/registry \
+		-v weave-target-cache:/weave/docker-target \
+		-e CARGO_TARGET_DIR=/weave/docker-target \
+		rust:latest \
+		sh -c "apt-get update -qq && apt-get install -y -qq fonts-dejavu-core libpipewire-0.3-0 libpipewire-0.3-dev libclang-dev xvfb >/dev/null 2>&1; Xvfb :99 -screen 0 1280x720x24 & sleep 1; DISPLAY=:99 cargo test -p weave-cli --test hello_world $(GATE) --features weave-winmm/pipewire-audio,weave-mmdevapi/pipewire-audio -- --nocapture"
 
 # ── Fixture cross-compile (mingw-w64) ──────────────────────────────────────────
 # Requires x86_64-w64-mingw32-gcc on PATH. Output goes to tests/fixtures/bin/.
