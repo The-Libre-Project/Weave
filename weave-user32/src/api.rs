@@ -10180,28 +10180,92 @@ pub extern "win64" fn mouse_event(
     let time = 0;
 
     if dw_flags & MOUSEEVENTF_MOVE != 0 {
-        queue::post(MsgEntry { hwnd, message: WM_MOUSEMOVE, w_param: 0, l_param: lparam, time, pt_x: x, pt_y: y });
+        queue::post(MsgEntry {
+            hwnd,
+            message: WM_MOUSEMOVE,
+            w_param: 0,
+            l_param: lparam,
+            time,
+            pt_x: x,
+            pt_y: y,
+        });
     }
     if dw_flags & MOUSEEVENTF_LEFTDOWN != 0 {
-        queue::post(MsgEntry { hwnd, message: WM_LBUTTONDOWN, w_param: MK_LBUTTON as usize, l_param: lparam, time, pt_x: x, pt_y: y });
+        queue::post(MsgEntry {
+            hwnd,
+            message: WM_LBUTTONDOWN,
+            w_param: MK_LBUTTON as usize,
+            l_param: lparam,
+            time,
+            pt_x: x,
+            pt_y: y,
+        });
     }
     if dw_flags & MOUSEEVENTF_LEFTUP != 0 {
-        queue::post(MsgEntry { hwnd, message: WM_LBUTTONUP, w_param: MK_LBUTTON as usize, l_param: lparam, time, pt_x: x, pt_y: y });
+        queue::post(MsgEntry {
+            hwnd,
+            message: WM_LBUTTONUP,
+            w_param: MK_LBUTTON as usize,
+            l_param: lparam,
+            time,
+            pt_x: x,
+            pt_y: y,
+        });
     }
     if dw_flags & MOUSEEVENTF_RIGHTDOWN != 0 {
-        queue::post(MsgEntry { hwnd, message: WM_RBUTTONDOWN, w_param: MK_RBUTTON as usize, l_param: lparam, time, pt_x: x, pt_y: y });
+        queue::post(MsgEntry {
+            hwnd,
+            message: WM_RBUTTONDOWN,
+            w_param: MK_RBUTTON as usize,
+            l_param: lparam,
+            time,
+            pt_x: x,
+            pt_y: y,
+        });
     }
     if dw_flags & MOUSEEVENTF_RIGHTUP != 0 {
-        queue::post(MsgEntry { hwnd, message: WM_RBUTTONUP, w_param: MK_RBUTTON as usize, l_param: lparam, time, pt_x: x, pt_y: y });
+        queue::post(MsgEntry {
+            hwnd,
+            message: WM_RBUTTONUP,
+            w_param: MK_RBUTTON as usize,
+            l_param: lparam,
+            time,
+            pt_x: x,
+            pt_y: y,
+        });
     }
     if dw_flags & MOUSEEVENTF_MIDDLEDOWN != 0 {
-        queue::post(MsgEntry { hwnd, message: WM_MBUTTONDOWN, w_param: MK_MBUTTON as usize, l_param: lparam, time, pt_x: x, pt_y: y });
+        queue::post(MsgEntry {
+            hwnd,
+            message: WM_MBUTTONDOWN,
+            w_param: MK_MBUTTON as usize,
+            l_param: lparam,
+            time,
+            pt_x: x,
+            pt_y: y,
+        });
     }
     if dw_flags & MOUSEEVENTF_MIDDLEUP != 0 {
-        queue::post(MsgEntry { hwnd, message: WM_MBUTTONUP, w_param: MK_MBUTTON as usize, l_param: lparam, time, pt_x: x, pt_y: y });
+        queue::post(MsgEntry {
+            hwnd,
+            message: WM_MBUTTONUP,
+            w_param: MK_MBUTTON as usize,
+            l_param: lparam,
+            time,
+            pt_x: x,
+            pt_y: y,
+        });
     }
     if dw_flags & MOUSEEVENTF_WHEEL != 0 {
-        queue::post(MsgEntry { hwnd, message: WM_MOUSEWHEEL, w_param: dw_data, l_param: lparam, time, pt_x: x, pt_y: y });
+        queue::post(MsgEntry {
+            hwnd,
+            message: WM_MOUSEWHEEL,
+            w_param: dw_data,
+            l_param: lparam,
+            time,
+            pt_x: x,
+            pt_y: y,
+        });
     }
 }
 
