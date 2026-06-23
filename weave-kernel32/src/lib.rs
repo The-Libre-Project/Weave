@@ -2909,9 +2909,9 @@ pub unsafe extern "win64" fn create_file_w(
     }
 
     // Named pipe paths: create a temp backing file so the caller does not
-    // crash with INVALID_HANDLE_VALUE. Case-insensitive check — Windows
-    // uses \\.\pipe\name or \\.\PIPE\name (case-insensitive).
-    if win_path.to_ascii_lowercase().contains("\\pipe\\") {
+    // crash with INVALID_HANDLE_VALUE. Matches any path containing "pipe"
+    // (e.g. \\.\pipe\name, \\.\PIPE\name).
+    if win_path.to_ascii_lowercase().contains("pipe") {
         let mut buf = *b"/tmp/weave-pipe-XXXXXX\0";
         let fd = unsafe { libc::mkstemp(buf.as_mut_ptr() as *mut i8) };
         if fd >= 0 {
