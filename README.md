@@ -174,7 +174,7 @@ Weave does **not** maintain a crowd-sourced "anything might work" compatibility 
 
 ## Libre Commons — project stewardship
 
-Weave is the founding asset of the [Libre Commons](https://github.com/The-Libre-Project/standards), a public infrastructure stewardship framework that draws a hard boundary between commons-scope work and product work. The Commons operates a [Standards Register](https://github.com/The-Libre-Project/standards) that publishes open standards and defensive publications — timestamped prior art, open specifications, and public-domain dedications — to keep the useful conventions of free computing in the public domain and out of patent capture.
+Weave is the founding asset of the [Libre Commons](https://github.com/eldo9000/Business-OS/tree/main/libre-commons), a public infrastructure stewardship framework that draws a hard boundary between commons-scope work and product work. The Commons operates a [Standards Register](https://github.com/eldo9000/Business-OS/tree/main/libre-commons/published) that publishes open standards and defensive publications — timestamped prior art, open specifications, and public-domain dedications — to keep the useful conventions of free computing in the public domain and out of patent capture.
 
 The boundary rule: if the work benefits any Linux platform, developer, public institution, refurbisher, or downstream OS, it belongs to the Commons. If it creates IronTree-specific product leverage, it belongs to IronTree. Commons outputs — compatibility gates, sandbox architecture, validation data, reproducible builds, clean-room documentation — are public by rule, not by goodwill.
 
@@ -415,7 +415,7 @@ Honest engineering requires acknowledging what doesn't work yet. These are the k
 
 ## Maintainer
 
-Weave is built and maintained by [IronTree Software](https://github.com/The-Libre-Project), as the founding asset of the [Libre Commons](https://github.com/The-Libre-Project/standards). For security disclosures, see [SECURITY.md](SECURITY.md).
+Weave is built and maintained by [IronTree Software](https://github.com/The-Libre-Project), as the founding asset of the [Libre Commons](https://github.com/eldo9000/Business-OS/tree/main/libre-commons). For security disclosures, see [SECURITY.md](SECURITY.md).
 
 ---
 
