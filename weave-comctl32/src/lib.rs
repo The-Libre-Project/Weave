@@ -67,14 +67,17 @@ const TCM_GETIMAGELIST: u32 = 0x1302; // TCM_FIRST + 2
 const TCM_SETIMAGELIST: u32 = 0x1303; // TCM_FIRST + 3
 const TCM_GETITEMCOUNT: u32 = 0x1304; // TCM_FIRST + 4
 const TCM_GETITEMA: u32 = 0x1305; // TCM_FIRST + 5
+const TCM_INSERTITEMA: u32 = 0x1307; // TCM_FIRST + 7
+const TCM_DELETEALLITEMS: u32 = 0x1309; // TCM_FIRST + 9
 const TCM_GETITEMRECT: u32 = 0x130a; // TCM_FIRST + 10
 const TCM_GETCURSEL: u32 = 0x130b; // TCM_FIRST + 11
 const TCM_SETCURSEL: u32 = 0x130c; // TCM_FIRST + 12
 const TCM_ADJUSTRECT: u32 = 0x1328; // TCM_FIRST + 40
 const TCM_SETITEMSIZE: u32 = 0x1329; // TCM_FIRST + 41
 const TCM_GETROWCOUNT: u32 = 0x132c; // TCM_FIRST + 44
-const TCM_GETITEMW: u32 = 0x133e; // TCM_FIRST + 62
-const TCM_SETITEMW: u32 = 0x133f; // TCM_FIRST + 63
+const TCM_GETITEMW: u32 = 0x133c; // TCM_FIRST + 60
+const TCM_SETITEMW: u32 = 0x133d; // TCM_FIRST + 61
+const TCM_INSERTITEMW: u32 = 0x133e; // TCM_FIRST + 62
 
 // ── SysListView32 constants ──────────────────────────────────────────────────
 
@@ -432,12 +435,23 @@ extern "win64" fn tab_wnd_proc(hwnd: usize, msg: u32, w_param: usize, l_param: i
         WM_GETFONT => 0,
         WM_GETTEXT => 0,
         TCM_GETITEMCOUNT => {
-            // No tabs inserted yet → return 0.
+            if let Ok(map) = get_state().lock() {
+                if let Some(ComctlState::Tab(ref tab)) = map.get(&hwnd) {
+                    return tab.items.len() as isize;
+                }
+            }
             0
         }
         TCM_GETCURSEL => {
-            // No tab is selected when no tabs exist. MSDN: returns -1.
-            -1
+            if let Ok(map) = get_state().lock() {
+                if let Some(ComctlState::Tab(ref tab)) = map.get(&hwnd) {
+                    if tab.items.is_empty() {
+                        return 0;
+                    }
+                    return tab.cur_sel as isize;
+                }
+            }
+            0
         }
         TCM_SETCURSEL => {
             if let Ok(mut map) = get_state().lock() {
@@ -476,6 +490,43 @@ extern "win64" fn tab_wnd_proc(hwnd: usize, msg: u32, w_param: usize, l_param: i
         }
         TCM_SETITEMW => {
             1 // TRUE — accept quietly
+        }
+        TCM_DELETEALLITEMS => {
+            if let Ok(mut map) = get_state().lock() {
+                if let Some(ComctlState::Tab(ref mut tab)) = map.get_mut(&hwnd) {
+                    tab.items.clear();
+                    tab.cur_sel = -1;
+                }
+            }
+            1 // TRUE
+        }
+        TCM_INSERTITEMW => {
+            if l_param == 0 {
+                return 0;
+            }
+            unsafe {
+                let _mask = std::ptr::read_unaligned(l_param as *const u32);
+                let psz_text = std::ptr::read_unaligned((l_param + 12) as *const usize);
+                let _cch_max = std::ptr::read_unaligned((l_param + 20) as *const i32);
+                let i_image = std::ptr::read_unaligned((l_param + 24) as *const i32);
+                let item_lparam = std::ptr::read_unaligned((l_param + 28) as *const isize);
+                let mut map = get_state().lock().unwrap();
+                let tab = map.entry(hwnd).or_insert(ComctlState::Tab(TabState {
+                    items: Vec::new(),
+                    cur_sel: -1,
+                    himl: 0,
+                }));
+                if let ComctlState::Tab(ref mut tab) = tab {
+                    let idx = tab.items.len();
+                    tab.items.push(TabItem {
+                        text_ptr: psz_text,
+                        i_image,
+                        l_param: item_lparam,
+                    });
+                    return idx as isize;
+                }
+            }
+            0
         }
         _ => def_window_proc_w(hwnd, msg, w_param, l_param),
     }
