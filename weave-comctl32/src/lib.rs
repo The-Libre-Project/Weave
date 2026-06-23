@@ -79,6 +79,11 @@ const TCM_GETITEMW: u32 = 0x133c; // TCM_FIRST + 60
 const TCM_SETITEMW: u32 = 0x133d; // TCM_FIRST + 61
 const TCM_INSERTITEMW: u32 = 0x133e; // TCM_FIRST + 62
 
+// TCIF_* mask flags for TCITEMW
+const TCIF_TEXT: u32 = 0x0001;
+const TCIF_IMAGE: u32 = 0x0002;
+const TCIF_PARAM: u32 = 0x0008;
+
 // ── SysListView32 constants ──────────────────────────────────────────────────
 
 const LVM_FIRST: u32 = 0x1000;
@@ -509,20 +514,31 @@ extern "win64" fn tab_wnd_proc(hwnd: usize, msg: u32, w_param: usize, l_param: i
             1 // TRUE
         }
         TCM_SETITEMW => {
-            // Update Vec<TabItem> from TCITEMW at lParam.
+            // Update Vec<TabItem> from TCITEMW at lParam, respecting mask bits.
             if l_param != 0 {
                 let idx = w_param;
-                let _mask = unsafe { std::ptr::read_unaligned(l_param as *const u32) };
-                let psz_text = unsafe { std::ptr::read_unaligned((l_param + 12) as *const usize) };
-                let i_image = unsafe { std::ptr::read_unaligned((l_param + 24) as *const i32) };
-                let item_lparam =
-                    unsafe { std::ptr::read_unaligned((l_param + 28) as *const isize) };
+                let mask = unsafe { std::ptr::read_unaligned(l_param as *const u32) };
                 if let Ok(mut map) = get_state().lock() {
                     if let Some(ComctlState::Tab(ref mut tab)) = map.get_mut(&hwnd) {
                         if idx < tab.items.len() {
-                            tab.items[idx].text_ptr = psz_text;
-                            tab.items[idx].i_image = i_image;
-                            tab.items[idx].l_param = item_lparam;
+                            if mask & TCIF_TEXT != 0 {
+                                let psz_text = unsafe {
+                                    std::ptr::read_unaligned((l_param + 12) as *const usize)
+                                };
+                                tab.items[idx].text_ptr = psz_text;
+                            }
+                            if mask & TCIF_IMAGE != 0 {
+                                let i_image = unsafe {
+                                    std::ptr::read_unaligned((l_param + 24) as *const i32)
+                                };
+                                tab.items[idx].i_image = i_image;
+                            }
+                            if mask & TCIF_PARAM != 0 {
+                                let item_lparam = unsafe {
+                                    std::ptr::read_unaligned((l_param + 28) as *const isize)
+                                };
+                                tab.items[idx].l_param = item_lparam;
+                            }
                             return 1;
                         }
                     }
