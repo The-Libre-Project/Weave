@@ -2918,23 +2918,23 @@ pub unsafe extern "win64" fn create_file_w(
         && win_path.as_bytes()[4..8].eq_ignore_ascii_case(b"pipe")
         && win_path.as_bytes()[8] == b'\\'
     {
-        // Create temp file for pipe backing. Try mkstemp first, fall back to
-        // open(O_TMPFILE) which works in Docker CI where /tmp writes are restricted.
-        let mut buf = *b"/tmp/weave-pipe-XXXXXX\0";
-        let mut fd = unsafe { libc::mkstemp(buf.as_mut_ptr() as *mut i8) };
+        // Create a temp backing file for the named pipe.
+        // Use a static atomic counter to generate unique names within the
+        // sandbox-allowed tree (pwd or /tmp).  Both mkstemp(3) and O_TMPFILE
+        // may fail under sandbox Landlock rules depending on /tmp permissions.
+        static PIPE_NUM: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let n = PIPE_NUM.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let name = format!("weave-pipe-{n}");
+        let cname = std::ffi::CString::new(name).unwrap_or_default();
+        let fd = unsafe {
+            libc::open(
+                cname.as_ptr(),
+                libc::O_CREAT | libc::O_EXCL | libc::O_RDWR | libc::O_CLOEXEC,
+                0o600,
+            )
+        };
         if fd >= 0 {
-            unsafe { libc::unlink(buf.as_ptr() as *const i8) };
-        } else {
-            // mkstemp failed — try O_TMPFILE in /tmp (Linux 3.11+)
-            fd = unsafe {
-                libc::open(
-                    "/tmp\0".as_ptr() as *const i8,
-                    libc::O_TMPFILE | libc::O_RDWR | libc::O_CLOEXEC,
-                    0o600,
-                )
-            };
-        }
-        if fd >= 0 {
+            unsafe { libc::unlink(cname.as_ptr()) }; // unlink so it vanishes on close
             eprintln!("weave/CreateFileW: pipe path={win_path:?} → backing fd={fd}");
             set_last_error(0);
             return fd as usize;
