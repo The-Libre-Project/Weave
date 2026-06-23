@@ -172,6 +172,14 @@ Weave does **not** maintain a crowd-sourced "anything might work" compatibility 
 - **Not a general-purpose Windows emulator.** Weave does not run every Windows binary. It runs the binaries on its list, and anything else is out of scope until it's on the list.
 - **Not cloud-dependent.** Everything runs locally. No internet required. No telemetry without explicit opt-in.
 
+## Libre Commons — project stewardship
+
+Weave is the founding asset of the [Libre Commons](https://github.com/The-Libre-Project/standards), a public infrastructure stewardship framework that draws a hard boundary between commons-scope work and product work. The Commons operates a [Standards Register](https://github.com/The-Libre-Project/standards) that publishes open standards and defensive publications — timestamped prior art, open specifications, and public-domain dedications — to keep the useful conventions of free computing in the public domain and out of patent capture.
+
+The boundary rule: if the work benefits any Linux platform, developer, public institution, refurbisher, or downstream OS, it belongs to the Commons. If it creates IronTree-specific product leverage, it belongs to IronTree. Commons outputs — compatibility gates, sandbox architecture, validation data, reproducible builds, clean-room documentation — are public by rule, not by goodwill.
+
+The Commons is operational through the Standards Register today. Incorporation as a separate nonprofit follows when Weave is visibly useful and outside contributors are asking what they're contributing into. The doctrine is a design constraint on the project now, not a future promise.
+
 ## Releases
 
 Tagged releases (`v*`) publish a Linux x86-64 binary as `weave-x86_64` plus `weave-x86_64.sha256` on GitHub Releases. Weave runs x86-64 Windows PE code natively and does not ship an aarch64 Linux build. To cut a release: tag `vX.Y.Z` on `main` after CI is green; the release workflow builds with `--release` and attaches both files. Dry-run without creating a release: `gh workflow run release.yml`.
@@ -407,7 +415,7 @@ Honest engineering requires acknowledging what doesn't work yet. These are the k
 
 ## Maintainer
 
-Weave is built and maintained by [IronTree Software](https://github.com/The-Libre-Project). For security disclosures, see [SECURITY.md](SECURITY.md).
+Weave is built and maintained by [IronTree Software](https://github.com/The-Libre-Project), as the founding asset of the [Libre Commons](https://github.com/The-Libre-Project/standards). For security disclosures, see [SECURITY.md](SECURITY.md).
 
 ---
 
