@@ -2918,15 +2918,28 @@ pub unsafe extern "win64" fn create_file_w(
         && win_path.as_bytes()[4..8].eq_ignore_ascii_case(b"pipe")
         && win_path.as_bytes()[8] == b'\\'
     {
+        // Create temp file for pipe backing. Try mkstemp first, fall back to
+        // open(O_TMPFILE) which works in Docker CI where /tmp writes are restricted.
         let mut buf = *b"/tmp/weave-pipe-XXXXXX\0";
-        let fd = unsafe { libc::mkstemp(buf.as_mut_ptr() as *mut i8) };
+        let mut fd = unsafe { libc::mkstemp(buf.as_mut_ptr() as *mut i8) };
         if fd >= 0 {
             unsafe { libc::unlink(buf.as_ptr() as *const i8) };
+        } else {
+            // mkstemp failed — try O_TMPFILE in /tmp (Linux 3.11+)
+            fd = unsafe {
+                libc::open(
+                    "/tmp\0".as_ptr() as *const i8,
+                    libc::O_TMPFILE | libc::O_RDWR | libc::O_CLOEXEC,
+                    0o600,
+                )
+            };
+        }
+        if fd >= 0 {
             eprintln!("weave/CreateFileW: pipe path={win_path:?} → backing fd={fd}");
             set_last_error(0);
             return fd as usize;
         }
-        eprintln!("weave/CreateFileW: mkstemp failed for pipe path={win_path:?}");
+        eprintln!("weave/CreateFileW: pipe backing failed for path={win_path:?}");
     }
 
     let nt_disposition = file_io::win32_disposition_to_nt(dw_creation_disposition);
