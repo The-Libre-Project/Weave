@@ -10251,7 +10251,7 @@ pub extern "win64" fn keybd_event(b_vk: u8, b_scan: u8, dw_flags: u32, _dw_extra
         (repeat & 0xFFFF)
             | (scan << 16)
             | (extended << 24)
-            | (0 << 29)   // context code
+            // bit 29 = context code (0 for non-Alt keys, deferred to Phase C)
             | (prev_state << 30)
             | (trans_state << 31)
     };
