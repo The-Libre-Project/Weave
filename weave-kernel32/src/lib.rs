@@ -2909,17 +2909,24 @@ pub unsafe extern "win64" fn create_file_w(
     }
 
     // Named pipe paths: create a temp backing file so the caller does not
-    // crash with INVALID_HANDLE_VALUE. Matches any path containing "pipe"
-    // (e.g. \\.\pipe\name, \\.\PIPE\name).
-    if win_path.to_ascii_lowercase().contains("pipe") {
+    // crash with INVALID_HANDLE_VALUE. Matches \\.\pipe\ prefix.
+    if win_path.len() > 9
+        && win_path.as_bytes()[0] == b'\\'
+        && win_path.as_bytes()[1] == b'\\'
+        && win_path.as_bytes()[2] == b'.'
+        && win_path.as_bytes()[3] == b'\\'
+        && win_path.as_bytes()[4..8].eq_ignore_ascii_case(b"pipe")
+        && win_path.as_bytes()[8] == b'\\'
+    {
         let mut buf = *b"/tmp/weave-pipe-XXXXXX\0";
         let fd = unsafe { libc::mkstemp(buf.as_mut_ptr() as *mut i8) };
         if fd >= 0 {
-            unsafe { libc::unlink(buf.as_ptr() as *const i8) }; // unlink so it vanishes on close
+            unsafe { libc::unlink(buf.as_ptr() as *const i8) };
             eprintln!("weave/CreateFileW: pipe path={win_path:?} → backing fd={fd}");
             set_last_error(0);
             return fd as usize;
         }
+        eprintln!("weave/CreateFileW: mkstemp failed for pipe path={win_path:?}");
     }
 
     let nt_disposition = file_io::win32_disposition_to_nt(dw_creation_disposition);
