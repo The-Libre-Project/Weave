@@ -9681,7 +9681,7 @@ pub unsafe extern "win64" fn allow_set_foreground_window(_dw_process_id: u32) ->
 }
 
 pub unsafe extern "win64" fn is_char_upper_w(ch: u16) -> i32 {
-    char::from_u32(ch as u32).map_or(false, |c| c.is_uppercase()) as i32
+    char::from_u32(ch as u32).is_some_and(|c| c.is_uppercase()) as i32
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
