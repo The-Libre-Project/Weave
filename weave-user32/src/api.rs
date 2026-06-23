@@ -493,6 +493,12 @@ pub unsafe extern "win64" fn create_window_ex_w(
     let wm_create_ret = call_wnd_proc(cls.wnd_proc, hwnd, WM_CREATE, 0, &cs as *const _ as isize);
     eprintln!("weave/user32: WM_CREATE class={class_name:?} hwnd={hwnd:#x} → {wm_create_ret}");
 
+    // Send WM_SIZE synchronously so the app can set up layout state (e.g. renderer
+    // creation at canvas object +0x38) before any subsequent work item processing.
+    // Real Windows sends WM_SIZE as part of WM_WINDOWPOSCHANGED during CreateWindowExW.
+    let size_lparam = (width as isize) | ((height as isize) << 16);
+    call_wnd_proc(cls.wnd_proc, hwnd, WM_SIZE, 0, size_lparam);
+
     // Probe Scintilla document state immediately after WM_CREATE, before NPP has a
     // chance to call SCI_SETDOCPOINTER.  This tells us whether pdoc is NULL from the
     // start (constructor/init failure) or whether something clears it later.
@@ -4151,19 +4157,14 @@ pub extern "win64" fn set_window_pos(
                 backend::show_window(xcb_id, true);
             }
         }
-        // Post WM_SIZE so app can update layout state before WM_PAINT.
-        // Only post when size actually changes (SWP_NOSIZE not set).
+        // Send WM_SIZE synchronously so app can update layout state
+        // before WM_PAINT or work item processing. Windows sends WM_SIZE
+        // as part of WM_WINDOWPOSCHANGED during SetWindowPos.
         if u_flags & SWP_NOSIZE == 0 {
             let l_param = (ww as isize) | ((wh as isize) << 16);
-            queue::post(MsgEntry {
-                hwnd,
-                message: WM_SIZE,
-                w_param: 0, // SIZE_RESTORED
-                l_param,
-                time: 0,
-                pt_x: 0,
-                pt_y: 0,
-            });
+            if let Some(proc_addr) = window::with(hwnd, |e| e.wnd_proc) {
+                call_wnd_proc(proc_addr, hwnd, WM_SIZE, 0, l_param);
+            }
         }
     }
     1 // TRUE
