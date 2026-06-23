@@ -491,9 +491,15 @@ extern "win64" fn tab_wnd_proc(hwnd: usize, msg: u32, w_param: usize, l_param: i
                             let item = &tab.items[idx];
                             unsafe {
                                 std::ptr::write_unaligned(l_param as *mut u32, !0u32); // mask
-                                std::ptr::write_unaligned((l_param + 12) as *mut usize, item.text_ptr);
+                                std::ptr::write_unaligned(
+                                    (l_param + 12) as *mut usize,
+                                    item.text_ptr,
+                                );
                                 std::ptr::write_unaligned((l_param + 24) as *mut i32, item.i_image);
-                                std::ptr::write_unaligned((l_param + 28) as *mut isize, item.l_param);
+                                std::ptr::write_unaligned(
+                                    (l_param + 28) as *mut isize,
+                                    item.l_param,
+                                );
                             }
                             return 1;
                         }
@@ -510,7 +516,8 @@ extern "win64" fn tab_wnd_proc(hwnd: usize, msg: u32, w_param: usize, l_param: i
                 let _mask = unsafe { std::ptr::read_unaligned(l_param as *const u32) };
                 let psz_text = unsafe { std::ptr::read_unaligned((l_param + 12) as *const usize) };
                 let i_image = unsafe { std::ptr::read_unaligned((l_param + 24) as *const i32) };
-                let item_lparam = unsafe { std::ptr::read_unaligned((l_param + 28) as *const isize) };
+                let item_lparam =
+                    unsafe { std::ptr::read_unaligned((l_param + 28) as *const isize) };
                 if let Ok(mut map) = get_state().lock() {
                     if let Some(ComctlState::Tab(ref mut tab)) = map.get_mut(&hwnd) {
                         if idx < tab.items.len() {
