@@ -572,16 +572,8 @@ pub extern "win64" fn show_window_async(hwnd: usize, n_cmd_show: i32) -> i32 {
 // only if the window has a non-empty update region; returns TRUE even if nothing was painted.
 pub extern "win64" fn update_window(hwnd: usize) -> i32 {
     eprintln!("weave/user32: UpdateWindow hwnd={hwnd:#x}");
-    if window::with(hwnd, |_| ()).is_some() {
-        queue::post(MsgEntry {
-            hwnd,
-            message: WM_PAINT,
-            w_param: 0,
-            l_param: 0,
-            time: 0,
-            pt_x: 0,
-            pt_y: 0,
-        });
+    if let Some(proc_addr) = window::with(hwnd, |e| e.wnd_proc) {
+        call_wnd_proc(proc_addr, hwnd, WM_PAINT, 0, 0);
         1 // TRUE
     } else {
         0 // FALSE — invalid HWND
