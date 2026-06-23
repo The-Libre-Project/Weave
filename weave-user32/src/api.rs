@@ -539,6 +539,14 @@ pub extern "win64" fn show_window(hwnd: usize, n_cmd_show: i32) -> i32 {
 
     let xcb = window::xcb_id(hwnd);
     eprintln!("weave/user32: ShowWindow hwnd={hwnd:#x} cmd={n_cmd_show} show={show} xcb={xcb:#x}");
+
+    // Send WM_SHOWWINDOW synchronously before changing visibility.
+    // Wine ref: dlls/win32u/window.c::show_window — sends WM_SHOWWINDOW with
+    // wParam=show (1=showing, 0=hiding) and lParam=0 before visibility change.
+    if let Some(proc_addr) = window::with(hwnd, |e| e.wnd_proc) {
+        call_wnd_proc(proc_addr, hwnd, WM_SHOWWINDOW, show as usize, 0);
+    }
+
     window::with_mut(hwnd, |e| e.visible = show);
     backend::show_window(xcb, show);
 
