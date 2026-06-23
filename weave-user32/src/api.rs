@@ -10141,16 +10141,68 @@ pub unsafe extern "win64" fn enum_windows(_lp_enum_func: usize, _l_param: isize)
 
 /// mouse_event — synthesise mouse movement and button events.
 ///
-/// No-op. Mouse input is not synthesised in headless mode.
+/// Posts WM_MOUSEMOVE / WM_*BUTTONDOWN / WM_*BUTTONUP / WM_MOUSEWHEEL messages
+/// to the message queue. Multiple flags in a single call produce multiple posts.
+/// Phase B: posts to HWND 0 (broadcast) — no foreground-window tracking yet.
+/// Phase C: foreground window targeting, double-click timing, journal hooks,
+/// raw input thread, relative-move accumulation.
 // Wine ref: dlls/user32/input.c — posts mouse input into the input queue;
-// headless Weave has no input queue for synthesis.
+// parses MOUSEEVENTF_* flags and dispatches to the appropriate input processor.
 pub extern "win64" fn mouse_event(
-    _dw_flags: u32,
-    _dx: i32,
-    _dy: i32,
-    _dw_data: usize,
+    dw_flags: u32,
+    dx: i32,
+    dy: i32,
+    dw_data: usize,
     _dw_extra_info: usize,
 ) {
+    const MOUSEEVENTF_MOVE: u32 = 0x0001;
+    const MOUSEEVENTF_LEFTDOWN: u32 = 0x0002;
+    const MOUSEEVENTF_LEFTUP: u32 = 0x0004;
+    const MOUSEEVENTF_RIGHTDOWN: u32 = 0x0008;
+    const MOUSEEVENTF_RIGHTUP: u32 = 0x0010;
+    const MOUSEEVENTF_MIDDLEDOWN: u32 = 0x0020;
+    const MOUSEEVENTF_MIDDLEUP: u32 = 0x0040;
+    const MOUSEEVENTF_WHEEL: u32 = 0x0800;
+    const MOUSEEVENTF_ABSOLUTE: u32 = 0x8000;
+
+    let (x, y) = if dw_flags & MOUSEEVENTF_ABSOLUTE != 0 {
+        let (sw, sh) = backend::screen_size();
+        (
+            (dx as u32 * sw as u32 / 65535) as i32,
+            (dy as u32 * sh as u32 / 65535) as i32,
+        )
+    } else {
+        (dx, dy)
+    };
+
+    let lparam = (x as isize & 0xFFFF) | ((y as isize) << 16);
+    let hwnd = 0;
+    let time = 0;
+
+    if dw_flags & MOUSEEVENTF_MOVE != 0 {
+        queue::post(MsgEntry { hwnd, message: WM_MOUSEMOVE, w_param: 0, l_param: lparam, time, pt_x: x, pt_y: y });
+    }
+    if dw_flags & MOUSEEVENTF_LEFTDOWN != 0 {
+        queue::post(MsgEntry { hwnd, message: WM_LBUTTONDOWN, w_param: MK_LBUTTON as usize, l_param: lparam, time, pt_x: x, pt_y: y });
+    }
+    if dw_flags & MOUSEEVENTF_LEFTUP != 0 {
+        queue::post(MsgEntry { hwnd, message: WM_LBUTTONUP, w_param: MK_LBUTTON as usize, l_param: lparam, time, pt_x: x, pt_y: y });
+    }
+    if dw_flags & MOUSEEVENTF_RIGHTDOWN != 0 {
+        queue::post(MsgEntry { hwnd, message: WM_RBUTTONDOWN, w_param: MK_RBUTTON as usize, l_param: lparam, time, pt_x: x, pt_y: y });
+    }
+    if dw_flags & MOUSEEVENTF_RIGHTUP != 0 {
+        queue::post(MsgEntry { hwnd, message: WM_RBUTTONUP, w_param: MK_RBUTTON as usize, l_param: lparam, time, pt_x: x, pt_y: y });
+    }
+    if dw_flags & MOUSEEVENTF_MIDDLEDOWN != 0 {
+        queue::post(MsgEntry { hwnd, message: WM_MBUTTONDOWN, w_param: MK_MBUTTON as usize, l_param: lparam, time, pt_x: x, pt_y: y });
+    }
+    if dw_flags & MOUSEEVENTF_MIDDLEUP != 0 {
+        queue::post(MsgEntry { hwnd, message: WM_MBUTTONUP, w_param: MK_MBUTTON as usize, l_param: lparam, time, pt_x: x, pt_y: y });
+    }
+    if dw_flags & MOUSEEVENTF_WHEEL != 0 {
+        queue::post(MsgEntry { hwnd, message: WM_MOUSEWHEEL, w_param: dw_data, l_param: lparam, time, pt_x: x, pt_y: y });
+    }
 }
 
 /// MenuItemFromPoint — determine which menu item is at a given point.
@@ -10177,10 +10229,63 @@ pub extern "win64" fn draw_icon(_hdc: usize, _x: i32, _y: i32, _h_icon: usize) {
 
 /// keybd_event — synthesise a keyboard input event.
 ///
-/// No-op. Keyboard input is not synthesised in headless mode.
+/// Posts WM_KEYDOWN / WM_KEYUP / WM_CHAR messages to the message queue.
+/// Phase B: posts to HWND 0, no repeat-count tracking, no scancode→VK mapping.
+/// Phase C: foreground window targeting, real repeat counts, ToUnicode mapping,
+/// KEYEVENTF_SCANCODE translation.
 // Wine ref: dlls/user32/input.c — synthesises a WM_KEYDOWN/WM_KEYUP pair;
-// Weave has no input queue for synthesis.
-pub extern "win64" fn keybd_event(_b_vk: u8, _b_scan: u8, _dw_flags: u32, _dw_extra_info: usize) {}
+// handles KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE,
+// and KEYEVENTF_SCANCODE flags.
+pub extern "win64" fn keybd_event(b_vk: u8, b_scan: u8, dw_flags: u32, _dw_extra_info: usize) {
+    const KEYEVENTF_EXTENDEDKEY: u32 = 0x0001;
+    const KEYEVENTF_KEYUP: u32 = 0x0002;
+    const KEYEVENTF_UNICODE: u32 = 0x0004;
+    #[allow(dead_code)]
+    const KEYEVENTF_SCANCODE: u32 = 0x0008;
+
+    let scan = b_scan as isize;
+    let extended = (dw_flags & KEYEVENTF_EXTENDEDKEY) as isize;
+    let is_keyup = dw_flags & KEYEVENTF_KEYUP != 0;
+
+    let build_lparam = |repeat: isize, prev_state: isize, trans_state: isize| -> isize {
+        (repeat & 0xFFFF)
+            | (scan << 16)
+            | (extended << 24)
+            | (0 << 29)   // context code
+            | (prev_state << 30)
+            | (trans_state << 31)
+    };
+
+    let hwnd = 0;
+    let time = 0;
+
+    if dw_flags & KEYEVENTF_UNICODE != 0 && !is_keyup {
+        // KEYEVENTF_UNICODE: bVk is a UTF-16 code unit; post WM_CHAR.
+        // Phase C: also handle WM_SYSCHAR and dead-key composition.
+        queue::post(MsgEntry {
+            hwnd,
+            message: WM_CHAR,
+            w_param: b_vk as usize,
+            l_param: build_lparam(1, 0, 0),
+            time,
+            pt_x: 0,
+            pt_y: 0,
+        });
+    } else {
+        let message = if is_keyup { WM_KEYUP } else { WM_KEYDOWN };
+        let prev_state = if is_keyup { 1 } else { 0 };
+        let trans_state = if is_keyup { 1 } else { 0 };
+        queue::post(MsgEntry {
+            hwnd,
+            message,
+            w_param: b_vk as usize,
+            l_param: build_lparam(1, prev_state, trans_state),
+            time,
+            pt_x: 0,
+            pt_y: 0,
+        });
+    }
+}
 
 /// FrameRect — draw a border around a rectangle using a brush.
 ///

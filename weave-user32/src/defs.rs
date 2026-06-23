@@ -68,12 +68,22 @@ pub const WM_LBUTTONDOWN: u32 = 0x0201;
 pub const WM_LBUTTONUP: u32 = 0x0202;
 pub const WM_RBUTTONDOWN: u32 = 0x0204;
 pub const WM_RBUTTONUP: u32 = 0x0205;
+pub const WM_MBUTTONDOWN: u32 = 0x0207;
+pub const WM_MBUTTONUP: u32 = 0x0208;
 pub const WM_MOUSEWHEEL: u32 = 0x020A;
 pub const WM_HSCROLL: u32 = 0x0114;
 pub const WM_VSCROLL: u32 = 0x0115;
 pub const WM_MOUSEHOVER: u32 = 0x02A1;
 pub const WM_MOUSELEAVE: u32 = 0x02A3;
 pub const WM_DPICHANGED: u32 = 0x02E0;
+
+// ── Mouse/keyboard virtual-key flags ──────────────────────────────────────────
+
+pub const MK_LBUTTON: u32 = 0x0001;
+pub const MK_RBUTTON: u32 = 0x0002;
+pub const MK_SHIFT: u32 = 0x0004;
+pub const MK_CONTROL: u32 = 0x0008;
+pub const MK_MBUTTON: u32 = 0x0010;
 
 // ── TrackMouseEvent flags ─────────────────────────────────────────────────────
 
