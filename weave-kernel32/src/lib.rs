@@ -14091,6 +14091,102 @@ pub unsafe extern "win64" fn set_system_time(_lp_system_time: *const u8) -> i32 
     1 // TRUE
 }
 
+// ── SumatraPDF gap-fill stubs ─────────────────────────────────────────────────
+
+/// FoldStringW: map a string using specified mapping flags (pass-through stub).
+///
+/// Returns the length of the destination string in characters. Pass-through:
+/// copies source to destination unchanged.
+// Wine ref: dlls/kernelbase/string.c — FoldStringW implements NORM_IGNORECASE,
+// NORM_IGNORENONSPACE, NORM_IGNORESYMBOLS, MAP_FOLDCZONE, MAP_FOLDDIGITS,
+// MAP_PRECOMPOSED, MAP_COMPOSITE. Weave: pass-through (no folding).
+pub unsafe extern "win64" fn fold_string_w(
+    _dw_map_flags: u32,
+    lp_src_str: *const u16,
+    cch_src: i32,
+    lp_dest_str: *mut u16,
+    cch_dest: i32,
+) -> i32 {
+    if lp_src_str.is_null() || cch_src == 0 {
+        set_last_error(87); // ERROR_INVALID_PARAMETER
+        return 0;
+    }
+    let src_len = if cch_src < 0 {
+        let mut len = 0;
+        while unsafe { *lp_src_str.add(len) } != 0 {
+            len += 1;
+        }
+        len as i32
+    } else {
+        cch_src
+    };
+    let copy_len = if cch_dest > 0 && !lp_dest_str.is_null() {
+        let to_copy = src_len.min(cch_dest);
+        unsafe {
+            std::ptr::copy_nonoverlapping(lp_src_str, lp_dest_str, to_copy as usize);
+        }
+        to_copy
+    } else {
+        src_len
+    };
+    eprintln!("weave: FoldStringW(stub) flags=0x{_dw_map_flags:x} len={copy_len}");
+    copy_len
+}
+
+/// Thread32First: retrieve first thread from toolhelp snapshot (stub).
+///
+/// Returns FALSE — no threads in snapshot.
+// Wine ref: dlls/kernel32/toolhelp.c — Thread32First walks the snapshot's
+// internal thread list; returns TRUE with first THREADENTRY32, FALSE if empty.
+pub unsafe extern "win64" fn thread32_first(_h_snapshot: usize, _lpte: *mut u8) -> i32 {
+    eprintln!("weave: Thread32First(stub) — no more entries");
+    0 // FALSE
+}
+
+/// Thread32Next: retrieve next thread from toolhelp snapshot (stub).
+///
+/// Returns FALSE — no more threads.
+// Wine ref: dlls/kernel32/toolhelp.c — Thread32Next advances internal position;
+// returns TRUE if valid thread found, FALSE + ERROR_NO_MORE_FILES when exhausted.
+pub unsafe extern "win64" fn thread32_next(_h_snapshot: usize, _lpte: *mut u8) -> i32 {
+    eprintln!("weave: Thread32Next(stub) — no more entries");
+    0 // FALSE
+}
+
+/// SetConsoleScreenBufferSize: set console screen buffer size (stub).
+///
+/// Returns TRUE (success).
+// Wine ref: dlls/kernelbase/console.c — SetConsoleScreenBufferSize calls
+// IOCTL_CONDRV_SET_BUFFER_SIZE to condrv; returns FALSE + ERROR_INVALID_PARAMETER
+// if size is too small (< 8×8 in recent Windows).
+pub extern "win64" fn set_console_screen_buffer_size(
+    _h_console_output: usize,
+    _dw_size: usize,
+) -> i32 {
+    eprintln!("weave: SetConsoleScreenBufferSize(stub)");
+    1 // TRUE
+}
+
+/// GlobalAddAtomW: add a string to the global atom table (stub).
+///
+/// Returns a synthetic atom value (0xc000).
+// Wine ref: dlls/kernel32/atom.c — GlobalAddAtomW calls NtAddAtom with the
+// string; returns the atom value (low 16 bits valid) or 0 on failure.
+pub extern "win64" fn global_add_atom_w(_lp_string: *const u16) -> u16 {
+    eprintln!("weave: GlobalAddAtomW(stub)");
+    0xc000
+}
+
+/// GlobalDeleteAtom: delete an atom from the global atom table (stub).
+///
+/// Returns 0 (success). Always succeeds in this stub.
+// Wine ref: dlls/kernel32/atom.c — GlobalDeleteAtom calls NtDeleteAtom; returns
+// 0 on success, ERROR_INVALID_HANDLE if atom does not exist.
+pub extern "win64" fn global_delete_atom(_n_atom: u16) -> u16 {
+    eprintln!("weave: GlobalDeleteAtom(stub)");
+    0
+}
+
 // ── Resolver ──────────────────────────────────────────────────────────────────
 
 /// Resolve a kernel32.dll import to a stub address.
@@ -14220,6 +14316,9 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
             multi_byte_to_wide_char as unsafe extern "win64" fn(_, _, _, _, _, _) -> _ as *const ()
                 as usize,
         ),
+        "FoldStringW" => Some(
+            fold_string_w as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const () as usize,
+        ),
         "GetStartupInfoA" => {
             Some(get_startup_info_a as unsafe extern "win64" fn(_) as *const () as usize)
         }
@@ -14232,6 +14331,8 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "GlobalLock" => Some(global_lock as *const () as usize),
         "GlobalUnlock" => Some(global_unlock as *const () as usize),
         "GlobalSize" => Some(global_size as *const () as usize),
+        "GlobalAddAtomW" => Some(global_add_atom_w as *const () as usize),
+        "GlobalDeleteAtom" => Some(global_delete_atom as *const () as usize),
         "LocalAlloc" => Some(local_alloc as *const () as usize),
         "LocalFree" => Some(local_free as *const () as usize),
         "LocalLock" => Some(local_lock as *const () as usize),
@@ -15088,6 +15189,10 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
             get_number_of_console_input_events as unsafe extern "win64" fn(_, _) -> _ as *const ()
                 as usize,
         ),
+        "SetConsoleScreenBufferSize" => Some(
+            set_console_screen_buffer_size as unsafe extern "win64" fn(_, _) -> _ as *const ()
+                as usize,
+        ),
         // Task 2: File information functions
         "GetFileInformationByHandle" => Some(
             get_file_information_by_handle as unsafe extern "win64" fn(_, _) -> _ as *const ()
@@ -15375,6 +15480,12 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         }
         "Module32NextW" => {
             Some(module32_next as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "Thread32First" => {
+            Some(thread32_first as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "Thread32Next" => {
+            Some(thread32_next as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
         }
         "GetLongPathNameW" => Some(
             get_long_path_name_w as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
