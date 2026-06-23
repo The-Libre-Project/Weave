@@ -493,25 +493,10 @@ pub unsafe extern "win64" fn create_window_ex_w(
     let wm_create_ret = call_wnd_proc(cls.wnd_proc, hwnd, WM_CREATE, 0, &cs as *const _ as isize);
     eprintln!("weave/user32: WM_CREATE class={class_name:?} hwnd={hwnd:#x} → {wm_create_ret}");
 
-    // Send WM_WINDOWPOSCHANGED synchronously so the app can set up layout state
-    // (e.g. renderer at canvas object +0x38) before any subsequent work item
-    // processing. Real Windows sends this during CreateWindowExW after WM_CREATE.
-    let pos = crate::defs::WindowPos {
-        hwnd,
-        hwnd_insert_after: 0,
-        x: abs_x,
-        y: abs_y,
-        cx: width as i32,
-        cy: height as i32,
-        flags: 0, // SWP_NOZORDER|SWP_NOACTIVATE — no special flags
-    };
-    call_wnd_proc(
-        cls.wnd_proc,
-        hwnd,
-        WM_WINDOWPOSCHANGED,
-        0,
-        &pos as *const _ as isize,
-    );
+    // Send WM_SIZE synchronously so the app can set up layout state (e.g. renderer
+    // creation) before any subsequent work item processing.
+    let size_lparam = (width as isize) | ((height as isize) << 16);
+    call_wnd_proc(cls.wnd_proc, hwnd, WM_SIZE, 0, size_lparam);
 
     // Probe Scintilla document state immediately after WM_CREATE, before NPP has a
     // chance to call SCI_SETDOCPOINTER.  This tells us whether pdoc is NULL from the
@@ -4171,25 +4156,13 @@ pub extern "win64" fn set_window_pos(
                 backend::show_window(xcb_id, true);
             }
         }
-        // Send WM_WINDOWPOSCHANGED synchronously so app can update layout
-        // and renderer state. Real Windows sends this during SetWindowPos.
-        if let Some(proc_addr) = window::with(hwnd, |e| e.wnd_proc) {
-            let pos = crate::defs::WindowPos {
-                hwnd,
-                hwnd_insert_after: 0,
-                x: wx,
-                y: wy,
-                cx: ww as i32,
-                cy: wh as i32,
-                flags: u_flags,
-            };
-            call_wnd_proc(
-                proc_addr,
-                hwnd,
-                WM_WINDOWPOSCHANGED,
-                0,
-                &pos as *const _ as isize,
-            );
+        // Send WM_SIZE synchronously so app can update layout state
+        // before WM_PAINT or work item processing.
+        if u_flags & SWP_NOSIZE == 0 {
+            let l_param = (ww as isize) | ((wh as isize) << 16);
+            if let Some(proc_addr) = window::with(hwnd, |e| e.wnd_proc) {
+                call_wnd_proc(proc_addr, hwnd, WM_SIZE, 0, l_param);
+            }
         }
     }
     1 // TRUE

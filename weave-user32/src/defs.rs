@@ -52,7 +52,6 @@ pub const EM_GETLIMITTEXT: u32 = 0x00D5;
 pub const WM_NCCREATE: u32 = 0x0081;
 pub const WM_NCDESTROY: u32 = 0x0082;
 pub const WM_NCCALCSIZE: u32 = 0x0083;
-pub const WM_WINDOWPOSCHANGED: u32 = 0x0047;
 pub const WM_NCHITTEST: u32 = 0x0084;
 pub const WM_INITDIALOG: u32 = 0x0110;
 pub const WM_COMMAND: u32 = 0x0111;
@@ -381,17 +380,6 @@ pub struct PaintStruct {
     pub rgb_reserved: [u8; 32],
 }
 const _: () = assert!(std::mem::size_of::<PaintStruct>() == 72);
-
-#[repr(C)]
-pub struct WindowPos {
-    pub hwnd: usize,
-    pub hwnd_insert_after: usize,
-    pub x: i32,
-    pub y: i32,
-    pub cx: i32,
-    pub cy: i32,
-    pub flags: u32,
-}
 
 // ── CREATESTRUCTW — passed to WNDPROC with WM_CREATE / WM_NCCREATE ───────────
 //
