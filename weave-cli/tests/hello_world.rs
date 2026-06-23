@@ -2411,12 +2411,18 @@ fn sumatrapdf_pdf_render_gate() {
     // 60s: SumatraPDF's OLE/DDE init can stall the main thread well past 10s.
     // Diagnostic run — we need to know whether the message loop *ever* starts.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    let mut exit_status: Option<std::process::ExitStatus> = None;
+    let mut killed_by_deadline = false;
     loop {
         match child.try_wait() {
-            Ok(Some(_)) => break,
+            Ok(Some(status)) => {
+                exit_status = Some(status);
+                break;
+            }
             Ok(None) => {
                 if std::time::Instant::now() >= deadline {
                     let _ = child.kill();
+                    killed_by_deadline = true;
                     break;
                 }
                 std::thread::sleep(std::time::Duration::from_millis(100));
@@ -2424,6 +2430,11 @@ fn sumatrapdf_pdf_render_gate() {
             Err(e) => panic!("wait failed: {e}"),
         }
     }
+    eprintln!(
+        "sumatrapdf exit: {:?} killed_by_deadline={}",
+        exit_status.map(|s| s.to_string()).unwrap_or_default(),
+        killed_by_deadline
+    );
 
     drain_thread.join().expect("stderr drain thread panicked");
     let stderr_bytes = stderr_shared.lock().unwrap().clone();

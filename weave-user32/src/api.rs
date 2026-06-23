@@ -556,6 +556,16 @@ pub extern "win64" fn show_window(hwnd: usize, n_cmd_show: i32) -> i32 {
     was_visible as i32
 }
 
+/// ShowWindowAsync: schedule a window show/hide asynchronously and return immediately.
+/// Weave: synchronous implementation — posts WM_PAINT and returns, same as ShowWindow.
+/// This matches the Win32 contract because the "async" part is the WM_PAINT dispatch,
+/// which happens at GetMessage time regardless.
+// Wine ref: dlls/user32/window.c — ShowWindowAsync posts WM_SHOWWINDOW to the window's
+// message queue via SendNotifyMessageW, then returns without waiting for processing.
+pub extern "win64" fn show_window_async(hwnd: usize, n_cmd_show: i32) -> i32 {
+    show_window(hwnd, n_cmd_show)
+}
+
 /// UpdateWindow: send WM_PAINT directly if the update region is non-empty.
 /// Phase 2: always posts WM_PAINT to the message queue.
 // Wine ref: dlls/win32u/painting.c — NtUserRedrawWindow with RDW_UPDATENOW; sends WM_PAINT
@@ -9582,6 +9592,96 @@ pub unsafe extern "win64" fn find_window_ex_w(
         "weave/user32: FindWindowExW tid={tid} class={class_str:?} window={window_str:?} → NULL"
     );
     0 // NULL — no matching window
+}
+
+// ── DDE runtime stubs ───────────────────────────────────────────────────────────
+
+/// DdeConnect: establish a conversation with a DDE server.
+/// Stub: returns NULL (no server found) — single-instance check passes.
+// Wine ref: dlls/user32/dde.c — connects to a DDE server by service/topic strings.
+pub unsafe extern "win64" fn dde_connect(
+    _id_inst: u32,
+    _hsz_service: usize,
+    _hsz_topic: usize,
+    _p_cc: *const u8,
+) -> usize {
+    eprintln!("weave/user32: DdeConnect → NULL (no DDE server)");
+    0
+}
+
+pub unsafe extern "win64" fn dde_disconnect(_h_conv: usize) -> i32 {
+    eprintln!("weave/user32: DdeDisconnect → TRUE");
+    1
+}
+
+/// DdeCreateStringHandleW: create a DDE string handle from a wide string.
+/// Stub: returns a pseudo-handle (string address cast).
+// Wine ref: dlls/user32/dde.c — hashes the string and returns an atom.
+pub unsafe extern "win64" fn dde_create_string_handle_w(
+    _id_inst: u32,
+    psz: *const u16,
+    _codepage: i32,
+) -> usize {
+    let handle = psz as usize;
+    eprintln!("weave/user32: DdeCreateStringHandleW → {handle:#x}");
+    handle
+}
+
+pub unsafe extern "win64" fn dde_free_string_handle(_id_inst: u32, _hsz: usize) -> i32 {
+    1
+}
+
+pub unsafe extern "win64" fn dde_client_transaction(
+    _data: *const u8,
+    _data_len: u32,
+    _h_conv: usize,
+    _hsz_item: usize,
+    _w_fmt: u32,
+    _w_type: u32,
+    _dw_timeout: u32,
+    _pdw_result: *mut u32,
+) -> usize {
+    eprintln!("weave/user32: DdeClientTransaction → 0 (no data)");
+    0
+}
+
+pub unsafe extern "win64" fn dde_uninitialize(_id_inst: u32) -> i32 {
+    eprintln!("weave/user32: DdeUninitialize → TRUE");
+    1
+}
+
+pub unsafe extern "win64" fn dde_free_data_handle(_h_data: usize) -> i32 {
+    1
+}
+
+pub unsafe extern "win64" fn reuse_dde_l_param(_l_param: isize, _l_param_in: isize) -> isize {
+    _l_param_in
+}
+
+pub unsafe extern "win64" fn unpack_dde_l_param(
+    _l_param: isize,
+    _p_lo: *mut u16,
+    _p_hi: *mut u16,
+) -> i32 {
+    1
+}
+
+// ── General window stubs ────────────────────────────────────────────────────────
+
+pub unsafe extern "win64" fn get_window_info(_hwnd: usize, lpwi: *mut u8) -> i32 {
+    if !lpwi.is_null() {
+        std::ptr::write_bytes(lpwi, 0, 60);
+    }
+    eprintln!("weave/user32: GetWindowInfo → TRUE (zero struct)");
+    1
+}
+
+pub unsafe extern "win64" fn allow_set_foreground_window(_dw_process_id: u32) -> i32 {
+    1
+}
+
+pub unsafe extern "win64" fn is_char_upper_w(ch: u16) -> i32 {
+    char::from_u32(ch as u32).map_or(false, |c| c.is_uppercase()) as i32
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

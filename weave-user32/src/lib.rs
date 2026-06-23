@@ -665,6 +665,7 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
                 as *const () as usize,
         ),
         "ShowWindow" => Some(show_window as *const () as usize),
+        "ShowWindowAsync" => Some(show_window_async as *const () as usize),
         "UpdateWindow" => Some(update_window as *const () as usize),
         "DestroyWindow" => Some(destroy_window as *const () as usize),
         // Message loop
@@ -1379,13 +1380,53 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
             wsprintf::wvsprintf_w as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
         ),
         // SumatraPDF DDE single-instance stubs
+        "AllowSetForegroundWindow" => Some(
+            api::allow_set_foreground_window as unsafe extern "win64" fn(_) -> _ as *const ()
+                as usize,
+        ),
+        "DdeClientTransaction" => Some(
+            api::dde_client_transaction as unsafe extern "win64" fn(_, _, _, _, _, _, _, _) -> _
+                as *const () as usize,
+        ),
+        "DdeConnect" => Some(
+            api::dde_connect as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
+        ),
+        "DdeCreateStringHandleW" => Some(
+            api::dde_create_string_handle_w as unsafe extern "win64" fn(_, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "DdeDisconnect" => {
+            Some(api::dde_disconnect as unsafe extern "win64" fn(_) -> _ as *const () as usize)
+        }
+        "DdeFreeDataHandle" => Some(
+            api::dde_free_data_handle as unsafe extern "win64" fn(_) -> _ as *const () as usize,
+        ),
+        "DdeFreeStringHandle" => Some(
+            api::dde_free_string_handle as unsafe extern "win64" fn(_, _) -> _ as *const ()
+                as usize,
+        ),
         "DdeInitializeW" => Some(
             api::dde_initialize_w as unsafe extern "win64" fn(_, _, _, _) -> _ as *const ()
                 as usize,
         ),
+        "DdeUninitialize" => {
+            Some(api::dde_uninitialize as unsafe extern "win64" fn(_) -> _ as *const () as usize)
+        }
         "FindWindowExW" => Some(
             api::find_window_ex_w as unsafe extern "win64" fn(_, _, _, _) -> _ as *const ()
                 as usize,
+        ),
+        "GetWindowInfo" => {
+            Some(api::get_window_info as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "IsCharUpperW" => {
+            Some(api::is_char_upper_w as unsafe extern "win64" fn(_) -> _ as *const () as usize)
+        }
+        "ReuseDDElParam" => Some(
+            api::reuse_dde_l_param as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
+        ),
+        "UnpackDDElParam" => Some(
+            api::unpack_dde_l_param as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
         ),
         // ── Q-Dir stubs ──
         "SetMenuDefaultItem" => Some(
