@@ -416,7 +416,6 @@ extern "win64" fn toolbar_wnd_proc(hwnd: usize, msg: u32, w_param: usize, l_para
             }
             0
         }
-        TB_GETDRAWTEXTFLAGS => 0,
         TB_SETDRAWTEXTFLAGS => 0,
         TB_GETSTRING => 0,
         TB_SETSTRING => 0,
@@ -484,7 +483,7 @@ extern "win64" fn tab_wnd_proc(hwnd: usize, msg: u32, w_param: usize, l_param: i
         TCM_GETITEMW => {
             // Fill TCITEMW struct at lParam with stored tab item data.
             if l_param != 0 {
-                let idx = w_param as usize;
+                let idx = w_param;
                 if let Ok(map) = get_state().lock() {
                     if let Some(ComctlState::Tab(ref tab)) = map.get(&hwnd) {
                         if idx < tab.items.len() {
@@ -512,7 +511,7 @@ extern "win64" fn tab_wnd_proc(hwnd: usize, msg: u32, w_param: usize, l_param: i
         TCM_SETITEMW => {
             // Update Vec<TabItem> from TCITEMW at lParam.
             if l_param != 0 {
-                let idx = w_param as usize;
+                let idx = w_param;
                 let _mask = unsafe { std::ptr::read_unaligned(l_param as *const u32) };
                 let psz_text = unsafe { std::ptr::read_unaligned((l_param + 12) as *const usize) };
                 let i_image = unsafe { std::ptr::read_unaligned((l_param + 24) as *const i32) };
