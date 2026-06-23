@@ -505,7 +505,13 @@ pub unsafe extern "win64" fn create_window_ex_w(
         cy: height as i32,
         flags: 0, // SWP_NOZORDER|SWP_NOACTIVATE — no special flags
     };
-    call_wnd_proc(cls.wnd_proc, hwnd, WM_WINDOWPOSCHANGED, 0, &pos as *const _ as isize);
+    call_wnd_proc(
+        cls.wnd_proc,
+        hwnd,
+        WM_WINDOWPOSCHANGED,
+        0,
+        &pos as *const _ as isize,
+    );
 
     // Probe Scintilla document state immediately after WM_CREATE, before NPP has a
     // chance to call SCI_SETDOCPOINTER.  This tells us whether pdoc is NULL from the
@@ -4175,9 +4181,15 @@ pub extern "win64" fn set_window_pos(
                 y: wy,
                 cx: ww as i32,
                 cy: wh as i32,
-                flags: u_flags as u32,
+                flags: u_flags,
             };
-            call_wnd_proc(proc_addr, hwnd, WM_WINDOWPOSCHANGED, 0, &pos as *const _ as isize);
+            call_wnd_proc(
+                proc_addr,
+                hwnd,
+                WM_WINDOWPOSCHANGED,
+                0,
+                &pos as *const _ as isize,
+            );
         }
     }
     1 // TRUE
