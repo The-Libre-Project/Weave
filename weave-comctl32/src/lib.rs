@@ -53,14 +53,14 @@ const TB_GETBUTTONTEXT: u32 = 0x0433;
 const TB_GETRECT: u32 = 0x043f;
 const TB_AUTOSIZE: u32 = 0x0411;
 const TB_SETIMAGELIST: u32 = 0x0430;
-const TB_SETEXTENDEDSTYLE: u32 = 0x0444;
+const TB_SETEXTENDEDSTYLE: u32 = 0x0454;
 const TB_SETBUTTONSIZE: u32 = 0x0440;
 const TB_GETMAXSIZE: u32 = 0x041d;
 const TB_GETDRAWTEXTFLAGS: u32 = 0x0454;
 const TB_SETDRAWTEXTFLAGS: u32 = 0x0455;
 const TB_GETSTRING: u32 = 0x0466;
 const TB_SETSTRING: u32 = 0x0465;
-const TB_ADDBUTTONSW: u32 = 0x0468;
+const TB_ADDBUTTONSW: u32 = 0x0444;
 
 // Correct Windows SDK TCM_* constants (TCM_FIRST = 0x1300).
 const TCM_GETIMAGELIST: u32 = 0x1302; // TCM_FIRST + 2
@@ -351,7 +351,7 @@ extern "win64" fn toolbar_wnd_proc(hwnd: usize, msg: u32, w_param: usize, l_para
             if l_param != 0 {
                 unsafe { std::ptr::write_bytes(l_param as *mut u8, 0, 64) };
             }
-            -1 // FALSE
+            0 // FALSE
         }
         TB_SETBUTTONINFOW => {
             -1 // FALSE
@@ -482,14 +482,47 @@ extern "win64" fn tab_wnd_proc(hwnd: usize, msg: u32, w_param: usize, l_param: i
             1 // TRUE
         }
         TCM_GETITEMW => {
-            // Fill TCITEMW struct at lParam. Stub: zero it out.
+            // Fill TCITEMW struct at lParam with stored tab item data.
             if l_param != 0 {
-                unsafe { std::ptr::write_bytes(l_param as *mut u8, 0, 48) };
+                let idx = w_param as usize;
+                if let Ok(map) = get_state().lock() {
+                    if let Some(ComctlState::Tab(ref tab)) = map.get(&hwnd) {
+                        if idx < tab.items.len() {
+                            let item = &tab.items[idx];
+                            unsafe {
+                                std::ptr::write_unaligned(l_param as *mut u32, !0u32); // mask
+                                std::ptr::write_unaligned((l_param + 12) as *mut usize, item.text_ptr);
+                                std::ptr::write_unaligned((l_param + 24) as *mut i32, item.i_image);
+                                std::ptr::write_unaligned((l_param + 28) as *mut isize, item.l_param);
+                            }
+                            return 1;
+                        }
+                    }
+                }
+                unsafe { std::ptr::write_bytes(l_param as *mut u8, 0, 36) };
             }
             1 // TRUE
         }
         TCM_SETITEMW => {
-            1 // TRUE — accept quietly
+            // Update Vec<TabItem> from TCITEMW at lParam.
+            if l_param != 0 {
+                let idx = w_param as usize;
+                let _mask = unsafe { std::ptr::read_unaligned(l_param as *const u32) };
+                let psz_text = unsafe { std::ptr::read_unaligned((l_param + 12) as *const usize) };
+                let i_image = unsafe { std::ptr::read_unaligned((l_param + 24) as *const i32) };
+                let item_lparam = unsafe { std::ptr::read_unaligned((l_param + 28) as *const isize) };
+                if let Ok(mut map) = get_state().lock() {
+                    if let Some(ComctlState::Tab(ref mut tab)) = map.get_mut(&hwnd) {
+                        if idx < tab.items.len() {
+                            tab.items[idx].text_ptr = psz_text;
+                            tab.items[idx].i_image = i_image;
+                            tab.items[idx].l_param = item_lparam;
+                            return 1;
+                        }
+                    }
+                }
+            }
+            1 // TRUE
         }
         TCM_DELETEALLITEMS => {
             if let Ok(mut map) = get_state().lock() {
