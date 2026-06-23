@@ -10913,6 +10913,107 @@ pub unsafe extern "win64" fn win_help_w(
     0
 }
 
+// ── SendInput ─────────────────────────────────────────────────────────────────
+
+/// SendInput — synthesize input events.
+///
+/// Returns 0 (not processed).
+#[allow(non_snake_case)]
+pub extern "win64" fn send_input(_c_inputs: u32, _p_inputs: *const u8, _cb_size: i32) -> u32 {
+    eprintln!("weave/user32: SendInput (stub → 0)");
+    0
+}
+
+// ── OEM/ANSI character set conversion ─────────────────────────────────────────
+
+/// OemToCharA — translate a null-terminated OEM string to ANSI (pass-through).
+///
+/// # Safety
+/// `oem_str` and `ansi_str` must be valid null-terminated pointers.
+#[allow(non_snake_case)]
+pub unsafe extern "win64" fn oem_to_char_a(oem_str: *const u8, ansi_str: *mut u8) -> i32 {
+    eprintln!("weave/user32: OemToCharA (stub — pass-through)");
+    if oem_str.is_null() || ansi_str.is_null() {
+        return 0;
+    }
+    let mut i = 0usize;
+    while i < 65536 {
+        let c = unsafe { *oem_str.add(i) };
+        unsafe { *ansi_str.add(i) = c };
+        if c == 0 {
+            break;
+        }
+        i += 1;
+    }
+    1
+}
+
+/// CharToOemA — translate a null-terminated ANSI string to OEM (pass-through).
+///
+/// # Safety
+/// `ansi_str` and `oem_str` must be valid null-terminated pointers.
+#[allow(non_snake_case)]
+pub unsafe extern "win64" fn char_to_oem_a(ansi_str: *const u8, oem_str: *mut u8) -> i32 {
+    eprintln!("weave/user32: CharToOemA (stub — pass-through)");
+    if ansi_str.is_null() || oem_str.is_null() {
+        return 0;
+    }
+    let mut i = 0usize;
+    while i < 65536 {
+        let c = unsafe { *ansi_str.add(i) };
+        unsafe { *oem_str.add(i) = c };
+        if c == 0 {
+            break;
+        }
+        i += 1;
+    }
+    1
+}
+
+/// OemToCharBuffA — translate a block of OEM characters to ANSI (pass-through).
+///
+/// # Safety
+/// `oem_buf` and `ansi_buf` must be valid pointers for `cch_len` bytes.
+#[allow(non_snake_case)]
+pub unsafe extern "win64" fn oem_to_char_buff_a(
+    oem_buf: *const u8,
+    ansi_buf: *mut u8,
+    cch_len: u32,
+) -> i32 {
+    eprintln!("weave/user32: OemToCharBuffA (stub — pass-through) len={cch_len}");
+    if oem_buf.is_null() || ansi_buf.is_null() {
+        return 0;
+    }
+    let len = (cch_len as usize).min(65536);
+    unsafe {
+        std::ptr::copy_nonoverlapping(oem_buf, ansi_buf, len);
+    }
+    0 // FALSE — no real conversion performed
+}
+
+/// CharToOemBuffW — translate a block of wide characters to OEM (pass-through, bytes dropped).
+///
+/// # Safety
+/// `wide_str` must be valid for `cch_len` u16 units; `oem_buf` for `cch_len` bytes.
+#[allow(non_snake_case)]
+pub unsafe extern "win64" fn char_to_oem_buff_w(
+    wide_str: *const u16,
+    oem_buf: *mut u8,
+    cch_len: u32,
+) -> i32 {
+    eprintln!("weave/user32: CharToOemBuffW (stub — pass-through) len={cch_len}");
+    if wide_str.is_null() || oem_buf.is_null() {
+        return 0;
+    }
+    let len = (cch_len as usize).min(65536);
+    // Pass-through: truncate each u16 to low byte.
+    for i in 0..len {
+        let c = unsafe { *wide_str.add(i) };
+        unsafe { *oem_buf.add(i) = c as u8 };
+    }
+    0 // FALSE — no real conversion performed
+}
+
 /// Resolve a UIAutomationCore.dll import to a stub address.
 ///
 /// Called by weave-cli's resolve chain. Uses eq_ignore_ascii_case because

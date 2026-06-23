@@ -488,6 +488,45 @@ pub unsafe extern "win64" fn wsprintf_w(buffer: *mut u16, format: *const u16) ->
     }
 }
 
+extern "C" {
+    fn vsnprintf(
+        s: *mut libc::c_char,
+        n: libc::size_t,
+        format: *const libc::c_char,
+        ap: *mut libc::c_void,
+    ) -> libc::c_int;
+}
+
+/// wsprintfA — ANSI sprintf wrapping vsnprintf on a 1024-byte buffer.
+///
+/// # Safety
+/// `buffer` must be writable for at least 1024 bytes. `format` must be a valid
+/// null-terminated ANSI string. Additional variadic args must match the format.
+pub unsafe extern "win64" fn wsprintf_a(buffer: *mut u8, format: *const u8) -> i32 {
+    if buffer.is_null() || format.is_null() {
+        return 0;
+    }
+    // Compute the address of the first variadic argument (after buffer and format on stack).
+    let ap: *const u8;
+    core::arch::asm!(
+        "mov {ap}, rsp",
+        "add {ap}, 24",
+        ap = out(reg) ap,
+    );
+    let fmt = unsafe { core::ffi::CStr::from_ptr(format as *const i8) };
+    eprintln!("weave/user32: wsprintfA enter fmt={fmt:?}");
+    let ret = unsafe {
+        vsnprintf(
+            buffer as *mut i8,
+            1024,
+            format as *const i8,
+            ap as *mut core::ffi::c_void,
+        )
+    };
+    eprintln!("weave/user32: wsprintfA ret={ret}");
+    ret as i32
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

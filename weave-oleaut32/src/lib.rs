@@ -495,6 +495,15 @@ pub unsafe extern "win64" fn create_error_info(pperrinfo: *mut *mut u8) -> i32 {
     0x80004001u32 as i32 // E_NOTIMPL
 }
 
+// Wine ref: none — ordinal #26 is undocumented / version-specific.
+/// oleaut32 ordinal #26 — unknown undocumented ordinal.
+///
+/// Returns S_OK (0) — stub.
+pub extern "win64" fn oleaut32_ord26() -> i32 {
+    eprintln!("weave/oleaut32: ordinal #26 (stub → 0)");
+    0 // S_OK
+}
+
 // Wine ref: none — ordinal #411 is undocumented / version-specific.
 /// oleaut32 ordinal #411 — unknown undocumented ordinal.
 ///
@@ -575,6 +584,7 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "CreateErrorInfo" | "#162" => {
             Some(create_error_info as unsafe extern "win64" fn(_) -> _ as *const () as usize)
         }
+        "#26" => Some(oleaut32_ord26 as extern "win64" fn() -> _ as *const () as usize),
         "#411" => Some(oleaut32_ord411 as extern "win64" fn() -> _ as *const () as usize),
         "#419" => Some(oleaut32_ord419 as extern "win64" fn() -> _ as *const () as usize),
         _ => None,
@@ -611,6 +621,7 @@ mod tests {
         assert!(resolve("oleaut32.dll", "#7").is_some());
         assert!(resolve("oleaut32.dll", "#9").is_some());
         assert!(resolve("oleaut32.dll", "#10").is_some());
+        assert!(resolve("oleaut32.dll", "#26").is_some());
         assert!(resolve("oleaut32.dll", "#149").is_some());
     }
 
@@ -699,7 +710,7 @@ mod tests {
         // Every ordinal in the resolver must resolve.
         let ordinals = [
             "#2", "#4", "#6", "#7", "#8", "#9", "#10", "#11", "#12", "#15", "#16", "#23", "#24",
-            "#146", "#149", "#162", "#411", "#419",
+            "#26", "#146", "#149", "#162", "#411", "#419",
         ];
         for ord in &ordinals {
             assert!(

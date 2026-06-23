@@ -2755,6 +2755,20 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "SetWinMetaFileBits" => Some(
             set_win_meta_file_bits as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
         ),
+        // ── SumatraPDF GDI stubs ──────────────────────────────────────────
+        "GetDIBColorTable" => Some(
+            get_dib_color_table as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
+        ),
+        "SetDIBColorTable" => Some(
+            set_dib_color_table as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
+        ),
+        "SetLayout" => Some(set_layout as extern "win64" fn(_, _) -> _ as *const () as usize),
+        "CreateRoundRectRgn" => Some(
+            create_round_rect_rgn as extern "win64" fn(_, _, _, _, _, _) -> _ as *const () as usize,
+        ),
+        "ExtSelectClipRgn" => {
+            Some(ext_select_clip_rgn as extern "win64" fn(_, _, _) -> _ as *const () as usize)
+        }
         _ => None,
     }
 }
@@ -5362,6 +5376,77 @@ pub unsafe extern "win64" fn set_window_ext_ex(
     _lp_size: *mut [i32; 2],
 ) -> i32 {
     0 // FALSE
+}
+
+// ── SumatraPDF stubs: DIB color table, layout, regions ────────────────────────
+
+/// GetDIBColorTable — retrieve RGB colour values from a DIB section colour table.
+///
+/// Returns 0 (no entries).
+// Wine ref: dlls/win32u/dib.c — GetDIBColorTable returns DIB colour table entries
+// for bitmaps with biBitCount <= 8 (palettized); returns 0 for 16/24/32bpp DIBs.
+#[allow(non_snake_case)]
+pub unsafe extern "win64" fn get_dib_color_table(
+    _hdc: usize,
+    _start: u32,
+    _entries: u32,
+    _table: *mut u8,
+) -> u32 {
+    eprintln!("weave/gdi32: GetDIBColorTable (stub → 0)");
+    0
+}
+
+/// SetDIBColorTable — set RGB colour values in a DIB section colour table.
+///
+/// Returns 0 (no entries set).
+// Wine ref: dlls/win32u/dib.c — SetDIBColorTable sets colour table entries for
+// palettized DIBs; returns 0 for 16/24/32bpp or invalid DC.
+#[allow(non_snake_case)]
+pub unsafe extern "win64" fn set_dib_color_table(
+    _hdc: usize,
+    _start: u32,
+    _entries: u32,
+    _table: *const u8,
+) -> u32 {
+    eprintln!("weave/gdi32: SetDIBColorTable (stub → 0)");
+    0
+}
+
+/// SetLayout — set the graphics mode layout for a DC.
+///
+/// Returns the previous layout (0 = LAYOUT_LTR).
+// Wine ref: dlls/win32u/dc.c — NtGdiSetLayout stores dwLayout in dc->attr.layout;
+// LAYOUT_LTR(0) is default; LAYOUT_RTL(1) mirrors the x-axis for RTL scripts.
+pub extern "win64" fn set_layout(_hdc: usize, _layout: u32) -> u32 {
+    eprintln!("weave/gdi32: SetLayout (stub → 0)");
+    0 // LAYOUT_LTR
+}
+
+/// CreateRoundRectRgn — create a region with rounded corners.
+///
+/// Returns a fake HRGN (1).
+// Wine ref: dlls/win32u/region.c — NtGdiCreateRoundRectRgn allocates a region with
+// elliptical corners of dimensions (w×h); returns NULL on failure.
+pub extern "win64" fn create_round_rect_rgn(
+    _x1: i32,
+    _y1: i32,
+    _x2: i32,
+    _y2: i32,
+    _w: i32,
+    _h: i32,
+) -> usize {
+    eprintln!("weave/gdi32: CreateRoundRectRgn (stub → fake HRGN 1)");
+    1
+}
+
+/// ExtSelectClipRgn — select a clip region with a combine mode.
+///
+/// Returns SIMPLEREGION (2).
+// Wine ref: dlls/win32u/clipping.c — NtGdiExtSelectClipRgn combines the region with
+// the DC's current clip region using RGN_AND/OR/XOR/DIFF/COPY; returns region type.
+pub extern "win64" fn ext_select_clip_rgn(_hdc: usize, _hrgn: usize, _mode: i32) -> i32 {
+    eprintln!("weave/gdi32: ExtSelectClipRgn (stub → SIMPLEREGION)");
+    SIMPLEREGION
 }
 
 // ── Phase A stubs ─────────────────────────────────────────────────

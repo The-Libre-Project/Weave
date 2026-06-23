@@ -1376,6 +1376,9 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "wsprintfW" => {
             Some(wsprintf::wsprintf_w as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
         }
+        "wsprintfA" => {
+            Some(wsprintf::wsprintf_a as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
         "wvsprintfW" => Some(
             wsprintf::wvsprintf_w as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
         ),
@@ -1604,6 +1607,20 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "WinHelpW" => {
             Some(api::win_help_w as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize)
         }
+        // ── SumatraPDF stubs: input synthesis, OEM/ANSI conversion ────────
+        "SendInput" => Some(api::send_input as *const () as usize),
+        "OemToCharA" => {
+            Some(api::oem_to_char_a as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "CharToOemA" => {
+            Some(api::char_to_oem_a as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "OemToCharBuffA" => Some(
+            api::oem_to_char_buff_a as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
+        ),
+        "CharToOemBuffW" => Some(
+            api::char_to_oem_buff_w as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
+        ),
         _ => None,
     }
 }
