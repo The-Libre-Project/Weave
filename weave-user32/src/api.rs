@@ -539,17 +539,6 @@ pub extern "win64" fn show_window(hwnd: usize, n_cmd_show: i32) -> i32 {
 
     let xcb = window::xcb_id(hwnd);
     eprintln!("weave/user32: ShowWindow hwnd={hwnd:#x} cmd={n_cmd_show} show={show} xcb={xcb:#x}");
-
-    // Send WM_SHOWWINDOW synchronously before changing visibility (non-dialog only).
-    // Dialog windows (#32770) receive WM_SHOWWINDOW after WM_INITDIALOG, not during
-    // ShowWindow. Sending too early crashes Q-Dir which expects dialog state first.
-    let is_dialog = window::with(hwnd, |e| e.class_name == "#32770").unwrap_or(false);
-    if !is_dialog {
-        if let Some(proc_addr) = window::with(hwnd, |e| e.wnd_proc) {
-            call_wnd_proc(proc_addr, hwnd, WM_SHOWWINDOW, show as usize, 0);
-        }
-    }
-
     window::with_mut(hwnd, |e| e.visible = show);
     backend::show_window(xcb, show);
 
