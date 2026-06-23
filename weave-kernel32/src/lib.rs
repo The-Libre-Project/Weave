@@ -2908,18 +2908,15 @@ pub unsafe extern "win64" fn create_file_w(
         eprintln!("weave/CreateFileW: read-open path={win_path:?} access={dw_desired_access:#x} disp={dw_creation_disposition:#x}");
     }
 
-    // Named pipe paths (\\\\.\\pipe\\*): create a temp backing file so the caller
-    // gets a valid handle and does not crash with INVALID_HANDLE_VALUE. SumatraPDF
-    // uses \\.\pipe\SumatraPDFLogger for diagnostic logging — the temp file is
-    // discarded after process exit.
-    if let Some(pipe_name) = win_path.strip_prefix("\\\\.\\pipe\\") {
+    // Named pipe paths: create a temp backing file so the caller does not
+    // crash with INVALID_HANDLE_VALUE. Case-insensitive check — Windows
+    // uses \\.\pipe\name or \\.\PIPE\name (case-insensitive).
+    if win_path.to_ascii_lowercase().contains("\\pipe\\") {
         let mut buf = *b"/tmp/weave-pipe-XXXXXX\0";
         let fd = unsafe { libc::mkstemp(buf.as_mut_ptr() as *mut i8) };
         if fd >= 0 {
             unsafe { libc::unlink(buf.as_ptr() as *const i8) }; // unlink so it vanishes on close
-            eprintln!(
-                "weave/CreateFileW: pipe path={win_path:?} → backing fd={fd} name={pipe_name:?}"
-            );
+            eprintln!("weave/CreateFileW: pipe path={win_path:?} → backing fd={fd}");
             set_last_error(0);
             return fd as usize;
         }
