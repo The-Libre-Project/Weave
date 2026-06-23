@@ -1692,6 +1692,10 @@ static PENDING_SCRATCH_PDOC: std::sync::atomic::AtomicUsize =
 /// set up via SendMessageW before the proxy was installed).
 static SCRATCH_SCI: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
+/// Phase-once guard for the NPP plugin load marker.
+static NPP_PLUGIN_LOAD_PHASED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 /// Proxy for SciFnDirectStatus — logs all SCI messages and intercepts SCI_GETDOCPOINTER.
 /// 4-param SciFnDirect wrapper: passes null p_status to the 5-param proxy.
 /// NPP may use SCI_GETDIRECTFUNCTION (2182) instead of SCI_GETDIRECTSTATUSFUNCTION (2184),
@@ -1866,6 +1870,16 @@ pub unsafe extern "win64" fn sci_direct_fn_proxy(
         } else {
             eprintln!("weave/sci_proxy:   → {ret:#x}");
         }
+    }
+
+    // Phase marker for NPP plugin load gate: first SCI_APPENDTEXT after
+    // the Scintilla HWND is known proves NPP reached full init with plugins.
+    if msg == 2282
+        && std::env::var("WEAVE_TEST_NPP_PLUGIN_LOAD").is_ok()
+        && M15_SCINTILLA_HWND.load(std::sync::atomic::Ordering::Relaxed) != 0
+        && !NPP_PLUGIN_LOAD_PHASED.swap(true, Ordering::Relaxed)
+    {
+        mark_phase("npp_plugin_load_first");
     }
 
     // Save lparam from SCI_APPENDTEXT for the msg=2358 handler's text copy.

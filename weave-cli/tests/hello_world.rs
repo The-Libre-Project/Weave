@@ -9638,3 +9638,172 @@ fn npp_syntax_highlight_gate() {
         "npp_syntax_highlight_gate: A1+A2+A3 passed, Tier C guards passed (no new unresolved imports)"
     );
 }
+
+/// NPP plugin folder gate: proves NPP finds and loads plugins from its plugins/
+/// directory. NPP's plugins/ subdirectories (Config, NppConverter, NppExport,
+/// mimeTools) each contain a .dll that NPP loads at startup.
+///
+/// The gate emits PHASE: npp_plugin_load_first when the first SCI_APPENDTEXT
+/// occurs after the Scintilla HWND is known (proving full initialization with
+/// plugin loading). Asserts A1: the phase marker appears in stderr within 30s.
+/// Asserts A2: at least one load_library_impl call includes "plugins" in the
+/// path — confirming NPP found the plugins directory.
+///
+/// Temp dir: /tmp/weave_npp_plugin_folder (distinct from other NPP gates)
+/// Timeout: 30 s
+#[test]
+fn npp_plugin_folder_gate() {
+    if !cfg!(target_os = "linux") {
+        eprintln!("skipping execution test — requires Linux");
+        return;
+    }
+
+    let manifest = env!("CARGO_MANIFEST_DIR");
+    let npp_dir = format!("{manifest}/../tests/fixtures/npp");
+    let npp_exe = format!("{npp_dir}/notepad++.exe");
+
+    if !std::path::Path::new(&npp_exe).exists() {
+        eprintln!("skipping: notepad++.exe not present in tests/fixtures/npp/");
+        return;
+    }
+
+    let test_py = format!("{npp_dir}/test.py");
+    if !std::path::Path::new(&test_py).exists() {
+        eprintln!("skipping: test.py not present in tests/fixtures/npp/");
+        return;
+    }
+
+    let plugins_dir = format!("{npp_dir}/plugins");
+    if !std::path::Path::new(&plugins_dir).is_dir() {
+        eprintln!("skipping: plugins/ not found in tests/fixtures/npp/");
+        return;
+    }
+
+    let weave_bin = env!("CARGO_BIN_EXE_weave");
+
+    // Use distinct temp dir.
+    let tmp_dir = std::path::PathBuf::from("/tmp/weave_npp_plugin_folder");
+    if tmp_dir.exists() {
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
+    fn copy_dir_all_npp(src: &std::path::Path, dst: &std::path::Path) {
+        std::fs::create_dir_all(dst).expect("create_dir_all failed");
+        for entry in std::fs::read_dir(src).expect("read_dir failed") {
+            let entry = entry.expect("entry failed");
+            let dst_path = dst.join(entry.file_name());
+            if entry.file_type().expect("file_type failed").is_dir() {
+                copy_dir_all_npp(&entry.path(), &dst_path);
+            } else {
+                std::fs::copy(entry.path(), &dst_path).expect("copy failed");
+            }
+        }
+    }
+    copy_dir_all_npp(std::path::Path::new(&npp_dir), &tmp_dir);
+
+    // Verify plugins were copied.
+    let tmp_plugins = tmp_dir.join("plugins");
+    assert!(
+        tmp_plugins.is_dir(),
+        "plugins/ directory must be present in temp dir — copy failed?"
+    );
+
+    let tmp_exe = tmp_dir.join("notepad++.exe");
+    let tmp_py = tmp_dir.join("test.py");
+
+    let start = std::time::Instant::now();
+    let mut child = std::process::Command::new(weave_bin)
+        .current_dir(&tmp_dir)
+        .arg(&tmp_exe)
+        .arg(&tmp_py)
+        .env("WEAVE_TEST_NPP_PLUGIN_LOAD", "1")
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|e| {
+            panic!("failed to spawn weave on notepad++.exe for NPP plugin folder probe: {e}")
+        });
+
+    // Drain stderr; signal on npp_plugin_load_first.
+    let stderr_pipe = child.stderr.take().expect("stderr was piped");
+    let stderr_shared = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let stderr_writer = std::sync::Arc::clone(&stderr_shared);
+    let (phase_tx, phase_rx) = std::sync::mpsc::channel::<()>();
+
+    let drain_thread = std::thread::spawn(move || {
+        use std::io::Read;
+        let mut pipe = stderr_pipe;
+        let mut buf = [0u8; 4096];
+        let mut acc = Vec::new();
+        let mut signalled = false;
+        loop {
+            match pipe.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    acc.extend_from_slice(&buf[..n]);
+                    if !signalled {
+                        let chunk = String::from_utf8_lossy(&acc);
+                        if chunk.contains("PHASE: npp_plugin_load_first") {
+                            let _ = phase_tx.send(());
+                            signalled = true;
+                        }
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        *stderr_writer.lock().unwrap() = acc;
+    });
+
+    // Wait for the phase marker (30s timeout).
+    let phase_deadline = std::time::Duration::from_secs(30);
+    let phase_seen = phase_rx.recv_timeout(phase_deadline).is_ok();
+
+    if phase_seen {
+        eprintln!("npp_plugin_folder_gate: npp_plugin_load_first observed — NPP reached full init with plugins loaded");
+        // Short window for log lines to flush.
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    } else {
+        eprintln!(
+            "npp_plugin_folder_gate: timed out waiting for npp_plugin_load_first — killing NPP"
+        );
+    }
+
+    // Wait for exit or kill.
+    let kill_deadline = start + std::time::Duration::from_secs(35);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) => {
+                if std::time::Instant::now() >= kill_deadline {
+                    let _ = child.kill();
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err(e) => panic!("wait failed: {e}"),
+        }
+    }
+    let elapsed = start.elapsed();
+
+    drain_thread.join().expect("stderr drain thread panicked");
+    let stderr_bytes = stderr_shared.lock().unwrap().clone();
+    let stderr = String::from_utf8_lossy(&stderr_bytes);
+    eprintln!("npp_plugin_folder_gate stderr ({elapsed:.1?}):\n{stderr}");
+
+    // A1: Phase marker proves NPP reached full init with plugin loading.
+    assert!(
+        stderr.contains("PHASE: npp_plugin_load_first"),
+        "A1 FAIL: PHASE: npp_plugin_load_first was never emitted — NPP did not reach full init.\nstderr: {stderr}"
+    );
+
+    // A2: At least one load_library_impl call includes "plugins" in the path.
+    let has_plugin_load = stderr
+        .lines()
+        .any(|l| l.contains("load_library_impl") && l.contains("plugins"));
+    assert!(
+        has_plugin_load,
+        "A2 FAIL: no load_library_impl with 'plugins' path found — NPP did not load plugin DLLs.\nstderr: {stderr}"
+    );
+
+    eprintln!("npp_plugin_folder_gate: A1+A2 passed — NPP loaded plugins");
+}
