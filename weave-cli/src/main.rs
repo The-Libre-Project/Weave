@@ -690,28 +690,39 @@ fn main() {
     if exe_name.eq_ignore_ascii_case("SumatraPDF.exe")
         || exe_name.eq_ignore_ascii_case("sumatrapdf.exe")
     {
-        // RVA 0x29b48-0x29b54: vtable[1] call on factory + store at +0x38.
-        // The factory's internal virtual method allocates GDI objects with
-        // side effects; NOP the entire block so neither the allocation nor
-        // the store happens, keeping +0x38 NULL.
+        // NOP all three stores to canvas object +0x38 in the set_sub_object
+        // function at RVA 0x29aa8. The factory's internal virtual method or
+        // direct copy puts INVALID_HANDLE_VALUE there; keeping +0x38 NULL lets
+        // the null-check at RVA 0x21c1b8 skip the vtable dispatch.
         let n = cfg::apply_binary_patches(
             image.base,
-            &[(
-                0x29b48,
-                &[
-                    0x48, 0x8b, 0x01, // movq (%rcx), %rax
-                    0x48, 0x8b, 0xd7, // movq %rdi, %rdx
-                    0xff, 0x50, 0x08, // callq *0x8(%rax)
-                    0x48, 0x89, 0x47, 0x38, // movq %rax, 0x38(%rdi)
-                ],
-                &[
-                    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
-                ],
-            )],
+            &[
+                // Path 1 (0x29ae1): swap path — movq %rax, 0x38(%rdi)
+                (
+                    0x29ae1,
+                    &[0x48, 0x89, 0x47, 0x38], // movq %rax, 0x38(%rdi)
+                    &[0x90, 0x90, 0x90, 0x90], // 4× NOP
+                ),
+                // Path 2 (0x29b48-0x29b54): vtable[1] call + store
+                (
+                    0x29b48,
+                    &[
+                        0x48, 0x8b, 0x01, 0x48, 0x8b, 0xd7, 0xff, 0x50, 0x08, 0x48, 0x89, 0x47,
+                        0x38,
+                    ],
+                    &[
+                        0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
+                        0x90,
+                    ],
+                ),
+                // Path 3 (0x29b77): direct copy — movq %rcx, 0x38(%rdi)
+                (
+                    0x29b77,
+                    &[0x48, 0x89, 0x4f, 0x38], // movq %rcx, 0x38(%rdi)
+                    &[0x90, 0x90, 0x90, 0x90], // 4× NOP
+                ),
+            ],
         );
-        if n > 0 {
-            eprintln!("weave: applied {n} binary patch(es) for {exe_name}");
-        }
     }
 
     // ── 4. Apply filesystem sandbox ───────────────────────────────────────
