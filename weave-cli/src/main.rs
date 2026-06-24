@@ -694,16 +694,14 @@ fn main() {
         // function at RVA 0x29aa8. The factory's internal virtual method or
         // direct copy puts INVALID_HANDLE_VALUE there; keeping +0x38 NULL lets
         // the null-check at RVA 0x21c1b8 skip the vtable dispatch.
-        let n = cfg::apply_binary_patches(
+        let _ = cfg::apply_binary_patches(
             image.base,
             &[
-                // Path 1 (0x29ae1): swap path — movq %rax, 0x38(%rdi)
                 (
                     0x29ae1,
-                    &[0x48, 0x89, 0x47, 0x38], // movq %rax, 0x38(%rdi)
-                    &[0x90, 0x90, 0x90, 0x90], // 4× NOP
+                    &[0x48, 0x89, 0x47, 0x38],
+                    &[0x90, 0x90, 0x90, 0x90],
                 ),
-                // Path 2 (0x29b48-0x29b54): vtable[1] call + store
                 (
                     0x29b48,
                     &[
@@ -715,11 +713,10 @@ fn main() {
                         0x90,
                     ],
                 ),
-                // Path 3 (0x29b77): direct copy — movq %rcx, 0x38(%rdi)
                 (
                     0x29b77,
-                    &[0x48, 0x89, 0x4f, 0x38], // movq %rcx, 0x38(%rdi)
-                    &[0x90, 0x90, 0x90, 0x90], // 4× NOP
+                    &[0x48, 0x89, 0x4f, 0x38],
+                    &[0x90, 0x90, 0x90, 0x90],
                 ),
             ],
         );
