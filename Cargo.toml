@@ -39,5 +39,5 @@ resolver = "2"
 [workspace.package]
 version = "0.0.1"
 edition = "2021"
-license = "MIT"
+license = "GPL-3.0"
 repository = "https://github.com/eldo9000/Weave"
