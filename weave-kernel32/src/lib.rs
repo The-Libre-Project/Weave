@@ -2935,9 +2935,10 @@ pub unsafe extern "win64" fn create_file_w(
         };
         if fd >= 0 {
             unsafe { libc::unlink(cname.as_ptr()) }; // unlink so it vanishes on close
-            eprintln!("weave/CreateFileW: pipe path={win_path:?} → backing fd={fd}");
+            let pipe_handle = handles::alloc(handles::HandleKind::File(fd));
+            eprintln!("weave/CreateFileW: pipe path={win_path:?} → backing fd={fd} → handle={pipe_handle}");
             set_last_error(0);
-            return fd as usize;
+            return pipe_handle;
         }
         eprintln!("weave/CreateFileW: pipe backing failed for path={win_path:?}");
     }
