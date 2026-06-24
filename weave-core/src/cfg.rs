@@ -1539,6 +1539,47 @@ unsafe extern "win64" fn weave_cfg_check_stub() {
     )
 }
 
+/// Apply byte-level patches to a loaded PE image's executable section.
+///
+/// Each patch is `(RVA, expected_bytes, replacement_bytes)`.
+/// Returns the number of patches successfully applied.
+pub fn apply_binary_patches(base: *mut u8, patches: &[(u32, &[u8], &[u8])]) -> usize {
+    let base_usize = base as usize;
+    let page_size = 4096usize;
+    let mut applied = 0usize;
+
+    for (rva, expected, replacement) in patches {
+        let target_va = base_usize.wrapping_add(*rva as usize);
+
+        let current_slice =
+            unsafe { std::slice::from_raw_parts(target_va as *const u8, expected.len()) };
+        if current_slice != *expected {
+            eprintln!(
+                "weave/patch: RVA {rva:#x}: expected {expected:02x?} but found {current_slice:02x?} — SKIPPED",
+            );
+            continue;
+        }
+
+        let page_base = (target_va & !(page_size - 1)) as *mut libc::c_void;
+        unsafe {
+            libc::mprotect(
+                page_base,
+                page_size,
+                libc::PROT_READ | libc::PROT_WRITE | libc::PROT_EXEC,
+            );
+            for (i, &byte) in replacement.iter().enumerate() {
+                std::ptr::write((target_va as *mut u8).add(i), byte);
+            }
+            libc::mprotect(page_base, page_size, libc::PROT_READ | libc::PROT_EXEC);
+        }
+
+        eprintln!("weave/patch: RVA {rva:#x}: {expected:02x?} → {replacement:02x?}",);
+        applied += 1;
+    }
+
+    applied
+}
+
 // On non-x86_64 (macOS ARM64 build for unit tests) provide a no-op.
 #[cfg(not(target_arch = "x86_64"))]
 fn weave_cfg_check_stub() {}

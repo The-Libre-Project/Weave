@@ -678,6 +678,36 @@ fn main() {
 
     eprintln!("weave: imports resolved");
 
+    // ── 3.5. Apply PE-specific binary patches ─────────────────────────────
+    // Binary patches fix known issues in specific PE images that cannot be
+    // resolved through Win32 stubs (e.g., internal C++ virtual methods that
+    // return invalid values due to missing OS services).
+    let exe_name = args
+        .exe
+        .file_name()
+        .and_then(std::ffi::OsStr::to_str)
+        .unwrap_or("");
+    if exe_name.eq_ignore_ascii_case("SumatraPDF.exe")
+        || exe_name.eq_ignore_ascii_case("sumatrapdf.exe")
+    {
+        // RVA 0x29b51: movq %rax, 0x38(%rdi) — stores factory vtable[1] result
+        // at canvas object +0x38. The factory's internal virtual method returns
+        // INVALID_HANDLE_VALUE, which bypasses the null-check at RVA 0x21c1b8
+        // and crashes. NOP the store so +0x38 stays NULL, letting the null-check
+        // skip the vtable dispatch.
+        let n = cfg::apply_binary_patches(
+            image.base,
+            &[(
+                0x29b51,
+                &[0x48, 0x89, 0x47, 0x38], // movq %rax, 0x38(%rdi)
+                &[0x90, 0x90, 0x90, 0x90], // 4× NOP
+            )],
+        );
+        if n > 0 {
+            eprintln!("weave: applied {n} binary patch(es) for {exe_name}");
+        }
+    }
+
     // ── 4. Apply filesystem sandbox ───────────────────────────────────────
     // Allowlist the exe's own directory for read-only access so apps can open
     // config files, data files, and DLLs that live beside the executable.
