@@ -76,6 +76,8 @@ docs/*
 !docs/ERA3-ROADMAP.md
 !docs/UNSAFE-AUDIT.md
 !docs/SHIM-CONTRACT.md
+!docs/ARCHITECTURE.md
+!docs/CLEAN-ROOM.md
 !docs/POINTERS.tsv
 !docs/POINTERS.md
 !docs/SHIM-CONTRACT-CASEBOOK.md

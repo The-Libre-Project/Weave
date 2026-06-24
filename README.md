@@ -41,9 +41,9 @@ Weave is early-stage and experimental. The wedge is single-binary native Win32 d
 
 **Real-desktop validation** (Fedora 41, GNOME Wayland, AMD RX 6700 XT, 2026-06-13):
 
-- **7-Zip** — Supported. Full extraction, archive browsing, GUI browse-for-folder.
-- **Notepad++** — CI gates green; editor save-roundtrip proven.
-- **IrfanView** — BMP/JPEG/PNG/GIF open and PNG save proven; folder navigation proven.
+- **7-Zip**: Supported. Full extraction, archive browsing, GUI browse-for-folder.
+- **Notepad++**: CI gates green; editor save-roundtrip proven.
+- **IrfanView**: BMP/JPEG/PNG/GIF open and PNG save proven; folder navigation proven.
 
 DXVK/VKD3D, ARM64, the GUI manager, plugin system, compat DB, hardware-accelerated games, real network clients, and the install flow are scaffolded or in progress, not shipped. See [ROADMAP.md](ROADMAP.md) for honest per-phase status.
 
@@ -73,7 +73,7 @@ weave-sandbox/       # Landlock isolation
 ...
 ```
 
-Plus crates for comctl32, ole32, oleaut32, d3d12, ddraw, mmdevapi, shlwapi, winmm, xinput, and ~18 smaller ones (bcrypt, crypt32, imm32, secur32, setupapi, wldap32, normaliz, msvcp140, and others). Full crate list in [`weave-cli/src/lib.rs`](weave-cli/src/lib.rs).
+Plus crates for comctl32, ole32, oleaut32, d3d12, ddraw, mmdevapi, shlwapi, winmm, xinput, and ~18 smaller ones (bcrypt, crypt32, imm32, secur32, setupapi, wldap32, normaliz, msvcp140, and others). Full crate list in [`weave-cli/src/main.rs`](weave-cli/src/main.rs).
 
 The runtime has two always-active layers: **Weave Native** (API translation, mapping Windows syscalls to Linux equivalents, graphics to Vulkan, audio to PipeWire) and **Weave Sandbox** (Landlock filesystem isolation, on by default, no root required). The full architecture, sandbox threat model, and graphics pipeline are documented in the [architecture paper](docs/ARCHITECTURE.md).
 
