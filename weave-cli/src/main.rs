@@ -690,17 +690,23 @@ fn main() {
     if exe_name.eq_ignore_ascii_case("SumatraPDF.exe")
         || exe_name.eq_ignore_ascii_case("sumatrapdf.exe")
     {
-        // RVA 0x29b51: movq %rax, 0x38(%rdi) — stores factory vtable[1] result
-        // at canvas object +0x38. The factory's internal virtual method returns
-        // INVALID_HANDLE_VALUE, which bypasses the null-check at RVA 0x21c1b8
-        // and crashes. NOP the store so +0x38 stays NULL, letting the null-check
-        // skip the vtable dispatch.
+        // RVA 0x29b48-0x29b54: vtable[1] call on factory + store at +0x38.
+        // The factory's internal virtual method allocates GDI objects with
+        // side effects; NOP the entire block so neither the allocation nor
+        // the store happens, keeping +0x38 NULL.
         let n = cfg::apply_binary_patches(
             image.base,
             &[(
-                0x29b51,
-                &[0x48, 0x89, 0x47, 0x38], // movq %rax, 0x38(%rdi)
-                &[0x90, 0x90, 0x90, 0x90], // 4× NOP
+                0x29b48,
+                &[
+                    0x48, 0x8b, 0x01, // movq (%rcx), %rax
+                    0x48, 0x8b, 0xd7, // movq %rdi, %rdx
+                    0xff, 0x50, 0x08, // callq *0x8(%rax)
+                    0x48, 0x89, 0x47, 0x38, // movq %rax, 0x38(%rdi)
+                ],
+                &[
+                    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
+                ],
             )],
         );
         if n > 0 {
