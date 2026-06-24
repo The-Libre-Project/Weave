@@ -2908,41 +2908,13 @@ pub unsafe extern "win64" fn create_file_w(
         eprintln!("weave/CreateFileW: read-open path={win_path:?} access={dw_desired_access:#x} disp={dw_creation_disposition:#x}");
     }
 
-    // Named pipe paths: create a temp backing file so the caller does not
-    // crash with INVALID_HANDLE_VALUE. Matches \\.\pipe\ prefix.
-    if win_path.len() > 9
-        && win_path.as_bytes()[0] == b'\\'
-        && win_path.as_bytes()[1] == b'\\'
-        && win_path.as_bytes()[2] == b'.'
-        && win_path.as_bytes()[3] == b'\\'
-        && win_path.as_bytes()[4..8].eq_ignore_ascii_case(b"pipe")
-        && win_path.as_bytes()[8] == b'\\'
-    {
-        // Create a temp backing file for the named pipe.
-        // Use a static atomic counter to generate unique names within the
-        // sandbox-allowed tree (pwd or /tmp).  Both mkstemp(3) and O_TMPFILE
-        // may fail under sandbox Landlock rules depending on /tmp permissions.
-        static PIPE_NUM: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-        let n = PIPE_NUM.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let name = format!("weave-pipe-{n}");
-        let cname = std::ffi::CString::new(name).unwrap_or_default();
-        let fd = unsafe {
-            libc::open(
-                cname.as_ptr(),
-                libc::O_CREAT | libc::O_EXCL | libc::O_RDWR | libc::O_CLOEXEC,
-                0o600,
-            )
-        };
-        if fd >= 0 {
-            unsafe { libc::unlink(cname.as_ptr()) }; // unlink so it vanishes on close
-            let pipe_handle = handles::alloc(handles::HandleKind::File(fd));
-            eprintln!("weave/CreateFileW: pipe path={win_path:?} → backing fd={fd} → handle={pipe_handle}");
-            set_last_error(0);
-            return pipe_handle;
-        }
-        eprintln!("weave/CreateFileW: pipe backing failed for path={win_path:?}");
-    }
-
+    // Named pipe paths: fall through to the normal file-open path.
+    // Callers that receive INVALID_HANDLE_VALUE generally handle it
+    // gracefully (e.g. PuTTY skips Pageant if \\.\pipe\pageant doesn't
+    // exist). A fake backing file does more harm than good — PuTTY would
+    // misidentify it as a real Pageant and crash on the empty response.
+    // If a specific binary truly needs a fake handle here, scope it in
+    // the caller, not in the generic CreateFileW path.
     let nt_disposition = file_io::win32_disposition_to_nt(dw_creation_disposition);
 
     // Wine ref: dlls/kernelbase/file.c:795 — CreateFileW maps NtCreateFile status
