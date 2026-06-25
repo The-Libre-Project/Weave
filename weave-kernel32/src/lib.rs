@@ -18856,16 +18856,48 @@ pub unsafe extern "win64" fn set_process_mitigation_policy(
 
 /// ReadProcessMemory: read from another process's memory.
 ///
-/// Phase A stub — returns FALSE.
+/// Phase B — in-process only. Cross-process reads return ERROR_ACCESS_DENIED.
 pub unsafe extern "win64" fn read_process_memory(
-    _h_process: usize,
-    _lp_base_address: *const u8,
-    _lp_buffer: *mut u8,
-    _n_size: usize,
-    _lp_number_of_bytes_read: *mut usize,
+    h_process: usize,
+    lp_base_address: *const u8,
+    lp_buffer: *mut u8,
+    n_size: usize,
+    lp_number_of_bytes_read: *mut usize,
 ) -> i32 {
     warn_once("ReadProcessMemory");
-    0
+
+    // Weave is in-process: only the pseudo-handle (usize::MAX) is allowed.
+    if h_process != usize::MAX {
+        set_last_error(file_io::ERROR_ACCESS_DENIED);
+        return 0;
+    }
+
+    // lp_buffer must be non-null.
+    if lp_buffer.is_null() {
+        set_last_error(87); // ERROR_INVALID_PARAMETER
+        return 0;
+    }
+
+    // lp_base_address null with n_size > 0 is invalid.
+    if n_size > 0 && lp_base_address.is_null() {
+        set_last_error(87);
+        return 0;
+    }
+
+    if n_size > 0 {
+        // SAFETY: In-process read. The caller guarantees validity for n_size bytes
+        // at both lp_base_address (read) and lp_buffer (write). Overlap is not
+        // guaranteed by the Win32 contract, so copy_nonoverlapping is correct.
+        unsafe {
+            core::ptr::copy_nonoverlapping(lp_base_address, lp_buffer, n_size);
+        }
+    }
+
+    if !lp_number_of_bytes_read.is_null() {
+        unsafe { *lp_number_of_bytes_read = n_size };
+    }
+
+    1
 }
 
 /// WTSGetActiveConsoleSessionId: get active terminal session ID.
