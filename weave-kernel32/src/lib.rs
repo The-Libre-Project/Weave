@@ -19207,15 +19207,87 @@ pub extern "win64" fn set_file_completion_notification_modes(
 
 /// SetFileInformationByHandle: set file information by handle.
 ///
-/// Phase A stub — returns FALSE.
+/// Only `FileBasicInfo` class (0) is implemented: writes CreationTime,
+/// LastAccessTime, and LastWriteTime via `futimens(2)`. The `FILE_BASIC_INFO`
+/// struct layout (36 bytes):
+///   - offset 0: CreationTime (u64 FILETIME) — silently skipped on Linux
+///   - offset 8: LastAccessTime (u64 FILETIME)
+///   - offset 16: LastWriteTime (u64 FILETIME)
+///   - offset 24: ChangeTime (u64 FILETIME) — silently skipped
+///   - offset 32: FileAttributes (u32) — silently skipped
+///
+/// Other info classes return FALSE with `ERROR_INVALID_PARAMETER` (87).
+///
+/// # Safety
+/// `lp_file_information` must be valid for at least `dw_buffer_size` bytes.
+// Wine ref: dlls/kernelbase/file.c:3770 — dispatches on FILE_INFO_BY_HANDLE_CLASS;
+// FileBasicInfo calls NtSetInformationFile(FileBasicInformation); other classes
+// return STATUS_INVALID_INFO_CLASS → ERROR_INVALID_PARAMETER.
 pub unsafe extern "win64" fn set_file_information_by_handle(
-    _h_file: usize,
-    _file_information_class: u32,
-    _lp_file_information: *const u8,
-    _dw_buffer_size: u32,
+    h_file: usize,
+    file_information_class: u32,
+    lp_file_information: *const u8,
+    dw_buffer_size: u32,
 ) -> i32 {
-    warn_once("SetFileInformationByHandle");
-    0
+    const FILE_BASIC_INFO: u32 = 0;
+    const ERROR_INVALID_PARAMETER: u32 = 87;
+
+    if lp_file_information.is_null() {
+        set_last_error(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+
+    if file_information_class != FILE_BASIC_INFO {
+        set_last_error(ERROR_INVALID_PARAMETER);
+        eprintln!(
+            "weave/SetFileInformationByHandle: unsupported class {file_information_class} → ERROR_INVALID_PARAMETER"
+        );
+        return 0;
+    }
+
+    // FileBasicInfo requires at least 36 bytes.
+    if dw_buffer_size < 36 {
+        set_last_error(122); // ERROR_INSUFFICIENT_BUFFER
+        return 0;
+    }
+
+    let fd = match handles::get_fd(h_file) {
+        Some(fd) => fd,
+        None => {
+            set_last_error(file_io::ERROR_INVALID_HANDLE);
+            return 0;
+        }
+    };
+
+    // Parse FILE_BASIC_INFO from the buffer.
+    let p = lp_file_information as *const u64;
+    let ft_access = unsafe { p.add(1).read_unaligned() }; // LastAccessTime (offset 8)
+    let ft_write = unsafe { p.add(2).read_unaligned() }; // LastWriteTime (offset 16)
+
+    // Convert Windows FILETIME (100-ns since 1601-01-01) to Unix timespec.
+    // 116,444,736,000,000,000 = 100-ns intervals from 1601-01-01 to 1970-01-01.
+    let to_timespec = |ft: u64| -> libc::timespec {
+        let intervals_since_unix = ft.saturating_sub(116_444_736_000_000_000);
+        libc::timespec {
+            tv_sec: (intervals_since_unix / 10_000_000) as i64,
+            tv_nsec: ((intervals_since_unix % 10_000_000) * 100) as i64,
+        }
+    };
+
+    let times = [to_timespec(ft_access), to_timespec(ft_write)];
+
+    let ret = unsafe { libc::futimens(fd, times.as_ptr()) };
+    if ret != 0 {
+        let errno = unsafe { *libc::__errno_location() };
+        eprintln!("weave/SetFileInformationByHandle: futimens failed fd={fd} errno={errno}");
+        set_last_error(file_io::ERROR_INVALID_HANDLE);
+        return 0;
+    }
+
+    eprintln!(
+        "weave/SetFileInformationByHandle: h={h_file:#x} fd={fd} access={ft_access:#x} write={ft_write:#x} → TRUE"
+    );
+    1 // TRUE
 }
 
 /// UnlockFileEx: unlock a byte-range in a file.
@@ -19678,15 +19750,82 @@ pub unsafe extern "win64" fn query_thread_cycle_time(
 
 /// QueryFullProcessImageNameW: get full process image path.
 ///
-/// Phase A stub — returns FALSE.
+/// For the current process (pseudo-handle `usize::MAX`, i.e. `GetCurrentProcess()`),
+/// reads `/proc/self/exe` symlink and returns the path as UTF-16. For cross-process
+/// handles, returns FALSE with `ERROR_ACCESS_DENIED` (5). `dw_flags` accepts 0
+/// (PROCESS_NAME_WIN32) and 1 (PROCESS_NAME_NATIVE) with identical behaviour.
+/// `lpdw_size` is updated to reflect the number of UTF-16 code units written,
+/// including the null terminator.
+///
+/// # Safety
+/// `lp_exe_name` must be writable for `*lpdw_size` u16 code units, or NULL for
+/// a size query. `lpdw_size` must be a valid writable u32.
+// Wine ref: dlls/kernelbase/process.c:492 — calls NtQueryInformationProcess with
+// ProcessImageFileName → native NT path (\\??\\<path>). If dw_flags == 0 (WIN32),
+// converts NT path to Win32 DOS path via RtlNtPathToDosPath. The returned count
+// is the number of chars written *including* the null terminator. Cross-process
+// handles are opened with PROCESS_QUERY_LIMITED_INFORMATION and usually succeed
+// for same-user processes; Weave returns ERROR_ACCESS_DENIED for simplicity.
 pub unsafe extern "win64" fn query_full_process_image_name_w(
-    _h_process: usize,
+    h_process: usize,
     _dw_flags: u32,
-    _lp_exe_name: *mut u16,
-    _lpdw_size: *mut u32,
+    lp_exe_name: *mut u16,
+    lpdw_size: *mut u32,
 ) -> i32 {
-    warn_once("QueryFullProcessImageNameW");
-    0
+    const ERROR_ACCESS_DENIED: u32 = 5;
+
+    if lpdw_size.is_null() {
+        set_last_error(87); // ERROR_INVALID_PARAMETER
+        return 0;
+    }
+
+    // Only the current-process pseudo-handle is supported.
+    // GetCurrentProcess() returns (HANDLE)-1 = usize::MAX.
+    if h_process != usize::MAX {
+        set_last_error(ERROR_ACCESS_DENIED);
+        eprintln!(
+            "weave/QueryFullProcessImageNameW: cross-process handle {h_process:#x} → ERROR_ACCESS_DENIED"
+        );
+        return 0;
+    }
+
+    // Read /proc/self/exe symlink.
+    let linux_path = match std::fs::read_link("/proc/self/exe") {
+        Ok(p) => p.to_string_lossy().into_owned(),
+        Err(e) => {
+            eprintln!("weave/QueryFullProcessImageNameW: read_link /proc/self/exe failed: {e}");
+            set_last_error(ERROR_ACCESS_DENIED);
+            return 0;
+        }
+    };
+
+    // Convert to Windows Z:\ path.
+    let win_path = format!("Z:{}", linux_path.replace('/', "\\"));
+    let wide: Vec<u16> = win_path.encode_utf16().chain(std::iter::once(0)).collect();
+    let needed = wide.len() as u32; // includes null terminator
+
+    if lp_exe_name.is_null() {
+        // Size query — return required char count including null.
+        *lpdw_size = needed;
+        eprintln!("weave/QueryFullProcessImageNameW: size_query → {needed} (\"{win_path}\")");
+        return 1;
+    }
+
+    let buf_size = *lpdw_size as usize;
+    if buf_size < wide.len() {
+        // Buffer too small — write required count and return FALSE.
+        *lpdw_size = needed;
+        set_last_error(234); // ERROR_MORE_DATA
+        eprintln!(
+            "weave/QueryFullProcessImageNameW: buffer too small (buf={buf_size}, need={needed})"
+        );
+        return 0;
+    }
+
+    std::ptr::copy_nonoverlapping(wide.as_ptr(), lp_exe_name, wide.len());
+    *lpdw_size = needed;
+    eprintln!("weave/QueryFullProcessImageNameW: → TRUE path=\"{win_path}\" chars={needed}");
+    1 // TRUE
 }
 
 // ── Power stubs ────────────────────────────────────────────────────────────────
