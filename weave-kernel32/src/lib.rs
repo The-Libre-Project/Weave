@@ -18361,19 +18361,48 @@ pub unsafe extern "win64" fn map_view_of_file_ex(
 
 /// WriteProcessMemory: write data to another process's memory.
 ///
-/// Phase A stub — returns FALSE (cross-process writes unsupported).
-///
-/// # Safety
-/// Pointer arguments are accepted but not dereferenced.
+/// Phase B — in-process only. Cross-process writes return ERROR_ACCESS_DENIED.
 pub unsafe extern "win64" fn write_process_memory(
-    _h_process: usize,
-    _lp_base_address: *mut u8,
-    _lp_buffer: *const u8,
-    _n_size: usize,
-    _lp_number_of_bytes_written: *mut usize,
+    h_process: usize,
+    lp_base_address: *mut u8,
+    lp_buffer: *const u8,
+    n_size: usize,
+    lp_number_of_bytes_written: *mut usize,
 ) -> i32 {
     warn_once("WriteProcessMemory");
-    0
+
+    // Weave is in-process: only the pseudo-handle (usize::MAX) is allowed.
+    if h_process != usize::MAX {
+        set_last_error(file_io::ERROR_ACCESS_DENIED);
+        return 0;
+    }
+
+    // lp_buffer must be non-null.
+    if lp_buffer.is_null() {
+        set_last_error(87); // ERROR_INVALID_PARAMETER
+        return 0;
+    }
+
+    // lp_base_address null with n_size > 0 is invalid.
+    if n_size > 0 && lp_base_address.is_null() {
+        set_last_error(87);
+        return 0;
+    }
+
+    if n_size > 0 {
+        // SAFETY: In-process write. The caller guarantees validity for n_size bytes
+        // at both lp_buffer (read) and lp_base_address (write). Overlap is not
+        // guaranteed by the Win32 contract, so copy_nonoverlapping is correct.
+        unsafe {
+            core::ptr::copy_nonoverlapping(lp_buffer, lp_base_address, n_size);
+        }
+    }
+
+    if !lp_number_of_bytes_written.is_null() {
+        unsafe { *lp_number_of_bytes_written = n_size };
+    }
+
+    1
 }
 
 // ── I/O Completion stubs ───────────────────────────────────────────────────────
