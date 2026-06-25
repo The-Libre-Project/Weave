@@ -2947,9 +2947,9 @@ pub unsafe extern "win64" fn wsa_get_overlapped_result(
     if f_wait != 0 {
         let h_event = *(overlapped.add(24) as *const usize);
         if h_event != 0 {
-            if let Some(addr) = weave_core::resolve::resolve("kernel32.dll", "WaitForSingleObject") {
-                let func: unsafe extern "win64" fn(usize, u32) -> u32 =
-                    std::mem::transmute(addr);
+            if let Some(addr) = weave_core::resolve::resolve("kernel32.dll", "WaitForSingleObject")
+            {
+                let func: unsafe extern "win64" fn(usize, u32) -> u32 = std::mem::transmute(addr);
                 func(h_event, 0xFFFFFFFF); // INFINITE = 0xFFFFFFFF
             }
         }
