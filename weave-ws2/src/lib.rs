@@ -2962,16 +2962,132 @@ pub unsafe extern "win64" fn wsa_get_overlapped_result(
 
 /// WSADuplicateSocketW: create a socket descriptor for a target process.
 ///
-/// Phase A stub — returns SOCKET_ERROR.
+/// Phase B: validates socket, fills WSAPROTOCOL_INFOW with probed or default
+/// socket properties, but returns SOCKET_ERROR + WSAEOPNOTSUPP because we
+/// cannot actually duplicate sockets across processes (in-process model).
+///
+/// Wine ref: dlls/ws2_32/socket.c — WSADuplicateSocketW fills a
+/// WSAPROTOCOL_INFOW with the socket's protocol info for child-process use.
 ///
 /// # Safety
-/// `lp_protocol_info` is accepted but not dereferenced.
+/// `lp_protocol_info` is dereferenced when non-null (offsets up to +456).
 pub unsafe extern "win64" fn wsa_duplicate_socket_w(
-    _s: usize,
+    s: usize,
     _dw_process_id: u32,
-    _lp_protocol_info: *mut u8,
+    lp_protocol_info: *mut u8,
 ) -> i32 {
     eprintln!("weave/ws2_stub: WSADuplicateSocketW");
+
+    if lp_protocol_info.is_null() {
+        set_last_error(10014); // WSAEFAULT
+        return SOCKET_ERROR;
+    }
+
+    // Validate socket via lightweight getsockopt (works on any valid fd).
+    let fd = s as libc::c_int;
+    let mut err_val: libc::c_int = 0;
+    let mut err_len: libc::socklen_t = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+    if libc::getsockopt(
+        fd,
+        libc::SOL_SOCKET,
+        libc::SO_ERROR,
+        &mut err_val as *mut _ as *mut libc::c_void,
+        &mut err_len,
+    ) != 0
+    {
+        set_last_error(10038); // WSAENOTSOCK
+        return SOCKET_ERROR;
+    }
+
+    // Probe address family via getsockname.
+    let af = {
+        let mut addr: libc::sockaddr_storage = std::mem::zeroed();
+        let mut addrlen: libc::socklen_t =
+            std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
+        if libc::getsockname(fd, &mut addr as *mut _ as *mut libc::sockaddr, &mut addrlen) == 0 {
+            af_linux_to_win(addr.ss_family as i32)
+        } else {
+            2 // AF_INET fallback
+        }
+    };
+
+    // Probe socket type via getsockopt SO_TYPE.
+    let sock_type = {
+        let mut st: libc::c_int = 0;
+        let mut st_len: libc::socklen_t = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+        if libc::getsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_TYPE,
+            &mut st as *mut _ as *mut libc::c_void,
+            &mut st_len,
+        ) == 0
+        {
+            st
+        } else {
+            1 // SOCK_STREAM fallback
+        }
+    };
+
+    // Probe protocol via getsockopt SO_PROTOCOL (Linux 38).
+    let protocol = {
+        let mut proto: libc::c_int = 0;
+        let mut proto_len: libc::socklen_t = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+        const SO_PROTOCOL: libc::c_int = 38;
+        if libc::getsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            SO_PROTOCOL,
+            &mut proto as *mut _ as *mut libc::c_void,
+            &mut proto_len,
+        ) == 0
+        {
+            proto
+        } else if sock_type == 1 {
+            6 // SOCK_STREAM → IPPROTO_TCP
+        } else {
+            17 // else → IPPROTO_UDP
+        }
+    };
+
+    // ── Fill WSAPROTOCOL_INFOW via raw pointer offsets ──
+
+    // +0..+16: dwServiceFlags[0..3], dwProviderFlags — all zero.
+    *(lp_protocol_info.add(0) as *mut u32) = 0;
+    *(lp_protocol_info.add(4) as *mut u32) = 0;
+    *(lp_protocol_info.add(8) as *mut u32) = 0;
+    *(lp_protocol_info.add(12) as *mut u32) = 0;
+    *(lp_protocol_info.add(16) as *mut u32) = 0;
+
+    // +20: dwCatalogEntryId — socket descriptor as opaque ID.
+    *(lp_protocol_info.add(20) as *mut usize) = s;
+
+    // +400: iAddressFamily
+    *(lp_protocol_info.add(400) as *mut i32) = af;
+    // +404: iMaxSockAddr
+    *(lp_protocol_info.add(404) as *mut i32) = 16;
+    // +408: iMinSockAddr
+    *(lp_protocol_info.add(408) as *mut i32) = 16;
+    // +412: iSocketType
+    *(lp_protocol_info.add(412) as *mut i32) = sock_type;
+    // +416: iProtocol
+    *(lp_protocol_info.add(416) as *mut i32) = protocol;
+    // +420: iProtocolMaxOffset
+    *(lp_protocol_info.add(420) as *mut i32) = 0;
+
+    // +456: szProtocol[256] as wide string "Weave Socket".
+    let name = "Weave Socket\0";
+    let name_wide: Vec<u16> = name.encode_utf16().collect();
+    let dst = lp_protocol_info.add(456) as *mut u16;
+    let copy_len = name_wide.len().min(256);
+    for (i, &c) in name_wide.iter().enumerate().take(copy_len) {
+        *dst.add(i) = c;
+    }
+    if copy_len < 256 {
+        std::ptr::write_bytes(dst.add(copy_len), 0, 256 - copy_len);
+    }
+
+    set_last_error(10045); // WSAEOPNOTSUPP
     SOCKET_ERROR
 }
 
