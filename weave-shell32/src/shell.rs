@@ -974,8 +974,7 @@ fn change_notify_state() -> &'static Mutex<Vec<ChangeNotifyEntry>> {
 /// This avoids a compile-time dependency on weave-user32 (crate boundary rule).
 unsafe fn post_message_w(hwnd: usize, msg: u32, w_param: usize, l_param: isize) -> Option<i32> {
     let addr = weave_core::resolve::resolve("user32.dll", "PostMessageW")?;
-    let func: unsafe extern "win64" fn(usize, u32, usize, isize) -> i32 =
-        std::mem::transmute(addr);
+    let func: unsafe extern "win64" fn(usize, u32, usize, isize) -> i32 = std::mem::transmute(addr);
     Some(func(hwnd, msg, w_param, l_param))
 }
 
@@ -1035,12 +1034,14 @@ pub unsafe extern "win64" fn sh_change_notify_deregister(handle: u32) -> i32 {
         let found = state.len() < len_before;
 
         if std::env::var("WEAVE_SHELL32_TRACE").is_ok() {
-            eprintln!(
-                "weave/shell32: SHChangeNotifyDeregister handle={handle} found={found}",
-            );
+            eprintln!("weave/shell32: SHChangeNotifyDeregister handle={handle} found={found}",);
         }
 
-        if found { 1 } else { 0 }
+        if found {
+            1
+        } else {
+            0
+        }
     } else {
         0
     }
