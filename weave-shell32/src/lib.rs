@@ -175,6 +175,14 @@ fn resolve_shell32(func: &str) -> Option<usize> {
         "SHChangeNotify" => Some(
             shell::sh_change_notify as unsafe extern "win64" fn(_, _, _, _) as *const () as usize,
         ),
+        "SHChangeNotifyRegister" => Some(
+            shell::sh_change_notify_register
+                as unsafe extern "win64" fn(_, _, _, _, _, _) -> _ as *const () as usize,
+        ),
+        "SHChangeNotifyDeregister" => Some(
+            shell::sh_change_notify_deregister as unsafe extern "win64" fn(_) -> _ as *const ()
+                as usize,
+        ),
         "ShellExecuteExW" => Some(
             shell::shell_execute_ex_w as unsafe extern "win64" fn(_) -> _ as *const () as usize,
         ),

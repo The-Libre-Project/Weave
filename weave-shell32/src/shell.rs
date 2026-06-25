@@ -953,6 +953,99 @@ pub unsafe extern "win64" fn shell32_ord155() -> usize {
     0
 }
 
+// ── SHChangeNotify notification infrastructure ────────────────────────────
+
+struct ChangeNotifyEntry {
+    handle: u32,
+    hwnd: usize,
+    event_mask: u32,
+    msg: u32,
+}
+
+static CHANGE_NOTIFY_STATE: OnceLock<Mutex<Vec<ChangeNotifyEntry>>> = OnceLock::new();
+static CHANGE_NOTIFY_NEXT_HANDLE: AtomicUsize = AtomicUsize::new(1);
+
+fn change_notify_state() -> &'static Mutex<Vec<ChangeNotifyEntry>> {
+    CHANGE_NOTIFY_STATE.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+/// Resolve and call PostMessageW at runtime through the Weave resolver.
+///
+/// This avoids a compile-time dependency on weave-user32 (crate boundary rule).
+unsafe fn post_message_w(hwnd: usize, msg: u32, w_param: usize, l_param: isize) -> Option<i32> {
+    let addr = weave_core::resolve::resolve("user32.dll", "PostMessageW")?;
+    let func: unsafe extern "win64" fn(usize, u32, usize, isize) -> i32 =
+        std::mem::transmute(addr);
+    Some(func(hwnd, msg, w_param, l_param))
+}
+
+// Wine ref: dlls/shell32/changenotify.c — SHChangeNotifyRegister creates a notification
+// entry with (hwnd, event_mask, msg); returns UINT handle.
+/// SHChangeNotifyRegister — register a window to receive shell change notifications.
+///
+/// Returns a notification handle (>0) on success, 0 on failure.
+///
+/// # Safety
+/// `hwnd` must be a valid window handle or 0.
+/// `p_shcne` is accepted but not dereferenced.
+pub unsafe extern "win64" fn sh_change_notify_register(
+    hwnd: usize,
+    _flags: u32,
+    f_events: u32,
+    msg: u32,
+    _n_entries: u32,
+    _p_shcne: *const u8,
+) -> u32 {
+    let handle =
+        CHANGE_NOTIFY_NEXT_HANDLE.fetch_add(1, std::sync::atomic::Ordering::Relaxed) as u32;
+    if handle == 0 {
+        return 0;
+    }
+
+    if let Ok(mut state) = change_notify_state().lock() {
+        state.push(ChangeNotifyEntry {
+            handle,
+            hwnd,
+            event_mask: f_events,
+            msg,
+        });
+        if std::env::var("WEAVE_SHELL32_TRACE").is_ok() {
+            eprintln!(
+                "weave/shell32: SHChangeNotifyRegister hwnd={hwnd:#x} events={f_events:#x} msg={msg} handle={handle}",
+            );
+        }
+        handle
+    } else {
+        0
+    }
+}
+
+// Wine ref: dlls/shell32/changenotify.c — SHChangeNotifyDeregister removes entry by handle;
+// returns TRUE (1) on success, FALSE (0) if handle not found.
+/// SHChangeNotifyDeregister — unregister a change notification handle.
+///
+/// Returns TRUE (1) on success, FALSE (0) if handle was not found.
+///
+/// # Safety
+/// No pointer arguments; safe for any handle value.
+pub unsafe extern "win64" fn sh_change_notify_deregister(handle: u32) -> i32 {
+    if let Ok(mut state) = change_notify_state().lock() {
+        let len_before = state.len();
+        state.retain(|e| e.handle != handle);
+        let found = state.len() < len_before;
+
+        if std::env::var("WEAVE_SHELL32_TRACE").is_ok() {
+            eprintln!(
+                "weave/shell32: SHChangeNotifyDeregister handle={handle} found={found}",
+            );
+        }
+
+        if found { 1 } else { 0 }
+    } else {
+        0
+    }
+}
+
 // ── Shell icon / info stubs ───────────────────────────────────────────────────
 
 // Wine ref: dlls/user32/exticon.c:249 — ICO_ExtractIconExW loads icon from PE resource; nIconIndex
@@ -1803,17 +1896,38 @@ pub unsafe extern "win64" fn sh_file_operation_w(lpfo: *mut u8) -> i32 {
 // listeners; SHCNF_FLUSH waits for all recipients to process before returning.
 /// SHChangeNotify — notify the shell of a change to the namespace.
 ///
-/// No-op stub.
+/// Posts a message to registered SHChangeNotifyRegister listeners.
 ///
 /// # Safety
-/// Pointer arguments are accepted but not dereferenced.
+/// Pointer arguments are logged but not dereferenced by this function.
 // Wine ref: dlls/shell32/changenotify.c — SHCNE_* event to registered listeners; SHCNF_FLUSH waits.
 pub unsafe extern "win64" fn sh_change_notify(
-    _w_event_id: i32,
-    _u_flags: u32,
-    _dw_item1: *const u8,
-    _dw_item2: *const u8,
+    w_event_id: i32,
+    u_flags: u32,
+    dw_item1: *const u8,
+    dw_item2: *const u8,
 ) {
+    if std::env::var("WEAVE_SHELL32_TRACE").is_ok() {
+        eprintln!(
+            "weave/shell32: SHChangeNotify event_id={:#x} flags={:#x} item1={:p} item2={:p}",
+            w_event_id, u_flags, dw_item1, dw_item2,
+        );
+    }
+
+    let event_id = w_event_id as u32;
+    if event_id == 0 {
+        return;
+    }
+
+    if let Ok(state) = change_notify_state().lock() {
+        let item1 = dw_item1 as usize;
+        let item2 = dw_item2 as isize;
+        for entry in state.iter() {
+            if (event_id & entry.event_mask) != 0 || entry.event_mask == u32::MAX {
+                let _ = post_message_w(entry.hwnd, entry.msg, item1, item2);
+            }
+        }
+    }
 }
 
 // Wine ref: dlls/shell32/shlexec.c:2053 — calls SHELL_execute(sei, SHELL_ExecuteW); stores result
