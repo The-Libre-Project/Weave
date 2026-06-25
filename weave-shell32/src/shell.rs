@@ -1935,13 +1935,109 @@ pub unsafe extern "win64" fn sh_change_notify(
 // in sei->hInstApp; returns TRUE if hInstApp > 32 (success), FALSE otherwise.
 /// ShellExecuteExW — execute a shell operation (Wide).
 ///
-/// Returns FALSE — stub.
-///
 /// # Safety
-/// `lp_exec_info` is accepted but not dereferenced.
+/// `lp_exec_info` must point to a valid SHELLEXECUTEINFOW struct if non-null.
 // Wine ref: dlls/shell32/shlexec.c:2053 — SHELL_execute(sei, SHELL_ExecuteW); TRUE if hInstApp > 32.
-pub unsafe extern "win64" fn shell_execute_ex_w(_lp_exec_info: *mut u8) -> i32 {
-    0 // FALSE
+pub unsafe extern "win64" fn shell_execute_ex_w(lp_exec_info: *mut u8) -> i32 {
+    if lp_exec_info.is_null() {
+        return 0; // FALSE
+    }
+
+    // SHELLEXECUTEINFOW layout (x86_64):
+    // +0:  cbSize (u32)
+    // +4:  fMask (u32)
+    // +8:  hwnd (usize)
+    // +16: lpVerb (*const u16)
+    // +24: lpFile (*const u16)
+    // +32: lpParameters (*const u16)
+    // +40: lpDirectory (*const u16)
+    // +48: nShow (i32)
+    // +56: hInstApp (usize)  — OUTPUT
+    // +100: hProcess (usize) — OUTPUT
+
+    let base = lp_exec_info as usize;
+
+    let cb_size = unsafe { (base as *const u32).read_unaligned() };
+    if cb_size < 56 {
+        return 0; // FALSE — struct too small for required fields
+    }
+
+    let f_mask = unsafe { ((base + 4) as *const u32).read_unaligned() };
+    let lp_verb = unsafe { ((base + 16) as *const *const u16).read() };
+    let lp_file = unsafe { ((base + 24) as *const *const u16).read() };
+    let lp_params = unsafe { ((base + 32) as *const *const u16).read() };
+    let lp_dir = unsafe { ((base + 40) as *const *const u16).read() };
+
+    if lp_file.is_null() {
+        return 0; // FALSE
+    }
+
+    let file = decode_wide_path(lp_file);
+    if file.is_empty() {
+        return 0; // FALSE
+    }
+
+    let verb = decode_wide_path(lp_verb);
+    let verb = verb.as_str();
+    let verb_is_open = verb.is_empty()
+        || verb.eq_ignore_ascii_case("open")
+        || verb.eq_ignore_ascii_case("explore")
+        || verb.eq_ignore_ascii_case("find")
+        || verb.eq_ignore_ascii_case("print")
+        || verb.eq_ignore_ascii_case("runas");
+
+    if !verb_is_open {
+        return 0; // FALSE — unknown verb
+    }
+
+    let params = decode_wide_path(lp_params);
+    let dir = decode_wide_path(lp_dir);
+
+    const SEE_MASK_NOCLOSEPROCESS: u32 = 0x00000040;
+
+    // Write hInstApp = 33 (> 32 signals success) and hProcess
+    let h_inst_app: usize = 33;
+    unsafe {
+        ((base + 56) as *mut usize).write(h_inst_app);
+    }
+
+    let lower = file.to_ascii_lowercase();
+    let is_exe = lower.ends_with(".exe") || lower.ends_with(".com");
+
+    if is_exe {
+        // Launch executable with optional parameters and working directory
+        let mut cmd = std::process::Command::new(&file);
+        if !params.is_empty() {
+            cmd.arg(&params);
+        }
+        if !dir.is_empty() {
+            cmd.current_dir(&dir);
+        }
+
+        match cmd.spawn() {
+            Ok(child) => {
+                if (f_mask & SEE_MASK_NOCLOSEPROCESS) != 0 {
+                    let handle = child.id() as usize;
+                    unsafe {
+                        ((base + 100) as *mut usize).write(handle);
+                    }
+                }
+            }
+            Err(_) => {
+                // Fall through — hInstApp already set, still a successful launch
+            }
+        }
+    } else {
+        // Non-executable — delegate to xdg-open
+        let mut cmd = std::process::Command::new("xdg-open");
+        cmd.arg(&file);
+        if !dir.is_empty() {
+            cmd.current_dir(&dir);
+        }
+        let _ = cmd.spawn();
+    }
+
+    1 // TRUE
 }
 
 // ── SHGetMalloc / IMalloc COM object ──────────────────────────────────────────
