@@ -1497,18 +1497,104 @@ pub unsafe extern "win64" fn sh_open_folder_and_select_items(
 // via MultiByteToWideChar then calls SHGetFileInfoW, then writes results back as ANSI.
 /// SHGetFileInfoA: ANSI variant of SHGetFileInfoW.
 ///
-/// Returns 0 — stub.
-///
 /// # Safety
-/// Pointer arguments are accepted but not dereferenced.
+/// `psfi` must point to a valid SHFILEINFOA buffer (356 bytes) when non-null.
 pub unsafe extern "win64" fn sh_get_file_info_a(
-    _psz_path: *const u8,
-    _dw_file_attributes: u32,
-    _psfi: *mut u8,
+    psz_path: *const u8,
+    dw_file_attributes: u32,
+    psfi: *mut u8,
     _cb_file_info: u32,
-    _u_flags: u32,
+    u_flags: u32,
 ) -> usize {
-    0
+    if psfi.is_null() {
+        return 0;
+    }
+
+    // Convert ANSI path (CP_ACP) to wide (UTF-16)
+    let path_wide = if !psz_path.is_null() {
+        let mut len = 0usize;
+        while len < 32_768 && unsafe { *psz_path.add(len) } != 0 {
+            len += 1;
+        }
+        let s = String::from_utf8_lossy(unsafe { std::slice::from_raw_parts(psz_path, len) });
+        let mut wide: Vec<u16> = s.encode_utf16().collect();
+        wide.push(0);
+        Some(wide)
+    } else {
+        None
+    };
+
+    // Temporary SHFILEINFOW buffer (696 bytes)
+    let mut tmp_buf = [0u8; 696];
+
+    let result = unsafe {
+        sh_get_file_info_w(
+            path_wide
+                .as_deref()
+                .map_or(std::ptr::null(), |v| v.as_ptr()),
+            dw_file_attributes,
+            tmp_buf.as_mut_ptr(),
+            696,
+            u_flags,
+        )
+    };
+
+    if result != 0 {
+        // hIcon at +0 — usize, same layout between A and W
+        unsafe {
+            *(psfi as *mut usize) = *(tmp_buf.as_ptr() as *mut usize);
+        }
+        // iIcon at +8 — i32, same layout
+        unsafe {
+            *(psfi.add(8) as *mut i32) = *(tmp_buf.as_ptr().add(8) as *mut i32);
+        }
+        // dwAttributes at +12 — u32, same layout
+        unsafe {
+            *(psfi.add(12) as *mut u32) = *(tmp_buf.as_ptr().add(12) as *mut u32);
+        }
+
+        // szDisplayName at +16: convert wide → ANSI (260 CHARs in SHFILEINFOA)
+        unsafe {
+            let src = tmp_buf.as_ptr().add(16) as *const u16;
+            let mut chars = Vec::new();
+            let mut p = src;
+            loop {
+                let c = *p;
+                if c == 0 {
+                    break;
+                }
+                chars.push(c);
+                p = p.add(1);
+            }
+            let name = String::from_utf16_lossy(&chars);
+            let bytes = name.as_bytes();
+            let copy_len = bytes.len().min(259);
+            core::ptr::copy_nonoverlapping(bytes.as_ptr(), psfi.add(16), copy_len);
+            *psfi.add(16 + copy_len) = 0;
+        }
+
+        // szTypeName at +276 (16 + 260): convert wide → ANSI (80 CHARs in SHFILEINFOA)
+        unsafe {
+            let src = tmp_buf.as_ptr().add(536) as *const u16;
+            let mut chars = Vec::new();
+            let mut p = src;
+            loop {
+                let c = *p;
+                if c == 0 {
+                    break;
+                }
+                chars.push(c);
+                p = p.add(1);
+            }
+            let name = String::from_utf16_lossy(&chars);
+            let bytes = name.as_bytes();
+            let copy_len = bytes.len().min(79);
+            core::ptr::copy_nonoverlapping(bytes.as_ptr(), psfi.add(276), copy_len);
+            *psfi.add(276 + copy_len) = 0;
+        }
+    }
+
+    result
 }
 
 // Wine ref: dlls/shell32/shlview.c — SHLimitInputEdit limits text input in an edit control
