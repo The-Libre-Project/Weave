@@ -3093,17 +3093,132 @@ pub unsafe extern "win64" fn wsa_duplicate_socket_w(
 
 /// WSAEnumProtocolsW: enumerate available network protocols.
 ///
-/// Phase A stub — returns SOCKET_ERROR.
+/// Phase B: returns a catalog of supported protocols (TCP, UDP, RAW IP)
+/// with optional filtering by protocol ID array.
+///
+/// Wine ref: dlls/ws2_32/socket.c — WSAEnumProtocolsW enumerates the
+/// Winsock catalog; we supply our own minimal catalog.
 ///
 /// # Safety
-/// `lp_protocol_buffer` and `lpdw_buffer_length` are accepted but not dereferenced.
+/// `lpi_protocols` is dereferenced when non-null (null-terminated int array).
+/// `lp_protocol_buffer` and `lpdw_buffer_length` are dereferenced when non-null.
 pub unsafe extern "win64" fn wsa_enum_protocols_w(
-    _lpi_protocols: *mut i32,
-    _lp_protocol_buffer: *mut u8,
-    _lpdw_buffer_length: *mut u32,
+    lpi_protocols: *mut i32,
+    lp_protocol_buffer: *mut u8,
+    lpdw_buffer_length: *mut u32,
 ) -> i32 {
     eprintln!("weave/ws2_stub: WSAEnumProtocolsW");
-    SOCKET_ERROR
+
+    if lpdw_buffer_length.is_null() {
+        set_last_error(10014); // WSAEFAULT
+        return SOCKET_ERROR;
+    }
+
+    // ── Protocol catalog ──
+    struct ProtoInfo {
+        af: i32,
+        sock_type: i32,
+        protocol: i32,
+        name: &'static str,
+    }
+    let catalog: &[ProtoInfo] = &[
+        ProtoInfo {
+            af: 2,
+            sock_type: 1,
+            protocol: 6,
+            name: "TCP\0",
+        }, // AF_INET, SOCK_STREAM, IPPROTO_TCP
+        ProtoInfo {
+            af: 2,
+            sock_type: 2,
+            protocol: 17,
+            name: "UDP\0",
+        }, // AF_INET, SOCK_DGRAM, IPPROTO_UDP
+        ProtoInfo {
+            af: 2,
+            sock_type: 3,
+            protocol: 0,
+            name: "RAW IP\0",
+        }, // AF_INET, SOCK_RAW, IPPROTO_IP
+    ];
+
+    // ── Filter by lpiProtocols ──
+    let filtered: Vec<&ProtoInfo> = if lpi_protocols.is_null() {
+        catalog.iter().collect()
+    } else {
+        let mut ids: Vec<i32> = Vec::new();
+        let mut p = lpi_protocols;
+        loop {
+            let id = *p;
+            if id == 0 {
+                break;
+            }
+            ids.push(id);
+            p = p.add(1);
+        }
+        catalog
+            .iter()
+            .filter(|pi| ids.contains(&pi.protocol))
+            .collect()
+    };
+
+    let proto_size: usize = 456 + 256 * 2; // WSAPROTOCOL_INFOW size (from dup socket offsets)
+    let needed: u32 = (filtered.len() as u32).saturating_mul(proto_size as u32);
+
+    if lp_protocol_buffer.is_null() {
+        *lpdw_buffer_length = needed;
+        set_last_error(10055); // WSAENOBUFS
+        return SOCKET_ERROR;
+    }
+
+    if *lpdw_buffer_length < needed {
+        *lpdw_buffer_length = needed;
+        set_last_error(10055); // WSAENOBUFS
+        return SOCKET_ERROR;
+    }
+
+    // ── Fill buffer ──
+    for (i, pi) in filtered.iter().enumerate() {
+        let base = lp_protocol_buffer.add(i * proto_size);
+
+        // +0..+16: dwServiceFlags[0..3], dwProviderFlags — all zero.
+        *(base.add(0) as *mut u32) = 0;
+        *(base.add(4) as *mut u32) = 0;
+        *(base.add(8) as *mut u32) = 0;
+        *(base.add(12) as *mut u32) = 0;
+        *(base.add(16) as *mut u32) = 0;
+
+        // +20: dwCatalogEntryId
+        *(base.add(20) as *mut usize) = i + 1;
+
+        // +400: iAddressFamily
+        *(base.add(400) as *mut i32) = pi.af;
+        // +404: iMaxSockAddr
+        *(base.add(404) as *mut i32) = 16;
+        // +408: iMinSockAddr
+        *(base.add(408) as *mut i32) = 16;
+        // +412: iSocketType
+        *(base.add(412) as *mut i32) = pi.sock_type;
+        // +416: iProtocol
+        *(base.add(416) as *mut i32) = pi.protocol;
+        // +420: iProtocolMaxOffset
+        *(base.add(420) as *mut i32) = 0;
+
+        // +456: szProtocol as wide string.
+        let name_wide: Vec<u16> = pi.name.encode_utf16().collect();
+        let dst = base.add(456) as *mut u16;
+        let copy_len = name_wide.len().min(256);
+        for (j, &c) in name_wide.iter().enumerate().take(copy_len) {
+            *dst.add(j) = c;
+        }
+        if copy_len < 256 {
+            std::ptr::write_bytes(dst.add(copy_len), 0, 256 - copy_len);
+        }
+    }
+
+    let written: u32 = filtered.len() as u32 * proto_size as u32;
+    *lpdw_buffer_length = written;
+    filtered.len() as i32
 }
 
 /// WSASetEvent — set a WSAEVENT object to the signaled state.
