@@ -19246,14 +19246,57 @@ pub unsafe extern "win64" fn wait_named_pipe_w(
 
 /// GetComputerNameExW: get computer name in extended format.
 ///
-/// Phase A stub — returns FALSE.
+/// Uses libc::gethostname to retrieve the system hostname.
+/// Supports ComputerNameDnsHostname (1) and ComputerNamePhysicalDnsHostname (5).
+/// Returns ERROR_MORE_DATA (234) if the buffer is too small.
+///
+/// # Safety
+/// `lp_buffer` must be writable for `*n_size` u16 code units when non-null.
+/// `n_size` must be a valid pointer to a u32.
+// Wine ref: dlls/kernelbase/registry.c — GetComputerNameExW reads the hostname
+// from the registry (HKLM\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Hostname
+// for DnsHostname). We use getaddrinfo/gethostname instead for simplicity;
+// the result is semantically identical on a single-homed system.
 pub unsafe extern "win64" fn get_computer_name_ex_w(
-    _name_type: u32,
-    _lp_buffer: *mut u16,
-    _n_size: *mut u32,
+    name_type: u32,
+    lp_buffer: *mut u16,
+    n_size: *mut u32,
 ) -> i32 {
-    warn_once("GetComputerNameExW");
-    0
+    const ERROR_INVALID_PARAMETER: u32 = 87;
+    const ERROR_MORE_DATA: u32 = 234;
+
+    if n_size.is_null() || (lp_buffer.is_null() && *n_size != 0) {
+        set_last_error(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+
+    // We support DnsHostname (1) and PhysicalDnsHostname (5).
+    if name_type != 1 && name_type != 5 {
+        set_last_error(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+
+    let mut hostname_buf = [0i8; 256];
+    if libc::gethostname(hostname_buf.as_mut_ptr(), hostname_buf.len()) != 0 {
+        return 0;
+    }
+    hostname_buf[255] = 0;
+    let cstr = std::ffi::CStr::from_ptr(hostname_buf.as_ptr());
+    let hostname = cstr.to_str().unwrap_or("localhost");
+
+    let wide: Vec<u16> = hostname.encode_utf16().chain(std::iter::once(0)).collect();
+
+    let buf_len = *n_size as usize;
+    if buf_len < wide.len() {
+        *n_size = wide.len() as u32;
+        set_last_error(ERROR_MORE_DATA);
+        return 0;
+    }
+
+    std::ptr::copy_nonoverlapping(wide.as_ptr(), lp_buffer, wide.len());
+    // n_size excludes the null terminator (same pattern as GetComputerNameW).
+    *n_size = (wide.len() - 1) as u32;
+    1
 }
 
 /// GetCurrentPackageFullName: get current app package full name.
@@ -19336,13 +19379,52 @@ pub unsafe extern "win64" fn get_geo_info_w(
 
 /// GetLogicalProcessorInformation: get logical processor info.
 ///
-/// Phase A stub — returns FALSE.
+/// Returns static topology: 1 CPU core with L1 data cache.
+/// Each entry is 24 bytes (sizeof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION) on x64).
+/// Returns ERROR_INSUFFICIENT_BUFFER (122) if buffer is too small.
+///
+/// # Safety
+/// `buffer` must be writable for `*returned_length` bytes when non-null.
+/// `returned_length` must be a valid pointer to a u32.
+// Wine ref: dlls/kernelbase/cpu.c — GetLogicalProcessorInformation queries
+// /sys/devices/system/cpu/ via sysfs and /proc/cpuinfo on Linux; returns
+// RelationProcessorCore + RelationCache entries for each active CPU.
 pub unsafe extern "win64" fn get_logical_processor_information(
-    _buffer: *mut u8,
-    _returned_length: *mut u32,
+    buffer: *mut u8,
+    returned_length: *mut u32,
 ) -> i32 {
-    warn_once("GetLogicalProcessorInformation");
-    0
+    const SLPI_SIZE: u32 = 24;
+    const NEEDED: u32 = SLPI_SIZE * 2; // 1 core + 1 cache
+
+    if returned_length.is_null() {
+        return 0;
+    }
+
+    if buffer.is_null() || *returned_length < NEEDED {
+        *returned_length = NEEDED;
+        set_last_error(122); // ERROR_INSUFFICIENT_BUFFER
+        return 0;
+    }
+
+    let mask: u64 = 1; // single logical processor, mask bit 0
+
+    // Entry 1: RelationProcessorCore (0)
+    std::ptr::write(buffer as *mut u64, mask);
+    std::ptr::write(buffer.add(8) as *mut u32, 0u32);
+    std::ptr::write(buffer.add(12), 0u8); // Flags: one logical processor per core
+
+    // Entry 2: RelationCache (2), L1 data cache
+    let e2 = buffer.add(SLPI_SIZE as usize);
+    std::ptr::write(e2 as *mut u64, mask);
+    std::ptr::write(e2.add(8) as *mut u32, 2u32);
+    std::ptr::write(e2.add(12), 1u8); // Level = 1
+    std::ptr::write(e2.add(13), 0xFFu8); // Associativity = CACHE_FULLY_ASSOCIATIVE
+    std::ptr::write(e2.add(14) as *mut u16, 64u16); // LineSize
+    std::ptr::write(e2.add(16) as *mut u32, 32768u32); // Size = 32 KB
+    std::ptr::write(e2.add(20) as *mut u32, 2u32); // Type = CacheData
+
+    *returned_length = NEEDED;
+    1
 }
 
 /// GetLogicalProcessorInformationEx: get extended logical processor info.
@@ -19744,12 +19826,20 @@ pub extern "win64" fn rtl_delete_function_table(_function_table: usize) -> i32 {
 
 /// CheckRemoteDebuggerPresent: check if debugger is attached.
 ///
-/// Phase A stub — returns FALSE (no debugger).
+/// Weave has no debugger — writes FALSE (0) to pb_debugger_present and returns TRUE.
+///
+/// # Safety
+/// `pb_debugger_present` must be a valid writable pointer when non-null.
+// Wine ref: dlls/kernel32/debugger.c — CheckRemoteDebuggerPresent calls
+// NtQueryInformationProcess(ProcessDebugPort) and writes the result.
 pub unsafe extern "win64" fn check_remote_debugger_present(
     _h_process: usize,
-    _pb_debugger_present: *mut i32,
+    pb_debugger_present: *mut i32,
 ) -> i32 {
-    1 // TRUE
+    if !pb_debugger_present.is_null() {
+        std::ptr::write(pb_debugger_present, 0);
+    }
+    1 // TRUE — function succeeded, no debugger attached
 }
 
 /// WerRegisterRuntimeExceptionModule: register a WER exception module.
