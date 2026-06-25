@@ -248,6 +248,22 @@ pub fn base_by_path(path: &str) -> Option<usize> {
     }
 }
 
+/// Return all registered handles (HMODULE values).
+///
+/// Used by K32EnumProcessModules to enumerate loaded modules for the current
+/// process. Returns handles from both name-registered modules and
+/// base-identity mappings.
+///
+/// Wine ref: dlls/psapi/psapi_main.c — EnumProcessModules queries the
+/// PEB's LDR_DATA table; Weave uses the synthetic handle registry instead.
+pub fn all_handles() -> Vec<usize> {
+    with_table(vec![], |t| {
+        let mut handles: Vec<usize> = t.handle_to_name.keys().copied().collect();
+        handles.sort_unstable();
+        handles
+    })
+}
+
 /// Extract the lowercase DLL basename from a path or bare name.
 ///
 /// `r"C:\Windows\System32\SHELL32.DLL"` → `"shell32.dll"`

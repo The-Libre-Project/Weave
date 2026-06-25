@@ -19572,13 +19572,43 @@ pub extern "win64" fn get_maximum_processor_group_count() -> u16 {
 
 /// GetProcessHeaps: get handles of all process heaps.
 ///
-/// Phase A stub — returns 0.
+/// Returns the list of process heap handles. Weave has exactly one heap
+/// (the default process heap at handle 1, returned by GetProcessHeap).
+///
+/// Query mode: if `number_of_heaps` is 0 and `process_heaps` is NULL,
+/// returns the total heap count (1) without writing anything.
+///
+/// Normal mode: writes up to `number_of_heaps` handles into the buffer.
+/// If the buffer is too small (return > `number_of_heaps`), the caller
+/// should retry with a larger buffer. No error is set in this case — the
+/// API signals insufficiency through the return value alone.
+///
+/// # Safety
+/// `process_heaps` must be valid for writing `number_of_heaps` usize
+/// values, or NULL if `number_of_heaps` is 0.
+// Wine ref: dlls/kernel32/heap.c — GetProcessHeaps reads the PEB's
+// ProcessHeaps array; return value is always total heap count. If the
+// caller's buffer is too small, the return value (still the total count)
+// exceeds NumberOfHeaps to signal insufficiency — no SetLastError call.
 pub unsafe extern "win64" fn get_process_heaps(
-    _number_of_heaps: u32,
-    _process_heaps: *mut usize,
+    number_of_heaps: u32,
+    process_heaps: *mut usize,
 ) -> u32 {
-    warn_once("GetProcessHeaps");
-    0
+    const TOTAL_HEAPS: u32 = 1; // Weave has a single default process heap.
+
+    restrace!("GetProcessHeaps(NumberOfHeaps={number_of_heaps})");
+
+    // Query mode: return total count without writing.
+    if number_of_heaps == 0 && process_heaps.is_null() {
+        return TOTAL_HEAPS;
+    }
+
+    // Normal mode: write the default heap handle if space allows.
+    if number_of_heaps >= 1 && !process_heaps.is_null() {
+        unsafe { *process_heaps = 1 }; // default process heap handle
+    }
+
+    TOTAL_HEAPS
 }
 
 /// HeapCompact: compact a heap.
@@ -19870,15 +19900,79 @@ pub unsafe extern "win64" fn prefetch_virtual_memory(
 
 /// K32EnumProcessModules: enumerate process modules.
 ///
-/// Phase A stub — returns FALSE.
+/// Enumerates loaded modules for the specified process. For the current
+/// process (pseudo-handle `usize::MAX`), iterates the module_handles
+/// table and writes HMODULE values into the caller's buffer.
+///
+/// Cross-process handles are not supported — returns FALSE with
+/// `ERROR_ACCESS_DENIED`.
+///
+/// If `cb` (buffer size in bytes) is too small, sets `lpcb_needed` to
+/// the required size and returns FALSE with `ERROR_INSUFFICIENT_BUFFER`.
+/// Callers typically call once with `cb=0` to query size, allocate, then
+/// call again with the correct size.
+///
+/// # Safety
+/// - `lph_module` must be valid for writing at least
+///   `cb / size_of::<usize>()` HMODULE values, or NULL if `cb` is 0.
+/// - `lpcb_needed` must be valid for writing one `u32`.
+// Wine ref: dlls/psapi/psapi_main.c — EnumProcessModulesW walks the
+// PEB's LDR_DATA linked list (InLoadOrderModuleList); cb is in bytes,
+// lpcbNeeded receives the byte count of the written or required array;
+// ERROR_INSUFFICIENT_BUFFER on overflow.
 pub unsafe extern "win64" fn k32_enum_process_modules(
-    _h_process: usize,
-    _lph_module: *mut usize,
-    _cb: u32,
-    _lpcb_needed: *mut u32,
+    h_process: usize,
+    lph_module: *mut usize,
+    cb: u32,
+    lpcb_needed: *mut u32,
 ) -> i32 {
-    warn_once("K32EnumProcessModules");
-    0
+    const ERROR_ACCESS_DENIED: u32 = 5;
+    const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
+
+    restrace!("K32EnumProcessModules(hProcess={h_process:#x}, cb={cb})");
+
+    // lpcb_needed is mandatory.
+    if lpcb_needed.is_null() {
+        set_last_error(87); // ERROR_INVALID_PARAMETER
+        return 0;
+    }
+    unsafe { *lpcb_needed = 0 };
+
+    // Cross-process handles are not supported (in-process model).
+    if h_process != usize::MAX {
+        set_last_error(ERROR_ACCESS_DENIED);
+        restrace!(
+            "K32EnumProcessModules: cross-process handle {h_process:#x} → ERROR_ACCESS_DENIED"
+        );
+        return 0;
+    }
+
+    // Gather all registered module handles.
+    let handles = weave_core::module_handles::all_handles();
+    let needed = (handles.len() * size_of::<usize>()) as u32;
+
+    unsafe { *lpcb_needed = needed };
+
+    // Insufficient buffer: return required size and fail.
+    if cb < needed {
+        set_last_error(ERROR_INSUFFICIENT_BUFFER);
+        restrace!("K32EnumProcessModules: cb={cb} < needed={needed} → ERROR_INSUFFICIENT_BUFFER");
+        return 0;
+    }
+
+    // Buffer was provided (and is large enough) but pointer is NULL.
+    if lph_module.is_null() {
+        set_last_error(87); // ERROR_INVALID_PARAMETER
+        return 0;
+    }
+
+    // Write handles into caller's buffer.
+    for (i, &handle) in handles.iter().enumerate() {
+        unsafe { *lph_module.add(i) = handle };
+    }
+
+    restrace!("K32EnumProcessModules: wrote {} handles", handles.len());
+    1 // TRUE
 }
 
 /// K32GetModuleBaseNameW: get module base name.
