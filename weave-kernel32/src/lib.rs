@@ -18099,23 +18099,43 @@ pub unsafe extern "win64" fn set_comm_timeouts(_h_file: usize, _lp_comm_timeouts
 
 // ── Thread / Process stubs ─────────────────────────────────────────────────────
 
-/// CreateRemoteThread: create a thread in another process.
+/// CreateRemoteThread — create a thread in another process.
 ///
-/// Phase A stub — returns NULL.
+/// Phase B: supports current-process handles only. Delegates to create_thread
+/// when h_process is the current-process pseudo-handle (usize::MAX).
+// Wine ref: dlls/kernelbase/thread.c — CreateRemoteThread checks RemoteDesktop,
+// then calls NtCreateThreadEx if the handle references the current process.
+// h_process must be the current-process pseudo-handle; real handles are not
+// supported under the in-process model.
 ///
 /// # Safety
-/// Pointer arguments are accepted but not dereferenced.
+/// Pointer arguments are forwarded to create_thread and must be valid.
 pub unsafe extern "win64" fn create_remote_thread(
-    _h_process: usize,
-    _lp_thread_attributes: usize,
-    _dw_stack_size: usize,
-    _lp_start_address: usize,
-    _lp_parameter: usize,
-    _dw_creation_flags: u32,
-    _lp_thread_id: *mut u32,
+    h_process: usize,
+    lp_thread_attributes: usize,
+    dw_stack_size: usize,
+    lp_start_address: usize,
+    lp_parameter: usize,
+    dw_creation_flags: u32,
+    lp_thread_id: *mut u32,
 ) -> usize {
     warn_once("CreateRemoteThread");
-    0
+
+    // GetCurrentProcess() returns usize::MAX pseudo-handle. Under the
+    // in-process model, only the current process is supported.
+    if h_process != usize::MAX {
+        set_last_error(5); // ERROR_ACCESS_DENIED
+        return 0;
+    }
+
+    create_thread(
+        lp_thread_attributes as *const u8,
+        dw_stack_size,
+        lp_start_address as *const u8,
+        lp_parameter as *mut u8,
+        dw_creation_flags,
+        lp_thread_id,
+    )
 }
 
 /// ExitThread: end the calling thread.
