@@ -8659,27 +8659,68 @@ pub unsafe extern "win64" fn open_process(
     dw_process_id as usize
 }
 
-/// GetProcessAffinityMask — reports single-CPU affinity.
+/// GetProcessAffinityMask — return process and system affinity masks.
+///
+/// Uses `libc::sched_getaffinity` to query the actual CPU mask for the current
+/// process. The system affinity mask is reported as equal to the process mask
+/// (single processor group model).
 ///
 /// # Safety
-/// Output pointers must be valid and writable or NULL.
-// Wine ref: dlls/kernel32/process.c — process affinity mask must be a subset of the system
-// affinity mask; both reported as 1 for single-CPU environments. Returns TRUE on success.
+/// Output pointers must be valid and writable, or the function returns FALSE.
+// Wine ref: dlls/kernel32/process.c — lpProcessAffinityMask/lpSystemAffinityMask NULL
+// → ERROR_INVALID_PARAMETER. Delegates to NtQueryInformationProcess(ProcessAffinityMask).
 pub unsafe extern "win64" fn get_process_affinity_mask(
     _h_process: usize,
     lp_process_affinity_mask: *mut usize,
     lp_system_affinity_mask: *mut usize,
 ) -> i32 {
-    // Wine ref: dlls/kernelbase/process.c — NtQueryInformationProcess(ProcessAffinityMask).
-    // Report single-CPU affinity (mask=1); Linux scheduler ignores Windows affinity.
+    if lp_process_affinity_mask.is_null() || lp_system_affinity_mask.is_null() {
+        set_last_error(87); // ERROR_INVALID_PARAMETER
+        return 0;
+    }
+
+    let mask = current_cpu_mask();
+
     unsafe {
-        if !lp_process_affinity_mask.is_null() {
-            *lp_process_affinity_mask = 1;
-        }
-        if !lp_system_affinity_mask.is_null() {
-            *lp_system_affinity_mask = 1;
+        *lp_process_affinity_mask = mask;
+        *lp_system_affinity_mask = mask;
+    }
+    1
+}
+
+/// Get the CPU affinity mask for the current process.
+// Wine ref: libc::sched_getaffinity — Linux kernel affinity via /proc/self/status
+// Cpus_allowed mask. Returns a simple usize bitmask for CPUs 0..(size_of<usize>*8).
+#[cfg(target_os = "linux")]
+fn current_cpu_mask() -> usize {
+    let mut cpuset = std::mem::MaybeUninit::<libc::cpu_set_t>::uninit();
+    let ret = unsafe {
+        libc::sched_getaffinity(
+            0,
+            std::mem::size_of::<libc::cpu_set_t>(),
+            cpuset.as_mut_ptr(),
+        )
+    };
+    if ret < 0 {
+        return 1;
+    }
+    let cpuset = unsafe { cpuset.assume_init() };
+    let mut m: usize = 0;
+    for cpu in 0..(std::mem::size_of::<usize>() * 8) {
+        // SAFETY: cpu_set_t is valid; cpu is within range.
+        if unsafe { libc::CPU_ISSET(cpu, &cpuset) } {
+            m |= 1usize << cpu;
         }
     }
+    if m == 0 {
+        1
+    } else {
+        m
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn current_cpu_mask() -> usize {
     1
 }
 
@@ -18698,16 +18739,62 @@ pub unsafe extern "win64" fn get_process_handle_count(
 
 /// GetProcessIoCounters: get I/O statistics for a process.
 ///
-/// Phase A stub — returns FALSE.
+/// Reads /proc/self/io for real byte counters (read_bytes, write_bytes,
+/// cancelled_write_bytes). Operation counts and other fields are zeroed.
+/// Only the current-process pseudo-handle (usize::MAX) is accepted;
+/// cross-process handles return FALSE with ERROR_ACCESS_DENIED.
 ///
 /// # Safety
-/// `lp_io_counters` is accepted but not dereferenced.
+/// `lp_io_counters` must be a valid writable buffer of at least 48 bytes.
+// Wine ref: dlls/kernelbase/process.c — NtQueryInformationProcess(ProcessIoCounters)
+// reads from EPROCESS->IoCounters; operation counts are accumulated by the kernel
+// on each IRP completion. Weave reads the equivalent from /proc/self/io (task I/O
+// stats aggregated by the Linux kernel).
 pub unsafe extern "win64" fn get_process_io_counters(
-    _h_process: usize,
-    _lp_io_counters: *mut u8,
+    h_process: usize,
+    lp_io_counters: *mut u8,
 ) -> i32 {
     warn_once("GetProcessIoCounters");
-    0
+
+    // Cross-process handle → access denied (in-process model).
+    if h_process != usize::MAX {
+        set_last_error(file_io::ERROR_ACCESS_DENIED);
+        return 0;
+    }
+
+    if lp_io_counters.is_null() {
+        set_last_error(87); // ERROR_INVALID_PARAMETER
+        return 0;
+    }
+
+    // IO_COUNTERS layout (48 bytes):
+    //   [0..7]   ReadOperationCount    → u64
+    //   [8..15]  WriteOperationCount   → u64
+    //   [16..23] OtherOperationCount   → u64
+    //   [24..31] ReadTransferCount     → u64  ← read_bytes from procfs
+    //   [32..39] WriteTransferCount    → u64  ← write_bytes from procfs
+    //   [40..47] OtherTransferCount    → u64  ← cancelled_write_bytes from procfs
+    unsafe { core::ptr::write_bytes(lp_io_counters, 0, 48) }
+
+    if let Ok(content) = std::fs::read_to_string("/proc/self/io") {
+        for line in content.lines() {
+            if let Some(rest) = line.strip_prefix("read_bytes: ") {
+                if let Ok(val) = rest.trim().parse::<u64>() {
+                    unsafe { *(lp_io_counters.add(24) as *mut u64) = val }
+                }
+            } else if let Some(rest) = line.strip_prefix("write_bytes: ") {
+                if let Ok(val) = rest.trim().parse::<u64>() {
+                    unsafe { *(lp_io_counters.add(32) as *mut u64) = val }
+                }
+            } else if let Some(rest) = line.strip_prefix("cancelled_write_bytes: ") {
+                if let Ok(val) = rest.trim().parse::<u64>() {
+                    unsafe { *(lp_io_counters.add(40) as *mut u64) = val }
+                }
+            }
+        }
+    }
+
+    1
 }
 
 /// GetProcessInformation: get process information of a specific class.
@@ -18860,15 +18947,50 @@ pub unsafe extern "win64" fn query_information_job_object(
 
 /// GetProcessMitigationPolicy: get process mitigation policy.
 ///
-/// Phase A stub — returns FALSE.
+/// Supports ProcessDEPPolicy (0), ProcessASLRPolicy (1), and
+/// ProcessStrictHandleCheckPolicy (3). Writes a zero-initialized policy
+/// struct of the correct size for the requested policy class. Unsupported
+/// policy classes return FALSE with ERROR_INVALID_PARAMETER. A NULL buffer
+/// or a dw_length too small for the policy struct returns FALSE with
+/// ERROR_INSUFFICIENT_BUFFER.
+///
+/// # Safety
+/// `lp_buffer` must be a valid writable buffer of at least `dw_length` bytes.
+// Wine ref: dlls/kernelbase/process.c — GetProcessMitigationPolicy dispatches on
+// the mitigation policy enum to NtQueryInformationProcess with the corresponding
+// ProcessMitigation*Info class. Each policy writes a fixed-size structure;
+// Weave returns all-zero (features disabled).
 pub unsafe extern "win64" fn get_process_mitigation_policy(
     _h_process: usize,
-    _mitigation_policy: u32,
-    _lp_buffer: *mut u8,
-    _dw_length: usize,
+    mitigation_policy: u32,
+    lp_buffer: *mut u8,
+    dw_length: usize,
 ) -> i32 {
     warn_once("GetProcessMitigationPolicy");
-    0
+
+    // Policy struct sizes (bytes):
+    //   ProcessDEPPolicy (0)          — 8
+    //   ProcessASLRPolicy (1)         — 12
+    //   ProcessStrictHandleCheckPolicy (3) — 4
+    let expected_size: usize = match mitigation_policy {
+        0 => 8,  // ProcessDEPPolicy
+        1 => 12, // ProcessASLRPolicy
+        3 => 4,  // ProcessStrictHandleCheckPolicy
+        _ => {
+            set_last_error(87); // ERROR_INVALID_PARAMETER
+            return 0;
+        }
+    };
+
+    if lp_buffer.is_null() || dw_length < expected_size {
+        set_last_error(122); // ERROR_INSUFFICIENT_BUFFER
+        return 0;
+    }
+
+    // Zero-initialize the policy struct — all features reported as disabled.
+    unsafe { core::ptr::write_bytes(lp_buffer, 0, expected_size) }
+
+    1
 }
 
 /// SetProcessMitigationPolicy: set process mitigation policy.
