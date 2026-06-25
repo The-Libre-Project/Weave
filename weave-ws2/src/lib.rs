@@ -2908,18 +2908,54 @@ pub unsafe extern "win64" fn wsa_send_to(
 
 /// WSAGetOverlappedResult: get result of an overlapped operation.
 ///
-/// Phase A stub — returns FALSE (not completed).
+/// Phase B: reads InternalHigh from the OVERLAPPED struct and returns TRUE.
+/// If `f_wait` is TRUE and hEvent is set, resolves and calls WaitForSingleObject
+/// via the runtime resolver (no compile-time dep on kernel32).
+///
+/// Wine ref: dlls/ws2_32/socket.c — WSAGetOverlappedResult checks
+/// HaveOverlappedCompletion and reads InternalHigh from the overlapped struct.
 ///
 /// # Safety
 /// Caller must ensure `lp_overlapped` and `lpcb_transfer` are valid.
 pub unsafe extern "win64" fn wsa_get_overlapped_result(
     _s: usize,
-    _lp_overlapped: usize,
-    _lpcb_transfer: *mut u32,
-    _f_wait: i32,
-    _lpdw_flags: *mut u32,
+    lp_overlapped: usize,
+    lpcb_transfer: *mut u32,
+    f_wait: i32,
+    lpdw_flags: *mut u32,
 ) -> i32 {
-    0
+    if lp_overlapped == 0 {
+        return 0; // FALSE
+    }
+
+    // OVERLAPPED layout (64-bit): +0 Internal(8), +8 InternalHigh(8), +16 Offset(4), +20 OffsetHigh(4), +24 hEvent(8)
+    let overlapped = lp_overlapped as *const u8;
+
+    // Read InternalHigh as the bytes transferred count.
+    let internal_high = *(overlapped.add(8) as *const u32);
+
+    if !lpcb_transfer.is_null() {
+        *lpcb_transfer = internal_high;
+    }
+
+    if !lpdw_flags.is_null() {
+        *lpdw_flags = 0;
+    }
+
+    // If caller wants to wait and the event handle is non-zero, resolve and call WaitForSingleObject.
+    // Our operations complete synchronously, so this is a courtesy wait.
+    if f_wait != 0 {
+        let h_event = *(overlapped.add(24) as *const usize);
+        if h_event != 0 {
+            if let Some(addr) = weave_core::resolve::resolve("kernel32.dll", "WaitForSingleObject") {
+                let func: unsafe extern "win64" fn(usize, u32) -> u32 =
+                    std::mem::transmute(addr);
+                func(h_event, 0xFFFFFFFF); // INFINITE = 0xFFFFFFFF
+            }
+        }
+    }
+
+    1 // TRUE
 }
 
 // ── Socket Management ──────────────────────────────────────────────────────────
