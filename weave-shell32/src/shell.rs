@@ -1553,21 +1553,187 @@ pub unsafe extern "win64" fn sh_create_item_from_parsing_name(
 
 // Wine ref: dlls/shell32/shlfolder.c — SHCreateItemFromIDList creates an IShellItem
 // from a PIDL.
+
+// ── IShellItem COM implementation ────────────────────────────────────────────
+
+/// IID_IShellItem = {43826d1e-e718-42ee-bc55-a1e261c37bfe}
+/// Wire (little-endian GUID): Data1, Data2, Data3 as LE, Data4 as-is.
+const IID_ISHELL_ITEM_WIRE: [u8; 16] = [
+    0x1E, 0x6D, 0x82, 0x43, 0x18, 0xE7, 0xEE, 0x42, 0xBC, 0x55, 0xA1, 0xE2, 0x61, 0xC3, 0x7B, 0xFE,
+];
+
+const SFGAO_FILESYSTEM: u32 = 0x4000_0000;
+const SFGAO_FOLDER: u32 = 0x2000_0000;
+
+#[repr(C)]
+struct ShellItemImpl {
+    vtable: *const [usize; 8],
+    refcount: u32,
+    pidl: *mut u8,
+}
+
+unsafe extern "win64" fn si_query_interface(this: usize, riid: *const u8, ppv: *mut usize) -> i32 {
+    if ppv.is_null() {
+        return 0x8000_4003u32 as i32;
+    }
+    unsafe { *ppv = 0 };
+    if riid.is_null() {
+        return 0x8000_4002u32 as i32;
+    }
+    if unsafe { std::slice::from_raw_parts(riid, 16) } != IID_ISHELL_ITEM_WIRE {
+        return 0x8000_4002u32 as i32;
+    }
+    let obj = unsafe { &mut *(this as *mut ShellItemImpl) };
+    obj.refcount += 1;
+    unsafe { *ppv = this };
+    0
+}
+
+unsafe extern "win64" fn si_add_ref(this: usize) -> u32 {
+    let obj = unsafe { &mut *(this as *mut ShellItemImpl) };
+    obj.refcount += 1;
+    obj.refcount
+}
+
+unsafe extern "win64" fn si_release(this: usize) -> u32 {
+    let obj = unsafe { &mut *(this as *mut ShellItemImpl) };
+    let count = obj.refcount.saturating_sub(1);
+    obj.refcount = count;
+    if count == 0 {
+        if !obj.pidl.is_null() {
+            unsafe { libc::free(obj.pidl as *mut libc::c_void) };
+        }
+        let _ = unsafe { Box::from_raw(this as *mut ShellItemImpl) };
+        0
+    } else {
+        count
+    }
+}
+
+unsafe extern "win64" fn si_bind_to_handler(
+    _this: usize,
+    _pbc: usize,
+    _bhid: *const u8,
+    _riid: *const u8,
+    _ppv: *mut usize,
+) -> i32 {
+    0x8000_4001u32 as i32
+}
+
+unsafe extern "win64" fn si_get_parent(_this: usize, _riid: *const u8, _ppv: *mut usize) -> i32 {
+    0x8000_4001u32 as i32
+}
+
+unsafe extern "win64" fn si_get_display_name(
+    this: usize,
+    _sigdn: u32,
+    ppsz_name: *mut *mut u16,
+) -> i32 {
+    if ppsz_name.is_null() {
+        return 0x8000_4003u32 as i32;
+    }
+    unsafe { *ppsz_name = std::ptr::null_mut() };
+    let obj = unsafe { &mut *(this as *mut ShellItemImpl) };
+    if obj.pidl.is_null() {
+        return 0x8007_000Eu32 as i32;
+    }
+    let path = crate::pidl::pidl_path_from_list(obj.pidl)
+        .or_else(|| crate::pidl::weave_item_path(obj.pidl));
+    let Some(ref path) = path else {
+        return 0x8007_000Eu32 as i32;
+    };
+    let wide: Vec<u16> = path.encode_utf16().collect();
+    let byte_len = (wide.len() + 1) * 2;
+    let alloc = unsafe { libc::malloc(byte_len) as *mut u16 };
+    if alloc.is_null() {
+        return 0x8007_000Eu32 as i32;
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(wide.as_ptr(), alloc, wide.len());
+        *alloc.add(wide.len()) = 0;
+        *ppsz_name = alloc;
+    }
+    0
+}
+
+unsafe extern "win64" fn si_get_attributes(
+    this: usize,
+    _sfgao_mask: u32,
+    psfgao_attribs: *mut u32,
+) -> i32 {
+    if psfgao_attribs.is_null() {
+        return 0x8000_4003u32 as i32;
+    }
+    let obj = unsafe { &mut *(this as *mut ShellItemImpl) };
+    let mut attrs = SFGAO_FILESYSTEM;
+    if let Some(path) = crate::pidl::pidl_path_from_list(obj.pidl)
+        .or_else(|| crate::pidl::weave_item_path(obj.pidl))
+    {
+        let linux_path = path.replace('\\', "/");
+        if std::path::Path::new(&linux_path).is_dir() {
+            attrs |= SFGAO_FOLDER;
+        }
+    }
+    unsafe { *psfgao_attribs = attrs };
+    0
+}
+
+unsafe extern "win64" fn si_compare(
+    _this: usize,
+    _psi: usize,
+    _hint: u32,
+    _pi_order: *mut i32,
+) -> i32 {
+    0x8000_4001u32 as i32
+}
+
+fn get_shell_item_vtable() -> &'static [usize; 8] {
+    static VTBL: OnceLock<[usize; 8]> = OnceLock::new();
+    VTBL.get_or_init(|| {
+        [
+            si_query_interface as *const () as usize,
+            si_add_ref as *const () as usize,
+            si_release as *const () as usize,
+            si_bind_to_handler as *const () as usize,
+            si_get_parent as *const () as usize,
+            si_get_display_name as *const () as usize,
+            si_get_attributes as *const () as usize,
+            si_compare as *const () as usize,
+        ]
+    })
+}
+
 /// SHCreateItemFromIDList: create a shell item from a PIDL.
 ///
-/// Returns E_NOTIMPL — stub.
-///
 /// # Safety
-/// Pointer arguments are accepted but not dereferenced.
+/// `pidl` must be a valid PIDL chain, `riid` must point to a valid GUID,
+/// `ppv` must be a writable pointer.
 pub unsafe extern "win64" fn sh_create_item_from_id_list(
-    _pidl: *const u8,
-    _riid: *const u8,
+    pidl: *const u8,
+    riid: *const u8,
     ppv: *mut usize,
 ) -> i32 {
-    if !ppv.is_null() {
-        unsafe { *ppv = 0 };
+    if ppv.is_null() {
+        return 0x8000_4003u32 as i32;
     }
-    0x8000_4001u32 as i32 // E_NOTIMPL
+    unsafe { *ppv = 0 };
+    if pidl.is_null() || riid.is_null() {
+        return 0x8000_4002u32 as i32;
+    }
+    if unsafe { std::slice::from_raw_parts(riid, 16) } != IID_ISHELL_ITEM_WIRE {
+        return 0x8000_4002u32 as i32;
+    }
+    let pidl_clone = unsafe { crate::pidl::il_clone(pidl) };
+    if pidl_clone.is_null() {
+        return 0x8007_000Eu32 as i32;
+    }
+    let obj = Box::new(ShellItemImpl {
+        vtable: get_shell_item_vtable() as *const [usize; 8],
+        refcount: 1,
+        pidl: pidl_clone,
+    });
+    unsafe { *ppv = Box::into_raw(obj) as usize };
+    0
 }
 
 // Wine ref: dlls/shell32/shlview.c — SHOpenFolderAndSelectItems opens an Explorer window
