@@ -1609,17 +1609,194 @@ pub unsafe extern "win64" fn sh_limit_input_edit(_hwnd: usize, _f_unicode: i32) 
     0 // S_OK
 }
 
+// ── SHFileOperationW constants ─────────────────────────────────────────────────
+
+const FO_MOVE: u32 = 1;
+const FO_COPY: u32 = 2;
+const FO_DELETE: u32 = 3;
+const FO_RENAME: u32 = 4;
+
+/// Parse a double-null-terminated UTF-16 multi-string into a Vec of Strings.
+///
+/// # Safety
+/// `ptr` must point to a valid double-null-terminated UTF-16 buffer.
+unsafe fn read_multi_string(ptr: *const u16) -> Vec<String> {
+    if ptr.is_null() {
+        return Vec::new();
+    }
+    let mut result = Vec::new();
+    let mut offset: isize = 0;
+    loop {
+        let mut chars = Vec::new();
+        loop {
+            let c = *ptr.offset(offset);
+            if c == 0 {
+                break;
+            }
+            chars.push(c);
+            offset += 1;
+        }
+        if chars.is_empty() {
+            break;
+        }
+        offset += 1;
+        if let Ok(s) = String::from_utf16(&chars) {
+            result.push(s);
+        }
+    }
+    result
+}
+
+/// Recursively copy a directory tree.
+fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+    if !dst.exists() {
+        std::fs::create_dir_all(dst)?;
+    }
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+        if file_type.is_dir() {
+            copy_dir_recursive(&src_path, &dst_path)?;
+        } else {
+            std::fs::copy(&src_path, &dst_path)?;
+        }
+    }
+    Ok(())
+}
+
 // Wine ref: dlls/shell32/shlfileop.c — parses SHFILEOPSTRUCTW; dispatches to copy/delete/rename/move
 // helpers; FOF_* flags control confirmation dialogs; returns 0 on success, non-zero on cancel/error.
 /// SHFileOperationW — perform a file operation (copy/move/delete/rename) (Wide).
 ///
-/// Returns 1 (operation aborted) — stub.
+/// Returns 0 on success, non-zero on error.
 ///
 /// # Safety
-/// `lpfo` is accepted but not dereferenced.
+/// `lpfo` points to a valid SHFILEOPSTRUCTW or is null.
 // Wine ref: dlls/shell32/shlfileop.c — parses SHFILEOPSTRUCTW; copy/delete/rename/move; 0=success.
-pub unsafe extern "win64" fn sh_file_operation_w(_lpfo: *mut u8) -> i32 {
-    1 // DE_OPCANCELLED — operation aborted
+pub unsafe extern "win64" fn sh_file_operation_w(lpfo: *mut u8) -> i32 {
+    if lpfo.is_null() {
+        return 0;
+    }
+
+    let w_func: u32 = *(lpfo.add(8) as *const u32);
+    let f_flags: u32 = *(lpfo.add(12) as *const u32);
+    let p_from: *const u16 = *(lpfo.add(16) as *const *const u16);
+    let p_to: *const u16 = *(lpfo.add(24) as *const *const u16);
+    let _allow_undo = (f_flags & 0x0040) != 0; // FOF_ALLOWUNDO — ignored, no recycle bin
+
+    let sources = read_multi_string(p_from);
+    let destinations = read_multi_string(p_to);
+
+    let mut any_aborted = 0i32;
+    let mut last_error = 0i32;
+
+    match w_func {
+        FO_MOVE => {
+            let base_dst = destinations.first().map(|s| s.as_str()).unwrap_or("");
+            let dst_path = std::path::Path::new(base_dst);
+            let dst_is_dir = !base_dst.is_empty() && dst_path.is_dir();
+            for src in &sources {
+                if src.is_empty() {
+                    continue;
+                }
+                let src_path = std::path::Path::new(src);
+                let target = if dst_is_dir {
+                    dst_path.join(src_path.file_name().unwrap_or_default())
+                } else {
+                    dst_path.to_path_buf()
+                };
+                if std::fs::rename(src, &target).is_err() {
+                    // Fall back to copy + delete
+                    if std::fs::copy(src, &target).is_err() {
+                        last_error = 1;
+                        any_aborted = 1;
+                    } else {
+                        let _ = std::fs::remove_file(src);
+                    }
+                }
+            }
+        }
+        FO_COPY => {
+            let base_dst = destinations.first().map(|s| s.as_str()).unwrap_or("");
+            let dst_path = std::path::Path::new(base_dst);
+            let dst_is_dir = !base_dst.is_empty() && dst_path.is_dir();
+            for src in &sources {
+                if src.is_empty() {
+                    continue;
+                }
+                let src_path = std::path::Path::new(src);
+                if src_path.is_dir() {
+                    if base_dst.is_empty() {
+                        continue;
+                    }
+                    let target = dst_path.join(src_path.file_name().unwrap_or_default());
+                    if copy_dir_recursive(src_path, &target).is_err() {
+                        last_error = 1;
+                        any_aborted = 1;
+                    }
+                } else {
+                    if base_dst.is_empty() {
+                        continue;
+                    }
+                    let target = if dst_is_dir {
+                        dst_path.join(src_path.file_name().unwrap_or_default())
+                    } else {
+                        dst_path.to_path_buf()
+                    };
+                    if std::fs::copy(src, &target).is_err() {
+                        last_error = 1;
+                        any_aborted = 1;
+                    }
+                }
+            }
+        }
+        FO_DELETE => {
+            for src in &sources {
+                if src.is_empty() {
+                    continue;
+                }
+                let src_path = std::path::Path::new(src);
+                let result = if src_path.is_dir() {
+                    std::fs::remove_dir_all(src)
+                } else {
+                    std::fs::remove_file(src)
+                };
+                if result.is_err() {
+                    last_error = 1;
+                    any_aborted = 1;
+                }
+            }
+        }
+        FO_RENAME => {
+            for (i, src) in sources.iter().enumerate() {
+                if src.is_empty() {
+                    continue;
+                }
+                let dest = destinations.get(i).map(|s| s.as_str()).unwrap_or("");
+                if dest.is_empty() {
+                    continue;
+                }
+                if std::fs::rename(src, dest).is_err() {
+                    if std::fs::copy(src, dest).is_err() {
+                        last_error = 1;
+                        any_aborted = 1;
+                    } else {
+                        let _ = std::fs::remove_file(src);
+                    }
+                }
+            }
+        }
+        _ => {
+            last_error = 1;
+            any_aborted = 1;
+        }
+    }
+
+    *(lpfo.add(40) as *mut i32) = any_aborted;
+
+    last_error
 }
 
 // Wine ref: dlls/shell32/changenotify.c — broadcasts SHCNE_* event to SHChangeNotifyRegister
