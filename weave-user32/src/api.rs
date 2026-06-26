@@ -326,6 +326,7 @@ pub unsafe extern "win64" fn register_class_ex_w(lp_wnd_class_ex: *const WndClas
         },
     );
     let atom = name_to_atom(&name);
+    class::register_atom(atom, name.clone());
     eprintln!("weave/user32: RegisterClassExW({name:?}) → atom 0x{atom:04x}");
     atom
 }
@@ -375,7 +376,26 @@ pub unsafe extern "win64" fn create_window_ex_w(
     if !PHASE_CREATE_WINDOW.swap(true, Ordering::Relaxed) {
         mark_phase("create_window_first");
     }
-    let class_name = unsafe { decode_wide(lp_class_name) };
+    // IS_INTRESOURCE: HIWORD(ptr) == 0 means an ATOM (integer), not a string pointer.
+    // Wine ref: dlls/user32/class.c::init_class_name — checks IS_INTRESOURCE and
+    // resolves via NtUserGetAtomName.
+    let class_name = if (lp_class_name as usize) >> 16 == 0 {
+        let atom = lp_class_name as u16;
+        match class::name_from_atom(atom) {
+            Some(name) => {
+                eprintln!(
+                    "weave/user32: CreateWindowExW: lpClassName is atom 0x{atom:04x} → '{name}'"
+                );
+                name
+            }
+            None => {
+                eprintln!("weave/user32: CreateWindowExW: unknown atom 0x{atom:04x} → 0");
+                return 0;
+            }
+        }
+    } else {
+        unsafe { decode_wide(lp_class_name) }
+    };
     let title = unsafe { decode_wide(lp_window_name) };
 
     // M19: detect PuTTY terminal window creation.

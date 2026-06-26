@@ -737,13 +737,19 @@ fn main() {
         //
         // Patch 3 (RVA 0x5cfb4): Replace `mov rcx, [rax]` (null deref crash
         // when [rsi+0xb0] is uninitialized) with `jmp <error_handler>; nop`.
-        // The file-watcher linked-list field at [rsi+0xb0] is never initialized
-        // because Weave's DialogBoxParamW stub doesn't run the dialog procedure
-        // (which would handle WM_CREATE and set up this structure).
-        // RVA 0x29aa8 has 6 stores to `rdi+0x38` from various registers
-        // (rax, rcx, r8, rbx, r14).  The factory's internal virtual method puts
-        // INVALID_HANDLE_VALUE there; keeping +0x38 NULL lets the null-check
-        // skip the vtable dispatch in the clone constructor at 0x21baf4.
+        // REMOVED: 6 set_sub_object patches (0x29ae1, 0x29b48, 0x29b77, 0x6ca9f,
+        // 0x6cabe, 0x6e535) — these masked INVALID_HANDLE_VALUE at [+0x38] which was
+        // downstream of CreateWindowExW returning 0 when given an ATOM lpClassName.
+        // The atom-based class lookup fix in api.rs resolves the root cause, making
+        // these patches unnecessary. See TASK-4.
+        //
+        // Remaining 3 patches — kept because they fix genuine code bugs in SumatraPDF:
+        //   - 0x21c1b4: dual-call-path bug (null check after two code paths that should
+        //     have been exclusive but both execute)
+        //   - 0x21c2f2: CreateThread suspended (race condition — thread created with
+        //     CREATE_SUSPENDED but ResumeThread never called)
+        //   - 0x5cfb4:  null-check skip (may also be downstream of atom fix; kept for
+        //     safety pending independent verification)
         let _ = cfg::apply_binary_patches(
             image.base,
             &[
@@ -758,42 +764,6 @@ fn main() {
                     &[0xc6, 0x44, 0x24, 0x20, 0x04],
                 ),
                 (0x5cfb4, &[0x48, 0x8b, 0x08], &[0xeb, 0x30, 0x90]),
-                (
-                    0x29ae1,
-                    &[0x48, 0x89, 0x47, 0x38],
-                    &[0x90, 0x90, 0x90, 0x90],
-                ),
-                (
-                    0x29b48,
-                    &[
-                        0x48, 0x8b, 0x01, 0x48, 0x8b, 0xd7, 0xff, 0x50, 0x08, 0x48, 0x89, 0x47,
-                        0x38,
-                    ],
-                    &[
-                        0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
-                        0x90,
-                    ],
-                ),
-                (
-                    0x29b77,
-                    &[0x48, 0x89, 0x4f, 0x38],
-                    &[0x90, 0x90, 0x90, 0x90],
-                ),
-                (
-                    0x6ca9f,
-                    &[0x48, 0x89, 0x47, 0x38],
-                    &[0x90, 0x90, 0x90, 0x90],
-                ),
-                (
-                    0x6cabe,
-                    &[0x4c, 0x89, 0x47, 0x38],
-                    &[0x90, 0x90, 0x90, 0x90],
-                ),
-                (
-                    0x6e535,
-                    &[0x48, 0x89, 0x5f, 0x38],
-                    &[0x90, 0x90, 0x90, 0x90],
-                ),
             ],
         );
     }

@@ -76,6 +76,37 @@ pub fn register(name: &str, entry: ClassEntry) -> bool {
     !replaced
 }
 
+// ── Atom-to-name reverse mapping ──────────────────────────────────────────────
+// When RegisterClassExW stores a class by name, it also records the
+// atom→name mapping so CreateWindowExW can resolve atoms back to class names.
+
+static ATOM_TO_NAME: OnceLock<Mutex<HashMap<u16, String>>> = OnceLock::new();
+
+fn atom_table() -> &'static Mutex<HashMap<u16, String>> {
+    ATOM_TO_NAME.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn lock_atom_table(
+    m: &Mutex<HashMap<u16, String>>,
+) -> Option<std::sync::MutexGuard<'_, HashMap<u16, String>>> {
+    m.lock()
+        .map_err(|e| eprintln!("weave: user32: atom table mutex poisoned: {e}"))
+        .ok()
+}
+
+/// Register an atom → class name mapping.
+pub fn register_atom(atom: u16, name: String) {
+    if let Some(mut guard) = lock_atom_table(atom_table()) {
+        guard.insert(atom, name);
+    }
+}
+
+/// Look up a class name from an atom.
+pub fn name_from_atom(atom: u16) -> Option<String> {
+    let guard = lock_atom_table(atom_table())?;
+    guard.get(&atom).cloned()
+}
+
 // ── Edit control state ────────────────────────────────────────────────────────
 
 /// Per-window selection state for built-in EDIT controls.
