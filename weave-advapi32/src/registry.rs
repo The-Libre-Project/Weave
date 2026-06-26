@@ -994,9 +994,11 @@ pub unsafe extern "win64" fn open_process_token(
         weave_common::set_last_error(87); // ERROR_INVALID_PARAMETER
         return 0; // FALSE
     }
-    // Accept current-process pseudo-handle (usize::MAX == -1 / GetCurrentProcess())
-    // or any non-zero handle for Phase B convenience. Reject process_handle == 0.
-    if process_handle != 0 {
+    // Accept ONLY the current-process pseudo-handle (usize::MAX == -1 / GetCurrentProcess()).
+    // Reject any other handle — returning a fake token for a wrong process causes
+    // callers (7-Zip, PuTTY) to SIGABRT when AdjustTokenPrivileges "succeeds" but the
+    // operation then fails (no real privilege enforcement in Phase B).
+    if process_handle == usize::MAX {
         // SAFETY: token_handle is non-null (checked above).  The Win32 API contract
         // requires callers to provide a valid, writable HANDLE*.
         unsafe { *token_handle = 0xCAFEBEE0 };
@@ -1101,33 +1103,30 @@ pub unsafe extern "win64" fn adjust_token_privileges(
     }
 
     if disable_all_privileges != 0 {
-        // Disable all — no-op, return success. We don't enforce privileges anyway.
+        // Disable all — no-op, return success.
         return 1; // TRUE
     }
 
     if !new_state.is_null() {
-        // Read the privilege count from TOKEN_PRIVILEGES.PrivilegeCount.
-        // SAFETY: new_state is non-null (checked above).  The Win32 API contract
-        // requires callers to provide a valid, readable TOKEN_PRIVILEGES structure
-        // of at least _buffer_length bytes when new_state is non-null.
+        // SAFETY: new_state is non-null (checked above).
         let _count = unsafe { *(new_state as *const u32) };
 
         if !previous_state.is_null() {
-            // SAFETY: previous_state is non-null.  The Win32 API contract for
-            // AdjustTokenPrivileges requires callers to provide a valid TOKEN_PRIVILEGES*
-            // buffer of at least _buffer_length bytes when previous_state is non-null.
-            // We write PrivilegeCount = 0 (no previous privileges to report).
+            // SAFETY: previous_state is non-null.
             unsafe { *(previous_state as *mut u32) = 0 };
         }
 
         if !return_length.is_null() {
-            // SAFETY: return_length is non-null.  The Win32 API contract requires
-            // callers to provide a valid, writable DWORD*.  We write the minimum
-            // required size: sizeof(PrivilegeCount) + sizeof(LUID_AND_ATTRIBUTES) == 16.
+            // SAFETY: return_length is non-null.
             unsafe { *return_length = 16 };
         }
     }
 
+    // Per MSDN, AdjustTokenPrivileges returns TRUE even when not all privileges
+    // were assigned — caller must check GetLastError for ERROR_NOT_ALL_ASSIGNED
+    // to detect partial success. We set this because no privileges were actually
+    // applied (Phase B — no real privilege enforcement).
+    weave_common::set_last_error(1300); // ERROR_NOT_ALL_ASSIGNED
     1 // TRUE
 }
 
