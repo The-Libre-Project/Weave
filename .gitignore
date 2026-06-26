@@ -90,4 +90,7 @@ docs/milestones/*
 docs/reference/*
 !docs/reference/*.md
 !docs/RELEASE-CLAIMS.md
+!docs/sprint-briefs/
+docs/sprint-briefs/*
+!docs/sprint-briefs/*.md
 .deepseek/
