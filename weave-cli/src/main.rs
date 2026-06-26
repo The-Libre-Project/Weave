@@ -735,7 +735,11 @@ fn main() {
         // the vtable dispatch.  The callback (vtable[0]) won't fire for the second
         // invocation, but the rest of initialization continues normally.
         //
-        // Patches 2-7 (RVAs 0x29ae1..0x6e535): The set_sub_object function at
+        // Patch 3 (RVA 0x5cfb4): Replace `mov rcx, [rax]` (null deref crash
+        // when [rsi+0xb0] is uninitialized) with `jmp <error_handler>; nop`.
+        // The file-watcher linked-list field at [rsi+0xb0] is never initialized
+        // because Weave's DialogBoxParamW stub doesn't run the dialog procedure
+        // (which would handle WM_CREATE and set up this structure).
         // RVA 0x29aa8 has 6 stores to `rdi+0x38` from various registers
         // (rax, rcx, r8, rbx, r14).  The factory's internal virtual method puts
         // INVALID_HANDLE_VALUE there; keeping +0x38 NULL lets the null-check
@@ -752,6 +756,11 @@ fn main() {
                     0x21c2f2,
                     &[0x83, 0x64, 0x24, 0x20, 0x00],
                     &[0xc6, 0x44, 0x24, 0x20, 0x04],
+                ),
+                (
+                    0x5cfb4,
+                    &[0x48, 0x8b, 0x08],
+                    &[0xeb, 0x30, 0x90],
                 ),
                 (
                     0x29ae1,
