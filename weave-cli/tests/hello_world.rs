@@ -2548,11 +2548,7 @@ fn scite_portable_mode() {
                     {
                         pixel_ok = sample_display_pixels_99();
                     }
-                    eprintln!(
-                        "pixel check at {:.1?} → {:?}",
-                        now - start,
-                        pixel_ok
-                    );
+                    eprintln!("pixel check at {:.1?} → {:?}", now - start, pixel_ok);
                 }
                 if now >= deadline {
                     let _ = child.kill();
