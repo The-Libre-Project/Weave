@@ -55,7 +55,7 @@ fi
 
 # ── Check 1: SESSION-STATUS contract ──────────────────────────────────────
 
-count_closed=$(grep -cE '^\*\*(M\d+|E3-M\d+).*CLOSED\*\*' SESSION-STATUS.md 2>/dev/null || echo 0)
+count_closed=$(grep -cE '^\*\*(M\d+|E3-M\d+).*CLOSED\*\*' SESSION-STATUS.md 2>/dev/null || true)
 if [ "$count_closed" -gt 5 ]; then
   echo "FAIL: SESSION-STATUS.md has $count_closed CLOSED one-liners (max 5 per its own contract §Document scope)" >&2
   any_failed=1
