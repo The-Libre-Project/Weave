@@ -96,9 +96,9 @@ fn notepad_m15_edit_save_roundtrip_gate() {
         // into the captured Scintilla hwnd after paint, making doc == injected_bytes exactly.
         .env("WEAVE_TEST_SCI_INJECT", injected_text)
         // Drive save via the M15a-proven WM_COMMAND post path (SendMessageW to main hwnd).
-        // 1001 chosen as representative File>Save ID (NPP menu command IDs are in 1000 range);
-        // the dispatch/reach to handler was proven by M15a regardless of specific low word.
-        .env("WEAVE_TEST_WM_COMMAND", "1001")
+        // 2001 is IDM_FILE_SAVE in Notepad++ (1001 = IDM_FILE_NEW, 2001 = File > Save).
+        // The dispatch/reach to handler was proven by M15a regardless of specific low word.
+        .env("WEAVE_TEST_WM_COMMAND", "2001")
         .env("WEAVE_TEST_WM_COMMAND_MIN_PAINTS", "1")
         .stderr(std::process::Stdio::piped())
         .spawn()
