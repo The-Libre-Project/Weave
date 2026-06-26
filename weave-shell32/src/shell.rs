@@ -1930,16 +1930,26 @@ pub unsafe extern "win64" fn sh_get_file_info_a(
 
     if result != 0 {
         // hIcon at +0 — usize, same layout between A and W
+        // Use unaligned access because tmp_buf is [u8; 696] (align 1).
         unsafe {
-            *(psfi as *mut usize) = *(tmp_buf.as_ptr() as *mut usize);
+            std::ptr::write_unaligned(
+                psfi as *mut usize,
+                std::ptr::read_unaligned(tmp_buf.as_ptr() as *const usize),
+            );
         }
         // iIcon at +8 — i32, same layout
         unsafe {
-            *(psfi.add(8) as *mut i32) = *(tmp_buf.as_ptr().add(8) as *mut i32);
+            std::ptr::write_unaligned(
+                psfi.add(8) as *mut i32,
+                std::ptr::read_unaligned(tmp_buf.as_ptr().add(8) as *const i32),
+            );
         }
         // dwAttributes at +12 — u32, same layout
         unsafe {
-            *(psfi.add(12) as *mut u32) = *(tmp_buf.as_ptr().add(12) as *mut u32);
+            std::ptr::write_unaligned(
+                psfi.add(12) as *mut u32,
+                std::ptr::read_unaligned(tmp_buf.as_ptr().add(12) as *const u32),
+            );
         }
 
         // szDisplayName at +16: convert wide → ANSI (260 CHARs in SHFILEINFOA)
