@@ -2434,7 +2434,7 @@ pub unsafe extern "win64" fn report_event_w(
 // Wine ref: dlls/advapi32/registry.c — RegCreateKeyW: validates phkResult != NULL,
 // then calls RegCreateKeyExW(hkey, lpSubKey, 0, NULL, REG_OPTION_NON_VOLATILE,
 // MAXIMUM_ALLOWED, NULL, phkResult, NULL).
-// TODO(shim): Phase A — delegates to reg_create_key_ex_w; disposition and options ignored.
+// stub: Phase A — delegates to reg_create_key_ex_w; disposition and options ignored.
 pub unsafe extern "win64" fn reg_create_key_w(
     h_key: usize,
     lp_sub_key: *const u16,

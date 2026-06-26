@@ -91,6 +91,9 @@ docs/reference/*
 !docs/reference/*.md
 !docs/RELEASE-CLAIMS.md
 !docs/sprint-briefs/
+!docs/archived-milestones/
+docs/archived-milestones/*
+!docs/archived-milestones/*.md
 docs/sprint-briefs/*
 !docs/sprint-briefs/*.md
 .deepseek/

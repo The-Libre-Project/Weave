@@ -1950,7 +1950,7 @@ pub unsafe extern "win64" fn property_sheet_a(_lp_psh: *const u8) -> isize {
 ///
 /// # Safety
 /// `lp_psp` is ignored.
-// TODO(shim): Phase A — no dialog subsystem; always returns NULL.
+// stub: Phase A — no dialog subsystem; always returns NULL.
 pub unsafe extern "win64" fn create_property_sheet_page_w(_lp_psp: *const u8) -> usize {
     0 // NULL HPROPSHEETPAGE
 }
@@ -1961,7 +1961,7 @@ pub unsafe extern "win64" fn create_property_sheet_page_w(_lp_psp: *const u8) ->
 ///
 /// # Safety
 /// `lp_psp` is ignored.
-// TODO(shim): Phase A — no dialog subsystem; always returns NULL.
+// stub: Phase A — no dialog subsystem; always returns NULL.
 pub unsafe extern "win64" fn create_property_sheet_page_a(_lp_psp: *const u8) -> usize {
     0 // NULL HPROPSHEETPAGE
 }
@@ -1972,7 +1972,7 @@ pub unsafe extern "win64" fn create_property_sheet_page_a(_lp_psp: *const u8) ->
 ///
 /// # Safety
 /// `hpsp` is ignored.
-// TODO(shim): Phase A — no handle table; returns TRUE (no-op destroy).
+// stub: Phase A — no handle table; returns TRUE (no-op destroy).
 pub unsafe extern "win64" fn destroy_property_sheet_page(_hpsp: usize) -> i32 {
     1 // TRUE
 }
