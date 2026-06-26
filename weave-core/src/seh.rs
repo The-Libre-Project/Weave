@@ -160,6 +160,7 @@ unsafe extern "C" fn on_fatal_signal(
     }
     let uctx = ctx as *const libc::ucontext_t;
     let rip = unsafe { (*uctx).uc_mcontext.gregs[libc::REG_RIP as usize] as usize };
+    let rsi = unsafe { (*uctx).uc_mcontext.gregs[libc::REG_RSI as usize] as usize };
     unsafe {
         libc::write(2, b"weave: sh got rip\n".as_ptr() as *const _, 18);
     }
@@ -227,7 +228,7 @@ unsafe extern "C" fn on_fatal_signal(
         // Log RIP/RVA/fault_addr before SEH dispatch (dispatch can crash recursively,
         // making post-dispatch logging unreachable).
         unsafe {
-            let mut buf = [0u8; 96];
+            let mut buf = [0u8; 128];
             let mut pos = 0usize;
             let nibble = |n: u64| {
                 if n < 10 {
@@ -270,6 +271,19 @@ unsafe extern "C" fn on_fatal_signal(
             }
             for sh in (0..16u32).rev() {
                 let n = (fault_addr as u64 >> (sh * 4)) & 0xf;
+                if pos < buf.len() {
+                    buf[pos] = nibble(n);
+                    pos += 1;
+                }
+            }
+            for &b in b" rsi=0x" {
+                if pos < buf.len() {
+                    buf[pos] = b;
+                    pos += 1;
+                }
+            }
+            for sh in (0..16u32).rev() {
+                let n = (rsi as u64 >> (sh * 4)) & 0xf;
                 if pos < buf.len() {
                     buf[pos] = nibble(n);
                     pos += 1;
