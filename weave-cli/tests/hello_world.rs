@@ -8666,7 +8666,7 @@ fn shell32_sh_get_file_info_a_probe() {
     let mut buf = [0u8; 356];
     let flags: u32 = 0x10 | 0x100; // SHGFI_DISPLAYNAME | SHGFI_TYPENAME
 
-    let result = unsafe { func(path_c.as_ptr(), 0, buf.as_mut_ptr(), 356, flags) };
+    let result = unsafe { func(path_c.as_ptr() as *const u8, 0, buf.as_mut_ptr(), 356, flags) };
 
     assert!(result != 0, "SHGetFileInfoA should return non-zero handle");
 
