@@ -18,6 +18,7 @@
 
 #![allow(non_snake_case)]
 
+use core::ptr::{read_unaligned, write_unaligned};
 use weave_core::handles::{self, HandleKind};
 use weave_core::registry::{
     find_value_file, predefined_hive_path, read_value_file, resolve_subkey, REG_EXPAND_SZ,
@@ -999,9 +1000,10 @@ pub unsafe extern "win64" fn open_process_token(
     // callers (7-Zip, PuTTY) to SIGABRT when AdjustTokenPrivileges "succeeds" but the
     // operation then fails (no real privilege enforcement in Phase B).
     if process_handle == usize::MAX {
-        // SAFETY: token_handle is non-null (checked above).  The Win32 API contract
-        // requires callers to provide a valid, writable HANDLE*.
-        unsafe { *token_handle = 0xCAFEBEE0 };
+        // SAFETY: token_handle is non-null (checked above). Guest may pass an
+        // unaligned pointer (e.g. 7-Zip on stack with 4-byte alignment), so use
+        // write_unaligned.
+        unsafe { write_unaligned(token_handle, 0xCAFEBEE0) };
         1 // TRUE
     } else {
         weave_common::set_last_error(5); // ERROR_ACCESS_DENIED
@@ -1063,9 +1065,10 @@ pub unsafe extern "win64" fn lookup_privilege_value_w(
 
     for &(privilege_name, luid) in table.iter() {
         if name == privilege_name {
-            // SAFETY: lp_luid is non-null (checked above).  The Win32 API contract
-            // requires callers to provide a valid, writable LUID* (u64*).
-            unsafe { *lp_luid = luid };
+            // SAFETY: lp_luid is non-null (checked above). Guest may pass an
+            // unaligned pointer (7-Zip passes stack pointer at 4-byte alignment),
+            // so use write_unaligned.
+            unsafe { write_unaligned(lp_luid, luid) };
             return 1; // TRUE
         }
     }
@@ -1108,17 +1111,18 @@ pub unsafe extern "win64" fn adjust_token_privileges(
     }
 
     if !new_state.is_null() {
-        // SAFETY: new_state is non-null (checked above).
-        let _count = unsafe { *(new_state as *const u32) };
+        // SAFETY: new_state is non-null (checked above). Use read_unaligned
+        // because guests may pass pointers at 4-byte alignment from stack frames.
+        let _count = unsafe { read_unaligned(new_state as *const u32) };
 
         if !previous_state.is_null() {
             // SAFETY: previous_state is non-null.
-            unsafe { *(previous_state as *mut u32) = 0 };
+            unsafe { write_unaligned(previous_state as *mut u32, 0) };
         }
 
         if !return_length.is_null() {
             // SAFETY: return_length is non-null.
-            unsafe { *return_length = 16 };
+            unsafe { write_unaligned(return_length, 16) };
         }
     }
 
