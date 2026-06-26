@@ -93,6 +93,7 @@ fn std_slot(n: u32) -> Option<usize> {
 }
 
 use weave_common::stub::warn_once;
+use weave_common::validators;
 use weave_common::{STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE};
 use weave_core::progress::mark_phase;
 use weave_core::restrace;
@@ -1265,7 +1266,11 @@ unsafe fn srw_state_ptr(slot: *mut usize) -> *mut u32 {
 // Wine ref: dlls/ntdll/sync.c:645 — RtlTryAcquireSRWLockExclusive: CAS loop on
 // owners==0 to set owners=1 and exclusive_waiters|=1; returns BOOLEAN.
 pub unsafe extern "win64" fn try_acquire_srw_lock_exclusive(srw_lock: *mut usize) -> u8 {
+    if srw_lock.is_null() {
+        return 0; // FALSE
+    }
     let p = unsafe { srw_state_ptr(srw_lock) };
+    // SAFETY: srw_lock validated non-null above
     let atomic = unsafe { &*(p as *const AtomicI32) };
     loop {
         let old_i32 = atomic.load(Ordering::Acquire);
@@ -1294,7 +1299,11 @@ pub unsafe extern "win64" fn try_acquire_srw_lock_exclusive(srw_lock: *mut usize
 // Wine ref: dlls/ntdll/sync.c:680 — RtlTryAcquireSRWLockShared: CAS loop; fails if
 // exclusive_waiters != 0 (exclusive held or waiters pending), else increments owners.
 pub unsafe extern "win64" fn try_acquire_srw_lock_shared(srw_lock: *mut usize) -> u8 {
+    if srw_lock.is_null() {
+        return 0; // FALSE
+    }
     let p = unsafe { srw_state_ptr(srw_lock) };
+    // SAFETY: srw_lock validated non-null above
     let atomic = unsafe { &*(p as *const AtomicI32) };
     loop {
         let old_i32 = atomic.load(Ordering::Acquire);
@@ -1384,6 +1393,14 @@ pub unsafe extern "win64" fn wait_on_address(
         "weave/WaitOnAddress: entry addr={address:?} size={address_size} ms={dw_milliseconds}"
     );
     if address_size != 1 && address_size != 2 && address_size != 4 && address_size != 8 {
+        set_last_error(0x57); // ERROR_INVALID_PARAMETER
+        return 0;
+    }
+
+    // SAFETY: validated by weave_common::validators::validate_lpvoid_in
+    if validators::validate_lpvoid_in(address as usize).is_none()
+        || validators::validate_lpvoid_in(compare_address as usize).is_none()
+    {
         set_last_error(0x57); // ERROR_INVALID_PARAMETER
         return 0;
     }
@@ -8182,7 +8199,11 @@ pub unsafe extern "win64" fn dos_date_time_to_file_time(
 // exclusive_waiters by 2 before the loop; CAS on owners==0 to set owners=1 and
 // clear the waiter count; futex-waits on &owners when contended.
 pub unsafe extern "win64" fn acquire_srw_lock_exclusive(srw_lock: *mut usize) {
+    if srw_lock.is_null() {
+        return;
+    }
     let p = unsafe { srw_state_ptr(srw_lock) };
+    // SAFETY: srw_lock validated non-null above
     let atomic = unsafe { &*(p as *const AtomicI32) };
 
     // Announce ourselves as an exclusive waiter (increment by 2 — bit 0 is the held flag).
@@ -8233,7 +8254,11 @@ pub unsafe extern "win64" fn acquire_srw_lock_exclusive(srw_lock: *mut usize) {
 // exclusive_waiters &= ~1; if exclusive_waiters remain, wakes &owners (one exclusive);
 // otherwise wakes all (shared waiters watch the full 32-bit word).
 pub unsafe extern "win64" fn release_srw_lock_exclusive(srw_lock: *mut usize) {
+    if srw_lock.is_null() {
+        return;
+    }
     let p = unsafe { srw_state_ptr(srw_lock) };
+    // SAFETY: srw_lock validated non-null above
     let atomic = unsafe { &*(p as *const AtomicI32) };
 
     loop {
@@ -8271,7 +8296,11 @@ pub unsafe extern "win64" fn release_srw_lock_exclusive(srw_lock: *mut usize) {
 // Wine ref: dlls/ntdll/sync.c:550 — RtlAcquireSRWLockShared: CAS on exclusive_waiters==0
 // to increment owners; if exclusive_waiters != 0, futex-waits on the full 32-bit word.
 pub unsafe extern "win64" fn acquire_srw_lock_shared(srw_lock: *mut usize) {
+    if srw_lock.is_null() {
+        return;
+    }
     let p = unsafe { srw_state_ptr(srw_lock) };
+    // SAFETY: srw_lock validated non-null above
     let atomic = unsafe { &*(p as *const AtomicI32) };
 
     let mut logged = false;
@@ -8313,7 +8342,11 @@ pub unsafe extern "win64" fn acquire_srw_lock_shared(srw_lock: *mut usize) {
 // Wine ref: dlls/ntdll/sync.c:618 — RtlReleaseSRWLockShared: CAS decrements owners;
 // if owners reaches 0, calls RtlWakeAddressSingle(&owners) to unblock one exclusive waiter.
 pub unsafe extern "win64" fn release_srw_lock_shared(srw_lock: *mut usize) {
+    if srw_lock.is_null() {
+        return;
+    }
     let p = unsafe { srw_state_ptr(srw_lock) };
+    // SAFETY: srw_lock validated non-null above
     let atomic = unsafe { &*(p as *const AtomicI32) };
 
     loop {
@@ -9882,6 +9915,12 @@ pub unsafe extern "win64" fn unhandled_exception_filter(exception_pointers: *mut
 // Wine ref: dlls/user32/lstr.c — lstrcmpA wraps CompareStringA(LOCALE_USER_DEFAULT,...) in
 // later Wine; returns negative/0/positive. NULL pointer → exception (not graceful return).
 pub unsafe extern "win64" fn lstrcmp_a(lp_string1: *const u8, lp_string2: *const u8) -> i32 {
+    // SAFETY: validated by weave_common::validators::validate_lpcstr
+    if validators::validate_lpcstr(lp_string1 as usize).is_none()
+        || validators::validate_lpcstr(lp_string2 as usize).is_none()
+    {
+        return 0;
+    }
     unsafe { libc::strcmp(lp_string1 as *const i8, lp_string2 as *const i8) }
 }
 
@@ -9892,6 +9931,12 @@ pub unsafe extern "win64" fn lstrcmp_a(lp_string1: *const u8, lp_string2: *const
 // Wine ref: dlls/user32/lstr.c — lstrcmpW wraps CompareStringW(LOCALE_USER_DEFAULT,...);
 // char-by-char Unicode comparison; NULL pointer → exception on real Windows.
 pub unsafe extern "win64" fn lstrcmp_w(lp_string1: *const u16, lp_string2: *const u16) -> i32 {
+    // SAFETY: validated by weave_common::validators::validate_lpvoid_in
+    if validators::validate_lpvoid_in(lp_string1 as usize).is_none()
+        || validators::validate_lpvoid_in(lp_string2 as usize).is_none()
+    {
+        return 0;
+    }
     unsafe {
         let mut p1 = lp_string1;
         let mut p2 = lp_string2;
@@ -9917,6 +9962,12 @@ pub unsafe extern "win64" fn lstrcmp_w(lp_string1: *const u16, lp_string2: *cons
 /// # Safety
 /// `lp_string1` and `lp_string2` must be valid null-terminated UTF-8 strings.
 pub unsafe extern "win64" fn lstrcmpi_a(lp_string1: *const u8, lp_string2: *const u8) -> i32 {
+    // SAFETY: validated by weave_common::validators::validate_lpcstr
+    if validators::validate_lpcstr(lp_string1 as usize).is_none()
+        || validators::validate_lpcstr(lp_string2 as usize).is_none()
+    {
+        return 0;
+    }
     unsafe { libc::strcasecmp(lp_string1 as *const i8, lp_string2 as *const i8) }
 }
 
@@ -9927,6 +9978,12 @@ pub unsafe extern "win64" fn lstrcmpi_a(lp_string1: *const u8, lp_string2: *cons
 /// # Safety
 /// `lp_string1` and `lp_string2` must be valid null-terminated UTF-16 strings.
 pub unsafe extern "win64" fn lstrcmpi_w(lp_string1: *const u16, lp_string2: *const u16) -> i32 {
+    // SAFETY: validated by weave_common::validators::validate_lpvoid_in
+    if validators::validate_lpvoid_in(lp_string1 as usize).is_none()
+        || validators::validate_lpvoid_in(lp_string2 as usize).is_none()
+    {
+        return 0;
+    }
     unsafe {
         let mut p1 = lp_string1;
         let mut p2 = lp_string2;
@@ -9962,6 +10019,10 @@ pub unsafe extern "win64" fn lstrcmpi_w(lp_string1: *const u16, lp_string2: *con
 /// # Safety
 /// `lp_string` must be a valid null-terminated UTF-8 string.
 pub unsafe extern "win64" fn lstrlen_a(lp_string: *const u8) -> i32 {
+    // SAFETY: validated by weave_common::validators::validate_lpcstr
+    if validators::validate_lpcstr(lp_string as usize).is_none() {
+        return 0;
+    }
     unsafe { libc::strlen(lp_string as *const i8) as i32 }
 }
 
@@ -9972,6 +10033,10 @@ pub unsafe extern "win64" fn lstrlen_a(lp_string: *const u8) -> i32 {
 /// # Safety
 /// `lp_string` must be a valid null-terminated UTF-16 string.
 pub unsafe extern "win64" fn lstrlen_w(lp_string: *const u16) -> i32 {
+    // SAFETY: validated by weave_common::validators::validate_lpvoid_in
+    if validators::validate_lpvoid_in(lp_string as usize).is_none() {
+        return 0;
+    }
     unsafe {
         let mut len = 0i32;
         let mut p = lp_string;
@@ -9991,6 +10056,13 @@ pub unsafe extern "win64" fn lstrlen_w(lp_string: *const u16) -> i32 {
 /// `lp_string1` must be writable and null-terminated with space for `lp_string2`.
 /// `lp_string2` must be a valid null-terminated UTF-8 string.
 pub unsafe extern "win64" fn lstrcat_a(lp_string1: *mut u8, lp_string2: *const u8) -> *mut u8 {
+    // SAFETY: validated by weave_common::validators::validate_lpvoid (dst) and
+    // validate_lpcstr (src)
+    if validators::validate_lpvoid(lp_string1 as usize).is_none()
+        || validators::validate_lpcstr(lp_string2 as usize).is_none()
+    {
+        return std::ptr::null_mut();
+    }
     unsafe {
         let mut dst = lp_string1;
         while *dst != 0 {
@@ -10018,6 +10090,12 @@ pub unsafe extern "win64" fn lstrcat_a(lp_string1: *mut u8, lp_string2: *const u
 /// `lp_string1` must be writable and null-terminated with space for `lp_string2`.
 /// `lp_string2` must be a valid null-terminated UTF-16 string.
 pub unsafe extern "win64" fn lstrcat_w(lp_string1: *mut u16, lp_string2: *const u16) -> *mut u16 {
+    // SAFETY: validated by weave_common::validators::validate_lpvoid
+    if validators::validate_lpvoid(lp_string1 as usize).is_none()
+        || validators::validate_lpvoid_in(lp_string2 as usize).is_none()
+    {
+        return std::ptr::null_mut();
+    }
     unsafe {
         let mut dst = lp_string1;
         while *dst != 0 {
@@ -10045,6 +10123,13 @@ pub unsafe extern "win64" fn lstrcat_w(lp_string1: *mut u16, lp_string2: *const 
 /// `lp_string1` must be writable for the length of `lp_string2` plus null terminator.
 /// `lp_string2` must be a valid null-terminated UTF-8 string.
 pub unsafe extern "win64" fn lstrcpy_a(lp_string1: *mut u8, lp_string2: *const u8) -> *mut u8 {
+    // SAFETY: validated by weave_common::validators::validate_lpvoid (dst) and
+    // validate_lpcstr (src)
+    if validators::validate_lpvoid(lp_string1 as usize).is_none()
+        || validators::validate_lpcstr(lp_string2 as usize).is_none()
+    {
+        return std::ptr::null_mut();
+    }
     unsafe { libc::strcpy(lp_string1 as *mut i8, lp_string2 as *const i8) as *mut u8 };
     lp_string1
 }
@@ -10057,6 +10142,12 @@ pub unsafe extern "win64" fn lstrcpy_a(lp_string1: *mut u8, lp_string2: *const u
 /// `lp_string1` must be writable for the length of `lp_string2` plus null terminator.
 /// `lp_string2` must be a valid null-terminated UTF-16 string.
 pub unsafe extern "win64" fn lstrcpy_w(lp_string1: *mut u16, lp_string2: *const u16) -> *mut u16 {
+    // SAFETY: validated by weave_common::validators::validate_lpvoid
+    if validators::validate_lpvoid(lp_string1 as usize).is_none()
+        || validators::validate_lpvoid_in(lp_string2 as usize).is_none()
+    {
+        return std::ptr::null_mut();
+    }
     unsafe {
         let mut dst = lp_string1;
         let mut src = lp_string2;
@@ -10085,6 +10176,13 @@ pub unsafe extern "win64" fn lstrcpyn_a(
     lp_string2: *const u8,
     i_max_length: i32,
 ) -> *mut u8 {
+    // SAFETY: validated by weave_common::validators::validate_lpvoid (dst) and
+    // validate_lpcstr (src)
+    if validators::validate_lpvoid(lp_string1 as usize).is_none()
+        || validators::validate_lpcstr(lp_string2 as usize).is_none()
+    {
+        return std::ptr::null_mut();
+    }
     unsafe {
         libc::strncpy(
             lp_string1 as *mut i8,
@@ -10107,6 +10205,12 @@ pub unsafe extern "win64" fn lstrcpyn_w(
     lp_string2: *const u16,
     i_max_length: i32,
 ) -> *mut u16 {
+    // SAFETY: validated by weave_common::validators::validate_lpvoid
+    if validators::validate_lpvoid(lp_string1 as usize).is_none()
+        || validators::validate_lpvoid_in(lp_string2 as usize).is_none()
+    {
+        return std::ptr::null_mut();
+    }
     unsafe {
         let mut dst = lp_string1;
         let mut src = lp_string2;
@@ -11781,9 +11885,12 @@ pub unsafe extern "win64" fn initialize_critical_section_and_spin_count(
     lp_critical_section: *mut u8,
     _dw_spin_count: u32,
 ) -> i32 {
-    // SAFETY: lp_critical_section is non-null (checked by the caller contract above)
-    // and points to at least 40 bytes.  Offset 8 is LockCount in the Windows
-    // RTL_CRITICAL_SECTION layout (DebugInfo ptr = 8 bytes, then LockCount i32).
+    if lp_critical_section.is_null() {
+        return 0; // FALSE
+    }
+    // SAFETY: lp_critical_section is non-null (checked above) and points to at
+    // least 40 bytes.  Offset 8 is LockCount in the Windows RTL_CRITICAL_SECTION
+    // layout (DebugInfo ptr = 8 bytes, then LockCount i32).
     // We zero all 40 bytes first, then set LockCount = -1 (unlocked per Windows ABI).
     unsafe { std::ptr::write_bytes(lp_critical_section, 0, 40) };
     unsafe { *(lp_critical_section.add(8) as *mut i32) = -1 };
@@ -11801,9 +11908,11 @@ pub unsafe extern "win64" fn initialize_critical_section_ex(
     _dw_spin_count: u32,
     _flags: u32,
 ) -> i32 {
-    // SAFETY: same invariant as initialize_critical_section and
-    // initialize_critical_section_and_spin_count — offset 8 is LockCount in
-    // RTL_CRITICAL_SECTION; -1 means unlocked.
+    if lp_critical_section.is_null() {
+        return 0; // FALSE
+    }
+    // SAFETY: lp_critical_section is non-null (checked above). Offset 8 is
+    // LockCount in RTL_CRITICAL_SECTION; -1 means unlocked.
     unsafe { std::ptr::write_bytes(lp_critical_section, 0, 40) };
     unsafe { *(lp_critical_section.add(8) as *mut i32) = -1 };
     1 // TRUE

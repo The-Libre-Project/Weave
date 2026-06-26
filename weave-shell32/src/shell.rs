@@ -2240,7 +2240,7 @@ fn get_imalloc_ptr() -> usize {
         // SAFETY: All fn items here have matching "extern win64" ABI; casting to
         // usize via typed fn-pointer is well-defined (function address is a usize).
         // (a) fn-item casts produce valid code addresses; (b) Box-heap; (c) process
-        // lifetime; (d) none — TODO(shim): Phase A, gated on E3-M5 launch gate.
+        // lifetime; (d) none — Phase A: gated on E3-M5 launch gate. No guest pointers — fn-item casts only.
         let vtable: Box<[usize; 9]> = Box::new([
             imalloc_query_interface as unsafe extern "win64" fn(usize, *const u8, *mut usize) -> i32
                 as usize,
@@ -2272,10 +2272,10 @@ unsafe extern "win64" fn imalloc_query_interface(
     _riid: *const u8,
     pp_obj: *mut usize,
 ) -> i32 {
-    if !pp_obj.is_null() {
-        // SAFETY: pp_obj non-null (checked above); aligned *mut usize output.
-        // (a) null-checked; (b) caller stack; (c) call duration; (d) none — TODO(shim): Phase A.
-        unsafe { *pp_obj = _this };
+    if let Some(p) = weave_common::validators::validate_lphandle(pp_obj as usize) {
+        // SAFETY: pp_obj validated by weave_common::validators::validate_lphandle (null + alignment).
+        // (a) null-checked; (b) caller stack; (c) call duration; (d) none — Phase A.
+        unsafe { *(p as *mut usize) = _this };
     }
     0 // S_OK
 }
@@ -2296,7 +2296,7 @@ unsafe extern "win64" fn imalloc_release(_this: usize) -> u32 {
 // Zero-byte alloc returns a unique non-null pointer per COM spec.
 unsafe extern "win64" fn imalloc_alloc(_this: usize, cb: usize) -> usize {
     // SAFETY: libc::malloc accepts any size; returns null on OOM (caller checks).
-    // (a) n/a — no deref; (b) heap; (c) caller owns result; (d) none — TODO(shim): Phase A.
+    // (a) n/a — no deref; (b) heap; (c) caller owns result; (d) none — Phase A: wraps libc::malloc. No guest pointer — cb is size param.
     let sz = if cb == 0 { 1 } else { cb };
     unsafe { libc::malloc(sz) as usize }
 }
@@ -2315,7 +2315,7 @@ unsafe extern "win64" fn imalloc_realloc(_this: usize, pv: usize, cb: usize) -> 
         return 0;
     }
     // SAFETY: pv non-zero; cb non-zero; caller contract: pv was allocated by this allocator.
-    // (a) null-checked; (b) heap; (c) caller owns result; (d) none — TODO(shim): Phase A.
+    // (a) null-checked; (b) heap; (c) caller owns result; (d) none — Phase A: wraps libc::realloc. pv is internal heap ptr.
     unsafe { libc::realloc(pv as *mut libc::c_void, cb) as usize }
 }
 
@@ -2323,7 +2323,7 @@ unsafe extern "win64" fn imalloc_realloc(_this: usize, pv: usize, cb: usize) -> 
 unsafe extern "win64" fn imalloc_free(_this: usize, pv: usize) {
     if pv != 0 {
         // SAFETY: pv non-zero (checked); assumed valid heap pointer from this allocator.
-        // (a) null-checked; (b) heap; (c) call duration; (d) none — TODO(shim): Phase A.
+        // (a) null-checked; (b) heap; (c) call duration; (d) none — Phase A: wraps libc::free. pv is internal heap ptr.
         unsafe { libc::free(pv as *mut libc::c_void) };
     }
 }
@@ -2335,7 +2335,7 @@ unsafe extern "win64" fn imalloc_get_size(_this: usize, pv: usize) -> usize {
         return usize::MAX; // (SIZE_T)-1 per COM spec for null pointer
     }
     // SAFETY: pv non-zero; malloc_usable_size accepts any valid heap pointer on Linux.
-    // (a) null-checked; (b) heap; (c) call duration; (d) none — TODO(shim): Phase A.
+    // (a) null-checked; (b) heap; (c) call duration; (d) none — Phase A: wraps libc::malloc_usable_size. pv is internal heap ptr.
     unsafe { libc::malloc_usable_size(pv as *mut libc::c_void) }
 }
 
@@ -2360,12 +2360,14 @@ unsafe extern "win64" fn imalloc_heap_minimize(_this: usize) {}
 /// `pp_malloc` must be null or a valid writable pointer to a `usize`-sized output slot.
 pub unsafe extern "win64" fn sh_get_malloc(pp_malloc: *mut usize) -> i32 {
     const E_INVALIDARG: i32 = 0x80070057u32 as i32;
-    if pp_malloc.is_null() {
-        return E_INVALIDARG;
-    }
-    // SAFETY: pp_malloc non-null (checked above); caller contract: valid *mut usize output,
-    // pointer-size aligned.  (a) null-checked; (b) caller stack/heap; (c) call duration;
-    // (d) none — TODO(shim): Phase A, gated on E3-M5 q_dir_launch_gate.
+    let pp_malloc = match weave_common::validators::validate_lphandle(pp_malloc as usize) {
+        Some(p) => p as *mut usize,
+        None => {
+            return E_INVALIDARG;
+        }
+    };
+    // SAFETY: pp_malloc validated by weave_common::validators::validate_lphandle (null + alignment).
+    // (a) null-checked; (b) caller stack/heap; (c) call duration; (d) none — Phase A, gated on E3-M5.
     unsafe { *pp_malloc = get_imalloc_ptr() };
     0 // S_OK
 }
@@ -2382,7 +2384,7 @@ pub unsafe extern "win64" fn sh_get_malloc(pp_malloc: *mut usize) -> i32 {
 /// `p_data` is accepted but not dereferenced.
 // Wine ref: dlls/shell32/appbar.c — ABM_* dispatch; returns 0 on error.
 pub unsafe extern "win64" fn sh_app_bar_message(_dw_message: u32, _p_data: *mut u8) -> usize {
-    // TODO(shim): Phase A — SHAppBarMessage taskbar integration not implemented.
+    // stub: Phase A — SHAppBarMessage taskbar integration not implemented.
     0
 }
 
@@ -2397,7 +2399,7 @@ pub unsafe extern "win64" fn sh_app_bar_message(_dw_message: u32, _p_data: *mut 
 /// `p_sfs` is accepted but not dereferenced.
 // Wine ref: dlls/shell32/shellord.c — fills SHELLFLAGSTATE from registry; dwMask selects fields.
 pub unsafe extern "win64" fn sh_get_settings(_p_sfs: *mut u8, _dw_mask: u32) {
-    // TODO(shim): Phase A — SHGetSettings shell configuration not implemented.
+    // stub: Phase A — SHGetSettings shell configuration not implemented.
 }
 
 // Wine ref: dlls/shell32/shlfolder.c — SHCreateShellItemArrayFromDataObject creates an

@@ -20,7 +20,7 @@
 /// # Safety
 /// `pp_printer_name` and `p_default` are ignored. `ph_printer` must be
 /// null or a valid writable pointer to a usize.
-// TODO(shim): Phase A — no spooler; always returns FALSE (ERROR_INVALID_PRINTER_NAME).
+// stub: Phase A — no spooler; always returns FALSE (ERROR_INVALID_PRINTER_NAME).
 pub unsafe extern "win64" fn open_printer_w(
     _pp_printer_name: *const u16,
     _ph_printer: *mut usize,
@@ -41,7 +41,7 @@ pub unsafe extern "win64" fn open_printer_w(
 ///
 /// # Safety
 /// `h_printer` is ignored.
-// TODO(shim): Phase A — no handle table; returns TRUE (no-op close).
+// stub: Phase A — no handle table; returns TRUE (no-op close).
 pub unsafe extern "win64" fn close_printer(_h_printer: usize) -> i32 {
     1 // TRUE — nothing to close
 }
@@ -57,7 +57,7 @@ pub unsafe extern "win64" fn close_printer(_h_printer: usize) -> i32 {
 /// # Safety
 /// `p_printer_enum`, `pcb_needed`, and `pc_returned` must be null or valid
 /// writable pointers for their respective types.
-// TODO(shim): Phase A — no spooler; zero printers enumerated, returns FALSE.
+// stub: Phase A — no spooler; zero printers enumerated, returns FALSE.
 pub unsafe extern "win64" fn enum_printers_w(
     _flags: u32,
     _name: *const u16,
@@ -69,16 +69,14 @@ pub unsafe extern "win64" fn enum_printers_w(
 ) -> i32 {
     // Write 0 to output counts before returning so callers that check them
     // before the return value don't see garbage.
-    if !pcb_needed.is_null() {
-        // SAFETY: pcb_needed is non-null (checked above); caller contract
-        // guarantees alignment to u32 (LPDWORD). Lifetime: duration of call.
-        // Gate: none — TODO(shim): Phase A.
+    if let Some(pcb_needed) = weave_common::validators::validate_lpdword(pcb_needed as usize) {
+        // SAFETY: pcb_needed validated by weave_common::validators::validate_lpdword (null + alignment).
+        // (a) null-checked; (b) caller stack; (c) call duration; (d) none — Phase A.
         unsafe { *pcb_needed = 0 };
     }
-    if !pc_returned.is_null() {
-        // SAFETY: pc_returned is non-null (checked above); caller contract
-        // guarantees alignment to u32 (LPDWORD). Lifetime: duration of call.
-        // Gate: none — TODO(shim): Phase A.
+    if let Some(pc_returned) = weave_common::validators::validate_lpdword(pc_returned as usize) {
+        // SAFETY: pc_returned validated by weave_common::validators::validate_lpdword (null + alignment).
+        // (a) null-checked; (b) caller stack; (c) call duration; (d) none — Phase A.
         unsafe { *pc_returned = 0 };
     }
     // ERROR_INSUFFICIENT_BUFFER is the Wine sentinel when cbBuf < needed.
@@ -98,7 +96,7 @@ pub unsafe extern "win64" fn enum_printers_w(
 ///
 /// # Safety
 /// Arguments are ignored.
-// TODO(shim): Phase A — no handle table; always returns FALSE.
+// stub: Phase A — no handle table; always returns FALSE.
 pub unsafe extern "win64" fn get_printer_w(
     _h_printer: usize,
     _level: u32,
@@ -119,7 +117,7 @@ pub unsafe extern "win64" fn get_printer_w(
 ///
 /// # Safety
 /// Arguments are ignored.
-// TODO(shim): Phase A — no spooler; always returns -1 (error sentinel).
+// stub: Phase A — no spooler; always returns -1 (error sentinel).
 pub unsafe extern "win64" fn device_capabilities_w(
     _p_device: *const u16,
     _p_port: *const u16,
@@ -139,7 +137,7 @@ pub unsafe extern "win64" fn device_capabilities_w(
 ///
 /// # Safety
 /// Arguments are ignored.
-// TODO(shim): Phase A — no spooler; always returns -1 (error sentinel).
+// stub: Phase A — no spooler; always returns -1 (error sentinel).
 pub unsafe extern "win64" fn document_properties_w(
     _hwnd: usize,
     _h_printer: usize,
@@ -160,7 +158,7 @@ pub unsafe extern "win64" fn document_properties_w(
 ///
 /// # Safety
 /// `psz_buffer` and `pcch_buffer` are ignored.
-// TODO(shim): Phase A — no spooler; always returns FALSE (ERROR_FILE_NOT_FOUND).
+// stub: Phase A — no spooler; always returns FALSE (ERROR_FILE_NOT_FOUND).
 pub unsafe extern "win64" fn get_default_printer_w(
     _psz_buffer: *mut u16,
     _pcch_buffer: *mut u32,

@@ -466,7 +466,7 @@ pub extern "win64" fn comm_dlg_extended_error() -> u32 {
 ///
 /// # Safety
 /// `lp_pdex` is ignored.
-// TODO(shim): Phase A — no spooler; always returns E_FAIL (no-printer sentinel).
+// stub: Phase A — no spooler; always returns E_FAIL (no-printer sentinel).
 pub unsafe extern "win64" fn print_dlg_ex_w(_lp_pdex: *const u8) -> i32 {
     // E_FAIL = 0x80004005 — "no printer available" sentinel per Wine test_PrintDlgExW.
     // Callers that pass PD_RETURNDEFAULT detect E_FAIL and skip printing gracefully.
