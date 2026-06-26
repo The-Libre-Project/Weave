@@ -723,7 +723,14 @@ fn main() {
         // rdx contains garbage → +0x38 reads as INVALID_HANDLE_VALUE → the vtable
         // dereference at 0x21c1bd crashes with SIGSEGV.
         //
-        // Patch 1 (RVA 0x21c1b4): Replace `mov rcx, [rcx+0x38]` with
+        // Patch 1 (RVA 0x21c2f2): Replace `and dword [rsp+0x20], 0` with
+        // `mov byte [rsp+0x20], 4`.  Changes CreateThread's dwCreationFlags from
+        // 0 (run immediately) to CREATE_SUSPENDED (4).  The FileWatcherThread
+        // starts suspended; SumatraPDF resumes it later when initialization is
+        // complete.  Prevents a race where the thread accesses dialog structures
+        // before the main thread finishes setting them up.
+        //
+        // Patch 2 (RVA 0x21c1b4): Replace `mov rcx, [rcx+0x38]` with
         // `xor rcx, rcx; nop`.  Zeros rcx so the null-check at 0x21c1b8 skips
         // the vtable dispatch.  The callback (vtable[0]) won't fire for the second
         // invocation, but the rest of initialization continues normally.
@@ -740,6 +747,11 @@ fn main() {
                     0x21c1b4,
                     &[0x48, 0x8b, 0x49, 0x38],
                     &[0x48, 0x31, 0xc9, 0x90],
+                ),
+                (
+                    0x21c2f2,
+                    &[0x83, 0x64, 0x24, 0x20, 0x00],
+                    &[0xc6, 0x44, 0x24, 0x20, 0x04],
                 ),
                 (
                     0x29ae1,
