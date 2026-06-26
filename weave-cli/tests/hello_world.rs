@@ -2529,6 +2529,9 @@ fn scite_portable_mode() {
     });
 
     let deadline = start + std::time::Duration::from_secs(15);
+    let pixel_check_interval = std::time::Duration::from_secs(2);
+    let mut last_pixel_check = start;
+    let mut pixel_ok: Option<bool> = None;
     let mut exit_status: Option<std::process::ExitStatus> = None;
     let mut killed_by_deadline = false;
     loop {
@@ -2538,7 +2541,20 @@ fn scite_portable_mode() {
                 break;
             }
             Ok(None) => {
-                if std::time::Instant::now() >= deadline {
+                let now = std::time::Instant::now();
+                if now - last_pixel_check >= pixel_check_interval && pixel_ok.is_none() {
+                    last_pixel_check = now;
+                    #[cfg(target_os = "linux")]
+                    {
+                        pixel_ok = sample_display_pixels_99();
+                    }
+                    eprintln!(
+                        "pixel check at {:.1?} → {:?}",
+                        now - start,
+                        pixel_ok
+                    );
+                }
+                if now >= deadline {
                     let _ = child.kill();
                     killed_by_deadline = true;
                     break;
@@ -2608,6 +2624,15 @@ fn scite_portable_mode() {
         stderr.contains("PHASE: sci_getlength_probed"),
         "PHASE: sci_getlength_probed was never emitted — SCI_GETLENGTH was not \
          dispatched, meaning Scintilla did not process the document.\n\
+         exit: {exit_summary}\nstderr: {stderr}"
+    );
+
+    // M20 Phase C: verify SciTE rendered content to the X11 display.
+    let pixel_result = pixel_ok.unwrap_or(false);
+    assert!(
+        pixel_result,
+        "M20 Phase C FAIL: no non-black pixels detected on display \
+         after {elapsed:.1?} — SciTE may not have rendered content to X11.\n\
          exit: {exit_summary}\nstderr: {stderr}"
     );
 }
