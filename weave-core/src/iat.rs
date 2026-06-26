@@ -10,7 +10,8 @@
 //! it to read-only.
 
 use goblin::pe::PE;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::io::Write;
 use std::sync::{Mutex, OnceLock};
 
 // ---------------------------------------------------------------------------
@@ -43,7 +44,19 @@ extern "win64" fn trace_slot_log_by_va(
 ) -> usize {
     if let Ok(map) = resolved_slot_map().lock() {
         if let Some((name, real_fn)) = map.get(&slot_va) {
-            eprintln!("weave/iat-trace: {name} ret={ret_addr:#x} ret1={caller_ret_addr:#x}");
+            if stub_trace_enabled() {
+                let (dll, func) = name.split_once("::").unwrap_or((name, ""));
+                let phase = if is_stub(dll, func) { "A" } else { "B" };
+                if let Ok(mut writer) = trace_writer().lock() {
+                    let _ = writeln!(
+                        &mut *writer,
+                        r#"{{"dll":"{}","func":"{}","phase":"{}","slot_va":"{:#x}","ret_addr":"{:#x}"}}"#,
+                        dll, func, phase, slot_va, ret_addr
+                    );
+                }
+            } else {
+                eprintln!("weave/iat-trace: {name} ret={ret_addr:#x} ret1={caller_ret_addr:#x}");
+            }
             return *real_fn;
         }
     }
@@ -343,6 +356,114 @@ pub fn tracer_enabled() -> bool {
             .map(|v| v == "1")
             .unwrap_or(false)
     })
+}
+
+/// Force-enable the per-slot IAT tracer programmatically (bypasses the
+/// `WEAVE_IAT_TRACE` env-var check).  Must be called before any
+/// `tracer_enabled()` reads that would cache the env-var result.
+/// Calling this after the env-var was already cached is a no-op.
+pub fn force_enable_tracer() {
+    TRACER_ENABLED.get_or_init(|| true);
+}
+
+// ---------------------------------------------------------------------------
+// Phase A/B stub registry
+// ---------------------------------------------------------------------------
+//
+// `register_stub(dll, func)` marks a function as a known Phase-A stub.
+// `register_real(dll, func)` marks it as a known Phase-B real implementation.
+// `is_stub(dll, func)` returns `true` unless the function was explicitly
+// registered as real.  Unregistered functions default to `true` (stub) —
+// conservative, since most Weave exports are stubs.
+
+static STUB_REGISTRY: OnceLock<Mutex<HashSet<(String, String)>>> = OnceLock::new();
+static REAL_FUNCTIONS: OnceLock<Mutex<HashSet<(String, String)>>> = OnceLock::new();
+
+fn stub_registry() -> &'static Mutex<HashSet<(String, String)>> {
+    STUB_REGISTRY.get_or_init(|| Mutex::new(HashSet::<(String, String)>::new()))
+}
+
+fn real_functions() -> &'static Mutex<HashSet<(String, String)>> {
+    REAL_FUNCTIONS.get_or_init(|| Mutex::new(HashSet::<(String, String)>::new()))
+}
+
+/// Mark `func` in `dll` as a known Phase-A stub.
+pub fn register_stub(dll: &str, func: &str) {
+    if let Ok(mut r) = stub_registry().lock() {
+        r.insert((dll.to_string(), func.to_string()));
+    }
+}
+
+/// Mark `func` in `dll` as a known Phase-B real implementation.
+pub fn register_real(dll: &str, func: &str) {
+    if let Ok(mut r) = real_functions().lock() {
+        r.insert((dll.to_string(), func.to_string()));
+    }
+}
+
+/// Returns `true` if `func` in `dll` is a Phase-A stub.
+///
+/// Classification priority:
+/// 1. Explicitly registered via `register_real` → Phase B (`false`).
+/// 2. Explicitly registered via `register_stub` → Phase A (`true`).
+/// 3. Default (unregistered) → Phase A (`true`).
+pub fn is_stub(dll: &str, func: &str) -> bool {
+    let key = (dll.to_string(), func.to_string());
+    if let Ok(r) = real_functions().lock() {
+        if r.contains(&key) {
+            return false;
+        }
+    }
+    if let Ok(r) = stub_registry().lock() {
+        if r.contains(&key) {
+            return true;
+        }
+    }
+    true
+}
+
+// ---------------------------------------------------------------------------
+// Structured JSONL stub-trace output
+// ---------------------------------------------------------------------------
+//
+// When enabled via `--trace-stubs`, the per-slot tracer emits JSONL records
+// instead of plaintext stderr lines.  Each record contains the DLL name,
+// function name, Phase A/B classification, and the execution context (slot
+// VA, return address).
+
+/// Global flag: `true` if stub tracing (`--trace-stubs`) is active.
+static STUB_TRACE_ENABLED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Returns `true` if stub tracing is active.
+pub fn stub_trace_enabled() -> bool {
+    STUB_TRACE_ENABLED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Enable stub-trace mode.  Called from the CLI when `--trace-stubs` is passed.
+pub fn enable_stub_trace() {
+    STUB_TRACE_ENABLED.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Global output sink for tracer / stub-trace JSONL lines.
+static TRACE_OUTPUT: OnceLock<Mutex<Box<dyn Write + Send>>> = OnceLock::new();
+
+fn trace_writer() -> &'static Mutex<Box<dyn Write + Send>> {
+    TRACE_OUTPUT.get_or_init(|| Mutex::new(Box::new(std::io::stderr()) as Box<dyn Write + Send>))
+}
+
+/// Redirect tracer output to the file at `path`.  JSONL lines will be written
+/// there instead of stderr.  Returns `Err` if the file cannot be created.
+pub fn set_trace_output(path: &str) -> std::io::Result<()> {
+    let file = std::fs::File::create(path)?;
+    let w: Box<dyn Write + Send> = Box::new(file);
+    *trace_writer().lock().unwrap() = w;
+    Ok(())
+}
+
+/// Revert tracer output to stderr.
+pub fn set_trace_stderr() {
+    *trace_writer().lock().unwrap() = Box::new(std::io::stderr());
 }
 
 /// Test-only helper: record a resolved slot as if the tracer had patched it.

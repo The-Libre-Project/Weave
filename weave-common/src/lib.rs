@@ -8,6 +8,7 @@ pub mod path;
 pub mod socket_event;
 pub mod stub;
 pub mod types;
+pub mod validators;
 
 pub use error::WeaveError;
 pub use filetime::unix_to_filetime;

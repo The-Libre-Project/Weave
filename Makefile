@@ -10,7 +10,7 @@
 #   make test       — run full test suite in a Linux Docker container
 #   make ci         — build + lint + full test suite (mirrors CI pipeline)
 
-.PHONY: build lint test test-gate test-unit ci fixture-wget-probe coverage-gauge hooks backfill-notes
+.PHONY: build lint test test-gate test-unit ci state-lint fixture-wget-probe coverage-gauge hooks backfill-notes
 
 # ── Build ──────────────────────────────────────────────────────────────────────
 
@@ -84,5 +84,8 @@ backfill-notes:
 	@bash scripts/backfill-git-notes.sh 30
 
 # ── Full CI mirror ─────────────────────────────────────────────────────────────
+
+state-lint:
+	@bash scripts/state-lint.sh
 
 ci: build lint test

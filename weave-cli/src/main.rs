@@ -49,6 +49,14 @@ struct Args {
     #[arg(long)]
     no_sandbox: bool,
 
+    /// Enable structured stub-trace JSONL output.
+    ///
+    /// When present, every IAT dispatch is traced and classified as
+    /// Phase A (stub) or Phase B (real implementation).  Output goes
+    /// to stderr by default, or to the given file path if provided.
+    #[arg(long, num_args = 0..=1, default_missing_value = "stubs.jsonl")]
+    trace_stubs: Option<String>,
+
     /// Arguments to pass to the Windows executable (e.g. `weave app.exe arg1 arg2`)
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     exe_args: Vec<String>,
@@ -363,6 +371,18 @@ fn main() {
     }));
 
     let args = Args::parse();
+
+    // ── −0.5. Stub-trace mode ────────────────────────────────────────────
+    // When --trace-stubs is passed, force-enable the per-slot IAT tracer,
+    // switch on stub classification, and redirect structured JSONL output
+    // to the given file (or stubs.jsonl in CWD by default).
+    if let Some(path) = &args.trace_stubs {
+        iat::force_enable_tracer();
+        iat::enable_stub_trace();
+        if let Err(e) = iat::set_trace_output(path) {
+            eprintln!("weave: warning: could not open stub trace output '{path}': {e}");
+        }
+    }
 
     // ── −1. Architecture compatibility ────────────────────────────────────
     if let Err(code) = arch::check_arch_compatibility(&args.exe) {
