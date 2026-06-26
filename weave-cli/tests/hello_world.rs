@@ -8645,3 +8645,164 @@ fn npp_plugin_folder_gate() {
 
     eprintln!("npp_plugin_folder_gate: A1 passed — NPP reached full init with plugins loaded");
 }
+
+/// Probe gate — shell32!SHGetFileInfoA (ANSI file info query).
+///
+/// Creates a temp file, calls SHGetFileInfoA with SHGFI_DISPLAYNAME|SHGFI_TYPENAME,
+/// and asserts non-zero return + non-empty display name and type name strings.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn shell32_sh_get_file_info_a_probe() {
+    let dir = std::env::temp_dir();
+    let path = dir.join("weave_shgfi_a_probe.tmp");
+    std::fs::write(&path, b"test content").expect("write temp file");
+
+    let fn_addr = weave_shell32::resolve("shell32.dll", "SHGetFileInfoA")
+        .expect("SHGetFileInfoA must resolve");
+    let func: unsafe extern "win64" fn(*const u8, u32, *mut u8, u32, u32) -> usize =
+        unsafe { std::mem::transmute(fn_addr) };
+
+    let path_c = std::ffi::CString::new(path.to_str().unwrap()).unwrap();
+    let mut buf = [0u8; 356];
+    let flags: u32 = 0x10 | 0x100; // SHGFI_DISPLAYNAME | SHGFI_TYPENAME
+
+    let result = unsafe { func(path_c.as_ptr(), 0, buf.as_mut_ptr(), 356, flags) };
+
+    assert!(result != 0, "SHGetFileInfoA should return non-zero handle");
+
+    let display_name = unsafe { std::ffi::CStr::from_ptr(buf.as_ptr().wrapping_add(16) as *const i8) };
+    assert!(
+        !display_name.to_bytes().is_empty(),
+        "SHGetFileInfoA: display name (offset 16) should be non-empty, got {:?}",
+        display_name
+    );
+
+    let type_name = unsafe { std::ffi::CStr::from_ptr(buf.as_ptr().wrapping_add(276) as *const i8) };
+    assert!(
+        !type_name.to_bytes().is_empty(),
+        "SHGetFileInfoA: type name (offset 276) should be non-empty, got {:?}",
+        type_name
+    );
+
+    std::fs::remove_file(&path).ok();
+    eprintln!("shell32_sh_get_file_info_a_probe: OK — result={:#x} name={:?} type={:?}", result, display_name, type_name);
+}
+
+/// Probe gate — shell32!SHFileOperationW (file copy via FO_COPY).
+///
+/// Creates a temp source file, builds a SHFILEOPSTRUCTW with FO_COPY,
+/// calls SHFileOperationW, and asserts return 0 + destination file exists.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn shell32_sh_file_operation_w_probe() {
+    let dir = std::env::temp_dir();
+    let src_path = dir.join("weave_shfo_src.tmp");
+    let dst_path = dir.join("weave_shfo_dst.tmp");
+    std::fs::write(&src_path, b"test file content").expect("write src temp file");
+
+    // Build UTF-16 double-null-terminated multi-strings
+    let mut p_from_wide: Vec<u16> = src_path.to_str().unwrap().encode_utf16().collect();
+    p_from_wide.push(0);
+    p_from_wide.push(0);
+    let mut p_to_wide: Vec<u16> = dst_path.to_str().unwrap().encode_utf16().collect();
+    p_to_wide.push(0);
+    p_to_wide.push(0);
+
+    let fn_addr = weave_shell32::resolve("shell32.dll", "SHFileOperationW")
+        .expect("SHFileOperationW must resolve");
+    let func: unsafe extern "win64" fn(*mut u8) -> i32 =
+        unsafe { std::mem::transmute(fn_addr) };
+
+    let mut buf = [0u8; 48];
+    unsafe {
+        *(buf.as_mut_ptr().add(8) as *mut u32) = 2;    // wFunc = FO_COPY
+        *(buf.as_mut_ptr().add(12) as *mut u32) = 0;   // fFlags = 0
+        *(buf.as_mut_ptr().add(16) as *mut *const u16) = p_from_wide.as_ptr();
+        *(buf.as_mut_ptr().add(24) as *mut *const u16) = p_to_wide.as_ptr();
+    }
+
+    let result = unsafe { func(buf.as_mut_ptr()) };
+
+    assert_eq!(result, 0, "SHFileOperationW(FO_COPY) should return 0, got {result}");
+
+    assert!(
+        dst_path.exists(),
+        "SHFileOperationW: destination {:?} should exist after copy",
+        dst_path
+    );
+
+    let _ = std::fs::remove_file(&src_path);
+    let _ = std::fs::remove_file(&dst_path);
+    eprintln!("shell32_sh_file_operation_w_probe: OK — FO_COPY from {:?} to {:?} returned 0", src_path, dst_path);
+}
+
+/// Probe gate — shell32!SHChangeNotify (empty-call smoke test).
+///
+/// Calls SHChangeNotify with SHCNE_ASSOCCHANGED and null pointers.
+/// Asserts the call does not crash (returns void).
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn shell32_sh_change_notify_probe() {
+    let fn_addr = weave_shell32::resolve("shell32.dll", "SHChangeNotify")
+        .expect("SHChangeNotify must resolve");
+    let func: unsafe extern "win64" fn(i32, u32, *const u8, *const u8) =
+        unsafe { std::mem::transmute(fn_addr) };
+
+    const SHCNE_ASSOCCHANGED: i32 = 0x0800_0000i32;
+    unsafe { func(SHCNE_ASSOCCHANGED, 0, std::ptr::null(), std::ptr::null()) };
+
+    eprintln!("shell32_sh_change_notify_probe: OK — SHChangeNotify(SHCNE_ASSOCCHANGED) completed without crash");
+}
+
+/// Probe gate — shell32!SHCreateItemFromIDList (IShellItem creation via PIDL).
+///
+/// Obtains a desktop PIDL via SHGetFolderLocation(CSIDL_DESKTOP), then calls
+/// SHCreateItemFromIDList to create an IShellItem COM object. Asserts S_OK
+/// and non-null ppv, then releases the item and frees the PIDL.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn shell32_sh_create_item_from_id_list_probe() {
+    // Step 1: get a desktop PIDL via SHGetFolderLocation
+    let gfl_addr = weave_shell32::resolve("shell32.dll", "SHGetFolderLocation")
+        .expect("SHGetFolderLocation must resolve");
+    let get_folder_loc: unsafe extern "win64" fn(usize, i32, *mut *mut u8) -> i32 =
+        unsafe { std::mem::transmute(gfl_addr) };
+
+    let mut pidl: *mut u8 = std::ptr::null_mut();
+    let hr = unsafe { get_folder_loc(0, 0, &mut pidl) };
+    assert_eq!(hr, 0, "SHGetFolderLocation(CSIDL_DESKTOP) should return S_OK, got {hr:#x}");
+    assert!(!pidl.is_null(), "PIDL should be non-null");
+
+    // Step 2: create IShellItem from PIDL
+    let cif_addr = weave_shell32::resolve("shell32.dll", "SHCreateItemFromIDList")
+        .expect("SHCreateItemFromIDList must resolve");
+    let create_item: unsafe extern "win64" fn(*const u8, *const u8, *mut usize) -> i32 =
+        unsafe { std::mem::transmute(cif_addr) };
+
+    let riid: [u8; 16] = [
+        0x07, 0x1c, 0xcb, 0xea, 0x82, 0x63, 0x44, 0x4a,
+        0xb1, 0xd5, 0xf3, 0x3b, 0x04, 0xcf, 0x4c, 0xb6,
+    ];
+    let mut ppv: usize = 0;
+    let hr2 = unsafe { create_item(pidl as *const u8, riid.as_ptr(), &mut ppv) };
+    assert_eq!(hr2, 0, "SHCreateItemFromIDList should return S_OK, got {hr2:#x}");
+    assert!(ppv != 0, "ppv (IShellItem pointer) should be non-null");
+
+    // Step 3: release the COM object via vtable[2] (Release)
+    let vtable = unsafe { *(ppv as *const *const [usize; 8]) };
+    let release: unsafe extern "win64" fn(usize) -> u32 =
+        unsafe { std::mem::transmute((*vtable)[2]) };
+    let refcnt = unsafe { release(ppv) };
+    eprintln!("shell32_sh_create_item_from_id_list_probe: IShellItem created, released (refcnt={refcnt})");
+
+    // Step 4: free the PIDL
+    let il_free_addr = weave_shell32::resolve("shell32.dll", "ILFree")
+        .expect("ILFree must resolve");
+    let il_free: unsafe extern "win64" fn(*mut u8) =
+        unsafe { std::mem::transmute(il_free_addr) };
+    unsafe { il_free(pidl) };
+
+    eprintln!(
+        "shell32_sh_create_item_from_id_list_probe: OK — SHGetFolderLocation→SHCreateItemFromIDList→Release→ILFree"
+    );
+}
