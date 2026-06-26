@@ -976,65 +976,158 @@ pub unsafe extern "win64" fn reg_enum_key_a(
 
 // ── OpenProcessToken ──────────────────────────────────────────────────────────
 
-// Wine ref: dlls/kernelbase/security.c:828 — calls NtOpenProcessToken(process, access, handle);
-// returns TRUE on success, FALSE + SetLastError on failure. Weave always returns FALSE (no token
-// support); apps that need a token for privilege escalation will fail, which is acceptable.
+// Wine ref: dlls/kernelbase/security.c:828 — NtOpenProcessToken
 /// OpenProcessToken: open the access token associated with a process.
 ///
-/// Returns FALSE (0). No real process tokens are supported.
+/// For the current process (pseudo-handle `-1` = `GetCurrentProcess()`), returns
+/// a fake token handle (`0xCAFEBEE0`). Returns FALSE for any other process handle.
 ///
 /// # Safety
-/// Pointer arguments are accepted but not dereferenced.
-// Wine ref: dlls/kernelbase/security.c:828 — NtOpenProcessToken(process, access, handle); TRUE on success; Weave has no token support
+/// `token_handle` must be a valid writable pointer (non-null).
+// Wine ref: dlls/kernelbase/security.c:828 — NtOpenProcessToken
 pub unsafe extern "win64" fn open_process_token(
-    _process_handle: usize,
+    process_handle: usize,
     _desired_access: u32,
-    _token_handle: *mut usize,
+    token_handle: *mut usize,
 ) -> i32 {
-    0 // FALSE
+    if token_handle.is_null() {
+        weave_common::set_last_error(87); // ERROR_INVALID_PARAMETER
+        return 0; // FALSE
+    }
+    // Accept current-process pseudo-handle (usize::MAX == -1 / GetCurrentProcess())
+    // or any non-zero handle for Phase B convenience. Reject process_handle == 0.
+    if process_handle != 0 {
+        // SAFETY: token_handle is non-null (checked above).  The Win32 API contract
+        // requires callers to provide a valid, writable HANDLE*.
+        unsafe { *token_handle = 0xCAFEBEE0 };
+        1 // TRUE
+    } else {
+        weave_common::set_last_error(5); // ERROR_ACCESS_DENIED
+        0 // FALSE
+    }
 }
 
 // ── LookupPrivilegeValueW ─────────────────────────────────────────────────────
 
-// Wine ref: dlls/kernelbase/security.c — reads privilege LUID from registry
-// HKLM\SYSTEM\CurrentControlSet\Control\Lsa\Data. Weave stubs this as FALSE;
-// apps that call it for privilege checks (e.g. SeDebugPrivilege) will get FALSE
-// and must handle that gracefully.
-/// LookupPrivilegeValueW: retrieve the locally unique identifier (LUID) for a privilege.
+// Wine ref: dlls/kernelbase/security.c:2841 — static privilege table
+/// LookupPrivilegeValueW: retrieve the locally unique identifier (LUID) for a
+/// privilege by name. Supports a static set of well-known privileges.
 ///
-/// Returns FALSE (0). Privilege lookup is not supported.
+/// Returns TRUE on match and writes the LUID to `lp_luid`.
 ///
 /// # Safety
-/// Pointer arguments are accepted but not dereferenced.
-// Wine ref: dlls/kernelbase/security.c — reads privilege LUID from HKLM\SYSTEM\CurrentControlSet\Control\Lsa\Data; Weave has no LSA registry data
+/// `lp_name` must be a valid null-terminated UTF-16 string. `lp_luid` must be
+/// a valid writable pointer. `lp_system_name` is ignored (remote lookup not
+/// supported).
+// Wine ref: dlls/kernelbase/security.c:2841 — static privilege table; real Wine reads from HKLM\SYSTEM\CurrentControlSet\Control\Lsa\Data
 pub unsafe extern "win64" fn lookup_privilege_value_w(
-    _lp_system_name: *const u16,
-    _lp_name: *const u16,
-    _lp_luid: *mut u64,
+    lp_system_name: *const u16,
+    lp_name: *const u16,
+    lp_luid: *mut u64,
 ) -> i32 {
+    if lp_name.is_null() || lp_luid.is_null() {
+        weave_common::set_last_error(87); // ERROR_INVALID_PARAMETER
+        return 0; // FALSE
+    }
+    if !lp_system_name.is_null() {
+        // Remote system lookups are not supported.
+        weave_common::set_last_error(1313); // ERROR_NO_SUCH_PRIVILEGE
+        return 0; // FALSE
+    }
+
+    // SAFETY: lp_name is non-null (checked above).  The Win32 API contract for
+    // LookupPrivilegeValueW requires callers to provide a valid null-terminated
+    // UTF-16 string as the privilege name. decode_wide_ptr scans until the null
+    // terminator and returns the decoded String.
+    let name = unsafe { decode_wide_ptr(lp_name) };
+
+    static TABLE: std::sync::OnceLock<Vec<(&'static str, u64)>> = std::sync::OnceLock::new();
+    let table = TABLE.get_or_init(|| {
+        vec![
+            ("SeDebugPrivilege", 1),
+            ("SeBackupPrivilege", 2),
+            ("SeRestorePrivilege", 3),
+            ("SeShutdownPrivilege", 4),
+            ("SeTakeOwnershipPrivilege", 5),
+            ("SeLoadDriverPrivilege", 6),
+            ("SeSecurityPrivilege", 7),
+            ("SeSystemEnvironmentPrivilege", 8),
+            ("SeSystemProfilePrivilege", 9),
+            ("SeIncreaseQuotaPrivilege", 10),
+            ("SeCreateTokenPrivilege", 11),
+            ("SeTcbPrivilege", 12),
+        ]
+    });
+
+    for &(privilege_name, luid) in table.iter() {
+        if name == privilege_name {
+            // SAFETY: lp_luid is non-null (checked above).  The Win32 API contract
+            // requires callers to provide a valid, writable LUID* (u64*).
+            unsafe { *lp_luid = luid };
+            return 1; // TRUE
+        }
+    }
+
+    weave_common::set_last_error(1313); // ERROR_NO_SUCH_PRIVILEGE
     0 // FALSE
 }
 
 // ── AdjustTokenPrivileges ─────────────────────────────────────────────────────
 
-// Wine ref: dlls/kernelbase/security.c — calls NtAdjustPrivilegesToken; returns TRUE even if
-// not all privileges were assigned (caller must check GetLastError for ERROR_NOT_ALL_ASSIGNED).
-// Weave returns TRUE unconditionally (no-op) — acceptable since we have no real token.
-/// AdjustTokenPrivileges: enable or disable privileges in the specified access token.
+// Wine ref: dlls/kernelbase/security.c:2970 — NtAdjustPrivilegesToken
+/// AdjustTokenPrivileges: enable or disable privileges in the specified access
+/// token.  Phase B: validates the fake token handle, then no-ops the adjustment.
 ///
-/// Returns TRUE (1). No-op implementation.
+/// Returns TRUE.  The caller may check `GetLastError` for `ERROR_NOT_ALL_ASSIGNED`
+/// (we do not set it — all requested privileges are trivially "applied").
 ///
 /// # Safety
-/// Pointer arguments are accepted but not dereferenced.
-// Wine ref: dlls/kernelbase/security.c — NtAdjustPrivilegesToken; returns TRUE even if not all privileges assigned (caller checks ERROR_NOT_ALL_ASSIGNED via GetLastError)
+/// `new_state` points to a `TOKEN_PRIVILEGES` structure if non-null.
+/// `previous_state`, if non-null, receives the previous privilege state.
+/// `return_length`, if non-null, receives the required buffer size.
+// Wine ref: dlls/kernelbase/security.c:2970 — NtAdjustPrivilegesToken; returns TRUE even if not all privileges assigned (caller checks GetLastError for ERROR_NOT_ALL_ASSIGNED)
 pub unsafe extern "win64" fn adjust_token_privileges(
-    _token_handle: usize,
-    _disable_all_privileges: i32,
-    _new_state: usize,
+    token_handle: usize,
+    disable_all_privileges: i32,
+    new_state: *const u8,
     _buffer_length: u32,
-    _previous_state: usize,
-    _return_length: *mut u32,
+    previous_state: *mut u8,
+    return_length: *mut u32,
 ) -> i32 {
+    // Validate the token handle matches our fake token (0xCAFEBEE0).
+    if token_handle != 0xCAFEBEE0 {
+        weave_common::set_last_error(6); // ERROR_INVALID_HANDLE
+        return 0; // FALSE
+    }
+
+    if disable_all_privileges != 0 {
+        // Disable all — no-op, return success. We don't enforce privileges anyway.
+        return 1; // TRUE
+    }
+
+    if !new_state.is_null() {
+        // Read the privilege count from TOKEN_PRIVILEGES.PrivilegeCount.
+        // SAFETY: new_state is non-null (checked above).  The Win32 API contract
+        // requires callers to provide a valid, readable TOKEN_PRIVILEGES structure
+        // of at least _buffer_length bytes when new_state is non-null.
+        let _count = unsafe { *(new_state as *const u32) };
+
+        if !previous_state.is_null() {
+            // SAFETY: previous_state is non-null.  The Win32 API contract for
+            // AdjustTokenPrivileges requires callers to provide a valid TOKEN_PRIVILEGES*
+            // buffer of at least _buffer_length bytes when previous_state is non-null.
+            // We write PrivilegeCount = 0 (no previous privileges to report).
+            unsafe { *(previous_state as *mut u32) = 0 };
+        }
+
+        if !return_length.is_null() {
+            // SAFETY: return_length is non-null.  The Win32 API contract requires
+            // callers to provide a valid, writable DWORD*.  We write the minimum
+            // required size: sizeof(PrivilegeCount) + sizeof(LUID_AND_ATTRIBUTES) == 16.
+            unsafe { *return_length = 16 };
+        }
+    }
+
     1 // TRUE
 }
 
