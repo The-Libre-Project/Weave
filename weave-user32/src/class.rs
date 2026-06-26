@@ -95,6 +95,8 @@ fn lock_atom_table(
 }
 
 /// Register an atom → class name mapping.
+// Wine ref: dlls/user32/class.c — NtUserGetAtomName resolves atoms back to strings.
+// Weave stores the mapping directly since we control the atom generation in name_to_atom.
 pub fn register_atom(atom: u16, name: String) {
     if let Some(mut guard) = lock_atom_table(atom_table()) {
         guard.insert(atom, name);
@@ -102,6 +104,8 @@ pub fn register_atom(atom: u16, name: String) {
 }
 
 /// Look up a class name from an atom.
+// Wine ref: dlls/user32/class.c::init_class_name — checks IS_INTRESOURCE and resolves
+// via NtUserGetAtomName. Weave maintains the reverse mapping for the same purpose.
 pub fn name_from_atom(atom: u16) -> Option<String> {
     let guard = lock_atom_table(atom_table())?;
     guard.get(&atom).cloned()
