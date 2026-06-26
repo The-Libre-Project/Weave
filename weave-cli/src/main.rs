@@ -710,13 +710,37 @@ fn main() {
     if exe_name.eq_ignore_ascii_case("SumatraPDF.exe")
         || exe_name.eq_ignore_ascii_case("sumatrapdf.exe")
     {
-        // NOP all three stores to canvas object +0x38 in the set_sub_object
-        // function at RVA 0x29aa8. The factory's internal virtual method or
-        // direct copy puts INVALID_HANDLE_VALUE there; keeping +0x38 NULL lets
-        // the null-check at RVA 0x21c1b8 skip the vtable dispatch.
+        // Binary patches for SumatraPDF.exe.
+        //
+        // The wrapper function at RVA 0x21c288 is called from two code paths:
+        //   - 0x01e645 (main init) — passes a properly initialized stack struct
+        //     with self-pointer at +0x38 in arg2 (rdx)
+        //   - 0x05cf70 (file-watcher init / tab-control path) — only sets arg1 (rcx),
+        //     leaves arg2 (rdx) as whatever was in the register from previous context
+        //
+        // The crash function at 0x21c0c4 reads the self-pointer from +0x38 of the
+        // arg2 struct and calls through it as a vtable. On the second call path,
+        // rdx contains garbage → +0x38 reads as INVALID_HANDLE_VALUE → the vtable
+        // dereference at 0x21c1bd crashes with SIGSEGV.
+        //
+        // Patch 1 (RVA 0x21c1b4): Replace `mov rcx, [rcx+0x38]` with
+        // `xor rcx, rcx; nop`.  Zeros rcx so the null-check at 0x21c1b8 skips
+        // the vtable dispatch.  The callback (vtable[0]) won't fire for the second
+        // invocation, but the rest of initialization continues normally.
+        //
+        // Patches 2-7 (RVAs 0x29ae1..0x6e535): The set_sub_object function at
+        // RVA 0x29aa8 has 6 stores to `rdi+0x38` from various registers
+        // (rax, rcx, r8, rbx, r14).  The factory's internal virtual method puts
+        // INVALID_HANDLE_VALUE there; keeping +0x38 NULL lets the null-check
+        // skip the vtable dispatch in the clone constructor at 0x21baf4.
         let _ = cfg::apply_binary_patches(
             image.base,
             &[
+                (
+                    0x21c1b4,
+                    &[0x48, 0x8b, 0x49, 0x38],
+                    &[0x48, 0x31, 0xc9, 0x90],
+                ),
                 (
                     0x29ae1,
                     &[0x48, 0x89, 0x47, 0x38],
