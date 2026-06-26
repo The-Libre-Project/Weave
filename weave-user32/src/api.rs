@@ -523,11 +523,11 @@ pub unsafe extern "win64" fn create_window_ex_w(
     // start (constructor/init failure) or whether something clears it later.
     // SCI_GETDOCPOINTER = 2268, SCI_GETDIRECTPOINTER = 2185.
     if class_name.eq_ignore_ascii_case("Scintilla") {
-        // M15a: capture first Scintilla hwnd for probe SendMessageW(SCI_*) injection.
+        // M15a: capture last Scintilla hwnd for probe SendMessageW(SCI_*) injection.
+        // NPP creates helper Scintilla windows (find-dialog) before the main editor,
+        // so we overwrite to ensure the last one (editor) is what we probe.
         // (Weave in-process model: guest ptrs from prior SCI_APPENDTEXT are directly usable here too.)
-        if M15_SCINTILLA_HWND.load(Ordering::Relaxed) == 0 {
-            M15_SCINTILLA_HWND.store(hwnd, Ordering::Relaxed);
-        }
+        M15_SCINTILLA_HWND.store(hwnd, Ordering::Relaxed);
         let sci_ptr = send_message_w(hwnd, 2185, 0, 0); // SCI_GETDIRECTPOINTER → this*
         let doc_ptr = send_message_w(hwnd, 2268, 0, 0); // SCI_GETDOCPOINTER → pdoc
         eprintln!("weave/user32: Scintilla post-WM_CREATE hwnd={hwnd:#x} sci*={sci_ptr:#x} pdoc={doc_ptr:#x}");
