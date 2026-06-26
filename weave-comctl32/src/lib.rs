@@ -482,6 +482,11 @@ extern "win64" fn tab_wnd_proc(hwnd: usize, msg: u32, w_param: usize, l_param: i
         }
         TCM_GETITEMW => {
             // Fill TCITEMW struct at lParam with stored tab item data.
+            // Wine ref: dlls/comctl32/tab.c::TAB_GetItemT — returns FALSE (0)
+            // when iItem >= uNumItem (empty control or out-of-range index).
+            // NPP reads TCITEMW.lParam even on TRUE and crashes with a corrupted
+            // pointer from uninitialized bytes (rva 0xe3caf). Return FALSE so NPP
+            // skips the struct dereference. Zero the struct regardless for safety.
             if l_param != 0 {
                 let idx = w_param;
                 if let Ok(map) = get_state().lock() {
@@ -506,7 +511,7 @@ extern "win64" fn tab_wnd_proc(hwnd: usize, msg: u32, w_param: usize, l_param: i
                 }
                 unsafe { std::ptr::write_bytes(l_param as *mut u8, 0, 36) };
             }
-            1 // TRUE
+            0 // FALSE — item not found
         }
         TCM_SETITEMW => {
             // Update Vec<TabItem> from TCITEMW at lParam.

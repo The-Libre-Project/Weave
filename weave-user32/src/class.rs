@@ -380,21 +380,10 @@ extern "win64" fn builtin_control_wnd_proc(
         0x130b => usize::MAX,
         // 0x133c is TCM_GETITEMW (TCM_FIRST+60). Wine ref: dlls/comctl32/tab.c::TAB_GetItemT
         // returns FALSE (0) when iItem >= uNumItem (empty control or out-of-range index).
-        // Returning TRUE for SysListView32 (class-gated attempt) caused sumatrapdf regression:
-        // SumatraPDF has a SysListView32 that receives 0x133c and enters a blocking init path
-        // on TRUE return (CI 26179659169). NPP's 0x133c window already received 0 in the
-        // class-gated build and NPP still passed — returning TRUE was not the NPP fix.
-        // We zero the TCITEMW struct at lParam before returning FALSE because NPP reads
-        // struct fields even on FALSE return and crashes at RVA 0xe3caf with a corrupted
-        // pointer derived from uninitialized bytes (different stale data = different fault addr,
-        // same code path — confirmed by CI runs 28248981531, 28251792764).
-        // Wine ref: dlls/comctl32/tab.c — TAB_GetItemT returns FALSE.
-        0x133c => {
-            if _lparam != 0 {
-                unsafe { std::ptr::write_bytes(_lparam as *mut u8, 0, 36) };
-            }
-            0
-        }
+        // This handler returns 0 (matches Wine). The real comctl32 tab proc (in weave-comctl32)
+        // also has a TCM_GETITEMW handler that zeros the struct and returns FALSE on failure.
+        // The builtin handler is only reached when no comctl32 registration exists for the HWND.
+        0x133c => 0,
         // LVM_INSERTITEMA/W — Wine ref: dlls/comctl32/listview.c::LISTVIEW_InsertItemT returns
         // zero-based index on success, -1 on failure.
         0x104d | 0x104f => {
