@@ -1495,24 +1495,125 @@ pub unsafe extern "win64" fn sh_get_file_info_w(
 /// Pointer arguments are accepted but not dereferenced.
 pub unsafe extern "win64" fn sh_add_to_recent_docs(_flags: u32, _docs: *const u16) {}
 
-// Wine ref: dlls/shell32/shlfolder.c — SHBindToParent resolves the parent PIDL of a given
-// PIDL and optionally returns the last component; E_INVALIDARG if ppidl null.
+// Wine ref: dlls/shell32/shlfolder.c:5294 — splits PIDL at last component via
+// ILFindLastID + ILRemoveLastID, creates IShellFolder for parent via
+// IShellFolder::BindToObject (or the desktop folder for single-item PIDLs),
+// copies child-relative PIDL; E_INVALIDARG for null/malformed input.
 /// SHBindToParent: bind to a PIDL's parent folder and retrieve the last component.
 ///
-/// Returns E_NOTIMPL — stub.
+/// Parses a full PIDL into its parent and child portions. The parent's
+/// IShellFolder is returned through `ppv`. The child's relative PIDL is
+/// optionally returned through `ppidl_last` (caller must ILFree).
+///
+/// Returns S_OK on success, E_INVALIDARG for null/malformed PIDL,
+/// E_NOINTERFACE if riid is specified and is not IID_IShellFolder.
 ///
 /// # Safety
-/// Pointer arguments are accepted but not dereferenced.
+/// `pidl` must be a valid PIDL chain or null. `riid` must be a valid 16-byte
+/// GUID pointer or null. `ppv` must be writable. `ppidl_last` may be null.
+// Wine ref: dlls/shell32/shlfolder.c:5294 — splits PIDL at last component, creates IShellFolder for parent
 pub unsafe extern "win64" fn sh_bind_to_parent(
-    _pidl: *const u8,
-    _riid: *const u8,
+    pidl: *const u8,
+    riid: *const u8,
     ppv: *mut usize,
-    _ppidl_last: *mut *mut u8,
+    ppidl_last: *mut *mut u8,
 ) -> i32 {
-    if !ppv.is_null() {
-        unsafe { *ppv = 0 };
+    const E_INVALIDARG: i32 = 0x8007_0057u32 as i32;
+    const E_POINTER: i32 = 0x8000_4003u32 as i32;
+    const E_OUTOFMEMORY: i32 = 0x8007_000Eu32 as i32;
+    const E_NOINTERFACE: i32 = 0x8000_4002u32 as i32;
+    const S_OK: i32 = 0;
+    const E_FAIL: i32 = 0x8000_4005u32 as i32;
+
+    if ppv.is_null() {
+        return E_POINTER;
     }
-    0x8000_4001u32 as i32 // E_NOTIMPL
+    unsafe { *ppv = 0 };
+    if !ppidl_last.is_null() {
+        unsafe { *ppidl_last = std::ptr::null_mut() };
+    }
+
+    if pidl.is_null() {
+        return E_INVALIDARG;
+    }
+
+    // IID_IShellFolder = {000214E6-0000-0000-C000-000000000046}
+    let iid_shell_folder: [u8; 16] = [
+        0xE6, 0x14, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x46,
+    ];
+    if !riid.is_null() && unsafe { std::slice::from_raw_parts(riid, 16) } != iid_shell_folder {
+        return E_NOINTERFACE;
+    }
+
+    // Find the last (non-terminator) item in the PIDL.
+    let last_item = crate::pidl::il_find_last_id(pidl);
+    if last_item.is_null() {
+        return E_INVALIDARG;
+    }
+
+    // Read the size of the last item from its cb field.
+    let item_cb = unsafe { *(last_item as *const u16) } as usize;
+
+    // Allocate the child-relative PIDL: last item + 2-byte terminator.
+    let child_size = item_cb + 2;
+    let child_pidl = unsafe { libc::malloc(child_size) as *mut u8 };
+    if child_pidl.is_null() {
+        return E_OUTOFMEMORY;
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(last_item, child_pidl, item_cb);
+        std::ptr::write_bytes(child_pidl.add(item_cb), 0, 2);
+    }
+    if !ppidl_last.is_null() {
+        unsafe { *ppidl_last = child_pidl };
+    }
+
+    // Clone the full PIDL and truncate to get the parent PIDL.
+    let parent_pidl = unsafe { crate::pidl::il_clone(pidl) };
+    if parent_pidl.is_null() {
+        unsafe { free_child(ppidl_last, child_pidl) };
+        return E_OUTOFMEMORY;
+    }
+    unsafe { crate::pidl::il_remove_last_id(parent_pidl) };
+
+    // If the parent PIDL is empty (single-item PIDL), use the desktop folder.
+    let parent_first_cb = unsafe { *(parent_pidl as *const u16) };
+    if parent_first_cb == 0 {
+        unsafe { crate::pidl::il_free(parent_pidl) };
+        unsafe { *ppv = crate::desktop_folder::desktop_folder_ptr() };
+        return S_OK;
+    }
+
+    // Resolve parent PIDL to a filesystem path.
+    let path = crate::pidl::pidl_path_from_list(parent_pidl);
+    unsafe { crate::pidl::il_free(parent_pidl) };
+
+    match path {
+        Some(ref parent_path) => {
+            let folder =
+                crate::desktop_folder::new_shell_folder_instance(Some(parent_path.clone()));
+            unsafe { *ppv = folder };
+            S_OK
+        }
+        None => {
+            unsafe { free_child(ppidl_last, child_pidl) };
+            E_FAIL
+        }
+    }
+}
+
+/// Free a child PIDL and null out the output pointer.
+///
+/// # Safety
+/// `ppidl_last` may be null. `child_pidl` must be a valid heap pointer or null.
+unsafe fn free_child(ppidl_last: *mut *mut u8, child_pidl: *mut u8) {
+    if !ppidl_last.is_null() {
+        *ppidl_last = std::ptr::null_mut();
+    }
+    if !child_pidl.is_null() {
+        libc::free(child_pidl as *mut libc::c_void);
+    }
 }
 
 // Wine ref: dlls/shell32/shlfileop.c — SHCreateDirectoryExW creates a directory tree;
@@ -1531,24 +1632,52 @@ pub unsafe extern "win64" fn sh_create_directory_ex_w(
     0x8000_4001u32 as i32 // E_NOTIMPL
 }
 
-// Wine ref: dlls/shell32/shlfolder.c — SHCreateItemFromParsingName parses a display name
-// into an IShellItem; delegates to SHCreateItemFromIDList after SHParseDisplayName.
-/// SHCreateItemFromParsingName: create a shell item from a parsing name.
+// Wine ref: dlls/shell32/shlview.c:2941 — converts path to PIDL via
+// ILCreateFromPathW, then delegates to SHCreateItemFromIDList; returns S_OK
+// on success, E_OUTOFMEMORY or HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND) on failure.
+/// SHCreateItemFromParsingName: create a shell item from a filesystem path.
 ///
-/// Returns E_NOTIMPL — stub.
+/// Converts a UTF-16 path to a PIDL, then creates an IShellItem via the same
+/// logic as SHCreateItemFromIDList. The `pbc` (IBindCtx) parameter is ignored.
+///
+/// Returns S_OK on success, E_OUTOFMEMORY on allocation failure.
 ///
 /// # Safety
-/// Pointer arguments are accepted but not dereferenced.
+/// `psz_path` must be a valid null-terminated UTF-16 string or null.
+/// `riid` must be a valid 16-byte GUID pointer or null.
+/// `ppv` must be a valid writable pointer.
+// Wine ref: dlls/shell32/shlview.c:2941 — converts path to pidl then delegates to SHCreateItemFromIDList
 pub unsafe extern "win64" fn sh_create_item_from_parsing_name(
-    _name: *const u16,
+    psz_path: *const u16,
     _pbc: usize,
-    _riid: *const u8,
+    riid: *const u8,
     ppv: *mut usize,
 ) -> i32 {
-    if !ppv.is_null() {
-        unsafe { *ppv = 0 };
+    const E_POINTER: i32 = 0x8000_4003u32 as i32;
+    const E_OUTOFMEMORY: i32 = 0x8007_000Eu32 as i32;
+
+    if ppv.is_null() {
+        return E_POINTER;
     }
-    0x8000_4001u32 as i32 // E_NOTIMPL
+    unsafe { *ppv = 0 };
+
+    if psz_path.is_null() || riid.is_null() {
+        return E_POINTER;
+    }
+
+    let path_str = decode_wide_path(psz_path);
+    if path_str.is_empty() {
+        return E_OUTOFMEMORY;
+    }
+
+    let pidl = crate::pidl::pidl_from_path_w(&path_str);
+    if pidl.is_null() {
+        return E_OUTOFMEMORY;
+    }
+
+    let result = unsafe { sh_create_item_from_id_list(pidl, riid, ppv) };
+    unsafe { crate::pidl::il_free(pidl) };
+    result
 }
 
 // Wine ref: dlls/shell32/shlfolder.c — SHCreateItemFromIDList creates an IShellItem

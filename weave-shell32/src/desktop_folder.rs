@@ -63,7 +63,7 @@ fn get_desktop_folder_ptr() -> usize {
 /// `data_ptr == 0`: desktop folder, enumerates CWD children.
 /// `data_ptr != 0`: bound subfolder, `data_ptr` is `Box::into_raw(Box::new(String))`
 /// containing the filesystem path to enumerate children from.
-fn new_shell_folder_instance(bound_path: Option<String>) -> usize {
+pub(crate) fn new_shell_folder_instance(bound_path: Option<String>) -> usize {
     let vtable: Box<[usize; 13]> = Box::new([
         sf_query_interface as *const () as usize,
         sf_add_ref as *const () as usize,
