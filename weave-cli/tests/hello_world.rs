@@ -8790,9 +8790,10 @@ fn shell32_sh_create_item_from_id_list_probe() {
     let create_item: unsafe extern "win64" fn(*const u8, *const u8, *mut usize) -> i32 =
         unsafe { std::mem::transmute(cif_addr) };
 
+    // IID_ISHELL_ITEM_WIRE from weave-shell32/src/shell.rs
     let riid: [u8; 16] = [
-        0x07, 0x1c, 0xcb, 0xea, 0x82, 0x63, 0x44, 0x4a, 0xb1, 0xd5, 0xf3, 0x3b, 0x04, 0xcf, 0x4c,
-        0xb6,
+        0x1E, 0x6D, 0x82, 0x43, 0x18, 0xE7, 0xEE, 0x42, 0xBC, 0x55, 0xA1, 0xE2, 0x61, 0xC3, 0x7B,
+        0xFE,
     ];
     let mut ppv: usize = 0;
     let hr2 = unsafe { create_item(pidl as *const u8, riid.as_ptr(), &mut ppv) };
