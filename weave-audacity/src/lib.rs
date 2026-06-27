@@ -31,10 +31,7 @@ pub unsafe extern "win64" fn SettingsWX_Read(
 pub unsafe extern "win64" fn SettingsWX_Clear() {}
 
 /// SettingsWX::Remove(wxString const& key) — Phase A stub, returns false.
-pub unsafe extern "win64" fn SettingsWX_Remove(
-    _this: *mut c_void,
-    _key: *const c_void,
-) -> bool {
+pub unsafe extern "win64" fn SettingsWX_Remove(_this: *mut c_void, _key: *const c_void) -> bool {
     false
 }
 
@@ -100,9 +97,9 @@ pub unsafe extern "win64" fn SettingsWX_GetGroup(
 pub fn resolve(dll: &str, func: &str) -> Option<usize> {
     match dll.to_lowercase().as_str() {
         "lib-theme-resources.dll" => match func {
-            "?Load@ThemeResources@@YAXXZ" => Some(
-                ThemeResources_Load as unsafe extern "win64" fn() as *const () as usize,
-            ),
+            "?Load@ThemeResources@@YAXXZ" => {
+                Some(ThemeResources_Load as unsafe extern "win64" fn() as *const () as usize)
+            }
             _ => None,
         },
         "lib-wx-init.dll" => match func {
@@ -110,12 +107,12 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
                 SettingsWX_Read as unsafe extern "win64" fn(*mut _, *const _, *mut _) -> bool
                     as *const () as usize,
             ),
-            "?Clear@SettingsWX@@UEAAXXZ" => Some(
-                SettingsWX_Clear as unsafe extern "win64" fn() as *const () as usize,
-            ),
+            "?Clear@SettingsWX@@UEAAXXZ" => {
+                Some(SettingsWX_Clear as unsafe extern "win64" fn() as *const () as usize)
+            }
             "?Remove@SettingsWX@@UEAA_NAEBVwxString@@@Z" => Some(
-                SettingsWX_Remove as unsafe extern "win64" fn(*mut _, *const _) -> bool
-                    as *const () as usize,
+                SettingsWX_Remove as unsafe extern "win64" fn(*mut _, *const _) -> bool as *const ()
+                    as usize,
             ),
             "?HasGroup@SettingsWX@@UEBA_NAEBVwxString@@@Z" => Some(
                 SettingsWX_HasGroup as unsafe extern "win64" fn(*mut _, *const _) -> bool
@@ -126,18 +123,15 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
                     as *const () as usize,
             ),
             "?GetChildKeys@SettingsWX@@UEBA?AVwxArrayString@@XZ" => Some(
-                SettingsWX_GetChildKeys
-                    as unsafe extern "win64" fn(*mut _, *mut _) -> *mut c_void
+                SettingsWX_GetChildKeys as unsafe extern "win64" fn(*mut _, *mut _) -> *mut c_void
                     as *const () as usize,
             ),
             "?GetChildGroups@SettingsWX@@UEBA?AVwxArrayString@@XZ" => Some(
-                SettingsWX_GetChildGroups
-                    as unsafe extern "win64" fn(*mut _, *mut _) -> *mut c_void
+                SettingsWX_GetChildGroups as unsafe extern "win64" fn(*mut _, *mut _) -> *mut c_void
                     as *const () as usize,
             ),
             "?GetGroup@SettingsWX@@UEBA?AVwxString@@XZ" => Some(
-                SettingsWX_GetGroup
-                    as unsafe extern "win64" fn(*mut _, *mut _) -> *mut c_void
+                SettingsWX_GetGroup as unsafe extern "win64" fn(*mut _, *mut _) -> *mut c_void
                     as *const () as usize,
             ),
             _ => None,
@@ -154,9 +148,7 @@ mod tests {
 
     #[test]
     fn resolve_lib_theme_resources_load() {
-        assert!(
-            resolve("lib-theme-resources.dll", "?Load@ThemeResources@@YAXXZ").is_some()
-        );
+        assert!(resolve("lib-theme-resources.dll", "?Load@ThemeResources@@YAXXZ").is_some());
     }
 
     #[test]
@@ -170,9 +162,7 @@ mod tests {
 
     #[test]
     fn resolve_lib_wx_init_clear() {
-        assert!(
-            resolve("lib-wx-init.dll", "?Clear@SettingsWX@@UEAAXXZ").is_some()
-        );
+        assert!(resolve("lib-wx-init.dll", "?Clear@SettingsWX@@UEAAXXZ").is_some());
     }
 
     #[test]
@@ -234,7 +224,8 @@ mod tests {
     fn settings_wx_get_child_keys_returns_slot() {
         unsafe {
             let mut slot: [u8; 16] = [0xFF; 16];
-            let ret = SettingsWX_GetChildKeys(std::ptr::null_mut(), slot.as_mut_ptr() as *mut c_void);
+            let ret =
+                SettingsWX_GetChildKeys(std::ptr::null_mut(), slot.as_mut_ptr() as *mut c_void);
             assert_eq!(ret, slot.as_mut_ptr() as *mut c_void);
             assert_eq!(slot[0..8], [0u8; 8]);
         }
