@@ -733,10 +733,19 @@ fn main() {
         }
         let pe_sig_off =
             u32::from_le_bytes(dll_bytes[0x3C..0x40].try_into().unwrap_or([0; 4])) as usize;
+        eprintln!(
+            "weave: DllMain {dll_name}: pe_sig_off={pe_sig_off:#x} len={}",
+            dll_bytes.len()
+        );
         if pe_sig_off + 40 > dll_bytes.len() {
+            eprintln!("weave: DllMain SKIP {dll_name}: pe_sig_off {pe_sig_off:#x} out of bounds");
             continue;
         }
         if &dll_bytes[pe_sig_off..pe_sig_off + 4] != b"PE\0\0" {
+            eprintln!(
+                "weave: DllMain SKIP {dll_name}: bad PE sig at {pe_sig_off:#x}: {:02x?}",
+                &dll_bytes[pe_sig_off..pe_sig_off + 4]
+            );
             continue;
         }
         let entry_rva = u32::from_le_bytes(
