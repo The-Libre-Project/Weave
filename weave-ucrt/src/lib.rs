@@ -545,6 +545,23 @@ pub unsafe extern "win64" fn ucrt_seh_filter_exe(_code: u32, _info: *const c_voi
     1 // EXCEPTION_EXECUTE_HANDLER
 }
 
+/// _seh_filter_dll — SEH exception filter for DLL modules.
+///
+/// Returns 0 (EXCEPTION_CONTINUE_SEARCH) to pass exceptions up the chain.
+extern "win64" fn ucrt_seh_filter_dll(_code: u32, _info: *const c_void) -> i32 {
+    0
+}
+
+/// _invoke_watson — crash reporter stub, does nothing.
+extern "win64" fn ucrt_invoke_watson(
+    _msg: *const u16,
+    _msg2: *const u16,
+    _msg3: *const u16,
+    _arg4: u32,
+    _exit_code: i32,
+) {
+}
+
 /// _callnewh — call the new_handler if allocation fails.
 ///
 /// Wine ref: dlls/msvcrt/heap.c — calls the installed new_handler(size).
@@ -1534,6 +1551,22 @@ pub extern "win64" fn ucrt_round(x: f64) -> f64 {
     x.round()
 }
 
+pub extern "win64" fn ucrt_trunc(x: f64) -> f64 {
+    x.trunc()
+}
+pub extern "win64" fn ucrt_lrint(x: f64) -> i32 {
+    x as i32
+}
+pub extern "win64" fn ucrt_llrint(x: f64) -> i64 {
+    x as i64
+}
+pub extern "win64" fn ucrt_rint(x: f64) -> f64 {
+    x.round_ties_even()
+}
+pub extern "win64" fn ucrt_llround(x: f64) -> i64 {
+    x.round() as i64
+}
+
 /// `_dsign` — return sign bit of a double.
 ///
 /// Wine ref: dlls/msvcrt/math.c — _dsign returns non-zero if x < 0.
@@ -1580,6 +1613,14 @@ pub unsafe extern "win64" fn ucrt_ldtest(x: *const f64) -> i16 {
     unsafe { ucrt_dtest(x) }
 }
 
+// Double-precision classification stubs — same as _dtest but by value.
+pub extern "win64" fn ucrt_dclass(_x: f64) -> i32 {
+    0 // FP_NORMAL
+}
+pub extern "win64" fn ucrt_fdclass(_x: f32) -> i32 {
+    0 // FP_NORMAL
+}
+
 // Single-precision (f32) math delegates.
 pub extern "win64" fn ucrt_sinf(x: f32) -> f32 {
     x.sin()
@@ -1607,6 +1648,25 @@ pub extern "win64" fn ucrt_fmodf(x: f32, y: f32) -> f32 {
 }
 pub extern "win64" fn ucrt_atan2f(y: f32, x: f32) -> f32 {
     y.atan2(x)
+}
+
+pub extern "win64" fn ucrt_expf(x: f32) -> f32 {
+    x.exp()
+}
+pub extern "win64" fn ucrt_logf(x: f32) -> f32 {
+    x.ln()
+}
+pub extern "win64" fn ucrt_log10f(x: f32) -> f32 {
+    x.log10()
+}
+pub extern "win64" fn ucrt_roundf(x: f32) -> f32 {
+    x.round()
+}
+pub extern "win64" fn ucrt_lrintf(x: f32) -> i32 {
+    x as i32
+}
+pub extern "win64" fn ucrt_rintf(x: f32) -> f32 {
+    x.round_ties_even()
 }
 
 /// # Safety
@@ -1674,6 +1734,19 @@ pub unsafe extern "win64" fn ucrt_perror(s: *const u8) {
         }
         libc::write(2, b"\n".as_ptr() as *const libc::c_void, 1);
     }
+}
+
+/// _wperror — wide-char perror stub, no-op.
+extern "win64" fn ucrt_wperror(_s: *const u16) {}
+
+/// _access — file access check, returns 0 (success) for all paths.
+extern "win64" fn ucrt_access(_path: *const u8, _mode: i32) -> i32 {
+    0 // success
+}
+
+/// _wremove — wide-char remove file stub, returns 0 (success).
+extern "win64" fn ucrt_wremove(_path: *const u16) -> i32 {
+    0 // success
 }
 
 /// # Safety
@@ -2721,6 +2794,14 @@ pub unsafe extern "win64" fn ucrt_atoi(s: *const u8) -> i32 {
 /// `s` must be a valid null-terminated string.
 pub unsafe extern "win64" fn ucrt_atof(s: *const u8) -> f64 {
     unsafe { libc::atof(s as _) }
+}
+
+/// atoll: convert string to i64.
+///
+/// # Safety
+/// `s` must be a valid null-terminated string.
+pub unsafe extern "win64" fn ucrt_atoll(s: *const u8) -> i64 {
+    unsafe { libc::atoll(s as _) }
 }
 
 /// strtod: convert string to double with end pointer.
@@ -4581,6 +4662,12 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "_seh_filter_exe" => {
             stub!(ucrt_seh_filter_exe as unsafe extern "win64" fn(_, _) -> _)
         }
+        "_seh_filter_dll" => {
+            stub!(ucrt_seh_filter_dll as extern "win64" fn(_, _) -> _)
+        }
+        "_invoke_watson" => {
+            stub!(ucrt_invoke_watson as extern "win64" fn(_, _, _, _, _))
+        }
         "_callnewh" => {
             stub!(ucrt_callnewh as unsafe extern "win64" fn(_) -> _)
         }
@@ -4643,6 +4730,7 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "_errno" => stub!(ucrt_errno as extern "win64" fn() -> _),
         "strerror" => stub!(ucrt_strerror as extern "win64" fn(_) -> _),
         "perror" => stub!(ucrt_perror as unsafe extern "win64" fn(_)),
+        "_wperror" => stub!(ucrt_wperror as extern "win64" fn(_)),
         "raise" => stub!(ucrt_raise as extern "win64" fn(_) -> _),
         "_get_osfhandle" => stub!(ucrt_get_osfhandle as extern "win64" fn(_) -> _),
         "_open_osfhandle" => stub!(ucrt_open_osfhandle as extern "win64" fn(_, _) -> _),
@@ -4656,6 +4744,8 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "_lock" => stub!(ucrt_lock as extern "win64" fn(_)),
         "_unlock" => stub!(ucrt_unlock as extern "win64" fn(_)),
         "remove" => stub!(ucrt_remove as extern "win64" fn(_) -> _),
+        "_wremove" => stub!(ucrt_wremove as extern "win64" fn(_) -> _),
+        "_access" => stub!(ucrt_access as extern "win64" fn(_, _) -> _),
         "_fstat64" => stub!(ucrt_fstat64 as extern "win64" fn(_, _) -> _),
         "fopen" => stub!(ucrt_fopen as unsafe extern "win64" fn(_, _) -> _),
         "_wfopen" => stub!(ucrt_wfopen as unsafe extern "win64" fn(_, _) -> _),
@@ -4712,6 +4802,13 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "_ldsign" => stub!(ucrt_ldsign as extern "win64" fn(_) -> _),
         "_dtest" => stub!(ucrt_dtest as unsafe extern "win64" fn(_) -> _),
         "_ldtest" => stub!(ucrt_ldtest as unsafe extern "win64" fn(_) -> _),
+        "_dclass" => stub!(ucrt_dclass as extern "win64" fn(_) -> _),
+        "_fdclass" => stub!(ucrt_fdclass as extern "win64" fn(_) -> _),
+        "trunc" => stub!(ucrt_trunc as extern "win64" fn(_) -> _),
+        "lrint" => stub!(ucrt_lrint as extern "win64" fn(_) -> _),
+        "llrint" => stub!(ucrt_llrint as extern "win64" fn(_) -> _),
+        "rint" => stub!(ucrt_rint as extern "win64" fn(_) -> _),
+        "llround" => stub!(ucrt_llround as extern "win64" fn(_) -> _),
         // math — single precision
         "sinf" => stub!(ucrt_sinf as extern "win64" fn(_) -> _),
         "cosf" => stub!(ucrt_cosf as extern "win64" fn(_) -> _),
@@ -4723,6 +4820,12 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "fmodf" => stub!(ucrt_fmodf as extern "win64" fn(_, _) -> _),
         "atan2f" => stub!(ucrt_atan2f as extern "win64" fn(_, _) -> _),
         "powf" => stub!(ucrt_powf as extern "win64" fn(_, _) -> _),
+        "expf" => stub!(ucrt_expf as extern "win64" fn(_) -> _),
+        "logf" => stub!(ucrt_logf as extern "win64" fn(_) -> _),
+        "log10f" => stub!(ucrt_log10f as extern "win64" fn(_) -> _),
+        "roundf" => stub!(ucrt_roundf as extern "win64" fn(_) -> _),
+        "lrintf" => stub!(ucrt_lrintf as extern "win64" fn(_) -> _),
+        "rintf" => stub!(ucrt_rintf as extern "win64" fn(_) -> _),
         // setjmp/longjmp
         "__intrinsic_setjmpex" => {
             stub!(ucrt_intrinsic_setjmpex as unsafe extern "win64" fn(_, _) -> _)
@@ -4740,6 +4843,7 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "strrchr" => stub!(ucrt_strrchr as unsafe extern "win64" fn(_, _) -> _),
         "atoi" => stub!(ucrt_atoi as unsafe extern "win64" fn(_) -> _),
         "atof" => stub!(ucrt_atof as unsafe extern "win64" fn(_) -> _),
+        "atoll" => stub!(ucrt_atoll as unsafe extern "win64" fn(_) -> _),
         "strtod" => stub!(ucrt_strtod as unsafe extern "win64" fn(_, _) -> _),
         "strtol" => stub!(ucrt_strtol as unsafe extern "win64" fn(_, _, _) -> _),
         "strtoll" => stub!(ucrt_strtoll as unsafe extern "win64" fn(_, _, _) -> _),

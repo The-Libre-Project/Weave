@@ -708,9 +708,27 @@ fn main() {
 
     eprintln!("weave: imports resolved");
 
-    // ── 3.45. DllMain not called for side-by-side DLLs — their CRT init
-    // hits null-stubbed imports (api-ms-win-crt-*) and crashes. The
-    // force-acquire in EnterCriticalSection handles the uninitialized CS.
+    // ── 3.45. Call DllMain(DLL_PROCESS_ATTACH) for wx/lib DLLs.
+    // CRT stubs now cover the import surface so DllMain can init safely.
+    for (dll_name, _dll_bytes, base, entry) in &side_dlls {
+        let dll_lower = dll_name.to_lowercase();
+        if !dll_lower.starts_with("wx")
+            && !dll_lower.starts_with("lib-")
+            && !dll_lower.starts_with("msvcp")
+            && !dll_lower.starts_with("vcruntime")
+        {
+            continue;
+        }
+        if entry.is_null() {
+            continue;
+        }
+        let hinst = *base as usize;
+        type DllMain = unsafe extern "win64" fn(hinst: usize, reason: u32, reserved: usize) -> i32;
+        let dll_main: DllMain = unsafe { std::mem::transmute(*entry) };
+        eprintln!("weave: {dll_name}: DllMain(DLL_PROCESS_ATTACH)...");
+        let ok = unsafe { dll_main(hinst, 1, 0) };
+        eprintln!("weave: {dll_name}: DllMain(DLL_PROCESS_ATTACH) → {ok}");
+    }
 
     // ── 3.5. Apply PE-specific binary patches ─────────────────────────────
     // Binary patches fix known issues in specific PE images that cannot be
