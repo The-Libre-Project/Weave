@@ -711,9 +711,15 @@ fn main() {
 
     eprintln!("weave: imports resolved");
 
-    // ── 3.45. Call DllMain for side-by-side DLLs (after main exe IAT patching
-    // so that imports like DisableThreadLibraryCalls are resolved). ────────
+    // ── 3.45. Call DllMain for side-by-side DLLs that need CRT/global init.
+    // Only call for DLLs with uninitialized CS (LockCount=0 vs -1) — i.e.
+    // wxWidgets and Audacity internal DLLs whose DllMain wasn't called.
+    // Skip DLLs like SDL2.dll that work fine without DllMain.
     for (dll_name, dll_bytes, base) in &side_dlls {
+        let dll_lower = dll_name.to_lowercase();
+        if !dll_lower.contains("wx") && !dll_lower.contains("lib-") && !dll_lower.contains("msvcp") && !dll_lower.contains("vcruntime") {
+            continue;
+        }
         if dll_bytes.len() < 0x100 {
             continue;
         }
