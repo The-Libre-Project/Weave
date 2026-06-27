@@ -620,6 +620,29 @@ fn main() {
                 });
             }
         }
+        // Call DllMain(DLL_PROCESS_ATTACH) for each side-by-side DLL so that
+        // static CRT init, C++ global constructors, and CRITICAL_SECTION init
+        // run.  Without this, wxWidgets DLLs have uninitialized CS (LockCount=0
+        // instead of -1) and other global state, causing crashes in real wx code.
+        // Read AddressOfEntryPoint from the PE optional header directly:
+        // PE signature + 20 (COFF header) + 16 (StdFields.AddressOfEntryPoint offset).
+        for (dll_name, dll_bytes, base) in &side_dlls {
+            if dll_bytes.len() < 0x100 { continue; }
+            let pe_sig_off = u32::from_le_bytes(dll_bytes[0x3C..0x40].try_into().unwrap_or([0; 4])) as usize;
+            if pe_sig_off + 40 > dll_bytes.len() { continue; }
+            if &dll_bytes[pe_sig_off..pe_sig_off + 4] != b"PE\0\0" { continue; }
+            let entry_rva = u32::from_le_bytes(
+                dll_bytes[pe_sig_off + 20 + 0x10..pe_sig_off + 20 + 0x14].try_into().unwrap_or([0; 4])
+            ) as usize;
+            if entry_rva != 0 {
+                let dll_main_addr = unsafe { base.add(entry_rva) };
+                type DllMain = unsafe extern "win64" fn(hinst: usize, reason: u32, reserved: usize) -> i32;
+                let dll_main: DllMain = unsafe { std::mem::transmute(dll_main_addr) };
+                let hinst = *base as usize;
+                let ok = unsafe { dll_main(hinst, 1, 0) }; // DLL_PROCESS_ATTACH = 1
+                eprintln!("weave: {dll_name}: DllMain(DLL_PROCESS_ATTACH) → {ok}");
+            }
+        }
     }
     eprintln!("weave: === SIDE-BY-SIDE DONE ===");
 
