@@ -2079,10 +2079,12 @@ pub unsafe extern "win64" fn sh_file_operation_w(lpfo: *mut u8) -> i32 {
         return 0;
     }
 
-    let w_func: u32 = *(lpfo.add(8) as *const u32);
-    let f_flags: u32 = *(lpfo.add(12) as *const u32);
-    let p_from: *const u16 = *(lpfo.add(16) as *const *const u16);
-    let p_to: *const u16 = *(lpfo.add(24) as *const *const u16);
+    // Use read_unaligned because lpfo may come from a byte buffer
+    // without 8-byte alignment (e.g., [u8; N] on the stack).
+    let w_func: u32 = unsafe { std::ptr::read_unaligned(lpfo.add(8) as *const u32) };
+    let f_flags: u32 = unsafe { std::ptr::read_unaligned(lpfo.add(12) as *const u32) };
+    let p_from: *const u16 = unsafe { std::ptr::read_unaligned(lpfo.add(16) as *const *const u16) };
+    let p_to: *const u16 = unsafe { std::ptr::read_unaligned(lpfo.add(24) as *const *const u16) };
     let _allow_undo = (f_flags & 0x0040) != 0; // FOF_ALLOWUNDO — ignored, no recycle bin
 
     let sources = read_multi_string(p_from);
