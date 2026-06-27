@@ -2275,13 +2275,21 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         ),
         "ImageList_Copy" => Some(image_list_copy as *const () as usize),
         "ImageList_Replace" => Some(image_list_replace as *const () as usize),
-        "ImageList_SetDragCursorImage" => Some(image_list_set_drag_cursor_image as *const () as usize),
+        "ImageList_SetDragCursorImage" => {
+            Some(image_list_set_drag_cursor_image as *const () as usize)
+        }
         _ => None,
     }
 }
 
 // Wine ref: dlls/comctl32/imagelist.c — ImageList_Copy copies images within image list.
-extern "win64" fn image_list_copy(_himl_dst: usize, _dst: i32, _himl_src: usize, _src: i32, _color: u32) -> i32 {
+extern "win64" fn image_list_copy(
+    _himl_dst: usize,
+    _dst: i32,
+    _himl_src: usize,
+    _src: i32,
+    _color: u32,
+) -> i32 {
     0 // FALSE
 }
 

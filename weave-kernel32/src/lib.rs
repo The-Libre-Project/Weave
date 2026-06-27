@@ -1095,7 +1095,9 @@ pub unsafe extern "win64" fn enter_critical_section(lp_critical_section: *mut u8
                 // Wine ref: dlls/ntdll/sync.c — RtlInitializeCriticalSection
                 // sets LockCount=-1; missing init means LockCount=0.
                 if owning_atomic.load(Ordering::Acquire) == 0
-                    && lock_atomic.compare_exchange(curr, curr, Ordering::AcqRel, Ordering::Acquire).is_ok()
+                    && lock_atomic
+                        .compare_exchange(curr, curr, Ordering::AcqRel, Ordering::Acquire)
+                        .is_ok()
                 {
                     owning_atomic.store(tid, Ordering::Release);
                     unsafe { std::ptr::write_volatile(rec_ptr, 1) };

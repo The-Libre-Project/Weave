@@ -714,16 +714,26 @@ fn main() {
     // ── 3.45. Call DllMain for side-by-side DLLs (after main exe IAT patching
     // so that imports like DisableThreadLibraryCalls are resolved). ────────
     for (dll_name, dll_bytes, base) in &side_dlls {
-        if dll_bytes.len() < 0x100 { continue; }
-        let pe_sig_off = u32::from_le_bytes(dll_bytes[0x3C..0x40].try_into().unwrap_or([0; 4])) as usize;
-        if pe_sig_off + 40 > dll_bytes.len() { continue; }
-        if &dll_bytes[pe_sig_off..pe_sig_off + 4] != b"PE\0\0" { continue; }
+        if dll_bytes.len() < 0x100 {
+            continue;
+        }
+        let pe_sig_off =
+            u32::from_le_bytes(dll_bytes[0x3C..0x40].try_into().unwrap_or([0; 4])) as usize;
+        if pe_sig_off + 40 > dll_bytes.len() {
+            continue;
+        }
+        if &dll_bytes[pe_sig_off..pe_sig_off + 4] != b"PE\0\0" {
+            continue;
+        }
         let entry_rva = u32::from_le_bytes(
-            dll_bytes[pe_sig_off + 20 + 0x10..pe_sig_off + 20 + 0x14].try_into().unwrap_or([0; 4])
+            dll_bytes[pe_sig_off + 20 + 0x10..pe_sig_off + 20 + 0x14]
+                .try_into()
+                .unwrap_or([0; 4]),
         ) as usize;
         if entry_rva != 0 {
             let dll_main_addr = unsafe { base.add(entry_rva) };
-            type DllMain = unsafe extern "win64" fn(hinst: usize, reason: u32, reserved: usize) -> i32;
+            type DllMain =
+                unsafe extern "win64" fn(hinst: usize, reason: u32, reserved: usize) -> i32;
             let dll_main: DllMain = unsafe { std::mem::transmute(dll_main_addr) };
             let hinst = *base as usize;
             let ok = unsafe { dll_main(hinst, 1, 0) }; // DLL_PROCESS_ATTACH = 1

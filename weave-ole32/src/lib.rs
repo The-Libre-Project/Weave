@@ -1044,7 +1044,11 @@ pub fn resolve_oleacc(dll: &str, func: &str) -> Option<usize> {
 }
 
 // Wine ref: dlls/oleacc/main.c — LresultFromObject returns an accessibility object reference.
-extern "win64" fn oleacc_lresult_from_object(_riid: *const u8, _w_param: usize, _acc: *const u8) -> usize {
+extern "win64" fn oleacc_lresult_from_object(
+    _riid: *const u8,
+    _w_param: usize,
+    _acc: *const u8,
+) -> usize {
     0
 }
 
