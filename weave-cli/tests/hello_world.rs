@@ -7798,6 +7798,115 @@ fn q_dir_launch_gate() {
     eprintln!("q_dir_launch_gate: A1+A2+A3 passed");
 }
 
+/// M25 Tier A gate: Audacity launch probe.
+///
+/// Runs audacity.exe under Xvfb (DISPLAY=:99) with a 15-second timeout.
+/// Asserts that:
+///   A1: stderr contains `PHASE: create_window_first` (wx main window created)
+///   A2: process did not exit with a crash signal
+///
+/// If the process is still running at 15s (expected for a GUI app), it is killed
+/// and A1 is checked against the collected stderr. Xvfb (:99) must be running.
+///
+/// The side-by-side DLL loader in main.rs auto-loads wxWidgets and lib-audacity
+/// DLLs from the fixture directory — no resolver entries needed for those.
+///
+/// Fixture: tests/fixtures/audacity/audacity.exe
+/// Skipped gracefully if the binary is absent (CI still passes).
+#[test]
+fn audacity_launch_gate() {
+    if !cfg!(target_os = "linux") {
+        eprintln!("skipping audacity_launch_gate — requires Linux");
+        return;
+    }
+
+    let manifest = env!("CARGO_MANIFEST_DIR");
+    let fixture_dir = format!("{manifest}/../tests/fixtures/audacity");
+    let exe = format!("{fixture_dir}/audacity.exe");
+
+    if !std::path::Path::new(&exe).exists() {
+        eprintln!("skipping: audacity.exe not present in tests/fixtures/audacity/");
+        eprintln!("  → run scripts/fetch-audacity.sh to download it");
+        return;
+    }
+
+    let weave_bin = env!("CARGO_BIN_EXE_weave");
+
+    let mut child = std::process::Command::new(weave_bin)
+        .current_dir(&fixture_dir)
+        .arg(&exe)
+        .env("DISPLAY", ":99")
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|e| panic!("failed to spawn weave on audacity.exe: {e}"));
+
+    // Drain stderr concurrently — Audacity's Weave output can exceed pipe buffer.
+    let stderr_pipe = child.stderr.take().expect("stderr was piped");
+    let stderr_shared = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let stderr_writer = std::sync::Arc::clone(&stderr_shared);
+    let drain_thread = std::thread::spawn(move || {
+        use std::io::Read;
+        let mut buf = Vec::new();
+        let mut pipe = stderr_pipe;
+        let _ = pipe.read_to_end(&mut buf);
+        *stderr_writer.lock().unwrap() = buf;
+    });
+
+    // 15-second timeout for the launch gate.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    let mut exit_status: Option<std::process::ExitStatus> = None;
+    let mut killed_by_deadline = false;
+
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                exit_status = Some(status);
+                break;
+            }
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    killed_by_deadline = true;
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err(e) => panic!("wait failed: {e}"),
+        }
+    }
+
+    drain_thread.join().expect("stderr drain thread panicked");
+    let stderr_bytes = stderr_shared.lock().unwrap().clone();
+    let stderr = String::from_utf8_lossy(&stderr_bytes);
+    eprintln!("audacity_launch_gate stderr:\n{stderr}");
+    eprintln!(
+        "audacity_launch_gate: killed_by_deadline={killed_by_deadline} exit={:?}",
+        exit_status
+    );
+
+    // A2: process must not have exited due to a signal (SIGSEGV, abort, etc.).
+    if let Some(status) = exit_status {
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::ExitStatusExt;
+            if let Some(sig) = status.signal() {
+                panic!(
+                    "Audacity Gate A2 FAIL: process exited with signal {sig} (SIGSEGV or abort)\n\
+                     stderr: {stderr}"
+                );
+            }
+        }
+    }
+
+    // A1: create_window_first must appear in stderr.
+    assert!(
+        stderr.contains("PHASE: create_window_first"),
+        "Audacity Gate A1 FAIL: create_window_first not seen within 15s\nstderr: {stderr}"
+    );
+
+    eprintln!("audacity_launch_gate: A1 passed");
+}
+
 /// E3-M5b Tier A gate: Q-Dir file-pane population (shell enum + ListView insert).
 ///
 /// Fixture: tests/fixtures/q-dir/Q-Dir_x64.exe
