@@ -566,7 +566,7 @@ fn main() {
         // Two-pass load: first register all exports, then patch all IATs.
         // This ensures that when sdl2_mixer.dll's IAT is patched, SDL2.dll's
         // exports are already registered (regardless of HashMap iteration order).
-        let mut side_dlls: Vec<(String, Vec<u8>, *mut u8)> = Vec::new();
+        side_dlls = Vec::new();
 
         // First pass: load DLLs from the main exe's import table.
         // Use a queue-based approach to handle transitive dependencies:
