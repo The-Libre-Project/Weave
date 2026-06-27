@@ -7839,6 +7839,19 @@ fn q_dir_file_pane_gate() {
     std::fs::create_dir_all(&drive_testdir).expect("failed to create drive_c/testdir");
     std::fs::write(drive_testdir.join("hello.txt"), b"Q-Dir file-pane test")
         .expect("failed to write test file");
+    // Also create a test file on the Desktop (bridged CSIDL_DESKTOP → XDG Desktop).
+    // This ensures Q-Dir's initial pane population finds at least one file entry.
+    if let Ok(desktop_path) = resolve_xdg_desktop_for_test() {
+        let _ = std::fs::create_dir_all(&desktop_path);
+        let _ = std::fs::write(
+            desktop_path.join("qdir_test.txt"),
+            b"Q-Dir file-pane test - desktop file",
+        );
+        eprintln!(
+            "q_dir_file_pane_gate: created desktop file at {:?}",
+            desktop_path
+        );
+    }
     eprintln!(
         "q_dir_file_pane_gate: created temp prefix at {:?}",
         prefix_path
@@ -7961,9 +7974,9 @@ fn q_dir_file_pane_gate() {
         "Q-Dir file-pane Gate A2 FAIL: loaded_pe not seen — binary didn't start\nstderr: {stderr}"
     );
 
-    // E3-M5e Tier A: file-pane population markers (blocked — see milestone doc).
-    // These assertions will remain soft until a startup path is found that triggers
-    // directory navigation. Currently diagnostic-only via the eprintln! above.
+    // M24 Tier A: file-pane population markers (CSIDL_DESKTOP bridged to XDG
+    // Desktop in M24). Assertions remain diagnostic-only; hard assert deferred
+    // until listview_insert_first is consistently observed across CI runs.
     if !stderr.contains("PHASE: find_first_file_first") {
         eprintln!("q_dir_file_pane_gate: find_first_file_first NOT observed — Hypothesis B confirmed (nav code never fires)");
     }
@@ -7973,14 +7986,46 @@ fn q_dir_file_pane_gate() {
         );
     }
 
-    // M18 A2: IShellFolder::EnumObjects — FALSIFIED (CI 27904088697).
-    // Q-Dir does not call IShellFolder::EnumObjects through Weave's stubs.
-    // The file-pane population mechanism remains unidentified. Log and continue.
-    if !stderr.contains("PHASE: shell_folder_enum_objects_first") {
-        eprintln!("q_dir_file_pane_gate: A2 note — shell_folder_enum_objects_first not observed (Q-Dir does not use IShellFolder for file-pane population)");
+    // M18 A2: IShellFolder::EnumObjects — falsified with old CSIDL_DESKTOP
+    // returning a non-existent prefix path. With CSIDL_DESKTOP bridged to XDG
+    // Desktop (M24), Q-Dir may now reach EnumObjects on a real directory.
+    if stderr.contains("PHASE: shell_folder_enum_objects_first") {
+        eprintln!("q_dir_file_pane_gate: shell_folder_enum_objects_first OBSERVED — Q-Dir uses IShellFolder::EnumObjects after CSIDL bridge");
+    } else {
+        eprintln!("q_dir_file_pane_gate: shell_folder_enum_objects_first not observed — Q-Dir likely uses FindFirstFileW");
+    }
+
+    // M24 A1: listview_insert_first — check if LVM_INSERTITEMW was dispatched.
+    if stderr.contains("PHASE: listview_insert_first") {
+        eprintln!("q_dir_file_pane_gate: listview_insert_first OBSERVED — file-pane population confirmed!");
+    } else {
+        eprintln!("q_dir_file_pane_gate: listview_insert_first not observed — file-pane population not yet reached");
     }
 
     eprintln!("q_dir_file_pane_gate: A1+A2+A3 passed");
+}
+
+/// Resolve the XDG Desktop path for test file creation.
+///
+/// Uses the same logic as `weave_shell32::shell::xdg_user_dir("DESKTOP", "Desktop")`.
+/// Returns `None` if the path cannot be determined (e.g., macOS without HOME set).
+fn resolve_xdg_desktop_for_test() -> Option<std::path::PathBuf> {
+    // Try xdg-user-dir first (available on most Linux desktops).
+    if let Ok(output) = std::process::Command::new("xdg-user-dir")
+        .arg("DESKTOP")
+        .output()
+    {
+        if output.status.success() {
+            let raw = String::from_utf8_lossy(&output.stdout);
+            let trimmed = raw.trim();
+            if !trimmed.is_empty() {
+                return Some(std::path::PathBuf::from(trimmed));
+            }
+        }
+    }
+    // Fall back to $HOME/Desktop.
+    let home = std::env::var("HOME").ok()?;
+    Some(std::path::PathBuf::from(home).join("Desktop"))
 }
 
 // ── Signal Desktop Phase A probe ─────────────────────────────────────────────

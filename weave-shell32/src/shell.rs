@@ -175,8 +175,12 @@ fn csidl_to_win_path(n_folder: i32) -> Option<String> {
         CSIDL_MYMUSIC => Some(xdg_user_dir("MUSIC", "Music")),
         CSIDL_MYPICTURES => Some(xdg_user_dir("PICTURES", "Pictures")),
         CSIDL_MYVIDEO => Some(xdg_user_dir("VIDEOS", "Videos")),
+        // Bridged: CSIDL_DESKTOP returns the real XDG Desktop path (same as
+        // CSIDL_DESKTOPDIRECTORY). On Windows both CSIDLs resolve to the same
+        // filesystem Desktop directory, so returning a non-existent prefix-relative
+        // path breaks file-manager pane population on first launch.
+        CSIDL_DESKTOP => Some(xdg_user_dir("DESKTOP", "Desktop")),
         // Non-bridged: prefix-relative fake Windows paths.
-        CSIDL_DESKTOP => Some(r"C:\Users\User\Desktop".to_string()),
         CSIDL_APPDATA => Some(r"C:\Users\User\AppData\Roaming".to_string()),
         CSIDL_LOCAL_APPDATA => Some(r"C:\Users\User\AppData\Local".to_string()),
         CSIDL_PROGRAM_FILES => Some(r"C:\Program Files".to_string()),
