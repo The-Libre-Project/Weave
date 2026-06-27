@@ -122,6 +122,9 @@ fn resolve(dll: &str, func: &str) -> Option<usize> {
         // bcryptprimitives.dll — CNG low-level crypto primitives (Signal/SChannel TLS)
         .or_else(|| weave_bcryptprimitives::resolve(dll, func))
         .or_else(|| weave_powrprof::resolve(dll, func))
+        // lib-audacity internal DLLs — C++ mangled symbols from side-by-side
+        // DLLs that are not always present as PE files in the fixture.
+        .or_else(|| weave_audacity::resolve(dll, func))
         .or_else(|| dll_registry::lookup(dll, func))
 }
 

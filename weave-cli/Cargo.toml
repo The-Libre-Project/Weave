@@ -41,6 +41,7 @@ weave-secur32 = { path = "../weave-secur32" }
 weave-bcrypt = { path = "../weave-bcrypt" }
 weave-bcryptprimitives = { path = "../weave-bcryptprimitives" }
 weave-powrprof = { path = "../weave-powrprof" }
+weave-audacity = { path = "../weave-audacity" }
 weave-dwrite = { path = "../weave-dwrite" }
 weave-sandbox = { path = "../weave-sandbox" }
 weave-installer = { path = "../weave-installer" }

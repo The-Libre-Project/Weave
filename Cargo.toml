@@ -33,6 +33,7 @@ members = [
     "weave-wldap32",
     "weave-dwrite",
     "weave-powrprof",
+    "weave-audacity",
 ]
 resolver = "2"
 

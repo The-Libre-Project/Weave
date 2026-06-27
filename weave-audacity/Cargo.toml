@@ -1,0 +1,7 @@
+[package]
+name = "weave-audacity"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Audacity internal DLL stubs for Weave — Phase A return-0 stubs for internal C++ imports"
