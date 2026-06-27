@@ -590,7 +590,9 @@ fn main() {
                 Ok((image, exports)) => {
                     let base = image.base;
                     let entry_point = image.entry_point;
+                    let image_size = image.size;
                     dll_registry::register(dll_key.clone(), image, exports);
+                    weave_core::seh::register_loaded_module(base as usize, image_size);
                     eprintln!("weave: pre-loaded {dll_name} from exe dir");
                     loaded.insert(dll_key.clone());
                     side_dlls.push((dll_name, dll_bytes.clone(), base, entry_point));
@@ -707,28 +709,6 @@ fn main() {
     }
 
     eprintln!("weave: imports resolved");
-
-    // ── 3.45. Call DllMain(DLL_PROCESS_ATTACH) for wx/lib DLLs.
-    // CRT stubs now cover the import surface so DllMain can init safely.
-    for (dll_name, _dll_bytes, base, entry) in &side_dlls {
-        let dll_lower = dll_name.to_lowercase();
-        if !dll_lower.starts_with("wx")
-            && !dll_lower.starts_with("lib-")
-            && !dll_lower.starts_with("msvcp")
-            && !dll_lower.starts_with("vcruntime")
-        {
-            continue;
-        }
-        if entry.is_null() {
-            continue;
-        }
-        let hinst = *base as usize;
-        type DllMain = unsafe extern "win64" fn(hinst: usize, reason: u32, reserved: usize) -> i32;
-        let dll_main: DllMain = unsafe { std::mem::transmute(*entry) };
-        eprintln!("weave: {dll_name}: DllMain(DLL_PROCESS_ATTACH)...");
-        let ok = unsafe { dll_main(hinst, 1, 0) };
-        eprintln!("weave: {dll_name}: DllMain(DLL_PROCESS_ATTACH) → {ok}");
-    }
 
     // ── 3.5. Apply PE-specific binary patches ─────────────────────────────
     // Binary patches fix known issues in specific PE images that cannot be
@@ -873,6 +853,28 @@ fn main() {
 
     // ── 6. Install exception handlers ─────────────────────────────────────
     seh::install(&image);
+
+    // ── 6.1. Call DllMain for side-by-side DLLs (after SEH is active so
+    // crashes in DllMain are caught and return FALSE instead of SIGSEGV).
+    for (dll_name, _dll_bytes, base, entry) in &side_dlls {
+        let dll_lower = dll_name.to_lowercase();
+        if !dll_lower.starts_with("wx")
+            && !dll_lower.starts_with("lib-")
+            && !dll_lower.starts_with("msvcp")
+            && !dll_lower.starts_with("vcruntime")
+        {
+            continue;
+        }
+        if entry.is_null() {
+            continue;
+        }
+        let hinst = *base as usize;
+        type DllMain = unsafe extern "win64" fn(hinst: usize, reason: u32, reserved: usize) -> i32;
+        let dll_main: DllMain = unsafe { std::mem::transmute(*entry) };
+        eprintln!("weave: {dll_name}: DllMain(DLL_PROCESS_ATTACH)...");
+        let ok = unsafe { dll_main(hinst, 1, 0) };
+        eprintln!("weave: {dll_name}: DllMain(DLL_PROCESS_ATTACH) → {ok}");
+    }
 
     // ── 6.5. Patch CFG dispatch stubs ─────────────────────────────────────
     // Windows PEs compiled with CFG encode indirect call targets using the

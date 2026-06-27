@@ -25,6 +25,40 @@
 use crate::loader::LoadedImage;
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
+// ── Lock-free loaded-module range table ────────────────────────────────────
+//
+// Signal-handler safe — no locks, no heap, fixed-size array.  Allows the
+// signal handler to identify crashes in loaded DLLs (not just the main PE).
+const MAX_LOADED_MODULES: usize = 256;
+static LOADED_MODULES_BASE: [AtomicUsize; MAX_LOADED_MODULES] =
+    [const { AtomicUsize::new(0) }; MAX_LOADED_MODULES];
+static LOADED_MODULES_SIZE: [AtomicUsize; MAX_LOADED_MODULES] =
+    [const { AtomicUsize::new(0) }; MAX_LOADED_MODULES];
+static LOADED_MODULES_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+/// Register a loaded module so the signal handler can identify crashes within it.
+/// Signal-handler safe — uses relaxed atomics.
+pub fn register_loaded_module(base: usize, size: usize) {
+    let idx = LOADED_MODULES_COUNT.fetch_add(1, Ordering::Relaxed);
+    if idx < MAX_LOADED_MODULES {
+        LOADED_MODULES_BASE[idx].store(base, Ordering::Relaxed);
+        LOADED_MODULES_SIZE[idx].store(size, Ordering::Relaxed);
+    }
+}
+
+/// Check if an address falls within any registered loaded module.
+fn addr_in_loaded_module(rip: usize) -> bool {
+    let count = LOADED_MODULES_COUNT.load(Ordering::Relaxed);
+    for i in 0..count.min(MAX_LOADED_MODULES) {
+        let b = LOADED_MODULES_BASE[i].load(Ordering::Relaxed);
+        let s = LOADED_MODULES_SIZE[i].load(Ordering::Relaxed);
+        if rip >= b && rip < b + s {
+            return true;
+        }
+    }
+    false
+}
+
 // ── Global PE metadata for async-signal-safe access ──────────────────────────
 //
 // Signal handlers cannot safely access complex data structures (locks, heap,
@@ -168,7 +202,7 @@ unsafe extern "C" fn on_fatal_signal(
     let base = PE_BASE.load(Ordering::Relaxed);
     let size = PE_SIZE.load(Ordering::Relaxed);
 
-    if base != 0 && rip >= base && rip < base + size {
+    if (base != 0 && rip >= base && rip < base + size) || addr_in_loaded_module(rip) {
         // ── SEH runaway cap ────────────────────────────────────────────────
         // If the same RIP faults repeatedly, no handler is actually resolving
         // the exception.  Cap consecutive identical-RIP faults and terminate
