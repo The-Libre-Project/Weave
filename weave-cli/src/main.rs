@@ -753,13 +753,17 @@ fn main() {
                 .try_into()
                 .unwrap_or([0; 4]),
         ) as usize;
+        eprintln!("weave: DllMain {dll_name}: entry_rva={entry_rva:#x}");
         if entry_rva != 0 {
             let dll_main_addr = unsafe { base.add(entry_rva) };
             type DllMain =
                 unsafe extern "win64" fn(hinst: usize, reason: u32, reserved: usize) -> i32;
             let dll_main: DllMain = unsafe { std::mem::transmute(dll_main_addr) };
             let hinst = *base as usize;
-            let ok = unsafe { dll_main(hinst, 1, 0) }; // DLL_PROCESS_ATTACH = 1
+            // Catch DllMain crash — some DLLs' entry points call null-stubbed
+            // imports and crash. We let the SEH handler catch it, but log first.
+            eprintln!("weave: DllMain {dll_name}: calling DLL_PROCESS_ATTACH...");
+            let ok = unsafe { dll_main(hinst, 1, 0) };
             eprintln!("weave: {dll_name}: DllMain(DLL_PROCESS_ATTACH) → {ok}");
         }
     }
