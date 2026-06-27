@@ -2273,8 +2273,32 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
             image_list_get_image_info as unsafe extern "win64" fn(_, _, _) -> _ as *const ()
                 as usize,
         ),
+        "ImageList_Copy" => Some(image_list_copy as *const () as usize),
+        "ImageList_Replace" => Some(image_list_replace as *const () as usize),
+        "ImageList_SetDragCursorImage" => Some(image_list_set_drag_cursor_image as *const () as usize),
         _ => None,
     }
+}
+
+// Wine ref: dlls/comctl32/imagelist.c — ImageList_Copy copies images within image list.
+extern "win64" fn image_list_copy(_himl_dst: usize, _dst: i32, _himl_src: usize, _src: i32, _color: u32) -> i32 {
+    0 // FALSE
+}
+
+// Wine ref: dlls/comctl32/imagelist.c — ImageList_Replace replaces an image.
+extern "win64" fn image_list_replace(_himl: usize, _i: i32, _image: usize, _mask: usize) -> i32 {
+    0 // FALSE
+}
+
+// Wine ref: dlls/comctl32/imagelist.c — ImageList_SetDragCursorImage creates a drag cursor.
+extern "win64" fn image_list_set_drag_cursor_image(
+    _himl: usize,
+    _i: i32,
+    _dx: i32,
+    _dy: i32,
+    _color: u32,
+) -> usize {
+    0
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
@@ -2514,6 +2538,8 @@ pub fn resolve_uxtheme(dll: &str, func: &str) -> Option<usize> {
         "GetThemeTransitionDuration" => Some(get_theme_transition_duration as *const () as usize),
         "GetThemeInt" => Some(get_theme_int as *const () as usize),
         "DrawThemeEdge" => Some(draw_theme_edge as *const () as usize),
+        "GetCurrentThemeName" => Some(get_current_theme_name as *const () as usize),
+        "GetThemeMargins" => Some(get_theme_margins as *const () as usize),
         _ => None,
     }
 }
@@ -2730,6 +2756,31 @@ extern "win64" fn draw_theme_edge(
     _edge: u32,
     _flags: u32,
     _rect: *mut u8,
+) -> i32 {
+    S_OK
+}
+
+// Wine ref: dlls/uxtheme/theme.c — GetCurrentThemeName returns theme name strings.
+extern "win64" fn get_current_theme_name(
+    _name: *mut u16,
+    _name_len: i32,
+    _color: *mut u16,
+    _color_len: i32,
+    _size: *mut u16,
+    _size_len: i32,
+) -> i32 {
+    S_OK
+}
+
+// Wine ref: dlls/uxtheme/theme.c — GetThemeMargins returns S_OK with zeroed margins.
+extern "win64" fn get_theme_margins(
+    _h_theme: usize,
+    _hdc: usize,
+    _part: i32,
+    _state: i32,
+    _prop: i32,
+    _rect: *const u8,
+    _margins: *mut u8,
 ) -> i32 {
     S_OK
 }

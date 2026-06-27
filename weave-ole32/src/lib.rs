@@ -972,6 +972,92 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
     }
 }
 
+// ── oleaut32.dll stubs ─────────────────────────────────────────────────────────
+
+/// Resolve an oleaut32.dll import to a stub address.
+pub fn resolve_oleaut32(dll: &str, func: &str) -> Option<usize> {
+    if !dll.eq_ignore_ascii_case("oleaut32.dll") {
+        return None;
+    }
+    match func {
+        "#17" | "#19" | "#20" | "#21" | "#22" | "#35" | "#77" | "#102" | "#113" | "#184"
+        | "#185" => Some(oleaut32_stub as *const () as usize),
+        _ => None,
+    }
+}
+
+/// Generic stub for oleaut32.dll ordinal imports exposed by wxWidgets.
+extern "win64" fn oleaut32_stub() -> i32 {
+    0
+}
+
+// ── rpcrt4.dll stubs ───────────────────────────────────────────────────────────
+
+/// Resolve an rpcrt4.dll import to a stub address.
+pub fn resolve_rpcrt4(dll: &str, func: &str) -> Option<usize> {
+    if !dll.eq_ignore_ascii_case("rpcrt4.dll") {
+        return None;
+    }
+    match func {
+        "UuidCreate" => Some(rpc_uuid_create as *const () as usize),
+        "UuidToStringW" => Some(rpc_uuid_to_string_w as *const () as usize),
+        "UuidFromStringW" => Some(rpc_uuid_from_string_w as *const () as usize),
+        "RpcStringFreeW" => Some(rpc_string_free_w as *const () as usize),
+        _ => None,
+    }
+}
+
+// Wine ref: dlls/rpcrt4/rpc.c — UuidCreate generates a new UUID.
+extern "win64" fn rpc_uuid_create(_uuid: *mut u8) -> i32 {
+    0 // RPC_S_OK
+}
+
+// Wine ref: dlls/rpcrt4/rpc.c — UuidToStringW converts UUID to string.
+extern "win64" fn rpc_uuid_to_string_w(_uuid: *const u8, _str: *mut usize) -> i32 {
+    0 // RPC_S_OK
+}
+
+// Wine ref: dlls/rpcrt4/rpc.c — UuidFromStringW converts string to UUID.
+extern "win64" fn rpc_uuid_from_string_w(_str: *const u16, _uuid: *mut u8) -> i32 {
+    0 // RPC_S_OK
+}
+
+// Wine ref: dlls/rpcrt4/rpc.c — RpcStringFreeW frees a UUID string.
+extern "win64" fn rpc_string_free_w(_str: *mut u16) -> i32 {
+    0 // RPC_S_OK
+}
+
+// ── oleacc.dll stubs ───────────────────────────────────────────────────────────
+
+/// Resolve an oleacc.dll import to a stub address.
+pub fn resolve_oleacc(dll: &str, func: &str) -> Option<usize> {
+    if !dll.eq_ignore_ascii_case("oleacc.dll") {
+        return None;
+    }
+    match func {
+        "LresultFromObject" => Some(oleacc_lresult_from_object as *const () as usize),
+        "CreateStdAccessibleObject" => {
+            Some(oleacc_create_std_accessible_object as *const () as usize)
+        }
+        _ => None,
+    }
+}
+
+// Wine ref: dlls/oleacc/main.c — LresultFromObject returns an accessibility object reference.
+extern "win64" fn oleacc_lresult_from_object(_riid: *const u8, _w_param: usize, _acc: *const u8) -> usize {
+    0
+}
+
+// Wine ref: dlls/oleacc/main.c — CreateStdAccessibleObject creates a standard accessible object.
+extern "win64" fn oleacc_create_std_accessible_object(
+    _hwnd: usize,
+    _role: u32,
+    _riid: *const u8,
+    _acc: *mut usize,
+) -> i32 {
+    0 // S_OK
+}
+
 // ── Unit tests ────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
