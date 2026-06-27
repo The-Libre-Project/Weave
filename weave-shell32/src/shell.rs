@@ -2632,7 +2632,12 @@ unsafe extern "win64" fn sil_add(this: usize, _hbm: usize, _hbm_mask: usize, _pi
 }
 
 // Vtable slot 4 — ReplaceIcon (int, HICON, int*)
-unsafe extern "win64" fn sil_replace_icon(this: usize, _i: i32, _hicon: usize, _pi: *mut i32) -> u32 {
+unsafe extern "win64" fn sil_replace_icon(
+    this: usize,
+    _i: i32,
+    _hicon: usize,
+    _pi: *mut i32,
+) -> u32 {
     let _ = this;
     0x8000_4001u32 // E_NOTIMPL
 }
@@ -2689,7 +2694,11 @@ unsafe extern "win64" fn sil_get_image_count(this: usize, pi: *mut i32) -> u32 {
 }
 
 // Vtable slot 31 — GetOverlayImage (int, int*)
-unsafe extern "win64" fn sil_get_overlay_image(this: usize, _i_overlay: i32, pi_index: *mut i32) -> u32 {
+unsafe extern "win64" fn sil_get_overlay_image(
+    this: usize,
+    _i_overlay: i32,
+    pi_index: *mut i32,
+) -> u32 {
     let _ = this;
     if !pi_index.is_null() {
         unsafe { *pi_index = -1 };
