@@ -615,6 +615,7 @@ fn main() {
             }
         }
     }
+    eprintln!("weave: === SIDE-BY-SIDE DONE ===");
 
     // ── 2.6. E3-M9: pre-load IrfanView Plugins/OptiPNG.dll for save gate ───
     // Guest never calls FindFirstFileW on Plugins\*.dll under Weave; preload
