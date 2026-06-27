@@ -546,6 +546,7 @@ fn main() {
     // that lives next to the exe and appears in its import table is loaded as
     // a PE and registered so that IAT patching can resolve its exports.
     // SDL2.dll, custom runtimes, and game-specific DLLs all land here.
+    let side_dlls: Vec<(String, Vec<u8>, *mut u8)>;
     {
         let exe_dir_canon = args.exe.canonicalize().unwrap_or_else(|_| args.exe.clone());
         let exe_dir = exe_dir_canon.parent().unwrap_or(std::path::Path::new("."));
