@@ -9006,3 +9006,78 @@ fn registry_basic_gate() {
     eprintln!("registry_basic stdout:\n{stdout}");
     eprintln!("registry_basic: A1+A2 passed — IAT resolved, exit 0");
 }
+
+/// M23 — fileio.exe file I/O operations gate.
+///
+/// fileio.exe is a test binary that exercises Windows file I/O:
+/// CreateFileW, ReadFile, WriteFile, CloseHandle, GetFileSize, SetFilePointer.
+#[test]
+fn fileio_basic_gate() {
+    if !cfg!(target_os = "linux") {
+        eprintln!("skipping execution test — requires Linux");
+        return;
+    }
+
+    let weave_bin = env!("CARGO_BIN_EXE_weave");
+    let manifest = env!("CARGO_MANIFEST_DIR");
+    let exe = format!("{manifest}/../tests/fixtures/bin/fileio.exe");
+
+    if !std::path::Path::new(&exe).exists() {
+        eprintln!("skipping: fileio.exe not present");
+        return;
+    }
+
+    let start = std::time::Instant::now();
+    let mut child = std::process::Command::new(weave_bin)
+        .arg(&exe)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|e| panic!("failed to spawn weave on fileio.exe: {e}"));
+
+    let deadline = start + std::time::Duration::from_secs(10);
+    let mut killed_by_deadline = false;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    killed_by_deadline = true;
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err(e) => panic!("wait failed: {e}"),
+        }
+    }
+
+    let output = child.wait_with_output().expect("wait_with_output failed");
+    let elapsed = start.elapsed();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    eprintln!("fileio stderr ({elapsed:.1?}):\n{stderr}");
+    eprintln!("fileio stdout:\n{stdout}");
+
+    // A1: IAT patch completed
+    assert!(
+        stderr.contains("weave: imports resolved"),
+        "M23 A1 FAIL: no import resolution.\nstderr: {stderr}"
+    );
+
+    // A2: exit 0
+    assert!(
+        output.status.success(),
+        "M23 A2 FAIL: exit code {}\nstderr: {stderr}",
+        output.status
+    );
+
+    // A3: file I/O was exercised (CreateFileW logged to stderr)
+    let has_create = stderr.contains("CreateFileW");
+    assert!(
+        has_create,
+        "M23 A3 FAIL: no CreateFileW activity detected.\nstderr: {stderr}"
+    );
+
+    eprintln!("fileio: A1+A2+A3 passed — IAT resolved, exit 0, CreateFileW observed");
+}
