@@ -7823,10 +7823,16 @@ fn audacity_launch_gate() {
     let manifest = env!("CARGO_MANIFEST_DIR");
     let fixture_dir = format!("{manifest}/../tests/fixtures/audacity");
     let exe = format!("{fixture_dir}/audacity.exe");
+    let wx_dll = format!("{fixture_dir}/wxmsw313u_core_vc_x64_custom.dll");
 
     if !std::path::Path::new(&exe).exists() {
         eprintln!("skipping: audacity.exe not present in tests/fixtures/audacity/");
         eprintln!("  → run scripts/fetch-audacity.sh to download it");
+        return;
+    }
+    if !std::path::Path::new(&wx_dll).exists() {
+        eprintln!("skipping: Audacity side-by-side DLLs not present in tests/fixtures/audacity/");
+        eprintln!("  → run scripts/fetch-audacity.sh to download the full Audacity bundle");
         return;
     }
 

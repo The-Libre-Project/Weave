@@ -61,6 +61,10 @@ tests/fixtures/bin/m8a_extract_out/
 # NXEngine fixture — binary game files, not tracked
 tests/fixtures/nxengine/
 
+# Audacity fixture — extracted from portable zip, downloaded by fetch-audacity.sh
+tests/fixtures/audacity/
+!tests/fixtures/audacity/audacity.exe
+
 # weave-gui build artifacts
 /weave-gui/dist/
 /weave-gui/node_modules/

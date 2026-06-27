@@ -2,14 +2,16 @@
 # Fetch Audacity portable 64-bit for Phase A probe.
 set -euo pipefail
 
-DEST="tests/fixtures/audacity/audacity.exe"
+DEST_DIR="tests/fixtures/audacity"
+DEST_EXE="$DEST_DIR/audacity.exe"
 
-if [ -f "$DEST" ]; then
-    echo "Audacity already present at $DEST"
+# Check for a representative DLL rather than the exe — the exe is committed
+# to git but the DLLs must be downloaded. If the DLLs are already present
+# (e.g. from a prior CI run), skip.
+if [ -f "$DEST_DIR/wxmsw313u_core_vc_x64_custom.dll" ]; then
+    echo "Audacity DLLs already present at $DEST_DIR"
     exit 0
 fi
-
-mkdir -p tests/fixtures/audacity
 
 python3 << 'PYEOF'
 import json, urllib.request, zipfile, os, shutil
