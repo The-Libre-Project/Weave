@@ -1086,7 +1086,22 @@ pub unsafe extern "win64" fn enter_critical_section(lp_critical_section: *mut u8
                 unsafe { std::ptr::write_volatile(rec_ptr, 1) };
                 return;
             }
-            Err(_) => {
+            Err(curr) => {
+                // Uninitialized CS: LockCount was never set to -1 (side-by-side
+                // DLL's DllMain was not called — static CRT init never ran).
+                // Force-acquire: CAS(0 → 0) does nothing and lets us set the
+                // owning thread. LockCount stays 0, which is correct for a CS
+                // held by one thread with no waiters.
+                // Wine ref: dlls/ntdll/sync.c — RtlInitializeCriticalSection
+                // sets LockCount=-1; missing init means LockCount=0.
+                if owning_atomic.load(Ordering::Acquire) == 0 {
+                    if lock_atomic.compare_exchange(curr, curr, Ordering::AcqRel, Ordering::Acquire).is_ok() {
+                        owning_atomic.store(tid, Ordering::Release);
+                        unsafe { std::ptr::write_volatile(rec_ptr, 1) };
+                        eprintln!("weave/EnterCriticalSection: cs={lp_critical_section:p} force-acquired (uninitialized)");
+                        return;
+                    }
+                }
                 spins += 1;
                 if spins == 1 {
                     eprintln!("weave/EnterCriticalSection: cs={lp_critical_section:p} contended (will spin)");
