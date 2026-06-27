@@ -546,7 +546,7 @@ fn main() {
     // that lives next to the exe and appears in its import table is loaded as
     // a PE and registered so that IAT patching can resolve its exports.
     // SDL2.dll, custom runtimes, and game-specific DLLs all land here.
-    let mut side_dlls: Vec<(String, Vec<u8>, *mut u8)>;
+    let mut side_dlls: Vec<(String, Vec<u8>, *mut u8, *const u8)>;
     {
         let exe_dir_canon = args.exe.canonicalize().unwrap_or_else(|_| args.exe.clone());
         let exe_dir = exe_dir_canon.parent().unwrap_or(std::path::Path::new("."));
@@ -592,7 +592,7 @@ fn main() {
                     dll_registry::register(dll_key.clone(), image, exports);
                     eprintln!("weave: pre-loaded {dll_name} from exe dir");
                     loaded.insert(dll_key.clone());
-                    side_dlls.push((dll_name, dll_bytes.clone(), base));
+                    side_dlls.push((dll_name, dll_bytes.clone(), base, image.entry_point));
                     // Discover transitive dependencies and add them to the queue.
                     if let Ok(parsed) = weave_core::pe::parse(&dll_bytes) {
                         for dep in &parsed.imports {
@@ -612,7 +612,7 @@ fn main() {
             }
         }
 
-        for (dll_name, dll_bytes, base) in &side_dlls {
+        for (dll_name, dll_bytes, base, _entry) in &side_dlls {
             unsafe {
                 iat::patch_best_effort(dll_bytes, *base, resolve, |d, f, va| {
                     eprintln!(
@@ -712,14 +712,7 @@ fn main() {
     eprintln!("weave: imports resolved");
 
     // ── 3.45. Call DllMain for side-by-side DLLs that need CRT/global init.
-    // Only call for DLLs with uninitialized CS (LockCount=0 vs -1) — i.e.
-    // wxWidgets and Audacity internal DLLs whose DllMain wasn't called.
-    // Skip DLLs like SDL2.dll that work fine without DllMain.
-    eprintln!(
-        "weave: === DllMain loop: side_dlls has {} entries ===",
-        side_dlls.len()
-    );
-    for (dll_name, dll_bytes, base) in &side_dlls {
+    for (dll_name, _dll_bytes, base, entry) in &side_dlls {
         let dll_lower = dll_name.to_lowercase();
         if !dll_lower.contains("wx")
             && !dll_lower.contains("lib-")
@@ -728,44 +721,15 @@ fn main() {
         {
             continue;
         }
-        if dll_bytes.len() < 0x100 {
+        if entry.is_null() {
             continue;
         }
-        let pe_sig_off =
-            u32::from_le_bytes(dll_bytes[0x3C..0x40].try_into().unwrap_or([0; 4])) as usize;
-        eprintln!(
-            "weave: DllMain {dll_name}: pe_sig_off={pe_sig_off:#x} len={}",
-            dll_bytes.len()
-        );
-        if pe_sig_off + 40 > dll_bytes.len() {
-            eprintln!("weave: DllMain SKIP {dll_name}: pe_sig_off {pe_sig_off:#x} out of bounds");
-            continue;
-        }
-        if &dll_bytes[pe_sig_off..pe_sig_off + 4] != b"PE\0\0" {
-            eprintln!(
-                "weave: DllMain SKIP {dll_name}: bad PE sig at {pe_sig_off:#x}: {:02x?}",
-                &dll_bytes[pe_sig_off..pe_sig_off + 4]
-            );
-            continue;
-        }
-        let entry_rva = u32::from_le_bytes(
-            dll_bytes[pe_sig_off + 20 + 0x10..pe_sig_off + 20 + 0x14]
-                .try_into()
-                .unwrap_or([0; 4]),
-        ) as usize;
-        eprintln!("weave: DllMain {dll_name}: entry_rva={entry_rva:#x}");
-        if entry_rva != 0 {
-            let dll_main_addr = unsafe { base.add(entry_rva) };
-            type DllMain =
-                unsafe extern "win64" fn(hinst: usize, reason: u32, reserved: usize) -> i32;
-            let dll_main: DllMain = unsafe { std::mem::transmute(dll_main_addr) };
-            let hinst = *base as usize;
-            // Catch DllMain crash — some DLLs' entry points call null-stubbed
-            // imports and crash. We let the SEH handler catch it, but log first.
-            eprintln!("weave: DllMain {dll_name}: calling DLL_PROCESS_ATTACH...");
-            let ok = unsafe { dll_main(hinst, 1, 0) };
-            eprintln!("weave: {dll_name}: DllMain(DLL_PROCESS_ATTACH) → {ok}");
-        }
+        let hinst = *base as usize;
+        type DllMain = unsafe extern "win64" fn(hinst: usize, reason: u32, reserved: usize) -> i32;
+        let dll_main: DllMain = unsafe { std::mem::transmute(*entry) };
+        eprintln!("weave: {dll_name}: DllMain(DLL_PROCESS_ATTACH)...");
+        let ok = unsafe { dll_main(hinst, 1, 0) };
+        eprintln!("weave: {dll_name}: DllMain(DLL_PROCESS_ATTACH) → {ok}");
     }
 
     // ── 3.5. Apply PE-specific binary patches ─────────────────────────────
