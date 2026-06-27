@@ -955,10 +955,25 @@ unsafe fn patch_inner(
         .optional_header
         .ok_or("IAT patch: no optional header")?;
 
+    let image_size = opt.windows_fields.size_of_image as usize;
     let import_rva = match opt.data_directories.get_import_table() {
         Some(d) if d.size > 0 => d.virtual_address as usize,
         _ => return Ok(()), // no imports
     };
+
+    // Make the entire image writable for the duration of IAT patching.
+    // Do NOT use a fixed 2-page window (PAGE * 2): when the IAT sits near
+    // the end of the image's mapped region, the fixed window spills beyond
+    // it and mprotect changes permissions on adjacent pages (heap, stack,
+    // other mmap'd regions). Restoring those to PROT_READ corrupts memory.
+    // See CI-FAIL-LADDER.md Fail #96.
+    unsafe {
+        libc::mprotect(
+            base as *mut libc::c_void,
+            image_size,
+            libc::PROT_READ | libc::PROT_WRITE,
+        );
+    }
 
     // Walk IMAGE_IMPORT_DESCRIPTORs from the loaded image.
     // The array is null-terminated (all-zero entry marks the end).
@@ -988,18 +1003,6 @@ unsafe fn patch_inner(
             || dll_name.to_ascii_lowercase().contains("kernel32")
         {
             eprintln!("weave/iat: patching {dll_name} INT={int_rva:#x} IAT={iat_rva:#x} first_thunk_in_desc={:#x} orig={:#x}", desc.first_thunk, desc.original_first_thunk);
-        }
-
-        // Temporarily make the IAT page(s) writable.
-        let iat_va = unsafe { base.add(iat_rva) };
-        let page_start = page_align_down(iat_va as usize);
-        // Cover at least 2 pages in case the IAT straddles a page boundary.
-        unsafe {
-            libc::mprotect(
-                page_start as *mut libc::c_void,
-                PAGE * 2,
-                libc::PROT_READ | libc::PROT_WRITE,
-            );
         }
 
         // Walk INT + IAT in lock-step.
@@ -1094,12 +1097,24 @@ unsafe fn patch_inner(
             i += 1;
         }
 
-        // Restore IAT to read-only.
-        unsafe {
-            libc::mprotect(page_start as *mut libc::c_void, PAGE * 2, libc::PROT_READ);
-        }
-
         desc_offset += std::mem::size_of::<ImportDescriptor>();
+    }
+
+    // Restore per-section permissions after IAT patching.
+    for section in &pe.sections {
+        let vaddr = section.virtual_address as usize;
+        let vsize = page_align_up(if section.virtual_size == 0 {
+            section.size_of_raw_data as usize
+        } else {
+            section.virtual_size as usize
+        });
+        if vsize == 0 || vaddr + vsize > image_size {
+            continue;
+        }
+        let prot = section_prot(section.characteristics);
+        unsafe {
+            libc::mprotect(base.add(vaddr) as *mut libc::c_void, vsize, prot);
+        }
     }
 
     Ok(())
@@ -1119,8 +1134,23 @@ unsafe fn read_cstr(ptr: *const u8) -> String {
 
 const PAGE: usize = 4096;
 
-fn page_align_down(addr: usize) -> usize {
-    addr & !(PAGE - 1)
+fn page_align_up(size: usize) -> usize {
+    (size + PAGE - 1) & !(PAGE - 1)
+}
+
+/// Convert PE section characteristic flags to Unix memory protection flags.
+fn section_prot(characteristics: u32) -> libc::c_int {
+    let mut prot = libc::PROT_NONE;
+    if characteristics & 0x4000_0000 != 0 {
+        prot |= libc::PROT_READ;
+    }
+    if characteristics & 0x8000_0000 != 0 {
+        prot |= libc::PROT_WRITE;
+    }
+    if characteristics & 0x2000_0000 != 0 {
+        prot |= libc::PROT_EXEC;
+    }
+    prot
 }
 
 // ---------------------------------------------------------------------------
