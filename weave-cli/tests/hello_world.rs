@@ -8935,3 +8935,80 @@ fn shell32_sh_create_item_from_id_list_probe() {
         "shell32_sh_create_item_from_id_list_probe: OK — SHGetFolderLocation→SHCreateItemFromIDList→Release→ILFree"
     );
 }
+
+/// M22 — registry_basic.exe registry operations gate.
+///
+/// registry_basic.exe is a test binary that exercises ADVAPI32 registry APIs:
+/// RegCreateKeyExW, RegOpenKeyExW, RegSetValueExW, RegQueryValueExW, RegCloseKey.
+/// This gate verifies the registry path works end-to-end.
+#[test]
+fn registry_basic_gate() {
+    if !cfg!(target_os = "linux") {
+        eprintln!("skipping execution test — requires Linux");
+        return;
+    }
+
+    let weave_bin = env!("CARGO_BIN_EXE_weave");
+    let manifest = env!("CARGO_MANIFEST_DIR");
+    let exe = format!("{manifest}/../tests/fixtures/bin/registry_basic.exe");
+
+    if !std::path::Path::new(&exe).exists() {
+        eprintln!("skipping: registry_basic.exe not present");
+        return;
+    }
+
+    let start = std::time::Instant::now();
+    let mut child = std::process::Command::new(weave_bin)
+        .arg(&exe)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|e| panic!("failed to spawn weave on registry_basic.exe: {e}"));
+
+    let deadline = start + std::time::Duration::from_secs(10);
+    let mut killed_by_deadline = false;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                break;
+            }
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    killed_by_deadline = true;
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err(e) => panic!("wait failed: {e}"),
+        }
+    }
+
+    let output = child.wait_with_output().expect("wait_with_output failed");
+    let elapsed = start.elapsed();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    eprintln!("registry_basic stderr ({elapsed:.1?}):\n{stderr}");
+
+    // A1: IAT patch completed
+    assert!(
+        stderr.contains("weave: imports resolved"),
+        "M22 A1 FAIL: no import resolution.\nstderr: {stderr}"
+    );
+
+    // A2: exit 0
+    assert!(
+        output.status.success(),
+        "M22 A2 FAIL: exit code {}\nstderr: {stderr}",
+        output.status
+    );
+
+    // A3: registry operations observed
+    assert!(
+        stderr.contains("PHASE: registry_create_key_first"),
+        "M22 A3 FAIL: no RegCreateKeyExW observed.\nstderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("PHASE: registry_set_value_first"),
+        "M22 A3 FAIL: no RegSetValueExW observed.\nstderr: {stderr}"
+    );
+}
