@@ -8711,10 +8711,16 @@ fn shell32_sh_file_operation_w_probe() {
 
     let mut buf = [0u8; 48];
     unsafe {
-        *(buf.as_mut_ptr().add(8) as *mut u32) = 2; // wFunc = FO_COPY
-        *(buf.as_mut_ptr().add(12) as *mut u32) = 0; // fFlags = 0
-        *(buf.as_mut_ptr().add(16) as *mut *const u16) = p_from_wide.as_ptr();
-        *(buf.as_mut_ptr().add(24) as *mut *const u16) = p_to_wide.as_ptr();
+        std::ptr::write_unaligned(buf.as_mut_ptr().add(8) as *mut u32, 2); // wFunc = FO_COPY
+        std::ptr::write_unaligned(buf.as_mut_ptr().add(12) as *mut u32, 0); // fFlags = 0
+        std::ptr::write_unaligned(
+            buf.as_mut_ptr().add(16) as *mut *const u16,
+            p_from_wide.as_ptr(),
+        );
+        std::ptr::write_unaligned(
+            buf.as_mut_ptr().add(24) as *mut *const u16,
+            p_to_wide.as_ptr(),
+        );
     }
 
     let result = unsafe { func(buf.as_mut_ptr()) };
