@@ -684,6 +684,7 @@ fn main() {
     // once rather than one per run.
     //
     // Safety: image.base points to a fully mapped PE loaded by loader::load().
+    eprintln!("weave: === IAT PATCH MAIN EXE BEGIN ===");
     let mut missing: Vec<String> = Vec::new();
     unsafe {
         iat::patch_best_effort(&bytes, image.base, resolve, |dll, func, iat_va| {
@@ -692,6 +693,7 @@ fn main() {
             missing.push(sym);
         });
     }
+    eprintln!("weave: === IAT PATCH MAIN EXE DONE ===");
     if !missing.is_empty() {
         eprintln!(
             "weave: warning: {} import(s) unresolved — binary may crash if they are called",
