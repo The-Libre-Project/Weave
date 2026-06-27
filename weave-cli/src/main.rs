@@ -715,9 +715,17 @@ fn main() {
     // Only call for DLLs with uninitialized CS (LockCount=0 vs -1) — i.e.
     // wxWidgets and Audacity internal DLLs whose DllMain wasn't called.
     // Skip DLLs like SDL2.dll that work fine without DllMain.
+    eprintln!(
+        "weave: === DllMain loop: side_dlls has {} entries ===",
+        side_dlls.len()
+    );
     for (dll_name, dll_bytes, base) in &side_dlls {
         let dll_lower = dll_name.to_lowercase();
-        if !dll_lower.contains("wx") && !dll_lower.contains("lib-") && !dll_lower.contains("msvcp") && !dll_lower.contains("vcruntime") {
+        if !dll_lower.contains("wx")
+            && !dll_lower.contains("lib-")
+            && !dll_lower.contains("msvcp")
+            && !dll_lower.contains("vcruntime")
+        {
             continue;
         }
         if dll_bytes.len() < 0x100 {
