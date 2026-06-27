@@ -589,10 +589,11 @@ fn main() {
             match loader::load_dll(&dll_bytes) {
                 Ok((image, exports)) => {
                     let base = image.base;
+                    let entry_point = image.entry_point;
                     dll_registry::register(dll_key.clone(), image, exports);
                     eprintln!("weave: pre-loaded {dll_name} from exe dir");
                     loaded.insert(dll_key.clone());
-                    side_dlls.push((dll_name, dll_bytes.clone(), base, image.entry_point));
+                    side_dlls.push((dll_name, dll_bytes.clone(), base, entry_point));
                     // Discover transitive dependencies and add them to the queue.
                     if let Ok(parsed) = weave_core::pe::parse(&dll_bytes) {
                         for dep in &parsed.imports {
