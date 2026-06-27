@@ -2588,7 +2588,7 @@ const IID_IIMAGELIST_WIRE: [u8; 16] = [
 
 #[allow(dead_code)]
 struct ShellImageList {
-    vtable: *const [usize; 8],
+    vtable: *const [usize; 32],
     refcount: u32,
 }
 
@@ -2625,11 +2625,49 @@ unsafe extern "win64" fn sil_release(this: usize) -> u32 {
     rc
 }
 
-unsafe extern "win64" fn sil_get_image_count(this: usize) -> u32 {
+// Vtable slot 3 — Add (HBITMAP, HBITMAP, int*)
+unsafe extern "win64" fn sil_add(this: usize, _hbm: usize, _hbm_mask: usize, _pi: *mut i32) -> u32 {
     let _ = this;
-    10 // plausible small count
+    0x8000_4001u32 // E_NOTIMPL
 }
 
+// Vtable slot 4 — ReplaceIcon (int, HICON, int*)
+unsafe extern "win64" fn sil_replace_icon(this: usize, _i: i32, _hicon: usize, _pi: *mut i32) -> u32 {
+    let _ = this;
+    0x8000_4001u32 // E_NOTIMPL
+}
+
+// Vtable slot 5 — SetOverlayImage (int, int)
+unsafe extern "win64" fn sil_set_overlay_image(this: usize, _i_image: i32, _i_overlay: i32) -> u32 {
+    let _ = this;
+    1 // S_FALSE
+}
+
+// Vtable slot 6 — Replace (int, HBITMAP, HBITMAP)
+unsafe extern "win64" fn sil_replace(this: usize, _i: i32, _hbm: usize, _hbm_mask: usize) -> u32 {
+    let _ = this;
+    0x8000_4001u32 // E_NOTIMPL
+}
+
+// Vtable slot 8 — Draw (IMAGELISTDRAWPARAMS*)
+unsafe extern "win64" fn sil_draw(this: usize, _pimldp: *const u8) -> u32 {
+    let _ = this;
+    1 // S_FALSE
+}
+
+// Vtable slot 9 — Remove (int)
+unsafe extern "win64" fn sil_remove(this: usize, _i: i32) -> u32 {
+    let _ = this;
+    1 // S_FALSE
+}
+
+// Vtable slot 11 — GetImageInfo (int, IMAGEINFO*)
+unsafe extern "win64" fn sil_get_image_info(this: usize, _i: i32, _pii: *mut u8) -> u32 {
+    let _ = this;
+    0x8000_4001u32 // E_NOTIMPL
+}
+
+// Vtable slot 16 — GetIconSize (int*, int*)
 unsafe extern "win64" fn sil_get_icon_size(this: usize, cx: *mut i32, cy: *mut i32) -> u32 {
     let _ = this;
     if !cx.is_null() {
@@ -2641,20 +2679,63 @@ unsafe extern "win64" fn sil_get_icon_size(this: usize, cx: *mut i32, cy: *mut i
     0 // S_OK
 }
 
-fn get_image_list_vtable() -> *const [usize; 8] {
+// Vtable slot 18 — GetImageCount (int*)
+unsafe extern "win64" fn sil_get_image_count(this: usize, pi: *mut i32) -> u32 {
+    let _ = this;
+    if !pi.is_null() {
+        unsafe { *pi = 10 };
+    }
+    0 // S_OK
+}
+
+// Vtable slot 31 — GetOverlayImage (int, int*)
+unsafe extern "win64" fn sil_get_overlay_image(this: usize, _i_overlay: i32, pi_index: *mut i32) -> u32 {
+    let _ = this;
+    if !pi_index.is_null() {
+        unsafe { *pi_index = -1 };
+    }
+    1 // S_FALSE
+}
+
+// Wine ref: dlls/comctl32/imagelist.c (ImageListImpl_Vtbl) — full IImageList vtable ordering
+fn get_image_list_vtable() -> *const [usize; 32] {
     use std::sync::OnceLock;
-    static VTABLE: OnceLock<[usize; 8]> = OnceLock::new();
+    static VTABLE: OnceLock<[usize; 32]> = OnceLock::new();
     VTABLE.get_or_init(|| {
-        [
-            sil_query_interface as *const () as usize,
-            sil_add_ref as *const () as usize,
-            sil_release as *const () as usize,
-            sil_get_image_count as *const () as usize,
-            sil_get_icon_size as *const () as usize,
-            0,
-            0,
-            0, // remaining slots: no-op (GetImageFlags, GetOverlayImage, etc.)
-        ]
+        let mut vt: [usize; 32] = [0; 32];
+        vt[0] = sil_query_interface as *const () as usize;
+        vt[1] = sil_add_ref as *const () as usize;
+        vt[2] = sil_release as *const () as usize;
+        vt[3] = sil_add as *const () as usize;
+        vt[4] = sil_replace_icon as *const () as usize;
+        vt[5] = sil_set_overlay_image as *const () as usize;
+        vt[6] = sil_replace as *const () as usize;
+        // vt[7] AddMasked — not implemented
+        vt[8] = sil_draw as *const () as usize;
+        vt[9] = sil_remove as *const () as usize;
+        // vt[10] GetIcon — not implemented
+        vt[11] = sil_get_image_info as *const () as usize;
+        // vt[12] Copy — not implemented
+        // vt[13] Merge — not implemented
+        // vt[14] Clone — not implemented
+        // vt[15] GetImageRect — not implemented
+        vt[16] = sil_get_icon_size as *const () as usize;
+        // vt[17] SetIconSize — not implemented
+        vt[18] = sil_get_image_count as *const () as usize;
+        // vt[19] SetImageCount — not implemented
+        // vt[20] SetBkColor — not implemented
+        // vt[21] GetBkColor — not implemented
+        // vt[22] BeginDrag — not implemented
+        // vt[23] EndDrag — not implemented
+        // vt[24] DragEnter — not implemented
+        // vt[25] DragLeave — not implemented
+        // vt[26] DragMove — not implemented
+        // vt[27] SetDragCursorImage — not implemented
+        // vt[28] DragShowNolock — not implemented
+        // vt[29] GetDragImage — not implemented
+        // vt[30] GetItemFlags — not implemented
+        vt[31] = sil_get_overlay_image as *const () as usize;
+        vt
     })
 }
 
