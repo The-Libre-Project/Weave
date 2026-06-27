@@ -7841,7 +7841,7 @@ fn q_dir_file_pane_gate() {
         .expect("failed to write test file");
     // Also create a test file on the Desktop (bridged CSIDL_DESKTOP → XDG Desktop).
     // This ensures Q-Dir's initial pane population finds at least one file entry.
-    if let Ok(desktop_path) = resolve_xdg_desktop_for_test() {
+    if let Some(desktop_path) = resolve_xdg_desktop_for_test() {
         let _ = std::fs::create_dir_all(&desktop_path);
         let _ = std::fs::write(
             desktop_path.join("qdir_test.txt"),
