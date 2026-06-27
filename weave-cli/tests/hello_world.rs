@@ -8762,6 +8762,119 @@ fn shell32_sh_change_notify_probe() {
     eprintln!("shell32_sh_change_notify_probe: OK — SHChangeNotify(SHCNE_ASSOCCHANGED) completed without crash");
 }
 
+/// M21 — gui_basic.exe first frame.
+///
+/// gui_basic.exe is a minimal Win32 GUI application that creates a window,
+/// registers a class, paints via GDI (FillRect, TextOutW), and runs a
+/// message loop. This gate verifies the full GUI bootstrap path.
+#[test]
+fn gui_basic_first_frame_gate() {
+    if !cfg!(target_os = "linux") {
+        eprintln!("skipping execution test — requires Linux");
+        return;
+    }
+
+    let weave_bin = env!("CARGO_BIN_EXE_weave");
+    let manifest = env!("CARGO_MANIFEST_DIR");
+    let gui_basic_exe = format!("{manifest}/../tests/fixtures/bin/gui_basic.exe");
+
+    if !std::path::Path::new(&gui_basic_exe).exists() {
+        eprintln!("skipping: gui_basic.exe not present");
+        return;
+    }
+
+    let start = std::time::Instant::now();
+    let mut child = std::process::Command::new(weave_bin)
+        .arg(&gui_basic_exe)
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|e| panic!("failed to spawn weave on gui_basic.exe: {e}"));
+
+    // Drain stderr
+    let stderr_pipe = child.stderr.take().expect("stderr was piped");
+    let stderr_shared = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let stderr_writer = std::sync::Arc::clone(&stderr_shared);
+    let (paint_tx, paint_rx) = std::sync::mpsc::channel::<()>();
+
+    let drain_thread = std::thread::spawn(move || {
+        use std::io::Read;
+        let mut pipe = stderr_pipe;
+        let mut buf = [0u8; 4096];
+        let mut acc = Vec::new();
+        let mut signalled = false;
+        loop {
+            match pipe.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    acc.extend_from_slice(&buf[..n]);
+                    if !signalled {
+                        let chunk = String::from_utf8_lossy(&acc);
+                        if chunk.contains("PHASE: wm_paint_dispatched_first") {
+                            let _ = paint_tx.send(());
+                            signalled = true;
+                        }
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        *stderr_writer.lock().unwrap() = acc;
+    });
+
+    // Wait for paint signal or timeout
+    let paint_deadline = std::time::Duration::from_secs(10);
+    let paint_seen = paint_rx.recv_timeout(paint_deadline).is_ok();
+
+    // Give the app a moment to render before killing
+    if paint_seen {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+
+    // Kill after budget
+    let kill_deadline = std::time::Duration::from_secs(15);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) => {
+                if start.elapsed() >= kill_deadline {
+                    let _ = child.kill();
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err(_) => break,
+        }
+    }
+    let elapsed = start.elapsed();
+
+    drain_thread.join().expect("drain thread panicked");
+    let stderr_bytes = stderr_shared.lock().unwrap().clone();
+    let stderr = String::from_utf8_lossy(&stderr_bytes);
+    eprintln!("gui_basic stderr ({elapsed:.1?}):\n{stderr}");
+
+    // A1: IAT patch completed
+    assert!(
+        stderr.contains("weave: imports resolved"),
+        "M21 A1 FAIL: no import resolution.\nstderr: {stderr}"
+    );
+
+    // A2: window class registered + window created
+    assert!(
+        stderr.contains("PHASE: register_class_first"),
+        "M21 A2 FAIL: no RegisterClassW observed.\nstderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("PHASE: create_window_first"),
+        "M21 A2 FAIL: no CreateWindowExW observed.\nstderr: {stderr}"
+    );
+
+    // A3: WM_PAINT dispatched
+    assert!(
+        paint_seen,
+        "M21 A3 FAIL: no WM_PAINT dispatched within 10s.\nstderr: {stderr}"
+    );
+}
+
 /// Probe gate — shell32!SHCreateItemFromIDList (IShellItem creation via PIDL).
 ///
 /// Obtains a desktop PIDL via SHGetFolderLocation(CSIDL_DESKTOP), then calls
