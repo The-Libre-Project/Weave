@@ -2575,16 +2575,109 @@ pub unsafe extern "win64" fn sh_create_shell_item_array_from_data_object(
 ///
 /// # Safety
 /// `ppv` must be a valid writable pointer if non-null.
+/// Minimal IImageList COM vtable (flat [usize; N]).
+/// Wine ref: dlls/shell32/shell32_main.c — SHGetImageList returns IImageList
+/// backed by the system image cache; Q-Dir calls this to set up ListView icons.
+const IID_IIMAGELIST_WIRE: [u8; 16] = [
+    0x26, 0x59, 0xEB, 0x46, 0x2E, 0x58, 0x17, 0x40, 0x9F, 0xDF, 0xE8, 0x99, 0x8D, 0xAA, 0x09, 0x50,
+];
+
+#[allow(dead_code)]
+struct ShellImageList {
+    vtable: *const [usize; 8],
+    refcount: u32,
+}
+
+unsafe extern "win64" fn sil_query_interface(this: usize, riid: *const u8, ppv: *mut usize) -> i32 {
+    if ppv.is_null() {
+        return 0x8000_4003u32 as i32;
+    }
+    unsafe { *ppv = 0 };
+    if riid.is_null() {
+        return 0x8000_4002u32 as i32;
+    }
+    if unsafe { std::slice::from_raw_parts(riid, 16) } == IID_IIMAGELIST_WIRE {
+        unsafe { *ppv = this };
+        let obj = &mut *(this as *mut ShellImageList);
+        obj.refcount += 1;
+        return 0; // S_OK
+    }
+    0x8000_4002u32 as i32 // E_NOINTERFACE
+}
+
+unsafe extern "win64" fn sil_add_ref(this: usize) -> u32 {
+    let obj = &mut *(this as *mut ShellImageList);
+    obj.refcount += 1;
+    obj.refcount
+}
+
+unsafe extern "win64" fn sil_release(this: usize) -> u32 {
+    let obj = &mut *(this as *mut ShellImageList);
+    obj.refcount -= 1;
+    let rc = obj.refcount;
+    if rc == 0 {
+        drop(Box::from_raw(this as *mut ShellImageList));
+    }
+    rc
+}
+
+unsafe extern "win64" fn sil_get_image_count(this: usize) -> u32 {
+    let _ = this;
+    10 // plausible small count
+}
+
+unsafe extern "win64" fn sil_get_icon_size(this: usize, cx: *mut i32, cy: *mut i32) -> u32 {
+    let _ = this;
+    if !cx.is_null() {
+        unsafe { *cx = 16 };
+    }
+    if !cy.is_null() {
+        unsafe { *cy = 16 };
+    }
+    0 // S_OK
+}
+
+fn get_image_list_vtable() -> *const [usize; 8] {
+    use std::sync::OnceLock;
+    static VTABLE: OnceLock<[usize; 8]> = OnceLock::new();
+    VTABLE.get_or_init(|| {
+        [
+            sil_query_interface as *const () as usize,
+            sil_add_ref as *const () as usize,
+            sil_release as *const () as usize,
+            sil_get_image_count as *const () as usize,
+            sil_get_icon_size as *const () as usize,
+            0,
+            0,
+            0, // remaining slots: no-op (GetImageFlags, GetOverlayImage, etc.)
+        ]
+    })
+}
+
+// Wine ref: dlls/shell32/shell32_main.c — SHGetImageList returns IImageList.
+// Q-Dir calls this to set up the system image list for file-pane ListViews.
 pub unsafe extern "win64" fn sh_get_image_list(
     _i_image_list: i32,
-    _riid: *const u8,
+    riid: *const u8,
     ppv: *mut *mut u8,
 ) -> u32 {
-    const S_FALSE: u32 = 1;
-    if !ppv.is_null() {
-        unsafe { *ppv = std::ptr::null_mut() };
+    if ppv.is_null() {
+        return 0x8000_4003;
     }
-    S_FALSE
+    unsafe { *ppv = std::ptr::null_mut() };
+    if riid.is_null() {
+        return 0x8000_4002;
+    }
+    // Only support IID_IImageList
+    if unsafe { std::slice::from_raw_parts(riid, 16) } != IID_IIMAGELIST_WIRE {
+        return 1; // S_FALSE
+    }
+    let obj = Box::new(ShellImageList {
+        vtable: get_image_list_vtable(),
+        refcount: 1,
+    });
+    unsafe { *ppv = Box::into_raw(obj) as *mut u8 };
+    0 // S_OK
 }
 
 #[cfg(test)]
