@@ -7840,7 +7840,6 @@ fn audacity_launch_gate() {
 
     let mut child = std::process::Command::new(weave_bin)
         .current_dir(&fixture_dir)
-        .arg("--no-sandbox")
         .arg(&exe)
         .env("DISPLAY", ":99")
         .stderr(std::process::Stdio::piped())
