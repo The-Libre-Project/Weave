@@ -1156,15 +1156,20 @@ fn try_m15_probe_inject(hwnd: usize) {
                     // bytes mixed in). CLEARALL+APPEND matches the pattern already used in
                     // the pending doc transfer path.
                     let _ = send_message_w(sci_hwnd, 2004, 0, 0); /*SCI_CLEARALL*/
-                    let ret = send_message_w(
+                    let _ = send_message_w(
                         sci_hwnd,
                         2282, /*SCI_APPENDTEXT*/
                         len,
                         buf_ptr as isize,
                     );
+                    // Set modified flag so NPP's save handler (IDM_FILE_SAVE) writes the file.
+                    // Without this, NPP checks SCI_GETMODIFY and skips save for unmodified docs.
+                    // Wine ref: Scintilla/ScintillaBase.cxx — SCI_SETMODIFY (2184) with wParam=TRUE
+                    // sets the internal modify flag that SCI_GETMODIFY reports.
+                    let _ = send_message_w(sci_hwnd, 2184, 1, 0); /*SCI_SETMODIFY(TRUE)*/
                     eprintln!(
-                        "weave/user32: M15 probe: SendMessageW SCI_APPENDTEXT hwnd={:#x} len={} ret={} (injected length={})",
-                        sci_hwnd, len, ret, len
+                        "weave/user32: M15 probe: SendMessageW SCI_APPENDTEXT hwnd={:#x} len={} (injected length={})",
+                        sci_hwnd, len, len
                     );
                     eprintln!("weave/user32: M15 probe: injected length={} via SendMessageW(SCI_APPENDTEXT)", len);
                 }
