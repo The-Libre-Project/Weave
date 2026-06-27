@@ -562,6 +562,11 @@ extern "win64" fn ucrt_invoke_watson(
 ) {
 }
 
+/// _crt_at_quick_exit — register a function for quick_exit callback.
+extern "win64" fn ucrt_crt_at_quick_exit(_func: usize) -> i32 {
+    0 // success
+}
+
 /// _callnewh — call the new_handler if allocation fails.
 ///
 /// Wine ref: dlls/msvcrt/heap.c — calls the installed new_handler(size).
@@ -4681,6 +4686,7 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "_initterm" => stub!(ucrt_initterm as unsafe extern "win64" fn(_, _)),
         "_initterm_e" => stub!(ucrt_initterm_e as unsafe extern "win64" fn(_, _) -> _),
         "_crt_atexit" => stub!(ucrt_crt_atexit as extern "win64" fn(_) -> _),
+        "_crt_at_quick_exit" => stub!(ucrt_crt_at_quick_exit as extern "win64" fn(_) -> _),
         "_register_onexit_function" => {
             stub!(ucrt_register_onexit_function as extern "win64" fn(_, _) -> _)
         }

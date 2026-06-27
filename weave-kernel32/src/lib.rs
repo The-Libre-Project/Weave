@@ -14361,6 +14361,12 @@ pub extern "win64" fn global_delete_atom(_n_atom: u16) -> u16 {
     0
 }
 
+/// DisableThreadLibraryCalls — disable DLL_THREAD_ATTACH/DETACH notifications.
+// Wine ref: dlls/kernel32/loader.c — DisableThreadLibraryCalls sets a flag.
+pub unsafe extern "win64" fn disable_thread_library_calls(_h_module: usize) -> i32 {
+    1 // TRUE
+}
+
 // ── Resolver ──────────────────────────────────────────────────────────────────
 
 /// Resolve a kernel32.dll import to a stub address.
@@ -16084,6 +16090,9 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "FreeLibraryWhenCallbackReturns" => Some(
             free_library_when_callback_returns as unsafe extern "win64" fn(_, _) as *const ()
                 as usize,
+        ),
+        "DisableThreadLibraryCalls" => Some(
+            disable_thread_library_calls as unsafe extern "win64" fn(_) -> _ as *const () as usize,
         ),
         _ => {
             // version.dll functions are forwarded through kernel32 in some apps;
