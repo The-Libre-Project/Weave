@@ -1928,7 +1928,7 @@ pub fn resolve(func: &str) -> Option<usize> {
         ),
         // ── Phase A stubs ─────────────────────────────────────────────────
         "RegEnumKeyW" => Some(
-            reg_enum_key_w as unsafe extern "win64" fn(_, _, _, _, _, _, _, _) -> *const ()
+            reg_enum_key_w as unsafe extern "win64" fn(_, _, _, _, _, _, _, _) -> _ as *const ()
                 as usize,
         ),
         _ => None,
