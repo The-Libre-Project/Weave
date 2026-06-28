@@ -198,6 +198,19 @@ unsafe extern "C" fn on_fatal_signal(
     unsafe {
         libc::write(2, b"weave: sh got rip\n".as_ptr() as *const _, 18);
     }
+    // Debug: print the fault address to understand where crashes happen.
+    // Hex-format RIP into a small stack buffer.
+    let mut rip_hex = [0u8; 32];
+    rip_hex[..18].copy_from_slice(b"weave: fault rip=0x");
+    let nibble = |v: u8| if v < 10 { b'0' + v } else { b'a' + v - 10 };
+    for i in 0..16 {
+        let shift = (15 - i) * 4;
+        rip_hex[18 + i] = nibble(((rip as u64 >> shift) & 0xf) as u8);
+    }
+    rip_hex[34] = b'\n';
+    unsafe {
+        libc::write(2, rip_hex.as_ptr() as *const _, 35);
+    }
 
     let base = PE_BASE.load(Ordering::Relaxed);
     let size = PE_SIZE.load(Ordering::Relaxed);
