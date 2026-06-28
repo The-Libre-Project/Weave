@@ -425,6 +425,12 @@ pub unsafe extern "win64" fn clsid_from_string(lpsz: *const u16, pclsid: *mut u8
     }
 }
 
+/// CoCreateGuid: create a new globally unique identifier (GUID).
+/// Stub returns E_NOTIMPL.
+pub unsafe extern "win64" fn co_create_guid(_pguid: *mut u8) -> u32 {
+    0x8000_401E // E_NOTIMPL
+}
+
 // Wine ref: dlls/combase/combase.c — identical implementation to CLSIDFromString; IID and CLSID
 // share the GUID wire format; both call guid_from_string() internally.
 /// IIDFromString: same as CLSIDFromString (IID and CLSID are both GUIDs).
@@ -913,6 +919,9 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         }
         "CLSIDFromString" => {
             Some(clsid_from_string as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "CoCreateGuid" => {
+            Some(co_create_guid as unsafe extern "win64" fn(_) -> _ as *const () as usize)
         }
         "IIDFromString" => {
             Some(iid_from_string as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
