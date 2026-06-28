@@ -2278,6 +2278,8 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "ImageList_SetDragCursorImage" => {
             Some(image_list_set_drag_cursor_image as *const () as usize)
         }
+        // ── wxWidgets gap-fill: ordinal stubs ──
+        "#16" | "#17" | "#18" | "#19" | "#20" => Some(comctl32_ordinal_stub as *const () as usize),
         _ => None,
     }
 }
@@ -2306,6 +2308,10 @@ extern "win64" fn image_list_set_drag_cursor_image(
     _dy: i32,
     _color: u32,
 ) -> usize {
+    0
+}
+
+extern "win64" fn comctl32_ordinal_stub() -> usize {
     0
 }
 
