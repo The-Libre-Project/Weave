@@ -1624,8 +1624,8 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         // Wine ref: dlls/user32/nonclient.c — GetProcessDefaultLayout returns the
         // process-level default layout (0 = LTR). Weave stub returns 0 (LTR).
         "GetProcessDefaultLayout" => Some(
-            api::get_process_default_layout
-                as unsafe extern "win64" fn(_) -> i32 as *const () as usize,
+            api::get_process_default_layout as unsafe extern "win64" fn(_) -> i32 as *const ()
+                as usize,
         ),
         _ => None,
     }

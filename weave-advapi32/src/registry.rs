@@ -1919,12 +1919,12 @@ pub fn resolve(func: &str) -> Option<usize> {
         }
         // ── Security descriptor stubs ──────────────────────────────────────
         "ConvertStringSecurityDescriptorToSecurityDescriptorW" => Some(
-            convert_string_sd_to_sd_w
-                as unsafe extern "win64" fn(_, _, _, _) -> i32 as *const () as usize,
+            convert_string_sd_to_sd_w as unsafe extern "win64" fn(_, _, _, _) -> i32 as *const ()
+                as usize,
         ),
         "BuildSecurityDescriptorW" => Some(
-            build_security_descriptor_w
-                as unsafe extern "win64" fn(_, _, _, _, _, _, _, _) -> u32 as *const () as usize,
+            build_security_descriptor_w as unsafe extern "win64" fn(_, _, _, _, _, _, _, _) -> u32
+                as *const () as usize,
         ),
         // ── Phase A stubs ─────────────────────────────────────────────────
         "RegEnumKeyW" => Some(
