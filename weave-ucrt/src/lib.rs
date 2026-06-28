@@ -5839,7 +5839,7 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "wcstombs" => stub!(ucrt_wcstombs as unsafe extern "win64" fn(_, _, _) -> _),
         "_wcstol_l" => stub!(ucrt_wcstol_l as unsafe extern "win64" fn(_, _, _, _) -> _),
         "wcstoul" => stub!(ucrt_wcstoul as unsafe extern "win64" fn(_, _, _) -> _),
-        "_wcstod_l" => stub!(ucrt_wcstod_l as unsafe extern "win64" fn(_, _, _, _) -> _),
+        "_wcstod_l" => stub!(ucrt_wcstod_l as unsafe extern "win64" fn(_, _, _) -> _),
         "_open" => stub!(ucrt_open as unsafe extern "win64" fn(_, _) -> _),
         "_wopen" => stub!(ucrt_wopen as unsafe extern "win64" fn(_, _, _) -> _),
         "iswprint" => stub!(ucrt_iswprint as extern "win64" fn(_) -> _),
