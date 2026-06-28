@@ -546,7 +546,7 @@ fn main() {
     // that lives next to the exe and appears in its import table is loaded as
     // a PE and registered so that IAT patching can resolve its exports.
     // SDL2.dll, custom runtimes, and game-specific DLLs all land here.
-    let mut side_dlls: Vec<(String, Vec<u8>, *mut u8, *const u8)>;
+    let mut side_dlls: Vec<(String, Vec<u8>, *mut u8)>;
     {
         let exe_dir_canon = args.exe.canonicalize().unwrap_or_else(|_| args.exe.clone());
         let exe_dir = exe_dir_canon.parent().unwrap_or(std::path::Path::new("."));
@@ -589,13 +589,12 @@ fn main() {
             match loader::load_dll(&dll_bytes) {
                 Ok((image, exports)) => {
                     let base = image.base;
-                    let entry_point = image.entry_point;
                     let image_size = image.size;
                     dll_registry::register(dll_key.clone(), image, exports);
                     weave_core::seh::register_loaded_module(base as usize, image_size);
                     eprintln!("weave: pre-loaded {dll_name} from exe dir");
                     loaded.insert(dll_key.clone());
-                    side_dlls.push((dll_name, dll_bytes.clone(), base, entry_point));
+                    side_dlls.push((dll_name, dll_bytes.clone(), base));
                     // Discover transitive dependencies and add them to the queue.
                     if let Ok(parsed) = weave_core::pe::parse(&dll_bytes) {
                         for dep in &parsed.imports {
@@ -615,7 +614,7 @@ fn main() {
             }
         }
 
-        for (dll_name, dll_bytes, base, _entry) in &side_dlls {
+        for (dll_name, dll_bytes, base) in &side_dlls {
             unsafe {
                 iat::patch_best_effort(dll_bytes, *base, resolve, |d, f, va| {
                     eprintln!(
