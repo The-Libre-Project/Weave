@@ -4840,8 +4840,9 @@ pub extern "win64" fn ucrt_lc_collate_cp_func(_locale: usize) -> *const i32 {
 // Wine ref: dlls/msvcrt/locale.c — ___lc_locale_name_func returns a pointer
 // to the locale name string pointer.
 pub extern "win64" fn ucrt_lc_locale_name_func(_locale: usize) -> *const *const u16 {
-    static NAME: *const u16 = core::ptr::null();
-    core::ptr::addr_of!(NAME)
+    // SAFETY: single-threaded CRT init; the locale name pointer is only read, never written.
+    static NAME: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+    NAME.as_ptr() as *const *const u16
 }
 
 pub unsafe extern "win64" fn ucrt_fgetwc(_stream: *mut c_void) -> u32 {
