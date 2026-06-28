@@ -2,7 +2,7 @@
 
 **A Rust-native Windows compatibility layer for Linux. Built from scratch, not from Wine, and deliberately an order of magnitude smaller.**
 
-Weave is a clean-room Rust reimplementation of the Win32 API surface. The Windows API is the dominant application binary interface on the planet: billions of devices, decades of software, and no open implementation that is memory-safe, sandboxed by default, or auditable at a fraction of the legacy codebase's complexity. Weave is that implementation, built to give Linux-based operating systems a secure, maintainable, freedom-respecting path to Windows application compatibility.
+Weave is an independent Rust reimplementation of the Win32 API surface, behaviorally referenced against Wine. The Windows API is the dominant application binary interface on the planet: billions of devices, decades of software, and no open implementation that is memory-safe, sandboxed by default, or auditable at a fraction of the legacy codebase's complexity. Weave is that implementation, built to give Linux-based operating systems a secure, maintainable, freedom-respecting path to Windows application compatibility.
 
 Licensed under GPL-3.0. Open for security auditing, research, and fork-under-GPL. Not accepting code contributions at this time (see [Contributing](#contributing)).
 
@@ -81,11 +81,11 @@ The runtime has two always-active layers: **Weave Native** (API translation, map
 
 ---
 
-## Clean-room methodology
+## Reference-first methodology
 
-APIs are not copyrightable (*Oracle v. Google*, 2021). Weave is an independent reimplementation: Wine's 30 years of reverse engineering is consulted as a behavioral reference for *what* each Win32 function must do, including the undocumented edges real apps depend on, but **no Wine code is copied**. Every implementation is original Rust, written from a behavioral spec derived from MSDN, Wine and ReactOS references, and black-box testing on real Windows.
+APIs are not copyrightable (*Oracle v. Google*, 2021). Weave is an independent reimplementation: Wine's 30 years of reverse engineering is consulted as a behavioral reference for *what* each Win32 function must do, including the undocumented edges real apps depend on, but **no Wine code is copied**. Every implementation is original Rust, written from a behavioral spec derived from MSDN, Wine and ReactOS references, and black-box testing on real Windows. The `// Wine ref:` comments embedded throughout the codebase are explicit receipts of this reference process — they document exactly which Wine function was consulted for each implementation.
 
-The one hard rule: **never access proprietary Windows source** (leaked source, decompiled or disassembled binaries). The full reference policy, IP boundaries, and per-function documentation standard are in [docs/CLEAN-ROOM.md](docs/CLEAN-ROOM.md).
+The one hard rule: **never access proprietary Windows source** (leaked source, decompiled or disassembled binaries). The full reference policy, IP boundaries, and per-function documentation standard are in [docs/REFERENCE-FIRST.md](docs/REFERENCE-FIRST.md).
 
 ---
 
@@ -127,7 +127,7 @@ Weave is open source for transparency and security auditability. The codebase, c
 
 ## Stewardship
 
-Weave is built and maintained by [IronTree Software](https://github.com/The-Libre-Project) as the founding asset of the [Libre Commons](https://github.com/The-Libre-Project/Commons), a public-infrastructure stewardship framework with a hard boundary between commons-scope work and product work: if the work benefits any Linux platform, developer, public institution, refurbisher, or downstream OS, it belongs to the Commons; if it creates IronTree-specific product leverage, it belongs to IronTree. Commons outputs (compatibility gates, sandbox architecture, validation data, reproducible builds, clean-room documentation) are public by rule.
+Weave is built and maintained by [IronTree Software](https://github.com/The-Libre-Project) as the founding asset of the [Libre Commons](https://github.com/The-Libre-Project/Commons), a public-infrastructure stewardship framework with a hard boundary between commons-scope work and product work: if the work benefits any Linux platform, developer, public institution, refurbisher, or downstream OS, it belongs to the Commons; if it creates IronTree-specific product leverage, it belongs to IronTree. Commons outputs (compatibility gates, sandbox architecture, validation data, reproducible builds, reference-first methodology documentation) are public by rule.
 
 ---
 
