@@ -5010,6 +5010,34 @@ pub unsafe extern "win64" fn ucrt_wgetcwd(_buf: *mut u16, _size: usize) -> *mut 
     core::ptr::null_mut()
 }
 
+// ── MSVCP140 crt-math/crt-convert stubs (CI run 28320568120) ───────────
+
+// Wine ref: dlls/msvcrt/math.c — _ldclass returns the class of a long double
+// (FP_NORMAL=4, FP_ZERO=2, FP_NAN=1, FP_INFINITE=3, FP_SUBNORMAL=5).
+pub extern "win64" fn ucrt_ldclass(_x: f64) -> i32 {
+    4 // FP_NORMAL
+}
+
+// Wine ref: dlls/msvcrt/math.c — frexp breaks x into significand and exponent.
+pub extern "win64" fn ucrt_frexp(_x: f64, _exp: *mut i32) -> f64 {
+    0.0
+}
+
+// Wine ref: dlls/msvcrt/math.c — copysign copies sign from y to magnitude of x.
+pub extern "win64" fn ucrt_copysign(x: f64, _y: f64) -> f64 {
+    x
+}
+
+// Wine ref: dlls/msvcrt/math.c — ldexp multiplies x by 2^exp.
+pub extern "win64" fn ucrt_ldexp(x: f64, _exp: i32) -> f64 {
+    x
+}
+
+// Wine ref: dlls/msvcrt/string.c — strtof converts string to float.
+pub unsafe extern "win64" fn ucrt_strtof(_s: *const u8, _end: *mut *mut u8) -> f32 {
+    0.0
+}
+
 /// Resolve a UCRT import to a stub address.
 pub fn resolve(dll: &str, func: &str) -> Option<usize> {
     if !is_ucrt_dll(dll) {
@@ -5520,6 +5548,12 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "_W_Gettnames" => stub!(ucrt_w_gettnames as extern "win64" fn() -> _),
         "_W_Getmonths" => stub!(ucrt_w_getmonths as extern "win64" fn() -> _),
         "_wgetcwd" => stub!(ucrt_wgetcwd as unsafe extern "win64" fn(_, _) -> _),
+        // ── MSVCP140 crt-math/crt-convert stubs (CI run 28320568120) ─────
+        "_ldclass" => stub!(ucrt_ldclass as extern "win64" fn(_) -> _),
+        "frexp" => stub!(ucrt_frexp as extern "win64" fn(_, _) -> _),
+        "copysign" => stub!(ucrt_copysign as extern "win64" fn(_, _) -> _),
+        "ldexp" => stub!(ucrt_ldexp as extern "win64" fn(_, _) -> _),
+        "strtof" => stub!(ucrt_strtof as unsafe extern "win64" fn(_, _, _) -> _),
         _ => None,
     }
 }

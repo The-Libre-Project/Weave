@@ -16097,6 +16097,39 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
             free_library_when_callback_returns as unsafe extern "win64" fn(_, _) as *const ()
                 as usize,
         ),
+        // ── MSVCP140 threadpool stubs ────────────────────────────────────
+        "CloseThreadpoolWait" => {
+            Some(close_threadpool_wait as unsafe extern "win64" fn(_) as *const () as usize)
+        }
+        "SetThreadpoolWait" => {
+            Some(set_threadpool_wait as unsafe extern "win64" fn(_, _, _) as *const () as usize)
+        }
+        "CreateThreadpoolWait" => Some(
+            create_threadpool_wait as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
+        ),
+        "CloseThreadpoolTimer" => {
+            Some(close_threadpool_timer as unsafe extern "win64" fn(_) as *const () as usize)
+        }
+        "WaitForThreadpoolTimerCallbacks" => Some(
+            wait_for_threadpool_timer_callbacks as unsafe extern "win64" fn(_, _) as *const ()
+                as usize,
+        ),
+        "SetThreadpoolTimer" => {
+            Some(set_threadpool_timer as unsafe extern "win64" fn(_, _, _, _) as *const () as usize)
+        }
+        "CreateThreadpoolTimer" => Some(
+            create_threadpool_timer as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
+        ),
+        "FlushProcessWriteBuffers" => {
+            Some(flush_process_write_buffers as extern "win64" fn() as *const () as usize)
+        }
+        "CreateSemaphoreExW" => Some(
+            create_semaphore_ex_w as unsafe extern "win64" fn(_, _, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "CreateEventExW" => Some(
+            create_event_ex_w as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
+        ),
         "DisableThreadLibraryCalls" => Some(
             disable_thread_library_calls as unsafe extern "win64" fn(_) -> _ as *const () as usize,
         ),
@@ -19251,6 +19284,60 @@ pub unsafe extern "win64" fn create_threadpool_work(
 /// # Safety
 /// `pwk` and `h_module` are accepted but not dereferenced.
 pub unsafe extern "win64" fn free_library_when_callback_returns(_pwk: usize, _h_module: usize) {}
+
+// ── Threadpool stubs (MSVCP140.dll init, CI run 28320568120) ────────────
+
+pub unsafe extern "win64" fn close_threadpool_wait(_pwt: usize) {}
+
+pub unsafe extern "win64" fn set_threadpool_wait(_pwt: usize, _h: usize, _pft: *mut u8) {}
+
+pub unsafe extern "win64" fn create_threadpool_wait(
+    _pfn: usize,
+    _pv: usize,
+    _pcbe: usize,
+) -> usize {
+    0
+}
+
+pub unsafe extern "win64" fn close_threadpool_timer(_ptimer: usize) {}
+
+pub unsafe extern "win64" fn wait_for_threadpool_timer_callbacks(_ptimer: usize, _fcancel: i32) {}
+
+pub unsafe extern "win64" fn set_threadpool_timer(
+    _ptimer: usize,
+    _pft: *mut u8,
+    _ms: u32,
+    _msr: u32,
+) {
+}
+
+pub unsafe extern "win64" fn create_threadpool_timer(
+    _pfn: usize,
+    _pv: usize,
+    _pcbe: usize,
+) -> usize {
+    0
+}
+
+pub unsafe extern "win64" fn flush_process_write_buffers() {}
+
+pub unsafe extern "win64" fn create_semaphore_ex_w(
+    _attrib: usize,
+    _initial: i32,
+    _max: i32,
+    _name: *const u16,
+) -> usize {
+    0
+}
+
+pub unsafe extern "win64" fn create_event_ex_w(
+    _attrib: usize,
+    _name: *const u16,
+    _flags: u32,
+    _desired: u32,
+) -> usize {
+    0
+}
 
 /// Wow64GetThreadContext: get thread context of WOW64 thread.
 ///
