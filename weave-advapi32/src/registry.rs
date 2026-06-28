@@ -1917,9 +1917,18 @@ pub fn resolve(func: &str) -> Option<usize> {
         "IsTextUnicode" => {
             Some(is_text_unicode as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize)
         }
+        // ── Security descriptor stubs ──────────────────────────────────────
+        "ConvertStringSecurityDescriptorToSecurityDescriptorW" => Some(
+            convert_string_sd_to_sd_w
+                as unsafe extern "win64" fn(_, _, _, _) -> i32 as *const () as usize,
+        ),
+        "BuildSecurityDescriptorW" => Some(
+            build_security_descriptor_w
+                as unsafe extern "win64" fn(_, _, _, _, _, _, _, _) -> u32 as *const () as usize,
+        ),
         // ── Phase A stubs ─────────────────────────────────────────────────
         "RegEnumKeyW" => Some(
-            reg_enum_key_w as unsafe extern "win64" fn(_, _, _, _, _, _, _, _) -> _ as *const ()
+            reg_enum_key_w as unsafe extern "win64" fn(_, _, _, _, _, _, _, _) -> *const ()
                 as usize,
         ),
         _ => None,
@@ -2805,6 +2814,39 @@ pub unsafe extern "win64" fn is_text_unicode(
     } else {
         0 // FALSE
     }
+}
+
+// ── Security descriptor stubs ─────────────────────────────────────
+
+// Wine ref: dlls/advapi32/sec.c — ConvertStringSecurityDescriptorToSecurityDescriptorW
+// parses a string SDDL representation. Not stub-capable — needs real SDDL parser.
+// Weave stub returns ERROR_INVALID_PARAMETER.
+#[allow(unused_variables)]
+pub unsafe extern "win64" fn convert_string_sd_to_sd_w(
+    string_sd: *const u16,
+    string_sd_revision: u32,
+    security_descriptor: *mut *mut u8,
+    security_descriptor_len: *mut u32,
+) -> i32 {
+    weave_common::set_last_error(87); // ERROR_INVALID_PARAMETER
+    0 // FALSE
+}
+
+// Wine ref: dlls/advapi32/sec.c — BuildSecurityDescriptorW constructs a security
+// descriptor from trustee and access entries. Not stub-capable.
+// Weave stub returns ERROR_INVALID_PARAMETER.
+#[allow(unused_variables)]
+pub unsafe extern "win64" fn build_security_descriptor_w(
+    p_owner: *const u8,
+    p_group: *const u8,
+    c_count_of_access_entries: u32,
+    p_list_of_access_entries: *const u8,
+    c_count_of_audit_entries: u32,
+    p_list_of_audit_entries: *const u8,
+    p_new_security_descriptor: *mut *mut u8,
+    pcb_security_descriptor: *mut u32,
+) -> u32 {
+    87 // ERROR_INVALID_PARAMETER
 }
 
 // ── Phase A stubs ─────────────────────────────────────────────────

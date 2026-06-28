@@ -1619,7 +1619,13 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
             api::oem_to_char_buff_a as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
         ),
         "CharToOemBuffW" => Some(
-            api::char_to_oem_buff_w as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
+            api::char_to_oem_buff_w as unsafe extern "win64" fn(_, _, _) -> *const () as usize,
+        ),
+        // Wine ref: dlls/user32/nonclient.c — GetProcessDefaultLayout returns the
+        // process-level default layout (0 = LTR). Weave stub returns 0 (LTR).
+        "GetProcessDefaultLayout" => Some(
+            api::get_process_default_layout
+                as unsafe extern "win64" fn(_) -> i32 as *const () as usize,
         ),
         _ => None,
     }

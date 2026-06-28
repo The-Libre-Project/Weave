@@ -11030,6 +11030,17 @@ pub unsafe extern "win64" fn char_to_oem_buff_w(
     0 // FALSE — no real conversion performed
 }
 
+// Wine ref: dlls/user32/nonclient.c — GetProcessDefaultLayout returns the
+// process-level default layout mode. Returns TRUE and writes 0 (LTR layout)
+// to pdwLayout.
+pub unsafe extern "win64" fn get_process_default_layout(pdw_layout: *mut u32) -> i32 {
+    if pdw_layout.is_null() {
+        return 0; // FALSE
+    }
+    unsafe { *pdw_layout = 0 }; // LTR layout
+    1 // TRUE
+}
+
 /// Resolve a UIAutomationCore.dll import to a stub address.
 ///
 /// Called by weave-cli's resolve chain. Uses eq_ignore_ascii_case because
