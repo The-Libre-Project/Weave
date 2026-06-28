@@ -11105,6 +11105,166 @@ pub unsafe extern "win64" fn get_process_default_layout(pdw_layout: *mut u32) ->
     1 // TRUE
 }
 
+// ── Audacity gap-fill: user32 stubs ───────────────────────────────────
+
+/// LoadCursorFromFileW: load a cursor from a .cur or .ani file.
+/// Phase A stub — returns NULL (0).
+// Wine ref: dlls/user32/cursoricon.c — loads the cursor file via
+// LoadImage; we have no cursor file support.
+pub extern "win64" fn load_cursor_from_file_w(_lp_file_name: *const u16) -> usize {
+    0
+}
+
+/// GetClipboardFormatNameW: get the name of a registered clipboard format.
+/// Phase A stub — returns 0 (format not found / no name).
+// Wine ref: dlls/user32/clipboard.c — looks up format name in internal table.
+pub unsafe extern "win64" fn get_clipboard_format_name_w(
+    _format: u32,
+    _lpsz_format_name: *mut u16,
+    _cch_max_count: i32,
+) -> i32 {
+    0
+}
+
+/// EnumClipboardFormats: enumerate available clipboard formats.
+/// Phase A stub — returns 0 (end of enumeration).
+// Wine ref: dlls/user32/clipboard.c — walks internal format list.
+pub extern "win64" fn enum_clipboard_formats(_format: u32) -> u32 {
+    0
+}
+
+/// CharLowerA: convert a character to lowercase.
+/// Phase A stub — returns the character unchanged.
+// Wine ref: dlls/user32/char.c — calls AnsiLower; we pass through.
+pub extern "win64" fn char_lower_a(ch: u8) -> u8 {
+    ch
+}
+
+/// CharUpperA: convert a character to uppercase.
+/// Phase A stub — returns the character unchanged.
+// Wine ref: dlls/user32/char.c — calls AnsiUpper; we pass through.
+pub extern "win64" fn char_upper_a(ch: u8) -> u8 {
+    ch
+}
+
+/// ChildWindowFromPoint: find child window at a point.
+/// Phase A stub — returns NULL.
+// Wine ref: dlls/user32/winpos.c — walks child windows.
+pub extern "win64" fn child_window_from_point(_hwnd_parent: usize, _pt: *const u8) -> usize {
+    0
+}
+
+/// CreateIconFromResourceEx: create an icon from resource bits.
+/// Phase A stub — returns NULL.
+// Wine ref: dlls/user32/cursoricon.c — parses icon directory.
+pub extern "win64" fn create_icon_from_resource_ex(
+    _pres_bits: *const u8,
+    _dw_res_size: u32,
+    _f_icon: i32,
+    _dw_ver: u32,
+    _cx_desired: i32,
+    _cy_desired: i32,
+    _flags: u32,
+) -> usize {
+    0
+}
+
+/// DefFrameProcW: default MDI frame window procedure.
+/// Phase A stub — returns 0.
+// Wine ref: dlls/user32/mdi.c — handles MDI frame messages.
+pub extern "win64" fn def_frame_proc_w(
+    _hwnd: usize,
+    _hwnd_mdi_child: usize,
+    _msg: u32,
+    _w_param: usize,
+    _l_param: usize,
+) -> usize {
+    0
+}
+
+/// DefMDIChildProcW: default MDI child window procedure.
+/// Phase A stub — returns 0.
+// Wine ref: dlls/user32/mdi.c — handles MDI child messages.
+pub extern "win64" fn def_mdi_child_proc_w(
+    _hwnd: usize,
+    _msg: u32,
+    _w_param: usize,
+    _l_param: usize,
+) -> usize {
+    0
+}
+
+/// DrawStateW: draw an image with visual state.
+/// Phase A stub — returns FALSE.
+// Wine ref: dlls/user32/drawstate.c — renders image with state effects.
+pub extern "win64" fn draw_state_w(
+    _hdc: usize,
+    _hbrush: usize,
+    _lp_callback: usize,
+    _l_param: usize,
+    _w_param: usize,
+    _x: i32,
+    _y: i32,
+    _cx: i32,
+    _cy: i32,
+    _flags: u32,
+) -> i32 {
+    0
+}
+
+/// EnableScrollBar: enable or disable scrollbar arrows.
+/// Phase A stub — returns TRUE.
+// Wine ref: dlls/user32/scroll.c — enables/disables scrollbar.
+pub extern "win64" fn enable_scroll_bar(_hwnd: usize, _w_sbflags: u32, _w_arrows: u32) -> i32 {
+    1
+}
+
+/// SetCaretBlinkTime: set the caret blink rate.
+/// Phase A stub — returns TRUE.
+// Wine ref: dlls/user32/caret.c — calls NtUserSetCaretBlinkTime.
+pub extern "win64" fn set_caret_blink_time(_u_msec: u32) -> i32 {
+    1
+}
+
+/// SetMenuInfo: set menu information.
+/// Phase A stub — returns TRUE.
+// Wine ref: dlls/user32/menu.c — copies MENUINFO into internal struct.
+pub extern "win64" fn set_menu_info(_hmenu: usize, _lpc_menu_info: *const u8) -> i32 {
+    1
+}
+
+/// TranslateMDISysAccel: translate MDI system accelerator keys.
+/// Phase A stub — returns FALSE.
+// Wine ref: dlls/user32/mdi.c — translates WM_KEYDOWN to WM_SYSCOMMAND.
+pub extern "win64" fn translate_mdi_sys_accel(_hwnd_client: usize, _lp_msg: *const u8) -> i32 {
+    0
+}
+
+/// UnionRect: compute the union of two rectangles.
+/// Phase A stub — returns FALSE (empty union).
+// Wine ref: dlls/gdi32/rect.c — computes union; we return empty.
+pub unsafe extern "win64" fn union_rect(
+    _lprc_dst: *mut u8,
+    _lprc_src1: *const u8,
+    _lprc_src2: *const u8,
+) -> i32 {
+    0
+}
+
+/// ValidateRgn: validate a window region (remove from update region).
+/// Phase A stub — returns TRUE.
+// Wine ref: dlls/user32/painting.c — removes region from update rect.
+pub extern "win64" fn validate_rgn(_hwnd: usize, _hrgn: usize) -> i32 {
+    1
+}
+
+/// AnimateWindow: animate a window during show/hide.
+/// Phase A stub — returns TRUE.
+// Wine ref: dlls/user32/winpos.c — performs window animation.
+pub extern "win64" fn animate_window(_hwnd: usize, _dw_time: u32, _dw_flags: u32) -> i32 {
+    1
+}
+
 /// Resolve a UIAutomationCore.dll import to a stub address.
 ///
 /// Called by weave-cli's resolve chain. Uses eq_ignore_ascii_case because

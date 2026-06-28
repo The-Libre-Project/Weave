@@ -117,6 +117,14 @@ pub extern "win64" fn ucrt_set_new_mode(_mode: i32) -> i32 {
     0
 }
 
+/// _msize — return the size of a heap allocation. Stub: returns 0.
+///
+/// Since Weave delegates to libc malloc, we cannot look up the allocation
+/// size. Return 0; callers should handle 0 as "unknown" per MSVC docs.
+pub extern "win64" fn ucrt_msize(_ptr: *const c_void) -> usize {
+    0
+}
+
 // ── Memory ────────────────────────────────────────────────────────────────────
 
 /// # Safety
@@ -1506,6 +1514,24 @@ pub unsafe extern "win64" fn ucrt_getenv(name: *const u8) -> *const u8 {
     unsafe { libc::getenv(name as *const libc::c_char) as *const u8 }
 }
 
+/// getenv_s — secure version of getenv. Stub: returns 0 (success, empty value).
+///
+/// Wine ref: dlls/msvcrt/environ.c — getenv_s copies the env var value into
+/// buf, writes the required size into retval. Returns EINVAL on null params,
+/// ERANGE if buf is too small.
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced (stub returns success
+/// with empty value).
+pub unsafe extern "win64" fn ucrt_getenv_s(
+    _retval: *mut usize,
+    _buf: *mut u8,
+    _size: usize,
+    _name: *const u8,
+) -> i32 {
+    0
+}
+
 /// _wgetenv — look up an environment variable by wide (UTF-16LE) name.
 ///
 /// Wine ref: dlls/msvcrt/environ.c — _wgetenv converts the wide name to ANSI,
@@ -1723,6 +1749,53 @@ pub extern "win64" fn ucrt_lrintf(x: f32) -> i32 {
 }
 pub extern "win64" fn ucrt_rintf(x: f32) -> f32 {
     x.round_ties_even()
+}
+
+/// _finite — test if a double value is finite.
+pub extern "win64" fn ucrt_finite(x: f64) -> i32 {
+    x.is_finite() as i32
+}
+
+/// _hypotf — compute the hypotenuse of a right triangle (single precision).
+pub extern "win64" fn ucrt_hypotf(a: f32, b: f32) -> f32 {
+    (a * a + b * b).sqrt()
+}
+
+/// exp2f — compute 2 raised to the power of x (single precision).
+pub extern "win64" fn ucrt_exp2f(x: f32) -> f32 {
+    x.exp2()
+}
+
+/// fmaxf — return the larger of two floating-point values (single precision).
+pub extern "win64" fn ucrt_fmaxf(a: f32, b: f32) -> f32 {
+    a.max(b)
+}
+
+/// log2l — compute the base-2 logarithm of a long double (treated as f64 on Win64).
+pub extern "win64" fn ucrt_log2l(x: f64) -> f64 {
+    x.log2()
+}
+
+/// lroundf — round to nearest long (single precision).
+pub extern "win64" fn ucrt_lroundf(x: f32) -> i64 {
+    x.round() as i64
+}
+
+/// modf — split a double into integral and fractional parts.
+///
+/// # Safety
+/// `intpart` must be a valid writable pointer to f64.
+pub unsafe extern "win64" fn ucrt_modf(x: f64, intpart: *mut f64) -> f64 {
+    let int = x.trunc();
+    if !intpart.is_null() {
+        *intpart = int;
+    }
+    x - int
+}
+
+/// tanh — compute the hyperbolic tangent of a double.
+pub extern "win64" fn ucrt_tanh(x: f64) -> f64 {
+    x.tanh()
 }
 
 /// # Safety
@@ -4313,6 +4386,23 @@ pub extern "win64" fn ucrt_getch() -> i32 {
     0
 }
 
+/// _kbhit — check for keyboard input. Stub: returns 0 (no key waiting).
+///
+/// Wine ref: dlls/msvcrt/console.c — _kbhit uses PeekConsoleInput on the
+/// console handle. On Linux there's no equivalent without blocking, so
+/// return 0 (no keypress).
+pub extern "win64" fn ucrt_kbhit() -> i32 {
+    0
+}
+
+/// getchar — read a character from stdin. Stub: returns EOF (-1).
+///
+/// Wine ref: dlls/msvcrt/file.c — getchar calls fgetc(stdin).
+/// Weave cannot safely bridge stdin from the host; return EOF.
+pub extern "win64" fn ucrt_getchar() -> i32 {
+    -1 // EOF
+}
+
 // ── Additional stdio ──────────────────────────────────────────────────────────
 
 /// fgets — read a line from a FILE stream into a buffer.
@@ -4407,6 +4497,14 @@ pub unsafe extern "win64" fn ucrt_getc(stream: *mut c_void) -> i32 {
         return -1; // EOF
     }
     libc::fgetc(stream as *mut libc::FILE)
+}
+
+/// tmpnam — generate a temporary filename. Stub: returns NULL.
+///
+/// Wine ref: dlls/msvcrt/stdio.c — tmpnam generates a unique temp filename.
+/// Stub: return NULL to signal failure. Callers should handle this gracefully.
+pub extern "win64" fn ucrt_tmpnam(_buf: *mut u8) -> *mut u8 {
+    std::ptr::null_mut()
 }
 
 // ── Low-level file I/O ────────────────────────────────────────────────────────
@@ -4865,6 +4963,26 @@ pub unsafe extern "win64" fn ucrt_wrmdir(_path: *const u16) -> i32 {
     -1
 }
 
+/// _chdir — change the current working directory.
+///
+/// Wine ref: dlls/msvcrt/dir.c — _chdir calls SetCurrentDirectoryA.
+/// Weave: delegates to libc::chdir.
+///
+/// # Safety
+/// `path` must be a valid null-terminated C string.
+pub unsafe extern "win64" fn ucrt_chdir(path: *const u8) -> i32 {
+    if path.is_null() {
+        unsafe { *libc::__errno_location() = libc::EINVAL };
+        return -1;
+    }
+    let ret = unsafe { libc::chdir(path as *const libc::c_char) };
+    if ret < 0 {
+        -1
+    } else {
+        0
+    }
+}
+
 // Wine ref: dlls/msvcrt/time.c — _W_Getdays returns a static wide string
 // of abbreviated day names separated by spaces, one entry per day.
 pub extern "win64" fn ucrt_w_getdays() -> *const u16 {
@@ -5277,6 +5395,29 @@ pub extern "win64" fn ucrt_expm1(_x: f64) -> f64 {
 
 pub extern "win64" fn ucrt_log1p(_x: f64) -> f64 {
     0.0
+}
+
+// ── __sys_nerr / __sys_errlist data ──────────────────────────────────────
+//
+// Wine ref: dlls/msvcrt/errno.c — _sys_nerr is the number of system error
+// messages in _sys_errlist[].  Classic MSVCRT defines _sys_nerr = 43.
+// _sys_errlist[] is an array of char* pointers to error messages.
+//
+// Weave provides read-only storage for callers that index into these tables.
+
+const SYS_NERR_VAL: usize = 43;
+
+static SYS_ERRLIST_BUF: OnceLock<usize> = OnceLock::new();
+
+pub fn sys_nerr_data_addr() -> usize {
+    &SYS_NERR_VAL as *const usize as usize
+}
+
+pub fn sys_errlist_data_addr() -> usize {
+    *SYS_ERRLIST_BUF.get_or_init(|| {
+        let buf: Box<[usize; SYS_NERR_VAL]> = Box::new([0; SYS_NERR_VAL]);
+        Box::into_raw(buf) as usize
+    })
 }
 
 // ── Final audacity straggler batch ────────────────────────────────────
@@ -5893,6 +6034,23 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "atanf" => stub!(ucrt_atanf as extern "win64" fn(_) -> _),
         "cosh" => stub!(ucrt_cosh as extern "win64" fn(_) -> _),
         "sinh" => stub!(ucrt_sinh as extern "win64" fn(_) -> _),
+        // ── New stubs (2026-06-28) ──────────────────────────────────────
+        "_msize" => stub!(ucrt_msize as extern "win64" fn(_) -> _),
+        "_finite" => stub!(ucrt_finite as extern "win64" fn(_) -> _),
+        "_hypotf" => stub!(ucrt_hypotf as extern "win64" fn(_, _) -> _),
+        "exp2f" => stub!(ucrt_exp2f as extern "win64" fn(_) -> _),
+        "fmaxf" => stub!(ucrt_fmaxf as extern "win64" fn(_, _) -> _),
+        "log2l" => stub!(ucrt_log2l as extern "win64" fn(_) -> _),
+        "lroundf" => stub!(ucrt_lroundf as extern "win64" fn(_) -> _),
+        "modf" => stub!(ucrt_modf as unsafe extern "win64" fn(_, _) -> _),
+        "tanh" => stub!(ucrt_tanh as extern "win64" fn(_) -> _),
+        "getenv_s" => stub!(ucrt_getenv_s as unsafe extern "win64" fn(_, _, _, _) -> _),
+        "_chdir" => stub!(ucrt_chdir as unsafe extern "win64" fn(_) -> _),
+        "_kbhit" => stub!(ucrt_kbhit as extern "win64" fn() -> _),
+        "getchar" | "_getchar" => stub!(ucrt_getchar as extern "win64" fn() -> _),
+        "tmpnam" => stub!(ucrt_tmpnam as extern "win64" fn(_) -> _),
+        "__sys_nerr" => Some(sys_nerr_data_addr()),
+        "__sys_errlist" => Some(sys_errlist_data_addr()),
         _ => None,
     }
 }

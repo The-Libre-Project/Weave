@@ -1676,6 +1676,207 @@ pub extern "win64" fn midi_out_reset(_hmo: usize) -> u32 {
     MMSYSERR_NOERROR
 }
 
+// ── MIDI stream stubs ───────────────────────────────────────────────────
+// Wine ref: dlls/winmm/midi.c — MIDI stream functions delegate to
+// MMDRV_Message; we Phase-A stub them all.
+
+pub extern "win64" fn midi_stream_open(
+    _phms: *mut u32,
+    _pu_device_id: *mut u32,
+    _c_midi: u32,
+    _dw_callback: usize,
+    _dw_instance: usize,
+    _fdw_open: u32,
+) -> u32 {
+    0xFFFFFFFF
+} // MMSYSERR_ERROR
+
+pub extern "win64" fn midi_stream_close(_hms: u32) -> u32 {
+    0
+}
+
+pub extern "win64" fn midi_stream_property(_hms: u32, _ppropty: usize, _fdw_property: u32) -> u32 {
+    0
+}
+
+pub extern "win64" fn midi_stream_position(_hms: u32, _ppmt: *mut u32, _cbmmt: u32) -> u32 {
+    0
+}
+
+pub extern "win64" fn midi_stream_out(_hms: u32, _pmidi_stream_hdr: usize, _cb_hdr: u32) -> u32 {
+    0
+}
+
+pub extern "win64" fn midi_stream_restart(_hms: u32) -> u32 {
+    0
+}
+
+pub extern "win64" fn midi_stream_stop(_hms: u32) -> u32 {
+    0
+}
+
+pub extern "win64" fn midi_stream_pause(_hms: u32) -> u32 {
+    0
+}
+
+pub extern "win64" fn midi_out_set_volume(_hmo: u32) -> u32 {
+    0
+}
+
+pub extern "win64" fn midi_in_stop(_hmi: u32) -> u32 {
+    0
+}
+
+pub extern "win64" fn midi_in_get_error_text_a(
+    _mmr_error: u32,
+    _lp_text: *mut u8,
+    _cch_text: u32,
+) -> u32 {
+    0
+}
+
+pub extern "win64" fn midi_in_get_dev_caps_a(
+    _u_device_id: u32,
+    _lp_caps: *mut u8,
+    _cb_caps: u32,
+) -> u32 {
+    0
+}
+
+pub extern "win64" fn midi_out_get_dev_caps_a(
+    _u_device_id: u32,
+    _lp_caps: *mut u8,
+    _cb_caps: u32,
+) -> u32 {
+    0
+}
+
+pub extern "win64" fn midi_out_get_error_text_a(
+    _mmr_error: u32,
+    _lp_text: *mut u8,
+    _cch_text: u32,
+) -> u32 {
+    0
+}
+
+// ── Joystick stubs ──────────────────────────────────────────────────────
+// Wine ref: dlls/winmm/joystick.c — joystick API delegates to
+// joyGetDevCapsW etc. via MMDRV_Message.
+
+pub extern "win64" fn joy_get_dev_caps_w(_u_dev_id: u32, _lp_caps: *mut u8, _cb_caps: u32) -> u32 {
+    0x0000006A
+}
+
+pub extern "win64" fn joy_get_num_devs() -> u32 {
+    0
+}
+
+pub extern "win64" fn joy_get_pos(_u_dev_id: u32, _lp_info: *mut u8) -> u32 {
+    0x0000006A
+}
+
+pub extern "win64" fn joy_get_pos_ex(_u_dev_id: u32, _lp_info: *mut u8) -> u32 {
+    0x0000006A
+}
+
+pub extern "win64" fn joy_get_threshold(_u_dev_id: u32, _pu_threshold: *mut u32) -> u32 {
+    0x0000006A
+}
+
+pub extern "win64" fn joy_set_threshold(_u_dev_id: u32, _u_threshold: u32) -> u32 {
+    0x0000006A
+}
+
+// ── Mixer API stubs ─────────────────────────────────────────────────────
+// Wine ref: dlls/winmm/mixer.c — mixer API; we stub all as MMSYSERR_NODRIVER
+// (no mixer device present).
+
+pub extern "win64" fn mixer_open(
+    _phmx: *mut u32,
+    _u_mx_id: u32,
+    _dw_callback: usize,
+    _dw_instance: usize,
+    _fdw_open: u32,
+) -> u32 {
+    0x0000006A
+}
+
+pub extern "win64" fn mixer_close(_hmx: u32) -> u32 {
+    0
+}
+
+pub extern "win64" fn mixer_get_dev_caps_a(
+    _u_mx_id: u32,
+    _pmxcaps: *mut u8,
+    _cb_mxcaps: u32,
+) -> u32 {
+    0x0000006A
+}
+
+pub extern "win64" fn mixer_get_line_info_a(_hmx: u32, _pmxl: *mut u8, _fdw_info: u32) -> u32 {
+    0x0000006A
+}
+
+pub extern "win64" fn mixer_get_line_controls_a(
+    _hmx: u32,
+    _pmxlc: *mut u8,
+    _fdw_controls: u32,
+) -> u32 {
+    0x0000006A
+}
+
+pub extern "win64" fn mixer_get_control_details_a(
+    _hmx: u32,
+    _pmxcd: *mut u8,
+    _fdw_details: u32,
+) -> u32 {
+    0x0000006A
+}
+
+pub extern "win64" fn mixer_set_control_details(
+    _hmx: u32,
+    _pmxcd: *mut u8,
+    _fdw_details: u32,
+) -> u32 {
+    0x0000006A
+}
+
+pub extern "win64" fn mixer_get_id(_hmx: u32, _pu_mx_id: *mut u32, _fdw_id: u32) -> u32 {
+    0x0000006A
+}
+
+// ── Wave out-of-band message stubs ──────────────────────────────────────
+
+pub extern "win64" fn wave_in_get_id(_hwi: u32, _pu_device_id: *mut u32) -> u32 {
+    0
+}
+
+pub extern "win64" fn wave_out_message(_hwo: u32, _u_msg: u32, _dw1: usize, _dw2: usize) -> u32 {
+    0
+}
+
+pub extern "win64" fn wave_in_message(_hwi: u32, _u_msg: u32, _dw1: usize, _dw2: usize) -> u32 {
+    0
+}
+
+// ── Timer event stubs ───────────────────────────────────────────────────
+// Wine ref: dlls/winmm/time.c — timeSetEvent/timeKillEvent manage a timer
+// queue. Phase A stub: return 0 (no timer created).
+
+pub extern "win64" fn time_set_event(
+    _u_delay: u32,
+    _u_resolution: u32,
+    _lp_func: usize,
+    _dw_user: usize,
+    _u_flags: u32,
+) -> u32 {
+    0
+}
+
+pub extern "win64" fn time_kill_event(_u_timer_id: u32) -> u32 {
+    0
+}
+
 /// Returns true for any DLL name this crate handles.
 fn is_winmm_dll(dll: &str) -> bool {
     dll.eq_ignore_ascii_case("winmm.dll")
@@ -1869,6 +2070,44 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
             Some(midi_out_long_msg as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize)
         }
         "midiOutReset" => Some(midi_out_reset as extern "win64" fn(_) -> _ as *const () as usize),
+        // ── MIDI stream stubs ──
+        "midiStreamOpen" => Some(midi_stream_open as *const () as usize),
+        "midiStreamClose" => Some(midi_stream_close as *const () as usize),
+        "midiStreamProperty" => Some(midi_stream_property as *const () as usize),
+        "midiStreamPosition" => Some(midi_stream_position as *const () as usize),
+        "midiStreamOut" => Some(midi_stream_out as *const () as usize),
+        "midiStreamRestart" => Some(midi_stream_restart as *const () as usize),
+        "midiStreamStop" => Some(midi_stream_stop as *const () as usize),
+        "midiStreamPause" => Some(midi_stream_pause as *const () as usize),
+        "midiOutSetVolume" => Some(midi_out_set_volume as *const () as usize),
+        "midiInStop" => Some(midi_in_stop as *const () as usize),
+        "midiInGetErrorTextA" => Some(midi_in_get_error_text_a as *const () as usize),
+        "midiInGetDevCapsA" => Some(midi_in_get_dev_caps_a as *const () as usize),
+        "midiOutGetDevCapsA" => Some(midi_out_get_dev_caps_a as *const () as usize),
+        "midiOutGetErrorTextA" => Some(midi_out_get_error_text_a as *const () as usize),
+        // ── Joystick stubs ──
+        "joyGetDevCapsW" => Some(joy_get_dev_caps_w as *const () as usize),
+        "joyGetNumDevs" => Some(joy_get_num_devs as *const () as usize),
+        "joyGetPos" => Some(joy_get_pos as *const () as usize),
+        "joyGetPosEx" => Some(joy_get_pos_ex as *const () as usize),
+        "joyGetThreshold" => Some(joy_get_threshold as *const () as usize),
+        "joySetThreshold" => Some(joy_set_threshold as *const () as usize),
+        // ── Mixer API stubs ──
+        "mixerOpen" => Some(mixer_open as *const () as usize),
+        "mixerClose" => Some(mixer_close as *const () as usize),
+        "mixerGetDevCapsA" => Some(mixer_get_dev_caps_a as *const () as usize),
+        "mixerGetLineInfoA" => Some(mixer_get_line_info_a as *const () as usize),
+        "mixerGetLineControlsA" => Some(mixer_get_line_controls_a as *const () as usize),
+        "mixerGetControlDetailsA" => Some(mixer_get_control_details_a as *const () as usize),
+        "mixerSetControlDetails" => Some(mixer_set_control_details as *const () as usize),
+        "mixerGetID" => Some(mixer_get_id as *const () as usize),
+        // ── Wave out-of-band message stubs ──
+        "waveInGetID" => Some(wave_in_get_id as *const () as usize),
+        "waveOutMessage" => Some(wave_out_message as *const () as usize),
+        "waveInMessage" => Some(wave_in_message as *const () as usize),
+        // ── Timer event stubs ──
+        "timeSetEvent" => Some(time_set_event as *const () as usize),
+        "timeKillEvent" => Some(time_kill_event as *const () as usize),
         _ => None,
     }
 }

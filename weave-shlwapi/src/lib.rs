@@ -617,6 +617,34 @@ pub unsafe extern "win64" fn str_cpy_w(psz_dest: *mut u16, psz_src: *const u16) 
     psz_dest
 }
 
+// ── SHAutoComplete ────────────────────────────────────────────────────────────
+
+/// SHAutoComplete — stub, always succeeds (returns S_OK).
+/// Wine ref: dlls/shlwapi/shlwapi_main.c — enables auto-complete on an edit control
+/// based on dw_flags (SHACF_*). Stub returns S_OK as a no-op.
+pub extern "win64" fn sh_auto_complete(_hwnd_edit: usize, _dw_flags: u32) -> u32 {
+    0 // S_OK
+}
+
+// ── SHRegGetUSValueW ──────────────────────────────────────────────────────────
+
+/// SHRegGetUSValueW — stub, returns ERROR_FILE_NOT_FOUND.
+/// Wine ref: dlls/shlwapi/reg.c — queries a registry value under HKEY_CURRENT_USER
+/// or HKEY_LOCAL_MACHINE (user/machine split). Stub returns 0x80070002 to signal
+/// "value not present", which callers handle gracefully.
+pub unsafe extern "win64" fn sh_reg_get_us_value_w(
+    _hkey: *const u8,
+    _psz_sub_key: *const u16,
+    _psz_value: *const u16,
+    _pdw_type: *mut u32,
+    _pv_data: *mut u8,
+    _pcb_data: *mut u32,
+    _pdefault_data: *const u8,
+    _default_data_size: u32,
+) -> u32 {
+    0x80070002 // ERROR_FILE_NOT_FOUND
+}
+
 // ── Resolver ─────────────────────────────────────────────────────────────────
 
 /// Resolve a shlwapi.dll import to a function pointer.
@@ -644,6 +672,8 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "ColorAdjustLuma" => color_adjust_luma as *const () as usize,
         "PathRelativePathToW" => path_relative_path_to_w as *const () as usize,
         "StrCpyW" => str_cpy_w as *const () as usize,
+        "SHAutoComplete" => sh_auto_complete as *const () as usize,
+        "SHRegGetUSValueW" => sh_reg_get_us_value_w as *const () as usize,
         _ => return None,
     })
 }
@@ -676,6 +706,8 @@ mod tests {
             "ColorAdjustLuma",
             "PathRelativePathToW",
             "StrCpyW",
+            "SHAutoComplete",
+            "SHRegGetUSValueW",
         ];
         for f in &funcs {
             assert!(resolve("shlwapi.dll", f).is_some(), "missing: {f}");

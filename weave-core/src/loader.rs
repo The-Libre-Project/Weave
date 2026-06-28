@@ -1,3 +1,4 @@
+use goblin::pe::export::ExportAddressTableEntry;
 use goblin::pe::PE;
 use std::collections::HashMap;
 use std::ptr;
@@ -200,9 +201,8 @@ pub fn load_dll(bytes: &[u8]) -> Result<(LoadedImage, HashMap<String, usize>), S
             exports.insert(name.to_string(), addr);
         }
     }
-    // Register ordinal #N entries for ordinal-based imports.
-    // The ordinal table parallels the named exports: ordinal_table[i] is the
-    // ordinal for the i-th named export (skipping ordinal-only exports).
+    // Register ordinal #N entries for named exports.
+    // export_ordinal_table[i] is the ordinal for the i-th named export.
     if let Some(ed) = &pe.export_data {
         for (i, exp) in pe
             .exports
@@ -214,6 +214,24 @@ pub fn load_dll(bytes: &[u8]) -> Result<(LoadedImage, HashMap<String, usize>), S
                 if let Some(&addr) = exports.get(name) {
                     exports.insert(format!("#{}", ed.export_ordinal_table[i]), addr);
                 }
+            }
+        }
+    }
+    // Also register every entry in the export address table by ordinal.
+    // This catches ordinal-only exports (no name in the Name Pointer Table)
+    // and ensures ordinal imports resolve correctly even when the ordinal
+    // table has gaps (e.g. portaudio_x64.dll exports at ordinals 1-34 and
+    // 52-75, leaving 35-51 unused — but the address table covers them all).
+    if let Some(ed) = &pe.export_data {
+        for (i, entry) in ed.export_address_table.iter().enumerate() {
+            let ordinal = ed.export_directory_table.ordinal_base as u16 + i as u16;
+            if let ExportAddressTableEntry::ExportRVA(rva) = entry {
+                let adj_rva = if *rva as usize >= preferred_base {
+                    *rva as usize - preferred_base
+                } else {
+                    *rva as usize
+                };
+                exports.insert(format!("#{ordinal}"), dll_loaded_base + adj_rva);
             }
         }
     }

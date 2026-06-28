@@ -16137,6 +16137,19 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "DisableThreadLibraryCalls" => Some(
             disable_thread_library_calls as unsafe extern "win64" fn(_) -> _ as *const () as usize,
         ),
+        // ── Audacity gap-fill ──
+        "VerifyVersionInfoA" => Some(
+            verify_version_info_a as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
+        ),
+        "WriteProfileStringW" => Some(write_profile_string_w as *const () as usize),
+        "ReadConsoleOutputCharacterA" => Some(
+            read_console_output_character_a as unsafe extern "win64" fn(_, _, _, _, _) -> _
+                as *const () as usize,
+        ),
+        "SignalObjectAndWait" => Some(signal_object_and_wait as *const () as usize),
+        "CreateDirectoryExW" => Some(
+            create_directory_ex_w as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
+        ),
         _ => {
             // version.dll functions are forwarded through kernel32 in some apps;
             // also handle them when the DLL name is version.dll directly.
@@ -20472,6 +20485,70 @@ pub unsafe extern "win64" fn wer_register_runtime_exception_module(
     _context: *const u8,
 ) -> i32 {
     0 // S_OK
+}
+
+// ── Audacity gap-fill: missing kernel32 stubs ──────────────────────────────────
+
+/// VerifyVersionInfoA: compare version information.
+/// Phase A stub — returns FALSE (version info does not match).
+// Wine ref: dlls/kernelbase/version.c — compares OS version info against
+// supplied conditions; we return FALSE to indicate no match.
+pub unsafe extern "win64" fn verify_version_info_a(
+    _lp_version_information: *const u8,
+    _dw_type_mask: u32,
+    _dwl_condition_mask: u64,
+) -> i32 {
+    0
+}
+
+/// WriteProfileStringW: write a string to the registry (Win16-compat).
+/// Phase A stub — returns FALSE.
+// Wine ref: dlls/kernelbase/profile.c — writes to HKCU\...\registry
+pub extern "win64" fn write_profile_string_w(
+    _lp_app_name: *const u16,
+    _lp_key_name: *const u16,
+    _lp_string: *const u16,
+) -> i32 {
+    1
+}
+
+/// ReadConsoleOutputCharacterA: read characters from the console output buffer.
+/// Phase A stub — reads nothing, returns TRUE (0 chars read).
+// Wine ref: dlls/kernelbase/console.c — copies chars from console buffer
+pub unsafe extern "win64" fn read_console_output_character_a(
+    _h_console_output: usize,
+    _lp_character: *mut u8,
+    _n_length: u32,
+    _dw_read_offset: u32,
+    lp_number_of_chars_read: *mut u32,
+) -> i32 {
+    if !lp_number_of_chars_read.is_null() {
+        *lp_number_of_chars_read = 0;
+    }
+    1
+}
+
+/// SignalObjectAndWait: signal one object and wait on another.
+/// Phase A stub — returns WAIT_FAILED (0xFFFFFFFF).
+// Wine ref: dlls/kernelbase/sync.c — calls NtSignalAndWaitForSingleObject
+pub extern "win64" fn signal_object_and_wait(
+    _h_object_to_signal: usize,
+    _h_object_to_wait_on: usize,
+    _dw_milliseconds: u32,
+    _b_alertable: i32,
+) -> u32 {
+    0xFFFFFFFF
+}
+
+/// CreateDirectoryExW: create a directory inheriting template attributes.
+/// Phase A stub — returns FALSE.
+// Wine ref: dlls/kernelbase/file.c — calls NtCreateFile
+pub extern "win64" fn create_directory_ex_w(
+    _lp_template_directory: *const u16,
+    _lp_new_directory: *const u16,
+    _lp_security_attributes: *const u8,
+) -> i32 {
+    0
 }
 
 // ── INI cluster ───────────────────────────────────────────────────────────────

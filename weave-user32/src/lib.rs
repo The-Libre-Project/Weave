@@ -1655,6 +1655,30 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
             api::get_process_default_layout as unsafe extern "win64" fn(_) -> i32 as *const ()
                 as usize,
         ),
+        // ── Audacity gap-fill: user32 stubs ──
+        "LoadCursorFromFileW" => Some(api::load_cursor_from_file_w as *const () as usize),
+        "GetClipboardFormatNameW" => Some(
+            api::get_clipboard_format_name_w as unsafe extern "win64" fn(_, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "EnumClipboardFormats" => Some(api::enum_clipboard_formats as *const () as usize),
+        "CharLowerA" => Some(api::char_lower_a as *const () as usize),
+        "CharUpperA" => Some(api::char_upper_a as *const () as usize),
+        "ChildWindowFromPoint" => Some(api::child_window_from_point as *const () as usize),
+        "CreateIconFromResourceEx" => Some(
+            api::create_icon_from_resource_ex as unsafe extern "win64" fn(_, _, _, _, _, _, _) -> _
+                as *const () as usize,
+        ),
+        "DefFrameProcW" => Some(api::def_frame_proc_w as *const () as usize),
+        "DefMDIChildProcW" => Some(api::def_mdi_child_proc_w as *const () as usize),
+        "DrawStateW" => Some(api::draw_state_w as *const () as usize),
+        "EnableScrollBar" => Some(api::enable_scroll_bar as *const () as usize),
+        "SetCaretBlinkTime" => Some(api::set_caret_blink_time as *const () as usize),
+        "SetMenuInfo" => Some(api::set_menu_info as *const () as usize),
+        "TranslateMDISysAccel" => Some(api::translate_mdi_sys_accel as *const () as usize),
+        "UnionRect" => Some(api::union_rect as *const () as usize),
+        "ValidateRgn" => Some(api::validate_rgn as *const () as usize),
+        "AnimateWindow" => Some(api::animate_window as *const () as usize),
         _ => None,
     }
 }

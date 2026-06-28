@@ -300,8 +300,17 @@ fn resolve_shell32(func: &str) -> Option<usize> {
             shell::sh_get_image_list as unsafe extern "win64" fn(_, _, _) -> _ as *const ()
                 as usize,
         ),
+        // ── Generic ordinals (Phase A stubs) ──
+        "#6" | "#7" | "#8" | "#9" | "#10" => Some(shell32_stub as *const () as usize),
         _ => None,
     }
+}
+
+// ── Generic ordinals ──────────────────────────────────────────────────────────
+
+/// Generic stub for unimplemented shell32 ordinals that return 0.
+extern "win64" fn shell32_stub() -> usize {
+    0
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

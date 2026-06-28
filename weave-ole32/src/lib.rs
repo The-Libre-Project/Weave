@@ -588,6 +588,71 @@ pub extern "win64" fn co_unmarshal_interface(_p_stm: usize, _riid: usize, _ppv: 
     CO_E_NOTINITIALIZED
 }
 
+/// CoMarshalInterThreadInterfaceInStream: marshal an interface pointer into a stream
+/// that can be unmarshalled in a different apartment.
+/// Phase A stub — returns E_NOTIMPL.
+// Wine ref: dlls/ole32/marshal.c — creates a stream and marshals the interface
+// into it via CoMarshalInterface; we return E_NOTIMPL for now.
+pub extern "win64" fn co_marshal_inter_thread_interface_in_stream(
+    _riid: *const u8,
+    _punk: usize,
+    _pp_stm: *mut usize,
+) -> u32 {
+    0x80004001 // E_NOTIMPL
+}
+
+/// CoGetInterfaceAndReleaseStream: unmarshal an interface from a stream and release it.
+/// Phase A stub — returns E_NOTIMPL.
+// Wine ref: dlls/ole32/marshal.c — unmarshal via CoUnmarshalInterface, then
+// release the stream; we return E_NOTIMPL.
+pub extern "win64" fn co_get_interface_and_release_stream(
+    _p_stm: usize,
+    _riid: *const u8,
+    _ppv: *mut usize,
+) -> u32 {
+    0x80004001 // E_NOTIMPL
+}
+
+/// CoLockObjectExternal: lock an object so it stays in memory.
+/// Phase A stub — returns S_OK.
+// Wine ref: dlls/ole32/ole2.c — calls CoLockObjectExternal on the object's
+// marshalling context; no-op for Phase A.
+pub extern "win64" fn co_lock_object_external(
+    _punk: usize,
+    _f_lock: i32,
+    _f_last_unlock_releases: i32,
+) -> u32 {
+    0 // S_OK
+}
+
+/// OleFlushClipboard: flush the clipboard contents.
+/// Phase A stub — returns S_OK.
+// Wine ref: dlls/ole32/ole2clip.c — notifies clipboard viewers; no-op.
+pub extern "win64" fn ole_flush_clipboard() -> u32 {
+    0 // S_OK
+}
+
+/// OleIsCurrentClipboard: check if the clipboard data object is current.
+/// Phase A stub — returns S_FALSE (not current).
+// Wine ref: dlls/ole32/ole2clip.c — compares the data object; return S_FALSE.
+pub extern "win64" fn ole_is_current_clipboard(_p_data_obj: usize) -> u32 {
+    1 // S_FALSE
+}
+
+/// OleRun: run an embedded object (transition to running state).
+/// Phase A stub — returns S_OK.
+// Wine ref: dlls/ole32/ole2.c — calls IRunnableObject::Run; no-op.
+pub extern "win64" fn ole_run(_punk: usize) -> u32 {
+    0 // S_OK
+}
+
+/// OleSetContainedObject: inform an object that it is contained.
+/// Phase A stub — returns S_OK.
+// Wine ref: dlls/ole32/ole2.c — sets the contained-object flag; no-op.
+pub extern "win64" fn ole_set_contained_object(_punk: usize, _f_contained: i32) -> u32 {
+    0 // S_OK
+}
+
 // Wine ref: dlls/combase/stubmanager.c — finds stub manager for punk in current apartment;
 // disconnects all remote references without destroying the object itself; S_OK always.
 /// CoDisconnectObject: disconnect a running object from its external connections (stub).
@@ -942,6 +1007,19 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "CoMarshalInterface" => Some(co_marshal_interface as *const () as usize),
         "CoUnmarshalInterface" => Some(co_unmarshal_interface as *const () as usize),
         "CoDisconnectObject" => Some(co_disconnect_object as *const () as usize),
+        // Marshalling (inter-thread)
+        "CoMarshalInterThreadInterfaceInStream" => {
+            Some(co_marshal_inter_thread_interface_in_stream as *const () as usize)
+        }
+        "CoGetInterfaceAndReleaseStream" => {
+            Some(co_get_interface_and_release_stream as *const () as usize)
+        }
+        "CoLockObjectExternal" => Some(co_lock_object_external as *const () as usize),
+        // OLE clipboard / object state
+        "OleFlushClipboard" => Some(ole_flush_clipboard as *const () as usize),
+        "OleIsCurrentClipboard" => Some(ole_is_current_clipboard as *const () as usize),
+        "OleRun" => Some(ole_run as *const () as usize),
+        "OleSetContainedObject" => Some(ole_set_contained_object as *const () as usize),
         // ProgID / CLSID conversion
         "ProgIDFromCLSID" => {
             Some(prog_id_from_clsid as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
