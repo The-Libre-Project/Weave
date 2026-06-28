@@ -216,7 +216,7 @@ unsafe extern "C" fn on_fatal_signal(
     let size = PE_SIZE.load(Ordering::Relaxed);
 
     if (base != 0 && rip >= base && rip < base + size) || addr_in_loaded_module(rip) {
-        let in_loaded = addr_in_loaded_module(rip);
+        let _in_loaded = addr_in_loaded_module(rip);
         // ── SEH runaway cap ──────────────────────────────────────────────── ────────────────────────────────────────────────
         // If the same RIP faults repeatedly, no handler is actually resolving
         // the exception.  Cap consecutive identical-RIP faults and terminate
