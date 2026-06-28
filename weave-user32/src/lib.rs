@@ -1413,8 +1413,36 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
                 as usize,
         ),
         "DdeUninitialize" => {
-            Some(api::dde_uninitialize as unsafe extern "win64" fn(_) -> _ as *const () as usize)
+            Some(api::dde_uninitialize as unsafe extern "win64" fn(_) -> *const () as usize)
         }
+        // ── wx DDE stubs (wxbase313u_vc_x64_custom.dll) ──────────────────
+        "DdeQueryStringW" => Some(
+            api::dde_query_string_w as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "DdeCreateDataHandle" => Some(
+            api::dde_create_data_handle as unsafe extern "win64" fn(_, _, _, _, _, _) -> _
+                as *const () as usize,
+        ),
+        "DdeGetLastError" => {
+            Some(api::dde_get_last_error as unsafe extern "win64" fn(_) -> _ as *const () as usize)
+        }
+        "DdeGetData" => Some(
+            api::dde_get_data as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const () as usize,
+        ),
+        "DdePostAdvise" => Some(
+            api::dde_post_advise as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
+        ),
+        "DdeNameService" => Some(
+            api::dde_name_service as unsafe extern "win64" fn(_, _, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "ExitWindowsEx" => {
+            Some(api::exit_windows_ex as extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "WaitForInputIdle" => Some(
+            api::wait_for_input_idle as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
+        ),
         "FindWindowExW" => Some(
             api::find_window_ex_w as unsafe extern "win64" fn(_, _, _, _) -> _ as *const ()
                 as usize,

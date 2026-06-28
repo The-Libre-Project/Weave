@@ -5038,6 +5038,33 @@ pub unsafe extern "win64" fn ucrt_strtof(_s: *const u8, _end: *mut *mut u8) -> f
     0.0
 }
 
+// ── wx stdio stubs (wxbase313u_vc_x64_custom.dll) ─────────────────────
+
+// Wine ref: dlls/msvcrt/file.c — _telli64 returns current file position as 64-bit.
+pub extern "win64" fn ucrt_telli64(_fh: i32) -> i64 {
+    -1_i64
+}
+
+// Wine ref: dlls/msvcrt/file.c — _commit flushes file to disk.
+pub extern "win64" fn ucrt_commit(_fh: i32) -> i32 {
+    0
+}
+
+// Wine ref: dlls/msvcrt/stdio.c — __stdio_common_vswprintf_p is a wide printf helper.
+pub unsafe extern "win64" fn ucrt_stdio_common_vswprintf_p(
+    _options: u64,
+    _str: *mut u16,
+    _len: usize,
+    _format: *const u16,
+    _locale: usize,
+    _arglist: *mut u8,
+) -> i32 {
+    0
+}
+
+// Wine ref: dlls/msvcrt/file.c — clearerr clears the error and EOF flags for a stream.
+pub unsafe extern "win64" fn ucrt_clearerr(_stream: *mut c_void) {}
+
 /// Resolve a UCRT import to a stub address.
 pub fn resolve(dll: &str, func: &str) -> Option<usize> {
     if !is_ucrt_dll(dll) {
@@ -5554,6 +5581,13 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "copysign" => stub!(ucrt_copysign as extern "win64" fn(_, _) -> _),
         "ldexp" => stub!(ucrt_ldexp as extern "win64" fn(_, _) -> _),
         "strtof" => stub!(ucrt_strtof as unsafe extern "win64" fn(_, _) -> _),
+        // ── wx stdio stubs (wxbase313u_vc_x64_custom.dll) ───────────────
+        "_telli64" => stub!(ucrt_telli64 as extern "win64" fn(_) -> _),
+        "_commit" => stub!(ucrt_commit as extern "win64" fn(_) -> _),
+        "__stdio_common_vswprintf_p" => {
+            stub!(ucrt_stdio_common_vswprintf_p as unsafe extern "win64" fn(_, _, _, _, _, _) -> _)
+        }
+        "clearerr" => stub!(ucrt_clearerr as unsafe extern "win64" fn(_)),
         _ => None,
     }
 }

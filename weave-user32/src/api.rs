@@ -9682,6 +9682,70 @@ pub unsafe extern "win64" fn unpack_dde_l_param(
     1
 }
 
+// ── wx DDE stubs (wxbase313u_vc_x64_custom.dll) ────────────────────────
+//
+// Wine ref: dlls/user32/dde.c — DDE functions for dynamic data exchange.
+// Weave stubs return DMLERR_NO_ERROR (0) or minimal valid values.
+
+pub unsafe extern "win64" fn dde_query_string_w(
+    _id_inst: u32,
+    _hsz: usize,
+    _p_string: *mut u16,
+    _cch_max: u32,
+    _codepage: u32,
+) -> i32 {
+    0 // DMLERR_NO_ERROR → empty string
+}
+
+pub unsafe extern "win64" fn dde_create_data_handle(
+    _id_inst: u32,
+    _p_src: *mut u8,
+    _cb: u32,
+    _off: u32,
+    _hsz_item: usize,
+    _fmt: u32,
+) -> usize {
+    0 // NULL handle
+}
+
+pub unsafe extern "win64" fn dde_get_last_error(_id_inst: u32) -> u32 {
+    0 // DMLERR_NO_ERROR
+}
+
+pub unsafe extern "win64" fn dde_get_data(
+    _h_data: usize,
+    _p_dst: *mut u8,
+    _cb_max: u32,
+    _off: u32,
+) -> u32 {
+    0 // DMLERR_NO_ERROR
+}
+
+pub unsafe extern "win64" fn dde_post_advise(
+    _id_inst: u32,
+    _hsz_topic: usize,
+    _hsz_item: usize,
+) -> i32 {
+    1 // TRUE
+}
+
+pub unsafe extern "win64" fn dde_name_service(
+    _id_inst: u32,
+    _hsz1: usize,
+    _hsz2: usize,
+    _af_cmd: u32,
+) -> usize {
+    0 // NULL handle
+}
+
+pub extern "win64" fn exit_windows_ex(_flags: u32, _reason: u32) -> i32 {
+    0 // FALSE
+}
+
+pub unsafe extern "win64" fn wait_for_input_idle(_process: usize, _ms: u32) -> u32 {
+    0 // WAIT_OBJECT_0 (process is idle)
+}
+
 // ── General window stubs ────────────────────────────────────────────────────────
 
 pub unsafe extern "win64" fn get_window_info(_hwnd: usize, lpwi: *mut u8) -> i32 {

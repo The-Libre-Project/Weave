@@ -16070,6 +16070,9 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
             Some(is_bad_write_ptr as extern "win64" fn(_, _) -> _ as *const () as usize)
         }
         "IsBadCodePtr" => Some(is_bad_code_ptr as extern "win64" fn(_) -> _ as *const () as usize),
+        "IsBadStringPtrA" => {
+            Some(is_bad_string_ptr_a as extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
         "EnumDateFormatsW" => Some(
             enum_date_formats_w as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
         ),
@@ -16870,6 +16873,12 @@ pub extern "win64" fn is_bad_write_ptr(_lp: *mut u8, _cb: usize) -> i32 {
 // Wine ref: dlls/kernelbase/heap.c — IsBadCodePtr probes the code entry point
 pub extern "win64" fn is_bad_code_ptr(_proc: usize) -> i32 {
     0
+}
+
+// Wine ref: dlls/kernelbase/heap.c — IsBadStringPtrA checks string accessibility;
+// Weave manages guest memory so all pointers are valid.
+pub extern "win64" fn is_bad_string_ptr_a(_ptr: *const u8, _max: usize) -> i32 {
+    0 // FALSE — pointer is valid
 }
 
 /// EnumDateFormatsW: enumerate locale date formats.
