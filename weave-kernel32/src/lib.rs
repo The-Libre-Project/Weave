@@ -6440,6 +6440,7 @@ fn is_emulated_dll(key: &str) -> bool {
             | "bcryptprimitives.dll"
             | "bcrypt.dll"
             | "powrprof.dll"
+            | "vcruntime140_1.dll"
     )
 }
 

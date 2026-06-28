@@ -5065,6 +5065,164 @@ pub unsafe extern "win64" fn ucrt_stdio_common_vswprintf_p(
 // Wine ref: dlls/msvcrt/file.c — clearerr clears the error and EOF flags for a stream.
 pub unsafe extern "win64" fn ucrt_clearerr(_stream: *mut c_void) {}
 
+// ── Batch 1 — dying-on stubs (audacity ladder) ──────────────────────────
+
+/// _putws — write a wide string to stdout (stub: returns 0 success).
+pub unsafe extern "win64" fn ucrt_putws(_s: *const u16) -> i32 {
+    0
+}
+
+/// fputws — write a wide string to a file stream (stub: returns 0 success).
+pub unsafe extern "win64" fn ucrt_fputws(_s: *const u16, _stream: *mut c_void) -> i32 {
+    0
+}
+
+/// _eof — test for end of file (stub: returns -1, not at EOF).
+pub extern "win64" fn ucrt_eof(_fh: i32) -> i32 {
+    -1
+}
+
+/// wcsspn — return length of initial segment containing only chars from accept (stub).
+pub unsafe extern "win64" fn ucrt_wcsspn(_s: *const u16, _accept: *const u16) -> usize {
+    0
+}
+
+/// wcspbrk — find first occurrence of any char from accept in s (stub: returns null).
+pub unsafe extern "win64" fn ucrt_wcspbrk(_s: *const u16, _accept: *const u16) -> *mut u16 {
+    core::ptr::null_mut()
+}
+
+/// iswalpha — test if wide character is alphabetic (stub: returns 0).
+pub extern "win64" fn ucrt_iswalpha(_c: u32) -> i32 {
+    0
+}
+
+/// wcsncat — concatenate at most n wide chars from src to dest.
+pub unsafe extern "win64" fn ucrt_wcsncat(dest: *mut u16, src: *const u16, n: usize) -> *mut u16 {
+    if dest.is_null() || src.is_null() {
+        return core::ptr::null_mut();
+    }
+    let mut i = 0;
+    while unsafe { *dest.add(i) } != 0 {
+        i += 1;
+    }
+    for j in 0..n {
+        let c = unsafe { *src.add(j) };
+        unsafe { *dest.add(i + j) = c };
+        if c == 0 {
+            break;
+        }
+    }
+    dest
+}
+
+/// _tzset — set timezone info from TZ env var (no-op stub).
+pub extern "win64" fn ucrt_tzset() {}
+
+/// _get_timezone — get timezone offset from global state (stub: returns 0, writes 0).
+pub unsafe extern "win64" fn ucrt_get_timezone(_tz: *mut i32) -> i32 {
+    if !_tz.is_null() {
+        unsafe { *_tz = 0 };
+    }
+    0
+}
+
+/// _mktime64 — convert local time to calendar time (stub: returns -1).
+pub unsafe extern "win64" fn ucrt_mktime64(_tm: *mut u8) -> i64 {
+    -1_i64
+}
+
+/// mbstowcs — convert multibyte string to wide string (stub: returns 0).
+pub unsafe extern "win64" fn ucrt_mbstowcs(_dest: *mut u16, _src: *const u8, _n: usize) -> usize {
+    0
+}
+
+/// _wtol — convert wide string to long (stub: returns 0).
+pub unsafe extern "win64" fn ucrt_wtol(_s: *const u16) -> i32 {
+    0
+}
+
+/// _wcstoul_l — convert wide string to unsigned long with locale (stub: returns 0).
+pub unsafe extern "win64" fn ucrt_wcstoul_l(
+    _s: *const u16,
+    _end: *mut *mut u16,
+    _base: i32,
+    _locale: usize,
+) -> u32 {
+    0
+}
+
+// ── Batch 1-fix — fix buggy stubs ─────────────────────────────────────
+
+/// _filbuf — read a character from a file stream buffer (stub: returns EOF -1).
+pub unsafe extern "win64" fn ucrt_filbuf(_stream: *mut c_void) -> i32 {
+    -1
+}
+
+/// _flsbuf — flush a character to a file stream buffer (stub: returns EOF -1).
+pub unsafe extern "win64" fn ucrt_flsbuf(_c: i32, _stream: *mut c_void) -> i32 {
+    -1
+}
+
+// ── Batch 2 — emerging stubs ──────────────────────────────────────────
+
+/// wcstol — convert wide string to long (stub: returns 0).
+pub unsafe extern "win64" fn ucrt_wcstol(_s: *const u16, _end: *mut *mut u16, _base: i32) -> i32 {
+    0
+}
+
+/// wcstod — convert wide string to double (stub: returns 0.0).
+pub unsafe extern "win64" fn ucrt_wcstod(_s: *const u16, _end: *mut *mut u16) -> f64 {
+    0.0
+}
+
+/// _wcstoi64 — convert wide string to signed 64-bit (stub: returns 0).
+pub unsafe extern "win64" fn ucrt_wcstoi64(_s: *const u16, _end: *mut *mut u16, _base: i32) -> i64 {
+    0
+}
+
+/// _wcstoui64 — convert wide string to unsigned 64-bit (stub: returns 0).
+pub unsafe extern "win64" fn ucrt_wcstoui64(
+    _s: *const u16,
+    _end: *mut *mut u16,
+    _base: i32,
+) -> u64 {
+    0
+}
+
+/// _wmkdir — create a directory by wide path (stub: returns 0 success).
+pub unsafe extern "win64" fn ucrt_wmkdir(_path: *const u16) -> i32 {
+    0
+}
+
+/// _waccess — check file access by wide path (stub: returns 0 success).
+pub unsafe extern "win64" fn ucrt_waccess(_path: *const u16, _mode: i32) -> i32 {
+    0
+}
+
+/// _wchmod — change file mode by wide path (stub: returns 0 success).
+pub unsafe extern "win64" fn ucrt_wchmod(_path: *const u16, _mode: i32) -> i32 {
+    0
+}
+
+/// _wputenv — set environment variable from wide string (stub: returns 0).
+pub unsafe extern "win64" fn ucrt_wputenv(_s: *const u16) -> i32 {
+    0
+}
+
+/// __p__wenviron — return pointer to the wide environment pointer (stub: returns null).
+pub unsafe extern "win64" fn ucrt_p_wenviron() -> *mut *mut *mut u16 {
+    core::ptr::null_mut()
+}
+
+/// _free_locale — free a locale object (no-op stub).
+pub unsafe extern "win64" fn ucrt_free_locale(_locale: usize) {}
+
+/// _create_locale — create a locale object (stub: returns 0).
+pub unsafe extern "win64" fn ucrt_create_locale(_cat: i32, _locale: *const u16) -> usize {
+    0
+}
+
 /// Resolve a UCRT import to a stub address.
 pub fn resolve(dll: &str, func: &str) -> Option<usize> {
     if !is_ucrt_dll(dll) {
@@ -5392,7 +5550,6 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "_stricmp" | "_strcmpi" => stub!(ucrt_stricmp as unsafe extern "win64" fn(_, _) -> _),
         "_wcsdup" => stub!(ucrt_wcsdup as unsafe extern "win64" fn(_) -> _),
         "_flushall" => stub!(ucrt_flushall_stub as extern "win64" fn()),
-        "_filbuf" | "_flsbuf" => stub!(ucrt_cexit as extern "win64" fn()),
         "_isatty" => stub!(ucrt_isatty as extern "win64" fn(_) -> _),
         "_get_errno" => stub!(ucrt_get_errno as unsafe extern "win64" fn(_) -> _),
         "_set_errno" => stub!(ucrt_set_errno as extern "win64" fn(_) -> _),
@@ -5588,6 +5745,35 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
             stub!(ucrt_stdio_common_vswprintf_p as unsafe extern "win64" fn(_, _, _, _, _, _) -> _)
         }
         "clearerr" => stub!(ucrt_clearerr as unsafe extern "win64" fn(_)),
+        // ── Batch 1 — dying-on stubs (audacity ladder) ────────────────────────
+        "_putws" => stub!(ucrt_putws as unsafe extern "win64" fn(_) -> _),
+        "fputws" => stub!(ucrt_fputws as unsafe extern "win64" fn(_, _) -> _),
+        "_eof" => stub!(ucrt_eof as extern "win64" fn(_) -> _),
+        "wcsspn" => stub!(ucrt_wcsspn as unsafe extern "win64" fn(_, _) -> _),
+        "wcspbrk" => stub!(ucrt_wcspbrk as unsafe extern "win64" fn(_, _) -> _),
+        "iswalpha" => stub!(ucrt_iswalpha as extern "win64" fn(_) -> _),
+        "wcsncat" => stub!(ucrt_wcsncat as unsafe extern "win64" fn(_, _, _) -> _),
+        "_tzset" => stub!(ucrt_tzset as extern "win64" fn()),
+        "_get_timezone" => stub!(ucrt_get_timezone as unsafe extern "win64" fn(_) -> _),
+        "_mktime64" => stub!(ucrt_mktime64 as unsafe extern "win64" fn(_) -> _),
+        "mbstowcs" => stub!(ucrt_mbstowcs as unsafe extern "win64" fn(_, _, _) -> _),
+        "_wtol" => stub!(ucrt_wtol as unsafe extern "win64" fn(_) -> _),
+        "_wcstoul_l" => stub!(ucrt_wcstoul_l as unsafe extern "win64" fn(_, _, _, _) -> _),
+        // ── Batch 1-fix — fix buggy stubs ─────────────────────────────────────
+        "_filbuf" => stub!(ucrt_filbuf as unsafe extern "win64" fn(_) -> _),
+        "_flsbuf" => stub!(ucrt_flsbuf as unsafe extern "win64" fn(_, _) -> _),
+        // ── Batch 2 — emerging stubs ──────────────────────────────────────────
+        "wcstol" => stub!(ucrt_wcstol as unsafe extern "win64" fn(_, _, _) -> _),
+        "wcstod" => stub!(ucrt_wcstod as unsafe extern "win64" fn(_, _) -> _),
+        "_wcstoi64" => stub!(ucrt_wcstoi64 as unsafe extern "win64" fn(_, _, _) -> _),
+        "_wcstoui64" => stub!(ucrt_wcstoui64 as unsafe extern "win64" fn(_, _, _) -> _),
+        "_wmkdir" => stub!(ucrt_wmkdir as unsafe extern "win64" fn(_) -> _),
+        "_waccess" => stub!(ucrt_waccess as unsafe extern "win64" fn(_, _) -> _),
+        "_wchmod" => stub!(ucrt_wchmod as unsafe extern "win64" fn(_, _) -> _),
+        "_wputenv" => stub!(ucrt_wputenv as unsafe extern "win64" fn(_) -> _),
+        "__p__wenviron" => stub!(ucrt_p_wenviron as unsafe extern "win64" fn() -> _),
+        "_free_locale" => stub!(ucrt_free_locale as unsafe extern "win64" fn(_)),
+        "_create_locale" => stub!(ucrt_create_locale as unsafe extern "win64" fn(_, _) -> _),
         _ => None,
     }
 }
