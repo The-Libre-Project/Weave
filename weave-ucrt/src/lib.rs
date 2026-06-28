@@ -5279,6 +5279,44 @@ pub extern "win64" fn ucrt_log1p(_x: f64) -> f64 {
     0.0
 }
 
+// ── Final audacity straggler batch ────────────────────────────────────
+
+pub unsafe extern "win64" fn ucrt_strncat(
+    _dest: *mut u16,
+    _src: *const u16,
+    _n: usize,
+) -> *mut u16 {
+    core::ptr::null_mut()
+}
+
+pub extern "win64" fn ucrt_set_abort_behavior(_flags: u32, _mask: u32) -> u32 {
+    0
+}
+
+pub extern "win64" fn ucrt_lround(_x: f64) -> i32 {
+    0
+}
+
+pub unsafe extern "win64" fn ucrt_wunlink(_path: *const u16) -> i32 {
+    -1
+}
+
+pub unsafe extern "win64" fn ucrt_wutime64(_path: *const u16, _buf: *mut u8) -> i32 {
+    -1
+}
+
+pub extern "win64" fn ucrt_atanf(_x: f32) -> f32 {
+    0.0
+}
+
+pub extern "win64" fn ucrt_cosh(_x: f64) -> f64 {
+    1.0
+}
+
+pub extern "win64" fn ucrt_sinh(_x: f64) -> f64 {
+    0.0
+}
+
 /// Resolve a UCRT import to a stub address.
 pub fn resolve(dll: &str, func: &str) -> Option<usize> {
     if !is_ucrt_dll(dll) {
@@ -5846,6 +5884,15 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "_fdsign" => stub!(ucrt_fdsign as extern "win64" fn(_) -> _),
         "expm1" => stub!(ucrt_expm1 as extern "win64" fn(_) -> _),
         "log1p" => stub!(ucrt_log1p as extern "win64" fn(_) -> _),
+        // ── Final audacity straggler batch ─────────────────────────────
+        "strncat" => stub!(ucrt_strncat as unsafe extern "win64" fn(_, _, _) -> _),
+        "_set_abort_behavior" => stub!(ucrt_set_abort_behavior as extern "win64" fn(_, _) -> _),
+        "lround" => stub!(ucrt_lround as extern "win64" fn(_) -> _),
+        "_wunlink" => stub!(ucrt_wunlink as unsafe extern "win64" fn(_) -> _),
+        "_wutime64" => stub!(ucrt_wutime64 as unsafe extern "win64" fn(_, _) -> _),
+        "atanf" => stub!(ucrt_atanf as extern "win64" fn(_) -> _),
+        "cosh" => stub!(ucrt_cosh as extern "win64" fn(_) -> _),
+        "sinh" => stub!(ucrt_sinh as extern "win64" fn(_) -> _),
         _ => None,
     }
 }
