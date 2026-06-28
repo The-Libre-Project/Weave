@@ -4821,6 +4821,194 @@ pub extern "win64" fn ucrt_ismbblead(_c: u32) -> i32 {
     0
 }
 
+// ── MSVCP140.dll stubs from CI run 28312531467 ─────────────────────────
+
+// Wine ref: dlls/msvcrt/wcs.c — iswalnum returns non-zero if c is alphanumeric.
+pub extern "win64" fn ucrt_iswalnum(_c: u32) -> i32 {
+    0
+}
+
+pub extern "win64" fn ucrt_unlock_locales() {}
+
+// Wine ref: dlls/msvcrt/locale.c — ___lc_collate_cp_func returns a pointer
+// to the locale's collation codepage (static int).
+pub extern "win64" fn ucrt_lc_collate_cp_func(_locale: usize) -> *const i32 {
+    static CP: i32 = 0;
+    core::ptr::addr_of!(CP)
+}
+
+// Wine ref: dlls/msvcrt/locale.c — ___lc_locale_name_func returns a pointer
+// to the locale name string pointer.
+pub extern "win64" fn ucrt_lc_locale_name_func(_locale: usize) -> *const *const u16 {
+    static NAME: *const u16 = core::ptr::null();
+    core::ptr::addr_of!(NAME)
+}
+
+pub unsafe extern "win64" fn ucrt_fgetwc(_stream: *mut c_void) -> u32 {
+    0xFFFF // WEOF
+}
+
+pub unsafe extern "win64" fn ucrt_fputwc(_c: u16, _stream: *mut c_void) -> u32 {
+    0xFFFF // WEOF
+}
+
+pub unsafe extern "win64" fn ucrt_ungetwc(_c: u16, _stream: *mut c_void) -> u32 {
+    0xFFFF // WEOF
+}
+
+pub unsafe extern "win64" fn ucrt_wchdir(_path: *const u16) -> i32 {
+    -1
+}
+
+pub unsafe extern "win64" fn ucrt_wrmdir(_path: *const u16) -> i32 {
+    -1
+}
+
+// Wine ref: dlls/msvcrt/time.c — _W_Getdays returns a static wide string
+// of abbreviated day names separated by spaces, one entry per day.
+pub extern "win64" fn ucrt_w_getdays() -> *const u16 {
+    static DAYS: [u16; 42] = [
+        // "Sun Mon Tue Wed Thu Fri Sat " — 7 entries × 4 chars + 6 spaces + null = 41+1
+        b'S' as u16,
+        b'u' as u16,
+        b'n' as u16,
+        b' ' as u16,
+        b'M' as u16,
+        b'o' as u16,
+        b'n' as u16,
+        b' ' as u16,
+        b'T' as u16,
+        b'u' as u16,
+        b'e' as u16,
+        b' ' as u16,
+        b'W' as u16,
+        b'e' as u16,
+        b'd' as u16,
+        b' ' as u16,
+        b'T' as u16,
+        b'h' as u16,
+        b'u' as u16,
+        b' ' as u16,
+        b'F' as u16,
+        b'r' as u16,
+        b'i' as u16,
+        b' ' as u16,
+        b'S' as u16,
+        b'a' as u16,
+        b't' as u16,
+        b' ' as u16,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+    ];
+    DAYS.as_ptr()
+}
+
+// Wine ref: dlls/msvcrt/time.c — _W_Getmonths returns a static wide string
+// of abbreviated month names.
+pub extern "win64" fn ucrt_w_getmonths() -> *const u16 {
+    static MONTHS: [u16; 66] = [
+        b'J' as u16,
+        b'a' as u16,
+        b'n' as u16,
+        b' ' as u16,
+        b'F' as u16,
+        b'e' as u16,
+        b'b' as u16,
+        b' ' as u16,
+        b'M' as u16,
+        b'a' as u16,
+        b'r' as u16,
+        b' ' as u16,
+        b'A' as u16,
+        b'p' as u16,
+        b'r' as u16,
+        b' ' as u16,
+        b'M' as u16,
+        b'a' as u16,
+        b'y' as u16,
+        b' ' as u16,
+        b'J' as u16,
+        b'u' as u16,
+        b'n' as u16,
+        b' ' as u16,
+        b'J' as u16,
+        b'u' as u16,
+        b'l' as u16,
+        b' ' as u16,
+        b'A' as u16,
+        b'u' as u16,
+        b'g' as u16,
+        b' ' as u16,
+        b'S' as u16,
+        b'e' as u16,
+        b'p' as u16,
+        b' ' as u16,
+        b'O' as u16,
+        b'c' as u16,
+        b't' as u16,
+        b' ' as u16,
+        b'N' as u16,
+        b'o' as u16,
+        b'v' as u16,
+        b' ' as u16,
+        b'D' as u16,
+        b'e' as u16,
+        b'c' as u16,
+        b' ' as u16,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+    ];
+    MONTHS.as_ptr()
+}
+
+// Wine ref: dlls/msvcrt/time.c — _W_Gettnames returns a static wide string
+// of full day name entries.
+pub extern "win64" fn ucrt_w_gettnames() -> *const u16 {
+    static TNAMES: [u16; 8] = [
+        b'S' as u16,
+        b'u' as u16,
+        b'n' as u16,
+        b'd' as u16,
+        b'a' as u16,
+        b'y' as u16,
+        0,
+        0,
+    ];
+    TNAMES.as_ptr()
+}
+
+pub unsafe extern "win64" fn ucrt_wgetcwd(_buf: *mut u16, _size: usize) -> *mut u16 {
+    core::ptr::null_mut()
+}
+
 /// Resolve a UCRT import to a stub address.
 pub fn resolve(dll: &str, func: &str) -> Option<usize> {
     if !is_ucrt_dll(dll) {
@@ -5317,6 +5505,20 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "_ultoa" => stub!(ucrt_ultoa as unsafe extern "win64" fn(_, _, _) -> _),
         // MBCS — Weave uses UTF-8/UTF-16 only; no lead-byte code pages active.
         "_ismbblead" => Some(ucrt_ismbblead as extern "win64" fn(_) -> _ as *const () as usize),
+        // ── MSVCP140.dll imports from CI run 28312531467 ────────────────────
+        "iswalnum" => stub!(ucrt_iswalnum as extern "win64" fn(_) -> _),
+        "_unlock_locales" => stub!(ucrt_unlock_locales as extern "win64" fn()),
+        "___lc_collate_cp_func" => stub!(ucrt_lc_collate_cp_func as extern "win64" fn(_) -> _),
+        "___lc_locale_name_func" => stub!(ucrt_lc_locale_name_func as extern "win64" fn(_) -> _),
+        "fgetwc" => stub!(ucrt_fgetwc as unsafe extern "win64" fn(_) -> _),
+        "fputwc" => stub!(ucrt_fputwc as unsafe extern "win64" fn(_, _) -> _),
+        "ungetwc" => stub!(ucrt_ungetwc as unsafe extern "win64" fn(_, _) -> _),
+        "_wchdir" => stub!(ucrt_wchdir as unsafe extern "win64" fn(_) -> _),
+        "_wrmdir" => stub!(ucrt_wrmdir as unsafe extern "win64" fn(_) -> _),
+        "_W_Getdays" => stub!(ucrt_w_getdays as extern "win64" fn() -> _),
+        "_W_Gettnames" => stub!(ucrt_w_gettnames as extern "win64" fn() -> _),
+        "_W_Getmonths" => stub!(ucrt_w_getmonths as extern "win64" fn() -> _),
+        "_wgetcwd" => stub!(ucrt_wgetcwd as unsafe extern "win64" fn(_, _) -> _),
         _ => None,
     }
 }

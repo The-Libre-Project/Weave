@@ -15509,6 +15509,9 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "InterlockedPushEntrySList" => Some(
             interlockedpushentryslsit as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
         ),
+        "InterlockedFlushSList" => {
+            Some(interlockedflushenslsit as unsafe extern "win64" fn(_) -> _ as *const () as usize)
+        }
         "IsValidLocale" => Some(is_valid_locale as *const () as usize),
         "IsValidLocaleName" => {
             Some(is_valid_locale_name as unsafe extern "win64" fn(_) -> _ as *const () as usize)
@@ -17398,6 +17401,23 @@ pub unsafe extern "win64" fn interlockedpushentryslsit(
     let new_val = new_low | ((list_entry as u64 as u128) << 64);
     unsafe { core::ptr::write_volatile(list_head, new_val) };
     old_next // previous head (null if list was empty)
+}
+
+/// InterlockedFlushSList: atomically remove all entries from the SLIST.
+/// Returns a pointer to the first entry that was removed, or null if the list was empty.
+///
+/// # Safety
+/// `list_head` must be a valid 16-byte-aligned SLIST_HEADER.
+pub unsafe extern "win64" fn interlockedflushenslsit(list_head: *mut u128) -> *mut u8 {
+    if list_head.is_null() {
+        return core::ptr::null_mut();
+    }
+    let _guard = SLIST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let val = unsafe { core::ptr::read_volatile(list_head) };
+    let old_next = (val >> 64) as u64 as *mut u8;
+    // Reset the list head to empty (depth=0, sequence=0, next=null).
+    unsafe { core::ptr::write_volatile(list_head, 0) };
+    old_next
 }
 
 /// IsValidLocale: return TRUE for any locale (we accept all).
