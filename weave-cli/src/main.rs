@@ -896,44 +896,7 @@ fn main() {
         eprintln!("weave: GS base = {gs_base:#x}");
     }
 
-    // ── 6.9. Install bare SIGSEGV fault-address logger ──────────────────
-    // The SEH handler at seh.rs may not fire if the guest overrides the
-    // signal handler. Install a minimal backup that prints si_addr from
-    // siginfo_t using only async-signal-safe calls, then re-raises with
-    // the default handler so the process still exits with signal 11.
-    #[cfg(target_os = "linux")]
-    {
-        unsafe extern "C" fn log_fault_addr(
-            sig: libc::c_int,
-            info: *mut libc::siginfo_t,
-            _ctx: *mut libc::c_void,
-        ) {
-            let addr = unsafe { (*info).si_addr() as usize };
-            let mut buf = [0u8; 96];
-            let hex = b"0123456789abcdef";
-            buf[..21].copy_from_slice(b"weave/fault: sig=\x00");
-            buf[20] = b'0' + sig as u8;
-            buf[21] = b' ';
-            buf[22..33].copy_from_slice(b"si_addr=0x");
-            for i in 0..16 {
-                let sh = (15 - i) * 4;
-                buf[33 + i] = hex[(addr >> sh) & 0xf];
-            }
-            buf[49] = b'\n';
-            unsafe {
-                libc::write(2, buf.as_ptr() as *const libc::c_void, 50);
-                libc::signal(sig, libc::SIG_DFL);
-                libc::raise(sig);
-            }
-        }
-        let mut sa: libc::sigaction = std::mem::zeroed();
-        sa.sa_flags = libc::SA_SIGINFO;
-        sa.sa_sigaction = log_fault_addr as unsafe extern "C" fn(_, _, _) as usize;
-        libc::sigaction(libc::SIGSEGV, &sa, std::ptr::null_mut());
-    }
-
     // ── 7. Jump to the entry point ────────────────────────────────────────
     // Safety: image.entry_point is a valid executable address set up by loader::load().
-    eprintln!("weave: entering guest entry point at {:p}", image.entry_point);
     unsafe { exec::run(image.entry_point) }
 }
