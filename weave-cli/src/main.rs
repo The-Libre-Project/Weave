@@ -136,7 +136,7 @@ fn resolve(dll: &str, func: &str) -> Option<usize> {
         .or_else(|| {
             if dll.eq_ignore_ascii_case("libexpat.dll") && func.starts_with('#') {
                 if let Ok(n) = func[1..].parse::<u16>() {
-                    let names = [
+                    let names: [(u16, &str); 10] = [
                         (1, "XML_DefaultCurrent"),
                         (2, "XML_ErrorString"),
                         (11, "XML_GetCurrentLineNumber"),
@@ -149,7 +149,7 @@ fn resolve(dll: &str, func: &str) -> Option<usize> {
                         (52, "XML_SetUserData"),
                     ];
                     for (ord, name) in names {
-                        if *ord == n {
+                        if ord == n {
                             return dll_registry::lookup(dll, name);
                         }
                     }
