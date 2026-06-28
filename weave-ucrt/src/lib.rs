@@ -3923,8 +3923,7 @@ pub unsafe extern "win64" fn ucrt_ctime64(time: *const i64) -> *mut u8 {
     CTIME_BUF.with(|cell| {
         let buf = cell.get() as *mut u8;
         let t = *time as libc::time_t;
-        let result =
-            unsafe { libc::ctime_r(&t, buf as *mut libc::c_char) };
+        let result = unsafe { libc::ctime_r(&t, buf as *mut libc::c_char) };
         if result.is_null() {
             std::ptr::null_mut()
         } else {
@@ -4578,9 +4577,7 @@ pub unsafe extern "win64" fn ucrt_splitpath(
 /// # Safety
 /// `buf` must be a writable buffer of at least `size` bytes, or NULL.
 pub unsafe extern "win64" fn ucrt_getcwd(buf: *mut u8, size: usize) -> *mut u8 {
-    let result = unsafe {
-        libc::getcwd(buf as *mut libc::c_char, size)
-    };
+    let result = unsafe { libc::getcwd(buf as *mut libc::c_char, size) };
     result as *mut u8
 }
 
@@ -4870,7 +4867,9 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
             )
         }
         "_iob" => Some(iob_data_addr()),
-        "fputc" | "putc" => Some(ms_fputc as unsafe extern "win64" fn(_, _) -> _ as *const () as usize),
+        "fputc" | "putc" => {
+            Some(ms_fputc as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
         "fputs" => Some(ms_fputs as unsafe extern "win64" fn(_, _) -> _ as *const () as usize),
         "fgetc" => Some(ms_fgetc as unsafe extern "win64" fn(_) -> _ as *const () as usize),
         "fflush" => Some(ms_fflush as unsafe extern "win64" fn(_) -> _ as *const () as usize),
@@ -5048,7 +5047,9 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "_get_doserrno" => stub!(ucrt_get_doserrno_stub as extern "win64" fn()),
         "_set_doserrno" => stub!(ucrt_set_doserrno_stub as extern "win64" fn()),
         "_sopen_s" => stub!(ucrt_sopen_s_stub as extern "win64" fn()),
-        "_wsopen_dispatch" => stub!(ucrt_wsopen_dispatch as unsafe extern "win64" fn(_, _, _, _) -> _),
+        "_wsopen_dispatch" => {
+            stub!(ucrt_wsopen_dispatch as unsafe extern "win64" fn(_, _, _, _) -> _)
+        }
         "_close" => stub!(ucrt_close_stub as extern "win64" fn()),
         "_dup" => stub!(ucrt_dup_stub as extern "win64" fn()),
         "_dup2" => stub!(ucrt_dup2_stub as extern "win64" fn()),
