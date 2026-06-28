@@ -5223,6 +5223,11 @@ pub unsafe extern "win64" fn ucrt_create_locale(_cat: i32, _locale: *const u16) 
     0
 }
 
+// Wine ref: dlls/msvcrt/file.c — _wstat64 gets file status using wide path.
+pub unsafe extern "win64" fn ucrt_wstat64(_path: *const u16, _buf: *mut u8) -> i32 {
+    -1
+}
+
 /// Resolve a UCRT import to a stub address.
 pub fn resolve(dll: &str, func: &str) -> Option<usize> {
     if !is_ucrt_dll(dll) {
@@ -5366,7 +5371,10 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "__stdio_common_vfprintf" | "__stdio_common_vfwprintf" => {
             stub!(ucrt_stdio_common_vfprintf as unsafe extern "win64" fn(_, _, _, _, _) -> _)
         }
-        "__stdio_common_vsprintf" | "__stdio_common_vswprintf" | "__stdio_common_vsprintf_s" => {
+        "__stdio_common_vsprintf"
+        | "__stdio_common_vswprintf"
+        | "__stdio_common_vsprintf_s"
+        | "__stdio_common_vsprintf_p" => {
             stub!(ucrt_stdio_common_vsprintf as unsafe extern "win64" fn(_, _, _, _, _, _) -> _)
         }
         "__stdio_common_vsnprintf_s" => {
@@ -5774,6 +5782,8 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "__p__wenviron" => stub!(ucrt_p_wenviron as unsafe extern "win64" fn() -> _),
         "_free_locale" => stub!(ucrt_free_locale as unsafe extern "win64" fn(_)),
         "_create_locale" => stub!(ucrt_create_locale as unsafe extern "win64" fn(_, _) -> _),
+        // ── Additional audacity stubs (CI run 28324113403) ──────────────
+        "_wstat64" => stub!(ucrt_wstat64 as unsafe extern "win64" fn(_, _) -> _),
         _ => None,
     }
 }

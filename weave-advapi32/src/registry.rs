@@ -1926,6 +1926,10 @@ pub fn resolve(func: &str) -> Option<usize> {
             build_security_descriptor_w as unsafe extern "win64" fn(_, _, _, _, _, _, _, _) -> u32
                 as *const () as usize,
         ),
+        "BuildExplicitAccessWithNameW" => Some(
+            build_explicit_access_with_name_w as unsafe extern "win64" fn(_, _, _, _, _) -> u32
+                as *const () as usize,
+        ),
         // ── Phase A stubs ─────────────────────────────────────────────────
         "RegEnumKeyW" => Some(
             reg_enum_key_w as unsafe extern "win64" fn(_, _, _, _, _, _, _, _) -> _ as *const ()
@@ -2845,6 +2849,19 @@ pub unsafe extern "win64" fn build_security_descriptor_w(
     p_list_of_audit_entries: *const u8,
     p_new_security_descriptor: *mut *mut u8,
     pcb_security_descriptor: *mut u32,
+) -> u32 {
+    87 // ERROR_INVALID_PARAMETER
+}
+
+// Wine ref: dlls/advapi32/sec.c — BuildExplicitAccessWithNameW constructs an
+// EXPLICIT_ACCESS structure from a trustee name. Weave stub — ERROR_INVALID_PARAMETER.
+#[allow(unused_variables)]
+pub unsafe extern "win64" fn build_explicit_access_with_name_w(
+    p_explicit_access: *mut u8,
+    p_trustee_name: *const u16,
+    access_permissions: u32,
+    access_mode: u32,
+    inheritance: u32,
 ) -> u32 {
     87 // ERROR_INVALID_PARAMETER
 }
