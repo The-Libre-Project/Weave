@@ -8340,10 +8340,12 @@ fn audacity_phase_a_probe() {
     });
 
     let mut exited = false;
+    let mut exit_status: Option<std::process::ExitStatus> = None;
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
                 eprintln!("Audacity probe: exited with {status}");
+                exit_status = Some(status);
                 exited = true;
                 break;
             }
@@ -8382,6 +8384,18 @@ fn audacity_phase_a_probe() {
         eprintln!("Result: UNKNOWN (neither killed nor exited)");
     }
 
+    // Exit status detail (Unix signal info)
+    #[cfg(unix)]
+    if let Some(status) = exit_status {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(sig) = status.signal() {
+            eprintln!("  ↳ Killed by signal: {sig}");
+        }
+        if let Some(code) = status.code() {
+            eprintln!("  ↳ Exit code: {code}");
+        }
+    }
+
     // PHASE markers
     let phases: Vec<&str> = stderr.lines().filter(|l| l.contains("PHASE:")).collect();
     eprintln!("\nPHASE markers ({}):", phases.len());
@@ -8415,6 +8429,61 @@ fn audacity_phase_a_probe() {
         eprintln!("  (none found)");
     }
 
+    // GetProcAddress ALL calls (not just NULL)
+    let gpall: Vec<&str> = stderr
+        .lines()
+        .filter(|l| l.contains("GetProcAddress"))
+        .collect();
+    eprintln!("\nGetProcAddress ALL calls ({}):", gpall.len());
+    for g in &gpall {
+        eprintln!("  {g}");
+    }
+    if gpall.is_empty() {
+        eprintln!("  (none found)");
+    }
+
+    // Thread creation/exit messages
+    let thread_lines: Vec<&str> = stderr
+        .lines()
+        .filter(|l| {
+            l.contains("thread")
+                || l.contains("Thread")
+                || l.contains("CreateThread")
+                || l.contains("DllMain")
+                || l.contains("TLS")
+        })
+        .collect();
+    eprintln!("\nThread/DllMain/TLS lines ({}):", thread_lines.len());
+    for t in &thread_lines {
+        eprintln!("  {t}");
+    }
+    if thread_lines.is_empty() {
+        eprintln!("  (none found)");
+    }
+
+    // SEH / Access violation
+    let seh_lines: Vec<&str> = stderr
+        .lines()
+        .filter(|l| {
+            l.contains("Access violation")
+                || l.contains("SEH")
+                || l.contains("exception")
+                || l.contains("Exception")
+                || l.contains("segfault")
+                || l.contains("SIGSEGV")
+                || l.contains("fault")
+                || l.contains("panic")
+                || l.contains("Panic")
+        })
+        .collect();
+    eprintln!("\nSEH/Access violation/panic lines ({}):", seh_lines.len());
+    for s in &seh_lines {
+        eprintln!("  {s}");
+    }
+    if seh_lines.is_empty() {
+        eprintln!("  (none found)");
+    }
+
     // IAT trace lines (resolve/patched)
     let iat_resolve: Vec<&str> = stderr
         .lines()
@@ -8422,10 +8491,36 @@ fn audacity_phase_a_probe() {
         .collect();
     eprintln!("\nIAT resolution summary: {} lines", iat_resolve.len());
 
-    // First 500 stderr lines
-    let lines: Vec<&str> = stderr.lines().take(500).collect();
-    eprintln!("\nFirst 500 stderr lines:");
-    for l in &lines {
+    // All lines after the last PHASE marker (crash vicinity)
+    let lines: Vec<&str> = stderr.lines().collect();
+    let last_phase_idx = lines.iter().rposition(|l| l.contains("PHASE:"));
+    if let Some(idx) = last_phase_idx {
+        let after_phase: Vec<&&str> = lines.iter().skip(idx).collect();
+        eprintln!(
+            "\nLines from last PHASE marker onward ({} lines):",
+            after_phase.len()
+        );
+        for l in &after_phase {
+            eprintln!("  {l}");
+        }
+    } else {
+        eprintln!("\nNo PHASE markers found — showing all stderr");
+        let all_500: Vec<&str> = lines.iter().take(500).copied().collect();
+        for l in &all_500 {
+            eprintln!("  {l}");
+        }
+    }
+
+    // Last 200 lines of stderr (directly before crash)
+    let total_lines = lines.len();
+    let start = if total_lines > 200 {
+        total_lines - 200
+    } else {
+        0
+    };
+    let last_200: Vec<&&str> = lines.iter().skip(start).collect();
+    eprintln!("\nLast {} stderr lines (pre-crash):", last_200.len());
+    for l in &last_200 {
         eprintln!("  {l}");
     }
 
