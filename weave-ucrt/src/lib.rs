@@ -5553,7 +5553,7 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "frexp" => stub!(ucrt_frexp as extern "win64" fn(_, _) -> _),
         "copysign" => stub!(ucrt_copysign as extern "win64" fn(_, _) -> _),
         "ldexp" => stub!(ucrt_ldexp as extern "win64" fn(_, _) -> _),
-        "strtof" => stub!(ucrt_strtof as unsafe extern "win64" fn(_, _, _) -> _),
+        "strtof" => stub!(ucrt_strtof as unsafe extern "win64" fn(_, _) -> _),
         _ => None,
     }
 }

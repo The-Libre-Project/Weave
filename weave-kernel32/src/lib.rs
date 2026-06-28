@@ -16121,7 +16121,7 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
             create_threadpool_timer as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
         ),
         "FlushProcessWriteBuffers" => {
-            Some(flush_process_write_buffers as extern "win64" fn() as *const () as usize)
+            Some(flush_process_write_buffers as unsafe extern "win64" fn() as *const () as usize)
         }
         "CreateSemaphoreExW" => Some(
             create_semaphore_ex_w as unsafe extern "win64" fn(_, _, _, _) -> _ as *const ()
