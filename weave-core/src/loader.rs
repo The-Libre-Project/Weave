@@ -177,7 +177,12 @@ pub fn load_dll(bytes: &[u8]) -> Result<(LoadedImage, HashMap<String, usize>), S
     let preferred_base = opt.windows_fields.image_base as usize;
 
     let mut exports: HashMap<String, usize> = HashMap::new();
-    for exp in &pe.exports {
+    let ordinal_base = pe
+        .export_data
+        .as_ref()
+        .map(|ed| ed.export_directory_table.ordinal_base)
+        .unwrap_or(0);
+    for (i, exp) in pe.exports.iter().enumerate() {
         if let Some(name) = exp.name {
             // exp.rva is the raw RVA from the Export Address Table — a 32-bit
             // byte offset from image base 0, regardless of where the image
@@ -195,7 +200,20 @@ pub fn load_dll(bytes: &[u8]) -> Result<(LoadedImage, HashMap<String, usize>), S
             } else {
                 exp.rva
             };
-            exports.insert(name.to_string(), dll_loaded_base + rva);
+            let addr = dll_loaded_base + rva;
+            exports.insert(name.to_string(), addr);
+            // Also register ordinal #N for this export (used for ordinal imports).
+            // The ordinal is derived from the Export Ordinal Table, which maps
+            // 1:1 with named exports (element `i` in the ordinal table at
+            // export_ordinal_table[i] is the ordinal for exports[i]).
+            if let Some(ed) = &pe.export_data {
+                let ord = ed
+                    .export_ordinal_table
+                    .get(i)
+                    .copied()
+                    .unwrap_or(ordinal_base as u16 + i as u16);
+                exports.insert(format!("#{ord}"), addr);
+            }
         }
     }
 
