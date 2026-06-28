@@ -2401,36 +2401,187 @@ pub unsafe extern "win64" fn d3dkmt_set_vid_pn_source_owner(_p_data: usize) -> u
 
 // ── wxWidgets gap-fill: GDI stubs ─────────────────────────────────────────────
 
-pub extern "win64" fn get_layout(_hdc: usize) -> u32 { 0 }
-pub extern "win64" fn set_poly_fill_mode(_hdc: usize, _mode: i32) -> i32 { 0 }
-pub extern "win64" fn poly_bezier(_hdc: usize, _lppt: *const u8, _c_count: u32) -> i32 { 1 }
-pub extern "win64" fn create_di_bitmap(_hdc: usize, _lpbm_info: *const u8, _fdw_init: u32, _lp_bits_init: *const u8, _lp_bmi: *const u8, _fu_usage: u32) -> usize { 0 }
-pub extern "win64" fn poly_polygon(_hdc: usize, _lp_points: *const u8, _lp_poly_counts: *const u32, _c_count: u32) -> i32 { 1 }
-pub extern "win64" fn pie(_hdc: usize, _x1: i32, _y1: i32, _x2: i32, _y2: i32, _x3: i32, _y3: i32, _x4: i32, _y4: i32) -> i32 { 1 }
-pub extern "win64" fn mask_blt(_hdc_dest: usize, _x_dest: i32, _y_dest: i32, _width: i32, _height: i32, _hdc_src: usize, _x_src: i32, _y_src: i32, _hbm_mask: usize, _x_mask: i32, _y_mask: i32, _rop: u32) -> i32 { 0 }
-pub extern "win64" fn get_object_type(_hgdiobj: usize) -> u32 { 0 }
-pub extern "win64" fn get_graphics_mode(_hdc: usize) -> i32 { 0 }
-pub extern "win64" fn ext_flood_fill(_hdc: usize, _x: i32, _y: i32, _color: u32, _fu_type: u32) -> i32 { 0 }
-pub extern "win64" fn arc(_hdc: usize, _x1: i32, _y1: i32, _x2: i32, _y2: i32, _x3: i32, _y3: i32, _x4: i32, _y4: i32) -> i32 { 1 }
-pub extern "win64" fn create_bitmap_indirect(_lp_bm: *const u8) -> usize { 0 }
-pub extern "win64" fn modify_world_transform(_hdc: usize, _lp_xform: *const u8, _i_mode: u32) -> i32 { 0 }
-pub extern "win64" fn gdi_flush() -> i32 { 1 }
-pub extern "win64" fn create_ic_w(_psz_driver: *const u16, _psz_device: *const u16, _psz_port: *const u16, _pdm: *const u8) -> usize { 0 }
-pub extern "win64" fn get_char_abc_widths_w(_hdc: usize, _u_first: u32, _u_last: u32, _lp_abc: *mut u8) -> i32 { 0 }
-pub extern "win64" fn create_polygon_rgn(_lppt: *const u8, _c_count: i32, _fn_poly_fill_mode: i32) -> usize { 0 }
-pub extern "win64" fn rect_in_region(_hrgn: usize, _lprc: *const u8) -> i32 { 0 }
-pub extern "win64" fn pt_in_region(_hrgn: usize, _x: i32, _y: i32) -> i32 { 0 }
-pub extern "win64" fn get_rgn_box(_hrgn: usize, _lprc: *const u8) -> i32 { 0 }
-pub extern "win64" fn equal_rgn(_hrgn1: usize, _hrgn2: usize) -> i32 { 0 }
-pub extern "win64" fn set_abort_proc(_hdc: usize, _lp_abort_proc: usize) -> i32 { 1 }
-pub extern "win64" fn get_palette_entries(_hdc: usize, _i_start: u32, _n_entries: u32, _lppe: *mut u8) -> u32 { 0 }
-pub extern "win64" fn offset_rgn(_hrgn: usize, _x: i32, _y: i32) -> i32 { 0 }
-pub extern "win64" fn get_region_data(_hrgn: usize, _n_count: u32, _lp_rgn_data: *mut u8) -> i32 { 0 }
-pub extern "win64" fn ext_create_region(_lp_xform: *const u8, _n_count: u32, _lp_rgn_data: *const u8) -> usize { 0 }
-pub extern "win64" fn add_font_resource_ex_w(_lp_name: *const u16, _ch_fl: u32, _pv_reserved: usize) -> usize { 0 }
-pub extern "win64" fn get_outline_text_metrics_w(_hdc: usize, _cb_data: u32, _lp_otm: *mut u8) -> u32 { 0 }
-pub extern "win64" fn get_win_meta_file_bits(_hdc: usize, _hmetafile: usize, _cb_buffer: u32, _lp_data: *mut u8) -> u32 { 0 }
-pub extern "win64" fn get_enh_meta_file_w(_lp_name: *const u16) -> usize { 0 }
+pub extern "win64" fn get_layout(_hdc: usize) -> u32 {
+    0
+}
+pub extern "win64" fn set_poly_fill_mode(_hdc: usize, _mode: i32) -> i32 {
+    0
+}
+pub extern "win64" fn poly_bezier(_hdc: usize, _lppt: *const u8, _c_count: u32) -> i32 {
+    1
+}
+pub extern "win64" fn create_di_bitmap(
+    _hdc: usize,
+    _lpbm_info: *const u8,
+    _fdw_init: u32,
+    _lp_bits_init: *const u8,
+    _lp_bmi: *const u8,
+    _fu_usage: u32,
+) -> usize {
+    0
+}
+pub extern "win64" fn poly_polygon(
+    _hdc: usize,
+    _lp_points: *const u8,
+    _lp_poly_counts: *const u32,
+    _c_count: u32,
+) -> i32 {
+    1
+}
+pub extern "win64" fn pie(
+    _hdc: usize,
+    _x1: i32,
+    _y1: i32,
+    _x2: i32,
+    _y2: i32,
+    _x3: i32,
+    _y3: i32,
+    _x4: i32,
+    _y4: i32,
+) -> i32 {
+    1
+}
+pub extern "win64" fn mask_blt(
+    _hdc_dest: usize,
+    _x_dest: i32,
+    _y_dest: i32,
+    _width: i32,
+    _height: i32,
+    _hdc_src: usize,
+    _x_src: i32,
+    _y_src: i32,
+    _hbm_mask: usize,
+    _x_mask: i32,
+    _y_mask: i32,
+    _rop: u32,
+) -> i32 {
+    0
+}
+pub extern "win64" fn get_object_type(_hgdiobj: usize) -> u32 {
+    0
+}
+pub extern "win64" fn get_graphics_mode(_hdc: usize) -> i32 {
+    0
+}
+pub extern "win64" fn ext_flood_fill(
+    _hdc: usize,
+    _x: i32,
+    _y: i32,
+    _color: u32,
+    _fu_type: u32,
+) -> i32 {
+    0
+}
+pub extern "win64" fn arc(
+    _hdc: usize,
+    _x1: i32,
+    _y1: i32,
+    _x2: i32,
+    _y2: i32,
+    _x3: i32,
+    _y3: i32,
+    _x4: i32,
+    _y4: i32,
+) -> i32 {
+    1
+}
+pub extern "win64" fn create_bitmap_indirect(_lp_bm: *const u8) -> usize {
+    0
+}
+pub extern "win64" fn modify_world_transform(
+    _hdc: usize,
+    _lp_xform: *const u8,
+    _i_mode: u32,
+) -> i32 {
+    0
+}
+pub extern "win64" fn gdi_flush() -> i32 {
+    1
+}
+pub extern "win64" fn create_ic_w(
+    _psz_driver: *const u16,
+    _psz_device: *const u16,
+    _psz_port: *const u16,
+    _pdm: *const u8,
+) -> usize {
+    0
+}
+pub extern "win64" fn get_char_abc_widths_w(
+    _hdc: usize,
+    _u_first: u32,
+    _u_last: u32,
+    _lp_abc: *mut u8,
+) -> i32 {
+    0
+}
+pub extern "win64" fn create_polygon_rgn(
+    _lppt: *const u8,
+    _c_count: i32,
+    _fn_poly_fill_mode: i32,
+) -> usize {
+    0
+}
+pub extern "win64" fn rect_in_region(_hrgn: usize, _lprc: *const u8) -> i32 {
+    0
+}
+pub extern "win64" fn pt_in_region(_hrgn: usize, _x: i32, _y: i32) -> i32 {
+    0
+}
+pub extern "win64" fn get_rgn_box(_hrgn: usize, _lprc: *const u8) -> i32 {
+    0
+}
+pub extern "win64" fn equal_rgn(_hrgn1: usize, _hrgn2: usize) -> i32 {
+    0
+}
+pub extern "win64" fn set_abort_proc(_hdc: usize, _lp_abort_proc: usize) -> i32 {
+    1
+}
+pub extern "win64" fn get_palette_entries(
+    _hdc: usize,
+    _i_start: u32,
+    _n_entries: u32,
+    _lppe: *mut u8,
+) -> u32 {
+    0
+}
+pub extern "win64" fn offset_rgn(_hrgn: usize, _x: i32, _y: i32) -> i32 {
+    0
+}
+pub extern "win64" fn get_region_data(_hrgn: usize, _n_count: u32, _lp_rgn_data: *mut u8) -> i32 {
+    0
+}
+pub extern "win64" fn ext_create_region(
+    _lp_xform: *const u8,
+    _n_count: u32,
+    _lp_rgn_data: *const u8,
+) -> usize {
+    0
+}
+pub extern "win64" fn add_font_resource_ex_w(
+    _lp_name: *const u16,
+    _ch_fl: u32,
+    _pv_reserved: usize,
+) -> usize {
+    0
+}
+pub extern "win64" fn get_outline_text_metrics_w(
+    _hdc: usize,
+    _cb_data: u32,
+    _lp_otm: *mut u8,
+) -> u32 {
+    0
+}
+pub extern "win64" fn get_win_meta_file_bits(
+    _hdc: usize,
+    _hmetafile: usize,
+    _cb_buffer: u32,
+    _lp_data: *mut u8,
+) -> u32 {
+    0
+}
+pub extern "win64" fn get_enh_meta_file_w(_lp_name: *const u16) -> usize {
+    0
+}
 
 // ── Resolve ───────────────────────────────────────────────────────────────────
 
