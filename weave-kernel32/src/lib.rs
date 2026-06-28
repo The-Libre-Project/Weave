@@ -15841,6 +15841,9 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "CreateSymbolicLinkW" => Some(
             create_symbolic_link_w as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
         ),
+        "CreateSymbolicLinkA" => Some(
+            create_symbolic_link_a as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
+        ),
         "DeleteProcThreadAttributeList" => Some(
             delete_proc_thread_attribute_list as unsafe extern "win64" fn(_) as *const () as usize,
         ),
@@ -19261,6 +19264,18 @@ pub unsafe extern "win64" fn create_symbolic_link_w(
     0
 }
 
+/// CreateSymbolicLinkA: ANSI symbolic link stub.
+///
+/// Phase A stub — returns FALSE.
+pub unsafe extern "win64" fn create_symbolic_link_a(
+    _lp_symlink_file_name: *const u8,
+    _lp_target_file_name: *const u8,
+    _dw_flags: u32,
+) -> i32 {
+    warn_once("CreateSymbolicLinkA");
+    0
+}
+
 // ── File/IO stubs ──────────────────────────────────────────────────────────────
 
 /// CancelIoEx: cancel outstanding I/O on a handle.
@@ -20895,6 +20910,7 @@ mod tests {
             "AssignProcessToJobObject",
             "CreateJobObjectW",
             "CreateSymbolicLinkW",
+            "CreateSymbolicLinkA",
             "DeleteProcThreadAttributeList",
             "InitializeProcThreadAttributeList",
             "UpdateProcThreadAttribute",

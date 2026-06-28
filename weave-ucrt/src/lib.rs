@@ -435,6 +435,16 @@ pub extern "win64" fn ucrt_raise(sig: i32) -> i32 {
     unsafe { libc::raise(sig) }
 }
 
+/// system — execute a shell command.
+///
+/// Delegates to POSIX libc::system. Returns the command's exit status.
+///
+/// # Safety
+/// `command` must be a valid null-terminated C string or null.
+pub unsafe extern "win64" fn ucrt_system(command: *const u8) -> i32 {
+    unsafe { libc::system(command as *const libc::c_char) }
+}
+
 pub extern "win64" fn ucrt_cexit() {
     unsafe {
         libc::write(
@@ -1752,6 +1762,37 @@ extern "win64" fn ucrt_access(_path: *const u8, _mode: i32) -> i32 {
 /// _wremove — wide-char remove file stub, returns 0 (success).
 extern "win64" fn ucrt_wremove(_path: *const u16) -> i32 {
     0 // success
+}
+
+/// _wrename — wide-char rename file.
+///
+/// Converts the wide paths to Rust UTF-8 strings and delegates
+/// to std::fs::rename.
+///
+/// # Safety
+/// Both paths must be valid null-terminated UTF-16 strings.
+pub unsafe extern "win64" fn ucrt_wrename(old_path: *const u16, new_path: *const u16) -> i32 {
+    let old_str = match decode_wide(old_path, 32_768) {
+        Some(s) => s,
+        None => {
+            unsafe { *libc::__errno_location() = libc::EINVAL };
+            return -1;
+        }
+    };
+    let new_str = match decode_wide(new_path, 32_768) {
+        Some(s) => s,
+        None => {
+            unsafe { *libc::__errno_location() = libc::EINVAL };
+            return -1;
+        }
+    };
+    match std::fs::rename(&old_str, &new_str) {
+        Ok(_) => 0,
+        Err(_) => {
+            unsafe { *libc::__errno_location() = libc::EACCES };
+            -1
+        }
+    }
 }
 
 /// # Safety
@@ -3303,6 +3344,20 @@ pub unsafe extern "win64" fn ucrt_wctype_fn(name: *const u8) -> u64 {
     unsafe { wctype(name as *const libc::c_char) }
 }
 
+/// MSVC wctype category bitmask constants — used by iswspace/iswcntrl wrappers.
+const _SPACE: u64 = 0x0008;
+const _CONTROL: u64 = 0x0020;
+
+/// iswspace — test if wide character is whitespace.
+pub extern "win64" fn ucrt_iswspace(c: u32) -> i32 {
+    unsafe { iswctype(c, _SPACE) }
+}
+
+/// iswcntrl — test if wide character is a control character.
+pub extern "win64" fn ucrt_iswcntrl(c: u32) -> i32 {
+    unsafe { iswctype(c, _CONTROL) }
+}
+
 /// strftime — format a broken-down time into a string.
 ///
 /// Delegates to libc strftime.  Windows struct tm and POSIX struct tm share
@@ -3393,6 +3448,19 @@ named_stub!(ucrt_dup_stub, "_dup");
 named_stub!(ucrt_dup2_stub, "_dup2");
 named_stub!(ucrt_flushall_stub, "_flushall");
 named_stub!(ucrt_chkstk_stub, "_chkstk");
+
+/// _wsopen_dispatch — low-level file open with sharing flags.
+///
+/// Stub: returns -1 with errno set to EINVAL.
+pub unsafe extern "win64" fn ucrt_wsopen_dispatch(
+    _path: *const u16,
+    _oflag: i32,
+    _shflag: i32,
+    _pmode: i32,
+) -> i32 {
+    unsafe { *libc::__errno_location() = libc::EINVAL };
+    -1
+}
 
 // ── __stdio_common_v*scanf family ────────────────────────────────────────────
 //
@@ -3786,6 +3854,8 @@ thread_local! {
         = const { std::cell::UnsafeCell::new([0u8; 36]) };
     static GMTIME_TM_BUF: std::cell::UnsafeCell<[u8; 36]>
         = const { std::cell::UnsafeCell::new([0u8; 36]) };
+    static CTIME_BUF: std::cell::UnsafeCell<[u8; 26]>
+        = const { std::cell::UnsafeCell::new([0u8; 26]) };
 }
 
 /// _localtime64 — convert _time64_t to local time, returning a thread-local
@@ -3832,6 +3902,30 @@ pub unsafe extern "win64" fn ucrt_gmtime64(time: *const i64) -> *mut u8 {
     GMTIME_TM_BUF.with(|cell| {
         let buf = cell.get() as *mut u8;
         if ucrt_gmtime64_s(buf, time) != 0 {
+            std::ptr::null_mut()
+        } else {
+            buf
+        }
+    })
+}
+
+/// _ctime64 — convert _time64_t to a 26-character string like "Wed Jun 30 21:49:08 1993\n\0".
+///
+/// Uses a per-thread static buffer (same contract as _localtime64). Delegates
+/// to libc::ctime_r via the thread-local buffer.
+///
+/// # Safety
+/// `time` must be non-null and point to a valid _time64_t.
+pub unsafe extern "win64" fn ucrt_ctime64(time: *const i64) -> *mut u8 {
+    if time.is_null() {
+        return std::ptr::null_mut();
+    }
+    CTIME_BUF.with(|cell| {
+        let buf = cell.get() as *mut u8;
+        let t = *time as libc::time_t;
+        let result =
+            unsafe { libc::ctime_r(&t, buf as *mut libc::c_char) };
+        if result.is_null() {
             std::ptr::null_mut()
         } else {
             buf
@@ -4476,6 +4570,20 @@ pub unsafe extern "win64" fn ucrt_splitpath(
     }
 }
 
+/// _getcwd — get current working directory.
+///
+/// Delegates to POSIX libc::getcwd. Returns a pointer to `buf` on success,
+/// or NULL on error.
+///
+/// # Safety
+/// `buf` must be a writable buffer of at least `size` bytes, or NULL.
+pub unsafe extern "win64" fn ucrt_getcwd(buf: *mut u8, size: usize) -> *mut u8 {
+    let result = unsafe {
+        libc::getcwd(buf as *mut libc::c_char, size)
+    };
+    result as *mut u8
+}
+
 /// _mkdir — create a directory. Returns 0 on success, -1 on failure.
 ///
 /// Wine ref: dlls/msvcrt/dir.c — _mkdir calls CreateDirectoryA.
@@ -4495,6 +4603,25 @@ pub unsafe extern "win64" fn ucrt_mkdir(path: *const u8) -> i32 {
     }
 }
 
+/// _rmdir — remove a directory. Returns 0 on success.
+///
+/// Wine ref: dlls/msvcrt/dir.c — _rmdir calls RemoveDirectoryA.
+/// Weave: delegates to libc::rmdir.
+///
+/// # Safety
+/// `path` must be a null-terminated C string.
+pub unsafe extern "win64" fn ucrt_rmdir(path: *const u8) -> i32 {
+    if path.is_null() {
+        return -1;
+    }
+    let ret = libc::rmdir(path as *const libc::c_char);
+    if ret < 0 {
+        -1
+    } else {
+        0
+    }
+}
+
 /// _stat64 — get file status (64-bit version). Returns 0 on success.
 ///
 /// Wine ref: dlls/msvcrt/dir.c — _stat64 calls GetFileAttributesW and
@@ -4503,6 +4630,19 @@ pub unsafe extern "win64" fn ucrt_mkdir(path: *const u8) -> i32 {
 /// # Safety
 /// `path` must be a null-terminated C string. `buf` must be writable.
 pub unsafe extern "win64" fn ucrt_stat64(_path: *const u8, _buf: *mut u8) -> i32 {
+    unsafe { *libc::__errno_location() = libc::ENOENT };
+    -1
+}
+
+/// _stat64i32 — get file status (32-bit size variant). Returns -1 (ENOENT).
+///
+/// Same semantics as _stat64 but with 32-bit st_size etc. Stub: returns -1.
+///
+/// Wine ref: dlls/msvcrt/dir.c — _stati64 fills a _stat64 struct.
+///
+/// # Safety
+/// `path` must be a null-terminated C string. `buf` must be writable.
+pub unsafe extern "win64" fn ucrt_stat64i32(_path: *const u8, _buf: *mut u8) -> i32 {
     unsafe { *libc::__errno_location() = libc::ENOENT };
     -1
 }
@@ -4634,6 +4774,8 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "towlower" => stub!(ucrt_towlower as extern "win64" fn(_) -> _),
         "towupper" => stub!(ucrt_towupper as extern "win64" fn(_) -> _),
         "iswctype" => stub!(ucrt_iswctype as extern "win64" fn(_, _) -> _),
+        "iswspace" => stub!(ucrt_iswspace as extern "win64" fn(_) -> _),
+        "iswcntrl" => stub!(ucrt_iswcntrl as extern "win64" fn(_) -> _),
         "wctype" => stub!(ucrt_wctype_fn as unsafe extern "win64" fn(_) -> _),
         // process
         "exit" => stub!(ucrt_exit as extern "win64" fn(_) -> !),
@@ -4719,7 +4861,7 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "__stdio_common_vfprintf" | "__stdio_common_vfwprintf" => {
             stub!(ucrt_stdio_common_vfprintf as unsafe extern "win64" fn(_, _, _, _, _) -> _)
         }
-        "__stdio_common_vsprintf" | "__stdio_common_vswprintf" => {
+        "__stdio_common_vsprintf" | "__stdio_common_vswprintf" | "__stdio_common_vsprintf_s" => {
             stub!(ucrt_stdio_common_vsprintf as unsafe extern "win64" fn(_, _, _, _, _, _) -> _)
         }
         "__stdio_common_vsnprintf_s" => {
@@ -4728,7 +4870,7 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
             )
         }
         "_iob" => Some(iob_data_addr()),
-        "fputc" => Some(ms_fputc as unsafe extern "win64" fn(_, _) -> _ as *const () as usize),
+        "fputc" | "putc" => Some(ms_fputc as unsafe extern "win64" fn(_, _) -> _ as *const () as usize),
         "fputs" => Some(ms_fputs as unsafe extern "win64" fn(_, _) -> _ as *const () as usize),
         "fgetc" => Some(ms_fgetc as unsafe extern "win64" fn(_) -> _ as *const () as usize),
         "fflush" => Some(ms_fflush as unsafe extern "win64" fn(_) -> _ as *const () as usize),
@@ -4738,6 +4880,7 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "perror" => stub!(ucrt_perror as unsafe extern "win64" fn(_)),
         "_wperror" => stub!(ucrt_wperror as extern "win64" fn(_)),
         "raise" => stub!(ucrt_raise as extern "win64" fn(_) -> _),
+        "system" => stub!(ucrt_system as unsafe extern "win64" fn(_) -> _),
         "_get_osfhandle" => stub!(ucrt_get_osfhandle as extern "win64" fn(_) -> _),
         "_open_osfhandle" => stub!(ucrt_open_osfhandle as extern "win64" fn(_, _) -> _),
         "_fseeki64" | "fseek" => {
@@ -4751,6 +4894,7 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "_unlock" => stub!(ucrt_unlock as extern "win64" fn(_)),
         "remove" => stub!(ucrt_remove as extern "win64" fn(_) -> _),
         "_wremove" => stub!(ucrt_wremove as extern "win64" fn(_) -> _),
+        "_wrename" => stub!(ucrt_wrename as unsafe extern "win64" fn(_, _) -> _),
         "_access" => stub!(ucrt_access as extern "win64" fn(_, _) -> _),
         "_fstat64" => stub!(ucrt_fstat64 as extern "win64" fn(_, _) -> _),
         "fopen" => stub!(ucrt_fopen as unsafe extern "win64" fn(_, _) -> _),
@@ -4904,6 +5048,7 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "_get_doserrno" => stub!(ucrt_get_doserrno_stub as extern "win64" fn()),
         "_set_doserrno" => stub!(ucrt_set_doserrno_stub as extern "win64" fn()),
         "_sopen_s" => stub!(ucrt_sopen_s_stub as extern "win64" fn()),
+        "_wsopen_dispatch" => stub!(ucrt_wsopen_dispatch as unsafe extern "win64" fn(_, _, _, _) -> _),
         "_close" => stub!(ucrt_close_stub as extern "win64" fn()),
         "_dup" => stub!(ucrt_dup_stub as extern "win64" fn()),
         "_dup2" => stub!(ucrt_dup2_stub as extern "win64" fn()),
@@ -4981,6 +5126,7 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "_localtime64" => stub!(ucrt_localtime64 as unsafe extern "win64" fn(_) -> _),
         "_gmtime64" => stub!(ucrt_gmtime64 as unsafe extern "win64" fn(_) -> _),
         "_mkgmtime64" => stub!(ucrt_mkgmtime64 as unsafe extern "win64" fn(_) -> _),
+        "_ctime64" => stub!(ucrt_ctime64 as unsafe extern "win64" fn(_) -> _),
         "clock" => stub!(ucrt_clock as extern "win64" fn() -> _),
         "_byteswap_uint64" => stub!(ucrt_byteswap_uint64 as extern "win64" fn(_) -> _),
         "bsearch" => stub!(ucrt_bsearch as unsafe extern "win64" fn(_, _, _, _, _) -> _),
@@ -5006,8 +5152,11 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "_findclose" => stub!(ucrt_findclose as unsafe extern "win64" fn(_) -> _),
         "_fullpath" => stub!(ucrt_fullpath as unsafe extern "win64" fn(_, _, _) -> _),
         "_splitpath" => stub!(ucrt_splitpath as unsafe extern "win64" fn(_, _, _, _, _)),
+        "_getcwd" => stub!(ucrt_getcwd as unsafe extern "win64" fn(_, _) -> _),
         "_mkdir" => stub!(ucrt_mkdir as unsafe extern "win64" fn(_) -> _),
+        "_rmdir" => stub!(ucrt_rmdir as unsafe extern "win64" fn(_) -> _),
         "_stat64" => stub!(ucrt_stat64 as unsafe extern "win64" fn(_, _) -> _),
+        "_stat64i32" => stub!(ucrt_stat64i32 as unsafe extern "win64" fn(_, _) -> _),
         "_unlink" => stub!(ucrt_unlink as unsafe extern "win64" fn(_) -> _),
         "__dllonexit" => {
             Some(ucrt_dllonexit as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize)
