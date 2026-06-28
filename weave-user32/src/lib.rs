@@ -1413,7 +1413,7 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
                 as usize,
         ),
         "DdeUninitialize" => {
-            Some(api::dde_uninitialize as unsafe extern "win64" fn(_) -> *const () as usize)
+            Some(api::dde_uninitialize as unsafe extern "win64" fn(_) -> _ as *const () as usize)
         }
         // ── wx DDE stubs (wxbase313u_vc_x64_custom.dll) ──────────────────
         "DdeQueryStringW" => Some(
@@ -1428,7 +1428,7 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
             Some(api::dde_get_last_error as unsafe extern "win64" fn(_) -> _ as *const () as usize)
         }
         "DdeGetData" => Some(
-            api::dde_get_data as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const () as usize,
+            api::dde_get_data as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
         ),
         "DdePostAdvise" => Some(
             api::dde_post_advise as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
