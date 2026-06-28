@@ -93,6 +93,8 @@ fn resolve(dll: &str, func: &str) -> Option<usize> {
         .or_else(|| weave_comctl32::resolve(dll, func))
         // uxtheme.dll — visual style / theme API stubs (IrfanView, Notepad++, 7zFM)
         .or_else(|| weave_comctl32::resolve_uxtheme(dll, func))
+        // comdlg32.dll — common dialog stubs (wxWidgets ChooseFontW, FindTextW, ReplaceTextW)
+        .or_else(|| weave_comctl32::resolve_comdlg32(dll, func))
         .or_else(|| weave_oleaut32::resolve(dll, func))
         .or_else(|| weave_imm32::resolve(dll, func))
         .or_else(|| weave_shlwapi::resolve(dll, func))

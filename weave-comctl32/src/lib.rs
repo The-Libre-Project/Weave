@@ -2798,3 +2798,38 @@ extern "win64" fn get_theme_margins(
 ) -> i32 {
     S_OK
 }
+
+// ── COMDLG32 stubs ────────────────────────────────────────────────────────────
+// Common dialog stubs — wxWidgets calls these during early GUI initialisation.
+// Phase A: return user-cancelled / NULL to prevent NULL-deref crashes.
+
+// Wine ref: dlls/comdlg32/fontdlg.c — ChooseFontW shows the font dialog;
+// returns FALSE if user cancels.
+extern "win64" fn choose_font_w(_lpcf: *const u8) -> i32 {
+    0 // FALSE — user cancelled
+}
+
+// Wine ref: dlls/comdlg32/finddlg.c — FindTextW creates a modeless find dialog;
+// returns NULL HWND on failure.
+extern "win64" fn find_text_w(_lpf: *const u8) -> usize {
+    0 // NULL HWND
+}
+
+// Wine ref: dlls/comdlg32/finddlg.c — ReplaceTextW creates a modeless replace dialog;
+// returns NULL HWND on failure.
+extern "win64" fn replace_text_w(_lpf: *const u8) -> usize {
+    0 // NULL HWND
+}
+
+/// Resolve a comdlg32.dll import to a stub address.
+pub fn resolve_comdlg32(dll: &str, func: &str) -> Option<usize> {
+    if !dll.eq_ignore_ascii_case("comdlg32.dll") {
+        return None;
+    }
+    match func {
+        "ChooseFontW" => Some(choose_font_w as *const () as usize),
+        "FindTextW" => Some(find_text_w as *const () as usize),
+        "ReplaceTextW" => Some(replace_text_w as *const () as usize),
+        _ => None,
+    }
+}

@@ -1935,6 +1935,9 @@ pub fn resolve(func: &str) -> Option<usize> {
             reg_enum_key_w as unsafe extern "win64" fn(_, _, _, _, _, _, _, _) -> _ as *const ()
                 as usize,
         ),
+        "RegOpenCurrentUser" => {
+            Some(reg_open_current_user as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
         _ => None,
     }
 }
@@ -2880,6 +2883,29 @@ pub unsafe extern "win64" fn reg_enum_key_w(
     lpft_last_write_time: *mut u8,
 ) -> i32 {
     1 // ERROR_NO_MORE_ITEMS
+}
+
+// ── RegOpenCurrentUser ──────────────────────────────────────────────────────────
+
+// Wine ref: dlls/advapi32/registry.c — RegOpenCurrentUser returns a handle to
+// HKEY_CURRENT_USER under the current user's security context; writes the handle
+// to the caller's buffer. Weave no-op: returns ERROR_SUCCESS with a write-only
+// fake HKEY_CURRENT_USER handle that delegates to reg_open_key_ex_w. This prevents
+// NULL-deref crashes when wxWidgets calls it during early GUI init.
+//
+// # Safety
+// `phk_result` must be a valid writable pointer.
+pub unsafe extern "win64" fn reg_open_current_user(
+    _sam_desired: u32,
+    phk_result: *mut usize,
+) -> i32 {
+    if phk_result.is_null() {
+        return 87; // ERROR_INVALID_PARAMETER
+    }
+    // Return HKEY_CURRENT_USER pseudo-handle so the caller can use it with
+    // Reg*Key operations. Weave maps this to the HKCU hive path internally.
+    unsafe { *phk_result = 0xFFFFFFFF80000001 }; // HKEY_CURRENT_USER
+    0 // ERROR_SUCCESS
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
