@@ -2582,6 +2582,19 @@ pub extern "win64" fn get_win_meta_file_bits(
 pub extern "win64" fn get_enh_meta_file_w(_lp_name: *const u16) -> usize {
     0
 }
+pub extern "win64" fn copy_enh_meta_file_w(_lp_name: *const u16, _hdc: usize) -> usize {
+    0
+}
+pub extern "win64" fn get_meta_file_bits_ex(
+    _hmetafile: usize,
+    _cb_buffer: u32,
+    _lp_data: *mut u8,
+) -> u32 {
+    0
+}
+pub extern "win64" fn set_meta_file_bits_ex(_cb_buffer: u32, _lp_data: *const u8) -> usize {
+    0
+}
 
 // ── Resolve ───────────────────────────────────────────────────────────────────
 
@@ -2984,6 +2997,9 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "GetOutlineTextMetricsW" => Some(get_outline_text_metrics_w as *const () as usize),
         "GetWinMetaFileBits" => Some(get_win_meta_file_bits as *const () as usize),
         "GetEnhMetaFileW" => Some(get_enh_meta_file_w as *const () as usize),
+        "CopyEnhMetaFileW" => Some(copy_enh_meta_file_w as *const () as usize),
+        "GetMetaFileBitsEx" => Some(get_meta_file_bits_ex as *const () as usize),
+        "SetMetaFileBitsEx" => Some(set_meta_file_bits_ex as *const () as usize),
         _ => None,
     }
 }
