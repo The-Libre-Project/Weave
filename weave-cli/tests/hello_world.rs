@@ -8402,6 +8402,19 @@ fn audacity_phase_a_probe() {
         eprintln!("  ... and {} more", unresolved.len() - 30);
     }
 
+    // GetProcAddress NULL returns
+    let gpnull: Vec<&str> = stderr
+        .lines()
+        .filter(|l| l.contains("GetProcAddress") && l.contains("NULL"))
+        .collect();
+    eprintln!("\nGetProcAddress NULL returns ({}):", gpnull.len());
+    for g in &gpnull {
+        eprintln!("  {g}");
+    }
+    if gpnull.is_empty() {
+        eprintln!("  (none found)");
+    }
+
     // IAT trace lines (resolve/patched)
     let iat_resolve: Vec<&str> = stderr
         .lines()
@@ -8409,9 +8422,9 @@ fn audacity_phase_a_probe() {
         .collect();
     eprintln!("\nIAT resolution summary: {} lines", iat_resolve.len());
 
-    // First 200 stderr lines
-    let lines: Vec<&str> = stderr.lines().take(200).collect();
-    eprintln!("\nFirst 200 stderr lines:");
+    // First 500 stderr lines
+    let lines: Vec<&str> = stderr.lines().take(500).collect();
+    eprintln!("\nFirst 500 stderr lines:");
     for l in &lines {
         eprintln!("  {l}");
     }
