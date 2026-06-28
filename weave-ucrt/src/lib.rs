@@ -5228,6 +5228,57 @@ pub unsafe extern "win64" fn ucrt_wstat64(_path: *const u16, _buf: *mut u8) -> i
     -1
 }
 
+// ── Audacity straggler stubs (CI run 28325191779) ─────────────────────
+
+pub unsafe extern "win64" fn ucrt_wcstombs(_dest: *mut u8, _src: *const u16, _n: usize) -> usize {
+    0
+}
+
+pub unsafe extern "win64" fn ucrt_wcstol_l(
+    _s: *const u16,
+    _end: *mut *mut u16,
+    _base: i32,
+    _locale: usize,
+) -> i32 {
+    0
+}
+
+pub unsafe extern "win64" fn ucrt_wcstoul(_s: *const u16, _end: *mut *mut u16, _base: i32) -> u32 {
+    0
+}
+
+pub unsafe extern "win64" fn ucrt_wcstod_l(
+    _s: *const u16,
+    _end: *mut *mut u16,
+    _locale: usize,
+) -> f64 {
+    0.0
+}
+
+pub unsafe extern "win64" fn ucrt_open(_path: *const u8, _flags: i32) -> i32 {
+    -1
+}
+
+pub unsafe extern "win64" fn ucrt_wopen(_path: *const u16, _flags: i32, _mode: i32) -> i32 {
+    -1
+}
+
+pub extern "win64" fn ucrt_iswprint(_c: u32) -> i32 {
+    0
+}
+
+pub extern "win64" fn ucrt_fdsign(_x: f64) -> i32 {
+    0
+}
+
+pub extern "win64" fn ucrt_expm1(_x: f64) -> f64 {
+    0.0
+}
+
+pub extern "win64" fn ucrt_log1p(_x: f64) -> f64 {
+    0.0
+}
+
 /// Resolve a UCRT import to a stub address.
 pub fn resolve(dll: &str, func: &str) -> Option<usize> {
     if !is_ucrt_dll(dll) {
@@ -5784,6 +5835,17 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "_create_locale" => stub!(ucrt_create_locale as unsafe extern "win64" fn(_, _) -> _),
         // ── Additional audacity stubs (CI run 28324113403) ──────────────
         "_wstat64" => stub!(ucrt_wstat64 as unsafe extern "win64" fn(_, _) -> _),
+        // ── Audacity straggler stubs (CI run 28325191779) ──────────────
+        "wcstombs" => stub!(ucrt_wcstombs as unsafe extern "win64" fn(_, _, _) -> _),
+        "_wcstol_l" => stub!(ucrt_wcstol_l as unsafe extern "win64" fn(_, _, _, _) -> _),
+        "wcstoul" => stub!(ucrt_wcstoul as unsafe extern "win64" fn(_, _, _) -> _),
+        "_wcstod_l" => stub!(ucrt_wcstod_l as unsafe extern "win64" fn(_, _, _, _) -> _),
+        "_open" => stub!(ucrt_open as unsafe extern "win64" fn(_, _) -> _),
+        "_wopen" => stub!(ucrt_wopen as unsafe extern "win64" fn(_, _, _) -> _),
+        "iswprint" => stub!(ucrt_iswprint as extern "win64" fn(_) -> _),
+        "_fdsign" => stub!(ucrt_fdsign as extern "win64" fn(_) -> _),
+        "expm1" => stub!(ucrt_expm1 as extern "win64" fn(_) -> _),
+        "log1p" => stub!(ucrt_log1p as extern "win64" fn(_) -> _),
         _ => None,
     }
 }

@@ -131,6 +131,32 @@ fn resolve(dll: &str, func: &str) -> Option<usize> {
         .or_else(|| weave_ole32::resolve_rpcrt4(dll, func))
         // oleacc.dll — accessibility stubs (wxWidgets accessibility imports)
         .or_else(|| weave_ole32::resolve_oleacc(dll, func))
+        // libexpat.dll — ordinals from lib-xml.dll; map ordinal to export name
+        // and look up in the DLL registry (pre-loaded PE exports).
+        .or_else(|| {
+            if dll.eq_ignore_ascii_case("libexpat.dll") && func.starts_with('#') {
+                if let Ok(n) = func[1..].parse::<u16>() {
+                    let names = [
+                        (1, "XML_DefaultCurrent"),
+                        (2, "XML_ErrorString"),
+                        (11, "XML_GetCurrentLineNumber"),
+                        (12, "XML_GetErrorCode"),
+                        (16, "XML_Parse"),
+                        (18, "XML_ParserCreate"),
+                        (21, "XML_ParserFree"),
+                        (25, "XML_SetCharacterDataHandler"),
+                        (31, "XML_SetElementHandler"),
+                        (52, "XML_SetUserData"),
+                    ];
+                    for (ord, name) in names {
+                        if *ord == n {
+                            return dll_registry::lookup(dll, name);
+                        }
+                    }
+                }
+            }
+            None
+        })
         .or_else(|| dll_registry::lookup(dll, func))
 }
 
