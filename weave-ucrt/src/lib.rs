@@ -314,6 +314,24 @@ pub unsafe extern "win64" fn ucrt_strnlen(s: *const u8, maxlen: usize) -> usize 
     }
 }
 
+/// __strncnt — count non-null characters in a bounded string.
+///
+/// Wine ref: dlls/msvcrt/string.c — returns the number of characters before null or count.
+///
+/// # Safety
+/// `s` must be readable for at least `count` bytes, or null.
+pub unsafe extern "win64" fn ucrt_strncnt(s: *const u8, count: usize) -> usize {
+    if s.is_null() {
+        return 0;
+    }
+    for i in 0..count {
+        if unsafe { *s.add(i) } == 0 {
+            return i;
+        }
+    }
+    count
+}
+
 /// # Safety
 /// `s` must be a valid null-terminated UTF-16 (u16) string, or null.
 pub unsafe extern "win64" fn ucrt_wcslen(s: *const u16) -> usize {
@@ -584,6 +602,20 @@ extern "win64" fn ucrt_crt_at_quick_exit(_func: usize) -> i32 {
 pub unsafe extern "win64" fn ucrt_callnewh(_size: usize) -> i32 {
     0
 }
+
+/// _set_new_handler — set the C++ new-handler. Returns previous handler.
+///
+/// Wine ref: dlls/msvcrt/new.cpp — calls _set_new_mode internally.
+/// Safe stub: no handler infrastructure; return NULL (no previous handler).
+pub extern "win64" fn ucrt_set_new_handler(_handler: *const c_void) -> *const c_void {
+    std::ptr::null()
+}
+
+/// _lock_locales — lock locale data. No-op stub.
+///
+/// Wine ref: dlls/msvcrt/locale.c — acquires the locale lock.
+/// Weave uses no shared mutable locale state, so no locking needed.
+pub extern "win64" fn ucrt_lock_locales() {}
 
 // ── _initterm / _initterm_e — runs C++ static constructors ───────────────────
 //
@@ -932,6 +964,15 @@ pub unsafe extern "win64" fn ucrt_p_fmode() -> *mut i32 {
         23,
     );
     *HEAP_FMODE.get_or_init(|| Box::into_raw(Box::new(0i32)) as usize) as *mut i32
+}
+
+/// __pctype_func — return pointer to character-type table.
+///
+/// Wine ref: dlls/msvcrt/ctype.c — returns a pointer to the `_ctype[]` table
+/// used by isdigit, isxdigit, etc.  Safe stub: return null; VCRUNTIME140 init
+/// does not reach this before window creation.
+pub unsafe extern "win64" fn ucrt_pctype_func() -> *const u16 {
+    std::ptr::null()
 }
 
 /// Return the address of the fake `_iob` array (DATA import for msvcrt.dll).
@@ -2850,6 +2891,20 @@ pub unsafe extern "win64" fn ucrt_atoll(s: *const u8) -> i64 {
     unsafe { libc::atoll(s as _) }
 }
 
+/// atol: convert string to long.
+///
+/// Wine ref: dlls/msvcrt/string.c — atol is a thin wrapper around strtol.
+/// Safe stub: return 0 (caller sees empty/default string result).
+///
+/// # Safety
+/// `s` must be a valid null-terminated string.
+pub unsafe extern "win64" fn ucrt_atol(s: *const u8) -> i64 {
+    if s.is_null() {
+        return 0;
+    }
+    unsafe { libc::atol(s as _) }
+}
+
 /// strtod: convert string to double with end pointer.
 ///
 /// # Safety
@@ -3347,6 +3402,8 @@ pub unsafe extern "win64" fn ucrt_wctype_fn(name: *const u8) -> u64 {
 /// MSVC wctype category bitmask constants — used by iswspace/iswcntrl wrappers.
 const _SPACE: u64 = 0x0008;
 const _CONTROL: u64 = 0x0020;
+const _DIGIT: u64 = 0x0004;
+const _HEX: u64 = 0x0080;
 
 /// iswspace — test if wide character is whitespace.
 pub extern "win64" fn ucrt_iswspace(c: u32) -> i32 {
@@ -3356,6 +3413,16 @@ pub extern "win64" fn ucrt_iswspace(c: u32) -> i32 {
 /// iswcntrl — test if wide character is a control character.
 pub extern "win64" fn ucrt_iswcntrl(c: u32) -> i32 {
     unsafe { iswctype(c, _CONTROL) }
+}
+
+/// iswdigit — test if wide character is a decimal digit.
+pub extern "win64" fn ucrt_iswdigit(c: u32) -> i32 {
+    unsafe { iswctype(c, _DIGIT) }
+}
+
+/// iswxdigit — test if wide character is a hexadecimal digit.
+pub extern "win64" fn ucrt_iswxdigit(c: u32) -> i32 {
+    unsafe { iswctype(c, _HEX) }
 }
 
 /// strftime — format a broken-down time into a string.
@@ -3579,6 +3646,42 @@ pub unsafe extern "win64" fn ucrt_strncpy_s(
         return 34; // ERANGE
     }
     0
+}
+
+/// strcpy_s — bounded string copy with null-termination guarantee.
+///
+/// Wine ref: dlls/msvcrt/string.c — strcpy_s copies min(strlen(src), dest_size-1)
+/// bytes, null-terminates, returns 0 on success, EINVAL for bad params, STRUNCATE
+/// (0x42) if src doesn't fit.
+///
+/// # Safety
+/// `dest` must be writable for `dest_size` bytes. `src` must be null-terminated.
+pub unsafe extern "win64" fn ucrt_strcpy_s(
+    dest: *mut u8,
+    dest_size: usize,
+    src: *const u8,
+) -> i32 {
+    if dest.is_null() || src.is_null() || dest_size == 0 {
+        return 22; // EINVAL
+    }
+    let mut src_len = 0usize;
+    while unsafe { *src.add(src_len) } != 0 {
+        src_len += 1;
+    }
+    if src_len < dest_size {
+        unsafe {
+            std::ptr::copy_nonoverlapping(src, dest, src_len);
+            *dest.add(src_len) = 0;
+        }
+        0
+    } else {
+        // String too long — truncate and null-terminate, but return STRUNCATE.
+        unsafe {
+            std::ptr::copy_nonoverlapping(src, dest, dest_size - 1);
+            *dest.add(dest_size - 1) = 0;
+        }
+        0x42 // STRUNCATE
+    }
 }
 
 /// _strnicmp — case-insensitive bounded string compare. Delegates to strncasecmp.
@@ -4761,6 +4864,7 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "_strdup" => stub!(ucrt_strdup as unsafe extern "win64" fn(_) -> _),
         "strncpy" => stub!(ucrt_strncpy as unsafe extern "win64" fn(_, _, _) -> _),
         "strnlen" => stub!(ucrt_strnlen as unsafe extern "win64" fn(_, _) -> _),
+        "__strncnt" => stub!(ucrt_strncnt as unsafe extern "win64" fn(_, _) -> _),
         "strtoul" => stub!(ucrt_strtoul as unsafe extern "win64" fn(_, _, _) -> _),
         // wide strings
         "_wcsicmp" => stub!(ucrt_wcsicmp as unsafe extern "win64" fn(_, _) -> _),
@@ -4773,6 +4877,8 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "iswctype" => stub!(ucrt_iswctype as extern "win64" fn(_, _) -> _),
         "iswspace" => stub!(ucrt_iswspace as extern "win64" fn(_) -> _),
         "iswcntrl" => stub!(ucrt_iswcntrl as extern "win64" fn(_) -> _),
+        "iswdigit" => stub!(ucrt_iswdigit as extern "win64" fn(_) -> _),
+        "iswxdigit" => stub!(ucrt_iswxdigit as extern "win64" fn(_) -> _),
         "wctype" => stub!(ucrt_wctype_fn as unsafe extern "win64" fn(_) -> _),
         // process
         "exit" => stub!(ucrt_exit as extern "win64" fn(_) -> !),
@@ -4815,6 +4921,9 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "_callnewh" => {
             stub!(ucrt_callnewh as unsafe extern "win64" fn(_) -> _)
         }
+        "_set_new_handler" => {
+            stub!(ucrt_set_new_handler as extern "win64" fn(_) -> _)
+        }
         "_set_invalid_parameter_handler" => {
             stub!(ucrt_set_invalid_parameter_handler as extern "win64" fn(_) -> _)
         }
@@ -4847,6 +4956,7 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "__p__environ" => stub!(ucrt_p_environ as unsafe extern "win64" fn() -> _),
         "__p__commode" => stub!(ucrt_p_commode as unsafe extern "win64" fn() -> _),
         "__p__fmode" => stub!(ucrt_p_fmode as unsafe extern "win64" fn() -> _),
+        "__pctype_func" => stub!(ucrt_pctype_func as unsafe extern "win64" fn() -> _),
         // stdio
         "__acrt_iob_func" | "__iob_func" => stub!(ucrt_acrt_iob_func as extern "win64" fn(_) -> _),
         // Legacy msvcrt.dll CRT startup functions
@@ -4889,6 +4999,7 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "_fdopen" => stub!(ucrt_fdopen as extern "win64" fn(_, _) -> _),
         "_lock_file" => stub!(ucrt_lock_file as extern "win64" fn(_)),
         "_unlock_file" => stub!(ucrt_unlock_file as extern "win64" fn(_)),
+        "_lock_locales" => stub!(ucrt_lock_locales as extern "win64" fn()),
         "_lock" => stub!(ucrt_lock as extern "win64" fn(_)),
         "_unlock" => stub!(ucrt_unlock as extern "win64" fn(_)),
         "remove" => stub!(ucrt_remove as extern "win64" fn(_) -> _),
@@ -4992,6 +5103,7 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "strrchr" => stub!(ucrt_strrchr as unsafe extern "win64" fn(_, _) -> _),
         "atoi" => stub!(ucrt_atoi as unsafe extern "win64" fn(_) -> _),
         "atof" => stub!(ucrt_atof as unsafe extern "win64" fn(_) -> _),
+        "atol" => stub!(ucrt_atol as unsafe extern "win64" fn(_) -> _),
         "atoll" => stub!(ucrt_atoll as unsafe extern "win64" fn(_) -> _),
         "strtod" => stub!(ucrt_strtod as unsafe extern "win64" fn(_, _) -> _),
         "strtol" => stub!(ucrt_strtol as unsafe extern "win64" fn(_, _, _) -> _),
@@ -5110,6 +5222,7 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "_c_exit" => Some(ucrt_c_exit as extern "win64" fn() as *const () as usize),
         // Task 01 additions — curl
         "strncpy_s" => stub!(ucrt_strncpy_s as unsafe extern "win64" fn(_, _, _, _) -> _),
+        "strcpy_s" => stub!(ucrt_strcpy_s as unsafe extern "win64" fn(_, _, _) -> _),
         "_strnicmp" => stub!(ucrt_strnicmp as unsafe extern "win64" fn(_, _, _) -> _),
         "strcspn" => stub!(ucrt_strcspn as unsafe extern "win64" fn(_, _) -> _),
         "strpbrk" => stub!(ucrt_strpbrk as unsafe extern "win64" fn(_, _) -> _),
