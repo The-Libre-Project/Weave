@@ -911,17 +911,16 @@ fn main() {
             let addr = unsafe { (*info).si_addr() as usize };
             let mut buf = [0u8; 96];
             let hex = b"0123456789abcdef";
-            buf[..21].copy_from_slice(b"weave/fault: sig=\x00");
-            buf[20] = b'0' + sig as u8;
-            buf[21] = b' ';
-            buf[22..33].copy_from_slice(b"si_addr=0x");
-            for i in 0..16 {
-                let sh = (15 - i) * 4;
-                buf[33 + i] = hex[(addr >> sh) & 0xf];
+            let mut pos = 0usize;
+            for &b in b"weave/fault: sig=" { buf[pos] = b; pos += 1; }
+            buf[pos] = b'0' + sig as u8; pos += 1;
+            for &b in b" si_addr=0x" { buf[pos] = b; pos += 1; }
+            for sh in (0..16).rev() {
+                buf[pos] = hex[(addr >> (sh * 4)) & 0xf]; pos += 1;
             }
-            buf[49] = b'\n';
+            buf[pos] = b'\n'; pos += 1;
             unsafe {
-                libc::write(2, buf.as_ptr() as *const libc::c_void, 50);
+                libc::write(2, buf.as_ptr() as *const libc::c_void, pos);
                 libc::signal(sig, libc::SIG_DFL);
                 libc::raise(sig);
             }
