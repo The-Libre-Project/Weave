@@ -3656,11 +3656,7 @@ pub unsafe extern "win64" fn ucrt_strncpy_s(
 ///
 /// # Safety
 /// `dest` must be writable for `dest_size` bytes. `src` must be null-terminated.
-pub unsafe extern "win64" fn ucrt_strcpy_s(
-    dest: *mut u8,
-    dest_size: usize,
-    src: *const u8,
-) -> i32 {
+pub unsafe extern "win64" fn ucrt_strcpy_s(dest: *mut u8, dest_size: usize, src: *const u8) -> i32 {
     if dest.is_null() || src.is_null() || dest_size == 0 {
         return 22; // EINVAL
     }
