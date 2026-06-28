@@ -200,7 +200,7 @@ unsafe extern "C" fn on_fatal_signal(
     }
     // Debug: print the fault address to understand where crashes happen.
     // Hex-format RIP into a small stack buffer.
-    let mut rip_hex = [0u8; 32];
+    let mut rip_hex = [0u8; 48];
     rip_hex[..18].copy_from_slice(b"weave: fault rip=0x");
     let nibble = |v: u8| if v < 10 { b'0' + v } else { b'a' + v - 10 };
     for i in 0..16 {
