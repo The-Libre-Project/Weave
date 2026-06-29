@@ -8484,6 +8484,16 @@ fn audacity_phase_a_probe() {
         eprintln!("  (none found)");
     }
 
+    // Pre-loaded DLL module indices (cross-reference crash mod[N])
+    let mod_lines: Vec<&str> = stderr.lines().filter(|l| l.contains("pre-loaded") && l.contains("mod[")).collect();
+    eprintln!("\nPre-loaded module indices ({} total):", mod_lines.len());
+    for m in &mod_lines {
+        eprintln!("  {m}");
+    }
+    if mod_lines.is_empty() {
+        eprintln!("  (none found in stderr capture)");
+    }
+
     // IAT trace lines (resolve/patched)
     let iat_resolve: Vec<&str> = stderr
         .lines()
