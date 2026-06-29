@@ -126,7 +126,13 @@ fn resolve(dll: &str, func: &str) -> Option<usize> {
         .or_else(|| weave_powrprof::resolve(dll, func))
         // lib-audacity internal DLLs — C++ mangled symbols from side-by-side
         // DLLs that are not always present as PE files in the fixture.
-        .or_else(|| weave_audacity::resolve(dll, func))
+        .or_else(|| {
+            let r = weave_audacity::resolve(dll, func);
+            if r.is_some() && dll.to_ascii_lowercase().contains("portaudio") {
+                eprintln!("weave/audacity: portaudio stub {dll}!{func} → {:#x}", r.unwrap());
+            }
+            r
+        })
         // oleaut32.dll — OLE Automation stubs (wxWidgets ordinal imports)
         .or_else(|| weave_ole32::resolve_oleaut32(dll, func))
         // rpcrt4.dll — RPC stubs (wxWidgets UUID imports)
