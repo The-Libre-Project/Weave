@@ -25,6 +25,7 @@ weave-plugin-system = { path = "../weave-plugin-system" }
 
 weave-ucrt = { path = "../weave-ucrt" }
 weave-msvcp140 = { path = "../weave-msvcp140" }
+weave-mfc140u = { path = "../weave-mfc140u" }
 weave-vulkan = { path = "../weave-vulkan" }
 weave-ws2 = { path = "../weave-ws2" }
 weave-comctl32 = { path = "../weave-comctl32" }
