@@ -88,6 +88,7 @@ fn resolve(dll: &str, func: &str) -> Option<usize> {
         .or_else(|| weave_setupapi::resolve(dll, func))
         .or_else(|| weave_ucrt::resolve(dll, func))
         .or_else(|| weave_msvcp140::resolve(dll, func))
+        .or_else(|| weave_mfc140u::resolve(dll, func))
         .or_else(|| weave_vulkan::resolve(dll, func))
         .or_else(|| weave_ws2::resolve(dll, func))
         .or_else(|| weave_comctl32::resolve(dll, func))
@@ -605,11 +606,15 @@ fn main() {
                     let mod_idx = {
                         // SEH handler uses the first registered module that contains RIP.
                         // Count live entries so we can cross-reference crash mod[N].
-                        static MOD_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+                        static MOD_COUNT: std::sync::atomic::AtomicUsize =
+                            std::sync::atomic::AtomicUsize::new(0);
                         MOD_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
                     };
                     weave_core::seh::register_loaded_module(base as usize, image_size);
-                    eprintln!("weave: pre-loaded {dll_name} from exe dir at base={:#x} mod[{mod_idx}]", base as usize);
+                    eprintln!(
+                        "weave: pre-loaded {dll_name} from exe dir at base={:#x} mod[{mod_idx}]",
+                        base as usize
+                    );
                     loaded.insert(dll_key.clone());
                     side_dlls.push((dll_name, dll_bytes.clone(), base));
                     // Discover transitive dependencies and add them to the queue.

@@ -1,0 +1,10 @@
+[package]
+name = "weave-mfc140u"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "MFC140U.dll stub crate for Weave"
+
+[dependencies]
+weave-core = { path = "../weave-core" }

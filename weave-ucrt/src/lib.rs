@@ -3440,6 +3440,12 @@ pub unsafe extern "win64" fn ucrt_std_exception_copy(_src: *const (), _dst: *mut
 /// No-op is safe for NXEngine which uses C++ exceptions only on error paths.
 pub unsafe extern "win64" fn ucrt_std_exception_destroy(_exc: *mut ()) {}
 
+/// `__std_type_info_destroy_list` — destroy a type_info list.
+/// Phase-A stub for vcruntime140.dll path; called during DLL unload in stats.exe.
+/// Wine ref: dlls/msvcp90/vcruntime.c — __std_type_info_destroy_list iterates
+///   the singly-linked type_info list and destroys each node.
+pub unsafe extern "win64" fn ucrt_std_type_info_destroy_list(_list: usize, _destroy_fn: usize) {}
+
 // ── Sprint A: confirmed bug fixes ─────────────────────────────────────────────
 
 /// _isatty — test whether a CRT fd refers to a terminal.
@@ -5931,6 +5937,9 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "__std_terminate" => {
             Some(ucrt_std_terminate as unsafe extern "win64" fn() -> ! as *const () as usize)
         }
+        "__std_type_info_destroy_list" => Some(
+            ucrt_std_type_info_destroy_list as unsafe extern "win64" fn(_, _) as *const () as usize,
+        ),
         "__vcrt_InitializeCriticalSectionEx" => {
             Some(ucrt_vcrt_init_cs as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize)
         }

@@ -24,6 +24,7 @@ members = [
     "weave-gdiplus",
     "weave-ddraw",
     "weave-msvcp140",
+    "weave-mfc140u",
     "weave-setupapi",
     "weave-bcrypt",
     "weave-bcryptprimitives",
