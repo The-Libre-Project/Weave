@@ -603,7 +603,7 @@ fn main() {
                     let image_size = image.size;
                     dll_registry::register(dll_key.clone(), image, exports);
                     weave_core::seh::register_loaded_module(base as usize, image_size);
-                    eprintln!("weave: pre-loaded {dll_name} from exe dir at base={base:#x}");
+                    eprintln!("weave: pre-loaded {dll_name} from exe dir at base={:#x}", base as usize);
                     loaded.insert(dll_key.clone());
                     side_dlls.push((dll_name, dll_bytes.clone(), base));
                     // Discover transitive dependencies and add them to the queue.
