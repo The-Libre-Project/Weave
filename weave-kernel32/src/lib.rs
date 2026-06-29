@@ -6653,8 +6653,19 @@ pub unsafe extern "win64" fn get_proc_address(h_module: usize, lp_proc_name: *co
         eprintln!("weave/E3-M9-trace: GetProcAddress(i_view64!{func_name})");
     }
 
-    // Check dll_registry first: covers real DLLs loaded from disk via LoadLibrary
-    // (e.g. Scintilla.DLL).  resolve::resolve only knows Weave's synthetic stubs.
+    // Resolve via the weave-core resolve chain first: catches stub overrides
+    // for pre-loaded DLL exports (e.g. portaudio_x64.dll!Pa_Initialize).
+    // Falls back to dll_registry for non-overridden real PE exports.
+    match weave_core::resolve::resolve(&dll_name, &func_name) {
+        Some(addr) => {
+            eprintln!("weave/kernel32: GetProcAddress({dll_name}!{func_name}) → {addr:#x} [stub]");
+            return addr;
+        }
+        None => {}
+    }
+
+    // Check dll_registry: covers real DLLs loaded from disk via LoadLibrary
+    // (e.g. Scintilla.DLL) where no Weave stub overrides the export.
     if let Some(addr) = weave_core::dll_registry::lookup(&dll_name, &func_name) {
         eprintln!("weave/kernel32: GetProcAddress({dll_name}!{func_name}) → {addr:#x} [dynamic]");
         return addr;
