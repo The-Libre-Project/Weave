@@ -136,32 +136,37 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
             ),
             _ => None,
         },
-        "portaudio_x64.dll" => match func {
+        "portaudio_x64.dll" => {
             // Intercept PortAudio API to skip audio hardware probing.
             // PortAudio in the Docker CI has no real audio hardware, and
             // probing may crash (dlopen → PulseAudio → crash in system
             // library). Return paNoError but stub all device enumeration
             // and stream functions to return 0 / empty.
-            "Pa_Initialize" => Some(portaudio_pa_initialize as *const () as usize),
-            "Pa_Terminate" => Some(portaudio_pa_terminate as *const () as usize),
-            "Pa_GetDeviceCount" => Some(portaudio_pa_get_device_count as *const () as usize),
-            "Pa_GetDefaultInputDevice" => Some(portaudio_pa_get_default_input_device as *const () as usize),
-            "Pa_GetDefaultOutputDevice" => Some(portaudio_pa_get_default_output_device as *const () as usize),
-            "Pa_GetDeviceInfo" => Some(portaudio_pa_get_device_info as *const () as usize),
-            "Pa_OpenDefaultStream" => Some(portaudio_pa_open_default_stream as *const () as usize),
-            "Pa_StartStream" => Some(portaudio_pa_start_stream as *const () as usize),
-            "Pa_StopStream" => Some(portaudio_pa_stop_stream as *const () as usize),
-            "Pa_CloseStream" => Some(portaudio_pa_close_stream as *const () as usize),
-            "Pa_IsStreamStopped" => Some(portaudio_pa_is_stream_stopped as *const () as usize),
-            "Pa_IsStreamActive" => Some(portaudio_pa_is_stream_active as *const () as usize),
-            "Pa_GetSampleSize" => Some(portaudio_pa_get_sample_size as *const () as usize),
-            "Pa_Sleep" => Some(portaudio_pa_sleep as *const () as usize),
-            "Pa_GetVersion" => Some(portaudio_pa_get_version as *const () as usize),
-            "Pa_GetVersionText" => Some(portaudio_pa_get_version_text as *const () as usize),
-            "Pa_GetHostApiCount" => Some(portaudio_pa_get_host_api_count as *const () as usize),
-            "Pa_GetHostApiInfo" => Some(portaudio_pa_get_host_api_info as *const () as usize),
-            _ => None,
-        },
+            // NOTE: lib-audio-devices.dll imports portaudio by ORDINAL,
+            // not by name. Both the ordinal (#N) and name (Pa_*) forms
+            // are registered here since the resolve chain handles both.
+            match func {
+                "Pa_Initialize" | "#4" => Some(portaudio_pa_initialize as *const () as usize),
+                "Pa_Terminate" | "#5" => Some(portaudio_pa_terminate as *const () as usize),
+                "Pa_GetDeviceCount" | "#12" => Some(portaudio_pa_get_device_count as *const () as usize),
+                "Pa_GetDefaultInputDevice" | "#13" => Some(portaudio_pa_get_default_input_device as *const () as usize),
+                "Pa_GetDefaultOutputDevice" | "#14" => Some(portaudio_pa_get_default_output_device as *const () as usize),
+                "Pa_GetDeviceInfo" | "#15" => Some(portaudio_pa_get_device_info as *const () as usize),
+                "Pa_OpenDefaultStream" | "#18" => Some(portaudio_pa_open_default_stream as *const () as usize),
+                "Pa_StartStream" | "#21" => Some(portaudio_pa_start_stream as *const () as usize),
+                "Pa_StopStream" | "#22" => Some(portaudio_pa_stop_stream as *const () as usize),
+                "Pa_CloseStream" | "#19" => Some(portaudio_pa_close_stream as *const () as usize),
+                "Pa_IsStreamStopped" | "#24" => Some(portaudio_pa_is_stream_stopped as *const () as usize),
+                "Pa_IsStreamActive" | "#25" => Some(portaudio_pa_is_stream_active as *const () as usize),
+                "Pa_GetSampleSize" | "#33" => Some(portaudio_pa_get_sample_size as *const () as usize),
+                "Pa_Sleep" | "#34" => Some(portaudio_pa_sleep as *const () as usize),
+                "Pa_GetVersion" | "#1" => Some(portaudio_pa_get_version as *const () as usize),
+                "Pa_GetVersionText" | "#2" => Some(portaudio_pa_get_version_text as *const () as usize),
+                "Pa_GetHostApiCount" | "#6" => Some(portaudio_pa_get_host_api_count as *const () as usize),
+                "Pa_GetHostApiInfo" | "#8" => Some(portaudio_pa_get_host_api_info as *const () as usize),
+                _ => None,
+            }
+        }
         _ => None,
     }
 }
