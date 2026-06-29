@@ -136,8 +136,25 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
             ),
             _ => None,
         },
+        "portaudio_x64.dll" => match func {
+            // Intercept Pa_Initialize to skip audio hardware probing.
+            // PortAudio in the Docker CI has no real audio hardware, and
+            // probing may crash (dlopen → PulseAudio → crash in system
+            // library). Returning paNoError (0) avoids the crash entirely.
+            "Pa_Initialize" => Some(portaudio_pa_initialize as *const () as usize),
+            "Pa_Terminate" => Some(portaudio_pa_terminate as *const () as usize),
+            _ => None,
+        },
         _ => None,
     }
+}
+
+extern "win64" fn portaudio_pa_initialize() -> i32 {
+    0 // paNoError
+}
+
+extern "win64" fn portaudio_pa_terminate() -> i32 {
+    0 // paNoError
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────
