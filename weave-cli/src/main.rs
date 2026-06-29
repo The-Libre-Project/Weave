@@ -67,9 +67,6 @@ struct Args {
 /// Checks Weave's built-in stub crates first, then falls back to any
 /// PE DLLs pre-loaded from the prefix (e.g. DXVK).
 fn resolve(dll: &str, func: &str) -> Option<usize> {
-    if dll.to_ascii_lowercase().contains("portaudio") || func.starts_with('#') {
-        eprintln!("weave/debug: resolve(dll={dll}, func={func})");
-    }
     weave_plugin_system::lookup(dll, func)
         .or_else(|| weave_ntdll::resolve(dll, func))
         .or_else(|| weave_kernel32::resolve(dll, func))
@@ -129,13 +126,7 @@ fn resolve(dll: &str, func: &str) -> Option<usize> {
         .or_else(|| weave_powrprof::resolve(dll, func))
         // lib-audacity internal DLLs — C++ mangled symbols from side-by-side
         // DLLs that are not always present as PE files in the fixture.
-        .or_else(|| {
-            let r = weave_audacity::resolve(dll, func);
-            if r.is_some() && dll.to_ascii_lowercase().contains("portaudio") {
-                eprintln!("weave/audacity: portaudio stub {dll}!{func} → {:#x}", r.unwrap());
-            }
-            r
-        })
+        .or_else(|| weave_audacity::resolve(dll, func))
         // oleaut32.dll — OLE Automation stubs (wxWidgets ordinal imports)
         .or_else(|| weave_ole32::resolve_oleaut32(dll, func))
         // rpcrt4.dll — RPC stubs (wxWidgets UUID imports)

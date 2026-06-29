@@ -64,6 +64,20 @@ fn find_loaded_module(rip: usize) -> Option<usize> {
     None
 }
 
+/// Find the INDEX of the loaded module containing `rip`, if any.
+/// Returns the index into LOADED_MODULES_BASE/SIZE.
+fn find_loaded_module_index(rip: usize) -> Option<usize> {
+    let count = LOADED_MODULES_COUNT.load(Ordering::Relaxed);
+    for i in 0..count.min(MAX_LOADED_MODULES) {
+        let b = LOADED_MODULES_BASE[i].load(Ordering::Relaxed);
+        let s = LOADED_MODULES_SIZE[i].load(Ordering::Relaxed);
+        if rip >= b && rip < b + s {
+            return Some(i);
+        }
+    }
+    None
+}
+
 // ── Global PE metadata for async-signal-safe access ──────────────────────────
 //
 // Signal handlers cannot safely access complex data structures (locks, heap,
@@ -348,11 +362,17 @@ unsafe extern "C" fn on_fatal_signal(
         }
         // Log the loaded module base if RIP is in a pre-loaded side DLL.
         if let Some(mod_base) = find_loaded_module(rip) {
+            let mod_idx = find_loaded_module_index(rip).unwrap_or(usize::MAX);
             let mod_rva = rip - mod_base;
-            let mut mbuf = [0u8; 64];
+            let mut mbuf = [0u8; 80];
             let mut mpos = 0usize;
             let nibble = |n: u64| if n < 10 { b'0' + n as u8 } else { b'a' + n as u8 - 10 };
-            for &b in b"weave: sh module_rva=0x" { mbuf[mpos] = b; mpos += 1; }
+            for &b in b"weave: sh mod[" { mbuf[mpos] = b; mpos += 1; }
+            // Module index as decimal (0-255)
+            if mod_idx >= 100 { mbuf[mpos] = b'0' + (mod_idx / 100) as u8; mpos += 1; }
+            if mod_idx >= 10 { mbuf[mpos] = b'0' + ((mod_idx / 10) % 10) as u8; mpos += 1; }
+            mbuf[mpos] = b'0' + (mod_idx % 10) as u8; mpos += 1;
+            for &b in b"] rva=0x" { mbuf[mpos] = b; mpos += 1; }
             for sh in (0..8u32).rev() {
                 mbuf[mpos] = nibble((mod_rva as u64 >> (sh * 4)) & 0xf); mpos += 1;
             }
