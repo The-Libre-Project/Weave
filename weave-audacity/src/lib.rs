@@ -189,7 +189,7 @@ extern "win64" fn portaudio_pa_open_default_stream(
     _stream: usize, _in_dev: i32, _in_config: usize, _out_dev: i32,
     _out_config: usize, _sample_rate: f64, _frames: u32, _flags: u32,
     _callback: usize, _userdata: usize,
-) -> i32 { 0xFFFFFFFC } // paInvalidDevice (no devices)
+) -> i32 { -4 } // paInvalidDevice (no devices)
 
 extern "win64" fn portaudio_pa_start_stream(_stream: usize) -> i32 { 0 }
 
