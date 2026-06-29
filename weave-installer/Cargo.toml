@@ -3,7 +3,7 @@ name = "weave-installer"
 version = "0.0.1"
 edition = "2021"
 license = "MIT"
-repository = "https://github.com/eldo9000/Weave"
+repository = "https://github.com/The-Libre-Project/Weave"
 
 [dependencies]
 

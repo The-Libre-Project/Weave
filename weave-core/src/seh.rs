@@ -48,15 +48,20 @@ pub fn register_loaded_module(base: usize, size: usize) {
 
 /// Check if an address falls within any registered loaded module.
 fn addr_in_loaded_module(rip: usize) -> bool {
+    find_loaded_module(rip).is_some()
+}
+
+/// Find the base address of the loaded module containing `rip`, if any.
+fn find_loaded_module(rip: usize) -> Option<usize> {
     let count = LOADED_MODULES_COUNT.load(Ordering::Relaxed);
     for i in 0..count.min(MAX_LOADED_MODULES) {
         let b = LOADED_MODULES_BASE[i].load(Ordering::Relaxed);
         let s = LOADED_MODULES_SIZE[i].load(Ordering::Relaxed);
         if rip >= b && rip < b + s {
-            return true;
+            return Some(b);
         }
     }
-    false
+    None
 }
 
 // ── Global PE metadata for async-signal-safe access ──────────────────────────
@@ -340,6 +345,27 @@ unsafe extern "C" fn on_fatal_signal(
             buf[pos] = b'\n';
             pos += 1;
             libc::write(2, buf.as_ptr() as *const _, pos);
+        }
+        // Log the loaded module base if RIP is in a pre-loaded side DLL.
+        if let Some(mod_base) = find_loaded_module(rip) {
+            let mod_rva = rip - mod_base;
+            let mut mbuf = [0u8; 64];
+            let mut mpos = 0usize;
+            let nibble = |n: u64| if n < 10 { b'0' + n as u8 } else { b'a' + n as u8 - 10 };
+            for &b in b"weave: sh module_rva=0x" { mbuf[mpos] = b; mpos += 1; }
+            for sh in (0..8u32).rev() {
+                mbuf[mpos] = nibble((mod_rva as u64 >> (sh * 4)) & 0xf); mpos += 1;
+            }
+            for &b in b" base=0x" { mbuf[mpos] = b; mpos += 1; }
+            for sh in (0..16u32).rev() {
+                mbuf[mpos] = nibble((mod_base as u64 >> (sh * 4)) & 0xf); mpos += 1;
+            }
+            mbuf[mpos] = b'\n'; mpos += 1;
+            unsafe { libc::write(2, mbuf.as_ptr() as *const _, mpos); }
+        } else if base != 0 && (rip < base || rip >= base + size) {
+            unsafe {
+                libc::write(2, b"weave: sh rip NOT in any loaded module or PE\n".as_ptr() as *const _, 48);
+            }
         }
         let win_code = signal_to_exception_code(sig);
 
