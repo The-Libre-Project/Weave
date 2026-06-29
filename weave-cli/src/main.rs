@@ -602,8 +602,14 @@ fn main() {
                     let base = image.base;
                     let image_size = image.size;
                     dll_registry::register(dll_key.clone(), image, exports);
+                    let mod_idx = {
+                        // SEH handler uses the first registered module that contains RIP.
+                        // Count live entries so we can cross-reference crash mod[N].
+                        static MOD_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+                        MOD_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                    };
                     weave_core::seh::register_loaded_module(base as usize, image_size);
-                    eprintln!("weave: pre-loaded {dll_name} from exe dir at base={:#x}", base as usize);
+                    eprintln!("weave: pre-loaded {dll_name} from exe dir at base={:#x} mod[{mod_idx}]", base as usize);
                     loaded.insert(dll_key.clone());
                     side_dlls.push((dll_name, dll_bytes.clone(), base));
                     // Discover transitive dependencies and add them to the queue.
