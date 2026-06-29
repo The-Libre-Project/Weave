@@ -9360,7 +9360,6 @@ fn fileio_basic_gate() {
 /// that the full bootstrap path (mfc140u resolution, user32 window creation,
 /// GDI paint) succeeds under Weave.
 #[test]
-#[ignore]
 fn spss_launch_gate() {
     if !cfg!(target_os = "linux") {
         eprintln!("skipping execution test — requires Linux");
