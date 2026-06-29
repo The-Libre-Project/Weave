@@ -67,7 +67,7 @@ struct Args {
 /// Checks Weave's built-in stub crates first, then falls back to any
 /// PE DLLs pre-loaded from the prefix (e.g. DXVK).
 fn resolve(dll: &str, func: &str) -> Option<usize> {
-    if dll.to_ascii_lowercase().contains("portaudio") || func == "#4" || func == "#5" || func == "#70" || func == "#75" {
+    if dll.to_ascii_lowercase().contains("portaudio") || func.starts_with('#') {
         eprintln!("weave/debug: resolve(dll={dll}, func={func})");
     }
     weave_plugin_system::lookup(dll, func)
