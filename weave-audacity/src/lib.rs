@@ -164,6 +164,14 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
                 "Pa_GetVersionText" | "#2" => Some(portaudio_pa_get_version_text as *const () as usize),
                 "Pa_GetHostApiCount" | "#6" => Some(portaudio_pa_get_host_api_count as *const () as usize),
                 "Pa_GetHostApiInfo" | "#8" => Some(portaudio_pa_get_host_api_info as *const () as usize),
+                "Pa_GetErrorText" | "#3" => Some(portaudio_pa_stub as *const () as usize),
+                "Pa_HostApiDeviceIndexToDeviceIndex" | "#10" => Some(portaudio_pa_stub_i32 as *const () as usize),
+                "Pa_IsFormatSupported" | "#16" => Some(portaudio_pa_stub_i32 as *const () as usize),
+                "Pa_OpenStream" | "#17" => Some(portaudio_pa_stub_i32 as *const () as usize),
+                "PaWasapi_GetIMMDevice" | "#70" => Some(portaudio_pa_stub_ptr as *const () as usize),
+                "PaWinMME_GetStreamInputHandleCount" | "#72" => Some(portaudio_pa_stub_u32 as *const () as usize),
+                "PaWinMME_GetStreamOutputHandleCount" | "#74" => Some(portaudio_pa_stub_u32 as *const () as usize),
+                "PaWinDS_GetDeviceGUID" | "#75" => Some(portaudio_pa_stub_ptr as *const () as usize),
                 _ => None,
             }
         }
@@ -221,6 +229,12 @@ extern "win64" fn portaudio_pa_get_version_text() -> usize { 0 }
 extern "win64" fn portaudio_pa_get_host_api_count() -> i32 { 0 }
 
 extern "win64" fn portaudio_pa_get_host_api_info(_host_api: i32) -> usize { 0 }
+
+// Generic stubs for portaudio functions not used during audio-free startup.
+extern "win64" fn portaudio_pa_stub() -> i32 { 0 }
+extern "win64" fn portaudio_pa_stub_i32() -> i32 { PA_NOT_INITIALIZED }
+extern "win64" fn portaudio_pa_stub_ptr() -> usize { 0 }
+extern "win64" fn portaudio_pa_stub_u32() -> u32 { 0 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────
 
