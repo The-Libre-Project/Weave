@@ -177,15 +177,19 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
 // system audio libraries (PulseAudio/ALSA) which crash in the Docker
 // environment. Returning paNoError (0) with 0 devices avoids the crash.
 
-extern "win64" fn portaudio_pa_initialize() -> i32 { 0 }
+// paNotInitialized = -1 — tell callers PortAudio was not initialized
+// (no audio hardware available in headless Docker CI).
+const PA_NOT_INITIALIZED: i32 = -1;
+
+extern "win64" fn portaudio_pa_initialize() -> i32 { PA_NOT_INITIALIZED }
 
 extern "win64" fn portaudio_pa_terminate() -> i32 { 0 }
 
 extern "win64" fn portaudio_pa_get_device_count() -> i32 { 0 }
 
-extern "win64" fn portaudio_pa_get_default_input_device() -> i32 { -1 }
+extern "win64" fn portaudio_pa_get_default_input_device() -> i32 { PA_NOT_INITIALIZED }
 
-extern "win64" fn portaudio_pa_get_default_output_device() -> i32 { -1 }
+extern "win64" fn portaudio_pa_get_default_output_device() -> i32 { PA_NOT_INITIALIZED }
 
 extern "win64" fn portaudio_pa_get_device_info(_dev: i32) -> usize { 0 }
 
