@@ -137,25 +137,81 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
             _ => None,
         },
         "portaudio_x64.dll" => match func {
-            // Intercept Pa_Initialize to skip audio hardware probing.
+            // Intercept PortAudio API to skip audio hardware probing.
             // PortAudio in the Docker CI has no real audio hardware, and
             // probing may crash (dlopen → PulseAudio → crash in system
-            // library). Returning paNoError (0) avoids the crash entirely.
+            // library). Return paNoError but stub all device enumeration
+            // and stream functions to return 0 / empty.
             "Pa_Initialize" => Some(portaudio_pa_initialize as *const () as usize),
             "Pa_Terminate" => Some(portaudio_pa_terminate as *const () as usize),
+            "Pa_GetDeviceCount" => Some(portaudio_pa_get_device_count as *const () as usize),
+            "Pa_GetDefaultInputDevice" => Some(portaudio_pa_get_default_input_device as *const () as usize),
+            "Pa_GetDefaultOutputDevice" => Some(portaudio_pa_get_default_output_device as *const () as usize),
+            "Pa_GetDeviceInfo" => Some(portaudio_pa_get_device_info as *const () as usize),
+            "Pa_OpenDefaultStream" => Some(portaudio_pa_open_default_stream as *const () as usize),
+            "Pa_StartStream" => Some(portaudio_pa_start_stream as *const () as usize),
+            "Pa_StopStream" => Some(portaudio_pa_stop_stream as *const () as usize),
+            "Pa_CloseStream" => Some(portaudio_pa_close_stream as *const () as usize),
+            "Pa_IsStreamStopped" => Some(portaudio_pa_is_stream_stopped as *const () as usize),
+            "Pa_IsStreamActive" => Some(portaudio_pa_is_stream_active as *const () as usize),
+            "Pa_GetSampleSize" => Some(portaudio_pa_get_sample_size as *const () as usize),
+            "Pa_Sleep" => Some(portaudio_pa_sleep as *const () as usize),
+            "Pa_GetVersion" => Some(portaudio_pa_get_version as *const () as usize),
+            "Pa_GetVersionText" => Some(portaudio_pa_get_version_text as *const () as usize),
+            "Pa_GetHostApiCount" => Some(portaudio_pa_get_host_api_count as *const () as usize),
+            "Pa_GetHostApiInfo" => Some(portaudio_pa_get_host_api_info as *const () as usize),
             _ => None,
         },
         _ => None,
     }
 }
 
-extern "win64" fn portaudio_pa_initialize() -> i32 {
-    0 // paNoError
-}
+// ── PortAudio stubs ─────────────────────────────────────────────────────
+// PortAudio is a cross-platform audio library. In headless Docker CI there
+// is no real audio hardware. These stubs prevent PortAudio from probing
+// system audio libraries (PulseAudio/ALSA) which crash in the Docker
+// environment. Returning paNoError (0) with 0 devices avoids the crash.
 
-extern "win64" fn portaudio_pa_terminate() -> i32 {
-    0 // paNoError
-}
+extern "win64" fn portaudio_pa_initialize() -> i32 { 0 }
+
+extern "win64" fn portaudio_pa_terminate() -> i32 { 0 }
+
+extern "win64" fn portaudio_pa_get_device_count() -> i32 { 0 }
+
+extern "win64" fn portaudio_pa_get_default_input_device() -> i32 { -1 }
+
+extern "win64" fn portaudio_pa_get_default_output_device() -> i32 { -1 }
+
+extern "win64" fn portaudio_pa_get_device_info(_dev: i32) -> usize { 0 }
+
+// Stream functions
+extern "win64" fn portaudio_pa_open_default_stream(
+    _stream: usize, _in_dev: i32, _in_config: usize, _out_dev: i32,
+    _out_config: usize, _sample_rate: f64, _frames: u32, _flags: u32,
+    _callback: usize, _userdata: usize,
+) -> i32 { 0xFFFFFFFC } // paInvalidDevice (no devices)
+
+extern "win64" fn portaudio_pa_start_stream(_stream: usize) -> i32 { 0 }
+
+extern "win64" fn portaudio_pa_stop_stream(_stream: usize) -> i32 { 0 }
+
+extern "win64" fn portaudio_pa_close_stream(_stream: usize) -> i32 { 0 }
+
+extern "win64" fn portaudio_pa_is_stream_stopped(_stream: usize) -> i32 { 1 }
+
+extern "win64" fn portaudio_pa_is_stream_active(_stream: usize) -> i32 { 0 }
+
+extern "win64" fn portaudio_pa_get_sample_size(_format: i32) -> i32 { 2 }
+
+extern "win64" fn portaudio_pa_sleep(_msec: u32) {}
+
+extern "win64" fn portaudio_pa_get_version() -> i32 { 0x1900 } // 19.0.0
+
+extern "win64" fn portaudio_pa_get_version_text() -> usize { 0 }
+
+extern "win64" fn portaudio_pa_get_host_api_count() -> i32 { 0 }
+
+extern "win64" fn portaudio_pa_get_host_api_info(_host_api: i32) -> usize { 0 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────
 
