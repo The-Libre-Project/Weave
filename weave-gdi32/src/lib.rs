@@ -2603,6 +2603,7 @@ pub extern "win64" fn set_meta_file_bits_ex(_cb_buffer: u32, _lp_data: *const u8
 /// Also handles a small set of GDI functions that Windows re-exports from
 /// `user32.dll` (FillRect, DrawTextW, DrawTextA). Binaries compiled with
 /// MinGW may import these from either DLL name.
+///
 // Wine ref: not applicable — Weave-internal IAT dispatch function with no Wine equivalent.
 // ── GDI+ Phase A stub ─────────────────────────────────────────────────────────
 
