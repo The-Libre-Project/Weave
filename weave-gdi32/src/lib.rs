@@ -2598,15 +2598,14 @@ pub extern "win64" fn set_meta_file_bits_ex(_cb_buffer: u32, _lp_data: *const u8
 
 // ── Resolve ───────────────────────────────────────────────────────────────────
 
-/// Resolve a `gdi32.dll` import to a stub address.
-///
-/// Also handles a small set of GDI functions that Windows re-exports from
-/// `user32.dll` (FillRect, DrawTextW, DrawTextA). Binaries compiled with
-/// MinGW may import these from either DLL name.
-///
+// Resolve a `gdi32.dll` import to a stub address.
+//
+// Also handles a small set of GDI functions that Windows re-exports from
+// `user32.dll` (FillRect, DrawTextW, DrawTextA). Binaries compiled with
+// MinGW may import these from either DLL name.
+//
 // Wine ref: not applicable — Weave-internal IAT dispatch function with no Wine equivalent.
 // ── GDI+ Phase A stub ─────────────────────────────────────────────────────────
-
 pub extern "win64" fn gdip_create_from_hwnd_icm(_hwnd: usize, _graphics: *mut usize) -> i32 {
     1 // GenericError
 }
