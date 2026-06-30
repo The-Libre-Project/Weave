@@ -2604,12 +2604,69 @@ pub extern "win64" fn set_meta_file_bits_ex(_cb_buffer: u32, _lp_data: *const u8
 /// `user32.dll` (FillRect, DrawTextW, DrawTextA). Binaries compiled with
 /// MinGW may import these from either DLL name.
 // Wine ref: not applicable — Weave-internal IAT dispatch function with no Wine equivalent.
+// ── GDI+ Phase A stub ─────────────────────────────────────────────────────────
+
+pub extern "win64" fn gdip_create_from_hwnd_icm(_hwnd: usize, _graphics: *mut usize) -> i32 {
+    1 // GenericError
+}
+
+// ── GDI Phase A stubs ─────────────────────────────────────────────────────────
+
+pub extern "win64" fn create_brush_indirect(_lplogbrush: usize) -> usize {
+    0
+}
+
+pub extern "win64" fn delete_meta_file(_hmf: usize) -> i32 {
+    0
+}
+
+pub extern "win64" fn gdi_transparent_blt(
+    _hdc_dest: usize,
+    _x_dest: i32,
+    _y_dest: i32,
+    _cx_dest: i32,
+    _cy_dest: i32,
+    _hdc_src: usize,
+    _x_src: i32,
+    _y_src: i32,
+    _cx_src: i32,
+    _cy_src: i32,
+    _cr_transparent: u32,
+) -> i32 {
+    0 // FALSE
+}
+
+pub extern "win64" fn get_dc_brush_color(_hdc: usize) -> u32 {
+    0 // default color
+}
+
+pub extern "win64" fn get_enh_meta_file_palette_entries(
+    _hemf: usize,
+    _n_entries: u32,
+    _lp_palette_entries: usize,
+) -> u32 {
+    0
+}
+
+pub extern "win64" fn get_nearest_color(_hdc: usize, _color: u32) -> u32 {
+    0
+}
+
 pub fn resolve(dll: &str, func: &str) -> Option<usize> {
     let is_gdi32 = dll.eq_ignore_ascii_case("gdi32.dll");
     let is_user32_gdi = dll.eq_ignore_ascii_case("user32.dll")
         && matches!(func, "FillRect" | "DrawTextW" | "DrawTextA");
-    if !is_gdi32 && !is_user32_gdi {
+    let is_gdiplus = dll.eq_ignore_ascii_case("gdiplus.dll");
+    if !is_gdi32 && !is_user32_gdi && !is_gdiplus {
         return None;
+    }
+    if is_gdiplus {
+        return match func {
+            "GdipCreateFromHWNDICM" => Some(
+                gdip_create_from_hwnd_icm as extern "win64" fn(_, _) -> _ as *const () as usize,
+            ),
+            _ => None,
+        };
     }
     match func {
         // Brush / pen / font creation
@@ -3000,6 +3057,27 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "CopyEnhMetaFileW" => Some(copy_enh_meta_file_w as *const () as usize),
         "GetMetaFileBitsEx" => Some(get_meta_file_bits_ex as *const () as usize),
         "SetMetaFileBitsEx" => Some(set_meta_file_bits_ex as *const () as usize),
+        // ── SPSS Phase A stubs ────────────────────────────────────────────
+        "CreateBrushIndirect" => {
+            Some(create_brush_indirect as extern "win64" fn(_) -> _ as *const () as usize)
+        }
+        "DeleteMetaFile" => {
+            Some(delete_meta_file as extern "win64" fn(_) -> _ as *const () as usize)
+        }
+        "GdiTransparentBlt" => Some(
+            gdi_transparent_blt as extern "win64" fn(_, _, _, _, _, _, _, _, _, _, _) -> _
+                as *const () as usize,
+        ),
+        "GetDCBrushColor" => {
+            Some(get_dc_brush_color as extern "win64" fn(_) -> _ as *const () as usize)
+        }
+        "GetEnhMetaFilePaletteEntries" => Some(
+            get_enh_meta_file_palette_entries as extern "win64" fn(_, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "GetNearestColor" => {
+            Some(get_nearest_color as extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
         _ => None,
     }
 }

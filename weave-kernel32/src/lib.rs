@@ -6656,12 +6656,9 @@ pub unsafe extern "win64" fn get_proc_address(h_module: usize, lp_proc_name: *co
     // Resolve via the weave-core resolve chain first: catches stub overrides
     // for pre-loaded DLL exports (e.g. portaudio_x64.dll!Pa_Initialize).
     // Falls back to dll_registry for non-overridden real PE exports.
-    match weave_core::resolve::resolve(&dll_name, &func_name) {
-        Some(addr) => {
-            eprintln!("weave/kernel32: GetProcAddress({dll_name}!{func_name}) → {addr:#x} [stub]");
-            return addr;
-        }
-        None => {}
+    if let Some(addr) = weave_core::resolve::resolve(&dll_name, &func_name) {
+        eprintln!("weave/kernel32: GetProcAddress({dll_name}!{func_name}) → {addr:#x} [stub]");
+        return addr;
     }
 
     // Check dll_registry: covers real DLLs loaded from disk via LoadLibrary
@@ -14379,6 +14376,57 @@ pub unsafe extern "win64" fn disable_thread_library_calls(_h_module: usize) -> i
     1 // TRUE
 }
 
+// ── Activation context / console stubs ────────────────────────────────────────
+
+/// ActivateActCtx — stub, returns FALSE.
+pub extern "win64" fn activate_act_ctx(_h_act_ctx: usize) -> i32 {
+    0 // FALSE
+}
+
+/// CreateActCtxW — stub, returns INVALID_HANDLE_VALUE.
+pub unsafe extern "win64" fn create_act_ctx_w(_p_ctx: *const u8) -> usize {
+    usize::MAX // INVALID_HANDLE_VALUE
+}
+
+/// DeactivateActCtx — stub, returns FALSE.
+pub extern "win64" fn deactivate_act_ctx(_dw_flags: u32) -> i32 {
+    0 // FALSE
+}
+
+/// FindActCtxSectionStringW — stub, returns FALSE.
+pub unsafe extern "win64" fn find_act_ctx_section_string_w(
+    _dw_flags: u32,
+    _lp_ext_guid: *const u8,
+    _ul_section_id: u32,
+    _lp_string_to_find: *const u16,
+    _returned_data: *mut u8,
+) -> i32 {
+    0 // FALSE
+}
+
+/// PeekConsoleInputW — stub, returns FALSE.
+pub unsafe extern "win64" fn peek_console_input_w(
+    _h_console_input: usize,
+    _lp_buffer: *mut u8,
+    _n_length: u32,
+    _lp_n_read: *mut u32,
+) -> i32 {
+    0 // FALSE
+}
+
+/// QueryActCtxW — stub, returns FALSE.
+pub unsafe extern "win64" fn query_act_ctx_w(
+    _dw_flags: u32,
+    _h_act_ctx: usize,
+    _pv_sub_instance: *const u8,
+    _ul_info_class: u32,
+    _pv_buffer: *mut u8,
+    _cb_buffer: usize,
+    _pcb_written_or_required: *mut usize,
+) -> i32 {
+    0 // FALSE
+}
+
 // ── Resolver ──────────────────────────────────────────────────────────────────
 
 /// Resolve a kernel32.dll import to a stub address.
@@ -16806,6 +16854,21 @@ pub fn resolve_version(dll: &str, func: &str) -> Option<usize> {
         "GetFileVersionInfoA" => get_file_version_info_a as *const () as usize,
         "VerQueryValueW" => ver_query_value_w as *const () as usize,
         "VerQueryValueA" => ver_query_value_a as *const () as usize,
+        // ── SPSS Phase A stubs ────────────────────────────────────────────
+        "ActivateActCtx" => activate_act_ctx as *const () as usize,
+        "CreateActCtxW" => create_act_ctx_w as *const () as usize,
+        "DeactivateActCtx" => deactivate_act_ctx as *const () as usize,
+        "FindActCtxSectionStringW" => {
+            find_act_ctx_section_string_w as unsafe extern "win64" fn(_, _, _, _, _) -> _
+                as *const () as usize
+        }
+        "PeekConsoleInputW" => {
+            peek_console_input_w as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize
+        }
+        "QueryActCtxW" => {
+            query_act_ctx_w as unsafe extern "win64" fn(_, _, _, _, _, _, _) -> _ as *const ()
+                as usize
+        }
         _ => return None,
     })
 }

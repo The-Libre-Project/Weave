@@ -366,25 +366,56 @@ unsafe extern "C" fn on_fatal_signal(
             let mod_rva = rip - mod_base;
             let mut mbuf = [0u8; 80];
             let mut mpos = 0usize;
-            let nibble = |n: u64| if n < 10 { b'0' + n as u8 } else { b'a' + n as u8 - 10 };
-            for &b in b"weave: sh mod[" { mbuf[mpos] = b; mpos += 1; }
+            let nibble = |n: u64| {
+                if n < 10 {
+                    b'0' + n as u8
+                } else {
+                    b'a' + n as u8 - 10
+                }
+            };
+            for &b in b"weave: sh mod[" {
+                mbuf[mpos] = b;
+                mpos += 1;
+            }
             // Module index as decimal (0-255)
-            if mod_idx >= 100 { mbuf[mpos] = b'0' + (mod_idx / 100) as u8; mpos += 1; }
-            if mod_idx >= 10 { mbuf[mpos] = b'0' + ((mod_idx / 10) % 10) as u8; mpos += 1; }
-            mbuf[mpos] = b'0' + (mod_idx % 10) as u8; mpos += 1;
-            for &b in b"] rva=0x" { mbuf[mpos] = b; mpos += 1; }
+            if mod_idx >= 100 {
+                mbuf[mpos] = b'0' + (mod_idx / 100) as u8;
+                mpos += 1;
+            }
+            if mod_idx >= 10 {
+                mbuf[mpos] = b'0' + ((mod_idx / 10) % 10) as u8;
+                mpos += 1;
+            }
+            mbuf[mpos] = b'0' + (mod_idx % 10) as u8;
+            mpos += 1;
+            for &b in b"] rva=0x" {
+                mbuf[mpos] = b;
+                mpos += 1;
+            }
             for sh in (0..8u32).rev() {
-                mbuf[mpos] = nibble((mod_rva as u64 >> (sh * 4)) & 0xf); mpos += 1;
+                mbuf[mpos] = nibble((mod_rva as u64 >> (sh * 4)) & 0xf);
+                mpos += 1;
             }
-            for &b in b" base=0x" { mbuf[mpos] = b; mpos += 1; }
+            for &b in b" base=0x" {
+                mbuf[mpos] = b;
+                mpos += 1;
+            }
             for sh in (0..16u32).rev() {
-                mbuf[mpos] = nibble((mod_base as u64 >> (sh * 4)) & 0xf); mpos += 1;
+                mbuf[mpos] = nibble((mod_base as u64 >> (sh * 4)) & 0xf);
+                mpos += 1;
             }
-            mbuf[mpos] = b'\n'; mpos += 1;
-            unsafe { libc::write(2, mbuf.as_ptr() as *const _, mpos); }
+            mbuf[mpos] = b'\n';
+            mpos += 1;
+            unsafe {
+                libc::write(2, mbuf.as_ptr() as *const _, mpos);
+            }
         } else if base != 0 && (rip < base || rip >= base + size) {
             unsafe {
-                libc::write(2, b"weave: sh rip NOT in any loaded module or PE\n".as_ptr() as *const _, 48);
+                libc::write(
+                    2,
+                    b"weave: sh rip NOT in any loaded module or PE\n".as_ptr() as *const _,
+                    48,
+                );
             }
         }
         let win_code = signal_to_exception_code(sig);

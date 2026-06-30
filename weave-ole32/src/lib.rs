@@ -750,6 +750,14 @@ pub unsafe extern "win64" fn do_drag_drop(
     0x0004_0101u32 as i32 // DRAGDROP_S_CANCEL
 }
 
+// ── StringFromCLSID ───────────────────────────────────────────────────────────
+
+/// StringFromCLSID — convert a CLSID to a string (ole32 version).
+/// Returns E_OUTOFMEMORY (0x8007000E) — stub, no allocation.
+pub unsafe extern "win64" fn string_from_clsid(_rclsid: *const u8, _lpsz: *mut *mut u16) -> u32 {
+    0x8007000E // E_OUTOFMEMORY
+}
+
 // ── PropVariant ───────────────────────────────────────────────────────────────
 
 // Wine ref: dlls/ole32/ole2.c::PropVariantClear — reads vt field; frees heap-allocated members
@@ -1046,6 +1054,10 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         // WinRT init (combase.dll)
         "RoInitialize" => Some(ro_initialize as *const () as usize),
         "RoUninitialize" => Some(ro_uninitialize as *const () as usize),
+        // StringFromCLSID — ole32 variant, returns E_OUTOFMEMORY
+        "StringFromCLSID" => {
+            Some(string_from_clsid as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
         // COM task allocator
         "CoGetMalloc" => {
             Some(co_get_malloc as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)

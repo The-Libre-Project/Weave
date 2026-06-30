@@ -1679,6 +1679,21 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "UnionRect" => Some(api::union_rect as *const () as usize),
         "ValidateRgn" => Some(api::validate_rgn as *const () as usize),
         "AnimateWindow" => Some(api::animate_window as *const () as usize),
+        // ── SPSS Phase A stubs ────────────────────────────────────────────
+        "GetNextDlgTabItem" => Some(
+            api::get_next_dlg_tab_item as unsafe extern "win64" fn(_, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "GetThreadDesktop" => {
+            Some(api::get_thread_desk as unsafe extern "win64" fn(_) -> _ as *const () as usize)
+        }
+        "GetTopWindow" => {
+            Some(api::get_top_window as unsafe extern "win64" fn(_) -> _ as *const () as usize)
+        }
+        "GetUserObjectInformationW" => Some(
+            api::get_user_object_information_w as unsafe extern "win64" fn(_, _, _, _, _) -> _
+                as *const () as usize,
+        ),
         _ => None,
     }
 }

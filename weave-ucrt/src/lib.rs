@@ -5464,6 +5464,48 @@ pub extern "win64" fn ucrt_sinh(_x: f64) -> f64 {
     0.0
 }
 
+// ── SPSS / MSVC CRT stubs ────────────────────────────────────────────────────
+
+pub extern "win64" fn ucrt_configure_wide_argv(_mode: i32) -> i32 {
+    0
+}
+
+pub unsafe extern "win64" fn ucrt_dupenv_s(
+    _buf: *mut *mut u8,
+    _count: *mut usize,
+    _name: *const u8,
+) -> i32 {
+    0
+}
+
+pub extern "win64" fn ucrt_initialize_wide_environment() -> i32 {
+    0
+}
+
+pub extern "win64" fn ucrt_putenv_s(_name: *const u8) -> i32 {
+    0
+}
+
+pub unsafe extern "win64" fn ucrt_recalloc(_ptr: *mut u8, _count: usize, _size: usize) -> *mut u8 {
+    std::ptr::null_mut()
+}
+
+pub unsafe extern "win64" fn ucrt_wdupenv_s(
+    _buf: *mut *mut u16,
+    _count: *mut usize,
+    _name: *const u16,
+) -> i32 {
+    0
+}
+
+pub extern "win64" fn ucrt_wputenv_s(_name: *const u16) -> i32 {
+    0
+}
+
+pub unsafe extern "win64" fn ucrt_wstat64i32(_path: *const u16, _buf: *mut u8) -> i32 {
+    -1
+}
+
 /// Resolve a UCRT import to a stub address.
 pub fn resolve(dll: &str, func: &str) -> Option<usize> {
     if !is_ucrt_dll(dll) {
@@ -6060,6 +6102,16 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "tmpnam" => stub!(ucrt_tmpnam as extern "win64" fn(_) -> _),
         "__sys_nerr" => Some(sys_nerr_data_addr()),
         "__sys_errlist" => Some(sys_errlist_data_addr()),
+        "_configure_wide_argv" => stub!(ucrt_configure_wide_argv as extern "win64" fn(_) -> _),
+        "_dupenv_s" => stub!(ucrt_dupenv_s as unsafe extern "win64" fn(_, _, _) -> _),
+        "_initialize_wide_environment" => {
+            stub!(ucrt_initialize_wide_environment as extern "win64" fn() -> _)
+        }
+        "_putenv_s" => stub!(ucrt_putenv_s as extern "win64" fn(_) -> _),
+        "_recalloc" => stub!(ucrt_recalloc as unsafe extern "win64" fn(_, _, _) -> _),
+        "_wdupenv_s" => stub!(ucrt_wdupenv_s as unsafe extern "win64" fn(_, _, _) -> _),
+        "_wputenv_s" => stub!(ucrt_wputenv_s as extern "win64" fn(_) -> _),
+        "_wstat64i32" => stub!(ucrt_wstat64i32 as unsafe extern "win64" fn(_, _) -> _),
         _ => None,
     }
 }

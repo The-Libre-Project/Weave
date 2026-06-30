@@ -148,30 +148,62 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
             match func {
                 "Pa_Initialize" | "#4" => Some(portaudio_pa_initialize as *const () as usize),
                 "Pa_Terminate" | "#5" => Some(portaudio_pa_terminate as *const () as usize),
-                "Pa_GetDeviceCount" | "#12" => Some(portaudio_pa_get_device_count as *const () as usize),
-                "Pa_GetDefaultInputDevice" | "#13" => Some(portaudio_pa_get_default_input_device as *const () as usize),
-                "Pa_GetDefaultOutputDevice" | "#14" => Some(portaudio_pa_get_default_output_device as *const () as usize),
-                "Pa_GetDeviceInfo" | "#15" => Some(portaudio_pa_get_device_info as *const () as usize),
-                "Pa_OpenDefaultStream" | "#18" => Some(portaudio_pa_open_default_stream as *const () as usize),
+                "Pa_GetDeviceCount" | "#12" => {
+                    Some(portaudio_pa_get_device_count as *const () as usize)
+                }
+                "Pa_GetDefaultInputDevice" | "#13" => {
+                    Some(portaudio_pa_get_default_input_device as *const () as usize)
+                }
+                "Pa_GetDefaultOutputDevice" | "#14" => {
+                    Some(portaudio_pa_get_default_output_device as *const () as usize)
+                }
+                "Pa_GetDeviceInfo" | "#15" => {
+                    Some(portaudio_pa_get_device_info as *const () as usize)
+                }
+                "Pa_OpenDefaultStream" | "#18" => {
+                    Some(portaudio_pa_open_default_stream as *const () as usize)
+                }
                 "Pa_StartStream" | "#21" => Some(portaudio_pa_start_stream as *const () as usize),
                 "Pa_StopStream" | "#22" => Some(portaudio_pa_stop_stream as *const () as usize),
                 "Pa_CloseStream" | "#19" => Some(portaudio_pa_close_stream as *const () as usize),
-                "Pa_IsStreamStopped" | "#24" => Some(portaudio_pa_is_stream_stopped as *const () as usize),
-                "Pa_IsStreamActive" | "#25" => Some(portaudio_pa_is_stream_active as *const () as usize),
-                "Pa_GetSampleSize" | "#33" => Some(portaudio_pa_get_sample_size as *const () as usize),
+                "Pa_IsStreamStopped" | "#24" => {
+                    Some(portaudio_pa_is_stream_stopped as *const () as usize)
+                }
+                "Pa_IsStreamActive" | "#25" => {
+                    Some(portaudio_pa_is_stream_active as *const () as usize)
+                }
+                "Pa_GetSampleSize" | "#33" => {
+                    Some(portaudio_pa_get_sample_size as *const () as usize)
+                }
                 "Pa_Sleep" | "#34" => Some(portaudio_pa_sleep as *const () as usize),
                 "Pa_GetVersion" | "#1" => Some(portaudio_pa_get_version as *const () as usize),
-                "Pa_GetVersionText" | "#2" => Some(portaudio_pa_get_version_text as *const () as usize),
-                "Pa_GetHostApiCount" | "#6" => Some(portaudio_pa_get_host_api_count as *const () as usize),
-                "Pa_GetHostApiInfo" | "#8" => Some(portaudio_pa_get_host_api_info as *const () as usize),
+                "Pa_GetVersionText" | "#2" => {
+                    Some(portaudio_pa_get_version_text as *const () as usize)
+                }
+                "Pa_GetHostApiCount" | "#6" => {
+                    Some(portaudio_pa_get_host_api_count as *const () as usize)
+                }
+                "Pa_GetHostApiInfo" | "#8" => {
+                    Some(portaudio_pa_get_host_api_info as *const () as usize)
+                }
                 "Pa_GetErrorText" | "#3" => Some(portaudio_pa_stub as *const () as usize),
-                "Pa_HostApiDeviceIndexToDeviceIndex" | "#10" => Some(portaudio_pa_stub_i32 as *const () as usize),
+                "Pa_HostApiDeviceIndexToDeviceIndex" | "#10" => {
+                    Some(portaudio_pa_stub_i32 as *const () as usize)
+                }
                 "Pa_IsFormatSupported" | "#16" => Some(portaudio_pa_stub_i32 as *const () as usize),
                 "Pa_OpenStream" | "#17" => Some(portaudio_pa_stub_i32 as *const () as usize),
-                "PaWasapi_GetIMMDevice" | "#70" => Some(portaudio_pa_stub_ptr as *const () as usize),
-                "PaWinMME_GetStreamInputHandleCount" | "#72" => Some(portaudio_pa_stub_u32 as *const () as usize),
-                "PaWinMME_GetStreamOutputHandleCount" | "#74" => Some(portaudio_pa_stub_u32 as *const () as usize),
-                "PaWinDS_GetDeviceGUID" | "#75" => Some(portaudio_pa_stub_ptr as *const () as usize),
+                "PaWasapi_GetIMMDevice" | "#70" => {
+                    Some(portaudio_pa_stub_ptr as *const () as usize)
+                }
+                "PaWinMME_GetStreamInputHandleCount" | "#72" => {
+                    Some(portaudio_pa_stub_u32 as *const () as usize)
+                }
+                "PaWinMME_GetStreamOutputHandleCount" | "#74" => {
+                    Some(portaudio_pa_stub_u32 as *const () as usize)
+                }
+                "PaWinDS_GetDeviceGUID" | "#75" => {
+                    Some(portaudio_pa_stub_ptr as *const () as usize)
+                }
                 _ => None,
             }
         }
@@ -189,52 +221,101 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
 // (no audio hardware available in headless Docker CI).
 const PA_NOT_INITIALIZED: i32 = -1;
 
-extern "win64" fn portaudio_pa_initialize() -> i32 { PA_NOT_INITIALIZED }
+extern "win64" fn portaudio_pa_initialize() -> i32 {
+    PA_NOT_INITIALIZED
+}
 
-extern "win64" fn portaudio_pa_terminate() -> i32 { 0 }
+extern "win64" fn portaudio_pa_terminate() -> i32 {
+    0
+}
 
-extern "win64" fn portaudio_pa_get_device_count() -> i32 { 0 }
+extern "win64" fn portaudio_pa_get_device_count() -> i32 {
+    0
+}
 
-extern "win64" fn portaudio_pa_get_default_input_device() -> i32 { PA_NOT_INITIALIZED }
+extern "win64" fn portaudio_pa_get_default_input_device() -> i32 {
+    PA_NOT_INITIALIZED
+}
 
-extern "win64" fn portaudio_pa_get_default_output_device() -> i32 { PA_NOT_INITIALIZED }
+extern "win64" fn portaudio_pa_get_default_output_device() -> i32 {
+    PA_NOT_INITIALIZED
+}
 
-extern "win64" fn portaudio_pa_get_device_info(_dev: i32) -> usize { 0 }
+extern "win64" fn portaudio_pa_get_device_info(_dev: i32) -> usize {
+    0
+}
 
 // Stream functions
 extern "win64" fn portaudio_pa_open_default_stream(
-    _stream: usize, _in_dev: i32, _in_config: usize, _out_dev: i32,
-    _out_config: usize, _sample_rate: f64, _frames: u32, _flags: u32,
-    _callback: usize, _userdata: usize,
-) -> i32 { -4 } // paInvalidDevice (no devices)
+    _stream: usize,
+    _in_dev: i32,
+    _in_config: usize,
+    _out_dev: i32,
+    _out_config: usize,
+    _sample_rate: f64,
+    _frames: u32,
+    _flags: u32,
+    _callback: usize,
+    _userdata: usize,
+) -> i32 {
+    -4
+} // paInvalidDevice (no devices)
 
-extern "win64" fn portaudio_pa_start_stream(_stream: usize) -> i32 { 0 }
+extern "win64" fn portaudio_pa_start_stream(_stream: usize) -> i32 {
+    0
+}
 
-extern "win64" fn portaudio_pa_stop_stream(_stream: usize) -> i32 { 0 }
+extern "win64" fn portaudio_pa_stop_stream(_stream: usize) -> i32 {
+    0
+}
 
-extern "win64" fn portaudio_pa_close_stream(_stream: usize) -> i32 { 0 }
+extern "win64" fn portaudio_pa_close_stream(_stream: usize) -> i32 {
+    0
+}
 
-extern "win64" fn portaudio_pa_is_stream_stopped(_stream: usize) -> i32 { 1 }
+extern "win64" fn portaudio_pa_is_stream_stopped(_stream: usize) -> i32 {
+    1
+}
 
-extern "win64" fn portaudio_pa_is_stream_active(_stream: usize) -> i32 { 0 }
+extern "win64" fn portaudio_pa_is_stream_active(_stream: usize) -> i32 {
+    0
+}
 
-extern "win64" fn portaudio_pa_get_sample_size(_format: i32) -> i32 { 2 }
+extern "win64" fn portaudio_pa_get_sample_size(_format: i32) -> i32 {
+    2
+}
 
 extern "win64" fn portaudio_pa_sleep(_msec: u32) {}
 
-extern "win64" fn portaudio_pa_get_version() -> i32 { 0x1900 } // 19.0.0
+extern "win64" fn portaudio_pa_get_version() -> i32 {
+    0x1900
+} // 19.0.0
 
-extern "win64" fn portaudio_pa_get_version_text() -> usize { 0 }
+extern "win64" fn portaudio_pa_get_version_text() -> usize {
+    0
+}
 
-extern "win64" fn portaudio_pa_get_host_api_count() -> i32 { 0 }
+extern "win64" fn portaudio_pa_get_host_api_count() -> i32 {
+    0
+}
 
-extern "win64" fn portaudio_pa_get_host_api_info(_host_api: i32) -> usize { 0 }
+extern "win64" fn portaudio_pa_get_host_api_info(_host_api: i32) -> usize {
+    0
+}
 
 // Generic stubs for portaudio functions not used during audio-free startup.
-extern "win64" fn portaudio_pa_stub() -> i32 { 0 }
-extern "win64" fn portaudio_pa_stub_i32() -> i32 { PA_NOT_INITIALIZED }
-extern "win64" fn portaudio_pa_stub_ptr() -> usize { 0 }
-extern "win64" fn portaudio_pa_stub_u32() -> u32 { 0 }
+extern "win64" fn portaudio_pa_stub() -> i32 {
+    0
+}
+extern "win64" fn portaudio_pa_stub_i32() -> i32 {
+    PA_NOT_INITIALIZED
+}
+extern "win64" fn portaudio_pa_stub_ptr() -> usize {
+    0
+}
+extern "win64" fn portaudio_pa_stub_u32() -> u32 {
+    0
+}
 
 // ── Tests ─────────────────────────────────────────────────────────────────
 

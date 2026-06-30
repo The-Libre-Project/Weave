@@ -2279,7 +2279,7 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
             Some(image_list_set_drag_cursor_image as *const () as usize)
         }
         // ── wxWidgets gap-fill: ordinal stubs ──
-        "#16" | "#17" | "#18" | "#19" | "#20" => Some(comctl32_ordinal_stub as *const () as usize),
+        "#16" | "#18" | "#19" | "#20" => Some(comctl32_ordinal_stub as *const () as usize),
         _ => None,
     }
 }

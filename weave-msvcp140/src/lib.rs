@@ -1138,6 +1138,24 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         | "?unshift@?$codecvt@DDU_Mbstatet@@@std@@QEBAHAEAU_Mbstatet@@PEAD1AEAPEAD@Z"
         | "?widen@?$basic_ios@DU?$char_traits@D@std@@@std@@QEBADD@Z"
         | "?xsputn@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MEAA_JPEBD_J@Z"
+        | "?eback@?$basic_streambuf@DU?$char_traits@D@std@@@std@@IEBAPEADXZ"
+        | "?egptr@?$basic_streambuf@DU?$char_traits@D@std@@@std@@IEBAPEADXZ"
+        | "?epptr@?$basic_streambuf@DU?$char_traits@D@std@@@std@@IEBAPEADXZ"
+        | "?gptr@?$basic_streambuf@DU?$char_traits@D@std@@@std@@IEBAPEADXZ"
+        | "?pbase@?$basic_streambuf@DU?$char_traits@D@std@@@std@@IEBAPEADXZ"
+        | "?pptr@?$basic_streambuf@DU?$char_traits@D@std@@@std@@IEBAPEADXZ"
+        | "?gbump@?$basic_streambuf@DU?$char_traits@D@std@@@std@@IEAAXH@Z"
+        | "?setg@?$basic_streambuf@DU?$char_traits@D@std@@@std@@IEAAXPEAD00@Z"
+        | "?setp@?$basic_streambuf@DU?$char_traits@D@std@@@std@@IEAAXPEAD0@Z"
+        | "?setp@?$basic_streambuf@DU?$char_traits@D@std@@@std@@IEAAXPEAD00@Z"
+        | "?_Pninc@?$basic_streambuf@DU?$char_traits@D@std@@@std@@IEAAPEADXZ"
+        | "?fill@?$basic_ios@DU?$char_traits@D@std@@@std@@QEBADXZ"
+        | "?flags@ios_base@std@@QEBAHXZ"
+        | "?good@ios_base@std@@QEBA_NXZ"
+        | "?rdbuf@?$basic_ios@DU?$char_traits@D@std@@@std@@QEBAPEAV?$basic_streambuf@DU?$char_traits@D@std@@@2@XZ"
+        | "?tie@?$basic_ios@DU?$char_traits@D@std@@@std@@QEBAPEAV?$basic_ostream@DU?$char_traits@D@std@@@2@XZ"
+        | "?width@ios_base@std@@QEAA_J_J@Z"
+        | "?width@ios_base@std@@QEBA_JXZ"
         => msvcp_noop as *const () as usize,
 
         "?read@?$basic_istream@DU?$char_traits@D@std@@@std@@QEAAAEAV12@PEAD_J@Z" => {
@@ -1185,7 +1203,8 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
                 ) -> *mut u8 as *const () as usize
         }
         "??6?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV01@H@Z"
-        | "??6?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV01@I@Z" => {
+        | "??6?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV01@I@Z"
+        | "??6?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV01@J@Z" => {
             msvcp_op_lshift_passthrough
                 as unsafe extern "win64" fn(*mut u8, usize, usize, usize) -> *mut u8
                 as *const () as usize

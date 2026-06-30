@@ -645,6 +645,13 @@ pub unsafe extern "win64" fn sh_reg_get_us_value_w(
     0x80070002 // ERROR_FILE_NOT_FOUND
 }
 
+// ── Phase A stub ──────────────────────────────────────────────────────────────
+
+/// StrDupA — stub, returns NULL (no ANSI strdup implementation).
+pub unsafe extern "win64" fn str_dup_a(_psz_src: *const u8) -> *mut u8 {
+    std::ptr::null_mut()
+}
+
 // ── Resolver ─────────────────────────────────────────────────────────────────
 
 /// Resolve a shlwapi.dll import to a function pointer.
@@ -674,6 +681,7 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "StrCpyW" => str_cpy_w as *const () as usize,
         "SHAutoComplete" => sh_auto_complete as *const () as usize,
         "SHRegGetUSValueW" => sh_reg_get_us_value_w as *const () as usize,
+        "StrDupA" => str_dup_a as *const () as usize,
         _ => return None,
     })
 }

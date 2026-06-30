@@ -11265,6 +11265,42 @@ pub extern "win64" fn animate_window(_hwnd: usize, _dw_time: u32, _dw_flags: u32
     1
 }
 
+// ── SPSS Phase A stubs ────────────────────────────────────────────────────
+
+/// GetNextDlgTabItem — return the next tab-stop dialog control.
+/// Phase A stub — returns NULL.
+pub unsafe extern "win64" fn get_next_dlg_tab_item(
+    _hwnd_dlg: usize,
+    _hwnd_current: usize,
+    _b_previous: i32,
+) -> usize {
+    0
+}
+
+/// GetThreadDesktop — return the desktop handle for a thread.
+/// Phase A stub — returns NULL.
+pub unsafe extern "win64" fn get_thread_desk(_dw_thread_id: u32) -> usize {
+    0
+}
+
+/// GetTopWindow — examine the top-level child of a window.
+/// Phase A stub — returns NULL.
+pub unsafe extern "win64" fn get_top_window(_hwnd: usize) -> usize {
+    0
+}
+
+/// GetUserObjectInformationW — query information about a window station
+/// or desktop object. Phase A stub — returns FALSE.
+pub unsafe extern "win64" fn get_user_object_information_w(
+    _h_obj: usize,
+    _n_index: i32,
+    _pv_info: *mut u8,
+    _n_len: u32,
+    _lpn_len_needed: *mut u32,
+) -> i32 {
+    0 // FALSE
+}
+
 /// Resolve a UIAutomationCore.dll import to a stub address.
 ///
 /// Called by weave-cli's resolve chain. Uses eq_ignore_ascii_case because
