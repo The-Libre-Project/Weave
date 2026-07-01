@@ -1077,7 +1077,7 @@ unsafe fn variant_convert_inplace(pvar: *mut u8, target_vt: u16) -> i32 {
             let is_true = s == "true"
                 || s == "True"
                 || s == "-1"
-                || s.parse::<i32>().ok().map_or(false, |n| n != 0);
+                || s.parse::<i32>().ok().is_some_and(|n| n != 0);
             unsafe { variant_write_i16(pvar, if is_true { -1 } else { 0 }) };
             unsafe { *(pvar as *mut u16) = VT_BOOL };
         }
@@ -1121,7 +1121,7 @@ pub unsafe extern "win64" fn variant_change_type(
         return DISP_E_TYPEMISMATCH;
     }
     // If dest == src (same pointer), convert in place.
-    if pvarg_dest as *const u8 == pvarg_src {
+    if std::ptr::eq(pvarg_dest, pvarg_src) {
         let src_vt = unsafe { *(pvarg_src as *const u16) };
         if src_vt == vt {
             return 0; // S_OK
