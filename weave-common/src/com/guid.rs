@@ -36,8 +36,14 @@ impl fmt::Debug for GUID {
             self.data1,
             self.data2,
             self.data3,
-            self.data4[0], self.data4[1],
-            self.data4[2], self.data4[3], self.data4[4], self.data4[5], self.data4[6], self.data4[7],
+            self.data4[0],
+            self.data4[1],
+            self.data4[2],
+            self.data4[3],
+            self.data4[4],
+            self.data4[5],
+            self.data4[6],
+            self.data4[7],
         )
     }
 }
@@ -95,9 +101,8 @@ mod tests {
     #[test]
     fn guid_from_bytes_matches_expected() {
         let bytes: [u8; 16] = [
-            0x01, 0x14, 0x02, 0x00,
-            0x00, 0x00, 0x00, 0x00,
-            0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46,
+            0x01, 0x14, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0xC0, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x46,
         ];
         let g = GUID::from_bytes(&bytes);
         assert_eq!(g.data1, 0x00021401);

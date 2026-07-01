@@ -212,10 +212,25 @@ pub struct IDispatchVtbl {
         unsafe extern "win64" fn(*mut IDispatchImpl, *const u8, *mut *mut ()) -> u32,
     pub add_ref: unsafe extern "win64" fn(*mut IDispatchImpl) -> u32,
     pub release: unsafe extern "win64" fn(*mut IDispatchImpl) -> u32,
-    pub get_ids_of_names:
-        unsafe extern "win64" fn(*mut IDispatchImpl, *const u8, *mut *mut u16, u32, u32, *mut i32) -> u32,
-    pub invoke:
-        unsafe extern "win64" fn(*mut IDispatchImpl, i32, *const u8, u32, u16, *const u8, *mut u8, *mut u8, *mut u32) -> u32,
+    pub get_ids_of_names: unsafe extern "win64" fn(
+        *mut IDispatchImpl,
+        *const u8,
+        *mut *mut u16,
+        u32,
+        u32,
+        *mut i32,
+    ) -> u32,
+    pub invoke: unsafe extern "win64" fn(
+        *mut IDispatchImpl,
+        i32,
+        *const u8,
+        u32,
+        u16,
+        *const u8,
+        *mut u8,
+        *mut u8,
+        *mut u32,
+    ) -> u32,
 }
 
 /// IDispatchImpl — a basic dispatch object.
@@ -485,7 +500,10 @@ pub unsafe extern "win64" fn safe_array_access_data(psa: *mut u8, ppv_data: *mut
     unsafe {
         // Increment lock count.
         let locks = std::ptr::read(psa.add(SA_OFFSET_C_LOCKS) as *const u32);
-        std::ptr::write(psa.add(SA_OFFSET_C_LOCKS) as *mut u32, locks.wrapping_add(1));
+        std::ptr::write(
+            psa.add(SA_OFFSET_C_LOCKS) as *mut u32,
+            locks.wrapping_add(1),
+        );
         // Return pv_data.
         *ppv_data = std::ptr::read(psa.add(SA_OFFSET_PV_DATA) as *const *mut u8);
     }
@@ -505,7 +523,10 @@ pub unsafe extern "win64" fn safe_array_unaccess_data(psa: *mut u8) -> i32 {
     unsafe {
         let locks = std::ptr::read(psa.add(SA_OFFSET_C_LOCKS) as *const u32);
         if locks > 0 {
-            std::ptr::write(psa.add(SA_OFFSET_C_LOCKS) as *mut u32, locks.wrapping_sub(1));
+            std::ptr::write(
+                psa.add(SA_OFFSET_C_LOCKS) as *mut u32,
+                locks.wrapping_sub(1),
+            );
         }
     }
     0 // S_OK
@@ -862,8 +883,6 @@ pub unsafe extern "win64" fn variant_copy_ind(pdest: *mut u8, psrc: *const u8) -
     unsafe { variant_copy(pdest, psrc) }
 }
 
-
-
 /// Parse a BSTR string into an i32. Returns None on failure.
 #[allow(dead_code)]
 unsafe fn bstr_to_i32(bstr: *const u16) -> Option<i32> {
@@ -1055,7 +1074,9 @@ unsafe fn variant_convert_inplace(pvar: *mut u8, target_vt: u16) -> i32 {
         }
         (VT_BSTR, VT_BOOL) => {
             let s = saved_bstr.as_deref().unwrap_or("");
-            let is_true = s == "true" || s == "True" || s == "-1"
+            let is_true = s == "true"
+                || s == "True"
+                || s == "-1"
                 || s.parse::<i32>().ok().map_or(false, |n| n != 0);
             unsafe { variant_write_i16(pvar, if is_true { -1 } else { 0 }) };
             unsafe { *(pvar as *mut u16) = VT_BOOL };
@@ -1320,21 +1341,22 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "SafeArrayCreate" | "#15" => {
             Some(safe_array_create as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize)
         }
-        "SafeArrayCreateVector" => {
-            Some(safe_array_create_vector as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize)
-        }
-        "SafeArrayAccessData" => {
-            Some(safe_array_access_data as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
-        }
+        "SafeArrayCreateVector" => Some(
+            safe_array_create_vector as unsafe extern "win64" fn(_, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "SafeArrayAccessData" => Some(
+            safe_array_access_data as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
+        ),
         "SafeArrayUnaccessData" => {
             Some(safe_array_unaccess_data as unsafe extern "win64" fn(_) -> _ as *const () as usize)
         }
         "SysReAllocString" | "#3" => {
             Some(sys_re_alloc_string as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
         }
-        "SysReAllocStringLen" | "#5" => {
-            Some(sys_re_alloc_string_len as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize)
-        }
+        "SysReAllocStringLen" | "#5" => Some(
+            sys_re_alloc_string_len as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
+        ),
         "VariantCopyInd" => {
             Some(variant_copy_ind as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
         }
@@ -1378,12 +1400,12 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "CreateErrorInfo" | "#162" => {
             Some(create_error_info as unsafe extern "win64" fn(_) -> _ as *const () as usize)
         }
-        "CreateDispTypeInfo" => {
-            Some(create_disp_type_info as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize)
-        }
-        "CreateStdDispatch" => {
-            Some(create_std_dispatch as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize)
-        }
+        "CreateDispTypeInfo" => Some(
+            create_disp_type_info as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
+        ),
+        "CreateStdDispatch" => Some(
+            create_std_dispatch as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
+        ),
         "#26" => Some(oleaut32_ord26 as extern "win64" fn() -> _ as *const () as usize),
         "#411" => Some(oleaut32_ord411 as extern "win64" fn() -> _ as *const () as usize),
         "#419" => Some(oleaut32_ord419 as extern "win64" fn() -> _ as *const () as usize),
@@ -1840,7 +1862,17 @@ mod tests {
         let ptr = Box::into_raw(obj);
         unsafe {
             let vtbl = &*(*ptr).vtable;
-            let hr = (vtbl.invoke)(ptr, 0, std::ptr::null(), 0, 0, std::ptr::null(), std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut());
+            let hr = (vtbl.invoke)(
+                ptr,
+                0,
+                std::ptr::null(),
+                0,
+                0,
+                std::ptr::null(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            );
             assert_eq!(hr, 0x80020003u32); // DISP_E_MEMBERNOTFOUND
             (vtbl.release)(ptr);
         }

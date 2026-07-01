@@ -312,30 +312,111 @@ mod tests {
         // A unit struct implementing WindowBackend for test purposes.
         struct TestBackend;
         impl WindowBackend for TestBackend {
-            fn is_available(&self) -> bool { false }
-            fn screen_size(&self) -> (u16, u16) { (0, 0) }
-            fn system_dpi(&self) -> u32 { 96 }
-            fn enumerate_monitors(&self) -> Vec<MonitorInfo> { vec![] }
-            fn create_window(&self, _: &str, _: i32, _: i32, _: u32, _: u32, _: bool, _: Option<WindowHandle>) -> BackendResult<WindowHandle> { Err(BackendError::NotAvailable) }
+            fn is_available(&self) -> bool {
+                false
+            }
+            fn screen_size(&self) -> (u16, u16) {
+                (0, 0)
+            }
+            fn system_dpi(&self) -> u32 {
+                96
+            }
+            fn enumerate_monitors(&self) -> Vec<MonitorInfo> {
+                vec![]
+            }
+            fn create_window(
+                &self,
+                _: &str,
+                _: i32,
+                _: i32,
+                _: u32,
+                _: u32,
+                _: bool,
+                _: Option<WindowHandle>,
+            ) -> BackendResult<WindowHandle> {
+                Err(BackendError::NotAvailable)
+            }
             fn destroy_window(&self, _: WindowHandle) {}
             fn show_window(&self, _: WindowHandle, _: bool) {}
             fn configure_window(&self, _: WindowHandle, _: i32, _: i32, _: u32, _: u32) {}
             fn set_title(&self, _: WindowHandle, _: &str) {}
-            fn poll_event(&self) -> bool { false }
-            fn wait_event(&self) -> bool { false }
-            fn create_pixmap(&self, _: u16, _: u16) -> BackendResult<PixmapHandle> { Err(BackendError::PixmapError("no backend".into())) }
+            fn poll_event(&self) -> bool {
+                false
+            }
+            fn wait_event(&self) -> bool {
+                false
+            }
+            fn create_pixmap(&self, _: u16, _: u16) -> BackendResult<PixmapHandle> {
+                Err(BackendError::PixmapError("no backend".into()))
+            }
             fn free_pixmap(&self, _: PixmapHandle) {}
             fn draw_line(&self, _: Drawable, _: i16, _: i16, _: i16, _: i16, _: u32) {}
-            fn copy_area(&self, _: Drawable, _: Drawable, _: i16, _: i16, _: i16, _: i16, _: u16, _: u16) {}
-            fn copy_area_with_rop(&self, _: Drawable, _: Drawable, _: i16, _: i16, _: i16, _: i16, _: u16, _: u16, _: u32) {}
-            fn fill_rect_with_rop(&self, _: Drawable, _: i16, _: i16, _: u16, _: u16, _: u32, _: u32) {}
+            fn copy_area(
+                &self,
+                _: Drawable,
+                _: Drawable,
+                _: i16,
+                _: i16,
+                _: i16,
+                _: i16,
+                _: u16,
+                _: u16,
+            ) {
+            }
+            fn copy_area_with_rop(
+                &self,
+                _: Drawable,
+                _: Drawable,
+                _: i16,
+                _: i16,
+                _: i16,
+                _: i16,
+                _: u16,
+                _: u16,
+                _: u32,
+            ) {
+            }
+            fn fill_rect_with_rop(
+                &self,
+                _: Drawable,
+                _: i16,
+                _: i16,
+                _: u16,
+                _: u16,
+                _: u32,
+                _: u32,
+            ) {
+            }
             fn draw_filled_rect(&self, _: Drawable, _: i16, _: i16, _: u16, _: u16, _: u32) {}
             fn draw_rect_outline(&self, _: Drawable, _: i16, _: i16, _: u16, _: u16, _: u32) {}
             fn draw_text(&self, _: Drawable, _: i16, _: i16, _: &[u8], _: u32, _: u32) {}
-            fn draw_text_utf16(&self, _: Drawable, _: i16, _: i16, _: &[u16], _: f32, _: u32, _: u32) {}
+            fn draw_text_utf16(
+                &self,
+                _: Drawable,
+                _: i16,
+                _: i16,
+                _: &[u16],
+                _: f32,
+                _: u32,
+                _: u32,
+            ) {
+            }
             unsafe fn put_dib_to_pixmap(&self, _: PixmapHandle, _: u32, _: u32, _: usize, _: u16) {}
-            fn put_bits_to_pixmap_at(&self, _: Drawable, _: i16, _: i16, _: u16, _: u16, _: usize, _: &[u8], _: u16) {}
-            fn colorref_to_pixel(&self, c: u32) -> u32 { c }
+            fn put_bits_to_pixmap_at(
+                &self,
+                _: Drawable,
+                _: i16,
+                _: i16,
+                _: u16,
+                _: u16,
+                _: usize,
+                _: &[u8],
+                _: u16,
+            ) {
+            }
+            fn colorref_to_pixel(&self, c: u32) -> u32 {
+                c
+            }
         }
         _assert_object_safe(&TestBackend);
     }

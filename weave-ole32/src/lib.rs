@@ -26,8 +26,8 @@
 //! Marshalling, proxy/stub infrastructure, apartment threading, ROT,
 //! moniker binding, structured storage, etc. These are Phase 4+ concerns.
 
-use std::collections::HashMap;
 use std::cell::Cell;
+use std::collections::HashMap;
 use std::sync::atomic::AtomicU32;
 use std::sync::{Mutex, OnceLock};
 
@@ -275,8 +275,9 @@ unsafe fn resolve_from_factory_table(
     for entry in table.iter() {
         if entry.clsid == *clsid {
             let mut obj: *mut () = std::ptr::null_mut();
-            let hr =
-                unsafe { factory_create_instance(entry.factory_ptr, p_unk_outer as *mut (), riid, &mut obj) };
+            let hr = unsafe {
+                factory_create_instance(entry.factory_ptr, p_unk_outer as *mut (), riid, &mut obj)
+            };
             if hr == 0 {
                 unsafe { *ppv = obj as usize };
             }
@@ -299,7 +300,17 @@ fn find_clsid_dll(clsid: &[u8; 16]) -> Option<String> {
     let d3 = u16::from_le_bytes([clsid[6], clsid[7]]);
     let clsid_str = format!(
         "{{{:08X}-{:04X}-{:04X}-{:02X}{:02X}-{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}}}",
-        d1, d2, d3, clsid[8], clsid[9], clsid[10], clsid[11], clsid[12], clsid[13], clsid[14], clsid[15],
+        d1,
+        d2,
+        d3,
+        clsid[8],
+        clsid[9],
+        clsid[10],
+        clsid[11],
+        clsid[12],
+        clsid[13],
+        clsid[14],
+        clsid[15],
     );
 
     let subkey = format!(r"CLSID\{clsid_str}\InprocServer32");
@@ -344,20 +355,22 @@ unsafe fn resolve_from_registry_dll(
 
     // IID_IClassFactory wire bytes (little-endian): {00000001-0000-0000-C000-000000000046}
     let iid_class_factory: [u8; 16] = [
-        0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xC0, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x46,
+        0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x46,
     ];
 
     let dll_get_class_object: unsafe extern "win64" fn(*const u8, *const u8, *mut *mut ()) -> u32 =
         unsafe { std::mem::transmute(func_ptr) };
 
     let mut factory: *mut () = std::ptr::null_mut();
-    let hr = unsafe { dll_get_class_object(clsid.as_ptr(), iid_class_factory.as_ptr(), &mut factory) };
+    let hr =
+        unsafe { dll_get_class_object(clsid.as_ptr(), iid_class_factory.as_ptr(), &mut factory) };
 
     if hr == 0 && !factory.is_null() {
         // Got an IClassFactory — call CreateInstance on it
         let mut obj: *mut () = std::ptr::null_mut();
-        let hr2 = unsafe { factory_create_instance(factory, p_unk_outer as *mut (), riid, &mut obj) };
+        let hr2 =
+            unsafe { factory_create_instance(factory, p_unk_outer as *mut (), riid, &mut obj) };
         unsafe { com_release(factory) };
         if hr2 == 0 {
             unsafe { *ppv = obj as usize };
@@ -589,7 +602,10 @@ pub unsafe extern "win64" fn co_create_instance(
 
     // 1. Check in-memory registered factories first.
     if let Some(hr) = unsafe { resolve_from_factory_table(&clsid, p_unk_outer, riid, ppv) } {
-        eprintln!("weave/ole32: CoCreateInstance: CLSID {:02x?} → registered factory (hr={hr:#010x})", clsid);
+        eprintln!(
+            "weave/ole32: CoCreateInstance: CLSID {:02x?} → registered factory (hr={hr:#010x})",
+            clsid
+        );
         if hr == S_OK {
             log_cross_apartment_diagnostic();
         }
@@ -607,9 +623,7 @@ pub unsafe extern "win64" fn co_create_instance(
     if clsid == CLSID_SUMATRA_DDE_SERVER
         && std::env::var("WEAVE_TEST_SUMATRA_CLSID").as_deref() == Ok("1")
     {
-        eprintln!(
-            "weave/ole32: CoCreateInstance: CLSID_Sumatra_DDE → TEST HOOK: returning S_OK"
-        );
+        eprintln!("weave/ole32: CoCreateInstance: CLSID_Sumatra_DDE → TEST HOOK: returning S_OK");
         if !ppv.is_null() {
             unsafe { *ppv = get_dde_sentinel_ptr() };
         }
@@ -619,7 +633,10 @@ pub unsafe extern "win64" fn co_create_instance(
     // 4. Try registry-based DLL lookup for INPROC_SERVER context.
     if dw_cls_context & CLSCTX_INPROC_SERVER != 0 {
         if let Some(hr) = unsafe { resolve_from_registry_dll(&clsid, p_unk_outer, riid, ppv) } {
-            eprintln!("weave/ole32: CoCreateInstance: CLSID {:02x?} → registry DLL (hr={hr:#010x})", clsid);
+            eprintln!(
+                "weave/ole32: CoCreateInstance: CLSID {:02x?} → registry DLL (hr={hr:#010x})",
+                clsid
+            );
             if hr == S_OK {
                 log_cross_apartment_diagnostic();
             }
@@ -809,7 +826,9 @@ fn generate_uuid_v4() -> [u8; 16] {
     let mut state = seed;
     let mut buf = [0u8; 16];
     for b in buf.iter_mut() {
-        state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         *b = (state >> 32) as u8;
     }
     buf[6] = (buf[6] & 0x0F) | 0x40;
@@ -1482,9 +1501,9 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "CoInitializeEx" => Some(co_initialize_ex as *const () as usize),
         "CoInitialize" => Some(co_initialize as *const () as usize),
         "CoUninitialize" => Some(co_uninitialize as *const () as usize),
-        "CoGetApartmentType" => Some(
-            co_get_apartment_type as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
-        ),
+        "CoGetApartmentType" => {
+            Some(co_get_apartment_type as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
         "CoGetCurrentProcess" => Some(co_get_current_process as *const () as usize),
         // Object creation
         "CoCreateInstance" => Some(
@@ -1501,12 +1520,12 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         ),
         // Class factory registration
         "CoRegisterClassObject" => Some(
-            co_register_class_object as unsafe extern "win64" fn(_, _, _, _, _) -> _
-                as *const () as usize,
+            co_register_class_object as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const ()
+                as usize,
         ),
-        "CoRevokeClassObject" => Some(
-            co_revoke_class_object as unsafe extern "win64" fn(_) -> _ as *const () as usize,
-        ),
+        "CoRevokeClassObject" => {
+            Some(co_revoke_class_object as unsafe extern "win64" fn(_) -> _ as *const () as usize)
+        }
         // Memory
         "CoTaskMemAlloc" => Some(co_task_mem_alloc as *const () as usize),
         "CoTaskMemFree" => Some(co_task_mem_free as *const () as usize),
@@ -1537,21 +1556,21 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "CoSetProxyBlanket" => Some(co_set_proxy_blanket as *const () as usize),
         "CoInitializeSecurity" => Some(co_initialize_security as *const () as usize),
         // Proxy/stub CLSID registry
-        "CoRegisterPSClsid" => Some(
-            co_register_ps_clsid as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
-        ),
-        "CoGetPSClsid" => Some(
-            co_get_ps_clsid as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
-        ),
+        "CoRegisterPSClsid" => {
+            Some(co_register_ps_clsid as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "CoGetPSClsid" => {
+            Some(co_get_ps_clsid as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
         // Marshalling (stubs)
         "CoMarshalInterface" => Some(co_marshal_interface as *const () as usize),
         "CoUnmarshalInterface" => Some(co_unmarshal_interface as *const () as usize),
-        "CoMarshalHresult" => Some(
-            co_marshal_hresult as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
-        ),
-        "CoUnmarshalHresult" => Some(
-            co_unmarshal_hresult as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
-        ),
+        "CoMarshalHresult" => {
+            Some(co_marshal_hresult as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "CoUnmarshalHresult" => {
+            Some(co_unmarshal_hresult as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
         "CoGetStandardMarshal" => Some(
             co_get_standard_marshal as unsafe extern "win64" fn(_, _, _, _, _, _) -> _ as *const ()
                 as usize,
@@ -1829,7 +1848,10 @@ mod tests {
 
     #[test]
     fn co_get_apartment_type_null_returns_invalidarg() {
-        assert_eq!(co_get_apartment_type(std::ptr::null_mut(), std::ptr::null_mut()), E_INVALIDARG);
+        assert_eq!(
+            co_get_apartment_type(std::ptr::null_mut(), std::ptr::null_mut()),
+            E_INVALIDARG
+        );
     }
 
     #[test]
@@ -1935,8 +1957,7 @@ mod tests {
         riid: *const u8,
         ppv: *mut *mut (),
     ) -> u32 {
-        const IID_IUNKNOWN_BYTES: [u8; 16] =
-            [0, 0, 0, 0, 0, 0, 0, 0, 0xC0, 0, 0, 0, 0, 0, 0, 0x46];
+        const IID_IUNKNOWN_BYTES: [u8; 16] = [0, 0, 0, 0, 0, 0, 0, 0, 0xC0, 0, 0, 0, 0, 0, 0, 0x46];
         if ppv.is_null() {
             return 0x8007_0057;
         }
@@ -1987,8 +2008,7 @@ mod tests {
 
     #[repr(C)]
     struct TestFactoryVtbl {
-        query_interface:
-            unsafe extern "win64" fn(*mut TestFactory, *const u8, *mut *mut ()) -> u32,
+        query_interface: unsafe extern "win64" fn(*mut TestFactory, *const u8, *mut *mut ()) -> u32,
         add_ref: unsafe extern "win64" fn(*mut TestFactory) -> u32,
         release: unsafe extern "win64" fn(*mut TestFactory) -> u32,
         create_instance:
@@ -2001,8 +2021,7 @@ mod tests {
         riid: *const u8,
         ppv: *mut *mut (),
     ) -> u32 {
-        const IID_IUNKNOWN_BYTES: [u8; 16] =
-            [0, 0, 0, 0, 0, 0, 0, 0, 0xC0, 0, 0, 0, 0, 0, 0, 0x46];
+        const IID_IUNKNOWN_BYTES: [u8; 16] = [0, 0, 0, 0, 0, 0, 0, 0, 0xC0, 0, 0, 0, 0, 0, 0, 0x46];
         const IID_ICLASSFACTORY_BYTES: [u8; 16] =
             [1, 0, 0, 0, 0, 0, 0, 0, 0xC0, 0, 0, 0, 0, 0, 0, 0x46];
         if ppv.is_null() {
@@ -2108,8 +2127,7 @@ mod tests {
         0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC,
         0xCC,
     ];
-    const IID_IUNKNOWN_BYTES: [u8; 16] =
-        [0, 0, 0, 0, 0, 0, 0, 0, 0xC0, 0, 0, 0, 0, 0, 0, 0x46];
+    const IID_IUNKNOWN_BYTES: [u8; 16] = [0, 0, 0, 0, 0, 0, 0, 0, 0xC0, 0, 0, 0, 0, 0, 0, 0x46];
 
     #[test]
     fn co_register_and_create() {
@@ -2247,8 +2265,8 @@ mod tests {
         // {6B29FC40-CA47-1067-B31D-00DD010662DA}
         let guid_bytes: [u8; 16] = [
             0x40, 0xFC, 0x29, 0x6B, // Data1 = 0x6B29FC40 (LE)
-            0x47, 0xCA,             // Data2 = 0xCA47 (LE)
-            0x67, 0x10,             // Data3 = 0x1067 (LE)
+            0x47, 0xCA, // Data2 = 0xCA47 (LE)
+            0x67, 0x10, // Data3 = 0x1067 (LE)
             0xB3, 0x1D, 0x00, 0xDD, 0x01, 0x06, 0x62, 0xDA, // Data4
         ];
         let mut out_str: *mut u16 = std::ptr::null_mut();
@@ -2269,8 +2287,8 @@ mod tests {
     #[test]
     fn string_from_clsid_roundtrip() {
         let guid_bytes: [u8; 16] = [
-            0x60, 0xBE, 0x56, 0x9E, 0x0F, 0xC5, 0xCF, 0x11,
-            0x9A, 0x2C, 0x00, 0xA0, 0xC9, 0x0A, 0x90, 0xCE,
+            0x60, 0xBE, 0x56, 0x9E, 0x0F, 0xC5, 0xCF, 0x11, 0x9A, 0x2C, 0x00, 0xA0, 0xC9, 0x0A,
+            0x90, 0xCE,
         ];
         let mut out_str: *mut u16 = std::ptr::null_mut();
         let hr = unsafe { string_from_clsid(guid_bytes.as_ptr(), &mut out_str) };
@@ -2403,12 +2421,12 @@ mod tests {
     // ── A3f: Proxy/stub marshaling scaffolding tests ─────────────────
 
     const PS_CLSID_A: [u8; 16] = [
-        0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11,
-        0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11,
+        0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11,
+        0x11,
     ];
     const PS_IID_A: [u8; 16] = [
-        0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA,
-        0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA,
+        0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA,
+        0xAA,
     ];
 
     #[test]
@@ -2425,8 +2443,8 @@ mod tests {
     #[test]
     fn co_get_ps_clsid_unregistered_returns_iidnotreg() {
         let iid: [u8; 16] = [
-            0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-            0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+            0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+            0xFF, 0xFF,
         ];
         let mut clsid_out = [0u8; 16];
         let hr = unsafe { co_get_ps_clsid(iid.as_ptr(), clsid_out.as_mut_ptr()) };
@@ -2473,8 +2491,8 @@ mod tests {
 
         // Register IID_A → different CLSID
         let clsid_b: [u8; 16] = [
-            0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22,
-            0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22,
+            0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22,
+            0x22, 0x22,
         ];
         let hr = unsafe { co_register_ps_clsid(clsid_b.as_ptr(), PS_IID_A.as_ptr()) };
         assert_eq!(hr, S_OK);

@@ -288,9 +288,7 @@ mod tests {
     fn stub_dllmain_process_attach_sets_flag() {
         TEST_FLAG.store(false, std::sync::atomic::Ordering::SeqCst);
 
-        let _ = crate::dll_registry::register_for_test(
-            "test_dllmain_attach.dll".to_string(),
-        );
+        let _ = crate::dll_registry::register_for_test("test_dllmain_attach.dll".to_string());
         crate::dll_registry::register_imports("test_dllmain_attach.dll", &[]);
 
         register_stub("test_dllmain_attach.dll", test_dll_main);
@@ -307,10 +305,7 @@ mod tests {
         register_all_default_stubs();
         if let Some(reg) = lock_stubs() {
             for dll in ALL_RUST_DLL_NAMES {
-                assert!(
-                    reg.contains_key(*dll),
-                    "DllMain not registered for {dll}"
-                );
+                assert!(reg.contains_key(*dll), "DllMain not registered for {dll}");
             }
         } else {
             panic!("could not lock stub registry");
@@ -333,8 +328,12 @@ mod tests {
     #[cfg(not(target_os = "linux"))]
     extern "C" fn th_single(_hinst: usize, reason: u32, _reserved: usize) -> i32 {
         match reason {
-            DLL_THREAD_ATTACH => { S_ATT.fetch_add(1, Ordering::SeqCst); }
-            DLL_THREAD_DETACH => { S_DET.fetch_add(1, Ordering::SeqCst); }
+            DLL_THREAD_ATTACH => {
+                S_ATT.fetch_add(1, Ordering::SeqCst);
+            }
+            DLL_THREAD_DETACH => {
+                S_DET.fetch_add(1, Ordering::SeqCst);
+            }
             _ => {}
         }
         1
@@ -343,8 +342,12 @@ mod tests {
     #[cfg(target_os = "linux")]
     extern "win64" fn th_single(_hinst: usize, reason: u32, _reserved: usize) -> i32 {
         match reason {
-            DLL_THREAD_ATTACH => { S_ATT.fetch_add(1, Ordering::SeqCst); }
-            DLL_THREAD_DETACH => { S_DET.fetch_add(1, Ordering::SeqCst); }
+            DLL_THREAD_ATTACH => {
+                S_ATT.fetch_add(1, Ordering::SeqCst);
+            }
+            DLL_THREAD_DETACH => {
+                S_DET.fetch_add(1, Ordering::SeqCst);
+            }
             _ => {}
         }
         1
@@ -384,8 +387,12 @@ mod tests {
     #[cfg(not(target_os = "linux"))]
     extern "C" fn th_multi_a(_hinst: usize, reason: u32, _reserved: usize) -> i32 {
         match reason {
-            DLL_THREAD_ATTACH => { MA_ATT.fetch_add(1, Ordering::SeqCst); }
-            DLL_THREAD_DETACH => { MA_DET.fetch_add(1, Ordering::SeqCst); }
+            DLL_THREAD_ATTACH => {
+                MA_ATT.fetch_add(1, Ordering::SeqCst);
+            }
+            DLL_THREAD_DETACH => {
+                MA_DET.fetch_add(1, Ordering::SeqCst);
+            }
             _ => {}
         }
         1
@@ -394,8 +401,12 @@ mod tests {
     #[cfg(target_os = "linux")]
     extern "win64" fn th_multi_a(_hinst: usize, reason: u32, _reserved: usize) -> i32 {
         match reason {
-            DLL_THREAD_ATTACH => { MA_ATT.fetch_add(1, Ordering::SeqCst); }
-            DLL_THREAD_DETACH => { MA_DET.fetch_add(1, Ordering::SeqCst); }
+            DLL_THREAD_ATTACH => {
+                MA_ATT.fetch_add(1, Ordering::SeqCst);
+            }
+            DLL_THREAD_DETACH => {
+                MA_DET.fetch_add(1, Ordering::SeqCst);
+            }
             _ => {}
         }
         1
@@ -404,8 +415,12 @@ mod tests {
     #[cfg(not(target_os = "linux"))]
     extern "C" fn th_multi_b(_hinst: usize, reason: u32, _reserved: usize) -> i32 {
         match reason {
-            DLL_THREAD_ATTACH => { MB_ATT.fetch_add(1, Ordering::SeqCst); }
-            DLL_THREAD_DETACH => { MB_DET.fetch_add(1, Ordering::SeqCst); }
+            DLL_THREAD_ATTACH => {
+                MB_ATT.fetch_add(1, Ordering::SeqCst);
+            }
+            DLL_THREAD_DETACH => {
+                MB_DET.fetch_add(1, Ordering::SeqCst);
+            }
             _ => {}
         }
         1
@@ -414,8 +429,12 @@ mod tests {
     #[cfg(target_os = "linux")]
     extern "win64" fn th_multi_b(_hinst: usize, reason: u32, _reserved: usize) -> i32 {
         match reason {
-            DLL_THREAD_ATTACH => { MB_ATT.fetch_add(1, Ordering::SeqCst); }
-            DLL_THREAD_DETACH => { MB_DET.fetch_add(1, Ordering::SeqCst); }
+            DLL_THREAD_ATTACH => {
+                MB_ATT.fetch_add(1, Ordering::SeqCst);
+            }
+            DLL_THREAD_DETACH => {
+                MB_DET.fetch_add(1, Ordering::SeqCst);
+            }
             _ => {}
         }
         1
@@ -442,10 +461,22 @@ mod tests {
         });
         h.join().expect("thread panicked");
 
-        assert!(MA_ATT.load(Ordering::SeqCst) > ab_a, "DLL_THREAD_ATTACH must fire for DLL A");
-        assert!(MA_DET.load(Ordering::SeqCst) > db_a, "DLL_THREAD_DETACH must fire for DLL A");
-        assert!(MB_ATT.load(Ordering::SeqCst) > ab_b, "DLL_THREAD_ATTACH must fire for DLL B");
-        assert!(MB_DET.load(Ordering::SeqCst) > db_b, "DLL_THREAD_DETACH must fire for DLL B");
+        assert!(
+            MA_ATT.load(Ordering::SeqCst) > ab_a,
+            "DLL_THREAD_ATTACH must fire for DLL A"
+        );
+        assert!(
+            MA_DET.load(Ordering::SeqCst) > db_a,
+            "DLL_THREAD_DETACH must fire for DLL A"
+        );
+        assert!(
+            MB_ATT.load(Ordering::SeqCst) > ab_b,
+            "DLL_THREAD_ATTACH must fire for DLL B"
+        );
+        assert!(
+            MB_DET.load(Ordering::SeqCst) > db_b,
+            "DLL_THREAD_DETACH must fire for DLL B"
+        );
     }
 
     #[test]
@@ -480,8 +511,12 @@ mod tests {
     #[cfg(not(target_os = "linux"))]
     extern "C" fn th_two(_hinst: usize, reason: u32, _reserved: usize) -> i32 {
         match reason {
-            DLL_THREAD_ATTACH => { TT_ATT.fetch_add(1, Ordering::SeqCst); }
-            DLL_THREAD_DETACH => { TT_DET.fetch_add(1, Ordering::SeqCst); }
+            DLL_THREAD_ATTACH => {
+                TT_ATT.fetch_add(1, Ordering::SeqCst);
+            }
+            DLL_THREAD_DETACH => {
+                TT_DET.fetch_add(1, Ordering::SeqCst);
+            }
             _ => {}
         }
         1
@@ -490,8 +525,12 @@ mod tests {
     #[cfg(target_os = "linux")]
     extern "win64" fn th_two(_hinst: usize, reason: u32, _reserved: usize) -> i32 {
         match reason {
-            DLL_THREAD_ATTACH => { TT_ATT.fetch_add(1, Ordering::SeqCst); }
-            DLL_THREAD_DETACH => { TT_DET.fetch_add(1, Ordering::SeqCst); }
+            DLL_THREAD_ATTACH => {
+                TT_ATT.fetch_add(1, Ordering::SeqCst);
+            }
+            DLL_THREAD_DETACH => {
+                TT_DET.fetch_add(1, Ordering::SeqCst);
+            }
             _ => {}
         }
         1

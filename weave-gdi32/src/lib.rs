@@ -49,6 +49,7 @@
 
 pub mod dc;
 pub mod defs;
+pub mod fontconfig;
 pub mod objects;
 
 use defs::*;
@@ -672,7 +673,15 @@ pub unsafe extern "win64" fn draw_text_w(
     let (fg, bg) = dc::with(hdc, |dc| (dc.text_color, dc.bk_color));
     let xcb = dc::with(hdc, |dc| dc.drawable());
     let (dx, dy) = dc::with(hdc, |dc| dc.lp_to_device(x, y));
-    weave_user32::backend::draw_text_utf16(xcb.0, dx, dy, units, px_size, to_pixel(fg), to_pixel(bg));
+    weave_user32::backend::draw_text_utf16(
+        xcb.0,
+        dx,
+        dy,
+        units,
+        px_size,
+        to_pixel(fg),
+        to_pixel(bg),
+    );
     text_h
 }
 
@@ -985,7 +994,10 @@ pub extern "win64" fn bit_blt(
     let src_draw = dc::with(hdc_src, |dc| dc.drawable());
     static BB: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
     if BB.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 30 {
-        eprintln!("weave/gdi32: BitBlt dst={:#x} src={:#x} ({x},{y}) {cx}x{cy}", dst_draw.0, src_draw.0);
+        eprintln!(
+            "weave/gdi32: BitBlt dst={:#x} src={:#x} ({x},{y}) {cx}x{cy}",
+            dst_draw.0, src_draw.0
+        );
     }
     if dst_draw.0 == 0 {
         // Headless/library-test path: the DC is valid but no X11 drawable is
@@ -1093,7 +1105,9 @@ pub extern "win64" fn bit_blt(
             });
             if let Some((dib_w, dib_h, bits_ptr, bpp)) = dib_info {
                 unsafe {
-                    weave_user32::backend::put_dib_to_pixmap(src_draw.0, dib_w, dib_h, bits_ptr, bpp);
+                    weave_user32::backend::put_dib_to_pixmap(
+                        src_draw.0, dib_w, dib_h, bits_ptr, bpp,
+                    );
                 }
             }
             // Fast path: SRCCOPY (GXcopy) is by far the hottest BitBlt ROP

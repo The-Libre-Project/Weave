@@ -2824,30 +2824,24 @@ pub extern "win64" fn get_system_metrics(n_index: i32) -> i32 {
     let monitors = backend::enumerate_monitors();
     match n_index {
         // ── screen / virtual screen ───────────────────────────────────────────
-        SM_CXSCREEN => {
-            monitors.first().map_or(sw as i32, |m| m.bounds.2)
-        }
-        SM_CYSCREEN => {
-            monitors.first().map_or(sh as i32, |m| m.bounds.3)
-        }
-        SM_CXFULLSCREEN => {
-            monitors.first().map_or(sw as i32, |m| m.bounds.2)
-        }
-        SM_CYFULLSCREEN => {
-            monitors.first().map_or((sh as i32).saturating_sub(40), |m| (m.bounds.3 - 40).max(0))
-        }
-        SM_XVIRTUALSCREEN => {
-            monitors.iter().map(|m| m.bounds.0).min().unwrap_or(0)
-        }
-        SM_YVIRTUALSCREEN => {
-            monitors.iter().map(|m| m.bounds.1).min().unwrap_or(0)
-        }
+        SM_CXSCREEN => monitors.first().map_or(sw as i32, |m| m.bounds.2),
+        SM_CYSCREEN => monitors.first().map_or(sh as i32, |m| m.bounds.3),
+        SM_CXFULLSCREEN => monitors.first().map_or(sw as i32, |m| m.bounds.2),
+        SM_CYFULLSCREEN => monitors
+            .first()
+            .map_or((sh as i32).saturating_sub(40), |m| (m.bounds.3 - 40).max(0)),
+        SM_XVIRTUALSCREEN => monitors.iter().map(|m| m.bounds.0).min().unwrap_or(0),
+        SM_YVIRTUALSCREEN => monitors.iter().map(|m| m.bounds.1).min().unwrap_or(0),
         SM_CXVIRTUALSCREEN => {
             if monitors.is_empty() {
                 sw as i32
             } else {
                 let min_x = monitors.iter().map(|m| m.bounds.0).min().unwrap_or(0);
-                let max_r = monitors.iter().map(|m| m.bounds.0 + m.bounds.2).max().unwrap_or(0);
+                let max_r = monitors
+                    .iter()
+                    .map(|m| m.bounds.0 + m.bounds.2)
+                    .max()
+                    .unwrap_or(0);
                 (max_r - min_x).max(0)
             }
         }
@@ -2856,7 +2850,11 @@ pub extern "win64" fn get_system_metrics(n_index: i32) -> i32 {
                 sh as i32
             } else {
                 let min_y = monitors.iter().map(|m| m.bounds.1).min().unwrap_or(0);
-                let max_b = monitors.iter().map(|m| m.bounds.1 + m.bounds.3).max().unwrap_or(0);
+                let max_b = monitors
+                    .iter()
+                    .map(|m| m.bounds.1 + m.bounds.3)
+                    .max()
+                    .unwrap_or(0);
                 (max_b - min_y).max(0)
             }
         }
@@ -3882,7 +3880,10 @@ pub extern "win64" fn monitor_from_window(_hwnd: usize, _dw_flags: u32) -> usize
     }
     // For Phase A: return primary monitor handle.
     // Future: find the monitor whose bounds intersect the window rect.
-    let primary = monitors.iter().find(|m| m.is_primary).unwrap_or(&monitors[0]);
+    let primary = monitors
+        .iter()
+        .find(|m| m.is_primary)
+        .unwrap_or(&monitors[0]);
     primary.handle as usize
 }
 
@@ -3897,7 +3898,10 @@ pub extern "win64" fn monitor_from_point(_pt_x: i32, _pt_y: i32, _dw_flags: u32)
     // MONITOR_DEFAULTTOPRIMARY (1) returns primary even if point is on a different monitor.
     // MONITOR_DEFAULTTONEAREST (2) returns the monitor nearest the point.
     // Future: find the monitor whose bounds contain the point.
-    let primary = monitors.iter().find(|m| m.is_primary).unwrap_or(&monitors[0]);
+    let primary = monitors
+        .iter()
+        .find(|m| m.is_primary)
+        .unwrap_or(&monitors[0]);
     primary.handle as usize
 }
 
@@ -3910,7 +3914,10 @@ pub unsafe extern "win64" fn monitor_from_rect(_lp_rc: *const Rect, _dw_flags: u
     if monitors.is_empty() {
         return 0;
     }
-    let primary = monitors.iter().find(|m| m.is_primary).unwrap_or(&monitors[0]);
+    let primary = monitors
+        .iter()
+        .find(|m| m.is_primary)
+        .unwrap_or(&monitors[0]);
     primary.handle as usize
 }
 
@@ -3930,7 +3937,10 @@ pub unsafe extern "win64" fn get_monitor_info_w(h_monitor: usize, lp_mi: *mut Mo
             if monitors.is_empty() {
                 return 0;
             }
-            monitors.iter().find(|m| m.is_primary).unwrap_or(&monitors[0])
+            monitors
+                .iter()
+                .find(|m| m.is_primary)
+                .unwrap_or(&monitors[0])
         }
     };
 
@@ -10506,14 +10516,8 @@ mod monitor_tests {
     #[test]
     fn get_system_metrics_virtual_screen_single_monitor() {
         let monos = primary_only_monitors();
-        assert_eq!(
-            get_system_metrics_sm_virtual(&monos, SM_XVIRTUALSCREEN),
-            0
-        );
-        assert_eq!(
-            get_system_metrics_sm_virtual(&monos, SM_YVIRTUALSCREEN),
-            0
-        );
+        assert_eq!(get_system_metrics_sm_virtual(&monos, SM_XVIRTUALSCREEN), 0);
+        assert_eq!(get_system_metrics_sm_virtual(&monos, SM_YVIRTUALSCREEN), 0);
         assert_eq!(
             get_system_metrics_sm_virtual(&monos, SM_CXVIRTUALSCREEN),
             1920
@@ -10532,10 +10536,7 @@ mod monitor_tests {
             get_system_metrics_sm_virtual(&monos, SM_XVIRTUALSCREEN),
             -800
         );
-        assert_eq!(
-            get_system_metrics_sm_virtual(&monos, SM_YVIRTUALSCREEN),
-            0
-        );
+        assert_eq!(get_system_metrics_sm_virtual(&monos, SM_YVIRTUALSCREEN), 0);
         assert_eq!(
             get_system_metrics_sm_virtual(&monos, SM_CXVIRTUALSCREEN),
             4000
@@ -10548,14 +10549,8 @@ mod monitor_tests {
 
     #[test]
     fn get_system_metrics_sm_cmonitors() {
-        assert_eq!(
-            get_system_metrics_sm_virtual(&multi_monitors(), 80),
-            3
-        );
-        assert_eq!(
-            get_system_metrics_sm_virtual(&vec![], 80),
-            0
-        );
+        assert_eq!(get_system_metrics_sm_virtual(&multi_monitors(), 80), 3);
+        assert_eq!(get_system_metrics_sm_virtual(&vec![], 80), 0);
     }
 
     fn get_system_metrics_sm_virtual(monos: &[MonitorInfo], index: i32) -> i32 {
@@ -10564,16 +10559,28 @@ mod monitor_tests {
             SM_XVIRTUALSCREEN => monos.iter().map(|m| m.bounds.0).min().unwrap_or(0),
             SM_YVIRTUALSCREEN => monos.iter().map(|m| m.bounds.1).min().unwrap_or(0),
             SM_CXVIRTUALSCREEN => {
-                if monos.is_empty() { 0 } else {
+                if monos.is_empty() {
+                    0
+                } else {
                     let min_x = monos.iter().map(|m| m.bounds.0).min().unwrap_or(0);
-                    let max_r = monos.iter().map(|m| m.bounds.0 + m.bounds.2).max().unwrap_or(0);
+                    let max_r = monos
+                        .iter()
+                        .map(|m| m.bounds.0 + m.bounds.2)
+                        .max()
+                        .unwrap_or(0);
                     (max_r - min_x).max(0)
                 }
             }
             SM_CYVIRTUALSCREEN => {
-                if monos.is_empty() { 0 } else {
+                if monos.is_empty() {
+                    0
+                } else {
                     let min_y = monos.iter().map(|m| m.bounds.1).min().unwrap_or(0);
-                    let max_b = monos.iter().map(|m| m.bounds.1 + m.bounds.3).max().unwrap_or(0);
+                    let max_b = monos
+                        .iter()
+                        .map(|m| m.bounds.1 + m.bounds.3)
+                        .max()
+                        .unwrap_or(0);
                     (max_b - min_y).max(0)
                 }
             }

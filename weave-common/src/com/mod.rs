@@ -33,6 +33,6 @@ pub mod shell_link;
 pub mod guid;
 
 #[cfg(target_arch = "x86_64")]
-pub mod iunknown;
-#[cfg(target_arch = "x86_64")]
 pub mod class_factory;
+#[cfg(target_arch = "x86_64")]
+pub mod iunknown;

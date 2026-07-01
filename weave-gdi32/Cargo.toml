@@ -9,5 +9,6 @@ description = "gdi32.dll stubs for Weave"
 weave-user32 = { path = "../weave-user32" }
 weave-common = { path = "../weave-common" }
 weave-core = { path = "../weave-core" }
+fontconfig = { version = "0.11", features = ["dlopen"] }
 
 [dev-dependencies]

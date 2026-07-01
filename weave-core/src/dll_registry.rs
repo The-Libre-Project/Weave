@@ -98,8 +98,7 @@ pub fn get_entry_point(dll: &str) -> Option<usize> {
 /// Return the loaded base address of a registered PE DLL.
 pub fn get_base(dll: &str) -> Option<usize> {
     let reg = lock_registry(registry())?;
-    reg.get(&dll.to_lowercase())
-        .map(|e| e._image.base as usize)
+    reg.get(&dll.to_lowercase()).map(|e| e._image.base as usize)
 }
 
 // ── Import dependency graph for DllMain call ordering ──────────────────────
@@ -244,11 +243,14 @@ mod dep_tests {
     #[test]
     fn single_dll_no_imports() {
         let _ = registry().lock().map(|mut r| {
-            r.insert("single_test_only.dll".to_string(), DllEntry {
-                _image: ManuallyDrop::new(unsafe { std::mem::zeroed() }),
-                exports: HashMap::new(),
-                entry_point: None,
-            });
+            r.insert(
+                "single_test_only.dll".to_string(),
+                DllEntry {
+                    _image: ManuallyDrop::new(unsafe { std::mem::zeroed() }),
+                    exports: HashMap::new(),
+                    entry_point: None,
+                },
+            );
         });
         let order = dllmain_order();
         // Tests share global state with parallel siblings, so we can only
@@ -260,16 +262,22 @@ mod dep_tests {
     fn linear_chain() {
         // chain_b.dll imports from chain_a.dll → a must come first.
         let _ = registry().lock().map(|mut r| {
-            r.insert("chain_a.dll".to_string(), DllEntry {
-                _image: ManuallyDrop::new(unsafe { std::mem::zeroed() }),
-                exports: HashMap::new(),
-                entry_point: None,
-            });
-            r.insert("chain_b.dll".to_string(), DllEntry {
-                _image: ManuallyDrop::new(unsafe { std::mem::zeroed() }),
-                exports: HashMap::new(),
-                entry_point: None,
-            });
+            r.insert(
+                "chain_a.dll".to_string(),
+                DllEntry {
+                    _image: ManuallyDrop::new(unsafe { std::mem::zeroed() }),
+                    exports: HashMap::new(),
+                    entry_point: None,
+                },
+            );
+            r.insert(
+                "chain_b.dll".to_string(),
+                DllEntry {
+                    _image: ManuallyDrop::new(unsafe { std::mem::zeroed() }),
+                    exports: HashMap::new(),
+                    entry_point: None,
+                },
+            );
         });
         register_imports("chain_b.dll", &["chain_a.dll".to_string()]);
         let order = dllmain_order();
@@ -284,24 +292,38 @@ mod dep_tests {
         // Valid orders: a, b, c, d or a, c, b, d.
         // Note: tests share global state, so other DLLs may also be present.
         let _ = registry().lock().map(|mut r| {
-            for name in &["diamond_a.dll", "diamond_b.dll", "diamond_c.dll", "diamond_d.dll"] {
-                r.insert(name.to_string(), DllEntry {
-                    _image: ManuallyDrop::new(unsafe { std::mem::zeroed() }),
-                    exports: HashMap::new(),
-                    entry_point: None,
-                });
+            for name in &[
+                "diamond_a.dll",
+                "diamond_b.dll",
+                "diamond_c.dll",
+                "diamond_d.dll",
+            ] {
+                r.insert(
+                    name.to_string(),
+                    DllEntry {
+                        _image: ManuallyDrop::new(unsafe { std::mem::zeroed() }),
+                        exports: HashMap::new(),
+                        entry_point: None,
+                    },
+                );
             }
         });
         register_imports("diamond_b.dll", &["diamond_a.dll".to_string()]);
         register_imports("diamond_c.dll", &["diamond_a.dll".to_string()]);
-        register_imports("diamond_d.dll", &["diamond_b.dll".to_string(), "diamond_c.dll".to_string()]);
+        register_imports(
+            "diamond_d.dll",
+            &["diamond_b.dll".to_string(), "diamond_c.dll".to_string()],
+        );
 
         let order = dllmain_order();
         let a_pos = order.iter().position(|d| d == "diamond_a.dll").unwrap();
         let b_pos = order.iter().position(|d| d == "diamond_b.dll").unwrap();
         let c_pos = order.iter().position(|d| d == "diamond_c.dll").unwrap();
         let d_pos = order.iter().position(|d| d == "diamond_d.dll").unwrap();
-        assert!(a_pos < b_pos && a_pos < c_pos, "diamond_a must precede diamond_b and diamond_c");
+        assert!(
+            a_pos < b_pos && a_pos < c_pos,
+            "diamond_a must precede diamond_b and diamond_c"
+        );
         assert!(b_pos < d_pos, "diamond_b must precede diamond_d");
         assert!(c_pos < d_pos, "diamond_c must precede diamond_d");
     }
@@ -310,11 +332,14 @@ mod dep_tests {
     fn unregistered_import_does_not_block() {
         // orphan_b depends on missing.dll (not registered) → orphan_b must appear.
         let _ = registry().lock().map(|mut r| {
-            r.insert("orphan_b.dll".to_string(), DllEntry {
-                _image: ManuallyDrop::new(unsafe { std::mem::zeroed() }),
-                exports: HashMap::new(),
-                entry_point: None,
-            });
+            r.insert(
+                "orphan_b.dll".to_string(),
+                DllEntry {
+                    _image: ManuallyDrop::new(unsafe { std::mem::zeroed() }),
+                    exports: HashMap::new(),
+                    entry_point: None,
+                },
+            );
         });
         register_imports("orphan_b.dll", &["missing.dll".to_string()]);
         let order = dllmain_order();

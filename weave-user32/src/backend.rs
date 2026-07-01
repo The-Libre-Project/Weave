@@ -20,9 +20,11 @@
 /// functions. Returns `true` if a display is available, `false` otherwise.
 #[cfg(target_os = "linux")]
 pub fn init() -> bool {
-    select_backend().map(|b| {
-        let _ = crate::backend_trait::BACKEND.set(b);
-    }).is_some()
+    select_backend()
+        .map(|b| {
+            let _ = crate::backend_trait::BACKEND.set(b);
+        })
+        .is_some()
 }
 
 /// Select the window backend based on the display server environment.
@@ -32,13 +34,15 @@ pub fn init() -> bool {
 /// `WaylandBackend::new()` instead.
 #[cfg(target_os = "linux")]
 fn select_backend() -> Option<Box<dyn crate::backend_trait::WindowBackend + Send + Sync>> {
-    let wayland = std::env::var("WAYLAND_DISPLAY").ok()
+    let wayland = std::env::var("WAYLAND_DISPLAY")
+        .ok()
         .filter(|v| !v.is_empty());
-    let display = std::env::var("DISPLAY").ok()
-        .filter(|v| !v.is_empty());
+    let display = std::env::var("DISPLAY").ok().filter(|v| !v.is_empty());
 
     if wayland.is_some() {
-        eprintln!("weave/user32: WAYLAND_DISPLAY detected but no Wayland backend — falling back to xcb");
+        eprintln!(
+            "weave/user32: WAYLAND_DISPLAY detected but no Wayland backend — falling back to xcb"
+        );
     }
 
     eprintln!(
@@ -48,7 +52,8 @@ fn select_backend() -> Option<Box<dyn crate::backend_trait::WindowBackend + Send
 
     // TODO: when a WaylandBackend is implemented, add a match arm:
     //   if wayland.is_some() && display.is_none() => WaylandBackend::new()
-    inner::XcbBackend::new().map(|b| Box::new(b) as Box<dyn crate::backend_trait::WindowBackend + Send + Sync>)
+    inner::XcbBackend::new()
+        .map(|b| Box::new(b) as Box<dyn crate::backend_trait::WindowBackend + Send + Sync>)
 }
 
 // ── Linux implementation ──────────────────────────────────────────────────────
@@ -58,7 +63,9 @@ mod inner {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Mutex, OnceLock};
 
-    use crate::backend_trait::{BackendError, BackendResult, Drawable, PixmapHandle, WindowBackend, WindowHandle, BACKEND};
+    use crate::backend_trait::{
+        BackendError, BackendResult, Drawable, PixmapHandle, WindowBackend, WindowHandle, BACKEND,
+    };
     use crate::defs::*;
     use crate::queue::{self, MsgEntry};
     use crate::window;
@@ -178,13 +185,14 @@ mod inner {
             visible: bool,
             _parent: Option<WindowHandle>,
         ) -> BackendResult<WindowHandle> {
-            let conn = self.conn.lock().map_err(|e| {
-                BackendError::ConnectionError(format!("mutex poisoned: {e}"))
-            })?;
+            let conn = self
+                .conn
+                .lock()
+                .map_err(|e| BackendError::ConnectionError(format!("mutex poisoned: {e}")))?;
 
-            let wid = conn.generate_id().map_err(|e| {
-                BackendError::WindowError(format!("generate_id failed: {e}"))
-            })?;
+            let wid = conn
+                .generate_id()
+                .map_err(|e| BackendError::WindowError(format!("generate_id failed: {e}")))?;
 
             let event_mask = EventMask::EXPOSURE
                 | EventMask::STRUCTURE_NOTIFY
@@ -379,10 +387,12 @@ mod inner {
         }
 
         fn create_pixmap(&self, width: u16, height: u16) -> BackendResult<PixmapHandle> {
-            let conn = self.conn.lock().map_err(|e| {
-                BackendError::PixmapError(format!("mutex poisoned: {e}"))
-            })?;
-            let pid = conn.generate_id()
+            let conn = self
+                .conn
+                .lock()
+                .map_err(|e| BackendError::PixmapError(format!("mutex poisoned: {e}")))?;
+            let pid = conn
+                .generate_id()
                 .map_err(|_| BackendError::PixmapError("generate_id failed".into()))?;
             conn.create_pixmap(self.depth, pid, self.root, width.max(1), height.max(1))
                 .map_err(|_| BackendError::PixmapError("create_pixmap failed".into()))?;
@@ -440,7 +450,9 @@ mod inner {
                 Err(_) => return,
             };
             let _ = conn.create_gc(gc_id, dst.0, &CreateGCAux::new());
-            let _ = conn.copy_area(src.0, dst.0, gc_id, src_x, src_y, dst_x, dst_y, width, height);
+            let _ = conn.copy_area(
+                src.0, dst.0, gc_id, src_x, src_y, dst_x, dst_y, width, height,
+            );
             let _ = conn.free_gc(gc_id);
             let _ = conn.sync();
         }
@@ -468,8 +480,14 @@ mod inner {
                 Ok(id) => id,
                 Err(_) => return,
             };
-            let _ = conn.create_gc(gc_id, dst.0, &CreateGCAux::new().function(GX::from(gx_func)));
-            let _ = conn.copy_area(src.0, dst.0, gc_id, src_x, src_y, dst_x, dst_y, width, height);
+            let _ = conn.create_gc(
+                gc_id,
+                dst.0,
+                &CreateGCAux::new().function(GX::from(gx_func)),
+            );
+            let _ = conn.copy_area(
+                src.0, dst.0, gc_id, src_x, src_y, dst_x, dst_y, width, height,
+            );
             let _ = conn.change_gc(gc_id, &ChangeGCAux::new().function(GX::COPY));
             let _ = conn.free_gc(gc_id);
             let _ = conn.sync();
@@ -506,7 +524,12 @@ mod inner {
             let _ = conn.poly_fill_rectangle(
                 dst.0,
                 gc_id,
-                &[Rectangle { x, y, width: w, height: h }],
+                &[Rectangle {
+                    x,
+                    y,
+                    width: w,
+                    height: h,
+                }],
             );
             let _ = conn.change_gc(gc_id, &ChangeGCAux::new().function(GX::COPY));
             let _ = conn.free_gc(gc_id);
@@ -529,7 +552,12 @@ mod inner {
             let _ = conn.poly_fill_rectangle(
                 dst.0,
                 gc_id,
-                &[Rectangle { x, y, width: w, height: h }],
+                &[Rectangle {
+                    x,
+                    y,
+                    width: w,
+                    height: h,
+                }],
             );
             let _ = conn.free_gc(gc_id);
             let _ = conn.flush();
@@ -551,13 +579,26 @@ mod inner {
             let _ = conn.poly_rectangle(
                 dst.0,
                 gc_id,
-                &[Rectangle { x, y, width: w, height: h }],
+                &[Rectangle {
+                    x,
+                    y,
+                    width: w,
+                    height: h,
+                }],
             );
             let _ = conn.free_gc(gc_id);
             let _ = conn.flush();
         }
 
-        fn draw_text(&self, dst: Drawable, x: i16, y: i16, text: &[u8], fg_pixel: u32, bg_pixel: u32) {
+        fn draw_text(
+            &self,
+            dst: Drawable,
+            x: i16,
+            y: i16,
+            text: &[u8],
+            fg_pixel: u32,
+            bg_pixel: u32,
+        ) {
             if text.is_empty() {
                 return;
             }
@@ -689,7 +730,9 @@ mod inner {
                 gc_id,
                 width as u16,
                 height as u16,
-                0, 0, 0,
+                0,
+                0,
+                0,
                 self.depth,
                 &pixels,
             );
@@ -743,8 +786,11 @@ mod inner {
                 ImageFormat::Z_PIXMAP,
                 dst.0,
                 gc_id,
-                width, height,
-                dst_x, dst_y, 0,
+                width,
+                height,
+                dst_x,
+                dst_y,
+                0,
                 self.depth,
                 &packed,
             );
@@ -765,7 +811,14 @@ mod inner {
     fn read_xft_dpi(conn: &Mutex<RustConnection>, root: Window) -> Option<u32> {
         let g = conn.lock().ok()?;
         let reply = g
-            .get_property(false, root, AtomEnum::RESOURCE_MANAGER, AtomEnum::STRING, 0, u32::MAX / 4)
+            .get_property(
+                false,
+                root,
+                AtomEnum::RESOURCE_MANAGER,
+                AtomEnum::STRING,
+                0,
+                u32::MAX / 4,
+            )
             .ok()?
             .reply()
             .ok()?;
@@ -818,29 +871,109 @@ mod inner {
 
     fn x11_keycode_to_vk(keycode: u8) -> u32 {
         match keycode {
-            9 => 0x1B,  10 => 0x31, 11 => 0x32, 12 => 0x33, 13 => 0x34,
-            14 => 0x35, 15 => 0x36, 16 => 0x37, 17 => 0x38, 18 => 0x39,
-            19 => 0x30, 20 => 0xBD, 21 => 0xBB, 22 => 0x08, 23 => 0x09,
-            24 => 0x51, 25 => 0x57, 26 => 0x45, 27 => 0x52, 28 => 0x54,
-            29 => 0x59, 30 => 0x55, 31 => 0x49, 32 => 0x4F, 33 => 0x50,
-            34 => 0xDB, 35 => 0xDD, 36 => 0x0D, 37 => 0xA2,
-            38 => 0x41, 39 => 0x53, 40 => 0x44, 41 => 0x46, 42 => 0x47,
-            43 => 0x48, 44 => 0x4A, 45 => 0x4B, 46 => 0x4C, 47 => 0xBA,
-            48 => 0xDE, 49 => 0xC0, 50 => 0xA0, 51 => 0xDC,
-            52 => 0x5A, 53 => 0x58, 54 => 0x43, 55 => 0x56, 56 => 0x42,
-            57 => 0x4E, 58 => 0x4D, 59 => 0xBC, 60 => 0xBE, 61 => 0xBF,
-            62 => 0xA1, 63 => 0x6A, 64 => 0xA4, 65 => 0x20, 66 => 0x14,
-            67 => 0x70, 68 => 0x71, 69 => 0x72, 70 => 0x73, 71 => 0x74,
-            72 => 0x75, 73 => 0x76, 74 => 0x77, 75 => 0x78, 76 => 0x79,
-            77 => 0x90, 78 => 0x91,
-            79 => 0x67, 80 => 0x68, 81 => 0x69, 82 => 0x6D,
-            83 => 0x64, 84 => 0x65, 85 => 0x66, 86 => 0x6B,
-            87 => 0x61, 88 => 0x62, 89 => 0x63, 90 => 0x60, 91 => 0x6E,
-            95 => 0x7A, 96 => 0x7B,
-            104 => 0x0D, 105 => 0xA3, 106 => 0x6F, 107 => 0x2C, 108 => 0xA5,
-            110 => 0x24, 111 => 0x26, 112 => 0x21, 113 => 0x25, 114 => 0x27,
-            115 => 0x23, 116 => 0x28, 117 => 0x22, 118 => 0x2D, 119 => 0x2E,
-            133 => 0x5B, 134 => 0x5C, 135 => 0x5D,
+            9 => 0x1B,
+            10 => 0x31,
+            11 => 0x32,
+            12 => 0x33,
+            13 => 0x34,
+            14 => 0x35,
+            15 => 0x36,
+            16 => 0x37,
+            17 => 0x38,
+            18 => 0x39,
+            19 => 0x30,
+            20 => 0xBD,
+            21 => 0xBB,
+            22 => 0x08,
+            23 => 0x09,
+            24 => 0x51,
+            25 => 0x57,
+            26 => 0x45,
+            27 => 0x52,
+            28 => 0x54,
+            29 => 0x59,
+            30 => 0x55,
+            31 => 0x49,
+            32 => 0x4F,
+            33 => 0x50,
+            34 => 0xDB,
+            35 => 0xDD,
+            36 => 0x0D,
+            37 => 0xA2,
+            38 => 0x41,
+            39 => 0x53,
+            40 => 0x44,
+            41 => 0x46,
+            42 => 0x47,
+            43 => 0x48,
+            44 => 0x4A,
+            45 => 0x4B,
+            46 => 0x4C,
+            47 => 0xBA,
+            48 => 0xDE,
+            49 => 0xC0,
+            50 => 0xA0,
+            51 => 0xDC,
+            52 => 0x5A,
+            53 => 0x58,
+            54 => 0x43,
+            55 => 0x56,
+            56 => 0x42,
+            57 => 0x4E,
+            58 => 0x4D,
+            59 => 0xBC,
+            60 => 0xBE,
+            61 => 0xBF,
+            62 => 0xA1,
+            63 => 0x6A,
+            64 => 0xA4,
+            65 => 0x20,
+            66 => 0x14,
+            67 => 0x70,
+            68 => 0x71,
+            69 => 0x72,
+            70 => 0x73,
+            71 => 0x74,
+            72 => 0x75,
+            73 => 0x76,
+            74 => 0x77,
+            75 => 0x78,
+            76 => 0x79,
+            77 => 0x90,
+            78 => 0x91,
+            79 => 0x67,
+            80 => 0x68,
+            81 => 0x69,
+            82 => 0x6D,
+            83 => 0x64,
+            84 => 0x65,
+            85 => 0x66,
+            86 => 0x6B,
+            87 => 0x61,
+            88 => 0x62,
+            89 => 0x63,
+            90 => 0x60,
+            91 => 0x6E,
+            95 => 0x7A,
+            96 => 0x7B,
+            104 => 0x0D,
+            105 => 0xA3,
+            106 => 0x6F,
+            107 => 0x2C,
+            108 => 0xA5,
+            110 => 0x24,
+            111 => 0x26,
+            112 => 0x21,
+            113 => 0x25,
+            114 => 0x27,
+            115 => 0x23,
+            116 => 0x28,
+            117 => 0x22,
+            118 => 0x2D,
+            119 => 0x2E,
+            133 => 0x5B,
+            134 => 0x5C,
+            135 => 0x5D,
             _ => 0,
         }
     }
@@ -891,8 +1024,13 @@ mod inner {
                         let hwnd = window::hwnd_for_xcb(ev.window);
                         if hwnd != 0 {
                             queue::post(MsgEntry {
-                                hwnd, message: WM_CLOSE, w_param: 0, l_param: 0,
-                                time: 0, pt_x: 0, pt_y: 0,
+                                hwnd,
+                                message: WM_CLOSE,
+                                w_param: 0,
+                                l_param: 0,
+                                time: 0,
+                                pt_x: 0,
+                                pt_y: 0,
                             });
                         }
                     }
@@ -902,8 +1040,13 @@ mod inner {
                     let hwnd = window::hwnd_for_xcb(ev.window);
                     if hwnd != 0 {
                         queue::post(MsgEntry {
-                            hwnd, message: WM_PAINT, w_param: 0, l_param: 0,
-                            time: 0, pt_x: 0, pt_y: 0,
+                            hwnd,
+                            message: WM_PAINT,
+                            w_param: 0,
+                            l_param: 0,
+                            time: 0,
+                            pt_x: 0,
+                            pt_y: 0,
                         });
                     }
 
@@ -912,35 +1055,62 @@ mod inner {
                         let top_hwnd = window::all_hwnds().first().copied().unwrap_or(0);
                         if top_hwnd != 0 {
                             queue::post(MsgEntry {
-                                hwnd: top_hwnd, message: WM_PAINT, w_param: 0, l_param: 0,
-                                time: 0, pt_x: 0, pt_y: 0,
+                                hwnd: top_hwnd,
+                                message: WM_PAINT,
+                                w_param: 0,
+                                l_param: 0,
+                                time: 0,
+                                pt_x: 0,
+                                pt_y: 0,
                             });
                         }
                         eprintln!("weave/x11: first Expose — posting WM_PAINT to all hwnds");
                         for h in window::all_hwnds() {
                             queue::post(MsgEntry {
-                                hwnd: h, message: WM_PAINT, w_param: 0, l_param: 0,
-                                time: 0, pt_x: 0, pt_y: 0,
+                                hwnd: h,
+                                message: WM_PAINT,
+                                w_param: 0,
+                                l_param: 0,
+                                time: 0,
+                                pt_x: 0,
+                                pt_y: 0,
                             });
                         }
                     }
                 }
 
-                Event::ConfigureNotify(ConfigureNotifyEvent { window, width, height, .. }) => {
+                Event::ConfigureNotify(ConfigureNotifyEvent {
+                    window,
+                    width,
+                    height,
+                    ..
+                }) => {
                     let hwnd = window::hwnd_for_xcb(window);
                     if hwnd != 0 {
-                        window::with_mut(hwnd, |e| { e.width = width as u32; e.height = height as u32; });
+                        window::with_mut(hwnd, |e| {
+                            e.width = width as u32;
+                            e.height = height as u32;
+                        });
                         let l_param = (width as isize) | ((height as isize) << 16);
                         queue::post(MsgEntry {
-                            hwnd, message: WM_SIZE, w_param: 0, l_param,
-                            time: 0, pt_x: 0, pt_y: 0,
+                            hwnd,
+                            message: WM_SIZE,
+                            w_param: 0,
+                            l_param,
+                            time: 0,
+                            pt_x: 0,
+                            pt_y: 0,
                         });
                     }
                 }
 
                 Event::KeyPress(ev) => {
                     if let Some(vk8) = crate::input::keycode_to_vk(ev.detail) {
-                        let toggle = if vk8 == 0x14 { Some(crate::input::vk_state(vk8) & 0x01 == 0) } else { None };
+                        let toggle = if vk8 == 0x14 {
+                            Some(crate::input::vk_state(vk8) & 0x01 == 0)
+                        } else {
+                            None
+                        };
                         crate::input::set_vk_down(vk8, true, toggle);
                     }
                     let hwnd = window::hwnd_for_xcb(ev.event);
@@ -951,8 +1121,13 @@ mod inner {
                         let message = win32_key_message(vk, true, x11_state);
                         let l_param = key_l_param(x11_state, true, is_sys);
                         queue::post(MsgEntry {
-                            hwnd, message, w_param: vk as usize, l_param,
-                            time: ev.time, pt_x: ev.event_x as i32, pt_y: ev.event_y as i32,
+                            hwnd,
+                            message,
+                            w_param: vk as usize,
+                            l_param,
+                            time: ev.time,
+                            pt_x: ev.event_x as i32,
+                            pt_y: ev.event_y as i32,
                         });
                     }
                 }
@@ -969,8 +1144,13 @@ mod inner {
                         let message = win32_key_message(vk, false, x11_state);
                         let l_param = key_l_param(x11_state, false, is_sys);
                         queue::post(MsgEntry {
-                            hwnd, message, w_param: vk as usize, l_param,
-                            time: ev.time, pt_x: ev.event_x as i32, pt_y: ev.event_y as i32,
+                            hwnd,
+                            message,
+                            w_param: vk as usize,
+                            l_param,
+                            time: ev.time,
+                            pt_x: ev.event_x as i32,
+                            pt_y: ev.event_y as i32,
                         });
                     }
                 }
@@ -981,18 +1161,32 @@ mod inner {
                         let l_param = (ev.event_x as isize) | ((ev.event_y as isize) << 16);
                         match ev.detail {
                             1 | 3 => {
-                                let message = if ev.detail == 1 { WM_LBUTTONDOWN } else { WM_RBUTTONDOWN };
+                                let message = if ev.detail == 1 {
+                                    WM_LBUTTONDOWN
+                                } else {
+                                    WM_RBUTTONDOWN
+                                };
                                 queue::post(MsgEntry {
-                                    hwnd, message, w_param: 0, l_param,
-                                    time: ev.time, pt_x: ev.event_x as i32, pt_y: ev.event_y as i32,
+                                    hwnd,
+                                    message,
+                                    w_param: 0,
+                                    l_param,
+                                    time: ev.time,
+                                    pt_x: ev.event_x as i32,
+                                    pt_y: ev.event_y as i32,
                                 });
                             }
                             4 | 5 => {
                                 let delta: i16 = if ev.detail == 4 { 120 } else { -120 };
                                 let w_param = (delta as u16 as usize) << 16;
                                 queue::post(MsgEntry {
-                                    hwnd, message: WM_MOUSEWHEEL, w_param, l_param,
-                                    time: ev.time, pt_x: ev.event_x as i32, pt_y: ev.event_y as i32,
+                                    hwnd,
+                                    message: WM_MOUSEWHEEL,
+                                    w_param,
+                                    l_param,
+                                    time: ev.time,
+                                    pt_x: ev.event_x as i32,
+                                    pt_y: ev.event_y as i32,
                                 });
                             }
                             _ => {}
@@ -1003,11 +1197,20 @@ mod inner {
                 Event::ButtonRelease(ev) => {
                     let hwnd = window::hwnd_for_xcb(ev.event);
                     if hwnd != 0 {
-                        let message = match ev.detail { 1 => WM_LBUTTONUP, 3 => WM_RBUTTONUP, _ => return };
+                        let message = match ev.detail {
+                            1 => WM_LBUTTONUP,
+                            3 => WM_RBUTTONUP,
+                            _ => return,
+                        };
                         let l_param = (ev.event_x as isize) | ((ev.event_y as isize) << 16);
                         queue::post(MsgEntry {
-                            hwnd, message, w_param: 0, l_param,
-                            time: ev.time, pt_x: ev.event_x as i32, pt_y: ev.event_y as i32,
+                            hwnd,
+                            message,
+                            w_param: 0,
+                            l_param,
+                            time: ev.time,
+                            pt_x: ev.event_x as i32,
+                            pt_y: ev.event_y as i32,
                         });
                     }
                 }
@@ -1017,8 +1220,13 @@ mod inner {
                     if hwnd != 0 {
                         let l_param = (ev.event_x as isize) | ((ev.event_y as isize) << 16);
                         queue::post(MsgEntry {
-                            hwnd, message: WM_MOUSEMOVE, w_param: 0, l_param,
-                            time: ev.time, pt_x: ev.event_x as i32, pt_y: ev.event_y as i32,
+                            hwnd,
+                            message: WM_MOUSEMOVE,
+                            w_param: 0,
+                            l_param,
+                            time: ev.time,
+                            pt_x: ev.event_x as i32,
+                            pt_y: ev.event_y as i32,
                         });
                     }
                 }
@@ -1027,8 +1235,13 @@ mod inner {
                     let hwnd = window::hwnd_for_xcb(ev.event);
                     if hwnd != 0 && crate::api::take_tme_leave(hwnd) {
                         queue::post(MsgEntry {
-                            hwnd, message: WM_MOUSELEAVE, w_param: 0, l_param: 0,
-                            time: ev.time, pt_x: 0, pt_y: 0,
+                            hwnd,
+                            message: WM_MOUSELEAVE,
+                            w_param: 0,
+                            l_param: 0,
+                            time: ev.time,
+                            pt_x: 0,
+                            pt_y: 0,
                         });
                     }
                 }
@@ -1077,7 +1290,11 @@ mod inner {
         visible: bool,
         parent_xcb: u32,
     ) -> u32 {
-        let parent = if parent_xcb != 0 { Some(WindowHandle(parent_xcb)) } else { None };
+        let parent = if parent_xcb != 0 {
+            Some(WindowHandle(parent_xcb))
+        } else {
+            None
+        };
         match BACKEND.get() {
             Some(b) => match b.create_window(title, x, y, width, height, visible, parent) {
                 Ok(h) => h.0,
@@ -1152,21 +1369,65 @@ mod inner {
         }
     }
 
-    pub fn copy_area(src: u32, dst: u32, src_x: i16, src_y: i16, dst_x: i16, dst_y: i16, width: u16, height: u16) {
+    pub fn copy_area(
+        src: u32,
+        dst: u32,
+        src_x: i16,
+        src_y: i16,
+        dst_x: i16,
+        dst_y: i16,
+        width: u16,
+        height: u16,
+    ) {
         if let Some(b) = BACKEND.get() {
-            b.copy_area(Drawable(src), Drawable(dst), src_x, src_y, dst_x, dst_y, width, height);
+            b.copy_area(
+                Drawable(src),
+                Drawable(dst),
+                src_x,
+                src_y,
+                dst_x,
+                dst_y,
+                width,
+                height,
+            );
         }
     }
 
     pub fn copy_area_with_rop(
-        src: u32, dst: u32, src_x: i16, src_y: i16, dst_x: i16, dst_y: i16, width: u16, height: u16, gx_func: u32,
+        src: u32,
+        dst: u32,
+        src_x: i16,
+        src_y: i16,
+        dst_x: i16,
+        dst_y: i16,
+        width: u16,
+        height: u16,
+        gx_func: u32,
     ) {
         if let Some(b) = BACKEND.get() {
-            b.copy_area_with_rop(Drawable(src), Drawable(dst), src_x, src_y, dst_x, dst_y, width, height, gx_func);
+            b.copy_area_with_rop(
+                Drawable(src),
+                Drawable(dst),
+                src_x,
+                src_y,
+                dst_x,
+                dst_y,
+                width,
+                height,
+                gx_func,
+            );
         }
     }
 
-    pub fn fill_rect_with_rop(xcb_id: u32, x: i16, y: i16, w: u16, h: u16, gx_func: u32, pixel: u32) {
+    pub fn fill_rect_with_rop(
+        xcb_id: u32,
+        x: i16,
+        y: i16,
+        w: u16,
+        h: u16,
+        gx_func: u32,
+        pixel: u32,
+    ) {
         if let Some(b) = BACKEND.get() {
             b.fill_rect_with_rop(Drawable(xcb_id), x, y, w, h, gx_func, pixel);
         }
@@ -1190,23 +1451,53 @@ mod inner {
         }
     }
 
-    pub fn draw_text_utf16(xcb_id: u32, x: i16, y: i16, text: &[u16], px_size: f32, fg_pixel: u32, bg_pixel: u32) {
+    pub fn draw_text_utf16(
+        xcb_id: u32,
+        x: i16,
+        y: i16,
+        text: &[u16],
+        px_size: f32,
+        fg_pixel: u32,
+        bg_pixel: u32,
+    ) {
         if let Some(b) = BACKEND.get() {
             b.draw_text_utf16(Drawable(xcb_id), x, y, text, px_size, fg_pixel, bg_pixel);
         }
     }
 
-    pub unsafe fn put_dib_to_pixmap(pixmap: u32, width: u32, height: u32, bits_ptr: usize, bpp: u16) {
+    pub unsafe fn put_dib_to_pixmap(
+        pixmap: u32,
+        width: u32,
+        height: u32,
+        bits_ptr: usize,
+        bpp: u16,
+    ) {
         if let Some(b) = BACKEND.get() {
             b.put_dib_to_pixmap(PixmapHandle(pixmap), width, height, bits_ptr, bpp);
         }
     }
 
     pub fn put_bits_to_pixmap_at(
-        drawable: u32, dst_x: i16, dst_y: i16, width: u16, height: u16, stride: usize, rows: &[u8], bpp: u16,
+        drawable: u32,
+        dst_x: i16,
+        dst_y: i16,
+        width: u16,
+        height: u16,
+        stride: usize,
+        rows: &[u8],
+        bpp: u16,
     ) {
         if let Some(b) = BACKEND.get() {
-            b.put_bits_to_pixmap_at(Drawable(drawable), dst_x, dst_y, width, height, stride, rows, bpp);
+            b.put_bits_to_pixmap_at(
+                Drawable(drawable),
+                dst_x,
+                dst_y,
+                width,
+                height,
+                stride,
+                rows,
+                bpp,
+            );
         }
     }
 
@@ -1244,9 +1535,9 @@ pub const GX_SET: u32 = 15;
 pub use inner::{
     colorref_to_pixel, configure_window, copy_area, copy_area_with_rop, create_pixmap,
     create_window, destroy_window, draw_filled_rect, draw_line, draw_rect_outline, draw_text,
-    draw_text_utf16, enumerate_monitors, fill_rect_with_rop, free_pixmap, is_available,
-    poll_event, put_bits_to_pixmap_at, put_dib_to_pixmap, screen_size, set_title, show_window,
-    system_dpi, wait_event,
+    draw_text_utf16, enumerate_monitors, fill_rect_with_rop, free_pixmap, is_available, poll_event,
+    put_bits_to_pixmap_at, put_dib_to_pixmap, screen_size, set_title, show_window, system_dpi,
+    wait_event,
 };
 
 // ── No-op stubs for non-Linux platforms (macOS dev builds) ───────────────────

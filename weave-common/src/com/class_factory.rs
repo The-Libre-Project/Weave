@@ -1,4 +1,4 @@
-use super::guid::{IID_IUNKNOWN, IID_ICLASSFACTORY};
+use super::guid::{IID_ICLASSFACTORY, IID_IUNKNOWN};
 
 #[cfg(test)]
 use super::guid::GUID;
@@ -185,9 +185,8 @@ mod tests {
     fn classfactory_qi_for_unknown_fails() {
         let ptr = make_classfactory();
         unsafe {
-            let unknown_iid = GUID::from_bytes(&[
-                0xAA, 0xBB, 0xCC, 0xDD, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-            ]);
+            let unknown_iid =
+                GUID::from_bytes(&[0xAA, 0xBB, 0xCC, 0xDD, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
             let mut ppv: *mut () = std::ptr::null_mut();
             let hr = call_qi(ptr, unknown_iid.to_bytes().as_ptr(), &mut ppv);
             assert_eq!(hr, E_NOINTERFACE);

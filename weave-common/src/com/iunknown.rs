@@ -157,9 +157,8 @@ mod tests {
     fn iunknown_query_interface_unknown_fails() {
         let ptr = make_iunknown();
         unsafe {
-            let unknown_iid = GUID::from_bytes(&[
-                1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
-            ]);
+            let unknown_iid =
+                GUID::from_bytes(&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]);
             let mut ppv: *mut () = std::ptr::null_mut();
             let hr = call_qi(ptr, unknown_iid.to_bytes().as_ptr(), &mut ppv);
             assert_eq!(hr, E_NOINTERFACE);
