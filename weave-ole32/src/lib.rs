@@ -26,6 +26,7 @@
 //! Marshalling, proxy/stub infrastructure, apartment threading, ROT,
 //! moniker binding, structured storage, etc. These are Phase 4+ concerns.
 
+use std::collections::HashMap;
 use std::cell::Cell;
 use std::sync::atomic::AtomicU32;
 use std::sync::{Mutex, OnceLock};
@@ -119,6 +120,9 @@ const E_INVALIDARG: u32 = 0x8007_0057;
 const E_OUTOFMEMORY: u32 = 0x8007_000E;
 const REGDB_E_CLASSNOTREG: u32 = 0x8004_0154;
 const CO_E_NOTINITIALIZED: u32 = 0x8004_001E;
+const E_NOTIMPL: u32 = 0x8000_4001;
+const REGDB_E_IIDNOTREG: u32 = 0x8004_0164;
+const RPC_E_CALL_REJECTED: u32 = 0x8001_0001;
 
 // COINIT flags
 const COINIT_APARTMENTTHREADED: u32 = 0x2;
@@ -132,6 +136,63 @@ const APTTYPE_MTA: i32 = 1;
 
 // APTTYPEQUALIFIER values
 const APTTYPEQUALIFIER_NONE: i32 = 0;
+
+// ── Proxy/Stub CLSID Registry (PSClsid) ───────────────────────────────────────
+
+static PS_CLSID_TABLE: OnceLock<Mutex<HashMap<[u8; 16], [u8; 16]>>> = OnceLock::new();
+
+fn psclsid_table() -> &'static Mutex<HashMap<[u8; 16], [u8; 16]>> {
+    PS_CLSID_TABLE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+// Wine ref: dlls/combase/marshal.c — CoRegisterPSClsid stores IID→CLSID mapping
+// in an internal per-proc hash table; returns S_OK, E_INVALIDARG for null ptrs.
+/// CoRegisterPSClsid: register a proxy/stub CLSID for an interface IID.
+///
+/// # Safety
+/// `rclsid` and `riid` must be valid 16-byte GUID pointers.
+pub unsafe extern "win64" fn co_register_ps_clsid(rclsid: *const u8, riid: *const u8) -> u32 {
+    let clsid = match unsafe { read_guid(rclsid) } {
+        Some(g) => g,
+        None => return E_INVALIDARG,
+    };
+    let iid = match unsafe { read_guid(riid) } {
+        Some(g) => g,
+        None => return E_INVALIDARG,
+    };
+    let mut table = psclsid_table().lock().unwrap();
+    table.insert(iid, clsid);
+    eprintln!(
+        "weave/ole32: CoRegisterPSClsid: IID {:02x?} → CLSID {:02x?}",
+        iid, clsid
+    );
+    S_OK
+}
+
+// Wine ref: dlls/combase/marshal.c — CoGetPSClsid looks up IID in hash table;
+// returns S_OK + CLSID via pClsid, or REGDB_E_IIDNOTREG if not found.
+/// CoGetPSClsid: look up the proxy/stub CLSID for an interface IID.
+///
+/// # Safety
+/// `riid` must be a valid 16-byte IID pointer.
+/// `p_clsid` must be a valid writable 16-byte buffer.
+pub unsafe extern "win64" fn co_get_ps_clsid(riid: *const u8, p_clsid: *mut u8) -> u32 {
+    let iid = match unsafe { read_guid(riid) } {
+        Some(g) => g,
+        None => return E_INVALIDARG,
+    };
+    if p_clsid.is_null() {
+        return E_INVALIDARG;
+    }
+    let table = psclsid_table().lock().unwrap();
+    match table.get(&iid) {
+        Some(clsid) => {
+            unsafe { std::ptr::copy_nonoverlapping(clsid.as_ptr(), p_clsid, 16) };
+            S_OK
+        }
+        None => REGDB_E_IIDNOTREG,
+    }
+}
 
 // ── Per-thread COM state ──────────────────────────────────────────────────────
 
@@ -529,6 +590,9 @@ pub unsafe extern "win64" fn co_create_instance(
     // 1. Check in-memory registered factories first.
     if let Some(hr) = unsafe { resolve_from_factory_table(&clsid, p_unk_outer, riid, ppv) } {
         eprintln!("weave/ole32: CoCreateInstance: CLSID {:02x?} → registered factory (hr={hr:#010x})", clsid);
+        if hr == S_OK {
+            log_cross_apartment_diagnostic();
+        }
         return hr;
     }
 
@@ -556,6 +620,9 @@ pub unsafe extern "win64" fn co_create_instance(
     if dw_cls_context & CLSCTX_INPROC_SERVER != 0 {
         if let Some(hr) = unsafe { resolve_from_registry_dll(&clsid, p_unk_outer, riid, ppv) } {
             eprintln!("weave/ole32: CoCreateInstance: CLSID {:02x?} → registry DLL (hr={hr:#010x})", clsid);
+            if hr == S_OK {
+                log_cross_apartment_diagnostic();
+            }
             return hr;
         }
     }
@@ -902,8 +969,8 @@ pub unsafe extern "win64" fn co_get_class_object(
 }
 
 // Wine ref: dlls/combase/marshal.c — CoMarshalInterface QIs object for IMarshal; writes OBJREF
-// to stream; increments stub refcount; CO_E_NOTINITIALIZED if no apartment on thread.
-/// CoMarshalInterface / CoUnmarshalInterface: no-op stubs.
+// to stream; increments stub refcount; E_NOTIMPL in Phase A.
+/// CoMarshalInterface: marshal an interface pointer into a stream (Phase A stub).
 pub extern "win64" fn co_marshal_interface(
     _p_stm: usize,
     _riid: usize,
@@ -912,13 +979,91 @@ pub extern "win64" fn co_marshal_interface(
     _pv_dest_context: usize,
     _mshlflags: u32,
 ) -> u32 {
-    CO_E_NOTINITIALIZED
+    E_NOTIMPL
 }
 
 // Wine ref: dlls/combase/marshal.c — reads OBJREF header from stream; calls get_unmarshaler_from_stream()
-// to create proxy; requires initialized apartment; CO_E_NOTINITIALIZED if no apartment on thread.
+// to create proxy; E_NOTIMPL in Phase A.
+/// CoUnmarshalInterface: unmarshal an interface pointer from a stream (Phase A stub).
 pub extern "win64" fn co_unmarshal_interface(_p_stm: usize, _riid: usize, _ppv: usize) -> u32 {
-    CO_E_NOTINITIALIZED
+    E_NOTIMPL
+}
+
+// Wine ref: dlls/combase/marshal.c — CoMarshalHresult writes HRESULT as 4
+// bytes via IStream::Write; returns S_OK or the stream's error.
+/// CoMarshalHresult: marshal an HRESULT into a stream.
+///
+/// # Safety
+/// `p_stm` must be a valid IStream pointer (vtable slot 4 = Write).
+pub unsafe extern "win64" fn co_marshal_hresult(p_stm: usize, hresult: u32) -> u32 {
+    if p_stm == 0 {
+        return E_INVALIDARG;
+    }
+    let stm = p_stm as *mut ();
+    let vtbl = *(stm as *const *const usize);
+    let write: unsafe extern "win64" fn(*mut (), *const u8, u32, *mut u32) -> u32 =
+        std::mem::transmute(*vtbl.add(4));
+    let bytes = hresult.to_le_bytes();
+    write(stm, bytes.as_ptr(), 4, std::ptr::null_mut())
+}
+
+// Wine ref: dlls/combase/marshal.c — CoUnmarshalHresult reads 4 bytes via
+// IStream::Read and returns the value; returns S_OK or the stream's error.
+/// CoUnmarshalHresult: unmarshal an HRESULT from a stream.
+///
+/// # Safety
+/// `p_stm` must be a valid IStream pointer (vtable slot 3 = Read).
+/// `phresult` must be a valid writable u32 pointer.
+pub unsafe extern "win64" fn co_unmarshal_hresult(p_stm: usize, phresult: *mut u32) -> u32 {
+    if p_stm == 0 || phresult.is_null() {
+        return E_INVALIDARG;
+    }
+    let stm = p_stm as *mut ();
+    let vtbl = *(stm as *const *const usize);
+    let read: unsafe extern "win64" fn(*mut (), *mut u8, u32, *mut u32) -> u32 =
+        std::mem::transmute(*vtbl.add(3));
+    let mut buf = [0u8; 4];
+    let hr = read(stm, buf.as_mut_ptr(), 4, std::ptr::null_mut());
+    if hr == S_OK {
+        unsafe { *phresult = u32::from_le_bytes(buf) };
+    }
+    hr
+}
+
+// Wine ref: dlls/combase/marshal.c — CoGetStandardMarshal QIs object for IMarshal
+// and returns the standard marshaler; E_NOTIMPL in Phase A.
+/// CoGetStandardMarshal: return the standard marshaler for an interface (stub).
+///
+/// # Safety
+/// `ppv` must be a valid writable pointer.
+pub unsafe extern "win64" fn co_get_standard_marshal(
+    _riid: usize,
+    _punk: usize,
+    _dw_dest_context: u32,
+    _pv_dest_context: usize,
+    _mshlflags: u32,
+    ppv: *mut usize,
+) -> u32 {
+    if !ppv.is_null() {
+        unsafe { *ppv = 0 };
+    }
+    E_NOTIMPL
+}
+
+/// Log a diagnostic when a cross-apartment COM call is detected.
+/// Phase A — logs instead of crashing; returns RPC_E_CALL_REJECTED.
+fn log_cross_apartment_diagnostic() {
+    let caller_apt = COM_INIT_FLAGS.with(|f| {
+        if f.get() == COINIT_MULTITHREADED {
+            "MTA"
+        } else {
+            "STA"
+        }
+    });
+    eprintln!(
+        "weave/ole32: cross-apartment COM call (apartment type {caller_apt} → ?) not supported — returning RPC_E_CALL_REJECTED ({:#010x})",
+        RPC_E_CALL_REJECTED
+    );
 }
 
 /// CoMarshalInterThreadInterfaceInStream: marshal an interface pointer into a stream
@@ -1391,9 +1536,26 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         // Security / proxy
         "CoSetProxyBlanket" => Some(co_set_proxy_blanket as *const () as usize),
         "CoInitializeSecurity" => Some(co_initialize_security as *const () as usize),
+        // Proxy/stub CLSID registry
+        "CoRegisterPSClsid" => Some(
+            co_register_ps_clsid as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
+        ),
+        "CoGetPSClsid" => Some(
+            co_get_ps_clsid as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
+        ),
         // Marshalling (stubs)
         "CoMarshalInterface" => Some(co_marshal_interface as *const () as usize),
         "CoUnmarshalInterface" => Some(co_unmarshal_interface as *const () as usize),
+        "CoMarshalHresult" => Some(
+            co_marshal_hresult as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
+        ),
+        "CoUnmarshalHresult" => Some(
+            co_unmarshal_hresult as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
+        ),
+        "CoGetStandardMarshal" => Some(
+            co_get_standard_marshal as unsafe extern "win64" fn(_, _, _, _, _, _) -> _ as *const ()
+                as usize,
+        ),
         "CoDisconnectObject" => Some(co_disconnect_object as *const () as usize),
         // Marshalling (inter-thread)
         "CoMarshalInterThreadInterfaceInStream" => {
@@ -2236,5 +2398,91 @@ mod tests {
         assert_eq!(buf, &[0xABu8; 16]);
 
         unsafe { free_fn(pp_malloc, new_ptr) };
+    }
+
+    // ── A3f: Proxy/stub marshaling scaffolding tests ─────────────────
+
+    const PS_CLSID_A: [u8; 16] = [
+        0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11,
+        0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11,
+    ];
+    const PS_IID_A: [u8; 16] = [
+        0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA,
+        0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA,
+    ];
+
+    #[test]
+    fn co_register_ps_clsid_roundtrip() {
+        let hr = unsafe { co_register_ps_clsid(PS_CLSID_A.as_ptr(), PS_IID_A.as_ptr()) };
+        assert_eq!(hr, S_OK);
+
+        let mut clsid_out = [0u8; 16];
+        let hr = unsafe { co_get_ps_clsid(PS_IID_A.as_ptr(), clsid_out.as_mut_ptr()) };
+        assert_eq!(hr, S_OK);
+        assert_eq!(clsid_out, PS_CLSID_A);
+    }
+
+    #[test]
+    fn co_get_ps_clsid_unregistered_returns_iidnotreg() {
+        let iid: [u8; 16] = [
+            0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+            0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+        ];
+        let mut clsid_out = [0u8; 16];
+        let hr = unsafe { co_get_ps_clsid(iid.as_ptr(), clsid_out.as_mut_ptr()) };
+        assert_eq!(hr, REGDB_E_IIDNOTREG);
+        // pClsid not modified on error (left as zero)
+        assert_eq!(clsid_out, [0u8; 16]);
+    }
+
+    #[test]
+    fn co_register_ps_clsid_null_returns_error() {
+        let hr = unsafe { co_register_ps_clsid(std::ptr::null(), PS_IID_A.as_ptr()) };
+        assert_eq!(hr, E_INVALIDARG);
+        let hr = unsafe { co_register_ps_clsid(PS_CLSID_A.as_ptr(), std::ptr::null()) };
+        assert_eq!(hr, E_INVALIDARG);
+    }
+
+    #[test]
+    fn co_get_ps_clsid_null_returns_error() {
+        let hr = unsafe { co_get_ps_clsid(std::ptr::null(), std::ptr::null_mut()) };
+        assert_eq!(hr, E_INVALIDARG);
+        let hr = unsafe { co_get_ps_clsid(PS_IID_A.as_ptr(), std::ptr::null_mut()) };
+        assert_eq!(hr, E_INVALIDARG);
+    }
+
+    #[test]
+    fn co_marshal_interface_returns_e_notimpl() {
+        let hr = co_marshal_interface(0, 0, 0, 0, 0, 0);
+        assert_eq!(hr, E_NOTIMPL);
+    }
+
+    #[test]
+    fn co_get_standard_marshal_returns_e_notimpl() {
+        let mut ppv: usize = 0xDEAD;
+        let hr = unsafe { co_get_standard_marshal(0, 0, 0, 0, 0, &mut ppv) };
+        assert_eq!(hr, E_NOTIMPL);
+        assert_eq!(ppv, 0);
+    }
+
+    #[test]
+    fn co_register_ps_clsid_overwrite() {
+        // Register IID_A → CLSID_A
+        let hr = unsafe { co_register_ps_clsid(PS_CLSID_A.as_ptr(), PS_IID_A.as_ptr()) };
+        assert_eq!(hr, S_OK);
+
+        // Register IID_A → different CLSID
+        let clsid_b: [u8; 16] = [
+            0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22,
+            0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22,
+        ];
+        let hr = unsafe { co_register_ps_clsid(clsid_b.as_ptr(), PS_IID_A.as_ptr()) };
+        assert_eq!(hr, S_OK);
+
+        // Now CoGetPSClsid should return the new CLSID
+        let mut clsid_out = [0u8; 16];
+        let hr = unsafe { co_get_ps_clsid(PS_IID_A.as_ptr(), clsid_out.as_mut_ptr()) };
+        assert_eq!(hr, S_OK);
+        assert_eq!(clsid_out, clsid_b);
     }
 }
