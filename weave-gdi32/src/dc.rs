@@ -10,6 +10,7 @@ use std::sync::{Mutex, OnceLock};
 
 use crate::defs::*;
 use crate::objects;
+use weave_user32::backend_trait::{Drawable, PixmapHandle, WindowHandle};
 
 // ── DC state ──────────────────────────────────────────────────────────────────
 
@@ -36,7 +37,7 @@ pub struct DcState {
     /// Currently selected font handle.
     pub h_font: usize,
     pub selected_bitmap: usize,
-    pub pixmap: Option<u32>,
+    pub pixmap: Option<PixmapHandle>,
     pub pen_pos: Point,      // current pen position (MoveToEx/LineTo)
     pub viewport_org: Point, // viewport origin (SetViewportOrgEx)
     pub window_org: Point,   // window origin (SetWindowOrgEx)
@@ -207,17 +208,17 @@ pub fn restore(hdc: usize, level: i32) -> i32 {
 }
 
 impl DcState {
-    /// Return the X11 drawable for this DC.
+    /// Return the drawable for this DC.
     ///
     /// Priority:
     /// 1. The Pixmap allocated for a memory DC (SelectObject + compatible bitmap).
-    /// 2. The X11 window ID of the associated HWND.
+    /// 2. The native window handle of the associated HWND.
     /// 3. If hwnd is 0 (memory DC created before any windows — Scintilla's
     ///    pattern), fall back to the current BeginPaint HWND, then the first
-    ///    window with a valid XCB ID.
-    pub fn drawable(&self) -> u32 {
+    ///    window with a valid native ID.
+    pub fn drawable(&self) -> Drawable {
         if let Some(pixmap) = self.pixmap {
-            return pixmap;
+            return Drawable::from(pixmap);
         }
         let hwnd = if self.hwnd == 0 {
             let from_paint = weave_user32::api::current_paint_hwnd();
@@ -229,7 +230,8 @@ impl DcState {
         } else {
             self.hwnd
         };
-        weave_user32::window::xcb_id(hwnd)
+        let wh = WindowHandle(weave_user32::window::xcb_id(hwnd));
+        Drawable::from(wh)
     }
 
     pub fn lp_to_device(&self, x: i32, y: i32) -> (i16, i16) {

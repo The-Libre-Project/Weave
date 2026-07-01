@@ -53,6 +53,7 @@ pub mod objects;
 
 use defs::*;
 use objects::GdiKind;
+use weave_user32::backend_trait::PixmapHandle;
 
 // ── Pixel helpers ─────────────────────────────────────────────────────────────
 
@@ -273,18 +274,18 @@ pub extern "win64" fn select_object(hdc: usize, h_gdi_obj: usize) -> usize {
                     if dc.pixmap.is_none() {
                         let parent_draw = dc.drawable();
                         let pid = weave_user32::backend::create_pixmap(
-                            parent_draw,
+                            parent_draw.0,
                             *width as u16,
                             *height as u16,
                         );
                         // Only store a non-zero pixmap ID.  If create_pixmap fails
                         // (returns 0) leave dc.pixmap as None so drawable() falls
-                        // back to xcb_id(hwnd) rather than returning 0, which would
-                        // silently discard all draw calls to this DC.
+                        // back to the window drawable rather than returning 0, which
+                        // would silently discard all draw calls to this DC.
                         // Wine ref: dlls/winex11.drv/bitmap.c — X11DRV_CreateBitmap
                         // fails gracefully; callers fall back to display DC drawing.
                         if pid != 0 {
-                            dc.pixmap = Some(pid);
+                            dc.pixmap = Some(PixmapHandle(pid));
                         }
                     }
                 }
@@ -433,11 +434,12 @@ pub unsafe extern "win64" fn fill_rect(hdc: usize, lp_rc: *const Rect, h_brush: 
         if FR.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 3 {
             let xcb = dc::with(hdc, |dc| dc.drawable());
             eprintln!(
-                "weave/gdi32: FillRect hdc={hdc:#x} xcb={xcb:#x} ({},{}) {}x{}",
+                "weave/gdi32: FillRect hdc={hdc:#x} xcb={:x} ({},{}) {}x{}",
                 rc.left,
                 rc.top,
                 rc.right - rc.left,
-                rc.bottom - rc.top
+                rc.bottom - rc.top,
+                xcb.0,
             );
         }
     }
@@ -464,7 +466,7 @@ pub unsafe extern "win64" fn fill_rect(hdc: usize, lp_rc: *const Rect, h_brush: 
     let (dw, dh) = dc::with(hdc, |dc| dc.lp_to_device(rc.right, rc.bottom));
     let ww = (dw - dx) as u16;
     let hh = (dh - dy) as u16;
-    weave_user32::backend::draw_filled_rect(xcb, dx, dy, ww, hh, pixel);
+    weave_user32::backend::draw_filled_rect(xcb.0, dx, dy, ww, hh, pixel);
     1
 }
 
@@ -484,11 +486,11 @@ pub extern "win64" fn rectangle(hdc: usize, left: i32, top: i32, right: i32, bot
 
     // Fill interior with brush.
     let fill_pixel = to_pixel(objects::brush_color(brush_h));
-    weave_user32::backend::draw_filled_rect(xcb, dx, dy, w, h, fill_pixel);
+    weave_user32::backend::draw_filled_rect(xcb.0, dx, dy, w, h, fill_pixel);
 
     // Draw outline with pen.
     let outline_pixel = to_pixel(objects::pen_color(pen_h));
-    weave_user32::backend::draw_rect_outline(xcb, dx, dy, w, h, outline_pixel);
+    weave_user32::backend::draw_rect_outline(xcb.0, dx, dy, w, h, outline_pixel);
     1
 }
 
@@ -585,7 +587,7 @@ pub unsafe extern "win64" fn text_out_w(
     };
 
     weave_user32::backend::draw_text_utf16(
-        xcb,
+        xcb.0,
         draw_x as i16,
         draw_y as i16,
         units,
@@ -670,7 +672,7 @@ pub unsafe extern "win64" fn draw_text_w(
     let (fg, bg) = dc::with(hdc, |dc| (dc.text_color, dc.bk_color));
     let xcb = dc::with(hdc, |dc| dc.drawable());
     let (dx, dy) = dc::with(hdc, |dc| dc.lp_to_device(x, y));
-    weave_user32::backend::draw_text_utf16(xcb, dx, dy, units, px_size, to_pixel(fg), to_pixel(bg));
+    weave_user32::backend::draw_text_utf16(xcb.0, dx, dy, units, px_size, to_pixel(fg), to_pixel(bg));
     text_h
 }
 
@@ -739,11 +741,12 @@ pub unsafe extern "win64" fn ext_text_out_w(
         // run-specific and causes silent loss of c>0 log entries when xcb==0.
         if n < 20 || c > 0 {
             eprintln!(
-                "weave/gdi32: ExtTextOutW#{n} hdc={hdc:#x} xcb={xcb:#x} c={c} options={options:#x}"
+                "weave/gdi32: ExtTextOutW#{n} hdc={hdc:#x} xcb={:x} c={c} options={options:#x}",
+                xcb.0,
             );
         }
     }
-    if xcb == 0 {
+    if xcb.0 == 0 {
         return 1; // no window — safe no-op
     }
 
@@ -755,7 +758,7 @@ pub unsafe extern "win64" fn ext_text_out_w(
         if w > 0 && h > 0 {
             let bg_pixel = to_pixel(dc::with(hdc, |dc| dc.bk_color));
             let (dx, dy) = dc::with(hdc, |dc| dc.lp_to_device(rc.left, rc.top));
-            weave_user32::backend::draw_filled_rect(xcb, dx, dy, w, h, bg_pixel);
+            weave_user32::backend::draw_filled_rect(xcb.0, dx, dy, w, h, bg_pixel);
         }
     }
 
@@ -770,7 +773,7 @@ pub unsafe extern "win64" fn ext_text_out_w(
         static ETO: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
         if ETO.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 3 {
             let (fg, bg) = dc::with(hdc, |dc| (dc.text_color, dc.bk_color));
-            eprintln!("weave/gdi32: ExtTextOutW hdc={hdc:#x} xcb={xcb:#x} ({x},{y}) c={c} fg={fg:#08x} bg={bg:#08x}");
+            eprintln!("weave/gdi32: ExtTextOutW hdc={hdc:#x} xcb={:x} ({x},{y}) c={c} fg={fg:#08x} bg={bg:#08x}", xcb.0);
         }
     }
     let units: &[u16] = unsafe { std::slice::from_raw_parts(lp_string, c as usize) };
@@ -811,7 +814,7 @@ pub unsafe extern "win64" fn ext_text_out_w(
     };
 
     weave_user32::backend::draw_text_utf16(
-        xcb,
+        xcb.0,
         draw_x as i16,
         draw_y as i16,
         units,
@@ -830,7 +833,7 @@ pub extern "win64" fn set_pixel(hdc: usize, x: i32, y: i32, color: u32) -> u32 {
     let pixel = to_pixel(color);
     let xcb = dc::with(hdc, |dc| dc.drawable());
     let (dx, dy) = dc::with(hdc, |dc| dc.lp_to_device(x, y));
-    weave_user32::backend::draw_filled_rect(xcb, dx, dy, 1, 1, pixel);
+    weave_user32::backend::draw_filled_rect(xcb.0, dx, dy, 1, 1, pixel);
     color
 }
 
@@ -907,8 +910,8 @@ pub extern "win64" fn line_to(hdc: usize, x: i32, y: i32) -> i32 {
         (dc.drawable(), x1, y1, pixel)
     });
     let (x2, y2) = dc::with(hdc, |dc| dc.lp_to_device(x, y));
-    if drawable != 0 {
-        weave_user32::backend::draw_line(drawable, x1, y1, x2, y2, pixel);
+    if drawable.0 != 0 {
+        weave_user32::backend::draw_line(drawable.0, x1, y1, x2, y2, pixel);
     }
     dc::with_mut(hdc, |dc| dc.pen_pos = Point { x, y });
     1
@@ -951,7 +954,7 @@ pub extern "win64" fn pat_blt(hdc: usize, x: i32, y: i32, w: i32, h: i32, rop: u
         }
     };
     weave_user32::backend::fill_rect_with_rop(
-        xcb, x as i16, y as i16, w as u16, h as u16, gx_func, pixel,
+        xcb.0, x as i16, y as i16, w as u16, h as u16, gx_func, pixel,
     );
     1
 }
@@ -982,9 +985,9 @@ pub extern "win64" fn bit_blt(
     let src_draw = dc::with(hdc_src, |dc| dc.drawable());
     static BB: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
     if BB.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 30 {
-        eprintln!("weave/gdi32: BitBlt dst={dst_draw:#x} src={src_draw:#x} ({x},{y}) {cx}x{cy}");
+        eprintln!("weave/gdi32: BitBlt dst={:#x} src={:#x} ({x},{y}) {cx}x{cy}", dst_draw.0, src_draw.0);
     }
-    if dst_draw == 0 {
+    if dst_draw.0 == 0 {
         // Headless/library-test path: the DC is valid but no X11 drawable is
         // available. Treat this like the backend no-op cases below and report
         // success so ROP-dispatch probes can run without a display.
@@ -1052,12 +1055,12 @@ pub extern "win64" fn bit_blt(
         }
         RopPlan::Pattern(gx_func, pixel) => {
             weave_user32::backend::fill_rect_with_rop(
-                dst_draw, x as i16, y as i16, cx as u16, cy as u16, gx_func, pixel,
+                dst_draw.0, x as i16, y as i16, cx as u16, cy as u16, gx_func, pixel,
             );
             1
         }
         RopPlan::Source(gx_func) => {
-            if src_draw == 0 {
+            if src_draw.0 == 0 {
                 return 0;
             }
             // If the source DC has a bitmap selected (DDB via CreateCompatibleBitmap
@@ -1090,7 +1093,7 @@ pub extern "win64" fn bit_blt(
             });
             if let Some((dib_w, dib_h, bits_ptr, bpp)) = dib_info {
                 unsafe {
-                    weave_user32::backend::put_dib_to_pixmap(src_draw, dib_w, dib_h, bits_ptr, bpp);
+                    weave_user32::backend::put_dib_to_pixmap(src_draw.0, dib_w, dib_h, bits_ptr, bpp);
                 }
             }
             // Fast path: SRCCOPY (GXcopy) is by far the hottest BitBlt ROP
@@ -1104,12 +1107,12 @@ pub extern "win64" fn bit_blt(
             // optimises SRCCOPY by not calling XSetFunction at all.
             if gx_func == weave_user32::backend::GX_COPY {
                 weave_user32::backend::copy_area(
-                    src_draw, dst_draw, x1 as i16, y1 as i16, x as i16, y as i16, cx as u16,
+                    src_draw.0, dst_draw.0, x1 as i16, y1 as i16, x as i16, y as i16, cx as u16,
                     cy as u16,
                 );
             } else {
                 weave_user32::backend::copy_area_with_rop(
-                    src_draw, dst_draw, x1 as i16, y1 as i16, x as i16, y as i16, cx as u16,
+                    src_draw.0, dst_draw.0, x1 as i16, y1 as i16, x as i16, y as i16, cx as u16,
                     cy as u16, gx_func,
                 );
             }
@@ -1295,13 +1298,13 @@ pub extern "win64" fn stretch_blt(
     // put_dib_to_pixmap + copy_area helpers without introducing a new
     // "put rect at offset" backend entry point.
     let dst_draw = dc::with(hdc_dest, |dc| dc.drawable());
-    if dst_draw == 0 {
+    if dst_draw.0 == 0 {
         return 0;
     }
 
     let scratch_ptr = scratch.as_ptr() as usize;
     let tmp_pixmap =
-        weave_user32::backend::create_pixmap(dst_draw, abs_w_dest as u16, abs_h_dest as u16);
+        weave_user32::backend::create_pixmap(dst_draw.0, abs_w_dest as u16, abs_h_dest as u16);
     if tmp_pixmap == 0 {
         // Backend unavailable (headless macOS, no X11). Return TRUE per the
         // Task-17 "lie TRUE" policy for dispatch-reached-backend cases so
@@ -1338,7 +1341,7 @@ pub extern "win64" fn stretch_blt(
         Some(gx) if gx == weave_user32::backend::GX_COPY => {
             weave_user32::backend::copy_area(
                 tmp_pixmap,
-                dst_draw,
+                dst_draw.0,
                 0,
                 0,
                 x_dest as i16,
@@ -1350,7 +1353,7 @@ pub extern "win64" fn stretch_blt(
         Some(gx) => {
             weave_user32::backend::copy_area_with_rop(
                 tmp_pixmap,
-                dst_draw,
+                dst_draw.0,
                 0,
                 0,
                 x_dest as i16,
@@ -1593,13 +1596,13 @@ pub unsafe extern "win64" fn stretch_di_bits(
     }
 
     let dst_draw = dc::with(hdc, |dc| dc.drawable());
-    if dst_draw == 0 {
+    if dst_draw.0 == 0 {
         return abs_h_dest as i32;
     }
 
     let scratch_ptr = scratch.as_ptr() as usize;
     let tmp_pixmap =
-        weave_user32::backend::create_pixmap(dst_draw, abs_w_dest as u16, abs_h_dest as u16);
+        weave_user32::backend::create_pixmap(dst_draw.0, abs_w_dest as u16, abs_h_dest as u16);
     if tmp_pixmap == 0 {
         // Headless — CPU scale ran; skip X11 upload (lie success per Task-17 policy).
         return abs_h_dest as i32;
@@ -1627,7 +1630,7 @@ pub unsafe extern "win64" fn stretch_di_bits(
         Some(gx) if gx == weave_user32::backend::GX_COPY => {
             weave_user32::backend::copy_area(
                 tmp_pixmap,
-                dst_draw,
+                dst_draw.0,
                 0,
                 0,
                 dev_x_dest,
@@ -1639,7 +1642,7 @@ pub unsafe extern "win64" fn stretch_di_bits(
         Some(gx) => {
             weave_user32::backend::copy_area_with_rop(
                 tmp_pixmap,
-                dst_draw,
+                dst_draw.0,
                 0,
                 0,
                 dev_x_dest,
@@ -1755,8 +1758,8 @@ pub unsafe extern "win64" fn create_dc_w(
 // FALSE if hdc is a display DC (those are not freed via DeleteDC).
 pub extern "win64" fn delete_dc(hdc: usize) -> i32 {
     if let Some(pixmap) = dc::with(hdc, |dc| dc.pixmap) {
-        if pixmap != 0 {
-            weave_user32::backend::free_pixmap(pixmap);
+        if pixmap.0 != 0 {
+            weave_user32::backend::free_pixmap(pixmap.0);
         }
     }
     dc::remove(hdc);
@@ -1999,7 +2002,7 @@ pub unsafe extern "win64" fn set_dib_bits_to_device(
 
     // Resolve destination drawable.
     let dst_draw = dc::with(hdc, |dc| dc.drawable());
-    if dst_draw == 0 {
+    if dst_draw.0 == 0 {
         return 0;
     }
 
@@ -2028,7 +2031,7 @@ pub unsafe extern "win64" fn set_dib_bits_to_device(
             }
         }
         weave_user32::backend::put_bits_to_pixmap_at(
-            dst_draw,
+            dst_draw.0,
             x_dest as i16,
             y_dest as i16,
             upload_w,
@@ -2039,7 +2042,7 @@ pub unsafe extern "win64" fn set_dib_bits_to_device(
         );
     } else {
         weave_user32::backend::put_bits_to_pixmap_at(
-            dst_draw,
+            dst_draw.0,
             x_dest as i16,
             y_dest as i16,
             upload_w,
@@ -3327,7 +3330,7 @@ pub unsafe extern "win64" fn alpha_blend(
     // Upload the composited band to the dest drawable so subsequent server-side
     // copies see the updated pixels. Mirrors set_dib_bits_to_device (task 19).
     let dst_draw = dc::with(hdc_dest, |dc| dc.drawable());
-    if dst_draw != 0 {
+    if dst_draw.0 != 0 {
         // Slice the composited band out of the dest bits, row-major top-down.
         let band_w = w_dest as usize;
         let band_h = h_dest as usize;
@@ -3340,7 +3343,7 @@ pub unsafe extern "win64" fn alpha_blend(
                 .copy_from_slice(&dst_bytes[src_row_off..src_row_off + band_w * 4]);
         }
         weave_user32::backend::put_bits_to_pixmap_at(
-            dst_draw,
+            dst_draw.0,
             x_origin_dest as i16,
             y_origin_dest as i16,
             w_dest as u16,
@@ -3541,7 +3544,7 @@ pub unsafe extern "win64" fn transparent_blt(
     // Upload the composited dest band so subsequent server-side copies see
     // the updated pixels — mirrors AlphaBlend (task 20).
     let dst_draw = dc::with(hdc_dest, |dc| dc.drawable());
-    if dst_draw != 0 {
+    if dst_draw.0 != 0 {
         let band_w = w_dest as usize;
         let band_h = h_dest as usize;
         let mut band = vec![0u8; band_w * band_h * 4];
@@ -3553,7 +3556,7 @@ pub unsafe extern "win64" fn transparent_blt(
                 .copy_from_slice(&dst_bytes[src_row_off..src_row_off + band_w * 4]);
         }
         weave_user32::backend::put_bits_to_pixmap_at(
-            dst_draw,
+            dst_draw.0,
             x_origin_dest as i16,
             y_origin_dest as i16,
             w_dest as u16,
@@ -3822,7 +3825,7 @@ pub unsafe extern "win64" fn gradient_fill(
     // Upload the painted band to the drawable — mirrors alpha_blend /
     // transparent_blt tail.
     let dst_draw = dc::with(hdc, |dc| dc.drawable());
-    if dst_draw != 0 {
+    if dst_draw.0 != 0 {
         let band_w = (dirty_x1 - dirty_x0) as usize;
         let band_h = (dirty_y1 - dirty_y0) as usize;
         let mut band = vec![0u8; band_w * band_h * 4];
@@ -3834,7 +3837,7 @@ pub unsafe extern "win64" fn gradient_fill(
                 .copy_from_slice(&dst_bytes[src_row_off..src_row_off + band_w * 4]);
         }
         weave_user32::backend::put_bits_to_pixmap_at(
-            dst_draw,
+            dst_draw.0,
             dirty_x0 as i16,
             dirty_y0 as i16,
             band_w as u16,
@@ -4369,14 +4372,14 @@ pub unsafe extern "win64" fn polyline(hdc: usize, lpt: *const i32, c_pt: i32) ->
     }
     let pts = unsafe { std::slice::from_raw_parts(lpt as *const Point, c_pt as usize) };
     let (drawable, h_pen) = dc::with(hdc, |dc| (dc.drawable(), dc.h_pen));
-    if drawable == 0 {
+    if drawable.0 == 0 {
         return 1;
     }
     let pixel = weave_user32::backend::colorref_to_pixel(objects::pen_color(h_pen));
     for seg in pts.windows(2) {
         let (x1, y1) = dc::with(hdc, |dc| dc.lp_to_device(seg[0].x, seg[0].y));
         let (x2, y2) = dc::with(hdc, |dc| dc.lp_to_device(seg[1].x, seg[1].y));
-        weave_user32::backend::draw_line(drawable, x1, y1, x2, y2, pixel);
+        weave_user32::backend::draw_line(drawable.0, x1, y1, x2, y2, pixel);
     }
     1
 }
