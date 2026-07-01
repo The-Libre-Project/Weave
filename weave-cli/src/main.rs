@@ -4,8 +4,10 @@ use weave_common::com::shell_link::ShellLinkSaveData;
 use weave_core::{
     cfg, cmdline, dll_registry, exec, iat, loader, module_handles, pe, prefix, registry, seh, teb,
 };
+use serde_json::json;
 use weave_ipc::CallMsg;
 use weave_installer::PrefixManager;
+use weave_user32::defs::{Msg, WndClassExW};
 
 mod arch;
 
@@ -372,6 +374,202 @@ static CHILD_FD: std::sync::OnceLock<libc::c_int> = std::sync::OnceLock::new();
 // execution path.  Each stub serialises the call, sends it to the host
 // process via CHILD_FD, and returns the host's reply.
 
+/// Send a generic IPC call and return the host's reply value.
+fn ipc_call(dll: &str, func: &str, args: Vec<serde_json::Value>) -> Result<serde_json::Value, String> {
+    let fd = CHILD_FD.get().ok_or("CHILD_FD not set")?;
+    let msg = CallMsg {
+        msg_type: "call".to_string(),
+        dll: dll.to_string(),
+        function: func.to_string(),
+        args,
+    };
+    weave_ipc::send_msg(*fd, &msg)?;
+    let reply = weave_ipc::recv_reply(*fd)?;
+    Ok(reply.result)
+}
+
+/// IPC stub for RegisterClassExW.
+pub unsafe extern "win64" fn ipc_register_class_ex_w(lp_wnd_class_ex: *const WndClassExW) -> u16 {
+    let bytes = weave_ipc::struct_to_value(&*lp_wnd_class_ex);
+    match ipc_call("user32.dll", "RegisterClassExW", vec![bytes]) {
+        Ok(v) => v.as_u64().unwrap_or(0) as u16,
+        Err(_) => 0,
+    }
+}
+
+/// IPC stub for CreateWindowExW.
+pub unsafe extern "win64" fn ipc_create_window_ex_w(
+    dw_ex_style: u32, lp_class_name: *const u16, lp_window_name: *const u16,
+    dw_style: u32, x: i32, y: i32, n_width: i32, n_height: i32,
+    h_wnd_parent: usize, h_menu: usize, h_instance: usize, lp_param: *mut u8,
+) -> usize {
+    // Read wide strings from guest memory (valid in both processes via COW fork)
+    let cls_name = if (lp_class_name as usize) >> 16 == 0 {
+        format!("#{}", lp_class_name as u16)
+    } else {
+        let len = (0..256).find(|&i| unsafe { *lp_class_name.add(i) } == 0).unwrap_or(0);
+        String::from_utf16_lossy(std::slice::from_raw_parts(lp_class_name, len))
+    };
+    let win_name = if !lp_window_name.is_null() {
+        let len = (0..1024).find(|&i| unsafe { *lp_window_name.add(i) } == 0).unwrap_or(0);
+        String::from_utf16_lossy(std::slice::from_raw_parts(lp_window_name, len))
+    } else {
+        String::new()
+    };
+    match ipc_call("user32.dll", "CreateWindowExW", vec![
+        json!(dw_ex_style), json!(cls_name), json!(win_name),
+        json!(dw_style), json!(x), json!(y), json!(n_width), json!(n_height),
+        json!(h_wnd_parent), json!(h_menu), json!(h_instance), json!(lp_param as usize),
+    ]) {
+        Ok(v) => v.as_u64().unwrap_or(0) as usize,
+        Err(_) => 0,
+    }
+}
+
+/// IPC stub for ShowWindow.
+pub extern "win64" fn ipc_show_window(h_wnd: usize, n_cmd_show: i32) -> i32 {
+    match ipc_call("user32.dll", "ShowWindow", vec![json!(h_wnd), json!(n_cmd_show)]) {
+        Ok(v) => v.as_i64().unwrap_or(0) as i32,
+        Err(_) => 0,
+    }
+}
+
+/// IPC stub for UpdateWindow.
+pub extern "win64" fn ipc_update_window(h_wnd: usize) -> i32 {
+    match ipc_call("user32.dll", "UpdateWindow", vec![json!(h_wnd)]) {
+        Ok(v) => v.as_i64().unwrap_or(0) as i32,
+        Err(_) => 0,
+    }
+}
+
+/// IPC stub for GetMessageW.
+pub unsafe extern "win64" fn ipc_get_message_w(
+    lp_msg: *mut Msg, h_wnd: usize, msg_filter_min: u32, msg_filter_max: u32,
+) -> i32 {
+    match ipc_call("user32.dll", "GetMessageW", vec![json!(h_wnd), json!(msg_filter_min), json!(msg_filter_max)]) {
+        Ok(v) => {
+            if let Some(msg_bytes) = v.get("msg") {
+                if let Ok(msg) = weave_ipc::value_to_struct::<Msg>(msg_bytes) {
+                    unsafe { *lp_msg = msg; }
+                }
+            }
+            v.get("ret").and_then(|r| r.as_i64()).unwrap_or(-1) as i32
+        }
+        Err(_) => {
+            unsafe { std::ptr::write_bytes(lp_msg as *mut u8, 0, std::mem::size_of::<Msg>()); }
+            -1
+        }
+    }
+}
+
+/// IPC stub for PeekMessageW.
+pub unsafe extern "win64" fn ipc_peek_message_w(
+    lp_msg: *mut Msg, h_wnd: usize, msg_filter_min: u32, msg_filter_max: u32, w_remove_msg: u32,
+) -> i32 {
+    match ipc_call("user32.dll", "PeekMessageW", vec![
+        json!(h_wnd), json!(msg_filter_min), json!(msg_filter_max), json!(w_remove_msg),
+    ]) {
+        Ok(v) => {
+            if let Some(msg_bytes) = v.get("msg") {
+                if let Ok(msg) = weave_ipc::value_to_struct::<Msg>(msg_bytes) {
+                    unsafe { *lp_msg = msg; }
+                }
+            }
+            v.get("ret").and_then(|r| r.as_i64()).unwrap_or(0) as i32
+        }
+        Err(_) => {
+            unsafe { std::ptr::write_bytes(lp_msg as *mut u8, 0, std::mem::size_of::<Msg>()); }
+            0
+        }
+    }
+}
+
+/// IPC stub for TranslateMessage.
+pub unsafe extern "win64" fn ipc_translate_message(lp_msg: *const Msg) -> i32 {
+    let msg_bytes = weave_ipc::struct_to_value(unsafe { &*lp_msg });
+    match ipc_call("user32.dll", "TranslateMessage", vec![msg_bytes]) {
+        Ok(v) => v.as_i64().unwrap_or(0) as i32,
+        Err(_) => 0,
+    }
+}
+
+/// IPC stub for DispatchMessageW.
+pub unsafe extern "win64" fn ipc_dispatch_message_w(lp_msg: *const Msg) -> isize {
+    let msg_bytes = weave_ipc::struct_to_value(unsafe { &*lp_msg });
+    match ipc_call("user32.dll", "DispatchMessageW", vec![msg_bytes]) {
+        Ok(v) => v.as_i64().unwrap_or(0) as isize,
+        Err(_) => 0,
+    }
+}
+
+/// IPC stub for DefWindowProcW.
+pub extern "win64" fn ipc_def_window_proc_w(h_wnd: usize, msg: u32, w_param: usize, l_param: isize) -> isize {
+    match ipc_call("user32.dll", "DefWindowProcW", vec![json!(h_wnd), json!(msg), json!(w_param), json!(l_param)]) {
+        Ok(v) => v.as_i64().unwrap_or(0) as isize,
+        Err(_) => 0,
+    }
+}
+
+/// IPC stub for GetDC.
+pub extern "win64" fn ipc_get_dc(h_wnd: usize) -> usize {
+    match ipc_call("user32.dll", "GetDC", vec![json!(h_wnd)]) {
+        Ok(v) => v.as_u64().unwrap_or(0) as usize,
+        Err(_) => 0,
+    }
+}
+
+/// IPC stub for ReleaseDC.
+pub extern "win64" fn ipc_release_dc(h_wnd: usize, h_dc: usize) -> i32 {
+    match ipc_call("user32.dll", "ReleaseDC", vec![json!(h_wnd), json!(h_dc)]) {
+        Ok(v) => v.as_i64().unwrap_or(0) as i32,
+        Err(_) => 0,
+    }
+}
+
+/// IPC stub for GetClientRect.
+pub unsafe extern "win64" fn ipc_get_client_rect(h_wnd: usize, lp_rect: *mut weave_user32::defs::Rect) -> i32 {
+    match ipc_call("user32.dll", "GetClientRect", vec![json!(h_wnd)]) {
+        Ok(v) => {
+            if let Some(rect_bytes) = v.get("rect") {
+                if let Ok(rect) = weave_ipc::value_to_struct::<weave_user32::defs::Rect>(rect_bytes) {
+                    unsafe { *lp_rect = rect; }
+                }
+            }
+            v.get("ret").and_then(|r| r.as_i64()).unwrap_or(0) as i32
+        }
+        Err(_) => 0,
+    }
+}
+
+/// IPC stub for DestroyWindow.
+pub extern "win64" fn ipc_destroy_window(h_wnd: usize) -> i32 {
+    match ipc_call("user32.dll", "DestroyWindow", vec![json!(h_wnd)]) {
+        Ok(v) => v.as_i64().unwrap_or(0) as i32,
+        Err(_) => 0,
+    }
+}
+
+/// IPC stub for PostQuitMessage.
+pub extern "win64" fn ipc_post_quit_message(n_exit_code: i32) {
+    let _ = ipc_call("user32.dll", "PostQuitMessage", vec![json!(n_exit_code)]);
+}
+
+/// IPC stub for GetSystemMetrics.
+pub extern "win64" fn ipc_get_system_metrics(n_index: i32) -> i32 {
+    match ipc_call("user32.dll", "GetSystemMetrics", vec![json!(n_index)]) {
+        Ok(v) => v.as_i64().unwrap_or(0) as i32,
+        Err(_) => 0,
+    }
+}
+
+/// IPC stub for SetCursor.
+pub extern "win64" fn ipc_set_cursor(h_cursor: usize) -> usize {
+    match ipc_call("user32.dll", "SetCursor", vec![json!(h_cursor)]) {
+        Ok(v) => v.as_u64().unwrap_or(0) as usize,
+        Err(_) => 0,
+    }
+}
+
 /// IPC stub for ExitProcess.
 pub extern "win64" fn ipc_exit_process(u_exit_code: u32) -> ! {
     let fd = CHILD_FD.get().expect("CHILD_FD not set in child");
@@ -505,11 +703,32 @@ pub unsafe extern "win64" fn ipc_write_console_w(
 /// code calls IPC stubs instead of the real Win32 implementations.
 fn resolve_with_ipc_stubs(dll: &str, func: &str) -> Option<usize> {
     let dll_lower = dll.to_lowercase();
+    // For user32 and gdi32, ALL calls go through IPC (seccomp blocks X11 poll).
+    // Each IPC stub serialises args, sends them to the host process, and
+    // returns the host's result.  The host process runs without seccomp and
+    // calls the real in-process implementations.
     match (dll_lower.as_str(), func) {
         ("kernel32.dll", "ExitProcess") => Some(ipc_exit_process as *const () as usize),
         ("kernel32.dll", "GetStdHandle") => Some(ipc_get_std_handle as *const () as usize),
         ("kernel32.dll", "WriteFile") => Some(ipc_write_file as *const () as usize),
         ("kernel32.dll", "WriteConsoleW") => Some(ipc_write_console_w as *const () as usize),
+        // user32.dll — message loop and window lifecycle
+        ("user32.dll", "RegisterClassExW") => Some(ipc_register_class_ex_w as *const () as usize),
+        ("user32.dll", "CreateWindowExW") => Some(ipc_create_window_ex_w as *const () as usize),
+        ("user32.dll", "ShowWindow") => Some(ipc_show_window as *const () as usize),
+        ("user32.dll", "UpdateWindow") => Some(ipc_update_window as *const () as usize),
+        ("user32.dll", "GetMessageW") => Some(ipc_get_message_w as *const () as usize),
+        ("user32.dll", "PeekMessageW") => Some(ipc_peek_message_w as *const () as usize),
+        ("user32.dll", "TranslateMessage") => Some(ipc_translate_message as *const () as usize),
+        ("user32.dll", "DispatchMessageW") => Some(ipc_dispatch_message_w as *const () as usize),
+        ("user32.dll", "DefWindowProcW") => Some(ipc_def_window_proc_w as *const () as usize),
+        ("user32.dll", "GetDC") => Some(ipc_get_dc as *const () as usize),
+        ("user32.dll", "ReleaseDC") => Some(ipc_release_dc as *const () as usize),
+        ("user32.dll", "GetClientRect") => Some(ipc_get_client_rect as *const () as usize),
+        ("user32.dll", "DestroyWindow") => Some(ipc_destroy_window as *const () as usize),
+        ("user32.dll", "PostQuitMessage") => Some(ipc_post_quit_message as *const () as usize),
+        ("user32.dll", "GetSystemMetrics") => Some(ipc_get_system_metrics as *const () as usize),
+        ("user32.dll", "SetCursor") => Some(ipc_set_cursor as *const () as usize),
         _ => resolve(dll, func),
     }
 }
@@ -567,6 +786,139 @@ fn ipc_handler(dll: &str, function: &str, args: &[serde_json::Value]) -> Option<
             let ret = unsafe { func(h_console, u16_buf.as_ptr(), n_chars, if has_chars_written { &mut written } else { std::ptr::null_mut() }, 0) };
             eprintln!("weave/host: WriteConsoleW({h_console:#x}, {} chars) → {ret}, written={written}", n_chars);
             Some(serde_json::json!({"ok": ret != 0, "written": written}))
+        }
+        // ── user32.dll — message loop and window lifecycle ─────────────────
+        ("user32.dll", "RegisterClassExW") => {
+            let wc: WndClassExW = args.get(0).and_then(|v| weave_ipc::value_to_struct(v).ok())?;
+            let addr = resolve("user32.dll", "RegisterClassExW")?;
+            let func: unsafe extern "win64" fn(*const WndClassExW) -> u16 = unsafe { std::mem::transmute(addr) };
+            let atom = unsafe { func(&wc) };
+            Some(json!(atom))
+        }
+        ("user32.dll", "CreateWindowExW") => {
+            let exs = args.get(0).and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+            let cls = args.get(1).and_then(|v| v.as_str()).unwrap_or("");
+            let title = args.get(2).and_then(|v| v.as_str()).unwrap_or("");
+            let style = args.get(3).and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+            let x = args.get(4).and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+            let y = args.get(5).and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+            let w = args.get(6).and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+            let h = args.get(7).and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+            let parent = args.get(8).and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            let menu = args.get(9).and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            let inst = args.get(10).and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            let param = args.get(11).and_then(|v| v.as_u64()).unwrap_or(0) as *mut u8;
+            let cls_w: Vec<u16> = cls.encode_utf16().chain(std::iter::once(0)).collect();
+            let title_w: Vec<u16> = title.encode_utf16().chain(std::iter::once(0)).collect();
+            let addr = resolve("user32.dll", "CreateWindowExW")?;
+            type CwFn = unsafe extern "win64" fn(u32, *const u16, *const u16, u32, i32, i32, i32, i32, usize, usize, usize, *mut u8) -> usize;
+            let func: CwFn = unsafe { std::mem::transmute(addr) };
+            let hwnd = unsafe { func(exs, cls_w.as_ptr(), title_w.as_ptr(), style, x, y, w, h, parent, menu, inst, param) };
+            Some(json!(hwnd))
+        }
+        ("user32.dll", "ShowWindow") => {
+            let h_wnd = args.get(0).and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            let c = args.get(1).and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+            let addr = resolve("user32.dll", "ShowWindow")?;
+            let func: extern "win64" fn(usize, i32) -> i32 = unsafe { std::mem::transmute(addr) };
+            Some(json!(func(h_wnd, c)))
+        }
+        ("user32.dll", "UpdateWindow") => {
+            let h_wnd = args.get(0).and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            let addr = resolve("user32.dll", "UpdateWindow")?;
+            let func: extern "win64" fn(usize) -> i32 = unsafe { std::mem::transmute(addr) };
+            Some(json!(func(h_wnd)))
+        }
+        ("user32.dll", "GetMessageW") => {
+            let h_wnd = args.get(0).and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            let lo = args.get(1).and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+            let hi = args.get(2).and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+            let addr = resolve("user32.dll", "GetMessageW")?;
+            type GmFn = unsafe extern "win64" fn(*mut Msg, usize, u32, u32) -> i32;
+            let func: GmFn = unsafe { std::mem::transmute(addr) };
+            let mut msg: Msg = unsafe { std::mem::zeroed() };
+            let ret = unsafe { func(&mut msg, h_wnd, lo, hi) };
+            Some(json!({"ret": ret, "msg": weave_ipc::struct_to_value(&msg)}))
+        }
+        ("user32.dll", "PeekMessageW") => {
+            let h_wnd = args.get(0).and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            let lo = args.get(1).and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+            let hi = args.get(2).and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+            let rm = args.get(3).and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+            let addr = resolve("user32.dll", "PeekMessageW")?;
+            type PmFn = unsafe extern "win64" fn(*mut Msg, usize, u32, u32, u32) -> i32;
+            let func: PmFn = unsafe { std::mem::transmute(addr) };
+            let mut msg: Msg = unsafe { std::mem::zeroed() };
+            let ret = unsafe { func(&mut msg, h_wnd, lo, hi, rm) };
+            Some(json!({"ret": ret, "msg": weave_ipc::struct_to_value(&msg)}))
+        }
+        ("user32.dll", "TranslateMessage") => {
+            let msg: Msg = args.get(0).and_then(|v| weave_ipc::value_to_struct(v).ok())?;
+            let addr = resolve("user32.dll", "TranslateMessage")?;
+            let func: unsafe extern "win64" fn(*const Msg) -> i32 = unsafe { std::mem::transmute(addr) };
+            Some(json!(unsafe { func(&msg) }))
+        }
+        ("user32.dll", "DispatchMessageW") => {
+            let msg: Msg = args.get(0).and_then(|v| weave_ipc::value_to_struct(v).ok())?;
+            let addr = resolve("user32.dll", "DispatchMessageW")?;
+            let func: unsafe extern "win64" fn(*const Msg) -> isize = unsafe { std::mem::transmute(addr) };
+            Some(json!(unsafe { func(&msg) }))
+        }
+        ("user32.dll", "DefWindowProcW") => {
+            let h = args.get(0).and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            let m = args.get(1).and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+            let wp = args.get(2).and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            let lp = args.get(3).and_then(|v| v.as_i64()).unwrap_or(0) as isize;
+            let addr = resolve("user32.dll", "DefWindowProcW")?;
+            let func: extern "win64" fn(usize, u32, usize, isize) -> isize = unsafe { std::mem::transmute(addr) };
+            Some(json!(func(h, m, wp, lp)))
+        }
+        ("user32.dll", "GetDC") => {
+            let h = args.get(0).and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            let addr = resolve("user32.dll", "GetDC")?;
+            let func: extern "win64" fn(usize) -> usize = unsafe { std::mem::transmute(addr) };
+            Some(json!(func(h)))
+        }
+        ("user32.dll", "ReleaseDC") => {
+            let h = args.get(0).and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            let dc = args.get(1).and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            let addr = resolve("user32.dll", "ReleaseDC")?;
+            let func: extern "win64" fn(usize, usize) -> i32 = unsafe { std::mem::transmute(addr) };
+            Some(json!(func(h, dc)))
+        }
+        ("user32.dll", "GetClientRect") => {
+            let h = args.get(0).and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            let addr = resolve("user32.dll", "GetClientRect")?;
+            type GcrFn = unsafe extern "win64" fn(usize, *mut weave_user32::defs::Rect) -> i32;
+            let func: GcrFn = unsafe { std::mem::transmute(addr) };
+            let mut rect: weave_user32::defs::Rect = unsafe { std::mem::zeroed() };
+            let ret = unsafe { func(h, &mut rect) };
+            Some(json!({"ret": ret, "rect": weave_ipc::struct_to_value(&rect)}))
+        }
+        ("user32.dll", "DestroyWindow") => {
+            let h = args.get(0).and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            let addr = resolve("user32.dll", "DestroyWindow")?;
+            let func: extern "win64" fn(usize) -> i32 = unsafe { std::mem::transmute(addr) };
+            Some(json!(func(h)))
+        }
+        ("user32.dll", "PostQuitMessage") => {
+            let code = args.get(0).and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+            let addr = resolve("user32.dll", "PostQuitMessage")?;
+            let func: extern "win64" fn(i32) = unsafe { std::mem::transmute(addr) };
+            func(code);
+            Some(json!(0))
+        }
+        ("user32.dll", "GetSystemMetrics") => {
+            let idx = args.get(0).and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+            let addr = resolve("user32.dll", "GetSystemMetrics")?;
+            let func: extern "win64" fn(i32) -> i32 = unsafe { std::mem::transmute(addr) };
+            Some(json!(func(idx)))
+        }
+        ("user32.dll", "SetCursor") => {
+            let c = args.get(0).and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            let addr = resolve("user32.dll", "SetCursor")?;
+            let func: extern "win64" fn(usize) -> usize = unsafe { std::mem::transmute(addr) };
+            Some(json!(func(c)))
         }
         _ => {
             eprintln!("weave/host: unhandled IPC call: {dll}!{function}");

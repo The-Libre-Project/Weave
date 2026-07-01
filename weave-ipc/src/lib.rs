@@ -80,6 +80,31 @@ pub fn recv_reply(fd: i32) -> Result<ReplyMsg, String> {
     recv_json(fd)
 }
 
+/// Serialize a repr(C) struct to a JSON value by encoding its raw bytes.
+///
+/// Safety: T must be plain-old-data with no interior pointers that need
+/// relocation (but since we use fork-based IPC with shared address space,
+/// pointers remain valid on the host side).
+pub fn struct_to_value<T>(s: &T) -> serde_json::Value {
+    let bytes = unsafe {
+        std::slice::from_raw_parts(s as *const T as *const u8, std::mem::size_of::<T>())
+    };
+    serde_json::json!(bytes.to_vec())
+}
+
+/// Deserialize a repr(C) struct from a JSON value containing raw bytes.
+///
+/// Safety: T must have the exact same ABI layout as the bytes were serialized
+/// from. Returns an error if the byte count doesn't match.
+pub fn value_to_struct<T>(v: &serde_json::Value) -> Result<T, String> {
+    let bytes: Vec<u8> = serde_json::from_value(v.clone()).map_err(|e| e.to_string())?;
+    let expected = std::mem::size_of::<T>();
+    if bytes.len() != expected {
+        return Err(format!("struct byte size mismatch: expected {expected}, got {}", bytes.len()));
+    }
+    unsafe { Ok(std::ptr::read_unaligned(bytes.as_ptr() as *const T)) }
+}
+
 /// Run the host-side message loop.
 ///
 /// Reads call messages from `fd`, hands each (dll, function, args) to the
