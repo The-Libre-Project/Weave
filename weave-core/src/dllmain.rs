@@ -264,6 +264,7 @@ fn pe_dispatch_rev(reason: u32, order: &[String]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicU32;
 
     static TEST_FLAG: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
@@ -322,5 +323,207 @@ mod tests {
         assert_eq!(ret, 1, "default_dll_main must return TRUE");
         let ret = default_dll_main(0, DLL_PROCESS_DETACH, 0);
         assert_eq!(ret, 1, "default_dll_main must return TRUE on detach too");
+    }
+
+    // ── Thread attach / detach dispatch ──────────────────────────────────
+
+    static S_ATT: AtomicU32 = AtomicU32::new(0);
+    static S_DET: AtomicU32 = AtomicU32::new(0);
+
+    #[cfg(not(target_os = "linux"))]
+    extern "C" fn th_single(_hinst: usize, reason: u32, _reserved: usize) -> i32 {
+        match reason {
+            DLL_THREAD_ATTACH => { S_ATT.fetch_add(1, Ordering::SeqCst); }
+            DLL_THREAD_DETACH => { S_DET.fetch_add(1, Ordering::SeqCst); }
+            _ => {}
+        }
+        1
+    }
+
+    #[cfg(target_os = "linux")]
+    extern "win64" fn th_single(_hinst: usize, reason: u32, _reserved: usize) -> i32 {
+        match reason {
+            DLL_THREAD_ATTACH => { S_ATT.fetch_add(1, Ordering::SeqCst); }
+            DLL_THREAD_DETACH => { S_DET.fetch_add(1, Ordering::SeqCst); }
+            _ => {}
+        }
+        1
+    }
+
+    #[test]
+    fn thread_attach_detach_single_dll() {
+        let _ = crate::dll_registry::register_for_test("th_single.dll".to_string());
+        crate::dll_registry::register_imports("th_single.dll", &[]);
+        register_stub("th_single.dll", th_single);
+
+        let ab = S_ATT.load(Ordering::SeqCst);
+        let db = S_DET.load(Ordering::SeqCst);
+
+        let h = std::thread::spawn(|| {
+            thread_attach();
+            std::thread::yield_now();
+            thread_detach();
+        });
+        h.join().expect("thread panicked");
+
+        assert!(
+            S_ATT.load(Ordering::SeqCst) > ab,
+            "DLL_THREAD_ATTACH must fire for a registered stub"
+        );
+        assert!(
+            S_DET.load(Ordering::SeqCst) > db,
+            "DLL_THREAD_DETACH must fire for a registered stub"
+        );
+    }
+
+    static MA_ATT: AtomicU32 = AtomicU32::new(0);
+    static MA_DET: AtomicU32 = AtomicU32::new(0);
+    static MB_ATT: AtomicU32 = AtomicU32::new(0);
+    static MB_DET: AtomicU32 = AtomicU32::new(0);
+
+    #[cfg(not(target_os = "linux"))]
+    extern "C" fn th_multi_a(_hinst: usize, reason: u32, _reserved: usize) -> i32 {
+        match reason {
+            DLL_THREAD_ATTACH => { MA_ATT.fetch_add(1, Ordering::SeqCst); }
+            DLL_THREAD_DETACH => { MA_DET.fetch_add(1, Ordering::SeqCst); }
+            _ => {}
+        }
+        1
+    }
+
+    #[cfg(target_os = "linux")]
+    extern "win64" fn th_multi_a(_hinst: usize, reason: u32, _reserved: usize) -> i32 {
+        match reason {
+            DLL_THREAD_ATTACH => { MA_ATT.fetch_add(1, Ordering::SeqCst); }
+            DLL_THREAD_DETACH => { MA_DET.fetch_add(1, Ordering::SeqCst); }
+            _ => {}
+        }
+        1
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    extern "C" fn th_multi_b(_hinst: usize, reason: u32, _reserved: usize) -> i32 {
+        match reason {
+            DLL_THREAD_ATTACH => { MB_ATT.fetch_add(1, Ordering::SeqCst); }
+            DLL_THREAD_DETACH => { MB_DET.fetch_add(1, Ordering::SeqCst); }
+            _ => {}
+        }
+        1
+    }
+
+    #[cfg(target_os = "linux")]
+    extern "win64" fn th_multi_b(_hinst: usize, reason: u32, _reserved: usize) -> i32 {
+        match reason {
+            DLL_THREAD_ATTACH => { MB_ATT.fetch_add(1, Ordering::SeqCst); }
+            DLL_THREAD_DETACH => { MB_DET.fetch_add(1, Ordering::SeqCst); }
+            _ => {}
+        }
+        1
+    }
+
+    #[test]
+    fn thread_attach_detach_multi_dll() {
+        let _ = crate::dll_registry::register_for_test("th_multi_a.dll".to_string());
+        let _ = crate::dll_registry::register_for_test("th_multi_b.dll".to_string());
+        crate::dll_registry::register_imports("th_multi_a.dll", &[]);
+        crate::dll_registry::register_imports("th_multi_b.dll", &[]);
+        register_stub("th_multi_a.dll", th_multi_a);
+        register_stub("th_multi_b.dll", th_multi_b);
+
+        let ab_a = MA_ATT.load(Ordering::SeqCst);
+        let db_a = MA_DET.load(Ordering::SeqCst);
+        let ab_b = MB_ATT.load(Ordering::SeqCst);
+        let db_b = MB_DET.load(Ordering::SeqCst);
+
+        let h = std::thread::spawn(|| {
+            thread_attach();
+            std::thread::yield_now();
+            thread_detach();
+        });
+        h.join().expect("thread panicked");
+
+        assert!(MA_ATT.load(Ordering::SeqCst) > ab_a, "DLL_THREAD_ATTACH must fire for DLL A");
+        assert!(MA_DET.load(Ordering::SeqCst) > db_a, "DLL_THREAD_DETACH must fire for DLL A");
+        assert!(MB_ATT.load(Ordering::SeqCst) > ab_b, "DLL_THREAD_ATTACH must fire for DLL B");
+        assert!(MB_DET.load(Ordering::SeqCst) > db_b, "DLL_THREAD_DETACH must fire for DLL B");
+    }
+
+    #[test]
+    fn thread_detach_without_attach_is_safe() {
+        // Register a DLL but only call thread_detach with no preceding thread_attach.
+        // This should not panic — Windows DllMain dispatch tolerates unbalanced calls.
+        let _ = crate::dll_registry::register_for_test("th_detach_only.dll".to_string());
+        crate::dll_registry::register_imports("th_detach_only.dll", &[]);
+        register_stub("th_detach_only.dll", default_dll_main);
+
+        let h = std::thread::spawn(|| {
+            thread_detach();
+        });
+        h.join().expect("thread must not panic on detach-only");
+    }
+
+    #[test]
+    fn thread_attach_empty_dispatch_noop() {
+        // Call thread_attach and thread_detach with no DLLs in the registry.
+        // Must not panic and must not deadlock.
+        let h = std::thread::spawn(|| {
+            thread_attach();
+            std::thread::yield_now();
+            thread_detach();
+        });
+        h.join().expect("empty dispatch must not panic");
+    }
+
+    static TT_ATT: AtomicU32 = AtomicU32::new(0);
+    static TT_DET: AtomicU32 = AtomicU32::new(0);
+
+    #[cfg(not(target_os = "linux"))]
+    extern "C" fn th_two(_hinst: usize, reason: u32, _reserved: usize) -> i32 {
+        match reason {
+            DLL_THREAD_ATTACH => { TT_ATT.fetch_add(1, Ordering::SeqCst); }
+            DLL_THREAD_DETACH => { TT_DET.fetch_add(1, Ordering::SeqCst); }
+            _ => {}
+        }
+        1
+    }
+
+    #[cfg(target_os = "linux")]
+    extern "win64" fn th_two(_hinst: usize, reason: u32, _reserved: usize) -> i32 {
+        match reason {
+            DLL_THREAD_ATTACH => { TT_ATT.fetch_add(1, Ordering::SeqCst); }
+            DLL_THREAD_DETACH => { TT_DET.fetch_add(1, Ordering::SeqCst); }
+            _ => {}
+        }
+        1
+    }
+
+    #[test]
+    fn thread_attach_detach_two_threads() {
+        let _ = crate::dll_registry::register_for_test("th_two.dll".to_string());
+        crate::dll_registry::register_imports("th_two.dll", &[]);
+        register_stub("th_two.dll", th_two);
+
+        let ab = TT_ATT.load(Ordering::SeqCst);
+        let db = TT_DET.load(Ordering::SeqCst);
+
+        let h1 = std::thread::spawn(|| {
+            thread_attach();
+            thread_detach();
+        });
+        let h2 = std::thread::spawn(|| {
+            thread_attach();
+            thread_detach();
+        });
+        h1.join().expect("thread 1 panicked");
+        h2.join().expect("thread 2 panicked");
+
+        assert!(
+            TT_ATT.load(Ordering::SeqCst) >= ab + 2,
+            "two threads must both receive DLL_THREAD_ATTACH"
+        );
+        assert!(
+            TT_DET.load(Ordering::SeqCst) >= db + 2,
+            "two threads must both receive DLL_THREAD_DETACH"
+        );
     }
 }
