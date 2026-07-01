@@ -218,11 +218,64 @@ pub fn font_path(family: &str, weight: i32, italic: bool) -> Option<String> {
     match_font(family, weight, italic).map(|f| f.file_path)
 }
 
+// ── LOGFONTW → Fontconfig translation ────────────────────────────────────────
+
+/// Translate a Windows LOGFONTW struct into a fontconfig pattern and return the
+/// best matching font. Handles family name substitution, weight mapping, italic
+/// flag, and charset hints.
+///
+/// Returns `None` if fontconfig is unavailable or no match is found.
+///
+/// Wine ref: dlls/win32u/font.c — NtGdiHfontCreate calls X11DRV_FontMatch which
+/// builds an FcPattern from the LOGFONTW fields (lfFaceName, lfWeight, lfItalic,
+/// lfHeight, lfCharSet) and calls FcConfigSubstitute + FcDefaultSubstitute +
+/// FcFontMatch.
+pub fn logfont_to_fontconfig(lf: &crate::defs::LogFontW) -> Option<FontInfo> {
+    // 1. Extract family name from lfFaceName (UTF-16).
+    let face_end = lf.lf_face_name.iter().position(|&c| c == 0).unwrap_or(32);
+    let family_str = String::from_utf16_lossy(&lf.lf_face_name[..face_end]);
+    let family = if family_str.trim().is_empty() {
+        "Sans Serif"
+    } else {
+        substitute_font(family_str.trim())
+    };
+
+    // 2. Map Windows weight (0–1000) to fontconfig weight.
+    //    Fontconfig weights: Thin=0, Light=50, Regular=80, Medium=100,
+    //    DemiBold=180, Bold=200, ExtraBold=205, Black=210.
+    let fc_weight = match lf.lf_weight {
+        0 | 400 => fontconfig::FC_WEIGHT_REGULAR, // FW_DONTCARE / FW_NORMAL
+        100 => fontconfig::FC_WEIGHT_THIN,        // FW_THIN
+        200 => fontconfig::FC_WEIGHT_EXTRALIGHT,  // FW_EXTRALIGHT
+        300 => fontconfig::FC_WEIGHT_LIGHT,       // FW_LIGHT
+        500 => fontconfig::FC_WEIGHT_MEDIUM,      // FW_MEDIUM
+        600 => fontconfig::FC_WEIGHT_DEMIBOLD,    // FW_SEMIBOLD
+        700 => fontconfig::FC_WEIGHT_BOLD,        // FW_BOLD
+        800 => fontconfig::FC_WEIGHT_EXTRABOLD,   // FW_EXTRABOLD
+        900 => fontconfig::FC_WEIGHT_BLACK,       // FW_HEAVY/BLACK
+        w if w < 100 => fontconfig::FC_WEIGHT_THIN,
+        w if w < 300 => fontconfig::FC_WEIGHT_LIGHT,
+        w if w < 500 => fontconfig::FC_WEIGHT_REGULAR,
+        w if w < 600 => fontconfig::FC_WEIGHT_MEDIUM,
+        w if w < 700 => fontconfig::FC_WEIGHT_DEMIBOLD,
+        w if w < 800 => fontconfig::FC_WEIGHT_BOLD,
+        w if w < 900 => fontconfig::FC_WEIGHT_EXTRABOLD,
+        _ => fontconfig::FC_WEIGHT_BLACK,
+    };
+
+    // 3. Italic flag.
+    let italic = lf.lf_italic != 0;
+
+    // 4. Match via fontconfig.
+    match_font(family, fc_weight, italic)
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::defs::LogFontW;
 
     #[test]
     fn substitute_known_names() {
@@ -299,6 +352,135 @@ mod tests {
     }
 
     #[test]
+    fn logfont_arial_regular() {
+        let mut face = [0u16; 32];
+        for (i, c) in "Arial\0".encode_utf16().take(32).enumerate() {
+            face[i] = c;
+        }
+        let lf = LogFontW {
+            lf_height: -16,
+            lf_width: 0,
+            lf_escapement: 0,
+            lf_orientation: 0,
+            lf_weight: 400,
+            lf_italic: 0,
+            lf_underline: 0,
+            lf_strike_out: 0,
+            lf_char_set: 0,
+            lf_out_precision: 0,
+            lf_clip_precision: 0,
+            lf_quality: 0,
+            lf_pitch_and_family: 0,
+            lf_face_name: face,
+        };
+        let fi = logfont_to_fontconfig(&lf);
+        assert!(fi.is_some(), "Arial 400 should resolve to a font");
+        if let Some(f) = fi {
+            assert!(!f.file_path.is_empty(), "matched font has no file path");
+        }
+    }
+
+    #[test]
+    fn logfont_bold() {
+        let mut face = [0u16; 32];
+        for (i, c) in "Arial\0".encode_utf16().take(32).enumerate() {
+            face[i] = c;
+        }
+        let lf = LogFontW {
+            lf_height: -16,
+            lf_width: 0,
+            lf_escapement: 0,
+            lf_orientation: 0,
+            lf_weight: 700,
+            lf_italic: 0,
+            lf_underline: 0,
+            lf_strike_out: 0,
+            lf_char_set: 0,
+            lf_out_precision: 0,
+            lf_clip_precision: 0,
+            lf_quality: 0,
+            lf_pitch_and_family: 0,
+            lf_face_name: face,
+        };
+        let fi = logfont_to_fontconfig(&lf);
+        assert!(fi.is_some(), "bold Arial should resolve to a font");
+    }
+
+    #[test]
+    fn logfont_italic() {
+        let mut face = [0u16; 32];
+        for (i, c) in "Arial\0".encode_utf16().take(32).enumerate() {
+            face[i] = c;
+        }
+        let lf = LogFontW {
+            lf_height: -16,
+            lf_width: 0,
+            lf_escapement: 0,
+            lf_orientation: 0,
+            lf_weight: 400,
+            lf_italic: 1,
+            lf_underline: 0,
+            lf_strike_out: 0,
+            lf_char_set: 0,
+            lf_out_precision: 0,
+            lf_clip_precision: 0,
+            lf_quality: 0,
+            lf_pitch_and_family: 0,
+            lf_face_name: face,
+        };
+        let fi = logfont_to_fontconfig(&lf);
+        assert!(fi.is_some(), "italic Arial should resolve to a font");
+    }
+
+    #[test]
+    fn logfont_empty_face_name() {
+        let lf = LogFontW {
+            lf_height: -13,
+            lf_width: 0,
+            lf_escapement: 0,
+            lf_orientation: 0,
+            lf_weight: 400,
+            lf_italic: 0,
+            lf_underline: 0,
+            lf_strike_out: 0,
+            lf_char_set: 0,
+            lf_out_precision: 0,
+            lf_clip_precision: 0,
+            lf_quality: 0,
+            lf_pitch_and_family: 0,
+            lf_face_name: [0u16; 32],
+        };
+        let fi = logfont_to_fontconfig(&lf);
+        assert!(
+            fi.is_some(),
+            "empty face name should fall back to a default font"
+        );
+    }
+
+    #[test]
+    fn logfont_weight_mapping() {
+        // FW_DONTCARE (0) → same as FW_NORMAL → should resolve
+        let mut face = [0u16; 32];
+        let lf = LogFontW {
+            lf_height: -13,
+            lf_width: 0,
+            lf_escapement: 0,
+            lf_orientation: 0,
+            lf_weight: 0,
+            lf_italic: 0,
+            lf_underline: 0,
+            lf_strike_out: 0,
+            lf_char_set: 0,
+            lf_out_precision: 0,
+            lf_clip_precision: 0,
+            lf_quality: 0,
+            lf_pitch_and_family: 0,
+            lf_face_name: face,
+        };
+        let fi = logfont_to_fontconfig(&lf);
+        assert!(fi.is_some(), "FW_DONTCARE should resolve");
+    }
+
     fn substitution_table_completeness() {
         // Verify every known Windows font maps to a non-empty string.
         let known = [

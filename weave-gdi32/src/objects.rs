@@ -25,6 +25,8 @@ pub enum GdiKind {
         weight: i32,
         italic: bool,
         face: [u16; 32],
+        font_path: Option<String>,
+        pixel_size: f32,
     },
     /// Device-dependent bitmap (DDB) allocated via `CreateCompatibleBitmap` /
     /// `CreateBitmap`. Weave treats every compatible bitmap as 32-bit ARGB

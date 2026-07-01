@@ -93,20 +93,78 @@ pub extern "win64" fn create_pen(fn_pen_style: i32, n_width: i32, color: u32) ->
 // Wine ref: dlls/win32u/font.c — NtGdiHfontCreate fills LOGFONTW; lfFaceName is
 // truncated to LF_FACESIZE-1 (31) chars; lfHeight<0 means cell height, >0 means
 // character height; weight 400=normal, 700=bold.
+/// Resolve pixel size from LOGFONTW height convention.
+/// Negative = character height (em-square), positive = cell height.
+/// At 96 DPI MM_TEXT, 1 logical unit ≈ 1 pixel.
+fn logfont_height_to_px(lf_height: i32) -> f32 {
+    if lf_height == 0 {
+        DEFAULT_FONT_PX
+    } else {
+        lf_height.unsigned_abs().max(8) as f32
+    }
+}
+
+/// Build the LOGFONTW fields that CreateFontW and CreateFontIndirectW share.
+fn build_font_gdi_kind(
+    lf_height: i32,
+    lf_width: i32,
+    lf_escapement: i32,
+    lf_orientation: i32,
+    lf_weight: i32,
+    lf_italic: u32,
+    lf_underline: u32,
+    lf_strike_out: u32,
+    lf_char_set: u32,
+    lf_out_precision: u32,
+    lf_clip_precision: u32,
+    lf_quality: u32,
+    lf_pitch_and_family: u32,
+    face: [u16; 32],
+) -> GdiKind {
+    let lf = defs::LogFontW {
+        lf_height,
+        lf_width,
+        lf_escapement,
+        lf_orientation,
+        lf_weight,
+        lf_italic: lf_italic as u8,
+        lf_underline: lf_underline as u8,
+        lf_strike_out: lf_strike_out as u8,
+        lf_char_set: lf_char_set as u8,
+        lf_out_precision: lf_out_precision as u8,
+        lf_clip_precision: lf_clip_precision as u8,
+        lf_quality: lf_quality as u8,
+        lf_pitch_and_family: lf_pitch_and_family as u8,
+        lf_face_name: face,
+    };
+
+    let pixel_size = logfont_height_to_px(lf_height);
+    let font_path = fontconfig::logfont_to_fontconfig(&lf).map(|fi| fi.file_path);
+
+    GdiKind::Font {
+        height: lf_height,
+        weight: lf_weight,
+        italic: lf_italic != 0,
+        face,
+        font_path,
+        pixel_size,
+    }
+}
+
 pub unsafe extern "win64" fn create_font_w(
     c_height: i32,
-    _c_width: i32,
-    _c_escapement: i32,
-    _c_orientation: i32,
+    c_width: i32,
+    c_escapement: i32,
+    c_orientation: i32,
     c_weight: i32,
     b_italic: u32,
-    _b_underline: u32,
-    _b_strike_out: u32,
-    _i_char_set: u32,
-    _i_out_precision: u32,
-    _i_clip_precision: u32,
-    _i_quality: u32,
-    _i_pitch_and_family: u32,
+    b_underline: u32,
+    b_strike_out: u32,
+    i_char_set: u32,
+    i_out_precision: u32,
+    i_clip_precision: u32,
+    i_quality: u32,
+    i_pitch_and_family: u32,
     lp_sz_face: *const u16,
 ) -> usize {
     let mut face = [0u16; 32];
@@ -121,12 +179,22 @@ pub unsafe extern "win64" fn create_font_w(
             i += 1;
         }
     }
-    objects::alloc(GdiKind::Font {
-        height: c_height,
-        weight: c_weight,
-        italic: b_italic != 0,
+    objects::alloc(build_font_gdi_kind(
+        c_height,
+        c_width,
+        c_escapement,
+        c_orientation,
+        c_weight,
+        b_italic,
+        b_underline,
+        b_strike_out,
+        i_char_set,
+        i_out_precision,
+        i_clip_precision,
+        i_quality,
+        i_pitch_and_family,
         face,
-    })
+    ))
 }
 
 /// CreateFontIndirectW: allocate a logical font from a LOGFONTW struct.
@@ -140,11 +208,15 @@ pub unsafe extern "win64" fn create_font_indirect_w(lplf: *const LogFontW) -> us
         return 0;
     }
     let lf = unsafe { &*lplf };
+    let pixel_size = logfont_height_to_px(lf.lf_height);
+    let font_path = fontconfig::logfont_to_fontconfig(lf).map(|fi| fi.file_path);
     objects::alloc(GdiKind::Font {
         height: lf.lf_height,
         weight: lf.lf_weight,
         italic: lf.lf_italic != 0,
         face: lf.lf_face_name,
+        font_path,
+        pixel_size,
     })
 }
 
@@ -514,12 +586,21 @@ fn font_px_size(hdc: usize) -> f32 {
         return DEFAULT_FONT_PX;
     }
     let mut height: i32 = 0;
+    let mut pixel_size: f32 = 0.0;
     objects::get(h_font, |kind| {
-        if let GdiKind::Font { height: h, .. } = kind {
+        if let GdiKind::Font {
+            height: h,
+            pixel_size: ps,
+            ..
+        } = kind
+        {
             height = *h;
+            pixel_size = *ps;
         }
     });
-    if height == 0 {
+    if pixel_size > 0.0 {
+        pixel_size
+    } else if height == 0 {
         DEFAULT_FONT_PX
     } else {
         height.unsigned_abs().max(8) as f32
@@ -2088,6 +2169,26 @@ pub unsafe extern "win64" fn get_text_metrics_w(hdc: usize, lptm: *mut TextMetri
     }
     let px_size = font_px_size(hdc);
     let fm = weave_user32::font::metrics(px_size);
+
+    // Read weight and italic from the selected font object.
+    let (font_weight, font_italic) = {
+        let h_font = dc::with(hdc, |dc| dc.h_font);
+        let mut weight = 400i32;
+        let mut italic = 0u8;
+        objects::get(h_font, |kind| {
+            if let GdiKind::Font {
+                weight: w,
+                italic: it,
+                ..
+            } = kind
+            {
+                weight = *w;
+                italic = if *it { 1 } else { 0 };
+            }
+        });
+        (weight, italic)
+    };
+
     unsafe {
         let tm = &mut *lptm;
         tm.tm_height = fm.height;
@@ -2106,7 +2207,7 @@ pub unsafe extern "win64" fn get_text_metrics_w(hdc: usize, lptm: *mut TextMetri
         let ave = fm.ave_char_width.min(9);
         tm.tm_ave_char_width = ave;
         tm.tm_max_char_width = ave + 2;
-        tm.tm_weight = 400; // FW_NORMAL
+        tm.tm_weight = font_weight;
         tm.tm_overhang = 0;
         tm.tm_digitized_aspect_x = 96;
         tm.tm_digitized_aspect_y = 96;
@@ -2114,7 +2215,7 @@ pub unsafe extern "win64" fn get_text_metrics_w(hdc: usize, lptm: *mut TextMetri
         tm.tm_last_char = 0xFFFF;
         tm.tm_default_char = b'?' as u16;
         tm.tm_break_char = b' ' as u16;
-        tm.tm_italic = 0;
+        tm.tm_italic = font_italic;
         tm.tm_underlined = 0;
         tm.tm_struck_out = 0;
         tm.tm_pitch_and_family = 0x01 | 0x30; // TMPF_FIXED_PITCH | FF_MODERN
@@ -4813,6 +4914,7 @@ pub unsafe extern "win64" fn get_object_w(h: usize, c: i32, pv: *mut u8) -> i32 
             weight,
             italic,
             face,
+            ..
         } => {
             if c >= 92 {
                 let lf = pv as *mut LogFontW;
