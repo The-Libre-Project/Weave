@@ -81,6 +81,18 @@ pub const APP_SYSCALLS: &[(&str, &[i64])] = &[
     // TODO(#SB4b): Run with WEAVE_SECCOMP_LOG=1 to identify actual denied syscalls for i_view64.exe.
     // Anticipated: file dialog, image codec loading (mmap/mprotect), GDI surface.
     ("i_view64.exe", &[]),
+    // TODO(#SB4c): Run with WEAVE_SECCOMP_LOG=1 to identify actual denied syscalls for 7za.exe.
+    // Anticipated: file I/O (openat, read, write, fstat), memory mapping, CRT init.
+    ("7za.exe", &[]),
+    // TODO(#SB4c): Run with WEAVE_SECCOMP_LOG=1 to identify actual denied syscalls for notepad++.exe.
+    // Anticipated: Scintilla editor, file dialogs, plugin loading, GDI rendering.
+    ("notepad++.exe", &[]),
+    // TODO(#SB4c): Run with WEAVE_SECCOMP_LOG=1 to identify actual denied syscalls for putty.exe.
+    // Anticipated: terminal rendering (GDI), SSH/network, crypto, event loop.
+    ("putty.exe", &[]),
+    // TODO(#SB4c): Run with WEAVE_SECCOMP_LOG=1 to identify actual denied syscalls for Q-Dir_x64.exe.
+    // Anticipated: shell namespace (FindFirstFile, SHBrowseForFolder), file pane population.
+    ("Q-Dir_x64.exe", &[]),
 ];
 
 /// Build a complete seccomp BPF program for the given list of allowed

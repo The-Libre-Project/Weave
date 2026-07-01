@@ -769,6 +769,636 @@ fn sandbox_irfanview_gate() {
     );
 }
 
+/// Gate 9 — 7-Zip CLI extraction: verify archive extraction + seccomp active under sandbox.
+#[test]
+fn sandbox_7zip_gate() {
+    if !cfg!(target_os = "linux") {
+        eprintln!("skipping sandbox_7zip_gate — requires Linux");
+        return;
+    }
+
+    let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let bin_dir = manifest.parent().unwrap().join("tests/fixtures/bin");
+    let seven_zip = bin_dir.join("7za.exe");
+    let archive = bin_dir.join("test.7z");
+
+    if !seven_zip.exists() {
+        eprintln!("skipping: 7za.exe not present in tests/fixtures/bin/");
+        return;
+    }
+    if !archive.exists() {
+        eprintln!("skipping: test.7z not present in tests/fixtures/bin/");
+        return;
+    }
+
+    let out_dir = bin_dir.join("extract_out_sb4c");
+    if out_dir.exists() {
+        let _ = std::fs::remove_dir_all(&out_dir);
+    }
+    std::fs::create_dir_all(&out_dir).expect("failed to create extract_out_sb4c");
+
+    let weave_bin = env!("CARGO_BIN_EXE_weave");
+    let mut child = Command::new(weave_bin)
+        .current_dir(&bin_dir)
+        .arg(&seven_zip)
+        .arg("x")
+        .arg("test.7z")
+        .arg(format!("-o{}", out_dir.display()))
+        .arg("-y")
+        .stderr(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .expect("failed to spawn weave on 7za.exe");
+
+    let stderr_pipe = child.stderr.take().expect("stderr was piped");
+    let stderr_shared = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let stderr_writer = std::sync::Arc::clone(&stderr_shared);
+    let drain_thread = std::thread::spawn(move || {
+        use std::io::Read;
+        let mut pipe = stderr_pipe;
+        let mut chunk = [0u8; 4096];
+        loop {
+            match pipe.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => stderr_writer.lock().unwrap().extend_from_slice(&chunk[..n]),
+                Err(_) => break,
+            }
+        }
+    });
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let mut child_pid: Option<i32> = None;
+    let mut seccomp_value: Option<u32> = None;
+    let mut exit_status: Option<std::process::ExitStatus> = None;
+
+    loop {
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            break;
+        }
+
+        if child_pid.is_none() {
+            let stderr_bytes = stderr_shared.lock().unwrap().clone();
+            let stderr = String::from_utf8_lossy(&stderr_bytes);
+            child_pid = stderr.lines().find_map(|line| {
+                line.strip_prefix("PHASE: child_spawned pid=")
+                    .and_then(|s| s.trim().parse::<i32>().ok())
+            });
+        }
+
+        if let Some(pid) = child_pid {
+            if seccomp_value.is_none() {
+                let status_path = format!("/proc/{pid}/status");
+                if let Ok(content) = std::fs::read_to_string(&status_path) {
+                    seccomp_value = content.lines().find_map(|l| {
+                        let t = l.trim();
+                        if t.starts_with("Seccomp:") {
+                            t.split_whitespace()
+                                .nth(1)
+                                .and_then(|s| s.parse::<u32>().ok())
+                        } else {
+                            None
+                        }
+                    });
+                    if let Some(val) = seccomp_value {
+                        eprintln!("sandbox_7zip_gate: child pid={pid} Seccomp={val}");
+                    }
+                }
+            }
+        }
+
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                exit_status = Some(status);
+                break;
+            }
+            Ok(None) => {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(e) => panic!("wait failed: {e}"),
+        }
+    }
+
+    drain_thread.join().expect("stderr drain thread panicked");
+    let stderr_bytes = stderr_shared.lock().unwrap().clone();
+    let stderr = String::from_utf8_lossy(&stderr_bytes);
+
+    eprintln!("sandbox_7zip_gate stderr:\n{stderr}");
+    eprintln!("sandbox_7zip_gate exit: {:?}", exit_status);
+
+    assert!(
+        seccomp_value == Some(2),
+        "FAIL: Seccomp != 2 (got {:?}) — seccomp not active.\nstderr:\n{stderr}",
+        seccomp_value
+    );
+    assert!(
+        stderr.contains("PHASE: seccomp_applied"),
+        "FAIL: PHASE: seccomp_applied not found.\nstderr:\n{stderr}"
+    );
+    assert!(
+        exit_status.map(|s| s.success()).unwrap_or(false),
+        "FAIL: 7za.exe x did not exit 0.\nexit: {:?}\nstderr:\n{stderr}",
+        exit_status
+    );
+
+    let checks: &[(&str, &[u8])] = &[
+        ("hello.txt", b"Hello from inside the archive\\!\n"),
+        ("subdir/world.txt", b"Another file in a subdirectory.\n"),
+    ];
+    for (name, expected_bytes) in checks {
+        let path = out_dir.join(name);
+        assert!(
+            path.exists(),
+            "FAIL: {name} was not extracted from test.7z\nstderr:\n{stderr}"
+        );
+        let actual = std::fs::read(&path).unwrap_or_else(|e| {
+            panic!("FAIL: cannot read extracted {name}: {e}\nstderr:\n{stderr}")
+        });
+        let actual_hash = sha256_of_bytes(&actual);
+        let expected_hash = sha256_of_bytes(expected_bytes);
+        assert_eq!(
+            actual_hash, expected_hash,
+            "FAIL: {name} SHA-256 mismatch.\nexpected: {expected_hash}\nactual:   {actual_hash}\nstderr:\n{stderr}",
+        );
+        eprintln!("sandbox_7zip_gate: {name} OK — SHA-256 {actual_hash}");
+    }
+}
+
+/// Gate 10 — Notepad++ WM_PAINT under sandbox: verify paint dispatch + seccomp.
+#[test]
+fn sandbox_npp_gate() {
+    if !cfg!(target_os = "linux") {
+        eprintln!("skipping sandbox_npp_gate — requires Linux");
+        return;
+    }
+
+    let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let npp_dir = manifest.parent().unwrap().join("tests/fixtures/npp");
+    let npp_exe = npp_dir.join("notepad++.exe");
+    let test_file = npp_dir.join("test.py");
+
+    if !npp_exe.exists() {
+        eprintln!("skipping: notepad++.exe not present in tests/fixtures/npp/");
+        return;
+    }
+    if !test_file.exists() {
+        eprintln!("skipping: test.py not present in tests/fixtures/npp/");
+        return;
+    }
+
+    let weave_bin = env!("CARGO_BIN_EXE_weave");
+    let mut child = Command::new(weave_bin)
+        .current_dir(&npp_dir)
+        .arg(&npp_exe)
+        .arg(&test_file)
+        .env("DISPLAY", ":99")
+        .stderr(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .expect("failed to spawn weave on notepad++.exe");
+
+    let stderr_pipe = child.stderr.take().expect("stderr was piped");
+    let stderr_shared = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let stderr_writer = std::sync::Arc::clone(&stderr_shared);
+    let drain_thread = std::thread::spawn(move || {
+        use std::io::Read;
+        let mut pipe = stderr_pipe;
+        let mut chunk = [0u8; 4096];
+        loop {
+            match pipe.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => stderr_writer.lock().unwrap().extend_from_slice(&chunk[..n]),
+                Err(_) => break,
+            }
+        }
+    });
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let mut saw_wm_paint = false;
+    let mut sent_alt_f4 = false;
+    let mut exit_status: Option<std::process::ExitStatus> = None;
+    let mut child_pid: Option<i32> = None;
+    let mut seccomp_value: Option<u32> = None;
+
+    loop {
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            break;
+        }
+
+        let stderr_bytes = stderr_shared.lock().unwrap().clone();
+        let stderr = String::from_utf8_lossy(&stderr_bytes);
+
+        if !saw_wm_paint && stderr.contains("PHASE: wm_paint_dispatched_first") {
+            saw_wm_paint = true;
+            eprintln!("observed PHASE: wm_paint_dispatched_first");
+        }
+
+        if child_pid.is_none() {
+            child_pid = stderr.lines().find_map(|line| {
+                line.strip_prefix("PHASE: child_spawned pid=")
+                    .and_then(|s| s.trim().parse::<i32>().ok())
+            });
+        }
+
+        if let Some(pid) = child_pid {
+            if seccomp_value.is_none() {
+                let status_path = format!("/proc/{pid}/status");
+                if let Ok(content) = std::fs::read_to_string(&status_path) {
+                    seccomp_value = content.lines().find_map(|l| {
+                        let t = l.trim();
+                        if t.starts_with("Seccomp:") {
+                            t.split_whitespace()
+                                .nth(1)
+                                .and_then(|s| s.parse::<u32>().ok())
+                        } else {
+                            None
+                        }
+                    });
+                    if let Some(val) = seccomp_value {
+                        eprintln!("sandbox_npp_gate: child pid={pid} Seccomp={val}");
+                    }
+                }
+            }
+        }
+
+        if saw_wm_paint && !sent_alt_f4 {
+            sent_alt_f4 = true;
+            eprintln!("observed wm_paint — sending Alt+F4 via xdotool");
+            // Notepad++ window title starts with filename then " - Notepad++"
+            let search = Command::new("xdotool")
+                .args(["search", "--name", "Notepad++"])
+                .output();
+            match search {
+                Ok(out) if out.status.success() => {
+                    let wid = String::from_utf8_lossy(&out.stdout)
+                        .lines()
+                        .next()
+                        .map(|s| s.trim().to_string())
+                        .unwrap_or_default();
+                    if !wid.is_empty() {
+                        let _ = Command::new("xdotool")
+                            .args(["windowactivate", &wid])
+                            .output();
+                        std::thread::sleep(std::time::Duration::from_millis(200));
+                        let _ = Command::new("xdotool")
+                            .args(["key", "--window", &wid, "Alt+F4"])
+                            .output();
+                    } else {
+                        eprintln!("xdotool search found no window matching 'Notepad++'");
+                    }
+                }
+                _ => {
+                    eprintln!("xdotool search failed or not found");
+                }
+            }
+        }
+
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                exit_status = Some(status);
+                break;
+            }
+            Ok(None) => {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err(e) => panic!("wait failed: {e}"),
+        }
+    }
+
+    drain_thread.join().expect("stderr drain thread panicked");
+    let stderr_bytes = stderr_shared.lock().unwrap().clone();
+    let stderr = String::from_utf8_lossy(&stderr_bytes);
+
+    eprintln!("sandbox_npp_gate stderr:\n{stderr}");
+    eprintln!("sandbox_npp_gate exit: {:?}", exit_status);
+
+    assert!(
+        saw_wm_paint,
+        "FAIL: PHASE: wm_paint_dispatched_first not observed within 30s.\nstderr:\n{stderr}"
+    );
+    assert!(
+        seccomp_value == Some(2),
+        "FAIL: Seccomp != 2 (got {:?}) — seccomp not active.\nstderr:\n{stderr}",
+        seccomp_value
+    );
+}
+
+/// Gate 11 — PuTTY terminal window under sandbox: verify window creation + seccomp.
+#[test]
+fn sandbox_putty_gate() {
+    if !cfg!(target_os = "linux") {
+        eprintln!("skipping sandbox_putty_gate — requires Linux");
+        return;
+    }
+
+    let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let bin_dir = manifest.parent().unwrap().join("tests/fixtures/bin");
+    let putty_exe = bin_dir.join("putty.exe");
+
+    if !putty_exe.exists() {
+        eprintln!("skipping: putty.exe not present in tests/fixtures/bin/");
+        return;
+    }
+
+    let weave_bin = env!("CARGO_BIN_EXE_weave");
+    let mut child = Command::new(weave_bin)
+        .arg(&putty_exe)
+        .env("DISPLAY", ":99")
+        .stderr(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .expect("failed to spawn weave on putty.exe");
+
+    let stderr_pipe = child.stderr.take().expect("stderr was piped");
+    let stderr_shared = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let stderr_writer = std::sync::Arc::clone(&stderr_shared);
+    let drain_thread = std::thread::spawn(move || {
+        use std::io::Read;
+        let mut pipe = stderr_pipe;
+        let mut chunk = [0u8; 4096];
+        loop {
+            match pipe.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => stderr_writer.lock().unwrap().extend_from_slice(&chunk[..n]),
+                Err(_) => break,
+            }
+        }
+    });
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let mut saw_create_window = false;
+    let mut sent_alt_f4 = false;
+    let mut exit_status: Option<std::process::ExitStatus> = None;
+    let mut child_pid: Option<i32> = None;
+    let mut seccomp_value: Option<u32> = None;
+
+    loop {
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            break;
+        }
+
+        let stderr_bytes = stderr_shared.lock().unwrap().clone();
+        let stderr = String::from_utf8_lossy(&stderr_bytes);
+
+        if !saw_create_window && stderr.contains("PHASE: create_window_first") {
+            saw_create_window = true;
+            eprintln!("observed PHASE: create_window_first");
+        }
+
+        if child_pid.is_none() {
+            child_pid = stderr.lines().find_map(|line| {
+                line.strip_prefix("PHASE: child_spawned pid=")
+                    .and_then(|s| s.trim().parse::<i32>().ok())
+            });
+        }
+
+        if let Some(pid) = child_pid {
+            if seccomp_value.is_none() {
+                let status_path = format!("/proc/{pid}/status");
+                if let Ok(content) = std::fs::read_to_string(&status_path) {
+                    seccomp_value = content.lines().find_map(|l| {
+                        let t = l.trim();
+                        if t.starts_with("Seccomp:") {
+                            t.split_whitespace()
+                                .nth(1)
+                                .and_then(|s| s.parse::<u32>().ok())
+                        } else {
+                            None
+                        }
+                    });
+                    if let Some(val) = seccomp_value {
+                        eprintln!("sandbox_putty_gate: child pid={pid} Seccomp={val}");
+                    }
+                }
+            }
+        }
+
+        if saw_create_window && !sent_alt_f4 {
+            sent_alt_f4 = true;
+            eprintln!("observed create_window — sending Alt+F4 via xdotool");
+            // PuTTY config window title is "PuTTY Configuration".
+            let search = Command::new("xdotool")
+                .args(["search", "--name", "PuTTY"])
+                .output();
+            match search {
+                Ok(out) if out.status.success() => {
+                    let wid = String::from_utf8_lossy(&out.stdout)
+                        .lines()
+                        .next()
+                        .map(|s| s.trim().to_string())
+                        .unwrap_or_default();
+                    if !wid.is_empty() {
+                        let _ = Command::new("xdotool")
+                            .args(["windowactivate", &wid])
+                            .output();
+                        std::thread::sleep(std::time::Duration::from_millis(200));
+                        let _ = Command::new("xdotool")
+                            .args(["key", "--window", &wid, "Alt+F4"])
+                            .output();
+                    } else {
+                        eprintln!("xdotool search found no window matching 'PuTTY'");
+                    }
+                }
+                _ => {
+                    eprintln!("xdotool search failed or not found");
+                }
+            }
+        }
+
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                exit_status = Some(status);
+                break;
+            }
+            Ok(None) => {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err(e) => panic!("wait failed: {e}"),
+        }
+    }
+
+    drain_thread.join().expect("stderr drain thread panicked");
+    let stderr_bytes = stderr_shared.lock().unwrap().clone();
+    let stderr = String::from_utf8_lossy(&stderr_bytes);
+
+    eprintln!("sandbox_putty_gate stderr:\n{stderr}");
+    eprintln!("sandbox_putty_gate exit: {:?}", exit_status);
+
+    assert!(
+        saw_create_window,
+        "FAIL: PHASE: create_window_first not observed within 30s.\nstderr:\n{stderr}"
+    );
+    assert!(
+        seccomp_value == Some(2),
+        "FAIL: Seccomp != 2 (got {:?}) — seccomp not active.\nstderr:\n{stderr}",
+        seccomp_value
+    );
+}
+
+/// Gate 12 — Q-Dir under sandbox: verify window creation + file pane + seccomp.
+#[test]
+fn sandbox_qdir_gate() {
+    if !cfg!(target_os = "linux") {
+        eprintln!("skipping sandbox_qdir_gate — requires Linux");
+        return;
+    }
+
+    let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let q_dir_dir = manifest.parent().unwrap().join("tests/fixtures/q-dir");
+    let q_dir_exe = q_dir_dir.join("Q-Dir_x64.exe");
+
+    if !q_dir_exe.exists() {
+        eprintln!("skipping: Q-Dir_x64.exe not present in tests/fixtures/q-dir/");
+        return;
+    }
+
+    let weave_bin = env!("CARGO_BIN_EXE_weave");
+    let mut child = Command::new(weave_bin)
+        .current_dir(&q_dir_dir)
+        .arg(&q_dir_exe)
+        .env("DISPLAY", ":99")
+        .stderr(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .expect("failed to spawn weave on Q-Dir_x64.exe");
+
+    let stderr_pipe = child.stderr.take().expect("stderr was piped");
+    let stderr_shared = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let stderr_writer = std::sync::Arc::clone(&stderr_shared);
+    let drain_thread = std::thread::spawn(move || {
+        use std::io::Read;
+        let mut pipe = stderr_pipe;
+        let mut chunk = [0u8; 4096];
+        loop {
+            match pipe.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => stderr_writer.lock().unwrap().extend_from_slice(&chunk[..n]),
+                Err(_) => break,
+            }
+        }
+    });
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let mut saw_create_window = false;
+    let mut saw_find_first = false;
+    let mut sent_alt_f4 = false;
+    let mut exit_status: Option<std::process::ExitStatus> = None;
+    let mut child_pid: Option<i32> = None;
+    let mut seccomp_value: Option<u32> = None;
+
+    loop {
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            break;
+        }
+
+        let stderr_bytes = stderr_shared.lock().unwrap().clone();
+        let stderr = String::from_utf8_lossy(&stderr_bytes);
+
+        if !saw_create_window && stderr.contains("PHASE: create_window_first") {
+            saw_create_window = true;
+            eprintln!("observed PHASE: create_window_first");
+        }
+        if !saw_find_first && stderr.contains("PHASE: find_first_file_first") {
+            saw_find_first = true;
+            eprintln!("observed PHASE: find_first_file_first");
+        }
+
+        if child_pid.is_none() {
+            child_pid = stderr.lines().find_map(|line| {
+                line.strip_prefix("PHASE: child_spawned pid=")
+                    .and_then(|s| s.trim().parse::<i32>().ok())
+            });
+        }
+
+        if let Some(pid) = child_pid {
+            if seccomp_value.is_none() {
+                let status_path = format!("/proc/{pid}/status");
+                if let Ok(content) = std::fs::read_to_string(&status_path) {
+                    seccomp_value = content.lines().find_map(|l| {
+                        let t = l.trim();
+                        if t.starts_with("Seccomp:") {
+                            t.split_whitespace()
+                                .nth(1)
+                                .and_then(|s| s.parse::<u32>().ok())
+                        } else {
+                            None
+                        }
+                    });
+                    if let Some(val) = seccomp_value {
+                        eprintln!("sandbox_qdir_gate: child pid={pid} Seccomp={val}");
+                    }
+                }
+            }
+        }
+
+        if saw_create_window && saw_find_first && !sent_alt_f4 {
+            sent_alt_f4 = true;
+            eprintln!("observed both phases — sending Alt+F4 via xdotool");
+            let search = Command::new("xdotool")
+                .args(["search", "--name", "Q-Dir"])
+                .output();
+            match search {
+                Ok(out) if out.status.success() => {
+                    let wid = String::from_utf8_lossy(&out.stdout)
+                        .lines()
+                        .next()
+                        .map(|s| s.trim().to_string())
+                        .unwrap_or_default();
+                    if !wid.is_empty() {
+                        let _ = Command::new("xdotool")
+                            .args(["windowactivate", &wid])
+                            .output();
+                        std::thread::sleep(std::time::Duration::from_millis(200));
+                        let _ = Command::new("xdotool")
+                            .args(["key", "--window", &wid, "Alt+F4"])
+                            .output();
+                    } else {
+                        eprintln!("xdotool search found no window matching 'Q-Dir'");
+                    }
+                }
+                _ => {
+                    eprintln!("xdotool search failed or not found");
+                }
+            }
+        }
+
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                exit_status = Some(status);
+                break;
+            }
+            Ok(None) => {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err(e) => panic!("wait failed: {e}"),
+        }
+    }
+
+    drain_thread.join().expect("stderr drain thread panicked");
+    let stderr_bytes = stderr_shared.lock().unwrap().clone();
+    let stderr = String::from_utf8_lossy(&stderr_bytes);
+
+    eprintln!("sandbox_qdir_gate stderr:\n{stderr}");
+    eprintln!("sandbox_qdir_gate exit: {:?}", exit_status);
+
+    assert!(
+        saw_create_window,
+        "FAIL: PHASE: create_window_first not observed within 30s.\nstderr:\n{stderr}"
+    );
+    assert!(
+        saw_find_first,
+        "FAIL: PHASE: find_first_file_first not observed within 10s.\nstderr:\n{stderr}"
+    );
+    assert!(
+        seccomp_value == Some(2),
+        "FAIL: Seccomp != 2 (got {:?}) — seccomp not active.\nstderr:\n{stderr}",
+        seccomp_value
+    );
+}
+
 /// Gate 2 — Verify hello.exe produces correct stdout under the sandbox.
 #[test]
 fn sandbox_hello_gate() {
