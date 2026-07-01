@@ -4,14 +4,12 @@
 //! begins. Once applied, the restriction stays in effect for the lifetime of
 //! the process — the guest PE code cannot open any file paths.
 //!
-//! Why path-level restrictions are sufficient for Phase 1
-//! -------------------------------------------------------
-//! The PE binary shares Weave's address space, so a seccomp filter would have
-//! to allowlist every syscall Weave itself needs (mmap, write, exit, …), which
-//! gives the guest the same syscall surface anyway. Real syscall isolation
-//! requires an out-of-process model (Phase 4+).
+//! The out-of-process model (fork + seccomp + IPC) is now the default execution
+//! path. See `docs/architecture/sandbox.md` for the full architecture
+//! documentation — model overview, IPC protocol, seccomp filter strategy,
+//! graphics path, and host/guest responsibilities.
 //!
-//! Landlock IS effective here because:
+//! Landlock IS effective for filesystem isolation because:
 //! - It restricts *path-based* filesystem access — open(), stat(), unlink(), …
 //! - File descriptors already open (stdout fd 1, stderr fd 2) remain usable.
 //! - Console apps like hello.exe never open paths at runtime; all I/O goes
