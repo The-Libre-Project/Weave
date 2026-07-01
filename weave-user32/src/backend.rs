@@ -20,9 +20,35 @@
 /// functions. Returns `true` if a display is available, `false` otherwise.
 #[cfg(target_os = "linux")]
 pub fn init() -> bool {
-    inner::XcbBackend::new().map(|b| {
-        let _ = crate::backend_trait::BACKEND.set(Box::new(b));
+    select_backend().map(|b| {
+        let _ = crate::backend_trait::BACKEND.set(b);
     }).is_some()
+}
+
+/// Select the window backend based on the display server environment.
+///
+/// Currently always returns `XcbBackend`. When a Wayland backend is added,
+/// extend this function: detect `WAYLAND_DISPLAY` and construct
+/// `WaylandBackend::new()` instead.
+#[cfg(target_os = "linux")]
+fn select_backend() -> Option<Box<dyn crate::backend_trait::WindowBackend + Send + Sync>> {
+    let wayland = std::env::var("WAYLAND_DISPLAY").ok()
+        .filter(|v| !v.is_empty());
+    let display = std::env::var("DISPLAY").ok()
+        .filter(|v| !v.is_empty());
+
+    if wayland.is_some() {
+        eprintln!("weave/user32: WAYLAND_DISPLAY detected but no Wayland backend — falling back to xcb");
+    }
+
+    eprintln!(
+        "weave/user32: backend selected: xcb (Wayland not implemented, DISPLAY={})",
+        display.as_deref().unwrap_or("(unset)"),
+    );
+
+    // TODO: when a WaylandBackend is implemented, add a match arm:
+    //   if wayland.is_some() && display.is_none() => WaylandBackend::new()
+    inner::XcbBackend::new().map(|b| Box::new(b) as Box<dyn crate::backend_trait::WindowBackend + Send + Sync>)
 }
 
 // ── Linux implementation ──────────────────────────────────────────────────────
