@@ -261,193 +261,18 @@ pub trait WindowBackend: Send + Sync {
     fn colorref_to_pixel(&self, colorref: u32) -> u32;
 }
 
-// ── XCB backend implementation (thin delegation to existing module) ───────────
+// ── Global backend instance ───────────────────────────────────────────────────
 
-/// X11/xcb backend.
+use std::sync::OnceLock;
+
+/// The process-global backend instance.
 ///
-/// Delegates every method to the existing module-level functions in
-/// [`crate::backend`]. This is the production backend on Linux.
-pub struct XcbBackend;
+/// Initialised by [`crate::backend::init_backend`] during startup. All
+/// module-level wrapper functions in [`crate::backend`] delegate to this.
+pub(crate) static BACKEND: OnceLock<Box<dyn WindowBackend + Send + Sync>> = OnceLock::new();
 
-#[allow(clippy::too_many_arguments)]
-impl WindowBackend for XcbBackend {
-    fn is_available(&self) -> bool {
-        crate::backend::is_available()
-    }
-
-    fn screen_size(&self) -> (u16, u16) {
-        crate::backend::screen_size()
-    }
-
-    fn system_dpi(&self) -> u32 {
-        crate::backend::system_dpi()
-    }
-
-    fn create_window(
-        &self,
-        title: &str,
-        x: i32,
-        y: i32,
-        width: u32,
-        height: u32,
-        visible: bool,
-        parent: Option<WindowHandle>,
-    ) -> BackendResult<WindowHandle> {
-        let parent_id = parent.map(|w| w.0).unwrap_or(0);
-        let id = crate::backend::create_window(title, x, y, width, height, visible, parent_id);
-        if id == 0 {
-            Err(BackendError::NotAvailable)
-        } else {
-            Ok(WindowHandle(id))
-        }
-    }
-
-    fn destroy_window(&self, window: WindowHandle) {
-        crate::backend::destroy_window(window.0);
-    }
-
-    fn show_window(&self, window: WindowHandle, show: bool) {
-        crate::backend::show_window(window.0, show);
-    }
-
-    fn configure_window(&self, window: WindowHandle, x: i32, y: i32, width: u32, height: u32) {
-        crate::backend::configure_window(window.0, x, y, width, height);
-    }
-
-    fn set_title(&self, window: WindowHandle, title: &str) {
-        crate::backend::set_title(window.0, title);
-    }
-
-    fn poll_event(&self) -> bool {
-        crate::backend::poll_event()
-    }
-
-    fn wait_event(&self) -> bool {
-        crate::backend::wait_event()
-    }
-
-    fn create_pixmap(&self, width: u16, height: u16) -> BackendResult<PixmapHandle> {
-        let id = crate::backend::create_pixmap(0, width, height);
-        if id == 0 {
-            Err(BackendError::PixmapError("create_pixmap returned 0".into()))
-        } else {
-            Ok(PixmapHandle(id))
-        }
-    }
-
-    fn free_pixmap(&self, pixmap: PixmapHandle) {
-        crate::backend::free_pixmap(pixmap.0);
-    }
-
-    fn draw_line(&self, dst: Drawable, x1: i16, y1: i16, x2: i16, y2: i16, pixel: u32) {
-        crate::backend::draw_line(dst.0, x1, y1, x2, y2, pixel);
-    }
-
-    fn copy_area(
-        &self,
-        src: Drawable,
-        dst: Drawable,
-        src_x: i16,
-        src_y: i16,
-        dst_x: i16,
-        dst_y: i16,
-        width: u16,
-        height: u16,
-    ) {
-        crate::backend::copy_area(src.0, dst.0, src_x, src_y, dst_x, dst_y, width, height);
-    }
-
-    fn copy_area_with_rop(
-        &self,
-        src: Drawable,
-        dst: Drawable,
-        src_x: i16,
-        src_y: i16,
-        dst_x: i16,
-        dst_y: i16,
-        width: u16,
-        height: u16,
-        gx_func: u32,
-    ) {
-        crate::backend::copy_area_with_rop(
-            src.0, dst.0, src_x, src_y, dst_x, dst_y, width, height, gx_func,
-        );
-    }
-
-    fn fill_rect_with_rop(
-        &self,
-        dst: Drawable,
-        x: i16,
-        y: i16,
-        w: u16,
-        h: u16,
-        gx_func: u32,
-        pixel: u32,
-    ) {
-        crate::backend::fill_rect_with_rop(dst.0, x, y, w, h, gx_func, pixel);
-    }
-
-    fn draw_filled_rect(&self, dst: Drawable, x: i16, y: i16, w: u16, h: u16, pixel: u32) {
-        crate::backend::draw_filled_rect(dst.0, x, y, w, h, pixel);
-    }
-
-    fn draw_rect_outline(&self, dst: Drawable, x: i16, y: i16, w: u16, h: u16, pixel: u32) {
-        crate::backend::draw_rect_outline(dst.0, x, y, w, h, pixel);
-    }
-
-    fn draw_text(&self, dst: Drawable, x: i16, y: i16, text: &[u8], fg_pixel: u32, bg_pixel: u32) {
-        crate::backend::draw_text(dst.0, x, y, text, fg_pixel, bg_pixel);
-    }
-
-    fn draw_text_utf16(
-        &self,
-        dst: Drawable,
-        x: i16,
-        y: i16,
-        text: &[u16],
-        px_size: f32,
-        fg_pixel: u32,
-        bg_pixel: u32,
-    ) {
-        crate::backend::draw_text_utf16(dst.0, x, y, text, px_size, fg_pixel, bg_pixel);
-    }
-
-    unsafe fn put_dib_to_pixmap(
-        &self,
-        pixmap: PixmapHandle,
-        width: u32,
-        height: u32,
-        bits_ptr: usize,
-        bpp: u16,
-    ) {
-        crate::backend::put_dib_to_pixmap(pixmap.0, width, height, bits_ptr, bpp);
-    }
-
-    fn put_bits_to_pixmap_at(
-        &self,
-        dst: Drawable,
-        dst_x: i16,
-        dst_y: i16,
-        width: u16,
-        height: u16,
-        stride: usize,
-        rows: &[u8],
-        bpp: u16,
-    ) {
-        crate::backend::put_bits_to_pixmap_at(dst.0, dst_x, dst_y, width, height, stride, rows, bpp);
-    }
-
-    fn colorref_to_pixel(&self, colorref: u32) -> u32 {
-        crate::backend::colorref_to_pixel(colorref)
-    }
-}
-
-/// Return the default backend for the current platform.
-///
-/// On Linux this returns `XcbBackend`. On other platforms (macOS dev builds)
-/// the backend is not available and `is_available()` returns `false`.
-pub fn default_backend() -> Box<dyn WindowBackend> {
-    Box::new(XcbBackend)
+pub fn set_backend(b: Box<dyn WindowBackend + Send + Sync>) {
+    let _ = BACKEND.set(b);
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────────
@@ -462,7 +287,34 @@ mod tests {
 
     #[test]
     fn window_backend_is_object_safe() {
-        _assert_object_safe(&XcbBackend);
+        // A unit struct implementing WindowBackend for test purposes.
+        struct TestBackend;
+        impl WindowBackend for TestBackend {
+            fn is_available(&self) -> bool { false }
+            fn screen_size(&self) -> (u16, u16) { (0, 0) }
+            fn system_dpi(&self) -> u32 { 96 }
+            fn create_window(&self, _: &str, _: i32, _: i32, _: u32, _: u32, _: bool, _: Option<WindowHandle>) -> BackendResult<WindowHandle> { Err(BackendError::NotAvailable) }
+            fn destroy_window(&self, _: WindowHandle) {}
+            fn show_window(&self, _: WindowHandle, _: bool) {}
+            fn configure_window(&self, _: WindowHandle, _: i32, _: i32, _: u32, _: u32) {}
+            fn set_title(&self, _: WindowHandle, _: &str) {}
+            fn poll_event(&self) -> bool { false }
+            fn wait_event(&self) -> bool { false }
+            fn create_pixmap(&self, _: u16, _: u16) -> BackendResult<PixmapHandle> { Err(BackendError::PixmapError("no backend".into())) }
+            fn free_pixmap(&self, _: PixmapHandle) {}
+            fn draw_line(&self, _: Drawable, _: i16, _: i16, _: i16, _: i16, _: u32) {}
+            fn copy_area(&self, _: Drawable, _: Drawable, _: i16, _: i16, _: i16, _: i16, _: u16, _: u16) {}
+            fn copy_area_with_rop(&self, _: Drawable, _: Drawable, _: i16, _: i16, _: i16, _: i16, _: u16, _: u16, _: u32) {}
+            fn fill_rect_with_rop(&self, _: Drawable, _: i16, _: i16, _: u16, _: u16, _: u32, _: u32) {}
+            fn draw_filled_rect(&self, _: Drawable, _: i16, _: i16, _: u16, _: u16, _: u32) {}
+            fn draw_rect_outline(&self, _: Drawable, _: i16, _: i16, _: u16, _: u16, _: u32) {}
+            fn draw_text(&self, _: Drawable, _: i16, _: i16, _: &[u8], _: u32, _: u32) {}
+            fn draw_text_utf16(&self, _: Drawable, _: i16, _: i16, _: &[u16], _: f32, _: u32, _: u32) {}
+            unsafe fn put_dib_to_pixmap(&self, _: PixmapHandle, _: u32, _: u32, _: usize, _: u16) {}
+            fn put_bits_to_pixmap_at(&self, _: Drawable, _: i16, _: i16, _: u16, _: u16, _: usize, _: &[u8], _: u16) {}
+            fn colorref_to_pixel(&self, c: u32) -> u32 { c }
+        }
+        _assert_object_safe(&TestBackend);
     }
 
     #[test]
@@ -470,18 +322,10 @@ mod tests {
         let w = WindowHandle(42);
         let p = PixmapHandle(99);
 
-        // WindowHandle and PixmapHandle convert into Drawable.
         let d1: Drawable = w.into();
         let d2: Drawable = p.into();
         assert_eq!(d1.0, 42);
         assert_eq!(d2.0, 99);
-    }
-
-    #[test]
-    fn default_backend_returns_xcb_backend() {
-        let backend = default_backend();
-        // Just verify it's a valid trait object.
-        let _ = backend.is_available();
     }
 
     #[test]

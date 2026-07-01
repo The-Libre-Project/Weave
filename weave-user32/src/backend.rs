@@ -14,13 +14,25 @@
 //! (e.g. running in a headless CI environment without Xvfb), all functions
 //! return error codes and the process continues without a window.
 
+// ── Global backend instance ────────────────────────────────────────────────────
+
+/// Initialise the process-global backend. Must be called before any backend
+/// functions. Returns `true` if a display is available, `false` otherwise.
+#[cfg(target_os = "linux")]
+pub fn init() -> bool {
+    inner::XcbBackend::new().map(|b| {
+        let _ = crate::backend_trait::BACKEND.set(Box::new(b));
+    }).is_some()
+}
+
 // ── Linux implementation ──────────────────────────────────────────────────────
 
 #[cfg(target_os = "linux")]
 mod inner {
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::{Mutex, MutexGuard, OnceLock};
+    use std::sync::{Mutex, OnceLock};
 
+    use crate::backend_trait::{BackendError, BackendResult, Drawable, PixmapHandle, WindowBackend, WindowHandle, BACKEND};
     use crate::defs::*;
     use crate::queue::{self, MsgEntry};
     use crate::window;
@@ -36,9 +48,10 @@ mod inner {
     use x11rb::rust_connection::RustConnection;
     use x11rb::wrapper::ConnectionExt as WrapperConnectionExt;
 
-    // Intern the atoms we need at startup.
+    // ── XcbBackend ──────────────────────────────────────────────────────────────
+
     atom_manager! {
-        pub Atoms: AtomsCookie {
+        Atoms: AtomsCookie {
             WM_PROTOCOLS,
             WM_DELETE_WINDOW,
             _NET_WM_NAME,
@@ -46,32 +59,33 @@ mod inner {
         }
     }
 
-    pub struct X11State {
-        pub conn: RustConnection,
+    pub struct XcbBackend {
+        conn: Mutex<RustConnection>,
         #[allow(dead_code)]
-        pub screen_num: usize,
-        pub atoms: Atoms,
-        pub root: Window,
-        pub white_pixel: u32,
+        screen_num: usize,
+        atoms: Atoms,
+        root: Window,
+        white_pixel: u32,
         #[allow(dead_code)]
-        pub black_pixel: u32,
-        pub screen_width: u16,
-        pub screen_height: u16,
-        pub screen_width_mm: u16,
+        black_pixel: u32,
+        screen_width: u16,
+        screen_height: u16,
+        screen_width_mm: u16,
         #[allow(dead_code)]
-        pub screen_height_mm: u16,
+        screen_height_mm: u16,
         /// Depth of the root window (typically 24 or 32). Used as PutImage depth.
-        pub depth: u8,
+        depth: u8,
+        font_id: OnceLock<Option<u32>>,
     }
 
-    static X11: OnceLock<Option<Mutex<X11State>>> = OnceLock::new();
-
-    fn x11() -> Option<&'static Mutex<X11State>> {
-        X11.get_or_init(|| {
+    impl XcbBackend {
+        pub fn new() -> Option<Self> {
             let (conn, screen_num) = RustConnection::connect(None).ok()?;
             let atoms = Atoms::new(&conn).ok()?.reply().ok()?;
             let screen = conn.setup().roots.get(screen_num)?.clone();
-            Some(Mutex::new(X11State {
+            Some(XcbBackend {
+                conn: Mutex::new(conn),
+                screen_num,
                 atoms,
                 root: screen.root,
                 white_pixel: screen.white_pixel,
@@ -81,34 +95,641 @@ mod inner {
                 screen_width_mm: screen.width_in_millimeters,
                 screen_height_mm: screen.height_in_millimeters,
                 depth: screen.root_depth,
-                conn,
-                screen_num,
-            }))
-        })
-        .as_ref()
+                font_id: OnceLock::new(),
+            })
+        }
+
+        fn get_or_open_font(&self) -> Option<u32> {
+            *self.font_id.get_or_init(|| {
+                let conn = self.conn.lock().ok()?;
+                let fid = conn.generate_id().ok()?;
+                for name in [b"fixed" as &[u8], b"9x15", b"6x13"] {
+                    if conn.open_font(fid, name).is_ok() {
+                        let _ = conn.flush();
+                        return Some(fid);
+                    }
+                }
+                None
+            })
+        }
     }
 
-    fn lock_x11(m: &Mutex<X11State>) -> Option<MutexGuard<'_, X11State>> {
-        m.lock()
-            .map_err(|e| eprintln!("weave: user32: X11 mutex poisoned: {e}"))
-            .ok()
-    }
+    // ── WindowBackend trait implementation ──────────────────────────────────────
 
-    /// Parse `Xft.dpi` from the X11 `RESOURCE_MANAGER` root window property.
-    ///
-    /// The `RESOURCE_MANAGER` property is a newline-separated list of X resource
-    /// strings. Desktop environments (GNOME, KDE, etc.) set `Xft.dpi` here to
-    /// communicate the intended DPI to all X clients, including under XWayland.
-    fn read_xft_dpi(conn: &RustConnection, root: Window) -> Option<u32> {
-        let reply = conn
-            .get_property(
-                false,
-                root,
-                AtomEnum::RESOURCE_MANAGER,
-                AtomEnum::STRING,
+    #[allow(clippy::too_many_arguments)]
+    impl WindowBackend for XcbBackend {
+        fn is_available(&self) -> bool {
+            true
+        }
+
+        fn screen_size(&self) -> (u16, u16) {
+            (self.screen_width, self.screen_height)
+        }
+
+        fn system_dpi(&self) -> u32 {
+            read_xft_dpi(&self.conn, self.root)
+                .or_else(|| dpi_from_physical(self.screen_width, self.screen_width_mm))
+                .unwrap_or(96)
+        }
+
+        fn create_window(
+            &self,
+            title: &str,
+            x: i32,
+            y: i32,
+            width: u32,
+            height: u32,
+            visible: bool,
+            _parent: Option<WindowHandle>,
+        ) -> BackendResult<WindowHandle> {
+            let conn = self.conn.lock().map_err(|e| {
+                BackendError::ConnectionError(format!("mutex poisoned: {e}"))
+            })?;
+
+            let wid = conn.generate_id().map_err(|e| {
+                BackendError::WindowError(format!("generate_id failed: {e}"))
+            })?;
+
+            let event_mask = EventMask::EXPOSURE
+                | EventMask::STRUCTURE_NOTIFY
+                | EventMask::KEY_PRESS
+                | EventMask::KEY_RELEASE
+                | EventMask::BUTTON_PRESS
+                | EventMask::BUTTON_RELEASE
+                | EventMask::POINTER_MOTION;
+
+            let aux = CreateWindowAux::new()
+                .background_pixel(self.white_pixel)
+                .backing_store(x11rb::protocol::xproto::BackingStore::ALWAYS)
+                .event_mask(event_mask);
+
+            // Always create as children of root — XQuartz (macOS compositor) only
+            // renders top-level X11 windows correctly. Win32 parent-child is
+            // managed at the HWND level; all X11 windows are siblings.
+            conn.create_window(
+                x11rb::COPY_DEPTH_FROM_PARENT,
+                wid,
+                self.root,
+                x as i16,
+                y as i16,
+                width.max(1) as u16,
+                height.max(1) as u16,
                 0,
-                u32::MAX / 4,
+                WindowClass::INPUT_OUTPUT,
+                0,
+                &aux,
             )
+            .map_err(|e| BackendError::WindowError(format!("xcb create_window failed: {e}")))?;
+
+            // Set window title via _NET_WM_NAME (UTF-8) and WM_NAME (Latin-1 fallback).
+            let _ = conn.change_property8(
+                PropMode::REPLACE,
+                wid,
+                self.atoms._NET_WM_NAME,
+                self.atoms.UTF8_STRING,
+                title.as_bytes(),
+            );
+            let _ = conn.change_property8(
+                PropMode::REPLACE,
+                wid,
+                AtomEnum::WM_NAME,
+                AtomEnum::STRING,
+                title.as_bytes(),
+            );
+
+            // Register WM_DELETE_WINDOW.
+            let _ = conn.change_property32(
+                PropMode::REPLACE,
+                wid,
+                self.atoms.WM_PROTOCOLS,
+                AtomEnum::ATOM,
+                &[self.atoms.WM_DELETE_WINDOW],
+            );
+
+            if visible {
+                let _ = conn.map_window(wid);
+            }
+
+            let _ = conn.flush();
+            Ok(WindowHandle(wid))
+        }
+
+        fn destroy_window(&self, window: WindowHandle) {
+            let conn = match self.conn.lock() {
+                Ok(c) => c,
+                Err(_) => return,
+            };
+            let _ = conn.destroy_window(window.0);
+            let _ = conn.flush();
+        }
+
+        fn show_window(&self, window: WindowHandle, show: bool) {
+            let conn = match self.conn.lock() {
+                Ok(c) => c,
+                Err(_) => return,
+            };
+            if show {
+                let _ = conn.map_window(window.0);
+                let _ = conn.map_subwindows(window.0);
+            } else {
+                let _ = conn.unmap_window(window.0);
+            }
+            let _ = conn.flush();
+        }
+
+        fn configure_window(&self, window: WindowHandle, x: i32, y: i32, width: u32, height: u32) {
+            let conn = match self.conn.lock() {
+                Ok(c) => c,
+                Err(_) => return,
+            };
+            let aux = ConfigureWindowAux::new()
+                .x(x)
+                .y(y)
+                .width(width.max(1))
+                .height(height.max(1));
+            let _ = conn.configure_window(window.0, &aux);
+            let _ = conn.flush();
+        }
+
+        fn set_title(&self, window: WindowHandle, title: &str) {
+            let conn = match self.conn.lock() {
+                Ok(c) => c,
+                Err(_) => return,
+            };
+            let _ = conn.change_property8(
+                PropMode::REPLACE,
+                window.0,
+                self.atoms._NET_WM_NAME,
+                self.atoms.UTF8_STRING,
+                title.as_bytes(),
+            );
+            let _ = conn.change_property8(
+                PropMode::REPLACE,
+                window.0,
+                AtomEnum::WM_NAME,
+                AtomEnum::STRING,
+                title.as_bytes(),
+            );
+            let _ = conn.flush();
+        }
+
+        fn poll_event(&self) -> bool {
+            let event = {
+                let conn = match self.conn.lock() {
+                    Ok(c) => c,
+                    Err(_) => return false,
+                };
+                conn.poll_for_event().ok().flatten()
+            };
+            match event {
+                Some(ev) => {
+                    self.translate_event(ev);
+                    true
+                }
+                None => false,
+            }
+        }
+
+        fn wait_event(&self) -> bool {
+            use std::os::unix::io::AsRawFd;
+
+            crate::queue::init_wake_pipe();
+            let wake_fd = crate::queue::wake_fd_read();
+
+            let x11_fd: i32 = match self.conn.lock() {
+                Ok(c) => c.stream().as_raw_fd(),
+                Err(_) => return false,
+            };
+
+            loop {
+                let mut fds = [
+                    libc::pollfd {
+                        fd: x11_fd,
+                        events: libc::POLLIN,
+                        revents: 0,
+                    },
+                    libc::pollfd {
+                        fd: wake_fd,
+                        events: libc::POLLIN,
+                        revents: 0,
+                    },
+                ];
+                let ret = unsafe { libc::poll(fds.as_mut_ptr(), 2, 50) };
+
+                if ret < 0 {
+                    continue;
+                }
+
+                if fds[1].revents & libc::POLLIN != 0 {
+                    let mut buf = [0u8; 64];
+                    unsafe { libc::read(wake_fd, buf.as_mut_ptr() as *mut _, 64) };
+                    return true;
+                }
+
+                if fds[0].revents & libc::POLLIN != 0 {
+                    let event = match self.conn.lock() {
+                        Ok(c) => c.poll_for_event().ok().flatten(),
+                        Err(_) => None,
+                    };
+                    if let Some(ev) = event {
+                        self.translate_event(ev);
+                        return true;
+                    }
+                    continue;
+                }
+
+                return true;
+            }
+        }
+
+        fn create_pixmap(&self, width: u16, height: u16) -> BackendResult<PixmapHandle> {
+            let conn = self.conn.lock().map_err(|e| {
+                BackendError::PixmapError(format!("mutex poisoned: {e}"))
+            })?;
+            let pid = conn.generate_id()
+                .map_err(|_| BackendError::PixmapError("generate_id failed".into()))?;
+            conn.create_pixmap(self.depth, pid, self.root, width.max(1), height.max(1))
+                .map_err(|_| BackendError::PixmapError("create_pixmap failed".into()))?;
+            let _ = conn.flush();
+            Ok(PixmapHandle(pid))
+        }
+
+        fn free_pixmap(&self, pixmap: PixmapHandle) {
+            let conn = match self.conn.lock() {
+                Ok(c) => c,
+                Err(_) => return,
+            };
+            let _ = conn.free_pixmap(pixmap.0);
+            let _ = conn.flush();
+        }
+
+        fn draw_line(&self, dst: Drawable, x1: i16, y1: i16, x2: i16, y2: i16, pixel: u32) {
+            if x1 == x2 && y1 == y2 {
+                return;
+            }
+            let conn = match self.conn.lock() {
+                Ok(c) => c,
+                Err(_) => return,
+            };
+            let gc_id = match conn.generate_id() {
+                Ok(id) => id,
+                Err(_) => return,
+            };
+            let _ = conn.create_gc(gc_id, dst.0, &CreateGCAux::new().foreground(pixel));
+            let _ = conn.poly_segment(dst.0, gc_id, &[Segment { x1, y1, x2, y2 }]);
+            let _ = conn.free_gc(gc_id);
+            let _ = conn.flush();
+        }
+
+        fn copy_area(
+            &self,
+            src: Drawable,
+            dst: Drawable,
+            src_x: i16,
+            src_y: i16,
+            dst_x: i16,
+            dst_y: i16,
+            width: u16,
+            height: u16,
+        ) {
+            if width == 0 || height == 0 {
+                return;
+            }
+            let conn = match self.conn.lock() {
+                Ok(c) => c,
+                Err(_) => return,
+            };
+            let gc_id = match conn.generate_id() {
+                Ok(id) => id,
+                Err(_) => return,
+            };
+            let _ = conn.create_gc(gc_id, dst.0, &CreateGCAux::new());
+            let _ = conn.copy_area(src.0, dst.0, gc_id, src_x, src_y, dst_x, dst_y, width, height);
+            let _ = conn.free_gc(gc_id);
+            let _ = conn.sync();
+        }
+
+        fn copy_area_with_rop(
+            &self,
+            src: Drawable,
+            dst: Drawable,
+            src_x: i16,
+            src_y: i16,
+            dst_x: i16,
+            dst_y: i16,
+            width: u16,
+            height: u16,
+            gx_func: u32,
+        ) {
+            if width == 0 || height == 0 {
+                return;
+            }
+            let conn = match self.conn.lock() {
+                Ok(c) => c,
+                Err(_) => return,
+            };
+            let gc_id = match conn.generate_id() {
+                Ok(id) => id,
+                Err(_) => return,
+            };
+            let _ = conn.create_gc(gc_id, dst.0, &CreateGCAux::new().function(GX::from(gx_func)));
+            let _ = conn.copy_area(src.0, dst.0, gc_id, src_x, src_y, dst_x, dst_y, width, height);
+            let _ = conn.change_gc(gc_id, &ChangeGCAux::new().function(GX::COPY));
+            let _ = conn.free_gc(gc_id);
+            let _ = conn.sync();
+        }
+
+        fn fill_rect_with_rop(
+            &self,
+            dst: Drawable,
+            x: i16,
+            y: i16,
+            w: u16,
+            h: u16,
+            gx_func: u32,
+            pixel: u32,
+        ) {
+            if w == 0 || h == 0 {
+                return;
+            }
+            let conn = match self.conn.lock() {
+                Ok(c) => c,
+                Err(_) => return,
+            };
+            let gc_id: Gcontext = match conn.generate_id() {
+                Ok(id) => id,
+                Err(_) => return,
+            };
+            let _ = conn.create_gc(
+                gc_id,
+                dst.0,
+                &CreateGCAux::new()
+                    .function(GX::from(gx_func))
+                    .foreground(pixel),
+            );
+            let _ = conn.poly_fill_rectangle(
+                dst.0,
+                gc_id,
+                &[Rectangle { x, y, width: w, height: h }],
+            );
+            let _ = conn.change_gc(gc_id, &ChangeGCAux::new().function(GX::COPY));
+            let _ = conn.free_gc(gc_id);
+            let _ = conn.flush();
+        }
+
+        fn draw_filled_rect(&self, dst: Drawable, x: i16, y: i16, w: u16, h: u16, pixel: u32) {
+            if w == 0 || h == 0 {
+                return;
+            }
+            let conn = match self.conn.lock() {
+                Ok(c) => c,
+                Err(_) => return,
+            };
+            let gc_id: Gcontext = match conn.generate_id() {
+                Ok(id) => id,
+                Err(_) => return,
+            };
+            let _ = conn.create_gc(gc_id, dst.0, &CreateGCAux::new().foreground(pixel));
+            let _ = conn.poly_fill_rectangle(
+                dst.0,
+                gc_id,
+                &[Rectangle { x, y, width: w, height: h }],
+            );
+            let _ = conn.free_gc(gc_id);
+            let _ = conn.flush();
+        }
+
+        fn draw_rect_outline(&self, dst: Drawable, x: i16, y: i16, w: u16, h: u16, pixel: u32) {
+            if w == 0 || h == 0 {
+                return;
+            }
+            let conn = match self.conn.lock() {
+                Ok(c) => c,
+                Err(_) => return,
+            };
+            let gc_id: Gcontext = match conn.generate_id() {
+                Ok(id) => id,
+                Err(_) => return,
+            };
+            let _ = conn.create_gc(gc_id, dst.0, &CreateGCAux::new().foreground(pixel));
+            let _ = conn.poly_rectangle(
+                dst.0,
+                gc_id,
+                &[Rectangle { x, y, width: w, height: h }],
+            );
+            let _ = conn.free_gc(gc_id);
+            let _ = conn.flush();
+        }
+
+        fn draw_text(&self, dst: Drawable, x: i16, y: i16, text: &[u8], fg_pixel: u32, bg_pixel: u32) {
+            if text.is_empty() {
+                return;
+            }
+            let font_id = match self.get_or_open_font() {
+                Some(f) => f,
+                None => return,
+            };
+            let conn = match self.conn.lock() {
+                Ok(c) => c,
+                Err(_) => return,
+            };
+            let gc_id: Gcontext = match conn.generate_id() {
+                Ok(id) => id,
+                Err(_) => return,
+            };
+            let aux = CreateGCAux::new()
+                .foreground(fg_pixel)
+                .background(bg_pixel)
+                .font(font_id);
+            let _ = conn.create_gc(gc_id, dst.0, &aux);
+            let baseline_y = y.saturating_add(11);
+            let clamped = if text.len() > 255 { &text[..255] } else { text };
+            let _ = conn.image_text8(dst.0, gc_id, x, baseline_y, clamped);
+            let _ = conn.free_gc(gc_id);
+            let _ = conn.flush();
+        }
+
+        fn draw_text_utf16(
+            &self,
+            dst: Drawable,
+            x: i16,
+            y: i16,
+            text: &[u16],
+            px_size: f32,
+            fg_pixel: u32,
+            bg_pixel: u32,
+        ) {
+            use crate::font;
+            use x11rb::protocol::xproto::ImageFormat;
+
+            if text.is_empty() {
+                return;
+            }
+
+            if let Some((pixels, w, h)) = font::rasterize_text(text, px_size, fg_pixel, bg_pixel) {
+                let conn = match self.conn.lock() {
+                    Ok(c) => c,
+                    Err(_) => return,
+                };
+                let gc_id: Gcontext = match conn.generate_id() {
+                    Ok(id) => id,
+                    Err(_) => return,
+                };
+                let _ = conn.create_gc(gc_id, dst.0, &CreateGCAux::new());
+                let _ = conn.put_image(
+                    ImageFormat::Z_PIXMAP,
+                    dst.0,
+                    gc_id,
+                    w as u16,
+                    h as u16,
+                    x,
+                    y,
+                    0,
+                    self.depth,
+                    &pixels,
+                );
+                let _ = conn.free_gc(gc_id);
+                let _ = conn.flush();
+            } else {
+                let bytes: Vec<u8> = text
+                    .iter()
+                    .map(|&u| if u <= 0xFF { u as u8 } else { b'?' })
+                    .collect();
+                self.draw_text(dst, x, y, &bytes, fg_pixel, bg_pixel);
+            }
+        }
+
+        unsafe fn put_dib_to_pixmap(
+            &self,
+            pixmap: PixmapHandle,
+            width: u32,
+            height: u32,
+            bits_ptr: usize,
+            bpp: u16,
+        ) {
+            if pixmap.0 == 0 || width == 0 || height == 0 || bits_ptr == 0 {
+                return;
+            }
+            let conn = match self.conn.lock() {
+                Ok(c) => c,
+                Err(_) => return,
+            };
+
+            let stride = ((u64::from(width) * u64::from(bpp)).div_ceil(32) * 4) as usize;
+
+            let pixels: Vec<u8> = match bpp {
+                32 => {
+                    let size = stride * height as usize;
+                    unsafe { std::slice::from_raw_parts(bits_ptr as *const u8, size) }.to_vec()
+                }
+                24 => {
+                    let src = unsafe {
+                        std::slice::from_raw_parts(bits_ptr as *const u8, stride * height as usize)
+                    };
+                    let mut out = vec![0u8; (width * height * 4) as usize];
+                    for row in 0..height as usize {
+                        let row_src = &src[row * stride..row * stride + width as usize * 3];
+                        for (col, chunk) in row_src.chunks_exact(3).enumerate() {
+                            let base = (row * width as usize + col) * 4;
+                            out[base] = chunk[0];
+                            out[base + 1] = chunk[1];
+                            out[base + 2] = chunk[2];
+                            out[base + 3] = 0xFF;
+                        }
+                    }
+                    out
+                }
+                _ => return,
+            };
+
+            let gc_id: Gcontext = match conn.generate_id() {
+                Ok(id) => id,
+                Err(_) => return,
+            };
+            let _ = conn.create_gc(gc_id, pixmap.0, &CreateGCAux::new());
+            let _ = conn.put_image(
+                ImageFormat::Z_PIXMAP,
+                pixmap.0,
+                gc_id,
+                width as u16,
+                height as u16,
+                0, 0, 0,
+                self.depth,
+                &pixels,
+            );
+            let _ = conn.free_gc(gc_id);
+            let _ = conn.flush();
+        }
+
+        fn put_bits_to_pixmap_at(
+            &self,
+            dst: Drawable,
+            dst_x: i16,
+            dst_y: i16,
+            width: u16,
+            height: u16,
+            stride: usize,
+            rows: &[u8],
+            bpp: u16,
+        ) {
+            if dst.0 == 0 || width == 0 || height == 0 {
+                return;
+            }
+            if bpp != 32 {
+                return;
+            }
+            if rows.len() < stride * height as usize {
+                return;
+            }
+            let conn = match self.conn.lock() {
+                Ok(c) => c,
+                Err(_) => return,
+            };
+
+            let row_bytes = width as usize * 4;
+            let packed: Vec<u8> = if stride == row_bytes {
+                rows[..stride * height as usize].to_vec()
+            } else {
+                let mut out = vec![0u8; row_bytes * height as usize];
+                for row in 0..height as usize {
+                    let src = &rows[row * stride..row * stride + row_bytes];
+                    out[row * row_bytes..(row + 1) * row_bytes].copy_from_slice(src);
+                }
+                out
+            };
+
+            let gc_id: Gcontext = match conn.generate_id() {
+                Ok(id) => id,
+                Err(_) => return,
+            };
+            let _ = conn.create_gc(gc_id, dst.0, &CreateGCAux::new());
+            let _ = conn.put_image(
+                ImageFormat::Z_PIXMAP,
+                dst.0,
+                gc_id,
+                width, height,
+                dst_x, dst_y, 0,
+                self.depth,
+                &packed,
+            );
+            let _ = conn.free_gc(gc_id);
+            let _ = conn.flush();
+        }
+
+        fn colorref_to_pixel(&self, colorref: u32) -> u32 {
+            let r = colorref & 0xFF;
+            let g = (colorref >> 8) & 0xFF;
+            let b = (colorref >> 16) & 0xFF;
+            0xFF00_0000 | (r << 16) | (g << 8) | b
+        }
+    }
+
+    // ── Helper: Xft.dpi from RESOURCE_MANAGER ─────────────────────────────────
+
+    fn read_xft_dpi(conn: &Mutex<RustConnection>, root: Window) -> Option<u32> {
+        let g = conn.lock().ok()?;
+        let reply = g
+            .get_property(false, root, AtomEnum::RESOURCE_MANAGER, AtomEnum::STRING, 0, u32::MAX / 4)
             .ok()?
             .reply()
             .ok()?;
@@ -124,10 +745,6 @@ mod inner {
         None
     }
 
-    /// Calculate DPI from physical screen dimensions.
-    ///
-    /// Returns `None` if `mm` is zero or the result is outside the plausible
-    /// range of 72–576 DPI.
     fn dpi_from_physical(px: u16, mm: u16) -> Option<u32> {
         if mm == 0 {
             return None;
@@ -140,837 +757,11 @@ mod inner {
         }
     }
 
-    /// Detect the system DPI with the following priority:
-    ///
-    /// 1. `Xft.dpi` from the X11 `RESOURCE_MANAGER` root window property — this
-    ///    is the authoritative value set by the desktop environment and works
-    ///    correctly under both native X11 and XWayland.
-    /// 2. Calculated from the physical screen width in millimetres as reported
-    ///    by the X server (less reliable — monitors often report incorrect EDID).
-    /// 3. 96 — the Windows "standard" DPI fallback.
-    pub fn system_dpi() -> u32 {
-        let Some(x11) = x11() else { return 96 };
-        let g = match lock_x11(x11) {
-            Some(g) => g,
-            None => return 96,
-        };
-        read_xft_dpi(&g.conn, g.root)
-            .or_else(|| dpi_from_physical(g.screen_width, g.screen_width_mm))
-            .unwrap_or(96)
-    }
+    // ── Event translation helpers (pure) ───────────────────────────────────────
 
-    /// Return whether an X11 display is available.
-    pub fn is_available() -> bool {
-        x11().is_some()
-    }
-
-    /// Screen dimensions in pixels, or a sensible fallback.
-    pub fn screen_size() -> (u16, u16) {
-        x11()
-            .and_then(|m| {
-                let g = lock_x11(m)?;
-                Some((g.screen_width, g.screen_height))
-            })
-            .unwrap_or((1920, 1080))
-    }
-
-    /// Create an X11 window and return its XCB window ID.
-    /// Returns 0 on failure (no display, or XCB error).
-    /// Create an X11 window.
-    ///
-    /// `parent_xcb` — XCB window ID of the Win32 parent window, or 0 for top-level.
-    /// Child windows are parented to their Win32 parent's X11 window (not root) so
-    /// that they render on top of (and within) the parent. For top-level windows
-    /// `parent_xcb` should be 0, which causes the root window to be used.
-    pub fn create_window(
-        title: &str,
-        x: i32,
-        y: i32,
-        width: u32,
-        height: u32,
-        visible: bool,
-        parent_xcb: u32,
-    ) -> u32 {
-        let x11 = match x11() {
-            Some(m) => m,
-            None => {
-                eprintln!("weave/backend: create_window — x11() is None (no DISPLAY?)");
-                return 0;
-            }
-        };
-        let g = match lock_x11(x11) {
-            Some(g) => g,
-            None => return 0,
-        };
-
-        let wid = match g.conn.generate_id() {
-            Ok(id) => id,
-            Err(e) => {
-                eprintln!("weave/backend: create_window — generate_id failed: {e}");
-                return 0;
-            }
-        };
-
-        let event_mask = EventMask::EXPOSURE
-            | EventMask::STRUCTURE_NOTIFY
-            | EventMask::KEY_PRESS
-            | EventMask::KEY_RELEASE
-            | EventMask::BUTTON_PRESS
-            | EventMask::BUTTON_RELEASE
-            | EventMask::POINTER_MOTION;
-
-        // backing_store = ALWAYS: the X11 server maintains the window's pixel content
-        // even when obscured, so XQuartz (macOS compositor) can composite it correctly.
-        // Without this, child window content is discarded on expose and XQuartz shows white.
-        let aux = CreateWindowAux::new()
-            .background_pixel(g.white_pixel)
-            .backing_store(x11rb::protocol::xproto::BackingStore::ALWAYS)
-            .event_mask(event_mask);
-
-        // Always create as children of root — XQuartz (macOS compositor) only renders
-        // top-level X11 windows correctly. Child-of-child windows are invisible because
-        // XQuartz doesn't composite them into the macOS display. Win32 parent-child
-        // relationships are managed at the HWND level; all X11 windows are siblings.
-        let x11_parent = g.root;
-        let _ = parent_xcb; // Win32 parent tracked separately, not in X11
-
-        if let Err(e) = g.conn.create_window(
-            x11rb::COPY_DEPTH_FROM_PARENT,
-            wid,
-            x11_parent,
-            x as i16,
-            y as i16,
-            width.max(1) as u16,
-            height.max(1) as u16,
-            0,
-            WindowClass::INPUT_OUTPUT,
-            0,
-            &aux,
-        ) {
-            eprintln!("weave/backend: create_window — xcb create_window failed: {e}");
-            return 0;
-        }
-
-        // Set window title via _NET_WM_NAME (UTF-8) and WM_NAME (Latin-1 fallback).
-        let _ = g.conn.change_property8(
-            PropMode::REPLACE,
-            wid,
-            g.atoms._NET_WM_NAME,
-            g.atoms.UTF8_STRING,
-            title.as_bytes(),
-        );
-        let _ = g.conn.change_property8(
-            PropMode::REPLACE,
-            wid,
-            AtomEnum::WM_NAME,
-            AtomEnum::STRING,
-            title.as_bytes(),
-        );
-
-        // Register WM_DELETE_WINDOW so we receive a ClientMessage when the
-        // user closes the window instead of having it destroyed abruptly.
-        let _ = g.conn.change_property32(
-            PropMode::REPLACE,
-            wid,
-            g.atoms.WM_PROTOCOLS,
-            AtomEnum::ATOM,
-            &[g.atoms.WM_DELETE_WINDOW],
-        );
-
-        if visible {
-            let _ = g.conn.map_window(wid);
-        }
-
-        let _ = g.conn.flush();
-        wid
-    }
-
-    /// Show or hide an X11 window.
-    pub fn show_window(xcb_id: u32, show: bool) {
-        let x11 = match x11() {
-            Some(m) => m,
-            None => return,
-        };
-        let g = match lock_x11(x11) {
-            Some(g) => g,
-            None => return,
-        };
-        if show {
-            let _ = g.conn.map_window(xcb_id);
-            // Win32 ShowWindow shows all visible children too.
-            // map_subwindows recursively maps every unmapped descendant so that
-            // child windows (Scintilla, toolbar, etc.) receive Expose events and
-            // can repaint with correct content.
-            let _ = g.conn.map_subwindows(xcb_id);
-        } else {
-            let _ = g.conn.unmap_window(xcb_id);
-        }
-        let _ = g.conn.flush();
-    }
-
-    /// Move and/or resize an X11 window via ConfigureWindow.
-    ///
-    /// Wine ref: dlls/winex11.drv/window.c — X11DRV_SetWindowPos calls
-    /// XConfigureWindow with CWX/CWY for moves and CWWidth/CWHeight for resizes.
-    /// Zero-size windows are clamped to 1×1 to avoid X11 BadValue errors.
-    pub fn configure_window(xcb_id: u32, x: i32, y: i32, width: u32, height: u32) {
-        let x11 = match x11() {
-            Some(m) => m,
-            None => return,
-        };
-        let g = match lock_x11(x11) {
-            Some(g) => g,
-            None => return,
-        };
-        let aux = ConfigureWindowAux::new()
-            .x(x)
-            .y(y)
-            .width(width.max(1))
-            .height(height.max(1));
-        let _ = g.conn.configure_window(xcb_id, &aux);
-        let _ = g.conn.flush();
-    }
-
-    /// Create an X11 Pixmap of the given dimensions.
-    ///
-    /// Wine ref: dlls/winex11.drv/bitblt.c — X11DRV_CreateBitmap allocates an
-    /// X11 Pixmap via XCreatePixmap with the screen depth. Returns 0 on failure.
-    pub fn create_pixmap(parent_drawable: u32, width: u16, height: u16) -> u32 {
-        let x11 = match x11() {
-            Some(m) => m,
-            None => return 0,
-        };
-        let g = match lock_x11(x11) {
-            Some(g) => g,
-            None => return 0,
-        };
-        let pid = match g.conn.generate_id() {
-            Ok(id) => id,
-            Err(_) => return 0,
-        };
-        let drawable = if parent_drawable != 0 {
-            parent_drawable
-        } else {
-            g.root
-        };
-        if g.conn
-            .create_pixmap(g.depth, pid, drawable, width.max(1), height.max(1))
-            .is_err()
-        {
-            return 0;
-        }
-        let _ = g.conn.flush();
-        pid
-    }
-
-    /// Draw a single-pixel line between two points using XDrawLine (poly_segment).
-    ///
-    /// Wine ref: dlls/winex11.drv/graphics.c — X11DRV_LineTo calls XDrawLine.
-    pub fn draw_line(xcb_id: u32, x1: i16, y1: i16, x2: i16, y2: i16, pixel: u32) {
-        if x1 == x2 && y1 == y2 {
-            return;
-        }
-        let x11 = match x11() {
-            Some(m) => m,
-            None => return,
-        };
-        let g = match lock_x11(x11) {
-            Some(g) => g,
-            None => return,
-        };
-        let gc_id = match g.conn.generate_id() {
-            Ok(id) => id,
-            Err(_) => return,
-        };
-        let _ = g
-            .conn
-            .create_gc(gc_id, xcb_id, &CreateGCAux::new().foreground(pixel));
-        let _ = g
-            .conn
-            .poly_segment(xcb_id, gc_id, &[Segment { x1, y1, x2, y2 }]);
-        let _ = g.conn.free_gc(gc_id);
-        let _ = g.conn.flush();
-    }
-
-    /// Copy a rectangle of pixels from one X11 drawable to another (XCopyArea).
-    ///
-    /// Wine ref: dlls/winex11.drv/bitblt.c — X11DRV_BitBlt issues XCopyArea for
-    /// SRCCOPY. src and dst may be windows or pixmaps interchangeably.
-    #[allow(clippy::too_many_arguments)]
-    pub fn copy_area(
-        src: u32,
-        dst: u32,
-        src_x: i16,
-        src_y: i16,
-        dst_x: i16,
-        dst_y: i16,
-        width: u16,
-        height: u16,
-    ) {
-        if width == 0 || height == 0 {
-            return;
-        }
-        let x11 = match x11() {
-            Some(m) => m,
-            None => return,
-        };
-        let g = match lock_x11(x11) {
-            Some(g) => g,
-            None => return,
-        };
-        let gc_id = match g.conn.generate_id() {
-            Ok(id) => id,
-            Err(_) => return,
-        };
-        let _ = g.conn.create_gc(gc_id, dst, &CreateGCAux::new());
-        let _ = g
-            .conn
-            .copy_area(src, dst, gc_id, src_x, src_y, dst_x, dst_y, width, height);
-        let _ = g.conn.free_gc(gc_id);
-        let _ = g.conn.sync();
-    }
-
-    /// Copy a rectangle with an explicit X11 GC `function` (raster-op) applied.
-    ///
-    /// `gx_func` selects the binary combine op — GXcopy (SRCCOPY), GXxor
-    /// (SRCINVERT), GXand (SRCAND), GXor (SRCPAINT), GXcopyInverted
-    /// (NOTSRCCOPY). The GC function is reset to GXcopy before `free_gc`; since
-    /// each call allocates a fresh GC this reset is defensive (the GC is freed
-    /// anyway), but it mirrors Wine's `XSetFunction(..., GXcopy)` pattern so
-    /// that any future shared-GC refactor stays correct.
-    ///
-    /// Wine ref: dlls/winex11.drv/bitblt.c — `XSetFunction(gdi_display,
-    /// physDev->gc, OP_ROP(*opcode))` before `XCopyArea`, then
-    /// `XSetFunction(..., GXcopy)` after (see `X11DRV_StretchBlt` around line
-    /// 869 and the BITBLT_Opcodes table at line 71).
-    #[allow(clippy::too_many_arguments)]
-    pub fn copy_area_with_rop(
-        src: u32,
-        dst: u32,
-        src_x: i16,
-        src_y: i16,
-        dst_x: i16,
-        dst_y: i16,
-        width: u16,
-        height: u16,
-        gx_func: u32,
-    ) {
-        if width == 0 || height == 0 {
-            return;
-        }
-        let x11 = match x11() {
-            Some(m) => m,
-            None => return,
-        };
-        let g = match lock_x11(x11) {
-            Some(g) => g,
-            None => return,
-        };
-        let gc_id = match g.conn.generate_id() {
-            Ok(id) => id,
-            Err(_) => return,
-        };
-        let _ = g
-            .conn
-            .create_gc(gc_id, dst, &CreateGCAux::new().function(GX::from(gx_func)));
-        let _ = g
-            .conn
-            .copy_area(src, dst, gc_id, src_x, src_y, dst_x, dst_y, width, height);
-        // Reset function on this GC before release; see module-level comment.
-        let _ = g
-            .conn
-            .change_gc(gc_id, &ChangeGCAux::new().function(GX::COPY));
-        let _ = g.conn.free_gc(gc_id);
-        let _ = g.conn.sync();
-    }
-
-    /// Fill a rectangle using an X11 GC `function` other than GXcopy.
-    ///
-    /// For source-less ROPs (DSTINVERT → GXinvert, WHITENESS → GXset,
-    /// BLACKNESS → GXclear, PATCOPY → GXcopy with brush foreground) Wine
-    /// calls `XFillRectangle` with the chosen function. GXinvert/GXset/GXclear
-    /// do not consult the foreground pixel; GXcopy does. `pixel` is ignored
-    /// when the op is GXinvert/GXset/GXclear but must be valid for GXcopy.
-    ///
-    /// Wine ref: dlls/winex11.drv/bitblt.c::X11DRV_PatBlt (line 757) — for
-    /// BLACKNESS/WHITENESS/DSTINVERT it switches XSetFunction then calls
-    /// `XFillRectangle( gdi_display, physDev->drawable, physDev->gc, ... )`.
-    pub fn fill_rect_with_rop(
-        xcb_id: u32,
-        x: i16,
-        y: i16,
-        w: u16,
-        h: u16,
-        gx_func: u32,
-        pixel: u32,
-    ) {
-        if w == 0 || h == 0 {
-            return;
-        }
-        let x11 = match x11() {
-            Some(m) => m,
-            None => return,
-        };
-        let g = match lock_x11(x11) {
-            Some(g) => g,
-            None => return,
-        };
-        let gc_id: Gcontext = match g.conn.generate_id() {
-            Ok(id) => id,
-            Err(_) => return,
-        };
-        let _ = g.conn.create_gc(
-            gc_id,
-            xcb_id,
-            &CreateGCAux::new()
-                .function(GX::from(gx_func))
-                .foreground(pixel),
-        );
-        let _ = g.conn.poly_fill_rectangle(
-            xcb_id,
-            gc_id,
-            &[Rectangle {
-                x,
-                y,
-                width: w,
-                height: h,
-            }],
-        );
-        let _ = g
-            .conn
-            .change_gc(gc_id, &ChangeGCAux::new().function(GX::COPY));
-        let _ = g.conn.free_gc(gc_id);
-        let _ = g.conn.flush();
-    }
-
-    /// Upload DIB pixel data from a heap buffer to an X11 Pixmap.
-    ///
-    /// Called from BitBlt when the source DC has a DibSection selected.  SDL2's
-    /// software renderer writes sprites into the DibSection's CPU-side buffer;
-    /// this call syncs those pixels to the server-side Pixmap before XCopyArea.
-    ///
-    /// Wine ref: dlls/winex11.drv/bitmap.c — X11DRV_PutImage uploads DIB data to
-    /// the server Pixmap with XPutImage, then XCopyArea transfers to the window.
-    ///
-    /// Format: 32bpp DIB is BGRA; X11 depth-24 expects BGRX — the A byte is
-    /// ignored by the X server.  24bpp DIB is BGR; expanded to BGRX (4 bytes/px).
-    /// Stride = ceil(width × bpp / 32) × 4 bytes (standard Windows DIB padding).
-    ///
-    /// # Safety
-    /// `bits_ptr` must be a valid pointer to at least stride × height bytes.
-    pub unsafe fn put_dib_to_pixmap(
-        pixmap: u32,
-        width: u32,
-        height: u32,
-        bits_ptr: usize,
-        bpp: u16,
-    ) {
-        if pixmap == 0 || width == 0 || height == 0 || bits_ptr == 0 {
-            return;
-        }
-        let x11 = match x11() {
-            Some(m) => m,
-            None => return,
-        };
-        let g = match lock_x11(x11) {
-            Some(g) => g,
-            None => return,
-        };
-
-        // Recompute stride (Windows DIB rows are 4-byte aligned).
-        let stride = ((u64::from(width) * u64::from(bpp)).div_ceil(32) * 4) as usize;
-
-        let pixels: Vec<u8> = match bpp {
-            32 => {
-                // BGRA → BGRX: pass bytes through; X11 ignores the 4th byte at depth 24.
-                let size = stride * height as usize;
-                unsafe { std::slice::from_raw_parts(bits_ptr as *const u8, size) }.to_vec()
-            }
-            24 => {
-                // BGR → BGRX: expand from 3 to 4 bytes per pixel, skip stride padding.
-                let src = unsafe {
-                    std::slice::from_raw_parts(bits_ptr as *const u8, stride * height as usize)
-                };
-                let mut out = vec![0u8; (width * height * 4) as usize];
-                for row in 0..height as usize {
-                    let row_src = &src[row * stride..row * stride + width as usize * 3];
-                    for (col, chunk) in row_src.chunks_exact(3).enumerate() {
-                        let base = (row * width as usize + col) * 4;
-                        out[base] = chunk[0]; // B
-                        out[base + 1] = chunk[1]; // G
-                        out[base + 2] = chunk[2]; // R
-                        out[base + 3] = 0xFF; // X (padding)
-                    }
-                }
-                out
-            }
-            _ => return,
-        };
-
-        let gc_id: Gcontext = match g.conn.generate_id() {
-            Ok(id) => id,
-            Err(_) => return,
-        };
-        let _ = g.conn.create_gc(gc_id, pixmap, &CreateGCAux::new());
-        let _ = g.conn.put_image(
-            ImageFormat::Z_PIXMAP,
-            pixmap,
-            gc_id,
-            width as u16,
-            height as u16,
-            0, // dst_x
-            0, // dst_y
-            0, // left_pad
-            g.depth,
-            &pixels,
-        );
-        let _ = g.conn.free_gc(gc_id);
-        let _ = g.conn.flush();
-    }
-
-    /// Upload an already-laid-out pixel buffer to a sub-rectangle of a drawable.
-    ///
-    /// Unlike `put_dib_to_pixmap` (which uploads a full DibSection-shaped bitmap
-    /// at origin 0,0), this helper targets `(dst_x, dst_y)` and accepts rows in
-    /// top-down order with a caller-provided stride. `SetDIBitsToDevice` uses
-    /// this to push a horizontal band of a caller-owned DIB directly to a DC's
-    /// drawable.
-    ///
-    /// Wine ref: dlls/winex11.drv/bitblt.c::X11DRV_PutImage — hands the bits to
-    /// xcb_put_image with ImageFormat::Z_PIXMAP at the destination coordinates.
-    ///
-    /// `rows` must contain exactly `height` rows of `stride` bytes each, already
-    /// in top-down order (caller flips bottom-up DIBs before calling). 32bpp
-    /// passes BGRA bytes through; X11 depth-24 ignores the A byte.
-    #[allow(clippy::too_many_arguments)]
-    pub fn put_bits_to_pixmap_at(
-        drawable: u32,
-        dst_x: i16,
-        dst_y: i16,
-        width: u16,
-        height: u16,
-        stride: usize,
-        rows: &[u8],
-        bpp: u16,
-    ) {
-        if drawable == 0 || width == 0 || height == 0 {
-            return;
-        }
-        if bpp != 32 {
-            return;
-        }
-        if rows.len() < stride * height as usize {
-            return;
-        }
-        let x11 = match x11() {
-            Some(m) => m,
-            None => return,
-        };
-        let g = match lock_x11(x11) {
-            Some(g) => g,
-            None => return,
-        };
-
-        // x11rb's put_image expects a tightly packed width*4 bytes per row
-        // buffer (no padding). If stride already matches width*4, send as-is;
-        // otherwise repack.
-        let row_bytes = width as usize * 4;
-        let packed: Vec<u8> = if stride == row_bytes {
-            rows[..stride * height as usize].to_vec()
-        } else {
-            let mut out = vec![0u8; row_bytes * height as usize];
-            for row in 0..height as usize {
-                let src = &rows[row * stride..row * stride + row_bytes];
-                out[row * row_bytes..(row + 1) * row_bytes].copy_from_slice(src);
-            }
-            out
-        };
-
-        let gc_id: Gcontext = match g.conn.generate_id() {
-            Ok(id) => id,
-            Err(_) => return,
-        };
-        let _ = g.conn.create_gc(gc_id, drawable, &CreateGCAux::new());
-        let _ = g.conn.put_image(
-            ImageFormat::Z_PIXMAP,
-            drawable,
-            gc_id,
-            width,
-            height,
-            dst_x,
-            dst_y,
-            0, // left_pad
-            g.depth,
-            &packed,
-        );
-        let _ = g.conn.free_gc(gc_id);
-        let _ = g.conn.flush();
-    }
-
-    /// Destroy an X11 window.
-    /// Free an X11 Pixmap.
-    ///
-    /// Wine ref: dlls/winex11.drv/bitblt.c — X11DRV_DeleteObject frees pixmaps allocated by CreateBitmap.
-    pub fn free_pixmap(pid: u32) {
-        let x11 = match x11() {
-            Some(m) => m,
-            None => return,
-        };
-        let g = match lock_x11(x11) {
-            Some(g) => g,
-            None => return,
-        };
-        let _ = g.conn.free_pixmap(pid);
-        let _ = g.conn.flush();
-    }
-
-    pub fn destroy_window(xcb_id: u32) {
-        let x11 = match x11() {
-            Some(m) => m,
-            None => return,
-        };
-        let g = match lock_x11(x11) {
-            Some(g) => g,
-            None => return,
-        };
-        let _ = g.conn.destroy_window(xcb_id);
-        let _ = g.conn.flush();
-    }
-
-    /// Update the title bar text of an X11 window.
-    pub fn set_title(xcb_id: u32, title: &str) {
-        let x11 = match x11() {
-            Some(m) => m,
-            None => return,
-        };
-        let g = match lock_x11(x11) {
-            Some(g) => g,
-            None => return,
-        };
-        let _ = g.conn.change_property8(
-            PropMode::REPLACE,
-            xcb_id,
-            g.atoms._NET_WM_NAME,
-            g.atoms.UTF8_STRING,
-            title.as_bytes(),
-        );
-        let _ = g.conn.change_property8(
-            PropMode::REPLACE,
-            xcb_id,
-            AtomEnum::WM_NAME,
-            AtomEnum::STRING,
-            title.as_bytes(),
-        );
-        let _ = g.conn.flush();
-    }
-
-    static FONT_ID: OnceLock<Option<u32>> = OnceLock::new();
-
-    fn get_or_open_font() -> Option<u32> {
-        *FONT_ID.get_or_init(|| {
-            let x11 = x11()?;
-            let g = lock_x11(x11)?;
-            let fid = g.conn.generate_id().ok()?;
-            // Try common X11 bitmap font names in order.
-            for name in [b"fixed" as &[u8], b"9x15", b"6x13"] {
-                if g.conn.open_font(fid, name).is_ok() {
-                    let _ = g.conn.flush();
-                    return Some(fid);
-                }
-            }
-            None
-        })
-    }
-
-    /// Convert a Win32 COLORREF (0x00BBGGRR) to an X11 TrueColor pixel (0x00RRGGBB).
-    pub fn colorref_to_pixel(colorref: u32) -> u32 {
-        let r = colorref & 0xFF;
-        let g = (colorref >> 8) & 0xFF;
-        let b = (colorref >> 16) & 0xFF;
-        // Alpha must be 0xFF for compositing displays (XQuartz on macOS). Alpha=0 = transparent.
-        0xFF00_0000 | (r << 16) | (g << 8) | b
-    }
-
-    /// Fill a solid rectangle on an X11 window.
-    pub fn draw_filled_rect(xcb_id: u32, x: i16, y: i16, w: u16, h: u16, pixel: u32) {
-        if w == 0 || h == 0 {
-            return;
-        }
-        let x11 = match x11() {
-            Some(m) => m,
-            None => return,
-        };
-        let g = match lock_x11(x11) {
-            Some(g) => g,
-            None => return,
-        };
-        let gc_id: Gcontext = match g.conn.generate_id() {
-            Ok(id) => id,
-            Err(_) => return,
-        };
-        let _ = g
-            .conn
-            .create_gc(gc_id, xcb_id, &CreateGCAux::new().foreground(pixel));
-        let _ = g.conn.poly_fill_rectangle(
-            xcb_id,
-            gc_id,
-            &[x11rb::protocol::xproto::Rectangle {
-                x,
-                y,
-                width: w,
-                height: h,
-            }],
-        );
-        let _ = g.conn.free_gc(gc_id);
-        let _ = g.conn.flush();
-    }
-
-    /// Draw a hollow rectangle outline on an X11 window.
-    pub fn draw_rect_outline(xcb_id: u32, x: i16, y: i16, w: u16, h: u16, pixel: u32) {
-        if w == 0 || h == 0 {
-            return;
-        }
-        let x11 = match x11() {
-            Some(m) => m,
-            None => return,
-        };
-        let g = match lock_x11(x11) {
-            Some(g) => g,
-            None => return,
-        };
-        let gc_id: Gcontext = match g.conn.generate_id() {
-            Ok(id) => id,
-            Err(_) => return,
-        };
-        let _ = g
-            .conn
-            .create_gc(gc_id, xcb_id, &CreateGCAux::new().foreground(pixel));
-        let _ = g.conn.poly_rectangle(
-            xcb_id,
-            gc_id,
-            &[x11rb::protocol::xproto::Rectangle {
-                x,
-                y,
-                width: w,
-                height: h,
-            }],
-        );
-        let _ = g.conn.free_gc(gc_id);
-        let _ = g.conn.flush();
-    }
-
-    /// Draw text using an X11 core bitmap font (Phase 2 legacy path).
-    ///
-    /// `text` must be ASCII/Latin-1 bytes (up to 255 per call). `fg_pixel` and
-    /// `bg_pixel` are X11 TrueColor pixel values (0x00RRGGBB).
-    pub fn draw_text(xcb_id: u32, x: i16, y: i16, text: &[u8], fg_pixel: u32, bg_pixel: u32) {
-        if text.is_empty() {
-            return;
-        }
-        let font_id = match get_or_open_font() {
-            Some(f) => f,
-            None => return,
-        };
-        let x11 = match x11() {
-            Some(m) => m,
-            None => return,
-        };
-        let g = match lock_x11(x11) {
-            Some(g) => g,
-            None => return,
-        };
-        let gc_id: Gcontext = match g.conn.generate_id() {
-            Ok(id) => id,
-            Err(_) => return,
-        };
-        let aux = CreateGCAux::new()
-            .foreground(fg_pixel)
-            .background(bg_pixel)
-            .font(font_id);
-        let _ = g.conn.create_gc(gc_id, xcb_id, &aux);
-        // image_text8 y is the text baseline; add ~11px ascent for the "fixed" font.
-        let baseline_y = y.saturating_add(11);
-        // X11 image_text8 is limited to 255 bytes per call.
-        let clamped = if text.len() > 255 { &text[..255] } else { text };
-        let _ = g.conn.image_text8(xcb_id, gc_id, x, baseline_y, clamped);
-        let _ = g.conn.free_gc(gc_id);
-        let _ = g.conn.flush();
-    }
-
-    /// Draw UTF-16 text using fontdue rasterization + X11 PutImage.
-    ///
-    /// This is the Phase 3 text rendering path: proper Unicode support with
-    /// anti-aliased TrueType rendering. Falls back to the legacy `draw_text`
-    /// path if no system font is available.
-    ///
-    /// `fg_pixel` and `bg_pixel` are X11 TrueColor values (0x00RRGGBB).
-    pub fn draw_text_utf16(
-        xcb_id: u32,
-        x: i16,
-        y: i16,
-        text: &[u16],
-        px_size: f32,
-        fg_pixel: u32,
-        bg_pixel: u32,
-    ) {
-        use crate::font;
-        use x11rb::protocol::xproto::ImageFormat;
-
-        if text.is_empty() {
-            return;
-        }
-
-        // Try fontdue rendering first.
-        if let Some((pixels, w, h)) = font::rasterize_text(text, px_size, fg_pixel, bg_pixel) {
-            let x11 = match x11() {
-                Some(m) => m,
-                None => return,
-            };
-            let g = match lock_x11(x11) {
-                Some(g) => g,
-                None => return,
-            };
-            let gc_id: Gcontext = match g.conn.generate_id() {
-                Ok(id) => id,
-                Err(_) => return,
-            };
-            let _ = g.conn.create_gc(gc_id, xcb_id, &CreateGCAux::new());
-            // Wine ref: not applicable — X11 PutImage depth must match the drawable.
-            // g.depth is stored from screen.root_depth at init; typically 24 on most
-            // X11 servers, 32 on compositing desktops (XWayland, GNOME). Using the
-            // wrong depth produces a BadMatch X11 error and silently drops the pixels.
-            let _ = g.conn.put_image(
-                ImageFormat::Z_PIXMAP,
-                xcb_id,
-                gc_id,
-                w as u16,
-                h as u16,
-                x,
-                y,
-                0, // left_pad
-                g.depth,
-                &pixels,
-            );
-            let _ = g.conn.free_gc(gc_id);
-            let _ = g.conn.flush();
-        } else {
-            // Fallback: convert to Latin-1 and use the legacy X11 bitmap path.
-            let bytes: Vec<u8> = text
-                .iter()
-                .map(|&u| if u <= 0xFF { u as u8 } else { b'?' })
-                .collect();
-            draw_text(xcb_id, x, y, &bytes, fg_pixel, bg_pixel);
-        }
-    }
-
-    /// X11 Mod1Mask (Alt) in `KeyPress`/`KeyRelease` `event.state`.
     const X11_MOD1_MASK: u16 = 0x0008;
     const VK_MENU: u32 = 0x12;
 
-    /// Choose WM_KEY* vs WM_SYSKEY* for an X11 key event.
-    ///
-    /// Wine ref: dlls/win32u/message.c::NtUserTranslateMessage — Alt-held keys and the Alt
-    /// key itself use WM_SYSKEYDOWN/UP; menu mnemonics (Alt+F, …) never arrive as WM_KEYDOWN.
     fn win32_key_message(vk: u32, is_press: bool, x11_state: u16) -> u32 {
         let alt_context = (x11_state & X11_MOD1_MASK) != 0 || vk == VK_MENU;
         match (alt_context, is_press) {
@@ -984,536 +775,409 @@ mod inner {
     fn key_l_param(x11_state: u16, is_press: bool, is_sys: bool) -> isize {
         let mut low = if is_press { 1 } else { (1 << 30) | (1 << 31) };
         if is_sys {
-            low |= 1 << 29; // context code: Alt active (KF_ALTDOWN >> 8 in lParam bit 29)
+            low |= 1 << 29;
         }
         ((x11_state as isize) << 16) | low
     }
 
-    /// Convert an X11 keycode (ev.detail, hardware scan code + 8) to a Win32 VK virtual key.
-    ///
-    /// Wine ref: dlls/winex11.drv/keyboard.c::EVENT_event_to_vkey — builds a per-process
-    /// keyc2vkey[] table at runtime using XGetKeyboardMapping + keysym→VK tables.
-    /// Weave: static table for the standard Linux evdev (pc105) US layout.
-    /// X11 keycodes = Linux evdev keycode + 8 (the evdev offset).
     fn x11_keycode_to_vk(keycode: u8) -> u32 {
         match keycode {
-            9 => 0x1B,  // VK_ESCAPE
-            10 => 0x31, // VK_1
-            11 => 0x32, // VK_2
-            12 => 0x33, // VK_3
-            13 => 0x34, // VK_4
-            14 => 0x35, // VK_5
-            15 => 0x36, // VK_6
-            16 => 0x37, // VK_7
-            17 => 0x38, // VK_8
-            18 => 0x39, // VK_9
-            19 => 0x30, // VK_0
-            20 => 0xBD, // VK_OEM_MINUS  '-'
-            21 => 0xBB, // VK_OEM_PLUS   '='
-            22 => 0x08, // VK_BACK
-            23 => 0x09, // VK_TAB
-            // QWERTY row
-            24 => 0x51, // VK_Q
-            25 => 0x57, // VK_W
-            26 => 0x45, // VK_E
-            27 => 0x52, // VK_R
-            28 => 0x54, // VK_T
-            29 => 0x59, // VK_Y
-            30 => 0x55, // VK_U
-            31 => 0x49, // VK_I
-            32 => 0x4F, // VK_O
-            33 => 0x50, // VK_P
-            34 => 0xDB, // VK_OEM_4  '['
-            35 => 0xDD, // VK_OEM_6  ']'
-            36 => 0x0D, // VK_RETURN
-            37 => 0xA2, // VK_LCONTROL
-            // ASDF row
-            38 => 0x41, // VK_A
-            39 => 0x53, // VK_S
-            40 => 0x44, // VK_D
-            41 => 0x46, // VK_F
-            42 => 0x47, // VK_G
-            43 => 0x48, // VK_H
-            44 => 0x4A, // VK_J
-            45 => 0x4B, // VK_K
-            46 => 0x4C, // VK_L
-            47 => 0xBA, // VK_OEM_1  ';'
-            48 => 0xDE, // VK_OEM_7  '\''
-            49 => 0xC0, // VK_OEM_3  '`'
-            50 => 0xA0, // VK_LSHIFT
-            51 => 0xDC, // VK_OEM_5  '\'
-            // ZXCV row
-            52 => 0x5A, // VK_Z
-            53 => 0x58, // VK_X
-            54 => 0x43, // VK_C
-            55 => 0x56, // VK_V
-            56 => 0x42, // VK_B
-            57 => 0x4E, // VK_N
-            58 => 0x4D, // VK_M
-            59 => 0xBC, // VK_OEM_COMMA  ','
-            60 => 0xBE, // VK_OEM_PERIOD '.'
-            61 => 0xBF, // VK_OEM_2      '/'
-            62 => 0xA1, // VK_RSHIFT
-            63 => 0x6A, // VK_MULTIPLY (KP_*)
-            64 => 0xA4, // VK_LMENU  (Alt_L)
-            65 => 0x20, // VK_SPACE
-            66 => 0x14, // VK_CAPITAL (CapsLock)
-            // Function keys
-            67 => 0x70, // VK_F1
-            68 => 0x71, // VK_F2
-            69 => 0x72, // VK_F3
-            70 => 0x73, // VK_F4
-            71 => 0x74, // VK_F5
-            72 => 0x75, // VK_F6
-            73 => 0x76, // VK_F7
-            74 => 0x77, // VK_F8
-            75 => 0x78, // VK_F9
-            76 => 0x79, // VK_F10
-            77 => 0x90, // VK_NUMLOCK
-            78 => 0x91, // VK_SCROLL
-            // Numpad
-            79 => 0x67, // VK_NUMPAD7
-            80 => 0x68, // VK_NUMPAD8
-            81 => 0x69, // VK_NUMPAD9
-            82 => 0x6D, // VK_SUBTRACT
-            83 => 0x64, // VK_NUMPAD4
-            84 => 0x65, // VK_NUMPAD5
-            85 => 0x66, // VK_NUMPAD6
-            86 => 0x6B, // VK_ADD
-            87 => 0x61, // VK_NUMPAD1
-            88 => 0x62, // VK_NUMPAD2
-            89 => 0x63, // VK_NUMPAD3
-            90 => 0x60, // VK_NUMPAD0
-            91 => 0x6E, // VK_DECIMAL
-            95 => 0x7A, // VK_F11
-            96 => 0x7B, // VK_F12
-            // Extended / nav cluster
-            104 => 0x0D, // VK_RETURN  (KP_Enter)
-            105 => 0xA3, // VK_RCONTROL
-            106 => 0x6F, // VK_DIVIDE  (KP_/)
-            107 => 0x2C, // VK_SNAPSHOT
-            108 => 0xA5, // VK_RMENU   (Alt_R / AltGr)
-            110 => 0x24, // VK_HOME
-            111 => 0x26, // VK_UP
-            112 => 0x21, // VK_PRIOR   (PageUp)
-            113 => 0x25, // VK_LEFT
-            114 => 0x27, // VK_RIGHT
-            115 => 0x23, // VK_END
-            116 => 0x28, // VK_DOWN
-            117 => 0x22, // VK_NEXT    (PageDown)
-            118 => 0x2D, // VK_INSERT
-            119 => 0x2E, // VK_DELETE
-            133 => 0x5B, // VK_LWIN   (Super_L)
-            134 => 0x5C, // VK_RWIN   (Super_R)
-            135 => 0x5D, // VK_APPS   (Menu)
-            _ => 0,      // unknown — caller should fall back to raw keycode
+            9 => 0x1B,  10 => 0x31, 11 => 0x32, 12 => 0x33, 13 => 0x34,
+            14 => 0x35, 15 => 0x36, 16 => 0x37, 17 => 0x38, 18 => 0x39,
+            19 => 0x30, 20 => 0xBD, 21 => 0xBB, 22 => 0x08, 23 => 0x09,
+            24 => 0x51, 25 => 0x57, 26 => 0x45, 27 => 0x52, 28 => 0x54,
+            29 => 0x59, 30 => 0x55, 31 => 0x49, 32 => 0x4F, 33 => 0x50,
+            34 => 0xDB, 35 => 0xDD, 36 => 0x0D, 37 => 0xA2,
+            38 => 0x41, 39 => 0x53, 40 => 0x44, 41 => 0x46, 42 => 0x47,
+            43 => 0x48, 44 => 0x4A, 45 => 0x4B, 46 => 0x4C, 47 => 0xBA,
+            48 => 0xDE, 49 => 0xC0, 50 => 0xA0, 51 => 0xDC,
+            52 => 0x5A, 53 => 0x58, 54 => 0x43, 55 => 0x56, 56 => 0x42,
+            57 => 0x4E, 58 => 0x4D, 59 => 0xBC, 60 => 0xBE, 61 => 0xBF,
+            62 => 0xA1, 63 => 0x6A, 64 => 0xA4, 65 => 0x20, 66 => 0x14,
+            67 => 0x70, 68 => 0x71, 69 => 0x72, 70 => 0x73, 71 => 0x74,
+            72 => 0x75, 73 => 0x76, 74 => 0x77, 75 => 0x78, 76 => 0x79,
+            77 => 0x90, 78 => 0x91,
+            79 => 0x67, 80 => 0x68, 81 => 0x69, 82 => 0x6D,
+            83 => 0x64, 84 => 0x65, 85 => 0x66, 86 => 0x6B,
+            87 => 0x61, 88 => 0x62, 89 => 0x63, 90 => 0x60, 91 => 0x6E,
+            95 => 0x7A, 96 => 0x7B,
+            104 => 0x0D, 105 => 0xA3, 106 => 0x6F, 107 => 0x2C, 108 => 0xA5,
+            110 => 0x24, 111 => 0x26, 112 => 0x21, 113 => 0x25, 114 => 0x27,
+            115 => 0x23, 116 => 0x28, 117 => 0x22, 118 => 0x2D, 119 => 0x2E,
+            133 => 0x5B, 134 => 0x5C, 135 => 0x5D,
+            _ => 0,
         }
     }
 
-    /// Poll for one X11 event and translate it into Win32 messages.
-    /// Returns `true` if an event was processed, `false` if none was pending.
-    pub fn poll_event() -> bool {
-        let x11 = match x11() {
-            Some(m) => m,
-            None => return false,
-        };
-        let event = {
-            let g = match lock_x11(x11) {
-                Some(g) => g,
-                None => return false,
+    // ── Event translation (method on XcbBackend) ──────────────────────────────
+
+    impl XcbBackend {
+        fn translate_event(&self, event: Event) {
+            let wm_protocols = self.atoms.WM_PROTOCOLS;
+            let wm_delete_window = self.atoms.WM_DELETE_WINDOW;
+
+            let event_tag = match &event {
+                Event::Expose(ev) => format!("Expose(window={:#x}, count={})", ev.window, ev.count),
+                Event::ClientMessage(_) => "ClientMessage".to_string(),
+                Event::ConfigureNotify(_) => "ConfigureNotify".to_string(),
+                Event::KeyPress(_) => "KeyPress".to_string(),
+                Event::KeyRelease(_) => "KeyRelease".to_string(),
+                Event::ButtonPress(_) => "ButtonPress".to_string(),
+                Event::ButtonRelease(_) => "ButtonRelease".to_string(),
+                Event::MotionNotify(_) => "MotionNotify".to_string(),
+                _ => "Other".to_string(),
             };
-            match g.conn.poll_for_event() {
-                Ok(Some(ev)) => ev,
-                _ => return false,
-            }
-        };
-        translate_event(event, x11);
-        true
-    }
+            eprintln!("weave/x11: event {event_tag}");
 
-    /// Block until one X11 event arrives or the message queue wake pipe fires.
-    ///
-    /// Uses `poll(2)` over two fds so the X11 mutex is NOT held during the
-    /// wait — background threads can make X11 calls freely while the main
-    /// loop is idle.  Returns `false` only on an unrecoverable connection
-    /// error (no display); returns `true` for any of:
-    ///   - X11 event processed and translated to a Win32 queue message
-    ///   - wake pipe signalled (a message was posted by another code path)
-    ///   - 50 ms poll timeout (lets GetMessageW re-check the queue)
-    pub fn wait_event() -> bool {
-        use std::os::unix::io::AsRawFd;
+            match event {
+                Event::ClientMessage(ev) => {
+                    let data32 = ev.data.as_data32();
+                    let msg_type = ev.type_;
+                    let data0 = data32[0];
 
-        // Ensure the wake pipe exists before we poll on it.
-        crate::queue::init_wake_pipe();
-        let wake_fd = crate::queue::wake_fd_read();
+                    let is_wm_protocols = msg_type == wm_protocols;
+                    let is_delete_window = data0 == wm_delete_window;
+                    let action = if is_wm_protocols && is_delete_window {
+                        "WM_CLOSE"
+                    } else if is_wm_protocols {
+                        "ignored (WM_PROTOCOLS but data[0] != WM_DELETE_WINDOW)"
+                    } else {
+                        "ignored (message_type != WM_PROTOCOLS)"
+                    };
 
-        // Extract the X11 fd without holding the mutex during the poll.
-        // A negative fd value is ignored by poll(2), so -1 is the safe
-        // "no display" sentinel.
-        let x11_fd: i32 = x11()
-            .and_then(|x11| lock_x11(x11).map(|g| g.conn.stream().as_raw_fd()))
-            .unwrap_or(-1);
+                    eprintln!(
+                        "weave/user32: X11 ClientMessage type={:#x}(WM_PROTOCOLS={}) \
+                         data[0]={:#x}(WM_DELETE_WINDOW={}) → {action}",
+                        msg_type, is_wm_protocols, data0, is_delete_window,
+                    );
 
-        loop {
-            let mut fds = [
-                libc::pollfd {
-                    fd: x11_fd,
-                    events: libc::POLLIN,
-                    revents: 0,
-                },
-                libc::pollfd {
-                    fd: wake_fd,
-                    events: libc::POLLIN,
-                    revents: 0,
-                },
-            ];
-            let ret = unsafe { libc::poll(fds.as_mut_ptr(), 2, 50) }; // 50 ms timeout
-
-            if ret < 0 {
-                // EINTR is normal (signal interrupted) — retry.
-                continue;
-            }
-
-            // Wake pipe fired: drain it and return — caller re-checks the queue.
-            if fds[1].revents & libc::POLLIN != 0 {
-                let mut buf = [0u8; 64];
-                unsafe { libc::read(wake_fd, buf.as_mut_ptr() as *mut _, 64) };
-                return true;
-            }
-
-            // X11 event ready: lock briefly, poll (non-blocking), translate.
-            if fds[0].revents & libc::POLLIN != 0 {
-                if let Some(x11) = x11() {
-                    let maybe_event =
-                        lock_x11(x11).and_then(|g| g.conn.poll_for_event().ok().flatten());
-                    if let Some(event) = maybe_event {
-                        translate_event(event, x11);
-                        return true;
+                    if is_wm_protocols && is_delete_window {
+                        let hwnd = window::hwnd_for_xcb(ev.window);
+                        if hwnd != 0 {
+                            queue::post(MsgEntry {
+                                hwnd, message: WM_CLOSE, w_param: 0, l_param: 0,
+                                time: 0, pt_x: 0, pt_y: 0,
+                            });
+                        }
                     }
                 }
-                // Spurious POLLIN (e.g. connection closed) — loop once more.
-                continue;
-            }
 
-            // Poll timeout with no events — return so GetMessageW re-checks the queue.
-            return true;
-        }
-    }
-
-    /// Translate one X11 event into one or more Win32 queue messages.
-    fn translate_event(event: Event, x11: &Mutex<X11State>) {
-        let (wm_protocols, wm_delete_window) = match lock_x11(x11) {
-            Some(g) => (g.atoms.WM_PROTOCOLS, g.atoms.WM_DELETE_WINDOW),
-            None => return,
-        };
-
-        // Diagnostic: log every X11 event type so we can see if events arrive.
-        let event_tag = match &event {
-            Event::Expose(ev) => format!("Expose(window={:#x}, count={})", ev.window, ev.count),
-            Event::ClientMessage(_) => "ClientMessage".to_string(),
-            Event::ConfigureNotify(_) => "ConfigureNotify".to_string(),
-            Event::KeyPress(_) => "KeyPress".to_string(),
-            Event::KeyRelease(_) => "KeyRelease".to_string(),
-            Event::ButtonPress(_) => "ButtonPress".to_string(),
-            Event::ButtonRelease(_) => "ButtonRelease".to_string(),
-            Event::MotionNotify(_) => "MotionNotify".to_string(),
-            _ => "Other".to_string(),
-        };
-        eprintln!("weave/x11: event {event_tag}");
-
-        match event {
-            // Step 1 — Prove the ClientMessage: log type and data[0] before any
-            // close decision so we can see exactly what the WM is sending us.
-            //
-            // Step 2 — Fix the classification: only post WM_CLOSE when BOTH
-            //   message_type == WM_PROTOCOLS  AND  data[0] == WM_DELETE_WINDOW.
-            // Any other ClientMessage (wrong type, _NET_WM_PING, focus atoms,
-            // etc.) is ignored — standard Xlib WM_DELETE_WINDOW protocol.
-            Event::ClientMessage(ev) => {
-                let data32 = ev.data.as_data32();
-                let msg_type = ev.type_;
-                let data0 = data32[0];
-
-                let is_wm_protocols = msg_type == wm_protocols;
-                let is_delete_window = data0 == wm_delete_window;
-                let action = if is_wm_protocols && is_delete_window {
-                    "WM_CLOSE"
-                } else if is_wm_protocols {
-                    "ignored (WM_PROTOCOLS but data[0] != WM_DELETE_WINDOW)"
-                } else {
-                    "ignored (message_type != WM_PROTOCOLS)"
-                };
-
-                eprintln!(
-                    "weave/user32: X11 ClientMessage type={:#x}(WM_PROTOCOLS={}) \
-                     data[0]={:#x}(WM_DELETE_WINDOW={}) → {action}",
-                    msg_type, is_wm_protocols, data0, is_delete_window,
-                );
-
-                if is_wm_protocols && is_delete_window {
+                Event::Expose(ev) if ev.count == 0 => {
                     let hwnd = window::hwnd_for_xcb(ev.window);
                     if hwnd != 0 {
                         queue::post(MsgEntry {
-                            hwnd,
-                            message: WM_CLOSE,
-                            w_param: 0,
-                            l_param: 0,
-                            time: 0,
-                            pt_x: 0,
-                            pt_y: 0,
+                            hwnd, message: WM_PAINT, w_param: 0, l_param: 0,
+                            time: 0, pt_x: 0, pt_y: 0,
                         });
                     }
-                }
-            }
 
-            // Only post WM_PAINT for the last Expose in a sequence
-            // (count == 0 means no more expose events follow).
-            Event::Expose(ev) if ev.count == 0 => {
-                let hwnd = window::hwnd_for_xcb(ev.window);
-                if hwnd != 0 {
-                    queue::post(MsgEntry {
-                        hwnd,
-                        message: WM_PAINT,
-                        w_param: 0,
-                        l_param: 0,
-                        time: 0,
-                        pt_x: 0,
-                        pt_y: 0,
-                    });
-                }
-
-                // WS1 fix: On the first Expose (X server is now showing
-                // mapped windows), post WM_PAINT to ALL registered hwnds.
-                //
-                // Scintilla and other child windows paint during init
-                // (triggered by UpdateWindow/WM_PAINT from the queue) while
-                // their X11 windows are still unmapped — the X server
-                // silently discards those draws. After ShowWindow maps the
-                // top-level X11 window, most children receive Expose and
-                // repaint correctly, but windows that were already mapped
-                // via SetWindowPos before the parent was shown may not get
-                // Expose at all. This one-shot mass WM_PAINT guarantees
-                // they all repaint on their now-visible X11 surfaces.
-                static FIRST_EXPOSE_SEEN: AtomicBool = AtomicBool::new(false);
-                if !FIRST_EXPOSE_SEEN.swap(true, Ordering::SeqCst) {
-                    // Force redraw of top-level window too
-                    let top_hwnd = window::all_hwnds().first().copied().unwrap_or(0);
-                    if top_hwnd != 0 {
-                        queue::post(MsgEntry {
-                            hwnd: top_hwnd,
-                            message: WM_PAINT,
-                            w_param: 0,
-                            l_param: 0,
-                            time: 0,
-                            pt_x: 0,
-                            pt_y: 0,
-                        });
-                    }
-                    eprintln!("weave/x11: first Expose — posting WM_PAINT to all hwnds");
-                    for h in window::all_hwnds() {
-                        queue::post(MsgEntry {
-                            hwnd: h,
-                            message: WM_PAINT,
-                            w_param: 0,
-                            l_param: 0,
-                            time: 0,
-                            pt_x: 0,
-                            pt_y: 0,
-                        });
-                    }
-                }
-            }
-
-            Event::ConfigureNotify(ConfigureNotifyEvent {
-                window,
-                width,
-                height,
-                ..
-            }) => {
-                let hwnd = window::hwnd_for_xcb(window);
-                if hwnd != 0 {
-                    // Update stored dimensions.
-                    window::with_mut(hwnd, |e| {
-                        e.width = width as u32;
-                        e.height = height as u32;
-                    });
-                    // lParam: LOWORD = width, HIWORD = height (SIZE_RESTORED = 0)
-                    let l_param = (width as isize) | ((height as isize) << 16);
-                    queue::post(MsgEntry {
-                        hwnd,
-                        message: WM_SIZE,
-                        w_param: 0, // SIZE_RESTORED
-                        l_param,
-                        time: 0,
-                        pt_x: 0,
-                        pt_y: 0,
-                    });
-                }
-            }
-
-            Event::KeyPress(ev) => {
-                // Update the process-global VK state table unconditionally —
-                // keyboard state is not scoped to a window.
-                // Wine ref: dlls/winex11.drv/keyboard.c — X11DRV_KeyEvent updates
-                // the per-thread key state table on every KeyPress/KeyRelease
-                // regardless of focus.
-                if let Some(vk8) = crate::input::keycode_to_vk(ev.detail) {
-                    // VK_CAPITAL (0x14): toggle bit flips on each press.
-                    // NUMLOCK (0x90) and SCROLLLOCK (0x91) toggle tracking: TODO.
-                    let toggle = if vk8 == 0x14 {
-                        Some(crate::input::vk_state(vk8) & 0x01 == 0)
-                    } else {
-                        None
-                    };
-                    crate::input::set_vk_down(vk8, true, toggle);
-                }
-                let hwnd = window::hwnd_for_xcb(ev.event);
-                if hwnd != 0 {
-                    let vk = x11_keycode_to_vk(ev.detail);
-                    let x11_state = u16::from(ev.state);
-                    let is_sys = (x11_state & X11_MOD1_MASK) != 0 || vk == VK_MENU;
-                    let message = win32_key_message(vk, true, x11_state);
-                    // Store X11 modifier state in l_param high word so TranslateMessage
-                    // can extract the shift flag for WM_CHAR generation.
-                    let l_param = key_l_param(x11_state, true, is_sys);
-                    queue::post(MsgEntry {
-                        hwnd,
-                        message,
-                        w_param: vk as usize,
-                        l_param,
-                        time: ev.time,
-                        pt_x: ev.event_x as i32,
-                        pt_y: ev.event_y as i32,
-                    });
-                }
-            }
-
-            Event::KeyRelease(ev) => {
-                // Update the process-global VK state table unconditionally.
-                if let Some(vk8) = crate::input::keycode_to_vk(ev.detail) {
-                    // Toggle bit is not modified on release — only on press.
-                    crate::input::set_vk_down(vk8, false, None);
-                }
-                let hwnd = window::hwnd_for_xcb(ev.event);
-                if hwnd != 0 {
-                    let vk = x11_keycode_to_vk(ev.detail);
-                    let x11_state = u16::from(ev.state);
-                    let is_sys = (x11_state & X11_MOD1_MASK) != 0 || vk == VK_MENU;
-                    let message = win32_key_message(vk, false, x11_state);
-                    let l_param = key_l_param(x11_state, false, is_sys);
-                    queue::post(MsgEntry {
-                        hwnd,
-                        message,
-                        w_param: vk as usize,
-                        l_param,
-                        time: ev.time,
-                        pt_x: ev.event_x as i32,
-                        pt_y: ev.event_y as i32,
-                    });
-                }
-            }
-
-            Event::ButtonPress(ev) => {
-                let hwnd = window::hwnd_for_xcb(ev.event);
-                if hwnd != 0 {
-                    let l_param = (ev.event_x as isize) | ((ev.event_y as isize) << 16);
-                    match ev.detail {
-                        1 | 3 => {
-                            let message = if ev.detail == 1 {
-                                WM_LBUTTONDOWN
-                            } else {
-                                WM_RBUTTONDOWN
-                            };
+                    static FIRST_EXPOSE_SEEN: AtomicBool = AtomicBool::new(false);
+                    if !FIRST_EXPOSE_SEEN.swap(true, Ordering::SeqCst) {
+                        let top_hwnd = window::all_hwnds().first().copied().unwrap_or(0);
+                        if top_hwnd != 0 {
                             queue::post(MsgEntry {
-                                hwnd,
-                                message,
-                                w_param: 0,
-                                l_param,
-                                time: ev.time,
-                                pt_x: ev.event_x as i32,
-                                pt_y: ev.event_y as i32,
+                                hwnd: top_hwnd, message: WM_PAINT, w_param: 0, l_param: 0,
+                                time: 0, pt_x: 0, pt_y: 0,
                             });
                         }
-                        // X11 button 4 = scroll up, button 5 = scroll down.
-                        // Wine ref: dlls/winex11.drv/mouse.c — button_down_data[3]=WHEEL_DELTA(120),
-                        //   button_down_data[4]=-WHEEL_DELTA(-120). WM_MOUSEWHEEL wParam HIWORD =
-                        //   signed delta: +120 forward/up, -120 backward/down. LOWORD = modifier keys.
-                        4 | 5 => {
-                            let delta: i16 = if ev.detail == 4 { 120 } else { -120 };
-                            let w_param = (delta as u16 as usize) << 16;
+                        eprintln!("weave/x11: first Expose — posting WM_PAINT to all hwnds");
+                        for h in window::all_hwnds() {
                             queue::post(MsgEntry {
-                                hwnd,
-                                message: WM_MOUSEWHEEL,
-                                w_param,
-                                l_param,
-                                time: ev.time,
-                                pt_x: ev.event_x as i32,
-                                pt_y: ev.event_y as i32,
+                                hwnd: h, message: WM_PAINT, w_param: 0, l_param: 0,
+                                time: 0, pt_x: 0, pt_y: 0,
                             });
                         }
-                        _ => {}
                     }
                 }
-            }
 
-            Event::ButtonRelease(ev) => {
-                let hwnd = window::hwnd_for_xcb(ev.event);
-                if hwnd != 0 {
-                    let message = match ev.detail {
-                        1 => WM_LBUTTONUP,
-                        3 => WM_RBUTTONUP,
-                        _ => return,
-                    };
-                    let l_param = (ev.event_x as isize) | ((ev.event_y as isize) << 16);
-                    queue::post(MsgEntry {
-                        hwnd,
-                        message,
-                        w_param: 0,
-                        l_param,
-                        time: ev.time,
-                        pt_x: ev.event_x as i32,
-                        pt_y: ev.event_y as i32,
-                    });
+                Event::ConfigureNotify(ConfigureNotifyEvent { window, width, height, .. }) => {
+                    let hwnd = window::hwnd_for_xcb(window);
+                    if hwnd != 0 {
+                        window::with_mut(hwnd, |e| { e.width = width as u32; e.height = height as u32; });
+                        let l_param = (width as isize) | ((height as isize) << 16);
+                        queue::post(MsgEntry {
+                            hwnd, message: WM_SIZE, w_param: 0, l_param,
+                            time: 0, pt_x: 0, pt_y: 0,
+                        });
+                    }
                 }
-            }
 
-            Event::MotionNotify(ev) => {
-                let hwnd = window::hwnd_for_xcb(ev.event);
-                if hwnd != 0 {
-                    // wParam: MK_* modifier flags (Phase 2: always 0)
-                    // lParam: LOWORD = x, HIWORD = y (client coordinates)
-                    let l_param = (ev.event_x as isize) | ((ev.event_y as isize) << 16);
-                    queue::post(MsgEntry {
-                        hwnd,
-                        message: WM_MOUSEMOVE,
-                        w_param: 0,
-                        l_param,
-                        time: ev.time,
-                        pt_x: ev.event_x as i32,
-                        pt_y: ev.event_y as i32,
-                    });
+                Event::KeyPress(ev) => {
+                    if let Some(vk8) = crate::input::keycode_to_vk(ev.detail) {
+                        let toggle = if vk8 == 0x14 { Some(crate::input::vk_state(vk8) & 0x01 == 0) } else { None };
+                        crate::input::set_vk_down(vk8, true, toggle);
+                    }
+                    let hwnd = window::hwnd_for_xcb(ev.event);
+                    if hwnd != 0 {
+                        let vk = x11_keycode_to_vk(ev.detail);
+                        let x11_state = u16::from(ev.state);
+                        let is_sys = (x11_state & X11_MOD1_MASK) != 0 || vk == VK_MENU;
+                        let message = win32_key_message(vk, true, x11_state);
+                        let l_param = key_l_param(x11_state, true, is_sys);
+                        queue::post(MsgEntry {
+                            hwnd, message, w_param: vk as usize, l_param,
+                            time: ev.time, pt_x: ev.event_x as i32, pt_y: ev.event_y as i32,
+                        });
+                    }
                 }
-            }
 
-            Event::LeaveNotify(ev) => {
-                // XCB fires LeaveNotify when the pointer leaves a window's client area.
-                // If the guest registered TME_LEAVE for this hwnd, post WM_MOUSELEAVE
-                // and cancel the subscription (one-shot per Wine contract).
-                let hwnd = window::hwnd_for_xcb(ev.event);
-                if hwnd != 0 && crate::api::take_tme_leave(hwnd) {
-                    queue::post(MsgEntry {
-                        hwnd,
-                        message: WM_MOUSELEAVE,
-                        w_param: 0,
-                        l_param: 0,
-                        time: ev.time,
-                        pt_x: 0,
-                        pt_y: 0,
-                    });
+                Event::KeyRelease(ev) => {
+                    if let Some(vk8) = crate::input::keycode_to_vk(ev.detail) {
+                        crate::input::set_vk_down(vk8, false, None);
+                    }
+                    let hwnd = window::hwnd_for_xcb(ev.event);
+                    if hwnd != 0 {
+                        let vk = x11_keycode_to_vk(ev.detail);
+                        let x11_state = u16::from(ev.state);
+                        let is_sys = (x11_state & X11_MOD1_MASK) != 0 || vk == VK_MENU;
+                        let message = win32_key_message(vk, false, x11_state);
+                        let l_param = key_l_param(x11_state, false, is_sys);
+                        queue::post(MsgEntry {
+                            hwnd, message, w_param: vk as usize, l_param,
+                            time: ev.time, pt_x: ev.event_x as i32, pt_y: ev.event_y as i32,
+                        });
+                    }
                 }
-            }
 
-            _ => {} // Ignore all other events for now.
+                Event::ButtonPress(ev) => {
+                    let hwnd = window::hwnd_for_xcb(ev.event);
+                    if hwnd != 0 {
+                        let l_param = (ev.event_x as isize) | ((ev.event_y as isize) << 16);
+                        match ev.detail {
+                            1 | 3 => {
+                                let message = if ev.detail == 1 { WM_LBUTTONDOWN } else { WM_RBUTTONDOWN };
+                                queue::post(MsgEntry {
+                                    hwnd, message, w_param: 0, l_param,
+                                    time: ev.time, pt_x: ev.event_x as i32, pt_y: ev.event_y as i32,
+                                });
+                            }
+                            4 | 5 => {
+                                let delta: i16 = if ev.detail == 4 { 120 } else { -120 };
+                                let w_param = (delta as u16 as usize) << 16;
+                                queue::post(MsgEntry {
+                                    hwnd, message: WM_MOUSEWHEEL, w_param, l_param,
+                                    time: ev.time, pt_x: ev.event_x as i32, pt_y: ev.event_y as i32,
+                                });
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+
+                Event::ButtonRelease(ev) => {
+                    let hwnd = window::hwnd_for_xcb(ev.event);
+                    if hwnd != 0 {
+                        let message = match ev.detail { 1 => WM_LBUTTONUP, 3 => WM_RBUTTONUP, _ => return };
+                        let l_param = (ev.event_x as isize) | ((ev.event_y as isize) << 16);
+                        queue::post(MsgEntry {
+                            hwnd, message, w_param: 0, l_param,
+                            time: ev.time, pt_x: ev.event_x as i32, pt_y: ev.event_y as i32,
+                        });
+                    }
+                }
+
+                Event::MotionNotify(ev) => {
+                    let hwnd = window::hwnd_for_xcb(ev.event);
+                    if hwnd != 0 {
+                        let l_param = (ev.event_x as isize) | ((ev.event_y as isize) << 16);
+                        queue::post(MsgEntry {
+                            hwnd, message: WM_MOUSEMOVE, w_param: 0, l_param,
+                            time: ev.time, pt_x: ev.event_x as i32, pt_y: ev.event_y as i32,
+                        });
+                    }
+                }
+
+                Event::LeaveNotify(ev) => {
+                    let hwnd = window::hwnd_for_xcb(ev.event);
+                    if hwnd != 0 && crate::api::take_tme_leave(hwnd) {
+                        queue::post(MsgEntry {
+                            hwnd, message: WM_MOUSELEAVE, w_param: 0, l_param: 0,
+                            time: ev.time, pt_x: 0, pt_y: 0,
+                        });
+                    }
+                }
+
+                _ => {}
+            }
+        }
+    }
+
+    // ── Module-level wrapper functions ─────────────────────────────────────────
+    //
+    // These delegate to the global BACKEND instance so that existing callers
+    // (api.rs, dialog.rs, weave-gdi32) keep calling `backend::*()` unchanged.
+
+    pub fn is_available() -> bool {
+        BACKEND.get().is_some()
+    }
+
+    pub fn screen_size() -> (u16, u16) {
+        match BACKEND.get() {
+            Some(b) => b.screen_size(),
+            None => (1920, 1080),
+        }
+    }
+
+    pub fn system_dpi() -> u32 {
+        match BACKEND.get() {
+            Some(b) => b.system_dpi(),
+            None => 96,
+        }
+    }
+
+    pub fn create_window(
+        title: &str,
+        x: i32,
+        y: i32,
+        width: u32,
+        height: u32,
+        visible: bool,
+        parent_xcb: u32,
+    ) -> u32 {
+        let parent = if parent_xcb != 0 { Some(WindowHandle(parent_xcb)) } else { None };
+        match BACKEND.get() {
+            Some(b) => match b.create_window(title, x, y, width, height, visible, parent) {
+                Ok(h) => h.0,
+                Err(e) => {
+                    eprintln!("weave/backend: create_window failed: {e}");
+                    0
+                }
+            },
+            None => {
+                eprintln!("weave/backend: create_window — backend not initialised (no DISPLAY?)");
+                0
+            }
+        }
+    }
+
+    pub fn show_window(xcb_id: u32, show: bool) {
+        if let Some(b) = BACKEND.get() {
+            b.show_window(WindowHandle(xcb_id), show);
+        }
+    }
+
+    pub fn configure_window(xcb_id: u32, x: i32, y: i32, width: u32, height: u32) {
+        if let Some(b) = BACKEND.get() {
+            b.configure_window(WindowHandle(xcb_id), x, y, width, height);
+        }
+    }
+
+    pub fn create_pixmap(parent_drawable: u32, width: u16, height: u16) -> u32 {
+        let _ = parent_drawable; // Not passed through trait — XcbBackend uses root.
+        match BACKEND.get() {
+            Some(b) => match b.create_pixmap(width, height) {
+                Ok(p) => p.0,
+                Err(_) => 0,
+            },
+            None => 0,
+        }
+    }
+
+    pub fn free_pixmap(pid: u32) {
+        if let Some(b) = BACKEND.get() {
+            b.free_pixmap(PixmapHandle(pid));
+        }
+    }
+
+    pub fn destroy_window(xcb_id: u32) {
+        if let Some(b) = BACKEND.get() {
+            b.destroy_window(WindowHandle(xcb_id));
+        }
+    }
+
+    pub fn set_title(xcb_id: u32, title: &str) {
+        if let Some(b) = BACKEND.get() {
+            b.set_title(WindowHandle(xcb_id), title);
+        }
+    }
+
+    pub fn colorref_to_pixel(colorref: u32) -> u32 {
+        match BACKEND.get() {
+            Some(b) => b.colorref_to_pixel(colorref),
+            None => {
+                let r = colorref & 0xFF;
+                let g = (colorref >> 8) & 0xFF;
+                let b_val = (colorref >> 16) & 0xFF;
+                0xFF00_0000 | (r << 16) | (g << 8) | b_val
+            }
+        }
+    }
+
+    pub fn draw_line(xcb_id: u32, x1: i16, y1: i16, x2: i16, y2: i16, pixel: u32) {
+        if let Some(b) = BACKEND.get() {
+            b.draw_line(Drawable(xcb_id), x1, y1, x2, y2, pixel);
+        }
+    }
+
+    pub fn copy_area(src: u32, dst: u32, src_x: i16, src_y: i16, dst_x: i16, dst_y: i16, width: u16, height: u16) {
+        if let Some(b) = BACKEND.get() {
+            b.copy_area(Drawable(src), Drawable(dst), src_x, src_y, dst_x, dst_y, width, height);
+        }
+    }
+
+    pub fn copy_area_with_rop(
+        src: u32, dst: u32, src_x: i16, src_y: i16, dst_x: i16, dst_y: i16, width: u16, height: u16, gx_func: u32,
+    ) {
+        if let Some(b) = BACKEND.get() {
+            b.copy_area_with_rop(Drawable(src), Drawable(dst), src_x, src_y, dst_x, dst_y, width, height, gx_func);
+        }
+    }
+
+    pub fn fill_rect_with_rop(xcb_id: u32, x: i16, y: i16, w: u16, h: u16, gx_func: u32, pixel: u32) {
+        if let Some(b) = BACKEND.get() {
+            b.fill_rect_with_rop(Drawable(xcb_id), x, y, w, h, gx_func, pixel);
+        }
+    }
+
+    pub fn draw_filled_rect(xcb_id: u32, x: i16, y: i16, w: u16, h: u16, pixel: u32) {
+        if let Some(b) = BACKEND.get() {
+            b.draw_filled_rect(Drawable(xcb_id), x, y, w, h, pixel);
+        }
+    }
+
+    pub fn draw_rect_outline(xcb_id: u32, x: i16, y: i16, w: u16, h: u16, pixel: u32) {
+        if let Some(b) = BACKEND.get() {
+            b.draw_rect_outline(Drawable(xcb_id), x, y, w, h, pixel);
+        }
+    }
+
+    pub fn draw_text(xcb_id: u32, x: i16, y: i16, text: &[u8], fg_pixel: u32, bg_pixel: u32) {
+        if let Some(b) = BACKEND.get() {
+            b.draw_text(Drawable(xcb_id), x, y, text, fg_pixel, bg_pixel);
+        }
+    }
+
+    pub fn draw_text_utf16(xcb_id: u32, x: i16, y: i16, text: &[u16], px_size: f32, fg_pixel: u32, bg_pixel: u32) {
+        if let Some(b) = BACKEND.get() {
+            b.draw_text_utf16(Drawable(xcb_id), x, y, text, px_size, fg_pixel, bg_pixel);
+        }
+    }
+
+    pub unsafe fn put_dib_to_pixmap(pixmap: u32, width: u32, height: u32, bits_ptr: usize, bpp: u16) {
+        if let Some(b) = BACKEND.get() {
+            b.put_dib_to_pixmap(PixmapHandle(pixmap), width, height, bits_ptr, bpp);
+        }
+    }
+
+    pub fn put_bits_to_pixmap_at(
+        drawable: u32, dst_x: i16, dst_y: i16, width: u16, height: u16, stride: usize, rows: &[u8], bpp: u16,
+    ) {
+        if let Some(b) = BACKEND.get() {
+            b.put_bits_to_pixmap_at(Drawable(drawable), dst_x, dst_y, width, height, stride, rows, bpp);
+        }
+    }
+
+    pub fn poll_event() -> bool {
+        match BACKEND.get() {
+            Some(b) => b.poll_event(),
+            None => false,
+        }
+    }
+
+    pub fn wait_event() -> bool {
+        match BACKEND.get() {
+            Some(b) => b.wait_event(),
+            None => false,
         }
     }
 }
