@@ -1358,8 +1358,10 @@ fn main() {
                     side_dlls.push((dll_name, dll_bytes.clone(), base));
                     // Discover transitive dependencies and add them to the queue.
                     if let Ok(parsed) = weave_core::pe::parse(&dll_bytes) {
+                        let mut deps: Vec<String> = Vec::new();
                         for dep in &parsed.imports {
                             let dep_key = dep.dll.to_lowercase();
+                            deps.push(dep_key.clone());
                             if dep_key != dll_key
                                 && !dll_registry::is_registered(&dep_key)
                                 && !loaded.contains(&dep_key)
@@ -1367,6 +1369,7 @@ fn main() {
                                 pending.push(dep.dll.clone());
                             }
                         }
+                        dll_registry::register_imports(&dll_key, &deps);
                     }
                 }
                 Err(e) => {
