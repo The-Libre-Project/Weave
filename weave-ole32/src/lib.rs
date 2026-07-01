@@ -482,10 +482,38 @@ pub unsafe extern "win64" fn clsid_from_string(lpsz: *const u16, pclsid: *mut u8
     }
 }
 
+fn generate_uuid_v4() -> [u8; 16] {
+    use std::time::SystemTime;
+    let now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default();
+    let pid = unsafe { libc::getpid() as u64 };
+    let tid = unsafe { libc::syscall(libc::SYS_gettid) as u64 };
+    let seed = now.as_nanos() as u64 ^ pid ^ tid;
+
+    let mut state = seed;
+    let mut buf = [0u8; 16];
+    for b in buf.iter_mut() {
+        state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        *b = (state >> 32) as u8;
+    }
+    buf[6] = (buf[6] & 0x0F) | 0x40;
+    buf[8] = (buf[8] & 0x3F) | 0x80;
+    buf
+}
+
 /// CoCreateGuid: create a new globally unique identifier (GUID).
-/// Stub returns E_NOTIMPL.
-pub unsafe extern "win64" fn co_create_guid(_pguid: *mut u8) -> u32 {
-    0x8000_401E // E_NOTIMPL
+/// Generates a random UUID v4.
+///
+/// # Safety
+/// `pguid` must be a valid writable 16-byte buffer.
+pub unsafe extern "win64" fn co_create_guid(pguid: *mut u8) -> u32 {
+    if pguid.is_null() {
+        return 0x8007_0057; // E_INVALIDARG
+    }
+    let guid = generate_uuid_v4();
+    unsafe { std::ptr::copy_nonoverlapping(guid.as_ptr(), pguid, 16) };
+    S_OK
 }
 
 // Wine ref: dlls/combase/combase.c — identical implementation to CLSIDFromString; IID and CLSID
@@ -1402,5 +1430,34 @@ mod tests {
         assert_ne!(ptr, 0);
         let result = co_task_mem_realloc(ptr, 0);
         assert_eq!(result, 0);
+    }
+
+    #[test]
+    fn co_create_guid_returns_nonzero() {
+        let mut guid = [0u8; 16];
+        let hr = unsafe { co_create_guid(&mut guid as *mut u8) };
+        assert_eq!(hr, S_OK);
+        assert_ne!(guid, [0u8; 16]);
+        // Verify UUID v4: version nibble should be 4 in byte 6 high nibble
+        assert_eq!(guid[6] >> 4, 4);
+        // Verify RFC 4122 variant: byte 8 should be 0x80..0xBF
+        assert!(guid[8] >= 0x80 && guid[8] <= 0xBF);
+    }
+
+    #[test]
+    fn co_create_guid_null_returns_error() {
+        let hr = unsafe { co_create_guid(std::ptr::null_mut()) };
+        assert_eq!(hr, 0x8007_0057); // E_INVALIDARG
+    }
+
+    #[test]
+    fn co_create_guid_unique_per_call() {
+        let mut g1 = [0u8; 16];
+        let mut g2 = [0u8; 16];
+        let hr1 = unsafe { co_create_guid(&mut g1 as *mut u8) };
+        let hr2 = unsafe { co_create_guid(&mut g2 as *mut u8) };
+        assert_eq!(hr1, S_OK);
+        assert_eq!(hr2, S_OK);
+        assert_ne!(g1, g2);
     }
 }
