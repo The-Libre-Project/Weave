@@ -19,6 +19,9 @@ struct DllEntry {
     _image: ManuallyDrop<LoadedImage>,
     /// Function name → absolute address in the loaded image.
     exports: HashMap<String, usize>,
+    /// Native DllMain entry point address (from the PE's AddressOfEntryPoint),
+    /// or None if the DLL has no DllMain.
+    entry_point: Option<usize>,
 }
 
 // Safety: DllEntry fields are only mutated during registration (single-
@@ -46,9 +49,15 @@ fn lock_registry<'a>(
 /// Takes ownership of `image` to keep the mapped memory alive; the memory is
 /// never freed.
 pub fn register(name: String, image: LoadedImage, exports: HashMap<String, usize>) {
+    let entry_point = if image.entry_point.is_null() {
+        None
+    } else {
+        Some(image.entry_point as usize)
+    };
     let entry = DllEntry {
         _image: ManuallyDrop::new(image),
         exports,
+        entry_point,
     };
     if let Some(mut reg) = lock_registry(registry()) {
         reg.insert(name, entry);
@@ -75,6 +84,22 @@ pub fn is_registered(dll: &str) -> bool {
     } else {
         false
     }
+}
+
+/// Return the native DllMain function pointer for a registered PE DLL.
+///
+/// Returns `Some(absolute_address)` if the DLL is registered and has a
+/// non-null AddressOfEntryPoint, or `None` if it has no DllMain.
+pub fn get_entry_point(dll: &str) -> Option<usize> {
+    let reg = lock_registry(registry())?;
+    reg.get(&dll.to_lowercase())?.entry_point
+}
+
+/// Return the loaded base address of a registered PE DLL.
+pub fn get_base(dll: &str) -> Option<usize> {
+    let reg = lock_registry(registry())?;
+    reg.get(&dll.to_lowercase())
+        .map(|e| e._image.base as usize)
 }
 
 // ── Import dependency graph for DllMain call ordering ──────────────────────
@@ -185,6 +210,22 @@ pub fn dllmain_order() -> Vec<String> {
     result
 }
 
+/// Test helper: register a dummy DLL with no exports and no entry point.
+/// Only available in test builds.
+#[cfg(test)]
+pub(crate) fn register_for_test(name: String) {
+    if let Some(mut reg) = lock_registry(registry()) {
+        reg.insert(
+            name,
+            DllEntry {
+                _image: ManuallyDrop::new(unsafe { std::mem::zeroed() }),
+                exports: HashMap::new(),
+                entry_point: None,
+            },
+        );
+    }
+}
+
 #[cfg(test)]
 mod dep_tests {
     use super::*;
@@ -206,6 +247,7 @@ mod dep_tests {
             r.insert("single_test_only.dll".to_string(), DllEntry {
                 _image: ManuallyDrop::new(unsafe { std::mem::zeroed() }),
                 exports: HashMap::new(),
+                entry_point: None,
             });
         });
         let order = dllmain_order();
@@ -221,10 +263,12 @@ mod dep_tests {
             r.insert("chain_a.dll".to_string(), DllEntry {
                 _image: ManuallyDrop::new(unsafe { std::mem::zeroed() }),
                 exports: HashMap::new(),
+                entry_point: None,
             });
             r.insert("chain_b.dll".to_string(), DllEntry {
                 _image: ManuallyDrop::new(unsafe { std::mem::zeroed() }),
                 exports: HashMap::new(),
+                entry_point: None,
             });
         });
         register_imports("chain_b.dll", &["chain_a.dll".to_string()]);
@@ -244,6 +288,7 @@ mod dep_tests {
                 r.insert(name.to_string(), DllEntry {
                     _image: ManuallyDrop::new(unsafe { std::mem::zeroed() }),
                     exports: HashMap::new(),
+                    entry_point: None,
                 });
             }
         });
@@ -268,6 +313,7 @@ mod dep_tests {
             r.insert("orphan_b.dll".to_string(), DllEntry {
                 _image: ManuallyDrop::new(unsafe { std::mem::zeroed() }),
                 exports: HashMap::new(),
+                entry_point: None,
             });
         });
         register_imports("orphan_b.dll", &["missing.dll".to_string()]);

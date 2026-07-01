@@ -3,7 +3,8 @@ use serde_json::json;
 use std::path::{Component, PathBuf};
 use weave_common::com::shell_link::ShellLinkSaveData;
 use weave_core::{
-    cfg, cmdline, dll_registry, exec, iat, loader, module_handles, pe, prefix, registry, seh, teb,
+    cfg, cmdline, dll_registry, dllmain, exec, iat, loader, module_handles, pe, prefix, registry,
+    seh, teb,
 };
 use weave_installer::PrefixManager;
 use weave_ipc::CallMsg;
@@ -1401,7 +1402,6 @@ fn main() {
                 match loader::load_dll(&dll_bytes) {
                     Ok((image, exports)) => {
                         let image_base = image.base as usize;
-                        let dll_entry = image.entry_point;
                         unsafe {
                             iat::patch_best_effort(&dll_bytes, image.base, resolve, |d, f, va| {
                                 eprintln!(
@@ -1419,20 +1419,6 @@ fn main() {
                         dll_registry::register(key, image, exports);
                         module_handles::register_with_handle(name, image_base);
                         module_handles::register_image_path(name, image_base);
-                        if !dll_entry.is_null() {
-                            const DLL_PROCESS_ATTACH: u32 = 1;
-                            type DllMain = unsafe extern "win64" fn(
-                                hinst: usize,
-                                reason: u32,
-                                reserved: usize,
-                            )
-                                -> i32;
-                            let dll_main: DllMain = unsafe { std::mem::transmute(dll_entry) };
-                            let ok = unsafe { dll_main(image_base, DLL_PROCESS_ATTACH, 0) };
-                            eprintln!(
-                                "weave/E3-M9-trace: preloaded OptiPNG.dll DllMain({image_base:#x}) → {ok}"
-                            );
-                        }
                         eprintln!(
                             "weave/E3-M9-trace: preloaded OptiPNG.dll from {} at {image_base:#x}",
                             optipng_path.display()
@@ -1736,6 +1722,11 @@ fn main() {
     // Installers call CoCreateInstance(CLSID_ShellLink) → IPersistFile::Save
     // to create desktop shortcuts. Write a .desktop file for each Save call.
     weave_common::com::shell_link::register_save_callback(shell_link_save_callback);
+
+    // ── 6.8. Dispatch DllMain(DLL_PROCESS_ATTACH) ─────────────────────
+    // Calls DllMain on every loaded DLL in dependency order (stubs first,
+    // then PE DLLs).  Also registers an atexit handler for PROCESS_DETACH.
+    dllmain::process_attach();
 
     eprintln!("weave: TEB ready — jumping in");
 

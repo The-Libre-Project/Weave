@@ -1,6 +1,7 @@
 pub mod cfg;
 pub mod cmdline;
 pub mod dll_registry;
+pub mod dllmain;
 pub mod exe_path;
 pub mod exec;
 pub mod file_io;

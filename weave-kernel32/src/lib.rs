@@ -8612,6 +8612,10 @@ pub unsafe extern "win64" fn create_thread(
         let _teb = weave_core::teb::setup_thread();
         let my_tid = unsafe { libc::syscall(libc::SYS_gettid) as u32 };
         eprintln!("weave/CreateThread: thread-start tid={my_tid} fn={fn_addr:#x}");
+        // Dispatch DLL_THREAD_ATTACH before running guest thread proc.
+        // Wine ref: dlls/ntdll/loader.c — LdrpInitializeThread calls
+        // LdrpCallInitRoutine for each loaded DLL with DLL_THREAD_ATTACH.
+        weave_core::dllmain::thread_attach();
         // Store a clone of the completion Arc so ExitThread can signal the
         // condvar before parking instead of blocking WaitForSingleObject
         // callers indefinitely (npp_syntax_highlight_gate A2 regression).
@@ -8621,6 +8625,10 @@ pub unsafe extern "win64" fn create_thread(
         let fn_ptr: unsafe extern "win64" fn(*mut u8) -> u32 =
             unsafe { std::mem::transmute(fn_addr as *const u8) };
         let ret = unsafe { fn_ptr(param_addr as *mut u8) };
+        // Dispatch DLL_THREAD_DETACH after guest thread proc returns.
+        // Wine ref: dlls/ntdll/loader.c — LdrShutdownThread calls
+        // LdrpCallInitRoutine for each loaded DLL with DLL_THREAD_DETACH.
+        weave_core::dllmain::thread_detach();
         eprintln!("weave/CreateThread: thread-exit tid={my_tid} fn={fn_addr:#x} exit_code={ret}");
         let mut guard = completion_clone.result.lock().unwrap();
         *guard = Some(ret);
