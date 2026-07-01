@@ -7,4 +7,5 @@ description = "ole32.dll / combase.dll stubs for Weave — COM initialisation an
 
 [dependencies]
 weave-common = { path = "../weave-common" }
+weave-core = { path = "../weave-core" }
 libc = "0.2"

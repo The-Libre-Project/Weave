@@ -1688,6 +1688,7 @@ version = "0.0.1"
 dependencies = [
  "libc",
  "weave-common",
+ "weave-core",
 ]
 
 [[package]]
