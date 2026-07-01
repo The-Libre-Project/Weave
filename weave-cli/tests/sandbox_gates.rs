@@ -104,6 +104,142 @@ fn sandbox_child_spawn_gate() {
     );
 }
 
+/// Gate 3 — Verify testsprite2 creates a window and dispatches WM_PAINT under sandbox,
+/// then cleanly exits on Alt+F4.
+#[test]
+fn sandbox_testsprite_gate() {
+    if !cfg!(target_os = "linux") {
+        eprintln!("skipping sandbox_testsprite_gate — requires Linux");
+        return;
+    }
+
+    let fixture = match find_fixture("testsprite2.exe") {
+        Some(p) => p,
+        None => {
+            eprintln!("skipping: testsprite2.exe not found in fixtures");
+            return;
+        }
+    };
+
+    let bin_dir = fixture.parent().unwrap().to_path_buf();
+    let weave_bin = env!("CARGO_BIN_EXE_weave");
+
+    let mut child = Command::new(weave_bin)
+        .current_dir(&bin_dir)
+        .arg(&fixture)
+        .env("DISPLAY", ":99")
+        .env("SDL_VIDEODRIVER", "x11")
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("failed to spawn weave on testsprite2.exe");
+
+    let stderr_pipe = child.stderr.take().expect("stderr was piped");
+    let stderr_shared = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let stderr_writer = std::sync::Arc::clone(&stderr_shared);
+    let drain_thread = std::thread::spawn(move || {
+        use std::io::Read;
+        let mut pipe = stderr_pipe;
+        let mut chunk = [0u8; 4096];
+        loop {
+            match pipe.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => stderr_writer.lock().unwrap().extend_from_slice(&chunk[..n]),
+                Err(_) => break,
+            }
+        }
+    });
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let mut saw_create_window = false;
+    let mut saw_wm_paint = false;
+    let mut sent_alt_f4 = false;
+    let mut exit_status: Option<std::process::ExitStatus> = None;
+
+    loop {
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            break;
+        }
+
+        {
+            let stderr_bytes = stderr_shared.lock().unwrap().clone();
+            let stderr = String::from_utf8_lossy(&stderr_bytes);
+            if !saw_create_window && stderr.contains("PHASE: create_window_first") {
+                saw_create_window = true;
+                eprintln!("observed PHASE: create_window_first");
+            }
+            if !saw_wm_paint && stderr.contains("PHASE: wm_paint_dispatched_first") {
+                saw_wm_paint = true;
+                eprintln!("observed PHASE: wm_paint_dispatched_first");
+            }
+        }
+
+        if saw_create_window && saw_wm_paint && !sent_alt_f4 {
+            sent_alt_f4 = true;
+            eprintln!("both phases observed — sending Alt+F4 via xdotool");
+            let search = Command::new("xdotool")
+                .args(["search", "--name", "testsprite"])
+                .output();
+            match search {
+                Ok(out) if out.status.success() => {
+                    let wid = String::from_utf8_lossy(&out.stdout)
+                        .lines()
+                        .next()
+                        .map(|s| s.trim().to_string())
+                        .unwrap_or_default();
+                    if !wid.is_empty() {
+                        let _ = Command::new("xdotool")
+                            .args(["windowactivate", &wid])
+                            .output();
+                        std::thread::sleep(std::time::Duration::from_millis(200));
+                        let _ = Command::new("xdotool")
+                            .args(["key", "--window", &wid, "Alt+F4"])
+                            .output();
+                    } else {
+                        eprintln!("xdotool search found no window matching 'testsprite'");
+                    }
+                }
+                _ => {
+                    eprintln!("xdotool search failed or not found");
+                }
+            }
+        }
+
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                exit_status = Some(status);
+                break;
+            }
+            Ok(None) => {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err(e) => panic!("wait failed: {e}"),
+        }
+    }
+
+    drain_thread.join().expect("stderr drain thread panicked");
+    let stderr_bytes = stderr_shared.lock().unwrap().clone();
+    let stderr = String::from_utf8_lossy(&stderr_bytes);
+
+    eprintln!("sandbox_testsprite_gate stderr:\n{stderr}");
+    eprintln!("sandbox_testsprite_gate exit: {:?}", exit_status);
+
+    assert!(
+        saw_create_window,
+        "FAIL: PHASE: create_window_first not observed within 30s.\nstderr:\n{stderr}"
+    );
+    assert!(
+        saw_wm_paint,
+        "FAIL: PHASE: wm_paint_dispatched_first not observed within 30s.\nstderr:\n{stderr}"
+    );
+    assert_eq!(
+        exit_status.map(|s| s.code().unwrap_or(-1)),
+        Some(0),
+        "FAIL: testsprite2 did not exit 0.\nexit_status: {:?}\nstderr:\n{stderr}",
+        exit_status
+    );
+}
+
 /// Gate 2 — Verify hello.exe produces correct stdout under the sandbox.
 #[test]
 fn sandbox_hello_gate() {
