@@ -49,7 +49,39 @@ const BASE_SYSCALLS: [u32; 18] = [
 ];
 
 /// Per-app syscall additions registry.
-pub const APP_SYSCALLS: &[(&str, &[i64])] = &[("hello.exe", &[]), ("testsprite2.exe", &[])];
+///
+/// To identify denied syscalls, run with `WEAVE_SECCOMP_LOG=1` and inspect
+/// the kernel audit log via `ausearch --start recent -m SECCOMP` or `dmesg`.
+///
+/// NXEngine-evo (nx.exe) anticipated needs — SDL2 input, Vulkan, game-loop timing:
+///   evdev ioctls (ioctl=16), clock_nanosleep=230, sched_yield=24, poll=7,
+///   clock_gettime=228, gettimeofday=96, getpid=39, tgkill=234, gettid=186,
+///   fcntl=72, dup=32, dup2=33, nanosleep=35, recvmsg=47, sendmsg=46,
+///   shmctl=24 (IPC), shmdt=67, shmget=29, semtimedop=192, semop=62,
+///   eventfd=284, timerfd_create=283, timerfd_settime=286
+///
+/// IrfanView (i_view64.exe) anticipated needs — file dialogs, image codecs, GDI:
+///   ioctl=16, fstat=5, stat=4, lstat=6, newfstatat=262, newfstat=6,
+///   readlink=89, access=21, faccessat=269, getdents=78, getdents64=217,
+///   lseek=8, pread64=17, openat=257, read=0, write=1,
+///   sendfile=40, copy_file_range=326,
+///   mremap=25, msync=26, mincore=27, madvise=28, mbind=237,
+///   getegid=108, geteuid=107, getgid=104, getuid=102, getresuid=118, getresgid=119,
+///   getgroups=115, set_robust_list=273, get_robust_list=274,
+///   sched_getparam=143, sched_getscheduler=144, sched_setscheduler=145, sched_setparam=146,
+///   setpriority=141, getpriority=140,
+///   sigaltstack=131, rt_sigqueueinfo=178, rt_tgsigqueueinfo=297,
+///   prlimit64=302, arch_prctl=158
+pub const APP_SYSCALLS: &[(&str, &[i64])] = &[
+    ("hello.exe", &[]),
+    ("testsprite2.exe", &[]),
+    // TODO(#SB4b): Run with WEAVE_SECCOMP_LOG=1 to identify actual denied syscalls for nx.exe.
+    // Anticipated: SDL2 input (evdev ioctls), Vulkan surface, game-loop timing.
+    ("nx.exe", &[]),
+    // TODO(#SB4b): Run with WEAVE_SECCOMP_LOG=1 to identify actual denied syscalls for i_view64.exe.
+    // Anticipated: file dialog, image codec loading (mmap/mprotect), GDI surface.
+    ("i_view64.exe", &[]),
+];
 
 /// Build a complete seccomp BPF program for the given list of allowed
 /// syscalls, using `deny_action` as the return value for non-matched calls.

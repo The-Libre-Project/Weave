@@ -453,6 +453,322 @@ fn sandbox_seccomp_allows_gate() {
     );
 }
 
+/// Gate 7 — NXEngine-evo (Cave Story) under sandbox: verify window creation + seccomp.
+#[test]
+fn sandbox_nxengine_gate() {
+    if !cfg!(target_os = "linux") {
+        eprintln!("skipping sandbox_nxengine_gate — requires Linux");
+        return;
+    }
+
+    let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let game_dir = manifest.parent().unwrap().join("tests/fixtures/nxengine");
+    let exe = game_dir.join("nx.exe");
+
+    if !exe.exists() {
+        eprintln!("skipping: nx.exe not present in tests/fixtures/nxengine/");
+        return;
+    }
+
+    let weave_bin = env!("CARGO_BIN_EXE_weave");
+    let mut child = Command::new(weave_bin)
+        .current_dir(&game_dir)
+        .arg(&exe)
+        .env("DISPLAY", ":99")
+        .env("SDL_VIDEODRIVER", "x11")
+        .env("SDL_AUDIODRIVER", "dummy")
+        .stderr(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .expect("failed to spawn weave on nx.exe");
+
+    let stderr_pipe = child.stderr.take().expect("stderr was piped");
+    let stderr_shared = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let stderr_writer = std::sync::Arc::clone(&stderr_shared);
+    let drain_thread = std::thread::spawn(move || {
+        use std::io::Read;
+        let mut pipe = stderr_pipe;
+        let mut chunk = [0u8; 4096];
+        loop {
+            match pipe.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => stderr_writer.lock().unwrap().extend_from_slice(&chunk[..n]),
+                Err(_) => break,
+            }
+        }
+    });
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let mut saw_create_window = false;
+    let mut sent_alt_f4 = false;
+    let mut exit_status: Option<std::process::ExitStatus> = None;
+    let mut child_pid: Option<i32> = None;
+    let mut seccomp_value: Option<u32> = None;
+
+    loop {
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            break;
+        }
+
+        let stderr_bytes = stderr_shared.lock().unwrap().clone();
+        let stderr = String::from_utf8_lossy(&stderr_bytes);
+
+        if !saw_create_window && stderr.contains("PHASE: create_window_first") {
+            saw_create_window = true;
+            eprintln!("observed PHASE: create_window_first");
+        }
+
+        // Parse child PID for seccomp check.
+        if child_pid.is_none() {
+            child_pid = stderr.lines().find_map(|line| {
+                line.strip_prefix("PHASE: child_spawned pid=")
+                    .and_then(|s| s.trim().parse::<i32>().ok())
+            });
+        }
+
+        // Read seccomp from /proc/<pid>/status once we know the PID.
+        if let Some(pid) = child_pid {
+            if seccomp_value.is_none() {
+                let status_path = format!("/proc/{pid}/status");
+                if let Ok(content) = std::fs::read_to_string(&status_path) {
+                    seccomp_value = content.lines().find_map(|l| {
+                        let t = l.trim();
+                        if t.starts_with("Seccomp:") {
+                            t.split_whitespace()
+                                .nth(1)
+                                .and_then(|s| s.parse::<u32>().ok())
+                        } else {
+                            None
+                        }
+                    });
+                    if let Some(val) = seccomp_value {
+                        eprintln!("sandbox_nxengine_gate: child pid={pid} Seccomp={val}");
+                    }
+                }
+            }
+        }
+
+        if saw_create_window && !sent_alt_f4 {
+            sent_alt_f4 = true;
+            eprintln!("observed create_window — sending Alt+F4 via xdotool");
+            let search = Command::new("xdotool")
+                .args(["search", "--name", "NXEngine"])
+                .output();
+            match search {
+                Ok(out) if out.status.success() => {
+                    let wid = String::from_utf8_lossy(&out.stdout)
+                        .lines()
+                        .next()
+                        .map(|s| s.trim().to_string())
+                        .unwrap_or_default();
+                    if !wid.is_empty() {
+                        let _ = Command::new("xdotool")
+                            .args(["windowactivate", &wid])
+                            .output();
+                        std::thread::sleep(std::time::Duration::from_millis(200));
+                        let _ = Command::new("xdotool")
+                            .args(["key", "--window", &wid, "Alt+F4"])
+                            .output();
+                    } else {
+                        eprintln!("xdotool search found no window matching 'NXEngine'");
+                    }
+                }
+                _ => {
+                    eprintln!("xdotool search failed or not found");
+                }
+            }
+        }
+
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                exit_status = Some(status);
+                break;
+            }
+            Ok(None) => {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err(e) => panic!("wait failed: {e}"),
+        }
+    }
+
+    drain_thread.join().expect("stderr drain thread panicked");
+    let stderr_bytes = stderr_shared.lock().unwrap().clone();
+    let stderr = String::from_utf8_lossy(&stderr_bytes);
+
+    eprintln!("sandbox_nxengine_gate stderr:\n{stderr}");
+    eprintln!("sandbox_nxengine_gate exit: {:?}", exit_status);
+
+    assert!(
+        saw_create_window,
+        "FAIL: PHASE: create_window_first not observed within 30s.\nstderr:\n{stderr}"
+    );
+    assert!(
+        seccomp_value == Some(2),
+        "FAIL: Seccomp != 2 (got {:?}) — seccomp not active.\nstderr:\n{stderr}",
+        seccomp_value
+    );
+}
+
+/// Gate 8 — IrfanView BMP open under sandbox: verify WM_PAINT + seccomp.
+#[test]
+fn sandbox_irfanview_gate() {
+    if !cfg!(target_os = "linux") {
+        eprintln!("skipping sandbox_irfanview_gate — requires Linux");
+        return;
+    }
+
+    let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let irfan_dir = manifest.parent().unwrap().join("tests/fixtures/irfanview");
+    let irfan_exe = irfan_dir.join("i_view64.exe");
+    let bmp_path = irfan_dir.join("test_image.bmp");
+
+    if !irfan_exe.exists() {
+        eprintln!("skipping: i_view64.exe not present in tests/fixtures/irfanview/");
+        return;
+    }
+    if !bmp_path.exists() {
+        eprintln!("skipping: test_image.bmp not present in tests/fixtures/irfanview/");
+        return;
+    }
+
+    let weave_bin = env!("CARGO_BIN_EXE_weave");
+    let mut child = Command::new(weave_bin)
+        .current_dir(&irfan_dir)
+        .arg(&irfan_exe)
+        .arg(&bmp_path)
+        .env("DISPLAY", ":99")
+        .stderr(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .expect("failed to spawn weave on i_view64.exe");
+
+    let stderr_pipe = child.stderr.take().expect("stderr was piped");
+    let stderr_shared = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let stderr_writer = std::sync::Arc::clone(&stderr_shared);
+    let drain_thread = std::thread::spawn(move || {
+        use std::io::Read;
+        let mut pipe = stderr_pipe;
+        let mut chunk = [0u8; 4096];
+        loop {
+            match pipe.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => stderr_writer.lock().unwrap().extend_from_slice(&chunk[..n]),
+                Err(_) => break,
+            }
+        }
+    });
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let mut saw_wm_paint = false;
+    let mut sent_alt_f4 = false;
+    let mut exit_status: Option<std::process::ExitStatus> = None;
+    let mut child_pid: Option<i32> = None;
+    let mut seccomp_value: Option<u32> = None;
+
+    loop {
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            break;
+        }
+
+        let stderr_bytes = stderr_shared.lock().unwrap().clone();
+        let stderr = String::from_utf8_lossy(&stderr_bytes);
+
+        if !saw_wm_paint && stderr.contains("PHASE: wm_paint_dispatched_first") {
+            saw_wm_paint = true;
+            eprintln!("observed PHASE: wm_paint_dispatched_first");
+        }
+
+        if child_pid.is_none() {
+            child_pid = stderr.lines().find_map(|line| {
+                line.strip_prefix("PHASE: child_spawned pid=")
+                    .and_then(|s| s.trim().parse::<i32>().ok())
+            });
+        }
+
+        if let Some(pid) = child_pid {
+            if seccomp_value.is_none() {
+                let status_path = format!("/proc/{pid}/status");
+                if let Ok(content) = std::fs::read_to_string(&status_path) {
+                    seccomp_value = content.lines().find_map(|l| {
+                        let t = l.trim();
+                        if t.starts_with("Seccomp:") {
+                            t.split_whitespace()
+                                .nth(1)
+                                .and_then(|s| s.parse::<u32>().ok())
+                        } else {
+                            None
+                        }
+                    });
+                    if let Some(val) = seccomp_value {
+                        eprintln!("sandbox_irfanview_gate: child pid={pid} Seccomp={val}");
+                    }
+                }
+            }
+        }
+
+        if saw_wm_paint && !sent_alt_f4 {
+            sent_alt_f4 = true;
+            eprintln!("observed wm_paint — sending Alt+F4 via xdotool");
+            let search = Command::new("xdotool")
+                .args(["search", "--name", "IrfanView"])
+                .output();
+            match search {
+                Ok(out) if out.status.success() => {
+                    let wid = String::from_utf8_lossy(&out.stdout)
+                        .lines()
+                        .next()
+                        .map(|s| s.trim().to_string())
+                        .unwrap_or_default();
+                    if !wid.is_empty() {
+                        let _ = Command::new("xdotool")
+                            .args(["windowactivate", &wid])
+                            .output();
+                        std::thread::sleep(std::time::Duration::from_millis(200));
+                        let _ = Command::new("xdotool")
+                            .args(["key", "--window", &wid, "Alt+F4"])
+                            .output();
+                    } else {
+                        eprintln!("xdotool search found no window matching 'IrfanView'");
+                    }
+                }
+                _ => {
+                    eprintln!("xdotool search failed or not found");
+                }
+            }
+        }
+
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                exit_status = Some(status);
+                break;
+            }
+            Ok(None) => {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err(e) => panic!("wait failed: {e}"),
+        }
+    }
+
+    drain_thread.join().expect("stderr drain thread panicked");
+    let stderr_bytes = stderr_shared.lock().unwrap().clone();
+    let stderr = String::from_utf8_lossy(&stderr_bytes);
+
+    eprintln!("sandbox_irfanview_gate stderr:\n{stderr}");
+    eprintln!("sandbox_irfanview_gate exit: {:?}", exit_status);
+
+    assert!(
+        saw_wm_paint,
+        "FAIL: PHASE: wm_paint_dispatched_first not observed within 30s.\nstderr:\n{stderr}"
+    );
+    assert!(
+        seccomp_value == Some(2),
+        "FAIL: Seccomp != 2 (got {:?}) — seccomp not active.\nstderr:\n{stderr}",
+        seccomp_value
+    );
+}
+
 /// Gate 2 — Verify hello.exe produces correct stdout under the sandbox.
 #[test]
 fn sandbox_hello_gate() {
