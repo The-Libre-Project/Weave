@@ -16,6 +16,7 @@
 pub mod accel_handles;
 pub mod api;
 pub mod backend;
+pub mod backend_trait;
 pub mod class;
 pub mod clipboard;
 pub mod defs;
