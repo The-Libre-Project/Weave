@@ -460,7 +460,7 @@ mod tests {
     #[test]
     fn logfont_weight_mapping() {
         // FW_DONTCARE (0) → same as FW_NORMAL → should resolve
-        let mut face = [0u16; 32];
+        let face = [0u16; 32];
         let lf = LogFontW {
             lf_height: -13,
             lf_width: 0,
@@ -481,6 +481,7 @@ mod tests {
         assert!(fi.is_some(), "FW_DONTCARE should resolve");
     }
 
+    #[test]
     fn substitution_table_completeness() {
         // Verify every known Windows font maps to a non-empty string.
         let known = [
