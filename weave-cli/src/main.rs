@@ -48,7 +48,10 @@ struct Args {
     #[arg(long)]
     prefix: Option<PathBuf>,
 
-    /// Disable the filesystem sandbox (for debugging only)
+    /// Run the guest in-process without seccomp isolation (debugging only).
+    ///
+    /// WARNING: The guest shares Weave's address space with no seccomp
+    /// restrictions. Only use for debugging or compatibility testing.
     #[arg(long)]
     no_sandbox: bool,
 
@@ -1449,13 +1452,22 @@ fn main() {
     // some stub crates are incomplete, and surfaces all missing imports at
     // once rather than one per run.
     //
+    // In the default out-of-process path, the guest is forked and uses IPC
+    // stubs that communicate with the host process.  In the --no-sandbox path
+    // (no fork), use direct stubs to avoid panicking on missing CHILD_FD.
+    //
     // Safety: image.base points to a fully mapped PE loaded by loader::load().
+    let resolver: fn(&str, &str) -> Option<usize> = if args.no_sandbox {
+        resolve
+    } else {
+        resolve_with_ipc_stubs
+    };
     let mut missing: Vec<String> = Vec::new();
     unsafe {
         iat::patch_best_effort(
             &bytes,
             image.base,
-            resolve_with_ipc_stubs,
+            resolver,
             |dll, func, iat_va| {
                 let sym = format!("{dll}!{func}");
                 eprintln!("weave: unresolved import: {sym} at iat={iat_va:#x} (stubbed to null)");
@@ -1544,90 +1556,94 @@ fn main() {
 
     // ── 3.7. Socketpair + fork for out-of-process guest ──────────────────
 
-    /// Open the first available DRM render node (/dev/dri/renderD*) for Vulkan.
-    fn open_drm_render_node() -> Result<i32, String> {
-        let dir = std::path::Path::new("/dev/dri");
-        if !dir.exists() {
-            return Err("/dev/dri does not exist".to_string());
-        }
-        let entries = std::fs::read_dir(dir).map_err(|e| e.to_string())?;
-        for entry in entries {
-            let entry = entry.map_err(|e| e.to_string())?;
-            let name = entry.file_name();
-            let name_str = name.to_string_lossy();
-            if name_str.starts_with("renderD") {
-                let path_str = entry.path().to_string_lossy();
-                let cpath = std::ffi::CString::new(path_str.as_ref())
-                    .map_err(|_| "invalid CString".to_string())?;
-                let fd = unsafe { libc::open(cpath.as_ptr(), libc::O_RDWR) };
-                if fd >= 0 {
-                    return Ok(fd);
-                }
+    if !args.no_sandbox {
+        /// Open the first available DRM render node (/dev/dri/renderD*) for Vulkan.
+        fn open_drm_render_node() -> Result<i32, String> {
+            let dir = std::path::Path::new("/dev/dri");
+            if !dir.exists() {
+                return Err("/dev/dri does not exist".to_string());
             }
-        }
-        Err("no renderD* node found".to_string())
-    }
-
-    let mut sv: [libc::c_int; 2] = [0; 2];
-    let rc = unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, sv.as_mut_ptr()) };
-    assert_eq!(
-        rc,
-        0,
-        "weave: socketpair failed: {}",
-        std::io::Error::last_os_error()
-    );
-
-    match unsafe { libc::fork() } {
-        -1 => panic!("weave: fork failed: {}", std::io::Error::last_os_error()),
-        0 => {
-            unsafe {
-                libc::close(sv[0]);
-            }
-            CHILD_FD.set(sv[1]).expect("weave: CHILD_FD already set");
-            eprintln!("PHASE: child_spawned pid={}", unsafe { libc::getpid() });
-            if let Err(e) = weave_sandbox::apply_seccomp(exe_name) {
-                eprintln!("weave: seccomp failed: {e}");
-                std::process::exit(1);
-            }
-            eprintln!("PHASE: seccomp_applied");
-
-            // Receive DRM render node fd from host for Vulkan.
-            match weave_ipc::recv_fd(sv[1]) {
-                Ok(drm_fd) => {
-                    eprintln!("PHASE: drm_fd_received fd={drm_fd}");
-                    DRM_FD.set(drm_fd).expect("DRM_FD already set");
-                    std::env::set_var("WEAVE_DRM_FD", drm_fd.to_string());
-                }
-                Err(e) => {
-                    eprintln!("weave: no DRM fd received (Vulkan may not init): {e}");
-                }
-            }
-
-            eprintln!("PHASE: ipc_alive");
-        }
-        _child_pid => {
-            unsafe {
-                libc::close(sv[1]);
-            }
-
-            // Open DRM render node and pass fd to child for Vulkan.
-            match open_drm_render_node() {
-                Ok(drm_fd) => {
-                    eprintln!("PHASE: drm_node_opened fd={drm_fd}");
-                    if let Err(e) = weave_ipc::send_fd(sv[0], drm_fd) {
-                        eprintln!("weave/host: send_fd(DRM) failed: {e}");
+            let entries = std::fs::read_dir(dir).map_err(|e| e.to_string())?;
+            for entry in entries {
+                let entry = entry.map_err(|e| e.to_string())?;
+                let name = entry.file_name();
+                let name_str = name.to_string_lossy();
+                if name_str.starts_with("renderD") {
+                    let path_str = entry.path().to_string_lossy();
+                    let cpath = std::ffi::CString::new(path_str.as_ref())
+                        .map_err(|_| "invalid CString".to_string())?;
+                    let fd = unsafe { libc::open(cpath.as_ptr(), libc::O_RDWR) };
+                    if fd >= 0 {
+                        return Ok(fd);
                     }
-                    unsafe { libc::close(drm_fd); }
-                }
-                Err(e) => {
-                    eprintln!("weave/host: no DRM render node (Vulkan may not init): {e}");
                 }
             }
-
-            eprintln!("PHASE: host_loop_started");
-
-            weave_ipc::host_loop(sv[0], ipc_handler);
+            Err("no renderD* node found".to_string())
         }
+
+        let mut sv: [libc::c_int; 2] = [0; 2];
+        let rc = unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, sv.as_mut_ptr()) };
+        assert_eq!(
+            rc,
+            0,
+            "weave: socketpair failed: {}",
+            std::io::Error::last_os_error()
+        );
+
+        match unsafe { libc::fork() } {
+            -1 => panic!("weave: fork failed: {}", std::io::Error::last_os_error()),
+            0 => {
+                unsafe {
+                    libc::close(sv[0]);
+                }
+                CHILD_FD.set(sv[1]).expect("weave: CHILD_FD already set");
+                eprintln!("PHASE: child_spawned pid={}", unsafe { libc::getpid() });
+                if let Err(e) = weave_sandbox::apply_seccomp(exe_name) {
+                    eprintln!("weave: seccomp failed: {e}");
+                    std::process::exit(1);
+                }
+                eprintln!("PHASE: seccomp_applied");
+
+                // Receive DRM render node fd from host for Vulkan.
+                match weave_ipc::recv_fd(sv[1]) {
+                    Ok(drm_fd) => {
+                        eprintln!("PHASE: drm_fd_received fd={drm_fd}");
+                        DRM_FD.set(drm_fd).expect("DRM_FD already set");
+                        std::env::set_var("WEAVE_DRM_FD", drm_fd.to_string());
+                    }
+                    Err(e) => {
+                        eprintln!("weave: no DRM fd received (Vulkan may not init): {e}");
+                    }
+                }
+
+                eprintln!("PHASE: ipc_alive");
+            }
+            _child_pid => {
+                unsafe {
+                    libc::close(sv[1]);
+                }
+
+                // Open DRM render node and pass fd to child for Vulkan.
+                match open_drm_render_node() {
+                    Ok(drm_fd) => {
+                        eprintln!("PHASE: drm_node_opened fd={drm_fd}");
+                        if let Err(e) = weave_ipc::send_fd(sv[0], drm_fd) {
+                            eprintln!("weave/host: send_fd(DRM) failed: {e}");
+                        }
+                        unsafe { libc::close(drm_fd); }
+                    }
+                    Err(e) => {
+                        eprintln!("weave/host: no DRM render node (Vulkan may not init): {e}");
+                    }
+                }
+
+                eprintln!("PHASE: host_loop_started");
+
+                weave_ipc::host_loop(sv[0], ipc_handler);
+            }
+        }
+    } else {
+        eprintln!("weave: --no-sandbox: sandbox isolation disabled");
     }
 
     // ── 4. Apply filesystem sandbox ───────────────────────────────────────
@@ -1677,7 +1693,7 @@ fn main() {
         }
     }
 
-    weave_sandbox::apply(!args.no_sandbox, &allowed);
+    weave_sandbox::apply(true, &allowed);
 
     // ── 4.5. Sandbox runtime invariant — release blocker ─────────────────
     // After `apply()` runs, the sandbox state is committed. This assert is
