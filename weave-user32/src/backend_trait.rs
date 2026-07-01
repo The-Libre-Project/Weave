@@ -83,6 +83,21 @@ impl std::error::Error for BackendError {}
 /// Convenience alias for `Result<T, BackendError>`.
 pub type BackendResult<T> = Result<T, BackendError>;
 
+// ── MonitorInfo ─────────────────────────────────────────────────────────────────
+
+/// Information about a single display monitor.
+#[derive(Clone, Debug)]
+pub struct MonitorInfo {
+    /// Monitor handle (xcb screen number or randr output ID).
+    pub handle: u32,
+    /// Virtual-screen bounds: (x, y, width, height).
+    pub bounds: (i32, i32, i32, i32),
+    /// Work-area bounds excluding taskbar etc.
+    pub work_area: (i32, i32, i32, i32),
+    /// True if this is the primary monitor.
+    pub is_primary: bool,
+}
+
 // ── Trait ──────────────────────────────────────────────────────────────────────
 
 /// Abstract window backend.
@@ -110,6 +125,13 @@ pub trait WindowBackend: Send + Sync {
 
     /// System DPI value. Falls back to 96 when no display or no DPI info.
     fn system_dpi(&self) -> u32;
+
+    /// Enumerate all monitors connected to the display server.
+    ///
+    /// Returns a vector of [`MonitorInfo`] describing each monitor's geometry.
+    /// At minimum, one entry (the primary monitor) is returned when a display
+    /// is available. Returns an empty vector when no display is connected.
+    fn enumerate_monitors(&self) -> Vec<MonitorInfo>;
 
     // ── Window lifecycle ─────────────────────────────────────────────────────
 
@@ -293,6 +315,7 @@ mod tests {
             fn is_available(&self) -> bool { false }
             fn screen_size(&self) -> (u16, u16) { (0, 0) }
             fn system_dpi(&self) -> u32 { 96 }
+            fn enumerate_monitors(&self) -> Vec<MonitorInfo> { vec![] }
             fn create_window(&self, _: &str, _: i32, _: i32, _: u32, _: u32, _: bool, _: Option<WindowHandle>) -> BackendResult<WindowHandle> { Err(BackendError::NotAvailable) }
             fn destroy_window(&self, _: WindowHandle) {}
             fn show_window(&self, _: WindowHandle, _: bool) {}

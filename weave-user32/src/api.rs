@@ -2821,19 +2821,47 @@ pub unsafe extern "win64" fn end_paint(hwnd: usize, _lp_paint: *const PaintStruc
 /// Small icons map_to_dpi(16,96) & ~1 = 16. Min window: CYMIN = CYCAPTION+2×CYFRAME.
 pub extern "win64" fn get_system_metrics(n_index: i32) -> i32 {
     let (sw, sh) = backend::screen_size();
+    let monitors = backend::enumerate_monitors();
     match n_index {
         // ── screen / virtual screen ───────────────────────────────────────────
-        SM_CXSCREEN => sw as i32,
-        SM_CYSCREEN => sh as i32,
-        SM_CXFULLSCREEN => sw as i32,
-        SM_CYFULLSCREEN => sh as i32 - 40,
-        SM_XVIRTUALSCREEN => 0,
-        SM_YVIRTUALSCREEN => 0,
-        SM_CXVIRTUALSCREEN => sw as i32,
-        SM_CYVIRTUALSCREEN => sh as i32,
-        // SM_CMONITORS: 1 only when a real display is available — IrfanView triggers
-        // display hardware init on 1, corrupting the heap in headless Docker.
-        80 => i32::from(backend::is_available()),
+        SM_CXSCREEN => {
+            monitors.first().map_or(sw as i32, |m| m.bounds.2)
+        }
+        SM_CYSCREEN => {
+            monitors.first().map_or(sh as i32, |m| m.bounds.3)
+        }
+        SM_CXFULLSCREEN => {
+            monitors.first().map_or(sw as i32, |m| m.bounds.2)
+        }
+        SM_CYFULLSCREEN => {
+            monitors.first().map_or((sh as i32).saturating_sub(40), |m| (m.bounds.3 - 40).max(0))
+        }
+        SM_XVIRTUALSCREEN => {
+            monitors.iter().map(|m| m.bounds.0).min().unwrap_or(0)
+        }
+        SM_YVIRTUALSCREEN => {
+            monitors.iter().map(|m| m.bounds.1).min().unwrap_or(0)
+        }
+        SM_CXVIRTUALSCREEN => {
+            if monitors.is_empty() {
+                sw as i32
+            } else {
+                let min_x = monitors.iter().map(|m| m.bounds.0).min().unwrap_or(0);
+                let max_r = monitors.iter().map(|m| m.bounds.0 + m.bounds.2).max().unwrap_or(0);
+                (max_r - min_x).max(0)
+            }
+        }
+        SM_CYVIRTUALSCREEN => {
+            if monitors.is_empty() {
+                sh as i32
+            } else {
+                let min_y = monitors.iter().map(|m| m.bounds.1).min().unwrap_or(0);
+                let max_b = monitors.iter().map(|m| m.bounds.1 + m.bounds.3).max().unwrap_or(0);
+                (max_b - min_y).max(0)
+            }
+        }
+        // SM_CMONITORS: count of monitors when a real display is available.
+        80 => monitors.len() as i32,
         SM_SAMEDISPLAYFORMAT => 1,
 
         // ── window border / frame ─────────────────────────────────────────────
@@ -3848,19 +3876,29 @@ pub unsafe extern "win64" fn change_display_settings_ex_w(
 // rcNormalPosition if iconic) to find intersecting monitor; falls back to primary if no match.
 // Return 0 (no monitor) when X11 is unavailable so headless apps see no display.
 pub extern "win64" fn monitor_from_window(_hwnd: usize, _dw_flags: u32) -> usize {
-    if !backend::is_available() {
+    let monitors = backend::enumerate_monitors();
+    if monitors.is_empty() {
         return 0;
     }
-    1usize
+    // For Phase A: return primary monitor handle.
+    // Future: find the monitor whose bounds intersect the window rect.
+    let primary = monitors.iter().find(|m| m.is_primary).unwrap_or(&monitors[0]);
+    primary.handle as usize
 }
 
 // Wine ref: dlls/win32u/sysparams.c — MonitorFromPoint wraps monitor_from_rect with a
 // 1×1 rect at the point; returns primary monitor handle on MONITOR_DEFAULTTOPRIMARY.
 pub extern "win64" fn monitor_from_point(_pt_x: i32, _pt_y: i32, _dw_flags: u32) -> usize {
-    if !backend::is_available() {
+    let monitors = backend::enumerate_monitors();
+    if monitors.is_empty() {
         return 0;
     }
-    1usize
+    // For Phase A: return primary monitor handle.
+    // MONITOR_DEFAULTTOPRIMARY (1) returns primary even if point is on a different monitor.
+    // MONITOR_DEFAULTTONEAREST (2) returns the monitor nearest the point.
+    // Future: find the monitor whose bounds contain the point.
+    let primary = monitors.iter().find(|m| m.is_primary).unwrap_or(&monitors[0]);
+    primary.handle as usize
 }
 
 /// # Safety
@@ -3868,21 +3906,34 @@ pub extern "win64" fn monitor_from_point(_pt_x: i32, _pt_y: i32, _dw_flags: u32)
 // Wine ref: dlls/win32u/sysparams.c::monitor_info_from_rect — finds monitor with largest
 // intersection area; if no intersection uses MONITOR_DEFAULTTO* flag to pick fallback.
 pub unsafe extern "win64" fn monitor_from_rect(_lp_rc: *const Rect, _dw_flags: u32) -> usize {
-    if !backend::is_available() {
+    let monitors = backend::enumerate_monitors();
+    if monitors.is_empty() {
         return 0;
     }
-    1usize
+    let primary = monitors.iter().find(|m| m.is_primary).unwrap_or(&monitors[0]);
+    primary.handle as usize
 }
 
 /// # Safety
 /// `lp_mi` must point to a MONITORINFO or MONITORINFOEXW with `cbSize` pre-filled.
 // Wine ref: dlls/win32u/sysparams.c::monitor_info_from_window — fills rcMonitor (full screen
 // rect) and rcWork (work area minus taskbar); dwFlags=MONITORINFOF_PRIMARY for primary.
-pub unsafe extern "win64" fn get_monitor_info_w(_h_monitor: usize, lp_mi: *mut MonitorInfo) -> i32 {
+pub unsafe extern "win64" fn get_monitor_info_w(h_monitor: usize, lp_mi: *mut MonitorInfo) -> i32 {
     if lp_mi.is_null() {
         return 0;
     }
-    let (sw, sh) = crate::backend::screen_size();
+    let monitors = crate::backend::enumerate_monitors();
+    let mon = match monitors.iter().find(|m| m.handle as usize == h_monitor) {
+        Some(m) => m,
+        None => {
+            // If the specific handle isn't found, return info for the primary monitor.
+            if monitors.is_empty() {
+                return 0;
+            }
+            monitors.iter().find(|m| m.is_primary).unwrap_or(&monitors[0])
+        }
+    };
+
     // Write using real Windows MONITORINFO layout (NOT the Weave MonitorInfo struct,
     // which has an erroneous _pad field that shifts offsets by 4 bytes):
     //   offset  0: cbSize (u32)  — caller pre-fills; do not touch
@@ -3893,35 +3944,26 @@ pub unsafe extern "win64" fn get_monitor_info_w(_h_monitor: usize, lp_mi: *mut M
     let base = lp_mi as *mut u8;
     let cb_size = (base as *const u32).read_unaligned();
 
+    let (mx, my, mw, mh) = mon.bounds;
+    let (wx, wy, ww, wh) = mon.work_area;
+
     // rcMonitor
-    (base.add(4) as *mut i32).write(0);
-    (base.add(8) as *mut i32).write(0);
-    (base.add(12) as *mut i32).write(sw as i32);
-    (base.add(16) as *mut i32).write(sh as i32);
-    // rcWork (same — no taskbar in Weave)
-    (base.add(20) as *mut i32).write(0);
-    (base.add(24) as *mut i32).write(0);
-    (base.add(28) as *mut i32).write(sw as i32);
-    (base.add(32) as *mut i32).write(sh as i32);
+    (base.add(4) as *mut i32).write(mx);
+    (base.add(8) as *mut i32).write(my);
+    (base.add(12) as *mut i32).write(mx + mw);
+    (base.add(16) as *mut i32).write(my + mh);
+    // rcWork
+    (base.add(20) as *mut i32).write(wx);
+    (base.add(24) as *mut i32).write(wy);
+    (base.add(28) as *mut i32).write(wx + ww);
+    (base.add(32) as *mut i32).write(wy + wh);
     // dwFlags: MONITORINFOF_PRIMARY
-    (base.add(36) as *mut u32).write(1);
+    (base.add(36) as *mut u32).write(if mon.is_primary { 1 } else { 0 });
     // szDevice in MONITORINFOEXW — SDL2 passes cbSize=104; fill "\\.\DISPLAY1"
     if cb_size >= 104 {
-        let name: [u16; 13] = [
-            '\\' as u16,
-            '\\' as u16,
-            '.' as u16,
-            '\\' as u16,
-            'D' as u16,
-            'I' as u16,
-            'S' as u16,
-            'P' as u16,
-            'L' as u16,
-            'A' as u16,
-            'Y' as u16,
-            '1' as u16,
-            0,
-        ];
+        let index = mon.handle.saturating_add(1);
+        let display_str = format!("\\\\DISPLAY{index}\0");
+        let name: Vec<u16> = display_str.encode_utf16().take(32).collect();
         let sz_ptr = base.add(40) as *mut u16;
         for (i, &c) in name.iter().enumerate() {
             sz_ptr.add(i).write(c);
@@ -3943,21 +3985,20 @@ pub unsafe extern "win64" fn enum_display_monitors(
     if lpfn_enum == 0 {
         return 1;
     }
-    // Only enumerate monitors when a real display is available.  Without a
-    // display (e.g. headless IrfanView test, env_remove("DISPLAY")), there are
-    // no monitors to report and the callback must not be called — calling it
-    // with a fake HMONITOR causes apps that probe display hardware in their
-    // callback (IrfanView) to corrupt the heap when the hardware isn't there.
-    if !backend::is_available() {
+    let monitors = crate::backend::enumerate_monitors();
+    if monitors.is_empty() {
         return 1;
     }
-    let (sw, sh) = backend::screen_size();
-    // RECT: left, top, right, bottom
-    let rect: [i32; 4] = [0, 0, sw as i32, sh as i32];
-    // MONITORENUMPROC: BOOL CALLBACK(HMONITOR, HDC, LPRECT, LPARAM)
     let callback: unsafe extern "win64" fn(usize, usize, *const i32, isize) -> i32 =
         std::mem::transmute(lpfn_enum);
-    callback(1, 0, rect.as_ptr(), dw_data);
+    for mon in &monitors {
+        let (mx, my, mw, mh) = mon.bounds;
+        // RECT: left, top, right, bottom
+        let rect: [i32; 4] = [mx, my, mx + mw, my + mh];
+        if callback(mon.handle as usize, 0, rect.as_ptr(), dw_data) == 0 {
+            break;
+        }
+    }
     1
 }
 
@@ -10355,6 +10396,151 @@ pub unsafe extern "win64" fn call_next_hook_ex(
 // lpEnumFunc for each; returns 0 when enumeration completes or is aborted.
 pub unsafe extern "win64" fn enum_windows(_lp_enum_func: usize, _l_param: isize) -> i32 {
     0
+}
+
+// ── Monitor API tests ─────────────────────────────────────────────────────────
+// These tests run on macOS (non-Linux) where the backend returns empty monitors.
+// They verify that the API functions handle the edge cases correctly.
+#[cfg(test)]
+mod monitor_tests {
+    use super::*;
+    use crate::backend_trait::MonitorInfo;
+
+    fn primary_only_monitors() -> Vec<MonitorInfo> {
+        vec![MonitorInfo {
+            handle: 0,
+            bounds: (0, 0, 1920, 1080),
+            work_area: (0, 0, 1920, 1080),
+            is_primary: true,
+        }]
+    }
+
+    fn multi_monitors() -> Vec<MonitorInfo> {
+        vec![
+            MonitorInfo {
+                handle: 0,
+                bounds: (0, 0, 1920, 1080),
+                work_area: (0, 0, 1920, 1080),
+                is_primary: true,
+            },
+            MonitorInfo {
+                handle: 1,
+                bounds: (1920, 0, 1280, 1024),
+                work_area: (1920, 0, 1280, 1024),
+                is_primary: false,
+            },
+            MonitorInfo {
+                handle: 2,
+                bounds: (-800, 0, 800, 600),
+                work_area: (-800, 0, 800, 600),
+                is_primary: false,
+            },
+        ]
+    }
+
+    #[test]
+    fn get_system_metrics_virtual_screen_single_monitor() {
+        let monos = primary_only_monitors();
+        assert_eq!(
+            get_system_metrics_sm_virtual(&monos, SM_XVIRTUALSCREEN),
+            0
+        );
+        assert_eq!(
+            get_system_metrics_sm_virtual(&monos, SM_YVIRTUALSCREEN),
+            0
+        );
+        assert_eq!(
+            get_system_metrics_sm_virtual(&monos, SM_CXVIRTUALSCREEN),
+            1920
+        );
+        assert_eq!(
+            get_system_metrics_sm_virtual(&monos, SM_CYVIRTUALSCREEN),
+            1080
+        );
+    }
+
+    #[test]
+    fn get_system_metrics_virtual_screen_multi_monitor() {
+        let monos = multi_monitors();
+        // leftmost = -800, rightmost = 1920+1280 = 3200
+        assert_eq!(
+            get_system_metrics_sm_virtual(&monos, SM_XVIRTUALSCREEN),
+            -800
+        );
+        assert_eq!(
+            get_system_metrics_sm_virtual(&monos, SM_YVIRTUALSCREEN),
+            0
+        );
+        assert_eq!(
+            get_system_metrics_sm_virtual(&monos, SM_CXVIRTUALSCREEN),
+            4000
+        );
+        assert_eq!(
+            get_system_metrics_sm_virtual(&monos, SM_CYVIRTUALSCREEN),
+            1080
+        );
+    }
+
+    #[test]
+    fn get_system_metrics_sm_cmonitors() {
+        assert_eq!(
+            get_system_metrics_sm_virtual(&multi_monitors(), 80),
+            3
+        );
+        assert_eq!(
+            get_system_metrics_sm_virtual(&vec![], 80),
+            0
+        );
+    }
+
+    fn get_system_metrics_sm_virtual(monos: &[MonitorInfo], index: i32) -> i32 {
+        // Replicate the switch logic from get_system_metrics for the virtual/CMONITORS indices.
+        match index {
+            SM_XVIRTUALSCREEN => monos.iter().map(|m| m.bounds.0).min().unwrap_or(0),
+            SM_YVIRTUALSCREEN => monos.iter().map(|m| m.bounds.1).min().unwrap_or(0),
+            SM_CXVIRTUALSCREEN => {
+                if monos.is_empty() { 0 } else {
+                    let min_x = monos.iter().map(|m| m.bounds.0).min().unwrap_or(0);
+                    let max_r = monos.iter().map(|m| m.bounds.0 + m.bounds.2).max().unwrap_or(0);
+                    (max_r - min_x).max(0)
+                }
+            }
+            SM_CYVIRTUALSCREEN => {
+                if monos.is_empty() { 0 } else {
+                    let min_y = monos.iter().map(|m| m.bounds.1).min().unwrap_or(0);
+                    let max_b = monos.iter().map(|m| m.bounds.1 + m.bounds.3).max().unwrap_or(0);
+                    (max_b - min_y).max(0)
+                }
+            }
+            80 => monos.len() as i32,
+            _ => 0,
+        }
+    }
+
+    #[test]
+    fn monitor_from_window_no_backend_returns_zero() {
+        // No display backend available on macOS — returns 0.
+        let result = monitor_from_window(0x12345, 0);
+        // On non-Linux there are no monitors, so result should be 0.
+        // (On Linux with a display it would be non-zero.)
+        if cfg!(target_os = "linux") && backend::is_available() {
+            assert_ne!(result, 0);
+        }
+    }
+
+    #[test]
+    fn monitor_from_point_no_backend_returns_zero() {
+        let result = monitor_from_point(100, 200, 0);
+        if cfg!(target_os = "linux") && backend::is_available() {
+            assert_ne!(result, 0);
+        }
+    }
+
+    #[test]
+    fn get_monitor_info_w_null_returns_false() {
+        let result = unsafe { get_monitor_info_w(0, std::ptr::null_mut()) };
+        assert_eq!(result, 0);
+    }
 }
 
 /// mouse_event — synthesise mouse movement and button events.

@@ -158,6 +158,16 @@ mod inner {
                 .unwrap_or(96)
         }
 
+        fn enumerate_monitors(&self) -> Vec<crate::backend_trait::MonitorInfo> {
+            use crate::backend_trait::MonitorInfo;
+            vec![MonitorInfo {
+                handle: 0,
+                bounds: (0, 0, self.screen_width as i32, self.screen_height as i32),
+                work_area: (0, 0, self.screen_width as i32, self.screen_height as i32),
+                is_primary: true,
+            }]
+        }
+
         fn create_window(
             &self,
             title: &str,
@@ -1051,6 +1061,13 @@ mod inner {
         }
     }
 
+    pub fn enumerate_monitors() -> Vec<crate::backend_trait::MonitorInfo> {
+        match BACKEND.get() {
+            Some(b) => b.enumerate_monitors(),
+            None => vec![],
+        }
+    }
+
     pub fn create_window(
         title: &str,
         x: i32,
@@ -1227,9 +1244,9 @@ pub const GX_SET: u32 = 15;
 pub use inner::{
     colorref_to_pixel, configure_window, copy_area, copy_area_with_rop, create_pixmap,
     create_window, destroy_window, draw_filled_rect, draw_line, draw_rect_outline, draw_text,
-    draw_text_utf16, fill_rect_with_rop, free_pixmap, is_available, poll_event,
-    put_bits_to_pixmap_at, put_dib_to_pixmap, screen_size, set_title, show_window, system_dpi,
-    wait_event,
+    draw_text_utf16, enumerate_monitors, fill_rect_with_rop, free_pixmap, is_available,
+    poll_event, put_bits_to_pixmap_at, put_dib_to_pixmap, screen_size, set_title, show_window,
+    system_dpi, wait_event,
 };
 
 // ── No-op stubs for non-Linux platforms (macOS dev builds) ───────────────────
@@ -1247,6 +1264,11 @@ pub fn screen_size() -> (u16, u16) {
 #[cfg(not(target_os = "linux"))]
 pub fn system_dpi() -> u32 {
     96
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn enumerate_monitors() -> Vec<crate::backend_trait::MonitorInfo> {
+    vec![]
 }
 
 #[cfg(not(target_os = "linux"))]
