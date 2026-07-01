@@ -20,6 +20,14 @@ pub struct LoadedImage {
     /// byte length.  Both are zero/null if the PE has no TLS directory.
     pub tls_data: *const u8,
     pub tls_data_size: usize,
+    /// Pointer to the null-terminated array of TLS callback function pointers
+    /// in the loaded image.  Null if the PE has no TLS callbacks.
+    ///
+    /// Each entry points to an `extern "win64" fn(usize, u32, usize)` (void
+    /// return) — the same calling convention as DllMain but returning nothing.
+    /// The array is terminated by a null pointer (u64 = 0 for 64-bit PEs,
+    /// u32 = 0 for 32-bit PEs).
+    pub tls_callbacks: *const u8,
     /// RVA and byte size of the .pdata exception table (0/0 if absent).
     /// Used by the SEH signal handler to identify which function faulted.
     pub pdata_rva: usize,
@@ -108,6 +116,23 @@ fn load_impl(bytes: &[u8]) -> Result<LoadedImage, String> {
 
     let (tls_data, tls_data_size) = init_tls(base, bytes, &pe);
 
+    // Compute TLS callback array address in the loaded image.
+    // The TLS directory stores VAs relative to the preferred base; after
+    // relocation (apply_relocations above) the runtime values shift by
+    // delta = actual_base - preferred_base.  Goblin parses TlsData from
+    // raw file bytes, so we add delta manually rather than re-reading the
+    // relocated in-memory TLS directory.
+    let preferred_base = opt.windows_fields.image_base as i64;
+    let actual_base = base as i64;
+    let delta = actual_base - preferred_base;
+    let tls_callbacks = match &pe.tls_data {
+        Some(t) if t.image_tls_directory.address_of_callbacks != 0 => {
+            let cb_va = t.image_tls_directory.address_of_callbacks as i64;
+            ((cb_va + delta) as usize) as *const u8
+        }
+        _ => std::ptr::null(),
+    };
+
     let (pdata_rva, pdata_size) = pe
         .sections
         .iter()
@@ -141,6 +166,7 @@ fn load_impl(bytes: &[u8]) -> Result<LoadedImage, String> {
         entry_point: unsafe { base.add(entry_rva) },
         tls_data,
         tls_data_size,
+        tls_callbacks,
         pdata_rva,
         pdata_size,
         machine: pe.header.coff_header.machine,
@@ -251,6 +277,7 @@ pub fn load_dll(bytes: &[u8]) -> Result<(LoadedImage, HashMap<String, usize>), S
         entry_point,
         tls_data: std::ptr::null(),
         tls_data_size: 0,
+        tls_callbacks: std::ptr::null(),
         pdata_rva: 0,
         pdata_size: 0,
         machine: pe.header.coff_header.machine,
@@ -394,6 +421,52 @@ fn reserve_memory(
             return Err(format!("mmap failed: {}", std::io::Error::last_os_error()));
         }
         Ok(p as usize)
+    }
+}
+
+/// Walk and call TLS callbacks for the given loaded image.
+///
+/// Each callback is called with (DllHandle, DLL_PROCESS_ATTACH, 0).
+/// The array is terminated by a null pointer.
+///
+/// Safe to call on an image with no TLS callbacks (returns immediately).
+pub fn run_tls_callbacks(image: &LoadedImage) {
+    // Wine ref: dlls/ntdll/loader.c — LdrpCallTlsInitializers calls each
+    // TLS callback with (DllHandle=module_base, Reason=DLL_PROCESS_ATTACH,
+    // Reserved=0) in the order they appear in the callback array.
+    let ptr = image.tls_callbacks;
+    if ptr.is_null() {
+        return;
+    }
+
+    let base = image.base as usize;
+    let reason: u32 = 1; // DLL_PROCESS_ATTACH
+    let reserved: usize = 0;
+
+    let is_64 = image.machine == 0x8664; // IMAGE_FILE_MACHINE_AMD64
+    let stride = if is_64 { 8usize } else { 4usize };
+
+    let mut offset = 0usize;
+    loop {
+        let entry_ptr = unsafe { ptr.add(offset) };
+        let va: u64 = if is_64 {
+            unsafe { *(entry_ptr as *const u64) }
+        } else {
+            unsafe { *(entry_ptr as *const u32) as u64 }
+        };
+
+        if va == 0 {
+            break;
+        }
+
+        #[cfg(target_os = "linux")]
+        type TlsCb = unsafe extern "win64" fn(usize, u32, usize);
+        #[cfg(not(target_os = "linux"))]
+        type TlsCb = unsafe extern "C" fn(usize, u32, usize);
+        let func: TlsCb = unsafe { std::mem::transmute(va as usize) };
+        unsafe { func(base, reason, reserved) };
+
+        offset += stride;
     }
 }
 
@@ -542,5 +615,104 @@ mod tests {
 
         let first_byte = unsafe { std::ptr::read_volatile(image.entry_point) };
         assert_ne!(first_byte, 0x00, "entry point looks like unmapped memory");
+    }
+
+    // ── TLS callbacks ──────────────────────────────────────────────────
+
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static TLS_CB_CALLED: AtomicBool = AtomicBool::new(false);
+
+    #[cfg(target_os = "linux")]
+    extern "win64" fn test_tls_callback(_hinst: usize, reason: u32, _reserved: usize) {
+        TLS_CB_CALLED.store(true, Ordering::SeqCst);
+        assert_eq!(reason, 1, "TLS callback reason must be DLL_PROCESS_ATTACH");
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    extern "C" fn test_tls_callback(_hinst: usize, reason: u32, _reserved: usize) {
+        TLS_CB_CALLED.store(true, Ordering::SeqCst);
+        assert_eq!(reason, 1, "TLS callback reason must be DLL_PROCESS_ATTACH");
+    }
+
+    #[test]
+    fn tls_callbacks_fire() {
+        TLS_CB_CALLED.store(false, Ordering::SeqCst);
+
+        // Allocate a fake image base (any readable/writable page).
+        let page_size = 4096usize;
+        let base = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                page_size,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                -1,
+                0,
+            )
+        };
+        assert_ne!(base, libc::MAP_FAILED, "mmap for test image base failed");
+
+        // Build a callback array: [test_fn_ptr, null_terminator]
+        let cb_addr = test_tls_callback as *const () as usize;
+        let callback_array: Vec<u64> = vec![cb_addr as u64, 0u64];
+        let callbacks_ptr = callback_array.as_ptr() as *const u8;
+
+        let image = LoadedImage {
+            base: base as *mut u8,
+            size: page_size,
+            entry_point: std::ptr::null(),
+            tls_data: std::ptr::null(),
+            tls_data_size: 0,
+            tls_callbacks: callbacks_ptr,
+            pdata_rva: 0,
+            pdata_size: 0,
+            machine: 0x8664, // IMAGE_FILE_MACHINE_AMD64
+        };
+
+        run_tls_callbacks(&image);
+
+        assert!(
+            TLS_CB_CALLED.load(Ordering::SeqCst),
+            "TLS callback must have been called"
+        );
+
+        // Prevent LoadedImage::drop from munmap'ing our manually-set-up base
+        // (the callback_array vec on the heap is dropped normally).
+        std::mem::forget(image);
+        unsafe { libc::munmap(base, page_size) };
+    }
+
+    #[test]
+    fn tls_callbacks_noop_when_null() {
+        // Must not crash or panic when tls_callbacks is null.
+        let page_size = 4096usize;
+        let base = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                page_size,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                -1,
+                0,
+            )
+        };
+        assert_ne!(base, libc::MAP_FAILED, "mmap for test image base failed");
+
+        let image = LoadedImage {
+            base: base as *mut u8,
+            size: page_size,
+            entry_point: std::ptr::null(),
+            tls_data: std::ptr::null(),
+            tls_data_size: 0,
+            tls_callbacks: std::ptr::null(),
+            pdata_rva: 0,
+            pdata_size: 0,
+            machine: 0x8664,
+        };
+
+        run_tls_callbacks(&image);
+
+        std::mem::forget(image);
+        unsafe { libc::munmap(base, page_size) };
     }
 }

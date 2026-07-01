@@ -1734,6 +1734,12 @@ fn main() {
     // then PE DLLs).  Also registers an atexit handler for PROCESS_DETACH.
     dllmain::process_attach();
 
+    // ── 6.10. Fire TLS callbacks for the main PE ──────────────────────
+    // TLS callbacks are PE-level static constructors called after all
+    // DllMain PROCESS_ATTACH calls, before the entry point runs. They
+    // receive (hinst=base, DLL_PROCESS_ATTACH, 0).
+    loader::run_tls_callbacks(&image);
+
     eprintln!("weave: TEB ready — jumping in");
 
     // ── DEBUG: print first 16 bytes at entry point and GS base ───────────
