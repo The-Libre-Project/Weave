@@ -179,7 +179,10 @@ mod tests {
     use super::*;
 
     #[test]
-    #[cfg_attr(target_os = "linux", ignore = "requires seccomp-enabled kernel, tested in integration")]
+    #[cfg_attr(
+        target_os = "linux",
+        ignore = "requires seccomp-enabled kernel, tested in integration"
+    )]
     fn test_apply_seccomp_returns_ok_on_non_linux() {
         assert!(apply_seccomp().is_ok());
     }

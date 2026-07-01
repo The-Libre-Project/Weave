@@ -362,6 +362,10 @@ fn shell_link_save_callback(data: &ShellLinkSaveData) -> Result<(), String> {
     }
 }
 
+/// Child-side socket fd for IPC with the host process.
+/// Set once after fork() in the child branch.
+static CHILD_FD: std::sync::OnceLock<libc::c_int> = std::sync::OnceLock::new();
+
 fn main() {
     // ── −3. Prefix subcommand dispatch — intercept before clap parsing ────
     // `weave prefix <create|list|launch|delete> [args...]` is handled here so
@@ -799,6 +803,57 @@ fn main() {
                 (0x5cfb4, &[0x48, 0x8b, 0x08], &[0xeb, 0x30, 0x90]),
             ],
         );
+    }
+
+    // ── 3.7. Socketpair + fork for out-of-process guest ──────────────────
+    let mut sv: [libc::c_int; 2] = [0; 2];
+    let rc = unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, sv.as_mut_ptr()) };
+    assert_eq!(
+        rc,
+        0,
+        "weave: socketpair failed: {}",
+        std::io::Error::last_os_error()
+    );
+
+    match unsafe { libc::fork() } {
+        -1 => panic!("weave: fork failed: {}", std::io::Error::last_os_error()),
+        0 => {
+            unsafe {
+                libc::close(sv[0]);
+            }
+            CHILD_FD.set(sv[1]).expect("weave: CHILD_FD already set");
+            eprintln!("PHASE: child_spawned pid={}", unsafe { libc::getpid() });
+        }
+        _child_pid => {
+            unsafe {
+                libc::close(sv[1]);
+            }
+            eprintln!("PHASE: host_loop_started");
+
+            let mut buf = [0u8; 4096];
+            loop {
+                let n =
+                    unsafe { libc::read(sv[0], buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
+                match n {
+                    -1 => {
+                        eprintln!(
+                            "weave: host loop read error: {}",
+                            std::io::Error::last_os_error()
+                        );
+                        break;
+                    }
+                    0 => {
+                        eprintln!("weave: host loop EOF");
+                        break;
+                    }
+                    _ => {
+                        eprintln!("weave: host loop received {} bytes", n);
+                        break;
+                    }
+                }
+            }
+            std::process::exit(0);
+        }
     }
 
     // ── 4. Apply filesystem sandbox ───────────────────────────────────────
