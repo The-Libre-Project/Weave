@@ -1,5 +1,84 @@
 use serde::{Deserialize, Serialize};
 
+// ── File descriptor passing (SCM_RIGHTS) ──────────────────────────
+
+/// Send a file descriptor over a Unix domain socket via SCM_RIGHTS.
+pub fn send_fd(fd: i32, fd_to_send: i32) -> Result<(), String> {
+    let mut dummy = [0u8; 1];
+    let mut iov = libc::iovec {
+        iov_base: dummy.as_mut_ptr() as *mut libc::c_void,
+        iov_len: 1,
+    };
+
+    let cmsg_space = unsafe {
+        libc::CMSG_SPACE(std::mem::size_of::<libc::c_int>() as libc::c_uint)
+    };
+    let cmsg_space_usize = cmsg_space as usize;
+    let mut cmsg_buf = vec![0u8; cmsg_space_usize];
+
+    let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
+    msg.msg_iov = &mut iov;
+    msg.msg_iovlen = 1;
+    msg.msg_control = cmsg_buf.as_mut_ptr() as *mut libc::c_void;
+    msg.msg_controllen = cmsg_space_usize;
+
+    unsafe {
+        let cmsg = libc::CMSG_FIRSTHDR(&msg);
+        if cmsg.is_null() {
+            return Err("CMSG_FIRSTHDR returned null".to_string());
+        }
+        (*cmsg).cmsg_level = libc::SOL_SOCKET;
+        (*cmsg).cmsg_type = libc::SCM_RIGHTS;
+        let cmsg_len_val = libc::CMSG_LEN(std::mem::size_of::<libc::c_int>() as libc::c_uint);
+        (*cmsg).cmsg_len = cmsg_len_val as _;
+        std::ptr::write(libc::CMSG_DATA(cmsg) as *mut libc::c_int, fd_to_send);
+    }
+
+    let ret = unsafe { libc::sendmsg(fd, &msg, 0) };
+    if ret < 0 {
+        return Err(std::io::Error::last_os_error().to_string());
+    }
+    Ok(())
+}
+
+/// Receive a file descriptor over a Unix domain socket via SCM_RIGHTS.
+pub fn recv_fd(fd: i32) -> Result<i32, String> {
+    let mut dummy = [0u8; 1];
+    let mut iov = libc::iovec {
+        iov_base: dummy.as_mut_ptr() as *mut libc::c_void,
+        iov_len: 1,
+    };
+
+    let cmsg_space = unsafe {
+        libc::CMSG_SPACE(std::mem::size_of::<libc::c_int>() as libc::c_uint)
+    };
+    let cmsg_space_usize = cmsg_space as usize;
+    let mut cmsg_buf = vec![0u8; cmsg_space_usize];
+
+    let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
+    msg.msg_iov = &mut iov;
+    msg.msg_iovlen = 1;
+    msg.msg_control = cmsg_buf.as_mut_ptr() as *mut libc::c_void;
+    msg.msg_controllen = cmsg_space_usize;
+
+    let ret = unsafe { libc::recvmsg(fd, &mut msg, 0) };
+    if ret < 0 {
+        return Err(std::io::Error::last_os_error().to_string());
+    }
+
+    unsafe {
+        let cmsg = libc::CMSG_FIRSTHDR(&msg);
+        if cmsg.is_null() {
+            return Err("no cmsg header received".to_string());
+        }
+        if (*cmsg).cmsg_level != libc::SOL_SOCKET || (*cmsg).cmsg_type != libc::SCM_RIGHTS {
+            return Err("expected SCM_RIGHTS ancillary data".to_string());
+        }
+        let received_fd = std::ptr::read(libc::CMSG_DATA(cmsg) as *const libc::c_int);
+        Ok(received_fd)
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 pub struct CallMsg {
     #[serde(rename = "type")]
