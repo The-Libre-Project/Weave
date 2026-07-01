@@ -1037,6 +1037,7 @@ fn main() {
                 std::process::exit(1);
             }
             eprintln!("PHASE: seccomp_applied");
+            eprintln!("PHASE: ipc_alive");
         }
         _child_pid => {
             unsafe {
