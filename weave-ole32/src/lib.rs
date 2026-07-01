@@ -1083,12 +1083,47 @@ pub unsafe extern "win64" fn do_drag_drop(
     0x0004_0101u32 as i32 // DRAGDROP_S_CANCEL
 }
 
-// ── StringFromCLSID ───────────────────────────────────────────────────────────
-
+// Wine ref: dlls/ole32/ifs.c — StringFromCLSID calls StringFromGUID2 into a
+// CoTaskMemAlloc'd buffer; caller must free with CoTaskMemFree.
 /// StringFromCLSID — convert a CLSID to a string (ole32 version).
-/// Returns E_OUTOFMEMORY (0x8007000E) — stub, no allocation.
-pub unsafe extern "win64" fn string_from_clsid(_rclsid: *const u8, _lpsz: *mut *mut u16) -> u32 {
-    0x8007000E // E_OUTOFMEMORY
+///
+/// Allocates the output string with `CoTaskMemAlloc`; the caller must free
+/// with `CoTaskMemFree`. Returns `S_OK` on success, `E_OUTOFMEMORY` if
+/// allocation fails, `E_INVALIDARG` if either pointer is null.
+///
+/// # Safety
+/// `rclsid` must be a valid pointer to a 16-byte GUID.
+/// `lpsz` must be a valid writable pointer to a `*mut u16` output slot.
+// Wine ref: dlls/ole32/ifs.c — StringFromGUID2 into CoTaskMemAlloc buffer.
+pub unsafe extern "win64" fn string_from_clsid(rclsid: *const u8, lpsz: *mut *mut u16) -> u32 {
+    if rclsid.is_null() || lpsz.is_null() {
+        return E_INVALIDARG;
+    }
+    unsafe { *lpsz = std::ptr::null_mut() };
+
+    let guid = unsafe { std::slice::from_raw_parts(rclsid, 16) };
+    let d1 = u32::from_le_bytes([guid[0], guid[1], guid[2], guid[3]]);
+    let d2 = u16::from_le_bytes([guid[4], guid[5]]);
+    let d3 = u16::from_le_bytes([guid[6], guid[7]]);
+    let s = format!(
+        "{{{:08X}-{:04X}-{:04X}-{:02X}{:02X}-{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}}}",
+        d1, d2, d3, guid[8], guid[9], guid[10], guid[11], guid[12], guid[13], guid[14], guid[15],
+    );
+
+    // Allocate buffer: UTF-16 chars + NUL terminator (2 bytes each).
+    let buf_size = (s.len() + 1) * 2;
+    let buf = co_task_mem_alloc(buf_size);
+    if buf == 0 {
+        return 0x8007000E; // E_OUTOFMEMORY
+    }
+
+    let buf_ptr = buf as *mut u16;
+    for (i, ch) in s.encode_utf16().enumerate() {
+        unsafe { *buf_ptr.add(i) = ch };
+    }
+    unsafe { *buf_ptr.add(s.len()) = 0 };
+    unsafe { *lpsz = buf_ptr };
+    S_OK
 }
 
 // ── PropVariant ───────────────────────────────────────────────────────────────
@@ -2026,5 +2061,180 @@ mod tests {
     fn co_revoke_class_object_invalid_cookie_returns_error() {
         let hr = unsafe { co_revoke_class_object(9999) };
         assert_eq!(hr, E_INVALIDARG);
+    }
+
+    // ── A3d: CoTaskMem / GUID / CoGetMalloc tests ──────────────────────
+
+    #[test]
+    fn co_task_mem_realloc_preserves_content() {
+        let ptr = co_task_mem_alloc(8);
+        assert_ne!(ptr, 0);
+        // Write a pattern.
+        unsafe { std::ptr::write_bytes(ptr as *mut u8, 0xAB, 8) };
+        // Realloc to larger size — content should be preserved.
+        let new_ptr = co_task_mem_realloc(ptr, 64);
+        assert_ne!(new_ptr, 0);
+        // First 8 bytes should still be 0xAB.
+        let buf = unsafe { std::slice::from_raw_parts(new_ptr as *const u8, 8) };
+        assert_eq!(buf, &[0xABu8; 8]);
+        co_task_mem_free(new_ptr);
+    }
+
+    #[test]
+    fn string_from_clsid_basic() {
+        // {6B29FC40-CA47-1067-B31D-00DD010662DA}
+        let guid_bytes: [u8; 16] = [
+            0x40, 0xFC, 0x29, 0x6B, // Data1 = 0x6B29FC40 (LE)
+            0x47, 0xCA,             // Data2 = 0xCA47 (LE)
+            0x67, 0x10,             // Data3 = 0x1067 (LE)
+            0xB3, 0x1D, 0x00, 0xDD, 0x01, 0x06, 0x62, 0xDA, // Data4
+        ];
+        let mut out_str: *mut u16 = std::ptr::null_mut();
+        let hr = unsafe { string_from_clsid(guid_bytes.as_ptr(), &mut out_str) };
+        assert_eq!(hr, S_OK);
+        assert!(!out_str.is_null());
+        let s = unsafe {
+            let mut len = 0usize;
+            while *out_str.add(len) != 0 {
+                len += 1;
+            }
+            String::from_utf16_lossy(std::slice::from_raw_parts(out_str, len))
+        };
+        assert_eq!(s, "{6B29FC40-CA47-1067-B31D-00DD010662DA}");
+        co_task_mem_free(out_str as usize);
+    }
+
+    #[test]
+    fn string_from_clsid_roundtrip() {
+        let guid_bytes: [u8; 16] = [
+            0x60, 0xBE, 0x56, 0x9E, 0x0F, 0xC5, 0xCF, 0x11,
+            0x9A, 0x2C, 0x00, 0xA0, 0xC9, 0x0A, 0x90, 0xCE,
+        ];
+        let mut out_str: *mut u16 = std::ptr::null_mut();
+        let hr = unsafe { string_from_clsid(guid_bytes.as_ptr(), &mut out_str) };
+        assert_eq!(hr, S_OK);
+        assert!(!out_str.is_null());
+
+        // Now parse it back.
+        let mut parsed = [0u8; 16];
+        let hr2 = unsafe { clsid_from_string(out_str, parsed.as_mut_ptr()) };
+        assert_eq!(hr2, S_OK);
+        assert_eq!(parsed, guid_bytes);
+
+        co_task_mem_free(out_str as usize);
+    }
+
+    #[test]
+    fn string_from_clsid_null_returns_error() {
+        let mut out_str: *mut u16 = std::ptr::null_mut();
+        let guid_bytes = [0u8; 16];
+        // Null rclsid.
+        let hr = unsafe { string_from_clsid(std::ptr::null(), &mut out_str) };
+        assert_eq!(hr, E_INVALIDARG);
+        // Null lpsz.
+        let hr = unsafe { string_from_clsid(guid_bytes.as_ptr(), std::ptr::null_mut()) };
+        assert_eq!(hr, E_INVALIDARG);
+    }
+
+    #[test]
+    fn clsid_from_string_no_braces() {
+        let s = "6B29FC40-CA47-1067-B31D-00DD010662DA\0";
+        let wide: Vec<u16> = s.encode_utf16().collect();
+        let mut parsed = [0u8; 16];
+        let hr = unsafe { clsid_from_string(wide.as_ptr(), parsed.as_mut_ptr()) };
+        assert_eq!(hr, S_OK);
+        let d1 = u32::from_le_bytes([parsed[0], parsed[1], parsed[2], parsed[3]]);
+        assert_eq!(d1, 0x6B29_FC40);
+    }
+
+    #[test]
+    fn clsid_from_string_lowercase() {
+        let s = "{6b29fc40-ca47-1067-b31d-00dd010662da}\0";
+        let wide: Vec<u16> = s.encode_utf16().collect();
+        let mut parsed = [0u8; 16];
+        let hr = unsafe { clsid_from_string(wide.as_ptr(), parsed.as_mut_ptr()) };
+        assert_eq!(hr, S_OK);
+        let d1 = u32::from_le_bytes([parsed[0], parsed[1], parsed[2], parsed[3]]);
+        assert_eq!(d1, 0x6B29_FC40);
+    }
+
+    #[test]
+    fn clsid_from_string_invalid_returns_error() {
+        let s = "not-a-guid\0";
+        let wide: Vec<u16> = s.encode_utf16().collect();
+        let mut parsed = [0u8; 16];
+        let hr = unsafe { clsid_from_string(wide.as_ptr(), parsed.as_mut_ptr()) };
+        assert_eq!(hr, 0x8004_0205); // CO_E_CLASSSTRING
+    }
+
+    #[test]
+    fn co_get_malloc_returns_interface() {
+        let mut pp_malloc: *mut IMallocVtbl = std::ptr::null_mut();
+        let hr = unsafe { co_get_malloc(1, &mut pp_malloc) };
+        assert_eq!(hr, 0); // S_OK
+        assert!(!pp_malloc.is_null());
+    }
+
+    #[test]
+    fn co_get_malloc_invalid_context() {
+        let mut pp_malloc: *mut IMallocVtbl = std::ptr::null_mut();
+        // MEMCTX_MAKEFULL (0) — should fail.
+        let hr = unsafe { co_get_malloc(0, &mut pp_malloc) };
+        assert_eq!(hr, 0x8007_0057u32 as i32); // E_INVALIDARG
+        assert!(pp_malloc.is_null());
+    }
+
+    #[test]
+    fn co_get_malloc_null_returns_error() {
+        let hr = unsafe { co_get_malloc(1, std::ptr::null_mut()) };
+        assert_eq!(hr, 0x8007_0057u32 as i32); // E_INVALIDARG
+    }
+
+    #[test]
+    fn co_get_malloc_alloc_free_via_imalloc() {
+        let mut pp_malloc: *mut IMallocVtbl = std::ptr::null_mut();
+        let hr = unsafe { co_get_malloc(1, &mut pp_malloc) };
+        assert_eq!(hr, 0);
+        assert!(!pp_malloc.is_null());
+
+        // Call IMalloc::Alloc (vtable slot 3).
+        let alloc_fn: unsafe extern "win64" fn(*mut IMallocVtbl, usize) -> *mut () =
+            unsafe { std::mem::transmute((*pp_malloc).alloc) };
+        let ptr = unsafe { alloc_fn(pp_malloc, 64) };
+        assert!(!ptr.is_null());
+
+        // Write a pattern and verify.
+        unsafe { std::ptr::write_bytes(ptr, 0x42, 64) };
+
+        // Call IMalloc::Free (vtable slot 5).
+        let free_fn: unsafe extern "win64" fn(*mut IMallocVtbl, *mut ()) =
+            unsafe { std::mem::transmute((*pp_malloc).free) };
+        unsafe { free_fn(pp_malloc, ptr) };
+        // No crash — success.
+    }
+
+    #[test]
+    fn co_get_malloc_realloc_via_imalloc() {
+        let mut pp_malloc: *mut IMallocVtbl = std::ptr::null_mut();
+        let hr = unsafe { co_get_malloc(1, &mut pp_malloc) };
+        assert_eq!(hr, 0);
+
+        let alloc_fn: unsafe extern "win64" fn(*mut IMallocVtbl, usize) -> *mut () =
+            unsafe { std::mem::transmute((*pp_malloc).alloc) };
+        let realloc_fn: unsafe extern "win64" fn(*mut IMallocVtbl, *mut (), usize) -> *mut () =
+            unsafe { std::mem::transmute((*pp_malloc).realloc) };
+        let free_fn: unsafe extern "win64" fn(*mut IMallocVtbl, *mut ()) =
+            unsafe { std::mem::transmute((*pp_malloc).free) };
+
+        let ptr = unsafe { alloc_fn(pp_malloc, 16) };
+        assert!(!ptr.is_null());
+        unsafe { std::ptr::write_bytes(ptr, 0xAB, 16) };
+
+        let new_ptr = unsafe { realloc_fn(pp_malloc, ptr, 64) };
+        assert!(!new_ptr.is_null());
+        let buf = unsafe { std::slice::from_raw_parts(new_ptr as *const u8, 16) };
+        assert_eq!(buf, &[0xABu8; 16]);
+
+        unsafe { free_fn(pp_malloc, new_ptr) };
     }
 }
