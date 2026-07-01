@@ -57,6 +57,49 @@ pub fn register_stub(name: &str, func: DllMainFn) {
     }
 }
 
+/// All Rust DLL crate filenames that Weave registers as DllMain stubs.
+/// Each entry is the canonical lowercase DLL name for a `weave-*` crate.
+pub const ALL_RUST_DLL_NAMES: &[&str] = &[
+    "ntdll.dll",
+    "kernel32.dll",
+    "advapi32.dll",
+    "user32.dll",
+    "gdi32.dll",
+    "shell32.dll",
+    "ole32.dll",
+    "mmdevapi.dll",
+    "xinput1_3.dll",
+    "winmm.dll",
+    "setupapi.dll",
+    "ucrtbase.dll",
+    "msvcp140.dll",
+    "mfc140u.dll",
+    "vulkan-1.dll",
+    "ws2_32.dll",
+    "comctl32.dll",
+    "oleaut32.dll",
+    "imm32.dll",
+    "shlwapi.dll",
+    "gdiplus.dll",
+    "dwrite.dll",
+    "ddraw.dll",
+    "crypt32.dll",
+    "wldap32.dll",
+    "normaliz.dll",
+    "secur32.dll",
+    "bcrypt.dll",
+    "bcryptprimitives.dll",
+    "powrprof.dll",
+];
+
+/// Register `default_dll_main` for every known Rust DLL crate.
+/// Call once during process startup, before `process_attach()`.
+pub fn register_all_default_stubs() {
+    for dll in ALL_RUST_DLL_NAMES {
+        register_stub(dll, default_dll_main);
+    }
+}
+
 /// Default no-op DllMain that returns TRUE. Use for crates that don't need
 /// any initialisation.
 #[cfg(target_os = "linux")]
@@ -256,6 +299,21 @@ mod tests {
             TEST_FLAG.load(std::sync::atomic::Ordering::SeqCst),
             "DllMain(DLL_PROCESS_ATTACH) should have set TEST_FLAG"
         );
+    }
+
+    #[test]
+    fn all_rust_dll_names_are_registered() {
+        register_all_default_stubs();
+        if let Some(reg) = lock_stubs() {
+            for dll in ALL_RUST_DLL_NAMES {
+                assert!(
+                    reg.contains_key(*dll),
+                    "DllMain not registered for {dll}"
+                );
+            }
+        } else {
+            panic!("could not lock stub registry");
+        }
     }
 
     #[test]

@@ -1723,7 +1723,13 @@ fn main() {
     // to create desktop shortcuts. Write a .desktop file for each Save call.
     weave_common::com::shell_link::register_save_callback(shell_link_save_callback);
 
-    // ── 6.8. Dispatch DllMain(DLL_PROCESS_ATTACH) ─────────────────────
+    // ── 6.8. Register Rust stub crate DllMains ────────────────────────
+    // Register no-op DllMain for every weave-* DLL crate. Crates that
+    // need real init (ucrt, ole32, user32) will get custom handlers when
+    // those crates implement them.
+    dllmain::register_all_default_stubs();
+
+    // ── 6.9. Dispatch DllMain(DLL_PROCESS_ATTACH) ─────────────────────
     // Calls DllMain on every loaded DLL in dependency order (stubs first,
     // then PE DLLs).  Also registers an atexit handler for PROCESS_DETACH.
     dllmain::process_attach();
