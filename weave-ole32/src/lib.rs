@@ -121,6 +121,15 @@ const CO_E_NOTINITIALIZED: u32 = 0x8004_001E;
 const COINIT_APARTMENTTHREADED: u32 = 0x2;
 const COINIT_MULTITHREADED: u32 = 0x0;
 
+const RPC_E_CHANGED_MODE: u32 = 0x8001_0106;
+
+// APTTYPE values for CoGetApartmentType
+const APTTYPE_STA: i32 = 0;
+const APTTYPE_MTA: i32 = 1;
+
+// APTTYPEQUALIFIER values
+const APTTYPEQUALIFIER_NONE: i32 = 0;
+
 // ── Per-thread COM state ──────────────────────────────────────────────────────
 
 thread_local! {
@@ -156,7 +165,7 @@ pub extern "win64" fn co_initialize_ex(_pv_reserved: usize, dw_co_init: u32) -> 
             let stored_mta = stored == COINIT_MULTITHREADED;
             let req_mta = req == COINIT_MULTITHREADED;
             if stored_mta != req_mta {
-                return 0x8001_0106; // RPC_E_CHANGED_MODE
+                return RPC_E_CHANGED_MODE;
             }
             c.set(count + 1);
             S_FALSE
@@ -174,16 +183,64 @@ pub extern "win64" fn co_initialize(pv_reserved: usize) -> u32 {
 // uninitializes apartment and frees thread-local COM state (TLS slot released).
 /// CoUninitialize: decrement the COM initialisation count for this thread.
 ///
-/// When the count reaches zero the thread's apartment is torn down (no-op in
-/// Phase 2).
+/// When the count reaches zero the thread's apartment state is cleared.
 // Wine ref: dlls/combase/combase.c — per-thread refcount; at zero: uninit apartment + free TLS.
 pub extern "win64" fn co_uninitialize() {
     COM_INIT_COUNT.with(|c| {
         let count = c.get();
         if count > 0 {
             c.set(count - 1);
+            if count == 1 {
+                COM_INIT_FLAGS.with(|f| f.set(u32::MAX));
+            }
         }
     });
+}
+
+// Wine ref: dlls/combase/apartment.c — reads apartment type from per-thread state;
+// returns APTTYPE_STA or APTTYPE_MTA via pAptType, APTTYPEQUALIFIER_NONE via
+// pAptQualifier; CO_E_NOTINITIALIZED if no apartment on this thread.
+/// CoGetApartmentType: retrieve the COM apartment type for the calling thread.
+///
+/// Returns S_OK and writes APTTYPE/APTTYPEQUALIFIER on success, or
+/// CO_E_NOTINITIALIZED if COM is not initialized on this thread.
+///
+/// # Safety
+/// `p_apt_type` and `p_apt_qualifier` must be valid writable i32 pointers.
+// Wine ref: dlls/combase/apartment.c — reads per-thread state; CO_E_NOTINITIALIZED if no apt.
+pub extern "win64" fn co_get_apartment_type(
+    p_apt_type: *mut i32,
+    p_apt_qualifier: *mut i32,
+) -> u32 {
+    if p_apt_type.is_null() || p_apt_qualifier.is_null() {
+        return E_INVALIDARG;
+    }
+    COM_INIT_COUNT.with(|c| {
+        if c.get() == 0 {
+            return CO_E_NOTINITIALIZED;
+        }
+        let apt_type = COM_INIT_FLAGS.with(|f| {
+            if f.get() == COINIT_MULTITHREADED {
+                APTTYPE_MTA
+            } else {
+                APTTYPE_STA
+            }
+        });
+        unsafe {
+            *p_apt_type = apt_type;
+            *p_apt_qualifier = APTTYPEQUALIFIER_NONE;
+        }
+        S_OK
+    })
+}
+
+// Wine ref: dlls/combase/compobj.c — returns a unique per-process identifier
+// (GetCurrentProcessId on Windows). We use the OS PID for uniqueness.
+/// CoGetCurrentProcess: return a unique identifier for the current process.
+///
+/// Used by COM internally for OXID resolution. Returns the process ID.
+pub extern "win64" fn co_get_current_process() -> u32 {
+    unsafe { libc::getpid() as u32 }
 }
 
 // ── CoCreateInstance ──────────────────────────────────────────────────────────
@@ -969,6 +1026,10 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "CoInitializeEx" => Some(co_initialize_ex as *const () as usize),
         "CoInitialize" => Some(co_initialize as *const () as usize),
         "CoUninitialize" => Some(co_uninitialize as *const () as usize),
+        "CoGetApartmentType" => Some(
+            co_get_apartment_type as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
+        ),
+        "CoGetCurrentProcess" => Some(co_get_current_process as *const () as usize),
         // Object creation
         "CoCreateInstance" => Some(
             co_create_instance as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const ()
@@ -1167,12 +1228,15 @@ extern "win64" fn oleacc_create_std_accessible_object(
 mod tests {
     use super::*;
 
+    fn reset_com_state() {
+        COM_INIT_COUNT.with(|c| c.set(0));
+        COM_INIT_FLAGS.with(|f| f.set(0));
+    }
+
     #[test]
     fn co_init_first_call_returns_s_ok() {
-        // Reset thread-local state.
-        COM_INIT_COUNT.with(|c| c.set(0));
+        reset_com_state();
         assert_eq!(co_initialize_ex(0, COINIT_APARTMENTTHREADED), S_OK);
-        // Second call should return S_FALSE.
         assert_eq!(co_initialize_ex(0, COINIT_APARTMENTTHREADED), S_FALSE);
         co_uninitialize();
         co_uninitialize();
@@ -1180,7 +1244,7 @@ mod tests {
 
     #[test]
     fn co_uninitialize_decrements() {
-        COM_INIT_COUNT.with(|c| c.set(0));
+        reset_com_state();
         co_initialize_ex(0, COINIT_MULTITHREADED);
         co_initialize_ex(0, COINIT_MULTITHREADED);
         assert_eq!(COM_INIT_COUNT.with(|c| c.get()), 2);
@@ -1188,6 +1252,120 @@ mod tests {
         assert_eq!(COM_INIT_COUNT.with(|c| c.get()), 1);
         co_uninitialize();
         assert_eq!(COM_INIT_COUNT.with(|c| c.get()), 0);
+    }
+
+    #[test]
+    fn co_uninitialize_clears_apartment_state() {
+        reset_com_state();
+        co_initialize_ex(0, COINIT_APARTMENTTHREADED);
+        // After uninit, CoGetApartmentType should fail
+        co_uninitialize();
+        let mut apt_type: i32 = -1;
+        let mut apt_qual: i32 = -1;
+        let hr = co_get_apartment_type(&mut apt_type, &mut apt_qual);
+        assert_eq!(hr, CO_E_NOTINITIALIZED);
+        // Re-init should succeed with S_OK (fresh state)
+        assert_eq!(co_initialize_ex(0, COINIT_MULTITHREADED), S_OK);
+        co_uninitialize();
+    }
+
+    #[test]
+    fn co_mta_after_sta_returns_changed_mode() {
+        reset_com_state();
+        co_initialize_ex(0, COINIT_APARTMENTTHREADED);
+        assert_eq!(
+            co_initialize_ex(0, COINIT_MULTITHREADED),
+            RPC_E_CHANGED_MODE
+        );
+        co_uninitialize();
+    }
+
+    #[test]
+    fn co_sta_after_mta_returns_changed_mode() {
+        reset_com_state();
+        co_initialize_ex(0, COINIT_MULTITHREADED);
+        assert_eq!(
+            co_initialize_ex(0, COINIT_APARTMENTTHREADED),
+            RPC_E_CHANGED_MODE
+        );
+        co_uninitialize();
+    }
+
+    #[test]
+    fn co_init_fresh_thread_mta_returns_s_ok() {
+        // Spawn a fresh thread and initialize with MTA — must succeed.
+        let handle = std::thread::spawn(|| {
+            assert_eq!(co_initialize_ex(0, COINIT_MULTITHREADED), S_OK);
+            co_uninitialize();
+        });
+        handle.join().expect("thread panicked");
+    }
+
+    #[test]
+    fn co_init_fresh_thread_sta_returns_s_ok() {
+        let handle = std::thread::spawn(|| {
+            assert_eq!(co_initialize_ex(0, COINIT_APARTMENTTHREADED), S_OK);
+            co_uninitialize();
+        });
+        handle.join().expect("thread panicked");
+    }
+
+    #[test]
+    fn co_initialize_delegates_to_sta() {
+        reset_com_state();
+        assert_eq!(co_initialize(0), S_OK);
+        // Second call with same mode should be S_FALSE
+        assert_eq!(co_initialize_ex(0, COINIT_APARTMENTTHREADED), S_FALSE);
+        co_uninitialize();
+        co_uninitialize();
+    }
+
+    #[test]
+    fn co_get_apartment_type_sta() {
+        reset_com_state();
+        let mut apt_type: i32 = -1;
+        let mut apt_qual: i32 = -1;
+        co_initialize_ex(0, COINIT_APARTMENTTHREADED);
+        let hr = co_get_apartment_type(&mut apt_type, &mut apt_qual);
+        assert_eq!(hr, S_OK);
+        assert_eq!(apt_type, APTTYPE_STA);
+        assert_eq!(apt_qual, APTTYPEQUALIFIER_NONE);
+        co_uninitialize();
+    }
+
+    #[test]
+    fn co_get_apartment_type_mta() {
+        reset_com_state();
+        let mut apt_type: i32 = -1;
+        let mut apt_qual: i32 = -1;
+        co_initialize_ex(0, COINIT_MULTITHREADED);
+        let hr = co_get_apartment_type(&mut apt_type, &mut apt_qual);
+        assert_eq!(hr, S_OK);
+        assert_eq!(apt_type, APTTYPE_MTA);
+        assert_eq!(apt_qual, APTTYPEQUALIFIER_NONE);
+        co_uninitialize();
+    }
+
+    #[test]
+    fn co_get_apartment_type_null_returns_invalidarg() {
+        assert_eq!(co_get_apartment_type(std::ptr::null_mut(), std::ptr::null_mut()), E_INVALIDARG);
+    }
+
+    #[test]
+    fn co_get_apartment_type_uninit_returns_notinit() {
+        reset_com_state();
+        let mut apt_type: i32 = -1;
+        let mut apt_qual: i32 = -1;
+        assert_eq!(
+            co_get_apartment_type(&mut apt_type, &mut apt_qual),
+            CO_E_NOTINITIALIZED
+        );
+    }
+
+    #[test]
+    fn co_get_current_process_returns_nonzero() {
+        let pid = co_get_current_process();
+        assert_ne!(pid, 0);
     }
 
     #[test]
@@ -1206,7 +1384,6 @@ mod tests {
     fn parse_guid_roundtrip() {
         let s = "{6B29FC40-CA47-1067-B31D-00DD010662DA}";
         let guid = parse_guid_str(s).unwrap();
-        // Data1 = 0x6B29FC40 stored LE
         assert_eq!(
             u32::from_le_bytes([guid[0], guid[1], guid[2], guid[3]]),
             0x6B29_FC40
