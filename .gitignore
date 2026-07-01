@@ -97,6 +97,9 @@ docs/reference/*
 !docs/plans/
 docs/plans/*
 !docs/plans/*.md
+!docs/architecture/
+docs/architecture/*
+!docs/architecture/*.md
 !docs/sprint-briefs/
 !docs/archived-milestones/
 docs/archived-milestones/*
