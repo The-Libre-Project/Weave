@@ -1,4 +1,4 @@
-//! Filesystem sandboxing via Linux Landlock LSM.
+//! Sandboxing via Linux Landlock LSM + seccomp-BPF syscall filter.
 //!
 //! Called after the PE is loaded and the IAT is patched, but before execution
 //! begins. Once applied, the restriction stays in effect for the lifetime of
@@ -22,6 +22,8 @@
 //! Landlock requires Linux 5.13+. On older kernels (or when disabled in the
 //! kernel config) the restriction is silently skipped and Weave runs without
 //! filesystem isolation. A diagnostic line is printed to stderr in both cases.
+
+pub mod seccomp;
 
 #[cfg(target_os = "linux")]
 use landlock::{
