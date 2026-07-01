@@ -239,6 +239,10 @@ pub trait WindowBackend: Send + Sync {
     fn draw_text(&self, dst: Drawable, x: i16, y: i16, text: &[u8], fg_pixel: u32, bg_pixel: u32);
 
     /// Draw UTF-16 text with anti-aliased TrueType rendering.
+    ///
+    /// `font_path` — when `Some`, the renderer should load the TrueType/OpenType
+    /// font from this absolute file path; when `None`, the default system font
+    /// is used.
     fn draw_text_utf16(
         &self,
         dst: Drawable,
@@ -248,6 +252,7 @@ pub trait WindowBackend: Send + Sync {
         px_size: f32,
         fg_pixel: u32,
         bg_pixel: u32,
+        font_path: Option<&str>,
     );
 
     /// Upload DIB pixel data from a heap buffer to a pixmap.
@@ -399,6 +404,7 @@ mod tests {
                 _: f32,
                 _: u32,
                 _: u32,
+                _: Option<&str>,
             ) {
             }
             unsafe fn put_dib_to_pixmap(&self, _: PixmapHandle, _: u32, _: u32, _: usize, _: u16) {}

@@ -635,6 +635,7 @@ mod inner {
             px_size: f32,
             fg_pixel: u32,
             bg_pixel: u32,
+            font_path: Option<&str>,
         ) {
             use crate::font;
             use x11rb::protocol::xproto::ImageFormat;
@@ -643,7 +644,9 @@ mod inner {
                 return;
             }
 
-            if let Some((pixels, w, h)) = font::rasterize_text(text, px_size, fg_pixel, bg_pixel) {
+            if let Some((pixels, w, h)) =
+                font::rasterize_text(text, px_size, fg_pixel, bg_pixel, font_path)
+            {
                 let conn = match self.conn.lock() {
                     Ok(c) => c,
                     Err(_) => return,
@@ -1459,9 +1462,12 @@ mod inner {
         px_size: f32,
         fg_pixel: u32,
         bg_pixel: u32,
+        font_path: Option<&str>,
     ) {
         if let Some(b) = BACKEND.get() {
-            b.draw_text_utf16(Drawable(xcb_id), x, y, text, px_size, fg_pixel, bg_pixel);
+            b.draw_text_utf16(
+                Drawable(xcb_id), x, y, text, px_size, fg_pixel, bg_pixel, font_path,
+            );
         }
     }
 
@@ -1645,6 +1651,7 @@ pub fn draw_text_utf16(
     _px_size: f32,
     _fg: u32,
     _bg: u32,
+    _font_path: Option<&str>,
 ) {
 }
 

@@ -644,25 +644,26 @@ pub unsafe extern "win64" fn text_out_w(
     let xcb = dc::with(hdc, |dc| dc.drawable());
     let px_size = font_px_size(hdc);
     let text_align = dc::with(hdc, |dc| dc.text_align);
+    let fp = font_path(hdc);
 
     let draw_y = match text_align & 0x0018 {
         TA_BASELINE => {
-            let fm = weave_user32::font::metrics(px_size);
+            let fm = weave_user32::font::metrics_with_path(px_size, fp.as_deref());
             y - fm.ascent
         }
         TA_BOTTOM => {
-            let fm = weave_user32::font::metrics(px_size);
+            let fm = weave_user32::font::metrics_with_path(px_size, fp.as_deref());
             y - fm.height
         }
         _ => y,
     };
     let draw_x = match text_align & 0x0006 {
         TA_RIGHT => {
-            let (tw, _) = weave_user32::font::measure_text(units, px_size);
+            let (tw, _) = weave_user32::font::measure_text_with_path(units, px_size, fp.as_deref());
             x - tw
         }
         TA_CENTER => {
-            let (tw, _) = weave_user32::font::measure_text(units, px_size);
+            let (tw, _) = weave_user32::font::measure_text_with_path(units, px_size, fp.as_deref());
             x - tw / 2
         }
         _ => x,
@@ -676,6 +677,7 @@ pub unsafe extern "win64" fn text_out_w(
         px_size,
         fg_pixel,
         bg_pixel,
+        fp.as_deref(),
     );
     1
 }
@@ -754,6 +756,7 @@ pub unsafe extern "win64" fn draw_text_w(
     let (fg, bg) = dc::with(hdc, |dc| (dc.text_color, dc.bk_color));
     let xcb = dc::with(hdc, |dc| dc.drawable());
     let (dx, dy) = dc::with(hdc, |dc| dc.lp_to_device(x, y));
+    let fp = font_path(hdc);
     weave_user32::backend::draw_text_utf16(
         xcb.0,
         dx,
@@ -762,6 +765,7 @@ pub unsafe extern "win64" fn draw_text_w(
         px_size,
         to_pixel(fg),
         to_pixel(bg),
+        fp.as_deref(),
     );
     text_h
 }
@@ -874,30 +878,36 @@ pub unsafe extern "win64" fn ext_text_out_w(
     let px_size = font_px_size(hdc);
     let text_align = dc::with(hdc, |dc| dc.text_align);
 
-    // lp_dx per-character advances are acknowledged but not used for individual glyph
-    // positioning yet — exact per-char kerning is a Phase 7 enhancement; the standard
-    // rasterize path below produces correct overall string width for most cases.
+    // lp_dx per-character advances are acknowledged but not yet used for
+    // individual glyph positioning — exact per-char kerning is a Phase 7
+    // enhancement. The rasterize path below produces correct overall string
+    // width for most cases. When lpDx is non-NULL on ETO_OPAQUE calls, the
+    // background rectangle fill (handled above) already covers the right area.
     let _ = lp_dx;
+
+    // Resolve the selected font's file path so the renderer loads the correct
+    // typeface rather than the default system font.
+    let fp = font_path(hdc);
 
     // Adjust x/y for text alignment.
     let draw_y = match text_align & 0x0018 {
         TA_BASELINE => {
-            let fm = weave_user32::font::metrics(px_size);
+            let fm = weave_user32::font::metrics_with_path(px_size, fp.as_deref());
             y - fm.ascent
         }
         TA_BOTTOM => {
-            let fm = weave_user32::font::metrics(px_size);
+            let fm = weave_user32::font::metrics_with_path(px_size, fp.as_deref());
             y - fm.height
         }
         _ => y, // TA_TOP (default)
     };
     let draw_x = match text_align & 0x0006 {
         TA_RIGHT => {
-            let (tw, _) = weave_user32::font::measure_text(units, px_size);
+            let (tw, _) = weave_user32::font::measure_text_with_path(units, px_size, fp.as_deref());
             x - tw
         }
         TA_CENTER => {
-            let (tw, _) = weave_user32::font::measure_text(units, px_size);
+            let (tw, _) = weave_user32::font::measure_text_with_path(units, px_size, fp.as_deref());
             x - tw / 2
         }
         _ => x, // TA_LEFT (default)
@@ -911,6 +921,7 @@ pub unsafe extern "win64" fn ext_text_out_w(
         px_size,
         fg_pixel,
         bg_pixel,
+        fp.as_deref(),
     );
     1
 }
@@ -2153,6 +2164,28 @@ pub unsafe extern "win64" fn set_dib_bits_to_device(
 
 // ── Text metrics ──────────────────────────────────────────────────────────────
 
+/// Resolve the font file path for the font currently selected in `hdc`.
+/// Returns `None` for stock fonts or when the GDI font object has no path.
+fn font_path(hdc: usize) -> Option<String> {
+    let h_font = dc::with(hdc, |dc| dc.h_font);
+    if h_font == 0 {
+        return None;
+    }
+    objects::get(h_font, |kind| {
+        if let GdiKind::Font { font_path, .. } = kind {
+            font_path.clone()
+        } else {
+            None
+        }
+    })
+    .flatten()
+}
+
+/// Detect TrueType/OpenType from the font path extension.
+fn is_truetype_font(path: &str) -> bool {
+    path.ends_with(".ttf") || path.ends_with(".otf") || path.ends_with(".ttc")
+}
+
 /// GetTextMetricsW: return metrics for the selected font.
 ///
 /// Wine ref: dlls/win32u/font.c::font_GetTextMetrics — queries the font cache for the
@@ -2168,57 +2201,65 @@ pub unsafe extern "win64" fn get_text_metrics_w(hdc: usize, lptm: *mut TextMetri
         return 0;
     }
     let px_size = font_px_size(hdc);
-    let fm = weave_user32::font::metrics(px_size);
+    let fp = font_path(hdc);
+    let fm = weave_user32::font::metrics_with_path(px_size, fp.as_deref());
 
-    // Read weight and italic from the selected font object.
-    let (font_weight, font_italic) = {
+    // Read weight, italic, and font path from the selected font object.
+    let (font_weight, font_italic, font_path_str) = {
         let h_font = dc::with(hdc, |dc| dc.h_font);
         let mut weight = 400i32;
         let mut italic = 0u8;
+        let mut fpath: Option<String> = None;
         objects::get(h_font, |kind| {
             if let GdiKind::Font {
                 weight: w,
                 italic: it,
+                font_path,
                 ..
             } = kind
             {
                 weight = *w;
                 italic = if *it { 1 } else { 0 };
+                fpath = font_path.clone();
             }
         });
-        (weight, italic)
+        (weight, italic, fpath)
     };
+
+    // Determine pitch & family flags.
+    // TMPF_TRUETYPE = 0x04 when the selected font is a TrueType/OpenType face.
+    let tt_flag: u8 = font_path_str
+        .as_deref()
+        .map(is_truetype_font)
+        .unwrap_or(false)
+        .then_some(0x04u8)
+        .unwrap_or(0);
+    // FF_DONTCARE = 0x00 (shifted left 4 bits) — appropriate for most cases.
+    let pitch_and_family: u8 = 0x01 | tt_flag; // TMPF_FIXED_PITCH | (TT if applicable)
 
     unsafe {
         let tm = &mut *lptm;
-        tm.tm_height = fm.height;
+        let h = fm.height.max(1);
+        tm.tm_height = h;
         tm.tm_ascent = fm.ascent;
         tm.tm_descent = fm.descent;
-        tm.tm_internal_leading = 0;
-        tm.tm_external_leading = 2;
-        // Clamp tmAveCharWidth to a reasonable value for typical screen fonts.
-        // Fontdue can return advance widths > 12px for some system fonts at small
-        // pixel sizes (e.g. DejaVu Sans at certain hinting levels). Scintilla uses
-        // tmAveCharWidth * digitCount to size its line-number margin, so an
-        // inflated value causes the margin to consume the entire client width,
-        // leaving a 1px-wide document body. Clamping to 9px matches a typical
-        // monospace character width at 13px font size (matches Wine's font metrics
-        // for Courier New 10pt at 96 DPI).
+        tm.tm_internal_leading = (h as f32 * 0.1).round() as i32;
+        tm.tm_external_leading = 0;
         let ave = fm.ave_char_width.min(9);
         tm.tm_ave_char_width = ave;
-        tm.tm_max_char_width = ave + 2;
+        tm.tm_max_char_width = (h as f32 * 1.2).round() as i32;
         tm.tm_weight = font_weight;
         tm.tm_overhang = 0;
         tm.tm_digitized_aspect_x = 96;
         tm.tm_digitized_aspect_y = 96;
         tm.tm_first_char = 0x20;
-        tm.tm_last_char = 0xFFFF;
+        tm.tm_last_char = 0x00FF;
         tm.tm_default_char = b'?' as u16;
         tm.tm_break_char = b' ' as u16;
         tm.tm_italic = font_italic;
         tm.tm_underlined = 0;
         tm.tm_struck_out = 0;
-        tm.tm_pitch_and_family = 0x01 | 0x30; // TMPF_FIXED_PITCH | FF_MODERN
+        tm.tm_pitch_and_family = pitch_and_family;
         tm.tm_char_set = 0; // ANSI_CHARSET
         tm._pad = [0u8; 3];
     }
@@ -5911,4 +5952,196 @@ pub unsafe extern "win64" fn play_enh_meta_file(
 #[allow(unused_variables)]
 pub unsafe extern "win64" fn set_win_meta_file_bits(hdc: usize, hmf: usize) -> i32 {
     0
+}
+
+// ── A6d tests ─────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod a6d_font_tests {
+    use super::*;
+    use crate::objects;
+    use crate::objects::GdiKind;
+
+    #[test]
+    fn is_truetype_detects_ttf() {
+        assert!(is_truetype_font("/usr/share/fonts/DejaVuSans.ttf"));
+        assert!(is_truetype_font("/path/font.otf"));
+        assert!(is_truetype_font("/path/font.ttc"));
+        assert!(!is_truetype_font("/path/font.fon"));
+        assert!(!is_truetype_font(""));
+    }
+
+    #[test]
+    fn font_path_resolves_from_selected_font() {
+        let hdc = 0x6000_00A0;
+        let h_font = objects::alloc(GdiKind::Font {
+            height: -16,
+            weight: 400,
+            italic: false,
+            face: [0u16; 32],
+            font_path: Some("/test/font.ttf".into()),
+            pixel_size: 16.0,
+        });
+        dc::with_mut(hdc, |dc| dc.h_font = h_font);
+        assert_eq!(font_path(hdc).as_deref(), Some("/test/font.ttf"));
+        objects::free(h_font);
+        dc::remove(hdc);
+    }
+
+    #[test]
+    fn font_path_stock_font_returns_none() {
+        let hdc = 0x6000_00A1;
+        dc::with_mut(hdc, |dc| dc.h_font = objects::stock_handle(SYSTEM_FONT));
+        assert!(font_path(hdc).is_none());
+        dc::remove(hdc);
+    }
+
+    #[test]
+    fn select_object_font_returns_previous_handle() {
+        let hdc = 0x6000_00A2;
+        let font_a = objects::alloc(GdiKind::Font {
+            height: -12, weight: 400, italic: false,
+            face: [0u16; 32], font_path: Some("/a.ttf".into()), pixel_size: 12.0,
+        });
+        let font_b = objects::alloc(GdiKind::Font {
+            height: -16, weight: 700, italic: false,
+            face: [0u16; 32], font_path: Some("/b.ttf".into()), pixel_size: 16.0,
+        });
+        let prev_a = select_object(hdc, font_a);
+        assert_eq!(prev_a, objects::stock_handle(SYSTEM_FONT));
+        let prev_b = select_object(hdc, font_b);
+        assert_eq!(prev_b, font_a);
+        assert_eq!(dc::with(hdc, |dc| dc.h_font), font_b);
+        objects::free(font_a);
+        objects::free(font_b);
+        dc::remove(hdc);
+    }
+
+    #[test]
+    fn get_text_metrics_w_returns_nonzero_height() {
+        let hdc = 0x6000_00A3;
+        let h_font = objects::alloc(GdiKind::Font {
+            height: -16, weight: 700, italic: true,
+            face: [0u16; 32], font_path: None, pixel_size: 16.0,
+        });
+        dc::with_mut(hdc, |dc| dc.h_font = h_font);
+        let mut tm: TextMetricW = unsafe { std::mem::zeroed() };
+        let ok = unsafe { get_text_metrics_w(hdc, &mut tm) };
+        assert_eq!(ok, 1);
+        assert!(tm.tm_height > 0);
+        assert_eq!(tm.tm_weight, 700);
+        assert_eq!(tm.tm_italic, 1);
+        assert_eq!(tm.tm_first_char, 0x20);
+        assert_eq!(tm.tm_last_char, 0x00FF);
+        assert_eq!(tm.tm_external_leading, 0);
+        objects::free(h_font);
+        dc::remove(hdc);
+    }
+
+    #[test]
+    fn get_text_metrics_truetype_flag_ttf() {
+        let hdc = 0x6000_00A4;
+        let h_font = objects::alloc(GdiKind::Font {
+            height: -16, weight: 400, italic: false,
+            face: [0u16; 32], font_path: Some("/f.otf".into()), pixel_size: 16.0,
+        });
+        dc::with_mut(hdc, |dc| dc.h_font = h_font);
+        let mut tm: TextMetricW = unsafe { std::mem::zeroed() };
+        let _ = unsafe { get_text_metrics_w(hdc, &mut tm) };
+        assert_ne!(tm.tm_pitch_and_family & 0x04, 0, "TMPF_TRUETYPE set");
+        objects::free(h_font);
+        dc::remove(hdc);
+    }
+
+    #[test]
+    fn get_text_metrics_no_truetype_flag_fon() {
+        let hdc = 0x6000_00A5;
+        let h_font = objects::alloc(GdiKind::Font {
+            height: -16, weight: 400, italic: false,
+            face: [0u16; 32], font_path: Some("/f.fon".into()), pixel_size: 16.0,
+        });
+        dc::with_mut(hdc, |dc| dc.h_font = h_font);
+        let mut tm: TextMetricW = unsafe { std::mem::zeroed() };
+        let _ = unsafe { get_text_metrics_w(hdc, &mut tm) };
+        assert_eq!(tm.tm_pitch_and_family & 0x04, 0, "TMPF_TRUETYPE not set");
+        objects::free(h_font);
+        dc::remove(hdc);
+    }
+
+    #[test]
+    fn get_text_extent_point32_w_empty() {
+        let hdc = 0x6000_00A6;
+        let mut size = Size { cx: 0, cy: 0 };
+        let ok = unsafe { get_text_extent_point32_w(hdc, std::ptr::null(), 0, &mut size) };
+        assert_eq!(ok, 1);
+        assert_eq!(size.cx, 0);
+        assert!(size.cy > 0);
+        dc::remove(hdc);
+    }
+
+    #[test]
+    fn get_text_extent_point32_w_nonempty() {
+        let hdc = 0x6000_00A7;
+        let text: [u16; 4] = [65, 66, 67, 68]; // "ABCD"
+        let mut size = Size { cx: 0, cy: 0 };
+        let ok = unsafe { get_text_extent_point32_w(hdc, text.as_ptr(), 4, &mut size) };
+        assert_eq!(ok, 1);
+        assert!(size.cx > 0);
+        assert!(size.cy > 0);
+        dc::remove(hdc);
+    }
+
+    #[test]
+    fn create_font_indirect_w_stores_fields() {
+        let mut face = [0u16; 32];
+        for (i, c) in "Arial\0".encode_utf16().take(32).enumerate() {
+            face[i] = c;
+        }
+        let lf = LogFontW {
+            lf_height: -16, lf_width: 0, lf_escapement: 0, lf_orientation: 0,
+            lf_weight: 700, lf_italic: 0, lf_underline: 0, lf_strike_out: 0,
+            lf_char_set: 0, lf_out_precision: 0, lf_clip_precision: 0,
+            lf_quality: 0, lf_pitch_and_family: 0, lf_face_name: face,
+        };
+        let h_font = unsafe { create_font_indirect_w(&lf) };
+        assert!(h_font != 0);
+        objects::get(h_font, |kind| {
+            if let GdiKind::Font { height, weight, italic, pixel_size, .. } = kind {
+                assert_eq!(*height, -16);
+                assert_eq!(*weight, 700);
+                assert!(!italic);
+                assert!(*pixel_size > 0.0);
+            } else {
+                panic!("wrong kind");
+            }
+        });
+        objects::free(h_font);
+    }
+
+    /// Verify delete_object skips buffer reclamation for fonts (no crash).
+    #[test]
+    fn delete_font_object_does_not_segfault() {
+        let h = objects::alloc(GdiKind::Font {
+            height: -13, weight: 400, italic: false,
+            face: [0u16; 32], font_path: None, pixel_size: 13.0,
+        });
+        assert!(objects::free(h));
+    }
+
+    #[test]
+    fn fontpath_read_from_selected_font_in_dc() {
+        let hdc = 0x6000_00A8;
+        let h_font = objects::alloc(GdiKind::Font {
+            height: -16, weight: 400, italic: false,
+            face: [0u16; 32],
+            font_path: Some("/usr/share/fonts/liberation/LiberationSans-Regular.ttf".into()),
+            pixel_size: 16.0,
+        });
+        dc::with_mut(hdc, |dc| dc.h_font = h_font);
+        let fp = font_path(hdc);
+        assert!(fp.is_some());
+        assert!(fp.unwrap().contains(".ttf"));
+        objects::free(h_font);
+        dc::remove(hdc);
+    }
 }
