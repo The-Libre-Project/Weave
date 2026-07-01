@@ -903,6 +903,7 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "WindowFromPoint" => Some(window_from_point as *const () as usize),
         // DPI awareness stubs
         "SetProcessDPIAware" => Some(set_process_dpi_aware as *const () as usize),
+        "IsProcessDPIAware" => Some(is_process_dpi_aware as *const () as usize),
         "GetDpiForWindow" => Some(get_dpi_for_window as *const () as usize),
         "GetDpiForSystem" => Some(get_dpi_for_system as *const () as usize),
         "AdjustWindowRectExForDpi" => Some(

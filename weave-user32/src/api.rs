@@ -15,7 +15,7 @@ use crate::queue::{self, MsgEntry};
 use crate::window::{self, WindowEntry};
 use libc;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicIsize, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 use weave_common::set_last_error;
 
@@ -4555,13 +4555,54 @@ pub extern "win64" fn window_from_point(pt_x: i32, pt_y: i32) -> usize {
     0
 }
 
+// ── DPI awareness state ───────────────────────────────────────────────────────
+//
+// Storage for process-level DPI awareness. Wine stores this as a per-process
+// value via NtUserSetProcessDpiAwarenessContext; Weave uses atomic globals.
+//
+// DPI_AWARENESS_CONTEXT values (encoded as negated isize):
+//   -1 = DPI_AWARENESS_CONTEXT_UNAWARE
+//   -2 = DPI_AWARENESS_CONTEXT_SYSTEM_AWARE
+//   -3 = DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE
+//   -4 = DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2
+//
+// PROCESS_DPI_AWARENESS values (for SetProcessDpiAwareness):
+//   0 = PROCESS_DPI_UNAWARE
+//   1 = PROCESS_SYSTEM_DPI_AWARE
+//   2 = PROCESS_PER_MONITOR_DPI_AWARE
+
+/// Whether SetProcessDPIAware has been called (legacy API).
+static DPI_AWARE_FLAG: AtomicBool = AtomicBool::new(false);
+/// Whether SetProcessDpiAwareness has been initialised at all (shcore API).
+static DPI_AWARENESS_INIT: AtomicBool = AtomicBool::new(false);
+/// The PROCESS_DPI_AWARENESS value (0/1/2). Defaults to 0 (unaware).
+static DPI_AWARENESS: AtomicU32 = AtomicU32::new(0);
+/// The DPI_AWARENESS_CONTEXT value (negated isize). Defaults to -1 (unaware).
+static DPI_AWARENESS_CONTEXT: AtomicIsize = AtomicIsize::new(-1);
+
+const E_ACCESSDENIED: i32 = -2_147_024_891; // 0x80070005
+
 // ── DPI awareness stubs ───────────────────────────────────────────────────────
 
 /// SetProcessDPIAware: mark the process as DPI-aware.
+///
+/// Records the flag so IsProcessDPIAware can report TRUE. Returns TRUE.
 // Wine ref: dlls/win32u/sysparams.c — sets thread DPI awareness context to
 // DPI_AWARENESS_CONTEXT_SYSTEM_AWARE; older API, superseded by SetProcessDpiAwarenessContext.
 pub extern "win64" fn set_process_dpi_aware() -> i32 {
+    DPI_AWARE_FLAG.store(true, Ordering::Relaxed);
+    DPI_AWARENESS.store(1, Ordering::Relaxed); // PROCESS_SYSTEM_DPI_AWARE
+    DPI_AWARENESS_INIT.store(true, Ordering::Relaxed);
     1
+}
+
+/// IsProcessDPIAware: query whether the process is DPI-aware.
+///
+/// Returns TRUE if SetProcessDPIAware was called.
+// Wine ref: dlls/win32u/sysparams.c — returns TRUE if thread DPI awareness context is
+// DPI_AWARENESS_CONTEXT_SYSTEM_AWARE or higher (not UNAWARE).
+pub extern "win64" fn is_process_dpi_aware() -> i32 {
+    DPI_AWARE_FLAG.load(Ordering::Relaxed) as i32
 }
 
 /// GetDpiForWindow: return the DPI for a window.
@@ -4596,9 +4637,17 @@ pub unsafe extern "win64" fn adjust_window_rect_ex_for_dpi(
 }
 
 /// SetProcessDpiAwarenessContext: set the DPI awareness context.
+///
+/// Stores the context value so GetDpiAwarenessContextForProcess returns it.
+/// Returns TRUE on success.
 // Wine ref: dlls/win32u/sysparams.c — stores value in thread-local DPI awareness context;
 // valid values: DPI_AWARENESS_CONTEXT_UNAWARE (-1) through PER_MONITOR_AWARE_V2 (-4).
-pub extern "win64" fn set_process_dpi_awareness_context(_value: isize) -> i32 {
+pub extern "win64" fn set_process_dpi_awareness_context(value: isize) -> i32 {
+    DPI_AWARENESS_CONTEXT.store(value, Ordering::Relaxed);
+    if value <= -2 {
+        // Any aware level: also set the backward-compat flag.
+        DPI_AWARE_FLAG.store(true, Ordering::Relaxed);
+    }
     1
 }
 
@@ -4606,7 +4655,7 @@ pub extern "win64" fn set_process_dpi_awareness_context(_value: isize) -> i32 {
 // Wine ref: dlls/win32u/sysparams.c — returns process-level DPI awareness context as
 // a DPI_AWARENESS_CONTEXT handle (encoded isize); -4 = PER_MONITOR_AWARE_V2.
 pub extern "win64" fn get_dpi_awareness_context_for_process(_h_process: usize) -> isize {
-    -4isize
+    DPI_AWARENESS_CONTEXT.load(Ordering::Relaxed)
 }
 
 /// AreDpiAwarenessContextsEqual: compare two DPI awareness contexts.
@@ -4644,10 +4693,25 @@ pub unsafe extern "win64" fn get_dpi_for_monitor(
 }
 
 /// SetProcessDpiAwareness: set DPI awareness for the calling process.
+///
+/// Returns E_ACCESSDENIED if a different awareness value was already set.
+/// Returns S_OK on first call or if the same value is set again.
 // Wine ref: dlls/shcore/main.c::SetProcessDpiAwareness — validates value (0-2),
-// stores it, then calls SetProcessDpiAwarenessInternal. Weave has no per-monitor DPI
-// tracking so we accept any value and return S_OK.
-pub extern "win64" fn set_process_dpi_awareness(_value: u32) -> i32 {
+// stores it, then calls SetProcessDpiAwarenessInternal. E_ACCESSDENIED returned
+// when changing already-set awareness to a different value.
+pub extern "win64" fn set_process_dpi_awareness(value: u32) -> i32 {
+    if DPI_AWARENESS_INIT.load(Ordering::Relaxed) {
+        let prev = DPI_AWARENESS.load(Ordering::Relaxed);
+        if prev != value {
+            return E_ACCESSDENIED;
+        }
+        return 0; // S_OK — same value
+    }
+    DPI_AWARENESS.store(value, Ordering::Relaxed);
+    DPI_AWARENESS_INIT.store(true, Ordering::Relaxed);
+    if value >= 1 {
+        DPI_AWARE_FLAG.store(true, Ordering::Relaxed);
+    }
     0 // S_OK
 }
 
@@ -4658,8 +4722,9 @@ pub extern "win64" fn set_process_dpi_awareness(_value: u32) -> i32 {
 /// # Safety
 /// value must be a valid pointer to u32, or null.
 pub unsafe extern "win64" fn get_process_dpi_awareness(_h_process: usize, value: *mut u32) -> i32 {
+    let v = DPI_AWARENESS.load(Ordering::Relaxed);
     if !value.is_null() {
-        unsafe { *value = 1 }; // PROCESS_SYSTEM_DPI_AWARE
+        unsafe { *value = v };
     }
     0 // S_OK
 }
@@ -10540,6 +10605,71 @@ mod monitor_tests {
     fn get_monitor_info_w_null_returns_false() {
         let result = unsafe { get_monitor_info_w(0, std::ptr::null_mut()) };
         assert_eq!(result, 0);
+    }
+
+    // ── DPI awareness tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn set_process_dpi_aware_returns_true() {
+        // Reset state first (tests run in parallel, but this is a simple write).
+        DPI_AWARE_FLAG.store(false, Ordering::Relaxed);
+        DPI_AWARENESS_INIT.store(false, Ordering::Relaxed);
+        let result = set_process_dpi_aware();
+        assert_eq!(result, 1);
+    }
+
+    #[test]
+    fn is_process_dpi_aware_after_set() {
+        DPI_AWARE_FLAG.store(true, Ordering::Relaxed);
+        DPI_AWARENESS_INIT.store(true, Ordering::Relaxed);
+        assert_eq!(is_process_dpi_aware(), 1);
+    }
+
+    #[test]
+    fn is_process_dpi_aware_default_returns_false() {
+        DPI_AWARE_FLAG.store(false, Ordering::Relaxed);
+        DPI_AWARENESS_INIT.store(false, Ordering::Relaxed);
+        assert_eq!(is_process_dpi_aware(), 0);
+    }
+
+    #[test]
+    fn set_process_dpi_awareness_first_call_succeeds() {
+        DPI_AWARENESS_INIT.store(false, Ordering::Relaxed);
+        let result = set_process_dpi_awareness(1); // PROCESS_SYSTEM_DPI_AWARE
+        assert_eq!(result, 0); // S_OK
+        assert_eq!(DPI_AWARENESS.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn set_process_dpi_awareness_same_value_succeeds() {
+        DPI_AWARENESS_INIT.store(true, Ordering::Relaxed);
+        DPI_AWARENESS.store(1, Ordering::Relaxed);
+        let result = set_process_dpi_awareness(1);
+        assert_eq!(result, 0); // S_OK — same value
+    }
+
+    #[test]
+    fn set_process_dpi_awareness_different_value_fails() {
+        DPI_AWARENESS_INIT.store(true, Ordering::Relaxed);
+        DPI_AWARENESS.store(1, Ordering::Relaxed);
+        let result = set_process_dpi_awareness(2); // different from 1
+        assert_eq!(result, E_ACCESSDENIED);
+    }
+
+    #[test]
+    fn get_dpi_for_monitor_returns_non_zero_dpi() {
+        let mut dpi_x: u32 = 0;
+        let mut dpi_y: u32 = 0;
+        let result = unsafe { get_dpi_for_monitor(0, 0, &mut dpi_x, &mut dpi_y) };
+        assert_eq!(result, 0); // S_OK
+        assert_ne!(dpi_x, 0);
+        assert_ne!(dpi_y, 0);
+    }
+
+    #[test]
+    fn get_dpi_for_window_returns_non_zero() {
+        let dpi = get_dpi_for_window(0);
+        assert_ne!(dpi, 0);
     }
 }
 
