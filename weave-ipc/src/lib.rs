@@ -10,9 +10,8 @@ pub fn send_fd(fd: i32, fd_to_send: i32) -> Result<(), String> {
         iov_len: 1,
     };
 
-    let cmsg_space = unsafe {
-        libc::CMSG_SPACE(std::mem::size_of::<libc::c_int>() as libc::c_uint)
-    };
+    let cmsg_space =
+        unsafe { libc::CMSG_SPACE(std::mem::size_of::<libc::c_int>() as libc::c_uint) };
     let cmsg_space_usize = cmsg_space as usize;
     let mut cmsg_buf = vec![0u8; cmsg_space_usize];
 
@@ -49,9 +48,8 @@ pub fn recv_fd(fd: i32) -> Result<i32, String> {
         iov_len: 1,
     };
 
-    let cmsg_space = unsafe {
-        libc::CMSG_SPACE(std::mem::size_of::<libc::c_int>() as libc::c_uint)
-    };
+    let cmsg_space =
+        unsafe { libc::CMSG_SPACE(std::mem::size_of::<libc::c_int>() as libc::c_uint) };
     let cmsg_space_usize = cmsg_space as usize;
     let mut cmsg_buf = vec![0u8; cmsg_space_usize];
 

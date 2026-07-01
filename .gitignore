@@ -94,6 +94,9 @@ docs/milestones/*
 docs/reference/*
 !docs/reference/*.md
 !docs/RELEASE-CLAIMS.md
+!docs/plans/
+docs/plans/*
+!docs/plans/*.md
 !docs/sprint-briefs/
 !docs/archived-milestones/
 docs/archived-milestones/*

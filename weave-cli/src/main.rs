@@ -1464,16 +1464,11 @@ fn main() {
     };
     let mut missing: Vec<String> = Vec::new();
     unsafe {
-        iat::patch_best_effort(
-            &bytes,
-            image.base,
-            resolver,
-            |dll, func, iat_va| {
-                let sym = format!("{dll}!{func}");
-                eprintln!("weave: unresolved import: {sym} at iat={iat_va:#x} (stubbed to null)");
-                missing.push(sym);
-            },
-        );
+        iat::patch_best_effort(&bytes, image.base, resolver, |dll, func, iat_va| {
+            let sym = format!("{dll}!{func}");
+            eprintln!("weave: unresolved import: {sym} at iat={iat_va:#x} (stubbed to null)");
+            missing.push(sym);
+        });
     }
     if !missing.is_empty() {
         eprintln!(
@@ -1630,7 +1625,9 @@ fn main() {
                         if let Err(e) = weave_ipc::send_fd(sv[0], drm_fd) {
                             eprintln!("weave/host: send_fd(DRM) failed: {e}");
                         }
-                        unsafe { libc::close(drm_fd); }
+                        unsafe {
+                            libc::close(drm_fd);
+                        }
                     }
                     Err(e) => {
                         eprintln!("weave/host: no DRM render node (Vulkan may not init): {e}");
