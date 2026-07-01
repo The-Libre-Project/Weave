@@ -49,10 +49,7 @@ const BASE_SYSCALLS: [u32; 18] = [
 ];
 
 /// Per-app syscall additions registry.
-pub const APP_SYSCALLS: &[(&str, &[i64])] = &[
-    ("hello.exe", &[]),
-    ("testsprite2.exe", &[]),
-];
+pub const APP_SYSCALLS: &[(&str, &[i64])] = &[("hello.exe", &[]), ("testsprite2.exe", &[])];
 
 /// Build a complete seccomp BPF program for the given list of allowed
 /// syscalls, using `deny_action` as the return value for non-matched calls.
@@ -267,7 +264,11 @@ mod tests {
         // Prologue: 4 insns (LD arch, JEQ arch, RET kill, LD nr)
         // 18 base checks
         // Epilogue: 2 insns (RET deny, RET allow)
-        assert_eq!(filter.len(), 24, "base filter must have 4 + 18 + 2 = 24 instructions");
+        assert_eq!(
+            filter.len(),
+            24,
+            "base filter must have 4 + 18 + 2 = 24 instructions"
+        );
     }
 
     #[test]

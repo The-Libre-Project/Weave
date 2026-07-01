@@ -21,7 +21,13 @@ fn write_all(fd: i32, buf: &[u8]) -> Result<(), String> {
     let mut remaining = buf.len();
     let mut offset = 0;
     while remaining > 0 {
-        let n = unsafe { libc::write(fd, buf.as_ptr().add(offset) as *const libc::c_void, remaining) };
+        let n = unsafe {
+            libc::write(
+                fd,
+                buf.as_ptr().add(offset) as *const libc::c_void,
+                remaining,
+            )
+        };
         if n <= 0 {
             return Err(std::io::Error::last_os_error().to_string());
         }
@@ -35,7 +41,13 @@ fn read_exact(fd: i32, buf: &mut [u8]) -> Result<(), String> {
     let mut remaining = buf.len();
     let mut offset = 0;
     while remaining > 0 {
-        let n = unsafe { libc::read(fd, buf.as_mut_ptr().add(offset) as *mut libc::c_void, remaining) };
+        let n = unsafe {
+            libc::read(
+                fd,
+                buf.as_mut_ptr().add(offset) as *mut libc::c_void,
+                remaining,
+            )
+        };
         if n <= 0 {
             if n == 0 {
                 return Err("EOF".to_string());
@@ -86,9 +98,8 @@ pub fn recv_reply(fd: i32) -> Result<ReplyMsg, String> {
 /// relocation (but since we use fork-based IPC with shared address space,
 /// pointers remain valid on the host side).
 pub fn struct_to_value<T>(s: &T) -> serde_json::Value {
-    let bytes = unsafe {
-        std::slice::from_raw_parts(s as *const T as *const u8, std::mem::size_of::<T>())
-    };
+    let bytes =
+        unsafe { std::slice::from_raw_parts(s as *const T as *const u8, std::mem::size_of::<T>()) };
     serde_json::json!(bytes.to_vec())
 }
 
@@ -100,7 +111,10 @@ pub fn value_to_struct<T>(v: &serde_json::Value) -> Result<T, String> {
     let bytes: Vec<u8> = serde_json::from_value(v.clone()).map_err(|e| e.to_string())?;
     let expected = std::mem::size_of::<T>();
     if bytes.len() != expected {
-        return Err(format!("struct byte size mismatch: expected {expected}, got {}", bytes.len()));
+        return Err(format!(
+            "struct byte size mismatch: expected {expected}, got {}",
+            bytes.len()
+        ));
     }
     unsafe { Ok(std::ptr::read_unaligned(bytes.as_ptr() as *const T)) }
 }
