@@ -24,6 +24,7 @@
 //! filesystem isolation. A diagnostic line is printed to stderr in both cases.
 
 pub mod seccomp;
+pub use seccomp::apply_seccomp;
 
 #[cfg(target_os = "linux")]
 use landlock::{

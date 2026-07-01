@@ -35,6 +35,7 @@ members = [
     "weave-dwrite",
     "weave-powrprof",
     "weave-audacity",
+    "weave-ipc",
 ]
 resolver = "2"
 

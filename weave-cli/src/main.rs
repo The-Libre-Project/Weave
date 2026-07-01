@@ -4,6 +4,7 @@ use weave_common::com::shell_link::ShellLinkSaveData;
 use weave_core::{
     cfg, cmdline, dll_registry, exec, iat, loader, module_handles, pe, prefix, registry, seh, teb,
 };
+use weave_ipc::CallMsg;
 use weave_installer::PrefixManager;
 
 mod arch;
@@ -366,6 +367,214 @@ fn shell_link_save_callback(data: &ShellLinkSaveData) -> Result<(), String> {
 /// Set once after fork() in the child branch.
 static CHILD_FD: std::sync::OnceLock<libc::c_int> = std::sync::OnceLock::new();
 
+// ── IPC stub functions (child side) ──────────────────────────────────
+// These replace the real Win32 implementations for the out-of-process
+// execution path.  Each stub serialises the call, sends it to the host
+// process via CHILD_FD, and returns the host's reply.
+
+/// IPC stub for ExitProcess.
+pub extern "win64" fn ipc_exit_process(u_exit_code: u32) -> ! {
+    let fd = CHILD_FD.get().expect("CHILD_FD not set in child");
+    let msg = CallMsg {
+        msg_type: "call".to_string(),
+        dll: "kernel32.dll".to_string(),
+        function: "ExitProcess".to_string(),
+        args: vec![serde_json::json!(u_exit_code)],
+    };
+    let _ = weave_ipc::send_msg(*fd, &msg);
+    unsafe { libc::exit(u_exit_code as i32) }
+}
+
+/// IPC stub for GetStdHandle.
+pub extern "win64" fn ipc_get_std_handle(n_std_handle: u32) -> usize {
+    let fd = CHILD_FD.get().expect("CHILD_FD not set in child");
+    let msg = CallMsg {
+        msg_type: "call".to_string(),
+        dll: "kernel32.dll".to_string(),
+        function: "GetStdHandle".to_string(),
+        args: vec![serde_json::json!(n_std_handle)],
+    };
+    if weave_ipc::send_msg(*fd, &msg).is_err() {
+        return usize::MAX;
+    }
+    match weave_ipc::recv_reply(*fd) {
+        Ok(reply) => reply.result.as_u64().unwrap_or(usize::MAX as u64) as usize,
+        Err(_) => usize::MAX,
+    }
+}
+
+/// IPC stub for WriteFile.
+pub unsafe extern "win64" fn ipc_write_file(
+    h_file: usize,
+    lp_buffer: *const u8,
+    n_bytes_to_write: u32,
+    lp_bytes_written: *mut u32,
+    lp_overlapped: usize,
+) -> i32 {
+    let fd = CHILD_FD.get().expect("CHILD_FD not set in child");
+    let buf_data: Vec<u8> = if !lp_buffer.is_null() && n_bytes_to_write > 0 {
+        unsafe { std::slice::from_raw_parts(lp_buffer, n_bytes_to_write as usize) }.to_vec()
+    } else {
+        Vec::new()
+    };
+    let msg = CallMsg {
+        msg_type: "call".to_string(),
+        dll: "kernel32.dll".to_string(),
+        function: "WriteFile".to_string(),
+        args: vec![
+            serde_json::json!(h_file),
+            serde_json::json!(buf_data),
+            serde_json::json!(n_bytes_to_write),
+            serde_json::json!(lp_overlapped),
+        ],
+    };
+    if weave_ipc::send_msg(*fd, &msg).is_err() {
+        if !lp_bytes_written.is_null() {
+            unsafe { *lp_bytes_written = 0 };
+        }
+        return 0;
+    }
+    let reply = match weave_ipc::recv_reply(*fd) {
+        Ok(r) => r,
+        Err(_) => {
+            if !lp_bytes_written.is_null() {
+                unsafe { *lp_bytes_written = 0 };
+            }
+            return 0;
+        }
+    };
+    let ok = reply.result.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
+    let written = reply.result.get("written").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+    if !lp_bytes_written.is_null() {
+        unsafe { *lp_bytes_written = written };
+    }
+    if ok { 1 } else { 0 }
+}
+
+/// IPC stub for WriteConsoleW.
+pub unsafe extern "win64" fn ipc_write_console_w(
+    h_console_output: usize,
+    lp_buffer: *const u16,
+    n_chars: u32,
+    lp_chars_written: *mut u32,
+    _lp_reserved: usize,
+) -> i32 {
+    let fd = CHILD_FD.get().expect("CHILD_FD not set in child");
+    let buf_data: Vec<u8> = if !lp_buffer.is_null() && n_chars > 0 {
+        let slice = unsafe { std::slice::from_raw_parts(lp_buffer as *const u8, n_chars as usize * 2) };
+        slice.to_vec()
+    } else {
+        Vec::new()
+    };
+    let msg = CallMsg {
+        msg_type: "call".to_string(),
+        dll: "kernel32.dll".to_string(),
+        function: "WriteConsoleW".to_string(),
+        args: vec![
+            serde_json::json!(h_console_output),
+            serde_json::json!(buf_data),
+            serde_json::json!(n_chars),
+            serde_json::json!(!lp_chars_written.is_null()),
+        ],
+    };
+    if weave_ipc::send_msg(*fd, &msg).is_err() {
+        if !lp_chars_written.is_null() {
+            unsafe { *lp_chars_written = 0 };
+        }
+        return 0;
+    }
+    let reply = match weave_ipc::recv_reply(*fd) {
+        Ok(r) => r,
+        Err(_) => {
+            if !lp_chars_written.is_null() {
+                unsafe { *lp_chars_written = 0 };
+            }
+            return 0;
+        }
+    };
+    let ok = reply.result.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
+    let written = reply.result.get("written").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+    if !lp_chars_written.is_null() {
+        unsafe { *lp_chars_written = written };
+    }
+    if ok { 1 } else { 0 }
+}
+
+/// Resolver wrapper that returns IPC stubs for the out-of-process execution
+/// model.  Used during IAT patching of the main exe (section 3) so the guest
+/// code calls IPC stubs instead of the real Win32 implementations.
+fn resolve_with_ipc_stubs(dll: &str, func: &str) -> Option<usize> {
+    let dll_lower = dll.to_lowercase();
+    match (dll_lower.as_str(), func) {
+        ("kernel32.dll", "ExitProcess") => Some(ipc_exit_process as *const () as usize),
+        ("kernel32.dll", "GetStdHandle") => Some(ipc_get_std_handle as *const () as usize),
+        ("kernel32.dll", "WriteFile") => Some(ipc_write_file as *const () as usize),
+        ("kernel32.dll", "WriteConsoleW") => Some(ipc_write_console_w as *const () as usize),
+        _ => resolve(dll, func),
+    }
+}
+
+/// Host-side IPC handler: resolves the requested function through `resolve`,
+/// calls it with the deserialised arguments, and returns the result for the
+/// host_loop to forward back to the child.
+///
+/// Returns `None` for ExitProcess (the function calls libc::exit internally,
+/// so the host_loop must break rather than attempt to send a reply).
+fn ipc_handler(dll: &str, function: &str, args: &[serde_json::Value]) -> Option<serde_json::Value> {
+    match (dll, function) {
+        ("kernel32.dll", "ExitProcess") => {
+            let code = args.first().and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+            eprintln!("weave/host: ExitProcess({code})");
+            unsafe { libc::exit(code as i32) }
+        }
+        ("kernel32.dll", "GetStdHandle") => {
+            let n = args.first().and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+            let addr = resolve("kernel32.dll", "GetStdHandle")
+                .expect("GetStdHandle must be resolvable");
+            let func: extern "win64" fn(u32) -> usize = unsafe { std::mem::transmute(addr) };
+            let h = func(n);
+            eprintln!("weave/host: GetStdHandle({n}) → {h:#x}");
+            Some(serde_json::json!(h))
+        }
+        ("kernel32.dll", "WriteFile") => {
+            let h_file = args.get(0).and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            let buf_data: Vec<u8> = serde_json::from_value(args.get(1).cloned().unwrap_or_default()).unwrap_or_default();
+            let overlapped = args.get(3).and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            let addr = resolve("kernel32.dll", "WriteFile")
+                .expect("WriteFile must be resolvable");
+            let func: unsafe extern "win64" fn(usize, *const u8, u32, *mut u32, usize) -> i32 =
+                unsafe { std::mem::transmute(addr) };
+            let mut written: u32 = 0;
+            let ret = unsafe { func(h_file, buf_data.as_ptr(), buf_data.len() as u32, &mut written, overlapped) };
+            eprintln!("weave/host: WriteFile({h_file:#x}, {} bytes) → {ret}, written={written}", buf_data.len());
+            Some(serde_json::json!({"ok": ret != 0, "written": written}))
+        }
+        ("kernel32.dll", "WriteConsoleW") => {
+            let h_console = args.get(0).and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            let buf_data: Vec<u8> = serde_json::from_value(args.get(1).cloned().unwrap_or_default()).unwrap_or_default();
+            let has_chars_written = args.get(3).and_then(|v| v.as_bool()).unwrap_or(false);
+            let u16_buf: Vec<u16> = buf_data
+                .chunks(2)
+                .filter(|c| c.len() == 2)
+                .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                .collect();
+            let n_chars = u16_buf.len() as u32;
+            let addr = resolve("kernel32.dll", "WriteConsoleW")
+                .expect("WriteConsoleW must be resolvable");
+            let func: unsafe extern "win64" fn(usize, *const u16, u32, *mut u32, usize) -> i32 =
+                unsafe { std::mem::transmute(addr) };
+            let mut written: u32 = 0;
+            let ret = unsafe { func(h_console, u16_buf.as_ptr(), n_chars, if has_chars_written { &mut written } else { std::ptr::null_mut() }, 0) };
+            eprintln!("weave/host: WriteConsoleW({h_console:#x}, {} chars) → {ret}, written={written}", n_chars);
+            Some(serde_json::json!({"ok": ret != 0, "written": written}))
+        }
+        _ => {
+            eprintln!("weave/host: unhandled IPC call: {dll}!{function}");
+            Some(serde_json::Value::Null)
+        }
+    }
+}
+
 fn main() {
     // ── −3. Prefix subcommand dispatch — intercept before clap parsing ────
     // `weave prefix <create|list|launch|delete> [args...]` is handled here so
@@ -720,7 +929,7 @@ fn main() {
     // Safety: image.base points to a fully mapped PE loaded by loader::load().
     let mut missing: Vec<String> = Vec::new();
     unsafe {
-        iat::patch_best_effort(&bytes, image.base, resolve, |dll, func, iat_va| {
+        iat::patch_best_effort(&bytes, image.base, resolve_with_ipc_stubs, |dll, func, iat_va| {
             let sym = format!("{dll}!{func}");
             eprintln!("weave: unresolved import: {sym} at iat={iat_va:#x} (stubbed to null)");
             missing.push(sym);
@@ -835,29 +1044,7 @@ fn main() {
             }
             eprintln!("PHASE: host_loop_started");
 
-            let mut buf = [0u8; 4096];
-            loop {
-                let n =
-                    unsafe { libc::read(sv[0], buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
-                match n {
-                    -1 => {
-                        eprintln!(
-                            "weave: host loop read error: {}",
-                            std::io::Error::last_os_error()
-                        );
-                        break;
-                    }
-                    0 => {
-                        eprintln!("weave: host loop EOF");
-                        break;
-                    }
-                    _ => {
-                        eprintln!("weave: host loop received {} bytes", n);
-                        break;
-                    }
-                }
-            }
-            std::process::exit(0);
+            weave_ipc::host_loop(sv[0], ipc_handler);
         }
     }
 
