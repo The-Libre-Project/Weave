@@ -1553,7 +1553,8 @@ fn main() {
                 let name = entry.file_name();
                 let name_str = name.to_string_lossy();
                 if name_str.starts_with("renderD") {
-                    let path_str = entry.path().to_string_lossy();
+                    let p = entry.path();
+                    let path_str = p.to_string_lossy();
                     let cpath = std::ffi::CString::new(path_str.as_ref())
                         .map_err(|_| "invalid CString".to_string())?;
                     let fd = unsafe { libc::open(cpath.as_ptr(), libc::O_RDWR) };
