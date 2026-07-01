@@ -1384,7 +1384,7 @@ fn main() {
             }
             CHILD_FD.set(sv[1]).expect("weave: CHILD_FD already set");
             eprintln!("PHASE: child_spawned pid={}", unsafe { libc::getpid() });
-            if let Err(e) = weave_sandbox::apply_seccomp() {
+            if let Err(e) = weave_sandbox::apply_seccomp(exe_name) {
                 eprintln!("weave: seccomp failed: {e}");
                 std::process::exit(1);
             }
