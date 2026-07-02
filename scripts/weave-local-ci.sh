@@ -40,10 +40,19 @@ echo "  Result: $RESULT_FILE"
 echo "  Output: $OUTPUT_FILE"
 echo ""
 
-# ── Run the local CI script ──────────────────────────────────────────────────
+# ── Run the local CI script (native first, fall back to Docker) ──────────────
 set +e
 bash "$SCRIPT_DIR/local-ci.sh" > "$OUTPUT_FILE" 2>&1
 EXIT_CODE=$?
+
+# If native CI fails and Docker is available, retry inside Docker
+if [ "$EXIT_CODE" -ne 0 ] && command -v docker &>/dev/null; then
+  echo "" >> "$OUTPUT_FILE"
+  echo "--- Native CI failed. Retrying inside Docker... ---" >> "$OUTPUT_FILE"
+  echo "" >> "$OUTPUT_FILE"
+  bash "$SCRIPT_DIR/docker-local-ci.sh" >> "$OUTPUT_FILE" 2>&1
+  EXIT_CODE=$?
+fi
 set -e
 
 # ── Write structured result file ─────────────────────────────────────────────
