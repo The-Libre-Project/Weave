@@ -1140,6 +1140,7 @@ fn main() {
     if let Some(path) = &args.trace_stubs {
         iat::force_enable_tracer();
         iat::enable_stub_trace();
+        iat::register_all_known_reals();
         if let Err(e) = iat::set_trace_output(path) {
             eprintln!("weave: warning: could not open stub trace output '{path}': {e}");
         }

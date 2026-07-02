@@ -55,7 +55,9 @@ extern "win64" fn trace_slot_log_by_va(
                     );
                 }
             } else {
-                eprintln!("weave/iat-trace: {name} ret={ret_addr:#x} ret1={caller_ret_addr:#x}");
+                let (dll, func) = name.split_once("::").unwrap_or((name, ""));
+                let phase = if is_stub(dll, func) { "A" } else { "B" };
+                eprintln!("weave/iat-trace: [{phase}] {name} ret={ret_addr:#x} ret1={caller_ret_addr:#x}");
             }
             return *real_fn;
         }
@@ -351,6 +353,7 @@ static TRACER_ENABLED: OnceLock<bool> = OnceLock::new();
 /// Returns true iff `WEAVE_IAT_TRACE=1` was set when this process started.
 /// The result is cached after first call.
 pub fn tracer_enabled() -> bool {
+    ensure_reals_registered();
     *TRACER_ENABLED.get_or_init(|| {
         std::env::var("WEAVE_IAT_TRACE")
             .map(|v| v == "1")
@@ -363,6 +366,7 @@ pub fn tracer_enabled() -> bool {
 /// `tracer_enabled()` reads that would cache the env-var result.
 /// Calling this after the env-var was already cached is a no-op.
 pub fn force_enable_tracer() {
+    ensure_reals_registered();
     TRACER_ENABLED.get_or_init(|| true);
 }
 
@@ -390,14 +394,14 @@ fn real_functions() -> &'static Mutex<HashSet<(String, String)>> {
 /// Mark `func` in `dll` as a known Phase-A stub.
 pub fn register_stub(dll: &str, func: &str) {
     if let Ok(mut r) = stub_registry().lock() {
-        r.insert((dll.to_string(), func.to_string()));
+        r.insert((dll.to_ascii_lowercase(), func.to_string()));
     }
 }
 
 /// Mark `func` in `dll` as a known Phase-B real implementation.
 pub fn register_real(dll: &str, func: &str) {
     if let Ok(mut r) = real_functions().lock() {
-        r.insert((dll.to_string(), func.to_string()));
+        r.insert((dll.to_ascii_lowercase(), func.to_string()));
     }
 }
 
@@ -408,7 +412,8 @@ pub fn register_real(dll: &str, func: &str) {
 /// 2. Explicitly registered via `register_stub` → Phase A (`true`).
 /// 3. Default (unregistered) → Phase A (`true`).
 pub fn is_stub(dll: &str, func: &str) -> bool {
-    let key = (dll.to_string(), func.to_string());
+    let dll_lower = dll.to_ascii_lowercase();
+    let key = (dll_lower, func.to_string());
     if let Ok(r) = real_functions().lock() {
         if r.contains(&key) {
             return false;
@@ -423,6 +428,190 @@ pub fn is_stub(dll: &str, func: &str) -> bool {
 }
 
 // ---------------------------------------------------------------------------
+/// Register all functions currently known to be Phase B (real implementations).
+///
+/// Derived from coverage gauge criteria: Wine ref present, body is not sole-panic,
+/// and function is mentioned in milestone docs.  Additional manual entries for
+/// functions exported from submodules (user32 api.rs, shell32 submodules, etc.).
+///
+/// Call this before running any traced binary to get meaningful Phase A/B
+/// classification in the stub-trace output.
+static INIT_REALS: std::sync::Once = std::sync::Once::new();
+
+/// Called once to populate the real-function registry before any
+/// is_stub() query can race with it.
+fn ensure_reals_registered() {
+    INIT_REALS.call_once(|| {
+        register_all_known_reals();
+    });
+}
+
+pub fn register_all_known_reals() {
+    // ── Coverage-gauge derived (Wine ref + not-sole-panic + milestone) ──────
+    register_real("comctl32.dll", "ImageList_Replace");
+    register_real("gdi32.dll", "BitBlt");
+    register_real("gdi32.dll", "CreateBrushIndirect");
+    register_real("gdi32.dll", "CreateFontW");
+    register_real("gdi32.dll", "DeleteDC");
+    register_real("gdi32.dll", "DrawTextW");
+    register_real("gdi32.dll", "ExtTextOutA");
+    register_real("gdi32.dll", "ExtTextOutW");
+    register_real("gdi32.dll", "FillRect");
+    register_real("gdi32.dll", "GetCharacterPlacementW");
+    register_real("gdi32.dll", "GetCurrentObject");
+    register_real("gdi32.dll", "GetDCBrushColor");
+    register_real("gdi32.dll", "GetDIBits");
+    register_real("gdi32.dll", "GetOutlineTextMetricsA");
+    register_real("gdi32.dll", "GetStockObject");
+    register_real("gdi32.dll", "GetTextExtentExPointA");
+    register_real("gdi32.dll", "GetTextMetricsA");
+    register_real("gdi32.dll", "LineTo");
+    register_real("gdi32.dll", "SetStretchBltMode");
+    register_real("gdi32.dll", "SetWorldTransform");
+    register_real("gdi32.dll", "StretchBlt");
+    register_real("gdi32.dll", "StretchDIBits");
+    register_real("gdi32.dll", "TextOutA");
+    register_real("gdi32.dll", "TextOutW");
+    register_real("gdi32.dll", "TranslateCharsetInfo");
+    register_real("imm32.dll", "ImmGetContext");
+    register_real("imm32.dll", "ImmSetCompositionStringW");
+    register_real("kernel32.dll", "CloseHandle");
+    register_real("kernel32.dll", "CreateFileW");
+    register_real("kernel32.dll", "DeleteCriticalSection");
+    register_real("kernel32.dll", "DeleteFileW");
+    register_real("kernel32.dll", "EnterCriticalSection");
+    register_real("kernel32.dll", "ExitProcess");
+    register_real("kernel32.dll", "FindFirstFileW");
+    register_real("kernel32.dll", "FindNextFileW");
+    register_real("kernel32.dll", "FoldStringW");
+    register_real("kernel32.dll", "GetFileAttributesExW");
+    register_real("kernel32.dll", "GetFileSize");
+    register_real("kernel32.dll", "GetLastError");
+    register_real("kernel32.dll", "GetStdHandle");
+    register_real("kernel32.dll", "GetSystemTimeAsFileTime");
+    register_real("kernel32.dll", "InitializeCriticalSection");
+    register_real("kernel32.dll", "LeaveCriticalSection");
+    register_real("kernel32.dll", "MapViewOfFile");
+    register_real("kernel32.dll", "QueryPerformanceCounter");
+    register_real("kernel32.dll", "QueryPerformanceFrequency");
+    register_real("kernel32.dll", "ReadFile");
+    register_real("kernel32.dll", "SetFilePointer");
+    register_real("kernel32.dll", "SetLastError");
+    register_real("kernel32.dll", "SetUnhandledExceptionFilter");
+    register_real("kernel32.dll", "Sleep");
+    register_real("kernel32.dll", "TlsGetValue");
+    register_real("kernel32.dll", "VirtualAlloc");
+    register_real("kernel32.dll", "VirtualAllocEx");
+    register_real("kernel32.dll", "VirtualFree");
+    register_real("kernel32.dll", "VirtualProtect");
+    register_real("kernel32.dll", "VirtualQuery");
+    register_real("kernel32.dll", "WriteConsoleW");
+    register_real("kernel32.dll", "WriteFile");
+    register_real("ole32.dll", "CoCreateInstance");
+    register_real("ole32.dll", "CreateStreamOnHGlobal");
+    register_real("ole32.dll", "DoDragDrop");
+    register_real("ole32.dll", "OleDuplicateData");
+    register_real("ole32.dll", "OleGetClipboard");
+    register_real("ole32.dll", "OleLockRunning");
+    register_real("ole32.dll", "OleSetClipboard");
+    register_real("ole32.dll", "RegisterDragDrop");
+    register_real("ucrtbase.dll", "fflush");
+    register_real("ucrtbase.dll", "fputs");
+    register_real("winmm.dll", "waveOutOpen");
+    register_real("winmm.dll", "waveOutWrite");
+    register_real("ws2_32.dll", "WSACreateEvent");
+    register_real("ws2_32.dll", "WSAEnumNetworkEvents");
+    register_real("ws2_32.dll", "WSAEventSelect");
+    register_real("ws2_32.dll", "WSAWaitForMultipleEvents");
+    register_real("ws2_32.dll", "accept");
+    register_real("ws2_32.dll", "bind");
+    register_real("ws2_32.dll", "connect");
+    register_real("ws2_32.dll", "getaddrinfo");
+    register_real("ws2_32.dll", "listen");
+    register_real("ws2_32.dll", "recv");
+    register_real("ws2_32.dll", "select");
+    register_real("ws2_32.dll", "send");
+    register_real("ws2_32.dll", "socket");
+
+    // ── Manual additions (submodule exports, Phase B proven by CI gates) ────
+    // user32 — exported from api.rs, not lib.rs match arms
+    register_real("user32.dll", "CreateWindowExW");
+    register_real("user32.dll", "DefWindowProcW");
+    register_real("user32.dll", "DispatchMessageW");
+    register_real("user32.dll", "GetMessageW");
+    register_real("user32.dll", "TranslateMessage");
+    register_real("user32.dll", "RegisterClassW");
+    register_real("user32.dll", "ShowWindow");
+    register_real("user32.dll", "UpdateWindow");
+    register_real("user32.dll", "BeginPaint");
+    register_real("user32.dll", "EndPaint");
+    register_real("user32.dll", "PostQuitMessage");
+    register_real("user32.dll", "GetDC");
+    register_real("user32.dll", "ReleaseDC");
+    register_real("user32.dll", "LoadIconW");
+    register_real("user32.dll", "LoadCursorW");
+    register_real("user32.dll", "SetWindowTextW");
+    register_real("user32.dll", "GetWindowTextW");
+    register_real("user32.dll", "PeekMessageW");
+    register_real("user32.dll", "SendMessageW");
+    register_real("user32.dll", "PostMessageW");
+    register_real("user32.dll", "GetClientRect");
+    register_real("user32.dll", "GetWindowRect");
+    register_real("user32.dll", "AdjustWindowRect");
+    register_real("user32.dll", "SetWindowPos");
+    register_real("user32.dll", "MoveWindow");
+    register_real("user32.dll", "ScreenToClient");
+    register_real("user32.dll", "ClientToScreen");
+    register_real("user32.dll", "IsWindowVisible");
+    register_real("user32.dll", "EnableWindow");
+    register_real("user32.dll", "DestroyWindow");
+    register_real("user32.dll", "MessageBoxW");
+    register_real("user32.dll", "MessageBoxA");
+    register_real("user32.dll", "LoadStringW");
+    register_real("user32.dll", "LoadAcceleratorsW");
+    register_real("user32.dll", "TranslateAcceleratorW");
+    register_real("user32.dll", "LoadMenuW");
+    register_real("user32.dll", "TrackPopupMenu");
+    register_real("user32.dll", "SetFocus");
+    register_real("user32.dll", "GetFocus");
+    register_real("user32.dll", "SetCapture");
+    register_real("user32.dll", "ReleaseCapture");
+    register_real("user32.dll", "GetKeyState");
+    register_real("user32.dll", "GetAsyncKeyState");
+    register_real("user32.dll", "MapVirtualKeyW");
+    register_real("user32.dll", "VkKeyScanW");
+    register_real("user32.dll", "GetSystemMetrics");
+    register_real("user32.dll", "GetMessagePos");
+    register_real("user32.dll", "GetMessageTime");
+    register_real("user32.dll", "CharNextW");
+    register_real("user32.dll", "CharUpperW");
+    register_real("user32.dll", "lstrlenW");
+    register_real("user32.dll", "lstrcpyW");
+    register_real("user32.dll", "lstrcatW");
+    register_real("user32.dll", "lstrcmpW");
+    register_real("user32.dll", "lstrcmpiW");
+    register_real("user32.dll", "wsprintfW");
+    register_real("user32.dll", "wsprintfA");
+    register_real("user32.dll", "wvsprintfW");
+    register_real("user32.dll", "wvsprintfA");
+    // shell32 — exported from submodules
+    register_real("shell32.dll", "SHGetFileInfoW");
+    register_real("shell32.dll", "SHGetSpecialFolderLocation");
+    register_real("shell32.dll", "SHBrowseForFolderW");
+    register_real("shell32.dll", "SHGetPathFromIDListW");
+    register_real("shell32.dll", "SHGetFolderPathW");
+    register_real("shell32.dll", "ILCreateFromPathW");
+    register_real("shell32.dll", "ILFindLastID");
+    register_real("shell32.dll", "ILRemoveLastID");
+    register_real("shell32.dll", "ILSaveToStream");
+    register_real("shell32.dll", "ILFree");
+    register_real("shell32.dll", "ILClone");
+    register_real("shell32.dll", "ILGetSize");
+    register_real("shell32.dll", "ILGetDisplayName");
+    register_real("shell32.dll", "SHGetDesktopFolder");
+    register_real("shell32.dll", "SHCreateShellItemArrayFromIDLists");
+}
+
 // Structured JSONL stub-trace output
 // ---------------------------------------------------------------------------
 //
