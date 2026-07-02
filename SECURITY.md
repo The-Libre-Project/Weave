@@ -19,7 +19,7 @@ The actual safety story is therefore **Rust + strict pointer validation + sandbo
 
 - **Rust** removes the easiest, most common memory-safety bugs and makes the remaining unsafe surface auditable (it's the `unsafe { }` blocks; you can grep for it).
 - **Strict pointer validation** at every Win32 entry point ensures guest-supplied pointers are bounds-checked, alignment-checked, and zero-checked before any host code dereferences them.
-- **Sandboxing** ensures that *even when something goes wrong in the host*, the guest's reach is reduced. Today this is **Landlock filesystem isolation only**, applied before guest code runs; bubblewrap process containment, seccomp syscall filtering, and per-app network isolation are roadmap, not shipped. The current Landlock layer prevents the guest from reading or writing paths outside its prefix and the explicitly bridged user-data dirs, but does not constrain network or syscall surface.
+- **Sandboxing** ensures that *even when something goes wrong in the host*, the guest's reach is reduced. Weave runs every app in an **out-of-process sandbox by default**: the host forks, the child applies a seccomp-BPF syscall filter, then the child jumps to the PE entry point with no direct filesystem or syscall access. Communication between guest and host happens over IPC (length-prefixed JSON over Unix domain sockets). The old in-process path (Landlock only, no seccomp, no fork) is available as `--no-sandbox` for debugging only. Full architecture: [`docs/architecture/sandbox.md`](docs/architecture/sandbox.md).
 
 Sandboxing is the load-bearing piece. Rust is the multiplier. Neither alone is the claim, and we don't make either alone.
 
@@ -30,8 +30,8 @@ This framing applies anywhere Weave's safety properties are described — in the
 ## Audit posture
 
 - PE parser fuzzing and pointer validation pass: complete (Phase 6b WS3, 2026-04-05). See [`docs/SECURITY_AUDIT.md`](docs/SECURITY_AUDIT.md).
-- In-process execution model: this is an accepted architectural limitation. Sub-process / out-of-process guest isolation is documented under guest-isolation analysis in `docs/STRATEGIC-AUDIT.md`.
-- Reproducible builds + signing: tracked at the portfolio level — see `Business-OS/SECURITY.md`.
+- **Out-of-process sandboxing is shipped** (E4 arc, June 2026): fork + seccomp-BPF + IPC is the default execution path. See [`docs/architecture/sandbox.md`](docs/architecture/sandbox.md) for the threat model and architecture.
+- Reproducible builds + signing: tracked at the portfolio level — see `../Business-OS/SECURITY.md` (portfolio security policy in the Business-OS repo).
 
 ## Reporting a vulnerability
 

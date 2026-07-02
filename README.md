@@ -8,7 +8,7 @@ Licensed under GPL-3.0. Open for security auditing, research, and fork-under-GPL
 
 > **Platform support:** Weave is developed and tested against [LibreWin-OS](https://github.com/The-Libre-Project/LibreWin-OS) — a Fedora-based distribution that ships it as the native Windows compat layer. The code compiles and runs on stock Linux (Fedora, Ubuntu, Arch, etc.), but that is a natural consequence of the architecture, not a supported configuration. We do not test against, package for, or verify behavior on any distribution outside our own ISO builds. If you install it elsewhere, you're working without a net. Contributions are welcome; bug reports from non-LibreWin environments will be accepted but prioritized accordingly.
 
-> **New here?** Read the [architecture paper](docs/ARCHITECTURE.md) for how Weave works and why it is so much smaller than Wine. For honest, per-phase status, see [ROADMAP.md](ROADMAP.md). This README is the engineering front matter: what exists today, how the repo is laid out, and how to build it.
+> **New here?** Read the [architecture paper](docs/published-papers/ARCHITECTURE.md) for how Weave works and why it is so much smaller than Wine. For honest, per-phase status, see [ROADMAP.md](ROADMAP.md). This README is the engineering front matter: what exists today, how the repo is laid out, and how to build it.
 
 ---
 
@@ -26,7 +26,7 @@ The host has them now. Weave delegates to them instead of reimplementing them.
 | Shell | Full `explorer.exe` reimplementation (~800K) | None; the app runs in the host desktop |
 | NT kernel | Own `ntoskrnl` (~600K) | ntdll shim for the syscalls real apps actually call (~2.5K) |
 
-Wine inserts a complete Windows OS boundary between the app and the host kernel. Weave is a translation shim: it converts Windows calling conventions and data structures into native Linux syscalls and libraries, and lets the host do the heavy lifting. That architectural leverage is why Weave can cover a comparable application surface at roughly **5 to 10 percent of Wine's code volume**. The full reasoning, line-count projections, and debuggability analysis are in the [architecture paper](docs/ARCHITECTURE.md).
+Wine inserts a complete Windows OS boundary between the app and the host kernel. Weave is a translation shim: it converts Windows calling conventions and data structures into native Linux syscalls and libraries, and lets the host do the heavy lifting. That architectural leverage is why Weave can cover a comparable application surface at roughly **5 to 10 percent of Wine's code volume**. The full reasoning, line-count projections, and debuggability analysis are in the [architecture paper](docs/published-papers/ARCHITECTURE.md).
 
 This is not a claim that Weave will ever support everything Wine supports. It will not. The wedge is narrow by design: the apps that matter for a specific audience, implemented well, sandboxed by default, in a fraction of the code.
 
@@ -37,8 +37,8 @@ This is not a claim that Weave will ever support everything Wine supports. It wi
 Weave is early-stage and experimental. The wedge is single-binary native Win32 desktop apps and SDL-era games that Wine handles poorly or insecurely, with sandboxing as the differentiator.
 
 - A Rust PE loader and ntdll syscall gateway work end-to-end on the supported corpus.
-- **1,661 Win32 exports are registered across 26 DLL emulation crates; 75 are fully implemented** per the [SHIM-CONTRACT](docs/SHIM-CONTRACT.md) (Wine-referenced behavior, non-panic body, exercised by a milestone gate). The rest are Phase A stubs: present in the resolver, returning sentinels, awaiting implementation. This staging is deliberate, not a sign of incompleteness; see the [architecture paper](docs/ARCHITECTURE.md) for why.
-- Every app runs inside a Landlock filesystem sandbox by default. Bubblewrap process containment, seccomp filtering, and per-app network isolation are roadmap, not shipped.
+- **~1,870 Win32 exports are registered across 44 crates** per the [SHIM-CONTRACT](docs/SHIM-CONTRACT.md) (Wine-referenced behavior, non-panic body, exercised by a milestone gate). The rest are Phase A stubs: present in the resolver, returning sentinels, awaiting implementation. This staging is deliberate, not a sign of incompleteness; see the [architecture paper](docs/published-papers/ARCHITECTURE.md) for why.
+- Every app runs in an **out-of-process sandbox by default** — fork + seccomp-BPF syscall filter + IPC over Unix domain sockets. The guest process has no direct filesystem or syscall access. See the [sandbox architecture doc](docs/architecture/sandbox.md).
 - The supported-app list is short and per-release-tier. Green end-to-end CI gates today: **NXEngine-evo** (SDL2 game), **SDL2 testsprite2**, **Notepad++**, **7-Zip**, **IrfanView**, and **Q-Dir**. Apps not on the list are not supported.
 
 **Real-desktop validation** (Fedora 41, GNOME Wayland, AMD RX 6700 XT, 2026-06-13):
@@ -77,7 +77,7 @@ weave-sandbox/       # Landlock isolation
 
 Plus crates for comctl32, ole32, oleaut32, d3d12, ddraw, mmdevapi, shlwapi, winmm, xinput, and ~18 smaller ones (bcrypt, crypt32, imm32, secur32, setupapi, wldap32, normaliz, msvcp140, and others). Full crate list in [`weave-cli/src/main.rs`](weave-cli/src/main.rs).
 
-The runtime has two always-active layers: **Weave Native** (API translation, mapping Windows syscalls to Linux equivalents, graphics to Vulkan, audio to PipeWire) and **Weave Sandbox** (Landlock filesystem isolation, on by default, no root required). The full architecture, sandbox threat model, and graphics pipeline are documented in the [architecture paper](docs/ARCHITECTURE.md).
+The runtime has two always-active layers: **Weave Native** (API translation, mapping Windows syscalls to Linux equivalents, graphics to Vulkan, audio to PipeWire) and **Weave Sandbox** (Landlock filesystem isolation, on by default, no root required). The full architecture, sandbox threat model, and graphics pipeline are documented in the [architecture paper](docs/published-papers/ARCHITECTURE.md).
 
 ---
 

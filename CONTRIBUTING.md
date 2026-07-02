@@ -21,7 +21,7 @@ Weave is licensed under the **GNU General Public License v3 (GPL-3.0)**. Any for
 rustup target add x86_64-unknown-linux-gnu
 
 # Clone
-git clone https://github.com/libre-project/Weave.git
+git clone https://github.com/The-Libre-Project/Weave.git
 cd Weave
 
 # Check it compiles
