@@ -1396,6 +1396,7 @@ mod inner {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn copy_area_with_rop(
         src: u32,
         dst: u32,
@@ -1454,6 +1455,7 @@ mod inner {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn draw_text_utf16(
         xcb_id: u32,
         x: i16,
@@ -1466,7 +1468,14 @@ mod inner {
     ) {
         if let Some(b) = BACKEND.get() {
             b.draw_text_utf16(
-                Drawable(xcb_id), x, y, text, px_size, fg_pixel, bg_pixel, font_path,
+                Drawable(xcb_id),
+                x,
+                y,
+                text,
+                px_size,
+                fg_pixel,
+                bg_pixel,
+                font_path,
             );
         }
     }
@@ -1483,6 +1492,7 @@ mod inner {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn put_bits_to_pixmap_at(
         drawable: u32,
         dst_x: i16,
@@ -1643,6 +1653,7 @@ pub fn draw_rect_outline(_xcb_id: u32, _x: i16, _y: i16, _w: u16, _h: u16, _pixe
 pub fn draw_text(_xcb_id: u32, _x: i16, _y: i16, _text: &[u8], _fg: u32, _bg: u32) {}
 
 #[cfg(not(target_os = "linux"))]
+#[allow(clippy::too_many_arguments)]
 pub fn draw_text_utf16(
     _xcb_id: u32,
     _x: i16,

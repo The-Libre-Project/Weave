@@ -307,11 +307,7 @@ pub fn measure_text(text: &[u16], _px_size: f32) -> (i32, i32) {
 }
 
 #[cfg(not(target_os = "linux"))]
-pub fn measure_text_with_path(
-    text: &[u16],
-    _px_size: f32,
-    _font_path: Option<&str>,
-) -> (i32, i32) {
+pub fn measure_text_with_path(text: &[u16], _px_size: f32, _font_path: Option<&str>) -> (i32, i32) {
     (text.len() as i32 * 7, 13)
 }
 

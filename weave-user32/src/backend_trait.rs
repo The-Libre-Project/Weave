@@ -243,6 +243,7 @@ pub trait WindowBackend: Send + Sync {
     /// `font_path` — when `Some`, the renderer should load the TrueType/OpenType
     /// font from this absolute file path; when `None`, the default system font
     /// is used.
+    #[allow(clippy::too_many_arguments)]
     fn draw_text_utf16(
         &self,
         dst: Drawable,

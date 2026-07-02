@@ -6000,12 +6000,20 @@ mod a6d_font_tests {
     fn select_object_font_returns_previous_handle() {
         let hdc = 0x6000_00A2;
         let font_a = objects::alloc(GdiKind::Font {
-            height: -12, weight: 400, italic: false,
-            face: [0u16; 32], font_path: Some("/a.ttf".into()), pixel_size: 12.0,
+            height: -12,
+            weight: 400,
+            italic: false,
+            face: [0u16; 32],
+            font_path: Some("/a.ttf".into()),
+            pixel_size: 12.0,
         });
         let font_b = objects::alloc(GdiKind::Font {
-            height: -16, weight: 700, italic: false,
-            face: [0u16; 32], font_path: Some("/b.ttf".into()), pixel_size: 16.0,
+            height: -16,
+            weight: 700,
+            italic: false,
+            face: [0u16; 32],
+            font_path: Some("/b.ttf".into()),
+            pixel_size: 16.0,
         });
         let prev_a = select_object(hdc, font_a);
         assert_eq!(prev_a, objects::stock_handle(SYSTEM_FONT));
@@ -6021,8 +6029,12 @@ mod a6d_font_tests {
     fn get_text_metrics_w_returns_nonzero_height() {
         let hdc = 0x6000_00A3;
         let h_font = objects::alloc(GdiKind::Font {
-            height: -16, weight: 700, italic: true,
-            face: [0u16; 32], font_path: None, pixel_size: 16.0,
+            height: -16,
+            weight: 700,
+            italic: true,
+            face: [0u16; 32],
+            font_path: None,
+            pixel_size: 16.0,
         });
         dc::with_mut(hdc, |dc| dc.h_font = h_font);
         let mut tm: TextMetricW = unsafe { std::mem::zeroed() };
@@ -6042,8 +6054,12 @@ mod a6d_font_tests {
     fn get_text_metrics_truetype_flag_ttf() {
         let hdc = 0x6000_00A4;
         let h_font = objects::alloc(GdiKind::Font {
-            height: -16, weight: 400, italic: false,
-            face: [0u16; 32], font_path: Some("/f.otf".into()), pixel_size: 16.0,
+            height: -16,
+            weight: 400,
+            italic: false,
+            face: [0u16; 32],
+            font_path: Some("/f.otf".into()),
+            pixel_size: 16.0,
         });
         dc::with_mut(hdc, |dc| dc.h_font = h_font);
         let mut tm: TextMetricW = unsafe { std::mem::zeroed() };
@@ -6057,8 +6073,12 @@ mod a6d_font_tests {
     fn get_text_metrics_no_truetype_flag_fon() {
         let hdc = 0x6000_00A5;
         let h_font = objects::alloc(GdiKind::Font {
-            height: -16, weight: 400, italic: false,
-            face: [0u16; 32], font_path: Some("/f.fon".into()), pixel_size: 16.0,
+            height: -16,
+            weight: 400,
+            italic: false,
+            face: [0u16; 32],
+            font_path: Some("/f.fon".into()),
+            pixel_size: 16.0,
         });
         dc::with_mut(hdc, |dc| dc.h_font = h_font);
         let mut tm: TextMetricW = unsafe { std::mem::zeroed() };
@@ -6098,15 +6118,32 @@ mod a6d_font_tests {
             face[i] = c;
         }
         let lf = LogFontW {
-            lf_height: -16, lf_width: 0, lf_escapement: 0, lf_orientation: 0,
-            lf_weight: 700, lf_italic: 0, lf_underline: 0, lf_strike_out: 0,
-            lf_char_set: 0, lf_out_precision: 0, lf_clip_precision: 0,
-            lf_quality: 0, lf_pitch_and_family: 0, lf_face_name: face,
+            lf_height: -16,
+            lf_width: 0,
+            lf_escapement: 0,
+            lf_orientation: 0,
+            lf_weight: 700,
+            lf_italic: 0,
+            lf_underline: 0,
+            lf_strike_out: 0,
+            lf_char_set: 0,
+            lf_out_precision: 0,
+            lf_clip_precision: 0,
+            lf_quality: 0,
+            lf_pitch_and_family: 0,
+            lf_face_name: face,
         };
         let h_font = unsafe { create_font_indirect_w(&lf) };
         assert!(h_font != 0);
         objects::get(h_font, |kind| {
-            if let GdiKind::Font { height, weight, italic, pixel_size, .. } = kind {
+            if let GdiKind::Font {
+                height,
+                weight,
+                italic,
+                pixel_size,
+                ..
+            } = kind
+            {
                 assert_eq!(*height, -16);
                 assert_eq!(*weight, 700);
                 assert!(!italic);
@@ -6122,8 +6159,12 @@ mod a6d_font_tests {
     #[test]
     fn delete_font_object_does_not_segfault() {
         let h = objects::alloc(GdiKind::Font {
-            height: -13, weight: 400, italic: false,
-            face: [0u16; 32], font_path: None, pixel_size: 13.0,
+            height: -13,
+            weight: 400,
+            italic: false,
+            face: [0u16; 32],
+            font_path: None,
+            pixel_size: 13.0,
         });
         assert!(objects::free(h));
     }
@@ -6132,7 +6173,9 @@ mod a6d_font_tests {
     fn fontpath_read_from_selected_font_in_dc() {
         let hdc = 0x6000_00A8;
         let h_font = objects::alloc(GdiKind::Font {
-            height: -16, weight: 400, italic: false,
+            height: -16,
+            weight: 400,
+            italic: false,
             face: [0u16; 32],
             font_path: Some("/usr/share/fonts/liberation/LiberationSans-Regular.ttf".into()),
             pixel_size: 16.0,

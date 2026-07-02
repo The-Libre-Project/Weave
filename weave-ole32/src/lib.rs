@@ -523,7 +523,7 @@ pub extern "win64" fn co_uninitialize() {
 /// # Safety
 /// `p_apt_type` and `p_apt_qualifier` must be valid writable i32 pointers.
 // Wine ref: dlls/combase/apartment.c — reads per-thread state; CO_E_NOTINITIALIZED if no apt.
-pub extern "win64" fn co_get_apartment_type(
+pub unsafe extern "win64" fn co_get_apartment_type(
     p_apt_type: *mut i32,
     p_apt_qualifier: *mut i32,
 ) -> u32 {
@@ -1090,7 +1090,7 @@ fn log_cross_apartment_diagnostic() {
 /// Phase A stub — returns E_NOTIMPL.
 // Wine ref: dlls/ole32/marshal.c — creates a stream and marshals the interface
 // into it via CoMarshalInterface; we return E_NOTIMPL for now.
-pub extern "win64" fn co_marshal_inter_thread_interface_in_stream(
+pub unsafe extern "win64" fn co_marshal_inter_thread_interface_in_stream(
     _riid: *const u8,
     _punk: usize,
     _pp_stm: *mut usize,
@@ -1102,7 +1102,7 @@ pub extern "win64" fn co_marshal_inter_thread_interface_in_stream(
 /// Phase A stub — returns E_NOTIMPL.
 // Wine ref: dlls/ole32/marshal.c — unmarshal via CoUnmarshalInterface, then
 // release the stream; we return E_NOTIMPL.
-pub extern "win64" fn co_get_interface_and_release_stream(
+pub unsafe extern "win64" fn co_get_interface_and_release_stream(
     _p_stm: usize,
     _riid: *const u8,
     _ppv: *mut usize,
@@ -1762,7 +1762,7 @@ mod tests {
         co_uninitialize();
         let mut apt_type: i32 = -1;
         let mut apt_qual: i32 = -1;
-        let hr = co_get_apartment_type(&mut apt_type, &mut apt_qual);
+        let hr = unsafe { co_get_apartment_type(&mut apt_type, &mut apt_qual) };
         assert_eq!(hr, CO_E_NOTINITIALIZED);
         // Re-init should succeed with S_OK (fresh state)
         assert_eq!(co_initialize_ex(0, COINIT_MULTITHREADED), S_OK);
@@ -1826,7 +1826,7 @@ mod tests {
         let mut apt_type: i32 = -1;
         let mut apt_qual: i32 = -1;
         co_initialize_ex(0, COINIT_APARTMENTTHREADED);
-        let hr = co_get_apartment_type(&mut apt_type, &mut apt_qual);
+        let hr = unsafe { co_get_apartment_type(&mut apt_type, &mut apt_qual) };
         assert_eq!(hr, S_OK);
         assert_eq!(apt_type, APTTYPE_STA);
         assert_eq!(apt_qual, APTTYPEQUALIFIER_NONE);
@@ -1839,7 +1839,7 @@ mod tests {
         let mut apt_type: i32 = -1;
         let mut apt_qual: i32 = -1;
         co_initialize_ex(0, COINIT_MULTITHREADED);
-        let hr = co_get_apartment_type(&mut apt_type, &mut apt_qual);
+        let hr = unsafe { co_get_apartment_type(&mut apt_type, &mut apt_qual) };
         assert_eq!(hr, S_OK);
         assert_eq!(apt_type, APTTYPE_MTA);
         assert_eq!(apt_qual, APTTYPEQUALIFIER_NONE);
@@ -1849,7 +1849,7 @@ mod tests {
     #[test]
     fn co_get_apartment_type_null_returns_invalidarg() {
         assert_eq!(
-            co_get_apartment_type(std::ptr::null_mut(), std::ptr::null_mut()),
+            unsafe { co_get_apartment_type(std::ptr::null_mut(), std::ptr::null_mut()) },
             E_INVALIDARG
         );
     }
@@ -1860,7 +1860,7 @@ mod tests {
         let mut apt_type: i32 = -1;
         let mut apt_qual: i32 = -1;
         assert_eq!(
-            co_get_apartment_type(&mut apt_type, &mut apt_qual),
+            unsafe { co_get_apartment_type(&mut apt_type, &mut apt_qual) },
             CO_E_NOTINITIALIZED
         );
     }

@@ -43,9 +43,11 @@ struct sock_fprog {
 /// read=0, write=1, close=3, mmap=9, mprotect=10, munmap=11, brk=12,
 /// rt_sigaction=13, rt_sigprocmask=14, sigreturn=15, getpid=39, exit=60,
 /// gettid=186, futex=202, restart_syscall=219, clock_gettime=228,
-/// exit_group=231, openat=257
-const BASE_SYSCALLS: [u32; 18] = [
-    0, 1, 3, 9, 10, 11, 12, 13, 14, 15, 39, 60, 186, 202, 219, 228, 231, 257,
+/// exit_group=231, openat=257,
+/// landlock_create_ruleset=444, landlock_add_rule=445, landlock_restrict_self=446
+/// (Linux 5.13+, needed by weave_sandbox::apply after seccomp is active)
+const BASE_SYSCALLS: [u32; 21] = [
+    0, 1, 3, 9, 10, 11, 12, 13, 14, 15, 39, 60, 186, 202, 219, 228, 231, 257, 444, 445, 446,
 ];
 
 /// Per-app syscall additions registry.
@@ -190,7 +192,7 @@ pub fn build_app_filter(_app: &str, additions: &[i64]) -> Vec<sock_filter> {
 pub fn apply_seccomp(exe_name: &str) -> Result<(), String> {
     #[cfg(target_os = "linux")]
     {
-        return apply_seccomp_inner(exe_name);
+        apply_seccomp_inner(exe_name)
     }
 
     #[cfg(not(target_os = "linux"))]
