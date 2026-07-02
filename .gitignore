@@ -108,3 +108,6 @@ docs/archived-milestones/*
 docs/sprint-briefs/*
 !docs/sprint-briefs/*.md
 .deepseek/
+
+# Allow audit reports
+!docs/stub-hit-audit-*.md
