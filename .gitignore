@@ -109,5 +109,6 @@ docs/sprint-briefs/*
 !docs/sprint-briefs/*.md
 .deepseek/
 
-# Allow audit reports
+# Allow audit reports and security docs
 !docs/stub-hit-audit-*.md
+!docs/SECURITY_AUDIT.md
