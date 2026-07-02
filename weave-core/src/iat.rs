@@ -57,7 +57,9 @@ extern "win64" fn trace_slot_log_by_va(
             } else {
                 let (dll, func) = name.split_once("::").unwrap_or((name, ""));
                 let phase = if is_stub(dll, func) { "A" } else { "B" };
-                eprintln!("weave/iat-trace: [{phase}] {name} ret={ret_addr:#x} ret1={caller_ret_addr:#x}");
+                eprintln!(
+                    "weave/iat-trace: [{phase}] {name} ret={ret_addr:#x} ret1={caller_ret_addr:#x}"
+                );
             }
             return *real_fn;
         }

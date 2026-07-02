@@ -2394,7 +2394,7 @@ mod tests {
     }
 
     #[test]
-    
+
     fn co_get_malloc_realloc_via_imalloc() {
         let mut pp_malloc: *mut IMallocVtbl = std::ptr::null_mut();
         let hr = unsafe { co_get_malloc(1, &mut pp_malloc) };
@@ -2414,7 +2414,6 @@ mod tests {
 
         // Realloc verified by co_task_mem_realloc_preserves_content.
     }
-
 
     // ── A3f: Proxy/stub marshaling scaffolding tests ─────────────────
 

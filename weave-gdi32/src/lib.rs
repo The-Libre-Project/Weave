@@ -1408,8 +1408,18 @@ pub extern "win64" fn stretch_blt(
         let bmp_h = dc::with(hdc_dest, |dc| dc.selected_bitmap);
         if bmp_h != 0 {
             let _ = objects::get(bmp_h, |kind| match kind {
-                objects::GdiKind::DibSection { width: _, height: _, bits_ptr, .. }
-                | objects::GdiKind::Bitmap { width: _, height: _, bits_ptr, .. } => {
+                objects::GdiKind::DibSection {
+                    width: _,
+                    height: _,
+                    bits_ptr,
+                    ..
+                }
+                | objects::GdiKind::Bitmap {
+                    width: _,
+                    height: _,
+                    bits_ptr,
+                    ..
+                } => {
                     if *bits_ptr != 0 {
                         let dst_stride = abs_w_dest * 4;
                         for row in 0..abs_h_dest {
@@ -2133,7 +2143,15 @@ pub unsafe extern "win64" fn set_dib_bits_to_device(
         if bitmap_h == 0 {
             return 0;
         }
-        return set_dib_bits(hdc, bitmap_h, start_scan, lines as u32, lp_v_bits, lpbmi, color_use);
+        return set_dib_bits(
+            hdc,
+            bitmap_h,
+            start_scan,
+            lines as u32,
+            lp_v_bits,
+            lpbmi,
+            color_use,
+        );
     }
 
     // Upload width is the lesser of w and abs_width — Wine intersects against
