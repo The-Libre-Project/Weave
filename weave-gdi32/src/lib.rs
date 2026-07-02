@@ -1405,7 +1405,27 @@ pub extern "win64" fn stretch_blt(
     // "put rect at offset" backend entry point.
     let dst_draw = dc::with(hdc_dest, |dc| dc.drawable());
     if dst_draw.0 == 0 {
-        return 0;
+        let bmp_h = dc::with(hdc_dest, |dc| dc.selected_bitmap);
+        if bmp_h != 0 {
+            let _ = objects::get(bmp_h, |kind| match kind {
+                objects::GdiKind::DibSection { width: _, height: _, bits_ptr, .. }
+                | objects::GdiKind::Bitmap { width: _, height: _, bits_ptr, .. } => {
+                    if *bits_ptr != 0 {
+                        let dst_stride = abs_w_dest * 4;
+                        for row in 0..abs_h_dest {
+                            unsafe {
+                                let s = &scratch[row * dst_stride..(row + 1) * dst_stride];
+                                let d = (*bits_ptr + row * dst_stride) as *mut u8;
+                                std::ptr::copy_nonoverlapping(s.as_ptr(), d, dst_stride);
+                            }
+                        }
+                    }
+                    true
+                }
+                _ => false,
+            });
+        }
+        return 1;
     }
 
     let scratch_ptr = scratch.as_ptr() as usize;
@@ -2109,7 +2129,11 @@ pub unsafe extern "win64" fn set_dib_bits_to_device(
     // Resolve destination drawable.
     let dst_draw = dc::with(hdc, |dc| dc.drawable());
     if dst_draw.0 == 0 {
-        return 0;
+        let bitmap_h = dc::with(hdc, |dc| dc.selected_bitmap);
+        if bitmap_h == 0 {
+            return 0;
+        }
+        return set_dib_bits(hdc, bitmap_h, start_scan, lines as u32, lp_v_bits, lpbmi, color_use);
     }
 
     // Upload width is the lesser of w and abs_width — Wine intersects against
