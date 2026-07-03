@@ -1,10 +1,14 @@
 # Contributing to Weave
 
-Weave is open source for transparency and security auditability. The full codebase, commit history, and architecture are public under GPL-3.0.
+Weave is open source for transparency and security auditability. The full codebase, commit history, and architecture are public under GPL-3.0. Read it, audit it, fork it.
 
-**We are not accepting external code contributions at this time.**
+**Weave does not accept external code contributions.** This is deliberate, not a lack of capacity.
 
-If you have found a security issue, see [SECURITY.md](SECURITY.md) for the disclosure process. Bug reports and questions are welcome via GitHub Issues.
+Weave is agent-assisted software. Raw code is not the scarce resource — judgment, verification, and behavioral correctness against a moving reference are. Merging outside code would add review and provenance burden without moving Weave toward its goal, and it would compromise the clean-room guarantee below: the value of an independent reimplementation is that we can account for the origin of every line. The project is built to finish, not to accumulate contributors.
+
+If you have found a security issue, see [SECURITY.md](SECURITY.md) for the disclosure process. Bug reports and questions are welcome via GitHub Issues — a reproducible report of a Windows app that misbehaves under Weave is worth far more to us than a patch.
+
+If your goals differ from this roadmap, fork it. That is what GPL-3.0 is for.
 
 ---
 
