@@ -5,7 +5,7 @@
   </picture>
 </p>
 
-# Weave
+<h1 align="center"><strong>Weave</strong></h1>
 
 **A Rust-native Windows compatibility layer for Linux. Built from scratch, not from Wine, and deliberately an order of magnitude smaller.**
 
