@@ -1,3 +1,10 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/Weave-badge-DARK.png">
+    <img alt="Weave" src="docs/Weave-badge-LIGHT.png">
+  </picture>
+</p>
+
 # Weave
 
 **A Rust-native Windows compatibility layer for Linux. Built from scratch, not from Wine, and deliberately an order of magnitude smaller.**
