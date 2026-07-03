@@ -13,8 +13,6 @@ Weave is an independent Rust reimplementation of the Win32 API surface, behavior
 
 Licensed under GPL-3.0. Open for security auditing, research, and fork-under-GPL. Not accepting code contributions at this time (see [Contributing](#contributing)).
 
-> **Platform support:** Weave is developed and tested against [LibreWin-OS](https://github.com/The-Libre-Project/LibreWin-OS) — a Fedora-based distribution that ships it as the native Windows compat layer. The code compiles and runs on stock Linux (Fedora, Ubuntu, Arch, etc.), but that is a natural consequence of the architecture, not a supported configuration. We do not test against, package for, or verify behavior on any distribution outside our own ISO builds. If you install it elsewhere, you're working without a net. Contributions are welcome; bug reports from non-LibreWin environments will be accepted but prioritized accordingly.
-
 > **New here?** Read the [architecture paper](docs/published-papers/ARCHITECTURE.md) for how Weave works and why it is so much smaller than Wine. For honest, per-phase status, see [ROADMAP.md](ROADMAP.md). This README is the engineering front matter: what exists today, how the repo is laid out, and how to build it.
 
 ---
