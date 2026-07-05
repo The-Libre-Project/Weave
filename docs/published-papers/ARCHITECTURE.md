@@ -230,7 +230,7 @@ The one hard rule: **never access proprietary Windows source**, meaning leaked s
 
 Wine's value to Weave is its 30 years of reverse engineering: it documents what every Win32 function actually does, including the undocumented behaviors real apps depend on. The obstacle is volume. Wine is roughly 12 million lines of C across thousands of files. Reading it conventionally burns context and tokens at an unsustainable rate.
 
-Weave uses MCP-based symbolic indexing (jcodemunch) that parses the reference trees with AST analysis and indexes every function, struct, and symbol into a queryable local database. Instead of reading a whole file, a developer or agent queries by symbol name and retrieves just that function.
+Weave uses MCP-based symbolic indexing that parses the reference trees with AST analysis and indexes every function, struct, and symbol into a queryable local database. Instead of reading a whole file, a developer or agent queries by symbol name and retrieves just that function.
 
 | Operation | Without indexing | With symbolic indexing |
 |---|---|---|
