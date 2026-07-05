@@ -80,8 +80,9 @@ docs/*
 !docs/ERA3-ROADMAP.md
 !docs/UNSAFE-AUDIT.md
 !docs/SHIM-CONTRACT.md
-!docs/ARCHITECTURE.md
-!docs/CLEAN-ROOM.md
+!docs/published-papers/
+docs/published-papers/*
+!docs/published-papers/*.md
 !docs/POINTERS.tsv
 !docs/POINTERS.md
 !docs/SHIM-CONTRACT-CASEBOOK.md

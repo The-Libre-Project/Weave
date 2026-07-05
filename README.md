@@ -88,7 +88,7 @@ The runtime has two always-active layers: **Weave Native** (API translation, map
 
 APIs are not copyrightable (*Oracle v. Google*, 2021). Weave is an independent reimplementation: Wine's 30 years of reverse engineering is consulted as a behavioral reference for *what* each Win32 function must do, including the undocumented edges real apps depend on, but **no Wine code is copied**. Every implementation is original Rust, written from a behavioral spec derived from MSDN, Wine and ReactOS references, and black-box testing on real Windows. The `// Wine ref:` comments embedded throughout the codebase are explicit receipts of this reference process — they document exactly which Wine function was consulted for each implementation.
 
-The one hard rule: **never access proprietary Windows source** (leaked source, decompiled or disassembled binaries). The full reference policy, IP boundaries, and per-function documentation standard are in [docs/REFERENCE-FIRST.md](docs/REFERENCE-FIRST.md).
+The one hard rule: **never access proprietary Windows source** (leaked source, decompiled or disassembled binaries). The full reference policy, IP boundaries, and per-function documentation standard are in [docs/published-papers/REFERENCE-FIRST.md](docs/published-papers/REFERENCE-FIRST.md).
 
 ---
 
