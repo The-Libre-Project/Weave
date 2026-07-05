@@ -1,7 +1,7 @@
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="images/Weave-badge-DARK.png">
-    <img alt="Weave" src="images/Weave-badge-LIGHT.png">
+    <source media="(prefers-color-scheme: dark)" srcset="images/Weave-Banner-DARK.png">
+    <img alt="Weave" src="images/Weave-Banner-LIGHT.png">
   </picture>
 </p>
 
