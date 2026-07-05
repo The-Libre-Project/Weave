@@ -5,8 +5,6 @@
   </picture>
 </p>
 
-<h1 align="center"><strong>Weave</strong></h1>
-
 **A Rust-native Windows compatibility layer for Linux. Built from scratch, not from Wine, and deliberately an order of magnitude smaller.**
 
 Weave is an independent Rust reimplementation of the Win32 API surface, behaviorally referenced against Wine. The Windows API is the dominant application binary interface on the planet: billions of devices, decades of software, and no open implementation that is memory-safe, sandboxed by default, or auditable at a fraction of the legacy codebase's complexity. Weave is that implementation, built to give Linux-based operating systems a secure, maintainable, freedom-respecting path to Windows application compatibility.
