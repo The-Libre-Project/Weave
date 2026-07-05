@@ -18431,8 +18431,8 @@ pub unsafe extern "win64" fn set_comm_timeouts(_h_file: usize, _lp_comm_timeouts
 
 // ── Signal gap-fill: missing kernel32 stubs ───────────────────────────────────
 //
-// jcodemunch unavailable — Phase A stubs only, safe sentinel returns.
-// Wine ref comments deferred to jcodemunch-available session.
+// reference index unavailable — Phase A stubs only, safe sentinel returns.
+// Wine ref comments deferred to reference-indexer-available session.
 
 // ── Thread / Process stubs ─────────────────────────────────────────────────────
 
@@ -19149,8 +19149,8 @@ pub unsafe extern "win64" fn query_process_cycle_time(
 
 // ── Signal gap-fill 2: remaining 73 kernel32 stubs ──────────────────────────
 //
-// jcodemunch unavailable — Phase A stubs only, safe sentinel returns.
-// Wine ref comments deferred to jcodemunch-available session.
+// reference index unavailable — Phase A stubs only, safe sentinel returns.
+// Wine ref comments deferred to reference-indexer-available session.
 
 // ── Process/Job stubs ─────────────────────────────────────────────────────────
 

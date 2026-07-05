@@ -1505,8 +1505,8 @@ pub unsafe extern "win64" fn wave_out_get_error_text_w(
 
 // ── Signal gap-fill: MIDI stubs ───────────────────────────────────────────────
 //
-// jcodemunch unavailable — Phase A stubs only, safe sentinel returns.
-// Wine ref comments deferred to jcodemunch-available session.
+// reference index unavailable — Phase A stubs only, safe sentinel returns.
+// Wine ref comments deferred to reference-indexer-available session.
 
 const MMSYSERR_NOERROR: u32 = 0;
 const MMSYSERR_NODRIVER: u32 = 6;

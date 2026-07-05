@@ -558,7 +558,7 @@ pub unsafe extern "win64" fn sh_get_path_from_id_list_ex(
 /// # Safety
 /// `psf` is unused. `pidl` must be null or a valid PIDL. `pv` must point to
 /// a buffer of at least `cb` bytes.
-// Wine ref: dlls/shell32/shlfolder.c — SHGetDataFromIDListW dispatches by format (ref hand-written, jcodemunch unavailable).
+// Wine ref: dlls/shell32/shlfolder.c — SHGetDataFromIDListW dispatches by format (ref hand-written, reference index unavailable).
 pub unsafe extern "win64" fn sh_get_data_from_id_list_w(
     _psf: *mut u8,
     pidl: *const u8,

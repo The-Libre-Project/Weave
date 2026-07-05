@@ -14,7 +14,7 @@
 //! # Wine ref provenance
 //! All BCrypt* functions below are documented in Wine's dlls/bcrypt/bcrypt_main.c
 //! and the bcrypt spec file. bcryptprimitives.dll in real Windows shares the
-//! same export surface — see jcodemunch / Wine reference for individual
+//! same export surface — see the reference index / Wine reference for individual
 //! implementation details.
 
 #![allow(non_snake_case, clippy::missing_safety_doc)]

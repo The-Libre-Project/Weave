@@ -1109,7 +1109,7 @@ fn try_test_irfanview_nav_inject(hwnd: usize) {
 /// If this had revealed a missing arm for WM_USER+SCI custom range or WM_COMMAND
 /// lparam variants, a minimal Phase A stub would be added (with Wine ref).
 ///
-/// Wine ref (consulted via jcodemunch for send dispatch contract):
+/// Wine ref (consulted via the reference index for send dispatch contract):
 ///   dlls/user32/message.c:579 SendMessageW — does NtUserMessageCall + dispatch_send_message
 ///   which ends up calling the target WndProc (our call_wnd_proc equivalent).
 ///   dispatch_send_message (line 550) sets up and calls dispatch_win_proc_params.
@@ -7143,7 +7143,7 @@ pub unsafe extern "win64" fn set_menu_item_info_w(
 /// `lp_buffer` must be null, writable for `n_buffer_max` UTF-16 units (normal
 /// case), or writable for one `LPWSTR` (when `n_buffer_max == 0`).
 // Wine ref: dlls/user32/resource.c::LoadStringW (lines 149-193) — verified via
-// jcodemunch get_symbol_source on local/wine-reference-182107cc:
+// reference index get_symbol_source on local/wine-reference-182107cc:
 //   hrsrc = FindResourceW(instance, MAKEINTRESOURCEW((LOWORD(id)>>4)+1), RT_STRING);
 //   p = LockResource(hmem); string_num = resource_id & 0x000f;
 //   for (i = 0; i < string_num; i++) p += *p + 1;
@@ -7295,7 +7295,7 @@ pub unsafe extern "win64" fn load_string_w(
 /// # Safety
 /// `lp_buffer` must be writable for `n_buffer_max` bytes.
 // Wine ref: dlls/user32/resource.c::LoadStringA (lines 198-224) — verified via
-// jcodemunch get_symbol_source on local/wine-reference-182107cc:
+// reference index get_symbol_source on local/wine-reference-182107cc:
 //   if (!buflen) return -1;
 //   hrsrc = FindResourceW(instance, MAKEINTRESOURCEW((LOWORD(id)>>4)+1), RT_STRING);
 //   p = LockResource(hmem); id = resource_id & 0x000f;

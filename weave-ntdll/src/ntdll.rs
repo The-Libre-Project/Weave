@@ -2155,7 +2155,7 @@ unsafe extern "C" fn rtl_raise_exception_impl(
 
 // ── Signal gap-fill: ntdll stubs ──────────────────────────────────────────────
 //
-// jcodemunch unavailable — Phase A stubs only, safe sentinel returns.
+// reference index unavailable — Phase A stubs only, safe sentinel returns.
 
 /// LdrLockLoaderLock: acquire the loader lock.
 ///

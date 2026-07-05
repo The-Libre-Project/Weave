@@ -2096,8 +2096,8 @@ pub unsafe extern "win64" fn ws_fd_is_set(s: usize, set: *const u8) -> i32 {
 
 // ── Signal gap-fill: WS2_32 Phase A stubs ────────────────────────────────────
 //
-// jcodemunch unavailable — Phase A stubs only, safe sentinel returns.
-// Wine ref comments deferred to jcodemunch-available session.
+// reference index unavailable — Phase A stubs only, safe sentinel returns.
+// Wine ref comments deferred to reference-indexer-available session.
 
 // ── AddrInfo family ────────────────────────────────────────────────────────────
 

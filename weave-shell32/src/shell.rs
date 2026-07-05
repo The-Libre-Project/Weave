@@ -461,7 +461,7 @@ pub unsafe extern "win64" fn sh_get_known_folder_path(
 // complete under Xvfb/CI without a blocking folder picker dialog. Production interactive
 // picker (via existing DialogBoxParamW + comctl32 tree) is stretch.
 //
-// jcodemunch MCP server is registered in .mcp.json but not exposed in the current agent
+// reference indexer MCP server is registered in .mcp.json but not exposed in the current agent
 // harness (CallMcpTool and sub-agents only see cursor-app-control + cursor-ide-browser).
 // Pre-existing audited Wine refs (brsfolder.c) from M8 are accepted per operator choice #1
 // (2026-06-08) rather than reconstructing from memory.
@@ -1079,7 +1079,7 @@ pub unsafe extern "win64" fn extract_icon_ex_w(
 ///
 /// # Safety
 /// `lpsz_exe_file_name` must be a valid null-terminated wide string pointer.
-// Wine ref: dlls/shell32/shicon.c — ExtractIconW delegates to ExtractIconExW internally (ref hand-written, jcodemunch unavailable).
+// Wine ref: dlls/shell32/shicon.c — ExtractIconW delegates to ExtractIconExW internally (ref hand-written, reference index unavailable).
 pub unsafe extern "win64" fn extract_icon_w(
     _h_inst: usize,
     lpsz_exe_file_name: *const u16,
