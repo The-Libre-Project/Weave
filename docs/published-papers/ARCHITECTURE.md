@@ -8,7 +8,7 @@ Canonical technical reference for the Weave project. The architectural thesis, t
 
 Weave and Wine solve the same problem (run Windows software on Linux) with opposite architectures. Understanding the difference is the whole point of the project.
 
-Wine does not translate Windows calls into Linux calls. It reimplements the entire Windows subsystem stack in userspace on Linux: its own window manager, its own compositor, its own software blitter, its own audio mixer, its own shell, its own registry hive parser, its own OLE infrastructure, its own NT kernel object manager. Each of these is a full operating-system subsystem re-expressed in C. That is why Wine is roughly 6.5 million lines of code and carries the complexity surface of a 30-year-old OS kernel.
+Wine does not translate Windows calls into Linux calls. It reimplements the entire Windows subsystem stack in userspace on Linux: its own window manager, its own compositor, its own software blitter, its own audio mixer, its own shell, its own registry hive parser, its own OLE infrastructure, its own NT kernel object manager. Each of these is a full operating-system subsystem re-expressed in C. That is why Wine is roughly 12 million lines of code and carries the complexity surface of a 30-year-old OS kernel.
 
 This was the correct design in 1993. Linux at the time had no Vulkan, no PipeWire, no Wayland compositor, no namespaces, no Landlock, and no container ecosystem. Wine had to build every Windows subsystem from scratch because there was nothing on the host side to delegate to. The host could not draw a hardware-accelerated triangle, mix audio streams, or sandbox a process, so Wine grew its own implementations of all three.
 
@@ -28,7 +28,7 @@ This is not a value judgment about Wine. Wine's approach was right for its era a
 
 ## 2. The cost model
 
-The architectural leverage of delegation has a direct, measurable consequence: Weave can cover a comparable application surface at roughly 5 to 10 percent of Wine's code volume. This section explains the projection so it can be checked rather than trusted.
+The architectural leverage of delegation has a direct, measurable consequence: Weave can cover a comparable application surface at roughly 2 to 4 percent of Wine's code volume. This section explains the projection so it can be checked rather than trusted.
 
 ### 2.1 The shape of the curve
 
@@ -88,15 +88,15 @@ The numbers come from a component model, not a guess. The current measured figur
 | Stub to implementation | ~1,500 remaining stubs at 30 to 50 lines of real body each | 45K | 60K | 80K |
 | New DLL coverage | 5 to 10 new crates (D2D1, DWrite, deeper OLE32, audio) at ~2K each, or zero if the current set suffices | 0K | 10K | 20K |
 | Application depth | Real-desktop edge cases (file dialog filters, print/CUPS, drag-and-drop, clipboard) added to existing functions | 20K | 30K | 40K |
-| Infrastructure | Bubblewrap, seccomp profiles, CLI, `.desktop` generation, installer | 10K | 12K | 15K |
-| **Total Rust** | | **180K** | **~220K** | **260K** |
-| With docs and tooling | | ~280K | ~330K | ~380K |
+| Infrastructure | IPC system, seccomp profiles, CLI, `.desktop` generation, installer | 12K | 15K | 18K |
+| **Total Rust** | | **182K** | **~222K** | **263K** |
+| With docs and tooling | | ~282K | ~332K | ~383K |
 
 The three reference points on the curve:
 
 - **v1 ship** (10 Tier-1 apps, real-desktop-validated): ~200 to 250K Rust, the midpoint of stub conversion plus application depth.
 - **Stable asymptote** (mature stubs, high-value corpus): ~350 to 450K Rust, full conversion plus all new DLLs and infrastructure.
-- **Completionist asymptote** (obscure one-off APIs): ~500K Rust, still under 11 percent of Wine's 6.5M lines.
+- **Completionist asymptote** (obscure one-off APIs): ~500K Rust, still under 5 percent of Wine's 12M lines.
 
 ### 2.3 The load-bearing assumption
 
@@ -117,8 +117,8 @@ Rust code maps Windows system calls to Linux equivalents. File operations route 
 | Layer | Status |
 |---|---|
 | Filesystem | Implemented. Landlock restricts the guest to its prefix plus bridged user-data directories. Requires Linux 5.13+; skipped with a diagnostic on older kernels. |
-| Process isolation | Roadmap. Bubblewrap plus user namespaces, out-of-process model (Phase 4+). |
-| Syscalls | Roadmap. seccomp filtering, blocked by the current in-process model (Section 6). |
+| Process isolation | Implemented. Out-of-process fork model (E4 arc, shipped 2026-06-30). The guest runs in a forked child process; Win32 API calls are proxied to the host via IPC over Unix domain sockets. |
+| Syscalls | Implemented. seccomp-BPF filter with an 18-syscall allowlist applied in the child process before guest code executes. Per-app syscall additions registered in a manifest. |
 | Network | Roadmap. Per-app network isolation; the guest currently uses the host network stack. |
 | No root required | Implemented. Weave never needs elevated privileges. |
 
@@ -138,7 +138,7 @@ All graphics paths target Vulkan as the common backend:
 - Vulkan is passthrough.
 - GDI and GDI+ render through Cairo/Skia for 2D.
 
-At the time of writing, the only real-desktop-validated graphics path is the SDL software renderer. D3D9 via DXVK is proven in CI but not yet validated on real hardware, and hardware-accelerated games are not yet validated. See the ROADMAP for live status.
+GDI rendering (2D graphics, image display, text rendering) is validated on real desktop hardware (GNOME Wayland, AMD RX 6700 XT). D3D9 via DXVK is proven in CI but not yet validated on real hardware; hardware-accelerated games remain unvalidated on bare metal. See the ROADMAP for live status.
 
 ## 4. Debuggability: the short debug chain
 
@@ -167,7 +167,7 @@ The function lives in a single file, is typically 30 to 60 lines, and does one t
 The practical consequences:
 
 - **Bisection is trivial.** A regression means one function changed behavior, not an RPC handshake or a shared-memory protocol version mismatch.
-- **No cascading state corruption.** Because every DLL runs in the same Rust process under Rust's ownership model, a bug in `gdi32` cannot corrupt `kernel32`'s handle table. They share no mutable state without an explicit typed interface.
+- **No cascading state corruption.** Every DLL crate is an independent module under Rust's ownership model. A bug in `gdi32` cannot corrupt `kernel32`'s handle table. They share no mutable state without an explicit typed interface. Under the out-of-process model (Section 3.2), the guest process boundary adds a further guarantee: guest memory corruption cannot reach host state at all.
 - **No silent degradation.** A narrow function with a wrong flag either works or fails immediately. There is no intermediate degraded state accumulating over hours of runtime.
 
 This simpler surface is structural. It falls out of the architecture: narrow functions calling stable host infrastructure through typed interfaces, with no intermediate daemon, no shared-memory protocol, and no reimplemented subsystem to have bugs in.
@@ -196,13 +196,15 @@ Everything else (`.ssh`, `.config`, `.gnupg`, browser profiles, the rest of the 
 
 Landlock is intentionally simple: path-based allowlisting, no deny rules, no network rules, no syscall filtering. That simplicity is a feature here. The ruleset is small enough to audit by hand (roughly 15 to 20 rules), and the guarantee cannot be dropped by guest code because it is applied before guest execution and cannot be relaxed without privilege escalation.
 
-### 6.2 The seccomp gap (roadmap)
+### 6.2 Out-of-process sandbox (shipped)
 
-seccomp-BPF can restrict which syscalls a process may make. It would be valuable for blocking `reboot`, `kexec_load`, or `bpf` itself. But it interacts poorly with the current in-process model.
+The E4 arc (shipped 2026-06-30) replaces the original in-process execution model with a fork-based architecture. After the PE is loaded and the IAT is patched, Weave forks. The child process applies a seccomp-BPF filter with an 18-syscall allowlist, receives a DRM render-node file descriptor from the host via SCM_RIGHTS, and jumps to the PE entry point. The parent runs the host loop: it reads IPC call messages from the child over a Unix domain socket, dispatches them to the real Win32 API implementations, and sends the result back. The child never calls a real Win32 function directly — every IAT entry points to an IPC stub that serialises the call into a length-prefixed JSON message.
 
-Because the guest PE shares Weave's address space, any seccomp filter must allowlist every syscall Weave's own runtime needs: `mmap`, `write`, `openat`, `read`, `close`, `exit_group`, `futex`, `clock_gettime`, and dozens more. The guest inherits that same allowlist, which makes the filter nearly useless, since every syscall the guest might abuse is also one the host needs.
+This is the **default execution path**. `--no-sandbox` exists for debugging and profiling but is not for production use.
 
-Meaningful syscall isolation requires moving the guest into a separate process with its own filter, with Weave communicating through a controlled interface. That is the Phase 4+ out-of-process redesign (Section 8). Until then the trade-off is explicit: Landlock covers the highest-value isolation (filesystem access to user data), and everything else runs at Weave's privilege level.
+The seccomp allowlist permits only the syscalls the guest needs to run: read, write, close, mmap, mprotect, munmap, brk, rt_sigaction, rt_sigprocmask, sigreturn, getpid, exit, gettid, futex, restart_syscall, clock_gettime, exit_group, and openat. Every other syscall — `reboot`, `kexec_load`, `bpf`, `ptrace`, `mount` — kills the child with SIGSYS. Per-app additions to the allowlist are registered in a manifest; new target apps are audited before additions are made.
+
+Landlock filesystem isolation is applied in both processes after the fork (the host already had it). The combined isolation model is: Landlock restricts filesystem access by path, seccomp restricts the syscall surface by number, and the process boundary prevents guest memory corruption from reaching host state.
 
 ### 6.3 The network gap (roadmap)
 
@@ -210,7 +212,7 @@ Per-app network isolation is not implemented. The guest currently has the same n
 
 ### 6.4 Position relative to Wine
 
-Wine has no sandbox. A Windows app under Wine has full access to the user's home directory, all open sockets, and every syscall the kernel allows the user. Any exploit in the Windows app is an exploit at the user's privilege level. Weave's Landlock layer eliminates the highest-value attack surface today, before any roadmap isolation layer is built. The sandbox is not complete, but it is already strictly stronger than Wine's default posture.
+Wine has no sandbox. A Windows app under Wine has full access to the user's home directory, all open sockets, and every syscall the kernel allows the user. Any exploit in the Windows app is an exploit at the user's privilege level. Weave's default execution path applies Landlock filesystem isolation, seccomp-BPF syscall filtering, and process-boundary isolation on every guest process. The sandbox is not complete (Section 6.3), but it is already structurally stronger than Wine's default posture by three independent mechanisms.
 
 ### 6.5 What Rust buys and what it does not
 
@@ -226,7 +228,7 @@ The one hard rule: **never access proprietary Windows source**, meaning leaked s
 
 ### 7.2 Symbolic compression of the reference corpus
 
-Wine's value to Weave is its 30 years of reverse engineering: it documents what every Win32 function actually does, including the undocumented behaviors real apps depend on. The obstacle is volume. Wine is roughly 10 million lines of C across thousands of files. Reading it conventionally burns context and tokens at an unsustainable rate.
+Wine's value to Weave is its 30 years of reverse engineering: it documents what every Win32 function actually does, including the undocumented behaviors real apps depend on. The obstacle is volume. Wine is roughly 12 million lines of C across thousands of files. Reading it conventionally burns context and tokens at an unsustainable rate.
 
 Weave uses MCP-based symbolic indexing (jcodemunch) that parses the reference trees with AST analysis and indexes every function, struct, and symbol into a queryable local database. Instead of reading a whole file, a developer or agent queries by symbol name and retrieves just that function.
 
@@ -258,7 +260,7 @@ Weave does not maintain a crowd-sourced "anything might work" database in the Wi
 
 Honest engineering names what does not work yet. These require architectural work, not just more stubs.
 
-**The in-process model limits isolation.** seccomp is structurally incompatible with shared-address-space execution (Section 6.2), and a guest crash currently takes down the Weave process. The out-of-process redesign (Phase 4+) is the single largest open architectural problem. It would deliver both syscall isolation and crash isolation.
+**The in-process model (resolved).** The out-of-process redesign (E4 arc, shipped 2026-06-30) closed this. Guest isolation is now delivered through fork + seccomp-BPF + IPC proxy (Section 6.2). A guest crash kills the child process; the host survives. The remaining work in this area is per-app syscall audit (expanding the allowlist for new target apps) and per-app network isolation (Section 6.3).
 
 **Audio is scaffolded but unproven.** PipeWire bindings exist, but no target app has been validated producing audio on real hardware. The decode pipeline (codec to PCM to PipeWire stream) may have latency or format-conversion issues that only real output will reveal.
 

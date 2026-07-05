@@ -24,7 +24,7 @@ Microsoft Learn (MSDN) is the first stop for any function: official signatures, 
 
 ### Secondary: Wine and ReactOS as behavioral references
 
-Wine's roughly 10 million lines of C represent 30 years of reverse engineering. Weave consults it to understand what a function should do, especially for undocumented edge cases MSDN does not cover. ReactOS serves the same role for NT-layer internals. References are queried through jcodemunch, an MCP server that indexes codebases into queryable symbol databases.
+Wine's roughly 12 million lines of C represent 30 years of reverse engineering. Weave consults it to understand what a function should do, especially for undocumented edge cases MSDN does not cover. ReactOS serves the same role for NT-layer internals. References are queried through jcodemunch, an MCP server that indexes codebases into queryable symbol databases.
 
 | Index | Contents | Used for |
 |---|---|---|
