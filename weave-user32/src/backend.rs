@@ -1372,6 +1372,7 @@ mod inner {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn copy_area(
         src: u32,
         dst: u32,

@@ -1,3 +1,4 @@
+#![allow(clippy::missing_safety_doc)]
 use clap::Parser;
 use serde_json::json;
 use std::path::{Component, PathBuf};
@@ -864,7 +865,7 @@ fn ipc_handler(dll: &str, function: &str, args: &[serde_json::Value]) -> Option<
             Some(serde_json::json!(h))
         }
         ("kernel32.dll", "WriteFile") => {
-            let h_file = args.get(0).and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            let h_file = args.first().and_then(|v| v.as_u64()).unwrap_or(0) as usize;
             let buf_data: Vec<u8> =
                 serde_json::from_value(args.get(1).cloned().unwrap_or_default())
                     .unwrap_or_default();
@@ -889,7 +890,7 @@ fn ipc_handler(dll: &str, function: &str, args: &[serde_json::Value]) -> Option<
             Some(serde_json::json!({"ok": ret != 0, "written": written}))
         }
         ("kernel32.dll", "WriteConsoleW") => {
-            let h_console = args.get(0).and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            let h_console = args.first().and_then(|v| v.as_u64()).unwrap_or(0) as usize;
             let buf_data: Vec<u8> =
                 serde_json::from_value(args.get(1).cloned().unwrap_or_default())
                     .unwrap_or_default();
@@ -927,7 +928,7 @@ fn ipc_handler(dll: &str, function: &str, args: &[serde_json::Value]) -> Option<
         // ── user32.dll — message loop and window lifecycle ─────────────────
         ("user32.dll", "RegisterClassExW") => {
             let wc: WndClassExW = args
-                .get(0)
+                .first()
                 .and_then(|v| weave_ipc::value_to_struct(v).ok())?;
             let addr = resolve("user32.dll", "RegisterClassExW")?;
             let func: unsafe extern "win64" fn(*const WndClassExW) -> u16 =
@@ -936,7 +937,7 @@ fn ipc_handler(dll: &str, function: &str, args: &[serde_json::Value]) -> Option<
             Some(json!(atom))
         }
         ("user32.dll", "CreateWindowExW") => {
-            let exs = args.get(0).and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+            let exs = args.first().and_then(|v| v.as_u64()).unwrap_or(0) as u32;
             let cls = args.get(1).and_then(|v| v.as_str()).unwrap_or("");
             let title = args.get(2).and_then(|v| v.as_str()).unwrap_or("");
             let style = args.get(3).and_then(|v| v.as_u64()).unwrap_or(0) as u32;
@@ -985,20 +986,20 @@ fn ipc_handler(dll: &str, function: &str, args: &[serde_json::Value]) -> Option<
             Some(json!(hwnd))
         }
         ("user32.dll", "ShowWindow") => {
-            let h_wnd = args.get(0).and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            let h_wnd = args.first().and_then(|v| v.as_u64()).unwrap_or(0) as usize;
             let c = args.get(1).and_then(|v| v.as_i64()).unwrap_or(0) as i32;
             let addr = resolve("user32.dll", "ShowWindow")?;
             let func: extern "win64" fn(usize, i32) -> i32 = unsafe { std::mem::transmute(addr) };
             Some(json!(func(h_wnd, c)))
         }
         ("user32.dll", "UpdateWindow") => {
-            let h_wnd = args.get(0).and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            let h_wnd = args.first().and_then(|v| v.as_u64()).unwrap_or(0) as usize;
             let addr = resolve("user32.dll", "UpdateWindow")?;
             let func: extern "win64" fn(usize) -> i32 = unsafe { std::mem::transmute(addr) };
             Some(json!(func(h_wnd)))
         }
         ("user32.dll", "GetMessageW") => {
-            let h_wnd = args.get(0).and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            let h_wnd = args.first().and_then(|v| v.as_u64()).unwrap_or(0) as usize;
             let lo = args.get(1).and_then(|v| v.as_u64()).unwrap_or(0) as u32;
             let hi = args.get(2).and_then(|v| v.as_u64()).unwrap_or(0) as u32;
             let addr = resolve("user32.dll", "GetMessageW")?;
@@ -1009,7 +1010,7 @@ fn ipc_handler(dll: &str, function: &str, args: &[serde_json::Value]) -> Option<
             Some(json!({"ret": ret, "msg": weave_ipc::struct_to_value(&msg)}))
         }
         ("user32.dll", "PeekMessageW") => {
-            let h_wnd = args.get(0).and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            let h_wnd = args.first().and_then(|v| v.as_u64()).unwrap_or(0) as usize;
             let lo = args.get(1).and_then(|v| v.as_u64()).unwrap_or(0) as u32;
             let hi = args.get(2).and_then(|v| v.as_u64()).unwrap_or(0) as u32;
             let rm = args.get(3).and_then(|v| v.as_u64()).unwrap_or(0) as u32;
@@ -1022,7 +1023,7 @@ fn ipc_handler(dll: &str, function: &str, args: &[serde_json::Value]) -> Option<
         }
         ("user32.dll", "TranslateMessage") => {
             let msg: Msg = args
-                .get(0)
+                .first()
                 .and_then(|v| weave_ipc::value_to_struct(v).ok())?;
             let addr = resolve("user32.dll", "TranslateMessage")?;
             let func: unsafe extern "win64" fn(*const Msg) -> i32 =
@@ -1031,7 +1032,7 @@ fn ipc_handler(dll: &str, function: &str, args: &[serde_json::Value]) -> Option<
         }
         ("user32.dll", "DispatchMessageW") => {
             let msg: Msg = args
-                .get(0)
+                .first()
                 .and_then(|v| weave_ipc::value_to_struct(v).ok())?;
             let addr = resolve("user32.dll", "DispatchMessageW")?;
             let func: unsafe extern "win64" fn(*const Msg) -> isize =
@@ -1039,7 +1040,7 @@ fn ipc_handler(dll: &str, function: &str, args: &[serde_json::Value]) -> Option<
             Some(json!(unsafe { func(&msg) }))
         }
         ("user32.dll", "DefWindowProcW") => {
-            let h = args.get(0).and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            let h = args.first().and_then(|v| v.as_u64()).unwrap_or(0) as usize;
             let m = args.get(1).and_then(|v| v.as_u64()).unwrap_or(0) as u32;
             let wp = args.get(2).and_then(|v| v.as_u64()).unwrap_or(0) as usize;
             let lp = args.get(3).and_then(|v| v.as_i64()).unwrap_or(0) as isize;
@@ -1049,20 +1050,20 @@ fn ipc_handler(dll: &str, function: &str, args: &[serde_json::Value]) -> Option<
             Some(json!(func(h, m, wp, lp)))
         }
         ("user32.dll", "GetDC") => {
-            let h = args.get(0).and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            let h = args.first().and_then(|v| v.as_u64()).unwrap_or(0) as usize;
             let addr = resolve("user32.dll", "GetDC")?;
             let func: extern "win64" fn(usize) -> usize = unsafe { std::mem::transmute(addr) };
             Some(json!(func(h)))
         }
         ("user32.dll", "ReleaseDC") => {
-            let h = args.get(0).and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            let h = args.first().and_then(|v| v.as_u64()).unwrap_or(0) as usize;
             let dc = args.get(1).and_then(|v| v.as_u64()).unwrap_or(0) as usize;
             let addr = resolve("user32.dll", "ReleaseDC")?;
             let func: extern "win64" fn(usize, usize) -> i32 = unsafe { std::mem::transmute(addr) };
             Some(json!(func(h, dc)))
         }
         ("user32.dll", "GetClientRect") => {
-            let h = args.get(0).and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            let h = args.first().and_then(|v| v.as_u64()).unwrap_or(0) as usize;
             let addr = resolve("user32.dll", "GetClientRect")?;
             type GcrFn = unsafe extern "win64" fn(usize, *mut weave_user32::defs::Rect) -> i32;
             let func: GcrFn = unsafe { std::mem::transmute(addr) };
@@ -1071,26 +1072,26 @@ fn ipc_handler(dll: &str, function: &str, args: &[serde_json::Value]) -> Option<
             Some(json!({"ret": ret, "rect": weave_ipc::struct_to_value(&rect)}))
         }
         ("user32.dll", "DestroyWindow") => {
-            let h = args.get(0).and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            let h = args.first().and_then(|v| v.as_u64()).unwrap_or(0) as usize;
             let addr = resolve("user32.dll", "DestroyWindow")?;
             let func: extern "win64" fn(usize) -> i32 = unsafe { std::mem::transmute(addr) };
             Some(json!(func(h)))
         }
         ("user32.dll", "PostQuitMessage") => {
-            let code = args.get(0).and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+            let code = args.first().and_then(|v| v.as_i64()).unwrap_or(0) as i32;
             let addr = resolve("user32.dll", "PostQuitMessage")?;
             let func: extern "win64" fn(i32) = unsafe { std::mem::transmute(addr) };
             func(code);
             Some(json!(0))
         }
         ("user32.dll", "GetSystemMetrics") => {
-            let idx = args.get(0).and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+            let idx = args.first().and_then(|v| v.as_i64()).unwrap_or(0) as i32;
             let addr = resolve("user32.dll", "GetSystemMetrics")?;
             let func: extern "win64" fn(i32) -> i32 = unsafe { std::mem::transmute(addr) };
             Some(json!(func(idx)))
         }
         ("user32.dll", "SetCursor") => {
-            let c = args.get(0).and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            let c = args.first().and_then(|v| v.as_u64()).unwrap_or(0) as usize;
             let addr = resolve("user32.dll", "SetCursor")?;
             let func: extern "win64" fn(usize) -> usize = unsafe { std::mem::transmute(addr) };
             Some(json!(func(c)))

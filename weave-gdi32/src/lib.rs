@@ -105,6 +105,7 @@ fn logfont_height_to_px(lf_height: i32) -> f32 {
 }
 
 /// Build the LOGFONTW fields that CreateFontW and CreateFontIndirectW share.
+#[allow(clippy::too_many_arguments)]
 fn build_font_gdi_kind(
     lf_height: i32,
     lf_width: i32,
@@ -2144,13 +2145,7 @@ pub unsafe extern "win64" fn set_dib_bits_to_device(
             return 0;
         }
         return set_dib_bits(
-            hdc,
-            bitmap_h,
-            start_scan,
-            lines as u32,
-            lp_v_bits,
-            lpbmi,
-            color_use,
+            hdc, bitmap_h, start_scan, lines, lp_v_bits, lpbmi, color_use,
         );
     }
 
@@ -2270,12 +2265,15 @@ pub unsafe extern "win64" fn get_text_metrics_w(hdc: usize, lptm: *mut TextMetri
 
     // Determine pitch & family flags.
     // TMPF_TRUETYPE = 0x04 when the selected font is a TrueType/OpenType face.
-    let tt_flag: u8 = font_path_str
+    let tt_flag: u8 = if font_path_str
         .as_deref()
         .map(is_truetype_font)
         .unwrap_or(false)
-        .then_some(0x04u8)
-        .unwrap_or(0);
+    {
+        0x04
+    } else {
+        0
+    };
     // FF_DONTCARE = 0x00 (shifted left 4 bits) — appropriate for most cases.
     let pitch_and_family: u8 = 0x01 | tt_flag; // TMPF_FIXED_PITCH | (TT if applicable)
 

@@ -374,26 +374,16 @@ mod tests {
     use std::path::PathBuf;
 
     #[test]
-    fn z_drive_relative_wildcard_resolves_to_cwd() {
+    fn z_drive_relative_paths_resolve_to_cwd() {
         let tmp = env::temp_dir().join(format!("weave_z_rel_{}", std::process::id()));
-        fs::create_dir_all(&tmp).unwrap();
-        env::set_current_dir(&tmp).unwrap();
-        let cwd = env::current_dir().unwrap();
-
-        let resolved = translate_win_path(r"Z:.\*.*").unwrap();
-        assert_eq!(resolved.parent().unwrap(), cwd);
-        assert_eq!(resolved.file_name().unwrap().to_string_lossy(), "*.*");
-
-        let _ = fs::remove_dir_all(&tmp);
-    }
-
-    #[test]
-    fn z_drive_relative_plugins_path_resolves_to_cwd() {
-        let tmp = env::temp_dir().join(format!("weave_z_plugins_{}", std::process::id()));
         let plugins = tmp.join("Plugins");
         fs::create_dir_all(&plugins).unwrap();
         env::set_current_dir(&tmp).unwrap();
         let cwd = env::current_dir().unwrap();
+
+        let wildcard = translate_win_path(r"Z:.\*.*").unwrap();
+        assert_eq!(wildcard.parent().unwrap(), cwd);
+        assert_eq!(wildcard.file_name().unwrap().to_string_lossy(), "*.*");
 
         let resolved = translate_win_path(r"Z:Plugins\OptiPNG.dll").unwrap();
         assert_eq!(resolved, cwd.join("Plugins/OptiPNG.dll"));
