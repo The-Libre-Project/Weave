@@ -11,7 +11,7 @@ Weave is an independent Rust reimplementation of the Win32 API surface, behavior
 
 Licensed under GPL-3.0. Open for security auditing, research, and fork-under-GPL. Not accepting code contributions at this time (see [Contributing](#contributing)).
 
-> **New here?** Read the [architecture paper](docs/published-papers/ARCHITECTURE.md) for how Weave works and why it is so much smaller than Wine. For honest, per-phase status, see [ROADMAP.md](ROADMAP.md). This README is the engineering front matter: what exists today, how the repo is laid out, and how to build it.
+> **New here?** Read the [architecture paper](https://irontreesoftware.com/weave/architecture.html) for how Weave works and why it is so much smaller than Wine. For honest, per-phase status and the supported-app list, see [the Weave project site](https://irontreesoftware.com/weave/). This README is the engineering front matter: what exists today, how the repo is laid out, and how to build it.
 
 ---
 
