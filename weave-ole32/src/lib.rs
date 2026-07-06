@@ -2482,21 +2482,30 @@ mod tests {
 
     #[test]
     fn co_register_ps_clsid_overwrite() {
-        // Register IID_A → CLSID_A
-        let hr = unsafe { co_register_ps_clsid(PS_CLSID_A.as_ptr(), PS_IID_A.as_ptr()) };
+        // Use a unique IID so this test does not race with
+        // co_register_ps_clsid_roundtrip (both share the process-wide table).
+        let overwrite_iid: [u8; 16] = [
+            0xBB, 0xBB, 0xBB, 0xBB, 0xBB, 0xBB, 0xBB, 0xBB, 0xBB, 0xBB, 0xBB, 0xBB, 0xBB, 0xBB,
+            0xBB, 0xBB,
+        ];
+        let clsid_a: [u8; 16] = [
+            0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11,
+            0x11, 0x11,
+        ];
+        let hr = unsafe { co_register_ps_clsid(clsid_a.as_ptr(), overwrite_iid.as_ptr()) };
         assert_eq!(hr, S_OK);
 
-        // Register IID_A → different CLSID
+        // Register same IID → different CLSID
         let clsid_b: [u8; 16] = [
             0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22,
             0x22, 0x22,
         ];
-        let hr = unsafe { co_register_ps_clsid(clsid_b.as_ptr(), PS_IID_A.as_ptr()) };
+        let hr = unsafe { co_register_ps_clsid(clsid_b.as_ptr(), overwrite_iid.as_ptr()) };
         assert_eq!(hr, S_OK);
 
         // Now CoGetPSClsid should return the new CLSID
         let mut clsid_out = [0u8; 16];
-        let hr = unsafe { co_get_ps_clsid(PS_IID_A.as_ptr(), clsid_out.as_mut_ptr()) };
+        let hr = unsafe { co_get_ps_clsid(overwrite_iid.as_ptr(), clsid_out.as_mut_ptr()) };
         assert_eq!(hr, S_OK);
         assert_eq!(clsid_out, clsid_b);
     }
