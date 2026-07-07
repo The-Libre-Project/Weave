@@ -529,6 +529,22 @@ fn print_weave_crash(
     let rsp = gregs[libc::REG_RSP as usize] as u64;
     let r8 = gregs[libc::REG_R8 as usize] as u64;
 
+    // Try to identify the crashing function via dladdr (async-signal-safe on Linux).
+    let mut dli: libc::Dl_info = unsafe { std::mem::zeroed() };
+    let has_sym = unsafe { libc::dladdr(rip as *const _, &mut dli) != 0 };
+    if has_sym {
+        let sym = if !dli.dli_sname.is_null() {
+            unsafe { std::ffi::CStr::from_ptr(dli.dli_sname) }.to_bytes()
+        } else {
+            b"<no symbol>"
+        };
+        unsafe {
+            libc::write(2, b"weave:   sym     = ".as_ptr() as *const _, 18);
+            libc::write(2, sym.as_ptr() as *const _, sym.len());
+            libc::write(2, b"\n".as_ptr() as *const _, 1);
+        }
+    }
+
     // Read 8 bytes at fault address and 16 bytes at RIP via /proc/self/mem.
     let (fault_preview, rip_preview) = {
         let path = b"/proc/self/mem\0";
