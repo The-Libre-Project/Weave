@@ -226,16 +226,44 @@ pub fn thread_detach() {
     let _ = &order;
 }
 
+/// Patch a known-crashing instruction in a loaded CRT DLL so that its
+/// native DllMain can complete without SIGSEGV.  MSVCP140.dll at RVA 0x300f
+/// has a null-deref in its CRT init code.  We replace the first byte of the
+/// crashing instruction with 0xC3 (RET) so execution is safely skipped.
+/// The page is made writable via mprotect, then restored.
+#[cfg(target_os = "linux")]
+fn patch_crt_rva(dll: &str, base: usize) {
+    if dll.eq_ignore_ascii_case("msvcp140.dll") {
+        let crash_rva: usize = 0x300f;
+        let crash_addr = base + crash_rva;
+        // The page for RVA 0x300f is typically .text (RX).  Make it writable.
+        let page_size = 4096usize;
+        let page_start = crash_addr & !(page_size - 1);
+        unsafe {
+            libc::mprotect(
+                page_start as *mut libc::c_void,
+                page_size,
+                libc::PROT_READ | libc::PROT_WRITE | libc::PROT_EXEC,
+            );
+            // Write RET (0xC3) at the crash site.
+            std::ptr::write(crash_addr as *mut u8, 0xC3u8);
+        }
+    }
+}
+
 /// Call native PE DllMain entry points in forward order.
-/// CRT DLLs (MSVCP140, VCRUNTIME, etc.) are excluded by not loading them
-/// as PEs (main.rs Phase B-14), so they never appear in the order list.
-/// All other side-by-side DLLs (wx*.dll, lib-*.dll, portaudio*.dll, etc.)
-/// have their native DllMain called.  If a DllMain crashes, the SEH handler
-/// catches it and the process terminates with a diagnostic — we fix those
-/// individually rather than blanket-skipping.
+/// CRT DLLs are loaded as PEs (their exports are used by side-by-side DLLs)
+/// but their DllMain may crash at known sites.  We patch those sites with
+/// RET before calling DllMain, then let the DllMain complete so CRT locale
+/// and TLS data is initialized.
 #[cfg(target_os = "linux")]
 fn pe_dispatch(reason: u32, order: &[String], _stubs: Option<&HashMap<String, DllMainFn>>) {
     for dll in order {
+        // Patch known CRT crash sites before calling DllMain.
+        let base = crate::dll_registry::get_base(dll);
+        if let Some(b) = base {
+            patch_crt_rva(dll, b);
+        }
         let entry = crate::dll_registry::get_entry_point(dll);
         let base = crate::dll_registry::get_base(dll);
         if let (Some(ep), Some(b)) = (entry, base) {

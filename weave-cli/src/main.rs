@@ -1337,23 +1337,9 @@ fn main() {
         let mut pending: Vec<String> = import_dlls.values().cloned().collect();
         let mut loaded: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-        // CRT DLLs whose exports are handled by weave-ucrt and weave-msvcp140
-        // stubs.  Their native DllMain crashes at RVA 0x300f (null deref in CRT
-        // init) and since Audacity links CRT statically, they are not needed.
-        // Skipping them avoids the crash while our stubs provide the exports.
-        let skip_crt_dlls = [
-            "msvcp140.dll", "msvcp140_1.dll", "msvcp140_2.dll",
-            "msvcp140_atomic_wait.dll", "msvcp140_codecvt_ids.dll",
-            "vcruntime140.dll", "vcruntime140_1.dll", "concrt140.dll",
-        ];
-
         while let Some(dll_name) = pending.pop() {
             let dll_key = dll_name.to_lowercase();
             if loaded.contains(&dll_key) || dll_registry::is_registered(&dll_key) {
-                continue;
-            }
-            if skip_crt_dlls.contains(&dll_key.as_str()) {
-                loaded.insert(dll_key);
                 continue;
             }
             let dll_bytes = match std::fs::read(exe_dir.join(&dll_name))
