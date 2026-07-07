@@ -630,6 +630,20 @@ fn print_weave_crash(
     };
     let stack_top = read_u64_at(rsp); // [RSP]   — ret addr if call crashed
     let stack_prev = read_u64_at(rsp.saturating_sub(8)); // [RSP-8] — ret addr if ret crashed
+    // Walk caller stack frames for backtrace (up to 8 entries).
+    let mut bt_entries = [0u64; 8];
+    let bt_count = {
+        let mut count = 0usize;
+        let mut fp = rsp;
+        for _ in 0..8 {
+            let ra = read_u64_at(fp);
+            if ra == 0 { break; }
+            bt_entries[count] = ra;
+            count += 1;
+            fp = fp.wrapping_add(8);
+        }
+        count
+    };
 
     // Build message using only stack buffers (no heap) for signal safety.
     // Keep enough room for the full register block and the "RIP maps" line;
@@ -708,6 +722,21 @@ fn print_weave_crash(
     push!(b"\nweave:   [RSP-8]   = ");
     push_hex!(stack_prev, 8);
     push!(b"  (ret addr if ret faulted)");
+
+    // Backtrace: walk up the return-address chain on the stack.
+    // With RSP=0 we can only emit raw RIP if dladdr resolved anything.
+    if bt_count > 0 && (stack_top != 0 || stack_prev != 0) {
+        push!(b"\nweave:   backtrace:");
+        for i in 0..std::cmp::min(bt_count, 4usize) {
+            let ba = bt_entries[i];
+            if ba == 0 { break; }
+            push!(b"\nweave:     [");
+            // Single hex digit for index
+            push!(&[(if i < 10 { b'0' + i as u8 } else { b'a' + i as u8 - 10 })]);
+            push!(b"] ");
+            push_hex!(ba, 8);
+        }
+    }
 
     // Look up /proc/self/maps to find which library RIP is in.
     // Async-signal-safe: only open/read/close syscalls + stack buffers.

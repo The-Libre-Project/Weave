@@ -112,22 +112,6 @@ pub extern "C" fn default_dll_main(_hinst: usize, _reason: u32, _reserved: usize
     1
 }
 
-/// Initialize CRT locale tables so that CRT functions (iswctype, toupper,
-/// etc.) don't crash when called from stubbed DLLs whose native DllMain was
-/// skipped.  This matches what MSVCP140/VCRUNTIME DllMain would do during
-/// DLL_PROCESS_ATTACH.
-fn init_crt_locale() {
-    // Wine ref: dlls/msvcrt/locale.c — msvcrt_init initializes LC_CTYPE via
-    // setlocale(LC_ALL, "") on process attach.  We use "C" locale rather than
-    // the user default because (a) we're on Linux, not Windows, and (b) "C"
-    // is the minimal guaranteed-safe locale that provides basic iswctype
-    // tables.
-    #[cfg(target_os = "linux")]
-    unsafe {
-        libc::setlocale(libc::LC_ALL, b"C\0".as_ptr() as *const libc::c_char);
-    }
-}
-
 /// Dispatch DLL_PROCESS_ATTACH to every registered DLL (stubs then PE) in
 /// dependency order.
 ///
@@ -136,7 +120,6 @@ fn init_crt_locale() {
 ///
 /// Also registers an atexit handler to call `process_detach` on normal exit.
 pub fn process_attach() {
-    init_crt_locale();
     let order = crate::dll_registry::dllmain_order();
     let stubs = lock_stubs();
 
