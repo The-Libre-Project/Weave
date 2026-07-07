@@ -227,19 +227,28 @@ pub fn thread_detach() {
 }
 
 /// Call native PE DllMain entry points in forward order.
-/// Skips DLLs that have a registered Rust stub (our crate handles them).
-/// Takes the already-locked stub registry to avoid deadlock on the same mutex.
+/// Skips DLLs that have a registered Rust stub (our crate handles them),
+/// except for CRT DLLs whose native DllMain must run to initialize locale
+/// and TLS tables.  Takes the already-locked stub registry to avoid deadlock.
 #[cfg(target_os = "linux")]
 fn pe_dispatch(reason: u32, order: &[String], stubs: Option<&HashMap<String, DllMainFn>>) {
+    // CRT DLLs whose native DllMain must run for locale/TLS initialization.
+    let crt_dlls = [
+        "msvcp140.dll", "msvcp140_1.dll", "msvcp140_2.dll",
+        "msvcp140_atomic_wait.dll", "msvcp140_codecvt_ids.dll",
+        "vcruntime140.dll", "vcruntime140_1.dll", "concrt140.dll",
+    ];
     for dll in order {
-        // Skip DLLs handled by a Rust stub crate — their DllMain is our
-        // default_dll_main (or a custom implementation).  Calling the real
-        // PE DllMain would cause CRT init crashes for CRT DLLs like
-        // MSVCP140.dll (RVA 0x300f null-deref) while providing no benefit
-        // since the stub handles all exports.
-        if let Some(s) = stubs {
-            if s.contains_key(dll) {
-                continue;
+        // Skip non-CRT DLLs that have a registered Rust stub — their DllMain
+        // is our default_dll_main (or a custom implementation).  Calling the
+        // real PE DllMain would crash for some DLLs (e.g. MSVCP140 RVA 0x300f
+        // null-deref) while providing no benefit since the stub handles exports.
+        // CRT DLLs are exempted — they need native DllMain for locale/TLS init.
+        if !crt_dlls.contains(&dll.as_str()) {
+            if let Some(s) = stubs {
+                if s.contains_key(dll) {
+                    continue;
+                }
             }
         }
         let entry = crate::dll_registry::get_entry_point(dll);
@@ -260,14 +269,21 @@ fn pe_dispatch(reason: u32, order: &[String], stubs: Option<&HashMap<String, Dll
 }
 
 /// Call native PE DllMain entry points in reverse order (for process detach).
-/// Skips DLLs that have a registered Rust stub.
+/// Skips DLLs that have a registered Rust stub (except CRT DLLs).
 /// Takes the already-locked stub registry to avoid deadlock.
 #[cfg(target_os = "linux")]
 fn pe_dispatch_rev(reason: u32, order: &[String], stubs: Option<&HashMap<String, DllMainFn>>) {
+    let crt_dlls = [
+        "msvcp140.dll", "msvcp140_1.dll", "msvcp140_2.dll",
+        "msvcp140_atomic_wait.dll", "msvcp140_codecvt_ids.dll",
+        "vcruntime140.dll", "vcruntime140_1.dll", "concrt140.dll",
+    ];
     for dll in order.iter().rev() {
-        if let Some(s) = stubs {
-            if s.contains_key(dll) {
-                continue;
+        if !crt_dlls.contains(&dll.as_str()) {
+            if let Some(s) = stubs {
+                if s.contains_key(dll) {
+                    continue;
+                }
             }
         }
         let entry = crate::dll_registry::get_entry_point(dll);
