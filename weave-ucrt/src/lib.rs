@@ -491,7 +491,6 @@ pub extern "win64" fn ucrt_set_app_type(_type: u32) {
     };
 }
 pub extern "win64" fn ucrt_configure_narrow_argv(_mode: i32) -> i32 {
-    eprintln!("weave: stub _configure_narrow_argv called");
     0
 }
 pub extern "win64" fn ucrt_initialize_narrow_environment() -> i32 {
@@ -643,13 +642,6 @@ pub unsafe extern "win64" fn ucrt_initterm(start: *const *const c_void, end: *co
         while p < end {
             let fn_ptr = *p;
             if !fn_ptr.is_null() {
-                // SAFETY: `fn_ptr` is a non-null entry read from the CRT initialiser
-                // table (`__xi_a`/`__xi_z` or `__xc_a`/`__xc_z`).  The MSVC/MinGW
-                // UCRT ABI guarantees every such non-null slot holds the address of a
-                // `void ()(void)` function compiled with the Win64 calling convention,
-                // matching the `extern "win64" fn()` signature.  The caller's `# Safety`
-                // precondition requires `start`..`end` to be a valid table, making the
-                // cast from `*const c_void` to fn pointer sound.
                 let f: extern "win64" fn() = std::mem::transmute(fn_ptr);
                 f();
             }
@@ -674,13 +666,6 @@ pub unsafe extern "win64" fn ucrt_initterm_e(
         while p < end {
             let fn_ptr = *p;
             if !fn_ptr.is_null() {
-                // SAFETY: `fn_ptr` is a non-null entry from the error-checked CRT
-                // initialiser table used by `_initterm_e`.  The MSVC/MinGW UCRT ABI
-                // specifies every non-null slot holds an `int ()(void)` function
-                // compiled with the Win64 calling convention, matching `extern "win64"
-                // fn() -> i32`.  The caller's `# Safety` precondition on `start`..`end`
-                // ensures the table is valid, making the cast from `*const c_void` to
-                // this fn-pointer type sound.
                 let f: extern "win64" fn() -> i32 = std::mem::transmute(fn_ptr);
                 let ret = f();
                 if ret != 0 {
