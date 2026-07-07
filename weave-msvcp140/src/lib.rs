@@ -818,20 +818,65 @@ pub unsafe extern "win64" fn mtx_unlock(
 /// _Cnd_destroy_in_situ — destroy the pthread_cond_t at the caller-provided address.
 /// Wine ref: dlls/msvcp140/msvcp140.c — _Cnd_destroy_in_situ: pthread_cond_destroy; caller owns memory.
 pub unsafe extern "win64" fn cnd_destroy_in_situ(
-    cnd: *mut libc::c_void,
+    _cond: *mut libc::c_void,
+    _a: usize,
     _b: usize,
     _c: usize,
-    _d: usize,
 ) -> usize {
-    #[cfg(target_os = "linux")]
-    {
-        libc::pthread_cond_destroy(cnd as *mut libc::pthread_cond_t);
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = cnd;
-    }
     0
+}
+
+/// `__ExceptionPtrCreate(void* ptr)` — initialize exception_ptr to empty (0).
+pub unsafe extern "win64" fn msvcp_exception_ptr_create(ptr: *mut u64, _b: usize, _c: usize, _d: usize) {
+    if !ptr.is_null() {
+        *ptr = 0;
+    }
+}
+
+/// `__ExceptionPtrDestroy(void* ptr)` — destroy exception_ptr (no-op for empty).
+pub unsafe extern "win64" fn msvcp_exception_ptr_destroy(_ptr: *mut u64, _b: usize, _c: usize, _d: usize) {
+}
+
+/// `__ExceptionPtrCopy(void* dst, void* src)` — copy exception_ptr.
+pub unsafe extern "win64" fn msvcp_exception_ptr_copy(dst: *mut u64, src: *const u64, _c: usize, _d: usize) {
+    if !dst.is_null() && !src.is_null() {
+        *dst = *src;
+    }
+}
+
+/// `__ExceptionPtrAssign(void* dst, void* src)` — assign exception_ptr.
+pub unsafe extern "win64" fn msvcp_exception_ptr_assign(dst: *mut u64, src: *const u64, _c: usize, _d: usize) {
+    if !dst.is_null() && !src.is_null() {
+        *dst = *src;
+    }
+}
+
+/// `__ExceptionPtrCopyException(void* dst, void* src, void* exc)` — copy with exception info.
+pub unsafe extern "win64" fn msvcp_exception_ptr_copy_exception(dst: *mut u64, src: *const u64, _exc: *const u64, _d: usize) {
+    if !dst.is_null() && !src.is_null() {
+        *dst = *src;
+    }
+}
+
+/// `__ExceptionPtrCurrentException(void* ptr)` — capture current exception (none → 0).
+pub unsafe extern "win64" fn msvcp_exception_ptr_current_exception(ptr: *mut u64, _b: usize, _c: usize, _d: usize) {
+    if !ptr.is_null() {
+        *ptr = 0;
+    }
+}
+
+/// `__ExceptionPtrRethrow(void* ptr)` — rethrow exception_ptr. Should only be called
+/// with a valid exception; since we never store one, this is a no-op.
+pub unsafe extern "win64" fn msvcp_exception_ptr_rethrow(_ptr: *mut u64, _b: usize, _c: usize, _d: usize) {
+}
+
+/// `std::uncaught_exceptions()` — return 0 (no uncaught exceptions).
+pub unsafe extern "win64" fn msvcp_uncaught_exceptions() -> i32 {
+    0
+}
+
+/// `_Cnd_do_broadcast_at_thread_exit` — no-op.
+pub unsafe extern "win64" fn msvcp_cnd_do_broadcast_at_thread_exit(_a: usize, _b: usize, _c: usize, _d: usize) {
 }
 
 // ── Real _Thrd_* and _Xtime_get_ticks implementations ────────────────────────
@@ -1233,6 +1278,44 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "_Mtx_unlock" => mtx_unlock as *const () as usize,
         "_Cnd_destroy_in_situ" => cnd_destroy_in_situ as *const () as usize,
         "_Cnd_signal" => cnd_signal as *const () as usize,
+        "_Cnd_do_broadcast_at_thread_exit" => {
+            msvcp_cnd_do_broadcast_at_thread_exit as *const () as usize
+        }
+
+        // ── Exception pointer stubs ──────────────────────────────────────────────
+        "?__ExceptionPtrAssign@@YAXPEAXPEBX@Z" => {
+            msvcp_exception_ptr_assign as unsafe extern "win64" fn(*mut u64, *const u64, usize, usize)
+                as *const () as usize
+        }
+        "?__ExceptionPtrCopy@@YAXPEAXPEBX@Z" => {
+            msvcp_exception_ptr_copy as unsafe extern "win64" fn(*mut u64, *const u64, usize, usize)
+                as *const () as usize
+        }
+        "?__ExceptionPtrCopyException@@YAXPEAXPEBX1@Z" => {
+            msvcp_exception_ptr_copy_exception
+                as unsafe extern "win64" fn(*mut u64, *const u64, *const u64, usize)
+                as *const () as usize
+        }
+        "?__ExceptionPtrCreate@@YAXPEAX@Z" => {
+            msvcp_exception_ptr_create as unsafe extern "win64" fn(*mut u64, usize, usize, usize)
+                as *const () as usize
+        }
+        "?__ExceptionPtrCurrentException@@YAXPEAX@Z" => {
+            msvcp_exception_ptr_current_exception
+                as unsafe extern "win64" fn(*mut u64, usize, usize, usize)
+                as *const () as usize
+        }
+        "?__ExceptionPtrDestroy@@YAXPEAX@Z" => {
+            msvcp_exception_ptr_destroy as unsafe extern "win64" fn(*mut u64, usize, usize, usize)
+                as *const () as usize
+        }
+        "?__ExceptionPtrRethrow@@YAXPEBX@Z" => {
+            msvcp_exception_ptr_rethrow as unsafe extern "win64" fn(*mut u64, usize, usize, usize)
+                as *const () as usize
+        }
+        "?uncaught_exceptions@std@@YAHXZ" => {
+            msvcp_uncaught_exceptions as unsafe extern "win64" fn() -> i32 as *const () as usize
+        }
 
         _ => return None,
     };

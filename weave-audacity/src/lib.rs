@@ -11,6 +11,55 @@
 
 use std::ffi::c_void;
 
+// ── wxWidgets data stubs ─────────────────────────────────────────────────
+//
+// When wxWidgets DLLs are not present as PE files, data exports like
+// wxDefaultPosition are IAT-resolved through the stub chain.  These static
+// objects provide valid (zeroed) addresses so that reading the data does not
+// crash.  The zero values are safe defaults for phase-A probing.
+
+/// wxDefaultPosition (wxPoint) — static zero-initialised 8 bytes.
+#[no_mangle]
+static WX_DEFAULT_POSITION: [u8; 16] = [0u8; 16];
+
+/// wxDefaultSize (wxSize) — static zero-initialised 8 bytes.
+#[no_mangle]
+static WX_DEFAULT_SIZE: [u8; 16] = [0u8; 16];
+
+/// wxDefaultValidator (wxValidator) — static zero-initialised 128 bytes.
+#[no_mangle]
+static WX_DEFAULT_VALIDATOR: [u8; 128] = [0u8; 128];
+
+/// wxDefaultDateTime — static zero-initialised 32 bytes.
+#[no_mangle]
+static WX_DEFAULT_DATE_TIME: [u8; 32] = [0u8; 32];
+
+/// wxDefaultDateTimeFormat — static null string pointer.
+#[no_mangle]
+static WX_DEFAULT_DATE_TIME_FORMAT: [u8; 16] = [0u8; 16];
+
+/// wxDefaultTimeSpanFormat — static null string pointer.
+#[no_mangle]
+static WX_DEFAULT_TIME_SPAN_FORMAT: [u8; 16] = [0u8; 16];
+
+/// wxDefaultPosition wxPoint(0, 0) and similar static constants in wxbase.
+#[no_mangle]
+static WXBASE_DEFAULT_POSITION: [u8; 16] = [0u8; 16];
+
+/// typeDefault@wxTextBuffer — wxTextFileType enum (int, default 0 = text).
+#[no_mangle]
+static WX_TYPE_DEFAULT: [u8; 8] = [0u8; 8];
+
+/// VCRUNTIME140 stubs (no dedicated crate exists — handled here for now).
+/// __current_exception → return null (no current exception).
+pub unsafe extern "win64" fn vcruntime_current_exception() -> u64 {
+    0
+}
+/// __current_exception_context → return null (no current exception context).
+pub unsafe extern "win64" fn vcruntime_current_exception_context() -> u64 {
+    0
+}
+
 // ── lib-theme-resources.dll ──────────────────────────────────────────────
 
 /// ThemeResources::Load() — Phase A stub. Returns normally (does nothing).
@@ -207,6 +256,47 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
                 _ => None,
             }
         }
+        // ── VCRUNTIME140.dll ───────────────────────────────────────────────
+        "vcruntime140.dll" => match func {
+            "__current_exception" => {
+                Some(vcruntime_current_exception as unsafe extern "win64" fn() -> u64
+                    as *const () as usize)
+            }
+            "__current_exception_context" => {
+                Some(vcruntime_current_exception_context as unsafe extern "win64" fn() -> u64
+                    as *const () as usize)
+            }
+            _ => None,
+        },
+        // ── wxWidgets base DLL (wxbase313u_vc_x64_custom.dll) ──────────────
+        "wxbase313u_vc_x64_custom.dll" => match func {
+            "?wxDefaultDateTime@@3VwxDateTime@@B" => {
+                Some(&WX_DEFAULT_DATE_TIME as *const u8 as usize)
+            }
+            "?wxDefaultDateTimeFormat@@3QBDB" => {
+                Some(&WX_DEFAULT_DATE_TIME_FORMAT as *const u8 as usize)
+            }
+            "?wxDefaultTimeSpanFormat@@3QBDB" => {
+                Some(&WX_DEFAULT_TIME_SPAN_FORMAT as *const u8 as usize)
+            }
+            "?typeDefault@wxTextBuffer@@2W4wxTextFileType@@B" => {
+                Some(&WX_TYPE_DEFAULT as *const u8 as usize)
+            }
+            _ => None,
+        },
+        // ── wxWidgets core DLL (wxmsw313u_core_vc_x64_custom.dll) ─────────
+        "wxmsw313u_core_vc_x64_custom.dll" => match func {
+            "?wxDefaultPosition@@3VwxPoint@@B" => {
+                Some(&WX_DEFAULT_POSITION as *const u8 as usize)
+            }
+            "?wxDefaultSize@@3VwxSize@@B" => {
+                Some(&WX_DEFAULT_SIZE as *const u8 as usize)
+            }
+            "?wxDefaultValidator@@3VwxValidator@@B" => {
+                Some(&WX_DEFAULT_VALIDATOR as *const u8 as usize)
+            }
+            _ => None,
+        },
         _ => None,
     }
 }
