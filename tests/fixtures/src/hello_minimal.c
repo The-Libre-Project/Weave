@@ -58,8 +58,7 @@ __declspec(dllimport) NTSTATUS NtTerminateProcess(HANDLE process, NTSTATUS exit_
  * On x86-64 Windows the PEB is always reachable via the GS segment register at offset 0x60.
  */
 static HANDLE get_stdout(void) {
-    ULONG_PTR peb;
-    __asm__("mov %%gs:0x60, %0" : "=r"(peb));
+    ULONG_PTR peb = __readgsqword(0x60);
     ULONG_PTR params = *(ULONG_PTR*)(peb + 0x20);   /* PEB->ProcessParameters */
     return *(HANDLE*)(params + 0x28);                /* ProcessParameters->StandardOutput */
 }
