@@ -112,17 +112,6 @@ pub extern "C" fn default_dll_main(_hinst: usize, _reason: u32, _reserved: usize
     1
 }
 
-/// Initialize glibc locale tables (__ctype_b_loc, etc.) so that character
-/// classification functions (iswctype, isalpha, isdigit, etc.) don't crash
-/// with SIGSEGV at fault=0x8 when called from host code during PE loading
-/// or init.  Must be called before any locale-dependent code runs.
-fn init_host_locale() {
-    #[cfg(target_os = "linux")]
-    unsafe {
-        libc::setlocale(libc::LC_ALL, b"C\0".as_ptr() as *const libc::c_char);
-    }
-}
-
 /// Dispatch DLL_PROCESS_ATTACH to every registered DLL (stubs then PE) in
 /// dependency order.
 ///
@@ -131,7 +120,6 @@ fn init_host_locale() {
 ///
 /// Also registers an atexit handler to call `process_detach` on normal exit.
 pub fn process_attach() {
-    init_host_locale();
     let order = crate::dll_registry::dllmain_order();
     let stubs = lock_stubs();
 

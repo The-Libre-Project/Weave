@@ -1104,6 +1104,14 @@ fn ipc_handler(dll: &str, function: &str, args: &[serde_json::Value]) -> Option<
 }
 
 fn main() {
+    // Initialize glibc locale at process start so character classification
+    // (iswctype, isalpha, etc.) doesn't SIGSEGV at fault=0x8 when called
+    // from PE code during loading or init.  Must be before any PE operations.
+    #[cfg(target_os = "linux")]
+    unsafe {
+        libc::setlocale(libc::LC_ALL, b"C\0".as_ptr() as *const libc::c_char);
+    }
+
     // ── −3. Prefix subcommand dispatch — intercept before clap parsing ────
     // `weave prefix <create|list|launch|delete> [args...]` is handled here so
     // that Args::parse() (which requires an exe positional arg) is never called
