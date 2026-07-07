@@ -237,7 +237,7 @@ fn pe_dispatch(reason: u32, order: &[String], stubs: Option<&HashMap<String, Dll
         // PE DllMain would cause CRT init crashes for CRT DLLs like
         // MSVCP140.dll (RVA 0x300f null-deref) while providing no benefit
         // since the stub handles all exports.
-        if let Some(ref s) = stubs {
+        if let Some(s) = stubs {
             if s.contains_key(dll) {
                 continue;
             }
@@ -265,7 +265,7 @@ fn pe_dispatch(reason: u32, order: &[String], stubs: Option<&HashMap<String, Dll
 #[cfg(target_os = "linux")]
 fn pe_dispatch_rev(reason: u32, order: &[String], stubs: Option<&HashMap<String, DllMainFn>>) {
     for dll in order.iter().rev() {
-        if let Some(ref s) = stubs {
+        if let Some(s) = stubs {
             if s.contains_key(dll) {
                 continue;
             }
