@@ -40,21 +40,16 @@ typedef struct {
     ULONG_PTR Information;  /* bytes written on success */
 } IO_STATUS_BLOCK;
 
-/* ---------- NT API declarations — imported from ntdll.dll ---------- */
+/* ---------- NT API declarations — imported from ntdll.dll and kernel32.dll ---------- */
 
-__declspec(dllimport) void     RtlInitUnicodeString(UNICODE_STRING* dest, const USHORT* src);
-__declspec(dllimport) NTSTATUS NtWriteFile(HANDLE file, HANDLE event, PVOID apc_routine,
-                                            PVOID apc_ctx, IO_STATUS_BLOCK* iosb,
-                                            PVOID buffer, ULONG length,
-                                            PVOID byte_offset, PVOID key);
-__declspec(dllimport) NTSTATUS NtTerminateProcess(HANDLE process, NTSTATUS exit_status);
+void     RtlInitUnicodeString(UNICODE_STRING* dest, const USHORT* src);
+NTSTATUS NtWriteFile(HANDLE file, HANDLE event, PVOID apc_routine,
+                     PVOID apc_ctx, IO_STATUS_BLOCK* iosb,
+                     PVOID buffer, ULONG length,
+                     PVOID byte_offset, PVOID key);
+NTSTATUS NtTerminateProcess(HANDLE process, NTSTATUS exit_status);
+HANDLE   GetStdHandle(unsigned long n_std_handle);
 
-/* ---------- get the stdout handle ----------
- *
- * GetStdHandle(STD_OUTPUT_HANDLE) is the canonical way to get the stdout handle.
- * We import it from kernel32 since building with -nostdlib means no <windows.h>.
- */
-__declspec(dllimport) HANDLE __stdcall GetStdHandle(unsigned long n_std_handle);
 #define STD_OUTPUT_HANDLE ((unsigned long)-11)
 
 static HANDLE get_stdout(void) {
