@@ -16,6 +16,10 @@
 
 /* ---------- minimal type definitions (no headers available without CRT) ---------- */
 
+#ifdef __MINGW64__
+#include <intrin.h>
+#endif
+
 typedef unsigned short      USHORT;
 typedef unsigned long       ULONG;
 typedef long                LONG;
@@ -58,13 +62,7 @@ __declspec(dllimport) NTSTATUS NtTerminateProcess(HANDLE process, NTSTATUS exit_
  * On x86-64 Windows the PEB is always reachable via the GS segment register at offset 0x60.
  */
 static HANDLE get_stdout(void) {
-    ULONG_PTR peb;
-    /* Read PEB address from GS segment register (x64 Windows TLS). */
-    __asm__ __volatile__(
-        ".intel_syntax noprefix\n"
-        "mov %0, gs:[0x60]\n"
-        ".att_syntax prefix"
-        : "=r"(peb));
+    ULONG_PTR peb = __readgsqword(0x60);
     ULONG_PTR params = *(ULONG_PTR*)(peb + 0x20);   /* PEB->ProcessParameters */
     return *(HANDLE*)(params + 0x28);                /* ProcessParameters->StandardOutput */
 }
