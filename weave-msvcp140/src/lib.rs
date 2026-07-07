@@ -1144,9 +1144,12 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "?cerr@std@@3V?$basic_ostream@DU?$char_traits@D@std@@@1@A" => {
             cerr_addr()
         }
-        "?cout@std@@3V?$basic_ostream@DU?$char_traits@D@std@@@1@A" => {
-            cout_addr()
-        }
+        // cout is a data object in MSVCP140.dll. The real MSVCP140.dll is
+        // not loaded (it crashes during DllMain). Using a zeroed buffer would
+        // cause a vtable-null crash on any virtual method call.  Route through
+        // the noop stub instead — callers get 0 return from any "call cout"
+        // pattern, which is safer than a null-vtable object.
+        // "?cout@std@@3V?$basic_ostream@DU?$char_traits@D@std@@@1@A" => { cout_addr() }
         "?id@?$codecvt@DDU_Mbstatet@@@std@@2V0locale@2@A" => {
             &LOCALE_ID_CODECVT_DD as *const usize as usize
         }
