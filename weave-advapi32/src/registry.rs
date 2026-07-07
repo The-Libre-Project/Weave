@@ -1843,10 +1843,12 @@ pub fn resolve(func: &str) -> Option<usize> {
             crypt_decrypt as unsafe extern "win64" fn(_, _, _, _, _, _) -> _ as *const () as usize,
         ),
         "CryptEncrypt" => Some(
-            crypt_encrypt as unsafe extern "win64" fn(_, _, _, _, _, _, _) -> _ as *const () as usize,
+            crypt_encrypt as unsafe extern "win64" fn(_, _, _, _, _, _, _) -> _ as *const ()
+                as usize,
         ),
         "CryptImportKey" => Some(
-            crypt_import_key as unsafe extern "win64" fn(_, _, _, _, _, _) -> _ as *const () as usize,
+            crypt_import_key as unsafe extern "win64" fn(_, _, _, _, _, _) -> _ as *const ()
+                as usize,
         ),
         "CryptDestroyHash" => {
             Some(crypt_destroy_hash as unsafe extern "win64" fn(_) -> _ as *const () as usize)

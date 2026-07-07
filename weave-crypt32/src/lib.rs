@@ -198,8 +198,7 @@ pub unsafe extern "win64" fn CertFreeCertificateChain(_p_chain_context: usize) -
 /// CertFreeCertificateChainEngine — free a certificate chain engine.
 /// Phase A stub — no-op.
 // Wine ref: dlls/crypt32/cert.c — CertFreeCertificateChainEngine
-pub unsafe extern "win64" fn CertFreeCertificateChainEngine(_h_chain_engine: usize) {
-}
+pub unsafe extern "win64" fn CertFreeCertificateChainEngine(_h_chain_engine: usize) {}
 
 /// PFXImportCertStore — import a PFX blob as a certificate store.
 /// Phase A stub — returns NULL (store not imported).
@@ -656,19 +655,20 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
             CertCreateCertificateChainEngine as unsafe extern "win64" fn(_, _) -> _ as *const ()
                 as usize,
         ),
-        "CertFindExtension" => Some(
-            CertFindExtension as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
-        ),
-        "CertFreeCertificateChainEngine" => {
-            Some(CertFreeCertificateChainEngine as unsafe extern "win64" fn(_) -> _ as *const () as usize)
+        "CertFindExtension" => {
+            Some(CertFindExtension as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize)
         }
-        "CryptDecodeObjectEx" => Some(
-            CryptDecodeObjectEx as unsafe extern "win64" fn(_, _, _, _, _, _, _, _) -> _ as *const ()
+        "CertFreeCertificateChainEngine" => Some(
+            CertFreeCertificateChainEngine as unsafe extern "win64" fn(_) -> _ as *const ()
                 as usize,
         ),
-        "PFXImportCertStore" => Some(
-            PFXImportCertStore as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
+        "CryptDecodeObjectEx" => Some(
+            CryptDecodeObjectEx as unsafe extern "win64" fn(_, _, _, _, _, _, _, _) -> _
+                as *const () as usize,
         ),
+        "PFXImportCertStore" => {
+            Some(PFXImportCertStore as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize)
+        }
         _ => None,
     }
 }
