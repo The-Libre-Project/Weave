@@ -227,22 +227,15 @@ pub fn thread_detach() {
 }
 
 /// Call native PE DllMain entry points in forward order.
-/// Skips DLLs that have a registered Rust stub (our crate handles them).
-/// Takes the already-locked stub registry to avoid deadlock.
+/// CRT DLLs (MSVCP140, VCRUNTIME, etc.) are excluded by not loading them
+/// as PEs (main.rs Phase B-14), so they never appear in the order list.
+/// All other side-by-side DLLs (wx*.dll, lib-*.dll, portaudio*.dll, etc.)
+/// have their native DllMain called.  If a DllMain crashes, the SEH handler
+/// catches it and the process terminates with a diagnostic — we fix those
+/// individually rather than blanket-skipping.
 #[cfg(target_os = "linux")]
-fn pe_dispatch(reason: u32, order: &[String], stubs: Option<&HashMap<String, DllMainFn>>) {
+fn pe_dispatch(reason: u32, order: &[String], _stubs: Option<&HashMap<String, DllMainFn>>) {
     for dll in order {
-        // Skip DLLs handled by a Rust stub crate — their DllMain is our
-        // default_dll_main (or a custom implementation).  Calling the real
-        // PE DllMain would cause CRT init crashes for CRT DLLs like
-        // MSVCP140.dll (RVA 0x300f null-deref) since our stubs handle the
-        // exports.  CRT locale/TLS data is initialized by Weave itself
-        // during startup (pe_setup_locale below).
-        if let Some(s) = stubs {
-            if s.contains_key(dll) {
-                continue;
-            }
-        }
         let entry = crate::dll_registry::get_entry_point(dll);
         let base = crate::dll_registry::get_base(dll);
         if let (Some(ep), Some(b)) = (entry, base) {
@@ -261,16 +254,10 @@ fn pe_dispatch(reason: u32, order: &[String], stubs: Option<&HashMap<String, Dll
 }
 
 /// Call native PE DllMain entry points in reverse order (for process detach).
-/// Skips DLLs that have a registered Rust stub.
-/// Takes the already-locked stub registry to avoid deadlock.
+/// Same policy as pe_dispatch: no blanket skip for stubbed DLLs.
 #[cfg(target_os = "linux")]
-fn pe_dispatch_rev(reason: u32, order: &[String], stubs: Option<&HashMap<String, DllMainFn>>) {
+fn pe_dispatch_rev(reason: u32, order: &[String], _stubs: Option<&HashMap<String, DllMainFn>>) {
     for dll in order.iter().rev() {
-        if let Some(s) = stubs {
-            if s.contains_key(dll) {
-                continue;
-            }
-        }
         let entry = crate::dll_registry::get_entry_point(dll);
         let base = crate::dll_registry::get_base(dll);
         if let (Some(ep), Some(b)) = (entry, base) {
