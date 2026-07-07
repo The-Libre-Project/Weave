@@ -16,10 +16,6 @@
 
 /* ---------- minimal type definitions (no headers available without CRT) ---------- */
 
-#ifdef __MINGW64__
-#include <intrin.h>
-#endif
-
 typedef unsigned short      USHORT;
 typedef unsigned long       ULONG;
 typedef long                LONG;
@@ -53,18 +49,16 @@ __declspec(dllimport) NTSTATUS NtWriteFile(HANDLE file, HANDLE event, PVOID apc_
                                             PVOID byte_offset, PVOID key);
 __declspec(dllimport) NTSTATUS NtTerminateProcess(HANDLE process, NTSTATUS exit_status);
 
-/* ---------- get the stdout handle from the Windows process environment block ----------
+/* ---------- get the stdout handle ----------
  *
- * Every Windows process has a "process environment block" (PEB) that the OS sets up
- * before our code runs. It contains the stdin/stdout/stderr handles. We read it here
- * directly since we have no CRT to call GetStdHandle for us.
- *
- * On x86-64 Windows the PEB is always reachable via the GS segment register at offset 0x60.
+ * GetStdHandle(STD_OUTPUT_HANDLE) is the canonical way to get the stdout handle.
+ * We import it from kernel32 since building with -nostdlib means no <windows.h>.
  */
+__declspec(dllimport) HANDLE __stdcall GetStdHandle(unsigned long n_std_handle);
+#define STD_OUTPUT_HANDLE ((unsigned long)-11)
+
 static HANDLE get_stdout(void) {
-    ULONG_PTR peb = __readgsqword(0x60);
-    ULONG_PTR params = *(ULONG_PTR*)(peb + 0x20);   /* PEB->ProcessParameters */
-    return *(HANDLE*)(params + 0x28);                /* ProcessParameters->StandardOutput */
+    return GetStdHandle(STD_OUTPUT_HANDLE);
 }
 
 /* ---------- entry point ---------- */
