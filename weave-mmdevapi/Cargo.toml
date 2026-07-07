@@ -16,4 +16,4 @@ pipewire-audio = ["dep:pipewire"]
 weave-common = { path = "../weave-common" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-pipewire = { version = "0.8", optional = true }
+pipewire = { version = "0.8", optional = true, features = ["v0_3_65"] }
