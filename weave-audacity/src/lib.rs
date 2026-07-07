@@ -258,14 +258,14 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         }
         // ── VCRUNTIME140.dll ───────────────────────────────────────────────
         "vcruntime140.dll" => match func {
-            "__current_exception" => {
-                Some(vcruntime_current_exception as unsafe extern "win64" fn() -> u64
-                    as *const () as usize)
-            }
-            "__current_exception_context" => {
-                Some(vcruntime_current_exception_context as unsafe extern "win64" fn() -> u64
-                    as *const () as usize)
-            }
+            "__current_exception" => Some(
+                vcruntime_current_exception as unsafe extern "win64" fn() -> u64 as *const ()
+                    as usize,
+            ),
+            "__current_exception_context" => Some(
+                vcruntime_current_exception_context as unsafe extern "win64" fn() -> u64
+                    as *const () as usize,
+            ),
             _ => None,
         },
         // ── wxWidgets base DLL (wxbase313u_vc_x64_custom.dll) ──────────────
@@ -286,12 +286,8 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         },
         // ── wxWidgets core DLL (wxmsw313u_core_vc_x64_custom.dll) ─────────
         "wxmsw313u_core_vc_x64_custom.dll" => match func {
-            "?wxDefaultPosition@@3VwxPoint@@B" => {
-                Some(&WX_DEFAULT_POSITION as *const u8 as usize)
-            }
-            "?wxDefaultSize@@3VwxSize@@B" => {
-                Some(&WX_DEFAULT_SIZE as *const u8 as usize)
-            }
+            "?wxDefaultPosition@@3VwxPoint@@B" => Some(&WX_DEFAULT_POSITION as *const u8 as usize),
+            "?wxDefaultSize@@3VwxSize@@B" => Some(&WX_DEFAULT_SIZE as *const u8 as usize),
             "?wxDefaultValidator@@3VwxValidator@@B" => {
                 Some(&WX_DEFAULT_VALIDATOR as *const u8 as usize)
             }
