@@ -1842,6 +1842,14 @@ pub fn resolve(func: &str) -> Option<usize> {
         "CryptDecrypt" => Some(
             crypt_decrypt as unsafe extern "win64" fn(_, _, _, _, _, _) -> _ as *const () as usize,
         ),
+        "CryptEncrypt" => Some(
+            crypt_encrypt as unsafe extern "win64" fn(_, _, _, _, _, _, _) -> _ as *const () as usize,
+        ),
+        "CryptImportKey" => Some(
+            crypt_import_key as unsafe extern "win64" fn(_, _, _, _, _, _) -> _ as *const () as usize,
+        ),
+            crypt_decrypt as unsafe extern "win64" fn(_, _, _, _, _, _) -> _ as *const () as usize,
+        ),
         "CryptDestroyHash" => {
             Some(crypt_destroy_hash as unsafe extern "win64" fn(_) -> _ as *const () as usize)
         }
@@ -2313,6 +2321,37 @@ pub unsafe extern "win64" fn crypt_create_hash(
     if !ph_hash.is_null() {
         unsafe { *ph_hash = 0 };
     }
+    weave_common::set_last_error(0x8009_0020_u32); // NTE_FAIL
+    0 // FALSE
+}
+
+/// CryptEncrypt — encrypt data with a key. Returns FALSE + NTE_FAIL.
+// Wine ref: dlls/advapi32/crypt.c — CryptEncrypt calls provider CPEncrypt;
+// FALSE + NTE_FAIL if key invalid.
+pub unsafe extern "win64" fn crypt_encrypt(
+    _h_key: usize,
+    _h_hash: usize,
+    _final_: i32,
+    _dw_flags: u32,
+    _pb_data: *mut u8,
+    _pdw_data_len: *mut u32,
+    _dw_buf_len: u32,
+) -> i32 {
+    weave_common::set_last_error(0x8009_0020_u32); // NTE_FAIL
+    0 // FALSE
+}
+
+/// CryptImportKey — import a key into the CSP. Returns FALSE + NTE_FAIL.
+// Wine ref: dlls/advapi32/crypt.c — CryptImportKey calls provider CPImportKey;
+// FALSE + NTE_FAIL if key format unsupported.
+pub unsafe extern "win64" fn crypt_import_key(
+    _h_prov: usize,
+    _pb_data: *mut u8,
+    _dw_data_len: u32,
+    _h_pub_key: usize,
+    _dw_flags: u32,
+    _ph_key: *mut u32,
+) -> i32 {
     weave_common::set_last_error(0x8009_0020_u32); // NTE_FAIL
     0 // FALSE
 }

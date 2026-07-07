@@ -304,6 +304,12 @@ pub struct AddrInfoExW {
 
 /// WSAStartup — initialise Winsock. On Linux this fills WSADATA and returns 0.
 ///
+/// Stub ordinal function returning SOCKET_ERROR. Used for unresolved WS2
+/// extension ordinals.
+pub unsafe extern "win64" fn ws_stub_socket_error() -> i32 {
+    SOCKET_ERROR
+}
+
 /// # Safety
 /// `lp_wsa_data` must point to a writable `WsaData`.
 pub unsafe extern "win64" fn wsa_startup(
@@ -3539,6 +3545,8 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "#111" => Some(wsa_enum_protocols_w as *const () as usize),
         "#112" => Some(wsa_enum_protocols_a as *const () as usize),
         "#115" => Some(wsa_startup as *const () as usize),
+        "#116" => Some(ws_stub_socket_error as *const () as usize),
+        "#151" => Some(ws_stub_socket_error as *const () as usize),
         _ => None,
     }
 }
@@ -3682,7 +3690,7 @@ mod tests {
         let ordinals = [
             "#1", "#2", "#3", "#4", "#5", "#6", "#7", "#8", "#9", "#10", "#11", "#12", "#13",
             "#14", "#15", "#16", "#17", "#18", "#19", "#20", "#21", "#22", "#23", "#57", "#111",
-            "#112", "#115",
+            "#112", "#115", "#116", "#151",
         ];
         for &name in &named {
             assert!(

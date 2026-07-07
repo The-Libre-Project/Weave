@@ -195,6 +195,60 @@ pub unsafe extern "win64" fn CertFreeCertificateChain(_p_chain_context: usize) -
     1
 }
 
+/// CertFreeCertificateChainEngine — free a certificate chain engine.
+/// Phase A stub — no-op.
+// Wine ref: dlls/crypt32/cert.c — CertFreeCertificateChainEngine
+pub unsafe extern "win64" fn CertFreeCertificateChainEngine(_h_chain_engine: usize) {
+}
+
+/// PFXImportCertStore — import a PFX blob as a certificate store.
+/// Phase A stub — returns NULL (store not imported).
+// Wine ref: dlls/crypt32/cert.c — PFXImportCertStore
+pub unsafe extern "win64" fn PFXImportCertStore(
+    _p_pfx: *const u8,
+    _sz_password: *const u16,
+    _dw_flags: u32,
+) -> usize {
+    0
+}
+
+/// CryptDecodeObjectEx — decode a cryptographic object from BER/DER encoding.
+/// Phase A stub — returns FALSE.
+// Wine ref: dlls/crypt32/encode.c — CryptDecodeObjectEx
+pub unsafe extern "win64" fn CryptDecodeObjectEx(
+    _dw_cert_encoding: u32,
+    _lpsz_struct_type: *const u8,
+    _pb_encoded: *const u8,
+    _cb_encoded: u32,
+    _dw_flags: u32,
+    _p_decode_para: *const u8,
+    _pv_decoded: *mut u8,
+    _pcb_decoded: *mut u32,
+) -> i32 {
+    0
+}
+
+/// CertFindExtension — find an extension in a CTL or cert by OID.
+/// Phase A stub — returns NULL (extension not found).
+// Wine ref: dlls/crypt32/cert.c — CertFindExtension
+pub unsafe extern "win64" fn CertFindExtension(
+    _psz_obj_id: *const u8,
+    _c_extensions: u32,
+    _rg_extensions: *const u8,
+) -> usize {
+    0
+}
+
+/// CertCreateCertificateChainEngine — create a certificate chain engine.
+/// Phase A stub — returns FALSE (engine not created).
+// Wine ref: dlls/crypt32/cert.c — CertCreateCertificateChainEngine
+pub unsafe extern "win64" fn CertCreateCertificateChainEngine(
+    _p_config: *const u8,
+    _ph_chain_engine: *mut usize,
+) -> i32 {
+    0
+}
+
 /// CertGetCertificateChain — build a certificate chain context.
 ///
 /// # Safety
@@ -597,6 +651,23 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "CertCreateCertificateContext" => Some(
             CertCreateCertificateContext as unsafe extern "win64" fn(_, _, _) -> _ as *const ()
                 as usize,
+        ),
+        "CertCreateCertificateChainEngine" => Some(
+            CertCreateCertificateChainEngine as unsafe extern "win64" fn(_, _) -> _ as *const ()
+                as usize,
+        ),
+        "CertFindExtension" => Some(
+            CertFindExtension as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
+        ),
+        "CertFreeCertificateChainEngine" => {
+            Some(CertFreeCertificateChainEngine as unsafe extern "win64" fn(_) -> _ as *const () as usize)
+        }
+        "CryptDecodeObjectEx" => Some(
+            CryptDecodeObjectEx as unsafe extern "win64" fn(_, _, _, _, _, _, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "PFXImportCertStore" => Some(
+            PFXImportCertStore as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
         ),
         _ => None,
     }

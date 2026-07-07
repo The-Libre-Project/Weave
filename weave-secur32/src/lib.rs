@@ -29,6 +29,13 @@ pub unsafe extern "win64" fn InitSecurityInterfaceA() -> usize {
     0
 }
 
+/// InitSecurityInterfaceW — retrieve the SSPI function dispatch table (Unicode).
+/// Phase A stub — returns NULL (no SSPI provider).
+// Wine ref: dlls/secur32/secur32.c — InitSecurityInterfaceW same as A variant.
+pub unsafe extern "win64" fn InitSecurityInterfaceW() -> usize {
+    0
+}
+
 /// Resolve a secur32.dll import to a function pointer.
 pub fn resolve(dll: &str, func: &str) -> Option<usize> {
     if !dll.eq_ignore_ascii_case("secur32.dll") {
@@ -37,6 +44,9 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
     match func {
         "InitSecurityInterfaceA" => {
             Some(InitSecurityInterfaceA as unsafe extern "win64" fn() -> _ as *const () as usize)
+        }
+        "InitSecurityInterfaceW" => {
+            Some(InitSecurityInterfaceW as unsafe extern "win64" fn() -> _ as *const () as usize)
         }
         _ => None,
     }
