@@ -59,6 +59,34 @@ pub unsafe extern "win64" fn vcruntime_current_exception() -> u64 {
 pub unsafe extern "win64" fn vcruntime_current_exception_context() -> u64 {
     0
 }
+/// __RTtypeid → return a dummy non-null type_info pointer.
+/// Without this, RTTI queries (used heavily by wxWidgets) crash.
+pub unsafe extern "win64" fn vcruntime_rttypeid() -> usize {
+    &VCRT_DUMMY_TYPEINFO as *const u8 as usize
+}
+/// __RTDynamicCast → return null (cast failed). Safe default.
+pub unsafe extern "win64" fn vcruntime_rtdynamiccast() -> usize {
+    0
+}
+/// __std_type_info_compare → return 0 (equal). Safe default.
+pub unsafe extern "win64" fn vcruntime_type_info_compare() -> i32 {
+    0
+}
+/// __std_type_info_destroy_list → no-op.
+pub unsafe extern "win64" fn vcruntime_type_info_destroy_list() {}
+
+/// VCRUNTIME140_1 stubs
+/// __CxxFrameHandler4 → return ExceptionContinueSearch (1).
+/// Without this, exception handling crashes and triggers SEH runaway / stack overflow.
+pub unsafe extern "win64" fn vcruntime_cxx_frame_handler4(
+    _rec: *const u8, _frame: *const u8, _ctx: *const u8, _dispatch: *const u8
+) -> i32 {
+    1  // ExceptionContinueSearch
+}
+
+/// Dummy type_info object for __RTtypeid.
+#[no_mangle]
+static VCRT_DUMMY_TYPEINFO: [u8; 32] = [0u8; 32];
 
 // ── lib-theme-resources.dll ──────────────────────────────────────────────
 
@@ -258,14 +286,39 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         }
         // ── VCRUNTIME140.dll ───────────────────────────────────────────────
         "vcruntime140.dll" => match func {
-            "__current_exception" => Some(
-                vcruntime_current_exception as unsafe extern "win64" fn() -> u64 as *const ()
-                    as usize,
-            ),
-            "__current_exception_context" => Some(
-                vcruntime_current_exception_context as unsafe extern "win64" fn() -> u64
-                    as *const () as usize,
-            ),
+            "__current_exception" => {
+                Some(vcruntime_current_exception as unsafe extern "win64" fn() -> u64
+                    as *const () as usize)
+            }
+            "__current_exception_context" => {
+                Some(vcruntime_current_exception_context as unsafe extern "win64" fn() -> u64
+                    as *const () as usize)
+            }
+            "__RTtypeid" => {
+                Some(vcruntime_rttypeid as unsafe extern "win64" fn() -> usize
+                    as *const () as usize)
+            }
+            "__RTDynamicCast" => {
+                Some(vcruntime_rtdynamiccast as unsafe extern "win64" fn() -> usize
+                    as *const () as usize)
+            }
+            "__std_type_info_compare" => {
+                Some(vcruntime_type_info_compare as unsafe extern "win64" fn() -> i32
+                    as *const () as usize)
+            }
+            "__std_type_info_destroy_list" => {
+                Some(vcruntime_type_info_destroy_list as unsafe extern "win64" fn()
+                    as *const () as usize)
+            }
+            _ => None,
+        },
+        // ── VCRUNTIME140_1.dll ─────────────────────────────────────────────
+        "vcruntime140_1.dll" => match func {
+            "__CxxFrameHandler4" => {
+                Some(vcruntime_cxx_frame_handler4
+                    as unsafe extern "win64" fn(*const u8, *const u8, *const u8, *const u8) -> i32
+                    as *const () as usize)
+            }
             _ => None,
         },
         // ── wxWidgets base DLL (wxbase313u_vc_x64_custom.dll) ──────────────
