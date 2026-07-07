@@ -74,6 +74,10 @@ pub unsafe extern "win64" fn vcruntime_type_info_compare() -> i32 {
 }
 /// __std_type_info_destroy_list → no-op.
 pub unsafe extern "win64" fn vcruntime_type_info_destroy_list() {}
+/// __RTCastToVoid → return 0 (no cast-to-void).
+pub unsafe extern "win64" fn vcruntime_rtcast_to_void() -> u64 { 0 }
+/// _set_se_translator → return 0 (no-op).
+pub unsafe extern "win64" fn vcruntime_set_se_translator() -> u64 { 0 }
 
 /// VCRUNTIME140_1 stubs
 /// __CxxFrameHandler4 → return ExceptionContinueSearch (1).
@@ -310,6 +314,14 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
                 Some(vcruntime_type_info_destroy_list as unsafe extern "win64" fn()
                     as *const () as usize)
             }
+            "__RTCastToVoid" => {
+                Some(vcruntime_rtcast_to_void as unsafe extern "win64" fn() -> u64
+                    as *const () as usize)
+            }
+            "_set_se_translator" => {
+                Some(vcruntime_set_se_translator as unsafe extern "win64" fn() -> u64
+                    as *const () as usize)
+            }
             _ => None,
         },
         // ── VCRUNTIME140_1.dll ─────────────────────────────────────────────
@@ -334,6 +346,17 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
             }
             "?typeDefault@wxTextBuffer@@2W4wxTextFileType@@B" => {
                 Some(&WX_TYPE_DEFAULT as *const u8 as usize)
+            }
+            _ => None,
+        },
+        // ── MSVCP140_CODECVT_IDS.dll ─────────────────────────────────────
+        "msvcp140_codecvt_ids.dll" => match func {
+            "?id@?$codecvt@_SDU_Mbstatet@@@std@@2V0locale@2@A" => {
+                // Reuse LOCALE_ID_CODECVT_DD from msvcp140 crate pattern
+                Some(0usize)
+            }
+            "?id@?$codecvt@_UDU_Mbstatet@@@std@@2V0locale@2@A" => {
+                Some(0usize)
             }
             _ => None,
         },
