@@ -8399,13 +8399,12 @@ fn audacity_phase_a_probe() {
         .lines()
         .filter(|l| l.contains("unresolved") || l.contains("lookup-miss"))
         .collect();
-    eprintln!("\nUnresolved imports ({}):", unresolved.len());
-    for u in unresolved.iter().take(30) {
+    eprintln!("\nTotal unresolved imports: {}", unresolved.len());
+    eprintln!("\n=== ALL UNRESOLVED IMPORTS ===");
+    for u in &unresolved {
         eprintln!("  {u}");
     }
-    if unresolved.len() > 30 {
-        eprintln!("  ... and {} more", unresolved.len() - 30);
-    }
+    eprintln!("=== END UNRESOLVED IMPORTS ===");
 
     // GetProcAddress NULL returns
     let gpnull: Vec<&str> = stderr
