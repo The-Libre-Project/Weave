@@ -65,6 +65,11 @@ tests/fixtures/nxengine/
 tests/fixtures/audacity/
 !tests/fixtures/audacity/audacity.exe
 
+# Windows local artifacts
+Program/
+tests/fixtures/irfanview/*.ini
+opencode.json
+
 # weave-gui build artifacts
 /weave-gui/dist/
 /weave-gui/node_modules/
