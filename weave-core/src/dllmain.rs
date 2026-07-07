@@ -137,7 +137,7 @@ pub fn process_attach() {
 
     // PE DLLs loaded from disk — call their native entry points.
     #[cfg(target_os = "linux")]
-    pe_dispatch(DLL_PROCESS_ATTACH, &order);
+    pe_dispatch(DLL_PROCESS_ATTACH, &order, stubs.as_deref());
 
     #[cfg(not(target_os = "linux"))]
     let _ = &order;
@@ -171,7 +171,7 @@ pub fn process_detach() {
 
     // PE DLLs first (reverse order — dependencies last).
     #[cfg(target_os = "linux")]
-    pe_dispatch_rev(DLL_PROCESS_DETACH, &order);
+    pe_dispatch_rev(DLL_PROCESS_DETACH, &order, stubs.as_deref());
 
     #[cfg(not(target_os = "linux"))]
     let _ = &order;
@@ -200,7 +200,7 @@ pub fn thread_attach() {
     }
 
     #[cfg(target_os = "linux")]
-    pe_dispatch(DLL_THREAD_ATTACH, &order);
+    pe_dispatch(DLL_THREAD_ATTACH, &order, stubs.as_deref());
 
     #[cfg(not(target_os = "linux"))]
     let _ = &order;
@@ -220,7 +220,7 @@ pub fn thread_detach() {
     }
 
     #[cfg(target_os = "linux")]
-    pe_dispatch(DLL_THREAD_DETACH, &order);
+    pe_dispatch(DLL_THREAD_DETACH, &order, stubs.as_deref());
 
     #[cfg(not(target_os = "linux"))]
     let _ = &order;
@@ -228,9 +228,9 @@ pub fn thread_detach() {
 
 /// Call native PE DllMain entry points in forward order.
 /// Skips DLLs that have a registered Rust stub (our crate handles them).
+/// Takes the already-locked stub registry to avoid deadlock on the same mutex.
 #[cfg(target_os = "linux")]
-fn pe_dispatch(reason: u32, order: &[String]) {
-    let stubs = lock_stubs();
+fn pe_dispatch(reason: u32, order: &[String], stubs: Option<&HashMap<String, DllMainFn>>) {
     for dll in order {
         // Skip DLLs handled by a Rust stub crate — their DllMain is our
         // default_dll_main (or a custom implementation).  Calling the real
@@ -261,9 +261,9 @@ fn pe_dispatch(reason: u32, order: &[String]) {
 
 /// Call native PE DllMain entry points in reverse order (for process detach).
 /// Skips DLLs that have a registered Rust stub.
+/// Takes the already-locked stub registry to avoid deadlock.
 #[cfg(target_os = "linux")]
-fn pe_dispatch_rev(reason: u32, order: &[String]) {
-    let stubs = lock_stubs();
+fn pe_dispatch_rev(reason: u32, order: &[String], stubs: Option<&HashMap<String, DllMainFn>>) {
     for dll in order.iter().rev() {
         if let Some(ref s) = stubs {
             if s.contains_key(dll) {
