@@ -59,7 +59,7 @@ __declspec(dllimport) NTSTATUS NtTerminateProcess(HANDLE process, NTSTATUS exit_
  */
 static HANDLE get_stdout(void) {
     ULONG_PTR peb;
-    __asm__("movq %%gs:0x60, %0" : "=r"(peb));
+    __asm__("mov %%gs:0x60, %0" : "=r"(peb));
     ULONG_PTR params = *(ULONG_PTR*)(peb + 0x20);   /* PEB->ProcessParameters */
     return *(HANDLE*)(params + 0x28);                /* ProcessParameters->StandardOutput */
 }

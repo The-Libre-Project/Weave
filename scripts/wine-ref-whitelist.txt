@@ -96,3 +96,8 @@ register_tme_leave
 cancel_tme_leave
 take_tme_leave
 name_key_from_ptr
+set_backend
+init
+enumerate_monitors
+metrics_with_path
+measure_text_with_path
