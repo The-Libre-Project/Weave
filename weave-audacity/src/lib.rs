@@ -75,17 +75,24 @@ pub unsafe extern "win64" fn vcruntime_type_info_compare() -> i32 {
 /// __std_type_info_destroy_list → no-op.
 pub unsafe extern "win64" fn vcruntime_type_info_destroy_list() {}
 /// __RTCastToVoid → return 0 (no cast-to-void).
-pub unsafe extern "win64" fn vcruntime_rtcast_to_void() -> u64 { 0 }
+pub unsafe extern "win64" fn vcruntime_rtcast_to_void() -> u64 {
+    0
+}
 /// _set_se_translator → return 0 (no-op).
-pub unsafe extern "win64" fn vcruntime_set_se_translator() -> u64 { 0 }
+pub unsafe extern "win64" fn vcruntime_set_se_translator() -> u64 {
+    0
+}
 
 /// VCRUNTIME140_1 stubs
 /// __CxxFrameHandler4 → return ExceptionContinueSearch (1).
 /// Without this, exception handling crashes and triggers SEH runaway / stack overflow.
 pub unsafe extern "win64" fn vcruntime_cxx_frame_handler4(
-    _rec: *const u8, _frame: *const u8, _ctx: *const u8, _dispatch: *const u8
+    _rec: *const u8,
+    _frame: *const u8,
+    _ctx: *const u8,
+    _dispatch: *const u8,
 ) -> i32 {
-    1  // ExceptionContinueSearch
+    1 // ExceptionContinueSearch
 }
 
 /// Dummy type_info object for __RTtypeid.
@@ -290,47 +297,45 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         }
         // ── VCRUNTIME140.dll ───────────────────────────────────────────────
         "vcruntime140.dll" => match func {
-            "__current_exception" => {
-                Some(vcruntime_current_exception as unsafe extern "win64" fn() -> u64
-                    as *const () as usize)
-            }
-            "__current_exception_context" => {
-                Some(vcruntime_current_exception_context as unsafe extern "win64" fn() -> u64
-                    as *const () as usize)
-            }
-            "__RTtypeid" => {
-                Some(vcruntime_rttypeid as unsafe extern "win64" fn() -> usize
-                    as *const () as usize)
-            }
-            "__RTDynamicCast" => {
-                Some(vcruntime_rtdynamiccast as unsafe extern "win64" fn() -> usize
-                    as *const () as usize)
-            }
-            "__std_type_info_compare" => {
-                Some(vcruntime_type_info_compare as unsafe extern "win64" fn() -> i32
-                    as *const () as usize)
-            }
-            "__std_type_info_destroy_list" => {
-                Some(vcruntime_type_info_destroy_list as unsafe extern "win64" fn()
-                    as *const () as usize)
-            }
-            "__RTCastToVoid" => {
-                Some(vcruntime_rtcast_to_void as unsafe extern "win64" fn() -> u64
-                    as *const () as usize)
-            }
-            "_set_se_translator" => {
-                Some(vcruntime_set_se_translator as unsafe extern "win64" fn() -> u64
-                    as *const () as usize)
-            }
+            "__current_exception" => Some(
+                vcruntime_current_exception as unsafe extern "win64" fn() -> u64 as *const ()
+                    as usize,
+            ),
+            "__current_exception_context" => Some(
+                vcruntime_current_exception_context as unsafe extern "win64" fn() -> u64
+                    as *const () as usize,
+            ),
+            "__RTtypeid" => Some(
+                vcruntime_rttypeid as unsafe extern "win64" fn() -> usize as *const () as usize,
+            ),
+            "__RTDynamicCast" => Some(
+                vcruntime_rtdynamiccast as unsafe extern "win64" fn() -> usize as *const ()
+                    as usize,
+            ),
+            "__std_type_info_compare" => Some(
+                vcruntime_type_info_compare as unsafe extern "win64" fn() -> i32 as *const ()
+                    as usize,
+            ),
+            "__std_type_info_destroy_list" => Some(
+                vcruntime_type_info_destroy_list as unsafe extern "win64" fn() as *const ()
+                    as usize,
+            ),
+            "__RTCastToVoid" => Some(
+                vcruntime_rtcast_to_void as unsafe extern "win64" fn() -> u64 as *const () as usize,
+            ),
+            "_set_se_translator" => Some(
+                vcruntime_set_se_translator as unsafe extern "win64" fn() -> u64 as *const ()
+                    as usize,
+            ),
             _ => None,
         },
         // ── VCRUNTIME140_1.dll ─────────────────────────────────────────────
         "vcruntime140_1.dll" => match func {
-            "__CxxFrameHandler4" => {
-                Some(vcruntime_cxx_frame_handler4
+            "__CxxFrameHandler4" => Some(
+                vcruntime_cxx_frame_handler4
                     as unsafe extern "win64" fn(*const u8, *const u8, *const u8, *const u8) -> i32
-                    as *const () as usize)
-            }
+                    as *const () as usize,
+            ),
             _ => None,
         },
         // ── wxWidgets base DLL (wxbase313u_vc_x64_custom.dll) ──────────────
@@ -355,9 +360,7 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
                 // Reuse LOCALE_ID_CODECVT_DD from msvcp140 crate pattern
                 Some(0usize)
             }
-            "?id@?$codecvt@_UDU_Mbstatet@@@std@@2V0locale@2@A" => {
-                Some(0usize)
-            }
+            "?id@?$codecvt@_UDU_Mbstatet@@@std@@2V0locale@2@A" => Some(0usize),
             _ => None,
         },
         // ── wxWidgets core DLL (wxmsw313u_core_vc_x64_custom.dll) ─────────
