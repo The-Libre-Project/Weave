@@ -1063,13 +1063,26 @@ static BADOFF: i64 = -1;
 /// which now address valid initialised memory rather than a `[0u8; 128]` blob.
 static CERR_OBJ_ADDR: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
 
-/// Static zeroed buffer for `std::cout`.
+/// Static `std::cout` ostream — same structure as cerr but a separate object.
 static COUT_OBJ_ADDR: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
 fn cout_addr() -> usize {
     *COUT_OBJ_ADDR.get_or_init(|| {
-        // Allocate a zeroed ostream-compatible buffer matching cerr size.
+        // Same layout and initialisation as cerr_addr() — fake streambuf + ostream
+        // with vtables so that virtual method calls (operator<<, flush, etc.) land
+        // in our fake vtable region rather than crashing on a null vtable pointer.
+        let sb_layout = std::alloc::Layout::from_size_align(0xA0, 16).unwrap();
+        let sb_raw = unsafe { std::alloc::alloc_zeroed(sb_layout) };
         let layout = std::alloc::Layout::from_size_align(384, 16).unwrap();
-        unsafe { std::alloc::alloc_zeroed(layout) as usize }
+        let raw = unsafe { std::alloc::alloc_zeroed(layout) };
+        unsafe {
+            msvcp_streambuf_ctor(sb_raw, 0, 0, 0);
+            init_discard_streambuf_ms_layout(sb_raw);
+            msvcp_ostream_ctor(raw, sb_raw, 0, 0);
+            let vbase_off = BASIC_OSTREAM_VBTABLE[1] as usize;
+            let base = raw.add(vbase_off);
+            *(base.add(0x28) as *mut *const u8) = sb_raw;
+        }
+        raw as usize
     })
 }
 
@@ -1144,12 +1157,9 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "?cerr@std@@3V?$basic_ostream@DU?$char_traits@D@std@@@1@A" => {
             cerr_addr()
         }
-        // cout is a data object in MSVCP140.dll. The real MSVCP140.dll is
-        // not loaded (it crashes during DllMain). Using a zeroed buffer would
-        // cause a vtable-null crash on any virtual method call.  Route through
-        // the noop stub instead — callers get 0 return from any "call cout"
-        // pattern, which is safer than a null-vtable object.
-        // "?cout@std@@3V?$basic_ostream@DU?$char_traits@D@std@@@1@A" => { cout_addr() }
+        "?cout@std@@3V?$basic_ostream@DU?$char_traits@D@std@@@1@A" => {
+            cout_addr()
+        }
         "?id@?$codecvt@DDU_Mbstatet@@@std@@2V0locale@2@A" => {
             &LOCALE_ID_CODECVT_DD as *const usize as usize
         }
