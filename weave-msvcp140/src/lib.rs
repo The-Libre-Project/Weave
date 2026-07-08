@@ -1525,6 +1525,22 @@ macro_rules! istream_op {
 }
 istream_op!(msvcp_istream_op_long, i32);
 istream_op!(msvcp_istream_op_int, i32);
+pub unsafe extern "win64" fn msvcp_ostream_flush(
+    this: *mut u8,
+    _: usize,
+    _: usize,
+    _: usize,
+) -> *mut u8 {
+    this
+}
+pub unsafe extern "win64" fn msvcp_ostream_flush_w(
+    this: *mut u8,
+    _: usize,
+    _: usize,
+    _: usize,
+) -> *mut u8 {
+    this
+}
 
 /// `basic_streambuf<char>::pbackfail(int c)` — putback failure handler.
 /// Called when putback fails (buffer full or not seekable). Returns EOF.
@@ -2135,6 +2151,8 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "??5?$basic_istream@DU?$char_traits@D@std@@@std@@QEAAAEAV01@AEAN@Z" => { msvcp_istream_op_double as unsafe extern "win64" fn(*mut u8,*mut f64,usize,usize)->*mut u8 as *const () as usize }
         "??5?$basic_istream@DU?$char_traits@D@std@@@std@@QEAAAEAV01@AEAJ@Z" => { msvcp_istream_op_long as unsafe extern "win64" fn(*mut u8,*mut i32,usize,usize)->*mut u8 as *const () as usize }
         "??5?$basic_istream@DU?$char_traits@D@std@@@std@@QEAAAEAV01@AEAH@Z" => { msvcp_istream_op_int as unsafe extern "win64" fn(*mut u8,*mut i32,usize,usize)->*mut u8 as *const () as usize }
+        "?flush@?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV12@XZ" => { msvcp_ostream_flush as unsafe extern "win64" fn(*mut u8,usize,usize,usize)->*mut u8 as *const () as usize }
+        "?flush@?$basic_ostream@_WU?$char_traits@_W@std@@@std@@QEAAAEAV12@XZ" => { msvcp_ostream_flush_w as unsafe extern "win64" fn(*mut u8,usize,usize,usize)->*mut u8 as *const () as usize }
         "?eback@?$basic_streambuf@DU?$char_traits@D@std@@@std@@IEBAPEADXZ" => { msvcp_streambuf_eback as unsafe extern "win64" fn(usize,usize,usize,usize)->usize as *const () as usize }
         "?egptr@?$basic_streambuf@DU?$char_traits@D@std@@@std@@IEBAPEADXZ" => { msvcp_streambuf_egptr as unsafe extern "win64" fn(usize,usize,usize,usize)->usize as *const () as usize }
         "?epptr@?$basic_streambuf@DU?$char_traits@D@std@@@std@@IEBAPEADXZ" => { msvcp_streambuf_epptr as unsafe extern "win64" fn(usize,usize,usize,usize)->usize as *const () as usize }
