@@ -303,7 +303,8 @@ fn patch_crt_rva(dll: &str, base: usize) {
             let jmp_back_off = ret_target.wrapping_sub((tramp_addr + 21) as i64) as i32;
 
             let tramp_src: &[u8] = &[
-                0x48, 0xb8, // mov rax, imm64
+                0x48,
+                0xb8, // mov rax, imm64
                 zero_addr as u8,
                 (zero_addr >> 8) as u8,
                 (zero_addr >> 16) as u8,
@@ -312,8 +313,12 @@ fn patch_crt_rva(dll: &str, base: usize) {
                 (zero_addr >> 40) as u8,
                 (zero_addr >> 48) as u8,
                 (zero_addr >> 56) as u8,
-                0x0f, 0x10, 0x00, // movups xmm0, [rax]
-                0x0f, 0x11, 0x07, // movups [rdi], xmm0
+                0x0f,
+                0x10,
+                0x00, // movups xmm0, [rax]
+                0x0f,
+                0x11,
+                0x07, // movups [rdi], xmm0
                 0xe9, // jmp rel32
                 jmp_back_off as u8,
                 (jmp_back_off >> 8) as u8,
@@ -337,9 +342,15 @@ fn patch_crt_rva(dll: &str, base: usize) {
                 (jmp_off >> 24) as u8,
                 0x90, // nop — fills byte that was part of original movups [rdi],xmm0
             ];
-            std::ptr::copy_nonoverlapping(patch_src.as_ptr(), crash_addr as *mut u8, patch_src.len());
+            std::ptr::copy_nonoverlapping(
+                patch_src.as_ptr(),
+                crash_addr as *mut u8,
+                patch_src.len(),
+            );
 
-            eprintln!("weave: patched msvcp140.dll RVA 0x{crash_rva:x} (zero-buf copy) at base={base:#x}");
+            eprintln!(
+                "weave: patched msvcp140.dll RVA 0x{crash_rva:x} (zero-buf copy) at base={base:#x}"
+            );
             eprintln!("weave: msvcp140 zero_buf={zero_addr:#x} trampoline={tramp_addr:#x}");
         }
     }
