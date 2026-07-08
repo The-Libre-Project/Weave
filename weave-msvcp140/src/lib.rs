@@ -1445,8 +1445,8 @@ trivial_stub!(msvcp_wcscoll, i32, 0); // _Wcscoll → 0
 
 /// `basic_ios<char>::rdbuf(basic_streambuf<char>*)` — set streambuf, return old one.
 pub unsafe extern "win64" fn msvcp_ios_rdbuf_set(
-    _this: *const u8,
-    _sb: *const u8,
+    _this: usize,
+    _sb: usize,
     _c: usize,
     _d: usize,
 ) -> usize {
