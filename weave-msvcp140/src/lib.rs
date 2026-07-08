@@ -1094,6 +1094,200 @@ pub unsafe extern "win64" fn msvcp_xinvalid_argument(
     eprintln!("weave/msvcp: _Xinvalid_argument(\"{msg_str}\") — exception swallowed (no SEH)");
 }
 
+/// `_Locinfo::_W_Getmonths()` — return pointer to static wide month name table.
+/// MSVC format: buffer of 13 null-terminated wide strings (January..December + sentinel).
+/// Wine ref: dlls/msvcp90/locale.c — _W_Getmonths returns &months_w[0].
+static W_MONTHS: [u16; 156] = {
+    let mut m = [0u16; 156];
+    // January\0 (8 + 1 = 9 wchars)
+    m[0] = b'J' as u16;
+    m[1] = b'a' as u16;
+    m[2] = b'n' as u16;
+    m[3] = b'u' as u16;
+    m[4] = b'a' as u16;
+    m[5] = b'r' as u16;
+    m[6] = b'y' as u16;
+    m[7] = 0;
+    // February\0 (10 wchars at offset 9)
+    m[9] = b'F' as u16;
+    m[10] = b'e' as u16;
+    m[11] = b'b' as u16;
+    m[12] = b'r' as u16;
+    m[13] = b'u' as u16;
+    m[14] = b'a' as u16;
+    m[15] = b'r' as u16;
+    m[16] = b'y' as u16;
+    m[17] = 0;
+    // March\0 (6 wchars at offset 18)
+    m[18] = b'M' as u16;
+    m[19] = b'a' as u16;
+    m[20] = b'r' as u16;
+    m[21] = b'c' as u16;
+    m[22] = b'h' as u16;
+    m[23] = 0;
+    // April\0 (6 wchars at offset 24)
+    m[24] = b'A' as u16;
+    m[25] = b'p' as u16;
+    m[26] = b'r' as u16;
+    m[27] = b'i' as u16;
+    m[28] = b'l' as u16;
+    m[29] = 0;
+    // May\0 (4 wchars at offset 30)
+    m[30] = b'M' as u16;
+    m[31] = b'a' as u16;
+    m[32] = b'y' as u16;
+    m[33] = 0;
+    // June\0 (5 wchars at offset 34)
+    m[34] = b'J' as u16;
+    m[35] = b'u' as u16;
+    m[36] = b'n' as u16;
+    m[37] = b'e' as u16;
+    m[38] = 0;
+    // July\0 (5 wchars at offset 39)
+    m[39] = b'J' as u16;
+    m[40] = b'u' as u16;
+    m[41] = b'l' as u16;
+    m[42] = b'y' as u16;
+    m[43] = 0;
+    // August\0 (6 wchars at offset 44)
+    m[44] = b'A' as u16;
+    m[45] = b'u' as u16;
+    m[46] = b'g' as u16;
+    m[47] = b'u' as u16;
+    m[48] = b's' as u16;
+    m[49] = b't' as u16;
+    m[50] = 0;
+    // September\0 (10 wchars at offset 51)
+    m[51] = b'S' as u16;
+    m[52] = b'e' as u16;
+    m[53] = b'p' as u16;
+    m[54] = b't' as u16;
+    m[55] = b'e' as u16;
+    m[56] = b'm' as u16;
+    m[57] = b'b' as u16;
+    m[58] = b'e' as u16;
+    m[59] = b'r' as u16;
+    m[60] = 0;
+    // October\0 (8 wchars at offset 61)
+    m[61] = b'O' as u16;
+    m[62] = b'c' as u16;
+    m[63] = b't' as u16;
+    m[64] = b'o' as u16;
+    m[65] = b'b' as u16;
+    m[66] = b'e' as u16;
+    m[67] = b'r' as u16;
+    m[68] = 0;
+    // November\0 (8 wchars at offset 69)
+    m[69] = b'N' as u16;
+    m[70] = b'o' as u16;
+    m[71] = b'v' as u16;
+    m[72] = b'e' as u16;
+    m[73] = b'm' as u16;
+    m[74] = b'b' as u16;
+    m[75] = b'e' as u16;
+    m[76] = b'r' as u16;
+    m[77] = 0;
+    // December\0 (9 wchars at offset 78)
+    m[78] = b'D' as u16;
+    m[79] = b'e' as u16;
+    m[80] = b'c' as u16;
+    m[81] = b'e' as u16;
+    m[82] = b'm' as u16;
+    m[83] = b'b' as u16;
+    m[84] = b'e' as u16;
+    m[85] = b'r' as u16;
+    m[86] = 0;
+    // Terminator at offset 87 (already 0 from init)
+    m
+};
+pub unsafe extern "win64" fn msvcp_w_getmonths(
+    _this: *const u8,
+    _b: usize,
+    _c: usize,
+    _d: usize,
+) -> usize {
+    W_MONTHS.as_ptr() as usize
+}
+
+/// `_Locinfo::_W_Getdays()` — return pointer to static wide day name table.
+/// MSVC format: buffer of 7 null-terminated wide strings (Sunday..Saturday).
+static W_DAYS: [u16; 64] = {
+    let mut d = [0u16; 64];
+    // Sunday\0
+    d[0] = b'S' as u16;
+    d[1] = b'u' as u16;
+    d[2] = b'n' as u16;
+    d[3] = b'd' as u16;
+    d[4] = b'a' as u16;
+    d[5] = b'y' as u16;
+    d[6] = 0;
+    // Monday\0 at off 7
+    d[7] = b'M' as u16;
+    d[8] = b'o' as u16;
+    d[9] = b'n' as u16;
+    d[10] = b'd' as u16;
+    d[11] = b'a' as u16;
+    d[12] = b'y' as u16;
+    d[13] = 0;
+    // Tuesday\0 at off 14
+    d[14] = b'T' as u16;
+    d[15] = b'u' as u16;
+    d[16] = b'e' as u16;
+    d[17] = b's' as u16;
+    d[18] = b'd' as u16;
+    d[19] = b'a' as u16;
+    d[20] = b'y' as u16;
+    d[21] = 0;
+    // Wednesday\0 at off 22
+    d[22] = b'W' as u16;
+    d[23] = b'e' as u16;
+    d[24] = b'd' as u16;
+    d[25] = b'n' as u16;
+    d[26] = b'e' as u16;
+    d[27] = b's' as u16;
+    d[28] = b'd' as u16;
+    d[29] = b'a' as u16;
+    d[30] = b'y' as u16;
+    d[31] = 0;
+    // Thursday\0 at off 32
+    d[32] = b'T' as u16;
+    d[33] = b'h' as u16;
+    d[34] = b'u' as u16;
+    d[35] = b'r' as u16;
+    d[36] = b's' as u16;
+    d[37] = b'd' as u16;
+    d[38] = b'a' as u16;
+    d[39] = b'y' as u16;
+    d[40] = 0;
+    // Friday\0 at off 41
+    d[41] = b'F' as u16;
+    d[42] = b'r' as u16;
+    d[43] = b'i' as u16;
+    d[44] = b'd' as u16;
+    d[45] = b'a' as u16;
+    d[46] = b'y' as u16;
+    d[47] = 0;
+    // Saturday\0 at off 48
+    d[48] = b'S' as u16;
+    d[49] = b'a' as u16;
+    d[50] = b't' as u16;
+    d[51] = b'u' as u16;
+    d[52] = b'r' as u16;
+    d[53] = b'd' as u16;
+    d[54] = b'a' as u16;
+    d[55] = b'y' as u16;
+    d[56] = 0;
+    d
+};
+pub unsafe extern "win64" fn msvcp_w_getdays(
+    _this: *const u8,
+    _b: usize,
+    _c: usize,
+    _d: usize,
+) -> usize {
+    W_DAYS.as_ptr() as usize
+}
+
 /// `basic_streambuf<char>::overflow(int c)` — flush buffer or write a character when
 /// the put area is exhausted.  Returns traits::not_eof(c) on success, EOF on failure.
 /// Wine ref: dlls/msvcp60/ios.c — xsputn calls overflow when buffer is full.
@@ -1651,6 +1845,15 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
                 as *const () as usize
         }
 
+        "?_W_Getmonths@_Locinfo@std@@QEBAPEBGXZ" => {
+            msvcp_w_getmonths as unsafe extern "win64" fn(*const u8, usize, usize, usize) -> usize
+                as *const () as usize
+        }
+        "?_W_Getdays@_Locinfo@std@@QEBAPEBGXZ" => {
+            msvcp_w_getdays as unsafe extern "win64" fn(*const u8, usize, usize, usize) -> usize
+                as *const () as usize
+        }
+
         // ── Additional MSVCP140 stubs needed by Audacity ───────────────────
         "_Query_perf_counter" => {
             msvcp_query_perf_counter as unsafe extern "win64" fn(*mut i64, usize, usize, usize) -> i32
@@ -1669,8 +1872,6 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         | "?underflow@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MEAAHXZ"
         | "?pbackfail@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MEAAHH@Z"
         | "?_Syserror_map@std@@YAPEBDH@Z"
-        | "?_W_Getdays@_Locinfo@std@@QEBAPEBGXZ"
-        | "?_W_Getmonths@_Locinfo@std@@QEBAPEBGXZ"
         | "?_Gndec@?$basic_streambuf@DU?$char_traits@D@std@@@std@@IEAAPEADXZ"
         | "?_Gninc@?$basic_streambuf@DU?$char_traits@D@std@@@std@@IEAAPEADXZ"
         | "?_Gnavail@?$basic_streambuf@DU?$char_traits@D@std@@@std@@IEBA_JXZ"
