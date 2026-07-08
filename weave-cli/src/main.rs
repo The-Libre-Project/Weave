@@ -74,7 +74,31 @@ struct Args {
 ///
 /// Checks Weave's built-in stub crates first, then falls back to any
 /// PE DLLs pre-loaded from the prefix (e.g. DXVK).
+///
+/// For CRT DLLs loaded as native PEs from the exe directory, the native
+/// export table is checked FIRST so that real implementations are used
+/// instead of Weave's msvcp_noop stubs.  Weave stubs serve as fallback
+/// for symbols the native DLL doesn't export.
 fn resolve(dll: &str, func: &str) -> Option<usize> {
+    // CRT and side-by-side DLLs loaded as native PEs — prefer native exports.
+    // Without this the weave_msvcp140 resolver shadows every symbol and
+    // returns msvcp_noop, defeating the purpose of loading real CRT DLLs.
+    const NATIVE_CRT_DLLS: &[&str] = &[
+        "msvcp140.dll",
+        "msvcp140_1.dll",
+        "msvcp140_2.dll",
+        "msvcp140_atomic_wait.dll",
+        "msvcp140_codecvt_ids.dll",
+        "vcruntime140.dll",
+        "vcruntime140_1.dll",
+        "concrt140.dll",
+    ];
+    if NATIVE_CRT_DLLS.contains(&dll) {
+        if let Some(addr) = dll_registry::lookup(dll, func) {
+            return Some(addr);
+        }
+    }
+
     weave_plugin_system::lookup(dll, func)
         .or_else(|| weave_ntdll::resolve(dll, func))
         .or_else(|| weave_kernel32::resolve(dll, func))
