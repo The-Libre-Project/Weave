@@ -1468,7 +1468,7 @@ pub unsafe extern "win64" fn msvcp_streambuf_copy_ctor(
 static LOCALE_ID_CNT: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
 
 /// `_Syserror_map(int err)` — map system error code to error string.
-static SYS_ERR_UNKNOWN: [u8; 15] = *b"Unknown error\0";
+static SYS_ERR_UNKNOWN: [u8; 14] = *b"Unknown error\0";
 pub unsafe extern "win64" fn msvcp_syserror_map(
     _err: i32,
     _b: usize,
