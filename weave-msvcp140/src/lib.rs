@@ -1548,7 +1548,16 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         | "_Thrd_yield"
         | "_Wcscoll"
         | "_Wcsxfrm"
-        => msvcp_noop as *const () as usize,
+        => {
+            // Log the first unresolved msvcp140 symbol that hits the noop
+            // fallback.  The `msvcp_noop` static diagnostic tells us the
+            // this-pointer at call time; this tells us WHICH symbol.
+            static MISSING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+            if !MISSING.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                eprintln!("weave/msvcp: first unresolved symbol (msvcp_noop fallback): {func}");
+            }
+            msvcp_noop as *const () as usize
+        }
 
         "?read@?$basic_istream@DU?$char_traits@D@std@@@std@@QEAAAEAV12@PEAD_J@Z" => {
             msvcp_read as unsafe extern "win64" fn(*mut u8, *mut u8, i64) -> *mut u8
