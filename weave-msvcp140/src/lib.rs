@@ -1074,6 +1074,46 @@ pub unsafe extern "win64" fn msvcp_thrd_detach(
     0
 }
 
+/// `basic_streambuf<char>::sputn(const char*, streamsize)` — write N chars to buffer.
+/// Delegates to fwrite via the FILE* tracked by MSVCP_OPEN_FP.
+/// Wine ref: dlls/mscp60/ios.c — xsputn writes to streambuf.
+pub unsafe extern "win64" fn msvcp_sputn(
+    _this: *const u8,
+    buf: *const u8,
+    n: i64,
+    _d: usize,
+) -> i64 {
+    if buf.is_null() || n <= 0 {
+        return 0;
+    }
+    if let Some(fp) = get_current_fp() {
+        let written = libc::fwrite(buf as *const libc::c_void, 1, n as usize, fp);
+        written as i64
+    } else {
+        0
+    }
+}
+
+/// `basic_streambuf<wchar_t>::sputn(const wchar_t*, streamsize)` — write N wide chars.
+/// Converts through libc::fwrite (wchar_t is 4 bytes on Linux, 2 bytes on Windows).
+/// Wine ref: dlls/mscp60/ios.c — xsputn for wide writes wchars to streambuf.
+pub unsafe extern "win64" fn msvcp_sputn_w(
+    _this: *const u8,
+    buf: *const u16,
+    n: i64,
+    _d: usize,
+) -> i64 {
+    if buf.is_null() || n <= 0 {
+        return 0;
+    }
+    if let Some(fp) = get_current_fp() {
+        let written = libc::fwrite(buf as *const libc::c_void, 2, n as usize, fp);
+        written as i64
+    } else {
+        0
+    }
+}
+
 /// `basic_ios<char>::fill()` — return the fill character from the ios struct.
 /// MSVC layout: fillchar at `this+0x58` (set to ' ' by msvcp_basic_ios_ctor).
 /// Returns the char in AL (Win64: zero-extended to u8 return).
@@ -1481,7 +1521,6 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         | "?setstate@?$basic_ios@DU?$char_traits@D@std@@@std@@QEAAXH_N@Z"
         | "?showmanyc@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MEAA_JXZ"
         | "?sputc@?$basic_streambuf@DU?$char_traits@D@std@@@std@@QEAAHD@Z"
-        | "?sputn@?$basic_streambuf@DU?$char_traits@D@std@@@std@@QEAA_JPEBD_J@Z"
         | "?sync@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MEAAHXZ"
         | "?uflow@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MEAAHXZ"
         | "?uncaught_exception@std@@YA_NXZ"
@@ -1509,6 +1548,15 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
 
         "?fill@?$basic_ios@DU?$char_traits@D@std@@@std@@QEBADXZ" => {
             msvcp_fill as unsafe extern "win64" fn(*const u8, usize, usize, usize) -> u8
+                as *const () as usize
+        }
+
+        "?sputn@?$basic_streambuf@DU?$char_traits@D@std@@@std@@QEAA_JPEBD_J@Z" => {
+            msvcp_sputn as unsafe extern "win64" fn(*const u8, *const u8, i64, usize) -> i64
+                as *const () as usize
+        }
+        "?sputn@?$basic_streambuf@_WU?$char_traits@_W@std@@@std@@QEAA_JPEB_W_J@Z" => {
+            msvcp_sputn_w as unsafe extern "win64" fn(*const u8, *const u16, i64, usize) -> i64
                 as *const () as usize
         }
 
@@ -1603,7 +1651,6 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         | "?setprecision@std@@YA?AU?$_Smanip@_J@1@_J@Z"
         | "?setstate@?$basic_ios@_WU?$char_traits@_W@std@@@std@@QEAAXH_N@Z"
         | "?sputc@?$basic_streambuf@_WU?$char_traits@_W@std@@@std@@QEAAG_W@Z"
-        | "?sputn@?$basic_streambuf@_WU?$char_traits@_W@std@@@std@@QEAA_JPEB_W_J@Z"
         | "?tellp@?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAA?AV?$fpos@U_Mbstatet@@@2@XZ"
         | "?tie@?$basic_ios@_WU?$char_traits@_W@std@@@std@@QEBAPEAV?$basic_ostream@_WU?$char_traits@_W@std@@@2@XZ"
         | "?tolower@?$ctype@D@std@@QEBADD@Z"
