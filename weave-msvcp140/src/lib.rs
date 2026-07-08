@@ -1376,6 +1376,17 @@ pub unsafe extern "win64" fn msvcp_cnd_wait(
     )
 }
 
+/// `ios_base::operator!()` — return true if stream has an error.
+/// Our fake streams never fail, so return false.
+pub unsafe extern "win64" fn msvcp_ios_not(
+    _this: *const u8,
+    _b: usize,
+    _c: usize,
+    _d: usize,
+) -> i32 {
+    0
+}
+
 /// `basic_streambuf<char>::pbackfail(int c)` — putback failure handler.
 /// Called when putback fails (buffer full or not seekable). Returns EOF.
 /// Wine ref: dlls/msvcp60/ios.c — pbackfail returns EOF.
@@ -1961,6 +1972,11 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
                 as *const () as usize
         }
 
+        "??7ios_base@std@@QEBA_NXZ" => {
+            msvcp_ios_not as unsafe extern "win64" fn(*const u8, usize, usize, usize) -> i32
+                as *const () as usize
+        }
+
         // ── Additional MSVCP140 stubs needed by Audacity ───────────────────
         "_Query_perf_counter" => {
             msvcp_query_perf_counter as unsafe extern "win64" fn(*mut i64, usize, usize, usize) -> i32
@@ -1982,7 +1998,6 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         | "?write@?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV12@PEBD_J@Z"
         | "?_Fiopen@std@@YAPEAU_iobuf@@PEBDHH@Z"
         | "?_Id_cnt@id@locale@std@@0HA"
-        | "??7ios_base@std@@QEBA_NXZ"
         | "?fail@ios_base@std@@QEBA_NXZ"
         | "?getline@?$basic_istream@DU?$char_traits@D@std@@@std@@QEAAAEAV12@PEAD_J@Z"
         | "??6?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV01@_K@Z"
