@@ -1387,6 +1387,21 @@ pub unsafe extern "win64" fn msvcp_ios_not(
     0
 }
 
+/// `basic_ios<char>::init(basic_streambuf<char>*, bool isstd)` — initialize ios with
+/// a streambuf.  Sets strbuf, stream=NULL, fillch=' ', and clears error state.
+/// Wine ref: dlls/msvcp60/ios.c basic_ios_char_init line 4059.
+pub unsafe extern "win64" fn msvcp_ios_init(this: *mut u8, sb: *mut u8, _isstd: usize, _d: usize) {
+    if this.is_null() {
+        return;
+    }
+    // Clear the ios_base portion: state = goodbit(0), exceptions = 0
+    // fmtfl at +0x10 is already set by the ctor, but reset to defaults
+    *(this.add(0x08) as *mut u32) = 0; // state = goodbit
+    *(this.add(0x0c) as *mut u32) = 0; // exceptions = 0
+    *(this.add(0x10) as *mut u32) = 0x1008; // fmtfl = skipws|dec
+    ios_char_init(this, sb);
+}
+
 /// `basic_streambuf<char>::pbackfail(int c)` — putback failure handler.
 /// Called when putback fails (buffer full or not seekable). Returns EOF.
 /// Wine ref: dlls/msvcp60/ios.c — pbackfail returns EOF.
@@ -1977,6 +1992,11 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
                 as *const () as usize
         }
 
+        "?init@?$basic_ios@DU?$char_traits@D@std@@@std@@IEAAXPEAV?$basic_streambuf@DU?$char_traits@D@std@@@2@_N@Z" => {
+            msvcp_ios_init as unsafe extern "win64" fn(*mut u8, *mut u8, usize, usize)
+                as *const () as usize
+        }
+
         // ── Additional MSVCP140 stubs needed by Audacity ───────────────────
         "_Query_perf_counter" => {
             msvcp_query_perf_counter as unsafe extern "win64" fn(*mut i64, usize, usize, usize) -> i32
@@ -2043,7 +2063,6 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         | "?gcount@?$basic_istream@DU?$char_traits@D@std@@@std@@QEBA_JXZ"
         | "?imbue@?$basic_ios@DU?$char_traits@D@std@@@std@@QEAA?AVlocale@2@AEBV32@@Z"
         | "?in@?$codecvt@_WDU_Mbstatet@@@std@@QEBAHAEAU_Mbstatet@@PEBD1AEAPEBDPEA_W3AEAPEA_W@Z"
-        | "?init@?$basic_ios@DU?$char_traits@D@std@@@std@@IEAAXPEAV?$basic_streambuf@DU?$char_traits@D@std@@@2@_N@Z"
         | "?is@?$ctype@_W@std@@QEBA_NF_W@Z"
         | "?out@?$codecvt@_SDU_Mbstatet@@@std@@QEBAHAEAU_Mbstatet@@PEB_S1AEAPEB_SPEAD3AEAPEAD@Z"
         | "?out@?$codecvt@_UDU_Mbstatet@@@std@@QEBAHAEAU_Mbstatet@@PEB_U1AEAPEB_UPEAD3AEAPEAD@Z"
