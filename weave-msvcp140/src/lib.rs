@@ -1362,6 +1362,20 @@ pub unsafe extern "win64" fn msvcp_pnavail(
     0
 }
 
+/// `_Cnd_wait(_Cnd_t*, _Mtx_t*)` — wait on a condition variable with a mutex.
+/// Wine ref: dlls/msvcp140/msvcp140.c — _Cnd_wait calls pthread_cond_wait.
+pub unsafe extern "win64" fn msvcp_cnd_wait(
+    cnd: *mut libc::c_void,
+    mtx: *mut libc::c_void,
+    _c: usize,
+    _d: usize,
+) -> i32 {
+    libc::pthread_cond_wait(
+        cnd as *mut libc::pthread_cond_t,
+        mtx as *mut libc::pthread_mutex_t,
+    )
+}
+
 /// `basic_streambuf<char>::pbackfail(int c)` — putback failure handler.
 /// Called when putback fails (buffer full or not seekable). Returns EOF.
 /// Wine ref: dlls/msvcp60/ios.c — pbackfail returns EOF.
@@ -1942,6 +1956,11 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
                 as *const () as usize
         }
 
+        "_Cnd_wait" => {
+            msvcp_cnd_wait as unsafe extern "win64" fn(*mut libc::c_void, *mut libc::c_void, usize, usize) -> i32
+                as *const () as usize
+        }
+
         // ── Additional MSVCP140 stubs needed by Audacity ───────────────────
         "_Query_perf_counter" => {
             msvcp_query_perf_counter as unsafe extern "win64" fn(*mut i64, usize, usize, usize) -> i32
@@ -2028,7 +2047,6 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         | "?tolower@?$ctype@_W@std@@QEBAPEB_WPEA_WPEB_W@Z"
         | "?tolower@?$ctype@_W@std@@QEBA_W_W@Z"
         | "_Cnd_broadcast"
-        | "_Cnd_wait"
         | "_Strcoll"
         | "_Strxfrm"
         | "_Thrd_hardware_concurrency"
