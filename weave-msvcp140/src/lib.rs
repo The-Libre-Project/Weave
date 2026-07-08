@@ -4,6 +4,7 @@
 //! Function stubs are no-op — they accept any Win64 arguments and return 0.
 //! Real pthread implementations for _Mtx_* and _Cnd_* added in TASK-3.
 #![allow(clippy::missing_safety_doc)]
+#![allow(unreachable_patterns)]
 //! Real implementations of _Thrd_* come in TASK-4.
 //!
 //! Wine ref: dlls/msvcp140/msvcp140.c — _Mtx_init_in_situ(mtx, flags),
@@ -1402,6 +1403,46 @@ pub unsafe extern "win64" fn msvcp_ios_init(this: *mut u8, sb: *mut u8, _isstd: 
     ios_char_init(this, sb);
 }
 
+/// Batch of trivial stream status/accessor stubs for basic_ios and basic_streambuf.
+macro_rules! trivial_stub {
+    ($name:ident, $ret:ty, $val:expr) => {
+        pub unsafe extern "win64" fn $name(_: usize, _b: usize, _c: usize, _d: usize) -> $ret {
+            $val
+        }
+    };
+}
+trivial_stub!(msvcp_ios_good, i32, 1); // good() → true
+trivial_stub!(msvcp_ios_fail, i32, 0); // fail() → false
+trivial_stub!(msvcp_ios_bad, i32, 0); // bad() → false
+trivial_stub!(msvcp_ios_eof, i32, 0); // eof() → false
+trivial_stub!(msvcp_ios_width_get, i64, 0); // width() → 0
+trivial_stub!(msvcp_ios_width_set, i64, 0); // width(i64) → old width
+trivial_stub!(msvcp_ios_tie, usize, 0); // tie() → null
+trivial_stub!(msvcp_ios_rdbuf_get, usize, 0); // rdbuf() → null
+trivial_stub!(msvcp_ios_flags_get, i32, 0x1008); // flags() → skipws|dec
+trivial_stub!(msvcp_streambuf_sgetc, i32, -1); // sgetc() → EOF
+trivial_stub!(msvcp_streambuf_snextc, i32, -1); // snextc() → EOF
+trivial_stub!(msvcp_streambuf_eback, usize, 0); // eback() → null
+trivial_stub!(msvcp_streambuf_egptr, usize, 0); // egptr() → null
+trivial_stub!(msvcp_streambuf_epptr, usize, 0); // epptr() → null
+trivial_stub!(msvcp_streambuf_gptr, usize, 0); // gptr() → null
+trivial_stub!(msvcp_streambuf_pbase, usize, 0); // pbase() → null
+trivial_stub!(msvcp_streambuf_pptr, usize, 0); // pptr() → null
+trivial_stub!(msvcp_streambuf_gbump, i32, 0); // gbump(int) → 0
+trivial_stub!(msvcp_streambuf_pbump, i32, 0); // pbump(int) → 0
+trivial_stub!(msvcp_streambuf_setg, usize, 0); // setg(...) → 0
+trivial_stub!(msvcp_streambuf_setp_2, usize, 0); // setp(a,b) → 0
+trivial_stub!(msvcp_streambuf_setp_3, usize, 0); // setp(a,b,c) → 0
+trivial_stub!(msvcp_streambuf_pninc, usize, 0); // _Pninc() → null
+trivial_stub!(msvcp_streambuf_gninc, usize, 0); // _Gninc() → null
+trivial_stub!(msvcp_streambuf_gndec, usize, 0); // _Gndec() → null
+trivial_stub!(msvcp_streambuf_init_2, usize, 0); // _Init(...) → 0
+trivial_stub!(msvcp_thrd_yield, i32, 0); // _Thrd_yield → 0
+trivial_stub!(msvcp_thrd_hw_conc, i32, 1); // _Thrd_hardware_concurrency → 1
+trivial_stub!(msvcp_cnd_broadcast, i32, 0); // _Cnd_broadcast → 0
+trivial_stub!(msvcp_strcoll, i32, 0); // _Strcoll → 0
+trivial_stub!(msvcp_wcscoll, i32, 0); // _Wcscoll → 0
+
 /// `basic_streambuf<char>::pbackfail(int c)` — putback failure handler.
 /// Called when putback fails (buffer full or not seekable). Returns EOF.
 /// Wine ref: dlls/msvcp60/ios.c — pbackfail returns EOF.
@@ -1982,6 +2023,41 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
                 as *const () as usize
         }
 
+        // ── Bulk trivial stream status/accessor stubs ──────────────────────
+        // All return safe defaults (no error, null pointers, EOF, etc.)
+        // These were previously in the msvcp_noop bulk arm.
+        "?good@ios_base@std@@QEBA_NXZ" => { msvcp_ios_good as unsafe extern "win64" fn(usize,usize,usize,usize)->i32 as *const () as usize }
+        "?fail@ios_base@std@@QEBA_NXZ" => { msvcp_ios_fail as unsafe extern "win64" fn(usize,usize,usize,usize)->i32 as *const () as usize }
+        "?bad@ios_base@std@@QEBA_NXZ" => { msvcp_ios_bad as unsafe extern "win64" fn(usize,usize,usize,usize)->i32 as *const () as usize }
+        "?eof@ios_base@std@@QEBA_NXZ" => { msvcp_ios_eof as unsafe extern "win64" fn(usize,usize,usize,usize)->i32 as *const () as usize }
+        "?width@ios_base@std@@QEBA_JXZ" => { msvcp_ios_width_get as unsafe extern "win64" fn(usize,usize,usize,usize)->i64 as *const () as usize }
+        "?width@ios_base@std@@QEAA_J_J@Z" => { msvcp_ios_width_set as unsafe extern "win64" fn(usize,usize,usize,usize)->i64 as *const () as usize }
+        "?flags@ios_base@std@@QEBAHXZ" => { msvcp_ios_flags_get as unsafe extern "win64" fn(usize,usize,usize,usize)->i32 as *const () as usize }
+        "?sgetc@?$basic_streambuf@DU?$char_traits@D@std@@@std@@QEAAHXZ" => { msvcp_streambuf_sgetc as unsafe extern "win64" fn(usize,usize,usize,usize)->i32 as *const () as usize }
+        "?snextc@?$basic_streambuf@DU?$char_traits@D@std@@@std@@QEAAHXZ" => { msvcp_streambuf_snextc as unsafe extern "win64" fn(usize,usize,usize,usize)->i32 as *const () as usize }
+        "?gbump@?$basic_streambuf@DU?$char_traits@D@std@@@std@@IEAAXH@Z" => { msvcp_streambuf_gbump as unsafe extern "win64" fn(usize,usize,usize,usize)->i32 as *const () as usize }
+        "?pbump@?$basic_streambuf@DU?$char_traits@D@std@@@std@@IEAAXH@Z" => { msvcp_streambuf_pbump as unsafe extern "win64" fn(usize,usize,usize,usize)->i32 as *const () as usize }
+        "_Thrd_yield" => { msvcp_thrd_yield as unsafe extern "win64" fn(usize,usize,usize,usize)->i32 as *const () as usize }
+        "_Thrd_hardware_concurrency" => { msvcp_thrd_hw_conc as unsafe extern "win64" fn(usize,usize,usize,usize)->i32 as *const () as usize }
+        "_Cnd_broadcast" => { msvcp_cnd_broadcast as unsafe extern "win64" fn(usize,usize,usize,usize)->i32 as *const () as usize }
+        "_Strcoll" => { msvcp_strcoll as unsafe extern "win64" fn(usize,usize,usize,usize)->i32 as *const () as usize }
+        "_Wcscoll" => { msvcp_wcscoll as unsafe extern "win64" fn(usize,usize,usize,usize)->i32 as *const () as usize }
+        "?tie@?$basic_ios@DU?$char_traits@D@std@@@std@@QEBAPEAV?$basic_ostream@DU?$char_traits@D@std@@@2@XZ" => { msvcp_ios_tie as unsafe extern "win64" fn(usize,usize,usize,usize)->usize as *const () as usize }
+        "?rdbuf@?$basic_ios@DU?$char_traits@D@std@@@std@@QEBAPEAV?$basic_streambuf@DU?$char_traits@D@std@@@2@XZ" => { msvcp_ios_rdbuf_get as unsafe extern "win64" fn(usize,usize,usize,usize)->usize as *const () as usize }
+        "?eback@?$basic_streambuf@DU?$char_traits@D@std@@@std@@IEBAPEADXZ" => { msvcp_streambuf_eback as unsafe extern "win64" fn(usize,usize,usize,usize)->usize as *const () as usize }
+        "?egptr@?$basic_streambuf@DU?$char_traits@D@std@@@std@@IEBAPEADXZ" => { msvcp_streambuf_egptr as unsafe extern "win64" fn(usize,usize,usize,usize)->usize as *const () as usize }
+        "?epptr@?$basic_streambuf@DU?$char_traits@D@std@@@std@@IEBAPEADXZ" => { msvcp_streambuf_epptr as unsafe extern "win64" fn(usize,usize,usize,usize)->usize as *const () as usize }
+        "?gptr@?$basic_streambuf@DU?$char_traits@D@std@@@std@@IEBAPEADXZ" => { msvcp_streambuf_gptr as unsafe extern "win64" fn(usize,usize,usize,usize)->usize as *const () as usize }
+        "?pbase@?$basic_streambuf@DU?$char_traits@D@std@@@std@@IEBAPEADXZ" => { msvcp_streambuf_pbase as unsafe extern "win64" fn(usize,usize,usize,usize)->usize as *const () as usize }
+        "?pptr@?$basic_streambuf@DU?$char_traits@D@std@@@std@@IEBAPEADXZ" => { msvcp_streambuf_pptr as unsafe extern "win64" fn(usize,usize,usize,usize)->usize as *const () as usize }
+        "?setg@?$basic_streambuf@DU?$char_traits@D@std@@@std@@IEAAXPEAD00@Z" => { msvcp_streambuf_setg as unsafe extern "win64" fn(usize,usize,usize,usize)->usize as *const () as usize }
+        "?setp@?$basic_streambuf@DU?$char_traits@D@std@@@std@@IEAAXPEAD0@Z" => { msvcp_streambuf_setp_2 as unsafe extern "win64" fn(usize,usize,usize,usize)->usize as *const () as usize }
+        "?setp@?$basic_streambuf@DU?$char_traits@D@std@@@std@@IEAAXPEAD00@Z" => { msvcp_streambuf_setp_3 as unsafe extern "win64" fn(usize,usize,usize,usize)->usize as *const () as usize }
+        "?_Pninc@?$basic_streambuf@DU?$char_traits@D@std@@@std@@IEAAPEADXZ" => { msvcp_streambuf_pninc as unsafe extern "win64" fn(usize,usize,usize,usize)->usize as *const () as usize }
+        "?_Gndec@?$basic_streambuf@DU?$char_traits@D@std@@@std@@IEAAPEADXZ" => { msvcp_streambuf_gndec as unsafe extern "win64" fn(usize,usize,usize,usize)->usize as *const () as usize }
+        "?_Gninc@?$basic_streambuf@DU?$char_traits@D@std@@@std@@IEAAPEADXZ" => { msvcp_streambuf_gninc as unsafe extern "win64" fn(usize,usize,usize,usize)->usize as *const () as usize }
+        "?_Init@?$basic_streambuf@DU?$char_traits@D@std@@@std@@IEAAXPEAPEAD0PEAH001@Z" => { msvcp_streambuf_init_2 as unsafe extern "win64" fn(usize,usize,usize,usize)->usize as *const () as usize }
+
         "_Cnd_wait" => {
             msvcp_cnd_wait as unsafe extern "win64" fn(*mut libc::c_void, *mut libc::c_void, usize, usize) -> i32
                 as *const () as usize
@@ -2011,19 +2087,12 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
                 as *const () as usize
         }
         "?_Syserror_map@std@@YAPEBDH@Z"
-        | "?_Gndec@?$basic_streambuf@DU?$char_traits@D@std@@@std@@IEAAPEADXZ"
-        | "?_Gninc@?$basic_streambuf@DU?$char_traits@D@std@@@std@@IEAAPEADXZ"
-        | "?pbump@?$basic_streambuf@DU?$char_traits@D@std@@@std@@IEAAXH@Z"
-        | "?_Init@?$basic_streambuf@DU?$char_traits@D@std@@@std@@IEAAXPEAPEAD0PEAH001@Z"
         | "?write@?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV12@PEBD_J@Z"
         | "?_Fiopen@std@@YAPEAU_iobuf@@PEBDHH@Z"
         | "?_Id_cnt@id@locale@std@@0HA"
-        | "?fail@ios_base@std@@QEBA_NXZ"
         | "?getline@?$basic_istream@DU?$char_traits@D@std@@@std@@QEAAAEAV12@PEAD_J@Z"
         | "??6?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV01@_K@Z"
         | "??Bios_base@std@@QEBA_NXZ"
-        | "?sgetc@?$basic_streambuf@DU?$char_traits@D@std@@@std@@QEAAHXZ"
-        | "?snextc@?$basic_streambuf@DU?$char_traits@D@std@@@std@@QEAAHXZ"
         | "?_Ipfx@?$basic_istream@DU?$char_traits@D@std@@@std@@QEAA_N_N@Z"
         | "?get@?$basic_istream@DU?$char_traits@D@std@@@std@@QEAAHXZ"
         | "_Cnd_register_at_thread_exit"
