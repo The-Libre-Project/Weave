@@ -1109,7 +1109,7 @@ fn main() {
     // from PE code during loading or init.  Must be before any PE operations.
     #[cfg(target_os = "linux")]
     unsafe {
-        libc::setlocale(libc::LC_ALL, b"C\0".as_ptr() as *const libc::c_char);
+        libc::setlocale(libc::LC_ALL, c"C".as_ptr());
     }
 
     // ── −3. Prefix subcommand dispatch — intercept before clap parsing ────
