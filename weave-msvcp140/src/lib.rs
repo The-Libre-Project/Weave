@@ -1467,6 +1467,17 @@ pub unsafe extern "win64" fn msvcp_streambuf_copy_ctor(
 /// Static locale ID counter — used for locale::id assignments.
 static LOCALE_ID_CNT: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
 
+/// `_Syserror_map(int err)` — map system error code to error string.
+static SYS_ERR_UNKNOWN: [u8; 15] = *b"Unknown error\0";
+pub unsafe extern "win64" fn msvcp_syserror_map(
+    _err: i32,
+    _b: usize,
+    _c: usize,
+    _d: usize,
+) -> usize {
+    SYS_ERR_UNKNOWN.as_ptr() as usize
+}
+
 /// `basic_ostream<char>::write(const char*, streamsize)` — write to stream via FILE*.
 pub unsafe extern "win64" fn msvcp_ostream_write(
     _this: *mut u8,
@@ -2153,6 +2164,7 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "??5?$basic_istream@DU?$char_traits@D@std@@@std@@QEAAAEAV01@AEAH@Z" => { msvcp_istream_op_int as unsafe extern "win64" fn(*mut u8,*mut i32,usize,usize)->*mut u8 as *const () as usize }
         "?flush@?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV12@XZ" => { msvcp_ostream_flush as unsafe extern "win64" fn(*mut u8,usize,usize,usize)->*mut u8 as *const () as usize }
         "?flush@?$basic_ostream@_WU?$char_traits@_W@std@@@std@@QEAAAEAV12@XZ" => { msvcp_ostream_flush_w as unsafe extern "win64" fn(*mut u8,usize,usize,usize)->*mut u8 as *const () as usize }
+        "?_Syserror_map@std@@YAPEBDH@Z" => { msvcp_syserror_map as unsafe extern "win64" fn(i32,usize,usize,usize)->usize as *const () as usize }
         "?eback@?$basic_streambuf@DU?$char_traits@D@std@@@std@@IEBAPEADXZ" => { msvcp_streambuf_eback as unsafe extern "win64" fn(usize,usize,usize,usize)->usize as *const () as usize }
         "?egptr@?$basic_streambuf@DU?$char_traits@D@std@@@std@@IEBAPEADXZ" => { msvcp_streambuf_egptr as unsafe extern "win64" fn(usize,usize,usize,usize)->usize as *const () as usize }
         "?epptr@?$basic_streambuf@DU?$char_traits@D@std@@@std@@IEBAPEADXZ" => { msvcp_streambuf_epptr as unsafe extern "win64" fn(usize,usize,usize,usize)->usize as *const () as usize }
