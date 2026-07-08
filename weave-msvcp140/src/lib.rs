@@ -1312,6 +1312,56 @@ pub unsafe extern "win64" fn msvcp_overflow(
     }
 }
 
+/// `basic_streambuf<char>::seekpos(fpos_t, int mode)` — seek to position. Return fail.
+pub unsafe extern "win64" fn msvcp_seekpos(
+    _this: *const u8,
+    _pos: usize,
+    _mode: i32,
+    _d: usize,
+) -> i32 {
+    -1
+}
+
+/// `basic_streambuf<char>::seekoff(long long, int way, int mode)` — seek by offset.
+pub unsafe extern "win64" fn msvcp_seekoff(
+    _this: *const u8,
+    _off: i64,
+    _way: i32,
+    _mode: i32,
+) -> i32 {
+    -1
+}
+
+/// `basic_streambuf<char>::underflow()` — read one char from get area. Return EOF.
+pub unsafe extern "win64" fn msvcp_underflow(
+    _this: *const u8,
+    _b: usize,
+    _c: usize,
+    _d: usize,
+) -> i32 {
+    -1
+}
+
+/// `basic_streambuf<char>::_Gnavail()` — chars available in get area.
+pub unsafe extern "win64" fn msvcp_gnavail(
+    _this: *const u8,
+    _b: usize,
+    _c: usize,
+    _d: usize,
+) -> i64 {
+    0
+}
+
+/// `basic_streambuf<char>::_Pnavail()` — space available in put area.
+pub unsafe extern "win64" fn msvcp_pnavail(
+    _this: *const u8,
+    _b: usize,
+    _c: usize,
+    _d: usize,
+) -> i64 {
+    0
+}
+
 /// `basic_streambuf<char>::pbackfail(int c)` — putback failure handler.
 /// Called when putback fails (buffer full or not seekable). Returns EOF.
 /// Wine ref: dlls/msvcp60/ios.c — pbackfail returns EOF.
@@ -1871,6 +1921,27 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
                 as *const () as usize
         }
 
+        "?seekpos@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MEAA?AV?$fpos@U_Mbstatet@@@2@V32@H@Z" => {
+            msvcp_seekpos as unsafe extern "win64" fn(*const u8, usize, i32, usize) -> i32
+                as *const () as usize
+        }
+        "?seekoff@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MEAA?AV?$fpos@U_Mbstatet@@@2@_JHH@Z" => {
+            msvcp_seekoff as unsafe extern "win64" fn(*const u8, i64, i32, i32) -> i32
+                as *const () as usize
+        }
+        "?underflow@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MEAAHXZ" => {
+            msvcp_underflow as unsafe extern "win64" fn(*const u8, usize, usize, usize) -> i32
+                as *const () as usize
+        }
+        "?_Gnavail@?$basic_streambuf@DU?$char_traits@D@std@@@std@@IEBA_JXZ" => {
+            msvcp_gnavail as unsafe extern "win64" fn(*const u8, usize, usize, usize) -> i64
+                as *const () as usize
+        }
+        "?_Pnavail@?$basic_streambuf@DU?$char_traits@D@std@@@std@@IEBA_JXZ" => {
+            msvcp_pnavail as unsafe extern "win64" fn(*const u8, usize, usize, usize) -> i64
+                as *const () as usize
+        }
+
         // ── Additional MSVCP140 stubs needed by Audacity ───────────────────
         "_Query_perf_counter" => {
             msvcp_query_perf_counter as unsafe extern "win64" fn(*mut i64, usize, usize, usize) -> i32
@@ -1884,15 +1955,10 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
             msvcp_thrd_detach as unsafe extern "win64" fn(usize, usize, usize, usize) -> i32
                 as *const () as usize
         }
-        | "?seekpos@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MEAA?AV?$fpos@U_Mbstatet@@@2@V32@H@Z"
-        | "?seekoff@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MEAA?AV?$fpos@U_Mbstatet@@@2@_JHH@Z"
-        | "?underflow@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MEAAHXZ"
-        | "?_Syserror_map@std@@YAPEBDH@Z"
+        "?_Syserror_map@std@@YAPEBDH@Z"
         | "?_Gndec@?$basic_streambuf@DU?$char_traits@D@std@@@std@@IEAAPEADXZ"
         | "?_Gninc@?$basic_streambuf@DU?$char_traits@D@std@@@std@@IEAAPEADXZ"
-        | "?_Gnavail@?$basic_streambuf@DU?$char_traits@D@std@@@std@@IEBA_JXZ"
         | "?pbump@?$basic_streambuf@DU?$char_traits@D@std@@@std@@IEAAXH@Z"
-        | "?_Pnavail@?$basic_streambuf@DU?$char_traits@D@std@@@std@@IEBA_JXZ"
         | "?_Init@?$basic_streambuf@DU?$char_traits@D@std@@@std@@IEAAXPEAPEAD0PEAH001@Z"
         | "?write@?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV12@PEBD_J@Z"
         | "?_Fiopen@std@@YAPEAU_iobuf@@PEBDHH@Z"
