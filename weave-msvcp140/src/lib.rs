@@ -1586,6 +1586,25 @@ pub unsafe extern "win64" fn msvcp_fiopen_narrow(
     msvcp_fiopen(filename as *const u16, mode, prot)
 }
 
+/// `codecvt<short,char,Mbstatet>::codecvt(size_t)` — constructor. Return this.
+pub unsafe extern "win64" fn msvcp_codecvt_short_ctor(
+    this: *mut u8,
+    _refs: usize,
+    _b: usize,
+    _c: usize,
+) -> *mut u8 {
+    this
+}
+/// `codecvt<unsigned short,char,Mbstatet>::codecvt(size_t)` — constructor.
+pub unsafe extern "win64" fn msvcp_codecvt_ushort_ctor(
+    this: *mut u8,
+    _refs: usize,
+    _b: usize,
+    _c: usize,
+) -> *mut u8 {
+    this
+}
+
 /// `basic_streambuf<char>::pbackfail(int c)` — putback failure handler.
 /// Called when putback fails (buffer full or not seekable). Returns EOF.
 /// Wine ref: dlls/msvcp60/ios.c — pbackfail returns EOF.
@@ -2214,6 +2233,10 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "?c_str@?$_Yarn@D@std@@QEBAPEBDXZ" => { msvcp_syserror_map as unsafe extern "win64" fn(i32,usize,usize,usize)->usize as *const () as usize }
         "?classic@locale@std@@SAAEBV12@XZ" => { msvcp_syserror_map as unsafe extern "win64" fn(i32,usize,usize,usize)->usize as *const () as usize }
         "?_Fiopen@std@@YAPEAU_iobuf@@PEBDHH@Z" => { msvcp_fiopen_narrow as unsafe extern "win64" fn(*const u8,i32,i32)->*mut libc::c_void as *const () as usize }
+        "??0?$codecvt@_SDU_Mbstatet@@@std@@QEAA@_K@Z" => { msvcp_codecvt_short_ctor as unsafe extern "win64" fn(*mut u8,usize,usize,usize)->*mut u8 as *const () as usize }
+        "??0?$codecvt@_UDU_Mbstatet@@@std@@QEAA@_K@Z" => { msvcp_codecvt_ushort_ctor as unsafe extern "win64" fn(*mut u8,usize,usize,usize)->*mut u8 as *const () as usize }
+        "??1?$codecvt@_SDU_Mbstatet@@@std@@MEAA@XZ" => { msvcp_osfx_nop as unsafe extern "win64" fn(usize,usize,usize,usize) as *const () as usize }
+        "??1?$codecvt@_UDU_Mbstatet@@@std@@MEAA@XZ" => { msvcp_osfx_nop as unsafe extern "win64" fn(usize,usize,usize,usize) as *const () as usize }
         "??Bios_base@std@@QEBA_NXZ" => { msvcp_ios_good as unsafe extern "win64" fn(usize,usize,usize,usize)->i32 as *const () as usize }
         "?_Ipfx@?$basic_istream@DU?$char_traits@D@std@@@std@@QEAA_N_N@Z" => { msvcp_ios_good as unsafe extern "win64" fn(usize,usize,usize,usize)->i32 as *const () as usize }
         "?get@?$basic_istream@DU?$char_traits@D@std@@@std@@QEAAHXZ" => { msvcp_streambuf_sgetc as unsafe extern "win64" fn(usize,usize,usize,usize)->i32 as *const () as usize }
