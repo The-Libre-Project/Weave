@@ -2172,9 +2172,9 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "?rdbuf@?$basic_ios@DU?$char_traits@D@std@@@std@@QEBAPEAV?$basic_streambuf@DU?$char_traits@D@std@@@2@XZ" => { msvcp_ios_rdbuf_get as unsafe extern "win64" fn(usize,usize,usize,usize)->usize as *const () as usize }
         "?rdbuf@?$basic_ios@_WU?$char_traits@_W@std@@@std@@QEBAPEAV?$basic_streambuf@_WU?$char_traits@_W@std@@@2@XZ" => { msvcp_ios_rdbuf_get as unsafe extern "win64" fn(usize,usize,usize,usize)->usize as *const () as usize }
         "?tie@?$basic_ios@_WU?$char_traits@_W@std@@@std@@QEBAPEAV?$basic_ostream@_WU?$char_traits@_W@std@@@2@XZ" => { msvcp_ios_tie as unsafe extern "win64" fn(usize,usize,usize,usize)->usize as *const () as usize }
-        "?setstate@?$basic_ios@_WU?$char_traits@_W@std@@@std@@QEAAXH_N@Z" => { msvcp_osfx_nop as usize }
-        "?imbue@?$basic_ios@DU?$char_traits@D@std@@@std@@QEAA?AVlocale@2@AEBV32@@Z" => { msvcp_osfx_nop as usize }
-        "?setf@ios_base@std@@QEAAHHH@Z" => { msvcp_osfx_nop as usize }
+        "?setstate@?$basic_ios@_WU?$char_traits@_W@std@@@std@@QEAAXH_N@Z" => { msvcp_osfx_nop as unsafe extern "win64" fn(usize,usize,usize,usize) as *const () as usize }
+        "?imbue@?$basic_ios@DU?$char_traits@D@std@@@std@@QEAA?AVlocale@2@AEBV32@@Z" => { msvcp_osfx_nop as unsafe extern "win64" fn(usize,usize,usize,usize) as *const () as usize }
+        "?setf@ios_base@std@@QEAAHHH@Z" => { msvcp_osfx_nop as unsafe extern "win64" fn(usize,usize,usize,usize) as *const () as usize }
         "?resetiosflags@std@@YA?AU?$_Smanip@H@1@H@Z" => { msvcp_ostream_flush as unsafe extern "win64" fn(*mut u8,usize,usize,usize)->*mut u8 as *const () as usize }
         "?setprecision@std@@YA?AU?$_Smanip@_J@1@_J@Z" => { msvcp_ostream_flush as unsafe extern "win64" fn(*mut u8,usize,usize,usize)->*mut u8 as *const () as usize }
         "?is@?$ctype@_W@std@@QEBA_NF_W@Z" => { msvcp_ios_good as unsafe extern "win64" fn(usize,usize,usize,usize)->i32 as *const () as usize }
