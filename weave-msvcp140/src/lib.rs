@@ -2196,6 +2196,16 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "?tellp@?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAA?AV?$fpos@U_Mbstatet@@@2@XZ" => { msvcp_seekoff as unsafe extern "win64" fn(*const u8,i64,i32,i32)->i32 as *const () as usize }
         "?c_str@?$_Yarn@D@std@@QEBAPEBDXZ" => { msvcp_syserror_map as unsafe extern "win64" fn(i32,usize,usize,usize)->usize as *const () as usize }
         "?classic@locale@std@@SAAEBV12@XZ" => { msvcp_syserror_map as unsafe extern "win64" fn(i32,usize,usize,usize)->usize as *const () as usize }
+        "??Bios_base@std@@QEBA_NXZ" => { msvcp_ios_good as unsafe extern "win64" fn(usize,usize,usize,usize)->i32 as *const () as usize }
+        "?_Ipfx@?$basic_istream@DU?$char_traits@D@std@@@std@@QEAA_N_N@Z" => { msvcp_ios_good as unsafe extern "win64" fn(usize,usize,usize,usize)->i32 as *const () as usize }
+        "?get@?$basic_istream@DU?$char_traits@D@std@@@std@@QEAAHXZ" => { msvcp_streambuf_sgetc as unsafe extern "win64" fn(usize,usize,usize,usize)->i32 as *const () as usize }
+        "??6?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV01@_K@Z" => { msvcp_op_lshift_ptr as unsafe extern "win64" fn(*mut u8,usize,usize,usize)->*mut u8 as *const () as usize }
+        "??6?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV01@F@Z" => { msvcp_op_lshift_ptr as unsafe extern "win64" fn(*mut u8,usize,usize,usize)->*mut u8 as *const () as usize }
+        "??6?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV01@G@Z" => { msvcp_op_lshift_ptr as unsafe extern "win64" fn(*mut u8,usize,usize,usize)->*mut u8 as *const () as usize }
+        "??6?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV01@K@Z" => { msvcp_op_lshift_ptr as unsafe extern "win64" fn(*mut u8,usize,usize,usize)->*mut u8 as *const () as usize }
+        "??6?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV01@M@Z" => { msvcp_op_lshift_ptr as unsafe extern "win64" fn(*mut u8,usize,usize,usize)->*mut u8 as *const () as usize }
+        "??6?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV01@N@Z" => { msvcp_op_lshift_ptr as unsafe extern "win64" fn(*mut u8,usize,usize,usize)->*mut u8 as *const () as usize }
+        "??6?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV01@_J@Z" => { msvcp_op_lshift_ptr as unsafe extern "win64" fn(*mut u8,usize,usize,usize)->*mut u8 as *const () as usize }
         "?rdbuf@?$basic_ios@DU?$char_traits@D@std@@@std@@QEAAPEAV?$basic_streambuf@DU?$char_traits@D@std@@@2@PEAV32@@Z" => { msvcp_ios_rdbuf_set as unsafe extern "win64" fn(usize,usize,usize,usize)->usize as *const () as usize }
         "??0?$basic_streambuf@DU?$char_traits@D@std@@@std@@IEAA@AEBV01@@Z" => { msvcp_streambuf_copy_ctor as unsafe extern "win64" fn(*mut u8,*const u8,usize,usize)->*mut u8 as *const () as usize }
         "?_Id_cnt@id@locale@std@@0HA" => { &LOCALE_ID_CNT as *const std::sync::atomic::AtomicI32 as usize }
