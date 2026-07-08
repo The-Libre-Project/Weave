@@ -1074,6 +1074,25 @@ pub unsafe extern "win64" fn msvcp_thrd_detach(
     0
 }
 
+/// `basic_streambuf<char>::overflow(int c)` — flush buffer or write a character when
+/// the put area is exhausted.  Returns traits::not_eof(c) on success, EOF on failure.
+/// Wine ref: dlls/msvcp60/ios.c — xsputn calls overflow when buffer is full.
+/// For now: write the character via fwrite if c != EOF, return not_eof(c).
+pub unsafe extern "win64" fn msvcp_overflow(_this: *const u8, c: i32, _c: usize, _d: usize) -> i32 {
+    if c != -1
+    /* EOF */
+    {
+        if let Some(fp) = get_current_fp() {
+            let byte = c as u8;
+            libc::fwrite(&byte as *const u8 as *const libc::c_void, 1, 1, fp);
+        }
+        // Return not_eof(c): any non-EOF value.  1 is safe (not EOF).
+        1
+    } else {
+        -1 // EOF — caller is just flushing, no character to write
+    }
+}
+
 /// `basic_streambuf<wchar_t>::sputc(wchar_t)` — write a single wide character to the
 /// stream buffer.  Delegates to fwrite via the FILE* tracked by MSVCP_OPEN_FP.
 pub unsafe extern "win64" fn msvcp_sputc_w(_this: *const u8, ch: u16, _c: usize, _d: usize) -> u16 {
@@ -1597,6 +1616,11 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
                 as *const () as usize
         }
 
+        "?overflow@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MEAAHH@Z" => {
+            msvcp_overflow as unsafe extern "win64" fn(*const u8, i32, usize, usize) -> i32
+                as *const () as usize
+        }
+
         // ── Additional MSVCP140 stubs needed by Audacity ───────────────────
         "_Query_perf_counter" => {
             msvcp_query_perf_counter as unsafe extern "win64" fn(*mut i64, usize, usize, usize) -> i32
@@ -1677,7 +1701,6 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         | "?is@?$ctype@_W@std@@QEBA_NF_W@Z"
         | "?out@?$codecvt@_SDU_Mbstatet@@@std@@QEBAHAEAU_Mbstatet@@PEB_S1AEAPEB_SPEAD3AEAPEAD@Z"
         | "?out@?$codecvt@_UDU_Mbstatet@@@std@@QEBAHAEAU_Mbstatet@@PEB_U1AEAPEB_UPEAD3AEAPEAD@Z"
-        | "?overflow@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MEAAHH@Z"
         | "?peek@?$basic_istream@DU?$char_traits@D@std@@@std@@QEAAHXZ"
         | "?rdbuf@?$basic_ios@DU?$char_traits@D@std@@@std@@QEAAPEAV?$basic_streambuf@DU?$char_traits@D@std@@@2@PEAV32@@Z"
         | "?rdbuf@?$basic_ios@_WU?$char_traits@_W@std@@@std@@QEBAPEAV?$basic_streambuf@_WU?$char_traits@_W@std@@@2@XZ"
