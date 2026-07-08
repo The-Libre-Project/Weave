@@ -2251,6 +2251,7 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "?is@?$ctype@_W@std@@QEBA_NF_W@Z" => { msvcp_ios_good as unsafe extern "win64" fn(usize,usize,usize,usize)->i32 as *const () as usize }
         "?tolower@?$ctype@D@std@@QEBADD@Z" => { msvcp_fill as unsafe extern "win64" fn(*const u8,usize,usize,usize)->u8 as *const () as usize }
         "?tolower@?$ctype@_W@std@@QEBA_W_W@Z" => { msvcp_fill_w as unsafe extern "win64" fn(*const u8,usize,usize,usize)->u16 as *const () as usize }
+        "?tolower@?$ctype@_W@std@@QEBAPEB_WPEA_WPEB_W@Z" => { msvcp_tolower_range as unsafe extern "win64" fn(*const u8,*mut u8,*const u8,usize)->*mut u8 as *const () as usize }
         "?out@?$codecvt@_SDU_Mbstatet@@@std@@QEBAHAEAU_Mbstatet@@PEB_S1AEAPEB_SPEAD3AEAPEAD@Z" => { msvcp_codecvt_out_short as unsafe extern "win64" fn(*const u8,*mut u8,*const u16,*const u16,*mut *const u16,*mut u8,*mut u8,*mut *mut u8)->i32 as *const () as usize }
         "?out@?$codecvt@_UDU_Mbstatet@@@std@@QEBAHAEAU_Mbstatet@@PEB_U1AEAPEB_UPEAD3AEAPEAD@Z" => { msvcp_codecvt_out_short as unsafe extern "win64" fn(*const u8,*mut u8,*const u16,*const u16,*mut *const u16,*mut u8,*mut u8,*mut *mut u8)->i32 as *const () as usize }
         "?in@?$codecvt@_WDU_Mbstatet@@@std@@QEBAHAEAU_Mbstatet@@PEBD1AEAPEBDPEA_W3AEAPEA_W@Z" => { msvcp_codecvt_out_short as unsafe extern "win64" fn(*const u8,*mut u8,*const u16,*const u16,*mut *const u16,*mut u8,*mut u8,*mut *mut u8)->i32 as *const () as usize }
