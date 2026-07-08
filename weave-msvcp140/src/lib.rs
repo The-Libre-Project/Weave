@@ -2170,6 +2170,7 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "_Wcscoll" => { msvcp_wcscoll as unsafe extern "win64" fn(usize,usize,usize,usize)->i32 as *const () as usize }
         "?tie@?$basic_ios@DU?$char_traits@D@std@@@std@@QEBAPEAV?$basic_ostream@DU?$char_traits@D@std@@@2@XZ" => { msvcp_ios_tie as unsafe extern "win64" fn(usize,usize,usize,usize)->usize as *const () as usize }
         "?rdbuf@?$basic_ios@DU?$char_traits@D@std@@@std@@QEBAPEAV?$basic_streambuf@DU?$char_traits@D@std@@@2@XZ" => { msvcp_ios_rdbuf_get as unsafe extern "win64" fn(usize,usize,usize,usize)->usize as *const () as usize }
+        "?rdbuf@?$basic_ios@_WU?$char_traits@_W@std@@@std@@QEBAPEAV?$basic_streambuf@_WU?$char_traits@_W@std@@@2@XZ" => { msvcp_ios_rdbuf_get as unsafe extern "win64" fn(usize,usize,usize,usize)->usize as *const () as usize }
         "?rdbuf@?$basic_ios@DU?$char_traits@D@std@@@std@@QEAAPEAV?$basic_streambuf@DU?$char_traits@D@std@@@2@PEAV32@@Z" => { msvcp_ios_rdbuf_set as unsafe extern "win64" fn(usize,usize,usize,usize)->usize as *const () as usize }
         "??0?$basic_streambuf@DU?$char_traits@D@std@@@std@@IEAA@AEBV01@@Z" => { msvcp_streambuf_copy_ctor as unsafe extern "win64" fn(*mut u8,*const u8,usize,usize)->*mut u8 as *const () as usize }
         "?_Id_cnt@id@locale@std@@0HA" => { &LOCALE_ID_CNT as *const std::sync::atomic::AtomicI32 as usize }
