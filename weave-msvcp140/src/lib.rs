@@ -1030,6 +1030,50 @@ pub unsafe extern "win64" fn msvcp_uncaught_exceptions() -> i32 {
     0
 }
 
+/// `_Query_perf_counter(LARGE_INTEGER*)` — write current performance counter.
+/// Wine ref: dlls/msvcp140/msvcp140.c — _Query_perf_counter calls QueryPerformanceCounter.
+/// On Linux: clock_gettime(CLOCK_MONOTONIC, &ts) → counter = ts.tv_sec * 1e9 + ts.tv_nsec
+pub unsafe extern "win64" fn msvcp_query_perf_counter(
+    out: *mut i64,
+    _b: usize,
+    _c: usize,
+    _d: usize,
+) -> i32 {
+    if out.is_null() {
+        return 0;
+    }
+    let mut ts = std::mem::zeroed::<libc::timespec>();
+    libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts);
+    *out = ts.tv_sec as i64 * 1_000_000_000 + ts.tv_nsec as i64;
+    1 // non-zero = success
+}
+
+/// `_Query_perf_frequency(LARGE_INTEGER*)` — write the performance counter frequency.
+/// Wine ref: dlls/msvcp140/msvcp140.c — _Query_perf_frequency calls QueryPerformanceFrequency.
+/// On Linux: clock_gettime returns nanosecond resolution → 1_000_000_000 Hz.
+pub unsafe extern "win64" fn msvcp_query_perf_frequency(
+    out: *mut i64,
+    _b: usize,
+    _c: usize,
+    _d: usize,
+) -> i32 {
+    if out.is_null() {
+        return 0;
+    }
+    *out = 1_000_000_000; // 1 GHz = nanosecond resolution
+    1
+}
+
+/// `_Thrd_detach(thr)` — detach a thread handle (no-op under Weave).
+pub unsafe extern "win64" fn msvcp_thrd_detach(
+    _thr: usize,
+    _b: usize,
+    _c: usize,
+    _d: usize,
+) -> i32 {
+    0
+}
+
 /// `basic_ios<char>::fill()` — return the fill character from the ios struct.
 /// MSVC layout: fillchar at `this+0x58` (set to ' ' by msvcp_basic_ios_ctor).
 /// Returns the char in AL (Win64: zero-extended to u8 return).
@@ -1469,13 +1513,22 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         }
 
         // ── Additional MSVCP140 stubs needed by Audacity ───────────────────
-        "_Query_perf_counter"
-        | "_Query_perf_frequency"
+        "_Query_perf_counter" => {
+            msvcp_query_perf_counter as unsafe extern "win64" fn(*mut i64, usize, usize, usize) -> i32
+                as *const () as usize
+        }
+        "_Query_perf_frequency" => {
+            msvcp_query_perf_frequency as unsafe extern "win64" fn(*mut i64, usize, usize, usize) -> i32
+                as *const () as usize
+        }
+        "_Thrd_detach" => {
+            msvcp_thrd_detach as unsafe extern "win64" fn(usize, usize, usize, usize) -> i32
+                as *const () as usize
+        }
         | "?seekpos@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MEAA?AV?$fpos@U_Mbstatet@@@2@V32@H@Z"
         | "?seekoff@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MEAA?AV?$fpos@U_Mbstatet@@@2@_JHH@Z"
         | "?underflow@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MEAAHXZ"
         | "?pbackfail@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MEAAHH@Z"
-        | "_Thrd_detach"
         | "?_Syserror_map@std@@YAPEBDH@Z"
         | "?_W_Getdays@_Locinfo@std@@QEBAPEBGXZ"
         | "?_W_Getmonths@_Locinfo@std@@QEBAPEBGXZ"
