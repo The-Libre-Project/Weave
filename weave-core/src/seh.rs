@@ -830,8 +830,10 @@ fn print_weave_crash(
     // With RSP=0 we can only emit raw RIP if dladdr resolved anything.
     if bt_count > 0 && (stack_top != 0 || stack_prev != 0) {
         push!(b"\nweave:   backtrace:");
-        for i in 0..std::cmp::min(bt_count, 4usize) {
-            let ba = bt_entries[i];
+        for (i, &ba) in bt_entries[..std::cmp::min(bt_count, 4usize)]
+            .iter()
+            .enumerate()
+        {
             if ba == 0 {
                 break;
             }
