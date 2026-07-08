@@ -12,7 +12,17 @@
 
 /// Single no-op stub for all remaining function symbols.
 /// Win64 ABI places return value in RAX; returning 0 covers void, ptr, and int return types.
-pub unsafe extern "win64" fn msvcp_noop(_a: usize, _b: usize, _c: usize, _d: usize) -> usize {
+///
+/// Diagnostic: logs the first invocation (with arg0/RCX) so we can identify
+/// which unresolved stub gets called during MSVCP140 DllMain init and whose
+/// return-0 value gets used as a corrupted vtable pointer.
+pub unsafe extern "win64" fn msvcp_noop(a0: usize, _b: usize, _c: usize, _d: usize) -> usize {
+    static NOOP_FIRED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if !NOOP_FIRED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        eprintln!(
+            "weave/msvcp: FIRST noop stub call a0=0x{a0:x} — return 0 may be used as vtable base"
+        );
+    }
     0
 }
 
@@ -835,6 +845,15 @@ pub unsafe extern "win64" fn msvcp_fiopen(
 ///   flags&0x100=recursive; returns _Thrd_success=0.
 /// The caller owns the memory. No Weave-side allocation occurs.
 pub unsafe extern "win64" fn mtx_init_in_situ(mtx: *mut libc::c_void, flags: i32) -> i32 {
+    {
+        static FIRST: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if !FIRST.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            eprintln!(
+                "weave/msvcp: _Mtx_init_in_situ mtx=0x{:x} flags=0x{flags:x}",
+                mtx as usize
+            );
+        }
+    }
     #[cfg(target_os = "linux")]
     {
         let mut attr: libc::pthread_mutexattr_t = core::mem::zeroed();
@@ -880,6 +899,12 @@ pub unsafe extern "win64" fn mtx_lock(
     _c: usize,
     _d: usize,
 ) -> i32 {
+    {
+        static FIRST: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if !FIRST.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            eprintln!("weave/msvcp: _Mtx_lock mtx=0x{:x}", mtx as usize);
+        }
+    }
     #[cfg(target_os = "linux")]
     {
         libc::pthread_mutex_lock(mtx as *mut libc::pthread_mutex_t)
@@ -1007,11 +1032,20 @@ pub unsafe extern "win64" fn msvcp_uncaught_exceptions() -> i32 {
 
 /// `_Cnd_do_broadcast_at_thread_exit` — no-op.
 pub unsafe extern "win64" fn msvcp_cnd_do_broadcast_at_thread_exit(
-    _a: usize,
+    cnd: *mut libc::c_void,
     _b: usize,
     _c: usize,
     _d: usize,
 ) {
+    {
+        static FIRST: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if !FIRST.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            eprintln!(
+                "weave/msvcp: _Cnd_do_broadcast_at_thread_exit cnd=0x{:x}",
+                cnd as usize
+            );
+        }
+    }
 }
 
 // ── Real _Thrd_* and _Xtime_get_ticks implementations ────────────────────────
