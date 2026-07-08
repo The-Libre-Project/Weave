@@ -1075,7 +1075,8 @@ pub unsafe extern "win64" fn msvcp_thrd_detach(
 }
 
 /// `std::_Xinvalid_argument(char const* msg)` — throws std::invalid_argument.
-/// Weave doesn't support C++ exceptions, so log and abort.
+/// Weave doesn't support C++ exceptions, so log the message and return.
+/// The caller will likely crash, but the diagnostic tells us WHAT was invalid.
 /// Wine ref: dlls/msvcp90/error.c — _Xinvalid_argument calls _Throw_Cpp_error.
 pub unsafe extern "win64" fn msvcp_xinvalid_argument(
     msg: *const u8,
@@ -1090,8 +1091,7 @@ pub unsafe extern "win64" fn msvcp_xinvalid_argument(
             .to_string_lossy()
             .into_owned()
     };
-    eprintln!("weave/msvcp: _Xinvalid_argument(\"{msg_str}\") — aborting");
-    unsafe { libc::abort() };
+    eprintln!("weave/msvcp: _Xinvalid_argument(\"{msg_str}\") — exception swallowed (no SEH)");
 }
 
 /// `basic_streambuf<char>::overflow(int c)` — flush buffer or write a character when
