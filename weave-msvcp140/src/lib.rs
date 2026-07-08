@@ -2233,6 +2233,8 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "?c_str@?$_Yarn@D@std@@QEBAPEBDXZ" => { msvcp_syserror_map as unsafe extern "win64" fn(i32,usize,usize,usize)->usize as *const () as usize }
         "?classic@locale@std@@SAAEBV12@XZ" => { msvcp_syserror_map as unsafe extern "win64" fn(i32,usize,usize,usize)->usize as *const () as usize }
         "?_Fiopen@std@@YAPEAU_iobuf@@PEBDHH@Z" => { msvcp_fiopen_narrow as unsafe extern "win64" fn(*const u8,i32,i32)->*mut libc::c_void as *const () as usize }
+        "_Wcsxfrm" => { msvcp_ios_eof as unsafe extern "win64" fn(usize,usize,usize,usize)->i32 as *const () as usize }
+        "_Strxfrm" => { msvcp_ios_eof as unsafe extern "win64" fn(usize,usize,usize,usize)->i32 as *const () as usize }
         "??0?$codecvt@_SDU_Mbstatet@@@std@@QEAA@_K@Z" => { msvcp_codecvt_short_ctor as unsafe extern "win64" fn(*mut u8,usize,usize,usize)->*mut u8 as *const () as usize }
         "??0?$codecvt@_UDU_Mbstatet@@@std@@QEAA@_K@Z" => { msvcp_codecvt_ushort_ctor as unsafe extern "win64" fn(*mut u8,usize,usize,usize)->*mut u8 as *const () as usize }
         "??1?$codecvt@_SDU_Mbstatet@@@std@@MEAA@XZ" => { msvcp_osfx_nop as unsafe extern "win64" fn(usize,usize,usize,usize) as *const () as usize }
