@@ -1078,12 +1078,17 @@ pub unsafe extern "win64" fn msvcp_thrd_detach(
 /// the put area is exhausted.  Returns traits::not_eof(c) on success, EOF on failure.
 /// Wine ref: dlls/msvcp60/ios.c — xsputn calls overflow when buffer is full.
 /// For now: write the character via fwrite if c != EOF, return not_eof(c).
-pub unsafe extern "win64" fn msvcp_overflow(_this: *const u8, c: i32, _c: usize, _d: usize) -> i32 {
-    if c != -1
+pub unsafe extern "win64" fn msvcp_overflow(
+    _this: *const u8,
+    ch: i32,
+    _b: usize,
+    _c: usize,
+) -> i32 {
+    if ch != -1
     /* EOF */
     {
         if let Some(fp) = get_current_fp() {
-            let byte = c as u8;
+            let byte = ch as u8;
             libc::fwrite(&byte as *const u8 as *const libc::c_void, 1, 1, fp);
         }
         // Return not_eof(c): any non-EOF value.  1 is safe (not EOF).
