@@ -1312,6 +1312,18 @@ pub unsafe extern "win64" fn msvcp_overflow(
     }
 }
 
+/// `basic_streambuf<char>::pbackfail(int c)` — putback failure handler.
+/// Called when putback fails (buffer full or not seekable). Returns EOF.
+/// Wine ref: dlls/msvcp60/ios.c — pbackfail returns EOF.
+pub unsafe extern "win64" fn msvcp_pbackfail(
+    _this: *const u8,
+    _ch: i32,
+    _b: usize,
+    _c: usize,
+) -> i32 {
+    -1 // EOF
+}
+
 /// `basic_streambuf<wchar_t>::sputc(wchar_t)` — write a single wide character to the
 /// stream buffer.  Delegates to fwrite via the FILE* tracked by MSVCP_OPEN_FP.
 pub unsafe extern "win64" fn msvcp_sputc_w(_this: *const u8, ch: u16, _c: usize, _d: usize) -> u16 {
@@ -1854,6 +1866,11 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
                 as *const () as usize
         }
 
+        "?pbackfail@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MEAAHH@Z" => {
+            msvcp_pbackfail as unsafe extern "win64" fn(*const u8, i32, usize, usize) -> i32
+                as *const () as usize
+        }
+
         // ── Additional MSVCP140 stubs needed by Audacity ───────────────────
         "_Query_perf_counter" => {
             msvcp_query_perf_counter as unsafe extern "win64" fn(*mut i64, usize, usize, usize) -> i32
@@ -1870,7 +1887,6 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         | "?seekpos@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MEAA?AV?$fpos@U_Mbstatet@@@2@V32@H@Z"
         | "?seekoff@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MEAA?AV?$fpos@U_Mbstatet@@@2@_JHH@Z"
         | "?underflow@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MEAAHXZ"
-        | "?pbackfail@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MEAAHH@Z"
         | "?_Syserror_map@std@@YAPEBDH@Z"
         | "?_Gndec@?$basic_streambuf@DU?$char_traits@D@std@@@std@@IEAAPEADXZ"
         | "?_Gninc@?$basic_streambuf@DU?$char_traits@D@std@@@std@@IEAAPEADXZ"
