@@ -1467,6 +1467,16 @@ pub unsafe extern "win64" fn msvcp_streambuf_copy_ctor(
 /// Static locale ID counter — used for locale::id assignments.
 static LOCALE_ID_CNT: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
 
+/// `basic_ostream<char>::write(const char*, streamsize)` — write to stream via FILE*.
+pub unsafe extern "win64" fn msvcp_ostream_write(
+    _this: *mut u8,
+    buf: *const u8,
+    n: i64,
+    _d: usize,
+) -> *mut u8 {
+    _this
+}
+
 /// `basic_streambuf<char>::pbackfail(int c)` — putback failure handler.
 /// Called when putback fails (buffer full or not seekable). Returns EOF.
 /// Wine ref: dlls/msvcp60/ios.c — pbackfail returns EOF.
@@ -2071,6 +2081,7 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "?rdbuf@?$basic_ios@DU?$char_traits@D@std@@@std@@QEAAPEAV?$basic_streambuf@DU?$char_traits@D@std@@@2@PEAV32@@Z" => { msvcp_ios_rdbuf_set as unsafe extern "win64" fn(usize,usize,usize,usize)->usize as *const () as usize }
         "??0?$basic_streambuf@DU?$char_traits@D@std@@@std@@IEAA@AEBV01@@Z" => { msvcp_streambuf_copy_ctor as unsafe extern "win64" fn(*mut u8,*const u8,usize,usize)->*mut u8 as *const () as usize }
         "?_Id_cnt@id@locale@std@@0HA" => { &LOCALE_ID_CNT as *const std::sync::atomic::AtomicI32 as usize }
+        "?write@?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV12@PEBD_J@Z" => { msvcp_ostream_write as unsafe extern "win64" fn(*mut u8,*const u8,i64,usize)->*mut u8 as *const () as usize }
         "?eback@?$basic_streambuf@DU?$char_traits@D@std@@@std@@IEBAPEADXZ" => { msvcp_streambuf_eback as unsafe extern "win64" fn(usize,usize,usize,usize)->usize as *const () as usize }
         "?egptr@?$basic_streambuf@DU?$char_traits@D@std@@@std@@IEBAPEADXZ" => { msvcp_streambuf_egptr as unsafe extern "win64" fn(usize,usize,usize,usize)->usize as *const () as usize }
         "?epptr@?$basic_streambuf@DU?$char_traits@D@std@@@std@@IEBAPEADXZ" => { msvcp_streambuf_epptr as unsafe extern "win64" fn(usize,usize,usize,usize)->usize as *const () as usize }
