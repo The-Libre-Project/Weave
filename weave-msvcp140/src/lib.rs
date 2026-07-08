@@ -1553,6 +1553,14 @@ pub unsafe extern "win64" fn msvcp_ostream_flush_w(
     this
 }
 pub unsafe extern "win64" fn msvcp_osfx_nop(_a: usize, _b: usize, _c: usize, _d: usize) {}
+pub unsafe extern "win64" fn msvcp_op_lshift_ptr(
+    this: *mut u8,
+    _: usize,
+    _: usize,
+    _: usize,
+) -> *mut u8 {
+    this
+}
 
 /// `basic_streambuf<char>::pbackfail(int c)` — putback failure handler.
 /// Called when putback fails (buffer full or not seekable). Returns EOF.
@@ -2168,6 +2176,7 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "?_Syserror_map@std@@YAPEBDH@Z" => { msvcp_syserror_map as unsafe extern "win64" fn(i32,usize,usize,usize)->usize as *const () as usize }
         "?_Osfx@?$basic_ostream@_WU?$char_traits@_W@std@@@std@@QEAAXXZ" => { msvcp_osfx_nop as unsafe extern "win64" fn(usize,usize,usize,usize) as *const () as usize }
         "?_Osfx@?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAXXZ" => { msvcp_osfx_nop as unsafe extern "win64" fn(usize,usize,usize,usize) as *const () as usize }
+        "??6?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV01@PEBX@Z" => { msvcp_op_lshift_ptr as unsafe extern "win64" fn(*mut u8,usize,usize,usize)->*mut u8 as *const () as usize }
         "?eback@?$basic_streambuf@DU?$char_traits@D@std@@@std@@IEBAPEADXZ" => { msvcp_streambuf_eback as unsafe extern "win64" fn(usize,usize,usize,usize)->usize as *const () as usize }
         "?egptr@?$basic_streambuf@DU?$char_traits@D@std@@@std@@IEBAPEADXZ" => { msvcp_streambuf_egptr as unsafe extern "win64" fn(usize,usize,usize,usize)->usize as *const () as usize }
         "?epptr@?$basic_streambuf@DU?$char_traits@D@std@@@std@@IEBAPEADXZ" => { msvcp_streambuf_epptr as unsafe extern "win64" fn(usize,usize,usize,usize)->usize as *const () as usize }
