@@ -1510,6 +1510,22 @@ pub unsafe extern "win64" fn msvcp_istream_op_double(
     this
 }
 
+/// Batch: istream operator>> stubs — all return *this without reading.
+macro_rules! istream_op {
+    ($name:ident, $ty:ty) => {
+        pub unsafe extern "win64" fn $name(
+            this: *mut u8,
+            _: *mut $ty,
+            _c: usize,
+            _d: usize,
+        ) -> *mut u8 {
+            this
+        }
+    };
+}
+istream_op!(msvcp_istream_op_long, i32);
+istream_op!(msvcp_istream_op_int, i32);
+
 /// `basic_streambuf<char>::pbackfail(int c)` — putback failure handler.
 /// Called when putback fails (buffer full or not seekable). Returns EOF.
 /// Wine ref: dlls/msvcp60/ios.c — pbackfail returns EOF.
@@ -2117,6 +2133,8 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "?write@?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV12@PEBD_J@Z" => { msvcp_ostream_write as unsafe extern "win64" fn(*mut u8,*const u8,i64,usize)->*mut u8 as *const () as usize }
         "?out@?$codecvt@_SDU_Mbstatet@@@std@@QEBAHAEAU_Mbstatet@@PEB_S1AEAPEB_SPEAD3AEAPEAD@Z" => { msvcp_codecvt_out_short as unsafe extern "win64" fn(*const u8,*mut u8,*const u16,*const u16,*mut *const u16,*mut u8,*mut u8,*mut *mut u8)->i32 as *const () as usize }
         "??5?$basic_istream@DU?$char_traits@D@std@@@std@@QEAAAEAV01@AEAN@Z" => { msvcp_istream_op_double as unsafe extern "win64" fn(*mut u8,*mut f64,usize,usize)->*mut u8 as *const () as usize }
+        "??5?$basic_istream@DU?$char_traits@D@std@@@std@@QEAAAEAV01@AEAJ@Z" => { msvcp_istream_op_long as unsafe extern "win64" fn(*mut u8,*mut i32,usize,usize)->*mut u8 as *const () as usize }
+        "??5?$basic_istream@DU?$char_traits@D@std@@@std@@QEAAAEAV01@AEAH@Z" => { msvcp_istream_op_int as unsafe extern "win64" fn(*mut u8,*mut i32,usize,usize)->*mut u8 as *const () as usize }
         "?eback@?$basic_streambuf@DU?$char_traits@D@std@@@std@@IEBAPEADXZ" => { msvcp_streambuf_eback as unsafe extern "win64" fn(usize,usize,usize,usize)->usize as *const () as usize }
         "?egptr@?$basic_streambuf@DU?$char_traits@D@std@@@std@@IEBAPEADXZ" => { msvcp_streambuf_egptr as unsafe extern "win64" fn(usize,usize,usize,usize)->usize as *const () as usize }
         "?epptr@?$basic_streambuf@DU?$char_traits@D@std@@@std@@IEBAPEADXZ" => { msvcp_streambuf_epptr as unsafe extern "win64" fn(usize,usize,usize,usize)->usize as *const () as usize }
