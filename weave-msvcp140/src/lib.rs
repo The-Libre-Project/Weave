@@ -1076,12 +1076,7 @@ pub unsafe extern "win64" fn msvcp_thrd_detach(
 
 /// `basic_streambuf<wchar_t>::sputc(wchar_t)` — write a single wide character to the
 /// stream buffer.  Delegates to fwrite via the FILE* tracked by MSVCP_OPEN_FP.
-pub unsafe extern "win64" fn msvcp_sputc_w(
-    _this: *const u8,
-    ch: u16,
-    _c: usize,
-    _d: usize,
-) -> u16 {
+pub unsafe extern "win64" fn msvcp_sputc_w(_this: *const u8, ch: u16, _c: usize, _d: usize) -> u16 {
     if let Some(fp) = get_current_fp() {
         let val = ch;
         libc::fwrite(&val as *const u16 as *const libc::c_void, 2, 1, fp);
