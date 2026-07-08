@@ -1470,8 +1470,8 @@ static LOCALE_ID_CNT: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI3
 /// `basic_ostream<char>::write(const char*, streamsize)` — write to stream via FILE*.
 pub unsafe extern "win64" fn msvcp_ostream_write(
     _this: *mut u8,
-    buf: *const u8,
-    n: i64,
+    _buf: *const u8,
+    _n: i64,
     _d: usize,
 ) -> *mut u8 {
     _this
