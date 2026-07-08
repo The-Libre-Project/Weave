@@ -1617,6 +1617,14 @@ pub unsafe extern "win64" fn msvcp_cnd_unregister_thread_exit(
     _e: usize,
 ) {
 }
+pub unsafe extern "win64" fn msvcp_locinfo_tag_ctor(
+    this: *mut u8,
+    _cat: i32,
+    _name: *const u8,
+    _d: usize,
+) -> *mut u8 {
+    this
+}
 /// `codecvt<unsigned short,char,Mbstatet>::codecvt(size_t)` — constructor.
 pub unsafe extern "win64" fn msvcp_codecvt_ushort_ctor(
     this: *mut u8,
@@ -2275,6 +2283,8 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "?tolower@?$ctype@D@std@@QEBAPEBDPEADPEBD@Z" => { msvcp_tolower_range as unsafe extern "win64" fn(*const u8,*mut u8,*const u8,usize)->*mut u8 as *const () as usize }
         "_Cnd_register_at_thread_exit" => { msvcp_cnd_register_thread_exit as unsafe extern "win64" fn(*mut libc::c_void,usize,usize,usize) as *const () as usize }
         "_Cnd_unregister_at_thread_exit" => { msvcp_cnd_unregister_thread_exit as unsafe extern "win64" fn(usize,usize,usize,usize) as *const () as usize }
+        "??0_Locinfo@std@@QEAA@HPEBD@Z" => { msvcp_locinfo_tag_ctor as unsafe extern "win64" fn(*mut u8,i32,*const u8,usize)->*mut u8 as *const () as usize }
+        "?_Getname@_Locinfo@std@@QEBAPEBDXZ" => { msvcp_syserror_map as unsafe extern "win64" fn(i32,usize,usize,usize)->usize as *const () as usize }
         "??0?$codecvt@_SDU_Mbstatet@@@std@@QEAA@_K@Z" => { msvcp_codecvt_short_ctor as unsafe extern "win64" fn(*mut u8,usize,usize,usize)->*mut u8 as *const () as usize }
         "??0?$codecvt@_UDU_Mbstatet@@@std@@QEAA@_K@Z" => { msvcp_codecvt_ushort_ctor as unsafe extern "win64" fn(*mut u8,usize,usize,usize)->*mut u8 as *const () as usize }
         "??1?$codecvt@_SDU_Mbstatet@@@std@@MEAA@XZ" => { msvcp_osfx_nop as unsafe extern "win64" fn(usize,usize,usize,usize) as *const () as usize }
