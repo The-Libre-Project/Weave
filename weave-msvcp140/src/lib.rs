@@ -1553,6 +1553,13 @@ pub unsafe extern "win64" fn msvcp_ostream_flush_w(
     this
 }
 pub unsafe extern "win64" fn msvcp_osfx_nop(_a: usize, _b: usize, _c: usize, _d: usize) {}
+pub unsafe extern "win64" fn msvcp_fill_w(this: *const u8, _b: usize, _c: usize, _d: usize) -> u16 {
+    if this.is_null() {
+        0
+    } else {
+        *this.add(0x58) as u16
+    }
+}
 pub unsafe extern "win64" fn msvcp_op_lshift_ptr(
     this: *mut u8,
     _: usize,
@@ -2177,6 +2184,7 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "?_Osfx@?$basic_ostream@_WU?$char_traits@_W@std@@@std@@QEAAXXZ" => { msvcp_osfx_nop as unsafe extern "win64" fn(usize,usize,usize,usize) as *const () as usize }
         "?_Osfx@?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAXXZ" => { msvcp_osfx_nop as unsafe extern "win64" fn(usize,usize,usize,usize) as *const () as usize }
         "??6?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV01@PEBX@Z" => { msvcp_op_lshift_ptr as unsafe extern "win64" fn(*mut u8,usize,usize,usize)->*mut u8 as *const () as usize }
+        "?fill@?$basic_ios@_WU?$char_traits@_W@std@@@std@@QEBA_WXZ" => { msvcp_fill_w as unsafe extern "win64" fn(*const u8,usize,usize,usize)->u16 as *const () as usize }
         "?eback@?$basic_streambuf@DU?$char_traits@D@std@@@std@@IEBAPEADXZ" => { msvcp_streambuf_eback as unsafe extern "win64" fn(usize,usize,usize,usize)->usize as *const () as usize }
         "?egptr@?$basic_streambuf@DU?$char_traits@D@std@@@std@@IEBAPEADXZ" => { msvcp_streambuf_egptr as unsafe extern "win64" fn(usize,usize,usize,usize)->usize as *const () as usize }
         "?epptr@?$basic_streambuf@DU?$char_traits@D@std@@@std@@IEBAPEADXZ" => { msvcp_streambuf_epptr as unsafe extern "win64" fn(usize,usize,usize,usize)->usize as *const () as usize }
