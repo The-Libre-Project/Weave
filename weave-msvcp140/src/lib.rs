@@ -1569,6 +1569,23 @@ pub unsafe extern "win64" fn msvcp_op_lshift_ptr(
     this
 }
 
+/// `_Fiopen(char const*, int, int)` — narrow filename version. Wraps the wide variant.
+pub unsafe extern "win64" fn msvcp_fiopen_narrow(
+    filename: *const u8,
+    mode: i32,
+    prot: i32,
+) -> *mut libc::c_void {
+    if filename.is_null() {
+        return msvcp_fiopen(std::ptr::null(), mode, prot);
+    }
+    // Convert narrow (UTF-8 on Linux) to wide (UTF-16 for MSVCP). We don't need
+    // real conversion — just pass through to fopen via the wide path, which on
+    // Linux interprets as UTF-8 bytes anyway. The wide function's u16* cast is
+    // safe because both u8 and u16 are read-only and the function null-terminates
+    // on the first zero byte (which is the same in ASCII/UTF-8).
+    msvcp_fiopen(filename as *const u16, mode, prot)
+}
+
 /// `basic_streambuf<char>::pbackfail(int c)` — putback failure handler.
 /// Called when putback fails (buffer full or not seekable). Returns EOF.
 /// Wine ref: dlls/msvcp60/ios.c — pbackfail returns EOF.
@@ -2196,6 +2213,7 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "?tellp@?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAA?AV?$fpos@U_Mbstatet@@@2@XZ" => { msvcp_seekoff as unsafe extern "win64" fn(*const u8,i64,i32,i32)->i32 as *const () as usize }
         "?c_str@?$_Yarn@D@std@@QEBAPEBDXZ" => { msvcp_syserror_map as unsafe extern "win64" fn(i32,usize,usize,usize)->usize as *const () as usize }
         "?classic@locale@std@@SAAEBV12@XZ" => { msvcp_syserror_map as unsafe extern "win64" fn(i32,usize,usize,usize)->usize as *const () as usize }
+        "?_Fiopen@std@@YAPEAU_iobuf@@PEBDHH@Z" => { msvcp_fiopen_narrow as unsafe extern "win64" fn(*const u8,i32,i32)->*mut libc::c_void as *const () as usize }
         "??Bios_base@std@@QEBA_NXZ" => { msvcp_ios_good as unsafe extern "win64" fn(usize,usize,usize,usize)->i32 as *const () as usize }
         "?_Ipfx@?$basic_istream@DU?$char_traits@D@std@@@std@@QEAA_N_N@Z" => { msvcp_ios_good as unsafe extern "win64" fn(usize,usize,usize,usize)->i32 as *const () as usize }
         "?get@?$basic_istream@DU?$char_traits@D@std@@@std@@QEAAHXZ" => { msvcp_streambuf_sgetc as unsafe extern "win64" fn(usize,usize,usize,usize)->i32 as *const () as usize }
