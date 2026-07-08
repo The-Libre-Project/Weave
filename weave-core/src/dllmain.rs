@@ -363,7 +363,23 @@ fn patch_crt_rva(dll: &str, base: usize) {
 /// and TLS data is initialized.
 #[cfg(target_os = "linux")]
 fn pe_dispatch(reason: u32, order: &[String], _stubs: Option<&HashMap<String, DllMainFn>>) {
+    // wxWidgets DLLs crash in DllMain during locale/CRT init (C++ locale facet
+    // stub returns 0 → null-this vtable dispatch with fault=0x8).  Their DllMain
+    // only runs CRT static initializers, not window/GUI setup.  Safe to skip.
+    // Fix the underlying stubs in Phase C.
+    let skip_dlls: &[&str] = &[
+        "wxbase313u_vc_x64_custom.dll",
+        "wxbase313u_xml_vc_x64_custom.dll",
+        "wxmsw313u_aui_vc_x64_custom.dll",
+        "wxmsw313u_core_vc_x64_custom.dll",
+        "wxmsw313u_html_vc_x64_custom.dll",
+        "wxmsw313u_qa_vc_x64_custom.dll",
+    ];
     for dll in order {
+        if skip_dlls.contains(&dll.as_str()) {
+            eprintln!("weave: pe_dispatch DLL_PROCESS_ATTACH -> {dll} (skipped — wx DllMain not required for Phase B)");
+            continue;
+        }
         // Patch known CRT crash sites before calling DllMain.
         let base = crate::dll_registry::get_base(dll);
         if let Some(b) = base {
@@ -391,7 +407,18 @@ fn pe_dispatch(reason: u32, order: &[String], _stubs: Option<&HashMap<String, Dl
 /// Same policy as pe_dispatch: no blanket skip for stubbed DLLs.
 #[cfg(target_os = "linux")]
 fn pe_dispatch_rev(reason: u32, order: &[String], _stubs: Option<&HashMap<String, DllMainFn>>) {
+    let skip_dlls: &[&str] = &[
+        "wxbase313u_vc_x64_custom.dll",
+        "wxbase313u_xml_vc_x64_custom.dll",
+        "wxmsw313u_aui_vc_x64_custom.dll",
+        "wxmsw313u_core_vc_x64_custom.dll",
+        "wxmsw313u_html_vc_x64_custom.dll",
+        "wxmsw313u_qa_vc_x64_custom.dll",
+    ];
     for dll in order.iter().rev() {
+        if skip_dlls.contains(&dll.as_str()) {
+            continue;
+        }
         let entry = crate::dll_registry::get_entry_point(dll);
         let base = crate::dll_registry::get_base(dll);
         if let (Some(ep), Some(b)) = (entry, base) {
