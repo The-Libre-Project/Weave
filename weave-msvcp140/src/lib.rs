@@ -1114,6 +1114,20 @@ pub unsafe extern "win64" fn msvcp_sputn_w(
     }
 }
 
+/// `__ExceptionPtrToBool(void* ptr)` — return true if the exception_ptr holds an exception.
+/// The exception_ptr stores the exception object pointer at offset 0; non-null = true.
+pub unsafe extern "win64" fn msvcp_exception_ptr_to_bool(
+    ptr: *const u64,
+    _b: usize,
+    _c: usize,
+    _d: usize,
+) -> i32 {
+    if ptr.is_null() {
+        return 0;
+    }
+    (*ptr != 0) as i32
+}
+
 /// `basic_ios<char>::fill()` — return the fill character from the ios struct.
 /// MSVC layout: fillchar at `this+0x58` (set to ' ' by msvcp_basic_ios_ctor).
 /// Returns the char in AL (Win64: zero-extended to u8 return).
@@ -1560,6 +1574,12 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
                 as *const () as usize
         }
 
+        "?__ExceptionPtrToBool@@YA_NPEBX@Z" => {
+            msvcp_exception_ptr_to_bool
+                as unsafe extern "win64" fn(*const u64, usize, usize, usize) -> i32
+                as *const () as usize
+        }
+
         // ── Additional MSVCP140 stubs needed by Audacity ───────────────────
         "_Query_perf_counter" => {
             msvcp_query_perf_counter as unsafe extern "win64" fn(*mut i64, usize, usize, usize) -> i32
@@ -1625,7 +1645,6 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         | "?_Xoverflow_error@std@@YAXPEBD@Z"
         | "?_Xregex_error@std@@YAXW4error_type@regex_constants@1@@Z"
         | "?_Xruntime_error@std@@YAXPEBD@Z"
-        | "?__ExceptionPtrToBool@@YA_NPEBX@Z"
         | "?bad@ios_base@std@@QEBA_NXZ"
         | "?c_str@?$_Yarn@D@std@@QEBAPEBDXZ"
         |         "?classic@locale@std@@SAAEBV12@XZ"
