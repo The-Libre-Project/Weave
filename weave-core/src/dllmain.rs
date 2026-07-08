@@ -227,16 +227,25 @@ pub fn thread_detach() {
 }
 
 /// Patch a known-crashing instruction in a loaded CRT DLL so that its
-/// native DllMain can complete without SIGSEGV.  MSVCP140.dll at RVA 0x300f
-/// has a null-deref in its CRT init code.  We replace the first byte of the
-/// crashing instruction with 0xC3 (RET) so execution is safely skipped.
-/// The page is made writable via mprotect, then restored.
+/// native DllMain can complete without SIGSEGV.
+///
+/// MSVCP140.dll at RVA 0x300f has a SIMD memcpy loop that reads the source
+/// pointer from RAX.  During DllMain, RAX is null → the first `movups xmm0,
+/// [rax]` faults.  The previous fix wrote RET (0xC3), but that skipped the
+/// entire copy, leaving the destination uninitialized → the caller used the
+/// stale stack data as a vtable → jumped to stack (SIGSEGV with this=4).
+///
+/// New fix: redirect RAX to a safe zero-filled page before the copy, so the
+/// destination is zero-initialised and the caller gets valid (empty) data.
+/// Uses an mmap'd executable trampoline to set RAX, perform the first two
+/// movups instructions, then jmp back into the original loop at RVA 0x3015.
+///
+/// The page is made writable via mprotect.
 #[cfg(target_os = "linux")]
 fn patch_crt_rva(dll: &str, base: usize) {
     if dll.eq_ignore_ascii_case("msvcp140.dll") {
         let crash_rva: usize = 0x300f;
         let crash_addr = base + crash_rva;
-        // The page for RVA 0x300f is typically .text (RX).  Make it writable.
         let page_size = 4096usize;
         let page_start = crash_addr & !(page_size - 1);
         unsafe {
@@ -245,10 +254,94 @@ fn patch_crt_rva(dll: &str, base: usize) {
                 page_size,
                 libc::PROT_READ | libc::PROT_WRITE | libc::PROT_EXEC,
             );
-            // Write RET (0xC3) at the crash site.
-            std::ptr::write(crash_addr as *mut u8, 0xC3u8);
+
+            // Allocate a zero-filled page for the redirected source read.
+            // MAP_ANONYMOUS pages are zero-initialised by the kernel.
+            let zero_buf = libc::mmap(
+                std::ptr::null_mut(),
+                256,
+                libc::PROT_READ,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                -1,
+                0,
+            );
+            if zero_buf == libc::MAP_FAILED {
+                eprintln!("weave: msvcp140 zero_buf mmap failed — falling back to RET");
+                std::ptr::write(crash_addr as *mut u8, 0xC3u8);
+                return;
+            }
+
+            // Allocate an executable page for the trampoline.
+            let trampoline = libc::mmap(
+                std::ptr::null_mut(),
+                4096,
+                libc::PROT_READ | libc::PROT_WRITE | libc::PROT_EXEC,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+                -1,
+                0,
+            );
+            if trampoline == libc::MAP_FAILED {
+                eprintln!("weave: msvcp140 trampoline mmap failed — falling back to RET");
+                libc::munmap(zero_buf, 256);
+                std::ptr::write(crash_addr as *mut u8, 0xC3u8);
+                return;
+            }
+
+            let tramp_addr = trampoline as usize;
+            let zero_addr = zero_buf as usize;
+
+            // Build trampoline at tramp_addr:
+            //   [ 0] 48 b8 <8-byte addr LE>   mov rax, zero_buf       ; 10 bytes
+            //   [10] 0f 10 00                 movups xmm0, [rax]      ;  3 bytes
+            //   [13] 0f 11 07                 movups [rdi], xmm0      ;  3 bytes
+            //   [16] e9 <4-byte rel32>        jmp base+0x3015         ;  5 bytes
+            // Total: 21 bytes
+
+            // Return target after our two restored movups: RVA 0x3015
+            let ret_target: i64 = (base + 0x3015) as i64;
+            // The jmp at tramp+16 (5 bytes) has next-instr at tramp+21
+            let jmp_back_off = ret_target.wrapping_sub((tramp_addr + 21) as i64) as i32;
+
+            let tramp_src: &[u8] = &[
+                0x48, 0xb8, // mov rax, imm64
+                zero_addr as u8,
+                (zero_addr >> 8) as u8,
+                (zero_addr >> 16) as u8,
+                (zero_addr >> 24) as u8,
+                (zero_addr >> 32) as u8,
+                (zero_addr >> 40) as u8,
+                (zero_addr >> 48) as u8,
+                (zero_addr >> 56) as u8,
+                0x0f, 0x10, 0x00, // movups xmm0, [rax]
+                0x0f, 0x11, 0x07, // movups [rdi], xmm0
+                0xe9, // jmp rel32
+                jmp_back_off as u8,
+                (jmp_back_off >> 8) as u8,
+                (jmp_back_off >> 16) as u8,
+                (jmp_back_off >> 24) as u8,
+            ];
+            std::ptr::copy_nonoverlapping(
+                tramp_src.as_ptr(),
+                tramp_addr as *mut u8,
+                tramp_src.len(),
+            );
+
+            // Patch RVA 0x300f: jmp rel32 (5 bytes) to trampoline + nop (1 byte pad).
+            // The jmp rel32 offset = tramp_addr - (crash_addr + 5).
+            let jmp_off = (tramp_addr as i64).wrapping_sub((crash_addr + 5) as i64) as i32;
+            let patch_src: &[u8] = &[
+                0xe9,
+                jmp_off as u8,
+                (jmp_off >> 8) as u8,
+                (jmp_off >> 16) as u8,
+                (jmp_off >> 24) as u8,
+                0x90, // nop — fills byte that was part of original movups [rdi],xmm0
+            ];
+            std::ptr::copy_nonoverlapping(patch_src.as_ptr(), crash_addr as *mut u8, patch_src.len());
+
+            eprintln!("weave: patched msvcp140.dll RVA 0x{crash_rva:x} (zero-buf copy) at base={base:#x}");
+            eprintln!("weave: msvcp140 zero_buf={zero_addr:#x} trampoline={tramp_addr:#x}");
         }
-        eprintln!("weave: patched msvcp140.dll RVA 0x{crash_rva:x} (RET) at base={base:#x}");
     }
 }
 
