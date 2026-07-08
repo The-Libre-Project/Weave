@@ -248,6 +248,7 @@ fn patch_crt_rva(dll: &str, base: usize) {
             // Write RET (0xC3) at the crash site.
             std::ptr::write(crash_addr as *mut u8, 0xC3u8);
         }
+        eprintln!("weave: patched msvcp140.dll RVA 0x{crash_rva:x} (RET) at base={base:#x}");
     }
 }
 
@@ -264,6 +265,7 @@ fn pe_dispatch(reason: u32, order: &[String], _stubs: Option<&HashMap<String, Dl
         if let Some(b) = base {
             patch_crt_rva(dll, b);
         }
+        eprintln!("weave: pe_dispatch DLL_PROCESS_ATTACH -> {dll}");
         let entry = crate::dll_registry::get_entry_point(dll);
         let base = crate::dll_registry::get_base(dll);
         if let (Some(ep), Some(b)) = (entry, base) {

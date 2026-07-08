@@ -3448,7 +3448,21 @@ pub extern "win64" fn ucrt_isatty(_fd: i32) -> i32 {
 /// Delegates to Linux libc iswctype.  On Linux wctype_t is u64; Windows
 /// passes a u32-truncated value which we zero-extend — safe because glibc
 /// wctype() return values fit in 16 bits.
+///
+/// Diagnostic: logs first call (and every 256th call) with caller RIP,
+/// so we can identify which C++ object's null-this triggers a corrupted
+/// vtable dispatch before reaching iswctype. If the crash is in the
+/// vtable lookup BEFORE this function, no log appears — confirming the
+/// crash is in the calling DLL, not inside ucrt.
 pub extern "win64" fn ucrt_iswctype(c: u32, desc: u64) -> i32 {
+    // Log first call only for provenance tracing.
+    static CALL_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = CALL_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    if n == 0 {
+        eprintln!(
+            "weave/ucrt: iswctype first call c=0x{c:x} desc=0x{desc:x} — if crash precedes this log, it is in the vtable dispatch before reaching iswctype"
+        );
+    }
     unsafe { iswctype(c, desc) }
 }
 

@@ -16,6 +16,101 @@ pub unsafe extern "win64" fn msvcp_noop(_a: usize, _b: usize, _c: usize, _d: usi
     0
 }
 
+/// Log the first call to a locale/facet function with arg0 (`this`/first arg)
+/// and the caller return address.  Signal-safe after init: uses atomics,
+/// no heap allocation on the hot path (OnceLock init happens once).
+fn log_first_locale_call(name: &'static str, a0: usize) {
+    static CALLED: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<&'static str>>> =
+        std::sync::OnceLock::new();
+    let mut set = CALLED
+        .get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if set.insert(name) {
+        eprintln!(
+            "weave/msvcp: locale call {name} this=0x{a0:x} — if this=0, the C++ object is null"
+        );
+    }
+}
+
+// ── Individual locale/facet diagnostic wrappers ──────────────────────────
+// Each shadows the corresponding bulk `msvcp_noop` entry in resolve(), logs
+// the first invocation, then returns 0 (same behaviour as msvcp_noop).
+// The caller sees a standard 4-arg Win64 extern function.
+
+pub unsafe extern "win64" fn msvcp_diag_getcat_ctype_d(
+    a0: usize,
+    _a1: usize,
+    _a2: usize,
+    _a3: usize,
+) -> usize {
+    log_first_locale_call("_Getcat@?$ctype@D@std@@", a0);
+    0
+}
+pub unsafe extern "win64" fn msvcp_diag_getcat_ctype_w(
+    a0: usize,
+    _a1: usize,
+    _a2: usize,
+    _a3: usize,
+) -> usize {
+    log_first_locale_call("_Getcat@?$ctype@_W@std@@", a0);
+    0
+}
+pub unsafe extern "win64" fn msvcp_diag_init_locale(
+    a0: usize,
+    _a1: usize,
+    _a2: usize,
+    _a3: usize,
+) -> usize {
+    log_first_locale_call("_Init@locale@std@@", a0);
+    0
+}
+pub unsafe extern "win64" fn msvcp_diag_makeloc(
+    a0: usize,
+    _a1: usize,
+    _a2: usize,
+    _a3: usize,
+) -> usize {
+    log_first_locale_call("_Makeloc@_Locimp@locale@std@@", a0);
+    0
+}
+pub unsafe extern "win64" fn msvcp_diag_new_locimp(
+    a0: usize,
+    _a1: usize,
+    _a2: usize,
+    _a3: usize,
+) -> usize {
+    log_first_locale_call("_New_Locimp@_Locimp@locale@std@@", a0);
+    0
+}
+pub unsafe extern "win64" fn msvcp_diag_locimp_adderfac(
+    a0: usize,
+    _a1: usize,
+    _a2: usize,
+    _a3: usize,
+) -> usize {
+    log_first_locale_call("_Locimp_Addfac@_Locimp@locale@std@@", a0);
+    0
+}
+pub unsafe extern "win64" fn msvcp_diag_getgloballocale(
+    a0: usize,
+    _a1: usize,
+    _a2: usize,
+    _a3: usize,
+) -> usize {
+    log_first_locale_call("_Getgloballocale@locale@std@@", a0);
+    0
+}
+pub unsafe extern "win64" fn msvcp_diag_getfalse(
+    a0: usize,
+    _a1: usize,
+    _a2: usize,
+    _a3: usize,
+) -> usize {
+    log_first_locale_call("_Getfalse@_Locinfo@std@@", a0);
+    0
+}
+
 // ── Fake vtable tables and virtual base tables ────────────────────────────────
 //
 // These are all-zero fake vtables used by the constructor stubs below.
@@ -1217,6 +1312,42 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
                 as *const () as usize
         }
 
+        // ── Locale/facet diagnostic arms (shadow bulk noop) ──────────────────
+        // Each logs the first call with `this`/arg0 to identify which C++
+        // object's null-this triggers a corrupted vtable dispatch.
+        "?_Getcat@?$ctype@D@std@@SA_KPEAPEBVfacet@locale@2@PEBV42@@Z" => {
+            msvcp_diag_getcat_ctype_d as unsafe extern "win64" fn(usize, usize, usize, usize) -> usize
+                as *const () as usize
+        }
+        "?_Getcat@?$ctype@_W@std@@SA_KPEAPEBVfacet@locale@2@PEBV42@@Z" => {
+            msvcp_diag_getcat_ctype_w as unsafe extern "win64" fn(usize, usize, usize, usize) -> usize
+                as *const () as usize
+        }
+        "?_Init@locale@std@@CAPEAV_Locimp@12@_N@Z" => {
+            msvcp_diag_init_locale as unsafe extern "win64" fn(usize, usize, usize, usize) -> usize
+                as *const () as usize
+        }
+        "?_Makeloc@_Locimp@locale@std@@CAPEAV123@AEBV_Locinfo@3@HPEAV123@PEBV23@@Z" => {
+            msvcp_diag_makeloc as unsafe extern "win64" fn(usize, usize, usize, usize) -> usize
+                as *const () as usize
+        }
+        "?_New_Locimp@_Locimp@locale@std@@CAPEAV123@_N@Z" => {
+            msvcp_diag_new_locimp as unsafe extern "win64" fn(usize, usize, usize, usize) -> usize
+                as *const () as usize
+        }
+        "?_Locimp_Addfac@_Locimp@locale@std@@CAXPEAV123@PEAVfacet@23@_K@Z" => {
+            msvcp_diag_locimp_adderfac as unsafe extern "win64" fn(usize, usize, usize, usize) -> usize
+                as *const () as usize
+        }
+        "?_Getgloballocale@locale@std@@CAPEAV_Locimp@12@XZ" => {
+            msvcp_diag_getgloballocale as unsafe extern "win64" fn(usize, usize, usize, usize) -> usize
+                as *const () as usize
+        }
+        "?_Getfalse@_Locinfo@std@@QEBAPEBDXZ" => {
+            msvcp_diag_getfalse as unsafe extern "win64" fn(usize, usize, usize, usize) -> usize
+                as *const () as usize
+        }
+
         // ── Function symbols — all map to msvcp_noop ──────────────────────────────
         "??0?$codecvt@_WDU_Mbstatet@@@std@@QEAA@_K@Z"
         | "??0_Locinfo@std@@QEAA@PEBD@Z"
@@ -1237,12 +1368,9 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         | "?_Decref@facet@locale@std@@UEAAPEAV_Facet_base@3@XZ"
         | "?_Getcat@?$codecvt@DDU_Mbstatet@@@std@@SA_KPEAPEBVfacet@locale@2@PEBV42@@Z"
         | "?_Getcvt@_Locinfo@std@@QEBA?AU_Cvtvec@@XZ"
-        | "?_Getfalse@_Locinfo@std@@QEBAPEBDXZ"
-        | "?_Getgloballocale@locale@std@@CAPEAV_Locimp@12@XZ"
         | "?_Getlconv@_Locinfo@std@@QEBAPEBUlconv@@XZ"
         | "?_Gettrue@_Locinfo@std@@QEBAPEBDXZ"
         | "?_Incref@facet@locale@std@@UEAAXXZ"
-        | "?_Init@locale@std@@CAPEAV_Locimp@12@_N@Z"
         | "?_Lock@?$basic_streambuf@DU?$char_traits@D@std@@@std@@UEAAXXZ"
         | "?_New_Locimp@_Locimp@locale@std@@CAPEAV123@AEBV123@@Z"
         | "?_Osfx@?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAXXZ"
@@ -1338,13 +1466,8 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         | "??6?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV01@N@Z"
         | "??6?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV01@PEBX@Z"
         | "??6?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV01@_J@Z"
-        | "?_Getcat@?$ctype@D@std@@SA_KPEAPEBVfacet@locale@2@PEBV42@@Z"
-        | "?_Getcat@?$ctype@_W@std@@SA_KPEAPEBVfacet@locale@2@PEBV42@@Z"
         | "?_Getcoll@_Locinfo@std@@QEBA?AU_Collvec@@XZ"
         | "?_Getname@_Locinfo@std@@QEBAPEBDXZ"
-        | "?_Locimp_Addfac@_Locimp@locale@std@@CAXPEAV123@PEAVfacet@23@_K@Z"
-        | "?_Makeloc@_Locimp@locale@std@@CAPEAV123@AEBV_Locinfo@3@HPEAV123@PEBV23@@Z"
-        | "?_New_Locimp@_Locimp@locale@std@@CAPEAV123@_N@Z"
         | "?_Osfx@?$basic_ostream@_WU?$char_traits@_W@std@@@std@@QEAAXXZ"
         | "?_Winerror_map@std@@YAHH@Z"
         | "?_Xoverflow_error@std@@YAXPEBD@Z"

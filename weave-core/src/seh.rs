@@ -409,6 +409,107 @@ unsafe extern "C" fn on_fatal_signal(
             unsafe {
                 libc::write(2, mbuf.as_ptr() as *const _, mpos);
             }
+            // ── C++ `this` diagnostic ──────────────────────────────────────
+            // In x64 Win64 ABI, RCX holds the `this` pointer for non-static
+            // member functions.  Print RCX and, if non-null, try to read the
+            // vtable pointer at [RCX] via /proc/self/mem.  Also print RDI
+            // (used for `this` in some MSVC calling-convention variants) and
+            // the return-address chain at [RSP..RSP+32].
+            {
+                let gregs = (*uctx).uc_mcontext.gregs;
+                let rcx = gregs[libc::REG_RCX as usize] as usize;
+                let rdi = gregs[libc::REG_RDI as usize] as usize;
+                let _rsp = gregs[libc::REG_RSP as usize] as usize;
+                let mut tbuf = [0u8; 160];
+                let mut tpos = 0usize;
+                let nibble = |n: u64| {
+                    if n < 10 {
+                        b'0' + n as u8
+                    } else {
+                        b'a' + n as u8 - 10
+                    }
+                };
+                macro_rules! push {
+                    ($s:expr) => {
+                        for &b in $s {
+                            if tpos < tbuf.len() {
+                                tbuf[tpos] = b;
+                                tpos += 1;
+                            }
+                        }
+                    };
+                }
+                macro_rules! push_hex16 {
+                    ($v:expr) => {
+                        push!(b"0x");
+                        for sh in (0..16u32).rev() {
+                            let n = ($v as u64 >> (sh * 4)) & 0xf;
+                            if tpos < tbuf.len() {
+                                tbuf[tpos] = nibble(n);
+                                tpos += 1;
+                            }
+                        }
+                    };
+                }
+                push!(b"weave: sh this(rcx)=");
+                push_hex16!(rcx);
+                push!(b" rdi=");
+                push_hex16!(rdi);
+                // Try to read vtable pointer at [this] via /proc/self/mem.
+                if rcx != 0 {
+                    let mem_path = b"/proc/self/mem\0";
+                    let fd = libc::open(mem_path.as_ptr() as *const libc::c_char, libc::O_RDONLY);
+                    if fd >= 0 {
+                        let mut vptr = 0usize;
+                        let n = libc::pread(
+                            fd,
+                            &mut vptr as *mut usize as *mut libc::c_void,
+                            8,
+                            rcx as i64,
+                        );
+                        libc::close(fd);
+                        if n == 8 {
+                            push!(b" vptr=");
+                            push_hex16!(vptr);
+                            // Read first 16 bytes of vtable (func pointers 0-1).
+                            let mem_fd2 = libc::open(
+                                mem_path.as_ptr() as *const libc::c_char,
+                                libc::O_RDONLY,
+                            );
+                            if mem_fd2 >= 0 {
+                                let mut vtab = [0u8; 16];
+                                let vn = libc::pread(
+                                    mem_fd2,
+                                    vtab.as_mut_ptr() as *mut libc::c_void,
+                                    16,
+                                    vptr as i64,
+                                );
+                                libc::close(mem_fd2);
+                                if vn > 0 {
+                                    push!(b" vt=[");
+                                    for (vi, &vb) in vtab[..vn as usize].iter().enumerate() {
+                                        if vi > 0 {
+                                            push!(b" ");
+                                        }
+                                        if tpos < tbuf.len() - 2 {
+                                            tbuf[tpos] = nibble((vb as u64 >> 4) & 0xf);
+                                            tbuf[tpos + 1] = nibble(vb as u64 & 0xf);
+                                            tpos += 2;
+                                        }
+                                    }
+                                    push!(b"]");
+                                } else {
+                                    push!(b" vt=<unreadable>");
+                                }
+                            }
+                        } else {
+                            push!(b" vptr=<unreadable>");
+                        }
+                    }
+                }
+                push!(b"\n");
+                unsafe { libc::write(2, tbuf.as_ptr() as *const _, tpos) };
+            }
         } else if base != 0 && (rip < base || rip >= base + size) {
             unsafe {
                 libc::write(
@@ -630,14 +731,16 @@ fn print_weave_crash(
     };
     let stack_top = read_u64_at(rsp); // [RSP]   — ret addr if call crashed
     let stack_prev = read_u64_at(rsp.saturating_sub(8)); // [RSP-8] — ret addr if ret crashed
-    // Walk caller stack frames for backtrace (up to 8 entries).
+                                                         // Walk caller stack frames for backtrace (up to 8 entries).
     let mut bt_entries = [0u64; 8];
     let bt_count = {
         let mut count = 0usize;
         let mut fp = rsp;
         for _ in 0..8 {
             let ra = read_u64_at(fp);
-            if ra == 0 { break; }
+            if ra == 0 {
+                break;
+            }
             bt_entries[count] = ra;
             count += 1;
             fp = fp.wrapping_add(8);
@@ -729,10 +832,16 @@ fn print_weave_crash(
         push!(b"\nweave:   backtrace:");
         for i in 0..std::cmp::min(bt_count, 4usize) {
             let ba = bt_entries[i];
-            if ba == 0 { break; }
+            if ba == 0 {
+                break;
+            }
             push!(b"\nweave:     [");
             // Single hex digit for index
-            push!(&[(if i < 10 { b'0' + i as u8 } else { b'a' + i as u8 - 10 })]);
+            push!(&[(if i < 10 {
+                b'0' + i as u8
+            } else {
+                b'a' + i as u8 - 10
+            })]);
             push!(b"] ");
             push_hex!(ba, 8);
         }
