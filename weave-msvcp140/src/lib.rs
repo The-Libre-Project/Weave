@@ -1074,6 +1074,23 @@ pub unsafe extern "win64" fn msvcp_thrd_detach(
     0
 }
 
+/// `basic_streambuf<wchar_t>::sputc(wchar_t)` — write a single wide character to the
+/// stream buffer.  Delegates to fwrite via the FILE* tracked by MSVCP_OPEN_FP.
+pub unsafe extern "win64" fn msvcp_sputc_w(
+    _this: *const u8,
+    ch: u16,
+    _c: usize,
+    _d: usize,
+) -> u16 {
+    if let Some(fp) = get_current_fp() {
+        let val = ch;
+        libc::fwrite(&val as *const u16 as *const libc::c_void, 2, 1, fp);
+        ch
+    } else {
+        0
+    }
+}
+
 /// `basic_streambuf<char>::sputn(const char*, streamsize)` — write N chars to buffer.
 /// Delegates to fwrite via the FILE* tracked by MSVCP_OPEN_FP.
 /// Wine ref: dlls/mscp60/ios.c — xsputn writes to streambuf.
@@ -1580,6 +1597,11 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
                 as *const () as usize
         }
 
+        "?sputc@?$basic_streambuf@_WU?$char_traits@_W@std@@@std@@QEAAG_W@Z" => {
+            msvcp_sputc_w as unsafe extern "win64" fn(*const u8, u16, usize, usize) -> u16
+                as *const () as usize
+        }
+
         // ── Additional MSVCP140 stubs needed by Audacity ───────────────────
         "_Query_perf_counter" => {
             msvcp_query_perf_counter as unsafe extern "win64" fn(*mut i64, usize, usize, usize) -> i32
@@ -1669,7 +1691,6 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         | "?setf@ios_base@std@@QEAAHHH@Z"
         | "?setprecision@std@@YA?AU?$_Smanip@_J@1@_J@Z"
         | "?setstate@?$basic_ios@_WU?$char_traits@_W@std@@@std@@QEAAXH_N@Z"
-        | "?sputc@?$basic_streambuf@_WU?$char_traits@_W@std@@@std@@QEAAG_W@Z"
         | "?tellp@?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAA?AV?$fpos@U_Mbstatet@@@2@XZ"
         | "?tie@?$basic_ios@_WU?$char_traits@_W@std@@@std@@QEBAPEAV?$basic_ostream@_WU?$char_traits@_W@std@@@2@XZ"
         | "?tolower@?$ctype@D@std@@QEBADD@Z"
