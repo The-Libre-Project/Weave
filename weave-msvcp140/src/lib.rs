@@ -1030,6 +1030,17 @@ pub unsafe extern "win64" fn msvcp_uncaught_exceptions() -> i32 {
     0
 }
 
+/// `basic_ios<char>::fill()` — return the fill character from the ios struct.
+/// MSVC layout: fillchar at `this+0x58` (set to ' ' by msvcp_basic_ios_ctor).
+/// Returns the char in AL (Win64: zero-extended to u8 return).
+/// Wine ref: dlls/msvcp60/ios.c — basic_ios_char_fill returns fillch.
+pub unsafe extern "win64" fn msvcp_fill(this: *const u8, _b: usize, _c: usize, _d: usize) -> u8 {
+    if this.is_null() {
+        return 0;
+    }
+    *this.add(0x58)
+}
+
 /// `_Cnd_do_broadcast_at_thread_exit` — no-op.
 pub unsafe extern "win64" fn msvcp_cnd_do_broadcast_at_thread_exit(
     cnd: *mut libc::c_void,
@@ -1444,15 +1455,21 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         | "?setp@?$basic_streambuf@DU?$char_traits@D@std@@@std@@IEAAXPEAD0@Z"
         | "?setp@?$basic_streambuf@DU?$char_traits@D@std@@@std@@IEAAXPEAD00@Z"
         | "?_Pninc@?$basic_streambuf@DU?$char_traits@D@std@@@std@@IEAAPEADXZ"
-        | "?fill@?$basic_ios@DU?$char_traits@D@std@@@std@@QEBADXZ"
         | "?flags@ios_base@std@@QEBAHXZ"
         | "?good@ios_base@std@@QEBA_NXZ"
         | "?rdbuf@?$basic_ios@DU?$char_traits@D@std@@@std@@QEBAPEAV?$basic_streambuf@DU?$char_traits@D@std@@@2@XZ"
         | "?tie@?$basic_ios@DU?$char_traits@D@std@@@std@@QEBAPEAV?$basic_ostream@DU?$char_traits@D@std@@@2@XZ"
         |         "?width@ios_base@std@@QEAA_J_J@Z"
         | "?width@ios_base@std@@QEBA_JXZ"
+        => msvcp_noop as *const () as usize,
+
+        "?fill@?$basic_ios@DU?$char_traits@D@std@@@std@@QEBADXZ" => {
+            msvcp_fill as unsafe extern "win64" fn(*const u8, usize, usize, usize) -> u8
+                as *const () as usize
+        }
+
         // ── Additional MSVCP140 stubs needed by Audacity ───────────────────
-        | "_Query_perf_counter"
+        "_Query_perf_counter"
         | "_Query_perf_frequency"
         | "?seekpos@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MEAA?AV?$fpos@U_Mbstatet@@@2@V32@H@Z"
         | "?seekoff@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MEAA?AV?$fpos@U_Mbstatet@@@2@_JHH@Z"
