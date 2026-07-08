@@ -1074,6 +1074,26 @@ pub unsafe extern "win64" fn msvcp_thrd_detach(
     0
 }
 
+/// `std::_Xinvalid_argument(char const* msg)` — throws std::invalid_argument.
+/// Weave doesn't support C++ exceptions, so log and abort.
+/// Wine ref: dlls/msvcp90/error.c — _Xinvalid_argument calls _Throw_Cpp_error.
+pub unsafe extern "win64" fn msvcp_xinvalid_argument(
+    msg: *const u8,
+    _b: usize,
+    _c: usize,
+    _d: usize,
+) {
+    let msg_str = if msg.is_null() {
+        "<null>".to_string()
+    } else {
+        unsafe { std::ffi::CStr::from_ptr(msg as *const libc::c_char) }
+            .to_string_lossy()
+            .into_owned()
+    };
+    eprintln!("weave/msvcp: _Xinvalid_argument(\"{msg_str}\") — aborting");
+    unsafe { libc::abort() };
+}
+
 /// `basic_streambuf<char>::overflow(int c)` — flush buffer or write a character when
 /// the put area is exhausted.  Returns traits::not_eof(c) on success, EOF on failure.
 /// Wine ref: dlls/msvcp60/ios.c — xsputn calls overflow when buffer is full.
@@ -1626,6 +1646,11 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
                 as *const () as usize
         }
 
+        "?_Xinvalid_argument@std@@YAXPEBD@Z" => {
+            msvcp_xinvalid_argument as unsafe extern "win64" fn(*const u8, usize, usize, usize)
+                as *const () as usize
+        }
+
         // ── Additional MSVCP140 stubs needed by Audacity ───────────────────
         "_Query_perf_counter" => {
             msvcp_query_perf_counter as unsafe extern "win64" fn(*mut i64, usize, usize, usize) -> i32
@@ -1646,7 +1671,6 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         | "?_Syserror_map@std@@YAPEBDH@Z"
         | "?_W_Getdays@_Locinfo@std@@QEBAPEBGXZ"
         | "?_W_Getmonths@_Locinfo@std@@QEBAPEBGXZ"
-        | "?_Xinvalid_argument@std@@YAXPEBD@Z"
         | "?_Gndec@?$basic_streambuf@DU?$char_traits@D@std@@@std@@IEAAPEADXZ"
         | "?_Gninc@?$basic_streambuf@DU?$char_traits@D@std@@@std@@IEAAPEADXZ"
         | "?_Gnavail@?$basic_streambuf@DU?$char_traits@D@std@@@std@@IEBA_JXZ"
