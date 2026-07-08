@@ -1443,6 +1443,16 @@ trivial_stub!(msvcp_cnd_broadcast, i32, 0); // _Cnd_broadcast → 0
 trivial_stub!(msvcp_strcoll, i32, 0); // _Strcoll → 0
 trivial_stub!(msvcp_wcscoll, i32, 0); // _Wcscoll → 0
 
+/// `basic_ios<char>::rdbuf(basic_streambuf<char>*)` — set streambuf, return old one.
+pub unsafe extern "win64" fn msvcp_ios_rdbuf_set(
+    _this: *const u8,
+    _sb: *const u8,
+    _c: usize,
+    _d: usize,
+) -> usize {
+    0
+}
+
 /// `basic_streambuf<char>::pbackfail(int c)` — putback failure handler.
 /// Called when putback fails (buffer full or not seekable). Returns EOF.
 /// Wine ref: dlls/msvcp60/ios.c — pbackfail returns EOF.
@@ -2044,6 +2054,7 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "_Wcscoll" => { msvcp_wcscoll as unsafe extern "win64" fn(usize,usize,usize,usize)->i32 as *const () as usize }
         "?tie@?$basic_ios@DU?$char_traits@D@std@@@std@@QEBAPEAV?$basic_ostream@DU?$char_traits@D@std@@@2@XZ" => { msvcp_ios_tie as unsafe extern "win64" fn(usize,usize,usize,usize)->usize as *const () as usize }
         "?rdbuf@?$basic_ios@DU?$char_traits@D@std@@@std@@QEBAPEAV?$basic_streambuf@DU?$char_traits@D@std@@@2@XZ" => { msvcp_ios_rdbuf_get as unsafe extern "win64" fn(usize,usize,usize,usize)->usize as *const () as usize }
+        "?rdbuf@?$basic_ios@DU?$char_traits@D@std@@@std@@QEAAPEAV?$basic_streambuf@DU?$char_traits@D@std@@@2@PEAV32@@Z" => { msvcp_ios_rdbuf_set as unsafe extern "win64" fn(usize,usize,usize,usize)->usize as *const () as usize }
         "?eback@?$basic_streambuf@DU?$char_traits@D@std@@@std@@IEBAPEADXZ" => { msvcp_streambuf_eback as unsafe extern "win64" fn(usize,usize,usize,usize)->usize as *const () as usize }
         "?egptr@?$basic_streambuf@DU?$char_traits@D@std@@@std@@IEBAPEADXZ" => { msvcp_streambuf_egptr as unsafe extern "win64" fn(usize,usize,usize,usize)->usize as *const () as usize }
         "?epptr@?$basic_streambuf@DU?$char_traits@D@std@@@std@@IEBAPEADXZ" => { msvcp_streambuf_epptr as unsafe extern "win64" fn(usize,usize,usize,usize)->usize as *const () as usize }
