@@ -92,10 +92,10 @@ unsafe extern "win64" fn weave_cfg_do_debug(rax_val: usize, caller_rip: usize) {
     let image_end = CFG_PE_IMAGE_END.load(Ordering::Relaxed);
     let will_jump = rax_val != 0
         && rax_val >= 0x10000
-        && (rax_val >> 47) == 0
-        && (rax_val >> 40) < 0x70
+        && (rax_val >> 47) == 0   // canonical user space
+        && (rax_val >> 40) < 0x80 // not kernel space
         && (text_start == 0
-            || rax_val >= image_end  // outside PE entirely (Weave stubs 0x55...)
+            || rax_val >= image_end  // outside PE entirely (Weave stubs, loaded DLLs)
             || rax_val < CFG_PE_TEXT_END.load(Ordering::Relaxed)); // in PE .text
     eprintln!(
         "weave: CFG dispatch[{n}]: target={rax_val:#018x} caller={caller_rip:#018x} \
@@ -1434,13 +1434,15 @@ unsafe extern "win64" fn weave_cfg_dispatch_stub() {
         "mov r11, rax",
         "shr r11, 47",
         "jnz 2f",
-        // ── Guard 3: below Linux stack range (reject 0x7x_xxxx_xxxx_xxxx) ───
-        // Linux stack lives at ~0x7FFF_xxxx_xxxx; Weave stubs at ~0x56_xxxx_xxxx;
-        // PE at 0x140_xxxx_xxxx.  Checking bits 63:40 >= 0x70 rejects stack
-        // addresses while allowing PE and Weave-stub targets.
+        // ── Guard 3: reject kernel-space addresses (bits 63:40 >= 0x80) ──
+        // 0x0000_0000_0000_0000 .. 0x0000_7FFF_FFFF_FFFF = canonical user space.
+        // 0x8000_0000_0000_0000 .. 0xFFFF_FFFF_FFFF_FFFF = kernel space.
+        // We check bits 63:40: values >= 0x80 are kernel-space and rejected.
+        // Loaded PE DLLs may be mmap'd anywhere in user space (e.g. 0x7659_...),
+        // well above PE text (0x140_...) and Weave stub (~0x56_...) ranges.
         "mov r11, rax",
         "shr r11, 40",
-        "cmp r11, 0x70",
+        "cmp r11, 0x80",
         "jae 2f",
         // ── Guard 4: reject non-executable PE sections (.data, .rdata, BSS) ──
         // Targets outside the PE image entirely (Weave stubs at 0x55..., Linux

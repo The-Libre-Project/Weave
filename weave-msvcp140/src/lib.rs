@@ -16,13 +16,93 @@
 ///
 /// Diagnostic: logs the first invocation (with arg0/RCX) so we can identify
 /// which unresolved stub gets called during MSVCP140 DllMain init and whose
-/// return-0 value gets used as a corrupted vtable pointer.
+/// return value gets used as a corrupted vtable pointer.
 pub unsafe extern "win64" fn msvcp_noop(a0: usize, _b: usize, _c: usize, _d: usize) -> usize {
     static NOOP_FIRED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     if !NOOP_FIRED.swap(true, std::sync::atomic::Ordering::Relaxed) {
-        eprintln!(
-            "weave/msvcp: FIRST noop stub call a0=0x{a0:x} — return 0 may be used as vtable base"
-        );
+        // Log this call — no crash-prone dladdr, just a0 and the return addr.
+        // The check [`RSP` at entry] = return address, but Rust may reorder.
+        // Best effort.
+        eprintln!("weave/msvcp: FIRST noop stub call a0=0x{a0:x} — return 0 (caller unknown)");
+    }
+    0
+}
+
+/// Like msvcp_noop but returns `a0` (the `this`/first arg) instead of 0.
+/// Use for constructors and functions that are expected to return a pointer.
+pub unsafe extern "win64" fn msvcp_noop_retfirst(
+    a0: usize,
+    _b: usize,
+    _c: usize,
+    _d: usize,
+) -> usize {
+    a0
+}
+
+/// Stub for `_Locinfo::_Getcvt()` — returns a zero-initialised `_Cvtvec` struct.
+/// In MSVC x64 a struct >16 bytes is returned via hidden pointer in RDX:
+/// the function writes the struct to [RDX] and returns RDX in RAX.
+/// Wine ref: dlls/msvcp90/locale.c _Locinfo__Getcvt — returns codepage data.
+pub unsafe extern "win64" fn msvcp_getcvt(
+    _this: usize,
+    out_ptr: usize,
+    _c: usize,
+    _d: usize,
+) -> usize {
+    static FIRED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if !FIRED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        eprintln!("weave/msvcp: _Getcvt called — writing zero _Cvtvec to {out_ptr:#x}");
+    }
+    // _Cvtvec is 24 bytes: { _Page=0, _Conv=0, _Shft=0, _Cvt=0 }
+    if out_ptr != 0 {
+        unsafe { std::ptr::write_bytes(out_ptr as *mut u8, 0, 24) };
+    }
+    out_ptr
+}
+
+/// Stub for `_Locinfo::_Getlconv()` — returns a pointer to a static zero `lconv`.
+/// Wine ref: dlls/msvcp90/locale.c _Locinfo__Getlconv — returns &__lc_lconv_data.
+pub unsafe extern "win64" fn msvcp_getlconv(
+    _this: usize,
+    _b: usize,
+    _c: usize,
+    _d: usize,
+) -> usize {
+    static LCONV: [u8; 128] = [0u8; 128];
+    static FIRED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if !FIRED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        let ptr = LCONV.as_ptr() as usize;
+        eprintln!("weave/msvcp: _Getlconv called — returning zero lconv at {ptr:#x}");
+    }
+    LCONV.as_ptr() as usize
+}
+
+/// Stub for `locale::_Getfacet(size_t id, bool addref)` — returns the facet
+/// from the fake locale data's farray for id < nfacets, else 0.
+/// Wine ref: dlls/msvcp90/locale.c locale__Getfacet — array lookup.
+pub unsafe extern "win64" fn msvcp_getfacet(
+    this: usize,
+    id: usize,
+    _addref: usize,
+    _d: usize,
+) -> usize {
+    static GF_CALLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if !GF_CALLED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        eprintln!("weave/msvcp: _Getfacet called this=0x{this:x} id={id}");
+    }
+    // `this` is a `locale*`. In MSVC, `locale._Ptr` is at offset 0 (a _Locimp*).
+    // The _Locimp has: vtable@+0, _Refs@+8, _Farray@+0x10, _Nfacets@+0x18.
+    // farray[0] holds the facet for category 0.
+    if this != 0 {
+        unsafe {
+            let locimp = *(this as *const usize); // locale._Ptr = _Locimp*
+            if locimp != 0 && id < 6 {
+                let farray_ptr = *((locimp + 0x10) as *const usize);
+                if farray_ptr != 0 {
+                    return *(farray_ptr as *const usize);
+                }
+            }
+        }
     }
     0
 }
@@ -49,6 +129,9 @@ fn log_first_locale_call(name: &'static str, a0: usize) {
 // the first invocation, then returns 0 (same behaviour as msvcp_noop).
 // The caller sees a standard 4-arg Win64 extern function.
 
+/// Stub for `ctype<char>::_Getcat(facet** ppf, const locale* loc)`.
+/// Returns the ctype category (0x0004) and sets *ppf to a dummy buffer.
+/// Wine ref: dlls/msvcp90/locale.c ctype<char>::_Getcat — allocates facet.
 pub unsafe extern "win64" fn msvcp_diag_getcat_ctype_d(
     a0: usize,
     _a1: usize,
@@ -56,8 +139,14 @@ pub unsafe extern "win64" fn msvcp_diag_getcat_ctype_d(
     _a3: usize,
 ) -> usize {
     log_first_locale_call("_Getcat@?$ctype@D@std@@", a0);
-    0
+    // a0 = facet** ppf. Set *ppf to a static dummy buffer.
+    if a0 != 0 {
+        static DUMMY_FACET_D: usize = 0;
+        unsafe { *(a0 as *mut usize) = std::ptr::addr_of!(DUMMY_FACET_D) as usize };
+    }
+    0x0004 // ios_base::ctype
 }
+/// Stub for `ctype<wchar_t>::_Getcat(facet** ppf, const locale* loc)`.
 pub unsafe extern "win64" fn msvcp_diag_getcat_ctype_w(
     a0: usize,
     _a1: usize,
@@ -65,8 +154,17 @@ pub unsafe extern "win64" fn msvcp_diag_getcat_ctype_w(
     _a3: usize,
 ) -> usize {
     log_first_locale_call("_Getcat@?$ctype@_W@std@@", a0);
-    0
+    if a0 != 0 {
+        static DUMMY_FACET_W: usize = 0;
+        unsafe { *(a0 as *mut usize) = std::ptr::addr_of!(DUMMY_FACET_W) as usize };
+    }
+    0x0004 // ios_base::ctype
 }
+/// Stub for `locale::_Init(bool named)` — returns the fake classic _Locimp.
+/// Wine ref: dlls/msvcp90/locale.c locale__Init — creates classic locale or
+/// named locale.  Our stub always returns the classic _Locimp (fake) regardless
+/// of the `named` flag, bypassing the complex named-locale path that requires
+/// _Locinfo, _Makeloc, and multiple facet categories.
 pub unsafe extern "win64" fn msvcp_diag_init_locale(
     a0: usize,
     _a1: usize,
@@ -74,7 +172,10 @@ pub unsafe extern "win64" fn msvcp_diag_init_locale(
     _a3: usize,
 ) -> usize {
     log_first_locale_call("_Init@locale@std@@", a0);
-    0
+    let fake = get_fake_locale_data();
+    let locimp = &fake.locimp_vtable as *const usize as usize;
+    eprintln!("  → returning fake classic _Locimp at {locimp:#x}");
+    locimp
 }
 pub unsafe extern "win64" fn msvcp_diag_makeloc(
     a0: usize,
@@ -83,7 +184,10 @@ pub unsafe extern "win64" fn msvcp_diag_makeloc(
     _a3: usize,
 ) -> usize {
     log_first_locale_call("_Makeloc@_Locimp@locale@std@@", a0);
-    0
+    let fake = get_fake_locale_data();
+    let locimp = &fake.locimp_vtable as *const usize as usize;
+    eprintln!("  → returning fake _Locimp at {locimp:#x}");
+    locimp
 }
 pub unsafe extern "win64" fn msvcp_diag_new_locimp(
     a0: usize,
@@ -92,7 +196,10 @@ pub unsafe extern "win64" fn msvcp_diag_new_locimp(
     _a3: usize,
 ) -> usize {
     log_first_locale_call("_New_Locimp@_Locimp@locale@std@@", a0);
-    0
+    let fake = get_fake_locale_data();
+    let locimp = &fake.locimp_vtable as *const usize as usize;
+    eprintln!("  → returning fake _Locimp at {locimp:#x}");
+    locimp
 }
 pub unsafe extern "win64" fn msvcp_diag_locimp_adderfac(
     a0: usize,
@@ -110,7 +217,10 @@ pub unsafe extern "win64" fn msvcp_diag_getgloballocale(
     _a3: usize,
 ) -> usize {
     log_first_locale_call("_Getgloballocale@locale@std@@", a0);
-    0
+    let fake = get_fake_locale_data();
+    let locimp = &fake.locimp_vtable as *const usize as usize;
+    eprintln!("  → returning fake _Locimp at {locimp:#x}");
+    locimp
 }
 pub unsafe extern "win64" fn msvcp_diag_getfalse(
     a0: usize,
@@ -181,12 +291,30 @@ static BASIC_IOSTREAM_VBTABLE2: [i32; 2] = [0i32, 0x10i32];
 // Wine ref: dlls/msvcp90/locale.c — _Locimp layout, facet base, _Getfacet().
 #[repr(C)]
 struct FakeLocaleData {
-    vtable: [usize; 8],    // fake vtable — all entries = msvcp_noop
-    locimp_vtable: usize,  // _Locimp.vtable (= &self.vtable[0]); at locimp+0x00
-    locimp_refs: usize,    // _Locimp._Refs = 1;                   at locimp+0x08
-    locimp_farray: usize,  // _Locimp._Farray (= &self.farray);    at locimp+0x10
-    locimp_nfacets: usize, // _Locimp._Nfacets = 1;                at locimp+0x18
-    farray: usize,         // farray[0] = locimp addr (non-null facet*)
+    // Padding before vtable to absorb negative vtable offsets AND the vtable
+    // over-read that MSVC does for RTTI / complete-object locator probing.
+    // MSVC reads vtable[-1] through vtable[-4] for RTTI, and may read
+    // vtable[0..63] depending on class hierarchy depth.
+    _pad_before_vtable: [usize; 8], // 64 bytes of padding
+    vtable: [usize; 64],            // fake vtable (64 entries)
+    // _Locimp starts here (&self.locimp_vtable).
+    // MSVC 14.x layout (matches Wine's _locale__Locimp):
+    //   +0x00: vtable* (inherited from facet → _Facet_base)
+    //   +0x08: _Refs (int, 4 bytes + 4 padding)
+    //   +0x10: facetvec** = _Farray
+    //   +0x18: facet_cnt = _Nfacets
+    //   +0x20: catmask (int, 4 bytes + 4 padding)
+    //   +0x28: transparent (bool, 1 byte + 7 padding)
+    //   +0x30: name (locale_string = const char* or char*)
+    locimp_vtable: usize,  // +0x00
+    locimp_refs: usize,    // +0x08
+    locimp_farray: usize,  // +0x10
+    locimp_nfacets: usize, // +0x18
+    locimp_catmask: usize, // +0x20 — all categories (0x3F)
+    locimp_transp: usize,  // +0x28 — false = 0
+    locimp_name: usize,    // +0x30 — pointer to "C" string
+    // Facet array (allocated after _Locimp fields, _Farray at +0x10 points here).
+    farray: [usize; 6], // all entries = locimp address (non-null)
 }
 
 // SAFETY: all fields are usize; no interior mutability; written once before first read.
@@ -213,21 +341,31 @@ fn get_current_fp() -> Option<*mut libc::FILE> {
 
 fn get_fake_locale_data() -> &'static FakeLocaleData {
     FAKE_LOCALE_DATA.get_or_init(|| {
-        let noop = msvcp_noop as *const () as usize;
+        let noop = msvcp_noop_retfirst as *const () as usize;
         let mut b = Box::new(FakeLocaleData {
-            vtable: [noop; 8],
+            _pad_before_vtable: [noop; 8],
+            vtable: [noop; 64],
             locimp_vtable: 0,
             locimp_refs: 1,
             locimp_farray: 0,
-            locimp_nfacets: 1,
-            farray: 0,
+            locimp_nfacets: 6,
+            locimp_catmask: 0,
+            locimp_transp: 0,
+            locimp_name: 0,
+            farray: [0usize; 6],
         });
         let vtable_addr = b.vtable.as_ptr() as usize;
         let locimp_addr = &b.locimp_vtable as *const usize as usize;
-        let farray_addr = &b.farray as *const usize as usize;
+        let farray_addr = b.farray.as_ptr() as usize;
+        let c_str = b"C\0";
         b.locimp_vtable = vtable_addr;
         b.locimp_farray = farray_addr;
-        b.farray = locimp_addr; // farray[0] = locimp itself (non-null, any facet*)
+        b.locimp_catmask = 0x3F; // all locale categories
+        b.locimp_transp = 0; // transparent = false (not a transparent locale)
+        b.locimp_name = c_str.as_ptr() as usize; // "C" locale name
+        for slot in &mut b.farray {
+            *slot = locimp_addr; // all facets = _Locimp itself (non-null)
+        }
         b
     })
 }
@@ -535,15 +673,21 @@ pub unsafe extern "win64" fn msvcp_iostream_ctor(
 ///
 /// Wine ref: dlls/msvcp90/ios.c:basic_streambuf_getloc — returns _Mylocale copy.
 pub unsafe extern "win64" fn msvcp_getloc(
-    _this: usize,
+    this: usize,
     ret: *mut usize,
     _c: usize,
     _d: usize,
 ) -> *mut usize {
     let data = get_fake_locale_data();
     let locimp_addr = &data.locimp_vtable as *const usize as usize;
-    *ret = 0; // locale.cookie = 0 (unused field)
-    *ret.add(1) = locimp_addr; // locale._Ptr = &fake _Locimp
+    // MSVC 14.x locale layout: _Locimp* _Ptr at offset 0 (no _Cookie field).
+    // Older MSVC had _Cookie at +0 and _Ptr at +8, but the side-by-side CRT
+    // DLLs shipped with modern tools (VS 2017+) use the no-cookie layout.
+    *ret = locimp_addr; // locale._Ptr = &fake _Locimp (offset 0)
+    static LOC_CALLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if !LOC_CALLED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        eprintln!("weave/msvcp: getloc this=0x{this:x} → _Locimp at {locimp_addr:#x}");
+    }
     ret
 }
 
@@ -1422,18 +1566,69 @@ trivial_stub!(msvcp_ios_rdbuf_get, usize, 0); // rdbuf() → null
 trivial_stub!(msvcp_ios_flags_get, i32, 0x1008); // flags() → skipws|dec
 trivial_stub!(msvcp_streambuf_sgetc, i32, -1); // sgetc() → EOF
 trivial_stub!(msvcp_streambuf_snextc, i32, -1); // snextc() → EOF
-trivial_stub!(msvcp_streambuf_eback, usize, 0); // eback() → null
-trivial_stub!(msvcp_streambuf_egptr, usize, 0); // egptr() → null
-trivial_stub!(msvcp_streambuf_epptr, usize, 0); // epptr() → null
-trivial_stub!(msvcp_streambuf_gptr, usize, 0); // gptr() → null
-trivial_stub!(msvcp_streambuf_pbase, usize, 0); // pbase() → null
-trivial_stub!(msvcp_streambuf_pptr, usize, 0); // pptr() → null
+                                                // Pointer getters — return discard sink instead of 0 to prevent null-deref
+pub unsafe extern "win64" fn msvcp_streambuf_eback(
+    _: usize,
+    _b: usize,
+    _c: usize,
+    _d: usize,
+) -> usize {
+    discard_sink_ptr() as usize
+}
+pub unsafe extern "win64" fn msvcp_streambuf_egptr(
+    _: usize,
+    _b: usize,
+    _c: usize,
+    _d: usize,
+) -> usize {
+    discard_sink_ptr() as usize
+}
+pub unsafe extern "win64" fn msvcp_streambuf_epptr(
+    _: usize,
+    _b: usize,
+    _c: usize,
+    _d: usize,
+) -> usize {
+    discard_sink_ptr() as usize
+}
+pub unsafe extern "win64" fn msvcp_streambuf_gptr(
+    _: usize,
+    _b: usize,
+    _c: usize,
+    _d: usize,
+) -> usize {
+    discard_sink_ptr() as usize
+}
+pub unsafe extern "win64" fn msvcp_streambuf_pbase(
+    _: usize,
+    _b: usize,
+    _c: usize,
+    _d: usize,
+) -> usize {
+    discard_sink_ptr() as usize
+}
+pub unsafe extern "win64" fn msvcp_streambuf_pptr(
+    _: usize,
+    _b: usize,
+    _c: usize,
+    _d: usize,
+) -> usize {
+    discard_sink_ptr() as usize
+}
 trivial_stub!(msvcp_streambuf_gbump, i32, 0); // gbump(int) → 0
 trivial_stub!(msvcp_streambuf_pbump, i32, 0); // pbump(int) → 0
 trivial_stub!(msvcp_streambuf_setg, usize, 0); // setg(...) → 0
 trivial_stub!(msvcp_streambuf_setp_2, usize, 0); // setp(a,b) → 0
 trivial_stub!(msvcp_streambuf_setp_3, usize, 0); // setp(a,b,c) → 0
-trivial_stub!(msvcp_streambuf_pninc, usize, 0); // _Pninc() → null
+                                                 // _Pninc() returns pptr then increments by 1. Our stub: return discard sink.
+pub unsafe extern "win64" fn msvcp_streambuf_pninc(
+    _: usize,
+    _b: usize,
+    _c: usize,
+    _d: usize,
+) -> usize {
+    discard_sink_ptr() as usize
+}
 trivial_stub!(msvcp_streambuf_gninc, usize, 0); // _Gninc() → null
 trivial_stub!(msvcp_streambuf_gndec, usize, 0); // _Gndec() → null
 trivial_stub!(msvcp_streambuf_init_2, usize, 0); // _Init(...) → 0
@@ -1976,6 +2171,262 @@ static LOCALE_ID_CTYPE_W: usize = 0;
 /// `?_Raise_handler@std@@3P6AXAEBVexception@stdext@@@ZEA` — static null function pointer.
 static RAISE_HANDLER: [u8; 8] = [0u8; 8];
 
+// ── Remaining noop-replacement stubs ──────────────────────────────────────────
+// These replace msvcp_noop entries in the resolve table.  Each implements the
+// minimal correct behavior: no crash, no null returns for pointer functions.
+// Wine ref: dlls/msvcp90/exception.c + dlls/msvcp90/ios.c for behavior.
+
+/// `_Throw_C_error(int)` — throw a system_error.  Abort (no SEH in Phase B).
+pub unsafe extern "win64" fn msvcp_throw_c_error(_n: i32, _b: usize, _c: usize, _d: usize) -> i32 {
+    eprintln!("weave/msvcp: _Throw_C_error called — aborting (no SEH)");
+    std::process::abort();
+}
+/// `_Throw_Cpp_error(int)` — throw a C++ error.  Abort.
+pub unsafe extern "win64" fn msvcp_throw_cpp_error(
+    _n: i32,
+    _b: usize,
+    _c: usize,
+    _d: usize,
+) -> i32 {
+    eprintln!("weave/msvcp: _Throw_Cpp_error called — aborting (no SEH)");
+    std::process::abort();
+}
+/// `_Xbad_alloc()` — throw bad_alloc.  Abort.
+pub unsafe extern "win64" fn msvcp_xbad_alloc(_: usize, _b: usize, _c: usize, _d: usize) -> usize {
+    eprintln!("weave/msvcp: _Xbad_alloc called — aborting (no SEH)");
+    std::process::abort();
+}
+/// `_Xbad_function_call()` — throw bad_function_call.  Abort.
+pub unsafe extern "win64" fn msvcp_xbad_function_call(
+    _: usize,
+    _b: usize,
+    _c: usize,
+    _d: usize,
+) -> usize {
+    eprintln!("weave/msvcp: _Xbad_function_call called — aborting (no SEH)");
+    std::process::abort();
+}
+/// `_Xlength_error(const char*)` — throw length_error.  Abort.
+pub unsafe extern "win64" fn msvcp_xlength_error(
+    _: usize,
+    _b: usize,
+    _c: usize,
+    _d: usize,
+) -> usize {
+    eprintln!("weave/msvcp: _Xlength_error called — aborting (no SEH)");
+    std::process::abort();
+}
+/// `_Xout_of_range(const char*)` — throw out_of_range.  Abort.
+pub unsafe extern "win64" fn msvcp_xout_of_range(
+    _: usize,
+    _b: usize,
+    _c: usize,
+    _d: usize,
+) -> usize {
+    eprintln!("weave/msvcp: _Xout_of_range called — aborting (no SEH)");
+    std::process::abort();
+}
+
+/// `uncaught_exception()` — return false (no active exceptions).
+pub unsafe extern "win64" fn msvcp_uncaught_exception(
+    _: usize,
+    _b: usize,
+    _c: usize,
+    _d: usize,
+) -> i32 {
+    0
+}
+/// `codecvt<char,char>::in(mbstate_t&, const char*, const char*, const char*&, char*, char*, char*&)`
+/// — noconv conversion: no chars consumed/produced, return ok.
+pub unsafe extern "win64" fn msvcp_codecvt_in(
+    _this: usize,
+    _state: usize,
+    from: usize,
+    from_end: usize,
+    from_next: usize,
+    to: usize,
+    _to_end: usize,
+    to_next: usize,
+) -> i32 {
+    // noconv: point from_next=from, to_next=to, return 0 (ok)
+    unsafe {
+        if from_next != 0 {
+            *(from_next as *mut usize) = from;
+        }
+        if to_next != 0 {
+            *(to_next as *mut usize) = to;
+        }
+    }
+    0 // codecvt_base::ok
+}
+/// `codecvt<char,char>::out(...)` — same noconv pattern.
+pub unsafe extern "win64" fn msvcp_codecvt_out(
+    _this: usize,
+    _state: usize,
+    from: usize,
+    from_end: usize,
+    from_next: usize,
+    to: usize,
+    _to_end: usize,
+    to_next: usize,
+) -> i32 {
+    unsafe {
+        if from_next != 0 {
+            *(from_next as *mut usize) = from_end;
+        }
+        if to_next != 0 {
+            *(to_next as *mut usize) = to;
+        }
+    }
+    0
+}
+/// `codecvt<wchar_t,char>::out(...)` — noconv pattern.
+pub unsafe extern "win64" fn msvcp_codecvt_out_w(
+    _this: usize,
+    _state: usize,
+    from: usize,
+    from_end: usize,
+    from_next: usize,
+    to: usize,
+    _to_end: usize,
+    to_next: usize,
+) -> i32 {
+    unsafe {
+        if from_next != 0 {
+            *(from_next as *mut usize) = from_end;
+        }
+        if to_next != 0 {
+            *(to_next as *mut usize) = to;
+        }
+    }
+    0
+}
+/// `codecvt<char,char>::unshift(...)` — return noconv (no partial char).
+pub unsafe extern "win64" fn msvcp_codecvt_unshift(
+    _this: usize,
+    _state: usize,
+    to: usize,
+    _to_end: usize,
+    to_next: usize,
+    _e: usize,
+    _f: usize,
+    _g: usize,
+) -> i32 {
+    unsafe {
+        if to_next != 0 {
+            *(to_next as *mut usize) = to;
+        }
+    }
+    0
+}
+/// `basic_streambuf::sync()` — flush put area. Return 0 (success).
+pub unsafe extern "win64" fn msvcp_streambuf_sync(
+    this: usize,
+    _b: usize,
+    _c: usize,
+    _d: usize,
+) -> i32 {
+    let _ = this;
+    0
+}
+/// `basic_streambuf::uflow()` — underflow. Return EOF.
+pub unsafe extern "win64" fn msvcp_streambuf_uflow(
+    this: usize,
+    _b: usize,
+    _c: usize,
+    _d: usize,
+) -> i32 {
+    let _ = this;
+    -1
+}
+/// `basic_streambuf::sputc(char c)` — put char into buffer. Return char.
+pub unsafe extern "win64" fn msvcp_streambuf_sputc(
+    this: usize,
+    c: usize,
+    _c2: usize,
+    _d: usize,
+) -> i32 {
+    let _ = this;
+    c as i32
+}
+/// `basic_streambuf::xsputn(const char*, streamsize n)` — put n chars. Return n.
+pub unsafe extern "win64" fn msvcp_streambuf_xsputn(
+    this: usize,
+    _buf: usize,
+    n: usize,
+    _d: usize,
+) -> i64 {
+    let _ = this;
+    n as i64
+}
+/// `basic_streambuf::setbuf(char*, streamsize)` — set buffer. Return this.
+pub unsafe extern "win64" fn msvcp_streambuf_setbuf(
+    this: usize,
+    _b: usize,
+    _c: usize,
+    _d: usize,
+) -> usize {
+    this
+}
+/// `basic_streambuf::imbue(locale const&)` — imbue locale. Void.
+pub unsafe extern "win64" fn msvcp_streambuf_imbue(
+    this: usize,
+    _b: usize,
+    _c: usize,
+    _d: usize,
+) -> usize {
+    let _ = this;
+    0
+}
+/// `basic_ios::clear(iostate state, bool reraise)` — set state.
+pub unsafe extern "win64" fn msvcp_ios_clear(
+    this: usize,
+    state: usize,
+    _reraise: usize,
+    _d: usize,
+) -> usize {
+    // Store state at ios+0x08 (MSVC 14.x layout)
+    if this != 0 {
+        unsafe {
+            *((this + 0x08) as *mut u32) = state as u32;
+        }
+    }
+    0
+}
+/// `basic_ios::setstate(iostate state, bool reraise)` — set state flags.
+pub unsafe extern "win64" fn msvcp_ios_setstate(
+    this: usize,
+    state: usize,
+    _reraise: usize,
+    _d: usize,
+) -> usize {
+    if this != 0 {
+        unsafe {
+            *((this + 0x08) as *mut u32) = state as u32;
+        }
+    }
+    0
+}
+/// `ios_base::showmanyc()` — show available chars. Return 0.
+pub unsafe extern "win64" fn msvcp_ios_showmanyc(
+    this: usize,
+    _b: usize,
+    _c: usize,
+    _d: usize,
+) -> i64 {
+    let _ = this;
+    0
+}
+/// `basic_ostream::put(char)` — return *this (works for void, put, write, etc.)
+pub unsafe extern "win64" fn msvcp_ostream_put(
+    this: usize,
+    _b: usize,
+    _c: usize,
+    _d: usize,
+) -> usize {
+    this
+}
+
 /// Resolve a MSVCP140.dll import to a function or data address.
 ///
 /// Returns `None` if the DLL is not msvcp140.dll.
@@ -2089,11 +2540,14 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
                 as *const () as usize
         }
 
-        // ── Function symbols — all map to msvcp_noop ──────────────────────────────
+        // ── Constructors — use msvcp_noop_retfirst (returns a0 = this) ─────
         "??0?$codecvt@_WDU_Mbstatet@@@std@@QEAA@_K@Z"
         | "??0_Locinfo@std@@QEAA@PEBD@Z"
         | "??0_Lockit@std@@QEAA@H@Z"
         | "??0facet@locale@std@@IEAA@_K@Z"
+        => msvcp_noop_retfirst as *const () as usize,
+
+        // ── All other function symbols — map to msvcp_noop (returns 0) ──────
         | "??1?$basic_ios@DU?$char_traits@D@std@@@std@@UEAA@XZ"
         | "??1?$basic_iostream@DU?$char_traits@D@std@@@std@@UEAA@XZ"
         | "??1?$basic_istream@DU?$char_traits@D@std@@@std@@UEAA@XZ"
@@ -2108,55 +2562,59 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         | "?_Addfac@_Locimp@locale@std@@AEAAXPEAVfacet@23@_K@Z"
         | "?_Decref@facet@locale@std@@UEAAPEAV_Facet_base@3@XZ"
         | "?_Getcat@?$codecvt@DDU_Mbstatet@@@std@@SA_KPEAPEBVfacet@locale@2@PEBV42@@Z"
-        | "?_Getcvt@_Locinfo@std@@QEBA?AU_Cvtvec@@XZ"
-        | "?_Getlconv@_Locinfo@std@@QEBAPEBUlconv@@XZ"
         | "?_Gettrue@_Locinfo@std@@QEBAPEBDXZ"
         | "?_Incref@facet@locale@std@@UEAAXXZ"
         | "?_Lock@?$basic_streambuf@DU?$char_traits@D@std@@@std@@UEAAXXZ"
-        | "?_New_Locimp@_Locimp@locale@std@@CAPEAV123@AEBV123@@Z"
-        | "?_Osfx@?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAXXZ"
-        | "?_Throw_C_error@std@@YAXH@Z"
-        | "?_Throw_Cpp_error@std@@YAXH@Z"
-        | "?_Unlock@?$basic_streambuf@DU?$char_traits@D@std@@@std@@UEAAXXZ"
-        | "?_Xbad_alloc@std@@YAXXZ"
-        | "?_Xbad_function_call@std@@YAXXZ"
-        | "?_Xlength_error@std@@YAXPEBD@Z"
-        | "?_Xout_of_range@std@@YAXPEBD@Z"
-        | "?clear@?$basic_ios@DU?$char_traits@D@std@@@std@@QEAAXH_N@Z"
-        | "?flush@?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV12@XZ"
-        | "?imbue@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MEAAXAEBVlocale@2@@Z"
-        | "?in@?$codecvt@DDU_Mbstatet@@@std@@QEBAHAEAU_Mbstatet@@PEBD1AEAPEBDPEAD3AEAPEAD@Z"
-        | "?out@?$codecvt@DDU_Mbstatet@@@std@@QEBAHAEAU_Mbstatet@@PEBD1AEAPEBDPEAD3AEAPEAD@Z"
-        | "?out@?$codecvt@_WDU_Mbstatet@@@std@@QEBAHAEAU_Mbstatet@@PEB_W1AEAPEB_WPEAD3AEAPEAD@Z"
-        | "?put@?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV12@D@Z"
-        | "?setbuf@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MEAAPEAV12@PEAD_J@Z"
-        | "?setstate@?$basic_ios@DU?$char_traits@D@std@@@std@@QEAAXH_N@Z"
-        | "?showmanyc@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MEAA_JXZ"
-        | "?sputc@?$basic_streambuf@DU?$char_traits@D@std@@@std@@QEAAHD@Z"
-        | "?sync@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MEAAHXZ"
-        | "?uflow@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MEAAHXZ"
-        | "?uncaught_exception@std@@YA_NXZ"
-        | "?unshift@?$codecvt@DDU_Mbstatet@@@std@@QEBAHAEAU_Mbstatet@@PEAD1AEAPEAD@Z"
-        | "?widen@?$basic_ios@DU?$char_traits@D@std@@@std@@QEBADD@Z"
-        | "?xsputn@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MEAA_JPEBD_J@Z"
-        | "?eback@?$basic_streambuf@DU?$char_traits@D@std@@@std@@IEBAPEADXZ"
-        | "?egptr@?$basic_streambuf@DU?$char_traits@D@std@@@std@@IEBAPEADXZ"
-        | "?epptr@?$basic_streambuf@DU?$char_traits@D@std@@@std@@IEBAPEADXZ"
-        | "?gptr@?$basic_streambuf@DU?$char_traits@D@std@@@std@@IEBAPEADXZ"
-        | "?pbase@?$basic_streambuf@DU?$char_traits@D@std@@@std@@IEBAPEADXZ"
-        | "?pptr@?$basic_streambuf@DU?$char_traits@D@std@@@std@@IEBAPEADXZ"
-        | "?gbump@?$basic_streambuf@DU?$char_traits@D@std@@@std@@IEAAXH@Z"
-        | "?setg@?$basic_streambuf@DU?$char_traits@D@std@@@std@@IEAAXPEAD00@Z"
-        | "?setp@?$basic_streambuf@DU?$char_traits@D@std@@@std@@IEAAXPEAD0@Z"
-        | "?setp@?$basic_streambuf@DU?$char_traits@D@std@@@std@@IEAAXPEAD00@Z"
-        | "?_Pninc@?$basic_streambuf@DU?$char_traits@D@std@@@std@@IEAAPEADXZ"
-        | "?flags@ios_base@std@@QEBAHXZ"
-        | "?good@ios_base@std@@QEBA_NXZ"
-        | "?rdbuf@?$basic_ios@DU?$char_traits@D@std@@@std@@QEBAPEAV?$basic_streambuf@DU?$char_traits@D@std@@@2@XZ"
-        | "?tie@?$basic_ios@DU?$char_traits@D@std@@@std@@QEBAPEAV?$basic_ostream@DU?$char_traits@D@std@@@2@XZ"
-        |         "?width@ios_base@std@@QEAA_J_J@Z"
-        | "?width@ios_base@std@@QEBA_JXZ"
-        => msvcp_noop as *const () as usize,
+        => msvcp_noop_retfirst as *const () as usize,
+
+        // ── _Locinfo data stubs — return valid pointers instead of 0 ───────
+        "?_Getcvt@_Locinfo@std@@QEBA?AU_Cvtvec@@XZ" => {
+            msvcp_getcvt as unsafe extern "win64" fn(usize, usize, usize, usize) -> usize
+                as *const () as usize
+        }
+        "?_Getlconv@_Locinfo@std@@QEBAPEBUlconv@@XZ" => {
+            msvcp_getlconv as unsafe extern "win64" fn(usize, usize, usize, usize) -> usize
+                as *const () as usize
+        }
+        "?_Getfacet@locale@std@@QEBAPEBVfacet@12@_K_N@Z" => {
+            msvcp_getfacet as unsafe extern "win64" fn(usize, usize, usize, usize) -> usize
+                as *const () as usize
+        }
+
+        // ── All remaining function symbols — individually implemented ──────
+        "?_Throw_C_error@std@@YAXH@Z" => { msvcp_throw_c_error as unsafe extern "win64" fn(i32,usize,usize,usize)->i32 as *const () as usize }
+        "?_Throw_Cpp_error@std@@YAXH@Z" => { msvcp_throw_cpp_error as unsafe extern "win64" fn(i32,usize,usize,usize)->i32 as *const () as usize }
+        "?_Xbad_alloc@std@@YAXXZ" => { msvcp_xbad_alloc as unsafe extern "win64" fn(usize,usize,usize,usize)->usize as *const () as usize }
+        "?_Xbad_function_call@std@@YAXXZ" => { msvcp_xbad_function_call as unsafe extern "win64" fn(usize,usize,usize,usize)->usize as *const () as usize }
+        "?_Xlength_error@std@@YAXPEBD@Z" => { msvcp_xlength_error as unsafe extern "win64" fn(usize,usize,usize,usize)->usize as *const () as usize }
+        "?_Xout_of_range@std@@YAXPEBD@Z" => { msvcp_xout_of_range as unsafe extern "win64" fn(usize,usize,usize,usize)->usize as *const () as usize }
+        "?clear@?$basic_ios@DU?$char_traits@D@std@@@std@@QEAAXH_N@Z" => { msvcp_ios_clear as unsafe extern "win64" fn(usize,usize,usize,usize)->usize as *const () as usize }
+        "?imbue@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MEAAXAEBVlocale@2@@Z" => { msvcp_streambuf_imbue as unsafe extern "win64" fn(usize,usize,usize,usize)->usize as *const () as usize }
+        "?setstate@?$basic_ios@DU?$char_traits@D@std@@@std@@QEAAXH_N@Z" => { msvcp_ios_setstate as unsafe extern "win64" fn(usize,usize,usize,usize)->usize as *const () as usize }
+        "?showmanyc@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MEAA_JXZ" => { msvcp_ios_showmanyc as unsafe extern "win64" fn(usize,usize,usize,usize)->i64 as *const () as usize }
+        "?sputc@?$basic_streambuf@DU?$char_traits@D@std@@@std@@QEAAHD@Z" => { msvcp_streambuf_sputc as unsafe extern "win64" fn(usize,usize,usize,usize)->i32 as *const () as usize }
+        "?sync@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MEAAHXZ" => { msvcp_streambuf_sync as unsafe extern "win64" fn(usize,usize,usize,usize)->i32 as *const () as usize }
+        "?uflow@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MEAAHXZ" => { msvcp_streambuf_uflow as unsafe extern "win64" fn(usize,usize,usize,usize)->i32 as *const () as usize }
+        "?uncaught_exception@std@@YA_NXZ" => { msvcp_uncaught_exception as unsafe extern "win64" fn(usize,usize,usize,usize)->i32 as *const () as usize }
+        "?xsputn@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MEAA_JPEBD_J@Z" => { msvcp_streambuf_xsputn as unsafe extern "win64" fn(usize,usize,usize,usize)->i64 as *const () as usize }
+        "?gbump@?$basic_streambuf@DU?$char_traits@D@std@@@std@@IEAAXH@Z" => { msvcp_streambuf_sync as unsafe extern "win64" fn(usize,usize,usize,usize)->i32 as *const () as usize }
+        "?in@?$codecvt@DDU_Mbstatet@@@std@@QEBAHAEAU_Mbstatet@@PEBD1AEAPEBDPEAD3AEAPEAD@Z" => {
+            msvcp_codecvt_in as unsafe extern "win64" fn(usize,usize,usize,usize,usize,usize,usize,usize)->i32 as *const () as usize
+        }
+        "?out@?$codecvt@DDU_Mbstatet@@@std@@QEBAHAEAU_Mbstatet@@PEBD1AEAPEBDPEAD3AEAPEAD@Z" => {
+            msvcp_codecvt_out as unsafe extern "win64" fn(usize,usize,usize,usize,usize,usize,usize,usize)->i32 as *const () as usize
+        }
+        "?out@?$codecvt@_WDU_Mbstatet@@@std@@QEBAHAEAU_Mbstatet@@PEB_W1AEAPEB_WPEAD3AEAPEAD@Z" => {
+            msvcp_codecvt_out_w as unsafe extern "win64" fn(usize,usize,usize,usize,usize,usize,usize,usize)->i32 as *const () as usize
+        }
+        "?unshift@?$codecvt@DDU_Mbstatet@@@std@@QEBAHAEAU_Mbstatet@@PEAD1AEAPEAD@Z" => {
+            msvcp_codecvt_unshift as unsafe extern "win64" fn(usize,usize,usize,usize,usize,usize,usize,usize)->i32 as *const () as usize
+        }
+        "?put@?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV12@D@Z" => { msvcp_ostream_put as unsafe extern "win64" fn(usize,usize,usize,usize)->usize as *const () as usize }
+        "?setbuf@?$basic_streambuf@DU?$char_traits@D@std@@@std@@MEAAPEAV12@PEAD_J@Z" => { msvcp_streambuf_setbuf as unsafe extern "win64" fn(usize,usize,usize,usize)->usize as *const () as usize }
+
+        // ── basic_ios accessors — handled by trivial_stub! macro ────────────
+
 
         "?fill@?$basic_ios@DU?$char_traits@D@std@@@std@@QEBADXZ" => {
             msvcp_fill as unsafe extern "win64" fn(*const u8, usize, usize, usize) -> u8
@@ -2551,7 +3009,15 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
             msvcp_uncaught_exceptions as unsafe extern "win64" fn() -> i32 as *const () as usize
         }
 
-        _ => return None,
+        // Unknown MSVCP140 export — log the name and return retfirst.
+        // Phase C: identify and implement individually.
+        _ => {
+            static UNKNOWN_LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+            if !UNKNOWN_LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                eprintln!("weave/msvcp: unknown export {func} → msvcp_noop_retfirst");
+            }
+            return Some(msvcp_noop_retfirst as *const () as usize)
+        }
     };
 
     Some(addr)

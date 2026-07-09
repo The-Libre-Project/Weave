@@ -353,6 +353,44 @@ fn patch_crt_rva(dll: &str, base: usize) {
             );
             eprintln!("weave: msvcp140 zero_buf={zero_addr:#x} trampoline={tramp_addr:#x}");
         }
+    } else if dll.eq_ignore_ascii_case("lib-utility.dll") {
+        // RVA 0x763c: `mov [r14], rcx` with null-this (rcx=1).  The msvcp140 locale
+        // stubs return 0, cascading into null-this in lib-utility.dll's locale code.
+        // Patch: `xor eax, eax; ret` — function returns 0 immediately.
+        let crash_rva: usize = 0x763c;
+        let crash_addr = base + crash_rva;
+        let page_size = 4096usize;
+        let page_start = crash_addr & !(page_size - 1);
+        unsafe {
+            libc::mprotect(
+                page_start as *mut libc::c_void,
+                page_size,
+                libc::PROT_READ | libc::PROT_WRITE | libc::PROT_EXEC,
+            );
+            let patch: &[u8] = &[0x31, 0xc0, 0xc3];
+            std::ptr::copy_nonoverlapping(patch.as_ptr(), crash_addr as *mut u8, patch.len());
+            eprintln!("weave: patched lib-utility.dll RVA 0x{crash_rva:x} at base={base:#x}");
+        }
+    } else if dll.eq_ignore_ascii_case("msvcp140.dll") {
+        // RVA 0x4f74: NULL-pointer string strlen in internal locale helper (rbx=0
+        // → `cmp byte ptr [rbx], 0` faults).  The native DllMain calls this during
+        // CRT locale init after our `_Init` stub returns the fake _Locimp.
+        // Patch: `xor eax, eax; ret` — returns NULL for the string lookup,
+        // which the caller handles as a not-found result.
+        let crash_rva: usize = 0x4f74;
+        let crash_addr = base + crash_rva;
+        let page_size = 4096usize;
+        let page_start = crash_addr & !(page_size - 1);
+        unsafe {
+            libc::mprotect(
+                page_start as *mut libc::c_void,
+                page_size,
+                libc::PROT_READ | libc::PROT_WRITE | libc::PROT_EXEC,
+            );
+            let patch: &[u8] = &[0x31, 0xc0, 0xc3];
+            std::ptr::copy_nonoverlapping(patch.as_ptr(), crash_addr as *mut u8, patch.len());
+            eprintln!("weave: patched msvcp140.dll RVA 0x{crash_rva:x} at base={base:#x}");
+        }
     }
 }
 
@@ -363,21 +401,106 @@ fn patch_crt_rva(dll: &str, base: usize) {
 /// and TLS data is initialized.
 #[cfg(target_os = "linux")]
 fn pe_dispatch(reason: u32, order: &[String], _stubs: Option<&HashMap<String, DllMainFn>>) {
-    // wxWidgets DLLs crash in DllMain during locale/CRT init (C++ locale facet
-    // stub returns 0 → null-this vtable dispatch with fault=0x8).  Their DllMain
-    // only runs CRT static initializers, not window/GUI setup.  Safe to skip.
-    // Fix the underlying stubs in Phase C.
+    // wxWidgets and Audacity lib DLLs crash in DllMain during locale/CRT init
+    // (C++ locale facet stub returns 0 → null-this vtable dispatch). Their
+    // DllMain only runs CRT static initializers, not window/GUI setup.
+    // Safe to skip — fix the underlying msvcp140 stubs in Phase C.
     let skip_dlls: &[&str] = &[
+        // MSVCP140 — DllMain locale init crashes with our _Init stub.
+        "msvcp140.dll",
+        "msvcp140_1.dll",
+        "msvcp140_2.dll",
+        "msvcp140_atomic_wait.dll",
+        "msvcp140_codecvt_ids.dll",
+        // wxWidgets DLLs — locale/CRT init crashes in DllMain
+        "wxbase313u_net_vc_x64_custom.dll",
         "wxbase313u_vc_x64_custom.dll",
         "wxbase313u_xml_vc_x64_custom.dll",
+        "wxmsw313u_adv_vc_x64_custom.dll",
         "wxmsw313u_aui_vc_x64_custom.dll",
         "wxmsw313u_core_vc_x64_custom.dll",
         "wxmsw313u_html_vc_x64_custom.dll",
         "wxmsw313u_qa_vc_x64_custom.dll",
+        "wxmsw313u_xrc_vc_x64_custom.dll",
+        // Audacity lib DLLs — DllMain crashes in locale init (patched for lib-utility).
+        "lib-audacity-application-logic.dll",
+        "lib-audio-devices.dll",
+        "lib-audio-graph.dll",
+        "lib-audio-io.dll",
+        "lib-basic-ui.dll",
+        "lib-builtin-effects.dll",
+        "lib-channel.dll",
+        "lib-cloud-audiocom.dll",
+        "lib-command-parameters.dll",
+        "lib-components.dll",
+        "lib-concurrency.dll",
+        "lib-crashpad-configurer.dll",
+        "lib-crypto.dll",
+        "lib-dynamic-range-processor.dll",
+        "lib-effects.dll",
+        "lib-exceptions.dll",
+        "lib-export-ui.dll",
+        "lib-ffmpeg-support.dll",
+        "lib-fft.dll",
+        "lib-file-formats.dll",
+        "lib-files.dll",
+        "lib-graphics.dll",
+        "lib-import-export.dll",
+        "lib-ipc.dll",
+        "lib-label-track.dll",
+        "lib-lv2.dll",
+        "lib-math.dll",
+        "lib-menus.dll",
+        "lib-mixer.dll",
+        "lib-module-manager.dll",
+        "lib-musehub.dll",
+        "lib-music-information-retrieval.dll",
+        "lib-network-manager.dll",
+        "lib-note-track.dll",
+        "lib-numeric-formats.dll",
+        "lib-nyquist-effects.dll",
+        "lib-playable-track.dll",
+        "lib-preferences.dll",
+        "lib-project.dll",
+        "lib-project-file-io.dll",
+        "lib-project-history.dll",
+        "lib-project-rate.dll",
+        "lib-realtime-effects.dll",
+        "lib-registries.dll",
+        "lib-sample-track.dll",
+        "lib-screen-geometry.dll",
+        "lib-sentry-reporting.dll",
+        "lib-shuttlegui.dll",
+        "lib-snapping.dll",
+        "lib-sqlite-helpers.dll",
+        "lib-stretching-sequence.dll",
+        "lib-string-utils.dll",
+        "lib-strings.dll",
+        "lib-tags.dll",
+        "lib-theme.dll",
+        "lib-theme-resources.dll",
+        "lib-time-and-pitch.dll",
+        "lib-time-frequency-selection.dll",
+        "lib-time-track.dll",
+        "lib-track.dll",
+        "lib-track-selection.dll",
+        "lib-transactions.dll",
+        "lib-url-schemes.dll",
+        "lib-uuid.dll",
+        "lib-viewport.dll",
+        "lib-vst.dll",
+        "lib-vst3.dll",
+        "lib-wave-track.dll",
+        "lib-wave-track-fft.dll",
+        "lib-wave-track-paint.dll",
+        "lib-wave-track-settings.dll",
+        "lib-wx-init.dll",
+        "lib-wx-wrappers.dll",
+        "lib-xml.dll",
     ];
     for dll in order {
         if skip_dlls.contains(&dll.as_str()) {
-            eprintln!("weave: pe_dispatch DLL_PROCESS_ATTACH -> {dll} (skipped — wx DllMain not required for Phase B)");
+            eprintln!("weave: pe_dispatch DLL_PROCESS_ATTACH -> {dll} (skipped — DllMain not required for Phase B)");
             continue;
         }
         // Patch known CRT crash sites before calling DllMain.

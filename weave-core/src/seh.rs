@@ -599,6 +599,58 @@ unsafe extern "C" fn on_fatal_signal(
         // Fault in Weave's own Rust code — print a diagnostic first so we know
         // which stub crashed, then restore the default handler and re-raise.
         let fault_addr = unsafe { (*info).si_addr() } as usize;
+        // Read return addresses from the stack (raw pointer, no /proc).
+        // Dump [RSP], [RSP+8], [RSP+16] for call chain.
+        unsafe {
+            let gregs = (*uctx).uc_mcontext.gregs;
+            let rsp = gregs[libc::REG_RSP as usize] as usize;
+            let mut rbuf = [0u8; 256];
+            let mut pos = 0usize;
+            let nibble = |n: u64| {
+                if n < 10 {
+                    b'0' + n as u8
+                } else {
+                    b'a' + n as u8 - 10
+                }
+            };
+            macro_rules! push_hex {
+                ($v:expr) => {
+                    for sh in (0..16u32).rev() {
+                        rbuf[pos] = nibble(($v >> (sh * 4)) & 0xf);
+                        pos += 1;
+                    }
+                };
+            }
+            macro_rules! push_str {
+                ($s:expr) => {
+                    for &b in $s {
+                        rbuf[pos] = b;
+                        pos += 1;
+                    }
+                };
+            }
+            if rsp >= 0x700000000000 {
+                push_str!(b"weave: callchain");
+                for i in 0..4usize {
+                    let addr = unsafe { *((rsp + i * 8) as *const u64) };
+                    push_str!(b" [");
+                    let d = if i < 10 {
+                        b'0' + i as u8
+                    } else {
+                        b'a' + i as u8 - 10
+                    };
+                    rbuf[pos] = d;
+                    pos += 1;
+                    push_str!(b"]=");
+                    push_hex!(addr);
+                }
+                rbuf[pos] = b'\n';
+                pos += 1;
+            } else {
+                push_str!(b"weave: rsp=0x0\n");
+            }
+            libc::write(2, rbuf.as_ptr() as *const libc::c_void, pos);
+        }
         print_weave_crash(sig, rip, fault_addr, base, uctx);
         unsafe {
             libc::signal(sig, libc::SIG_DFL);

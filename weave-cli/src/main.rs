@@ -83,16 +83,25 @@ fn resolve(dll: &str, func: &str) -> Option<usize> {
     // CRT and side-by-side DLLs loaded as native PEs — prefer native exports.
     // Without this the weave_msvcp140 resolver shadows every symbol and
     // returns msvcp_noop, defeating the purpose of loading real CRT DLLs.
-    const NATIVE_CRT_DLLS: &[&str] = &[
-        "msvcp140.dll",
-        "msvcp140_1.dll",
-        "msvcp140_2.dll",
-        "msvcp140_atomic_wait.dll",
-        "msvcp140_codecvt_ids.dll",
-        "vcruntime140.dll",
-        "vcruntime140_1.dll",
-        "concrt140.dll",
-    ];
+    // CRT DLLs with safe DllMain — prefer native exports.
+    const NATIVE_CRT_DLLS: &[&str] = &["vcruntime140.dll", "vcruntime140_1.dll", "concrt140.dll"];
+    if NATIVE_CRT_DLLS.contains(&dll) {
+        if let Some(addr) = dll_registry::lookup(dll, func) {
+            return Some(addr);
+        }
+    }
+    // MSVCP140 family: native DllMain is skipped (locale crash).  All exports
+    // go through our resolver.  Unknown exports get msvcp_noop_retfirst.
+    if matches!(
+        dll,
+        "msvcp140.dll"
+            | "msvcp140_1.dll"
+            | "msvcp140_2.dll"
+            | "msvcp140_atomic_wait.dll"
+            | "msvcp140_codecvt_ids.dll"
+    ) {
+        return weave_msvcp140::resolve(dll, func);
+    }
     if NATIVE_CRT_DLLS.contains(&dll) {
         if let Some(addr) = dll_registry::lookup(dll, func) {
             return Some(addr);
@@ -1385,6 +1394,8 @@ fn main() {
                         MOD_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
                     };
                     weave_core::seh::register_loaded_module(base as usize, image_size);
+                    // Patch known crash sites in CRT DLLs right after loading,
+                    // before any DllMain is called (DllMain runs in pe_dispatch).
                     eprintln!(
                         "weave: pre-loaded {dll_name} from exe dir at base={:#x} mod[{mod_idx}]",
                         base as usize
