@@ -8308,7 +8308,8 @@ fn audacity_phase_a_probe() {
         .arg("--no-sandbox")
         .arg(&fixture)
         .env("WEAVE_IAT_TRACE", "1")
-        .stdout(std::process::Stdio::piped())
+        // The probe reports only stderr; leaving stdout unread can block a verbose guest.
+        .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
         .spawn()
         .unwrap_or_else(|e| panic!("failed to spawn weave on audacity.exe: {e}"));
