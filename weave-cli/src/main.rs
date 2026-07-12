@@ -1175,6 +1175,17 @@ fn main() {
 
     let args = Args::parse();
 
+    // The test-only kill switch must fail before the out-of-process host can
+    // fork. `apply` records Disabled without restricting the process, then
+    // the canonical invariant emits its stable diagnostic and aborts.
+    let sandbox_disabled_by_env = std::env::var_os("WEAVE_DISABLE_SANDBOX")
+        .map(|value| !value.is_empty() && value != "0")
+        .unwrap_or(false);
+    if sandbox_disabled_by_env {
+        weave_sandbox::apply(true, &[]);
+        weave_sandbox::assert_sandboxed!("weave-cli");
+    }
+
     // ── −0.5. Stub-trace mode ────────────────────────────────────────────
     // When --trace-stubs is passed, force-enable the per-slot IAT tracer,
     // switch on stub classification, and redirect structured JSONL output
