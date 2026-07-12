@@ -1659,7 +1659,7 @@ fn main() {
 
                 eprintln!("PHASE: ipc_alive");
             }
-            _child_pid => {
+            child_pid => {
                 unsafe {
                     libc::close(sv[1]);
                 }
@@ -1682,7 +1682,32 @@ fn main() {
 
                 eprintln!("PHASE: host_loop_started");
 
-                weave_ipc::host_loop(sv[0], ipc_handler);
+                if let Err(e) = weave_ipc::host_loop(sv[0], ipc_handler) {
+                    let mut child_wait_status = 0;
+                    let waited_pid = unsafe { libc::waitpid(child_pid, &mut child_wait_status, 0) };
+                    if waited_pid == child_pid {
+                        let child_exit_status = if libc::WIFEXITED(child_wait_status) {
+                            Some(libc::WEXITSTATUS(child_wait_status))
+                        } else {
+                            None
+                        };
+                        let child_signal = if libc::WIFSIGNALED(child_wait_status) {
+                            Some(libc::WTERMSIG(child_wait_status))
+                        } else {
+                            None
+                        };
+                        eprintln!(
+                            "weave: host_loop recv error: {e}; child_pid={child_pid} child_wait_status={child_wait_status} child_exit_status={child_exit_status:?} child_signal={child_signal:?}"
+                        );
+                    } else {
+                        eprintln!(
+                            "weave: host_loop recv error: {e}; child_pid={child_pid} waitpid_error={}",
+                            std::io::Error::last_os_error()
+                        );
+                    }
+                    std::process::exit(1);
+                }
+                std::process::exit(0);
             }
         }
     } else {

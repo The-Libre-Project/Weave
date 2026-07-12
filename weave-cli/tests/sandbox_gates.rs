@@ -408,6 +408,12 @@ fn sandbox_seccomp_blocks_gate() {
         stderr.contains("host_loop recv error"),
         "sandbox_seccomp_blocks_gate FAIL: expected IPC recv error\nstderr:\n{stderr}"
     );
+    assert!(
+        stderr.contains("child_pid=")
+            && stderr.contains("child_wait_status=")
+            && stderr.contains(&format!("child_signal=Some({})", libc::SIGSYS)),
+        "sandbox_seccomp_blocks_gate FAIL: expected child SIGSYS status after IPC EOF\nstderr:\n{stderr}"
+    );
 }
 
 /// Gate 6 — Verify seccomp does NOT break normal apps (hello.exe).

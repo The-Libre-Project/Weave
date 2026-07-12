@@ -203,20 +203,15 @@ pub fn value_to_struct<T>(v: &serde_json::Value) -> Result<T, String> {
 /// a reply.  The handler returns `None` to break the loop (e.g. after an
 /// ExitProcess call that has already called libc::exit).
 ///
-/// # Panics
-///
-/// Panics on unrecoverable I/O errors.
-pub fn host_loop<F>(fd: i32, handler: F) -> !
+/// Returns a receive error to the host so it can report child-process state.
+pub fn host_loop<F>(fd: i32, handler: F) -> Result<(), String>
 where
     F: Fn(&str, &str, &[serde_json::Value]) -> Option<serde_json::Value>,
 {
     loop {
         let msg = match recv_msg(fd) {
             Ok(m) => m,
-            Err(e) => {
-                eprintln!("weave: host_loop recv error: {e}");
-                std::process::exit(1);
-            }
+            Err(e) => return Err(e),
         };
 
         let result = match handler(&msg.dll, &msg.function, &msg.args) {
@@ -234,5 +229,5 @@ where
             break;
         }
     }
-    std::process::exit(0);
+    Ok(())
 }
