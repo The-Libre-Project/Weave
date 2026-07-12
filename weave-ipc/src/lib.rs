@@ -209,10 +209,7 @@ where
     F: Fn(&str, &str, &[serde_json::Value]) -> Option<serde_json::Value>,
 {
     loop {
-        let msg = match recv_msg(fd) {
-            Ok(m) => m,
-            Err(e) => return Err(e),
-        };
+        let msg = recv_msg(fd)?;
 
         let result = match handler(&msg.dll, &msg.function, &msg.args) {
             Some(v) => v,
