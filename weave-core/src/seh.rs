@@ -632,7 +632,7 @@ unsafe extern "C" fn on_fatal_signal(
             if rsp >= 0x700000000000 {
                 push_str!(b"weave: callchain");
                 for i in 0..4usize {
-                    let addr = unsafe { *((rsp + i * 8) as *const u64) };
+                    let addr = *((rsp + i * 8) as *const u64);
                     push_str!(b" [");
                     let d = if i < 10 {
                         b'0' + i as u8
