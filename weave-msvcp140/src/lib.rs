@@ -2242,7 +2242,7 @@ pub unsafe extern "win64" fn msvcp_codecvt_in(
     _this: usize,
     _state: usize,
     from: usize,
-    from_end: usize,
+    _from_end: usize,
     from_next: usize,
     to: usize,
     _to_end: usize,
@@ -2263,7 +2263,7 @@ pub unsafe extern "win64" fn msvcp_codecvt_in(
 pub unsafe extern "win64" fn msvcp_codecvt_out(
     _this: usize,
     _state: usize,
-    from: usize,
+    _from: usize,
     from_end: usize,
     from_next: usize,
     to: usize,
@@ -2284,7 +2284,7 @@ pub unsafe extern "win64" fn msvcp_codecvt_out(
 pub unsafe extern "win64" fn msvcp_codecvt_out_w(
     _this: usize,
     _state: usize,
-    from: usize,
+    _from: usize,
     from_end: usize,
     from_next: usize,
     to: usize,
