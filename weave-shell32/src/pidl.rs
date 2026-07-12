@@ -103,14 +103,11 @@ pub(crate) fn pidl_path_from_list(pidl: *const u8) -> Option<String> {
         if cb == 0 {
             break;
         }
-        if let Some(segment) = weave_item_path(item) {
-            path = Some(match path {
-                Some(existing) => join_win_paths(&existing, &segment),
-                None => segment,
-            });
-        } else {
-            return None;
-        }
+        let segment = weave_item_path(item)?;
+        path = Some(match path {
+            Some(existing) => join_win_paths(&existing, &segment),
+            None => segment,
+        });
         item = unsafe { item.add(cb as usize) };
     }
     path
@@ -669,7 +666,7 @@ fn win_path_to_linux(win_path: &str) -> String {
             .trim_start_matches('/');
         format!(
             "/drive_{}/{}",
-            &trimmed[..1].to_lowercase(),
+            trimmed[..1].to_lowercase(),
             rest.replace('\\', "/")
         )
     } else {
