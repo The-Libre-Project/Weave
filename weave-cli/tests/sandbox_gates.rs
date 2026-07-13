@@ -380,6 +380,7 @@ fn sandbox_seccomp_blocks_gate() {
     let weave_bin = env!("CARGO_BIN_EXE_weave");
     let output = Command::new(weave_bin)
         .arg(&fixture)
+        .env("WEAVE_SECCOMP_TRAP", "1")
         .output()
         .expect("failed to spawn weave on socket_call.exe");
 
@@ -403,16 +404,14 @@ fn sandbox_seccomp_blocks_gate() {
         stderr.contains("PHASE: seccomp_applied"),
         "sandbox_seccomp_blocks_gate FAIL: seccomp was not applied\nstderr:\n{stderr}"
     );
-    // Verify IPC broke (child killed by SIGSYS before sending any IPC).
+    // Verify IPC broke after the SIGSYS handler reported the denied socket syscall.
     assert!(
         stderr.contains("host_loop recv error"),
         "sandbox_seccomp_blocks_gate FAIL: expected IPC recv error\nstderr:\n{stderr}"
     );
     assert!(
-        stderr.contains("child_pid=")
-            && stderr.contains("child_wait_status=")
-            && stderr.contains(&format!("child_signal=Some({})", libc::SIGSYS)),
-        "sandbox_seccomp_blocks_gate FAIL: expected child SIGSYS status after IPC EOF\nstderr:\n{stderr}"
+        stderr.contains("weave: seccomp denied syscall=41"),
+        "sandbox_seccomp_blocks_gate FAIL: expected denied socket syscall report\nstderr:\n{stderr}"
     );
 }
 

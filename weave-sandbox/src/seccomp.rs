@@ -16,6 +16,7 @@ const BPF_K: u16 = 0x00;
 const SECCOMP_RET_KILL_PROCESS: u32 = 0x8000_0000;
 const SECCOMP_RET_ALLOW: u32 = 0x7fff_0000;
 const SECCOMP_RET_LOG: u32 = 0x7ffc_0000;
+const SECCOMP_RET_TRAP: u32 = 0x0003_0000;
 
 // x86_64 audit architecture identifier.
 const AUDIT_ARCH_X86_64: u32 = 0xc000_003e;
@@ -163,14 +164,19 @@ pub fn build_base_filter() -> Vec<sock_filter> {
 /// Build a per-app BPF seccomp filter combining the base allowlist with
 /// per-app `additions`.
 ///
-/// When `WEAVE_SECCOMP_LOG=1` is set in the environment, denied syscalls
-/// are logged to the kernel audit log instead of killing the process.
+/// `WEAVE_SECCOMP_LOG=1` logs denied syscalls to the kernel audit log and
+/// continues. `WEAVE_SECCOMP_TRAP=1` takes precedence and delivers SIGSYS so
+/// the CLI's diagnostic handler can report the syscall number before exiting.
 pub fn build_app_filter(_app: &str, additions: &[i64]) -> Vec<sock_filter> {
-    let deny_action = if std::env::var("WEAVE_SECCOMP_LOG")
+    let trap_enabled = std::env::var("WEAVE_SECCOMP_TRAP")
         .ok()
-        .map(|v| v == "1")
-        .unwrap_or(false)
-    {
+        .is_some_and(|v| v == "1");
+    let log_enabled = std::env::var("WEAVE_SECCOMP_LOG")
+        .ok()
+        .is_some_and(|v| v == "1");
+    let deny_action = if trap_enabled {
+        SECCOMP_RET_TRAP
+    } else if log_enabled {
         SECCOMP_RET_LOG
     } else {
         SECCOMP_RET_KILL_PROCESS
@@ -249,10 +255,14 @@ fn apply_seccomp_inner(exe_name: &str) -> Result<(), String> {
     };
 
     if ret == 0 {
-        if std::env::var("WEAVE_SECCOMP_LOG")
+        if std::env::var("WEAVE_SECCOMP_TRAP")
             .ok()
-            .map(|v| v == "1")
-            .unwrap_or(false)
+            .is_some_and(|v| v == "1")
+        {
+            eprintln!("PHASE: seccomp_applied (trap mode)");
+        } else if std::env::var("WEAVE_SECCOMP_LOG")
+            .ok()
+            .is_some_and(|v| v == "1")
         {
             eprintln!("PHASE: seccomp_applied (logging mode)");
         } else {
@@ -301,6 +311,21 @@ mod tests {
         assert!(
             nrs.contains(&41),
             "app filter with socket addition must allow socket (41)"
+        );
+    }
+
+    #[test]
+    fn test_trap_mode_changes_only_the_deny_action() {
+        // The base allowlist remains unchanged; trap mode only changes the
+        // final action for a denied syscall.
+        std::env::set_var("WEAVE_SECCOMP_TRAP", "1");
+        let filter = build_app_filter("test_app", &[]);
+        std::env::remove_var("WEAVE_SECCOMP_TRAP");
+
+        assert_eq!(filter[filter.len() - 2].k, SECCOMP_RET_TRAP);
+        assert_eq!(
+            syscall_numbers(&filter),
+            syscall_numbers(&build_base_filter())
         );
     }
 

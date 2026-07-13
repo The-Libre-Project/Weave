@@ -1597,6 +1597,77 @@ fn main() {
     // ── 3.7. Socketpair + fork for out-of-process guest ──────────────────
 
     if !args.no_sandbox {
+        #[cfg(target_os = "linux")]
+        unsafe extern "C" fn seccomp_sigsys_handler(
+            _signal: libc::c_int,
+            info: *mut libc::siginfo_t,
+            _context: *mut libc::c_void,
+        ) {
+            #[repr(C)]
+            struct SigsysInfo {
+                _signo: libc::c_int,
+                _errno: libc::c_int,
+                _code: libc::c_int,
+                _padding: libc::c_int,
+                _call_addr: *mut libc::c_void,
+                syscall: libc::c_int,
+                _arch: u32,
+            }
+
+            // Linux seccomp TRAP supplies the denied syscall in si_syscall.
+            // Only write and _exit are used here because this is a signal handler.
+            let syscall = if info.is_null() {
+                0
+            } else {
+                unsafe { (*(info as *const SigsysInfo)).syscall }
+            };
+            let mut message = [0u8; 64];
+            let prefix = b"weave: seccomp denied syscall=";
+            message[..prefix.len()].copy_from_slice(prefix);
+            let mut end = prefix.len();
+            let mut digits = [0u8; 11];
+            let mut count = 0;
+            let mut value = syscall.unsigned_abs();
+            loop {
+                digits[count] = b'0' + (value % 10) as u8;
+                count += 1;
+                value /= 10;
+                if value == 0 {
+                    break;
+                }
+            }
+            if syscall < 0 {
+                message[end] = b'-';
+                end += 1;
+            }
+            for digit in digits[..count].iter().rev() {
+                message[end] = *digit;
+                end += 1;
+            }
+            message[end] = b'\n';
+            unsafe {
+                libc::write(2, message.as_ptr() as *const libc::c_void, end + 1);
+                libc::_exit(128 + libc::SIGSYS);
+            }
+        }
+
+        #[cfg(target_os = "linux")]
+        fn install_seccomp_trap_handler() -> Result<(), String> {
+            if std::env::var("WEAVE_SECCOMP_TRAP").ok().as_deref() != Some("1") {
+                return Ok(());
+            }
+            unsafe {
+                let mut action: libc::sigaction = std::mem::zeroed();
+                action.sa_sigaction = seccomp_sigsys_handler as *const () as usize;
+                action.sa_flags = libc::SA_SIGINFO;
+                libc::sigemptyset(&mut action.sa_mask);
+                if libc::sigaction(libc::SIGSYS, &action, std::ptr::null_mut()) != 0 {
+                    return Err(std::io::Error::last_os_error().to_string());
+                }
+            }
+            Ok(())
+        }
+
         /// Open the first available DRM render node (/dev/dri/renderD*) for Vulkan.
         fn open_drm_render_node() -> Result<i32, String> {
             let dir = std::path::Path::new("/dev/dri");
@@ -1639,6 +1710,11 @@ fn main() {
                 }
                 CHILD_FD.set(sv[1]).expect("weave: CHILD_FD already set");
                 eprintln!("PHASE: child_spawned pid={}", unsafe { libc::getpid() });
+                #[cfg(target_os = "linux")]
+                if let Err(e) = install_seccomp_trap_handler() {
+                    eprintln!("weave: seccomp trap handler failed: {e}");
+                    std::process::exit(1);
+                }
                 if let Err(e) = weave_sandbox::apply_seccomp(exe_name) {
                     eprintln!("weave: seccomp failed: {e}");
                     std::process::exit(1);
