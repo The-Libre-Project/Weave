@@ -1,11 +1,11 @@
 # Weave development commands
 #
 # The project targets Linux x86-64 only. Development happens on macOS with
-# cross-compilation (cargo-zigbuild) for builds and Docker for tests.
+# cross-compilation (cargo-zigbuild) or on any OS with the same tooling.
 #
 # Quick reference:
-#   make build      — cross-compile for Linux (works on macOS)
-#   make lint       — clippy + format check (works on macOS)
+#   make build      — cross-compile for Linux (works on any OS with cargo-zigbuild)
+#   make lint       — clippy + format check (works on any OS)
 #   make test-unit  — run unit tests natively on macOS (fast, no Docker)
 #   make test       — run full test suite in a Linux Docker container
 #   make ci         — build + lint + full test suite (mirrors CI pipeline)
@@ -23,10 +23,9 @@ lint:
 	cargo clippy --target x86_64-unknown-linux-gnu -- -D warnings
 	cargo fmt --check
 
-# ── Unit tests (native macOS — no Docker required) ────────────────────────────
-# Runs PE parser and loader tests directly on macOS. Only covers weave-core
-# and weave-common (the stub crates use extern "win64" which doesn't exist
-# on ARM64). Fast (~2s).
+# ── Unit tests (native on macOS — Docker on other platforms) ───────────────────
+# Runs PE parser and loader tests directly on macOS (native aarch64 target).
+# Fast (~2s). On Windows/Linux, run via `make test` (Docker) instead.
 
 test-unit:
 	cargo test -p weave-core -p weave-common --target aarch64-apple-darwin

@@ -174,7 +174,7 @@ This simpler surface is structural. It falls out of the architecture: narrow fun
 
 ## 5. The shim lifecycle: what "coverage" means
 
-Every Win32 export in Weave begins as a stub and graduates through defined stages. The [SHIM-CONTRACT.md](SHIM-CONTRACT.md) codifies this. The staging is the reason a count like "1,661 registered exports, a fraction fully implemented" is a strategy rather than a measure of incompleteness.
+Every Win32 export in Weave begins as a stub and graduates through defined stages. The [SHIM-CONTRACT.md](../SHIM-CONTRACT.md) codifies this. The staging is the reason a count like "1,661 registered exports, a fraction fully implemented" is a strategy rather than a measure of incompleteness.
 
 **Phase A, stub (present in the resolver).** The function is registered in its crate's `resolve()` match block and returns a sentinel (0, `FALSE`, `ERROR_CALL_NOT_IMPLEMENTED`, or a zero-initialized struct). It exists so the PE loader can resolve the IAT entry and the process can continue past calls to unimplemented APIs. If no target app ever calls it, it stays here forever, costing almost nothing.
 

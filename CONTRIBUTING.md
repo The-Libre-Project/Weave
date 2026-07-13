@@ -31,7 +31,7 @@ cd Weave
 # Check it compiles
 cargo check
 
-# Cross-compile from macOS
+# Cross-compile (any OS — cargo-zigbuild works on Windows, macOS, Linux)
 cargo zigbuild --target x86_64-unknown-linux-gnu
 
 # Unit tests (any platform)

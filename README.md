@@ -111,7 +111,7 @@ git clone https://github.com/The-Libre-Project/Weave.git
 cd Weave
 
 cargo check                                      # compiles
-cargo zigbuild --target x86_64-unknown-linux-gnu # cross-compile from macOS
+cargo zigbuild --target x86_64-unknown-linux-gnu # cross-compile (any OS)
 make test-unit                                   # unit tests, any platform
 make test                                        # full suite (Linux or Docker)
 ```
