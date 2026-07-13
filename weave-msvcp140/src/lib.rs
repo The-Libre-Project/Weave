@@ -39,6 +39,19 @@ pub unsafe extern "win64" fn msvcp_noop_retfirst(
     a0
 }
 
+/// Like msvcp_noop but returns 0 unconditionally (even for `this`/first arg).
+/// Use for facet vtable stubs where returning `this` causes the inlined CRT
+/// to misread the return value as a vtable pointer for subsequent calls.
+/// Wine ref: dlls/msvcp90/locale.c — noop stubs for facet virtual methods.
+pub unsafe extern "win64" fn msvcp_noop_retzero(
+    _a0: usize,
+    _b: usize,
+    _c: usize,
+    _d: usize,
+) -> usize {
+    0
+}
+
 /// Stub for `_Locinfo::_Getcvt()` — returns a zero-initialised `_Cvtvec` struct.
 /// In MSVC x64 a struct >16 bytes is returned via hidden pointer in RDX:
 /// the function writes the struct to [RDX] and returns RDX in RAX.
@@ -363,6 +376,16 @@ static BASIC_IOSTREAM_VBTABLE2: [i32; 2] = [0i32, 0x10i32];
 // implementing the full locale machinery.
 //
 // Wine ref: dlls/msvcp90/locale.c — _Locimp layout, facet base, _Getfacet().
+
+/// Minimal MSVC `std::locale::facet` base class layout (matches `_Facet_base`).
+/// Layout: vtable_ptr at +0, _Refs at +8. Total 16 bytes.
+/// Wine ref: dlls/msvcp90/locale.c — _Facet_base and facet base class layout.
+#[repr(C)]
+struct StdFacet {
+    vtable_ptr: usize,
+    refs: usize,
+}
+
 #[repr(C)]
 struct FakeLocaleData {
     // Padding before vtable to absorb negative vtable offsets AND the vtable
@@ -388,7 +411,13 @@ struct FakeLocaleData {
     locimp_transp: usize,  // +0x28 — false = 0
     locimp_name: usize,    // +0x30 — pointer to "C" string
     // Facet array (allocated after _Locimp fields, _Farray at +0x10 points here).
-    farray: [usize; 6], // all entries = locimp address (non-null)
+    farray: [usize; 6],
+    // Per-category facet vtable and objects. Each farray[i] points to
+    // facets[i] so that the inlined CRT's virtual calls through a facet
+    // go through a retzero vtable (returns 0) instead of the _Locimp's
+    // retfirst vtable (returns this → used as vtable → garbage).
+    facet_vtable: [usize; 64], // retzero vtable for all 6 facets
+    facets: [StdFacet; 6],     // one facet per locale category
 }
 
 // SAFETY: all fields are usize; no interior mutability; written once before first read.
@@ -458,35 +487,54 @@ fn get_fake_locale_data() -> &'static FakeLocaleData {
             thunk_page != libc::MAP_FAILED,
             "mmap MAP_32BIT+PROT_EXEC failed for vtable thunk page"
         );
-        // Write a single indirect JMP thunk: jmp qword ptr [rip+0]; <8-byte addr>
-        let noop = msvcp_noop_retfirst as *const () as usize;
-        let thunk: [u8; 14] = [
-            0xFF,
-            0x25,
-            0x00,
-            0x00,
-            0x00,
-            0x00, // jmp qword ptr [rip+0]
-            noop as u8,
-            (noop >> 8) as u8,
-            (noop >> 16) as u8,
-            (noop >> 24) as u8,
-            (noop >> 32) as u8,
-            (noop >> 40) as u8,
-            (noop >> 48) as u8,
-            (noop >> 56) as u8,
-        ];
-        unsafe {
-            std::ptr::copy_nonoverlapping(thunk.as_ptr(), thunk_page as *mut u8, 14);
+        // ── Write two indirect JMP thunks on the executable page ─────────────
+        // Thunk 0 (offset 0): jmp qword ptr [rip+0]; <8-byte addr of msvcp_noop_retfirst>
+        // Thunk 1 (offset 16): jmp qword ptr [rip+0]; <8-byte addr of msvcp_noop_retzero>
+        // Each thunk is 14 bytes; spaced 16 bytes apart for alignment.
+        fn assemble_thunk(target: usize) -> [u8; 16] {
+            let mut t = [0u8; 16];
+            t[0] = 0xFF;
+            t[1] = 0x25;
+            t[2..6].copy_from_slice(&[0x00u8; 4]); // jmp qword ptr [rip+0]
+            t[6..14].copy_from_slice(&target.to_ne_bytes());
+            t
         }
-        let thunk_addr = thunk_page as usize; // < 4 GiB, 32-bit safe
-                                              // ── All vtable entries use the low-address thunk ──────────────────────
-        data._pad_before_vtable = [thunk_addr; 8]; // pad absorbs negative vtable offsets
-        data.vtable = [thunk_addr; 64];
+        let noop_retfirst = msvcp_noop_retfirst as *const () as usize;
+        let noop_retzero = msvcp_noop_retzero as *const () as usize;
+        let thunk_retfirst = assemble_thunk(noop_retfirst);
+        let thunk_retzero = assemble_thunk(noop_retzero);
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                thunk_retfirst.as_ptr(),
+                thunk_page as *mut u8,
+                16,
+            );
+            std::ptr::copy_nonoverlapping(
+                thunk_retzero.as_ptr(),
+                (thunk_page as *mut u8).add(16),
+                16,
+            );
+        }
+        let retfirst_thunk_addr = thunk_page as usize;     // < 4 GiB, 32-bit safe
+        let retzero_thunk_addr = thunk_page as usize + 16; // < 4 GiB, 32-bit safe
+                                                            // ── All _Locimp vtable entries use the retfirst thunk ─────────────────
+        data._pad_before_vtable = [retfirst_thunk_addr; 8]; // pad absorbs negative vtable offsets
+        data.vtable = [retfirst_thunk_addr; 64];
+        // ── All facet vtable entries use the retzero thunk ────────────────────
+        data.facet_vtable = [retzero_thunk_addr; 64];
+        let facet_vtable_addr = data.facet_vtable.as_ptr() as usize;
+        // ── Init 6 facet objects and point farray entries at them ─────────────
+        for i in 0..6 {
+            data.facets[i] = StdFacet {
+                vtable_ptr: facet_vtable_addr,
+                refs: 0,
+            };
+            data.farray[i] = &data.facets[i] as *const StdFacet as usize;
+        }
         data.locimp_refs = 1;
         data.locimp_nfacets = 6;
         let vtable_addr = data.vtable.as_ptr() as usize;
-        let locimp_addr = &data.locimp_vtable as *const usize as usize;
+        let _locimp_addr = &data.locimp_vtable as *const usize as usize;
         let farray_addr = data.farray.as_ptr() as usize;
         let c_str = b"C\0";
         data.locimp_vtable = vtable_addr;
@@ -494,9 +542,6 @@ fn get_fake_locale_data() -> &'static FakeLocaleData {
         data.locimp_catmask = 0x3F;
         data.locimp_transp = 0;
         data.locimp_name = c_str.as_ptr() as usize;
-        for slot in &mut data.farray {
-            *slot = locimp_addr;
-        }
         // SAFETY: all fields are fully initialized; no other reference exists
         // to this freshly mmap'd memory. Leaked intentionally — process exit
         // cleans up.
@@ -521,6 +566,17 @@ fn get_fake_locale_data() -> &'static FakeLocaleData {
         eprintln!("  farray[0..5] = [{:#x}, {:#x}, {:#x}, {:#x}, {:#x}, {:#x}]",
             data.farray[0], data.farray[1], data.farray[2],
             data.farray[3], data.farray[4], data.farray[5]);
+        // Per-facet vtable & object check
+        let facet_vaddr = data.facet_vtable.as_ptr() as usize;
+        eprintln!("  facet_vtable = {facet_vaddr:#x}");
+        eprintln!("  facet_vtable[0] = {:#x}", data.facet_vtable[0]);
+        for i in 0..6 {
+            let faddr = data.farray[i];
+            if faddr != 0 {
+                let vp = unsafe { *(faddr as *const usize) };
+                eprintln!("  facets[{i}] @ {faddr:#x} vtable_ptr={vp:#x}");
+            }
+        }
         true
     });
 
