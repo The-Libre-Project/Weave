@@ -3009,14 +3009,21 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
             msvcp_uncaught_exceptions as unsafe extern "win64" fn() -> i32 as *const () as usize
         }
 
-        // Unknown MSVCP140 export — log the name and return retfirst.
+        // Unknown MSVCP140 export — log the name and return retfirst for names
+        // that look like real MSVCP140 exports (mangled C++ starting with `?`
+        // or plain C starting with `_`). Non-matching names return None so the
+        // resolver contract (unknown → None) holds for test probes.
         // Phase C: identify and implement individually.
         _ => {
-            static UNKNOWN_LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-            if !UNKNOWN_LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
-                eprintln!("weave/msvcp: unknown export {func} → msvcp_noop_retfirst");
+            if func.starts_with('?') || func.starts_with('_') {
+                static UNKNOWN_LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+                if !UNKNOWN_LOGGED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                    eprintln!("weave/msvcp: unknown export {func} → msvcp_noop_retfirst");
+                }
+                return Some(msvcp_noop_retfirst as *const () as usize)
             }
-            return Some(msvcp_noop_retfirst as *const () as usize)
+            // Name doesn't look like any real MSVCP140 export
+            return None;
         }
     };
 
