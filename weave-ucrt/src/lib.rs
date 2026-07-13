@@ -5505,6 +5505,175 @@ pub unsafe extern "win64" fn ucrt_wstat64i32(_path: *const u16, _buf: *mut u8) -
     -1
 }
 
+// ── SDL2 msvcrt string/ctype stubs ─────────────────────────────────────────────
+
+/// _i64toa — convert int64 to string (ANSI).
+// Wine ref: dlls/msvcrt/string.c — delegates to _itoa-style formatting.
+pub unsafe extern "win64" fn ucrt_i64toa(val: i64, buf: *mut u8, radix: i32) -> *mut u8 {
+    if buf.is_null() {
+        return buf;
+    }
+    let s = match radix {
+        16 => format!("{val:x}"),
+        _ => format!("{val}"),
+    };
+    let bytes = s.as_bytes();
+    unsafe {
+        for (i, &b) in bytes.iter().enumerate() {
+            *buf.add(i) = b;
+        }
+        *buf.add(bytes.len()) = 0;
+    }
+    buf
+}
+
+/// _itoa — convert int (i32) to string (ANSI).
+// Wine ref: dlls/msvcrt/string.c — _itoa writes decimal or hex representation.
+pub unsafe extern "win64" fn ucrt_itoa(val: i32, buf: *mut u8, radix: i32) -> *mut u8 {
+    if buf.is_null() {
+        return buf;
+    }
+    let s = match radix {
+        16 => format!("{val:x}"),
+        _ => format!("{val}"),
+    };
+    let bytes = s.as_bytes();
+    unsafe {
+        for (i, &b) in bytes.iter().enumerate() {
+            *buf.add(i) = b;
+        }
+        *buf.add(bytes.len()) = 0;
+    }
+    buf
+}
+
+/// _ltoa — convert long (i32) to string.
+// Wine ref: dlls/msvcrt/string.c — same as _itoa.
+pub unsafe extern "win64" fn ucrt_ltoa(val: i32, buf: *mut u8, radix: i32) -> *mut u8 {
+    unsafe { ucrt_itoa(val, buf, radix) }
+}
+
+/// _ui64toa — convert uint64 to string.
+// Wine ref: dlls/msvcrt/string.c — delegates to _itoa-style formatting.
+pub unsafe extern "win64" fn ucrt_ui64toa(val: u64, buf: *mut u8, radix: i32) -> *mut u8 {
+    if buf.is_null() {
+        return buf;
+    }
+    let s = match radix {
+        16 => format!("{val:x}"),
+        _ => format!("{val}"),
+    };
+    let bytes = s.as_bytes();
+    unsafe {
+        for (i, &b) in bytes.iter().enumerate() {
+            *buf.add(i) = b;
+        }
+        *buf.add(bytes.len()) = 0;
+    }
+    buf
+}
+
+/// _strrev — reverse a string in place.
+// Wine ref: dlls/msvcrt/string.c — _strrev reverses the null-terminated string in place.
+pub unsafe extern "win64" fn ucrt_strrev(s: *mut u8) -> *mut u8 {
+    if s.is_null() {
+        return s;
+    }
+    unsafe {
+        let mut len = 0usize;
+        while *s.add(len) != 0 {
+            len += 1;
+        }
+        if len > 1 {
+            let mut i = 0;
+            let mut j = len - 1;
+            while i < j {
+                let tmp = *s.add(i);
+                *s.add(i) = *s.add(j);
+                *s.add(j) = tmp;
+                i += 1;
+                j -= 1;
+            }
+        }
+    }
+    s
+}
+
+/// _strupr — convert string to uppercase in place.
+// Wine ref: dlls/msvcrt/string.c — _strupr converts lower-case letters to upper case.
+pub unsafe extern "win64" fn ucrt_strupr(s: *mut u8) -> *mut u8 {
+    if s.is_null() {
+        return s;
+    }
+    unsafe {
+        let mut i = 0;
+        while *s.add(i) != 0 {
+            let c = *s.add(i);
+            if c.is_ascii_lowercase() {
+                *s.add(i) = c - 32;
+            }
+            i += 1;
+        }
+    }
+    s
+}
+
+/// _strlwr — convert string to lowercase in place.
+// Wine ref: dlls/msvcrt/string.c — _strlwr converts upper-case letters to lower case.
+pub unsafe extern "win64" fn ucrt_strlwr(s: *mut u8) -> *mut u8 {
+    if s.is_null() {
+        return s;
+    }
+    unsafe {
+        let mut i = 0;
+        while *s.add(i) != 0 {
+            let c = *s.add(i);
+            if c.is_ascii_uppercase() {
+                *s.add(i) = c + 32;
+            }
+            i += 1;
+        }
+    }
+    s
+}
+
+/// _isctype — test character for a given ctype class.
+// Wine ref: dlls/msvcrt/ctype.c — _isctype(c, mask) checks _ctype[c] & mask.
+pub extern "win64" fn ucrt_isctype(_c: i32, _mask: i32) -> i32 {
+    // Phase-A stub: return 0 (not a match).
+    0
+}
+
+/// iscntrl — test for control character.
+// Wine ref: dlls/msvcrt/ctype.c — iscntrl(c) = _isctype(c, _CONTROL).
+pub extern "win64" fn ucrt_iscntrl(c: i32) -> i32 {
+    unsafe { libc::iscntrl(c) }
+}
+
+/// isgraph — test for graphic (printable, non-space) character.
+// Wine ref: dlls/msvcrt/ctype.c — isgraph(c) = _isctype(c, _PUNCT|_DIGIT|_ALPHA).
+pub extern "win64" fn ucrt_isgraph(c: i32) -> i32 {
+    unsafe { libc::isgraph(c) }
+}
+
+/// ispunct — test for punctuation character.
+// Wine ref: dlls/msvcrt/ctype.c — ispunct(c) = _isctype(c, _PUNCT).
+pub extern "win64" fn ucrt_ispunct(c: i32) -> i32 {
+    unsafe { libc::ispunct(c) }
+}
+
+/// _strtoi64 — parse string as int64.
+// Wine ref: dlls/msvcrt/string.c — _strtoi64 is the signed variant of strtoull.
+pub unsafe extern "win64" fn ucrt_strtoi64(s: *const u8, endptr: *mut *mut u8, base: i32) -> i64 {
+    unsafe { libc::strtoll(s as _, endptr as _, base) as i64 }
+}
+
+/// _strtoui64 — parse string as uint64.
+// Wine ref: dlls/msvcrt/string.c — _strtoui64 delegates to strtoull.
+pub unsafe extern "win64" fn ucrt_strtoui64(s: *const u8, endptr: *mut *mut u8, base: i32) -> u64 {
+    unsafe { libc::strtoull(s as _, endptr as _, base) as u64 }
+}
+
 /// Resolve a UCRT import to a stub address.
 pub fn resolve(dll: &str, func: &str) -> Option<usize> {
     if !is_ucrt_dll(dll) {
@@ -6111,6 +6280,20 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "_wdupenv_s" => stub!(ucrt_wdupenv_s as unsafe extern "win64" fn(_, _, _) -> _),
         "_wputenv_s" => stub!(ucrt_wputenv_s as extern "win64" fn(_) -> _),
         "_wstat64i32" => stub!(ucrt_wstat64i32 as unsafe extern "win64" fn(_, _) -> _),
+        // ── SDL2 msvcrt stubs ────────────────────────────────────────────────
+        "_i64toa" => stub!(ucrt_i64toa as unsafe extern "win64" fn(_, _, _) -> _),
+        "_itoa" => stub!(ucrt_itoa as unsafe extern "win64" fn(_, _, _) -> _),
+        "_ltoa" => stub!(ucrt_ltoa as unsafe extern "win64" fn(_, _, _) -> _),
+        "_ui64toa" => stub!(ucrt_ui64toa as unsafe extern "win64" fn(_, _, _) -> _),
+        "_strrev" => stub!(ucrt_strrev as unsafe extern "win64" fn(_) -> _),
+        "_strupr" => stub!(ucrt_strupr as unsafe extern "win64" fn(_) -> _),
+        "_strlwr" => stub!(ucrt_strlwr as unsafe extern "win64" fn(_) -> _),
+        "_isctype" => stub!(ucrt_isctype as extern "win64" fn(_, _) -> _),
+        "iscntrl" => stub!(ucrt_iscntrl as extern "win64" fn(_) -> _),
+        "isgraph" => stub!(ucrt_isgraph as extern "win64" fn(_) -> _),
+        "ispunct" => stub!(ucrt_ispunct as extern "win64" fn(_) -> _),
+        "_strtoi64" => stub!(ucrt_strtoi64 as unsafe extern "win64" fn(_, _, _) -> _),
+        "_strtoui64" => stub!(ucrt_strtoui64 as unsafe extern "win64" fn(_, _, _) -> _),
         _ => None,
     }
 }
