@@ -86,8 +86,9 @@ pub unsafe extern "win64" fn msvcp_getfacet(
     _addref: usize,
     _d: usize,
 ) -> usize {
-    static GF_CALLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-    if !GF_CALLED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+    static GF_CALLED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let call_count = GF_CALLED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    if call_count < 3 {
         eprintln!("weave/msvcp: _Getfacet called this=0x{this:x} id={id}");
     }
     // `this` is a `locale*`. In MSVC 14.x, `locale._Ptr` is at offset 0 (a _Locimp*).
@@ -96,13 +97,26 @@ pub unsafe extern "win64" fn msvcp_getfacet(
     if this != 0 {
         unsafe {
             let locimp = *(this as *const usize); // locale._Ptr = _Locimp*
+            if call_count < 3 {
+                eprintln!("  → _Ptr=0x{locimp:x}");
+            }
             if locimp != 0 && id < 6 {
                 let farray_ptr = *((locimp + 0x10) as *const usize);
+                if call_count < 3 {
+                    eprintln!("  → _Farray=0x{farray_ptr:x} id={id}");
+                }
                 if farray_ptr != 0 {
-                    return *((farray_ptr as *const usize).add(id));
+                    let facet = *((farray_ptr as *const usize).add(id));
+                    if call_count < 3 {
+                        eprintln!("  → farray[{id}]=0x{facet:x}");
+                    }
+                    return facet;
                 }
             }
         }
+    }
+    if call_count < 3 {
+        eprintln!("  → returning 0 (fallback)");
     }
     0
 }
@@ -174,7 +188,11 @@ pub unsafe extern "win64" fn msvcp_diag_init_locale(
     log_first_locale_call("_Init@locale@std@@", a0);
     let fake = get_fake_locale_data();
     let locimp = &fake.locimp_vtable as *const usize as usize;
-    eprintln!("  → returning fake classic _Locimp at {locimp:#x}");
+    let fakedata_base = fake as *const FakeLocaleData as usize;
+    eprintln!(
+        "  → fake data base=0x{fakedata_base:x} locimp=0x{locimp:x} delta=0x{:x}",
+        locimp - fakedata_base
+    );
     locimp
 }
 pub unsafe extern "win64" fn msvcp_diag_makeloc(
@@ -186,7 +204,11 @@ pub unsafe extern "win64" fn msvcp_diag_makeloc(
     log_first_locale_call("_Makeloc@_Locimp@locale@std@@", a0);
     let fake = get_fake_locale_data();
     let locimp = &fake.locimp_vtable as *const usize as usize;
-    eprintln!("  → returning fake _Locimp at {locimp:#x}");
+    let fakedata_base = fake as *const FakeLocaleData as usize;
+    eprintln!(
+        "  → fake data base=0x{fakedata_base:x} locimp=0x{locimp:x} delta=0x{:x}",
+        locimp - fakedata_base
+    );
     locimp
 }
 pub unsafe extern "win64" fn msvcp_diag_new_locimp(
@@ -219,7 +241,11 @@ pub unsafe extern "win64" fn msvcp_diag_getgloballocale(
     log_first_locale_call("_Getgloballocale@locale@std@@", a0);
     let fake = get_fake_locale_data();
     let locimp = &fake.locimp_vtable as *const usize as usize;
-    eprintln!("  → returning fake _Locimp at {locimp:#x}");
+    let fakedata_base = fake as *const FakeLocaleData as usize;
+    eprintln!(
+        "  → fake data base=0x{fakedata_base:x} locimp=0x{locimp:x} farray=0x{:x} nfacets={}",
+        fake.locimp_farray, fake.locimp_nfacets
+    );
     locimp
 }
 pub unsafe extern "win64" fn msvcp_diag_gettrue(
@@ -502,8 +528,19 @@ pub unsafe extern "win64" fn msvcp_streambuf_ctor(
     // Write fake vtable at +0x00
     write_ptr(this, 0x00, FAKE_STREAMBUF_VTABLE.as_ptr() as *const u8);
     // Write fake locale pointer at +0x98
-    let locale_ptr = get_fake_locale_data() as *const FakeLocaleData as *const u8;
-    write_ptr(this, 0x98, locale_ptr);
+    // Must use &data.locimp_vtable, not the FakeLocaleData base address:
+    // the _Locimp field layout starts at +0x240 within FakeLocaleData (after
+    // _pad_before_vtable[8] + vtable[64]), and the CRT's inlined locale code
+    // reads _Locimp._Farray at offset +0x10 from _Ptr.  Using the base address
+    // would read into _pad_before_vtable instead, producing garbage facet pointers.
+    let data = get_fake_locale_data();
+    let locimp_addr = &data.locimp_vtable as *const usize as usize;
+    write_ptr(this, 0x98, locimp_addr as *const u8);
+    static SB_CALLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if !SB_CALLED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        let fakedata_base = data as *const FakeLocaleData as usize;
+        eprintln!("weave/msvcp: streambuf_ctor this=0x{this:p} fakedata=0x{fakedata_base:x} locimp=0x{locimp_addr:x} farray=0x{:x}", data.locimp_farray);
+    }
     // Set self-referential pointer fields (Wine layout — kept for callers that
     // depend on prbuf/pwbuf/prpos/pwpos/prsize/pwsize self-references).
     streambuf_init_empty(this);
@@ -698,9 +735,10 @@ pub unsafe extern "win64" fn msvcp_getloc(
     // Older MSVC had _Cookie at +0 and _Ptr at +8, but the side-by-side CRT
     // DLLs shipped with modern tools (VS 2017+) use the no-cookie layout.
     *ret = locimp_addr; // locale._Ptr = &fake _Locimp (offset 0)
-    static LOC_CALLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-    if !LOC_CALLED.swap(true, std::sync::atomic::Ordering::Relaxed) {
-        eprintln!("weave/msvcp: getloc this=0x{this:x} → _Locimp at {locimp_addr:#x}");
+    static LOC_CALLED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    if LOC_CALLED.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 3 {
+        eprintln!("weave/msvcp: getloc this=0x{this:x} → _Locimp at {locimp_addr:#x} farray=0x{:x} nfacets={}",
+            data.locimp_farray, data.locimp_nfacets);
     }
     ret
 }
