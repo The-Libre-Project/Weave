@@ -3090,149 +3090,6 @@ fn testsprite2_sdl2_gate1_smoke() {
     }
 }
 
-/// `weave waveout_test.exe` — waveOut + blue window; Gate 1 smoke test.
-///
-/// Runs waveout_test.exe under Weave with --no-sandbox and DISPLAY=:99.
-/// The binary opens a solid-blue window, calls waveOutOpen/PrepareHeader/Write
-/// with a 1-second silence PCM buffer, runs for 5 seconds, then cleans up.
-///
-/// Gates:
-///   1. process exits (not timeout) — no panic / hard crash
-///   2. stderr contains PHASE: waveout_opened — waveOutOpen returned MMSYSERR_NOERROR
-///   3. pixel check at 5 s — Xvfb screen non-black (blue window rendered)
-///   PHASE: waveout_wrote is checked but only warned (silent stub is acceptable)
-///
-/// Skipped gracefully if waveout_test.exe is absent from fixtures.
-#[test]
-fn waveout_gate1_smoke() {
-    if !cfg!(target_os = "linux") {
-        eprintln!("skipping execution test — requires Linux");
-        return;
-    }
-
-    let manifest = env!("CARGO_MANIFEST_DIR");
-    let bin_dir = format!("{manifest}/../tests/fixtures/bin");
-    let exe = format!("{bin_dir}/waveout_test.exe");
-
-    if !std::path::Path::new(&exe).exists() {
-        eprintln!("skipping: waveout_test.exe not present in tests/fixtures/bin/");
-        return;
-    }
-
-    let weave_bin = env!("CARGO_BIN_EXE_weave");
-
-    let start = std::time::Instant::now();
-    let mut child = std::process::Command::new(weave_bin)
-        .current_dir(&bin_dir)
-        .arg("--no-sandbox")
-        .arg(&exe)
-        .env("DISPLAY", ":99")
-        .stderr(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .spawn()
-        .unwrap_or_else(|e| panic!("failed to spawn weave on waveout_test.exe: {e}"));
-
-    // Drain stderr concurrently to avoid blocking the child on the 64 KB pipe.
-    let stderr_pipe = child.stderr.take().expect("stderr was piped");
-    let stderr_shared = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
-    let stderr_writer = std::sync::Arc::clone(&stderr_shared);
-    let drain_thread = std::thread::spawn(move || {
-        use std::io::Read;
-        let mut buf = Vec::new();
-        let mut pipe = stderr_pipe;
-        let _ = pipe.read_to_end(&mut buf);
-        *stderr_writer.lock().unwrap() = buf;
-    });
-
-    let deadline = start + std::time::Duration::from_secs(10);
-    let pixel_check_at = start + std::time::Duration::from_secs(5);
-    let mut pixel_result: Option<bool> = None;
-    let mut exit_status: Option<std::process::ExitStatus> = None;
-    let mut killed_by_deadline = false;
-
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                exit_status = Some(status);
-                break;
-            }
-            Ok(None) => {
-                let now = std::time::Instant::now();
-                if pixel_result.is_none() && now >= pixel_check_at {
-                    #[cfg(target_os = "linux")]
-                    {
-                        pixel_result = sample_display_pixels_99();
-                    }
-                    println!("gate2: waveout_pixel_check → {:?}", pixel_result);
-                }
-                if now >= deadline {
-                    let _ = child.kill();
-                    killed_by_deadline = true;
-                    break;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(100));
-            }
-            Err(e) => panic!("wait failed: {e}"),
-        }
-    }
-    let elapsed = start.elapsed();
-
-    drain_thread.join().expect("stderr drain thread panicked");
-    let stderr_bytes = stderr_shared.lock().unwrap().clone();
-    let stderr = String::from_utf8_lossy(&stderr_bytes);
-
-    eprintln!("waveout_test elapsed: {elapsed:.1?}");
-    eprintln!(
-        "waveout_test exit: {}",
-        if killed_by_deadline {
-            "killed by deadline".to_string()
-        } else {
-            exit_status
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| "unknown".to_string())
-        }
-    );
-    eprintln!("--- FULL STDERR BEGIN ---");
-    eprintln!("{stderr}");
-    eprintln!("--- FULL STDERR END ---");
-
-    // Gate 1: process must exit before the 10-second deadline (no hard hang/panic).
-    assert!(
-        !killed_by_deadline,
-        "waveout Gate 1 FAIL: process did not exit within 10 s — hung or panicked.\nstderr: {stderr}"
-    );
-
-    // Gate 2: waveOutOpen must have returned MMSYSERR_NOERROR.
-    assert!(
-        stderr.contains("PHASE: waveout_opened"),
-        "waveout Gate 1 FAIL: PHASE: waveout_opened not found — waveOutOpen did not \
-         return MMSYSERR_NOERROR.\nstderr: {stderr}"
-    );
-
-    // Warn only (not fail) if waveOutWrite did not succeed — silent stub is OK.
-    if !stderr.contains("PHASE: waveout_wrote") {
-        eprintln!(
-            "waveout warn: PHASE: waveout_wrote absent — waveOutWrite stub may be silent (acceptable)"
-        );
-    }
-
-    // Gate 2 pixel check: blue window rendering is a diagnostic only.
-    // waveout_test validates waveOut stubs — the GDI FillRect→X11 path is
-    // tracked separately (testsprite2 owns the rendering gate).  A black
-    // screen here means FillRect/EndPaint doesn't flush to X11, which is a
-    // known gap but does not invalidate the waveOut result.
-    eprintln!(
-        "gate2: waveout final pixel check result: {:?} (diagnostic — not a hard gate)",
-        pixel_result
-    );
-    if let Some(false) | None = pixel_result {
-        eprintln!(
-            "gate2: waveout pixel check WARN — screen black; \
-             FillRect→X11 path not flushing (separate from waveOut correctness)"
-        );
-    }
-}
-
 /// `weave sdl2_audio_test.exe` — SDL2 video+audio fixture; M2 Gate 1 smoke test.
 ///
 /// Runs sdl2_audio_test.exe under Weave with --no-sandbox and DISPLAY=:99 (Xvfb).
@@ -3272,6 +3129,7 @@ fn sdl2_audio_gate1_smoke() {
         .arg("--no-sandbox")
         .arg(&exe)
         .env("DISPLAY", ":99")
+        .env("SDL_AUDIODRIVER", "dummy")
         .stderr(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .spawn()
@@ -3413,6 +3271,7 @@ fn nxengine_gate1_smoke() {
         .env("DISPLAY", ":99")
         .env("SDL_RENDER_DRIVER", "software")
         .env("SDL_FRAMEBUFFER_ACCELERATION", "0")
+        .env("SDL_AUDIODRIVER", "dummy")
         .stderr(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .spawn()
@@ -3541,7 +3400,7 @@ fn nxengine_gate1_smoke() {
     );
     cap.record(
         CapabilityClass::Audio,
-        CapabilityOutcome::pass("audio bridge active: waveOut→PipeWire"),
+        CapabilityOutcome::untested("SDL_AUDIODRIVER=dummy — audio bypassed, real waveOut→PipeWire not exercised"),
     );
     cap.emit();
 }
@@ -3724,6 +3583,7 @@ fn d3d9_probe_m9_a1_gate() {
         .arg(&fixture)
         .current_dir(&d3d9_dir)
         .env("DISPLAY", ":99")
+        .env("SDL_AUDIODRIVER", "dummy")
         .stderr(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .spawn()
@@ -6368,6 +6228,7 @@ fn testsprite2_d3d9_gate() {
         .env("SDL_RENDER_DRIVER", "direct3d")
         .env("SDL_FRAMEBUFFER_ACCELERATION", "0")
         .env("WEAVE_D3D9_TRACE", "1")
+        .env("SDL_AUDIODRIVER", "dummy")
         .stderr(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .spawn()
@@ -6452,7 +6313,7 @@ fn testsprite2_d3d9_gate() {
     );
     cap.record(
         CapabilityClass::Audio,
-        CapabilityOutcome::pass("audio bridge active: waveOut→PipeWire"),
+        CapabilityOutcome::untested("SDL_AUDIODRIVER=dummy — audio bypassed, real waveOut→PipeWire not exercised"),
     );
     cap.emit();
 }
@@ -6539,6 +6400,7 @@ fn nxengine_d3d9_gate() {
         .env("WEAVE_D3D9_BARRIER_TRACE", "1")
         .env("WEAVE_D3D9_DESC_TRACE", "1")
         .env("WEAVE_D3D9_PRESENT_SOURCE_TRACE", "1")
+        .env("SDL_AUDIODRIVER", "dummy")
         .stderr(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .spawn()
@@ -6695,7 +6557,7 @@ fn nxengine_d3d9_gate() {
     );
     cap.record(
         CapabilityClass::Audio,
-        CapabilityOutcome::pass("audio bridge active: waveOut→PipeWire"),
+        CapabilityOutcome::untested("SDL_AUDIODRIVER=dummy — audio bypassed, real waveOut→PipeWire not exercised"),
     );
     cap.emit();
 }
@@ -9452,5 +9314,113 @@ fn spss_launch_gate() {
     assert!(
         exited.success(),
         "M26 A3 FAIL: SPSS exited with non-zero status\nstderr: {stderr}"
+    );
+}
+
+/// `weave waveout_test.exe` — waveOut-only audio fixture; Gate 1 smoke test.
+///
+/// Runs waveout_test.exe under Weave with --no-sandbox. No DISPLAY needed
+/// (no video). The binary opens a waveOut device, writes a short silent buffer,
+/// and exits.
+///
+/// Gates:
+///   1. Process exits within 30s
+///   2. Stderr contains PHASE: waveout_opened — waveOutOpen returned MMSYSERR_NOERROR
+///   3. Stderr contains PHASE: waveout_written — waveOutWrite completed
+///   4. Process exits with code 0
+///
+/// Skipped gracefully if waveout_test.exe is absent from fixtures.
+#[test]
+fn waveout_gate1_smoke() {
+    if !cfg!(target_os = "linux") {
+        eprintln!("skipping execution test — requires Linux");
+        return;
+    }
+
+    let manifest = env!("CARGO_MANIFEST_DIR");
+    let bin_dir = format!("{manifest}/../tests/fixtures/bin");
+    let exe = format!("{bin_dir}/waveout_test.exe");
+
+    if !std::path::Path::new(&exe).exists() {
+        eprintln!("skipping: waveout_test.exe not present in tests/fixtures/bin/");
+        return;
+    }
+
+    let weave_bin = env!("CARGO_BIN_EXE_weave");
+
+    let start = std::time::Instant::now();
+    let mut child = std::process::Command::new(weave_bin)
+        .arg("--no-sandbox")
+        .arg(&exe)
+        .stderr(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|e| panic!("failed to spawn weave on waveout_test.exe: {e}"));
+
+    // Drain stderr concurrently to avoid blocking the child on the 64 KB pipe.
+    let stderr_pipe = child.stderr.take().expect("stderr was piped");
+    let stderr_shared = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let stderr_writer = std::sync::Arc::clone(&stderr_shared);
+    let drain_thread = std::thread::spawn(move || {
+        use std::io::Read;
+        let mut buf = Vec::new();
+        let mut pipe = stderr_pipe;
+        let _ = pipe.read_to_end(&mut buf);
+        *stderr_writer.lock().unwrap() = buf;
+    });
+
+    let deadline = std::time::Duration::from_secs(30);
+    let mut killed_by_deadline = false;
+
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) => {
+                if start.elapsed() >= deadline {
+                    let _ = child.kill();
+                    killed_by_deadline = true;
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err(e) => panic!("wait failed: {e}"),
+        }
+    }
+    let elapsed = start.elapsed();
+
+    drain_thread.join().expect("stderr drain thread panicked");
+    let stderr_bytes = stderr_shared.lock().unwrap().clone();
+    let stderr = String::from_utf8_lossy(&stderr_bytes);
+
+    eprintln!("waveout_test elapsed: {elapsed:.1?}");
+    eprintln!("--- FULL STDERR BEGIN ---");
+    eprintln!("{stderr}");
+    eprintln!("--- FULL STDERR END ---");
+
+    // Gate 1: process must exit before the 30-second deadline (no hard hang/panic).
+    assert!(
+        !killed_by_deadline,
+        "waveout Gate 1 FAIL: process did not exit within 30 s — hung or panicked.\nstderr: {stderr}"
+    );
+
+    // Gate 2: waveOutOpen must have returned MMSYSERR_NOERROR.
+    assert!(
+        stderr.contains("PHASE: waveout_opened"),
+        "waveout Gate 2 FAIL: PHASE: waveout_opened not found — waveOutOpen did not \
+         return MMSYSERR_NOERROR.\nstderr: {stderr}"
+    );
+
+    // Gate 3: waveOutWrite must have completed.
+    assert!(
+        stderr.contains("PHASE: waveout_written"),
+        "waveout Gate 3 FAIL: PHASE: waveout_written not found — waveOutWrite did not \
+         complete.\nstderr: {stderr}"
+    );
+
+    // Gate 4: process must exit with code 0.
+    let exited = child.wait().expect("waveout: wait");
+    assert!(
+        exited.success(),
+        "waveout Gate 4 FAIL: waveout_test.exe exited with non-zero status.\nstderr: {stderr}"
     );
 }
