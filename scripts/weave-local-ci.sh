@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # weave-local-ci.sh — Agent-owned local CI runner.
 #
-# Replaces weave-ci-watch.sh (GitHub CI) for local CI workflows.
+# Only runs on macOS/Linux (has the cross-compiler). On PC, push with
+# --no-verify and pull on Mac for build/test.
 # Runs the full local CI suite (build + test + lint), writes structured
 # result files, and emits a machine-parseable directive on failure.
 #
@@ -72,26 +73,10 @@ if git notes show "$SHA" >/dev/null 2>&1; then
   git notes add -f -m "$UPDATED" "$SHA" 2>/dev/null || true
 fi
 
-# ── GitHub CI recommendation ──────────────────────────────────────────────
-RECOMMEND_GITHUB_CI=0
-CHANGED_FILES=$(git diff HEAD~1 --name-only 2>/dev/null || echo "")
-for path in weave-cli/ weave-user32/ weave-gdi32/ weave-winmm/ weave-ddraw/ weave-d3d9/ weave-vulkan/ weave-comctl32/ weave-ole32/ weave-ws2_32/ weave-advapi32/ weave-shell32/; do
-  if echo "$CHANGED_FILES" | rg -q "^$path" 2>/dev/null; then
-    RECOMMEND_GITHUB_CI=1
-    break
-  fi
-done
-
-# ── Emit result ──────────────────────────────────────────────────────────────
+# ── Update git note ci: field ────────────────────────────────────────────
 if [ "$EXIT_CODE" -eq 0 ]; then
   echo "=== LOCAL CI GREEN — commit $SHA passed. ==="
   echo ""
-  if [ "$RECOMMEND_GITHUB_CI" -eq 1 ]; then
-    echo "    Note: change touches crates exercised by integration gates."
-    echo "    If needed: gh workflow run CI"
-    echo "    (Skip for comment-only or build-config changes.)"
-    echo ""
-  fi
 else
   echo "=== LOCAL CI RED — commit $SHA FAILED (exit code $EXIT_CODE). ==="
   echo "    Output: $OUTPUT_FILE (last 50 lines below)"
