@@ -287,6 +287,7 @@ pub unsafe extern "win64" fn register_class_w(lp_wnd_class: *const WndClassW) ->
         ClassEntry {
             wnd_proc: wc.lpfn_wnd_proc,
             style: wc.style,
+            h_instance: wc.h_instance,
             h_cursor: wc.h_cursor,
             hbr_background: wc.hbr_background,
             cb_wnd_extra: wc.cb_wnd_extra.max(0) as u32,
@@ -318,11 +319,12 @@ pub unsafe extern "win64" fn register_class_ex_w(lp_wnd_class_ex: *const WndClas
         ClassEntry {
             wnd_proc: wc.lpfn_wnd_proc,
             style: wc.style,
+            h_instance: wc.h_instance,
             h_cursor: wc.h_cursor,
             hbr_background: wc.hbr_background,
             cb_wnd_extra: wc.cb_wnd_extra.max(0) as u32,
-            h_icon: 0,
-            h_icon_sm: 0,
+            h_icon: wc.h_icon,
+            h_icon_sm: wc.h_icon_sm,
         },
     );
     let atom = name_to_atom(&name);
@@ -5105,6 +5107,7 @@ pub unsafe extern "win64" fn register_class_a(lp_wnd_class: *const WndClassA) ->
         class::ClassEntry {
             wnd_proc: wc.lpfn_wnd_proc,
             style: wc.style,
+            h_instance: wc.h_instance,
             h_cursor: wc.h_cursor,
             hbr_background: wc.hbr_background,
             cb_wnd_extra: wc.cb_wnd_extra.max(0) as u32,
@@ -5135,11 +5138,12 @@ pub unsafe extern "win64" fn register_class_ex_a(lp_wnd_class_ex: *const WndClas
         class::ClassEntry {
             wnd_proc: wc.lpfn_wnd_proc,
             style: wc.style,
+            h_instance: wc.h_instance,
             h_cursor: wc.h_cursor,
             hbr_background: wc.hbr_background,
             cb_wnd_extra: wc.cb_wnd_extra.max(0) as u32,
-            h_icon: 0,
-            h_icon_sm: 0,
+            h_icon: wc.h_icon,
+            h_icon_sm: wc.h_icon_sm,
         },
     );
     name_to_atom(&name)
@@ -8181,8 +8185,8 @@ pub unsafe extern "win64" fn get_class_info_w(
         //   offset  8: lpfnWndProc (usize)
         //   offset 16: cbClsExtra (i32) — zero
         //   offset 20: cbWndExtra (i32)
-        //   offset 24: hInstance (usize) — zero
-        //   offset 32: hIcon (usize) — zero
+        //   offset 24: hInstance (usize)
+        //   offset 32: hIcon (usize)
         //   offset 40: hCursor (usize)
         //   offset 48: hbrBackground (usize)
         //   offset 56: lpszMenuName (*const u16) — null
@@ -8194,8 +8198,8 @@ pub unsafe extern "win64" fn get_class_info_w(
             *(p.add(8) as *mut usize) = entry.wnd_proc;
             *(p.add(16) as *mut i32) = 0;
             *(p.add(20) as *mut i32) = entry.cb_wnd_extra as i32;
-            *(p.add(24) as *mut usize) = 0;
-            *(p.add(32) as *mut usize) = 0;
+            *(p.add(24) as *mut usize) = entry.h_instance;
+            *(p.add(32) as *mut usize) = entry.h_icon;
             *(p.add(40) as *mut usize) = entry.h_cursor;
             *(p.add(48) as *mut usize) = entry.hbr_background;
             *(p.add(56) as *mut usize) = 0;

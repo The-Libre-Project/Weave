@@ -323,6 +323,7 @@ fn create_frame_window(
         ClassEntry {
             wnd_proc: dlg_proc,
             style: 0,
+            h_instance: 0,
             h_cursor: 0,
             hbr_background: 0,
             cb_wnd_extra: DLG_WINDOW_EXTRA,

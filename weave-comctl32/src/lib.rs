@@ -1501,6 +1501,7 @@ fn register_comctl32_classes() {
     let toolbar_entry = ClassEntry {
         wnd_proc: toolbar_wnd_proc as *const () as usize,
         style: 0,
+        h_instance: 0,
         h_cursor: 0,
         hbr_background: 0,
         cb_wnd_extra: 0,
@@ -1511,6 +1512,7 @@ fn register_comctl32_classes() {
     let tab_entry = ClassEntry {
         wnd_proc: tab_wnd_proc as *const () as usize,
         style: 0,
+        h_instance: 0,
         h_cursor: 0,
         hbr_background: 0,
         cb_wnd_extra: 0,
@@ -1521,6 +1523,7 @@ fn register_comctl32_classes() {
     let listview_entry = ClassEntry {
         wnd_proc: listview_wnd_proc as *const () as usize,
         style: 0,
+        h_instance: 0,
         h_cursor: 0,
         hbr_background: 0,
         cb_wnd_extra: 0,
@@ -1531,6 +1534,7 @@ fn register_comctl32_classes() {
     let treeview_entry = ClassEntry {
         wnd_proc: treeview_wnd_proc as *const () as usize,
         style: 0,
+        h_instance: 0,
         h_cursor: 0,
         hbr_background: 0,
         cb_wnd_extra: 0,

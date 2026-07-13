@@ -18,6 +18,7 @@ pub struct ClassEntry {
     /// with `extern "win64"` ABI.
     pub wnd_proc: usize,
     pub style: u32,
+    pub h_instance: usize,
     pub h_cursor: usize,
     pub hbr_background: usize,
     /// Number of extra bytes to allocate per window (cbWndExtra).
@@ -550,6 +551,7 @@ pub fn find(name: &str) -> Option<ClassEntry> {
         return Some(ClassEntry {
             wnd_proc,
             style: 0,
+            h_instance: 0,
             h_cursor: 0,
             hbr_background: 0,
             cb_wnd_extra: 0,
@@ -568,6 +570,7 @@ mod tests {
         ClassEntry {
             wnd_proc: 0x1234,
             style: 0,
+            h_instance: 0,
             h_cursor: 0,
             hbr_background: 0,
             cb_wnd_extra: 0,
