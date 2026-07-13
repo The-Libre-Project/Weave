@@ -7842,14 +7842,22 @@ fn audacity_launch_gate() {
         .current_dir(&fixture_dir)
         .arg(&exe)
         .env("DISPLAY", ":99")
+        .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
         .unwrap_or_else(|e| panic!("failed to spawn weave on audacity.exe: {e}"));
 
-    // Drain stderr concurrently — Audacity's Weave output can exceed pipe buffer.
+    // Drain both pipes concurrently — output can exceed pipe buffer.
     let stderr_pipe = child.stderr.take().expect("stderr was piped");
+    let stdout_pipe = child.stdout.take().expect("stdout was piped");
     let stderr_shared = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
     let stderr_writer = std::sync::Arc::clone(&stderr_shared);
+    let stdout_dropper = std::thread::spawn(move || {
+        use std::io::Read;
+        let mut buf = Vec::new();
+        let mut pipe = stdout_pipe;
+        let _ = pipe.read_to_end(&mut buf);
+    });
     let drain_thread = std::thread::spawn(move || {
         use std::io::Read;
         let mut buf = Vec::new();
@@ -8308,8 +8316,8 @@ fn audacity_phase_a_probe() {
         .arg("--no-sandbox")
         .arg(&fixture)
         .env("WEAVE_IAT_TRACE", "1")
-        // The probe reports only stderr; leaving stdout unread can block a verbose guest.
-        .stdout(std::process::Stdio::null())
+        // Drain both stdout and stderr — leaving stdout unread can block a verbose guest.
+        .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
         .unwrap_or_else(|e| panic!("failed to spawn weave on audacity.exe: {e}"));
@@ -8323,6 +8331,13 @@ fn audacity_phase_a_probe() {
         std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let stderr_dest = stderr_shared.clone();
     let mut child_stderr = child.stderr.take().unwrap();
+    let mut child_stdout = child.stdout.take().unwrap();
+
+    let stdout_dropper = std::thread::spawn(move || {
+        use std::io::Read;
+        let mut buf = Vec::new();
+        let _ = child_stdout.read_to_end(&mut buf);
+    });
 
     let drain_thread = std::thread::spawn(move || {
         use std::io::Read;
