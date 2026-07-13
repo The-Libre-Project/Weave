@@ -553,6 +553,98 @@ pub unsafe fn decode_ansi(ptr: *const u8) -> String {
     String::from_utf8_lossy(slice).into_owned()
 }
 
+// ── DisplayConfig types (CCD API) ─────────────────────────────────────────────
+
+/// LUID: locally unique identifier (8 bytes).
+#[repr(C)]
+pub struct LUID {
+    pub low_part: u32,
+    pub high_part: i32,
+}
+
+/// DISPLAYCONFIG_RATIONAL: fractional value (8 bytes).
+#[repr(C)]
+pub struct DisplayConfigRational {
+    pub numerator: u32,
+    pub denominator: u32,
+}
+
+/// DISPLAYCONFIG_2DREGION: 2D size (8 bytes).
+#[repr(C)]
+pub struct DisplayConfig2DRegion {
+    pub cx: u32,
+    pub cy: u32,
+}
+
+/// DISPLAYCONFIG_VIDEO_SIGNAL_INFO: video timing (48 bytes).
+#[repr(C)]
+pub struct DisplayConfigVideoSignalInfo {
+    pub pixel_rate: u64,
+    pub h_sync_freq: DisplayConfigRational,
+    pub v_sync_freq: DisplayConfigRational,
+    pub active_size: DisplayConfig2DRegion,
+    pub total_size: DisplayConfig2DRegion,
+    pub additional_signal_info: u32,
+    pub scan_line_ordering: u32,
+}
+
+/// DISPLAYCONFIG_TARGET_MODE: target mode wrapper (48 bytes).
+#[repr(C)]
+pub struct DisplayConfigTargetMode {
+    pub target_video_signal_info: DisplayConfigVideoSignalInfo,
+}
+
+/// DISPLAYCONFIG_PATH_SOURCE_INFO: source side of a path (20 bytes).
+#[repr(C)]
+pub struct DisplayConfigPathSourceInfo {
+    pub adapter_id: LUID,
+    pub id: u32,
+    pub mode_info_idx: u32,
+    pub status_flags: u32,
+}
+
+/// DISPLAYCONFIG_PATH_TARGET_INFO: target side of a path (48 bytes).
+#[repr(C)]
+pub struct DisplayConfigPathTargetInfo {
+    pub adapter_id: LUID,
+    pub id: u32,
+    pub mode_info_idx: u32,
+    pub output_technology: u32,
+    pub rotation: u32,
+    pub scaling: u32,
+    pub refresh_rate: DisplayConfigRational,
+    pub scan_line_ordering: u32,
+    pub target_available: u32,
+    pub status_flags: u32,
+}
+
+/// DISPLAYCONFIG_PATH_INFO: a single display path (72 bytes).
+#[repr(C)]
+pub struct DisplayConfigPathInfo {
+    pub source_info: DisplayConfigPathSourceInfo,
+    pub target_info: DisplayConfigPathTargetInfo,
+    pub flags: u32,
+}
+
+/// DISPLAYCONFIG_MODE_INFO: mode information (64 bytes).
+#[repr(C)]
+pub struct DisplayConfigModeInfo {
+    pub info_type: u32,
+    pub id: u32,
+    pub adapter_id: LUID,
+    pub target_mode: DisplayConfigTargetMode,
+}
+
+const _: () = assert!(std::mem::size_of::<LUID>() == 8);
+const _: () = assert!(std::mem::size_of::<DisplayConfigRational>() == 8);
+const _: () = assert!(std::mem::size_of::<DisplayConfig2DRegion>() == 8);
+const _: () = assert!(std::mem::size_of::<DisplayConfigVideoSignalInfo>() == 48);
+const _: () = assert!(std::mem::size_of::<DisplayConfigTargetMode>() == 48);
+const _: () = assert!(std::mem::size_of::<DisplayConfigPathSourceInfo>() == 20);
+const _: () = assert!(std::mem::size_of::<DisplayConfigPathTargetInfo>() == 48);
+const _: () = assert!(std::mem::size_of::<DisplayConfigPathInfo>() == 72);
+const _: () = assert!(std::mem::size_of::<DisplayConfigModeInfo>() == 64);
+
 #[cfg(test)]
 mod tests {
     use super::*;

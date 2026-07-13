@@ -8927,16 +8927,28 @@ pub unsafe extern "win64" fn get_dc_ex(hwnd: usize, _clip: usize, _flags: u32) -
     get_dc(hwnd)
 }
 
-/// GetDisplayConfigBufferSizes — return ERROR_NOT_SUPPORTED.
+/// GetDisplayConfigBufferSizes — return buffer sizes for one display.
+///
+/// Returns ERROR_SUCCESS and writes a single path and mode count.
 ///
 /// # Safety
-/// `_num_paths` and `_num_modes` are accepted but not written.
+/// `_num_paths` and `_num_modes` must be valid writable pointers or null.
+// Wine ref: dlls/win32u/sysparams.c — NtUserGetDisplayConfigBufferSizes counts
+// active monitors and returns num_paths=monitor_count, num_modes=monitor_count*2.
+// Weave: stub returns 1 path, 1 mode when no real display info is available.
 pub unsafe extern "win64" fn get_display_config_buffer_sizes(
     _flags: u32,
     _num_paths: *mut u32,
     _num_modes: *mut u32,
 ) -> i32 {
-    50 // ERROR_NOT_SUPPORTED
+    if _num_paths.is_null() || _num_modes.is_null() {
+        return 87; // ERROR_INVALID_PARAMETER
+    }
+    unsafe {
+        *_num_paths = 1;
+        *_num_modes = 1;
+    }
+    0 // ERROR_SUCCESS
 }
 
 /// IsWindowUnicode — return TRUE (Weave windows are always Unicode).
@@ -8947,10 +8959,16 @@ pub unsafe extern "win64" fn is_window_unicode(_hwnd: usize) -> i32 {
     1 // TRUE
 }
 
-/// QueryDisplayConfig — return ERROR_NOT_SUPPORTED.
+/// QueryDisplayConfig — return one display configuration path and mode.
+///
+/// Fills a single DISPLAYCONFIG_PATH_INFO and DISPLAYCONFIG_MODE_INFO
+/// describing a 1280×720 display at 60 Hz.
 ///
 /// # Safety
-/// All pointer arguments are accepted but not dereferenced.
+/// All pointer arguments must be valid writable pointers or null as appropriate.
+// Wine ref: dlls/win32u/sysparams.c — NtUserQueryDisplayConfig iterates active
+// monitors and fills paths/modes arrays. Weave: stub returns one fake display
+// when no real display info is available.
 pub unsafe extern "win64" fn query_display_config(
     _flags: u32,
     _num_paths: *mut u32,
@@ -8959,7 +8977,78 @@ pub unsafe extern "win64" fn query_display_config(
     _modes: *mut std::ffi::c_void,
     _top: *mut std::ffi::c_void,
 ) -> i32 {
-    50 // ERROR_NOT_SUPPORTED
+    if _num_paths.is_null() || _num_modes.is_null() || _paths.is_null() || _modes.is_null() {
+        return 87; // ERROR_INVALID_PARAMETER
+    }
+    if !_top.is_null() {
+        unsafe {
+            *(_top as *mut u32) = 1; // DISPLAYCONFIG_TOPOLOGY_INTERNAL
+        }
+    }
+    unsafe {
+        *_num_paths = 1;
+        *_num_modes = 1;
+
+        let path = &mut *(_paths as *mut DisplayConfigPathInfo);
+        *path = DisplayConfigPathInfo {
+            source_info: DisplayConfigPathSourceInfo {
+                adapter_id: LUID {
+                    low_part: 0,
+                    high_part: 0,
+                },
+                id: 0,
+                mode_info_idx: 0,
+                status_flags: 1, // DISPLAYCONFIG_SOURCE_IN_USE
+            },
+            target_info: DisplayConfigPathTargetInfo {
+                adapter_id: LUID {
+                    low_part: 0,
+                    high_part: 0,
+                },
+                id: 0,
+                mode_info_idx: 0,
+                output_technology: 0xFFFFFFFF, // DISPLAYCONFIG_OUTPUT_TECHNOLOGY_OTHER
+                rotation: 1,                   // DISPLAYCONFIG_ROTATION_IDENTITY
+                scaling: 1,                    // DISPLAYCONFIG_SCALING_IDENTITY
+                refresh_rate: DisplayConfigRational {
+                    numerator: 60,
+                    denominator: 1,
+                },
+                scan_line_ordering: 0, // DISPLAYCONFIG_SCANLINE_ORDERING_UNSPECIFIED
+                target_available: 1,   // TRUE
+                status_flags: 1,       // DISPLAYCONFIG_TARGET_IN_USE
+            },
+            flags: 1, // DISPLAYCONFIG_PATH_ACTIVE
+        };
+
+        let mode = &mut *(_modes as *mut DisplayConfigModeInfo);
+        *mode = DisplayConfigModeInfo {
+            info_type: 2, // DISPLAYCONFIG_MODE_INFO_TYPE_TARGET
+            id: 0,
+            adapter_id: LUID {
+                low_part: 0,
+                high_part: 0,
+            },
+            target_mode: DisplayConfigTargetMode {
+                target_video_signal_info: DisplayConfigVideoSignalInfo {
+                    pixel_rate: 55_296_000, // 1280 * 720 * 60
+                    h_sync_freq: DisplayConfigRational {
+                        numerator: 48_000,
+                        denominator: 1,
+                    },
+                    v_sync_freq: DisplayConfigRational {
+                        numerator: 60,
+                        denominator: 1,
+                    },
+                    active_size: DisplayConfig2DRegion { cx: 1280, cy: 720 },
+                    total_size: DisplayConfig2DRegion { cx: 1280, cy: 720 },
+                    additional_signal_info: 0,
+                    scan_line_ordering: 0, // DISPLAYCONFIG_SCANLINE_ORDERING_UNSPECIFIED
+                },
+            },
+        };
+    }
+    0 // ERROR_SUCCESS
 }
 
 /// SetRect — fill a RECT structure with [x1, y1, x2, y2]; return TRUE.
