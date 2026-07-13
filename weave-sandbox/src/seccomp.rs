@@ -39,16 +39,16 @@ struct sock_fprog {
     filter: *const sock_filter,
 }
 
-/// Base allowlist: syscalls every app needs (18 x86_64 syscalls).
+/// Base allowlist: syscalls every app needs (22 x86_64 syscalls).
 ///
 /// read=0, write=1, close=3, mmap=9, mprotect=10, munmap=11, brk=12,
 /// rt_sigaction=13, rt_sigprocmask=14, sigreturn=15, getpid=39, exit=60,
 /// gettid=186, futex=202, restart_syscall=219, clock_gettime=228,
-/// exit_group=231, openat=257,
+/// exit_group=231, recvmsg=47, openat=257,
 /// landlock_create_ruleset=444, landlock_add_rule=445, landlock_restrict_self=446
 /// (Linux 5.13+, needed by weave_sandbox::apply after seccomp is active)
-const BASE_SYSCALLS: [u32; 21] = [
-    0, 1, 3, 9, 10, 11, 12, 13, 14, 15, 39, 60, 186, 202, 219, 228, 231, 257, 444, 445, 446,
+const BASE_SYSCALLS: [u32; 22] = [
+    0, 1, 3, 9, 10, 11, 12, 13, 14, 15, 39, 47, 60, 186, 202, 219, 228, 231, 257, 444, 445, 446,
 ];
 
 /// Per-app syscall additions registry.
@@ -77,7 +77,10 @@ const BASE_SYSCALLS: [u32; 21] = [
 ///   prlimit64=302, arch_prctl=158
 pub const APP_SYSCALLS: &[(&str, &[i64])] = &[
     ("hello.exe", &[]),
-    ("testsprite2.exe", &[]),
+    // Observed in SB2b trap/log mode: readlink resolves runtime paths, pipe2
+    // initializes the runtime channel, and prlimit64/clone3/dup2 support CRT
+    // startup and thread initialization after the host IPC handshake.
+    ("testsprite2.exe", &[33, 89, 293, 302, 435]),
     // TODO(#SB4b): Run with WEAVE_SECCOMP_LOG=1 to identify actual denied syscalls for nx.exe.
     // Anticipated: SDL2 input (evdev ioctls), Vulkan surface, game-loop timing.
     ("nx.exe", &[]),
@@ -298,6 +301,13 @@ mod tests {
     }
 
     #[test]
+    fn test_base_filter_includes_recvmsg() {
+        let filter = build_base_filter();
+        let nrs = syscall_numbers(&filter);
+        assert!(nrs.contains(&47), "base filter must allow recvmsg (47)");
+    }
+
+    #[test]
     fn test_base_filter_denies_socket() {
         let filter = build_base_filter();
         let nrs = syscall_numbers(&filter);
@@ -312,6 +322,22 @@ mod tests {
             nrs.contains(&41),
             "app filter with socket addition must allow socket (41)"
         );
+    }
+
+    #[test]
+    fn test_testsprite_policy_includes_observed_runtime_syscalls() {
+        let additions = APP_SYSCALLS
+            .iter()
+            .find(|(name, _)| *name == "testsprite2.exe")
+            .expect("testsprite2 policy must exist")
+            .1;
+        let filter = build_app_filter("testsprite2.exe", additions);
+        let nrs = syscall_numbers(&filter);
+        assert!(nrs.contains(&33), "testsprite2 must allow dup2 (33)");
+        assert!(nrs.contains(&89), "testsprite2 must allow readlink (89)");
+        assert!(nrs.contains(&293), "testsprite2 must allow pipe2 (293)");
+        assert!(nrs.contains(&302), "testsprite2 must allow prlimit64 (302)");
+        assert!(nrs.contains(&435), "testsprite2 must allow clone3 (435)");
     }
 
     #[test]
@@ -333,12 +359,12 @@ mod tests {
     fn test_base_filter_has_correct_length() {
         let filter = build_base_filter();
         // Prologue: 4 insns (LD arch, JEQ arch, RET kill, LD nr)
-        // 18 base checks
+        // One architecture check plus one check for each base syscall.
         // Epilogue: 2 insns (RET deny, RET allow)
         assert_eq!(
             filter.len(),
-            24,
-            "base filter must have 4 + 18 + 2 = 24 instructions"
+            BASE_SYSCALLS.len() + 6,
+            "base filter must have 4 + base checks + 2 instructions"
         );
     }
 
@@ -346,12 +372,17 @@ mod tests {
     fn test_app_filter_length_with_additions() {
         let filter = build_app_filter("test_app", &[16, 41, 234]); // ioctl, socket, tgkill
         let nrs = syscall_numbers(&filter);
-        assert_eq!(nrs.len(), 21, "must have 18 base + 3 added syscalls");
+        assert_eq!(
+            nrs.len(),
+            BASE_SYSCALLS.len() + 4,
+            "must have one architecture check, all base syscalls, and 3 additions"
+        );
         assert!(nrs.contains(&16));
         assert!(nrs.contains(&41));
         assert!(nrs.contains(&234));
     }
 
+    #[cfg(not(target_os = "linux"))]
     #[test]
     fn test_apply_seccomp_returns_ok_on_non_linux() {
         assert!(apply_seccomp("test.exe").is_ok());
