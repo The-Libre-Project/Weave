@@ -3400,7 +3400,9 @@ fn nxengine_gate1_smoke() {
     );
     cap.record(
         CapabilityClass::Audio,
-        CapabilityOutcome::untested("SDL_AUDIODRIVER=dummy — audio bypassed, real waveOut→PipeWire not exercised"),
+        CapabilityOutcome::untested(
+            "SDL_AUDIODRIVER=dummy — audio bypassed, real waveOut→PipeWire not exercised",
+        ),
     );
     cap.emit();
 }
@@ -6313,7 +6315,9 @@ fn testsprite2_d3d9_gate() {
     );
     cap.record(
         CapabilityClass::Audio,
-        CapabilityOutcome::untested("SDL_AUDIODRIVER=dummy — audio bypassed, real waveOut→PipeWire not exercised"),
+        CapabilityOutcome::untested(
+            "SDL_AUDIODRIVER=dummy — audio bypassed, real waveOut→PipeWire not exercised",
+        ),
     );
     cap.emit();
 }
@@ -6557,7 +6561,9 @@ fn nxengine_d3d9_gate() {
     );
     cap.record(
         CapabilityClass::Audio,
-        CapabilityOutcome::untested("SDL_AUDIODRIVER=dummy — audio bypassed, real waveOut→PipeWire not exercised"),
+        CapabilityOutcome::untested(
+            "SDL_AUDIODRIVER=dummy — audio bypassed, real waveOut→PipeWire not exercised",
+        ),
     );
     cap.emit();
 }
