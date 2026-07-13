@@ -90,16 +90,16 @@ pub unsafe extern "win64" fn msvcp_getfacet(
     if !GF_CALLED.swap(true, std::sync::atomic::Ordering::Relaxed) {
         eprintln!("weave/msvcp: _Getfacet called this=0x{this:x} id={id}");
     }
-    // `this` is a `locale*`. In MSVC, `locale._Ptr` is at offset 0 (a _Locimp*).
+    // `this` is a `locale*`. In MSVC 14.x, `locale._Ptr` is at offset 0 (a _Locimp*).
     // The _Locimp has: vtable@+0, _Refs@+8, _Farray@+0x10, _Nfacets@+0x18.
-    // farray[0] holds the facet for category 0.
+    // farray[id] holds the facet for category id.
     if this != 0 {
         unsafe {
             let locimp = *(this as *const usize); // locale._Ptr = _Locimp*
             if locimp != 0 && id < 6 {
                 let farray_ptr = *((locimp + 0x10) as *const usize);
                 if farray_ptr != 0 {
-                    return *(farray_ptr as *const usize);
+                    return *((farray_ptr as *const usize).add(id));
                 }
             }
         }
@@ -222,6 +222,17 @@ pub unsafe extern "win64" fn msvcp_diag_getgloballocale(
     eprintln!("  → returning fake _Locimp at {locimp:#x}");
     locimp
 }
+pub unsafe extern "win64" fn msvcp_diag_gettrue(
+    a0: usize,
+    _a1: usize,
+    _a2: usize,
+    _a3: usize,
+) -> usize {
+    log_first_locale_call("_Gettrue@_Locinfo@std@@", a0);
+    static TRUE_STR: [u8; 5] = [b't', b'r', b'u', b'e', 0];
+    TRUE_STR.as_ptr() as usize
+}
+
 pub unsafe extern "win64" fn msvcp_diag_getfalse(
     a0: usize,
     _a1: usize,
@@ -229,7 +240,9 @@ pub unsafe extern "win64" fn msvcp_diag_getfalse(
     _a3: usize,
 ) -> usize {
     log_first_locale_call("_Getfalse@_Locinfo@std@@", a0);
-    0
+    // Returns const char* — must point to the string "false\0"
+    static FALSE_STR: [u8; 6] = [b'f', b'a', b'l', b's', b'e', 0];
+    FALSE_STR.as_ptr() as usize
 }
 
 // ── Fake vtable tables and virtual base tables ────────────────────────────────
@@ -280,10 +293,11 @@ static BASIC_IOSTREAM_VBTABLE2: [i32; 2] = [0i32, 0x10i32];
 
 // ── Fake locale infrastructure ────────────────────────────────────────────────
 //
-// NXEngine inlines locale::_Getfacet() which navigates:
-//   locale* this → [+8] = _Locimp* impl
+// Audacity's CRT inlines locale::_Getfacet() which navigates MSVC 14.x layout:
+//   locale* this → [+0] = _Locimp* impl       (_Ptr, no _Cookie in MSVC 14.x)
 //   impl → [+0x10] = facet** farray, [+0x18] = size_t nfacets
 // After _Getfacet, the locale._Ptr is "decremented" via impl->vtable[2].
+// (Older MSVC had _Cookie at +0, _Ptr at +8; MSVC 14.x is _Ptr at +0.)
 //
 // We construct a minimal static structure that satisfies these accesses without
 // implementing the full locale machinery.
@@ -2539,6 +2553,10 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
             msvcp_diag_getfalse as unsafe extern "win64" fn(usize, usize, usize, usize) -> usize
                 as *const () as usize
         }
+        "?_Gettrue@_Locinfo@std@@QEBAPEBDXZ" => {
+            msvcp_diag_gettrue as unsafe extern "win64" fn(usize, usize, usize, usize) -> usize
+                as *const () as usize
+        }
 
         // ── Constructors — use msvcp_noop_retfirst (returns a0 = this) ─────
         "??0?$codecvt@_WDU_Mbstatet@@@std@@QEAA@_K@Z"
@@ -2562,7 +2580,6 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         | "?_Addfac@_Locimp@locale@std@@AEAAXPEAVfacet@23@_K@Z"
         | "?_Decref@facet@locale@std@@UEAAPEAV_Facet_base@3@XZ"
         | "?_Getcat@?$codecvt@DDU_Mbstatet@@@std@@SA_KPEAPEBVfacet@locale@2@PEBV42@@Z"
-        | "?_Gettrue@_Locinfo@std@@QEBAPEBDXZ"
         | "?_Incref@facet@locale@std@@UEAAXXZ"
         | "?_Lock@?$basic_streambuf@DU?$char_traits@D@std@@@std@@UEAAXXZ"
         => msvcp_noop_retfirst as *const () as usize,
