@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # weave-local-ci.sh — Agent-owned local CI runner.
 #
-# Only runs on macOS/Linux (has the cross-compiler). On PC, push with
-# --no-verify and pull on Mac for build/test.
+# All builds are local on this PC. Runs the full suite (build + test + lint)
+# natively or via Docker fallback.
 # Runs the full local CI suite (build + test + lint), writes structured
 # result files, and emits a machine-parseable directive on failure.
 #

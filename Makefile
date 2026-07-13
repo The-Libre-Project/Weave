@@ -1,14 +1,14 @@
 # Weave development commands
 #
-# The project targets Linux x86-64 only. Development happens on macOS with
-# cross-compilation (cargo-zigbuild) or on any OS with the same tooling.
+# The project targets Linux x86-64 only. Development happens on this Windows PC with
+# cross-compilation (cargo-zigbuild).
 #
 # Quick reference:
 #   make build      — cross-compile for Linux (works on any OS with cargo-zigbuild)
-#   make lint       — clippy + format check (works on any OS)
-#   make test-unit  — run unit tests natively on macOS (fast, no Docker)
+#   make lint       — clippy + format check
+#   make test-unit  — run unit tests (PE parser/loader tests)
 #   make test       — run full test suite in a Linux Docker container
-#   make ci         — build + lint + full test suite (mirrors CI pipeline)
+#   make ci         — build + lint + full test suite
 
 .PHONY: build lint test test-gate test-unit ci state-lint fixture-wget-probe coverage-gauge hooks backfill-notes
 
@@ -23,16 +23,14 @@ lint:
 	cargo clippy --target x86_64-unknown-linux-gnu -- -D warnings
 	cargo fmt --check
 
-# ── Unit tests (native on macOS — Docker on other platforms) ───────────────────
-# Runs PE parser and loader tests directly on macOS (native aarch64 target).
-# Fast (~2s). On Windows/Linux, run via `make test` (Docker) instead.
+# ── Unit tests ─────────────────────────────────────────────────────────────
+# Runs PE parser and loader tests. Fast (~2s).
 
 test-unit:
-	cargo test -p weave-core -p weave-common --target aarch64-apple-darwin
+	cargo test -p weave-core -p weave-common
 
-# ── Full test suite (Docker — requires OrbStack or Docker Desktop) ─────────────
-# Runs the complete test suite inside a Linux container, matching CI exactly.
-# First run pulls the rust image (~1.5 GB); subsequent runs use cache.
+# ── Full test suite (Docker) ───────────────────────────────────────────────────
+# Runs the complete test suite inside a Linux container.
 # Uses a named volume for the Cargo build cache so rebuilds are fast.
 
 test:
@@ -69,7 +67,7 @@ fixture-wget-probe:
 	x86_64-w64-mingw32-gcc -O2 -o tests/fixtures/bin/wget_probe.exe tests/fixtures/src/wget_probe.c -lws2_32
 
 # ── Coverage gauge (resolver-registered exports vs. §8 implemented) ──────────
-# Runs in <5s on macOS. Requires python3. Strategy B (milestone-weighted).
+# Runs in <5s. Requires python3. Strategy B (milestone-weighted).
 
 coverage-gauge:
 	@bash scripts/coverage-gauge.sh
