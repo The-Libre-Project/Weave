@@ -198,8 +198,16 @@ fn diag_check_locimp_vtable(locimp: usize, locimp_desc: &'static str) {
             let vtable_ptr = *(locimp as *const usize);
             let farray_field = *((locimp as *const usize).add(0x10 / 8));
             let nfacets_field = *((locimp as *const usize).add(0x18 / 8));
-            let vtable0 = if vtable_ptr != 0 { *(vtable_ptr as *const usize) } else { 0 };
-            let vtable10 = if vtable_ptr != 0 { *(vtable_ptr as *const usize).add(10) } else { 0 };
+            let vtable0 = if vtable_ptr != 0 {
+                *(vtable_ptr as *const usize)
+            } else {
+                0
+            };
+            let vtable10 = if vtable_ptr != 0 {
+                *(vtable_ptr as *const usize).add(10)
+            } else {
+                0
+            };
             eprintln!("weave/msvcp: DIAG _Locimp check ({locimp_desc}):");
             eprintln!("  [_Locimp+0x00] = vtable_ptr  = {vtable_ptr:#018x}");
             eprintln!("  [_Locimp+0x10] = _Farray     = {farray_field:#018x}");
@@ -238,9 +246,12 @@ pub unsafe extern "win64" fn msvcp_diag_init_locale(
     );
     diag_check_locimp_vtable(locimp, "msvcp_diag_init_locale");
     // Log what RAX will contain after return — the _Locimp address
-    let ret_rax = locimp;
-    eprintln!("  → returning RAX={ret_rax:#x} (_Locimp addr, saved by caller)");
-    ret_rax
+    // TEMP: return 0 to test if crash is _Locimp-dependent (diagnostic, not production)
+    eprintln!(
+        "weave/msvcp: _Init returning 0 (isolation test — not 0x{:x})",
+        locimp
+    );
+    0
 }
 pub unsafe extern "win64" fn msvcp_diag_makeloc(
     a0: usize,
@@ -504,20 +515,16 @@ fn get_fake_locale_data() -> &'static FakeLocaleData {
         let thunk_retfirst = assemble_thunk(noop_retfirst);
         let thunk_retzero = assemble_thunk(noop_retzero);
         unsafe {
-            std::ptr::copy_nonoverlapping(
-                thunk_retfirst.as_ptr(),
-                thunk_page as *mut u8,
-                16,
-            );
+            std::ptr::copy_nonoverlapping(thunk_retfirst.as_ptr(), thunk_page as *mut u8, 16);
             std::ptr::copy_nonoverlapping(
                 thunk_retzero.as_ptr(),
                 (thunk_page as *mut u8).add(16),
                 16,
             );
         }
-        let retfirst_thunk_addr = thunk_page as usize;     // < 4 GiB, 32-bit safe
+        let retfirst_thunk_addr = thunk_page as usize; // < 4 GiB, 32-bit safe
         let retzero_thunk_addr = thunk_page as usize + 16; // < 4 GiB, 32-bit safe
-                                                            // ── All _Locimp vtable entries use the retfirst thunk ─────────────────
+                                                           // ── All _Locimp vtable entries use the retfirst thunk ─────────────────
         data._pad_before_vtable = [retfirst_thunk_addr; 8]; // pad absorbs negative vtable offsets
         data.vtable = [retfirst_thunk_addr; 64];
         // ── All facet vtable entries use the retzero thunk ────────────────────
@@ -557,15 +564,23 @@ fn get_fake_locale_data() -> &'static FakeLocaleData {
         let nfacets = data.locimp_nfacets;
         eprintln!("weave/msvcp: DIAG FakeLocaleData layout (once):");
         eprintln!("  vtable_addr={vtable_addr:#x}");
-        eprintln!("  vtable[0]={:#x} vtable[10]={vtable10:#x}",
-            data.vtable[0]);
-        eprintln!("  _Locimp @ {:#x}", &data.locimp_vtable as *const usize as usize);
+        eprintln!("  vtable[0]={:#x} vtable[10]={vtable10:#x}", data.vtable[0]);
+        eprintln!(
+            "  _Locimp @ {:#x}",
+            &data.locimp_vtable as *const usize as usize
+        );
         eprintln!("  [_Locimp+0x10] = locimp_farray = {farray_ptr:#x}");
         eprintln!("  [_Locimp+0x18] = nfacets = {nfacets}");
         eprintln!("  farray[0] = {:#x}", data.farray[0]);
-        eprintln!("  farray[0..5] = [{:#x}, {:#x}, {:#x}, {:#x}, {:#x}, {:#x}]",
-            data.farray[0], data.farray[1], data.farray[2],
-            data.farray[3], data.farray[4], data.farray[5]);
+        eprintln!(
+            "  farray[0..5] = [{:#x}, {:#x}, {:#x}, {:#x}, {:#x}, {:#x}]",
+            data.farray[0],
+            data.farray[1],
+            data.farray[2],
+            data.farray[3],
+            data.farray[4],
+            data.farray[5]
+        );
         // Per-facet vtable & object check
         let facet_vaddr = data.facet_vtable.as_ptr() as usize;
         eprintln!("  facet_vtable = {facet_vaddr:#x}");
