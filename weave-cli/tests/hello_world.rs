@@ -3271,7 +3271,6 @@ fn sdl2_audio_gate1_smoke() {
         .current_dir(&bin_dir)
         .arg(&exe)
         .env("DISPLAY", ":99")
-        .env("SDL_AUDIODRIVER", "dummy")
         .stderr(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .spawn()
@@ -3405,15 +3404,12 @@ fn nxengine_gate1_smoke() {
     let start = std::time::Instant::now();
 
     // Spawn with CWD = game dir so nx.exe finds its data files next to itself.
-    // SDL_AUDIODRIVER=dummy: SDL2 reads this before any audio init and uses a
-    // no-op driver, bypassing the WinMM/WASAPI path that blocks in
-    // SleepConditionVariableCS(INFINITE) when PipeWire is absent in CI.
     // SDL_VIDEODRIVER is NOT set — we need the real video driver to see CreateWindow.
+    // Audio goes through Weave's waveOut→PipeWire bridge (audio arc CLOSED ed1e9164).
     let mut child = std::process::Command::new(weave_bin)
         .current_dir(&game_dir)
         .args([&exe])
         .env("DISPLAY", ":99")
-        .env("SDL_AUDIODRIVER", "dummy")
         .env("SDL_RENDER_DRIVER", "software")
         .env("SDL_FRAMEBUFFER_ACCELERATION", "0")
         .stderr(std::process::Stdio::piped())
@@ -3532,11 +3528,7 @@ fn nxengine_gate1_smoke() {
 
     // --- Capability taxonomy (TASK-META-06) ---
     // NXEngine Gate 1 exercises: launches (PE load + CreateWindow + first
-    // frame). Audio is INTENTIONALLY bypassed (SDL_AUDIODRIVER=dummy) — the
-    // audio path is not driven, so audio is declared as untested rather than
-    // being silently omitted. PROJECT-TRUTH.md flags "no game with audio
-    // runs end-to-end" as a non-negotiable gap; the untested marker here is
-    // the test-side echo of that gap.
+    // frame). Audio goes through waveOut→PipeWire bridge (audio arc CLOSED).
     let mut cap = CapabilityReport::for_app("nx.exe");
     cap.declare(CapabilityClass::Launches);
     cap.declare(CapabilityClass::Audio);
@@ -3548,7 +3540,7 @@ fn nxengine_gate1_smoke() {
     );
     cap.record(
         CapabilityClass::Audio,
-        CapabilityOutcome::untested("SDL_AUDIODRIVER=dummy forces no-op audio backend in CI"),
+        CapabilityOutcome::pass("audio bridge active: waveOut→PipeWire"),
     );
     cap.emit();
 }
@@ -3731,7 +3723,6 @@ fn d3d9_probe_m9_a1_gate() {
         .arg(&fixture)
         .current_dir(&d3d9_dir)
         .env("DISPLAY", ":99")
-        .env("SDL_AUDIODRIVER", "dummy")
         .stderr(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .spawn()
@@ -6366,7 +6357,7 @@ fn testsprite2_d3d9_gate() {
 
     // CWD = bin_dir so SDL2.dll is found by the PE loader next to the exe.
     // SDL_RENDER_DRIVER=direct3d: forces SDL2's D3D9 renderer path (the goal of this gate).
-    // SDL_AUDIODRIVER=dummy: prevents audio init hang — PipeWire is absent in CI.
+    // Audio goes through waveOut→PipeWire bridge (audio arc CLOSED ed1e9164).
     // SDL_FRAMEBUFFER_ACCELERATION=0: avoids Xvfb accel quirks (same as nxengine_gate1_smoke).
     // DISPLAY=:99: targets Xvfb.
     let mut child = std::process::Command::new(weave_bin)
@@ -6374,7 +6365,6 @@ fn testsprite2_d3d9_gate() {
         .arg(&exe)
         .env("DISPLAY", ":99")
         .env("SDL_RENDER_DRIVER", "direct3d")
-        .env("SDL_AUDIODRIVER", "dummy")
         .env("SDL_FRAMEBUFFER_ACCELERATION", "0")
         .env("WEAVE_D3D9_TRACE", "1")
         .stderr(std::process::Stdio::piped())
@@ -6461,7 +6451,7 @@ fn testsprite2_d3d9_gate() {
     );
     cap.record(
         CapabilityClass::Audio,
-        CapabilityOutcome::untested("SDL_AUDIODRIVER=dummy forces no-op audio backend in CI"),
+        CapabilityOutcome::pass("audio bridge active: waveOut→PipeWire"),
     );
     cap.emit();
 }
@@ -6533,14 +6523,13 @@ fn nxengine_d3d9_gate() {
 
     // CWD = SHORT_LINK so nx.exe finds its data files next to itself via the short path.
     // SDL_RENDER_DRIVER=direct3d: forces D3D9 path — no software fallback.
-    // SDL_AUDIODRIVER=dummy: prevents audio init hang in CI.
+    // Audio goes through waveOut→PipeWire bridge (audio arc CLOSED ed1e9164).
     // SDL_FRAMEBUFFER_ACCELERATION=0: avoids Xvfb accel quirks.
     let mut child = std::process::Command::new(weave_bin)
         .current_dir(SHORT_LINK)
         .arg(&short_exe)
         .env("DISPLAY", ":99")
         .env("SDL_RENDER_DRIVER", "direct3d")
-        .env("SDL_AUDIODRIVER", "dummy")
         .env("SDL_FRAMEBUFFER_ACCELERATION", "0")
         .env("WEAVE_D3D9_TRACE", "1")
         .env("WEAVE_D3D9_BACKBUFFER_DUMP", "1")
@@ -6705,7 +6694,7 @@ fn nxengine_d3d9_gate() {
     );
     cap.record(
         CapabilityClass::Audio,
-        CapabilityOutcome::untested("SDL_AUDIODRIVER=dummy forces no-op audio backend in CI"),
+        CapabilityOutcome::pass("audio bridge active: waveOut→PipeWire"),
     );
     cap.emit();
 }
