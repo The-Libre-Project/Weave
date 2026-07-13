@@ -3269,6 +3269,7 @@ fn sdl2_audio_gate1_smoke() {
     let start = std::time::Instant::now();
     let mut child = std::process::Command::new(weave_bin)
         .current_dir(&bin_dir)
+        .arg("--no-sandbox")
         .arg(&exe)
         .env("DISPLAY", ":99")
         .stderr(std::process::Stdio::piped())
