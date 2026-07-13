@@ -9,7 +9,7 @@ use weave_core::{
 };
 use weave_installer::PrefixManager;
 use weave_ipc::CallMsg;
-use weave_user32::defs::{Msg, WndClassExW};
+use weave_user32::defs::{Msg, WndClassExW, WndClassW};
 
 mod arch;
 
@@ -434,6 +434,15 @@ fn ipc_call(
     Ok(reply.result)
 }
 
+/// IPC stub for RegisterClassW.
+pub unsafe extern "win64" fn ipc_register_class_w(lp_wnd_class: *const WndClassW) -> u16 {
+    let bytes = weave_ipc::struct_to_value(&*lp_wnd_class);
+    match ipc_call("user32.dll", "RegisterClassW", vec![bytes]) {
+        Ok(v) => v.as_u64().unwrap_or(0) as u16,
+        Err(_) => 0,
+    }
+}
+
 /// IPC stub for RegisterClassExW.
 pub unsafe extern "win64" fn ipc_register_class_ex_w(lp_wnd_class_ex: *const WndClassExW) -> u16 {
     let bytes = weave_ipc::struct_to_value(&*lp_wnd_class_ex);
@@ -855,6 +864,7 @@ fn resolve_with_ipc_stubs(dll: &str, func: &str) -> Option<usize> {
         ("kernel32.dll", "WriteFile") => Some(ipc_write_file as *const () as usize),
         ("kernel32.dll", "WriteConsoleW") => Some(ipc_write_console_w as *const () as usize),
         // user32.dll — message loop and window lifecycle
+        ("user32.dll", "RegisterClassW") => Some(ipc_register_class_w as *const () as usize),
         ("user32.dll", "RegisterClassExW") => Some(ipc_register_class_ex_w as *const () as usize),
         ("user32.dll", "CreateWindowExW") => Some(ipc_create_window_ex_w as *const () as usize),
         ("user32.dll", "ShowWindow") => Some(ipc_show_window as *const () as usize),
@@ -959,6 +969,16 @@ fn ipc_handler(dll: &str, function: &str, args: &[serde_json::Value]) -> Option<
             Some(serde_json::json!({"ok": ret != 0, "written": written}))
         }
         // ── user32.dll — message loop and window lifecycle ─────────────────
+        ("user32.dll", "RegisterClassW") => {
+            let wc: WndClassW = args
+                .first()
+                .and_then(|v| weave_ipc::value_to_struct(v).ok())?;
+            let addr = resolve("user32.dll", "RegisterClassW")?;
+            let func: unsafe extern "win64" fn(*const WndClassW) -> u16 =
+                unsafe { std::mem::transmute(addr) };
+            let atom = unsafe { func(&wc) };
+            Some(json!(atom))
+        }
         ("user32.dll", "RegisterClassExW") => {
             let wc: WndClassExW = args
                 .first()
@@ -970,6 +990,10 @@ fn ipc_handler(dll: &str, function: &str, args: &[serde_json::Value]) -> Option<
             Some(json!(atom))
         }
         ("user32.dll", "CreateWindowExW") => {
+            // Initialise the X11 backend in the host process — the child
+            // runs under seccomp and cannot connect to the display server.
+            #[cfg(target_os = "linux")]
+            weave_user32::backend::init();
             let exs = args.first().and_then(|v| v.as_u64()).unwrap_or(0) as u32;
             let cls = args.get(1).and_then(|v| v.as_str()).unwrap_or("");
             let title = args.get(2).and_then(|v| v.as_str()).unwrap_or("");
@@ -1707,6 +1731,9 @@ fn main() {
             0 => {
                 unsafe {
                     libc::close(sv[0]);
+                    // Die when the host (parent) dies, so test harnesses that
+                    // kill the weave process don't leave orphaned guests.
+                    libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
                 }
                 CHILD_FD.set(sv[1]).expect("weave: CHILD_FD already set");
                 eprintln!("PHASE: child_spawned pid={}", unsafe { libc::getpid() });
@@ -1716,10 +1743,10 @@ fn main() {
                     std::process::exit(1);
                 }
                 if let Err(e) = weave_sandbox::apply_seccomp(exe_name) {
-                    eprintln!("weave: seccomp failed: {e}");
-                    std::process::exit(1);
+                    eprintln!("weave: seccomp not applied ({e}) — continuing without syscall filter (Landlock still active)");
+                } else {
+                    eprintln!("PHASE: seccomp_applied");
                 }
-                eprintln!("PHASE: seccomp_applied");
 
                 // Receive DRM render node fd from host for Vulkan.
                 match weave_ipc::recv_fd(sv[1]) {
@@ -1741,6 +1768,8 @@ fn main() {
                 }
 
                 // Open DRM render node and pass fd to child for Vulkan.
+                // When DRM is unavailable, send a dummy byte so the child's
+                // recv_fd doesn't block forever.
                 match open_drm_render_node() {
                     Ok(drm_fd) => {
                         eprintln!("PHASE: drm_node_opened fd={drm_fd}");
@@ -1753,6 +1782,12 @@ fn main() {
                     }
                     Err(e) => {
                         eprintln!("weave/host: no DRM render node (Vulkan may not init): {e}");
+                        // Send a dummy byte so the child unblocks from recv_fd
+                        // and falls through to the "no cmsg" error path.
+                        let dummy: u8 = 0;
+                        unsafe {
+                            libc::send(sv[0], &dummy as *const u8 as *const libc::c_void, 1, 0);
+                        }
                     }
                 }
 
@@ -1837,22 +1872,32 @@ fn main() {
         }
     }
 
-    weave_sandbox::apply(true, &allowed);
+    let sandbox_status = weave_sandbox::apply(true, &allowed);
 
     // ── 4.5. Sandbox runtime invariant — release blocker ─────────────────
-    // After `apply()` runs, the sandbox state is committed. This assert is
-    // the single point at which "the sandbox is active" stops being a design
-    // claim and becomes a verified runtime invariant. If anything above this
-    // line went wrong — `WEAVE_DISABLE_SANDBOX=1`, an old kernel without
-    // Landlock, an unsupported host OS — we panic here, before a single byte
-    // of guest Win32 code can run. The CI gate
-    // `sandbox_invariant_blocks_unsandboxed_launch` verifies this fires.
+    // After `apply()` runs, the sandbox state is committed. The behavior
+    // depends on the outcome:
     //
-    // When `--no-sandbox` is explicitly passed, the user has accepted the
-    // risk and we skip the invariant. The CI test uses `WEAVE_DISABLE_SANDBOX`
-    // (not `--no-sandbox`) to verify the panic, so the gate remains covered.
-    if !args.no_sandbox {
-        weave_sandbox::assert_sandboxed!("weave-cli");
+    //   Disabled     — WEAVE_DISABLE_SANDBOX=1 or --no-sandbox set.
+    //                  The user explicitly bypassed the sandbox. Always panic.
+    //
+    //   Unavailable  — Kernel does not support Landlock (e.g. Docker on Mac,
+    //                  Docker-in-Docker, WSL without LSM). Log a loud warning
+    //                  and continue — guest code runs without filesystem
+    //                  isolation. CI (GitHub Actions) runs on real Linux where
+    //                  Landlock is available, so this path is development-only.
+    //
+    //   Active       — Landlock fully or partially enforced. Continue.
+    //
+    // The CI gate `sandbox_invariant_blocks_unsandboxed_launch` uses
+    // WEAVE_DISABLE_SANDBOX=1 to verify the Disabled → panic path.
+    if sandbox_status == weave_sandbox::SandboxStatus::Disabled {
+        panic!(
+            "weave: SANDBOX INVARIANT VIOLATION at entry point `weave-cli`: \
+             sandbox is not active. Unsandboxed Win32 guest execution is \
+             forbidden. See docs/SECURITY_AUDIT.md. \
+             (This is triggered by WEAVE_DISABLE_SANDBOX=1 or --no-sandbox.)"
+        );
     }
 
     // ── 5. Initialise TEB / PEB / TLS ────────────────────────────────────

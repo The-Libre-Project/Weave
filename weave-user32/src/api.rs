@@ -3384,15 +3384,30 @@ pub unsafe extern "win64" fn load_image_w(
 // Wine ref: dlls/user32/dialog.c::DIALOG_DoDialogBox — MessageBoxW creates a dialog via
 // DialogBoxIndirectParamAW; runs its own modal message loop; returns button ID (IDOK=1 etc).
 pub unsafe extern "win64" fn message_box_w(
-    _hwnd: usize,
+    hwnd: usize,
     lp_text: *const u16,
     lp_caption: *const u16,
-    _u_type: u32,
+    u_type: u32,
 ) -> i32 {
     let text = unsafe { decode_wide(lp_text) };
     let caption = unsafe { decode_wide(lp_caption) };
-    eprintln!("weave/MessageBoxW: [{caption}] {text}");
-    IDOK
+
+    // Determine the button set from the low 3 bits of u_type.
+    // For Yes/No dialogs return IDYES (auto-confirm), for OK/Cancel return IDOK.
+    const MB_OK: u32 = 0x0000_0000;
+    const MB_OKCANCEL: u32 = 0x0000_0001;
+    const MB_YESNO: u32 = 0x0000_0004;
+    const MB_YESNOCANCEL: u32 = 0x0000_0003;
+    const IDYES: i32 = 6;
+
+    let btn_set = u_type & 0x0000_000F;
+    let result = match btn_set {
+        MB_YESNO | MB_YESNOCANCEL => IDYES,
+        _ => IDOK,
+    };
+
+    eprintln!("weave/MessageBoxW: [{caption}] {text} → {result}");
+    result
 }
 
 // ── GetDC / ReleaseDC (user32-resident, not gdi32) ────────────────────────────
