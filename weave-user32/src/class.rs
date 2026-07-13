@@ -25,6 +25,8 @@ pub struct ClassEntry {
     pub cb_wnd_extra: u32,
     pub h_icon: usize,
     pub h_icon_sm: usize,
+    pub lpsz_class_name: usize,
+    pub lpsz_menu_name: usize,
 }
 
 // ── GCLP/GCL nIndex constants (Wine ref: include/winuser.h) ─────────────────
@@ -557,6 +559,8 @@ pub fn find(name: &str) -> Option<ClassEntry> {
             cb_wnd_extra: 0,
             h_icon: 0,
             h_icon_sm: 0,
+            lpsz_class_name: 0,
+            lpsz_menu_name: 0,
         });
     }
     None
@@ -576,6 +580,8 @@ mod tests {
             cb_wnd_extra: 0,
             h_icon: 0,
             h_icon_sm: 0,
+            lpsz_class_name: 0,
+            lpsz_menu_name: 0,
         }
     }
 

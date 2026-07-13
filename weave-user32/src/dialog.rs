@@ -329,6 +329,8 @@ fn create_frame_window(
             cb_wnd_extra: DLG_WINDOW_EXTRA,
             h_icon: 0,
             h_icon_sm: 0,
+            lpsz_class_name: 0,
+            lpsz_menu_name: 0,
         },
     );
     let mut style = template.style;

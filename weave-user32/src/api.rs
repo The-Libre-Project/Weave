@@ -293,6 +293,8 @@ pub unsafe extern "win64" fn register_class_w(lp_wnd_class: *const WndClassW) ->
             cb_wnd_extra: wc.cb_wnd_extra.max(0) as u32,
             h_icon: 0,
             h_icon_sm: 0,
+            lpsz_class_name: wc.lpsz_class_name as usize,
+            lpsz_menu_name: wc.lpsz_menu_name as usize,
         },
     );
     // Return a non-zero ATOM — use a hash of the name for uniqueness.
@@ -325,6 +327,8 @@ pub unsafe extern "win64" fn register_class_ex_w(lp_wnd_class_ex: *const WndClas
             cb_wnd_extra: wc.cb_wnd_extra.max(0) as u32,
             h_icon: wc.h_icon,
             h_icon_sm: wc.h_icon_sm,
+            lpsz_class_name: wc.lpsz_class_name as usize,
+            lpsz_menu_name: wc.lpsz_menu_name as usize,
         },
     );
     let atom = name_to_atom(&name);
@@ -5113,6 +5117,8 @@ pub unsafe extern "win64" fn register_class_a(lp_wnd_class: *const WndClassA) ->
             cb_wnd_extra: wc.cb_wnd_extra.max(0) as u32,
             h_icon: 0,
             h_icon_sm: 0,
+            lpsz_class_name: 0,
+            lpsz_menu_name: 0,
         },
     );
     name_to_atom(&name)
@@ -5144,6 +5150,8 @@ pub unsafe extern "win64" fn register_class_ex_a(lp_wnd_class_ex: *const WndClas
             cb_wnd_extra: wc.cb_wnd_extra.max(0) as u32,
             h_icon: wc.h_icon,
             h_icon_sm: wc.h_icon_sm,
+            lpsz_class_name: 0,
+            lpsz_menu_name: 0,
         },
     );
     name_to_atom(&name)
@@ -8202,8 +8210,8 @@ pub unsafe extern "win64" fn get_class_info_w(
             *(p.add(32) as *mut usize) = entry.h_icon;
             *(p.add(40) as *mut usize) = entry.h_cursor;
             *(p.add(48) as *mut usize) = entry.hbr_background;
-            *(p.add(56) as *mut usize) = 0;
-            *(p.add(64) as *mut usize) = 0;
+            *(p.add(56) as *mut usize) = entry.lpsz_menu_name;
+            *(p.add(64) as *mut usize) = entry.lpsz_class_name as usize;
         }
     }
     1 // TRUE

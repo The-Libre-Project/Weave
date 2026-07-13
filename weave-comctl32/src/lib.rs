@@ -1507,6 +1507,8 @@ fn register_comctl32_classes() {
         cb_wnd_extra: 0,
         h_icon: 0,
         h_icon_sm: 0,
+        lpsz_class_name: 0,
+        lpsz_menu_name: 0,
     };
     class::register("ToolbarWindow32", toolbar_entry);
     let tab_entry = ClassEntry {
@@ -1518,6 +1520,8 @@ fn register_comctl32_classes() {
         cb_wnd_extra: 0,
         h_icon: 0,
         h_icon_sm: 0,
+        lpsz_class_name: 0,
+        lpsz_menu_name: 0,
     };
     class::register("SysTabControl32", tab_entry);
     let listview_entry = ClassEntry {
@@ -1529,6 +1533,8 @@ fn register_comctl32_classes() {
         cb_wnd_extra: 0,
         h_icon: 0,
         h_icon_sm: 0,
+        lpsz_class_name: 0,
+        lpsz_menu_name: 0,
     };
     class::register("SysListView32", listview_entry);
     let treeview_entry = ClassEntry {
@@ -1540,6 +1546,8 @@ fn register_comctl32_classes() {
         cb_wnd_extra: 0,
         h_icon: 0,
         h_icon_sm: 0,
+        lpsz_class_name: 0,
+        lpsz_menu_name: 0,
     };
     class::register("SysTreeView32", treeview_entry);
 }
