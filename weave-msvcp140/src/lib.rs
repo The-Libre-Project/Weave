@@ -174,6 +174,33 @@ pub unsafe extern "win64" fn msvcp_diag_getcat_ctype_w(
     }
     0x0004 // ios_base::ctype
 }
+/// One-shot vtable integrity check: reads `[_Locimp + 0]` (vtable pointer)
+/// then `[vtable_ptr + 0x50]` (vtable[10]) and logs them. Called from
+/// `msvcp_diag_init_locale` right before returning.
+fn diag_check_locimp_vtable(locimp: usize, locimp_desc: &'static str) {
+    static CHECKED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    CHECKED.get_or_init(|| {
+        unsafe {
+            let vtable_ptr = *(locimp as *const usize);
+            let vtable10 = if vtable_ptr != 0 {
+                *(vtable_ptr as *const usize).add(10)
+            } else {
+                0
+            };
+            let vtable0 = if vtable_ptr != 0 {
+                * (vtable_ptr as *const usize)
+            } else {
+                0
+            };
+            eprintln!("weave/msvcp: DIAG vtable check ({locimp_desc}):");
+            eprintln!("  [_Locimp+0x00] = vtable_ptr = {vtable_ptr:#x}");
+            eprintln!("  [vtable_ptr+0x00] = vtable[0]  = {vtable0:#x}");
+            eprintln!("  [vtable_ptr+0x50] = vtable[10] = {vtable10:#x}");
+        }
+        true
+    });
+}
+
 /// Stub for `locale::_Init(bool named)` — returns the fake classic _Locimp.
 /// Wine ref: dlls/msvcp90/locale.c locale__Init — creates classic locale or
 /// named locale.  Our stub always returns the classic _Locimp (fake) regardless
@@ -193,7 +220,11 @@ pub unsafe extern "win64" fn msvcp_diag_init_locale(
         "  → fake data base=0x{fakedata_base:x} locimp=0x{locimp:x} delta=0x{:x}",
         locimp - fakedata_base
     );
-    locimp
+    diag_check_locimp_vtable(locimp, "msvcp_diag_init_locale");
+    // Log what RAX will contain after return — the _Locimp address
+    let ret_rax = locimp;
+    eprintln!("  → returning RAX={ret_rax:#x} (_Locimp addr, saved by caller)");
+    ret_rax
 }
 pub unsafe extern "win64" fn msvcp_diag_makeloc(
     a0: usize,
@@ -380,7 +411,7 @@ fn get_current_fp() -> Option<*mut libc::FILE> {
 }
 
 fn get_fake_locale_data() -> &'static FakeLocaleData {
-    FAKE_LOCALE_DATA.get_or_init(|| {
+    let data = FAKE_LOCALE_DATA.get_or_init(|| {
         const MAP_32BIT: i32 = 0x40;
         let size = std::mem::size_of::<FakeLocaleData>();
         // SAFETY: mmap with MAP_ANONYMOUS and fd=-1 does not dereference any
@@ -467,7 +498,30 @@ fn get_fake_locale_data() -> &'static FakeLocaleData {
         // to this freshly mmap'd memory. Leaked intentionally — process exit
         // cleans up.
         unsafe { &*(ptr as *const FakeLocaleData) }
-    })
+    });
+
+    // One-shot layout diagnostic — runs once per process
+    static LAYOUT_DIAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    LAYOUT_DIAG.get_or_init(|| {
+        let vtable_addr = data.vtable.as_ptr() as usize;
+        let vtable10 = unsafe { *((vtable_addr as *const usize).add(10)) };
+        let farray_ptr = data.locimp_farray;
+        let nfacets = data.locimp_nfacets;
+        eprintln!("weave/msvcp: DIAG FakeLocaleData layout (once):");
+        eprintln!("  vtable_addr={vtable_addr:#x}");
+        eprintln!("  vtable[0]={:#x} vtable[10]={vtable10:#x}",
+            data.vtable[0]);
+        eprintln!("  _Locimp @ {:#x}", &data.locimp_vtable as *const usize as usize);
+        eprintln!("  [_Locimp+0x10] = locimp_farray = {farray_ptr:#x}");
+        eprintln!("  [_Locimp+0x18] = nfacets = {nfacets}");
+        eprintln!("  farray[0] = {:#x}", data.farray[0]);
+        eprintln!("  farray[0..5] = [{:#x}, {:#x}, {:#x}, {:#x}, {:#x}, {:#x}]",
+            data.farray[0], data.farray[1], data.farray[2],
+            data.farray[3], data.farray[4], data.farray[5]);
+        true
+    });
+
+    data
 }
 
 // ── Constructor helper utilities ───────────────────────────────────────────────
