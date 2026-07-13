@@ -3384,7 +3384,7 @@ pub unsafe extern "win64" fn load_image_w(
 // Wine ref: dlls/user32/dialog.c::DIALOG_DoDialogBox — MessageBoxW creates a dialog via
 // DialogBoxIndirectParamAW; runs its own modal message loop; returns button ID (IDOK=1 etc).
 pub unsafe extern "win64" fn message_box_w(
-    hwnd: usize,
+    _hwnd: usize,
     lp_text: *const u16,
     lp_caption: *const u16,
     u_type: u32,
@@ -3394,7 +3394,9 @@ pub unsafe extern "win64" fn message_box_w(
 
     // Determine the button set from the low 3 bits of u_type.
     // For Yes/No dialogs return IDYES (auto-confirm), for OK/Cancel return IDOK.
+    #[expect(dead_code)]
     const MB_OK: u32 = 0x0000_0000;
+    #[expect(dead_code)]
     const MB_OKCANCEL: u32 = 0x0000_0001;
     const MB_YESNO: u32 = 0x0000_0004;
     const MB_YESNOCANCEL: u32 = 0x0000_0003;
