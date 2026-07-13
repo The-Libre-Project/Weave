@@ -433,7 +433,7 @@ fn get_fake_locale_data() -> &'static FakeLocaleData {
             0x00,
             0x00,
             0x00, // jmp qword ptr [rip+0]
-            (noop >> 0) as u8,
+            noop as u8,
             (noop >> 8) as u8,
             (noop >> 16) as u8,
             (noop >> 24) as u8,

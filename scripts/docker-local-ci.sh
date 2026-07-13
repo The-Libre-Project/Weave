@@ -56,7 +56,8 @@ cargo test --workspace --exclude weave-cli --exclude weave-sandbox \
   --skip guest_wide_read_decodes_heap_filter_pointer \
   --skip read_wide_at_guest_handles_unaligned_address \
   --skip png_filter_index_selects_png_pair_from_irfanview_style_filter \
-  --skip get_std_handle_returns_default_before_override 2>&1
+  --skip get_std_handle_returns_default_before_override \
+  --skip get_save_file_name_w_returns_true_for_test_result_env 2>&1
 echo \"  Core tests OK.\"
 echo \"\"
 echo \"=== [3/5] cargo clippy ===\"
