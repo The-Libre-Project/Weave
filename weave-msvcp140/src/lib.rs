@@ -174,28 +174,31 @@ pub unsafe extern "win64" fn msvcp_diag_getcat_ctype_w(
     }
     0x0004 // ios_base::ctype
 }
-/// One-shot vtable integrity check: reads `[_Locimp + 0]` (vtable pointer)
-/// then `[vtable_ptr + 0x50]` (vtable[10]) and logs them. Called from
+/// One-shot integrity check: reads `[_Locimp + 0x00]` (vtable pointer),
+/// `[_Locimp + 0x10]` (locimp_farray), `[_Locimp + 0x18]` (nfacets),
+/// the vtable entries, and the farray entries. Logs them all. Called from
 /// `msvcp_diag_init_locale` right before returning.
 fn diag_check_locimp_vtable(locimp: usize, locimp_desc: &'static str) {
     static CHECKED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     CHECKED.get_or_init(|| {
         unsafe {
             let vtable_ptr = *(locimp as *const usize);
-            let vtable10 = if vtable_ptr != 0 {
-                *(vtable_ptr as *const usize).add(10)
-            } else {
-                0
-            };
-            let vtable0 = if vtable_ptr != 0 {
-                * (vtable_ptr as *const usize)
-            } else {
-                0
-            };
-            eprintln!("weave/msvcp: DIAG vtable check ({locimp_desc}):");
-            eprintln!("  [_Locimp+0x00] = vtable_ptr = {vtable_ptr:#x}");
-            eprintln!("  [vtable_ptr+0x00] = vtable[0]  = {vtable0:#x}");
-            eprintln!("  [vtable_ptr+0x50] = vtable[10] = {vtable10:#x}");
+            let farray_field = *((locimp as *const usize).add(0x10 / 8));
+            let nfacets_field = *((locimp as *const usize).add(0x18 / 8));
+            let vtable0 = if vtable_ptr != 0 { *(vtable_ptr as *const usize) } else { 0 };
+            let vtable10 = if vtable_ptr != 0 { *(vtable_ptr as *const usize).add(10) } else { 0 };
+            eprintln!("weave/msvcp: DIAG _Locimp check ({locimp_desc}):");
+            eprintln!("  [_Locimp+0x00] = vtable_ptr  = {vtable_ptr:#018x}");
+            eprintln!("  [_Locimp+0x10] = _Farray     = {farray_field:#018x}");
+            eprintln!("  [_Locimp+0x18] = _Nfacets    = {nfacets_field:#018x}");
+            eprintln!("  [vtable_ptr+0x00] = vtable[0]  = {vtable0:#018x}");
+            eprintln!("  [vtable_ptr+0x50] = vtable[10] = {vtable10:#018x}");
+            if farray_field != 0 {
+                for i in 0..6usize {
+                    let facet = *(farray_field as *const usize).add(i);
+                    eprintln!("  farray[{i}] = {facet:#018x}");
+                }
+            }
         }
         true
     });
