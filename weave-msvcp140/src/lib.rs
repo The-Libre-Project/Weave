@@ -402,9 +402,53 @@ fn get_fake_locale_data() -> &'static FakeLocaleData {
             "mmap MAP_32BIT failed for FakeLocaleData"
         );
         let data = unsafe { &mut *(ptr as *mut FakeLocaleData) };
+
+        // ── Executable thunk page for fake vtable entries ──────────────────────
+        // The vtable entries are stored at low addresses (< 4 GiB) so that even
+        // if the inlined CRT code reads them with a 32-bit load (dword instead of
+        // qword), the value is not truncated. Each entry points to a JMP thunk on
+        // an executable page, which in turn jumps to the real Rust function.
+        // Wine ref: N/A — this is a dispatch-layer fix, not a behavioral reference.
+        let page_size = 4096usize;
+        let thunk_page = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                page_size,
+                libc::PROT_READ | libc::PROT_WRITE | libc::PROT_EXEC,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | MAP_32BIT,
+                -1,
+                0,
+            )
+        };
+        assert!(
+            thunk_page != libc::MAP_FAILED,
+            "mmap MAP_32BIT+PROT_EXEC failed for vtable thunk page"
+        );
+        // Write a single indirect JMP thunk: jmp qword ptr [rip+0]; <8-byte addr>
         let noop = msvcp_noop_retfirst as *const () as usize;
-        data._pad_before_vtable = [noop; 8];
-        data.vtable = [noop; 64];
+        let thunk: [u8; 14] = [
+            0xFF,
+            0x25,
+            0x00,
+            0x00,
+            0x00,
+            0x00, // jmp qword ptr [rip+0]
+            (noop >> 0) as u8,
+            (noop >> 8) as u8,
+            (noop >> 16) as u8,
+            (noop >> 24) as u8,
+            (noop >> 32) as u8,
+            (noop >> 40) as u8,
+            (noop >> 48) as u8,
+            (noop >> 56) as u8,
+        ];
+        unsafe {
+            std::ptr::copy_nonoverlapping(thunk.as_ptr(), thunk_page as *mut u8, 14);
+        }
+        let thunk_addr = thunk_page as usize; // < 4 GiB, 32-bit safe
+                                              // ── All vtable entries use the low-address thunk ──────────────────────
+        data._pad_before_vtable = [thunk_addr; 8]; // pad absorbs negative vtable offsets
+        data.vtable = [thunk_addr; 64];
         data.locimp_refs = 1;
         data.locimp_nfacets = 6;
         let vtable_addr = data.vtable.as_ptr() as usize;
