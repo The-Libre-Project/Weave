@@ -361,7 +361,7 @@ struct FakeLocaleData {
 unsafe impl Send for FakeLocaleData {}
 unsafe impl Sync for FakeLocaleData {}
 
-static FAKE_LOCALE_DATA: std::sync::OnceLock<Box<FakeLocaleData>> = std::sync::OnceLock::new();
+static FAKE_LOCALE_DATA: std::sync::OnceLock<&'static FakeLocaleData> = std::sync::OnceLock::new();
 
 // ── File I/O registry ─────────────────────────────────────────────────────────
 // `_Fiopen` registers the most recently opened FILE*. read/seekg/tellg/xsgetn/
@@ -381,32 +381,48 @@ fn get_current_fp() -> Option<*mut libc::FILE> {
 
 fn get_fake_locale_data() -> &'static FakeLocaleData {
     FAKE_LOCALE_DATA.get_or_init(|| {
+        const MAP_32BIT: i32 = 0x40;
+        let size = std::mem::size_of::<FakeLocaleData>();
+        // SAFETY: mmap with MAP_ANONYMOUS and fd=-1 does not dereference any
+        // pointer; passing null as the hint is always valid. MAP_32BIT ensures
+        // the returned address is below 4 GiB, avoiding 32-bit truncation in
+        // Audacity's CRT inlined locale code that stores locale._Ptr as u32.
+        let ptr = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                size,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | MAP_32BIT,
+                -1,
+                0,
+            )
+        };
+        assert!(
+            ptr != libc::MAP_FAILED,
+            "mmap MAP_32BIT failed for FakeLocaleData"
+        );
+        let data = unsafe { &mut *(ptr as *mut FakeLocaleData) };
         let noop = msvcp_noop_retfirst as *const () as usize;
-        let mut b = Box::new(FakeLocaleData {
-            _pad_before_vtable: [noop; 8],
-            vtable: [noop; 64],
-            locimp_vtable: 0,
-            locimp_refs: 1,
-            locimp_farray: 0,
-            locimp_nfacets: 6,
-            locimp_catmask: 0,
-            locimp_transp: 0,
-            locimp_name: 0,
-            farray: [0usize; 6],
-        });
-        let vtable_addr = b.vtable.as_ptr() as usize;
-        let locimp_addr = &b.locimp_vtable as *const usize as usize;
-        let farray_addr = b.farray.as_ptr() as usize;
+        data._pad_before_vtable = [noop; 8];
+        data.vtable = [noop; 64];
+        data.locimp_refs = 1;
+        data.locimp_nfacets = 6;
+        let vtable_addr = data.vtable.as_ptr() as usize;
+        let locimp_addr = &data.locimp_vtable as *const usize as usize;
+        let farray_addr = data.farray.as_ptr() as usize;
         let c_str = b"C\0";
-        b.locimp_vtable = vtable_addr;
-        b.locimp_farray = farray_addr;
-        b.locimp_catmask = 0x3F; // all locale categories
-        b.locimp_transp = 0; // transparent = false (not a transparent locale)
-        b.locimp_name = c_str.as_ptr() as usize; // "C" locale name
-        for slot in &mut b.farray {
-            *slot = locimp_addr; // all facets = _Locimp itself (non-null)
+        data.locimp_vtable = vtable_addr;
+        data.locimp_farray = farray_addr;
+        data.locimp_catmask = 0x3F;
+        data.locimp_transp = 0;
+        data.locimp_name = c_str.as_ptr() as usize;
+        for slot in &mut data.farray {
+            *slot = locimp_addr;
         }
-        b
+        // SAFETY: all fields are fully initialized; no other reference exists
+        // to this freshly mmap'd memory. Leaked intentionally — process exit
+        // cleans up.
+        unsafe { &*(ptr as *const FakeLocaleData) }
     })
 }
 
