@@ -8946,15 +8946,15 @@ pub unsafe extern "win64" fn get_dc_ex(hwnd: usize, _clip: usize, _flags: u32) -
 // Weave: stub returns 1 path, 1 mode when no real display info is available.
 pub unsafe extern "win64" fn get_display_config_buffer_sizes(
     _flags: u32,
-    _num_paths: *mut u32,
-    _num_modes: *mut u32,
+    num_paths: *mut u32,
+    num_modes: *mut u32,
 ) -> i32 {
-    if _num_paths.is_null() || _num_modes.is_null() {
+    if num_paths.is_null() || num_modes.is_null() {
         return 87; // ERROR_INVALID_PARAMETER
     }
     unsafe {
-        *_num_paths = 1;
-        *_num_modes = 1;
+        *num_paths = 1;
+        *num_modes = 1;
     }
     0 // ERROR_SUCCESS
 }
@@ -8979,25 +8979,25 @@ pub unsafe extern "win64" fn is_window_unicode(_hwnd: usize) -> i32 {
 // when no real display info is available.
 pub unsafe extern "win64" fn query_display_config(
     _flags: u32,
-    _num_paths: *mut u32,
-    _paths: *mut std::ffi::c_void,
-    _num_modes: *mut u32,
-    _modes: *mut std::ffi::c_void,
-    _top: *mut std::ffi::c_void,
+    num_paths: *mut u32,
+    paths: *mut std::ffi::c_void,
+    num_modes: *mut u32,
+    modes: *mut std::ffi::c_void,
+    top: *mut std::ffi::c_void,
 ) -> i32 {
-    if _num_paths.is_null() || _num_modes.is_null() || _paths.is_null() || _modes.is_null() {
+    if num_paths.is_null() || num_modes.is_null() || paths.is_null() || modes.is_null() {
         return 87; // ERROR_INVALID_PARAMETER
     }
-    if !_top.is_null() {
+    if !top.is_null() {
         unsafe {
-            *(_top as *mut u32) = 1; // DISPLAYCONFIG_TOPOLOGY_INTERNAL
+            *(top as *mut u32) = 1; // DISPLAYCONFIG_TOPOLOGY_INTERNAL
         }
     }
     unsafe {
-        *_num_paths = 1;
-        *_num_modes = 1;
+        *num_paths = 1;
+        *num_modes = 1;
 
-        let path = &mut *(_paths as *mut DisplayConfigPathInfo);
+        let path = &mut *(paths as *mut DisplayConfigPathInfo);
         *path = DisplayConfigPathInfo {
             source_info: DisplayConfigPathSourceInfo {
                 adapter_id: LUID {
@@ -9029,7 +9029,7 @@ pub unsafe extern "win64" fn query_display_config(
             flags: 1, // DISPLAYCONFIG_PATH_ACTIVE
         };
 
-        let mode = &mut *(_modes as *mut DisplayConfigModeInfo);
+        let mode = &mut *(modes as *mut DisplayConfigModeInfo);
         *mode = DisplayConfigModeInfo {
             info_type: 2, // DISPLAYCONFIG_MODE_INFO_TYPE_TARGET
             id: 0,

@@ -1280,7 +1280,18 @@ mod inner {
     pub fn enumerate_monitors() -> Vec<crate::backend_trait::MonitorInfo> {
         match BACKEND.get() {
             Some(b) => b.enumerate_monitors(),
-            None => vec![],
+            None => {
+                // SDL2 and other apps query monitors during init (before any
+                // window is created). Return a default display when the X11
+                // backend has not been initialized yet.
+                let (sw, sh) = screen_size();
+                vec![crate::backend_trait::MonitorInfo {
+                    handle: 0,
+                    bounds: (0, 0, sw as i32, sh as i32),
+                    work_area: (0, 0, sw as i32, sh as i32),
+                    is_primary: true,
+                }]
+            }
         }
     }
 
