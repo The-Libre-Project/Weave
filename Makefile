@@ -40,6 +40,7 @@ test:
 		-v weave-cargo-cache:/usr/local/cargo/registry \
 		-v weave-target-cache:/weave/docker-target \
 		-e CARGO_TARGET_DIR=/weave/docker-target \
+		-e SDL_AUDIODRIVER=dummy \
 		rust:latest \
 		sh -c "apt-get update -qq && apt-get install -y -qq fonts-dejavu-core libpipewire-0.3-0 libpipewire-0.3-dev libclang-dev xvfb >/dev/null 2>&1; Xvfb :99 -screen 0 1280x720x24 & sleep 1; DISPLAY=:99 cargo test --features weave-winmm/pipewire-audio,weave-mmdevapi/pipewire-audio"
 
@@ -57,6 +58,7 @@ test-gate:
 		-v weave-cargo-cache:/usr/local/cargo/registry \
 		-v weave-target-cache:/weave/docker-target \
 		-e CARGO_TARGET_DIR=/weave/docker-target \
+		-e SDL_AUDIODRIVER=dummy \
 		rust:latest \
 		sh -c "apt-get update -qq && apt-get install -y -qq fonts-dejavu-core libpipewire-0.3-0 libpipewire-0.3-dev libclang-dev xvfb >/dev/null 2>&1; Xvfb :99 -screen 0 1280x720x24 & sleep 1; DISPLAY=:99 cargo test -p weave-cli --test hello_world $(GATE) --features weave-winmm/pipewire-audio,weave-mmdevapi/pipewire-audio -- --nocapture"
 

@@ -3094,6 +3094,9 @@ fn testsprite2_sdl2_gate1_smoke() {
 ///
 /// Runs sdl2_audio_test.exe under Weave with --no-sandbox and DISPLAY=:99 (Xvfb).
 /// SDL2.dll must be in the same directory as the exe (tests/fixtures/bin/SDL2.dll).
+/// No SDL_AUDIODRIVER override. When PipeWire is running (CI), SDL2 uses the
+/// Windows audio driver → waveOut → PipeWire.  Set SDL_AUDIODRIVER=dummy in
+/// your environment when testing without PipeWire.
 ///
 /// Gates:
 ///   1. process exits within 70 s — no panic / hard crash (M2: 60s stability)
@@ -3129,7 +3132,6 @@ fn sdl2_audio_gate1_smoke() {
         .arg("--no-sandbox")
         .arg(&exe)
         .env("DISPLAY", ":99")
-        .env("SDL_AUDIODRIVER", "dummy")
         .stderr(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .spawn()
