@@ -8610,6 +8610,11 @@ pub unsafe extern "win64" fn create_thread(
         // garbage, causing the thread to crash immediately when the PE function
         // dereferences the result.  Keep _teb alive until thread exit.
         let _teb = weave_core::teb::setup_thread();
+        // Re-install SIGSEGV handler in this thread.  glibc's pthread_create
+        // may use clone3 with CLONE_CLEAR_SIGHAND on modern kernels (5.5+),
+        // which clears all signal handlers in the new thread.  The crate-level
+        // crash_handler function lives in this file (defined below).
+        crate::install_thread_crash_handler();
         let my_tid = unsafe { libc::syscall(libc::SYS_gettid) as u32 };
         eprintln!("weave/CreateThread: thread-start tid={my_tid} fn={fn_addr:#x}");
         // Dispatch DLL_THREAD_ATTACH before running guest thread proc.
@@ -21018,6 +21023,86 @@ pub unsafe extern "win64" fn get_profile_string_w(
         unsafe { lp_returned_string.write(0) };
     }
     0
+}
+
+// ── Thread crash handler ─────────────────────────────────────────────────────
+// Glibc's pthread_create may use clone3 with CLONE_CLEAR_SIGHAND on modern
+// kernels (5.5+), clearing inherited signal handlers.  This trampoline is
+// installed in every CreateThread so SIGSEGV in worker threads is diagnosed.
+
+#[cfg(target_os = "linux")]
+unsafe extern "C" fn thread_crash_handler(
+    _signal: libc::c_int,
+    info: *mut libc::siginfo_t,
+    context: *mut libc::c_void,
+) {
+    let addr = if info.is_null() {
+        0usize
+    } else {
+        *((info as *const u8).add(16) as *const usize)
+    };
+    let rip = if context.is_null() {
+        0usize
+    } else {
+        *((context as *const u8).add(168) as *const usize)
+    };
+    let mut msg = [0u8; 128];
+    let prefix = b"weave: thread crash SIGSEGV";
+    msg[..prefix.len()].copy_from_slice(prefix);
+    let mut pos = prefix.len();
+    if rip != 0 {
+        let r = b" rip=0x";
+        msg[pos..pos + 7].copy_from_slice(r);
+        pos += 7;
+        for i in (0..16).rev() {
+            let n = (rip >> (i * 4)) & 0xf;
+            msg[pos] = if n < 10 {
+                b'0' + n as u8
+            } else {
+                b'a' + (n - 10) as u8
+            };
+            pos += 1;
+        }
+    }
+    {
+        let a = b" addr=0x";
+        msg[pos..pos + 8].copy_from_slice(a);
+        pos += 8;
+        for i in (0..16).rev() {
+            let n = (addr >> (i * 4)) & 0xf;
+            msg[pos] = if n < 10 {
+                b'0' + n as u8
+            } else {
+                b'a' + (n - 10) as u8
+            };
+            pos += 1;
+        }
+    }
+    msg[pos] = b'\n';
+    unsafe {
+        libc::write(2, msg.as_ptr() as *const libc::c_void, pos + 1);
+    }
+    unsafe {
+        libc::_exit(199);
+    }
+}
+
+/// Install the SIGSEGV crash handler for the calling thread.
+pub fn install_thread_crash_handler() {
+    #[cfg(target_os = "linux")]
+    if std::env::var("WEAVE_CRASH_TRAP").ok().as_deref() == Some("1") {
+        unsafe {
+            let mut action: libc::sigaction = std::mem::zeroed();
+            action.sa_sigaction = thread_crash_handler as *const () as usize;
+            action.sa_flags = libc::SA_SIGINFO | libc::SA_NODEFER;
+            libc::sigemptyset(&mut action.sa_mask);
+            libc::sigaction(libc::SIGSEGV, &action, std::ptr::null_mut());
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = std::env::var("WEAVE_CRASH_TRAP");
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

@@ -1624,6 +1624,10 @@ fn main() {
                 // from 5 to 0xFF so `jne` at 0x7c8ae always takes the default path
                 // (jump to 0x7c934), skipping the entire crash-prone path.
                 (0x7c8ab, &[0x83, 0xff, 0x05], &[0x83, 0xff, 0xff]),
+                // RVA 0x5a91d: `mov rdx, [rcx]` (48 8b 11) — RCX=0 (NULL) from
+                // `mov rcx, [r14]` where [r14] is uninitialized.  Zero out RDX
+                // so the code continues instead of crashing on NULL dereference.
+                (0x5a91d, &[0x48, 0x8b, 0x11], &[0x31, 0xd2, 0x90]),
             ],
         );
 
