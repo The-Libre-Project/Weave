@@ -119,10 +119,10 @@ pub fn setup(image: &LoadedImage) -> Result<TebState, String> {
     // SAFETY: alloc_low returns valid mmap'd memory. Wrap in ManuallyDrop so
     // our custom Drop (via munmap) runs instead of the Box drop (via free).
     let tls_slots = ManuallyDrop::new(unsafe {
-        Box::from_raw(std::slice::from_raw_parts_mut(tls_slots_raw, TLS_SLOTS))
+        Box::from_raw(std::ptr::slice_from_raw_parts_mut(tls_slots_raw, TLS_SLOTS))
     });
     let tls_data = ManuallyDrop::new(unsafe {
-        Box::from_raw(std::slice::from_raw_parts_mut(tls_data_raw, tls_size))
+        Box::from_raw(std::ptr::slice_from_raw_parts_mut(tls_data_raw, tls_size))
     });
 
     // Store TLS template for threads spawned later via CreateThread.
@@ -133,11 +133,7 @@ pub fn setup(image: &LoadedImage) -> Result<TebState, String> {
     // Copy PE raw TLS initialisation data into our block.
     if !image.tls_data.is_null() && image.tls_data_size > 0 {
         unsafe {
-            std::ptr::copy_nonoverlapping(
-                image.tls_data,
-                tls_data_raw as *mut u8,
-                image.tls_data_size,
-            );
+            std::ptr::copy_nonoverlapping(image.tls_data, tls_data_raw, image.tls_data_size);
         }
     }
 
@@ -239,10 +235,10 @@ pub fn setup_thread() -> TebState {
     let tls_size = src_size.max(TLS_DATA_MIN);
     let (tls_data_raw, _) = alloc_low::<u8>(tls_size);
     let tls_slots = ManuallyDrop::new(unsafe {
-        Box::from_raw(std::slice::from_raw_parts_mut(tls_slots_raw, TLS_SLOTS))
+        Box::from_raw(std::ptr::slice_from_raw_parts_mut(tls_slots_raw, TLS_SLOTS))
     });
     let tls_data = ManuallyDrop::new(unsafe {
-        Box::from_raw(std::slice::from_raw_parts_mut(tls_data_raw, tls_size))
+        Box::from_raw(std::ptr::slice_from_raw_parts_mut(tls_data_raw, tls_size))
     });
 
     if !src_ptr.is_null() && src_size > 0 {
