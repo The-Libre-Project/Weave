@@ -62,10 +62,7 @@ impl Drop for TebState {
         #[cfg(target_os = "linux")]
         unsafe {
             let slots_sz = std::mem::size_of::<u64>() * TLS_SLOTS;
-            libc::munmap(
-                self.tls_slots.as_ptr() as *mut libc::c_void,
-                slots_sz,
-            );
+            libc::munmap(self.tls_slots.as_ptr() as *mut libc::c_void, slots_sz);
             libc::munmap(
                 self.tls_data.as_ptr() as *mut libc::c_void,
                 self.tls_data.len(),
@@ -103,9 +100,7 @@ fn alloc_low<T: Default + Copy>(n: usize) -> (*mut T, usize) {
 #[cfg(not(target_os = "linux"))]
 fn alloc_low<T: Default + Copy>(n: usize) -> (*mut T, usize) {
     let size = n * std::mem::size_of::<T>();
-    let ptr = unsafe {
-        std::alloc::alloc(std::alloc::Layout::from_size_align(size, 16).unwrap())
-    };
+    let ptr = unsafe { std::alloc::alloc(std::alloc::Layout::from_size_align(size, 16).unwrap()) };
     (ptr as *mut T, size)
 }
 
@@ -252,11 +247,7 @@ pub fn setup_thread() -> TebState {
 
     if !src_ptr.is_null() && src_size > 0 {
         unsafe {
-            std::ptr::copy_nonoverlapping(
-                src_ptr,
-                tls_data.as_ptr() as *mut u8,
-                src_size,
-            );
+            std::ptr::copy_nonoverlapping(src_ptr, tls_data.as_ptr() as *mut u8, src_size);
         }
     }
 
