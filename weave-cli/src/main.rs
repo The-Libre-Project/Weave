@@ -1842,6 +1842,19 @@ fn main() {
                     }
                 }
 
+                // Install crash handler in host process too, so we can
+                // diagnose crashes that happen in the host (e.g. XCB/fontconfig).
+                if std::env::var("WEAVE_CRASH_TRAP").ok().as_deref() == Some("1") {
+                    #[cfg(target_os = "linux")]
+                    unsafe {
+                        let mut action: libc::sigaction = std::mem::zeroed();
+                        action.sa_sigaction = crash_handler as *const () as usize;
+                        action.sa_flags = libc::SA_SIGINFO | libc::SA_NODEFER;
+                        libc::sigemptyset(&mut action.sa_mask);
+                        libc::sigaction(libc::SIGSEGV, &action, std::ptr::null_mut());
+                    }
+                }
+
                 eprintln!("PHASE: host_loop_started");
 
                 if let Err(e) = weave_ipc::host_loop(sv[0], ipc_handler) {
