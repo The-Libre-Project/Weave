@@ -21,6 +21,7 @@
 //! has no TLS). This is the minimum needed to keep CRT startup code from
 //! crashing when it reads its per-thread state via GS:[0x58].
 
+use std::mem::ManuallyDrop;
 use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
 
 use crate::handles;
@@ -49,39 +50,97 @@ pub struct TebState {
     teb: Box<[u8]>,
     peb: Box<[u8; 4096]>,
     params: Box<[u8; 4096]>,
-    tls_slots: Box<[u64; TLS_SLOTS]>,
-    tls_data: Box<[u8]>,
+    /// TLS slots array. Backed by MAP_32BIT mmap on Linux; freed via munmap
+    /// in the custom Drop impl (not via Box drop, which would call free()).
+    tls_slots: ManuallyDrop<Box<[u64]>>,
+    /// TLS data block. Same backing/free scheme as tls_slots.
+    tls_data: ManuallyDrop<Box<[u8]>>,
 }
 
-/// Allocate and initialise the TEB/PEB/TLS and point GS at the TEB.
-///
-/// `image` is used only to locate and copy the PE's TLS raw data into the
-/// per-thread TLS block. If the PE has no TLS, a zeroed block is used.
-///
-/// On non-Linux platforms this is a no-op at runtime (GS won't be set) but
-/// the function still returns `Ok(state)` so the caller can hold the memory.
+impl Drop for TebState {
+    fn drop(&mut self) {
+        #[cfg(target_os = "linux")]
+        unsafe {
+            let slots_sz = std::mem::size_of::<u64>() * TLS_SLOTS;
+            libc::munmap(
+                self.tls_slots.as_ptr() as *mut libc::c_void,
+                slots_sz,
+            );
+            libc::munmap(
+                self.tls_data.as_ptr() as *mut libc::c_void,
+                self.tls_data.len(),
+            );
+        }
+    }
+}
+
+/// Allocate memory below 4 GiB using MAP_32BIT. Returns a leaked pointer.
+/// MSVC CRT code does 32-bit stores to TLS data structures (e.g. `_onexit_table`).
+/// When the TLS data is at a high address (>4 GiB), these stores corrupt adjacent
+/// 64-bit pointer fields (producing addresses like PE_base&0xFFFFFFFF00000000).
+/// MAP_32BIT keeps data under 4 GiB so the corrupted high bits remain 0.
+/// Falls back to `mmap(NULL, ...)` (non-MAP_32BIT) when unavailable.
+#[cfg(target_os = "linux")]
+fn alloc_low<T: Default + Copy>(n: usize) -> (*mut T, usize) {
+    const MAP_32BIT: i32 = 0x40;
+    let size = n * std::mem::size_of::<T>();
+    let ptr = unsafe {
+        libc::mmap(
+            std::ptr::null_mut(),
+            size,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | MAP_32BIT,
+            -1,
+            0,
+        )
+    };
+    if ptr == libc::MAP_FAILED {
+        panic!("MAP_32BIT allocation of {size} bytes failed");
+    }
+    (ptr as *mut T, size)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn alloc_low<T: Default + Copy>(n: usize) -> (*mut T, usize) {
+    let size = n * std::mem::size_of::<T>();
+    let ptr = unsafe {
+        std::alloc::alloc(std::alloc::Layout::from_size_align(size, 16).unwrap())
+    };
+    (ptr as *mut T, size)
+}
+
 pub fn setup(image: &LoadedImage) -> Result<TebState, String> {
     let mut teb = vec![0u8; TEB_SIZE].into_boxed_slice();
     let mut peb = Box::new([0u8; 4096]);
     let mut params = Box::new([0u8; 4096]);
 
-    // ── TLS slot array and per-thread data block ──────────────────────────
-    let mut tls_slots = Box::new([0u64; TLS_SLOTS]);
+    // ── TLS slot array and per-thread data block (below 4 GiB) ──────────
+    // MSVC CRT code does 32-bit stores to CRT internal structs in TLS data
+    // (e.g. `_onexit_table` init via the wrappers at Audacity RVAs 0x53da10/5c/e0).
+    // MAP_32BIT prevents corruption of adjacent 64-bit pointer fields.
+    let (tls_slots_raw, _) = alloc_low::<u64>(TLS_SLOTS);
+    let tls_size = image.tls_data_size.max(TLS_DATA_MIN);
+    let (tls_data_raw, _) = alloc_low::<u8>(tls_size);
+    // SAFETY: alloc_low returns valid mmap'd memory. Wrap in ManuallyDrop so
+    // our custom Drop (via munmap) runs instead of the Box drop (via free).
+    let tls_slots = ManuallyDrop::new(unsafe {
+        Box::from_raw(std::slice::from_raw_parts_mut(tls_slots_raw, TLS_SLOTS))
+    });
+    let tls_data = ManuallyDrop::new(unsafe {
+        Box::from_raw(std::slice::from_raw_parts_mut(tls_data_raw, tls_size))
+    });
 
     // Store TLS template for threads spawned later via CreateThread.
     // The PE image stays mapped for the process lifetime, so this pointer is valid.
     PE_TLS_SRC.store(image.tls_data as *mut u8, Ordering::Relaxed);
     PE_TLS_SRC_SIZE.store(image.tls_data_size, Ordering::Relaxed);
 
-    let tls_size = image.tls_data_size.max(TLS_DATA_MIN);
-    let mut tls_data = vec![0u8; tls_size].into_boxed_slice();
-
     // Copy PE raw TLS initialisation data into our block.
     if !image.tls_data.is_null() && image.tls_data_size > 0 {
         unsafe {
             std::ptr::copy_nonoverlapping(
                 image.tls_data,
-                tls_data.as_mut_ptr(),
+                tls_data_raw as *mut u8,
                 image.tls_data_size,
             );
         }
@@ -90,8 +149,9 @@ pub fn setup(image: &LoadedImage) -> Result<TebState, String> {
     let teb_ptr = teb.as_mut_ptr();
     let peb_ptr = peb.as_mut_ptr();
     let params_ptr = params.as_mut_ptr();
-    let tls_slots_ptr = tls_slots.as_mut_ptr();
-    let tls_data_ptr = tls_data.as_mut_ptr();
+    // SAFETY: mmap MAP_32BIT memory below 4 GiB. Read-only for the TEB setup.
+    let tls_slots_ptr = tls_slots.as_ptr() as *mut u64;
+    let tls_data_ptr = tls_data.as_ptr() as *mut u8;
 
     // Determine the current thread's stack bounds so we can populate
     // NT_TIB.StackBase (high addr) and NT_TIB.StackLimit (low addr).
@@ -178,24 +238,33 @@ pub fn setup_thread() -> TebState {
     let mut teb = vec![0u8; TEB_SIZE].into_boxed_slice();
     let mut peb = Box::new([0u8; 4096]);
     let mut params = Box::new([0u8; 4096]);
-    let mut tls_slots = Box::new([0u64; TLS_SLOTS]);
-
+    let (tls_slots_raw, _) = alloc_low::<u64>(TLS_SLOTS);
     let src_ptr = PE_TLS_SRC.load(Ordering::Relaxed);
     let src_size = PE_TLS_SRC_SIZE.load(Ordering::Relaxed);
     let tls_size = src_size.max(TLS_DATA_MIN);
-    let mut tls_data = vec![0u8; tls_size].into_boxed_slice();
+    let (tls_data_raw, _) = alloc_low::<u8>(tls_size);
+    let tls_slots = ManuallyDrop::new(unsafe {
+        Box::from_raw(std::slice::from_raw_parts_mut(tls_slots_raw, TLS_SLOTS))
+    });
+    let tls_data = ManuallyDrop::new(unsafe {
+        Box::from_raw(std::slice::from_raw_parts_mut(tls_data_raw, tls_size))
+    });
 
     if !src_ptr.is_null() && src_size > 0 {
         unsafe {
-            std::ptr::copy_nonoverlapping(src_ptr, tls_data.as_mut_ptr(), src_size);
+            std::ptr::copy_nonoverlapping(
+                src_ptr,
+                tls_data.as_ptr() as *mut u8,
+                src_size,
+            );
         }
     }
 
     let teb_ptr = teb.as_mut_ptr();
     let peb_ptr = peb.as_mut_ptr();
     let params_ptr = params.as_mut_ptr();
-    let tls_slots_ptr = tls_slots.as_mut_ptr();
-    let tls_data_ptr = tls_data.as_mut_ptr();
+    let tls_slots_ptr = tls_slots.as_ptr() as *mut u64;
+    let tls_data_ptr = tls_data.as_ptr() as *mut u8;
 
     #[cfg(target_os = "linux")]
     let (stack_base, stack_limit) = {
