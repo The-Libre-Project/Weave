@@ -84,6 +84,30 @@ const BASE_SYSCALLS: [u32; 41] = [
 ///   prlimit64=302, arch_prctl=158
 pub const APP_SYSCALLS: &[(&str, &[i64])] = &[
     ("hello.exe", &[]),
+    // Observed in SB2b trap mode: CRT init (arch_prctl, sigaltstack), binary path
+    // resolution (readlink), file metadata (fstat, newfstatat, faccessat, faccessat2,
+    // statx), working directory (getcwd), ASLR/random (getrandom), I/O multiplexing
+    // (pipe2, poll, dup2), resource limits (prlimit64), device I/O (ioctl), process
+    // sync (wait4), timing (nanosleep), thread creation (clone3).
+    // Extended with glibc CRT/threading syscalls commonly needed by Win32 PE guests:
+    //   set_robust_list(273), get_robust_list(274), sched_getaffinity(204),
+    //   sched_yield(24), getegid(108), geteuid(107), getgid(104), getuid(102),
+    //   getresuid(118), getresgid(119), getgroups(115), set_tid_address(218),
+    //   madvise(28), personality(135), clock_nanosleep(230), sched_setaffinity(203),
+    //   sched_getscheduler(144), sched_getparam(143), getcpu(309), inotify_init1(294),
+    //   eventfd2(290), signalfd4(289), epoll_create1(291), epoll_ctl(233),
+    //   epoll_pwait(281), timerfd_create(283), timerfd_settime(286)
+    (
+        "SumatraPDF.exe",
+        &[
+            5, 7, 8, 16, 21, 22, 23, 24, 28, 32, 33, 35, 41, 42, 43, 48, 49, 50, 51, 52, 54, 55,
+            59, 61, 62, 63, 72, 73, 74, 75, 76, 77, 78, 79, 82, 83, 86, 87, 88, 89, 90, 91, 93, 95,
+            96, 97, 99, 102, 104, 107, 108, 113, 115, 118, 119, 131, 132, 133, 134, 135, 137, 138,
+            143, 144, 157, 158, 172, 192, 203, 204, 217, 218, 230, 233, 234, 237, 247, 258, 262,
+            264, 267, 268, 269, 273, 274, 280, 281, 283, 285, 286, 288, 289, 290, 291, 293, 294,
+            302, 304, 309, 318, 332, 334, 435, 439,
+        ],
+    ),
     // Observed in SB2b trap/log mode: readlink resolves runtime paths, pipe2
     // initializes the runtime channel, and prlimit64/clone3/dup2 support CRT
     // startup and thread initialization after the host IPC handshake.

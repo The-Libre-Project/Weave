@@ -2383,6 +2383,7 @@ fn sumatrapdf_pdf_render_gate() {
         .arg(&pdf_path)
         .env("DISPLAY", ":99")
         .env("WEAVE_TEST_SUMATRA_CLSID", "1")
+        .env("WEAVE_SECCOMP_TRAP", "1")
         .stderr(std::process::Stdio::piped())
         .spawn()
         .unwrap_or_else(|e| panic!("failed to spawn weave on SumatraPDF.exe: {e}"));
