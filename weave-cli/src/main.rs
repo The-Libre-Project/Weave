@@ -1626,7 +1626,7 @@ fn main() {
         // executable sections.  The guest callback context is often corrupted,
         // causing r8 to contain invalid heap pointers (~0x40xxxxxx).  This
         // prevents all write-to-[r8] crashes in one pass.
-        cfg::nop_r8_stores(&bytes, image.base);
+        // cfg::nop_r8_stores(&bytes, image.base);  // Sweeping NOP disabled — crashes during section scan. TEB setup + individual patches are sufficient.
     }
 
     // ── 3.7. Socketpair + fork for out-of-process guest ──────────────────
@@ -1863,6 +1863,25 @@ fn main() {
                         action.sa_flags = libc::SA_SIGINFO | libc::SA_NODEFER;
                         libc::sigemptyset(&mut action.sa_mask);
                         libc::sigaction(libc::SIGSEGV, &action, std::ptr::null_mut());
+                    }
+                }
+
+                // Set up TEB for the host process too.  PE callback functions
+                // (WNDPROC, timer callbacks) that the host executes during IPC
+                // handling expect a valid GS-base TEB with ThreadLocalStoragePointer.
+                // Without this, any PE callback that accesses TLS (via GS-relative
+                // addressing) reads garbage and crashes when it follows corrupted
+                // pointers.
+                eprintln!("weave/host: setting up TEB");
+                match teb::setup(&image) {
+                    Ok(teb) => {
+                        eprintln!("weave/host: TEB set up OK, keeping TebState alive");
+                        // Keep TebState alive until host_loop returns (or crashes).
+                        // Drop at end of scope.
+                        let _host_teb = teb;
+                    }
+                    Err(e) => {
+                        eprintln!("weave/host: TEB setup failed (PE callbacks may crash): {e}");
                     }
                 }
 

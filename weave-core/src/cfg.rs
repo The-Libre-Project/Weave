@@ -1672,15 +1672,13 @@ pub fn nop_r8_stores(pe_bytes: &[u8], base: *mut u8) {
             let instr_va = base_usize.wrapping_add(sec_va).wrapping_add(offset);
             let page_base = (instr_va & !(page_size - 1)) as *mut libc::c_void;
             unsafe {
-                let _ = libc::mprotect(
-                    page_base,
-                    page_size,
-                    libc::PROT_READ | libc::PROT_WRITE | libc::PROT_EXEC,
-                );
-                (instr_va as *mut u8).write(0x90);
-                ((instr_va + 1) as *mut u8).write(0x90);
-                ((instr_va + 2) as *mut u8).write(0x90);
-                let _ = libc::mprotect(page_base, page_size, libc::PROT_READ | libc::PROT_EXEC);
+                let ret = libc::mprotect(page_base, page_size, libc::PROT_READ | libc::PROT_WRITE);
+                if ret == 0 {
+                    (instr_va as *mut u8).write(0x90);
+                    ((instr_va + 1) as *mut u8).write(0x90);
+                    ((instr_va + 2) as *mut u8).write(0x90);
+                    libc::mprotect(page_base, page_size, libc::PROT_READ | libc::PROT_EXEC);
+                }
             }
             _nop_count += 1;
         }
