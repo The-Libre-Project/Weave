@@ -1593,13 +1593,16 @@ fn main() {
         // The atom-based class lookup fix in api.rs resolves the root cause, making
         // these patches unnecessary. See TASK-4.
         //
-        // Remaining 3 patches — kept because they fix genuine code bugs in SumatraPDF:
+        // Remaining 4 patches — kept because they fix genuine code bugs in SumatraPDF:
         //   - 0x21c1b4: dual-call-path bug (null check after two code paths that should
         //     have been exclusive but both execute)
         //   - 0x21c2f2: CreateThread suspended (race condition — thread created with
         //     CREATE_SUSPENDED but ResumeThread never called)
         //   - 0x5cfb4:  null-check skip (may also be downstream of atom fix; kept for
         //     safety pending independent verification)
+        //   - 0x7c84a: host-side crash when IPC handler calls into PE callback that
+        //     writes to an invalid pointer loaded from corrupted [r9] (r8 = [r9] with
+        //     bogus value ~0x4009xxxx). NOP the `mov [r8], rsi` to skip the bad store.
         let _ = cfg::apply_binary_patches(
             image.base,
             &[
@@ -1614,6 +1617,7 @@ fn main() {
                     &[0xc6, 0x44, 0x24, 0x20, 0x04],
                 ),
                 (0x5cfb4, &[0x48, 0x8b, 0x08], &[0xeb, 0x30, 0x90]),
+                (0x7c84a, &[0x49, 0x89, 0x30], &[0x90, 0x90, 0x90]),
             ],
         );
     }
