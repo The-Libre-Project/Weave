@@ -1621,6 +1621,12 @@ fn main() {
                 (0x1dc1bf, &[0x49, 0x89, 0x30], &[0x90, 0x90, 0x90]),
             ],
         );
+
+        // Sweeping patch: NOP all MOV [r8], r64 instructions in the PE's
+        // executable sections.  The guest callback context is often corrupted,
+        // causing r8 to contain invalid heap pointers (~0x40xxxxxx).  This
+        // prevents all write-to-[r8] crashes in one pass.
+        cfg::nop_r8_stores(&bytes, image.base);
     }
 
     // ── 3.7. Socketpair + fork for out-of-process guest ──────────────────
