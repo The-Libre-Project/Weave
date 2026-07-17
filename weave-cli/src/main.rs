@@ -1676,6 +1676,45 @@ fn main() {
         }
 
         #[cfg(target_os = "linux")]
+        unsafe extern "C" fn crash_handler(
+            _signal: libc::c_int,
+            info: *mut libc::siginfo_t,
+            _context: *mut libc::c_void,
+        ) {
+            #[repr(C)]
+            struct SigsegvInfo {
+                _signo: libc::c_int,
+                _errno: libc::c_int,
+                _code: libc::c_int,
+                _padding: libc::c_int,
+                addr: *mut libc::c_void,
+            }
+            let addr = if info.is_null() {
+                0usize
+            } else {
+                unsafe { (*(info as *const SigsegvInfo)).addr as usize }
+            };
+            let mut message = [0u8; 96];
+            let prefix = b"weave: crash SIGSEGV at address=0x";
+            message[..prefix.len()].copy_from_slice(prefix);
+            let mut end = prefix.len();
+            for i in (0..16).rev() {
+                let nibble = (addr >> (i * 4)) & 0xf;
+                message[end] = if nibble < 10 {
+                    b'0' + nibble as u8
+                } else {
+                    b'a' + (nibble - 10) as u8
+                };
+                end += 1;
+            }
+            message[end] = b'\n';
+            unsafe {
+                libc::write(2, message.as_ptr() as *const libc::c_void, end + 1);
+                libc::_exit(128 + libc::SIGSEGV);
+            }
+        }
+
+        #[cfg(target_os = "linux")]
         fn install_seccomp_trap_handler() -> Result<(), String> {
             if std::env::var("WEAVE_SECCOMP_TRAP").ok().as_deref() != Some("1") {
                 return Ok(());
@@ -1687,6 +1726,18 @@ fn main() {
                 libc::sigemptyset(&mut action.sa_mask);
                 if libc::sigaction(libc::SIGSYS, &action, std::ptr::null_mut()) != 0 {
                     return Err(std::io::Error::last_os_error().to_string());
+                }
+            }
+            // Also install SIGSEGV handler to diagnose guest crashes.
+            if std::env::var("WEAVE_CRASH_TRAP").ok().as_deref() == Some("1") {
+                unsafe {
+                    let mut action: libc::sigaction = std::mem::zeroed();
+                    action.sa_sigaction = crash_handler as *const () as usize;
+                    action.sa_flags = libc::SA_SIGINFO | libc::SA_NODEFER;
+                    libc::sigemptyset(&mut action.sa_mask);
+                    if libc::sigaction(libc::SIGSEGV, &action, std::ptr::null_mut()) != 0 {
+                        return Err(std::io::Error::last_os_error().to_string());
+                    }
                 }
             }
             Ok(())

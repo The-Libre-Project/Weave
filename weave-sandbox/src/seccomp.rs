@@ -53,9 +53,8 @@ struct sock_fprog {
 /// landlock_create_ruleset=444, landlock_add_rule=445, landlock_restrict_self=446
 /// (Linux 5.13+, needed by weave_sandbox::apply after seccomp is active)
 const BASE_SYSCALLS: [u32; 41] = [
-    0, 1, 3, 5, 7, 9, 10, 11, 12, 13, 14, 15, 16, 33, 35, 39, 47, 60, 61,
-    79, 89, 131, 157, 158, 262, 269, 293, 302, 318, 332, 435, 439,
-    186, 202, 219, 228, 231, 257, 444, 445, 446,
+    0, 1, 3, 5, 7, 9, 10, 11, 12, 13, 14, 15, 16, 33, 35, 39, 47, 60, 61, 79, 89, 131, 157, 158,
+    262, 269, 293, 302, 318, 332, 435, 439, 186, 202, 219, 228, 231, 257, 444, 445, 446,
 ];
 
 /// Per-app syscall additions registry.
