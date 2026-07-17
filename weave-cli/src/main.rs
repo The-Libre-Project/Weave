@@ -1923,6 +1923,22 @@ fn main() {
         }
     }
 
+    // Fontconfig support: fontconfig reads /etc/fonts/fonts.conf for system
+    // font configuration. Without this, fontconfig prints an error and may crash
+    // the guest or the host during GDI text operations.
+    let font_sys_paths: &[&str] = &[
+        "/etc/fonts",
+        "/usr/share/fonts",
+        "/usr/share/fontconfig",
+        "/var/cache/fontconfig",
+    ];
+    for path_str in font_sys_paths {
+        let p = std::path::Path::new(path_str);
+        if p.exists() {
+            allowed.push(p);
+        }
+    }
+
     let sandbox_status = weave_sandbox::apply(true, &allowed);
 
     // ── 4.5. Sandbox runtime invariant — release blocker ─────────────────
