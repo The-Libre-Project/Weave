@@ -39,7 +39,7 @@ struct sock_fprog {
     filter: *const sock_filter,
 }
 
-/// Base allowlist: syscalls every app needs (32 x86_64 syscalls).
+/// Base allowlist: syscalls every app needs (41 x86_64 syscalls).
 ///
 /// read=0, write=1, close=3, fstat=5, mmap=9, mprotect=10, munmap=11, brk=12,
 /// rt_sigaction=13, rt_sigprocmask=14, sigreturn=15, getpid=39, exit=60,
@@ -48,13 +48,13 @@ struct sock_fprog {
 /// readlink=89, sigaltstack=131, prctl=157, arch_prctl=158,
 /// getcwd=79, getrandom=318, newfstatat=262, faccessat=269, faccessat2=439,
 /// pipe2=293, dup2=33, clone3=435, prlimit64=302, ioctl=16, poll=7,
-/// wait4=61, nanosleep=35
+/// wait4=61, nanosleep=35, statx=332
 /// (prctl runs before seccomp is applied; arch_prctl and sigaltstack run after)
 /// landlock_create_ruleset=444, landlock_add_rule=445, landlock_restrict_self=446
 /// (Linux 5.13+, needed by weave_sandbox::apply after seccomp is active)
-const BASE_SYSCALLS: [u32; 40] = [
+const BASE_SYSCALLS: [u32; 41] = [
     0, 1, 3, 5, 7, 9, 10, 11, 12, 13, 14, 15, 16, 33, 35, 39, 47, 60, 61,
-    79, 89, 131, 157, 158, 262, 269, 293, 302, 318, 435, 439,
+    79, 89, 131, 157, 158, 262, 269, 293, 302, 318, 332, 435, 439,
     186, 202, 219, 228, 231, 257, 444, 445, 446,
 ];
 
