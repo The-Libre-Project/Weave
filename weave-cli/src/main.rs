@@ -1619,6 +1619,11 @@ fn main() {
                 (0x5cfb4, &[0x48, 0x8b, 0x08], &[0xeb, 0x30, 0x90]),
                 (0x7c84a, &[0x49, 0x89, 0x30], &[0x90, 0x90, 0x90]),
                 (0x1dc1bf, &[0x49, 0x89, 0x30], &[0x90, 0x90, 0x90]),
+                // RVA 0x7c8ab: `cmp edi, 5` (83 ff 05) — switch case dispatch that
+                // enters a code path using corrupted rbx. Change comparison value
+                // from 5 to 0xFF so `jne` at 0x7c8ae always takes the default path
+                // (jump to 0x7c934), skipping the entire crash-prone path.
+                (0x7c8ab, &[0x83, 0xff, 0x05], &[0x83, 0xff, 0xff]),
             ],
         );
 
@@ -1690,7 +1695,7 @@ fn main() {
         unsafe extern "C" fn crash_handler(
             _signal: libc::c_int,
             info: *mut libc::siginfo_t,
-            _context: *mut libc::c_void,
+            context: *mut libc::c_void,
         ) {
             #[repr(C)]
             struct SigsegvInfo {
@@ -1705,10 +1710,20 @@ fn main() {
             } else {
                 unsafe { (*(info as *const SigsegvInfo)).addr as usize }
             };
-            let mut message = [0u8; 96];
-            let prefix = b"weave: crash SIGSEGV at address=0x";
-            message[..prefix.len()].copy_from_slice(prefix);
-            let mut end = prefix.len();
+            // Extract RIP from ucontext_t (x86_64 glibc layout):
+            //   uc_mcontext.gregs[REG_RIP] at offset 40 + 16 * 8 = 168.
+            let rip = if context.is_null() {
+                0usize
+            } else {
+                unsafe {
+                    let rip_ptr = (context as *const u8).add(168) as *const u64;
+                    (*rip_ptr) as usize
+                }
+            };
+            let mut message = [0u8; 192];
+            let addr_label = b"weave: crash SIGSEGV addr=0x";
+            message[..addr_label.len()].copy_from_slice(addr_label);
+            let mut end = addr_label.len();
             for i in (0..16).rev() {
                 let nibble = (addr >> (i * 4)) & 0xf;
                 message[end] = if nibble < 10 {
@@ -1718,10 +1733,25 @@ fn main() {
                 };
                 end += 1;
             }
+            // If RIP looks reasonable (in the PE image or a library), print it too.
+            if rip >= 0x140000000 && rip <= 0x150000000 || rip >= 0x550000000000 {
+                let rip_label = b" rip=0x";
+                message[end..end + 7].copy_from_slice(rip_label);
+                end += 7;
+                for i in (0..16).rev() {
+                    let nibble = (rip >> (i * 4)) & 0xf;
+                    message[end] = if nibble < 10 {
+                        b'0' + nibble as u8
+                    } else {
+                        b'a' + (nibble - 10) as u8
+                    };
+                    end += 1;
+                }
+            }
             message[end] = b'\n';
             unsafe {
                 libc::write(2, message.as_ptr() as *const libc::c_void, end + 1);
-                libc::_exit(128 + libc::SIGSEGV);
+                libc::_exit(199);
             }
         }
 
