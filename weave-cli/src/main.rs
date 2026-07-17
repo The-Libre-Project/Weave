@@ -1764,7 +1764,7 @@ fn main() {
                 end += 1;
             }
             // If RIP looks reasonable (in the PE image or a library), print it too.
-            if rip >= 0x140000000 && rip <= 0x150000000 || rip >= 0x550000000000 {
+            if (0x140000000..=0x150000000).contains(&rip) || rip >= 0x550000000000 {
                 let rip_label = b" rip=0x";
                 message[end..end + 7].copy_from_slice(rip_label);
                 end += 7;
