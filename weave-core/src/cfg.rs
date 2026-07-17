@@ -1600,70 +1600,79 @@ pub fn nop_r8_stores(pe_bytes: &[u8], base: *mut u8) {
     let page_size = 4096usize;
     let pe_off = match read_u32(pe_bytes, 0x3c) {
         Some(x) => x as usize,
-        None => return,
+        None => {
+            return;
+        }
     };
     let num_sections = match read_u16(pe_bytes, pe_off + 6) {
         Some(x) => x as usize,
-        None => return,
+        None => {
+            return;
+        }
     };
     let sec_table_off = pe_off + 24 + 240;
-
-    let mut nop_count = 0usize;
-
+    let mut _nop_count = 0usize;
     for i in 0..num_sections {
         let s = sec_table_off + i * 40;
-        let characteristics = match read_u32(pe_bytes, s + 36) {
+        let chars = match read_u32(pe_bytes, s + 36) {
             Some(x) => x,
-            None => continue,
+            None => {
+                continue;
+            }
         };
-        if characteristics & 0x2000_0000 == 0 {
+        if chars & 0x20000000 == 0 {
             continue;
         }
         let sec_va = match read_u32(pe_bytes, s + 12) {
             Some(x) => x as usize,
-            None => continue,
+            None => {
+                continue;
+            }
         };
-        let _sec_vsz = match read_u32(pe_bytes, s + 8) {
+        let sec_vsz = match read_u32(pe_bytes, s + 8) {
             Some(x) => x as usize,
             None => 0,
         };
         let sec_fsz = match read_u32(pe_bytes, s + 16) {
             Some(x) => x as usize,
-            None => continue,
+            None => {
+                continue;
+            }
         };
         let sec_foff = match read_u32(pe_bytes, s + 20) {
             Some(x) => x as usize,
-            None => continue,
+            None => {
+                continue;
+            }
         };
-
-        if sec_foff >= pe_bytes.len() || sec_fsz < 3 {
+        let sec_len = sec_vsz.min(sec_fsz);
+        if sec_foff >= pe_bytes.len() || sec_len < 3 {
             continue;
         }
-        let avail = pe_bytes.len() - sec_foff;
-        let scan_len = sec_fsz.min(avail).saturating_sub(2);
+        let avail = pe_bytes.len().saturating_sub(sec_foff);
+        let scan_len = sec_len.min(avail).saturating_sub(2);
+        if scan_len == 0 {
+            continue;
+        }
         let end = sec_foff + scan_len + 2;
         if end > pe_bytes.len() {
             continue;
         }
         let sec_bytes = &pe_bytes[sec_foff..end];
-
         for offset in 0..scan_len {
-            let b0 = sec_bytes[offset];
-            if b0 != 0x49 && b0 != 0x4d {
+            if sec_bytes[offset] != 0x49 && sec_bytes[offset] != 0x4d {
                 continue;
             }
             if sec_bytes[offset + 1] != 0x89 {
                 continue;
             }
-            let modrm = sec_bytes[offset + 2];
-            if modrm & 0xC7 != 0x00 {
+            if sec_bytes[offset + 2] & 0xC7 != 0x00 {
                 continue;
             }
-
             let instr_va = base_usize.wrapping_add(sec_va).wrapping_add(offset);
             let page_base = (instr_va & !(page_size - 1)) as *mut libc::c_void;
             unsafe {
-                libc::mprotect(
+                let _ = libc::mprotect(
                     page_base,
                     page_size,
                     libc::PROT_READ | libc::PROT_WRITE | libc::PROT_EXEC,
@@ -1671,13 +1680,11 @@ pub fn nop_r8_stores(pe_bytes: &[u8], base: *mut u8) {
                 (instr_va as *mut u8).write(0x90);
                 ((instr_va + 1) as *mut u8).write(0x90);
                 ((instr_va + 2) as *mut u8).write(0x90);
-                libc::mprotect(page_base, page_size, libc::PROT_READ | libc::PROT_EXEC);
+                let _ = libc::mprotect(page_base, page_size, libc::PROT_READ | libc::PROT_EXEC);
             }
-            nop_count += 1;
+            _nop_count += 1;
         }
     }
-
-    eprintln!("weave: CFG: NOP'd {nop_count} MOV [r8],reg instructions (sweeping r8 store fix)");
 }
 
 #[cfg(all(test, target_os = "linux", target_arch = "x86_64"))]
