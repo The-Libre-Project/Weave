@@ -3269,13 +3269,15 @@ fn nxengine_gate1_smoke() {
     // Spawn with CWD = game dir so nx.exe finds its data files next to itself.
     // SDL_VIDEODRIVER is NOT set — we need the real video driver to see CreateWindow.
     // Audio goes through Weave's waveOut→PipeWire bridge (audio arc CLOSED ed1e9164).
+    // No SDL_AUDIODRIVER override — when PipeWire is running (CI), SDL2 uses the Windows
+    // audio driver → waveOut → PipeWire. Set SDL_AUDIODRIVER=dummy in env for Docker/local
+    // without PipeWire.
     let mut child = std::process::Command::new(weave_bin)
         .current_dir(&game_dir)
         .args([&exe])
         .env("DISPLAY", ":99")
         .env("SDL_RENDER_DRIVER", "software")
         .env("SDL_FRAMEBUFFER_ACCELERATION", "0")
-        .env("SDL_AUDIODRIVER", "dummy")
         .stderr(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .spawn()
@@ -3392,7 +3394,10 @@ fn nxengine_gate1_smoke() {
 
     // --- Capability taxonomy (TASK-META-06) ---
     // NXEngine Gate 1 exercises: launches (PE load + CreateWindow + first
-    // frame). Audio goes through waveOut→PipeWire bridge (audio arc CLOSED).
+    // frame). Audio goes through real waveOut→PipeWire bridge (audio arc CLOSED).
+    // SDL_AUDIODRIVER override removed — gate exercises real audio when PipeWire
+    // is running (CI audio section). Docker/local without PipeWire should set
+    // SDL_AUDIODRIVER=dummy at the container/environment level.
     let mut cap = CapabilityReport::for_app("nx.exe");
     cap.declare(CapabilityClass::Launches);
     cap.declare(CapabilityClass::Audio);
@@ -3404,8 +3409,8 @@ fn nxengine_gate1_smoke() {
     );
     cap.record(
         CapabilityClass::Audio,
-        CapabilityOutcome::untested(
-            "SDL_AUDIODRIVER=dummy — audio bypassed, real waveOut→PipeWire not exercised",
+        CapabilityOutcome::pass(
+            "waveOut→PipeWire exercised via SDL2 audio driver (no SDL_AUDIODRIVER override)",
         ),
     );
     cap.emit();

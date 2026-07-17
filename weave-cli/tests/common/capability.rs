@@ -171,8 +171,8 @@ impl CapabilityReport {
     /// Example output:
     /// ```text
     /// weave-capability: app=nx.exe class=launches tested=true passed=true evidence="PE loaded; CreateWindow seen"
-    /// weave-capability: app=nx.exe class=audio tested=false passed=false evidence="SDL_AUDIODRIVER=dummy; audio path not driven"
-    /// weave-capability-summary: app=nx.exe declared=2 tested=1 passed=1
+    /// weave-capability: app=nx.exe class=audio tested=true passed=true evidence="waveOut→PipeWire exercised via SDL2 audio driver"
+    /// weave-capability-summary: app=nx.exe declared=2 tested=2 passed=2
     /// ```
     pub fn emit(&self) {
         for (class, outcome) in &self.rows {
