@@ -1628,14 +1628,14 @@ fn main() {
                 // `mov rcx, [r14]` where [r14] is uninitialized.  Zero out RDX
                 // so the code continues instead of crashing on NULL dereference.
                 (0x5a91d, &[0x48, 0x8b, 0x11], &[0x31, 0xd2, 0x90]),
-                // RVA 0x5a84c: `je 0x5a8d5` (74 87) — skip work-item dispatch when
-                // rcx (from [r14]) is NULL.  Change to unconditional `jmp` so the
-                // skip path is always taken, preventing vtable calls through
-                // uninitialized struct with sentinel (-0xf0) vtable pointer.
+                // RVA 0x5a84c: `je 0x5a8d5` (0f 84 83 00 00 00) — skip path for
+                // NULL work item.  The skip target 0x5a8d5 also crashes (tries to
+                // load [r14] which is NULL).  Jump to function exit at 0x5a967.
+                // Patch: `jmp 0x5a967` (e9 16 01 00 00) + nop pad.
                 (
                     0x5a84c,
                     &[0x0f, 0x84, 0x83, 0x00, 0x00, 0x00],
-                    &[0xe9, 0x83, 0x00, 0x00, 0x00, 0x90],
+                    &[0xe9, 0x16, 0x01, 0x00, 0x00, 0x90],
                 ),
                 // RVA 0x4ca18: worker thread entry point.  Replace prologue
                 // `mov rax, rsp` (48 8b c4) with `ret; nop; nop` (c3 90 90)
