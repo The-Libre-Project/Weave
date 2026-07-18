@@ -8560,8 +8560,9 @@ pub unsafe extern "win64" fn wake_all_condition_variable(condition_variable: *mu
 
 const THREAD_DIAGNOSTIC_LIMIT: usize = 64;
 static THREAD_DIAGNOSTIC_COUNT: AtomicUsize = AtomicUsize::new(0);
-static THREAD_DIAGNOSTIC_RECORDS: OnceLock<Mutex<HashMap<usize, (usize, usize, u32)>>> =
-    OnceLock::new();
+type ThreadDiagnosticRecord = (usize, usize, u32);
+type ThreadDiagnosticRecords = HashMap<usize, ThreadDiagnosticRecord>;
+static THREAD_DIAGNOSTIC_RECORDS: OnceLock<Mutex<ThreadDiagnosticRecords>> = OnceLock::new();
 
 fn log_thread_diagnostic(message: std::fmt::Arguments<'_>) {
     if THREAD_DIAGNOSTIC_COUNT.fetch_add(1, Ordering::Relaxed) < THREAD_DIAGNOSTIC_LIMIT {
