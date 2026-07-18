@@ -8558,6 +8558,17 @@ pub unsafe extern "win64" fn wake_all_condition_variable(condition_variable: *mu
 
 // ── Threads ───────────────────────────────────────────────────────────────────
 
+const THREAD_DIAGNOSTIC_LIMIT: usize = 64;
+static THREAD_DIAGNOSTIC_COUNT: AtomicUsize = AtomicUsize::new(0);
+static THREAD_DIAGNOSTIC_RECORDS: OnceLock<Mutex<HashMap<usize, (usize, usize, u32)>>> =
+    OnceLock::new();
+
+fn log_thread_diagnostic(message: std::fmt::Arguments<'_>) {
+    if THREAD_DIAGNOSTIC_COUNT.fetch_add(1, Ordering::Relaxed) < THREAD_DIAGNOSTIC_LIMIT {
+        eprintln!("weave/thread-diag: {message}");
+    }
+}
+
 /// CreateThread — spawn the thread function on a real OS thread, return a real handle.
 ///
 /// Wine ref: dlls/kernel32/thread.c — CreateThread wraps NtCreateThread; the thread
@@ -8640,6 +8651,16 @@ pub unsafe extern "win64" fn create_thread(
     });
 
     let handle = handles::alloc_thread(completion, start_gate, join_handle);
+    THREAD_DIAGNOSTIC_RECORDS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap()
+        .insert(handle, (fn_addr, param_addr, dw_creation_flags));
+    log_thread_diagnostic(format_args!(
+        "create handle={handle:#x} fn={fn_addr:#x} param={param_addr:#x} \
+         flags={dw_creation_flags:#x} suspended={}",
+        dw_creation_flags & 0x4 != 0
+    ));
     eprintln!("weave/CreateThread: → handle={handle:#x} fn={fn_addr:#x}");
 
     if !lp_thread_id.is_null() {
@@ -8694,9 +8715,26 @@ pub extern "win64" fn suspend_thread(_h_thread: usize) -> u32 {
 // Wine ref: dlls/kernelbase/thread.c:455 — returns the previous suspend count,
 // or DWORD(-1) when NtResumeThread rejects the handle.
 pub extern "win64" fn resume_thread(h_thread: usize) -> u32 {
-    handles::get_thread_start_gate(h_thread)
+    let previous = handles::get_thread_start_gate(h_thread)
         .map(|gate| gate.resume())
-        .unwrap_or(u32::MAX)
+        .unwrap_or(u32::MAX);
+    let record = THREAD_DIAGNOSTIC_RECORDS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap()
+        .get(&h_thread)
+        .copied();
+    match record {
+        Some((fn_addr, param_addr, flags)) => log_thread_diagnostic(format_args!(
+            "resume handle={h_thread:#x} fn={fn_addr:#x} param={param_addr:#x} \
+             flags={flags:#x} previous_count={previous} result={previous}"
+        )),
+        None => log_thread_diagnostic(format_args!(
+            "resume handle={h_thread:#x} fn=<unknown> param=<unknown> \
+             previous_count={previous} result={previous}"
+        )),
+    }
+    previous
 }
 
 // ── Process ───────────────────────────────────────────────────────────────────
