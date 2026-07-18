@@ -8573,13 +8573,14 @@ pub unsafe extern "win64" fn wake_all_condition_variable(condition_variable: *mu
 /// `lp_parameter` is forwarded to that function and must be valid for the thread's lifetime.
 // Wine ref: dlls/kernelbase/thread.c — CreateThread wraps CreateRemoteThread(GetCurrentProcess(),
 // ...) → NtCreateThread. Thread function called with lpParameter; returns DWORD exit code.
-// CREATE_SUSPENDED flag (0x4) defers start until ResumeThread; Weave ignores it.
+// Wine ref: dlls/kernelbase/thread.c — a CREATE_SUSPENDED thread remains paused
+// until ResumeThread decrements its initial suspend count.
 pub unsafe extern "win64" fn create_thread(
     _lp_thread_attributes: *const u8,
     _dw_stack_size: usize,
     lp_start_address: *const u8,
     lp_parameter: *mut u8,
-    _dw_creation_flags: u32,
+    dw_creation_flags: u32,
     lp_thread_id: *mut u32,
 ) -> usize {
     if lp_start_address.is_null() {
@@ -8598,12 +8599,15 @@ pub unsafe extern "win64" fn create_thread(
         condvar: std::sync::Condvar::new(),
     });
     let completion_clone = Arc::clone(&completion);
+    let start_gate = Arc::new(handles::ThreadStartGate::new(dw_creation_flags & 0x4 != 0));
+    let thread_start_gate = Arc::clone(&start_gate);
 
     // SAFETY: `fn_addr` is a Win64-ABI function pointer in the mapped PE image.
     // The PE image stays mapped for the process lifetime, so the pointer is valid
     // for the duration of the spawned thread.  `param_addr` is forwarded as the
     // sole RCX argument, matching LPTHREAD_START_ROUTINE exactly on x86-64.
     let join_handle = std::thread::spawn(move || {
+        thread_start_gate.wait_until_resumed();
         // Set up a TEB for this thread and point GS at it.  PE code accesses
         // TEB fields via GS-relative loads (gs:[0x10], gs:[0x58], etc.).  Without
         // this, GS points to the pthread TCB and any gs:[offset] read returns
@@ -8635,7 +8639,7 @@ pub unsafe extern "win64" fn create_thread(
         completion_clone.condvar.notify_all();
     });
 
-    let handle = handles::alloc_thread(completion, join_handle);
+    let handle = handles::alloc_thread(completion, start_gate, join_handle);
     eprintln!("weave/CreateThread: → handle={handle:#x} fn={fn_addr:#x}");
 
     if !lp_thread_id.is_null() {
@@ -8686,16 +8690,13 @@ pub extern "win64" fn suspend_thread(_h_thread: usize) -> u32 {
     warn_once("SuspendThread");
     u32::MAX // failure
 }
-/// ResumeThread — returns 1 (previous suspend count was 1, now running).
-///
-/// Weave ignores CREATE_SUSPENDED (thread starts immediately), so by the time a
-/// caller calls ResumeThread the thread is already running. Returning 1 satisfies
-/// the common `if (ResumeThread(h) == (DWORD)-1)` failure-check pattern.
-// Wine ref: dlls/kernelbase/thread.c — calls NtResumeThread; returns previous suspend count
-// (1 = was suspended, now resumed) or ~0U on failure. Weave: thread was never truly
-// suspended (flag ignored in create_thread), so 1 is the correct "was suspended" reply.
-pub extern "win64" fn resume_thread(_h_thread: usize) -> u32 {
-    1 // previous suspend count — was 1 (suspended), now 0 (running)
+/// ResumeThread — decrement a thread's start-suspend count.
+// Wine ref: dlls/kernelbase/thread.c:455 — returns the previous suspend count,
+// or DWORD(-1) when NtResumeThread rejects the handle.
+pub extern "win64" fn resume_thread(h_thread: usize) -> u32 {
+    handles::get_thread_start_gate(h_thread)
+        .map(|gate| gate.resume())
+        .unwrap_or(u32::MAX)
 }
 
 // ── Process ───────────────────────────────────────────────────────────────────
@@ -22525,6 +22526,53 @@ mod tests {
     }
 
     // ── 32-bit-clean VirtualAlloc (E3-M5b-a) ──────────────────────────────────
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    static SUSPENDED_THREAD_STARTS: std::sync::atomic::AtomicU32 =
+        std::sync::atomic::AtomicU32::new(0);
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    unsafe extern "win64" fn suspended_thread_probe(_parameter: *mut u8) -> u32 {
+        SUSPENDED_THREAD_STARTS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        0
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[test]
+    fn create_suspended_thread_waits_for_resume() {
+        SUSPENDED_THREAD_STARTS.store(0, std::sync::atomic::Ordering::SeqCst);
+        let handle = unsafe {
+            create_thread(
+                std::ptr::null(),
+                0,
+                suspended_thread_probe as *const u8,
+                std::ptr::null_mut(),
+                0x4,
+                std::ptr::null_mut(),
+            )
+        };
+        assert_ne!(handle, 0);
+
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        assert_eq!(
+            SUSPENDED_THREAD_STARTS.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "CREATE_SUSPENDED must defer the thread start routine"
+        );
+        assert_eq!(resume_thread(handle), 1);
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        while SUSPENDED_THREAD_STARTS.load(std::sync::atomic::Ordering::SeqCst) == 0
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert_eq!(
+            SUSPENDED_THREAD_STARTS.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "ResumeThread must release the deferred start routine"
+        );
+    }
+
     #[cfg(target_arch = "x86_64")]
     #[test]
     fn virtual_alloc_null_base_returns_32bit_clean_address() {

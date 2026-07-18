@@ -27,6 +27,42 @@ pub struct ThreadCompletion {
     pub condvar: Condvar,
 }
 
+/// Start gate shared by a newly-created thread and its Win32 thread handle.
+#[derive(Debug)]
+pub struct ThreadStartGate {
+    suspend_count: Mutex<u32>,
+    condvar: Condvar,
+}
+
+impl ThreadStartGate {
+    pub fn new(suspended: bool) -> Self {
+        Self {
+            suspend_count: Mutex::new(u32::from(suspended)),
+            condvar: Condvar::new(),
+        }
+    }
+
+    pub fn wait_until_resumed(&self) {
+        let mut count = self.suspend_count.lock().unwrap();
+        while *count != 0 {
+            count = self.condvar.wait(count).unwrap();
+        }
+    }
+
+    /// Decrement the start-suspend count and return its prior value.
+    pub fn resume(&self) -> u32 {
+        let mut count = self.suspend_count.lock().unwrap();
+        let previous = *count;
+        if previous != 0 {
+            *count -= 1;
+            if *count == 0 {
+                self.condvar.notify_all();
+            }
+        }
+        previous
+    }
+}
+
 impl std::fmt::Debug for ThreadCompletion {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let r = self.result.lock().ok().and_then(|g| *g);
@@ -47,6 +83,7 @@ pub enum HandleKind {
     /// (on CloseHandle) detaches the thread gracefully.
     Thread {
         completion: Arc<ThreadCompletion>,
+        start_gate: Arc<ThreadStartGate>,
         join_handle: Mutex<Option<std::thread::JoinHandle<()>>>,
     },
     /// A Win32 event object backed by a Linux eventfd (on Linux target).
@@ -206,10 +243,12 @@ pub fn get_registry_path(handle: usize) -> Option<std::path::PathBuf> {
 /// the JoinHandle so they are owned by the handle table.
 pub fn alloc_thread(
     completion: Arc<ThreadCompletion>,
+    start_gate: Arc<ThreadStartGate>,
     join_handle: std::thread::JoinHandle<()>,
 ) -> usize {
     alloc(HandleKind::Thread {
         completion,
+        start_gate,
         join_handle: Mutex::new(Some(join_handle)),
     })
 }
@@ -221,6 +260,16 @@ pub fn get_thread_completion(handle: usize) -> Option<Arc<ThreadCompletion>> {
     let index = handle.checked_sub(HANDLE_OFFSET)?;
     match guard.slots.get(index)?.as_ref()? {
         HandleKind::Thread { completion, .. } => Some(Arc::clone(completion)),
+        _ => None,
+    }
+}
+
+/// Return the start gate for a thread handle.
+pub fn get_thread_start_gate(handle: usize) -> Option<Arc<ThreadStartGate>> {
+    let guard = lock_table(table())?;
+    let index = handle.checked_sub(HANDLE_OFFSET)?;
+    match guard.slots.get(index)?.as_ref()? {
+        HandleKind::Thread { start_gate, .. } => Some(Arc::clone(start_gate)),
         _ => None,
     }
 }

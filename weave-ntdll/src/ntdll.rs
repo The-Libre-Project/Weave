@@ -1083,8 +1083,11 @@ pub unsafe extern "win64" fn nt_create_thread_ex(
         condvar: std::sync::Condvar::new(),
     });
     let completion_clone = Arc::clone(&completion);
+    let start_gate = Arc::new(handles::ThreadStartGate::new(false));
+    let thread_start_gate = Arc::clone(&start_gate);
 
     let join_handle = std::thread::spawn(move || {
+        thread_start_gate.wait_until_resumed();
         let _teb = weave_core::teb::setup_thread();
         let my_tid = unsafe { libc::syscall(libc::SYS_gettid) as u32 };
         eprintln!("weave/NtCreateThreadEx: thread-start tid={my_tid} fn={fn_addr:#x}");
@@ -1099,7 +1102,7 @@ pub unsafe extern "win64" fn nt_create_thread_ex(
         completion_clone.condvar.notify_all();
     });
 
-    let handle = handles::alloc_thread(completion, join_handle);
+    let handle = handles::alloc_thread(completion, start_gate, join_handle);
     eprintln!("weave/NtCreateThreadEx: handle={handle:#x}");
     unsafe {
         *thread_handle = handle;
@@ -1111,8 +1114,7 @@ pub unsafe extern "win64" fn nt_create_thread_ex(
 
 /// NtResumeThread: resume a previously-suspended thread.
 ///
-/// Phase B — returns STATUS_SUCCESS with previous suspend count = 1.
-/// Threads are created running, so "previous suspend count" is always 1.
+/// Return the previous suspend count and release a thread when it reaches zero.
 ///
 /// # Safety
 /// Caller must ensure `suspend_count` is null or a valid writable pointer.
@@ -1122,13 +1124,14 @@ pub unsafe extern "win64" fn nt_resume_thread(
     thread_handle: usize,
     suspend_count: *mut u32,
 ) -> i32 {
-    if handles::get_thread_completion(thread_handle).is_none() {
+    let Some(start_gate) = handles::get_thread_start_gate(thread_handle) else {
         return STATUS_INVALID_HANDLE;
-    }
+    };
+    let previous = start_gate.resume();
     if !suspend_count.is_null() {
-        unsafe { *suspend_count = 1 };
+        unsafe { *suspend_count = previous };
     }
-    eprintln!("weave/NtResumeThread: handle={thread_handle:#x} prev_count=1");
+    eprintln!("weave/NtResumeThread: handle={thread_handle:#x} prev_count={previous}");
     STATUS_SUCCESS
 }
 

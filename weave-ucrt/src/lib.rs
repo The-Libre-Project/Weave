@@ -1906,9 +1906,8 @@ pub unsafe extern "win64" fn ucrt_assert(_expr: *const u8, _file: *const u8, _li
 /// trampoline; trampoline calls start_address_ex(arglist) then _endthreadex(retval).
 /// On x86-64 the start routine is `unsigned int (__stdcall *)(void *)` which is
 /// identical to `extern "win64" fn(*mut u8) -> u32`.  Returns 0 on failure,
-/// the thread handle (uintptr_t) on success.  _flags / initflag is forwarded to
-/// CreateThread (CREATE_SUSPENDED=0x4 defers start); Weave ignores it as
-/// kernel32::create_thread does.
+/// the thread handle (uintptr_t) on success. `_flags` honors
+/// CREATE_SUSPENDED (0x4), matching CreateThread.
 ///
 /// # Safety
 /// `start` must be a valid `extern "win64"` function pointer for the duration
@@ -1920,7 +1919,7 @@ pub unsafe extern "win64" fn ucrt_beginthreadex(
     _stack_size: u32,
     start: *const c_void,
     arg: *const c_void,
-    _flags: u32,
+    flags: u32,
     thread_id: *mut u32,
 ) -> usize {
     if start.is_null() {
@@ -1937,6 +1936,9 @@ pub unsafe extern "win64" fn ucrt_beginthreadex(
         condvar: std::sync::Condvar::new(),
     });
     let completion_clone = std::sync::Arc::clone(&completion);
+    let start_gate =
+        std::sync::Arc::new(weave_core::handles::ThreadStartGate::new(flags & 0x4 != 0));
+    let thread_start_gate = std::sync::Arc::clone(&start_gate);
 
     // SAFETY: `fn_addr` is a Win64-ABI function pointer in the mapped PE image.
     // The PE image stays mapped for the process lifetime, so the pointer is valid
@@ -1944,6 +1946,7 @@ pub unsafe extern "win64" fn ucrt_beginthreadex(
     // sole RCX argument, matching the _beginthreadex start-routine signature
     // `unsigned int (__stdcall *)(void *)` on x86-64.
     let join_handle = std::thread::spawn(move || {
+        thread_start_gate.wait_until_resumed();
         let fn_ptr: unsafe extern "win64" fn(*mut u8) -> u32 =
             unsafe { std::mem::transmute(fn_addr as *const u8) };
         let ret = unsafe { fn_ptr(param_addr as *mut u8) };
@@ -1953,7 +1956,7 @@ pub unsafe extern "win64" fn ucrt_beginthreadex(
         completion_clone.condvar.notify_all();
     });
 
-    let handle = weave_core::handles::alloc_thread(completion, join_handle);
+    let handle = weave_core::handles::alloc_thread(completion, start_gate, join_handle);
 
     if !thread_id.is_null() {
         unsafe { *thread_id = 1 };
