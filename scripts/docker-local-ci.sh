@@ -29,7 +29,7 @@ echo ""
 
 # ── Run CI suite inside Docker ───────────────────────────────────────────────
 # Use the same pattern as `make test` but with build + lint steps too.
-DOCKER_CMD="docker run --rm --platform linux/amd64 \
+DOCKER_CMD="MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' docker run --rm --platform linux/amd64 \
   --security-opt seccomp=unconfined \
   -v \"$ROOT:/weave\" \
   -w /weave \
