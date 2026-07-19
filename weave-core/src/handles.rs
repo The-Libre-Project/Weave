@@ -72,6 +72,10 @@ impl DirectoryWatchState {
         self.watcher_fd = Some(fd);
         true
     }
+
+    pub fn watcher_fd(&self) -> Option<i32> {
+        self.watcher_fd
+    }
 }
 
 impl Drop for DirectoryWatchState {
@@ -287,6 +291,19 @@ impl HandleTable {
         }
     }
 
+    fn directory_watcher_fds(&self) -> Vec<(usize, i32)> {
+        self.slots
+            .iter()
+            .enumerate()
+            .filter_map(|(index, slot)| match slot.as_ref()? {
+                HandleKind::Directory { watch, .. } => {
+                    watch.watcher_fd().map(|fd| (index + HANDLE_OFFSET, fd))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Return the eventfd for an Event handle, or `None` if not an Event.
     fn get_event_fd(&self, handle: usize) -> Option<i32> {
         let index = handle.checked_sub(HANDLE_OFFSET)?;
@@ -381,6 +398,13 @@ pub fn set_directory_watcher_fd(handle: usize, fd: i32) -> bool {
     lock_table(table())
         .map(|mut guard| guard.set_directory_watcher_fd(handle, fd))
         .unwrap_or(false)
+}
+
+/// Return registered directory watcher descriptors for the wait integration.
+pub fn directory_watcher_fds() -> Vec<(usize, i32)> {
+    lock_table(table())
+        .map(|guard| guard.directory_watcher_fds())
+        .unwrap_or_default()
 }
 
 /// Allocate a new Event handle backed by the given eventfd fd.

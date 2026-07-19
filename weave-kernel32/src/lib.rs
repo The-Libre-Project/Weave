@@ -3879,27 +3879,82 @@ pub unsafe extern "win64" fn get_application_restart_settings(
 
 /// ReadDirectoryChangesW — watch a directory for changes.
 ///
-/// Wine ref: dlls/kernel32/change.c — issues NtNotifyChangeDirectoryFile.
-/// Weave stub: returns FALSE (not supported). NPP uses this for live file
-/// change detection; failing here disables that feature gracefully.
+/// Wine ref: dlls/kernelbase/file.c:3576 — writes STATUS_PENDING into the
+/// caller's OVERLAPPED before issuing NtNotifyChangeDirectoryFile and returns
+/// TRUE immediately for the overlapped path.
 ///
 /// # Safety
-/// All pointer args are ignored.
-// Wine ref: dlls/kernelbase/file.c — ReadDirectoryChangesW: issues NtNotifyChangeDirectoryFile.
-// No overlapped → creates a temporary event, waits synchronously, then CloseHandle(event).
-// overlapped → STATUS_PENDING returns TRUE immediately (async path).
+/// `lp_buffer` and `lp_overlapped` must reference caller-owned writable memory.
+// Wine ref: dlls/kernelbase/file.c:3576 — completion callbacks receive the
+// Win32 error, byte count, and the original OVERLAPPED identity.
 pub unsafe extern "win64" fn read_directory_changes_w(
-    _h_directory: usize,
-    _lp_buffer: *mut u8,
-    _n_buffer_length: u32,
+    h_directory: usize,
+    lp_buffer: *mut u8,
+    n_buffer_length: u32,
     _b_watch_subtree: i32,
-    _dw_notify_filter: u32,
+    dw_notify_filter: u32,
     _lp_bytes_returned: *mut u32,
-    _lp_overlapped: *mut u8,
-    _lp_completion_routine: usize,
+    lp_overlapped: *mut u8,
+    lp_completion_routine: usize,
 ) -> i32 {
-    set_last_error(120); // ERROR_CALL_NOT_IMPLEMENTED
-    0 // FALSE
+    if n_buffer_length == 0 || validators::validate_lpvoid(lp_buffer as usize).is_none() {
+        set_last_error(87); // ERROR_INVALID_PARAMETER
+        return 0;
+    }
+    let Some(overlapped) = validators::validate_lpoverlapped(
+        lp_overlapped as usize,
+        std::mem::size_of::<[usize; 4]>() as u32,
+    ) else {
+        set_last_error(87); // ERROR_INVALID_PARAMETER
+        return 0;
+    };
+    if lp_completion_routine != 0
+        && validators::validate_lpoverlapped_completion_routine(lp_completion_routine).is_none()
+    {
+        set_last_error(87); // ERROR_INVALID_PARAMETER
+        return 0;
+    }
+    let Some(path) = weave_core::handles::get_directory_path(h_directory) else {
+        set_last_error(file_io::ERROR_INVALID_HANDLE);
+        return 0;
+    };
+
+    #[cfg(target_os = "linux")]
+    if weave_core::handles::directory_watcher_fds()
+        .iter()
+        .all(|(handle, _)| *handle != h_directory)
+    {
+        if let Err(error) = register_directory_inotify(h_directory, &path) {
+            set_last_error(error);
+            return 0;
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = path;
+        let _ = dw_notify_filter;
+        set_last_error(120); // ERROR_CALL_NOT_IMPLEMENTED
+        return 0;
+    }
+
+    let operation = weave_core::handles::PendingDirectoryOperation {
+        buffer: lp_buffer as usize,
+        buffer_len: n_buffer_length,
+        overlapped: overlapped as usize,
+        completion_routine: lp_completion_routine,
+    };
+    if !weave_core::handles::set_pending_directory_watch(h_directory, operation) {
+        set_last_error(87); // ERROR_INVALID_PARAMETER or duplicate request
+        return 0;
+    }
+
+    // SAFETY: `overlapped` was validated as a non-null, aligned 32-byte guest
+    // OVERLAPPED allocation above. Only the documented Internal field is set;
+    // the operation retains the address without reading guest memory.
+    unsafe { std::ptr::write_volatile(overlapped as *mut usize, 0x103) }; // STATUS_PENDING
+    let _ = dw_notify_filter;
+    set_last_error(997); // ERROR_IO_PENDING
+    1 // TRUE
 }
 
 /// SetEndOfFile: truncate or extend file at current position.
@@ -7325,6 +7380,34 @@ pub unsafe extern "win64" fn set_priority_class(_h_process: usize, dw_priority_c
 }
 
 // ── Change notifications ──────────────────────────────────────────────────────
+
+#[cfg(target_os = "linux")]
+fn register_directory_inotify(handle: usize, path: &std::path::Path) -> Result<(), u32> {
+    let path = weave_core::file_io::path_to_cstring(path).ok_or(87u32)?;
+    let fd = unsafe { libc::inotify_init1(libc::IN_NONBLOCK | libc::IN_CLOEXEC) };
+    if fd < 0 {
+        return Err(8); // ERROR_NOT_ENOUGH_MEMORY
+    }
+    let mask = libc::IN_CREATE
+        | libc::IN_DELETE
+        | libc::IN_MOVED_FROM
+        | libc::IN_MOVED_TO
+        | libc::IN_CLOSE_WRITE
+        | libc::IN_MODIFY;
+    let watch = unsafe { libc::inotify_add_watch(fd, path.as_ptr(), mask) };
+    if watch < 0 {
+        // SAFETY: fd was returned by inotify_init1 and remains owned here.
+        unsafe { libc::close(fd) };
+        return Err(3); // ERROR_PATH_NOT_FOUND
+    }
+    if !weave_core::handles::set_directory_watcher_fd(handle, fd) {
+        // SAFETY: fd was not adopted by the handle table because registration
+        // failed, so this path owns and closes it exactly once.
+        unsafe { libc::close(fd) };
+        return Err(87); // ERROR_INVALID_PARAMETER
+    }
+    Ok(())
+}
 
 /// FindFirstChangeNotificationW — watch a directory for changes.
 ///
@@ -21214,6 +21297,46 @@ mod ini;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn read_directory_changes_registers_pending_watch() {
+        let root =
+            std::env::temp_dir().join(format!("weave-overlapped-watch-{}", std::process::id()));
+        std::fs::create_dir_all(&root).expect("create watch fixture");
+        let root_name = root.to_string_lossy().into_owned();
+        let directory = file_io::open_file(&root_name, file_io::GENERIC_READ, file_io::FILE_OPEN)
+            .expect("open directory fixture");
+
+        let mut buffer = [0u8; 256];
+        let mut overlapped = [0usize; 4];
+        let result = unsafe {
+            read_directory_changes_w(
+                directory,
+                buffer.as_mut_ptr(),
+                buffer.len() as u32,
+                0,
+                0x0000_0001,
+                std::ptr::null_mut(),
+                overlapped.as_mut_ptr() as *mut u8,
+                0x8000,
+            )
+        };
+        assert_eq!(result, 1);
+        assert_eq!(get_last_error(), 997); // ERROR_IO_PENDING
+        assert_eq!(overlapped[0], 0x103); // STATUS_PENDING
+        assert_eq!(
+            weave_core::handles::pending_directory_watch(directory)
+                .expect("pending operation")
+                .overlapped,
+            overlapped.as_mut_ptr() as usize
+        );
+        assert!(weave_core::handles::directory_watcher_fds()
+            .iter()
+            .any(|(handle, _)| *handle == directory));
+        assert_eq!(close_handle(directory), 1);
+        let _ = std::fs::remove_dir(&root);
+    }
 
     // ── win_prot_to_linux ─────────────────────────────────────────────────────
 
