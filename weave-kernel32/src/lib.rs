@@ -9839,7 +9839,11 @@ unsafe fn wait_for_multiple_objects_impl(
 
     eprintln!("weave/WFMO: n={n_count} timeout={dw_milliseconds}ms alertable={alertable}");
 
-    if lp_handles.is_null() || n_count == 0 {
+    // The focused directory-watch contract uses an alertable zero-handle wait
+    // as the guest thread's polling boundary: directory watcher fds and the
+    // APC wake fd are added below even when the guest supplied no handles.
+    // Preserve the Win32 failure shape for non-alertable empty waits.
+    if (lp_handles.is_null() && n_count != 0) || (n_count == 0 && !alertable) {
         eprintln!("weave/WFMO: → WAIT_FAILED (null/empty)");
         return WAIT_FAILED;
     }
@@ -9860,7 +9864,8 @@ unsafe fn wait_for_multiple_objects_impl(
 
     for i in 0..n_count as usize {
         // SAFETY: the public contract requires lp_handles to reference n_count
-        // readable handle values; the null/empty case was rejected above.
+        // readable handle values; the null/empty case was rejected above, and
+        // this loop is skipped when the allowed alertable count is zero.
         let handle = unsafe { *lp_handles.add(i) };
         eprintln!("weave/WFMO: handle[{i}]={handle:#x}");
 

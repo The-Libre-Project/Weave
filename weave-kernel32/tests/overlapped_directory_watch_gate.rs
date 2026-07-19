@@ -31,6 +31,12 @@ fn wide(s: &str) -> Vec<u16> {
 fn overlapped_directory_watch_registers_completes_and_cancels() {
     reset_callback();
 
+    // Model the guest thread that owns the alertable completion routine. The
+    // public guest path registers this state during CreateThread; this direct
+    // contract gate must establish the same APC queue before issuing the watch.
+    let apc_state = weave_core::apc::ThreadApcState::new();
+    weave_core::apc::register_current_thread(apc_state);
+
     // ── 1. Create a temp directory ──────────────────────────────────────────
     let root = std::env::temp_dir().join(format!("weave-watch-gate-{}", std::process::id()));
     std::fs::create_dir_all(&root).expect("create watch fixture dir");
