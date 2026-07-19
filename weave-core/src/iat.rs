@@ -40,12 +40,27 @@ use std::sync::{Mutex, OnceLock};
 extern "win64" fn trace_slot_log_by_va(
     slot_va: usize,
     ret_addr: usize,
-    caller_ret_addr: usize,
+    _caller_ret_addr: usize,
 ) -> usize {
     if let Ok(map) = resolved_slot_map().lock() {
         if let Some((name, real_fn)) = map.get(&slot_va) {
+            let (dll, func) = name.split_once("::").unwrap_or((name, ""));
+
+            // Push to the weave-trace ring buffer (enabled via --trace / WEAVE_TRACE)
+            weave_trace::emit(weave_trace::TraceEvent {
+                timestamp: std::time::Instant::now(),
+                thread_id: weave_trace::current_thread_id(),
+                kind: weave_trace::EventKind::ApiCall {
+                    dll: dll.to_string(),
+                    function: func.to_string(),
+                    args: vec![],
+                    result: weave_trace::ApiResult::Value(*real_fn as u64),
+                    duration: std::time::Duration::ZERO,
+                },
+            });
+
+            // Legacy: stub-trace JSONL output (--trace-stubs flag)
             if stub_trace_enabled() {
-                let (dll, func) = name.split_once("::").unwrap_or((name, ""));
                 let phase = if is_stub(dll, func) { "A" } else { "B" };
                 if let Ok(mut writer) = trace_writer().lock() {
                     let _ = writeln!(
@@ -54,13 +69,8 @@ extern "win64" fn trace_slot_log_by_va(
                         dll, func, phase, slot_va, ret_addr
                     );
                 }
-            } else {
-                let (dll, func) = name.split_once("::").unwrap_or((name, ""));
-                let phase = if is_stub(dll, func) { "A" } else { "B" };
-                eprintln!(
-                    "weave/iat-trace: [{phase}] {name} ret={ret_addr:#x} ret1={caller_ret_addr:#x}"
-                );
             }
+
             return *real_fn;
         }
     }
@@ -717,7 +727,18 @@ fn trace_import_stub_log_impl(ret_addr: usize, rax_at_call: usize) -> usize {
     });
     match entry {
         Some((name, real_fn)) => {
-            eprintln!("weave/iat-trace: {name} ret={ret_addr:#x}");
+            let (dll, func) = name.split_once("::").unwrap_or((name.as_str(), ""));
+            weave_trace::emit(weave_trace::TraceEvent {
+                timestamp: std::time::Instant::now(),
+                thread_id: weave_trace::current_thread_id(),
+                kind: weave_trace::EventKind::ApiCall {
+                    dll: dll.to_string(),
+                    function: func.to_string(),
+                    args: vec![],
+                    result: weave_trace::ApiResult::Value(real_fn as u64),
+                    duration: std::time::Duration::ZERO,
+                },
+            });
             real_fn
         }
         None => {

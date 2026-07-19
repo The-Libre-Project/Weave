@@ -1586,6 +1586,7 @@ dependencies = [
  "libc",
  "tempfile",
  "weave-common",
+ "weave-trace",
 ]
 
 [[package]]
