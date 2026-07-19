@@ -19,13 +19,25 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
 /// Caller-owned state retained from an overlapped directory-watch request.
 /// Guest addresses are stored as integers so cleanup never dereferences guest
 /// memory after cancellation or handle close.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub struct PendingDirectoryOperation {
     pub buffer: usize,
     pub buffer_len: u32,
     pub overlapped: usize,
     pub completion_routine: usize,
+    pub apc: Option<Arc<crate::apc::ThreadApcState>>,
 }
+
+impl PartialEq for PendingDirectoryOperation {
+    fn eq(&self, other: &Self) -> bool {
+        self.buffer == other.buffer
+            && self.buffer_len == other.buffer_len
+            && self.overlapped == other.overlapped
+            && self.completion_routine == other.completion_routine
+    }
+}
+
+impl Eq for PendingDirectoryOperation {}
 
 /// Lifetime-owned state for a directory handle's future watcher.
 #[derive(Debug)]
@@ -49,7 +61,7 @@ impl DirectoryWatchState {
     }
 
     pub fn pending(&self) -> Option<PendingDirectoryOperation> {
-        self.pending
+        self.pending.clone()
     }
 
     pub fn set_pending(&mut self, operation: PendingDirectoryOperation) -> bool {
@@ -280,6 +292,24 @@ impl HandleTable {
         }
     }
 
+    fn cancel_pending_directory_watch(
+        &mut self,
+        handle: usize,
+        overlapped: usize,
+    ) -> Option<PendingDirectoryOperation> {
+        let operation = self.take_pending_directory_watch(handle)?;
+        if overlapped != 0 && operation.overlapped != overlapped {
+            let index = handle.checked_sub(HANDLE_OFFSET)?;
+            if let Some(HandleKind::Directory { watch, .. }) =
+                self.slots.get_mut(index).and_then(Option::as_mut)
+            {
+                let _ = watch.set_pending(operation);
+            }
+            return None;
+        }
+        Some(operation)
+    }
+
     fn set_directory_watcher_fd(&mut self, handle: usize, fd: i32) -> bool {
         let index = match handle.checked_sub(HANDLE_OFFSET) {
             Some(index) => index,
@@ -391,6 +421,14 @@ pub fn pending_directory_watch(handle: usize) -> Option<PendingDirectoryOperatio
 /// Remove a pending operation by handle. Dropping the handle also removes it.
 pub fn take_pending_directory_watch(handle: usize) -> Option<PendingDirectoryOperation> {
     lock_table(table())?.take_pending_directory_watch(handle)
+}
+
+/// Remove the matching pending operation without touching guest memory.
+pub fn cancel_pending_directory_watch(
+    handle: usize,
+    overlapped: usize,
+) -> Option<PendingDirectoryOperation> {
+    lock_table(table())?.cancel_pending_directory_watch(handle, overlapped)
 }
 
 /// Transfer ownership of an inotify descriptor to a directory handle.
@@ -560,9 +598,10 @@ mod tests {
             buffer_len: 128,
             overlapped: 0x2000,
             completion_routine: 0x3000,
+            apc: None,
         };
-        assert!(t.set_pending_directory_watch(h, operation));
-        assert_eq!(t.pending_directory_watch(h), Some(operation));
+        assert!(t.set_pending_directory_watch(h, operation.clone()));
+        assert_eq!(t.pending_directory_watch(h), Some(operation.clone()));
         assert!(!t.set_pending_directory_watch(h, operation));
     }
 
@@ -581,6 +620,7 @@ mod tests {
                 buffer_len: u32::MAX,
                 overlapped: usize::MAX,
                 completion_routine: usize::MAX,
+                apc: None,
             },
         ));
         assert!(t.free(h));

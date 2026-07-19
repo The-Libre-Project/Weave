@@ -3207,6 +3207,8 @@ pub unsafe extern "win64" fn write_file(
 /// CloseHandle on a thread does not wait for it to terminate.
 pub extern "win64" fn close_handle(h_object: usize) -> i32 {
     eprintln!("weave/CloseHandle: entry h={h_object:#x}");
+    #[cfg(target_os = "linux")]
+    let _ = cancel_directory_operation(h_object, 0);
     // Thread handles are not file descriptors; handle them before delegating
     // to file_io::close_handle which would fail on non-fd handles.
     if handles::free_if_thread(h_object) {
@@ -3942,6 +3944,7 @@ pub unsafe extern "win64" fn read_directory_changes_w(
         buffer_len: n_buffer_length,
         overlapped: overlapped as usize,
         completion_routine: lp_completion_routine,
+        apc: weave_core::apc::current_thread(),
     };
     if !weave_core::handles::set_pending_directory_watch(h_directory, operation) {
         set_last_error(87); // ERROR_INVALID_PARAMETER or duplicate request
@@ -3955,6 +3958,101 @@ pub unsafe extern "win64" fn read_directory_changes_w(
     let _ = dw_notify_filter;
     set_last_error(997); // ERROR_IO_PENDING
     1 // TRUE
+}
+
+#[cfg(target_os = "linux")]
+fn finish_directory_operation(
+    operation: weave_core::handles::PendingDirectoryOperation,
+    error: u32,
+    bytes: u32,
+) {
+    // SAFETY: The OVERLAPPED pointer was validated when the operation was
+    // registered and remains caller-owned until this completion is delivered.
+    unsafe {
+        let overlapped = operation.overlapped as *mut usize;
+        std::ptr::write_volatile(overlapped, if error == 0 { 0 } else { 0xC000_0120 });
+        std::ptr::write_volatile(overlapped.add(1), bytes as usize);
+    }
+    if operation.completion_routine != 0 {
+        if let Some(apc) = operation.apc {
+            apc.enqueue(weave_core::apc::ApcRecord::IoCompletion {
+                callback: operation.completion_routine,
+                error,
+                bytes,
+                overlapped: operation.overlapped,
+            });
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn complete_directory_watch(handle: usize, fd: i32) -> bool {
+    let mut raw = [0u8; 4096];
+    // SAFETY: raw is a valid writable buffer owned by this function and fd is
+    // owned by the directory handle's watcher state.
+    let count = unsafe { libc::read(fd, raw.as_mut_ptr() as *mut libc::c_void, raw.len()) };
+    if count <= 0 {
+        return false;
+    }
+    let Some(operation) = weave_core::handles::take_pending_directory_watch(handle) else {
+        return false;
+    };
+
+    let mut error = 0u32;
+    let mut bytes = 0u32;
+    if count < 16 {
+        error = 38; // ERROR_HANDLE_EOF
+    } else {
+        let event_mask = u32::from_ne_bytes([raw[4], raw[5], raw[6], raw[7]]);
+        let name_len = u32::from_ne_bytes([raw[12], raw[13], raw[14], raw[15]]) as usize;
+        let name_start = 16usize;
+        let name_end = name_start.saturating_add(name_len).min(count as usize);
+        let name = &raw[name_start..name_end];
+        let name = name.split(|byte| *byte == 0).next().unwrap_or(name);
+        let wide: Vec<u16> = String::from_utf8_lossy(name).encode_utf16().collect();
+        let record_len = 12usize.saturating_add(wide.len().saturating_mul(2));
+        if record_len > operation.buffer_len as usize {
+            error = 122; // ERROR_INSUFFICIENT_BUFFER
+        } else {
+            let action = if event_mask & libc::IN_CREATE != 0 {
+                1u32 // FILE_ACTION_ADDED
+            } else if event_mask & libc::IN_DELETE != 0 {
+                2u32 // FILE_ACTION_REMOVED
+            } else if event_mask & libc::IN_MOVED_FROM != 0 {
+                4u32 // FILE_ACTION_RENAMED_OLD_NAME
+            } else if event_mask & libc::IN_MOVED_TO != 0 {
+                5u32 // FILE_ACTION_RENAMED_NEW_NAME
+            } else {
+                3u32 // FILE_ACTION_MODIFIED
+            };
+            let destination = operation.buffer as *mut u8;
+            // SAFETY: The caller supplied a buffer of buffer_len bytes; the
+            // encoded record was bounded by that same length above.
+            unsafe {
+                std::ptr::write_unaligned(destination as *mut u32, 0);
+                std::ptr::write_unaligned(destination.add(4) as *mut u32, action);
+                std::ptr::write_unaligned(destination.add(8) as *mut u32, (wide.len() * 2) as u32);
+                std::ptr::copy_nonoverlapping(
+                    wide.as_ptr() as *const u8,
+                    destination.add(12),
+                    wide.len() * 2,
+                );
+            }
+            bytes = record_len as u32;
+        }
+    }
+    finish_directory_operation(operation, error, bytes);
+    true
+}
+
+#[cfg(target_os = "linux")]
+fn cancel_directory_operation(handle: usize, overlapped: usize) -> bool {
+    let Some(operation) = weave_core::handles::cancel_pending_directory_watch(handle, overlapped)
+    else {
+        return false;
+    };
+    finish_directory_operation(operation, 995, 0); // ERROR_OPERATION_ABORTED
+    true
 }
 
 /// SetEndOfFile: truncate or extend file at current position.
@@ -9835,6 +9933,14 @@ unsafe fn wait_for_multiple_objects_impl(
             });
             pollfd_to_handle_idx.push(usize::MAX);
         }
+        for (_, watcher_fd) in handles::directory_watcher_fds() {
+            pollfds.push(libc::pollfd {
+                fd: watcher_fd,
+                events: libc::POLLIN,
+                revents: 0,
+            });
+            pollfd_to_handle_idx.push(DIRECTORY_WATCH_SENTINEL);
+        }
     }
 
     // Poll all eventfd-backed handles together.
@@ -9871,6 +9977,16 @@ unsafe fn wait_for_multiple_objects_impl(
                             return WAIT_IO_COMPLETION;
                         }
                     }
+                    if hi == DIRECTORY_WATCH_SENTINEL {
+                        let _ = complete_directory_watch_for_fd(pfd.fd);
+                        if let Some(state) = weave_core::apc::current_thread() {
+                            if state.has_pending() {
+                                dispatch_current_apcs(&state);
+                                return WAIT_IO_COMPLETION;
+                            }
+                        }
+                        return WAIT_OBJECT_0;
+                    }
                     // SAFETY: hi is an index originating from the validated
                     // handle array; the APC sentinel returned above never falls through.
                     let handle = unsafe { *lp_handles.add(hi) };
@@ -9903,19 +10019,51 @@ unsafe fn wait_for_multiple_objects_impl(
 }
 
 const WAIT_IO_COMPLETION: u32 = 0x000000C0;
+const DIRECTORY_WATCH_SENTINEL: usize = usize::MAX - 1;
+
+#[cfg(target_os = "linux")]
+fn complete_directory_watch_for_fd(fd: i32) -> bool {
+    handles::directory_watcher_fds()
+        .into_iter()
+        .find(|(_, watcher_fd)| *watcher_fd == fd)
+        .is_some_and(|(handle, _)| complete_directory_watch(handle, fd))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn complete_directory_watch_for_fd(_fd: i32) -> bool {
+    false
+}
 
 fn dispatch_current_apcs(state: &weave_core::apc::ThreadApcState) {
     for record in state.drain() {
-        log_apc_diagnostic(format_args!(
-            "dispatch callback={:#x} data={:#x}",
-            record.callback, record.data
-        ));
-        // SAFETY: QueueUserAPC accepts a guest function pointer with the Win64
-        // callback ABI. The PE image remains mapped for the guest lifetime and
-        // the callback is invoked only on the registered guest thread.
-        let callback: unsafe extern "win64" fn(usize) =
-            unsafe { std::mem::transmute(record.callback) };
-        unsafe { callback(record.data) };
+        match record {
+            weave_core::apc::ApcRecord::User { callback, data } => {
+                log_apc_diagnostic(format_args!(
+                    "dispatch callback={callback:#x} data={data:#x}"
+                ));
+                // SAFETY: QueueUserAPC accepts a guest function pointer with the Win64
+                // callback ABI. The PE image remains mapped for the guest lifetime and
+                // the callback is invoked only on the registered guest thread.
+                let callback: unsafe extern "win64" fn(usize) =
+                    unsafe { std::mem::transmute(callback) };
+                unsafe { callback(data) };
+            }
+            weave_core::apc::ApcRecord::IoCompletion {
+                callback,
+                error,
+                bytes,
+                overlapped,
+            } => {
+                log_apc_diagnostic(format_args!(
+                    "dispatch io-completion callback={callback:#x} error={error} bytes={bytes} overlapped={overlapped:#x}"
+                ));
+                // SAFETY: ReadDirectoryChangesW validated the guest callback and
+                // retained it only for this one completion on the issuing thread.
+                let callback: unsafe extern "win64" fn(u32, u32, *mut u8) =
+                    unsafe { std::mem::transmute(callback) };
+                unsafe { callback(error, bytes, overlapped as *mut u8) };
+            }
+        }
     }
 }
 
@@ -14153,7 +14301,7 @@ pub unsafe extern "win64" fn queue_user_apc(
         set_last_error(file_io::ERROR_INVALID_HANDLE);
         return 0;
     };
-    apc.enqueue(weave_core::apc::ApcRecord {
+    apc.enqueue(weave_core::apc::ApcRecord::User {
         callback: pfn_apc,
         data: dw_data,
     });
@@ -19762,9 +19910,26 @@ pub unsafe extern "win64" fn create_symbolic_link_a(
 
 /// CancelIoEx: cancel outstanding I/O on a handle.
 ///
-/// Phase A stub — returns FALSE.
-pub unsafe extern "win64" fn cancel_io_ex(_h_file: usize, _lp_overlapped: usize) -> i32 {
-    warn_once("CancelIoEx");
+/// Wine ref: dlls/kernelbase/file.c:3101 — delegates to NtCancelIoFileEx,
+/// targeting the supplied OVERLAPPED identity and mapping the NT status to a
+/// Win32 BOOL result.
+pub unsafe extern "win64" fn cancel_io_ex(h_file: usize, lp_overlapped: usize) -> i32 {
+    if lp_overlapped != 0
+        && validators::validate_lpoverlapped(
+            lp_overlapped,
+            std::mem::size_of::<[usize; 4]>() as u32,
+        )
+        .is_none()
+    {
+        set_last_error(87); // ERROR_INVALID_PARAMETER
+        return 0;
+    }
+    #[cfg(target_os = "linux")]
+    if cancel_directory_operation(h_file, lp_overlapped) {
+        set_last_error(0);
+        return 1;
+    }
+    set_last_error(1168); // ERROR_NOT_FOUND
     0
 }
 
@@ -21297,6 +21462,135 @@ mod ini;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    static DIRECTORY_CALLBACK_COUNT: AtomicUsize = AtomicUsize::new(0);
+    #[cfg(target_os = "linux")]
+    static DIRECTORY_CALLBACK_ERROR: AtomicU32 = AtomicU32::new(0);
+    #[cfg(target_os = "linux")]
+    static DIRECTORY_CALLBACK_BYTES: AtomicU32 = AtomicU32::new(0);
+    #[cfg(target_os = "linux")]
+    static DIRECTORY_CALLBACK_OVERLAPPED: AtomicUsize = AtomicUsize::new(0);
+
+    #[cfg(target_os = "linux")]
+    unsafe extern "win64" fn directory_completion_callback(
+        error: u32,
+        bytes: u32,
+        overlapped: *mut u8,
+    ) {
+        DIRECTORY_CALLBACK_ERROR.store(error, Ordering::SeqCst);
+        DIRECTORY_CALLBACK_BYTES.store(bytes, Ordering::SeqCst);
+        DIRECTORY_CALLBACK_OVERLAPPED.store(overlapped as usize, Ordering::SeqCst);
+        DIRECTORY_CALLBACK_COUNT.fetch_add(1, Ordering::SeqCst);
+    }
+
+    #[cfg(target_os = "linux")]
+    fn reset_directory_callback() {
+        DIRECTORY_CALLBACK_COUNT.store(0, Ordering::SeqCst);
+        DIRECTORY_CALLBACK_ERROR.store(0, Ordering::SeqCst);
+        DIRECTORY_CALLBACK_BYTES.store(0, Ordering::SeqCst);
+        DIRECTORY_CALLBACK_OVERLAPPED.store(0, Ordering::SeqCst);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn directory_change_completion_dispatches_once_and_cancels_once() {
+        reset_directory_callback();
+        let current_apc = if let Some(state) = weave_core::apc::current_thread() {
+            state
+        } else {
+            let state = weave_core::apc::ThreadApcState::new();
+            weave_core::apc::register_current_thread(state.clone());
+            state
+        };
+        let root = std::env::temp_dir().join(format!(
+            "weave-overlapped-completion-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).expect("create completion fixture");
+        let root_name = root.to_string_lossy().into_owned();
+        let directory = file_io::open_file(&root_name, file_io::GENERIC_READ, file_io::FILE_OPEN)
+            .expect("open directory fixture");
+        let mut buffer = [0u8; 256];
+        let mut overlapped = [0usize; 4];
+        let callback = directory_completion_callback as *const () as usize;
+        assert_eq!(
+            unsafe {
+                read_directory_changes_w(
+                    directory,
+                    buffer.as_mut_ptr(),
+                    buffer.len() as u32,
+                    0,
+                    1,
+                    std::ptr::null_mut(),
+                    overlapped.as_mut_ptr() as *mut u8,
+                    callback,
+                )
+            },
+            1
+        );
+        let watcher_fd = weave_core::handles::directory_watcher_fds()
+            .into_iter()
+            .find(|(handle, _)| *handle == directory)
+            .expect("watcher fd")
+            .1;
+        let child = root.join("created.txt");
+        std::fs::write(&child, b"x").expect("create watched file");
+        let mut pollfd = libc::pollfd {
+            fd: watcher_fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        assert_eq!(unsafe { libc::poll(&mut pollfd, 1, 1000) }, 1);
+        assert!(complete_directory_watch_for_fd(watcher_fd));
+        assert!(current_apc.has_pending());
+        dispatch_current_apcs(&current_apc);
+        assert_eq!(DIRECTORY_CALLBACK_COUNT.load(Ordering::SeqCst), 1);
+        assert_eq!(DIRECTORY_CALLBACK_ERROR.load(Ordering::SeqCst), 0);
+        assert!(DIRECTORY_CALLBACK_BYTES.load(Ordering::SeqCst) > 0);
+        assert_eq!(
+            DIRECTORY_CALLBACK_OVERLAPPED.load(Ordering::SeqCst),
+            overlapped.as_mut_ptr() as usize
+        );
+        assert_eq!(overlapped[0], 0);
+        assert!(overlapped[1] > 0);
+        assert_eq!(u32::from_ne_bytes(buffer[4..8].try_into().unwrap()), 1);
+        assert!(u32::from_ne_bytes(buffer[8..12].try_into().unwrap()) > 0);
+
+        reset_directory_callback();
+        let mut cancelled_overlapped = [0usize; 4];
+        assert_eq!(
+            unsafe {
+                read_directory_changes_w(
+                    directory,
+                    buffer.as_mut_ptr(),
+                    buffer.len() as u32,
+                    0,
+                    1,
+                    std::ptr::null_mut(),
+                    cancelled_overlapped.as_mut_ptr() as *mut u8,
+                    callback,
+                )
+            },
+            1
+        );
+        assert_eq!(
+            unsafe { cancel_io_ex(directory, cancelled_overlapped.as_mut_ptr() as usize) },
+            1
+        );
+        assert_eq!(
+            unsafe { cancel_io_ex(directory, cancelled_overlapped.as_mut_ptr() as usize) },
+            0
+        );
+        dispatch_current_apcs(&current_apc);
+        assert_eq!(DIRECTORY_CALLBACK_COUNT.load(Ordering::SeqCst), 1);
+        assert_eq!(DIRECTORY_CALLBACK_ERROR.load(Ordering::SeqCst), 995);
+        assert_eq!(DIRECTORY_CALLBACK_BYTES.load(Ordering::SeqCst), 0);
+        assert_eq!(cancelled_overlapped[0], 0xC000_0120usize);
+        assert_eq!(close_handle(directory), 1);
+        let _ = std::fs::remove_file(child);
+        let _ = std::fs::remove_dir(root);
+    }
 
     #[cfg(target_os = "linux")]
     #[test]
@@ -22936,7 +23230,7 @@ mod tests {
 
         let current_apc = weave_core::apc::ThreadApcState::new();
         weave_core::apc::register_current_thread(current_apc.clone());
-        current_apc.enqueue(weave_core::apc::ApcRecord {
+        current_apc.enqueue(weave_core::apc::ApcRecord::User {
             callback: callback_addr,
             data: 0x99,
         });

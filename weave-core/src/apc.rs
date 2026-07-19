@@ -3,11 +3,19 @@
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, OnceLock};
 
-/// One queued guest APC. The callback uses the Win64 `VOID (CALLBACK *)(ULONG_PTR)` ABI.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ApcRecord {
-    pub callback: usize,
-    pub data: usize,
+/// One queued guest APC.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ApcRecord {
+    User {
+        callback: usize,
+        data: usize,
+    },
+    IoCompletion {
+        callback: usize,
+        error: u32,
+        bytes: u32,
+        overlapped: usize,
+    },
 }
 
 /// APC state shared by a thread handle and the corresponding guest thread.
@@ -103,14 +111,14 @@ mod tests {
     #[test]
     fn queue_round_trip_and_wake() {
         let state = ThreadApcState::new();
-        state.enqueue(ApcRecord {
+        state.enqueue(ApcRecord::User {
             callback: 0x1234,
             data: 0x5678,
         });
         assert!(state.has_pending());
         assert_eq!(
             state.drain(),
-            vec![ApcRecord {
+            vec![ApcRecord::User {
                 callback: 0x1234,
                 data: 0x5678
             }]
