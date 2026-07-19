@@ -84,6 +84,7 @@ pub enum HandleKind {
     Thread {
         completion: Arc<ThreadCompletion>,
         start_gate: Arc<ThreadStartGate>,
+        apc: Arc<crate::apc::ThreadApcState>,
         join_handle: Mutex<Option<std::thread::JoinHandle<()>>>,
     },
     /// A Win32 event object backed by a Linux eventfd (on Linux target).
@@ -244,13 +245,25 @@ pub fn get_registry_path(handle: usize) -> Option<std::path::PathBuf> {
 pub fn alloc_thread(
     completion: Arc<ThreadCompletion>,
     start_gate: Arc<ThreadStartGate>,
+    apc: Arc<crate::apc::ThreadApcState>,
     join_handle: std::thread::JoinHandle<()>,
 ) -> usize {
     alloc(HandleKind::Thread {
         completion,
         start_gate,
+        apc,
         join_handle: Mutex::new(Some(join_handle)),
     })
+}
+
+/// Return a clone of the APC state associated with a thread handle.
+pub fn get_thread_apc(handle: usize) -> Option<Arc<crate::apc::ThreadApcState>> {
+    let guard = lock_table(table())?;
+    let index = handle.checked_sub(HANDLE_OFFSET)?;
+    match guard.slots.get(index)?.as_ref()? {
+        HandleKind::Thread { apc, .. } => Some(Arc::clone(apc)),
+        _ => None,
+    }
 }
 
 /// Return a clone of the `ThreadCompletion` Arc for a thread handle.

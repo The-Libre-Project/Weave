@@ -8563,6 +8563,14 @@ static THREAD_DIAGNOSTIC_COUNT: AtomicUsize = AtomicUsize::new(0);
 type ThreadDiagnosticRecord = (usize, usize, u32);
 type ThreadDiagnosticRecords = HashMap<usize, ThreadDiagnosticRecord>;
 static THREAD_DIAGNOSTIC_RECORDS: OnceLock<Mutex<ThreadDiagnosticRecords>> = OnceLock::new();
+const APC_DIAGNOSTIC_LIMIT: usize = 32;
+static APC_DIAGNOSTIC_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+fn log_apc_diagnostic(message: std::fmt::Arguments<'_>) {
+    if APC_DIAGNOSTIC_COUNT.fetch_add(1, Ordering::Relaxed) < APC_DIAGNOSTIC_LIMIT {
+        eprintln!("weave/apc: {message}");
+    }
+}
 
 fn log_thread_diagnostic(message: std::fmt::Arguments<'_>) {
     if THREAD_DIAGNOSTIC_COUNT.fetch_add(1, Ordering::Relaxed) < THREAD_DIAGNOSTIC_LIMIT {
@@ -8613,6 +8621,8 @@ pub unsafe extern "win64" fn create_thread(
     let completion_clone = Arc::clone(&completion);
     let start_gate = Arc::new(handles::ThreadStartGate::new(dw_creation_flags & 0x4 != 0));
     let thread_start_gate = Arc::clone(&start_gate);
+    let apc = weave_core::apc::ThreadApcState::new();
+    let thread_apc = Arc::clone(&apc);
 
     // SAFETY: `fn_addr` is a Win64-ABI function pointer in the mapped PE image.
     // The PE image stays mapped for the process lifetime, so the pointer is valid
@@ -8626,6 +8636,7 @@ pub unsafe extern "win64" fn create_thread(
         // garbage, causing the thread to crash immediately when the PE function
         // dereferences the result.  Keep _teb alive until thread exit.
         let _teb = weave_core::teb::setup_thread();
+        weave_core::apc::register_current_thread(thread_apc);
         let my_tid = unsafe { libc::syscall(libc::SYS_gettid) as u32 };
         eprintln!("weave/CreateThread: thread-start tid={my_tid} fn={fn_addr:#x}");
         // Dispatch DLL_THREAD_ATTACH before running guest thread proc.
@@ -8651,7 +8662,7 @@ pub unsafe extern "win64" fn create_thread(
         completion_clone.condvar.notify_all();
     });
 
-    let handle = handles::alloc_thread(completion, start_gate, join_handle);
+    let handle = handles::alloc_thread(completion, start_gate, apc, join_handle);
     THREAD_DIAGNOSTIC_RECORDS
         .get_or_init(|| Mutex::new(HashMap::new()))
         .lock()
@@ -9554,7 +9565,8 @@ pub unsafe extern "win64" fn wait_for_single_object_ex(
     dw_milliseconds: u32,
     _b_alertable: i32,
 ) -> u32 {
-    // Delegate to WaitForSingleObject (alertable flag is a no-op in Weave).
+    // Delegate to WaitForSingleObject; APC-aware dispatch is implemented by
+    // WaitForMultipleObjectsEx, which is the alertable wait used by the guest.
     wait_for_single_object(h_handle, dw_milliseconds)
 }
 
@@ -9629,16 +9641,35 @@ pub unsafe extern "win64" fn wait_for_multiple_objects(
     _b_wait_all: i32,
     dw_milliseconds: u32,
 ) -> u32 {
+    wait_for_multiple_objects_impl(n_count, lp_handles, _b_wait_all, dw_milliseconds, false)
+}
+
+unsafe fn wait_for_multiple_objects_impl(
+    n_count: u32,
+    lp_handles: *const usize,
+    _b_wait_all: i32,
+    dw_milliseconds: u32,
+    alertable: bool,
+) -> u32 {
     const WAIT_OBJECT_0: u32 = 0;
     const WAIT_TIMEOUT: u32 = 0x00000102;
     const WAIT_FAILED: u32 = 0xFFFFFFFF;
     const INFINITE: u32 = 0xFFFF_FFFF;
 
-    eprintln!("weave/WFMO: n={n_count} timeout={dw_milliseconds}ms");
+    eprintln!("weave/WFMO: n={n_count} timeout={dw_milliseconds}ms alertable={alertable}");
 
     if lp_handles.is_null() || n_count == 0 {
         eprintln!("weave/WFMO: → WAIT_FAILED (null/empty)");
         return WAIT_FAILED;
+    }
+
+    if alertable {
+        if let Some(state) = weave_core::apc::current_thread() {
+            if state.has_pending() {
+                dispatch_current_apcs(&state);
+                return WAIT_IO_COMPLETION;
+            }
+        }
     }
 
     // Collect handles — classify each one.
@@ -9647,7 +9678,9 @@ pub unsafe extern "win64" fn wait_for_multiple_objects(
     let mut pollfd_to_handle_idx: Vec<usize> = Vec::new();
 
     for i in 0..n_count as usize {
-        let handle = *lp_handles.add(i);
+        // SAFETY: the public contract requires lp_handles to reference n_count
+        // readable handle values; the null/empty case was rejected above.
+        let handle = unsafe { *lp_handles.add(i) };
         eprintln!("weave/WFMO: handle[{i}]={handle:#x}");
 
         // Guard against NULL handle (0) or INVALID_HANDLE_VALUE.  These are
@@ -9661,7 +9694,11 @@ pub unsafe extern "win64" fn wait_for_multiple_objects(
 
         // Real thread handle — delegate to WFSO immediately (blocking wait).
         if handles::get_thread_completion(handle).is_some() {
-            let result = wait_for_single_object(handle, dw_milliseconds);
+            let result = if alertable {
+                wait_for_thread_alertable(handle, dw_milliseconds)
+            } else {
+                wait_for_single_object(handle, dw_milliseconds)
+            };
             eprintln!("weave/WFMO: handle[{i}]={handle:#x} → {result:#x} (thread)");
             return result;
         }
@@ -9706,6 +9743,17 @@ pub unsafe extern "win64" fn wait_for_multiple_objects(
         }
     }
 
+    if alertable {
+        if let Some(state) = weave_core::apc::current_thread() {
+            pollfds.push(libc::pollfd {
+                fd: state.wake_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            });
+            pollfd_to_handle_idx.push(usize::MAX);
+        }
+    }
+
     // Poll all eventfd-backed handles together.
     #[cfg(target_os = "linux")]
     if !pollfds.is_empty() {
@@ -9720,13 +9768,29 @@ pub unsafe extern "win64" fn wait_for_multiple_objects(
             timeout_ms,
         );
         if ret > 0 {
+            if alertable {
+                if let Some(state) = weave_core::apc::current_thread() {
+                    if state.has_pending() {
+                        dispatch_current_apcs(&state);
+                        return WAIT_IO_COMPLETION;
+                    }
+                }
+            }
             for (pi, pfd) in pollfds.iter().enumerate() {
                 let ready = (pfd.revents
                     & (libc::POLLIN | libc::POLLOUT | libc::POLLHUP | libc::POLLRDHUP))
                     != 0;
                 if ready {
                     let hi = pollfd_to_handle_idx[pi];
-                    let handle = *lp_handles.add(hi);
+                    if hi == usize::MAX {
+                        if let Some(state) = weave_core::apc::current_thread() {
+                            dispatch_current_apcs(&state);
+                            return WAIT_IO_COMPLETION;
+                        }
+                    }
+                    // SAFETY: hi is an index originating from the validated
+                    // handle array; the APC sentinel returned above never falls through.
+                    let handle = unsafe { *lp_handles.add(hi) };
                     // If this fd is a socket (WSAEventSelect reverse map), do NOT drain
                     // the eventfd — WSAEnumNetworkEvents polls the socket fd directly.
                     if weave_common::socket_event::get_socket_for_event(handle as u64).is_some() {
@@ -9755,11 +9819,73 @@ pub unsafe extern "win64" fn wait_for_multiple_objects(
     WAIT_FAILED
 }
 
+const WAIT_IO_COMPLETION: u32 = 0x000000C0;
+
+fn dispatch_current_apcs(state: &weave_core::apc::ThreadApcState) {
+    for record in state.drain() {
+        log_apc_diagnostic(format_args!(
+            "dispatch callback={:#x} data={:#x}",
+            record.callback, record.data
+        ));
+        // SAFETY: QueueUserAPC accepts a guest function pointer with the Win64
+        // callback ABI. The PE image remains mapped for the guest lifetime and
+        // the callback is invoked only on the registered guest thread.
+        let callback: unsafe extern "win64" fn(usize) =
+            unsafe { std::mem::transmute(record.callback) };
+        unsafe { callback(record.data) };
+    }
+}
+
+fn wait_for_thread_alertable(handle: usize, dw_milliseconds: u32) -> u32 {
+    const WAIT_OBJECT_0: u32 = 0;
+    const WAIT_TIMEOUT: u32 = 0x00000102;
+    const WAIT_FAILED: u32 = 0xFFFF_FFFF;
+    const INFINITE: u32 = 0xFFFF_FFFF;
+    let Some(completion) = handles::get_thread_completion(handle) else {
+        return WAIT_FAILED;
+    };
+    let Some(state) = weave_core::apc::current_thread() else {
+        // SAFETY: the handle was resolved as a thread handle above and the
+        // single-object wait API does not dereference guest pointers.
+        return unsafe { wait_for_single_object(handle, dw_milliseconds) };
+    };
+    let deadline = if dw_milliseconds == INFINITE {
+        None
+    } else {
+        Some(std::time::Instant::now() + std::time::Duration::from_millis(dw_milliseconds as u64))
+    };
+    loop {
+        if completion.result.lock().unwrap().is_some() {
+            return WAIT_OBJECT_0;
+        }
+        if state.has_pending() {
+            dispatch_current_apcs(&state);
+            return WAIT_IO_COMPLETION;
+        }
+        let timeout = deadline.map(|d| d.saturating_duration_since(std::time::Instant::now()));
+        if timeout.is_some_and(|d| d.is_zero()) {
+            return WAIT_TIMEOUT;
+        }
+        let timeout_ms = timeout
+            .map(|d| d.as_millis().min(i32::MAX as u128) as i32)
+            .unwrap_or(100);
+        let mut pfd = libc::pollfd {
+            fd: state.wake_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: pfd points to one initialized pollfd for the APC eventfd.
+        let ret = unsafe { libc::poll(&mut pfd, 1, timeout_ms) };
+        if ret < 0 && unsafe { *libc::__errno_location() } != libc::EINTR {
+            return WAIT_FAILED;
+        }
+    }
+}
+
 /// WaitForMultipleObjectsEx — wait on multiple handles, optionally alertable.
-///
-/// Wine ref: dlls/kernelbase/sync.c — `WaitForMultipleObjects` is a thin
-/// wrapper around this API with alertable=FALSE. Weave does not deliver APCs
-/// yet, so alertable mode reuses the existing multi-object wait path.
+// Wine ref: dlls/kernelbase/sync.c:424-434 — WaitForMultipleObjects forwards
+// to WaitForMultipleObjectsEx with alertable=FALSE; alertable waits return
+// WAIT_IO_COMPLETION when NtQueueApcThread has delivered a user APC.
 ///
 /// # Safety
 /// `lp_handles` must point to `n_count` handles, or be NULL when `n_count` is 0.
@@ -9768,9 +9894,15 @@ pub unsafe extern "win64" fn wait_for_multiple_objects_ex(
     lp_handles: *const usize,
     b_wait_all: i32,
     dw_milliseconds: u32,
-    _b_alertable: i32,
+    b_alertable: i32,
 ) -> u32 {
-    unsafe { wait_for_multiple_objects(n_count, lp_handles, b_wait_all, dw_milliseconds) }
+    wait_for_multiple_objects_impl(
+        n_count,
+        lp_handles,
+        b_wait_all,
+        dw_milliseconds,
+        b_alertable != 0,
+    )
 }
 
 /// CreateMutexA — returns a fake handle (1).
@@ -13918,19 +14050,34 @@ pub unsafe extern "win64" fn sleep_ex(dw_milliseconds: u32, _b_alertable: i32) -
 }
 
 /// QueueUserAPC — queue a user APC to a thread.
-///
-/// Wine ref: dlls/kernelbase/thread.c — forwards to NtQueueApcThread and
-/// returns TRUE on STATUS_SUCCESS. Weave does not yet deliver APC callbacks,
-/// but many apps use this API as a wakeup/scheduling hint and only need the
-/// call to succeed so the surrounding wait path can continue.
+// Wine ref: dlls/kernelbase/thread.c — wraps the guest callback in
+// call_user_apc, queues it through NtQueueApcThread, and maps the NTSTATUS to
+// TRUE/FALSE. The queued callback receives the caller-supplied data value.
 ///
 /// # Safety
-/// `pfn_apc` is accepted but not called; `h_thread` and `dw_data` are ignored.
+/// `pfn_apc` must be a valid guest APC callback and `h_thread` must identify a
+/// live thread handle.
 pub unsafe extern "win64" fn queue_user_apc(
-    _pfn_apc: usize,
-    _h_thread: usize,
-    _dw_data: usize,
+    pfn_apc: usize,
+    h_thread: usize,
+    dw_data: usize,
 ) -> u32 {
+    if pfn_apc == 0 {
+        set_last_error(87); // ERROR_INVALID_PARAMETER
+        return 0;
+    }
+    let Some(apc) = handles::get_thread_apc(h_thread) else {
+        set_last_error(file_io::ERROR_INVALID_HANDLE);
+        return 0;
+    };
+    apc.enqueue(weave_core::apc::ApcRecord {
+        callback: pfn_apc,
+        data: dw_data,
+    });
+    log_apc_diagnostic(format_args!(
+        "queue thread={h_thread:#x} callback={pfn_apc:#x} data={dw_data:#x}"
+    ));
+    set_last_error(0);
     1 // TRUE
 }
 
@@ -22637,5 +22784,54 @@ mod tests {
         unsafe {
             let _ = virtual_free(addr, 0, MEM_RELEASE);
         };
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn queue_user_apc_validates_handle_and_alertable_wait_dispatches_only_when_alertable() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        static CALLBACK_DATA: AtomicUsize = AtomicUsize::new(0);
+        unsafe extern "win64" fn apc_callback(data: usize) {
+            CALLBACK_DATA.store(data, Ordering::SeqCst);
+        }
+
+        let callback_addr = apc_callback as *const () as usize;
+        assert_eq!(unsafe { queue_user_apc(callback_addr, 0, 1) }, 0);
+        assert_eq!(get_last_error(), file_io::ERROR_INVALID_HANDLE);
+
+        let completion = Arc::new(handles::ThreadCompletion {
+            result: Mutex::new(None),
+            condvar: std::sync::Condvar::new(),
+        });
+        let start_gate = Arc::new(handles::ThreadStartGate::new(false));
+        let target_apc = weave_core::apc::ThreadApcState::new();
+        let join = std::thread::spawn(|| {});
+        let target = handles::alloc_thread(completion, start_gate, target_apc.clone(), join);
+        assert_eq!(unsafe { queue_user_apc(callback_addr, target, 0x42) }, 1);
+        assert_eq!(target_apc.drain().len(), 1);
+
+        let current_apc = weave_core::apc::ThreadApcState::new();
+        weave_core::apc::register_current_thread(current_apc.clone());
+        current_apc.enqueue(weave_core::apc::ApcRecord {
+            callback: callback_addr,
+            data: 0x99,
+        });
+        CALLBACK_DATA.store(0, Ordering::SeqCst);
+
+        let fd = unsafe { libc::eventfd(0, libc::EFD_NONBLOCK | libc::EFD_CLOEXEC) };
+        assert!(fd >= 0);
+        let event = handles::alloc_event(fd);
+        let handles = [event];
+        assert_eq!(
+            unsafe { wait_for_multiple_objects(1, handles.as_ptr(), 0, 0) },
+            0x102
+        );
+        assert_eq!(CALLBACK_DATA.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            unsafe { wait_for_multiple_objects_ex(1, handles.as_ptr(), 0, 0, 1) },
+            WAIT_IO_COMPLETION
+        );
+        assert_eq!(CALLBACK_DATA.load(Ordering::SeqCst), 0x99);
     }
 }

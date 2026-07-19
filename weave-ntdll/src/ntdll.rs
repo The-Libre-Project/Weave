@@ -95,6 +95,8 @@ pub unsafe extern "win64" fn nt_delay_execution(
 
 /// Global handle counter for NT event objects.
 static NT_HANDLE_COUNTER: AtomicUsize = AtomicUsize::new(0x9000_0000);
+const NT_RESUME_DIAG_LIMIT: usize = 16;
+static NT_RESUME_DIAG_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 fn next_nt_handle() -> usize {
     NT_HANDLE_COUNTER.fetch_add(4, Ordering::Relaxed)
@@ -1085,10 +1087,13 @@ pub unsafe extern "win64" fn nt_create_thread_ex(
     let completion_clone = Arc::clone(&completion);
     let start_gate = Arc::new(handles::ThreadStartGate::new(false));
     let thread_start_gate = Arc::clone(&start_gate);
+    let apc = weave_core::apc::ThreadApcState::new();
+    let thread_apc = Arc::clone(&apc);
 
     let join_handle = std::thread::spawn(move || {
         thread_start_gate.wait_until_resumed();
         let _teb = weave_core::teb::setup_thread();
+        weave_core::apc::register_current_thread(thread_apc);
         let my_tid = unsafe { libc::syscall(libc::SYS_gettid) as u32 };
         eprintln!("weave/NtCreateThreadEx: thread-start tid={my_tid} fn={fn_addr:#x}");
         let fn_ptr: unsafe extern "win64" fn(*mut u8) -> u32 =
@@ -1102,7 +1107,7 @@ pub unsafe extern "win64" fn nt_create_thread_ex(
         completion_clone.condvar.notify_all();
     });
 
-    let handle = handles::alloc_thread(completion, start_gate, join_handle);
+    let handle = handles::alloc_thread(completion, start_gate, apc, join_handle);
     eprintln!("weave/NtCreateThreadEx: handle={handle:#x}");
     unsafe {
         *thread_handle = handle;
@@ -1124,14 +1129,33 @@ pub unsafe extern "win64" fn nt_resume_thread(
     thread_handle: usize,
     suspend_count: *mut u32,
 ) -> i32 {
+    let diag = NT_RESUME_DIAG_COUNT
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+            (count < NT_RESUME_DIAG_LIMIT).then_some(count + 1)
+        })
+        .is_ok();
+    if diag {
+        eprintln!(
+            "weave/NtResumeThread: entry handle={thread_handle:#x} suspend_count={suspend_count:p}"
+        );
+    }
     let Some(start_gate) = handles::get_thread_start_gate(thread_handle) else {
+        if diag {
+            eprintln!(
+                "weave/NtResumeThread: result handle={thread_handle:#x} status={STATUS_INVALID_HANDLE:#x} prev_count=unknown"
+            );
+        }
         return STATUS_INVALID_HANDLE;
     };
     let previous = start_gate.resume();
     if !suspend_count.is_null() {
         unsafe { *suspend_count = previous };
     }
-    eprintln!("weave/NtResumeThread: handle={thread_handle:#x} prev_count={previous}");
+    if diag {
+        eprintln!(
+            "weave/NtResumeThread: result handle={thread_handle:#x} status={STATUS_SUCCESS:#x} prev_count={previous}"
+        );
+    }
     STATUS_SUCCESS
 }
 

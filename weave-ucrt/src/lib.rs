@@ -1939,6 +1939,8 @@ pub unsafe extern "win64" fn ucrt_beginthreadex(
     let start_gate =
         std::sync::Arc::new(weave_core::handles::ThreadStartGate::new(flags & 0x4 != 0));
     let thread_start_gate = std::sync::Arc::clone(&start_gate);
+    let apc = weave_core::apc::ThreadApcState::new();
+    let thread_apc = std::sync::Arc::clone(&apc);
 
     // SAFETY: `fn_addr` is a Win64-ABI function pointer in the mapped PE image.
     // The PE image stays mapped for the process lifetime, so the pointer is valid
@@ -1947,6 +1949,8 @@ pub unsafe extern "win64" fn ucrt_beginthreadex(
     // `unsigned int (__stdcall *)(void *)` on x86-64.
     let join_handle = std::thread::spawn(move || {
         thread_start_gate.wait_until_resumed();
+        let _teb = weave_core::teb::setup_thread();
+        weave_core::apc::register_current_thread(thread_apc);
         let fn_ptr: unsafe extern "win64" fn(*mut u8) -> u32 =
             unsafe { std::mem::transmute(fn_addr as *const u8) };
         let ret = unsafe { fn_ptr(param_addr as *mut u8) };
@@ -1956,7 +1960,7 @@ pub unsafe extern "win64" fn ucrt_beginthreadex(
         completion_clone.condvar.notify_all();
     });
 
-    let handle = weave_core::handles::alloc_thread(completion, start_gate, join_handle);
+    let handle = weave_core::handles::alloc_thread(completion, start_gate, apc, join_handle);
 
     if !thread_id.is_null() {
         unsafe { *thread_id = 1 };

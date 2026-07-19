@@ -100,8 +100,8 @@ pub const APP_SYSCALLS: &[(&str, &[i64])] = &[
         "SumatraPDF.exe",
         &[
             5, 7, 8, 16, 21, 22, 23, 24, 28, 32, 33, 35, 41, 42, 43, 48, 49, 50, 51, 52, 54, 55,
-            221, 59, 61, 62, 63, 72, 73, 74, 75, 76, 77, 78, 79, 80, 82, 83, 86, 87, 88, 89, 90,
-            91, 93, 95, 96, 97, 99, 102, 104, 107, 108, 113, 115, 118, 119, 131, 132, 133, 134,
+            56, 221, 59, 61, 62, 63, 72, 73, 74, 75, 76, 77, 78, 79, 80, 82, 83, 86, 87, 88, 89,
+            90, 91, 93, 95, 96, 97, 99, 102, 104, 107, 108, 113, 115, 118, 119, 131, 132, 133, 134,
             135, 137, 138, 143, 144, 157, 158, 172, 192, 203, 204, 217, 218, 230, 233, 234, 237,
             247, 258, 262, 264, 267, 268, 269, 273, 274, 280, 281, 283, 285, 286, 288, 289, 290,
             291, 293, 294, 302, 304, 309, 318, 332, 334, 435, 439,
@@ -371,6 +371,19 @@ mod tests {
         assert!(nrs.contains(&293), "testsprite2 must allow pipe2 (293)");
         assert!(nrs.contains(&302), "testsprite2 must allow prlimit64 (302)");
         assert!(nrs.contains(&435), "testsprite2 must allow clone3 (435)");
+    }
+
+    #[test]
+    fn test_sumatra_policy_allows_clone_and_clone3() {
+        let additions = APP_SYSCALLS
+            .iter()
+            .find(|(name, _)| *name == "SumatraPDF.exe")
+            .expect("SumatraPDF policy must exist")
+            .1;
+        let filter = build_app_filter("SumatraPDF.exe", additions);
+        let nrs = syscall_numbers(&filter);
+        assert!(nrs.contains(&56), "SumatraPDF must allow clone (56)");
+        assert!(nrs.contains(&435), "SumatraPDF must allow clone3 (435)");
     }
 
     #[test]

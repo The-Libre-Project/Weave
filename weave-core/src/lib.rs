@@ -1,3 +1,4 @@
+pub mod apc;
 pub mod cfg;
 pub mod cmdline;
 pub mod dll_registry;
