@@ -16,6 +16,77 @@
 
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
 
+/// Caller-owned state retained from an overlapped directory-watch request.
+/// Guest addresses are stored as integers so cleanup never dereferences guest
+/// memory after cancellation or handle close.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PendingDirectoryOperation {
+    pub buffer: usize,
+    pub buffer_len: u32,
+    pub overlapped: usize,
+    pub completion_routine: usize,
+}
+
+/// Lifetime-owned state for a directory handle's future watcher.
+#[derive(Debug)]
+pub struct DirectoryWatchState {
+    path: std::path::PathBuf,
+    watcher_fd: Option<i32>,
+    pending: Option<PendingDirectoryOperation>,
+}
+
+impl DirectoryWatchState {
+    pub fn new(path: std::path::PathBuf) -> Self {
+        Self {
+            path,
+            watcher_fd: None,
+            pending: None,
+        }
+    }
+
+    pub fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+
+    pub fn pending(&self) -> Option<PendingDirectoryOperation> {
+        self.pending
+    }
+
+    pub fn set_pending(&mut self, operation: PendingDirectoryOperation) -> bool {
+        if self.pending.is_some() {
+            return false;
+        }
+        self.pending = Some(operation);
+        true
+    }
+
+    pub fn take_pending(&mut self) -> Option<PendingDirectoryOperation> {
+        self.pending.take()
+    }
+
+    /// Adopt a watcher descriptor once inotify registration is implemented.
+    pub fn set_watcher_fd(&mut self, fd: i32) -> bool {
+        if self.watcher_fd.is_some() {
+            return false;
+        }
+        self.watcher_fd = Some(fd);
+        true
+    }
+}
+
+impl Drop for DirectoryWatchState {
+    fn drop(&mut self) {
+        if let Some(fd) = self.watcher_fd.take() {
+            // SAFETY: watcher_fd is owned by this state after explicit adoption
+            // and is closed exactly once when the directory handle is dropped.
+            unsafe { libc::close(fd) };
+        }
+        // The pending operation contains guest addresses only; dropping it
+        // intentionally performs no guest-memory access.
+        self.pending.take();
+    }
+}
+
 /// Offset added to a slot index to produce the public handle value.
 /// Ensures 0 (NULL) is never returned as a valid open handle.
 const HANDLE_OFFSET: usize = 4;
@@ -77,6 +148,12 @@ impl std::fmt::Debug for ThreadCompletion {
 pub enum HandleKind {
     /// A Linux file descriptor owned by Weave. Closed when the handle is freed.
     File(i32),
+    /// An open directory with path identity and owned async-watch state.
+    Directory {
+        fd: i32,
+        path: std::path::PathBuf,
+        watch: DirectoryWatchState,
+    },
     /// An open registry key. Stores the on-disk path to the key's directory.
     RegistryKey(std::path::PathBuf),
     /// A spawned OS thread.  The join handle is stored so that dropping it
@@ -97,6 +174,7 @@ impl HandleKind {
     pub fn as_fd(&self) -> Option<i32> {
         match self {
             HandleKind::File(fd) => Some(*fd),
+            HandleKind::Directory { fd, .. } => Some(*fd),
             _ => None,
         }
     }
@@ -105,6 +183,13 @@ impl HandleKind {
     pub fn as_registry_path(&self) -> Option<&std::path::Path> {
         match self {
             HandleKind::RegistryKey(p) => Some(p),
+            _ => None,
+        }
+    }
+
+    pub fn as_directory_path(&self) -> Option<&std::path::Path> {
+        match self {
+            HandleKind::Directory { path, .. } => Some(path),
             _ => None,
         }
     }
@@ -150,6 +235,56 @@ impl HandleTable {
     fn get_fd(&self, handle: usize) -> Option<i32> {
         let index = handle.checked_sub(HANDLE_OFFSET)?;
         self.slots.get(index)?.as_ref().and_then(|k| k.as_fd())
+    }
+
+    fn get_directory_path(&self, handle: usize) -> Option<std::path::PathBuf> {
+        let index = handle.checked_sub(HANDLE_OFFSET)?;
+        self.slots
+            .get(index)?
+            .as_ref()
+            .and_then(|kind| kind.as_directory_path().map(std::path::Path::to_path_buf))
+    }
+
+    fn set_pending_directory_watch(
+        &mut self,
+        handle: usize,
+        operation: PendingDirectoryOperation,
+    ) -> bool {
+        let index = match handle.checked_sub(HANDLE_OFFSET) {
+            Some(index) => index,
+            None => return false,
+        };
+        match self.slots.get_mut(index).and_then(Option::as_mut) {
+            Some(HandleKind::Directory { watch, .. }) => watch.set_pending(operation),
+            _ => false,
+        }
+    }
+
+    fn pending_directory_watch(&self, handle: usize) -> Option<PendingDirectoryOperation> {
+        let index = handle.checked_sub(HANDLE_OFFSET)?;
+        match self.slots.get(index)?.as_ref()? {
+            HandleKind::Directory { watch, .. } => watch.pending(),
+            _ => None,
+        }
+    }
+
+    fn take_pending_directory_watch(&mut self, handle: usize) -> Option<PendingDirectoryOperation> {
+        let index = handle.checked_sub(HANDLE_OFFSET)?;
+        match self.slots.get_mut(index)?.as_mut()? {
+            HandleKind::Directory { watch, .. } => watch.take_pending(),
+            _ => None,
+        }
+    }
+
+    fn set_directory_watcher_fd(&mut self, handle: usize, fd: i32) -> bool {
+        let index = match handle.checked_sub(HANDLE_OFFSET) {
+            Some(index) => index,
+            None => return false,
+        };
+        match self.slots.get_mut(index).and_then(Option::as_mut) {
+            Some(HandleKind::Directory { watch, .. }) => watch.set_watcher_fd(fd),
+            _ => false,
+        }
     }
 
     /// Return the eventfd for an Event handle, or `None` if not an Event.
@@ -215,6 +350,37 @@ pub fn alloc(kind: HandleKind) -> usize {
 /// is invalid or not a file handle.
 pub fn get_fd(handle: usize) -> Option<i32> {
     lock_table(table())?.get_fd(handle)
+}
+
+/// Return the translated Linux identity retained for an open directory.
+pub fn get_directory_path(handle: usize) -> Option<std::path::PathBuf> {
+    let guard = lock_table(table())?;
+    guard.get_directory_path(handle)
+}
+
+/// Retain one pending directory operation without touching guest memory.
+pub fn set_pending_directory_watch(handle: usize, operation: PendingDirectoryOperation) -> bool {
+    lock_table(table())
+        .map(|mut guard| guard.set_pending_directory_watch(handle, operation))
+        .unwrap_or(false)
+}
+
+/// Inspect the retained pending operation for diagnostics and completion code.
+pub fn pending_directory_watch(handle: usize) -> Option<PendingDirectoryOperation> {
+    let guard = lock_table(table())?;
+    guard.pending_directory_watch(handle)
+}
+
+/// Remove a pending operation by handle. Dropping the handle also removes it.
+pub fn take_pending_directory_watch(handle: usize) -> Option<PendingDirectoryOperation> {
+    lock_table(table())?.take_pending_directory_watch(handle)
+}
+
+/// Transfer ownership of an inotify descriptor to a directory handle.
+pub fn set_directory_watcher_fd(handle: usize, fd: i32) -> bool {
+    lock_table(table())
+        .map(|mut guard| guard.set_directory_watcher_fd(handle, fd))
+        .unwrap_or(false)
 }
 
 /// Allocate a new Event handle backed by the given eventfd fd.
@@ -352,6 +518,50 @@ mod tests {
         let h = t.alloc(HandleKind::File(42));
         assert!(h >= HANDLE_OFFSET);
         assert_eq!(t.get_fd(h), Some(42));
+    }
+
+    #[test]
+    fn directory_handle_retains_path_and_pending_state() {
+        let mut t = fresh();
+        let path = std::path::PathBuf::from("/tmp/weave-watch");
+        let h = t.alloc(HandleKind::Directory {
+            fd: 42,
+            path: path.clone(),
+            watch: DirectoryWatchState::new(path.clone()),
+        });
+        assert_eq!(t.get_fd(h), Some(42));
+        assert_eq!(t.get_directory_path(h), Some(path));
+        let operation = PendingDirectoryOperation {
+            buffer: 0x1000,
+            buffer_len: 128,
+            overlapped: 0x2000,
+            completion_routine: 0x3000,
+        };
+        assert!(t.set_pending_directory_watch(h, operation));
+        assert_eq!(t.pending_directory_watch(h), Some(operation));
+        assert!(!t.set_pending_directory_watch(h, operation));
+    }
+
+    #[test]
+    fn freeing_directory_handle_discards_guest_addresses_without_access() {
+        let mut t = fresh();
+        let h = t.alloc(HandleKind::Directory {
+            fd: 42,
+            path: std::path::PathBuf::from("/tmp/weave-watch"),
+            watch: DirectoryWatchState::new(std::path::PathBuf::from("/tmp/weave-watch")),
+        });
+        assert!(t.set_pending_directory_watch(
+            h,
+            PendingDirectoryOperation {
+                buffer: usize::MAX,
+                buffer_len: u32::MAX,
+                overlapped: usize::MAX,
+                completion_routine: usize::MAX,
+            },
+        ));
+        assert!(t.free(h));
+        assert_eq!(t.get_directory_path(h), None);
+        assert_eq!(t.pending_directory_watch(h), None);
     }
 
     #[test]

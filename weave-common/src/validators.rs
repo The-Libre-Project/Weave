@@ -173,7 +173,7 @@ pub fn validate_lpoverlapped(p: usize, cb: u32) -> Option<*mut u8> {
 /// Validate a guest-supplied LPOVERLAPPED_COMPLETION_ROUTINE (fn ptr).
 /// Returns the pointer if non-null.
 pub fn validate_lpoverlapped_completion_routine(p: usize) -> Option<usize> {
-    if p == 0 {
+    if p == 0 || !p.is_multiple_of(2) {
         return None;
     }
     Some(p)
@@ -449,5 +449,10 @@ mod tests {
         let v = validate_lpoverlapped_completion_routine(0x8000);
         assert!(v.is_some());
         assert_eq!(v.unwrap(), 0x8000);
+    }
+
+    #[test]
+    fn lpoverlapped_completion_routine_misaligned() {
+        assert!(validate_lpoverlapped_completion_routine(0x8001).is_none());
     }
 }

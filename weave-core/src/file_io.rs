@@ -237,7 +237,16 @@ pub fn open_file(win_path: &str, desired_access: u32, nt_disposition: u32) -> Re
     }
 
     // ── 5. Register in the HANDLE table ──────────────────────────────────
-    Ok(handles::alloc(handles::HandleKind::File(fd)))
+    if linux_path.is_dir() {
+        let watch_path = linux_path.clone();
+        Ok(handles::alloc(handles::HandleKind::Directory {
+            fd,
+            path: watch_path.clone(),
+            watch: handles::DirectoryWatchState::new(watch_path),
+        }))
+    } else {
+        Ok(handles::alloc(handles::HandleKind::File(fd)))
+    }
 }
 
 /// Close a handle. Returns `Ok(())` on success, `Err(STATUS_INVALID_HANDLE)`
