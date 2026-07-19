@@ -42,3 +42,7 @@ path = "tests/rtl_unwind_gate.rs"
 [[test]]
 name = "comdlg32_load_probe_gate"
 path = "tests/comdlg32_load_probe_gate.rs"
+
+[[test]]
+name = "overlapped_directory_watch_gate"
+path = "tests/overlapped_directory_watch_gate.rs"
