@@ -65,6 +65,26 @@ struct Args {
     #[arg(long, num_args = 0..=1, default_missing_value = "stubs.jsonl")]
     trace_stubs: Option<String>,
 
+    /// Enable live trace output to stderr.
+    ///
+    /// Optionally filtered by event kind: `api`, `msg`, `stub`, `phase`,
+    /// `loader`, `log`, or comma-separated combinations like `api,msg`.
+    /// Defaults to `all` if no value given.
+    #[arg(long, num_args = 0..=1, default_missing_value = "all")]
+    trace: Option<String>,
+
+    /// Only trace window messages (shorthand for `--trace=msg`).
+    #[arg(long)]
+    trace_msg: bool,
+
+    /// Write structured JSONL trace to a file.
+    #[arg(long)]
+    trace_file: Option<String>,
+
+    /// Dump the in-memory trace ring buffer to a file on crash.
+    #[arg(long)]
+    trace_dump_on_crash: bool,
+
     /// Arguments to pass to the Windows executable (e.g. `weave app.exe arg1 arg2`)
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     exe_args: Vec<String>,
@@ -1197,7 +1217,7 @@ fn main() {
         eprintln!("weave: RUST PANIC — {location}: {message}");
     }));
 
-    let args = Args::parse();
+    let mut args = Args::parse();
 
     // The test-only kill switch must fail before the out-of-process host can
     // fork. `apply` records Disabled without restricting the process, then
@@ -1210,10 +1230,16 @@ fn main() {
         weave_sandbox::assert_sandboxed!("weave-cli");
     }
 
-    // ── −0.5. Stub-trace mode ────────────────────────────────────────────
-    // When --trace-stubs is passed, force-enable the per-slot IAT tracer,
-    // switch on stub classification, and redirect structured JSONL output
-    // to the given file (or stubs.jsonl in CWD by default).
+    // ── −0.5. Trace mode ─────────────────────────────────────────────────
+    // Initialize weave-trace and set up subscribers based on flags and env vars.
+    //
+    // Precedence (highest to lowest):
+    //   1. --trace / --trace-file / --trace-dump-on-crash / --trace-msg flags
+    //   2. WEAVE_TRACE / WEAVE_TRACE_FILE env vars
+    //   3. WEAVE_IAT_TRACE env var (legacy, aliased to --trace=api)
+    //   4. --trace-stubs (legacy, aliased to --trace-file=stubs.jsonl)
+
+    // Legacy: --trace-stubs → force-enable IAT tracer + file output
     if let Some(path) = &args.trace_stubs {
         iat::force_enable_tracer();
         iat::enable_stub_trace();
@@ -1221,6 +1247,59 @@ fn main() {
         if let Err(e) = iat::set_trace_output(path) {
             eprintln!("weave: warning: could not open stub trace output '{path}': {e}");
         }
+    }
+
+    // Build the event filter from --trace / --trace-msg flags
+    if args.trace_msg {
+        args.trace.get_or_insert("msg".into());
+    }
+
+    let trace_filter: Option<weave_trace::EventFilter> = args.trace.as_ref().map(|v| {
+        if v == "all" || v.is_empty() {
+            weave_trace::EventFilter::all()
+        } else {
+            weave_trace::EventFilter::parse(v)
+        }
+    });
+
+    // Check env vars as fallback
+    let trace_env = std::env::var("WEAVE_TRACE").ok();
+    let trace_file_env = std::env::var("WEAVE_TRACE_FILE").ok();
+    let iat_trace_env = std::env::var("WEAVE_IAT_TRACE").ok();
+
+    let filter = trace_filter.or_else(|| {
+        if trace_env.is_some() || iat_trace_env.is_some() {
+            Some(weave_trace::EventFilter::all())
+        } else {
+            None
+        }
+    });
+
+    let trace_enabled = filter.is_some();
+    if let Some(f) = filter.as_ref() {
+        // Ensure the global ring buffer is initialized
+        weave_trace::emit(weave_trace::TraceEvent {
+            timestamp: std::time::Instant::now(),
+            thread_id: weave_trace::current_thread_id(),
+            kind: weave_trace::EventKind::PhaseMarker {
+                name: "trace-start".into(),
+            },
+        });
+        // Start console subscriber with a clone of the filter
+        weave_trace::start_console_subscriber(f.clone());
+    }
+
+    // File subscriber
+    let trace_file_path = args.trace_file.as_ref().or(trace_file_env.as_ref());
+    if let Some(path) = trace_file_path {
+        if let Err(e) = weave_trace::start_file_subscriber(path) {
+            eprintln!("weave: warning: could not open trace file '{path}': {e}");
+        }
+    }
+
+    // Crash dump hook
+    if args.trace_dump_on_crash || trace_enabled {
+        weave_trace::install_crash_dump_hook();
     }
 
     // ── −1. Architecture compatibility ────────────────────────────────────

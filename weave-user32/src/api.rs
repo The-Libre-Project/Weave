@@ -1483,6 +1483,19 @@ pub unsafe extern "win64" fn dispatch_message_w(lp_msg: *const Msg) -> isize {
         }
     };
 
+    // Trace the window message
+    weave_trace::emit(weave_trace::TraceEvent {
+        timestamp: std::time::Instant::now(),
+        thread_id: weave_trace::current_thread_id(),
+        kind: weave_trace::EventKind::WindowMessage {
+            hwnd: m.hwnd as u32,
+            msg: m.message,
+            wparam: m.w_param as u64,
+            lparam: m.l_param as u64,
+            result: 0, // updated after dispatch
+        },
+    });
+
     // #32770 dialog DefDlgProc message filtering: only forward messages that
     // DefDlgProc forwards to the DLGPROC. Redirect all other messages to
     // DefWindowProcW (same as send_message_w logic above).
@@ -1610,6 +1623,19 @@ pub extern "win64" fn send_message_w(
             return pdoc as isize;
         }
     }
+
+    // Trace the window message
+    weave_trace::emit(weave_trace::TraceEvent {
+        timestamp: std::time::Instant::now(),
+        thread_id: weave_trace::current_thread_id(),
+        kind: weave_trace::EventKind::WindowMessage {
+            hwnd: hwnd as u32,
+            msg,
+            wparam: w_param as u64,
+            lparam: l_param as u64,
+            result: 0, // updated after dispatch
+        },
+    });
 
     let seq = SEND_MSG_SEQ.fetch_add(1, Ordering::Relaxed);
     let cur_tid = unsafe { libc::syscall(libc::SYS_gettid) as u32 };
@@ -8233,6 +8259,18 @@ pub unsafe extern "win64" fn call_window_proc_w(
     w_param: usize,
     l_param: isize,
 ) -> isize {
+    weave_trace::emit(weave_trace::TraceEvent {
+        timestamp: std::time::Instant::now(),
+        thread_id: weave_trace::current_thread_id(),
+        kind: weave_trace::EventKind::WindowMessage {
+            hwnd: h_wnd as u32,
+            msg,
+            wparam: w_param as u64,
+            lparam: l_param as u64,
+            result: 0,
+        },
+    });
+
     // Previously a stub returning 0 — broke NPP subclassing of Scintilla.
     // NPP calls CallWindowProcW(original_sci_proc, hwnd, SCI_GETDOCPOINTER, 0, 0) to
     // forward unhandled SCI messages to Scintilla's real WndProc.  Stub meant

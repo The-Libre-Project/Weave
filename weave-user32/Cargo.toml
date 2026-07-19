@@ -9,6 +9,7 @@ description = "user32.dll stubs for Weave — windowing, message loop, input"
 [dependencies]
 weave-common = { path = "../weave-common" }
 weave-core = { path = "../weave-core" }
+weave-trace = { path = "../weave-trace" }
 libc = "0.2"
 
 # x11rb is a pure-Rust X11 protocol client — no C FFI, no libxcb required.

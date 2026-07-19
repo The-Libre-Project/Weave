@@ -1546,6 +1546,7 @@ dependencies = [
  "weave-setupapi",
  "weave-shell32",
  "weave-shlwapi",
+ "weave-trace",
  "weave-ucrt",
  "weave-user32",
  "weave-vulkan",
@@ -1765,6 +1766,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "weave-trace"
+version = "0.0.1"
+dependencies = [
+ "weave-common",
+]
+
+[[package]]
 name = "weave-ucrt"
 version = "0.0.1"
 dependencies = [
@@ -1780,6 +1788,7 @@ dependencies = [
  "libc",
  "weave-common",
  "weave-core",
+ "weave-trace",
  "x11rb",
 ]
 
