@@ -71,6 +71,10 @@ tests/fixtures/winamp/
 !tests/fixtures/winamp/out_wave.dll
 !tests/fixtures/winamp/tataki.dll
 
+# Foobar2000 fixture — extracted from NSIS installer
+tests/fixtures/foobar2000/
+!tests/fixtures/foobar2000/foobar2000.exe
+
 # Windows local artifacts
 Program/
 tests/fixtures/irfanview/*.ini
@@ -124,3 +128,7 @@ docs/sprint-briefs/*
 # Allow audit reports and security docs
 !docs/stub-hit-audit-*.md
 !docs/SECURITY_AUDIT.md
+
+# Foobar2000 fixture — extracted from portable archive
+tests/fixtures/foobar2000/
+!tests/fixtures/foobar2000/foobar2000.exe
