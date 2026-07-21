@@ -1528,6 +1528,119 @@ fn irfanview_gdip_startup_reached() {
     );
 }
 
+/// `weave winamp.exe` — Winamp 5.666 Phase A probe gate (diagnostic iteration 1).
+///
+/// Runs Winamp 5.666 under Weave without DISPLAY (headless Docker). Kills after
+/// a timeout and checks for key phase markers. First iteration is diagnostic:
+/// A1 (imports resolved) is the only hard assert; phase markers are soft checks
+/// to reveal what actually fires on first contact.
+///
+/// Tier A assertions (PP1 milestone):
+///   A1: stderr contains "weave: imports resolved" (IAT patch completed)
+///   A2: stderr contains "wWinMain_entered" (WinMain reached)
+///   A3: stderr contains "wm_paint_dispatched_first" (WM_PAINT dispatched)
+///
+/// Fixture: tests/fixtures/winamp/winamp.exe (+ support DLLs in same dir)
+// Wine ref: dlls/user32/menu.c::TranslateAccelerator — Winamp uses accelerators
+// for play/pause/next/prev.
+#[test]
+fn winamp_probe_gate() {
+    if !cfg!(target_os = "linux") {
+        eprintln!("skipping winamp_probe_gate — requires Linux");
+        return;
+    }
+
+    let manifest = env!("CARGO_MANIFEST_DIR");
+    let winamp_dir = format!("{manifest}/../tests/fixtures/winamp");
+    let winamp_exe = format!("{winamp_dir}/winamp.exe");
+
+    if !std::path::Path::new(&winamp_exe).exists() {
+        eprintln!("skipping: winamp.exe not present in tests/fixtures/winamp/");
+        eprintln!("  → place Winamp 5.666 portable exe there to enable this test");
+        return;
+    }
+
+    let weave_bin = env!("CARGO_BIN_EXE_weave");
+
+    // Winamp may hang in headless Docker; first probe adds --no-sandbox to
+    // avoid sandbox denials on plugin DLL access.
+    let mut child = std::process::Command::new(weave_bin)
+        .current_dir(&winamp_dir)
+        .arg("--no-sandbox")
+        .arg(&winamp_exe)
+        .env_remove("DISPLAY")
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|e| panic!("failed to spawn weave on winamp.exe: {e}"));
+
+    let stderr_pipe = child.stderr.take().expect("stderr was piped");
+    let stderr_shared = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let stderr_writer = std::sync::Arc::clone(&stderr_shared);
+    let drain_thread = std::thread::spawn(move || {
+        use std::io::Read;
+        let mut buf = Vec::new();
+        let mut pipe = stderr_pipe;
+        let _ = pipe.read_to_end(&mut buf);
+        *stderr_writer.lock().unwrap() = buf;
+    });
+
+    // 30 s timeout for first probe — Winamp's CRT init + plugin loading may
+    // be slower than IrfanView.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err(e) => panic!("wait failed: {e}"),
+        }
+    }
+
+    drain_thread.join().expect("stderr drain thread panicked");
+    let stderr_bytes = stderr_shared.lock().unwrap().clone();
+    let stderr = String::from_utf8_lossy(&stderr_bytes);
+    eprintln!("winamp_probe_gate stderr:\n{stderr}");
+
+    // Extract diagnostic counters (soft — printed, not asserted).
+    let imports_done = stderr.contains("weave: imports resolved");
+    let winmain = stderr.contains("wWinMain_entered");
+    let paint = stderr.contains("wm_paint_dispatched_first");
+    let exit_seen = stderr.contains("PHASE: guest_exit");
+
+    eprintln!(
+        "winamp_probe_gate diag: imports_resolved={imports_done} \
+         wWinMain_entered={winmain} wm_paint_dispatched_first={paint} \
+         guest_exit={exit_seen}"
+    );
+
+    // A1 (hard): imports must resolve or nothing else works.
+    // If this fails, we have IAT resolver gaps for Winamp's DLLs.
+    assert!(
+        imports_done,
+        "winamp_probe_gate A1 FAIL: imports did not resolve — \
+         IAT patch failed or crashed during PE load.\nstderr: {stderr}"
+    );
+
+    // A2 (soft for iteration 1): WinMain reached.
+    if winmain {
+        eprintln!("winamp_probe_gate A2: PASS — wWinMain_entered");
+    } else {
+        eprintln!("winamp_probe_gate A2: INFO — wWinMain_entered not seen (CRT/Loader gap)");
+    }
+
+    // A3 (soft for iteration 1): WM_PAINT dispatched.
+    if paint {
+        eprintln!("winamp_probe_gate A3: PASS — wm_paint_dispatched_first");
+    } else {
+        eprintln!("winamp_probe_gate A3: INFO — wm_paint_dispatched_first not seen (GUI gap)");
+    }
+}
+
 /// `weave i_view64.exe test_image.bmp` — E3-M3 Tier A image-open gate.
 ///
 /// Runs IrfanView 4.73 under Xvfb (DISPLAY=:99) with a 24-bit 100×100 BMP fixture.
