@@ -65,6 +65,12 @@ tests/fixtures/nxengine/
 tests/fixtures/audacity/
 !tests/fixtures/audacity/audacity.exe
 
+# Winamp fixture — extracted from NSIS installer
+tests/fixtures/winamp/
+!tests/fixtures/winamp/winamp.exe
+!tests/fixtures/winamp/out_wave.dll
+!tests/fixtures/winamp/tataki.dll
+
 # Windows local artifacts
 Program/
 tests/fixtures/irfanview/*.ini
