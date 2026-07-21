@@ -239,6 +239,38 @@ mod x64 {
         (p as *const u64).read_unaligned()
     }
 
+    /// Read a u64 from any address via `/proc/self/mem`, returning `None` on
+    /// unmapped pages instead of faulting.  Used in stack-scan fallback where
+    /// the pointer may point to an address outside the committed stack range.
+    ///
+    /// Returns `Some(val)` if exactly 8 bytes were read; `None` on any error
+    /// (unmapped page, EFAULT, short read, etc.).
+    #[cfg(target_os = "linux")]
+    unsafe fn read_u64_safe(addr: u64) -> Option<u64> {
+        let mem_path = b"/proc/self/mem\0";
+        let fd = libc::open(mem_path.as_ptr() as *const libc::c_char, libc::O_RDONLY);
+        if fd < 0 {
+            return None;
+        }
+        let mut val: u64 = 0;
+        let n = libc::pread(
+            fd,
+            &mut val as *mut u64 as *mut libc::c_void,
+            8,
+            addr as i64,
+        );
+        libc::close(fd);
+        if n == 8 { Some(val) } else { None }
+    }
+
+    /// Non-Linux fallback: direct read (no `/proc/self/mem` available, but
+    /// stack scan faults are Linux-specific anyway).
+    #[cfg(not(target_os = "linux"))]
+    unsafe fn read_u64_safe(addr: u64) -> Option<u64> {
+        let p = addr as *const u8;
+        if p.is_null() { None } else { Some(read_u64(p)) }
+    }
+
     /// Read a u32 from a pointer (unaligned-safe).
     unsafe fn read_u32(p: *const u8) -> u32 {
         // SAFETY: `p` points into a mapped PE section (UNWIND_INFO, FuncInfo, or
@@ -625,7 +657,13 @@ mod x64 {
                     // stack is at least 512 KB, so this scan stays within committed
                     // pages. We advance in 8-byte steps matching the x64 ABI stack
                     // alignment invariant (RSP is always 8-byte aligned at call sites).
-                    let candidate = unsafe { read_u64(scan_ptr as *const u8) };
+                    let candidate = match unsafe { read_u64_safe(scan_ptr) } {
+                        Some(v) => v,
+                        None => {
+                            scan_ptr += 8;
+                            continue;
+                        }
+                    };
                     if candidate > image_base as u64
                         && candidate < (image_base + pe_size) as u64
                         && lookup_function_entry(image_base, candidate).is_some()
