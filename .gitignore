@@ -74,6 +74,7 @@ tests/fixtures/winamp/
 # Foobar2000 fixture — extracted from NSIS installer
 tests/fixtures/foobar2000/
 !tests/fixtures/foobar2000/foobar2000.exe
+!tests/fixtures/foobar2000/portable_mode_enabled
 
 # Windows local artifacts
 Program/
