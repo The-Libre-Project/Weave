@@ -4300,7 +4300,7 @@ pub unsafe extern "win64" fn ucrt_mkgmtime64(tm: *mut u8) -> i64 {
 /// `clock()` twice per iteration to compute elapsed time.  Returning 0
 /// (unresolved stub) made the loop never terminate.
 pub extern "win64" fn ucrt_clock() -> i32 {
-    use std::sync::{Mutex, OnceLock};
+    use std::sync::OnceLock;
     use std::time::Instant;
     static START: OnceLock<Instant> = OnceLock::new();
     let start = START.get_or_init(Instant::now);
