@@ -1565,7 +1565,6 @@ mod x64 {
         // dc is the DispatcherContext built on the dispatch loop's stack frame.
         let exc = unsafe { &*exc_record };
         let dc_ref = unsafe { &*dc };
-        let mut matched_first = false;
 
         // Unwind phase: no-op (finally blocks run via unwind_ex's handler calls).
         if exc.exception_flags & EXCEPTION_UNWINDING != 0 {
