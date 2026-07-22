@@ -1273,8 +1273,12 @@ mod x64 {
                                     let td = (ib + td_rva) as *const u8;
                                     let name_ptr = td.add(0x10) as *const i8;
                                     if !name_ptr.is_null() {
-                                        if let Ok(s) = core::ffi::CStr::from_ptr(name_ptr).to_str() {
-                                            eprintln!("weave: C++ exception type='{s}' at rip={:#x}", throw_rip);
+                                        if let Ok(s) = core::ffi::CStr::from_ptr(name_ptr).to_str()
+                                        {
+                                            eprintln!(
+                                                "weave: C++ exception type='{s}' at rip={:#x}",
+                                                throw_rip
+                                            );
                                         }
                                     }
                                 }
