@@ -10,7 +10,7 @@
 #![allow(clippy::missing_safety_doc)]
 
 use libc::c_void;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 fn m13_crt_trace_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
@@ -471,14 +471,22 @@ pub unsafe extern "win64" fn ucrt_system(command: *const u8) -> i32 {
     unsafe { libc::system(command as *const libc::c_char) }
 }
 
+/// Global atexit function list. LIFO order, matching MSVC/glibc `atexit` semantics.
+static ATEXIT_FNS: Mutex<Vec<unsafe extern "C" fn()>> = Mutex::new(Vec::new());
+
 pub extern "win64" fn ucrt_cexit() {
-    unsafe {
-        libc::write(
-            2,
-            b"weave: stub _cexit\n".as_ptr() as *const libc::c_void,
-            19,
-        )
-    };
+    eprintln!(
+        "weave: _cexit — running {} atexit handlers",
+        ATEXIT_FNS.lock().unwrap().len()
+    );
+    // Drain in LIFO order (reverse insertion order).
+    loop {
+        let f = ATEXIT_FNS.lock().unwrap().pop();
+        match f {
+            Some(f) => unsafe { f() },
+            None => break,
+        }
+    }
 }
 
 pub extern "win64" fn ucrt_set_app_type(_type: u32) {
@@ -678,29 +686,131 @@ pub unsafe extern "win64" fn ucrt_initterm_e(
     0
 }
 
-pub extern "win64" fn ucrt_crt_atexit(_fn: *const c_void) -> i32 {
-    unsafe {
-        libc::write(
-            2,
-            b"weave: stub _crt_atexit\n".as_ptr() as *const libc::c_void,
-            24,
-        )
-    };
+pub extern "win64" fn ucrt_crt_atexit(fn_ptr: *const c_void) -> i32 {
+    if fn_ptr.is_null() {
+        return 0;
+    }
+    let f: unsafe extern "C" fn() = unsafe { std::mem::transmute(fn_ptr) };
+    ATEXIT_FNS.lock().unwrap().push(f);
+    1
+}
+
+/// Layout of `_onexit_table_t` (three pointer fields, 24 bytes on x64).
+/// Used by the MSVC CRT's per-module atexit registration pipeline.
+struct OnexitTable {
+    first: *mut *const c_void,
+    last: *mut *const c_void,
+    end: *mut *const c_void,
+}
+
+const TABLE_INITIAL_CAP: usize = 32;
+
+/// _initialize_onexit_table — initialise a `_onexit_table_t` at `table`.
+/// Wine ref: dlls/msvcrt/exit.c:62
+pub extern "win64" fn ucrt_initialize_onexit_table(table: *mut c_void) -> i32 {
+    if table.is_null() {
+        return -1;
+    }
+    // _onexit_table_t layout: [first, last, end] each 8 bytes.
+    // If first == end (already zeroed or already initialized), clear it.
+    let first = unsafe { *(table as *mut *mut *const c_void) };
+    let end = unsafe { *((table as *mut *mut *const c_void).add(2)) };
+    if first == end {
+        unsafe {
+            *(table as *mut *mut *const c_void) = std::ptr::null_mut();
+            *((table as *mut *mut *const c_void).add(1)) = std::ptr::null_mut();
+            *((table as *mut *mut *const c_void).add(2)) = std::ptr::null_mut();
+        }
+    }
     0
 }
 
+/// _register_onexit_function — add `func` to the per-module atexit table at `table`.
+/// Grows the table if full. Wine ref: dlls/msvcrt/exit.c:72
 pub extern "win64" fn ucrt_register_onexit_function(
-    _table: *mut c_void,
-    _fn: *const c_void,
+    table: *mut c_void,
+    func: *const c_void,
 ) -> i32 {
+    if table.is_null() || func.is_null() {
+        return -1;
+    }
+    unsafe {
+        let first = table as *mut *mut *const c_void;
+        let mut first_val = *first;
+        let last = first.add(1);
+        let _last_val = *last;
+        let end = first.add(2);
+        let end_val = *end;
+
+        // Allocate initial table if empty.
+        if first_val.is_null() {
+            let cap = TABLE_INITIAL_CAP;
+            let alloc = libc::calloc(cap, std::mem::size_of::<*const c_void>());
+            if alloc.is_null() {
+                return -1;
+            }
+            *first = alloc as *mut *const c_void;
+            *last = *first;
+            *end = (*first).add(cap);
+            first_val = *first;
+        }
+
+        // Grow if full.
+        if *last == *end {
+            let old_len = end_val.offset_from(first_val) as usize;
+            let new_cap = old_len * 2;
+            let new_alloc = libc::realloc(
+                first_val as *mut libc::c_void,
+                new_cap * std::mem::size_of::<*const c_void>(),
+            ) as *mut *const c_void;
+            if new_alloc.is_null() {
+                return -1;
+            }
+            *first = new_alloc;
+            *last = new_alloc.add(old_len);
+            *end = new_alloc.add(new_cap);
+        }
+
+        **last = func;
+        *last = (*last).add(1);
+    }
     0
 }
 
-pub extern "win64" fn ucrt_execute_onexit_table(_table: *mut c_void) -> i32 {
-    0
-}
+/// _execute_onexit_table — call all registered atexit functions in LIFO order,
+/// then free the table. Wine ref: dlls/msvcrt/exit.c:113
+pub extern "win64" fn ucrt_execute_onexit_table(table: *mut c_void) -> i32 {
+    if table.is_null() {
+        return -1;
+    }
+    unsafe {
+        let first_ptr = table as *mut *mut *const c_void;
+        let first_val = *first_ptr;
+        let last_val = *(first_ptr.add(1));
+        let end_val = *(first_ptr.add(2));
 
-pub extern "win64" fn ucrt_initialize_onexit_table(_table: *mut c_void) -> i32 {
+        if first_val.is_null() || first_val >= last_val {
+            return 0;
+        }
+
+        // Snapshot the table and clear it.
+        let copy_first = first_val;
+        let copy_last = last_val;
+        std::ptr::write_bytes(first_ptr, 0, 3); // zero _first, _last, _end
+
+        // Call functions in LIFO order (matching MSVC `atexit` semantics).
+        let mut func = copy_last.offset_from(copy_first) as isize - 1;
+        while func >= 0 {
+            let f = *copy_first.add(func as usize);
+            if !f.is_null() {
+                let cb: extern "C" fn() = std::mem::transmute(f);
+                cb();
+            }
+            func -= 1;
+        }
+
+        libc::free(copy_first as *mut libc::c_void);
+    }
     0
 }
 
@@ -1141,9 +1251,12 @@ pub extern "win64" fn ucrt_amsg_exit(_msg_num: i32) -> ! {
 /// _onexit — register a function to be called at process exit.
 ///
 /// On success returns the passed function pointer; NULL on failure.
-/// We don't maintain a real atexit list — just return the pointer so
-/// MinGW CRT startup sees "success" and doesn't call _amsg_exit.
 pub extern "win64" fn ucrt_onexit(fn_ptr: usize) -> usize {
+    if fn_ptr == 0 {
+        return 0;
+    }
+    let f: unsafe extern "C" fn() = unsafe { std::mem::transmute(fn_ptr) };
+    ATEXIT_FNS.lock().unwrap().push(f);
     fn_ptr
 }
 
@@ -4186,7 +4299,7 @@ pub unsafe extern "win64" fn ucrt_mkgmtime64(tm: *mut u8) -> i64 {
 /// `clock()` twice per iteration to compute elapsed time.  Returning 0
 /// (unresolved stub) made the loop never terminate.
 pub extern "win64" fn ucrt_clock() -> i32 {
-    use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
     use std::time::Instant;
     static START: OnceLock<Instant> = OnceLock::new();
     let start = START.get_or_init(Instant::now);
