@@ -686,6 +686,7 @@ pub unsafe extern "win64" fn ucrt_initterm_e(
     0
 }
 
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub extern "win64" fn ucrt_crt_atexit(fn_ptr: *const c_void) -> i32 {
     if fn_ptr.is_null() {
         return 0;
@@ -697,6 +698,7 @@ pub extern "win64" fn ucrt_crt_atexit(fn_ptr: *const c_void) -> i32 {
 
 /// Layout of `_onexit_table_t` (three pointer fields, 24 bytes on x64).
 /// Used by the MSVC CRT's per-module atexit registration pipeline.
+#[allow(dead_code)]
 struct OnexitTable {
     first: *mut *const c_void,
     last: *mut *const c_void,
@@ -787,7 +789,6 @@ pub extern "win64" fn ucrt_execute_onexit_table(table: *mut c_void) -> i32 {
         let first_ptr = table as *mut *mut *const c_void;
         let first_val = *first_ptr;
         let last_val = *(first_ptr.add(1));
-        let end_val = *(first_ptr.add(2));
 
         if first_val.is_null() || first_val >= last_val {
             return 0;
@@ -799,7 +800,7 @@ pub extern "win64" fn ucrt_execute_onexit_table(table: *mut c_void) -> i32 {
         std::ptr::write_bytes(first_ptr, 0, 3); // zero _first, _last, _end
 
         // Call functions in LIFO order (matching MSVC `atexit` semantics).
-        let mut func = copy_last.offset_from(copy_first) as isize - 1;
+        let mut func = copy_last.offset_from(copy_first) - 1;
         while func >= 0 {
             let f = *copy_first.add(func as usize);
             if !f.is_null() {
