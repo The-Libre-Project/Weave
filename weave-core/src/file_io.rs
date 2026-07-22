@@ -127,6 +127,10 @@ fn resolve_z_drive_relative(win_path: &str) -> Option<std::path::PathBuf> {
 /// backslashes replaced by forward slashes — is a valid Linux absolute path
 /// that does exist, and returns that instead.
 pub fn translate_win_path(win_path: &str) -> Result<std::path::PathBuf, i32> {
+    // Extended-length paths use the same filesystem semantics after the
+    // namespace prefix; normalize them before drive/path classification.
+    let win_path = win_path.strip_prefix("\\\\?\\").unwrap_or(win_path);
+
     // Z: drive-relative paths (e.g. IrfanView plugin scan `Z:.\*.*`) must
     // resolve against the Linux CWD, not the Z: drive root `/`.
     if let Some(cwd_candidate) = resolve_z_drive_relative(win_path) {

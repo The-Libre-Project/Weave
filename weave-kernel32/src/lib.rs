@@ -6389,12 +6389,14 @@ fn load_library_impl(name: &str) -> usize {
                         if dep_key == key || dll_registry::is_registered(&dep_key) {
                             continue;
                         }
-                        if let Some(dir) = parent_dir.as_deref() {
-                            let dep_path = dir.join(&imp.dll);
-                            let dep_path_lc = dir.join(&dep_key);
-                            if dep_path.exists() || dep_path_lc.exists() {
-                                let _ = load_library_impl(&imp.dll);
-                            }
+                        let dependency_is_local = parent_dir.as_deref().is_some_and(|dir| {
+                            dir.join(&imp.dll).exists() || dir.join(&dep_key).exists()
+                        });
+                        // A component may live in a subdirectory while its
+                        // app-local dependencies live beside the executable.
+                        // Let the normal loader search order resolve that case.
+                        if dependency_is_local || exe_path::exe_dir().is_some() {
+                            let _ = load_library_impl(&imp.dll);
                         }
                     }
                 }
