@@ -260,7 +260,11 @@ mod x64 {
             addr as i64,
         );
         libc::close(fd);
-        if n == 8 { Some(val) } else { None }
+        if n == 8 {
+            Some(val)
+        } else {
+            None
+        }
     }
 
     /// Non-Linux fallback: direct read (no `/proc/self/mem` available, but
@@ -268,7 +272,11 @@ mod x64 {
     #[cfg(not(target_os = "linux"))]
     unsafe fn read_u64_safe(addr: u64) -> Option<u64> {
         let p = addr as *const u8;
-        if p.is_null() { None } else { Some(read_u64(p)) }
+        if p.is_null() {
+            None
+        } else {
+            Some(read_u64(p))
+        }
     }
 
     /// Read a u32 from a pointer (unaligned-safe).
@@ -1824,15 +1832,21 @@ mod x64 {
                                 let first_cta = (throw_image_base + first_cta_rva) as *const u8;
                                 let n_ct = unsafe { read_u32(first_cta) } as usize;
                                 if n_ct > 0 {
-                                    let first_ct_rva = unsafe { read_u32(first_cta.add(4)) } as usize;
+                                    let first_ct_rva =
+                                        unsafe { read_u32(first_cta.add(4)) } as usize;
                                     if first_ct_rva != 0 && first_ct_rva < pe_size {
-                                        let first_ct = (throw_image_base + first_ct_rva) as *const u8;
+                                        let first_ct =
+                                            (throw_image_base + first_ct_rva) as *const u8;
                                         let td_rva = unsafe { read_u32(first_ct.add(4)) } as usize;
                                         if td_rva != 0 && td_rva < pe_size {
                                             let td = (throw_image_base + td_rva) as *const u8;
-                                            let td_name = unsafe { core::ffi::CStr::from_ptr(td.add(0x10) as *const i8) };
+                                            let td_name = unsafe {
+                                                core::ffi::CStr::from_ptr(td.add(0x10) as *const i8)
+                                            };
                                             if let Ok(s) = td_name.to_str() {
-                                                eprintln!("weave: CxxFrameHandler: thrown type='{s}'");
+                                                eprintln!(
+                                                    "weave: CxxFrameHandler: thrown type='{s}'"
+                                                );
                                             }
                                         }
                                     }
