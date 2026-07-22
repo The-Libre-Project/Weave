@@ -1825,30 +1825,18 @@ mod x64 {
                         "weave: CxxFrameHandler: no match typed catch j={j} type_rva={disp_type:#x}"
                     );
                         // Log the thrown type name for diagnostics.
-                        if !matched_first {
-                            // Read first type from the exception's CatchableTypeArray.
-                            let first_cta_rva = unsafe { read_u32(ti.add(0x0c)) } as usize;
-                            if first_cta_rva != 0 && first_cta_rva < pe_size {
-                                let first_cta = (throw_image_base + first_cta_rva) as *const u8;
-                                let n_ct = unsafe { read_u32(first_cta) } as usize;
-                                if n_ct > 0 {
-                                    let first_ct_rva =
-                                        unsafe { read_u32(first_cta.add(4)) } as usize;
-                                    if first_ct_rva != 0 && first_ct_rva < pe_size {
-                                        let first_ct =
-                                            (throw_image_base + first_ct_rva) as *const u8;
-                                        let td_rva = unsafe { read_u32(first_ct.add(4)) } as usize;
-                                        if td_rva != 0 && td_rva < pe_size {
-                                            let td = (throw_image_base + td_rva) as *const u8;
-                                            let td_name = unsafe {
-                                                core::ffi::CStr::from_ptr(td.add(0x10) as *const i8)
-                                            };
-                                            if let Ok(s) = td_name.to_str() {
-                                                eprintln!(
-                                                    "weave: CxxFrameHandler: thrown type='{s}'"
-                                                );
-                                            }
-                                        }
+                        if !matched_first && n_ct > 0 {
+                            let first_ct_rva = unsafe { read_u32(cta.add(4)) } as usize;
+                            if first_ct_rva != 0 && first_ct_rva < pe_size {
+                                let first_ct = (throw_image_base + first_ct_rva) as *const u8;
+                                let td_rva = unsafe { read_u32(first_ct.add(4)) } as usize;
+                                if td_rva != 0 && td_rva < pe_size {
+                                    let td = (throw_image_base + td_rva) as *const u8;
+                                    let td_name = unsafe {
+                                        core::ffi::CStr::from_ptr(td.add(0x10) as *const i8)
+                                    };
+                                    if let Ok(s) = td_name.to_str() {
+                                        eprintln!("weave: CxxFrameHandler: thrown type='{s}'");
                                     }
                                 }
                             }
