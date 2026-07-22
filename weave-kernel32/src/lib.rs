@@ -6374,6 +6374,7 @@ fn load_library_impl(name: &str) -> usize {
         match loader::load_dll(&bytes) {
             Ok((image, exports)) => {
                 let image_base = image.base as usize;
+                let image_size = image.size;
                 let dll_entry = image.entry_point;
                 // Transitive pre-load: a dynamically-loaded PE (e.g. libpng16-16.dll
                 // pulled in by SDL2_image's IMG_Init) may import other native PE DLLs
@@ -6423,6 +6424,9 @@ fn load_library_impl(name: &str) -> usize {
                 dll_registry::register(key.clone(), image, exports);
                 // HMODULE == image base address (Windows convention).  Register
                 // this so GetProcAddress / GetModuleFileName can map handle→name.
+                // Register with the SEH module table so the signal handler can
+                // identify crashes inside this dynamically loaded DLL.
+                weave_core::seh::register_loaded_module(image_base, image_size);
                 module_handles::register_with_handle(name, image_base);
                 // Loader: share path-registry convention with load_with_name
                 // (weave-core::loader). `register_image_path` normalizes to

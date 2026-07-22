@@ -1249,6 +1249,41 @@ mod x64 {
         // SAFETY: exc_record and ctx are fully initialized above. dispatch_exception's
         // contract: exc_record is a valid ExceptionRecord, ctx represents the throw-site
         // register state (rip/rsp exact from the naked trampoline, nonvolatiles captured).
+        // Log the thrown type name for C++ exceptions before dispatch.
+        if exception_code == 0xE06D7363 && exc_record.number_parameters >= 3 {
+            let ti_ptr = exc_record.exception_information[2] as usize;
+            let ib = if exc_record.number_parameters >= 4 {
+                exc_record.exception_information[3] as usize
+            } else {
+                crate::seh::PE_BASE.load(Ordering::Relaxed)
+            };
+            let pe_sz = crate::seh::PE_SIZE.load(Ordering::Relaxed);
+            if ti_ptr != 0 && ib != 0 {
+                unsafe {
+                    let cta_rva = read_u32((ti_ptr as *const u8).add(0x0c)) as usize;
+                    if cta_rva != 0 && cta_rva < pe_sz {
+                        let cta = (ib + cta_rva) as *const u8;
+                        let n_ct = read_u32(cta) as usize;
+                        if n_ct > 0 {
+                            let ct_rva = read_u32(cta.add(4)) as usize;
+                            if ct_rva != 0 && ct_rva < pe_sz {
+                                let ct = (ib + ct_rva) as *const u8;
+                                let td_rva = read_u32(ct.add(4)) as usize;
+                                if td_rva != 0 && td_rva < pe_sz {
+                                    let td = (ib + td_rva) as *const u8;
+                                    let name_ptr = td.add(0x10) as *const i8;
+                                    if !name_ptr.is_null() {
+                                        if let Ok(s) = core::ffi::CStr::from_ptr(name_ptr).to_str() {
+                                            eprintln!("weave: C++ exception type='{s}' at rip={:#x}", throw_rip);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
         let handled = unsafe { dispatch_exception(&mut exc_record, &mut ctx) };
         if !handled {
             eprintln!("weave: unhandled exception {exception_code:#x}");
@@ -1824,24 +1859,6 @@ mod x64 {
                         eprintln!(
                         "weave: CxxFrameHandler: no match typed catch j={j} type_rva={disp_type:#x}"
                     );
-                        // Log the thrown type name for diagnostics.
-                        if !matched_first && n_ct > 0 {
-                            let first_ct_rva = unsafe { read_u32(cta.add(4)) } as usize;
-                            if first_ct_rva != 0 && first_ct_rva < pe_size {
-                                let first_ct = (throw_image_base + first_ct_rva) as *const u8;
-                                let td_rva = unsafe { read_u32(first_ct.add(4)) } as usize;
-                                if td_rva != 0 && td_rva < pe_size {
-                                    let td = (throw_image_base + td_rva) as *const u8;
-                                    let td_name = unsafe {
-                                        core::ffi::CStr::from_ptr(td.add(0x10) as *const i8)
-                                    };
-                                    if let Ok(s) = td_name.to_str() {
-                                        eprintln!("weave: CxxFrameHandler: thrown type='{s}'");
-                                    }
-                                }
-                            }
-                            matched_first = true;
-                        }
                         continue;
                     }
                 }
