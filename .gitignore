@@ -75,6 +75,7 @@ tests/fixtures/winamp/
 tests/fixtures/foobar2000/
 !tests/fixtures/foobar2000/foobar2000.exe
 !tests/fixtures/foobar2000/portable_mode_enabled
+!tests/fixtures/foobar2000/user-components/
 
 # Windows local artifacts
 Program/
