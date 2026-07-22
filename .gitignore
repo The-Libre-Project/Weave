@@ -76,6 +76,11 @@ tests/fixtures/foobar2000/
 !tests/fixtures/foobar2000/foobar2000.exe
 !tests/fixtures/foobar2000/portable_mode_enabled
 !tests/fixtures/foobar2000/user-components/
+!tests/fixtures/foobar2000/user-components/.gitkeep
+!tests/fixtures/foobar2000/profile/
+!tests/fixtures/foobar2000/profile/user-components-x64/
+!tests/fixtures/foobar2000/profile/user-components-x64/.gitkeep
+!tests/fixtures/foobar2000/profile/user-components-x64/pending/
 
 # Windows local artifacts
 Program/
