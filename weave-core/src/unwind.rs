@@ -1244,7 +1244,22 @@ mod x64 {
         let handled = unsafe { dispatch_exception(&mut exc_record, &mut ctx) };
         if !handled {
             eprintln!("weave: unhandled exception {exception_code:#x}");
-            // SAFETY: abort() is safe to call; unhandled exception is unrecoverable.
+            // Try the registered UnhandledExceptionFilter before aborting.
+            let uef = crate::seh::UEF_HANDLER.load(Ordering::Relaxed);
+            if uef != 0 {
+                eprintln!("weave: calling UnhandledExceptionFilter handler");
+                // Build a minimal EXCEPTION_POINTERS-like struct on the stack:
+                // [0] = &exc_record, [1] = &ctx (as ExceptionRecord* and ContextRecord*)
+                let pointers: [*mut std::ffi::c_void; 2] = [
+                    &mut exc_record as *mut _ as *mut std::ffi::c_void,
+                    &mut ctx as *mut _ as *mut std::ffi::c_void,
+                ];
+                let f: unsafe extern "win64" fn(*mut u8) -> i32 =
+                    unsafe { std::mem::transmute(uef) };
+                let result = unsafe { f(pointers.as_ptr() as *mut u8) };
+                eprintln!("weave: UnhandledExceptionFilter returned {result}");
+            }
+            // SAFETY: abort() terminates the process; no cleanup needed for unhandled exceptions.
             unsafe { libc::abort() };
         }
     }

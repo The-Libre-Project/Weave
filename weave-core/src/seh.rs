@@ -83,6 +83,10 @@ fn find_loaded_module_index(rip: usize) -> Option<usize> {
 // Signal handlers cannot safely access complex data structures (locks, heap,
 // etc.), so we cache only what we need as plain atomics.
 
+/// Global unhandled-exception filter, installed by `SetUnhandledExceptionFilter`.
+/// Called from `dispatch_exception` when no SEH handler is found.
+pub static UEF_HANDLER: AtomicUsize = AtomicUsize::new(0);
+
 pub(crate) static PE_BASE: AtomicUsize = AtomicUsize::new(0);
 pub(crate) static PE_SIZE: AtomicUsize = AtomicUsize::new(0);
 pub(crate) static PDATA_RVA: AtomicUsize = AtomicUsize::new(0);

@@ -64,8 +64,8 @@ fn alloc_size_from_header(header: usize) -> usize {
 }
 
 /// Process-global top-level exception filter installed via SetUnhandledExceptionFilter.
-/// 0 means no handler installed (default: no filter).
-static UEF_HANDLER: AtomicUsize = AtomicUsize::new(0);
+/// Stored in weave-core::seh so dispatch_exception can call it.
+static UEF_HANDLER: &AtomicUsize = &weave_core::seh::UEF_HANDLER;
 
 /// Process-global override table for SetStdHandle / GetStdHandle.
 /// Slots: [0]=stdin, [1]=stdout, [2]=stderr.
