@@ -1181,6 +1181,18 @@ fn ipc_handler(dll: &str, function: &str, args: &[serde_json::Value]) -> Option<
 }
 
 fn main() {
+    // Raise the main thread stack limit before any PE or crypto code runs.
+    // AWS-LC (via rustls → aws-lc-rs) uses AVX-512 stack frames that can
+    // push past the default 8 MiB RLIMIT_STACK, causing a guard-page fault.
+    #[cfg(target_os = "linux")]
+    unsafe {
+        let rlim = libc::rlimit {
+            rlim_cur: 64 * 1024 * 1024, // 64 MiB soft
+            rlim_max: 64 * 1024 * 1024, // 64 MiB hard
+        };
+        libc::setrlimit(libc::RLIMIT_STACK, &rlim);
+    }
+
     // Initialize glibc locale at process start so character classification
     // (iswctype, isalpha, etc.) doesn't SIGSEGV at fault=0x8 when called
     // from PE code during loading or init.  Must be before any PE operations.
