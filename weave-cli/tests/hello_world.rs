@@ -9634,3 +9634,95 @@ fn waveout_gate1_smoke() {
         "waveout Gate 4 FAIL: waveout_test.exe exited with non-zero status.\nstderr: {stderr}"
     );
 }
+
+/// PP3/b — OpenMPT Phase A probe gate.
+///
+/// Tier A assertions (see `docs/milestones/PP3.md`):
+///   A1: No `weave: unresolved:` lines in stderr (all imports resolve).
+///   A2: `PHASE: create_window_first` appears in stderr (player window visible).
+///
+/// The gate is #[ignore]'d — invoke explicitly with:
+///   cargo test -p weave-cli --test hello_world pp3_openmpt_probe_gate
+#[ignore]
+#[test]
+fn pp3_openmpt_probe_gate() {
+    if !cfg!(target_os = "linux") {
+        eprintln!("skipping OpenMPT probe gate — requires Linux");
+        return;
+    }
+
+    let manifest = env!("CARGO_MANIFEST_DIR");
+    let fixture = format!("{manifest}/../tests/fixtures/openmpt/OpenMPT.exe");
+
+    if !std::path::Path::new(&fixture).exists() {
+        eprintln!("skipping: OpenMPT.exe not present at {fixture}");
+        return;
+    }
+
+    let weave_bin = env!("CARGO_BIN_EXE_weave");
+
+    let start = std::time::Instant::now();
+    let mut child = std::process::Command::new(weave_bin)
+        .arg("--no-sandbox")
+        .arg("--trace=stub,phase,msg")
+        .arg(&fixture)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|e| panic!("failed to spawn weave on OpenMPT.exe: {e}"));
+
+    let stderr_pipe = child.stderr.take().expect("stderr was piped");
+    let stderr_shared = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let stderr_writer = std::sync::Arc::clone(&stderr_shared);
+    let drain_thread = std::thread::spawn(move || {
+        use std::io::Read;
+        let mut buf = Vec::new();
+        let mut pipe = stderr_pipe;
+        let _ = pipe.read_to_end(&mut buf);
+        *stderr_writer.lock().unwrap() = buf;
+    });
+
+    let deadline = std::time::Duration::from_secs(30);
+    let mut killed_by_deadline = false;
+
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) => {
+                if start.elapsed() >= deadline {
+                    let _ = child.kill();
+                    killed_by_deadline = true;
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err(e) => panic!("wait failed: {e}"),
+        }
+    }
+    let elapsed = start.elapsed();
+
+    drain_thread.join().expect("stderr drain thread panicked");
+    let stderr_bytes = stderr_shared.lock().unwrap().clone();
+    let stderr = String::from_utf8_lossy(&stderr_bytes);
+
+    eprintln!("OpenMPT probe elapsed: {elapsed:.1?}");
+    eprintln!("--- FULL STDERR BEGIN ---");
+    eprintln!("{stderr}");
+    eprintln!("--- FULL STDERR END ---");
+
+    // A1: no unresolved imports.
+    let unresolved_count = stderr
+        .lines()
+        .filter(|l| l.contains("weave: unresolved:"))
+        .count();
+    assert_eq!(
+        unresolved_count, 0,
+        "PP3 A1 FAIL: found {unresolved_count} unresolved import(s) in stderr.\nstderr: {stderr}"
+    );
+
+    // A2: CreateWindow call observed (player window visible).
+    assert!(
+        stderr.contains("PHASE: create_window_first"),
+        "PP3 A2 FAIL: PHASE: create_window_first not found — player window not created.\nstderr: {stderr}"
+    );
+}
