@@ -1722,6 +1722,43 @@ extern "win64" fn oleacc_create_std_accessible_object(
     0 // S_OK
 }
 
+// ── oledlg.dll stubs ───────────────────────────────────────────────────────────┐
+//                                                                               │
+// oledlg.dll provides OLE common dialogs (busy dialog, insert object, etc.).   │
+// OpenMPT imports OleUIBusyW. Phase A stub returning S_OK (0).                 │
+//┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄│
+
+/// Resolve an oledlg.dll import to a stub address.
+pub fn resolve_oledlg(dll: &str, func: &str) -> Option<usize> {
+    if !dll.eq_ignore_ascii_case("oledlg.dll") {
+        return None;
+    }
+    match func {
+        "OleUIBusyW" => {
+            Some(ole_uibusy_w as unsafe extern "win64" fn(_, _, _, _, _, _) -> _ as *const () as usize)
+        }
+        _ => None,
+    }
+}
+
+/// OleUIBusyW — display the OLE busy dialog.
+///
+/// Returns S_OK (0) without showing a dialog. The caller interprets this as
+/// "the busy dialog was dismissed" and continues.
+// Wine ref: dlls/oledlg/busydlg.c — OleUIBusyW creates and shows a modal dialog
+// box that lets the user switch to the busy server or retry. Returns S_OK, S_FALSE,
+// or OLEUI_CANCEL depending on user action.
+pub unsafe extern "win64" fn ole_uibusy_w(
+    _lp_ole_uibusy: *const u8,
+    _hwnd: usize,
+    _psz_filename: *const u16,
+    _cb_filename: u32,
+    _f_show: u32,
+    _pfn_hook: usize,
+) -> u32 {
+    0 // S_OK
+}
+
 // ── Unit tests ────────────────────────────────────────────────────────────────
 
 #[cfg(test)]

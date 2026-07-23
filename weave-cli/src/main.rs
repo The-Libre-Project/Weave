@@ -181,6 +181,8 @@ fn resolve(dll: &str, func: &str) -> Option<usize> {
         .or_else(|| weave_normaliz::resolve(dll, func))
         // secur32.dll — SSPI dispatch table stub (curl.exe NTLM/Kerberos surface)
         .or_else(|| weave_secur32::resolve(dll, func))
+        // avrt.dll — Multimedia Class Scheduler stubs (OpenMPT thread scheduling)
+        .or_else(|| weave_avrt::resolve(dll, func))
         // bcrypt.dll — CNG random stub (curl.exe entropy fallback)
         .or_else(|| weave_bcrypt::resolve(dll, func))
         // bcryptprimitives.dll — CNG low-level crypto primitives (Signal/SChannel TLS)
@@ -195,6 +197,8 @@ fn resolve(dll: &str, func: &str) -> Option<usize> {
         .or_else(|| weave_ole32::resolve_rpcrt4(dll, func))
         // oleacc.dll — accessibility stubs (wxWidgets accessibility imports)
         .or_else(|| weave_ole32::resolve_oleacc(dll, func))
+        // oledlg.dll — OLE dialog stubs (OpenMPT OleUIBusyW)
+        .or_else(|| weave_ole32::resolve_oledlg(dll, func))
         // Pre-loaded DLL ordinal resolution — ordinals (#N) are registered as
         // export keys in the DLL registry by weave-core's PE loader.
         .or_else(|| {
