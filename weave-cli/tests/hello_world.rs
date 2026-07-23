@@ -9637,9 +9637,10 @@ fn waveout_gate1_smoke() {
 
 /// PP3/b — OpenMPT Phase A probe gate.
 ///
-/// Tier A assertions (see `docs/milestones/PP3.md`):
+/// Tier A assertions (see `docs/milestones/PP3-openmpt-phase-a.md`):
 ///   A1: No `weave: unresolved:` lines in stderr (all imports resolve).
 ///   A2: `PHASE: create_window_first` appears in stderr (player window visible).
+///   A3: `PHASE: waveout_opened` appears in stderr (audio playback via waveOut→PipeWire).
 ///
 /// The gate is #[ignore]'d — invoke explicitly with:
 ///   cargo test -p weave-cli --test hello_world pp3_openmpt_probe_gate
@@ -9724,5 +9725,11 @@ fn pp3_openmpt_probe_gate() {
     assert!(
         stderr.contains("PHASE: create_window_first"),
         "PP3 A2 FAIL: PHASE: create_window_first not found — player window not created.\nstderr: {stderr}"
+    );
+
+    // A3: waveOut audio pipeline started.
+    assert!(
+        stderr.contains("PHASE: waveout_opened"),
+        "PP3 A3 FAIL: PHASE: waveout_opened not found — waveOut audio did not start.\nstderr: {stderr}"
     );
 }
