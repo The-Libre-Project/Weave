@@ -1734,9 +1734,9 @@ pub fn resolve_oledlg(dll: &str, func: &str) -> Option<usize> {
         return None;
     }
     match func {
-        "OleUIBusyW" => {
-            Some(ole_uibusy_w as unsafe extern "win64" fn(_, _, _, _, _, _) -> _ as *const () as usize)
-        }
+        "OleUIBusyW" => Some(
+            ole_uibusy_w as unsafe extern "win64" fn(_, _, _, _, _, _) -> _ as *const () as usize,
+        ),
         _ => None,
     }
 }
