@@ -1640,8 +1640,7 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         ),
         // TODO(shim): Phase A — message filter needed by OpenMPT
         "CoRegisterMessageFilter" => Some(
-            co_register_message_filter as unsafe extern "win64" fn(_, _) -> _ as *const ()
-                as usize,
+            co_register_message_filter as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
         ),
         _ => None,
     }
