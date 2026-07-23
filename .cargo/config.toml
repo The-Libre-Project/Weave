@@ -4,6 +4,13 @@
 # Tests run in Docker (`make test`).
 target = "x86_64-unknown-linux-gnu"
 
+[env]
+# Disable assembly optimizations in aws-lc-sys to avoid AVX-512 instructions
+# that emit 64-byte stack loads.  These loads can cross a page boundary near
+# the top of the process stack, faulting on an adjacent unmapped page.
+# (Observed with Foobar2000 component loading + rustls → aws-lc-rs.)
+AWS_LC_SYS_NO_ASM = "1"
+
 [alias]
 # Build for the Linux target
 zbuild = "zigbuild --target x86_64-unknown-linux-gnu"
