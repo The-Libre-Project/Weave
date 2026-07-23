@@ -1,7 +1,5 @@
-# OpenMPT fixture — track only .gitignore and imports.txt
-# Download the portable amd64 zip from openmpt.org and extract manually.
-# See tasks/TASK-PP3-a-fixture-download.md
-
-*
-!.gitignore
-!imports.txt
+# OpenMPT fixture — track the exe, ignore downloaded artifacts
+*.zip
+*.dll
+*.portable
+openmpt-wine-support.zip
