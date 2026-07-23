@@ -14851,7 +14851,9 @@ pub unsafe extern "win64" fn peek_console_input_w(
     0 // FALSE
 }
 
-/// QueryActCtxW — stub, returns FALSE.
+// TODO(shim): Phase A — activation context query needed by OpenMPT
+// Wine ref: dlls/kernel32/actctx.c — QueryActCtxW queries activation context data.
+// Weave: stub returning FALSE (0).
 pub unsafe extern "win64" fn query_act_ctx_w(
     _dw_flags: u32,
     _h_act_ctx: usize,
@@ -16645,6 +16647,11 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "SignalObjectAndWait" => Some(signal_object_and_wait as *const () as usize),
         "CreateDirectoryExW" => Some(
             create_directory_ex_w as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
+        ),
+        // TODO(shim): Phase A — activation context query needed by OpenMPT
+        "QueryActCtxW" => Some(
+            query_act_ctx_w as unsafe extern "win64" fn(_, _, _, _, _, _, _) -> _ as *const ()
+                as usize,
         ),
         _ => {
             // version.dll functions are forwarded through kernel32 in some apps;

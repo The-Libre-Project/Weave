@@ -2,4 +2,5 @@
 *.zip
 *.dll
 *.portable
+!OpenMPT.portable
 openmpt-wine-support.zip

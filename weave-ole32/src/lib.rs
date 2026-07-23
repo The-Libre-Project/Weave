@@ -957,6 +957,16 @@ pub extern "win64" fn co_initialize_security(
     S_OK
 }
 
+// TODO(shim): Phase A — message filter needed by OpenMPT
+// Wine ref: dlls/ole32/ole32.spec — CoRegisterMessageFilter registers/replaces
+// the message filter for COM. Weave: stub returning S_OK.
+pub unsafe extern "win64" fn co_register_message_filter(
+    _lp_message_filter: usize,
+    _lpl_prev_filter: *mut usize,
+) -> i32 {
+    0 // S_OK
+}
+
 // Wine ref: dlls/combase/combase.c:1965 — delegates to com_get_class_object(); searches activation
 // context first, then HKCR\CLSID\{...}\InprocServer32; returns REGDB_E_CLASSNOTREG if not found.
 /// CoGetClassObject: retrieve the class factory for a given CLSID (stub).
@@ -1626,6 +1636,11 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         // Structured storage (E_NOTIMPL stub)
         "CreateStreamOnHGlobal" => Some(
             create_stream_on_hglobal as unsafe extern "win64" fn(_, _, _) -> _ as *const ()
+                as usize,
+        ),
+        // TODO(shim): Phase A — message filter needed by OpenMPT
+        "CoRegisterMessageFilter" => Some(
+            co_register_message_filter as unsafe extern "win64" fn(_, _) -> _ as *const ()
                 as usize,
         ),
         _ => None,
