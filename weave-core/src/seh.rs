@@ -606,14 +606,8 @@ unsafe extern "C" fn on_fatal_signal(
         // Do not dereference RSP here. A host fault can leave it unmapped or
         // point at a guard page; the detailed reporter uses /proc/self/mem.
         unsafe {
-            let gregs = (*uctx).uc_mcontext.gregs;
-            let rsp = gregs[libc::REG_RSP as usize] as usize;
-            let mut rbuf = [0u8; 256];
-            let mut pos = 0usize;
             let line = b"weave: host fault; stack dereference skipped\n";
-            rbuf[..line.len()].copy_from_slice(line);
-            pos = line.len();
-            libc::write(2, rbuf.as_ptr() as *const libc::c_void, pos);
+            libc::write(2, line.as_ptr() as *const libc::c_void, line.len());
         }
         print_weave_crash(sig, rip, fault_addr, base, uctx);
         unsafe {
