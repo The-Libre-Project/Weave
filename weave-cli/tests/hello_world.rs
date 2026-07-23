@@ -1661,6 +1661,7 @@ fn foobar2000_probe_gate() {
         .arg("--no-sandbox")
         .arg(&fb2k_exe)
         .env_remove("DISPLAY")
+        .env("OPENSSL_ia32cap", "::~0x10000")
         .stderr(std::process::Stdio::piped())
         .spawn()
         .unwrap_or_else(|e| panic!("failed to spawn weave on foobar2000.exe: {e}"));

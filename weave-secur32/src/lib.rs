@@ -36,6 +36,53 @@ pub unsafe extern "win64" fn InitSecurityInterfaceW() -> usize {
     0
 }
 
+const SEC_E_UNSUPPORTED_FUNCTION: i32 = -2146893054; // 0x80090302
+
+/// stub — returns SEC_E_UNSUPPORTED_FUNCTION.
+pub unsafe extern "win64" fn StubAcquireCredentialsHandleW() -> i32 {
+    SEC_E_UNSUPPORTED_FUNCTION
+}
+/// stub — returns SEC_E_UNSUPPORTED_FUNCTION.
+pub unsafe extern "win64" fn StubInitializeSecurityContextW() -> i32 {
+    SEC_E_UNSUPPORTED_FUNCTION
+}
+/// stub — returns SEC_E_UNSUPPORTED_FUNCTION.
+pub unsafe extern "win64" fn StubAcceptSecurityContext() -> i32 {
+    SEC_E_UNSUPPORTED_FUNCTION
+}
+/// stub — returns SEC_E_UNSUPPORTED_FUNCTION.
+pub unsafe extern "win64" fn StubDeleteSecurityContext() -> i32 {
+    SEC_E_UNSUPPORTED_FUNCTION
+}
+/// stub — returns SEC_E_UNSUPPORTED_FUNCTION.
+pub unsafe extern "win64" fn StubFreeContextBuffer() -> i32 {
+    SEC_E_UNSUPPORTED_FUNCTION
+}
+/// stub — returns SEC_E_UNSUPPORTED_FUNCTION.
+pub unsafe extern "win64" fn StubQueryContextAttributesW() -> i32 {
+    SEC_E_UNSUPPORTED_FUNCTION
+}
+/// stub — returns SEC_E_UNSUPPORTED_FUNCTION.
+pub unsafe extern "win64" fn StubFreeCredentialsHandle() -> i32 {
+    SEC_E_UNSUPPORTED_FUNCTION
+}
+/// stub — returns SEC_E_UNSUPPORTED_FUNCTION.
+pub unsafe extern "win64" fn StubEncryptMessage() -> i32 {
+    SEC_E_UNSUPPORTED_FUNCTION
+}
+/// stub — returns SEC_E_UNSUPPORTED_FUNCTION.
+pub unsafe extern "win64" fn StubDecryptMessage() -> i32 {
+    SEC_E_UNSUPPORTED_FUNCTION
+}
+/// stub — returns SEC_E_UNSUPPORTED_FUNCTION.
+pub unsafe extern "win64" fn StubMakeSignature() -> i32 {
+    SEC_E_UNSUPPORTED_FUNCTION
+}
+/// stub — returns SEC_E_UNSUPPORTED_FUNCTION.
+pub unsafe extern "win64" fn StubVerifySignature() -> i32 {
+    SEC_E_UNSUPPORTED_FUNCTION
+}
+
 /// Resolve a secur32.dll import to a function pointer.
 pub fn resolve(dll: &str, func: &str) -> Option<usize> {
     if !dll.eq_ignore_ascii_case("secur32.dll") {
@@ -47,6 +94,39 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         }
         "InitSecurityInterfaceW" => {
             Some(InitSecurityInterfaceW as unsafe extern "win64" fn() -> _ as *const () as usize)
+        }
+        "AcquireCredentialsHandleW" => Some(
+            StubAcquireCredentialsHandleW as unsafe extern "win64" fn() -> _ as *const () as usize,
+        ),
+        "InitializeSecurityContextW" => Some(
+            StubInitializeSecurityContextW as unsafe extern "win64" fn() -> _ as *const () as usize,
+        ),
+        "AcceptSecurityContext" => {
+            Some(StubAcceptSecurityContext as unsafe extern "win64" fn() -> _ as *const () as usize)
+        }
+        "DeleteSecurityContext" => {
+            Some(StubDeleteSecurityContext as unsafe extern "win64" fn() -> _ as *const () as usize)
+        }
+        "FreeContextBuffer" => {
+            Some(StubFreeContextBuffer as unsafe extern "win64" fn() -> _ as *const () as usize)
+        }
+        "QueryContextAttributesW" => Some(
+            StubQueryContextAttributesW as unsafe extern "win64" fn() -> _ as *const () as usize,
+        ),
+        "FreeCredentialsHandle" => {
+            Some(StubFreeCredentialsHandle as unsafe extern "win64" fn() -> _ as *const () as usize)
+        }
+        "EncryptMessage" => {
+            Some(StubEncryptMessage as unsafe extern "win64" fn() -> _ as *const () as usize)
+        }
+        "DecryptMessage" => {
+            Some(StubDecryptMessage as unsafe extern "win64" fn() -> _ as *const () as usize)
+        }
+        "MakeSignature" => {
+            Some(StubMakeSignature as unsafe extern "win64" fn() -> _ as *const () as usize)
+        }
+        "VerifySignature" => {
+            Some(StubVerifySignature as unsafe extern "win64" fn() -> _ as *const () as usize)
         }
         _ => None,
     }

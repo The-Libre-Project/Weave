@@ -1181,17 +1181,19 @@ fn ipc_handler(dll: &str, function: &str, args: &[serde_json::Value]) -> Option<
 }
 
 fn main() {
-    // Raise the main thread stack limit before any PE or crypto code runs.
-    // AWS-LC (via rustls → aws-lc-rs) uses AVX-512 stack frames that can
-    // push past the default 8 MiB RLIMIT_STACK, causing a guard-page fault.
+    // On Linux 5.18+, disable AVX-512 for this process so AWS-LC avoids the
+    // 64-byte stack loads that cross page boundaries.  AD_COMPAT_SKIP_AVX512
+    // (= 0x4000) clears XSTATE_AVX512 in the kernel's x86 CET/XSAVE logic,
+    // causing sigreturn to strip AVX-512 state and CPUID to report no support.
     #[cfg(target_os = "linux")]
     unsafe {
-        let rlim = libc::rlimit {
-            rlim_cur: 64 * 1024 * 1024, // 64 MiB soft
-            rlim_max: 64 * 1024 * 1024, // 64 MiB hard
-        };
-        libc::setrlimit(libc::RLIMIT_STACK, &rlim);
+        // personality(SYS_personality=135, AD_COMPAT_SKIP_AVX512=0x4000)
+        libc::syscall(135i64, 0x4000i64);
     }
+
+    // Keep the default 8 MiB kernel stack.  Increasing RLIMIT_STACK at runtime
+    // does not enlarge the initial mapping and can confuse the kernel's guard-
+    // page handling for the main thread.
 
     // Initialize glibc locale at process start so character classification
     // (iswctype, isalpha, etc.) doesn't SIGSEGV at fault=0x8 when called

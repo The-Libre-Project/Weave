@@ -95,15 +95,33 @@ pub fn load_with_name(bytes: &[u8], name: &str) -> Result<LoadedImage, String> {
 }
 
 fn load_impl(bytes: &[u8]) -> Result<LoadedImage, String> {
-    // Wrap in catch_unwind: goblin's TLS/reloc parsers can panic on crafted input.
-    // (Confirmed by cargo-fuzz crash, 2026-04-05.)
-    let pe = std::panic::catch_unwind(|| PE::parse(bytes))
-        .unwrap_or_else(|_| {
-            Err(goblin::error::Error::Malformed(
-                "goblin panicked".to_string(),
-            ))
-        })
-        .map_err(|e| format!("parse error: {e}"))?;
+    // Goblin's TLS parser can SIGSEGV on a near-exhausted host stack
+    // (observed with Foobar2000 component loading).  Running PE::parse on
+    // a dedicated thread with a large stack avoids this while keeping the
+    // parsed data accessible on the calling thread (via a leaked copy).
+    let owned = bytes.to_vec().into_boxed_slice();
+    let static_ref: &'static [u8] = Box::leak(owned);
+    let pe = {
+        let copy_ptr = static_ref.as_ptr() as usize;
+        let copy_len = static_ref.len();
+        std::thread::Builder::new()
+            .stack_size(32 * 1024 * 1024)
+            .name("weave-pe-parse".into())
+            .spawn(move || {
+                let slice: &[u8] =
+                    unsafe { std::slice::from_raw_parts(copy_ptr as *const u8, copy_len) };
+                std::panic::catch_unwind(|| PE::parse(slice))
+                    .unwrap_or_else(|_| {
+                        Err(goblin::error::Error::Malformed(
+                            "goblin panicked".to_string(),
+                        ))
+                    })
+                    .map_err(|e| format!("parse error: {e}"))
+            })
+            .map_err(|e| format!("PE parse thread spawn: {e}"))?
+            .join()
+            .map_err(|_| "PE parser thread panicked".to_string())??
+    };
 
     let opt = pe
         .header
@@ -117,11 +135,6 @@ fn load_impl(bytes: &[u8]) -> Result<LoadedImage, String> {
     let (tls_data, tls_data_size) = init_tls(base, bytes, &pe);
 
     // Compute TLS callback array address in the loaded image.
-    // The TLS directory stores VAs relative to the preferred base; after
-    // relocation (apply_relocations above) the runtime values shift by
-    // delta = actual_base - preferred_base.  Goblin parses TlsData from
-    // raw file bytes, so we add delta manually rather than re-reading the
-    // relocated in-memory TLS directory.
     let preferred_base = opt.windows_fields.image_base as i64;
     let actual_base = base as i64;
     let delta = actual_base - preferred_base;
@@ -144,21 +157,8 @@ fn load_impl(bytes: &[u8]) -> Result<LoadedImage, String> {
         crate::progress::mark_phase("loaded_pe");
     }
 
-    // Register identity mapping so `base_of(base)` resolves for callers that
-    // pass the real PE base as HMODULE (the common case — e.g.
-    // `GetModuleHandleW(NULL)` returns `seh::pe_base()`). Without this the
-    // resource walker fails for guest exes regardless of whether they were
-    // loaded via `load` or `load_with_name`.
     crate::module_handles::register_image_base(base as usize);
-
-    // If the PE was rebased (MAP_FIXED_NOREPLACE failed or was not attempted),
-    // the MSVC CRT reads OptionalHeader.ImageBase directly from the mapped
-    // header and passes it unchanged as hInst to resource APIs.  Register the
-    // preferred base as an alias → actual so base_of(preferred) resolves.
-    // When the PE landed at its preferred base the alias is a no-op (guarded
-    // inside register_image_base_alias).
-    let preferred_base = opt.windows_fields.image_base as usize;
-    crate::module_handles::register_image_base_alias(preferred_base, base as usize);
+    crate::module_handles::register_image_base_alias(preferred_base as usize, base as usize);
 
     Ok(LoadedImage {
         base,
