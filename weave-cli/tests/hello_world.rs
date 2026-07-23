@@ -9642,9 +9642,6 @@ fn waveout_gate1_smoke() {
 ///   A2: `PHASE: create_window_first` appears in stderr (player window visible).
 ///   A3: `PHASE: waveout_opened` appears in stderr (audio playback via waveOut→PipeWire).
 ///
-/// The gate is #[ignore]'d — invoke explicitly with:
-///   cargo test -p weave-cli --test hello_world pp3_openmpt_probe_gate
-#[ignore]
 #[test]
 fn pp3_openmpt_probe_gate() {
     if !cfg!(target_os = "linux") {
