@@ -571,7 +571,10 @@ pub unsafe extern "win64" fn write_console_w(
 // which sends the exit code to the Wineserver and unwinds TLS callbacks
 // (DLL_PROCESS_DETACH) before calling NtTerminateProcess.
 pub extern "win64" fn exit_process(u_exit_code: u32) -> ! {
-    eprintln!("weave/kernel32: ExitProcess({u_exit_code})");
+    // Capture the return address to identify which guest code called ExitProcess.
+    let ret_addr: usize;
+    unsafe { std::arch::asm!("mov {0}, [rsp]", out(reg) ret_addr) };
+    eprintln!("weave/kernel32: ExitProcess({u_exit_code}) from guest RIP=0x{ret_addr:x}");
     unsafe { libc::exit(u_exit_code as i32) }
 }
 
@@ -16797,6 +16800,16 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "HeapQueryInformation" => Some(
             heap_query_information as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const () as usize,
         ),
+        // Activation context stubs (SPSS Phase A / OpenMPT).
+        // Resolved here in the kernel32 path; also registered in resolve_version
+        // for apps that import from sxs.dll directly.
+        "ActivateActCtx" => Some(activate_act_ctx as *const () as usize),
+        "CreateActCtxW" => Some(create_act_ctx_w as *const () as usize),
+        "DeactivateActCtx" => Some(deactivate_act_ctx as *const () as usize),
+        "FindActCtxSectionStringW" => Some(
+            find_act_ctx_section_string_w as unsafe extern "win64" fn(_, _, _, _, _) -> _
+                as *const () as usize,
+        ),
         _ => {
             // version.dll functions are forwarded through kernel32 in some apps;
             // also handle them when the DLL name is version.dll directly.
@@ -17443,13 +17456,6 @@ pub fn resolve_version(dll: &str, func: &str) -> Option<usize> {
         "VerQueryValueW" => ver_query_value_w as *const () as usize,
         "VerQueryValueA" => ver_query_value_a as *const () as usize,
         // ── SPSS Phase A stubs ────────────────────────────────────────────
-        "ActivateActCtx" => activate_act_ctx as *const () as usize,
-        "CreateActCtxW" => create_act_ctx_w as *const () as usize,
-        "DeactivateActCtx" => deactivate_act_ctx as *const () as usize,
-        "FindActCtxSectionStringW" => {
-            find_act_ctx_section_string_w as unsafe extern "win64" fn(_, _, _, _, _) -> _
-                as *const () as usize
-        }
         "PeekConsoleInputW" => {
             peek_console_input_w as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize
         }
