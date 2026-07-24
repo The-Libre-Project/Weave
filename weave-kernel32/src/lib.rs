@@ -571,10 +571,7 @@ pub unsafe extern "win64" fn write_console_w(
 // which sends the exit code to the Wineserver and unwinds TLS callbacks
 // (DLL_PROCESS_DETACH) before calling NtTerminateProcess.
 pub extern "win64" fn exit_process(u_exit_code: u32) -> ! {
-    // Capture the return address to identify which guest code called ExitProcess.
-    let ret_addr: usize;
-    unsafe { std::arch::asm!("mov {0}, [rsp]", out(reg) ret_addr) };
-    eprintln!("weave/kernel32: ExitProcess({u_exit_code}) from guest RIP=0x{ret_addr:x}");
+    eprintln!("weave/kernel32: ExitProcess({u_exit_code})");
     unsafe { libc::exit(u_exit_code as i32) }
 }
 
