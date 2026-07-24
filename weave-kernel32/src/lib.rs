@@ -14889,7 +14889,7 @@ pub unsafe extern "win64" fn write_private_profile_struct_w(
     _n_size: u32,
     _lp_file_name: *const u16,
 ) -> i32 {
-    0 // FALSE
+    1 // TRUE — pretend success; binary INI data not persisted
 }
 
 // TODO(shim): Phase A — threadpool callback wait needed by OpenMPT
