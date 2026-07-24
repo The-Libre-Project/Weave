@@ -9662,8 +9662,9 @@ fn pp3_openmpt_probe_gate() {
     let start = std::time::Instant::now();
     let mut child = std::process::Command::new(weave_bin)
         .arg("--no-sandbox")
-        .arg("--trace=stub,phase,msg")
+        .arg("--trace=stub,phase,msg,fault")
         .arg(&fixture)
+        .arg("--noCrashHandler")
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()

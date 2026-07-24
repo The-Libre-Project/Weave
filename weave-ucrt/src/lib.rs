@@ -446,8 +446,6 @@ pub extern "win64" fn ucrt__exit(code: i32) -> ! {
 /// Wine ref: dlls/msvcrt/exit.c:252 — abort() calls raise(SIGABRT) and then
 /// `_aexit_rtn(3)` (which is `_exit` by default, see line 60 of that file).
 pub extern "win64" fn ucrt_abort() -> ! {
-    // Safety: no guest pointers, no UB from this fn.
-    eprintln!("weave/ucrt: abort() called — OpenMPT SEH caught an exception");
     unsafe {
         libc::raise(libc::SIGABRT);
         libc::_exit(3);
