@@ -1,6 +1,7 @@
-# OpenMPT fixture — track the exe, ignore downloaded artifacts
-*.zip
-*.dll
-*.portable
+# Only track the exe, .gitignore, and imports.txt
+# Everything else is part of the distribution but not needed for testing
+*
+!.gitignore
+!imports.txt
+!OpenMPT.exe
 !OpenMPT.portable
-openmpt-wine-support.zip
