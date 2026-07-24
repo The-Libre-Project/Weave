@@ -2851,6 +2851,76 @@ pub extern "win64" fn get_nearest_color(_hdc: usize, _color: u32) -> u32 {
     0
 }
 
+// ── OpenMPT Phase A stubs ─────────────────────────────────────────────────────
+
+// TODO(shim): Phase A — DC pen color set needed by OpenMPT
+// Wine ref: dlls/gdi32/dc.c — SetDCPenColor sets the current pen color
+pub extern "win64" fn set_dc_pen_color(_hdc: usize, _color: u32) -> u32 {
+    0xFFFFFFFF // CLR_INVALID
+}
+
+// TODO(shim): Phase A — DC brush color set needed by OpenMPT
+// Wine ref: dlls/gdi32/dc.c — SetDCBrushColor sets the current brush color
+pub extern "win64" fn set_dc_brush_color(_hdc: usize, _color: u32) -> u32 {
+    0xFFFFFFFF // CLR_INVALID
+}
+
+// TODO(shim): Phase A — elliptic region creation needed by OpenMPT
+// Wine ref: dlls/gdi32/region.c — CreateEllipticRgn creates an elliptical region
+pub extern "win64" fn create_elliptic_rgn(
+    _x1: i32, _y1: i32, _x2: i32, _y2: i32,
+) -> usize {
+    0 // NULL
+}
+
+// TODO(shim): Phase A — set rect region needed by OpenMPT
+// Wine ref: dlls/gdi32/region.c — SetRectRgn sets a region to a rectangle
+pub extern "win64" fn set_rect_rgn(
+    _hrgn: usize, _x1: i32, _y1: i32, _x2: i32, _y2: i32,
+) -> i32 {
+    0 // FALSE
+}
+
+// TODO(shim): Phase A — window extent scaling needed by OpenMPT
+// Wine ref: dlls/gdi32/gdiobj.c — ScaleWindowExtEx scales window extent
+pub unsafe extern "win64" fn scale_window_ext_ex(
+    _hdc: usize,
+    _x_num: i32, _x_denom: i32,
+    _y_num: i32, _y_denom: i32,
+    _prev_size: *mut u8,
+) -> i32 {
+    0 // FALSE
+}
+
+// TODO(shim): Phase A — viewport extent scaling needed by OpenMPT
+// Wine ref: dlls/gdi32/gdiobj.c — ScaleViewportExtEx scales viewport extent
+pub unsafe extern "win64" fn scale_viewport_ext_ex(
+    _hdc: usize,
+    _x_num: i32, _x_denom: i32,
+    _y_num: i32, _y_denom: i32,
+    _prev_size: *mut u8,
+) -> i32 {
+    0 // FALSE
+}
+
+// TODO(shim): Phase A — printer escape needed by OpenMPT
+// Wine ref: dlls/gdi32/print.c — Escape handles printer escapes
+pub unsafe extern "win64" fn escape(
+    _hdc: usize,
+    _n_escape: i32,
+    _n_input: i32,
+    _lpin_data: *const u8,
+    _lp_out_data: *mut u8,
+) -> i32 {
+    0 // SP_ERROR
+}
+
+// TODO(shim): Phase A — point visibility needed by OpenMPT
+// Wine ref: dlls/gdi32/clipping.c — PtVisible tests if point is in clip region
+pub extern "win64" fn pt_visible(_hdc: usize, _x: i32, _y: i32) -> i32 {
+    0 // FALSE
+}
+
 pub fn resolve(dll: &str, func: &str) -> Option<usize> {
     let is_gdi32 = dll.eq_ignore_ascii_case("gdi32.dll");
     let is_user32_gdi = dll.eq_ignore_ascii_case("user32.dll")
@@ -3277,6 +3347,21 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "GetNearestColor" => {
             Some(get_nearest_color as extern "win64" fn(_, _) -> _ as *const () as usize)
         }
+        // ── OpenMPT Phase A stubs ──────────────────────────────────────────
+        "SetDCPenColor" => Some(set_dc_pen_color as *const () as usize),
+        "SetDCBrushColor" => Some(set_dc_brush_color as *const () as usize),
+        "CreateEllipticRgn" => Some(create_elliptic_rgn as extern "win64" fn(_, _, _, _) -> _ as *const () as usize),
+        "SetRectRgn" => Some(set_rect_rgn as extern "win64" fn(_, _, _, _, _) -> _ as *const () as usize),
+        "ScaleWindowExtEx" => Some(
+            scale_window_ext_ex as unsafe extern "win64" fn(_, _, _, _, _, _) -> _ as *const () as usize,
+        ),
+        "ScaleViewportExtEx" => Some(
+            scale_viewport_ext_ex as unsafe extern "win64" fn(_, _, _, _, _, _) -> _ as *const () as usize,
+        ),
+        "Escape" => Some(
+            escape as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const () as usize,
+        ),
+        "PtVisible" => Some(pt_visible as *const () as usize),
         _ => None,
     }
 }

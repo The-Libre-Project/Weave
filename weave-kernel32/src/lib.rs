@@ -14863,6 +14863,117 @@ pub unsafe extern "win64" fn query_act_ctx_w(
     _cb_buffer: usize,
     _pcb_written_or_required: *mut usize,
 ) -> i32 {
+     0 // FALSE
+}
+
+// ── OpenMPT Phase A stubs ─────────────────────────────────────────────────────
+
+// TODO(shim): Phase A — private profile string read needed by OpenMPT
+// Wine ref: dlls/kernel32/profile.c — GetPrivateProfileStructW reads from INI file
+pub unsafe extern "win64" fn get_private_profile_struct_w(
+    _lp_app_name: *const u16,
+    _lp_key_name: *const u16,
+    _lp_string: *mut u8,
+    _n_size: u32,
+    _lp_file_name: *const u16,
+) -> i32 {
+    0 // FALSE
+}
+
+// TODO(shim): Phase A — private profile string write needed by OpenMPT
+// Wine ref: dlls/kernel32/profile.c — WritePrivateProfileStructW writes to INI file
+pub unsafe extern "win64" fn write_private_profile_struct_w(
+    _lp_app_name: *const u16,
+    _lp_key_name: *const u16,
+    _lp_string: *mut u8,
+    _n_size: u32,
+    _lp_file_name: *const u16,
+) -> i32 {
+    0 // FALSE
+}
+
+// TODO(shim): Phase A — threadpool callback wait needed by OpenMPT
+// Wine ref: dlls/kernel32/threadpool.c — WaitForThreadpoolWorkCallbacks waits for pending work
+pub unsafe extern "win64" fn wait_for_threadpool_work_callbacks(
+    _ptp_work: usize,
+    _f_cancel_pending_callbacks: i32,
+) {
+    // void return
+}
+
+// TODO(shim): Phase A — global atom lookup needed by OpenMPT
+// Wine ref: dlls/kernel32/atom.c — GlobalFindAtomW searches the global atom table
+pub unsafe extern "win64" fn global_find_atom_w(_lp_string: *const u16) -> u16 {
+    0 // ATOM 0 = not found
+}
+
+// TODO(shim): Phase A — global atom name query needed by OpenMPT
+// Wine ref: dlls/kernel32/atom.c — GlobalGetAtomNameW retrieves an atom's name
+pub unsafe extern "win64" fn global_get_atom_name_w(
+    _n_atom: u16,
+    _lp_buffer: *mut u16,
+    _n_size: i32,
+) -> i32 {
+    0 // FALSE
+}
+
+// TODO(shim): Phase A — global atom flags needed by OpenMPT
+// Wine ref: dlls/kernel32/atom.c — GlobalFlags returns atom flags
+pub extern "win64" fn global_flags(_n_atom: u16) -> u32 {
+    0 // GMEM_INVALID_HANDLE
+}
+
+// TODO(shim): Phase A — profile integer read needed by OpenMPT
+// Wine ref: dlls/kernel32/profile.c — GetProfileIntW reads integer from INI file
+pub extern "win64" fn get_profile_int_w(
+    _lp_app_name: *const u16,
+    _lp_key_name: *const u16,
+    n_default: i32,
+) -> i32 {
+    n_default
+}
+
+// TODO(shim): Phase A — global memory reallocation needed by OpenMPT
+// Wine ref: dlls/kernel32/heap.c — GlobalReAlloc re-allocates global memory
+pub unsafe extern "win64" fn global_re_alloc(_h_mem: usize, _dw_bytes: usize, _u_flags: u32) -> usize {
+    0 // NULL
+}
+
+// TODO(shim): Phase A — system default UI language needed by OpenMPT
+// Wine ref: dlls/kernel32/locale.c — GetSystemDefaultUILanguage returns the system UI lang
+pub extern "win64" fn get_system_default_ui_language() -> u16 {
+    0x0409 // en-US
+}
+
+// TODO(shim): Phase A — time zone conversion needed by OpenMPT
+// Wine ref: dlls/kernel32/timezone.c — SystemTimeToTzSpecificLocalTimeEx converts time
+pub unsafe extern "win64" fn system_time_to_tz_specific_local_time_ex(
+    _lp_time_zone_info: *const u8,
+    _lp_universal_time: *const u8,
+    _lp_local_time: *mut u8,
+) -> i32 {
+    0 // FALSE
+}
+
+// TODO(shim): Phase A — time zone conversion needed by OpenMPT
+// Wine ref: dlls/kernel32/timezone.c — TzSpecificLocalTimeToSystemTimeEx converts time
+pub unsafe extern "win64" fn tz_specific_local_time_to_system_time_ex(
+    _lp_time_zone_info: *const u8,
+    _lp_local_time: *const u8,
+    _lp_universal_time: *mut u8,
+) -> i32 {
+    0 // FALSE
+}
+
+// TODO(shim): Phase A — heap query needed by OpenMPT
+// Wine ref: dlls/kernel32/heap.c — HeapQueryInformation queries heap properties
+pub unsafe extern "win64" fn heap_query_information(
+    _h_heap: usize,
+    _heap_information_class: i32,
+    _heap_information: *mut u8,
+    _heap_information_length: usize,
+    _return_length: *mut usize,
+) -> i32 {
     0 // FALSE
 }
 
@@ -16652,6 +16763,39 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "QueryActCtxW" => Some(
             query_act_ctx_w as unsafe extern "win64" fn(_, _, _, _, _, _, _) -> _ as *const ()
                 as usize,
+        ),
+        // ── OpenMPT Phase A stubs ──────────────────────────────────────────
+        "GetPrivateProfileStructW" => Some(
+            get_private_profile_struct_w
+                as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const () as usize,
+        ),
+        "WritePrivateProfileStructW" => Some(
+            write_private_profile_struct_w
+                as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const () as usize,
+        ),
+        "WaitForThreadpoolWorkCallbacks" => Some(
+            wait_for_threadpool_work_callbacks as unsafe extern "win64" fn(_, _) as *const () as usize,
+        ),
+        "GlobalFindAtomW" => Some(global_find_atom_w as *const () as usize),
+        "GlobalGetAtomNameW" => Some(
+            global_get_atom_name_w as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
+        ),
+        "GlobalFlags" => Some(global_flags as *const () as usize),
+        "GetProfileIntW" => Some(
+            get_profile_int_w as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
+        ),
+        "GlobalReAlloc" => Some(global_re_alloc as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize),
+        "GetSystemDefaultUILanguage" => Some(get_system_default_ui_language as *const () as usize),
+        "SystemTimeToTzSpecificLocalTimeEx" => Some(
+            system_time_to_tz_specific_local_time_ex
+                as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
+        ),
+        "TzSpecificLocalTimeToSystemTimeEx" => Some(
+            tz_specific_local_time_to_system_time_ex
+                as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
+        ),
+        "HeapQueryInformation" => Some(
+            heap_query_information as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const () as usize,
         ),
         _ => {
             // version.dll functions are forwarded through kernel32 in some apps;

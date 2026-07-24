@@ -1642,8 +1642,17 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "CoRegisterMessageFilter" => Some(
             co_register_message_filter as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
         ),
+        // TODO(shim): Phase A — free unused COM libraries needed by OpenMPT
+        // Wine ref: dlls/ole32/ole32.c — CoFreeUnusedLibraries frees unused libs
+        "CoFreeUnusedLibraries" => Some(co_free_unused_libraries as *const () as usize),
         _ => None,
     }
+}
+
+/// CoFreeUnusedLibraries — stub, no-op.
+// Wine ref: dlls/ole32/ole32.c — CoFreeUnusedLibraries calls CoFreeUnusedLibrariesEx
+extern "win64" fn co_free_unused_libraries() {
+    // void
 }
 
 // ── oleaut32.dll stubs ─────────────────────────────────────────────────────────
@@ -1674,8 +1683,10 @@ pub fn resolve_rpcrt4(dll: &str, func: &str) -> Option<usize> {
     }
     match func {
         "UuidCreate" => Some(rpc_uuid_create as *const () as usize),
+        "UuidCreateSequential" => Some(rpc_uuid_create_sequential as *const () as usize),
         "UuidToStringW" => Some(rpc_uuid_to_string_w as *const () as usize),
         "UuidFromStringW" => Some(rpc_uuid_from_string_w as *const () as usize),
+        "UuidIsNil" => Some(rpc_uuid_is_nil as *const () as usize),
         "RpcStringFreeW" => Some(rpc_string_free_w as *const () as usize),
         _ => None,
     }
@@ -1701,6 +1712,18 @@ extern "win64" fn rpc_string_free_w(_str: *mut u16) -> i32 {
     0 // RPC_S_OK
 }
 
+// TODO(shim): Phase A — sequential UUID creation needed by OpenMPT
+// Wine ref: dlls/rpcrt4/rpc.c — UuidCreateSequential creates a UUID
+extern "win64" fn rpc_uuid_create_sequential(_uuid: *mut u8) -> i32 {
+    0 // RPC_S_OK
+}
+
+// TODO(shim): Phase A — UUID nil check needed by OpenMPT
+// Wine ref: dlls/rpcrt4/rpc.c — UuidIsNil checks if UUID is nil
+extern "win64" fn rpc_uuid_is_nil(_uuid: *const u8) -> i32 {
+    1 // TRUE — claim nil (safest default)
+}
+
 // ── oleacc.dll stubs ───────────────────────────────────────────────────────────
 
 /// Resolve an oleacc.dll import to a stub address.
@@ -1713,6 +1736,10 @@ pub fn resolve_oleacc(dll: &str, func: &str) -> Option<usize> {
         "CreateStdAccessibleObject" => {
             Some(oleacc_create_std_accessible_object as *const () as usize)
         }
+        "AccessibleObjectFromWindow" => Some(
+            oleacc_accessible_object_from_window as unsafe extern "win64" fn(_, _, _, _) -> _
+                as *const () as usize,
+        ),
         _ => None,
     }
 }
@@ -1733,6 +1760,21 @@ extern "win64" fn oleacc_create_std_accessible_object(
     _riid: *const u8,
     _acc: *mut usize,
 ) -> i32 {
+    0 // S_OK
+}
+
+// TODO(shim): Phase A — accessible object from window needed by OpenMPT
+// Wine ref: dlls/oleacc/main.c — AccessibleObjectFromWindow gets an accessibility
+// object for a window. Weave stub returns S_OK and sets ppvObject to NULL.
+extern "win64" fn oleacc_accessible_object_from_window(
+    _hwnd: usize,
+    _id_object: u32,
+    _riid: *const u8,
+    ppv_object: *mut usize,
+) -> i32 {
+    if !ppv_object.is_null() {
+        unsafe { *ppv_object = 0 };
+    }
     0 // S_OK
 }
 

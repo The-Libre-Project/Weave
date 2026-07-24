@@ -878,6 +878,31 @@ pub unsafe extern "win64" fn internet_open_url_w(
     std::ptr::null() // NULL — URL open not supported in headless mode
 }
 
+// TODO(shim): Phase A — HTTP send request (wide) needed by OpenMPT
+// Wine ref: dlls/wininet/http.c — HttpSendRequestW is the wide variant
+// Weave: stub returning FALSE (0) since no server connection exists.
+pub unsafe extern "win64" fn http_send_request_w(
+    _h_request: usize,
+    _lpsz_headers: *const u16,
+    _dw_headers_length: u32,
+    _lp_optional: *const u8,
+    _dw_optional_length: u32,
+) -> i32 {
+    0 // FALSE
+}
+
+// TODO(shim): Phase A — query data available needed by OpenMPT
+// Wine ref: dlls/wininet/internet.c — InternetQueryDataAvailable checks data availability
+// Weave: stub returning FALSE (0) since no data is available.
+pub unsafe extern "win64" fn internet_query_data_available(
+    _h_file: usize,
+    _lpdw_number_of_bytes_available: *mut u32,
+    _dw_flags: u32,
+    _dw_context: usize,
+) -> i32 {
+    0 // FALSE
+}
+
 pub fn resolve_wininet(func: &str) -> Option<usize> {
     Some(match func {
         "InternetCrackUrlW" => internet_crack_url_w as *const () as usize,
@@ -886,10 +911,12 @@ pub fn resolve_wininet(func: &str) -> Option<usize> {
         "InternetCloseHandle" => internet_close_handle as *const () as usize,
         "HttpOpenRequestW" => http_open_request_w as *const () as usize,
         "HttpSendRequestA" => http_send_request_a as *const () as usize,
+        "HttpSendRequestW" => http_send_request_w as *const () as usize,
         "HttpQueryInfoW" => http_query_info_w as *const () as usize,
         "InternetSetOptionW" => internet_set_option_w as *const () as usize,
         "InternetReadFile" => internet_read_file as *const () as usize,
         "InternetOpenUrlW" => internet_open_url_w as *const () as usize,
+        "InternetQueryDataAvailable" => internet_query_data_available as *const () as usize,
         _ => return None,
     })
 }

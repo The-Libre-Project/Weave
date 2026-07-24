@@ -11780,6 +11780,103 @@ pub unsafe extern "win64" fn get_user_object_information_w(
     0 // FALSE
 }
 
+// ── OpenMPT Phase A stubs ───────────────────────────────────────────────
+
+// TODO(shim): Phase A — custom draw text needed by OpenMPT
+// Wine ref: dlls/user32/text.c — GrayStringW draws gray text
+pub unsafe extern "win64" fn gray_string_w(
+    _hdc: usize,
+    _hwnd: usize,
+    _lp_output_func: usize,
+    _lp_data: usize,
+    _n_count: i32,
+    _x: i32,
+    _y: i32,
+    _n_width: i32,
+    _n_height: i32,
+) -> i32 {
+    0 // FALSE
+}
+
+// TODO(shim): Phase A — tabbed text output needed by OpenMPT
+// Wine ref: dlls/user32/text.c — TabbedTextOutW draws text with tab stops
+pub unsafe extern "win64" fn tabbed_text_out_w(
+    _hdc: usize,
+    _x: i32,
+    _y: i32,
+    _lp_string: *const u16,
+    _n_count: i32,
+    _n_tab_positions: i32,
+    _lpn_tab_stop_positions: *const i32,
+    _n_tab_origin: i32,
+) -> i32 {
+    0 // 0 characters drawn
+}
+
+// TODO(shim): Phase A — menu check mark dimensions needed by OpenMPT
+// Wine ref: dlls/user32/menu.c — GetMenuCheckMarkDimensions returns menu check mark size
+pub extern "win64" fn get_menu_check_mark_dimensions() -> u32 {
+    0 // no default dimensions
+}
+
+// TODO(shim): Phase A — real child window from point needed by OpenMPT
+// Wine ref: dlls/user32/win.c — RealChildWindowFromPoint finds child at point
+pub unsafe extern "win64" fn real_child_window_from_point(
+    _hwnd_parent: usize,
+    _pt_parent_client: *const u8,
+) -> usize {
+    0 // NULL
+}
+
+// TODO(shim): Phase A — show owned popups needed by OpenMPT
+// Wine ref: dlls/user32/win.c — ShowOwnedPopups shows/hides owned popups
+pub extern "win64" fn show_owned_popups(_hwnd: usize, _f_show: i32) -> i32 {
+    0 // FALSE
+}
+
+// TODO(shim): Phase A — virtual key scan needed by OpenMPT
+// Wine ref: dlls/user32/input.c — VkKeyScanExW translates char to virtual key
+pub unsafe extern "win64" fn vk_key_scan_ex_w(_ch: u16, _dwhkl: usize) -> i16 {
+    -1 // no character
+}
+
+// TODO(shim): Phase A — message extra info needed by OpenMPT
+// Wine ref: dlls/user32/message.c — SetMessageExtraInfo sets per-message extra info
+pub extern "win64" fn set_message_extra_info(_l_param: usize) -> usize {
+    0 // old value (stub = 0)
+}
+
+// TODO(shim): Phase A — rectangle subtraction needed by OpenMPT
+// Wine ref: dlls/user32/rect.c — SubtractRect subtracts one rect from another
+pub unsafe extern "win64" fn subtract_rect(
+    _lprc_dest: *mut u8,
+    _lprc_src1: *const u8,
+    _lprc_src2: *const u8,
+) -> i32 {
+    0 // FALSE
+}
+
+// TODO(shim): Phase A — invert rectangle needed by OpenMPT
+// Wine ref: dlls/user32/painting.c — InvertRect inverts a rectangle region
+pub unsafe extern "win64" fn invert_rect(_hdc: usize, _lprc: *const u8) -> i32 {
+    0 // FALSE
+}
+
+// TODO(shim): Phase A — shutdown block reason create needed by OpenMPT
+// Wine ref: dlls/user32/sysparams.c — ShutdownBlockReasonCreate creates shutdown reason
+pub unsafe extern "win64" fn shutdown_block_reason_create(
+    _hwnd: usize,
+    _reason: *const u16,
+) -> i32 {
+    1 // TRUE — pretend we succeeded
+}
+
+// TODO(shim): Phase A — shutdown block reason destroy needed by OpenMPT
+// Wine ref: dlls/user32/sysparams.c — ShutdownBlockReasonDestroy destroys shutdown reason
+pub extern "win64" fn shutdown_block_reason_destroy(_hwnd: usize) -> i32 {
+    1 // TRUE
+}
+
 /// Resolve a UIAutomationCore.dll import to a stub address.
 ///
 /// Called by weave-cli's resolve chain. Uses eq_ignore_ascii_case because

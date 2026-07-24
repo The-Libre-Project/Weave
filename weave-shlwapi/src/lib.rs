@@ -652,6 +652,26 @@ pub unsafe extern "win64" fn str_dup_a(_psz_src: *const u8) -> *mut u8 {
     std::ptr::null_mut()
 }
 
+// ── OpenMPT Phase A stubs ─────────────────────────────────────────────────────
+
+// TODO(shim): Phase A — path strip to root needed by OpenMPT
+// Wine ref: dlls/shlwapi/path.c — PathStripToRootW strips path to root
+pub unsafe extern "win64" fn path_strip_to_root_w(_psz_path: *mut u16) -> i32 {
+    0 // FALSE
+}
+
+// TODO(shim): Phase A — UNC path check needed by OpenMPT
+// Wine ref: dlls/shlwapi/path.c — PathIsUNCW checks if path is UNC
+pub unsafe extern "win64" fn path_is_unc_w(_psz_path: *const u16) -> i32 {
+    0 // FALSE
+}
+
+// TODO(shim): Phase A — ordinal 12 stub needed by OpenMPT
+// Wine ref: dlls/shlwapi/shlwapi.c — ordinal exports are undocumented internals
+extern "win64" fn shlwapi_ordinal_12() -> i32 {
+    0
+}
+
 // ── Resolver ─────────────────────────────────────────────────────────────────
 
 /// Resolve a shlwapi.dll import to a function pointer.
@@ -682,6 +702,10 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "SHAutoComplete" => sh_auto_complete as *const () as usize,
         "SHRegGetUSValueW" => sh_reg_get_us_value_w as *const () as usize,
         "StrDupA" => str_dup_a as *const () as usize,
+        // ── OpenMPT Phase A stubs ──────────────────────────────────────────
+        "PathStripToRootW" => path_strip_to_root_w as *const () as usize,
+        "PathIsUNCW" => path_is_unc_w as *const () as usize,
+        "#12" => shlwapi_ordinal_12 as *const () as usize,
         _ => return None,
     })
 }

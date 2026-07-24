@@ -116,7 +116,64 @@ pub unsafe extern "win64" fn cm_locate_dev_node_a(
     p_device_id: *const u8,
     ul_flags: u32,
 ) -> i32 {
-    0
+     0
+}
+
+// ── OpenMPT Phase A stubs ────────────────────────────────────────────────
+
+#[allow(unused_variables)]
+pub unsafe extern "win64" fn setup_di_open_device_interface_reg_key(
+    _devinfo: usize,
+    _iface_data: *const u8,
+    _reserved: u32,
+    _sam_desired: u32,
+) -> usize {
+    usize::MAX // INVALID_HANDLE_VALUE
+}
+
+#[allow(unused_variables)]
+pub unsafe extern "win64" fn setup_di_get_device_interface_alias(
+    _devinfo: usize,
+    _iface_data: *const u8,
+    _alias_guid: *const u8,
+    _alias_data: *mut u8,
+) -> i32 {
+    0 // FALSE
+}
+
+#[allow(unused_variables)]
+pub unsafe extern "win64" fn setup_di_get_device_registry_property_w(
+    _devinfo: usize,
+    _devinfo_data: *const u8,
+    _property: u32,
+    _property_reg_data_type: *mut u32,
+    _property_buffer: *mut u8,
+    _property_buffer_size: u32,
+    _required_size: *mut u32,
+) -> i32 {
+    0 // FALSE
+}
+
+#[allow(unused_variables)]
+pub unsafe extern "win64" fn setup_di_get_class_devs_w(
+    _class_guid: *const u8,
+    _enumerator: *const u16,
+    _hwnd_parent: usize,
+    _flags: u32,
+) -> usize {
+    usize::MAX // INVALID_HANDLE_VALUE
+}
+
+#[allow(unused_variables)]
+pub unsafe extern "win64" fn setup_di_get_device_interface_detail_w(
+    _devinfo: usize,
+    _iface_data: *const u8,
+    _detail_data: *mut u8,
+    _detail_size: u32,
+    _required_size: *mut u32,
+    _devinfo_data: *mut u8,
+) -> i32 {
+    0 // FALSE
 }
 
 // ── DLL Resolver ─────────────────────────────────────────────────────────────
@@ -148,6 +205,14 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "CM_Locate_DevNodeA" => Some(
             cm_locate_dev_node_a as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
         ),
+        // ── OpenMPT Phase A stubs ──────────────────────────────────────────
+        "SetupDiOpenDeviceInterfaceRegKey" => Some(setup_di_open_device_interface_reg_key as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize),
+        "SetupDiGetDeviceInterfaceAlias" => Some(setup_di_get_device_interface_alias as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize),
+        "SetupDiGetDeviceRegistryPropertyW" => Some(setup_di_get_device_registry_property_w as unsafe extern "win64" fn(_, _, _, _, _, _, _) -> _ as *const () as usize),
+        "SetupDiGetClassDevsW" => Some(
+            setup_di_get_class_devs_w as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
+        ),
+        "SetupDiGetDeviceInterfaceDetailW" => Some(setup_di_get_device_interface_detail_w as unsafe extern "win64" fn(_, _, _, _, _, _) -> _ as *const () as usize),
         _ => None,
     }
 }

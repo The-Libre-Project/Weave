@@ -1696,6 +1696,32 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
             api::get_user_object_information_w as unsafe extern "win64" fn(_, _, _, _, _) -> _
                 as *const () as usize,
         ),
+        // ── OpenMPT Phase A stubs ──────────────────────────────────────────
+        "GrayStringW" => Some(
+            api::gray_string_w as unsafe extern "win64" fn(_, _, _, _, _, _, _, _, _) -> _
+                as *const () as usize,
+        ),
+        "TabbedTextOutW" => Some(
+            api::tabbed_text_out_w as unsafe extern "win64" fn(_, _, _, _, _, _, _, _) -> _
+                as *const () as usize,
+        ),
+        "GetMenuCheckMarkDimensions" => Some(api::get_menu_check_mark_dimensions as *const () as usize),
+        "RealChildWindowFromPoint" => Some(
+            api::real_child_window_from_point as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
+        ),
+        "ShowOwnedPopups" => Some(api::show_owned_popups as *const () as usize),
+        "VkKeyScanExW" => Some(api::vk_key_scan_ex_w as *const () as usize),
+        "SetMessageExtraInfo" => Some(api::set_message_extra_info as *const () as usize),
+        "SubtractRect" => Some(
+            api::subtract_rect as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
+        ),
+        "InvertRect" => Some(
+            api::invert_rect as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
+        ),
+        "ShutdownBlockReasonCreate" => Some(
+            api::shutdown_block_reason_create as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
+        ),
+        "ShutdownBlockReasonDestroy" => Some(api::shutdown_block_reason_destroy as *const () as usize),
         _ => None,
     }
 }

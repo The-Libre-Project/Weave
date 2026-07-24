@@ -1946,6 +1946,9 @@ pub fn resolve(func: &str) -> Option<usize> {
         "RegOpenCurrentUser" => {
             Some(reg_open_current_user as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
         }
+        "RegQueryValueW" => Some(
+            reg_query_value_w as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
+        ),
         _ => None,
     }
 }
@@ -2945,6 +2948,20 @@ pub unsafe extern "win64" fn reg_open_current_user(
     // Reg*Key operations. Weave maps this to the HKCU hive path internally.
     unsafe { *phk_result = 0xFFFFFFFF80000001 }; // HKEY_CURRENT_USER
     0 // ERROR_SUCCESS
+}
+
+// ── OpenMPT Phase A stubs ──────────────────────────────────────────────────
+
+// TODO(shim): Phase A — registry query value (deprecated) needed by OpenMPT
+// Wine ref: dlls/kernelbase/registry.c — RegQueryValueW is the older API (Win3.1)
+// Weave: stub returning ERROR_FILE_NOT_FOUND since the subkey likely doesn't exist.
+pub unsafe extern "win64" fn reg_query_value_w(
+    _hkey: usize,
+    _lp_sub_key: *const u16,
+    _lp_value: *mut u16,
+    _lpcb_value: *mut i32,
+) -> i32 {
+    2 // ERROR_FILE_NOT_FOUND
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
