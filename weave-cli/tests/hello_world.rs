@@ -9664,7 +9664,7 @@ fn pp3_openmpt_probe_gate() {
         .arg("--no-sandbox")
         .arg("--trace=stub,phase,msg,fault")
         .arg(&fixture)
-        .arg("--noCrashHandler")
+        .arg("/noCrashHandler")
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
