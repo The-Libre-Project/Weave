@@ -9686,7 +9686,10 @@ fn pp3_openmpt_probe_gate() {
 
     loop {
         match child.try_wait() {
-            Ok(Some(_)) => break,
+            Ok(Some(status)) => {
+                eprintln!("PP3: exited with code {:?}", status.code());
+                break;
+            }
             Ok(None) => {
                 if start.elapsed() >= deadline {
                     let _ = child.kill();
@@ -9704,7 +9707,7 @@ fn pp3_openmpt_probe_gate() {
     let stderr_bytes = stderr_shared.lock().unwrap().clone();
     let stderr = String::from_utf8_lossy(&stderr_bytes);
 
-    eprintln!("OpenMPT probe elapsed: {elapsed:.1?}");
+    eprintln!("PP3: elapsed={elapsed:.1?} killed_by_deadline={killed_by_deadline}");
     eprintln!("--- FULL STDERR BEGIN ---");
     eprintln!("{stderr}");
     eprintln!("--- FULL STDERR END ---");
@@ -9727,7 +9730,7 @@ fn pp3_openmpt_probe_gate() {
     // A2: CreateWindow call observed (player window visible).
     assert!(
         stderr.contains("PHASE: create_window_first"),
-        "PP3 A2 FAIL: PHASE: create_window_first not found — player window not created.\nstderr: {stderr}"
+        "PP3 A2 FAIL: PHASE: create_window_first not found.\nstderr: {stderr}"
     );
 
     // A3: waveOut audio pipeline started (soft — OpenMPT opens audio lazily).
