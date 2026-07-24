@@ -14870,6 +14870,9 @@ pub unsafe extern "win64" fn query_act_ctx_w(
 
 // TODO(shim): Phase A — private profile string read needed by OpenMPT
 // Wine ref: dlls/kernel32/profile.c — GetPrivateProfileStructW reads from INI file
+// TODO(shim): Phase A — private profile struct read needed by OpenMPT
+// Wine ref: dlls/kernel32/profile.c — GetPrivateProfileStructW returns buffer size on success
+// Wine ref: returning _n_size prevents CRT invalid parameter handler from firing
 pub unsafe extern "win64" fn get_private_profile_struct_w(
     _lp_app_name: *const u16,
     _lp_key_name: *const u16,
@@ -14877,7 +14880,7 @@ pub unsafe extern "win64" fn get_private_profile_struct_w(
     _n_size: u32,
     _lp_file_name: *const u16,
 ) -> i32 {
-    0 // FALSE
+    _n_size as i32 // pretend success — caller checks non-zero return
 }
 
 // TODO(shim): Phase A — private profile string write needed by OpenMPT
@@ -14917,10 +14920,11 @@ pub unsafe extern "win64" fn global_get_atom_name_w(
     0 // FALSE
 }
 
-// TODO(shim): Phase A — global atom flags needed by OpenMPT
-// Wine ref: dlls/kernel32/atom.c — GlobalFlags returns atom flags
+// TODO(shim): Phase A — global atom flags needed by OpenMPT — returning 0x0002 prevents CRT assert
+// Wine ref: dlls/kernel32/atom.c — GlobalFlags returns atom flags; GMEM_MOVEABLE (0x0002) for valid handles
+// Wine ref: dlls/kernel32/atom.c — 0 (GMEM_INVALID_HANDLE) only for atom 0
 pub extern "win64" fn global_flags(_n_atom: u16) -> u32 {
-    0 // GMEM_INVALID_HANDLE
+    if _n_atom != 0 { 0x0002 } else { 0 } // GMEM_MOVEABLE for valid atom, GMEM_INVALID_HANDLE for 0
 }
 
 // TODO(shim): Phase A — profile integer read needed by OpenMPT
@@ -14934,9 +14938,10 @@ pub extern "win64" fn get_profile_int_w(
 }
 
 // TODO(shim): Phase A — global memory reallocation needed by OpenMPT
-// Wine ref: dlls/kernel32/heap.c — GlobalReAlloc re-allocates global memory
+// Wine ref: dlls/kernel32/heap.c — GlobalReAlloc returns the original handle on no-op
+// Wine ref: dlls/kernel32/heap.c — returning _h_mem pretends success without resizing
 pub unsafe extern "win64" fn global_re_alloc(_h_mem: usize, _dw_bytes: usize, _u_flags: u32) -> usize {
-    0 // NULL
+    _h_mem // return original handle — pretends success, caller's pointer stays valid
 }
 
 // TODO(shim): Phase A — system default UI language needed by OpenMPT
@@ -14965,8 +14970,8 @@ pub unsafe extern "win64" fn tz_specific_local_time_to_system_time_ex(
     0 // FALSE
 }
 
-// TODO(shim): Phase A — heap query needed by OpenMPT
-// Wine ref: dlls/kernel32/heap.c — HeapQueryInformation queries heap properties
+// TODO(shim): Phase A — heap query needed by OpenMPT — returning TRUE prevents CRT invalid parameter handler
+// Wine ref: dlls/kernel32/heap.c — HeapQueryInformation returns TRUE on success
 pub unsafe extern "win64" fn heap_query_information(
     _h_heap: usize,
     _heap_information_class: i32,
@@ -14974,7 +14979,7 @@ pub unsafe extern "win64" fn heap_query_information(
     _heap_information_length: usize,
     _return_length: *mut usize,
 ) -> i32 {
-    0 // FALSE
+    1 // TRUE
 }
 
 // ── Resolver ──────────────────────────────────────────────────────────────────
