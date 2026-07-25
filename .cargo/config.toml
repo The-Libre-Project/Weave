@@ -1,7 +1,8 @@
 [build]
 # Weave is Linux x86-64 only. All builds are local on this PC using cargo-zigbuild.
-# Build: cargo zigbuild --target x86_64-unknown-linux-gnu
+# Build: cargo zigbuild --target x86_64-unknown-linux-gnu.2.42
 # Tests run in Docker (`make test`).
+# GLIBC version pinned to 2.42 for Fedora 43 compatibility.
 target = "x86_64-unknown-linux-gnu"
 
 [env]
@@ -12,6 +13,6 @@ target = "x86_64-unknown-linux-gnu"
 AWS_LC_SYS_NO_ASM = "1"
 
 [alias]
-# Build for the Linux target
-zbuild = "zigbuild --target x86_64-unknown-linux-gnu"
-ztest  = "zigbuild --tests --target x86_64-unknown-linux-gnu"
+# Build for the Linux target, pinned to glibc 2.42
+zbuild = "zigbuild --target x86_64-unknown-linux-gnu.2.42"
+ztest  = "zigbuild --tests --target x86_64-unknown-linux-gnu.2.42"
