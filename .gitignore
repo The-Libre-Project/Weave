@@ -43,6 +43,7 @@ tests/fixtures/bin/signal.exe
 # Runtime / session artifacts
 /tmp-trace/
 /OBSERVER-STATE.md
+weave-trace-crash-*.jsonl
 .weave-local-ci-result
 .weave-local-ci-output
 tests/fixtures/bin/extract_out/
