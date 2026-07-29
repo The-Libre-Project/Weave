@@ -15059,6 +15059,35 @@ pub unsafe extern "win64" fn heap_query_information(
     1 // TRUE
 }
 
+/// SystemFunction036 — RtlGenRandom; fills a buffer with cryptographically random bytes.
+///
+/// Wine ref: dlls/advapi32/crypt.c — RtlGenRandom delegates to
+/// NtQuerySystemInformation(SystemInterruptInformation) on NT; on Linux Wine
+/// uses /dev/urandom; Weave uses getrandom(2).
+///
+/// # Safety
+/// `random_buffer` must be a writable buffer of at least `random_buffer_length` bytes.
+pub unsafe extern "win64" fn system_function_036(
+    random_buffer: *mut u8,
+    random_buffer_length: u32,
+) -> u8 {
+    if random_buffer.is_null() || random_buffer_length == 0 {
+        return 0;
+    }
+    let ret = unsafe {
+        libc::getrandom(
+            random_buffer as *mut libc::c_void,
+            random_buffer_length as usize,
+            0,
+        )
+    };
+    if ret >= 0 && ret as usize == random_buffer_length as usize {
+        1
+    } else {
+        0
+    }
+}
+
 // ── Resolver ──────────────────────────────────────────────────────────────────
 
 /// Resolve a kernel32.dll import to a stub address.
@@ -15625,6 +15654,9 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
             get_system_directory_a as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
         ),
         "GetTempPathW" => {
+            Some(get_temp_path_w as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "GetTempPath2W" => {
             Some(get_temp_path_w as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
         }
         "GetTempPathA" => {
@@ -16893,6 +16925,11 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
             find_act_ctx_section_string_w as unsafe extern "win64" fn(_, _, _, _, _) -> _
                 as *const () as usize,
         ),
+        // SystemFunction036 — RtlGenRandom; exposed via kernel32 and
+        // api-ms-win-security-systemfunctions-l1-1-0.dll API set
+        "SystemFunction036" => {
+            Some(system_function_036 as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
         _ => {
             // version.dll functions are forwarded through kernel32 in some apps;
             // also handle them when the DLL name is version.dll directly.
