@@ -14863,7 +14863,7 @@ pub unsafe extern "win64" fn query_act_ctx_w(
     _cb_buffer: usize,
     _pcb_written_or_required: *mut usize,
 ) -> i32 {
-     0 // FALSE
+    0 // FALSE
 }
 
 // ── OpenMPT Phase A stubs ─────────────────────────────────────────────────────
@@ -14924,7 +14924,11 @@ pub unsafe extern "win64" fn global_get_atom_name_w(
 // Wine ref: dlls/kernel32/atom.c — GlobalFlags returns atom flags; GMEM_MOVEABLE (0x0002) for valid handles
 // Wine ref: dlls/kernel32/atom.c — 0 (GMEM_INVALID_HANDLE) only for atom 0
 pub extern "win64" fn global_flags(_n_atom: u16) -> u32 {
-    if _n_atom != 0 { 0x0002 } else { 0 } // GMEM_MOVEABLE for valid atom, GMEM_INVALID_HANDLE for 0
+    if _n_atom != 0 {
+        0x0002
+    } else {
+        0
+    } // GMEM_MOVEABLE for valid atom, GMEM_INVALID_HANDLE for 0
 }
 
 // TODO(shim): Phase A — profile integer read needed by OpenMPT
@@ -14940,7 +14944,11 @@ pub extern "win64" fn get_profile_int_w(
 // TODO(shim): Phase A — global memory reallocation needed by OpenMPT
 // Wine ref: dlls/kernel32/heap.c — GlobalReAlloc returns the original handle on no-op
 // Wine ref: dlls/kernel32/heap.c — returning _h_mem pretends success without resizing
-pub unsafe extern "win64" fn global_re_alloc(_h_mem: usize, _dw_bytes: usize, _u_flags: u32) -> usize {
+pub unsafe extern "win64" fn global_re_alloc(
+    _h_mem: usize,
+    _dw_bytes: usize,
+    _u_flags: u32,
+) -> usize {
     _h_mem // return original handle — pretends success, caller's pointer stays valid
 }
 
@@ -16771,36 +16779,40 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         ),
         // ── OpenMPT Phase A stubs ──────────────────────────────────────────
         "GetPrivateProfileStructW" => Some(
-            get_private_profile_struct_w
-                as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const () as usize,
+            get_private_profile_struct_w as unsafe extern "win64" fn(_, _, _, _, _) -> _
+                as *const () as usize,
         ),
         "WritePrivateProfileStructW" => Some(
-            write_private_profile_struct_w
-                as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const () as usize,
+            write_private_profile_struct_w as unsafe extern "win64" fn(_, _, _, _, _) -> _
+                as *const () as usize,
         ),
         "WaitForThreadpoolWorkCallbacks" => Some(
-            wait_for_threadpool_work_callbacks as unsafe extern "win64" fn(_, _) as *const () as usize,
+            wait_for_threadpool_work_callbacks as unsafe extern "win64" fn(_, _) as *const ()
+                as usize,
         ),
         "GlobalFindAtomW" => Some(global_find_atom_w as *const () as usize),
         "GlobalGetAtomNameW" => Some(
             global_get_atom_name_w as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
         ),
         "GlobalFlags" => Some(global_flags as *const () as usize),
-        "GetProfileIntW" => Some(
-            get_profile_int_w as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
-        ),
-        "GlobalReAlloc" => Some(global_re_alloc as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize),
+        "GetProfileIntW" => {
+            Some(get_profile_int_w as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize)
+        }
+        "GlobalReAlloc" => {
+            Some(global_re_alloc as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize)
+        }
         "GetSystemDefaultUILanguage" => Some(get_system_default_ui_language as *const () as usize),
         "SystemTimeToTzSpecificLocalTimeEx" => Some(
-            system_time_to_tz_specific_local_time_ex
-                as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
+            system_time_to_tz_specific_local_time_ex as unsafe extern "win64" fn(_, _, _) -> _
+                as *const () as usize,
         ),
         "TzSpecificLocalTimeToSystemTimeEx" => Some(
-            tz_specific_local_time_to_system_time_ex
-                as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
+            tz_specific_local_time_to_system_time_ex as unsafe extern "win64" fn(_, _, _) -> _
+                as *const () as usize,
         ),
         "HeapQueryInformation" => Some(
-            heap_query_information as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const () as usize,
+            heap_query_information as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const ()
+                as usize,
         ),
         // Activation context stubs (SPSS Phase A / OpenMPT).
         // Resolved here in the kernel32 path; also registered in resolve_version

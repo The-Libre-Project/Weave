@@ -2867,17 +2867,13 @@ pub extern "win64" fn set_dc_brush_color(_hdc: usize, _color: u32) -> u32 {
 
 // TODO(shim): Phase A — elliptic region creation needed by OpenMPT
 // Wine ref: dlls/gdi32/region.c — CreateEllipticRgn creates an elliptical region
-pub extern "win64" fn create_elliptic_rgn(
-    _x1: i32, _y1: i32, _x2: i32, _y2: i32,
-) -> usize {
+pub extern "win64" fn create_elliptic_rgn(_x1: i32, _y1: i32, _x2: i32, _y2: i32) -> usize {
     0 // NULL
 }
 
 // TODO(shim): Phase A — set rect region needed by OpenMPT
 // Wine ref: dlls/gdi32/region.c — SetRectRgn sets a region to a rectangle
-pub extern "win64" fn set_rect_rgn(
-    _hrgn: usize, _x1: i32, _y1: i32, _x2: i32, _y2: i32,
-) -> i32 {
+pub extern "win64" fn set_rect_rgn(_hrgn: usize, _x1: i32, _y1: i32, _x2: i32, _y2: i32) -> i32 {
     0 // FALSE
 }
 
@@ -2885,8 +2881,10 @@ pub extern "win64" fn set_rect_rgn(
 // Wine ref: dlls/gdi32/gdiobj.c — ScaleWindowExtEx scales window extent
 pub unsafe extern "win64" fn scale_window_ext_ex(
     _hdc: usize,
-    _x_num: i32, _x_denom: i32,
-    _y_num: i32, _y_denom: i32,
+    _x_num: i32,
+    _x_denom: i32,
+    _y_num: i32,
+    _y_denom: i32,
     _prev_size: *mut u8,
 ) -> i32 {
     0 // FALSE
@@ -2896,8 +2894,10 @@ pub unsafe extern "win64" fn scale_window_ext_ex(
 // Wine ref: dlls/gdi32/gdiobj.c — ScaleViewportExtEx scales viewport extent
 pub unsafe extern "win64" fn scale_viewport_ext_ex(
     _hdc: usize,
-    _x_num: i32, _x_denom: i32,
-    _y_num: i32, _y_denom: i32,
+    _x_num: i32,
+    _x_denom: i32,
+    _y_num: i32,
+    _y_denom: i32,
     _prev_size: *mut u8,
 ) -> i32 {
     0 // FALSE
@@ -3350,17 +3350,23 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         // ── OpenMPT Phase A stubs ──────────────────────────────────────────
         "SetDCPenColor" => Some(set_dc_pen_color as *const () as usize),
         "SetDCBrushColor" => Some(set_dc_brush_color as *const () as usize),
-        "CreateEllipticRgn" => Some(create_elliptic_rgn as extern "win64" fn(_, _, _, _) -> _ as *const () as usize),
-        "SetRectRgn" => Some(set_rect_rgn as extern "win64" fn(_, _, _, _, _) -> _ as *const () as usize),
+        "CreateEllipticRgn" => {
+            Some(create_elliptic_rgn as extern "win64" fn(_, _, _, _) -> _ as *const () as usize)
+        }
+        "SetRectRgn" => {
+            Some(set_rect_rgn as extern "win64" fn(_, _, _, _, _) -> _ as *const () as usize)
+        }
         "ScaleWindowExtEx" => Some(
-            scale_window_ext_ex as unsafe extern "win64" fn(_, _, _, _, _, _) -> _ as *const () as usize,
+            scale_window_ext_ex as unsafe extern "win64" fn(_, _, _, _, _, _) -> _ as *const ()
+                as usize,
         ),
         "ScaleViewportExtEx" => Some(
-            scale_viewport_ext_ex as unsafe extern "win64" fn(_, _, _, _, _, _) -> _ as *const () as usize,
+            scale_viewport_ext_ex as unsafe extern "win64" fn(_, _, _, _, _, _) -> _ as *const ()
+                as usize,
         ),
-        "Escape" => Some(
-            escape as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const () as usize,
-        ),
+        "Escape" => {
+            Some(escape as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const () as usize)
+        }
         "PtVisible" => Some(pt_visible as *const () as usize),
         _ => None,
     }

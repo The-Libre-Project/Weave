@@ -116,7 +116,7 @@ pub unsafe extern "win64" fn cm_locate_dev_node_a(
     p_device_id: *const u8,
     ul_flags: u32,
 ) -> i32 {
-     0
+    0
 }
 
 // ── OpenMPT Phase A stubs ────────────────────────────────────────────────
@@ -206,13 +206,28 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
             cm_locate_dev_node_a as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
         ),
         // ── OpenMPT Phase A stubs ──────────────────────────────────────────
-        "SetupDiOpenDeviceInterfaceRegKey" => Some(setup_di_open_device_interface_reg_key as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize),
-        "SetupDiGetDeviceInterfaceAlias" => Some(setup_di_get_device_interface_alias as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize),
-        "SetupDiGetDeviceRegistryPropertyW" => Some(setup_di_get_device_registry_property_w as unsafe extern "win64" fn(_, _, _, _, _, _, _) -> _ as *const () as usize),
-        "SetupDiGetClassDevsW" => Some(
-            setup_di_get_class_devs_w as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
+        "SetupDiOpenDeviceInterfaceRegKey" => Some(
+            setup_di_open_device_interface_reg_key as unsafe extern "win64" fn(_, _, _, _) -> _
+                as *const () as usize,
         ),
-        "SetupDiGetDeviceInterfaceDetailW" => Some(setup_di_get_device_interface_detail_w as unsafe extern "win64" fn(_, _, _, _, _, _) -> _ as *const () as usize),
+        "SetupDiGetDeviceInterfaceAlias" => Some(
+            setup_di_get_device_interface_alias as unsafe extern "win64" fn(_, _, _, _) -> _
+                as *const () as usize,
+        ),
+        "SetupDiGetDeviceRegistryPropertyW" => Some(
+            setup_di_get_device_registry_property_w
+                as unsafe extern "win64" fn(_, _, _, _, _, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "SetupDiGetClassDevsW" => Some(
+            setup_di_get_class_devs_w as unsafe extern "win64" fn(_, _, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "SetupDiGetDeviceInterfaceDetailW" => Some(
+            setup_di_get_device_interface_detail_w
+                as unsafe extern "win64" fn(_, _, _, _, _, _) -> _ as *const ()
+                as usize,
+        ),
         _ => None,
     }
 }

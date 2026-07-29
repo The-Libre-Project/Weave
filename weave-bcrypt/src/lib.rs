@@ -62,8 +62,12 @@ pub unsafe extern "win64" fn BCryptGenRandom(
 // TODO(shim): Phase A — BCryptExportKey needed by OpenMPT
 // Wine ref: dlls/bcrypt/bcrypt_main.c — BCryptExportKey exports a key
 pub unsafe extern "win64" fn BCryptExportKey(
-    _hKey: usize, _hExportKey: usize, _pszBlobType: *const u16,
-    _pbOutput: *mut u8, _cbOutput: u32, _pcbResult: *mut u32,
+    _hKey: usize,
+    _hExportKey: usize,
+    _pszBlobType: *const u16,
+    _pbOutput: *mut u8,
+    _cbOutput: u32,
+    _pcbResult: *mut u32,
     _dwFlags: u32,
 ) -> u32 {
     STATUS_UNSUCCESSFUL
@@ -72,7 +76,10 @@ pub unsafe extern "win64" fn BCryptExportKey(
 // TODO(shim): Phase A — BCryptHashData needed by OpenMPT
 // Wine ref: dlls/bcrypt/bcrypt_main.c — BCryptHashData hashes data
 pub unsafe extern "win64" fn BCryptHashData(
-    _hHash: usize, _pbInput: *const u8, _cbInput: u32, _dwFlags: u32,
+    _hHash: usize,
+    _pbInput: *const u8,
+    _cbInput: u32,
+    _dwFlags: u32,
 ) -> u32 {
     STATUS_UNSUCCESSFUL
 }
@@ -85,14 +92,19 @@ pub unsafe extern "win64" fn BCryptDestroyHash(_hHash: usize) -> u32 {
 
 // TODO(shim): Phase A — BCryptCloseAlgorithmProvider needed by OpenMPT
 // Wine ref: dlls/bcrypt/bcrypt_main.c — BCryptCloseAlgorithmProvider closes provider
-pub unsafe extern "win64" fn BCryptCloseAlgorithmProvider(_hAlgorithm: usize, _dwFlags: u32) -> u32 {
+pub unsafe extern "win64" fn BCryptCloseAlgorithmProvider(
+    _hAlgorithm: usize,
+    _dwFlags: u32,
+) -> u32 {
     STATUS_SUCCESS
 }
 
 // TODO(shim): Phase A — BCryptOpenAlgorithmProvider needed by OpenMPT
 // Wine ref: dlls/bcrypt/bcrypt_main.c — BCryptOpenAlgorithmProvider opens provider
 pub unsafe extern "win64" fn BCryptOpenAlgorithmProvider(
-    _phAlgorithm: *mut usize, _pszAlgId: *const u16, _pszImplementation: *const u16,
+    _phAlgorithm: *mut usize,
+    _pszAlgId: *const u16,
+    _pszImplementation: *const u16,
     _dwFlags: u32,
 ) -> u32 {
     STATUS_UNSUCCESSFUL
@@ -101,8 +113,12 @@ pub unsafe extern "win64" fn BCryptOpenAlgorithmProvider(
 // TODO(shim): Phase A — BCryptGetProperty needed by OpenMPT
 // Wine ref: dlls/bcrypt/bcrypt_main.c — BCryptGetProperty queries property
 pub unsafe extern "win64" fn BCryptGetProperty(
-    _hObject: usize, _pszProperty: *const u16,
-    _pbOutput: *mut u8, _cbOutput: u32, _pcbResult: *mut u32, _dwFlags: u32,
+    _hObject: usize,
+    _pszProperty: *const u16,
+    _pbOutput: *mut u8,
+    _cbOutput: u32,
+    _pcbResult: *mut u32,
+    _dwFlags: u32,
 ) -> u32 {
     STATUS_UNSUCCESSFUL
 }
@@ -110,9 +126,13 @@ pub unsafe extern "win64" fn BCryptGetProperty(
 // TODO(shim): Phase A — BCryptCreateHash needed by OpenMPT
 // Wine ref: dlls/bcrypt/bcrypt_main.c — BCryptCreateHash creates hash
 pub unsafe extern "win64" fn BCryptCreateHash(
-    _hAlgorithm: usize, _phHash: *mut usize,
-    _pbHashObject: *mut u8, _cbHashObject: u32,
-    _pbSecret: *mut u8, _cbSecret: u32, _dwFlags: u32,
+    _hAlgorithm: usize,
+    _phHash: *mut usize,
+    _pbHashObject: *mut u8,
+    _cbHashObject: u32,
+    _pbSecret: *mut u8,
+    _cbSecret: u32,
+    _dwFlags: u32,
 ) -> u32 {
     STATUS_UNSUCCESSFUL
 }
@@ -120,8 +140,12 @@ pub unsafe extern "win64" fn BCryptCreateHash(
 // TODO(shim): Phase A — BCryptVerifySignature needed by OpenMPT
 // Wine ref: dlls/bcrypt/bcrypt_main.c — BCryptVerifySignature verifies sig
 pub unsafe extern "win64" fn BCryptVerifySignature(
-    _hHash: usize, _pbPadding: *const u8, _cbPadding: u32,
-    _pbSignature: *const u8, _cbSignature: u32, _dwFlags: u32,
+    _hHash: usize,
+    _pbPadding: *const u8,
+    _cbPadding: u32,
+    _pbSignature: *const u8,
+    _cbSignature: u32,
+    _dwFlags: u32,
 ) -> u32 {
     TRUST_E_BAD_DIGEST
 }
@@ -129,8 +153,13 @@ pub unsafe extern "win64" fn BCryptVerifySignature(
 // TODO(shim): Phase A — BCryptImportKeyPair needed by OpenMPT
 // Wine ref: dlls/bcrypt/bcrypt_main.c — BCryptImportKeyPair imports key pair
 pub unsafe extern "win64" fn BCryptImportKeyPair(
-    _hAlgorithm: usize, _hImportKey: usize, _pszBlobType: *const u16,
-    _phKey: *mut usize, _pbInput: *mut u8, _cbInput: u32, _dwFlags: u32,
+    _hAlgorithm: usize,
+    _hImportKey: usize,
+    _pszBlobType: *const u16,
+    _phKey: *mut usize,
+    _pbInput: *mut u8,
+    _cbInput: u32,
+    _dwFlags: u32,
 ) -> u32 {
     STATUS_UNSUCCESSFUL
 }
@@ -144,7 +173,10 @@ pub unsafe extern "win64" fn BCryptDestroyKey(_hKey: usize) -> u32 {
 // TODO(shim): Phase A — BCryptFinishHash needed by OpenMPT
 // Wine ref: dlls/bcrypt/bcrypt_main.c — BCryptFinishHash finalizes hash
 pub unsafe extern "win64" fn BCryptFinishHash(
-    _hHash: usize, _pbOutput: *mut u8, _cbOutput: u32, _dwFlags: u32,
+    _hHash: usize,
+    _pbOutput: *mut u8,
+    _cbOutput: u32,
+    _dwFlags: u32,
 ) -> u32 {
     STATUS_UNSUCCESSFUL
 }
@@ -157,17 +189,39 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
     match func {
         "BCryptGenRandom" => Some(BCryptGenRandom as *const () as usize),
         // ── OpenMPT Phase A stubs ──────────────────────────────────────────
-        "BCryptExportKey" => Some(BCryptExportKey as unsafe extern "win64" fn(_, _, _, _, _, _, _) -> _ as *const () as usize),
-        "BCryptHashData" => Some(BCryptHashData as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize),
+        "BCryptExportKey" => Some(
+            BCryptExportKey as unsafe extern "win64" fn(_, _, _, _, _, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "BCryptHashData" => {
+            Some(BCryptHashData as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize)
+        }
         "BCryptDestroyHash" => Some(BCryptDestroyHash as *const () as usize),
         "BCryptCloseAlgorithmProvider" => Some(BCryptCloseAlgorithmProvider as *const () as usize),
-        "BCryptOpenAlgorithmProvider" => Some(BCryptOpenAlgorithmProvider as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize),
-        "BCryptGetProperty" => Some(BCryptGetProperty as unsafe extern "win64" fn(_, _, _, _, _, _) -> _ as *const () as usize),
-        "BCryptCreateHash" => Some(BCryptCreateHash as unsafe extern "win64" fn(_, _, _, _, _, _, _) -> _ as *const () as usize),
-        "BCryptVerifySignature" => Some(BCryptVerifySignature as unsafe extern "win64" fn(_, _, _, _, _, _) -> _ as *const () as usize),
-        "BCryptImportKeyPair" => Some(BCryptImportKeyPair as unsafe extern "win64" fn(_, _, _, _, _, _, _) -> _ as *const () as usize),
+        "BCryptOpenAlgorithmProvider" => Some(
+            BCryptOpenAlgorithmProvider as unsafe extern "win64" fn(_, _, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "BCryptGetProperty" => Some(
+            BCryptGetProperty as unsafe extern "win64" fn(_, _, _, _, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "BCryptCreateHash" => Some(
+            BCryptCreateHash as unsafe extern "win64" fn(_, _, _, _, _, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "BCryptVerifySignature" => Some(
+            BCryptVerifySignature as unsafe extern "win64" fn(_, _, _, _, _, _) -> _ as *const ()
+                as usize,
+        ),
+        "BCryptImportKeyPair" => Some(
+            BCryptImportKeyPair as unsafe extern "win64" fn(_, _, _, _, _, _, _) -> _ as *const ()
+                as usize,
+        ),
         "BCryptDestroyKey" => Some(BCryptDestroyKey as *const () as usize),
-        "BCryptFinishHash" => Some(BCryptFinishHash as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize),
+        "BCryptFinishHash" => Some(
+            BCryptFinishHash as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
+        ),
         _ => None,
     }
 }
