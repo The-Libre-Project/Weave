@@ -9734,9 +9734,11 @@ fn pp3_openmpt_probe_gate() {
     );
 
     // A3: waveOut audio pipeline started (soft — OpenMPT opens audio lazily).
-    // OpenMPT does not open waveOut by default at startup (prefers WASAPI).
-    // A3 will be hardened in Phase B when we load a module and trigger playback.
+    // OpenMPT requires user action (File→Open + Play button) to trigger waveOut
+    // via its settings dialog.  The `/play` command-line flag is not recognized
+    // by this version.  A3 will be hardened in Phase C when we add simulated
+    // input (WM_COMMAND for play button) or expose a sound-settings change.
     if !stderr.contains("PHASE: waveout_opened") {
-        eprintln!("PP3 A3: waveOut not opened (expected — lazy audio init, Phase B target)");
+        eprintln!("PP3 A3: waveOut not opened (expected — lazy audio init, Phase C target)");
     }
 }

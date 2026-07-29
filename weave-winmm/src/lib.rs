@@ -750,6 +750,7 @@ pub unsafe extern "win64" fn wave_out_open(
         })();
 
         if pw_state.is_some() {
+            eprintln!("PHASE: waveout_opened");
             eprintln!("weave/waveOut: PipeWire stream connected");
         } else {
             eprintln!("weave/waveOut: PipeWire unavailable — silent mode");
