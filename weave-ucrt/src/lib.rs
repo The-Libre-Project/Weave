@@ -420,15 +420,49 @@ pub unsafe extern "win64" fn ucrt_wcsnicmp(s1: *const u16, s2: *const u16, n: us
     0
 }
 
+// ── Diagnostics helper ────────────────────────────────────────────────────────
+
+/// Capture a native backtrace (via libc::backtrace) and log the raw return
+/// addresses to stderr.  These can be resolved with `addr2line -e <exe> <addr>`.
+fn dump_backtrace(label: &str) {
+    const MAX_FRAMES: usize = 32;
+    let mut buf: [*mut libc::c_void; MAX_FRAMES] = [std::ptr::null_mut(); MAX_FRAMES];
+    let n = unsafe { libc::backtrace(buf.as_mut_ptr(), MAX_FRAMES as i32) };
+    if n > 0 {
+        // Also symbolicate inline for convenience (available on glibc).
+        let syms = unsafe { libc::backtrace_symbols(buf.as_ptr(), n as i32) };
+        eprint!("weave/ucrt: {label} backtrace ({n} frames):");
+        for i in 0..n {
+            let addr = buf[i as usize] as usize;
+            if !syms.is_null() {
+                let name = unsafe { *syms.add(i as usize) };
+                let c_str = unsafe { std::ffi::CStr::from_ptr(name) };
+                eprint!(" [{i}] {addr:#x} {c_str:?}");
+            } else {
+                eprint!(" [{i}] {addr:#x}");
+            }
+        }
+        eprintln!();
+        if !syms.is_null() {
+            unsafe { libc::free(syms as *mut libc::c_void) };
+        }
+    } else {
+        eprintln!("weave/ucrt: {label} backtrace empty");
+    }
+}
+
 // ── Process / runtime ─────────────────────────────────────────────────────────
 
 pub extern "win64" fn ucrt_exit(code: i32) -> ! {
     eprintln!("weave/ucrt: exit({code}) called");
+    dump_backtrace("exit");
     unsafe { libc::exit(code) }
 }
 
 #[allow(non_snake_case)]
 pub extern "win64" fn ucrt__exit(code: i32) -> ! {
+    eprintln!("weave/ucrt: _exit({code}) called");
+    dump_backtrace("_exit");
     unsafe { libc::_exit(code) }
 }
 
@@ -446,6 +480,8 @@ pub extern "win64" fn ucrt__exit(code: i32) -> ! {
 /// Wine ref: dlls/msvcrt/exit.c:252 — abort() calls raise(SIGABRT) and then
 /// `_aexit_rtn(3)` (which is `_exit` by default, see line 60 of that file).
 pub extern "win64" fn ucrt_abort() -> ! {
+    eprintln!("weave/ucrt: abort() called");
+    dump_backtrace("abort");
     unsafe {
         libc::raise(libc::SIGABRT);
         libc::_exit(3);
@@ -1245,7 +1281,9 @@ pub extern "win64" fn ucrt_acrt_iob_func(fd: u32) -> *mut c_void {
 
 /// _amsg_exit — abnormal CRT termination (e.g. failed _onexit registration).
 /// Never returns — exits immediately.
-pub extern "win64" fn ucrt_amsg_exit(_msg_num: i32) -> ! {
+pub extern "win64" fn ucrt_amsg_exit(msg_num: i32) -> ! {
+    eprintln!("weave/ucrt: _amsg_exit({msg_num}) called — abnormal CRT termination");
+    dump_backtrace("_amsg_exit");
     unsafe { libc::exit(255) }
 }
 
@@ -2011,6 +2049,8 @@ pub unsafe extern "win64" fn ucrt_wrename(old_path: *const u16, new_path: *const
 /// # Safety
 /// `_expr` and `_file` must be valid null-terminated byte strings if non-null (they are not read — this stub calls abort immediately).
 pub unsafe extern "win64" fn ucrt_assert(_expr: *const u8, _file: *const u8, _line: u32) {
+    eprintln!("weave/ucrt: assert() called — expr={_expr:?} file={_file:?} line={_line}");
+    dump_backtrace("assert");
     unsafe { libc::abort() }
 }
 
@@ -3381,6 +3421,8 @@ pub unsafe extern "win64" fn ucrt_dllonexit(
 
 /// _purecall — called when a pure virtual function is invoked. Aborts.
 pub extern "win64" fn ucrt_purecall() -> ! {
+    eprintln!("weave/ucrt: _purecall() called — pure virtual function call");
+    dump_backtrace("_purecall");
     unsafe { libc::abort() }
 }
 
@@ -3498,12 +3540,16 @@ pub unsafe extern "win64" fn ucrt_cxx_frame_handler(
 
 /// ?terminate@@YAXXZ — C++ std::terminate(). Aborts the process.
 pub extern "win64" fn ucrt_terminate() -> ! {
+    eprintln!("weave/ucrt: terminate() called — std::terminate");
+    dump_backtrace("terminate");
     unsafe { libc::abort() }
 }
 
 /// `__std_terminate` — VCRUNTIME140.dll terminate hook. Calls abort().
 /// Wine ref: dlls/msvcp140/msvcp140.c — __std_terminate calls terminate() → abort().
 pub unsafe extern "win64" fn ucrt_std_terminate() -> ! {
+    eprintln!("weave/ucrt: __std_terminate() called — VCRUNTIME140 terminate hook");
+    dump_backtrace("__std_terminate");
     libc::abort()
 }
 

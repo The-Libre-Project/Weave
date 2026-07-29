@@ -10,6 +10,7 @@ description = "kernel32.dll stubs for Weave"
 weave-common = { path = "../weave-common" }
 weave-core = { path = "../weave-core" }
 libc = "0.2"
+backtrace = "0.3"
 
 [[test]]
 name = "disk_free_space_probe_gate"
