@@ -574,42 +574,33 @@ pub extern "win64" fn exit_process(u_exit_code: u32) -> ! {
     eprintln!("weave/kernel32: ExitProcess({u_exit_code})");
     let image_base = weave_core::seh::pe_base();
     let pe_size = weave_core::seh::pe_size();
-    eprint!("weave/kernel32: ExitProcess backtrace:");
+    eprintln!("weave/kernel32: ExitProcess backtrace:");
+    let image_base_u64 = image_base as u64;
+    let pe_end = image_base_u64 + pe_size as u64;
     // Phase 1 — DWARF (.eh_frame) frames via backtrace crate (Rust / libc / libgcc).
+    let mut seen: Vec<usize> = Vec::new();
     let bt = backtrace::Backtrace::new_unresolved();
     for (i, frame) in bt.frames().iter().enumerate() {
         let ip = frame.ip() as usize;
-        eprint!(" [{}]{:#010x}", i, ip.wrapping_sub(image_base));
+        let rva = ip.wrapping_sub(image_base);
+        if rva < pe_size && !seen.contains(&rva) {
+            eprintln!("  [{i}]{rva:#010x}  (DWARF)");
+            seen.push(rva);
+        }
     }
     // Phase 2 — MSVC-compiled PE frames via .pdata stack scan.
-    //
     // The DWARF unwinder stops at the first MSVC frame (no .eh_frame).
-    // We recover by scanning the thread stack for 8-byte values that fall
-    // within the mapped PE code range AND have a .pdata RUNTIME_FUNCTION entry,
-    // which is the heuristic used by Weave's own exception-handler fallback
-    // (dispatch_exception, unwind.rs:654).
-    //
-    // This produces more frames than a pure CFI walk, but may include
-    // non-return-address values that happen to land in .pdata (e.g. vtable
-    // pointers or function-pointer local variables).  Even so, the genuine
-    // call chain usually appears as a clean run, and false positives are easy
-    // to spot because they break the sequential RVA progression.
+    // Scan the stack for return addresses that fall within the PE code range
+    // AND have a .pdata RUNTIME_FUNCTION entry (the same heuristic used by
+    // Weave's exception-handler fallback dispatch_exception).
     let mut rsp: u64;
-    // SAFETY: inline asm reading the stack pointer — safe at any point in a
-    // non-naked function.
     unsafe { core::arch::asm!("mov {}, rsp", out(reg) rsp) };
     let scan_limit = rsp.saturating_add(64 * 1024);
     let mut scan_ptr = rsp;
-    let mut e_idx = bt.frames().len();
-    // SAFETY: reading /proc/self/mem with pread is safe even on unmapped pages
-    // (returns -1, handled by read_u64_safe returning None).  stack scanning
-    // within [rsp, rsp+64KB) stays inside the thread's committed stack pages
-    // on a typical 512KB+ Linux thread stack, but we use the fallible read
-    // regardless so a mis-step returns None instead of SIGSEGV.
     let mem_path = b"/proc/self/mem\0";
     let fd = unsafe { libc::open(mem_path.as_ptr() as *const libc::c_char, libc::O_RDONLY) };
     let fd_to_use = if fd >= 0 { fd } else { -1 };
-    while scan_ptr < scan_limit && e_idx < 64 {
+    while scan_ptr < scan_limit && seen.len() < 64 {
         let mut candidate: u64 = 0;
         if fd_to_use >= 0 {
             let n = unsafe {
@@ -625,7 +616,6 @@ pub extern "win64" fn exit_process(u_exit_code: u32) -> ! {
                 continue;
             }
         } else {
-            // Fallback (non-Linux): direct read with null check only.
             let p = scan_ptr as *const u64;
             if p.is_null() {
                 scan_ptr += 8;
@@ -633,25 +623,24 @@ pub extern "win64" fn exit_process(u_exit_code: u32) -> ! {
             }
             candidate = unsafe { p.read_unaligned() };
         }
-        // Does this value look like a PE code address?
-        if image_base > 0
-            && candidate >= image_base as u64
-            && candidate < (image_base + pe_size) as u64
+        if candidate >= image_base_u64
+            && candidate < pe_end
+            && weave_core::unwind::lookup_function_entry(image_base, candidate).is_some()
         {
-            // Confirm with .pdata lookup — reduces false positives.
-            if weave_core::unwind::lookup_function_entry(image_base, candidate).is_some() {
-                let rva = candidate as usize - image_base;
-                // Deduplicate: skip if same RVA as an already-printed frame.
-                eprint!(" [{e_idx}]{rva:#010x}");
-                e_idx += 1;
+            let rva = candidate as usize - image_base;
+            if !seen.contains(&rva) {
+                eprintln!("  [{}]{rva:#010x}  (stack)", seen.len());
+                seen.push(rva);
             }
         }
         scan_ptr += 8;
     }
     if fd_to_use >= 0 {
-        unsafe { libc::close(fd_to_use) };
+        unsafe {
+            libc::close(fd_to_use);
+        }
     }
-    eprintln!();
+    eprintln!("  ({} unique frames)", seen.len());
     unsafe { libc::exit(u_exit_code as i32) }
 }
 
