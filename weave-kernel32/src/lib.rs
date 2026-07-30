@@ -19528,19 +19528,36 @@ pub extern "win64" fn get_current_processor_number() -> u32 {
     0
 }
 
-/// QueueUserWorkItem: queue a user-mode work item to the thread pool.
+/// QueueUserWorkItem: queue a function to execute on a thread pool thread.
 ///
-/// Phase A stub — returns FALSE.
+/// Creates a detached `std::thread` for each work item.  The thread calls
+/// `lp_fn(lp_context)` and exits.  This matches Windows behaviour for the
+/// default thread pool with `WT_EXECUTEDEFAULT`.
 ///
-/// # Safety
-/// Caller must ensure function pointer is valid if not NULL.
+/// Flags:
+///   - `WT_EXECUTELONGFUNCTION` (0x10) — hint that the work item takes a
+///     long time; no behavioural difference in our implementation.
+///   - `WT_EXECUTEINIOTHREAD` (0x01) — hint to run on an I/O thread; no
+///     behavioural difference.
+///   - `WT_EXECUTEINPERSISTENTTHREAD` (0x80) — hint to keep the thread
+///     alive; our implementation creates a fresh thread each time.
+// Wine ref: dlls/kernelbase/thread.c:1418 — delegates to RtlQueueWorkItem,
+// which uses ntdll's thread pool (TpAllocWork + TpPostWork).  Weave uses a
+// simple std::thread spawn as a functionally correct substitute.
 pub unsafe extern "win64" fn queue_user_work_item(
-    _lp_fn: usize,
-    _lp_context: usize,
+    lp_fn: usize,
+    lp_context: usize,
     _dw_flags: u32,
 ) -> i32 {
-    warn_once("QueueUserWorkItem");
-    0
+    if lp_fn == 0 {
+        set_last_error(87); // ERROR_INVALID_PARAMETER
+        return 0;
+    }
+    // LPTHREAD_START_ROUTINE = unsafe extern "system" fn(LPVOID) -> DWORD.
+    // In Win64 the calling convention for thread start is the same as extern "win64".
+    let func: extern "win64" fn(usize) -> u32 = unsafe { std::mem::transmute(lp_fn) };
+    std::thread::spawn(move || { func(lp_context); });
+    1 // TRUE
 }
 
 /// RegisterWaitForSingleObject: register a wait on a thread pool.
