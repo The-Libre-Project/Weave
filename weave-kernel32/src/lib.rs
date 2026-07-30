@@ -15069,46 +15069,191 @@ pub unsafe extern "win64" fn set_system_time(_lp_system_time: *const u8) -> i32 
     1 // TRUE
 }
 
+// ── String folding constants ────────────────────────────────────────────────
+// Deferred flags are defined for API completeness but accepted as pass-through.
+
+const MAP_FOLDCZONE: u32 = 0x0010;
+#[allow(dead_code)]
+const MAP_PRECOMPOSED: u32 = 0x0020;
+#[allow(dead_code)]
+const MAP_COMPOSITE: u32 = 0x0040;
+#[allow(dead_code)]
+const MAP_FOLDDIGITS: u32 = 0x0080;
+#[allow(dead_code)]
+const MAP_EXPAND_LIGATURES: u32 = 0x2000;
+
+/// Lowercase a single UTF-16 code unit (BMP, non-surrogate) in place.
+/// Surrogate code units pass through unchanged.
+fn lower_bmp(c: u16) -> u16 {
+    if c <= 127 {
+        if (c as u8).is_ascii_uppercase() {
+            return c + 32;
+        }
+        return c;
+    }
+    // Lone surrogates and non-BMP code units pass through unchanged
+    if (0xD800..=0xDFFF).contains(&c) {
+        return c;
+    }
+    // BMP non-ASCII: use Rust's Unicode case folding
+    if let Some(ch) = char::from_u32(c as u32) {
+        ch.to_lowercase()
+            .next()
+            .map(|l| {
+                let lc = l as u32;
+                if lc <= 0xFFFF {
+                    lc as u16
+                } else {
+                    c
+                } // preserve if multi-unit
+            })
+            .unwrap_or(c)
+    } else {
+        c
+    }
+}
+
 // ── SumatraPDF gap-fill stubs ─────────────────────────────────────────────────
 
-/// FoldStringW: map a string using specified mapping flags (pass-through stub).
+/// FoldStringW: map a UTF-16 string with case folding.
 ///
-/// Returns the length of the destination string in characters. Pass-through:
-/// copies source to destination unchanged.
-// Wine ref: dlls/kernelbase/string.c — FoldStringW implements NORM_IGNORECASE,
-// NORM_IGNORENONSPACE, NORM_IGNORESYMBOLS, MAP_FOLDCZONE, MAP_FOLDDIGITS,
-// MAP_PRECOMPOSED, MAP_COMPOSITE. Weave: pass-through (no folding).
+/// Returns the length of the mapped string in characters on success, 0 on failure.
+/// NORM_IGNORECASE and MAP_FOLDCZONE fold uppercase BMP characters to lowercase.
+/// MAP_FOLDDIGITS, MAP_PRECOMPOSED, MAP_COMPOSITE, MAP_EXPAND_LIGATURES are
+/// accepted as no-ops (deferred).
+///
+/// # Safety
+/// `lp_src_str` must be a valid pointer to `cch_src` u16 elements (or
+/// null-terminated when cch_src == -1). `lp_dest_str` must be writable for
+/// `cch_dest` u16 elements, or NULL for size queries.
+// Wine ref: dlls/kernelbase/string.c — FoldStringW delegates to LCMapStringW
+// internally; NORM_IGNORECASE → LCMAP_LOWERCASE, MAP_FOLDCZONE same.
+// MAP_FOLDDIGITS folds numeral shapes (deferred), MAP_PRECOMPOSED/MAP_COMPOSITE
+// normalise (deferred). Weave: NORM_IGNORECASE + MAP_FOLDCZONE via Unicode
+// simple case folding with lower_bmp(); surrogate pairs decoded for full
+// supplementary-plane support.
 pub unsafe extern "win64" fn fold_string_w(
-    _dw_map_flags: u32,
+    dw_map_flags: u32,
     lp_src_str: *const u16,
     cch_src: i32,
     lp_dest_str: *mut u16,
     cch_dest: i32,
 ) -> i32 {
-    if lp_src_str.is_null() || cch_src == 0 {
+    if lp_src_str.is_null() {
         set_last_error(87); // ERROR_INVALID_PARAMETER
         return 0;
     }
+    if cch_src == 0 {
+        set_last_error(87);
+        return 0;
+    }
+
     let src_len = if cch_src < 0 {
-        let mut len = 0;
+        let mut len = 0usize;
         while unsafe { *lp_src_str.add(len) } != 0 {
             len += 1;
         }
-        len as i32
+        len
     } else {
-        cch_src
+        cch_src as usize
     };
-    let copy_len = if cch_dest > 0 && !lp_dest_str.is_null() {
-        let to_copy = src_len.min(cch_dest);
-        unsafe {
-            std::ptr::copy_nonoverlapping(lp_src_str, lp_dest_str, to_copy as usize);
+
+    let do_fold = (dw_map_flags & (NORM_IGNORECASE | MAP_FOLDCZONE)) != 0;
+
+    if !do_fold {
+        // Deferred or zero flags — identity copy
+        if dw_map_flags != 0 {
+            warn_once("FoldStringW(deferred-flags)");
         }
-        to_copy
-    } else {
-        src_len
-    };
-    eprintln!("weave: FoldStringW(stub) flags=0x{_dw_map_flags:x} len={copy_len}");
-    copy_len
+        if cch_dest == 0 {
+            return src_len as i32;
+        }
+        if !lp_dest_str.is_null() {
+            let to_copy = src_len.min(cch_dest as usize);
+            unsafe {
+                std::ptr::copy_nonoverlapping(lp_src_str, lp_dest_str, to_copy);
+            }
+        }
+        return src_len as i32;
+    }
+
+    // ── First pass: compute folded output length ──
+    // lower_bmp() produces exactly 1 output per BMP input code unit.
+    // Surrogate pairs decode to a supplementary-plane char whose lowercase
+    // may produce 1 or more code units.
+    let mut needed = 0usize;
+    let mut i = 0usize;
+    while i < src_len {
+        let c = unsafe { *lp_src_str.add(i) };
+        if (0xD800..=0xDBFF).contains(&c) && i + 1 < src_len {
+            let low = unsafe { *lp_src_str.add(i + 1) };
+            if (0xDC00..=0xDFFF).contains(&low) {
+                let cp = 0x10000 + (((c as u32 - 0xD800) << 10) | (low as u32 - 0xDC00));
+                if let Some(ch) = char::from_u32(cp) {
+                    needed += ch.to_lowercase().count();
+                } else {
+                    needed += 2;
+                }
+                i += 2;
+                continue;
+            }
+        }
+        // BMP or lone surrogate — 1:1
+        needed += 1;
+        i += 1;
+    }
+
+    // Size query / null dest
+    if cch_dest == 0 || lp_dest_str.is_null() {
+        return needed as i32;
+    }
+
+    // ── Second pass: write folded output ──
+    let write_end = needed.min(cch_dest as usize);
+    let mut j = 0usize;
+    let mut i = 0usize;
+    while i < src_len && j < write_end {
+        let c = unsafe { *lp_src_str.add(i) };
+        if (0xD800..=0xDBFF).contains(&c) && i + 1 < src_len {
+            let low = unsafe { *lp_src_str.add(i + 1) };
+            if (0xDC00..=0xDFFF).contains(&low) {
+                let cp = 0x10000 + (((c as u32 - 0xD800) << 10) | (low as u32 - 0xDC00));
+                if let Some(ch) = char::from_u32(cp) {
+                    for lc in ch.to_lowercase() {
+                        if j >= write_end {
+                            break;
+                        }
+                        let lcu = lc as u32;
+                        if lcu <= 0xFFFF {
+                            unsafe { *lp_dest_str.add(j) = lcu as u16 };
+                            j += 1;
+                        } else {
+                            if j + 1 >= write_end {
+                                break;
+                            }
+                            let val = lcu - 0x10000;
+                            unsafe {
+                                *lp_dest_str.add(j) = 0xD800 | ((val >> 10) as u16);
+                                *lp_dest_str.add(j + 1) = 0xDC00 | (val as u16);
+                            }
+                            j += 2;
+                        }
+                        if j == write_end {
+                            break;
+                        }
+                    }
+                }
+                i += 2;
+                continue;
+            }
+        }
+        let folded = lower_bmp(c);
+        unsafe { *lp_dest_str.add(j) = folded };
+        j += 1;
+        i += 1;
+    }
+
+    needed as i32
 }
 
 /// Thread32First: retrieve first thread from toolhelp snapshot (stub).
@@ -22351,6 +22496,121 @@ mod ini;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── FoldStringW unit tests ──────────────────────────────────────────────
+
+    fn fold_string_w_safe(
+        dw_map_flags: u32,
+        src: &[u16],
+        cch_src: i32,
+        dest: &mut [u16],
+        cch_dest: i32,
+    ) -> i32 {
+        unsafe {
+            let src_ptr = if cch_src == 0 {
+                std::ptr::null()
+            } else {
+                src.as_ptr()
+            };
+            let dest_ptr = if cch_dest == 0 || dest.is_empty() {
+                std::ptr::null_mut()
+            } else {
+                dest.as_mut_ptr()
+            };
+            fold_string_w(dw_map_flags, src_ptr, cch_src, dest_ptr, cch_dest)
+        }
+    }
+
+    #[test]
+    fn foldstringw_no_flags_identity() {
+        let src: Vec<u16> = "Hello\0".encode_utf16().collect();
+        let mut dst = vec![0u16; 256];
+        let ret = fold_string_w_safe(0, &src, -1, &mut dst, 256);
+        assert_eq!(ret, 5, "A1: expected length 5, got {ret}");
+        let expected: Vec<u16> = "Hello".encode_utf16().collect();
+        assert_eq!(&dst[..5], &expected[..], "A1: content mismatch");
+    }
+
+    #[test]
+    fn foldstringw_norm_ignorecase_ascii() {
+        let src: Vec<u16> = "HELLO\0".encode_utf16().collect();
+        let mut dst = vec![0u16; 256];
+        let ret = fold_string_w_safe(NORM_IGNORECASE, &src, -1, &mut dst, 256);
+        assert_eq!(ret, 5, "A2: expected length 5, got {ret}");
+        let expected: Vec<u16> = "hello".encode_utf16().collect();
+        assert_eq!(&dst[..5], &expected[..], "A2: content mismatch");
+    }
+
+    #[test]
+    fn foldstringw_norm_ignorecase_unicode() {
+        /* ABCÄÜÖ → abcäüö */
+        let src: Vec<u16> = vec!['A' as u16, 'B' as u16, 'C' as u16, 0xC4, 0xDC, 0xD6, 0];
+        let mut dst = vec![0u16; 256];
+        let ret = fold_string_w_safe(NORM_IGNORECASE, &src, -1, &mut dst, 256);
+        assert_eq!(ret, 6, "A3: expected length 6, got {ret}");
+        let expected: Vec<u16> = vec!['a' as u16, 'b' as u16, 'c' as u16, 0xE4, 0xFC, 0xF6];
+        assert_eq!(&dst[..6], &expected[..], "A3: content mismatch");
+    }
+
+    #[test]
+    fn foldstringw_map_foldczone_same_as_ignorecase() {
+        let src: Vec<u16> = "HELLO\0".encode_utf16().collect();
+        let mut dst = vec![0u16; 256];
+        let ret = fold_string_w_safe(MAP_FOLDCZONE, &src, -1, &mut dst, 256);
+        assert_eq!(ret, 5, "A4: expected length 5, got {ret}");
+        let expected: Vec<u16> = "hello".encode_utf16().collect();
+        assert_eq!(&dst[..5], &expected[..], "A4: content mismatch");
+    }
+
+    #[test]
+    fn foldstringw_empty_string() {
+        let src: Vec<u16> = vec![0];
+        let mut dst = vec![0u16; 256];
+        let ret = fold_string_w_safe(NORM_IGNORECASE, &src, -1, &mut dst, 256);
+        assert_eq!(ret, 0, "A5a: empty string should return 0");
+    }
+
+    #[test]
+    fn foldstringw_cch_src_zero() {
+        let src: Vec<u16> = "Hello\0".encode_utf16().collect();
+        let mut dst = vec![0u16; 256];
+        let ret = fold_string_w_safe(NORM_IGNORECASE, &src, 0, &mut dst, 256);
+        assert_eq!(ret, 0, "A5b: cch_src=0 should return 0");
+    }
+
+    #[test]
+    fn foldstringw_size_query() {
+        let src: Vec<u16> = "Hello\0".encode_utf16().collect();
+        let ret = fold_string_w_safe(NORM_IGNORECASE, &src, -1, &mut [], 0);
+        assert_eq!(ret, 5, "A5c: size query should return 5");
+    }
+
+    #[test]
+    fn foldstringw_buffer_too_small() {
+        let src: Vec<u16> = "Hello\0".encode_utf16().collect();
+        let mut dst = vec![0u16; 2];
+        let ret = fold_string_w_safe(NORM_IGNORECASE, &src, -1, &mut dst, 2);
+        assert_eq!(ret, 5, "A5d: should return required length 5, got {ret}");
+        let expected: Vec<u16> = "he".encode_utf16().collect();
+        assert_eq!(
+            &dst[..],
+            &expected[..],
+            "A5d: partial write content mismatch"
+        );
+    }
+
+    #[test]
+    fn foldstringw_null_src_returns_error() {
+        let mut dst = vec![0u16; 256];
+        let ret =
+            unsafe { fold_string_w(NORM_IGNORECASE, std::ptr::null(), -1, dst.as_mut_ptr(), 256) };
+        assert_eq!(ret, 0, "null src should return 0, got {ret}");
+        assert_eq!(
+            get_last_error(),
+            87,
+            "null src should set ERROR_INVALID_PARAMETER"
+        );
+    }
 
     #[cfg(target_os = "linux")]
     static DIRECTORY_CALLBACK_COUNT: AtomicUsize = AtomicUsize::new(0);

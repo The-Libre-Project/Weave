@@ -33,6 +33,9 @@ if command -v x86_64-w64-mingw32-gcc &>/dev/null; then
   x86_64-w64-mingw32-gcc -o "$FIXTURES_BIN/registry_basic.exe" \
     "$FIXTURES_SRC/registry_basic.c" -lkernel32 -ladvapi32
 
+  x86_64-w64-mingw32-gcc -o "$FIXTURES_BIN/foldstringw_test.exe" \
+    "$FIXTURES_SRC/foldstringw_test.c" -lkernel32
+
   echo "  Test fixtures compiled."
 else
   echo "  WARNING: MinGW cross-compiler not found. Skipping fixture compilation."

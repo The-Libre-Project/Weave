@@ -9736,3 +9736,113 @@ fn pp3_openmpt_probe_gate() {
         eprintln!("PP3 A3: waveOut not opened (expected — CMemoryException during module init)");
     }
 }
+
+/// M27 — FoldStringW gate test.
+///
+/// Runs foldstringw_test.exe, which exercises FoldStringW with various
+/// mapping flags and edge cases. Asserts that every PHASE marker indicates
+/// PASS and that all_tests_passed is emitted.
+#[test]
+fn m27_foldstringw_gate() {
+    if !cfg!(target_os = "linux") {
+        eprintln!("skipping execution test — requires Linux");
+        return;
+    }
+
+    let weave_bin = env!("CARGO_BIN_EXE_weave");
+    let manifest = env!("CARGO_MANIFEST_DIR");
+    let exe = format!("{manifest}/../tests/fixtures/bin/foldstringw_test.exe");
+
+    if !std::path::Path::new(&exe).exists() {
+        eprintln!("skipping: foldstringw_test.exe not present");
+        return;
+    }
+
+    let start = std::time::Instant::now();
+    let mut child = std::process::Command::new(weave_bin)
+        .arg(&exe)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|e| panic!("failed to spawn weave on foldstringw_test.exe: {e}"));
+
+    let deadline = start + std::time::Duration::from_secs(10);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                break;
+            }
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err(e) => panic!("wait failed: {e}"),
+        }
+    }
+
+    let output = child.wait_with_output().expect("wait_with_output failed");
+    let elapsed = start.elapsed();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    eprintln!("foldstringw_test stderr ({elapsed:.1?}):\n{stderr}");
+    eprintln!("foldstringw_test stdout:\n{stdout}");
+
+    // A1: no-flags pass-through
+    assert!(
+        stdout.contains("PHASE: A1_no_flags PASS") && !stdout.contains("PHASE: A1_no_flags FAIL"),
+        "M27 A1 FAIL: no-flags pass-through.\nstdout: {stdout}"
+    );
+
+    // A2: NORM_IGNORECASE ASCII
+    assert!(
+        stdout.contains("PHASE: A2_NORM_IGNORECASE_ASCII PASS")
+            && !stdout.contains("PHASE: A2_NORM_IGNORECASE_ASCII FAIL"),
+        "M27 A2 FAIL: NORM_IGNORECASE ASCII.\nstdout: {stdout}"
+    );
+
+    // A3: NORM_IGNORECASE Unicode
+    assert!(
+        stdout.contains("PHASE: A3_NORM_IGNORECASE_Unicode PASS")
+            && !stdout.contains("PHASE: A3_NORM_IGNORECASE_Unicode FAIL"),
+        "M27 A3 FAIL: NORM_IGNORECASE Unicode.\nstdout: {stdout}"
+    );
+
+    // A4: MAP_FOLDCZONE
+    assert!(
+        stdout.contains("PHASE: A4_MAP_FOLDCZONE PASS")
+            && !stdout.contains("PHASE: A4_MAP_FOLDCZONE FAIL"),
+        "M27 A4 FAIL: MAP_FOLDCZONE.\nstdout: {stdout}"
+    );
+
+    // A5: Edge cases
+    assert!(
+        stdout.contains("PHASE: A5a_empty_string PASS")
+            && !stdout.contains("PHASE: A5a_empty_string FAIL")
+            && stdout.contains("PHASE: A5b_cch_src_zero PASS")
+            && !stdout.contains("PHASE: A5b_cch_src_zero FAIL")
+            && stdout.contains("PHASE: A5c_size_query PASS")
+            && !stdout.contains("PHASE: A5c_size_query FAIL")
+            && stdout.contains("PHASE: A5d_buffer_too_small PASS")
+            && !stdout.contains("PHASE: A5d_buffer_too_small FAIL"),
+        "M27 A5 FAIL: edge case(s) failed.\nstdout: {stdout}"
+    );
+
+    // All-tests-passed marker
+    assert!(
+        stdout.contains("PHASE: all_tests_passed"),
+        "M27 FAIL: all_tests_passed not emitted.\nstdout: {stdout}"
+    );
+
+    // Exit must be 0
+    assert!(
+        output.status.success(),
+        "M27 FAIL: exit code {}\nstderr: {stderr}",
+        output.status
+    );
+
+    eprintln!("M27 FoldStringW: all assertions passed");
+}
