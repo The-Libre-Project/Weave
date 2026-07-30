@@ -18960,7 +18960,9 @@ pub unsafe extern "win64" fn get_overlapped_result(
 /// RtlPcToFileHeader: return the module base for a code address.
 ///
 /// Weave has a single guest PE, so we check if the PC falls within
-/// [PE_BASE, PE_BASE+PE_SIZE).
+/// [PE_BASE, PE_BASE+PE_SIZE).  Also accepts MAP_32BIT heap addresses
+/// (<4 GiB) — the C++ exception handler passes type-info pointers from
+/// heap-allocated objects and needs a valid module base for each.
 ///
 /// # Safety
 /// `pp_base_of_image` must be writable if non-null.
@@ -18974,16 +18976,18 @@ pub unsafe extern "win64" fn rtl_pc_to_file_header(
     let base = weave_core::seh::pe_base();
     let size = weave_core::seh::pe_size();
 
+    // Accept PE range, MAP_32BIT heap range (<4 GiB, not null),
+    // and any low address that might be a heap or vtable pointer.
     let ret = if base != 0 && pc >= base && pc < base + size {
+        base as *const u8
+    } else if pc > 0x10000 && pc < 0x1_0000_0000 {
+        // MAP_32BIT heap or stack address — belongs to the guest PE.
         base as *const u8
     } else {
         std::ptr::null()
     };
 
     if !pp_base_of_image.is_null() {
-        // SAFETY: pp_base_of_image is non-null (checked) and the caller's # Safety
-        // contract guarantees it is a writable `*mut *const u8`.  We write a single
-        // pointer — either the PE image base or null — so the size is always correct.
         unsafe { *pp_base_of_image = ret };
     }
     ret
