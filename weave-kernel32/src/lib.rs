@@ -16604,15 +16604,6 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         }
         "ClearCommBreak" => Some(clear_comm_break as *const () as usize),
         "SetCommBreak" => Some(set_comm_break as *const () as usize),
-        "GetCommState" => {
-            Some(get_comm_state as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
-        }
-        "SetCommState" => {
-            Some(set_comm_state as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
-        }
-        "SetCommTimeouts" => {
-            Some(set_comm_timeouts as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
-        }
         // INI cluster — Phase A stubs for IrfanView (E3-M3)
         "GetPrivateProfileStringW" => Some(
             get_private_profile_string_w as unsafe extern "win64" fn(_, _, _, _, _, _) -> _
@@ -16746,6 +16737,32 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
             write_process_memory as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const ()
                 as usize,
         ),
+        // ── Serial port API ────────────────────────────────────────────────
+        "BuildCommDCBW" => Some(
+            build_comm_dcb_w as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
+        ),
+        "GetCommState" => Some(
+            get_comm_state as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
+        ),
+        "SetCommState" => Some(
+            set_comm_state as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
+        ),
+        "SetCommTimeouts" => Some(
+            set_comm_timeouts as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
+        ),
+        "GetCommTimeouts" => Some(
+            get_comm_timeouts as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
+        ),
+        "SetCommMask" => Some(set_comm_mask as *const () as usize),
+        "ClearCommError" => Some(
+            clear_comm_error as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
+        ),
+        "EscapeCommFunction" => Some(
+            escape_comm_function as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
+        ),
+        "GetCommModemStatus" => Some(
+            get_comm_modem_status as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
+        ),
         "CreateNamedPipeW" => Some(
             create_named_pipe_w as unsafe extern "win64" fn(_, _, _, _, _, _, _, _) -> _
                 as *const () as usize,
@@ -16834,9 +16851,6 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
             check_remote_debugger_present as unsafe extern "win64" fn(_, _) -> _ as *const ()
                 as usize,
         ),
-        "ClearCommError" => {
-            Some(clear_comm_error as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize)
-        }
         "CreateJobObjectW" => {
             Some(create_job_object_w as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
         }
@@ -16849,16 +16863,10 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "DeleteProcThreadAttributeList" => Some(
             delete_proc_thread_attribute_list as unsafe extern "win64" fn(_) as *const () as usize,
         ),
-        "EscapeCommFunction" => {
-            Some(escape_comm_function as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
-        }
         "FindFirstFileExA" => Some(
             find_first_file_ex_a as unsafe extern "win64" fn(_, _, _, _, _, _) -> _ as *const ()
                 as usize,
         ),
-        "GetCommModemStatus" => {
-            Some(get_comm_modem_status as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
-        }
         "GetComputerNameExW" => Some(
             get_computer_name_ex_w as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
         ),
@@ -19315,6 +19323,168 @@ pub unsafe extern "win64" fn read_console_w(
     0 // FALSE
 }
 
+// ── Serial Port Configuration ────────────────────────────────────────────────
+
+// DCB structure layout (used by GetCommState / SetCommState).
+// Full structure is ~92 bytes; we only set the common fields.
+const DCB_BINARY: u8 = 1;
+
+/// BuildStatusStringW — format a status message.  Returns 0 (empty).
+/// BuildCommDCBW — parse a device-control string and populate a DCB.
+/// Not implemented — returns FALSE.
+///
+/// # Safety
+/// Pointer arguments are accepted but not dereferenced.
+// Wine ref: dlls/kernelbase/comm.c:580 — parses "baud=9600 parity=N data=8 stop=1" etc.
+pub unsafe extern "win64" fn build_comm_dcb_w(
+    _lp_def: *const u16,
+    _lp_dcb: *mut u8,
+) -> i32 {
+    0
+}
+
+/// GetCommState — get current serial port configuration. Returns a minimal
+/// DCB (9600-8-N-1) so callers don't fail on NULL/false.
+///
+/// # Safety
+/// `lp_dcb` must be a valid writable buffer (≥ sizeof(DCB) = 28 bytes minimum).
+// Wine ref: dlls/kernelbase/comm.c — calls NtQueryInformationFile(FileNameInformation)
+// to check if handle is a serial port, then builds DCB from cached state.
+pub unsafe extern "win64" fn get_comm_state(
+    _h_file: usize,
+    lp_dcb: *mut u8,
+) -> i32 {
+    if lp_dcb.is_null() {
+        set_last_error(87); // ERROR_INVALID_PARAMETER
+        return 0;
+    }
+    // Write a minimal DCB: 9600 baud, 8 data bits, 1 stop bit, no parity.
+    // DCB layout (first 28 bytes):
+    //   +0: DCBlength (4)
+    //   +4: BaudRate (4) = 9600
+    //   +8: fBinary:1 (bit 0) = 1
+    //   +12: wReserved (2)
+    //   +14: XonLim (2)
+    //   +16: XoffLim (2)
+    //   +18: ByteSize (1) = 8
+    //   +19: Parity (1) = 0 (NOPARITY)
+    //   +20: StopBits (1) = 0 (ONESTOPBIT)
+    //   +21: XonChar (1)
+    //   +22: XoffChar (1)
+    //   +23: ErrorChar (1)
+    //   +24: EofChar (1)
+    //   +25: EvtChar (1)
+    //   +26: wReserved1 (2)
+    unsafe {
+        std::ptr::write_bytes(lp_dcb, 0, 28);
+        *lp_dcb.cast::<u32>() = 28; // DCBlength
+        *lp_dcb.add(4).cast::<u32>() = 9600; // BaudRate
+        *lp_dcb.add(8) = DCB_BINARY; // fBinary
+        *lp_dcb.add(18) = 8; // ByteSize
+    }
+    1 // TRUE
+}
+
+/// SetCommState — set serial port configuration. Always succeeds (no-op).
+///
+/// # Safety
+/// `lp_dcb` is validated non-null but not fully dereferenced.
+// Wine ref: dlls/kernelbase/comm.c — validates DCB size, then calls NtSetInformationFile.
+pub unsafe extern "win64" fn set_comm_state(
+    _h_file: usize,
+    lp_dcb: *const u8,
+) -> i32 {
+    if lp_dcb.is_null() {
+        set_last_error(87);
+        return 0;
+    }
+    1
+}
+
+/// SetCommTimeouts — set read/write timeouts. Always succeeds (no-op).
+///
+/// # Safety
+/// `lp_timeouts` is validated non-null but not fully dereferenced.
+// Wine ref: dlls/kernelbase/comm.c — calls NtSetInformationFile.
+pub unsafe extern "win64" fn set_comm_timeouts(
+    _h_file: usize,
+    lp_timeouts: *const u8,
+) -> i32 {
+    if lp_timeouts.is_null() {
+        set_last_error(87);
+        return 0;
+    }
+    1
+}
+
+/// GetCommTimeouts — get current read/write timeouts. Returns zeroed timeouts.
+///
+/// # Safety
+/// `lp_timeouts` must be a valid writable buffer (≥ sizeof(COMMTIMEOUTS) = 20 bytes).
+// Wine ref: dlls/kernelbase/comm.c — returns cached COMMTIMEOUTS from handle.
+pub unsafe extern "win64" fn get_comm_timeouts(
+    _h_file: usize,
+    lp_timeouts: *mut u8,
+) -> i32 {
+    if lp_timeouts.is_null() {
+        set_last_error(87);
+        return 0;
+    }
+    // COMMTIMEOUTS: 5 DWORDs — return all zeros (no timeouts).
+    unsafe { std::ptr::write_bytes(lp_timeouts, 0, 20); }
+    1
+}
+
+/// SetCommMask — set serial port event mask. Always succeeds (no-op).
+// Wine ref: dlls/kernelbase/comm.c — calls NtSetInformationFile.
+pub unsafe extern "win64" fn set_comm_mask(
+    _h_file: usize,
+    _dw_evt_mask: u32,
+) -> i32 {
+    1
+}
+
+/// ClearCommError — clear serial port error and return status.
+/// Returns TRUE with zeroed status (no errors).
+///
+/// # Safety
+/// `lp_errors` and `lp_stat` may be NULL.
+// Wine ref: dlls/kernelbase/comm.c — calls NtQueryInformationFile.
+pub unsafe extern "win64" fn clear_comm_error(
+    _h_file: usize,
+    lp_errors: *mut u32,
+    _lp_stat: *mut u8,
+) -> i32 {
+    if !lp_errors.is_null() {
+        unsafe { *lp_errors = 0; }
+    }
+    1
+}
+
+/// EscapeCommFunction — perform extended serial port function.
+/// All functions return TRUE (no-op) except unsupported ones.
+// Wine ref: dlls/kernelbase/file.c:4394 — maps to DeviceIoControl with serial IOCTLs.
+pub unsafe extern "win64" fn escape_comm_function(
+    _h_file: usize,
+    _func: u32,
+) -> i32 {
+    1
+}
+
+/// GetCommModemStatus — get modem status. Returns zeroed status (no modem signals).
+// Wine ref: dlls/kernelbase/comm.c — calls DeviceIoControl(IOCTL_SERIAL_GET_MODEMSTATUS).
+pub unsafe extern "win64" fn get_comm_modem_status(
+    _h_file: usize,
+    lp_modem_status: *mut u32,
+) -> i32 {
+    if !lp_modem_status.is_null() {
+        unsafe { *lp_modem_status = 0; }
+    }
+    1
+}
+
+// ── Named Pipe stubs ─────────────────────────────────────────────────────────
+
 /// ConnectNamedPipe: wait for a client to connect to a named pipe. Returns FALSE.
 ///
 /// # Safety
@@ -19378,39 +19548,6 @@ pub extern "win64" fn clear_comm_break(_h_file: usize) -> i32 {
 // sets the TX line to a break state (continuous 0); must be cleared with ClearCommBreak
 pub extern "win64" fn set_comm_break(_h_file: usize) -> i32 {
     warn_once("SetCommBreak");
-    0
-}
-
-/// GetCommState: return serial port state. Returns FALSE (no serial support).
-///
-/// # Safety
-/// `lp_dcb` is accepted but not written.
-// Wine ref: dlls/kernelbase/comm.c — calls DeviceIoControl(IOCTL_SERIAL_GET_BAUD_RATE + others)
-// to populate DCB fields; translates serial driver bitmasks to Win32 DCB structure fields
-pub unsafe extern "win64" fn get_comm_state(_h_file: usize, _lp_dcb: usize) -> i32 {
-    warn_once("GetCommState");
-    0
-}
-
-/// SetCommState: set serial port state. Returns FALSE.
-///
-/// # Safety
-/// `lp_dcb` is accepted but not dereferenced.
-// Wine ref: dlls/kernelbase/comm.c — validates DCB.DCBlength == sizeof(DCB); translates Win32 DCB
-// fields to IOCTL_SERIAL_SET_BAUD_RATE/LINE_CONTROL/HANDFLOW/CHARS ioctls; ERROR_INVALID_PARAMETER if invalid
-pub unsafe extern "win64" fn set_comm_state(_h_file: usize, _lp_dcb: usize) -> i32 {
-    warn_once("SetCommState");
-    0
-}
-
-/// SetCommTimeouts: set serial port timeouts. Returns FALSE.
-///
-/// # Safety
-/// `lp_comm_timeouts` is accepted but not dereferenced.
-// Wine ref: dlls/kernelbase/comm.c — calls DeviceIoControl(IOCTL_SERIAL_SET_TIMEOUTS) with the
-// COMMTIMEOUTS struct; ReadIntervalTimeout/ReadTotalTimeoutMultiplier/Constant/Write fields mapped directly
-pub unsafe extern "win64" fn set_comm_timeouts(_h_file: usize, _lp_comm_timeouts: usize) -> i32 {
-    warn_once("SetCommTimeouts");
     0
 }
 
@@ -20658,26 +20795,6 @@ pub extern "win64" fn cancel_synchronous_io(_h_thread: usize) -> i32 {
     0
 }
 
-/// ClearCommError: clear serial port error and get status.
-///
-/// Phase A stub — returns FALSE.
-pub unsafe extern "win64" fn clear_comm_error(
-    _h_file: usize,
-    _lp_errors: *mut u32,
-    _lp_stat: *mut u8,
-) -> i32 {
-    warn_once("ClearCommError");
-    0
-}
-
-/// EscapeCommFunction: perform an extended serial function.
-///
-/// Phase A stub — returns FALSE.
-pub extern "win64" fn escape_comm_function(_h_file: usize, _n_func: u32) -> i32 {
-    warn_once("EscapeCommFunction");
-    0
-}
-
 /// FindFirstFileExA: find first matching file (ANSI extended).
 ///
 /// Converts the ANSI path to wide and delegates to FindFirstFileExW,
@@ -20768,17 +20885,6 @@ pub unsafe extern "win64" fn find_first_file_ex_a(
     }
 
     handle
-}
-
-/// GetCommModemStatus: get modem status register bits.
-///
-/// Phase A stub — returns FALSE.
-pub unsafe extern "win64" fn get_comm_modem_status(
-    _h_file: usize,
-    _lp_modem_stat: *mut u32,
-) -> i32 {
-    warn_once("GetCommModemStatus");
-    0
 }
 
 /// LockFile: lock a region in an open file.
