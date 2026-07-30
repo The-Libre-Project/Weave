@@ -8989,18 +8989,117 @@ pub extern "win64" fn set_thread_priority(_h_thread: usize, _n_priority: i32) ->
 /// Pointer arguments are accepted but not dereferenced.
 // Wine ref: dlls/kernelbase/thread.c::GetThreadContext:253 — delegates to
 // NtGetContextThread; CONTEXT flags select which register groups to capture.
-pub unsafe extern "win64" fn get_thread_context(_h_thread: usize, _lp_context: *mut u8) -> i32 {
-    warn_once("GetThreadContext");
-    0 // FALSE
-}
-/// SetThreadContext — not supported, returns FALSE.
+/// GetThreadContext — capture register context for the current thread.
 ///
-/// # Safety
-/// Pointer arguments are accepted but not dereferenced.
-// Wine ref: dlls/kernelbase/thread.c::SetThreadContext:467 — delegates to
-// NtSetContextThread; requires thread to be suspended first.
-pub unsafe extern "win64" fn set_thread_context(_h_thread: usize, _lp_context: *const u8) -> i32 {
+/// For threads other than self (or the pseudo-handle GetCurrentThread()), returns
+/// FALSE with ERROR_ACCESS_DENIED — we cannot inspect another native thread's
+/// registers without OS kernel support.
+///
+/// For the calling thread, captures CONTEXT_FULL (integer + control + segment
+/// registers) via inline assembly.
+// Wine ref: dlls/kernelbase/thread.c:253 — delegates to NtGetContextThread,
+// which requires the thread to be suspended for remote capture.
+pub unsafe extern "win64" fn get_thread_context(
+    _h_thread: usize,
+    lp_context: *mut u8,
+) -> i32 {
+    if lp_context.is_null() {
+        set_last_error(87); // ERROR_INVALID_PARAMETER
+        return 0;
+    }
+    // Accept self via pseudo-handle (GetCurrentThread() = ~1 = 0xFFFF_FFFF_FFFF_FFFE).
+    let is_self = _h_thread == !1usize;
+    if !is_self {
+        set_last_error(5); // ERROR_ACCESS_DENIED
+        return 0;
+    }
+
+    // CONTEXT_AMD64 flag values (0x100000 is implicit via the low bits)
+    const CONTEXT_CONTROL: u32 = 0x100001;
+    const CONTEXT_INTEGER: u32 = 0x100002;
+    const CONTEXT_SEGMENTS: u32 = 0x100004;
+    const CONTEXT_FULL: u32 = CONTEXT_CONTROL | CONTEXT_INTEGER | CONTEXT_SEGMENTS;
+
+    let ctx = lp_context as *mut weave_core::unwind::Context;
+    // Zero the entire context first (sets all fields to 0).
+    unsafe { std::ptr::write_bytes(ctx, 0, 1); }
+    // Capture integer registers via mov.
+    let rax: u64; let rcx: u64; let rdx: u64; let rbx: u64;
+    let rbp: u64; let rsi: u64; let rdi: u64;
+    let r8: u64; let r9: u64; let r10: u64; let r11: u64;
+    let r12: u64; let r13: u64; let r14: u64; let r15: u64;
+    unsafe {
+        std::arch::asm!("mov {}, rax", out(reg) rax);
+        std::arch::asm!("mov {}, rcx", out(reg) rcx);
+        std::arch::asm!("mov {}, rdx", out(reg) rdx);
+        std::arch::asm!("mov {}, rbx", out(reg) rbx);
+        std::arch::asm!("mov {}, rbp", out(reg) rbp);
+        std::arch::asm!("mov {}, rsi", out(reg) rsi);
+        std::arch::asm!("mov {}, rdi", out(reg) rdi);
+        std::arch::asm!("mov {}, r8", out(reg) r8);
+        std::arch::asm!("mov {}, r9", out(reg) r9);
+        std::arch::asm!("mov {}, r10", out(reg) r10);
+        std::arch::asm!("mov {}, r11", out(reg) r11);
+        std::arch::asm!("mov {}, r12", out(reg) r12);
+        std::arch::asm!("mov {}, r13", out(reg) r13);
+        std::arch::asm!("mov {}, r14", out(reg) r14);
+        std::arch::asm!("mov {}, r15", out(reg) r15);
+    }
+    unsafe {
+        (*ctx).context_flags = CONTEXT_FULL;
+        (*ctx).rax = rax;
+        (*ctx).rcx = rcx;
+        (*ctx).rdx = rdx;
+        (*ctx).rbx = rbx;
+        (*ctx).rbp = rbp;
+        (*ctx).rsi = rsi;
+        (*ctx).rdi = rdi;
+        (*ctx).r8 = r8;
+        (*ctx).r9 = r9;
+        (*ctx).r10 = r10;
+        (*ctx).r11 = r11;
+        (*ctx).r12 = r12;
+        (*ctx).r13 = r13;
+        (*ctx).r14 = r14;
+        (*ctx).r15 = r15;
+    }
+    // Capture RIP and RSP: they come from the inline asm context.
+    // The asm block clobbers no registers and DOES NOT modify RSP/RIP,
+    // so we can read them after the register captures.
+    let rip: u64; let rsp: u64; let eflags: u64;
+    unsafe {
+        std::arch::asm!("lea {}, [rip]", out(reg) rip); // RIP-relative LEA
+        std::arch::asm!("mov {}, rsp", out(reg) rsp);
+        std::arch::asm!("pushfq; pop {}", out(reg) eflags);
+    }
+    unsafe {
+        (*ctx).rip = rip;
+        (*ctx).rsp = rsp;
+        (*ctx).eflags = eflags as u32;
+        // Segment registers — these don't change in user mode on Linux x64.
+        // We set them to typical Windows x64 values.
+        (*ctx).seg_cs = 0x33;  // x64 Ring 3 code segment
+        (*ctx).seg_ds = 0x2b;  // x64 Ring 3 data segment
+        (*ctx).seg_es = 0x2b;
+        (*ctx).seg_fs = 0x53;  // TEB segment
+        (*ctx).seg_gs = 0x2b;
+        (*ctx).seg_ss = 0x2b;
+    }
+    1 // TRUE
+}
+
+/// SetThreadContext — not supported; returns FALSE with ERROR_ACCESS_DENIED.
+///
+/// We cannot modify a thread's registers without OS kernel support.  This is
+/// rarely needed in practice — the main caller is the debugger API.
+// Wine ref: dlls/kernelbase/thread.c:467 — delegates to NtSetContextThread,
+// which requires the thread to be suspended.
+pub unsafe extern "win64" fn set_thread_context(
+    _h_thread: usize,
+    _lp_context: *const u8,
+) -> i32 {
     warn_once("SetThreadContext");
+    set_last_error(5); // ERROR_ACCESS_DENIED
     0
 }
 /// SuspendThread — not supported, returns DWORD(-1) (failure).
