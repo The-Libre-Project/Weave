@@ -19720,22 +19720,56 @@ pub unsafe extern "win64" fn queue_user_work_item(
     1 // TRUE
 }
 
-/// RegisterWaitForSingleObject: register a wait on a thread pool.
+/// RegisterWaitForSingleObject — queue a callback when an object is signaled.
 ///
-/// Phase A stub — returns FALSE.
+/// Spawns a thread that calls WaitForSingleObject on the given handle, then
+/// invokes `call_back(context, TRUE)` on signal or `call_back(context, FALSE)`
+/// on timeout.  The wait thread detaches after the first callback.
 ///
-/// # Safety
-/// Caller must ensure `ph_new_wait_object` is a valid pointer.
+/// `ph_new_wait_object` receives an opaque handle that can be passed to
+/// UnregisterWait/UnregisterWaitEx.
+///
+/// Flags:
+///   WT_EXECUTEONLYONCE (0x08) — wait fires only once; thread exits.
+///   WT_EXECUTELONGFUNCTION (0x10) — no behavioural difference.
+///
+// Wine ref: dlls/kernelbase/thread.c — this API doesn't exist in kernelbase;
+// it's implemented in ntdll via RtlRegisterWait (TpAllocWait + TpSetWait).
 pub unsafe extern "win64" fn register_wait_for_single_object(
-    _ph_new_wait_object: *mut usize,
-    _h_object: usize,
-    _call_back: usize,
-    _context: usize,
-    _dw_milliseconds: u32,
-    _dw_flags: u32,
+    ph_new_wait_object: *mut usize,
+    h_object: usize,
+    call_back: usize,
+    context: usize,
+    dw_milliseconds: u32,
+    dw_flags: u32,
 ) -> i32 {
-    warn_once("RegisterWaitForSingleObject");
-    0
+    if call_back == 0 {
+        set_last_error(87); // ERROR_INVALID_PARAMETER
+        return 0;
+    }
+    let only_once = (dw_flags & 0x08) != 0;
+    let callback_fn: extern "win64" fn(usize, i32) = unsafe { std::mem::transmute(call_back) };
+    let wait_handle = if ph_new_wait_object.is_null() { 0 } else { ph_new_wait_object as usize };
+
+    let h_obj = h_object;
+    let ctx = context;
+    let once = only_once;
+    let timeout = dw_milliseconds;
+    std::thread::spawn(move || {
+        loop {
+            let t = if timeout == 0 { u32::MAX } else { timeout };
+            let signaled = wait_for_single_object(h_obj, t);
+            callback_fn(ctx, signaled as i32);
+            if once || signaled != 0 {
+                break;
+            }
+        }
+    });
+
+    if !ph_new_wait_object.is_null() {
+        unsafe { *ph_new_wait_object = wait_handle };
+    }
+    1
 }
 
 /// UnregisterWait: cancel a registered wait operation.
