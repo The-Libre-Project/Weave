@@ -9657,6 +9657,15 @@ fn pp3_openmpt_probe_gate() {
         return;
     }
 
+    let module = format!("{manifest}/../tests/fixtures/openmpt/ExampleSongs/Pigu - Nightfall.mptm");
+
+    // Install xdotool for keypress simulation.
+    let xdotool_ok = std::process::Command::new("apt-get")
+        .args(["install", "-y", "-qq", "xdotool"])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+
     let weave_bin = env!("CARGO_BIN_EXE_weave");
 
     let start = std::time::Instant::now();
@@ -9665,6 +9674,7 @@ fn pp3_openmpt_probe_gate() {
         .arg("--trace=stub,phase,msg,fault")
         .arg(&fixture)
         .arg("-noCrashHandler")
+        .arg(&module)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
@@ -9680,6 +9690,14 @@ fn pp3_openmpt_probe_gate() {
         let _ = pipe.read_to_end(&mut buf);
         *stderr_writer.lock().unwrap() = buf;
     });
+
+    // Give OpenMPT time to create its window, then send Space (play).
+    std::thread::sleep(std::time::Duration::from_secs(3));
+    if xdotool_ok {
+        let _ = std::process::Command::new("xdotool")
+            .args(["search", "--name", "OpenMPT", "key", "space"])
+            .status();
+    }
 
     let deadline = std::time::Duration::from_secs(30);
     let mut killed_by_deadline = false;
@@ -9713,9 +9731,6 @@ fn pp3_openmpt_probe_gate() {
     eprintln!("--- FULL STDERR END ---");
 
     // A1: no unresolved system imports.
-    // Exclude openmpt-lame.dll and openmpt-mpg123.dll — these are optional
-    // bundled codec plugins (MP3 export/import). Their exports are resolved
-    // dynamically at plugin load time, not through Weave's IAT patcher.
     let unresolved_count = stderr
         .lines()
         .filter(|l| l.contains("weave: unresolved:"))
@@ -9733,12 +9748,9 @@ fn pp3_openmpt_probe_gate() {
         "PP3 A2 FAIL: PHASE: create_window_first not found.\nstderr: {stderr}"
     );
 
-    // A3: waveOut audio pipeline started (soft — OpenMPT opens audio lazily).
-    // OpenMPT requires user action (File→Open + Play button) to trigger waveOut
-    // via its settings dialog.  The `/play` command-line flag is not recognized
-    // by this version.  A3 will be hardened in Phase C when we add simulated
-    // input (WM_COMMAND for play button) or expose a sound-settings change.
-    if !stderr.contains("PHASE: waveout_opened") {
-        eprintln!("PP3 A3: waveOut not opened (expected — lazy audio init, Phase C target)");
-    }
+    // A3: waveOut audio pipeline started.
+    assert!(
+        stderr.contains("PHASE: waveout_opened"),
+        "PP3 A3 FAIL: waveOut was not opened — Space keypress did not trigger playback.\nstderr: {stderr}"
+    );
 }
