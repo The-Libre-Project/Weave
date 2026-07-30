@@ -42,7 +42,7 @@ DOCKER_CMD="MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' docker run --rm --platfor
 set -e
 echo \"=== [1/5] cargo build ===\"
 apt-get update -qq >/dev/null 2>&1
-apt-get install -y -qq fonts-dejavu-core libpipewire-0.3-dev libclang-dev xvfb xdotool >/dev/null 2>&1
+apt-get install -y -qq fonts-dejavu-core libpipewire-0.3-dev libclang-dev xvfb xdotool cmake >/dev/null 2>&1
 rustup component add clippy rustfmt 2>&1
 cargo build --features weave-winmm/pipewire-audio,weave-mmdevapi/pipewire-audio 2>&1
 echo \"  Build OK.\"

@@ -42,7 +42,7 @@ test:
 		-e CARGO_TARGET_DIR=/weave/docker-target \
 		-e SDL_AUDIODRIVER=dummy \
 		rust:latest \
-		sh -c "apt-get update -qq && apt-get install -y -qq fonts-dejavu-core libpipewire-0.3-0 libpipewire-0.3-dev libclang-dev xvfb >/dev/null 2>&1; Xvfb :99 -screen 0 1280x720x24 & sleep 1; DISPLAY=:99 cargo test --features weave-winmm/pipewire-audio,weave-mmdevapi/pipewire-audio"
+		sh -c "apt-get update -qq && apt-get install -y -qq fonts-dejavu-core libpipewire-0.3-0 libpipewire-0.3-dev libclang-dev xvfb cmake >/dev/null 2>&1; Xvfb :99 -screen 0 1280x720x24 & sleep 1; DISPLAY=:99 cargo test --features weave-winmm/pipewire-audio,weave-mmdevapi/pipewire-audio"
 
 # ── Single gate test (Docker — same env as `make test` but one gate) ────────────
 # Usage: make test-gate GATE=irfanview_image_open_gate
@@ -60,7 +60,7 @@ test-gate:
 		-e CARGO_TARGET_DIR=/weave/docker-target \
 		-e SDL_AUDIODRIVER=dummy \
 		rust:latest \
-		sh -c "apt-get update -qq && apt-get install -y -qq fonts-dejavu-core libpipewire-0.3-0 libpipewire-0.3-dev libclang-dev xvfb >/dev/null 2>&1; Xvfb :99 -screen 0 1280x720x24 & sleep 1; DISPLAY=:99 cargo test -p weave-cli --test hello_world $(GATE) --features weave-winmm/pipewire-audio,weave-mmdevapi/pipewire-audio -- --nocapture"
+		sh -c "apt-get update -qq && apt-get install -y -qq fonts-dejavu-core libpipewire-0.3-0 libpipewire-0.3-dev libclang-dev xvfb cmake >/dev/null 2>&1; Xvfb :99 -screen 0 1280x720x24 & sleep 1; DISPLAY=:99 cargo test -p weave-cli --test hello_world $(GATE) --features weave-winmm/pipewire-audio,weave-mmdevapi/pipewire-audio -- --nocapture"
 
 # ── Fixture cross-compile (mingw-w64) ──────────────────────────────────────────
 # Requires x86_64-w64-mingw32-gcc on PATH. Output goes to tests/fixtures/bin/.

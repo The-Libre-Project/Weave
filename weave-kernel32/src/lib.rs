@@ -8999,10 +8999,7 @@ pub extern "win64" fn set_thread_priority(_h_thread: usize, _n_priority: i32) ->
 /// registers) via inline assembly.
 // Wine ref: dlls/kernelbase/thread.c:253 — delegates to NtGetContextThread,
 // which requires the thread to be suspended for remote capture.
-pub unsafe extern "win64" fn get_thread_context(
-    _h_thread: usize,
-    lp_context: *mut u8,
-) -> i32 {
+pub unsafe extern "win64" fn get_thread_context(_h_thread: usize, lp_context: *mut u8) -> i32 {
     if lp_context.is_null() {
         set_last_error(87); // ERROR_INVALID_PARAMETER
         return 0;
@@ -9022,12 +9019,25 @@ pub unsafe extern "win64" fn get_thread_context(
 
     let ctx = lp_context as *mut weave_core::unwind::Context;
     // Zero the entire context first (sets all fields to 0).
-    unsafe { std::ptr::write_bytes(ctx, 0, 1); }
+    unsafe {
+        std::ptr::write_bytes(ctx, 0, 1);
+    }
     // Capture integer registers via mov.
-    let rax: u64; let rcx: u64; let rdx: u64; let rbx: u64;
-    let rbp: u64; let rsi: u64; let rdi: u64;
-    let r8: u64; let r9: u64; let r10: u64; let r11: u64;
-    let r12: u64; let r13: u64; let r14: u64; let r15: u64;
+    let rax: u64;
+    let rcx: u64;
+    let rdx: u64;
+    let rbx: u64;
+    let rbp: u64;
+    let rsi: u64;
+    let rdi: u64;
+    let r8: u64;
+    let r9: u64;
+    let r10: u64;
+    let r11: u64;
+    let r12: u64;
+    let r13: u64;
+    let r14: u64;
+    let r15: u64;
     unsafe {
         std::arch::asm!("mov {}, rax", out(reg) rax);
         std::arch::asm!("mov {}, rcx", out(reg) rcx);
@@ -9066,7 +9076,9 @@ pub unsafe extern "win64" fn get_thread_context(
     // Capture RIP and RSP: they come from the inline asm context.
     // The asm block clobbers no registers and DOES NOT modify RSP/RIP,
     // so we can read them after the register captures.
-    let rip: u64; let rsp: u64; let eflags: u64;
+    let rip: u64;
+    let rsp: u64;
+    let eflags: u64;
     unsafe {
         std::arch::asm!("lea {}, [rip]", out(reg) rip); // RIP-relative LEA
         std::arch::asm!("mov {}, rsp", out(reg) rsp);
@@ -9078,10 +9090,10 @@ pub unsafe extern "win64" fn get_thread_context(
         (*ctx).eflags = eflags as u32;
         // Segment registers — these don't change in user mode on Linux x64.
         // We set them to typical Windows x64 values.
-        (*ctx).seg_cs = 0x33;  // x64 Ring 3 code segment
-        (*ctx).seg_ds = 0x2b;  // x64 Ring 3 data segment
+        (*ctx).seg_cs = 0x33; // x64 Ring 3 code segment
+        (*ctx).seg_ds = 0x2b; // x64 Ring 3 data segment
         (*ctx).seg_es = 0x2b;
-        (*ctx).seg_fs = 0x53;  // TEB segment
+        (*ctx).seg_fs = 0x53; // TEB segment
         (*ctx).seg_gs = 0x2b;
         (*ctx).seg_ss = 0x2b;
     }
@@ -9094,10 +9106,7 @@ pub unsafe extern "win64" fn get_thread_context(
 /// rarely needed in practice — the main caller is the debugger API.
 // Wine ref: dlls/kernelbase/thread.c:467 — delegates to NtSetContextThread,
 // which requires the thread to be suspended.
-pub unsafe extern "win64" fn set_thread_context(
-    _h_thread: usize,
-    _lp_context: *const u8,
-) -> i32 {
+pub unsafe extern "win64" fn set_thread_context(_h_thread: usize, _lp_context: *const u8) -> i32 {
     warn_once("SetThreadContext");
     set_last_error(5); // ERROR_ACCESS_DENIED
     0
@@ -16687,14 +16696,19 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         }
         "GetCurrentProcessorNumber" => Some(get_current_processor_number as *const () as usize),
         "CreateIoCompletionPort" => Some(
-            create_io_completion_port as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
+            create_io_completion_port as unsafe extern "win64" fn(_, _, _, _) -> _ as *const ()
+                as usize,
         ),
         "PostQueuedCompletionStatus" => Some(
-            post_queued_completion_status as unsafe extern "win64" fn(_, _, _, _) -> _
-                as *const () as usize,
+            post_queued_completion_status as unsafe extern "win64" fn(_, _, _, _) -> _ as *const ()
+                as usize,
         ),
         "GetQueuedCompletionStatus" => Some(
             get_queued_completion_status as unsafe extern "win64" fn(_, _, _, _, _) -> _
+                as *const () as usize,
+        ),
+        "GetQueuedCompletionStatusEx" => Some(
+            get_queued_completion_status_ex as unsafe extern "win64" fn(_, _, _, _, _, _) -> _
                 as *const () as usize,
         ),
         "QueueUserWorkItem" => Some(
@@ -16738,31 +16752,31 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
                 as usize,
         ),
         // ── Serial port API ────────────────────────────────────────────────
-        "BuildCommDCBW" => Some(
-            build_comm_dcb_w as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
-        ),
-        "GetCommState" => Some(
-            get_comm_state as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
-        ),
-        "SetCommState" => Some(
-            set_comm_state as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
-        ),
-        "SetCommTimeouts" => Some(
-            set_comm_timeouts as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
-        ),
-        "GetCommTimeouts" => Some(
-            get_comm_timeouts as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
-        ),
+        "BuildCommDCBW" => {
+            Some(build_comm_dcb_w as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "GetCommState" => {
+            Some(get_comm_state as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "SetCommState" => {
+            Some(set_comm_state as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "SetCommTimeouts" => {
+            Some(set_comm_timeouts as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "GetCommTimeouts" => {
+            Some(get_comm_timeouts as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
         "SetCommMask" => Some(set_comm_mask as *const () as usize),
-        "ClearCommError" => Some(
-            clear_comm_error as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
-        ),
-        "EscapeCommFunction" => Some(
-            escape_comm_function as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
-        ),
-        "GetCommModemStatus" => Some(
-            get_comm_modem_status as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
-        ),
+        "ClearCommError" => {
+            Some(clear_comm_error as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize)
+        }
+        "EscapeCommFunction" => {
+            Some(escape_comm_function as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
+        "GetCommModemStatus" => {
+            Some(get_comm_modem_status as unsafe extern "win64" fn(_, _) -> _ as *const () as usize)
+        }
         "CreateNamedPipeW" => Some(
             create_named_pipe_w as unsafe extern "win64" fn(_, _, _, _, _, _, _, _) -> _
                 as *const () as usize,
@@ -19336,10 +19350,7 @@ const DCB_BINARY: u8 = 1;
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
 // Wine ref: dlls/kernelbase/comm.c:580 — parses "baud=9600 parity=N data=8 stop=1" etc.
-pub unsafe extern "win64" fn build_comm_dcb_w(
-    _lp_def: *const u16,
-    _lp_dcb: *mut u8,
-) -> i32 {
+pub unsafe extern "win64" fn build_comm_dcb_w(_lp_def: *const u16, _lp_dcb: *mut u8) -> i32 {
     0
 }
 
@@ -19350,10 +19361,7 @@ pub unsafe extern "win64" fn build_comm_dcb_w(
 /// `lp_dcb` must be a valid writable buffer (≥ sizeof(DCB) = 28 bytes minimum).
 // Wine ref: dlls/kernelbase/comm.c — calls NtQueryInformationFile(FileNameInformation)
 // to check if handle is a serial port, then builds DCB from cached state.
-pub unsafe extern "win64" fn get_comm_state(
-    _h_file: usize,
-    lp_dcb: *mut u8,
-) -> i32 {
+pub unsafe extern "win64" fn get_comm_state(_h_file: usize, lp_dcb: *mut u8) -> i32 {
     if lp_dcb.is_null() {
         set_last_error(87); // ERROR_INVALID_PARAMETER
         return 0;
@@ -19390,10 +19398,7 @@ pub unsafe extern "win64" fn get_comm_state(
 /// # Safety
 /// `lp_dcb` is validated non-null but not fully dereferenced.
 // Wine ref: dlls/kernelbase/comm.c — validates DCB size, then calls NtSetInformationFile.
-pub unsafe extern "win64" fn set_comm_state(
-    _h_file: usize,
-    lp_dcb: *const u8,
-) -> i32 {
+pub unsafe extern "win64" fn set_comm_state(_h_file: usize, lp_dcb: *const u8) -> i32 {
     if lp_dcb.is_null() {
         set_last_error(87);
         return 0;
@@ -19406,10 +19411,7 @@ pub unsafe extern "win64" fn set_comm_state(
 /// # Safety
 /// `lp_timeouts` is validated non-null but not fully dereferenced.
 // Wine ref: dlls/kernelbase/comm.c — calls NtSetInformationFile.
-pub unsafe extern "win64" fn set_comm_timeouts(
-    _h_file: usize,
-    lp_timeouts: *const u8,
-) -> i32 {
+pub unsafe extern "win64" fn set_comm_timeouts(_h_file: usize, lp_timeouts: *const u8) -> i32 {
     if lp_timeouts.is_null() {
         set_last_error(87);
         return 0;
@@ -19422,25 +19424,21 @@ pub unsafe extern "win64" fn set_comm_timeouts(
 /// # Safety
 /// `lp_timeouts` must be a valid writable buffer (≥ sizeof(COMMTIMEOUTS) = 20 bytes).
 // Wine ref: dlls/kernelbase/comm.c — returns cached COMMTIMEOUTS from handle.
-pub unsafe extern "win64" fn get_comm_timeouts(
-    _h_file: usize,
-    lp_timeouts: *mut u8,
-) -> i32 {
+pub unsafe extern "win64" fn get_comm_timeouts(_h_file: usize, lp_timeouts: *mut u8) -> i32 {
     if lp_timeouts.is_null() {
         set_last_error(87);
         return 0;
     }
     // COMMTIMEOUTS: 5 DWORDs — return all zeros (no timeouts).
-    unsafe { std::ptr::write_bytes(lp_timeouts, 0, 20); }
+    unsafe {
+        std::ptr::write_bytes(lp_timeouts, 0, 20);
+    }
     1
 }
 
 /// SetCommMask — set serial port event mask. Always succeeds (no-op).
 // Wine ref: dlls/kernelbase/comm.c — calls NtSetInformationFile.
-pub unsafe extern "win64" fn set_comm_mask(
-    _h_file: usize,
-    _dw_evt_mask: u32,
-) -> i32 {
+pub unsafe extern "win64" fn set_comm_mask(_h_file: usize, _dw_evt_mask: u32) -> i32 {
     1
 }
 
@@ -19456,7 +19454,9 @@ pub unsafe extern "win64" fn clear_comm_error(
     _lp_stat: *mut u8,
 ) -> i32 {
     if !lp_errors.is_null() {
-        unsafe { *lp_errors = 0; }
+        unsafe {
+            *lp_errors = 0;
+        }
     }
     1
 }
@@ -19464,10 +19464,7 @@ pub unsafe extern "win64" fn clear_comm_error(
 /// EscapeCommFunction — perform extended serial port function.
 /// All functions return TRUE (no-op) except unsupported ones.
 // Wine ref: dlls/kernelbase/file.c:4394 — maps to DeviceIoControl with serial IOCTLs.
-pub unsafe extern "win64" fn escape_comm_function(
-    _h_file: usize,
-    _func: u32,
-) -> i32 {
+pub unsafe extern "win64" fn escape_comm_function(_h_file: usize, _func: u32) -> i32 {
     1
 }
 
@@ -19478,7 +19475,9 @@ pub unsafe extern "win64" fn get_comm_modem_status(
     lp_modem_status: *mut u32,
 ) -> i32 {
     if !lp_modem_status.is_null() {
-        unsafe { *lp_modem_status = 0; }
+        unsafe {
+            *lp_modem_status = 0;
+        }
     }
     1
 }
@@ -19796,7 +19795,10 @@ pub unsafe extern "win64" fn get_queued_completion_status(
         let (new_queue, timeout_result) = unsafe {
             (*port)
                 .wake
-                .wait_timeout(queue, std::time::Duration::from_millis(dw_milliseconds as u64))
+                .wait_timeout(
+                    queue,
+                    std::time::Duration::from_millis(dw_milliseconds as u64),
+                )
                 .unwrap()
         };
         queue = new_queue;
@@ -19814,15 +19816,77 @@ pub unsafe extern "win64" fn get_queued_completion_status(
 
     // Write packet data to output pointers.
     if !lp_number_of_bytes_transferred.is_null() {
-        unsafe { *lp_number_of_bytes_transferred = packet.transferred; }
+        unsafe {
+            *lp_number_of_bytes_transferred = packet.transferred;
+        }
     }
     if !lp_completion_key.is_null() {
-        unsafe { *lp_completion_key = packet.completion_key; }
+        unsafe {
+            *lp_completion_key = packet.completion_key;
+        }
     }
     if !lp_overlapped.is_null() {
-        unsafe { *lp_overlapped = packet.overlapped as *mut u8; }
+        unsafe {
+            *lp_overlapped = packet.overlapped as *mut u8;
+        }
     }
     1 // TRUE
+}
+
+/// GetQueuedCompletionStatusEx — retrieve multiple completion packets from the port.
+///
+/// Tries to dequeue up to `ul_count` packets.  Returns TRUE with the number removed
+/// on success, FALSE on error/timeout.
+///
+/// # Safety
+/// `lp_completion_port_entries` and `ul_num_entries_removed` must be valid pointers.
+// Wine ref: dlls/kernel32/completion_port.c — calls NtRemoveIoCompletionEx.
+pub unsafe extern "win64" fn get_queued_completion_status_ex(
+    completion_port: usize,
+    lp_completion_port_entries: *mut u8,
+    ul_count: u32,
+    ul_num_entries_removed: *mut u32,
+    _dw_milliseconds: u32,
+    _f_alertable: i32,
+) -> i32 {
+    if completion_port == 0 {
+        set_last_error(6); // ERROR_INVALID_HANDLE
+        return 0;
+    }
+    if lp_completion_port_entries.is_null() || ul_num_entries_removed.is_null() || ul_count == 0 {
+        set_last_error(87); // ERROR_INVALID_PARAMETER
+        return 0;
+    }
+    let port = completion_port as *mut CompletionPort;
+    // Dequeue at most `ul_count` packets into the caller's OVERLAPPED_ENTRY array.
+    // Each entry is 32 bytes: completion_key (8), overlapped (8), internal (8), transferred (4).
+    let mut queue = unsafe { (*port).queue.lock().unwrap() };
+    let mut removed: u32 = 0;
+    for i in 0..ul_count as usize {
+        match queue.pop_front() {
+            Some(pkt) => {
+                let entry = unsafe { lp_completion_port_entries.add(i * 32) };
+                unsafe {
+                    std::ptr::write_unaligned(entry as *mut u64, pkt.completion_key);
+                    std::ptr::write_unaligned(entry.add(8) as *mut u64, pkt.overlapped);
+                    std::ptr::write_unaligned(entry.add(16) as *mut u64, 0); // Internal
+                    std::ptr::write_unaligned(entry.add(24) as *mut u32, pkt.transferred);
+                }
+                removed += 1;
+            }
+            None => break,
+        }
+    }
+    drop(queue);
+    unsafe {
+        *ul_num_entries_removed = removed;
+    }
+    if removed > 0 {
+        1 // TRUE
+    } else {
+        set_last_error(121); // ERROR_SEM_TIMEOUT
+        0 // FALSE
+    }
 }
 
 /// QueueUserWorkItem: queue a function to execute on a thread pool thread.
@@ -19853,7 +19917,9 @@ pub unsafe extern "win64" fn queue_user_work_item(
     // LPTHREAD_START_ROUTINE = unsafe extern "system" fn(LPVOID) -> DWORD.
     // In Win64 the calling convention for thread start is the same as extern "win64".
     let func: extern "win64" fn(usize) -> u32 = unsafe { std::mem::transmute(lp_fn) };
-    std::thread::spawn(move || { func(lp_context); });
+    std::thread::spawn(move || {
+        func(lp_context);
+    });
     1 // TRUE
 }
 
@@ -19886,20 +19952,22 @@ pub unsafe extern "win64" fn register_wait_for_single_object(
     }
     let only_once = (dw_flags & 0x08) != 0;
     let callback_fn: extern "win64" fn(usize, i32) = unsafe { std::mem::transmute(call_back) };
-    let wait_handle = if ph_new_wait_object.is_null() { 0 } else { ph_new_wait_object as usize };
+    let wait_handle = if ph_new_wait_object.is_null() {
+        0
+    } else {
+        ph_new_wait_object as usize
+    };
 
     let h_obj = h_object;
     let ctx = context;
     let once = only_once;
     let timeout = dw_milliseconds;
-    std::thread::spawn(move || {
-        loop {
-            let t = if timeout == 0 { u32::MAX } else { timeout };
-            let signaled = wait_for_single_object(h_obj, t);
-            callback_fn(ctx, signaled as i32);
-            if once || signaled != 0 {
-                break;
-            }
+    std::thread::spawn(move || loop {
+        let t = if timeout == 0 { u32::MAX } else { timeout };
+        let signaled = wait_for_single_object(h_obj, t);
+        callback_fn(ctx, signaled as i32);
+        if once || signaled != 0 {
+            break;
         }
     });
 
@@ -20072,8 +20140,6 @@ pub unsafe extern "win64" fn write_process_memory(
 }
 
 // ── I/O Completion stubs ───────────────────────────────────────────────────────
-
-
 
 // ── Named Pipe stubs ───────────────────────────────────────────────────────────
 
