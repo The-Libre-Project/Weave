@@ -1,7 +1,11 @@
-# Only track the exe, .gitignore, and imports.txt
+# Only track the exe, .gitignore, imports.txt, and tunings directory
 # Everything else is part of the distribution but not needed for testing
 *
 !.gitignore
 !imports.txt
 !OpenMPT.exe
 !OpenMPT.portable
+!tunings/
+!tunings/.gitkeep
+!tunings/Built-in/
+!tunings/Built-in/.gitkeep
