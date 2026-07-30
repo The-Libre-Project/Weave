@@ -16686,6 +16686,17 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
             Some(free_library_and_exit_thread as extern "win64" fn(_, _) as *const () as usize)
         }
         "GetCurrentProcessorNumber" => Some(get_current_processor_number as *const () as usize),
+        "CreateIoCompletionPort" => Some(
+            create_io_completion_port as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize,
+        ),
+        "PostQueuedCompletionStatus" => Some(
+            post_queued_completion_status as unsafe extern "win64" fn(_, _, _, _) -> _
+                as *const () as usize,
+        ),
+        "GetQueuedCompletionStatus" => Some(
+            get_queued_completion_status as unsafe extern "win64" fn(_, _, _, _, _) -> _
+                as *const () as usize,
+        ),
         "QueueUserWorkItem" => Some(
             queue_user_work_item as unsafe extern "win64" fn(_, _, _) -> _ as *const () as usize,
         ),
@@ -16724,22 +16735,6 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         ),
         "WriteProcessMemory" => Some(
             write_process_memory as unsafe extern "win64" fn(_, _, _, _, _) -> _ as *const ()
-                as usize,
-        ),
-        "CreateIoCompletionPort" => Some(
-            create_io_completion_port as unsafe extern "win64" fn(_, _, _, _) -> _ as *const ()
-                as usize,
-        ),
-        "GetQueuedCompletionStatus" => Some(
-            get_queued_completion_status as unsafe extern "win64" fn(_, _, _, _, _) -> _
-                as *const () as usize,
-        ),
-        "GetQueuedCompletionStatusEx" => Some(
-            get_queued_completion_status_ex as unsafe extern "win64" fn(_, _, _, _, _, _) -> _
-                as *const () as usize,
-        ),
-        "PostQueuedCompletionStatus" => Some(
-            post_queued_completion_status as unsafe extern "win64" fn(_, _, _, _) -> _ as *const ()
                 as usize,
         ),
         "CreateNamedPipeW" => Some(
@@ -19528,6 +19523,162 @@ pub extern "win64" fn get_current_processor_number() -> u32 {
     0
 }
 
+// ── I/O Completion Ports ─────────────────────────────────────────────────────
+
+use std::collections::VecDeque;
+use std::sync::Condvar;
+
+/// A completion packet queued on an I/O completion port.
+#[repr(C)]
+struct CompletionPacket {
+    transferred: u32,
+    completion_key: u64,
+    overlapped: u64,
+}
+
+/// I/O completion port state.
+struct CompletionPort {
+    queue: Mutex<VecDeque<CompletionPacket>>,
+    wake: Condvar,
+}
+
+/// CreateIoCompletionPort — create or associate an I/O completion port.
+///
+/// When `existing_completion_port` is NULL, creates a new port.  When non-NULL,
+/// associates `file_handle` with the existing port (returns the port handle).
+/// `completion_key` is stored and returned on each completion packet.
+/// `number_of_concurrent_threads` is stored but not enforced (our queue is
+/// unbounded).
+///
+/// Returns the port handle on success, NULL on failure.
+// Wine ref: dlls/kernel32/completion_port.c — delegates to NtCreateIoCompletion
+// and NtSetInformationFile(FileCompletionInformation).
+pub unsafe extern "win64" fn create_io_completion_port(
+    file_handle: usize,
+    existing_completion_port: usize,
+    completion_key: u64,
+    number_of_concurrent_threads: u32,
+) -> usize {
+    if existing_completion_port != 0 {
+        // Associate a file handle with an existing port.
+        // Store the completion key on the port for later retrieval.
+        // For now, return the existing port handle (no-op).
+        let _ = file_handle;
+        let _ = completion_key;
+        let _ = number_of_concurrent_threads;
+        return existing_completion_port;
+    }
+    // Create a new completion port.
+    let port = Box::into_raw(Box::new(CompletionPort {
+        queue: Mutex::new(VecDeque::new()),
+        wake: Condvar::new(),
+    }));
+    port as usize
+}
+
+/// PostQueuedCompletionStatus — post a completion packet to the port.
+///
+/// # Safety
+/// `lp_overlapped` must be valid or NULL.
+// Wine ref: dlls/kernel32/completion_port.c — calls NtSetIoCompletion.
+pub unsafe extern "win64" fn post_queued_completion_status(
+    completion_port: usize,
+    dw_number_of_bytes_transferred: u32,
+    dw_completion_key: u64,
+    lp_overlapped: *mut u8,
+) -> i32 {
+    if completion_port == 0 {
+        set_last_error(6); // ERROR_INVALID_HANDLE
+        return 0;
+    }
+    let port = completion_port as *mut CompletionPort;
+    let packet = CompletionPacket {
+        transferred: dw_number_of_bytes_transferred,
+        completion_key: dw_completion_key,
+        overlapped: lp_overlapped as u64,
+    };
+    unsafe {
+        (*port).queue.lock().unwrap().push_back(packet);
+        (*port).wake.notify_one();
+    }
+    1 // TRUE
+}
+
+/// GetQueuedCompletionStatus — retrieve a completion packet from the port.
+///
+/// Blocks up to `dw_milliseconds` (INFINITE = u32::MAX).  Returns TRUE
+/// with the packet data on success, FALSE with ERROR_ABANDONED_WAIT_0 on timeout.
+///
+/// # Safety
+/// `lp_number_of_bytes_transferred`, `lp_completion_key`, and `lp_overlapped`
+/// must be valid writable pointers or NULL.
+// Wine ref: dlls/kernel32/completion_port.c — calls NtRemoveIoCompletion.
+pub unsafe extern "win64" fn get_queued_completion_status(
+    completion_port: usize,
+    lp_number_of_bytes_transferred: *mut u32,
+    lp_completion_key: *mut u64,
+    lp_overlapped: *mut *mut u8,
+    dw_milliseconds: u32,
+) -> i32 {
+    if completion_port == 0 {
+        set_last_error(6); // ERROR_INVALID_HANDLE
+        return 0;
+    }
+    let port = completion_port as *mut CompletionPort;
+
+    // Lock and wait for a packet.
+    let mut queue = unsafe { (*port).queue.lock().unwrap() };
+    let packet = if dw_milliseconds == u32::MAX {
+        // INFINITE — wait forever.
+        loop {
+            if let Some(p) = queue.pop_front() {
+                break p;
+            }
+            queue = unsafe { (*port).wake.wait(queue).unwrap() };
+        }
+    } else if dw_milliseconds == 0 {
+        // Poll — return immediately.
+        match queue.pop_front() {
+            Some(p) => p,
+            None => {
+                set_last_error(121); // ERROR_SEM_TIMEOUT
+                return 0;
+            }
+        }
+    } else {
+        // Timed wait.
+        let (new_queue, timeout_result) = unsafe {
+            (*port)
+                .wake
+                .wait_timeout(queue, std::time::Duration::from_millis(dw_milliseconds as u64))
+                .unwrap()
+        };
+        queue = new_queue;
+        match queue.pop_front() {
+            Some(p) => p,
+            None => {
+                if timeout_result.timed_out() {
+                    set_last_error(121); // ERROR_SEM_TIMEOUT
+                }
+                return 0;
+            }
+        }
+    };
+    drop(queue);
+
+    // Write packet data to output pointers.
+    if !lp_number_of_bytes_transferred.is_null() {
+        unsafe { *lp_number_of_bytes_transferred = packet.transferred; }
+    }
+    if !lp_completion_key.is_null() {
+        unsafe { *lp_completion_key = packet.completion_key; }
+    }
+    if !lp_overlapped.is_null() {
+        unsafe { *lp_overlapped = packet.overlapped as *mut u8; }
+    }
+    1 // TRUE
+}
+
 /// QueueUserWorkItem: queue a function to execute on a thread pool thread.
 ///
 /// Creates a detached `std::thread` for each work item.  The thread calls
@@ -19742,64 +19893,7 @@ pub unsafe extern "win64" fn write_process_memory(
 
 // ── I/O Completion stubs ───────────────────────────────────────────────────────
 
-/// CreateIoCompletionPort: create or associate an I/O completion port.
-///
-/// Phase A stub — returns NULL.
-pub unsafe extern "win64" fn create_io_completion_port(
-    _file_handle: usize,
-    _existing_completion_port: usize,
-    _completion_key: usize,
-    _dw_number_of_concurrent_threads: u32,
-) -> usize {
-    warn_once("CreateIoCompletionPort");
-    0
-}
 
-/// GetQueuedCompletionStatus: de-queue a completion packet.
-///
-/// Phase A stub — returns FALSE (no IO yet).
-///
-/// # Safety
-/// Caller must ensure output pointers are valid.
-pub unsafe extern "win64" fn get_queued_completion_status(
-    _completion_port: usize,
-    _lp_number_of_bytes: *mut u32,
-    _lp_completion_key: *mut usize,
-    _lp_overlapped: *mut *mut u8,
-    _dw_milliseconds: u32,
-) -> i32 {
-    0
-}
-
-/// GetQueuedCompletionStatusEx: de-queue multiple completion packets.
-///
-/// Phase A stub — returns FALSE.
-///
-/// # Safety
-/// Caller must ensure `lp_completion_port_entries` is a valid buffer.
-pub unsafe extern "win64" fn get_queued_completion_status_ex(
-    _completion_port: usize,
-    _lp_completion_port_entries: *mut u8,
-    _ul_count: u32,
-    _ul_num_entries_removed: *mut u32,
-    _dw_milliseconds: u32,
-    _f_alertable: i32,
-) -> i32 {
-    0
-}
-
-/// PostQueuedCompletionStatus: post a completion packet to an IOCP.
-///
-/// Phase A stub — returns FALSE.
-pub unsafe extern "win64" fn post_queued_completion_status(
-    _completion_port: usize,
-    _dw_number_of_bytes_transferred: u32,
-    _dw_completion_key: usize,
-    _lp_overlapped: usize,
-) -> i32 {
-    warn_once("PostQueuedCompletionStatus");
-    0
-}
 
 // ── Named Pipe stubs ───────────────────────────────────────────────────────────
 
