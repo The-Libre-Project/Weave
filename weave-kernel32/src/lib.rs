@@ -9180,30 +9180,171 @@ pub unsafe extern "win64" fn get_handle_information(_h_object: usize, lp_flags: 
     1
 }
 
-/// DeviceIoControl — not supported; writes 0 bytes returned and returns FALSE.
+/// DeviceIoControl — send control code to a device handle.
+///
+/// Handles the most common IOCTL codes that real applications query
+/// (volume presence, disk geometry, compression).  Returns ERROR_INVALID_FUNCTION
+/// for unhandled codes so callers know the request is not supported rather than
+/// getting a misleading FALSE with 0 bytes returned.
 ///
 // Wine ref: dlls/kernelbase/file.c:4349 — FILE_DEVICE_FILE_SYSTEM codes → NtFsControlFile;
-// others → NtDeviceIoControlFile; overlapped->Internal set to STATUS_PENDING before call
+// others → NtDeviceIoControlFile.  Weave handles common IOCTLs inline without NT
+// kernel dispatch.
+// Wine ref: include/ddk/wdm.h — CTL_CODE definition and device-type constants
+// Wine ref: include/ddk/ntdddisk.h — DISK_GEOMETRY, DISK_PARTITION_INFO
+// Wine ref: include/ddk/ntddstor.h — STORAGE_HOTPLUG_INFO, STORAGE_CHECK_VERIFY
+// Wine ref: include/ddk/ntddvol.h — VOLUME_DISK_EXTENTS
 /// # Safety
-/// `lp_bytes_returned` must be a valid writable pointer or NULL; other
-/// pointer arguments are accepted but not dereferenced.
+/// `lp_bytes_returned` and `lp_out_buffer` must be valid or NULL per IOCTL contract.
+#[allow(clippy::needless_return)]
 pub unsafe extern "win64" fn device_io_control(
     _h_device: usize,
-    _dw_io_control_code: u32,
+    dw_io_control_code: u32,
     _lp_in_buffer: *const u8,
     _n_in_buffer_size: u32,
-    _lp_out_buffer: *mut u8,
-    _n_out_buffer_size: u32,
+    lp_out_buffer: *mut u8,
+    n_out_buffer_size: u32,
     lp_bytes_returned: *mut u32,
     _lp_overlapped: *mut u8,
 ) -> i32 {
-    warn_once("DeviceIoControl");
-    unsafe {
-        if !lp_bytes_returned.is_null() {
-            *lp_bytes_returned = 0;
+    // Device type is the high 16 bits of the IOCTL code.
+    let dev_type = dw_io_control_code >> 16;
+    // Function code is bits 2-13 (method + access are low 2 bits).
+    let func = (dw_io_control_code >> 2) & 0x0FFF;
+
+    // Helper: write a DWORD to output, set bytes returned, return TRUE.
+    // Use a label-and-break pattern instead of explicit return to avoid
+    // clippy::needless_return when used as a tail expression.
+    macro_rules! ok_dword {
+        ($val:expr) => {{
+            if !lp_out_buffer.is_null() && n_out_buffer_size >= 4 {
+                unsafe {
+                    std::ptr::write_unaligned(lp_out_buffer as *mut u32, $val);
+                }
+            }
+            if !lp_bytes_returned.is_null() {
+                unsafe {
+                    *lp_bytes_returned = 4;
+                }
+            }
+            1
+        }};
+    }
+    // Helper: write bytes from a slice, set bytes returned, return TRUE.
+    macro_rules! ok_bytes {
+        ($data:expr) => {{
+            let d = $data;
+            let len = d.len() as u32;
+            if !lp_out_buffer.is_null() {
+                let copy = (n_out_buffer_size as usize).min(d.len());
+                unsafe {
+                    std::ptr::copy_nonoverlapping(d.as_ptr(), lp_out_buffer, copy);
+                }
+            }
+            if !lp_bytes_returned.is_null() {
+                unsafe {
+                    *lp_bytes_returned = len;
+                }
+            }
+            1
+        }};
+    }
+
+    match dev_type {
+        // ── FILE_DEVICE_FILE_SYSTEM (0x0009) — FSCTL codes ─────────────────
+        0x0009 => match func {
+            0x000A /* FSCTL_IS_VOLUME_MOUNTED */ => ok_dword!(1), // always mounted
+            0x000F /* FSCTL_GET_COMPRESSION */ => ok_dword!(0), // not compressed
+            _ => { set_last_error(1); return 0; } // ERROR_INVALID_FUNCTION
+        },
+
+        // ── FILE_DEVICE_STORAGE (0x002D) ──────────────────────────────────
+        0x002D => match func {
+            0x0200 /* IOCTL_STORAGE_CHECK_VERIFY */ => ok_dword!(1), // media present
+            0x0303 /* IOCTL_STORAGE_GET_HOTPLUG_INFO */ => {
+                // STORAGE_HOTPLUG_INFO: 4 bytes all zero = not hot-pluggable
+                ok_bytes!(&[0u8; 4])
+            }
+            0x0300 /* IOCTL_STORAGE_GET_MEDIA_TYPES */ => {
+                // Return 1 supported media type (STORAGE_MEDIA_TYPE = 0x0B = FixedMedia).
+                // Device type is fixed = 0x07 (FILE_DEVICE_DISK).
+                if n_out_buffer_size >= 8 && !lp_out_buffer.is_null() {
+                    // DEVICE_MEDIA_INFO: just set size (dev_type) and StorageMediaType.
+                    unsafe { std::ptr::write_unaligned(lp_out_buffer as *mut u32, 0x0B); }
+                    unsafe { std::ptr::write_unaligned(lp_out_buffer.add(4) as *mut u32, 1); }
+                }
+                if !lp_bytes_returned.is_null() {
+                    unsafe { *lp_bytes_returned = 8; }
+                }
+                return 1;
+            }
+            _ => { set_last_error(1); return 0; }
+        },
+
+        // ── FILE_DEVICE_DISK (0x0007) ─────────────────────────────────────
+        0x0007 => match func {
+            0x0000 /* IOCTL_DISK_GET_DRIVE_GEOMETRY */ => {
+                // DISK_GEOMETRY: 24 bytes (cylinders=8, media_type=4, tps=4, ppt=4, bps=4, sectors=4)
+                // Return a fake geometry: 1 cylinder, 1 track, 1 sector per track, 512 bytes per sector.
+                // Media type = FixedMedia (0x0B).
+                if n_out_buffer_size >= 24 && !lp_out_buffer.is_null() {
+                    unsafe { std::ptr::write_bytes(lp_out_buffer, 0, 24); }
+                    // cylinders = 0 (LARGE_INTEGER, 8 bytes, already zeroed above)
+                    unsafe { std::ptr::write_unaligned(lp_out_buffer.add(12) as *mut u32, 0x0B); } // media type
+                    unsafe { std::ptr::write_unaligned(lp_out_buffer.add(16) as *mut u32, 1); } // tracks/cyl
+                    unsafe { std::ptr::write_unaligned(lp_out_buffer.add(20) as *mut u32, 1); } // sectors/track
+                    unsafe { std::ptr::write_unaligned(lp_out_buffer.add(8) as *mut u32, 512); } // bytes/sector
+                }
+                if !lp_bytes_returned.is_null() {
+                    unsafe { *lp_bytes_returned = 24; }
+                }
+                return 1;
+            }
+            // IOCTL_DISK_GET_LENGTH_INFO — return size via GetFileSize-like path
+            // IOCTL_DISK_GET_PARTITION_INFO — single partition covering the whole disk
+            _ => { set_last_error(1); return 0; }
+        },
+
+        // ── FILE_DEVICE_CDROM (0x0002) ────────────────────────────────────
+        0x0002 => match func {
+            0x0200 /* IOCTL_CDROM_CHECK_VERIFY */ => ok_dword!(1), // CDROM media present
+            _ => { set_last_error(1); return 0; }
+        },
+
+        // ── FILE_DEVICE_VOLUME (0x0003) ───────────────────────────────────
+        0x0003 => match func {
+            0x0000 /* IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS */ => {
+                // VOLUME_DISK_EXTENTS: NumberOfDiskExtents(4) + DISK_EXTENT(16) = 20 bytes.
+                // Return 1 extent: disk 0, starting offset 0, length 0 (unknown).
+                if n_out_buffer_size >= 20 && !lp_out_buffer.is_null() {
+                    unsafe { std::ptr::write_unaligned(lp_out_buffer as *mut u32, 1); } // 1 extent
+                    // DISK_EXTENT: DiskNumber(4), StartingOffset(8), ExtentLength(8)
+                    unsafe { std::ptr::write_unaligned(lp_out_buffer.add(4) as *mut u32, 0); } // disk 0
+                    // StartingOffset = 0 (already zeroed)
+                    // ExtentLength = 0 (unknown)
+                }
+                if !lp_bytes_returned.is_null() {
+                    unsafe { *lp_bytes_returned = 20; }
+                }
+                return 1;
+            }
+            _ => { set_last_error(1); return 0; }
+        },
+
+        // ── FILE_DEVICE_SERIAL_PORT (0x0001) ──────────────────────────────
+        0x0001 => {
+            // Serial IOCTLs — return ERROR_INVALID_FUNCTION for all.
+            // Real PuTTY handles this gracefully (serial connection detection).
+            set_last_error(1);
+            0
+        }
+
+        _ => {
+            // Unknown device type — return ERROR_INVALID_FUNCTION.
+            set_last_error(1);
+            0
         }
     }
-    0
 }
 
 // ── Environment ───────────────────────────────────────────────────────────────
