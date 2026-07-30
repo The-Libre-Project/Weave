@@ -136,6 +136,14 @@ impl ThreadStartGate {
         }
     }
 
+    /// Increment the suspend count and return its prior value.
+    pub fn suspend(&self) -> u32 {
+        let mut count = self.suspend_count.lock().unwrap();
+        let previous = *count;
+        *count += 1;
+        previous
+    }
+
     /// Decrement the start-suspend count and return its prior value.
     pub fn resume(&self) -> u32 {
         let mut count = self.suspend_count.lock().unwrap();

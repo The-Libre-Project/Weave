@@ -9105,7 +9105,16 @@ pub unsafe extern "win64" fn set_thread_context(
 /// SuspendThread — not supported, returns DWORD(-1) (failure).
 // Wine ref: dlls/kernelbase/thread.c:689 — calls NtSuspendThread; Win9x mode returns 0 for
 // current thread; returns ~0U on failure (NtSuspendThread fails)
-pub extern "win64" fn suspend_thread(_h_thread: usize) -> u32 {
+pub extern "win64" fn suspend_thread(h_thread: usize) -> u32 {
+    // Threads created via CreateThread have a start_gate that supports
+    // suspend/resume via suspend count.
+    if let Some(gate) = handles::get_thread_start_gate(h_thread) {
+        return gate.suspend();
+    }
+    // Self-suspend via GetCurrentThread() pseudo-handle.
+    if h_thread == !1usize {
+        return 0; // Win9x compat — suspend of self returns 0
+    }
     warn_once("SuspendThread");
     u32::MAX // failure
 }
