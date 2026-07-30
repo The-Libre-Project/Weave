@@ -2637,17 +2637,20 @@ pub unsafe extern "win64" fn local_re_alloc(
     unsafe { libc::realloc(h_mem, u_bytes) }
 }
 
-/// HeapCreate: create a heap and return a fake handle.
+/// HeapCreate: create a heap and return a unique handle.
 ///
 /// Wine ref: dlls/kernelbase/memory.c — HeapCreate calls RtlCreateHeap;
-/// Weave uses a single libc allocator so we return a fake but consistent
-/// handle (1 = process heap sentinel). Parameters are ignored.
+/// Weave uses a single libc allocator so all heaps share the same backing
+/// store, but we still return distinct handles so the PE can tell heaps apart.
+static NEXT_HEAP: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(2);
 pub extern "win64" fn heap_create(
     _fl_options: u32,
     _dw_initial_size: usize,
     _dw_maximum_size: usize,
 ) -> usize {
-    1usize // fake process heap handle — Weave uses single libc allocator
+    let h = NEXT_HEAP.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    eprintln!("weave/HeapCreate: handle={h}");
+    h
 }
 
 /// HeapDestroy: destroy a heap (no-op).
