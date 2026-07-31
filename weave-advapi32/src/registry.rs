@@ -23,7 +23,7 @@ use sha1::digest::{Digest, DynDigest};
 use weave_core::handles::{self, HandleKind};
 use weave_core::registry::{
     find_value_file, predefined_hive_path, read_value_file, resolve_subkey, REG_EXPAND_SZ,
-    REG_NONE, REG_SZ,
+    REG_MULTI_SZ, REG_NONE, REG_SZ,
 };
 
 // ── Win32 error codes for registry operations ─────────────────────────────────
@@ -238,15 +238,20 @@ pub unsafe extern "win64" fn reg_create_key_ex_w(
 
 // ── RegQueryValueExW ──────────────────────────────────────────────────────────
 
-// Wine ref: dlls/kernelbase/registry.c:1636 — (data && !count) || reserved → ERROR_INVALID_PARAMETER;
-// for REG_SZ/REG_EXPAND_SZ, appends a null WCHAR if the stored data doesn't end with one and
-// there's room in the buffer; fills *type and *count on success and on ERROR_MORE_DATA;
-// calls NtQueryValueKey via KEY_VALUE_PARTIAL_INFORMATION.
+// Wine ref: dlls/kernelbase/registry.c:1636-1704 — (data && !count) || reserved →
+// ERROR_INVALID_PARAMETER; bad root hkey → ERROR_INVALID_HANDLE; on a size probe
+// (data == NULL) Wine zeroes *count up front then reports the required byte count on
+// success; fills *type and *count on success AND on ERROR_MORE_DATA (STATUS_BUFFER_OVERFLOW);
+// for string types (is_string: REG_SZ/REG_EXPAND_SZ/REG_MULTI_SZ, registry.c:88) appends a
+// null WCHAR if the stored data doesn't end with one and the buffer has room (does NOT extend
+// *count); NtQueryValueKey(KeyValuePartialInformation) returns ERROR_FILE_NOT_FOUND for a
+// missing value name.
 /// RegQueryValueExW: read a registry value.
 ///
-/// If `lp_data` is null (or `lpcb_data` points to 0), fills `lp_type` and
-/// `lpcb_data` with the value's type and byte length, then returns
-/// `ERROR_SUCCESS`. The caller uses this to size a buffer before the real read.
+/// If `lp_data` is null, fills `lp_type` and `lpcb_data` with the value's type
+/// and required byte length, then returns `ERROR_SUCCESS`. The caller uses this
+/// to size a buffer before the real read. The required length includes the null
+/// terminator for string types.
 ///
 /// If `lp_data` is non-null and the buffer is large enough, copies the data
 /// and returns `ERROR_SUCCESS`.
@@ -256,7 +261,7 @@ pub unsafe extern "win64" fn reg_create_key_ex_w(
 ///
 /// # Safety
 /// All pointer arguments must be valid per their Windows API contracts.
-// Wine ref: dlls/kernelbase/registry.c:1636 — appends NUL for REG_SZ if space allows; data+!count → ERROR_INVALID_PARAMETER; perf keys handled separately via query_perf_data
+// Wine ref: dlls/kernelbase/registry.c:1636-1704 — (data && !count) || reserved → ERROR_INVALID_PARAMETER; size probe zeroes *count first; *type and *count filled on success and on ERROR_MORE_DATA; NUL appended for string types if room, *count unchanged; missing name → ERROR_FILE_NOT_FOUND
 pub unsafe extern "win64" fn reg_query_value_ex_w(
     h_key: usize,
     lp_value_name: *const u16,
@@ -283,6 +288,15 @@ pub unsafe extern "win64" fn reg_query_value_ex_w(
     // must supply a valid null-terminated UTF-16 string.
     let value_name = unsafe { decode_wide_ptr(lp_value_name) };
 
+    // Wine zeroes *count on the size-probe path before the value lookup
+    // (registry.c:1646), so callers reading it after an error see 0, not a stale value.
+    if lp_data.is_null() && !lpcb_data.is_null() {
+        // SAFETY: lpcb_data is optional per MSDN (may be null for a pure type query);
+        // written only after confirming non-null.  The Win32 API contract requires that
+        // when non-null it points to a valid, writable DWORD*.
+        unsafe { *lpcb_data = 0 };
+    }
+
     let value_file = match find_value_file(&key_path, &value_name) {
         Some(f) => f,
         None => return ERROR_FILE_NOT_FOUND,
@@ -293,21 +307,21 @@ pub unsafe extern "win64" fn reg_query_value_ex_w(
         None => return ERROR_FILE_NOT_FOUND,
     };
 
-    // Write the type.
+    let data_len = data.len() as u32;
+
+    // Write the type on success and on ERROR_MORE_DATA (Wine fills *type in both cases).
     if !lp_type.is_null() {
         // SAFETY: lp_type is optional per MSDN; written only after confirming non-null.
         // The Win32 API contract requires callers to provide a valid, writable DWORD*.
         unsafe { *lp_type = reg_type };
     }
 
-    let data_len = data.len() as u32;
-
     if lp_data.is_null() {
-        // Size-probe call: just report the required size.
+        // Size-probe call: report the required byte count (includes the null
+        // terminator for string types, since encode_sz appends one).
         if !lpcb_data.is_null() {
-            // SAFETY: lpcb_data is optional per MSDN (may be null for a pure type query);
-            // written only after confirming non-null.  The Win32 API contract requires that
-            // when non-null it points to a valid, writable DWORD*.
+            // SAFETY: lpcb_data is non-null (checked above).  The Win32 API contract
+            // requires callers to provide a valid, writable DWORD*.
             unsafe { *lpcb_data = data_len };
         }
         return ERROR_SUCCESS;
@@ -338,13 +352,13 @@ pub unsafe extern "win64" fn reg_query_value_ex_w(
     // data.as_ptr() is a valid Rust slice — no aliasing with lp_data (caller-owned memory).
     unsafe { std::ptr::copy_nonoverlapping(data.as_ptr(), lp_data, data.len()) };
 
-    // Wine behaviour: for string types, guarantee a UTF-16 null terminator at
-    // the end of the buffer if the data doesn't already end with one and there
-    // is room for two more bytes.
-    if reg_type == REG_SZ || reg_type == REG_EXPAND_SZ {
+    // Wine behaviour (registry.c:1684-1692): for string types, guarantee a UTF-16 null
+    // terminator at the end of the buffer if the stored data doesn't already end with
+    // one and there is room for two more bytes. *count is NOT extended by the append.
+    if reg_type == REG_SZ || reg_type == REG_EXPAND_SZ || reg_type == REG_MULTI_SZ {
         let len = data.len();
-        let already_null = len >= 2 && data[len - 2] == 0 && data[len - 1] == 0;
-        if !already_null && buf_size as usize >= len + 2 {
+        let ends_with_null = len >= 2 && data[len - 2] == 0 && data[len - 1] == 0;
+        if len > 0 && !ends_with_null && buf_size as usize >= len + 2 {
             // SAFETY: We checked buf_size >= len + 2, so writing two bytes past the end
             // of the data (but still within the caller's declared buffer) is safe.
             // lp_data is non-null and points into the caller-provided buffer.
@@ -3295,7 +3309,9 @@ mod tests {
 
     use std::path::PathBuf;
     use std::sync::OnceLock;
-    use weave_core::registry::{encode_sz, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
+    use weave_core::registry::{
+        encode_dword, encode_sz, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, REG_DWORD,
+    };
 
     /// Shared throwaway registry tree for functional tests. Redirects the
     /// global prefix once so predefined hive handles resolve under a temp dir.
@@ -3491,6 +3507,297 @@ mod tests {
         };
         assert_eq!(status, ERROR_SUCCESS);
         assert_eq!(buf, value);
+    }
+
+    #[test]
+    fn query_sz_size_query_includes_terminator() {
+        // REG_SZ size query must report the stored byte count, which includes the
+        // UTF-16 null terminator (encode_sz appends one).
+        test_registry_dir();
+        let key = create_key(HKEY_CURRENT_USER, r"Software\WeaveSzSize");
+        let value_name = wide("Greeting");
+        let value = encode_sz("hello world");
+        let status = unsafe {
+            reg_set_value_ex_w(
+                key,
+                value_name.as_ptr(),
+                0,
+                REG_SZ,
+                value.as_ptr(),
+                value.len() as u32,
+            )
+        };
+        assert_eq!(status, ERROR_SUCCESS);
+
+        let mut reg_type = 0u32;
+        let mut size = 0u32;
+        let status = unsafe {
+            reg_query_value_ex_w(
+                key,
+                value_name.as_ptr(),
+                std::ptr::null_mut(),
+                &mut reg_type,
+                std::ptr::null_mut(),
+                &mut size,
+            )
+        };
+        assert_eq!(status, ERROR_SUCCESS);
+        assert_eq!(reg_type, REG_SZ);
+        // "hello world" = 11 chars + null terminator = 12 UTF-16 units = 24 bytes.
+        assert_eq!(size, 24);
+    }
+
+    #[test]
+    fn query_dword_roundtrip() {
+        test_registry_dir();
+        let key = create_key(HKEY_CURRENT_USER, r"Software\WeaveDword");
+        let value_name = wide("Count");
+        let value = encode_dword(0xDEAD_BEEF);
+        let status = unsafe {
+            reg_set_value_ex_w(
+                key,
+                value_name.as_ptr(),
+                0,
+                REG_DWORD,
+                value.as_ptr(),
+                value.len() as u32,
+            )
+        };
+        assert_eq!(status, ERROR_SUCCESS);
+
+        let mut reg_type = 0u32;
+        let mut size = 0u32;
+        let status = unsafe {
+            reg_query_value_ex_w(
+                key,
+                value_name.as_ptr(),
+                std::ptr::null_mut(),
+                &mut reg_type,
+                std::ptr::null_mut(),
+                &mut size,
+            )
+        };
+        assert_eq!(status, ERROR_SUCCESS);
+        assert_eq!(reg_type, REG_DWORD);
+        assert_eq!(size, 4);
+
+        let mut buf = [0u8; 4];
+        let status = unsafe {
+            reg_query_value_ex_w(
+                key,
+                value_name.as_ptr(),
+                std::ptr::null_mut(),
+                &mut reg_type,
+                buf.as_mut_ptr(),
+                &mut size,
+            )
+        };
+        assert_eq!(status, ERROR_SUCCESS);
+        assert_eq!(buf, value.as_slice());
+    }
+
+    #[test]
+    fn query_missing_value_returns_error_file_not_found() {
+        test_registry_dir();
+        let key = create_key(HKEY_CURRENT_USER, r"Software\WeaveQueryMissing");
+        let value_name = wide("NoSuchValue");
+        let mut size = 0u32;
+        let status = unsafe {
+            reg_query_value_ex_w(
+                key,
+                value_name.as_ptr(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut size,
+            )
+        };
+        assert_eq!(status, ERROR_FILE_NOT_FOUND);
+        // Wine zeroes *count on the size-probe path even when the value is missing.
+        assert_eq!(size, 0);
+    }
+
+    #[test]
+    fn query_buffer_too_small_returns_error_more_data() {
+        test_registry_dir();
+        let key = create_key(HKEY_CURRENT_USER, r"Software\WeaveQuerySmall");
+        let value_name = wide("Payload");
+        let value = encode_sz("a long string value");
+        let status = unsafe {
+            reg_set_value_ex_w(
+                key,
+                value_name.as_ptr(),
+                0,
+                REG_SZ,
+                value.as_ptr(),
+                value.len() as u32,
+            )
+        };
+        assert_eq!(status, ERROR_SUCCESS);
+
+        let mut reg_type = 0u32;
+        let mut size = 4u32; // buffer far too small
+        let mut buf = [0u8; 4];
+        let status = unsafe {
+            reg_query_value_ex_w(
+                key,
+                value_name.as_ptr(),
+                std::ptr::null_mut(),
+                &mut reg_type,
+                buf.as_mut_ptr(),
+                &mut size,
+            )
+        };
+        assert_eq!(status, ERROR_MORE_DATA);
+        assert_eq!(size as usize, value.len(), "required size reported back");
+        assert_eq!(reg_type, REG_SZ);
+    }
+
+    #[test]
+    fn query_reserved_non_null_returns_error_invalid_parameter() {
+        test_registry_dir();
+        let key = create_key(HKEY_CURRENT_USER, r"Software\WeaveQueryReserved");
+        let mut reserved = 1u32;
+        let status = unsafe {
+            reg_query_value_ex_w(
+                key,
+                std::ptr::null(),
+                &mut reserved as *mut u32,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(status, ERROR_INVALID_PARAMETER);
+    }
+
+    #[test]
+    fn query_data_without_count_returns_error_invalid_parameter() {
+        // Wine: (data && !count) → ERROR_INVALID_PARAMETER.
+        test_registry_dir();
+        let key = create_key(HKEY_CURRENT_USER, r"Software\WeaveQueryNoCount");
+        let mut byte = 0u8;
+        let status = unsafe {
+            reg_query_value_ex_w(
+                key,
+                std::ptr::null(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut byte,
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(status, ERROR_INVALID_PARAMETER);
+    }
+
+    #[test]
+    fn query_invalid_handle_returns_error_invalid_handle() {
+        test_registry_dir();
+        let mut size = 0u32;
+        let status = unsafe {
+            reg_query_value_ex_w(
+                0x1234_5678,
+                std::ptr::null(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut size,
+            )
+        };
+        assert_eq!(status, ERROR_INVALID_HANDLE);
+    }
+
+    #[test]
+    fn query_default_value_reads_empty_name() {
+        // The default value (empty name) is stored under the "@" filename;
+        // reading with lpValueName = "" must retrieve it.
+        test_registry_dir();
+        let key = create_key(HKEY_CURRENT_USER, r"Software\WeaveQueryDefault");
+        let value = encode_sz("default");
+        let status = unsafe {
+            reg_set_value_ex_w(
+                key,
+                std::ptr::null(),
+                0,
+                REG_SZ,
+                value.as_ptr(),
+                value.len() as u32,
+            )
+        };
+        assert_eq!(status, ERROR_SUCCESS);
+
+        let empty = wide("");
+        let mut reg_type = 0u32;
+        let mut size = 0u32;
+        let status = unsafe {
+            reg_query_value_ex_w(
+                key,
+                empty.as_ptr(),
+                std::ptr::null_mut(),
+                &mut reg_type,
+                std::ptr::null_mut(),
+                &mut size,
+            )
+        };
+        assert_eq!(status, ERROR_SUCCESS);
+        assert_eq!(reg_type, REG_SZ);
+        assert_eq!(size as usize, value.len());
+
+        let mut buf = vec![0u8; size as usize];
+        let status = unsafe {
+            reg_query_value_ex_w(
+                key,
+                empty.as_ptr(),
+                std::ptr::null_mut(),
+                &mut reg_type,
+                buf.as_mut_ptr(),
+                &mut size,
+            )
+        };
+        assert_eq!(status, ERROR_SUCCESS);
+        assert_eq!(buf, value);
+    }
+
+    #[test]
+    fn query_sz_appends_null_terminator_when_room() {
+        // A REG_SZ value stored without a null terminator (raw 10-byte UTF-16 for
+        // "hello") must get a null WCHAR appended by RegQueryValueExW when the
+        // caller's buffer has room — Wine contract (registry.c:1684).
+        test_registry_dir();
+        let key = create_key(HKEY_CURRENT_USER, r"Software\WeaveQueryAppend");
+        let value_name = wide("Text");
+        let raw: Vec<u8> = "hello"
+            .encode_utf16()
+            .flat_map(|c| c.to_le_bytes())
+            .collect();
+        assert_eq!(raw.len(), 10);
+        let status = unsafe {
+            reg_set_value_ex_w(
+                key,
+                value_name.as_ptr(),
+                0,
+                REG_SZ,
+                raw.as_ptr(),
+                raw.len() as u32,
+            )
+        };
+        assert_eq!(status, ERROR_SUCCESS);
+
+        let mut buf = vec![0xFFu8; 12];
+        let mut size = 12u32;
+        let status = unsafe {
+            reg_query_value_ex_w(
+                key,
+                value_name.as_ptr(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                buf.as_mut_ptr(),
+                &mut size,
+            )
+        };
+        assert_eq!(status, ERROR_SUCCESS);
+        assert_eq!(&buf[..10], raw.as_slice());
+        assert_eq!(&buf[10..12], &[0x00, 0x00], "null terminator appended");
     }
 
     // ── RegCreateKeyExW functional tests ────────────────────────────────────
