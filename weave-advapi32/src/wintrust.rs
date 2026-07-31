@@ -14,8 +14,9 @@
 //!     (e.g. CERT_FIND_SUBJECT_CERT) return the first fake CERT_CONTEXT so NPP's
 //!     signature check proceeds.
 //!   - CertGetNameStringW returns L"Notepad++" — the publisher name NPP expects.
-//!   - CertGetCertificateContextProperty returns 20 zero bytes for the hash
-//!     property IDs NPP queries (SHA1=3, key identifier=20).
+//!   - CertGetCertificateContextProperty returns a 20-byte SHA-1 placeholder
+//!     for the hash property IDs NPP queries (SHA1=3, key identifier=20); real
+//!     cert contexts (encoded bytes present) get a real SHA-1.
 //!   - CertFreeCertificateContext / CertCloseStore / CryptMsgClose are no-ops.
 //!
 //! Wine refs:
@@ -521,103 +522,150 @@ pub unsafe extern "win64" fn cert_get_name_string_w(
 
 /// CertGetCertificateContextProperty — retrieve a named property of a cert.
 ///
-/// Wine ref: dlls/crypt32/cert.c line 526 — CertContext_GetProperty dispatches
-/// by dwPropId; CERT_SHA1_HASH_PROP_ID (3) computes SHA-1 of pbCertEncoded,
-/// CERT_KEY_IDENTIFIER_PROP_ID (20) decodes the SubjectKeyIdentifier extension.
+/// Wine ref: dlls/crypt32/cert.c:626 — the public entry dispatches on dwPropId
+/// and defers to CertContext_GetProperty (cert.c:526) for the implicit
+/// properties: CERT_SHA1_HASH_PROP_ID (3) hashes pbCertEncoded via
+/// CertContext_GetHashProp (cert.c:405, CryptHashCertificate/CALG_SHA1);
+/// CERT_SIGNATURE_HASH_PROP_ID (9) hashes the to-be-signed portion via
+/// CryptHashToBeSigned; CERT_KEY_IDENTIFIER_PROP_ID (20) decodes the
+/// SubjectKeyIdentifier extension (ERROR_INVALID_DATA when absent). The
+/// size-query contract is CertContext_CopyParam (cert.c:600): pvData NULL →
+/// *pcbData = cb, TRUE; *pcbData < cb → ERROR_MORE_DATA, FALSE; else copy.
 ///
-/// We return 20 zero bytes for propIds 3 and 20 (the two NPP most commonly
-/// queries), and CRYPT_E_NOT_FOUND (0x80092004) for anything else.
-// Wine ref: dlls/crypt32/cert.c:526 — CertContext_GetProperty dispatches by dwPropId; SHA1_HASH(3) hashes pbCertEncoded; KEY_IDENTIFIER(20) decodes SubjectKeyIdentifier extension
+/// Weave deviations (documented):
+///   - The fake store certs carry no encoded bytes (pbCertEncoded = NULL,
+///     cbCertEncoded = 0), so the digest props (3, 9, 20) return the 20-byte
+///     zero placeholder NPP was shipped against (module docs). Real contexts
+///     (bytes present) get a real SHA-1.
+///   - CERT_SIGNATURE_HASH (9) hashes the full encoding instead of Wine's
+///     ASN.1-stripped to-be-signed portion (same 20-byte size).
+///   - CERT_KEY_IDENTIFIER (20) returns the placeholder instead of Wine's
+///     ERROR_INVALID_DATA — NPP queries it and expects a value.
+///   - CERT_SHA256_HASH_PROP_ID (223) returns the fixed fingerprint NPP's
+///     allow-list compares against.
+///   - pcbData NULL → ERROR_INVALID_PARAMETER instead of Wine's NULL deref.
+// Wine ref: dlls/crypt32/cert.c:626 — public entry; implicit props via CertContext_GetProperty (cert.c:526); SHA1_HASH(3) hashes pbCertEncoded (CertContext_GetHashProp cert.c:405); SIGNATURE_HASH(9) via CryptHashToBeSigned; KEY_IDENTIFIER(20) decodes SubjectKeyIdentifier ext; size-query via CertContext_CopyParam (cert.c:600)
+// SHA-256 fingerprint for one of NPP's known gup.exe signing certs. NPP
+// hex-encodes this via "%02x" and compares to its embedded allow-list
+// (wincrypt strings in notepad++.exe at rva ~0x461000). Providing a matching
+// fingerprint prevents NPP from throwing a cert-mismatch exception.
+// Wine ref: dlls/crypt32/cert.c CertContext_GetProperty propId dispatch.
+const CERT_SHA256_BYTES: [u8; 32] = [
+    0x31, 0x1a, 0x92, 0x11, 0x6c, 0xf2, 0xea, 0x64, 0x9f, 0x87, 0xc6, 0xf0, 0x5f, 0x43, 0x25, 0xd8,
+    0xb8, 0x37, 0x0c, 0xa6, 0xb6, 0x24, 0xec, 0xf1, 0x17, 0x4e, 0xc5, 0x59, 0x85, 0x9b, 0x20, 0x3c,
+];
 #[unsafe(no_mangle)]
 pub unsafe extern "win64" fn cert_get_certificate_context_property(
-    _p_cert_context: *const u8,
+    p_cert_context: *const u8,
     dw_prop_id: u32,
     pv_data: *mut u8,
     pcb_data: *mut u32,
 ) -> i32 {
     const CERT_SHA1_HASH_PROP_ID: u32 = 3;
+    const CERT_SIGNATURE_HASH_PROP_ID: u32 = 9;
     const CERT_KEY_IDENTIFIER_PROP_ID: u32 = 20;
     const CERT_SHA256_HASH_PROP_ID: u32 = 223;
+    const ERROR_MORE_DATA: u32 = 234;
+    const ERROR_INVALID_PARAMETER: u32 = 87;
+    // CRYPT_E_NOT_FOUND = 0x80092004
+    const CRYPT_E_NOT_FOUND: u32 = 0x8009_2004;
 
-    // SHA-256 fingerprint for one of NPP's known gup.exe signing certs.
-    // NPP hex-encodes this via "%02x" and compares to its embedded allow-list
-    // (wincrypt strings in notepad++.exe at rva ~0x461000). Providing a
-    // matching fingerprint prevents NPP from throwing a cert-mismatch exception.
-    // Wine ref: dlls/crypt32/cert.c CertContext_GetProperty propId dispatch.
-    const CERT_SHA256_BYTES: [u8; 32] = [
-        0x31, 0x1a, 0x92, 0x11, 0x6c, 0xf2, 0xea, 0x64, 0x9f, 0x87, 0xc6, 0xf0, 0x5f, 0x43, 0x25,
-        0xd8, 0xb8, 0x37, 0x0c, 0xa6, 0xb6, 0x24, 0xec, 0xf1, 0x17, 0x4e, 0xc5, 0x59, 0x85, 0x9b,
-        0x20, 0x3c,
-    ];
-
-    eprintln!("weave/CertGetCertificateContextProperty: propId={dw_prop_id}");
-
-    match dw_prop_id {
-        CERT_SHA1_HASH_PROP_ID | CERT_KEY_IDENTIFIER_PROP_ID => {
-            let hash_size: u32 = 20;
-            if pv_data.is_null() {
-                if !pcb_data.is_null() {
-                    unsafe { *pcb_data = hash_size };
-                }
-                return 1;
-            }
-            let available = if pcb_data.is_null() {
-                0u32
-            } else {
-                unsafe { *pcb_data }
-            };
-            if available < hash_size {
-                weave_common::set_last_error(234_u32); // ERROR_MORE_DATA
-                if !pcb_data.is_null() {
-                    unsafe { *pcb_data = hash_size };
-                }
-                return 0;
-            }
-            unsafe { core::ptr::write_bytes(pv_data, 0, hash_size as usize) };
-            if !pcb_data.is_null() {
-                unsafe { *pcb_data = hash_size };
-            }
-            1
-        }
-        CERT_SHA256_HASH_PROP_ID => {
-            let hash_size: u32 = 32;
-            if pv_data.is_null() {
-                if !pcb_data.is_null() {
-                    unsafe { *pcb_data = hash_size };
-                }
-                return 1;
-            }
-            let available = if pcb_data.is_null() {
-                0u32
-            } else {
-                unsafe { *pcb_data }
-            };
-            if available < hash_size {
-                weave_common::set_last_error(234_u32); // ERROR_MORE_DATA
-                if !pcb_data.is_null() {
-                    unsafe { *pcb_data = hash_size };
-                }
-                return 0;
-            }
-            unsafe {
-                core::ptr::copy_nonoverlapping(
-                    CERT_SHA256_BYTES.as_ptr(),
-                    pv_data,
-                    hash_size as usize,
-                )
-            };
-            if !pcb_data.is_null() {
-                unsafe { *pcb_data = hash_size };
-            }
-            eprintln!("weave/CertGetCertificateContextProperty: SHA256 → matching fingerprint");
-            1
-        }
-        _ => {
-            // CRYPT_E_NOT_FOUND = 0x80092004
-            weave_common::set_last_error(0x8009_2004_u32);
-            0
-        }
+    // The size pointer is part of the contract — Wine dereferences it in
+    // CertContext_CopyParam, Windows rejects a NULL pcbData outright.
+    if pcb_data.is_null() {
+        weave_common::set_last_error(ERROR_INVALID_PARAMETER);
+        return 0;
     }
+
+    let prop: Option<(u32, [u8; 32])> = match dw_prop_id {
+        // SHA-1 (3) / SIGNATURE_HASH (9) — both 20-byte digests. Real contexts
+        // get a real SHA-1 over the encoded bytes; byte-less fake certs get the
+        // zero placeholder NPP was shipped against.
+        CERT_SHA1_HASH_PROP_ID | CERT_SIGNATURE_HASH_PROP_ID => {
+            let mut out = [0u8; 32];
+            let digest = sha1_of_encoded(p_cert_context);
+            out[..20].copy_from_slice(&digest);
+            Some((20, out))
+        }
+        // KEY_IDENTIFIER (20) — see Weave deviations above.
+        CERT_KEY_IDENTIFIER_PROP_ID => Some((20, [0u8; 32])),
+        // SHA256 (223) — NPP's allow-list fingerprint.
+        CERT_SHA256_HASH_PROP_ID => {
+            let mut out = [0u8; 32];
+            out.copy_from_slice(&CERT_SHA256_BYTES);
+            Some((32, out))
+        }
+        // Key-property IDs (CERT_KEY_PROV_INFO=2, CERT_KEY_PROV_HANDLE=5) and
+        // everything else: no property on the fake certs → CRYPT_E_NOT_FOUND,
+        // matching Wine's property-list miss in CertContext_GetProperty.
+        _ => None,
+    };
+
+    let Some((size, bytes)) = prop else {
+        weave_common::set_last_error(CRYPT_E_NOT_FOUND);
+        return 0;
+    };
+
+    eprintln!("weave/CertGetCertificateContextProperty: propId={dw_prop_id} size={size}");
+
+    if pv_data.is_null() {
+        // Size query — report required size, caller allocates and re-calls.
+        unsafe { *pcb_data = size };
+        return 1;
+    }
+
+    let available = unsafe { *pcb_data };
+    if available < size {
+        weave_common::set_last_error(ERROR_MORE_DATA);
+        unsafe { *pcb_data = size };
+        return 0;
+    }
+    unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), pv_data, size as usize) };
+    if dw_prop_id == CERT_SHA256_HASH_PROP_ID {
+        eprintln!("weave/CertGetCertificateContextProperty: SHA256 → matching fingerprint");
+    }
+    unsafe { *pcb_data = size };
+    1
+}
+
+/// SHA-1 digest over the cert context's encoded bytes.
+///
+/// CERT_CONTEXT (wincrypt.h line 481, 40 bytes on 64-bit) carries the raw
+/// encoding at offset 8 (pbCertEncoded) / 16 (cbCertEncoded). Our fake static
+/// certs hold NULL/0 and yield the zero placeholder; a context with real bytes
+/// (e.g. created by CertCreateCertificateContext) yields the real SHA-1.
+fn sha1_of_encoded(p_cert_context: *const u8) -> [u8; 20] {
+    use sha1::{Digest, Sha1};
+
+    let mut out = [0u8; 20];
+    if let Some(encoded) = encoded_bytes(p_cert_context) {
+        let digest = Sha1::digest(encoded);
+        out.copy_from_slice(&digest);
+    }
+    out
+}
+
+/// Read the encoded certificate bytes from a CERT_CONTEXT, if it carries any.
+///
+/// Returns None for a NULL context, a context with no bytes (our fake certs),
+/// or a length outside the 1 MiB bound (defensive — a corrupt length must not
+/// make us read arbitrary memory).
+fn encoded_bytes(p_cert_context: *const u8) -> Option<Vec<u8>> {
+    const MAX_CERT_SIZE: usize = 1 << 20; // 1 MiB
+
+    if p_cert_context.is_null() {
+        return None;
+    }
+    // Safe: p_cert_context must be a valid CERT_CONTEXT (documented ABI). Only
+    // the two field reads below (offsets 8 and 16) are performed.
+    let pb = unsafe { *(p_cert_context.add(8) as *const *const u8) };
+    let cb = unsafe { *(p_cert_context.add(16) as *const u32) } as usize;
+    if pb.is_null() || cb == 0 || cb > MAX_CERT_SIZE {
+        return None;
+    }
+    // Safe: pb/cb came from a well-formed CERT_CONTEXT describing cb readable
+    // bytes in the guest's address space (shared with the host).
+    Some(unsafe { core::slice::from_raw_parts(pb, cb) }.to_vec())
 }
 
 /// CertFreeCertificateContext — decrement refcount of a PCCERT_CONTEXT.
@@ -2101,5 +2149,203 @@ mod tests {
     #[test]
     fn resolver_registers_cert_find_certificate_in_store() {
         assert!(resolve_crypt32("CertFindCertificateInStore").is_some());
+    }
+
+    // ── CertGetCertificateContextProperty ────────────────────────────────────
+
+    const CERT_SHA1_HASH_PROP_ID: u32 = 3;
+    const CERT_SIGNATURE_HASH_PROP_ID: u32 = 9;
+    const CERT_KEY_IDENTIFIER_PROP_ID: u32 = 20;
+    const CERT_SHA256_HASH_PROP_ID: u32 = 223;
+    const ERROR_MORE_DATA: u32 = 234;
+    const ERROR_INVALID_PARAMETER: u32 = 87;
+
+    /// CERT_CONTEXT with the same 40-byte layout as FakeCertContext, but
+    /// carrying caller-supplied encoded bytes so the real SHA-1 path runs.
+    #[repr(C)]
+    struct TestCertCtx {
+        dw_cert_encoding_type: u32,
+        _pad0: u32,
+        pb_cert_encoded: *const u8,
+        cb_cert_encoded: u32,
+        _pad1: u32,
+        p_cert_info: usize,
+        h_cert_store: usize,
+    }
+
+    fn real_ctx(bytes: &[u8]) -> TestCertCtx {
+        TestCertCtx {
+            dw_cert_encoding_type: 1,
+            _pad0: 0,
+            pb_cert_encoded: bytes.as_ptr(),
+            cb_cert_encoded: bytes.len() as u32,
+            _pad1: 0,
+            p_cert_info: 0,
+            h_cert_store: 0,
+        }
+    }
+
+    /// Call the property getter with a fake-store cert context.
+    unsafe fn prop(prop_id: u32, pv: *mut u8, pcb: *mut u32) -> i32 {
+        cert_get_certificate_context_property(ctx0(), prop_id, pv, pcb)
+    }
+
+    #[test]
+    fn prop_sha1_size_query_returns_20() {
+        unsafe {
+            let mut size: u32 = 0;
+            let ret = prop(CERT_SHA1_HASH_PROP_ID, core::ptr::null_mut(), &mut size);
+            assert_eq!(ret, 1);
+            assert_eq!(size, 20);
+        }
+    }
+
+    #[test]
+    fn prop_sha1_real_bytes_returns_expected_digest() {
+        // SHA-1("hello") = aaf4c61d... (verified against the sha1 crate).
+        let bytes = b"hello";
+        let ctx = real_ctx(bytes);
+        let mut out = [0u8; 20];
+        let mut size: u32 = 20;
+        unsafe {
+            let ret = cert_get_certificate_context_property(
+                &ctx as *const TestCertCtx as *const u8,
+                CERT_SHA1_HASH_PROP_ID,
+                out.as_mut_ptr(),
+                &mut size,
+            );
+            assert_eq!(ret, 1);
+            assert_eq!(size, 20);
+            let expected: [u8; 20] = [
+                0xaa, 0xf4, 0xc6, 0x1d, 0xdc, 0xc5, 0xe8, 0xa2, 0xda, 0xbe, 0xde, 0x0f, 0x3b, 0x48,
+                0x2c, 0xd9, 0xae, 0xa9, 0x43, 0x4d,
+            ];
+            assert_eq!(out, expected);
+        }
+    }
+
+    #[test]
+    fn prop_sha1_byte_less_cert_returns_zero_placeholder() {
+        // The fake store certs carry no encoded bytes; NPP was shipped against
+        // 20 zero bytes for the SHA-1 hash. Regression guard for that contract.
+        let mut out = [0xffu8; 20];
+        let mut size: u32 = 20;
+        unsafe {
+            let ret = prop(CERT_SHA1_HASH_PROP_ID, out.as_mut_ptr(), &mut size);
+            assert_eq!(ret, 1);
+            assert_eq!(size, 20);
+            assert!(out.iter().all(|&b| b == 0));
+        }
+    }
+
+    #[test]
+    fn prop_signature_hash_size_query_returns_20() {
+        unsafe {
+            let mut size: u32 = 0;
+            let ret = prop(
+                CERT_SIGNATURE_HASH_PROP_ID,
+                core::ptr::null_mut(),
+                &mut size,
+            );
+            assert_eq!(ret, 1);
+            assert_eq!(size, 20);
+        }
+    }
+
+    #[test]
+    fn prop_key_identifier_size_query_returns_20() {
+        unsafe {
+            let mut size: u32 = 0;
+            let ret = prop(
+                CERT_KEY_IDENTIFIER_PROP_ID,
+                core::ptr::null_mut(),
+                &mut size,
+            );
+            assert_eq!(ret, 1);
+            assert_eq!(size, 20);
+        }
+    }
+
+    #[test]
+    fn prop_sha256_returns_fixed_fingerprint() {
+        unsafe {
+            let mut size: u32 = 0;
+            let ret = prop(CERT_SHA256_HASH_PROP_ID, core::ptr::null_mut(), &mut size);
+            assert_eq!(ret, 1);
+            assert_eq!(size, 32);
+
+            let mut out = [0u8; 32];
+            let mut size: u32 = 32;
+            let ret = prop(CERT_SHA256_HASH_PROP_ID, out.as_mut_ptr(), &mut size);
+            assert_eq!(ret, 1);
+            assert_eq!(size, 32);
+            assert_eq!(out[..], CERT_SHA256_BYTES[..]);
+        }
+    }
+
+    #[test]
+    fn prop_unknown_id_returns_not_found() {
+        unsafe {
+            let mut size: u32 = 0;
+            let ret = prop(0x1234, core::ptr::null_mut(), &mut size);
+            assert_eq!(ret, 0);
+            assert_eq!(weave_common::get_last_error(), CRYPT_E_NOT_FOUND);
+        }
+    }
+
+    #[test]
+    fn prop_key_prov_handle_returns_not_found() {
+        // No CERT_KEY_CONTEXT property on the fake certs → Wine returns
+        // CRYPT_E_NOT_FOUND for CERT_KEY_PROV_HANDLE_PROP_ID (5).
+        unsafe {
+            let mut size: u32 = 0;
+            let ret = prop(5, core::ptr::null_mut(), &mut size);
+            assert_eq!(ret, 0);
+            assert_eq!(weave_common::get_last_error(), CRYPT_E_NOT_FOUND);
+        }
+    }
+
+    #[test]
+    fn prop_null_pcb_data_returns_invalid_parameter() {
+        unsafe {
+            let ret = prop(
+                CERT_SHA1_HASH_PROP_ID,
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+            );
+            assert_eq!(ret, 0);
+            assert_eq!(weave_common::get_last_error(), ERROR_INVALID_PARAMETER);
+        }
+    }
+
+    #[test]
+    fn prop_buffer_too_small_returns_more_data() {
+        unsafe {
+            let mut tiny = [0u8; 4];
+            let mut size: u32 = 4;
+            let ret = prop(CERT_SHA1_HASH_PROP_ID, tiny.as_mut_ptr(), &mut size);
+            assert_eq!(ret, 0);
+            assert_eq!(weave_common::get_last_error(), ERROR_MORE_DATA);
+            assert_eq!(size, 20); // required size reported for the re-call
+        }
+    }
+
+    #[test]
+    fn prop_fill_updates_pcb_data_to_bytes_written() {
+        // A caller may size a buffer larger than the property; *pcbData is set
+        // to the actual bytes written (20), not the buffer size.
+        unsafe {
+            let mut big = [0xffu8; 64];
+            let mut size: u32 = 64;
+            let ret = prop(CERT_SHA1_HASH_PROP_ID, big.as_mut_ptr(), &mut size);
+            assert_eq!(ret, 1);
+            assert_eq!(size, 20);
+            assert!(big[..20].iter().all(|&b| b == 0));
+        }
+    }
+
+    #[test]
+    fn resolver_registers_cert_get_certificate_context_property() {
+        assert!(resolve_crypt32("CertGetCertificateContextProperty").is_some());
     }
 }
