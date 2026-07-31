@@ -329,11 +329,20 @@ pub unsafe extern "win64" fn il_is_equal(pidl1: *const u8, pidl2: *const u8) -> 
     eq as i32
 }
 
-/// ILCreateFromPathW (shell32 #190) — build a PIDL from a path string.
+/// ILCreateFromPathW (shell32 #190) — build a PIDL from a filesystem path.
+///
+/// Returns a malloc'd PIDL (free with `ILFree`), or NULL on failure.
 ///
 /// # Safety
 /// `path` must be null or a valid null-terminated UTF-16 string.
-// Wine ref: dlls/shell32/pidl.c::ILCreateFromPathW — SHILCreateFromPathW wrapper.
+// Wine ref: dlls/shell32/pidl.c:936 — ILCreateFromPathW returns NULL unless
+// SHILCreateFromPathW (pidl.c:383) → desktop IShellFolder::ParseDisplayName
+// (shfldr_desktop.c:147) succeeds. NULL → E_INVALIDARG → NULL. "" →
+// _ILCreateMyComputer (valid PIDL). The relative branch (shfldr_desktop.c:240)
+// calls _ILCreateFromPathW (pidl.c:1754), which FindFirstFileW's the path and
+// fails on nonexistent entries. Weave diverges: no shell namespace, so any
+// non-empty string yields a WEV1 tagged-path PIDL (existence not checked);
+// "" and NULL → NULL.
 pub unsafe extern "win64" fn il_create_from_path_w(path: *const u16) -> *mut u8 {
     let path_str = decode_wide_null(path);
     if path_str.is_empty() {
@@ -752,6 +761,86 @@ mod tests {
                 String::from_utf16_lossy(&buf[..buf.iter().position(|&c| c == 0).unwrap_or(0)]);
             assert_eq!(back, r"C:\Users\test\file.txt");
             il_free(pidl);
+        }
+    }
+
+    #[test]
+    fn il_create_from_path_null_is_null() {
+        let pidl = unsafe { il_create_from_path_w(std::ptr::null()) };
+        assert!(pidl.is_null(), "NULL path must yield a NULL PIDL");
+    }
+
+    #[test]
+    fn il_create_from_path_empty_is_null() {
+        let empty = [0u16; 1];
+        let pidl = unsafe { il_create_from_path_w(empty.as_ptr()) };
+        assert!(pidl.is_null(), "empty path must yield a NULL PIDL");
+    }
+
+    #[test]
+    fn il_create_from_path_relative_roundtrip() {
+        fn encode_utf16_null(s: &str) -> Vec<u16> {
+            s.encode_utf16().chain(std::iter::once(0)).collect()
+        }
+        let path = encode_utf16_null(r"file.txt");
+        let pidl = unsafe { il_create_from_path_w(path.as_ptr()) };
+        assert!(
+            !pidl.is_null(),
+            "ILCreateFromPathW must return a PIDL for a relative path"
+        );
+        unsafe {
+            let mut buf = [0u16; MAX_PATH];
+            assert_eq!(sh_get_path_from_id_list_w(pidl, buf.as_mut_ptr()), 1);
+            let back =
+                String::from_utf16_lossy(&buf[..buf.iter().position(|&c| c == 0).unwrap_or(0)]);
+            assert_eq!(back, "file.txt");
+            il_free(pidl);
+        }
+    }
+
+    #[test]
+    fn il_create_from_path_walks_well_formed_chain() {
+        fn encode_utf16_null(s: &str) -> Vec<u16> {
+            s.encode_utf16().chain(std::iter::once(0)).collect()
+        }
+        let path = encode_utf16_null(r"C:\Users\test\file.txt");
+        let pidl = unsafe { il_create_from_path_w(path.as_ptr()) };
+        assert!(!pidl.is_null());
+        unsafe {
+            let mut item = pidl;
+            let mut count = 0u32;
+            loop {
+                let cb = read_u16(item);
+                if cb == 0 {
+                    break;
+                }
+                assert!(is_weave_item(item), "item must carry WEV1 magic");
+                assert!(weave_item_path(item).is_some());
+                count += 1;
+                item = item.add(cb as usize);
+            }
+            assert_eq!(count, 1, "single tagged item + terminator expected");
+            assert_eq!(
+                il_get_size(pidl),
+                il_get_size(pidl_from_path_w(r"C:\Users\test\file.txt"))
+            );
+            il_free(pidl);
+        }
+    }
+
+    #[test]
+    fn il_create_from_path_matches_pidl_from_path() {
+        fn encode_utf16_null(s: &str) -> Vec<u16> {
+            s.encode_utf16().chain(std::iter::once(0)).collect()
+        }
+        let path = encode_utf16_null(r"C:\Users\test");
+        unsafe {
+            let via_export = il_create_from_path_w(path.as_ptr());
+            let via_builder = pidl_from_path_w(r"C:\Users\test");
+            assert!(!via_export.is_null() && !via_builder.is_null());
+            assert_eq!(il_is_equal(via_export, via_builder), 1);
+            il_free(via_export);
+            il_free(via_builder);
         }
     }
 }
