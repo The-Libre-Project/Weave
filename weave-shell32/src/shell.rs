@@ -57,6 +57,7 @@ pub(crate) struct NotifyIconDataW {
 // ── CSIDL constants ───────────────────────────────────────────────────────────
 
 const CSIDL_DESKTOP: i32 = 0x0000;
+const CSIDL_PROGRAMS: i32 = 0x0002; // Start Menu\Programs
 const CSIDL_PERSONAL: i32 = 0x0005; // My Documents
 const CSIDL_MYMUSIC: i32 = 0x000D;
 const CSIDL_MYVIDEO: i32 = 0x000E;
@@ -144,6 +145,24 @@ fn xdg_user_dir(name: &str, fallback: &str) -> String {
     format!("{home}/{fallback}")
 }
 
+// ── XDG applications-dir resolver ─────────────────────────────────────────────
+//
+// Returns the real Linux directory where `.desktop` shortcuts are installed:
+// `$XDG_DATA_HOME/applications` if set, otherwise `$HOME/.local/share/applications`.
+// Mirrors `weave-desktop::applications_dir()` so CSIDL_PROGRAMS agrees with where
+// Weave's IShellLink actually writes shortcuts.
+
+fn xdg_applications_dir() -> String {
+    if let Ok(data_home) = std::env::var("XDG_DATA_HOME") {
+        let trimmed = data_home.trim();
+        if !trimmed.is_empty() {
+            return format!("{}/applications", trimmed.trim_end_matches('/'));
+        }
+    }
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
+    format!("{home}/.local/share/applications")
+}
+
 // ── Helper: Win32 path → UTF-16 buffer ───────────────────────────────────────
 
 fn write_win_path(win_path: &str, buf: *mut u16, capacity: usize) {
@@ -180,6 +199,9 @@ fn csidl_to_win_path(n_folder: i32) -> Option<String> {
         // filesystem Desktop directory, so returning a non-existent prefix-relative
         // path breaks file-manager pane population on first launch.
         CSIDL_DESKTOP => Some(xdg_user_dir("DESKTOP", "Desktop")),
+        // Bridged: CSIDL_PROGRAMS returns the real Linux `.desktop` applications
+        // dir, matching where weave-desktop / IShellLink installs shortcuts.
+        CSIDL_PROGRAMS => Some(xdg_applications_dir()),
         // Non-bridged: prefix-relative fake Windows paths.
         CSIDL_APPDATA => Some(r"C:\Users\User\AppData\Roaming".to_string()),
         CSIDL_LOCAL_APPDATA => Some(r"C:\Users\User\AppData\Local".to_string()),
@@ -299,28 +321,41 @@ pub unsafe extern "win64" fn shell_notify_icon_w(
 
 // ── Win32 API functions ───────────────────────────────────────────────────────
 
-// Wine ref: dlls/shell32/shellpath.c:2862 — delegates to SHGetFolderPathAndSubDirW which
-// reads from registry (User Shell Folders / Shell Folders) with %USERPROFILE% expansion;
-// converts ERROR_PATH_NOT_FOUND → ERROR_FILE_NOT_FOUND in the result; creates directory
-// if CSIDL_FLAG_CREATE (0x8000) is set in nFolder. Weave uses hardcoded paths — acceptable
+// Wine ref: dlls/shell32/shellpath.c:2862 — SHGetFolderPathW delegates to
+// SHGetFolderPathAndSubDirW (shellpath.c:2927), which masks nFolder with
+// CSIDL_FOLDER_MASK (0x00ff), returns E_INVALIDARG for out-of-range CSIDLs and
+// for dwFlags outside {SHGFP_TYPE_CURRENT, SHGFP_TYPE_DEFAULT}; reads registry
+// User Shell Folders with %USERPROFILE% expansion; creates the directory if
+// CSIDL_FLAG_CREATE (0x8000) is set. Weave uses hardcoded paths — acceptable
 // since we're a synthetic environment with a fixed prefix layout.
-// Wine ref: dlls/shell32/shellpath.c:2862 — reads registry User Shell Folders/%USERPROFILE%;
-// creates dir if CSIDL_FLAG_CREATE set; see full behavioral ref in block comment above.
+// Wine ref: dlls/shell32/shellpath.c:2927 — E_INVALIDARG for out-of-range CSIDL and bad dwFlags;
+// CSIDL_FLAG_CREATE creates the dir; see full behavioral ref in block comment above.
 /// SHGetFolderPathW: return the path of a special shell folder.
 ///
 /// Supports the most common CSIDL values. Returns `S_OK` (0) on success,
-/// `E_FAIL` (0x80004005) if the CSIDL is unknown.
+/// `E_INVALIDARG` (0x80070057) if the CSIDL is unknown, the output buffer is
+/// NULL, or `dw_flags` is not `SHGFP_TYPE_CURRENT` (0) or `SHGFP_TYPE_DEFAULT` (1).
 ///
 /// # Safety
 /// `psz_path` must be a writable buffer of at least `MAX_PATH` (260) wide chars.
-// Wine ref: dlls/shell32/shellpath.c:2862 — registry User Shell Folders; creates dir if CSIDL_FLAG_CREATE.
+// Wine ref: dlls/shell32/shellpath.c:2927 — E_INVALIDARG for out-of-range CSIDL/bad flags; dir created if CSIDL_FLAG_CREATE.
 pub unsafe extern "win64" fn sh_get_folder_path_w(
     _h_wnd: usize,
     n_folder: i32,
     _h_token: usize,
-    _dw_flags: u32,
+    dw_flags: u32,
     psz_path: *mut u16,
 ) -> u32 {
+    const SHGFP_TYPE_CURRENT: u32 = 0;
+    const SHGFP_TYPE_DEFAULT: u32 = 1;
+    const E_INVALIDARG: u32 = 0x8007_0057;
+
+    if psz_path.is_null() {
+        return E_INVALIDARG;
+    }
+    if dw_flags != SHGFP_TYPE_CURRENT && dw_flags != SHGFP_TYPE_DEFAULT {
+        return E_INVALIDARG;
+    }
     match csidl_to_win_path(n_folder) {
         Some(win_path) => {
             ensure_linux_dir(&win_path);
@@ -329,45 +364,54 @@ pub unsafe extern "win64" fn sh_get_folder_path_w(
         }
         None => {
             eprintln!("weave/shell32: SHGetFolderPathW: unknown CSIDL {n_folder:#x}");
-            0x8000_4005 // E_FAIL
+            E_INVALIDARG
         }
     }
 }
 
-// Wine ref: dlls/shell32/shellpath.c:2838 — SHGetFolderPathA is a thin wrapper around
+// Wine ref: dlls/shell32/shellpath.c:3055 — SHGetFolderPathA is a thin wrapper around
 // SHGetFolderPathW; it calls the W variant then converts the wide result to ANSI via
 // WideCharToMultiByte(CP_ACP). Our fake paths are pure ASCII so a direct byte copy
 // suffices — no multi-byte conversion needed.
 /// SHGetFolderPathA: ANSI variant of SHGetFolderPathW.
 ///
-/// Returns `S_OK` (0) on success, `E_FAIL` (0x80004005) if the CSIDL is unknown.
+/// Returns `S_OK` (0) on success, `E_INVALIDARG` (0x80070057) if the CSIDL is
+/// unknown, the output buffer is NULL, or `dw_flags` is not 0 or 1.
 ///
 /// # Safety
 /// `psz_path` must be a writable buffer of at least `MAX_PATH` (260) bytes.
-// Wine ref: dlls/shell32/shellpath.c:2838 — calls SHGetFolderPathW then WideCharToMultiByte(CP_ACP).
+// Wine ref: dlls/shell32/shellpath.c:3055 — calls SHGetFolderPathW then WideCharToMultiByte(CP_ACP).
 pub unsafe extern "win64" fn sh_get_folder_path_a(
     _h_wnd: usize,
     n_folder: i32,
     _h_token: usize,
-    _dw_flags: u32,
+    dw_flags: u32,
     psz_path: *mut u8,
 ) -> u32 {
+    const SHGFP_TYPE_CURRENT: u32 = 0;
+    const SHGFP_TYPE_DEFAULT: u32 = 1;
+    const E_INVALIDARG: u32 = 0x8007_0057;
+
+    if psz_path.is_null() {
+        return E_INVALIDARG;
+    }
+    if dw_flags != SHGFP_TYPE_CURRENT && dw_flags != SHGFP_TYPE_DEFAULT {
+        return E_INVALIDARG;
+    }
     match csidl_to_win_path(n_folder) {
         Some(win_path) => {
             ensure_linux_dir(&win_path);
-            if !psz_path.is_null() {
-                let bytes = win_path.as_bytes();
-                let len = bytes.len().min(259);
-                unsafe {
-                    core::ptr::copy_nonoverlapping(bytes.as_ptr(), psz_path, len);
-                    *psz_path.add(len) = 0;
-                }
+            let bytes = win_path.as_bytes();
+            let len = bytes.len().min(259);
+            unsafe {
+                core::ptr::copy_nonoverlapping(bytes.as_ptr(), psz_path, len);
+                *psz_path.add(len) = 0;
             }
             0 // S_OK
         }
         None => {
             eprintln!("weave/shell32: SHGetFolderPathA: unknown CSIDL {n_folder:#x}");
-            0x8000_4005 // E_FAIL
+            E_INVALIDARG
         }
     }
 }
@@ -2804,6 +2848,91 @@ mod tests {
     #[test]
     fn csidl_unknown_returns_none() {
         assert!(csidl_to_win_path(0x99).is_none());
+    }
+
+    #[test]
+    fn csidl_programs_maps_to_applications_dir() {
+        let path = csidl_to_win_path(CSIDL_PROGRAMS).expect("CSIDL_PROGRAMS must resolve");
+        assert!(!path.is_empty());
+        assert!(
+            path.ends_with("applications"),
+            "CSIDL_PROGRAMS should end with /applications, got: {path}"
+        );
+    }
+
+    fn wide_path(buf: &[u16]) -> String {
+        let end = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+        String::from_utf16_lossy(&buf[..end])
+    }
+
+    #[test]
+    fn sh_get_folder_path_w_desktop_returns_nonempty() {
+        let mut out = [0u16; 260];
+        let hr = unsafe { sh_get_folder_path_w(0, CSIDL_DESKTOP, 0, 0, out.as_mut_ptr()) };
+        assert_eq!(hr, 0, "SHGetFolderPathW(CSIDL_DESKTOP) should be S_OK");
+        assert!(!wide_path(&out).is_empty());
+    }
+
+    #[test]
+    fn sh_get_folder_path_w_appdata_returns_nonempty() {
+        let mut out = [0u16; 260];
+        let hr = unsafe { sh_get_folder_path_w(0, CSIDL_APPDATA, 0, 0, out.as_mut_ptr()) };
+        assert_eq!(hr, 0, "SHGetFolderPathW(CSIDL_APPDATA) should be S_OK");
+        assert!(!wide_path(&out).is_empty());
+    }
+
+    #[test]
+    fn sh_get_folder_path_w_distinct_paths() {
+        let known = [
+            CSIDL_DESKTOP,
+            CSIDL_PROGRAMS,
+            CSIDL_PERSONAL,
+            CSIDL_APPDATA,
+            CSIDL_LOCAL_APPDATA,
+            CSIDL_WINDOWS,
+            CSIDL_SYSTEM,
+            CSIDL_PROGRAM_FILES,
+        ];
+        let mut seen = std::collections::HashSet::new();
+        for csidl in known {
+            let mut out = [0u16; 260];
+            let hr = unsafe { sh_get_folder_path_w(0, csidl, 0, 0, out.as_mut_ptr()) };
+            assert_eq!(hr, 0, "SHGetFolderPathW({csidl:#x}) should be S_OK");
+            let path = wide_path(&out);
+            assert!(!path.is_empty(), "CSIDL {csidl:#x} returned empty path");
+            assert!(
+                seen.insert(path.clone()),
+                "CSIDL {csidl:#x} collides with another CSIDL path: {path}"
+            );
+        }
+    }
+
+    #[test]
+    fn sh_get_folder_path_w_invalid_csidl_returns_e_invalidarg() {
+        let mut out = [0u16; 260];
+        let hr = unsafe { sh_get_folder_path_w(0, 0x99, 0, 0, out.as_mut_ptr()) };
+        assert_eq!(hr, 0x8007_0057, "unknown CSIDL should return E_INVALIDARG");
+    }
+
+    #[test]
+    fn sh_get_folder_path_w_null_output_returns_e_invalidarg() {
+        let hr = unsafe { sh_get_folder_path_w(0, CSIDL_DESKTOP, 0, 0, std::ptr::null_mut()) };
+        assert_eq!(hr, 0x8007_0057, "NULL output should return E_INVALIDARG");
+    }
+
+    #[test]
+    fn sh_get_folder_path_w_bad_flags_returns_e_invalidarg() {
+        let mut out = [0u16; 260];
+        let hr = unsafe { sh_get_folder_path_w(0, CSIDL_DESKTOP, 0, 2, out.as_mut_ptr()) };
+        assert_eq!(hr, 0x8007_0057, "dwFlags=2 should return E_INVALIDARG");
+    }
+
+    #[test]
+    fn sh_get_folder_path_a_desktop_returns_nonempty() {
+        let mut out = [0u8; 260];
+        let hr = unsafe { sh_get_folder_path_a(0, CSIDL_DESKTOP, 0, 0, out.as_mut_ptr()) };
+        assert_eq!(hr, 0, "SHGetFolderPathA(CSIDL_DESKTOP) should be S_OK");
+        assert!(out[0] != 0);
     }
 
     #[test]
