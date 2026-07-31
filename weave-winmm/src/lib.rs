@@ -215,11 +215,26 @@ const WHDR_INQUEUE: u32 = 0x00000010;
 // waveOut callback flags — Wine ref: include/mmsystem.h / dlls/winmm/waveform.c
 const CALLBACK_FUNCTION: u32 = 0x00030000;
 const CALLBACK_TYPEMASK: u32 = 0x00070000;
+const CALLBACK_WINDOW: u32 = 0x00010000;
+const CALLBACK_THREAD: u32 = 0x00020000;
+const CALLBACK_EVENT: u32 = 0x00050000;
+
+// waveOut open flags — Wine ref: include/mmsystem.h / dlls/winmm/waveform.c
+// WOD_Open treats both WAVE_MAPPER and MAPPER_INDEX (0x3F) as "the mapper".
+const WAVE_FORMAT_QUERY: u32 = 0x0001;
+const WAVE_MAPPER: u32 = 0xFFFF_FFFF;
+const MAPPER_INDEX: u32 = 0x3F;
+
+// WAVEFORMATEX wFormatTag — Wine ref: include/mmsystem.h
+const WAVE_FORMAT_PCM: u16 = 0x0001;
+const WAVE_FORMAT_EXTENSIBLE: u16 = 0xFFFE;
 
 // WOM messages — Wine ref: include/mmsystem.h
 const WOM_OPEN: u32 = 0x3BB;
 #[cfg(feature = "pipewire-audio")]
 const WOM_DONE: u32 = 0x3BD;
+#[cfg(feature = "pipewire-audio")]
+const WOM_CLOSE: u32 = 0x3BC;
 
 // WIM messages — Wine ref: include/mmsystem.h
 #[cfg(feature = "pipewire-audio")]
@@ -275,6 +290,17 @@ const WAVE_OUT_HANDLE: usize = 0x0001_0001;
 // Pseudo-handle value written to *phwi on success.
 #[cfg(feature = "pipewire-audio")]
 const WAVE_IN_HANDLE: usize = 0x0002_0001;
+
+/// Tracks whether a waveOut device is currently open. Mirrors the PipeWire
+/// session (which only exists under the pipewire-audio feature) so the stub
+/// build can also reject operations on a closed handle, matching Wine's
+/// MMSYSERR_INVALHANDLE semantics.
+static WAVE_OUT_OPEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// True when `hwo` is the waveOut pseudo-handle and a device is open.
+fn wave_out_is_open(hwo: usize) -> bool {
+    hwo == WAVE_OUT_HANDLE && WAVE_OUT_OPEN.load(std::sync::atomic::Ordering::Relaxed)
+}
 
 /// Invoke a CALLBACK_FUNCTION-style waveOut callback if flags indicate it.
 /// Wine ref: dlls/winmm/waveform.c WINMM_NotifyClient — callback invoked with
@@ -611,21 +637,77 @@ pub extern "win64" fn mci_send_command_w(
 
 // ── waveOut core stubs ───────────────────────────────────────────────────────
 
+/// Validate a waveOut open request against Wine's WOD_Open / WINMM_OpenDevice
+/// contract. Returns MMSYSERR_NOERROR when the request is acceptable, otherwise
+/// the MMRESULT waveOutOpen should return.
+fn validate_wave_out_open(dev_id: u32, pwfx: *const WAVEFORMATEX, flags: u32) -> u32 {
+    // Wine ref: dlls/winmm/waveform.c WINMM_OpenDevice — a NULL format is
+    // invalid; the Wine test also expects MMSYSERR_INVALPARAM for NULL pwfx
+    // even with a callback specified.
+    if pwfx.is_null() {
+        return MMSYSERR_INVALPARAM;
+    }
+    let f = unsafe { &*pwfx };
+    // Only PCM (and WAVE_FORMAT_EXTENSIBLE carrying PCM) is supported by the
+    // PipeWire bridge. Wine ref: WOD_Open — non-PCM formats that the driver
+    // cannot convert return WAVERR_BADFORMAT.
+    if f.wFormatTag != WAVE_FORMAT_PCM && f.wFormatTag != WAVE_FORMAT_EXTENSIBLE {
+        return WAVERR_BADFORMAT;
+    }
+    // Wine ref: WINMM_OpenDevice — nSamplesPerSec == 0 → MMSYSERR_INVALPARAM
+    // (XP returns WAVERR_BADFORMAT; either is accepted by Wine's tests).
+    // Wine *fixes* broken nBlockAlign/nAvgBytesPerSec rather than rejecting.
+    if f.nSamplesPerSec == 0 {
+        return MMSYSERR_INVALPARAM;
+    }
+    // Wine ref: WOD_Open — req_device >= device count → MMSYSERR_BADDEVICEID.
+    // We model one always-present output device (id 0) plus the mapper aliases.
+    if dev_id != WAVE_MAPPER && dev_id != MAPPER_INDEX && dev_id != 0 {
+        return MMSYSERR_BADDEVICEID;
+    }
+    // Wine ref: dlls/winmm/winmm.c WINMM_CheckCallback — unknown callback type
+    // → MMSYSERR_INVALFLAG.
+    let cb_type = flags & CALLBACK_TYPEMASK;
+    if cb_type != 0
+        && cb_type != CALLBACK_WINDOW
+        && cb_type != CALLBACK_THREAD
+        && cb_type != CALLBACK_FUNCTION
+        && cb_type != CALLBACK_EVENT
+    {
+        return MMSYSERR_INVALFLAG;
+    }
+    MMSYSERR_NOERROR
+}
+
 /// waveOutOpen: open a wave output device.
 /// Wine ref: dlls/winmm/waveform.c WOD_Open / WINMM_OpenDevice —
 ///   writes handle to *phwo, invokes callback with WOM_OPEN on success.
+///   WAVE_FORMAT_QUERY validates the format without opening: no handle is
+///   written and no WOM_OPEN callback is delivered.
 ///
 /// # Safety
-/// `phwo` must be null or a valid pointer to a usize. `pwfx` is accepted but
-/// not read. `callback` is invoked only when flags indicate CALLBACK_FUNCTION.
+/// `phwo` must be null or a valid pointer to a usize. `pwfx` must be a valid
+/// pointer to a WAVEFORMATEX if non-null. `callback` is invoked only when
+/// flags indicate CALLBACK_FUNCTION.
 pub unsafe extern "win64" fn wave_out_open(
     phwo: *mut usize,
-    _dev_id: u32,
-    #[cfg_attr(not(feature = "pipewire-audio"), allow(unused_variables))] pwfx: *const WAVEFORMATEX,
+    dev_id: u32,
+    pwfx: *const WAVEFORMATEX,
     callback: usize,
     instance: usize,
     flags: u32,
 ) -> u32 {
+    let rc = validate_wave_out_open(dev_id, pwfx, flags);
+    if rc != MMSYSERR_NOERROR {
+        return rc;
+    }
+    // Wine ref: WOD_Open — WAVE_FORMAT_QUERY returns after format validation;
+    // the caller's handle is left untouched (Wine's test passes a sentinel
+    // and verifies it is unchanged) and no WOM_OPEN notification fires.
+    if flags & WAVE_FORMAT_QUERY != 0 {
+        return MMSYSERR_NOERROR;
+    }
+
     #[cfg(feature = "pipewire-audio")]
     {
         use pipewire as pw;
@@ -773,6 +855,7 @@ pub unsafe extern "win64" fn wave_out_open(
                 *phwo = WAVE_OUT_HANDLE;
             }
         }
+        WAVE_OUT_OPEN.store(true, std::sync::atomic::Ordering::Relaxed);
         unsafe {
             maybe_notify(WAVE_OUT_HANDLE, WOM_OPEN, callback, instance, flags);
         }
@@ -786,6 +869,7 @@ pub unsafe extern "win64" fn wave_out_open(
                 *phwo = WAVE_OUT_HANDLE;
             }
         }
+        WAVE_OUT_OPEN.store(true, std::sync::atomic::Ordering::Relaxed);
         unsafe {
             maybe_notify(WAVE_OUT_HANDLE, WOM_OPEN, callback, instance, flags);
         }
@@ -794,108 +878,158 @@ pub unsafe extern "win64" fn wave_out_open(
 }
 
 /// waveOutClose: close a wave output device.
-/// Wine ref: dlls/winmm/waveform.c WOD_Close — invokes WOM_CLOSE callback.
-pub extern "win64" fn wave_out_close(_hwo: usize) -> u32 {
+/// Wine ref: dlls/winmm/waveform.c WOD_Close — invalid handle →
+///   MMSYSERR_INVALHANDLE; WOM_CLOSE delivered to the callback before the
+///   device is torn down.
+pub extern "win64" fn wave_out_close(hwo: usize) -> u32 {
+    if !wave_out_is_open(hwo) {
+        return MMSYSERR_INVALHANDLE; // Wine ref: WOD_Close — ValidateAndLock
+    }
+    WAVE_OUT_OPEN.store(false, std::sync::atomic::Ordering::Relaxed);
     #[cfg(feature = "pipewire-audio")]
     {
+        let mut cb: Option<(usize, usize, u32)> = None;
         if let Some(m) = WAVE_OUT_SESSION.get() {
             if let Ok(mut guard) = m.lock() {
+                if let Some(ref session) = *guard {
+                    cb = Some((session.callback, session.instance, session.flags));
+                }
                 guard.take(); // drops WaveOutSession → drops PwState → stops ThreadLoop
             }
         }
-        0
+        unsafe {
+            if let Some((callback, instance, flags)) = cb {
+                maybe_notify(hwo, WOM_CLOSE, callback, instance, flags);
+            }
+        }
     }
-    #[cfg(not(feature = "pipewire-audio"))]
-    {
-        0 // MMSYSERR_NOERROR
-    }
+    MMSYSERR_NOERROR
 }
 
 /// waveOutPrepareHeader: prepare a wave header for playback.
-/// Wine ref: dlls/winmm/waveform.c — sets WHDR_PREPARED in dwFlags.
+/// Wine ref: dlls/winmm/waveform.c WINMM_PrepareHeader — validates the
+///   handle (MMSYSERR_INVALHANDLE), sets WHDR_PREPARED and clears
+///   WHDR_DONE|WHDR_INQUEUE ("flags cleared since w2k").
 ///
 /// # Safety
 /// `pwh` must be a valid pointer to a WAVEHDR if non-null.
 pub unsafe extern "win64" fn wave_out_prepare_header(
-    _hwo: usize,
+    hwo: usize,
     pwh: *mut WAVEHDR,
     _cbwh: u32,
 ) -> u32 {
-    if !pwh.is_null() {
-        unsafe {
-            (*pwh).dwFlags |= WHDR_PREPARED;
-        }
+    if !wave_out_is_open(hwo) {
+        return MMSYSERR_INVALHANDLE;
     }
-    0 // MMSYSERR_NOERROR
+    if pwh.is_null() {
+        return MMSYSERR_INVALPARAM;
+    }
+    unsafe {
+        (*pwh).dwFlags |= WHDR_PREPARED;
+        (*pwh).dwFlags &= !(WHDR_DONE | WHDR_INQUEUE);
+    }
+    MMSYSERR_NOERROR
 }
 
 /// waveOutUnprepareHeader: unprepare a wave header.
-/// Wine ref: dlls/winmm/waveform.c — clears WHDR_PREPARED from dwFlags.
+/// Wine ref: dlls/winmm/waveform.c WINMM_UnprepareHeader — validates the
+///   handle and clears WHDR_PREPARED only (WHDR_DONE is preserved; an
+///   already-unprepared header is not an error).
 ///
 /// # Safety
 /// `pwh` must be a valid pointer to a WAVEHDR if non-null.
 pub unsafe extern "win64" fn wave_out_unprepare_header(
-    _hwo: usize,
+    hwo: usize,
     pwh: *mut WAVEHDR,
     _cbwh: u32,
 ) -> u32 {
-    if !pwh.is_null() {
-        unsafe {
-            (*pwh).dwFlags &= !WHDR_PREPARED;
-        }
+    if !wave_out_is_open(hwo) {
+        return MMSYSERR_INVALHANDLE;
     }
-    0 // MMSYSERR_NOERROR
+    if pwh.is_null() {
+        return MMSYSERR_INVALPARAM;
+    }
+    unsafe {
+        (*pwh).dwFlags &= !WHDR_PREPARED;
+    }
+    MMSYSERR_NOERROR
 }
 
 /// waveOutWrite: submit a buffer for playback.
-/// Wine ref: dlls/winmm/waveform.c — marks WHDR_INQUEUE while queued,
-///   marks WHDR_DONE when buffer completes.
+/// Wine ref: dlls/winmm/waveform.c WOD_PushData / WOD_MarkDoneHeaders —
+///   marks WHDR_INQUEUE while queued, marks WHDR_DONE (and clears WHDR_INQUEUE)
+///   when the buffer completes, and delivers WOM_DONE to the callback.
+///   Invalid handle → MMSYSERR_INVALHANDLE; cbwh < sizeof(WAVEHDR) →
+///   MMSYSERR_INVALPARAM; header without WHDR_PREPARED → WAVERR_UNPREPARED.
+///
 /// With pipewire-audio: pushes PCM data into the ring buffer consumed by the
 /// PipeWire process callback. WOM_DONE is fired immediately after queuing
-/// (approximate — real WinMM fires after playback completes).
+/// (approximate — real WinMM fires after playback completes; WAVERR_STILLPLAYING
+/// for a second write of a queued header is therefore deferred).
 ///
 /// # Safety
 /// `pwh` must be a valid pointer to a WAVEHDR if non-null.
-pub unsafe extern "win64" fn wave_out_write(_hwo: usize, pwh: *mut WAVEHDR, _cbwh: u32) -> u32 {
+pub unsafe extern "win64" fn wave_out_write(hwo: usize, pwh: *mut WAVEHDR, cbwh: u32) -> u32 {
+    // Wine ref: dlls/winmm/wave.c WODM_WRITE — shared validation.
+    if !wave_out_is_open(hwo) {
+        return MMSYSERR_INVALHANDLE;
+    }
+    if pwh.is_null() || (cbwh as usize) < std::mem::size_of::<WAVEHDR>() {
+        return MMSYSERR_INVALPARAM;
+    }
+
     #[cfg(feature = "pipewire-audio")]
     {
-        if let Ok(guard) = wave_out_session_mutex().lock() {
-            if let Some(ref session) = *guard {
-                if !pwh.is_null() {
-                    let hdr = &mut *pwh;
-                    hdr.dwFlags |= WHDR_INQUEUE | WHDR_DONE;
-                    if !hdr.lpData.is_null() && hdr.dwBufferLength > 0 {
-                        let slice = std::slice::from_raw_parts(
-                            hdr.lpData as *const u8,
-                            hdr.dwBufferLength as usize,
-                        );
-                        if let Ok(mut ring) = session.ring_buf.lock() {
-                            ring.write_from(slice);
-                        }
-                    }
-                }
-                maybe_notify(
-                    WAVE_OUT_HANDLE,
-                    WOM_DONE,
-                    session.callback,
-                    session.instance,
-                    session.flags,
+        let notify = {
+            let guard = wave_out_session_mutex()
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            let session = match *guard {
+                Some(ref s) => s,
+                None => return MMSYSERR_INVALHANDLE, // no open device for this handle
+            };
+            let hdr = &mut *pwh;
+            if hdr.dwFlags & WHDR_PREPARED == 0 {
+                return WAVERR_UNPREPARED;
+            }
+            // Instant-completion approximation: the buffer is "queued" then
+            // "played" immediately. Final header state matches Wine's
+            // post-playback flags: WHDR_DONE set, WHDR_INQUEUE cleared.
+            hdr.dwFlags |= WHDR_INQUEUE;
+            if !hdr.lpData.is_null() && hdr.dwBufferLength > 0 {
+                let slice = std::slice::from_raw_parts(
+                    hdr.lpData as *const u8,
+                    hdr.dwBufferLength as usize,
                 );
+                if let Ok(mut ring) = session.ring_buf.lock() {
+                    ring.write_from(slice);
+                }
+            }
+            hdr.dwFlags &= !WHDR_INQUEUE;
+            hdr.dwFlags |= WHDR_DONE;
+            Some((session.callback, session.instance, session.flags))
+        };
+        // Notify outside the session lock — the guest callback may call back
+        // into waveOutWrite (Wine ref: WINMM_NotifyClient "should never be
+        // called while holding the device lock").
+        unsafe {
+            if let Some((callback, instance, flags)) = notify {
+                maybe_notify(WAVE_OUT_HANDLE, WOM_DONE, callback, instance, flags);
             }
         }
-        0
+        MMSYSERR_NOERROR
     }
 
     #[cfg(not(feature = "pipewire-audio"))]
     {
-        if !pwh.is_null() {
-            unsafe {
-                (*pwh).dwFlags |= WHDR_INQUEUE;
-                (*pwh).dwFlags |= WHDR_DONE;
-                (*pwh).dwFlags &= !WHDR_INQUEUE;
-            }
+        let hdr = &mut *pwh;
+        if hdr.dwFlags & WHDR_PREPARED == 0 {
+            return WAVERR_UNPREPARED;
         }
-        0 // MMSYSERR_NOERROR
+        hdr.dwFlags |= WHDR_INQUEUE;
+        hdr.dwFlags &= !WHDR_INQUEUE;
+        hdr.dwFlags |= WHDR_DONE;
+        MMSYSERR_NOERROR
     }
 }
 
@@ -1509,8 +1643,15 @@ pub unsafe extern "win64" fn wave_out_get_error_text_w(
 // reference index unavailable — Phase A stubs only, safe sentinel returns.
 // Wine ref comments deferred to reference-indexer-available session.
 
+// MMRESULT error codes — Wine ref: include/mmsystem.h
 const MMSYSERR_NOERROR: u32 = 0;
+const MMSYSERR_BADDEVICEID: u32 = 2;
+const MMSYSERR_INVALHANDLE: u32 = 5;
 const MMSYSERR_NODRIVER: u32 = 6;
+const MMSYSERR_INVALFLAG: u32 = 10;
+const MMSYSERR_INVALPARAM: u32 = 11;
+const WAVERR_BADFORMAT: u32 = 32;
+const WAVERR_UNPREPARED: u32 = 33;
 
 // ── MIDI Input — Phase B (no devices available) ───────────────────────────────
 // Reports 0 input devices and returns MMSYSERR_NOERROR for no-op operations.
@@ -2182,5 +2323,250 @@ mod tests {
     fn resolve_wrong_dll_returns_none() {
         assert!(resolve("kernel32.dll", "timeGetTime").is_none());
         assert!(resolve("winmm.dll", "__nonexistent__").is_none());
+    }
+
+    // ── waveOutOpen / waveOutWrite behavior ──────────────────────────────────
+    //
+    // These mirror the Wine contract exercised by dlls/winmm/tests/wave.c:
+    // validation errors, WAVE_FORMAT_QUERY semantics, and the WAVEHDR flag
+    // lifecycle (WHDR_PREPARED → WHDR_INQUEUE → WHDR_DONE). They pass in both
+    // feature configurations: without pipewire-audio the stub path is used,
+    // with it the PipeWire stream degrades to silent mode when no daemon is
+    // present, and waveOutOpen still returns MMSYSERR_NOERROR.
+
+    fn pcm_format() -> super::WAVEFORMATEX {
+        super::WAVEFORMATEX {
+            wFormatTag: super::WAVE_FORMAT_PCM,
+            nChannels: 2,
+            nSamplesPerSec: 44100,
+            nAvgBytesPerSec: 176400,
+            nBlockAlign: 4,
+            wBitsPerSample: 16,
+            cbSize: 0,
+        }
+    }
+
+    fn invalid_format() -> super::WAVEFORMATEX {
+        let mut f = pcm_format();
+        f.wFormatTag = 0x0011; // WAVE_FORMAT_GSM610 — unsupported non-PCM
+        f
+    }
+
+    #[test]
+    fn wave_out_open_validation_errors() {
+        unsafe {
+            let mut hwo: usize = 0;
+
+            // NULL format → MMSYSERR_INVALPARAM.
+            assert_eq!(
+                super::wave_out_open(&mut hwo, super::WAVE_MAPPER, std::ptr::null(), 0, 0, 0,),
+                super::MMSYSERR_INVALPARAM,
+                "NULL pwfx must be rejected"
+            );
+
+            // Unsupported (non-PCM) format → WAVERR_BADFORMAT.
+            let bad = invalid_format();
+            assert_eq!(
+                super::wave_out_open(&mut hwo, super::WAVE_MAPPER, &bad, 0, 0, 0,),
+                super::WAVERR_BADFORMAT,
+                "non-PCM format must be rejected"
+            );
+
+            // nSamplesPerSec == 0 → MMSYSERR_INVALPARAM (Wine: INVALPARAM,
+            // XP: WAVERR_BADFORMAT).
+            let mut zero_rate = pcm_format();
+            zero_rate.nSamplesPerSec = 0;
+            assert_eq!(
+                super::wave_out_open(&mut hwo, super::WAVE_MAPPER, &zero_rate, 0, 0, 0,),
+                super::MMSYSERR_INVALPARAM,
+                "zero sample rate must be rejected"
+            );
+
+            // Out-of-range device id → MMSYSERR_BADDEVICEID.
+            assert_eq!(
+                super::wave_out_open(&mut hwo, 42, &pcm_format(), 0, 0, 0),
+                super::MMSYSERR_BADDEVICEID,
+                "device id 42 must be rejected"
+            );
+
+            // Invalid callback type → MMSYSERR_INVALFLAG.
+            assert_eq!(
+                super::wave_out_open(
+                    &mut hwo,
+                    super::WAVE_MAPPER,
+                    &pcm_format(),
+                    0,
+                    0,
+                    0x0004_0000, // invalid value under CALLBACK_TYPEMASK
+                ),
+                super::MMSYSERR_INVALFLAG,
+                "invalid callback type must be rejected"
+            );
+
+            // No handle must have been written by any failing path.
+            assert_eq!(hwo, 0);
+        }
+    }
+
+    #[test]
+    fn wave_out_open_query_validates_without_opening() {
+        unsafe {
+            // WAVE_FORMAT_QUERY with a valid PCM format → MMSYSERR_NOERROR.
+            let mut sentinel: usize = 0xDEAD_F00D;
+            assert_eq!(
+                super::wave_out_open(
+                    &mut sentinel,
+                    super::WAVE_MAPPER,
+                    &pcm_format(),
+                    0,
+                    0,
+                    super::WAVE_FORMAT_QUERY,
+                ),
+                super::MMSYSERR_NOERROR
+            );
+            // The caller's handle must be left untouched (Wine test checks
+            // exactly this with a sentinel).
+            assert_eq!(sentinel, 0xDEAD_F00D, "query must not write *phwo");
+
+            // Query with an unsupported format → WAVERR_BADFORMAT.
+            assert_eq!(
+                super::wave_out_open(
+                    std::ptr::null_mut(),
+                    super::WAVE_MAPPER,
+                    &invalid_format(),
+                    0,
+                    0,
+                    super::WAVE_FORMAT_QUERY,
+                ),
+                super::WAVERR_BADFORMAT
+            );
+
+            // Query with NULL format → MMSYSERR_INVALPARAM.
+            assert_eq!(
+                super::wave_out_open(
+                    std::ptr::null_mut(),
+                    super::WAVE_MAPPER,
+                    std::ptr::null(),
+                    0,
+                    0,
+                    super::WAVE_FORMAT_QUERY,
+                ),
+                super::MMSYSERR_INVALPARAM
+            );
+        }
+    }
+
+    #[test]
+    fn wave_out_lifecycle_roundtrip() {
+        unsafe {
+            // Open with WAVE_MAPPER + PCM → MMSYSERR_NOERROR, valid handle.
+            let mut hwo: usize = 0;
+            assert_eq!(
+                super::wave_out_open(&mut hwo, super::WAVE_MAPPER, &pcm_format(), 0, 0, 0,),
+                super::MMSYSERR_NOERROR
+            );
+            assert_eq!(hwo, super::WAVE_OUT_HANDLE);
+
+            // Prepare a header → WHDR_PREPARED set, no DONE/INQUEUE residue.
+            let mut data = [0u8; 64];
+            let mut hdr = super::WAVEHDR {
+                lpData: data.as_mut_ptr(),
+                dwBufferLength: data.len() as u32,
+                dwBytesRecorded: 0,
+                dwUser: 0,
+                dwFlags: super::WHDR_DONE | super::WHDR_INQUEUE,
+                dwLoops: 0,
+                lpNext: std::ptr::null_mut(),
+                reserved: 0,
+            };
+            assert_eq!(
+                super::wave_out_prepare_header(
+                    hwo,
+                    &mut hdr,
+                    std::mem::size_of::<super::WAVEHDR>() as u32,
+                ),
+                super::MMSYSERR_NOERROR
+            );
+            assert_eq!(
+                hdr.dwFlags & super::WHDR_PREPARED,
+                super::WHDR_PREPARED,
+                "prepare must set WHDR_PREPARED"
+            );
+            assert_eq!(
+                hdr.dwFlags & (super::WHDR_DONE | super::WHDR_INQUEUE),
+                0,
+                "prepare must clear WHDR_DONE|WHDR_INQUEUE (since w2k)"
+            );
+
+            // Write a prepared header → MMSYSERR_NOERROR and WHDR_DONE set,
+            // WHDR_INQUEUE cleared (instant-completion approximation).
+            assert_eq!(
+                super::wave_out_write(hwo, &mut hdr, std::mem::size_of::<super::WAVEHDR>() as u32,),
+                super::MMSYSERR_NOERROR
+            );
+            assert_ne!(
+                hdr.dwFlags & super::WHDR_DONE,
+                0,
+                "write must set WHDR_DONE"
+            );
+            assert_eq!(
+                hdr.dwFlags & super::WHDR_INQUEUE,
+                0,
+                "write must clear WHDR_INQUEUE once done"
+            );
+
+            // Unprepare → WHDR_PREPARED cleared, WHDR_DONE preserved.
+            assert_eq!(
+                super::wave_out_unprepare_header(
+                    hwo,
+                    &mut hdr,
+                    std::mem::size_of::<super::WAVEHDR>() as u32,
+                ),
+                super::MMSYSERR_NOERROR
+            );
+            assert_eq!(hdr.dwFlags & super::WHDR_PREPARED, 0);
+            assert_ne!(hdr.dwFlags & super::WHDR_DONE, 0);
+
+            // Write of an unprepared header → WAVERR_UNPREPARED.
+            assert_eq!(
+                super::wave_out_write(hwo, &mut hdr, std::mem::size_of::<super::WAVEHDR>() as u32,),
+                super::WAVERR_UNPREPARED
+            );
+
+            // Close → MMSYSERR_NOERROR.
+            assert_eq!(super::wave_out_close(hwo), super::MMSYSERR_NOERROR);
+
+            // All operations on a closed / bogus handle → MMSYSERR_INVALHANDLE.
+            assert_eq!(
+                super::wave_out_close(0xDEAD_BEEF),
+                super::MMSYSERR_INVALHANDLE
+            );
+            assert_eq!(super::wave_out_close(hwo), super::MMSYSERR_INVALHANDLE);
+            assert_eq!(
+                super::wave_out_write(hwo, &mut hdr, std::mem::size_of::<super::WAVEHDR>() as u32,),
+                super::MMSYSERR_INVALHANDLE
+            );
+            assert_eq!(
+                super::wave_out_prepare_header(
+                    hwo,
+                    &mut hdr,
+                    std::mem::size_of::<super::WAVEHDR>() as u32,
+                ),
+                super::MMSYSERR_INVALHANDLE
+            );
+
+            // cbwh too small → MMSYSERR_INVALPARAM (needs a valid handle).
+            let mut hwo2: usize = 0;
+            super::wave_out_open(&mut hwo2, super::WAVE_MAPPER, &pcm_format(), 0, 0, 0);
+            assert_eq!(
+                super::wave_out_write(
+                    hwo2,
+                    &mut hdr,
+                    (std::mem::size_of::<super::WAVEHDR>() - 4) as u32,
+                ),
+                super::MMSYSERR_INVALPARAM
+            );
+            super::wave_out_close(hwo2);
+        }
     }
 }
