@@ -19,6 +19,7 @@
 #![allow(non_snake_case)]
 
 use core::ptr::{read_unaligned, write_unaligned};
+use sha1::digest::{Digest, DynDigest};
 use weave_core::handles::{self, HandleKind};
 use weave_core::registry::{
     find_value_file, predefined_hive_path, read_value_file, resolve_subkey, REG_EXPAND_SZ,
@@ -2314,24 +2315,148 @@ pub unsafe extern "win64" fn reg_notify_change_key_value(
 
 // ── wget Crypt* / event-log stubs (CAPI + cleanup gap-fill) ─────────────────
 
-/// CryptCreateHash — create a hash object. Returns FALSE + NTE_FAIL.
+// CALG_IDs for the hash algorithms Weave supports (wincrypt.h).
+const CALG_MD5: u32 = 0x0000_8003;
+const CALG_SHA1: u32 = 0x0000_8004;
+const CALG_SHA_256: u32 = 0x0000_800c;
+
+// CryptGetHashParam dwParam values (wincrypt.h).
+const HP_ALGID: u32 = 0x0001;
+const HP_HASHVAL: u32 = 0x0002;
+const HP_HASHSIZE: u32 = 0x0004;
+
+// CAPI/NTE error codes (winerror.h / nteerror.h).
+const NTE_BAD_ALGID: u32 = 0x8009_0008;
+const NTE_BAD_HASH: u32 = 0x8009_0002;
+const NTE_BAD_KEY: u32 = 0x8009_0003;
+const NTE_BAD_FLAGS: u32 = 0x8009_0009;
+const NTE_BAD_PROV: u32 = 0x8009_0004;
+const NTE_INVALID_PARAMETER: u32 = 0x8009_0027;
+
+/// An open CAPI hash object: the algorithm and a live incremental hasher.
+///
+/// `CryptHashData` feeds the hasher with `update`; `CryptGetHashParam(HP_HASHVAL)`
+/// finalizes it. `finalized` mirrors Wine's `RSAENH_HASHSTATE_FINISHED` — once the
+/// hash value has been read, no further data may be added to the object.
+struct HashObject {
+    alg_id: u32,
+    hasher: Box<dyn DynDigest + Send>,
+    finalized: bool,
+}
+
+/// Hash object handle table. Handle value = slot index + `HASH_HANDLE_OFFSET`
+/// (mirrors `weave_core::handles` so 0 is never a valid handle).
+const HASH_HANDLE_OFFSET: usize = 4;
+
+static HASH_OBJECTS: std::sync::OnceLock<std::sync::Mutex<Vec<Option<HashObject>>>> =
+    std::sync::OnceLock::new();
+
+fn hash_table() -> &'static std::sync::Mutex<Vec<Option<HashObject>>> {
+    HASH_OBJECTS.get_or_init(|| std::sync::Mutex::new(Vec::new()))
+}
+
+/// Allocate a fresh hash object handle. Returns the smallest free slot.
+fn hash_alloc(obj: HashObject) -> usize {
+    let mut table = hash_table()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    for (i, slot) in table.iter_mut().enumerate() {
+        if slot.is_none() {
+            *slot = Some(obj);
+            return i + HASH_HANDLE_OFFSET;
+        }
+    }
+    table.push(Some(obj));
+    table.len() - 1 + HASH_HANDLE_OFFSET
+}
+
+/// Run `f` against the hash object for `handle`. Returns `None` if the handle
+/// is invalid or the table lock is poisoned.
+fn with_hash<R>(handle: usize, f: impl FnOnce(&mut HashObject) -> R) -> Option<R> {
+    let mut table = hash_table().lock().ok()?;
+    let index = handle.checked_sub(HASH_HANDLE_OFFSET)?;
+    let slot = table.get_mut(index)?.as_mut()?;
+    Some(f(slot))
+}
+
+/// Free a hash object handle. Returns `false` if the handle was invalid.
+fn hash_remove(handle: usize) -> bool {
+    let mut table = match hash_table().lock() {
+        Ok(guard) => guard,
+        Err(_) => return false,
+    };
+    let index = match handle.checked_sub(HASH_HANDLE_OFFSET) {
+        Some(i) => i,
+        None => return false,
+    };
+    match table.get_mut(index) {
+        Some(slot @ Some(_)) => {
+            *slot = None;
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Construct a live incremental hasher for `alg_id`. `None` for unsupported
+/// algorithms (Wine's rsaenh rejects those with NTE_BAD_ALGID).
+fn make_hasher(alg_id: u32) -> Option<Box<dyn DynDigest + Send>> {
+    match alg_id {
+        CALG_MD5 => Some(Box::new(md5::Md5::new())),
+        CALG_SHA1 => Some(Box::new(sha1::Sha1::new())),
+        CALG_SHA_256 => Some(Box::new(sha2::Sha256::new())),
+        _ => None,
+    }
+}
+
+/// CryptCreateHash — create a hash object for `alg_id` inside a CAPI provider context.
 ///
 /// # Safety
-/// `ph_hash`, if non-null, receives 0 (no hash created).
-// Wine ref: dlls/advapi32/crypt.c — CryptCreateHash calls provider CPCreateHash;
-// FALSE + NTE_FAIL if provider invalid or ALG_ID unsupported.
+/// `ph_hash` must be a writable pointer to an `HCRYPTHASH` slot.
+// Wine ref: dlls/advapi32/crypt.c — CryptCreateHash validates hProv via
+// prov_from_handle, allocates a CRYPTHASH, then dispatches to provider
+// pCPCreateHash; dlls/rsaenh/rsaenh.c RSAENH_CPCreateHash rejects unsupported
+// ALG_IDs with NTE_BAD_ALGID, a non-zero hKey with NTE_BAD_KEY, and non-zero
+// dwFlags with NTE_BAD_FLAGS. Weave supports MD5/SHA1/SHA256 and stores a live
+// incremental hasher per object; any non-zero provider handle (as issued by
+// CryptAcquireContextA/W) is accepted.
 pub unsafe extern "win64" fn crypt_create_hash(
-    _h_prov: usize,
-    _alg_id: u32,
-    _h_key: usize,
-    _dw_flags: u32,
+    h_prov: usize,
+    alg_id: u32,
+    h_key: usize,
+    dw_flags: u32,
     ph_hash: *mut usize,
 ) -> i32 {
-    if !ph_hash.is_null() {
-        unsafe { *ph_hash = 0 };
+    if ph_hash.is_null() {
+        weave_common::set_last_error(ERROR_INVALID_PARAMETER as u32);
+        return 0; // FALSE
     }
-    weave_common::set_last_error(0x8009_0020_u32); // NTE_FAIL
-    0 // FALSE
+    // SAFETY: ph_hash checked non-null above; caller provides a writable slot.
+    unsafe { *ph_hash = 0 };
+    if h_prov == 0 {
+        weave_common::set_last_error(NTE_BAD_PROV);
+        return 0;
+    }
+    if h_key != 0 {
+        weave_common::set_last_error(NTE_BAD_KEY);
+        return 0;
+    }
+    if dw_flags != 0 {
+        weave_common::set_last_error(NTE_BAD_FLAGS);
+        return 0;
+    }
+    let Some(hasher) = make_hasher(alg_id) else {
+        weave_common::set_last_error(NTE_BAD_ALGID);
+        return 0;
+    };
+    let handle = hash_alloc(HashObject {
+        alg_id,
+        hasher,
+        finalized: false,
+    });
+    // SAFETY: ph_hash checked non-null above; write the new handle out.
+    unsafe { *ph_hash = handle };
+    1 // TRUE
 }
 
 /// CryptEncrypt — encrypt data with a key. Returns FALSE + NTE_FAIL.
@@ -2380,44 +2505,166 @@ pub unsafe extern "win64" fn crypt_decrypt(
     0 // FALSE
 }
 
-/// CryptDestroyHash — release a hash object. Returns TRUE (no-op; no state to free).
-// Wine ref: dlls/advapi32/crypt.c — CryptDestroyHash calls provider CPDestroyHash
-// then frees internal hash object; TRUE on success.
-pub unsafe extern "win64" fn crypt_destroy_hash(_h_hash: usize) -> i32 {
-    1 // TRUE
-}
-
-/// CryptHashData — hash a block of data into an existing hash object. Returns FALSE + NTE_FAIL.
+/// CryptDestroyHash — release a hash object and free its handle.
 ///
 /// # Safety
-/// All pointer arguments are ignored.
-// Wine ref: dlls/advapi32/crypt.h PROVFUNCS::pCPHashData — CryptHashData dispatches to
-// provider CPHashData(hProv, hHash, pbData, dwDataLen, dwFlags); FALSE + NTE_FAIL with no CSP.
+/// No pointer dereferences; `h_hash` is an opaque handle.
+// Wine ref: dlls/advapi32/crypt.c — CryptDestroyHash looks up the hash handle,
+// calls provider CPDestroyHash, then frees the CRYPTHASH; FALSE on an invalid
+// handle. Weave removes the object from the hash handle table.
+pub unsafe extern "win64" fn crypt_destroy_hash(h_hash: usize) -> i32 {
+    if hash_remove(h_hash) {
+        1 // TRUE
+    } else {
+        weave_common::set_last_error(ERROR_INVALID_HANDLE as u32);
+        0 // FALSE
+    }
+}
+
+/// CryptHashData — add a block of data to an existing hash object.
+///
+/// The block is appended to the object's incremental hash state; the final
+/// digest (read via `CryptGetHashParam(HP_HASHVAL)`) covers all accumulated
+/// data, no matter how the data was split across calls.
+///
+/// # Safety
+/// `pb_data` must be readable for `dw_data_len` bytes, or null when the length is 0.
+// Wine ref: dlls/advapi32/crypt.c — CryptHashData looks up the hash handle and
+// dispatches to provider pCPHashData; dlls/rsaenh/rsaenh.c RSAENH_CPHashData
+// rejects non-zero dwFlags (NTE_BAD_FLAGS) and any data after the hash has been
+// finalized (NTE_BAD_HASH), then feeds the incremental hash via update_hash.
+// Weave maps invalid handles to ERROR_INVALID_HANDLE and bad flags to
+// ERROR_INVALID_PARAMETER; zero-length data is a no-op.
 pub unsafe extern "win64" fn crypt_hash_data(
-    _h_hash: usize,
-    _pb_data: *const u8,
-    _dw_data_len: u32,
-    _dw_flags: u32,
+    h_hash: usize,
+    pb_data: *const u8,
+    dw_data_len: u32,
+    dw_flags: u32,
 ) -> i32 {
-    weave_common::set_last_error(0x8009_0020_u32); // NTE_FAIL
-    0 // FALSE
+    if dw_flags != 0 {
+        weave_common::set_last_error(ERROR_INVALID_PARAMETER as u32);
+        return 0; // FALSE
+    }
+    if dw_data_len > 0 && pb_data.is_null() {
+        weave_common::set_last_error(ERROR_INVALID_PARAMETER as u32);
+        return 0;
+    }
+    let data: &[u8] = if dw_data_len == 0 {
+        &[]
+    } else {
+        // SAFETY: dw_data_len > 0 and pb_data checked non-null; the caller
+        // guarantees dw_data_len readable bytes at pb_data.
+        unsafe { std::slice::from_raw_parts(pb_data, dw_data_len as usize) }
+    };
+    match with_hash(h_hash, |obj| {
+        if obj.finalized {
+            Err(())
+        } else {
+            obj.hasher.update(data);
+            Ok(())
+        }
+    }) {
+        Some(Ok(())) => 1, // TRUE
+        Some(Err(())) => {
+            weave_common::set_last_error(NTE_BAD_HASH);
+            0
+        }
+        None => {
+            weave_common::set_last_error(ERROR_INVALID_HANDLE as u32);
+            0
+        }
+    }
 }
 
-/// CryptGetHashParam — retrieve a hash object parameter. Returns FALSE + NTE_FAIL.
+/// CryptGetHashParam — retrieve a parameter from a hash object.
+///
+/// Supported `dwParam` values: `HP_ALGID` (0x1, the algorithm id), `HP_HASHVAL`
+/// (0x2, the digest over all hashed data — finalizes the object) and
+/// `HP_HASHSIZE` (0x4, the digest length in bytes). `*pdw_data_len` is in/out:
+/// the caller supplies the buffer size and receives the bytes written (or, on
+/// `ERROR_MORE_DATA`, the required size).
 ///
 /// # Safety
-/// All pointer arguments are ignored.
-// Wine ref: dlls/advapi32/crypt.h PROVFUNCS::pCPGetHashParam — CryptGetHashParam dispatches to
-// provider CPGetHashParam(hProv, hHash, dwParam, pbData, pdwDataLen, dwFlags); FALSE + NTE_FAIL with no CSP.
+/// `pb_data` must be writable for `*pdw_data_len` bytes; `pdw_data_len` must be
+/// a writable pointer to a `DWORD`.
+// Wine ref: dlls/advapi32/crypt.c — CryptGetHashParam dispatches to provider
+// pCPGetHashParam; dlls/rsaenh/rsaenh.c RSAENH_CPGetHashParam handles HP_ALGID,
+// HP_HASHVAL (finalizing the hash via finalize_hash) and HP_HASHSIZE, returning
+// ERROR_MORE_DATA when the caller's buffer is too small. Weave maps invalid
+// handles to ERROR_INVALID_HANDLE and unknown parameters to NTE_INVALID_PARAMETER.
 pub unsafe extern "win64" fn crypt_get_hash_param(
-    _h_hash: usize,
-    _dw_param: u32,
-    _pb_data: *mut u8,
-    _pdw_data_len: *mut u32,
+    h_hash: usize,
+    dw_param: u32,
+    pb_data: *mut u8,
+    pdw_data_len: *mut u32,
     _dw_flags: u32,
 ) -> i32 {
-    weave_common::set_last_error(0x8009_0020_u32); // NTE_FAIL
-    0 // FALSE
+    if pdw_data_len.is_null() {
+        weave_common::set_last_error(ERROR_INVALID_PARAMETER as u32);
+        return 0; // FALSE
+    }
+    // SAFETY: pdw_data_len checked non-null above; caller provides a writable DWORD.
+    let size_in = unsafe { *pdw_data_len } as usize;
+
+    // Each arm yields Ok(bytes written) or Err(Some(required)) when the caller's
+    // buffer is too small, Err(None) for an unknown parameter.
+    match with_hash(h_hash, |obj| match dw_param {
+        HP_ALGID => {
+            if pb_data.is_null() || size_in < std::mem::size_of::<u32>() {
+                Err(Some(std::mem::size_of::<u32>()))
+            } else {
+                // SAFETY: size_in >= 4 and pb_data is writable. The ALG_ID is
+                // written unaligned since pb_data has no alignment guarantee.
+                unsafe { std::ptr::write_unaligned(pb_data as *mut u32, obj.alg_id) };
+                Ok(std::mem::size_of::<u32>())
+            }
+        }
+        HP_HASHSIZE => {
+            if pb_data.is_null() || size_in < std::mem::size_of::<u32>() {
+                Err(Some(std::mem::size_of::<u32>()))
+            } else {
+                // SAFETY: size_in >= 4 and pb_data is writable (see HP_ALGID).
+                unsafe {
+                    std::ptr::write_unaligned(pb_data as *mut u32, obj.hasher.output_size() as u32)
+                };
+                Ok(std::mem::size_of::<u32>())
+            }
+        }
+        HP_HASHVAL => {
+            let digest_len = obj.hasher.output_size();
+            if pb_data.is_null() || size_in < digest_len {
+                Err(Some(digest_len))
+            } else {
+                // SAFETY: digest_len <= size_in and pb_data is writable; the
+                // digest slice is owned by the freshly finalized hasher.
+                let digest = obj.hasher.finalize_reset();
+                unsafe { std::ptr::copy_nonoverlapping(digest.as_ptr(), pb_data, digest_len) };
+                obj.finalized = true;
+                Ok(digest_len)
+            }
+        }
+        _ => Err(None),
+    }) {
+        Some(Ok(written)) => {
+            // SAFETY: pdw_data_len checked non-null above.
+            unsafe { *pdw_data_len = written as u32 };
+            1 // TRUE
+        }
+        Some(Err(Some(required))) => {
+            // SAFETY: pdw_data_len checked non-null above.
+            unsafe { *pdw_data_len = required as u32 };
+            weave_common::set_last_error(ERROR_MORE_DATA as u32);
+            0 // FALSE
+        }
+        Some(Err(None)) => {
+            weave_common::set_last_error(NTE_INVALID_PARAMETER);
+            0
+        }
+        None => {
+            weave_common::set_last_error(ERROR_INVALID_HANDLE as u32);
+            0
+        }
+    }
 }
 
 /// RegSetKeySecurity — set security descriptor on a registry key. Returns ERROR_SUCCESS (no-op).
@@ -3545,5 +3792,239 @@ mod tests {
             handles::get_registry_path(out),
             Some(test_registry_dir().join("HKCU/Software/WeaveNoDisposition"))
         );
+    }
+
+    // ── CAPI hash object tests (CryptCreateHash / CryptHashData / CryptGetHashParam) ──
+
+    /// Create a hash for `alg_id`, feed it `data` in one call, and return the
+    /// HP_HASHVAL digest as lowercase hex. Panics on any CAPI failure.
+    fn hash_digest_hex(alg_id: u32, data: &[u8]) -> String {
+        let mut h = 0usize;
+        let ret = unsafe { crypt_create_hash(1, alg_id, 0, 0, &mut h) };
+        assert_eq!(ret, 1, "crypt_create_hash(alg={alg_id:#x}) failed");
+        let ret = unsafe { crypt_hash_data(h, data.as_ptr(), data.len() as u32, 0) };
+        assert_eq!(ret, 1, "crypt_hash_data failed");
+        let mut buf = [0u8; 64];
+        let mut len = buf.len() as u32;
+        let ret = unsafe { crypt_get_hash_param(h, HP_HASHVAL, buf.as_mut_ptr(), &mut len, 0) };
+        assert_eq!(ret, 1, "crypt_get_hash_param failed");
+        unsafe { crypt_destroy_hash(h) };
+        buf[..len as usize]
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect()
+    }
+
+    #[test]
+    fn crypt_hash_md5_abc_matches_known_digest() {
+        // md5("abc") = 900150983cd24fb0d6963f7d28e17f72 (RFC 1321 test suite).
+        assert_eq!(
+            hash_digest_hex(CALG_MD5, b"abc"),
+            "900150983cd24fb0d6963f7d28e17f72"
+        );
+    }
+
+    #[test]
+    fn crypt_hash_data_accumulates_across_calls() {
+        // Hashing "a" then "bc" must equal hashing "abc" in one call.
+        let mut h = 0usize;
+        assert_eq!(unsafe { crypt_create_hash(1, CALG_MD5, 0, 0, &mut h) }, 1);
+        assert_eq!(unsafe { crypt_hash_data(h, b"a".as_ptr(), 1, 0) }, 1);
+        assert_eq!(unsafe { crypt_hash_data(h, b"bc".as_ptr(), 2, 0) }, 1);
+        let mut buf = [0u8; 16];
+        let mut len = buf.len() as u32;
+        assert_eq!(
+            unsafe { crypt_get_hash_param(h, HP_HASHVAL, buf.as_mut_ptr(), &mut len, 0) },
+            1
+        );
+        unsafe { crypt_destroy_hash(h) };
+        let hex: String = buf[..len as usize]
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        assert_eq!(hex, "900150983cd24fb0d6963f7d28e17f72");
+    }
+
+    #[test]
+    fn crypt_hash_sha1_abc_matches_known_digest() {
+        // SHA-1("abc") = a9993e364706816aba3e25717850c26c9cd0d89d (FIPS 180).
+        assert_eq!(
+            hash_digest_hex(CALG_SHA1, b"abc"),
+            "a9993e364706816aba3e25717850c26c9cd0d89d"
+        );
+    }
+
+    #[test]
+    fn crypt_hash_sha256_abc_matches_known_digest() {
+        // SHA-256("abc") = ba7816bf8f01cfea414140de5dae2223... (FIPS 180).
+        assert_eq!(
+            hash_digest_hex(CALG_SHA_256, b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    #[test]
+    fn crypt_hash_data_invalid_handle_returns_false() {
+        let ret = unsafe { crypt_hash_data(0xdead_beef, b"x".as_ptr(), 1, 0) };
+        assert_eq!(ret, 0);
+        assert_eq!(weave_common::get_last_error(), ERROR_INVALID_HANDLE as u32);
+    }
+
+    #[test]
+    fn crypt_hash_data_nonzero_flags_returns_false() {
+        let mut h = 0usize;
+        assert_eq!(unsafe { crypt_create_hash(1, CALG_SHA1, 0, 0, &mut h) }, 1);
+        let ret = unsafe { crypt_hash_data(h, b"x".as_ptr(), 1, 1) };
+        assert_eq!(ret, 0);
+        assert_eq!(
+            weave_common::get_last_error(),
+            ERROR_INVALID_PARAMETER as u32
+        );
+        unsafe { crypt_destroy_hash(h) };
+    }
+
+    #[test]
+    fn crypt_hash_data_null_with_nonzero_len_returns_false() {
+        let mut h = 0usize;
+        assert_eq!(unsafe { crypt_create_hash(1, CALG_SHA1, 0, 0, &mut h) }, 1);
+        let ret = unsafe { crypt_hash_data(h, std::ptr::null(), 4, 0) };
+        assert_eq!(ret, 0);
+        assert_eq!(
+            weave_common::get_last_error(),
+            ERROR_INVALID_PARAMETER as u32
+        );
+        unsafe { crypt_destroy_hash(h) };
+    }
+
+    #[test]
+    fn crypt_hash_data_zero_length_is_noop() {
+        // Zero-length data leaves the digest at hash-of-empty: md5("") = d41d8cd9...
+        assert_eq!(
+            hash_digest_hex(CALG_MD5, b""),
+            "d41d8cd98f00b204e9800998ecf8427e"
+        );
+    }
+
+    #[test]
+    fn crypt_hash_data_after_finalize_returns_false() {
+        let mut h = 0usize;
+        assert_eq!(unsafe { crypt_create_hash(1, CALG_MD5, 0, 0, &mut h) }, 1);
+        let mut buf = [0u8; 16];
+        let mut len = buf.len() as u32;
+        assert_eq!(
+            unsafe { crypt_get_hash_param(h, HP_HASHVAL, buf.as_mut_ptr(), &mut len, 0) },
+            1
+        );
+        // The hash is finalized — Wine's rsaenh rejects further data (NTE_BAD_HASH).
+        let ret = unsafe { crypt_hash_data(h, b"more".as_ptr(), 4, 0) };
+        assert_eq!(ret, 0);
+        assert_eq!(weave_common::get_last_error(), NTE_BAD_HASH);
+        unsafe { crypt_destroy_hash(h) };
+    }
+
+    #[test]
+    fn crypt_create_hash_bad_algid_returns_false() {
+        let mut h = 0usize;
+        let ret = unsafe {
+            crypt_create_hash(
+                1,
+                0x0000_8005, /* CALG_MD2 (unsupported) */
+                0,
+                0,
+                &mut h,
+            )
+        };
+        assert_eq!(ret, 0);
+        assert_eq!(weave_common::get_last_error(), NTE_BAD_ALGID);
+        assert_eq!(h, 0);
+    }
+
+    #[test]
+    fn crypt_create_hash_null_phhash_returns_false() {
+        let ret = unsafe { crypt_create_hash(1, CALG_MD5, 0, 0, std::ptr::null_mut()) };
+        assert_eq!(ret, 0);
+        assert_eq!(
+            weave_common::get_last_error(),
+            ERROR_INVALID_PARAMETER as u32
+        );
+    }
+
+    #[test]
+    fn crypt_get_hash_param_insufficient_buffer_returns_more_data() {
+        let mut h = 0usize;
+        assert_eq!(
+            unsafe { crypt_create_hash(1, CALG_SHA_256, 0, 0, &mut h) },
+            1
+        );
+        let mut buf = [0u8; 8];
+        let mut len = buf.len() as u32; // too small for the 32-byte SHA-256 digest
+        let ret = unsafe { crypt_get_hash_param(h, HP_HASHVAL, buf.as_mut_ptr(), &mut len, 0) };
+        assert_eq!(ret, 0);
+        assert_eq!(weave_common::get_last_error(), ERROR_MORE_DATA as u32);
+        assert_eq!(len, 32, "required size reported back");
+        unsafe { crypt_destroy_hash(h) };
+    }
+
+    #[test]
+    fn crypt_get_hash_param_reports_algid_and_hashsize() {
+        let mut h = 0usize;
+        assert_eq!(unsafe { crypt_create_hash(1, CALG_MD5, 0, 0, &mut h) }, 1);
+
+        let mut algid = 0u32;
+        let mut len = std::mem::size_of::<u32>() as u32;
+        assert_eq!(
+            unsafe {
+                crypt_get_hash_param(
+                    h,
+                    HP_ALGID,
+                    (&mut algid as *mut u32) as *mut u8,
+                    &mut len,
+                    0,
+                )
+            },
+            1
+        );
+        assert_eq!(algid, CALG_MD5);
+
+        let mut size = 0u32;
+        let mut len = std::mem::size_of::<u32>() as u32;
+        assert_eq!(
+            unsafe {
+                crypt_get_hash_param(
+                    h,
+                    HP_HASHSIZE,
+                    (&mut size as *mut u32) as *mut u8,
+                    &mut len,
+                    0,
+                )
+            },
+            1
+        );
+        assert_eq!(size, 16);
+
+        unsafe { crypt_destroy_hash(h) };
+    }
+
+    #[test]
+    fn crypt_destroy_hash_invalidates_handle() {
+        let mut h = 0usize;
+        assert_eq!(unsafe { crypt_create_hash(1, CALG_MD5, 0, 0, &mut h) }, 1);
+        assert_eq!(unsafe { crypt_destroy_hash(h) }, 1);
+        // The freed handle must now be rejected by CryptHashData.
+        let ret = unsafe { crypt_hash_data(h, b"x".as_ptr(), 1, 0) };
+        assert_eq!(ret, 0);
+        assert_eq!(weave_common::get_last_error(), ERROR_INVALID_HANDLE as u32);
+    }
+
+    #[test]
+    fn resolve_crypt_hash_functions() {
+        for name in [
+            "CryptCreateHash",
+            "CryptHashData",
+            "CryptGetHashParam",
+            "CryptDestroyHash",
+        ] {
+            assert!(resolve(name).is_some(), "missing resolver entry for {name}");
+        }
     }
 }
