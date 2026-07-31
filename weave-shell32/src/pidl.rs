@@ -204,7 +204,10 @@ pub unsafe extern "win64" fn il_get_next(pidl: *const u8) -> *mut u8 {
 ///
 /// # Safety
 /// `pidl` must be null or a PIDL pointer originally returned by `pidl_from_path_w` / `il_combine`.
-// Wine ref: dlls/shell32/pidl.c::ILFree — SHFree/CoTaskMemFree; NULL is no-op.
+/// Calling twice on the same pointer is undefined behavior (same as CoTaskMemFree on Windows).
+// Wine ref: dlls/shell32/pidl.c:879 — ILFree (exported SHELL32.155) is `SHFree(pidl)`;
+// SHFree → CoTaskMemFree (dlls/shell32/shellole.c:329), which no-ops on NULL.
+// Weave: PIDLs are libc::malloc'd, so il_free uses libc::free (matches CoTaskMemFree here).
 pub unsafe extern "win64" fn il_free(pidl: *mut u8) {
     if !pidl.is_null() {
         unsafe { libc::free(pidl as *mut libc::c_void) };
@@ -724,6 +727,31 @@ mod tests {
             il_free(parent);
             il_free(child);
             il_free(combined);
+        }
+    }
+
+    #[test]
+    fn il_free_null_is_noop() {
+        unsafe {
+            il_free(std::ptr::null_mut());
+        }
+    }
+
+    #[test]
+    fn il_free_roundtrip_via_export() {
+        fn encode_utf16_null(s: &str) -> Vec<u16> {
+            s.encode_utf16().chain(std::iter::once(0)).collect()
+        }
+        let path = encode_utf16_null(r"C:\Users\test\file.txt");
+        let pidl = unsafe { il_create_from_path_w(path.as_ptr()) };
+        assert!(!pidl.is_null(), "ILCreateFromPathW must return a PIDL");
+        unsafe {
+            let mut buf = [0u16; MAX_PATH];
+            assert_eq!(sh_get_path_from_id_list_w(pidl, buf.as_mut_ptr()), 1);
+            let back =
+                String::from_utf16_lossy(&buf[..buf.iter().position(|&c| c == 0).unwrap_or(0)]);
+            assert_eq!(back, r"C:\Users\test\file.txt");
+            il_free(pidl);
         }
     }
 }
