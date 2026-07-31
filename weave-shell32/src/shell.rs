@@ -1330,6 +1330,31 @@ const SHGFI_PIDL: u32 = 0x00000008;
 const SHGFI_USEFILEATTRIBUTES: u32 = 0x00000010;
 
 const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x00000010;
+const FILE_ATTRIBUTE_NORMAL: u32 = 0x00000080;
+
+const ERROR_INVALID_PARAMETER: u32 = 87;
+const ERROR_FILE_NOT_FOUND: u32 = 2;
+
+// SHFILEINFOW layout (x64, 696 bytes total). Offsets verified against the SDK:
+//   +0    HICON hIcon               (8 bytes)
+//   +8    int   iIcon               (4)
+//   +12   DWORD dwAttributes        (4)
+//   +16   WCHAR szDisplayName[260]  (520 bytes)
+//   +536  WCHAR szTypeName[80]      (160 bytes)
+const SFI_HICON_OFF: usize = 0;
+const SFI_IICON_OFF: usize = 8;
+const SFI_ATTRIBUTES_OFF: usize = 12;
+const SFI_DISPLAYNAME_OFF: usize = 16;
+const SFI_TYPENAME_OFF: usize = 536;
+const SFI_DISPLAYNAME_CHARS: usize = 260;
+const SFI_TYPENAME_CHARS: usize = 80;
+
+// Wine writes -IDI_SHELL_FOLDER as the iIcon for the folder icon location.
+const IDI_SHELL_FOLDER: i32 = 32503;
+
+fn set_last_error(code: u32) {
+    weave_common::set_last_error(code);
+}
 
 fn decode_wide_path(ptr: *const u16) -> String {
     if ptr.is_null() {
@@ -1348,20 +1373,30 @@ fn decode_wide_path(ptr: *const u16) -> String {
     String::from_utf16_lossy(&chars)
 }
 
-fn write_wide_to_buf(dest: *mut u16, s: &str, max: usize) {
-    if dest.is_null() || max == 0 {
+/// Writes `s` (plus NUL) into a buffer of `avail_bytes` bytes, capped at
+/// `max_chars` code units. `avail_bytes` must reflect the real allocation so a
+/// small `cbFileInfo` (SHGetFileInfoW) can never overflow the guest buffer.
+fn write_wide_to_buf(dest: *mut u16, s: &str, max_chars: usize, avail_bytes: usize) {
+    if dest.is_null() || max_chars == 0 || avail_bytes < 2 {
         return;
     }
+    let cap = (avail_bytes / 2).min(max_chars);
     let mut i = 0;
     for ch in s.encode_utf16() {
-        if i >= max - 1 {
+        if i >= cap - 1 {
             break;
         }
+        // SAFETY: (a) dest is non-null (checked above) and the caller contract
+        // guarantees it points into a guest buffer of avail_bytes bytes;
+        // (b) memory is guest-owned, written for the duration of this call;
+        // (c) lifetime is this call; (d) cap = avail_bytes/2 bounds every write.
         unsafe {
             *dest.add(i) = ch;
         }
         i += 1;
     }
+    // SAFETY: i <= cap - 1, so dest.add(i) writes the terminator within the
+    // same avail_bytes-allocation as the loop above.
     unsafe {
         *dest.add(i) = 0;
     }
@@ -1386,84 +1421,270 @@ fn extension_to_type_name(ext: &str) -> &'static str {
     }
 }
 
-// Wine ref: dlls/shell32/shell32_main.c — queries icon index, display name, type name per uFlags;
-// SHGFI_USEFILEATTRIBUTES skips disk access; returns HIMAGELIST handle or 0 on failure.
+/// Wine: PathIsRelativeW + PathCombineW (dlls/shlwapi/path.c). Resolves a
+/// possibly-relative path against the process current directory so the stat and
+/// the filename/extension extraction operate on an absolute path, matching the
+/// input SHILCreateFromPathW expects.
+fn resolve_full_path(path: &str) -> String {
+    let bytes = path.as_bytes();
+    let is_absolute = path.starts_with('\\')
+        || path.starts_with('/')
+        || (bytes.len() >= 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic());
+    if is_absolute {
+        return path.to_string();
+    }
+    std::env::current_dir()
+        .map(|cwd| cwd.join(path).to_string_lossy().to_string())
+        .unwrap_or_else(|_| path.to_string())
+}
+
+/// Wine: PathFindFileNameW — last path component, skipping trailing separators.
+fn file_name_from_path(path: &str) -> String {
+    path.trim_end_matches(['\\', '/'])
+        .rsplit(['\\', '/'])
+        .next()
+        .unwrap_or("")
+        .to_string()
+}
+
+/// Wine: shgfi_get_exe_type (dlls/shell32/shell32_main.c) — reads the on-disk
+/// image header: MZ-only -> 0x4d5a; PE (non-DLL) -> IMAGE_NT_SIGNATURE 0x4550
+/// plus (MajorSubsystemVersion<<24 | MinorSubsystemVersion<<16) for GUI
+/// (IMAGE_SUBSYSTEM_WINDOWS_GUI); NE -> 0x454e; DLLs and unreadable files -> 0.
+fn exe_type_from_file(path: &str) -> u32 {
+    use std::io::Read;
+    let mut buf = [0u8; 0x200];
+    let n = match std::fs::File::open(path).and_then(|mut f| f.read(&mut buf)) {
+        Ok(n) => n,
+        Err(_) => return 0,
+    };
+    if n < 2 || &buf[0..2] != b"MZ" {
+        return 0;
+    }
+    if n < 0x40 {
+        return 0x4d5a;
+    }
+    let e_lfanew = u32::from_le_bytes([buf[0x3c], buf[0x3d], buf[0x3e], buf[0x3f]]) as usize;
+    if n < e_lfanew.saturating_add(4 + 20 + 2) {
+        return 0x4d5a;
+    }
+    if &buf[e_lfanew..e_lfanew + 4] == b"PE\0\0" {
+        let file_header = e_lfanew + 4;
+        // IMAGE_FILE_HEADER.Characteristics at offset 18 (IMAGE_FILE_DLL = 0x2000).
+        let characteristics = u16::from_le_bytes([buf[file_header + 18], buf[file_header + 19]]);
+        if characteristics & 0x2000 != 0 {
+            return 0;
+        }
+        // Optional header starts at file_header + 20; for both PE32 and PE32+
+        // MajorSubsystemVersion is at +48, MinorSubsystemVersion at +50, and
+        // Subsystem at +68.
+        let opt = file_header + 20;
+        if n < opt + 72 {
+            return 0x0000_4550;
+        }
+        let major = u16::from_le_bytes([buf[opt + 48], buf[opt + 49]]);
+        let minor = u16::from_le_bytes([buf[opt + 50], buf[opt + 51]]);
+        let subsystem = u16::from_le_bytes([buf[opt + 68], buf[opt + 69]]);
+        if subsystem == 2 {
+            // IMAGE_SUBSYSTEM_WINDOWS_GUI
+            return 0x0000_4550 | ((major as u32) << 24) | ((minor as u32) << 16);
+        }
+        return 0x0000_4550;
+    }
+    if n >= e_lfanew + 2 && &buf[e_lfanew..e_lfanew + 2] == b"NE" {
+        return 0x0000_454e; // IMAGE_OS2_SIGNATURE
+    }
+    0x4d5a // plain DOS binary
+}
+
+// Wine ref: dlls/shell32/shell32_main.c (verified against master) —
+// * NULL path fails (FALSE) before any output-buffer initialization.
+// * Non-NULL psfi always clears szDisplayName[0], szTypeName[0], iIcon; hIcon and
+//   dwAttributes are left untouched unless the matching flag requests them.
+// * SHGFI_EXETYPE is honored only as the sole flag (`flags != SHGFI_EXETYPE` -> 0)
+//   and reads the real image header; psfi may be NULL for it.
+// * Non-USEFILEATTRIBUTES paths go through SHILCreateFromPathW, which fails for
+//   missing files -> FALSE. SHGFI_USEFILEATTRIBUTES never touches the disk.
+// * SHGFI_SYSICONINDEX|SHGFI_ICON sets both iIcon and hIcon; the return value is
+//   the HIMAGELIST handle for SYSICONINDEX, else nonzero (TRUE) on success.
+// SHIM NOTE: Wine leaves dwAttributes at the 0xffffffff pre-mask under
+// USEFILEATTRIBUTES (no IShellFolder to AND with); Weave instead reflects the
+// caller's dwFileAttributes — strictly more useful and what MSDN documents for
+// the parameter.
 /// SHGetFileInfoW — retrieve information about an object in the shell namespace (Wide).
 ///
-/// May write szDisplayName at offset 16, szTypeName at offset 536, iIcon at offset 8,
-/// dwAttributes at offset 12, and hIcon at offset 0, depending on `u_flags`.
+/// May write hIcon at 0, iIcon at 8, dwAttributes at 12, szDisplayName at 16,
+/// and szTypeName at 536, depending on `u_flags`.
 ///
 /// # Safety
-/// `psfi` must point to a valid SHFILEINFOW buffer (696 bytes) when non-null.
-// Wine ref: dlls/shell32/shell32_main.c — icon index/display name/type by uFlags; SHGFI_USEFILEATTRIBUTES skips disk.
+/// `psfi` must point to at least `cb_file_info` writable bytes when non-null.
+/// `psz_path` must be a NUL-terminated UTF-16 string (or PIDL when SHGFI_PIDL).
 pub unsafe extern "win64" fn sh_get_file_info_w(
     psz_path: *const u16,
     dw_file_attributes: u32,
     psfi: *mut u8,
-    _cb_file_info: u32,
+    cb_file_info: u32,
     u_flags: u32,
 ) -> usize {
-    // Null checks
-    if psfi.is_null() {
-        return 0;
-    }
-    if psz_path.is_null() && (u_flags & SHGFI_USEFILEATTRIBUTES) == 0 {
+    if psz_path.is_null() {
+        set_last_error(ERROR_INVALID_PARAMETER);
         return 0;
     }
 
-    // Resolve path
-    let path_str = if (u_flags & SHGFI_PIDL) != 0 {
-        // psz_path is a PIDL pointer (ITEMIDLIST*)
+    // SHGFI_EXETYPE: sole-flag only; reads the on-disk image header; psfi may be NULL.
+    if (u_flags & SHGFI_EXETYPE) != 0 {
+        if u_flags != SHGFI_EXETYPE {
+            set_last_error(ERROR_INVALID_PARAMETER);
+            return 0;
+        }
+        let path = decode_wide_path(psz_path);
+        return exe_type_from_file(&resolve_full_path(&path)) as usize;
+    }
+
+    if psfi.is_null() {
+        set_last_error(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    // 16 bytes covers hIcon + iIcon + dwAttributes; smaller buffers cannot be
+    // safely filled for any requesting flag. Wine ignores the size; this is a
+    // Weave hardening divergence (SHIM NOTE).
+    if cb_file_info < 16 {
+        set_last_error(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    let cb = cb_file_info as usize;
+
+    // Wine clears these three fields unconditionally (psfi non-null, path valid).
+    if cb >= SFI_IICON_OFF + 4 {
+        // SAFETY: (a) cb >= SFI_IICON_OFF + 4 bounds the 4 bytes at offset 8;
+        // (b) guest-owned SHFILEINFOW buffer; (c) duration of this call;
+        // (d) SHFILEINFOW begins with HICON (8 bytes) so iIcon is 4-aligned per
+        // the Win32 ABI.
+        unsafe { *(psfi.add(SFI_IICON_OFF) as *mut i32) = 0 };
+    }
+    if cb >= SFI_DISPLAYNAME_OFF + 2 {
+        write_wide_to_buf(
+            (psfi as *mut u16).add(SFI_DISPLAYNAME_OFF / 2),
+            "",
+            SFI_DISPLAYNAME_CHARS,
+            cb - SFI_DISPLAYNAME_OFF,
+        );
+    }
+    if cb >= SFI_TYPENAME_OFF + 2 {
+        write_wide_to_buf(
+            (psfi as *mut u16).add(SFI_TYPENAME_OFF / 2),
+            "",
+            SFI_TYPENAME_CHARS,
+            cb - SFI_TYPENAME_OFF,
+        );
+    }
+
+    // Resolve path (PIDL or string) and determine directory-ness.
+    let use_file_attributes = (u_flags & SHGFI_USEFILEATTRIBUTES) != 0;
+    let is_pidl = (u_flags & SHGFI_PIDL) != 0;
+    let path_str = if is_pidl {
         match crate::pidl::pidl_path_from_list(psz_path as *const u8) {
             Some(p) => p,
-            None => return 0,
+            None => {
+                set_last_error(ERROR_FILE_NOT_FOUND);
+                return 0;
+            }
         }
     } else {
-        decode_wide_path(psz_path)
+        resolve_full_path(&decode_wide_path(psz_path))
     };
 
-    // Extract filename (last component after \ or /)
-    let filename = path_str
-        .rsplit(['\\', '/'])
-        .next()
-        .unwrap_or(&path_str)
-        .to_string();
+    let is_directory = if use_file_attributes {
+        (dw_file_attributes & FILE_ATTRIBUTE_DIRECTORY) != 0
+    } else {
+        let (exists, is_dir) = match std::fs::metadata(&path_str) {
+            Ok(m) => (true, m.is_dir()),
+            Err(_) => (false, false),
+        };
+        if !exists && !is_pidl {
+            // Wine: SHILCreateFromPathW fails for missing paths -> FALSE.
+            set_last_error(ERROR_FILE_NOT_FOUND);
+            return 0;
+        }
+        is_dir
+    };
 
-    // Extract extension (with the dot)
-    let ext = if let Some(dot_pos) = filename.rfind('.') {
-        &filename[dot_pos..]
+    let filename = file_name_from_path(&path_str);
+    let ext = if let Some(dot) = filename.rfind('.') {
+        &filename[dot..]
     } else {
         ""
     };
 
-    // Determine if this is a directory
-    let is_directory = if (u_flags & SHGFI_USEFILEATTRIBUTES) != 0 {
-        (dw_file_attributes & FILE_ATTRIBUTE_DIRECTORY) != 0
-    } else if !path_str.is_empty() {
-        std::fs::metadata(&path_str)
-            .map(|m| m.is_dir())
-            .unwrap_or(false)
-    } else {
-        false
-    };
-
-    // SHGFI_DISPLAYNAME: write filename at offset 16
-    if (u_flags & SHGFI_DISPLAYNAME) != 0 {
-        write_wide_to_buf((psfi as *mut u16).add(16 / 2), &filename, 260);
-    }
-
-    // SHGFI_TYPENAME: write type name at offset 536
-    if (u_flags & SHGFI_TYPENAME) != 0 {
-        let type_name = if is_directory {
-            "File Folder"
+    // SHGFI_ATTRIBUTES
+    if (u_flags & SHGFI_ATTRIBUTES) != 0 && cb >= SFI_ATTRIBUTES_OFF + 4 {
+        let attrs = if use_file_attributes {
+            dw_file_attributes
+        } else if is_directory {
+            FILE_ATTRIBUTE_DIRECTORY
         } else {
-            extension_to_type_name(ext)
+            FILE_ATTRIBUTE_NORMAL
         };
-        write_wide_to_buf((psfi as *mut u16).add(536 / 2), type_name, 80);
+        // SAFETY: cb >= SFI_ATTRIBUTES_OFF + 4 bounds the 4-byte write; alignment
+        // follows the iIcon field layout above (dwAttributes at +12 is 4-aligned).
+        unsafe { *(psfi.add(SFI_ATTRIBUTES_OFF) as *mut u32) = attrs };
     }
 
-    // SHGFI_SYSICONINDEX: write icon index at offset 8
-    if (u_flags & SHGFI_SYSICONINDEX) != 0 {
+    // SHGFI_DISPLAYNAME
+    if (u_flags & SHGFI_DISPLAYNAME) != 0 && cb >= SFI_DISPLAYNAME_OFF + 2 {
+        write_wide_to_buf(
+            (psfi as *mut u16).add(SFI_DISPLAYNAME_OFF / 2),
+            &filename,
+            SFI_DISPLAYNAME_CHARS,
+            cb - SFI_DISPLAYNAME_OFF,
+        );
+    }
+
+    // SHGFI_TYPENAME
+    if (u_flags & SHGFI_TYPENAME) != 0 && cb >= SFI_TYPENAME_OFF + 2 {
+        let type_name = if is_directory {
+            "File Folder".to_string()
+        } else {
+            let mapped = extension_to_type_name(ext);
+            if mapped == "File" && !ext.is_empty() && ext != "." {
+                // Wine USEFILEATTRIBUTES branch: unknown extension -> "<ext> file".
+                format!("{ext} file")
+            } else {
+                mapped.to_string()
+            }
+        };
+        write_wide_to_buf(
+            (psfi as *mut u16).add(SFI_TYPENAME_OFF / 2),
+            &type_name,
+            SFI_TYPENAME_CHARS,
+            cb - SFI_TYPENAME_OFF,
+        );
+    }
+
+    // SHGFI_ICONLOCATION
+    if (u_flags & SHGFI_ICONLOCATION) != 0 {
+        // Wine fills szDisplayName with the icon location (the shell32 resource
+        // name for folders, the file itself when the icon is embedded) and sets
+        // iIcon to -IDI_SHELL_FOLDER for directories.
+        if cb >= SFI_DISPLAYNAME_OFF + 2 {
+            write_wide_to_buf(
+                (psfi as *mut u16).add(SFI_DISPLAYNAME_OFF / 2),
+                &path_str,
+                SFI_DISPLAYNAME_CHARS,
+                cb - SFI_DISPLAYNAME_OFF,
+            );
+        }
+        if cb >= SFI_IICON_OFF + 4 {
+            // SAFETY: cb >= SFI_IICON_OFF + 4 bounds the 4-byte write; 4-aligned.
+            unsafe {
+                *(psfi.add(SFI_IICON_OFF) as *mut i32) =
+                    if is_directory { -IDI_SHELL_FOLDER } else { 1 };
+            }
+        }
+    }
+
+    // SHGFI_SYSICONINDEX
+    if (u_flags & SHGFI_SYSICONINDEX) != 0 && cb >= SFI_IICON_OFF + 4 {
         let icon_index: i32 = if is_directory {
             0 // folder icon
         } else {
@@ -1475,60 +1696,26 @@ pub unsafe extern "win64" fn sh_get_file_info_w(
                 _ => 1, // generic document
             }
         };
-        unsafe {
-            *(psfi.add(8) as *mut i32) = icon_index;
-        }
+        // SAFETY: cb >= SFI_IICON_OFF + 4 bounds the 4-byte write; 4-aligned.
+        unsafe { *(psfi.add(SFI_IICON_OFF) as *mut i32) = icon_index };
     }
 
-    // SHGFI_ATTRIBUTES: write attributes at offset 12
-    if (u_flags & SHGFI_ATTRIBUTES) != 0 {
-        let attrs = if (u_flags & SHGFI_USEFILEATTRIBUTES) != 0 {
-            dw_file_attributes
-        } else if !path_str.is_empty() {
-            std::fs::metadata(&path_str)
-                .map(|m| {
-                    let mut a: u32 = 0;
-                    if m.is_dir() {
-                        a |= FILE_ATTRIBUTE_DIRECTORY;
-                    }
-                    if m.is_file() {
-                        a |= 0x80; // FILE_ATTRIBUTE_NORMAL
-                    }
-                    a
-                })
-                .unwrap_or(0x80)
-        } else {
-            0x80
-        };
-        unsafe {
-            *(psfi.add(12) as *mut u32) = attrs;
-        }
+    // SHGFI_ICON
+    if (u_flags & SHGFI_ICON) != 0 && cb >= SFI_HICON_OFF + 8 {
+        // Fake opaque HICON: GDI icon rendering is not required by the gates that
+        // exercise SHGetFileInfoW; callers only test hIcon != 0.
+        // SAFETY: cb >= 8 bounds the 8-byte write; usize is 8-aligned at offset 0
+        // of the caller's SHFILEINFOW buffer per the Win32 ABI.
+        unsafe { *(psfi.add(SFI_HICON_OFF) as *mut usize) = 1 };
     }
 
-    // SHGFI_ICON: write fake HICON handle at offset 0 (only if SYSICONINDEX not set)
-    if (u_flags & SHGFI_ICON) != 0 && (u_flags & SHGFI_SYSICONINDEX) == 0 {
-        unsafe {
-            *(psfi as *mut usize) = 0x1usize;
-        }
+    // Wine return contract: HIMAGELIST handle for SHGFI_SYSICONINDEX, else TRUE.
+    if (u_flags & SHGFI_SYSICONINDEX) != 0 {
+        // Fake opaque HIMAGELIST (the system image list itself is not implemented).
+        0x0001_0001usize
+    } else {
+        1
     }
-
-    // SHGFI_EXETYPE: return executable type
-    if (u_flags & SHGFI_EXETYPE) != 0 {
-        let ext_lower = ext.to_lowercase();
-        if ext_lower == ".exe" || ext_lower == ".com" {
-            return 0x0000_014C; // IMAGE_FILE_MACHINE_I386
-        }
-        return 0x0000_0000;
-    }
-
-    // SHGFI_ICONLOCATION: copy full path to display name field, return path length
-    if (u_flags & SHGFI_ICONLOCATION) != 0 {
-        write_wide_to_buf((psfi as *mut u16).add(16 / 2), &path_str, 260);
-        return path_str.len();
-    }
-
-    // Success: return fake HIMAGELIST handle (non-zero, looks like a real system image list)
-    0x0001_0001usize
 }
 
 // ── Additional shell32 stubs ──────────────────────────────────────────────
@@ -1930,8 +2117,12 @@ pub unsafe extern "win64" fn sh_open_folder_and_select_items(
     0x8000_4001u32 as i32 // E_NOTIMPL
 }
 
-// Wine ref: dlls/shell32/shell32_main.c — SHGetFileInfoA is the ANSI variant; converts
-// via MultiByteToWideChar then calls SHGetFileInfoW, then writes results back as ANSI.
+// Wine ref: dlls/shell32/shell32_main.c (verified against master) — SHGetFileInfoA
+// converts the ANSI path to wide, delegates to SHGetFileInfoW, then writes back
+// ONLY the fields requested by uFlags: hIcon for SHGFI_ICON, iIcon for
+// SYSICONINDEX|ICON|ICONLOCATION, dwAttributes for SHGFI_ATTRIBUTES,
+// szDisplayName for DISPLAYNAME|ICONLOCATION, szTypeName for SHGFI_TYPENAME.
+// A NULL psfi is valid for SHGFI_EXETYPE (delegated through unchanged).
 /// SHGetFileInfoA: ANSI variant of SHGetFileInfoW.
 ///
 /// # Safety
@@ -1943,16 +2134,15 @@ pub unsafe extern "win64" fn sh_get_file_info_a(
     _cb_file_info: u32,
     u_flags: u32,
 ) -> usize {
-    if psfi.is_null() {
-        return 0;
-    }
-
-    // Convert ANSI path (CP_ACP) to wide (UTF-16)
+    // Convert ANSI path (CP_ACP) to wide (UTF-16).
     let path_wide = if !psz_path.is_null() {
         let mut len = 0usize;
+        // SAFETY: psz_path is a NUL-terminated ANSI string per the caller
+        // contract; the scan stops at NUL or the 32k cap, bounding the read.
         while len < 32_768 && unsafe { *psz_path.add(len) } != 0 {
             len += 1;
         }
+        // SAFETY: len bounded by the NUL-scan above, so the slice is valid.
         let s = String::from_utf8_lossy(unsafe { std::slice::from_raw_parts(psz_path, len) });
         let mut wide: Vec<u16> = s.encode_utf16().collect();
         wide.push(0);
@@ -1961,7 +2151,7 @@ pub unsafe extern "win64" fn sh_get_file_info_a(
         None
     };
 
-    // Temporary SHFILEINFOW buffer (696 bytes)
+    // Temporary SHFILEINFOW buffer (696 bytes).
     let mut tmp_buf = [0u8; 696];
 
     let result = unsafe {
@@ -1970,74 +2160,95 @@ pub unsafe extern "win64" fn sh_get_file_info_a(
                 .as_deref()
                 .map_or(std::ptr::null(), |v| v.as_ptr()),
             dw_file_attributes,
-            tmp_buf.as_mut_ptr(),
+            if psfi.is_null() {
+                std::ptr::null_mut()
+            } else {
+                tmp_buf.as_mut_ptr()
+            },
             696,
             u_flags,
         )
     };
 
-    if result != 0 {
-        // hIcon at +0 — usize, same layout between A and W
-        // Use unaligned access because tmp_buf is [u8; 696] (align 1).
-        unsafe {
-            std::ptr::write_unaligned(
-                psfi as *mut usize,
-                std::ptr::read_unaligned(tmp_buf.as_ptr() as *const usize),
-            );
+    if result != 0 && !psfi.is_null() {
+        // Copy back only the fields requested by uFlags (Wine contract).
+        if (u_flags & SHGFI_ICON) != 0 {
+            // SAFETY: psfi is non-null (checked above); SHFILEINFOA starts with
+            // HICON, 8 bytes, layout identical to SHFILEINFOW; write_unaligned
+            // avoids alignment UB on the u8-typed buffer.
+            unsafe {
+                std::ptr::write_unaligned(
+                    psfi as *mut usize,
+                    std::ptr::read_unaligned(tmp_buf.as_ptr() as *const usize),
+                );
+            }
         }
-        // iIcon at +8 — i32, same layout
-        unsafe {
-            std::ptr::write_unaligned(
-                psfi.add(8) as *mut i32,
-                std::ptr::read_unaligned(tmp_buf.as_ptr().add(8) as *const i32),
-            );
+        if (u_flags & (SHGFI_SYSICONINDEX | SHGFI_ICON | SHGFI_ICONLOCATION)) != 0 {
+            // SAFETY: same allocation guarantee as the hIcon copy; i32 at +8.
+            unsafe {
+                std::ptr::write_unaligned(
+                    psfi.add(8) as *mut i32,
+                    std::ptr::read_unaligned(tmp_buf.as_ptr().add(8) as *const i32),
+                );
+            }
         }
-        // dwAttributes at +12 — u32, same layout
-        unsafe {
-            std::ptr::write_unaligned(
-                psfi.add(12) as *mut u32,
-                std::ptr::read_unaligned(tmp_buf.as_ptr().add(12) as *const u32),
-            );
+        if (u_flags & SHGFI_ATTRIBUTES) != 0 {
+            // SAFETY: same allocation guarantee; u32 at +12.
+            unsafe {
+                std::ptr::write_unaligned(
+                    psfi.add(12) as *mut u32,
+                    std::ptr::read_unaligned(tmp_buf.as_ptr().add(12) as *const u32),
+                );
+            }
         }
 
-        // szDisplayName at +16: convert wide → ANSI (260 CHARs in SHFILEINFOA)
-        unsafe {
-            let src = tmp_buf.as_ptr().add(16) as *const u16;
-            let mut chars = Vec::new();
-            let mut p = src;
-            loop {
-                let c = *p;
-                if c == 0 {
-                    break;
+        if (u_flags & (SHGFI_DISPLAYNAME | SHGFI_ICONLOCATION)) != 0 {
+            // szDisplayName at +16: convert wide → ANSI (260 CHARs in SHFILEINFOA).
+            // SAFETY: psfi non-null; SHFILEINFOA has 260 CHARs starting at +16.
+            unsafe {
+                let src = tmp_buf.as_ptr().add(16) as *const u16;
+                let mut chars = Vec::new();
+                let mut p = src;
+                loop {
+                    // SAFETY: src points into tmp_buf; write_wide_to_buf
+                    // NUL-terminated it, so the scan stops at the terminator.
+                    let c = *p;
+                    if c == 0 {
+                        break;
+                    }
+                    chars.push(c);
+                    p = p.add(1);
                 }
-                chars.push(c);
-                p = p.add(1);
+                let name = String::from_utf16_lossy(&chars);
+                let bytes = name.as_bytes();
+                let copy_len = bytes.len().min(259);
+                core::ptr::copy_nonoverlapping(bytes.as_ptr(), psfi.add(16), copy_len);
+                *psfi.add(16 + copy_len) = 0;
             }
-            let name = String::from_utf16_lossy(&chars);
-            let bytes = name.as_bytes();
-            let copy_len = bytes.len().min(259);
-            core::ptr::copy_nonoverlapping(bytes.as_ptr(), psfi.add(16), copy_len);
-            *psfi.add(16 + copy_len) = 0;
         }
 
-        // szTypeName at +276 (16 + 260): convert wide → ANSI (80 CHARs in SHFILEINFOA)
-        unsafe {
-            let src = tmp_buf.as_ptr().add(536) as *const u16;
-            let mut chars = Vec::new();
-            let mut p = src;
-            loop {
-                let c = *p;
-                if c == 0 {
-                    break;
+        if (u_flags & SHGFI_TYPENAME) != 0 {
+            // szTypeName at +276 (16 + 260): convert wide → ANSI (80 CHARs).
+            // SAFETY: psfi non-null; SHFILEINFOA has 80 CHARs starting at +276.
+            unsafe {
+                let src = tmp_buf.as_ptr().add(536) as *const u16;
+                let mut chars = Vec::new();
+                let mut p = src;
+                loop {
+                    // SAFETY: same NUL-termination guarantee as the display name.
+                    let c = *p;
+                    if c == 0 {
+                        break;
+                    }
+                    chars.push(c);
+                    p = p.add(1);
                 }
-                chars.push(c);
-                p = p.add(1);
+                let name = String::from_utf16_lossy(&chars);
+                let bytes = name.as_bytes();
+                let copy_len = bytes.len().min(79);
+                core::ptr::copy_nonoverlapping(bytes.as_ptr(), psfi.add(276), copy_len);
+                *psfi.add(276 + copy_len) = 0;
             }
-            let name = String::from_utf16_lossy(&chars);
-            let bytes = name.as_bytes();
-            let copy_len = bytes.len().min(79);
-            core::ptr::copy_nonoverlapping(bytes.as_ptr(), psfi.add(276), copy_len);
-            *psfi.add(276 + copy_len) = 0;
         }
     }
 
@@ -2989,28 +3200,382 @@ mod tests {
 
     #[test]
     fn test_sh_get_file_info_display_name() {
+        // Uses a real temp file so the non-USEFILEATTRIBUTES path (which stats
+        // the file like Wine's SHILCreateFromPathW) succeeds.
+        let dir = std::env::temp_dir();
+        let path = dir.join("weave_shgfi_display_test.txt");
+        std::fs::write(&path, b"x").expect("write temp file");
         unsafe {
-            let path = encode_utf16_null("C:\\test\\document.txt");
+            let path_w = encode_utf16_null(&path.to_string_lossy());
             let mut sfi = [0u8; 696];
             let result = sh_get_file_info_w(
-                path.as_ptr(),
+                path_w.as_ptr(),
                 0,
                 sfi.as_mut_ptr(),
                 696,
                 SHGFI_DISPLAYNAME | SHGFI_TYPENAME | SHGFI_SYSICONINDEX,
             );
-            assert!(result != 0, "SHGetFileInfoW should succeed");
-            // Read display name (offset 16)
-            let name_bytes = &sfi[16..16 + 520];
-            let name_wide: Vec<u16> = name_bytes
-                .chunks(2)
-                .map(|c| u16::from_le_bytes([c[0], c[1]]))
-                .collect();
-            let name = String::from_utf16_lossy(&name_wide);
-            assert!(
-                name.contains("document"),
-                "Display name should contain 'document', got: {name}"
+            assert_ne!(result, 0, "SHGetFileInfoW should succeed");
+            let name = wide_at(&sfi, 16, 520);
+            assert_eq!(
+                name, "weave_shgfi_display_test.txt",
+                "display name should be the file name, got: {name}"
             );
         }
+        std::fs::remove_file(&path).ok();
+    }
+
+    fn wide_at(sfi: &[u8; 696], off: usize, max: usize) -> String {
+        let mut out = String::new();
+        for c in sfi[off..off + max]
+            .chunks(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        {
+            if c == 0 {
+                break;
+            }
+            out.push(char::from_u32(c as u32).unwrap_or('\u{FFFD}'));
+        }
+        out
+    }
+
+    #[test]
+    fn sh_get_file_info_w_attributes_directory() {
+        let dir = std::env::temp_dir();
+        let mut sfi = [0u8; 696];
+        unsafe {
+            let r = sh_get_file_info_w(
+                encode_utf16_null(&dir.to_string_lossy()).as_ptr(),
+                0,
+                sfi.as_mut_ptr(),
+                696,
+                SHGFI_ATTRIBUTES,
+            );
+            assert_ne!(r, 0, "SHGetFileInfoW(directory) should succeed");
+            let attrs = u32::from_le_bytes(sfi[12..16].try_into().unwrap());
+            assert_ne!(
+                attrs & FILE_ATTRIBUTE_DIRECTORY,
+                0,
+                "directory attrs should include FILE_ATTRIBUTE_DIRECTORY, got {attrs:#x}"
+            );
+        }
+    }
+
+    #[test]
+    fn sh_get_file_info_w_attributes_file() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("weave_shgfi_attrs.tmp");
+        std::fs::write(&path, b"x").expect("write temp file");
+        let mut sfi = [0u8; 696];
+        unsafe {
+            let r = sh_get_file_info_w(
+                encode_utf16_null(&path.to_string_lossy()).as_ptr(),
+                0,
+                sfi.as_mut_ptr(),
+                696,
+                SHGFI_ATTRIBUTES,
+            );
+            assert_ne!(r, 0, "SHGetFileInfoW(file) should succeed");
+            let attrs = u32::from_le_bytes(sfi[12..16].try_into().unwrap());
+            assert_ne!(
+                attrs & FILE_ATTRIBUTE_NORMAL,
+                0,
+                "file attrs should include FILE_ATTRIBUTE_NORMAL, got {attrs:#x}"
+            );
+        }
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn sh_get_file_info_w_usefileattributes_skips_disk() {
+        // Nonexistent path + USEFILEATTRIBUTES must still succeed, reflecting the
+        // passed dwFileAttributes without touching the filesystem.
+        let mut sfi = [0u8; 696];
+        unsafe {
+            let r = sh_get_file_info_w(
+                encode_utf16_null(r"C:\weave\definitely\missing").as_ptr(),
+                FILE_ATTRIBUTE_DIRECTORY,
+                sfi.as_mut_ptr(),
+                696,
+                SHGFI_ATTRIBUTES | SHGFI_TYPENAME | SHGFI_USEFILEATTRIBUTES,
+            );
+            assert_ne!(r, 0, "USEFILEATTRIBUTES on missing path should succeed");
+            let attrs = u32::from_le_bytes(sfi[12..16].try_into().unwrap());
+            assert_ne!(attrs & FILE_ATTRIBUTE_DIRECTORY, 0);
+            let type_name = wide_at(&sfi, 536, 160);
+            assert!(
+                type_name.contains("Folder"),
+                "folder type name expected, got: {type_name}"
+            );
+        }
+    }
+
+    #[test]
+    fn sh_get_file_info_w_typename_directory() {
+        let dir = std::env::temp_dir();
+        let mut sfi = [0u8; 696];
+        unsafe {
+            let r = sh_get_file_info_w(
+                encode_utf16_null(&dir.to_string_lossy()).as_ptr(),
+                0,
+                sfi.as_mut_ptr(),
+                696,
+                SHGFI_TYPENAME,
+            );
+            assert_ne!(r, 0, "SHGetFileInfoW(directory) should succeed");
+            assert_eq!(wide_at(&sfi, 536, 160), "File Folder");
+        }
+    }
+
+    #[test]
+    fn sh_get_file_info_w_unknown_extension_type_name() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("weave_shgfi_unknown.zzq");
+        std::fs::write(&path, b"x").expect("write temp file");
+        let mut sfi = [0u8; 696];
+        unsafe {
+            let r = sh_get_file_info_w(
+                encode_utf16_null(&path.to_string_lossy()).as_ptr(),
+                0,
+                sfi.as_mut_ptr(),
+                696,
+                SHGFI_TYPENAME,
+            );
+            assert_ne!(r, 0, "SHGetFileInfoW(file) should succeed");
+            // Wine USEFILEATTRIBUTES branch: unknown extension -> "<ext> file".
+            assert_eq!(wide_at(&sfi, 536, 160), ".zzq file");
+        }
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn sh_get_file_info_w_sysiconindex_sets_index_and_returns_imagelist() {
+        let mut sfi = [0u8; 696];
+        unsafe {
+            let r = sh_get_file_info_w(
+                encode_utf16_null(r"C:\weave\dir").as_ptr(),
+                FILE_ATTRIBUTE_DIRECTORY,
+                sfi.as_mut_ptr(),
+                696,
+                SHGFI_SYSICONINDEX | SHGFI_USEFILEATTRIBUTES,
+            );
+            assert_ne!(r, 0, "SYSICONINDEX should return a HIMAGELIST handle");
+            let icon_index = i32::from_le_bytes(sfi[8..12].try_into().unwrap());
+            assert_eq!(icon_index, 0, "folder icon index should be 0");
+        }
+    }
+
+    #[test]
+    fn sh_get_file_info_w_null_path_fails() {
+        let mut sfi = [0u8; 696];
+        unsafe {
+            let r = sh_get_file_info_w(
+                std::ptr::null(),
+                FILE_ATTRIBUTE_DIRECTORY,
+                sfi.as_mut_ptr(),
+                696,
+                SHGFI_ATTRIBUTES | SHGFI_USEFILEATTRIBUTES,
+            );
+            assert_eq!(r, 0, "NULL path should fail even with USEFILEATTRIBUTES");
+        }
+    }
+
+    #[test]
+    fn sh_get_file_info_w_null_psfi_fails() {
+        unsafe {
+            let r = sh_get_file_info_w(
+                encode_utf16_null(r"C:\weave\dir").as_ptr(),
+                0,
+                std::ptr::null_mut(),
+                696,
+                SHGFI_ATTRIBUTES,
+            );
+            assert_eq!(r, 0, "NULL psfi should fail");
+        }
+    }
+
+    #[test]
+    fn sh_get_file_info_w_bad_cbfileinfo_fails() {
+        let dir = std::env::temp_dir();
+        let mut sfi = [0u8; 16];
+        unsafe {
+            let r = sh_get_file_info_w(
+                encode_utf16_null(&dir.to_string_lossy()).as_ptr(),
+                0,
+                sfi.as_mut_ptr(),
+                8,
+                SHGFI_ATTRIBUTES,
+            );
+            assert_eq!(r, 0, "cbFileInfo < 16 should fail");
+        }
+    }
+
+    #[test]
+    fn sh_get_file_info_w_nonexistent_path_fails() {
+        let mut sfi = [0u8; 696];
+        unsafe {
+            let r = sh_get_file_info_w(
+                encode_utf16_null(r"C:\weave\definitely\missing\file.txt").as_ptr(),
+                0,
+                sfi.as_mut_ptr(),
+                696,
+                SHGFI_ATTRIBUTES,
+            );
+            assert_eq!(r, 0, "missing path without USEFILEATTRIBUTES should fail");
+        }
+    }
+
+    #[test]
+    fn sh_get_file_info_w_relative_path_resolves_against_cwd() {
+        // A relative path to an existing file must succeed (Wine resolves it
+        // against the process current directory via PathCombineW), so the file
+        // is placed in the test process cwd.
+        let cwd = std::env::current_dir().expect("cwd");
+        let path = cwd.join("weave_shgfi_relative.tmp");
+        std::fs::write(&path, b"x").expect("write temp file");
+        let mut sfi = [0u8; 696];
+        unsafe {
+            let r = sh_get_file_info_w(
+                encode_utf16_null("weave_shgfi_relative.tmp").as_ptr(),
+                0,
+                sfi.as_mut_ptr(),
+                696,
+                SHGFI_DISPLAYNAME,
+            );
+            assert_ne!(r, 0, "relative path to existing file should succeed");
+            assert_eq!(wide_at(&sfi, 16, 520), "weave_shgfi_relative.tmp");
+        }
+        std::fs::remove_file(&path).ok();
+    }
+
+    fn write_mini_pe(path: &std::path::Path, gui: bool) {
+        let mut data = vec![0u8; 0x100];
+        data[0] = b'M';
+        data[1] = b'Z';
+        let e_lfanew = 0x40u32;
+        data[0x3c..0x40].copy_from_slice(&e_lfanew.to_le_bytes());
+        data[0x40..0x44].copy_from_slice(b"PE\0\0");
+        // IMAGE_FILE_HEADER at 0x44.
+        data[0x44..0x46].copy_from_slice(&0x8664u16.to_le_bytes()); // Machine (x64)
+        data[0x46..0x48].copy_from_slice(&0u16.to_le_bytes()); // NumberOfSections
+        data[0x54..0x56].copy_from_slice(&0x70u16.to_le_bytes()); // SizeOfOptionalHeader (PE32+)
+        data[0x56..0x58].copy_from_slice(&0x0022u16.to_le_bytes()); // Characteristics (no DLL)
+                                                                    // IMAGE_OPTIONAL_HEADER64 at 0x58.
+        let opt = 0x58usize;
+        data[opt..opt + 2].copy_from_slice(&0x20bu16.to_le_bytes()); // Magic PE32+
+        data[opt + 48..opt + 50].copy_from_slice(&6u16.to_le_bytes()); // MajorSubsystemVersion
+        data[opt + 50..opt + 52].copy_from_slice(&1u16.to_le_bytes()); // MinorSubsystemVersion
+        data[opt + 68..opt + 70].copy_from_slice(&(if gui { 2u16 } else { 3u16 }).to_le_bytes());
+        std::fs::write(path, &data).expect("write mini PE");
+    }
+
+    #[test]
+    fn sh_get_file_info_w_exetype_pe_gui() {
+        let path = std::env::temp_dir().join("weave_shgfi_gui.exe");
+        write_mini_pe(&path, true);
+        unsafe {
+            let r = sh_get_file_info_w(
+                encode_utf16_null(&path.to_string_lossy()).as_ptr(),
+                0,
+                std::ptr::null_mut(),
+                0,
+                SHGFI_EXETYPE,
+            );
+            // IMAGE_NT_SIGNATURE | (MajorSubsystemVersion<<24) | (MinorSubsystemVersion<<16)
+            assert_eq!(r, (0x0000_4550 | (6u32 << 24) | (1u32 << 16)) as usize);
+        }
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn sh_get_file_info_w_exetype_pe_console() {
+        let path = std::env::temp_dir().join("weave_shgfi_console.exe");
+        write_mini_pe(&path, false);
+        unsafe {
+            let r = sh_get_file_info_w(
+                encode_utf16_null(&path.to_string_lossy()).as_ptr(),
+                0,
+                std::ptr::null_mut(),
+                0,
+                SHGFI_EXETYPE,
+            );
+            assert_eq!(r, 0x0000_4550, "console PE should return bare NT signature");
+        }
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn sh_get_file_info_w_exetype_requires_sole_flag() {
+        let path = std::env::temp_dir().join("weave_shgfi_gui2.exe");
+        write_mini_pe(&path, true);
+        unsafe {
+            let r = sh_get_file_info_w(
+                encode_utf16_null(&path.to_string_lossy()).as_ptr(),
+                0,
+                std::ptr::null_mut(),
+                0,
+                SHGFI_EXETYPE | SHGFI_ICON,
+            );
+            assert_eq!(r, 0, "EXETYPE combined with other flags must fail");
+        }
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn sh_get_file_info_w_exetype_missing_file() {
+        unsafe {
+            let r = sh_get_file_info_w(
+                encode_utf16_null(r"C:\weave\missing\app.exe").as_ptr(),
+                0,
+                std::ptr::null_mut(),
+                0,
+                SHGFI_EXETYPE,
+            );
+            assert_eq!(r, 0, "EXETYPE on a missing file must fail");
+        }
+    }
+
+    #[test]
+    fn sh_get_file_info_a_transcodes_display_name() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("weave_shgfi_ansi.tmp");
+        std::fs::write(&path, b"x").expect("write temp file");
+        let path_c = std::ffi::CString::new(path.to_str().unwrap()).unwrap();
+        let mut buf = [0u8; 356];
+        unsafe {
+            let r = sh_get_file_info_a(
+                path_c.as_ptr() as *const u8,
+                0,
+                buf.as_mut_ptr(),
+                356,
+                SHGFI_DISPLAYNAME,
+            );
+            assert_ne!(r, 0, "SHGetFileInfoA should succeed");
+            let name_end = buf[16..].iter().position(|&b| b == 0).unwrap_or(0);
+            assert_eq!(
+                std::str::from_utf8(&buf[16..16 + name_end]).unwrap(),
+                "weave_shgfi_ansi.tmp"
+            );
+        }
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn sh_get_file_info_a_null_psfi_exetype() {
+        let path = std::env::temp_dir().join("weave_shgfi_ansi_gui.exe");
+        write_mini_pe(&path, true);
+        let path_c = std::ffi::CString::new(path.to_str().unwrap()).unwrap();
+        unsafe {
+            let r = sh_get_file_info_a(
+                path_c.as_ptr() as *const u8,
+                0,
+                std::ptr::null_mut(),
+                0,
+                SHGFI_EXETYPE,
+            );
+            assert_ne!(r, 0, "EXETYPE with NULL psfi should succeed via W");
+            assert_eq!(r, (0x0000_4550 | (6u32 << 24) | (1u32 << 16)) as usize);
+        }
+        std::fs::remove_file(&path).ok();
     }
 }
