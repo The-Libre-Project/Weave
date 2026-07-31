@@ -8,8 +8,11 @@
 //!   - CryptMsgGetParam fills a 136-byte CMSG_SIGNER_INFO with dwVersion=1 and
 //!     all blob fields zeroed (cbData=0, pbData=NULL). This avoids embedded-pointer
 //!     problems — CertFindCertificateInStore receives a CERT_INFO with empty
-//!     Issuer/SerialNumber blobs and ignores it.
-//!   - CertFindCertificateInStore ignores pvPara and returns a static CERT_CONTEXT.
+//!     Issuer/SerialNumber blobs and treats it as a match.
+//!   - CertFindCertificateInStore dispatches on find type over the fake store's
+//!     cert list: CERT_FIND_ANY and the *_STR types are honored; other find types
+//!     (e.g. CERT_FIND_SUBJECT_CERT) return the first fake CERT_CONTEXT so NPP's
+//!     signature check proceeds.
 //!   - CertGetNameStringW returns L"Notepad++" — the publisher name NPP expects.
 //!   - CertGetCertificateContextProperty returns 20 zero bytes for the hash
 //!     property IDs NPP queries (SHA1=3, key identifier=20).
@@ -22,6 +25,7 @@
 //!   - CERT_CONTEXT:      include/wincrypt.h line 481 — verified layout, 40 bytes
 //!   - CertContext_GetProperty: dlls/crypt32/cert.c line 526 — propId dispatch
 //!   - CertGetNameStringW: dlls/crypt32/str.c — CERT_NAME_SIMPLE_DISPLAY_TYPE
+//!   - CertFindCertificateInStore: dlls/crypt32/cert.c — find/compare dispatch
 
 // ── Sentinel handle values ────────────────────────────────────────────────────
 
@@ -93,6 +97,43 @@ static FAKE_CERT_CTX: FakeCertContext = FakeCertContext {
     p_cert_info: &FAKE_CERT_INFO as *const FakeCertInfo,
     h_cert_store: FAKE_STORE_HANDLE,
 };
+
+/// Second fake certificate context — gives the fake store a second entry so
+/// iteration (CertFindCertificateInStore with pvPrevCertContext) is observable.
+/// Shares the zeroed FAKE_CERT_INFO blob; no guest code dereferences it.
+static FAKE_CERT_CTX2: FakeCertContext = FakeCertContext {
+    dw_cert_encoding_type: 1, // X509_ASN_ENCODING
+    _pad0: 0,
+    pb_cert_encoded: core::ptr::null(),
+    cb_cert_encoded: 0,
+    _pad1: 0,
+    p_cert_info: &FAKE_CERT_INFO as *const FakeCertInfo,
+    h_cert_store: FAKE_STORE_HANDLE,
+};
+
+/// A certificate in the fake store: its CERT_CONTEXT plus the name strings our
+/// stubs use for CERT_FIND_*_STR matching.
+struct FakeCertEntry {
+    ctx: &'static FakeCertContext,
+    subject: &'static str,
+    issuer: &'static str,
+}
+
+/// The fake store's certificate list, in iteration order. FAKE_CERT_CTX is first
+/// so single-call finds (pvPrevCertContext == NULL) keep returning it — the NPP
+/// signature-check flow depends on that.
+static FAKE_STORE_CERTS: [FakeCertEntry; 2] = [
+    FakeCertEntry {
+        ctx: &FAKE_CERT_CTX,
+        subject: "Notepad++",
+        issuer: "Weave Root CA",
+    },
+    FakeCertEntry {
+        ctx: &FAKE_CERT_CTX2,
+        subject: "Weave Test",
+        issuer: "Weave Root CA",
+    },
+];
 
 // ── wintrust.dll ─────────────────────────────────────────────────────────────
 
@@ -215,7 +256,8 @@ pub unsafe extern "win64" fn crypt_msg_close(_h_crypt_msg: usize) -> i32 {
 /// For FAKE_MSG_HANDLE + CMSG_SIGNER_INFO_PARAM we return a 136-byte struct:
 /// dwVersion=1, all blob fields zeroed (cbData=0, pbData=NULL). NPP copies
 /// Issuer and SerialNumber into a stack CERT_INFO and passes it to
-/// CertFindCertificateInStore, which we also stub to ignore pvPara.
+/// CertFindCertificateInStore, which treats the empty CERT_INFO as a match
+/// against the fake cert so the signature check proceeds.
 // Wine ref: dlls/crypt32/msg.c — CDecodeMsg_GetParam dispatches by dwParamType; CMSG_SIGNER_INFO_PARAM(6) copies SignerInfo from decode table into caller's buffer
 #[unsafe(no_mangle)]
 pub unsafe extern "win64" fn crypt_msg_get_param(
@@ -263,26 +305,133 @@ pub unsafe extern "win64" fn crypt_msg_get_param(
     0 // FALSE
 }
 
+// CertFindCertificateInStore find-type encoding (wincrypt.h):
+//
+//   dwFindType = (CERT_COMPARE_* << CERT_COMPARE_SHIFT) | CERT_INFO_*_FLAG
+//   CERT_COMPARE_SHIFT = 16
+//   CERT_COMPARE_ANY         = 0  → CERT_FIND_ANY
+//   CERT_COMPARE_NAME_STR_A  = 7  → CERT_FIND_SUBJECT_STR_A / ISSUER_STR_A
+//   CERT_COMPARE_NAME_STR_W  = 8  → CERT_FIND_SUBJECT_STR / ISSUER_STR
+//   CERT_INFO_SUBJECT_FLAG   = 7
+//   CERT_INFO_ISSUER_FLAG    = 4
+
+/// Case-insensitive substring match of `name` against the find string at
+/// `pv_find_para` (wide or ANSI). A null find string matches any cert, mirroring
+/// Wine's find_cert_by_name_str_w which falls back to find_cert_any for NULL.
+///
+/// # Safety
+/// `pv_find_para` must be a valid null-terminated wide or ANSI string, or null.
+unsafe fn name_str_matches(name: &str, pv_find_para: *const u8, is_wide: bool) -> bool {
+    if pv_find_para.is_null() {
+        return true;
+    }
+    // Bound the scan so a bad pointer cannot walk the whole address space.
+    const MAX_LEN: usize = 4096;
+    let needle = if is_wide {
+        let ptr = pv_find_para as *const u16;
+        let mut len = 0usize;
+        unsafe {
+            while len < MAX_LEN && *ptr.add(len) != 0 {
+                len += 1;
+            }
+        }
+        String::from_utf16_lossy(unsafe { core::slice::from_raw_parts(ptr, len) }).to_lowercase()
+    } else {
+        let ptr = pv_find_para;
+        let mut len = 0usize;
+        unsafe {
+            while len < MAX_LEN && *ptr.add(len) != 0 {
+                len += 1;
+            }
+        }
+        String::from_utf8_lossy(unsafe { core::slice::from_raw_parts(ptr, len) }).to_lowercase()
+    };
+    name.to_lowercase().contains(&needle)
+}
+
 /// CertFindCertificateInStore — find a certificate matching criteria in a store.
 ///
-/// Wine ref: dlls/crypt32/store.c — for CERT_FIND_SUBJECT_CERT iterates the
-/// store's cert list comparing each cert's Issuer and SerialNumber against
-/// pvPara (a PCERT_INFO). Our fake store has no real certs; we return
-/// FAKE_CERT_CTX unconditionally, ignoring search criteria.
+/// Wine ref: dlls/crypt32/cert.c — CertFindCertificateInStore dispatches on
+/// `dwFindType >> CERT_COMPARE_SHIFT` to a find/compare callback, walks the
+/// store from `pPrevCertContext` (via CertEnumCertificatesInStore), and sets
+/// CRYPT_E_NOT_FOUND when nothing matches.
+///
+/// The fake store (FAKE_STORE_HANDLE) holds FAKE_STORE_CERTS. CERT_FIND_ANY and
+/// the *_STR find types do real matching; all other find types (SUBJECT_CERT,
+/// SHA1_HASH, ...) treat the fake certs as matching so NPP's signature check —
+/// which passes a CERT_INFO with empty Issuer/SerialNumber blobs — proceeds.
+///
+/// # Safety
+/// `pv_find_para` must be valid for `dw_find_type` (a null-terminated wide/ANSI
+/// string for *_STR, any valid pointer for other types); `pv_prev_context` must
+/// be NULL or a context previously returned from this store.
+// Wine ref: dlls/crypt32/cert.c — CertFindCertificateInStore: dispatch on dwType >> CERT_COMPARE_SHIFT, iterate from pPrevCertContext, SetLastError(CRYPT_E_NOT_FOUND) on no match
 #[unsafe(no_mangle)]
 pub unsafe extern "win64" fn cert_find_certificate_in_store(
     h_cert_store: usize,
     _dw_cert_encoding_type: u32,
     _dw_find_flags: u32,
-    _dw_find_type: u32,
-    _pv_find_para: *const u8,
-    _pv_prev_context: *const u8,
+    dw_find_type: u32,
+    pv_find_para: *const u8,
+    pv_prev_context: *const u8,
 ) -> *const u8 {
-    if h_cert_store == FAKE_STORE_HANDLE {
-        eprintln!("weave/CertFindCertificateInStore: → &FAKE_CERT_CTX");
-        return &FAKE_CERT_CTX as *const FakeCertContext as *const u8;
+    // CRYPT_E_NOT_FOUND = 0x80092004
+    const CRYPT_E_NOT_FOUND: u32 = 0x8009_2004;
+    const CERT_COMPARE_SHIFT: u32 = 16;
+    const CERT_COMPARE_MASK: u32 = 0xFFFF;
+    const CERT_COMPARE_NAME_STR_A: u32 = 7;
+    const CERT_COMPARE_NAME_STR_W: u32 = 8;
+    const CERT_INFO_SUBJECT_FLAG: u32 = 7;
+
+    if h_cert_store != FAKE_STORE_HANDLE {
+        eprintln!("weave/CertFindCertificateInStore: unknown store → NULL");
+        weave_common::set_last_error(CRYPT_E_NOT_FOUND);
+        return core::ptr::null();
     }
-    eprintln!("weave/CertFindCertificateInStore: unknown store → NULL");
+
+    // Continue iteration from the certificate after pvPrevContext.
+    let start = if pv_prev_context.is_null() {
+        0
+    } else {
+        match FAKE_STORE_CERTS
+            .iter()
+            .position(|entry| entry.ctx as *const FakeCertContext as *const u8 == pv_prev_context)
+        {
+            Some(idx) => idx + 1,
+            None => {
+                eprintln!("weave/CertFindCertificateInStore: unknown prev context → NULL");
+                weave_common::set_last_error(CRYPT_E_NOT_FOUND);
+                return core::ptr::null();
+            }
+        }
+    };
+
+    let compare_type = dw_find_type >> CERT_COMPARE_SHIFT;
+    let use_subject = (dw_find_type & CERT_COMPARE_MASK) == CERT_INFO_SUBJECT_FLAG;
+    let is_wide = compare_type == CERT_COMPARE_NAME_STR_W;
+
+    for entry in FAKE_STORE_CERTS.iter().skip(start) {
+        let matches =
+            if compare_type == CERT_COMPARE_NAME_STR_A || compare_type == CERT_COMPARE_NAME_STR_W {
+                // CERT_FIND_(SUBJECT|ISSUER)_STR — case-insensitive substring match.
+                let name = if use_subject {
+                    entry.subject
+                } else {
+                    entry.issuer
+                };
+                unsafe { name_str_matches(name, pv_find_para, is_wide) }
+            } else {
+                // CERT_FIND_ANY (0) ignores pvFindPara; every other find type treats
+                // the fake PKI certs as matching any query.
+                true
+            };
+        if matches {
+            return entry.ctx as *const FakeCertContext as *const u8;
+        }
+    }
+
+    eprintln!("weave/CertFindCertificateInStore: no match → NULL");
+    weave_common::set_last_error(CRYPT_E_NOT_FOUND);
     core::ptr::null()
 }
 
@@ -1765,5 +1914,192 @@ pub fn resolve_wldap32(func: &str) -> Option<usize> {
         | "ldap_set_option"
         | "ber_free" => Some(stub),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const X509_ASN_ENCODING: u32 = 1;
+    // Find-type encoding from wincrypt.h: (CERT_COMPARE_* << 16) | CERT_INFO_*_FLAG.
+    const CERT_FIND_ANY: u32 = 0;
+    const CERT_FIND_SUBJECT_STR_W: u32 = (8 << 16) | 7;
+    const CERT_FIND_SUBJECT_STR_A: u32 = (7 << 16) | 7;
+    const CERT_FIND_ISSUER_STR_W: u32 = (8 << 16) | 4;
+    const CERT_FIND_SUBJECT_CERT: u32 = 11 << 16;
+    const CRYPT_E_NOT_FOUND: u32 = 0x8009_2004;
+
+    fn ctx0() -> *const u8 {
+        FAKE_STORE_CERTS[0].ctx as *const FakeCertContext as *const u8
+    }
+
+    fn ctx1() -> *const u8 {
+        FAKE_STORE_CERTS[1].ctx as *const FakeCertContext as *const u8
+    }
+
+    fn w(s: &str) -> Vec<u16> {
+        s.encode_utf16().chain([0]).collect()
+    }
+
+    /// Call CertFindCertificateInStore with the fake store and X509 encoding.
+    unsafe fn find(find_type: u32, para: *const u8, prev: *const u8) -> *const u8 {
+        cert_find_certificate_in_store(
+            FAKE_STORE_HANDLE,
+            X509_ASN_ENCODING,
+            0,
+            find_type,
+            para,
+            prev,
+        )
+    }
+
+    #[test]
+    fn find_any_empty_store_returns_null() {
+        let unknown = FAKE_STORE_HANDLE.wrapping_add(0x1234);
+        unsafe {
+            let p = cert_find_certificate_in_store(
+                unknown,
+                X509_ASN_ENCODING,
+                0,
+                CERT_FIND_ANY,
+                core::ptr::null(),
+                core::ptr::null(),
+            );
+            assert!(p.is_null());
+            assert_eq!(weave_common::get_last_error(), CRYPT_E_NOT_FOUND);
+        }
+    }
+
+    #[test]
+    fn find_any_populated_store_returns_first_cert() {
+        unsafe {
+            let p = find(CERT_FIND_ANY, core::ptr::null(), core::ptr::null());
+            assert_eq!(p, ctx0());
+        }
+    }
+
+    #[test]
+    fn find_any_iterates_then_returns_null() {
+        unsafe {
+            let first = find(CERT_FIND_ANY, core::ptr::null(), core::ptr::null());
+            assert_eq!(first, ctx0());
+            let second = find(CERT_FIND_ANY, core::ptr::null(), first);
+            assert_eq!(second, ctx1());
+            let third = find(CERT_FIND_ANY, core::ptr::null(), second);
+            assert!(third.is_null());
+            assert_eq!(weave_common::get_last_error(), CRYPT_E_NOT_FOUND);
+        }
+    }
+
+    #[test]
+    fn find_subject_str_matches_case_insensitively() {
+        let needle = w("notepad");
+        unsafe {
+            let p = find(
+                CERT_FIND_SUBJECT_STR_W,
+                needle.as_ptr() as *const u8,
+                core::ptr::null(),
+            );
+            assert_eq!(p, ctx0());
+            let needle2 = w("Weave Test");
+            let p2 = find(
+                CERT_FIND_SUBJECT_STR_W,
+                needle2.as_ptr() as *const u8,
+                core::ptr::null(),
+            );
+            assert_eq!(p2, ctx1());
+        }
+    }
+
+    #[test]
+    fn find_subject_str_no_match_returns_null() {
+        let needle = w("bogus");
+        unsafe {
+            let p = find(
+                CERT_FIND_SUBJECT_STR_W,
+                needle.as_ptr() as *const u8,
+                core::ptr::null(),
+            );
+            assert!(p.is_null());
+            assert_eq!(weave_common::get_last_error(), CRYPT_E_NOT_FOUND);
+        }
+    }
+
+    #[test]
+    fn find_str_null_para_matches_any() {
+        unsafe {
+            let p = find(
+                CERT_FIND_SUBJECT_STR_W,
+                core::ptr::null(),
+                core::ptr::null(),
+            );
+            assert_eq!(p, ctx0());
+        }
+    }
+
+    #[test]
+    fn find_ansi_subject_str_matches() {
+        let needle = b"notepad\0";
+        unsafe {
+            let p = find(CERT_FIND_SUBJECT_STR_A, needle.as_ptr(), core::ptr::null());
+            assert_eq!(p, ctx0());
+        }
+    }
+
+    #[test]
+    fn find_issuer_str_matches_issuer_not_subject() {
+        let needle = w("weave root");
+        unsafe {
+            // Both fake certs have issuer "Weave Root CA".
+            let first = find(
+                CERT_FIND_ISSUER_STR_W,
+                needle.as_ptr() as *const u8,
+                core::ptr::null(),
+            );
+            assert_eq!(first, ctx0());
+            let second = find(CERT_FIND_ISSUER_STR_W, needle.as_ptr() as *const u8, first);
+            assert_eq!(second, ctx1());
+            // A subject search for the issuer name must not match.
+            let subj = find(
+                CERT_FIND_SUBJECT_STR_W,
+                needle.as_ptr() as *const u8,
+                core::ptr::null(),
+            );
+            assert!(subj.is_null());
+            assert_eq!(weave_common::get_last_error(), CRYPT_E_NOT_FOUND);
+        }
+    }
+
+    #[test]
+    fn find_subject_cert_returns_fake_cert_for_npp() {
+        // NPP passes an empty CERT_INFO via CERT_FIND_SUBJECT_CERT; the fake PKI
+        // treats it as a match so the signature check proceeds.
+        unsafe {
+            let p = find(CERT_FIND_SUBJECT_CERT, core::ptr::null(), core::ptr::null());
+            assert_eq!(p, ctx0());
+        }
+    }
+
+    #[test]
+    fn find_subject_str_iteration_skips_non_matching_certs() {
+        let needle = w("notepad");
+        unsafe {
+            let first = find(
+                CERT_FIND_SUBJECT_STR_W,
+                needle.as_ptr() as *const u8,
+                core::ptr::null(),
+            );
+            assert_eq!(first, ctx0());
+            // ctx1's subject ("Weave Test") does not contain "notepad".
+            let next = find(CERT_FIND_SUBJECT_STR_W, needle.as_ptr() as *const u8, first);
+            assert!(next.is_null());
+            assert_eq!(weave_common::get_last_error(), CRYPT_E_NOT_FOUND);
+        }
+    }
+
+    #[test]
+    fn resolver_registers_cert_find_certificate_in_store() {
+        assert!(resolve_crypt32("CertFindCertificateInStore").is_some());
     }
 }
