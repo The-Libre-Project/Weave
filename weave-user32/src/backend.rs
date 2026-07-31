@@ -200,7 +200,9 @@ mod inner {
                 | EventMask::KEY_RELEASE
                 | EventMask::BUTTON_PRESS
                 | EventMask::BUTTON_RELEASE
-                | EventMask::POINTER_MOTION;
+                | EventMask::POINTER_MOTION
+                | EventMask::ENTER_WINDOW
+                | EventMask::LEAVE_WINDOW;
 
             let aux = CreateWindowAux::new()
                 .background_pixel(self.white_pixel)
@@ -1218,6 +1220,18 @@ mod inner {
                     }
                 }
 
+                Event::EnterNotify(ev) => {
+                    let hwnd = window::hwnd_for_xcb(ev.event);
+                    if hwnd != 0 {
+                        crate::api::tme_hover_enter(
+                            hwnd,
+                            ev.time,
+                            ev.event_x as i32,
+                            ev.event_y as i32,
+                        );
+                    }
+                }
+
                 Event::MotionNotify(ev) => {
                     let hwnd = window::hwnd_for_xcb(ev.event);
                     if hwnd != 0 {
@@ -1231,21 +1245,40 @@ mod inner {
                             pt_x: ev.event_x as i32,
                             pt_y: ev.event_y as i32,
                         });
+                        if crate::api::tme_hover_check(
+                            hwnd,
+                            ev.time,
+                            ev.event_x as i32,
+                            ev.event_y as i32,
+                        ) {
+                            queue::post(MsgEntry {
+                                hwnd,
+                                message: WM_MOUSEHOVER,
+                                w_param: 0,
+                                l_param,
+                                time: ev.time,
+                                pt_x: ev.event_x as i32,
+                                pt_y: ev.event_y as i32,
+                            });
+                        }
                     }
                 }
 
                 Event::LeaveNotify(ev) => {
                     let hwnd = window::hwnd_for_xcb(ev.event);
-                    if hwnd != 0 && crate::api::take_tme_leave(hwnd) {
-                        queue::post(MsgEntry {
-                            hwnd,
-                            message: WM_MOUSELEAVE,
-                            w_param: 0,
-                            l_param: 0,
-                            time: ev.time,
-                            pt_x: 0,
-                            pt_y: 0,
-                        });
+                    if hwnd != 0 {
+                        crate::api::cancel_tme_hover(hwnd);
+                        if crate::api::take_tme_leave(hwnd) {
+                            queue::post(MsgEntry {
+                                hwnd,
+                                message: WM_MOUSELEAVE,
+                                w_param: 0,
+                                l_param: 0,
+                                time: ev.time,
+                                pt_x: 0,
+                                pt_y: 0,
+                            });
+                        }
                     }
                 }
 

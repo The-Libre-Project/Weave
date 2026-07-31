@@ -89,8 +89,12 @@ pub const MK_MBUTTON: u32 = 0x0010;
 
 pub const TME_HOVER: u32 = 0x0000_0001;
 pub const TME_LEAVE: u32 = 0x0000_0002;
+pub const TME_NONCLIENT: u32 = 0x0000_0010;
 pub const TME_CANCEL: u32 = 0x8000_0000;
 pub const TME_QUERY: u32 = 0x4000_0000;
+
+/// Default hover time (400ms).  Pass this as dwHoverTime to use the system default.
+pub const HOVER_DEFAULT: u32 = 0xFFFF_FFFF;
 
 /// Win64 layout of TRACKMOUSEEVENT (cbSize = 24).
 ///

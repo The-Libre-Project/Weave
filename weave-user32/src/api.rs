@@ -260,6 +260,99 @@ pub fn take_tme_leave(hwnd: usize) -> bool {
     }
 }
 
+// ── TrackMouseEvent hover-tracking table ────────────────────────────────────
+// Per-hwnd state for TME_HOVER: entry timestamp, hover threshold, entry position.
+// When enough time elapses without significant mouse movement, WM_MOUSEHOVER
+// is posted and the entry is removed (one-shot per Wine contract).
+
+#[derive(Clone)]
+pub(crate) struct HoverState {
+    pub entry_time: u32,
+    pub hover_time: u32,
+    pub entry_x: i32,
+    pub entry_y: i32,
+}
+
+static TME_HOVER_TABLE: OnceLock<Mutex<HashMap<usize, HoverState>>> = OnceLock::new();
+
+fn tme_hover_table() -> &'static Mutex<HashMap<usize, HoverState>> {
+    TME_HOVER_TABLE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Register TME_HOVER for `hwnd` with the given hover time threshold.
+pub fn register_tme_hover(hwnd: usize, hover_time: u32) {
+    let actual = if hover_time == HOVER_DEFAULT {
+        400
+    } else {
+        hover_time
+    };
+    if let Ok(mut t) = tme_hover_table().lock() {
+        t.insert(
+            hwnd,
+            HoverState {
+                entry_time: 0,
+                hover_time: actual,
+                entry_x: 0,
+                entry_y: 0,
+            },
+        );
+    }
+}
+
+/// Cancel TME_HOVER for `hwnd`.
+pub fn cancel_tme_hover(hwnd: usize) {
+    if let Ok(mut t) = tme_hover_table().lock() {
+        t.remove(&hwnd);
+    }
+}
+
+/// Check if `hwnd` has an active TME_HOVER registration.
+pub fn has_tme_hover(hwnd: usize) -> bool {
+    if let Ok(t) = tme_hover_table().lock() {
+        t.contains_key(&hwnd)
+    } else {
+        false
+    }
+}
+
+/// Record the mouse entry timestamp and position for hover tracking.
+/// Called from the backend XCB EnterNotify handler.
+pub fn tme_hover_enter(hwnd: usize, time: u32, x: i32, y: i32) {
+    if let Ok(mut t) = tme_hover_table().lock() {
+        if let Some(state) = t.get_mut(&hwnd) {
+            state.entry_time = time;
+            state.entry_x = x;
+            state.entry_y = y;
+        }
+    }
+}
+
+/// Check and atomically consume TME_HOVER for `hwnd` when the hover time has
+/// elapsed.  Returns `true` if WM_MOUSEHOVER should be posted (one-shot).
+/// Called from the backend XCB MotionNotify handler.
+pub fn tme_hover_check(hwnd: usize, time: u32, x: i32, y: i32) -> bool {
+    if let Ok(mut t) = tme_hover_table().lock() {
+        if let Some(state) = t.get_mut(&hwnd) {
+            if state.entry_time == 0 {
+                return false;
+            }
+            let elapsed = time.wrapping_sub(state.entry_time);
+            let moved_outside = (x - state.entry_x).abs() > 2 || (y - state.entry_y).abs() > 2;
+            if moved_outside {
+                state.entry_time = time;
+                state.entry_x = x;
+                state.entry_y = y;
+                return false;
+            }
+            if elapsed >= state.hover_time {
+                t.remove(&hwnd);
+                return true;
+            }
+        }
+    }
+    false
+}
+
 // ── RegisterClassW / RegisterClassExW ─────────────────────────────────────────
 
 /// RegisterClassW: register a window class.
@@ -9318,18 +9411,16 @@ pub unsafe extern "win64" fn pt_in_rect(lp_rc: *const i32, pt_packed: u64) -> i3
 
 /// TrackMouseEvent — post hover and leave messages for mouse tracking.
 ///
-/// Returns TRUE — Weave generates no hover/leave events but SDL2 does not
-/// depend on them for rendering correctness.
-///
 /// # Safety
-/// `lp_event_track` is accepted but not dereferenced.
+/// `lp_event_track` must point to a valid `TrackMouseEventStruct` or be NULL.
 // Wine ref: dlls/user32/input.c — sets a timer to fire WM_MOUSEHOVER/WM_MOUSELEAVE
 // when the mouse enters/leaves the client area; HOVER_DEFAULT maps to the system
 // hover time (400ms by default).
 // Wine ref: dlls/win32u/input.c::NtUserTrackMouseEvent — validates cbSize >= 24,
 // hwndTrack must be valid; TME_LEAVE subscribes a one-shot WM_MOUSELEAVE;
 // TME_CANCEL|TME_LEAVE unsubscribes; TME_QUERY fills the struct with active flags;
-// TME_HOVER sets a timer (Weave: accepted but not fired — no timer infrastructure).
+// TME_HOVER sets a timer (one-shot WM_MOUSEHOVER when the hover time elapses);
+// TME_NONCLIENT is treated as TME_LEAVE (non-client area tracking).
 pub unsafe extern "win64" fn track_mouse_event(lp_event_track: *mut u8) -> i32 {
     if lp_event_track.is_null() {
         return 0; // FALSE
@@ -9345,15 +9436,15 @@ pub unsafe extern "win64" fn track_mouse_event(lp_event_track: *mut u8) -> i32 {
     if flags & TME_QUERY != 0 {
         // Fill dwFlags with currently active tracking flags for hwndTrack.
         let tme_mut = unsafe { &mut *(lp_event_track as *mut TrackMouseEventStruct) };
-        let active = if tme_leave_table()
-            .lock()
-            .map(|t| t.contains(&hwnd))
-            .unwrap_or(false)
-        {
-            TME_LEAVE
-        } else {
-            0
-        };
+        let mut active = 0u32;
+        if let Ok(t) = tme_leave_table().lock() {
+            if t.contains(&hwnd) {
+                active |= TME_LEAVE;
+            }
+        }
+        if has_tme_hover(hwnd) {
+            active |= TME_HOVER;
+        }
         tme_mut.dw_flags = active;
         return 1; // TRUE
     }
@@ -9362,13 +9453,24 @@ pub unsafe extern "win64" fn track_mouse_event(lp_event_track: *mut u8) -> i32 {
         if flags & TME_LEAVE != 0 {
             cancel_tme_leave(hwnd);
         }
+        if flags & TME_HOVER != 0 {
+            cancel_tme_hover(hwnd);
+        }
+        if flags & TME_NONCLIENT != 0 {
+            cancel_tme_leave(hwnd);
+        }
         return 1; // TRUE
     }
 
     if flags & TME_LEAVE != 0 {
         register_tme_leave(hwnd);
     }
-    // TME_HOVER: accepted but timer not fired — no timer infrastructure yet.
+    if flags & TME_HOVER != 0 {
+        register_tme_hover(hwnd, tme.dw_hover_time);
+    }
+    if flags & TME_NONCLIENT != 0 {
+        register_tme_leave(hwnd);
+    }
     1 // TRUE
 }
 

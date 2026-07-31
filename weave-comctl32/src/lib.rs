@@ -34,6 +34,7 @@ use std::sync::Mutex;
 use std::sync::OnceLock;
 
 use weave_user32::api::def_window_proc_w;
+use weave_user32::api::track_mouse_event as user32_track_mouse_event;
 use weave_user32::class::{self, ClassEntry};
 
 // ── Common control window class registration ────────────────────────────────
@@ -1924,13 +1925,13 @@ pub unsafe extern "win64" fn create_mapped_bitmap(
 
 /// _TrackMouseEvent — request WM_MOUSELEAVE / WM_MOUSEHOVER messages.
 ///
-/// Returns TRUE (success). Since we don't have a real message loop,
-/// the events won't actually fire, but callers treat this as optional.
+/// Delegates directly to user32's TrackMouseEvent for full tracking support.
 ///
 /// # Safety
-/// `lp_event_track` is ignored.
-pub unsafe extern "win64" fn track_mouse_event(_lp_event_track: *mut u8) -> i32 {
-    1 // TRUE
+/// `lp_event_track` must point to a valid `TrackMouseEventStruct` or be NULL.
+pub unsafe extern "win64" fn track_mouse_event(lp_event_track: *mut u8) -> i32 {
+    // Safe: user32 validates the pointer internally.
+    unsafe { user32_track_mouse_event(lp_event_track) }
 }
 
 // ── Property sheets ───────────────────────────────────────────────────────────
