@@ -166,18 +166,21 @@ pub unsafe extern "win64" fn reg_open_key_ex_w(
 // NtCreateKey; writes REG_CREATED_NEW_KEY (1) or REG_OPENED_EXISTING_KEY (2) to *dispos.
 /// RegCreateKeyExW: open an existing key or create it if it doesn't exist.
 ///
-/// `lp_class`, `dw_options`, `sam_desired`, `lp_security_attrs` are ignored.
-/// `lpdw_disposition` receives `REG_OPENED_EXISTING_KEY` (2) or
-/// `REG_CREATED_NEW_KEY` (1).
+/// `reserved` must be 0 (`ERROR_INVALID_PARAMETER` otherwise). `lp_class`,
+/// `dw_options`, `sam_desired`, `lp_security_attrs` are ignored. A NULL
+/// `lp_sub_key` means the key itself (Wine treats it as an empty name — the
+/// parent key is created/opened, matching RegOpenKeyExW's tolerance).
+/// `lpdw_disposition` receives `REG_CREATED_NEW_KEY` (1) or
+/// `REG_OPENED_EXISTING_KEY` (2).
 ///
 /// # Safety
 /// `lp_sub_key` and `lp_class` (if non-null) must be valid UTF-16 strings.
 /// `phk_result` must be a valid writable pointer.
-// Wine ref: dlls/kernelbase/registry.c:566 — NULL retkey → ERROR_BADKEY; reserved!=0 → ERROR_INVALID_PARAMETER; writes REG_CREATED_NEW_KEY(1) or REG_OPENED_EXISTING_KEY(2) to *dispos
+// Wine ref: dlls/kernelbase/registry.c:566 — !retkey → ERROR_BADKEY; reserved!=0 → ERROR_INVALID_PARAMETER; get_special_root_hkey fails → ERROR_INVALID_HANDLE; RtlInitUnicodeString tolerates NULL name (empty → key itself); create_key writes REG_CREATED_NEW_KEY(1) or REG_OPENED_EXISTING_KEY(2) to *dispos
 pub unsafe extern "win64" fn reg_create_key_ex_w(
     h_key: usize,
     lp_sub_key: *const u16,
-    _reserved: u32,
+    reserved: u32,
     _lp_class: *const u16,
     _dw_options: u32,
     _sam_desired: u32,
@@ -186,7 +189,10 @@ pub unsafe extern "win64" fn reg_create_key_ex_w(
     lpdw_disposition: *mut u32,
 ) -> i32 {
     if phk_result.is_null() {
-        return 1010; // ERROR_BADKEY — Wine returns this, not ERROR_INVALID_HANDLE
+        return 1010; // ERROR_BADKEY — Wine returns this, not ERROR_INVALID_PARAMETER
+    }
+    if reserved != 0 {
+        return ERROR_INVALID_PARAMETER; // Wine: reserved must be 0
     }
 
     let base_path = match key_to_path(h_key) {
@@ -3238,5 +3244,306 @@ mod tests {
         };
         assert_eq!(status, ERROR_SUCCESS);
         assert_eq!(buf, value);
+    }
+
+    // ── RegCreateKeyExW functional tests ────────────────────────────────────
+
+    const REG_CREATED_NEW_KEY: u32 = 1;
+    const REG_OPENED_EXISTING_KEY: u32 = 2;
+
+    #[test]
+    fn create_new_key_reports_created_disposition() {
+        test_registry_dir();
+        let mut out = 0usize;
+        let mut disposition = 0u32;
+        let path = wide(r"Software\WeaveCreated");
+        let status = unsafe {
+            reg_create_key_ex_w(
+                HKEY_CURRENT_USER,
+                path.as_ptr(),
+                0,
+                std::ptr::null(),
+                0,
+                0,
+                0,
+                &mut out,
+                &mut disposition,
+            )
+        };
+        assert_eq!(status, ERROR_SUCCESS);
+        assert_eq!(disposition, REG_CREATED_NEW_KEY);
+        assert_ne!(out, 0);
+        assert_eq!(
+            handles::get_registry_path(out),
+            Some(test_registry_dir().join("HKCU/Software/WeaveCreated"))
+        );
+    }
+
+    #[test]
+    fn create_same_key_twice_reports_opened_second_time() {
+        test_registry_dir();
+        let path = wide(r"Software\WeaveTwice");
+        let mut first = 0usize;
+        let mut d1 = 0u32;
+        let status = unsafe {
+            reg_create_key_ex_w(
+                HKEY_CURRENT_USER,
+                path.as_ptr(),
+                0,
+                std::ptr::null(),
+                0,
+                0,
+                0,
+                &mut first,
+                &mut d1,
+            )
+        };
+        assert_eq!(status, ERROR_SUCCESS);
+        assert_eq!(d1, REG_CREATED_NEW_KEY);
+
+        let mut second = 0usize;
+        let mut d2 = 0u32;
+        let status = unsafe {
+            reg_create_key_ex_w(
+                HKEY_CURRENT_USER,
+                path.as_ptr(),
+                0,
+                std::ptr::null(),
+                0,
+                0,
+                0,
+                &mut second,
+                &mut d2,
+            )
+        };
+        assert_eq!(status, ERROR_SUCCESS);
+        assert_eq!(d2, REG_OPENED_EXISTING_KEY);
+        assert_ne!(second, 0);
+        assert_eq!(
+            handles::get_registry_path(second),
+            handles::get_registry_path(first)
+        );
+    }
+
+    #[test]
+    fn create_subkey_under_open_handle() {
+        test_registry_dir();
+        let parent = create_key(HKEY_CURRENT_USER, r"Software\WeaveParent");
+        let mut child = 0usize;
+        let mut disposition = 0u32;
+        let child_path = wide("Child");
+        let status = unsafe {
+            reg_create_key_ex_w(
+                parent,
+                child_path.as_ptr(),
+                0,
+                std::ptr::null(),
+                0,
+                0,
+                0,
+                &mut child,
+                &mut disposition,
+            )
+        };
+        assert_eq!(status, ERROR_SUCCESS);
+        assert_eq!(disposition, REG_CREATED_NEW_KEY);
+        assert_eq!(
+            handles::get_registry_path(child),
+            handles::get_registry_path(parent).map(|p| p.join("Child"))
+        );
+    }
+
+    #[test]
+    fn create_query_close_roundtrip() {
+        test_registry_dir();
+        let mut key = 0usize;
+        let mut disposition = 0u32;
+        let path = wide(r"Software\WeaveCreateRoundtrip");
+        let status = unsafe {
+            reg_create_key_ex_w(
+                HKEY_CURRENT_USER,
+                path.as_ptr(),
+                0,
+                std::ptr::null(),
+                0,
+                0,
+                0,
+                &mut key,
+                &mut disposition,
+            )
+        };
+        assert_eq!(status, ERROR_SUCCESS);
+        assert_eq!(disposition, REG_CREATED_NEW_KEY);
+
+        let value_name = wide("Name");
+        let value = encode_sz("weave-advapi32");
+        let status = unsafe {
+            reg_set_value_ex_w(
+                key,
+                value_name.as_ptr(),
+                0,
+                REG_SZ,
+                value.as_ptr(),
+                value.len() as u32,
+            )
+        };
+        assert_eq!(status, ERROR_SUCCESS);
+
+        let mut reg_type = 0u32;
+        let mut size = 0u32;
+        let status = unsafe {
+            reg_query_value_ex_w(
+                key,
+                value_name.as_ptr(),
+                std::ptr::null_mut(),
+                &mut reg_type,
+                std::ptr::null_mut(),
+                &mut size,
+            )
+        };
+        assert_eq!(status, ERROR_SUCCESS);
+        assert_eq!(reg_type, REG_SZ);
+
+        let mut buf = vec![0u8; size as usize];
+        let status = unsafe {
+            reg_query_value_ex_w(
+                key,
+                value_name.as_ptr(),
+                std::ptr::null_mut(),
+                &mut reg_type,
+                buf.as_mut_ptr(),
+                &mut size,
+            )
+        };
+        assert_eq!(status, ERROR_SUCCESS);
+        assert_eq!(buf, value);
+
+        // RegCloseKey frees the slot — the handle is no longer usable.
+        let status = reg_close_key(key);
+        assert_eq!(status, ERROR_SUCCESS);
+        assert_eq!(handles::get_registry_path(key), None);
+    }
+
+    #[test]
+    fn null_subkey_opens_or_creates_key_itself() {
+        // Wine: RegCreateKeyExW tolerates a NULL lp_sub_key (RtlInitUnicodeString
+        // yields an empty name) and opens/creates the key itself — it does NOT
+        // return ERROR_INVALID_PARAMETER.
+        test_registry_dir();
+        let mut out = 0usize;
+        let mut disposition = 0u32;
+        let status = unsafe {
+            reg_create_key_ex_w(
+                HKEY_CURRENT_USER,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+                0,
+                0,
+                &mut out,
+                &mut disposition,
+            )
+        };
+        assert_eq!(status, ERROR_SUCCESS);
+        assert_ne!(out, 0);
+        assert_eq!(disposition, REG_OPENED_EXISTING_KEY); // HKCU already exists
+        assert_eq!(
+            handles::get_registry_path(out),
+            Some(test_registry_dir().join("HKCU"))
+        );
+    }
+
+    #[test]
+    fn create_invalid_root_returns_error_invalid_handle() {
+        test_registry_dir();
+        let mut out = 0usize;
+        let path = wide("Whatever");
+        let status = unsafe {
+            reg_create_key_ex_w(
+                0x1234_5678,
+                path.as_ptr(),
+                0,
+                std::ptr::null(),
+                0,
+                0,
+                0,
+                &mut out,
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(status, ERROR_INVALID_HANDLE);
+        assert_eq!(out, 0);
+    }
+
+    #[test]
+    fn create_null_phk_result_returns_error_badkey() {
+        // Wine returns ERROR_BADKEY (1010) for a NULL retkey — not
+        // ERROR_INVALID_PARAMETER and not ERROR_INVALID_HANDLE.
+        test_registry_dir();
+        let path = wide("Software");
+        let status = unsafe {
+            reg_create_key_ex_w(
+                HKEY_CURRENT_USER,
+                path.as_ptr(),
+                0,
+                std::ptr::null(),
+                0,
+                0,
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(status, 1010);
+    }
+
+    #[test]
+    fn create_nonzero_reserved_returns_error_invalid_parameter() {
+        test_registry_dir();
+        let mut out = 0usize;
+        let path = wide("Software");
+        let status = unsafe {
+            reg_create_key_ex_w(
+                HKEY_CURRENT_USER,
+                path.as_ptr(),
+                1, // reserved must be 0
+                std::ptr::null(),
+                0,
+                0,
+                0,
+                &mut out,
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(status, ERROR_INVALID_PARAMETER);
+        assert_eq!(out, 0);
+    }
+
+    #[test]
+    fn create_null_disposition_is_skipped() {
+        // A NULL lpdwDisposition is valid — the caller opts out of the output.
+        test_registry_dir();
+        let mut out = 0usize;
+        let path = wide(r"Software\WeaveNoDisposition");
+        let status = unsafe {
+            reg_create_key_ex_w(
+                HKEY_CURRENT_USER,
+                path.as_ptr(),
+                0,
+                std::ptr::null(),
+                0,
+                0,
+                0,
+                &mut out,
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(status, ERROR_SUCCESS);
+        assert_ne!(out, 0);
+        assert_eq!(
+            handles::get_registry_path(out),
+            Some(test_registry_dir().join("HKCU/Software/WeaveNoDisposition"))
+        );
     }
 }
