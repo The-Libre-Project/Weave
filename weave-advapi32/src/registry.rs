@@ -3796,9 +3796,22 @@ mod tests {
 
     // ── CAPI hash object tests (CryptCreateHash / CryptHashData / CryptGetHashParam) ──
 
+    /// Guards the shared hash-object handle table. Tests run in parallel; the
+    /// slot+4 handle allocator reuses freed slots, so without the lock one test
+    /// can reclaim another test's destroyed handle mid-flight and make a
+    /// "destroyed handle must be invalid" assertion spuriously fail.
+    static HASH_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Acquire the hash-table guard and return it so the caller's handle is not
+    /// invalidated by a parallel test's create/destroy cycle.
+    fn hash_guard() -> std::sync::MutexGuard<'static, ()> {
+        HASH_LOCK.lock().unwrap()
+    }
+
     /// Create a hash for `alg_id`, feed it `data` in one call, and return the
     /// HP_HASHVAL digest as lowercase hex. Panics on any CAPI failure.
     fn hash_digest_hex(alg_id: u32, data: &[u8]) -> String {
+        let _guard = hash_guard();
         let mut h = 0usize;
         let ret = unsafe { crypt_create_hash(1, alg_id, 0, 0, &mut h) };
         assert_eq!(ret, 1, "crypt_create_hash(alg={alg_id:#x}) failed");
@@ -3827,6 +3840,7 @@ mod tests {
     #[test]
     fn crypt_hash_data_accumulates_across_calls() {
         // Hashing "a" then "bc" must equal hashing "abc" in one call.
+        let _guard = hash_guard();
         let mut h = 0usize;
         assert_eq!(unsafe { crypt_create_hash(1, CALG_MD5, 0, 0, &mut h) }, 1);
         assert_eq!(unsafe { crypt_hash_data(h, b"a".as_ptr(), 1, 0) }, 1);
@@ -3872,6 +3886,7 @@ mod tests {
 
     #[test]
     fn crypt_hash_data_nonzero_flags_returns_false() {
+        let _guard = hash_guard();
         let mut h = 0usize;
         assert_eq!(unsafe { crypt_create_hash(1, CALG_SHA1, 0, 0, &mut h) }, 1);
         let ret = unsafe { crypt_hash_data(h, b"x".as_ptr(), 1, 1) };
@@ -3885,6 +3900,7 @@ mod tests {
 
     #[test]
     fn crypt_hash_data_null_with_nonzero_len_returns_false() {
+        let _guard = hash_guard();
         let mut h = 0usize;
         assert_eq!(unsafe { crypt_create_hash(1, CALG_SHA1, 0, 0, &mut h) }, 1);
         let ret = unsafe { crypt_hash_data(h, std::ptr::null(), 4, 0) };
@@ -3907,6 +3923,7 @@ mod tests {
 
     #[test]
     fn crypt_hash_data_after_finalize_returns_false() {
+        let _guard = hash_guard();
         let mut h = 0usize;
         assert_eq!(unsafe { crypt_create_hash(1, CALG_MD5, 0, 0, &mut h) }, 1);
         let mut buf = [0u8; 16];
@@ -3924,6 +3941,7 @@ mod tests {
 
     #[test]
     fn crypt_create_hash_bad_algid_returns_false() {
+        let _guard = hash_guard();
         let mut h = 0usize;
         let ret = unsafe {
             crypt_create_hash(
@@ -3951,6 +3969,7 @@ mod tests {
 
     #[test]
     fn crypt_get_hash_param_insufficient_buffer_returns_more_data() {
+        let _guard = hash_guard();
         let mut h = 0usize;
         assert_eq!(
             unsafe { crypt_create_hash(1, CALG_SHA_256, 0, 0, &mut h) },
@@ -3967,6 +3986,7 @@ mod tests {
 
     #[test]
     fn crypt_get_hash_param_reports_algid_and_hashsize() {
+        let _guard = hash_guard();
         let mut h = 0usize;
         assert_eq!(unsafe { crypt_create_hash(1, CALG_MD5, 0, 0, &mut h) }, 1);
 
@@ -4007,6 +4027,7 @@ mod tests {
 
     #[test]
     fn crypt_destroy_hash_invalidates_handle() {
+        let _guard = hash_guard();
         let mut h = 0usize;
         assert_eq!(unsafe { crypt_create_hash(1, CALG_MD5, 0, 0, &mut h) }, 1);
         assert_eq!(unsafe { crypt_destroy_hash(h) }, 1);
