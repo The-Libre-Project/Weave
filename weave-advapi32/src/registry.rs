@@ -2999,6 +2999,9 @@ mod tests {
 
     #[test]
     fn predefined_hive_path_returns_some_for_known_roots() {
+        // Route through the shared initializer first so the global prefix is
+        // pinned to a temp dir (see test_registry_dir doc comment).
+        test_registry_dir();
         // 64-bit sign-extended values as passed by MinGW-compiled binaries.
         // These constants are defined in weave-core.
         const HKEY_CLASSES_ROOT: usize = 0xFFFFFFFF80000000;
@@ -3026,9 +3029,214 @@ mod tests {
 
     #[test]
     fn predefined_hive_path_returns_none_for_non_root() {
+        // Route through the shared initializer first (see test_registry_dir
+        // doc comment) so the global prefix is pinned to a temp dir.
+        test_registry_dir();
         // A plain handle value (not a predefined root) should return None
         assert!(predefined_hive_path(0).is_none());
         assert!(predefined_hive_path(4).is_none()); // looks like a real handle
         assert!(predefined_hive_path(0x7FFF_FFFF).is_none());
+    }
+
+    // ── RegOpenKeyExW functional tests ────────────────────────────────────────
+
+    use std::path::PathBuf;
+    use std::sync::OnceLock;
+    use weave_core::registry::{encode_sz, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
+
+    /// Shared throwaway registry tree for functional tests. Redirects the
+    /// global prefix once so predefined hive handles resolve under a temp dir.
+    /// Each test uses unique subkey names to avoid cross-test interference.
+    ///
+    /// Every test that touches the registry or `prefix::get()` must call this
+    /// first: `prefix::set` is a no-op after the first caller initialises the
+    /// global prefix, and `predefined_hive_path` initialises it on first use.
+    fn test_registry_dir() -> &'static std::path::Path {
+        static DIR: OnceLock<PathBuf> = OnceLock::new();
+        DIR.get_or_init(|| {
+            let dir = Box::leak(Box::new(
+                tempfile::tempdir().expect("registry test tempdir"),
+            ));
+            let reg = dir.path().join("registry");
+            for hive in ["HKLM", "HKCU", "HKCR", "HKU", "HKCC"] {
+                std::fs::create_dir_all(reg.join(hive)).expect("create hive dir");
+            }
+            weave_core::prefix::set(dir.path().to_path_buf());
+            reg
+        })
+    }
+
+    fn wide(s: &str) -> Vec<u16> {
+        s.encode_utf16().chain(std::iter::once(0)).collect()
+    }
+
+    fn create_key(hkey: usize, subkey: &str) -> usize {
+        let mut out = 0usize;
+        let w = wide(subkey);
+        let status = unsafe {
+            reg_create_key_ex_w(
+                hkey,
+                w.as_ptr(),
+                0,
+                std::ptr::null(),
+                0,
+                0,
+                0,
+                &mut out,
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(status, ERROR_SUCCESS, "create_key({subkey}) failed");
+        out
+    }
+
+    #[test]
+    fn open_predefined_root_directly() {
+        let reg = test_registry_dir();
+        let mut hkey = 0usize;
+        let status =
+            unsafe { reg_open_key_ex_w(HKEY_LOCAL_MACHINE, std::ptr::null(), 0, 0, &mut hkey) };
+        assert_eq!(status, ERROR_SUCCESS);
+        assert_ne!(hkey, 0);
+        assert_eq!(handles::get_registry_path(hkey), Some(reg.join("HKLM")));
+    }
+
+    #[test]
+    fn open_subkey_created_by_reg_create_key_ex_w() {
+        test_registry_dir();
+        let leaf = create_key(HKEY_CURRENT_USER, r"Software\WeaveTest\Child");
+
+        let mut parent = 0usize;
+        let parent_path = wide(r"Software\WeaveTest");
+        let status = unsafe {
+            reg_open_key_ex_w(HKEY_CURRENT_USER, parent_path.as_ptr(), 0, 0, &mut parent)
+        };
+        assert_eq!(status, ERROR_SUCCESS);
+        assert_ne!(parent, 0);
+
+        let mut child = 0usize;
+        let child_path = wide("Child");
+        let status = unsafe { reg_open_key_ex_w(parent, child_path.as_ptr(), 0, 0, &mut child) };
+        assert_eq!(status, ERROR_SUCCESS);
+        assert_ne!(child, parent);
+        assert_eq!(
+            handles::get_registry_path(child),
+            handles::get_registry_path(leaf)
+        );
+    }
+
+    #[test]
+    fn null_subkey_returns_duplicate_handle() {
+        test_registry_dir();
+        let base = create_key(HKEY_CURRENT_USER, r"Software\WeaveNull");
+
+        let mut dup_null = 0usize;
+        let status = unsafe { reg_open_key_ex_w(base, std::ptr::null(), 0, 0, &mut dup_null) };
+        assert_eq!(status, ERROR_SUCCESS);
+        assert_ne!(dup_null, base);
+        assert_eq!(
+            handles::get_registry_path(base),
+            handles::get_registry_path(dup_null)
+        );
+
+        let empty = wide("");
+        let mut dup_empty = 0usize;
+        let status = unsafe { reg_open_key_ex_w(base, empty.as_ptr(), 0, 0, &mut dup_empty) };
+        assert_eq!(status, ERROR_SUCCESS);
+        assert_ne!(dup_empty, base);
+        assert_eq!(
+            handles::get_registry_path(base),
+            handles::get_registry_path(dup_empty)
+        );
+    }
+
+    #[test]
+    fn missing_subkey_returns_error_file_not_found() {
+        test_registry_dir();
+        let mut hkey = 0usize;
+        let sub = wide(r"Software\NoSuchKey");
+        let status =
+            unsafe { reg_open_key_ex_w(HKEY_LOCAL_MACHINE, sub.as_ptr(), 0, 0, &mut hkey) };
+        assert_eq!(status, ERROR_FILE_NOT_FOUND);
+        assert_eq!(hkey, 0);
+    }
+
+    #[test]
+    fn invalid_root_returns_error_invalid_handle() {
+        test_registry_dir();
+        let mut hkey = 0usize;
+        let status = unsafe { reg_open_key_ex_w(0x1234_5678, std::ptr::null(), 0, 0, &mut hkey) };
+        assert_eq!(status, ERROR_INVALID_HANDLE);
+    }
+
+    #[test]
+    fn null_phk_result_returns_error_invalid_parameter() {
+        test_registry_dir();
+        let status = unsafe {
+            reg_open_key_ex_w(
+                HKEY_LOCAL_MACHINE,
+                std::ptr::null(),
+                0,
+                0,
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(status, ERROR_INVALID_PARAMETER);
+    }
+
+    #[test]
+    fn opened_handle_supports_reg_query_value_ex_w_roundtrip() {
+        test_registry_dir();
+        let key = create_key(HKEY_CURRENT_USER, r"Software\WeaveRoundtrip");
+
+        let value_name = wide("Greeting");
+        let value = encode_sz("hello world");
+        let status = unsafe {
+            reg_set_value_ex_w(
+                key,
+                value_name.as_ptr(),
+                0,
+                REG_SZ,
+                value.as_ptr(),
+                value.len() as u32,
+            )
+        };
+        assert_eq!(status, ERROR_SUCCESS);
+
+        let mut opened = 0usize;
+        let open_path = wide(r"Software\WeaveRoundtrip");
+        let status =
+            unsafe { reg_open_key_ex_w(HKEY_CURRENT_USER, open_path.as_ptr(), 0, 0, &mut opened) };
+        assert_eq!(status, ERROR_SUCCESS);
+
+        let mut reg_type = 0u32;
+        let mut size = 0u32;
+        let status = unsafe {
+            reg_query_value_ex_w(
+                opened,
+                value_name.as_ptr(),
+                std::ptr::null_mut(),
+                &mut reg_type,
+                std::ptr::null_mut(),
+                &mut size,
+            )
+        };
+        assert_eq!(status, ERROR_SUCCESS);
+        assert_eq!(reg_type, REG_SZ);
+        assert_eq!(size as usize, value.len());
+
+        let mut buf = vec![0u8; size as usize];
+        let status = unsafe {
+            reg_query_value_ex_w(
+                opened,
+                value_name.as_ptr(),
+                std::ptr::null_mut(),
+                &mut reg_type,
+                buf.as_mut_ptr(),
+                &mut size,
+            )
+        };
+        assert_eq!(status, ERROR_SUCCESS);
+        assert_eq!(buf, value);
     }
 }

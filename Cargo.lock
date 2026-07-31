@@ -1530,6 +1530,7 @@ dependencies = [
  "rustls",
  "rustls-native-certs",
  "rustls-pki-types",
+ "tempfile",
  "weave-common",
  "weave-core",
 ]
