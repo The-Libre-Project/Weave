@@ -17,7 +17,9 @@
 //!   - CertGetCertificateContextProperty returns a 20-byte SHA-1 placeholder
 //!     for the hash property IDs NPP queries (SHA1=3, key identifier=20); real
 //!     cert contexts (encoded bytes present) get a real SHA-1.
-//!   - CertFreeCertificateContext / CertCloseStore / CryptMsgClose are no-ops.
+//!   - CertFreeCertificateContext / CryptMsgClose are no-ops; CertCloseStore
+//!     validates the fake store handle and invalidates it — subsequent store
+//!     operations on the closed handle fail.
 //!
 //! Wine refs:
 //!   - CryptQueryObject:  dlls/crypt32/object.c — CRYPT_QueryEmbeddedMessageObject
@@ -34,6 +36,24 @@
 const FAKE_MSG_HANDLE: usize = 0x4D53_4700;
 /// Magic value for our fake HCERTSTORE — ASCII "STO\0"
 const FAKE_STORE_HANDLE: usize = 0x5354_4F00;
+
+/// Open/closed state of the fake store. The single fake store handle
+/// (FAKE_STORE_HANDLE) is open between CertOpenStore / CryptQueryObject /
+/// CertOpenSystemStoreA and CertCloseStore. CertCloseStore invalidates it;
+/// store operations on a closed handle fail.
+static FAKE_STORE_OPEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Mark the fake store open and return its handle.
+fn open_fake_store() -> usize {
+    FAKE_STORE_OPEN.store(true, std::sync::atomic::Ordering::Relaxed);
+    FAKE_STORE_HANDLE
+}
+
+/// True if `h_cert_store` is the fake store handle and the store is currently
+/// open (not yet closed by CertCloseStore).
+fn fake_store_is_open(h_cert_store: usize) -> bool {
+    h_cert_store == FAKE_STORE_HANDLE && FAKE_STORE_OPEN.load(std::sync::atomic::Ordering::Relaxed)
+}
 
 // Size of CMSG_SIGNER_INFO on 64-bit Windows, from wincrypt.h line 866:
 //
@@ -232,7 +252,9 @@ pub unsafe extern "win64" fn crypt_query_object(
         unsafe { *pdw_format_type = 1 };
     }
     if !ph_cert_store.is_null() {
-        unsafe { *ph_cert_store = FAKE_STORE_HANDLE };
+        // SAFETY: ph_cert_store is a guest-supplied output pointer, non-null
+        // checked above; the Win32 ABI guarantees it is writable for one usize.
+        unsafe { *ph_cert_store = open_fake_store() };
     }
     if !ph_msg.is_null() {
         unsafe { *ph_msg = FAKE_MSG_HANDLE };
@@ -384,8 +406,8 @@ pub unsafe extern "win64" fn cert_find_certificate_in_store(
     const CERT_COMPARE_NAME_STR_W: u32 = 8;
     const CERT_INFO_SUBJECT_FLAG: u32 = 7;
 
-    if h_cert_store != FAKE_STORE_HANDLE {
-        eprintln!("weave/CertFindCertificateInStore: unknown store → NULL");
+    if !fake_store_is_open(h_cert_store) {
+        eprintln!("weave/CertFindCertificateInStore: unknown or closed store → NULL");
         weave_common::set_last_error(CRYPT_E_NOT_FOUND);
         return core::ptr::null();
     }
@@ -680,18 +702,38 @@ pub unsafe extern "win64" fn cert_free_certificate_context(_p_cert_context: *con
 
 /// CertCloseStore — close a HCERTSTORE handle.
 ///
-/// Wine ref: dlls/crypt32/store.c — CertCloseStore decrements the store's
-/// refcount and frees it when it reaches zero. FAKE_STORE_HANDLE is a sentinel
-/// with no real resources.
+/// Wine ref: dlls/crypt32/store.c — CertCloseStore returns TRUE for a NULL
+/// handle, FALSE for a non-NULL handle whose magic is invalid, else delegates to
+/// the store vtbl's release. The in-memory store (MemStore_release) decrements
+/// its refcount and frees the store when it reaches zero, or immediately under
+/// CERT_CLOSE_STORE_FORCE_FLAG; with CERT_CLOSE_STORE_CHECK_FLAG and refs still
+/// outstanding it returns CRYPT_E_PENDING_CLOSE and CertCloseStore fails.
+///
+/// Our fake store is a single sentinel (FAKE_STORE_HANDLE) with no refcount and
+/// no heap allocation. Closing it invalidates the handle: later store operations
+/// on it fail. dwFlags are accepted and ignored — the in-memory store never
+/// holds outstanding references, so CERT_CLOSE_STORE_CHECK_FLAG (2) finds
+/// nothing pending close and CERT_CLOSE_STORE_FORCE_FLAG (1) is trivially
+/// satisfied (Wine's MemStore_release semantics for a store at ref==1).
 #[unsafe(no_mangle)]
-pub unsafe extern "win64" fn cert_close_store(_h_cert_store: usize, _dw_flags: u32) -> i32 {
+pub unsafe extern "win64" fn cert_close_store(h_cert_store: usize, _dw_flags: u32) -> i32 {
+    if h_cert_store == 0 {
+        return 1; // TRUE — Wine treats a NULL store handle as a successful no-op
+    }
+    if !fake_store_is_open(h_cert_store) {
+        weave_common::set_last_error(6); // ERROR_INVALID_HANDLE
+        return 0; // FALSE — unknown or already-closed handle
+    }
+    FAKE_STORE_OPEN.store(false, std::sync::atomic::Ordering::Relaxed);
+    eprintln!("weave/CertCloseStore: store closed");
     1 // TRUE
 }
 
 /// CertOpenSystemStoreA — open a certificate store by name.
 ///
 /// Wine ref: dlls/crypt32/store.c — CertOpenSystemStoreA opens a system store
-/// (e.g. "ROOT", "MY", "CA"). Returns a fake store handle so callers proceed.
+/// (e.g. "ROOT", "MY", "CA"). Returns the fake store handle, marked open, so
+/// callers proceed.
 ///
 /// # Safety
 /// `subsystem_protocol` is a null-terminated C string (store name); we ignore it.
@@ -700,21 +742,25 @@ pub unsafe extern "win64" fn cert_open_system_store_a(
     _h_prov: usize,
     _sz_subsystem_protocol: *const u8,
 ) -> usize {
-    FAKE_STORE_HANDLE
+    open_fake_store()
 }
 
 /// CertEnumCertificatesInStore — enumerate certificates in a store.
 ///
 /// Wine ref: dlls/crypt32/store.c — CertEnumCertificatesInStore walks the store
-/// chain. Returns NULL (no certificates) for our fake store.
+/// chain, returning NULL when the store is invalid (bad magic) or exhausted.
+/// Returns NULL (no certificates) for our fake store.
 ///
 /// # Safety
 /// `h_cert_store` and `pv_prev_context` are accepted but not dereferenced.
 // Wine ref: dlls/crypt32/store.c — CertEnumCertificatesInStore returns next CERT_CONTEXT in store or NULL if done; caller must free each context
 pub unsafe extern "win64" fn cert_enum_certificates_in_store(
-    _h_cert_store: usize,
+    h_cert_store: usize,
     _pv_prev_context: *const u8,
 ) -> *const u8 {
+    if !fake_store_is_open(h_cert_store) {
+        return std::ptr::null(); // closed/invalid store — mirror Wine's magic check
+    }
     std::ptr::null() // no certificates — fake store is empty
 }
 
@@ -771,7 +817,8 @@ pub unsafe extern "win64" fn cert_duplicate_certificate_context(
     &FAKE_CERT_CTX as *const FakeCertContext as *const u8
 }
 
-/// CertOpenStore — open a certificate store. Returns the fake store handle.
+/// CertOpenStore — open a certificate store. Returns the fake store handle,
+/// marked open.
 ///
 /// # Safety
 /// Pointer arguments are accepted but not dereferenced.
@@ -786,7 +833,7 @@ pub unsafe extern "win64" fn cert_open_store(
     _dw_flags: u32,
     _pv_para: *const u8,
 ) -> usize {
-    FAKE_STORE_HANDLE
+    open_fake_store()
 }
 
 pub fn resolve_crypt32(func: &str) -> Option<usize> {
@@ -2002,6 +2049,19 @@ mod tests {
         )
     }
 
+    /// Guards the shared fake-store open/closed state. Tests run in parallel;
+    /// without the lock a close test could invalidate the store mid-test.
+    static STORE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Acquire the store lock and open the fake store. Hold the returned guard
+    /// for the whole test so parallel tests don't interfere with the shared
+    /// open/closed state.
+    fn with_open_store() -> std::sync::MutexGuard<'static, ()> {
+        let guard = STORE_LOCK.lock().unwrap();
+        FAKE_STORE_OPEN.store(true, std::sync::atomic::Ordering::Relaxed);
+        guard
+    }
+
     #[test]
     fn find_any_empty_store_returns_null() {
         let unknown = FAKE_STORE_HANDLE.wrapping_add(0x1234);
@@ -2021,6 +2081,7 @@ mod tests {
 
     #[test]
     fn find_any_populated_store_returns_first_cert() {
+        let _guard = with_open_store();
         unsafe {
             let p = find(CERT_FIND_ANY, core::ptr::null(), core::ptr::null());
             assert_eq!(p, ctx0());
@@ -2029,6 +2090,7 @@ mod tests {
 
     #[test]
     fn find_any_iterates_then_returns_null() {
+        let _guard = with_open_store();
         unsafe {
             let first = find(CERT_FIND_ANY, core::ptr::null(), core::ptr::null());
             assert_eq!(first, ctx0());
@@ -2042,6 +2104,7 @@ mod tests {
 
     #[test]
     fn find_subject_str_matches_case_insensitively() {
+        let _guard = with_open_store();
         let needle = w("notepad");
         unsafe {
             let p = find(
@@ -2062,6 +2125,7 @@ mod tests {
 
     #[test]
     fn find_subject_str_no_match_returns_null() {
+        let _guard = with_open_store();
         let needle = w("bogus");
         unsafe {
             let p = find(
@@ -2076,6 +2140,7 @@ mod tests {
 
     #[test]
     fn find_str_null_para_matches_any() {
+        let _guard = with_open_store();
         unsafe {
             let p = find(
                 CERT_FIND_SUBJECT_STR_W,
@@ -2088,6 +2153,7 @@ mod tests {
 
     #[test]
     fn find_ansi_subject_str_matches() {
+        let _guard = with_open_store();
         let needle = b"notepad\0";
         unsafe {
             let p = find(CERT_FIND_SUBJECT_STR_A, needle.as_ptr(), core::ptr::null());
@@ -2097,6 +2163,7 @@ mod tests {
 
     #[test]
     fn find_issuer_str_matches_issuer_not_subject() {
+        let _guard = with_open_store();
         let needle = w("weave root");
         unsafe {
             // Both fake certs have issuer "Weave Root CA".
@@ -2121,6 +2188,7 @@ mod tests {
 
     #[test]
     fn find_subject_cert_returns_fake_cert_for_npp() {
+        let _guard = with_open_store();
         // NPP passes an empty CERT_INFO via CERT_FIND_SUBJECT_CERT; the fake PKI
         // treats it as a match so the signature check proceeds.
         unsafe {
@@ -2131,6 +2199,7 @@ mod tests {
 
     #[test]
     fn find_subject_str_iteration_skips_non_matching_certs() {
+        let _guard = with_open_store();
         let needle = w("notepad");
         unsafe {
             let first = find(
@@ -2347,5 +2416,140 @@ mod tests {
     #[test]
     fn resolver_registers_cert_get_certificate_context_property() {
         assert!(resolve_crypt32("CertGetCertificateContextProperty").is_some());
+    }
+
+    // ── CertCloseStore ───────────────────────────────────────────────────────
+
+    const ERROR_INVALID_HANDLE: u32 = 6;
+
+    #[test]
+    fn close_null_handle_returns_true() {
+        unsafe {
+            // Wine: CertCloseStore(NULL, ...) is a successful no-op.
+            assert_eq!(cert_close_store(0, 0), 1);
+        }
+    }
+
+    #[test]
+    fn close_open_store_returns_true() {
+        let _guard = with_open_store();
+        unsafe {
+            assert_eq!(cert_close_store(FAKE_STORE_HANDLE, 0), 1);
+        }
+    }
+
+    #[test]
+    fn close_twice_second_close_fails_with_invalid_handle() {
+        let _guard = with_open_store();
+        unsafe {
+            assert_eq!(cert_close_store(FAKE_STORE_HANDLE, 0), 1);
+            assert_eq!(cert_close_store(FAKE_STORE_HANDLE, 0), 0);
+            assert_eq!(weave_common::get_last_error(), ERROR_INVALID_HANDLE);
+        }
+    }
+
+    #[test]
+    fn close_invalid_handle_fails() {
+        unsafe {
+            let bogus = FAKE_STORE_HANDLE.wrapping_add(0x1234);
+            assert_eq!(cert_close_store(bogus, 0), 0);
+            assert_eq!(weave_common::get_last_error(), ERROR_INVALID_HANDLE);
+        }
+    }
+
+    #[test]
+    fn close_with_force_flag_returns_true() {
+        let _guard = with_open_store();
+        unsafe {
+            // CERT_CLOSE_STORE_FORCE_FLAG = 1 — always frees an open store.
+            assert_eq!(cert_close_store(FAKE_STORE_HANDLE, 1), 1);
+        }
+    }
+
+    #[test]
+    fn close_with_check_flag_returns_true() {
+        let _guard = with_open_store();
+        unsafe {
+            // CERT_CLOSE_STORE_CHECK_FLAG = 2 — the in-memory store holds no
+            // outstanding references, so nothing is pending close (Wine's
+            // MemStore_release returns ERROR_SUCCESS once the refcount is 0).
+            assert_eq!(cert_close_store(FAKE_STORE_HANDLE, 2), 1);
+        }
+    }
+
+    #[test]
+    fn close_with_check_and_force_flags_returns_true() {
+        let _guard = with_open_store();
+        unsafe {
+            assert_eq!(cert_close_store(FAKE_STORE_HANDLE, 1 | 2), 1);
+        }
+    }
+
+    #[test]
+    fn store_functions_fail_after_close() {
+        let _guard = with_open_store();
+        unsafe {
+            assert_eq!(cert_close_store(FAKE_STORE_HANDLE, 0), 1);
+            // Find on the closed handle fails with CRYPT_E_NOT_FOUND.
+            let p = find(CERT_FIND_ANY, core::ptr::null(), core::ptr::null());
+            assert!(p.is_null());
+            assert_eq!(weave_common::get_last_error(), CRYPT_E_NOT_FOUND);
+            // Enumeration on the closed handle returns NULL.
+            assert!(
+                cert_enum_certificates_in_store(FAKE_STORE_HANDLE, core::ptr::null()).is_null()
+            );
+        }
+    }
+
+    #[test]
+    fn reopen_after_close_makes_handle_valid_again() {
+        let _guard = with_open_store();
+        unsafe {
+            assert_eq!(cert_close_store(FAKE_STORE_HANDLE, 0), 1);
+            // CertOpenStore re-opens the fake store; the handle is valid again.
+            assert_eq!(
+                cert_open_store(0, 0, 0, 0, core::ptr::null()),
+                FAKE_STORE_HANDLE
+            );
+            assert_eq!(cert_close_store(FAKE_STORE_HANDLE, 0), 1);
+        }
+    }
+
+    #[test]
+    fn query_object_reopens_closed_store() {
+        let _guard = with_open_store();
+        unsafe {
+            assert_eq!(cert_close_store(FAKE_STORE_HANDLE, 0), 1);
+            // CryptQueryObject re-opens the store via *phCertStore; find works
+            // again on the returned handle.
+            let mut store_handle: usize = 0;
+            let mut msg_handle: usize = 0;
+            let mut enc: u32 = 0;
+            let mut content: u32 = 0;
+            let mut fmt: u32 = 0;
+            let path = w("signed.exe");
+            let ret = crypt_query_object(
+                1, // CERT_QUERY_OBJECT_FILE
+                path.as_ptr() as *const u8,
+                0,
+                0,
+                0,
+                &mut enc,
+                &mut content,
+                &mut fmt,
+                &mut store_handle,
+                &mut msg_handle,
+                core::ptr::null_mut(),
+            );
+            assert_eq!(ret, 1);
+            assert_eq!(store_handle, FAKE_STORE_HANDLE);
+            let p = find(CERT_FIND_ANY, core::ptr::null(), core::ptr::null());
+            assert_eq!(p, ctx0());
+        }
+    }
+
+    #[test]
+    fn resolver_registers_cert_close_store() {
+        assert!(resolve_crypt32("CertCloseStore").is_some());
     }
 }
