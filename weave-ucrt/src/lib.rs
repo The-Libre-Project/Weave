@@ -2103,11 +2103,21 @@ pub unsafe extern "win64" fn ucrt_beginthreadex(
     // `unsigned int (__stdcall *)(void *)` on x86-64.
     let join_handle = std::thread::spawn(move || {
         thread_start_gate.wait_until_resumed();
+        // TerminateThread before the thread started (CREATE_SUSPENDED): never
+        // run guest code; the completion was already signalled by TerminateThread.
+        if thread_start_gate.is_terminate_requested() {
+            return;
+        }
         let _teb = weave_core::teb::setup_thread();
         weave_core::apc::register_current_thread(thread_apc);
         let fn_ptr: unsafe extern "win64" fn(*mut u8) -> u32 =
             unsafe { std::mem::transmute(fn_addr as *const u8) };
         let ret = unsafe { fn_ptr(param_addr as *mut u8) };
+        // TerminateThread while running: do not overwrite the TerminateThread
+        // exit code — the completion was already set by TerminateThread.
+        if thread_start_gate.is_terminate_requested() {
+            return;
+        }
         eprintln!("weave/_beginthreadex: fn={fn_addr:#x} thread returned {ret}");
         let mut guard = completion_clone.result.lock().unwrap();
         *guard = Some(ret);

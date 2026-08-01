@@ -8968,6 +8968,12 @@ pub unsafe extern "win64" fn create_thread(
     // sole RCX argument, matching LPTHREAD_START_ROUTINE exactly on x86-64.
     let join_handle = std::thread::spawn(move || {
         thread_start_gate.wait_until_resumed();
+        // TerminateThread before the thread started (CREATE_SUSPENDED): never
+        // run guest code; the completion was already signalled by TerminateThread.
+        if thread_start_gate.is_terminate_requested() {
+            eprintln!("weave/CreateThread: thread never started (terminate requested)");
+            return;
+        }
         // Set up a TEB for this thread and point GS at it.  PE code accesses
         // TEB fields via GS-relative loads (gs:[0x10], gs:[0x58], etc.).  Without
         // this, GS points to the pthread TCB and any gs:[offset] read returns
@@ -8990,6 +8996,14 @@ pub unsafe extern "win64" fn create_thread(
         let fn_ptr: unsafe extern "win64" fn(*mut u8) -> u32 =
             unsafe { std::mem::transmute(fn_addr as *const u8) };
         let ret = unsafe { fn_ptr(param_addr as *mut u8) };
+        // TerminateThread while running: no DLL_THREAD_DETACH (Windows skips it
+        // for TerminateThread), and the TerminateThread exit code must not be
+        // overwritten by the guest's return value — the completion was already
+        // set by TerminateThread.
+        if thread_start_gate.is_terminate_requested() {
+            eprintln!("weave/CreateThread: thread-exit tid={my_tid} (terminate requested)");
+            return;
+        }
         // Dispatch DLL_THREAD_DETACH after guest thread proc returns.
         // Wine ref: dlls/ntdll/loader.c — LdrShutdownThread calls
         // LdrpCallInitRoutine for each loaded DLL with DLL_THREAD_DETACH.
@@ -12348,25 +12362,74 @@ pub unsafe extern "win64" fn get_exit_code_process(
 /// # Safety
 /// `lp_exit_code` must be a valid writable pointer or NULL.
 // Wine ref: dlls/kernelbase/thread.c:218 — calls NtQueryInformationThread(ThreadBasicInformation);
-// reads info.ExitStatus; STILL_ACTIVE (259) means thread is still running
-pub unsafe extern "win64" fn get_exit_code_thread(_h_thread: usize, lp_exit_code: *mut u32) -> i32 {
-    // Wine ref: dlls/kernelbase/thread.c — NtQueryInformationThread(ThreadBasicInformation).
-    // Weave: thread handle→completion map exists but exit code not exposed here; report STILL_ACTIVE.
-    if !lp_exit_code.is_null() {
-        unsafe { *lp_exit_code = 259 };
+// reads info.ExitStatus; STILL_ACTIVE (259) means thread is still running.
+// Invalid handle → STATUS_INVALID_HANDLE → FALSE + ERROR_INVALID_HANDLE.
+pub unsafe extern "win64" fn get_exit_code_thread(h_thread: usize, lp_exit_code: *mut u32) -> i32 {
+    if lp_exit_code.is_null() {
+        set_last_error(87); // ERROR_INVALID_PARAMETER
+        return 0;
     }
+    // GetCurrentThread() pseudo-handle (~0 = 0xFFFF...FFFE): read the
+    // thread-local exit code written by ExitThread / TerminateThread on self.
+    if h_thread == !1usize {
+        let code = EXIT_THREAD_TLS.with(|tls| (*tls.borrow()).unwrap_or(259));
+        unsafe { *lp_exit_code = code };
+        return 1; // TRUE
+    }
+    // Real thread handle — read the completion state. STILL_ACTIVE (259) while
+    // the thread function is still running, the exit code once it has exited
+    // (naturally via return, or forcibly via ExitThread / TerminateThread).
+    let Some(completion) = handles::get_thread_completion(h_thread) else {
+        set_last_error(6); // ERROR_INVALID_HANDLE
+        return 0;
+    };
+    let result = completion.result.lock().unwrap();
+    unsafe { *lp_exit_code = result.unwrap_or(259) };
     1 // TRUE
 }
 
-/// TerminateThread: terminate a thread (no-op stub).
+/// TerminateThread: force-terminate a thread with the given exit code.
+///
+/// Weave's in-process model cannot destroy a live std::thread, so termination
+/// is cooperative at the handle level: the exit code is stored and the
+/// completion state is signalled (so WaitForSingleObject wakes and
+/// GetExitCodeThread returns `dw_exit_code`), and the start gate's terminate
+/// flag is set so the trampoline exits without running DLL_THREAD_DETACH or
+/// overwriting the termination exit code.  A guest thread still inside guest
+/// code keeps running on the host (documented in-process-model gap).
 ///
 /// # Safety
-/// `h_thread` is accepted but not dereferenced.
-// Wine ref: dlls/kernelbase/thread.c:714 — calls NtTerminateThread(handle, exit_code);
-// handle == GetCurrentThread() causes the calling thread to exit immediately
-pub unsafe extern "win64" fn terminate_thread(_h_thread: usize, _dw_exit_code: u32) -> i32 {
-    warn_once("TerminateThread");
-    // No-op: thread termination not supported in Phase 1
+/// `h_thread` is not dereferenced.
+// Wine ref: dlls/kernelbase/thread.c:714 — TerminateThread(handle, exit_code)
+// → NtTerminateThread(handle, exit_code).  server/thread.c:1820 sets
+// thread->exit_code then kill_thread(thread, 1) — never DLL_THREAD_DETACH;
+// handle == current thread → reply->self so the calling thread exits itself.
+// Invalid handle → STATUS_INVALID_HANDLE → FALSE + ERROR_INVALID_HANDLE.
+pub unsafe extern "win64" fn terminate_thread(h_thread: usize, dw_exit_code: u32) -> i32 {
+    restrace!("TerminateThread({h_thread:#x}, {dw_exit_code:#x})");
+    eprintln!("weave/TerminateThread: h={h_thread:#x} exit_code={dw_exit_code:#x}");
+
+    // GetCurrentThread() pseudo-handle (~0 = 0xFFFF...FFFE): terminate the
+    // calling thread — behaves like ExitThread (park forever, never returns).
+    if h_thread == !1usize {
+        eprintln!("weave/TerminateThread: self (GetCurrentThread) → ExitThread");
+        exit_thread(dw_exit_code);
+    }
+
+    let Some(completion) = handles::get_thread_completion(h_thread) else {
+        eprintln!("weave/TerminateThread: h={h_thread:#x} → FALSE (ERROR_INVALID_HANDLE)");
+        set_last_error(6); // ERROR_INVALID_HANDLE
+        return 0;
+    };
+
+    if let Some(gate) = handles::get_thread_start_gate(h_thread) {
+        gate.request_terminate();
+    }
+
+    let mut guard = completion.result.lock().unwrap();
+    *guard = Some(dw_exit_code);
+    completion.condvar.notify_all();
+    eprintln!("weave/TerminateThread: h={h_thread:#x} → TRUE (exit_code={dw_exit_code:#x})");
     1 // TRUE
 }
 

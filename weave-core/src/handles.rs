@@ -14,6 +14,7 @@
 //! Callers must use `STDIN_HANDLE`, `STDOUT_HANDLE`, `STDERR_HANDLE` (or call
 //! `get_fd(handle)`) — never assume a handle value equals a Linux fd number.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
 
 /// Caller-owned state retained from an overlapped directory-watch request.
@@ -119,6 +120,9 @@ pub struct ThreadCompletion {
 pub struct ThreadStartGate {
     suspend_count: Mutex<u32>,
     condvar: Condvar,
+    /// Set by TerminateThread so the trampoline exits without running guest
+    /// code (or overwriting the TerminateThread exit code).
+    terminate_requested: AtomicBool,
 }
 
 impl ThreadStartGate {
@@ -126,14 +130,29 @@ impl ThreadStartGate {
         Self {
             suspend_count: Mutex::new(u32::from(suspended)),
             condvar: Condvar::new(),
+            terminate_requested: AtomicBool::new(false),
         }
     }
 
     pub fn wait_until_resumed(&self) {
         let mut count = self.suspend_count.lock().unwrap();
-        while *count != 0 {
+        while *count != 0 && !self.terminate_requested.load(Ordering::Acquire) {
             count = self.condvar.wait(count).unwrap();
         }
+    }
+
+    /// Request termination of a thread created via this gate.  The trampoline
+    /// observes the flag after the start gate and after the guest function
+    /// returns, so a CREATE_SUSPENDED thread is woken and exits without ever
+    /// running guest code, and the TerminateThread exit code is not
+    /// overwritten when a running guest later returns.
+    pub fn request_terminate(&self) {
+        self.terminate_requested.store(true, Ordering::Release);
+        self.condvar.notify_all();
+    }
+
+    pub fn is_terminate_requested(&self) -> bool {
+        self.terminate_requested.load(Ordering::Acquire)
     }
 
     /// Increment the suspend count and return its prior value.

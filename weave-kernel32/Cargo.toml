@@ -51,3 +51,7 @@ path = "tests/overlapped_directory_watch_gate.rs"
 [[test]]
 name = "named_pipe_connect_gate"
 path = "tests/named_pipe_connect_gate.rs"
+
+[[test]]
+name = "terminate_thread_gate"
+path = "tests/terminate_thread_gate.rs"

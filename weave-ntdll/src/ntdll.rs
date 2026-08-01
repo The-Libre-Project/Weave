@@ -1092,6 +1092,12 @@ pub unsafe extern "win64" fn nt_create_thread_ex(
 
     let join_handle = std::thread::spawn(move || {
         thread_start_gate.wait_until_resumed();
+        // TerminateThread before the thread started (CREATE_SUSPENDED): never
+        // run guest code; the completion was already signalled by TerminateThread.
+        if thread_start_gate.is_terminate_requested() {
+            eprintln!("weave/NtCreateThreadEx: thread never started (terminate requested)");
+            return;
+        }
         let _teb = weave_core::teb::setup_thread();
         weave_core::apc::register_current_thread(thread_apc);
         let my_tid = unsafe { libc::syscall(libc::SYS_gettid) as u32 };
@@ -1099,6 +1105,12 @@ pub unsafe extern "win64" fn nt_create_thread_ex(
         let fn_ptr: unsafe extern "win64" fn(*mut u8) -> u32 =
             unsafe { std::mem::transmute(fn_addr as *const u8) };
         let ret = unsafe { fn_ptr(param_addr as *mut u8) };
+        // TerminateThread while running: do not overwrite the TerminateThread
+        // exit code — the completion was already set by TerminateThread.
+        if thread_start_gate.is_terminate_requested() {
+            eprintln!("weave/NtCreateThreadEx: thread-exit tid={my_tid} (terminate requested)");
+            return;
+        }
         eprintln!(
             "weave/NtCreateThreadEx: thread-exit tid={my_tid} fn={fn_addr:#x} exit_code={ret}"
         );
