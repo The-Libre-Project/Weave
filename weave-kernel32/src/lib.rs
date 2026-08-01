@@ -97,7 +97,7 @@ use weave_common::validators;
 use weave_common::{STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE};
 use weave_core::progress::mark_phase;
 use weave_core::restrace;
-use weave_core::{file_io, handles};
+use weave_core::{file_io, handles, named_pipe};
 
 // ── File mapping table ────────────────────────────────────────────────────────
 //
@@ -3042,13 +3042,13 @@ pub unsafe extern "win64" fn create_file_w(
         eprintln!("weave/CreateFileW: read-open path={win_path:?} access={dw_desired_access:#x} disp={dw_creation_disposition:#x}");
     }
 
-    // Named pipe paths: fall through to the normal file-open path.
-    // Callers that receive INVALID_HANDLE_VALUE generally handle it
-    // gracefully (e.g. PuTTY skips Pageant if \\.\pipe\pageant doesn't
-    // exist). A fake backing file does more harm than good — PuTTY would
-    // misidentify it as a real Pageant and crash on the empty response.
-    // If a specific binary truly needs a fake handle here, scope it in
-    // the caller, not in the generic CreateFileW path.
+    // Named pipe paths rendezvous through the in-process pipe registry.
+    // Callers that receive INVALID_HANDLE_VALUE generally handle it gracefully
+    // (e.g. PuTTY skips Pageant if \\.\pipe\pageant doesn't exist).
+    if win_path.starts_with(r"\\.\pipe\") {
+        return create_file_pipe_path(&win_path);
+    }
+
     let nt_disposition = file_io::win32_disposition_to_nt(dw_creation_disposition);
 
     // Wine ref: dlls/kernelbase/file.c:795 — CreateFileW maps NtCreateFile status
@@ -3079,6 +3079,52 @@ pub unsafe extern "win64" fn create_file_w(
             );
             usize::MAX // INVALID_HANDLE_VALUE
         }
+    }
+}
+
+/// Client side of a named pipe open (`CreateFileW` on a `\\.\pipe\` path).
+/// Resolves the server instance in the pipe registry and attaches as the
+/// client. Returns INVALID_HANDLE_VALUE with the last error set when no
+/// instance exists (ERROR_FILE_NOT_FOUND) or every instance is busy
+/// (ERROR_PIPE_BUSY).
+fn create_file_pipe_path(name: &str) -> usize {
+    match named_pipe::client_open(name) {
+        Ok((instance, completed)) => {
+            let handle = handles::alloc(handles::HandleKind::NamedPipe {
+                instance,
+                server: false,
+            });
+            if let Some(request) = completed {
+                // SAFETY: the request's OVERLAPPED was validated at
+                // ConnectNamedPipe time and remains caller-owned until the
+                // completion is written; the completion is exactly one write.
+                unsafe { complete_pending_connect(request) };
+            }
+            eprintln!("weave/CreateFileW(pipe): name={name:?} → handle={handle:#x}");
+            set_last_error(0);
+            handle
+        }
+        Err(code) => {
+            eprintln!("weave/CreateFileW(pipe): name={name:?} → INVALID_HANDLE_VALUE err={code}");
+            set_last_error(code);
+            usize::MAX
+        }
+    }
+}
+
+/// Complete a previously-registered overlapped ConnectNamedPipe request:
+/// write STATUS_SUCCESS into OVERLAPPED.Internal (0 bytes in InternalHigh) and
+/// signal hEvent so the waiter wakes.
+///
+/// # Safety
+/// `request.overlapped` was validated when the request was registered and the
+/// OVERLAPPED remains caller-owned until the caller observes the completion.
+unsafe fn complete_pending_connect(request: named_pipe::PendingConnect) {
+    let ovl = request.overlapped as *mut usize;
+    std::ptr::write_volatile(ovl, 0); // STATUS_SUCCESS
+    std::ptr::write_volatile(ovl.add(1), 0); // InternalHigh = 0 bytes
+    if request.event != 0 {
+        set_event(request.event);
     }
 }
 
@@ -3312,6 +3358,11 @@ pub extern "win64" fn close_handle(h_object: usize) -> i32 {
     // Thread handles are not file descriptors; handle them before delegating
     // to file_io::close_handle which would fail on non-fd handles.
     if handles::free_if_thread(h_object) {
+        set_last_error(0);
+        return 1; // TRUE
+    }
+    // Named pipe handles are registry-bound, not fd-backed.
+    if handles::free_if_named_pipe(h_object) {
         set_last_error(0);
         return 1; // TRUE
     }
@@ -14100,6 +14151,9 @@ pub extern "win64" fn get_file_type(h_file: usize) -> u32 {
     {
         return 0x0002; // FILE_TYPE_CHAR
     }
+    if handles::get_named_pipe(h_file).is_some() {
+        return 0x0003; // FILE_TYPE_PIPE
+    }
     if handles::get_fd(h_file).is_some() {
         0x0001 // FILE_TYPE_DISK
     } else {
@@ -19629,54 +19683,175 @@ pub unsafe extern "win64" fn get_comm_modem_status(
 
 // ── Named Pipe stubs ─────────────────────────────────────────────────────────
 
-/// ConnectNamedPipe: wait for a client to connect to a named pipe. Returns FALSE.
+/// ConnectNamedPipe: wait for a client to connect to a server pipe.
+///
+/// Blocking mode (`lp_overlapped == NULL`): the instance begins listening and
+/// waits until a client opens it via `CreateFileW`; returns TRUE on connect.
+/// If a client already connected, returns FALSE with ERROR_PIPE_CONNECTED.
+///
+/// Overlapped mode (`lp_overlapped != NULL`): sets `OVERLAPPED.Internal` to
+/// STATUS_PENDING, registers the request, and returns FALSE with
+/// ERROR_IO_PENDING. When a client connects, the OVERLAPPED completion fields
+/// are written and `hEvent` is signaled (the pipe handle, when `hEvent` is
+/// NULL, is not yet wired into WaitForSingleObject).
+///
+/// A client handle is rejected with ERROR_INVALID_FUNCTION (Wine test:
+/// ConnectNamedPipe(client) → ERROR_INVALID_FUNCTION); a non-pipe handle with
+/// ERROR_INVALID_HANDLE.
 ///
 /// # Safety
-/// Pointer arguments are accepted but not dereferenced.
-// Wine ref: dlls/kernelbase/sync.c:1350 — calls NtFsControlFile(FSCTL_PIPE_LISTEN); if overlapped
-// is NULL and status is STATUS_PENDING, calls WaitForSingleObject(pipe, INFINITE) to block;
-// overlapped->Internal set to STATUS_PENDING on async path
-pub unsafe extern "win64" fn connect_named_pipe(
-    _h_named_pipe: usize,
-    _lp_overlapped: usize,
-) -> i32 {
-    warn_once("ConnectNamedPipe");
-    0
+/// `lp_overlapped`, when non-null, must point to a valid 32-byte OVERLAPPED.
+// Wine ref: dlls/kernelbase/sync.c:1350 — ConnectNamedPipe sets
+// overlapped->Internal = STATUS_PENDING and calls NtFsControlFile(pipe, hEvent,
+// NULL, cvalue, (IO_STATUS_BLOCK*)overlapped, FSCTL_PIPE_LISTEN, ...). With no
+// overlapped, STATUS_PENDING blocks via WaitForSingleObject(pipe, INFINITE).
+// STATUS_PIPE_CONNECTED (client connected first) → ERROR_PIPE_CONNECTED.
+// FSCTL_PIPE_LISTEN on a client-side handle → STATUS_INVALID_DEVICE_REQUEST →
+// ERROR_INVALID_FUNCTION.
+pub unsafe extern "win64" fn connect_named_pipe(h_named_pipe: usize, lp_overlapped: usize) -> i32 {
+    let (instance, is_server) = match handles::get_named_pipe(h_named_pipe) {
+        Some(pair) => pair,
+        None => {
+            set_last_error(named_pipe::ERROR_INVALID_HANDLE);
+            return 0;
+        }
+    };
+    if !is_server {
+        set_last_error(named_pipe::ERROR_INVALID_FUNCTION);
+        return 0;
+    }
+    if lp_overlapped == 0 {
+        match named_pipe::server_connect(&instance, None) {
+            Ok(()) => {
+                set_last_error(0);
+                1
+            }
+            Err(code) => {
+                set_last_error(code);
+                0
+            }
+        }
+    } else {
+        let Some(ovl) = validators::validate_lpoverlapped(lp_overlapped, 32) else {
+            set_last_error(named_pipe::ERROR_INVALID_PARAMETER);
+            return 0;
+        };
+        // SAFETY: `ovl` was validated as a non-null, aligned 32-byte guest
+        // OVERLAPPED above. Only the documented Internal field is written and
+        // the hEvent field is read at its fixed x64 offset (+24).
+        let h_event = unsafe { std::ptr::read_unaligned(ovl.add(24) as *const usize) };
+        unsafe { std::ptr::write_volatile(ovl as *mut usize, named_pipe::STATUS_PENDING) };
+        let request = named_pipe::PendingConnect {
+            overlapped: lp_overlapped,
+            event: h_event,
+        };
+        match named_pipe::server_connect(&instance, Some(request)) {
+            Err(code) => {
+                set_last_error(code);
+                0
+            }
+            Ok(()) => {
+                set_last_error(0);
+                1
+            }
+        }
+    }
 }
 
-/// CreateNamedPipeA: create a named pipe. Returns INVALID_HANDLE_VALUE.
+/// CreateNamedPipeA: convert the ANSI name and delegate to CreateNamedPipeW.
 ///
 /// # Safety
-/// Pointer arguments are accepted but not dereferenced.
-// Wine ref: dlls/kernelbase/sync.c — converts ANSI name to Unicode via MultiByteToWideChar(CP_ACP);
-// delegates to CreateNamedPipeW; pipe name must begin with \\.\pipe\
+/// `lp_name` must be a valid, null-terminated ANSI string.
+// Wine ref: dlls/kernelbase/sync.c — CreateNamedPipeA converts the ANSI name via
+// RtlCreateUnicodeStringFromAsciiz then delegates to CreateNamedPipeW.
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "win64" fn create_named_pipe_a(
-    _lp_name: *const u8,
-    _dw_open_mode: u32,
-    _dw_pipe_mode: u32,
-    _n_max_instances: u32,
-    _n_out_buffer_size: u32,
-    _n_in_buffer_size: u32,
-    _n_default_timeout: u32,
-    _lp_security_attributes: usize,
+    lp_name: *const u8,
+    dw_open_mode: u32,
+    dw_pipe_mode: u32,
+    n_max_instances: u32,
+    n_out_buffer_size: u32,
+    n_in_buffer_size: u32,
+    n_default_timeout: u32,
+    lp_security_attributes: usize,
 ) -> usize {
-    warn_once("CreateNamedPipeA");
-    usize::MAX // INVALID_HANDLE_VALUE
+    let Some(wide) = decode_ansi_name(lp_name) else {
+        set_last_error(named_pipe::ERROR_INVALID_NAME);
+        return usize::MAX;
+    };
+    create_named_pipe_w(
+        wide.as_ptr(),
+        dw_open_mode,
+        dw_pipe_mode,
+        n_max_instances,
+        n_out_buffer_size,
+        n_in_buffer_size,
+        n_default_timeout,
+        lp_security_attributes,
+    )
 }
 
-/// WaitNamedPipeA: wait for a named pipe to become available. Returns FALSE.
+/// WaitNamedPipeA: convert the ANSI name and delegate to WaitNamedPipeW.
 ///
 /// # Safety
-/// Pointer arguments are accepted but not dereferenced.
-// Wine ref: dlls/kernelbase/sync.c — converts ANSI name to Unicode, delegates to WaitNamedPipeW;
-// WaitNamedPipeW calls NtFsControlFile(FSCTL_PIPE_WAIT) with timeout in 100ns units; NMPWAIT_USE_DEFAULT_WAIT → 0 timeout
+/// `lp_named_pipe_name` must be a valid, null-terminated ANSI string.
+// Wine ref: dlls/kernelbase/sync.c — WaitNamedPipeA converts the ANSI name then
+// delegates to WaitNamedPipeW.
 pub unsafe extern "win64" fn wait_named_pipe_a(
-    _lp_named_pipe_name: *const u8,
-    _n_timeout_ms: u32,
+    lp_named_pipe_name: *const u8,
+    n_timeout_ms: u32,
 ) -> i32 {
-    warn_once("WaitNamedPipeA");
-    0
+    let Some(wide) = decode_ansi_name(lp_named_pipe_name) else {
+        set_last_error(named_pipe::ERROR_INVALID_NAME);
+        return 0;
+    };
+    wait_named_pipe_w(wide.as_ptr(), n_timeout_ms)
+}
+
+/// Decode a null-terminated UTF-16 guest string into an owned String.
+///
+/// # Safety
+/// `lp` must be a valid pointer to a null-terminated UTF-16 string (or NULL).
+fn decode_utf16_name(lp: *const u16) -> Option<String> {
+    if lp.is_null() {
+        return None;
+    }
+    // SAFETY: the caller's contract bounds the scan at MAX_UTF16_LEN code
+    // units; a non-terminated pointer of that length is treated as invalid.
+    let mut len = 0usize;
+    while len < MAX_UTF16_LEN && unsafe { *lp.add(len) } != 0 {
+        len += 1;
+    }
+    if len == MAX_UTF16_LEN {
+        return None;
+    }
+    // SAFETY: the slice is bounded by the scan above and stays within guest
+    // memory owned by the caller for the duration of the call.
+    let slice = unsafe { std::slice::from_raw_parts(lp, len) };
+    Some(String::from_utf16_lossy(slice))
+}
+
+/// Decode a null-terminated ANSI (CP_ACP ≈ UTF-8 in Weave) guest string to
+/// a null-terminated UTF-16 buffer.
+///
+/// # Safety
+/// `lp` must be a valid pointer to a null-terminated byte string (or NULL).
+fn decode_ansi_name(lp: *const u8) -> Option<Vec<u16>> {
+    if lp.is_null() {
+        return None;
+    }
+    let mut len = 0usize;
+    while len < MAX_UTF16_LEN && unsafe { *lp.add(len) } != 0 {
+        len += 1;
+    }
+    if len == MAX_UTF16_LEN {
+        return None;
+    }
+    // SAFETY: bounded by the scan above; guest-owned for the call duration.
+    let bytes = unsafe { std::slice::from_raw_parts(lp, len) };
+    let mut wide: Vec<u16> = String::from_utf8_lossy(bytes).encode_utf16().collect();
+    wide.push(0);
+    Some(wide)
 }
 
 /// ClearCommBreak: clear a serial communication break condition. Returns FALSE.
@@ -20288,32 +20463,87 @@ pub unsafe extern "win64" fn write_process_memory(
 
 // ── Named Pipe stubs ───────────────────────────────────────────────────────────
 
-/// CreateNamedPipeW: create a named pipe.
+/// CreateNamedPipeW: create a named pipe instance.
 ///
-/// Phase A stub — returns INVALID_HANDLE_VALUE.
+/// Registers a new server instance in the global pipe registry and returns its
+/// handle. The name must begin with `\\.\pipe\`. `n_max_instances` limits the
+/// number of live instances for the name (255+ = unlimited).
 ///
 /// # Safety
-/// `lp_name` is accepted but not dereferenced.
+/// `lp_name` must be a valid, null-terminated UTF-16 string.
+// Wine ref: dlls/kernelbase/sync.c:1379 — CreateNamedPipeW validates the
+// \\.\pipe\ name via RtlDosPathNameToNtPathName_U, rejects an open_mode access
+// direction outside INBOUND/OUTBOUND/DUPLEX with ERROR_INVALID_PARAMETER, and
+// calls NtCreateNamedPipeFile; instance counts >= PIPE_UNLIMITED_INSTANCES are
+// treated as unlimited. The server handle is the instance identity; clients
+// rendezvous by name.
 pub unsafe extern "win64" fn create_named_pipe_w(
-    _lp_name: *const u16,
+    lp_name: *const u16,
     _dw_open_mode: u32,
     _dw_pipe_mode: u32,
-    _n_max_instances: u32,
+    n_max_instances: u32,
     _n_out_buffer_size: u32,
     _n_in_buffer_size: u32,
     _n_default_time_out: u32,
     _lp_security_attributes: usize,
 ) -> usize {
-    warn_once("CreateNamedPipeW");
-    usize::MAX
+    let Some(name) = decode_utf16_name(lp_name) else {
+        set_last_error(named_pipe::ERROR_INVALID_NAME);
+        return usize::MAX;
+    };
+    let max_instances = if n_max_instances >= named_pipe::PIPE_UNLIMITED_INSTANCES {
+        named_pipe::PIPE_UNLIMITED_INSTANCES
+    } else {
+        n_max_instances
+    };
+    match named_pipe::create_server_instance(&name, max_instances) {
+        Ok(instance) => {
+            let handle = handles::alloc(handles::HandleKind::NamedPipe {
+                instance,
+                server: true,
+            });
+            eprintln!("weave/CreateNamedPipeW: name={name:?} → handle={handle:#x}");
+            set_last_error(0);
+            handle
+        }
+        Err(code) => {
+            eprintln!("weave/CreateNamedPipeW: name={name:?} → INVALID_HANDLE_VALUE err={code}");
+            set_last_error(code);
+            usize::MAX
+        }
+    }
 }
 
-/// DisconnectNamedPipe: disconnect a named pipe.
+/// DisconnectNamedPipe: disconnect the client from a server pipe.
 ///
-/// Phase A stub — returns FALSE.
-pub extern "win64" fn disconnect_named_pipe(_h_named_pipe: usize) -> i32 {
-    warn_once("DisconnectNamedPipe");
-    0
+/// The instance stays owned by the server handle and can be re-armed with
+/// ConnectNamedPipe. On an already-disconnected instance returns FALSE with
+/// ERROR_PIPE_NOT_CONNECTED (Wine `test_DisconnectNamedPipe`).
+// Wine ref: dlls/kernelbase/sync.c:1506 — DisconnectNamedPipe issues
+// NtFsControlFile(pipe, ..., FSCTL_PIPE_DISCONNECT). With no client attached
+// the server returns STATUS_PIPE_NOT_CONNECTED → ERROR_PIPE_NOT_CONNECTED.
+pub extern "win64" fn disconnect_named_pipe(h_named_pipe: usize) -> i32 {
+    let (instance, is_server) = match handles::get_named_pipe(h_named_pipe) {
+        Some(pair) => pair,
+        None => {
+            set_last_error(named_pipe::ERROR_INVALID_HANDLE);
+            return 0;
+        }
+    };
+    if !is_server {
+        set_last_error(named_pipe::ERROR_INVALID_FUNCTION);
+        return 0;
+    }
+    match named_pipe::server_disconnect(&instance) {
+        Ok(()) => {
+            set_last_error(0);
+            1
+        }
+        Err(code) => {
+            set_last_error(code);
+            0
+        }
+    }
 }
 
 /// GetNamedPipeClientProcessId: get the client process ID of a named pipe.
@@ -21256,15 +21486,36 @@ pub unsafe extern "win64" fn unlock_file_ex(
     1
 }
 
-/// WaitNamedPipeW: wait for a named pipe to become available.
+/// WaitNamedPipeW: wait for a named pipe instance to become available.
 ///
-/// Phase A stub — returns FALSE.
+/// Returns TRUE when an instance is (or becomes) connectable within the
+/// timeout; FALSE with ERROR_SEM_TIMEOUT on timeout. `NMPWAIT_WAIT_FOREVER`
+/// (0xFFFF_FFFF) blocks until an instance appears and is connectable.
+///
+/// # Safety
+/// `lp_named_pipe_name` must be a valid, null-terminated UTF-16 string.
+// Wine ref: dlls/kernelbase/sync.c:1684 — WaitNamedPipeW rejects names without
+// the \??\PIPE\ prefix (ERROR_PATH_NOT_FOUND) and issues NtFsControlFile(
+// FSCTL_PIPE_WAIT) with the timeout in 100ns units; STATUS_TIMEOUT →
+// ERROR_SEM_TIMEOUT. Weave resolves the registry directly.
 pub unsafe extern "win64" fn wait_named_pipe_w(
-    _lp_named_pipe_name: *const u16,
-    _n_timeout: u32,
+    lp_named_pipe_name: *const u16,
+    n_timeout: u32,
 ) -> i32 {
-    warn_once("WaitNamedPipeW");
-    0
+    let Some(name) = decode_utf16_name(lp_named_pipe_name) else {
+        set_last_error(named_pipe::ERROR_INVALID_NAME);
+        return 0;
+    };
+    match named_pipe::wait_named_pipe(&name, n_timeout) {
+        Ok(()) => {
+            set_last_error(0);
+            1
+        }
+        Err(code) => {
+            set_last_error(code);
+            0
+        }
+    }
 }
 
 // ── System Info stubs ──────────────────────────────────────────────────────────

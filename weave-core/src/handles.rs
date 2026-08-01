@@ -191,6 +191,13 @@ pub enum HandleKind {
     /// A Win32 event object backed by a Linux eventfd (on Linux target).
     /// The i32 is the raw eventfd file descriptor.
     Event(i32),
+    /// A named pipe endpoint. `server` distinguishes the `CreateNamedPipeW`
+    /// handle from the client-side handle returned by `CreateFileW` on a
+    /// `\\.\pipe\` path. The Arc is shared with the global pipe registry.
+    NamedPipe {
+        instance: Arc<crate::named_pipe::PipeInstance>,
+        server: bool,
+    },
 }
 
 impl HandleKind {
@@ -222,6 +229,15 @@ impl HandleKind {
     pub fn as_event_fd(&self) -> Option<i32> {
         match self {
             HandleKind::Event(fd) => Some(*fd),
+            _ => None,
+        }
+    }
+
+    /// Return the shared pipe instance and server/client role for a named pipe
+    /// handle. `None` for non-pipe handles.
+    pub fn as_named_pipe(&self) -> Option<(Arc<crate::named_pipe::PipeInstance>, bool)> {
+        match self {
+            HandleKind::NamedPipe { instance, server } => Some((Arc::clone(instance), *server)),
             _ => None,
         }
     }
@@ -351,6 +367,29 @@ impl HandleTable {
             .and_then(|k| k.as_event_fd())
     }
 
+    fn get_named_pipe(
+        &self,
+        handle: usize,
+    ) -> Option<(Arc<crate::named_pipe::PipeInstance>, bool)> {
+        let index = handle.checked_sub(HANDLE_OFFSET)?;
+        self.slots.get(index)?.as_ref()?.as_named_pipe()
+    }
+
+    fn take_named_pipe(
+        &mut self,
+        handle: usize,
+    ) -> Option<(Arc<crate::named_pipe::PipeInstance>, bool)> {
+        let index = handle.checked_sub(HANDLE_OFFSET)?;
+        match self.slots.get(index) {
+            Some(Some(HandleKind::NamedPipe { instance, server })) => {
+                let pair = (Arc::clone(instance), *server);
+                self.slots[index] = None;
+                Some(pair)
+            }
+            _ => None,
+        }
+    }
+
     /// Free a handle slot. Returns `false` if the handle was already free or
     /// out of range. stdin/stdout/stderr (slots 0–2) cannot be freed.
     fn free(&mut self, handle: usize) -> bool {
@@ -462,6 +501,26 @@ pub fn alloc_event(fd: i32) -> usize {
 /// handle is invalid or not an Event handle.
 pub fn get_event_fd(handle: usize) -> Option<i32> {
     lock_table(table())?.get_event_fd(handle)
+}
+
+/// Return the shared pipe instance and server/client role for a named pipe
+/// handle. Returns `None` if the handle is invalid or not a pipe handle.
+pub fn get_named_pipe(handle: usize) -> Option<(Arc<crate::named_pipe::PipeInstance>, bool)> {
+    lock_table(table())?.get_named_pipe(handle)
+}
+
+/// Free a named pipe handle. When the handle is a server pipe, the instance is
+/// unregistered from the global pipe registry. Returns `false` for non-pipe
+/// handles (the caller should try other handle types).
+pub fn free_if_named_pipe(handle: usize) -> bool {
+    let instance = match lock_table(table()).and_then(|mut g| g.take_named_pipe(handle)) {
+        Some(pair) => pair,
+        None => return false,
+    };
+    if instance.1 {
+        crate::named_pipe::unregister(&instance.0);
+    }
+    true
 }
 
 /// Return the registry key path for a handle. Returns `None` if the handle is
@@ -588,6 +647,32 @@ mod tests {
         let h = t.alloc(HandleKind::File(42));
         assert!(h >= HANDLE_OFFSET);
         assert_eq!(t.get_fd(h), Some(42));
+    }
+
+    #[test]
+    fn named_pipe_handle_retains_instance_and_role() {
+        let mut t = fresh();
+        let name = format!(r"\\.\pipe\weave-handles-{}", std::process::id());
+        let instance = crate::named_pipe::create_server_instance(&name, 1).expect("create");
+        let h = t.alloc(HandleKind::NamedPipe {
+            instance: Arc::clone(&instance),
+            server: true,
+        });
+        let (got, server) = t.get_named_pipe(h).expect("pipe handle resolves");
+        assert!(server, "server pipe handle role");
+        assert!(Arc::ptr_eq(&got, &instance));
+
+        let h_client = t.alloc(HandleKind::NamedPipe {
+            instance: Arc::clone(&instance),
+            server: false,
+        });
+        let (_c, server) = t.get_named_pipe(h_client).expect("client handle resolves");
+        assert!(!server, "client pipe handle role");
+
+        assert!(t.take_named_pipe(h).is_some());
+        assert!(t.take_named_pipe(h).is_none(), "second take must fail");
+        assert!(t.get_named_pipe(h).is_none());
+        assert!(t.take_named_pipe(h_client).is_some());
     }
 
     #[test]

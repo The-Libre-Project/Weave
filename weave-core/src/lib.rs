@@ -10,6 +10,7 @@ pub mod handles;
 pub mod iat;
 pub mod loader;
 pub mod module_handles;
+pub mod named_pipe;
 pub mod pe;
 pub mod prefix;
 pub mod progress;
