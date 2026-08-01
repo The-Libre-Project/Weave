@@ -1501,47 +1501,195 @@ pub unsafe extern "win64" fn clsid_from_prog_id(
 // Wine ref: dlls/ole32/ole2.c — frees by tymed: HGLOBAL/HFILE/IStream/IStorage/HGDIOBJ; pUnkForRelease->Release.
 pub unsafe extern "win64" fn release_stg_medium(_pmedium: *mut u8) {}
 
-// Wine ref: dlls/ole32/ole2.c — registers IDropTarget for hwnd in internal hashtable; requires STA;
-// returns DRAGDROP_E_ALREADYREGISTERED (0x80040101) if hwnd already registered; CO_E_NOTINITIALIZED if no STA.
-/// RegisterDragDrop — register a window as a drag-drop target. Returns E_NOTIMPL.
+// ── OLE drag-and-drop: RegisterDragDrop / RevokeDragDrop / DoDragDrop ────────
+
+// OLE D&D HRESULT constants (FACILITY_OLE, winerror.h).
+#[allow(dead_code)] // S_DROP is the future DoDragDrop success result; only S_CANCEL is returned today
+const DRAGDROP_S_DROP: u32 = 0x0004_0100;
+const DRAGDROP_S_CANCEL: u32 = 0x0004_0101;
+const DRAGDROP_E_NOTREGISTERED: u32 = 0x8004_0100;
+const DRAGDROP_E_ALREADYREGISTERED: u32 = 0x8004_0101;
+const DRAGDROP_E_INVALIDHWND: u32 = 0x8004_0102;
+
+// IID_IDropTarget = {00000122-0000-0000-C000-000000000046} (little-endian wire bytes)
+#[allow(dead_code)] // ABI contract for the future DoDragDrop loop; exercised by tests
+const IID_IDROPTARGET: [u8; 16] = [
+    0x22, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46,
+];
+
+/// POINTL: `LONG x; LONG y` (8 bytes) — the point argument to every IDropTarget
+/// drag method.
+///
+/// Wine ref: include/winnt.h — POINTL is a POINT with LONG members.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(dead_code)] // ABI contract for the future DoDragDrop loop; exercised by tests
+#[allow(clippy::upper_case_acronyms)] // canonical Win32 type name
+struct POINTL {
+    x: i32,
+    y: i32,
+}
+
+/// The COM `IDropTarget` vtable — 7 slots (the 3 IUnknown methods followed by
+/// DragEnter, DragOver, DragLeave, Drop).
+///
+/// Mirrors the `IStreamVtbl` layout pattern in this file: a `#[repr(C)]` struct
+/// of `win64` fn-pointer fields in interface order. Slot indices 3..=6 are the
+/// drag methods a drop-target implementation must provide.
+///
+/// Wine ref: include/oleidl.h — IDropTargetVtbl order: QueryInterface, AddRef,
+/// Release, DragEnter, DragOver, DragLeave, Drop.
+#[repr(C)]
+#[allow(dead_code)] // ABI contract for the future DoDragDrop loop; exercised by tests
+struct IDropTargetVtbl {
+    query_interface: unsafe extern "win64" fn(*mut (), *const u8, *mut *mut ()) -> u32,
+    add_ref: unsafe extern "win64" fn(*mut ()) -> u32,
+    release: unsafe extern "win64" fn(*mut ()) -> u32,
+    drag_enter: unsafe extern "win64" fn(*mut (), *mut (), u32, *const POINTL, *mut u32) -> u32,
+    drag_over: unsafe extern "win64" fn(*mut (), u32, *const POINTL, *mut u32) -> u32,
+    drag_leave: unsafe extern "win64" fn(*mut ()) -> u32,
+    drop: unsafe extern "win64" fn(*mut (), *mut (), u32, *const POINTL, *mut u32) -> u32,
+}
+
+/// A window's registered IDropTarget, holding one owning reference.
+///
+/// The reference is taken with `com_add_ref` at registration and balanced with
+/// `com_release` at revocation — the same lifetime contract Wine keeps on the
+/// "OleDropTargetInterface" window prop.
+struct DropTargetEntry {
+    target: *mut (), // IDropTarget* — AddRef'd on register, Release'd on revoke
+}
+
+// SAFETY: entry.target is only ever accessed while holding the DROP_TARGETS
+// mutex, making the raw pointer safe to share across threads.
+unsafe impl Send for DropTargetEntry {}
+unsafe impl Sync for DropTargetEntry {}
+
+static DROP_TARGETS: OnceLock<Mutex<HashMap<usize, DropTargetEntry>>> = OnceLock::new();
+
+fn drop_target_table() -> &'static Mutex<HashMap<usize, DropTargetEntry>> {
+    DROP_TARGETS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+// Wine ref: dlls/ole32/ole2.c:540 — RegisterDragDrop stores an AddRef'd
+// IDropTarget keyed by hwnd (as the "OleDropTargetInterface" window prop). It
+// returns E_INVALIDARG for a NULL pDropTarget, DRAGDROP_E_INVALIDHWND when
+// IsWindow(hwnd) fails (including NULL hwnd), DRAGDROP_E_ALREADYREGISTERED when
+// the hwnd is already registered (leaving the existing registration intact), and
+// S_OK otherwise. Wine also gates on OleInitialize having been called
+// (E_OUTOFMEMORY) and on the window belonging to the current process
+// (DRAGDROP_E_INVALIDHWND); Weave omits both gates — no process-window model is
+// reachable from ole32 (weave-user32 holds the window table), and dropping the
+// gate keeps callers that skip OleInitialize working.
+///
+/// RegisterDragDrop — register a window as an OLE drag-and-drop target.
+///
+/// Stores `p_drop_target` (an `IDropTarget*`) keyed by `hwnd`, taking one
+/// owning reference on the interface. The registration is removed (and the
+/// reference released) by `revoke_drag_drop`.
+///
+/// Returns `S_OK` on success, `E_INVALIDARG` for a NULL `p_drop_target`,
+/// `DRAGDROP_E_INVALIDHWND` for a NULL `hwnd`, and
+/// `DRAGDROP_E_ALREADYREGISTERED` when `hwnd` is already registered.
 ///
 /// # Safety
-/// Pointer arguments are accepted but not dereferenced.
-// Wine ref: dlls/ole32/ole2.c — registers IDropTarget in hashtable; STA required; DRAGDROP_E_ALREADYREGISTERED if dup.
-pub unsafe extern "win64" fn register_drag_drop(hwnd: usize, _p_drop_target: *mut u8) -> i32 {
-    // Wine ref: dlls/ole32/ole2.c — returns CO_E_NOTINITIALIZED if no STA,
-    // DRAGDROP_E_ALREADYREGISTERED if already registered, S_OK on success.
-    // Weave stub: always succeeds — no real drop events are ever delivered.
+/// `p_drop_target` must be a live IDropTarget COM object with a valid vtable
+/// (refcount ≥ 1); an owning reference is taken and later released on revoke.
+pub unsafe extern "win64" fn register_drag_drop(hwnd: usize, p_drop_target: *mut u8) -> i32 {
+    if p_drop_target.is_null() {
+        return E_INVALIDARG as i32;
+    }
+    // Wine validates via IsWindow(hwnd); a NULL hwnd fails that check. Weave's
+    // window table lives in weave-user32 (unreachable from ole32), so only the
+    // NULL case is detectable here — non-zero garbage hwnds are accepted.
+    if hwnd == 0 {
+        return DRAGDROP_E_INVALIDHWND as i32;
+    }
+
+    let mut table = drop_target_table().lock().unwrap();
+    match table.entry(hwnd) {
+        std::collections::hash_map::Entry::Occupied(_) => {
+            // Wine keeps the first registration; the duplicate is rejected and
+            // the new target is not AddRef'd.
+            eprintln!(
+                "weave/ole32: RegisterDragDrop(hwnd={hwnd:#x}) → DRAGDROP_E_ALREADYREGISTERED"
+            );
+            return DRAGDROP_E_ALREADYREGISTERED as i32;
+        }
+        std::collections::hash_map::Entry::Vacant(vacant) => {
+            // SAFETY: caller contract guarantees p_drop_target is a live
+            // IDropTarget (refcount ≥ 1); com_add_ref gives the table an
+            // owning reference that revoke_drag_drop balances with com_release.
+            unsafe { com_add_ref(p_drop_target as *mut ()) };
+            vacant.insert(DropTargetEntry {
+                target: p_drop_target as *mut (),
+            });
+        }
+    }
+
     eprintln!("weave/ole32: RegisterDragDrop(hwnd={hwnd:#x}) → S_OK");
     0 // S_OK
 }
 
-// Wine ref: dlls/ole32/ole2.c — removes IDropTarget for hwnd from hashtable; returns
-// DRAGDROP_E_NOTREGISTERED (0x80040100) if hwnd was not registered; S_OK on success.
-/// RevokeDragDrop — revoke a window's drag-drop registration. Returns S_OK.
+// Wine ref: dlls/ole32/ole2.c:624 — RevokeDragDrop returns DRAGDROP_E_INVALIDHWND
+// when IsWindow(hwnd) fails, DRAGDROP_E_NOTREGISTERED when the hwnd has no
+// registration, otherwise it Releases the stored IDropTarget, removes the props,
+// and returns S_OK.
+/// RevokeDragDrop — revoke a window's drag-and-drop registration.
+///
+/// Releases the registered `IDropTarget` and removes the `hwnd` mapping.
+///
+/// Returns `S_OK` on success, `DRAGDROP_E_INVALIDHWND` for a NULL `hwnd`, and
+/// `DRAGDROP_E_NOTREGISTERED` when `hwnd` was never registered.
 ///
 /// # Safety
-/// No pointer dereferences.
-// Wine ref: dlls/ole32/ole2.c — removes IDropTarget from hashtable; DRAGDROP_E_NOTREGISTERED if not found.
+/// No pointer dereferences; only the internal table is mutated.
 pub unsafe extern "win64" fn revoke_drag_drop(hwnd: usize) -> i32 {
-    eprintln!("weave/ole32: RevokeDragDrop(hwnd={hwnd:#x}) → S_OK");
-    0 // S_OK
+    if hwnd == 0 {
+        return DRAGDROP_E_INVALIDHWND as i32;
+    }
+
+    let mut table = drop_target_table().lock().unwrap();
+    match table.remove(&hwnd) {
+        Some(entry) => {
+            // SAFETY: entry.target is the owning reference taken by
+            // register_drag_drop; no other code can free the object while the
+            // table holds it (removal happened above, so we now own it).
+            unsafe { com_release(entry.target) };
+            eprintln!("weave/ole32: RevokeDragDrop(hwnd={hwnd:#x}) → S_OK");
+            0 // S_OK
+        }
+        None => {
+            eprintln!("weave/ole32: RevokeDragDrop(hwnd={hwnd:#x}) → DRAGDROP_E_NOTREGISTERED");
+            DRAGDROP_E_NOTREGISTERED as i32
+        }
+    }
 }
 
-// Wine ref: dlls/ole32/ole2.c — creates tracker window; runs message loop tracking mouse;
-// calls IDropTarget::{DragEnter,DragOver,Drop,DragLeave}; returns DRAGDROP_S_DROP or DRAGDROP_S_CANCEL.
-/// DoDragDrop — initiate a drag-and-drop operation. Returns DRAGDROP_S_CANCEL.
+// Wine ref: dlls/ole32/ole2.c:736 — DoDragDrop returns E_INVALIDARG when any of
+// pDataObject / pDropSource / pdwEffect is NULL; otherwise it creates a tracker
+// window and runs a modal message loop dispatching IDropTarget events to the
+// registered targets, returning DRAGDROP_S_DROP or DRAGDROP_S_CANCEL. Weave:
+// bounded stub — no drag loop is run, so no IDropTarget events are delivered;
+// the argument validation matches Wine and the result is DRAGDROP_S_CANCEL.
+/// DoDragDrop — initiate an OLE drag-and-drop operation.
+///
+/// Validates the arguments as Wine does (`E_INVALIDARG` when any is NULL), then
+/// returns `DRAGDROP_S_CANCEL` without running a drag loop — no drop events are
+/// delivered in this milestone.
 ///
 /// # Safety
-/// Pointer arguments are accepted but not dereferenced.
-// Wine ref: dlls/ole32/ole2.c — tracker window + message loop; IDropTarget::{DragEnter,DragOver,Drop,DragLeave}.
+/// Pointer arguments are checked for NULL but not dereferenced.
 pub unsafe extern "win64" fn do_drag_drop(
-    _p_data_obj: *mut u8,
-    _p_drop_source: *mut u8,
+    p_data_obj: *mut u8,
+    p_drop_source: *mut u8,
     _dw_ok_effects: u32,
-    _pdw_effect: *mut u32,
+    pdw_effect: *mut u32,
 ) -> i32 {
-    0x0004_0101u32 as i32 // DRAGDROP_S_CANCEL
+    if p_data_obj.is_null() || p_drop_source.is_null() || pdw_effect.is_null() {
+        return E_INVALIDARG as i32;
+    }
+    DRAGDROP_S_CANCEL as i32
 }
 
 // Wine ref: dlls/ole32/ifs.c — StringFromCLSID calls StringFromGUID2 into a
@@ -4286,5 +4434,309 @@ mod tests {
         assert_eq!(unsafe { (vtbl.commit)(st, 0) }, S_OK);
         assert_eq!(unsafe { (vtbl.revert)(st) }, S_OK);
         assert_eq!(srelease(st), 0);
+    }
+
+    // ── RegisterDragDrop / RevokeDragDrop tests ──────────────────────────
+
+    /// Minimal IDropTarget for testing the registration contract. Tracks its
+    /// refcount so the table's AddRef/Release lifecycle is observable.
+    #[repr(C)]
+    struct TestDropTarget {
+        vtable: *const IDropTargetVtbl,
+        ref_count: u32,
+    }
+
+    unsafe extern "win64" fn test_drop_target_qi(
+        this: *mut (),
+        riid: *const u8,
+        ppv: *mut *mut (),
+    ) -> u32 {
+        if ppv.is_null() {
+            return E_INVALIDARG;
+        }
+        // SAFETY: ppv validated non-null above; writable output slot.
+        unsafe { *ppv = std::ptr::null_mut() };
+        if riid.is_null() {
+            return E_INVALIDARG;
+        }
+        // SAFETY: the caller dispatched through TEST_DROP_TARGET_VTBL, so this
+        // is a live TestDropTarget; riid is a 16-byte IID buffer per COM ABI.
+        let this = this as *mut TestDropTarget;
+        let iid = unsafe { std::ptr::read_unaligned(riid as *const [u8; 16]) };
+        if iid == IID_IUNKNOWN_BYTES || iid == IID_IDROPTARGET {
+            // SAFETY: this is a live object (IUnknown contract — ref_count > 0).
+            unsafe {
+                (*this).ref_count += 1;
+                *ppv = this as *mut ();
+            }
+            S_OK
+        } else {
+            E_NOINTERFACE
+        }
+    }
+
+    unsafe extern "win64" fn test_drop_target_add_ref(this: *mut ()) -> u32 {
+        // SAFETY: the caller dispatched through TEST_DROP_TARGET_VTBL, so this
+        // is a live TestDropTarget (IUnknown contract — ref_count > 0).
+        let this = this as *mut TestDropTarget;
+        unsafe { (*this).ref_count += 1 };
+        // SAFETY: ref_count > 0 before the write, so the object stays alive.
+        unsafe { (*this).ref_count }
+    }
+
+    unsafe extern "win64" fn test_drop_target_release(this: *mut ()) -> u32 {
+        // SAFETY: the caller dispatched through TEST_DROP_TARGET_VTBL, so this
+        // is a live TestDropTarget (IUnknown contract).
+        let this = this as *mut TestDropTarget;
+        let prev = unsafe { (*this).ref_count };
+        let new = prev - 1;
+        if new == 0 {
+            // SAFETY: Box::into_raw'd at construction; refcount 0 means no other
+            // references remain, so reclaiming the Box is sound.
+            unsafe { drop(Box::from_raw(this)) };
+        } else {
+            // SAFETY: ref_count > 0, so the object stays alive.
+            unsafe { (*this).ref_count = new };
+        }
+        new
+    }
+
+    unsafe extern "win64" fn test_drop_target_drag_enter(
+        _this: *mut (),
+        _p_data_obj: *mut (),
+        _grf_key_state: u32,
+        _pt: *const POINTL,
+        _pdw_effect: *mut u32,
+    ) -> u32 {
+        S_OK
+    }
+
+    unsafe extern "win64" fn test_drop_target_drag_over(
+        _this: *mut (),
+        _grf_key_state: u32,
+        _pt: *const POINTL,
+        _pdw_effect: *mut u32,
+    ) -> u32 {
+        S_OK
+    }
+
+    unsafe extern "win64" fn test_drop_target_drag_leave(_this: *mut ()) -> u32 {
+        S_OK
+    }
+
+    unsafe extern "win64" fn test_drop_target_drop(
+        _this: *mut (),
+        _p_data_obj: *mut (),
+        _grf_key_state: u32,
+        _pt: *const POINTL,
+        _pdw_effect: *mut u32,
+    ) -> u32 {
+        S_OK
+    }
+
+    static TEST_DROP_TARGET_VTBL: IDropTargetVtbl = IDropTargetVtbl {
+        query_interface: test_drop_target_qi,
+        add_ref: test_drop_target_add_ref,
+        release: test_drop_target_release,
+        drag_enter: test_drop_target_drag_enter,
+        drag_over: test_drop_target_drag_over,
+        drag_leave: test_drop_target_drag_leave,
+        drop: test_drop_target_drop,
+    };
+
+    fn make_test_drop_target() -> *mut TestDropTarget {
+        let t = Box::new(TestDropTarget {
+            vtable: &TEST_DROP_TARGET_VTBL,
+            ref_count: 1,
+        });
+        Box::into_raw(t)
+    }
+
+    // Distinct hwnds per test — the table is process-global and tests run in
+    // parallel, so collisions would make results nondeterministic. Each test
+    // cleans up its own registration; no test drains the whole table, since a
+    // global reset would race with in-flight registrations on other threads.
+    const HWND_T_A: usize = 0x1234_1001;
+    const HWND_T_B: usize = 0x1234_1002;
+    const HWND_T_C: usize = 0x1234_1003;
+    const HWND_T_D: usize = 0x1234_1004;
+    const HWND_T_E: usize = 0x1234_1005;
+
+    #[test]
+    fn idrop_target_vtable_dispatch() {
+        // Exercise the 7-slot IDropTargetVtbl layout (slots 3..=6 are the drag
+        // methods) — the ABI contract the future DoDragDrop loop dispatches on.
+        let target = make_test_drop_target();
+        let vtbl = unsafe { &*((*target).vtable) };
+        let pt = POINTL { x: 10, y: 20 };
+
+        let mut effect: u32 = 0;
+        let hr = unsafe {
+            (vtbl.drag_enter)(target as *mut (), std::ptr::null_mut(), 0, &pt, &mut effect)
+        };
+        assert_eq!(hr, S_OK);
+        let hr = unsafe { (vtbl.drag_over)(target as *mut (), 0, &pt, &mut effect) };
+        assert_eq!(hr, S_OK);
+        let hr = unsafe { (vtbl.drag_leave)(target as *mut ()) };
+        assert_eq!(hr, S_OK);
+        let hr =
+            unsafe { (vtbl.drop)(target as *mut (), std::ptr::null_mut(), 0, &pt, &mut effect) };
+        assert_eq!(hr, S_OK);
+
+        // QI for IID_IDropTarget / IID_IUnknown succeeds; unknown IID fails.
+        let mut ppv: *mut () = std::ptr::null_mut();
+        assert_eq!(
+            unsafe {
+                (vtbl.query_interface)(target as *mut (), IID_IDROPTARGET.as_ptr(), &mut ppv)
+            },
+            S_OK
+        );
+        assert_eq!(ppv, target as *mut ());
+        let bogus: [u8; 16] = [0xEE; 16];
+        assert_eq!(
+            unsafe { (vtbl.query_interface)(target as *mut (), bogus.as_ptr(), &mut ppv) },
+            E_NOINTERFACE
+        );
+
+        // 1 QI added a ref; release the QI ref and the initial ref.
+        assert_eq!(unsafe { (vtbl.release)(target as *mut ()) }, 1);
+        assert_eq!(unsafe { (vtbl.release)(target as *mut ()) }, 0);
+    }
+
+    #[test]
+    fn register_drag_drop_valid_hwnd_returns_s_ok() {
+        let target = make_test_drop_target();
+        let hr = unsafe { register_drag_drop(HWND_T_A, target as *mut u8) };
+        assert_eq!(hr, S_OK as i32);
+        // The table holds one owning reference on the target.
+        assert_eq!(unsafe { (*target).ref_count }, 2);
+
+        let hr = unsafe { revoke_drag_drop(HWND_T_A) };
+        assert_eq!(hr, S_OK as i32);
+        assert_eq!(unsafe { (*target).ref_count }, 1);
+        // Drop the test's own initial reference — frees the object.
+        unsafe { com_release(target as *mut ()) };
+    }
+
+    #[test]
+    fn register_drag_drop_null_target_returns_invalidarg() {
+        let hr = unsafe { register_drag_drop(HWND_T_B, std::ptr::null_mut()) };
+        assert_eq!(hr, E_INVALIDARG as i32);
+    }
+
+    #[test]
+    fn register_drag_drop_null_hwnd_returns_invalidhwnd() {
+        let target = make_test_drop_target();
+        let hr = unsafe { register_drag_drop(0, target as *mut u8) };
+        assert_eq!(hr, DRAGDROP_E_INVALIDHWND as i32);
+        // Failure path must not AddRef the target.
+        assert_eq!(unsafe { (*target).ref_count }, 1);
+        unsafe { com_release(target as *mut ()) };
+    }
+
+    #[test]
+    fn revoke_drag_drop_unregistered_returns_notregistered() {
+        let hr = unsafe { revoke_drag_drop(HWND_T_C) };
+        assert_eq!(hr, DRAGDROP_E_NOTREGISTERED as i32);
+    }
+
+    #[test]
+    fn revoke_drag_drop_null_hwnd_returns_invalidhwnd() {
+        let hr = unsafe { revoke_drag_drop(0) };
+        assert_eq!(hr, DRAGDROP_E_INVALIDHWND as i32);
+    }
+
+    #[test]
+    fn register_drag_drop_twice_returns_already_registered() {
+        let first = make_test_drop_target();
+        assert_eq!(
+            unsafe { register_drag_drop(HWND_T_D, first as *mut u8) },
+            S_OK as i32
+        );
+
+        // Duplicate registration is rejected and the new target is not AddRef'd;
+        // the first registration stays intact (Wine semantics).
+        let second = make_test_drop_target();
+        let hr = unsafe { register_drag_drop(HWND_T_D, second as *mut u8) };
+        assert_eq!(hr, DRAGDROP_E_ALREADYREGISTERED as i32);
+        assert_eq!(unsafe { (*second).ref_count }, 1);
+        unsafe { com_release(second as *mut ()) };
+
+        assert_eq!(unsafe { (*first).ref_count }, 2); // still held by the table
+        assert_eq!(unsafe { revoke_drag_drop(HWND_T_D) }, S_OK as i32);
+        assert_eq!(unsafe { (*first).ref_count }, 1);
+        unsafe { com_release(first as *mut ()) };
+    }
+
+    #[test]
+    fn registered_target_is_lookupable() {
+        let target = make_test_drop_target();
+        assert_eq!(
+            unsafe { register_drag_drop(HWND_T_E, target as *mut u8) },
+            S_OK as i32
+        );
+
+        // The stored mapping is retrievable from the table — the pointer the
+        // future DoDragDrop loop would dispatch drag events to.
+        let table = drop_target_table().lock().unwrap();
+        let entry = table.get(&HWND_T_E).expect("hwnd should be registered");
+        assert_eq!(entry.target, target as *mut ());
+        drop(table);
+
+        assert_eq!(unsafe { revoke_drag_drop(HWND_T_E) }, S_OK as i32);
+        unsafe { com_release(target as *mut ()) };
+    }
+
+    #[test]
+    fn do_drag_drop_null_args_returns_invalidarg() {
+        let mut effect: u32 = 0;
+        assert_eq!(
+            unsafe {
+                do_drag_drop(
+                    std::ptr::null_mut(),
+                    &mut effect as *mut u32 as *mut u8,
+                    0,
+                    &mut effect,
+                )
+            },
+            E_INVALIDARG as i32
+        );
+        assert_eq!(
+            unsafe {
+                do_drag_drop(
+                    &mut effect as *mut u32 as *mut u8,
+                    std::ptr::null_mut(),
+                    0,
+                    &mut effect,
+                )
+            },
+            E_INVALIDARG as i32
+        );
+        assert_eq!(
+            unsafe {
+                do_drag_drop(
+                    &mut effect as *mut u32 as *mut u8,
+                    &mut effect as *mut u32 as *mut u8,
+                    0,
+                    std::ptr::null_mut(),
+                )
+            },
+            E_INVALIDARG as i32
+        );
+    }
+
+    #[test]
+    fn do_drag_drop_bounded_stub_returns_cancel() {
+        let mut effect: u32 = 0;
+        let dummy: u8 = 0;
+        let hr = unsafe {
+            do_drag_drop(
+                &dummy as *const u8 as *mut u8,
+                &dummy as *const u8 as *mut u8,
+                0,
+                &mut effect,
+            )
+        };
+        assert_eq!(hr, DRAGDROP_S_CANCEL as i32);
     }
 }
