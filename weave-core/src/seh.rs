@@ -125,11 +125,30 @@ static CONSECUTIVE_FAULTS: std::sync::atomic::AtomicU32 = std::sync::atomic::Ato
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
+/// The host signals routed to [`on_fatal_signal`].
+///
+/// SIGTRAP is included so that `DebugBreak` — which raises SIGTRAP, the host
+/// equivalent of an x86 `int3` / STATUS_BREAKPOINT — lands in the crash and
+/// backtrace path instead of dying silently under the default action.  A guest
+/// `int3` executed directly inside PE code also delivers SIGTRAP with RIP in
+/// the PE range, where it is mapped to STATUS_BREAKPOINT (0x80000003).
+#[cfg(target_os = "linux")]
+fn fatal_signals() -> &'static [libc::c_int] {
+    &[
+        libc::SIGSEGV,
+        libc::SIGFPE,
+        libc::SIGILL,
+        libc::SIGBUS,
+        libc::SIGABRT,
+        libc::SIGTRAP,
+    ]
+}
+
 /// Register the PE's address range and install signal handlers.
 ///
 /// Must be called after [`crate::teb::setup`] and before jumping to the entry
-/// point.  Replaces any previously installed handlers for the four crash
-/// signals.  On non-Linux platforms this is a no-op.
+/// point.  Replaces any previously installed handlers for every signal in
+/// [`fatal_signals`].  On non-Linux platforms this is a no-op.
 pub fn install(image: &LoadedImage) {
     PE_BASE.store(image.base as usize, Ordering::Relaxed);
     PE_SIZE.store(image.size, Ordering::Relaxed);
@@ -139,11 +158,9 @@ pub fn install(image: &LoadedImage) {
 
     #[cfg(target_os = "linux")]
     {
-        install_one(libc::SIGSEGV);
-        install_one(libc::SIGFPE);
-        install_one(libc::SIGILL);
-        install_one(libc::SIGBUS);
-        install_one(libc::SIGABRT);
+        for sig in fatal_signals() {
+            install_one(*sig);
+        }
         eprintln!("weave: exception handlers installed");
     }
 }
@@ -707,6 +724,7 @@ fn print_weave_crash(
         libc::SIGILL => b"SIGILL",
         libc::SIGBUS => b"SIGBUS",
         libc::SIGABRT => b"SIGABRT",
+        libc::SIGTRAP => b"SIGTRAP",
         _ => b"SIG???",
     };
 
@@ -1041,6 +1059,7 @@ fn print_crash_report(
         libc::SIGFPE => "SIGFPE",
         libc::SIGILL => "SIGILL",
         libc::SIGBUS => "SIGBUS",
+        libc::SIGTRAP => "SIGTRAP",
         _ => "SIG???",
     };
 
@@ -1211,6 +1230,7 @@ fn signal_to_exception_code(sig: libc::c_int) -> u32 {
         libc::SIGFPE => 0xC000_0094,  // STATUS_INTEGER_DIVIDE_BY_ZERO
         libc::SIGILL => 0xC000_001D,  // STATUS_ILLEGAL_INSTRUCTION
         libc::SIGBUS => 0xC000_0006,  // STATUS_IN_PAGE_ERROR
+        libc::SIGTRAP => 0x8000_0003, // STATUS_BREAKPOINT
         _ => 0xC000_0001,             // STATUS_UNSUCCESSFUL
     }
 }
@@ -1222,6 +1242,29 @@ fn exception_name(code: u32) -> &'static str {
         0xC000_0094 => "STATUS_INTEGER_DIVIDE_BY_ZERO",
         0xC000_001D => "STATUS_ILLEGAL_INSTRUCTION",
         0xC000_0006 => "STATUS_IN_PAGE_ERROR",
+        0x8000_0003 => "STATUS_BREAKPOINT",
         _ => "STATUS_UNSUCCESSFUL",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fatal_signals_includes_sigtrap() {
+        // DebugBreak raises SIGTRAP; the handler set must cover it or the
+        // raise would fall through to the default action (silent SIGTRAP
+        // death) instead of Weave's crash-and-backtrace path.
+        assert!(fatal_signals().contains(&libc::SIGTRAP));
+    }
+
+    #[test]
+    fn sigtrap_maps_to_status_breakpoint() {
+        // A guest `int3` executed inside PE code delivers SIGTRAP with RIP in
+        // the PE range; on_fatal_signal translates it to the Windows
+        // exception code so the crash report (and exit status) match Windows.
+        assert_eq!(signal_to_exception_code(libc::SIGTRAP), 0x8000_0003);
+        assert_eq!(exception_name(0x8000_0003), "STATUS_BREAKPOINT");
     }
 }

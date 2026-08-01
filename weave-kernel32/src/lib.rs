@@ -16883,13 +16883,13 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
             peek_named_pipe as unsafe extern "win64" fn(_, _, _, _, _, _) -> _ as *const ()
                 as usize,
         ),
+        "DebugBreak" => Some(debug_break as *const () as usize),
         // ── Signal gap-fill: 41 kernel32 Phase A stubs ──
         "CreateRemoteThread" => Some(
             create_remote_thread as unsafe extern "win64" fn(_, _, _, _, _, _, _) -> _ as *const ()
                 as usize,
         ),
         "ExitThread" => Some(exit_thread as extern "win64" fn(_) as *const () as usize),
-        "DebugBreak" => Some(debug_break as *const () as usize),
         "FreeLibraryAndExitThread" => {
             Some(free_library_and_exit_thread as extern "win64" fn(_, _) as *const () as usize)
         }
@@ -19964,11 +19964,27 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
-/// DebugBreak: signal a debug break to the debugger.
+/// DebugBreak: cause a breakpoint exception in the current process.
 ///
-/// Phase A stub — no-op on Weave.
+/// Wine ref: dlls/kernelbase/debug.c:118 — DebugBreak jumps to ntdll's
+/// DbgBreakPoint, which executes an x86 `int3` / arm64 `brk #0xf000`,
+/// raising STATUS_BREAKPOINT (0x80000003).  With a debugger attached the
+/// breakpoint stops there; with no debugger the unhandled-exception filter
+/// terminates the process.
+///
+/// Weave maps this to the host breakpoint signal SIGTRAP — the Linux
+/// equivalent of `int3`.  weave_core::seh installs a SIGTRAP handler (see
+/// `fatal_signals`) so raise() lands in `on_fatal_signal`: it prints a crash
+/// report with a backtrace, then re-raises with SIG_DFL so the process
+/// terminates by SIGTRAP, or a host debugger (gdb) stops — which is exactly
+/// what DebugBreak is for.  If the raise ever returns (a debugger consumed
+/// and resumed the signal), DebugBreak returns normally, matching Windows
+/// behaviour when a debugger continues past the breakpoint.
 pub extern "win64" fn debug_break() {
-    warn_once("DebugBreak");
+    eprintln!("weave/DebugBreak: raising SIGTRAP (STATUS_BREAKPOINT 0x80000003)");
+    unsafe {
+        libc::raise(libc::SIGTRAP);
+    }
 }
 
 /// FreeLibraryAndExitThread: free a DLL and exit the thread.
@@ -23134,6 +23150,24 @@ mod tests {
                 "missing resolver entry for {name}"
             );
         }
+    }
+
+    #[test]
+    fn debug_break_resolver_registration() {
+        // The fault path itself is not unit-testable: debug_break raises
+        // SIGTRAP, which weave_core::seh::on_fatal_signal turns into a crash
+        // report and process termination (exit by SIGTRAP).  A unit test that
+        // called debug_break would kill the test process, so we assert only
+        // the contract that is safe in-process: the export resolves to the
+        // live debug_break function.  The SIGTRAP → STATUS_BREAKPOINT signal
+        // mapping is covered in weave-core/src/seh.rs unit tests.
+        let addr = resolve("kernel32.dll", "DebugBreak");
+        assert!(addr.is_some(), "missing resolver entry for DebugBreak");
+        assert_eq!(
+            addr,
+            Some(debug_break as *const () as usize),
+            "DebugBreak resolver entry must point at debug_break"
+        );
     }
 
     #[test]
