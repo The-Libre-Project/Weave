@@ -521,6 +521,7 @@ pub fn register_all_known_reals() {
     register_real("kernel32.dll", "WriteFile");
     register_real("ole32.dll", "CoCreateInstance");
     register_real("ole32.dll", "CreateStreamOnHGlobal");
+    register_real("ole32.dll", "GetHGlobalFromStream");
     register_real("ole32.dll", "DoDragDrop");
     register_real("ole32.dll", "OleDuplicateData");
     register_real("ole32.dll", "OleGetClipboard");

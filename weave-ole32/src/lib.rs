@@ -20,11 +20,16 @@
 //! - `CLSIDFromString` / `IIDFromString` — parse a GUID string.
 //! - `CoSetProxyBlanket` — no-op security blanket (stub).
 //! - `OleInitialize` / `OleUninitialize` — delegate to Co* variants.
+//! - `CoGetMalloc` — process task allocator (IMalloc singleton).
+//! - `CreateStreamOnHGlobal` / `GetHGlobalFromStream` — an IStream over an
+//!   HGLOBAL (full 14-slot vtable: Read/Write/Seek/SetSize/CopyTo/Commit/
+//!   Revert/LockRegion/UnlockRegion/Stat/Clone).
 //!
 //! ## What is NOT implemented
 //!
 //! Marshalling, proxy/stub infrastructure, apartment threading, ROT,
-//! moniker binding, structured storage, etc. These are Phase 4+ concerns.
+//! moniker binding, structured storage (IStorage/compound files), etc.
+//! These are Phase 4+ concerns.
 
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -116,11 +121,11 @@ unsafe extern "win64" fn dde_iunknown_release(_this: usize) -> u32 {
 const S_OK: u32 = 0x0000_0000;
 const S_FALSE: u32 = 0x0000_0001;
 const E_INVALIDARG: u32 = 0x8007_0057;
-#[allow(dead_code)]
 const E_OUTOFMEMORY: u32 = 0x8007_000E;
 const REGDB_E_CLASSNOTREG: u32 = 0x8004_0154;
 const CO_E_NOTINITIALIZED: u32 = 0x8004_001E;
 const E_NOTIMPL: u32 = 0x8000_4001;
+const E_NOINTERFACE: u32 = 0x8000_4002;
 const REGDB_E_IIDNOTREG: u32 = 0x8004_0164;
 const RPC_E_CALL_REJECTED: u32 = 0x8001_0001;
 
@@ -1435,30 +1440,652 @@ pub unsafe extern "win64" fn co_get_malloc(
     0 // S_OK
 }
 
-// ── CreateStreamOnHGlobal (ole32.dll) ─────────────────────────────────────────
+// ── CreateStreamOnHGlobal / GetHGlobalFromStream (ole32.dll) ─────────────────
 
-// Wine ref: dlls/combase/hglobalstream.c — CreateStreamOnHGlobal(hGlobal,
-// fDeleteOnRelease, ppstm): allocates a handle_wrapper around hGlobal (or a
-// fresh GlobalAlloc if hGlobal==NULL), constructs an hglobal_stream COM object
-// implementing the full IStream vtable, writes IStream* into *ppstm; returns
-// S_OK. Weave: full IStream is Phase 3+; return E_NOTIMPL so callers can
-// detect the absence and fall back.
-/// CreateStreamOnHGlobal: create an IStream backed by an HGLOBAL (stub).
+// Wine ref: dlls/combase/hglobalstream.c — hglobal_stream implements the full
+// IStream vtable (14 methods) over a refcounted handle_wrapper that owns the
+// HGLOBAL. handle_wrapper refcount is shared across Clone'd streams; the
+// HGLOBAL is GlobalFree'd when the last wrapper ref drops and delete_on_release
+// is set. Behavioral contract from dlls/ole32/tests/hglobalstream.c:
+//   - Read past EOF returns S_OK with *pcbRead == 0 (never S_FALSE)
+//   - Seek uses only the low 32 bits of dlibMove (HighPart ignored), treats it
+//     as a signed i32, and returns STG_E_SEEKERROR (0x80030019) when the target
+//     would land before 0 or past 0xFFFFFFFF (win8 no-wrap behavior). The
+//     stream position is unchanged on error, but *plibNewPosition is still set.
+//   - SetSize uses only the low 32 bits of libNewSize
+//   - LockRegion → STG_E_INVALIDFUNCTION; Commit/Revert/UnlockRegion → S_OK
+//   - Clone shares the handle (handle_addref) and copies the stream position
+//   - Stat zeroes the full STATSTG; type = STGTY_STREAM; cbSize = size;
+//     pwcsName/clsid stay NULL / GUID_NULL
+//   - CreateStreamOnHGlobal returns E_INVALIDARG when ppstm is NULL
+//   - GetHGlobalFromStream returns E_INVALIDARG unless the stream was created
+//     by CreateStreamOnHGlobal (vtable identity check)
+//
+// Weave Phase 2 note: HGLOBAL == raw heap pointer (see weave-kernel32
+// global_alloc — handle == pointer, GlobalLock is identity, GlobalUnlock is a
+// no-op), so the stream operates on the pointer directly and grows the block
+// with libc::realloc. Caller-supplied handles are libc-malloc'd (they come
+// from GlobalAlloc); malloc_usable_size mirrors Weave's GlobalSize.
+
+// IID_IStream = {0000000C-0000-0000-C000-000000000046}
+const IID_ISTREAM: [u8; 16] = [0x0C, 0, 0, 0, 0, 0, 0, 0, 0xC0, 0, 0, 0, 0, 0, 0, 0x46];
+// IID_ISequentialStream = {0C733A30-2A1C-11CE-ADE5-00AA0044773D}
+const IID_ISEQUENTIALSTREAM: [u8; 16] = [
+    0x30, 0x3A, 0x73, 0x0C, 0x1C, 0x2A, 0xCE, 0x11, 0xAD, 0xE5, 0x00, 0xAA, 0x00, 0x44, 0x77, 0x3D,
+];
+// IID_IUnknown = {00000000-0000-0000-C000-000000000046}
+const IID_IUNKNOWN_BYTES: [u8; 16] = [0, 0, 0, 0, 0, 0, 0, 0, 0xC0, 0, 0, 0, 0, 0, 0, 0x46];
+
+// STG_E_* storage errors (winerror.h, FACILITY_STORAGE 0x8003_xxxx)
+const STG_E_SEEKERROR: u32 = 0x8003_0019;
+const STG_E_INVALIDFUNCTION: u32 = 0x8003_0001;
+const STG_E_INVALIDPOINTER: u32 = 0x8003_0009;
+
+const STGTY_STREAM: u32 = 2;
+const STREAM_SEEK_SET: u32 = 0;
+const STREAM_SEEK_CUR: u32 = 1;
+const STREAM_SEEK_END: u32 = 2;
+
+// STATSTG win64 layout: pwcsName(0,8) type(8,4) pad(12,4) cbSize(16,8)
+// mtime(24,8) ctime(32,8) atime(40,8) grfMode(48,4) grfLocksSupported(52,4)
+// clsid(56,16) grfStateBits(72,4) reserved(76,4) → 80 bytes total.
+const STATSTG_SIZE: usize = 80;
+const STATSTG_TYPE_OFFSET: usize = 8;
+const STATSTG_CBSIZE_OFFSET: usize = 16;
+
+/// IStream vtable — 14 methods after IUnknown's 3 (17 slots total).
 ///
-/// Returns `E_NOTIMPL` — full IStream implementation is Phase 3+.
+/// Slot indices 3..=16 mirror the Windows `IStreamVtbl` order, which
+/// `co_marshal_hresult` / `co_unmarshal_hresult` rely on (Read=3, Write=4).
+#[repr(C)]
+struct IStreamVtbl {
+    query_interface: unsafe extern "win64" fn(*mut HGlobalStream, *const u8, *mut *mut ()) -> u32,
+    add_ref: unsafe extern "win64" fn(*mut HGlobalStream) -> u32,
+    release: unsafe extern "win64" fn(*mut HGlobalStream) -> u32,
+    read: unsafe extern "win64" fn(*mut HGlobalStream, *mut u8, u32, *mut u32) -> u32,
+    write: unsafe extern "win64" fn(*mut HGlobalStream, *const u8, u32, *mut u32) -> u32,
+    seek: unsafe extern "win64" fn(*mut HGlobalStream, i64, u32, *mut u64) -> u32,
+    set_size: unsafe extern "win64" fn(*mut HGlobalStream, u64) -> u32,
+    copy_to: unsafe extern "win64" fn(*mut HGlobalStream, *mut (), u64, *mut u64, *mut u64) -> u32,
+    commit: unsafe extern "win64" fn(*mut HGlobalStream, u32) -> u32,
+    revert: unsafe extern "win64" fn(*mut HGlobalStream) -> u32,
+    lock_region: unsafe extern "win64" fn(*mut HGlobalStream, u64, u64, u32) -> u32,
+    unlock_region: unsafe extern "win64" fn(*mut HGlobalStream, u64, u64, u32) -> u32,
+    stat: unsafe extern "win64" fn(*mut HGlobalStream, *mut u8, u32) -> u32,
+    clone: unsafe extern "win64" fn(*mut HGlobalStream, *mut *mut ()) -> u32,
+}
+
+/// Refcounted owner of the HGLOBAL, shared across Clone'd streams.
+///
+/// The HGLOBAL (Phase 2: a libc-malloc'd pointer) is freed when the refcount
+/// drops to zero *and* delete_on_release was set at creation. `size` is the
+/// logical stream size (Wine's handle->size), always ≤ u32::MAX.
+#[repr(C)]
+struct HandleWrapper {
+    ref_count: u32,
+    hglobal: usize,
+    size: u64,
+    delete_on_release: bool,
+}
+
+/// The hglobal_stream COM object: an IStream backed by a shared HandleWrapper.
+#[repr(C)]
+struct HGlobalStream {
+    vtable: *const IStreamVtbl,
+    ref_count: u32,
+    handle: *mut HandleWrapper,
+    position: u64,
+}
+
+// SAFETY: ref_count and position are only mutated under the single-threaded
+// process model the rest of this crate's COM objects assume (IUnknownImpl/
+// IClassFactoryImpl in weave-common use the same plain-u32 pattern). The
+// vtable is a 'static immutable.
+unsafe impl Send for HandleWrapper {}
+unsafe impl Sync for HandleWrapper {}
+unsafe impl Send for HGlobalStream {}
+unsafe impl Sync for HGlobalStream {}
+
+unsafe fn handle_addref(handle: *mut HandleWrapper) {
+    // SAFETY: handle is a valid HandleWrapper* from Box::into_raw, held alive
+    // by the caller (stream construction or Clone) for the duration of this
+    // call; ref_count < u32::MAX in practice.
+    unsafe { (*handle).ref_count += 1 };
+}
+
+/// Drop one reference to the shared HGLOBAL wrapper. Frees the HGLOBAL when
+/// the last ref drops and delete_on_release is set.
+unsafe fn handle_release(handle: *mut HandleWrapper) {
+    // SAFETY: handle is valid and every handle_release is balanced by a
+    // handle_addref / initial ref of 1, so ref_count ≥ 1 here.
+    let prev = unsafe { (*handle).ref_count };
+    let new = prev - 1;
+    if new == 0 {
+        // SAFETY: fields are read before the wrapper is reclaimed below.
+        let hg = unsafe { (*handle).hglobal };
+        let delete = unsafe { (*handle).delete_on_release };
+        if delete {
+            // SAFETY: hg is a Phase 2 HGLOBAL (libc-malloc'd pointer) and this
+            // wrapper is its sole owner; no other reference survives.
+            unsafe { libc::free(hg as *mut libc::c_void) };
+        }
+        // SAFETY: handle was Box::into_raw'd in handle_create; refcount 0
+        // means no other references remain, so reclaiming the Box is sound.
+        unsafe { drop(Box::from_raw(handle)) };
+    } else {
+        // SAFETY: ref_count > 0, so the wrapper stays alive.
+        unsafe { (*handle).ref_count = new };
+    }
+}
+
+/// Create a refcounted wrapper around `hglobal`, or around a fresh block when
+/// `hglobal` is 0. Returns NULL on allocation failure.
+unsafe fn handle_create(hglobal: usize, delete_on_release: bool) -> *mut HandleWrapper {
+    let hg = if hglobal != 0 {
+        hglobal
+    } else {
+        // Wine ref: dlls/combase/hglobalstream.c handle_create — allocates
+        // GlobalAlloc(GMEM_MOVEABLE|GMEM_NODISCARD|GMEM_SHARE, 0) when no
+        // handle is supplied. Weave's global_alloc returns NULL for size 0, so
+        // allocate a minimal 1-byte block; the logical size stays 0.
+        // SAFETY: libc::malloc(1) either returns a valid owned block or NULL.
+        let p = unsafe { libc::malloc(1) };
+        if p.is_null() {
+            return std::ptr::null_mut();
+        }
+        p as usize
+    };
+    let size = if hglobal != 0 {
+        // Wine ref: handle_create stores GlobalSize(hglobal). Weave's
+        // GlobalSize is malloc_usable_size (weave-kernel32 global_size), so
+        // match Weave's notion of an external block's size.
+        // SAFETY: hg is a live libc-malloc'd block (caller contract: an
+        // HGLOBAL from GlobalAlloc), valid for the malloc_usable_size call.
+        (unsafe { libc::malloc_usable_size(hg as *mut _) }) as u64
+    } else {
+        0
+    };
+    let wrapper = Box::new(HandleWrapper {
+        ref_count: 1,
+        hglobal: hg,
+        size,
+        delete_on_release,
+    });
+    Box::into_raw(wrapper)
+}
+
+fn hglobalstream_construct() -> *mut HGlobalStream {
+    let obj = Box::new(HGlobalStream {
+        vtable: &H_GLOBAL_STREAM_VTBL,
+        ref_count: 1,
+        handle: std::ptr::null_mut(),
+        position: 0,
+    });
+    Box::into_raw(obj)
+}
+
+unsafe extern "win64" fn stream_query_interface(
+    this: *mut HGlobalStream,
+    riid: *const u8,
+    ppv: *mut *mut (),
+) -> u32 {
+    if ppv.is_null() {
+        return E_INVALIDARG;
+    }
+    // SAFETY: ppv validated non-null above; caller contract guarantees a
+    // writable pointer slot.
+    unsafe { *ppv = std::ptr::null_mut() };
+    if riid.is_null() {
+        return E_INVALIDARG;
+    }
+    // SAFETY: riid validated non-null above; the caller's # Safety contract
+    // guarantees a 16-byte IID buffer.
+    let iid = unsafe { std::ptr::read_unaligned(riid as *const [u8; 16]) };
+    if iid == IID_IUNKNOWN_BYTES || iid == IID_ISEQUENTIALSTREAM || iid == IID_ISTREAM {
+        // SAFETY: this is a live stream (IUnknown contract — ref_count > 0).
+        unsafe {
+            (*this).ref_count += 1;
+            *ppv = this as *mut ();
+        }
+        S_OK
+    } else {
+        E_NOINTERFACE
+    }
+}
+
+unsafe extern "win64" fn stream_add_ref(this: *mut HGlobalStream) -> u32 {
+    // SAFETY: this is a live stream (IUnknown contract).
+    let count = unsafe { (*this).ref_count + 1 };
+    // SAFETY: ref_count > 0 before the write, so the stream stays alive.
+    unsafe { (*this).ref_count = count };
+    count
+}
+
+unsafe extern "win64" fn stream_release(this: *mut HGlobalStream) -> u32 {
+    // SAFETY: this is a live stream (IUnknown contract).
+    let prev = unsafe { (*this).ref_count };
+    let new = prev - 1;
+    if new == 0 {
+        // SAFETY: fields are read before the stream Box is reclaimed below;
+        // the handle wrapper may free the HGLOBAL on its own last ref.
+        let handle = unsafe { (*this).handle };
+        unsafe { handle_release(handle) };
+        // SAFETY: the stream was Box::into_raw'd at construction; no
+        // references remain (refcount 0), so reclaiming the Box is sound.
+        unsafe { drop(Box::from_raw(this)) };
+    } else {
+        // SAFETY: ref_count > 0, so the stream stays alive.
+        unsafe { (*this).ref_count = new };
+    }
+    new
+}
+
+unsafe extern "win64" fn stream_read(
+    this: *mut HGlobalStream,
+    pv: *mut u8,
+    cb: u32,
+    pcb_read: *mut u32,
+) -> u32 {
+    // Wine ref: dlls/combase/hglobalstream.c stream_Read — clamps the copy to
+    // (size - position), advances position, and returns S_OK even at EOF
+    // (pcbRead == 0, never S_FALSE).
+    let mut dummy: u32 = 0;
+    let read_out = if pcb_read.is_null() {
+        &mut dummy
+    } else {
+        pcb_read
+    };
+    // SAFETY: read_out is either the validated pcb_read or the stack dummy.
+    unsafe { *read_out = 0 };
+
+    if cb == 0 {
+        return S_OK;
+    }
+    if pv.is_null() {
+        return E_INVALIDARG;
+    }
+
+    // SAFETY: this is a live stream (IUnknown contract); the handle wrapper
+    // outlives it (released after the stream in stream_release).
+    let position = unsafe { (*this).position };
+    let size = unsafe { (*(*this).handle).size };
+    let len = if size >= position {
+        (size - position).min(cb as u64)
+    } else {
+        0
+    };
+    if len > 0 {
+        // SAFETY: the handle owns a libc-malloc'd block of at least `size`
+        // bytes; len is clamped to size - position, so the copy stays in-block.
+        // pv was validated non-null above (len > 0 implies cb > 0).
+        let hg = unsafe { (*(*this).handle).hglobal } as *mut u8;
+        unsafe { std::ptr::copy_nonoverlapping(hg.add(position as usize), pv, len as usize) };
+        // SAFETY: this is a live stream; position += len ≤ size ≤ u32::MAX.
+        unsafe { (*this).position = position + len };
+        // SAFETY: read_out is valid (validated above).
+        unsafe { *read_out = len as u32 };
+    }
+    S_OK
+}
+
+unsafe extern "win64" fn stream_write(
+    this: *mut HGlobalStream,
+    pv: *const u8,
+    cb: u32,
+    pcb_written: *mut u32,
+) -> u32 {
+    // Wine ref: dlls/combase/hglobalstream.c stream_Write — grows the block via
+    // SetSize when position + cb exceeds size, then copies; S_OK with
+    // *pcbWritten == cb. *pcbWritten is 0 on SetSize failure.
+    let mut dummy: u32 = 0;
+    let written_out = if pcb_written.is_null() {
+        &mut dummy
+    } else {
+        pcb_written
+    };
+    // SAFETY: written_out is either the validated pcb_written or a stack dummy.
+    unsafe { *written_out = 0 };
+
+    if cb == 0 {
+        return S_OK;
+    }
+    if pv.is_null() {
+        return E_INVALIDARG;
+    }
+
+    // SAFETY: this is a live stream (IUnknown contract).
+    let position = unsafe { (*this).position };
+    let need = position + cb as u64;
+    if need > 0xFFFF_FFFF {
+        // The stream lives in a 32-bit position/size space (Wine uses LowPart
+        // everywhere); a write needing more is out of range. Guard prevents an
+        // out-of-bounds copy that the LowPart truncation would otherwise allow.
+        return E_INVALIDARG;
+    }
+    let size = unsafe { (*(*this).handle).size };
+    if need > size {
+        let hr = stream_set_size(this, need);
+        if hr != S_OK {
+            return hr;
+        }
+    }
+    // SAFETY: the block was grown (or already large enough) via SetSize, so
+    // the copy at `position` of `cb` bytes stays in-block; pv validated above.
+    let hg = unsafe { (*(*this).handle).hglobal } as *mut u8;
+    unsafe { std::ptr::copy_nonoverlapping(pv, hg.add(position as usize), cb as usize) };
+    // SAFETY: this is a live stream; position advances by exactly cb.
+    unsafe { (*this).position = position + cb as u64 };
+    // SAFETY: written_out is valid (validated above).
+    unsafe { *written_out = cb };
+    S_OK
+}
+
+unsafe extern "win64" fn stream_seek(
+    this: *mut HGlobalStream,
+    dlib_move: i64,
+    origin: u32,
+    plib_new_position: *mut u64,
+) -> u32 {
+    // Wine ref: dlls/combase/hglobalstream.c stream_Seek — only the low 32
+    // bits of dlibMove are used, treated as a signed i32. STG_E_SEEKERROR when
+    // the target lands before 0 or past u32::MAX (win8 no-wrap). Position is
+    // unchanged on error; *plibNewPosition always receives the position.
+    // SAFETY: this is a live stream (IUnknown contract).
+    let base: i64 = match origin {
+        STREAM_SEEK_SET => 0,
+        STREAM_SEEK_CUR => (unsafe { (*this).position }) as i64,
+        STREAM_SEEK_END => (unsafe { (*(*this).handle).size }) as i64,
+        _ => {
+            // SAFETY: plibNewPosition validated (or null) below.
+            if !plib_new_position.is_null() {
+                unsafe { *plib_new_position = (*this).position };
+            }
+            return STG_E_SEEKERROR;
+        }
+    };
+    // Only the low 32 bits of the move are meaningful (Wine ignores HighPart).
+    let m = dlib_move as i32 as i64;
+    let target = base + m;
+    if !(0..=0xFFFF_FFFF).contains(&target) {
+        if !plib_new_position.is_null() {
+            // SAFETY: plibNewPosition validated non-null above.
+            unsafe { *plib_new_position = (*this).position };
+        }
+        return STG_E_SEEKERROR;
+    }
+    // SAFETY: this is a live stream; target is within [0, u32::MAX].
+    unsafe { (*this).position = target as u64 };
+    if !plib_new_position.is_null() {
+        // SAFETY: plibNewPosition validated non-null above; it is a valid
+        // writable ULARGE_INTEGER* per the caller's # Safety contract.
+        unsafe { *plib_new_position = (*this).position };
+    }
+    S_OK
+}
+
+unsafe extern "win64" fn stream_set_size(this: *mut HGlobalStream, lib_new_size: u64) -> u32 {
+    // Wine ref: dlls/combase/hglobalstream.c stream_SetSize — uses only the
+    // low 32 bits (LowPart); GlobalReAlloc's the block; updates size on
+    // success; E_OUTOFMEMORY when the realloc fails.
+    let new_size = (lib_new_size as u32) as u64;
+    // SAFETY: this is a live stream; the wrapper outlives it.
+    let handle = unsafe { (*this).handle };
+    let current = unsafe { (*handle).size };
+    if current == new_size {
+        return S_OK;
+    }
+    // SAFETY: hg is a live libc-malloc'd block owned by the wrapper; realloc
+    // keeps ownership in the wrapper. A 0-size request gets a 1-byte block so
+    // the pointer stays non-null (libc::realloc(p, 0) would free and return
+    // NULL, which we must not store as an owned handle).
+    let hg = unsafe { (*handle).hglobal };
+    let alloc_size = new_size.max(1) as usize;
+    let new_hg = unsafe { libc::realloc(hg as *mut libc::c_void, alloc_size) };
+    if new_hg.is_null() {
+        return E_OUTOFMEMORY;
+    }
+    // SAFETY: both wrapper fields are live (refcount > 0, held by this stream).
+    unsafe {
+        (*handle).hglobal = new_hg as usize;
+        (*handle).size = new_size;
+    }
+    S_OK
+}
+
+unsafe extern "win64" fn stream_copy_to(
+    this: *mut HGlobalStream,
+    dest: *mut (),
+    cb: u64,
+    pcb_read: *mut u64,
+    pcb_written: *mut u64,
+) -> u32 {
+    // Wine ref: dlls/combase/hglobalstream.c stream_CopyTo — chunked 128-byte
+    // read/write loop; accumulates totals; stops on FAILED hr or when a read
+    // returns fewer bytes than requested (EOF). dest must be a valid IStream.
+    if dest.is_null() {
+        return STG_E_INVALIDPOINTER;
+    }
+    let mut total_read: u64 = 0;
+    let mut total_written: u64 = 0;
+    let mut remaining = cb;
+    let mut hr: u32 = S_OK;
+    let mut buffer = [0u8; 128];
+    while remaining > 0 {
+        let chunk_size = remaining.min(128) as u32;
+        let mut chunk_read: u32 = 0;
+        hr = stream_read(this, buffer.as_mut_ptr(), chunk_size, &mut chunk_read);
+        if hr >= 0x8000_0000 {
+            break;
+        }
+        total_read += chunk_read as u64;
+        if chunk_read > 0 {
+            let mut chunk_written: u32 = 0;
+            // SAFETY: dest validated non-null above; for any valid IStream the
+            // vtable pointer and its slot 4 (Write) are readable — same layout
+            // used by co_marshal_hresult and by IStreamVtbl above.
+            let vtbl = unsafe { com_vtable(dest) };
+            let write: unsafe extern "win64" fn(*mut (), *const u8, u32, *mut u32) -> u32 =
+                unsafe { std::mem::transmute(*vtbl.add(4)) };
+            hr = write(dest, buffer.as_ptr(), chunk_read, &mut chunk_written);
+            if hr >= 0x8000_0000 {
+                break;
+            }
+            total_written += chunk_written as u64;
+        }
+        if chunk_read != chunk_size {
+            remaining = 0;
+        } else {
+            remaining -= chunk_read as u64;
+        }
+    }
+    if !pcb_read.is_null() {
+        // SAFETY: pcb_read validated non-null above; valid ULARGE_INTEGER*.
+        unsafe { *pcb_read = total_read };
+    }
+    if !pcb_written.is_null() {
+        // SAFETY: pcb_written validated non-null above; valid ULARGE_INTEGER*.
+        unsafe { *pcb_written = total_written };
+    }
+    hr
+}
+
+unsafe extern "win64" fn stream_commit(_this: *mut HGlobalStream, _flags: u32) -> u32 {
+    // Wine ref: stream_Commit — no-op for a memory-backed stream.
+    S_OK
+}
+
+unsafe extern "win64" fn stream_revert(_this: *mut HGlobalStream) -> u32 {
+    // Wine ref: stream_Revert — no-op for a memory-backed stream.
+    S_OK
+}
+
+unsafe extern "win64" fn stream_lock_region(
+    _this: *mut HGlobalStream,
+    _offset: u64,
+    _len: u64,
+    _lock_type: u32,
+) -> u32 {
+    // Wine ref: stream_LockRegion — region locking unsupported on HGLOBAL streams.
+    STG_E_INVALIDFUNCTION
+}
+
+unsafe extern "win64" fn stream_unlock_region(
+    _this: *mut HGlobalStream,
+    _offset: u64,
+    _len: u64,
+    _lock_type: u32,
+) -> u32 {
+    // Wine ref: stream_UnlockRegion — no-op, S_OK.
+    S_OK
+}
+
+unsafe extern "win64" fn stream_stat(
+    this: *mut HGlobalStream,
+    pstatstg: *mut u8,
+    _grf_stat_flag: u32,
+) -> u32 {
+    // Wine ref: stream_Stat — zeroes the whole STATSTG, sets type =
+    // STGTY_STREAM and cbSize = size; pwcsName and clsid stay NULL / GUID_NULL.
+    if pstatstg.is_null() {
+        return E_INVALIDARG;
+    }
+    // SAFETY: pstatstg validated non-null above; the caller's # Safety
+    // contract guarantees a writable buffer of at least sizeof(STATSTG) = 80
+    // bytes (win64 layout).
+    unsafe { std::ptr::write_bytes(pstatstg, 0, STATSTG_SIZE) };
+    // SAFETY: pstatstg is valid for 80 bytes; offsets are the named STATSTG
+    // layout constants; the stream/handle are live.
+    unsafe {
+        *(pstatstg.add(STATSTG_TYPE_OFFSET) as *mut u32) = STGTY_STREAM;
+        *(pstatstg.add(STATSTG_CBSIZE_OFFSET) as *mut u64) = (*(*this).handle).size;
+    }
+    S_OK
+}
+
+unsafe extern "win64" fn stream_clone(this: *mut HGlobalStream, ppstm: *mut *mut ()) -> u32 {
+    // Wine ref: stream_Clone — a new hglobal_stream sharing the same handle
+    // (handle_addref) and the same position.
+    if ppstm.is_null() {
+        return E_INVALIDARG;
+    }
+    // SAFETY: ppstm validated non-null above; writable pointer slot.
+    unsafe { *ppstm = std::ptr::null_mut() };
+    let clone = hglobalstream_construct();
+    if clone.is_null() {
+        return E_OUTOFMEMORY;
+    }
+    // SAFETY: this is a live stream (IUnknown contract); handle outlives it.
+    let handle = unsafe { (*this).handle };
+    unsafe { handle_addref(handle) };
+    // SAFETY: clone is a fresh Box::into_raw'd stream (refcount 1); assigning
+    // the shared handle and copying the position is sound, and the handle ref
+    // taken above balances the future handle_release.
+    unsafe {
+        (*clone).handle = handle;
+        (*clone).position = (*this).position;
+    }
+    // SAFETY: ppstm validated non-null above; clone outlives this call.
+    unsafe { *ppstm = clone as *mut () };
+    S_OK
+}
+
+static H_GLOBAL_STREAM_VTBL: IStreamVtbl = IStreamVtbl {
+    query_interface: stream_query_interface,
+    add_ref: stream_add_ref,
+    release: stream_release,
+    read: stream_read,
+    write: stream_write,
+    seek: stream_seek,
+    set_size: stream_set_size,
+    copy_to: stream_copy_to,
+    commit: stream_commit,
+    revert: stream_revert,
+    lock_region: stream_lock_region,
+    unlock_region: stream_unlock_region,
+    stat: stream_stat,
+    clone: stream_clone,
+};
+
+// Wine ref: dlls/combase/hglobalstream.c — CreateStreamOnHGlobal returns
+// E_INVALIDARG when ppstm is NULL; constructs the hglobal_stream (refcount 1)
+// and a handle_wrapper around hGlobal (or a fresh allocation when hGlobal is
+// NULL), then writes IStream* into *ppstm. fDeleteOnRelease is stored verbatim
+// on the wrapper — Wine frees an internally-allocated handle only when TRUE.
+/// CreateStreamOnHGlobal: create an IStream that reads/writes an HGLOBAL.
+///
+/// Returns `S_OK` and writes the IStream* into `pp_stm`. The HGLOBAL is
+/// grown in place as the stream is written to (Phase 2 HGLOBAL == raw heap
+/// pointer). When `h_global` is NULL a fresh block is allocated. When
+/// `f_delete_on_release` is non-zero the stream frees the HGLOBAL when its
+/// last reference (including any clones) is released.
 ///
 /// # Safety
-/// Pointer arguments are accepted but not dereferenced.
+/// `pp_stm` must be a valid writable pointer to a `usize` output slot, or
+/// null (in which case `E_INVALIDARG` is returned). `h_global` must be a
+/// valid HGLOBAL from `GlobalAlloc` (Phase 2: a live heap pointer), or 0.
 pub unsafe extern "win64" fn create_stream_on_hglobal(
-    _h_global: usize,
-    _f_delete_on_release: i32,
+    h_global: usize,
+    f_delete_on_release: i32,
     pp_stm: *mut usize,
 ) -> i32 {
-    if !pp_stm.is_null() {
-        unsafe { *pp_stm = 0 };
+    if pp_stm.is_null() {
+        return E_INVALIDARG as i32;
     }
-    eprintln!("weave/ole32: CreateStreamOnHGlobal → E_NOTIMPL (Phase 3+)");
-    0x8000_4001u32 as i32 // E_NOTIMPL
+    // SAFETY: pp_stm validated non-null above; writable output slot.
+    unsafe { *pp_stm = 0 };
+
+    let stream = hglobalstream_construct();
+    // SAFETY: the wrapper may fail to allocate (returns NULL) — in that case
+    // the stream is unowned and reclaimed here.
+    let handle = unsafe { handle_create(h_global, f_delete_on_release != 0) };
+    if handle.is_null() {
+        // SAFETY: stream is a fresh Box::into_raw'd object with no other
+        // references, so reclaiming it is sound.
+        unsafe { drop(Box::from_raw(stream)) };
+        return E_OUTOFMEMORY as i32;
+    }
+    // SAFETY: stream is a live Box::into_raw'd object (refcount 1).
+    unsafe { (*stream).handle = handle };
+    // SAFETY: pp_stm validated non-null above; stream outlives this call.
+    unsafe { *pp_stm = stream as usize };
+    eprintln!(
+        "weave/ole32: CreateStreamOnHGlobal(h={h_global:#x}, delete={f_delete_on_release}) → S_OK"
+    );
+    S_OK as i32
+}
+
+// Wine ref: dlls/combase/hglobalstream.c — GetHGlobalFromStream returns
+// E_INVALIDARG when either argument is NULL, or when the stream's vtable is
+// not the hglobal_stream vtable (i.e. it was not created by
+// CreateStreamOnHGlobal). Returns the backing HGLOBAL via *phglobal.
+/// GetHGlobalFromStream: retrieve the HGLOBAL backing a stream.
+///
+/// Returns `S_OK` and writes the HGLOBAL into `ph_global`, or `E_INVALIDARG`
+/// when the stream is NULL, `ph_global` is NULL, or the stream was not created
+/// by `CreateStreamOnHGlobal`.
+///
+/// # Safety
+/// `stream` must be a valid IStream* or 0. `ph_global` must be a valid
+/// writable pointer to a `usize` output slot, or null.
+pub unsafe extern "win64" fn get_hglobal_from_stream(stream: usize, ph_global: *mut usize) -> i32 {
+    if stream == 0 || ph_global.is_null() {
+        return E_INVALIDARG as i32;
+    }
+    let obj = stream as *mut HGlobalStream;
+    // SAFETY: stream validated non-null above; reading the first field (the
+    // vtable pointer) is sound for any COM object — we only compare it.
+    let vtbl = unsafe { (*obj).vtable };
+    if !std::ptr::eq(vtbl, &H_GLOBAL_STREAM_VTBL as *const IStreamVtbl) {
+        // SAFETY: ph_global validated non-null above; writable output slot.
+        unsafe { *ph_global = 0 };
+        return E_INVALIDARG as i32;
+    }
+    // SAFETY: the vtable identity check proves obj is one of our live streams,
+    // so its handle wrapper and hglobal are valid.
+    let hg = unsafe { (*(*obj).handle).hglobal };
+    // SAFETY: ph_global validated non-null above; writable output slot.
+    unsafe { *ph_global = hg };
+    S_OK as i32
 }
 
 // ── urlmon.dll stubs ──────────────────────────────────────────────────────────
@@ -1637,6 +2264,9 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
         "CreateStreamOnHGlobal" => Some(
             create_stream_on_hglobal as unsafe extern "win64" fn(_, _, _) -> _ as *const ()
                 as usize,
+        ),
+        "GetHGlobalFromStream" => Some(
+            get_hglobal_from_stream as unsafe extern "win64" fn(_, _) -> _ as *const () as usize,
         ),
         // TODO(shim): Phase A — message filter needed by OpenMPT
         "CoRegisterMessageFilter" => Some(
@@ -2220,7 +2850,6 @@ mod tests {
         0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC,
         0xCC,
     ];
-    const IID_IUNKNOWN_BYTES: [u8; 16] = [0, 0, 0, 0, 0, 0, 0, 0, 0xC0, 0, 0, 0, 0, 0, 0, 0x46];
 
     #[test]
     fn co_register_and_create() {
@@ -2601,5 +3230,424 @@ mod tests {
         let hr = unsafe { co_get_ps_clsid(overwrite_iid.as_ptr(), clsid_out.as_mut_ptr()) };
         assert_eq!(hr, S_OK);
         assert_eq!(clsid_out, clsid_b);
+    }
+
+    // ── CreateStreamOnHGlobal / IStream tests ─────────────────────────
+
+    fn stream_vtbl(stm: *mut HGlobalStream) -> *const IStreamVtbl {
+        unsafe { (*stm).vtable }
+    }
+
+    fn make_stream(delete_on_release: i32) -> *mut HGlobalStream {
+        let mut stm: usize = 0;
+        let hr = unsafe { create_stream_on_hglobal(0, delete_on_release, &mut stm) };
+        assert_eq!(hr, S_OK as i32);
+        assert_ne!(stm, 0);
+        stm as *mut HGlobalStream
+    }
+
+    fn swrite(stm: *mut HGlobalStream, data: &[u8]) -> u32 {
+        let vtbl = unsafe { &*stream_vtbl(stm) };
+        let mut written: u32 = 0;
+        let hr = unsafe { (vtbl.write)(stm, data.as_ptr(), data.len() as u32, &mut written) };
+        assert_eq!(hr, S_OK);
+        written
+    }
+
+    fn sread(stm: *mut HGlobalStream, buf: &mut [u8]) -> u32 {
+        let vtbl = unsafe { &*stream_vtbl(stm) };
+        let mut read: u32 = 0;
+        let hr = unsafe { (vtbl.read)(stm, buf.as_mut_ptr(), buf.len() as u32, &mut read) };
+        assert_eq!(hr, S_OK);
+        read
+    }
+
+    fn sseek(stm: *mut HGlobalStream, mv: i64, origin: u32) -> (u32, u64) {
+        let vtbl = unsafe { &*stream_vtbl(stm) };
+        let mut pos: u64 = 0;
+        let hr = unsafe { (vtbl.seek)(stm, mv, origin, &mut pos) };
+        (hr, pos)
+    }
+
+    fn srelease(stm: *mut HGlobalStream) -> u32 {
+        let vtbl = unsafe { &*stream_vtbl(stm) };
+        unsafe { (vtbl.release)(stm) }
+    }
+
+    fn sclone(stm: *mut HGlobalStream) -> *mut HGlobalStream {
+        let vtbl = unsafe { &*stream_vtbl(stm) };
+        let mut out: *mut () = std::ptr::null_mut();
+        let hr = unsafe { (vtbl.clone)(stm, &mut out) };
+        assert_eq!(hr, S_OK);
+        assert!(!out.is_null());
+        out as *mut HGlobalStream
+    }
+
+    // STATSTG is 8-aligned in the Win32 ABI (first member is a pointer); a
+    // plain [u8; 80] only guarantees alignment 1, which would trip the debug
+    // misaligned-deref check in stream_stat. Mirror the real alignment.
+    #[repr(align(8))]
+    struct AlignedStatStg([u8; STATSTG_SIZE]);
+
+    fn stat_buf() -> AlignedStatStg {
+        AlignedStatStg([0u8; STATSTG_SIZE])
+    }
+
+    #[test]
+    fn create_stream_null_returns_s_ok_and_nonnull() {
+        let mut stm: usize = 0;
+        let hr = unsafe { create_stream_on_hglobal(0, 1, &mut stm) };
+        assert_eq!(hr, S_OK as i32);
+        assert_ne!(stm, 0);
+        assert_eq!(srelease(stm as *mut HGlobalStream), 0);
+    }
+
+    #[test]
+    fn create_stream_null_ppstm_returns_e_invalidarg() {
+        let hr = unsafe { create_stream_on_hglobal(0, 1, std::ptr::null_mut()) };
+        assert_eq!(hr, E_INVALIDARG as i32);
+    }
+
+    #[test]
+    fn write_then_seek_read_roundtrip() {
+        let st = make_stream(1);
+        let payload = b"hello weave stream";
+        assert_eq!(swrite(st, payload), payload.len() as u32);
+
+        // position is at the end after write
+        let (hr, pos) = sseek(st, 0, STREAM_SEEK_CUR);
+        assert_eq!(hr, S_OK);
+        assert_eq!(pos, payload.len() as u64);
+
+        // read at EOF → S_OK with 0 bytes (never S_FALSE)
+        let mut buf = [0u8; 64];
+        assert_eq!(sread(st, &mut buf), 0);
+
+        // seek to 0 and read back
+        let (hr, _) = sseek(st, 0, STREAM_SEEK_SET);
+        assert_eq!(hr, S_OK);
+        let mut out = vec![0u8; payload.len()];
+        assert_eq!(sread(st, &mut out), payload.len() as u32);
+        assert_eq!(&out[..], &payload[..]);
+
+        // seek past EOF then read → 0 bytes
+        let (hr, pos) = sseek(st, payload.len() as i64 + 16, STREAM_SEEK_SET);
+        assert_eq!(hr, S_OK);
+        assert_eq!(pos, payload.len() as u64 + 16);
+        assert_eq!(sread(st, &mut buf), 0);
+
+        assert_eq!(srelease(st), 0);
+    }
+
+    #[test]
+    fn seek_semantics_set_cur_end() {
+        let st = make_stream(1);
+        swrite(st, b"0123456789"); // 10 bytes
+
+        let (hr, pos) = sseek(st, 3, STREAM_SEEK_SET);
+        assert_eq!(hr, S_OK);
+        assert_eq!(pos, 3);
+        let (hr, pos) = sseek(st, 4, STREAM_SEEK_CUR);
+        assert_eq!(hr, S_OK);
+        assert_eq!(pos, 7);
+        let (hr, pos) = sseek(st, -7, STREAM_SEEK_CUR);
+        assert_eq!(hr, S_OK);
+        assert_eq!(pos, 0);
+        let (hr, pos) = sseek(st, 0, STREAM_SEEK_END);
+        assert_eq!(hr, S_OK);
+        assert_eq!(pos, 10);
+        let (hr, pos) = sseek(st, -5, STREAM_SEEK_END);
+        assert_eq!(hr, S_OK);
+        assert_eq!(pos, 5);
+
+        assert_eq!(srelease(st), 0);
+    }
+
+    #[test]
+    fn seek_before_start_returns_seekerror() {
+        let st = make_stream(1);
+        swrite(st, b"abcd"); // size 4
+
+        // CUR -5 from 4 → -1
+        let (hr, pos) = sseek(st, -5, STREAM_SEEK_CUR);
+        assert_eq!(hr, STG_E_SEEKERROR);
+        assert_eq!(pos, 4); // position unchanged on error
+                            // invalid origin
+        let (hr, pos) = sseek(st, 0, 3);
+        assert_eq!(hr, STG_E_SEEKERROR);
+        assert_eq!(pos, 4);
+        // SET with low-32-bits-as-signed negative (0x80000000) → SEEKERROR
+        let (hr, _) = sseek(st, 0x8000_0000, STREAM_SEEK_SET);
+        assert_eq!(hr, STG_E_SEEKERROR);
+        // forward seek into the 0x80000000 region is fine (positive move)
+        let (hr, pos) = sseek(st, 0x8000_0000 - 4, STREAM_SEEK_CUR);
+        assert_eq!(hr, S_OK);
+        assert_eq!(pos, 0x8000_0000);
+
+        assert_eq!(srelease(st), 0);
+    }
+
+    #[test]
+    fn stat_reports_size_and_type() {
+        let st = make_stream(1);
+        swrite(st, b"0123456789ABCDEF");
+
+        let vtbl = unsafe { &*stream_vtbl(st) };
+        let hr = unsafe { (vtbl.set_size)(st, 0x8000) };
+        assert_eq!(hr, S_OK);
+
+        let mut statbuf = AlignedStatStg([0xEEu8; STATSTG_SIZE]);
+        let hr = unsafe { (vtbl.stat)(st, statbuf.0.as_mut_ptr(), 0) };
+        assert_eq!(hr, S_OK);
+        assert_eq!(
+            u32::from_le_bytes(
+                statbuf.0[STATSTG_TYPE_OFFSET..STATSTG_TYPE_OFFSET + 4]
+                    .try_into()
+                    .unwrap()
+            ),
+            STGTY_STREAM
+        );
+        assert_eq!(
+            u64::from_le_bytes(
+                statbuf.0[STATSTG_CBSIZE_OFFSET..STATSTG_CBSIZE_OFFSET + 8]
+                    .try_into()
+                    .unwrap()
+            ),
+            0x8000
+        );
+        // pwcsName is NULL
+        assert_eq!(u64::from_le_bytes(statbuf.0[0..8].try_into().unwrap()), 0);
+        // clsid is GUID_NULL
+        assert_eq!(u64::from_le_bytes(statbuf.0[56..64].try_into().unwrap()), 0);
+        assert_eq!(u64::from_le_bytes(statbuf.0[64..72].try_into().unwrap()), 0);
+
+        assert_eq!(srelease(st), 0);
+    }
+
+    #[test]
+    fn set_size_uses_low_32_bits_only() {
+        let st = make_stream(1);
+        swrite(st, b"data");
+        let vtbl = unsafe { &*stream_vtbl(st) };
+        // HighPart bits are ignored (Wine LowPart-only semantics) — a huge
+        // QuadPart with LowPart == current size must be S_OK and keep size.
+        let hr = unsafe { (vtbl.set_size)(st, 0xFFFF_FFFF_0000_0004) };
+        assert_eq!(hr, S_OK);
+        let mut statbuf = stat_buf();
+        unsafe { (vtbl.stat)(st, statbuf.0.as_mut_ptr(), 0) };
+        assert_eq!(
+            u64::from_le_bytes(
+                statbuf.0[STATSTG_CBSIZE_OFFSET..STATSTG_CBSIZE_OFFSET + 8]
+                    .try_into()
+                    .unwrap()
+            ),
+            4
+        );
+        assert_eq!(srelease(st), 0);
+    }
+
+    #[test]
+    fn copy_to_copies_content() {
+        let src = make_stream(1);
+        let dst = make_stream(1);
+        let payload = b"Copy me over";
+        swrite(src, payload);
+        let (hr, _) = sseek(src, 0, STREAM_SEEK_SET);
+        assert_eq!(hr, S_OK);
+
+        let vtbl = unsafe { &*stream_vtbl(src) };
+        let mut read_out: u64 = 0;
+        let mut written_out: u64 = 0;
+        let hr = unsafe {
+            (vtbl.copy_to)(
+                src,
+                dst as *mut (),
+                payload.len() as u64,
+                &mut read_out,
+                &mut written_out,
+            )
+        };
+        assert_eq!(hr, S_OK);
+        assert_eq!(read_out, payload.len() as u64);
+        assert_eq!(written_out, payload.len() as u64);
+
+        // destination holds the same content
+        let (hr, _) = sseek(dst, 0, STREAM_SEEK_SET);
+        assert_eq!(hr, S_OK);
+        let mut out = vec![0u8; payload.len()];
+        assert_eq!(sread(dst, &mut out), payload.len() as u32);
+        assert_eq!(&out[..], &payload[..]);
+
+        assert_eq!(srelease(src), 0);
+        assert_eq!(srelease(dst), 0);
+    }
+
+    #[test]
+    fn copy_to_null_dest_returns_invalidpointer() {
+        let src = make_stream(1);
+        swrite(src, b"data");
+        let vtbl = unsafe { &*stream_vtbl(src) };
+        let hr = unsafe {
+            (vtbl.copy_to)(
+                src,
+                std::ptr::null_mut(),
+                4,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(hr, STG_E_INVALIDPOINTER);
+        assert_eq!(srelease(src), 0);
+    }
+
+    #[test]
+    fn clone_duplicates_position_and_shares_handle() {
+        let mut stm: usize = 0;
+        let hr = unsafe { create_stream_on_hglobal(0, 1, &mut stm) };
+        assert_eq!(hr, S_OK as i32);
+        let st = stm as *mut HGlobalStream;
+        let payload = b"clone me";
+        swrite(st, payload);
+
+        // clone at current position (end of stream)
+        let clone = sclone(st);
+        let (hr, cpos) = sseek(clone, 0, STREAM_SEEK_CUR);
+        assert_eq!(hr, S_OK);
+        assert_eq!(cpos, payload.len() as u64);
+
+        // both streams report the same backing HGLOBAL
+        let mut h1: usize = 0;
+        let mut h2: usize = 0;
+        assert_eq!(
+            unsafe { get_hglobal_from_stream(stm, &mut h1) },
+            S_OK as i32
+        );
+        assert_eq!(
+            unsafe { get_hglobal_from_stream(clone as usize, &mut h2) },
+            S_OK as i32
+        );
+        assert_ne!(h1, 0);
+        assert_eq!(h1, h2);
+
+        // clone sees data written by the source (shared buffer)
+        let (hr, _) = sseek(clone, 0, STREAM_SEEK_SET);
+        assert_eq!(hr, S_OK);
+        let mut out = vec![0u8; payload.len()];
+        assert_eq!(sread(clone, &mut out), payload.len() as u32);
+        assert_eq!(&out[..], &payload[..]);
+
+        assert_eq!(srelease(clone), 0);
+        assert_eq!(srelease(st), 0);
+    }
+
+    #[test]
+    fn delete_on_release_false_keeps_hglobal() {
+        // Caller-supplied HGLOBAL with fDeleteOnRelease=FALSE: the stream must
+        // NOT free it — a subsequent libc::free here is a single free (a
+        // double-free from a bug would abort).
+        let hg = unsafe { libc::malloc(64) as usize };
+        assert_ne!(hg, 0);
+        let mut stm: usize = 0;
+        let hr = unsafe { create_stream_on_hglobal(hg, 0, &mut stm) };
+        assert_eq!(hr, S_OK as i32);
+        let st = stm as *mut HGlobalStream;
+        swrite(st, b"persistent");
+        assert_eq!(srelease(st), 0);
+        unsafe { libc::free(hg as *mut libc::c_void) };
+    }
+
+    #[test]
+    fn delete_on_release_true_clone_keeps_handle_alive() {
+        let st = make_stream(1);
+        let payload = b"shared";
+        swrite(st, payload);
+        let clone = sclone(st);
+
+        // Releasing the original stream drops only its own reference; the
+        // shared HandleWrapper survives via the clone.
+        assert_eq!(srelease(st), 0);
+
+        // Clone still reads the shared buffer — the HGLOBAL was not freed.
+        let (hr, _) = sseek(clone, 0, STREAM_SEEK_SET);
+        assert_eq!(hr, S_OK);
+        let mut out = vec![0u8; payload.len()];
+        assert_eq!(sread(clone, &mut out), payload.len() as u32);
+        assert_eq!(&out[..], &payload[..]);
+
+        // Last release → HandleWrapper drops → HGLOBAL freed (no crash here).
+        assert_eq!(srelease(clone), 0);
+    }
+
+    #[test]
+    fn stream_qi_returns_requested_interfaces() {
+        let st = make_stream(1);
+        let vtbl = unsafe { &*stream_vtbl(st) };
+        let mut ppv: *mut () = std::ptr::null_mut();
+
+        for iid in [IID_ISTREAM, IID_ISEQUENTIALSTREAM, IID_IUNKNOWN_BYTES] {
+            let hr = unsafe { (vtbl.query_interface)(st, iid.as_ptr(), &mut ppv) };
+            assert_eq!(hr, S_OK);
+            assert_eq!(ppv, st as *mut ());
+        }
+
+        let bogus: [u8; 16] = [0xAA; 16];
+        let hr = unsafe { (vtbl.query_interface)(st, bogus.as_ptr(), &mut ppv) };
+        assert_eq!(hr, E_NOINTERFACE);
+
+        // 3 successful QIs added 3 refs → refcount 4 → 4 releases frees.
+        assert_eq!(srelease(st), 3);
+        assert_eq!(srelease(st), 2);
+        assert_eq!(srelease(st), 1);
+        assert_eq!(srelease(st), 0);
+    }
+
+    #[test]
+    fn get_hglobal_from_stream_validation() {
+        // null stream
+        let mut hg: usize = 0;
+        assert_eq!(
+            unsafe { get_hglobal_from_stream(0, &mut hg) },
+            E_INVALIDARG as i32
+        );
+        // null out param
+        let mut stm: usize = 0;
+        let hr = unsafe { create_stream_on_hglobal(0, 1, &mut stm) };
+        assert_eq!(hr, S_OK as i32);
+        assert_eq!(
+            unsafe { get_hglobal_from_stream(stm, std::ptr::null_mut()) },
+            E_INVALIDARG as i32
+        );
+        // foreign stream (an IUnknownImpl, not created by CreateStreamOnHGlobal)
+        let foreign = weave_common::com::iunknown::IUnknownImpl::new();
+        let fptr = Box::into_raw(foreign);
+        assert_eq!(
+            unsafe { get_hglobal_from_stream(fptr as usize, &mut hg) },
+            E_INVALIDARG as i32
+        );
+        // release the foreign object through its own vtable
+        let vtbl = unsafe { &*(*fptr).vtable };
+        assert_eq!(unsafe { (vtbl.release)(fptr) }, 0);
+        // valid stream → returns its backing HGLOBAL
+        assert_eq!(
+            unsafe { get_hglobal_from_stream(stm, &mut hg) },
+            S_OK as i32
+        );
+        assert_ne!(hg, 0);
+        assert_eq!(srelease(stm as *mut HGlobalStream), 0);
+    }
+
+    #[test]
+    fn lock_region_commit_revert_contract() {
+        let st = make_stream(1);
+        swrite(st, b"data");
+        let vtbl = unsafe { &*stream_vtbl(st) };
+        assert_eq!(
+            unsafe { (vtbl.lock_region)(st, 0, 4, 1) },
+            STG_E_INVALIDFUNCTION
+        );
+        assert_eq!(unsafe { (vtbl.unlock_region)(st, 0, 4, 1) }, S_OK);
+        assert_eq!(unsafe { (vtbl.commit)(st, 0) }, S_OK);
+        assert_eq!(unsafe { (vtbl.revert)(st) }, S_OK);
+        assert_eq!(srelease(st), 0);
     }
 }
