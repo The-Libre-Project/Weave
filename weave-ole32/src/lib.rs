@@ -1504,12 +1504,40 @@ pub unsafe extern "win64" fn release_stg_medium(_pmedium: *mut u8) {}
 // ── OLE drag-and-drop: RegisterDragDrop / RevokeDragDrop / DoDragDrop ────────
 
 // OLE D&D HRESULT constants (FACILITY_OLE, winerror.h).
-#[allow(dead_code)] // S_DROP is the future DoDragDrop success result; only S_CANCEL is returned today
 const DRAGDROP_S_DROP: u32 = 0x0004_0100;
 const DRAGDROP_S_CANCEL: u32 = 0x0004_0101;
+#[allow(dead_code)] // returned by IDropSource::GiveFeedback; cursor selection is a user32 concern
+const DRAGDROP_S_USEDEFAULTCURSORS: u32 = 0x0004_0102;
 const DRAGDROP_E_NOTREGISTERED: u32 = 0x8004_0100;
 const DRAGDROP_E_ALREADYREGISTERED: u32 = 0x8004_0101;
 const DRAGDROP_E_INVALIDHWND: u32 = 0x8004_0102;
+
+// DROPEFFECT_* masks (oleidl.h) — source- and target-negotiated effect flags.
+const DROPEFFECT_NONE: u32 = 0;
+#[allow(dead_code)] // exercised by tests; documents the DROPEFFECT surface
+const DROPEFFECT_COPY: u32 = 1;
+#[allow(dead_code)] // exercised by tests; documents the DROPEFFECT surface
+const DROPEFFECT_MOVE: u32 = 2;
+#[allow(dead_code)] // exercised by tests; documents the DROPEFFECT surface
+const DROPEFFECT_LINK: u32 = 4;
+
+// MK_* mouse-button / modifier masks (winuser.h) — the grfKeyState argument
+// passed to every IDropTarget drag method and to QueryContinueDrag.
+const MK_LBUTTON: u32 = 0x0001;
+const MK_RBUTTON: u32 = 0x0002;
+const MK_SHIFT: u32 = 0x0004;
+const MK_CONTROL: u32 = 0x0008;
+const MK_MBUTTON: u32 = 0x0010;
+const MK_ALT: u32 = 0x0020;
+
+// VK_* virtual-key codes used by the real input source (winuser.h).
+const VK_LBUTTON: i32 = 0x01;
+const VK_RBUTTON: i32 = 0x02;
+const VK_MBUTTON: i32 = 0x04;
+const VK_SHIFT: i32 = 0x10;
+const VK_CONTROL: i32 = 0x11;
+const VK_MENU: i32 = 0x12;
+const VK_ESCAPE: i32 = 0x1B;
 
 // IID_IDropTarget = {00000122-0000-0000-C000-000000000046} (little-endian wire bytes)
 #[allow(dead_code)] // ABI contract for the future DoDragDrop loop; exercised by tests
@@ -1670,26 +1698,490 @@ pub unsafe extern "win64" fn revoke_drag_drop(hwnd: usize) -> i32 {
 // pDataObject / pDropSource / pdwEffect is NULL; otherwise it creates a tracker
 // window and runs a modal message loop dispatching IDropTarget events to the
 // registered targets, returning DRAGDROP_S_DROP or DRAGDROP_S_CANCEL. Weave:
-// bounded stub — no drag loop is run, so no IDropTarget events are delivered;
-// the argument validation matches Wine and the result is DRAGDROP_S_CANCEL.
-/// DoDragDrop — initiate an OLE drag-and-drop operation.
+// the modal loop is decoupled from the input source — `do_drag_drop_with_input`
+// is the real QueryContinueDrag-driven state machine + IDropTarget dispatch,
+// and the exported `do_drag_drop` drives it with a real (resolver-backed) input
+// source. See `real_drag_input_source`.
+
+/// Per-tick input snapshot fed to the drag loop by the input source.
 ///
-/// Validates the arguments as Wine does (`E_INVALIDARG` when any is NULL), then
-/// returns `DRAGDROP_S_CANCEL` without running a drag loop — no drop events are
-/// delivered in this milestone.
+/// Wine's tracker window collects the same fields from the message stream
+/// (WM_MOUSEMOVE position, `OLEDD_GetButtonState()` key mask, ESC flag, and
+/// `WindowFromPoint` for the target hwnd).
+struct DragInput {
+    /// Cursor position in screen coordinates.
+    pos: POINTL,
+    /// MK_* modifier/button mask (Wine's dwKeyState).
+    key_state: u32,
+    /// Whether Escape is currently pressed.
+    escape_pressed: bool,
+    /// Window under the cursor to dispatch drag events to (0 = none).
+    target_hwnd: usize,
+}
+
+/// Cap on loop iterations — a bounded modal loop (an infinite drag loop would
+/// hang any caller; tests rely on this bound too).
+const MAX_DRAG_ITERATIONS: u32 = 10_000;
+
+// ── Caller-side COM dispatch helpers (IDropSource, IDropTarget) ─────────────
+
+// Wine ref: include/oleidl.h — IDropSource vtable order: QueryInterface, AddRef,
+// Release, QueryContinueDrag, GiveFeedback.
+unsafe fn drop_source_query_continue_drag(
+    drop_source: *mut (),
+    escape_pressed: bool,
+    key_state: u32,
+) -> u32 {
+    // SAFETY: drop_source is a live IDropSource validated non-null by the
+    // caller; the vtable pointer and slot 3 (QueryContinueDrag) are readable
+    // for any valid COM object — same layout relied on by com_add_ref.
+    let vtbl = unsafe { com_vtable(drop_source) };
+    // SAFETY: transmute between the stored usize slot and the win64 fn pointer
+    // is size-equivalent (both 8 bytes) and the slot is a valid entry point.
+    let qcd: unsafe extern "win64" fn(*mut (), i32, u32) -> u32 =
+        unsafe { std::mem::transmute(*vtbl.add(3)) };
+    qcd(drop_source, escape_pressed as i32, key_state)
+}
+
+// Wine ref: include/oleidl.h — GiveFeedback is IDropSource vtable slot 4.
+unsafe fn drop_source_give_feedback(drop_source: *mut (), effect: u32) -> u32 {
+    // SAFETY: drop_source is a live IDropSource validated non-null by the
+    // caller; slot 4 (GiveFeedback) is readable for any valid COM object.
+    let vtbl = unsafe { com_vtable(drop_source) };
+    // SAFETY: size-equivalent transmute; the slot is a valid entry point.
+    let gf: unsafe extern "win64" fn(*mut (), u32) -> u32 =
+        unsafe { std::mem::transmute(*vtbl.add(4)) };
+    gf(drop_source, effect)
+}
+
+// Wine ref: include/oleidl.h — IDropTarget vtable order: QueryInterface, AddRef,
+// Release, DragEnter, DragOver, DragLeave, Drop (slots 3..=6).
+unsafe fn drop_target_drag_enter(
+    target: *mut (),
+    data_object: *mut (),
+    key_state: u32,
+    pt: *const POINTL,
+    effect: *mut u32,
+) -> u32 {
+    let vtbl = unsafe { com_vtable(target) };
+    let de: unsafe extern "win64" fn(*mut (), *mut (), u32, *const POINTL, *mut u32) -> u32 =
+        unsafe { std::mem::transmute(*vtbl.add(3)) };
+    de(target, data_object, key_state, pt, effect)
+}
+
+unsafe fn drop_target_drag_over(
+    target: *mut (),
+    key_state: u32,
+    pt: *const POINTL,
+    effect: *mut u32,
+) -> u32 {
+    let vtbl = unsafe { com_vtable(target) };
+    let dv: unsafe extern "win64" fn(*mut (), u32, *const POINTL, *mut u32) -> u32 =
+        unsafe { std::mem::transmute(*vtbl.add(4)) };
+    dv(target, key_state, pt, effect)
+}
+
+unsafe fn drop_target_drag_leave(target: *mut ()) -> u32 {
+    let vtbl = unsafe { com_vtable(target) };
+    let dl: unsafe extern "win64" fn(*mut ()) -> u32 = unsafe { std::mem::transmute(*vtbl.add(5)) };
+    dl(target)
+}
+
+unsafe fn drop_target_drop(
+    target: *mut (),
+    data_object: *mut (),
+    key_state: u32,
+    pt: *const POINTL,
+    effect: *mut u32,
+) -> u32 {
+    let vtbl = unsafe { com_vtable(target) };
+    let dp: unsafe extern "win64" fn(*mut (), *mut (), u32, *const POINTL, *mut u32) -> u32 =
+        unsafe { std::mem::transmute(*vtbl.add(6)) };
+    dp(target, data_object, key_state, pt, effect)
+}
+
+/// Return the registered IDropTarget for `hwnd` (AddRef'd, caller must Release),
+/// or NULL when the hwnd is not registered.
+///
+/// Wine ref: dlls/ole32/ole2.c drag_enter — walks GetParent up the ancestor
+/// chain until it finds a registered drop target. Weave has no window hierarchy
+/// reachable from ole32 (the window tree lives in weave-user32), so only the
+/// exact hwnd is consulted — a deviation documented in the M60 shim contract.
 ///
 /// # Safety
-/// Pointer arguments are checked for NULL but not dereferenced.
+/// The returned pointer is a live IDropTarget with one reference held by the
+/// caller; the caller must balance it with `com_release`.
+unsafe fn lookup_drop_target(hwnd: usize) -> *mut () {
+    let table = drop_target_table().lock().unwrap();
+    let target = match table.get(&hwnd) {
+        Some(entry) => entry.target,
+        None => return std::ptr::null_mut(),
+    };
+    // SAFETY: entry.target is a live IDropTarget held by the table (refcount
+    // ≥ 1, validated at register time); com_add_ref gives the caller a
+    // reference that survives the table lock.
+    unsafe { com_add_ref(target) };
+    target
+}
+
+/// Wine ref: dlls/ole32/ole2.c give_feedback — forces the effect to
+/// DROPEFFECT_NONE when there is no current drag target, then calls
+/// IDropSource::GiveFeedback. The default-cursor branch (DRAGDROP_S_USEDEFAULTCURSORS)
+/// is a no-op in Weave (no cursor subsystem reachable from ole32).
+fn give_feedback(drop_source: *mut (), cur_target: *mut (), pdw_effect: *mut u32) {
+    if cur_target.is_null() {
+        // SAFETY: pdw_effect validated non-null by the caller (do_drag_drop_with_input).
+        unsafe { *pdw_effect = DROPEFFECT_NONE };
+    }
+    let effect = unsafe { *pdw_effect };
+    // SAFETY: drop_source validated non-null by the caller; effect is a valid
+    // negotiated DROPEFFECT value.
+    unsafe { drop_source_give_feedback(drop_source, effect) };
+}
+
+/// Interpret a QueryContinueDrag result: S_OK continues, S_FALSE (documented
+/// MSDN contract) or DRAGDROP_S_DROP (Wine's own test drop sources) requests a
+/// drop, DRAGDROP_S_CANCEL cancels. Other (failed) HRESULTs cancel too.
+fn drop_source_decision(rv: u32) -> DragDecision {
+    if rv == S_OK {
+        DragDecision::Continue
+    } else if rv == S_FALSE || rv == DRAGDROP_S_DROP {
+        DragDecision::Drop
+    } else if rv == DRAGDROP_S_CANCEL {
+        DragDecision::Cancel
+    } else {
+        // Wine ref: drag_end — a failed QueryContinueDrag result propagates as
+        // the DoDragDrop return (its own test asserts E_FAIL round-trips).
+        DragDecision::Cancel
+    }
+}
+
+#[derive(PartialEq, Clone, Copy)]
+enum DragDecision {
+    Continue,
+    Drop,
+    Cancel,
+}
+
+/// Wine ref: dlls/ole32/ole2.c:2280 OLEDD_TrackStateChange — the per-tick drag
+/// state machine. Returns the loop exit decision (S_OK to keep looping,
+/// otherwise the HRESULT `do_drag_drop_with_input` returns).
+///
+/// # Safety
+/// `data_object` and `drop_source` must be live COM interfaces validated
+/// non-null by the caller; `pdw_effect` must be a valid writable u32 pointer.
+unsafe fn drag_tick(
+    data_object: *mut (),
+    drop_source: *mut (),
+    dw_ok_effects: u32,
+    pdw_effect: *mut u32,
+    di: &DragInput,
+    cur_target_hwnd: &mut usize,
+    cur_target: &mut *mut (),
+) -> u32 {
+    // Wine ref: OLEDD_TrackStateChange — QueryContinueDrag decides continue,
+    // drop, or cancel.
+    // SAFETY: drop_source validated non-null by the caller.
+    let rv =
+        unsafe { drop_source_query_continue_drag(drop_source, di.escape_pressed, di.key_state) };
+    let decision = drop_source_decision(rv);
+
+    // Wine ref: OLEDD_TrackStateChange — on target change (and only while
+    // continuing or about to drop), leave the old target and enter the new one.
+    if *cur_target_hwnd != di.target_hwnd
+        && (decision == DragDecision::Continue || decision == DragDecision::Drop)
+    {
+        if !cur_target.is_null() {
+            // SAFETY: cur_target is the AddRef'd target from a previous
+            // lookup_drop_target; DragLeave is a live-target call.
+            unsafe { drop_target_drag_leave(*cur_target) };
+            // SAFETY: balances the com_add_ref from lookup_drop_target.
+            unsafe { com_release(*cur_target) };
+            *cur_target = std::ptr::null_mut();
+            *cur_target_hwnd = 0;
+        }
+        *cur_target_hwnd = di.target_hwnd;
+        if di.target_hwnd != 0 {
+            // SAFETY: lookup_drop_target validates the hwnd is registered and
+            // returns an AddRef'd target (or NULL).
+            *cur_target = unsafe { lookup_drop_target(di.target_hwnd) };
+            if !cur_target.is_null() {
+                // Wine ref: drag_enter — sets *pdwEffect = dwOKEffect before
+                // DragEnter, then masks with dwOKEffect; a failed DragEnter
+                // means an invalid target.
+                unsafe { *pdw_effect = dw_ok_effects };
+                let hr = unsafe {
+                    drop_target_drag_enter(
+                        *cur_target,
+                        data_object,
+                        di.key_state,
+                        &di.pos,
+                        pdw_effect,
+                    )
+                };
+                unsafe { *pdw_effect &= dw_ok_effects };
+                if hr != S_OK {
+                    // SAFETY: balances the com_add_ref from lookup_drop_target.
+                    unsafe { com_release(*cur_target) };
+                    *cur_target = std::ptr::null_mut();
+                    *cur_target_hwnd = 0;
+                }
+            }
+        }
+        give_feedback(drop_source, *cur_target, pdw_effect);
+    }
+
+    match decision {
+        DragDecision::Continue => {
+            // Wine ref: OLEDD_TrackStateChange — DragOver on the current target.
+            if !cur_target.is_null() {
+                // SAFETY: pdw_effect validated non-null by the caller; cur_target
+                // is a live AddRef'd IDropTarget.
+                unsafe { *pdw_effect = dw_ok_effects };
+                unsafe { drop_target_drag_over(*cur_target, di.key_state, &di.pos, pdw_effect) };
+                unsafe { *pdw_effect &= dw_ok_effects };
+            }
+            give_feedback(drop_source, *cur_target, pdw_effect);
+            S_OK
+        }
+        DragDecision::Drop => {
+            // Wine ref: dlls/ole32/ole2.c drag_end — end the drag. A drop with
+            // a non-NONE effect calls IDropTarget::Drop; otherwise (no target,
+            // or the target refused via a NONE effect) it DragLeaves.
+            if !cur_target.is_null() && unsafe { *pdw_effect } != DROPEFFECT_NONE {
+                // SAFETY: pdw_effect validated non-null; cur_target live.
+                unsafe { *pdw_effect = dw_ok_effects };
+                let hr = unsafe {
+                    drop_target_drop(*cur_target, data_object, di.key_state, &di.pos, pdw_effect)
+                };
+                unsafe { *pdw_effect &= dw_ok_effects };
+                // SAFETY: balances the com_add_ref from lookup_drop_target.
+                unsafe { com_release(*cur_target) };
+                *cur_target = std::ptr::null_mut();
+                *cur_target_hwnd = 0;
+                if hr & 0x8000_0000 != 0 {
+                    hr
+                } else {
+                    DRAGDROP_S_DROP
+                }
+            } else {
+                // Wine ref: drag_end — drop requested but no drop performed:
+                // DragLeave the current target and clear the effect.
+                if !cur_target.is_null() {
+                    // SAFETY: cur_target is a live AddRef'd IDropTarget.
+                    unsafe { drop_target_drag_leave(*cur_target) };
+                    // SAFETY: balances the com_add_ref from lookup_drop_target.
+                    unsafe { com_release(*cur_target) };
+                    *cur_target = std::ptr::null_mut();
+                    *cur_target_hwnd = 0;
+                }
+                // SAFETY: pdw_effect validated non-null by the caller.
+                unsafe { *pdw_effect = DROPEFFECT_NONE };
+                DRAGDROP_S_DROP
+            }
+        }
+        DragDecision::Cancel => {
+            // Wine ref: drag_end — a cancelled drag DragLeaves and clears the effect.
+            if !cur_target.is_null() {
+                // SAFETY: cur_target is a live AddRef'd IDropTarget.
+                unsafe { drop_target_drag_leave(*cur_target) };
+                // SAFETY: balances the com_add_ref from lookup_drop_target.
+                unsafe { com_release(*cur_target) };
+                *cur_target = std::ptr::null_mut();
+                *cur_target_hwnd = 0;
+            }
+            // SAFETY: pdw_effect validated non-null by the caller.
+            unsafe { *pdw_effect = DROPEFFECT_NONE };
+            DRAGDROP_S_CANCEL
+        }
+    }
+}
+
+/// The real drag loop. `input` is polled once per iteration and returns the
+/// current mouse/state snapshot, or `None` to terminate the (bounded) loop
+/// without a decision — the headless-safe termination condition.
+///
+/// Wine ref: dlls/ole32/ole2.c:736 DoDragDrop — runs a modal loop pumping
+/// tracker-window messages and feeding each to OLEDD_TrackStateChange. Weave
+/// replaces the message pump with an input-polling loop; the state machine and
+/// IDropTarget dispatch are identical.
+///
+/// # Safety
+/// `p_data_object` and `p_drop_source` must be live COM interfaces and
+/// `pdw_effect` a valid writable u32 pointer; all three are NULL-checked.
 pub unsafe extern "win64" fn do_drag_drop(
-    p_data_obj: *mut u8,
+    p_data_object: *mut u8,
     p_drop_source: *mut u8,
-    _dw_ok_effects: u32,
+    dw_ok_effects: u32,
     pdw_effect: *mut u32,
 ) -> i32 {
-    if p_data_obj.is_null() || p_drop_source.is_null() || pdw_effect.is_null() {
+    // SAFETY: the input closure reads live input through the resolver.
+    let input = real_drag_input_source();
+    do_drag_drop_with_input(
+        p_data_object,
+        p_drop_source,
+        dw_ok_effects,
+        pdw_effect,
+        input,
+    )
+}
+
+/// The testable drag loop: `do_drag_drop` with an injected input sequence.
+///
+/// `input` returns `Some(DragInput)` per tick and `None` once the sequence is
+/// exhausted — the loop then terminates as a cancel. This is what makes the
+/// QueryContinueDrag-driven state machine testable headless.
+///
+/// # Safety
+/// `p_data_object` and `p_drop_source` must be live COM interfaces and
+/// `pdw_effect` a valid writable u32 pointer; all three are NULL-checked.
+unsafe fn do_drag_drop_with_input(
+    p_data_object: *mut u8,
+    p_drop_source: *mut u8,
+    dw_ok_effects: u32,
+    pdw_effect: *mut u32,
+    mut input: impl FnMut() -> Option<DragInput>,
+) -> i32 {
+    // Wine ref: ole2.c:736 DoDragDrop — NULL pDataObject / pDropSource / pdwEffect → E_INVALIDARG.
+    if p_data_object.is_null() || p_drop_source.is_null() || pdw_effect.is_null() {
         return E_INVALIDARG as i32;
     }
+    // SAFETY: pdw_effect validated non-null above.
+    unsafe { *pdw_effect = DROPEFFECT_NONE };
+
+    let data_object = p_data_object as *mut ();
+    let drop_source = p_drop_source as *mut ();
+
+    let mut cur_target_hwnd: usize = 0;
+    let mut cur_target: *mut () = std::ptr::null_mut();
+    let mut iterations: u32 = 0;
+
+    loop {
+        iterations += 1;
+        // Bounded modal loop — never spin forever (headless / broken sources).
+        if iterations > MAX_DRAG_ITERATIONS {
+            break;
+        }
+        // SAFETY: input is a FnMut owned by this loop; None ends the loop.
+        let Some(di) = input() else {
+            break;
+        };
+        // SAFETY: data_object / drop_source / pdw_effect validated non-null
+        // above; cur_target_hwnd / cur_target are this loop's own state.
+        let rv = unsafe {
+            drag_tick(
+                data_object,
+                drop_source,
+                dw_ok_effects,
+                pdw_effect,
+                &di,
+                &mut cur_target_hwnd,
+                &mut cur_target,
+            )
+        };
+        if rv != S_OK {
+            return rv as i32;
+        }
+    }
+
+    // SAFETY: cur_target is the AddRef'd target from the last drag_enter (or
+    // NULL); drag_leave + release any still-held target on early exit.
+    if !cur_target.is_null() {
+        unsafe { drop_target_drag_leave(cur_target) };
+        // SAFETY: balances the com_add_ref from lookup_drop_target.
+        unsafe { com_release(cur_target) };
+    }
+    // SAFETY: pdw_effect validated non-null above.
+    unsafe { *pdw_effect = DROPEFFECT_NONE };
     DRAGDROP_S_CANCEL as i32
+}
+
+// ── Real input source (resolver-backed) ───────────────────────────────────────
+
+// Wine ref: dlls/ole32/ole2.c OLEDD_GetButtonState — builds the MK_* mask from
+// the VK_* keyboard state via GetKeyboardState. Weave resolves GetAsyncKeyState
+// through the import resolver (user32 is a separate crate; no crate-to-crate
+// import is allowed across DLL boundaries).
+unsafe fn build_key_state(get_async: unsafe extern "win64" fn(i32) -> i16) -> u32 {
+    let mut mask = 0u32;
+    // SAFETY: get_async is the resolved GetAsyncKeyState entry point; VK codes
+    // are constants. Bit 15 (0x8000) is the key-down bit; cast to u16 so the
+    // bit-mask literal is in range.
+    let down = |vk: i32| unsafe { get_async(vk) } as u16 & 0x8000 != 0;
+    if down(VK_SHIFT) {
+        mask |= MK_SHIFT;
+    }
+    if down(VK_CONTROL) {
+        mask |= MK_CONTROL;
+    }
+    if down(VK_MENU) {
+        mask |= MK_ALT;
+    }
+    if down(VK_LBUTTON) {
+        mask |= MK_LBUTTON;
+    }
+    if down(VK_RBUTTON) {
+        mask |= MK_RBUTTON;
+    }
+    if down(VK_MBUTTON) {
+        mask |= MK_MBUTTON;
+    }
+    mask
+}
+
+/// Real input source for `do_drag_drop`: polls the live cursor position, key
+/// state, and target window through user32 exports resolved via
+/// `weave_core::resolve` (GetCursorPos, GetAsyncKeyState, WindowFromPoint).
+///
+/// When the resolver cannot supply user32 (headless test environment), the
+/// closure returns `None` on the first poll and the loop terminates as a
+/// cancel — matching the previous stub's observable result but through the real
+/// state machine.
+fn real_drag_input_source() -> impl FnMut() -> Option<DragInput> {
+    let get_cursor_pos =
+        weave_core::resolve::resolve("user32.dll", "GetCursorPos").map(|a| unsafe {
+            std::mem::transmute::<usize, unsafe extern "win64" fn(*mut POINTL) -> i32>(a)
+        });
+    let get_async_key_state = weave_core::resolve::resolve("user32.dll", "GetAsyncKeyState")
+        .map(|a| unsafe { std::mem::transmute::<usize, unsafe extern "win64" fn(i32) -> i16>(a) });
+    let window_from_point =
+        weave_core::resolve::resolve("user32.dll", "WindowFromPoint").map(|a| unsafe {
+            std::mem::transmute::<usize, unsafe extern "win64" fn(i32, i32) -> usize>(a)
+        });
+
+    let mut ticks: u32 = 0;
+    move || {
+        // SAFETY: transmutes of usize → fn pointer are size-equivalent (8 bytes);
+        // the resolver guarantees the target has the user32 ABI.
+        let (get_cursor_pos, get_async_key_state, window_from_point) =
+            match (get_cursor_pos, get_async_key_state, window_from_point) {
+                (Some(c), Some(k), Some(w)) => (c, k, w),
+                _ => return None, // user32 not resolvable (headless) → terminate as cancel
+            };
+
+        ticks += 1;
+        if ticks > MAX_DRAG_ITERATIONS {
+            return None;
+        }
+
+        let mut pos = POINTL { x: 0, y: 0 };
+        // SAFETY: pos is a valid writable POINTL (8 bytes); GetCursorPos writes
+        // it. Return value ignored (0 on failure leaves pos at (0,0)).
+        unsafe { get_cursor_pos(&mut pos) };
+        let key_state = unsafe { build_key_state(get_async_key_state) };
+        // SAFETY: VK_ESCAPE is a constant; bit 15 (0x8000) is the key-down bit
+        // (cast to u16 so the bit-mask literal is in range).
+        let escape_pressed = unsafe { get_async_key_state(VK_ESCAPE) } as u16 & 0x8000 != 0;
+        // SAFETY: WindowFromPoint takes two i32 coordinates and returns HWND.
+        let target_hwnd = unsafe { window_from_point(pos.x, pos.y) };
+
+        Some(DragInput {
+            pos,
+            key_state,
+            escape_pressed,
+            target_hwnd,
+        })
+    }
 }
 
 // Wine ref: dlls/ole32/ifs.c — StringFromCLSID calls StringFromGUID2 into a
@@ -4727,6 +5219,10 @@ mod tests {
 
     #[test]
     fn do_drag_drop_bounded_stub_returns_cancel() {
+        // No input source available (headless): the real drag loop must
+        // terminate as a cancel, never hang, and never dereference a NULL
+        // target. The previous M60 stub returned DRAGDROP_S_CANCEL too; the
+        // bounded loop preserves that observable result.
         let mut effect: u32 = 0;
         let dummy: u8 = 0;
         let hr = unsafe {
@@ -4738,5 +5234,482 @@ mod tests {
             )
         };
         assert_eq!(hr, DRAGDROP_S_CANCEL as i32);
+        assert_eq!(effect, DROPEFFECT_NONE);
+    }
+
+    // ── DoDragDrop real drag-loop tests (injected input) ─────────────
+
+    // IID_IDropSource = {00000121-0000-0000-C000-000000000046}
+    const IID_IDROPSOURCE: [u8; 16] = [
+        0x21, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x46,
+    ];
+
+    /// Scripted IDropSource fake for driving the drag loop.
+    #[repr(C)]
+    struct TestDropSource {
+        vtable: *const TestDropSourceVtbl,
+        ref_count: u32,
+        /// QueryContinueDrag results consumed in order (last one repeats).
+        script: Vec<u32>,
+        script_idx: usize,
+        /// Effects handed to GiveFeedback, in call order.
+        feedback_effects: Vec<u32>,
+        /// (fEscapePressed, grfKeyState) pairs seen by QueryContinueDrag.
+        query_args: Vec<(i32, u32)>,
+    }
+
+    #[repr(C)]
+    struct TestDropSourceVtbl {
+        query_interface:
+            unsafe extern "win64" fn(*mut TestDropSource, *const u8, *mut *mut ()) -> u32,
+        add_ref: unsafe extern "win64" fn(*mut TestDropSource) -> u32,
+        release: unsafe extern "win64" fn(*mut TestDropSource) -> u32,
+        query_continue_drag: unsafe extern "win64" fn(*mut TestDropSource, i32, u32) -> u32,
+        give_feedback: unsafe extern "win64" fn(*mut TestDropSource, u32) -> u32,
+    }
+
+    unsafe extern "win64" fn test_drop_source_qi(
+        this: *mut TestDropSource,
+        riid: *const u8,
+        ppv: *mut *mut (),
+    ) -> u32 {
+        if ppv.is_null() {
+            return E_INVALIDARG;
+        }
+        // SAFETY: ppv validated non-null above; writable output slot.
+        unsafe { *ppv = std::ptr::null_mut() };
+        if riid.is_null() {
+            return E_INVALIDARG;
+        }
+        // SAFETY: the caller dispatched through TEST_DROP_SOURCE_VTBL, so this
+        // is a live TestDropSource; riid is a 16-byte IID buffer per COM ABI.
+        let iid = unsafe { std::ptr::read_unaligned(riid as *const [u8; 16]) };
+        if iid == IID_IUNKNOWN_BYTES || iid == IID_IDROPSOURCE {
+            // SAFETY: this is a live object (IUnknown contract — ref_count > 0).
+            unsafe {
+                (*this).ref_count += 1;
+                *ppv = this as *mut ();
+            }
+            S_OK
+        } else {
+            E_NOINTERFACE
+        }
+    }
+
+    unsafe extern "win64" fn test_drop_source_add_ref(this: *mut TestDropSource) -> u32 {
+        // SAFETY: live TestDropSource (IUnknown contract).
+        unsafe {
+            (*this).ref_count += 1;
+            (*this).ref_count
+        }
+    }
+
+    unsafe extern "win64" fn test_drop_source_release(this: *mut TestDropSource) -> u32 {
+        // SAFETY: live TestDropSource (IUnknown contract).
+        let prev = unsafe { (*this).ref_count };
+        let new = prev - 1;
+        if new == 0 {
+            // SAFETY: Box::into_raw'd at construction; refcount 0 means no
+            // other references remain, so reclaiming the Box is sound.
+            unsafe { drop(Box::from_raw(this)) };
+        } else {
+            // SAFETY: ref_count > 0, so the object stays alive.
+            unsafe { (*this).ref_count = new };
+        }
+        new
+    }
+
+    unsafe extern "win64" fn test_drop_source_query_continue_drag(
+        this: *mut TestDropSource,
+        f_escape_pressed: i32,
+        grf_key_state: u32,
+    ) -> u32 {
+        // SAFETY: live TestDropSource (IUnknown contract).
+        let this = unsafe { &mut *this };
+        this.query_args.push((f_escape_pressed, grf_key_state));
+        let rv = this.script[this.script_idx.min(this.script.len() - 1)];
+        this.script_idx += 1;
+        rv
+    }
+
+    unsafe extern "win64" fn test_drop_source_give_feedback(
+        this: *mut TestDropSource,
+        dw_effect: u32,
+    ) -> u32 {
+        // SAFETY: live TestDropSource (IUnknown contract).
+        unsafe { (*this).feedback_effects.push(dw_effect) };
+        DRAGDROP_S_USEDEFAULTCURSORS
+    }
+
+    static TEST_DROP_SOURCE_VTBL: TestDropSourceVtbl = TestDropSourceVtbl {
+        query_interface: test_drop_source_qi,
+        add_ref: test_drop_source_add_ref,
+        release: test_drop_source_release,
+        query_continue_drag: test_drop_source_query_continue_drag,
+        give_feedback: test_drop_source_give_feedback,
+    };
+
+    fn make_test_drop_source(script: Vec<u32>) -> *mut TestDropSource {
+        Box::into_raw(Box::new(TestDropSource {
+            vtable: &TEST_DROP_SOURCE_VTBL,
+            ref_count: 1,
+            script,
+            script_idx: 0,
+            feedback_effects: Vec::new(),
+            query_args: Vec::new(),
+        }))
+    }
+
+    /// IDropTarget fake that records every drag-method call and writes a fixed
+    /// effect into *pdwEffect on DragEnter/DragOver/Drop.
+    #[repr(C)]
+    struct RecordingDropTarget {
+        vtable: *const IDropTargetVtbl,
+        ref_count: u32,
+        calls: Vec<&'static str>,
+        effect: u32,
+    }
+
+    unsafe extern "win64" fn rec_drop_target_qi(
+        this: *mut (),
+        riid: *const u8,
+        ppv: *mut *mut (),
+    ) -> u32 {
+        if ppv.is_null() {
+            return E_INVALIDARG;
+        }
+        // SAFETY: ppv validated non-null above; writable output slot.
+        unsafe { *ppv = std::ptr::null_mut() };
+        if riid.is_null() {
+            return E_INVALIDARG;
+        }
+        // SAFETY: dispatched through the recording vtable; riid is a 16-byte
+        // IID buffer per COM ABI.
+        let this = this as *mut RecordingDropTarget;
+        let iid = unsafe { std::ptr::read_unaligned(riid as *const [u8; 16]) };
+        if iid == IID_IUNKNOWN_BYTES || iid == IID_IDROPTARGET {
+            // SAFETY: live object (IUnknown contract).
+            unsafe {
+                (*this).ref_count += 1;
+                *ppv = this as *mut ();
+            }
+            S_OK
+        } else {
+            E_NOINTERFACE
+        }
+    }
+
+    unsafe extern "win64" fn rec_drop_target_add_ref(this: *mut ()) -> u32 {
+        // SAFETY: live RecordingDropTarget (IUnknown contract).
+        let this = this as *mut RecordingDropTarget;
+        unsafe {
+            (*this).ref_count += 1;
+            (*this).ref_count
+        }
+    }
+
+    unsafe extern "win64" fn rec_drop_target_release(this: *mut ()) -> u32 {
+        // SAFETY: live RecordingDropTarget (IUnknown contract).
+        let this = this as *mut RecordingDropTarget;
+        let prev = unsafe { (*this).ref_count };
+        let new = prev - 1;
+        if new == 0 {
+            // SAFETY: Box::into_raw'd at construction; refcount 0 means no
+            // other references remain, so reclaiming the Box is sound.
+            unsafe { drop(Box::from_raw(this)) };
+        } else {
+            // SAFETY: ref_count > 0, so the object stays alive.
+            unsafe { (*this).ref_count = new };
+        }
+        new
+    }
+
+    unsafe extern "win64" fn rec_drop_target_drag_enter(
+        this: *mut (),
+        _p_data_obj: *mut (),
+        _grf_key_state: u32,
+        _pt: *const POINTL,
+        pdw_effect: *mut u32,
+    ) -> u32 {
+        // SAFETY: live RecordingDropTarget; pdw_effect is a valid writable
+        // effect slot per the IDropTarget contract.
+        let this = this as *mut RecordingDropTarget;
+        unsafe {
+            (*this).calls.push("DragEnter");
+            if !pdw_effect.is_null() {
+                *pdw_effect = (*this).effect;
+            }
+        }
+        S_OK
+    }
+
+    unsafe extern "win64" fn rec_drop_target_drag_over(
+        this: *mut (),
+        _grf_key_state: u32,
+        _pt: *const POINTL,
+        pdw_effect: *mut u32,
+    ) -> u32 {
+        // SAFETY: live RecordingDropTarget; pdw_effect is a valid writable
+        // effect slot per the IDropTarget contract.
+        let this = this as *mut RecordingDropTarget;
+        unsafe {
+            (*this).calls.push("DragOver");
+            if !pdw_effect.is_null() {
+                *pdw_effect = (*this).effect;
+            }
+        }
+        S_OK
+    }
+
+    unsafe extern "win64" fn rec_drop_target_drag_leave(this: *mut ()) -> u32 {
+        // SAFETY: live RecordingDropTarget.
+        let this = this as *mut RecordingDropTarget;
+        unsafe { (*this).calls.push("DragLeave") };
+        S_OK
+    }
+
+    unsafe extern "win64" fn rec_drop_target_drop(
+        this: *mut (),
+        _p_data_obj: *mut (),
+        _grf_key_state: u32,
+        _pt: *const POINTL,
+        pdw_effect: *mut u32,
+    ) -> u32 {
+        // SAFETY: live RecordingDropTarget; pdw_effect is a valid writable
+        // effect slot per the IDropTarget contract.
+        let this = this as *mut RecordingDropTarget;
+        unsafe {
+            (*this).calls.push("Drop");
+            if !pdw_effect.is_null() {
+                *pdw_effect = (*this).effect;
+            }
+        }
+        S_OK
+    }
+
+    static REC_DROP_TARGET_VTBL: IDropTargetVtbl = IDropTargetVtbl {
+        query_interface: rec_drop_target_qi,
+        add_ref: rec_drop_target_add_ref,
+        release: rec_drop_target_release,
+        drag_enter: rec_drop_target_drag_enter,
+        drag_over: rec_drop_target_drag_over,
+        drag_leave: rec_drop_target_drag_leave,
+        drop: rec_drop_target_drop,
+    };
+
+    fn make_recording_drop_target(effect: u32) -> *mut RecordingDropTarget {
+        Box::into_raw(Box::new(RecordingDropTarget {
+            vtable: &REC_DROP_TARGET_VTBL,
+            ref_count: 1,
+            calls: Vec::new(),
+            effect,
+        }))
+    }
+
+    /// An input sequence over a Vec of DragInputs, ending with None.
+    fn input_seq(ticks: Vec<DragInput>) -> impl FnMut() -> Option<DragInput> {
+        let mut iter = ticks.into_iter();
+        move || iter.next()
+    }
+
+    fn tick(pos: POINTL, target_hwnd: usize) -> DragInput {
+        DragInput {
+            pos,
+            key_state: MK_LBUTTON,
+            escape_pressed: false,
+            target_hwnd,
+        }
+    }
+
+    // Distinct hwnds for the drag-loop tests — the pre-existing RegisterDragDrop
+    // tests already own HWND_T_A..E, and the table is process-global across
+    // parallel test threads.
+    const HWND_DD_A: usize = 0x1234_2001;
+    const HWND_DD_B: usize = 0x1234_2002;
+    const HWND_DD_C: usize = 0x1234_2003;
+    const HWND_DD_D: usize = 0x1234_2004;
+
+    #[test]
+    fn do_drag_drop_cancel_sequence() {
+        let target = make_recording_drop_target(DROPEFFECT_COPY);
+        // Register the target so the loop finds it under the cursor.
+        assert_eq!(
+            unsafe { register_drag_drop(HWND_DD_A, target as *mut u8) },
+            S_OK as i32
+        );
+        let source = make_test_drop_source(vec![S_OK, S_OK, DRAGDROP_S_CANCEL]);
+        let mut effect: u32 = 0xDEAD;
+        let ticks = vec![
+            tick(POINTL { x: 10, y: 10 }, HWND_DD_A),
+            tick(POINTL { x: 11, y: 10 }, HWND_DD_A),
+            tick(POINTL { x: 12, y: 10 }, HWND_DD_A),
+        ];
+
+        // SAFETY: do_drag_drop_with_input NULL-checks its arguments; target and
+        // source are live COM fakes held by this test.
+        let hr = unsafe {
+            do_drag_drop_with_input(
+                source as *mut u8,
+                source as *mut u8,
+                DROPEFFECT_COPY | DROPEFFECT_MOVE,
+                &mut effect,
+                input_seq(ticks),
+            )
+        };
+
+        assert_eq!(hr, DRAGDROP_S_CANCEL as i32);
+        assert_eq!(effect, DROPEFFECT_NONE);
+        // SAFETY: target/source are Box::into_raw'd and still alive here.
+        // Tick 1: DragEnter + DragOver; tick 2: DragOver; tick 3: cancel → DragLeave.
+        assert_eq!(
+            unsafe { (*target).calls.as_slice() },
+            &["DragEnter", "DragOver", "DragOver", "DragLeave"]
+        );
+        assert_eq!(unsafe { (*source).query_args.len() }, 3);
+        // GiveFeedback is called after each DragEnter/DragOver.
+        assert_eq!(unsafe { (*source).feedback_effects.len() }, 3);
+
+        assert_eq!(unsafe { revoke_drag_drop(HWND_DD_A) }, S_OK as i32);
+        unsafe { com_release(target as *mut ()) };
+        unsafe { com_release(source as *mut ()) };
+    }
+
+    #[test]
+    fn do_drag_drop_drop_sequence() {
+        let target = make_recording_drop_target(DROPEFFECT_COPY);
+        assert_eq!(
+            unsafe { register_drag_drop(HWND_DD_B, target as *mut u8) },
+            S_OK as i32
+        );
+        // S_OK (continue) then S_FALSE (drop).
+        let source = make_test_drop_source(vec![S_OK, S_FALSE]);
+        let mut effect: u32 = 0;
+        let ticks = vec![
+            tick(POINTL { x: 10, y: 10 }, HWND_DD_B),
+            tick(POINTL { x: 11, y: 10 }, HWND_DD_B),
+        ];
+
+        let hr = unsafe {
+            do_drag_drop_with_input(
+                source as *mut u8,
+                source as *mut u8,
+                DROPEFFECT_COPY,
+                &mut effect,
+                input_seq(ticks),
+            )
+        };
+
+        assert_eq!(hr, DRAGDROP_S_DROP as i32);
+        assert_eq!(effect, DROPEFFECT_COPY);
+        // SAFETY: target/source are Box::into_raw'd and still alive here.
+        assert_eq!(
+            unsafe { (*target).calls.as_slice() },
+            &["DragEnter", "DragOver", "Drop"]
+        );
+        assert_eq!(unsafe { (*source).query_args.len() }, 2);
+        // GiveFeedback must have been called after DragEnter and after DragOver.
+        assert_eq!(unsafe { (*source).feedback_effects.len() }, 2);
+
+        assert_eq!(unsafe { revoke_drag_drop(HWND_DD_B) }, S_OK as i32);
+        unsafe { com_release(target as *mut ()) };
+        unsafe { com_release(source as *mut ()) };
+    }
+
+    #[test]
+    fn do_drag_drop_enter_then_over_order() {
+        let target = make_recording_drop_target(DROPEFFECT_COPY);
+        assert_eq!(
+            unsafe { register_drag_drop(HWND_DD_C, target as *mut u8) },
+            S_OK as i32
+        );
+        // Three continue ticks → DragEnter once, then DragOver each tick.
+        let source = make_test_drop_source(vec![S_OK, S_OK, S_OK]);
+        let mut effect: u32 = 0;
+        let ticks = vec![
+            tick(POINTL { x: 10, y: 10 }, HWND_DD_C),
+            tick(POINTL { x: 11, y: 10 }, HWND_DD_C),
+            tick(POINTL { x: 12, y: 10 }, HWND_DD_C),
+        ];
+
+        let hr = unsafe {
+            do_drag_drop_with_input(
+                source as *mut u8,
+                source as *mut u8,
+                DROPEFFECT_COPY | DROPEFFECT_MOVE,
+                &mut effect,
+                input_seq(ticks),
+            )
+        };
+
+        // Input exhausted → cancel after the DragOver ticks.
+        assert_eq!(hr, DRAGDROP_S_CANCEL as i32);
+        assert_eq!(effect, DROPEFFECT_NONE);
+        assert_eq!(
+            unsafe { (*target).calls.as_slice() },
+            &["DragEnter", "DragOver", "DragOver", "DragOver", "DragLeave"]
+        );
+        // DragEnter happened exactly once (first tick), DragOver per tick.
+        assert_eq!(
+            unsafe {
+                (*target)
+                    .calls
+                    .iter()
+                    .filter(|c| **c == "DragEnter")
+                    .count()
+            },
+            1
+        );
+        assert_eq!(
+            unsafe { (*target).calls.iter().filter(|c| **c == "DragOver").count() },
+            3
+        );
+
+        assert_eq!(unsafe { revoke_drag_drop(HWND_DD_C) }, S_OK as i32);
+        unsafe { com_release(target as *mut ()) };
+        unsafe { com_release(source as *mut ()) };
+    }
+
+    #[test]
+    fn do_drag_drop_registered_target_receives_events() {
+        // The registered target's vtable methods must receive the drag events;
+        // refcount is observed through the table's AddRef/Release lifecycle.
+        let target = make_recording_drop_target(DROPEFFECT_COPY);
+        assert_eq!(
+            unsafe { register_drag_drop(HWND_DD_D, target as *mut u8) },
+            S_OK as i32
+        );
+        let source = make_test_drop_source(vec![S_OK, DRAGDROP_S_DROP]);
+        let mut effect: u32 = 0;
+        let ticks = vec![
+            tick(POINTL { x: 10, y: 10 }, HWND_DD_D),
+            tick(POINTL { x: 11, y: 10 }, HWND_DD_D),
+        ];
+
+        let hr = unsafe {
+            do_drag_drop_with_input(
+                source as *mut u8,
+                source as *mut u8,
+                DROPEFFECT_COPY,
+                &mut effect,
+                input_seq(ticks),
+            )
+        };
+
+        assert_eq!(hr, DRAGDROP_S_DROP as i32);
+        assert_eq!(effect, DROPEFFECT_COPY);
+        // The table held one owning ref; the drag took a temp ref (via
+        // lookup_drop_target) that was released on Drop — target still alive.
+        // SAFETY: target/source are Box::into_raw'd and still alive here.
+        assert_eq!(unsafe { (*target).ref_count }, 2); // test's 1 + table's 1
+        assert_eq!(
+            unsafe { (*target).calls.as_slice() },
+            &["DragEnter", "DragOver", "Drop"]
+        );
+
+        assert_eq!(unsafe { revoke_drag_drop(HWND_DD_D) }, S_OK as i32);
+        assert_eq!(unsafe { (*target).ref_count }, 1); // back to the test's ref
+        unsafe { com_release(target as *mut ()) };
+        unsafe { com_release(source as *mut ()) };
     }
 }
