@@ -18,6 +18,8 @@
 
 #![allow(non_snake_case)]
 
+use aes::cipher::{BlockDecrypt, BlockEncrypt, KeyInit};
+use aes::{Aes128, Aes192, Aes256};
 use core::ptr::{read_unaligned, write_unaligned};
 use sha1::digest::{Digest, DynDigest};
 use weave_core::handles::{self, HandleKind};
@@ -1871,6 +1873,9 @@ pub fn resolve(func: &str) -> Option<usize> {
             crypt_import_key as unsafe extern "win64" fn(_, _, _, _, _, _) -> _ as *const ()
                 as usize,
         ),
+        "CryptGenKey" => {
+            Some(crypt_gen_key as unsafe extern "win64" fn(_, _, _, _) -> _ as *const () as usize)
+        }
         "CryptDestroyHash" => {
             Some(crypt_destroy_hash as unsafe extern "win64" fn(_) -> _ as *const () as usize)
         }
@@ -2334,6 +2339,21 @@ const CALG_MD5: u32 = 0x0000_8003;
 const CALG_SHA1: u32 = 0x0000_8004;
 const CALG_SHA_256: u32 = 0x0000_800c;
 
+// CALG_IDs for the symmetric bulk-encryption algorithms Weave supports.
+// RC4 is a stream cipher; the AES variants are block ciphers.
+const CALG_RC4: u32 = 0x0000_6801;
+const CALG_AES_128: u32 = 0x0000_660e;
+const CALG_AES_192: u32 = 0x0000_660f;
+const CALG_AES_256: u32 = 0x0000_6610;
+
+// AES block size in bytes. Weave implements AES in ECB mode with Wine's
+// length padding (pad bytes equal to the pad count; one extra block).
+const AES_BLOCK_LEN: usize = 16;
+
+// BLOBHEADER fields for PLAINTEXTKEYBLOB key blobs (wincrypt.h).
+const PLAINTEXTKEYBLOB: u8 = 8;
+const CUR_BLOB_VERSION: u8 = 2;
+
 // CryptGetHashParam dwParam values (wincrypt.h).
 const HP_ALGID: u32 = 0x0001;
 const HP_HASHVAL: u32 = 0x0002;
@@ -2345,6 +2365,10 @@ const NTE_BAD_HASH: u32 = 0x8009_0002;
 const NTE_BAD_KEY: u32 = 0x8009_0003;
 const NTE_BAD_FLAGS: u32 = 0x8009_0009;
 const NTE_BAD_PROV: u32 = 0x8009_0004;
+const NTE_BAD_LEN: u32 = 0x8009_0004;
+const NTE_BAD_DATA: u32 = 0x8009_0005;
+const NTE_BAD_TYPE: u32 = 0x8009_000a;
+const NTE_FAIL: u32 = 0x8009_0020;
 const NTE_INVALID_PARAMETER: u32 = 0x8009_0027;
 
 /// An open CAPI hash object: the algorithm and a live incremental hasher.
@@ -2412,6 +2436,184 @@ fn hash_remove(handle: usize) -> bool {
     }
 }
 
+/// An imported/generated CAPI key: the algorithm and its raw key material.
+///
+/// RC4 is a stateful stream cipher — the keystream S-box advances across
+/// `CryptEncrypt`/`CryptDecrypt` calls and is reset to the initial KSA state on
+/// a `Final` call. AES (ECB) keeps no cross-call state.
+struct KeyObject {
+    alg_id: u32,
+    key_material: Vec<u8>,
+    rc4: Option<Rc4State>,
+}
+
+/// RC4 keystream state (the KSA/PRGA working variables S-box, i and j).
+struct Rc4State {
+    s: [u8; 256],
+    i: u8,
+    j: u8,
+}
+
+/// Key object handle table. Handle value = slot index + `KEY_HANDLE_OFFSET`
+/// (mirrors `weave_core::handles` so 0 is never a valid handle).
+const KEY_HANDLE_OFFSET: usize = 4;
+
+static KEY_OBJECTS: std::sync::OnceLock<std::sync::Mutex<Vec<Option<KeyObject>>>> =
+    std::sync::OnceLock::new();
+
+fn key_table() -> &'static std::sync::Mutex<Vec<Option<KeyObject>>> {
+    KEY_OBJECTS.get_or_init(|| std::sync::Mutex::new(Vec::new()))
+}
+
+/// Allocate a fresh key object handle. Returns the smallest free slot.
+fn key_alloc(obj: KeyObject) -> usize {
+    let mut table = key_table()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    for (i, slot) in table.iter_mut().enumerate() {
+        if slot.is_none() {
+            *slot = Some(obj);
+            return i + KEY_HANDLE_OFFSET;
+        }
+    }
+    table.push(Some(obj));
+    table.len() - 1 + KEY_HANDLE_OFFSET
+}
+
+/// Run `f` against the key object for `handle`. Returns `None` if the handle
+/// is invalid or the table lock is poisoned.
+fn with_key<R>(handle: usize, f: impl FnOnce(&mut KeyObject) -> R) -> Option<R> {
+    let mut table = key_table().lock().ok()?;
+    let index = handle.checked_sub(KEY_HANDLE_OFFSET)?;
+    let slot = table.get_mut(index)?.as_mut()?;
+    Some(f(slot))
+}
+
+/// Free a key object handle. Returns `false` if the handle was invalid.
+fn key_remove(handle: usize) -> bool {
+    let mut table = match key_table().lock() {
+        Ok(guard) => guard,
+        Err(_) => return false,
+    };
+    let index = match handle.checked_sub(KEY_HANDLE_OFFSET) {
+        Some(i) => i,
+        None => return false,
+    };
+    match table.get_mut(index) {
+        Some(slot @ Some(_)) => {
+            *slot = None;
+            true
+        }
+        _ => false,
+    }
+}
+
+/// True for the symmetric bulk-encryption ALG_IDs Weave implements.
+fn key_alg_supported(alg_id: u32) -> bool {
+    matches!(
+        alg_id,
+        CALG_RC4 | CALG_AES_128 | CALG_AES_192 | CALG_AES_256
+    )
+}
+
+/// Block size in bytes for `alg_id`, or `None` for stream ciphers.
+fn key_block_len(alg_id: u32) -> Option<usize> {
+    match alg_id {
+        CALG_AES_128 | CALG_AES_192 | CALG_AES_256 => Some(AES_BLOCK_LEN),
+        _ => None,
+    }
+}
+
+/// Build the initial RC4 keystream S-box (KSA) for `key`.
+fn rc4_init(key: &[u8]) -> Rc4State {
+    let mut s = [0u8; 256];
+    for (i, v) in s.iter_mut().enumerate() {
+        *v = i as u8;
+    }
+    let mut j = 0u8;
+    for i in 0..256 {
+        j = j.wrapping_add(s[i]).wrapping_add(key[i % key.len()]);
+        s.swap(i, j as usize);
+    }
+    Rc4State { s, i: 0, j: 0 }
+}
+
+/// XOR `data` with the RC4 keystream (PRGA), advancing `state`. RC4 is its own
+/// inverse, so this serves both encryption and decryption.
+fn rc4_apply(state: &mut Rc4State, data: &mut [u8]) {
+    let mut i = state.i;
+    let mut j = state.j;
+    for byte in data.iter_mut() {
+        i = i.wrapping_add(1);
+        j = j.wrapping_add(state.s[i as usize]);
+        state.s.swap(i as usize, j as usize);
+        let k = state.s[state.s[i as usize].wrapping_add(state.s[j as usize]) as usize];
+        *byte ^= k;
+    }
+    state.i = i;
+    state.j = j;
+}
+
+/// One of the three AES key sizes Weave supports.
+enum AesKey {
+    Aes128(aes::Aes128),
+    Aes192(aes::Aes192),
+    Aes256(aes::Aes256),
+}
+
+impl AesKey {
+    /// Encrypt a single 16-byte block in place.
+    fn encrypt(&self, block: &mut aes::Block) {
+        match self {
+            AesKey::Aes128(c) => c.encrypt_block(block),
+            AesKey::Aes192(c) => c.encrypt_block(block),
+            AesKey::Aes256(c) => c.encrypt_block(block),
+        }
+    }
+
+    /// Decrypt a single 16-byte block in place.
+    fn decrypt(&self, block: &mut aes::Block) {
+        match self {
+            AesKey::Aes128(c) => c.decrypt_block(block),
+            AesKey::Aes192(c) => c.decrypt_block(block),
+            AesKey::Aes256(c) => c.decrypt_block(block),
+        }
+    }
+}
+
+/// Construct the AES cipher for `alg_id` from `key`. `None` on a key-length /
+/// algorithm mismatch (callers surface it as NTE_BAD_ALGID).
+fn aes_cipher(alg_id: u32, key: &[u8]) -> Option<AesKey> {
+    match alg_id {
+        CALG_AES_128 => Aes128::new_from_slice(key).ok().map(AesKey::Aes128),
+        CALG_AES_192 => Aes192::new_from_slice(key).ok().map(AesKey::Aes192),
+        CALG_AES_256 => Aes256::new_from_slice(key).ok().map(AesKey::Aes256),
+        _ => None,
+    }
+}
+
+/// Hash a plaintext chunk through `h_hash` when it resolves to a live hash
+/// object (Wine's rsaenh only hashes when `is_valid_handle` succeeds; an
+/// invalid handle is silently skipped). `Err(NTE_BAD_HASH)` when the hash was
+/// already finalized and rejects further data.
+fn hash_plaintext(h_hash: usize, data: &[u8]) -> Result<(), u32> {
+    if h_hash == 0 {
+        return Ok(());
+    }
+    match with_hash(h_hash, |obj| {
+        if obj.finalized {
+            Err(())
+        } else {
+            obj.hasher.update(data);
+            Ok(())
+        }
+    }) {
+        Some(Ok(())) => Ok(()),
+        Some(Err(())) => Err(NTE_BAD_HASH),
+        None => Ok(()), // invalid hash handle: skipped, as in Wine's is_valid_handle
+    }
+}
+
 /// Construct a live incremental hasher for `alg_id`. `None` for unsupported
 /// algorithms (Wine's rsaenh rejects those with NTE_BAD_ALGID).
 fn make_hasher(alg_id: u32) -> Option<Box<dyn DynDigest + Send>> {
@@ -2473,50 +2675,319 @@ pub unsafe extern "win64" fn crypt_create_hash(
     1 // TRUE
 }
 
-/// CryptEncrypt — encrypt data with a key. Returns FALSE + NTE_FAIL.
-// Wine ref: dlls/advapi32/crypt.c — CryptEncrypt calls provider CPEncrypt;
-// FALSE + NTE_FAIL if key invalid.
+/// CryptEncrypt — encrypt data in place with a key.
+///
+/// RC4 is a stream cipher: the caller's buffer is XORed with the keystream and
+/// the length is unchanged. AES runs in ECB mode with Wine's length padding on
+/// the final block (`encrypted_len = ceil(len/16)*16`, every pad byte equals
+/// the pad count). `h_hash`, when it resolves to a live hash object, is fed the
+/// *plaintext* before encryption (matching Wine, for message signatures).
+///
+/// # Safety
+/// `pb_data` must be a writable buffer of `dw_buf_len` bytes (or null for a
+/// size probe); `pdw_data_len` must be a writable pointer to the data length.
+// Wine ref: dlls/advapi32/crypt.c — CryptEncrypt dispatches to provider
+// pCPEncrypt; dlls/rsaenh/rsaenh.c RSAENH_CPEncrypt rejects dwFlags (!= 0 and
+// != CRYPT_OAEP) with NTE_BAD_FLAGS and an invalid hKey with NTE_BAD_KEY, then
+// hashes the plaintext through hHash when it resolves and dispatches on
+// algorithm type: streams (RC4) XOR in place, blocks (AES) go through
+// block_encrypt, which pads the final block (pad byte = pad count), rejects
+// non-block-multiple lengths when not final with NTE_BAD_DATA, and reports the
+// padded size via ERROR_MORE_DATA when dwBufLen is too small. Weave implements
+// AES in ECB mode (no CBC chain vector) and skips an unresolvable hash handle
+// exactly as Wine's is_valid_handle does.
 pub unsafe extern "win64" fn crypt_encrypt(
-    _h_key: usize,
-    _h_hash: usize,
-    _final_: i32,
-    _dw_flags: u32,
-    _pb_data: *mut u8,
-    _pdw_data_len: *mut u32,
-    _dw_buf_len: u32,
+    h_key: usize,
+    h_hash: usize,
+    final_block: i32,
+    dw_flags: u32,
+    pb_data: *mut u8,
+    pdw_data_len: *mut u32,
+    dw_buf_len: u32,
 ) -> i32 {
-    weave_common::set_last_error(0x8009_0020_u32); // NTE_FAIL
-    0 // FALSE
+    if pdw_data_len.is_null() {
+        weave_common::set_last_error(ERROR_INVALID_PARAMETER as u32);
+        return 0; // FALSE
+    }
+    // SAFETY: pdw_data_len checked non-null above; the caller provides a writable DWORD.
+    let data_len = unsafe { *pdw_data_len } as usize;
+    if dw_flags != 0 {
+        weave_common::set_last_error(NTE_BAD_FLAGS);
+        return 0;
+    }
+    let result = with_key(h_key, |key| match key.alg_id {
+        CALG_RC4 => {
+            if pb_data.is_null() {
+                // Size probe: report the required buffer size (Wine's stream path).
+                // SAFETY: pdw_data_len checked non-null above.
+                unsafe { *pdw_data_len = dw_buf_len };
+                return Ok(());
+            }
+            if data_len > 0 {
+                // SAFETY: data_len > 0 and pb_data non-null; the caller
+                // guarantees data_len writable bytes at pb_data.
+                let buf = unsafe { std::slice::from_raw_parts_mut(pb_data, data_len) };
+                hash_plaintext(h_hash, buf)?;
+                if let Some(state) = key.rc4.as_mut() {
+                    rc4_apply(state, buf);
+                }
+            }
+            if final_block != 0 {
+                // Wine's setup_key: reset the stream cipher to its initial state.
+                key.rc4 = Some(rc4_init(&key.key_material));
+            }
+            Ok(())
+        }
+        alg if key_block_len(alg).is_some() => {
+            let block_len = AES_BLOCK_LEN;
+            if final_block == 0 && !data_len.is_multiple_of(block_len) {
+                return Err(NTE_BAD_DATA);
+            }
+            let encrypted_len =
+                (data_len / block_len + if final_block != 0 { 1 } else { 0 }) * block_len;
+            if pb_data.is_null() {
+                // Size probe: report the padded length (Wine's block_encrypt).
+                // SAFETY: pdw_data_len checked non-null above.
+                unsafe { *pdw_data_len = encrypted_len as u32 };
+                return Ok(());
+            }
+            if encrypted_len > dw_buf_len as usize {
+                // SAFETY: pdw_data_len checked non-null above.
+                unsafe { *pdw_data_len = encrypted_len as u32 };
+                return Err(ERROR_MORE_DATA as u32);
+            }
+            // SAFETY: the caller guarantees dw_buf_len writable bytes at pb_data
+            // and encrypted_len <= dw_buf_len was checked above.
+            let buf = unsafe { std::slice::from_raw_parts_mut(pb_data, encrypted_len) };
+            if data_len > 0 {
+                hash_plaintext(h_hash, &buf[..data_len])?;
+            }
+            // Pad the final block with length bytes (Wine's block_encrypt).
+            for b in &mut buf[data_len..] {
+                *b = (encrypted_len - data_len) as u8;
+            }
+            let cipher = aes_cipher(key.alg_id, &key.key_material).ok_or(NTE_BAD_ALGID)?;
+            for chunk in buf.chunks_exact_mut(block_len) {
+                let block = aes::Block::from_mut_slice(chunk);
+                cipher.encrypt(block);
+            }
+            // SAFETY: pdw_data_len checked non-null above.
+            unsafe { *pdw_data_len = encrypted_len as u32 };
+            Ok(())
+        }
+        _ => Err(NTE_BAD_ALGID),
+    });
+    match result {
+        Some(Ok(())) => 1, // TRUE
+        Some(Err(err)) => {
+            weave_common::set_last_error(err);
+            0
+        }
+        None => {
+            weave_common::set_last_error(NTE_BAD_KEY);
+            0
+        }
+    }
 }
 
-/// CryptImportKey — import a key into the CSP. Returns FALSE + NTE_FAIL.
-// Wine ref: dlls/advapi32/crypt.c — CryptImportKey calls provider CPImportKey;
-// FALSE + NTE_FAIL if key format unsupported.
+/// CryptImportKey — import a key blob into the CSP and return a key handle.
+///
+/// Supports `PLAINTEXTKEYBLOB` blobs for RC4/AES. The blob layout is a
+/// `BLOBHEADER` (bType, bVersion, reserved, aiKeyAlg), a `DWORD` key length and
+/// the raw key material.
+///
+/// # Safety
+/// `pb_data` must be readable for `dw_data_len` bytes; `ph_key` must be a
+/// writable pointer to an `HCRYPTKEY` slot.
+// Wine ref: dlls/advapi32/crypt.c — CryptImportKey dispatches to provider
+// pCPImportKey; dlls/rsaenh/rsaenh.c RSAENH_CPImportKey → import_key rejects
+// blobs shorter than BLOBHEADER or with bVersion != CUR_BLOB_VERSION with
+// NTE_BAD_DATA, unknown blob types with NTE_BAD_TYPE, and unsupported ALG_IDs
+// with NTE_BAD_ALGID (new_key → get_algid_info); import_plaintext_key copies
+// the key bytes into the new CRYPTKEY and setup_key()s it. Weave stores the
+// key material in a KeyObject; SIMPLEBLOB (RSA-wrapped) and asymmetric blobs
+// return NTE_BAD_TYPE as no RSA support exists.
 pub unsafe extern "win64" fn crypt_import_key(
-    _h_prov: usize,
-    _pb_data: *mut u8,
-    _dw_data_len: u32,
+    h_prov: usize,
+    pb_data: *mut u8,
+    dw_data_len: u32,
     _h_pub_key: usize,
     _dw_flags: u32,
-    _ph_key: *mut u32,
+    ph_key: *mut usize,
 ) -> i32 {
-    weave_common::set_last_error(0x8009_0020_u32); // NTE_FAIL
-    0 // FALSE
+    if ph_key.is_null() {
+        weave_common::set_last_error(ERROR_INVALID_PARAMETER as u32);
+        return 0; // FALSE
+    }
+    // SAFETY: ph_key checked non-null above; the caller provides a writable HCRYPTKEY slot.
+    unsafe { *ph_key = 0 };
+    if h_prov == 0 {
+        weave_common::set_last_error(NTE_BAD_PROV);
+        return 0;
+    }
+    if pb_data.is_null() || dw_data_len < std::mem::size_of::<u64>() as u32 {
+        weave_common::set_last_error(NTE_BAD_DATA);
+        return 0;
+    }
+    // BLOBHEADER layout: BYTE bType, BYTE bVersion, WORD reserved, ALG_ID aiKeyAlg.
+    // SAFETY: dw_data_len >= 8 and pb_data non-null (checked above); the caller
+    // guarantees dw_data_len readable bytes, so the 8-byte header is readable.
+    let header = unsafe { std::slice::from_raw_parts(pb_data, std::mem::size_of::<u64>()) };
+    let b_type = header[0];
+    let b_version = header[1];
+    let alg_id = u32::from_le_bytes([header[4], header[5], header[6], header[7]]);
+    if b_version != CUR_BLOB_VERSION {
+        weave_common::set_last_error(NTE_BAD_DATA);
+        return 0;
+    }
+    if b_type != PLAINTEXTKEYBLOB {
+        weave_common::set_last_error(NTE_BAD_TYPE);
+        return 0;
+    }
+    if !key_alg_supported(alg_id) {
+        weave_common::set_last_error(NTE_BAD_ALGID);
+        return 0;
+    }
+    if dw_data_len < 12 {
+        weave_common::set_last_error(NTE_BAD_DATA);
+        return 0;
+    }
+    // SAFETY: dw_data_len >= 12 checked above; the DWORD key length at offset 8
+    // is read unaligned per the blob layout.
+    let key_len = unsafe { std::ptr::read_unaligned(pb_data.add(8) as *const u32) } as usize;
+    if (dw_data_len as usize) < 12 + key_len {
+        weave_common::set_last_error(NTE_BAD_DATA);
+        return 0;
+    }
+    let key_material = if key_len == 0 {
+        Vec::new()
+    } else {
+        // SAFETY: key_len > 0; dw_data_len >= 12 + key_len checked above, so the
+        // key bytes at pb_data.add(12) are readable.
+        unsafe { std::slice::from_raw_parts(pb_data.add(12), key_len) }.to_vec()
+    };
+    let handle = key_alloc(KeyObject {
+        alg_id,
+        key_material: key_material.clone(),
+        rc4: (alg_id == CALG_RC4).then(|| rc4_init(&key_material)),
+    });
+    // SAFETY: ph_key checked non-null above; write the new handle out.
+    unsafe { *ph_key = handle };
+    1 // TRUE
 }
 
-/// CryptDecrypt — decrypt data with a key. Returns FALSE + NTE_FAIL.
-// Wine ref: dlls/advapi32/crypt.c — CryptDecrypt calls provider CPDecrypt;
-// FALSE + NTE_FAIL if key invalid.
+/// CryptDecrypt — decrypt data in place with a key.
+///
+/// RC4 is a stream cipher: the caller's buffer is XORed with the keystream and
+/// the length is unchanged. AES runs in ECB mode; on `Final` Wine's length
+/// padding is verified and stripped (every pad byte equals the pad count) or
+/// `NTE_BAD_DATA` is raised. `h_hash`, when it resolves, is fed the *plaintext*
+/// after decryption.
+///
+/// # Safety
+/// `pb_data` must be a writable buffer of `*pdw_data_len` bytes; `pdw_data_len`
+/// must be a writable pointer to the data length.
+// Wine ref: dlls/advapi32/crypt.c — CryptDecrypt dispatches to provider
+// pCPDecrypt; dlls/rsaenh/rsaenh.c RSAENH_CPDecrypt rejects dwFlags with
+// NTE_BAD_FLAGS, an invalid hKey with NTE_BAD_KEY, Final with a zero length
+// with NTE_BAD_LEN, then decrypts in place per algorithm type: streams (RC4)
+// XOR in place, blocks (AES) per block with the final PKCS-style pad verified
+// and stripped (invalid pad bytes → NTE_BAD_DATA). setup_key on Final resets
+// the cipher. Weave implements AES in ECB mode (no CBC chain vector).
 pub unsafe extern "win64" fn crypt_decrypt(
-    _h_key: usize,
-    _h_hash: usize,
-    _final_: i32,
-    _dw_flags: u32,
-    _pb_data: *mut u8,
-    _pdw_data_len: *mut u32,
+    h_key: usize,
+    h_hash: usize,
+    final_block: i32,
+    dw_flags: u32,
+    pb_data: *mut u8,
+    pdw_data_len: *mut u32,
 ) -> i32 {
-    weave_common::set_last_error(0x8009_0020_u32); // NTE_FAIL
-    0 // FALSE
+    if pdw_data_len.is_null() {
+        weave_common::set_last_error(ERROR_INVALID_PARAMETER as u32);
+        return 0; // FALSE
+    }
+    // SAFETY: pdw_data_len checked non-null above; the caller provides a writable DWORD.
+    let data_len = unsafe { *pdw_data_len } as usize;
+    if dw_flags != 0 {
+        weave_common::set_last_error(NTE_BAD_FLAGS);
+        return 0;
+    }
+    let result = with_key(h_key, |key| match key.alg_id {
+        CALG_RC4 => {
+            if data_len > 0 && pb_data.is_null() {
+                return Err(ERROR_INVALID_PARAMETER as u32);
+            }
+            if data_len > 0 {
+                // SAFETY: data_len > 0 and pb_data non-null (checked above); the
+                // caller guarantees data_len bytes at pb_data (decrypt in place).
+                let buf = unsafe { std::slice::from_raw_parts_mut(pb_data, data_len) };
+                if let Some(state) = key.rc4.as_mut() {
+                    rc4_apply(state, buf);
+                }
+                hash_plaintext(h_hash, buf)?;
+            }
+            if final_block != 0 {
+                // Wine's setup_key: reset the stream cipher to its initial state.
+                key.rc4 = Some(rc4_init(&key.key_material));
+            }
+            Ok(())
+        }
+        alg if key_block_len(alg).is_some() => {
+            let block_len = AES_BLOCK_LEN;
+            if final_block != 0 && data_len == 0 {
+                return Err(NTE_BAD_LEN);
+            }
+            if data_len > 0 && pb_data.is_null() {
+                return Err(ERROR_INVALID_PARAMETER as u32);
+            }
+            if !data_len.is_multiple_of(block_len) {
+                return Err(NTE_BAD_DATA);
+            }
+            if data_len > 0 {
+                // SAFETY: data_len > 0 and pb_data non-null (checked above); the
+                // caller guarantees data_len bytes at pb_data.
+                let buf = unsafe { std::slice::from_raw_parts_mut(pb_data, data_len) };
+                let cipher = aes_cipher(key.alg_id, &key.key_material).ok_or(NTE_BAD_ALGID)?;
+                for chunk in buf.chunks_exact_mut(block_len) {
+                    let block = aes::Block::from_mut_slice(chunk);
+                    cipher.decrypt(block);
+                }
+                let plain_len = if final_block != 0 {
+                    let pad = buf[data_len - 1] as usize;
+                    // Wine's pad check: pad byte count must be in [1, block_len],
+                    // fit the buffer, and every pad byte must equal the count.
+                    if pad == 0
+                        || pad > block_len
+                        || pad > data_len
+                        || buf[data_len - pad..data_len - 1]
+                            .iter()
+                            .any(|&b| b as usize != pad)
+                    {
+                        return Err(NTE_BAD_DATA);
+                    }
+                    data_len - pad
+                } else {
+                    data_len
+                };
+                hash_plaintext(h_hash, &buf[..plain_len])?;
+                // SAFETY: pdw_data_len checked non-null above.
+                unsafe { *pdw_data_len = plain_len as u32 };
+            }
+            Ok(())
+        }
+        _ => Err(NTE_BAD_ALGID),
+    });
+    match result {
+        Some(Ok(())) => 1, // TRUE
+        Some(Err(err)) => {
+            weave_common::set_last_error(err);
+            0
+        }
+        None => {
+            weave_common::set_last_error(NTE_BAD_KEY);
+            0
+        }
+    }
 }
 
 /// CryptDestroyHash — release a hash object and free its handle.
@@ -2709,11 +3180,87 @@ pub unsafe extern "win64" fn check_token_membership(
     1 // TRUE (call succeeded; membership is FALSE)
 }
 
-/// CryptDestroyKey — release a key object. Returns TRUE (no-op; no state to free).
-// Wine ref: dlls/advapi32/crypt.c — CryptDestroyKey calls provider CPDestroyKey
-// then frees internal key object; TRUE on success.
-pub unsafe extern "win64" fn crypt_destroy_key(_h_key: usize) -> i32 {
+/// CryptGenKey — generate a fresh symmetric key for `alg_id`.
+///
+/// `dw_flags`' high word carries the key length in bits (0 = per-algorithm
+/// default: RC4 128, AES-128/192/256 fixed). The key material is filled from
+/// getrandom(2) via `fill_random`.
+///
+/// # Safety
+/// `ph_key` must be a writable pointer to an `HCRYPTKEY` slot.
+// Wine ref: dlls/rsaenh/rsaenh.c — RSAENH_CPGenKey rejects unsupported ALG_IDs
+// with NTE_BAD_ALGID, fills the key bytes with RtlGenRandom (Weave uses
+// getrandom(2) via fill_random), and returns the new key handle. Default key
+// lengths come from aProvEnumAlgsEx (RC4 128 bits; AES-128/192/256 fixed).
+pub unsafe extern "win64" fn crypt_gen_key(
+    h_prov: usize,
+    alg_id: u32,
+    dw_flags: u32,
+    ph_key: *mut usize,
+) -> i32 {
+    if ph_key.is_null() {
+        weave_common::set_last_error(ERROR_INVALID_PARAMETER as u32);
+        return 0; // FALSE
+    }
+    // SAFETY: ph_key checked non-null above; the caller provides a writable HCRYPTKEY slot.
+    unsafe { *ph_key = 0 };
+    if h_prov == 0 {
+        weave_common::set_last_error(NTE_BAD_PROV);
+        return 0;
+    }
+    let key_len_bits = match alg_id {
+        CALG_RC4 => {
+            let hi = (dw_flags >> 16) as usize;
+            if hi == 0 {
+                128
+            } else {
+                hi
+            }
+        }
+        CALG_AES_128 => 128,
+        CALG_AES_192 => 192,
+        CALG_AES_256 => 256,
+        _ => {
+            weave_common::set_last_error(NTE_BAD_ALGID);
+            return 0;
+        }
+    };
+    if key_len_bits == 0 || key_len_bits % 8 != 0 || key_len_bits > 256 {
+        weave_common::set_last_error(NTE_BAD_FLAGS);
+        return 0;
+    }
+    let key_len = key_len_bits / 8;
+    let mut key_material = vec![0u8; key_len];
+    // SAFETY: key_material is a freshly allocated Vec of key_len bytes; fill_random
+    // writes exactly that many bytes when it succeeds.
+    if !unsafe { fill_random(key_material.as_mut_ptr(), key_len) } {
+        weave_common::set_last_error(NTE_FAIL);
+        return 0;
+    }
+    let handle = key_alloc(KeyObject {
+        alg_id,
+        key_material: key_material.clone(),
+        rc4: (alg_id == CALG_RC4).then(|| rc4_init(&key_material)),
+    });
+    // SAFETY: ph_key checked non-null above; write the new handle out.
+    unsafe { *ph_key = handle };
     1 // TRUE
+}
+
+/// CryptDestroyKey — release a key object and free its handle.
+///
+/// # Safety
+/// No pointer dereferences; `h_key` is an opaque handle.
+// Wine ref: dlls/advapi32/crypt.c — CryptDestroyKey looks up the key handle,
+// calls provider CPDestroyKey, then frees the internal CRYPTKEY; FALSE on an
+// invalid handle. Weave removes the object from the key handle table.
+pub unsafe extern "win64" fn crypt_destroy_key(h_key: usize) -> i32 {
+    if key_remove(h_key) {
+        1 // TRUE
+    } else {
+        weave_common::set_last_error(ERROR_INVALID_HANDLE as u32);
+        0 // FALSE
+    }
 }
 
 /// CryptEnumProvidersW — enumerate installed CSPs. Returns FALSE + ERROR_NO_MORE_ITEMS.
@@ -4351,6 +4898,390 @@ mod tests {
             "CryptHashData",
             "CryptGetHashParam",
             "CryptDestroyHash",
+        ] {
+            assert!(resolve(name).is_some(), "missing resolver entry for {name}");
+        }
+    }
+
+    // ── CAPI key object tests (CryptImportKey / CryptGenKey / CryptEncrypt / CryptDecrypt) ──
+
+    /// Guards the shared key-object handle table (see HASH_LOCK rationale).
+    static KEY_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Acquire the key-table guard so a parallel test's create/destroy cycle
+    /// cannot reclaim this test's destroyed handle mid-flight.
+    fn key_guard() -> std::sync::MutexGuard<'static, ()> {
+        KEY_LOCK.lock().unwrap()
+    }
+
+    /// Build a PLAINTEXTKEYBLOB for `alg_id` and `key` (BLOBHEADER + DWORD key
+    /// length + key bytes).
+    fn plaintext_key_blob(alg_id: u32, key: &[u8]) -> Vec<u8> {
+        let mut blob = Vec::new();
+        blob.push(PLAINTEXTKEYBLOB);
+        blob.push(CUR_BLOB_VERSION);
+        blob.extend_from_slice(&[0u8, 0]); // reserved
+        blob.extend_from_slice(&alg_id.to_le_bytes());
+        blob.extend_from_slice(&(key.len() as u32).to_le_bytes());
+        blob.extend_from_slice(key);
+        blob
+    }
+
+    /// Import a PLAINTEXTKEYBLOB and return the key handle. Caller must hold `key_guard`.
+    fn import_key_blob(alg_id: u32, key: &[u8]) -> usize {
+        let mut blob = plaintext_key_blob(alg_id, key);
+        let mut h = 0usize;
+        let ret =
+            unsafe { crypt_import_key(1, blob.as_mut_ptr(), blob.len() as u32, 0, 0, &mut h) };
+        assert_eq!(ret, 1, "crypt_import_key(alg={alg_id:#x}) failed");
+        h
+    }
+
+    /// Encrypt `data` in a buffer of `buf_len` bytes and return the ciphertext.
+    fn encrypt_data(h_key: usize, data: &[u8], final_block: bool, buf_len: u32) -> Vec<u8> {
+        let mut buf = data.to_vec();
+        buf.resize(buf_len as usize, 0);
+        let mut len = data.len() as u32;
+        let ret = unsafe {
+            crypt_encrypt(
+                h_key,
+                0,
+                final_block as i32,
+                0,
+                buf.as_mut_ptr(),
+                &mut len,
+                buf_len,
+            )
+        };
+        assert_eq!(ret, 1, "crypt_encrypt failed");
+        buf.truncate(len as usize);
+        buf
+    }
+
+    /// Decrypt `data` in place and return the plaintext.
+    fn decrypt_data(h_key: usize, data: &[u8], final_block: bool) -> Vec<u8> {
+        let mut buf = data.to_vec();
+        let mut len = data.len() as u32;
+        let ret =
+            unsafe { crypt_decrypt(h_key, 0, final_block as i32, 0, buf.as_mut_ptr(), &mut len) };
+        assert_eq!(ret, 1, "crypt_decrypt failed");
+        buf.truncate(len as usize);
+        buf
+    }
+
+    #[test]
+    fn crypt_rc4_known_vector() {
+        // Classic RC4 vector: key "Key" encrypts "Plaintext" to
+        // BB F3 16 E8 D9 40 AF 0A D3.
+        let _guard = key_guard();
+        let h = import_key_blob(CALG_RC4, b"Key");
+        let ct = encrypt_data(h, b"Plaintext", true, 9);
+        assert_eq!(ct, [0xbb, 0xf3, 0x16, 0xe8, 0xd9, 0x40, 0xaf, 0x0a, 0xd3]);
+        unsafe { crypt_destroy_key(h) };
+    }
+
+    #[test]
+    fn crypt_rc4_roundtrip() {
+        let _guard = key_guard();
+        let h = import_key_blob(CALG_RC4, b"Secret");
+        let plaintext = b"Attack at dawn";
+        let ct = encrypt_data(h, plaintext, true, plaintext.len() as u32);
+        assert_ne!(ct, plaintext);
+        unsafe { crypt_destroy_key(h) };
+
+        let h2 = import_key_blob(CALG_RC4, b"Secret");
+        let pt = decrypt_data(h2, &ct, true);
+        assert_eq!(pt, plaintext);
+        unsafe { crypt_destroy_key(h2) };
+    }
+
+    #[test]
+    fn crypt_decrypt_wrong_key_yields_garbage() {
+        // Decrypting with a different key must succeed (RC4 has no integrity
+        // check) and produce garbage, not fail.
+        let _guard = key_guard();
+        let enc = import_key_blob(CALG_RC4, b"key-one");
+        let dec = import_key_blob(CALG_RC4, b"key-two");
+        let ct = encrypt_data(enc, b"hello world", true, 11);
+        let pt = decrypt_data(dec, &ct, true);
+        assert_ne!(pt.as_slice(), b"hello world");
+        unsafe { crypt_destroy_key(enc) };
+        unsafe { crypt_destroy_key(dec) };
+    }
+
+    #[test]
+    fn crypt_rc4_stream_continues_across_calls() {
+        // Non-final calls must keep the keystream state: encrypting "hel",
+        // "lo " and "world" as three chunks equals one-shot encryption.
+        let _guard = key_guard();
+        let h = import_key_blob(CALG_RC4, b"Key");
+        let mut whole = b"hello world".to_vec();
+        let mut whole_len = whole.len() as u32;
+        assert_eq!(
+            unsafe { crypt_encrypt(h, 0, 1, 0, whole.as_mut_ptr(), &mut whole_len, 11) },
+            1
+        );
+
+        let h2 = import_key_blob(CALG_RC4, b"Key");
+        let mut chunked = Vec::new();
+        for chunk in b"hello world".chunks(3) {
+            chunked.extend_from_slice(&encrypt_data(h2, chunk, false, chunk.len() as u32));
+        }
+        unsafe { crypt_destroy_key(h2) };
+        assert_eq!(chunked, whole);
+        unsafe { crypt_destroy_key(h) };
+    }
+
+    #[test]
+    fn crypt_aes_ecb_known_vector() {
+        // NIST SP 800-38A F.1.1 ECB vector: key 000102...0f, block
+        // 00112233445566778899aabbccddeeff → 69c4e0d86a7b0430d8cdb78070b4c55a.
+        let _guard = key_guard();
+        let key: [u8; 16] = (0..16).collect::<Vec<u8>>().try_into().unwrap();
+        let h = import_key_blob(CALG_AES_128, &key);
+        let block = [
+            0x00u8, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd,
+            0xee, 0xff,
+        ];
+        // Final = FALSE: no padding, exact block length.
+        let ct = encrypt_data(h, &block, false, 16);
+        assert_eq!(
+            ct,
+            [
+                0x69, 0xc4, 0xe0, 0xd8, 0x6a, 0x7b, 0x04, 0x30, 0xd8, 0xcd, 0xb7, 0x80, 0x70, 0xb4,
+                0xc5, 0x5a,
+            ]
+        );
+        let pt = decrypt_data(h, &ct, false);
+        assert_eq!(pt, block);
+        unsafe { crypt_destroy_key(h) };
+    }
+
+    #[test]
+    fn crypt_aes_padded_roundtrip() {
+        // A non-block-multiple plaintext padded on Final encrypts to a full
+        // block and decrypts back to the original length.
+        let _guard = key_guard();
+        let key = [0x2bu8; 16];
+        let h = import_key_blob(CALG_AES_128, &key);
+        let plaintext = b"hello world"; // 11 bytes → padded to 16
+        let ct = encrypt_data(h, plaintext, true, 32);
+        assert_eq!(ct.len(), 16);
+        let pt = decrypt_data(h, &ct, true);
+        assert_eq!(pt, plaintext);
+        unsafe { crypt_destroy_key(h) };
+    }
+
+    #[test]
+    fn crypt_decrypt_invalid_key_handle_returns_false() {
+        let mut buf = [0xbbu8; 9];
+        let mut len = 9u32;
+        let ret = unsafe { crypt_decrypt(0xdead_beef, 0, 1, 0, buf.as_mut_ptr(), &mut len) };
+        assert_eq!(ret, 0);
+        assert_eq!(weave_common::get_last_error(), NTE_BAD_KEY);
+    }
+
+    #[test]
+    fn crypt_decrypt_null_pdw_data_len_returns_false() {
+        let ret = unsafe { crypt_decrypt(4, 0, 1, 0, std::ptr::null_mut(), std::ptr::null_mut()) };
+        assert_eq!(ret, 0);
+        assert_eq!(
+            weave_common::get_last_error(),
+            ERROR_INVALID_PARAMETER as u32
+        );
+    }
+
+    #[test]
+    fn crypt_decrypt_null_pb_data_returns_false() {
+        let _guard = key_guard();
+        let h = import_key_blob(CALG_RC4, b"Key");
+        let mut len = 9u32;
+        let ret = unsafe { crypt_decrypt(h, 0, 1, 0, std::ptr::null_mut(), &mut len) };
+        assert_eq!(ret, 0);
+        assert_eq!(
+            weave_common::get_last_error(),
+            ERROR_INVALID_PARAMETER as u32
+        );
+        unsafe { crypt_destroy_key(h) };
+    }
+
+    #[test]
+    fn crypt_encrypt_flags_must_be_zero() {
+        let _guard = key_guard();
+        let h = import_key_blob(CALG_RC4, b"Key");
+        let mut buf = [0u8; 9];
+        let mut len = 9u32;
+        let ret = unsafe { crypt_encrypt(h, 0, 1, 1, buf.as_mut_ptr(), &mut len, 9) };
+        assert_eq!(ret, 0);
+        assert_eq!(weave_common::get_last_error(), NTE_BAD_FLAGS);
+        unsafe { crypt_destroy_key(h) };
+    }
+
+    #[test]
+    fn crypt_decrypt_flags_must_be_zero() {
+        let _guard = key_guard();
+        let h = import_key_blob(CALG_RC4, b"Key");
+        let mut buf = [0u8; 9];
+        let mut len = 9u32;
+        let ret = unsafe { crypt_decrypt(h, 0, 1, 1, buf.as_mut_ptr(), &mut len) };
+        assert_eq!(ret, 0);
+        assert_eq!(weave_common::get_last_error(), NTE_BAD_FLAGS);
+        unsafe { crypt_destroy_key(h) };
+    }
+
+    #[test]
+    fn crypt_import_key_unsupported_algid_returns_false() {
+        let _guard = key_guard();
+        // CALG_DES (0x6601) is not implemented by Weave.
+        let mut blob = plaintext_key_blob(0x0000_6601, &[0u8; 8]);
+        let mut h = 0usize;
+        let ret =
+            unsafe { crypt_import_key(1, blob.as_mut_ptr(), blob.len() as u32, 0, 0, &mut h) };
+        assert_eq!(ret, 0);
+        assert_eq!(weave_common::get_last_error(), NTE_BAD_ALGID);
+        assert_eq!(h, 0);
+    }
+
+    #[test]
+    fn crypt_import_key_bad_blob_version_returns_false() {
+        let _guard = key_guard();
+        let mut blob = plaintext_key_blob(CALG_RC4, b"Key");
+        blob[1] = 1; // bVersion must be CUR_BLOB_VERSION (2)
+        let mut h = 0usize;
+        let ret =
+            unsafe { crypt_import_key(1, blob.as_mut_ptr(), blob.len() as u32, 0, 0, &mut h) };
+        assert_eq!(ret, 0);
+        assert_eq!(weave_common::get_last_error(), NTE_BAD_DATA);
+        assert_eq!(h, 0);
+    }
+
+    #[test]
+    fn crypt_import_key_bad_blob_type_returns_false() {
+        let _guard = key_guard();
+        let mut blob = plaintext_key_blob(CALG_RC4, b"Key");
+        blob[0] = 1; // PRIVATEKEYBLOB, unsupported
+        let mut h = 0usize;
+        let ret =
+            unsafe { crypt_import_key(1, blob.as_mut_ptr(), blob.len() as u32, 0, 0, &mut h) };
+        assert_eq!(ret, 0);
+        assert_eq!(weave_common::get_last_error(), NTE_BAD_TYPE);
+        assert_eq!(h, 0);
+    }
+
+    #[test]
+    fn crypt_import_key_short_blob_returns_false() {
+        let _guard = key_guard();
+        // Blob header advertises 8 key bytes but only 4 are present.
+        let mut blob = plaintext_key_blob(CALG_RC4, &[0u8; 8]);
+        blob.truncate(16);
+        let mut h = 0usize;
+        let ret =
+            unsafe { crypt_import_key(1, blob.as_mut_ptr(), blob.len() as u32, 0, 0, &mut h) };
+        assert_eq!(ret, 0);
+        assert_eq!(weave_common::get_last_error(), NTE_BAD_DATA);
+        assert_eq!(h, 0);
+    }
+
+    #[test]
+    fn crypt_gen_key_rc4_roundtrip() {
+        let _guard = key_guard();
+        let mut h = 0usize;
+        assert_eq!(unsafe { crypt_gen_key(1, CALG_RC4, 0, &mut h) }, 1);
+        assert_ne!(h, 0);
+        let plaintext = b"generated key roundtrip";
+        let ct = encrypt_data(h, plaintext, true, plaintext.len() as u32);
+        assert_ne!(ct, plaintext);
+        let pt = decrypt_data(h, &ct, true);
+        assert_eq!(pt, plaintext);
+        unsafe { crypt_destroy_key(h) };
+    }
+
+    #[test]
+    fn crypt_gen_key_bad_algid_returns_false() {
+        let _guard = key_guard();
+        let mut h = 0usize;
+        let ret = unsafe {
+            crypt_gen_key(1, 0x0000_6601 /* CALG_DES */, 0, &mut h)
+        };
+        assert_eq!(ret, 0);
+        assert_eq!(weave_common::get_last_error(), NTE_BAD_ALGID);
+        assert_eq!(h, 0);
+    }
+
+    #[test]
+    fn crypt_destroy_key_invalidates_handle() {
+        let _guard = key_guard();
+        let mut h = 0usize;
+        assert_eq!(unsafe { crypt_gen_key(1, CALG_RC4, 0, &mut h) }, 1);
+        assert_eq!(unsafe { crypt_destroy_key(h) }, 1);
+        let mut buf = [0u8; 4];
+        let mut len = 4u32;
+        let ret = unsafe { crypt_decrypt(h, 0, 1, 0, buf.as_mut_ptr(), &mut len) };
+        assert_eq!(ret, 0);
+        assert_eq!(weave_common::get_last_error(), NTE_BAD_KEY);
+    }
+
+    #[test]
+    fn crypt_aes_decrypt_final_zero_length_returns_bad_len() {
+        let _guard = key_guard();
+        let h = import_key_blob(CALG_AES_128, &[0u8; 16]);
+        let mut len = 0u32;
+        let ret = unsafe { crypt_decrypt(h, 0, 1, 0, std::ptr::null_mut(), &mut len) };
+        assert_eq!(ret, 0);
+        assert_eq!(weave_common::get_last_error(), NTE_BAD_LEN);
+        unsafe { crypt_destroy_key(h) };
+    }
+
+    #[test]
+    fn crypt_aes_encrypt_reports_more_data() {
+        let _guard = key_guard();
+        let h = import_key_blob(CALG_AES_128, &[0u8; 16]);
+        let mut buf = [0u8; 16];
+        let mut len = 11u32;
+        // dwBufLen = 8 < padded length 16 → ERROR_MORE_DATA with required size.
+        let ret = unsafe { crypt_encrypt(h, 0, 1, 0, buf.as_mut_ptr(), &mut len, 8) };
+        assert_eq!(ret, 0);
+        assert_eq!(weave_common::get_last_error(), ERROR_MORE_DATA as u32);
+        assert_eq!(len, 16);
+        unsafe { crypt_destroy_key(h) };
+    }
+
+    #[test]
+    fn crypt_encrypt_feeds_plaintext_to_hash() {
+        // With a valid hHash, the plaintext is hashed before encryption
+        // (Wine's rsaenh behavior for message signatures).
+        let _h_guard = hash_guard();
+        let _k_guard = key_guard();
+        let key = import_key_blob(CALG_RC4, b"Key");
+        let mut h_hash = 0usize;
+        assert_eq!(
+            unsafe { crypt_create_hash(1, CALG_MD5, 0, 0, &mut h_hash) },
+            1
+        );
+        let mut buf = b"abc".to_vec();
+        let mut len = 3u32;
+        let ret = unsafe { crypt_encrypt(key, h_hash, 1, 0, buf.as_mut_ptr(), &mut len, 3) };
+        assert_eq!(ret, 1);
+        let mut digest = [0u8; 16];
+        let mut dlen = digest.len() as u32;
+        assert_eq!(
+            unsafe { crypt_get_hash_param(h_hash, HP_HASHVAL, digest.as_mut_ptr(), &mut dlen, 0) },
+            1
+        );
+        let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(hex, "900150983cd24fb0d6963f7d28e17f72"); // md5("abc")
+        unsafe { crypt_destroy_hash(h_hash) };
+        unsafe { crypt_destroy_key(key) };
+    }
+
+    #[test]
+    fn resolve_crypt_key_functions() {
+        for name in [
+            "CryptImportKey",
+            "CryptGenKey",
+            "CryptEncrypt",
+            "CryptDecrypt",
+            "CryptDestroyKey",
         ] {
             assert!(resolve(name).is_some(), "missing resolver entry for {name}");
         }
