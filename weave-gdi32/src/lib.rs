@@ -3376,8 +3376,9 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
 //
 // msimg32.dll provides alpha-blending, transparent blit, and gradient fill.
 // IrfanView uses AlphaBlend for compositing images with transparency.
-// All three stubs return FALSE (0); callers that check the return value will
-// fall back to a non-alpha path or skip the draw.
+// AlphaBlend and TransparentBlt are implemented; GradientFill remains a stub
+// returning FALSE (0), so callers that check the return value fall back or
+// skip the draw.
 //
 // Wine ref: dlls/msimg32/msimg32.c — AlphaBlend calls NtGdiAlphaBlend;
 // TransparentBlt calls NtGdiTransparentBlt; GradientFill calls NtGdiGradientFill.
@@ -3388,6 +3389,11 @@ pub fn resolve(dll: &str, func: &str) -> Option<usize> {
 /// destination with matching dimensions. Other configurations (scale, non-32bpp,
 /// window-DC dest, BlendOp != 0, BlendFlags != 0) return FALSE with a traced
 /// warning so callers observe the rejection and can fall back.
+///
+/// The composite itself lives in `blend_and_upload`, shared with the gdi32
+/// export `GdiAlphaBlend` (both exports forward to NtGdiAlphaBlend in win32u).
+/// This msimg32 entry keeps the task-20 pinned first-pass scope: equal
+/// dimensions and non-zero area only.
 ///
 /// BLENDFUNCTION byte layout (packed into a u64 on win64):
 ///   byte 0  BlendOp              — must be AC_SRC_OVER (0)
@@ -3422,6 +3428,72 @@ pub unsafe extern "win64" fn alpha_blend(
     h_src: i32,
     blend_function: u64, // BLENDFUNCTION packs into a u64 on x64 ABI
 ) -> i32 {
+    // Task-20 pinned first-pass scope: equal dimensions and non-zero area.
+    if w_dest <= 0 || h_dest <= 0 || w_src <= 0 || h_src <= 0 {
+        return 0;
+    }
+    if w_src != w_dest || h_src != h_dest {
+        static NO_SCALE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        if NO_SCALE.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 4 {
+            eprintln!(
+                "weave/gdi32: AlphaBlend scale not yet supported ({w_src}x{h_src} -> {w_dest}x{h_dest})"
+            );
+        }
+        return 0;
+    }
+
+    blend_and_upload(
+        hdc_dest,
+        x_origin_dest,
+        y_origin_dest,
+        w_dest,
+        h_dest,
+        hdc_src,
+        x_origin_src,
+        y_origin_src,
+        w_src,
+        h_src,
+        blend_function,
+    )
+}
+
+/// Shared AC_SRC_OVER alpha-composite engine behind `AlphaBlend` (msimg32) and
+/// `GdiAlphaBlend` (gdi32); both exports map to NtGdiAlphaBlend in win32u.
+///
+/// Composites a 32-bit ARGB memory-DC source rectangle onto a 32-bit ARGB
+/// memory-DC destination rectangle. When `w_src`/`h_src` differ from
+/// `w_dest`/`h_dest`, the source is resampled with COLORONCOLOR nearest
+/// neighbour — the same `stretch_bits(COLORONCOLOR)` fallback Wine applies in
+/// `nulldrv_AlphaBlend` when the blend driver rejects unequal sizes.
+///
+/// Zero-area rectangles are a no-op returning TRUE (the blend loop covers no
+/// pixels and Wine reports success). Negative sizes, non-32bpp surfaces,
+/// window-DC destinations, out-of-bounds rectangles, and BlendOp/BlendFlags
+/// other than AC_SRC_OVER/0 return FALSE.
+///
+/// Wine ref: dlls/win32u/bitblt.c::NtGdiAlphaBlend — validates both DCs and
+/// the coordinate geometry before dispatching to pAlphaBlend;
+/// dlls/win32u/bitblt.c::nulldrv_AlphaBlend — falls back to stretch_bits
+/// (COLORONCOLOR) when `src->width != dst->width || src->height != dst->height`;
+/// dlls/win32u/bitblt.c::blend_bitmapinfo — per-pixel source-over composite.
+///
+/// # Safety
+/// `hdc_dest` and `hdc_src` must be DC handles whose selected bitmaps (if any)
+/// have valid `bits_ptr` allocations covering `width*height*4` bytes.
+#[allow(clippy::too_many_arguments)]
+fn blend_and_upload(
+    hdc_dest: usize,
+    x_origin_dest: i32,
+    y_origin_dest: i32,
+    w_dest: i32,
+    h_dest: i32,
+    hdc_src: usize,
+    x_origin_src: i32,
+    y_origin_src: i32,
+    w_src: i32,
+    h_src: i32,
+    blend_function: u64, // BLENDFUNCTION packs into a u64 on x64 ABI
+) -> i32 {
     // Unpack BLENDFUNCTION — generated.c tests pin these byte offsets.
     let blend_op = (blend_function & 0xFF) as u8;
     let blend_flags = ((blend_function >> 8) & 0xFF) as u8;
@@ -3435,25 +3507,22 @@ pub unsafe extern "win64" fn alpha_blend(
         static BAD_OP: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
         if BAD_OP.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 4 {
             eprintln!(
-                "weave/gdi32: AlphaBlend BlendOp={blend_op:#x} Flags={blend_flags:#x} unsupported"
+                "weave/gdi32: alpha blend BlendOp={blend_op:#x} Flags={blend_flags:#x} unsupported"
             );
         }
         return 0;
     }
 
-    if w_dest <= 0 || h_dest <= 0 || w_src <= 0 || h_src <= 0 {
+    // Wine NtGdiAlphaBlend: negative source/dest sizes are
+    // ERROR_INVALID_PARAMETER → FALSE.
+    if w_dest < 0 || h_dest < 0 || w_src < 0 || h_src < 0 {
         return 0;
     }
 
-    // Scale-and-blend is deferred — this first pass handles equal-dim only.
-    if w_src != w_dest || h_src != h_dest {
-        static NO_SCALE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-        if NO_SCALE.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 4 {
-            eprintln!(
-                "weave/gdi32: AlphaBlend scale not yet supported ({w_src}x{h_src} -> {w_dest}x{h_dest})"
-            );
-        }
-        return 0;
+    // Zero-area is a no-op: the blend loop covers no pixels and Wine reports
+    // success (TRUE).
+    if w_dest == 0 || h_dest == 0 || w_src == 0 || h_src == 0 {
+        return 1;
     }
 
     // Resolve source bits (memory-DC with a 32bpp Bitmap or DibSection selected).
@@ -3486,7 +3555,7 @@ pub unsafe extern "win64" fn alpha_blend(
     if src_bpp != 32 {
         static BAD_SRC_BPP: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
         if BAD_SRC_BPP.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 4 {
-            eprintln!("weave/gdi32: AlphaBlend src bpp={src_bpp} unsupported (32-bit only)");
+            eprintln!("weave/gdi32: alpha blend src bpp={src_bpp} unsupported (32-bit only)");
         }
         return 0;
     }
@@ -3521,7 +3590,7 @@ pub unsafe extern "win64" fn alpha_blend(
             // we don't do yet. Defer.
             static NO_WIN_DC: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
             if NO_WIN_DC.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 4 {
-                eprintln!("weave/gdi32: AlphaBlend dest must be a memory DC with a 32bpp bitmap");
+                eprintln!("weave/gdi32: alpha blend dest must be a memory DC with a 32bpp bitmap");
             }
             return 0;
         }
@@ -3529,14 +3598,14 @@ pub unsafe extern "win64" fn alpha_blend(
     if dst_bpp != 32 {
         static BAD_DST_BPP: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
         if BAD_DST_BPP.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 4 {
-            eprintln!("weave/gdi32: AlphaBlend dst bpp={dst_bpp} unsupported (32-bit only)");
+            eprintln!("weave/gdi32: alpha blend dst bpp={dst_bpp} unsupported (32-bit only)");
         }
         return 0;
     }
 
-    // Bounds-clip the source/dest rectangles against their bitmap dimensions —
-    // anything outside the bitmap is skipped. Wine clips in `clip_visrect` plus
-    // the `bitblt_coords` intersection; we do the simpler CPU clip here.
+    // Bounds-check the source/dest rectangles against their bitmap dimensions —
+    // anything outside the bitmap is rejected. Wine clips in `clip_visrect` plus
+    // the `bitblt_coords` intersection; we do the simpler CPU check here.
     if x_origin_src < 0
         || y_origin_src < 0
         || x_origin_dest < 0
@@ -3549,8 +3618,8 @@ pub unsafe extern "win64" fn alpha_blend(
         return 0;
     }
 
-    let w = w_src as usize;
-    let h = h_src as usize;
+    let w = w_dest as usize;
+    let h = h_dest as usize;
     let src_stride = src_w as usize * 4;
     let dst_stride = dst_w as usize * 4;
     let sca = src_const_alpha as u32;
@@ -3563,17 +3632,40 @@ pub unsafe extern "win64" fn alpha_blend(
         ((a * b) + 127) / 255
     }
 
+    // SAFETY: src_ptr/dst_ptr come from the object table's Bitmap/DibSection
+    // bits_ptr, which covers width*height*4 bytes (see create_compatible_bitmap);
+    // the slices stay in bounds because the bounds check above constrains every
+    // s_off/d_off to the bitmap dimensions. (a) pointer valid via objects::get,
+    // (b) weave-owned heap allocation, (c) lifetime = this call,
+    // (d) alpha_blend probe gate exercises the same path.
     let src_bytes =
         unsafe { std::slice::from_raw_parts(src_ptr as *const u8, src_h as usize * src_stride) };
     let dst_bytes =
         unsafe { std::slice::from_raw_parts_mut(dst_ptr as *mut u8, dst_h as usize * dst_stride) };
 
+    // Nearest-neighbour resample: map each destination pixel back to its source
+    // pixel with COLORONCOLOR (src = src_origin + dst_idx * src_span / dst_span,
+    // integer divide). Equal dimensions reduce to the identity walk.
     for row in 0..h {
-        let sy = y_origin_src as usize + row;
         let dy = y_origin_dest as usize + row;
+        let sy_signed = y_origin_src as i64 + (row as i64 * h_src as i64) / h as i64;
+        let sy = if sy_signed < 0 {
+            0
+        } else if sy_signed >= src_h as i64 {
+            src_h as i64 - 1
+        } else {
+            sy_signed
+        } as usize;
         for col in 0..w {
-            let sx = x_origin_src as usize + col;
             let dx = x_origin_dest as usize + col;
+            let sx_signed = x_origin_src as i64 + (col as i64 * w_src as i64) / w as i64;
+            let sx = if sx_signed < 0 {
+                0
+            } else if sx_signed >= src_w as i64 {
+                src_w as i64 - 1
+            } else {
+                sx_signed
+            } as usize;
             let s_off = sy * src_stride + sx * 4;
             let d_off = dy * dst_stride + dx * 4;
             // BGRA in memory (little-endian DWORD = AARRGGBB).
@@ -5355,30 +5447,49 @@ pub unsafe extern "win64" fn ext_create_pen(
     })
 }
 
-/// GdiAlphaBlend: alpha-composite source DC onto destination (gdi32.dll export).
+/// GdiAlphaBlend — alpha-composite a source DC onto a destination DC
+/// (gdi32.dll export).
 ///
-/// Wine ref: dlls/gdi32/gdi32.spec — GdiAlphaBlend is forwarded to msimg32.AlphaBlend;
-/// the implementation is NtGdiAlphaBlend in win32u. Weave: stub returning FALSE.
+/// gdi32.dll's export of the same NtGdiAlphaBlend operation that msimg32's
+/// `AlphaBlend` wraps. Unlike the msimg32 entry, the full Wine contract is
+/// honoured here: unequal source/dest sizes resample the source with
+/// COLORONCOLOR nearest neighbour, and zero-area rectangles are a no-op
+/// returning TRUE.
+///
+/// Wine ref: dlls/gdi32/dc.c::GdiAlphaBlend — validates the dest DC then
+/// forwards to NtGdiAlphaBlend; dlls/win32u/bitblt.c::NtGdiAlphaBlend — the
+/// shared implementation used by both exports (see `blend_and_upload`).
 ///
 /// # Safety
-/// All pointer arguments are ignored in this stub.
-// Wine ref: dlls/gdi32/gdi32.spec — GdiAlphaBlend is a forward to msimg32.AlphaBlend;
-// both map to NtGdiAlphaBlend in win32u.
+/// `hdc_dest` and `hdc_src` must be DC handles whose selected bitmaps (if any)
+/// have valid `bits_ptr` allocations covering `width*height*4` bytes.
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "win64" fn gdi_alpha_blend(
-    _hdc_dest: usize,
-    _x_dest: i32,
-    _y_dest: i32,
-    _w_dest: i32,
-    _h_dest: i32,
-    _hdc_src: usize,
-    _x_src: i32,
-    _y_src: i32,
-    _w_src: i32,
-    _h_src: i32,
-    _blend: u64,
+    hdc_dest: usize,
+    x_dest: i32,
+    y_dest: i32,
+    w_dest: i32,
+    h_dest: i32,
+    hdc_src: usize,
+    x_src: i32,
+    y_src: i32,
+    w_src: i32,
+    h_src: i32,
+    blend_function: u64, // BLENDFUNCTION packs into a u64 on x64 ABI
 ) -> i32 {
-    0
+    blend_and_upload(
+        hdc_dest,
+        x_dest,
+        y_dest,
+        w_dest,
+        h_dest,
+        hdc_src,
+        x_src,
+        y_src,
+        w_src,
+        h_src,
+        blend_function,
+    )
 }
 
 /// GetClipRgn: retrieve the current application-defined clipping region.
