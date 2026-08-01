@@ -37,6 +37,10 @@ name = "console_ctrl_probe_gate"
 path = "tests/console_ctrl_probe_gate.rs"
 
 [[test]]
+name = "console_read_probe_gate"
+path = "tests/console_read_probe_gate.rs"
+
+[[test]]
 name = "rtl_unwind_gate"
 path = "tests/rtl_unwind_gate.rs"
 

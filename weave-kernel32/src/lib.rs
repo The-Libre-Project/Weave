@@ -19714,21 +19714,141 @@ pub unsafe extern "win64" fn create_pipe(
     1
 }
 
-/// ReadConsoleW: read from the console. Returns FALSE (no console input).
+/// ReadConsoleW: read a line of input from the console input (stdin).
+///
+/// Guests run headless, so the console input is the standard input fd rather
+/// than a terminal emulator. Reads a line (bytes up to a newline, EOF, or the
+/// requested character count), decodes UTF-8 → UTF-16, and stores the result in
+/// `lp_buffer`. The trailing CR/LF is included in the returned line, matching
+/// Wine's line-input behaviour (the conhost test observes `"xyzab\r\n"`).
+///
+/// `p_input_control` (CONSOLE_READCONSOLE_CONTROL) is not supported — a
+/// non-NULL value fails with ERROR_INVALID_PARAMETER. A request larger than
+/// INT_MAX fails with ERROR_NOT_ENOUGH_MEMORY (Wine contract).
+///
+/// Reads are non-blocking: `poll(2)` waits up to `READ_POLL_TIMEOUT_MS` for
+/// input and returns TRUE with *count = 0 if none arrives. A blocking read on
+/// an empty stdin would hang the guest (and the test harness), so headless
+/// guests poll instead. This diverges from Wine, which blocks indefinitely.
 ///
 /// # Safety
-/// Pointer arguments are accepted but not dereferenced.
-// Wine ref: dlls/kernelbase/console.c — calls console_ioctl(IOCTL_CONDRV_READ_INPUT) into condrv;
-// pInputControl can specify a stopping character; nNumberOfCharsRead is set on success
+/// `lp_buffer` must be writable for at least `n_number_of_chars_to_read`
+/// UTF-16 code units; `lp_number_of_chars_read` must point to a writable u32.
+// Wine ref: dlls/kernelbase/console.c:2093 — ReadConsoleW: length > INT_MAX →
+// ERROR_NOT_ENOUGH_MEMORY; NULL reserved → console_ioctl(IOCTL_CONDRV_READ_CONSOLE)
+// reads a line (CR LF included, per conhost tty.c test_read_console) and sets
+// *count = bytes_read / sizeof(WCHAR) on success, 0 on failure. CONSOLE_READCONSOLE_CONTROL
+// (reserved) path implemented for initial chars + ctrl wakeup — Weave skips it.
 pub unsafe extern "win64" fn read_console_w(
-    _h_console_input: usize,
-    _lp_buffer: *mut u16,
-    _n_number_of_chars_to_read: u32,
-    _lp_number_of_chars_read: *mut u32,
-    _p_input_control: usize,
+    h_console_input: usize,
+    lp_buffer: *mut u16,
+    n_number_of_chars_to_read: u32,
+    lp_number_of_chars_read: *mut u32,
+    p_input_control: usize,
 ) -> i32 {
-    warn_once("ReadConsoleW");
-    0 // FALSE
+    // Wine contract: requests above INT_MAX are rejected up front.
+    if n_number_of_chars_to_read > i32::MAX as u32 {
+        set_last_error(8); // ERROR_NOT_ENOUGH_MEMORY
+        return 0; // FALSE
+    }
+    // CONSOLE_READCONSOLE_CONTROL is unsupported — must be NULL.
+    if p_input_control != 0 {
+        set_last_error(87); // ERROR_INVALID_PARAMETER
+        return 0; // FALSE
+    }
+    // Guest-pointer validation before any dereference.
+    if lp_buffer.is_null() || lp_number_of_chars_read.is_null() {
+        set_last_error(87); // ERROR_INVALID_PARAMETER
+        return 0; // FALSE
+    }
+
+    // Sanity cap: same as write_console_w — a crafted count of 0xFFFFFFFF
+    // would otherwise read unbounded bytes from the fd.
+    const MAX_CONSOLE_CHARS: u32 = 65_536;
+    let max_chars = n_number_of_chars_to_read.min(MAX_CONSOLE_CHARS);
+
+    // Handle-table lookup. Never dereference a HANDLE as a raw pointer.
+    // Output console handles (stdout/stderr) are rejected, matching Wine's
+    // ReadConsoleW on CONOUT$ → ERROR_INVALID_HANDLE.
+    if h_console_input == handles::STDOUT_HANDLE || h_console_input == handles::STDERR_HANDLE {
+        set_last_error(6); // ERROR_INVALID_HANDLE
+                           // SAFETY: lp_number_of_chars_read is non-null (checked above);
+                           // guest heap, valid for this call. (a) null-checked, (b) guest
+                           // heap, (c) duration of call, (d) caller contract.
+        unsafe { *lp_number_of_chars_read = 0 };
+        return 0; // FALSE
+    }
+    let fd = match handles::get_fd(h_console_input) {
+        Some(fd) => fd,
+        None => {
+            set_last_error(6); // ERROR_INVALID_HANDLE
+                               // SAFETY: lp_number_of_chars_read is non-null (checked above);
+                               // guest heap, valid for this call. (a) null-checked, (b) guest
+                               // heap, (c) duration of call, (d) caller contract.
+            unsafe { *lp_number_of_chars_read = 0 };
+            return 0; // FALSE
+        }
+    };
+
+    // Zero-length read is a no-op success (Wine: `if (!out_size) read_from_buffer`).
+    if max_chars == 0 {
+        // SAFETY: non-null checked above; guest heap; duration of call.
+        unsafe { *lp_number_of_chars_read = 0 };
+        return 1; // TRUE
+    }
+
+    // Read a line byte-by-byte, stopping at '\n', EOF, or the char cap.
+    // Poll first so an empty stdin (headless / test) cannot block forever.
+    let mut bytes: Vec<u8> = Vec::with_capacity(max_chars as usize);
+    loop {
+        if bytes.len() >= max_chars as usize {
+            break;
+        }
+        let mut pfd = libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        const READ_POLL_TIMEOUT_MS: i32 = 100;
+        // SAFETY: fd is a valid Linux fd from the handle table lookup above;
+        // pfd points to stack memory owned by this call. (a) get_fd validated,
+        // (b) kernel-owned fd, (c) duration of poll, (d) handle-table invariant.
+        let pres = unsafe { libc::poll(&mut pfd, 1, READ_POLL_TIMEOUT_MS) };
+        if pres <= 0 {
+            break; // error or timeout — return what we have
+        }
+        if pfd.revents & (libc::POLLIN | libc::POLLHUP) == 0 {
+            break;
+        }
+        let mut byte = [0u8; 1];
+        // SAFETY: fd is a valid Linux fd; byte is a 1-byte stack buffer owned
+        // by this call. (a) get_fd validated, (b) kernel-owned fd, (c) duration
+        // of read, (d) handle-table invariant.
+        let n = unsafe { libc::read(fd, byte.as_mut_ptr() as *mut libc::c_void, 1) };
+        if n <= 0 {
+            break; // EOF or error
+        }
+        bytes.push(byte[0]);
+        if byte[0] == b'\n' {
+            break; // line terminator
+        }
+    }
+
+    // Decode UTF-8 → UTF-16, truncating to the requested character count.
+    let s = String::from_utf8_lossy(&bytes);
+    let units: Vec<u16> = s.encode_utf16().collect();
+    let count = units.len().min(max_chars as usize) as u32;
+
+    // SAFETY: lp_buffer is non-null (checked above) and valid for max_chars
+    // u16s per the # Safety contract; count ≤ max_chars so the copy stays
+    // in bounds. (a) null-checked, (b) guest heap, caller-owned, (c) duration
+    // of call, (d) caller contract + max_chars cap.
+    unsafe {
+        std::ptr::copy_nonoverlapping(units.as_ptr(), lp_buffer, count as usize);
+    }
+    // SAFETY: non-null checked above; guest heap; duration of call.
+    unsafe { *lp_number_of_chars_read = count };
+    1 // TRUE
 }
 
 // ── Serial Port Configuration ────────────────────────────────────────────────
