@@ -417,6 +417,66 @@ fn current_protection(addr: *const u8) -> Option<u32> {
     None
 }
 
+/// Check that the byte range `[base, base+size)` is fully covered by mapped
+/// regions in /proc/self/maps that all grant `perm` (`b'r'` for read,
+/// `b'w'` for write). A range may span several VMAs with differing
+/// permissions; every covering region must carry the requested bit.
+///
+/// This is the range-valued sibling of `current_protection`: it lets
+/// WriteProcessMemory/ReadProcessMemory reject unmapped or wrong-permission
+/// ranges with ERROR_INVALID_ADDRESS before any copy runs, instead of
+/// faulting the whole process. A zero `size` trivially passes (no-op).
+fn range_has_permission(base: *const u8, size: usize, perm: u8) -> bool {
+    if size == 0 {
+        return true;
+    }
+    let start = base as usize;
+    let Some(end) = start.checked_add(size) else {
+        return false; // wrapping range → cannot be a valid mapping
+    };
+    let Ok(maps) = std::fs::read_to_string("/proc/self/maps") else {
+        return false; // /proc unavailable → be conservative and reject
+    };
+    let mut regions: Vec<(usize, usize)> = Vec::new();
+    for line in maps.lines() {
+        let mut fields = line.split_whitespace();
+        let (Some(range), Some(perms)) = (fields.next(), fields.next()) else {
+            continue;
+        };
+        if !perms.as_bytes().contains(&perm) {
+            continue;
+        }
+        let mut bounds = range.split('-');
+        let (Some(lo), Some(hi)) = (
+            bounds
+                .next()
+                .and_then(|s| usize::from_str_radix(s, 16).ok()),
+            bounds
+                .next()
+                .and_then(|s| usize::from_str_radix(s, 16).ok()),
+        ) else {
+            continue;
+        };
+        if hi <= start || lo >= end {
+            continue; // region does not overlap the queried range
+        }
+        regions.push((lo, hi));
+    }
+    // Sort by start and merge to verify contiguous coverage of [start, end).
+    regions.sort_unstable();
+    let mut covered = start;
+    for (lo, hi) in regions {
+        if lo > covered {
+            return false; // gap between regions
+        }
+        covered = covered.max(hi);
+        if covered >= end {
+            return true;
+        }
+    }
+    false
+}
+
 // ── Locale information ───────────────────────────────────────────────────────
 
 fn locale_info_lookup(lc_type: u32) -> Option<&'static str> {
@@ -20616,7 +20676,26 @@ pub unsafe extern "win64" fn map_view_of_file_ex(
 
 /// WriteProcessMemory: write data to another process's memory.
 ///
-/// Phase B — in-process only. Cross-process writes return ERROR_ACCESS_DENIED.
+/// Under Weave's single-process model the handle is validated against the
+/// current process via `validate_process_handle`, then the destination range
+/// is checked against the mapped, writable regions of /proc/self/maps before
+/// the copy runs. A valid range is written with a guarded copy; the bytes
+/// written count is reported on success (`lp_number_of_bytes_written` is
+/// optional — NULL is allowed).
+///
+/// # Safety
+/// `lp_base_address` must point into writable memory of the current process
+/// (verified via the maps check); `lp_buffer` must be readable for `n_size`
+/// bytes. The copy is performed only after the range check succeeds.
+// Wine ref: dlls/kernelbase/memory.c::WriteProcessMemory — calls
+// VirtualQueryEx(process, addr, &info) first: on failure returns FALSE. Then
+// it inspects info.Protect: writable pages (PAGE_READWRITE / PAGE_WRITECOPY /
+// PAGE_EXECUTE_READWRITE / PAGE_EXECUTE_WRITECOPY) go straight to
+// NtWriteVirtualMemory; execute-only pages are temporarily made writable via
+// NtProtectVirtualMemory, written, then restored; any other protection yields
+// STATUS_ACCESS_VIOLATION. Weave mirrors this by requiring the full range to
+// be mapped and writable — a read-only or unmapped target is rejected with
+// ERROR_INVALID_ADDRESS before any memory is touched.
 pub unsafe extern "win64" fn write_process_memory(
     h_process: usize,
     lp_base_address: *mut u8,
@@ -20624,11 +20703,8 @@ pub unsafe extern "win64" fn write_process_memory(
     n_size: usize,
     lp_number_of_bytes_written: *mut usize,
 ) -> i32 {
-    warn_once("WriteProcessMemory");
-
-    // Weave is in-process: only the pseudo-handle (usize::MAX) is allowed.
-    if h_process != usize::MAX {
-        set_last_error(file_io::ERROR_ACCESS_DENIED);
+    if let Err(code) = validate_process_handle(h_process) {
+        set_last_error(code);
         return 0;
     }
 
@@ -20644,10 +20720,19 @@ pub unsafe extern "win64" fn write_process_memory(
         return 0;
     }
 
+    // Wine's VirtualQueryEx gate: reject unmapped or non-writable destinations.
+    // A read-only page would fault the copy; catch that before touching memory.
+    if !range_has_permission(lp_base_address, n_size, b'w') {
+        set_last_error(487); // ERROR_INVALID_ADDRESS
+        return 0;
+    }
+
     if n_size > 0 {
-        // SAFETY: In-process write. The caller guarantees validity for n_size bytes
-        // at both lp_buffer (read) and lp_base_address (write). Overlap is not
-        // guaranteed by the Win32 contract, so copy_nonoverlapping is correct.
+        // SAFETY: range_has_permission(lp_base_address, n_size, b'w') above
+        // proves the destination is fully mapped and writable, so the write
+        // cannot fault. The caller guarantees lp_buffer is readable for n_size
+        // bytes. Overlap is not guaranteed by the Win32 contract, so
+        // copy_nonoverlapping is correct.
         unsafe {
             core::ptr::copy_nonoverlapping(lp_buffer, lp_base_address, n_size);
         }
@@ -21217,7 +21302,22 @@ pub unsafe extern "win64" fn set_process_mitigation_policy(
 
 /// ReadProcessMemory: read from another process's memory.
 ///
-/// Phase B — in-process only. Cross-process reads return ERROR_ACCESS_DENIED.
+/// Under Weave's single-process model the handle is validated against the
+/// current process via `validate_process_handle`, then the source range is
+/// checked against the mapped, readable regions of /proc/self/maps before
+/// the copy runs. A valid range is read with a guarded copy; the bytes read
+/// count is reported on success (`lp_number_of_bytes_read` is optional —
+/// NULL is allowed).
+///
+/// # Safety
+/// `lp_base_address` must point into mapped, readable memory of the current
+/// process (verified via the maps check); `lp_buffer` must be writable for
+/// `n_size` bytes. The copy is performed only after the range check succeeds.
+// Wine ref: dlls/kernelbase/memory.c::ReadProcessMemory — delegates straight
+// to NtReadVirtualMemory, whose driver returns STATUS_ACCESS_VIOLATION for an
+// unmapped or protected source range. Weave mirrors this by requiring the
+// full range to be mapped and readable, returning ERROR_INVALID_ADDRESS
+// otherwise — a stale guest pointer can never fault the host process.
 pub unsafe extern "win64" fn read_process_memory(
     h_process: usize,
     lp_base_address: *const u8,
@@ -21225,11 +21325,8 @@ pub unsafe extern "win64" fn read_process_memory(
     n_size: usize,
     lp_number_of_bytes_read: *mut usize,
 ) -> i32 {
-    warn_once("ReadProcessMemory");
-
-    // Weave is in-process: only the pseudo-handle (usize::MAX) is allowed.
-    if h_process != usize::MAX {
-        set_last_error(file_io::ERROR_ACCESS_DENIED);
+    if let Err(code) = validate_process_handle(h_process) {
+        set_last_error(code);
         return 0;
     }
 
@@ -21245,10 +21342,20 @@ pub unsafe extern "win64" fn read_process_memory(
         return 0;
     }
 
+    // Wine's NtReadVirtualMemory gate: reject unmapped or non-readable
+    // sources. Reading an unmapped page would fault the copy; catch that
+    // before touching memory.
+    if !range_has_permission(lp_base_address, n_size, b'r') {
+        set_last_error(487); // ERROR_INVALID_ADDRESS
+        return 0;
+    }
+
     if n_size > 0 {
-        // SAFETY: In-process read. The caller guarantees validity for n_size bytes
-        // at both lp_base_address (read) and lp_buffer (write). Overlap is not
-        // guaranteed by the Win32 contract, so copy_nonoverlapping is correct.
+        // SAFETY: range_has_permission(lp_base_address, n_size, b'r') above
+        // proves the source is fully mapped and readable, so the read cannot
+        // fault. The caller guarantees lp_buffer is writable for n_size bytes.
+        // Overlap is not guaranteed by the Win32 contract, so
+        // copy_nonoverlapping is correct.
         unsafe {
             core::ptr::copy_nonoverlapping(lp_base_address, lp_buffer, n_size);
         }
@@ -25379,6 +25486,276 @@ mod tests {
         let n = unsafe { virtual_query_ex(0, std::ptr::null(), raw.as_mut_ptr(), raw.len()) };
         assert_eq!(n, 0, "NULL process handle must return 0");
         assert_eq!(get_last_error(), 6, "ERROR_INVALID_HANDLE");
+    }
+
+    // ── WriteProcessMemory / ReadProcessMemory ───────────────────────────────
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[test]
+    fn write_read_process_memory_roundtrip_on_local_buffer() {
+        let mut dst = [0u8; 64];
+        let src = b"hello from WriteProcessMemory";
+        set_last_error(0);
+        let mut written = usize::MAX;
+        let ok = unsafe {
+            write_process_memory(
+                usize::MAX, // GetCurrentProcess() pseudo-handle
+                dst.as_mut_ptr(),
+                src.as_ptr(),
+                src.len(),
+                &mut written,
+            )
+        };
+        assert_eq!(
+            ok, 1,
+            "WriteProcessMemory to a mapped local buffer must succeed"
+        );
+        assert_eq!(written, src.len(), "bytes written must equal nSize");
+        assert_eq!(
+            &dst[..src.len()],
+            src,
+            "destination must hold the written bytes"
+        );
+
+        let mut out = [0u8; 64];
+        let mut read = usize::MAX;
+        let ok = unsafe {
+            read_process_memory(
+                usize::MAX,
+                dst.as_ptr(),
+                out.as_mut_ptr(),
+                src.len(),
+                &mut read,
+            )
+        };
+        assert_eq!(
+            ok, 1,
+            "ReadProcessMemory from the written buffer must succeed"
+        );
+        assert_eq!(read, src.len(), "bytes read must equal nSize");
+        assert_eq!(
+            &out[..src.len()],
+            src,
+            "read-back must match the written bytes"
+        );
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[test]
+    fn write_process_memory_null_bytes_written_is_allowed() {
+        let mut dst = [0u8; 16];
+        let src = [0xABu8; 8];
+        set_last_error(0);
+        let ok = unsafe {
+            write_process_memory(
+                usize::MAX,
+                dst.as_mut_ptr(),
+                src.as_ptr(),
+                src.len(),
+                std::ptr::null_mut(), // NULL lpNumberOfBytesWritten is allowed
+            )
+        };
+        assert_eq!(ok, 1, "NULL lpNumberOfBytesWritten must be allowed");
+        assert_eq!(&dst[..8], &src[..], "write must still take effect");
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[test]
+    fn write_process_memory_bad_address_returns_invalid_address() {
+        // Pick an address that is provably unmapped: the page one past the end
+        // of a freshly reserved region (VirtualAlloc reserves exactly 4096).
+        let reserved = unsafe {
+            virtual_alloc(
+                std::ptr::null_mut(),
+                4096,
+                VPROT_MEM_COMMIT | VPROT_MEM_RESERVE,
+                VPROT_PAGE_READWRITE,
+            )
+        };
+        assert!(!reserved.is_null(), "VirtualAlloc must succeed");
+        let bad_addr = (reserved as usize + 4096) as *mut u8;
+        assert_eq!(
+            range_has_permission(bad_addr, 8, b'w'),
+            false,
+            "page past the reserved region must be unmapped"
+        );
+
+        let src = [0x11u8; 8];
+        set_last_error(0);
+        let ok = unsafe {
+            write_process_memory(
+                usize::MAX,
+                bad_addr,
+                src.as_ptr(),
+                src.len(),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(ok, 0, "write to an unmapped address must fail");
+        assert_eq!(get_last_error(), 487, "ERROR_INVALID_ADDRESS");
+
+        unsafe {
+            let _ = virtual_free(reserved, 0, VPROT_MEM_RELEASE);
+        };
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[test]
+    fn read_process_memory_bad_address_returns_invalid_address() {
+        let reserved = unsafe {
+            virtual_alloc(
+                std::ptr::null_mut(),
+                4096,
+                VPROT_MEM_COMMIT | VPROT_MEM_RESERVE,
+                VPROT_PAGE_READWRITE,
+            )
+        };
+        assert!(!reserved.is_null(), "VirtualAlloc must succeed");
+        let bad_addr = (reserved as usize + 4096) as *const u8;
+        assert_eq!(
+            range_has_permission(bad_addr, 8, b'r'),
+            false,
+            "page past the reserved region must be unmapped"
+        );
+
+        let mut out = [0u8; 8];
+        set_last_error(0);
+        let ok = unsafe {
+            read_process_memory(
+                usize::MAX,
+                bad_addr,
+                out.as_mut_ptr(),
+                out.len(),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(ok, 0, "read from an unmapped address must fail");
+        assert_eq!(get_last_error(), 487, "ERROR_INVALID_ADDRESS");
+
+        unsafe {
+            let _ = virtual_free(reserved, 0, VPROT_MEM_RELEASE);
+        };
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[test]
+    fn process_memory_invalid_handle_returns_invalid_handle() {
+        let mut buf = [0u8; 8];
+        set_last_error(0);
+        let ok = unsafe {
+            write_process_memory(
+                0,
+                buf.as_mut_ptr(),
+                buf.as_ptr(),
+                buf.len(),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(ok, 0, "NULL process handle must fail");
+        assert_eq!(get_last_error(), 6, "ERROR_INVALID_HANDLE");
+
+        set_last_error(0);
+        let ok = unsafe {
+            read_process_memory(
+                0,
+                buf.as_ptr(),
+                buf.as_mut_ptr(),
+                buf.len(),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(ok, 0, "NULL process handle must fail");
+        assert_eq!(get_last_error(), 6, "ERROR_INVALID_HANDLE");
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[test]
+    fn process_memory_foreign_process_returns_access_denied() {
+        let other_pid = unsafe { libc::getppid() } as usize;
+        assert_ne!(other_pid, unsafe { libc::getpid() } as usize);
+        assert!(std::path::Path::new(&format!("/proc/{other_pid}")).exists());
+
+        let mut buf = [0u8; 8];
+        set_last_error(0);
+        let ok = unsafe {
+            write_process_memory(
+                other_pid,
+                buf.as_mut_ptr(),
+                buf.as_ptr(),
+                buf.len(),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(ok, 0, "foreign-process write must fail");
+        assert_eq!(get_last_error(), 5, "ERROR_ACCESS_DENIED");
+
+        set_last_error(0);
+        let ok = unsafe {
+            read_process_memory(
+                other_pid,
+                buf.as_ptr(),
+                buf.as_mut_ptr(),
+                buf.len(),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(ok, 0, "foreign-process read must fail");
+        assert_eq!(get_last_error(), 5, "ERROR_ACCESS_DENIED");
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[test]
+    fn process_memory_current_pid_handle_is_accepted() {
+        // validate_process_handle accepts the real current PID, not just the
+        // pseudo-handle, mirroring VirtualProtectEx/VirtualQueryEx.
+        let current_pid = unsafe { libc::getpid() } as usize;
+        let mut dst = [0u8; 8];
+        let src = [0x42u8; 8];
+        set_last_error(0);
+        let ok = unsafe {
+            write_process_memory(
+                current_pid,
+                dst.as_mut_ptr(),
+                src.as_ptr(),
+                src.len(),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(ok, 1, "current-PID handle must be accepted");
+        assert_eq!(&dst[..], &src[..]);
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[test]
+    fn write_process_memory_zero_size_is_noop_success() {
+        // Zero-size write is a documented no-op success: nothing is written,
+        // even to a NULL or unmapped target address.
+        let mut src = [0x11u8; 8];
+        set_last_error(0);
+        let mut written = usize::MAX;
+        let ok = unsafe {
+            write_process_memory(
+                usize::MAX,
+                std::ptr::null_mut(),
+                src.as_ptr(),
+                0,
+                &mut written,
+            )
+        };
+        assert_eq!(ok, 1, "zero-size write must succeed");
+        assert_eq!(written, 0, "bytes written must be 0");
+
+        set_last_error(0);
+        let ok = unsafe {
+            read_process_memory(
+                usize::MAX,
+                std::ptr::null(),
+                src.as_mut_ptr(),
+                0,
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(ok, 1, "zero-size read must succeed");
     }
 
     #[cfg(target_os = "linux")]
