@@ -516,7 +516,9 @@ pub fn register_all_known_reals() {
     register_real("kernel32.dll", "VirtualAllocEx");
     register_real("kernel32.dll", "VirtualFree");
     register_real("kernel32.dll", "VirtualProtect");
+    register_real("kernel32.dll", "VirtualProtectEx");
     register_real("kernel32.dll", "VirtualQuery");
+    register_real("kernel32.dll", "VirtualQueryEx");
     register_real("kernel32.dll", "WriteConsoleW");
     register_real("kernel32.dll", "WriteFile");
     register_real("ole32.dll", "CoCreateInstance");

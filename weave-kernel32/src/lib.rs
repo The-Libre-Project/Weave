@@ -3,7 +3,8 @@
 //! Critical sections are real: EnterCriticalSection blocks via spin+yield,
 //! LeaveCriticalSection releases atomically, TryEnterCriticalSection returns
 //! FALSE under contention. All three honour recursive entry (same-TID re-enter).
-//! VirtualProtect/VirtualQuery delegate to mprotect/mincore.
+//! VirtualProtect/Ex and VirtualQuery/Ex delegate to mprotect and a
+//! /proc/self/maps-backed MEMORY_BASIC_INFORMATION synthesis.
 //! WriteConsoleW converts UTF-16 to UTF-8 and writes to the Linux fd.
 //! CreateFileW/ReadFile/WriteFile/CloseHandle delegate to weave-core file_io.
 
@@ -365,6 +366,57 @@ fn win_prot_to_linux(protect: u32) -> i32 {
     }
 }
 
+/// Read the current Windows protection of the page containing `addr` from the
+/// Linux VMA permission flags in /proc/self/maps. This is the inverse of
+/// `win_prot_to_linux` and lets VirtualProtect report a truthful old
+/// protection and VirtualQuery report a truthful Protect field.
+///
+/// Returns `None` when the address is not currently mapped (or /proc is
+/// unavailable); malformed lines are skipped, never fatal.
+fn current_protection(addr: *const u8) -> Option<u32> {
+    let target = addr as usize;
+    let maps = std::fs::read_to_string("/proc/self/maps").ok()?;
+    for line in maps.lines() {
+        let mut fields = line.split_whitespace();
+        let (Some(range), Some(perms)) = (fields.next(), fields.next()) else {
+            continue;
+        };
+        let mut bounds = range.split('-');
+        let (Some(start), Some(end)) = (
+            bounds
+                .next()
+                .and_then(|s| usize::from_str_radix(s, 16).ok()),
+            bounds
+                .next()
+                .and_then(|s| usize::from_str_radix(s, 16).ok()),
+        ) else {
+            continue;
+        };
+        if target < start || target >= end {
+            continue;
+        }
+        let mut prot = 0u32;
+        if perms.contains('r') {
+            prot |= 0x02; // PAGE_READONLY
+        }
+        if perms.contains('w') {
+            prot |= 0x04; // PAGE_READWRITE
+        }
+        if perms.contains('x') {
+            prot |= 0x10; // PAGE_EXECUTE
+        }
+        return Some(match prot {
+            0x02 => 0x02, // PAGE_READONLY
+            0x06 => 0x04, // PAGE_READWRITE
+            0x10 => 0x10, // PAGE_EXECUTE
+            0x12 => 0x20, // PAGE_EXECUTE_READ
+            0x16 => 0x40, // PAGE_EXECUTE_READWRITE
+            _ => 0x04,    // unknown combo → synthesized PAGE_READWRITE
+        });
+    }
+    None
+}
+
 // ── Locale information ───────────────────────────────────────────────────────
 
 fn locale_info_lookup(lc_type: u32) -> Option<&'static str> {
@@ -700,9 +752,13 @@ pub unsafe extern "win64" fn set_error_mode(u_mode: u32) -> u32 {
 ///
 /// # Safety
 /// `lp_address` must point into a valid mapped region.
-// Wine ref: dlls/kernelbase/memory.c:553 — delegates to VirtualProtectEx which
-// calls NtProtectVirtualMemory; Win9x allows NULL old_prot but NT does not —
-// old_prot must be a valid pointer on NT/Vista+.
+// Wine ref: dlls/kernelbase/memory.c::VirtualProtect — delegates to
+// VirtualProtectEx(GetCurrentProcess(), ...) → NtProtectVirtualMemory, which
+// fills *old_prot with the region's current protection before applying the
+// new one (NULL old_prot fails on NT; Win9x only). Weave reads the current
+// protection from /proc/self/maps so *old_prot reflects the actual pre-call
+// state instead of a synthesized constant. mprotect ENOMEM/EACCES failures
+// map to ERROR_INVALID_ADDRESS, mirroring STATUS_ACCESS_VIOLATION.
 pub unsafe extern "win64" fn virtual_protect(
     lp_address: *mut u8,
     dw_size: usize,
@@ -710,7 +766,11 @@ pub unsafe extern "win64" fn virtual_protect(
     lpfl_old_protect: *mut u32,
 ) -> i32 {
     if !lpfl_old_protect.is_null() {
-        unsafe { *lpfl_old_protect = 0x40 }; // report old prot as PAGE_EXECUTE_READWRITE
+        // SAFETY: non-null caller-supplied pointer; the Win32 contract grants
+        // writable storage for one u32. Weave keeps the Win9x leniency of
+        // accepting NULL, so this dereference is guarded by the null check.
+        // current_protection reads kernel state, not guest memory.
+        unsafe { *lpfl_old_protect = current_protection(lp_address).unwrap_or(0x40) };
     }
     let prot = win_prot_to_linux(fl_new_protect);
     // Round address down to page boundary and size up to a full page multiple.
@@ -723,21 +783,30 @@ pub unsafe extern "win64" fn virtual_protect(
     // multi-region calls, and mprotect will return ENOMEM for invalid ranges which
     // we map to failure via the return value.
     let ret = unsafe { libc::mprotect(page_addr as *mut libc::c_void, page_size, prot) };
-    (ret == 0) as i32
+    if ret == 0 {
+        1
+    } else {
+        set_last_error(487); // ERROR_INVALID_ADDRESS
+        0
+    }
 }
 
 /// VirtualQuery: return basic info about a memory region.
 ///
-/// Returns a minimal MEMORY_BASIC_INFORMATION (48 bytes) that satisfies
-/// the CRT stack-guard introspection. Every page is reported as committed
-/// and read-write private.
+/// Returns a MEMORY_BASIC_INFORMATION (48 bytes on x64) that satisfies
+/// the CRT stack-guard introspection. Every mapped page is reported as
+/// committed private memory; the Protect/AllocationProtect fields reflect the
+/// region's actual protection read from /proc/self/maps (falling back to
+/// PAGE_READWRITE when the VMA lookup fails).
 ///
 /// # Safety
 /// `lp_buffer` must be writable for at least `dw_length` bytes (minimum 48).
 // Wine ref: dlls/kernelbase/memory.c::VirtualQueryEx — calls
 // NtQueryVirtualMemory(MemoryBasicInformation); returns sizeof(MBI) on success,
-// 0 on failure. MBI layout: BaseAddress(8)+AllocationBase(8)+AllocationProtect(4)
-// +__alignment(4)+RegionSize(8)+State(4)+Protect(4)+Type(4) = 48 bytes on x64.
+// 0 on failure. A too-small buffer yields STATUS_INFO_LENGTH_MISMATCH → the
+// caller sees 0 + ERROR_INVALID_PARAMETER. MBI layout (x64):
+// BaseAddress(8)+AllocationBase(8)+AllocationProtect(4)+PartitionId(2)
+// +pad(2)+RegionSize(8)+State(4)+Protect(4)+Type(4) = 48 bytes.
 pub unsafe extern "win64" fn virtual_query(
     lp_address: *const u8,
     lp_buffer: *mut u8,
@@ -745,15 +814,18 @@ pub unsafe extern "win64" fn virtual_query(
 ) -> usize {
     const MBI_SIZE: usize = 48;
     if lp_buffer.is_null() || dw_length < MBI_SIZE {
+        set_last_error(87); // ERROR_INVALID_PARAMETER
         return 0;
     }
     let page_addr = (lp_address as usize) & !(4096 - 1);
+    let protect = current_protection(lp_address).unwrap_or(0x04);
     // SAFETY: lp_buffer is non-null (checked above) and dw_length >= MBI_SIZE (48).
     // We write exactly MBI_SIZE bytes at byte-level offsets matching the
     // MEMORY_BASIC_INFORMATION layout documented in the Windows SDK (x64):
     //   +0  PVOID  BaseAddress
     //   +8  PVOID  AllocationBase
     //   +16 DWORD  AllocationProtect
+    //   +20 WORD   PartitionId (0 — Weave does not model partitions)
     //   +24 SIZE_T RegionSize
     //   +32 DWORD  State
     //   +36 DWORD  Protect
@@ -763,10 +835,10 @@ pub unsafe extern "win64" fn virtual_query(
         std::ptr::write_bytes(lp_buffer, 0, MBI_SIZE);
         *(lp_buffer as *mut usize) = page_addr; // BaseAddress
         *(lp_buffer.add(8) as *mut usize) = page_addr; // AllocationBase
-        *(lp_buffer.add(16) as *mut u32) = 0x04; // AllocationProtect = PAGE_READWRITE
+        *(lp_buffer.add(16) as *mut u32) = protect; // AllocationProtect
         *(lp_buffer.add(24) as *mut usize) = 4096; // RegionSize
         *(lp_buffer.add(32) as *mut u32) = 0x1000; // State = MEM_COMMIT
-        *(lp_buffer.add(36) as *mut u32) = 0x04; // Protect = PAGE_READWRITE
+        *(lp_buffer.add(36) as *mut u32) = protect; // Protect
         *(lp_buffer.add(40) as *mut u32) = 0x20000; // Type = MEM_PRIVATE
     }
     MBI_SIZE
@@ -20411,42 +20483,73 @@ pub extern "win64" fn unregister_wait_ex(_handle: usize, _completion_event: usiz
 
 // ── Memory Management stubs ────────────────────────────────────────────────────
 
+/// Resolve a process handle under Weave's single-process model.
+///
+/// GetCurrentProcess() returns the pseudo-handle `usize::MAX`; OpenProcess
+/// returns the target PID as the handle value (see `get_process_id`). Only the
+/// current process is reachable in-process, so the only accepted handles are
+/// the pseudo-handle and the current PID.
+///
+/// Returns `Ok(())` for the current process, or the Win32 error to report:
+/// `ERROR_INVALID_HANDLE` (6) for NULL/unknown handles and `ERROR_ACCESS_DENIED`
+/// (5) for a live foreign process (mirrors `create_remote_thread`'s gate).
+fn validate_process_handle(h_process: usize) -> Result<(), u32> {
+    if h_process == usize::MAX || h_process == unsafe { libc::getpid() } as usize {
+        Ok(())
+    } else if h_process == 0 || !std::path::Path::new(&format!("/proc/{h_process}")).exists() {
+        Err(6) // ERROR_INVALID_HANDLE
+    } else {
+        Err(5) // ERROR_ACCESS_DENIED
+    }
+}
+
 /// VirtualProtectEx: change memory protection in another process.
 ///
-/// Phase A stub — returns FALSE.
+/// Under Weave's single-process model the handle is validated against the
+/// current process, then the work is delegated to `virtual_protect`.
 ///
 /// # Safety
-/// Pointer arguments are accepted but not dereferenced.
+/// `lp_address` must point into a valid mapped region.
+// Wine ref: dlls/kernelbase/memory.c::VirtualProtectEx — calls
+// NtProtectVirtualMemory(process, &addr, &size, new_prot, old_prot).
+// VirtualProtect delegates to it with GetCurrentProcess(). NULL old_prot fails
+// on NT (Win9x only allows it); Weave keeps the lenient null-safe behaviour.
 pub unsafe extern "win64" fn virtual_protect_ex(
-    _h_process: usize,
-    _lp_address: *mut u8,
-    _dw_size: usize,
-    _fl_new_protect: u32,
-    _lp_fl_old_protect: *mut u32,
+    h_process: usize,
+    lp_address: *mut u8,
+    dw_size: usize,
+    fl_new_protect: u32,
+    lp_fl_old_protect: *mut u32,
 ) -> i32 {
-    warn_once("VirtualProtectEx");
-    0
+    if let Err(code) = validate_process_handle(h_process) {
+        set_last_error(code);
+        return 0;
+    }
+    unsafe { virtual_protect(lp_address, dw_size, fl_new_protect, lp_fl_old_protect) }
 }
 
 /// VirtualQueryEx: query memory region information in another process.
 ///
-/// Phase A stub — returns 0 (no bytes written).
+/// Under Weave's single-process model the handle is validated against the
+/// current process, then the work is delegated to `virtual_query`.
 ///
 /// # Safety
-/// Caller must ensure `lp_buffer` is a valid pointer.
+/// `lp_buffer` must be writable for at least `dw_length` bytes (minimum 48).
+// Wine ref: dlls/kernelbase/memory.c::VirtualQueryEx — calls
+// NtQueryVirtualMemory(process, addr, MemoryBasicInformation, info, len, &ret);
+// returns ret (bytes written) or 0 on failure. VirtualQuery delegates to it
+// with GetCurrentProcess().
 pub unsafe extern "win64" fn virtual_query_ex(
-    _h_process: usize,
-    _lp_address: *const u8,
+    h_process: usize,
+    lp_address: *const u8,
     lp_buffer: *mut u8,
-    _dw_length: usize,
+    dw_length: usize,
 ) -> usize {
-    warn_once("VirtualQueryEx");
-    // Zero out the returned struct to indicate failure
-    // MEMORY_BASIC_INFORMATION is 48 bytes
-    if !lp_buffer.is_null() {
-        std::ptr::write_bytes(lp_buffer, 0, 48);
+    if let Err(code) = validate_process_handle(h_process) {
+        set_last_error(code);
+        return 0;
     }
-    0
+    unsafe { virtual_query(lp_address, lp_buffer, dw_length) }
 }
 
 /// VirtualLock: lock memory pages into physical RAM.
@@ -23219,7 +23322,9 @@ mod tests {
             "GetLastError",
             "SetLastError",
             "VirtualProtect",
+            "VirtualProtectEx",
             "VirtualQuery",
+            "VirtualQueryEx",
             "Sleep",
             "TlsGetValue",
             "InitializeCriticalSection",
@@ -23280,8 +23385,6 @@ mod tests {
             "UnregisterWait",
             "UnregisterWaitEx",
             // Memory Management
-            "VirtualProtectEx",
-            "VirtualQueryEx",
             "VirtualLock",
             "VirtualUnlock",
             "DiscardVirtualMemory",
@@ -24998,6 +25101,284 @@ mod tests {
         unsafe {
             let _ = virtual_free(addr, 0, MEM_RELEASE);
         };
+    }
+
+    // ── VirtualProtectEx / VirtualQueryEx ─────────────────────────────────────
+
+    const VPROT_MEM_COMMIT: u32 = 0x1000;
+    const VPROT_MEM_RESERVE: u32 = 0x20000;
+    const VPROT_MEM_RELEASE: u32 = 0x8000;
+    const VPROT_PAGE_READONLY: u32 = 0x02;
+    const VPROT_PAGE_READWRITE: u32 = 0x04;
+
+    /// Canonical Windows x64 MEMORY_BASIC_INFORMATION layout (48 bytes):
+    /// BaseAddress(8) + AllocationBase(8) + AllocationProtect(4) +
+    /// PartitionId(2) + pad(2) + RegionSize(8) + State(4) + Protect(4) +
+    /// Type(4). Used only to decode the byte offsets written by virtual_query.
+    #[repr(C)]
+    #[derive(Clone, Copy, Default)]
+    struct Mbi {
+        base_address: usize,
+        allocation_base: usize,
+        allocation_protect: u32,
+        partition_id: u16,
+        pad: u16,
+        region_size: usize,
+        state: u32,
+        protect: u32,
+        ty: u32,
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[test]
+    fn virtual_protect_ex_changes_protection_and_fills_old_prot() {
+        let addr = unsafe {
+            virtual_alloc(
+                std::ptr::null_mut(),
+                4096,
+                VPROT_MEM_COMMIT | VPROT_MEM_RESERVE,
+                VPROT_PAGE_READWRITE,
+            )
+        };
+        assert!(!addr.is_null(), "VirtualAlloc must succeed");
+        assert_eq!(current_protection(addr), Some(VPROT_PAGE_READWRITE));
+
+        let mut old_prot = 0u32;
+        set_last_error(0);
+        let ok = unsafe {
+            virtual_protect_ex(
+                usize::MAX, // GetCurrentProcess() pseudo-handle
+                addr,
+                4096,
+                VPROT_PAGE_READONLY,
+                &mut old_prot,
+            )
+        };
+        assert_eq!(
+            ok, 1,
+            "VirtualProtectEx on current process must return TRUE"
+        );
+        assert_eq!(
+            old_prot, VPROT_PAGE_READWRITE,
+            "lpflOldProtect must report the prior protection"
+        );
+        assert_eq!(
+            current_protection(addr),
+            Some(VPROT_PAGE_READONLY),
+            "mprotect must actually change the page to read-only"
+        );
+
+        // Restore read-write so the rest of the test process is unaffected.
+        assert_eq!(
+            unsafe {
+                virtual_protect_ex(
+                    usize::MAX,
+                    addr,
+                    4096,
+                    VPROT_PAGE_READWRITE,
+                    std::ptr::null_mut(),
+                )
+            },
+            1,
+            "restoring PAGE_READWRITE must succeed"
+        );
+        unsafe {
+            let _ = virtual_free(addr, 0, VPROT_MEM_RELEASE);
+        };
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[test]
+    fn virtual_protect_ex_invalid_handle_returns_invalid_handle() {
+        set_last_error(0);
+        assert_eq!(
+            unsafe {
+                virtual_protect_ex(
+                    0,
+                    std::ptr::null_mut(),
+                    0,
+                    VPROT_PAGE_READWRITE,
+                    std::ptr::null_mut(),
+                )
+            },
+            0,
+            "NULL process handle must fail"
+        );
+        assert_eq!(get_last_error(), 6, "ERROR_INVALID_HANDLE");
+
+        // A PID that cannot exist (above /proc/sys/kernel/pid_max).
+        set_last_error(0);
+        assert_eq!(
+            unsafe {
+                virtual_protect_ex(
+                    0x7fff_ffff,
+                    std::ptr::null_mut(),
+                    0,
+                    VPROT_PAGE_READWRITE,
+                    std::ptr::null_mut(),
+                )
+            },
+            0,
+            "non-existent process PID must fail"
+        );
+        assert_eq!(get_last_error(), 6, "ERROR_INVALID_HANDLE");
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[test]
+    fn virtual_protect_ex_foreign_process_returns_access_denied() {
+        // The parent PID is always a live, distinct process.
+        let other_pid = unsafe { libc::getppid() } as usize;
+        assert_ne!(other_pid, unsafe { libc::getpid() } as usize);
+        assert!(std::path::Path::new(&format!("/proc/{other_pid}")).exists());
+        set_last_error(0);
+        let ok = unsafe {
+            virtual_protect_ex(
+                other_pid,
+                std::ptr::null_mut(),
+                0,
+                VPROT_PAGE_READWRITE,
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(ok, 0, "foreign-process handle must fail");
+        assert_eq!(get_last_error(), 5, "ERROR_ACCESS_DENIED");
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[test]
+    fn virtual_query_ex_valid_mbi_on_allocated_region() {
+        let addr = unsafe {
+            virtual_alloc(
+                std::ptr::null_mut(),
+                4096,
+                VPROT_MEM_COMMIT | VPROT_MEM_RESERVE,
+                VPROT_PAGE_READWRITE,
+            )
+        };
+        assert!(!addr.is_null(), "VirtualAlloc must succeed");
+        let page_addr = (addr as usize) & !(4096 - 1);
+
+        let mut raw = [0u8; 48];
+        let n = unsafe { virtual_query_ex(usize::MAX, addr, raw.as_mut_ptr(), raw.len()) };
+        assert_eq!(n, 48, "VirtualQueryEx must write sizeof(MBI) bytes");
+
+        // Decode the raw bytes through the canonical layout to prove the writer
+        // used the Windows x64 byte offsets.
+        let mbi: Mbi = unsafe { std::ptr::read_unaligned(raw.as_ptr() as *const Mbi) };
+        assert_eq!(
+            mbi.base_address, page_addr,
+            "BaseAddress = page-aligned addr"
+        );
+        assert_eq!(
+            mbi.allocation_base, page_addr,
+            "AllocationBase = page-aligned addr"
+        );
+        assert_eq!(mbi.allocation_protect, VPROT_PAGE_READWRITE);
+        assert_eq!(mbi.partition_id, 0, "PartitionId not modelled");
+        assert_eq!(mbi.region_size, 4096);
+        assert_eq!(mbi.state, VPROT_MEM_COMMIT, "State = MEM_COMMIT");
+        assert_eq!(
+            mbi.protect, VPROT_PAGE_READWRITE,
+            "Protect must match the allocation protection"
+        );
+        assert_eq!(mbi.ty, 0x20000, "Type = MEM_PRIVATE");
+
+        unsafe {
+            let _ = virtual_free(addr, 0, VPROT_MEM_RELEASE);
+        };
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[test]
+    fn virtual_query_ex_mbi_layout_matches_windows_x64() {
+        assert_eq!(
+            std::mem::size_of::<Mbi>(),
+            48,
+            "MEMORY_BASIC_INFORMATION must be 48 bytes on x64"
+        );
+        let mbi = Mbi {
+            base_address: 0x1122_3344_5566_7788,
+            allocation_base: 0x9988_7766_5544_3322,
+            allocation_protect: 0x5566_7788,
+            partition_id: 0xAABB,
+            pad: 0xCCDD,
+            region_size: 0x1111_2222_3333_4444,
+            state: 0x1234_5678,
+            protect: 0x8765_4321,
+            ty: 0x0A0B_0C0D,
+        };
+        let bytes = unsafe {
+            std::slice::from_raw_parts(&mbi as *const Mbi as *const u8, std::mem::size_of::<Mbi>())
+        };
+        assert_eq!(
+            u64::from_le_bytes(bytes[0..8].try_into().unwrap()),
+            mbi.base_address as u64
+        );
+        assert_eq!(
+            u64::from_le_bytes(bytes[8..16].try_into().unwrap()),
+            mbi.allocation_base as u64
+        );
+        assert_eq!(
+            u32::from_le_bytes(bytes[16..20].try_into().unwrap()),
+            mbi.allocation_protect
+        );
+        assert_eq!(
+            u16::from_le_bytes(bytes[20..22].try_into().unwrap()),
+            mbi.partition_id
+        );
+        assert_eq!(
+            u16::from_le_bytes(bytes[22..24].try_into().unwrap()),
+            mbi.pad
+        );
+        assert_eq!(
+            u64::from_le_bytes(bytes[24..32].try_into().unwrap()),
+            mbi.region_size as u64
+        );
+        assert_eq!(
+            u32::from_le_bytes(bytes[32..36].try_into().unwrap()),
+            mbi.state
+        );
+        assert_eq!(
+            u32::from_le_bytes(bytes[36..40].try_into().unwrap()),
+            mbi.protect
+        );
+        assert_eq!(
+            u32::from_le_bytes(bytes[40..44].try_into().unwrap()),
+            mbi.ty
+        );
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[test]
+    fn virtual_query_ex_too_small_buffer_returns_invalid_parameter() {
+        set_last_error(0);
+        let mut small = [0u8; 47];
+        let n = unsafe {
+            virtual_query_ex(
+                usize::MAX,
+                std::ptr::null(),
+                small.as_mut_ptr(),
+                small.len(),
+            )
+        };
+        assert_eq!(n, 0, "buffer shorter than MBI must return 0");
+        assert_eq!(get_last_error(), 87, "ERROR_INVALID_PARAMETER");
+
+        set_last_error(0);
+        let n = unsafe { virtual_query_ex(usize::MAX, std::ptr::null(), std::ptr::null_mut(), 48) };
+        assert_eq!(n, 0, "NULL buffer must return 0");
+        assert_eq!(get_last_error(), 87, "ERROR_INVALID_PARAMETER");
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[test]
+    fn virtual_query_ex_invalid_handle_returns_invalid_handle() {
+        set_last_error(0);
+        let mut raw = [0u8; 48];
+        let n = unsafe { virtual_query_ex(0, std::ptr::null(), raw.as_mut_ptr(), raw.len()) };
+        assert_eq!(n, 0, "NULL process handle must return 0");
+        assert_eq!(get_last_error(), 6, "ERROR_INVALID_HANDLE");
     }
 
     #[cfg(target_os = "linux")]
