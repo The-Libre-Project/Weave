@@ -2021,55 +2021,151 @@ pub unsafe extern "win64" fn system_function_036(
 
 /// CryptAcquireContextA — open a cryptographic service provider context (ANSI).
 ///
-/// # Safety
-/// `ph_prov` must be a writable pointer to a `ULONG_PTR`-sized slot.
-// Wine ref: dlls/advapi32/crypt.c — CryptAcquireContextA calls CryptAcquireContextW internally;
-// writes a non-zero HCRYPTPROV to *phProv and returns TRUE. Flags like CRYPT_VERIFYCONTEXT are
-// accepted without validation; error codes (e.g. NTE_BAD_PROV_TYPE) not needed for entropy path.
-pub unsafe extern "win64" fn crypt_acquire_context_a(
-    ph_prov: *mut usize,
-    _psz_container: *const u8,
-    _psz_provider: *const u8,
-    _dw_prov_type: u32,
-    _dw_flags: u32,
-) -> i32 {
-    if ph_prov.is_null() {
-        return 0; // FALSE
-    }
-    // SAFETY: ph_prov is non-null (checked above); caller provides a writable HCRYPTPROV slot.
-    unsafe { *ph_prov = 1 }; // non-zero fake provider handle
-    1 // TRUE
-}
-
-/// CryptAcquireContextW — open a cryptographic service provider context (Unicode).
+/// Mirrors Wine's A→W forwarding: the ANSI container/provider names are decoded
+/// and the shared W core runs the validation. Only the RSA Full / Base provider
+/// (`PROV_RSA_FULL`) is implemented — Weave compiles the Base provider's
+/// algorithms in instead of loading a provider DLL.
 ///
 /// # Safety
 /// `ph_prov` must be a writable pointer to a `ULONG_PTR`-sized slot.
-// Wine ref: dlls/advapi32/crypt.c — CryptAcquireContextW; same semantics as A variant;
-// returns TRUE with a fake non-zero HCRYPTPROV handle.
+/// `psz_container` / `psz_provider`, if non-null, must be valid
+/// null-terminated ANSI strings.
+// Wine ref: dlls/advapi32/crypt.c — CryptAcquireContextA converts the ANSI
+// container/provider names via CRYPT_ANSIToUnicode, then calls
+// CryptAcquireContextW.
+pub unsafe extern "win64" fn crypt_acquire_context_a(
+    ph_prov: *mut usize,
+    psz_container: *const u8,
+    psz_provider: *const u8,
+    dw_prov_type: u32,
+    dw_flags: u32,
+) -> i32 {
+    // SAFETY: psz_container/psz_provider, if non-null, point to valid
+    // null-terminated ANSI strings per the Win32 API contract;
+    // decode_narrow_ptr handles the null case.
+    let container = unsafe { decode_narrow_ptr(psz_container) };
+    let provider = unsafe { decode_narrow_ptr(psz_provider) };
+    crypt_acquire_context_core(ph_prov, &provider, &container, dw_prov_type, dw_flags)
+}
+
+/// CryptAcquireContextW — open a cryptographic service provider context (Unicode).
+/// See `crypt_acquire_context_a`.
+///
+/// # Safety
+/// `ph_prov` must be a writable pointer to a `ULONG_PTR`-sized slot.
+/// `psz_container` / `psz_provider`, if non-null, must be valid
+/// null-terminated UTF-16 strings.
+// Wine ref: dlls/advapi32/crypt.c — CryptAcquireContextW: NTE_BAD_PROV_TYPE when
+// dwProvType < 1 || > MAXPROVTYPES(24) (Weave supports only PROV_RSA_FULL=1);
+// ERROR_INVALID_PARAMETER for a NULL phProv; an unregistered pszProvider name
+// fails the HKLM\Software\Microsoft\Cryptography\Defaults\Provider\<name>
+// RegOpenKeyW → NTE_KEYSET_NOT_DEF; then loads the provider DLL and dispatches
+// to pCPAcquireContext.
 pub unsafe extern "win64" fn crypt_acquire_context_w(
     ph_prov: *mut usize,
-    _psz_container: *const u16,
-    _psz_provider: *const u16,
-    _dw_prov_type: u32,
-    _dw_flags: u32,
+    psz_container: *const u16,
+    psz_provider: *const u16,
+    dw_prov_type: u32,
+    dw_flags: u32,
 ) -> i32 {
-    if ph_prov.is_null() {
+    // SAFETY: psz_container/psz_provider, if non-null, point to valid
+    // null-terminated UTF-16 strings per the Win32 API contract;
+    // decode_wide_ptr handles the null case.
+    let container = unsafe { decode_wide_ptr(psz_container) };
+    let provider = unsafe { decode_wide_ptr(psz_provider) };
+    crypt_acquire_context_core(ph_prov, &provider, &container, dw_prov_type, dw_flags)
+}
+
+/// Shared CryptAcquireContext validation after ANSI/Unicode decoding.
+///
+/// Returns TRUE with `*ph_prov` set to a new provider-table handle, or FALSE
+/// with last error set. Check order mirrors Wine: provider type first, then
+/// the NULL `ph_prov` check, then the provider-name lookup.
+fn crypt_acquire_context_core(
+    ph_prov: *mut usize,
+    provider: &str,
+    container: &str,
+    dw_prov_type: u32,
+    dw_flags: u32,
+) -> i32 {
+    if dw_prov_type != PROV_RSA_FULL {
+        weave_common::set_last_error(NTE_BAD_PROV_TYPE);
         return 0; // FALSE
     }
-    // SAFETY: ph_prov is non-null (checked above); caller provides a writable HCRYPTPROV slot.
-    unsafe { *ph_prov = 1 }; // non-zero fake provider handle
+    if ph_prov.is_null() {
+        weave_common::set_last_error(ERROR_INVALID_PARAMETER as u32);
+        return 0; // FALSE
+    }
+    // NULL/empty provider name selects the type default. Weave implements only
+    // the Base provider, so any other name is treated as unregistered.
+    if !provider.is_empty() && !provider.eq_ignore_ascii_case(MS_DEF_PROV) {
+        weave_common::set_last_error(NTE_KEYSET_NOT_DEF);
+        return 0; // FALSE
+    }
+    acquire_provider(container, dw_flags, ph_prov)
+}
+
+/// Validate the CAPI keyset flags and allocate a provider-table handle.
+///
+/// `ph_prov` is guaranteed non-null by the caller. Returns TRUE with `*ph_prov`
+/// set, or FALSE with last error set.
+// Wine ref: dlls/rsaenh/rsaenh.c RSAENH_CPAcquireContext — switch over
+// dwFlags & (CRYPT_NEWKEYSET|CRYPT_VERIFYCONTEXT|CRYPT_DELETEKEYSET): 0 opens
+// the existing container; CRYPT_DELETEKEYSET deletes it (TRUE; the returned
+// handle is undefined — advapi32 sets *phProv=0); CRYPT_NEWKEYSET creates it
+// (an existing container → NTE_EXISTS — Weave persists no keysets, so creation
+// is a no-op); CRYPT_VERIFYCONTEXT[|CRYPT_NEWKEYSET] requires an empty
+// container (else NTE_BAD_FLAGS) and acquires without a container; any other
+// combination → NTE_BAD_FLAGS. CRYPT_MACHINE_KEYSET / CRYPT_SILENT sit outside
+// the mask and are accepted.
+fn acquire_provider(container: &str, dw_flags: u32, ph_prov: *mut usize) -> i32 {
+    let keyset_flags = dw_flags & (CRYPT_NEWKEYSET | CRYPT_VERIFYCONTEXT | CRYPT_DELETEKEYSET);
+    if keyset_flags == CRYPT_DELETEKEYSET {
+        // Delete the named keyset. Weave persists no key containers, so this
+        // is a no-op; the returned handle is undefined (Wine sets it to 0).
+        // SAFETY: ph_prov non-null (validated in crypt_acquire_context_core).
+        unsafe { *ph_prov = 0 };
+        return 1; // TRUE
+    }
+    if keyset_flags == CRYPT_VERIFYCONTEXT || keyset_flags == CRYPT_VERIFYCONTEXT | CRYPT_NEWKEYSET
+    {
+        // Verify-context acquires without touching a key container, so a
+        // non-empty container name is invalid (Wine: NTE_BAD_FLAGS).
+        if !container.is_empty() {
+            weave_common::set_last_error(NTE_BAD_FLAGS);
+            return 0; // FALSE
+        }
+    } else if keyset_flags != 0 && keyset_flags != CRYPT_NEWKEYSET {
+        // Any other keyset-flag combination (e.g. NEWKEYSET|DELETEKEYSET,
+        // VERIFYCONTEXT|DELETEKEYSET) is invalid (Wine: NTE_BAD_FLAGS).
+        weave_common::set_last_error(NTE_BAD_FLAGS);
+        return 0; // FALSE
+    }
+    let handle = prov_alloc(ProviderObject);
+    // SAFETY: ph_prov non-null (validated in crypt_acquire_context_core).
+    unsafe { *ph_prov = handle };
     1 // TRUE
 }
 
 /// CryptReleaseContext — release a cryptographic service provider context.
 ///
+/// Frees the provider-table slot. Returns FALSE + `ERROR_INVALID_PARAMETER` for
+/// an invalid handle (Wine's `provider_from_handle` → `pointer_from_handle`).
+///
 /// # Safety
-/// No pointer dereferences needed; `h_prov` is treated as an opaque handle.
-// Wine ref: dlls/advapi32/crypt.c — CryptReleaseContext; frees provider state and returns TRUE.
-// Weave uses a fake handle so there is nothing to free.
-pub unsafe extern "win64" fn crypt_release_context(_h_prov: usize, _dw_flags: u32) -> i32 {
-    1 // TRUE
+/// No pointer dereferences; `h_prov` is treated as an opaque handle.
+// Wine ref: dlls/advapi32/crypt.c — CryptReleaseContext: provider_from_handle
+// fails on an invalid handle (ERROR_INVALID_PARAMETER); otherwise decrements
+// the refcount and calls pCPReleaseContext, freeing the provider at zero. Weave
+// tracks no refcount — releasing frees the handle immediately, so a hash/key
+// created before release keeps working (a known simplification).
+pub unsafe extern "win64" fn crypt_release_context(h_prov: usize, _dw_flags: u32) -> i32 {
+    if prov_remove(h_prov) {
+        1 // TRUE
+    } else {
+        weave_common::set_last_error(ERROR_INVALID_PARAMETER as u32);
+        0 // FALSE
+    }
 }
 
 /// CryptGenRandom — fill a buffer with cryptographically random bytes.
@@ -2364,12 +2460,86 @@ const NTE_BAD_ALGID: u32 = 0x8009_0008;
 const NTE_BAD_HASH: u32 = 0x8009_0002;
 const NTE_BAD_KEY: u32 = 0x8009_0003;
 const NTE_BAD_FLAGS: u32 = 0x8009_0009;
-const NTE_BAD_PROV: u32 = 0x8009_0004;
+const NTE_BAD_PROV: u32 = 0x8009_0001;
 const NTE_BAD_LEN: u32 = 0x8009_0004;
 const NTE_BAD_DATA: u32 = 0x8009_0005;
 const NTE_BAD_TYPE: u32 = 0x8009_000a;
+const NTE_BAD_PROV_TYPE: u32 = 0x8009_0014;
+const NTE_KEYSET_NOT_DEF: u32 = 0x8009_0019;
 const NTE_FAIL: u32 = 0x8009_0020;
 const NTE_INVALID_PARAMETER: u32 = 0x8009_0027;
+
+// Provider types and flags for CryptAcquireContext (wincrypt.h).
+const PROV_RSA_FULL: u32 = 1;
+const CRYPT_NEWKEYSET: u32 = 0x0000_0008;
+const CRYPT_DELETEKEYSET: u32 = 0x0000_0010;
+const CRYPT_VERIFYCONTEXT: u32 = 0xF000_0000;
+
+/// The Base provider's name (wincrypt.h `MS_DEF_PROV_A`). Weave compiles this
+/// provider's algorithms in — no provider DLL is loaded.
+const MS_DEF_PROV: &str = "Microsoft Base Cryptographic Provider v1.0";
+
+/// A live CAPI provider context. Wine's CRYPTPROV holds a loaded provider DLL
+/// and function vtable; Weave compiles the Base provider in, so the object is a
+/// liveness token in the provider handle table rather than a loaded module.
+struct ProviderObject;
+
+/// Provider handle table. Handle value = slot index + `PROVIDER_HANDLE_OFFSET`
+/// (mirrors the hash/key tables so 0 is never a valid handle).
+const PROVIDER_HANDLE_OFFSET: usize = 4;
+
+static PROVIDER_OBJECTS: std::sync::OnceLock<std::sync::Mutex<Vec<Option<ProviderObject>>>> =
+    std::sync::OnceLock::new();
+
+fn provider_table() -> &'static std::sync::Mutex<Vec<Option<ProviderObject>>> {
+    PROVIDER_OBJECTS.get_or_init(|| std::sync::Mutex::new(Vec::new()))
+}
+
+/// Allocate a fresh provider handle. Returns the smallest free slot.
+fn prov_alloc(obj: ProviderObject) -> usize {
+    let mut table = provider_table()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    for (i, slot) in table.iter_mut().enumerate() {
+        if slot.is_none() {
+            *slot = Some(obj);
+            return i + PROVIDER_HANDLE_OFFSET;
+        }
+    }
+    table.push(Some(obj));
+    table.len() - 1 + PROVIDER_HANDLE_OFFSET
+}
+
+/// True when `handle` refers to a live provider context.
+fn prov_valid(handle: usize) -> bool {
+    let table = match provider_table().lock() {
+        Ok(guard) => guard,
+        Err(_) => return false,
+    };
+    match handle.checked_sub(PROVIDER_HANDLE_OFFSET) {
+        Some(i) => table.get(i).is_some_and(|slot| slot.is_some()),
+        None => false,
+    }
+}
+
+/// Free a provider handle. Returns `false` if the handle was invalid.
+fn prov_remove(handle: usize) -> bool {
+    let mut table = match provider_table().lock() {
+        Ok(guard) => guard,
+        Err(_) => return false,
+    };
+    let index = match handle.checked_sub(PROVIDER_HANDLE_OFFSET) {
+        Some(i) => i,
+        None => return false,
+    };
+    match table.get_mut(index) {
+        Some(slot @ Some(_)) => {
+            *slot = None;
+            true
+        }
+        _ => false,
+    }
+}
 
 /// An open CAPI hash object: the algorithm and a live incremental hasher.
 ///
@@ -2634,8 +2804,8 @@ fn make_hasher(alg_id: u32) -> Option<Box<dyn DynDigest + Send>> {
 // pCPCreateHash; dlls/rsaenh/rsaenh.c RSAENH_CPCreateHash rejects unsupported
 // ALG_IDs with NTE_BAD_ALGID, a non-zero hKey with NTE_BAD_KEY, and non-zero
 // dwFlags with NTE_BAD_FLAGS. Weave supports MD5/SHA1/SHA256 and stores a live
-// incremental hasher per object; any non-zero provider handle (as issued by
-// CryptAcquireContextA/W) is accepted.
+// incremental hasher per object; the provider handle must be a live entry in
+// the provider table (as issued by CryptAcquireContextA/W), else NTE_BAD_PROV.
 pub unsafe extern "win64" fn crypt_create_hash(
     h_prov: usize,
     alg_id: u32,
@@ -2649,7 +2819,7 @@ pub unsafe extern "win64" fn crypt_create_hash(
     }
     // SAFETY: ph_hash checked non-null above; caller provides a writable slot.
     unsafe { *ph_hash = 0 };
-    if h_prov == 0 {
+    if !prov_valid(h_prov) {
         weave_common::set_last_error(NTE_BAD_PROV);
         return 0;
     }
@@ -2821,7 +2991,7 @@ pub unsafe extern "win64" fn crypt_import_key(
     }
     // SAFETY: ph_key checked non-null above; the caller provides a writable HCRYPTKEY slot.
     unsafe { *ph_key = 0 };
-    if h_prov == 0 {
+    if !prov_valid(h_prov) {
         weave_common::set_last_error(NTE_BAD_PROV);
         return 0;
     }
@@ -3204,7 +3374,7 @@ pub unsafe extern "win64" fn crypt_gen_key(
     }
     // SAFETY: ph_key checked non-null above; the caller provides a writable HCRYPTKEY slot.
     unsafe { *ph_key = 0 };
-    if h_prov == 0 {
+    if !prov_valid(h_prov) {
         weave_common::set_last_error(NTE_BAD_PROV);
         return 0;
     }
@@ -4662,12 +4832,53 @@ mod tests {
         HASH_LOCK.lock().unwrap()
     }
 
+    // ── CAPI provider context helpers (CryptAcquireContextA/W) ────────────────
+
+    /// Guards the shared provider-object handle table for the tests that
+    /// acquire *and release* a provider, so a parallel test cannot reclaim the
+    /// freed slot mid-flight (same rationale as HASH_LOCK/KEY_LOCK).
+    static PROV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Acquire the provider-table guard. Callers that also touch the hash/key
+    /// tables must hold those guards FIRST (lock order: hash/key → provider).
+    fn prov_guard() -> std::sync::MutexGuard<'static, ()> {
+        PROV_LOCK.lock().unwrap()
+    }
+
+    /// A provider handle shared by the crypto tests. Acquired once via
+    /// `crypt_acquire_context_a` and never released, so the handle stays valid
+    /// for the whole test run. Serialized by `OnceLock` — no `prov_guard` held.
+    fn test_prov() -> usize {
+        static PROV: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+        *PROV.get_or_init(|| {
+            let mut h = 0usize;
+            let ret = unsafe {
+                crypt_acquire_context_a(
+                    &mut h,
+                    std::ptr::null(),
+                    std::ptr::null(),
+                    PROV_RSA_FULL,
+                    CRYPT_VERIFYCONTEXT,
+                )
+            };
+            assert_eq!(ret, 1, "crypt_acquire_context_a failed");
+            h
+        })
+    }
+
+    /// Decode `s` into a null-terminated ANSI byte buffer for the A-variant.
+    fn narrow(s: &str) -> Vec<u8> {
+        let mut bytes = s.as_bytes().to_vec();
+        bytes.push(0);
+        bytes
+    }
+
     /// Create a hash for `alg_id`, feed it `data` in one call, and return the
     /// HP_HASHVAL digest as lowercase hex. Panics on any CAPI failure.
     fn hash_digest_hex(alg_id: u32, data: &[u8]) -> String {
         let _guard = hash_guard();
         let mut h = 0usize;
-        let ret = unsafe { crypt_create_hash(1, alg_id, 0, 0, &mut h) };
+        let ret = unsafe { crypt_create_hash(test_prov(), alg_id, 0, 0, &mut h) };
         assert_eq!(ret, 1, "crypt_create_hash(alg={alg_id:#x}) failed");
         let ret = unsafe { crypt_hash_data(h, data.as_ptr(), data.len() as u32, 0) };
         assert_eq!(ret, 1, "crypt_hash_data failed");
@@ -4696,7 +4907,10 @@ mod tests {
         // Hashing "a" then "bc" must equal hashing "abc" in one call.
         let _guard = hash_guard();
         let mut h = 0usize;
-        assert_eq!(unsafe { crypt_create_hash(1, CALG_MD5, 0, 0, &mut h) }, 1);
+        assert_eq!(
+            unsafe { crypt_create_hash(test_prov(), CALG_MD5, 0, 0, &mut h) },
+            1
+        );
         assert_eq!(unsafe { crypt_hash_data(h, b"a".as_ptr(), 1, 0) }, 1);
         assert_eq!(unsafe { crypt_hash_data(h, b"bc".as_ptr(), 2, 0) }, 1);
         let mut buf = [0u8; 16];
@@ -4742,7 +4956,10 @@ mod tests {
     fn crypt_hash_data_nonzero_flags_returns_false() {
         let _guard = hash_guard();
         let mut h = 0usize;
-        assert_eq!(unsafe { crypt_create_hash(1, CALG_SHA1, 0, 0, &mut h) }, 1);
+        assert_eq!(
+            unsafe { crypt_create_hash(test_prov(), CALG_SHA1, 0, 0, &mut h) },
+            1
+        );
         let ret = unsafe { crypt_hash_data(h, b"x".as_ptr(), 1, 1) };
         assert_eq!(ret, 0);
         assert_eq!(
@@ -4756,7 +4973,10 @@ mod tests {
     fn crypt_hash_data_null_with_nonzero_len_returns_false() {
         let _guard = hash_guard();
         let mut h = 0usize;
-        assert_eq!(unsafe { crypt_create_hash(1, CALG_SHA1, 0, 0, &mut h) }, 1);
+        assert_eq!(
+            unsafe { crypt_create_hash(test_prov(), CALG_SHA1, 0, 0, &mut h) },
+            1
+        );
         let ret = unsafe { crypt_hash_data(h, std::ptr::null(), 4, 0) };
         assert_eq!(ret, 0);
         assert_eq!(
@@ -4779,7 +4999,10 @@ mod tests {
     fn crypt_hash_data_after_finalize_returns_false() {
         let _guard = hash_guard();
         let mut h = 0usize;
-        assert_eq!(unsafe { crypt_create_hash(1, CALG_MD5, 0, 0, &mut h) }, 1);
+        assert_eq!(
+            unsafe { crypt_create_hash(test_prov(), CALG_MD5, 0, 0, &mut h) },
+            1
+        );
         let mut buf = [0u8; 16];
         let mut len = buf.len() as u32;
         assert_eq!(
@@ -4799,7 +5022,7 @@ mod tests {
         let mut h = 0usize;
         let ret = unsafe {
             crypt_create_hash(
-                1,
+                test_prov(),
                 0x0000_8005, /* CALG_MD2 (unsupported) */
                 0,
                 0,
@@ -4813,7 +5036,7 @@ mod tests {
 
     #[test]
     fn crypt_create_hash_null_phhash_returns_false() {
-        let ret = unsafe { crypt_create_hash(1, CALG_MD5, 0, 0, std::ptr::null_mut()) };
+        let ret = unsafe { crypt_create_hash(test_prov(), CALG_MD5, 0, 0, std::ptr::null_mut()) };
         assert_eq!(ret, 0);
         assert_eq!(
             weave_common::get_last_error(),
@@ -4826,7 +5049,7 @@ mod tests {
         let _guard = hash_guard();
         let mut h = 0usize;
         assert_eq!(
-            unsafe { crypt_create_hash(1, CALG_SHA_256, 0, 0, &mut h) },
+            unsafe { crypt_create_hash(test_prov(), CALG_SHA_256, 0, 0, &mut h) },
             1
         );
         let mut buf = [0u8; 8];
@@ -4842,7 +5065,10 @@ mod tests {
     fn crypt_get_hash_param_reports_algid_and_hashsize() {
         let _guard = hash_guard();
         let mut h = 0usize;
-        assert_eq!(unsafe { crypt_create_hash(1, CALG_MD5, 0, 0, &mut h) }, 1);
+        assert_eq!(
+            unsafe { crypt_create_hash(test_prov(), CALG_MD5, 0, 0, &mut h) },
+            1
+        );
 
         let mut algid = 0u32;
         let mut len = std::mem::size_of::<u32>() as u32;
@@ -4883,7 +5109,10 @@ mod tests {
     fn crypt_destroy_hash_invalidates_handle() {
         let _guard = hash_guard();
         let mut h = 0usize;
-        assert_eq!(unsafe { crypt_create_hash(1, CALG_MD5, 0, 0, &mut h) }, 1);
+        assert_eq!(
+            unsafe { crypt_create_hash(test_prov(), CALG_MD5, 0, 0, &mut h) },
+            1
+        );
         assert_eq!(unsafe { crypt_destroy_hash(h) }, 1);
         // The freed handle must now be rejected by CryptHashData.
         let ret = unsafe { crypt_hash_data(h, b"x".as_ptr(), 1, 0) };
@@ -4898,6 +5127,272 @@ mod tests {
             "CryptHashData",
             "CryptGetHashParam",
             "CryptDestroyHash",
+        ] {
+            assert!(resolve(name).is_some(), "missing resolver entry for {name}");
+        }
+    }
+
+    // ── CAPI provider context tests (CryptAcquireContextA/W / CryptReleaseContext) ──
+
+    #[test]
+    fn crypt_acquire_context_a_verifycontext_returns_valid_handle() {
+        let _guard = prov_guard();
+        let mut h = 0usize;
+        let ret = unsafe {
+            crypt_acquire_context_a(
+                &mut h,
+                std::ptr::null(),
+                std::ptr::null(),
+                PROV_RSA_FULL,
+                CRYPT_VERIFYCONTEXT,
+            )
+        };
+        assert_eq!(ret, 1);
+        assert_ne!(h, 0);
+        assert_eq!(unsafe { crypt_release_context(h, 0) }, 1);
+    }
+
+    #[test]
+    fn crypt_acquire_context_w_verifycontext_returns_valid_handle() {
+        let _guard = prov_guard();
+        let mut h = 0usize;
+        let container = wide("");
+        let provider = wide(MS_DEF_PROV);
+        let ret = unsafe {
+            crypt_acquire_context_w(
+                &mut h,
+                container.as_ptr(),
+                provider.as_ptr(),
+                PROV_RSA_FULL,
+                CRYPT_VERIFYCONTEXT,
+            )
+        };
+        assert_eq!(ret, 1);
+        assert_ne!(h, 0);
+        assert_eq!(unsafe { crypt_release_context(h, 0) }, 1);
+    }
+
+    #[test]
+    fn crypt_acquire_context_bad_prov_type_returns_false() {
+        let mut h = 0usize;
+        // dwProvType 0 fails the type check before the phProv write (Wine order).
+        let ret = unsafe {
+            crypt_acquire_context_a(
+                &mut h,
+                std::ptr::null(),
+                std::ptr::null(),
+                0,
+                CRYPT_VERIFYCONTEXT,
+            )
+        };
+        assert_eq!(ret, 0);
+        assert_eq!(weave_common::get_last_error(), NTE_BAD_PROV_TYPE);
+        assert_eq!(h, 0);
+    }
+
+    #[test]
+    fn crypt_acquire_context_bad_provider_name_returns_false() {
+        let mut h = 0usize;
+        let bad = narrow("Not A Real Provider");
+        // Wine: an unregistered provider name fails the registry lookup with
+        // NTE_KEYSET_NOT_DEF (Weave registers only the Base provider).
+        let ret = unsafe {
+            crypt_acquire_context_a(
+                &mut h,
+                std::ptr::null(),
+                bad.as_ptr(),
+                PROV_RSA_FULL,
+                CRYPT_VERIFYCONTEXT,
+            )
+        };
+        assert_eq!(ret, 0);
+        assert_eq!(weave_common::get_last_error(), NTE_KEYSET_NOT_DEF);
+        assert_eq!(h, 0);
+    }
+
+    #[test]
+    fn crypt_acquire_context_provider_name_is_case_insensitive() {
+        let _guard = prov_guard();
+        let mut h = 0usize;
+        let name = narrow("microsoft base cryptographic provider v1.0");
+        let ret = unsafe {
+            crypt_acquire_context_a(
+                &mut h,
+                std::ptr::null(),
+                name.as_ptr(),
+                PROV_RSA_FULL,
+                CRYPT_VERIFYCONTEXT,
+            )
+        };
+        assert_eq!(ret, 1);
+        assert_ne!(h, 0);
+        assert_eq!(unsafe { crypt_release_context(h, 0) }, 1);
+    }
+
+    #[test]
+    fn crypt_acquire_context_deletekeyset_returns_true() {
+        let mut h = 0x1234usize;
+        // Deleting a keyset is a no-op in Weave (no containers are persisted);
+        // Wine leaves *phProv undefined, and advapi32 sets it to 0.
+        let ret = unsafe {
+            crypt_acquire_context_a(
+                &mut h,
+                narrow("oldkeyset").as_ptr(),
+                std::ptr::null(),
+                PROV_RSA_FULL,
+                CRYPT_DELETEKEYSET,
+            )
+        };
+        assert_eq!(ret, 1);
+        assert_eq!(h, 0);
+    }
+
+    #[test]
+    fn crypt_acquire_context_newkeyset_returns_valid_handle() {
+        let _guard = prov_guard();
+        let mut h = 0usize;
+        // Creating a keyset is a no-op in Weave (nothing persisted).
+        let ret = unsafe {
+            crypt_acquire_context_a(
+                &mut h,
+                narrow("newkeyset").as_ptr(),
+                std::ptr::null(),
+                PROV_RSA_FULL,
+                CRYPT_NEWKEYSET,
+            )
+        };
+        assert_eq!(ret, 1);
+        assert_ne!(h, 0);
+        assert_eq!(unsafe { crypt_release_context(h, 0) }, 1);
+    }
+
+    #[test]
+    fn crypt_acquire_context_null_phprov_returns_false() {
+        // With a valid provider type, a NULL phProv → ERROR_INVALID_PARAMETER.
+        let ret = unsafe {
+            crypt_acquire_context_a(
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                std::ptr::null(),
+                PROV_RSA_FULL,
+                CRYPT_VERIFYCONTEXT,
+            )
+        };
+        assert_eq!(ret, 0);
+        assert_eq!(
+            weave_common::get_last_error(),
+            ERROR_INVALID_PARAMETER as u32
+        );
+    }
+
+    #[test]
+    fn crypt_acquire_context_verifycontext_with_container_returns_false() {
+        let mut h = 0usize;
+        // rsaenh: CRYPT_VERIFYCONTEXT requires an empty container → NTE_BAD_FLAGS.
+        let ret = unsafe {
+            crypt_acquire_context_a(
+                &mut h,
+                narrow("mykeyset").as_ptr(),
+                std::ptr::null(),
+                PROV_RSA_FULL,
+                CRYPT_VERIFYCONTEXT,
+            )
+        };
+        assert_eq!(ret, 0);
+        assert_eq!(weave_common::get_last_error(), NTE_BAD_FLAGS);
+        assert_eq!(h, 0);
+    }
+
+    #[test]
+    fn crypt_acquire_context_bad_flag_combo_returns_false() {
+        let mut h = 0usize;
+        // NEWKEYSET|DELETEKEYSET is outside the rsaenh switch → NTE_BAD_FLAGS.
+        let ret = unsafe {
+            crypt_acquire_context_a(
+                &mut h,
+                std::ptr::null(),
+                std::ptr::null(),
+                PROV_RSA_FULL,
+                CRYPT_NEWKEYSET | CRYPT_DELETEKEYSET,
+            )
+        };
+        assert_eq!(ret, 0);
+        assert_eq!(weave_common::get_last_error(), NTE_BAD_FLAGS);
+        assert_eq!(h, 0);
+    }
+
+    #[test]
+    fn crypt_acquired_provider_handle_works_with_crypto() {
+        // Integration: the handle from CryptAcquireContextA must be accepted by
+        // CryptCreateHash / CryptImportKey / CryptGenKey, and a released handle
+        // must be rejected.
+        let _guard = prov_guard();
+        let mut prov = 0usize;
+        let ret = unsafe {
+            crypt_acquire_context_a(
+                &mut prov,
+                std::ptr::null(),
+                std::ptr::null(),
+                PROV_RSA_FULL,
+                CRYPT_VERIFYCONTEXT,
+            )
+        };
+        assert_eq!(ret, 1);
+
+        let mut h_hash = 0usize;
+        assert_eq!(
+            unsafe { crypt_create_hash(prov, CALG_MD5, 0, 0, &mut h_hash) },
+            1
+        );
+        unsafe { crypt_destroy_hash(h_hash) };
+
+        let mut key_blob = plaintext_key_blob(CALG_RC4, b"Key");
+        let mut h_key = 0usize;
+        assert_eq!(
+            unsafe {
+                crypt_import_key(
+                    prov,
+                    key_blob.as_mut_ptr(),
+                    key_blob.len() as u32,
+                    0,
+                    0,
+                    &mut h_key,
+                )
+            },
+            1
+        );
+        unsafe { crypt_destroy_key(h_key) };
+
+        let mut h_gen = 0usize;
+        assert_eq!(unsafe { crypt_gen_key(prov, CALG_RC4, 0, &mut h_gen) }, 1);
+        unsafe { crypt_destroy_key(h_gen) };
+
+        assert_eq!(unsafe { crypt_release_context(prov, 0) }, 1);
+        // The released handle is no longer a live provider → NTE_BAD_PROV.
+        let mut h2 = 0usize;
+        assert_eq!(
+            unsafe { crypt_create_hash(prov, CALG_MD5, 0, 0, &mut h2) },
+            0
+        );
+        assert_eq!(weave_common::get_last_error(), NTE_BAD_PROV);
+    }
+
+    #[test]
+    fn crypt_release_context_invalid_handle_returns_false() {
+        let ret = unsafe { crypt_release_context(0xdead_beef, 0) };
+        assert_eq!(ret, 0);
+        assert_eq!(
+            weave_common::get_last_error(),
+            ERROR_INVALID_PARAMETER as u32
+        );
+    }
+
+    #[test]
+    fn resolve_crypt_provider_context_functions() {
+        for name in [
+            "CryptAcquireContextA",
+            "CryptAcquireContextW",
+            "CryptReleaseContext",
         ] {
             assert!(resolve(name).is_some(), "missing resolver entry for {name}");
         }
@@ -4931,8 +5426,16 @@ mod tests {
     fn import_key_blob(alg_id: u32, key: &[u8]) -> usize {
         let mut blob = plaintext_key_blob(alg_id, key);
         let mut h = 0usize;
-        let ret =
-            unsafe { crypt_import_key(1, blob.as_mut_ptr(), blob.len() as u32, 0, 0, &mut h) };
+        let ret = unsafe {
+            crypt_import_key(
+                test_prov(),
+                blob.as_mut_ptr(),
+                blob.len() as u32,
+                0,
+                0,
+                &mut h,
+            )
+        };
         assert_eq!(ret, 1, "crypt_import_key(alg={alg_id:#x}) failed");
         h
     }
@@ -5135,8 +5638,16 @@ mod tests {
         // CALG_DES (0x6601) is not implemented by Weave.
         let mut blob = plaintext_key_blob(0x0000_6601, &[0u8; 8]);
         let mut h = 0usize;
-        let ret =
-            unsafe { crypt_import_key(1, blob.as_mut_ptr(), blob.len() as u32, 0, 0, &mut h) };
+        let ret = unsafe {
+            crypt_import_key(
+                test_prov(),
+                blob.as_mut_ptr(),
+                blob.len() as u32,
+                0,
+                0,
+                &mut h,
+            )
+        };
         assert_eq!(ret, 0);
         assert_eq!(weave_common::get_last_error(), NTE_BAD_ALGID);
         assert_eq!(h, 0);
@@ -5148,8 +5659,16 @@ mod tests {
         let mut blob = plaintext_key_blob(CALG_RC4, b"Key");
         blob[1] = 1; // bVersion must be CUR_BLOB_VERSION (2)
         let mut h = 0usize;
-        let ret =
-            unsafe { crypt_import_key(1, blob.as_mut_ptr(), blob.len() as u32, 0, 0, &mut h) };
+        let ret = unsafe {
+            crypt_import_key(
+                test_prov(),
+                blob.as_mut_ptr(),
+                blob.len() as u32,
+                0,
+                0,
+                &mut h,
+            )
+        };
         assert_eq!(ret, 0);
         assert_eq!(weave_common::get_last_error(), NTE_BAD_DATA);
         assert_eq!(h, 0);
@@ -5161,8 +5680,16 @@ mod tests {
         let mut blob = plaintext_key_blob(CALG_RC4, b"Key");
         blob[0] = 1; // PRIVATEKEYBLOB, unsupported
         let mut h = 0usize;
-        let ret =
-            unsafe { crypt_import_key(1, blob.as_mut_ptr(), blob.len() as u32, 0, 0, &mut h) };
+        let ret = unsafe {
+            crypt_import_key(
+                test_prov(),
+                blob.as_mut_ptr(),
+                blob.len() as u32,
+                0,
+                0,
+                &mut h,
+            )
+        };
         assert_eq!(ret, 0);
         assert_eq!(weave_common::get_last_error(), NTE_BAD_TYPE);
         assert_eq!(h, 0);
@@ -5175,8 +5702,16 @@ mod tests {
         let mut blob = plaintext_key_blob(CALG_RC4, &[0u8; 8]);
         blob.truncate(16);
         let mut h = 0usize;
-        let ret =
-            unsafe { crypt_import_key(1, blob.as_mut_ptr(), blob.len() as u32, 0, 0, &mut h) };
+        let ret = unsafe {
+            crypt_import_key(
+                test_prov(),
+                blob.as_mut_ptr(),
+                blob.len() as u32,
+                0,
+                0,
+                &mut h,
+            )
+        };
         assert_eq!(ret, 0);
         assert_eq!(weave_common::get_last_error(), NTE_BAD_DATA);
         assert_eq!(h, 0);
@@ -5186,7 +5721,10 @@ mod tests {
     fn crypt_gen_key_rc4_roundtrip() {
         let _guard = key_guard();
         let mut h = 0usize;
-        assert_eq!(unsafe { crypt_gen_key(1, CALG_RC4, 0, &mut h) }, 1);
+        assert_eq!(
+            unsafe { crypt_gen_key(test_prov(), CALG_RC4, 0, &mut h) },
+            1
+        );
         assert_ne!(h, 0);
         let plaintext = b"generated key roundtrip";
         let ct = encrypt_data(h, plaintext, true, plaintext.len() as u32);
@@ -5201,7 +5739,7 @@ mod tests {
         let _guard = key_guard();
         let mut h = 0usize;
         let ret = unsafe {
-            crypt_gen_key(1, 0x0000_6601 /* CALG_DES */, 0, &mut h)
+            crypt_gen_key(test_prov(), 0x0000_6601 /* CALG_DES */, 0, &mut h)
         };
         assert_eq!(ret, 0);
         assert_eq!(weave_common::get_last_error(), NTE_BAD_ALGID);
@@ -5212,7 +5750,10 @@ mod tests {
     fn crypt_destroy_key_invalidates_handle() {
         let _guard = key_guard();
         let mut h = 0usize;
-        assert_eq!(unsafe { crypt_gen_key(1, CALG_RC4, 0, &mut h) }, 1);
+        assert_eq!(
+            unsafe { crypt_gen_key(test_prov(), CALG_RC4, 0, &mut h) },
+            1
+        );
         assert_eq!(unsafe { crypt_destroy_key(h) }, 1);
         let mut buf = [0u8; 4];
         let mut len = 4u32;
@@ -5255,7 +5796,7 @@ mod tests {
         let key = import_key_blob(CALG_RC4, b"Key");
         let mut h_hash = 0usize;
         assert_eq!(
-            unsafe { crypt_create_hash(1, CALG_MD5, 0, 0, &mut h_hash) },
+            unsafe { crypt_create_hash(test_prov(), CALG_MD5, 0, 0, &mut h_hash) },
             1
         );
         let mut buf = b"abc".to_vec();
