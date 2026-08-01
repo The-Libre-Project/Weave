@@ -9180,42 +9180,76 @@ pub extern "win64" fn set_thread_priority(_h_thread: usize, _n_priority: i32) ->
     // Linux thread priority requires SCHED_FIFO/SCHED_RR and root; silently accept.
     1
 }
-/// GetThreadContext — not supported, returns FALSE.
+// CONTEXT_AMD64 flag values. 0x100000 is the mandatory architecture bit; the
+// low bits select which register groups GetThreadContext/SetThreadContext read
+// or apply.
+const CONTEXT_AMD64: u32 = 0x100000;
+const CONTEXT_CONTROL: u32 = CONTEXT_AMD64 | 0x1;
+const CONTEXT_INTEGER: u32 = CONTEXT_AMD64 | 0x2;
+const CONTEXT_SEGMENTS: u32 = CONTEXT_AMD64 | 0x4;
+const CONTEXT_FULL: u32 = CONTEXT_CONTROL | CONTEXT_INTEGER | CONTEXT_SEGMENTS;
+
+// Pending register context set via SetThreadContext(GetCurrentThread(), ...).
+// Weave cannot write a live thread's registers without OS kernel support, so
+// the context is stored here and returned verbatim by GetThreadContext — the
+// store/restore roundtrip. Per-thread (thread_local), so it only ever affects
+// the calling thread.
+thread_local! {
+    static PENDING_SELF_CONTEXT: RefCell<Option<Box<weave_core::unwind::Context>>> =
+        const { RefCell::new(None) };
+}
+
+/// Copy the register groups selected by `src.context_flags` from `src` into `dst`.
+/// Only the CONTEXT_CONTROL, CONTEXT_INTEGER and CONTEXT_SEGMENTS groups are
+/// tracked; Weave does not capture the FPU/XMM or debug-register groups.
+// Wine ref: dlls/ntdll/unix/thread.c — context_to_server: CONTEXT_AMD64_CONTROL →
+// RIP/RSP/SegCs/SegSs/EFlags, CONTEXT_AMD64_INTEGER → RAX..R15,
+// CONTEXT_AMD64_SEGMENTS → SegDs/SegEs/SegFs/SegGs.
+fn apply_context_groups(dst: &mut weave_core::unwind::Context, src: &weave_core::unwind::Context) {
+    let flags = src.context_flags;
+    // Every CONTEXT_* group flag carries the CONTEXT_AMD64 architecture bit
+    // (0x100000), so mask it out before testing the low group bits.
+    let groups = flags & !CONTEXT_AMD64;
+    if groups & CONTEXT_CONTROL != 0 {
+        dst.rip = src.rip;
+        dst.rsp = src.rsp;
+        dst.eflags = src.eflags;
+        dst.seg_cs = src.seg_cs;
+        dst.seg_ss = src.seg_ss;
+    }
+    if groups & CONTEXT_INTEGER != 0 {
+        dst.rax = src.rax;
+        dst.rcx = src.rcx;
+        dst.rdx = src.rdx;
+        dst.rbx = src.rbx;
+        dst.rbp = src.rbp;
+        dst.rsi = src.rsi;
+        dst.rdi = src.rdi;
+        dst.r8 = src.r8;
+        dst.r9 = src.r9;
+        dst.r10 = src.r10;
+        dst.r11 = src.r11;
+        dst.r12 = src.r12;
+        dst.r13 = src.r13;
+        dst.r14 = src.r14;
+        dst.r15 = src.r15;
+    }
+    if groups & CONTEXT_SEGMENTS != 0 {
+        dst.seg_ds = src.seg_ds;
+        dst.seg_es = src.seg_es;
+        dst.seg_fs = src.seg_fs;
+        dst.seg_gs = src.seg_gs;
+    }
+    dst.context_flags = flags;
+}
+
+/// Capture the calling thread's CONTEXT_FULL register state into `ctx`.
+/// The buffer is zeroed first, then the integer/control/segment registers are
+/// read via inline asm.
 ///
 /// # Safety
-/// Pointer arguments are accepted but not dereferenced.
-// Wine ref: dlls/kernelbase/thread.c::GetThreadContext:253 — delegates to
-// NtGetContextThread; CONTEXT flags select which register groups to capture.
-/// GetThreadContext — capture register context for the current thread.
-///
-/// For threads other than self (or the pseudo-handle GetCurrentThread()), returns
-/// FALSE with ERROR_ACCESS_DENIED — we cannot inspect another native thread's
-/// registers without OS kernel support.
-///
-/// For the calling thread, captures CONTEXT_FULL (integer + control + segment
-/// registers) via inline assembly.
-// Wine ref: dlls/kernelbase/thread.c:253 — delegates to NtGetContextThread,
-// which requires the thread to be suspended for remote capture.
-pub unsafe extern "win64" fn get_thread_context(_h_thread: usize, lp_context: *mut u8) -> i32 {
-    if lp_context.is_null() {
-        set_last_error(87); // ERROR_INVALID_PARAMETER
-        return 0;
-    }
-    // Accept self via pseudo-handle (GetCurrentThread() = ~1 = 0xFFFF_FFFF_FFFF_FFFE).
-    let is_self = _h_thread == !1usize;
-    if !is_self {
-        set_last_error(5); // ERROR_ACCESS_DENIED
-        return 0;
-    }
-
-    // CONTEXT_AMD64 flag values (0x100000 is implicit via the low bits)
-    const CONTEXT_CONTROL: u32 = 0x100001;
-    const CONTEXT_INTEGER: u32 = 0x100002;
-    const CONTEXT_SEGMENTS: u32 = 0x100004;
-    const CONTEXT_FULL: u32 = CONTEXT_CONTROL | CONTEXT_INTEGER | CONTEXT_SEGMENTS;
-
-    let ctx = lp_context as *mut weave_core::unwind::Context;
-    // Zero the entire context first (sets all fields to 0).
+/// `ctx` must point to at least `size_of::<Context>()` writable bytes.
+unsafe fn capture_self_context(ctx: *mut weave_core::unwind::Context) {
     unsafe {
         std::ptr::write_bytes(ctx, 0, 1);
     }
@@ -9252,6 +9286,17 @@ pub unsafe extern "win64" fn get_thread_context(_h_thread: usize, lp_context: *m
         std::arch::asm!("mov {}, r14", out(reg) r14);
         std::arch::asm!("mov {}, r15", out(reg) r15);
     }
+    // Capture RIP and RSP: they come from the inline asm context. The asm
+    // blocks clobber no registers and DO NOT modify RSP/RIP, so we can read
+    // them after the register captures.
+    let rip: u64;
+    let rsp: u64;
+    let eflags: u64;
+    unsafe {
+        std::arch::asm!("lea {}, [rip]", out(reg) rip); // RIP-relative LEA
+        std::arch::asm!("mov {}, rsp", out(reg) rsp);
+        std::arch::asm!("pushfq; pop {}", out(reg) eflags);
+    }
     unsafe {
         (*ctx).context_flags = CONTEXT_FULL;
         (*ctx).rax = rax;
@@ -9269,19 +9314,6 @@ pub unsafe extern "win64" fn get_thread_context(_h_thread: usize, lp_context: *m
         (*ctx).r13 = r13;
         (*ctx).r14 = r14;
         (*ctx).r15 = r15;
-    }
-    // Capture RIP and RSP: they come from the inline asm context.
-    // The asm block clobbers no registers and DOES NOT modify RSP/RIP,
-    // so we can read them after the register captures.
-    let rip: u64;
-    let rsp: u64;
-    let eflags: u64;
-    unsafe {
-        std::arch::asm!("lea {}, [rip]", out(reg) rip); // RIP-relative LEA
-        std::arch::asm!("mov {}, rsp", out(reg) rsp);
-        std::arch::asm!("pushfq; pop {}", out(reg) eflags);
-    }
-    unsafe {
         (*ctx).rip = rip;
         (*ctx).rsp = rsp;
         (*ctx).eflags = eflags as u32;
@@ -9294,19 +9326,99 @@ pub unsafe extern "win64" fn get_thread_context(_h_thread: usize, lp_context: *m
         (*ctx).seg_gs = 0x2b;
         (*ctx).seg_ss = 0x2b;
     }
+}
+
+/// GetThreadContext — capture register context for the current thread.
+///
+/// For threads other than self (or the pseudo-handle GetCurrentThread()),
+/// returns FALSE with ERROR_ACCESS_DENIED — we cannot inspect another native
+/// thread's registers without OS kernel support.
+///
+/// For the calling thread, captures CONTEXT_FULL (integer + control + segment
+/// registers) via inline assembly. If a context was previously stored by
+/// SetThreadContext on this thread, that stored context is returned instead.
+// Wine ref: dlls/kernelbase/thread.c:253 — delegates to NtGetContextThread,
+// which requires the thread to be suspended for remote capture.
+pub unsafe extern "win64" fn get_thread_context(h_thread: usize, lp_context: *mut u8) -> i32 {
+    if lp_context.is_null() {
+        set_last_error(87); // ERROR_INVALID_PARAMETER
+        return 0;
+    }
+    // Accept self via pseudo-handle (GetCurrentThread() = ~1 = 0xFFFF_FFFF_FFFF_FFFE).
+    let is_self = h_thread == !1usize;
+    if !is_self {
+        set_last_error(5); // ERROR_ACCESS_DENIED
+        return 0;
+    }
+
+    let ctx = lp_context as *mut weave_core::unwind::Context;
+    // A context stored by SetThreadContext(self, ...) is returned verbatim, so
+    // the store/restore roundtrip works without kernel support.
+    let pending = PENDING_SELF_CONTEXT.with(|slot| {
+        slot.borrow().as_ref().map(|b| unsafe {
+            // Bitwise copy of the stored context (Context is not Clone).
+            std::ptr::read(b.as_ref() as *const weave_core::unwind::Context)
+        })
+    });
+    if let Some(pending) = pending {
+        unsafe { std::ptr::write(ctx, pending) };
+        return 1;
+    }
+    unsafe { capture_self_context(ctx) };
     1 // TRUE
 }
 
-/// SetThreadContext — not supported; returns FALSE with ERROR_ACCESS_DENIED.
+/// SetThreadContext — store a register context for the current thread.
 ///
-/// We cannot modify a thread's registers without OS kernel support.  This is
-/// rarely needed in practice — the main caller is the debugger API.
-// Wine ref: dlls/kernelbase/thread.c:467 — delegates to NtSetContextThread,
-// which requires the thread to be suspended.
-pub unsafe extern "win64" fn set_thread_context(_h_thread: usize, _lp_context: *const u8) -> i32 {
-    warn_once("SetThreadContext");
-    set_last_error(5); // ERROR_ACCESS_DENIED
-    0
+/// Weave cannot modify a live thread's registers without OS kernel support
+/// (the same restriction that limits GetThreadContext to the calling thread).
+/// Wine's Linux backend behaves the same way: setting a running thread's
+/// context is a no-op that still succeeds. The context is stored per thread so
+/// a subsequent GetThreadContext(GetCurrentThread(), ...) returns the stored
+/// values — the store/restore roundtrip used by debugger-style callers. Only
+/// the register groups selected by CONTEXT flags are applied (CONTROL,
+/// INTEGER, SEGMENTS).
+///
+/// For threads other than self (or the pseudo-handle GetCurrentThread()),
+/// returns FALSE with ERROR_ACCESS_DENIED. An invalid handle returns FALSE with
+/// ERROR_INVALID_HANDLE.
+// Wine ref: dlls/kernelbase/thread.c:467 — delegates to NtSetContextThread.
+// Wine ref: dlls/server/thread.c — the server stores a pending context for
+// non-current threads (applied on resume) and calls set_thread_context for the
+// current thread, which the Linux procfs backend implements as a no-op that
+// succeeds.
+pub unsafe extern "win64" fn set_thread_context(h_thread: usize, lp_context: *const u8) -> i32 {
+    if lp_context.is_null() {
+        set_last_error(87); // ERROR_INVALID_PARAMETER
+        return 0;
+    }
+    // Accept self via pseudo-handle (GetCurrentThread() = ~1 = 0xFFFF_FFFF_FFFF_FFFE).
+    let is_self = h_thread == !1usize;
+    if !is_self {
+        // A real thread handle to another thread: we cannot modify its registers
+        // without kernel support, mirroring the GetThreadContext restriction.
+        if handles::get_thread_start_gate(h_thread).is_some() {
+            set_last_error(5); // ERROR_ACCESS_DENIED
+        } else {
+            set_last_error(6); // ERROR_INVALID_HANDLE
+        }
+        return 0;
+    }
+
+    let incoming = unsafe { &*(lp_context as *const weave_core::unwind::Context) };
+    PENDING_SELF_CONTEXT.with(|slot| {
+        let mut borrow = slot.borrow_mut();
+        if borrow.is_none() {
+            // No prior SetThreadContext on this thread: baseline is the current
+            // live register state so a partial set only overrides flagged groups.
+            let mut fresh = weave_core::unwind::Context::default();
+            unsafe { capture_self_context(&mut fresh) };
+            *borrow = Some(Box::new(fresh));
+        }
+        let merged: &mut weave_core::unwind::Context = borrow.as_deref_mut().unwrap();
+        apply_context_groups(merged, incoming);
+    });
+    1 // TRUE
 }
 /// SuspendThread — not supported, returns DWORD(-1) (failure).
 // Wine ref: dlls/kernelbase/thread.c:689 — calls NtSuspendThread; Win9x mode returns 0 for
@@ -25301,6 +25413,142 @@ mod tests {
         };
         assert_eq!(handle, 0, "other-process handle must fail");
         assert_eq!(get_last_error(), 5, "ERROR_ACCESS_DENIED");
+    }
+
+    // ── SetThreadContext (rank #34) ────────────────────────────────────────
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[test]
+    fn set_thread_context_null_context_returns_invalid_parameter() {
+        set_last_error(0);
+        let ret = unsafe { set_thread_context(!1usize, std::ptr::null()) };
+        assert_eq!(ret, 0, "NULL lpContext must fail");
+        assert_eq!(get_last_error(), 87, "ERROR_INVALID_PARAMETER");
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[test]
+    fn set_thread_context_invalid_handle_returns_invalid_handle() {
+        let mut ctx = weave_core::unwind::Context::default();
+        ctx.context_flags = CONTEXT_FULL;
+        set_last_error(0);
+        // Handle 1 is below HANDLE_OFFSET (4), so it can never resolve to a thread.
+        let ret = unsafe { set_thread_context(1, &ctx as *const _ as *const u8) };
+        assert_eq!(ret, 0, "invalid handle must fail");
+        assert_eq!(get_last_error(), 6, "ERROR_INVALID_HANDLE");
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    static SETCTX_OTHER_THREAD_RAN: std::sync::atomic::AtomicU32 =
+        std::sync::atomic::AtomicU32::new(0);
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    unsafe extern "win64" fn setctx_other_thread_probe(_parameter: *mut u8) -> u32 {
+        SETCTX_OTHER_THREAD_RAN.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        0
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[test]
+    fn set_thread_context_other_thread_returns_access_denied() {
+        SETCTX_OTHER_THREAD_RAN.store(0, std::sync::atomic::Ordering::SeqCst);
+        let handle = unsafe {
+            create_thread(
+                std::ptr::null(),
+                0,
+                setctx_other_thread_probe as *const u8,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+            )
+        };
+        assert_ne!(handle, 0, "probe thread must be created");
+
+        let mut ctx = weave_core::unwind::Context::default();
+        ctx.context_flags = CONTEXT_FULL;
+        set_last_error(0);
+        let ret = unsafe { set_thread_context(handle, &ctx as *const _ as *const u8) };
+        assert_eq!(ret, 0, "a real thread handle to another thread must fail");
+        assert_eq!(get_last_error(), 5, "ERROR_ACCESS_DENIED");
+
+        assert_eq!(unsafe { wait_for_single_object(handle, 5000) }, 0);
+        assert_eq!(close_handle(handle), 1);
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[test]
+    fn set_thread_context_self_store_restore_roundtrip() {
+        // GetThreadContext → SetThreadContext → GetThreadContext must roundtrip
+        // the modified register value (store + restore).
+        let mut ctx = weave_core::unwind::Context::default();
+        assert_eq!(
+            unsafe { get_thread_context(!1usize, &mut ctx as *mut _ as *mut u8) },
+            1,
+            "live capture of the current thread must succeed"
+        );
+        assert_eq!(
+            ctx.context_flags, CONTEXT_FULL,
+            "live capture sets CONTEXT_FULL"
+        );
+
+        ctx.rax = 0x1122_3344_5566_7788;
+        assert_eq!(
+            unsafe { set_thread_context(!1usize, &ctx as *const _ as *const u8) },
+            1,
+            "storing a context on self must succeed"
+        );
+
+        let mut out = weave_core::unwind::Context::default();
+        assert_eq!(
+            unsafe { get_thread_context(!1usize, &mut out as *mut _ as *mut u8) },
+            1
+        );
+        assert_eq!(
+            out.rax, 0x1122_3344_5566_7788,
+            "stored context must be returned verbatim"
+        );
+        assert_eq!(out.context_flags, CONTEXT_FULL);
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[test]
+    fn set_thread_context_integer_only_partial_set_preserves_control() {
+        // Establish a known CONTEXT_FULL baseline, then apply a CONTEXT_INTEGER-only
+        // update. Only the integer group may change; control/segment groups are kept.
+        let mut base = weave_core::unwind::Context::default();
+        base.context_flags = CONTEXT_FULL;
+        base.rip = 0x1111_1111_1111_1111;
+        base.rsp = 0x2222_2222_2222_2222;
+        base.eflags = 0x246;
+        base.rax = 0xAAAA_AAAA_AAAA_AAAA;
+        assert_eq!(
+            unsafe { set_thread_context(!1usize, &base as *const _ as *const u8) },
+            1
+        );
+
+        let mut partial = weave_core::unwind::Context::default();
+        partial.context_flags = CONTEXT_INTEGER;
+        partial.rax = 0xBBBB_BBBB_BBBB_BBBB;
+        partial.rcx = 0xCCCC_CCCC_CCCC_CCCC;
+        assert_eq!(
+            unsafe { set_thread_context(!1usize, &partial as *const _ as *const u8) },
+            1
+        );
+
+        let mut out = weave_core::unwind::Context::default();
+        assert_eq!(
+            unsafe { get_thread_context(!1usize, &mut out as *mut _ as *mut u8) },
+            1
+        );
+        assert_eq!(out.context_flags, CONTEXT_INTEGER);
+        assert_eq!(out.rax, 0xBBBB_BBBB_BBBB_BBBB);
+        assert_eq!(out.rcx, 0xCCCC_CCCC_CCCC_CCCC);
+        assert_eq!(
+            out.rip, 0x1111_1111_1111_1111,
+            "control group must survive an INTEGER-only set"
+        );
+        assert_eq!(out.rsp, 0x2222_2222_2222_2222);
+        assert_eq!(out.eflags, 0x246);
     }
 
     #[cfg(target_arch = "x86_64")]
