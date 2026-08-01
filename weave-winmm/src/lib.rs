@@ -350,8 +350,11 @@ pub unsafe extern "win64" fn time_get_dev_caps(ptc: *mut u32, cbtc: u32) -> u32 
 // ── Wave audio + MCI stubs ───────────────────────────────────────────────────
 
 /// waveOutGetNumDevs: return the number of wave output devices.
+/// The bridge always models a single output device (id 0) — waveOutOpen
+/// succeeds in both the PipeWire and stub builds — so report 1.
+/// Wine ref: dlls/winmm/waveform.c — returns 1 when an output device exists.
 pub extern "win64" fn wave_out_get_num_devs() -> u32 {
-    0
+    1
 }
 
 /// # Safety
@@ -1080,9 +1083,38 @@ pub unsafe extern "win64" fn wave_out_write(hwo: usize, pwh: *mut WAVEHDR, cbwh:
     }
 }
 
-/// waveOutReset: reset a wave output device.
-pub extern "win64" fn wave_out_reset(_hwo: usize) -> u32 {
-    0 // MMSYSERR_NOERROR
+/// waveOutReset: stop playback and reset the device so waveOutWrite can be
+/// called again. Wine marks every queued buffer WHDR_DONE (clearing
+/// WHDR_INQUEUE) and delivers WOM_DONE per header; this bridge completes
+/// buffers instantly in waveOutWrite (no persistent in-queue list, per M39),
+/// so reset validates the handle and flushes any pending PCM.
+///
+/// Wine ref: dlls/winmm/waveform.c WINMM_Reset — WINMM_ValidateAndLock fails
+///   → MMSYSERR_INVALHANDLE; on success the client is stopped and reset.
+pub extern "win64" fn wave_out_reset(hwo: usize) -> u32 {
+    if !wave_out_is_open(hwo) {
+        // Wine ref: WINMM_Reset — handle validation → MMSYSERR_INVALHANDLE.
+        return MMSYSERR_INVALHANDLE;
+    }
+    #[cfg(feature = "pipewire-audio")]
+    {
+        // Wine ref: WINMM_Reset — IAudioClient_Stop + IAudioClient_Reset
+        // discard queued audio; here we flush the ring buffer so nothing
+        // pending keeps playing after the reset.
+        if let Some(m) = WAVE_OUT_SESSION.get() {
+            if let Ok(guard) = m.lock() {
+                if let Some(ref session) = *guard {
+                    if let Ok(mut ring) = session.ring_buf.lock() {
+                        let pending = ring.available;
+                        if pending > 0 {
+                            ring.read_into(&mut vec![0u8; pending]);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    MMSYSERR_NOERROR
 }
 
 /// waveOutPause: pause a wave output device.
@@ -2615,6 +2647,85 @@ mod tests {
                 super::MMSYSERR_INVALPARAM
             );
             super::wave_out_close(hwo2);
+        }
+    }
+
+    #[test]
+    fn wave_out_get_num_devs_reports_a_device() {
+        // The bridge always models output device 0, so GetNumDevs >= 1 in
+        // both feature configurations (waveOutOpen succeeds in each).
+        assert!(
+            super::wave_out_get_num_devs() >= 1,
+            "at least one waveOut device must be present"
+        );
+    }
+
+    #[test]
+    fn wave_out_reset_open_device_returns_noerror() {
+        unsafe {
+            let mut hwo: usize = 0;
+            assert_eq!(
+                super::wave_out_open(&mut hwo, super::WAVE_MAPPER, &pcm_format(), 0, 0, 0),
+                super::MMSYSERR_NOERROR
+            );
+            assert_eq!(super::wave_out_reset(hwo), super::MMSYSERR_NOERROR);
+            super::wave_out_close(hwo);
+        }
+    }
+
+    #[test]
+    fn wave_out_reset_invalid_handle_returns_invalhandle() {
+        assert_eq!(
+            super::wave_out_reset(0xDEAD_BEEF),
+            super::MMSYSERR_INVALHANDLE
+        );
+        assert_eq!(super::wave_out_reset(0), super::MMSYSERR_INVALHANDLE);
+    }
+
+    #[test]
+    fn wave_out_write_works_after_reset() {
+        unsafe {
+            let mut hwo: usize = 0;
+            assert_eq!(
+                super::wave_out_open(&mut hwo, super::WAVE_MAPPER, &pcm_format(), 0, 0, 0),
+                super::MMSYSERR_NOERROR
+            );
+
+            let mut data = [0u8; 64];
+            let mut hdr = super::WAVEHDR {
+                lpData: data.as_mut_ptr(),
+                dwBufferLength: data.len() as u32,
+                dwBytesRecorded: 0,
+                dwUser: 0,
+                dwFlags: 0,
+                dwLoops: 0,
+                lpNext: std::ptr::null_mut(),
+                reserved: 0,
+            };
+            let sizeof_hdr = std::mem::size_of::<super::WAVEHDR>() as u32;
+
+            // Prepare + write → WHDR_DONE set (instant-completion bridge).
+            assert_eq!(
+                super::wave_out_prepare_header(hwo, &mut hdr, sizeof_hdr),
+                super::MMSYSERR_NOERROR
+            );
+            assert_eq!(
+                super::wave_out_write(hwo, &mut hdr, sizeof_hdr),
+                super::MMSYSERR_NOERROR
+            );
+            assert_ne!(hdr.dwFlags & super::WHDR_DONE, 0);
+
+            // Reset stops playback but keeps the device open.
+            assert_eq!(super::wave_out_reset(hwo), super::MMSYSERR_NOERROR);
+
+            // The same prepared header can be written again after reset.
+            assert_eq!(
+                super::wave_out_write(hwo, &mut hdr, sizeof_hdr),
+                super::MMSYSERR_NOERROR
+            );
+            assert_ne!(hdr.dwFlags & super::WHDR_DONE, 0);
+
+            assert_eq!(super::wave_out_close(hwo), super::MMSYSERR_NOERROR);
         }
     }
 
