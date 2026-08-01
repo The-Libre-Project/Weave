@@ -19879,12 +19879,19 @@ pub extern "win64" fn set_comm_break(_h_file: usize) -> i32 {
 
 /// CreateRemoteThread — create a thread in another process.
 ///
-/// Phase B: supports current-process handles only. Delegates to create_thread
-/// when h_process is the current-process pseudo-handle (usize::MAX).
-// Wine ref: dlls/kernelbase/thread.c — CreateRemoteThread checks RemoteDesktop,
-// then calls NtCreateThreadEx if the handle references the current process.
-// h_process must be the current-process pseudo-handle; real handles are not
-// supported under the in-process model.
+/// Weave's in-process model can only create threads in the *current*
+/// process. `h_process` accepts the current-process pseudo-handle
+/// (`GetCurrentProcess()` → usize::MAX) and a real handle to the current
+/// process (OpenProcess returns the target PID as its handle, so that is
+/// `getpid()`). Any other value delegates nothing and fails:
+/// a valid PID of another process → ERROR_ACCESS_DENIED (remote-process
+/// threads are not supported), anything else → ERROR_INVALID_HANDLE.
+// Wine ref: dlls/kernelbase/thread.c — CreateRemoteThread forwards to
+// CreateRemoteThreadEx, which calls NtCreateThreadEx with THREAD_ALL_ACCESS,
+// fills *id with the new thread's ID, then resumes the thread unless
+// CREATE_SUSPENDED is set. NtCreateThreadEx rejects a bad process handle with
+// STATUS_INVALID_HANDLE (→ ERROR_INVALID_HANDLE) and a handle lacking
+// PROCESS_CREATE_THREAD access with STATUS_ACCESS_DENIED.
 ///
 /// # Safety
 /// Pointer arguments are forwarded to create_thread and must be valid.
@@ -19897,12 +19904,24 @@ pub unsafe extern "win64" fn create_remote_thread(
     dw_creation_flags: u32,
     lp_thread_id: *mut u32,
 ) -> usize {
-    warn_once("CreateRemoteThread");
+    if lp_start_address == 0 {
+        // Wine ref: dlls/ntdll/unix/thread.c — NtCreateThreadEx rejects a NULL
+        // start routine with STATUS_INVALID_PARAMETER.
+        set_last_error(87); // ERROR_INVALID_PARAMETER
+        return 0;
+    }
 
-    // GetCurrentProcess() returns usize::MAX pseudo-handle. Under the
-    // in-process model, only the current process is supported.
-    if h_process != usize::MAX {
-        set_last_error(5); // ERROR_ACCESS_DENIED
+    // GetCurrentProcess() returns usize::MAX pseudo-handle; OpenProcess returns
+    // the target PID as the handle. Only the current process is reachable.
+    let current_pid = unsafe { libc::getpid() as usize };
+    if h_process != usize::MAX && h_process != current_pid {
+        if h_process == 0 || !std::path::Path::new(&format!("/proc/{h_process}")).exists() {
+            set_last_error(6); // ERROR_INVALID_HANDLE
+        } else {
+            // A real handle to a different process — Weave cannot create
+            // threads there under the in-process model.
+            set_last_error(5); // ERROR_ACCESS_DENIED
+        }
         return 0;
     }
 
@@ -24608,6 +24627,219 @@ mod tests {
             1,
             "ResumeThread must release the deferred start routine"
         );
+    }
+
+    // ── CreateRemoteThread (rank #22) ────────────────────────────────────────
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    static REMOTE_THREAD_STARTS: std::sync::atomic::AtomicU32 =
+        std::sync::atomic::AtomicU32::new(0);
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    static REMOTE_THREAD_PARAM: std::sync::atomic::AtomicUsize =
+        std::sync::atomic::AtomicUsize::new(0);
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    unsafe extern "win64" fn remote_thread_probe(parameter: *mut u8) -> u32 {
+        REMOTE_THREAD_STARTS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        REMOTE_THREAD_PARAM.store(parameter as usize, std::sync::atomic::Ordering::SeqCst);
+        42
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    static REAL_HANDLE_THREAD_STARTS: std::sync::atomic::AtomicU32 =
+        std::sync::atomic::AtomicU32::new(0);
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    unsafe extern "win64" fn real_handle_thread_probe(_parameter: *mut u8) -> u32 {
+        REAL_HANDLE_THREAD_STARTS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        42
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    static SUSPENDED_REMOTE_THREAD_STARTS: std::sync::atomic::AtomicU32 =
+        std::sync::atomic::AtomicU32::new(0);
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    unsafe extern "win64" fn suspended_remote_thread_probe(_parameter: *mut u8) -> u32 {
+        SUSPENDED_REMOTE_THREAD_STARTS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        42
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[test]
+    fn create_remote_thread_pseudo_handle_runs_and_roundtrips() {
+        REMOTE_THREAD_STARTS.store(0, std::sync::atomic::Ordering::SeqCst);
+        REMOTE_THREAD_PARAM.store(0, std::sync::atomic::Ordering::SeqCst);
+        let mut tid = 0u32;
+        let handle = unsafe {
+            create_remote_thread(
+                usize::MAX, // GetCurrentProcess() pseudo-handle
+                0,
+                0,
+                remote_thread_probe as *const () as usize,
+                0x1234,
+                0,
+                &mut tid,
+            )
+        };
+        assert_ne!(handle, 0, "pseudo-handle must create a thread");
+        assert_eq!(tid, 1, "lpThreadId must be filled");
+        // Roundtrip: the returned handle must be waitable.
+        assert_eq!(
+            unsafe { wait_for_single_object(handle, 5000) },
+            0,
+            "WAIT_OBJECT_0 after the probe thread completes"
+        );
+        assert_eq!(
+            REMOTE_THREAD_STARTS.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "probe must have run exactly once"
+        );
+        assert_eq!(
+            REMOTE_THREAD_PARAM.load(std::sync::atomic::Ordering::SeqCst),
+            0x1234,
+            "lpParameter must be forwarded verbatim"
+        );
+        assert_eq!(close_handle(handle), 1);
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[test]
+    fn create_remote_thread_real_current_process_handle_runs() {
+        // OpenProcess returns the target PID as its handle; a handle to the
+        // current process must behave exactly like the pseudo-handle.
+        REAL_HANDLE_THREAD_STARTS.store(0, std::sync::atomic::Ordering::SeqCst);
+        let current_pid = unsafe { libc::getpid() as usize };
+        let handle = unsafe {
+            create_remote_thread(
+                current_pid,
+                0,
+                0,
+                real_handle_thread_probe as *const () as usize,
+                0,
+                0,
+                std::ptr::null_mut(),
+            )
+        };
+        assert_ne!(
+            handle, 0,
+            "real handle to current process must create a thread"
+        );
+        assert_eq!(unsafe { wait_for_single_object(handle, 5000) }, 0);
+        assert_eq!(
+            REAL_HANDLE_THREAD_STARTS.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        assert_eq!(close_handle(handle), 1);
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[test]
+    fn create_remote_thread_suspended_waits_for_resume() {
+        SUSPENDED_REMOTE_THREAD_STARTS.store(0, std::sync::atomic::Ordering::SeqCst);
+        let handle = unsafe {
+            create_remote_thread(
+                usize::MAX,
+                0,
+                0,
+                suspended_remote_thread_probe as *const () as usize,
+                0,
+                0x4, // CREATE_SUSPENDED
+                std::ptr::null_mut(),
+            )
+        };
+        assert_ne!(handle, 0);
+
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        assert_eq!(
+            SUSPENDED_REMOTE_THREAD_STARTS.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "CREATE_SUSPENDED must defer the start routine"
+        );
+        assert_eq!(resume_thread(handle), 1);
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        while SUSPENDED_REMOTE_THREAD_STARTS.load(std::sync::atomic::Ordering::SeqCst) == 0
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert_eq!(
+            SUSPENDED_REMOTE_THREAD_STARTS.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "ResumeThread must release the deferred start routine"
+        );
+        assert_eq!(close_handle(handle), 1);
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[test]
+    fn create_remote_thread_null_start_returns_invalid_parameter() {
+        set_last_error(0);
+        let handle =
+            unsafe { create_remote_thread(usize::MAX, 0, 0, 0, 0, 0, std::ptr::null_mut()) };
+        assert_eq!(handle, 0, "NULL start address must fail");
+        assert_eq!(get_last_error(), 87, "ERROR_INVALID_PARAMETER");
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[test]
+    fn create_remote_thread_invalid_process_handle_returns_invalid_handle() {
+        set_last_error(0);
+        let handle = unsafe {
+            create_remote_thread(
+                0,
+                0,
+                0,
+                remote_thread_probe as *const () as usize,
+                0,
+                0,
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(handle, 0, "zero process handle must fail");
+        assert_eq!(get_last_error(), 6, "ERROR_INVALID_HANDLE");
+
+        // A PID that cannot exist (above /proc/sys/kernel/pid_max).
+        set_last_error(0);
+        let bogus: usize = 0x7fff_ffff;
+        let handle = unsafe {
+            create_remote_thread(
+                bogus,
+                0,
+                0,
+                remote_thread_probe as *const () as usize,
+                0,
+                0,
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(handle, 0, "non-existent process PID must fail");
+        assert_eq!(get_last_error(), 6, "ERROR_INVALID_HANDLE");
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[test]
+    fn create_remote_thread_other_process_handle_returns_access_denied() {
+        // The parent PID is always a live, distinct process.
+        let other_pid = unsafe { libc::getppid() } as usize;
+        assert_ne!(other_pid, unsafe { libc::getpid() } as usize);
+        assert!(std::path::Path::new(&format!("/proc/{other_pid}")).exists());
+        set_last_error(0);
+        let handle = unsafe {
+            create_remote_thread(
+                other_pid,
+                0,
+                0,
+                remote_thread_probe as *const () as usize,
+                0,
+                0,
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(handle, 0, "other-process handle must fail");
+        assert_eq!(get_last_error(), 5, "ERROR_ACCESS_DENIED");
     }
 
     #[cfg(target_arch = "x86_64")]
