@@ -10668,48 +10668,188 @@ unsafe extern "win64" fn uia_return_raw_element_provider(
 // ── Q-Dir Phase A hooks, input synthesis, and misc stubs ──────────────────────
 //
 // Q-Dir creates a global CBT hook to manage its folder-tree windows, fires
-// mouse/keyboard input events, and draws various UI elements. All are no-ops.
+// mouse/keyboard input events, and draws various UI elements.
 //
-// Wine ref: dlls/user32/hook.c — SetWindowsHookExW installs a hook into the
-// hook chain; UnhookWindowsHookEx removes it; CallNextHookEx passes to the next
-// hook. Weave returns NULL/FALSE — no hook support.
+// Wine ref: dlls/user32/hook.c + dlls/win32u/hook.c — SetWindowsHookExW
+// (set_windows_hook → NtUserSetWindowsHookEx) validates the proc and hook id,
+// links the HOOK into the per-thread hook chain, and returns an HHOOK handle;
+// NtUserUnhookWindowsHookEx unlinks it and returns TRUE; NtUserCallNextHookEx
+// walks to the next hook in the chain, whose tail returns 0. Wine requires a
+// module for non-LL global hooks and rejects global-only ids for thread hooks;
+// Weave is single-process, so any id 0..14 is accepted in-process. Dispatch of
+// WH_* events from the input path is deferred — TODO(shim).
 // Wine ref: dlls/user32/input.c — mouse_event / keybd_event synthesise input;
 // not supported headless.
 
-/// SetWindowsHookExW — install a hook procedure into the hook chain.
+/// Valid hook types: WH_MINHOOK (0) .. WH_MAXHOOK (14) per the hook_names table
+/// in dlls/user32/hook.c. All ids in this range are accepted: Weave is
+/// single-process so WH_KEYBOARD_LL/WH_MOUSE_LL need no DLL and thread-hook
+/// restrictions (WH_JOURNAL*, WH_SYSMSGFILTER global-only) do not apply.
+const WH_MINHOOK: i32 = 0;
+const WH_JOURNALRECORD: i32 = 0;
+const WH_JOURNALPLAYBACK: i32 = 1;
+const WH_KEYBOARD: i32 = 2;
+const WH_GETMESSAGE: i32 = 3;
+const WH_CALLWNDPROC: i32 = 4;
+const WH_CBT: i32 = 5;
+const WH_SYSMSGFILTER: i32 = 6;
+const WH_MOUSE: i32 = 7;
+const WH_HARDWARE: i32 = 8;
+const WH_DEBUG: i32 = 9;
+const WH_SHELL: i32 = 10;
+const WH_FOREGROUNDIDLE: i32 = 11;
+const WH_CALLWNDPROCRET: i32 = 12;
+const WH_KEYBOARD_LL: i32 = 13;
+const WH_MOUSE_LL: i32 = 14;
+const WH_MAXHOOK: i32 = 14;
+
+/// Every supported hook id, WH_MINHOOK..=WH_MAXHOOK. Held as a slice so the full
+/// taxonomy is exercised by the lib build and checked against on install.
+const SUPPORTED_HOOK_IDS: [i32; WH_MAXHOOK as usize - WH_MINHOOK as usize + 1] = [
+    WH_JOURNALRECORD,
+    WH_JOURNALPLAYBACK,
+    WH_KEYBOARD,
+    WH_GETMESSAGE,
+    WH_CALLWNDPROC,
+    WH_CBT,
+    WH_SYSMSGFILTER,
+    WH_MOUSE,
+    WH_HARDWARE,
+    WH_DEBUG,
+    WH_SHELL,
+    WH_FOREGROUNDIDLE,
+    WH_CALLWNDPROCRET,
+    WH_KEYBOARD_LL,
+    WH_MOUSE_LL,
+];
+
+const ERROR_INVALID_PARAMETER: u32 = 87;
+
+/// A registered Windows hook (WH_*).
 ///
-/// Returns NULL — hook installation is not supported.
-///
-/// # Safety
-/// `lpfn` is accepted but not dereferenced.
-// Wine ref: dlls/user32/hook.c — allocates a HOOK struct, links it into the
-// per-thread hook chain, and returns an HHK handle; Weave returns NULL.
-pub unsafe extern "win64" fn set_windows_hook_ex_w(
+/// `handle` is read by the unhook path. The remaining fields are the
+/// registration contract payload — stored for the deferred input dispatch
+/// (TODO(shim)) and not read yet, hence underscored.
+struct HookEntry {
+    handle: usize,
     _id_hook: i32,
-    _lpfn: usize,
-    _hmod: usize,
-    _dw_thread_id: u32,
-) -> usize {
-    0 // NULL
+    _callback: usize,
+    _thread_id: u32,
+    _module: usize,
 }
 
-/// UnhookWindowsHookEx — remove a hook from the hook chain.
+static NEXT_HOOK_HANDLE: AtomicUsize = AtomicUsize::new(0x9100_0001);
+static HOOKS: OnceLock<Mutex<Vec<HookEntry>>> = OnceLock::new();
+
+fn hooks() -> &'static Mutex<Vec<HookEntry>> {
+    HOOKS.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+/// Register a hook. Returns the handle, or `Err(code)` for the caller to set.
 ///
-/// Returns FALSE — no hook was ever installed.
-// Wine ref: dlls/user32/hook.c — unlinks the HOOK struct, frees it, returns TRUE.
-// Weave returns FALSE since no hooks exist.
-pub extern "win64" fn unhook_windows_hook_ex(_hhk: usize) -> i32 {
-    0 // FALSE
+/// Wine ref: dlls/win32u/hook.c — NtUserSetWindowsHookEx rejects a NULL proc
+/// (ERROR_INVALID_FILTER_PROC) and requires the hook id to be valid; Weave uses
+/// ERROR_INVALID_PARAMETER for both and accepts every id in WH_MINHOOK..=WH_MAXHOOK
+/// because the callback is in-process (no DLL/module indirection to validate).
+fn set_hook_inner(
+    id_hook: i32,
+    callback: usize,
+    module: usize,
+    thread_id: u32,
+) -> Result<usize, u32> {
+    if callback == 0 {
+        return Err(ERROR_INVALID_PARAMETER);
+    }
+    if !SUPPORTED_HOOK_IDS.contains(&id_hook) {
+        return Err(ERROR_INVALID_PARAMETER);
+    }
+
+    let handle = NEXT_HOOK_HANDLE.fetch_add(1, Ordering::Relaxed);
+    let entry = HookEntry {
+        handle,
+        _id_hook: id_hook,
+        _callback: callback,
+        _thread_id: thread_id,
+        _module: module,
+    };
+
+    let mut guard = hooks().lock().map_err(|_| ERROR_INVALID_PARAMETER)?;
+    guard.push(entry);
+    Ok(handle)
+}
+
+/// SetWindowsHookExW — install a hook procedure into the hook chain.
+///
+/// Registers `lpfn` for `id_hook` in a process-global hook table and returns a
+/// non-zero HHOOK handle. In Weave's in-process model the callback pointer is
+/// valid directly, so `hmod` is stored but not resolved and `dw_thread_id` is
+/// accepted for either a thread or a global hook.
+///
+/// Returns NULL and sets ERROR_INVALID_PARAMETER when `lpfn` is null or
+/// `id_hook` is not one of the supported hook types.
+///
+/// # Safety
+/// `lpfn` must be null or a valid callback pointer; it is stored but not
+/// dereferenced until dispatch is implemented (TODO(shim)).
+// Wine ref: dlls/user32/hook.c:132 (set_windows_hook) + dlls/win32u/hook.c
+// (NtUserSetWindowsHookEx) — allocates a HOOK, links it into the hook chain, and
+// returns an HHK handle; rejects a NULL proc. Weave keeps the registration
+// contract in-process and defers input dispatch.
+pub unsafe extern "win64" fn set_windows_hook_ex_w(
+    id_hook: i32,
+    lpfn: usize,
+    hmod: usize,
+    dw_thread_id: u32,
+) -> usize {
+    match set_hook_inner(id_hook, lpfn, hmod, dw_thread_id) {
+        Ok(handle) => handle,
+        Err(code) => {
+            set_last_error(code);
+            0
+        }
+    }
+}
+
+/// Remove a hook from the hook table.
+///
+/// Returns TRUE on success. Returns FALSE and sets ERROR_INVALID_HANDLE when
+/// `hhk` is not a registered hook handle.
+// Wine ref: dlls/win32u/hook.c — NtUserUnhookWindowsHookEx unlinks the HOOK
+// struct and returns TRUE; a bad handle returns FALSE with
+// ERROR_INVALID_HOOK_HANDLE. Weave removes the in-process table entry and
+// reports ERROR_INVALID_HANDLE.
+fn unhook_inner(hhk: usize) -> Result<(), u32> {
+    let mut guard = hooks().lock().map_err(|_| ERROR_INVALID_HANDLE)?;
+    let len_before = guard.len();
+    guard.retain(|entry| entry.handle != hhk);
+    if guard.len() == len_before {
+        return Err(ERROR_INVALID_HANDLE);
+    }
+    Ok(())
+}
+
+pub extern "win64" fn unhook_windows_hook_ex(hhk: usize) -> i32 {
+    match unhook_inner(hhk) {
+        Ok(()) => 1, // TRUE
+        Err(code) => {
+            set_last_error(code);
+            0 // FALSE
+        }
+    }
 }
 
 /// CallNextHookEx — pass the hook notification to the next hook in the chain.
 ///
-/// Returns 0 — there is no next hook.
+/// Wine's chain tail returns 0 when no further hook is registered (`call_hook`
+/// returns 0 when the next HOOK has no proc and no tid). Weave does not dispatch
+/// WH_* events to hooks yet, so there is never a next hook to call and the
+/// correct value is always 0. When dispatch lands, this will walk the chain.
 ///
 /// # Safety
-/// `w_param` and `l_param` are forwarded but unused.
-// Wine ref: dlls/user32/hook.c — walks the hook chain and calls the next procedure;
-// returns whatever the next hook returns. Weave has no chain, returns 0.
+/// `hhk` is accepted but not dereferenced; `w_param`/`l_param` are forwarded but
+/// currently unused.
+// Wine ref: dlls/win32u/hook.c — NtUserCallNextHookEx → call_hook walks to the
+// next hook in the chain and returns whatever it returns; 0 when the chain ends.
 pub unsafe extern "win64" fn call_next_hook_ex(
     _hhk: usize,
     _n_code: i32,
@@ -10717,6 +10857,116 @@ pub unsafe extern "win64" fn call_next_hook_ex(
     _l_param: isize,
 ) -> isize {
     0
+}
+
+// ── Windows hook tests ──────────────────────────────────────────────────────
+#[cfg(test)]
+mod hook_tests {
+    use super::*;
+    use weave_common::get_last_error;
+
+    extern "win64" fn dummy_hook_proc(_n_code: i32, _w_param: usize, _l_param: isize) -> isize {
+        0
+    }
+
+    fn contains_handle(hhk: usize) -> bool {
+        hooks()
+            .lock()
+            .map(|guard| guard.iter().any(|entry| entry.handle == hhk))
+            .unwrap_or(false)
+    }
+
+    #[test]
+    fn set_keyboard_hook_returns_non_null_handle() {
+        let hhk = unsafe {
+            set_windows_hook_ex_w(WH_KEYBOARD, dummy_hook_proc as *const () as usize, 0, 0)
+        };
+        assert_ne!(hhk, 0);
+        assert!(contains_handle(hhk));
+        assert_eq!(unhook_windows_hook_ex(hhk), 1);
+        assert!(!contains_handle(hhk));
+    }
+
+    #[test]
+    fn null_proc_returns_null_and_sets_invalid_parameter() {
+        let hhk = unsafe { set_windows_hook_ex_w(WH_KEYBOARD, 0, 0, 0) };
+        assert_eq!(hhk, 0);
+        assert_eq!(get_last_error(), ERROR_INVALID_PARAMETER);
+    }
+
+    #[test]
+    fn invalid_hook_id_returns_null_and_sets_invalid_parameter() {
+        // Above WH_MAXHOOK.
+        let hhk = unsafe {
+            set_windows_hook_ex_w(WH_MAXHOOK + 1, dummy_hook_proc as *const () as usize, 0, 0)
+        };
+        assert_eq!(hhk, 0);
+        assert_eq!(get_last_error(), ERROR_INVALID_PARAMETER);
+        // Below WH_MINHOOK.
+        let hhk = unsafe {
+            set_windows_hook_ex_w(WH_MINHOOK - 1, dummy_hook_proc as *const () as usize, 0, 0)
+        };
+        assert_eq!(hhk, 0);
+        assert_eq!(get_last_error(), ERROR_INVALID_PARAMETER);
+    }
+
+    #[test]
+    fn unhook_invalid_handle_returns_false_and_sets_invalid_handle() {
+        // 0xDEAD_BEEF can never collide with the 0x9100_0001+ allocation range.
+        assert_eq!(unhook_windows_hook_ex(0xDEAD_BEEF), 0);
+        assert_eq!(get_last_error(), ERROR_INVALID_HANDLE);
+    }
+
+    #[test]
+    fn call_next_hook_returns_zero_default() {
+        let hhk = unsafe {
+            set_windows_hook_ex_w(WH_KEYBOARD, dummy_hook_proc as *const () as usize, 0, 0)
+        };
+        assert_ne!(hhk, 0);
+        assert_eq!(unsafe { call_next_hook_ex(hhk, 0, 0, 0) }, 0);
+        assert_eq!(unhook_windows_hook_ex(hhk), 1);
+    }
+
+    #[test]
+    fn multiple_hooks_get_distinct_handles() {
+        let a = unsafe {
+            set_windows_hook_ex_w(WH_KEYBOARD, dummy_hook_proc as *const () as usize, 0, 0)
+        };
+        let b =
+            unsafe { set_windows_hook_ex_w(WH_MOUSE, dummy_hook_proc as *const () as usize, 0, 0) };
+        let c = unsafe {
+            set_windows_hook_ex_w(WH_KEYBOARD_LL, dummy_hook_proc as *const () as usize, 0, 0)
+        };
+        assert_ne!(a, 0);
+        assert_ne!(b, 0);
+        assert_ne!(c, 0);
+        assert_ne!(a, b);
+        assert_ne!(b, c);
+        assert_ne!(a, c);
+        assert!(contains_handle(a));
+        assert!(contains_handle(b));
+        assert!(contains_handle(c));
+        assert_eq!(unhook_windows_hook_ex(a), 1);
+        assert_eq!(unhook_windows_hook_ex(b), 1);
+        assert_eq!(unhook_windows_hook_ex(c), 1);
+        assert!(!contains_handle(a));
+        assert!(!contains_handle(b));
+        assert!(!contains_handle(c));
+    }
+
+    #[test]
+    fn roundtrip_register_verify_unhook_verify_removed() {
+        let hhk = unsafe {
+            set_windows_hook_ex_w(WH_MOUSE_LL, dummy_hook_proc as *const () as usize, 0, 0)
+        };
+        assert_ne!(hhk, 0);
+        assert!(contains_handle(hhk));
+        assert_eq!(unhook_windows_hook_ex(hhk), 1);
+        assert!(!contains_handle(hhk));
+        // Unhooking an already-removed handle fails with ERROR_INVALID_HANDLE.
+        assert_eq!(unhook_windows_hook_ex(hhk), 0);
+        assert_eq!(get_last_error(), ERROR_INVALID_HANDLE);
+    }
 }
 
 /// EnumWindows — enumerate all top-level windows.
