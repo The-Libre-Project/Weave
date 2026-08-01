@@ -907,49 +907,96 @@ pub extern "win64" fn wave_out_close(hwo: usize) -> u32 {
 }
 
 /// waveOutPrepareHeader: prepare a wave header for playback.
-/// Wine ref: dlls/winmm/waveform.c WINMM_PrepareHeader — validates the
-///   handle (MMSYSERR_INVALHANDLE), sets WHDR_PREPARED and clears
-///   WHDR_DONE|WHDR_INQUEUE ("flags cleared since w2k").
+/// Wine ref: dlls/winmm/waveform.c waveOutPrepareHeader + WINMM_PrepareHeader —
+///   NULL pwh or cbwh < sizeof(WAVEHDR) → MMSYSERR_INVALPARAM; an already
+///   prepared header short-circuits to MMSYSERR_NOERROR without handle
+///   validation; otherwise the handle is validated (MMSYSERR_INVALHANDLE),
+///   then WHDR_PREPARED is set and WHDR_DONE|WHDR_INQUEUE are cleared
+///   ("flags cleared since w2k").
 ///
 /// # Safety
-/// `pwh` must be a valid pointer to a WAVEHDR if non-null.
+/// `pwh` must be a valid pointer to at least `cbwh` bytes of WAVEHDR data if
+/// non-null.
 pub unsafe extern "win64" fn wave_out_prepare_header(
     hwo: usize,
     pwh: *mut WAVEHDR,
-    _cbwh: u32,
+    cbwh: u32,
 ) -> u32 {
-    if !wave_out_is_open(hwo) {
-        return MMSYSERR_INVALHANDLE;
-    }
-    if pwh.is_null() {
+    // Wine ref: dlls/winmm/waveform.c waveOutPrepareHeader — the param check
+    // precedes handle validation, so it fires even for a closed handle.
+    if pwh.is_null() || (cbwh as usize) < std::mem::size_of::<WAVEHDR>() {
         return MMSYSERR_INVALPARAM;
     }
+    // Wine ref: dlls/winmm/waveform.c waveOutPrepareHeader — an already
+    // prepared header returns NOERROR without touching the handle or the
+    // flags (idempotent short-circuit before WINMM_PrepareHeader).
+    // SAFETY: pwh is non-null and cbwh >= sizeof(WAVEHDR) as checked above;
+    // the caller's # Safety contract guarantees pwh covers a WAVEHDR owned by
+    // the guest. (a) validated above; (b) guest heap; (c) duration of call;
+    // (d) wave_out_lifecycle_roundtrip / wave_out_prepare_unprepare_contract.
+    if unsafe { (*pwh).dwFlags & WHDR_PREPARED } != 0 {
+        return MMSYSERR_NOERROR;
+    }
+    if !wave_out_is_open(hwo) {
+        // Wine ref: dlls/winmm/waveform.c WINMM_PrepareHeader — handle
+        // validation (WINMM_ValidateAndLock) → MMSYSERR_INVALHANDLE.
+        return MMSYSERR_INVALHANDLE;
+    }
     unsafe {
+        // SAFETY: pwh is non-null with cbwh >= sizeof(WAVEHDR) as checked
+        // above; dwFlags lives at offset 24 of WAVEHDR, inside that buffer.
+        // (a) validated above; (b) guest heap; (c) duration of call;
+        // (d) wave_out_prepare_unprepare_contract asserts PREPARED set and
+        // DONE|INQUEUE residue cleared.
         (*pwh).dwFlags |= WHDR_PREPARED;
-        (*pwh).dwFlags &= !(WHDR_DONE | WHDR_INQUEUE);
+        (*pwh).dwFlags &= !(WHDR_DONE | WHDR_INQUEUE); // "flags cleared since w2k"
     }
     MMSYSERR_NOERROR
 }
 
 /// waveOutUnprepareHeader: unprepare a wave header.
-/// Wine ref: dlls/winmm/waveform.c WINMM_UnprepareHeader — validates the
-///   handle and clears WHDR_PREPARED only (WHDR_DONE is preserved; an
-///   already-unprepared header is not an error).
+/// Wine ref: dlls/winmm/waveform.c waveOutUnprepareHeader + WINMM_UnprepareHeader —
+///   NULL pwh or cbwh < sizeof(WAVEHDR) → MMSYSERR_INVALPARAM; a header still
+///   queued (WHDR_INQUEUE) → WAVERR_STILLPLAYING; an already-unprepared header
+///   → MMSYSERR_NOERROR (no-op); otherwise the handle is validated
+///   (MMSYSERR_INVALHANDLE) and WHDR_PREPARED is cleared, leaving WHDR_DONE
+///   intact.
 ///
 /// # Safety
-/// `pwh` must be a valid pointer to a WAVEHDR if non-null.
+/// `pwh` must be a valid pointer to at least `cbwh` bytes of WAVEHDR data if
+/// non-null.
 pub unsafe extern "win64" fn wave_out_unprepare_header(
     hwo: usize,
     pwh: *mut WAVEHDR,
-    _cbwh: u32,
+    cbwh: u32,
 ) -> u32 {
-    if !wave_out_is_open(hwo) {
-        return MMSYSERR_INVALHANDLE;
-    }
-    if pwh.is_null() {
+    // Wine ref: dlls/winmm/waveform.c waveOutUnprepareHeader — the param check
+    // precedes handle validation.
+    if pwh.is_null() || (cbwh as usize) < std::mem::size_of::<WAVEHDR>() {
         return MMSYSERR_INVALPARAM;
     }
+    // SAFETY: pwh is non-null and cbwh >= sizeof(WAVEHDR) as checked above;
+    // the caller's # Safety contract guarantees pwh covers a WAVEHDR owned by
+    // the guest. (a) validated above; (b) guest heap; (c) duration of call;
+    // (d) wave_out_prepare_unprepare_contract tests.
+    let flags = unsafe { (*pwh).dwFlags };
+    if flags & WHDR_INQUEUE != 0 {
+        return WAVERR_STILLPLAYING; // Wine ref: queued header is still playing
+    }
+    if flags & WHDR_PREPARED == 0 {
+        return MMSYSERR_NOERROR; // Wine ref: already unprepared — not an error
+    }
+    if !wave_out_is_open(hwo) {
+        // Wine ref: dlls/winmm/waveform.c WINMM_UnprepareHeader — handle
+        // validation (WINMM_ValidateAndLock) → MMSYSERR_INVALHANDLE.
+        return MMSYSERR_INVALHANDLE;
+    }
     unsafe {
+        // SAFETY: pwh is non-null with cbwh >= sizeof(WAVEHDR) as checked
+        // above; dwFlags lives at offset 24 of WAVEHDR, inside that buffer.
+        // (a) validated above; (b) guest heap; (c) duration of call;
+        // (d) wave_out_lifecycle_roundtrip asserts PREPARED cleared and
+        // DONE preserved.
         (*pwh).dwFlags &= !WHDR_PREPARED;
     }
     MMSYSERR_NOERROR
@@ -1651,6 +1698,7 @@ const MMSYSERR_NODRIVER: u32 = 6;
 const MMSYSERR_INVALFLAG: u32 = 10;
 const MMSYSERR_INVALPARAM: u32 = 11;
 const WAVERR_BADFORMAT: u32 = 32;
+const WAVERR_STILLPLAYING: u32 = 34;
 const WAVERR_UNPREPARED: u32 = 33;
 
 // ── MIDI Input — Phase B (no devices available) ───────────────────────────────
@@ -2567,6 +2615,101 @@ mod tests {
                 super::MMSYSERR_INVALPARAM
             );
             super::wave_out_close(hwo2);
+        }
+    }
+
+    #[test]
+    fn wave_out_prepare_unprepare_contract() {
+        unsafe {
+            let mut hwo: usize = 0;
+            assert_eq!(
+                super::wave_out_open(&mut hwo, super::WAVE_MAPPER, &pcm_format(), 0, 0, 0,),
+                super::MMSYSERR_NOERROR
+            );
+            let sizeof_hdr = std::mem::size_of::<super::WAVEHDR>() as u32;
+
+            let fresh_hdr = || super::WAVEHDR {
+                lpData: std::ptr::null_mut(),
+                dwBufferLength: 0,
+                dwBytesRecorded: 0,
+                dwUser: 0,
+                dwFlags: 0,
+                dwLoops: 0,
+                lpNext: std::ptr::null_mut(),
+                reserved: 0,
+            };
+
+            // NULL pwh → MMSYSERR_INVALPARAM.
+            assert_eq!(
+                super::wave_out_prepare_header(hwo, std::ptr::null_mut(), sizeof_hdr),
+                super::MMSYSERR_INVALPARAM
+            );
+
+            // cbwh < sizeof(WAVEHDR) → MMSYSERR_INVALPARAM.
+            let mut hdr = fresh_hdr();
+            assert_eq!(
+                super::wave_out_prepare_header(hwo, &mut hdr, sizeof_hdr - 4),
+                super::MMSYSERR_INVALPARAM
+            );
+
+            // Param checks precede handle validation (Wine ordering) — they
+            // fire even against a bogus handle.
+            assert_eq!(
+                super::wave_out_prepare_header(0xDEAD_BEEF, std::ptr::null_mut(), sizeof_hdr),
+                super::MMSYSERR_INVALPARAM
+            );
+
+            // Prepare → NOERROR, WHDR_PREPARED set, no DONE/INQUEUE residue.
+            assert_eq!(
+                super::wave_out_prepare_header(hwo, &mut hdr, sizeof_hdr),
+                super::MMSYSERR_NOERROR
+            );
+            assert_ne!(hdr.dwFlags & super::WHDR_PREPARED, 0);
+            assert_eq!(hdr.dwFlags & (super::WHDR_DONE | super::WHDR_INQUEUE), 0);
+
+            // Prepare again → NOERROR and flags untouched (Wine idempotent
+            // short-circuit before handle/flag mutation).
+            let saved = hdr.dwFlags;
+            assert_eq!(
+                super::wave_out_prepare_header(hwo, &mut hdr, sizeof_hdr),
+                super::MMSYSERR_NOERROR
+            );
+            assert_eq!(hdr.dwFlags, saved, "re-prepare must not change flags");
+
+            // Unprepare of an unprepared header → NOERROR (no-op, per Wine).
+            let mut virgin = fresh_hdr();
+            assert_eq!(
+                super::wave_out_unprepare_header(hwo, &mut virgin, sizeof_hdr),
+                super::MMSYSERR_NOERROR
+            );
+            assert_eq!(virgin.dwFlags & super::WHDR_PREPARED, 0);
+
+            // Unprepare of a queued header → WAVERR_STILLPLAYING.
+            let mut queued = fresh_hdr();
+            queued.dwFlags = super::WHDR_PREPARED | super::WHDR_INQUEUE;
+            assert_eq!(
+                super::wave_out_unprepare_header(hwo, &mut queued, sizeof_hdr),
+                super::WAVERR_STILLPLAYING
+            );
+
+            // Unprepare with bad pwh/cbwh → MMSYSERR_INVALPARAM.
+            assert_eq!(
+                super::wave_out_unprepare_header(hwo, std::ptr::null_mut(), sizeof_hdr),
+                super::MMSYSERR_INVALPARAM
+            );
+            assert_eq!(
+                super::wave_out_unprepare_header(hwo, &mut hdr, sizeof_hdr - 4),
+                super::MMSYSERR_INVALPARAM
+            );
+
+            // Unprepare → NOERROR, WHDR_PREPARED cleared.
+            assert_eq!(
+                super::wave_out_unprepare_header(hwo, &mut hdr, sizeof_hdr),
+                super::MMSYSERR_NOERROR
+            );
+            assert_eq!(hdr.dwFlags & super::WHDR_PREPARED, 0);
+
+            super::wave_out_close(hwo);
         }
     }
 }
