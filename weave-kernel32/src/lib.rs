@@ -21852,9 +21852,23 @@ pub unsafe extern "win64" fn get_process_heaps(
 
 /// HeapCompact: compact a heap.
 ///
-/// Phase A stub — returns 0 (error).
-pub extern "win64" fn heap_compact(_h_heap: usize, _dw_flags: u32) -> usize {
-    warn_once("HeapCompact");
+/// Attempts to defragment the heap and returns the largest free block it
+/// could free. Weave's heap is a single MAP_32BIT slab / libc-backed
+/// allocator that the OS already compacts; there is nothing to defragment.
+/// Returns 0 for a valid heap (matching Wine's harmless-stub RtlCompactHeap)
+/// and 0 + ERROR_INVALID_HANDLE for a NULL heap handle.
+// Wine ref: dlls/kernelbase/memory.c — HeapCompact forwards to RtlCompactHeap;
+// dlls/ntdll/heap.c::RtlCompactHeap:2282 — "harmless stub", always returns 0.
+// msvcrt's _heapmin (dlls/msvcrt/heap.c:260) calls HeapCompact and treats a
+// 0 return as "nothing freed" — it does not require a specific value.
+pub extern "win64" fn heap_compact(h_heap: usize, _dw_flags: u32) -> usize {
+    restrace!("HeapCompact(hHeap={h_heap:#x})");
+
+    if h_heap == 0 {
+        set_last_error(file_io::ERROR_INVALID_HANDLE);
+        return 0;
+    }
+
     0
 }
 
@@ -23453,6 +23467,60 @@ mod tests {
     fn heap_create_returns_nonzero() {
         let h = heap_create(0, 0, 0);
         assert_ne!(h, 0);
+    }
+
+    // ── HeapCompact ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn heap_compact_valid_heap_returns_zero() {
+        let h = heap_create(0, 0, 0);
+        assert_ne!(h, 0);
+        set_last_error(0);
+        let freed = heap_compact(h, 0);
+        // Wine's RtlCompactHeap is a no-op stub: returns 0, no error set.
+        assert_eq!(freed, 0);
+        assert_eq!(get_last_error(), 0);
+    }
+
+    #[test]
+    fn heap_compact_null_handle_sets_invalid_handle() {
+        set_last_error(0);
+        let freed = heap_compact(0, 0);
+        assert_eq!(freed, 0);
+        assert_eq!(get_last_error(), 6); // ERROR_INVALID_HANDLE
+    }
+
+    #[test]
+    fn heap_compact_process_heap_no_crash() {
+        set_last_error(0);
+        let freed = heap_compact(get_process_heap(), 0);
+        assert_eq!(freed, 0);
+        assert_eq!(get_last_error(), 0);
+    }
+
+    #[test]
+    fn heap_compact_accepts_no_serialize_flag() {
+        const HEAP_NO_SERIALIZE: u32 = 0x1;
+        let h = heap_create(0, 0, 0);
+        set_last_error(0);
+        let freed = heap_compact(h, HEAP_NO_SERIALIZE);
+        assert_eq!(freed, 0);
+        assert_eq!(get_last_error(), 0);
+    }
+
+    #[test]
+    fn heap_alloc_works_after_heap_compact() {
+        let h = heap_create(0, 0, 0);
+        set_last_error(0);
+        assert_eq!(heap_compact(h, 0), 0);
+        // Roundtrip: the heap must remain fully usable after compaction.
+        let p = heap_alloc(h, 0, 64);
+        assert!(!p.is_null());
+        unsafe {
+            std::ptr::write_bytes(p, 0xAB, 64);
+        }
+        assert_eq!(heap_size(h, 0, p), 64);
+        assert_eq!(unsafe { heap_free(h, 0, p) }, 1);
     }
 
     // ── WS5: SwitchToThread ───────────────────────────────────────────────────
