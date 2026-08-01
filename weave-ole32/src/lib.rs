@@ -126,7 +126,9 @@ const REGDB_E_CLASSNOTREG: u32 = 0x8004_0154;
 const CO_E_NOTINITIALIZED: u32 = 0x8004_001E;
 const E_NOTIMPL: u32 = 0x8000_4001;
 const E_NOINTERFACE: u32 = 0x8000_4002;
+const E_POINTER: u32 = 0x8000_4003;
 const REGDB_E_IIDNOTREG: u32 = 0x8004_0164;
+const CLASS_E_NOAGGREGATION: u32 = 0x8004_0110;
 const RPC_E_CALL_REJECTED: u32 = 0x8001_0001;
 
 // COINIT flags
@@ -211,6 +213,17 @@ thread_local! {
 // ── CLSCTX and REGCLS constants ──────────────────────────────────────────────
 
 const CLSCTX_INPROC_SERVER: u32 = 1;
+#[allow(dead_code)] // exercised by tests; documents the CLSCTX surface
+const CLSCTX_INPROC_HANDLER: u32 = 2;
+#[allow(dead_code)] // exercised by tests; documents the CLSCTX surface
+const CLSCTX_LOCAL_SERVER: u32 = 4;
+#[allow(dead_code)] // exercised by tests; documents the CLSCTX surface
+const CLSCTX_ALL: u32 = 7;
+
+// IID_IClassFactory = {00000001-0000-0000-C000-000000000046} (little-endian wire bytes)
+const IID_ICLASSFACTORY_BYTES: [u8; 16] = [
+    0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46,
+];
 
 // ── COM helper functions for opaque vtable dispatch ──────────────────────────
 
@@ -231,6 +244,20 @@ unsafe fn com_release(unk: *mut ()) -> u32 {
     let vtbl = com_vtable(unk);
     let release: unsafe extern "win64" fn(*mut ()) -> u32 = std::mem::transmute(*vtbl.add(2));
     release(unk)
+}
+
+/// Call IUnknown::QueryInterface (vtable slot 0) on any IClassFactory pointer.
+unsafe fn factory_query_interface(factory: *mut (), riid: *const u8, ppv: *mut *mut ()) -> u32 {
+    // SAFETY: factory is a live IClassFactory (refcount > 0, validated by the
+    // caller); the vtable pointer and its slot 0 (QueryInterface) are readable
+    // for any valid COM object — same layout relied on by com_add_ref/com_release.
+    let vtbl = com_vtable(factory);
+    // SAFETY: transmute between the stored usize slot and the win64 fn pointer
+    // is size-equivalent (both 8 bytes) and the slot is a valid entry point by
+    // the COM vtable layout guarantee.
+    let qi: unsafe extern "win64" fn(*mut (), *const u8, *mut *mut ()) -> u32 =
+        std::mem::transmute(*vtbl.add(0));
+    qi(factory, riid, ppv)
 }
 
 /// Call IClassFactory::CreateInstance (vtable slot 3) on an IClassFactory pointer.
@@ -292,6 +319,32 @@ unsafe fn resolve_from_factory_table(
     None
 }
 
+/// Look up a CLSID in the registered-factory table, returning a raw factory
+/// pointer with one reference added for the caller (caller must Release).
+///
+/// Wine ref: dlls/combase/combase.c:142 — com_get_registered_class_object
+/// matches `clscontext & cur->clscontext` (the requested context must overlap
+/// the registered one) plus CLSID equality, and returns an AddRef'd object.
+/// The AddRef happens under the table lock so the factory cannot be revoked
+/// (and released) before the caller takes its reference.
+///
+/// # Safety
+/// Returns a live IClassFactory pointer with one owning reference on `Some`.
+unsafe fn lookup_registered_factory(clsid: &[u8; 16], dw_cls_context: u32) -> Option<*mut ()> {
+    let table = factory_table().lock().unwrap();
+    for entry in table.iter() {
+        if entry.clsid == *clsid && dw_cls_context & entry.dw_cls_context != 0 {
+            // SAFETY: entry.factory_ptr is a live IClassFactory held by the
+            // table (validated at CoRegisterClassObject time, refcount > 0);
+            // we hold the table lock so it cannot be revoked concurrently.
+            // com_add_ref gives the caller a reference that survives unlock.
+            unsafe { com_add_ref(entry.factory_ptr) };
+            return Some(entry.factory_ptr);
+        }
+    }
+    None
+}
+
 // ── Registry-based CLSID→DLL lookup ──────────────────────────────────────────
 
 // Wine ref: dlls/combase/combase.c — com_get_class_object() searches
@@ -340,14 +393,13 @@ fn find_clsid_dll(clsid: &[u8; 16]) -> Option<String> {
 
 // Wine ref: dlls/combase/combase.c — load_dll() LoadLibraryW + GetProcAddress("DllGetClassObject"),
 // then calls DllGetClassObject(clsid, IID_IClassFactory, ppv).
-/// Load a COM DLL and call its DllGetClassObject to get an IClassFactory pointer.
-/// Returns the HRESULT from DllGetClassObject, or None if the DLL was not found/resolved.
-unsafe fn resolve_from_registry_dll(
-    clsid: &[u8; 16],
-    p_unk_outer: usize,
-    riid: *const u8,
-    ppv: *mut usize,
-) -> Option<u32> {
+/// Load a COM DLL and call its DllGetClassObject, returning the IClassFactory
+/// with one reference (the caller must Release it). Returns `None` when the
+/// DLL cannot be resolved or DllGetClassObject fails.
+///
+/// # Safety
+/// `clsid` must be a valid 16-byte CLSID buffer.
+unsafe fn load_class_factory_from_dll(clsid: &[u8; 16]) -> Option<*mut ()> {
     let dll_path = find_clsid_dll(clsid)?;
 
     let dll_name = std::path::Path::new(&dll_path)
@@ -358,32 +410,73 @@ unsafe fn resolve_from_registry_dll(
     // The DLL must have its DllGetClassObject registered in Weave's resolver.
     let func_ptr = weave_core::resolve::resolve(dll_name, "DllGetClassObject")?;
 
-    // IID_IClassFactory wire bytes (little-endian): {00000001-0000-0000-C000-000000000046}
-    let iid_class_factory: [u8; 16] = [
-        0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x46,
-    ];
-
     let dll_get_class_object: unsafe extern "win64" fn(*const u8, *const u8, *mut *mut ()) -> u32 =
+        // SAFETY: func_ptr is a resolved win64 entry point (usize → fn pointer
+        // transmute is size-equivalent; the resolver guarantees the target has
+        // DllGetClassObject's ABI).
         unsafe { std::mem::transmute(func_ptr) };
 
     let mut factory: *mut () = std::ptr::null_mut();
-    let hr =
-        unsafe { dll_get_class_object(clsid.as_ptr(), iid_class_factory.as_ptr(), &mut factory) };
+    let hr = unsafe {
+        dll_get_class_object(
+            clsid.as_ptr(),
+            IID_ICLASSFACTORY_BYTES.as_ptr(),
+            &mut factory,
+        )
+    };
 
-    if hr == 0 && !factory.is_null() {
-        // Got an IClassFactory — call CreateInstance on it
-        let mut obj: *mut () = std::ptr::null_mut();
-        let hr2 =
-            unsafe { factory_create_instance(factory, p_unk_outer as *mut (), riid, &mut obj) };
-        unsafe { com_release(factory) };
-        if hr2 == 0 {
-            unsafe { *ppv = obj as usize };
-        }
-        return Some(hr2);
+    // SAFETY: factory is written by the resolved DllGetClassObject; reading it
+    // for the null check is valid. On S_OK the DLL returned a live IClassFactory
+    // with one reference we now own.
+    if hr == S_OK && !factory.is_null() {
+        Some(factory)
+    } else {
+        None
     }
+}
 
-    None
+// Wine ref: dlls/combase/combase.c — load_dll() LoadLibraryW + GetProcAddress("DllGetClassObject"),
+// then calls DllGetClassObject(clsid, IID_IClassFactory, ppv).
+/// Load a COM DLL and use its IClassFactory to create an instance.
+/// Returns the HRESULT from CreateInstance, or None if the DLL was not found/resolved.
+unsafe fn resolve_from_registry_dll(
+    clsid: &[u8; 16],
+    p_unk_outer: usize,
+    riid: *const u8,
+    ppv: *mut usize,
+) -> Option<u32> {
+    let factory = unsafe { load_class_factory_from_dll(clsid)? };
+
+    // Got an IClassFactory — call CreateInstance on it.
+    let mut obj: *mut () = std::ptr::null_mut();
+    let hr = unsafe { factory_create_instance(factory, p_unk_outer as *mut (), riid, &mut obj) };
+    unsafe { com_release(factory) };
+    if hr == S_OK {
+        unsafe { *ppv = obj as usize };
+    }
+    Some(hr)
+}
+
+// Wine ref: dlls/combase/combase.c — for the class-factory lookup, DllGetClassObject's
+// result is QI'd for the requested riid, then the temporary factory ref is released.
+/// Load a COM DLL and return its IClassFactory QI'd for `riid`.
+/// Returns the QI HRESULT, or None if the DLL was not found/resolved.
+unsafe fn resolve_factory_from_registry_dll(
+    clsid: &[u8; 16],
+    riid: *const u8,
+    ppv: *mut usize,
+) -> Option<u32> {
+    let factory = unsafe { load_class_factory_from_dll(clsid)? };
+
+    // QI the factory for the requested interface (AddRefs the output), then
+    // drop our temporary reference.
+    let mut out: *mut () = std::ptr::null_mut();
+    let hr = unsafe { factory_query_interface(factory, riid, &mut out) };
+    unsafe { com_release(factory) };
+    if hr == S_OK {
+        unsafe { *ppv = out as usize };
+    }
+    Some(hr)
 }
 
 // ── CoRegisterClassObject / CoRevokeClassObject ──────────────────────────────
@@ -972,33 +1065,222 @@ pub unsafe extern "win64" fn co_register_message_filter(
     0 // S_OK
 }
 
-// Wine ref: dlls/combase/combase.c:1965 — delegates to com_get_class_object(); searches activation
-// context first, then HKCR\CLSID\{...}\InprocServer32; returns REGDB_E_CLASSNOTREG if not found.
-/// CoGetClassObject: retrieve the class factory for a given CLSID (stub).
+// ── Well-known class factory: CLSID_ShellLink ────────────────────────────────
+
+/// Static class factory singleton for CLSID_ShellLink. `IClassFactory::CreateInstance`
+/// delegates to `create_shell_link`, so CoGetClassObject can hand this factory to a
+/// caller exactly like a registry-registered factory would behave.
 ///
-/// Returns `REGDB_E_CLASSNOTREG` — no class factories in Phase 2.
+/// Wine ref: dlls/combase/combase.c — builtin class factories (FreeMarshaler,
+/// GlobalOptions, ...) are process-lifetime singletons whose AddRef/Release
+/// return 1 and whose CreateInstance delegates to the real implementation.
+#[repr(C)]
+struct ShellLinkFactory {
+    vtable: *const ShellLinkFactoryVtbl,
+}
+
+#[repr(C)]
+struct ShellLinkFactoryVtbl {
+    query_interface:
+        unsafe extern "win64" fn(*mut ShellLinkFactory, *const u8, *mut *mut ()) -> u32,
+    add_ref: unsafe extern "win64" fn(*mut ShellLinkFactory) -> u32,
+    release: unsafe extern "win64" fn(*mut ShellLinkFactory) -> u32,
+    create_instance:
+        unsafe extern "win64" fn(*mut ShellLinkFactory, *mut (), *const u8, *mut *mut ()) -> u32,
+    lock_server: unsafe extern "win64" fn(*mut ShellLinkFactory, i32) -> u32,
+}
+
+// SAFETY: the factory is a process-lifetime static singleton with no per-thread
+// mutable state (refcount is a literal 1), so it is safe to share across threads.
+unsafe impl Send for ShellLinkFactory {}
+unsafe impl Sync for ShellLinkFactory {}
+
+static SHELL_LINK_FACTORY_VTBL: ShellLinkFactoryVtbl = ShellLinkFactoryVtbl {
+    query_interface: shell_link_factory_qi,
+    add_ref: shell_link_factory_add_ref,
+    release: shell_link_factory_release,
+    create_instance: shell_link_factory_create_instance,
+    lock_server: shell_link_factory_lock_server,
+};
+
+static SHELL_LINK_FACTORY: ShellLinkFactory = ShellLinkFactory {
+    vtable: &SHELL_LINK_FACTORY_VTBL,
+};
+
+/// Return the COM object pointer for the ShellLink factory singleton.
+fn shell_link_factory_ptr() -> *mut () {
+    // SAFETY: the pointer is derived from a 'static and handed out as a
+    // non-owning reference to a singleton that outlives the call (same pattern
+    // as IMALLOC_VTBL in co_get_malloc).
+    (&raw const SHELL_LINK_FACTORY) as *mut ()
+}
+
+// Wine ref: dlls/combase/combase.c — builtin factory QI returns S_OK for
+// IClassFactory / IUnknown; E_NOINTERFACE otherwise, with *ppv nulled.
+unsafe extern "win64" fn shell_link_factory_qi(
+    this: *mut ShellLinkFactory,
+    riid: *const u8,
+    ppv: *mut *mut (),
+) -> u32 {
+    if ppv.is_null() {
+        return E_INVALIDARG;
+    }
+    // SAFETY: ppv validated non-null above; writable output slot per COM ABI.
+    unsafe { *ppv = std::ptr::null_mut() };
+    if riid.is_null() {
+        return E_INVALIDARG;
+    }
+    // SAFETY: riid validated non-null above; 16-byte IID buffer per COM ABI.
+    let iid = unsafe { std::ptr::read_unaligned(riid as *const [u8; 16]) };
+    if iid == IID_IUNKNOWN_BYTES || iid == IID_ICLASSFACTORY_BYTES {
+        // SAFETY: this is the process-lifetime singleton; the caller receives
+        // a non-owning pointer (no AddRef bookkeeping — Release never frees).
+        unsafe { *ppv = this as *mut () };
+        S_OK
+    } else {
+        E_NOINTERFACE
+    }
+}
+
+unsafe extern "win64" fn shell_link_factory_add_ref(_this: *mut ShellLinkFactory) -> u32 {
+    1
+}
+
+unsafe extern "win64" fn shell_link_factory_release(_this: *mut ShellLinkFactory) -> u32 {
+    1
+}
+
+// Wine ref: dlls/combase/combase.c — builtin factory CreateInstance delegates
+// to the class's real constructor and returns its HRESULT. ShellLink is
+// non-aggregatable: a non-NULL pUnkOuter returns CLASS_E_NOAGGREGATION.
+unsafe extern "win64" fn shell_link_factory_create_instance(
+    _this: *mut ShellLinkFactory,
+    p_unk_outer: *mut (),
+    riid: *const u8,
+    ppv: *mut *mut (),
+) -> u32 {
+    if ppv.is_null() {
+        return E_INVALIDARG;
+    }
+    // SAFETY: ppv validated non-null above; writable output slot per COM ABI.
+    unsafe { *ppv = std::ptr::null_mut() };
+    if !p_unk_outer.is_null() {
+        return CLASS_E_NOAGGREGATION;
+    }
+    // SAFETY: ppv validated non-null above; create_shell_link revalidates it
+    // and only ignores the rclsid/riid arguments (both may be null).
+    unsafe { create_shell_link(riid, riid, ppv) }
+}
+
+unsafe extern "win64" fn shell_link_factory_lock_server(
+    _this: *mut ShellLinkFactory,
+    _f_lock: i32,
+) -> u32 {
+    S_OK
+}
+
+// Wine ref: dlls/combase/combase.c:1724 com_get_class_object — nulls *obj first,
+// then resolves via registered classes → InprocServer32 registry → InprocHandler32
+// → local/remote servers. We support only in-proc resolution (registered factories,
+// builtin ShellLink, InprocServer32 DLLs); non-INPROC contexts fall through to
+// REGDB_E_CLASSNOTREG. Wine's own test (dlls/ole32/tests/compobj.c:849) asserts
+// E_INVALIDARG for a NULL ppv; we return E_POINTER for null pointer args instead
+// (documented standard HRESULT for this API) — SHIM NOTE: deliberate deviation.
+/// CoGetClassObject: retrieve the class factory for a given CLSID.
+///
+/// Resolution order (same as CoCreateInstance):
+///   1. In-memory registered factories (CoRegisterClassObject)
+///   2. Well-known CLSIDs (ShellLink)
+///   3. Registry-based DLL lookup (HKCR\CLSID\{clsid}\InprocServer32)
+///   4. REGDB_E_CLASSNOTREG if not found anywhere
+///
+/// Returns `S_OK` and a factory interface pointer (one reference for the caller)
+/// on success. The factory's `IClassFactory::CreateInstance` then creates objects.
 ///
 /// # Safety
-/// Pointer arguments must be null or valid.
-// Wine ref: dlls/combase/combase.c:1965 — com_get_class_object(); REGDB_E_CLASSNOTREG if not found.
+/// `rclsid` and `riid` must be valid pointers to 16-byte GUID structs.
+/// `ppv` must be a valid writable pointer to a `*mut c_void` output slot.
 pub unsafe extern "win64" fn co_get_class_object(
     rclsid: *const u8,
-    _dw_cls_context: u32,
-    _pv_reserved: usize,
-    _riid: *const u8,
+    dw_cls_context: u32,
+    pv_reserved: usize,
+    riid: *const u8,
     ppv: *mut usize,
 ) -> u32 {
-    if !ppv.is_null() {
-        unsafe { *ppv = 0 };
+    // Validate pointer arguments first; a null ppv is E_POINTER before anything
+    // else. Otherwise null *ppv up front, mirroring Wine's *obj = NULL discipline.
+    if ppv.is_null() {
+        return E_POINTER;
     }
+    // SAFETY: ppv validated non-null above; writable output slot per contract.
+    unsafe { *ppv = 0 };
+    if rclsid.is_null() || riid.is_null() {
+        return E_POINTER;
+    }
+
+    // pvReserved must be NULL for the non-server form of this API.
+    if pv_reserved != 0 {
+        return E_INVALIDARG;
+    }
+
+    // SAFETY: rclsid validated non-null above; 16-byte GUID buffer per contract.
     let clsid = match unsafe { read_guid(rclsid) } {
         Some(g) => g,
-        None => return E_INVALIDARG,
+        None => return E_POINTER, // unreachable — rclsid non-null checked above
     };
+
+    // 1. In-memory registered factories (CoRegisterClassObject).
+    if let Some(factory) = unsafe { lookup_registered_factory(&clsid, dw_cls_context) } {
+        let mut out: *mut () = std::ptr::null_mut();
+        // SAFETY: factory is a live IClassFactory with a reference we own from
+        // lookup_registered_factory; out is a valid writable output slot.
+        let hr = unsafe { factory_query_interface(factory, riid, &mut out) };
+        // SAFETY: the reference taken by lookup_registered_factory is balanced by
+        // this release; the QI output (when S_OK) holds its own reference.
+        unsafe { com_release(factory) };
+        if hr == S_OK {
+            // SAFETY: ppv validated non-null above; out is the QI result.
+            unsafe { *ppv = out as usize };
+        }
+        eprintln!(
+            "weave/ole32: CoGetClassObject: CLSID {:02x?} → registered factory (hr={hr:#010x})",
+            clsid
+        );
+        return hr;
+    }
+
+    // 2. Well-known CLSIDs (CLSID_ShellLink).
+    if dw_cls_context & CLSCTX_INPROC_SERVER != 0 && clsid == CLSID_SHELL_LINK {
+        let mut out: *mut () = std::ptr::null_mut();
+        // SAFETY: shell_link_factory_ptr() is a process-lifetime singleton;
+        // out is a valid writable output slot. QI hands back the same pointer.
+        let hr = unsafe { factory_query_interface(shell_link_factory_ptr(), riid, &mut out) };
+        if hr == S_OK {
+            // SAFETY: ppv validated non-null above; out is the QI result.
+            unsafe { *ppv = out as usize };
+        }
+        eprintln!(
+            "weave/ole32: CoGetClassObject: CLSID_ShellLink → builtin factory (hr={hr:#010x})"
+        );
+        return hr;
+    }
+
+    // 3. Registry-based DLL lookup for INPROC_SERVER context.
+    if dw_cls_context & CLSCTX_INPROC_SERVER != 0 {
+        if let Some(hr) = unsafe { resolve_factory_from_registry_dll(&clsid, riid, ppv) } {
+            eprintln!(
+                "weave/ole32: CoGetClassObject: CLSID {:02x?} → registry DLL (hr={hr:#010x})",
+                clsid
+            );
+            return hr;
+        }
+    }
+
     eprintln!(
-        "weave/ole32: CoGetClassObject: CLSID {:02x?} (stub — REGDB_E_CLASSNOTREG)",
+        "weave/ole32: CoGetClassObject: CLSID {:02x?} (not found — REGDB_E_CLASSNOTREG)",
         clsid
     );
+
     REGDB_E_CLASSNOTREG
 }
 
@@ -2450,6 +2732,7 @@ pub unsafe extern "win64" fn ole_uibusy_w(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use weave_common::com::shell_link::IID_ISHELL_LINK_W;
 
     fn reset_com_state() {
         COM_INIT_COUNT.with(|c| c.set(0));
@@ -2963,6 +3246,360 @@ mod tests {
     fn co_revoke_class_object_invalid_cookie_returns_error() {
         let hr = unsafe { co_revoke_class_object(9999) };
         assert_eq!(hr, E_INVALIDARG);
+    }
+
+    // ── CoGetClassObject tests ───────────────────────────────────────────
+
+    #[test]
+    fn co_get_class_object_shell_link_returns_factory() {
+        // Well-known CLSID_ShellLink → builtin IClassFactory singleton.
+        let mut factory: usize = 0xDEAD;
+        let hr = unsafe {
+            co_get_class_object(
+                CLSID_SHELL_LINK.as_ptr(),
+                CLSCTX_INPROC_SERVER,
+                0,
+                IID_ICLASSFACTORY_BYTES.as_ptr(),
+                &mut factory,
+            )
+        };
+        assert_eq!(hr, S_OK);
+        assert_ne!(factory, 0);
+
+        // The returned factory's QI for IClassFactory succeeds.
+        let mut qi_out: *mut () = std::ptr::null_mut();
+        let hr = unsafe {
+            factory_query_interface(
+                factory as *mut (),
+                IID_ICLASSFACTORY_BYTES.as_ptr(),
+                &mut qi_out,
+            )
+        };
+        assert_eq!(hr, S_OK);
+        assert_eq!(qi_out as usize, factory);
+    }
+
+    #[test]
+    fn co_get_class_object_shell_link_works_with_clsctx_all() {
+        let mut factory: usize = 0;
+        let hr = unsafe {
+            co_get_class_object(
+                CLSID_SHELL_LINK.as_ptr(),
+                CLSCTX_ALL,
+                0,
+                IID_ICLASSFACTORY_BYTES.as_ptr(),
+                &mut factory,
+            )
+        };
+        assert_eq!(hr, S_OK);
+        assert_ne!(factory, 0);
+    }
+
+    #[test]
+    fn co_get_class_object_shell_link_factory_create_instance() {
+        let mut factory: usize = 0;
+        let hr = unsafe {
+            co_get_class_object(
+                CLSID_SHELL_LINK.as_ptr(),
+                CLSCTX_INPROC_SERVER,
+                0,
+                IID_ICLASSFACTORY_BYTES.as_ptr(),
+                &mut factory,
+            )
+        };
+        assert_eq!(hr, S_OK);
+
+        // IClassFactory::CreateInstance → a live IShellLink object.
+        let mut obj: *mut () = std::ptr::null_mut();
+        let hr = unsafe {
+            factory_create_instance(
+                factory as *mut (),
+                std::ptr::null_mut(),
+                IID_ISHELL_LINK_W.as_ptr(),
+                &mut obj,
+            )
+        };
+        assert_eq!(hr, S_OK);
+        assert!(!obj.is_null());
+    }
+
+    #[test]
+    fn co_get_class_object_shell_link_no_aggregation() {
+        let mut factory: usize = 0;
+        let hr = unsafe {
+            co_get_class_object(
+                CLSID_SHELL_LINK.as_ptr(),
+                CLSCTX_INPROC_SERVER,
+                0,
+                IID_ICLASSFACTORY_BYTES.as_ptr(),
+                &mut factory,
+            )
+        };
+        assert_eq!(hr, S_OK);
+
+        // ShellLink is non-aggregatable: non-NULL pUnkOuter → CLASS_E_NOAGGREGATION.
+        let mut obj: *mut () = std::ptr::null_mut();
+        let hr = unsafe {
+            factory_create_instance(
+                factory as *mut (),
+                std::ptr::dangling_mut::<()>(),
+                IID_ISHELL_LINK_W.as_ptr(),
+                &mut obj,
+            )
+        };
+        assert_eq!(hr, CLASS_E_NOAGGREGATION);
+        assert!(obj.is_null());
+    }
+
+    #[test]
+    fn co_get_class_object_registered_factory() {
+        reset_factory_table();
+        let factory = make_test_factory();
+        let mut cookie: u32 = 0;
+        let hr = unsafe {
+            co_register_class_object(
+                CLSID_TEST_A.as_ptr(),
+                factory as *mut (),
+                CLSCTX_INPROC_SERVER,
+                0,
+                &mut cookie,
+            )
+        };
+        assert_eq!(hr, S_OK);
+
+        // CoGetClassObject returns the very same registered factory.
+        let mut got: usize = 0;
+        let hr = unsafe {
+            co_get_class_object(
+                CLSID_TEST_A.as_ptr(),
+                CLSCTX_INPROC_SERVER,
+                0,
+                IID_ICLASSFACTORY_BYTES.as_ptr(),
+                &mut got,
+            )
+        };
+        assert_eq!(hr, S_OK);
+        assert_eq!(got, factory as usize);
+
+        // Release the reference CoGetClassObject handed us.
+        unsafe { com_release(got as *mut ()) };
+        unsafe { co_revoke_class_object(cookie) };
+    }
+
+    #[test]
+    fn co_get_class_object_registered_factory_roundtrip() {
+        reset_factory_table();
+        let factory = make_test_factory();
+        let mut cookie: u32 = 0;
+        unsafe {
+            co_register_class_object(
+                CLSID_TEST_B.as_ptr(),
+                factory as *mut (),
+                CLSCTX_INPROC_SERVER,
+                0,
+                &mut cookie,
+            )
+        };
+
+        let mut got: usize = 0;
+        let hr = unsafe {
+            co_get_class_object(
+                CLSID_TEST_B.as_ptr(),
+                CLSCTX_INPROC_SERVER,
+                0,
+                IID_ICLASSFACTORY_BYTES.as_ptr(),
+                &mut got,
+            )
+        };
+        assert_eq!(hr, S_OK);
+
+        // Use the returned factory's CreateInstance — full roundtrip.
+        let mut obj: *mut () = std::ptr::null_mut();
+        let hr = unsafe {
+            factory_create_instance(
+                got as *mut (),
+                std::ptr::null_mut(),
+                IID_IUNKNOWN_BYTES.as_ptr(),
+                &mut obj,
+            )
+        };
+        assert_eq!(hr, S_OK);
+        assert!(!obj.is_null());
+        unsafe {
+            com_release(obj);
+            com_release(got as *mut ());
+            co_revoke_class_object(cookie);
+        }
+    }
+
+    #[test]
+    fn co_get_class_object_qi_for_iunknown_succeeds() {
+        reset_factory_table();
+        let factory = make_test_factory();
+        let mut cookie: u32 = 0;
+        unsafe {
+            co_register_class_object(
+                CLSID_TEST_A.as_ptr(),
+                factory as *mut (),
+                CLSCTX_INPROC_SERVER,
+                0,
+                &mut cookie,
+            )
+        };
+        let mut got: usize = 0;
+        let hr = unsafe {
+            co_get_class_object(
+                CLSID_TEST_A.as_ptr(),
+                CLSCTX_INPROC_SERVER,
+                0,
+                IID_IUNKNOWN_BYTES.as_ptr(),
+                &mut got,
+            )
+        };
+        assert_eq!(hr, S_OK);
+        assert_eq!(got, factory as usize);
+        unsafe { com_release(got as *mut ()) };
+        unsafe { co_revoke_class_object(cookie) };
+    }
+
+    #[test]
+    fn co_get_class_object_qi_for_unknown_interface_fails() {
+        reset_factory_table();
+        let factory = make_test_factory();
+        let mut cookie: u32 = 0;
+        unsafe {
+            co_register_class_object(
+                CLSID_TEST_B.as_ptr(),
+                factory as *mut (),
+                CLSCTX_INPROC_SERVER,
+                0,
+                &mut cookie,
+            )
+        };
+        let bogus: [u8; 16] = [0xDD; 16];
+        let mut got: usize = 0xDEAD;
+        let hr = unsafe {
+            co_get_class_object(
+                CLSID_TEST_B.as_ptr(),
+                CLSCTX_INPROC_SERVER,
+                0,
+                bogus.as_ptr(),
+                &mut got,
+            )
+        };
+        assert_eq!(hr, E_NOINTERFACE);
+        assert_eq!(got, 0);
+        unsafe { co_revoke_class_object(cookie) };
+    }
+
+    #[test]
+    fn co_get_class_object_unknown_clsid_returns_classnotreg() {
+        reset_factory_table();
+        let mut got: usize = 0xDEAD;
+        let hr = unsafe {
+            co_get_class_object(
+                CLSID_TEST_C.as_ptr(),
+                CLSCTX_INPROC_SERVER,
+                0,
+                IID_ICLASSFACTORY_BYTES.as_ptr(),
+                &mut got,
+            )
+        };
+        assert_eq!(hr, REGDB_E_CLASSNOTREG);
+        assert_eq!(got, 0);
+    }
+
+    #[test]
+    fn co_get_class_object_context_mismatch_returns_classnotreg() {
+        reset_factory_table();
+        let factory = make_test_factory();
+        let mut cookie: u32 = 0;
+        unsafe {
+            co_register_class_object(
+                CLSID_TEST_C.as_ptr(),
+                factory as *mut (),
+                CLSCTX_INPROC_SERVER,
+                0,
+                &mut cookie,
+            )
+        };
+        // Registered with INPROC_SERVER; request LOCAL_SERVER → no context
+        // overlap → REGDB_E_CLASSNOTREG (Wine's clscontext & cur->clscontext).
+        let mut got: usize = 0xDEAD;
+        let hr = unsafe {
+            co_get_class_object(
+                CLSID_TEST_C.as_ptr(),
+                CLSCTX_LOCAL_SERVER,
+                0,
+                IID_ICLASSFACTORY_BYTES.as_ptr(),
+                &mut got,
+            )
+        };
+        assert_eq!(hr, REGDB_E_CLASSNOTREG);
+        assert_eq!(got, 0);
+        unsafe { co_revoke_class_object(cookie) };
+    }
+
+    #[test]
+    fn co_get_class_object_null_ppv_returns_epointer() {
+        let hr = unsafe {
+            co_get_class_object(
+                CLSID_TEST_A.as_ptr(),
+                CLSCTX_INPROC_SERVER,
+                0,
+                IID_ICLASSFACTORY_BYTES.as_ptr(),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(hr, E_POINTER);
+    }
+
+    #[test]
+    fn co_get_class_object_null_rclsid_returns_epointer() {
+        let mut got: usize = 0xDEAD;
+        let hr = unsafe {
+            co_get_class_object(
+                std::ptr::null(),
+                CLSCTX_INPROC_SERVER,
+                0,
+                IID_ICLASSFACTORY_BYTES.as_ptr(),
+                &mut got,
+            )
+        };
+        assert_eq!(hr, E_POINTER);
+        assert_eq!(got, 0); // *ppv nulled on the E_POINTER path
+    }
+
+    #[test]
+    fn co_get_class_object_null_riid_returns_epointer() {
+        let mut got: usize = 0xDEAD;
+        let hr = unsafe {
+            co_get_class_object(
+                CLSID_TEST_A.as_ptr(),
+                CLSCTX_INPROC_SERVER,
+                0,
+                std::ptr::null(),
+                &mut got,
+            )
+        };
+        assert_eq!(hr, E_POINTER);
+        assert_eq!(got, 0);
+    }
+
+    #[test]
+    fn co_get_class_object_nonnull_pv_reserved_returns_invalidarg() {
+        let mut got: usize = 0xDEAD;
+        let hr = unsafe {
+            co_get_class_object(
+                CLSID_TEST_A.as_ptr(),
+                CLSCTX_INPROC_SERVER,
+                0x1234, // non-NULL pvReserved
+                IID_ICLASSFACTORY_BYTES.as_ptr(),
+                &mut got,
+            )
+        };
+        assert_eq!(hr, E_INVALIDARG);
+        assert_eq!(got, 0);
     }
 
     // ── A3d: CoTaskMem / GUID / CoGetMalloc tests ──────────────────────
