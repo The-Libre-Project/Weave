@@ -2426,6 +2426,18 @@ mod tests {
         }
     }
 
+    /// Guards the single global `WaveOutSession` / `WAVE_OUT_HANDLE`. Tests run
+    /// in parallel and share one device; without the lock one test's
+    /// `wave_out_close` can invalidate the session mid-lifecycle of another
+    /// test, making `wave_out_write` spuriously return `MMSYSERR_INVALHANDLE`.
+    static WAVEOUT_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Acquire the waveOut test guard for the duration of a test that opens
+    /// and/or closes the shared device.
+    fn waveout_guard() -> std::sync::MutexGuard<'static, ()> {
+        WAVEOUT_TEST_LOCK.lock().unwrap()
+    }
+
     fn invalid_format() -> super::WAVEFORMATEX {
         let mut f = pcm_format();
         f.wFormatTag = 0x0011; // WAVE_FORMAT_GSM610 — unsupported non-PCM
@@ -2434,6 +2446,7 @@ mod tests {
 
     #[test]
     fn wave_out_open_validation_errors() {
+        let _guard = waveout_guard();
         unsafe {
             let mut hwo: usize = 0;
 
@@ -2490,6 +2503,7 @@ mod tests {
 
     #[test]
     fn wave_out_open_query_validates_without_opening() {
+        let _guard = waveout_guard();
         unsafe {
             // WAVE_FORMAT_QUERY with a valid PCM format → MMSYSERR_NOERROR.
             let mut sentinel: usize = 0xDEAD_F00D;
@@ -2538,6 +2552,7 @@ mod tests {
 
     #[test]
     fn wave_out_lifecycle_roundtrip() {
+        let _guard = waveout_guard();
         unsafe {
             // Open with WAVE_MAPPER + PCM → MMSYSERR_NOERROR, valid handle.
             let mut hwo: usize = 0;
@@ -2662,6 +2677,7 @@ mod tests {
 
     #[test]
     fn wave_out_reset_open_device_returns_noerror() {
+        let _guard = waveout_guard();
         unsafe {
             let mut hwo: usize = 0;
             assert_eq!(
@@ -2675,6 +2691,7 @@ mod tests {
 
     #[test]
     fn wave_out_reset_invalid_handle_returns_invalhandle() {
+        let _guard = waveout_guard();
         assert_eq!(
             super::wave_out_reset(0xDEAD_BEEF),
             super::MMSYSERR_INVALHANDLE
@@ -2684,6 +2701,7 @@ mod tests {
 
     #[test]
     fn wave_out_write_works_after_reset() {
+        let _guard = waveout_guard();
         unsafe {
             let mut hwo: usize = 0;
             assert_eq!(
@@ -2731,6 +2749,7 @@ mod tests {
 
     #[test]
     fn wave_out_prepare_unprepare_contract() {
+        let _guard = waveout_guard();
         unsafe {
             let mut hwo: usize = 0;
             assert_eq!(

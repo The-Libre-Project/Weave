@@ -42,20 +42,13 @@ DOCKER_CMD="MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' docker run --rm --platfor
 set -e
 echo \"=== [1/5] cargo build ===\"
 apt-get update -qq >/dev/null 2>&1
-apt-get install -y -qq fonts-dejavu-core libpipewire-0.3-dev libclang-dev xvfb xdotool cmake pipewire pipewire-pulse wireplumber >/dev/null 2>&1
+apt-get install -y -qq fonts-dejavu-core libpipewire-0.3-dev libclang-dev xvfb xdotool cmake >/dev/null 2>&1
 rustup component add clippy rustfmt 2>&1
 cargo build --features weave-winmm/pipewire-audio,weave-mmdevapi/pipewire-audio 2>&1
 echo \"  Build OK.\"
 echo \"\"
 echo \"=== [2/5] cargo test (core crates, skip weave-cli display gates) ===\"
 Xvfb :99 -screen 0 1280x720x24 & sleep 1
-find /usr/share/pipewire -name '*.conf' -exec chmod 644 {} \; 2>/dev/null || true
-export XDG_RUNTIME_DIR=/tmp/weave-pw-runtime
-mkdir -p $XDG_RUNTIME_DIR
-pipewire > /tmp/pipewire.log 2>&1 &
-sleep 2
-wireplumber > /tmp/wireplumber.log 2>&1 &
-sleep 2
 cargo test --workspace --exclude weave-cli --exclude weave-sandbox \
   --features weave-winmm/pipewire-audio,weave-mmdevapi/pipewire-audio \
   -- \
