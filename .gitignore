@@ -103,6 +103,7 @@ docs/*
 !docs/ERA3-ROADMAP.md
 !docs/UNSAFE-AUDIT.md
 !docs/SHIM-CONTRACT.md
+!docs/VALIDATION-TIERS.md
 !docs/published-papers/
 docs/published-papers/*
 !docs/published-papers/*.md
