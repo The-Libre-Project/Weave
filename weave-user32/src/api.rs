@@ -391,7 +391,14 @@ pub unsafe extern "win64" fn register_class_w(lp_wnd_class: *const WndClassW) ->
         },
     );
     // Return a non-zero ATOM — use a hash of the name for uniqueness.
-    name_to_atom(&name)
+    // Register the atom→name mapping so CreateWindowExW can resolve the atom
+    // back to the class (same contract as register_class_ex_w).
+    // Wine ref: dlls/user32/class.c — RegisterClassW and RegisterClassExW both
+    // allocate an ATOM via NtUserRegisterClassExWOW; the returned ATOM is passed
+    // back to CreateWindowExW as lpClassName and resolved via NtUserGetAtomName.
+    let atom = name_to_atom(&name);
+    class::register_atom(atom, name.clone());
+    atom
 }
 
 /// RegisterClassExW: extended version with cbSize + hIconSm fields.
@@ -8295,11 +8302,6 @@ pub unsafe extern "win64" fn get_class_info_w(
     };
 
     let entry = class::find(&name);
-    eprintln!(
-        "weave/user32: GetClassInfoW({:?}) → {}",
-        name,
-        if entry.is_some() { "TRUE" } else { "FALSE" }
-    );
     let entry = match entry {
         Some(e) => e,
         None => return 0,
