@@ -9642,6 +9642,13 @@ fn waveout_gate1_smoke() {
 ///   A2: `PHASE: create_window_first` appears in stderr (player window visible).
 ///   A3: `PHASE: waveout_opened` appears in stderr (audio playback via waveOut→PipeWire).
 ///
+/// App-depth assertions (see `docs/plans/APP-DEPTH-VERIFICATION.md`):
+///   A4-A6: IAT ApiCall dispatch lines (--trace=api) for the functions that
+///   OpenMPT's startup/window-creation path genuinely dispatches.  The trace
+///   line format is `[ts] T<tid> <DLL>.<func> -> <addr> [dur]`; the `<DLL>.<func>`
+///   (dot) form is unique to dispatch — the IAT patch lines use `<DLL>.dll!<func>`
+///   and must not be mistaken for a call.  The assertion needle is the dotted form.
+///
 #[test]
 fn pp3_openmpt_probe_gate() {
     if !cfg!(target_os = "linux") {
@@ -9662,7 +9669,8 @@ fn pp3_openmpt_probe_gate() {
     let start = std::time::Instant::now();
     let mut child = std::process::Command::new(weave_bin)
         .arg("--no-sandbox")
-        .arg("--trace=stub,phase,msg,fault")
+        .arg("--trace=stub,phase,msg,api,fault")
+        .env("WEAVE_TRACE_RING_SIZE", "1000000")
         .arg(&fixture)
         .arg("-noCrashHandler")
         .stdout(std::process::Stdio::piped())
@@ -9735,6 +9743,86 @@ fn pp3_openmpt_probe_gate() {
     if !stderr.contains("PHASE: waveout_opened") {
         eprintln!("PP3 A3: waveOut not opened (expected — CMemoryException during module init)");
     }
+
+    // ── App-depth dispatch assertions ──────────────────────────────────────
+    // Evidence: `--trace=api` captures an IAT ApiCall event per dispatched
+    // import (weave-core/src/iat.rs `trace_slot_log_by_va`), printed by the
+    // console subscriber as `[ts] T<tid> <DLL>.<func> -> <addr> [dur]`.  The
+    // dotted `<DLL>.<func>` needle is unique to dispatch lines: the IAT patch
+    // lines printed at load time use `<DLL>.dll!<func>` and must not count.
+    //
+    // These needles were established empirically by running OpenMPT.exe under
+    // Weave with `--trace=api` and grepping stderr.  They are deterministic:
+    // OpenMPT's startup path ends in the same ExitProcess/crash point every
+    // run (CMemoryException during InitInstance — see A3), so the dispatch set
+    // is stable across runs.
+    let dispatch_count = |needle: &str| stderr.lines().filter(|l| l.contains(needle)).count();
+
+    // A4: RegOpenKeyExW — dispatched 3× during startup (settings/hardware init).
+    //   Observed: `[ 0.031] T1 ADVAPI32.RegOpenKeyExW -> 0x... [0ns]`
+    assert!(
+        dispatch_count("ADVAPI32.RegOpenKeyExW") >= 1,
+        "PP3 A4 FAIL: ADVAPI32.RegOpenKeyExW not dispatched during startup (M29/M34).\nstderr: {stderr}"
+    );
+
+    // A5: SHGetFolderPathW — dispatched 1× during startup (settings dir lookup).
+    //   Observed: `[ 0.022] T1 SHELL32.SHGetFolderPathW -> 0x... [0ns]`
+    assert!(
+        dispatch_count("SHELL32.SHGetFolderPathW") >= 1,
+        "PP3 A5 FAIL: SHELL32.SHGetFolderPathW not dispatched during startup (M32).\nstderr: {stderr}"
+    );
+
+    // A6: SetWindowsHookExW — dispatched 1-2× during startup (keyboard hook).
+    //   Observed: `[ 0.051] T1 USER32.SetWindowsHookExW -> 0x... [0ns]`
+    assert!(
+        dispatch_count("USER32.SetWindowsHookExW") >= 1,
+        "PP3 A6 FAIL: USER32.SetWindowsHookExW not dispatched during startup (M58).\nstderr: {stderr}"
+    );
+
+    // ── NOT-REACHED / CAREFUL classification (imported, not dispatched) ────
+    // These are documented here per `docs/plans/APP-DEPTH-VERIFICATION.md`
+    // (written-justification path).  None are asserted — a `0` is expected and
+    // would indicate a regression only if a future code change makes the
+    // startup path reach them (they'd then need an assertion).
+    //
+    //   FoldStringW (M27)          NOT-REACHED — locale string folding; OpenMPT
+    //     reaches it via per-locale UI formatting, not the startup path that
+    //     runs under the gate (init → window → crash before message loop).
+    //   TrackMouseEvent (M28)      NOT-REACHED — only fires on mouse hover
+    //     tracking (WM_MOUSEMOVE), i.e. real user interaction, absent here.
+    //   RegCreateKeyExW (M34)      NOT-REACHED — registry key CREATION happens
+    //     on settings save / first-run setup; startup only opens+queries.
+    //   SHGetFileInfoW (M38)       NOT-REACHED — file/icon browsing (dialogs,
+    //     plugin lists); not on the headless startup path.
+    //   waveOutOpen/Write (M39)    NOT-REACHED — audio device open/playback
+    //     needs a fully-initialized app; the run dies during InitInstance
+    //     (CMemoryException) before audio setup. Same gate corpus as A3.
+    //   RegQueryValueExW (M40)     NOT-REACHED — startup opens keys but the
+    //     value reads it performs go through RegQueryValueExA; the -W variant
+    //     is only used on paths not reached here.
+    //   DebugBreak (M45)           CAREFUL — fires only when the app hits a
+    //     breakpoint (assert/fault path). Not reached = good; if it ever
+    //     dispatches it signals a debug-triggering fault, so never assert it.
+    //   TerminateThread (M49)      CAREFUL — fires only when a thread is being
+    //     force-killed. Not reached in this run; a dispatch would signal a
+    //     thread-kill event worth recording, not something to assert.
+    //   ReadConsoleW (M55)         NOT-REACHED — console input; OpenMPT is a GUI
+    //     app and the gate never feeds it console input.
+    //   waveOutPrepareHeader (M57) NOT-REACHED — buffer prep follows
+    //     waveOutOpen, unreached for the same A3 reason.
+    //   waveOutReset (M59)         NOT-REACHED — playback reset follows
+    //     waveOutOpen, unreached for the same A3 reason.
+    //   RegisterDragDrop (M60)     NOT-REACHED — OLE drop-target registration
+    //     happens on the specific window that accepts drops; the startup
+    //     windows under the gate never register one (DoDragDrop M61 likewise
+    //     requires real drag input, per its own gate doc).
+    //
+    // Milestone→function→M-number mapping (verified in this run):
+    //   M27 FoldStringW, M28 TrackMouseEvent, M29 RegOpenKeyExW, M32
+    //   SHGetFolderPathW, M34 RegCreateKeyExW, M38 SHGetFileInfoW, M39
+    //   waveOutOpen/waveOutWrite, M40 RegQueryValueExW, M45 DebugBreak, M49
+    //   TerminateThread, M55 ReadConsoleW, M57 waveOutPrepareHeader, M58
+    //   SetWindowsHookExW, M59 waveOutReset, M60 RegisterDragDrop.
 }
 
 /// M27 — FoldStringW gate test.

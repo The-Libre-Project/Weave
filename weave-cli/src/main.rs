@@ -1295,6 +1295,24 @@ fn main() {
 
     let trace_enabled = filter.is_some();
     if let Some(f) = filter.as_ref() {
+        // When the filter accepts ApiCall events, force-enable the IAT tracer
+        // so per-slot trampolines actually emit them (--trace=api / --trace=all).
+        // Without this, the console/file subscribers filter on ApiCall but no
+        // such events are ever produced.
+        let wants_api = f.accepts(&weave_trace::TraceEvent {
+            timestamp: std::time::Instant::now(),
+            thread_id: 0,
+            kind: weave_trace::EventKind::ApiCall {
+                dll: String::new(),
+                function: String::new(),
+                args: vec![],
+                result: weave_trace::ApiResult::Void,
+                duration: std::time::Duration::ZERO,
+            },
+        });
+        if wants_api {
+            iat::force_enable_tracer();
+        }
         // Ensure the global ring buffer is initialized
         weave_trace::emit(weave_trace::TraceEvent {
             timestamp: std::time::Instant::now(),

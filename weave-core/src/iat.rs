@@ -99,9 +99,13 @@ impl SlabAlloc {
     /// 16-byte boundary (cleaner disassembly, no functional requirement).
     const STUB_STRIDE: usize = 176;
 
-    /// Number of pages to allocate for the exec slab.  4 pages × 4 KiB =
-    /// 16 KiB, which holds 102 stubs — more than enough for NPP's ~83 imports.
-    const SLAB_PAGES: usize = 4;
+    /// Number of pages to allocate for the exec slab.  Each stub occupies
+    /// 176 bytes, so a page holds ~23 stubs.  OpenMPT imports 801 functions
+    /// across 25 DLLs and ships real binaries with 500+ imports, so a fixed
+    /// 4-page slab (~93 stubs) silently drops tracing for every later DLL.
+    /// 512 pages = 2 MiB = ~11.9k stubs — enough headroom for any realistic
+    /// import table.  Only allocated when the IAT tracer is enabled.
+    const SLAB_PAGES: usize = 512;
 
     /// Try to create a new slab.  Returns `None` if `mmap` fails.
     fn try_new() -> Option<Self> {
