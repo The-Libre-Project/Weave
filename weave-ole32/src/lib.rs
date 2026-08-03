@@ -5617,6 +5617,30 @@ mod tests {
     }
 
     #[test]
+    fn do_drag_drop_failed_query_continue_cancels() {
+        // Any failed QueryContinueDrag result must terminate the drag safely
+        // and clear the negotiated effect, even when no target is present.
+        let source = make_test_drop_source(vec![0x8000_4005]);
+        let mut effect = DROPEFFECT_COPY;
+
+        let hr = unsafe {
+            do_drag_drop_with_input(
+                source as *mut u8,
+                source as *mut u8,
+                DROPEFFECT_COPY,
+                &mut effect,
+                input_seq(vec![tick(POINTL { x: 0, y: 0 }, 0)]),
+            )
+        };
+
+        assert_eq!(hr, DRAGDROP_S_CANCEL as i32);
+        assert_eq!(effect, DROPEFFECT_NONE);
+        assert_eq!(unsafe { (*source).query_args.len() }, 1);
+        assert!(unsafe { (*source).feedback_effects.is_empty() });
+        unsafe { com_release(source as *mut ()) };
+    }
+
+    #[test]
     fn do_drag_drop_enter_then_over_order() {
         let target = make_recording_drop_target(DROPEFFECT_COPY);
         assert_eq!(
