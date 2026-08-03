@@ -5736,4 +5736,13 @@ mod tests {
         unsafe { com_release(target as *mut ()) };
         unsafe { com_release(source as *mut ()) };
     }
+
+    #[test]
+    fn resolver_exposes_do_drag_drop_for_ole32_and_combase() {
+        let ole32 = resolve("ole32.dll", "DoDragDrop");
+        let combase = resolve("combase.dll", "DoDragDrop");
+        assert!(ole32.is_some());
+        assert_eq!(ole32, combase);
+        assert!(resolve("user32.dll", "DoDragDrop").is_none());
+    }
 }
