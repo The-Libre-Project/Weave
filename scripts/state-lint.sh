@@ -92,7 +92,15 @@ else
   any_failed=1
 fi
 
-# ── Check 3: git note ci: field on src commits ────────────────────────────
+# Check 3: canonical status registry
+if ruby scripts/status-check.rb; then
+  echo "PASS" >&2
+else
+  echo "FAIL: canonical status registry is invalid" >&2
+  any_failed=1
+fi
+
+# ── Check 4: git note ci: field on src commits ────────────────────────────
 
 parent_count=$(git log -1 --format=%p HEAD | wc -w)
 if [ "$parent_count" -gt 1 ]; then
@@ -118,7 +126,7 @@ else
   fi
 fi
 
-# ── Check 4: CI-FAIL-LADDER size ──────────────────────────────────────────
+# ── Check 5: CI-FAIL-LADDER size ──────────────────────────────────────────
 
 ladder_lines=$(wc -l < CI-FAIL-LADDER.md 2>/dev/null || echo 0)
 if [ "$ladder_lines" -gt 800 ]; then

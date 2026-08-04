@@ -10,7 +10,7 @@
 #   make test       — run full test suite in a Linux Docker container
 #   make ci         — build + lint + full test suite
 
-.PHONY: build lint test test-gate test-unit ci state-lint fixture-wget-probe coverage-gauge hooks backfill-notes
+.PHONY: build lint test test-gate test-unit ci state-lint fixture-wget-probe coverage-gauge status-check status-render hooks backfill-notes
 
 # ── Build ──────────────────────────────────────────────────────────────────────
 
@@ -74,6 +74,14 @@ fixture-wget-probe:
 coverage-gauge:
 	@bash scripts/coverage-gauge.sh
 
+# ── Canonical status registry ───────────────────────────────────────────────
+
+status-check:
+	@ruby scripts/status-check.rb
+
+status-render:
+	@ruby scripts/status-render.rb
+
 # ── Git hooks (auto git-notes on commit + sync on push) ─────────────────────
 
 hooks:
@@ -87,4 +95,4 @@ backfill-notes:
 state-lint:
 	@bash scripts/state-lint.sh
 
-ci: build lint test
+ci: status-check build lint test

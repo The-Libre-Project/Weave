@@ -40,9 +40,9 @@ This is not a claim that Weave will ever support everything Wine supports. It wi
 Weave is early-stage and experimental. The wedge is single-binary native Win32 desktop apps and SDL-era games that Wine handles poorly or insecurely, with sandboxing as the differentiator.
 
 - A Rust PE loader and ntdll syscall gateway work end-to-end on the supported corpus.
-- **~1,870 Win32 exports are registered across 44 crates** per the [SHIM-CONTRACT](docs/SHIM-CONTRACT.md) (Wine-referenced behavior, non-panic body, exercised by a milestone gate). The rest are Phase A stubs: present in the resolver, returning sentinels, awaiting implementation. This staging is deliberate, not a sign of incompleteness; see the [architecture paper](docs/published-papers/ARCHITECTURE.md) for why.
+- **2,506 Win32 exports are registered across the resolver surface; 214 meet the current milestone-qualified implementation gauge**. See the [canonical status registry](docs/status.yaml) for the definition, date, weighted and unweighted values, and known limitations. The rest are Phase A stubs or draft implementations: present in the resolver, returning sentinels, awaiting implementation. This staging is deliberate; the gauge is not application compatibility coverage.
 - Every app runs in an **out-of-process sandbox by default** — fork + seccomp-BPF syscall filter + IPC over Unix domain sockets. The guest process has no direct filesystem or syscall access. See the [sandbox architecture doc](docs/architecture/sandbox.md).
-- The supported-app list is short and per-release-tier. Green end-to-end CI gates today: **NXEngine-evo** (SDL2 game), **SDL2 testsprite2**, **Notepad++**, **7-Zip**, **IrfanView**, and **Q-Dir**. Apps not on the list are not supported.
+- The supported-app list is short and workflow-specific. Current application and capability status, including work in progress and preservation targets, is maintained in the [canonical status registry](docs/status.yaml). Apps and workflows not listed there are not supported claims.
 
 **Real-desktop validation** (Fedora 41, GNOME Wayland, AMD RX 6700 XT, 2026-06-13):
 
