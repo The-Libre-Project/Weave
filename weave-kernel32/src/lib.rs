@@ -25235,6 +25235,9 @@ mod tests {
         std::sync::atomic::AtomicU32::new(0);
 
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    static SUSPENDED_THREAD_STARTS_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     unsafe extern "win64" fn suspended_thread_probe(_parameter: *mut u8) -> u32 {
         SUSPENDED_THREAD_STARTS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         0
@@ -25243,6 +25246,7 @@ mod tests {
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     #[test]
     fn create_suspended_thread_waits_for_resume() {
+        let _test_lock = SUSPENDED_THREAD_STARTS_TEST_LOCK.lock().unwrap();
         SUSPENDED_THREAD_STARTS.store(0, std::sync::atomic::Ordering::SeqCst);
         let handle = unsafe {
             create_thread(
@@ -25280,6 +25284,7 @@ mod tests {
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     #[test]
     fn suspend_thread_returns_previous_count_and_resume_releases_in_order() {
+        let _test_lock = SUSPENDED_THREAD_STARTS_TEST_LOCK.lock().unwrap();
         SUSPENDED_THREAD_STARTS.store(0, std::sync::atomic::Ordering::SeqCst);
         let handle = unsafe {
             create_thread(
