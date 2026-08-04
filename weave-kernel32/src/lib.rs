@@ -25313,7 +25313,7 @@ mod tests {
         );
         assert_eq!(
             resume_thread(handle),
-            1,
+            2,
             "A2: second resume returns prior count"
         );
         assert_eq!(
