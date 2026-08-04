@@ -112,9 +112,24 @@ const FILE_MAPPING_OFFSET: usize = 0x0005_0000;
 #[allow(clippy::type_complexity)]
 static FILE_MAPPINGS: std::sync::OnceLock<Mutex<Vec<Option<(usize, usize)>>>> =
     std::sync::OnceLock::new();
+static FILE_MAPPING_NAMES: OnceLock<Mutex<HashMap<String, usize>>> = OnceLock::new();
 
 fn file_mappings() -> &'static Mutex<Vec<Option<(usize, usize)>>> {
     FILE_MAPPINGS.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+fn file_mapping_names() -> &'static Mutex<HashMap<String, usize>> {
+    FILE_MAPPING_NAMES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+unsafe fn record_file_mapping_name(handle: usize, name: *const u16) {
+    if name.is_null() {
+        return;
+    }
+    let key = read_cstr_w(name).to_lowercase();
+    if let Ok(mut names) = file_mapping_names().lock() {
+        names.insert(key, handle);
+    }
 }
 
 type FileMappingsGuard<'a> = std::sync::MutexGuard<'a, Vec<Option<(usize, usize)>>>;
@@ -5421,7 +5436,7 @@ pub unsafe extern "win64" fn create_file_mapping_w(
     fl_protect: u32,
     dw_maximum_size_high: u32,
     dw_maximum_size_low: u32,
-    _lp_name: *const u16,
+    lp_name: *const u16,
 ) -> usize {
     const INVALID_HANDLE_VALUE: usize = usize::MAX;
     if h_file != INVALID_HANDLE_VALUE {
@@ -5466,6 +5481,7 @@ pub unsafe extern "win64" fn create_file_mapping_w(
             return 0;
         }
         let mapping_handle = alloc_mapping(addr as usize, map_size);
+        record_file_mapping_name(mapping_handle, lp_name);
         set_last_error(0);
         return mapping_handle;
     }
@@ -5487,7 +5503,9 @@ pub unsafe extern "win64" fn create_file_mapping_w(
     if addr == libc::MAP_FAILED {
         0
     } else {
-        alloc_mapping(addr as usize, size)
+        let mapping_handle = alloc_mapping(addr as usize, size);
+        record_file_mapping_name(mapping_handle, lp_name);
+        mapping_handle
     }
 }
 
@@ -8643,10 +8661,27 @@ pub extern "win64" fn set_file_apis_to_oem() {
 pub unsafe extern "win64" fn open_file_mapping_w(
     _dw_desired_access: u32,
     _b_inherit_handle: i32,
-    _lp_name: *const u16,
+    lp_name: *const u16,
 ) -> usize {
-    warn_once("OpenFileMappingW");
-    0 // NULL — not found
+    if lp_name.is_null() {
+        set_last_error(87); // ERROR_INVALID_PARAMETER
+        return 0;
+    }
+    let key = read_cstr_w(lp_name).to_lowercase();
+    let handle = file_mapping_names()
+        .lock()
+        .ok()
+        .and_then(|names| names.get(&key).copied());
+    match handle {
+        Some(handle) => {
+            set_last_error(0);
+            handle
+        }
+        None => {
+            set_last_error(file_io::ERROR_FILE_NOT_FOUND);
+            0
+        }
+    }
 }
 
 /// DosDateTimeToFileTime — convert a DOS date/time to a FILETIME.
@@ -26230,6 +26265,52 @@ mod tests {
                 std::ptr::null(),
             )
         }
+    }
+
+    fn make_named_mapping(name: &str) -> (usize, Vec<u16>) {
+        let name_w: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+        let handle =
+            unsafe { create_file_mapping_w(usize::MAX, 0, 0x04, 0, 4096, name_w.as_ptr()) };
+        (handle, name_w)
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn open_file_mapping_w_returns_existing_named_mapping() {
+        let (created, name) = make_named_mapping("weave-m63-named-mapping");
+        assert_ne!(created, 0, "CreateFileMappingW must return a handle");
+        let opened = unsafe { open_file_mapping_w(0x04, 0, name.as_ptr()) };
+        assert_ne!(opened, 0, "A1: existing named mapping must open");
+        let first = map_view_of_file(created, 0x04, 0, 0, 0);
+        let second = map_view_of_file(opened, 0x04, 0, 0, 0);
+        assert_ne!(first, 0, "created mapping must have a view");
+        assert_eq!(second, first, "A2: opened handle must share the view");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn open_file_mapping_w_is_case_insensitive() {
+        let (created, _) = make_named_mapping("Weave-M63-Case");
+        assert_ne!(created, 0);
+        let upper: Vec<u16> = "WEAVE-M63-CASE"
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        let opened = unsafe { open_file_mapping_w(0x04, 0, upper.as_ptr()) };
+        assert_ne!(opened, 0, "A2: mapping names are case-insensitive");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn open_file_mapping_w_unknown_name_returns_file_not_found() {
+        let name: Vec<u16> = "weave-m63-missing"
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        set_last_error(0);
+        let opened = unsafe { open_file_mapping_w(0x04, 0, name.as_ptr()) };
+        assert_eq!(opened, 0, "A3: unknown mapping must return NULL");
+        assert_eq!(get_last_error(), file_io::ERROR_FILE_NOT_FOUND);
     }
 
     #[cfg(target_os = "linux")]
