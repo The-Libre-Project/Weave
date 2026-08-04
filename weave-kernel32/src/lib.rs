@@ -270,6 +270,12 @@ fn find_mapping_by_addr(view_addr: usize) -> Option<(usize, usize)> {
     None
 }
 
+/// Peek a mapping slot by handle without consuming it (for MapViewOfFile(Ex)).
+fn mapping_lookup<'a>(table: &'a FileMappingsGuard<'a>, handle: usize) -> Option<(usize, usize)> {
+    let index = handle.checked_sub(FILE_MAPPING_OFFSET)?;
+    table.get(index).copied().flatten()
+}
+
 // Windows limits null-terminated strings to 32,767 UTF-16 code units (MAX_PATH extended).
 // Scanning beyond this is almost certainly a caller bug; cap the loop to avoid runaway reads.
 const MAX_UTF16_LEN: usize = 32_768;
@@ -5497,22 +5503,22 @@ pub unsafe extern "win64" fn create_file_mapping_w(
 // to PAGE_WRITECOPY, FILE_MAP_WRITE to PAGE_READWRITE, FILE_MAP_EXECUTE to PAGE_EXECUTE_*.
 pub extern "win64" fn map_view_of_file(
     h_file_mapping_object: usize,
-    _dw_desired_access: u32,
-    _dw_file_offset_high: u32,
-    _dw_file_offset_low: u32,
-    _dw_number_of_bytes_to_map: usize,
+    dw_desired_access: u32,
+    dw_file_offset_high: u32,
+    dw_file_offset_low: u32,
+    dw_number_of_bytes_to_map: usize,
 ) -> usize {
-    // Peek at the mapping without consuming it (MapViewOfFile doesn't free the handle).
-    let table = match lock_file_mappings(file_mappings()) {
-        Some(g) => g,
-        None => return 0,
-    };
-    if let Some(index) = h_file_mapping_object.checked_sub(FILE_MAPPING_OFFSET) {
-        if let Some(Some((addr, _size))) = table.get(index) {
-            return *addr;
-        }
+    // Wine ref: dlls/kernelbase/memory.c:278 — thin wrapper over MapViewOfFileEx(addr=NULL).
+    unsafe {
+        map_view_of_file_ex(
+            h_file_mapping_object,
+            dw_desired_access,
+            dw_file_offset_high,
+            dw_file_offset_low,
+            dw_number_of_bytes_to_map,
+            std::ptr::null_mut(),
+        )
     }
-    0
 }
 
 /// UnmapViewOfFile: unmap a mapped view of a file.
@@ -20893,16 +20899,50 @@ pub unsafe extern "win64" fn flush_view_of_file(
 
 /// MapViewOfFileEx: map a view of a file mapping at a specific address.
 ///
-/// Phase A stub — returns NULL.
+/// Under Weave's model the mapping created by CreateFileMappingW IS the view
+/// (one mmap region per handle). `lp_base_address` NULL returns the mapping
+/// base — identical to MapViewOfFile, which delegates here. A non-NULL address
+/// equal to the mapping base is honored. Any other fixed address is not
+/// satisfiable (Weave does not relocate an existing mmap region), so it returns
+/// NULL with ERROR_INVALID_ADDRESS, matching Wine's NtMapViewOfSection failure
+/// path. An unknown handle returns NULL with ERROR_INVALID_HANDLE.
+///
+/// # Safety
+/// `lp_base_address` is compared as an integer but never dereferenced.
+// Wine ref: dlls/kernelbase/memory.c:288 — MapViewOfFileEx translates FILE_MAP_*
+// access to PAGE_* protect (FILE_MAP_COPY -> PAGE_WRITECOPY, FILE_MAP_WRITE ->
+// PAGE_READWRITE, FILE_MAP_READ -> PAGE_READONLY, else PAGE_NOACCESS; FILE_MAP_EXECUTE
+// ORs the EXECUTE bit) then calls NtMapViewOfSection(handle, proc, &addr, ...,
+// ViewShare, protect); on NT failure SetLastError(RtlNtStatusToDosError) and
+// returns NULL. Weave creates the region with its final protection at
+// CreateFileMappingW time, so the access flags select no new protection here.
 pub unsafe extern "win64" fn map_view_of_file_ex(
-    _h_file_mapping_object: usize,
+    h_file_mapping_object: usize,
     _dw_desired_access: u32,
     _dw_file_offset_high: u32,
     _dw_file_offset_low: u32,
     _dw_number_of_bytes_to_map: usize,
-    _lp_base_address: *mut u8,
+    lp_base_address: *mut u8,
 ) -> usize {
-    warn_once("MapViewOfFileEx");
+    let table = match lock_file_mappings(file_mappings()) {
+        Some(g) => g,
+        None => return 0,
+    };
+    let (base, _size) = match mapping_lookup(&table, h_file_mapping_object) {
+        Some((addr, size)) => (addr, size),
+        None => {
+            drop(table);
+            set_last_error(file_io::ERROR_INVALID_HANDLE);
+            return 0;
+        }
+    };
+    drop(table);
+    let requested = lp_base_address as usize;
+    if requested == 0 || requested == base {
+        set_last_error(0);
+        return base;
+    }
+    set_last_error(487); // ERROR_INVALID_ADDRESS
     0
 }
 
@@ -26173,5 +26213,86 @@ mod tests {
             WAIT_IO_COMPLETION
         );
         assert_eq!(CALLBACK_DATA.load(Ordering::SeqCst), 0x99);
+    }
+
+    // ── MapViewOfFileEx / MapViewOfFile ──────────────────────────────────────
+
+    /// Create an anonymous file mapping and return its handle.
+    fn make_anon_mapping(size: usize) -> usize {
+        // SAFETY: anonymous mapping, no guest pointers touched.
+        unsafe {
+            create_file_mapping_w(
+                usize::MAX, // INVALID_HANDLE_VALUE -> anonymous
+                0,          // lp_file_mapping_attributes ignored
+                0x04,       // PAGE_READWRITE
+                0,
+                size as u32,
+                std::ptr::null(),
+            )
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn map_view_of_file_ex_null_addr_returns_mapping_base() {
+        let handle = make_anon_mapping(4096);
+        assert_ne!(handle, 0, "CreateFileMappingW must return a handle");
+        let base = unsafe {
+            map_view_of_file_ex(
+                handle,
+                0x04 | 0x02, // FILE_MAP_READ | FILE_MAP_WRITE
+                0,
+                0,
+                0,
+                std::ptr::null_mut(),
+            )
+        };
+        assert_ne!(
+            base, 0,
+            "A1: MapViewOfFileEx(NULL) must return non-zero base"
+        );
+        // MapViewOfFile delegates to MapViewOfFileEx(addr=NULL) -> same base.
+        let plain = map_view_of_file(handle, 0x04 | 0x02, 0, 0, 0);
+        assert_eq!(
+            plain, base,
+            "A1: MapViewOfFile must agree with MapViewOfFileEx"
+        );
+        // The base is writable (anonymous PAGE_READWRITE region).
+        unsafe {
+            std::ptr::write_volatile(base as *mut u32, 0x1234_5678);
+            assert_eq!(std::ptr::read_volatile(base as *mut u32), 0x1234_5678);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn map_view_of_file_ex_accepts_base_as_fixed_address() {
+        let handle = make_anon_mapping(4096);
+        let base = unsafe { map_view_of_file_ex(handle, 0x04, 0, 0, 0, std::ptr::null_mut()) };
+        assert_ne!(base, 0, "A2: base must be non-zero");
+        let ret = unsafe { map_view_of_file_ex(handle, 0x04, 0, 0, 0, base as *mut u8) };
+        assert_eq!(ret, base, "A2: fixed address == base must be honored");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn map_view_of_file_ex_invalid_handle_returns_null() {
+        set_last_error(0);
+        let ret = unsafe { map_view_of_file_ex(0xDEAD_BEEF, 0x04, 0, 0, 0, std::ptr::null_mut()) };
+        assert_eq!(ret, 0, "A3: unknown handle must return NULL");
+        assert_eq!(get_last_error(), file_io::ERROR_INVALID_HANDLE);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn map_view_of_file_ex_foreign_fixed_address_returns_null() {
+        let handle = make_anon_mapping(4096);
+        let base = unsafe { map_view_of_file_ex(handle, 0x04, 0, 0, 0, std::ptr::null_mut()) };
+        assert_ne!(base, 0, "A4: base must be non-zero");
+        let foreign = base.wrapping_add(0x1_0000_0000);
+        set_last_error(0);
+        let ret = unsafe { map_view_of_file_ex(handle, 0x04, 0, 0, 0, foreign as *mut u8) };
+        assert_eq!(ret, 0, "A4: foreign fixed address must return NULL");
+        assert_eq!(get_last_error(), 487); // ERROR_INVALID_ADDRESS
     }
 }
