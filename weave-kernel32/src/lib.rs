@@ -25277,6 +25277,76 @@ mod tests {
         );
     }
 
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[test]
+    fn suspend_thread_returns_previous_count_and_resume_releases_in_order() {
+        SUSPENDED_THREAD_STARTS.store(0, std::sync::atomic::Ordering::SeqCst);
+        let handle = unsafe {
+            create_thread(
+                std::ptr::null(),
+                0,
+                suspended_thread_probe as *const u8,
+                std::ptr::null_mut(),
+                0x4,
+                std::ptr::null_mut(),
+            )
+        };
+        assert_ne!(handle, 0);
+        assert_eq!(
+            suspend_thread(handle),
+            1,
+            "A1: first suspend returns prior count"
+        );
+        assert_eq!(
+            suspend_thread(handle),
+            2,
+            "A2: second suspend returns prior count"
+        );
+        assert_eq!(
+            SUSPENDED_THREAD_STARTS.load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+        assert_eq!(
+            resume_thread(handle),
+            2,
+            "A2: first resume returns prior count"
+        );
+        assert_eq!(
+            resume_thread(handle),
+            1,
+            "A2: second resume returns prior count"
+        );
+        assert_eq!(
+            SUSPENDED_THREAD_STARTS.load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+        assert_eq!(
+            resume_thread(handle),
+            0,
+            "A3: final resume releases the thread"
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        while SUSPENDED_THREAD_STARTS.load(std::sync::atomic::Ordering::SeqCst) == 0
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert_eq!(
+            SUSPENDED_THREAD_STARTS.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[test]
+    fn suspend_thread_invalid_handle_returns_failure() {
+        assert_eq!(
+            suspend_thread(0xDEAD_BEEF),
+            u32::MAX,
+            "A4: invalid handle fails"
+        );
+    }
+
     // ── CreateRemoteThread (rank #22) ────────────────────────────────────────
 
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
