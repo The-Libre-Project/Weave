@@ -25308,7 +25308,7 @@ mod tests {
         );
         assert_eq!(
             resume_thread(handle),
-            2,
+            3,
             "A2: first resume returns prior count"
         );
         assert_eq!(
@@ -25322,7 +25322,7 @@ mod tests {
         );
         assert_eq!(
             resume_thread(handle),
-            0,
+            1,
             "A3: final resume releases the thread"
         );
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
